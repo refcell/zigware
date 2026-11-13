@@ -16,11 +16,14 @@ variants (MinPk, MinSig) must match exactly.
   `conformance` harness.)
 - [x] simd: the operations commonware abstracts (simd/src/core.rs), scalar + `@Vector`
   implementations with the consistency tests.
-- [ ] bls12381 primitives: group elements, scalars, compressed codec, hash-to-curve with
+- [x] bls12381 primitives: group elements, scalars, compressed codec, hash-to-curve with
   commonware's DSTs, sign/verify, aggregate, MinPk and MinSig variants, batch verify. Vectors.
-- [ ] bls12381 threshold: polynomial shares, partial signatures, recovery (primitives/ops).
-- [ ] bls12381 dkg (Joint-Feldman / reshare) and tle (timelock encryption).
-- [ ] bls12381 certificate schemes (multisig, threshold) and scheme.rs.
+- [x] bls12381 threshold: polynomial shares, partial signatures, recovery (primitives/ops),
+  and the trusted dealer `dkg.feldman_desmedt.deal_anonymous`.
+- [ ] bls12381 codec conformance entries (group, partial signature, aggregate types) via
+  `conformance.verify` against `src/cryptography/conformance.toml`.
+- [ ] bls12381 certificate schemes (multisig, threshold); consensus-simplex waits on these.
+- [ ] bls12381 dkg (Joint-Feldman / reshare) and tle (timelock encryption), scheme.rs.
 - [ ] Fuzz targets (commonware math/fuzz, simd/fuzz, bls parts of cryptography/fuzz).
 
 ## Decisions
@@ -28,15 +31,26 @@ variants (MinPk, MinSig) must match exactly.
   `eql` methods; `math.algebra` documents the interfaces and supplies trait defaults
   (`exp`, `scale`, `double`, `msm`, `div_2`). A module element `K` over scalars `R` multiplies
   with `K.mul(K, R)`, so groups and fields share one `Space` interface.
-- Until `invariants.minifuzz` lands, `math.fuzz` provides `Unstructured` and the seeded and
-  `std.testing.fuzz` drivers; fuzz plans are `fn (void, *Unstructured) !void`.
+- Property tests run on `invariants.minifuzz` with commonware's draw order;
+  `math.testing.smith_body` adapts a minifuzz body to `std.testing.fuzz`.
 - Encodings use the `codec` package interface (`fixed_size`/`encode_size`, `write`, `read`,
   `Cfg`); `Poly(K).Cfg` is `codec.SliceCfg` (zero coefficients always rejected) and
   `Poly(K).max_encode_size_with(n)` is commonware's `Poly::max_encode_size(n)`.
-- Until `parallel` lands, `Strategy` parameters are omitted (sequential); results are identical.
+- `Strategy` parameters are omitted (sequential) in math and bls12381 ops; results do not
+  depend on the strategy. Adding `strategy: anytype` (parallel package) is a later step.
 - Conformance hashes (math/conformance.toml) wait for the `conformance` harness.
 - Randomness is injected as a `utils.rng` generator pointer (`next_u64`/`fill_bytes`, commonware's
   `CryptoRng`), so ported tests draw the same values as the Rust tests.
+
+- BLS12-381 arithmetic is adapted from needlefish. Scalar multiplication of points is
+  variable time (GLV/GLS windows); commonware uses blst's constant-time code. Signing with a
+  secret scalar therefore leaks timing; a constant-time ladder is a follow-up.
+- `threshold.batch_verify_same_message` returns positions of invalid partials (out-of-range
+  indices first, then failed verifications ascending) instead of references; same set.
+- Slow test cases (every noble vector, large bisections) run in release builds or with
+  `-Dslow-tests`; Debug runs a deterministic subset.
+- A local Rust oracle (not committed) built against commonware-ref produced the byte vectors
+  for points, hashes, dealings, shares, and recovered signatures.
 
 - simd: one `@Vector` implementation per profile (scalar 64-bit, x86_v3 256, x86_v4c 512,
   neon/arm_v9 128) stands in for both commonware's emulated and native tokens; `dispatch`
@@ -48,3 +62,6 @@ variants (MinPk, MinSig) must match exactly.
 - 2026-11-13: math poly (Poly, commit, Interpolator) and varint wire helpers.
 - 2026-11-13: math ntt (NTT, recovery, vanishing, Lagrange), synthetic, codec migration.
 - 2026-11-13: simd backends, profile instructions, dispatch, consistency, SHA-256 checks.
+- 2026-11-13: math property tests on invariants.minifuzz; temporary fuzz driver removed.
+- 2026-11-13: bls12381 arithmetic, group, variants, ops, aggregate, batch, noble/eth vectors.
+- 2026-11-13: bls12381 sharing, threshold ops, deal_anonymous; vectors match commonware.
