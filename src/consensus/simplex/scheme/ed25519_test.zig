@@ -81,3 +81,39 @@ test "a quorum of notarize votes makes a notarization that survives the codec" {
         try testing.expect(!try scheme.verify_certificate(gpa, &rng, bad, certificate, sequential));
     }
 }
+
+test "votes sign and certificates assemble through the message types" {
+    const gpa = testing.allocator;
+    var rng = utils.rng.test_rng();
+    var fixture = try ed25519.fixture(Digest, gpa, &rng, "simplex", 4);
+    defer fixture.deinit(gpa);
+    const p = proposal(2);
+    const Nullify = types.Nullify(Scheme);
+    const Nullification = types.Nullification(Scheme);
+    var notarizes: [3]Notarize = undefined;
+    var nullifies: [3]Nullify = undefined;
+    for (&notarizes, &nullifies, fixture.schemes[0..3]) |*notarize, *nullify, *scheme| {
+        notarize.* = (try Notarize.sign(gpa, scheme, p)).?;
+        nullify.* = (try Nullify.sign(gpa, scheme, p.round)).?;
+        try testing.expect(try notarize.verify(gpa, &rng, &fixture.verifier, sequential));
+        try testing.expect(try nullify.verify(gpa, &rng, &fixture.verifier, sequential));
+    }
+    try testing.expectEqual(null, try Nullify.sign(gpa, &fixture.verifier, p.round));
+    const verifier = &fixture.verifier;
+    var notarization = try Notarization.from_votes(gpa, verifier, &notarizes, sequential);
+    defer notarization.deinit(gpa);
+    var nullification = try Nullification.from_votes(gpa, verifier, &nullifies, sequential);
+    defer nullification.deinit(gpa);
+    const Certificate = types.Certificate(Scheme, Digest);
+    var certificates = [_]Certificate{
+        .{ .notarization = try notarization.clone(gpa) },
+        .{ .nullification = try nullification.clone(gpa) },
+    };
+    defer for (&certificates) |*certificate| certificate.deinit(gpa);
+    for (&certificates) |*certificate| {
+        try testing.expect(try certificate.verify(gpa, &rng, &fixture.verifier, sequential));
+    }
+    // Two votes are below the quorum of three.
+    const too_few = Notarization.from_votes(gpa, &fixture.verifier, notarizes[0..2], sequential);
+    try testing.expectError(error.InsufficientAttestations, too_few);
+}

@@ -32,7 +32,10 @@ resolver; those lanes are running, so do the types first and the actors as they 
   (`message` is the signed bytes), `Notarize`/`Nullify`/`Finalize` (proposal or round plus
   `Attestation(S)`), `Notarization`/`Nullification`/`Finalization`, `ConflictingNotarize`,
   `ConflictingFinalize`, `NullifyFinalize`, the `Vote`/`Certificate`/`Artifact`/`Activity`
-  unions (`epoch`, `view`, `eql`, codec), `Certification`, `AttributableMap(T)`.
+  unions (`epoch`, `view`, `eql`, codec), `Certification`, `AttributableMap(T)`. Votes have
+  `sign(gpa, scheme, proposal|round) !?Self`, `verify(gpa, rng, scheme, strategy) !bool`,
+  `subject()`; certificates have `from_votes(gpa, scheme, votes, strategy)`, `verify`, `clone`;
+  `Vote` has `signer`/`verify`, `Certificate` has `verify`/`clone`.
 - `consensus.simplex.Attestation(S)` and `Deferred(T)`: re-exports of
   `cryptography.certificate`'s. `Subject(D)` implements `certificate.assert_subject`
   (`Namespace`, `namespace`, `message(gpa)`, plus allocation-free `message_to(buffer)`).
@@ -131,3 +134,4 @@ resolver; those lanes are running, so do the types first and the actors as they 
 - 2026-11-13: metrics.rs label sets on runtime.telemetry.metrics.
 - 2026-11-13: simplex bls12381_multisig and secp256r1 schemes.
 - 2026-11-13: simplex bls12381_threshold standard scheme; Lookahead, Viewport, Plan.
+- 2026-11-13: sign/verify/assemble/clone on the simplex vote and certificate types.

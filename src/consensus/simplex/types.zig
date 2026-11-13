@@ -204,6 +204,37 @@ pub fn Subject(comptime D: type) type {
 
 const ProposalKind = enum { notarize, finalize };
 
+/// Copies a certificate (`Clone`), deep when it owns memory.
+fn clone_certificate(
+    comptime S: type,
+    gpa: Allocator,
+    certificate: *const S.Certificate,
+) Allocator.Error!S.Certificate {
+    if (comptime !codec.owns_memory(S.Certificate)) return certificate.*;
+    return certificate.clone(gpa);
+}
+
+/// The attestations of `votes`, which must be non-empty, assembled into a certificate.
+fn assemble_votes(
+    comptime S: type,
+    gpa: Allocator,
+    scheme: *const S,
+    votes: anytype,
+    strategy: anytype,
+) (cryptography.certificate.AssemblyError || Allocator.Error)!S.Certificate {
+    assert(votes.len > 0);
+    const attestations = try gpa.alloc(Attestation(S), votes.len);
+    defer gpa.free(attestations);
+    for (votes, attestations) |vote, *attestation| attestation.* = vote.attestation;
+    assert(attestations.len == votes.len);
+    return scheme.assemble(gpa, attestations, strategy);
+}
+
+/// A nullify subject in the scheme's own subject type (the round carries no digest).
+fn nullify_subject(comptime S: type, round: Round) S.Subject {
+    return .{ .nullify = round };
+}
+
 /// A vote over a proposal (`Notarize` or `Finalize`): the proposal and an attestation.
 fn ProposalVote(comptime S: type, comptime D: type, comptime kind: ProposalKind) type {
     return struct {
@@ -230,6 +261,34 @@ fn ProposalVote(comptime S: type, comptime D: type, comptime kind: ProposalKind)
 
         pub fn signer(self: Self) Participant {
             return self.attestation.signer;
+        }
+
+        /// What this vote signs.
+        pub fn subject(self: *const Self) Subject(D) {
+            return @unionInit(Subject(D), @tagName(kind), &self.proposal);
+        }
+
+        /// Signs a vote for `proposal`, or returns null when `scheme` cannot sign.
+        pub fn sign(
+            gpa: Allocator,
+            scheme: *const S,
+            proposal: Proposal(D),
+        ) Allocator.Error!?Self {
+            const signed = @unionInit(Subject(D), @tagName(kind), &proposal);
+            const attestation = try scheme.sign(gpa, signed) orelse return null;
+            assert(attestation.signer.get() < scheme.participants().len());
+            return .{ .proposal = proposal, .attestation = attestation };
+        }
+
+        pub fn verify(
+            self: *const Self,
+            gpa: Allocator,
+            rng: anytype,
+            scheme: *const S,
+            strategy: anytype,
+        ) Allocator.Error!bool {
+            const attestation = &self.attestation;
+            return scheme.verify_attestation(gpa, rng, self.subject(), attestation, strategy);
         }
 
         pub fn eql(a: Self, b: Self) bool {
@@ -289,6 +348,25 @@ pub fn Nullify(comptime S: type) type {
             return self.attestation.signer;
         }
 
+        /// Signs a nullify vote for `round`, or returns null when `scheme` cannot sign.
+        pub fn sign(gpa: Allocator, scheme: *const S, round: Round) Allocator.Error!?Self {
+            const signed = nullify_subject(S, round);
+            const attestation = try scheme.sign(gpa, signed) orelse return null;
+            assert(attestation.signer.get() < scheme.participants().len());
+            return .{ .round = round, .attestation = attestation };
+        }
+
+        pub fn verify(
+            self: *const Self,
+            gpa: Allocator,
+            rng: anytype,
+            scheme: *const S,
+            strategy: anytype,
+        ) Allocator.Error!bool {
+            const signed = nullify_subject(S, self.round);
+            return scheme.verify_attestation(gpa, rng, signed, &self.attestation, strategy);
+        }
+
         pub fn eql(a: Self, b: Self) bool {
             return a.round == b.round and a.attestation.eql(b.attestation);
         }
@@ -343,6 +421,39 @@ fn ProposalCertificate(comptime S: type, comptime D: type, comptime kind: Propos
 
         pub fn eql(a: Self, b: Self) bool {
             return a.proposal.eql(b.proposal) and a.certificate.eql(&b.certificate);
+        }
+
+        /// What this certificate signs.
+        pub fn subject(self: *const Self) Subject(D) {
+            return @unionInit(Subject(D), @tagName(kind), &self.proposal);
+        }
+
+        /// Assembles a non-empty list of votes for one proposal (`from_notarizes`,
+        /// `from_finalizes`).
+        pub fn from_votes(
+            gpa: Allocator,
+            scheme: *const S,
+            votes: []const ProposalVote(S, D, kind),
+            strategy: anytype,
+        ) (cryptography.certificate.AssemblyError || Allocator.Error)!Self {
+            const certificate = try assemble_votes(S, gpa, scheme, votes, strategy);
+            return .{ .proposal = votes[0].proposal, .certificate = certificate };
+        }
+
+        pub fn verify(
+            self: *const Self,
+            gpa: Allocator,
+            rng: anytype,
+            scheme: anytype,
+            strategy: anytype,
+        ) Allocator.Error!bool {
+            const certificate = &self.certificate;
+            return scheme.verify_certificate(gpa, rng, self.subject(), certificate, strategy);
+        }
+
+        pub fn clone(self: *const Self, gpa: Allocator) Allocator.Error!Self {
+            const certificate = try clone_certificate(S, gpa, &self.certificate);
+            return .{ .proposal = self.proposal, .certificate = certificate };
         }
 
         pub fn write(self: Self, writer: *codec.Writer) void {
@@ -409,6 +520,33 @@ pub fn Nullification(comptime S: type) type {
             return a.round == b.round and a.certificate.eql(&b.certificate);
         }
 
+        /// Assembles a non-empty list of nullify votes for one round (`from_nullifies`).
+        pub fn from_votes(
+            gpa: Allocator,
+            scheme: *const S,
+            votes: []const Nullify(S),
+            strategy: anytype,
+        ) (cryptography.certificate.AssemblyError || Allocator.Error)!Self {
+            const certificate = try assemble_votes(S, gpa, scheme, votes, strategy);
+            return .{ .round = votes[0].round, .certificate = certificate };
+        }
+
+        pub fn verify(
+            self: *const Self,
+            gpa: Allocator,
+            rng: anytype,
+            scheme: anytype,
+            strategy: anytype,
+        ) Allocator.Error!bool {
+            const signed = nullify_subject(S, self.round);
+            return scheme.verify_certificate(gpa, rng, signed, &self.certificate, strategy);
+        }
+
+        pub fn clone(self: *const Self, gpa: Allocator) Allocator.Error!Self {
+            const certificate = try clone_certificate(S, gpa, &self.certificate);
+            return .{ .round = self.round, .certificate = certificate };
+        }
+
         pub fn write(self: Self, writer: *codec.Writer) void {
             self.round.write(writer);
             codec.write(S.Certificate, self.certificate, writer);
@@ -467,6 +605,24 @@ pub fn Vote(comptime S: type, comptime D: type) type {
 
         pub fn eql(a: Self, b: Self) bool {
             return tagged.eql(a, b);
+        }
+
+        pub fn signer(self: Self) Participant {
+            return switch (self) {
+                inline else => |vote| vote.attestation.signer,
+            };
+        }
+
+        pub fn verify(
+            self: *const Self,
+            gpa: Allocator,
+            rng: anytype,
+            scheme: *const S,
+            strategy: anytype,
+        ) Allocator.Error!bool {
+            return switch (self.*) {
+                inline else => |*vote| vote.verify(gpa, rng, scheme, strategy),
+            };
         }
 
         pub fn write(self: Self, writer: *codec.Writer) void {
@@ -529,6 +685,28 @@ pub fn Certificate(comptime S: type, comptime D: type) type {
 
         pub fn deinit(self: *Self, gpa: Allocator) void {
             tagged.deinit(Self, self, gpa);
+        }
+
+        pub fn verify(
+            self: *const Self,
+            gpa: Allocator,
+            rng: anytype,
+            scheme: anytype,
+            strategy: anytype,
+        ) Allocator.Error!bool {
+            return switch (self.*) {
+                inline else => |*certificate| certificate.verify(gpa, rng, scheme, strategy),
+            };
+        }
+
+        pub fn clone(self: *const Self, gpa: Allocator) Allocator.Error!Self {
+            return switch (self.*) {
+                inline else => |*certificate, tag| @unionInit(
+                    Self,
+                    @tagName(tag),
+                    try certificate.clone(gpa),
+                ),
+            };
         }
 
         pub fn arbitrary(gpa: Allocator, u: *Unstructured) ArbitraryError!Self {
