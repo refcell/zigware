@@ -50,4 +50,5 @@ pub fn Accepted(comptime PublicKey: type) type {
 
 test {
     std.testing.refAllDecls(@This());
+    _ = @import("fuzz.zig");
 }

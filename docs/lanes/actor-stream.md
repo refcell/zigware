@@ -92,8 +92,11 @@ see docs/lanes/runtime.md). Write library code against `std.Io`.
 - [ ] stream sake conformance hashes (sake/conformance.rs: CupsV0, CupsV1, SakeV0CupsV1,
   SakeV1CupsV0). They hash bytes whose keys and timestamps come from the deterministic
   runtime's RNG, so they match only if its draw order matches commonware's.
-- [ ] Tests over the runtime's deterministic network once it lands (in-memory sink/stream
-  pairs before then), plus fuzz targets (commonware stream/fuzz).
+- [x] stream fuzz targets (commonware stream/fuzz: transport, connection, lazy_transport,
+  e2e with a corrupting/forging/tampering adversary) in `src/stream/fuzz.zig`, seeded in
+  `zig build test` and coverage-guided under `--fuzz`.
+- [ ] Switch stream tests and the transport contract to the runtime's network types once
+  they land (mock channel until then).
 
 ## Log
 - 2026-11-13: actor `Feedback`, `Unreliable`, and `mailbox` with commonware's tests.
@@ -101,3 +104,4 @@ see docs/lanes/runtime.md). Write library code against `std.Io`.
 - 2026-11-13: stream cups (record protocol, cipher derivation) and the handshake contract.
 - 2026-11-13: stream sake and `SakeCups`; cups sender sends each batch in one sink call.
 - 2026-11-13: stream `Timeout` with lib.rs's upgrader tests.
+- 2026-11-13: stream fuzz targets (transport, connection, lazy_transport, e2e).
