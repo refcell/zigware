@@ -22,6 +22,9 @@ on p2p's simulated network and the deterministic runtime.
 - `resolver.p2p.wire`: `Message(Key)` (`id`, `payload`), `Payload(Key)` (`request`,
   `response: codec.Bytes`, `error`), `request_overhead`, `response_overhead_max`,
   `max_message_size(Key, value_size)`; commonware's two conformance hashes match.
+- `resolver.ingress`: `Message(K, S, M)` (mailbox message: `fetch: Batch`, `retain: Predicate`;
+  `fetch_one`, reliable `handle` that coalesces by key, `discard`), `FetchKey(K, S, M)`,
+  `Pending(K, S, M)` (the overflow), `Targets(P)` metadata (null = unrestricted).
 - `resolver.p2p.mocks.Key` (one-byte test key).
 
 ## Decisions
@@ -34,11 +37,13 @@ on p2p's simulated network and the deterministic runtime.
 - `subscribers.Tracker.pending`/`remove_delivered` return borrowed slices instead of clones.
 - resolver imports `conformance` (a dev-dependency in commonware) for its conformance test.
 - Wire `encode_iobufs` tests have no counterpart (no `IoBufs` yet; writes go to one buffer).
+- Ingress batches carry the mailbox allocator (`Batch.gpa`) because the mailbox's `discard`
+  takes none; `handle` asserts every batch uses the mailbox's allocator. The pending-fetch
+  index hashes each key's codec encoding (Wyhash), so keys need a bounded encoding.
 - Seeded fuzz uses `p2p.fuzz.run` (the same driver as codec's).
 
 ## Backlog
-- [ ] resolver: lib.rs traits (done), subscribers.rs (done), opaque.rs, delivery.rs,
-  ingress.rs.
+- [ ] resolver: lib.rs traits (done), subscribers.rs (done), ingress.rs (done), opaque.rs, delivery.rs.
 - [ ] resolver p2p: wire.rs (done, conformance hashes match), fetcher, inflight, score,
   config, engine, ingress, mocks; port mod.rs tests on p2p simulated.
 - [ ] broadcast: lib.rs and buffered (engine, ingress, config, mocks) with its tests.
@@ -48,3 +53,4 @@ on p2p's simulated network and the deterministic runtime.
 
 ## Log
 - 2026-11-13: resolver lib.rs types, subscribers tracker, p2p wire (conformance hashes match).
+- 2026-11-13: resolver ingress (coalescing mailbox policy, targets metadata).

@@ -24,6 +24,7 @@ const codec = @import("codec");
 const actor = @import("actor");
 
 pub const subscribers = @import("subscribers.zig");
+pub const ingress = @import("ingress.zig");
 pub const p2p = @import("p2p/mod.zig");
 
 pub const Feedback = actor.Feedback;
