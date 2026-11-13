@@ -17,6 +17,7 @@ const root = @import("root.zig");
 const rng = @import("rng.zig");
 const range = @import("range.zig");
 const sequence = @import("sequence.zig");
+const bitmap = @import("bitmap.zig");
 
 const conformance_file = @embedFile("conformance.toml");
 const prefix = "commonware_utils::";
@@ -142,6 +143,11 @@ const entries = .{
         gen_unit,
     ),
     Entry("rng::tests::conformance::FuzzRngConformance", FuzzRngConformance, 1024),
+    Codec(
+        "bitmap" ++ conformance_suffix ++ "BitMap>",
+        bitmap.DefaultBitMap,
+        arbitrary.default_generator(bitmap.DefaultBitMap),
+    ),
 };
 
 test "utils conformance hashes match commonware" {

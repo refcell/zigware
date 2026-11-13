@@ -21,6 +21,11 @@ encoding parts as soon as `codec` has its core API (see docs/lanes/codec.md).
 - `utils.sequence`: `FixedBytes(N)` (`init`, comptime `from_hex`, `zeroize`), `U32`, `U64`,
   `PrefixedU64` (`prefix`, `value`), `VecU64`, `Unit`; all with codec encodings, `order`,
   `eql`, `as_slice`, `{f}` formatting. `utils.Array(T)`/`utils.Span(T)` are comptime checks.
+- `utils.bitmap`: `BitMap(N)` (alias `utils.BitMap`, `DefaultBitMap` = 8-byte chunks):
+  allocator-explicit `push`/`pop`/`truncate`/`extend_from_bitmap`/`push_chunk`/`prune_chunks`,
+  `get`/`set`/`flip`/`set_all`/`flip_all`, `and`/`or`/`xor`, `count_ones`, `is_unset`,
+  `iter`, `ones_iter`/`ones_iter_from`/`ones_iter_range`, codec (`Cfg = RangeCfg(u64)`), `{f}`.
+  `bitmap.readable` is the `Readable` trait (`len`, `pruned_chunks`, `get_chunk`) + `OnesIter`.
 - `utils.rng.ChaChaRng(rounds)`, `ChaCha8Rng` (Rust `rand_chacha` 0.10).
 - `utils`: `modulo`, `union`, `union_unique`, `Participant`, `NonZero(T)`/`nz`, `GOLDEN_RATIO`,
   `MAX_ALLOCATION_BYTES`.
@@ -44,7 +49,8 @@ encoding parts as soon as `codec` has its core API (see docs/lanes/codec.md).
   `time.rs`, `range.rs`, `iter.rs`, `vec.rs` (NonEmptyVec), `rational`, `probability`,
   `sampling`, `rng.rs` (deterministic test RNG matching commonware's where tests depend on it).
 - [x] utils sequence: fixed_bytes, u32, u64, prefixed_u64, vec_u64, unit — with codec.
-- [ ] utils bitmap: BitMap, prunable, historical, roaring; codec encodings identical.
+- [ ] utils bitmap (done: BitMap; next: hostname/net for p2p, then prunable, historical,
+  roaring): BitMap, prunable, historical, roaring; codec encodings identical.
 - [ ] utils ordered (Set/Map/Quorum), priority_set, cache (LRU etc.), acknowledgement,
   channel (bounded mpsc, ring, reservation, tracked) — channels over `std.Io` primitives.
 - [ ] Fuzz targets for every decoder (commonware utils/fuzz).
@@ -58,3 +64,4 @@ encoding parts as soon as `codec` has its core API (see docs/lanes/codec.md).
 - 2026-11-13: sequence (FixedBytes, U32, U64, PrefixedU64, VecU64, Unit) with conformance
   hashes; Participant and NonEmptyRange conformance hashes; ChaCha8Rng; utils fuzz driver.
 - 2026-11-13: moved utils conformance onto the shared harness (conformance + codec.arbitrary).
+- 2026-11-13: BitMap with all mod.rs tests, conformance hash, and a model-based fuzz target.

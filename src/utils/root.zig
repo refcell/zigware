@@ -22,6 +22,9 @@ pub const test_rng = rng.test_rng;
 
 pub const range = @import("range.zig");
 
+pub const bitmap = @import("bitmap.zig");
+pub const BitMap = bitmap.BitMap;
+
 pub const sequence = @import("sequence.zig");
 pub const Array = sequence.assert_array;
 pub const Span = sequence.assert_span;
