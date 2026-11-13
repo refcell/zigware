@@ -19,10 +19,11 @@ time, files, and network: build on it rather than around it where it fits.
 - [x] storage header (`storage/header.zig`), conformance hashes V0Blob, V1Blob, Header.
 - [x] in-memory storage (`storage/memory.zig`), storage suite (`storage/tests.zig`), audit
   digests checked against commonware.
-- [ ] wire storage into `deterministic.Runner` (`storage()`, `storage_audit()`, crash on
-  restart) and faulty.rs fault injection; audited and metered wrappers.
-- [ ] deterministic network (`Listener`, `Sink`, `Stream` matching `src/stream/mocks.zig`),
-  port network/deterministic.rs tests.
+- [x] storage in `deterministic.Runner` (`storage()`, `storage_audit()`, crash on restart).
+- [ ] faulty.rs storage fault injection; audited and metered storage wrappers.
+- [x] mock channel (`mocks.zig`), deterministic network (`network/deterministic.zig`),
+  network suite (`network/tests.zig`), `Runner.network()`.
+- [ ] audited and metered network wrappers.
 - [ ] Port remaining deterministic.rs tests.
 - [ ] iobuf (IoBuf/IoBufs pooled buffers) and utils (buffer pools, handle, signal,
   supervision).
@@ -55,6 +56,10 @@ time, files, and network: build on it rather than around it where it fits.
   `Blob.read_at` fills a caller buffer (commonware's `read_at_buf`); `read_many` and
   `start_sync` are not ported (callers loop, and `sync` is synchronous in zigware).
   `Blob.close` replaces drop: handles must be closed, and closing does not sync.
+- Network backends are duck-typed (`Listener`, `Accepted`, `Connection` declared by the
+  backend) rather than vtables, so sinks and streams stay concrete and inlinable. The mock
+  channel keeps `src/stream/mocks.zig`'s method shapes; unlike that stand-in, a canceled send
+  closes the sink (commonware drops it), so the peer's pending recv fails.
 - The memory backend guards its state with one spin lock that never blocks inside, so it
   is safe across threads and never yields a fiber while held.
 
@@ -63,3 +68,4 @@ time, files, and network: build on it rather than around it where it fits.
 - 2026-11-13: naked-function fiber switch (fixes ReleaseSafe crashes on x86_64 and aarch64).
 - 2026-11-13: storage interface, blob header with conformance hashes, memory backend and
   the storage suite.
+- 2026-11-13: runner storage, mock channel, deterministic network and network suite.
