@@ -706,3 +706,108 @@ test "fetch targeted does not restrict all" {
         }
     }.body);
 }
+
+test "retain" {
+    try run(10, struct {
+        fn body(io: Io) !void {
+            const setup = try Setup.init(io, &.{ 1, 2 }, .{});
+            defer setup.deinit();
+            const consumer = try setup.make_consumer();
+            const mailbox1 = try setup.spawn(0, consumer, try setup.make_producer(&.{}));
+            const prod2 = try setup.make_producer(&.{.{ 5, "data for key 5" }});
+            _ = try setup.spawn(1, try setup.make_consumer(), prod2);
+
+            // Retaining everything before fetching has no effect.
+            const keep_all = Predicate.init({}, struct {
+                fn keep(_: void, _: MockKey, _: void) bool {
+                    return true;
+                }
+            }.keep);
+            _ = try mailbox1.retain(keep_all);
+            try expect_no_event(setup, consumer, 100);
+
+            // With no link the fetch stays in flight; pruning it must clean up its entry.
+            try fetch(mailbox1, 5);
+            try retain_except(mailbox1, 5);
+            try setup.add_link(link, 0, 1);
+            // A leftover entry would make this fetch a silently ignored duplicate.
+            try fetch(mailbox1, 5);
+            try expect_event(consumer, 5, "data for key 5");
+        }
+    }.body);
+}
+
+/// Setup for consumers with `u16` subscribers.
+const TaggedSetup = SetupWith(MockConsumer(MockKey, u16));
+const TaggedFetch = resolver.Fetch(MockKey, u16);
+
+fn fetch_tagged(mailbox: anytype, value: u8, subscriber: u16) !void {
+    _ = try mailbox.fetch(.{ .key = key(value), .subscriber = subscriber });
+}
+
+test "retain uses subscribers" {
+    try run(10, struct {
+        fn body(io: Io) !void {
+            const setup = try TaggedSetup.init(io, &.{ 1, 2 }, .{});
+            defer setup.deinit();
+            const consumer = try setup.make_consumer();
+            const mailbox1 = try setup.spawn(0, consumer, try setup.make_producer(&.{}));
+            const prod2 = try setup.make_producer(&.{.{ 5, "data for key 5" }});
+            _ = try setup.spawn(1, try setup.make_consumer(), prod2);
+
+            try fetch_tagged(mailbox1, 5, 50);
+            try fetch_tagged(mailbox1, 5, 51);
+            try setup.sleep(Duration.from_millis(100));
+            // Dropping one subscriber keeps the fetch alive for the other.
+            const keep_51 = resolver.Predicate(MockKey, u16).init({}, struct {
+                fn keep(_: void, _: MockKey, subscriber: u16) bool {
+                    return subscriber == 51;
+                }
+            }.keep);
+            _ = try mailbox1.retain(keep_51);
+            try setup.sleep(Duration.from_millis(100));
+            try setup.add_link(link, 0, 1);
+            var event = try consumer.next_event();
+            defer event.deinit(gpa);
+            try testing.expectEqual(key(5), event.key);
+            try testing.expectEqualStrings("data for key 5", event.value);
+            try testing.expectEqualSlices(u16, &.{51}, event.subscribers);
+        }
+    }.body);
+}
+
+fn deliver_subscribers(io: Io, first: u16, second: u16) !void {
+    const setup = try TaggedSetup.init(io, &.{ 1, 2 }, .{});
+    defer setup.deinit();
+    const consumer = try setup.make_consumer();
+    const mailbox1 = try setup.spawn(0, consumer, try setup.make_producer(&.{}));
+    const prod2 = try setup.make_producer(&.{.{ 5, "data for key 5" }});
+    _ = try setup.spawn(1, try setup.make_consumer(), prod2);
+
+    try fetch_tagged(mailbox1, 5, first);
+    try fetch_tagged(mailbox1, 5, second);
+    try setup.add_link(link, 0, 1);
+    // The delivery carries every subscriber, in ascending order.
+    var event = try consumer.next_event();
+    defer event.deinit(gpa);
+    try testing.expectEqual(key(5), event.key);
+    const ascending = [_]u16{ @min(first, second), @max(first, second) };
+    try testing.expectEqualSlices(u16, &ascending, event.subscribers);
+    try testing.expectEqualStrings("data for key 5", event.value);
+}
+
+test "deliver receives subscribers" {
+    try run(10, struct {
+        fn body(io: Io) !void {
+            try deliver_subscribers(io, 51, 50);
+        }
+    }.body);
+}
+
+test "deliver receives multiple subscribers" {
+    try run(10, struct {
+        fn body(io: Io) !void {
+            try deliver_subscribers(io, 49, 50);
+        }
+    }.body);
+}

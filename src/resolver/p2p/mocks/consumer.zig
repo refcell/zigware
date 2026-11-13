@@ -26,9 +26,12 @@ pub fn Consumer(comptime K: type, comptime S: type) type {
         /// A delivered (key, value) pair; free with `deinit`.
         pub const Event = struct {
             key: K,
+            /// The delivered subscribers, in delivery order.
+            subscribers: []S,
             value: []u8,
 
             pub fn deinit(self: *Event, gpa: Allocator) void {
+                gpa.free(self.subscribers);
                 gpa.free(self.value);
                 self.* = undefined;
             }
@@ -98,16 +101,23 @@ pub fn Consumer(comptime K: type, comptime S: type) type {
             const shared = self.shared;
             var pair = try oneshot.channel(bool, shared.gpa, shared.io);
             errdefer pair.receiver.deinit();
-            const valid = try self.record(delivery.key, value);
+            const valid = try self.record(delivery, value);
             pair.sender.send(valid) catch unreachable; // Proof: the receiver is open.
             assert(pair.receiver.is_ready());
             return pair.receiver;
         }
 
-        fn record(self: Self, key: K, value: []const u8) Allocator.Error!bool {
+        fn record(
+            self: Self,
+            delivery: resolver.Delivery(K, S),
+            value: []const u8,
+        ) Allocator.Error!bool {
             const shared = self.shared;
+            const key = delivery.key;
             const copy = try shared.gpa.dupe(u8, value);
             errdefer shared.gpa.free(copy);
+            const subscribers = try shared.gpa.dupe(S, delivery.subscribers);
+            errdefer shared.gpa.free(subscribers);
             shared.mutex.lockUncancelable(shared.io);
             defer shared.mutex.unlock(shared.io);
             const valid = if (find(shared.expected.items, key)) |index|
@@ -116,9 +126,11 @@ pub fn Consumer(comptime K: type, comptime S: type) type {
                 true;
             if (!valid) {
                 shared.gpa.free(copy);
+                shared.gpa.free(subscribers);
                 return false;
             }
-            try shared.events.append(shared.gpa, .{ .key = key, .value = copy });
+            const event: Event = .{ .key = key, .subscribers = subscribers, .value = copy };
+            try shared.events.append(shared.gpa, event);
             shared.condition.broadcast(shared.io);
             return true;
         }
