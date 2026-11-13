@@ -200,7 +200,7 @@ fn record_encoding(io: Io, version: Version) !void {
     var pair = try mocks.channel(gpa, io);
     defer pair.stream.deinit();
     var sender = try TestSender.init(gpa, cipher(), pair.sink, 64, version);
-    defer sender.deinit(gpa);
+    defer sender.deinit();
     const sevens: [64]u8 = @splat(7);
     const messages = [_][]const u8{ "", "hello", &sevens };
     try sender.send_many(&messages);
@@ -336,7 +336,7 @@ fn frame_errors(io: Io) !void {
         var pair = try mocks.channel(gpa, io);
         defer pair.stream.deinit();
         var sender = try TestSender.init(gpa, cipher(), pair.sink, max_message_size, version);
-        defer sender.deinit(gpa);
+        defer sender.deinit();
 
         // Oversized records report SendTooLarge without consuming the cipher.
         const oversized = try gpa.alloc(u8, max_message_size + 1);
@@ -370,7 +370,7 @@ fn whole_batch_sized_first(io: Io, version: Version) !void {
     var pair = try mocks.channel(gpa, io);
     defer pair.stream.deinit();
     var sender = try TestSender.init(gpa, cipher(), pair.sink, limit, version);
-    defer sender.deinit(gpa);
+    defer sender.deinit();
     const payload = try gpa.alloc(u8, limit + 1);
     defer gpa.free(payload);
     @memset(payload, 0);
@@ -394,7 +394,7 @@ fn many_records(io: Io, version: Version) !void {
     const gpa = testing.allocator;
     const pair = try mocks.channel(gpa, io);
     var sender = try TestSender.init(gpa, cipher(), pair.sink, 100, version);
-    defer sender.deinit(gpa);
+    defer sender.deinit();
     var receiver = try TestReceiver.init(gpa, cipher(), pair.stream, 100, version);
     defer receiver.deinit(gpa);
     var storage: [100]u8 = undefined;

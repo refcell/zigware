@@ -4,6 +4,7 @@
 //! (https://github.com/commonwarexyz/monorepo/tree/main/stream).
 //!
 //! - `cups`: CUPS, an upgrader that runs a handshake, then exchanges encrypted, ordered records.
+//! - `sake`: the SAKE handshake over a byte stream; `SakeCups(S, C)` combines the two.
 //! - `utils.codec`: length-prefixed framing.
 //! - `mocks`: an in-memory sink/stream pair; its doc comment states the transport contract.
 //!
@@ -30,8 +31,14 @@ const std = @import("std");
 const cryptography = @import("cryptography");
 
 pub const cups = @import("cups.zig");
+pub const sake = @import("sake.zig");
 pub const utils = @import("utils.zig");
 pub const mocks = @import("mocks.zig");
+
+/// CUPS running a SAKE handshake with signer `S` and cipher `C`.
+pub fn SakeCups(comptime S: type, comptime C: type) type {
+    return cups.Cups(sake.Sake(S), C);
+}
 
 /// What a handshake's `listen` returns: the admitted peer and the shared secret transcript.
 pub fn Accepted(comptime PublicKey: type) type {

@@ -154,12 +154,14 @@ pub fn Sender(comptime C: type, comptime SinkType: type) type {
     return struct {
         const Self = @This();
 
+        gpa: Allocator,
         cipher: ?C,
         sink: SinkType,
         max_message_size: u32,
         version: Version,
-        /// Holds one or more sealed records before they go to the sink.
-        buffer: []u8,
+        /// Sealed records of one batch. Starts at one largest record and grows to the largest
+        /// batch sent, so steady-state sends do not allocate.
+        buffer: std.ArrayList(u8),
 
         pub fn init(
             gpa: Allocator,
@@ -169,8 +171,10 @@ pub fn Sender(comptime C: type, comptime SinkType: type) type {
             version: Version,
         ) Allocator.Error!Self {
             assert(max_message_size <= max_payload(C));
-            const buffer = try gpa.alloc(u8, record_len(C, version, max_message_size));
+            const capacity = record_len(C, version, max_message_size);
+            const buffer: std.ArrayList(u8) = try .initCapacity(gpa, capacity);
             return .{
+                .gpa = gpa,
                 .cipher = cipher,
                 .sink = sink,
                 .max_message_size = max_message_size,
@@ -180,44 +184,44 @@ pub fn Sender(comptime C: type, comptime SinkType: type) type {
         }
 
         /// Frees the buffer, erases the cipher, and closes the sink.
-        pub fn deinit(self: *Self, gpa: Allocator) void {
+        pub fn deinit(self: *Self) void {
             if (self.cipher) |*cipher| if (comptime @hasDecl(C, "zeroize")) cipher.zeroize();
-            gpa.free(self.buffer);
+            self.buffer.deinit(self.gpa);
             deinit_transport(&self.sink);
             self.* = undefined;
         }
 
         /// Encrypts and sends one message.
-        pub fn send(self: *Self, message: []const u8) Error!void {
+        pub fn send(self: *Self, message: []const u8) (Error || Allocator.Error)!void {
             return self.send_many(&.{message});
         }
 
-        /// Encrypts and sends messages, one record each, packing records into as few sink calls
-        /// as the buffer allows. An oversized message fails the batch with `SendTooLarge`
-        /// before any record is sealed. An empty batch sends nothing.
-        pub fn send_many(self: *Self, messages: []const []const u8) Error!void {
+        /// Encrypts and sends messages, one record each, in a single sink call. An oversized
+        /// message fails the batch with `SendTooLarge` before anything is allocated or sealed,
+        /// leaving the sender usable. An empty batch sends nothing.
+        pub fn send_many(
+            self: *Self,
+            messages: []const []const u8,
+        ) (Error || Allocator.Error)!void {
+            // A saturating total cannot overflow, so sizing reaches every message.
+            var total: usize = 0;
             for (messages) |message| {
                 _ = try framing.validate_frame_len(message.len, self.max_message_size);
+                total +|= record_len(C, self.version, message.len);
             }
+            if (messages.len == 0) return;
+            if (self.cipher == null) return error.StreamClosed;
+
+            try self.buffer.ensureTotalCapacity(self.gpa, total);
+            const out = self.buffer.allocatedSlice()[0..total];
             var used: usize = 0;
             for (messages) |message| {
                 const len = record_len(C, self.version, message.len);
-                assert(len <= self.buffer.len);
-                if (used + len > self.buffer.len) {
-                    try self.flush(used);
-                    used = 0;
-                }
-                try self.append_record(self.buffer[used..][0..len], message);
+                try self.append_record(out[used..][0..len], message);
                 used += len;
             }
-            if (used > 0) try self.flush(used);
-        }
-
-        fn flush(self: *Self, len: usize) Error!void {
-            assert(len > 0 and len <= self.buffer.len);
-            self.sink.send(&.{self.buffer[0..len]}) catch |err| {
-                return map_transport_error(err, error.SendFailed);
-            };
+            assert(used == total);
+            self.sink.send(&.{out}) catch |err| return map_transport_error(err, error.SendFailed);
         }
 
         /// Writes the header and the sealed message into `out`, exactly one record long.
@@ -359,7 +363,7 @@ pub fn Cups(comptime H: type, comptime C: type) type {
                 receiver: Receiver(C, StreamType),
 
                 pub fn deinit(connection: *@This(), gpa: Allocator) void {
-                    connection.sender.deinit(gpa);
+                    connection.sender.deinit();
                     connection.receiver.deinit(gpa);
                 }
             };
@@ -446,7 +450,10 @@ pub fn Cups(comptime H: type, comptime C: type) type {
         ) Allocator.Error!Connection(@TypeOf(stream), @TypeOf(sink)) {
             const sender = try Sender(C, @TypeOf(sink))
                 .init(gpa, send_cipher, sink, max_message_size, version);
-            errdefer gpa.free(sender.buffer);
+            errdefer {
+                var owned = sender.buffer;
+                owned.deinit(gpa);
+            }
             const receiver = try Receiver(C, @TypeOf(stream))
                 .init(gpa, recv_cipher, stream, max_message_size, version);
             return .{ .sender = sender, .receiver = receiver };

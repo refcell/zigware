@@ -43,6 +43,10 @@ see docs/lanes/runtime.md). Write library code against `std.Io`.
   ownership of the stream and sink. `Sender(C, Sink)`: `send(message)`, `send_many(messages)`.
   `Receiver(C, Stream)`: `recv() ![]const u8` (valid until the next `recv`). Free functions
   `ciphers`, `header_len`, `record_len`, `tag_size`, `max_payload`; `Version` (`v0`, `v1`).
+- `stream.sake.Sake(S)` (fields `signer`, `synchrony_bound_ms`, `max_handshake_age_ms`,
+  `version`) implements the handshake contract over `cryptography.handshake.sake`;
+  `stream.SakeCups(S, C)` is `cups.Cups(sake.Sake(S), C)`, the authenticated transport p2p
+  uses. Randomness comes from `io.random` (the runtime RNG), time from `Io.Clock.real`.
 
 ## Decisions
 - The mailbox guards ready and overflow with one `std.Io.Mutex` and parks the receiver on a
@@ -58,11 +62,12 @@ see docs/lanes/runtime.md). Write library code against `std.Io`.
   stream switches to the runtime's types. Commonware's `test_recv_frame_max_length` (a 4 GiB
   declared frame left pending) has no counterpart: Zig reads `usize` lengths without overflow
   and the caller buffer bounds the frame.
-- CUPS halves own one buffer each, sized for the largest record and allocated when the
-  connection is split. `send_many` packs records into that buffer and flushes when it fills,
-  so a batch larger than one record limit takes several sink calls (commonware: one call per
-  batch); the bytes on the wire are identical. Errors carry no payload (commonware reports the
-  oversized payload length).
+- CUPS halves own their buffers. The receiver's holds the largest record body and is
+  allocated at split; the sender's starts at one largest record and grows to the largest batch
+  sent (after the whole batch is sized), so a batch is one sink call like commonware's and
+  steady-state sends do not allocate. Errors carry no payload (commonware reports the
+  oversized payload length). `test_recv_decrypts_unique_frame_in_place` has no counterpart:
+  records always decrypt in the receiver's own buffer.
 - Loom tests (thread interleavings of the lock-free paths) have no counterpart: the paths
   they check do not exist here. Concurrency is covered on the deterministic runtime instead
   (parked receivers, three producers, same-seed replay) plus a seeded FIFO fuzz.
@@ -76,10 +81,10 @@ see docs/lanes/runtime.md). Write library code against `std.Io`.
   sink/stream channel, and a seeded wire-bytes fuzz.
 - [ ] stream utils: `Timeout` (utils/timeout.rs), with the `Upgrader` interface (lib.rs).
 - [x] stream cups protocol (cups/protocol.rs) with its tests, against a test handshake.
-- [ ] stream sake: the authenticated handshake protocol and encrypted send/receive, wire
-  format and conformance hashes identical to commonware's. Uses cryptography's ed25519,
-  chacha20_poly1305, transcript, and handshake as the crypto lane lands them; coordinate
-  with it (thread in docs/lanes/README.md) if you need one of those sooner.
+- [x] stream sake (sake/protocol.rs) over `cryptography.handshake.sake`, with its tests.
+- [ ] stream sake conformance hashes (sake/conformance.rs: CupsV0, CupsV1, SakeV0CupsV1,
+  SakeV1CupsV0). They hash bytes whose keys and timestamps come from the deterministic
+  runtime's RNG, so they match only if its draw order matches commonware's.
 - [ ] Tests over the runtime's deterministic network once it lands (in-memory sink/stream
   pairs before then), plus fuzz targets (commonware stream/fuzz).
 
@@ -87,3 +92,4 @@ see docs/lanes/runtime.md). Write library code against `std.Io`.
 - 2026-11-13: actor `Feedback`, `Unreliable`, and `mailbox` with commonware's tests.
 - 2026-11-13: stream framing codec, mock sink/stream channel, framing fuzz.
 - 2026-11-13: stream cups (record protocol, cipher derivation) and the handshake contract.
+- 2026-11-13: stream sake and `SakeCups`; cups sender sends each batch in one sink call.
