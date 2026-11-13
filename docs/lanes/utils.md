@@ -6,8 +6,25 @@ Reference: `~/.cache/zigware/commonware-ref/{utils,parallel,allocator,bench}`.
 `utils` depends on codec; until codec lands, start with the codec-free modules and build the
 encoding parts as soon as `codec` has its core API (see docs/lanes/codec.md).
 
+## Public API (on main)
+- `utils.faults`: `N3f1`, `N5f1` (`max_faults`, `quorum`, `m_quorum`, `l_quorum`; any int `n`).
+- `utils.rng`: `TestRng` (byte-identical to commonware's `TestRng`, i.e. Rust `rand` 0.10
+  `StdRng::seed_from_u64`), `ScriptedRng`, `FuzzRng`, `mix64`, and `rand`-identical samplers
+  `range_at_most`, `range_less_than`, `boolean`, `bernoulli`, `ratio`, `float64`;
+  `random(&rng)` adapts any generator to `std.Random`. Generators are borrowed-slice, no alloc.
+- `utils.range`: `Bound(T)`, `contains_cyclic`, `NonEmptyRange(T)`.
+- `utils`: `modulo`, `union`, `union_unique`, `Participant`, `NonZero(T)`/`nz`, `GOLDEN_RATIO`,
+  `MAX_ALLOCATION_BYTES`.
+
+## Decisions
+- RNG interface is `next_u32`/`next_u64`/`fill_bytes`; ports that draw randomness use the
+  samplers in `utils.rng` (not `std.Random`) so values match commonware's tests.
+- `union_unique` uses a private LEB128 writer until codec's varint lands; `Participant` and
+  `NonEmptyRange` encodings follow with codec.
+
 ## Backlog
-- [ ] utils basics: `Span`/`Array` traits as comptime interfaces, `union_unique`, `hex`
+- [ ] utils basics (done: faults, modulo, union/union_unique, NZ, Participant, rng, range
+  without codec; remaining: time, iter, vec, rational, probability, sampling, hostname, net): `Span`/`Array` traits as comptime interfaces, `union_unique`, `hex`
   re-exports, `modulo`, `NZ*` non-zero helpers, quorum math (`quorum`, `max_faults`),
   `time.rs`, `range.rs`, `iter.rs`, `vec.rs` (NonEmptyVec), `rational`, `probability`,
   `sampling`, `rng.rs` (deterministic test RNG matching commonware's where tests depend on it).
@@ -23,3 +40,5 @@ encoding parts as soon as `codec` has its core API (see docs/lanes/codec.md).
 - [ ] Fuzz targets for every decoder (commonware utils/fuzz).
 
 ## Log
+- 2026-11-13: faults, rng (TestRng/ScriptedRng/FuzzRng + FuzzRng conformance hash), range,
+  lib basics.
