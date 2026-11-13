@@ -546,6 +546,7 @@ fn RecoveryType(comptime A: type) type {
             self.pop_front();
             if (valid_size >= blob_size) return;
             try self.ensure_above_floor(section, valid_size);
+            errdefer self.clear_replays();
             const buffer = (try self.journal.?.manager.get(section)).?;
             try buffer.truncate(valid_size);
         }
@@ -560,12 +561,14 @@ fn RecoveryType(comptime A: type) type {
                 return err;
             };
             const valid_size = position * chunk_u64;
-            self.replays.items[self.head].reader.deinit();
+            // A failed storage mutation ends the replay (commonware's `repairing`).
+            errdefer self.clear_replays();
             const buffer = (try self.journal.?.manager.get(section)).?;
             try buffer.truncate(target);
             var reader = try buffer.replay(self.cfg.replay_buffer);
             errdefer reader.deinit();
             try reader.seek_to(valid_size);
+            self.replays.items[self.head].reader.deinit();
             self.replays.items[self.head].reader = reader;
             assert(self.replays.items[self.head].section == section);
         }

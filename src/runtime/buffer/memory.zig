@@ -107,6 +107,15 @@ pub const Storage = struct {
         partition.deinit(gpa);
     }
 
+    /// The published length of a blob, even while a handle is open (commonware's
+    /// `logical_blob`), or null if it does not exist.
+    pub fn durable_len(self: *Storage, partition: []const u8, name: []const u8) ?u64 {
+        const blobs = self.partitions.getPtr(partition) orelse return null;
+        const durable = blobs.getPtr(name) orelse return null;
+        assert(durable.generation < self.generation_next);
+        return durable.bytes.items.len;
+    }
+
     /// Let `operations` more mutations succeed, then fail every later one.
     pub fn allow_mutations(self: *Storage, operations: u64) void {
         self.mutations_allowed = operations;

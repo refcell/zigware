@@ -21,7 +21,9 @@ build on it. Until then, start with the pure parts (frame.rs, durability, item e
 - [x] journal/segmented: section manager and fixed segmented journal (append, read, replay,
   prune, bounded init, floors and checkpoint restore), torn-page repair; tests incl.
   corruption and interrupted-open crash tests.
-- [ ] journal/segmented: variable, glob, and oversized journals.
+- [x] journal/segmented: variable journal (varint frames, optional zstd) with recovery and
+  its ported tests.
+- [ ] journal/segmented: glob and oversized journals.
 - [ ] journal/contiguous: fixed and variable contiguous journals.
 - [ ] journal/authenticated.rs.
 - [x] metadata (two-blob atomic key-value store), over the in-lane memory storage.
@@ -58,6 +60,11 @@ build on it. Until then, start with the pure parts (frame.rs, durability, item e
   with `next`, `drain`, `finish`, `boundary_items`), `append`, `get`, `get_many`,
   `try_get_sync`, `last`, `sync`, `sync_all`, `prune`, `section_len`, `size`, `clear`,
   `destroy`; `Config`, `Floor`.
+- `storage.journal.segmented.variable`: `Journal(V)` for variable-size codec items with
+  `init` (returns a `Recovery` yielding `{section, offset, size, item}`; `drain`, `finish`),
+  `init_at_most`, `append` (returns `{offset, size}`), `get`, `get_many`, `try_get_sync`,
+  `size`, `sync`, `sync_all`, `prune`, `pruned`, `clear`, `destroy`; `Config(V)`. Decoded
+  items are owned by the caller (`codec.free`).
 - `storage.metadata`: `Metadata(K, V)` with `init`, `deinit`, `get`, `get_mut`,
   `put`, `put_sync`, `upsert`, `remove`, `clear`, `retain`, `items`, `count`, `sync`,
   `destroy`; `Config(V)`.
@@ -116,6 +123,12 @@ build on it. Until then, start with the pure parts (frame.rs, durability, item e
   `allow_mutations`/`mutation_refused` (commonware's `MutationFaults`). A clean replay of
   eight pages takes one read where commonware takes two (larger batches).
 
+- variable: replay checks a frame's declared end against the blob before buffering it, so a
+  corrupt length cannot make replay buffer the rest of the blob; a frame running past the end
+  is an incomplete trailing item, as in commonware. Appends encode each frame into a reused
+  scratch buffer and copy it into the write buffer (commonware encodes in place); the bytes
+  are identical.
+
 ## Log
 - 2026-11-13: journal Error, frame encoding/decoding with zstd frames, durability Barrier,
   frame fuzz target.
@@ -128,3 +141,4 @@ build on it. Until then, start with the pure parts (frame.rs, durability, item e
   storage read counts and mutation faults.
 - 2026-11-13: switched metadata, the paged buffer, and the segmented journal onto
   `runtime.storage`; the memory stand-in is now a test backend for its vtable.
+- 2026-11-13: segmented variable journal with recovery and its ported tests.

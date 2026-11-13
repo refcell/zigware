@@ -501,6 +501,11 @@ pub const Writer = struct {
         if (prefix_len > 0) try self.read_blob(buf[0..prefix_len], offset);
     }
 
+    /// Read exactly `buf.len` bytes at logical `offset` (the `Blob.read_at` argument order).
+    pub fn read_at(self: *Self, offset: u64, buf: []u8) Error!void {
+        return self.read_into(buf, offset);
+    }
+
     /// Read up to `buf.len` bytes at `offset`, returning how many were available. Fails if
     /// none are.
     pub fn read_up_to(self: *Self, offset: u64, buf: []u8) Error!usize {
