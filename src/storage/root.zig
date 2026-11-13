@@ -23,6 +23,7 @@ pub const cache = @import("cache/mod.zig");
 pub const ordinal = @import("ordinal/mod.zig");
 pub const freezer = @import("freezer/mod.zig");
 pub const archive = @import("archive/mod.zig");
+pub const qmdb = @import("qmdb/mod.zig");
 
 test {
     std.testing.refAllDecls(@This());

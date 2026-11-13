@@ -16,11 +16,59 @@ Not yet on main: persisted merkle (storage-merkle lane) and `journal/authenticat
 that don't need them and keep a small interface where you must.
 
 ## Backlog
-- [ ] Shared: operation, value, floor, chain, snapshot, cache, bitmap, metrics, verify, and
-  the store traits, with codec conformance hashes (conformance.rs lists them).
+- [x] Shared codecs: value encodings, operation commit codecs, floor policies and `Walk`,
+  chain (`Commitment`, `Bounds`, staleness checks), the `qmdb.Error` set, initialization
+  validation; keyless, immutable, and any (ordered/unordered, fixed/variable) operations with
+  all 21 codec conformance hashes; decoder fuzz over every operation type.
+- [ ] Shared rest: snapshot, cache, bitmap, metrics, verify, and the store traits.
 - [ ] keyless (with its tests and conformance hashes).
 - [ ] immutable.
 - [ ] any (ordered and unordered, fixed and variable).
 - [ ] Fuzz targets under storage/fuzz for these databases; benches under `benches.zig`.
 
+## Public API (on main)
+- `storage.qmdb.value`: `Fixed(V)`, `Variable(V)` (encodings with `Value`, `fixed`), `check`,
+  `eql`, `bytes`, `clone`, `arbitrary`.
+- `storage.qmdb.operation`: `Commit(V)` (`metadata: ?V`, `floor: u64`), the fixed and
+  variable commit codecs, `write_location`/`read_location(F)`/`location_size`,
+  `arbitrary_location(F)`, `format_commit`, `format_encoded`.
+- `storage.qmdb.keyless.Operation(F, E)`: `append: V`, `commit: Commit`.
+- `storage.qmdb.immutable.Operation(F, K, E)`: `set: {key, value}`, `commit: Commit`.
+- `storage.qmdb.any.Operation(F, S)`, `any.Ordered(F, K, E)`, `any.Unordered(F, K, E)`:
+  `delete: K`, `update: S`, `commit: Commit`; `any.operation.update.{Ordered,Unordered}(K, E)`
+  (`key`, `value`, and `next_key` when ordered).
+  Every operation has `key`, `is_update`, `is_delete`, `is_commit`, `inactivity_floor`, `eql`,
+  `deinit`, the codec interface, `format` (commonware's `Display`), and `arbitrary`.
+- `storage.qmdb.floor`: `Limits`, `Entry(K, V)` (`keep`, `stop`, `replace`, `evict`),
+  `Decision(V)`, `Action(V)`, `Walk`, policies `Proportional`, `Hold`, `Bounded`, `check`.
+- `storage.qmdb.chain`: `Commitment(F, D)` (codec, `compatible`), `Bounds(F, D)` (`from_db`,
+  `compatible`, `validate_apply_to`), `effective_boundary`, `validate_batch_applicable`,
+  `validate_merkleize_floor`.
+- `storage.qmdb`: `Error`, `root_bagging`, `hasher(H)`, `single_operation_root(F, H, bytes)`,
+  `validate_initialization_bound`, `validate_initialization_commit`,
+  `find_inactivity_floor_at`, `inactive_peaks_at`.
+
+## Decisions
+- Value encodings are comptime structs (`value.Fixed(V)`, `value.Variable(V)`) instead of
+  sealed traits; one generic operation type switches on `E.fixed` at comptime, so fixed and
+  variable layouts share one implementation. Variable byte values are `[]const u8` (Rust
+  `Vec<u8>`), owned by decoded operations (`deinit`).
+- Locations are plain `u64` as in the merkle lane; their codec (`UInt` varint, refused above
+  `max_leaves`) lives in `qmdb.operation`.
+- `qmdb.Error` is a payload-free error set merged with the merkle, journal, and runtime
+  storage errors (commonware wraps them). `DataCorrupted` drops its check name.
+- chain: `Compatible` borrow witnesses have no counterpart; the checks return `void`.
+  `Bounds.ancestors` is an owned slice. Weak-parent ancestor iteration comes with the batches.
+- floor: a policy is a duck-typed struct (`evicts`, `limits`, `decide`). Rust's lifetime tie
+  between a decision and its entry is a documented contract; `stop` and `replace` return the
+  entry's value in `Decision.released` so the walk can free it.
+- codec: custom types may declare `owns_memory` (an additive codec edit), so generic
+  operations over non-allocating values are usable with `decode_fixed`.
+- conformance: the TOML reader now accepts `\n`/`\t`/`\"`/`\\` escapes in section names
+  (commonware wraps long type names with `\n`); names are compared unescaped.
+- Display formats an encoding of up to 4096 bytes as hex and prints `<N bytes>` beyond that
+  (formatting does not allocate).
+
 ## Log
+- 2026-11-13: shared codecs (value, operation, floor, chain, Error, initialization checks),
+  keyless/immutable/any operations with all 21 codec conformance hashes, decoder fuzz.
