@@ -165,6 +165,22 @@ pub fn TrackedPeers(comptime P: type) type {
     };
 }
 
+/// Primary and secondary peers with their addresses, for `AddressableManager.track`. A key in
+/// both maps is tracked as primary only.
+pub fn AddressableTrackedPeers(comptime P: type) type {
+    return struct {
+        const Self = @This();
+        pub const PeerMap = codec.Map(P, types.Address);
+
+        primary: PeerMap,
+        secondary: PeerMap,
+
+        pub fn init_primary(primary: PeerMap) Self {
+            return .{ .primary = primary, .secondary = .{ .entries = &.{} } };
+        }
+    };
+}
+
 /// Notification sent to subscribers when a peer set changes.
 pub fn PeerSetUpdate(comptime P: type) type {
     return struct {

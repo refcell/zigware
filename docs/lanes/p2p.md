@@ -51,6 +51,10 @@ handshake and the runtime's network, which the actor-stream and runtime lanes ar
   `data.Header` (prefix, channel, and length for a zero-copy send), `max_payload_overhead`,
   `max_size(stream_max)`, and `authenticated.lookup.Message` (`data` or `ping`); both match
   commonware's conformance hashes.
+- `p2p.AddressableTrackedPeers(P)` (`primary`/`secondary` as `codec.Map(P, types.Address)`),
+  `authenticated.dialing` (`DialStatus`, `ReserveResult`, `earliest`), and lookup's
+  `Record` and `Directory(P)` (track, overwrite, dial/listen reservations, blocks,
+  dialable/listenable); callers pass `now` and an RNG.
 - `p2p.Message(P)` owns its payload when `gpa` is set; release it with `deinit`.
 - Senders take a message as parts (`[]const []const u8`, concatenated), like stream frames.
 
@@ -80,6 +84,9 @@ handshake and the runtime's network, which the actor-stream and runtime lanes ar
   `Probability` (0 and 1 draw nothing). Whole-run streams can still differ from commonware's,
   because the deterministic runtime's scheduler draws from the same RNG and the network's
   task layout differs from commonware's actor.
+- Lookup's directory takes the current time and an RNG per call instead of owning a
+  context, and keeps peers in key order (commonware's HashMap results are sorted before
+  use). Reservations are `Metadata` values that the owner releases explicitly.
 - p2p carries its own seeded fuzz driver (`p2p.fuzz.run`, same as codec's) until
   `invariants.minifuzz` lands.
 
@@ -118,3 +125,4 @@ handshake and the runtime's network, which the actor-stream and runtime lanes ar
 - 2026-11-13: rand_distr ziggurat Normal for link latency, bit-identical to Rust.
 - 2026-11-13: simulated blocking and shutdown tests.
 - 2026-11-13: authenticated Data frame and lookup Message with conformance hashes.
+- 2026-11-13: lookup record and directory with their tests.

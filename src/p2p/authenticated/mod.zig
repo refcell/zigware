@@ -6,6 +6,7 @@ pub const data = @import("data.zig");
 pub const Data = data.Data;
 pub const max_payload_overhead = data.max_payload_overhead;
 pub const max_size = data.max_size;
+pub const dialing = @import("dialing.zig");
 pub const lookup = @import("lookup/mod.zig");
 
 test {
