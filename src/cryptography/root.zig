@@ -49,6 +49,8 @@ pub const LtHash = lthash.LtHash;
 pub const secret = @import("secret.zig");
 pub const Secret = secret.Secret;
 pub const certificate = @import("certificate.zig");
+pub const bloomfilter = @import("bloomfilter.zig");
+pub const BloomFilter = bloomfilter.BloomFilter;
 
 /// The digest type of hasher `H` (commonware `DigestOf<H>`).
 pub fn DigestOf(comptime H: type) type {

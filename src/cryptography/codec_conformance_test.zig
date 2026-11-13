@@ -27,6 +27,7 @@ const LtHash = @import("lthash.zig").LtHash;
 const Summary = @import("transcript.zig").Summary;
 const sake = @import("handshake/sake.zig");
 const certificate = @import("certificate.zig");
+const Bloom = @import("bloomfilter.zig").Default;
 
 const conformance_file = @embedFile("conformance.toml");
 const prefix = "commonware_cryptography::";
@@ -243,6 +244,11 @@ test "conformance: certificate signers, attestation, and ed25519 certificate" {
         ed25519.certificate.Certificate,
         gen_ed25519_certificate,
     );
+}
+
+test "conformance: bloomfilter" {
+    try slow.skip_slow();
+    try verify("bloomfilter::conformance::CodecConformance<BloomFilter>", Bloom, Bloom.arbitrary);
 }
 
 test "conformance: digests" {

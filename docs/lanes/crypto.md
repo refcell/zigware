@@ -38,7 +38,10 @@ handshake), then certificate, secp256r1, the rest, zk and banderwagon last.
 - [x] secp256r1 `certificate` scheme with its conformance hash and `fixture` mock.
 - [x] lthash: `LtHash` with commonware-generated checksums, the `CodecConformance<LtHash>`
   hash, and the `lthash_operations`/`metamorph_lthash` fuzz targets.
-- [ ] bloomfilter (+ conformance, `RationalOptimalBits`).
+- [x] bloomfilter: `BloomFilter(H)` with its tests, `CodecConformance<BloomFilter>`, and the
+  `bloomfilter` fuzz target (`New` constructor).
+- [ ] bloomfilter `with_rate`/`optimal_*`/estimates and the `RationalOptimalBits` hash (waits
+  for `utils.rational`'s `BigRational` and `log2_floor`).
 - [ ] banderwagon, zk (bulletproofs, pedersen) last.
 - [ ] Fuzz targets (commonware cryptography/fuzz) and conformance hashes.
 
