@@ -124,8 +124,11 @@ pub fn formal_derivative(data: ShardsRefMut) void {
             c_chunk.* = cv ^ dv;
         }
     }
-    // There is no pass at 0.
-    for (@max(fused4_end, 1)..count) |i| derivative_pass(data, i);
+    // There is no pass at 0, and no pass at all for zero or one shard.
+    const tail_start = @max(fused4_end, 1);
+    if (tail_start < count) {
+        for (tail_start..count) |i| derivative_pass(data, i);
+    }
 }
 
 /// The reference pass at `i`: `data[i - w..i] ^= data[i..i + w]`, clamped at `data.len()`.

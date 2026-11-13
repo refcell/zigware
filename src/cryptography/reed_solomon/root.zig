@@ -50,6 +50,7 @@ pub const engine = @import("engine.zig");
 pub const rate = @import("rate.zig");
 pub const results = @import("results.zig");
 pub const plan = @import("plan.zig");
+pub const fuzz = @import("fuzz.zig");
 
 pub const Plan = plan.Plan;
 pub const EncoderResult = results.EncoderResult;
@@ -233,4 +234,5 @@ test {
     _ = engine;
     _ = rate;
     _ = @import("tests.zig");
+    _ = fuzz;
 }

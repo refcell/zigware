@@ -28,13 +28,15 @@ hashers (on main).
 - Tables live in static memory behind an atomic once-guard, not on the heap.
 - `ChaCha8Rng` (`reed_solomon/test_util.zig`) matches `rand_chacha` 0.10 `from_seed`, so shard
   generation and every recovery-hash vector match commonware.
+- `reed_solomon.fuzz` drives plans from `invariants.minifuzz.Unstructured` with commonware's
+  search limits; the `std.testing.fuzz` targets skip input-rejection errors.
 
 ## Backlog
 - [x] reed_solomon: GF(2^16) arithmetic, naive and scalar engines, high/low/default rate
   encoders and decoders, wrappers, results, plans; every recovery-hash vector (slow ones under
   `-Dslow-tests`) and the rate, wrapper, result, and plan tests.
-- [ ] reed_solomon: port `fuzz.rs` (engine and rate differential fuzzing) as seeded fuzz plus
-  `std.testing.fuzz`.
+- [x] reed_solomon: port `fuzz.rs` (engine and rate differential fuzzing) as minifuzz searches
+  plus `std.testing.fuzz` targets, with every fixed regression case.
 - [ ] reed_solomon: `@Vector` SIMD engine, checked against `Naive`.
 - [ ] coding: the Scheme interface, reed_solomon scheme (encode into shards with a BMT
   commitment, check, reshard, decode from any k shards), shard selection, codec encodings
@@ -43,3 +45,4 @@ hashers (on main).
 
 ## Log
 - 2026-11-13: reed_solomon engines, rates, wrappers, results, plans, and test vectors.
+- 2026-11-13: reed_solomon differential fuzzing (engine and rate plans, field oracle).
