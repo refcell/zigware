@@ -19,6 +19,7 @@ pub const actors = struct {
     pub const batcher = struct {
         pub const votes = @import("actors/batcher/votes.zig");
         pub const verifier = @import("actors/batcher/verifier.zig");
+        pub const round = @import("actors/batcher/round.zig");
     };
 };
 
@@ -44,6 +45,7 @@ test {
     _ = lookahead;
     _ = actors.batcher.votes;
     _ = actors.batcher.verifier;
+    _ = actors.batcher.round;
     _ = scheme.bls12381_threshold.vrf;
     _ = scheme.bls12381_threshold.standard;
     _ = scheme.namespace;
