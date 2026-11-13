@@ -33,6 +33,7 @@ pub const sizing = @import("sizing.zig");
 pub const max_message_size = sizing.max_message_size;
 pub const fuzz = @import("fuzz.zig");
 pub const utils = @import("utils/mod.zig");
+pub const simulated = @import("simulated/mod.zig");
 pub const rate_limit = @import("rate_limit.zig");
 pub const Quota = rate_limit.Quota;
 pub const KeyedRateLimiter = rate_limit.KeyedRateLimiter;
@@ -214,6 +215,7 @@ test {
     _ = sizing;
     _ = rate_limit;
     _ = utils;
+    _ = simulated;
 }
 
 test "recipient unions (recipient_unions)" {
