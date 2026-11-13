@@ -26,9 +26,9 @@ see docs/lanes/runtime.md). Write library code against `std.Io`.
 ### stream
 - Transport contract (commonware `runtime::{Sink, Stream}`), duck-typed:
   `sink.send(bufs: []const []const u8) !void`, `stream.recv(out: []u8) !void` (exactly
-  `out.len` bytes), `stream.peek(max_len) []const u8`. `stream.mocks.channel(gpa, io)` /
-  `channel_with_buffer_size` give an in-memory `Sink`/`Stream` pair with commonware's
-  `mocks::Channel` buffering and backpressure.
+  `out.len` bytes), `stream.peek(max_len) []const u8`, the runtime's contract
+  (`runtime.mocks`). Tests use `runtime.mocks.channel(gpa, io)` and the deterministic network
+  (`runner.network()`: bind, accept, dial).
 - `stream.utils.codec`: `send_frame(sink, parts, max_message_size)`,
   `recv_frame(stream, buffer, max_message_size) ![]u8` (payload in `buffer`, which holds at
   least `max_message_size` bytes), `recv_length`, `validate_frame_len`, `Error`.
@@ -104,8 +104,8 @@ see docs/lanes/runtime.md). Write library code against `std.Io`.
 - [x] stream fuzz targets (commonware stream/fuzz: transport, connection, lazy_transport,
   e2e with a corrupting/forging/tampering adversary) in `src/stream/fuzz.zig`, seeded in
   `zig build test` and coverage-guided under `--fuzz`.
-- [ ] Blocked on runtime network: switch the stream transport contract and tests to the
-  runtime's `Sink`/`Stream` and its mock channel (`stream.mocks` until then).
+- [x] Stream transport contract and tests on `runtime.mocks` and `runtime.network`;
+  `src/stream/mocks.zig` deleted. SakeCups is also tested over bind/accept/dial.
 
 ## Log
 - 2026-11-13: actor `Feedback`, `Unreliable`, and `mailbox` with commonware's tests.
@@ -115,3 +115,5 @@ see docs/lanes/runtime.md). Write library code against `std.Io`.
 - 2026-11-13: stream `Timeout` with lib.rs's upgrader tests.
 - 2026-11-13: stream fuzz targets (transport, connection, lazy_transport, e2e).
 - 2026-11-13: conformance-hash decision recorded; remaining items wait on bench and runtime.
+- 2026-11-13: stream moved onto runtime.mocks and runtime.network (buffer size 0 allowed in
+  runtime.mocks, as in commonware).

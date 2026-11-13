@@ -8,7 +8,7 @@ const runtime = @import("runtime");
 const utils = @import("utils");
 
 const framing = @import("codec.zig");
-const mocks = @import("../mocks.zig");
+const mocks = runtime.mocks;
 
 const max_message_size: u32 = 1024;
 const max_prefix_size = codec.varint.max_u32_varint_size;

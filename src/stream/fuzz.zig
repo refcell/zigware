@@ -30,7 +30,7 @@ const runtime = @import("runtime");
 const stream = @import("root.zig");
 const cups = @import("cups.zig");
 const sake = @import("sake.zig");
-const mocks = @import("mocks.zig");
+const mocks = runtime.mocks;
 const framing = @import("utils/codec.zig");
 const Timeout = @import("utils/timeout.zig").Timeout;
 

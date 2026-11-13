@@ -1,8 +1,7 @@
 //! In-memory sink/stream pair (commonware `runtime/src/mocks.rs` `Channel`), the transport of
 //! the deterministic network.
 //!
-//! Transport contract (commonware `runtime::{Sink, Stream}`), the same shapes as
-//! `stream`'s stand-in in `src/stream/mocks.zig`:
+//! Transport contract (commonware `runtime::{Sink, Stream}`), which `stream` builds on:
 //!
 //! ```zig
 //! sink.send(bufs: []const []const u8) !void  // all buffers, in order, as one write
@@ -89,9 +88,10 @@ pub fn channel(gpa: Allocator, io: Io) Allocator.Error!Pair {
     return channel_with_buffer_size(gpa, io, default_buffer_size);
 }
 
-/// Returns a sink/stream pair with the given buffer size.
+/// Returns a sink/stream pair with the given buffer size. Zero is valid, as in commonware:
+/// every send then blocks until the stream reads it, and `peek` sees nothing a recv did not
+/// pull (commonware's stream tests use sizes 0 through 5).
 pub fn channel_with_buffer_size(gpa: Allocator, io: Io, buffer_size: usize) Allocator.Error!Pair {
-    assert(buffer_size > 0);
     const shared = try gpa.create(Shared);
     shared.* = .{ .gpa = gpa, .io = io, .buffer_size = buffer_size };
     return .{ .sink = .{ .shared = shared }, .stream = .{ .shared = shared } };

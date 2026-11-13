@@ -11,7 +11,7 @@ const runtime = @import("runtime");
 const stream = @import("root.zig");
 const cups = @import("cups.zig");
 const sake = @import("sake.zig");
-const mocks = @import("mocks.zig");
+const mocks = runtime.mocks;
 
 const ed25519 = cryptography.ed25519;
 const PrivateKey = ed25519.PrivateKey;
@@ -399,4 +399,68 @@ test "the handshake prelude is the dialer's encoded public key" {
     // Stream-level check of the cleartext prelude: varint(32) then the 32-byte key.
     try testing.expectEqual(@as(?usize, 32), codec.fixed_size(PublicKey));
     _ = stream.Accepted(PublicKey);
+}
+
+// Over the deterministic network: the listener binds and accepts, the dialer dials.
+
+const listen_address: runtime.network.Address = .{ .ip4 = .loopback(3000) };
+
+fn accept_and_listen(
+    io: Io,
+    listener: *runtime.network.deterministic.Network.Listener,
+) anyerror!Listened(mocks.Sink) {
+    const accepted = try listener.accept();
+    const listening = upgrader(.from_seed(24), .v1, .v1);
+    const admit: AdmitAll = .{};
+    return listening.listen(
+        gpa,
+        io,
+        namespace,
+        max_message_size,
+        admit,
+        accepted.stream,
+        accepted.sink,
+    );
+}
+
+fn over_network(io: Io, network: *runtime.network.deterministic.Network) !void {
+    const listener = try network.bind(listen_address);
+    defer listener.deinit();
+    var listening = try io.concurrent(accept_and_listen, .{ io, listener });
+    const connection = try network.dial(listen_address);
+    const dialing = upgrader(.from_seed(42), .v1, .v1);
+    const peer = PrivateKey.from_seed(24).public_key();
+    var dialer = dialing.dial(
+        gpa,
+        io,
+        namespace,
+        max_message_size,
+        peer,
+        connection.stream,
+        connection.sink,
+    ) catch |err| {
+        if (listening.cancel(io)) |accepted| {
+            var owned = accepted;
+            owned.connection.deinit(gpa);
+        } else |_| {}
+        return err;
+    };
+    defer dialer.deinit(gpa);
+    var listened = try listening.await(io);
+    defer listened.connection.deinit(gpa);
+    try testing.expect(listened.peer.eql(PrivateKey.from_seed(42).public_key()));
+
+    try dialer.sender.send_many(&.{ "hello", "", "network" });
+    for ([_][]const u8{ "hello", "", "network" }) |message| {
+        try testing.expectEqualStrings(message, try listened.connection.receiver.recv());
+    }
+    try listened.connection.sender.send("reply");
+    try testing.expectEqualStrings("reply", try dialer.receiver.recv());
+}
+
+test "SakeCups over the deterministic network" {
+    const config: runtime.deterministic.Config = .{ .timeout_ns = 5 * std.time.ns_per_s };
+    var runner = try runtime.deterministic.Runner.init(gpa, config);
+    defer runner.deinit();
+    try (try runner.start(over_network, .{ runner.io(), runner.network() }));
 }

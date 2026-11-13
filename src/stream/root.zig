@@ -6,7 +6,8 @@
 //! - `cups`: CUPS, an upgrader that runs a handshake, then exchanges encrypted, ordered records.
 //! - `sake`: the SAKE handshake over a byte stream; `SakeCups(S, C)` combines the two.
 //! - `utils.codec`: length-prefixed framing.
-//! - `mocks`: an in-memory sink/stream pair; its doc comment states the transport contract.
+//! - Transports are any sink/stream pair with the contract in `runtime.mocks`:
+//!   `runtime.mocks.channel` for tests, `runtime.network` connections otherwise.
 //!
 //! # Interfaces (commonware `Handshake`, `Upgrader`)
 //!
@@ -33,7 +34,6 @@ const cryptography = @import("cryptography");
 pub const cups = @import("cups.zig");
 pub const sake = @import("sake.zig");
 pub const utils = @import("utils.zig");
-pub const mocks = @import("mocks.zig");
 
 /// CUPS running a SAKE handshake with signer `S` and cipher `C`.
 pub fn SakeCups(comptime S: type, comptime C: type) type {

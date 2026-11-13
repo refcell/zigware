@@ -1,7 +1,7 @@
 //! Length-prefixed framing (commonware `stream/src/utils/codec.rs`): every frame is a
 //! `UInt<u32>` varint length followed by that many bytes.
 //!
-//! The transport is any sink/stream pair with the contract in `stream.mocks`:
+//! The transport is any sink/stream pair with the contract in `runtime.mocks`:
 //! `sink.send([]const []const u8)`, `stream.recv([]u8)` (exactly that many bytes), and
 //! `stream.peek(max_len)`. Received frames land in a caller buffer, so receiving never
 //! allocates; the buffer must hold `max_message_size` bytes.

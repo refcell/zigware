@@ -7,7 +7,7 @@ const Io = std.Io;
 const runtime = @import("runtime");
 
 const Timeout = @import("timeout.zig").Timeout;
-const mocks = @import("../mocks.zig");
+const mocks = runtime.mocks;
 
 const gpa = testing.allocator;
 

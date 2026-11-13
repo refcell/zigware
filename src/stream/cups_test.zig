@@ -11,7 +11,7 @@ const utils = @import("utils");
 
 const stream = @import("root.zig");
 const cups = @import("cups.zig");
-const mocks = @import("mocks.zig");
+const mocks = runtime.mocks;
 
 const Transcript = cryptography.Transcript;
 const RecordCipher = cryptography.ChaCha20Poly1305;

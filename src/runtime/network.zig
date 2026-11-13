@@ -13,10 +13,9 @@
 //! stream.peek(max_len)                         // buffered bytes, never blocks
 //! ```
 //!
-//! Sinks and streams follow the contract in `runtime.mocks` (byte-compatible with
-//! `src/stream/mocks.zig`): after any error a half is unusable and the next call returns
-//! `error.Closed`; `error.Canceled` also poisons the half it interrupted. Close each half and
-//! each listener with `deinit`.
+//! Sinks and streams follow the contract in `runtime.mocks`: after any error a half is
+//! unusable and the next call returns `error.Closed`; `error.Canceled` also poisons the half
+//! it interrupted. Close each half and each listener with `deinit`.
 
 const std = @import("std");
 
