@@ -270,3 +270,38 @@ test "recv before send" {
         }
     }.body);
 }
+
+// A zero-size buffer (commonware allows it): every non-empty send waits until the receiver
+// drains the channel, and a recv pulls exactly what it asks for, so peek stays empty.
+test "zero buffer size" {
+    try run(struct {
+        fn send(sink: *mocks.Sink, bytes: []const u8) !void {
+            try sink.send(&.{bytes});
+        }
+        fn body(io: Io) !void {
+            var pair = try mocks.channel_with_buffer_size(testing.allocator, io, 0);
+            defer pair.stream.deinit();
+            defer pair.sink.deinit();
+            // Send first: the sender blocks until every byte is pulled.
+            var sender = try io.concurrent(send, .{ &pair.sink, "hello" });
+            try sleep_ms(io, 10);
+            try expect_recv(&pair.stream, "he");
+            try testing.expectEqual(@as(usize, 0), pair.stream.peek(100).len);
+            try expect_recv(&pair.stream, "llo");
+            try sender.await(io);
+            // Receive first: the sink hands over what the receiver asked for, then blocks on
+            // the rest.
+            var receiver = try io.concurrent(expect_abc, .{&pair.stream});
+            try sleep_ms(io, 10);
+            var rest = try io.concurrent(send, .{ &pair.sink, "abcdef" });
+            try receiver.await(io);
+            try expect_recv(&pair.stream, "def");
+            try rest.await(io);
+            // Empty sends never block.
+            try pair.sink.send(&.{""});
+        }
+        fn expect_abc(stream: *mocks.Stream) !void {
+            try expect_recv(stream, "abc");
+        }
+    }.body);
+}
