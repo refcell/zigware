@@ -29,6 +29,7 @@
 //! | `s.join(a, b) struct { RA, RB }` | `a.call() RA`, `b.call() RB` |
 //! | `s.sort_by(T, items, ctx, lessThan)` | stable; `sort_unstable_by` is not |
 //! | `s.run_batches(len, min_len, multiplier, op)` | `run(batches) R`, see `Batches` |
+//! | `s.run_tiles(len, grids, multiplier, op)` | `run(tiles) R`, see `Tiles` |
 //! | `s.parallelism() usize` | |
 //!
 //! Optional op methods: `discard(value)` releases accumulators or outputs a failed fallible
@@ -44,6 +45,11 @@ pub const max_chunks = ops.max_chunks;
 
 const strategy_module = @import("strategy.zig");
 pub const Batches = strategy_module.Batches;
+
+const tiles_module = @import("tiles.zig");
+pub const Grid = tiles_module.Grid;
+pub const Tiles = tiles_module.Tiles;
+pub const max_units = tiles_module.max_units;
 
 pub const Sequential = @import("sequential.zig").Sequential;
 pub const Rayon = @import("rayon.zig").Rayon;
@@ -79,4 +85,5 @@ comptime {
 test {
     std.testing.refAllDecls(@This());
     _ = @import("tests.zig");
+    _ = @import("tiles_tests.zig");
 }

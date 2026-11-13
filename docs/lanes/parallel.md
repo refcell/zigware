@@ -20,6 +20,8 @@ placeholder until this lands, so land `Strategy` first and tell the coordinator 
   `map_collect_with_multiplier`, `map_partition_collect(gpa, items, op{map -> {K, ?U}})`,
   `join(a{call}, b{call})`, `sort_by(T, items, ctx, lessThan)`, `sort_unstable_by`,
   `run_batches(len, min_batch_len, multiplier, op{run(batches)})`, `try_run_batches`,
+  `run_tiles(len, grids, multiplier, op{run(tiles)})` with `parallel.Grid{rows, tile_cost}`
+  and `tiles.fill_collect(gpa, op{init, fill(*state, row, columns), finish(*state, row)})`,
   `parallelism()`. Optional op hooks: `discard(value)`, `deinit_state(*state)`.
 
 ## Decisions
@@ -36,13 +38,15 @@ placeholder until this lands, so land `Strategy` first and tell the coordinator 
   sort runs in parallel and merge pairwise with a scratch buffer from the pool's allocator;
   without one they sort serially.
 - Fallible ops return the first error in chunk order (commonware allows any).
+- `run_tiles` plans at most 64 workers (one pool job each); `Tiles.fill_collect` returns an
+  allocated slice and `OutOfMemory` if a worker's result list cannot grow.
 
 ## Backlog
 - [x] parallel: the `Strategy` interface (fold, map, join) with `Sequential` and a
   thread-pool strategy, matching lib.rs semantics and tests. Implement a small
   work-stealing pool on std threads and `std.Io` instead of porting rayon line by line;
   results must not depend on the number of threads.
-- [ ] parallel: `run_tiles` (`Grid`, `Tiles`, `Shares` claim/steal) with its tests.
+- [x] parallel: `run_tiles` (`Grid`, `Tiles`, `Shares` claim/steal) with its tests.
 - [ ] parallel: `spawn`/`block_on` over the pool.
 - [ ] parallel policy.rs and topology.rs (CPU topology, pinning policy), mocks.rs.
 - [ ] allocator: an allocator wrapper with commonware's metrics and purge/reserve
@@ -52,5 +56,6 @@ placeholder until this lands, so land `Strategy` first and tell the coordinator 
 - [ ] Fuzz targets and benches.
 
 ## Log
+- 2026-11-13: run_tiles (Grid, Tiles, Shares claim/steal) with ported tile tests.
 - 2026-11-13: Strategy interface (Sequential, Rayon over a std.Io fork-join pool), batches,
   parallel sorts, ported lib.rs tests.

@@ -6,6 +6,7 @@ const std = @import("std");
 const assert = std.debug.assert;
 const ops = @import("ops.zig");
 const shared = @import("strategy.zig");
+const tiles = @import("tiles.zig");
 
 pub const Sequential = struct {
     pub fn parallelism(_: Sequential) usize {
@@ -39,6 +40,7 @@ pub const Sequential = struct {
     pub const try_run = shared.try_run;
     pub const run_batches = shared.run_batches;
     pub const try_run_batches = shared.try_run_batches;
+    pub const run_tiles = tiles.run_tiles;
     pub const fold = shared.fold;
     pub const fold_init = shared.fold_init;
     pub const try_fold = shared.try_fold;
