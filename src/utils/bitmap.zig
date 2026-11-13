@@ -10,6 +10,8 @@ pub const prunable = @import("bitmap/prunable.zig");
 pub const Prunable = prunable.Prunable;
 /// The historical bitmap: `historical.BitMap(N)` with its `Dirty` view.
 pub const historical = @import("bitmap/historical.zig");
+/// The roaring compressed bitmap and its containers.
+pub const roaring = @import("bitmap/roaring.zig");
 pub const DEFAULT_CHUNK_SIZE = bitmap.DEFAULT_CHUNK_SIZE;
 /// `BitMap` with commonware's default chunk size of 8 bytes.
 pub const DefaultBitMap = BitMap(DEFAULT_CHUNK_SIZE);

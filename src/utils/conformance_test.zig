@@ -175,6 +175,11 @@ const entries = .{
         bitmap.Prunable(16),
         arbitrary.default_generator(bitmap.Prunable(16)),
     ),
+    Codec(
+        "bitmap::roaring::container::array" ++ conformance_suffix ++ "super::Array>",
+        bitmap.roaring.Array,
+        arbitrary.default_generator(bitmap.roaring.Array),
+    ),
 };
 
 test "utils conformance hashes match commonware" {
