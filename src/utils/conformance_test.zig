@@ -205,6 +205,11 @@ const entries = .{
         bitmap.roaring.Bitmap,
         arbitrary.default_generator(bitmap.roaring.Bitmap),
     ),
+    Codec(
+        "bitmap::roaring::prunable" ++ conformance_suffix ++ "super::Prunable>",
+        bitmap.roaring.Prunable,
+        arbitrary.default_generator(bitmap.roaring.Prunable),
+    ),
 };
 
 test "utils conformance hashes match commonware" {

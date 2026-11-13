@@ -21,6 +21,9 @@ pub const run = @import("roaring/run.zig");
 pub const Run = run.Run;
 pub const container = @import("roaring/container.zig");
 pub const Container = container.Container;
+pub const prunable = @import("roaring/prunable.zig");
+pub const Prunable = prunable.Prunable;
+pub const ops = @import("roaring/ops.zig");
 
 pub const MAX_KEY: u64 = (1 << 48) - 1;
 
@@ -47,6 +50,13 @@ pub const Bitmap = struct {
     /// Bounds the number of containers.
     pub const Cfg = codec.RangeCfg(usize);
     pub const empty: Bitmap = .{};
+
+    // Set operations (ops.zig).
+    pub const @"union" = ops.@"union";
+    pub const intersection = ops.intersection;
+    pub const difference = ops.difference;
+    pub const is_subset = ops.is_subset;
+    pub const intersects = ops.intersects;
 
     pub fn deinit(self: *Bitmap, gpa: Allocator) void {
         for (self.containers.items) |*entry| entry.value.deinit(gpa);
@@ -328,4 +338,6 @@ test {
     std.testing.refAllDecls(@This());
     _ = @import("roaring/container_test.zig");
     _ = @import("roaring/roaring_test.zig");
+    _ = @import("roaring/ops_test.zig");
+    _ = @import("roaring/fuzz_test.zig");
 }
