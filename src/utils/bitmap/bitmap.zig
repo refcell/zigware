@@ -36,6 +36,12 @@ pub fn BitMap(comptime N: usize) type {
             return .{ .chunks = try .initCapacity(gpa, chunk_count(size)) };
         }
 
+        /// Reserves room for `size` bits in total, so growing to that size cannot fail.
+        pub fn ensure_total_capacity(self: *Self, gpa: Allocator, size: u64) Allocator.Error!void {
+            try self.chunks.ensureTotalCapacity(gpa, chunk_count(size));
+            assert(self.chunks.buffer.len >= chunk_count(size));
+        }
+
         pub fn zeroes(gpa: Allocator, size: u64) Allocator.Error!Self {
             return filled(gpa, size, EMPTY_CHUNK);
         }

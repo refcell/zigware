@@ -39,6 +39,13 @@ pub fn Prunable(comptime N: usize) type {
             return .{ .pruned = pruned_chunks_count };
         }
 
+        /// Reserves room for `size` total bits (pruned included), so `extend_to(size)` and
+        /// pushes up to `size` cannot fail.
+        pub fn ensure_total_capacity(self: *Self, gpa: Allocator, size: u64) Allocator.Error!void {
+            assert(size >= self.pruned_bits());
+            try self.bitmap.ensure_total_capacity(gpa, size - self.pruned_bits());
+        }
+
         pub fn clone(self: *const Self, gpa: Allocator) Allocator.Error!Self {
             return .{ .bitmap = try self.bitmap.clone(gpa), .pruned = self.pruned };
         }

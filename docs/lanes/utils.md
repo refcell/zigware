@@ -28,6 +28,10 @@ encoding parts as soon as `codec` has its core API (see docs/lanes/codec.md).
   `bitmap.Prunable(N)`: absolute positions over pruned leading chunks (`init_pruned`,
   `prune_to_bit`, `unprune_chunks`, `set_chunk_by_index`, `get_bit`/`set_bit`, `ones_iter_*`,
   codec: pruned count `u64` + `BitMap`, `Cfg` bounds the retained bits).
+  `bitmap.historical.BitMap(N)`: a `Prunable` plus reverse diffs per commit (`into_dirty` ->
+  `Dirty` with read-through `get_bit`/`get_chunk`, `set_bit`, `push*`, `pop`, `prune_to_bit`;
+  `commit(gpa, n)` / `abort`; `apply_batch`, `get_at_commit`, `prune_commits_before`). A failed
+  `commit` leaves the `Dirty` unchanged (Rust consumes it).
   `bitmap.readable` is the `Readable` trait (`len`, `pruned_chunks`, `get_chunk`) + `OnesIter`.
 - `utils.Hostname` (`utils.hostname`): validated RFC 1035/1123 hostname stored inline
   (`init`, `literal`, `as_str`, `eql`, `order`, `{f}`, `len_max`, `label_len_max`,
@@ -65,7 +69,7 @@ encoding parts as soon as `codec` has its core API (see docs/lanes/codec.md).
   `time.rs`, `range.rs`, `iter.rs`, `vec.rs` (NonEmptyVec), `rational`, `probability`,
   `sampling`, `rng.rs` (deterministic test RNG matching commonware's where tests depend on it).
 - [x] utils sequence: fixed_bytes, u32, u64, prefixed_u64, vec_u64, unit — with codec.
-- [ ] utils bitmap (done: BitMap, Prunable; next: historical,
+- [ ] utils bitmap (done: BitMap, Prunable, historical; next:
   roaring): BitMap, prunable, historical, roaring; codec encodings identical.
 - [x] utils ordered (Set/Map/BiMap/Quorum) with conformance hashes.
 - [ ] utils priority_set, cache (LRU etc.), acknowledgement,
@@ -85,3 +89,4 @@ encoding parts as soon as `codec` has its core API (see docs/lanes/codec.md).
 - 2026-11-13: Hostname (conformance hash) and net is_global/subnet, for p2p.
 - 2026-11-13: Prunable bitmap with its tests, conformance hash, and fuzz target.
 - 2026-11-13: ordered Set/Map/BiMap/Quorum with tests, conformance hashes, and a set fuzz.
+- 2026-11-13: historical bitmap with its tests, randomized checkpoints, and fuzz target.
