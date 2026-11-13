@@ -18,6 +18,9 @@ pub const mmr = @import("mmr/mod.zig");
 pub const conformance = @import("conformance.zig");
 pub const proof = @import("proof.zig");
 pub const Proof = proof.Proof;
+pub const storage = @import("storage.zig");
+pub const verification = @import("verification.zig");
+pub const ProofStore = verification.ProofStore;
 
 /// Upper bound on pinned nodes (and peaks) for any u64-backed family: a structure with `n`
 /// leaves has at most `popcount(n)` peaks.
@@ -252,6 +255,8 @@ test {
     std.testing.refAllDecls(@This());
     _ = @import("proof_test.zig");
     _ = @import("mem_test.zig");
+    _ = @import("verification_test.zig");
+    _ = @import("fuzz_test.zig");
 }
 
 test "bagging domains are distinct" {

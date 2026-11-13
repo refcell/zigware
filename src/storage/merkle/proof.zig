@@ -29,6 +29,9 @@ const max_siblings = 2 * max_peaks;
 /// Explicit DFS stacks hold at most a few pending items per level.
 const stack_capacity = 4 * max_peaks;
 
+/// Upper bound on the positions a range plan reads (`RangePlan.positions`).
+pub const max_plan_positions = max_peaks + max_siblings;
+
 /// Upper bound on the digests in a single-element proof of any family.
 pub const max_proof_digests_per_element = 122;
 

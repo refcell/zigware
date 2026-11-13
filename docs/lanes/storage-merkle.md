@@ -19,8 +19,15 @@ variants need `runtime` storage; do them after its interface lands.
 - [x] bitmap (authenticated bitmap over MMR).
 - [x] index (ordered/unordered, partitioned, immutable) over translators. The partitioned
   `new_range`/`install_range` (crate-private, for qmdb) come with qmdb.
-- [ ] merkle/persisted (journaled MMR) once runtime storage lands.
-- [ ] Fuzz targets (storage/fuzz entries for these modules).
+- [x] merkle/verification (`ProofStore`, `range_proof`/`historical_range_proof`/`multi_proof`
+  over any source) and merkle/storage (the source interface, `get_nodes`).
+- [ ] merkle/persisted (journaled MMR): waits on storage-journal's `contiguous/fixed` and
+  `authenticated` (Backing, BackingRecovery).
+- [ ] Fuzz targets (storage/fuzz entries for these modules). Done: rmap, bitmap, index
+  (unordered, ordered, immutable), merkle_family_operations, merkle_range_proof,
+  merkle_proof_store, and the Merkle half of proofs_malleability (its BMT half goes with bmt).
+  Remaining: merkle_batch_operations (with the batch API), merkle_full_operations and
+  merkle_full_recovery (with persisted).
 
 ## Log
 - translator: Rust's `Translator`/`BuildHasher` traits become a comptime interface
@@ -83,3 +90,13 @@ variants need `runtime` storage; do them after its interface lands.
   Commonware's position-only `utils::handles::Table` belongs to the utils lane; until it lands
   the positions sit in a hash map from translated key to positions (same results). Seeded and
   `std.testing.fuzz` targets check it against a model of live (position, key) pairs.
+- merkle/storage + verification: commonware's async `Storage` trait is a comptime interface:
+  `size()` and `get_node(position)` returning `?Digest` or `!?Digest`, with an optional
+  batched `get_nodes`; `merkle.storage.get_nodes` falls back to one read per position. Proof
+  builders take the family first (`verification.range_proof(F, gpa, hasher, source, ..)`).
+  `ProofStore` keeps the verified digests in a hash map plus the fold-prefix and backward
+  suffix accumulators; `multi_proof` takes supplied peaks as `NodeDigest`s (last one wins, as
+  commonware's map collect does). The `merkle_proof_store` fuzz also proves random ranges of
+  real trees (commonware's raw-bytes proofs almost never verify) and requires every sub-range to
+  re-prove; swapping the suffix fold order fails it at iteration 15. The family-operations fuzz
+  also rebuilds the root from the reference leaves.
