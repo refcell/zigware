@@ -65,6 +65,17 @@ resolver; those lanes are running, so do the types first and the actors as they 
   `HandoffAbandoned`; enum labels print commonware's variant names.
 - `consensus.simplex.scheme.bls12381_threshold.vrf`: `Signature(V)`, `Certificate(V)`,
   `Seed(V)` wire types.
+- `consensus.simplex.actors.batcher`: `votes.VoteTracker(S, D)`, `verifier.Verifier(S, D)`
+  and `Batch(C)` (optimistic assembly with per-vote fallback), `round.Round(S, B, D, R)`
+  (`add_network`, `accept_vote`, `record_certificate`, `try_construct`, `missing_voters`),
+  `ingress.Message`/`Pending`/`Mailbox` (`update`, `constructed`), and `actor.Actor(P)`
+  (`init(gpa, io, Config(P))` returns the actor and its `Mailbox`; `run(voter, votes,
+  certificates)` until a source closes or the task is canceled). `P` declares `Scheme`,
+  `Digest`, `Blocker`, `Reporter`, `Relay`, `Strategy`, and `Receiver` (any p2p receiver
+  with `recv() !?Message` or `recv() !Message`).
+- `consensus.simplex.actors.voter.ingress`: `Message` (`proposal`, `timeout`,
+  `verified{gpa, certificate}`, `discard`), `Pending`, `Mailbox` (`proposal`, `timeout`,
+  `recovered`).
 
 ## Decisions
 - `Epoch`/`Height`/`View`/deltas are non-exhaustive `enum(u64)` so they compare with `==`,
@@ -93,6 +104,11 @@ resolver; those lanes are running, so do the types first and the actors as they 
   `verify_certificate(gpa, rng, Subject(D), *const Certificate, strategy) !bool`.
 - consensus also imports `conformance` and `invariants` (test-only, like commonware's
   dev-dependencies).
+- Actors replace `select_loop!` with `actors/inbox.zig`: one pump task per source feeds a
+  bounded `std.Io.Queue`, and the actor handles one event, then its `on_end` work. Time and
+  randomness come from `std.Io` (`actors/context.zig`), so the deterministic runtime replays
+  a run. Batcher rounds live in a view-sorted list rather than a `BTreeMap`. Certificate
+  construction runs inline (no offload). Metrics and tracing spans in the actors follow.
 
 ## Backlog
 - [x] types.rs: Epoch, Height, View, deltas, ranges, TermLength, Round, FixedEpocher, with
@@ -135,3 +151,5 @@ resolver; those lanes are running, so do the types first and the actors as they 
 - 2026-11-13: simplex bls12381_multisig and secp256r1 schemes.
 - 2026-11-13: simplex bls12381_threshold standard scheme; Lookahead, Viewport, Plan.
 - 2026-11-13: sign/verify/assemble/clone on the simplex vote and certificate types.
+- 2026-11-13: batcher VoteTracker, Verifier, Round, and the batcher/voter mailboxes.
+- 2026-11-13: batcher actor on an Io.Queue inbox, tested on the deterministic runtime.

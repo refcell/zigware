@@ -21,6 +21,7 @@ pub const actors = struct {
         pub const verifier = @import("actors/batcher/verifier.zig");
         pub const round = @import("actors/batcher/round.zig");
         pub const ingress = @import("actors/batcher/ingress.zig");
+        pub const actor = @import("actors/batcher/actor.zig");
     };
     pub const voter = struct {
         pub const ingress = @import("actors/voter/ingress.zig");
@@ -51,6 +52,7 @@ test {
     _ = actors.batcher.verifier;
     _ = actors.batcher.round;
     _ = @import("actors/ingress_test.zig");
+    _ = @import("actors/batcher/actor_test.zig");
     _ = scheme.bls12381_threshold.vrf;
     _ = scheme.bls12381_threshold.standard;
     _ = scheme.namespace;
