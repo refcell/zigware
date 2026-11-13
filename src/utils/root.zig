@@ -38,6 +38,8 @@ pub const ordered = @import("ordered.zig");
 
 pub const handles = @import("handles.zig");
 
+pub const acknowledgement = @import("acknowledgement.zig");
+
 pub const channel = @import("channel/mod.zig");
 
 pub const sampling = @import("sampling.zig");

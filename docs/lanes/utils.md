@@ -48,6 +48,10 @@ encoding parts as soon as `codec` has its core API (see docs/lanes/codec.md).
   `rehash_context.rehash(H) u64` gives each held handle's hash on growth, `matcher.matches(H)`
   confirms a candidate. `partition(hash, partitions)` picks a shard from the bits below the
   fingerprint.
+- `utils.acknowledgement`: `Exact` (`handle(gpa, io)` -> `{ acknowledgement, waiter }`,
+  `clone`, `acknowledge` (consumes), `deinit` (drop = cancel)); `Exact.Waiter` (`wait()` ->
+  `error.AcknowledgementCanceled` when a handle was dropped, `poll()` = `now_or_never`,
+  `deinit`); `assert_acknowledgement(T)` checks the interface. Runs on any `std.Io`.
 - `utils.Hostname` (`utils.hostname`): validated RFC 1035/1123 hostname stored inline
   (`init`, `literal`, `as_str`, `eql`, `order`, `{f}`, `len_max`, `label_len_max`,
   `max_encode_size` = 258), codec as a `RangeCfg(..=253)` byte string; `hostname.Error`.
@@ -87,7 +91,7 @@ encoding parts as soon as `codec` has its core API (see docs/lanes/codec.md).
 - [x] utils bitmap: BitMap, prunable, historical, roaring (containers, Bitmap, Prunable, ops,
   fuzz Plan); codec encodings identical, all bitmap conformance hashes match.
 - [x] utils ordered (Set/Map/BiMap/Quorum) with conformance hashes.
-- [ ] utils priority_set, cache (LRU etc.), acknowledgement,
+- [ ] utils cache (Clock2Q+) (done: priority_set (from the resolver lane, audited), acknowledgement),
   channel (bounded mpsc, ring, reservation, tracked; keep broadcast-resolver's oneshot.zig) — channels over `std.Io` primitives.
 - [x] utils handles (`Table`, `partition`), requested by storage-merkle.
 - [ ] Fuzz targets for every decoder (commonware utils/fuzz).
@@ -115,3 +119,4 @@ encoding parts as soon as `codec` has its core API (see docs/lanes/codec.md).
   values, intersections are almost always empty and a broken `difference` went unnoticed.
 - 2026-11-13: handles `Table` (Robin Hood multimap of hashes to handles) and `partition`,
   with all handles.rs tests; Rust closures are `rehash_context`/`matcher` parameters.
+- 2026-11-13: acknowledgement Exact with its tests, a concurrent waiter test, and the ack fuzz.
