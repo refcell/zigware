@@ -35,9 +35,9 @@ statistics, output, CLI) and run against a minimal in-lane stand-in, then switch
   matching commonware's.
 - [x] Simulation on `runtime.deterministic.Runner` and `p2p.simulated`: same seed, same
   output. `zig build run-estimator -- examples/estimator/simplex.lazy --distribution ...`.
-- [ ] Every `.lazy` file in the reference runs; port main.rs/lib.rs tests. (lib.rs tests,
-  `accepts_config`, and `validate` over every file are ported; next, an end-to-end run of
-  each file.)
+- [x] Every `.lazy` file in the reference runs; port main.rs/lib.rs tests. (Every file runs
+  end to end with and without bandwidth caps; all 16 match commonware's output line for line
+  with numbers masked, and stall.lazy exits 101 in both.)
 - [x] A short `examples/estimator/README.md` with the commands the README demo uses.
 
 - [ ] `--reload`: fetch cloudping.co through the runtime's network.
@@ -45,3 +45,4 @@ statistics, output, CLI) and run against a minimal in-lane stand-in, then switch
 ## Log
 - 2026-11-13: DSL parser, latency data, statistics, clap-identical CLI, colored output, and
   the simulation on runtime.deterministic + p2p.simulated. `zig build run-estimator` works.
+- 2026-11-13: end-to-end test of every completing .lazy file, uncapped and bandwidth-capped.

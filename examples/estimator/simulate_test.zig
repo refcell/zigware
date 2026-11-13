@@ -100,6 +100,69 @@ test "stall is reported" {
     );
 }
 
+/// Every `wait` (and the proposer's `collect`) is passed, as `validate` predicts.
+fn expect_completes(name: []const u8, content: []const u8, distribution: []const u8) !void {
+    var fixture = try Fixture.init(distribution, content);
+    defer fixture.deinit();
+    const peers = try lib.count_peers(&fixture.distribution);
+    var simulation = try simulate.run_single_simulation(testing.allocator, 0, fixture.input());
+    defer simulation.steps.deinit(testing.allocator);
+    for (fixture.task.commands, 0..) |command, index| {
+        var gates: usize = 0;
+        var collects: usize = 0;
+        for (command.items) |item| {
+            if (item != .leaf) continue;
+            gates += @intFromBool(item.leaf.gate() != null);
+            collects += @intFromBool(item.leaf == .collect);
+        }
+        if (gates == 0) continue;
+        var samples: usize = 0;
+        for (0..simulation.steps.regions) |region| {
+            samples += simulation.steps.at(index, region).items.len;
+        }
+        // A lone `collect` completes for the proposer only; anything else for every peer.
+        const expected: usize = if (collects == gates and gates == 1) 1 else @intCast(peers);
+        if (samples != expected) std.debug.print("{s} line {d}\n", .{ name, command.line });
+        try testing.expectEqual(expected, samples);
+        try testing.expect(simulation.steps.proposer[index] != null);
+    }
+}
+
+test "every completing example file runs end to end" {
+    const files = [_]struct { []const u8, []const u8 }{
+        .{ "echo.lazy", @embedFile("echo.lazy") },
+        .{ "hotstuff.lazy", @embedFile("hotstuff.lazy") },
+        .{ "simplex.lazy", @embedFile("simplex.lazy") },
+        .{ "simplex_with_delay.lazy", @embedFile("simplex_with_delay.lazy") },
+        .{ "simplex_with_certificates.lazy", @embedFile("simplex_with_certificates.lazy") },
+        .{ "simplex_small_block.lazy", @embedFile("simplex_small_block.lazy") },
+        .{ "simplex_large_block.lazy", @embedFile("simplex_large_block.lazy") },
+        .{
+            "simplex_large_block_coding_50.lazy",
+            @embedFile("simplex_large_block_coding_50.lazy"),
+        },
+        .{ "minimmit.lazy", @embedFile("minimmit.lazy") },
+        .{ "minimmit_small_block.lazy", @embedFile("minimmit_small_block.lazy") },
+        .{ "minimmit_large_block.lazy", @embedFile("minimmit_large_block.lazy") },
+        .{
+            "minimmit_large_block_coding_50.lazy",
+            @embedFile("minimmit_large_block_coding_50.lazy"),
+        },
+        .{ "kudzu_small_block.lazy", @embedFile("kudzu_small_block.lazy") },
+        .{ "kudzu_large_block.lazy", @embedFile("kudzu_large_block.lazy") },
+        .{
+            "kudzu_large_block_coding_50.lazy",
+            @embedFile("kudzu_large_block_coding_50.lazy"),
+        },
+    };
+    for (files) |file| {
+        try expect_completes(file[0], file[1], "us-east-1:2,eu-west-1:1");
+        // 1 Gbit/s symmetric and asymmetric caps exercise the bandwidth planner.
+        const capped = "us-east-1:2:125000000,eu-west-1:1:125000000/62500000";
+        try expect_completes(file[0], file[1], capped);
+    }
+}
+
 /// The full report for every proposer, without colors.
 fn render_all(fixture: *const Fixture, content: []const u8) ![]u8 {
     const gpa = testing.allocator;
