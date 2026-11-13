@@ -1,0 +1,48 @@
+# HELP api_requests HTTP requests.
+# TYPE api_requests counter
+api_requests_total{epoch="5",region="us",method="GET",status="200",ok="true",kind="SharedBlocking"} 3
+# HELP consensus_latency Latency.
+# TYPE consensus_latency histogram
+consensus_latency_sum{epoch="5",region="us"} 2.50402
+consensus_latency_count{epoch="5",region="us"} 4
+consensus_latency_bucket{epoch="5",region="us",le="0.000003"} 0
+consensus_latency_bucket{epoch="5",region="us",le="0.00001"} 0
+consensus_latency_bucket{epoch="5",region="us",le="0.00003"} 1
+consensus_latency_bucket{epoch="5",region="us",le="0.0001"} 1
+consensus_latency_bucket{epoch="5",region="us",le="0.0003"} 1
+consensus_latency_bucket{epoch="5",region="us",le="0.001"} 1
+consensus_latency_bucket{epoch="5",region="us",le="0.003"} 1
+consensus_latency_bucket{epoch="5",region="us",le="0.01"} 2
+consensus_latency_bucket{epoch="5",region="us",le="0.03"} 2
+consensus_latency_bucket{epoch="5",region="us",le="0.1"} 2
+consensus_latency_bucket{epoch="5",region="us",le="0.3"} 2
+consensus_latency_bucket{epoch="5",region="us",le="1.0"} 3
+consensus_latency_bucket{epoch="5",region="us",le="+Inf"} 4
+# HELP counter_max max.
+# TYPE counter_max counter
+counter_max_total{epoch="5",region="us"} 18446744073709551615
+# HELP gauge_min min.
+# TYPE gauge_min gauge
+gauge_min{epoch="5",region="us"} -9223372036854775808
+# HELP peer_latency per peer.
+# TYPE peer_latency histogram
+peer_latency_sum{epoch="5",region="us",peer="alice"} 0.25
+peer_latency_count{epoch="5",region="us",peer="alice"} 1
+peer_latency_bucket{epoch="5",region="us",le="0.01",peer="alice"} 0
+peer_latency_bucket{epoch="5",region="us",le="0.02",peer="alice"} 0
+peer_latency_bucket{epoch="5",region="us",le="0.05",peer="alice"} 0
+peer_latency_bucket{epoch="5",region="us",le="0.1",peer="alice"} 0
+peer_latency_bucket{epoch="5",region="us",le="0.2",peer="alice"} 0
+peer_latency_bucket{epoch="5",region="us",le="0.5",peer="alice"} 1
+peer_latency_bucket{epoch="5",region="us",le="1.0",peer="alice"} 1
+peer_latency_bucket{epoch="5",region="us",le="2.0",peer="alice"} 1
+peer_latency_bucket{epoch="5",region="us",le="5.0",peer="alice"} 1
+peer_latency_bucket{epoch="5",region="us",le="10.0",peer="alice"} 1
+peer_latency_bucket{epoch="5",region="us",le="30.0",peer="alice"} 1
+peer_latency_bucket{epoch="5",region="us",le="60.0",peer="alice"} 1
+peer_latency_bucket{epoch="5",region="us",le="300.0",peer="alice"} 1
+peer_latency_bucket{epoch="5",region="us",le="+Inf",peer="alice"} 1
+# HELP zeta odd label value.
+# TYPE zeta gauge
+zeta{epoch="5",region="us",method="a"b}",status="0",ok="false",kind="Root"} 1
+# EOF

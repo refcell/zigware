@@ -9,6 +9,7 @@ pub const storage = @import("storage.zig");
 pub const mocks = @import("mocks.zig");
 pub const network = @import("network.zig");
 pub const buffer = @import("buffer/mod.zig");
+pub const telemetry = @import("telemetry/mod.zig");
 
 test {
     std.testing.refAllDecls(@This());
