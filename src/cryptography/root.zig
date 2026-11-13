@@ -15,6 +15,10 @@ pub const hasher = @import("hasher.zig");
 pub const fuzz = @import("fuzz.zig");
 pub const rng = @import("rng.zig");
 pub const ChaCha20Rng = rng.ChaCha20Rng;
+pub const signer = @import("signer.zig");
+pub const BatchEntry = signer.BatchEntry;
+pub const entries = signer.entries;
+pub const from_seed = signer.from_seed;
 
 pub const Digest = digest.Digest;
 pub const assert_hasher = hasher.assert_hasher;
@@ -29,6 +33,8 @@ pub const keccak256 = @import("keccak256.zig");
 pub const Keccak256 = keccak256.Keccak256;
 pub const crc32 = @import("crc32.zig");
 pub const Crc32 = crc32.Crc32;
+
+pub const ed25519 = @import("ed25519.zig");
 
 /// The digest type of hasher `H` (commonware `DigestOf<H>`).
 pub fn DigestOf(comptime H: type) type {

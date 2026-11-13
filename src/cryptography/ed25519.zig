@@ -1,0 +1,15 @@
+//! Ed25519 implementation of the signer traits (commonware `cryptography/src/ed25519`).
+//!
+//! Validation follows ZIP-215 (https://zips.z.cash/zip-0215), as commonware does with its
+//! vendored `ed25519-consensus`: see `ed25519/core.zig`.
+
+const scheme = @import("ed25519/scheme.zig");
+
+pub const core = @import("ed25519/core.zig");
+pub const PrivateKey = scheme.PrivateKey;
+pub const PublicKey = scheme.PublicKey;
+pub const Signature = scheme.Signature;
+
+test {
+    _ = @import("ed25519/tests.zig");
+}
