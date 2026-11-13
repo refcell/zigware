@@ -49,6 +49,9 @@ resolver; those lanes are running, so do the types first and the actors as they 
 - `consensus.simplex.config`: `Config(P)` (P declares `Scheme`, `Elector`, `Blocker`,
   `Digest`, `Automaton`, `Relay`, `Reporter`, `Strategy`;
   `check(gpa, rng) !?[]const u8`, `assert_valid(gpa, rng)`), `Floor(S, D)`, `SkipPolicy`, `SkipBudget`, `ForwardPolicy`.
+- `consensus.simplex.metrics`: label sets `Peer(P)`, `Leader(P)`, `Timeout(P)` with
+  `TimeoutReason`, `Outbound`, `Inbound(P)` with `MessageType`, `HandoffEvent`,
+  `HandoffAbandoned`; enum labels print commonware's variant names.
 - `consensus.simplex.scheme.bls12381_threshold.vrf`: `Signature(V)`, `Certificate(V)`,
   `Seed(V)` wire types.
 
@@ -117,3 +120,4 @@ resolver; those lanes are running, so do the types first and the actors as they 
 - 2026-11-13: config.rs (Config, Floor, SkipPolicy, ForwardPolicy).
 - 2026-11-13: simplex ed25519 scheme and Namespace on crypto's certificate.rs; the
   Attestation stand-in is removed.
+- 2026-11-13: metrics.rs label sets on runtime.telemetry.metrics.

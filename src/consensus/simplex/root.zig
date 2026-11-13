@@ -9,6 +9,7 @@ pub const Deferred = @import("cryptography").certificate.Deferred;
 pub const elector = @import("elector.zig");
 pub const limits = @import("limits.zig");
 pub const config = @import("config.zig");
+pub const metrics = @import("metrics.zig");
 
 pub const scheme = struct {
     pub const namespace = @import("scheme/namespace.zig");
@@ -25,6 +26,7 @@ test {
     _ = elector;
     _ = limits;
     _ = config;
+    _ = metrics;
     _ = scheme.bls12381_threshold.vrf;
     _ = scheme.namespace;
     _ = scheme.ed25519;
