@@ -6,6 +6,7 @@ const std = @import("std");
 pub const wire = @import("wire.zig");
 pub const Message = wire.Message;
 pub const Payload = wire.Payload;
+pub const score = @import("score.zig");
 
 /// Mock implementations for testing.
 pub const mocks = struct {
@@ -16,4 +17,5 @@ pub const mocks = struct {
 test {
     std.testing.refAllDecls(@This());
     _ = wire;
+    _ = score;
 }

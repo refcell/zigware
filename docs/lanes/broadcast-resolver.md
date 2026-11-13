@@ -33,6 +33,7 @@ on p2p's simulated network and the deterministic runtime.
 - Consumer contract: `C.Key`, `C.Value`, `C.Subscriber`, `C.Outcome` (`bool` or `Outcome`),
   `deliver(self, Delivery, value) !utils.channel.oneshot.Receiver(C.Outcome)`, optional
   `deinit_value(gpa, value)`.
+- `resolver.p2p.score.Score` (`record(elapsed: utils.Duration, bytes: u64)`, `weight() u64`).
 - `resolver.p2p.mocks.Key` (one-byte test key), `resolver.p2p.mocks.Consumer(K, S)` (byte
   values, expected values, `next_event`/`try_event`).
 - Shared, in the utils directory at the coordinator's request: `utils.channel.oneshot`
@@ -66,7 +67,7 @@ on p2p's simulated network and the deterministic runtime.
 
 ## Backlog
 - [ ] resolver: lib.rs, subscribers, ingress, delivery (done); opaque.rs.
-- [ ] resolver p2p: wire.rs (done, conformance hashes match), fetcher, inflight, score,
+- [ ] resolver p2p: wire.rs (done, conformance hashes match), score (done), fetcher, inflight,
   config, engine, ingress, mocks; port mod.rs tests on p2p simulated.
 - [ ] broadcast: lib.rs and buffered (engine, ingress, config, mocks) with its tests.
 - [ ] collector: lib.rs and p2p (engine, wire) with its tests.
@@ -79,3 +80,4 @@ on p2p's simulated network and the deterministic runtime.
 - 2026-11-13: shared `utils.channel.oneshot` (tokio semantics over std.Io), with a model fuzz.
 
 - 2026-11-13: resolver delivery tracker and mock consumer; oneshot recv wakes on close.
+- 2026-11-13: resolver p2p score (throughput weights, commonware test values).
