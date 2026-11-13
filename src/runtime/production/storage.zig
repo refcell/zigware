@@ -13,6 +13,9 @@
 //! instance fsyncs the file before trusting its length (commonware's first-open flush debt).
 //! Writes reach the file at once; `sync` (or `WriteOptions.sync`) makes them durable.
 //!
+//! With `Config.ring`, blob reads, writes, and syncs go through io_uring (commonware
+//! `storage::iouring`); namespace operations and blob creation stay on `std.Io`.
+//!
 //! One `Io.Mutex` serializes namespace operations (open, remove, scan), as commonware's
 //! dispatch lock does. Blob I/O runs without it. A blob has one live handle: a second open
 //! returns `error.BlobAlreadyOpen` until the first closes or the blob is removed. A removed
@@ -21,6 +24,7 @@
 const std = @import("std");
 const iface = @import("../storage.zig");
 const header = @import("../storage/header.zig");
+const ring_mod = @import("ring.zig");
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -39,6 +43,8 @@ pub const Config = struct {
     layouts: iface.LayoutRange = .all,
     /// Layout of new blobs.
     layout: iface.BlobLayout = iface.default_blob_layout,
+    /// Runs blob I/O through io_uring; it must outlive the storage.
+    ring: ?*ring_mod.Ring = null,
 };
 
 pub const Storage = struct {
@@ -325,6 +331,68 @@ fn hex_digit(char: u8) ?u8 {
     };
 }
 
+/// Reads up to `buffer.len` bytes at `offset`, fewer only at the end of the file.
+fn file_read(storage: *const Storage, file: File, buffer: []u8, offset: u64) Error!usize {
+    const ring = storage.config.ring orelse
+        return file.readPositionalAll(storage.io, buffer, offset) catch error.ReadFailed;
+    var done: usize = 0;
+    while (done < buffer.len) {
+        const result = try ring_perform(ring, .{ .read = .{
+            .fd = file.handle,
+            .buffer = buffer[done..],
+            .offset = offset + done,
+        } }) orelse continue;
+        if (result.failed) return error.ReadFailed;
+        if (result.count == 0) break;
+        done += result.count;
+    }
+    assert(done <= buffer.len);
+    return done;
+}
+
+fn file_write(storage: *const Storage, file: File, bytes: []const u8, offset: u64) Error!void {
+    const ring = storage.config.ring orelse
+        return file.writePositionalAll(storage.io, bytes, offset) catch error.WriteFailed;
+    var done: usize = 0;
+    while (done < bytes.len) {
+        const result = try ring_perform(ring, .{ .write = .{
+            .fd = file.handle,
+            .bytes = bytes[done..],
+            .offset = offset + done,
+        } }) orelse continue;
+        if (result.failed or result.count == 0) return error.WriteFailed;
+        done += result.count;
+    }
+    assert(done == bytes.len);
+}
+
+fn file_sync(storage: *const Storage, file: File) Error!void {
+    const ring = storage.config.ring orelse
+        return file.sync(storage.io) catch error.BlobSyncFailed;
+    while (true) {
+        const result = try ring_perform(ring, .{ .fsync = .{ .fd = file.handle } }) orelse
+            continue;
+        if (result.failed) return error.BlobSyncFailed;
+        assert(result.count == 0);
+        return;
+    }
+}
+
+const RingResult = struct { count: usize, failed: bool };
+
+/// One ring operation: its count, a failure, or null for an interrupted call to retry.
+fn ring_perform(ring: *ring_mod.Ring, operation: ring_mod.Operation) Error!?RingResult {
+    const result = ring.perform(operation, .none) catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        error.Timeout => unreachable, // No timeout was given.
+    };
+    if (result >= 0) return .{ .count = @intCast(result), .failed = false };
+    return switch (ring_mod.errno(result)) {
+        .INTR, .AGAIN => null,
+        else => .{ .count = 0, .failed = true },
+    };
+}
+
 /// Makes a directory's entries durable (commonware `sync_dir`).
 fn sync_dir(io: Io, dir: Dir) Error!void {
     // A directory opened without `iterate` is an `O_PATH` handle on Linux, which cannot be
@@ -411,8 +479,7 @@ pub const Blob = struct {
         _ = options; // `dont_cache` is a hint; std.Io has no per-read cache control.
         const start = try self.raw_offset(offset, buffer.len);
         if (buffer.len == 0) return;
-        const io = self.storage.io;
-        const read = self.file.readPositionalAll(io, buffer, start) catch return error.ReadFailed;
+        const read = try file_read(self.storage, self.file, buffer, start);
         if (read < buffer.len) return error.BlobInsufficientLength;
         assert(read == buffer.len);
     }
@@ -427,13 +494,12 @@ pub const Blob = struct {
         for (chunks) |chunk| total += chunk.len;
         var position = try self.raw_offset(offset, total);
         if (total == 0) return;
-        const io = self.storage.io;
         for (chunks) |chunk| {
-            self.file.writePositionalAll(io, chunk, position) catch return error.WriteFailed;
+            try file_write(self.storage, self.file, chunk, position);
             position += chunk.len;
         }
         assert(position == self.data_offset + offset + total);
-        if (options.sync) self.file.sync(io) catch return error.BlobSyncFailed;
+        if (options.sync) try file_sync(self.storage, self.file);
     }
 
     pub fn resize(self: *Blob, length: u64) Error!void {
@@ -442,7 +508,7 @@ pub const Blob = struct {
     }
 
     pub fn sync(self: *Blob) Error!void {
-        self.file.sync(self.storage.io) catch return error.BlobSyncFailed;
+        try file_sync(self.storage, self.file);
     }
 
     /// Releases the handle without syncing.

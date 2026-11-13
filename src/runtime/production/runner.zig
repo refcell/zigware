@@ -3,7 +3,9 @@
 //! `std.Io.Threaded`, file storage under a held directory, and TCP.
 //!
 //! `std.Io.Uring` does not compile in Zig 0.17.1, so the runner uses `std.Io.Threaded` on
-//! every platform; see the runtime-telemetry lane file.
+//! every platform; on Linux, `Config.io_uring` moves blob and socket I/O onto our own ring
+//! (commonware's `iouring-storage` and `iouring-network` features). See the runtime-telemetry
+//! lane file.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -13,6 +15,7 @@ const iface = @import("../storage.zig");
 const telemetry = @import("../telemetry/mod.zig");
 const file_storage = @import("storage.zig");
 const tcp_network = @import("network.zig");
+const ring_mod = @import("ring.zig");
 
 pub const Error = iface.Error;
 
@@ -22,6 +25,8 @@ pub const Config = struct {
     storage_directory: []const u8,
     storage: file_storage.Config = .{},
     network: tcp_network.Config = .{},
+    /// Runs storage and network I/O through io_uring (Linux only); null keeps it on `std.Io`.
+    io_uring: ?ring_mod.Config = null,
     /// Threads running tasks besides the caller's; null uses one per logical CPU, less one.
     worker_threads: ?u32 = null,
     thread_stack_size_bytes: usize = std.Thread.SpawnConfig.default_stack_size,
@@ -30,11 +35,16 @@ pub const Config = struct {
         assert(config.storage_directory.len > 0);
         assert(config.thread_stack_size_bytes > 0);
         assert(config.storage.layouts.contains(config.storage.layout));
+        // The runner supplies the ring itself.
+        assert(config.storage.ring == null and config.network.ring == null);
     }
 };
 
 pub const Runner = struct {
     threaded: Io.Threaded,
+    /// Initialized only with `Config.io_uring`.
+    ring: ring_mod.Ring,
+    ring_active: bool,
     file_storage: file_storage.Storage,
     tcp: tcp_network.Network,
     /// The metrics registry. Release every handle before `deinit`.
@@ -50,11 +60,20 @@ pub const Runner = struct {
         });
         errdefer runner.threaded.deinit();
         const runner_io = runner.threaded.io();
+        var storage_config = config.storage;
+        var network_config = config.network;
+        runner.ring_active = config.io_uring != null;
+        if (config.io_uring) |ring_config| {
+            runner.ring.init(runner_io, ring_config) catch return error.Io;
+            storage_config.ring = &runner.ring;
+            network_config.ring = &runner.ring;
+        }
+        errdefer if (runner.ring_active) runner.ring.deinit();
         const root = Io.Dir.cwd().createDirPathOpen(runner_io, config.storage_directory, .{}) catch
             return error.Io;
         errdefer root.close(runner_io);
-        runner.file_storage = try .init(runner_io, gpa, root, config.storage);
-        runner.tcp = .init(gpa, runner_io, config.network);
+        runner.file_storage = try .init(runner_io, gpa, root, storage_config);
+        runner.tcp = .init(gpa, runner_io, network_config);
         runner.metrics_registry = .init(gpa);
         assert(runner.tcp.io.userdata == runner.file_storage.io.userdata);
     }
@@ -64,6 +83,7 @@ pub const Runner = struct {
         runner.metrics_registry.deinit();
         runner.tcp.deinit();
         runner.file_storage.deinit();
+        if (runner.ring_active) runner.ring.deinit();
         runner.threaded.deinit();
         runner.* = undefined;
     }

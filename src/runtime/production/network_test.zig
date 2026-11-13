@@ -2,6 +2,7 @@
 //! (commonware `runtime/src/network/tokio.rs`).
 
 const std = @import("std");
+const build_options = @import("build_options");
 const Io = std.Io;
 const testing = std.testing;
 const network = @import("../network.zig");
@@ -17,7 +18,8 @@ test "tcp network passes the network suite (run_network_tests)" {
     try network.tests.run_network_tests(testing.io, Network, new_network);
 }
 
-test "tcp network passes the stress suite (stress_concurrent_streams)" {
+test "tcp network passes the stress suite (stress_concurrent_streams, slow)" {
+    if (!build_options.slow_tests) return error.SkipZigTest;
     try network.tests.run_network_stress_tests(testing.io, Network, new_network);
 }
 
@@ -158,4 +160,49 @@ test "a dial to a full accept queue times out (test_connect_timeout)" {
     try testing.expectError(error.Timeout, tcp.dial(server.socket.address));
     const elapsed_ms = start.durationTo(now(io)).raw.toMilliseconds();
     try testing.expect(elapsed_ms >= 100 and elapsed_ms < 200);
+}
+
+const Ring = @import("ring.zig").Ring;
+
+/// The ring every io_uring network test shares, or null where io_uring is unavailable.
+var test_ring: Ring = undefined;
+
+fn new_ring_network(io: Io) Network {
+    return .init(testing.allocator, io, .{ .ring = &test_ring });
+}
+
+fn init_test_ring() !void {
+    return @import("ring_test.zig").init_or_skip(&test_ring, .{ .entries = 512 });
+}
+
+test "io_uring tcp network passes the network suite (run_network_tests)" {
+    try init_test_ring();
+    defer test_ring.deinit();
+    try network.tests.run_network_tests(testing.io, Network, new_ring_network);
+}
+
+test "io_uring tcp network passes the stress suite (stress_concurrent_streams, slow)" {
+    if (!build_options.slow_tests) return error.SkipZigTest;
+    try init_test_ring();
+    defer test_ring.deinit();
+    try network.tests.run_network_stress_tests(testing.io, Network, new_ring_network);
+}
+
+test "an io_uring recv of partial data times out (test_read_timeout_with_partial_data)" {
+    try init_test_ring();
+    defer test_ring.deinit();
+    const io = testing.io;
+    var tcp: Network = .init(testing.allocator, io, .{
+        .read_timeout = .fromMilliseconds(100),
+        .ring = &test_ring,
+    });
+    defer tcp.deinit();
+    const listener = try tcp.bind(any_port);
+    defer listener.deinit();
+    var reader = try io.concurrent(accept_and_expect_timeout, .{ io, listener });
+    var connection = try tcp.dial(listener.local_addr());
+    defer connection.deinit();
+    try connection.sink.send(&.{&[_]u8{ 1, 2, 3, 4, 5 }});
+    var accepted = try reader.await(io);
+    defer accepted.deinit();
 }

@@ -3,7 +3,8 @@
 //! Each connection is one socket split into a sink and a stream, as tokio's `into_split`:
 //! closing the sink shuts down the write side, and the socket closes once both halves are
 //! closed. The stream reads through a buffer like tokio's `BufReader`, which `peek` exposes.
-//! Every send, recv, and dial is bounded by its configured timeout (`error.Timeout`).
+//! Every send, recv, and dial is bounded by its configured timeout (`error.Timeout`). With
+//! `Config.ring`, sends and receives go through io_uring (commonware `network::iouring`).
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -12,6 +13,7 @@ const Io = std.Io;
 const net = Io.net;
 const posix = std.posix;
 const network = @import("../network.zig");
+const ring_mod = @import("ring.zig");
 
 const Address = network.Address;
 const Error = network.Error;
@@ -28,6 +30,8 @@ pub const Config = struct {
     write_timeout: Io.Duration = .fromSeconds(60),
     /// The stream's read buffer, which `peek` sees; 0 reads unbuffered.
     read_buffer_size: u32 = 64 * 1024,
+    /// Runs sends and receives through io_uring; it must outlive every connection.
+    ring: ?*ring_mod.Ring = null,
 };
 
 /// The socket both halves share; the last half to close closes it.
@@ -35,6 +39,7 @@ const Shared = struct {
     gpa: Allocator,
     io: Io,
     stream: net.Stream,
+    ring: ?*ring_mod.Ring,
     handles: std.atomic.Value(u8) = .init(2),
 
     fn release(shared: *Shared) void {
@@ -106,17 +111,7 @@ pub const Sink = struct {
                 offset = 0;
                 continue;
             }
-            const rest = bufs[index + 1 ..];
-            const result = operate_until(io, .{ .net_write = .{
-                .socket_handle = sink.shared.stream.socket.handle,
-                .header = bufs[index][offset..],
-                .data = if (rest.len == 0) &.{""} else rest,
-            } }, timeout) catch |err| return switch (err) {
-                error.Canceled => error.Canceled,
-                error.Timeout => error.Timeout,
-                error.ConcurrencyUnavailable => error.SendFailed,
-            };
-            var written = result.net_write catch return error.SendFailed;
+            var written = try sink.write_some(bufs[index][offset..], bufs[index + 1 ..], timeout);
             assert(written > 0);
             // Advance past what was written, buffer by buffer.
             while (written > 0) {
@@ -130,6 +125,29 @@ pub const Sink = struct {
             }
         }
         assert(index == bufs.len);
+    }
+
+    /// One write of `first` and then `rest`, as much as the socket takes.
+    fn write_some(
+        sink: *Sink,
+        first: []const u8,
+        rest: []const []const u8,
+        timeout: Io.Timeout,
+    ) Error!usize {
+        assert(first.len > 0);
+        const shared = sink.shared;
+        const fd = shared.stream.socket.handle;
+        if (shared.ring) |ring| return ring_send(ring, fd, first, rest, timeout);
+        const result = operate_until(shared.io, .{ .net_write = .{
+            .socket_handle = fd,
+            .header = first,
+            .data = if (rest.len == 0) &.{""} else rest,
+        } }, timeout) catch |err| return switch (err) {
+            error.Canceled => error.Canceled,
+            error.Timeout => error.Timeout,
+            error.ConcurrencyUnavailable => error.SendFailed,
+        };
+        return result.net_write catch error.SendFailed;
     }
 
     /// Shut down the write side once; the peer's stream sees the end.
@@ -188,7 +206,9 @@ pub const Stream = struct {
     /// One read into `into`; the end of the stream fails.
     fn read_some(stream: *Stream, into: []u8, timeout: Io.Timeout) Error!usize {
         assert(into.len > 0);
-        const io = stream.shared.io;
+        const shared = stream.shared;
+        if (shared.ring) |ring| return ring_recv(ring, shared.stream.socket.handle, into, timeout);
+        const io = shared.io;
         var data: [1][]u8 = .{into};
         const result = operate_until(io, .{ .net_read = .{
             .socket_handle = stream.shared.stream.socket.handle,
@@ -219,6 +239,68 @@ pub const Stream = struct {
     }
 };
 
+/// Most buffers one ring send carries (as `std.Io.Threaded` does per write).
+const send_iovecs_max = 8;
+
+/// One `sendmsg` of `first` and up to 7 buffers of `rest` through the ring.
+fn ring_send(
+    ring: *ring_mod.Ring,
+    fd: posix.fd_t,
+    first: []const u8,
+    rest: []const []const u8,
+    timeout: Io.Timeout,
+) Error!usize {
+    var iovecs: [send_iovecs_max]posix.iovec_const = undefined;
+    iovecs[0] = .{ .base = first.ptr, .len = first.len };
+    const count = 1 + @min(rest.len, send_iovecs_max - 1);
+    for (iovecs[1..count], rest[0 .. count - 1]) |*iovec, buf| {
+        iovec.* = .{ .base = buf.ptr, .len = buf.len };
+    }
+    const msg: posix.msghdr_const = .{
+        .name = null,
+        .namelen = 0,
+        .iov = &iovecs,
+        .iovlen = @intCast(count),
+        .control = null,
+        .controllen = 0,
+        .flags = 0,
+    };
+    const sent = try ring_perform(ring, .{ .sendmsg = .{ .fd = fd, .msg = &msg } }, timeout) orelse
+        return error.SendFailed;
+    if (sent == 0) return error.SendFailed;
+    return sent;
+}
+
+/// One `recv` into `into` through the ring; the end of the stream fails.
+fn ring_recv(ring: *ring_mod.Ring, fd: posix.fd_t, into: []u8, timeout: Io.Timeout) Error!usize {
+    const read = try ring_perform(ring, .{ .recv = .{ .fd = fd, .buffer = into } }, timeout) orelse
+        return error.RecvFailed;
+    if (read == 0) return error.RecvFailed;
+    assert(read <= into.len);
+    return read;
+}
+
+/// Runs a ring operation, retrying interrupted ones: its count, or null if it failed.
+fn ring_perform(
+    ring: *ring_mod.Ring,
+    operation: ring_mod.Operation,
+    timeout: Io.Timeout,
+) Error!?usize {
+    var attempts: u32 = 0;
+    while (true) : (attempts += 1) {
+        assert(attempts < 1024); // Interrupts do not repeat without end.
+        const result = ring.perform(operation, timeout) catch |err| return switch (err) {
+            error.Canceled => error.Canceled,
+            error.Timeout => error.Timeout,
+        };
+        if (result >= 0) return @intCast(result);
+        switch (ring_mod.errno(result)) {
+            .INTR, .AGAIN => continue,
+            else => return null,
+        }
+    }
+}
+
 /// Splits a connected socket into its two halves, applying the socket options.
 fn split(gpa: Allocator, io: Io, config: *const Config, stream: net.Stream) Error!Halves {
     errdefer stream.close(io);
@@ -226,7 +308,7 @@ fn split(gpa: Allocator, io: Io, config: *const Config, stream: net.Stream) Erro
     const shared = try gpa.create(Shared);
     errdefer gpa.destroy(shared);
     const buffer = try gpa.alloc(u8, config.read_buffer_size);
-    shared.* = .{ .gpa = gpa, .io = io, .stream = stream };
+    shared.* = .{ .gpa = gpa, .io = io, .stream = stream, .ring = config.ring };
     assert(shared.handles.load(.monotonic) == 2);
     return .{
         .sink = .{ .shared = shared, .write_timeout_ns = nanoseconds(config.write_timeout) },

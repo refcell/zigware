@@ -88,14 +88,30 @@ the registry API first and report it.
   Sinks and streams keep their timeouts as `u64` nanoseconds for this reason.
 - `production.Runner` owns its `std.Io.Threaded`, initializes in place (storage and network
   hold its `Io`), and `start` runs the root function on the calling thread.
+- io_uring (`production/ring.zig`) is a driver, not an executor: tasks stay on `std.Io`, and
+  blob read/write/fsync and socket recv/sendmsg go through one ring. Submitters push under a
+  mutex and wait on an `Io.Event`; one reaper thread wakes them. A canceled or timed-out
+  waiter submits `ASYNC_CANCEL` and waits for both completions, so its buffers outlive the
+  kernel's use. Operations use at most half the queue, so a cancellation always fits and the
+  completion queue never overflows. Commonware's iouring executor (its own task scheduler on
+  the ring thread) is not ported. `Config.io_uring` (off by default, like commonware's
+  `iouring-*` features) turns it on in the runner.
+- io_uring tests skip when the kernel cannot give a ring: unsupported, or `io_uring_setup`
+  fails with ENOMEM because the user's locked-memory limit (shared by all of the user's
+  processes, 8 MiB by default) is used up by other rings on the machine.
+- The production network stress tests run only with `-Dslow-tests` (commonware's
+  `test_group("slow")`). Over the ring the stress test is about 20 times slower than over
+  `std.Io.Threaded` (a submit syscall under the mutex plus a cross-thread wakeup per
+  operation); SQPOLL or batched submission would close that gap.
 
 ## Backlog
 - [x] production runtime over `std.Io`: a `Runner` with the same surface as
   `deterministic.Runner` (io, storage, network, metrics), file-backed `runtime.storage`, and
   TCP `runtime.network`, passing `run_storage_tests`, `run_network_tests`, the network stress
   suite, and tokio's own storage and network tests.
-- [ ] Our own io_uring backend (`std.os.linux.IoUring`) behind the same storage and network,
-  since `std.Io.Uring` does not compile; run on Linux through `just test-linux` / CI.
+- [x] Our own io_uring backend (`std.os.linux.IoUring`) behind the same storage and network,
+  since `std.Io.Uring` does not compile, passing `run_storage_tests` and `run_network_tests`.
+- [ ] io_uring throughput: SQPOLL or batched submission, measured with the stress test.
 - [ ] Executor-side `runtime_tasks_*` metrics, if the runtime lane hands them over.
 - [x] metrics registry: counters, gauges, histograms (bucket layout as commonware), label
   sets, families, registration/scoping by component label, and Prometheus text exposition
@@ -120,3 +136,4 @@ the registry API first and report it.
 - 2026-11-13: production file storage passes `run_storage_tests` plus tokio's file tests.
 - 2026-11-13: production TCP passes `run_network_tests`, the stress suite, and tokio's network
   tests; `production.Runner` ties io, file storage, TCP, and metrics together.
+- 2026-11-13: io_uring driver; storage and TCP pass their suites over it; `Config.io_uring`.

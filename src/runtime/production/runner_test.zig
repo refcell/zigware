@@ -65,17 +65,33 @@ fn second_run(runner: *Runner) !void {
     try testing.expectEqualStrings("durable", &contents);
 }
 
-test "the production runner serves storage, tcp, and metrics, and storage survives restart" {
+fn run_twice(io_uring: ?@import("ring.zig").Config) !void {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
     var path_buffer: [64]u8 = undefined;
     const path = storage_directory(&path_buffer, &tmp);
     var runner: Runner = undefined;
-    try runner.init(testing.allocator, .{ .storage_directory = path, .worker_threads = 4 });
+    try runner.init(testing.allocator, .{
+        .storage_directory = path,
+        .worker_threads = 4,
+        .io_uring = io_uring,
+    });
     try runner.start(first_run, .{&runner});
     runner.deinit();
 
-    try runner.init(testing.allocator, .{ .storage_directory = path });
+    try runner.init(testing.allocator, .{ .storage_directory = path, .io_uring = io_uring });
     defer runner.deinit();
     try runner.start(second_run, .{&runner});
+}
+
+test "the production runner serves storage, tcp, and metrics, and storage survives restart" {
+    try run_twice(null);
+}
+
+test "the production runner does the same over io_uring" {
+    // Skip where the kernel cannot give a ring (the runner reports that as `error.Io`).
+    var probe: @import("ring.zig").Ring = undefined;
+    try @import("ring_test.zig").init_or_skip(&probe, .{ .entries = 64 });
+    probe.deinit();
+    try run_twice(.{ .entries = 64 });
 }

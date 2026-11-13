@@ -20,6 +20,47 @@ test "file storage passes the storage suite (run_storage_tests)" {
     try iface.tests.run_storage_tests(io, gpa, storage.storage());
 }
 
+const Ring = @import("ring.zig").Ring;
+
+fn init_ring(ring: *Ring) !void {
+    return @import("ring_test.zig").init_or_skip(ring, .{ .entries = 64 });
+}
+
+test "io_uring file storage passes the storage suite (run_storage_tests)" {
+    var ring: Ring = undefined;
+    try init_ring(&ring);
+    defer ring.deinit();
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.createDirPathOpen(io, "suite", .{});
+    var storage = try file_storage.Storage.init(io, gpa, root, .{ .ring = &ring });
+    defer storage.deinit();
+    try iface.tests.run_storage_tests(io, gpa, storage.storage());
+}
+
+test "io_uring writes persist across storage instances" {
+    var ring: Ring = undefined;
+    try init_ring(&ring);
+    defer ring.deinit();
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    for (0..2) |run| {
+        const root = try tmp.dir.createDirPathOpen(io, "root", .{});
+        var storage = try file_storage.Storage.init(io, gpa, root, .{ .ring = &ring });
+        defer storage.deinit();
+        const opened = try storage.storage().open("partition", "blob");
+        defer opened.blob.close();
+        if (run == 0) {
+            try opened.blob.write_at(0, "through the ring", .{ .sync = true });
+            continue;
+        }
+        var contents: ["through the ring".len]u8 = undefined;
+        try opened.blob.read_at(0, &contents);
+        try testing.expectEqualStrings("through the ring", &contents);
+        try testing.expectError(error.BlobInsufficientLength, opened.blob.read_at(1, &contents));
+    }
+}
+
 const header = @import("../storage/header.zig");
 
 fn read_raw(tmp: *testing.TmpDir, path: []const u8) ![]u8 {
