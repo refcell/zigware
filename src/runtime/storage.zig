@@ -28,6 +28,8 @@ const std = @import("std");
 const assert = std.debug.assert;
 
 pub const header = @import("storage/header.zig");
+pub const memory = @import("storage/memory.zig");
+pub const tests = @import("storage/tests.zig");
 
 pub const Error = error{
     PartitionNameInvalid,
@@ -285,4 +287,6 @@ test "options are single bits" {
 
 test {
     _ = header;
+    _ = memory;
+    _ = @import("storage/memory_test.zig");
 }
