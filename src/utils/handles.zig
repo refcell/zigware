@@ -179,6 +179,19 @@ pub fn Table(comptime H: type) type {
             assert(self.len <= self.capacity());
         }
 
+        /// Inserts `handle` under `hash` without growing; asserts there is room.
+        pub fn insert_assume_capacity(self: *Self, hash: u64, handle: H) void {
+            assert(self.len < self.capacity());
+            self.place(hash, handle);
+            self.len += 1;
+        }
+
+        /// Removes every entry, keeping the slots.
+        pub fn clear(self: *Self) void {
+            for (self.slots) |*slot| slot.meta = EMPTY;
+            self.len = 0;
+        }
+
         pub const Found = struct { handle: H, inserted: bool };
 
         /// The first candidate for `hash` that `matcher.matches` accepts, or else `handle`,

@@ -52,6 +52,11 @@ encoding parts as soon as `codec` has its core API (see docs/lanes/codec.md).
   `clone`, `acknowledge` (consumes), `deinit` (drop = cancel)); `Exact.Waiter` (`wait()` ->
   `error.AcknowledgementCanceled` when a handle was dropped, `poll()` = `now_or_never`,
   `deinit`); `assert_acknowledgement(T)` checks the interface. Runs on any `std.Io`.
+- `utils.Cache(K, V)` (`utils.cache`): Clock2Q+ cache (`init(gpa, capacity)` allocates
+  everything; `get`/`get_at`/`get_mut`/`peek`/`contains`, `put` (returns the replaced value),
+  `get_or_insert_with(key, factory)`, `try_get_or_insert_with`, `get_or_insert_mut` ->
+  `{ slot, value }`, `remove`, `retain(predicate)`, `clear`, `prefill(factory)`). Factories
+  declare `make()`, predicates `keep(key, *const V)`; dropped keys/values go to `discard`.
 - `utils.Hostname` (`utils.hostname`): validated RFC 1035/1123 hostname stored inline
   (`init`, `literal`, `as_str`, `eql`, `order`, `{f}`, `len_max`, `label_len_max`,
   `max_encode_size` = 258), codec as a `RangeCfg(..=253)` byte string; `hostname.Error`.
@@ -91,7 +96,8 @@ encoding parts as soon as `codec` has its core API (see docs/lanes/codec.md).
 - [x] utils bitmap: BitMap, prunable, historical, roaring (containers, Bitmap, Prunable, ops,
   fuzz Plan); codec encodings identical, all bitmap conformance hashes match.
 - [x] utils ordered (Set/Map/BiMap/Quorum) with conformance hashes.
-- [ ] utils cache (Clock2Q+) (done: priority_set (from the resolver lane, audited), acknowledgement),
+- [ ] utils cache model fuzz + colliding-key tests (done: priority_set (resolver lane, audited),
+  acknowledgement, cache with its unit tests),
   channel (bounded mpsc, ring, reservation, tracked; keep broadcast-resolver's oneshot.zig) — channels over `std.Io` primitives.
 - [x] utils handles (`Table`, `partition`), requested by storage-merkle.
 - [ ] Fuzz targets for every decoder (commonware utils/fuzz).
@@ -120,3 +126,4 @@ encoding parts as soon as `codec` has its core API (see docs/lanes/codec.md).
 - 2026-11-13: handles `Table` (Robin Hood multimap of hashes to handles) and `partition`,
   with all handles.rs tests; Rust closures are `rehash_context`/`matcher` parameters.
 - 2026-11-13: acknowledgement Exact with its tests, a concurrent waiter test, and the ack fuzz.
+- 2026-11-13: Clock2Q+ Cache over handles.Table, with the cache.rs unit tests and invariants.

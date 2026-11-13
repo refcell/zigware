@@ -40,6 +40,9 @@ pub const handles = @import("handles.zig");
 
 pub const acknowledgement = @import("acknowledgement.zig");
 
+pub const cache = @import("cache.zig");
+pub const Cache = cache.Cache;
+
 pub const channel = @import("channel/mod.zig");
 
 pub const sampling = @import("sampling.zig");
