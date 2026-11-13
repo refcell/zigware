@@ -27,7 +27,7 @@ time, files, and network: build on it rather than around it where it fits.
 - [ ] Port remaining deterministic.rs tests.
 - [ ] iobuf (IoBuf/IoBufs pooled buffers) and utils (buffer pools, handle, signal,
   supervision).
-- [ ] production runtime over `std.Io` (io_uring on Linux, kqueue on macOS): network and
+- [ ] (moved to the runtime-telemetry lane) production runtime over `std.Io` (io_uring on Linux, kqueue on macOS): network and
   storage. Linux tests via `just test-linux`.
 - Telemetry (`src/runtime/telemetry/`, metrics registry and traces) moved to the
   runtime-telemetry lane. `src/runtime/buffer/` belongs to storage-journal.

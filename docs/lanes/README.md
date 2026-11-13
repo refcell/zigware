@@ -12,14 +12,14 @@ appends a short dated log line after each push. Other lanes read it to find inte
 | parallel | parallel.md | `src/{parallel,allocator,bench}` | 2 |
 | crypto | crypto.md | `src/cryptography` except `bls12381/`, `reed_solomon/` | 1 |
 | bls-math | bls-math.md | `src/{math,simd}`, `src/cryptography/bls12381` | 1 |
-| runtime | runtime.md | `src/runtime` except `buffer/`, `telemetry/` | 1 |
+| runtime | runtime.md | `src/runtime` except `buffer/`, `telemetry/`, `production/` | 1 |
 | storage-merkle | storage-merkle.md | `src/storage/{merkle,bitmap,index,rmap}`, `src/storage/translator.zig`, `src/storage/root.zig` | 1 |
 | actor-stream | actor-stream.md | `src/{actor,stream}` (paused: waits on runtime network, metrics, bench) | 2 |
 | storage-journal | storage-journal.md | `src/storage/{journal,metadata,queue}`, `src/runtime/buffer` | 2 |
 | coding | coding.md | `src/coding`, `src/storage/bmt`, `src/cryptography/reed_solomon` (done; benches wait on bench) | 2 |
 | p2p | p2p.md | `src/p2p` | 2 |
 | storage-archive | storage-archive.md | `src/storage/{archive,freezer,ordinal,cache}` | 3 |
-| runtime-telemetry | runtime-telemetry.md | `src/runtime/telemetry` | 3 |
+| runtime-telemetry | runtime-telemetry.md | `src/runtime/telemetry`, `src/runtime/production` | 3 |
 | broadcast-resolver | broadcast-resolver.md | `src/{broadcast,resolver,collector}` | 3 |
 | examples-estimator | examples-estimator.md | `examples/estimator` | 3 |
 | consensus-simplex | consensus-simplex.md | `src/consensus` except `marshal/`, `aggregation/` | 3 |

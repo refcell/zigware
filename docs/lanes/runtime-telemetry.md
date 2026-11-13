@@ -1,6 +1,8 @@
 # Lane: runtime-telemetry
 
-Owns `src/runtime/telemetry/` (split off the runtime lane). Add `pub const telemetry` to
+Owns `src/runtime/telemetry/` (split off the runtime lane) and, since its telemetry backlog
+finished, the production runtime: `src/runtime/production/` (commonware's `iouring/`,
+`tokio/`, `storage/iouring.rs`, `storage/tokio`, `network/iouring.rs`, `network/tokio.rs`). Add `pub const telemetry` to
 `src/runtime/root.zig` (additive edit).
 
 Reference: `~/.cache/zigware/commonware-ref/runtime/src/telemetry` (metrics: registry,
@@ -59,6 +61,13 @@ the registry API first and report it.
   span so tests can check it.
 
 ## Backlog
+- [ ] production runtime over `std.Io` (`std.Io.Uring` on Linux, kqueue/Threaded on macOS):
+  a `Runner` with the same surface as `deterministic.Runner` (io, storage, network, metrics),
+  file-backed `runtime.storage` (blob header, sync semantics, partitions as directories),
+  and TCP `runtime.network` (bind/accept/dial returning the same sink/stream contract).
+  Run the ported `run_storage_tests` and `run_network_tests` suites against it; Linux
+  io_uring through `just test-linux` / CI, kqueue on macOS CI.
+- [ ] Executor-side `runtime_tasks_*` metrics, if the runtime lane hands them over.
 - [x] metrics registry: counters, gauges, histograms (bucket layout as commonware), label
   sets, families, registration/scoping by component label, and Prometheus text exposition
   byte-identical to commonware's output for the same metrics. No allocation on the record
