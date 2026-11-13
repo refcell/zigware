@@ -21,6 +21,12 @@ handshake and the runtime's network, which the actor-stream and runtime lanes ar
 - `p2p.Quota` (`per_second`, `per_minute`, `per_hour`, `with_period`, `allow_burst`,
   `burst_size`) and `p2p.KeyedRateLimiter(K)` (`check_key` returns null or the earliest
   `SystemTime`, `retain_recent`): governor 0.10's keyed GCRA, step for step.
+- `p2p.utils.LimitedSender(S, C)` (`init(gpa, io, sender, quota, connected)`, `clone`,
+  `deinit`, `check(recipients) !Check(Checked)`), `p2p.utils.CheckedSender(S)`
+  (`recipients`, `send(parts, priority)`, `into_inner`, `deinit`), `filter_rate_limited`,
+  and `p2p.utils.Watch(T)` (latest-value channel: `publish`, `close`, `subscribe`,
+  `Subscription.try_recv(gpa)`).
+- Senders take a message as parts (`[]const []const u8`, concatenated), like stream frames.
 
 ## Decisions
 - `Hostname` and `is_global` live in `p2p/types.zig` until the utils lane ports
@@ -32,6 +38,9 @@ handshake and the runtime's network, which the actor-stream and runtime lanes ar
 - `Quota`/`KeyedRateLimiter` (commonware re-exports them from governor via runtime) live in
   `p2p/rate_limit.zig` until the runtime lane takes them; keys sit in a sorted array so the
   limiter is deterministic and needs no hashing of public keys.
+- `utils.Watch` stands in for `channel::ring` with capacity 1 (the only way p2p uses it)
+  until the utils lane ports channels. Values are owned copies on both sides.
+- A `CheckedSender` that is never sent must be released with `deinit` (Rust drops it).
 - p2p carries its own seeded fuzz driver (`p2p.fuzz.run`, same as codec's) until
   `invariants.minifuzz` lands.
 
@@ -39,7 +48,9 @@ handshake and the runtime's network, which the actor-stream and runtime lanes ar
 - [x] types.rs, sizing.rs, lib.rs traits (`Sender`, `Receiver`, `Blocker`, `Manager`,
   `Recipients`, channels) as comptime interfaces; Ingress/Address conformance; decode fuzz.
 - [x] Rate limiter: `Quota` and governor's keyed GCRA (`rate_limit.zig`).
-- [ ] utils: codec (wrapped sender/receiver), limited, mux (channel multiplexing), mocks.
+- [x] utils: limited (`LimitedSender`, `CheckedSender`) with its tests.
+- [ ] utils: codec (wrapped sender/receiver), mux (channel multiplexing), mocks,
+  `StaticProvider`.
 - [ ] simulated: network with links (latency, jitter, success rate), bandwidth limits,
   transmitter scheduling, partitions, peer sets, Byzantine blocking. Port its tests; it is
   the test bed for broadcast, resolver, and consensus, so keep it deterministic per seed.
@@ -51,3 +62,4 @@ handshake and the runtime's network, which the actor-stream and runtime lanes ar
 - 2026-11-13: lib.rs types and interface checks, types.rs (Ingress, Address, Hostname,
   is_global) with commonware conformance hashes, sizing.rs, decode-canonical fuzz.
 - 2026-11-13: Quota and KeyedRateLimiter (governor GCRA port).
+- 2026-11-13: utils.limited (LimitedSender, CheckedSender) and utils.Watch.

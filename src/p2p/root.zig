@@ -22,7 +22,7 @@ const std = @import("std");
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const codec = @import("codec");
-const utils = @import("utils");
+const utils_pkg = @import("utils");
 const actor = @import("actor");
 
 pub const types = @import("types.zig");
@@ -32,6 +32,7 @@ pub const Hostname = types.Hostname;
 pub const sizing = @import("sizing.zig");
 pub const max_message_size = sizing.max_message_size;
 pub const fuzz = @import("fuzz.zig");
+pub const utils = @import("utils/mod.zig");
 pub const rate_limit = @import("rate_limit.zig");
 pub const Quota = rate_limit.Quota;
 pub const KeyedRateLimiter = rate_limit.KeyedRateLimiter;
@@ -107,7 +108,7 @@ pub fn Recipients(comptime P: type) type {
 pub fn Check(comptime Checked: type) type {
     return union(enum) {
         checked: Checked,
-        limited: utils.SystemTime,
+        limited: utils_pkg.SystemTime,
     };
 }
 
@@ -212,6 +213,7 @@ test {
     _ = types;
     _ = sizing;
     _ = rate_limit;
+    _ = utils;
 }
 
 test "recipient unions (recipient_unions)" {
