@@ -25,7 +25,12 @@ resize, sync), `runtime.storage`, with the in-memory backend `runtime.storage.me
 - [x] journal/segmented: glob (CRC-trailed values located by an external index) with its
   `Recovery` and ported tests.
 - [ ] journal/segmented: oversized journal.
-- [ ] journal/contiguous: fixed and variable contiguous journals.
+- [x] journal/contiguous: fixed journal (checkpoint, blob partition, recovery with watermark
+  and clear intent, bounded open, `init_at_size`, `clear_to_size`, replay batches) with the
+  shared contiguous suite and the checkpoint tests.
+- [ ] journal/contiguous: port the rest of fixed.rs's own tests (recovery faults, torn pages,
+  legacy partitions, clear crash scenarios, read_many accounting).
+- [ ] journal/contiguous: variable journal.
 - [ ] journal/authenticated.rs.
 - [x] metadata (two-blob atomic key-value store).
 - [ ] metadata: `start_sync` (pipelined syncs), conformance hash (`MetadataWorkload`), and
@@ -80,6 +85,17 @@ resize, sync), `runtime.storage`, with the in-memory backend `runtime.storage.me
   `truncate_sections`, `size`, `sections`, `sync`, `remove_section`, `finish`, `deinit`),
   `Config(V)`, `checksum_size`, and the test helper `corrupt_frame`. The manager gained
   `truncate_pending_sections([]const SectionSize)` and `section_iterator`.
+- `storage.journal.contiguous`: `Bounds{start, end}`, `position_to_blob`,
+  `blob_first_position`, `blob_end_position`, `batch_count_to_blob_boundary`;
+  `checkpoint.Checkpoint`; `blobs` (`Partition`, `select`, `Writable`).
+- `storage.journal.contiguous.fixed`: `Journal(A)` with `init`, `init_at_most`,
+  `init_at_size`, `deinit`, `size`, `get_bounds`, `pruning_boundary`, `append`, `append_many`,
+  `append_many_nested`, `prepare_append`/`append_prepared`, `commit`, `start_sync`, `sync`,
+  `prune`, `read`, `read_many`, `try_read_sync`, `try_read_many_sync`, `replay(range,
+  buffer)` (a `Replay` yielding `Batch{start, items}`), `clear_to_size`,
+  `stage_clear_intent`, `destroy`; the `Backing` entry points `recover`, `clear`, `span`
+  returning `Recovery(A)` (`size`, `pruning_boundary`, `recovery_watermark`, `item`,
+  `append`, `truncate`, `sync`, `prune`, `clear_to_size`, `publish`, `deinit`); `Config`.
 - `storage.metadata`: `Metadata(K, V)` with `init`, `deinit`, `get`, `get_mut`,
   `put`, `put_sync`, `upsert`, `remove`, `clear`, `retain`, `items`, `count`, `sync`,
   `destroy`; `Config(V)`.
@@ -150,6 +166,13 @@ resize, sync), `runtime.storage`, with the in-memory backend `runtime.storage.me
   unsynced replacement by writing its bytes into the durable raw blob before reopening, since
   the memory backend drops every unsynced write at `crash()`.
 
+- contiguous fixed: syncs complete synchronously, so `start_sync` advances the watermark to
+  the current size (commonware advances it to the last observed sync), sealed blobs are
+  fully synced paged writers (no `Sealed` views or snapshots; `snapshot` readers are not
+  ported, since nothing runs concurrently with the journal), and `read_many` reads item by item
+  through the page cache. Metrics are plain counters (`items_read`, `cache_hits`,
+  `cache_misses`, blob `synced`/`pruned`).
+
 ## Log
 - 2026-11-13: journal Error, frame encoding/decoding with zstd frames, durability Barrier,
   frame fuzz target.
@@ -167,3 +190,4 @@ resize, sync), `runtime.storage`, with the in-memory backend `runtime.storage.me
   `runtime.buffer.mocks` (recording and mutation faults) and crash with `crash()`.
 - 2026-11-13: buffer `Write` and tip; `Manager` generic over its buffer factory.
 - 2026-11-13: segmented glob with `Recovery` and its ported tests.
+- 2026-11-13: contiguous fixed journal with checkpoint and blob partitions; shared suite.

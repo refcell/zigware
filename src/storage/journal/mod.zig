@@ -13,6 +13,7 @@ pub const frame = @import("frame.zig");
 pub const durability = @import("durability.zig");
 pub const zstd = @import("zstd.zig");
 pub const segmented = @import("segmented/mod.zig");
+pub const contiguous = @import("contiguous/mod.zig");
 
 /// Errors that can occur when interacting with a journal (commonware's `journal::Error`).
 ///
