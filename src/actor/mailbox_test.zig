@@ -1,0 +1,677 @@
+//! Tests for `mailbox.zig`, ported from commonware `actor/src/mailbox.rs`, plus tests on the
+//! deterministic runtime (parked receivers, many producers, replay) and a seeded fuzz.
+
+const std = @import("std");
+const assert = std.debug.assert;
+const testing = std.testing;
+const Allocator = std.mem.Allocator;
+const Io = std.Io;
+const Smith = std.testing.Smith;
+const build_options = @import("build_options");
+const runtime = @import("runtime");
+
+const actor = @import("root.zig");
+const mailbox = @import("mailbox.zig");
+const Feedback = actor.Feedback;
+const U = actor.Unreliable(Feedback);
+
+fn remove_at(comptime T: type, deque: *std.Deque(T), index: usize) void {
+    assert(index < deque.len);
+    var cursor = index;
+    while (cursor + 1 < deque.len) : (cursor += 1) deque.atPtr(cursor).* = deque.at(cursor + 1);
+    _ = deque.popBack();
+}
+
+/// The unreliable policy from commonware's mailbox tests.
+const Message = union(enum) {
+    update: u64,
+    vote: u64,
+    required: u64,
+    buffered: u64,
+    hint: u64,
+
+    pub const Overflow = std.Deque(Message);
+
+    pub fn handle(gpa: Allocator, overflow: *Overflow, message: Message) Allocator.Error!bool {
+        switch (message) {
+            .update => {
+                if (last_update(overflow)) |index| remove_at(Message, overflow, index);
+                try overflow.pushBack(gpa, message);
+            },
+            .required, .buffered => try overflow.pushBack(gpa, message),
+            .hint => {
+                const index = last_update(overflow) orelse return true;
+                remove_at(Message, overflow, index);
+                try overflow.pushBack(gpa, message);
+            },
+            .vote => return false,
+        }
+        return true;
+    }
+
+    fn last_update(overflow: *const Overflow) ?usize {
+        var index = overflow.len;
+        while (index > 0) {
+            index -= 1;
+            if (overflow.at(index) == .update) return index;
+        }
+        return null;
+    }
+};
+
+/// A message owning a responder: the mailbox must `discard` it when it drops it.
+const Ack = struct {
+    dropped: *u32,
+
+    pub const Overflow = std.Deque(Ack);
+
+    pub fn handle(gpa: Allocator, overflow: *Overflow, message: Ack) Allocator.Error!void {
+        try overflow.pushBack(gpa, message);
+    }
+
+    pub fn discard(message: Ack) void {
+        message.dropped.* += 1;
+    }
+};
+
+const ClearingMessage = enum {
+    fill_ready,
+    clear_overflow,
+
+    pub const Overflow = std.Deque(ClearingMessage);
+
+    pub fn handle(gpa: Allocator, overflow: *Overflow, message: ClearingMessage) !void {
+        try overflow.pushBack(gpa, message);
+        while (overflow.popFront()) |_| {}
+    }
+};
+
+const SpillMessage = enum {
+    fill_ready,
+    spill,
+
+    pub const Overflow = std.Deque(SpillMessage);
+
+    pub fn handle(gpa: Allocator, overflow: *Overflow, message: SpillMessage) !void {
+        try overflow.pushBack(gpa, message);
+    }
+};
+
+/// Keeps only the newest overflow message in a fixed slot: a custom `Overflow` with an
+/// infallible policy (like glue's `Option<Message>` overflow).
+const Latest = struct {
+    value: u64,
+
+    pub const Overflow = struct {
+        pending: ?Latest = null,
+
+        pub const empty: Overflow = .{};
+
+        pub fn deinit(overflow: *Overflow, gpa: Allocator) void {
+            _ = gpa;
+            assert(overflow.pending == null);
+        }
+
+        pub fn is_empty(overflow: *const Overflow) bool {
+            return overflow.pending == null;
+        }
+
+        pub fn drain(overflow: *Overflow, pusher: anytype) void {
+            const message = overflow.pending orelse return;
+            overflow.pending = pusher.push(message);
+        }
+    };
+
+    pub fn handle(gpa: Allocator, overflow: *Overflow, message: Latest) void {
+        _ = gpa;
+        overflow.pending = message;
+    }
+};
+
+fn open(comptime T: type, capacity: u32) !mailbox.Pair(T) {
+    return mailbox.new(T, testing.allocator, testing.io, capacity);
+}
+
+fn expect_enqueue(sender: mailbox.Sender(Message), message: Message, expected: U) !void {
+    try testing.expectEqual(expected, try sender.enqueue(message));
+}
+
+fn expect_recv(receiver: *mailbox.Receiver(Message), expected: Message) !void {
+    try testing.expectEqual(@as(?Message, expected), try receiver.recv());
+}
+
+fn expect_try_recv(receiver: *mailbox.Receiver(Message), expected: Message) !void {
+    try testing.expectEqual(expected, try receiver.try_recv());
+}
+
+test "deque overflow drain stops after rejected message" {
+    const gpa = testing.allocator;
+    var overflow: std.Deque(Message) = .empty;
+    defer overflow.deinit(gpa);
+    for ([_]u64{ 1, 2, 3 }) |value| try overflow.pushBack(gpa, .{ .vote = value });
+    var drained: std.ArrayList(Message) = try .initCapacity(gpa, 3);
+    defer drained.deinit(gpa);
+
+    const Pusher = struct {
+        drained: *std.ArrayList(Message),
+
+        pub fn push(pusher: *@This(), message: Message) ?Message {
+            pusher.drained.appendAssumeCapacity(message);
+            if (pusher.drained.items.len == 2) return pusher.drained.pop();
+            return null;
+        }
+    };
+    var pusher: Pusher = .{ .drained = &drained };
+    mailbox.drain_overflow(Message, &overflow, &pusher);
+
+    try testing.expectEqual(@as(usize, 1), drained.items.len);
+    try testing.expectEqual(Message{ .vote = 1 }, drained.items[0]);
+    try testing.expectEqual(@as(usize, 2), overflow.len);
+    try testing.expectEqual(Message{ .vote = 2 }, overflow.at(0));
+    try testing.expectEqual(Message{ .vote = 3 }, overflow.at(1));
+}
+
+test "full inbox replaces stale overflow message" {
+    var pair = try open(Message, 1);
+    defer pair.sender.deinit();
+    defer pair.receiver.deinit();
+    try expect_enqueue(pair.sender, .{ .update = 1 }, .new(.ok));
+    try expect_enqueue(pair.sender, .{ .update = 2 }, .new(.backoff));
+    try expect_enqueue(pair.sender, .{ .update = 3 }, .new(.backoff));
+    try expect_recv(&pair.receiver, .{ .update = 1 });
+    try expect_recv(&pair.receiver, .{ .update = 3 });
+}
+
+test "policy can replace stale overflow at back" {
+    var pair = try open(Message, 1);
+    defer pair.sender.deinit();
+    defer pair.receiver.deinit();
+    try expect_enqueue(pair.sender, .{ .vote = 1 }, .new(.ok));
+    try expect_enqueue(pair.sender, .{ .update = 2 }, .new(.backoff));
+    try expect_enqueue(pair.sender, .{ .required = 3 }, .new(.backoff));
+    try expect_enqueue(pair.sender, .{ .update = 4 }, .new(.backoff));
+    try expect_recv(&pair.receiver, .{ .vote = 1 });
+    try expect_recv(&pair.receiver, .{ .required = 3 });
+    try expect_recv(&pair.receiver, .{ .update = 4 });
+}
+
+test "full inbox rejects non-replaceable message" {
+    var pair = try open(Message, 1);
+    defer pair.sender.deinit();
+    defer pair.receiver.deinit();
+    try expect_enqueue(pair.sender, .{ .vote = 1 }, .new(.ok));
+    try expect_enqueue(pair.sender, .{ .vote = 2 }, .rejected);
+    try expect_recv(&pair.receiver, .{ .vote = 1 });
+    try testing.expectError(error.Empty, pair.receiver.try_recv());
+}
+
+test "full inbox retains required message" {
+    var pair = try open(Message, 1);
+    defer pair.sender.deinit();
+    defer pair.receiver.deinit();
+    try expect_enqueue(pair.sender, .{ .vote = 1 }, .new(.ok));
+    try expect_enqueue(pair.sender, .{ .buffered = 2 }, .new(.backoff));
+    try expect_recv(&pair.receiver, .{ .vote = 1 });
+    try expect_recv(&pair.receiver, .{ .buffered = 2 });
+}
+
+test "try_recv refills from overflow" {
+    var pair = try open(Message, 1);
+    defer pair.sender.deinit();
+    defer pair.receiver.deinit();
+    try expect_enqueue(pair.sender, .{ .vote = 1 }, .new(.ok));
+    try expect_enqueue(pair.sender, .{ .buffered = 2 }, .new(.backoff));
+    try expect_try_recv(&pair.receiver, .{ .vote = 1 });
+    try expect_try_recv(&pair.receiver, .{ .buffered = 2 });
+}
+
+test "backoff metric counts backoff feedback" {
+    var pair = try open(Message, 1);
+    defer pair.sender.deinit();
+    defer pair.receiver.deinit();
+    try expect_enqueue(pair.sender, .{ .vote = 1 }, .new(.ok));
+    try expect_enqueue(pair.sender, .{ .buffered = 2 }, .new(.backoff));
+    try expect_enqueue(pair.sender, .{ .buffered = 3 }, .new(.backoff));
+    try testing.expectEqual(@as(u64, 2), pair.sender.backoff_total());
+    try testing.expectEqual(@as(u64, 2), pair.receiver.backoff_total());
+}
+
+test "unreliable rejected feedback is not accepted or counted as backoff" {
+    var pair = try open(Message, 1);
+    defer pair.sender.deinit();
+    defer pair.receiver.deinit();
+    try expect_enqueue(pair.sender, .{ .vote = 1 }, .new(.ok));
+    const feedback = try pair.sender.enqueue(.{ .vote = 2 });
+    try testing.expectEqual(@as(U, .rejected), feedback);
+    try testing.expect(!feedback.accepted());
+    try testing.expectEqual(@as(u64, 0), pair.sender.backoff_total());
+}
+
+test "receiver drains buffered messages after senders drop" {
+    for ([_]bool{ false, true }) |blocking| {
+        var pair = try open(Message, 1);
+        defer pair.receiver.deinit();
+        try expect_enqueue(pair.sender, .{ .vote = 1 }, .new(.ok));
+        try expect_enqueue(pair.sender, .{ .buffered = 2 }, .new(.backoff));
+        pair.sender.deinit();
+
+        if (blocking) {
+            try expect_recv(&pair.receiver, .{ .vote = 1 });
+            try expect_recv(&pair.receiver, .{ .buffered = 2 });
+            try testing.expectEqual(@as(?Message, null), try pair.receiver.recv());
+        } else {
+            try expect_try_recv(&pair.receiver, .{ .vote = 1 });
+            try expect_try_recv(&pair.receiver, .{ .buffered = 2 });
+            try testing.expectError(error.Disconnected, pair.receiver.try_recv());
+        }
+    }
+}
+
+test "enqueue uses ready capacity after partial drain" {
+    var pair = try open(Message, 2);
+    defer pair.sender.deinit();
+    defer pair.receiver.deinit();
+    try expect_enqueue(pair.sender, .{ .vote = 1 }, .new(.ok));
+    try expect_enqueue(pair.sender, .{ .vote = 2 }, .new(.ok));
+    try expect_enqueue(pair.sender, .{ .required = 3 }, .new(.backoff));
+    try expect_try_recv(&pair.receiver, .{ .vote = 1 });
+    try expect_try_recv(&pair.receiver, .{ .vote = 2 });
+    try expect_enqueue(pair.sender, .{ .vote = 4 }, .new(.ok));
+    try expect_try_recv(&pair.receiver, .{ .required = 3 });
+    try expect_try_recv(&pair.receiver, .{ .vote = 4 });
+}
+
+test "receiver refills overflow after partial drain" {
+    var pair = try open(Message, 3);
+    defer pair.sender.deinit();
+    defer pair.receiver.deinit();
+    try expect_enqueue(pair.sender, .{ .vote = 1 }, .new(.ok));
+    try expect_enqueue(pair.sender, .{ .vote = 2 }, .new(.ok));
+    try expect_enqueue(pair.sender, .{ .vote = 3 }, .new(.ok));
+    try expect_enqueue(pair.sender, .{ .required = 4 }, .new(.backoff));
+    try expect_try_recv(&pair.receiver, .{ .vote = 1 });
+    try expect_try_recv(&pair.receiver, .{ .vote = 2 });
+    try expect_enqueue(pair.sender, .{ .vote = 5 }, .new(.ok));
+    try expect_try_recv(&pair.receiver, .{ .vote = 3 });
+    try expect_try_recv(&pair.receiver, .{ .required = 4 });
+    try expect_try_recv(&pair.receiver, .{ .vote = 5 });
+}
+
+test "full inbox retains unmatched replaceable message" {
+    var pair = try open(Message, 1);
+    defer pair.sender.deinit();
+    defer pair.receiver.deinit();
+    try expect_enqueue(pair.sender, .{ .vote = 1 }, .new(.ok));
+    try expect_enqueue(pair.sender, .{ .required = 2 }, .new(.backoff));
+    try expect_recv(&pair.receiver, .{ .vote = 1 });
+    try expect_recv(&pair.receiver, .{ .required = 2 });
+}
+
+test "full inbox replaces stale overflow after ready fills" {
+    var pair = try open(Message, 2);
+    defer pair.sender.deinit();
+    defer pair.receiver.deinit();
+    try expect_enqueue(pair.sender, .{ .vote = 1 }, .new(.ok));
+    try expect_enqueue(pair.sender, .{ .update = 2 }, .new(.ok));
+    try expect_enqueue(pair.sender, .{ .update = 3 }, .new(.backoff));
+    try expect_enqueue(pair.sender, .{ .update = 4 }, .new(.backoff));
+    try expect_recv(&pair.receiver, .{ .vote = 1 });
+    try expect_recv(&pair.receiver, .{ .update = 2 });
+    try expect_recv(&pair.receiver, .{ .update = 4 });
+}
+
+test "mailbox capacity is a soft limit for required messages" {
+    var pair = try open(Message, 1);
+    defer pair.sender.deinit();
+    defer pair.receiver.deinit();
+    try expect_enqueue(pair.sender, .{ .vote = 1 }, .new(.ok));
+    try expect_enqueue(pair.sender, .{ .required = 2 }, .new(.backoff));
+    try expect_enqueue(pair.sender, .{ .required = 3 }, .new(.backoff));
+    try expect_recv(&pair.receiver, .{ .vote = 1 });
+    try expect_recv(&pair.receiver, .{ .required = 2 });
+    try expect_recv(&pair.receiver, .{ .required = 3 });
+}
+
+test "full inbox drops hint without a stale update" {
+    var pair = try open(Message, 1);
+    defer pair.sender.deinit();
+    defer pair.receiver.deinit();
+    try expect_enqueue(pair.sender, .{ .vote = 1 }, .new(.ok));
+    try expect_enqueue(pair.sender, .{ .hint = 2 }, .new(.backoff));
+    try expect_recv(&pair.receiver, .{ .vote = 1 });
+    try testing.expectError(error.Empty, pair.receiver.try_recv());
+}
+
+test "full inbox can replace or drop by message" {
+    var pair = try open(Message, 1);
+    defer pair.sender.deinit();
+    defer pair.receiver.deinit();
+    try expect_enqueue(pair.sender, .{ .vote = 1 }, .new(.ok));
+    try expect_enqueue(pair.sender, .{ .update = 2 }, .new(.backoff));
+    try expect_enqueue(pair.sender, .{ .hint = 3 }, .new(.backoff));
+    try expect_recv(&pair.receiver, .{ .vote = 1 });
+    try expect_recv(&pair.receiver, .{ .hint = 3 });
+}
+
+test "empty inbox closes when senders drop" {
+    var pair = try open(Message, 1);
+    defer pair.receiver.deinit();
+    pair.sender.deinit();
+    try testing.expectError(error.Disconnected, pair.receiver.try_recv());
+    try testing.expectEqual(@as(?Message, null), try pair.receiver.recv());
+}
+
+test "cloned senders keep the mailbox connected" {
+    var pair = try open(Message, 1);
+    defer pair.receiver.deinit();
+    var clone = pair.sender.clone();
+    pair.sender.deinit();
+    try testing.expectError(error.Empty, pair.receiver.try_recv());
+    try expect_enqueue(clone, .{ .vote = 7 }, .new(.ok));
+    clone.deinit();
+    try expect_try_recv(&pair.receiver, .{ .vote = 7 });
+    try testing.expectError(error.Disconnected, pair.receiver.try_recv());
+}
+
+test "enqueue after receiver drop returns closed" {
+    var pair = try open(Message, 1);
+    defer pair.sender.deinit();
+    pair.receiver.deinit();
+    try testing.expect(pair.sender.is_closed());
+    try expect_enqueue(pair.sender, .{ .vote = 1 }, .new(.closed));
+    try expect_enqueue(pair.sender, .{ .required = 2 }, .new(.closed));
+}
+
+test "receiver drop cancels buffered responders" {
+    var pair = try open(Ack, 1);
+    defer pair.sender.deinit();
+    var dropped: u32 = 0;
+    try testing.expectEqual(Feedback.ok, try pair.sender.enqueue(.{ .dropped = &dropped }));
+    try testing.expectEqual(Feedback.backoff, try pair.sender.enqueue(.{ .dropped = &dropped }));
+    try testing.expectEqual(@as(u32, 0), dropped);
+    pair.receiver.deinit();
+    try testing.expectEqual(@as(u32, 2), dropped);
+    try testing.expectEqual(Feedback.closed, try pair.sender.enqueue(.{ .dropped = &dropped }));
+    try testing.expectEqual(@as(u32, 3), dropped);
+}
+
+test "policy can clear overflow and request backoff" {
+    var pair = try open(ClearingMessage, 1);
+    defer pair.sender.deinit();
+    defer pair.receiver.deinit();
+    try testing.expectEqual(Feedback.ok, try pair.sender.enqueue(.fill_ready));
+    try testing.expectEqual(Feedback.backoff, try pair.sender.enqueue(.clear_overflow));
+    try testing.expectEqual(ClearingMessage.fill_ready, try pair.receiver.try_recv());
+    try testing.expectError(error.Empty, pair.receiver.try_recv());
+}
+
+test "custom overflow with an infallible policy" {
+    var pair = try open(Latest, 1);
+    defer pair.sender.deinit();
+    defer pair.receiver.deinit();
+    // `handle` cannot fail, so `enqueue` returns plain feedback.
+    try testing.expectEqual(Feedback.ok, pair.sender.enqueue(.{ .value = 1 }));
+    try testing.expectEqual(Feedback.backoff, pair.sender.enqueue(.{ .value = 2 }));
+    try testing.expectEqual(Feedback.backoff, pair.sender.enqueue(.{ .value = 3 }));
+    try testing.expectEqual(@as(u64, 1), (try pair.receiver.try_recv()).value);
+    try testing.expectEqual(@as(u64, 3), (try pair.receiver.try_recv()).value);
+    try testing.expectError(error.Empty, pair.receiver.try_recv());
+}
+
+/// Holds a sender of its own mailbox, forming a cycle the receiver's close must break.
+const CyclicMessage = struct {
+    sender: mailbox.Sender(CyclicMessage),
+    drops: *u32,
+
+    pub const Overflow = std.Deque(CyclicMessage);
+
+    pub fn handle(gpa: Allocator, overflow: *Overflow, message: CyclicMessage) !void {
+        try overflow.pushBack(gpa, message);
+    }
+
+    pub fn discard(message: CyclicMessage) void {
+        var sender = message.sender;
+        sender.deinit();
+        message.drops.* += 1;
+    }
+};
+
+test "receiver drop breaks message sender cycle" {
+    var pair = try open(CyclicMessage, 1);
+    defer pair.sender.deinit();
+    var drops: u32 = 0;
+    const sender = pair.sender;
+    try testing.expectEqual(
+        Feedback.ok,
+        try sender.enqueue(.{ .sender = sender.clone(), .drops = &drops }),
+    );
+    try testing.expectEqual(
+        Feedback.backoff,
+        try sender.enqueue(.{ .sender = sender.clone(), .drops = &drops }),
+    );
+    pair.receiver.deinit();
+    try testing.expectEqual(@as(u32, 2), drops);
+    try testing.expectEqual(
+        Feedback.closed,
+        try sender.enqueue(.{ .sender = sender.clone(), .drops = &drops }),
+    );
+    try testing.expectEqual(@as(u32, 3), drops);
+}
+
+// Deterministic runtime: parked receivers and many producers.
+
+fn run_deterministic(comptime function: fn (Io) anyerror!void) !void {
+    var runner = try runtime.deterministic.Runner.init(testing.allocator, .{});
+    defer runner.deinit();
+    try (try runner.start(function, .{runner.io()}));
+}
+
+fn recv_flagged(comptime T: type) fn (*mailbox.Receiver(T), *bool) Io.Cancelable!?T {
+    return struct {
+        fn run(receiver: *mailbox.Receiver(T), received: *bool) Io.Cancelable!?T {
+            const message = try receiver.recv();
+            received.* = true;
+            return message;
+        }
+    }.run;
+}
+
+test "empty inbox wakes on enqueue" {
+    const Root = struct {
+        fn run(io: Io) !void {
+            var pair = try mailbox.new(Message, testing.allocator, io, 1);
+            defer pair.sender.deinit();
+            defer pair.receiver.deinit();
+            var received = false;
+            var future = try io.concurrent(recv_flagged(Message), .{ &pair.receiver, &received });
+            try io.sleep(.fromMilliseconds(5), .awake);
+            try testing.expect(!received);
+            try expect_enqueue(pair.sender, .{ .vote = 1 }, .new(.ok));
+            try testing.expectEqual(@as(?Message, .{ .vote = 1 }), try future.await(io));
+            try testing.expect(received);
+        }
+    };
+    try run_deterministic(Root.run);
+}
+
+test "pending recv wakes when senders drop" {
+    const Root = struct {
+        fn run(io: Io) !void {
+            var pair = try mailbox.new(Message, testing.allocator, io, 1);
+            defer pair.receiver.deinit();
+            var received = false;
+            var future = try io.concurrent(recv_flagged(Message), .{ &pair.receiver, &received });
+            try io.sleep(.fromMilliseconds(5), .awake);
+            try testing.expect(!received);
+            pair.sender.deinit();
+            try testing.expectEqual(@as(?Message, null), try future.await(io));
+        }
+    };
+    try run_deterministic(Root.run);
+}
+
+/// The receiver parks, ready is primed without a wake, then an overflow enqueue must wake it.
+fn expect_overflow_wakes(comptime T: type, io: Io, fill: T, spill: T) !void {
+    var pair = try mailbox.new(T, testing.allocator, io, 1);
+    defer pair.sender.deinit();
+    defer pair.receiver.deinit();
+    var received = false;
+    var future = try io.concurrent(recv_flagged(T), .{ &pair.receiver, &received });
+    try io.sleep(.fromMilliseconds(5), .awake);
+    try testing.expect(!received);
+
+    // Prime ready directly to isolate the overflow wake (single-threaded runtime).
+    pair.sender.state.ready.pushBackAssumeCapacity(fill);
+    try io.sleep(.fromMilliseconds(5), .awake);
+    try testing.expect(!received);
+
+    const feedback = try pair.sender.enqueue(spill);
+    if (comptime mailbox.is_unreliable(T)) {
+        try testing.expectEqual(U.new(.backoff), feedback);
+    } else {
+        try testing.expectEqual(Feedback.backoff, feedback);
+    }
+    try testing.expectEqual(@as(?T, fill), try future.await(io));
+    try testing.expectEqual(spill, try pair.receiver.try_recv());
+}
+
+test "pending recv wakes on handled overflow enqueue" {
+    const Root = struct {
+        fn run(io: Io) !void {
+            try expect_overflow_wakes(Message, io, .{ .vote = 1 }, .{ .buffered = 2 });
+        }
+    };
+    try run_deterministic(Root.run);
+}
+
+test "pending recv wakes when policy spills" {
+    const Root = struct {
+        fn run(io: Io) !void {
+            try expect_overflow_wakes(SpillMessage, io, .fill_ready, .spill);
+        }
+    };
+    try run_deterministic(Root.run);
+}
+
+/// Reliable FIFO policy: every overflow message is retained in order.
+const Sequenced = struct {
+    producer: u32,
+    index: u64,
+
+    pub const Overflow = std.Deque(Sequenced);
+
+    pub fn handle(gpa: Allocator, overflow: *Overflow, message: Sequenced) !void {
+        try overflow.pushBack(gpa, message);
+    }
+};
+
+const producers_count = 3;
+const messages_per_producer = 50;
+const ProduceError = Allocator.Error || Io.Cancelable;
+
+fn produce(io: Io, sender: mailbox.Sender(Sequenced), producer: u32) ProduceError!void {
+    var owned = sender;
+    defer owned.deinit();
+    var index: u64 = 0;
+    while (index < messages_per_producer) : (index += 1) {
+        const feedback = try owned.enqueue(.{ .producer = producer, .index = index });
+        assert(feedback.accepted());
+        if (index % 7 == producer) try io.sleep(.fromMilliseconds(1), .awake);
+    }
+}
+
+/// Many producers, one receiver: per-sender order holds and nothing is lost. Returns a hash
+/// of the delivery order so runs can be compared.
+fn many_producers(io: Io) !u64 {
+    var pair = try mailbox.new(Sequenced, testing.allocator, io, 4);
+    defer pair.receiver.deinit();
+    var futures: [producers_count]Io.Future(ProduceError!void) = undefined;
+    for (&futures, 0..) |*future, producer| {
+        future.* = try io.concurrent(produce, .{ io, pair.sender.clone(), @intCast(producer) });
+    }
+    pair.sender.deinit();
+
+    var next: [producers_count]u64 = @splat(0);
+    var order = std.hash.Wyhash.init(0);
+    var received: u64 = 0;
+    while (try pair.receiver.recv()) |message| : (received += 1) {
+        try testing.expectEqual(next[message.producer], message.index);
+        next[message.producer] += 1;
+        order.update(std.mem.asBytes(&message.producer));
+    }
+    try testing.expectEqual(@as(u64, producers_count * messages_per_producer), received);
+    for (&futures) |*future| try future.await(io);
+    return order.final();
+}
+
+test "many producers keep per-sender order and replay from the seed" {
+    var digests: [3]u64 = undefined;
+    for (&digests, [_]u64{ 1, 1, 2 }) |*digest, seed| {
+        var runner = try runtime.deterministic.Runner.init(testing.allocator, .{ .seed = seed });
+        defer runner.deinit();
+        digest.* = try (try runner.start(many_producers, .{runner.io()}));
+    }
+    try testing.expectEqual(digests[0], digests[1]);
+    try testing.expect(digests[0] != digests[2]);
+}
+
+// Seeded fuzz: a reliable FIFO mailbox against a counting model.
+
+fn fuzz_run(comptime body: fn (void, *Smith) anyerror!void, seed: u64, iterations: u32) !void {
+    assert(iterations > 0);
+    var prng = std.Random.DefaultPrng.init(seed ^ build_options.fuzz_seed);
+    const random = prng.random();
+    var input: [1024]u8 = undefined;
+    const total: u64 = @as(u64, iterations) * build_options.fuzz_soak;
+    var iteration: u64 = 0;
+    while (iteration < total) : (iteration += 1) {
+        const len = random.uintAtMost(usize, input.len);
+        random.bytes(input[0..len]);
+        var smith: Smith = .{ .in = input[0..len] };
+        body({}, &smith) catch |err| {
+            std.debug.print("fuzz: seed {d} iteration {d} failed: {t}\n", .{
+                seed ^ build_options.fuzz_seed, iteration, err,
+            });
+            return err;
+        };
+    }
+    assert(iteration == total);
+    try std.testing.fuzz({}, body, .{});
+}
+
+fn fuzz_fifo(_: void, smith: *Smith) anyerror!void {
+    const capacity = smith.valueRangeAtMost(u32, 1, 8);
+    var pair = try open(Sequenced, capacity);
+    defer pair.receiver.deinit();
+    var sent: u64 = 0;
+    var received: u64 = 0;
+    var backoffs: u64 = 0;
+    var steps: u32 = 0;
+    while (steps < 512 and !smith.eos()) : (steps += 1) {
+        if (smith.value(bool)) {
+            // Overflow is only non-empty while ready is full, so feedback follows the count.
+            const queued = sent - received;
+            const feedback = try pair.sender.enqueue(.{ .producer = 0, .index = sent });
+            const expected: Feedback = if (queued < capacity) .ok else .backoff;
+            try testing.expectEqual(expected, feedback);
+            if (feedback == .backoff) backoffs += 1;
+            sent += 1;
+        } else if (pair.receiver.try_recv()) |message| {
+            try testing.expectEqual(received, message.index);
+            received += 1;
+        } else |err| {
+            try testing.expect(err == error.Empty);
+            try testing.expectEqual(sent, received);
+        }
+    }
+    try testing.expectEqual(backoffs, pair.sender.backoff_total());
+    pair.sender.deinit();
+    while (received < sent) : (received += 1) {
+        try testing.expectEqual(received, (try pair.receiver.try_recv()).index);
+    }
+    try testing.expectError(error.Disconnected, pair.receiver.try_recv());
+}
+
+test "fuzz mailbox fifo against a model" {
+    try fuzz_run(fuzz_fifo, 0x6d61_696c_626f_78, 200);
+}
