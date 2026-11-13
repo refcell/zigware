@@ -6,6 +6,8 @@
 
 pub const rational = @import("rational.zig");
 pub const bandwidth = @import("bandwidth.zig");
+pub const sorted_map = @import("sorted_map.zig");
+pub const transmitter = @import("transmitter.zig");
 pub const Rational = rational.Rational;
 
 test {
