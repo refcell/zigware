@@ -203,12 +203,14 @@ pub fn map_span(items: anytype, start: usize, end: usize, out: anytype, op: anyt
     for (start..end) |index| out[index] = op.map(at(items, index));
 }
 
-/// Maps `items[start..end]` into `out[start..end]` with one `op.init` state and `op.map`.
+/// Maps `items[start..end]` into `out[start..end]` with one `op.init` state and `op.map`. When
+/// the operation declares `deinit_state(&state)`, the state is released afterwards.
 pub fn map_init_span(items: anytype, start: usize, end: usize, out: anytype, op: anytype) void {
     assert(start <= end);
     assert(end <= count(items));
     assert(out.len == count(items));
     var state = op.init();
+    defer if (comptime @hasDecl(Base(@TypeOf(op)), "deinit_state")) op.deinit_state(&state);
     for (start..end) |index| out[index] = op.map(&state, at(items, index));
 }
 

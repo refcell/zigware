@@ -25,6 +25,11 @@ placeholder until this lands, so land `Strategy` first and tell the coordinator 
   `spawn(len, &task)` / `block_on(&task)` with `parallel.Task(Op)` (`op.call()`),
   `parallelism()`. Optional op hooks: `discard(value)`, `deinit_state(*state)`.
 
+- `parallel.mocks`: `pooled(gpa, io, workers, parallelism)`, `inlined(gpa, io, parallelism)`,
+  `pending(gpa, io, workers)`, `Explorer.parallel(rayon)` / `Explorer.seeded(rayon, seed)`,
+  and `explore(gpa, io, op{run(explorer)})`, which runs `op` under serial, parallel, and four
+  seeded rules and fails with `error.ShapeDependentOutput` if any output differs.
+
 ## Decisions
 - No rayon port: `ThreadPool` is a fork-join pool whose workers are `std.Io.Group.concurrent`
   tasks and whose waits are `std.Io` futexes, so the deterministic runtime can host it. The
@@ -40,6 +45,9 @@ placeholder until this lands, so land `Strategy` first and tell the coordinator 
   without one they sort serially.
 - `spawn` takes a caller-owned `Task(Op)` instead of returning a future, so it never
   allocates; every spawned task must be `block_on`'d before its pool is destroyed.
+- Mocks: a seeded `Explorer` keys its choice by the call's return address (Zig has no
+  `#[track_caller]`), so seeds repeat within one build. `pending`'s queued jobs run when
+  `block_on` takes them back, since a Zig task must be awaited before it goes out of scope.
 - Fallible ops return the first error in chunk order (commonware allows any).
 - `run_tiles` plans at most 64 workers (one pool job each); `Tiles.fill_collect` returns an
   allocated slice and `OutOfMemory` if a worker's result list cannot grow.
@@ -51,7 +59,8 @@ placeholder until this lands, so land `Strategy` first and tell the coordinator 
   results must not depend on the number of threads.
 - [x] parallel: `run_tiles` (`Grid`, `Tiles`, `Shares` claim/steal) with its tests.
 - [x] parallel: `spawn`/`block_on` over the pool.
-- [ ] parallel policy.rs and topology.rs (CPU topology, pinning policy), mocks.rs.
+- [x] parallel mocks.rs (Explorer, explore, pooled, inlined, pending) with its tests.
+- [ ] parallel policy.rs and topology.rs (CPU topology, pinning policy).
 - [ ] allocator: an allocator wrapper with commonware's metrics and purge/reserve
   configuration; no mimalloc (zero deps).
 - [ ] bench: the benchmark workload abstraction (lib.rs) and its runner/report binary
@@ -59,6 +68,7 @@ placeholder until this lands, so land `Strategy` first and tell the coordinator 
 - [ ] Fuzz targets and benches.
 
 ## Log
+- 2026-11-13: mocks (Explorer, explore, pooled, inlined, pending) with ported tests.
 - 2026-11-13: spawn/block_on with caller-owned Task over the pool.
 - 2026-11-13: run_tiles (Grid, Tiles, Shares claim/steal) with ported tile tests.
 - 2026-11-13: Strategy interface (Sequential, Rayon over a std.Io fork-join pool), batches,

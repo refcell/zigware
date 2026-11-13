@@ -28,6 +28,9 @@ pub const threads_max: u32 = 1024;
 pub const Config = struct {
     /// Worker threads to start. Zero runs every job on the calling thread.
     threads: u32,
+    /// Whether to start the workers. An unstarted pool (a test mock) keeps queued jobs until
+    /// their callers take them back.
+    start_workers: bool = true,
 };
 
 /// Counts the jobs of one `run` call (or one spawned task) that are not finished yet.
@@ -79,7 +82,9 @@ pub const ThreadPool = struct {
         errdefer allocator.destroy(pool);
         pool.* = .{ .io = io, .allocator = allocator, .threads = config.threads };
         errdefer pool.stop();
-        for (0..config.threads) |_| try pool.group.concurrent(io, worker_main, .{pool});
+        if (config.start_workers) {
+            for (0..config.threads) |_| try pool.group.concurrent(io, worker_main, .{pool});
+        }
         assert(pool.queue.first == null);
         return pool;
     }

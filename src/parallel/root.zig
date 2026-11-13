@@ -34,7 +34,7 @@
 //! | `s.parallelism() usize` | |
 //!
 //! Optional op methods: `discard(value)` releases accumulators or outputs a failed fallible
-//! operation drops, and `deinit_state(*T)` releases a `fold_init` chunk's state.
+//! operation drops, and `deinit_state(*T)` releases a `fold_init` or `map_init` chunk's state.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -53,6 +53,7 @@ pub const Tiles = tiles_module.Tiles;
 pub const max_units = tiles_module.max_units;
 
 pub const Task = @import("task.zig").Task;
+pub const mocks = @import("mocks.zig");
 
 pub const Sequential = @import("sequential.zig").Sequential;
 pub const Rayon = @import("rayon.zig").Rayon;
@@ -89,4 +90,5 @@ test {
     std.testing.refAllDecls(@This());
     _ = @import("tests.zig");
     _ = @import("tiles_tests.zig");
+    _ = @import("mocks_tests.zig");
 }

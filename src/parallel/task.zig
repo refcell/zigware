@@ -44,6 +44,12 @@ pub fn Task(comptime Op: type) type {
             return self.latch.pending.load(.acquire) == 0;
         }
 
+        /// Whether `spawn` handed the job to a pool rather than running it inline.
+        pub fn is_offloaded(self: *const Self) bool {
+            assert(self.spawned);
+            return self.pool != null;
+        }
+
         fn body(context: *const anyopaque, index: usize) void {
             assert(index == 0);
             const self: *Self = @ptrCast(@alignCast(@constCast(context)));
