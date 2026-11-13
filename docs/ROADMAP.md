@@ -12,12 +12,13 @@ and start when what they build on has landed (or can be stubbed behind an interf
 | 1 | bls-math | math, simd, cryptography/bls12381 (primitives, dkg, tle, certificate) | now |
 | 1 | runtime | runtime: interface, deterministic runtime, iobuf, storage, network, io_uring | now |
 | 1 | storage-merkle | storage: merkle (mmr, mmb), bmt, bitmap, index, rmap, translator | now |
-| 2 | actor-stream | actor, stream | runtime interface (started) |
+| 2 | actor-stream | actor, stream | done |
 | 2 | storage-journal | storage: journal, metadata, queue | runtime storage (started) |
 | 2 | storage-archive | storage: archive, freezer, ordinal, cache | segmented journal (started) |
 | 2 | p2p | p2p: simulated first, then authenticated | deterministic runtime (started) |
 | 2 | coding | coding, storage/bmt, cryptography/reed_solomon | done |
-| 3 | broadcast-resolver | broadcast, collector, resolver | wire types now (started); engines after p2p simulated |
+| 3 | broadcast-resolver | resolver | p2p simulated (started) |
+| 3 | broadcast-collector | broadcast, collector | p2p simulated (started) |
 | 3 | runtime-telemetry | runtime telemetry (metrics registry, traces) | now (started) |
 | 3 | examples-estimator | the estimator example, the first README demo | DSL now (started); simulation after p2p simulated |
 | 3 | clearing | clearing | qmdb |

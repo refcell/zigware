@@ -1,6 +1,7 @@
 # Lane: broadcast-resolver
 
-Owns `src/broadcast`, `src/resolver`, `src/collector`.
+Owns `src/resolver`. `src/broadcast` and `src/collector` moved to the broadcast-collector
+lane (docs/lanes/broadcast-collector.md).
 
 Reference: `~/.cache/zigware/commonware-ref/{broadcast,resolver,collector}`. All three are
 actors over p2p (`actor` mailbox on main, p2p's lib types on main, p2p `simulated` landing
