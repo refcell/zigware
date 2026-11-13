@@ -14,10 +14,14 @@
 //! `check` asserts a type implements it.
 
 const std = @import("std");
+const utils = @import("utils");
 const assert = std.debug.assert;
 
 /// Mixing constant (`commonware_utils::GOLDEN_RATIO`), the 64-bit golden ratio.
-pub const golden_ratio: u64 = 0x9e37_79b9_7f4a_7c15;
+const golden_ratio: u64 = utils.GOLDEN_RATIO;
+comptime {
+    assert(golden_ratio == 0x9e37_79b9_7f4a_7c15);
+}
 
 /// Asserts at comptime that `T` implements the translator interface.
 pub fn check(comptime T: type) void {
@@ -281,10 +285,10 @@ test "eight cap" {
     try testing.expect(t4 < t5);
 }
 
-fn check_unhashed_array_order(comptime n: usize, random: std.Random) !void {
+fn check_unhashed_array_order(comptime n: usize, rng: *utils.rng.TestRng) !void {
     const Array = UnhashedArray(n);
     var arrays: [204]Array = undefined;
-    for (arrays[0..200]) |*array| random.bytes(&array.inner);
+    for (arrays[0..200]) |*array| rng.fill_bytes(&array.inner);
     var last: [n]u8 = @splat(0xab);
     arrays[200] = .{ .inner = last };
     last[n - 1] = 0xac;
@@ -299,9 +303,8 @@ fn check_unhashed_array_order(comptime n: usize, random: std.Random) !void {
 }
 
 test "unhashed array orders like its bytes" {
-    var prng = std.Random.DefaultPrng.init(0);
-    const random = prng.random();
-    inline for (.{ 1, 2, 3, 4, 5, 6, 7, 8, 9 }) |n| try check_unhashed_array_order(n, random);
+    var rng = utils.test_rng();
+    inline for (.{ 1, 2, 3, 4, 5, 6, 7, 8, 9 }) |n| try check_unhashed_array_order(n, &rng);
 }
 
 test "cap 3" {
@@ -346,13 +349,14 @@ fn assert_order_preserving(comptime T: type, t: T, keys: []OrderingKey) !void {
 test "cap translators preserve order" {
     // A small alphabet makes shared prefixes, zero padding, and high bytes common.
     const alphabet = [_]u8{ 0x00, 0x01, 0x7f, 0x80, 0xfe, 0xff };
-    var prng = std.Random.DefaultPrng.init(1);
-    const random = prng.random();
+    var rng = utils.test_rng();
     const keys = try testing.allocator.alloc(OrderingKey, ordering_key_count);
     defer testing.allocator.free(keys);
     for (keys) |*key| {
-        key.len = random.uintAtMost(u8, ordering_key_len_max);
-        for (key.bytes[0..key.len]) |*byte| byte.* = alphabet[random.uintLessThan(usize, 6)];
+        key.len = utils.rng.range_at_most(&rng, u8, 0, ordering_key_len_max);
+        for (key.bytes[0..key.len]) |*byte| {
+            byte.* = alphabet[utils.rng.range_less_than(&rng, usize, 0, alphabet.len)];
+        }
     }
     std.mem.sort(OrderingKey, keys, {}, OrderingKey.less_than);
     try assert_order_preserving(OneCap, .{}, keys);
@@ -430,8 +434,8 @@ test "hashed all cap sizes" {
 }
 
 test "hashed random seed" {
-    var prng = std.Random.DefaultPrng.init(3);
-    const a = Hashed(EightCap).init_random(prng.random(), .{});
-    const b = Hashed(EightCap).init_random(prng.random(), .{});
+    var rng = utils.rng.TestRng.init(3);
+    const a = Hashed(EightCap).init_random(utils.rng.random(&rng), .{});
+    const b = Hashed(EightCap).init_random(utils.rng.random(&rng), .{});
     try testing.expect(a.transform("hello") != b.transform("hello"));
 }
