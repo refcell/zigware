@@ -23,6 +23,7 @@ const Keccak256 = @import("keccak256.zig").Keccak256;
 const Crc32 = @import("crc32.zig").Crc32;
 const ed25519 = @import("ed25519.zig");
 const secp256r1 = @import("secp256r1.zig");
+const LtHash = @import("lthash.zig").LtHash;
 const Summary = @import("transcript.zig").Summary;
 const sake = @import("handshake/sake.zig");
 
@@ -149,6 +150,11 @@ fn gen_secp_signature(comptime M: type) arbitrary.Generator(M.Signature) {
     }.generate;
 }
 
+/// The derived `Arbitrary` of `LtHash`: 1024 arbitrary `u16`s.
+fn gen_lthash(gpa: Allocator, u: *Unstructured) Error!LtHash {
+    return .{ .state = try arbitrary.value([1024]u16, gpa, u) };
+}
+
 const Protocol = sake.Sake(ed25519.PrivateKey);
 
 fn gen_syn(gpa: Allocator, u: *Unstructured) Error!Protocol.Syn {
@@ -234,4 +240,8 @@ test "conformance: secp256r1 keys and signatures" {
         recoverable.Signature,
         gen_secp_signature(recoverable),
     );
+}
+
+test "conformance: lthash" {
+    try verify("lthash::tests::conformance::CodecConformance<LtHash>", LtHash, gen_lthash);
 }

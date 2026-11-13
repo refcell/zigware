@@ -44,6 +44,8 @@ pub const transcript = @import("transcript.zig");
 pub const Transcript = transcript.Transcript;
 pub const handshake = @import("handshake.zig");
 pub const secp256r1 = @import("secp256r1.zig");
+pub const lthash = @import("lthash.zig");
+pub const LtHash = lthash.LtHash;
 pub const secret = @import("secret.zig");
 pub const Secret = secret.Secret;
 

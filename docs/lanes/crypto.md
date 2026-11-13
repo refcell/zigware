@@ -32,7 +32,9 @@ handshake), then certificate, secp256r1, the rest, zk and banderwagon last.
   its own RFC 6979 signer and key recovery; commonware's vectors, the four `CodecConformance`
   hashes, and the `secp256r1_{standard,recoverable}_decode` fuzz targets.
 - [ ] secp256r1 `certificate` scheme (after certificate.rs).
-- [ ] lthash, bloomfilter (+ conformance).
+- [x] lthash: `LtHash` with commonware-generated checksums, the `CodecConformance<LtHash>`
+  hash, and the `lthash_operations`/`metamorph_lthash` fuzz targets.
+- [ ] bloomfilter (+ conformance, `RationalOptimalBits`).
 - [ ] banderwagon, zk (bulletproofs, pedersen) last.
 - [ ] Fuzz targets (commonware cryptography/fuzz) and conformance hashes.
 
