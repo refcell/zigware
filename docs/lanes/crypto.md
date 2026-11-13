@@ -22,7 +22,7 @@ handshake), then certificate, secp256r1, the rest, zk and banderwagon last.
 - [ ] ed25519 conformance hashes and `certificate` scheme (after certificate.rs).
 - [x] chacha20_poly1305 (`Cipher`) with the `Seal` conformance hash.
 - [x] transcript.rs with the `TranscriptV0Ops`/`TranscriptV1Ops` conformance hashes.
-- [ ] secret.rs.
+- [x] secret.rs: `Secret(T)` (redacted format, constant-time `eql`, zeroizing `deinit`).
 - [x] handshake (sake) used by `stream`: V0/V1, X25519 on std, `SakeV0`/`SakeV1`
   conformance hashes, RFC 7748 and Wycheproof X25519 vectors, message decode fuzz.
 - [ ] sake: `test_v1_rejects_derived_identity` (needs secp256r1) and `CodecConformance` of
