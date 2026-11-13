@@ -32,7 +32,7 @@ encoding parts as soon as `codec` has its core API (see docs/lanes/codec.md).
   `Dirty` with read-through `get_bit`/`get_chunk`, `set_bit`, `push*`, `pop`, `prune_to_bit`;
   `commit(gpa, n)` / `abort`; `apply_batch`, `get_at_commit`, `prune_commits_before`). A failed
   `commit` leaves the `Dirty` unchanged (Rust consumes it).
-  `bitmap.roaring`: in progress; `roaring.Array` container (codec + conformance) so far.
+  `bitmap.roaring`: in progress; `roaring.Array` and `roaring.Bitmap` containers (codec + conformance) so far.
   `bitmap.readable` is the `Readable` trait (`len`, `pruned_chunks`, `get_chunk`) + `OnesIter`.
 - `utils.Hostname` (`utils.hostname`): validated RFC 1035/1123 hostname stored inline
   (`init`, `literal`, `as_str`, `eql`, `order`, `{f}`, `len_max`, `label_len_max`,
@@ -91,4 +91,4 @@ encoding parts as soon as `codec` has its core API (see docs/lanes/codec.md).
 - 2026-11-13: Prunable bitmap with its tests, conformance hash, and fuzz target.
 - 2026-11-13: ordered Set/Map/BiMap/Quorum with tests, conformance hashes, and a set fuzz.
 - 2026-11-13: historical bitmap with its tests, randomized checkpoints, and fuzz target.
-- 2026-11-13: roaring Array container with tests and conformance hash.
+- 2026-11-13: roaring Array and Bitmap containers with tests and conformance hashes.

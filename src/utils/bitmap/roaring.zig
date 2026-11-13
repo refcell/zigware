@@ -6,6 +6,8 @@ const std = @import("std");
 
 pub const array = @import("roaring/array.zig");
 pub const Array = array.Array;
+pub const bitmap = @import("roaring/bitmap.zig");
+pub const Bitmap = bitmap.Bitmap;
 
 test {
     std.testing.refAllDecls(@This());
