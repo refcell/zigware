@@ -8,6 +8,7 @@ const buf = @import("buf.zig");
 const Reader = buf.Reader;
 const Writer = buf.Writer;
 const Error = @import("error.zig").Error;
+const Bytes = @import("types/bytes.zig").Bytes;
 
 const gpa = testing.allocator;
 
@@ -157,4 +158,84 @@ test "free reports no leaks for nested owned values" {
     defer codec.free(T, gpa, decoded);
     try testing.expectEqualSlices(u16, inner, decoded[0].?.*);
     try testing.expectEqualSlices(u8, &.{9}, decoded[1][0]);
+}
+
+/// `#[fixed_array(bytes([u8; N]))]`: a generic fixed-size type (commonware's `GenericFixed`).
+fn GenericFixed(comptime size: usize) type {
+    return struct {
+        raw: [size]u8,
+
+        const Self = @This();
+        pub const fixed_size = size;
+
+        pub fn write(self: Self, writer: *Writer) void {
+            writer.write_bytes(&self.raw);
+        }
+
+        pub fn read(_: Allocator, reader: *Reader, _: void) Error!Self {
+            return .{ .raw = (try reader.take_array(size)).* };
+        }
+    };
+}
+
+test "generic fixed array conversions" {
+    const Generic = GenericFixed(3);
+    const generic: Generic = .{ .raw = .{ 1, 2, 3 } };
+    try testing.expectEqual([3]u8{ 1, 2, 3 }, codec.encode_fixed(Generic, generic));
+    try testing.expectEqual(generic, try codec.decode_fixed(Generic, &.{ 1, 2, 3 }));
+    try testing.expectEqual(generic, try codec.decode(Generic, gpa, &.{ 1, 2, 3 }));
+    var reader = Reader.init(&.{ 1, 2, 3, 4 });
+    try testing.expectError(error.ExtraData, codec.decode_reader(Generic, gpa, &reader, {}));
+    try testing.expectEqual(@as(u64, 1), reader.diagnostic.value);
+}
+
+// buf.rs `Viewing` tests: a Reader is a borrowed cursor, `Bytes` reads share its storage.
+
+test "viewing scalar reads" {
+    const encoded = "\x00\x00\x00\x07ab";
+    var input = Reader.init(encoded);
+    try testing.expectEqual(@as(u32, 7), try codec.read(u32, gpa, &input));
+    var other = input;
+    try testing.expectEqual("ab".*, try codec.read([2]u8, gpa, &input));
+    try testing.expectEqual(@as(usize, 2), other.remaining());
+    try testing.expectEqual("ab".*, try codec.read([2]u8, gpa, &other));
+    try testing.expectEqual(@as(usize, 0), input.remaining());
+    try testing.expectEqual(@as(usize, 0), input.rest().len);
+}
+
+test "viewing retained fields and split frames" {
+    const encoded = "\x05hello\x05world";
+    var input = Reader.init(encoded);
+    // A frame longer than its field leaves trailing data.
+    var overlong = input;
+    const overlong_frame = try overlong.take(7);
+    try testing.expectError(error.ExtraData, codec.decode_cfg(Bytes, gpa, overlong_frame, .full()));
+    const first = try codec.decode_cfg(Bytes, gpa, try input.take(6), .full());
+    try testing.expectEqual(@as([*]const u8, encoded[1..].ptr), first.data.ptr);
+    try testing.expectEqual(@as(usize, 6), input.remaining());
+    const second = try codec.read_cfg(Bytes, gpa, &input, .full());
+    try testing.expectEqual(@as([*]const u8, encoded[7..].ptr), second.data.ptr);
+    try testing.expectEqualStrings("hello", first.data);
+    try testing.expectEqualStrings("world", second.data);
+    try testing.expectEqual(@as(usize, 0), (try input.take(0)).len);
+}
+
+test "viewing empty ranges and invalid input" {
+    for ([_][]const u8{ "", "hello" }) |encoded| {
+        var input = Reader.init(encoded);
+        try input.skip(0);
+        try testing.expectEqual(@as(usize, 0), (try input.take(0)).len);
+        try testing.expectEqual(encoded.len, input.remaining());
+        try input.skip(encoded.len);
+        try input.skip(0);
+        try testing.expectEqual(@as(usize, 0), (try input.take(0)).len);
+        try testing.expectEqual(@as(usize, 0), input.remaining());
+        // Past the end is an error, not a panic.
+        try testing.expectError(error.EndOfBuffer, input.skip(1));
+    }
+    for ([_][]const u8{ "", "\x05hi", "\x01ab", "\x80" }) |bytes| {
+        try testing.expect(std.meta.isError(codec.decode_cfg(Bytes, gpa, bytes, .full())));
+    }
+    const empty = try codec.decode_cfg(Bytes, gpa, "\x00", .full());
+    try testing.expectEqual(@as(usize, 0), empty.data.len);
 }

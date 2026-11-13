@@ -170,7 +170,12 @@ floats, arrays, optionals, structs/tuples, enums (`derive` scaling), or `T.arbit
   arbitrary 1.4 bit for bit; all 51 hashes in commonware's codec/conformance.toml match.
 - [x] invariants: minifuzz (Builder, Branch tokens, ChaCha8 Sampler and its strategies) plus
   arbitrary 1.4's `Unstructured`, with the crate's tests and a byte-exact sampler vector.
-- [ ] extend the codec fuzz targets as net/lazy/mode land (maps/sets done).
+- [x] extend the codec fuzz targets: net, mode, NonZero, and a Lazy property (deferred `get`
+  agrees with a direct decode); maps/sets done.
+- [x] remaining codec.rs/buf.rs tests: generic FixedArray conversions (`encode_fixed`,
+  `decode_fixed`, `decode` cover the derive), Viewing cursor tests on `Reader` + `Bytes`.
+  Chained-buffer and `should_panic` tests have no Zig counterpart (contiguous readers;
+  programmer errors are assertions).
 
 ## Log
 - 2026-11-13: formatting (hex, from_hex, Hex, hex_literal) and codec core (Reader/Writer,
@@ -183,3 +188,4 @@ floats, arrays, optionals, structs/tuples, enums (`derive` scaling), or `T.arbit
   codec conformance hashes match.
 - 2026-11-13: invariants: minifuzz (Builder, Branch tokens, Sampler) and `Unstructured`
   (arbitrary 1.4); sampler stream matches commonware's byte for byte.
+- 2026-11-13: codec fuzz covers NonZero and Lazy; generic FixedArray and Viewing tests.

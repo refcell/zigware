@@ -16,6 +16,8 @@ const RangeCfg = @import("config.zig").RangeCfg;
 const map = @import("types/map.zig");
 const net = @import("types/net.zig");
 const Modes = @import("mode.zig").Modes;
+const Lazy = @import("types/lazy.zig").Lazy;
+const NonZero = @import("types/nonzero.zig").NonZero;
 
 const gpa = testing.allocator;
 
@@ -245,6 +247,23 @@ fn decode_canonical(_: void, smith: *Smith) anyerror!void {
         try expect_canonical(varint.UInt(T), input, {});
     }
     inline for (.{ i16, i32, i64, i128 }) |S| try expect_canonical(varint.SInt(S), input, {});
+    try expect_canonical(NonZero(u32), input, {});
+    try expect_lazy_matches_direct(NonZero(u64), input);
+    try expect_lazy_matches_direct(u64, input);
+}
+
+/// A fixed-size `Lazy(T)` defers decoding; its `get` must agree with decoding `T` directly,
+/// including on inputs `T` rejects.
+fn expect_lazy_matches_direct(comptime T: type, input: []const u8) !void {
+    const direct: ?T = codec.decode(T, gpa, input) catch null;
+    var lazy = codec.decode(Lazy(T), gpa, input) catch {
+        try testing.expect(direct == null);
+        return;
+    };
+    try testing.expectEqual(direct, lazy.get(gpa));
+    const encoded = try codec.encode(Lazy(T), gpa, lazy);
+    defer gpa.free(encoded);
+    try testing.expectEqualSlices(u8, input, encoded);
 }
 
 test "fuzz codec roundtrip" {
