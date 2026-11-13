@@ -14,6 +14,7 @@ pub const durability = @import("durability.zig");
 pub const zstd = @import("zstd.zig");
 pub const segmented = @import("segmented/mod.zig");
 pub const contiguous = @import("contiguous/mod.zig");
+pub const authenticated = @import("authenticated.zig");
 
 /// Errors that can occur when interacting with a journal (commonware's `journal::Error`).
 ///

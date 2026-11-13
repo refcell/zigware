@@ -35,7 +35,10 @@ resize, sync), `runtime.storage`, with the in-memory backend `runtime.storage.me
 - [ ] journal/contiguous: the rest of fixed.rs's tests (torn interior pages, bounded-open
   faults, `init_at_most` crashes, clear crash scenarios, read_many accounting).
 - [ ] journal/contiguous: variable journal.
-- [ ] journal/authenticated.rs.
+- [x] journal/authenticated.rs backing contract: `assert_backing`, `last_matching`, `covers`,
+  `Stored`, `init_sync`, with the fixed journal as a backing; init_sync and last_matching tests.
+- [ ] journal/authenticated.rs `Journal` (items plus persisted Merkle, batches, proofs): needs
+  storage-merkle's persisted Merkle, which itself needs the backing contract.
 - [x] metadata (two-blob atomic key-value store).
 - [ ] metadata: `start_sync` (pipelined syncs), conformance hash (`MetadataWorkload`), and
   the fault-injection tests (torn writes, failed syncs), once runtime storage lands.
@@ -107,6 +110,13 @@ resize, sync), `runtime.storage`, with the in-memory backend `runtime.storage.me
   `deinit`), `append(section, entry, value)`, `get`, `last`, `get_value`, `sync`,
   `sync_tracked`, `sync_all`, `prune`, `size`, `value_size`, `pruned`, `oldest_section`,
   `newest_section`, `destroy`, `deinit`.
+- `storage.journal.authenticated`: `assert_backing(J)`, `last_matching(recovery, ceiling,
+  context, predicate)`, `covers(span, position)`, `Stored(J)` (`open` returns `.opened` or
+  `.unopened`), `init_sync(J, gpa, storage, cfg, range)`. A backing journal declares
+  `BackingConfig`, `BackingRecovery`, `recover(gpa, storage, cfg, ?max_size)`,
+  `clear(gpa, storage, cfg, size)`, `span(gpa, storage, cfg) Bounds`; its recovery declares
+  `Item`, `get_bounds`, `read`, `reset`, `finish(size) J` (consumes, also on error), `deinit`.
+  `contiguous.fixed.Journal(A)` implements it.
 - `storage.metadata`: `Metadata(K, V)` with `init`, `deinit`, `get`, `get_mut`,
   `put`, `put_sync`, `upsert`, `remove`, `clear`, `retain`, `items`, `count`, `sync`,
   `destroy`; `Config(V)`.
@@ -188,6 +198,10 @@ resize, sync), `runtime.storage`, with the in-memory backend `runtime.storage.me
   succeeded and marker generations are never in flight; markers persist with a blocking
   metadata `sync`.
 
+- authenticated: commonware's `Backing`/`BackingRecovery` traits are a comptime contract
+  (`assert_backing`) over decl names; contexts become `(gpa, storage)`, and
+  `last_matching`'s closure is a `(context, comptime predicate)` pair.
+
 ## Log
 - 2026-11-13: journal Error, frame encoding/decoding with zstd frames, durability Barrier,
   frame fuzz target.
@@ -208,3 +222,4 @@ resize, sync), `runtime.storage`, with the in-memory backend `runtime.storage.me
 - 2026-11-13: contiguous fixed journal with checkpoint and blob partitions; shared suite.
 - 2026-11-13: first batch of the fixed contiguous journal's own recovery tests.
 - 2026-11-13: segmented oversized journal with its core tests.
+- 2026-11-13: authenticated backing contract (`init_sync`, `Stored`, `last_matching`).

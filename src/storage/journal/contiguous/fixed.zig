@@ -122,6 +122,8 @@ pub fn Recovery(comptime A: type) type {
         const Self = @This();
         const chunk: usize = Journal(A).chunk;
         const chunk_u64: u64 = chunk;
+        /// The item type (`BackingRecovery`).
+        pub const Item = A;
 
         gpa: Allocator,
         storage: Storage,
@@ -394,6 +396,32 @@ pub fn Recovery(comptime A: type) type {
             return self.watermark;
         }
 
+        /// Available item positions, including the retained pruning boundary
+        /// (`BackingRecovery::bounds`).
+        pub fn get_bounds(self: *const Self) Bounds {
+            assert(self.bounds.start <= self.bounds.end);
+            return self.bounds;
+        }
+
+        /// Read a retained item (`BackingRecovery::read`).
+        pub fn read(self: *Self, position: u64) Error!A {
+            return self.item(position);
+        }
+
+        /// Discard stored items and continue empty at `size_new` (`BackingRecovery::reset`).
+        pub fn reset(self: *Self, size_new: u64) Error!void {
+            return self.clear_to_size(size_new);
+        }
+
+        /// Durably retain at most `max_size` items and publish the committed journal
+        /// (`BackingRecovery::finish`). Consumes the recovery, also on error.
+        pub fn finish(self: *Self, max_size: u64) Error!Journal(A) {
+            var journal = try self.publish(max_size);
+            errdefer journal.deinit();
+            try journal.commit();
+            return journal;
+        }
+
         /// Read an item for recovery selection or validation.
         pub fn item(self: *Self, position: u64) Error!A {
             if (position < self.bounds.start) return error.ItemPruned;
@@ -626,6 +654,9 @@ pub fn Journal(comptime A: type) type {
         pub const chunk: usize = chunk_size;
         const chunk_u64: u64 = chunk_size;
         pub const RecoveryType = Recovery(A);
+        /// `Backing` names: the configuration and recovery types.
+        pub const BackingConfig = Config;
+        pub const BackingRecovery = RecoveryType;
         pub const Replay = ReplayType(A);
 
         gpa: Allocator,
