@@ -47,6 +47,10 @@ handshake and the runtime's network, which the actor-stream and runtime lanes ar
   `LinkingSelf`, `LinkExists`, `LinkMissing`.
 - `p2p.simulated.Normal` (`init(mean, std_dev)`, `sample(rng)`), `simulated.normal.standard`
   and `duration_ms`: rand_distr's `Normal<f64>`, bit-identical for the same RNG stream.
+- `p2p.authenticated.Data` (wire frame: channel varint, length-prefixed message),
+  `data.Header` (prefix, channel, and length for a zero-copy send), `max_payload_overhead`,
+  `max_size(stream_max)`, and `authenticated.lookup.Message` (`data` or `ping`); both match
+  commonware's conformance hashes.
 - `p2p.Message(P)` owns its payload when `gpa` is set; release it with `deinit`.
 - Senders take a message as parts (`[]const []const u8`, concatenated), like stream frames.
 
@@ -113,3 +117,4 @@ handshake and the runtime's network, which the actor-stream and runtime lanes ar
   frame so stack traces captured on a fiber stop at its top.
 - 2026-11-13: rand_distr ziggurat Normal for link latency, bit-identical to Rust.
 - 2026-11-13: simulated blocking and shutdown tests.
+- 2026-11-13: authenticated Data frame and lookup Message with conformance hashes.
