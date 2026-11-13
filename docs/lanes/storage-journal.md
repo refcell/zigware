@@ -22,7 +22,9 @@ resize, sync), `runtime.storage`, with the in-memory backend `runtime.storage.me
   corruption and interrupted-open crash tests.
 - [x] journal/segmented: variable journal (varint frames, optional zstd) with recovery and
   its ported tests.
-- [ ] journal/segmented: glob and oversized journals.
+- [x] journal/segmented: glob (CRC-trailed values located by an external index) with its
+  `Recovery` and ported tests.
+- [ ] journal/segmented: oversized journal.
 - [ ] journal/contiguous: fixed and variable contiguous journals.
 - [ ] journal/authenticated.rs.
 - [x] metadata (two-blob atomic key-value store).
@@ -30,6 +32,9 @@ resize, sync), `runtime.storage`, with the in-memory backend `runtime.storage.me
   the fault-injection tests (torn writes, failed syncs), once runtime storage lands.
 - [ ] queue (persistent queue with cursor).
 - [ ] Conformance hashes for every on-disk format, fuzz targets (storage/fuzz).
+- [ ] Metrics: record through `runtime.telemetry.metrics` where commonware has metrics
+  (journal and manager counters, metadata `sync_rewrites`/`sync_overwrites`), replacing
+  the plain fields.
 - [ ] zstd: a real compressor (LZ matches, FSE/Huffman) so compressed journals shrink.
 
 ## Public API (on main)
@@ -68,6 +73,13 @@ resize, sync), `runtime.storage`, with the in-memory backend `runtime.storage.me
   `init_at_most`, `append` (returns `{offset, size}`), `get`, `get_many`, `try_get_sync`,
   `size`, `sync`, `sync_all`, `prune`, `pruned`, `clear`, `destroy`; `Config(V)`. Decoded
   items are owned by the caller (`codec.free`).
+- `storage.journal.segmented.glob`: `Glob(V)` (`append` returning `Entry{offset, size}`,
+  `get(section, offset, size)`, `sync`, `sync_all`, `size`, `prune`, `pruned`,
+  `oldest_section`, `newest_section`, `sections` iterator, `remove_section`, `destroy`,
+  test-only `inject`), `Recovery(V)` (`init`, `init_bounded`, `verify`, `truncate`,
+  `truncate_sections`, `size`, `sections`, `sync`, `remove_section`, `finish`, `deinit`),
+  `Config(V)`, `checksum_size`, and the test helper `corrupt_frame`. The manager gained
+  `truncate_pending_sections([]const SectionSize)` and `section_iterator`.
 - `storage.metadata`: `Metadata(K, V)` with `init`, `deinit`, `get`, `get_mut`,
   `put`, `put_sync`, `upsert`, `remove`, `clear`, `retain`, `items`, `count`, `sync`,
   `destroy`; `Config(V)`.
@@ -133,6 +145,11 @@ resize, sync), `runtime.storage`, with the in-memory backend `runtime.storage.me
   scratch buffer and copy it into the write buffer (commonware encodes in place); the bytes
   are identical.
 
+- glob: decoded values own their memory, so `test_glob_get_view` (two reads share one tip
+  buffer) has no counterpart. `truncate_survives_crash` models a crash that retains the
+  unsynced replacement by writing its bytes into the durable raw blob before reopening, since
+  the memory backend drops every unsynced write at `crash()`.
+
 ## Log
 - 2026-11-13: journal Error, frame encoding/decoding with zstd frames, durability Barrier,
   frame fuzz target.
@@ -149,3 +166,4 @@ resize, sync), `runtime.storage`, with the in-memory backend `runtime.storage.me
 - 2026-11-13: deleted the memory stand-in; tests run on `runtime.storage.memory` through
   `runtime.buffer.mocks` (recording and mutation faults) and crash with `crash()`.
 - 2026-11-13: buffer `Write` and tip; `Manager` generic over its buffer factory.
+- 2026-11-13: segmented glob with `Recovery` and its ported tests.

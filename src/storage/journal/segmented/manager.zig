@@ -120,6 +120,9 @@ pub const WriteFactory = struct {
     }
 };
 
+/// A requested byte size for one section (commonware's `BTreeMap<u64, u64>` entries).
+pub const SectionSize = struct { section: u64, size: u64 };
+
 /// Configuration for section buffers.
 pub fn Config(comptime Factory: type) type {
     return struct {
@@ -320,6 +323,23 @@ pub fn Manager(comptime Factory: type) type {
             return self.sections.items.len;
         }
 
+        /// Iterates retained section numbers, ascending. Invalidated by inserts and removals.
+        pub const SectionIterator = struct {
+            entries: []const Section,
+            index: usize = 0,
+
+            pub fn next(self: *SectionIterator) ?u64 {
+                assert(self.index <= self.entries.len);
+                if (self.index == self.entries.len) return null;
+                defer self.index += 1;
+                return self.entries[self.index].section;
+            }
+        };
+
+        pub fn section_iterator(self: *const Self) SectionIterator {
+            return .{ .entries = self.sections.items };
+        }
+
         /// Remove one section. Returns whether it existed.
         pub fn remove_section(self: *Self, section: u64) Error!bool {
             assert(!self.failed);
@@ -383,6 +403,18 @@ pub fn Manager(comptime Factory: type) type {
             errdefer self.failed = true;
             try self.prune_guard(section);
             try self.truncate_section(section, bytes);
+        }
+
+        /// Durably shorten each listed section (ascending, unique) that is longer than its
+        /// size. Every section passes the prune guard before any is truncated.
+        pub fn truncate_pending_sections(self: *Self, sizes: []const SectionSize) Error!void {
+            assert(!self.failed);
+            errdefer self.failed = true;
+            for (sizes, 0..) |entry, index| {
+                if (index > 0) assert(sizes[index - 1].section < entry.section);
+                try self.prune_guard(entry.section);
+            }
+            for (sizes) |entry| try self.truncate_section(entry.section, entry.size);
         }
 
         fn truncate_section(self: *Self, section: u64, bytes: u64) Error!void {
