@@ -16,7 +16,8 @@
 //! - `Receiver.recv` waits for the value (cancelable). `try_recv` never waits:
 //!   `error.Empty` while the sender may still send, `error.Closed` once it cannot.
 //! - `Receiver.close` refuses later sends but keeps a value already sent readable with
-//!   `try_recv` / `recv` (tokio `close` then `try_recv`).
+//!   `try_recv` / `recv` (tokio `close` then `try_recv`); without one, a `recv` waiting on
+//!   another task wakes with `error.Closed`.
 //! - `Receiver.deinit` drops the receiver and any unreceived value.
 //!
 //! Handles are values: each side is released exactly once, by `send`/`deinit` (sender) or
@@ -135,7 +136,8 @@ pub fn Receiver(comptime T: type) type {
             defer state.unlock();
             while (true) {
                 if (state.take()) |value| return value;
-                if (!state.sender_alive) return error.Closed;
+                // Like tokio: once closed, a value not already sent never arrives.
+                if (!state.sender_alive or !state.receiver_open) return error.Closed;
                 try state.condition.wait(state.io, &state.mutex);
             }
         }
@@ -359,6 +361,21 @@ test "a waiting recv is cancelable" {
     // The channel is still usable after the canceled wait.
     try pair.sender.send(5);
     try testing.expectEqual(@as(u32, 5), try pair.receiver.try_recv());
+    pair.receiver.deinit();
+}
+
+fn close_later(receiver: *Receiver(u32), io: Io) Io.Cancelable!void {
+    try io.sleep(.fromMilliseconds(1), .awake);
+    receiver.close();
+}
+
+test "close wakes a waiting recv" {
+    const io = testing.io;
+    var pair = try channel(u32, testing.allocator, io);
+    var future = try io.concurrent(close_later, .{ &pair.receiver, io });
+    try testing.expectError(error.Closed, pair.receiver.recv());
+    try future.await(io);
+    try testing.expectError(error.Closed, pair.sender.send(1));
     pair.receiver.deinit();
 }
 

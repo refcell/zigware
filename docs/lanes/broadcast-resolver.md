@@ -25,7 +25,16 @@ on p2p's simulated network and the deterministic runtime.
 - `resolver.ingress`: `Message(K, S, M)` (mailbox message: `fetch: Batch`, `retain: Predicate`;
   `fetch_one`, reliable `handle` that coalesces by key, `discard`), `FetchKey(K, S, M)`,
   `Pending(K, S, M)` (the overflow), `Targets(P)` metadata (null = unrestricted).
-- `resolver.p2p.mocks.Key` (one-byte test key).
+- `resolver.delivery`: `Tracker(C, Context, State)` (`init(gpa, io, consumer)`, `insert`,
+  `insert_with_state`, `remove`, `remove_with_state`, `take_state`, `state_mut`, `retain`,
+  `drain`, `deliver`, `redeliver`, `accept_response`, `response_accepted`, `discard_response`,
+  `next_completion` (`error.Aborted` for a canceled delivery without a verdict),
+  `try_next_completion`, `pending`) and `Completion(K, S, Context)` (owns its subscribers).
+- Consumer contract: `C.Key`, `C.Value`, `C.Subscriber`, `C.Outcome` (`bool` or `Outcome`),
+  `deliver(self, Delivery, value) !utils.channel.oneshot.Receiver(C.Outcome)`, optional
+  `deinit_value(gpa, value)`.
+- `resolver.p2p.mocks.Key` (one-byte test key), `resolver.p2p.mocks.Consumer(K, S)` (byte
+  values, expected values, `next_event`/`try_event`).
 - Shared, in the utils directory at the coordinator's request: `utils.channel.oneshot`
   (`channel(T, gpa, io)` -> `.{ sender, receiver }`; `Sender.send` (consumes, `error.Closed`
   when refused), `is_closed`, `closed()` (wait), `deinit`; `Receiver.recv` (cancelable,
@@ -45,10 +54,18 @@ on p2p's simulated network and the deterministic runtime.
 - Ingress batches carry the mailbox allocator (`Batch.gpa`) because the mailbox's `discard`
   takes none; `handle` asserts every batch uses the mailbox's allocator. The pending-fetch
   index hashes each key's codec encoding (Wyhash), so keys need a bounded encoding.
+- The delivery tracker runs each verdict wait as a `std.Io` task (commonware's future pool)
+  that queues finished slots; cancellation is decided when a completion is read and canceled
+  receivers are closed then, matching commonware's biased `select!` and lazy close. The
+  tracker owns cached values (freed through `C.deinit_value` when declared) and lends them to
+  `deliver` for the call. `test_redeliver_requires_cached_response` (`should_panic`) is an
+  assertion here.
+- `utils.channel.oneshot.Receiver.recv` returns `error.Closed` once the receiver is closed
+  without a value (tokio behavior; the delivery tracker relies on it).
 - Seeded fuzz uses `p2p.fuzz.run` (the same driver as codec's).
 
 ## Backlog
-- [ ] resolver: lib.rs traits (done), subscribers.rs (done), ingress.rs (done), opaque.rs, delivery.rs.
+- [ ] resolver: lib.rs, subscribers, ingress, delivery (done); opaque.rs.
 - [ ] resolver p2p: wire.rs (done, conformance hashes match), fetcher, inflight, score,
   config, engine, ingress, mocks; port mod.rs tests on p2p simulated.
 - [ ] broadcast: lib.rs and buffered (engine, ingress, config, mocks) with its tests.
@@ -60,3 +77,5 @@ on p2p's simulated network and the deterministic runtime.
 - 2026-11-13: resolver lib.rs types, subscribers tracker, p2p wire (conformance hashes match).
 - 2026-11-13: resolver ingress (coalescing mailbox policy, targets metadata).
 - 2026-11-13: shared `utils.channel.oneshot` (tokio semantics over std.Io), with a model fuzz.
+
+- 2026-11-13: resolver delivery tracker and mock consumer; oneshot recv wakes on close.

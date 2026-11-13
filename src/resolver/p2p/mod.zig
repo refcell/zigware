@@ -10,6 +10,7 @@ pub const Payload = wire.Payload;
 /// Mock implementations for testing.
 pub const mocks = struct {
     pub const Key = @import("mocks/key.zig").Key;
+    pub const Consumer = @import("mocks/consumer.zig").Consumer;
 };
 
 test {
