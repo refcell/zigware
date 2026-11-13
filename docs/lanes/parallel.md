@@ -39,6 +39,14 @@ placeholder until this lands, so land `Strategy` first and tell the coordinator 
   `runner.allocator`, `runner.io`; `bench.criterion(io, &workload, iters)` (iter_custom),
   `Benchmark.metrics_json`, `bench.Inputs`, `bench.test_mode`.
 
+- `allocator`: `var heap = allocator.Heap.init(io, config); heap.allocator()` gives a
+  `std.mem.Allocator`; `heap.read_stats()` (`allocator.Stats`, commonware's fields),
+  `heap.contains(ptr)`, `heap.collect()`, `heap.effective`, `heap.status`. `Config` (and
+  `Config.default`), `Purge` (`.never`, `.after_ns`), `Reserve.init_pinned/init_unpinned`,
+  `EagerCommit`, `good_size(len)`, the constants (`arena_slice_size`, `arena_chunk_size`,
+  `large_object_limit`, `arena_max_object_size`), and `allocator.metrics.metrics` (name, help,
+  kind, `read(stats)`) for runtime exporters.
+
 ## Decisions
 - No rayon port: `ThreadPool` is a fork-join pool whose workers are `std.Io.Group.concurrent`
   tasks and whose waits are `std.Io` futexes, so the deterministic runtime can host it. The
@@ -61,6 +69,14 @@ placeholder until this lands, so land `Strategy` first and tell the coordinator 
 - Mocks: a seeded `Explorer` keys its choice by the call's return address (Zig has no
   `#[track_caller]`), so seeds repeat within one build. `pending`'s queued jobs run when
   `block_on` takes them back, since a Zig task must be awaited before it goes out of scope.
+- allocator: no mimalloc (zero deps, no libc). `Heap` is a native allocator with mimalloc's
+  layout: its size classes, shared pages up to `large_object_limit`, single-block pages above,
+  arenas of 64 KiB slices with metadata in front, pinned and unpinned reservations, on-demand
+  arenas, delayed purges (madvise) at collections, and pages above `arena_max_object_size`
+  (or with alignment beyond a slice) mapped on their own. One lock guards a heap, so `Stats`
+  are exact; the mimalloc-only knobs (large OS pages, THP, stats merge threshold) are recorded
+  in `effective` but change nothing. A heap is a value, not the process allocator, so
+  configuration is per heap rather than once per process.
 - Fallible ops return the first error in chunk order (commonware allows any).
 - `run_tiles` plans at most 64 workers (one pool job each); `Tiles.fill_collect` returns an
   allocated slice and `OutOfMemory` if a worker's result list cannot grow.
@@ -74,7 +90,7 @@ placeholder until this lands, so land `Strategy` first and tell the coordinator 
 - [x] parallel: `spawn`/`block_on` over the pool.
 - [x] parallel mocks.rs (Explorer, explore, pooled, inlined, pending) with its tests.
 - [ ] parallel policy.rs and topology.rs (CPU topology, pinning policy).
-- [ ] allocator: an allocator wrapper with commonware's metrics and purge/reserve
+- [x] allocator: an allocator wrapper with commonware's metrics and purge/reserve
   configuration; no mimalloc (zero deps).
 - [x] bench: the benchmark workload abstraction (lib.rs) and `zig build bench`.
 - [ ] bench: the tracker binary's config, results comparison, and report rendering
@@ -82,6 +98,8 @@ placeholder until this lands, so land `Strategy` first and tell the coordinator 
 - [ ] Fuzz targets and benches.
 
 ## Log
+- 2026-11-13: allocator `Heap` (mimalloc layout, reserve/purge config, Stats, metrics) with
+  ported config/size-class/heap tests, a threaded stress test, and seeded and std fuzz.
 - 2026-11-13: bench package and `zig build bench` (auto-discovered benches.zig), parallel
   benches; every-op-on-every-strategy test.
 - 2026-11-13: mocks (Explorer, explore, pooled, inlined, pending) with ported tests.
