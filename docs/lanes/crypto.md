@@ -43,7 +43,10 @@ handshake), then certificate, secp256r1, the rest, zk and banderwagon last.
   `bloomfilter` fuzz target (`New` constructor).
 - [ ] bloomfilter `with_rate`/`optimal_*`/estimates and the `RationalOptimalBits` hash (waits
   for `utils.rational`'s `BigRational` and `log2_floor`).
-- [ ] banderwagon, zk (bulletproofs, pedersen) last.
+- [x] zk circuit (`zk/circuit.zig`): `Context`, `Var`, `BoolVar`, `Selector`, and the
+  minifuzz satisfaction plan.
+- [ ] zk bulletproofs (ipa, circuit) and `pedersen_to_plain`, then banderwagon (needs the
+  bls12381 `Scalar` from the bls-math lane).
 - [ ] Fuzz targets (commonware cryptography/fuzz) and conformance hashes.
 
 ## Log
@@ -112,3 +115,9 @@ handshake), then certificate, secp256r1, the rest, zk and banderwagon last.
   alive and unchanged while a `Digested` refers to it. `compute(value, strategy)` hashes
   synchronously through `digest_across` (no future). It has `write`/`encode_size` but no
   `read`, so it is not a codec type; encode it with `digested.write(writer)`.
+- zk circuits build through an explicit `Context(F)` (`.verifier` or `.prover`) instead of
+  `build`/`build_with_values` closures, with buffers sized up front from a `Capacity`, so var
+  arithmetic never fails (exceeding the capacity panics). Var arithmetic is method calls
+  (`add`, `sub`, `mul`, `neg`, `div`, `inv`); allocation order matches commonware's, so the
+  circuits match node for node. Witness initializers are `init.call(values)` structs, or
+  `witness_value` for a known value.
