@@ -28,8 +28,10 @@ resize, sync), `runtime.storage`, with the in-memory backend `runtime.storage.me
 - [x] journal/contiguous: fixed journal (checkpoint, blob partition, recovery with watermark
   and clear intent, bounded open, `init_at_size`, `clear_to_size`, replay batches) with the
   shared contiguous suite and the checkpoint tests.
-- [ ] journal/contiguous: port the rest of fixed.rs's own tests (recovery faults, torn pages,
-  legacy partitions, clear crash scenarios, read_many accounting).
+- [x] journal/contiguous: fixed.rs's partition, replay, codec-error, interrupted
+  `init_at_size`/`destroy`, repair, stale-hint, legacy-watermark, and commit tests.
+- [ ] journal/contiguous: the rest of fixed.rs's tests (torn interior pages, bounded-open
+  faults, `init_at_most` crashes, clear crash scenarios, read_many accounting).
 - [ ] journal/contiguous: variable journal.
 - [ ] journal/authenticated.rs.
 - [x] metadata (two-blob atomic key-value store).
@@ -191,3 +193,4 @@ resize, sync), `runtime.storage`, with the in-memory backend `runtime.storage.me
 - 2026-11-13: buffer `Write` and tip; `Manager` generic over its buffer factory.
 - 2026-11-13: segmented glob with `Recovery` and its ported tests.
 - 2026-11-13: contiguous fixed journal with checkpoint and blob partitions; shared suite.
+- 2026-11-13: first batch of the fixed contiguous journal's own recovery tests.
