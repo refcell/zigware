@@ -16,6 +16,7 @@
 const std = @import("std");
 const assert = std.debug.assert;
 const codec = @import("codec");
+const transcript = @import("../transcript.zig");
 
 pub const Point = std.crypto.ecc.Edwards25519;
 const Fe = Point.Fe;
@@ -245,11 +246,20 @@ pub const BatchItem = struct {
     message: []const u8,
 };
 
+const noise_batch_verify = "batch_verify";
+
 /// Verifies `count` signatures at once: `[8](sum z_i (R_i + k_i A_i - s_i B)) == 0` with
-/// random 128-bit `z_i` drawn from `rng`, which an attacker must not predict. `items` has
-/// `item(index) BatchItem`. An empty batch is rejected, as in commonware.
+/// random 128-bit `z_i`, which an attacker must not predict. As in commonware, the `z_i`
+/// come from a v1 transcript resumed from a 32-byte seed drawn from `rng`, committed to the
+/// batch index (always 0: one batch on the calling thread), and read as `batch_verify`
+/// noise. `items` has `item(index) BatchItem`. An empty batch is rejected.
 pub fn verify_batch(rng: anytype, count: usize, items: anytype) bool {
     if (count == 0) return false;
+    var seed: transcript.Summary = undefined;
+    rng.fill_bytes(&seed.bytes);
+    var shard = transcript.Transcript.resume_from(seed, .v1);
+    shard.commit(&codec.encode_fixed(u64, 0));
+    var noise = shard.noise(noise_batch_verify);
     var sum = MultiScalar.init();
     var base_coefficient = scalar.zero;
     for (0..count) |index| {
@@ -259,7 +269,7 @@ pub fn verify_batch(rng: anytype, count: usize, items: anytype) bool {
         const r = decompress(item.signature[0..32].*) orelse return false;
         const k = challenge(item.signature[0..32], &item.key.bytes, item.namespace, item.message);
         var z = scalar.zero;
-        rng.fill_bytes(z[0..16]);
+        noise.fill_bytes(z[0..16]);
         base_coefficient = scalar.sub(base_coefficient, scalar.mul(z, s));
         sum.add(r, z);
         // minus_a carries -A, so the coefficient is negated to add z k A.

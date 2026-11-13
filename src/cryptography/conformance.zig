@@ -5,7 +5,16 @@
 //! A small lane-local driver until the conformance package exports one.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const assert = std.debug.assert;
+const build_options = @import("build_options");
+
+/// Conformance cases that run signature schemes thousands of times take about a minute in
+/// a Debug build. They run in optimized builds (CI runs ReleaseSafe) and with
+/// `-Dslow-tests`; a Debug run without it skips them.
+pub fn skip_slow() error{SkipZigTest}!void {
+    if (builtin.mode == .debug and !build_options.slow_tests) return error.SkipZigTest;
+}
 
 /// Computes the conformance hash of `commit(gpa, seed, *log)` over `n_cases` seeds.
 pub fn hash(

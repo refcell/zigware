@@ -20,7 +20,9 @@ handshake), then certificate, secp256r1, the rest, zk and banderwagon last.
 - [x] ed25519: keys, namespaced sign/verify, ZIP-215 verification, batch verify, codec;
   RFC 8032, Wycheproof, and ZIP-215 vectors; decode and batch fuzz targets.
 - [ ] ed25519 conformance hashes and `certificate` scheme (after certificate.rs).
-- [ ] chacha20_poly1305 (`Cipher`), transcript.rs, secret.rs.
+- [x] chacha20_poly1305 (`Cipher`) with the `Seal` conformance hash.
+- [x] transcript.rs with the `TranscriptV0Ops`/`TranscriptV1Ops` conformance hashes.
+- [ ] secret.rs.
 - [ ] handshake (sake) used by `stream`.
 - [ ] certificate.rs: the certificate scheme abstraction and mocks.
 - [ ] secp256r1: standard and recoverable signatures, codec, certificate scheme.
@@ -42,8 +44,12 @@ handshake), then certificate, secp256r1, the rest, zk and banderwagon last.
 - ed25519 verification is ZIP-215 on std's Edwards25519 arithmetic (`ed25519/core.zig`):
   lenient point decoding, canonical `s`, cofactored check. Small-order keys go through an
   own variable-time multiscalar loop because std's `mul*Public` rejects them.
-- ed25519 batch verification draws its 128-bit coefficients straight from the caller's
-  RNG; commonware derives them from a transcript seeded by that RNG. Accept/reject results
-  are the same; switch to the transcript once it is ported.
+- ed25519 batch verification derives its coefficients from a transcript as commonware
+  does, always as one shard (batch index 0) on the calling thread.
 - `verify_batch(rng, items, projector, strategy)`: `projector.project(index, *const Item)`
   returns a `BatchEntry`; `cryptography.entries` projects a slice of entries.
+- Conformance hashes that run signature schemes thousands of times skip in Debug unless
+  `-Dslow-tests` (`conformance.skip_slow`); CI's ReleaseSafe run checks them.
+- `Transcript.resume` is `resume_from`; `Transcript::sample` is `sample_label`.
+  `Summary` is `Digest(32, "transcript")`; `Summary::sign`/`verify` are `sign_summary` and
+  `verify_summary`.

@@ -39,6 +39,8 @@ pub const chacha20_poly1305 = @import("chacha20_poly1305.zig");
 pub const ChaCha20Poly1305 = chacha20_poly1305.ChaCha20Poly1305;
 pub const assert_cipher = signer.assert_cipher;
 pub const bls12381 = @import("bls12381/root.zig");
+pub const transcript = @import("transcript.zig");
+pub const Transcript = transcript.Transcript;
 
 /// The digest type of hasher `H` (commonware `DigestOf<H>`).
 pub fn DigestOf(comptime H: type) type {
