@@ -23,7 +23,10 @@ handshake), then certificate, secp256r1, the rest, zk and banderwagon last.
 - [x] chacha20_poly1305 (`Cipher`) with the `Seal` conformance hash.
 - [x] transcript.rs with the `TranscriptV0Ops`/`TranscriptV1Ops` conformance hashes.
 - [ ] secret.rs.
-- [ ] handshake (sake) used by `stream`.
+- [x] handshake (sake) used by `stream`: V0/V1, X25519 on std, `SakeV0`/`SakeV1`
+  conformance hashes, RFC 7748 and Wycheproof X25519 vectors, message decode fuzz.
+- [ ] sake: `test_v1_rejects_derived_identity` (needs secp256r1) and `CodecConformance` of
+  Syn/SynAck/Ack (needs the codec `arbitrary` generator).
 - [ ] certificate.rs: the certificate scheme abstraction and mocks.
 - [ ] secp256r1: standard and recoverable signatures, codec, certificate scheme.
 - [ ] lthash, bloomfilter (+ conformance).
@@ -53,3 +56,7 @@ handshake), then certificate, secp256r1, the rest, zk and banderwagon last.
 - `Transcript.resume` is `resume_from`; `Transcript::sample` is `sample_label`.
   `Summary` is `Digest(32, "transcript")`; `Summary::sign`/`verify` are `sign_summary` and
   `verify_summary`.
+- SAKE is `handshake.sake.Sake(Signer)`: `Context.init`, `dial_start`, `listen_start`,
+  `dial_end`, `listen_end`; results are structs (`DialStart`, `ListenStart`, `DialEnd`).
+  Errors carry no payload (`InvalidTimestamp` drops the value and range). Ephemeral and
+  shared secrets are zeroized once used.

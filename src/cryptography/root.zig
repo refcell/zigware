@@ -42,6 +42,7 @@ pub const assert_cipher = signer.assert_cipher;
 pub const bls12381 = @import("bls12381/root.zig");
 pub const transcript = @import("transcript.zig");
 pub const Transcript = transcript.Transcript;
+pub const handshake = @import("handshake.zig");
 
 /// The digest type of hasher `H` (commonware `DigestOf<H>`).
 pub fn DigestOf(comptime H: type) type {
