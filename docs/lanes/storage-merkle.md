@@ -17,7 +17,8 @@ variants need `runtime` storage; do them after its interface lands.
 - [x] merkle/mmb and shared merkle proof types.
 - bmt moved to the coding lane (it needs it first).
 - [x] bitmap (authenticated bitmap over MMR).
-- [ ] index (ordered/unordered, partitioned) over translators.
+- [ ] index (ordered/unordered, partitioned) over translators. Flat unordered and ordered
+  done; partitioned and immutable next.
 - [ ] merkle/persisted (journaled MMR) once runtime storage lands.
 - [ ] Fuzz targets (storage/fuzz entries for these modules).
 
@@ -62,3 +63,12 @@ variants need `runtime` storage; do them after its interface lands.
   against a from-scratch rebuild; skipping dirty-chunk rehashing fails it at iteration 3.
   Commonware's `should_panic` tests (bad pushes, pruned/out-of-bounds reads) are panics in
   `utils.bitmap.Prunable` and are not ported as tests.
+- index: commonware's `Unordered`/`Ordered`/`Cursor` traits become one type,
+  `index.storage.Index(T, V, Heads)`; `unordered.Index` keeps heads in a `std.HashMapUnmanaged`
+  (translator hash), `ordered.Index` in a `std.Treap` over a memory pool (commonware's
+  `BTreeMap`). Values iterate newest first, exactly as commonware's head + reversed overflow
+  chain. The cursor edits the chain in place in the overflow map (never storing an empty chain)
+  instead of taking it out and putting it back on drop, so `Cursor.finish` only removes an
+  emptied key. Closures are a context value plus a comptime fn. The fuzz drives both indices and
+  a reference model with every commonware fuzz operation and checks values and counters after
+  each step; inserting after the head at the wrong chain end fails it and 3 ported tests.

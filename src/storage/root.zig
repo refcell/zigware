@@ -14,6 +14,7 @@ pub const merkle = @import("merkle/mod.zig");
 pub const bitmap = @import("bitmap/mod.zig");
 pub const AuthenticatedBitMap = bitmap.BitMap;
 pub const bmt = @import("bmt/mod.zig");
+pub const index = @import("index/mod.zig");
 pub const mmb = merkle.mmb;
 pub const mmr = merkle.mmr;
 pub const journal = @import("journal/mod.zig");
