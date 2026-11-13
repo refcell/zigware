@@ -27,6 +27,8 @@
 const std = @import("std");
 const assert = std.debug.assert;
 
+pub const header = @import("storage/header.zig");
+
 pub const Error = error{
     PartitionNameInvalid,
     PartitionCreationFailed,
@@ -279,4 +281,8 @@ test "options are single bits" {
     try std.testing.expectEqual(@as(u8, 1), @as(u8, @bitCast(WriteOptions{ .sync = true })));
     try std.testing.expectEqual(@as(u8, 2), @as(u8, @bitCast(WriteOptions{ .dont_cache = true })));
     try std.testing.expectEqual(@as(u8, 1), @as(u8, @bitCast(ReadOptions{ .dont_cache = true })));
+}
+
+test {
+    _ = header;
 }
