@@ -51,6 +51,12 @@ the registry API first and report it.
 - `Scope` stays under 640 bytes (asserted) so a context can copy it into a task closure (the
   deterministic runner caps closures at 1 KiB): prefix up to 128 bytes, 4 attributes of up to
   96-byte values.
+- Traces have no global subscriber (library code never touches global state): components take
+  a `Tracer` (from the runtime context once hooked up) and tests read a `Collector`. Spans are
+  explicit values with parent pointers instead of a task-local current span. The collector is
+  bounded (`event_count_max`, overflow counted in `dropped`); commonware keeps every event.
+- OTLP export is not ported (no OpenTelemetry dependency); `status` records the status on the
+  span so tests can check it.
 
 ## Backlog
 - [x] metrics registry: counters, gauges, histograms (bucket layout as commonware), label
@@ -58,10 +64,11 @@ the registry API first and report it.
   byte-identical to commonware's output for the same metrics. No allocation on the record
   path. Port the tests.
 - [x] metrics: batched, status, task (per-task metrics), histogram helpers (timers).
-- [ ] traces: span collector and status for tests (what commonware's tests assert on).
+- [x] traces: span collector and status for tests (what commonware's tests assert on).
 - [ ] Hook into `runtime.deterministic.Runner` (coordinate with the runtime lane, thread
   T-01a1d57b-1bfd-71b8-940f-5663d558c803) so `Context`/`metrics()` returns the registry.
 
 ## Log
 - 2026-11-13: metrics registry, scopes, raw metrics, dtoa, byte-identical exposition.
 - 2026-11-13: batched, status, task labels, histogram timers.
+- 2026-11-13: traces: Tracer, spans, Collector with commonware's assertions, status, traced.
