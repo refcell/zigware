@@ -20,6 +20,14 @@ hashers (on main).
 - `coding.Config` (`minimum_shards`, `extra_shards` as non-zero `u16`s; `total_shards()`,
   codec with `fixed_size` 4, `eql`, `order`) and `coding.assert_scheme(S)`, the comptime
   `Scheme` interface (see `src/coding/root.zig`).
+- `coding.ReedSolomon(H)`: `Commitment` (= `H.Digest`), `Shard` (`reed_solomon.Chunk(D)`: `shard`,
+  `index`, owned `proof`; codec cfg `ShardCfg{ config, maximum_data_bytes }`), `CheckedShard`
+  (`CheckedChunk(H)`), `Error`, `ShardRef`, `max_shard_size(config, data)`,
+  `encode(gpa, config, data, strategy) !Encoding(D)` (`commitment`, `shards`, `codeword`;
+  `deinit(gpa)`), `check(config, *commitment, index, *shard, strategy)`, `check_many(gpa, config,
+  *commitment, []ShardRef, out, strategy)`, `decode(gpa, config, *commitment, []CheckedShard,
+  strategy) ![]u8` (caller frees). Strategies are `parallel` strategies; striping uses
+  `try_run_batches`. `coding.fuzz` is the `coding/fuzz` reed_solomon target.
 - `storage.bmt`: `Builder(H)` (`init(gpa, leaves)`, `add(gpa, *digest) u32`, `build(gpa)`,
   `deinit`), `Tree(D)` (`root()`, `proof(gpa, position, diag)`, `range_proof(gpa, start, end,
   diag)`, `multi_proof(gpa, positions, diag)`, `level(i)`, `deinit`), `Proof(D)` (`leaf_count`,
@@ -48,10 +56,17 @@ hashers (on main).
 - The bmt fuzz draws an operation tag then its fields from `Unstructured` instead of
   commonware's derived enum layout; the operations and asserted properties are the same.
 
+- Coding shards and checked shards borrow their bytes (from the encoding's `codeword`, or from
+  the decoded input) instead of holding a `Bytes` refcount; `Encoding.deinit` frees them.
+- Commonware caches one encoder and decoder per thread; here each stripe task creates its own and
+  reuses it across its tiles, so the cached-width test (`test_single_stripe_coding_caches_tile_
+  width`) has no counterpart. `#[should_panic]` tests (invalid encode parameters, `max_shard_size`
+  panics) are assertions and panics here and are not run; `encode_iobufs` is not ported (codec
+  has no vectored writes).
+- `check_many` writes results into a caller slice; `Explorer`/`explore` shapes are covered by
+  running each striped test with `Sequential` and a 4-way `Rayon`.
+
 ## Backlog
-- [ ] storage bmt (moved from storage-merkle): the whole of commonware's storage/src/bmt
-  (Builder, root, proofs, multi-proofs, range proofs, codec, conformance, fuzz) at
-  `src/storage/bmt/`, with `pub const bmt` in `src/storage/root.zig` (additive edit).
 - [x] reed_solomon: GF(2^16) arithmetic, naive and scalar engines, high/low/default rate
   encoders and decoders, wrappers, results, plans; every recovery-hash vector (slow ones under
   `-Dslow-tests`) and the rate, wrapper, result, and plan tests.
@@ -63,13 +78,16 @@ hashers (on main).
   `bmt_operations` fuzz (minifuzz + `std.testing.fuzz`).
 - [ ] storage bmt benches once `zig build bench` exists.
 - [x] coding: Config (codec, CodecConformance<Config> hash) and the Scheme interface.
-- [ ] coding: the Scheme interface, reed_solomon scheme (encode into shards with a BMT
-  commitment, check, reshard, decode from any k shards), shard selection, codec encodings
-  identical to commonware's. Port lib.rs and reed_solomon.rs tests.
-- [ ] Fuzz targets (commonware coding/fuzz) and conformance hashes.
+- [x] coding: ReedSolomon scheme (striped encode with a BMT commitment, check, check_many,
+  striped decode and reveal), Chunk codec, every lib.rs and reed_solomon.rs test except panic
+  tests, pinned commitments and recovery output, CodecConformance<Chunk> hash, the
+  unique-commitment and roundtrip minifuzz tests, and the coding/fuzz reed_solomon target.
+- [ ] coding benches (`coding_scheme_times`, `coding_scheme_sizes`, shard_selection,
+  reed_solomon) once `zig build bench` exists.
 
 ## Log
 - 2026-11-13: reed_solomon engines, rates, wrappers, results, plans, and test vectors.
 - 2026-11-13: reed_solomon differential fuzzing (engine and rate plans, field oracle).
 - 2026-11-13: storage bmt (proofs, codec, conformance, fuzz).
 - 2026-11-13: coding Config with its conformance hash, and the Scheme interface.
+- 2026-11-13: coding ReedSolomon scheme, tests, Chunk conformance hash, and fuzz target.

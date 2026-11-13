@@ -98,6 +98,12 @@ pub fn assert_scheme(comptime S: type) void {
     }
 }
 
+pub const reed_solomon = @import("reed_solomon/mod.zig");
+pub const ReedSolomon = reed_solomon.ReedSolomon;
+pub const fuzz = @import("fuzz.zig");
+
 test {
     _ = @import("config_test.zig");
+    _ = @import("reed_solomon/tests.zig");
+    _ = fuzz;
 }
