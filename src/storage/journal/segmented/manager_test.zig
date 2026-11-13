@@ -7,11 +7,11 @@
 const std = @import("std");
 const testing = std.testing;
 const runtime = @import("runtime");
-const memory = runtime.buffer.memory;
+const mocks = runtime.buffer.mocks;
 const paged = runtime.buffer.paged;
 const manager_mod = @import("manager.zig");
 
-const Storage = memory.Storage;
+const Storage = mocks.Storage;
 const M = manager_mod.Manager;
 const gpa = testing.allocator;
 const partition = "test";

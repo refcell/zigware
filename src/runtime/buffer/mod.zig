@@ -1,14 +1,14 @@
 //! Buffers for reading and writing to blobs (commonware's `runtime/src/utils/buffer`).
 //!
 //! Owned by the storage-journal lane (docs/lanes/storage-journal.md). Buffers wrap a
-//! `runtime.storage.Blob`; `memory` is an in-memory test backend for `runtime.storage` until the
-//! runtime's own lands.
+//! `runtime.storage.Blob`; `mocks` wraps the runtime's in-memory storage with commonware's
+//! recording and mutation-fault mocks for tests.
 
 const std = @import("std");
 const assert = std.debug.assert;
 const Blob = @import("../storage.zig").Blob;
 
-pub const memory = @import("memory.zig");
+pub const mocks = @import("mocks.zig");
 pub const paged = @import("paged/mod.zig");
 
 /// Tracks whether blob mutations still need a sync (commonware's `SyncState`).

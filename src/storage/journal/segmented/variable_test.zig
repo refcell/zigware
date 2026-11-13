@@ -2,21 +2,21 @@
 //! `segmented/variable.rs` (same 1024-byte pages and 10-page cache).
 //!
 //! Faults that commonware injects through the deterministic runtime (failed resizes and
-//! writes) use the memory backend's mutation budget. Tests of dropping an in-flight `next`,
+//! writes) use the storage mock's mutation budget. Tests of dropping an in-flight `next`,
 //! read options, and metric encodings have no counterpart.
 
 const std = @import("std");
 const testing = std.testing;
 const codec = @import("codec");
 const runtime = @import("runtime");
-const memory = runtime.buffer.memory;
+const mocks = runtime.buffer.mocks;
 const paged = runtime.buffer.paged;
 const variable = @import("variable.zig");
 const manager_mod = @import("manager.zig");
 const frame = @import("../frame.zig");
 const test_support = @import("test_support.zig");
 
-const Storage = memory.Storage;
+const Storage = mocks.Storage;
 const CacheRef = paged.CacheRef;
 const gpa = testing.allocator;
 const page_size: u16 = 1024;
@@ -377,14 +377,14 @@ test "replay repairs a torn interior page when reached" {
     defer h.deinit();
     const config = try seed_torn_interior_page(&h, false);
     const name = manager_mod.section_name(1);
-    const original = h.storage.durable_len(partition, &name).?;
+    const original = (try h.storage.durable_len(partition, &name)).?;
     var recovery = try variable.Journal(u64).init(gpa, h.storage.interface(), config);
     // Neither setup nor consuming an earlier section repairs a later one.
-    try testing.expectEqual(original, h.storage.durable_len(partition, &name).?);
+    try testing.expectEqual(original, (try h.storage.durable_len(partition, &name)).?);
     const first = (try recovery.next()).?;
     try testing.expectEqual(@as(u64, 0), first.section);
     try testing.expectEqual(@as(u64, std.math.maxInt(u64)), first.item);
-    try testing.expectEqual(original, h.storage.durable_len(partition, &name).?);
+    try testing.expectEqual(original, (try h.storage.durable_len(partition, &name)).?);
     var count: u64 = 0;
     while (try recovery.next()) |item| : (count += 1) {
         try testing.expectEqual(@as(u64, 1), item.section);

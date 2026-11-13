@@ -9,7 +9,7 @@ const testing = std.testing;
 const cryptography = @import("cryptography");
 const merkle = @import("../merkle/mod.zig");
 const authenticated = @import("authenticated.zig");
-const memory = @import("runtime").buffer.memory;
+const memory = @import("runtime").storage.memory;
 const fuzz_bytes = @import("../fuzz_bytes.zig");
 
 const Sha256 = cryptography.Sha256;
@@ -41,7 +41,7 @@ fn open(
     partition: []const u8,
     hasher: *const H,
 ) !TestBitMap(N) {
-    return TestBitMap(N).init(gpa, storage.interface(), partition, hasher);
+    return TestBitMap(N).init(gpa, storage.storage(), partition, hasher);
 }
 
 fn verify(
@@ -490,7 +490,7 @@ const FuzzState = struct {
     fn check_root(self: *FuzzState) !void {
         var scratch_storage = Storage.init(gpa);
         defer scratch_storage.deinit();
-        var scratch = try FuzzMap.init(gpa, scratch_storage.interface(), "scratch", &self.hasher);
+        var scratch = try FuzzMap.init(gpa, scratch_storage.storage(), "scratch", &self.hasher);
         defer scratch.deinit();
         scratch.into_dirty();
         for (self.bits.items) |bit| try scratch.push(bit);
@@ -564,7 +564,7 @@ fn fuzz_proof(state: *FuzzState, reader: *fuzz_bytes.Reader) !void {
 
 fn fuzz_restore(state: *FuzzState) !void {
     state.bitmap.deinit();
-    state.bitmap = try FuzzMap.init(gpa, state.storage.interface(), fuzz_partition, &state.hasher);
+    state.bitmap = try FuzzMap.init(gpa, state.storage.storage(), fuzz_partition, &state.hasher);
     // Only the pruning state persists, so the bitmap reopens with just its pruned bits.
     const count = state.bitmap.len();
     try testing.expectEqual(count, state.bitmap.pruned_bits());
@@ -608,7 +608,7 @@ fn fuzz_run(bytes: []const u8) anyerror!void {
     var state: FuzzState = .{
         .storage = &storage,
         .hasher = hasher,
-        .bitmap = try FuzzMap.init(gpa, storage.interface(), fuzz_partition, &hasher),
+        .bitmap = try FuzzMap.init(gpa, storage.storage(), fuzz_partition, &hasher),
     };
     defer state.bits.deinit(gpa);
     defer state.bitmap.deinit();

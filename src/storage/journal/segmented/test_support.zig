@@ -4,11 +4,11 @@ const std = @import("std");
 const assert = std.debug.assert;
 const testing = std.testing;
 const runtime = @import("runtime");
-const memory = runtime.buffer.memory;
+const mocks = runtime.buffer.mocks;
 const paged = runtime.buffer.paged;
 const manager_mod = @import("manager.zig");
 
-const Storage = memory.Storage;
+const Storage = mocks.Storage;
 const CacheRef = paged.CacheRef;
 const gpa = testing.allocator;
 
@@ -115,7 +115,11 @@ pub fn check_interrupted_bounded_open(comptime Adapter: type) !void {
             }
             storage.allow_mutations(interrupted);
             const first: Bound = .{ .section = 1, .end = bound };
-            const completed = if (Adapter.open(&storage, &cache, first)) |opened| blk: {
+            const attempt = Adapter.open(&storage, &cache, first);
+            // The run crashes after the open, whether or not it completed (commonware's
+            // `start_and_recover`): only durable contents survive.
+            storage.crash();
+            const completed = if (attempt) |opened| blk: {
                 var journal = opened;
                 journal.deinit();
                 break :blk true;

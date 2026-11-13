@@ -6,13 +6,13 @@ const assert = std.debug.assert;
 const testing = std.testing;
 const Crc32 = @import("cryptography").crc32.Crc32;
 const build_options = @import("build_options");
-const memory = @import("../memory.zig");
+const mocks = @import("../mocks.zig");
 const paged = @import("mod.zig");
 const writer_mod = @import("writer.zig");
 const CacheRef = paged.CacheRef;
 const Checksum = paged.Checksum;
 
-const Storage = memory.Storage;
+const Storage = mocks.Storage;
 const W = writer_mod.Writer;
 const gpa = testing.allocator;
 const page_size: usize = 103;

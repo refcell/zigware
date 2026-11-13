@@ -7,12 +7,12 @@ const testing = std.testing;
 const runtime = @import("runtime");
 const Sha256 = @import("cryptography").sha256.Sha256;
 const Digest = @import("cryptography").sha256.Digest;
-const memory = runtime.buffer.memory;
+const mocks = runtime.buffer.mocks;
 const paged = runtime.buffer.paged;
 const fixed = @import("fixed.zig");
 const manager_mod = @import("manager.zig");
 
-const Storage = memory.Storage;
+const Storage = mocks.Storage;
 const CacheRef = paged.CacheRef;
 const J = fixed.Journal(Digest);
 const Item = J.Recovery.Item;

@@ -3,7 +3,7 @@
 //!
 //! Keys are `u64`, whose codec encoding (8 bytes, big-endian) is commonware's `U64`.
 //! Values are `[]const u8` (`Vec<u8>`). Metric names map to fields: `sync_rewrites`,
-//! `sync_overwrites`, `count()` for `keys`, and the memory storage's `write_bytes` for
+//! `sync_overwrites`, `count()` for `keys`, and the storage mock's `write_bytes` for
 //! `runtime_storage_write_bytes_total`.
 
 const std = @import("std");
@@ -11,11 +11,11 @@ const assert = std.debug.assert;
 const testing = std.testing;
 const codec = @import("codec");
 const metadata = @import("mod.zig");
-const memory = @import("runtime").buffer.memory;
+const mocks = @import("runtime").buffer.mocks;
 const fuzz_bytes = @import("../fuzz_bytes.zig");
 const Crc32 = @import("cryptography").crc32.Crc32;
 
-const Storage = memory.Storage;
+const Storage = mocks.Storage;
 const blob_page_size: u64 = @import("runtime").storage.blob_page_size;
 const Store = metadata.Metadata(u64, []const u8);
 const gpa = testing.allocator;
@@ -97,7 +97,7 @@ test "put get clear" {
     try expect_value(&store, 42, null);
     try expect_metrics(&store, 0, 0, 0);
     try store.destroy();
-    try testing.expectEqual(@as(usize, 0), storage.partitions.count());
+    try testing.expectError(error.PartitionMissing, storage.scan(gpa, "test"));
 }
 
 test "put returns previous value" {

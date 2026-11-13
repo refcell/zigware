@@ -7,8 +7,7 @@ lane by the coordinator because the journal is its main user). Add your `pub con
 
 Reference: `~/.cache/zigware/commonware-ref/storage/src/{journal,metadata,queue}`. These
 persist through the runtime's storage (`Storage` partitions and `Blob` read_at, write_at,
-resize, sync). The runtime lane is landing that interface and an in-memory backend first;
-build on it. Until then, start with the pure parts (frame.rs, durability, item encodings).
+resize, sync), `runtime.storage`, with the in-memory backend `runtime.storage.memory`.
 
 ## Backlog
 - [x] runtime buffer paged core: page format (two-slot CRC record), tip buffer, page cache,
@@ -26,7 +25,7 @@ build on it. Until then, start with the pure parts (frame.rs, durability, item e
 - [ ] journal/segmented: glob and oversized journals.
 - [ ] journal/contiguous: fixed and variable contiguous journals.
 - [ ] journal/authenticated.rs.
-- [x] metadata (two-blob atomic key-value store), over the in-lane memory storage.
+- [x] metadata (two-blob atomic key-value store).
 - [ ] metadata: `start_sync` (pipelined syncs), conformance hash (`MetadataWorkload`), and
   the fault-injection tests (torn writes, failed syncs), once runtime storage lands.
 - [ ] queue (persistent queue with cursor).
@@ -42,9 +41,9 @@ build on it. Until then, start with the pure parts (frame.rs, durability, item e
 - `storage.journal.durability.Barrier(Completion)`: durable-boundary tracker.
 - `storage.journal.zstd`: `compress_into`, `compress_bound`, `frame_content_size`,
   `decompress`.
-- `runtime.buffer.memory` (re-exported as `storage.journal.memory`): in-memory test backend;
-  `Storage.init(gpa)`, `interface()` returns a `runtime.storage.Storage`; counters `reads`,
-  `writes`, `write_bytes`; faults `remove_failures_after`, `allow_mutations`.
+- `runtime.buffer.mocks.Storage`: test storage over `runtime.storage.memory`;
+  `init(gpa)`, `interface()`, `crash()`, `durable_len`; counters `reads`, `writes`,
+  `write_bytes`; faults `allow_mutations`, `remove_failures_after`.
 - `runtime.buffer.SyncState`; `runtime.buffer.paged`: `Checksum`, `page_size`, `page_len`,
   `corrupt_page`, `CacheRef` (`init(gpa, page_size, capacity)`, `next_id`, `cache`,
   `read_cached`, `clear`), `Writer` (`init`, `open_recovery`, `truncate`,
@@ -91,11 +90,12 @@ build on it. Until then, start with the pure parts (frame.rs, durability, item e
   compressor differs by design.
 
 - Storage: journal, metadata, and the buffers take `runtime.storage.Storage` and
-  `runtime.storage.Blob` vtable values (no comptime storage parameter). Until the runtime's
-  in-memory backend lands, tests run on `runtime.buffer.memory`, a test backend implementing
-  that vtable (live contents published by `sync`; closing without a sync drops unsynced
-  writes), with read/write counters and removal and mutation fault knobs. It does not model
-  the blob header. Read options are not used.
+  `runtime.storage.Blob` vtable values (no comptime storage parameter). Tests run on
+  `runtime.buffer.mocks.Storage`, which wraps the runtime's `storage.memory` backend with what
+  commonware's runtime mocks provide (`RecordingContext` read counts and
+  `runtime_storage_write_bytes_total`, `MutationFaultContext` faults, plus a removal fault),
+  and crash with `crash()` where commonware uses `start_and_recover`. The mocks live in the
+  buffer directory until the runtime lane ports `mocks.rs`; they can move there unchanged.
 - metadata: keys are fixed-size codec types sorted by encoded bytes (commonware's `Span`
   ordering); values are owned by the store and must not borrow input (`codec.Bytes`).
   Methods that commonware makes consuming (`sync`, `put_sync`) mark the store failed on
@@ -119,7 +119,7 @@ build on it. Until then, start with the pure parts (frame.rs, durability, item e
   page cache. Tests of in-flight `start_sync` handles and of dropping a `next` mid-repair
   have no counterpart: syncs and repairs complete synchronously. Removing a section removes
   its blob name before closing its writer, as commonware does.
-- memory storage gained `reads` (commonware's `RecordingContext` read count) and
+- The storage mocks provide `reads` (commonware's `RecordingContext` read count) and
   `allow_mutations`/`mutation_refused` (commonware's `MutationFaults`). A clean replay of
   eight pages takes one read where commonware takes two (larger batches).
 
@@ -142,3 +142,5 @@ build on it. Until then, start with the pure parts (frame.rs, durability, item e
 - 2026-11-13: switched metadata, the paged buffer, and the segmented journal onto
   `runtime.storage`; the memory stand-in is now a test backend for its vtable.
 - 2026-11-13: segmented variable journal with recovery and its ported tests.
+- 2026-11-13: deleted the memory stand-in; tests run on `runtime.storage.memory` through
+  `runtime.buffer.mocks` (recording and mutation faults) and crash with `crash()`.
