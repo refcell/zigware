@@ -93,8 +93,9 @@ handshake and the runtime's network, which the actor-stream and runtime lanes ar
 - [x] simulated: dynamic links, peer-set window and own/network-wide peer sets, and every
   bandwidth test (contention, sharing, staggered, pipe reservation, zero limits).
 - [x] simulated: ziggurat `Normal` for byte-identical latency samples.
-- [ ] simulated: remaining mod.rs tests (blocking and disconnect_on_block, peer-set
-  subscriptions, shutdown, socket manager), split senders and receivers.
+- [x] simulated: blocked subscriptions, disconnect_on_block, operations after shutdown.
+- [ ] simulated: remaining mod.rs tests (peer-set subscriptions, socket manager, clean
+  shutdown, duplicate channel), split senders and receivers, metrics (runtime.telemetry).
 - [ ] authenticated: router, relay, throttle, dialing, connection over stream's
   handshake, then discovery and lookup (actors, types, codec identical to commonware).
 - [ ] Fuzz targets (commonware p2p/fuzz).
@@ -111,3 +112,4 @@ handshake and the runtime's network, which the actor-stream and runtime lanes ar
 - 2026-11-13: simulated link, peer-set, and bandwidth tests; fiber stacks end in a zeroed
   frame so stack traces captured on a fiber stop at its top.
 - 2026-11-13: rand_distr ziggurat Normal for link latency, bit-identical to Rust.
+- 2026-11-13: simulated blocking and shutdown tests.

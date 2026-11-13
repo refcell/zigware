@@ -341,3 +341,107 @@ test "determinism over seeds" {
     }
     try testing.expect(!std.mem.eql(u8, &first[0], &first[1]));
 }
+
+fn expect_blocked(subscription: *Net.BlockedSubscription, expected: []const Key) !void {
+    const blocked = (try subscription.try_recv(testing.allocator)).?;
+    defer testing.allocator.free(blocked);
+    try testing.expectEqual(expected.len, blocked.len);
+    for (expected, blocked) |want, got| try testing.expect(Key.order(want, got) == .eq);
+}
+
+test "blocked subscription tracks block and unblock" {
+    _ = try run_deterministic(0, struct {
+        fn run(io: Io) !void {
+            var harness = try Harness.start(io, config(2, 3));
+            defer harness.deinit();
+            const oracle = harness.oracle();
+            const pk1 = key(1);
+            const pk2 = key(2);
+            try harness.track(&.{ pk1, pk2 });
+
+            // A new subscription starts with the current, empty set.
+            const control1 = oracle.control(pk1);
+            var blocked = try control1.blocked();
+            try expect_blocked(&blocked, &.{});
+
+            // Blocking publishes the peer to the blocker's subscribers only.
+            try testing.expectEqual(p2p.Feedback.ok, control1.block(pk2));
+            try expect_blocked(&blocked, &.{pk2});
+            try testing.expectEqual(p2p.Feedback.ok, oracle.control(pk2).block(pk1));
+            try testing.expectEqual(p2p.Feedback.ok, control1.block(pk2));
+            const pairs = try oracle.blocked(testing.allocator);
+            defer testing.allocator.free(pairs);
+            try testing.expectEqual(2, pairs.len);
+            try testing.expect(try blocked.try_recv(testing.allocator) == null);
+
+            // Lifting the block publishes the empty set again.
+            try oracle.unblock(pk1, pk2);
+            try expect_blocked(&blocked, &.{});
+            const remaining = try oracle.blocked(testing.allocator);
+            defer testing.allocator.free(remaining);
+            try testing.expectEqual(1, remaining.len);
+            try testing.expect(Key.order(remaining[0].origin, pk2) == .eq);
+            try testing.expect(Key.order(remaining[0].recipient, pk1) == .eq);
+        }
+    }.run);
+}
+
+/// Whether a message from `pk1` to `pk2` arrives after `pk2` blocks `pk1`.
+fn delivered_after_block(io: Io, disconnect_on_block: bool) !bool {
+    var cfg = config(2, 1);
+    cfg.disconnect_on_block = disconnect_on_block;
+    var harness = try Harness.start(io, cfg);
+    defer harness.deinit();
+    const oracle = harness.oracle();
+    const pk1 = key(1);
+    const pk2 = key(2);
+    var one = try oracle.control(pk1).register(0, test_quota);
+    defer one.deinit();
+    var two = try oracle.control(pk2).register(0, test_quota);
+    defer two.deinit();
+    try harness.track(&.{ pk1, pk2 });
+    try oracle.add_link(pk1, pk2, link_ms(1, 0, 1.0));
+    try testing.expectEqual(p2p.Feedback.ok, oracle.control(pk2).block(pk1));
+    return delivered(io, &one.sender, &two.receiver, pk2);
+}
+
+test "blocking cuts a pair off only with disconnect_on_block" {
+    _ = try run_deterministic(0, struct {
+        fn run(io: Io) !void {
+            try testing.expect(!try delivered_after_block(io, true));
+            try testing.expect(try delivered_after_block(io, false));
+        }
+    }.run);
+}
+
+test "operations after shutdown do not panic" {
+    _ = try run_deterministic(0, struct {
+        fn run(io: Io) !void {
+            var harness = try Harness.start(io, config(2, 3));
+            defer harness.deinit();
+            const oracle = harness.oracle();
+            const pk1 = key(1);
+            const pk2 = key(2);
+            try harness.track(&.{ pk1, pk2 });
+            const manager = oracle.manager();
+            const control1 = oracle.control(pk1);
+            var one = try control1.register(0, test_quota);
+            defer one.deinit();
+            try oracle.add_link(pk1, pk2, link_ms(10, 0, 1.0));
+
+            harness.network.close();
+            try testing.expectEqual(0, try send_one(&one.sender, pk2, "test", false));
+            try testing.expectError(error.NetworkClosed, one.receiver.recv());
+            try testing.expectEqual(p2p.Feedback.closed, manager.track(1, .empty));
+            try testing.expect(try manager.peer_set(testing.allocator, 2) == null);
+            var updates = try manager.subscribe();
+            updates.deinit();
+            const relink = oracle.add_link(pk1, pk2, link_ms(1, 0, 1));
+            try testing.expectError(error.NetworkClosed, relink);
+            try testing.expectError(error.NetworkClosed, oracle.remove_link(pk1, pk2));
+            testing.allocator.free(try oracle.blocked(testing.allocator));
+            try testing.expectError(error.NetworkClosed, control1.register(1, test_quota));
+            try testing.expectEqual(p2p.Feedback.closed, control1.block(pk2));
+        }
+    }.run);
+}

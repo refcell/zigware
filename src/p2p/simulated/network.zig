@@ -126,6 +126,7 @@ pub fn Network(comptime P: type) type {
         pub const PeerSetSubscription = Tracker.Subscription;
         pub const PeerSetUpdate = Tracker.Update;
         pub const OwnedPeers = Tracker.Owned;
+        pub const BlockedSubscription = Watch(P).Subscription;
 
         const Registration = struct { mailbox: Mailbox.Sender, generation: u64 };
 
@@ -779,7 +780,7 @@ pub fn Network(comptime P: type) type {
 
             /// A subscription to the set of peers this peer blocks; it first yields the current
             /// set (commonware `Blocker::blocked`).
-            pub fn blocked(control: Control) !Watch(P).Subscription {
+            pub fn blocked(control: Control) !BlockedSubscription {
                 const network = control.network;
                 network.lock();
                 defer network.unlock();
