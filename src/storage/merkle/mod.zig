@@ -15,6 +15,8 @@ pub const hasher = @import("hasher.zig");
 pub const mem = @import("mem.zig");
 pub const mmr = @import("mmr/mod.zig");
 pub const conformance = @import("conformance.zig");
+pub const proof = @import("proof.zig");
+pub const Proof = proof.Proof;
 
 /// Upper bound on pinned nodes (and peaks) for any u64-backed family: a structure with `n`
 /// leaves has at most `popcount(n)` peaks.
@@ -35,6 +37,54 @@ pub const Bagging = enum {
         };
     }
 };
+
+/// A half-open range of leaf locations `[start, end)`.
+pub const Range = struct {
+    start: u64,
+    end: u64,
+};
+
+/// A fixed-capacity list: the bounded stacks and peak lists the Merkle code walks with.
+/// Appending past `capacity` is a bug (every use has a proven bound), so it asserts.
+pub fn BoundedList(comptime T: type, comptime capacity: usize) type {
+    comptime assert(capacity > 0);
+    return struct {
+        const Self = @This();
+
+        buffer: [capacity]T = undefined,
+        len: usize = 0,
+
+        pub fn from_slice(items: []const T) Self {
+            assert(items.len <= capacity);
+            var self: Self = .{};
+            @memcpy(self.buffer[0..items.len], items);
+            self.len = items.len;
+            return self;
+        }
+
+        pub fn append(self: *Self, item: T) void {
+            assert(self.len < capacity);
+            self.buffer[self.len] = item;
+            self.len += 1;
+        }
+
+        pub fn pop(self: *Self) ?T {
+            if (self.len == 0) return null;
+            self.len -= 1;
+            return self.buffer[self.len];
+        }
+
+        pub fn slice(self: *const Self) []const T {
+            assert(self.len <= capacity);
+            return self.buffer[0..self.len];
+        }
+
+        pub fn slice_mut(self: *Self) []T {
+            assert(self.len <= capacity);
+            return self.buffer[0..self.len];
+        }
+    };
+}
 
 /// A peak (or any node) and its height.
 pub const Peak = struct {
@@ -199,6 +249,7 @@ pub fn nodes_to_pin(
 
 test {
     std.testing.refAllDecls(@This());
+    _ = @import("proof_test.zig");
 }
 
 test "bagging domains are distinct" {

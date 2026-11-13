@@ -10,8 +10,10 @@ variants need `runtime` storage; do them after its interface lands.
 
 ## Backlog
 - [x] translator.rs (key translators) and rmap (range map).
-- [ ] merkle/mmr: in-memory MMR (append, root, proofs, range proofs, verification), node
+- [x] merkle/mmr: in-memory MMR (append, root, proofs, range proofs, verification), node
   positions and peaks math identical to commonware, proof codec. Port its tests and vectors.
+  (Batch API and the Proof `CodecConformance` hash still to do; the latter waits on the
+  conformance lane's `arbitrary` emulation.)
 - [ ] merkle/mmb and shared merkle proof types.
 - [ ] bmt (binary merkle tree) with proofs and multi-proofs.
 - [ ] bitmap (authenticated bitmap over MMR).
@@ -37,3 +39,10 @@ variants need `runtime` storage; do them after its interface lands.
 - merkle/mem: `Mem.add` appends one leaf directly (the same as a one-leaf batch); the batch
   API (`new_batch`/`merkleize`/`apply_batch`) comes next on top of it. MMR root
   conformance hash (`MmrRootStability`, 200 cases) matches commonware.
+- merkle/proof: commonware's recursive subtree walks (sibling collection, range and multi
+  reconstruction, pin reconstruction) are iterative over fixed-capacity stacks
+  (`merkle.BoundedList`), sized from the 64-peak / 63-level bound. Proof nodes are read through
+  any `source` with `get_node(position) ?Digest` (commonware's `get_node` closure). Elements
+  are any slice of byte slices, byte arrays, or digests. `verify_multi_inclusion` takes
+  locations and elements as two parallel slices. Mutation checks: reversing sibling DFS order
+  fails 11 tests; dropping the multi-proof witness cross-check fails the binding test.
