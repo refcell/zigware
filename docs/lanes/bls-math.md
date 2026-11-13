@@ -14,7 +14,7 @@ variants (MinPk, MinSig) must match exactly.
 - [x] math: algebra traits, fields (goldilocks), poly (polynomials, evaluation,
   interpolation), ntt, synthetic. Port math's tests. (Conformance hashes wait for the
   `conformance` harness.)
-- [ ] simd: the operations commonware abstracts (simd/src/core.rs), scalar + `@Vector`
+- [x] simd: the operations commonware abstracts (simd/src/core.rs), scalar + `@Vector`
   implementations with the consistency tests.
 - [ ] bls12381 primitives: group elements, scalars, compressed codec, hash-to-curve with
   commonware's DSTs, sign/verify, aggregate, MinPk and MinSig variants, batch verify. Vectors.
@@ -38,7 +38,13 @@ variants (MinPk, MinSig) must match exactly.
 - Randomness is injected as a `utils.rng` generator pointer (`next_u64`/`fill_bytes`, commonware's
   `CryptoRng`), so ported tests draw the same values as the Rust tests.
 
+- simd: one `@Vector` implementation per profile (scalar 64-bit, x86_v3 256, x86_v4c 512,
+  neon/arm_v9 128) stands in for both commonware's emulated and native tokens; `dispatch`
+  picks the compile target's best profile at comptime. Profile-only instructions are `void`
+  on other profiles, so misuse is a compile error. Operations declare `pub const Output`.
+
 ## Log
 - 2026-11-13: math algebra interfaces, goldilocks field, test field/group, fuzz driver.
 - 2026-11-13: math poly (Poly, commit, Interpolator) and varint wire helpers.
 - 2026-11-13: math ntt (NTT, recovery, vanishing, Lagrange), synthetic, codec migration.
+- 2026-11-13: simd backends, profile instructions, dispatch, consistency, SHA-256 checks.
