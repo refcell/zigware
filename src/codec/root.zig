@@ -74,4 +74,5 @@ test {
     _ = @import("types/vec.zig");
     _ = @import("types/tuple.zig");
     _ = @import("codec_test.zig");
+    _ = @import("fuzz_test.zig");
 }

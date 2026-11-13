@@ -342,3 +342,153 @@ test "varint conformity" {
         try testing.expectEqualSlices(u8, case.bytes, writer.written());
     }
 }
+
+test "varint all u16 and i16 values" {
+    var value: u32 = 0;
+    while (value <= std.math.maxInt(u16)) : (value += 1) {
+        const unsigned: u16 = @intCast(value);
+        var out: [max_u16_varint_size]u8 = undefined;
+        var writer = Writer.init(&out);
+        write(u16, unsigned, &writer);
+        try testing.expectEqual(size(u16, unsigned), writer.end);
+        try testing.expectEqual(writer.end, (UInt(u16){ .value = unsigned }).encode_size());
+
+        const signed: i16 = @bitCast(unsigned);
+        var signed_writer = Writer.init(&out);
+        write_signed(i16, signed, &signed_writer);
+        try testing.expectEqual(size_signed(i16, signed), signed_writer.end);
+        try testing.expectEqual(signed_writer.end, (SInt(i16){ .value = signed }).encode_size());
+        var reader = Reader.init(signed_writer.written());
+        try testing.expectEqual(signed, try read_signed(i16, &reader));
+        try testing.expectEqual(@as(usize, 0), reader.remaining());
+    }
+}
+
+fn expect_size_and_length(comptime T: type, value: T, expected: usize) !void {
+    try testing.expectEqual(expected, size(T, value));
+    var out: [max_size(T)]u8 = undefined;
+    var writer = Writer.init(&out);
+    write(T, value, &writer);
+    try testing.expectEqual(expected, writer.end);
+}
+
+test "varint exact and single bit boundaries" {
+    inline for (.{ u16, u32, u64, u128 }) |T| {
+        var bits: u32 = 1;
+        while (bits <= @bitSizeOf(T)) : (bits += 1) {
+            const all_ones: T = @as(T, std.math.maxInt(T)) >> @intCast(@bitSizeOf(T) - bits);
+            const expected = std.math.divCeil(u32, bits, 7) catch unreachable;
+            try expect_size_and_length(T, all_ones, expected);
+            const single: T = std.math.shl(T, 1, bits - 1);
+            try expect_size_and_length(T, single, expected);
+        }
+    }
+}
+
+test "varint max size constants" {
+    inline for (.{ u16, u32, u64, u128 }) |T| {
+        try expect_size_and_length(T, std.math.maxInt(T), max_size(T));
+        try testing.expectEqual(max_size(T), UInt(T).max_encode_size);
+    }
+}
+
+fn decode_uint(comptime T: type, bytes: []const u8) Error!T {
+    return (try codec.decode(UInt(T), testing.allocator, bytes)).value;
+}
+
+fn encode_uint(comptime T: type, value: T, out: []u8) []u8 {
+    return codec.encode_to(UInt(T), .{ .value = value }, out);
+}
+
+fn expect_invalid_varint(comptime T: type, bytes: []const u8, width: u64) !void {
+    var reader = Reader.init(bytes);
+    const result = codec.decode_reader(UInt(T), testing.allocator, &reader, {});
+    try testing.expectError(error.InvalidVarint, result);
+    try testing.expectEqual(width, reader.diagnostic.value);
+}
+
+test "varint u256 round trips at any width" {
+    var out: [max_size(u256)]u8 = undefined;
+    var narrow_out: [max_size(u64)]u8 = undefined;
+    const values = [_]u64{ 0, 1, 127, 128, 300, 0x3fff, 0x4000, std.math.maxInt(u64) };
+    for (values) |value| {
+        const wide = encode_uint(u256, value, &out);
+        try testing.expectEqualSlices(u8, encode_uint(u64, value, &narrow_out), wide);
+        try testing.expectEqual(@as(u256, value), try decode_uint(u256, wide));
+    }
+    const filling: u256 = @as(u256, 1 << 11) << 128;
+    const beyond: u256 = (@as(u256, 1 << 63) << 192) | (@as(u256, 1) << 64) | std.math.maxInt(u64);
+    for ([_]u256{ filling, beyond, std.math.maxInt(u256) }) |value| {
+        const encoded = encode_uint(u256, value, &out);
+        try testing.expectEqual(size(u256, value), encoded.len);
+        try testing.expectEqual(value, try decode_uint(u256, encoded));
+    }
+    try testing.expectEqual(@as(usize, 37), size(u256, std.math.maxInt(u256)));
+    try testing.expectEqual(@as(usize, 37), UInt(u256).max_encode_size);
+
+    // A bit beyond the width, a trailing zero byte, and a truncated encoding are refused.
+    const max_encoded = encode_uint(u256, std.math.maxInt(u256), &out);
+    max_encoded[max_encoded.len - 1] |= 0x10;
+    try expect_invalid_varint(u256, max_encoded, 32);
+    try expect_invalid_varint(u256, &.{ 0xff, 0x00 }, 32);
+    const all_ff: [36]u8 = @splat(0xff);
+    try testing.expectError(error.EndOfBuffer, decode_uint(u256, &all_ff));
+}
+
+test "varint partial widths" {
+    var out: [8]u8 = undefined;
+    // Eight bits spill their top bit into a second byte that holds nothing more.
+    try testing.expectEqualSlices(u8, &.{ 0xff, 0x01 }, encode_uint(u8, 0xff, &out));
+    try testing.expectEqual(@as(u8, 0xff), try decode_uint(u8, &.{ 0xff, 0x01 }));
+    try expect_invalid_varint(u8, &.{ 0xff, 0x02 }, 1);
+
+    // Thirty-six bits leave one bit for a sixth byte.
+    try testing.expectEqual(@as(usize, 6), UInt(u36).max_encode_size);
+    const max36 = encode_uint(u36, std.math.maxInt(u36), &out);
+    try testing.expectEqual(@as(usize, 6), max36.len);
+    try testing.expectEqual(@as(u36, std.math.maxInt(u36)), try decode_uint(u36, max36));
+    try expect_invalid_varint(u36, &.{ 0xff, 0xff, 0xff, 0xff, 0xff, 0x1f }, 5);
+
+    // A multiple of seven bits fills its last byte; a continuation there is refused before
+    // another byte is read.
+    const max14 = encode_uint(u14, std.math.maxInt(u14), &out);
+    try testing.expectEqualSlices(u8, &.{ 0xff, 0x7f }, max14);
+    try testing.expectEqual(@as(u14, std.math.maxInt(u14)), try decode_uint(u14, &.{ 0xff, 0x7f }));
+    var reader = Reader.init(&.{ 0xff, 0xff, 0x01 });
+    try testing.expectError(error.InvalidVarint, codec.read(UInt(u14), testing.allocator, &reader));
+    try testing.expectEqual(@as(u64, 2), reader.diagnostic.value);
+    try testing.expectEqual(@as(usize, 1), reader.remaining());
+}
+
+test "varint narrow widths" {
+    var out: [1]u8 = undefined;
+    try testing.expectEqual(@as(usize, 1), UInt(u4).max_encode_size);
+    try testing.expectEqualSlices(u8, &.{0x0f}, encode_uint(u4, 0xf, &out));
+    try testing.expectEqual(@as(u4, 0xf), try decode_uint(u4, &.{0x0f}));
+    try expect_invalid_varint(u4, &.{0x10}, 1);
+    try expect_invalid_varint(u4, &.{ 0x8f, 0x01 }, 1);
+
+    try testing.expectEqual(@as(usize, 1), UInt(u7).max_encode_size);
+    try testing.expectEqualSlices(u8, &.{0x7f}, encode_uint(u7, 0x7f, &out));
+    try testing.expectEqual(@as(u7, 0x7f), try decode_uint(u7, &.{0x7f}));
+    try expect_invalid_varint(u7, &.{ 0xff, 0x01 }, 1);
+
+    // Zero bits hold only zero, which still takes a byte.
+    try testing.expectEqual(@as(usize, 1), UInt(u0).max_encode_size);
+    try testing.expectEqual(@as(usize, 1), size(u0, 0));
+    try testing.expectEqualSlices(u8, &.{0x00}, encode_uint(u0, 0, &out));
+    try testing.expectEqual(@as(u0, 0), try decode_uint(u0, &.{0x00}));
+    try expect_invalid_varint(u0, &.{0x01}, 0);
+
+    // The byte-at-a-time decoder applies the same bound.
+    var decoder = Decoder(u4).init();
+    try testing.expectEqual(@as(?u4, 0xf), try decoder.feed(0x0f));
+    var refused = Decoder(u4).init();
+    try testing.expectError(error.InvalidVarint, refused.feed(0x10));
+}
+
+test "varint fragmented decoder" {
+    var decoder = Decoder(u32).init();
+    try testing.expectEqual(@as(?u32, null), try decoder.feed(0xac));
+    try testing.expectEqual(@as(?u32, 300), try decoder.feed(0x02));
+}

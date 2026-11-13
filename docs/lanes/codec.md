@@ -102,16 +102,20 @@ Use `reader.invalid("Type", "message")` for `Error::Invalid(ctx, msg)`.
   error.rs, `RangeCfg`, buffer helpers (`Reader`/`Writer`), util.rs.
 - [x] codec varint (any unsigned width, ZigZag signed) byte-identical to varint.rs, with tests.
 - [x] codec types: primitives, arrays, optional, vec, tuple, bytes, Arc (pointer).
-- [ ] varint: port the rest of varint.rs tests (exhaustive u16/i16, bit boundaries, narrow and
-  wide widths), seeded + `std.testing.fuzz` round-trip.
+- [x] varint: rest of varint.rs tests (exhaustive u16/i16, bit boundaries, narrow, partial,
+  and u256 widths).
+- [x] codec fuzz: `codec/fuzz.zig` seeded driver (Smith over a seeded PRNG, `fuzz_soak`,
+  `fuzz_seed`, then `std.testing.fuzz`); targets port codec_roundtrip.rs plus a
+  decode-canonical target (any successful decode re-encodes to the exact input).
 - [ ] codec types: maps/sets (sorted, canonical, reject duplicates/unsorted), net addrs, lazy,
   mode (`Mode`/`Modes`), `U256`/uint.rs. Port every test in codec/src/types.
 - [ ] conformance: hash-of-encodings harness (conformance/src/lib.rs), TOML reader, codec's
   conformance.rs (ChaCha8 + `arbitrary` emulation) so codec/conformance.toml hashes match.
 - [ ] invariants: minifuzz (deterministic seeded fuzz driver over `std.testing.Smith`;
   `build_options.fuzz_seed`/`fuzz_soak`).
-- [ ] `std.testing.fuzz` targets for every decoder (commonware codec/fuzz codec_roundtrip).
+- [ ] extend the codec fuzz targets as maps/sets/net/lazy/mode land.
 
 ## Log
 - 2026-11-13: formatting (hex, from_hex, Hex, hex_literal) and codec core (Reader/Writer,
   Error, RangeCfg, varint, primitives, arrays, optional, vec, tuple, Bytes, pointer) landed.
+- 2026-11-13: remaining varint tests; codec seeded fuzz driver and roundtrip/canonical targets.
