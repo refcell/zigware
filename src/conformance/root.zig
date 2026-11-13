@@ -62,7 +62,7 @@ pub fn find(text: []const u8, type_name: []const u8) ParseError!?Entry {
         if (line[0] == '[') {
             if (in_section) break;
             const name = try parse_section(line);
-            in_section = std.mem.eql(u8, name, type_name);
+            in_section = escaped_eql(name, type_name);
             continue;
         }
         if (!in_section) continue;
@@ -91,14 +91,50 @@ fn parse_section(line: []const u8) ParseError![]const u8 {
     return inner;
 }
 
-/// Parses a basic TOML string without escapes.
+/// Parses a basic TOML string and returns its raw contents, escapes still in place. Only the
+/// escapes `\n`, `\t`, `\"`, and `\\` are accepted (commonware's type names wrap with
+/// `\n`).
 fn parse_string(value: []const u8) ParseError![]const u8 {
     if (value.len < 2 or value[0] != '"' or value[value.len - 1] != '"') {
         return error.InvalidConformanceFile;
     }
     const inner = value[1 .. value.len - 1];
-    if (std.mem.indexOfAny(u8, inner, "\"\\") != null) return error.InvalidConformanceFile;
+    var index: usize = 0;
+    while (index < inner.len) : (index += 1) {
+        switch (inner[index]) {
+            '"' => return error.InvalidConformanceFile,
+            '\\' => {
+                index += 1;
+                if (index == inner.len) return error.InvalidConformanceFile;
+                if (std.mem.indexOfScalar(u8, "nt\"\\", inner[index]) == null) {
+                    return error.InvalidConformanceFile;
+                }
+            },
+            else => {},
+        }
+    }
     return inner;
+}
+
+/// Whether the raw string contents `raw` (as `parse_string` returns them) unescape to `name`.
+fn escaped_eql(raw: []const u8, name: []const u8) bool {
+    var raw_index: usize = 0;
+    var name_index: usize = 0;
+    while (raw_index < raw.len) : (raw_index += 1) {
+        var byte = raw[raw_index];
+        if (byte == '\\') {
+            raw_index += 1;
+            if (raw_index == raw.len) return false;
+            byte = switch (raw[raw_index]) {
+                'n' => '\n',
+                't' => '\t',
+                else => |escaped| escaped,
+            };
+        }
+        if (name_index == name.len or name[name_index] != byte) return false;
+        name_index += 1;
+    }
+    return name_index == name.len;
 }
 
 /// Commits seeds `0..n_cases` with `C.commit` and returns the hex SHA-256 of every
@@ -190,6 +226,21 @@ test "compute hash matches its definition" {
     _ = formatting.hex_encode(&expected, &expected_digest);
     const actual = try compute_hash(SimpleConformance, testing.allocator, 1);
     try testing.expectEqualSlices(u8, &expected, &actual);
+}
+
+test "conformance file names with escapes" {
+    const text =
+        \\["a<b\nc>"]
+        \\n_cases = 3
+        \\hash = "ff"
+        \\["later"]
+        \\n_cases = 1
+        \\hash = "00"
+    ;
+    const entry = (try find(text, "a<b\nc>")).?;
+    try testing.expectEqual(@as(u64, 3), entry.n_cases);
+    try testing.expectEqual(null, try find(text, "a<bnc>"));
+    try testing.expectEqualStrings("00", (try find(text, "later")).?.hash);
 }
 
 test "conformance file parse" {

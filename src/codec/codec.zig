@@ -28,6 +28,7 @@
 //! pub fn encode_size(self: Self) usize       // required unless `fixed_size` is declared
 //! pub fn read(gpa: Allocator, reader: *codec.Reader, cfg: Cfg) codec.Error!Self
 //! pub fn deinit(self: *Self, gpa: Allocator) void  // optional; frees what `read` allocated
+//! pub const owns_memory: bool = ...;         // optional; false when `deinit` frees nothing
 //! ```
 //!
 //! Decoding takes an allocator explicitly. Types that do not allocate ignore it, and
@@ -188,7 +189,8 @@ pub fn owns_memory(comptime T: type) bool {
             }
             break :tuple false;
         },
-        .custom => @hasDecl(T, "deinit"),
+        // A generic type may declare `owns_memory` to say whether its `deinit` frees anything.
+        .custom => if (@hasDecl(T, "owns_memory")) T.owns_memory else @hasDecl(T, "deinit"),
     };
 }
 
