@@ -25,17 +25,20 @@ time, files, and network: build on it rather than around it where it fits.
   network suite (`network/tests.zig`), `Runner.network()`.
 - [ ] audited and metered network wrappers.
 - [ ] Port remaining deterministic.rs tests.
-- [ ] iobuf (IoBuf/IoBufs pooled buffers) and utils (buffer pools, handle, signal,
-  supervision).
-- [ ] (moved to the runtime-telemetry lane) production runtime over `std.Io` (io_uring on Linux, kqueue on macOS): network and
-  storage. Linux tests via `just test-linux`.
-- Telemetry (`src/runtime/telemetry/`, metrics registry and traces) moved to the
-  runtime-telemetry lane. `src/runtime/buffer/` belongs to storage-journal.
+- [x] signal (`signal.zig`: `Signaler`, `Signal`, `Stopper`), commonware's shutdown tests.
+- [ ] Context: io, storage, network, `metrics.Scope` (runtime-telemetry's), labeled
+  `child`/`with_attribute`, `spawn` with mandatory supervision (a finished or aborted parent
+  aborts its descendants), `stop`/`stopped`, clock helpers (`timeout`, `sleep_until`);
+  deterministic `register`/`encode` audits; runtime task metrics. Port the lib.rs tests.
+- [ ] iobuf (IoBuf/IoBufs pooled buffers) and utils (buffer pools, handle, supervision).
+- Moved to the runtime-telemetry lane: telemetry (`src/runtime/telemetry/`) and the
+  production runtime (`src/runtime/production/`, io_uring/kqueue storage and network).
+  `src/runtime/buffer/` belongs to storage-journal.
 
 ## Decisions
 - The deterministic executor implements `std.Io` (`deterministic.Runner.io()`): tasks
   (`async`/`concurrent`/groups), futexes, sleep, clocks, and randomness on stackful fibers
-  (`fiber.zig`, built on `std.Io.fiber.contextSwitch`). So `std.Io.Mutex`, `Condition`,
+  (`fiber.zig`). So `std.Io.Mutex`, `Condition`,
   `Event`, `Queue` (bounded mailboxes), and `Select` are deterministic with no extra API.
 - Abort is a `std.Io` cancelation request (`error.Canceled` at the next cancelation point);
   Zig cannot drop a task mid-await. When the root finishes, leftover tasks are canceled and
@@ -60,6 +63,14 @@ time, files, and network: build on it rather than around it where it fits.
   backend) rather than vtables, so sinks and streams stay concrete and inlinable. The mock
   channel keeps `src/stream/mocks.zig`'s method shapes; unlike that stand-in, a canceled send
   closes the sink (commonware drops it), so the peer's pending recv fails.
+- Fibers are entered with a null return address (tail jump from `trampoline`), so DWARF and
+  frame-pointer unwinders stop at the entry function; a call left x30 pointing into the
+  trampoline on aarch64 and unwinders looped. Stacks have a guard page at both ends (Linux).
+- `Signal` is reference-counted with an explicit `deinit` (Rust drops it), and `wait` may be
+  called again after it resolves. `Stopper.stop` takes an `Io.Timeout`.
+- The mock channel accepts a zero buffer size, as commonware does. Like commonware, a recv
+  waiting for n bytes and a send of fewer than n that exceeds the buffer block each other;
+  callers frame their reads.
 - The memory backend guards its state with one spin lock that never blocks inside, so it
   is safe across threads and never yields a fiber while held.
 
@@ -69,3 +80,4 @@ time, files, and network: build on it rather than around it where it fits.
 - 2026-11-13: storage interface, blob header with conformance hashes, memory backend and
   the storage suite.
 - 2026-11-13: runner storage, mock channel, deterministic network and network suite.
+- 2026-11-13: fiber unwind fix for aarch64 (stack traces on fibers), signal/Stopper.
