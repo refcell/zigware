@@ -1,14 +1,45 @@
 //! stream: Exchange messages over arbitrary transport.
 //!
 //! Zig port of commonware's `commonware-stream` crate
-//! (https://github.com/commonwarexyz/monorepo/tree/main/stream). Landed: `utils.codec`
-//! (length-prefixed framing) and `mocks` (an in-memory sink/stream pair that also documents
-//! the transport contract). The sake handshake and cups protocol follow.
+//! (https://github.com/commonwarexyz/monorepo/tree/main/stream).
+//!
+//! - `cups`: CUPS, an upgrader that runs a handshake, then exchanges encrypted, ordered records.
+//! - `utils.codec`: length-prefixed framing.
+//! - `mocks`: an in-memory sink/stream pair; its doc comment states the transport contract.
+//!
+//! # Interfaces (commonware `Handshake`, `Upgrader`)
+//!
+//! A handshake authenticates a raw connection and agrees on a secret transcript `T` that
+//! commits to the namespace and both identities, is fresh and secret, and is returned by each
+//! peer only after it verified that the other holds `T`. It must not read past its final
+//! message. Shape (duck-typed):
+//!
+//! ```zig
+//! pub fn public_key(self) PublicKey
+//! pub fn dial(self, io, namespace, peer: PublicKey, stream: *Stream, sink: *Sink) !Transcript
+//! pub fn listen(self, io, namespace, bouncer, stream: *Stream, sink: *Sink)
+//!     !stream.Accepted(PublicKey)
+//! ```
+//!
+//! The bouncer sees the peer's unauthenticated identity claim through `bouncer.admit(peer)
+//! !bool`; only a successful `listen` proves it. An upgrader (`cups.Cups`) takes ownership of
+//! a stream and sink, runs the handshake, and returns sender and receiver halves. Callers
+//! enforce a deadline on every attempt and discard the connection after any error.
 
 const std = @import("std");
+const cryptography = @import("cryptography");
 
+pub const cups = @import("cups.zig");
 pub const utils = @import("utils.zig");
 pub const mocks = @import("mocks.zig");
+
+/// What a handshake's `listen` returns: the admitted peer and the shared secret transcript.
+pub fn Accepted(comptime PublicKey: type) type {
+    return struct {
+        peer: PublicKey,
+        transcript: cryptography.Transcript,
+    };
+}
 
 test {
     std.testing.refAllDecls(@This());
