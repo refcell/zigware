@@ -169,6 +169,29 @@ pub fn LimitedSender(comptime S: type, comptime C: type) type {
             return .{ .checked = self.checked_for(.{ .some = allowed }) };
         }
 
+        /// Sends to the recipients within their rate limit (commonware's blanket
+        /// `Sender::send`). Returns the recipients it attempted, owned by the caller: empty when
+        /// every recipient is limited, the sender is closed, or the send is not accepted.
+        pub fn send(
+            self: *Self,
+            recipients: p2p.Recipients(P),
+            parts: []const []const u8,
+            priority: bool,
+        ) ![]P {
+            const gpa = self.state.gpa;
+            const checked = switch (try self.check(recipients)) {
+                .limited => return gpa.alloc(P, 0),
+                .checked => |checked| checked,
+            };
+            const attempted = gpa.dupe(P, checked.recipients()) catch |err| {
+                checked.deinit();
+                return err;
+            };
+            if (checked.send(parts, priority).accepted()) return attempted;
+            gpa.free(attempted);
+            return gpa.alloc(P, 0);
+        }
+
         fn checked_for(self: *Self, recipients: p2p.Recipients(P)) Checked {
             assert(recipients != .all);
             return .{ .sender = &self.sender, .gpa = self.state.gpa, .checked = recipients };

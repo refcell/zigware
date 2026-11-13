@@ -44,8 +44,18 @@ pub const Unreliable = actor.Unreliable;
 pub const Channel = u64;
 
 /// A message received from a given public key: authenticated and within the channel's limits.
+/// When `gpa` is set the message owns `payload`; release it with `deinit`.
 pub fn Message(comptime P: type) type {
-    return struct { peer: P, payload: []const u8 };
+    return struct {
+        peer: P,
+        payload: []const u8,
+        gpa: ?Allocator = null,
+
+        pub fn deinit(message: *@This()) void {
+            if (message.gpa) |gpa| gpa.free(message.payload);
+            message.* = undefined;
+        }
+    };
 }
 
 /// The set of recipients to send a message to.

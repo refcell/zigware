@@ -10,8 +10,14 @@ pub const sorted_map = @import("sorted_map.zig");
 pub const transmitter = @import("transmitter.zig");
 pub const channel = @import("channel.zig");
 pub const tracker = @import("tracker.zig");
+pub const network = @import("network.zig");
+pub const Network = network.Network;
+pub const Config = network.Config;
+pub const Link = network.Link;
+pub const Error = network.Error;
 pub const Rational = rational.Rational;
 
 test {
     @import("std").testing.refAllDecls(@This());
+    _ = @import("network_test.zig");
 }

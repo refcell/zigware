@@ -33,6 +33,19 @@ handshake and the runtime's network, which the actor-stream and runtime lanes ar
 - `p2p.simulated.channel.Unbounded(T)` (unbounded mpsc over actor's mailbox; undeliverable
   values are released with `deinit`) and `p2p.simulated.tracker.Tracker(P)` (peer-set window,
   role counts, `Update` subscriptions).
+- `p2p.simulated.Network(P)`: `init(gpa, io, Config)` / `init_with_peers(gpa, io, Config,
+  TrackedPeers)` return `*Network`; spawn `io.concurrent(Network(P).run, .{network})`, then
+  `close()`, await the task, and `deinit()` after every handle is released. `oracle()` gives
+  `Oracle` (`control(me)`, `manager()`, `add_link(a, b, Link{latency, jitter,
+  success_rate})`, `remove_link`, `limit_bandwidth(peer, ?egress, ?ingress)`, `blocked(gpa)`,
+  `unblock`). `Control` has `register(channel, Quota) !Registered{sender, receiver}`,
+  `manager()`, `block(peer)`, `blocked()`, `reset_peer_sets()`. `Manager` has `track(id,
+  TrackedPeers) Feedback`, `peer_set(gpa, id)`, `subscribe()`. `Sender` is a
+  `LimitedSender` (`send(recipients, parts, priority) ![]P` returns the attempted peers,
+  caller-owned; `check` for the two-step form; `deinit`). `Receiver` has `recv() !Message(P)`
+  (free with `message.deinit()`), `try_recv`, `capacity()`, `deinit`. Errors: `NetworkClosed`,
+  `LinkingSelf`, `LinkExists`, `LinkMissing`.
+- `p2p.Message(P)` owns its payload when `gpa` is set; release it with `deinit`.
 - Senders take a message as parts (`[]const []const u8`, concatenated), like stream frames.
 
 ## Decisions
@@ -50,6 +63,14 @@ handshake and the runtime's network, which the actor-stream and runtime lanes ar
 - The simulator keeps commonware's exact `BigRational` bandwidth math (`simulated/rational.zig`)
   and BTreeMap iteration order (`SortedMap`), so flow ids, rates, and completion times match.
   Payloads are opaque to the transmitter (`M` with a `len`); the network owns them.
+- The simulated network runs operations in the caller's task under one `Io.Mutex` instead of
+  an actor fed by an ingress queue, and a single `run` task drives the transmitter and timed
+  deliveries straight into per-(peer, channel) unbounded mailboxes instead of simulated
+  sockets. Order of sends, link changes, and arrival times per link match commonware;
+  `priority` does not reorder sends.
+- Pending conformance: link latency is sampled with Box-Muller from the runtime RNG, not
+  `rand_distr`'s ziggurat `Normal`, so individual latencies differ from commonware's for the
+  same seed (runs are still deterministic per seed).
 - p2p carries its own seeded fuzz driver (`p2p.fuzz.run`, same as codec's) until
   `invariants.minifuzz` lands.
 
@@ -62,9 +83,11 @@ handshake and the runtime's network, which the actor-stream and runtime lanes ar
   `StaticProvider`.
 - [x] simulated: bandwidth planner and transmitter with their tests.
 - [x] simulated: unbounded channel and peer-set tracker.
-- [ ] simulated: network with links (latency, jitter, success rate), bandwidth limits,
-  transmitter scheduling, partitions, peer sets, Byzantine blocking. Port its tests; it is
-  the test bed for broadcast, resolver, and consensus, so keep it deterministic per seed.
+- [x] simulated: network core (Oracle, Control, Manager, links with latency/jitter/success
+  rate, rate-limited senders, receivers, peer-set tracking) with its first tests.
+- [ ] simulated: remaining mod.rs tests (bandwidth via Oracle, dynamic links and peers,
+  blocking and disconnect_on_block, peer-set subscriptions, shutdown), split senders and
+  receivers, ziggurat `Normal` for byte-identical latency samples.
 - [ ] authenticated: router, relay, throttle, dialing, connection over stream's
   handshake, then discovery and lookup (actors, types, codec identical to commonware).
 - [ ] Fuzz targets (commonware p2p/fuzz).
@@ -77,3 +100,4 @@ handshake and the runtime's network, which the actor-stream and runtime lanes ar
 - 2026-11-13: simulated bandwidth planner (exact rationals) and transmitter; types.zig moved to
   utils.Hostname and utils.net.is_global.
 - 2026-11-13: simulated unbounded channel and peer-set tracker.
+- 2026-11-13: simulated network core: Oracle, links, send/receive, peer sets, blocking.
