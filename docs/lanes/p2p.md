@@ -55,6 +55,11 @@ handshake and the runtime's network, which the actor-stream and runtime lanes ar
   `authenticated.dialing` (`DialStatus`, `ReserveResult`, `earliest`), and lookup's
   `Record` and `Directory(P)` (track, overwrite, dial/listen reservations, blocks,
   dialable/listenable); callers pass `now` and an RNG.
+- `authenticated.throttle.Throttle` (inbound rate limit that waits), `outbox.Outbox`
+  (kill > high > low queues with a ping deadline) and `outbox.Frame` (a data frame encoded
+  once and shared), `router.Router(P)` (connected peers, `content`, `Connected` source), and
+  `channels.Channels(P)` (`register(channel, quota)` returns a limited `Sender` and a lossy
+  `Receiver` sized `max_peers * burst`).
 - `p2p.Message(P)` owns its payload when `gpa` is set; release it with `deinit`.
 - Senders take a message as parts (`[]const []const u8`, concatenated), like stream frames.
 
@@ -87,6 +92,11 @@ handshake and the runtime's network, which the actor-stream and runtime lanes ar
 - Lookup's directory takes the current time and an RNG per call instead of owning a
   context, and keeps peers in key order (commonware's HashMap results are sorted before
   use). Reservations are `Metadata` values that the owner releases explicitly.
+- The authenticated router is shared state behind a lock instead of an actor: `content`
+  encodes the frame once and queues it on each recipient's outbox in the caller's task. A
+  connection's control, high, and low mailboxes are one locked outbox read in the same
+  priority order, with a timed wait for pings. Channel inbound queues grow on demand rather
+  than preallocating `max_peers * burst` slots.
 - p2p carries its own seeded fuzz driver (`p2p.fuzz.run`, same as codec's) until
   `invariants.minifuzz` lands.
 
@@ -126,3 +136,4 @@ handshake and the runtime's network, which the actor-stream and runtime lanes ar
 - 2026-11-13: simulated blocking and shutdown tests.
 - 2026-11-13: authenticated Data frame and lookup Message with conformance hashes.
 - 2026-11-13: lookup record and directory with their tests.
+- 2026-11-13: authenticated throttle, outbox, router, and channels.
