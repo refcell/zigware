@@ -278,13 +278,7 @@ pub fn Scheme(comptime SubjectType: type, comptime FaultsType: type) type {
             );
         }
 
-        const SignatureCell = certificate.Deferred(scheme_module.Signature);
         const Entry = scheme_module.PublicKey.Entry;
-        const Signed = struct { signer: Participant, signature: SignatureCell };
-
-        fn entry_less(_: void, a: Signed, b: Signed) bool {
-            return a.signer.get() < b.signer.get();
-        }
 
         /// Assembles a non-empty list of attestations, which need not be verified, into a
         /// certificate with the signatures in signer order.
@@ -295,24 +289,8 @@ pub fn Scheme(comptime SubjectType: type, comptime FaultsType: type) type {
             strategy: anytype,
         ) (certificate.AssemblyError || Allocator.Error)!certificate_type {
             _ = strategy;
-            assert(attestations.len > 0);
-            const entries = try gpa.alloc(Signed, attestations.len);
-            defer gpa.free(entries);
-            for (attestations, entries) |attestation, *entry| {
-                if (self.committee.key(attestation.signer) == null) return error.UnknownSigner;
-                if (attestation.signature.get() == null) return error.MalformedSignature;
-                entry.* = .{ .signer = attestation.signer, .signature = attestation.signature };
-            }
-            std.mem.sort(Signed, entries, {}, entry_less);
-            const signer_indices = try gpa.alloc(Participant, entries.len);
-            defer gpa.free(signer_indices);
-            for (entries, signer_indices) |entry, *index| index.* = entry.signer;
-            var signers = try certificate.Signers.from_set(gpa, &self.committee, signer_indices);
-            errdefer signers.deinit(gpa);
-            try signers.require(self.committee.quorum(Faults));
-            const signatures = try gpa.alloc(SignatureCell, entries.len);
-            for (entries, signatures) |entry, *signature| signature.* = entry.signature;
-            return .{ .signers = signers, .signatures = signatures };
+            const quorum = self.committee.quorum(Faults);
+            return certificate_type.assemble(gpa, self.committee.len(), quorum, attestations);
         }
 
         const Staged = struct {

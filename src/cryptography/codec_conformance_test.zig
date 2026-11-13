@@ -209,6 +209,26 @@ fn gen_ed25519_certificate(gpa: Allocator, u: *Unstructured) Error!ed25519.certi
     return .{ .signers = signers, .signatures = signatures };
 }
 
+/// The secp256r1 `Certificate::arbitrary`: signers, then one signature per signer.
+fn gen_secp_certificate(gpa: Allocator, u: *Unstructured) Error!secp256r1.certificate.Certificate {
+    const standard = secp256r1.standard;
+    const signers = try gen_signers(gpa, u);
+    const Deferred = certificate.Deferred(standard.Signature);
+    const signatures = try gpa.alloc(Deferred, signers.count());
+    const gen = gen_secp_signature(standard);
+    for (signatures) |*signature| signature.* = .init(try gen(gpa, u));
+    return .{ .signers = signers, .signatures = signatures };
+}
+
+test "conformance: secp256r1 certificate" {
+    try slow.skip_slow();
+    try verify_n(
+        "secp256r1::certificate::tests::conformance::CodecConformance<Certificate>",
+        secp256r1.certificate.Certificate,
+        gen_secp_certificate,
+    );
+}
+
 test "conformance: certificate signers, attestation, and ed25519 certificate" {
     try slow.skip_slow();
     const tests = "certificate::tests::conformance::";

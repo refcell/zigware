@@ -391,6 +391,44 @@ pub fn Individual(comptime Sig: type, comptime context: []const u8) type {
         /// The participant count bounding both the bitmap and the signature list.
         pub const Cfg = usize;
 
+        const Signed = struct { signer: Participant, signature: Deferred(Sig) };
+
+        fn signed_less(_: void, a: Signed, b: Signed) bool {
+            return a.signer.get() < b.signer.get();
+        }
+
+        /// Assembles a non-empty list of attestations, which need not be verified, over a
+        /// committee of `participants` with quorum `quorum`, sorting the signatures by signer
+        /// (the shared body of the ed25519 and secp256r1 `assemble`).
+        pub fn assemble(
+            gpa: Allocator,
+            participants: usize,
+            quorum: u32,
+            attestations: anytype,
+        ) (AssemblyError || Allocator.Error)!Self {
+            assert(attestations.len > 0);
+            const total = std.math.cast(u32, participants) orelse
+                @panic("participant count exceeds u32::MAX");
+            const entries = try gpa.alloc(Signed, attestations.len);
+            defer gpa.free(entries);
+            for (attestations, entries) |attestation, *entry| {
+                if (attestation.signer.get() >= total) return error.UnknownSigner;
+                if (attestation.signature.get() == null) return error.MalformedSignature;
+                entry.* = .{ .signer = attestation.signer, .signature = attestation.signature };
+            }
+            std.mem.sort(Signed, entries, {}, signed_less);
+            const indices = try gpa.alloc(Participant, entries.len);
+            defer gpa.free(indices);
+            for (entries, indices) |entry, *index| index.* = entry.signer;
+            var signers = try Signers.init(gpa, total, indices);
+            errdefer signers.deinit(gpa);
+            try signers.require(quorum);
+            const signatures = try gpa.alloc(Deferred(Sig), entries.len);
+            for (entries, signatures) |entry, *signature| signature.* = entry.signature;
+            assert(signers.count() == signatures.len);
+            return .{ .signers = signers, .signatures = signatures };
+        }
+
         pub fn deinit(self: *Self, gpa: Allocator) void {
             self.signers.deinit(gpa);
             gpa.free(self.signatures);

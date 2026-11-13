@@ -34,7 +34,7 @@ handshake), then certificate, secp256r1, the rest, zk and banderwagon last.
 - [x] secp256r1: standard and recoverable signatures and codec on `std.crypto.ecc.P256`, with
   its own RFC 6979 signer and key recovery; commonware's vectors, the four `CodecConformance`
   hashes, and the `secp256r1_{standard,recoverable}_decode` fuzz targets.
-- [ ] secp256r1 `certificate` scheme (after certificate.rs).
+- [x] secp256r1 `certificate` scheme with its conformance hash and `fixture` mock.
 - [x] lthash: `LtHash` with commonware-generated checksums, the `CodecConformance<LtHash>`
   hash, and the `lthash_operations`/`metamorph_lthash` fuzz targets.
 - [ ] bloomfilter (+ conformance, `RationalOptimalBits`).
@@ -85,7 +85,10 @@ handshake), then certificate, secp256r1, the rest, zk and banderwagon last.
   buffer. An ed25519 signature is any 64 bytes, so the ed25519 malformed-`Lazy` test cases
   have no counterpart; secp256r1 covers malformed signatures.
 - commonware's `impl_certificate_ed25519!(Subject, Namespace, Faults)` plus `Generic` is
-  `ed25519.certificate.Scheme(Subject, Faults)` with `Subject.Namespace`.
+  `ed25519.certificate.Scheme(Subject, Faults)` with `Subject.Namespace`;
+  `impl_certificate_secp256r1!` with `Scheme<P>` is
+  `secp256r1.certificate.Scheme(Subject, Faults, P)`. Both share
+  `certificate.Individual(Sig, context)` for the certificate and its `assemble`.
 - Hashers and ed25519 batch verification take `parallel` strategies (`assert_strategy`);
   `hash_many` is commonware's one-lane `hash_batches` over
   `run_batches`; ed25519 `verify_batch` shards like commonware (one seed per call, one
