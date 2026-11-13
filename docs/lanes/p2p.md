@@ -18,6 +18,9 @@ handshake and the runtime's network, which the actor-stream and runtime lanes ar
 - `p2p.types`: `Hostname`, `Ingress` (`socket`/`dns`), `Address` (`symmetric`/`asymmetric`),
   `is_global(IpAddr)`; codec encodings match commonware's conformance hashes.
 - `p2p.sizing`: `max_message_size`, `peer_set_limit`, `max_retained_peers`, `peer_set_size`.
+- `p2p.Quota` (`per_second`, `per_minute`, `per_hour`, `with_period`, `allow_burst`,
+  `burst_size`) and `p2p.KeyedRateLimiter(K)` (`check_key` returns null or the earliest
+  `SystemTime`, `retain_recent`): governor 0.10's keyed GCRA, step for step.
 
 ## Decisions
 - `Hostname` and `is_global` live in `p2p/types.zig` until the utils lane ports
@@ -26,12 +29,16 @@ handshake and the runtime's network, which the actor-stream and runtime lanes ar
 - p2p imports `conformance` (a dev-dependency in commonware) for its conformance tests.
 - `Recipients.union_with` returns a new value (inputs borrowed); a `some` result is owned by
   the caller. Message payloads are byte slices until the runtime lane ports `IoBuf`.
+- `Quota`/`KeyedRateLimiter` (commonware re-exports them from governor via runtime) live in
+  `p2p/rate_limit.zig` until the runtime lane takes them; keys sit in a sorted array so the
+  limiter is deterministic and needs no hashing of public keys.
 - p2p carries its own seeded fuzz driver (`p2p.fuzz.run`, same as codec's) until
   `invariants.minifuzz` lands.
 
 ## Backlog
 - [x] types.rs, sizing.rs, lib.rs traits (`Sender`, `Receiver`, `Blocker`, `Manager`,
   `Recipients`, channels) as comptime interfaces; Ingress/Address conformance; decode fuzz.
+- [x] Rate limiter: `Quota` and governor's keyed GCRA (`rate_limit.zig`).
 - [ ] utils: codec (wrapped sender/receiver), limited, mux (channel multiplexing), mocks.
 - [ ] simulated: network with links (latency, jitter, success rate), bandwidth limits,
   transmitter scheduling, partitions, peer sets, Byzantine blocking. Port its tests; it is
@@ -43,3 +50,4 @@ handshake and the runtime's network, which the actor-stream and runtime lanes ar
 ## Log
 - 2026-11-13: lib.rs types and interface checks, types.rs (Ingress, Address, Hostname,
   is_global) with commonware conformance hashes, sizing.rs, decode-canonical fuzz.
+- 2026-11-13: Quota and KeyedRateLimiter (governor GCRA port).

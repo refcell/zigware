@@ -32,6 +32,9 @@ pub const Hostname = types.Hostname;
 pub const sizing = @import("sizing.zig");
 pub const max_message_size = sizing.max_message_size;
 pub const fuzz = @import("fuzz.zig");
+pub const rate_limit = @import("rate_limit.zig");
+pub const Quota = rate_limit.Quota;
+pub const KeyedRateLimiter = rate_limit.KeyedRateLimiter;
 
 pub const Feedback = actor.Feedback;
 pub const Unreliable = actor.Unreliable;
@@ -208,6 +211,7 @@ test {
     std.testing.refAllDecls(@This());
     _ = types;
     _ = sizing;
+    _ = rate_limit;
 }
 
 test "recipient unions (recipient_unions)" {
