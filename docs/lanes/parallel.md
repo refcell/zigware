@@ -30,6 +30,15 @@ placeholder until this lands, so land `Strategy` first and tell the coordinator 
   and `explore(gpa, io, op{run(explorer)})`, which runs `op` under serial, parallel, and four
   seeded rules and fails with `error.ShapeDependentOutput` if any output differs.
 
+- `bench`: add `src/<package>/benches.zig` exporting `pub fn run(runner: *bench.Runner) !void`;
+  it may import its package, the package's deps, and `bench`. `zig build bench` measures it
+  (ReleaseFast; `-Dbench-filter=...`, `COMMONWARE_BENCH_FULL=1`), `zig build test` runs every
+  benchmark once on smoke inputs. `bench.Benchmark.init(prefix).with_param(k, v)`,
+  `runner.inputs.pick(T, smoke, standard, full)`, `runner.run(benchmark, &workload)` with a
+  workload of `iter(*W)` and optional `setup`/`before_iter`/`teardown`/`metrics`,
+  `runner.allocator`, `runner.io`; `bench.criterion(io, &workload, iters)` (iter_custom),
+  `Benchmark.metrics_json`, `bench.Inputs`, `bench.test_mode`.
+
 ## Decisions
 - No rayon port: `ThreadPool` is a fork-join pool whose workers are `std.Io.Group.concurrent`
   tasks and whose waits are `std.Io` futexes, so the deterministic runtime can host it. The
@@ -38,6 +47,10 @@ placeholder until this lands, so land `Strategy` first and tell the coordinator 
   fold gives the same result on every pool size (and equals `Sequential` for lawful ops).
 - `Rayon` planning parallelism defaults to workers + 1 (the caller helps). With parallelism 1
   every operation runs serially, like commonware's deterministic runtime pool.
+- bench: no Criterion or Gungraun; `Runner` warms up by doubling, then takes 20 samples over
+  ~1 s and prints min/median/max per iteration. Harnesses are discovered by file, so lanes add
+  benches without editing build.zig. The Gungraun tracker binary (bench/src/bin) is not
+  ported yet: it drives valgrind; its compare/report logic is next.
 - No adaptive policy yet: `Rayon` behaves like commonware's `Rayon::without_policy`.
 - Closures are `pub fn` methods on op values (Zig cannot see private decls across files).
 - Sorts take Zig's `lessThan(ctx, a, b)` instead of an `Ordering` comparator. Parallel sorts
@@ -63,11 +76,14 @@ placeholder until this lands, so land `Strategy` first and tell the coordinator 
 - [ ] parallel policy.rs and topology.rs (CPU topology, pinning policy).
 - [ ] allocator: an allocator wrapper with commonware's metrics and purge/reserve
   configuration; no mimalloc (zero deps).
-- [ ] bench: the benchmark workload abstraction (lib.rs) and its runner/report binary
-  (bench/src/bin) as `zig build bench`.
+- [x] bench: the benchmark workload abstraction (lib.rs) and `zig build bench`.
+- [ ] bench: the tracker binary's config, results comparison, and report rendering
+  (bench/src/bin) over `zig build bench` output.
 - [ ] Fuzz targets and benches.
 
 ## Log
+- 2026-11-13: bench package and `zig build bench` (auto-discovered benches.zig), parallel
+  benches; every-op-on-every-strategy test.
 - 2026-11-13: mocks (Explorer, explore, pooled, inlined, pending) with ported tests.
 - 2026-11-13: spawn/block_on with caller-owned Task over the pool.
 - 2026-11-13: run_tiles (Grid, Tiles, Shares claim/steal) with ported tile tests.

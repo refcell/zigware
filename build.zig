@@ -12,6 +12,8 @@
 //!   zig build test-<package>  run one package's unit tests, e.g. zig build test-codec
 //!   zig build run-<example>   run an example: zig build run-log -- --help
 //!   zig build check           compile everything without running
+//!   zig build bench           measure every package's benchmarks (src/<package>/benches.zig);
+//!                             -Dbench-filter=... narrows, COMMONWARE_BENCH_FULL=1 for full inputs
 
 const std = @import("std");
 
@@ -144,6 +146,7 @@ pub fn build(b: *std.Build) void {
     }
 
     add_examples(b, zigware, target, optimize, test_step, check_step, filters);
+    add_benches(b, &modules, options_module, target, optimize, test_step, check_step);
 }
 
 fn package_index(name: []const u8) usize {
@@ -151,6 +154,92 @@ fn package_index(name: []const u8) usize {
         if (std.mem.eql(u8, package.name, name)) return index;
     }
     std.debug.panic("build.zig: unknown package dependency '{s}'", .{name});
+}
+
+/// Every package with a `src/<package>/benches.zig` gets a `bench-<package>` harness
+/// (`src/bench/main.zig`): `zig build bench` measures it (in ReleaseFast unless -Doptimize says
+/// otherwise), and `zig build test` runs each benchmark once on the smoke inputs.
+fn add_benches(
+    b: *std.Build,
+    modules: []const *std.Build.Module,
+    options_module: *std.Build.Module,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    test_step: *std.Build.Step,
+    check_step: *std.Build.Step,
+) void {
+    const bench_step = b.step("bench", "Measure every package's benchmarks");
+    const bench_filter = b.option([]const u8, "bench-filter", "Only run benchmarks matching");
+    const bench_optimize: std.builtin.OptimizeMode = if (optimize == .debug)
+        .fast
+    else
+        optimize;
+    // Package code compiles in its module's mode, so measured runs get their own graph.
+    var measured_modules: [packages.len]*std.Build.Module = undefined;
+    for (packages, 0..) |package, index| {
+        measured_modules[index] = b.createModule(.{
+            .root_source_file = b.path(b.fmt("src/{s}/root.zig", .{package.name})),
+            .target = target,
+            .optimize = bench_optimize,
+        });
+        measured_modules[index].addImport("build_options", options_module);
+    }
+    for (packages, 0..) |package, index| {
+        for (package.deps) |dep| {
+            measured_modules[index].addImport(dep, measured_modules[package_index(dep)]);
+        }
+    }
+    for (packages, 0..) |package, index| {
+        const path = b.fmt("src/{s}/benches.zig", .{package.name});
+        b.dependOnDirectoryContents(b.path(b.fmt("src/{s}", .{package.name})));
+        b.root.access(b.graph.io, path, .{}) catch continue;
+        for ([_]std.builtin.OptimizeMode{ optimize, bench_optimize }, 0..) |mode, measured| {
+            const graph = if (measured == 0) modules else &measured_modules;
+            const exe = bench_harness(b, graph, package, index, path, target, mode);
+            const run = b.addRunArtifact(exe);
+            if (measured == 0) {
+                run.addArg("--test");
+                run.expectExitCode(0); // Checked runs keep the smoke log out of test output.
+                check_step.dependOn(&exe.step);
+                test_step.dependOn(&run.step);
+            } else {
+                run.addArg("--bench");
+                run.has_side_effects = true;
+                if (bench_filter) |filter| run.addArgs(&.{ "--", filter });
+                bench_step.dependOn(&run.step);
+            }
+        }
+    }
+}
+
+fn bench_harness(
+    b: *std.Build,
+    modules: []const *std.Build.Module,
+    package: Package,
+    index: usize,
+    path: []const u8,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+) *std.Build.Step.Compile {
+    const bench = modules[package_index("bench")];
+    const benches = b.createModule(.{
+        .root_source_file = b.path(path),
+        .target = target,
+        .optimize = optimize,
+    });
+    benches.addImport(package.name, modules[index]);
+    benches.addImport("bench", bench);
+    for (package.deps) |dep| benches.addImport(dep, modules[package_index(dep)]);
+    const root = b.createModule(.{
+        .root_source_file = b.path("src/bench/main.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "bench", .module = bench },
+            .{ .name = "benches", .module = benches },
+        },
+    });
+    return b.addExecutable(.{ .name = b.fmt("bench-{s}", .{package.name}), .root_module = root });
 }
 
 /// Each example gets an install, a `run-<name>` step, and its own test binary.
