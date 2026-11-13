@@ -33,7 +33,9 @@ variants (MinPk, MinSig) must match exactly.
   `decode(*const [N]u8) error{Invalid}!T` with commonware's byte layout (big-endian ints).
 - Until `parallel` lands, `Strategy` parameters are omitted (sequential); results are identical.
 - Conformance hashes (math/conformance.toml) wait for the `conformance` harness.
-- Randomness is injected as `std.Random` (commonware's `CryptoRng`).
+- Randomness is injected as a `utils.rng` generator pointer (`next_u64`/`fill_bytes`, commonware's
+  `CryptoRng`), so ported tests draw the same values as the Rust tests.
 
 ## Log
 - 2026-11-13: math algebra interfaces, goldilocks field, test field/group, fuzz driver.
+- 2026-11-13: math poly (Poly, commit, Interpolator) and varint wire helpers.

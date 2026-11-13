@@ -148,9 +148,10 @@ pub const F = struct {
     }
 
     /// Uniform sampling by rejection; fails about once every 2^32 draws.
-    pub fn random(rng: std.Random) F {
+    /// `rng` is a `utils.rng` generator (`next_u64`), so draws match commonware's.
+    pub fn random(rng: anytype) F {
         while (true) {
-            const x = rng.int(u64);
+            const x = rng.next_u64();
             if (x < P) return .{ .value = x };
         }
     }

@@ -4,6 +4,7 @@
 
 const std = @import("std");
 const assert = std.debug.assert;
+const utils = @import("utils");
 const algebra = @import("algebra.zig");
 const fuzz = @import("fuzz.zig");
 const Unstructured = fuzz.Unstructured;
@@ -63,9 +64,9 @@ pub const F = struct {
         return a.value == b.value;
     }
 
-    pub fn random(rng: std.Random) F {
+    pub fn random(rng: anytype) F {
         var bytes: [8]u8 = undefined;
-        rng.bytes(&bytes);
+        rng.fill_bytes(&bytes);
         return .{ .value = std.mem.readInt(u64, &bytes, .little) % P };
     }
 
@@ -177,8 +178,8 @@ test "test types fuzz plan (coverage-guided)" {
 }
 
 test "field and group guards" {
-    var prng = std.Random.DefaultPrng.init(0);
-    const x = F.random(prng.random());
+    var rng = utils.rng.test_rng();
+    const x = F.random(&rng);
     try testing.expect(x.eql(F.zero) or x.inv().mul(x).eql(F.one));
     var bytes: [8]u8 = undefined;
     std.mem.writeInt(u64, &bytes, P, .big);

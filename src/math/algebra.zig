@@ -14,7 +14,8 @@
 //!   `msm([]const T, []const R) T`. Every Ring is a Space over itself.
 //! - CryptoGroup: Space(Scalar) with `Scalar: type` (a Field) and `generator: T`.
 //! - HashToGroup: CryptoGroup and `hash_to_group(dst, message) T`.
-//! - Random: `random(std.Random) T`.
+//! - Random: `random(rng) T`, where `rng` is a `utils.rng` generator pointer (`next_u64`,
+//!   `fill_bytes`), so ports draw the same values as commonware.
 //!
 //! The free functions (`exp`, `scale`, `double`, `msm`, ...) supply the trait defaults.
 
@@ -176,10 +177,10 @@ pub fn div_2(comptime T: type, x: T) T {
 }
 
 /// `HashToGroup::rand_to_group`: 32 random bytes hashed with an empty domain separator.
-pub fn rand_to_group(comptime G: type, random: std.Random) G {
+pub fn rand_to_group(comptime G: type, rng: anytype) G {
     comptime assert(@hasDecl(G, "hash_to_group"));
     var bytes: [32]u8 = undefined;
-    random.bytes(&bytes);
+    rng.fill_bytes(&bytes);
     return G.hash_to_group(&.{}, &bytes);
 }
 

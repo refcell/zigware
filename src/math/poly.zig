@@ -204,7 +204,7 @@ pub fn Poly(comptime K: type) type {
         }
 
         /// Random coefficients (commonware `Poly::new`).
-        pub fn random(allocator: Allocator, rng: std.Random, degree_value: u32) !Self {
+        pub fn random(allocator: Allocator, rng: anytype, degree_value: u32) !Self {
             const out = try allocator.alloc(K, @as(usize, degree_value) + 1);
             for (out) |*c| c.* = K.random(rng);
             return from_owned(out);
@@ -213,7 +213,7 @@ pub fn Poly(comptime K: type) type {
         /// Random coefficients with a fixed constant (commonware `Poly::new_with_constant`).
         pub fn random_with_constant(
             allocator: Allocator,
-            rng: std.Random,
+            rng: anytype,
             degree_value: u32,
             constant_value: K,
         ) !Self {
