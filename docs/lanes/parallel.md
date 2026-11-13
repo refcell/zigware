@@ -22,6 +22,7 @@ placeholder until this lands, so land `Strategy` first and tell the coordinator 
   `run_batches(len, min_batch_len, multiplier, op{run(batches)})`, `try_run_batches`,
   `run_tiles(len, grids, multiplier, op{run(tiles)})` with `parallel.Grid{rows, tile_cost}`
   and `tiles.fill_collect(gpa, op{init, fill(*state, row, columns), finish(*state, row)})`,
+  `spawn(len, &task)` / `block_on(&task)` with `parallel.Task(Op)` (`op.call()`),
   `parallelism()`. Optional op hooks: `discard(value)`, `deinit_state(*state)`.
 
 ## Decisions
@@ -37,6 +38,8 @@ placeholder until this lands, so land `Strategy` first and tell the coordinator 
 - Sorts take Zig's `lessThan(ctx, a, b)` instead of an `Ordering` comparator. Parallel sorts
   sort runs in parallel and merge pairwise with a scratch buffer from the pool's allocator;
   without one they sort serially.
+- `spawn` takes a caller-owned `Task(Op)` instead of returning a future, so it never
+  allocates; every spawned task must be `block_on`'d before its pool is destroyed.
 - Fallible ops return the first error in chunk order (commonware allows any).
 - `run_tiles` plans at most 64 workers (one pool job each); `Tiles.fill_collect` returns an
   allocated slice and `OutOfMemory` if a worker's result list cannot grow.
@@ -47,7 +50,7 @@ placeholder until this lands, so land `Strategy` first and tell the coordinator 
   work-stealing pool on std threads and `std.Io` instead of porting rayon line by line;
   results must not depend on the number of threads.
 - [x] parallel: `run_tiles` (`Grid`, `Tiles`, `Shares` claim/steal) with its tests.
-- [ ] parallel: `spawn`/`block_on` over the pool.
+- [x] parallel: `spawn`/`block_on` over the pool.
 - [ ] parallel policy.rs and topology.rs (CPU topology, pinning policy), mocks.rs.
 - [ ] allocator: an allocator wrapper with commonware's metrics and purge/reserve
   configuration; no mimalloc (zero deps).
@@ -56,6 +59,7 @@ placeholder until this lands, so land `Strategy` first and tell the coordinator 
 - [ ] Fuzz targets and benches.
 
 ## Log
+- 2026-11-13: spawn/block_on with caller-owned Task over the pool.
 - 2026-11-13: run_tiles (Grid, Tiles, Shares claim/steal) with ported tile tests.
 - 2026-11-13: Strategy interface (Sequential, Rayon over a std.Io fork-join pool), batches,
   parallel sorts, ported lib.rs tests.

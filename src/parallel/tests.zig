@@ -543,3 +543,78 @@ test "parallel sorts match serial sorts and stay stable" {
         }
     }
 }
+
+const Seven = struct {
+    pub fn call(_: Seven) u32 {
+        return 7;
+    }
+};
+
+test "sequential spawn runs the job inline and block_on returns it" {
+    var task: parallel.Task(Seven) = .init(.{});
+    sequential.spawn(1, &task);
+    try testing.expect(task.is_done());
+    try testing.expectEqual(@as(u32, 7), sequential.block_on(&task));
+}
+
+test "rayon spawn runs the job on a pool worker" {
+    const pool = try create_pool(2);
+    defer pool.destroy();
+    const rayon = Rayon.init(pool);
+    var task: parallel.Task(Seven) = .init(.{});
+    rayon.spawn(1, &task);
+    // Only a worker can finish the job before `block_on`.
+    var spins: u64 = 0;
+    while (!task.is_done()) : (spins += 1) {
+        try testing.expect(spins < 200_000_000);
+        std.Thread.yield() catch {};
+    }
+    try testing.expectEqual(@as(u32, 7), rayon.block_on(&task));
+}
+
+test "rayon spawn runs inline without parallelism" {
+    const pool = try create_pool(0);
+    defer pool.destroy();
+    const rayon = Rayon.init(pool).with_parallelism(4);
+    var task: parallel.Task(Seven) = .init(.{});
+    rayon.spawn(1, &task);
+    try testing.expect(task.is_done());
+    try testing.expectEqual(@as(u32, 7), rayon.block_on(&task));
+}
+
+/// Folds `0..n` on the strategy it captures, from inside a spawned job.
+const SpawnedFold = struct {
+    rayon: Rayon,
+    n: usize,
+
+    pub fn call(spawned: SpawnedFold) u64 {
+        const Sum = struct {
+            pub fn identity(_: @This()) u64 {
+                return 0;
+            }
+            pub fn fold(_: @This(), acc: u64, index: usize) u64 {
+                return acc + index;
+            }
+            pub fn reduce(_: @This(), a: u64, b: u64) u64 {
+                return a + b;
+            }
+        };
+        return spawned.rayon.fold(Range.upto(spawned.n), Sum{});
+    }
+};
+
+test "many spawned jobs with nested folds all complete" {
+    const pool = try create_pool(3);
+    defer pool.destroy();
+    const rayon = Rayon.init(pool);
+    var tasks: [100]parallel.Task(SpawnedFold) = undefined;
+    for (&tasks, 0..) |*task, index| {
+        task.* = .init(.{ .rayon = rayon, .n = index * 10 });
+        rayon.spawn(index, task);
+    }
+    for (&tasks, 0..) |*task, index| {
+        const n: u64 = index * 10;
+        const expected = if (n == 0) 0 else n * (n - 1) / 2;
+        try testing.expectEqual(expected, rayon.block_on(task));
+    }
+}

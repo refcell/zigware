@@ -14,6 +14,7 @@ const assert = std.debug.assert;
 const ops = @import("ops.zig");
 const shared = @import("strategy.zig");
 const tiles = @import("tiles.zig");
+const task_module = @import("task.zig");
 const pool_module = @import("pool.zig");
 
 const ThreadPool = pool_module.ThreadPool;
@@ -79,6 +80,19 @@ pub const Rayon = struct {
         return rayon.pool.allocator;
     }
 
+    /// Hands `task`'s job to the pool, or runs it inline when the strategy has no parallelism
+    /// or the pool no workers. `len` sizes the job for adaptive strategies.
+    pub fn spawn(rayon: Rayon, len: usize, task: anytype) void {
+        _ = len;
+        if (rayon.parallelism_planned <= 1 or rayon.pool.threads == 0) {
+            task.run_inline();
+            assert(task.is_done());
+            return;
+        }
+        task.offload(rayon.pool);
+    }
+
+    pub const block_on = task_module.block_on;
     pub const run = shared.run;
     pub const try_run = shared.try_run;
     pub const run_batches = shared.run_batches;

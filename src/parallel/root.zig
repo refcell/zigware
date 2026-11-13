@@ -30,6 +30,7 @@
 //! | `s.sort_by(T, items, ctx, lessThan)` | stable; `sort_unstable_by` is not |
 //! | `s.run_batches(len, min_len, multiplier, op)` | `run(batches) R`, see `Batches` |
 //! | `s.run_tiles(len, grids, multiplier, op)` | `run(tiles) R`, see `Tiles` |
+//! | `s.spawn(len, &task)`, `s.block_on(&task) R` | `call() R`, see `Task` |
 //! | `s.parallelism() usize` | |
 //!
 //! Optional op methods: `discard(value)` releases accumulators or outputs a failed fallible
@@ -50,6 +51,8 @@ const tiles_module = @import("tiles.zig");
 pub const Grid = tiles_module.Grid;
 pub const Tiles = tiles_module.Tiles;
 pub const max_units = tiles_module.max_units;
+
+pub const Task = @import("task.zig").Task;
 
 pub const Sequential = @import("sequential.zig").Sequential;
 pub const Rayon = @import("rayon.zig").Rayon;

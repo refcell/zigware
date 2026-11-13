@@ -7,6 +7,7 @@ const assert = std.debug.assert;
 const ops = @import("ops.zig");
 const shared = @import("strategy.zig");
 const tiles = @import("tiles.zig");
+const task_module = @import("task.zig");
 
 pub const Sequential = struct {
     pub fn parallelism(_: Sequential) usize {
@@ -36,6 +37,14 @@ pub const Sequential = struct {
         return null;
     }
 
+    /// Runs `task`'s job inline before returning.
+    pub fn spawn(_: Sequential, len: usize, task: anytype) void {
+        _ = len;
+        task.run_inline();
+        assert(task.is_done());
+    }
+
+    pub const block_on = task_module.block_on;
     pub const run = shared.run;
     pub const try_run = shared.try_run;
     pub const run_batches = shared.run_batches;

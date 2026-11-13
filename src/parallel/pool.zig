@@ -30,12 +30,12 @@ pub const Config = struct {
     threads: u32,
 };
 
-/// Counts the jobs of one `run` call that are not finished yet.
-const Latch = struct {
+/// Counts the jobs of one `run` call (or one spawned task) that are not finished yet.
+pub const Latch = struct {
     pending: std.atomic.Value(u32),
 };
 
-const Job = struct {
+pub const Job = struct {
     node: std.DoublyLinkedList.Node = .{},
     context: *const anyopaque,
     call: *const fn (context: *const anyopaque, index: usize) void,
@@ -150,6 +150,22 @@ pub const ThreadPool = struct {
         pool.queue.remove(&job.node);
         job.queued = false;
         return true;
+    }
+
+    /// Queues one detached `job` (a spawned task). Its owner must later call `finish`.
+    pub fn submit(pool: *ThreadPool, job: *Job) void {
+        assert(job.queued);
+        assert(job.latch.pending.load(.monotonic) == 1);
+        pool.push_all(job[0..1]);
+    }
+
+    /// Waits for a job queued with `submit`, running it on the caller if no worker has
+    /// started it, and running other queued jobs while a worker holds it.
+    pub fn finish(pool: *ThreadPool, job: *Job) void {
+        if (pool.reclaim(job)) job.execute(pool.io);
+        pool.wait(job.latch);
+        assert(!job.queued);
+        assert(job.latch.pending.load(.acquire) == 0);
     }
 
     /// Waits until every job counted by `latch` finishes, running other queued jobs meanwhile.
