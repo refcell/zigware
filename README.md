@@ -14,6 +14,18 @@ It is a ground-up port of the public commonware monorepo and keeps its layout: e
 there is a package here with the same name and the same dependency graph, and wire formats
 are byte-identical so the two can interoperate.
 
+<p align="center">
+  <img src="docs/assets/estimator-demo.gif" width="800"
+    alt="The estimator simulates a Simplex round across three AWS regions">
+</p>
+
+The [estimator](examples/estimator) runs a consensus protocol written in a small DSL over
+the deterministic runtime and the simulated p2p network, with real AWS inter-region
+latencies, and reports when each region crosses each step
+([video](docs/assets/estimator-demo.mp4)). Here Simplex finalizes across seven validators in
+three regions in about 114 ms at the mean. `zig build run-estimator -- <file.lazy>
+--distribution <region:count,...>` runs any protocol in [examples/estimator](examples/estimator).
+
 > [!WARNING]
 > zigware is pre-alpha and being ported now. Do not use it in production.
 
@@ -21,22 +33,22 @@ are byte-identical so the two can interoperate.
 
 | Package | What it does | Status |
 | --- | --- | --- |
-| [codec](src/codec) | Serialize structured data | porting |
+| [codec](src/codec) | Serialize structured data | ported |
 | [cryptography](src/cryptography) | Keys, signatures, hashes, BLS12-381 threshold crypto | porting |
 | [math](src/math) | Fields, polynomials, NTT | porting |
 | [runtime](src/runtime) | Async tasks with a deterministic scheduler or io_uring | porting |
 | [storage](src/storage) | Journals, archives, MMRs, authenticated databases | porting |
 | [utils](src/utils) | Shared functionality across primitives | porting |
 | [parallel](src/parallel) | Parallel folds with pluggable strategies | porting |
-| [actor](src/actor) | Coordinate concurrent components | planned |
-| [stream](src/stream) | Encrypted messages over any transport | planned |
-| [p2p](src/p2p) | Communicate with authenticated peers | planned |
+| [actor](src/actor) | Coordinate concurrent components | ported |
+| [stream](src/stream) | Encrypted messages over any transport | ported |
+| [p2p](src/p2p) | Communicate with authenticated peers | porting |
 | [broadcast](src/broadcast) | Disseminate data over a wide-area network | planned |
-| [resolver](src/resolver) | Resolve data by a fixed-length key | planned |
+| [resolver](src/resolver) | Resolve data by a fixed-length key | porting |
 | [collector](src/collector) | Collect responses to committable requests | planned |
-| [coding](src/coding) | Erasure-code data for recovery from fragments | planned |
+| [coding](src/coding) | Erasure-code data for recovery from fragments | ported |
 | [clearing](src/clearing) | Settle actions at scale | planned |
-| [consensus](src/consensus) | Order messages in a Byzantine environment (simplex, marshal) | planned |
+| [consensus](src/consensus) | Order messages in a Byzantine environment (simplex, aggregation, marshal) | porting |
 | [glue](src/glue) | Default constructions spanning several primitives | planned |
 | [deployer](src/deployer) | Deploy infrastructure across cloud providers | planned |
 
