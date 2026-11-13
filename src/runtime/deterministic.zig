@@ -144,6 +144,8 @@ const Task = struct {
     wait_cancelable: bool,
     /// Bumped on every wake, so timers armed for an earlier wait are ignored.
     wait_generation: u64,
+    /// Alarms in `Runner.alarms` that point at this task, stale ones included.
+    alarms_queued: u32,
     wake_reason: enum { notified, timeout, canceled },
     futex_address: usize,
     futex_node: std.DoublyLinkedList.Node,
@@ -357,6 +359,7 @@ pub const Runner = struct {
             .cancel_protection = .unblocked,
             .wait_cancelable = false,
             .wait_generation = 0,
+            .alarms_queued = 0,
             .wake_reason = .notified,
             .futex_address = 0,
             .futex_node = .{},
@@ -384,15 +387,16 @@ pub const Runner = struct {
 
     /// Removes the stale alarms of a task being destroyed: a wait that ended before its
     /// timeout leaves its alarm queued, and firing it later would read the freed task.
-    fn drop_alarms(runner: *Runner, task: *const Task) void {
+    fn drop_alarms(runner: *Runner, task: *Task) void {
         var index: usize = 0;
-        while (index < runner.alarms.items.len) {
+        while (task.alarms_queued > 0 and index < runner.alarms.items.len) {
             if (runner.alarms.items[index].task != task) {
                 index += 1;
                 continue;
             }
             assert(task.state == .finished or runner.current == null);
             _ = runner.alarms.popIndex(index);
+            task.alarms_queued -= 1;
             // Removal reorders the heap, so scan again from the start.
             index = 0;
         }
@@ -512,6 +516,7 @@ pub const Runner = struct {
         };
         runner.next_alarm_sequence += 1;
         runner.alarms.push(runner.allocator, alarm) catch @panic("deterministic: out of memory");
+        task.alarms_queued += 1;
     }
 
     fn run_until_root(runner: *Runner) Error!void {
@@ -580,6 +585,8 @@ pub const Runner = struct {
             if (next.deadline_ns > runner.time_ns) return;
             const alarm = runner.alarms.pop().?;
             const task = alarm.task;
+            assert(task.alarms_queued > 0);
+            task.alarms_queued -= 1;
             // A stale alarm (its wait already ended) wakes nobody, as in commonware.
             if (task.state == .blocked and task.wait_generation == alarm.generation) {
                 runner.wake(task, .timeout);
@@ -1207,4 +1214,35 @@ test "the runner's network connects tasks" {
         }
     };
     try (try runner.start(Root.run, .{ runner.io(), runner.network() }));
+}
+
+// Regression (15fe6e5): a timed wait woken early leaves its alarm queued; destroying the task
+// must drop it, or firing it later reads the freed task.
+test "a finished task's stale alarms are dropped with it" {
+    var runner = try test_runner(.{});
+    defer runner.deinit();
+    const Root = struct {
+        fn waiter(io: Io, word: *u32) !void {
+            const timeout: Io.Timeout = .{ .duration = .{
+                .raw = .fromSeconds(10),
+                .clock = .awake,
+            } };
+            try io.futexWaitTimeout(u32, word, 0, timeout);
+            try testing.expectEqual(@as(u32, 1), word.*);
+        }
+        fn run(io: Io, r: *Runner) !void {
+            var word: u32 = 0;
+            var future = try io.concurrent(waiter, .{ io, &word });
+            // Several cycles, so the waiter has run and armed its alarm.
+            try io.sleep(.fromMilliseconds(10), .awake);
+            try testing.expectEqual(@as(usize, 1), r.alarms.items.len);
+            word = 1;
+            io.futexWake(u32, &word, 1);
+            try future.await(io);
+            // The waiter is freed; its alarm went with it.
+            try testing.expectEqual(@as(usize, 0), r.alarms.items.len);
+            try io.sleep(.fromSeconds(20), .awake);
+        }
+    };
+    try (try runner.start(Root.run, .{ runner.io(), &runner }));
 }
