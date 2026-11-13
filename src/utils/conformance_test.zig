@@ -154,6 +154,11 @@ const entries = .{
         bitmap.DefaultBitMap,
         arbitrary.default_generator(bitmap.DefaultBitMap),
     ),
+    Codec(
+        "bitmap::prunable" ++ conformance_suffix ++ "Prunable<16>>",
+        bitmap.Prunable(16),
+        arbitrary.default_generator(bitmap.Prunable(16)),
+    ),
 };
 
 test "utils conformance hashes match commonware" {

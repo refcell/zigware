@@ -25,6 +25,9 @@ encoding parts as soon as `codec` has its core API (see docs/lanes/codec.md).
   allocator-explicit `push`/`pop`/`truncate`/`extend_from_bitmap`/`push_chunk`/`prune_chunks`,
   `get`/`set`/`flip`/`set_all`/`flip_all`, `and`/`or`/`xor`, `count_ones`, `is_unset`,
   `iter`, `ones_iter`/`ones_iter_from`/`ones_iter_range`, codec (`Cfg = RangeCfg(u64)`), `{f}`.
+  `bitmap.Prunable(N)`: absolute positions over pruned leading chunks (`init_pruned`,
+  `prune_to_bit`, `unprune_chunks`, `set_chunk_by_index`, `get_bit`/`set_bit`, `ones_iter_*`,
+  codec: pruned count `u64` + `BitMap`, `Cfg` bounds the retained bits).
   `bitmap.readable` is the `Readable` trait (`len`, `pruned_chunks`, `get_chunk`) + `OnesIter`.
 - `utils.Hostname` (`utils.hostname`): validated RFC 1035/1123 hostname stored inline
   (`init`, `literal`, `as_str`, `eql`, `order`, `{f}`, `len_max`, `label_len_max`,
@@ -54,7 +57,7 @@ encoding parts as soon as `codec` has its core API (see docs/lanes/codec.md).
   `time.rs`, `range.rs`, `iter.rs`, `vec.rs` (NonEmptyVec), `rational`, `probability`,
   `sampling`, `rng.rs` (deterministic test RNG matching commonware's where tests depend on it).
 - [x] utils sequence: fixed_bytes, u32, u64, prefixed_u64, vec_u64, unit — with codec.
-- [ ] utils bitmap (done: BitMap; next: prunable, historical,
+- [ ] utils bitmap (done: BitMap, Prunable; next: historical,
   roaring): BitMap, prunable, historical, roaring; codec encodings identical.
 - [ ] utils ordered (Set/Map/Quorum), priority_set, cache (LRU etc.), acknowledgement,
   channel (bounded mpsc, ring, reservation, tracked) — channels over `std.Io` primitives.
@@ -71,3 +74,4 @@ encoding parts as soon as `codec` has its core API (see docs/lanes/codec.md).
 - 2026-11-13: moved utils conformance onto the shared harness (conformance + codec.arbitrary).
 - 2026-11-13: BitMap with all mod.rs tests, conformance hash, and a model-based fuzz target.
 - 2026-11-13: Hostname (conformance hash) and net is_global/subnet, for p2p.
+- 2026-11-13: Prunable bitmap with its tests, conformance hash, and fuzz target.
