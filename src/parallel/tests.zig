@@ -618,3 +618,184 @@ test "many spawned jobs with nested folds all complete" {
         try testing.expectEqual(expected, rayon.block_on(task));
     }
 }
+
+/// Ops for `exercise_all`.
+const ExerciseOps = struct {
+    pub fn identity(_: @This()) u64 {
+        return 0;
+    }
+    pub fn init(_: @This()) u64 {
+        return 1;
+    }
+    pub fn fold(_: @This(), acc: u64, index: usize) u64 {
+        return acc + index;
+    }
+    pub fn reduce(_: @This(), a: u64, b: u64) u64 {
+        return a + b;
+    }
+    pub fn map(_: @This(), index: usize) u64 {
+        return index * 2;
+    }
+    pub fn call(_: @This()) u64 {
+        return 42;
+    }
+    pub fn serial(_: @This()) u8 {
+        return 1;
+    }
+    pub fn parallel(_: @This()) u8 {
+        return 1;
+    }
+};
+const ExerciseFoldInit = struct {
+    pub fn init(_: @This()) u64 {
+        return 1;
+    }
+    pub fn identity(_: @This()) u64 {
+        return 0;
+    }
+    pub fn fold(_: @This(), acc: u64, state: *u64, index: usize) u64 {
+        return acc + index * state.*;
+    }
+    pub fn reduce(_: @This(), a: u64, b: u64) u64 {
+        return a + b;
+    }
+};
+const ExerciseTryOps = struct {
+    pub fn identity(_: @This()) u64 {
+        return 0;
+    }
+    pub fn fold(_: @This(), acc: u64, index: usize) error{Never}!u64 {
+        return acc + index;
+    }
+    pub fn reduce(_: @This(), a: u64, b: u64) u64 {
+        return a + b;
+    }
+    pub fn map(_: @This(), index: usize) error{Never}!u64 {
+        return index * 2;
+    }
+};
+const ExerciseInitMap = struct {
+    pub fn init(_: @This()) u64 {
+        return 0;
+    }
+    pub fn map(_: @This(), state: *u64, index: usize) u64 {
+        state.* += 1;
+        return index * 2;
+    }
+};
+const ExercisePartition = struct {
+    pub fn map(_: @This(), index: usize) struct { usize, ?usize } {
+        return .{ index, if (index % 2 == 0) index else null };
+    }
+};
+
+const exercise_len = 300;
+
+/// Calls every strategy operation once on `strategy` and checks each result, so every op is
+/// compiled and run against every strategy type (a pool-only compile error once slipped by).
+fn exercise_all(strategy: anytype) !void {
+    const n = exercise_len;
+    const items = Range.upto(n);
+    const sum: u64 = n * (n - 1) / 2;
+    try testing.expectEqual(sum, strategy.fold(items, ExerciseOps{}));
+    try testing.expectEqual(sum, strategy.fold_init(items, ExerciseFoldInit{}));
+    try testing.expectEqual(sum, try strategy.try_fold(items, ExerciseTryOps{}));
+    try testing.expectEqual(@as(u8, 1), strategy.run(n, ExerciseOps{}));
+    try testing.expectEqual(@as(u8, 1), strategy.try_run(n, ExerciseOps{}));
+
+    var out: [n]u64 = undefined;
+    strategy.map_into(items, &out, ExerciseOps{});
+    for (out, 0..) |value, index| try testing.expectEqual(index * 2, value);
+    strategy.map_init_into(items, &out, ExerciseInitMap{});
+    try strategy.try_map_into(items, &out, ExerciseTryOps{});
+    try testing.expectEqual(@as(u64, 2 * (n - 1)), out[n - 1]);
+
+    const gpa_test = testing.allocator;
+    const collected = [_][]u64{
+        try strategy.map_collect(testing.allocator, items, ExerciseOps{}),
+        try strategy.map_init_collect(testing.allocator, items, ExerciseInitMap{}),
+        try strategy.try_map_collect(testing.allocator, items, ExerciseTryOps{}),
+        try strategy.map_collect_with_multiplier(testing.allocator, items, 4, ExerciseOps{}),
+        try strategy.map_init_collect_with_multiplier(gpa_test, items, 4, ExerciseInitMap{}),
+    };
+    for (collected) |values| {
+        defer testing.allocator.free(values);
+        try testing.expectEqualSlices(u64, &out, values);
+    }
+    const split = try strategy.map_partition_collect(testing.allocator, items, ExercisePartition{});
+    defer split.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, n / 2), split.results.len);
+    try testing.expectEqual(@as(usize, n / 2), split.filtered.len);
+
+    const a, const b = strategy.join(ExerciseOps{}, Seven{});
+    try testing.expectEqual(@as(u64, 42), a);
+    try testing.expectEqual(@as(u32, 7), b);
+
+    var task: parallel.Task(ExerciseOps) = .init(.{});
+    strategy.spawn(1, &task);
+    try testing.expectEqual(@as(u64, 42), strategy.block_on(&task));
+    try exercise_batches_tiles_sorts(strategy);
+}
+
+fn exercise_batches_tiles_sorts(strategy: anytype) !void {
+    const Lengths = struct {
+        pub fn map(_: @This(), _: usize, range: Range) error{Never}!usize {
+            return range.len();
+        }
+    };
+    const Batched = struct {
+        pub fn run(_: @This(), batches: anytype) error{Never}!usize {
+            var lengths: [parallel.max_chunks]usize = undefined;
+            try batches.try_map_collect(lengths[0..batches.count()], Lengths{});
+            var total: usize = 0;
+            for (lengths[0..batches.count()]) |len| total += len;
+            return total;
+        }
+    };
+    try testing.expectEqual(@as(usize, 1000), try strategy.run_batches(1000, 16, 1, Batched{}));
+    try testing.expectEqual(@as(usize, 1000), try strategy.try_run_batches(1000, 16, 1, Batched{}));
+
+    const Cells = struct {
+        pub fn init(_: @This()) usize {
+            return 0;
+        }
+        pub fn fill(_: @This(), cells: *usize, _: usize, columns: Range) void {
+            cells.* += columns.len();
+        }
+        pub fn finish(_: @This(), cells: *usize, _: usize) usize {
+            defer cells.* = 0;
+            return cells.*;
+        }
+    };
+    const Tiled = struct {
+        pub fn run(_: @This(), tiles: anytype) std.mem.Allocator.Error!usize {
+            const results = try tiles.fill_collect(testing.allocator, Cells{});
+            defer testing.allocator.free(results);
+            var total: usize = 0;
+            for (results) |cells| total += cells;
+            return total;
+        }
+    };
+    const grids = [_]parallel.Grid{.{ .rows = 5, .tile_cost = 4 }};
+    try testing.expectEqual(@as(usize, 5 * 700), try strategy.run_tiles(700, &grids, 1, Tiled{}));
+
+    var values: [2000]u32 = undefined;
+    for (&values, 0..) |*value, index| value.* = @intCast((index * 7919) % 2000);
+    strategy.sort_by(u32, &values, {}, std.sort.asc(u32));
+    for (values, 0..) |value, index| try testing.expectEqual(@as(u32, @intCast(index)), value);
+    strategy.sort_unstable_by(u32, &values, {}, std.sort.desc(u32));
+    try testing.expectEqual(@as(u32, 1999), values[0]);
+}
+
+test "every operation runs on every strategy, including multi-threaded pools" {
+    try exercise_all(sequential);
+    const threaded = try create_pool(3);
+    defer threaded.destroy();
+    try exercise_all(Rayon.init(threaded));
+    try exercise_all(Rayon.init(threaded).with_parallelism(1));
+    const empty = try create_pool(0);
+    defer empty.destroy();
+    try exercise_all(Rayon.init(empty).with_parallelism(4));
+    try exercise_all(parallel.mocks.Explorer.parallel(Rayon.init(threaded)));
+    for (0..8) |seed| try exercise_all(parallel.mocks.Explorer.seeded(Rayon.init(threaded), seed));
+}
