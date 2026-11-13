@@ -118,7 +118,122 @@ fn start(frame: *Frame) callconv(.withStackAlign(.c, 16)) noreturn {
 /// Save the current CPU state into `from` and resume `to`.
 pub inline fn switch_to(from: *Context, to: *Context) void {
     const message: std.Io.fiber.Switch = .{ .old = from, .new = to };
-    _ = std.Io.fiber.contextSwitch(&message);
+    if (builtin.cpu.arch == .aarch64) {
+        switch_aarch64(&message);
+    } else {
+        _ = std.Io.fiber.contextSwitch(&message);
+    }
+}
+
+/// Everything the switch clobbers except sp, fp, x18, and x30 (saved by hand above).
+const aarch64_clobbers: std.lang.assembly.Clobbers = .{
+    .x0 = true,
+    .x1 = true,
+    .x2 = true,
+    .x3 = true,
+    .x4 = true,
+    .x5 = true,
+    .x6 = true,
+    .x7 = true,
+    .x8 = true,
+    .x9 = true,
+    .x10 = true,
+    .x11 = true,
+    .x12 = true,
+    .x13 = true,
+    .x14 = true,
+    .x15 = true,
+    .x16 = true,
+    .x17 = true,
+    .x19 = true,
+    .x20 = true,
+    .x21 = true,
+    .x22 = true,
+    .x23 = true,
+    .x24 = true,
+    .x25 = true,
+    .x26 = true,
+    .x27 = true,
+    .x28 = true,
+    .x30 = true,
+    .z0 = true,
+    .z1 = true,
+    .z2 = true,
+    .z3 = true,
+    .z4 = true,
+    .z5 = true,
+    .z6 = true,
+    .z7 = true,
+    .z8 = true,
+    .z9 = true,
+    .z10 = true,
+    .z11 = true,
+    .z12 = true,
+    .z13 = true,
+    .z14 = true,
+    .z15 = true,
+    .z16 = true,
+    .z17 = true,
+    .z18 = true,
+    .z19 = true,
+    .z20 = true,
+    .z21 = true,
+    .z22 = true,
+    .z23 = true,
+    .z24 = true,
+    .z25 = true,
+    .z26 = true,
+    .z27 = true,
+    .z28 = true,
+    .z29 = true,
+    .z30 = true,
+    .z31 = true,
+    .p0 = true,
+    .p1 = true,
+    .p2 = true,
+    .p3 = true,
+    .p4 = true,
+    .p5 = true,
+    .p6 = true,
+    .p7 = true,
+    .p8 = true,
+    .p9 = true,
+    .p10 = true,
+    .p11 = true,
+    .p12 = true,
+    .p13 = true,
+    .p14 = true,
+    .p15 = true,
+    .fpcr = true,
+    .fpsr = true,
+    .ffr = true,
+    .memory = true,
+};
+
+/// `std.Io.fiber.contextSwitch` for aarch64, plus explicit saves of x18 and x30.
+/// In optimized builds LLVM kept live values in both across std's asm, and the resuming
+/// side overwrote them: x30 (the link register) despite its clobber (a bus error on macOS),
+/// and x18, which std does not list because Darwin reserves it but Linux allocates it.
+/// Every switch pushes x18/x30 on its own stack before leaving and pops them after
+/// resuming (fp travels in the context). A fresh fiber starts at `trampoline`, not at the
+/// resume label, so the pushes and pops pair up.
+inline fn switch_aarch64(message: *const std.Io.fiber.Switch) void {
+    _ = asm volatile (
+        \\ stp x18, x30, [sp, #-16]!
+        \\ ldp x0, x2, [x1]
+        \\ ldr x3, [x2, #16]
+        \\ mov x4, sp
+        \\ stp x4, fp, [x0]
+        \\ adr x5, 0f
+        \\ ldp x4, fp, [x2]
+        \\ str x5, [x0, #16]
+        \\ mov sp, x4
+        \\ br x3
+        \\0:
+        \\ ldp x18, x30, [sp], #16
+        : [received_message] "={x1}" (-> *const std.Io.fiber.Switch),
+        : [message_to_send] "{x1}" (message),
+        : aarch64_clobbers);
 }
 
 test "fiber runs on its own stack and switches back" {
