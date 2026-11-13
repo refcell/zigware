@@ -15,6 +15,12 @@ pub const Lookahead = lookahead.Lookahead;
 pub const Viewport = lookahead.Viewport;
 pub const Plan = lookahead.Plan;
 
+pub const actors = struct {
+    pub const batcher = struct {
+        pub const votes = @import("actors/batcher/votes.zig");
+    };
+};
+
 pub const scheme = struct {
     pub const namespace = @import("scheme/namespace.zig");
     pub const Namespace = namespace.Namespace;
@@ -35,6 +41,7 @@ test {
     _ = config;
     _ = metrics;
     _ = lookahead;
+    _ = actors.batcher.votes;
     _ = scheme.bls12381_threshold.vrf;
     _ = scheme.bls12381_threshold.standard;
     _ = scheme.namespace;
