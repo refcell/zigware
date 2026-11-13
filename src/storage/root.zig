@@ -12,6 +12,7 @@ pub const rmap = @import("rmap/mod.zig");
 pub const RMap = rmap.RMap;
 pub const merkle = @import("merkle/mod.zig");
 pub const mmr = merkle.mmr;
+pub const journal = @import("journal/mod.zig");
 
 test {
     std.testing.refAllDecls(@This());
