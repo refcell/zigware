@@ -59,7 +59,10 @@ placeholder until this lands, so land `Strategy` first and tell the coordinator 
   ~1 s and prints min/median/max per iteration. Harnesses are discovered by file, so lanes add
   benches without editing build.zig. The Gungraun tracker binary (bench/src/bin) is not
   ported yet: it drives valgrind; its compare/report logic is next.
-- No adaptive policy yet: `Rayon` behaves like commonware's `Rayon::without_policy`.
+- `parallel.policy` ports policy.rs (entries, cadence, placement choice, spawn decisions) with
+  its tests and numbers. A call site is a return address instead of `Location::caller()`, and
+  the entry tables are bounded (256 run keys, 64 spawn keys); a key that finds its table full
+  runs parallel or offloaded, untimed.
 - Closures are `pub fn` methods on op values (Zig cannot see private decls across files).
 - Sorts take Zig's `lessThan(ctx, a, b)` instead of an `Ordering` comparator. Parallel sorts
   sort runs in parallel and merge pairwise with a scratch buffer from the pool's allocator;
@@ -98,6 +101,8 @@ placeholder until this lands, so land `Strategy` first and tell the coordinator 
 - [ ] Fuzz targets and benches.
 
 ## Log
+- 2026-11-13: parallel policy (adaptive serial/parallel and inline/offload decisions) with
+  ported policy.rs tests.
 - 2026-11-13: allocator `Heap` (mimalloc layout, reserve/purge config, Stats, metrics) with
   ported config/size-class/heap tests, a threaded stress test, and seeded and std fuzz.
 - 2026-11-13: bench package and `zig build bench` (auto-discovered benches.zig), parallel
