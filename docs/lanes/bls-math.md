@@ -20,10 +20,12 @@ variants (MinPk, MinSig) must match exactly.
   commonware's DSTs, sign/verify, aggregate, MinPk and MinSig variants, batch verify. Vectors.
 - [x] bls12381 threshold: polynomial shares, partial signatures, recovery (primitives/ops),
   and the trusted dealer `dkg.feldman_desmedt.deal_anonymous`.
-- [ ] bls12381 codec conformance entries (group, partial signature, aggregate types) via
-  `conformance.verify` against `src/cryptography/conformance.toml`.
+- [x] bls12381 codec conformance entries (group, partial signature, aggregate types, tle
+  Ciphertext) via `conformance.verify` against `src/cryptography/conformance.toml`.
+- [x] bls12381 tle (timelock encryption) with commonware ciphertext vectors.
 - [ ] bls12381 certificate schemes (multisig, threshold); consensus-simplex waits on these.
-- [ ] bls12381 dkg (Joint-Feldman / reshare) and tle (timelock encryption), scheme.rs.
+- [ ] bls12381 dkg (the rest of feldman_desmedt: dealers, players, reshare, golden and
+  FeldmanTranscript conformance) and scheme.rs.
 - [ ] Fuzz targets (commonware math/fuzz, simd/fuzz, bls parts of cryptography/fuzz).
 
 ## Decisions
@@ -65,3 +67,4 @@ variants (MinPk, MinSig) must match exactly.
 - 2026-11-13: math property tests on invariants.minifuzz; temporary fuzz driver removed.
 - 2026-11-13: bls12381 arithmetic, group, variants, ops, aggregate, batch, noble/eth vectors.
 - 2026-11-13: bls12381 sharing, threshold ops, deal_anonymous; vectors match commonware.
+- 2026-11-13: bls12381 tle and the bls12381 codec conformance hashes (11 entries).
