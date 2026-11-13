@@ -376,9 +376,26 @@ pub const Runner = struct {
         assert(task.state == .finished or runner.current == null);
         assert(runner.task_count > 0);
         if (task.stack) |stack| runner.release_stack(stack);
+        runner.drop_alarms(task);
         runner.tasks.remove(&task.all_node);
         runner.task_count -= 1;
         runner.allocator.destroy(task);
+    }
+
+    /// Removes the stale alarms of a task being destroyed: a wait that ended before its
+    /// timeout leaves its alarm queued, and firing it later would read the freed task.
+    fn drop_alarms(runner: *Runner, task: *const Task) void {
+        var index: usize = 0;
+        while (index < runner.alarms.items.len) {
+            if (runner.alarms.items[index].task != task) {
+                index += 1;
+                continue;
+            }
+            assert(task.state == .finished or runner.current == null);
+            _ = runner.alarms.popIndex(index);
+            // Removal reorders the heap, so scan again from the start.
+            index = 0;
+        }
     }
 
     fn acquire_stack(runner: *Runner) error{OutOfMemory}!fiber.Stack {

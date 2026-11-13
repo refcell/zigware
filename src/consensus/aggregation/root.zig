@@ -18,6 +18,12 @@ pub const limits = @import("limits.zig");
 pub const max_payload_size = limits.max_payload_size;
 pub const safe_tip = @import("safe_tip.zig");
 pub const SafeTip = safe_tip.SafeTip;
+pub const config = @import("config.zig");
+pub const Config = config.Config;
+pub const metrics = @import("metrics.zig");
+pub const engine = @import("engine.zig");
+pub const Engine = engine.Engine;
+pub const mocks = @import("mocks/root.zig");
 
 test {
     std.testing.refAllDecls(@This());
@@ -25,4 +31,8 @@ test {
     _ = scheme;
     _ = limits;
     _ = safe_tip;
+    _ = metrics;
+    _ = mocks;
+    _ = @import("height_map.zig");
+    _ = @import("mod_test.zig");
 }
