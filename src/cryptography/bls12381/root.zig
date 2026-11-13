@@ -1,0 +1,10 @@
+//! BLS12-381: signatures, threshold signatures, DKG, and timelock encryption (commonware
+//! `cryptography::bls12381`). Lane: bls-math (docs/lanes/bls-math.md).
+
+const std = @import("std");
+
+pub const primitives = @import("primitives/root.zig");
+
+test {
+    std.testing.refAllDecls(@This());
+}
