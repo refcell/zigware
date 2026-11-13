@@ -18,6 +18,7 @@ const rng = @import("rng.zig");
 const range = @import("range.zig");
 const sequence = @import("sequence.zig");
 const bitmap = @import("bitmap.zig");
+const hostname = @import("hostname.zig");
 
 const conformance_file = @embedFile("conformance.toml");
 const prefix = "commonware_utils::";
@@ -143,6 +144,11 @@ const entries = .{
         gen_unit,
     ),
     Entry("rng::tests::conformance::FuzzRngConformance", FuzzRngConformance, 1024),
+    Codec(
+        "hostname" ++ conformance_suffix ++ "Hostname>",
+        hostname.Hostname,
+        arbitrary.default_generator(hostname.Hostname),
+    ),
     Codec(
         "bitmap" ++ conformance_suffix ++ "BitMap>",
         bitmap.DefaultBitMap,

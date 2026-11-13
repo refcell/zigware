@@ -26,6 +26,11 @@ encoding parts as soon as `codec` has its core API (see docs/lanes/codec.md).
   `get`/`set`/`flip`/`set_all`/`flip_all`, `and`/`or`/`xor`, `count_ones`, `is_unset`,
   `iter`, `ones_iter`/`ones_iter_from`/`ones_iter_range`, codec (`Cfg = RangeCfg(u64)`), `{f}`.
   `bitmap.readable` is the `Readable` trait (`len`, `pruned_chunks`, `get_chunk`) + `OnesIter`.
+- `utils.Hostname` (`utils.hostname`): validated RFC 1035/1123 hostname stored inline
+  (`init`, `literal`, `as_str`, `eql`, `order`, `{f}`, `len_max`, `label_len_max`,
+  `max_encode_size` = 258), codec as a `RangeCfg(..=253)` byte string; `hostname.Error`.
+- `utils.net`: `is_global` (`is_global_v4`/`is_global_v6`), `subnet(ip, SubnetMask)`,
+  `Subnet`, `SubnetMask.init(v4_bits, v6_bits)`, `to_ipv4_mapped`, over codec's `IpAddr`.
 - `utils.rng.ChaChaRng(rounds)`, `ChaCha8Rng` (Rust `rand_chacha` 0.10).
 - `utils`: `modulo`, `union`, `union_unique`, `Participant`, `NonZero(T)`/`nz`, `GOLDEN_RATIO`,
   `MAX_ALLOCATION_BYTES`.
@@ -44,12 +49,12 @@ encoding parts as soon as `codec` has its core API (see docs/lanes/codec.md).
 
 ## Backlog
 - [ ] utils basics (done: faults, modulo, union/union_unique, NZ, Participant, rng, range
-  without codec; time; remaining: iter, vec, rational, probability, sampling, hostname, net): `Span`/`Array` traits as comptime interfaces, `union_unique`, `hex`
+  without codec; time; remaining: iter, vec, rational, probability, sampling; hostname and net done): `Span`/`Array` traits as comptime interfaces, `union_unique`, `hex`
   re-exports, `modulo`, `NZ*` non-zero helpers, quorum math (`quorum`, `max_faults`),
   `time.rs`, `range.rs`, `iter.rs`, `vec.rs` (NonEmptyVec), `rational`, `probability`,
   `sampling`, `rng.rs` (deterministic test RNG matching commonware's where tests depend on it).
 - [x] utils sequence: fixed_bytes, u32, u64, prefixed_u64, vec_u64, unit — with codec.
-- [ ] utils bitmap (done: BitMap; next: hostname/net for p2p, then prunable, historical,
+- [ ] utils bitmap (done: BitMap; next: prunable, historical,
   roaring): BitMap, prunable, historical, roaring; codec encodings identical.
 - [ ] utils ordered (Set/Map/Quorum), priority_set, cache (LRU etc.), acknowledgement,
   channel (bounded mpsc, ring, reservation, tracked) — channels over `std.Io` primitives.
@@ -65,3 +70,4 @@ encoding parts as soon as `codec` has its core API (see docs/lanes/codec.md).
   hashes; Participant and NonEmptyRange conformance hashes; ChaCha8Rng; utils fuzz driver.
 - 2026-11-13: moved utils conformance onto the shared harness (conformance + codec.arbitrary).
 - 2026-11-13: BitMap with all mod.rs tests, conformance hash, and a model-based fuzz target.
+- 2026-11-13: Hostname (conformance hash) and net is_global/subnet, for p2p.

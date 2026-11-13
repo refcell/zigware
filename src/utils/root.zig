@@ -29,6 +29,11 @@ pub const sequence = @import("sequence.zig");
 pub const Array = sequence.assert_array;
 pub const Span = sequence.assert_span;
 
+pub const hostname = @import("hostname.zig");
+pub const Hostname = hostname.Hostname;
+
+pub const net = @import("net.zig");
+
 pub const time = @import("time.zig");
 pub const Duration = time.Duration;
 pub const SystemTime = time.SystemTime;
