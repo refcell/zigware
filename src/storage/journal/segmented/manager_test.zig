@@ -12,7 +12,7 @@ const paged = runtime.buffer.paged;
 const manager_mod = @import("manager.zig");
 
 const Storage = mocks.Storage;
-const M = manager_mod.Manager;
+const M = manager_mod.Manager(manager_mod.AppendFactory);
 const gpa = testing.allocator;
 const partition = "test";
 
@@ -33,10 +33,9 @@ const Harness = struct {
     }
 
     fn open(self: *Harness, ceiling: u64) !M {
-        const cfg: manager_mod.Config = .{
+        const cfg: manager_mod.Config(manager_mod.AppendFactory) = .{
             .partition = partition,
-            .write_buffer = 128,
-            .cache_ref = &self.cache_ref,
+            .factory = .{ .write_buffer = 128, .cache_ref = &self.cache_ref },
         };
         return M.init(gpa, self.storage.interface(), cfg, ceiling);
     }

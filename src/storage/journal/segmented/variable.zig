@@ -66,7 +66,7 @@ pub const Appended = struct {
 pub fn Journal(comptime V: type) type {
     return struct {
         const Self = @This();
-        pub const Manager = manager_mod.Manager;
+        pub const Manager = manager_mod.Manager(manager_mod.AppendFactory);
         pub const Error = Manager.Error;
         pub const Recovery = RecoveryType(V);
         pub const Cfg = Config(V);
@@ -77,11 +77,10 @@ pub fn Journal(comptime V: type) type {
         /// Reused frame encoding buffer.
         scratch: std.ArrayList(u8) = .empty,
 
-        fn manager_config(cfg: Cfg) manager_mod.Config {
+        fn manager_config(cfg: Cfg) manager_mod.Config(manager_mod.AppendFactory) {
             return .{
                 .partition = cfg.partition,
-                .write_buffer = cfg.write_buffer,
-                .cache_ref = cfg.cache_ref,
+                .factory = .{ .write_buffer = cfg.write_buffer, .cache_ref = cfg.cache_ref },
             };
         }
 

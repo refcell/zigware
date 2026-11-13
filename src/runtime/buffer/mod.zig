@@ -9,6 +9,9 @@ const assert = std.debug.assert;
 const Blob = @import("../storage.zig").Blob;
 
 pub const mocks = @import("mocks.zig");
+pub const tip = @import("tip.zig");
+pub const write = @import("write.zig");
+pub const Write = write.Write;
 pub const paged = @import("paged/mod.zig");
 
 /// Tracks whether blob mutations still need a sync (commonware's `SyncState`).

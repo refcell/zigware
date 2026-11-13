@@ -13,9 +13,9 @@ resize, sync), `runtime.storage`, with the in-memory backend `runtime.storage.me
 - [x] runtime buffer paged core: page format (two-slot CRC record), tip buffer, page cache,
   `Writer` (append, bulk append, sync, recovery open/truncate with staged shrink), `Replay`,
   `recoverable_prefix_len`; `runtime.buffer`.
+- [x] runtime buffer `Write` and its tip (write.rs, tip.rs) with their tests.
 - [ ] runtime buffer rest: `Sealed`/`seal`/`snapshot`, `read_many_into`/`read_ranges_into`,
-  plain `Read`/`Write` buffers (read.rs, write.rs, tip.rs), and the
-  remaining writer tests.
+  the plain `Read` buffer (read.rs), and the remaining writer tests.
 - [x] journal frame format and durability (frame.rs, durability.rs), byte-identical.
 - [x] journal/segmented: section manager and fixed segmented journal (append, read, replay,
   prune, bounded init, floors and checkpoint restore), torn-page repair; tests incl.
@@ -51,7 +51,11 @@ resize, sync), `runtime.storage`, with the in-memory backend `runtime.storage.me
   `read_up_to`, `try_read_sync_into`, `replay`, `recoverable_prefix_len[_at_most]`),
   `Replay` (`ensure`, `bytes`, `advance`, `seek_to`), `read_range` and `read_tail`
   (validated logical reads from a raw paged blob).
-- `storage.journal.segmented.manager`: `Manager` (one paged writer per section:
+- `runtime.buffer.Write`: write-buffered blob (`init(gpa, blob, len, capacity)`, `deinit`,
+  `size`, `needs_sync`, `read_at`, `try_write_at`, `write_at`, `resize`, `sync`, `truncate`);
+  `runtime.buffer.tip`.
+- `storage.journal.segmented.manager`: `Manager(Factory)` (one buffer per section, built by
+  `AppendFactory` (paged `Writer`) or `WriteFactory` (plain `Write`):
   `get`, `get_or_create`, `sync`, `sync_all`, `prune`, `remove_section`, `truncate_pending`,
   `clear`, `destroy`), `truncate_paged_tail`, `stored_sections`, `section_name`.
 - `storage.journal.segmented.fixed`: `Journal(A)` for fixed-size codec items with
@@ -144,3 +148,4 @@ resize, sync), `runtime.storage`, with the in-memory backend `runtime.storage.me
 - 2026-11-13: segmented variable journal with recovery and its ported tests.
 - 2026-11-13: deleted the memory stand-in; tests run on `runtime.storage.memory` through
   `runtime.buffer.mocks` (recording and mutation faults) and crash with `crash()`.
+- 2026-11-13: buffer `Write` and tip; `Manager` generic over its buffer factory.

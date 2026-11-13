@@ -52,7 +52,7 @@ pub fn Journal(comptime A: type) type {
     comptime assert(!codec.owns_memory(A));
     return struct {
         const Self = @This();
-        pub const Manager = manager_mod.Manager;
+        pub const Manager = manager_mod.Manager(manager_mod.AppendFactory);
         pub const Error = Manager.Error;
         pub const Recovery = RecoveryType(A);
         /// Size of each item in bytes.
@@ -61,11 +61,10 @@ pub fn Journal(comptime A: type) type {
 
         manager: Manager,
 
-        fn manager_config(cfg: Config) manager_mod.Config {
+        fn manager_config(cfg: Config) manager_mod.Config(manager_mod.AppendFactory) {
             return .{
                 .partition = cfg.partition,
-                .write_buffer = cfg.write_buffer,
-                .cache_ref = cfg.cache_ref,
+                .factory = .{ .write_buffer = cfg.write_buffer, .cache_ref = cfg.cache_ref },
             };
         }
 
@@ -417,8 +416,8 @@ fn RecoveryType(comptime A: type) type {
         fn from_journal(gpa: Allocator, journal: J, replay_buffer: usize) Error!Self {
             var self = Self.init(gpa, journal.manager.storage, .{
                 .partition = journal.manager.partition,
-                .cache_ref = journal.manager.cache_ref,
-                .write_buffer = journal.manager.write_buffer,
+                .cache_ref = journal.manager.factory.cache_ref,
+                .write_buffer = journal.manager.factory.write_buffer,
                 .replay_buffer = replay_buffer,
             });
             self.journal = journal;
