@@ -6,7 +6,8 @@ and start when what they build on has landed (or can be stubbed behind an interf
 | Wave | Lane | Owns | Starts when |
 | --- | --- | --- | --- |
 | 1 | codec | formatting, conformance, invariants, codec | now |
-| 1 | utils | utils, parallel, allocator, bench | now |
+| 1 | utils | utils | now |
+| 2 | parallel | parallel, allocator, bench | now (started) |
 | 1 | crypto | cryptography (hashes, ed25519, secp256r1, certificate, handshake, zk, ...) | now |
 | 1 | bls-math | math, simd, cryptography/bls12381 (primitives, dkg, tle, certificate) | now |
 | 1 | runtime | runtime: interface, deterministic runtime, iobuf, storage, network, io_uring | now |
@@ -14,7 +15,7 @@ and start when what they build on has landed (or can be stubbed behind an interf
 | 2 | actor-stream | actor, stream | runtime interface (started) |
 | 2 | storage-journal | storage: journal, metadata, queue | runtime storage (started) |
 | 2 | storage-archive | storage: archive, freezer, ordinal, cache | segmented journal |
-| 2 | p2p | p2p: simulated, authenticated, utils | actor, stream |
+| 2 | p2p | p2p: simulated first, then authenticated | deterministic runtime (started) |
 | 2 | coding | coding, cryptography/reed_solomon | bmt (started) |
 | 3 | broadcast-resolver | broadcast, collector, resolver | p2p simulated |
 | 3 | clearing | clearing | qmdb |

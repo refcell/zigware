@@ -1,6 +1,6 @@
 # Lane: utils
 
-Owns `src/utils`, `src/parallel`, `src/allocator`, `src/bench`.
+Owns `src/utils` (parallel, allocator, and bench moved to the parallel lane).
 
 Reference: `~/.cache/zigware/commonware-ref/{utils,parallel,allocator,bench}`.
 `utils` depends on codec; until codec lands, start with the codec-free modules and build the
@@ -38,11 +38,6 @@ encoding parts as soon as `codec` has its core API (see docs/lanes/codec.md).
 - [ ] utils bitmap: BitMap, prunable, historical, roaring; codec encodings identical.
 - [ ] utils ordered (Set/Map/Quorum), priority_set, cache (LRU etc.), acknowledgement,
   channel (bounded mpsc, ring, reservation, tracked) — channels over `std.Io` primitives.
-- [ ] parallel: `Strategy` (sequential and thread-pool fold), policy, topology. Implement a
-  small work-stealing pool on std threads instead of porting rayon line by line.
-- [ ] allocator: Zig equivalent of the crate's purpose (an allocator wrapper with metrics
-  and purge/reserve config); no mimalloc (zero deps).
-- [ ] bench: benchmark workload abstraction used by other packages' benches.
 - [ ] Fuzz targets for every decoder (commonware utils/fuzz).
 
 ## Log
