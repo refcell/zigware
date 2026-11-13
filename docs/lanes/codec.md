@@ -104,6 +104,30 @@ For codec types, build values with `codec.arbitrary.generate(T, gen, arena, seed
 is `codec.arbitrary.default_generator(T)` or a hand-written port of the Rust `Arbitrary` impl
 (see `src/codec/conformance_test.zig`). Pass `std.heap.smp_allocator` for 65536-case runs.
 
+### invariants (minifuzz, for other lanes' property tests)
+
+```zig
+const minifuzz = @import("invariants").minifuzz;
+try minifuzz.run(testing.allocator, context, body);            // default Builder
+try (minifuzz.Builder{}).with_search_limit(1000).with_seed(0)
+    .run(testing.allocator, context, body);
+// body: fn (@TypeOf(context), u: *minifuzz.Unstructured) !void
+```
+
+Builder: `with_seed`, `with_search_limit`, `with_search_time(io, duration)`,
+`with_min_iterations`, `with_reproduce("0x...")`; `search(...)` returns
+`Outcome{ passed: Branch, failed: Failure{ branch, err, sampling } }` instead of printing.
+The body fails by returning an error (use `testing.expect*`, not `assert`);
+`error.NotEnoughData` asks for more input and `error.IncorrectFormat` rejects it. A failure
+prints `failure (MINIFUZZ_BRANCH = 0x...)`; replay one test with `with_reproduce`, or all with
+`zig build test -Dminifuzz-branch=0x...`.
+
+`Unstructured` (arbitrary 1.4, same bytes to same values): `arbitrary(T)` for bool, ints,
+floats, arrays, optionals, structs/tuples, enums (`derive` scaling), or `T.arbitrary(u)`;
+`int_in_range(T, lo, hi)`, `choose(T, items)`, `choose_index(n)`, `ratio(T, num, den)`,
+`bytes(n)`, `fill(out)`, `byte_size()`, `arbitrary_len(T)`, `peek_bytes`, `take_rest`,
+`len`, `is_empty`. Collections: `for (0..u.arbitrary_len(T))` and append.
+
 ## Decisions
 
 - Zig errors carry no payload; payloads live in `Reader.diagnostic`.
@@ -119,6 +143,9 @@ is `codec.arbitrary.default_generator(T)` or a hand-written port of the Rust `Ar
   fixed-size elements check `len * size` bytes remain before allocating.
 - formatting/codec/conformance/invariants sit below `utils`, so their tests cannot use
   `utils.rng.TestRng`; the conformance generator ports ChaCha8 `seed_from_u64` itself.
+- minifuzz defaults to `default_search_limit` (10000) cases times `-Dfuzz-soak` instead of
+  commonware's 10 s (time needs an `std.Io`), seeds from `-Dfuzz-seed` instead of the OS, and
+  takes `-Dminifuzz-branch` instead of reading `MINIFUZZ_BRANCH` from the environment.
 - conformance does no file I/O: TOML text comes in via `@embedFile`, and a missing entry fails
   and prints the entry to add (commonware writes the file instead).
 
@@ -141,8 +168,8 @@ is `codec.arbitrary.default_generator(T)` or a hand-written port of the Rust `Ar
   over an `@embedFile`d TOML), with the crate's tests.
 - [x] codec conformance: `codec.arbitrary` reproduces rand_core `seed_from_u64` + ChaCha8 and
   arbitrary 1.4 bit for bit; all 51 hashes in commonware's codec/conformance.toml match.
-- [ ] invariants: minifuzz (deterministic seeded fuzz driver over `std.testing.Smith`;
-  `build_options.fuzz_seed`/`fuzz_soak`).
+- [x] invariants: minifuzz (Builder, Branch tokens, ChaCha8 Sampler and its strategies) plus
+  arbitrary 1.4's `Unstructured`, with the crate's tests and a byte-exact sampler vector.
 - [ ] extend the codec fuzz targets as net/lazy/mode land (maps/sets done).
 
 ## Log
@@ -152,4 +179,7 @@ is `codec.arbitrary.default_generator(T)` or a hand-written port of the Rust `Ar
 - 2026-11-13: canonical Map/HashMap/Set/HashSet and `codec.order`, with tests and fuzz.
 - 2026-11-13: net addresses (Ipv4/Ipv6/SocketAddr*/IpAddr) and Modes, with tests and fuzz.
 - 2026-11-13: any-width unsigned integers (Uint/U256) and Lazy, with tests and fuzz.
-- 2026-11-13: conformance harness, codec arbitrary/ChaCha8 port, NonZero; all 51 commonware codec conformance hashes match.\n
+- 2026-11-13: conformance harness, codec arbitrary/ChaCha8 port, NonZero; all 51 commonware
+  codec conformance hashes match.
+- 2026-11-13: invariants: minifuzz (Builder, Branch tokens, Sampler) and `Unstructured`
+  (arbitrary 1.4); sampler stream matches commonware's byte for byte.

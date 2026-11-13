@@ -101,6 +101,8 @@ pub fn build(b: *std.Build) void {
     options.addOption(u32, "fuzz_soak", fuzz_soak);
     const fuzz_seed = b.option(u64, "fuzz-seed", "Mixed into every seeded fuzz seed") orelse 0;
     options.addOption(u64, "fuzz_seed", fuzz_seed);
+    const minifuzz_branch = b.option([]const u8, "minifuzz-branch", "Replay a minifuzz failure");
+    options.addOption([]const u8, "minifuzz_branch", minifuzz_branch orelse "");
     const options_module = options.createModule();
 
     // One module per package, then the dependency edges.
