@@ -34,6 +34,8 @@ pub const Hostname = hostname.Hostname;
 
 pub const net = @import("net.zig");
 
+pub const ordered = @import("ordered.zig");
+
 pub const time = @import("time.zig");
 pub const Duration = time.Duration;
 pub const SystemTime = time.SystemTime;
@@ -159,6 +161,7 @@ const testing = std.testing;
 test {
     std.testing.refAllDecls(@This());
     _ = @import("conformance_test.zig");
+    _ = @import("ordered_test.zig");
     _ = @import("fuzz.zig");
 }
 

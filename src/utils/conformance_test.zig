@@ -19,6 +19,7 @@ const range = @import("range.zig");
 const sequence = @import("sequence.zig");
 const bitmap = @import("bitmap.zig");
 const hostname = @import("hostname.zig");
+const ordered = @import("ordered.zig");
 
 const conformance_file = @embedFile("conformance.toml");
 const prefix = "commonware_utils::";
@@ -153,6 +154,21 @@ const entries = .{
         "bitmap" ++ conformance_suffix ++ "BitMap>",
         bitmap.DefaultBitMap,
         arbitrary.default_generator(bitmap.DefaultBitMap),
+    ),
+    Codec(
+        "ordered::test::conformance::CodecConformance<Set<u32>>",
+        ordered.Set(u32),
+        arbitrary.default_generator(ordered.Set(u32)),
+    ),
+    Codec(
+        "ordered::test::conformance::CodecConformance<Map<u32,u32>>",
+        ordered.Map(u32, u32),
+        arbitrary.default_generator(ordered.Map(u32, u32)),
+    ),
+    Codec(
+        "ordered::test::conformance::CodecConformance<BiMap<u32,u32>>",
+        ordered.BiMap(u32, u32),
+        arbitrary.default_generator(ordered.BiMap(u32, u32)),
     ),
     Codec(
         "bitmap::prunable" ++ conformance_suffix ++ "Prunable<16>>",

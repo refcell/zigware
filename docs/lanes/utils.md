@@ -34,6 +34,14 @@ encoding parts as soon as `codec` has its core API (see docs/lanes/codec.md).
   `max_encode_size` = 258), codec as a `RangeCfg(..=253)` byte string; `hostname.Error`.
 - `utils.net`: `is_global` (`is_global_v4`/`is_global_v6`), `subnet(ip, SubnetMask)`,
   `Subnet`, `SubnetMask.init(v4_bits, v6_bits)`, `to_ipv4_mapped`, over codec's `IpAddr`.
+- `utils.ordered`: `Set(T)`, `Map(K, V)`, `BiMap(K, V)` (sorted, deduplicated; `init` fails
+  with `DuplicateKey`/`DuplicateValue`, `from_dedup` drops duplicates; `get`, `position`,
+  `as_slice`, `get_value`, `get_key`, `iter_pairs`, `map_values`, `map_values_into`,
+  `from_parts`, `truncate`, `{f}`). `Set` has the `Quorum` helpers `quorum(M)`,
+  `max_faults(M)`, `key(Participant)`, `index(item) ?Participant`. Codec: `Set` = `Vec<T>`
+  (decode rejects unsorted/duplicate), `Map` = keys then values, `Cfg` = `{ range, key, value }`.
+  Items order by their `order(a, b)` decl, else `codec.order`. Collections own their items:
+  constructors take ownership (releasing on error); `deinit` releases.
 - `utils.rng.ChaChaRng(rounds)`, `ChaCha8Rng` (Rust `rand_chacha` 0.10).
 - `utils`: `modulo`, `union`, `union_unique`, `Participant`, `NonZero(T)`/`nz`, `GOLDEN_RATIO`,
   `MAX_ALLOCATION_BYTES`.
@@ -59,8 +67,9 @@ encoding parts as soon as `codec` has its core API (see docs/lanes/codec.md).
 - [x] utils sequence: fixed_bytes, u32, u64, prefixed_u64, vec_u64, unit — with codec.
 - [ ] utils bitmap (done: BitMap, Prunable; next: historical,
   roaring): BitMap, prunable, historical, roaring; codec encodings identical.
-- [ ] utils ordered (Set/Map/Quorum), priority_set, cache (LRU etc.), acknowledgement,
-  channel (bounded mpsc, ring, reservation, tracked) — channels over `std.Io` primitives.
+- [x] utils ordered (Set/Map/BiMap/Quorum) with conformance hashes.
+- [ ] utils priority_set, cache (LRU etc.), acknowledgement,
+  channel (bounded mpsc, ring, reservation, tracked; keep broadcast-resolver's oneshot.zig) — channels over `std.Io` primitives.
 - [ ] Fuzz targets for every decoder (commonware utils/fuzz).
 
 ## Log
@@ -75,3 +84,4 @@ encoding parts as soon as `codec` has its core API (see docs/lanes/codec.md).
 - 2026-11-13: BitMap with all mod.rs tests, conformance hash, and a model-based fuzz target.
 - 2026-11-13: Hostname (conformance hash) and net is_global/subnet, for p2p.
 - 2026-11-13: Prunable bitmap with its tests, conformance hash, and fuzz target.
+- 2026-11-13: ordered Set/Map/BiMap/Quorum with tests, conformance hashes, and a set fuzz.
