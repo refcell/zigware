@@ -6,6 +6,8 @@ pub const rng = @import("rng.zig");
 pub const fiber = @import("fiber.zig");
 pub const deterministic = @import("deterministic.zig");
 pub const storage = @import("storage.zig");
+pub const mocks = @import("mocks.zig");
+pub const network = @import("network.zig");
 pub const buffer = @import("buffer/mod.zig");
 
 test {

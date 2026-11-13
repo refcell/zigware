@@ -31,6 +31,7 @@ const cryptography = @import("cryptography");
 
 const fiber = @import("fiber.zig");
 const storage_mod = @import("storage.zig");
+const network_mod = @import("network.zig");
 const rng_helpers = @import("rng.zig");
 
 const Rng = utils.rng.TestRng;
@@ -200,6 +201,8 @@ pub const Runner = struct {
     stack_pool: std.ArrayList(fiber.Stack),
     /// In-memory storage; durable contents carry over between starts.
     memory_storage: storage_mod.memory.Storage,
+    /// The simulated network, created on first use; it carries over between starts.
+    simulated_network: ?network_mod.deterministic.Network = null,
     /// Number of roots started, so a restart can retire the previous run's opens.
     starts: u64 = 0,
 
@@ -234,6 +237,7 @@ pub const Runner = struct {
         runner.batch.deinit(runner.allocator);
         runner.alarms.deinit(runner.allocator);
         runner.memory_storage.deinit();
+        if (runner.simulated_network) |*net| net.deinit();
         runner.* = undefined;
     }
 
@@ -245,6 +249,14 @@ pub const Runner = struct {
     /// The runtime's in-memory storage. The runner must not move once it is used.
     pub fn storage(runner: *Runner) storage_mod.Storage {
         return runner.memory_storage.storage();
+    }
+
+    /// The runtime's deterministic network. The runner must not move once it is used.
+    pub fn network(runner: *Runner) *network_mod.deterministic.Network {
+        if (runner.simulated_network == null) {
+            runner.simulated_network = .init(runner.allocator, runner.io());
+        }
+        return &runner.simulated_network.?;
     }
 
     /// CRC32C digest of all durable blob contents (commonware `storage_audit`).
@@ -1137,4 +1149,33 @@ test "storage survives a restart with only synced contents (test_recover_storage
     const audit = runner.storage_audit();
     try testing.expectEqual(@as(u64, 6), try (try runner.start(Root.read, .{runner.storage()})));
     try testing.expectEqualSlices(u8, &audit, &runner.storage_audit());
+}
+
+test "the runner's network connects tasks" {
+    var runner = try test_runner(.{});
+    defer runner.deinit();
+    const Network = network_mod.deterministic.Network;
+    const Root = struct {
+        fn serve(listener: *Network.Listener) !void {
+            var accepted = try listener.accept();
+            defer accepted.deinit();
+            var buffer: [4]u8 = undefined;
+            try accepted.stream.recv(&buffer);
+            try accepted.sink.send(&.{&buffer});
+        }
+        fn run(io: Io, net: *Network) !void {
+            const address: network_mod.Address = .{ .ip4 = .loopback(9000) };
+            const listener = try net.bind(address);
+            defer listener.deinit();
+            var server = try io.concurrent(serve, .{listener});
+            var connection = try net.dial(address);
+            defer connection.deinit();
+            try connection.sink.send(&.{"ping"});
+            var buffer: [4]u8 = undefined;
+            try connection.stream.recv(&buffer);
+            try testing.expectEqualStrings("ping", &buffer);
+            try server.await(io);
+        }
+    };
+    try (try runner.start(Root.run, .{ runner.io(), runner.network() }));
 }
