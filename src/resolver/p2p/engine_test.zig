@@ -24,15 +24,19 @@ const Net = p2p.simulated.Network(PublicKey);
 const Tracked = p2p.TrackedPeers(PublicKey);
 pub const Consumer = MockConsumer(MockKey, void);
 pub const Producer = MockProducer(MockKey);
-pub const Engine = engine_mod.Engine(engine_mod.Params(
-    PublicKey,
-    Net.Manager,
-    Net.Control,
-    Consumer,
-    Producer,
-    Net.Sender,
-    Net.Receiver,
-));
+/// The engine over consumer `C` on the simulated network.
+pub fn EngineOf(comptime C: type) type {
+    return engine_mod.Engine(engine_mod.Params(
+        PublicKey,
+        Net.Manager,
+        Net.Control,
+        C,
+        Producer,
+        Net.Sender,
+        Net.Receiver,
+    ));
+}
+pub const Engine = EngineOf(Consumer);
 pub const Mailbox = Engine.Mailbox;
 const Fetch = resolver.Fetch(MockKey, void);
 const Predicate = resolver.Predicate(MockKey, void);
@@ -56,168 +60,181 @@ pub const peers_max = 8;
 
 /// A simulated network with registered peers, the engines spawned on it, and the consumers
 /// and producers they use. `deinit` stops the engines, then the network.
-pub const Setup = struct {
-    io: Io,
-    network: *Net,
-    task: Io.Future((Io.Cancelable || Allocator.Error)!void),
-    registry: metrics.Registry,
-    peers: [peers_max]PublicKey = undefined,
-    peer_count: usize = 0,
-    connections: [peers_max]?Net.Registered = @splat(null),
-    engines: [peers_max]?Engine.Spawned = @splat(null),
-    consumers: std.ArrayList(Consumer) = .empty,
-    producers: std.ArrayList(Producer) = .empty,
+pub fn SetupWith(comptime C: type) type {
+    return struct {
+        const Self = @This();
+        pub const EngineT = EngineOf(C);
+        pub const MailboxT = EngineT.Mailbox;
 
-    pub const Options = struct {
-        quota: p2p.Quota = p2p.Quota.per_second(rate_limit),
-        tracked_peer_sets: usize = 3,
-        /// Track every peer at id 0 before any engine starts.
-        track: bool = true,
-        /// Sort peers by public key (as some commonware tests do).
-        sort: bool = false,
-    };
+        io: Io,
+        network: *Net,
+        task: Io.Future((Io.Cancelable || Allocator.Error)!void),
+        registry: metrics.Registry,
+        peers: [peers_max]PublicKey = undefined,
+        peer_count: usize = 0,
+        connections: [peers_max]?Net.Registered = @splat(null),
+        engines: [peers_max]?EngineT.Spawned = @splat(null),
+        consumers: std.ArrayList(C) = .empty,
+        producers: std.ArrayList(Producer) = .empty,
 
-    pub fn init(io: Io, seeds: []const u64, options: Options) !*Setup {
-        assert(seeds.len > 0 and seeds.len <= peers_max);
-        const network = try Net.init(gpa, io, .{
-            .max_size = 1024 * 1024,
-            .max_peers_per_set = seeds.len,
-            .disconnect_on_block = true,
-            .tracked_peer_sets = options.tracked_peer_sets,
-        });
-        errdefer network.deinit();
-        const setup = try gpa.create(Setup);
-        errdefer gpa.destroy(setup);
-        setup.* = .{
-            .io = io,
-            .network = network,
-            .task = try io.concurrent(Net.run, .{network}),
-            .registry = .init(gpa),
+        pub const Options = struct {
+            quota: p2p.Quota = p2p.Quota.per_second(rate_limit),
+            tracked_peer_sets: usize = 3,
+            /// Track every peer at id 0 before any engine starts.
+            track: bool = true,
+            /// Sort peers by public key (as some commonware tests do).
+            sort: bool = false,
         };
-        for (seeds, 0..) |seed, index| setup.peers[index] = key_of(seed);
-        setup.peer_count = seeds.len;
-        if (options.sort) Tracked.PeerSet.sort(setup.peers[0..seeds.len]);
-        if (options.track) try setup.track(0, setup.peer_list());
-        for (setup.peer_list(), 0..) |peer, index| {
-            const control = setup.oracle().control(peer);
-            setup.connections[index] = try control.register(0, options.quota);
-        }
-        return setup;
-    }
 
-    pub fn deinit(setup: *Setup) void {
-        for (&setup.engines) |*slot| {
-            const spawned = &(slot.* orelse continue);
-            spawned.mailbox.deinit();
-            spawned.future.await(setup.io) catch |err| std.debug.panic("engine: {t}", .{err});
-            slot.* = null;
-        }
-        for (&setup.connections) |*slot| if (slot.*) |*connection| connection.deinit();
-        setup.network.close();
-        setup.task.await(setup.io) catch |err| std.debug.panic("network: {t}", .{err});
-        setup.network.deinit();
-        for (setup.consumers.items) |item| item.deinit();
-        setup.consumers.deinit(gpa);
-        for (setup.producers.items) |item| item.deinit();
-        setup.producers.deinit(gpa);
-        setup.registry.deinit();
-        gpa.destroy(setup);
-    }
-
-    pub fn peer_list(setup: *const Setup) []const PublicKey {
-        return setup.peers[0..setup.peer_count];
-    }
-
-    pub fn oracle(setup: *const Setup) Net.Oracle {
-        return setup.network.oracle();
-    }
-
-    /// Tracks `peers` network-wide at `id`.
-    pub fn track(setup: *const Setup, id: u64, peers: []const PublicKey) !void {
-        const sorted = try gpa.dupe(PublicKey, peers);
-        defer gpa.free(sorted);
-        Tracked.PeerSet.sort(sorted);
-        const feedback = setup.oracle().manager().track(id, .init_primary(.init(sorted)));
-        try testing.expectEqual(p2p.Feedback.ok, feedback);
-    }
-
-    /// Adds links both ways between peers `from` and `to`.
-    pub fn add_link(setup: *const Setup, value: p2p.simulated.Link, from: usize, to: usize) !void {
-        const a = setup.peers[from];
-        const b = setup.peers[to];
-        try setup.oracle().add_link(a, b, value);
-        try setup.oracle().add_link(b, a, value);
-    }
-
-    /// A consumer owned by the setup.
-    pub fn make_consumer(setup: *Setup) !Consumer {
-        const value = try Consumer.init(gpa, setup.io);
-        errdefer value.deinit();
-        try setup.consumers.append(gpa, value);
-        return value;
-    }
-
-    /// A producer owned by the setup, serving `entries`.
-    pub fn make_producer(setup: *Setup, entries: []const struct { u8, []const u8 }) !Producer {
-        const value = try Producer.init(gpa, setup.io);
-        errdefer value.deinit();
-        try setup.producers.append(gpa, value);
-        for (entries) |entry| try value.insert(.init(entry[0]), entry[1]);
-        return value;
-    }
-
-    /// Spawns peer `index`'s engine on its registered channel; returns its mailbox.
-    pub fn spawn(
-        setup: *Setup,
-        index: usize,
-        consumer_value: Consumer,
-        producer_value: Producer,
-    ) !*Mailbox {
-        const me = setup.peers[index];
-        const connection = setup.connections[index].?;
-        setup.connections[index] = null;
-        const scope = metrics.Scope.init(&setup.registry).child("actor")
-            .with_attribute("peer", me);
-        const control = setup.oracle().control(me);
-        setup.engines[index] = try Engine.spawn(gpa, setup.io, scope, .{
-            .peer_provider = setup.oracle().manager(),
-            .blocker = control,
-            .consumer = consumer_value,
-            .producer = producer_value,
-            .mailbox_size = mailbox_size,
-            .me = me,
-            .fetch_timeout = timeout,
-            .fetch_retry_delay = fetch_retry_delay,
-            .priority_requests = false,
-            .priority_responses = false,
-        }, connection.sender, connection.receiver);
-        return &setup.engines[index].?.mailbox;
-    }
-
-    pub fn sleep(setup: *const Setup, duration: Duration) !void {
-        const nanos: i96 = @intCast(duration.as_nanos());
-        try setup.io.sleep(.fromNanoseconds(nanos), .real);
-    }
-
-    /// The encoded metrics (caller frees).
-    pub fn encode(setup: *Setup) ![]u8 {
-        return metrics.Scope.init(&setup.registry).encode(gpa);
-    }
-
-    /// Waits until `blocker` blocks `blocked`.
-    pub fn wait_for_blocked(setup: *Setup, blocker: usize, blocked: usize) !void {
-        // Bounded by the runner's timeout.
-        while (true) {
-            const pairs = try setup.oracle().blocked(gpa);
-            defer gpa.free(pairs);
-            for (pairs) |pair| {
-                const by = pair.origin.order(setup.peers[blocker]) == .eq;
-                if (by and pair.recipient.order(setup.peers[blocked]) == .eq) return;
+        pub fn init(io: Io, seeds: []const u64, options: Options) !*Self {
+            assert(seeds.len > 0 and seeds.len <= peers_max);
+            const network = try Net.init(gpa, io, .{
+                .max_size = 1024 * 1024,
+                .max_peers_per_set = seeds.len,
+                .disconnect_on_block = true,
+                .tracked_peer_sets = options.tracked_peer_sets,
+            });
+            errdefer network.deinit();
+            const setup = try gpa.create(Self);
+            errdefer gpa.destroy(setup);
+            setup.* = .{
+                .io = io,
+                .network = network,
+                .task = try io.concurrent(Net.run, .{network}),
+                .registry = .init(gpa),
+            };
+            for (seeds, 0..) |seed, index| setup.peers[index] = key_of(seed);
+            setup.peer_count = seeds.len;
+            if (options.sort) Tracked.PeerSet.sort(setup.peers[0..seeds.len]);
+            if (options.track) try setup.track(0, setup.peer_list());
+            for (setup.peer_list(), 0..) |peer, index| {
+                const control = setup.oracle().control(peer);
+                setup.connections[index] = try control.register(0, options.quota);
             }
-            try setup.sleep(Duration.from_millis(10));
+            return setup;
         }
-    }
-};
+
+        pub fn deinit(setup: *Self) void {
+            for (&setup.engines) |*slot| {
+                const spawned = &(slot.* orelse continue);
+                spawned.mailbox.deinit();
+                spawned.future.await(setup.io) catch |err| std.debug.panic("engine: {t}", .{err});
+                slot.* = null;
+            }
+            for (&setup.connections) |*slot| if (slot.*) |*connection| connection.deinit();
+            setup.network.close();
+            setup.task.await(setup.io) catch |err| std.debug.panic("network: {t}", .{err});
+            setup.network.deinit();
+            for (setup.consumers.items) |item| item.deinit();
+            setup.consumers.deinit(gpa);
+            for (setup.producers.items) |item| item.deinit();
+            setup.producers.deinit(gpa);
+            setup.registry.deinit();
+            gpa.destroy(setup);
+        }
+
+        pub fn peer_list(setup: *const Self) []const PublicKey {
+            return setup.peers[0..setup.peer_count];
+        }
+
+        pub fn oracle(setup: *const Self) Net.Oracle {
+            return setup.network.oracle();
+        }
+
+        /// Tracks `peers` network-wide at `id`.
+        pub fn track(setup: *const Self, id: u64, peers: []const PublicKey) !void {
+            const sorted = try gpa.dupe(PublicKey, peers);
+            defer gpa.free(sorted);
+            Tracked.PeerSet.sort(sorted);
+            const feedback = setup.oracle().manager().track(id, .init_primary(.init(sorted)));
+            try testing.expectEqual(p2p.Feedback.ok, feedback);
+        }
+
+        /// Adds links both ways between peers `from` and `to`.
+        pub fn add_link(
+            setup: *const Self,
+            value: p2p.simulated.Link,
+            from: usize,
+            to: usize,
+        ) !void {
+            const a = setup.peers[from];
+            const b = setup.peers[to];
+            try setup.oracle().add_link(a, b, value);
+            try setup.oracle().add_link(b, a, value);
+        }
+
+        /// A consumer owned by the setup.
+        pub fn make_consumer(setup: *Self) !C {
+            const value = try C.init(gpa, setup.io);
+            errdefer value.deinit();
+            try setup.consumers.append(gpa, value);
+            return value;
+        }
+
+        /// A producer owned by the setup, serving `entries`.
+        pub fn make_producer(setup: *Self, entries: []const struct { u8, []const u8 }) !Producer {
+            const value = try Producer.init(gpa, setup.io);
+            errdefer value.deinit();
+            try setup.producers.append(gpa, value);
+            for (entries) |entry| try value.insert(.init(entry[0]), entry[1]);
+            return value;
+        }
+
+        /// Spawns peer `index`'s engine on its registered channel; returns its mailbox.
+        pub fn spawn(
+            setup: *Self,
+            index: usize,
+            consumer_value: C,
+            producer_value: Producer,
+        ) !*MailboxT {
+            const me = setup.peers[index];
+            const connection = setup.connections[index].?;
+            setup.connections[index] = null;
+            const scope = metrics.Scope.init(&setup.registry).child("actor")
+                .with_attribute("peer", me);
+            const control = setup.oracle().control(me);
+            setup.engines[index] = try EngineT.spawn(gpa, setup.io, scope, .{
+                .peer_provider = setup.oracle().manager(),
+                .blocker = control,
+                .consumer = consumer_value,
+                .producer = producer_value,
+                .mailbox_size = mailbox_size,
+                .me = me,
+                .fetch_timeout = timeout,
+                .fetch_retry_delay = fetch_retry_delay,
+                .priority_requests = false,
+                .priority_responses = false,
+            }, connection.sender, connection.receiver);
+            return &setup.engines[index].?.mailbox;
+        }
+
+        pub fn sleep(setup: *const Self, duration: Duration) !void {
+            const nanos: i96 = @intCast(duration.as_nanos());
+            try setup.io.sleep(.fromNanoseconds(nanos), .real);
+        }
+
+        /// The encoded metrics (caller frees).
+        pub fn encode(setup: *Self) ![]u8 {
+            return metrics.Scope.init(&setup.registry).encode(gpa);
+        }
+
+        /// Waits until `blocker` blocks `blocked`.
+        pub fn wait_for_blocked(setup: *Self, blocker: usize, blocked: usize) !void {
+            // Bounded by the runner's timeout.
+            while (true) {
+                const pairs = try setup.oracle().blocked(gpa);
+                defer gpa.free(pairs);
+                for (pairs) |pair| {
+                    const by = pair.origin.order(setup.peers[blocker]) == .eq;
+                    if (by and pair.recipient.order(setup.peers[blocked]) == .eq) return;
+                }
+                try setup.sleep(Duration.from_millis(10));
+            }
+        }
+    };
+}
+
+pub const Setup = SetupWith(Consumer);
 
 pub fn key_of(seed: u64) PublicKey {
     return cryptography.ed25519.PrivateKey.from_seed(seed).public_key();
@@ -235,11 +252,11 @@ pub fn run(timeout_s: ?u64, comptime body: fn (Io) anyerror!void) !void {
     try try runner.start(body, .{runner.io()});
 }
 
-pub fn fetch(mailbox: *Mailbox, value: u8) !void {
+pub fn fetch(mailbox: anytype, value: u8) !void {
     _ = try mailbox.fetch(Fetch.from_key(key(value)));
 }
 
-pub fn retain_except(mailbox: *Mailbox, value: u8) !void {
+pub fn retain_except(mailbox: anytype, value: u8) !void {
     const predicate = Predicate.init(value, struct {
         fn keep(canceled: u8, item: MockKey, _: void) bool {
             return item.value != canceled;
