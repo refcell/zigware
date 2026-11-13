@@ -26,6 +26,7 @@ const secp256r1 = @import("secp256r1.zig");
 const LtHash = @import("lthash.zig").LtHash;
 const Summary = @import("transcript.zig").Summary;
 const sake = @import("handshake/sake.zig");
+const certificate = @import("certificate.zig");
 
 const conformance_file = @embedFile("conformance.toml");
 const prefix = "commonware_cryptography::";
@@ -172,6 +173,56 @@ fn gen_syn_ack(gpa: Allocator, u: *Unstructured) Error!Protocol.SynAck {
         .signature = try gen_signature(gpa, u),
         .confirmation = try gen_summary(gpa, u),
     };
+}
+
+/// `Signers::arbitrary`: up to 9 participants, the first `signer_count` of them signing.
+fn gen_signers(gpa: Allocator, u: *Unstructured) Error!certificate.Signers {
+    const participants: u32 = @intCast(u.byte_size() % 10);
+    const signer_count = @min(u.byte_size(), participants);
+    const signers = try gpa.alloc(utils.Participant, signer_count);
+    for (signers, 0..) |*signer, index| signer.* = .from_usize(index);
+    return certificate.Signers.init(gpa, participants, signers) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        // Proof: the indices `0..signer_count` are unique and below `participants`.
+        else => unreachable,
+    };
+}
+
+/// The certificate tests' ed25519 fixture scheme, as far as `Attestation` uses it.
+const Ed25519Attesting = struct {
+    pub const Signature = ed25519.Signature;
+};
+const Ed25519Attestation = certificate.Attestation(Ed25519Attesting);
+
+/// `Attestation::arbitrary`: the signer (`u32`), then a signature.
+fn gen_attestation(gpa: Allocator, u: *Unstructured) Error!Ed25519Attestation {
+    const signer = try arbitrary.value(u32, gpa, u);
+    return .init(.init(signer), try gen_signature(gpa, u));
+}
+
+/// The ed25519 `Certificate::arbitrary`: signers, then one signature per signer.
+fn gen_ed25519_certificate(gpa: Allocator, u: *Unstructured) Error!ed25519.certificate.Certificate {
+    const signers = try gen_signers(gpa, u);
+    const Deferred = certificate.Deferred(ed25519.Signature);
+    const signatures = try gpa.alloc(Deferred, signers.count());
+    for (signatures) |*signature| signature.* = .init(try gen_signature(gpa, u));
+    return .{ .signers = signers, .signatures = signatures };
+}
+
+test "conformance: certificate signers, attestation, and ed25519 certificate" {
+    try slow.skip_slow();
+    const tests = "certificate::tests::conformance::";
+    try verify(tests ++ "CodecConformance<Signers>", certificate.Signers, gen_signers);
+    try verify(
+        tests ++ "CodecConformance<Attestation<Scheme>>",
+        Ed25519Attestation,
+        gen_attestation,
+    );
+    try verify(
+        "ed25519::" ++ tests ++ "CodecConformance<Certificate>",
+        ed25519.certificate.Certificate,
+        gen_ed25519_certificate,
+    );
 }
 
 test "conformance: digests" {

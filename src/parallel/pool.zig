@@ -208,7 +208,7 @@ pub const ThreadPool = struct {
 
         const Erased = struct {
             fn call(erased: *const anyopaque, index: usize) void {
-                body(@ptrCast(@alignCast(erased)), index);
+                body(@ptrCast(@alignCast(@constCast(erased))), index);
             }
         };
         var latch: Latch = .{ .pending = .init(@intCast(count - 1)) };

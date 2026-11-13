@@ -20,14 +20,17 @@ handshake), then certificate, secp256r1, the rest, zk and banderwagon last.
   signatures, and the sake `Ack`/`Syn`/`SynAck`/`EphemeralPublicKey`.
 - [x] ed25519: keys, namespaced sign/verify, ZIP-215 verification, batch verify, codec;
   RFC 8032, Wycheproof, and ZIP-215 vectors; decode and batch fuzz targets.
-- [ ] ed25519 `certificate` scheme and its conformance hash (after certificate.rs).
+- [x] ed25519 `certificate` scheme and its conformance hash, with the `fixture` mock.
 - [x] chacha20_poly1305 (`Cipher`) with the `Seal` conformance hash.
 - [x] transcript.rs with the `TranscriptV0Ops`/`TranscriptV1Ops` conformance hashes.
 - [x] secret.rs: `Secret(T)` (redacted format, constant-time `eql`, zeroizing `deinit`).
 - [x] handshake (sake) used by `stream`: V0/V1, X25519 on std, `SakeV0`/`SakeV1`
   conformance hashes, RFC 7748 and Wycheproof X25519 vectors, message decode fuzz.
 - [x] sake: `test_v1_rejects_derived_identity` (secp256r1 key substitution).
-- [ ] certificate.rs: the certificate scheme abstraction and mocks.
+- [x] certificate.rs: `Signers`, `Attestation`, `Verification`, assembly and bisection,
+  `Scoped`/`ConstantProvider`, `mocks.Fixture`, and the `Signers`/`Attestation`
+  conformance hashes.
+- [ ] certificate mocks: the generic mock scheme (`certificate/mocks.rs` `Generic`).
 - [x] secp256r1: standard and recoverable signatures and codec on `std.crypto.ecc.P256`, with
   its own RFC 6979 signer and key recovery; commonware's vectors, the four `CodecConformance`
   hashes, and the `secp256r1_{standard,recoverable}_decode` fuzz targets.
@@ -71,8 +74,18 @@ handshake), then certificate, secp256r1, the rest, zk and banderwagon last.
   (commonware verifies with aws-lc-rs on x86_64 and aarch64 and `p256` elsewhere; both
   agree on decoded, low-s signatures). Keys are `PrivateKey.from_bytes`, signatures
   `sign_raw`/`verify_raw` without namespace framing, as for ed25519.
-- certificate.rs waits for `utils.BitMap` (the `Signers` encoding) and `utils.ordered.Set`;
-  secp256r1 came first because it needs neither.
+- certificate.rs's traits are comptime interfaces (`assert_subject`, `assert_verifier`,
+  `assert_scheme`). Scheme operations take `(gpa, rng, subject, ...)` and return
+  `Allocator.Error!` on top of commonware's result; `optimistic_assemble` returns an
+  `Assembled` union (certificate or verification) instead of `Result`. A subject's
+  `message(gpa)` returns an owned slice, and its `Namespace` declares `derive`, `clone`, and
+  `deinit` (`BytesNamespace` is commonware's `Vec<u8>`). `AssemblyError` drops payloads.
+- `Lazy<Signature>` in attestations and certificates is `certificate.Deferred(T)`: the fixed
+  encoding inline, decoded on `get()`, so wire bytes match and decoded values outlive their
+  buffer. An ed25519 signature is any 64 bytes, so the ed25519 malformed-`Lazy` test cases
+  have no counterpart; secp256r1 covers malformed signatures.
+- commonware's `impl_certificate_ed25519!(Subject, Namespace, Faults)` plus `Generic` is
+  `ed25519.certificate.Scheme(Subject, Faults)` with `Subject.Namespace`.
 - Hashers and ed25519 batch verification take `parallel` strategies (`assert_strategy`);
   `hash_many` is commonware's one-lane `hash_batches` over
   `run_batches`; ed25519 `verify_batch` shards like commonware (one seed per call, one

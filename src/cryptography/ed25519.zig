@@ -9,7 +9,9 @@ pub const core = @import("ed25519/core.zig");
 pub const PrivateKey = scheme.PrivateKey;
 pub const PublicKey = scheme.PublicKey;
 pub const Signature = scheme.Signature;
+pub const certificate = @import("ed25519/certificate.zig");
 
 test {
     _ = @import("ed25519/tests.zig");
+    _ = @import("ed25519/certificate.zig");
 }
