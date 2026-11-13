@@ -30,6 +30,9 @@ handshake and the runtime's network, which the actor-stream and runtime lanes ar
   `p2p.simulated.transmitter.State(P, M)` (`limit`, `enqueue`, `next`, `advance`, appending
   `Completion`s), on `simulated.Rational` (exact, over `std.math.big.int`) and
   `simulated.sorted_map.SortedMap` (BTreeMap order).
+- `p2p.simulated.channel.Unbounded(T)` (unbounded mpsc over actor's mailbox; undeliverable
+  values are released with `deinit`) and `p2p.simulated.tracker.Tracker(P)` (peer-set window,
+  role counts, `Update` subscriptions).
 - Senders take a message as parts (`[]const []const u8`, concatenated), like stream frames.
 
 ## Decisions
@@ -58,6 +61,7 @@ handshake and the runtime's network, which the actor-stream and runtime lanes ar
 - [ ] utils: codec (wrapped sender/receiver), mux (channel multiplexing), mocks,
   `StaticProvider`.
 - [x] simulated: bandwidth planner and transmitter with their tests.
+- [x] simulated: unbounded channel and peer-set tracker.
 - [ ] simulated: network with links (latency, jitter, success rate), bandwidth limits,
   transmitter scheduling, partitions, peer sets, Byzantine blocking. Port its tests; it is
   the test bed for broadcast, resolver, and consensus, so keep it deterministic per seed.
@@ -72,3 +76,4 @@ handshake and the runtime's network, which the actor-stream and runtime lanes ar
 - 2026-11-13: utils.limited (LimitedSender, CheckedSender) and utils.Watch.
 - 2026-11-13: simulated bandwidth planner (exact rationals) and transmitter; types.zig moved to
   utils.Hostname and utils.net.is_global.
+- 2026-11-13: simulated unbounded channel and peer-set tracker.
