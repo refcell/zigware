@@ -40,6 +40,9 @@ resolver; those lanes are running, so do the types first and the actors as they 
   `_NOTARIZE`/`_NULLIFY`/`_FINALIZE`/`_SEED` suffixes).
 - `consensus.simplex.scheme.ed25519`: `Scheme(D)` (crypto's `ed25519.certificate.Scheme`
   over `Subject(D)` and `N3f1`) and `fixture(D, gpa, rng, namespace, n)`.
+- `consensus.simplex.scheme.bls12381_multisig`: `Scheme(D, P, V)` and `fixture(S, ...)`;
+  `consensus.simplex.scheme.secp256r1`: `Scheme(D, P)` and `fixture(S, ...)` (crypto's
+  schemes over simplex subjects).
 - `consensus.simplex.elector`: `Terms` (`rotating`, `stable`), `RoundRobin(H)` (`default`,
   `shuffled(seed)`, `with_term`, `build(gpa, n)`), `RoundRobinElector` (`elect(round, {})`,
   `terms`, `deinit`), `Random(H)` (`init(.v0/.v1)`, `select_leader`, `build(V, n)`),
@@ -97,8 +100,8 @@ resolver; those lanes are running, so do the types first and the actors as they 
   with its tests and the `TestCommitment` conformance hash.
 - [x] elector.rs: RoundRobin (shuffled, stable terms) and Random (V0/V1) with their tests;
   RoundRobinShuffleConformance matches. (Random V0/V1 hashes: after threshold signing.)
-- [ ] simplex scheme: ed25519 done (on crypto's certificate.rs); bls12381_multisig and bls12381_threshold as the bls-math
-  lane lands them; secp256r1 when crypto lands it. elector.rs (leader election).
+- [ ] simplex scheme: ed25519, bls12381_multisig, secp256r1 done (on crypto's certificate
+  schemes); bls12381_threshold (vrf) when the bls-math lane lands threshold certificates.
 - [x] limits.rs (`max_payload_size`), checked against the widest VRF encodings; the
   per-scheme widest-encoding tests follow with the schemes.
 - [x] config.rs (Config, Floor, skip and forward policies) with its validation rules.
@@ -121,3 +124,4 @@ resolver; those lanes are running, so do the types first and the actors as they 
 - 2026-11-13: simplex ed25519 scheme and Namespace on crypto's certificate.rs; the
   Attestation stand-in is removed.
 - 2026-11-13: metrics.rs label sets on runtime.telemetry.metrics.
+- 2026-11-13: simplex bls12381_multisig and secp256r1 schemes.
