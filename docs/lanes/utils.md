@@ -12,7 +12,12 @@ encoding parts as soon as `codec` has its core API (see docs/lanes/codec.md).
   `StdRng::seed_from_u64`), `ScriptedRng`, `FuzzRng`, `mix64`, and `rand`-identical samplers
   `range_at_most`, `range_less_than`, `boolean`, `bernoulli`, `ratio`, `float64`;
   `random(&rng)` adapts any generator to `std.Random`. Generators are borrowed-slice, no alloc.
-- `utils.range`: `Bound(T)`, `contains_cyclic`, `NonEmptyRange(T)`.
+- `utils.rng.Uniform(T)`: `rand`'s precomputed `Uniform<T>` (Lemire), distinct from the
+  one-shot `range_*` samplers.
+- `utils.range`: `Bound(T)`, `contains_cyclic`, `NonEmptyRange(T)` (codec encoding).
+- `utils.time`: `Duration` (Rust `Duration` semantics, `parse`, `from_nanos_saturating`,
+  `as_millis_u64`), `SystemTime` (`epoch`, `epoch_millis`, `add_jittered`, `limit`,
+  `saturating_add`, `from_timestamp(std.Io.Timestamp)`), `sample_duration` (rand-identical).
 - `utils`: `modulo`, `union`, `union_unique`, `Participant`, `NonZero(T)`/`nz`, `GOLDEN_RATIO`,
   `MAX_ALLOCATION_BYTES`.
 
@@ -25,7 +30,7 @@ encoding parts as soon as `codec` has its core API (see docs/lanes/codec.md).
 
 ## Backlog
 - [ ] utils basics (done: faults, modulo, union/union_unique, NZ, Participant, rng, range
-  without codec; remaining: time, iter, vec, rational, probability, sampling, hostname, net): `Span`/`Array` traits as comptime interfaces, `union_unique`, `hex`
+  without codec; time; remaining: iter, vec, rational, probability, sampling, hostname, net): `Span`/`Array` traits as comptime interfaces, `union_unique`, `hex`
   re-exports, `modulo`, `NZ*` non-zero helpers, quorum math (`quorum`, `max_faults`),
   `time.rs`, `range.rs`, `iter.rs`, `vec.rs` (NonEmptyVec), `rational`, `probability`,
   `sampling`, `rng.rs` (deterministic test RNG matching commonware's where tests depend on it).
@@ -44,3 +49,5 @@ encoding parts as soon as `codec` has its core API (see docs/lanes/codec.md).
 - 2026-11-13: faults, rng (TestRng/ScriptedRng/FuzzRng + FuzzRng conformance hash), range,
   lib basics.
 - 2026-11-13: switched union_unique to codec; Participant and NonEmptyRange codec encodings.
+- 2026-11-13: time (Duration, SystemTime, parse, rand-identical jitter) with seeded and
+  std.testing.fuzz targets; rng.Uniform.

@@ -22,6 +22,10 @@ pub const test_rng = rng.test_rng;
 
 pub const range = @import("range.zig");
 
+pub const time = @import("time.zig");
+pub const Duration = time.Duration;
+pub const SystemTime = time.SystemTime;
+
 /// 64-bit golden-ratio-derived odd mixing constant, `floor(2^64 / phi)`.
 pub const GOLDEN_RATIO: u64 = rng.GOLDEN_RATIO;
 

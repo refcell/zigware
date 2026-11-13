@@ -301,6 +301,49 @@ pub fn range_at_most(rng: anytype, comptime T: type, low: T, high: T) T {
     return low + @as(T, @intCast(result));
 }
 
+/// A uniform distribution over `[low, high]` sampled with Lemire's unbiased method, like
+/// `rand` 0.10's `Uniform<T>` (`Uniform::new_inclusive` then `sample`). This differs from
+/// `range_at_most`, which mirrors the one-shot `random_range`. `T` is `u8` to `u64`.
+pub fn Uniform(comptime T: type) type {
+    comptime assert(@typeInfo(T).int.signedness == .unsigned and @bitSizeOf(T) <= 64);
+    const Sample = if (@bitSizeOf(T) <= 32) u32 else u64;
+    return struct {
+        low: T,
+        /// `high - low + 1`, wrapping to 0 for the full range.
+        range: Sample,
+        threshold: Sample,
+
+        const Self = @This();
+
+        pub fn init_inclusive(low: T, high: T) Self {
+            assert(low <= high);
+            const span: Sample = @as(Sample, high - low) +% 1;
+            const threshold: Sample = if (span > 0) (0 -% span) % span else 0;
+            assert(span == 0 or threshold < span);
+            return .{ .low = low, .range = span, .threshold = threshold };
+        }
+
+        /// `[low, high)` (`Uniform::new`).
+        pub fn init(low: T, high: T) Self {
+            assert(low < high);
+            return init_inclusive(low, high - 1);
+        }
+
+        pub fn sample(uniform: Self, rng: anytype) T {
+            if (uniform.range == 0) return draw(rng, T);
+            // Rejection loop: each draw is accepted with probability above 1/2.
+            while (true) {
+                const high_order, const low_order =
+                    wide_multiply(Sample, draw(rng, Sample), uniform.range);
+                if (low_order >= uniform.threshold) {
+                    assert(high_order < uniform.range);
+                    return uniform.low + @as(T, @intCast(high_order));
+                }
+            }
+        }
+    };
+}
+
 /// Uniform sample in `[low, high)` (`rand`'s `random_range(low..high)`).
 pub fn range_less_than(rng: anytype, comptime T: type, low: T, high: T) T {
     assert(low < high);
@@ -403,6 +446,24 @@ test "rng: sampling helpers match rand 0.10" {
         try testing.expectEqual(expected, @as(u8, @truncate(rng.next_u32())));
     }
     try testing.expectEqual(@as(f64, 0.21757424256511837), float64(&rng));
+}
+
+test "rng: Uniform matches rand 0.10 Uniform::sample" {
+    // Reference values from Rust `rand` 0.10.2 drawing from `StdRng::seed_from_u64(3)`.
+    var rng = TestRng.init(3);
+    const small = Uniform(u32).init_inclusive(5, 1_000_003);
+    for ([_]u32{ 647539, 95214, 980602, 352492, 142550, 183850 }) |expected| {
+        try testing.expectEqual(expected, small.sample(&rng));
+    }
+    const large = Uniform(u64).init(0, 3_000_000_000_000_000_007);
+    for ([_]u64{
+        1279479076645568377, 721613868094690859,  1213129373839275124,
+        1065764713380545529, 1927539637544225603, 1441477339730032608,
+    }) |expected| {
+        try testing.expectEqual(expected, large.sample(&rng));
+    }
+    const tiny = Uniform(u8).init_inclusive(0, 6);
+    for ([_]u8{ 2, 6, 3, 3, 3, 3 }) |expected| try testing.expectEqual(expected, tiny.sample(&rng));
 }
 
 test "rng: ScriptedRng output forms" {
