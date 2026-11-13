@@ -59,6 +59,10 @@ see docs/lanes/runtime.md). Write library code against `std.Io`.
 - Handles are values: `clone`/`deinit` replace `Clone`/`Drop`; the state is freed when the
   last handle goes. Dropped messages go through the type's optional `discard`, called
   outside the lock on receiver close so a discarded message may own a sender of its mailbox.
+- Mailbox benches: `iter_batched(LargeInput)` setup is `before_iter` (untimed).
+  `recv_waiting` runs on the deterministic runtime (single-threaded like `block_on`); the
+  producer sleeps until the receiver has parked for each message, so its time includes
+  scheduler cycles the reference's single poll does not have.
 - `mailbox.new` takes no metrics context; its backoff counter is detached, like commonware's
   test `mocks::Metrics`. `new_with_metrics(T, gpa, io, *const Scope, capacity)` registers it
   as `<scope>_backoff_total`. Stream has no metrics in commonware.
@@ -95,7 +99,8 @@ see docs/lanes/runtime.md). Write library code against `std.Io`.
 ## Backlog
 - [x] actor: mailbox (bounded ready queue plus policy-managed overflow), `Feedback`,
   `Unreliable`, with commonware's tests on the deterministic runtime and a seeded fuzz.
-- [ ] Blocked on bench: actor mailbox benches (actor/src/benches/mailbox.rs).
+- [x] Actor mailbox benches (actor/src/benches/mailbox.rs) in `src/actor/benches.zig`, with
+  commonware's names (`mailbox::mailbox::<group>/<params>`) and constants.
 - [x] Mailbox `backoff` counter in the metrics registry (`mailbox_backoff_total`), with
   commonware's metric-text assertions.
 - [x] stream utils: length-prefixed framing codec (utils/codec.rs) with its tests, a mock
@@ -121,3 +126,4 @@ see docs/lanes/runtime.md). Write library code against `std.Io`.
 - 2026-11-13: stream moved onto runtime.mocks and runtime.network (buffer size 0 allowed in
   runtime.mocks, as in commonware).
 - 2026-11-13: mailbox `backoff` counter registered through `new_with_metrics`.
+- 2026-11-13: actor mailbox benches; the lane backlog is done.
