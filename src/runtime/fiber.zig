@@ -1,17 +1,34 @@
-//! Stackful fibers: a stack, a saved CPU context, and the entry trampoline.
+//! Stackful fibers: a stack, a saved stack pointer, and an out-of-line context switch.
 //!
-//! The executors switch between fibers with `std.Io.fiber.contextSwitch`, the same primitive
-//! `std.Io.Evented` uses. Every fiber switches back to its executor's scheduler context when it
-//! blocks, so the scheduler alone decides what runs next (which the deterministic runtime needs
-//! to replay a seed exactly).
+//! The executors switch between fibers with `switch_to`, which calls `switch_naked`, a naked
+//! function, through a C-ABI function pointer. That makes the switch an ordinary call: the
+//! ABI guarantees where its arguments are and that the caller treats every caller-saved
+//! register as clobbered, and `switch_naked` itself pushes every callee-saved register (and
+//! the floating-point control state) on the outgoing fiber's stack before switching stacks,
+//! then pops the incoming fiber's. Correctness therefore holds for any register allocation.
+//!
+//! We do not use `std.Io.fiber.contextSwitch`: it is inline asm with register operands and a
+//! clobber list, and in optimized builds LLVM lowered it wrongly here. On aarch64 it kept
+//! live values in x30 and x18 across the switch, and on x86_64 it omitted loading the `rsi`
+//! input operand, so the switch read its message through a stale pointer.
+//!
+//! Every fiber switches back to its executor's scheduler context when it blocks, so the
+//! scheduler alone decides what runs next (which the deterministic runtime needs to replay a
+//! seed exactly).
 
 const std = @import("std");
 const builtin = @import("builtin");
 const assert = std.debug.assert;
 
-const Context = std.Io.fiber.Context;
+pub const supported = switch (builtin.cpu.arch) {
+    .x86_64, .aarch64 => true,
+    else => false,
+};
 
-pub const supported = std.Io.fiber.supported;
+/// A suspended fiber: its stack pointer. Its callee-saved registers are on that stack.
+pub const Context = struct {
+    sp: usize = 0,
+};
 
 const page_size = std.heap.page_size_min;
 
@@ -57,190 +74,147 @@ pub const Stack = struct {
     }
 };
 
-/// The first frame on a fresh stack: what the trampoline hands to `entry_fn`.
-pub const Frame = extern struct {
-    entry_fn: *const fn (argument: *anyopaque) callconv(.c) noreturn,
-    argument: *anyopaque,
+pub const EntryFn = *const fn (argument: *anyopaque) callconv(.c) noreturn;
+
+/// Bytes `switch_naked` keeps on a suspended fiber's stack, return address included.
+const saved_frame_bytes = switch (builtin.cpu.arch) {
+    // FP control words, r15, r14, r13, r12, rbx, rbp, return address.
+    .x86_64 => 8 * 8,
+    // x19..x28, x29, x30, d8..d15, fpcr, padding.
+    .aarch64 => 176,
+    else => 0,
 };
 
 comptime {
-    assert(@sizeOf(Frame) <= 16);
+    assert(saved_frame_bytes % 16 == 0);
 }
 
-/// Prepare `stack` so that switching to the returned context calls
-/// `entry_fn(argument)` on it. `entry_fn` must never return: it switches away for good.
-pub fn prepare(
-    stack: Stack,
-    entry_fn: *const fn (argument: *anyopaque) callconv(.c) noreturn,
-    argument: *anyopaque,
-) Context {
-    const frame_address = std.mem.alignBackward(usize, stack.top() - @sizeOf(Frame), 16);
-    assert(frame_address > @intFromPtr(stack.memory.ptr) + page_size);
-    const frame: *Frame = @ptrFromInt(frame_address);
-    frame.* = .{ .entry_fn = entry_fn, .argument = argument };
-    return switch (builtin.cpu.arch) {
-        .x86_64 => .{ .rsp = frame_address - 8, .rbp = 0, .rip = @intFromPtr(&trampoline) },
-        .aarch64, .riscv64 => .{ .sp = frame_address, .fp = 0, .pc = @intFromPtr(&trampoline) },
+/// Prepare `stack` so that switching to the returned context calls `entry_fn(argument)` on
+/// it. `entry_fn` must never return: it switches away for good.
+pub fn prepare(stack: Stack, entry_fn: EntryFn, argument: *anyopaque) Context {
+    comptime assert(supported);
+    const base = std.mem.alignBackward(usize, stack.top(), 16) - saved_frame_bytes;
+    assert(base > @intFromPtr(stack.memory.ptr) + page_size);
+    assert(base % 16 == 0);
+    const slots: [*]usize = @ptrFromInt(base);
+    @memset(slots[0 .. saved_frame_bytes / @sizeOf(usize)], 0);
+    switch (builtin.cpu.arch) {
+        .x86_64 => {
+            // Default MXCSR (all exceptions masked, round to nearest) and x87 control word.
+            slots[0] = 0x1F80 | (@as(usize, 0x037F) << 32);
+            slots[4] = @intFromPtr(argument); // r12
+            slots[3] = @intFromPtr(entry_fn); // r13
+            slots[7] = @intFromPtr(&trampoline); // return address
+        },
+        .aarch64 => {
+            slots[0] = @intFromPtr(argument); // x19
+            slots[1] = @intFromPtr(entry_fn); // x20
+            slots[11] = @intFromPtr(&trampoline); // x30
+        },
+        else => unreachable,
+    }
+    return .{ .sp = base };
+}
+
+/// Save the current fiber into `from` and resume `to`. Returns when something switches back.
+pub fn switch_to(from: *Context, to: *const Context) void {
+    comptime assert(supported);
+    assert(to.sp != 0);
+    assert(to.sp % 16 == 0);
+    const switch_fn: *const fn (from_sp: *usize, to_sp: usize) callconv(.c) void =
+        @ptrCast(&switch_naked);
+    switch_fn(&from.sp, to.sp);
+}
+
+/// `switch_fn(from_sp: *usize, to_sp: usize)`: push callee-saved state, store sp into
+/// `from_sp`, load `to_sp`, pop the incoming fiber's state, and return into it.
+fn switch_naked() callconv(.naked) void {
+    switch (builtin.cpu.arch) {
+        .x86_64 => asm volatile (
+            \\ pushq %%rbp
+            \\ pushq %%rbx
+            \\ pushq %%r12
+            \\ pushq %%r13
+            \\ pushq %%r14
+            \\ pushq %%r15
+            \\ subq $8, %%rsp
+            \\ stmxcsr (%%rsp)
+            \\ fnstcw 4(%%rsp)
+            \\ movq %%rsp, (%%rdi)
+            \\ movq %%rsi, %%rsp
+            \\ ldmxcsr (%%rsp)
+            \\ fldcw 4(%%rsp)
+            \\ addq $8, %%rsp
+            \\ popq %%r15
+            \\ popq %%r14
+            \\ popq %%r13
+            \\ popq %%r12
+            \\ popq %%rbx
+            \\ popq %%rbp
+            \\ retq
+        ),
+        .aarch64 => asm volatile (
+            \\ sub sp, sp, #176
+            \\ stp x19, x20, [sp, #0]
+            \\ stp x21, x22, [sp, #16]
+            \\ stp x23, x24, [sp, #32]
+            \\ stp x25, x26, [sp, #48]
+            \\ stp x27, x28, [sp, #64]
+            \\ stp x29, x30, [sp, #80]
+            \\ stp d8, d9, [sp, #96]
+            \\ stp d10, d11, [sp, #112]
+            \\ stp d12, d13, [sp, #128]
+            \\ stp d14, d15, [sp, #144]
+            \\ mrs x9, fpcr
+            \\ str x9, [sp, #160]
+            \\ mov x9, sp
+            \\ str x9, [x0]
+            \\ mov sp, x1
+            \\ ldp x19, x20, [sp, #0]
+            \\ ldp x21, x22, [sp, #16]
+            \\ ldp x23, x24, [sp, #32]
+            \\ ldp x25, x26, [sp, #48]
+            \\ ldp x27, x28, [sp, #64]
+            \\ ldp x29, x30, [sp, #80]
+            \\ ldp d8, d9, [sp, #96]
+            \\ ldp d10, d11, [sp, #112]
+            \\ ldp d12, d13, [sp, #128]
+            \\ ldp d14, d15, [sp, #144]
+            \\ ldr x9, [sp, #160]
+            \\ msr fpcr, x9
+            \\ add sp, sp, #176
+            \\ ret
+        ),
         else => @compileError("fibers are not implemented for this architecture"),
-    };
+    }
 }
 
-/// Entered by the first switch to a prepared context. The stack pointer addresses the
-/// `Frame` (plus the fake return slot on x86_64); load it and call the entry function.
+/// Where a prepared fiber's first switch returns to: call `entry_fn(argument)`, both left in
+/// callee-saved registers by `prepare`. The stack is 16-byte aligned here, so the call gives
+/// `entry_fn` the ABI's entry alignment.
 fn trampoline() callconv(.naked) noreturn {
     switch (builtin.cpu.arch) {
         .x86_64 => asm volatile (
-            \\ leaq 8(%%rsp), %%rdi
-            \\ jmp %[start:P]
-            :
-            : [start] "X" (&start),
+            \\ movq %%r12, %%rdi
+            \\ callq *%%r13
+            \\ ud2
         ),
         .aarch64 => asm volatile (
-            \\ mov x0, sp
-            \\ b %[start]
-            :
-            : [start] "X" (&start),
-        ),
-        .riscv64 => asm volatile (
-            \\ mv a0, sp
-            \\ tail %[start]@plt
-            :
-            : [start] "X" (&start),
+            \\ mov x0, x19
+            \\ blr x20
+            \\ brk #1
         ),
         else => @compileError("fibers are not implemented for this architecture"),
     }
 }
 
-fn start(frame: *Frame) callconv(.withStackAlign(.c, 16)) noreturn {
-    frame.entry_fn(frame.argument);
-}
-
-/// Save the current CPU state into `from` and resume `to`.
-pub inline fn switch_to(from: *Context, to: *Context) void {
-    const message: std.Io.fiber.Switch = .{ .old = from, .new = to };
-    if (builtin.cpu.arch == .aarch64) {
-        switch_aarch64(&message);
-    } else {
-        _ = std.Io.fiber.contextSwitch(&message);
-    }
-}
-
-/// Everything the switch clobbers except sp, fp, x18, and x30 (saved by hand above).
-const aarch64_clobbers: std.lang.assembly.Clobbers = .{
-    .x0 = true,
-    .x1 = true,
-    .x2 = true,
-    .x3 = true,
-    .x4 = true,
-    .x5 = true,
-    .x6 = true,
-    .x7 = true,
-    .x8 = true,
-    .x9 = true,
-    .x10 = true,
-    .x11 = true,
-    .x12 = true,
-    .x13 = true,
-    .x14 = true,
-    .x15 = true,
-    .x16 = true,
-    .x17 = true,
-    .x19 = true,
-    .x20 = true,
-    .x21 = true,
-    .x22 = true,
-    .x23 = true,
-    .x24 = true,
-    .x25 = true,
-    .x26 = true,
-    .x27 = true,
-    .x28 = true,
-    .x30 = true,
-    .z0 = true,
-    .z1 = true,
-    .z2 = true,
-    .z3 = true,
-    .z4 = true,
-    .z5 = true,
-    .z6 = true,
-    .z7 = true,
-    .z8 = true,
-    .z9 = true,
-    .z10 = true,
-    .z11 = true,
-    .z12 = true,
-    .z13 = true,
-    .z14 = true,
-    .z15 = true,
-    .z16 = true,
-    .z17 = true,
-    .z18 = true,
-    .z19 = true,
-    .z20 = true,
-    .z21 = true,
-    .z22 = true,
-    .z23 = true,
-    .z24 = true,
-    .z25 = true,
-    .z26 = true,
-    .z27 = true,
-    .z28 = true,
-    .z29 = true,
-    .z30 = true,
-    .z31 = true,
-    .p0 = true,
-    .p1 = true,
-    .p2 = true,
-    .p3 = true,
-    .p4 = true,
-    .p5 = true,
-    .p6 = true,
-    .p7 = true,
-    .p8 = true,
-    .p9 = true,
-    .p10 = true,
-    .p11 = true,
-    .p12 = true,
-    .p13 = true,
-    .p14 = true,
-    .p15 = true,
-    .fpcr = true,
-    .fpsr = true,
-    .ffr = true,
-    .memory = true,
-};
-
-/// `std.Io.fiber.contextSwitch` for aarch64, plus explicit saves of x18 and x30.
-/// In optimized builds LLVM kept live values in both across std's asm, and the resuming
-/// side overwrote them: x30 (the link register) despite its clobber (a bus error on macOS),
-/// and x18, which std does not list because Darwin reserves it but Linux allocates it.
-/// Every switch pushes x18/x30 on its own stack before leaving and pops them after
-/// resuming (fp travels in the context). A fresh fiber starts at `trampoline`, not at the
-/// resume label, so the pushes and pops pair up.
-inline fn switch_aarch64(message: *const std.Io.fiber.Switch) void {
-    _ = asm volatile (
-        \\ stp x18, x30, [sp, #-16]!
-        \\ ldp x0, x2, [x1]
-        \\ ldr x3, [x2, #16]
-        \\ mov x4, sp
-        \\ stp x4, fp, [x0]
-        \\ adr x5, 0f
-        \\ ldp x4, fp, [x2]
-        \\ str x5, [x0, #16]
-        \\ mov sp, x4
-        \\ br x3
-        \\0:
-        \\ ldp x18, x30, [sp], #16
-        : [received_message] "={x1}" (-> *const std.Io.fiber.Switch),
-        : [message_to_send] "{x1}" (message),
-        : aarch64_clobbers);
-}
+const testing = std.testing;
 
 test "fiber runs on its own stack and switches back" {
     if (!supported) return error.SkipZigTest;
     const State = struct {
-        main: Context = undefined,
-        fiber: Context = undefined,
+        main: Context = .{},
+        fiber: Context = .{},
         steps: u32 = 0,
 
         fn entry(argument: *anyopaque) callconv(.c) noreturn {
@@ -259,7 +233,71 @@ test "fiber runs on its own stack and switches back" {
     var state: State = .{};
     state.fiber = prepare(stack, State.entry, &state);
     switch_to(&state.main, &state.fiber);
-    try std.testing.expectEqual(@as(u32, 1), state.steps);
+    try testing.expectEqual(@as(u32, 1), state.steps);
     switch_to(&state.main, &state.fiber);
-    try std.testing.expectEqual(@as(u32, 3), state.steps);
+    try testing.expectEqual(@as(u32, 3), state.steps);
+}
+
+// Many fibers ping-pong with the scheduler while keeping values live in locals and floats
+// across every switch; any register the switch fails to preserve shows up as a wrong sum.
+test "fibers preserve live values across many switches" {
+    if (!supported) return error.SkipZigTest;
+    const fiber_count = 8;
+    const rounds = 1000;
+    const Shared = struct {
+        main: Context = .{},
+        current: usize = 0,
+    };
+    const Fiber = struct {
+        shared: *Shared,
+        context: Context = .{},
+        index: u64,
+        sum: u64 = 0,
+        float_sum: f64 = 0,
+        alignment_ok: bool = true,
+
+        fn entry(argument: *anyopaque) callconv(.c) noreturn {
+            const self: *@This() = @ptrCast(@alignCast(argument));
+            var a: u64 = self.index;
+            var b: u64 = self.index * 3 + 1;
+            var c: f64 = @floatFromInt(self.index);
+            var aligned: @Vector(4, f32) align(16) = @splat(@floatFromInt(self.index));
+            for (0..rounds) |round| {
+                a +%= round;
+                b ^= a *% 0x9e37_79b9_7f4a_7c15;
+                c += 0.5;
+                aligned += @splat(1.0);
+                if (@intFromPtr(&aligned) % 16 != 0) self.alignment_ok = false;
+                switch_to(&self.context, &self.shared.main);
+            }
+            self.sum = a +% b;
+            self.float_sum = c + aligned[0];
+            switch_to(&self.context, &self.shared.main);
+            unreachable;
+        }
+    };
+    var shared: Shared = .{};
+    var fibers: [fiber_count]Fiber = undefined;
+    var stacks: [fiber_count]Stack = undefined;
+    for (&fibers, &stacks, 0..) |*fiber, *stack, i| {
+        stack.* = try Stack.map(64 * 1024);
+        fiber.* = .{ .shared = &shared, .index = i };
+        fiber.context = prepare(stack.*, Fiber.entry, fiber);
+    }
+    defer for (stacks) |stack| stack.unmap();
+    for (0..rounds + 1) |_| {
+        for (&fibers) |*fiber| switch_to(&shared.main, &fiber.context);
+    }
+    for (fibers, 0..) |fiber, i| {
+        var a: u64 = i;
+        var b: u64 = i * 3 + 1;
+        for (0..rounds) |round| {
+            a +%= round;
+            b ^= a *% 0x9e37_79b9_7f4a_7c15;
+        }
+        try testing.expectEqual(a +% b, fiber.sum);
+        const index: f64 = @floatFromInt(i);
+        try testing.expectEqual(index + 0.5 * rounds + index + rounds, fiber.float_sum);
+        try testing.expect(fiber.alignment_ok);
+    }
 }

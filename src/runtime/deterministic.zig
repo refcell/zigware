@@ -116,7 +116,7 @@ const max_alignment: std.mem.Alignment = .@"16";
 const Task = struct {
     id: u64,
     label: []const u8,
-    context: Io.fiber.Context,
+    context: fiber.Context,
     stack: ?fiber.Stack,
     state: enum { ready, running, blocked, finished },
     kind: union(enum) {
@@ -186,7 +186,7 @@ pub const Runner = struct {
     next_task_id: u64 = 0,
     next_alarm_sequence: u64 = 0,
 
-    scheduler_context: Io.fiber.Context = undefined,
+    scheduler_context: fiber.Context = .{},
     current: ?*Task = null,
     root_finished: bool = false,
     tasks: std.DoublyLinkedList = .{},
