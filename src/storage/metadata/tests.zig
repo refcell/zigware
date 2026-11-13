@@ -11,7 +11,7 @@ const assert = std.debug.assert;
 const testing = std.testing;
 const codec = @import("codec");
 const metadata = @import("mod.zig");
-const memory = @import("../journal/memory.zig");
+const memory = @import("runtime").buffer.memory;
 const fuzz_bytes = @import("../fuzz_bytes.zig");
 const Crc32 = @import("cryptography").crc32.Crc32;
 

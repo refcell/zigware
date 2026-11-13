@@ -11,9 +11,12 @@ resize, sync). The runtime lane is landing that interface and an in-memory backe
 build on it. Until then, start with the pure parts (frame.rs, durability, item encodings).
 
 ## Backlog
-- [ ] runtime buffer: read.rs, write.rs, tip.rs, then paged (CRC'd pages, cache, `Append`,
-  `Writer`, `Replay`, `CacheRef`), byte-identical page format, over runtime's `Blob`. Add
-  `pub const buffer` to `src/runtime/root.zig` (additive edit).
+- [x] runtime buffer paged core: page format (two-slot CRC record), tip buffer, page cache,
+  `Writer` (append, bulk append, sync, recovery open/truncate with staged shrink), `Replay`,
+  `recoverable_prefix_len`; `runtime.buffer`.
+- [ ] runtime buffer rest: `Sealed`/`seal`/`snapshot`, `read_many_into`/`read_ranges_into`,
+  `read_range`/`read_tail`, plain `Read`/`Write` buffers (read.rs, write.rs, tip.rs), and the
+  remaining writer tests.
 - [x] journal frame format and durability (frame.rs, durability.rs), byte-identical.
 - [ ] journal/segmented: fixed and variable segmented journals (append, read, replay,
   prune, rewind, sync), recovery from torn writes; port the tests incl. corruption tests.
@@ -22,9 +25,6 @@ build on it. Until then, start with the pure parts (frame.rs, durability, item e
 - [x] metadata (two-blob atomic key-value store), over the in-lane memory storage.
 - [ ] metadata: `start_sync` (pipelined syncs), conformance hash (`MetadataWorkload`), and
   the fault-injection tests (torn writes, failed syncs), once runtime storage lands.
-- [ ] runtime/buffer (owned by this lane since 3d5033e): read.rs, write.rs, tip.rs, and paged
-  (CRC'd pages, Append/Writer/Replay/CacheRef), over runtime's Blob; `pub const buffer` in
-  `src/runtime/root.zig`.
 - [ ] queue (persistent queue with cursor).
 - [ ] Conformance hashes for every on-disk format, fuzz targets (storage/fuzz).
 - [ ] zstd: a real compressor (LZ matches, FSE/Huffman) so compressed journals shrink.
@@ -38,8 +38,15 @@ build on it. Until then, start with the pure parts (frame.rs, durability, item e
 - `storage.journal.durability.Barrier(Completion)`: durable-boundary tracker.
 - `storage.journal.zstd`: `compress_into`, `compress_bound`, `frame_content_size`,
   `decompress`.
-- `storage.journal.memory`: in-memory `Storage` (`open`, `remove`, `scan`) and `Blob`
-  (`read_at`, `write_at`, `resize`, `sync`, `deinit`), a stand-in for runtime storage.
+- `runtime.buffer.memory` (re-exported as `storage.journal.memory`): in-memory `Storage`
+  (`open`, `remove`, `scan`) and `Blob` (`read_at`, `write_at`, `resize`, `sync`, `deinit`),
+  a stand-in for runtime storage.
+- `runtime.buffer.SyncState`; `runtime.buffer.paged`: `Checksum`, `page_size`, `page_len`,
+  `corrupt_page`, `CacheRef` (`init(gpa, page_size, capacity)`, `next_id`, `cache`,
+  `read_cached`, `clear`), `Writer(Blob)` (`init`, `open_recovery`, `truncate`,
+  `finish_recovery`, `append`, `try_append`, `try_append_value`, `sync`, `read_into`,
+  `read_up_to`, `try_read_sync_into`, `replay`, `recoverable_prefix_len[_at_most]`),
+  `Replay(Blob)` (`ensure`, `bytes`, `advance`, `seek_to`).
 - `storage.metadata`: `Metadata(Storage, K, V)` with `init`, `deinit`, `get`, `get_mut`,
   `put`, `put_sync`, `upsert`, `remove`, `clear`, `retain`, `items`, `count`, `sync`,
   `destroy`; `Config(V)`.
@@ -78,8 +85,19 @@ build on it. Until then, start with the pure parts (frame.rs, durability, item e
   instead of a panic. Metrics are plain fields (`sync_rewrites`, `sync_overwrites`,
   `count()`). `upsert(key, default)` returns a pointer instead of taking a closure.
 
+- runtime buffer: the tip buffer is one contiguous allocation of `capacity + page_size`
+  made at init (appends that would overflow it by a page bypass it), instead of chained
+  zero-copy chunks. The page cache evicts with CLOCK instead of Clock2Q+ and does not share
+  in-flight reads (single-owner fibers); hit rates differ, contents do not. Blobs sync
+  synchronously, so `start_sync` is `sync` and `SyncState` has no pending state. A writer
+  takes ownership of its blob on success and closes it in `deinit`; a `Replay` borrows it.
+  Large appends write their bulk pages in buffer-capacity chunks rather than one write; the
+  bytes on disk are identical. `recoverable_prefix_len` reads one page at a time.
+
 ## Log
 - 2026-11-13: journal Error, frame encoding/decoding with zstd frames, durability Barrier,
   frame fuzz target.
 - 2026-11-13: in-memory Storage/Blob stand-in; metadata with its tests and the
   metadata_operations fuzz target.
+- 2026-11-13: moved the memory storage stand-in to `runtime.buffer.memory`; paged buffer
+  core (page format, tip, cache, Writer, Replay) with tests and a seeded crash fuzz.

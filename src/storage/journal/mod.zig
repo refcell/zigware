@@ -12,7 +12,8 @@ const codec = @import("codec");
 pub const frame = @import("frame.zig");
 pub const durability = @import("durability.zig");
 pub const zstd = @import("zstd.zig");
-pub const memory = @import("memory.zig");
+/// The in-memory storage stand-in (`runtime.buffer.memory`), re-exported for journal users.
+pub const memory = @import("runtime").buffer.memory;
 
 /// Errors that can occur when interacting with a journal (commonware's `journal::Error`).
 ///
