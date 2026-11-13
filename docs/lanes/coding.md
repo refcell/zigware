@@ -79,14 +79,20 @@ hashers (on main).
 - [x] storage bmt (taken over from storage-merkle): Builder, Tree, single/range/multi proofs and
   verification, codec, every test, RootConformance and CodecConformance<Proof> hashes, and the
   `bmt_operations` fuzz (minifuzz + `std.testing.fuzz`).
-- [ ] storage bmt benches once `zig build bench` exists.
+- [x] storage bmt benches (`src/storage/bmt/benches.zig`): build, proof, range_proof,
+  multi_proof, verify_single, verify_multi, verify_range.
 - [x] coding: Config (codec, CodecConformance<Config> hash) and the Scheme interface.
 - [x] coding: ReedSolomon scheme (striped encode with a BMT commitment, check, check_many,
   striped decode and reveal), Chunk codec, every lib.rs and reed_solomon.rs test except panic
   tests, pinned commitments and recovery output, CodecConformance<Chunk> hash, the
   unique-commitment and roundtrip minifuzz tests, and the coding/fuzz reed_solomon target.
-- [ ] coding benches (`coding_scheme_times`, `coding_scheme_sizes`, shard_selection,
-  reed_solomon) once `zig build bench` exists.
+- [x] coding benches (`src/coding/benches.zig`): `reed_solomon::encode`/`decode` with every
+  shard selection and the extra decode cases, and `coding_scheme_sizes` as
+  `reed_solomon size (shard)` reporting a `shard_bytes` metric.
+- [x] reed_solomon benches (`src/cryptography/reed_solomon/benches.zig`): encoder, decoder,
+  high/low rate encoders and decoders, and per-engine eval_poly, mul, fft, and ifft.
+- [x] formatting (encode, decode, display) and codec (`codec::lazy::get`) benches, taken over
+  from the closed codec lane.
 
 ## Log
 - 2026-11-13: reed_solomon engines, rates, wrappers, results, plans, and test vectors.
@@ -95,3 +101,4 @@ hashers (on main).
 - 2026-11-13: coding Config with its conformance hash, and the Scheme interface.
 - 2026-11-13: coding ReedSolomon scheme, tests, Chunk conformance hash, and fuzz target.
 - 2026-11-13: reed_solomon Simd engine (AVX2 nibble-shuffle kernel), now the default.
+- 2026-11-13: benches for coding, bmt, reed_solomon, formatting, and codec.
