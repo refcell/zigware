@@ -63,12 +63,14 @@
 //!   deterministic runtime.
 //! - Handles are values, so `Sender.clone`/`Sender.deinit` and `Receiver.deinit` replace Rust's
 //!   `Clone`/`Drop`. Copying a handle without `clone` breaks sender counting.
-//! - The backoff counter is `backoff_total()` until the runtime has a metrics registry.
+//! - `new` takes no metrics context: its backoff counter is detached (commonware's test
+//!   `mocks::Metrics`). `new_with_metrics` registers it as `<scope>_backoff_total`.
 
 const std = @import("std");
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
+const metrics = @import("runtime").telemetry.metrics;
 
 const actor = @import("root.zig");
 const Feedback = actor.Feedback;
@@ -82,8 +84,41 @@ pub const TryRecvError = error{
     Disconnected,
 };
 
-/// Create a new bounded mailbox holding up to `capacity` ready messages.
+/// Create a new bounded mailbox holding up to `capacity` ready messages, with a detached
+/// backoff counter (read it with `backoff_total`).
 pub fn new(comptime T: type, gpa: Allocator, io: Io, capacity: u32) Allocator.Error!Pair(T) {
+    assert(capacity > 0);
+    var backoff: metrics.Counter = try .detached(gpa, .{});
+    errdefer backoff.deinit();
+    const pair = try new_state(T, gpa, io, capacity, backoff);
+    assert(pair.sender.state == pair.receiver.state);
+    return pair;
+}
+
+/// Create a new bounded mailbox holding up to `capacity` ready messages, registering its
+/// backoff counter in `scope` as `backoff` (commonware `new(metrics, capacity)`).
+pub fn new_with_metrics(
+    comptime T: type,
+    gpa: Allocator,
+    io: Io,
+    scope: *const metrics.Scope,
+    capacity: u32,
+) Allocator.Error!Pair(T) {
+    assert(capacity > 0);
+    var backoff = try scope.counter("backoff", "number of enqueue calls that requested backoff");
+    errdefer backoff.deinit();
+    const pair = try new_state(T, gpa, io, capacity, backoff);
+    assert(pair.sender.state == pair.receiver.state);
+    return pair;
+}
+
+fn new_state(
+    comptime T: type,
+    gpa: Allocator,
+    io: Io,
+    capacity: u32,
+    backoff: metrics.Counter,
+) Allocator.Error!Pair(T) {
     assert(capacity > 0);
     const state = try gpa.create(State(T));
     errdefer gpa.destroy(state);
@@ -93,6 +128,7 @@ pub fn new(comptime T: type, gpa: Allocator, io: Io, capacity: u32) Allocator.Er
         .capacity = capacity,
         .ready = try .initCapacity(gpa, capacity),
         .overflow = .empty,
+        .backoff = backoff,
     };
     assert(state.ready.buffer.len >= capacity);
     assert(state.handles == 2);
@@ -281,7 +317,8 @@ fn State(comptime T: type) type {
         senders: u32 = 1,
         /// Live handles (senders plus the receiver); zero frees the state.
         handles: u32 = 2,
-        backoff: u64 = 0,
+        /// Enqueue calls that requested backoff (commonware `backoff` counter).
+        backoff: metrics.Counter,
 
         fn lock(state: *Self) void {
             state.mutex.lockUncancelable(state.io);
@@ -292,9 +329,9 @@ fn State(comptime T: type) type {
         }
 
         fn backoff_count(state: *Self) u64 {
-            state.lock();
-            defer state.unlock();
-            return state.backoff;
+            assert(state.handles > 0);
+            assert(state.capacity > 0);
+            return state.backoff.metric().get();
         }
 
         fn enqueue(state: *Self, message: T) Allocator.Error!FeedbackType {
@@ -321,7 +358,7 @@ fn State(comptime T: type) type {
                 (if (handled) .new(.backoff) else .rejected)
             else
                 .backoff;
-            if (handled) state.backoff += 1;
+            if (handled) state.backoff.metric().inc();
             // A spill may be the only signal a parked receiver gets; spurious wakes are fine.
             state.condition.signal(state.io);
             return feedback;
@@ -358,6 +395,7 @@ fn State(comptime T: type) type {
             const gpa = state.gpa;
             state.ready.deinit(gpa);
             state.overflow.deinit(gpa);
+            state.backoff.deinit();
             gpa.destroy(state);
         }
     };

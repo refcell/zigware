@@ -11,7 +11,8 @@ see docs/lanes/runtime.md). Write library code against `std.Io`.
 ### actor
 - `actor.Feedback` (`ok`, `backoff`, `closed`; `accepted()`), `actor.Unreliable(T)`
   (`outcome: T` / `rejected`; `new`, `is_rejected`, `get`, `accepted`, `eql`).
-- `actor.mailbox.new(T, gpa, io, capacity) !Pair(T)` returns `.{ .sender, .receiver }`.
+- `actor.mailbox.new(T, gpa, io, capacity) !Pair(T)` returns `.{ .sender, .receiver }`;
+  `new_with_metrics(T, gpa, io, &scope, capacity)` also registers `<scope>_backoff_total`.
   `Sender(T)`: `enqueue(message)` (returns `Feedback`, or `Unreliable(Feedback)` when the
   policy can reject; wrapped in `Allocator.Error!` when `handle` can fail), `clone`, `deinit`,
   `capacity`, `is_closed`, `backoff_total`. `Receiver(T)`: `recv() Cancelable!?T` (null once
@@ -58,7 +59,9 @@ see docs/lanes/runtime.md). Write library code against `std.Io`.
 - Handles are values: `clone`/`deinit` replace `Clone`/`Drop`; the state is freed when the
   last handle goes. Dropped messages go through the type's optional `discard`, called
   outside the lock on receiver close so a discarded message may own a sender of its mailbox.
-- The backoff metric is `backoff_total()` until the runtime has a metrics registry.
+- `mailbox.new` takes no metrics context; its backoff counter is detached, like commonware's
+  test `mocks::Metrics`. `new_with_metrics(T, gpa, io, *const Scope, capacity)` registers it
+  as `<scope>_backoff_total`. Stream has no metrics in commonware.
 - Stream transports receive into caller buffers (no allocation per frame); framing errors
   carry no runtime error payload, and `error.Canceled` passes through. The sink/stream
   contract and mock channel live in `stream` until the runtime lane ships its network; then
@@ -93,8 +96,8 @@ see docs/lanes/runtime.md). Write library code against `std.Io`.
 - [x] actor: mailbox (bounded ready queue plus policy-managed overflow), `Feedback`,
   `Unreliable`, with commonware's tests on the deterministic runtime and a seeded fuzz.
 - [ ] Blocked on bench: actor mailbox benches (actor/src/benches/mailbox.rs).
-- [ ] Blocked on runtime telemetry: register the mailbox `backoff` counter in the metrics
-  registry (`mailbox_backoff_total`) and port commonware's metric-text assertions.
+- [x] Mailbox `backoff` counter in the metrics registry (`mailbox_backoff_total`), with
+  commonware's metric-text assertions.
 - [x] stream utils: length-prefixed framing codec (utils/codec.rs) with its tests, a mock
   sink/stream channel, and a seeded wire-bytes fuzz.
 - [x] stream utils: `Timeout` (utils/timeout.rs) with the upgrader tests from lib.rs.
@@ -117,3 +120,4 @@ see docs/lanes/runtime.md). Write library code against `std.Io`.
 - 2026-11-13: conformance-hash decision recorded; remaining items wait on bench and runtime.
 - 2026-11-13: stream moved onto runtime.mocks and runtime.network (buffer size 0 allowed in
   runtime.mocks, as in commonware).
+- 2026-11-13: mailbox `backoff` counter registered through `new_with_metrics`.

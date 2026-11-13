@@ -9,6 +9,7 @@ const Io = std.Io;
 const Smith = std.testing.Smith;
 const build_options = @import("build_options");
 const runtime = @import("runtime");
+const metrics = runtime.telemetry.metrics;
 
 const actor = @import("root.zig");
 const mailbox = @import("mailbox.zig");
@@ -226,25 +227,48 @@ test "try_recv refills from overflow" {
 }
 
 test "backoff metric counts backoff feedback" {
-    var pair = try open(Message, 1);
+    var registry: metrics.Registry = .init(testing.allocator);
+    defer registry.deinit();
+    const scope = metrics.Scope.init(&registry).child("mailbox");
+    var pair = try mailbox.new_with_metrics(Message, testing.allocator, testing.io, &scope, 1);
     defer pair.sender.deinit();
     defer pair.receiver.deinit();
     try expect_enqueue(pair.sender, .{ .vote = 1 }, .new(.ok));
     try expect_enqueue(pair.sender, .{ .buffered = 2 }, .new(.backoff));
     try expect_enqueue(pair.sender, .{ .buffered = 3 }, .new(.backoff));
+    const text = try registry.encode(testing.allocator);
+    defer testing.allocator.free(text);
+    try testing.expect(metrics.has_metric_value(text, "mailbox_backoff_total", 2));
     try testing.expectEqual(@as(u64, 2), pair.sender.backoff_total());
     try testing.expectEqual(@as(u64, 2), pair.receiver.backoff_total());
 }
 
 test "unreliable rejected feedback is not accepted or counted as backoff" {
-    var pair = try open(Message, 1);
+    var registry: metrics.Registry = .init(testing.allocator);
+    defer registry.deinit();
+    const scope = metrics.Scope.init(&registry).child("mailbox");
+    var pair = try mailbox.new_with_metrics(Message, testing.allocator, testing.io, &scope, 1);
     defer pair.sender.deinit();
     defer pair.receiver.deinit();
     try expect_enqueue(pair.sender, .{ .vote = 1 }, .new(.ok));
     const feedback = try pair.sender.enqueue(.{ .vote = 2 });
     try testing.expectEqual(@as(U, .rejected), feedback);
     try testing.expect(!feedback.accepted());
+    const text = try registry.encode(testing.allocator);
+    defer testing.allocator.free(text);
+    try testing.expect(metrics.has_metric_value(text, "mailbox_backoff_total", 0));
     try testing.expectEqual(@as(u64, 0), pair.sender.backoff_total());
+}
+
+test "dropping the mailbox unregisters the backoff metric" {
+    var registry: metrics.Registry = .init(testing.allocator);
+    defer registry.deinit();
+    const scope = metrics.Scope.init(&registry).child("mailbox");
+    var pair = try mailbox.new_with_metrics(Message, testing.allocator, testing.io, &scope, 1);
+    try testing.expectEqual(@as(usize, 1), registry.count());
+    pair.sender.deinit();
+    pair.receiver.deinit();
+    try testing.expectEqual(@as(usize, 0), registry.count());
 }
 
 test "receiver drains buffered messages after senders drop" {
