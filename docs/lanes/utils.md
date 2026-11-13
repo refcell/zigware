@@ -34,10 +34,20 @@ encoding parts as soon as `codec` has its core API (see docs/lanes/codec.md).
   `commit` leaves the `Dirty` unchanged (Rust consumes it).
   `bitmap.roaring`: `roaring.Bitmap` (u64 roaring bitmap: sorted `codec.Map(u64, Container)`
   entries; `insert`, `insert_range`, `contains`, `iter`, `iter_range`, `min`, `max`, `clear`,
-  `truncate_containers_below`, `container_variant_counts`, `eql`; codec with `RangeCfg(usize)`
-  container bound); `roaring.Container` (Array/Bitmap/Run with hysteresis transitions,
+  `truncate_containers_below`, `container_variant_counts`, `eql`; set operations with a result
+  limit `union`/`intersection`/`difference(other, gpa, limit)` plus `is_subset`/`intersects`;
+  codec with `RangeCfg(usize)` container bound); `roaring.Prunable` (a `Bitmap` with a
+  container-aligned `pruned_below` watermark: `prune(gpa, threshold)` returns the applied
+  watermark; access below it is an assertion; codec `u64` watermark + `Bitmap`); `roaring.Container` (Array/Bitmap/Run with hysteresis transitions,
   canonical encoding, set operations) and its three kinds; codec + conformance hashes.
   `bitmap.readable` is the `Readable` trait (`len`, `pruned_chunks`, `get_chunk`) + `OnesIter`.
+- `utils.handles`: `Table(H)` (`empty`, `init_capacity`, `deinit`, `len` field, `capacity`,
+  `reserve(gpa, n, rehash_context)`, `get(hash)` -> `Candidates` iterator (`next() ?H`),
+  `insert(gpa, hash, handle, rehash_context)`, `find_or_insert(gpa, hash, matcher, handle,
+  rehash_context)` -> `Found{handle, inserted}`, `remove(hash, handle)`, `prefetch`);
+  `rehash_context.rehash(H) u64` gives each held handle's hash on growth, `matcher.matches(H)`
+  confirms a candidate. `partition(hash, partitions)` picks a shard from the bits below the
+  fingerprint.
 - `utils.Hostname` (`utils.hostname`): validated RFC 1035/1123 hostname stored inline
   (`init`, `literal`, `as_str`, `eql`, `order`, `{f}`, `len_max`, `label_len_max`,
   `max_encode_size` = 258), codec as a `RangeCfg(..=253)` byte string; `hostname.Error`.
@@ -74,12 +84,12 @@ encoding parts as soon as `codec` has its core API (see docs/lanes/codec.md).
   `time.rs`, `range.rs`, `iter.rs`, `vec.rs` (NonEmptyVec), `rational`, `probability`,
   `sampling`, `rng.rs` (deterministic test RNG matching commonware's where tests depend on it).
 - [x] utils sequence: fixed_bytes, u32, u64, prefixed_u64, vec_u64, unit — with codec.
-- [ ] utils bitmap (done: BitMap, Prunable, historical; next:
-  roaring): BitMap, prunable, historical, roaring; codec encodings identical.
+- [x] utils bitmap: BitMap, prunable, historical, roaring (containers, Bitmap, Prunable, ops,
+  fuzz Plan); codec encodings identical, all bitmap conformance hashes match.
 - [x] utils ordered (Set/Map/BiMap/Quorum) with conformance hashes.
 - [ ] utils priority_set, cache (LRU etc.), acknowledgement,
   channel (bounded mpsc, ring, reservation, tracked; keep broadcast-resolver's oneshot.zig) — channels over `std.Io` primitives.
-- [ ] utils handles (`Table`), requested by storage-merkle; right after roaring.
+- [x] utils handles (`Table`, `partition`), requested by storage-merkle.
 - [ ] Fuzz targets for every decoder (commonware utils/fuzz).
 
 ## Log
@@ -99,3 +109,9 @@ encoding parts as soon as `codec` has its core API (see docs/lanes/codec.md).
 - 2026-11-13: roaring containers (Array, Bitmap, Run, Container) with tests and all five
   container conformance hashes, including ContainerTransitionsConformance.
 - 2026-11-13: roaring top-level Bitmap with the mod.rs tests and its conformance hash.
+- 2026-11-13: roaring Prunable (conformance hash), ops (union/intersection/difference with
+  limits, is_subset, intersects), and the roaring fuzz Plan. The fuzz draws overlapping
+  sets (shared narrow domains, dense blocks): with commonware's independent full-range
+  values, intersections are almost always empty and a broken `difference` went unnoticed.
+- 2026-11-13: handles `Table` (Robin Hood multimap of hashes to handles) and `partition`,
+  with all handles.rs tests; Rust closures are `rehash_context`/`matcher` parameters.
