@@ -86,6 +86,16 @@ Read this whole file before you change anything. These rules are not optional.
   the run exactly. A failing seed is a bug report.
 - Linux io_uring tests: `just test-linux` runs the suite in a Docker Linux container.
 
+## Zig 0.17.1 pitfalls
+
+- `std.Io.Threaded`'s `Future.create` ignores the result's alignment. `io.concurrent` on a
+  function whose result is 16-byte aligned (anything holding an `Io.Duration` or
+  `Io.Clock.Timestamp`, which are i96) overruns the future by up to 8 bytes and corrupts the
+  heap. Keep such fields as `u64` nanoseconds in values returned from concurrent tasks.
+- `std.Io.Uring` does not compile; `runtime.production.Runner` runs on `std.Io.Threaded`.
+  `Threaded` panics on connect with a timeout and its poll timeouts can fire up to 1 ms
+  early; `runtime.production.network` works around both (docs/lanes/runtime-telemetry.md).
+
 ## Layout (mirrors commonware, Zig conventions)
 
 ```
