@@ -1,11 +1,16 @@
 name: ci
 
-# Every push to main gets its own Linux run (many lanes push concurrently, and each
-# commit's result matters). macOS runs in macos.yml on the newest push only.
+# About fifteen lanes push to main, faster than runs finish. Three slots run at once; each
+# finishes its running build and keeps only the newest push waiting. Jobs time out, so a
+# hung job cannot hold a slot. macOS runs in macos.yml.
 on:
   push:
     branches: [main]
   workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}-${{ github.run_number % 3 }}
+  cancel-in-progress: false
 
 jobs:
   test:
