@@ -3,6 +3,7 @@
 //! Backed by `std.crypto.hash.sha2.Sha512`. Digests encode as their 64 raw bytes.
 
 const std = @import("std");
+const parallel = @import("parallel");
 const codec = @import("codec");
 const assert = std.debug.assert;
 const hasher = @import("hasher.zig");
@@ -45,11 +46,11 @@ test "sha512 known answers and reset" {
     try testing.expect(Sha512.hash(&.{}).eql(empty_digest));
     try testing.expect(Sha512.hash(&.{"abc"}).eql(abc_digest));
     try testing.expect(Sha512.hash(&.{ "a", "", "bc" }).eql(abc_digest));
-    const pair = Sha512.hash_pair(&.{}, &.{ "a", "bc" }, {});
+    const pair = Sha512.hash_pair(&.{}, &.{ "a", "bc" }, parallel.sequential);
     try testing.expect(pair[0].eql(empty_digest));
     try testing.expect(pair[1].eql(abc_digest));
     var digests: [2]Digest = undefined;
-    Sha512.hash_many(&.{ "", "abc" }, &digests, {});
+    Sha512.hash_many(&.{ "", "abc" }, &digests, parallel.sequential);
     try testing.expect(digests[0].eql(empty_digest));
     try testing.expect(digests[1].eql(abc_digest));
 
@@ -79,7 +80,7 @@ test "sha512 hash_many with equal and mixed lengths" {
             messages[lane] = storage[lane][0..own];
         }
         for (0..21) |count| {
-            Sha512.hash_many(messages[0..count], digests[0..count], {});
+            Sha512.hash_many(messages[0..count], digests[0..count], parallel.sequential);
             for (messages[0..count], digests[0..count]) |message, d| {
                 var reference: Digest = undefined;
                 Core.hash(message, &reference.bytes, .{});

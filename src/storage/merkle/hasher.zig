@@ -15,6 +15,7 @@
 const std = @import("std");
 const assert = std.debug.assert;
 const cryptography = @import("cryptography");
+const parallel = @import("parallel");
 const merkle = @import("mod.zig");
 
 /// Asserts at comptime that `T` implements the Merkle hasher interface.
@@ -82,7 +83,7 @@ pub fn Standard(comptime H: type) type {
             return H.hash_pair(
                 &.{ &left_position, &nodes[0].left.bytes, &nodes[0].right.bytes },
                 &.{ &right_position, &nodes[1].left.bytes, &nodes[1].right.bytes },
-                {},
+                parallel.sequential,
             );
         }
 

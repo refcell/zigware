@@ -123,10 +123,9 @@ pub const PublicKey = struct {
     /// Verifies every entry `projector.project(index, &items[index])` at once (commonware
     /// `BatchVerifier::verify_batch`); pass `cryptography.entries` for a slice of `Entry`.
     /// Returns false for an empty batch or when any signature is invalid. `rng` must be
-    /// unpredictable to whoever chose the signatures. `strategy` is accepted for parity;
-    /// the batch is checked on the calling thread.
+    /// unpredictable to whoever chose the signatures. `strategy` may split the batch across
+    /// threads.
     pub fn verify_batch(rng: anytype, items: anytype, projector: anytype, strategy: anytype) bool {
-        _ = strategy;
         const Items = struct {
             items: @TypeOf(items),
             projector: @TypeOf(projector),
@@ -141,7 +140,8 @@ pub const PublicKey = struct {
                 };
             }
         };
-        return core.verify_batch(rng, items.len, Items{ .items = items, .projector = projector });
+        const view: Items = .{ .items = items, .projector = projector };
+        return core.verify_batch(rng, items.len, view, strategy);
     }
 
     pub fn as_slice(self: *const PublicKey) []const u8 {

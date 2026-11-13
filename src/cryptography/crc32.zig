@@ -67,7 +67,7 @@ pub const Crc32 = struct {
     }
 
     pub fn hash_across(parts: []const []const u8, strategy: anytype) Self.Digest {
-        _ = strategy;
+        _ = hasher.resolve_strategy(strategy);
         return hash(parts);
     }
 
@@ -76,13 +76,12 @@ pub const Crc32 = struct {
         right: []const []const u8,
         strategy: anytype,
     ) [2]Self.Digest {
-        _ = strategy;
+        _ = hasher.resolve_strategy(strategy);
         return .{ hash(left), hash(right) };
     }
 
     pub fn hash_many(messages: []const []const u8, digests: []Self.Digest, strategy: anytype) void {
-        _ = strategy;
-        hasher.hash_each(Self, messages, digests);
+        hasher.hash_batches(Self, messages, digests, strategy);
     }
 };
 

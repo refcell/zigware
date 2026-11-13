@@ -16,6 +16,8 @@
 const std = @import("std");
 const assert = std.debug.assert;
 const codec = @import("codec");
+const parallel = @import("parallel");
+const hasher_mod = @import("../hasher.zig");
 const transcript = @import("../transcript.zig");
 
 pub const Point = std.crypto.ecc.Edwards25519;
@@ -249,20 +251,50 @@ pub const BatchItem = struct {
 const noise_batch_verify = "batch_verify";
 
 /// Verifies `count` signatures at once: `[8](sum z_i (R_i + k_i A_i - s_i B)) == 0` with
-/// random 128-bit `z_i`, which an attacker must not predict. As in commonware, the `z_i`
-/// come from a v1 transcript resumed from a 32-byte seed drawn from `rng`, committed to the
-/// batch index (always 0: one batch on the calling thread), and read as `batch_verify`
-/// noise. `items` has `item(index) BatchItem`. An empty batch is rejected.
-pub fn verify_batch(rng: anytype, count: usize, items: anytype) bool {
+/// random 128-bit `z_i`, which an attacker must not predict. As in commonware, one 32-byte
+/// seed is drawn from `rng`, `strategy` splits the items into batches (one on a serial
+/// strategy), and each batch checks its own equation with `z_i` read as `batch_verify` noise
+/// from a v1 transcript resumed from the seed and committed to the batch ordinal. `items` has
+/// `item(index) BatchItem`. An empty batch is rejected.
+pub fn verify_batch(rng: anytype, count: usize, items: anytype, strategy: anytype) bool {
+    const resolved = hasher_mod.resolve_strategy(strategy);
     if (count == 0) return false;
     var seed: transcript.Summary = undefined;
     rng.fill_bytes(&seed.bytes);
+    const Batch = struct {
+        items: @TypeOf(items),
+        seed: transcript.Summary,
+        count: usize,
+
+        pub fn run(batch: @This(), batches: anytype) bool {
+            if (batches.is_whole()) return batch.map(0, .init(0, batch.count));
+            var valid: [parallel.max_chunks]bool = undefined;
+            batches.map_collect(valid[0..batches.count()], batch);
+            return std.mem.allEqual(bool, valid[0..batches.count()], true);
+        }
+
+        pub fn map(batch: @This(), ordinal: usize, range: parallel.Range) bool {
+            return verify_shard(batch.items, range, batch.seed, ordinal);
+        }
+    };
+    const batch: Batch = .{ .items = items, .seed = seed, .count = count };
+    return resolved.run_batches(count, 1, 1, batch);
+}
+
+/// Checks the items in `range` as one equation, with coefficients for batch `ordinal`.
+fn verify_shard(
+    items: anytype,
+    range: parallel.Range,
+    seed: transcript.Summary,
+    ordinal: usize,
+) bool {
+    assert(range.start < range.end);
     var shard = transcript.Transcript.resume_from(seed, .v1);
-    shard.commit(&codec.encode_fixed(u64, 0));
+    shard.commit(&codec.encode_fixed(u64, ordinal));
     var noise = shard.noise(noise_batch_verify);
     var sum = MultiScalar.init();
     var base_coefficient = scalar.zero;
-    for (0..count) |index| {
+    for (range.start..range.end) |index| {
         const item: BatchItem = items.item(index);
         const s = item.signature[32..64].*;
         scalar.rejectNonCanonical(s) catch return false;

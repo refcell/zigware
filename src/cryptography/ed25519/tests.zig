@@ -4,6 +4,7 @@
 //! `std.crypto.sign.Ed25519`, whose strict rules accept a subset of ZIP-215).
 
 const std = @import("std");
+const parallel = @import("parallel");
 const testing = std.testing;
 const codec = @import("codec");
 const utils = @import("utils");
@@ -97,12 +98,13 @@ test "ed25519 ZIP-215 vectors, alone and in batches" {
                 .signature = &signatures[index],
             };
             const one = batch[index..][0..1];
-            try testing.expect(PublicKey.verify_batch(&rng, one, signer.entries, {}));
+            const sequential = parallel.sequential;
+            try testing.expect(PublicKey.verify_batch(&rng, one, signer.entries, sequential));
             index += 1;
         }
     }
     try testing.expectEqual(@as(usize, 196), count);
-    try testing.expect(PublicKey.verify_batch(&rng, &batch, signer.entries, {}));
+    try testing.expect(PublicKey.verify_batch(&rng, &batch, signer.entries, parallel.sequential));
 }
 
 test "ed25519 codec round trips" {
@@ -329,7 +331,7 @@ const Fixture = struct {
         };
         var rng = utils.rng.test_rng();
         const view = Items{ .items = items[0..fixture.count] };
-        return ed25519.core.verify_batch(&rng, fixture.count, view);
+        return ed25519.core.verify_batch(&rng, fixture.count, view, parallel.sequential);
     }
 };
 
@@ -371,7 +373,7 @@ test "ed25519 batch framing matches union_unique" {
                 .signature = &signature,
             }};
             const expected = std.mem.eql(u8, supplied, ns);
-            const valid = PublicKey.verify_batch(&rng, &entry, signer.entries, {});
+            const valid = PublicKey.verify_batch(&rng, &entry, signer.entries, parallel.sequential);
             try testing.expectEqual(expected, valid);
         }
         if (length == 0) continue;
@@ -384,7 +386,8 @@ test "ed25519 batch framing matches union_unique" {
             .public_key = &public_key,
             .signature = &signature,
         }};
-        try testing.expect(!PublicKey.verify_batch(&rng, &entry, signer.entries, {}));
+        const sequential = parallel.sequential;
+        try testing.expect(!PublicKey.verify_batch(&rng, &entry, signer.entries, sequential));
     }
 }
 
@@ -415,18 +418,18 @@ test "ed25519 projected batch over records, empty, and noncanonical s" {
     };
     const projector = Projector{ .publics = &publics, .records = &records };
     const all: []const Record = &records;
-    try testing.expect(PublicKey.verify_batch(&rng, all, projector, {}));
+    try testing.expect(PublicKey.verify_batch(&rng, all, projector, parallel.sequential));
     for (0..records.len) |index| {
         records[index].message[0] ^= 1;
         if (records[index].length == 0) records[index].length = 1;
-        try testing.expect(!PublicKey.verify_batch(&rng, all, projector, {}));
+        try testing.expect(!PublicKey.verify_batch(&rng, all, projector, parallel.sequential));
         records[index].message[0] ^= 1;
         if (index % 3 == 0) records[index].length = 0;
     }
     records[24].signature.raw[63] |= 0x80;
-    try testing.expect(!PublicKey.verify_batch(&rng, all, projector, {}));
+    try testing.expect(!PublicKey.verify_batch(&rng, all, projector, parallel.sequential));
     const empty: []const Entry = &.{};
-    try testing.expect(!PublicKey.verify_batch(&rng, empty, signer.entries, {}));
+    try testing.expect(!PublicKey.verify_batch(&rng, empty, signer.entries, parallel.sequential));
 }
 
 /// The `ed25519_decode` fuzz target: decoding, verification, and signing agree with
@@ -509,8 +512,8 @@ test "ed25519 fuzz decode (coverage-guided)" {
 }
 
 /// The `ed25519_batch_verifier` fuzz target: batches of valid and wrong-key signatures
-/// verify exactly when every entry is valid.
-fn fuzz_batch(bytes: []const u8) !void {
+/// verify exactly when every entry is valid, on any strategy.
+fn fuzz_batch(bytes: []const u8, strategy: anytype) !void {
     const capacity = 32;
     var input = fuzz.Input.init(bytes);
     var rng = utils.rng.TestRng.init(input.int_in_range(0, std.math.maxInt(u64)));
@@ -524,7 +527,7 @@ fn fuzz_batch(bytes: []const u8) !void {
     for (0..operations + 1) |step| {
         const operation = if (step == operations) 2 else input.int_in_range(0, 2);
         if (operation == 2) {
-            const valid = PublicKey.verify_batch(&rng, batch[0..count], signer.entries, {});
+            const valid = PublicKey.verify_batch(&rng, batch[0..count], signer.entries, strategy);
             try testing.expectEqual(expected orelse false, valid);
             count = 0;
             expected = null;
@@ -552,10 +555,15 @@ fn fuzz_batch(bytes: []const u8) !void {
 }
 
 test "ed25519 fuzz batch verifier (seeded)" {
+    // A pool splits batches into shards with their own coefficients; the verdict must match.
+    const pool = try parallel.ThreadPool.create(testing.allocator, testing.io, .{ .threads = 3 });
+    defer pool.destroy();
     var random = fuzz.prng(0xba7c4);
     var bytes: [256]u8 = undefined;
     for (0..fuzz.iterations(16)) |_| {
         random.random().bytes(&bytes);
-        try fuzz_batch(bytes[0..random.random().uintAtMost(usize, bytes.len)]);
+        const input = bytes[0..random.random().uintAtMost(usize, bytes.len)];
+        try fuzz_batch(input, parallel.sequential);
+        try fuzz_batch(input, parallel.Rayon.init(pool));
     }
 }

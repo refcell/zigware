@@ -2,6 +2,7 @@
 //! `TranscriptV1Ops` conformance hashes.
 
 const std = @import("std");
+const parallel = @import("parallel");
 const testing = std.testing;
 const codec = @import("codec");
 const utils = @import("utils");
@@ -153,7 +154,8 @@ test "transcript summary codec and signatures" {
         .signature = &signature,
     }};
     var rng = utils.rng.test_rng();
-    try testing.expect(ed25519.PublicKey.verify_batch(&rng, &entry, signer.entries, {}));
+    const sequential = parallel.sequential;
+    try testing.expect(ed25519.PublicKey.verify_batch(&rng, &entry, signer.entries, sequential));
 }
 
 test "transcript shuffle and sample" {
@@ -291,7 +293,8 @@ fn sign_ops(
         }};
         var rng = t.noise(batch[0]);
         try append_encoded(gpa, log, bool, true);
-        const valid = ed25519.PublicKey.verify_batch(&rng, &entry, signer.entries, {});
+        const sequential = parallel.sequential;
+        const valid = ed25519.PublicKey.verify_batch(&rng, &entry, signer.entries, sequential);
         try append_encoded(gpa, log, bool, valid);
     }
 }

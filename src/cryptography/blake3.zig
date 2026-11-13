@@ -5,6 +5,7 @@
 //! so until the parallel package lands `hash_across` hashes on the calling thread.
 
 const std = @import("std");
+const parallel = @import("parallel");
 const assert = std.debug.assert;
 const hasher = @import("hasher.zig");
 const digest = @import("digest.zig");
@@ -86,7 +87,8 @@ test "blake3 long messages split into parts" {
         try testing.expect(Blake3.hash(&.{message}).eql(expected));
         const parts = [_][]const u8{ message[0..a], message[a..b], message[b..] };
         try testing.expect(Blake3.hash(&parts).eql(expected));
-        try testing.expect(Blake3.hash_across(&.{ "", message, "" }, {}).eql(expected));
+        const across = Blake3.hash_across(&.{ "", message, "" }, parallel.sequential);
+        try testing.expect(across.eql(expected));
     }
 }
 

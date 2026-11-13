@@ -51,7 +51,7 @@ handshake), then certificate, secp256r1, the rest, zk and banderwagon last.
   lenient point decoding, canonical `s`, cofactored check. Small-order keys go through an
   own variable-time multiscalar loop because std's `mul*Public` rejects them.
 - ed25519 batch verification derives its coefficients from a transcript as commonware
-  does, always as one shard (batch index 0) on the calling thread.
+  does (see the strategy entry below).
 - `verify_batch(rng, items, projector, strategy)`: `projector.project(index, *const Item)`
   returns a `BatchEntry`; `cryptography.entries` projects a slice of entries.
 - Conformance hashes that run signature schemes thousands of times skip in Debug unless
@@ -71,3 +71,12 @@ handshake), then certificate, secp256r1, the rest, zk and banderwagon last.
   `sign_raw`/`verify_raw` without namespace framing, as for ed25519.
 - certificate.rs waits for `utils.BitMap` (the `Signers` encoding) and `utils.ordered.Set`;
   secp256r1 came first because it needs neither.
+- Hashers and ed25519 batch verification take `parallel` strategies (`assert_strategy`);
+  `hash_many` is commonware's one-lane `hash_batches` over
+  `run_batches`; ed25519 `verify_batch` shards like commonware (one seed per call, one
+  equation per batch, coefficients committed to the batch ordinal) but splits by index range
+  without the first-key-byte counting sort, which only helps an implementation that coalesces
+  repeated keys. `hash_across`/`hash_pair` stay on the calling thread: Blake3's parallel
+  subtree hashing needs chaining values that `std.crypto.hash.Blake3` does not expose.
+- `{}` passed as a strategy still means `parallel.sequential` (`hasher.resolve_strategy`), so
+  other lanes' placeholder calls keep compiling until they switch.

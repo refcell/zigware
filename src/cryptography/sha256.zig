@@ -4,6 +4,7 @@
 //! has them. Digests encode as their 32 raw bytes.
 
 const std = @import("std");
+const parallel = @import("parallel");
 const codec = @import("codec");
 const assert = std.debug.assert;
 const hasher = @import("hasher.zig");
@@ -119,7 +120,7 @@ test "sha256 hash_many matches individual hashes" {
             messages[lane] = storage[lane][0..length];
         }
         for ([_]usize{ 0, 1, 2, 6, 7, 15, 16, 17, 31, 32, 33 }) |count| {
-            Sha256.hash_many(messages[0..count], digests[0..count], {});
+            Sha256.hash_many(messages[0..count], digests[0..count], parallel.sequential);
             for (messages[0..count], digests[0..count]) |message, d| {
                 try testing.expect(d.eql(Sha256.hash(&.{message})));
             }

@@ -8,6 +8,7 @@
 //! byte string and yields zeroes once the bytes run out, so every input decodes to some plan.
 
 const std = @import("std");
+const parallel = @import("parallel");
 const assert = std.debug.assert;
 const build_options = @import("build_options");
 
@@ -137,9 +138,9 @@ pub fn run_plan(comptime H: type, left: []const []const u8, right: []const []con
 
     try expect_digest(H, expected_left, H.hash(left));
     try expect_digest(H, expected_right, H.hash(right));
-    try expect_digest(H, expected_left, H.hash_across(left, {}));
-    try expect_digest(H, expected_right, H.hash_across(right, {}));
-    const pair = H.hash_pair(left, right, {});
+    try expect_digest(H, expected_left, H.hash_across(left, parallel.sequential));
+    try expect_digest(H, expected_right, H.hash_across(right, parallel.sequential));
+    const pair = H.hash_pair(left, right, parallel.sequential);
     try expect_digest(H, expected_left, pair[0]);
     try expect_digest(H, expected_right, pair[1]);
 }
@@ -183,8 +184,12 @@ pub fn fuzz_hasher(comptime H: type, seed: u64) !void {
     }
 }
 
-/// Checks `H.hash_many` on `count` arbitrary messages against hashing each alone.
+/// Checks `H.hash_many` on `count` arbitrary messages against hashing each alone, on the
+/// sequential strategy and on a thread pool.
 pub fn fuzz_hash_many(comptime H: type, seed: u64) !void {
+    const gpa = std.testing.allocator;
+    const pool = try parallel.ThreadPool.create(gpa, std.testing.io, .{ .threads = 3 });
+    defer pool.destroy();
     var random = prng(seed);
     var storage: [batch_count_max][256]u8 = undefined;
     var messages: [batch_count_max][]const u8 = undefined;
@@ -199,7 +204,12 @@ pub fn fuzz_hash_many(comptime H: type, seed: u64) !void {
             if (length > 0) storage[lane][0] = @truncate(lane);
             messages[lane] = storage[lane][0..length];
         }
-        H.hash_many(messages[0..count], digests[0..count], {});
+        H.hash_many(messages[0..count], digests[0..count], parallel.sequential);
+        for (messages[0..count], digests[0..count]) |message, digest| {
+            try expect_digest(H, H.hash(&.{message}), digest);
+        }
+        @memset(digests[0..count], H.Digest.empty);
+        H.hash_many(messages[0..count], digests[0..count], parallel.Rayon.init(pool));
         for (messages[0..count], digests[0..count]) |message, digest| {
             try expect_digest(H, H.hash(&.{message}), digest);
         }

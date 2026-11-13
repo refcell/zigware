@@ -8,11 +8,24 @@
 //! - `H.hash(parts) Digest`, the one-shot hash of the concatenation of `parts`;
 //! - `H.hash_across(parts, strategy)`, `H.hash_pair(left, right, strategy)`, and
 //!   `H.hash_many(messages, digests, strategy)`, which must equal hashing each message with
-//!   `hash`. `strategy` is a `parallel` strategy; until that package lands the work runs on
-//!   the calling thread and any value (such as `{}`) is accepted.
+//!   `hash`. `strategy` is a `parallel` strategy (`parallel.sequential` or a `Rayon`); `{}`
+//!   still means `parallel.sequential` for callers written before `parallel` landed.
 
 const std = @import("std");
 const assert = std.debug.assert;
+const parallel = @import("parallel");
+
+/// The strategy type `resolve_strategy` returns for a `strategy` argument of type `S`.
+pub fn Strategy(comptime S: type) type {
+    return if (S == void) parallel.Sequential else S;
+}
+
+/// `strategy`, or `parallel.sequential` for the `{}` placeholder.
+pub fn resolve_strategy(strategy: anytype) Strategy(@TypeOf(strategy)) {
+    if (@TypeOf(strategy) == void) return parallel.sequential;
+    comptime parallel.assert_strategy(@TypeOf(strategy));
+    return strategy;
+}
 
 /// Asserts at compile time that `H` implements the hasher interface.
 pub fn assert_hasher(comptime H: type) void {
@@ -60,8 +73,9 @@ pub fn Streaming(comptime Core: type, comptime DigestType: type) type {
             return self.finalize();
         }
 
+        /// `hash(parts)`: these hashes do not split one message across threads.
         pub fn hash_across(parts: []const []const u8, strategy: anytype) Digest {
-            _ = strategy;
+            _ = resolve_strategy(strategy);
             return hash(parts);
         }
 
@@ -70,14 +84,13 @@ pub fn Streaming(comptime Core: type, comptime DigestType: type) type {
             right: []const []const u8,
             strategy: anytype,
         ) [2]Digest {
-            _ = strategy;
+            _ = resolve_strategy(strategy);
             return .{ hash(left), hash(right) };
         }
 
         /// Hashes each message alone into `digests`, which must be as long as `messages`.
         pub fn hash_many(messages: []const []const u8, digests: []Digest, strategy: anytype) void {
-            _ = strategy;
-            hash_each(Self, messages, digests);
+            hash_batches(Self, messages, digests, strategy);
         }
     };
 }
@@ -86,4 +99,39 @@ pub fn Streaming(comptime Core: type, comptime DigestType: type) type {
 pub fn hash_each(comptime H: type, messages: []const []const u8, digests: []H.Digest) void {
     assert(messages.len == digests.len);
     for (messages, digests) |message, *digest| digest.* = H.hash(&.{message});
+}
+
+/// commonware `hash_batches` with one lane: hashes `messages` into `digests` in
+/// strategy-supplied batches, estimating the work per message as its average length.
+pub fn hash_batches(
+    comptime H: type,
+    messages: []const []const u8,
+    digests: []H.Digest,
+    strategy: anytype,
+) void {
+    const resolved = resolve_strategy(strategy);
+    assert(messages.len == digests.len);
+    if (messages.len == 0) return;
+    var bytes: usize = 0;
+    for (messages) |message| bytes +|= message.len;
+    const Batch = struct {
+        messages: []const []const u8,
+        digests: []H.Digest,
+
+        pub fn run(batch: @This(), batches: anytype) void {
+            // A serial run hashes the whole input as one batch.
+            if (batches.is_whole()) return hash_each(H, batch.messages, batch.digests);
+            var done: [parallel.max_chunks]void = undefined;
+            batches.map_collect(done[0..batches.count()], batch);
+        }
+
+        pub fn map(batch: @This(), _: usize, range: parallel.Range) void {
+            const messages_range = batch.messages[range.start..range.end];
+            hash_each(H, messages_range, batch.digests[range.start..range.end]);
+        }
+    };
+    const batch: Batch = .{ .messages = messages, .digests = digests };
+    // `messages` is not empty, so the division is defined.
+    const bytes_per_message = std.math.divCeil(usize, bytes, messages.len) catch unreachable;
+    resolved.run_batches(messages.len, 1, bytes_per_message, batch);
 }

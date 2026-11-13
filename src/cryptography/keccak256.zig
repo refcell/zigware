@@ -4,6 +4,7 @@
 //! `std.crypto.hash.sha3.Keccak256`.
 
 const std = @import("std");
+const parallel = @import("parallel");
 const codec = @import("codec");
 const assert = std.debug.assert;
 const hasher = @import("hasher.zig");
@@ -40,7 +41,7 @@ test "keccak256 known answers and reset" {
     try testing.expect(Keccak256.hash(&.{}).eql(empty_digest));
     try testing.expect(Keccak256.hash(&.{"abc"}).eql(abc_digest));
     try testing.expect(Keccak256.hash(&.{ "a", "", "bc" }).eql(abc_digest));
-    const pair = Keccak256.hash_pair(&.{}, &.{ "a", "bc" }, {});
+    const pair = Keccak256.hash_pair(&.{}, &.{ "a", "bc" }, parallel.sequential);
     try testing.expect(pair[0].eql(empty_digest));
     try testing.expect(pair[1].eql(abc_digest));
 
