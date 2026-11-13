@@ -12,6 +12,13 @@ pub const Height = types.Height;
 pub const View = types.View;
 pub const Round = types.Round;
 
+pub const traits = @import("traits.zig");
+pub const Handoff = traits.Handoff;
+pub const Feedback = traits.Feedback;
+pub const round = traits.round;
+pub const reporter = @import("reporter.zig");
+pub const Reporters = reporter.Reporters;
+
 test {
     std.testing.refAllDecls(@This());
 }

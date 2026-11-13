@@ -18,6 +18,11 @@ resolver; those lanes are running, so do the types first and the actors as they 
   `term_index`, `covers`, `covering_range`, `admits`), `Round` (packed, `==` works; `new`,
   `order`, codec epoch then view), `EpochInfo`, `EpochPhase`, `FixedEpocher`,
   `assert_epocher`, `Participant` (re-export of `utils.Participant`).
+- `consensus.traits` (lib.rs as comptime interfaces): `assert_epochable`/`viewable`/
+  `heightable`, `round(x)`, `assert_block`, `assert_certifiable_block`, `assert_automaton`,
+  `assert_certifiable_automaton` with default-supplying `prepare`/`certify`, `Handoff(D)`,
+  `assert_relay`, `assert_reporter`, `assert_monitor`; see the top of `traits.zig`.
+- `consensus.reporter`: `Optional(R)`, `Reporters(R1, R2)`, `combine`.
 
 ## Decisions
 - `Epoch`/`Height`/`View`/deltas are non-exhaustive `enum(u64)` so they compare with `==`,
@@ -26,15 +31,18 @@ resolver; those lanes are running, so do the types first and the actors as they 
 - `covering_range` returns the inclusive pair `{ start, end }` instead of `RangeInclusive`.
 - `coding::Commitment` (and its `TestCommitment` conformance hash) waits for the coding
   lane's `Config`.
+- Automaton/CertifiableAutomaton methods block on `std.Io` (`propose(io, ctx) !?Digest`)
+  instead of returning oneshot receivers; null is a closed channel. Callers run them with
+  `io.async` to wait on several at once.
 - consensus also imports `conformance` and `invariants` (test-only, like commonware's
   dev-dependencies).
 
 ## Backlog
 - [x] types.rs: Epoch, Height, View, deltas, ranges, TermLength, Round, FixedEpocher, with
   every test and the Epoch/Height/View/Round conformance hashes. (Commitment: see Decisions.)
-- [ ] consensus lib.rs traits (`Automaton`, `Relay`, `Reporter`, `Supervisor`, `Monitor`,
-  `Epochable`, `Viewable`, ...) as comptime interfaces; types.rs (Epoch, View, Round, Height,
-  their deltas and codecs) with its conformance hashes; reporter.rs.
+- [x] consensus lib.rs traits (`Automaton`, `CertifiableAutomaton`, `Handoff`, `Relay`,
+  `Reporter`, `Monitor`, `Epochable`, `Viewable`, `Block`, ...) as comptime interfaces;
+  reporter.rs.
 - [ ] simplex types.rs: Proposal, Notarize, Nullify, Finalize, their certificates, Voter and
   Backfiller messages, Activity, and the attributable faults; codec byte-identical and every
   simplex conformance hash matching.
@@ -49,3 +57,4 @@ resolver; those lanes are running, so do the types first and the actors as they 
 ## Log
 - 2026-11-13: types.rs (Epoch/Height/View/Round, term math, FixedEpocher); 4 conformance
   hashes match.
+- 2026-11-13: lib.rs traits as comptime interfaces (`traits.zig`) and reporter.rs.
