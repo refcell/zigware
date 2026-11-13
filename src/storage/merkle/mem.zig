@@ -123,6 +123,89 @@ pub fn Mem(comptime F: type, comptime Digest: type) type {
             assert(self.leaves() == location + 1);
         }
 
+        /// Replaces the element of the leaf at `location` (see `update_leaf_digest`).
+        pub fn update_leaf(
+            self: *Self,
+            hasher: anytype,
+            location: u64,
+            element: []const u8,
+        ) merkle.Error!void {
+            if (location >= self.leaves()) return error.LeafOutOfBounds;
+            const position = F.location_to_position(location);
+            try self.update_leaf_digest(hasher, location, hasher.leaf_digest(position, element));
+        }
+
+        /// Replaces the digest of the leaf at `location` and recomputes its ancestors up to
+        /// their peak (commonware's batch `update_leaf_digest`). Fails, changing nothing, when
+        /// the leaf or a node its ancestors hash is pruned.
+        pub fn update_leaf_digest(
+            self: *Self,
+            hasher: anytype,
+            location: u64,
+            leaf: Digest,
+        ) merkle.Error!void {
+            if (location >= self.leaves()) return error.LeafOutOfBounds;
+            const leaf_position = F.location_to_position(location);
+            if (leaf_position < self.pruned_size) return error.ElementPruned;
+            const path = self.leaf_path(location);
+            assert(path.leaf == leaf_position);
+            // Check every sibling first so a failure leaves the structure untouched.
+            for (path.ancestors.slice()) |parent| {
+                const children = F.children(parent.position, parent.height);
+                assert(parent.position >= self.pruned_size); // Parents follow their leaves.
+                if (self.get_node(children.left) == null) return error.ElementPruned;
+                if (self.get_node(children.right) == null) return error.ElementPruned;
+            }
+            self.nodes.items[@intCast(leaf_position - self.pruned_size)] = leaf;
+            var index = path.ancestors.len;
+            while (index > 0) {
+                index -= 1;
+                const parent = path.ancestors.buffer[index];
+                const children = F.children(parent.position, parent.height);
+                const left = self.node(children.left);
+                const right = self.node(children.right);
+                const digest = hasher.node_digest(parent.position, &left, &right);
+                self.nodes.items[@intCast(parent.position - self.pruned_size)] = digest;
+            }
+        }
+
+        const LeafPath = struct {
+            /// The ancestors of the leaf, its peak first.
+            ancestors: merkle.BoundedList(merkle.Peak, merkle.max_pinned_nodes) = .{},
+            leaf: u64,
+        };
+
+        /// The ancestors of leaf `location`, found by descending from the peak covering it.
+        fn leaf_path(self: *const Self, location: u64) LeafPath {
+            assert(location < self.leaves());
+            var first_leaf: u64 = 0;
+            var current: merkle.Peak = undefined;
+            var iterator = F.peaks(self.size());
+            while (iterator.next()) |peak| {
+                const peak_leaves = @as(u64, 1) << @intCast(peak.height);
+                if (location < first_leaf + peak_leaves) {
+                    current = peak;
+                    break;
+                }
+                first_leaf += peak_leaves;
+            } else unreachable; // The peaks cover every leaf below `leaves()`.
+            var path: LeafPath = .{ .leaf = undefined };
+            while (current.height > 0) {
+                path.ancestors.append(current);
+                const children = F.children(current.position, current.height);
+                const half = @as(u64, 1) << @intCast(current.height - 1);
+                const left = location < first_leaf + half;
+                if (!left) first_leaf += half;
+                current = .{
+                    .position = if (left) children.left else children.right,
+                    .height = current.height - 1,
+                };
+            }
+            assert(first_leaf == location);
+            path.leaf = current.position;
+            return path;
+        }
+
         /// Writes the peak digests, oldest first, into `out` and returns them.
         pub fn peaks(self: *const Self, out: *[merkle.max_pinned_nodes]Digest) []Digest {
             var count: usize = 0;

@@ -233,6 +233,104 @@ test "split root matches recompute" {
     }
 }
 
+fn expect_verifies(
+    comptime F: type,
+    mem: *const Mem(F),
+    hasher: *const H,
+    location: u64,
+    element: []const u8,
+) !bool {
+    var proof = try mem.proof(gpa, hasher, location, 0);
+    defer proof.deinit(gpa);
+    const root = try mem.root(hasher, 0);
+    return proof.verify_element_inclusion(hasher, location, element, &root);
+}
+
+test "update leaf" {
+    inline for (families) |F| {
+        const hasher = H.init(.forward_fold);
+        var mem = try build_raw(F, &hasher, 11);
+        defer mem.deinit(gpa);
+        const root_before = try mem.root(&hasher, 0);
+        try mem.update_leaf(&hasher, 5, "updated-5");
+        try testing.expect(!root_before.eql(try mem.root(&hasher, 0)));
+        try testing.expectEqual(@as(u64, 11), mem.leaves());
+        try testing.expect(try expect_verifies(F, &mem, &hasher, 5, "updated-5"));
+        try testing.expect(!try expect_verifies(F, &mem, &hasher, 5, &be(5)));
+        for ([_]u64{ 0, 3, 7, 10 }) |i| {
+            try testing.expect(try expect_verifies(F, &mem, &hasher, i, &be(i)));
+        }
+    }
+}
+
+test "update leaf every position" {
+    inline for (families) |F| {
+        const hasher = H.init(.forward_fold);
+        var mem = try build(F, &hasher, 20);
+        defer mem.deinit(gpa);
+        for (0..20) |location| {
+            try mem.update_leaf(&hasher, location, "new-value");
+            try testing.expect(try expect_verifies(F, &mem, &hasher, location, "new-value"));
+        }
+    }
+}
+
+test "update leaf errors" {
+    inline for (families) |F| {
+        const hasher = H.init(.forward_fold);
+        var mem = try build(F, &hasher, 10);
+        defer mem.deinit(gpa);
+        try testing.expectError(error.LeafOutOfBounds, mem.update_leaf(&hasher, 10, "x"));
+        try mem.prune(5);
+        const root = try mem.root(&hasher, 0);
+        try testing.expectError(error.ElementPruned, mem.update_leaf(&hasher, 3, "x"));
+        try testing.expect(root.eql(try mem.root(&hasher, 0)));
+        try mem.update_leaf(&hasher, 5, "x");
+    }
+}
+
+test "update leaf with append and under merge parent" {
+    inline for (families) |F| {
+        const hasher = H.init(.forward_fold);
+        var mem = try build(F, &hasher, 8);
+        defer mem.deinit(gpa);
+        try mem.update_leaf(&hasher, 3, "updated-3");
+        try mem.add(gpa, &hasher, &be(100));
+        try mem.add(gpa, &hasher, &be(101));
+        try testing.expectEqual(@as(u64, 10), mem.leaves());
+        try testing.expect(try expect_verifies(F, &mem, &hasher, 3, "updated-3"));
+        try testing.expect(try expect_verifies(F, &mem, &hasher, 8, &be(100)));
+        // Updating before or after the append that merges the leaf's parent agrees.
+        var before = try build(F, &hasher, 2);
+        defer before.deinit(gpa);
+        try before.update_leaf(&hasher, 0, "updated-0");
+        try before.add(gpa, &hasher, &be(2));
+        var after = try build(F, &hasher, 2);
+        defer after.deinit(gpa);
+        try after.add(gpa, &hasher, &be(2));
+        try after.update_leaf(&hasher, 0, "updated-0");
+        try testing.expect((try before.root(&hasher, 0)).eql(try after.root(&hasher, 0)));
+        try testing.expect(try expect_verifies(F, &after, &hasher, 0, "updated-0"));
+    }
+}
+
+test "update leaf after prune" {
+    inline for (families) |F| {
+        const hasher = H.init(.forward_fold);
+        for (1..21) |n| {
+            for (1..n) |prune_to| {
+                for (prune_to..n) |location| {
+                    var mem = try build_raw(F, &hasher, n);
+                    defer mem.deinit(gpa);
+                    try mem.prune(prune_to);
+                    try mem.update_leaf(&hasher, location, "new");
+                    try testing.expect(try expect_verifies(F, &mem, &hasher, location, "new"));
+                }
+            }
+        }
+    }
+}
+
 const Mmb = Mem(merkle.mmb.Family);
 
 test "mmb append and size" {

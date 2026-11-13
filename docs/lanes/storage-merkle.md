@@ -16,7 +16,7 @@ variants need `runtime` storage; do them after its interface lands.
   conformance lane's `arbitrary` emulation.)
 - [x] merkle/mmb and shared merkle proof types.
 - bmt moved to the coding lane (it needs it first).
-- [ ] bitmap (authenticated bitmap over MMR).
+- [x] bitmap (authenticated bitmap over MMR).
 - [ ] index (ordered/unordered, partitioned) over translators.
 - [ ] merkle/persisted (journaled MMR) once runtime storage lands.
 - [ ] Fuzz targets (storage/fuzz entries for these modules).
@@ -52,3 +52,13 @@ variants need `runtime` storage; do them after its interface lands.
   proof and Mem test runs under both families. MMB root conformance hash
   (`MmbRootStability`, 200 cases) matches commonware; a domain-tag mutation fails it.
   `Mem.init(gpa, nodes, boundary, pinned)` ports `Mem::init(Config)`.
+- merkle/mem: `update_leaf`/`update_leaf_digest` port the batch leaf update (one leaf at a
+  time, ancestors recomputed in place); the mem.rs update tests run under both families.
+- bitmap: `storage.bitmap.BitMap(Storage, Digest, N)` (`storage.AuthenticatedBitMap`). The
+  Merkleized/Unmerkleized typestate is one type with an asserted `merkleized` flag
+  (`into_dirty`, mutate, `merkleize`). Pruning state persists through `storage.metadata` with
+  commonware's keys (`PrefixedU64` prefix 0 = pinned nodes, prefix 1 = pruned chunk count).
+  The `bitmap_operations` fuzz uses 1-byte chunks and weighted appends, and checks every root
+  against a from-scratch rebuild; skipping dirty-chunk rehashing fails it at iteration 3.
+  Commonware's `should_panic` tests (bad pushes, pruned/out-of-bounds reads) are panics in
+  `utils.bitmap.Prunable` and are not ported as tests.
