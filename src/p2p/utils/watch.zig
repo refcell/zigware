@@ -19,6 +19,8 @@ pub fn Watch(comptime T: type) type {
         gpa: Allocator,
         io: Io,
         mutex: Io.Mutex = .init,
+        /// Broadcast on every publish and on close, for `Subscription.recv`.
+        condition: Io.Condition = .init,
         /// Bumped on every publish; zero means nothing was published yet.
         version: u64 = 0,
         value: []T = &.{},
@@ -46,6 +48,7 @@ pub fn Watch(comptime T: type) type {
             watch.value = copy;
             watch.version += 1;
             assert(watch.version > 0);
+            watch.condition.broadcast(watch.io);
             return true;
         }
 
@@ -54,6 +57,7 @@ pub fn Watch(comptime T: type) type {
             watch.mutex.lockUncancelable(watch.io);
             defer watch.mutex.unlock(watch.io);
             watch.closed = true;
+            watch.condition.broadcast(watch.io);
         }
 
         /// A subscription that receives values published from now on (and the current one, if
@@ -76,6 +80,26 @@ pub fn Watch(comptime T: type) type {
                 defer watch.mutex.unlock(watch.io);
                 assert(subscription.seen <= watch.version);
                 if (subscription.seen == watch.version) return null;
+                const copy = try gpa.dupe(T, watch.value);
+                subscription.seen = watch.version;
+                return copy;
+            }
+
+            /// Waits for the newest unseen value (a copy owned by the caller, allocated from
+            /// `gpa`); null once the watch is closed with nothing new (commonware's awaited
+            /// `ring::Receiver::recv`).
+            pub fn recv(
+                subscription: *Subscription,
+                gpa: Allocator,
+            ) (Allocator.Error || Io.Cancelable)!?[]T {
+                const watch = subscription.watch;
+                try watch.mutex.lock(watch.io);
+                defer watch.mutex.unlock(watch.io);
+                while (subscription.seen == watch.version) {
+                    if (watch.closed) return null;
+                    try watch.condition.wait(watch.io, &watch.mutex);
+                }
+                assert(subscription.seen < watch.version);
                 const copy = try gpa.dupe(T, watch.value);
                 subscription.seen = watch.version;
                 return copy;
@@ -108,4 +132,22 @@ test "watch delivers only the latest unseen value" {
     watch.close();
     try testing.expect(!try watch.publish(&.{4}));
     try testing.expect(try early.try_recv(testing.allocator) == null);
+}
+
+test "watch recv waits for a publish and ends on close" {
+    var watch = Watch(u32).init(testing.allocator, testing.io);
+    defer watch.deinit();
+    var subscription = watch.subscribe(false);
+    const Publisher = struct {
+        fn run(target: *Watch(u32)) void {
+            _ = target.publish(&.{7}) catch unreachable; // Proof: the test allocator has room.
+        }
+    };
+    var future = try testing.io.concurrent(Publisher.run, .{&watch});
+    const value = (try subscription.recv(testing.allocator)).?;
+    defer testing.allocator.free(value);
+    future.await(testing.io);
+    try testing.expectEqualSlices(u32, &.{7}, value);
+    watch.close();
+    try testing.expect(try subscription.recv(testing.allocator) == null);
 }
