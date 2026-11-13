@@ -58,7 +58,6 @@ fn expect_canonical(comptime T: type, input: []const u8) !void {
 fn decode_canonical(_: void, smith: *Smith) anyerror!void {
     var data: [512]u8 = undefined;
     const input = data[0..smith.slice(&data)];
-    try expect_canonical(types.Hostname, input);
     try expect_canonical(types.Ingress, input);
     try expect_canonical(types.Address, input);
 }

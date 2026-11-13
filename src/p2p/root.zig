@@ -28,7 +28,6 @@ const actor = @import("actor");
 pub const types = @import("types.zig");
 pub const Address = types.Address;
 pub const Ingress = types.Ingress;
-pub const Hostname = types.Hostname;
 pub const sizing = @import("sizing.zig");
 pub const max_message_size = sizing.max_message_size;
 pub const fuzz = @import("fuzz.zig");
