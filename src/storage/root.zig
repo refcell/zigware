@@ -10,6 +10,8 @@ const std = @import("std");
 pub const translator = @import("translator.zig");
 pub const rmap = @import("rmap/mod.zig");
 pub const RMap = rmap.RMap;
+pub const merkle = @import("merkle/mod.zig");
+pub const mmr = merkle.mmr;
 
 test {
     std.testing.refAllDecls(@This());
