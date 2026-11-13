@@ -7,6 +7,7 @@ pub const types = @import("types.zig");
 pub const attestation = @import("attestation.zig");
 pub const Attestation = attestation.Attestation;
 pub const Deferred = attestation.Deferred;
+pub const elector = @import("elector.zig");
 
 pub const scheme = struct {
     pub const bls12381_threshold = struct {
@@ -18,5 +19,6 @@ test {
     std.testing.refAllDecls(@This());
     _ = types;
     _ = attestation;
+    _ = elector;
     _ = scheme.bls12381_threshold.vrf;
 }

@@ -35,6 +35,11 @@ resolver; those lanes are running, so do the types first and the actors as they 
   unions (`epoch`, `view`, `eql`, codec), `Certification`, `AttributableMap(T)`.
 - `consensus.simplex.Attestation(S)` and `Deferred(T)` (a fixed-size value kept as its
   bytes and decoded on demand, commonware's `Lazy`).
+- `consensus.simplex.elector`: `Terms` (`rotating`, `stable`), `RoundRobin(H)` (`default`,
+  `shuffled(seed)`, `with_term`, `build(gpa, n)`), `RoundRobinElector` (`elect(round, {})`,
+  `terms`, `deinit`), `Random(H)` (`init(.v0/.v1)`, `select_leader`, `build(V, n)`),
+  `RandomElector(H, V)` (`elect(round, ?*const vrf.Certificate(V))`), `assert_elector`
+  (`mode` `.scheduled`/`.dynamic`, `Input`).
 - `consensus.simplex.scheme.bls12381_threshold.vrf`: `Signature(V)`, `Certificate(V)`,
   `Seed(V)` wire types.
 
@@ -54,6 +59,11 @@ resolver; those lanes are running, so do the types first and the actors as they 
 - Fault evidence fields are `first`/`second` (commonware `notarize_1`/`notarize_2`).
 - Conformance hashes that need BLS or ed25519 key generation skip in Debug without
   `-Dslow-tests`, like the crypto lane; ReleaseSafe CI runs them.
+- Elector `build` takes the participant count, not the set (commonware reads only its
+  length). `mode`/`Input` replace the sealed `Mode` trait.
+- Random V0/V1 conformance hashes and the threshold-certificate elector tests wait for the
+  bls-math lane's threshold signatures; `select_leader` is checked against independently
+  computed values instead.
 - consensus also imports `conformance` and `invariants` (test-only, like commonware's
   dev-dependencies).
 
@@ -69,6 +79,8 @@ resolver; those lanes are running, so do the types first and the actors as they 
   with the schemes.)
 - [x] types.rs `coding::Commitment` (`types.coding.Commitment(BlockDigest, Root, Context)`)
   with its tests and the `TestCommitment` conformance hash.
+- [x] elector.rs: RoundRobin (shuffled, stable terms) and Random (V0/V1) with their tests;
+  RoundRobinShuffleConformance matches. (Random V0/V1 hashes: after threshold signing.)
 - [ ] simplex scheme: ed25519 now; bls12381_multisig and bls12381_threshold as the bls-math
   lane lands them; secp256r1 when crypto lands it. elector.rs (leader election).
 - [ ] simplex config, limits, metrics, and the actors (voter, batcher, resolver) and engine,
@@ -84,3 +96,4 @@ resolver; those lanes are running, so do the types first and the actors as they 
 - 2026-11-13: simplex wire types, attestation stand-in, VRF Signature/Certificate/Seed; 18
   conformance hashes match.
 - 2026-11-13: types.rs `coding::Commitment`; TestCommitment conformance hash matches.
+- 2026-11-13: elector.rs (RoundRobin, Random); RoundRobinShuffleConformance matches.
