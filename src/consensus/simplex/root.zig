@@ -10,6 +10,10 @@ pub const elector = @import("elector.zig");
 pub const limits = @import("limits.zig");
 pub const config = @import("config.zig");
 pub const metrics = @import("metrics.zig");
+pub const lookahead = @import("lookahead.zig");
+pub const Lookahead = lookahead.Lookahead;
+pub const Viewport = lookahead.Viewport;
+pub const Plan = lookahead.Plan;
 
 pub const scheme = struct {
     pub const namespace = @import("scheme/namespace.zig");
@@ -19,6 +23,7 @@ pub const scheme = struct {
     pub const secp256r1 = @import("scheme/secp256r1.zig");
     pub const bls12381_threshold = struct {
         pub const vrf = @import("scheme/bls12381_threshold/vrf.zig");
+        pub const standard = @import("scheme/bls12381_threshold/standard.zig");
     };
 };
 
@@ -29,7 +34,9 @@ test {
     _ = limits;
     _ = config;
     _ = metrics;
+    _ = lookahead;
     _ = scheme.bls12381_threshold.vrf;
+    _ = scheme.bls12381_threshold.standard;
     _ = scheme.namespace;
     _ = scheme.ed25519;
     _ = scheme.bls12381_multisig;
