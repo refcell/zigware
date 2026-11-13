@@ -24,6 +24,7 @@ Every value goes through comptime dispatch on its type (`src/codec/codec.zig` ha
 | --- | --- | --- |
 | `bool` | `bool` | 1 byte, 0/1 (else `InvalidBool`) |
 | `u8`..`u128`, `i8`..`i128` | same | fixed big-endian |
+| any unsigned `uN` (`u36`, `u256`, ...) | `Uint<BITS, LIMBS>`, `U256` | big-endian in ceil(N/8) bytes; bits beyond N are `Invalid` |
 | `f32`, `f64` | same | IEEE bits big-endian |
 | `usize` | `usize` | `UInt<u32>` varint; cfg `RangeCfg(usize)` |
 | `[N]T` | `[T; N]` | elements, no prefix |
@@ -38,6 +39,7 @@ Every value goes through comptime dispatch on its type (`src/codec/codec.zig` ha
 | `codec.Set(K)`, `codec.HashSet(K)` | `BTreeSet`, `HashSet` | usize count + items strictly ascending |
 | `codec.Ipv4`, `Ipv6`, `SocketAddrV4`, `SocketAddrV6` | std::net types | octets (+ u16 port) |
 | `codec.IpAddr` (union v4/v6), `codec.SocketAddr` | `IpAddr`, `SocketAddr` | version byte 4/6 + addr (+ port) |
+| `codec.Lazy(T)` | `Lazy<T>` | `T`'s bytes; read defers fixed-size `T`, `get(gpa)` decodes once |
 | `codec.Modes(N)` from `[N]u7` (`codec.mode(u8) ?u7`) | `Modes<N>`, `Mode` | continuation-bit packet |
 
 Operations (`T` is always the first, comptime argument):
@@ -122,8 +124,7 @@ Decoded maps/sets own their slice: free with `codec.free(M, gpa, m)` or `m.deini
   decode-canonical target (any successful decode re-encodes to the exact input).
 - [x] codec types: maps/sets (sorted, canonical, reject duplicates/unsorted), with tests.
 - [x] codec types: net addrs, mode (`Mode`/`Modes`), with tests and fuzz.
-- [ ] codec types: lazy, `U256`/uint.rs (Zig `u256` already works with `UInt`; port the
-  fixed-width `Uint` codec and its tests).
+- [x] codec types: lazy, uint.rs (any-width unsigned `uN`, incl. `u256`), with tests.
 - [ ] conformance: hash-of-encodings harness (conformance/src/lib.rs), TOML reader, codec's
   conformance.rs (ChaCha8 + `arbitrary` emulation) so codec/conformance.toml hashes match.
 - [ ] invariants: minifuzz (deterministic seeded fuzz driver over `std.testing.Smith`;
@@ -136,3 +137,4 @@ Decoded maps/sets own their slice: free with `codec.free(M, gpa, m)` or `m.deini
 - 2026-11-13: remaining varint tests; codec seeded fuzz driver and roundtrip/canonical targets.
 - 2026-11-13: canonical Map/HashMap/Set/HashSet and `codec.order`, with tests and fuzz.
 - 2026-11-13: net addresses (Ipv4/Ipv6/SocketAddr*/IpAddr) and Modes, with tests and fuzz.
+- 2026-11-13: any-width unsigned integers (Uint/U256) and Lazy, with tests and fuzz.

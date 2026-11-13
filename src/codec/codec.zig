@@ -49,9 +49,12 @@ fn kind(comptime T: type) Kind {
     if (T == usize) return .usize;
     return switch (@typeInfo(T)) {
         .bool => .bool,
-        .int => |info| if (info.bits % 8 == 0) .int else @compileError(
-            "codec: integer width must be a whole number of bytes: " ++ @typeName(T),
-        ),
+        // Unsigned integers of any width are commonware's `Uint<BITS, LIMBS>`; signed widths
+        // must be whole bytes.
+        .int => |info| if (info.bits % 8 == 0 or info.signedness == .unsigned)
+            .int
+        else
+            @compileError("codec: signed integer width must be whole bytes: " ++ @typeName(T)),
         .float => if (T == f32 or T == f64) .float else @compileError(
             "codec: only f32 and f64 are supported: " ++ @typeName(T),
         ),
@@ -128,7 +131,8 @@ pub fn unit_cfg(comptime C: type) C {
 pub fn fixed_size(comptime T: type) ?usize {
     return switch (comptime kind(T)) {
         .bool => 1,
-        .int, .float => @bitSizeOf(T) / 8,
+        .int => int_bytes(T),
+        .float => @bitSizeOf(T) / 8,
         .tag => @bitSizeOf(@typeInfo(T).@"enum".tag_type) / 8,
         .usize, .optional, .slice => null,
         .array => if (fixed_size(@typeInfo(T).array.child)) |size|
@@ -228,7 +232,7 @@ pub fn encode_size_items(comptime T: type, items: []const T) usize {
 pub fn write(comptime T: type, value: T, writer: *Writer) void {
     switch (comptime kind(T)) {
         .bool => writer.write_byte(@intFromBool(value)),
-        .int => writer.write_int(T, value),
+        .int => writer.write_int(IntBytes(T), value),
         .float => writer.write_int(@Int(.unsigned, @bitSizeOf(T)), @bitCast(value)),
         .tag => writer.write_int(@typeInfo(T).@"enum".tag_type, @backingInt(value)),
         .usize => varint.write(u32, usize_to_u32(value), writer),
@@ -260,7 +264,7 @@ pub fn write_items(comptime T: type, items: []const T, writer: *Writer) void {
 pub fn read_cfg(comptime T: type, gpa: Allocator, reader: *Reader, cfg: Cfg(T)) Error!T {
     switch (comptime kind(T)) {
         .bool => return read_bool(reader),
-        .int => return reader.read_int(T),
+        .int => return read_int(T, reader),
         .float => return @bitCast(try reader.read_int(@Int(.unsigned, @bitSizeOf(T)))),
         .tag => return read_tag(T, reader),
         .usize => return read_usize(reader, cfg),
@@ -283,6 +287,23 @@ pub fn read_cfg(comptime T: type, gpa: Allocator, reader: *Reader, cfg: Cfg(T)) 
         .tuple => return read_tuple(T, gpa, reader, cfg),
         .custom => return T.read(gpa, reader, cfg),
     }
+}
+
+/// Bytes in the encoding of integer `T`: the fewest that hold its bits (`Uint::BYTES`).
+fn int_bytes(comptime T: type) usize {
+    return (@bitSizeOf(T) + 7) / 8;
+}
+
+/// The whole-byte integer `T` is written as.
+fn IntBytes(comptime T: type) type {
+    return @Int(@typeInfo(T).int.signedness, int_bytes(T) * 8);
+}
+
+fn read_int(comptime T: type, reader: *Reader) Error!T {
+    const wide = try reader.read_int(IntBytes(T));
+    // A width that ends inside a byte leaves bits no value sets; refuse them so every value
+    // has one encoding.
+    return std.math.cast(T, wide) orelse reader.invalid("Uint", "a bit is set beyond the width");
 }
 
 fn read_bool(reader: *Reader) Error!bool {

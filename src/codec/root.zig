@@ -52,6 +52,7 @@ pub const SocketAddrV6 = net.SocketAddrV6;
 const mode_mod = @import("mode.zig");
 pub const mode = mode_mod.mode;
 pub const Modes = mode_mod.Modes;
+pub const Lazy = @import("types/lazy.zig").Lazy;
 
 pub const Cfg = codec_mod.Cfg;
 pub const SliceCfg = codec_mod.SliceCfg;
@@ -95,6 +96,8 @@ test {
     _ = @import("types/tuple.zig");
     _ = @import("types/map_test.zig");
     _ = @import("types/net.zig");
+    _ = @import("types/uint.zig");
+    _ = @import("types/lazy.zig");
     _ = @import("mode.zig");
     _ = @import("codec_test.zig");
     _ = @import("fuzz_test.zig");

@@ -220,6 +220,9 @@ fn decode_canonical(_: void, smith: *Smith) anyerror!void {
     try expect_canonical(bool, input, {});
     try expect_canonical(u32, input, {});
     try expect_canonical(f64, input, {});
+    try expect_canonical(u36, input, {});
+    try expect_canonical(u72, input, {});
+    try expect_canonical(u256, input, {});
     try expect_canonical(usize, input, .full());
     try expect_canonical(?u16, input, {});
     try expect_canonical([3]u8, input, {});
