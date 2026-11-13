@@ -12,6 +12,7 @@ pub const storage = @import("storage.zig");
 pub const unordered = @import("unordered.zig");
 pub const ordered = @import("ordered.zig");
 pub const partitioned = @import("partitioned/mod.zig");
+pub const immutable = @import("immutable.zig");
 pub const Values = storage.Values;
 
 test {

@@ -17,8 +17,8 @@ variants need `runtime` storage; do them after its interface lands.
 - [x] merkle/mmb and shared merkle proof types.
 - bmt moved to the coding lane (it needs it first).
 - [x] bitmap (authenticated bitmap over MMR).
-- [ ] index (ordered/unordered, partitioned) over translators. Flat and partitioned done;
-  `immutable` and the partitioned `new_range`/`install_range` (qmdb-only) remain.
+- [x] index (ordered/unordered, partitioned, immutable) over translators. The partitioned
+  `new_range`/`install_range` (crate-private, for qmdb) come with qmdb.
 - [ ] merkle/persisted (journaled MMR) once runtime storage lands.
 - [ ] Fuzz targets (storage/fuzz entries for these modules).
 
@@ -79,3 +79,7 @@ variants need `runtime` storage; do them after its interface lands.
   cursor) in one treap instead of per-partition sorted arrays that spill to a `BTreeMap`. Same
   results and O(log n) operations, so the spill threshold and its tests do not apply. Every
   generic index test runs against all four indices.
+- index/immutable: same ring of translated keys by position and exact prefix retirement.
+  Commonware's position-only `utils::handles::Table` belongs to the utils lane; until it lands
+  the positions sit in a hash map from translated key to positions (same results). Seeded and
+  `std.testing.fuzz` targets check it against a model of live (position, key) pairs.
