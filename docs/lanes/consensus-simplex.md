@@ -23,6 +23,16 @@ resolver; those lanes are running, so do the types first and the actors as they 
   `assert_certifiable_automaton` with default-supplying `prepare`/`certify`, `Handoff(D)`,
   `assert_relay`, `assert_reporter`, `assert_monitor`; see the top of `traits.zig`.
 - `consensus.reporter`: `Optional(R)`, `Reporters(R1, R2)`, `combine`.
+- `consensus.simplex.types` (generic over a scheme `S` with `S.Signature`, `S.Certificate`,
+  `S.max_certificate_size`, and a digest `D`): `Proposal(D)`, `Context(D, P)`, `Subject(D)`
+  (`message` is the signed bytes), `Notarize`/`Nullify`/`Finalize` (proposal or round plus
+  `Attestation(S)`), `Notarization`/`Nullification`/`Finalization`, `ConflictingNotarize`,
+  `ConflictingFinalize`, `NullifyFinalize`, the `Vote`/`Certificate`/`Artifact`/`Activity`
+  unions (`epoch`, `view`, `eql`, codec), `Certification`, `AttributableMap(T)`.
+- `consensus.simplex.Attestation(S)` and `Deferred(T)` (a fixed-size value kept as its
+  bytes and decoded on demand, commonware's `Lazy`).
+- `consensus.simplex.scheme.bls12381_threshold.vrf`: `Signature(V)`, `Certificate(V)`,
+  `Seed(V)` wire types.
 
 ## Decisions
 - `Epoch`/`Height`/`View`/deltas are non-exhaustive `enum(u64)` so they compare with `==`,
@@ -34,6 +44,14 @@ resolver; those lanes are running, so do the types first and the actors as they 
 - Automaton/CertifiableAutomaton methods block on `std.Io` (`propose(io, ctx) !?Digest`)
   instead of returning oneshot receivers; null is a closed channel. Callers run them with
   `io.async` to wait on several at once.
+- `Attestation(S)` lives in `simplex/attestation.zig` until the crypto lane ports
+  `certificate.rs`; same wire format, then switch to `cryptography.certificate`.
+- Signatures in attestations and VRF certificates are `Deferred(T)`: the fixed bytes inline,
+  decoded on `get()` (no cache), instead of `Lazy`'s borrowed view, so a decoded vote never
+  points into a network buffer. Equality is byte equality.
+- Fault evidence fields are `first`/`second` (commonware `notarize_1`/`notarize_2`).
+- Conformance hashes that need BLS or ed25519 key generation skip in Debug without
+  `-Dslow-tests`, like the crypto lane; ReleaseSafe CI runs them.
 - consensus also imports `conformance` and `invariants` (test-only, like commonware's
   dev-dependencies).
 
@@ -43,9 +61,11 @@ resolver; those lanes are running, so do the types first and the actors as they 
 - [x] consensus lib.rs traits (`Automaton`, `CertifiableAutomaton`, `Handoff`, `Relay`,
   `Reporter`, `Monitor`, `Epochable`, `Viewable`, `Block`, ...) as comptime interfaces;
   reporter.rs.
-- [ ] simplex types.rs: Proposal, Notarize, Nullify, Finalize, their certificates, Voter and
-  Backfiller messages, Activity, and the attributable faults; codec byte-identical and every
-  simplex conformance hash matching.
+- [x] simplex types.rs: Proposal, Context, Notarize, Nullify, Finalize, their certificates,
+  Vote/Certificate/Artifact/Activity, the attributable faults, AttributableMap; all 15
+  simplex types hashes and the 3 threshold-VRF wire-type hashes match. (Signing tests follow
+  with the schemes.)
+- [ ] types.rs `coding::Commitment` and the `TestCommitment` hash (coding.Config landed).
 - [ ] simplex scheme: ed25519 now; bls12381_multisig and bls12381_threshold as the bls-math
   lane lands them; secp256r1 when crypto lands it. elector.rs (leader election).
 - [ ] simplex config, limits, metrics, and the actors (voter, batcher, resolver) and engine,
@@ -58,3 +78,5 @@ resolver; those lanes are running, so do the types first and the actors as they 
 - 2026-11-13: types.rs (Epoch/Height/View/Round, term math, FixedEpocher); 4 conformance
   hashes match.
 - 2026-11-13: lib.rs traits as comptime interfaces (`traits.zig`) and reporter.rs.
+- 2026-11-13: simplex wire types, attestation stand-in, VRF Signature/Certificate/Seed; 18
+  conformance hashes match.
