@@ -253,8 +253,12 @@ test "historical range proof matches the structure's own range proof" {
 
 // Fuzz (`merkle_proof_store`): commonware feeds raw proofs, which almost never verify, so this
 // also proves random ranges of a real structure under either bagging and inactive boundary.
-// A verified store must re-prove every sub-range; tampering must fail `init`; any proof the
-// store does return must verify; multi-proofs must reject unsorted or repeated locations.
+// A verified store must re-prove every sub-range; tampering must fail `init`; a proof the store
+// returns for another range must verify unless it folds some, but fewer, peaks than the stored
+// fold accumulator covers (see `fuzz_subranges`); multi-proofs must reject unsorted or repeated
+// locations.
+
+const Blueprint = @import("proof.zig").Blueprint;
 
 const fuzz_leaves_max = 160;
 
@@ -370,7 +374,17 @@ fn fuzz_subranges(
             continue;
         };
         defer proof.deinit(gpa);
-        try testing.expect(proof.verify_range_inclusion(hasher, start, elements[start..end], root));
+        const verified = proof.verify_range_inclusion(hasher, start, elements[start..end], root);
+        // A range starting before the proven one may fold some peaks, but fewer than the stored
+        // fold accumulator covers. Commonware's store still starts from that accumulator, so
+        // the proof it returns cannot verify; every other returned proof must.
+        const sub = range(start, end);
+        const inactive = store.inactive_peaks;
+        const blueprint = try Blueprint(F).init(elements.len, inactive, store.bagging, sub);
+        const folded = blueprint.fold_prefix.len;
+        const folds_fewer = folded > 0 and folded < store.fold_peak_count;
+        assert(!folds_fewer or start < proven.start);
+        try testing.expectEqual(!folds_fewer, verified);
     }
 }
 
@@ -439,4 +453,19 @@ test "fuzz merkle proof store (seeded)" {
 
 test "fuzz merkle proof store" {
     try testing.fuzz({}, fuzz_bytes.smith(256, fuzz_run), .{});
+}
+
+// CI seed 155, iteration 399: an MMR of 30 leaves proven at 24..25 (backward bagging, 4
+// inactive peaks) asked for 16..26, which folds 1 peak where the store's accumulator holds 2.
+test "fuzz merkle proof store regression: shorter fold prefix" {
+    const hex = "1fb229df17a4a51f1d8d765a9443f1a52e75a3e65c68146be8b1e1d517b834975e89fc0b54d5f2" ++
+        "07b7f97dc6923b00a112f7eadb07a6ed55792e6680f31d647a026ce4a23d3aeffc5d3729834c49a50a" ++
+        "afbc9c0a53b2be1ebbf612542133dfb2caf8ee11c39f9650fc4e4488ec95c89d126685c1088e50c19f" ++
+        "681243885aecdc18ed57259abc41e6b882a646cb00afbefb28c719fbb31eabc4bb605dac6a415817ac" ++
+        "8a8c2217a35e9ef252b63011af5d3067fa8bdf3f791ce40eecce0ed2825486c5cfa8d288a72f7358c6" ++
+        "9d0007d0cb8095f365d6fd2d889d4fd8a23d7b7204b97070a9172b44eba39aac7dd69b58f2c977196a" ++
+        "8f756b62b221381546";
+    var bytes: [hex.len / 2]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&bytes, hex);
+    try fuzz_run(&bytes);
 }
