@@ -4,6 +4,7 @@
 //! has them. Digests encode as their 32 raw bytes.
 
 const std = @import("std");
+const codec = @import("codec");
 const assert = std.debug.assert;
 const hasher = @import("hasher.zig");
 const digest = @import("digest.zig");
@@ -45,7 +46,7 @@ test "sha256 hello world through streaming and one-shot" {
     h.update("hello world");
     const d = h.finalize();
     try testing.expect(d.eql(hello_digest));
-    _ = try Digest.decode(&d.bytes);
+    _ = try codec.decode(Digest, testing.allocator, &d.bytes);
     try testing.expect(Sha256.hash(&.{"hello world"}).eql(hello_digest));
     try testing.expect(Sha256.hash(&.{ "hello", " world" }).eql(hello_digest));
     // The reset hasher returned by finalize hashes again from scratch.
@@ -128,11 +129,10 @@ test "sha256 hash_many matches individual hashes" {
 
 test "sha256 digest codec and size" {
     const d = Sha256.hash(&.{"hello world"});
-    var encoded: [Digest.size]u8 = undefined;
-    d.encode(&encoded);
+    const encoded = codec.encode_fixed(Digest, d);
     try testing.expectEqualSlices(u8, &d.bytes, &encoded);
-    try testing.expect((try Digest.decode(&encoded)).eql(d));
-    try testing.expectEqual(@as(usize, 32), Digest.size);
+    try testing.expect((try codec.decode(Digest, testing.allocator, &encoded)).eql(d));
+    try testing.expectEqual(@as(usize, 32), Digest.fixed_size);
     try testing.expect(Sha256.hash(&.{}).eql(streamed(&.{})));
 }
 

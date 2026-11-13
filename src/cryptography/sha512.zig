@@ -3,6 +3,7 @@
 //! Backed by `std.crypto.hash.sha2.Sha512`. Digests encode as their 64 raw bytes.
 
 const std = @import("std");
+const codec = @import("codec");
 const assert = std.debug.assert;
 const hasher = @import("hasher.zig");
 const digest = @import("digest.zig");
@@ -90,11 +91,11 @@ test "sha512 hash_many with equal and mixed lengths" {
 
 test "sha512 digest codec" {
     const d = Sha512.hash(&.{"abc"});
-    var encoded: [Digest.size]u8 = undefined;
-    d.encode(&encoded);
+    const encoded = codec.encode_fixed(Digest, d);
     try testing.expectEqualSlices(u8, &abc_digest.bytes, &encoded);
-    try testing.expect((try Digest.decode(&encoded)).eql(d));
-    try testing.expectError(error.EndOfBuffer, Digest.decode(encoded[0..63]));
+    try testing.expect((try codec.decode(Digest, testing.allocator, &encoded)).eql(d));
+    const short = codec.decode(Digest, testing.allocator, encoded[0..63]);
+    try testing.expectError(error.EndOfBuffer, short);
 }
 
 test "sha512 fuzz hasher entrypoints" {

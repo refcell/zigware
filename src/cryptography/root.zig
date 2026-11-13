@@ -8,13 +8,15 @@
 //! `assert_hasher` (see `hasher.zig`), and every digest is a `Digest(length, name)`.
 
 const std = @import("std");
+const codec = @import("codec");
 
 pub const digest = @import("digest.zig");
 pub const hasher = @import("hasher.zig");
 pub const fuzz = @import("fuzz.zig");
+pub const rng = @import("rng.zig");
+pub const ChaCha20Rng = rng.ChaCha20Rng;
 
 pub const Digest = digest.Digest;
-pub const DecodeError = digest.DecodeError;
 pub const assert_hasher = hasher.assert_hasher;
 
 pub const sha256 = @import("sha256.zig");
@@ -38,8 +40,8 @@ fn expect_hasher_multiple_runs(comptime H: type) !void {
     var h = H.init();
     h.update("hello world");
     const first = h.finalize();
-    try std.testing.expectEqual(H.Digest.size, first.bytes.len);
-    _ = try H.Digest.decode(&first.bytes);
+    try std.testing.expectEqual(H.Digest.fixed_size, first.bytes.len);
+    _ = try codec.decode(H.Digest, std.testing.allocator, &first.bytes);
     h.update("hello world");
     try std.testing.expect(h.finalize().eql(first));
     try std.testing.expect(H.hash(&.{"hello world"}).eql(first));

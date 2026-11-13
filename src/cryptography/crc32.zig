@@ -10,6 +10,7 @@
 //! from the state of the empty checksum, so `state = checksum ^ init().crc` covers both.
 
 const std = @import("std");
+const codec = @import("codec");
 const assert = std.debug.assert;
 const hasher = @import("hasher.zig");
 const digest = @import("digest.zig");
@@ -186,9 +187,8 @@ test "crc32 hasher interface" {
     try testing.expect(h.finalize().eql(d));
     try testing.expect(Crc32.hash(&.{"hello world"}).eql(d));
     try testing.expect(Crc32.hash(&.{ "hello", " world" }).eql(d));
-    var encoded: [Digest.size]u8 = undefined;
-    d.encode(&encoded);
-    try testing.expect((try Digest.decode(&encoded)).eql(d));
+    const encoded = codec.encode_fixed(Digest, d);
+    try testing.expect((try codec.decode(Digest, testing.allocator, &encoded)).eql(d));
     const dead = Digest.from_u32(0xDEADBEEF);
     try testing.expectEqualSlices(u8, &.{ 0xDE, 0xAD, 0xBE, 0xEF }, &dead.bytes);
 }

@@ -24,10 +24,12 @@ it lands, write fixed-size `encode`/`decode` methods and switch when codec's API
 
 ## Log
 - Digests are `Digest(length, name)`: one distinct type per hasher, encoded as raw bytes.
-  Until codec lands they carry fixed-size `encode`/`decode`.
+  They implement the codec interface (`fixed_size`, `write`, `read`).
 - `Hasher.finalize` resets the hasher in place and returns the digest (Rust returns the reset
   hasher by value). `hash_many` writes into a caller-provided digest slice instead of
   returning a `Vec`, so hashing never allocates.
 - `strategy` parameters (`hash_across`, `hash_pair`, `hash_many`) take any value and run on
   the calling thread until the parallel package lands; the digests are identical.
 - `Crc32.resume` is `Crc32.resume_from` (`resume` is a Zig keyword).
+- `ChaCha20Rng` (`rng.zig`) is byte-identical to Rust `rand_chacha` 0.10, so `from_seed(u64)`
+  keys match commonware's `Signer::from_seed`.

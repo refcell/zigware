@@ -2,21 +2,13 @@
 //!
 //! Every hasher has its own digest type (a SHA-256 digest is not a BLAKE3 digest even though
 //! both are 32 bytes), so `Digest` takes a name that makes each instantiation distinct. A
-//! digest encodes as its raw bytes with no length prefix, byte-identical to commonware's
-//! `FixedArray` derive, and orders lexicographically by those bytes.
+//! digest implements the codec interface as its raw bytes with no length prefix,
+//! byte-identical to commonware's `FixedArray` derive, and orders lexicographically by those
+//! bytes.
 
 const std = @import("std");
 const assert = std.debug.assert;
-
-/// Errors from decoding a fixed-size value from bytes.
-pub const DecodeError = error{
-    /// The input is shorter than the encoding.
-    EndOfBuffer,
-    /// The input continues past the encoding.
-    ExtraData,
-    /// The bytes do not encode a valid value.
-    Invalid,
-};
+const codec = @import("codec");
 
 /// Returns the digest type `name` of `length` bytes.
 pub fn Digest(comptime length: usize, comptime name: []const u8) type {
@@ -28,7 +20,7 @@ pub fn Digest(comptime length: usize, comptime name: []const u8) type {
         bytes: [length]u8,
 
         /// Encoded size in bytes (commonware `FixedSize::SIZE`).
-        pub const size = length;
+        pub const fixed_size: usize = length;
         /// The hasher family this digest belongs to.
         pub const label = name;
         /// The all-zero digest (commonware `Digest::EMPTY`).
@@ -46,17 +38,17 @@ pub fn Digest(comptime length: usize, comptime name: []const u8) type {
             return self;
         }
 
-        /// Decodes a digest from exactly `size` bytes.
-        pub fn decode(bytes: []const u8) DecodeError!Self {
-            if (bytes.len < length) return error.EndOfBuffer;
-            if (bytes.len > length) return error.ExtraData;
-            return .{ .bytes = bytes[0..length].* };
+        /// codec: writes the raw bytes.
+        pub fn write(self: *const Self, writer: *codec.Writer) void {
+            writer.write_bytes(&self.bytes);
         }
 
-        /// Writes the encoding (the raw bytes) into `out`, which must hold `size` bytes.
-        pub fn encode(self: *const Self, out: []u8) void {
-            assert(out.len >= length);
-            @memcpy(out[0..length], &self.bytes);
+        /// codec: reads `fixed_size` raw bytes; every byte string is a valid digest.
+        pub fn read(gpa: std.mem.Allocator, reader: *codec.Reader, cfg: void) codec.Error!Self {
+            _ = gpa;
+            _ = cfg;
+            const bytes = try reader.take_array(length);
+            return .{ .bytes = bytes.* };
         }
 
         /// The digest as a byte slice (commonware `AsRef<[u8]>`).
@@ -105,11 +97,14 @@ pub fn Digest(comptime length: usize, comptime name: []const u8) type {
     };
 }
 
-test "digest decode, order, and hex" {
+test "digest codec, order, and hex" {
     const D = Digest(4, "test");
-    try std.testing.expectError(error.EndOfBuffer, D.decode(&.{ 1, 2, 3 }));
-    try std.testing.expectError(error.ExtraData, D.decode(&.{ 1, 2, 3, 4, 5 }));
-    const d = try D.decode(&.{ 0xde, 0xad, 0xbe, 0xef });
+    const gpa = std.testing.allocator;
+    try std.testing.expectEqual(@as(?usize, 4), codec.fixed_size(D));
+    try std.testing.expectError(error.EndOfBuffer, codec.decode(D, gpa, &.{ 1, 2, 3 }));
+    try std.testing.expectError(error.ExtraData, codec.decode(D, gpa, &.{ 1, 2, 3, 4, 5 }));
+    const d = try codec.decode(D, gpa, &.{ 0xde, 0xad, 0xbe, 0xef });
+    try std.testing.expectEqualSlices(u8, &d.bytes, &codec.encode_fixed(D, d));
     try std.testing.expectEqual(@as(u32, 0xdeadbeef), d.as_u32());
     try std.testing.expect(D.from_u32(0xdeadbeef).eql(d));
     var buffer: [16]u8 = undefined;

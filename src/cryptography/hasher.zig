@@ -18,7 +18,7 @@ const assert = std.debug.assert;
 pub fn assert_hasher(comptime H: type) void {
     comptime {
         assert(@hasDecl(H, "Digest"));
-        assert(@hasDecl(H.Digest, "size"));
+        assert(@hasDecl(H.Digest, "fixed_size"));
         for ([_][]const u8{
             "init", "update", "finalize", "hash", "hash_across", "hash_pair", "hash_many",
         }) |decl| {
@@ -29,7 +29,7 @@ pub fn assert_hasher(comptime H: type) void {
 
 /// A hasher over `Core`, a `std.crypto` hash with `init(.{})`, `update`, and `final`.
 pub fn Streaming(comptime Core: type, comptime DigestType: type) type {
-    comptime assert(DigestType.size > 0);
+    comptime assert(DigestType.fixed_size > 0);
     return struct {
         const Self = @This();
         pub const Digest = DigestType;

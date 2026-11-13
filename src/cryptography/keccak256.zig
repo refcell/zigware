@@ -4,6 +4,7 @@
 //! `std.crypto.hash.sha3.Keccak256`.
 
 const std = @import("std");
+const codec = @import("codec");
 const assert = std.debug.assert;
 const hasher = @import("hasher.zig");
 const digest = @import("digest.zig");
@@ -67,11 +68,11 @@ test "keccak256 rate boundaries" {
 
 test "keccak256 codec and zeroize" {
     var d = Keccak256.hash(&.{"abc"});
-    var encoded: [Digest.size]u8 = undefined;
-    d.encode(&encoded);
+    const encoded = codec.encode_fixed(Digest, d);
     try testing.expectEqualSlices(u8, &abc_digest.bytes, &encoded);
-    try testing.expect((try Digest.decode(&encoded)).eql(d));
-    try testing.expectError(error.EndOfBuffer, Digest.decode(abc_digest.bytes[0..31]));
+    try testing.expect((try codec.decode(Digest, testing.allocator, &encoded)).eql(d));
+    const short = codec.decode(Digest, testing.allocator, abc_digest.bytes[0..31]);
+    try testing.expectError(error.EndOfBuffer, short);
     d.zeroize();
     try testing.expect(d.eql(Digest.empty));
 }
