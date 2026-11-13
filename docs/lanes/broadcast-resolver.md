@@ -9,9 +9,37 @@ traits, wire formats (resolver p2p/wire.rs, collector p2p wire), and the pure st
 (fetcher, inflight, score, subscribers, delivery); then the engines and the multi-peer tests
 on p2p's simulated network and the deterministic runtime.
 
+## Public API (on main)
+- `resolver.Fetch(K, S)` (`key`, `subscriber`, `from_key`, `order`), `resolver.Delivery(K, S)`
+  (`key`, `subscribers: []const S`), `resolver.Outcome` (`invalid`, `resolved: Resolution`,
+  `unresolved`, `ignored`; `from(Outcome or bool)`), `resolver.Resolution`,
+  `resolver.Predicate(K, S)` (inline-captured retain predicate: `init(captured, fn)`, `call`),
+  `resolver.order`/`eql` (codec order, `void` subscribers equal).
+- Interface checks `assert_consumer`, `assert_resolver`, `assert_targeted_resolver` (decls at the
+  top of `src/resolver/root.zig`).
+- `resolver.subscribers.Tracker(K, S)`: `insert`, `remove`, `clear`, `retain(gpa, predicate,
+  *removed)`, `pending` (borrowed, ascending), `remove_delivered`, `contains`, `count`.
+- `resolver.p2p.wire`: `Message(Key)` (`id`, `payload`), `Payload(Key)` (`request`,
+  `response: codec.Bytes`, `error`), `request_overhead`, `response_overhead_max`,
+  `max_message_size(Key, value_size)`; commonware's two conformance hashes match.
+- `resolver.p2p.mocks.Key` (one-byte test key).
+
+## Decisions
+- No tracing in zigware, so `Fetch`, `Delivery`, and the subscriber tracker carry no spans;
+  ordering and equality ignore spans in commonware too.
+- `Delivery.subscribers` is a slice (never empty, asserted) instead of `NonEmptyVec`.
+- Retain predicates are `Predicate(K, S)` values with inline captured state (at most 64 bytes)
+  so they queue in a mailbox without allocation; generic code takes any `predicate` with
+  `call(key, subscriber) bool`.
+- `subscribers.Tracker.pending`/`remove_delivered` return borrowed slices instead of clones.
+- resolver imports `conformance` (a dev-dependency in commonware) for its conformance test.
+- Wire `encode_iobufs` tests have no counterpart (no `IoBufs` yet; writes go to one buffer).
+- Seeded fuzz uses `p2p.fuzz.run` (the same driver as codec's).
+
 ## Backlog
-- [ ] resolver: lib.rs traits, opaque.rs, delivery.rs, subscribers.rs, ingress.rs.
-- [ ] resolver p2p: wire.rs (byte-identical, conformance hashes), fetcher, inflight, score,
+- [ ] resolver: lib.rs traits (done), subscribers.rs (done), opaque.rs, delivery.rs,
+  ingress.rs.
+- [ ] resolver p2p: wire.rs (done, conformance hashes match), fetcher, inflight, score,
   config, engine, ingress, mocks; port mod.rs tests on p2p simulated.
 - [ ] broadcast: lib.rs and buffered (engine, ingress, config, mocks) with its tests.
 - [ ] collector: lib.rs and p2p (engine, wire) with its tests.
@@ -19,3 +47,4 @@ on p2p's simulated network and the deterministic runtime.
   lands.
 
 ## Log
+- 2026-11-13: resolver lib.rs types, subscribers tracker, p2p wire (conformance hashes match).
