@@ -93,11 +93,16 @@ comptime {
 /// it. `entry_fn` must never return: it switches away for good.
 pub fn prepare(stack: Stack, entry_fn: EntryFn, argument: *anyopaque) Context {
     comptime assert(supported);
-    const base = std.mem.alignBackward(usize, stack.top(), 16) - saved_frame_bytes;
+    // Above the saved frame sits a zeroed 16-byte terminator: an unwinder that walks past
+    // `trampoline` (such as an allocator capturing a stack trace) reads a null return address
+    // there instead of the first byte past the mapping.
+    const terminator_bytes = 16;
+    const base = std.mem.alignBackward(usize, stack.top(), 16) - saved_frame_bytes -
+        terminator_bytes;
     assert(base > @intFromPtr(stack.memory.ptr) + page_size);
     assert(base % 16 == 0);
     const slots: [*]usize = @ptrFromInt(base);
-    @memset(slots[0 .. saved_frame_bytes / @sizeOf(usize)], 0);
+    @memset(slots[0 .. (saved_frame_bytes + terminator_bytes) / @sizeOf(usize)], 0);
     switch (builtin.cpu.arch) {
         .x86_64 => {
             // Default MXCSR (all exceptions masked, round to nearest) and x87 control word.
