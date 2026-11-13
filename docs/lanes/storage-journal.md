@@ -19,7 +19,12 @@ build on it. Until then, start with the pure parts (frame.rs, durability, item e
   prune, rewind, sync), recovery from torn writes; port the tests incl. corruption tests.
 - [ ] journal/contiguous: fixed and variable contiguous journals.
 - [ ] journal/authenticated.rs.
-- [ ] metadata (two-blob atomic key-value store).
+- [x] metadata (two-blob atomic key-value store), over the in-lane memory storage.
+- [ ] metadata: `start_sync` (pipelined syncs), conformance hash (`MetadataWorkload`), and
+  the fault-injection tests (torn writes, failed syncs), once runtime storage lands.
+- [ ] runtime/buffer (owned by this lane since 3d5033e): read.rs, write.rs, tip.rs, and paged
+  (CRC'd pages, Append/Writer/Replay/CacheRef), over runtime's Blob; `pub const buffer` in
+  `src/runtime/root.zig`.
 - [ ] queue (persistent queue with cursor).
 - [ ] Conformance hashes for every on-disk format, fuzz targets (storage/fuzz).
 - [ ] zstd: a real compressor (LZ matches, FSE/Huffman) so compressed journals shrink.
@@ -33,6 +38,11 @@ build on it. Until then, start with the pure parts (frame.rs, durability, item e
 - `storage.journal.durability.Barrier(Completion)`: durable-boundary tracker.
 - `storage.journal.zstd`: `compress_into`, `compress_bound`, `frame_content_size`,
   `decompress`.
+- `storage.journal.memory`: in-memory `Storage` (`open`, `remove`, `scan`) and `Blob`
+  (`read_at`, `write_at`, `resize`, `sync`, `deinit`), a stand-in for runtime storage.
+- `storage.metadata`: `Metadata(Storage, K, V)` with `init`, `deinit`, `get`, `get_mut`,
+  `put`, `put_sync`, `upsert`, `remove`, `clear`, `retain`, `items`, `count`, `sync`,
+  `destroy`; `Config(V)`.
 
 ## Decisions
 - Errors: `journal.Error` is an error set without payloads (section, offset, sizes);
@@ -55,6 +65,21 @@ build on it. Until then, start with the pure parts (frame.rs, durability, item e
   with libzstd's compressor) have no Zig counterpart: codec readers take one slice, and the
   compressor differs by design.
 
+- Storage stand-in: until runtime's storage lands, journal/metadata/queue are comptime
+  generic over a `Storage` type, tested with `journal/memory.zig`. Its names match
+  commonware's (`open`, `remove`, `scan`, `read_at`, `write_at`, `resize`, `sync`); reads
+  fill a caller buffer and writes take one slice instead of `IoBufs`, and read/write options
+  are omitted (they change caching and syscalls, not contents). Unsynced writes are lost
+  when a handle closes, as in commonware's memory storage.
+- metadata: keys are fixed-size codec types sorted by encoded bytes (commonware's `Span`
+  ordering); values are owned by the store and must not borrow input (`codec.Bytes`).
+  Methods that commonware makes consuming (`sync`, `put_sync`) mark the store failed on
+  error; only `deinit` may follow. A checksummed copy that fails to decode is `Corruption`
+  instead of a panic. Metrics are plain fields (`sync_rewrites`, `sync_overwrites`,
+  `count()`). `upsert(key, default)` returns a pointer instead of taking a closure.
+
 ## Log
 - 2026-11-13: journal Error, frame encoding/decoding with zstd frames, durability Barrier,
   frame fuzz target.
+- 2026-11-13: in-memory Storage/Blob stand-in; metadata with its tests and the
+  metadata_operations fuzz target.

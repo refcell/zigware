@@ -12,6 +12,7 @@ const codec = @import("codec");
 pub const frame = @import("frame.zig");
 pub const durability = @import("durability.zig");
 pub const zstd = @import("zstd.zig");
+pub const memory = @import("memory.zig");
 
 /// Errors that can occur when interacting with a journal (commonware's `journal::Error`).
 ///
