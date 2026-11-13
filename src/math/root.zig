@@ -15,6 +15,7 @@ pub const algebra = @import("algebra.zig");
 pub const fields = struct {
     pub const goldilocks = @import("fields/goldilocks.zig");
 };
+pub const ntt = @import("ntt.zig");
 pub const poly = @import("poly.zig");
 pub const testing = @import("testing.zig");
 pub const wire = @import("wire.zig");
