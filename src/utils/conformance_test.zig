@@ -182,8 +182,8 @@ const entries = .{
     ),
     Codec(
         "bitmap::roaring::container::bitmap" ++ conformance_suffix ++ "super::Bitmap>",
-        bitmap.roaring.Bitmap,
-        arbitrary.default_generator(bitmap.roaring.Bitmap),
+        bitmap.roaring.BitmapContainer,
+        arbitrary.default_generator(bitmap.roaring.BitmapContainer),
     ),
     Codec(
         "bitmap::roaring::container::run" ++ conformance_suffix ++ "super::Run>",
@@ -199,6 +199,11 @@ const entries = .{
         "bitmap::roaring::container::tests::conformance::ContainerTransitionsConformance",
         @import("bitmap/roaring/container_test.zig").TransitionsConformance,
         1024,
+    ),
+    Codec(
+        "bitmap::roaring" ++ conformance_suffix ++ "super::Bitmap>",
+        bitmap.roaring.Bitmap,
+        arbitrary.default_generator(bitmap.roaring.Bitmap),
     ),
 };
 

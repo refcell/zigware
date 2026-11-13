@@ -32,7 +32,10 @@ encoding parts as soon as `codec` has its core API (see docs/lanes/codec.md).
   `Dirty` with read-through `get_bit`/`get_chunk`, `set_bit`, `push*`, `pop`, `prune_to_bit`;
   `commit(gpa, n)` / `abort`; `apply_batch`, `get_at_commit`, `prune_commits_before`). A failed
   `commit` leaves the `Dirty` unchanged (Rust consumes it).
-  `bitmap.roaring`: in progress; `roaring.Container` (Array/Bitmap/Run with hysteresis transitions,
+  `bitmap.roaring`: `roaring.Bitmap` (u64 roaring bitmap: sorted `codec.Map(u64, Container)`
+  entries; `insert`, `insert_range`, `contains`, `iter`, `iter_range`, `min`, `max`, `clear`,
+  `truncate_containers_below`, `container_variant_counts`, `eql`; codec with `RangeCfg(usize)`
+  container bound); `roaring.Container` (Array/Bitmap/Run with hysteresis transitions,
   canonical encoding, set operations) and its three kinds; codec + conformance hashes.
   `bitmap.readable` is the `Readable` trait (`len`, `pruned_chunks`, `get_chunk`) + `OnesIter`.
 - `utils.Hostname` (`utils.hostname`): validated RFC 1035/1123 hostname stored inline
@@ -95,3 +98,4 @@ encoding parts as soon as `codec` has its core API (see docs/lanes/codec.md).
 - 2026-11-13: historical bitmap with its tests, randomized checkpoints, and fuzz target.
 - 2026-11-13: roaring containers (Array, Bitmap, Run, Container) with tests and all five
   container conformance hashes, including ContainerTransitionsConformance.
+- 2026-11-13: roaring top-level Bitmap with the mod.rs tests and its conformance hash.
