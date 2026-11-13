@@ -2,10 +2,11 @@
 //!
 //! `contains_cyclic` tests membership in a span that wraps around when its start is not
 //! below its end. `NonEmptyRange(T)` is a half-open range `[start, end)` with
-//! `start < end`. Its codec encoding (start then end, decode rejects `start >= end`)
-//! lands with the codec package.
+//! `start < end`. It encodes as start then end; decoding rejects `start >= end` with
+//! `Invalid("NonEmptyRange", "start must be < end")`, like commonware.
 
 const std = @import("std");
+const codec = @import("codec");
 const assert = std.debug.assert;
 
 /// One end of a span, like Rust's `core::ops::Bound`.
@@ -86,6 +87,28 @@ pub fn NonEmptyRange(comptime T: type) type {
         pub fn contains(range: Self, value: T) bool {
             return range.range_start <= value and value < range.range_end;
         }
+
+        pub const Cfg = codec.Cfg(T);
+        pub const fixed_size: ?usize = if (codec.fixed_size(T)) |size| 2 * size else null;
+        pub const max_encode_size: ?usize =
+            if (codec.max_encode_size(T)) |size| 2 * size else null;
+
+        pub fn write(range: Self, writer: *codec.Writer) void {
+            assert(range.range_start < range.range_end);
+            codec.write(T, range.range_start, writer);
+            codec.write(T, range.range_end, writer);
+        }
+
+        pub fn encode_size(range: Self) usize {
+            return codec.encode_size(T, range.range_start) + codec.encode_size(T, range.range_end);
+        }
+
+        pub fn read(gpa: std.mem.Allocator, reader: *codec.Reader, cfg: Cfg) codec.Error!Self {
+            const start_value = try codec.read_cfg(T, gpa, reader, cfg);
+            const end_value = try codec.read_cfg(T, gpa, reader, cfg);
+            return init(start_value, end_value) catch
+                reader.invalid("NonEmptyRange", "start must be < end");
+        }
     };
 }
 
@@ -155,4 +178,25 @@ test "range: NonEmptyRange" {
     try testing.expect(!single.contains(4));
     try testing.expectError(error.EmptyRange, R.init(5, 5));
     try testing.expectError(error.EmptyRange, R.init(5, 3));
+}
+
+test "range: NonEmptyRange encode and decode" {
+    const R = NonEmptyRange(u32);
+    const r = try R.init(10, 20);
+    const encoded = codec.encode_fixed(R, r);
+    try testing.expectEqualSlices(u8, &.{ 0, 0, 0, 10, 0, 0, 0, 20 }, &encoded);
+    try testing.expectEqual(r, try codec.decode(R, testing.allocator, &encoded));
+    try testing.expectEqual(@as(?usize, 16), codec.fixed_size(NonEmptyRange(u64)));
+
+    for ([_][2]u32{ .{ 20, 10 }, .{ 5, 5 } }) |pair| {
+        var bytes: [8]u8 = undefined;
+        std.mem.writeInt(u32, bytes[0..4], pair[0], .big);
+        std.mem.writeInt(u32, bytes[4..8], pair[1], .big);
+        var reader = codec.Reader.init(&bytes);
+        try testing.expectError(error.Invalid, codec.read(R, testing.allocator, &reader));
+        try testing.expectEqualStrings("NonEmptyRange", reader.diagnostic.context);
+        try testing.expectEqualStrings("start must be < end", reader.diagnostic.message);
+    }
+    const short = codec.decode(R, testing.allocator, &.{ 0, 0, 0, 1 });
+    try testing.expectError(error.EndOfBuffer, short);
 }

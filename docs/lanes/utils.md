@@ -19,8 +19,9 @@ encoding parts as soon as `codec` has its core API (see docs/lanes/codec.md).
 ## Decisions
 - RNG interface is `next_u32`/`next_u64`/`fill_bytes`; ports that draw randomness use the
   samplers in `utils.rng` (not `std.Random`) so values match commonware's tests.
-- `union_unique` uses a private LEB128 writer until codec's varint lands; `Participant` and
-  `NonEmptyRange` encodings follow with codec.
+- `union_unique`, `Participant` (`UInt<u32>`), and `NonEmptyRange(T)` (start, end; rejects
+  `start >= end` as `Invalid`) encode through `codec`. Their conformance hashes need codec's
+  `arbitrary` emulation in the conformance harness and are checked once that lands.
 
 ## Backlog
 - [ ] utils basics (done: faults, modulo, union/union_unique, NZ, Participant, rng, range
@@ -42,3 +43,4 @@ encoding parts as soon as `codec` has its core API (see docs/lanes/codec.md).
 ## Log
 - 2026-11-13: faults, rng (TestRng/ScriptedRng/FuzzRng + FuzzRng conformance hash), range,
   lib basics.
+- 2026-11-13: switched union_unique to codec; Participant and NonEmptyRange codec encodings.

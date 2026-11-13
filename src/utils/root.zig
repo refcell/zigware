@@ -7,6 +7,7 @@
 //! Rust traits become comptime interfaces; `NZ*!` macros become `nz`/`NonZero`.
 
 const std = @import("std");
+const codec = @import("codec");
 const assert = std.debug.assert;
 
 pub const faults = @import("faults.zig");
@@ -54,6 +55,21 @@ pub const Participant = struct {
     pub fn format(participant: Participant, writer: *std.Io.Writer) std.Io.Writer.Error!void {
         try writer.print("{d}", .{participant.index});
     }
+
+    /// Encoded as `UInt<u32>`, like commonware.
+    pub const max_encode_size: usize = codec.varint.max_size(u32);
+
+    pub fn write(participant: Participant, writer: *codec.Writer) void {
+        codec.varint.write(u32, participant.index, writer);
+    }
+
+    pub fn encode_size(participant: Participant) usize {
+        return codec.varint.size(u32, participant.index);
+    }
+
+    pub fn read(_: std.mem.Allocator, reader: *codec.Reader, _: void) codec.Error!Participant {
+        return .{ .index = try codec.varint.read(u32, reader) };
+    }
 };
 
 /// A value of integer type `T` that is never zero (Rust `core::num::NonZero*`).
@@ -92,35 +108,20 @@ pub fn @"union"(allocator: std.mem.Allocator, a: []const u8, b: []const u8) ![]u
     return result;
 }
 
-/// Writes `value` as a LEB128 varint, matching codec's `UInt<u32>`. Returns bytes written.
-/// Kept private until the codec package lands its varint.
-fn write_varint_u32(value: u32, out: *[5]u8) usize {
-    var remaining = value;
-    var len: usize = 0;
-    while (remaining >= 0x80) : (len += 1) {
-        assert(len < 4);
-        out[len] = @as(u8, @truncate(remaining)) | 0x80;
-        remaining >>= 7;
-    }
-    out[len] = @intCast(remaining);
-    return len + 1;
-}
-
-/// Concatenates a namespace and a message, prefixed by the varint of the namespace length.
-/// Produces a unique byte sequence for each `(namespace, msg)` pair.
+/// Concatenates a namespace and a message, prefixed by the varint of the namespace length
+/// (codec's `usize` encoding). Produces a unique byte sequence for each `(namespace, msg)`.
 pub fn union_unique(
     allocator: std.mem.Allocator,
     namespace: []const u8,
     msg: []const u8,
 ) ![]u8 {
-    const namespace_len = std.math.cast(u32, namespace.len) orelse
-        @panic("write: usize value is larger than u32");
-    var prefix: [5]u8 = undefined;
-    const prefix_len = write_varint_u32(namespace_len, &prefix);
+    const prefix_len = codec.encode_size(usize, namespace.len);
     const result = try allocator.alloc(u8, prefix_len + namespace.len + msg.len);
-    @memcpy(result[0..prefix_len], prefix[0..prefix_len]);
-    @memcpy(result[prefix_len..][0..namespace.len], namespace);
-    @memcpy(result[prefix_len + namespace.len ..], msg);
+    var writer = codec.Writer.init(result);
+    codec.write(usize, namespace.len, &writer);
+    writer.write_bytes(namespace);
+    writer.write_bytes(msg);
+    assert(writer.written().len == result.len);
     return result;
 }
 
@@ -212,4 +213,23 @@ test "utils: participant" {
     var buffer: [16]u8 = undefined;
     const text = try std.fmt.bufPrint(&buffer, "{f}", .{Participant.init(1000)});
     try testing.expectEqualStrings("1000", text);
+}
+
+test "utils: participant encode and decode" {
+    const cases = [_]u32{ 0, 1, 127, 128, 255, 256, std.math.maxInt(u32) };
+    for (cases) |value| {
+        const participant = Participant.init(value);
+        var buffer: [codec.varint.max_size(u32)]u8 = undefined;
+        const encoded = codec.encode_to(Participant, participant, &buffer);
+        try testing.expectEqual(codec.encode_size(Participant, participant), encoded.len);
+        const decoded = try codec.decode(Participant, testing.allocator, encoded);
+        try testing.expectEqual(participant, decoded);
+    }
+    // 128 is the varint 0x80 0x01; u32::MAX takes five bytes.
+    var buffer: [5]u8 = undefined;
+    const encoded = codec.encode_to(Participant, Participant.init(128), &buffer);
+    try testing.expectEqualSlices(u8, &.{ 0x80, 0x01 }, encoded);
+    try testing.expectEqual(@as(?usize, 5), codec.max_encode_size(Participant));
+    const truncated = codec.decode(Participant, testing.allocator, &.{0x80});
+    try testing.expectError(error.EndOfBuffer, truncated);
 }
