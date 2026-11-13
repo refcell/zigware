@@ -1,6 +1,8 @@
 # Lane: storage-journal
 
-Owns `src/storage/{journal,metadata,queue}`. Add your `pub const` lines to
+Owns `src/storage/{journal,metadata,queue}` and `src/runtime/buffer/` (commonware's
+`runtime/src/utils/buffer`: read/write buffers, tip, and `paged`; handed over from the runtime
+lane by the coordinator because the journal is its main user). Add your `pub const` lines to
 `src/storage/root.zig` (owned by storage-merkle; additive edits).
 
 Reference: `~/.cache/zigware/commonware-ref/storage/src/{journal,metadata,queue}`. These
@@ -9,6 +11,9 @@ resize, sync). The runtime lane is landing that interface and an in-memory backe
 build on it. Until then, start with the pure parts (frame.rs, durability, item encodings).
 
 ## Backlog
+- [ ] runtime buffer: read.rs, write.rs, tip.rs, then paged (CRC'd pages, cache, `Append`,
+  `Writer`, `Replay`, `CacheRef`), byte-identical page format, over runtime's `Blob`. Add
+  `pub const buffer` to `src/runtime/root.zig` (additive edit).
 - [x] journal frame format and durability (frame.rs, durability.rs), byte-identical.
 - [ ] journal/segmented: fixed and variable segmented journals (append, read, replay,
   prune, rewind, sync), recovery from torn writes; port the tests incl. corruption tests.
