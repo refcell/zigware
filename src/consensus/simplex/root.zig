@@ -18,6 +18,7 @@ pub const Plan = lookahead.Plan;
 pub const actors = struct {
     pub const batcher = struct {
         pub const votes = @import("actors/batcher/votes.zig");
+        pub const verifier = @import("actors/batcher/verifier.zig");
     };
 };
 
@@ -42,6 +43,7 @@ test {
     _ = metrics;
     _ = lookahead;
     _ = actors.batcher.votes;
+    _ = actors.batcher.verifier;
     _ = scheme.bls12381_threshold.vrf;
     _ = scheme.bls12381_threshold.standard;
     _ = scheme.namespace;
