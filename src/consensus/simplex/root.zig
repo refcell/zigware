@@ -9,6 +9,7 @@ pub const Attestation = attestation.Attestation;
 pub const Deferred = attestation.Deferred;
 pub const elector = @import("elector.zig");
 pub const limits = @import("limits.zig");
+pub const config = @import("config.zig");
 
 pub const scheme = struct {
     pub const bls12381_threshold = struct {
@@ -22,5 +23,6 @@ test {
     _ = attestation;
     _ = elector;
     _ = limits;
+    _ = config;
     _ = scheme.bls12381_threshold.vrf;
 }

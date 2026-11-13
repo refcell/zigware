@@ -41,6 +41,9 @@ resolver; those lanes are running, so do the types first and the actors as they 
   `RandomElector(H, V)` (`elect(round, ?*const vrf.Certificate(V))`), `assert_elector`
   (`mode` `.scheduled`/`.dynamic`, `Input`).
 - `consensus.simplex.limits.max_payload_size(S, D, participants)`.
+- `consensus.simplex.config`: `Config(P)` (P declares `Scheme`, `Elector`, `Blocker`,
+  `Digest`, `Automaton`, `Relay`, `Reporter`, `Strategy`; `check(rng) ?[]const u8`,
+  `assert_valid(rng)`), `Floor(S, D)`, `SkipPolicy`, `SkipBudget`, `ForwardPolicy`.
 - `consensus.simplex.scheme.bls12381_threshold.vrf`: `Signature(V)`, `Certificate(V)`,
   `Seed(V)` wire types.
 
@@ -65,6 +68,10 @@ resolver; those lanes are running, so do the types first and the actors as they 
 - Random V0/V1 conformance hashes and the threshold-certificate elector tests wait for the
   bls-math lane's threshold signatures; `select_leader` is checked against independently
   computed values instead.
+- `Config(P)` takes one parameter type declaring commonware's eight type parameters.
+  `check` returns the violated rule's message so tests can see it, and `assert_valid` panics
+  with it. The floor check expects the scheme surface
+  `verify_certificate(rng, Subject(D), *const Certificate, strategy) bool`.
 - consensus also imports `conformance` and `invariants` (test-only, like commonware's
   dev-dependencies).
 
@@ -86,7 +93,8 @@ resolver; those lanes are running, so do the types first and the actors as they 
   lane lands them; secp256r1 when crypto lands it. elector.rs (leader election).
 - [x] limits.rs (`max_payload_size`), checked against the widest VRF encodings; the
   per-scheme widest-encoding tests follow with the schemes.
-- [ ] simplex config, metrics, and the actors (voter, batcher, resolver) and engine,
+- [x] config.rs (Config, Floor, skip and forward policies) with its validation rules.
+- [ ] simplex metrics, and the actors (voter, batcher, resolver) and engine,
   on p2p's simulated network and the deterministic runtime.
 - [ ] simplex mod.rs tests: the full multi-node DST suite with the Byzantine mocks
   (conflicter, equivocator, impersonator, nuller, outdated, twins, ...), seeded.
@@ -101,3 +109,4 @@ resolver; those lanes are running, so do the types first and the actors as they 
 - 2026-11-13: types.rs `coding::Commitment`; TestCommitment conformance hash matches.
 - 2026-11-13: elector.rs (RoundRobin, Random); RoundRobinShuffleConformance matches.
 - 2026-11-13: limits.rs (`max_payload_size`).
+- 2026-11-13: config.rs (Config, Floor, SkipPolicy, ForwardPolicy).
