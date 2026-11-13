@@ -1,0 +1,7 @@
+//! Benchmarks of the storage package, one file per module (`zig build bench`).
+
+const bench = @import("bench");
+
+pub fn run(runner: *bench.Runner) !void {
+    try @import("bmt/benches.zig").run(runner);
+}
