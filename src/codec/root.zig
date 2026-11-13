@@ -42,6 +42,16 @@ pub const HashSet = map.HashSet;
 pub const OrderedMap = map.OrderedMap;
 pub const OrderedSet = map.OrderedSet;
 pub const MapCfg = map.MapCfg;
+pub const net = @import("types/net.zig");
+pub const Ipv4 = net.Ipv4;
+pub const Ipv6 = net.Ipv6;
+pub const IpAddr = net.IpAddr;
+pub const SocketAddr = net.SocketAddr;
+pub const SocketAddrV4 = net.SocketAddrV4;
+pub const SocketAddrV6 = net.SocketAddrV6;
+const mode_mod = @import("mode.zig");
+pub const mode = mode_mod.mode;
+pub const Modes = mode_mod.Modes;
 
 pub const Cfg = codec_mod.Cfg;
 pub const SliceCfg = codec_mod.SliceCfg;
@@ -84,6 +94,8 @@ test {
     _ = @import("types/vec.zig");
     _ = @import("types/tuple.zig");
     _ = @import("types/map_test.zig");
+    _ = @import("types/net.zig");
+    _ = @import("mode.zig");
     _ = @import("codec_test.zig");
     _ = @import("fuzz_test.zig");
 }

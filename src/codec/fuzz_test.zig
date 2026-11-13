@@ -14,6 +14,8 @@ const Bytes = @import("types/bytes.zig").Bytes;
 const fuzz = @import("fuzz.zig");
 const RangeCfg = @import("config.zig").RangeCfg;
 const map = @import("types/map.zig");
+const net = @import("types/net.zig");
+const Modes = @import("mode.zig").Modes;
 
 const gpa = testing.allocator;
 
@@ -118,6 +120,21 @@ fn roundtrip_set(comptime S: type, smith: *Smith) !void {
     try testing.expectEqualSlices(K, value.items, decoded.items);
 }
 
+fn roundtrip_net(smith: *Smith) !void {
+    const v4 = net.Ipv4{ .octets = smith.value([4]u8) };
+    const v6 = net.Ipv6{ .octets = smith.value([16]u8) };
+    const port = smith.value(u16);
+    try expect_roundtrip(net.Ipv4, v4);
+    try expect_roundtrip(net.Ipv6, v6);
+    try expect_roundtrip(net.SocketAddrV4, .{ .ip = v4, .port = port });
+    try expect_roundtrip(net.SocketAddrV6, .{ .ip = v6, .port = port });
+    const ip: net.IpAddr = if (smith.value(bool)) .{ .v4 = v4 } else .{ .v6 = v6 };
+    try expect_roundtrip(net.IpAddr, ip);
+    const socket = net.SocketAddr{ .ip = ip, .port = port };
+    try expect_roundtrip(net.SocketAddr, socket);
+    try testing.expectEqual(1 + 2 + @as(usize, if (ip == .v4) 4 else 16), socket.encode_size());
+}
+
 fn roundtrip_scalars(smith: *Smith, choice: u8) !void {
     switch (choice) {
         0 => try expect_roundtrip(bool, smith.value(bool)),
@@ -169,12 +186,16 @@ fn roundtrip_composites(smith: *Smith, choice: u8) !void {
         12 => try roundtrip_map(map.Map(u32, u32), smith),
         13 => try roundtrip_set(map.HashSet(u64), smith),
         14 => try roundtrip_set(map.Set(u32), smith),
+        15 => try roundtrip_net(smith),
+        16 => if (Modes(3).init(smith.value([3]u7))) |packet| {
+            try expect_roundtrip(Modes(3), packet);
+        },
         else => unreachable,
     }
 }
 
 const scalar_count = 24;
-const composite_count = 15;
+const composite_count = 17;
 
 fn roundtrip(_: void, smith: *Smith) anyerror!void {
     const choice = smith.value(u8) % (scalar_count + composite_count);
@@ -212,6 +233,11 @@ fn decode_canonical(_: void, smith: *Smith) anyerror!void {
     try expect_canonical(map.Map(u8, u16), input, .{ .range = .full() });
     try expect_canonical(map.Set(u16), input, .{ .range = .full() });
     try expect_canonical(map.HashSet(Bytes), input, .{ .range = .full(), .item = .full() });
+    try expect_canonical(net.IpAddr, input, {});
+    try expect_canonical(net.SocketAddr, input, {});
+    try expect_canonical(net.SocketAddrV6, input, {});
+    try expect_canonical(Modes(1), input, {});
+    try expect_canonical(Modes(3), input, {});
     inline for (.{ u0, u4, u8, u14, u16, u32, u36, u64, u128, u256 }) |T| {
         try expect_canonical(varint.UInt(T), input, {});
     }

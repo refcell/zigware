@@ -36,6 +36,9 @@ Every value goes through comptime dispatch on its type (`src/codec/codec.zig` ha
 | `codec.UInt(T)`, `codec.SInt(S)` | `UInt`, `SInt` | varint / ZigZag varint, any width |
 | `codec.Map(K, V)`, `codec.HashMap(K, V)` | `BTreeMap`, `HashMap` | usize count + key/value pairs, keys strictly ascending |
 | `codec.Set(K)`, `codec.HashSet(K)` | `BTreeSet`, `HashSet` | usize count + items strictly ascending |
+| `codec.Ipv4`, `Ipv6`, `SocketAddrV4`, `SocketAddrV6` | std::net types | octets (+ u16 port) |
+| `codec.IpAddr` (union v4/v6), `codec.SocketAddr` | `IpAddr`, `SocketAddr` | version byte 4/6 + addr (+ port) |
+| `codec.Modes(N)` from `[N]u7` (`codec.mode(u8) ?u7`) | `Modes<N>`, `Mode` | continuation-bit packet |
 
 Operations (`T` is always the first, comptime argument):
 
@@ -118,7 +121,9 @@ Decoded maps/sets own their slice: free with `codec.free(M, gpa, m)` or `m.deini
   `fuzz_seed`, then `std.testing.fuzz`); targets port codec_roundtrip.rs plus a
   decode-canonical target (any successful decode re-encodes to the exact input).
 - [x] codec types: maps/sets (sorted, canonical, reject duplicates/unsorted), with tests.
-- [ ] codec types: net addrs, lazy, mode (`Mode`/`Modes`), `U256`/uint.rs (Zig `u256`).
+- [x] codec types: net addrs, mode (`Mode`/`Modes`), with tests and fuzz.
+- [ ] codec types: lazy, `U256`/uint.rs (Zig `u256` already works with `UInt`; port the
+  fixed-width `Uint` codec and its tests).
 - [ ] conformance: hash-of-encodings harness (conformance/src/lib.rs), TOML reader, codec's
   conformance.rs (ChaCha8 + `arbitrary` emulation) so codec/conformance.toml hashes match.
 - [ ] invariants: minifuzz (deterministic seeded fuzz driver over `std.testing.Smith`;
@@ -130,3 +135,4 @@ Decoded maps/sets own their slice: free with `codec.free(M, gpa, m)` or `m.deini
   Error, RangeCfg, varint, primitives, arrays, optional, vec, tuple, Bytes, pointer) landed.
 - 2026-11-13: remaining varint tests; codec seeded fuzz driver and roundtrip/canonical targets.
 - 2026-11-13: canonical Map/HashMap/Set/HashSet and `codec.order`, with tests and fuzz.
+- 2026-11-13: net addresses (Ipv4/Ipv6/SocketAddr*/IpAddr) and Modes, with tests and fuzz.
