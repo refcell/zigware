@@ -30,6 +30,8 @@ pub const Error = error{
     RecvFailed,
     Closed,
     OutOfMemory,
+    /// A production dial, send, or recv outlived its configured timeout.
+    Timeout,
 } || std.Io.Cancelable;
 
 pub const deterministic = @import("network/deterministic.zig");

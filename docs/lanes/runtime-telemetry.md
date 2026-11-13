@@ -71,14 +71,31 @@ the registry API first and report it.
   settlement (`pending.rs`) has no counterpart: `close` is synchronous, so a handle's writes
   have reached the file before the next open. `dont_cache` read/write hints are accepted and
   ignored (std.Io has no per-call cache control).
+- Production TCP (`production/network.zig`) follows commonware's tokio network: one socket
+  split into a sink (closing it shuts down the write side) and a `BufReader`-like stream
+  (`read_buffer_size`, 0 for unbuffered, large reads bypass the empty buffer), the same
+  `Config` defaults (TCP_NODELAY, zero linger, 10 s connect, 60 s read and write timeouts),
+  and `error.Timeout` (added to `network.Error`, commonware `Error::Timeout`).
+  The listener does not set SO_REUSEADDR (std's `reuse_address` also sets SO_REUSEPORT, which
+  would let a second bind of a live port succeed); zero linger already avoids TIME_WAIT.
+- Two `std.Io.Threaded` 0.17.1 limits are worked around in `production/network.zig`: connect
+  with a timeout panics (TODO), so a dial races the connect against a sleep with `Io.Select`;
+  poll timeouts round down to whole milliseconds and can fire up to 1 ms early, so after an
+  early timeout the operation waits out the deadline and retries once.
+- `std.Io.Threaded` 0.17.1 `Future.create` does not reserve room for the result's
+  misalignment: a future whose result is 16-byte aligned (anything holding an `i96`, such as
+  `Io.Duration` or `Io.Clock.Timestamp`) is overrun by up to 8 bytes, which corrupts the heap.
+  Sinks and streams keep their timeouts as `u64` nanoseconds for this reason.
+- `production.Runner` owns its `std.Io.Threaded`, initializes in place (storage and network
+  hold its `Io`), and `start` runs the root function on the calling thread.
 
 ## Backlog
-- [ ] production runtime over `std.Io` (`std.Io.Uring` on Linux, kqueue/Threaded on macOS):
-  a `Runner` with the same surface as `deterministic.Runner` (io, storage, network, metrics),
-  file-backed `runtime.storage` (blob header, sync semantics, partitions as directories),
-  and TCP `runtime.network` (bind/accept/dial returning the same sink/stream contract).
-  Run the ported `run_storage_tests` and `run_network_tests` suites against it; Linux
-  io_uring through `just test-linux` / CI, kqueue on macOS CI.
+- [x] production runtime over `std.Io`: a `Runner` with the same surface as
+  `deterministic.Runner` (io, storage, network, metrics), file-backed `runtime.storage`, and
+  TCP `runtime.network`, passing `run_storage_tests`, `run_network_tests`, the network stress
+  suite, and tokio's own storage and network tests.
+- [ ] Our own io_uring backend (`std.os.linux.IoUring`) behind the same storage and network,
+  since `std.Io.Uring` does not compile; run on Linux through `just test-linux` / CI.
 - [ ] Executor-side `runtime_tasks_*` metrics, if the runtime lane hands them over.
 - [x] metrics registry: counters, gauges, histograms (bucket layout as commonware), label
   sets, families, registration/scoping by component label, and Prometheus text exposition
@@ -101,3 +118,5 @@ the registry API first and report it.
 - 2026-11-13: traces: Tracer, spans, Collector with commonware's assertions, status, traced.
 - 2026-11-13: `deterministic.Runner.metrics()` over a runner-owned registry.
 - 2026-11-13: production file storage passes `run_storage_tests` plus tokio's file tests.
+- 2026-11-13: production TCP passes `run_network_tests`, the stress suite, and tokio's network
+  tests; `production.Runner` ties io, file storage, TCP, and metrics together.
