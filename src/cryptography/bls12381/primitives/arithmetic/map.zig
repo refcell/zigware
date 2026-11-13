@@ -24,6 +24,15 @@ pub const ExpandError = error{ OutputTooLong, DstTooLong };
 
 /// expand_message_xmd with SHA-256 into `out` (its length is len_in_bytes).
 pub fn expand_message_xmd(message: []const u8, dst: []const u8, out: []u8) ExpandError!void {
+    return expand_message_xmd_parts(&.{message}, dst, out);
+}
+
+/// expand_message_xmd of the concatenation of `parts`, without materializing it.
+pub fn expand_message_xmd_parts(
+    parts: []const []const u8,
+    dst: []const u8,
+    out: []u8,
+) ExpandError!void {
     if (out.len > expand_length_max or out.len > 65535) return error.OutputTooLong;
     if (dst.len > dst_length_max) return error.DstTooLong;
     assert(out.len > 0);
@@ -32,7 +41,7 @@ pub fn expand_message_xmd(message: []const u8, dst: []const u8, out: []u8) Expan
     const length_bytes = [2]u8{ @intCast(out.len >> 8), @truncate(out.len) };
     var hasher = sha256.Hasher.init();
     hasher.update(&@as([sha256.block_length]u8, @splat(0)));
-    hasher.update(message);
+    for (parts) |part| hasher.update(part);
     hasher.update(&length_bytes);
     hasher.update(&.{0});
     hasher.update(dst);
@@ -56,15 +65,23 @@ pub fn expand_message_xmd(message: []const u8, dst: []const u8, out: []u8) Expan
 
 /// hash_to_field for Fp with count = 2 (L = 64).
 pub fn hash_to_field_fp(message: []const u8, dst: []const u8) ExpandError![2]Fp {
+    return hash_to_field_fp_parts(&.{message}, dst);
+}
+
+fn hash_to_field_fp_parts(parts: []const []const u8, dst: []const u8) ExpandError![2]Fp {
     var bytes: [128]u8 = undefined;
-    try expand_message_xmd(message, dst, &bytes);
+    try expand_message_xmd_parts(parts, dst, &bytes);
     return .{ fields.fp_from_bytes_wide(bytes[0..64]), fields.fp_from_bytes_wide(bytes[64..128]) };
 }
 
 /// hash_to_field for Fp2 with count = 2 (L = 64, m = 2).
 pub fn hash_to_field_fp2(message: []const u8, dst: []const u8) ExpandError![2]Fp2 {
+    return hash_to_field_fp2_parts(&.{message}, dst);
+}
+
+fn hash_to_field_fp2_parts(parts: []const []const u8, dst: []const u8) ExpandError![2]Fp2 {
     var bytes: [256]u8 = undefined;
-    try expand_message_xmd(message, dst, &bytes);
+    try expand_message_xmd_parts(parts, dst, &bytes);
     var out: [2]Fp2 = undefined;
     for (&out, 0..) |*element, index| {
         const chunk = bytes[index * 128 ..][0..128];
@@ -238,7 +255,12 @@ pub fn map_fp2_to_g2(u: Fp2) g2.Affine {
 
 /// hash_to_curve for BLS12381G1_XMD:SHA-256_SSWU_RO_ with a caller-chosen DST.
 pub fn hash_to_g1(message: []const u8, dst: []const u8) ExpandError!g1.Affine {
-    const u = try hash_to_field_fp(message, dst);
+    return hash_to_g1_parts(&.{message}, dst);
+}
+
+/// hash_to_g1 of the concatenation of `parts`.
+pub fn hash_to_g1_parts(parts: []const []const u8, dst: []const u8) ExpandError!g1.Affine {
+    const u = try hash_to_field_fp_parts(parts, dst);
     const sum = map_to_curve_g1(u[0]).add(map_to_curve_g1(u[1]));
     const result = g1.clear_cofactor(sum).to_affine();
     assert(g1.is_in_subgroup(result));
@@ -247,7 +269,12 @@ pub fn hash_to_g1(message: []const u8, dst: []const u8) ExpandError!g1.Affine {
 
 /// hash_to_curve for BLS12381G2_XMD:SHA-256_SSWU_RO_ with a caller-chosen DST.
 pub fn hash_to_g2(message: []const u8, dst: []const u8) ExpandError!g2.Affine {
-    const u = try hash_to_field_fp2(message, dst);
+    return hash_to_g2_parts(&.{message}, dst);
+}
+
+/// hash_to_g2 of the concatenation of `parts`.
+pub fn hash_to_g2_parts(parts: []const []const u8, dst: []const u8) ExpandError!g2.Affine {
+    const u = try hash_to_field_fp2_parts(parts, dst);
     const sum = map_to_curve_g2(u[0]).add(map_to_curve_g2(u[1]));
     const result = g2.clear_cofactor(sum).to_affine();
     assert(g2.is_in_subgroup(result));

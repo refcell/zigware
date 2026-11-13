@@ -455,6 +455,65 @@ pub fn pairing(p: G1, q: G2) GT {
     return .{ .value = arithmetic.pairing.pairing(p.to_affine(), q.to_affine()) };
 }
 
+/// Checks `prod_i e(p_i, q_i) == 1` over pairs added one at a time: Miller loops run over
+/// batches of `pairs_per_loop_max` pairs, and one final exponentiation ends the check
+/// (commonware `multi_pairing_check`). Pairs with an identity point contribute one.
+pub const PairingCheck = struct {
+    product: Fp12 = Fp12.one,
+    g1s: [batch]G1.Jacobian = undefined,
+    g2s: [batch]G2.Jacobian = undefined,
+    count: usize = 0,
+
+    const batch = arithmetic.pairing.pairs_per_loop_max;
+
+    pub fn add(self: *PairingCheck, p: G1, q: G2) void {
+        assert(self.count < batch);
+        self.g1s[self.count] = p.point;
+        self.g2s[self.count] = q.point;
+        self.count += 1;
+        if (self.count == batch) self.flush();
+        assert(self.count < batch);
+    }
+
+    fn flush(self: *PairingCheck) void {
+        if (self.count == 0) return;
+        var g1_affine: [batch]G1.Affine = undefined;
+        var g2_affine: [batch]G2.Affine = undefined;
+        var g1_scratch: [batch]Fp = undefined;
+        var g2_scratch: [batch]arithmetic.Fp2 = undefined;
+        const count = self.count;
+        G1.Jacobian.batch_to_affine(self.g1s[0..count], g1_affine[0..count], g1_scratch[0..count]);
+        G2.Jacobian.batch_to_affine(self.g2s[0..count], g2_affine[0..count], g2_scratch[0..count]);
+        var pairs: [batch]arithmetic.pairing.Pair = undefined;
+        for (pairs[0..count], g1_affine[0..count], g2_affine[0..count]) |*pair, p, q| {
+            pair.* = .{ .g1 = p, .g2 = q };
+        }
+        self.product = self.product.mul(arithmetic.pairing.miller_loop(pairs[0..count]));
+        self.count = 0;
+    }
+
+    /// Finishes the check; true when the product of the pairings is one.
+    pub fn verify(self: *PairingCheck) bool {
+        self.flush();
+        assert(self.count == 0);
+        return arithmetic.pairing.final_exponentiation(self.product).eql(Fp12.one);
+    }
+};
+
+/// The parts of commonware's `union_unique(namespace, message)`: the varint length of the
+/// namespace, the namespace, then the message. `prefix` holds the varint.
+pub fn union_unique_parts(
+    prefix: *[5]u8,
+    namespace: []const u8,
+    message: []const u8,
+) [3][]const u8 {
+    var writer = codec.Writer.init(prefix);
+    codec.write(usize, namespace.len, &writer);
+    const length = writer.written().len;
+    assert(length > 0 and length <= prefix.len);
+    return .{ prefix[0..length], namespace, message };
+}
+
 const PointKind = enum { g1, g2 };
 
 pub const G1 = Point(.g1);
@@ -572,11 +631,16 @@ fn Point(comptime kind: PointKind) type {
         /// RFC 9380 hash_to_curve (SSWU, random oracle) with domain separation tag `dst`
         /// of at most 255 bytes.
         pub fn hash_to_group(dst: []const u8, message: []const u8) Self {
+            return hash_to_group_parts(dst, &.{message});
+        }
+
+        /// `hash_to_group` of the concatenation of `parts`, without materializing it.
+        pub fn hash_to_group_parts(dst: []const u8, parts: []const []const u8) Self {
             assert(dst.len <= arithmetic.map.dst_length_max);
             // The dst length is checked above and the expansion length is fixed.
             const affine = switch (kind) {
-                .g1 => arithmetic.map.hash_to_g1(message, dst),
-                .g2 => arithmetic.map.hash_to_g2(message, dst),
+                .g1 => arithmetic.map.hash_to_g1_parts(parts, dst),
+                .g2 => arithmetic.map.hash_to_g2_parts(parts, dst),
             } catch unreachable;
             return from_affine(affine);
         }
