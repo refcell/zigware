@@ -5,9 +5,11 @@ on:
     branches: [main]
   workflow_dispatch:
 
+# Many lanes push to main: let the running build finish and keep only the newest push
+# waiting, so a busy main still gets complete runs.
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   test:
