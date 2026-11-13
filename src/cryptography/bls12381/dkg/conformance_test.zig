@@ -185,3 +185,79 @@ test "conformance: feldman-desmedt output" {
         gen_output,
     );
 }
+
+fn feldman_transcript(
+    gpa: Allocator,
+    seed: u64,
+    mode: primitives.Mode,
+    reveal: fd.Reveal,
+) ![]u8 {
+    const application = "_COMMONWARE_CRYPTOGRAPHY_BLS12381_DKG_CONFORMANCE";
+    const dealer_sk = ed25519.PrivateKey.from_seed(11);
+    const dealer_pk = dealer_sk.public_key();
+    const player_sk = ed25519.PrivateKey.from_seed(22);
+    const player_pk = player_sk.public_key();
+    const dealers = try Set(P).init(gpa, &.{dealer_pk});
+    const players = try Set(P).init(gpa, &.{player_pk});
+    const N3f1 = utils.N3f1;
+    var info = try fd.Info(MinPk, P).init(
+        N3f1,
+        gpa,
+        application,
+        seed,
+        null,
+        mode,
+        reveal,
+        dealers,
+        players,
+    );
+    defer info.deinit(gpa);
+
+    var rng = utils.rng.TestRng.init(seed);
+    const Dealer = fd.Dealer(MinPk, ed25519.PrivateKey);
+    var started = try Dealer.start(N3f1, gpa, &rng, &info, dealer_sk, null);
+    defer {
+        started.dealer.deinit(gpa);
+        gpa.free(started.priv_msgs);
+    }
+    const round = info.round_transcript();
+    const ack = try fd.transcript_for_ack(gpa, &round, MinPk, P, dealer_pk, started.pub_msg);
+    const ack_summary = ack.summarize();
+    const ack_signature = ack.sign(&player_sk);
+    const log: fd.DealerLog(MinPk, P) = .{
+        .pub_msg = started.pub_msg,
+        .results = .too_many_reveals,
+    };
+    const log_summary = (try fd.transcript_for_log(gpa, &info, MinPk, P, log)).summarize();
+    var signed = try fd.sign_log(MinPk, ed25519.PrivateKey, gpa, &dealer_sk, &info, log);
+    defer signed.deinit(gpa);
+    const signed_bytes = try codec.encode(fd.SignedDealerLog(MinPk, P), gpa, signed);
+    defer gpa.free(signed_bytes);
+    return std.mem.concat(gpa, u8, &.{
+        &info.summary.bytes, &ack_summary.bytes, &ack_signature.raw,
+        &log_summary.bytes,  signed_bytes,
+    });
+}
+
+fn FeldmanTranscript(comptime mode: primitives.Mode, comptime reveal: fd.Reveal) type {
+    return struct {
+        pub fn commit(gpa: Allocator, seed: u64) ![]u8 {
+            return feldman_transcript(gpa, seed, mode, reveal);
+        }
+    };
+}
+
+test "conformance: feldman-desmedt transcripts" {
+    const conformance = @import("conformance");
+    const file = @embedFile("../../conformance.toml");
+    const name = "commonware_cryptography::bls12381::" ++ module ++ "FeldmanTranscript";
+    inline for (.{
+        .{ "<0,0>", primitives.Mode.non_zero_counter, fd.Reveal.v0 },
+        .{ "<0,1>", primitives.Mode.non_zero_counter, fd.Reveal.v1 },
+        .{ "<1,0>", primitives.Mode.roots_of_unity, fd.Reveal.v0 },
+        .{ "<1,1>", primitives.Mode.roots_of_unity, fd.Reveal.v1 },
+    }) |case| {
+        const C = FeldmanTranscript(case[1], case[2]);
+        try conformance.verify(C, std.testing.allocator, name ++ case[0], 16, file);
+    }
+}

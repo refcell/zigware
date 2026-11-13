@@ -31,6 +31,17 @@ pub const DealerLogSummary = messages.DealerLogSummary;
 pub const SignedDealerLog = messages.SignedDealerLog;
 pub const Output = messages.Output;
 
+const round = @import("feldman_desmedt/round.zig");
+pub const Error = round.Error;
+pub const PubMsgError = round.PubMsgError;
+pub const Info = round.Info;
+pub const Dealer = round.Dealer;
+pub const PrivMsgFor = round.PrivMsgFor;
+pub const transcript_for_ack = round.transcript_for_ack;
+pub const transcript_for_log = round.transcript_for_log;
+pub const sign_log = round.sign_log;
+pub const check_log = round.check_log;
+
 /// Bytes of the transcript summary a dealing draws after its polynomial.
 const summary_length = 32;
 
@@ -85,6 +96,11 @@ pub fn deal_anonymous(
 
 test {
     std.testing.refAllDecls(messages);
+    std.testing.refAllDecls(round);
+    inline for (.{ variant_types.MinPk, variant_types.MinSig }) |V| {
+        std.testing.refAllDecls(Info(V, ed25519.PublicKey));
+        std.testing.refAllDecls(Dealer(V, ed25519.PrivateKey));
+    }
     inline for (.{ variant_types.MinPk, variant_types.MinSig }) |V| {
         _ = DealerPubMsg(V);
         _ = DealerLog(V, ed25519.PublicKey);
