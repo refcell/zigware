@@ -185,6 +185,11 @@ const entries = .{
         bitmap.roaring.Bitmap,
         arbitrary.default_generator(bitmap.roaring.Bitmap),
     ),
+    Codec(
+        "bitmap::roaring::container::run" ++ conformance_suffix ++ "super::Run>",
+        bitmap.roaring.Run,
+        arbitrary.default_generator(bitmap.roaring.Run),
+    ),
 };
 
 test "utils conformance hashes match commonware" {

@@ -32,7 +32,7 @@ encoding parts as soon as `codec` has its core API (see docs/lanes/codec.md).
   `Dirty` with read-through `get_bit`/`get_chunk`, `set_bit`, `push*`, `pop`, `prune_to_bit`;
   `commit(gpa, n)` / `abort`; `apply_batch`, `get_at_commit`, `prune_commits_before`). A failed
   `commit` leaves the `Dirty` unchanged (Rust consumes it).
-  `bitmap.roaring`: in progress; `roaring.Array` and `roaring.Bitmap` containers (codec + conformance) so far.
+  `bitmap.roaring`: in progress; `roaring.Array`, `roaring.Bitmap`, and `roaring.Run` containers (codec + conformance) so far.
   `bitmap.readable` is the `Readable` trait (`len`, `pruned_chunks`, `get_chunk`) + `OnesIter`.
 - `utils.Hostname` (`utils.hostname`): validated RFC 1035/1123 hostname stored inline
   (`init`, `literal`, `as_str`, `eql`, `order`, `{f}`, `len_max`, `label_len_max`,
@@ -75,6 +75,7 @@ encoding parts as soon as `codec` has its core API (see docs/lanes/codec.md).
 - [x] utils ordered (Set/Map/BiMap/Quorum) with conformance hashes.
 - [ ] utils priority_set, cache (LRU etc.), acknowledgement,
   channel (bounded mpsc, ring, reservation, tracked; keep broadcast-resolver's oneshot.zig) — channels over `std.Io` primitives.
+- [ ] utils handles (`Table`), requested by storage-merkle; right after roaring.
 - [ ] Fuzz targets for every decoder (commonware utils/fuzz).
 
 ## Log
@@ -91,4 +92,4 @@ encoding parts as soon as `codec` has its core API (see docs/lanes/codec.md).
 - 2026-11-13: Prunable bitmap with its tests, conformance hash, and fuzz target.
 - 2026-11-13: ordered Set/Map/BiMap/Quorum with tests, conformance hashes, and a set fuzz.
 - 2026-11-13: historical bitmap with its tests, randomized checkpoints, and fuzz target.
-- 2026-11-13: roaring Array and Bitmap containers with tests and conformance hashes.
+- 2026-11-13: roaring Array, Bitmap, and Run containers with tests and conformance hashes.
