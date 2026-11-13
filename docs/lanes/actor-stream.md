@@ -75,6 +75,15 @@ see docs/lanes/runtime.md). Write library code against `std.Io`.
   finishes as the deadline fires still wins (commonware's biased `select!`). A canceled
   fiber must run to unwind, so a timed-out call returns a few scheduler cycles (1 ms each
   in the deterministic runtime) after its deadline; commonware drops the future at once.
+- The stream conformance hashes (CupsV0, CupsV1, SakeV0CupsV1, SakeV1CupsV0) are not
+  ported. Commonware's deterministic executor shuffles each iteration's ready queue with the
+  same `StdRng` that draws the test's keys, ephemeral keys, and message bytes, so those bytes
+  depend on how many tasks are ready per iteration. Fibers block at different points than
+  polled futures, so the counts differ and the hashes cannot match (the same reason the
+  runtime lane gives for auditor digests). Wire identity is covered piecewise instead: SAKE
+  message encodings and transcripts by cryptography's SakeV0/V1 conformance hashes, ChaCha20-
+  Poly1305 by its Seal hash, and CUPS record bytes by `record encoding` against an
+  independent oracle.
 - Loom tests (thread interleavings of the lock-free paths) have no counterpart: the paths
   they check do not exist here. Concurrency is covered on the deterministic runtime instead
   (parked receivers, three producers, same-seed replay) plus a seeded FIFO fuzz.
@@ -82,21 +91,20 @@ see docs/lanes/runtime.md). Write library code against `std.Io`.
 ## Backlog
 - [x] actor: mailbox (bounded ready queue plus policy-managed overflow), `Feedback`,
   `Unreliable`, with commonware's tests on the deterministic runtime and a seeded fuzz.
-- [ ] actor: mailbox benches (actor/src/benches/mailbox.rs) once `bench` lands; metrics
-  counter once the runtime registry lands.
+- [ ] Blocked on bench: actor mailbox benches (actor/src/benches/mailbox.rs).
+- [ ] Blocked on runtime telemetry: register the mailbox `backoff` counter in the metrics
+  registry (`mailbox_backoff_total`) and port commonware's metric-text assertions.
 - [x] stream utils: length-prefixed framing codec (utils/codec.rs) with its tests, a mock
   sink/stream channel, and a seeded wire-bytes fuzz.
 - [x] stream utils: `Timeout` (utils/timeout.rs) with the upgrader tests from lib.rs.
 - [x] stream cups protocol (cups/protocol.rs) with its tests, against a test handshake.
 - [x] stream sake (sake/protocol.rs) over `cryptography.handshake.sake`, with its tests.
-- [ ] stream sake conformance hashes (sake/conformance.rs: CupsV0, CupsV1, SakeV0CupsV1,
-  SakeV1CupsV0). They hash bytes whose keys and timestamps come from the deterministic
-  runtime's RNG, so they match only if its draw order matches commonware's.
+- [x] stream sake conformance hashes: not portable on a fiber runtime (see Decisions).
 - [x] stream fuzz targets (commonware stream/fuzz: transport, connection, lazy_transport,
   e2e with a corrupting/forging/tampering adversary) in `src/stream/fuzz.zig`, seeded in
   `zig build test` and coverage-guided under `--fuzz`.
-- [ ] Switch stream tests and the transport contract to the runtime's network types once
-  they land (mock channel until then).
+- [ ] Blocked on runtime network: switch the stream transport contract and tests to the
+  runtime's `Sink`/`Stream` and its mock channel (`stream.mocks` until then).
 
 ## Log
 - 2026-11-13: actor `Feedback`, `Unreliable`, and `mailbox` with commonware's tests.
@@ -105,3 +113,4 @@ see docs/lanes/runtime.md). Write library code against `std.Io`.
 - 2026-11-13: stream sake and `SakeCups`; cups sender sends each batch in one sink call.
 - 2026-11-13: stream `Timeout` with lib.rs's upgrader tests.
 - 2026-11-13: stream fuzz targets (transport, connection, lazy_transport, e2e).
+- 2026-11-13: conformance-hash decision recorded; remaining items wait on bench and runtime.
