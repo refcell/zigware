@@ -21,8 +21,9 @@ storage-journal (thread T-01a1d58d-a981-75c2-966d-93dcd484f46b).
   `ordinal_operations` fuzz.
 - [x] freezer and archive on-disk records with their codec conformance hashes (freezer
   `Checkpoint`, `Cursor`, `Entry`, `Record<U64>`; prunable `Record<U64>`; immutable `Record`).
-- [ ] freezer: the hash table over fixed + oversized journals, checkpoints, resize, recovery
-  after crash, conformance hashes for every on-disk format.
+- [x] freezer: the hash table over the oversized journal, checkpoints, incremental resize,
+  recovery after crash; `StorageConformance<FreezerWorkload>` (512 cases) matches; ported
+  tests and a `freezer_operations` fuzz target.
 - [ ] archive: the `Archive` interface, prunable (index + journal) and immutable (freezer +
   ordinal + metadata) archives; port their test suites including crash recovery.
 - [ ] Fuzz targets (storage/fuzz entries for these modules) and metrics through
@@ -40,6 +41,10 @@ storage-journal (thread T-01a1d58d-a981-75c2-966d-93dcd484f46b).
   `missing_items`, `prune`, `sync`, `deinit`, `destroy`; `Record(V)`, `BitMap`,
   `SectionBits{section, bits: ?*const BitMap}`, `bits_for_indices`/`free_bits`, `Error`
   (runtime storage errors plus `InvalidBlobName`, `InvalidRecord`, `MissingRecord`).
+- `storage.freezer`: `Freezer(K, V)` with `init(gpa, storage, scope, Config(V), ?Checkpoint)`,
+  `put -> Cursor`, `get(.{ .key = &k } | .{ .cursor = c })`, `has`, `sync -> Checkpoint`,
+  `close -> Checkpoint`, `deinit`, `destroy`, `resizing`, `resizable_entries`; records
+  `Cursor`, `Checkpoint`, `Entry`, `Record(K)`.
 
 ## Decisions
 - Storage conformance: `StorageConformance<W>` commits seeds directly on
@@ -58,6 +63,9 @@ storage-journal (thread T-01a1d58d-a981-75c2-966d-93dcd484f46b).
 - Arbitrary generators: a `#[derive(Arbitrary)]` enum picks its variant as
   `(u64(u32) * variants) >> 32` (arbitrary 1.4); byte-array newtype keys (`U64`,
   `FixedBytes`) fill byte by byte (`freezer.records.arbitrary_key`).
+- freezer: `get` takes a tagged `Identifier` union; `close` frees the freezer on success.
+  The freezer_operations fuzz uses a small key pool so chains collide and keys shadow, and
+  checks every key after crash restores against the model at the last checkpoint.
 - Tests that commonware runs at 100,000 and 5,000 items (`slow` group) run at 2,000 and 600.
 
 ## Log
@@ -67,3 +75,5 @@ storage-journal (thread T-01a1d58d-a981-75c2-966d-93dcd484f46b).
   clearing unmarked runs), both conformance hashes, and the `ordinal_operations` fuzz target.
 - 2026-11-13: freezer and archive record codecs, the `archive.Identifier` interface type, and
   six codec conformance hashes.
+- 2026-11-13: freezer over the oversized journal with its ported tests, storage conformance
+  hash, and the `freezer_operations` fuzz target.

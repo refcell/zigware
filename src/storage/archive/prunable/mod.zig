@@ -10,6 +10,7 @@ const std = @import("std");
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const codec = @import("codec");
+const oversized = @import("../../journal/segmented/oversized.zig");
 const freezer_records = @import("../../freezer/records.zig");
 
 /// A key index record of the prunable archive.
@@ -28,8 +29,8 @@ pub fn Record(comptime K: type) type {
         value_size: u32,
 
         /// The value's `(offset, size)` in the value journal (commonware's `OversizedRecord`).
-        pub fn value_location(record: Self) struct { u64, u32 } {
-            return .{ record.value_offset, record.value_size };
+        pub fn value_location(record: Self) oversized.Location {
+            return .{ .offset = record.value_offset, .size = record.value_size };
         }
 
         pub fn with_location(record: Self, value_offset: u64, value_size: u32) Self {
