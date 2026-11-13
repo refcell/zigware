@@ -83,7 +83,8 @@ see docs/lanes/runtime.md). Write library code against `std.Io`.
   runtime lane gives for auditor digests). Wire identity is covered piecewise instead: SAKE
   message encodings and transcripts by cryptography's SakeV0/V1 conformance hashes, ChaCha20-
   Poly1305 by its Seal hash, and CUPS record bytes by `record encoding` against an
-  independent oracle.
+  independent oracle. The coordinator accepted this on 2026-11-13: the deterministic runtime
+  will not imitate commonware's polling order, and these hashes stay unported.
 - Loom tests (thread interleavings of the lock-free paths) have no counterpart: the paths
   they check do not exist here. Concurrency is covered on the deterministic runtime instead
   (parked receivers, three producers, same-seed replay) plus a seeded FIFO fuzz.
@@ -99,7 +100,7 @@ see docs/lanes/runtime.md). Write library code against `std.Io`.
 - [x] stream utils: `Timeout` (utils/timeout.rs) with the upgrader tests from lib.rs.
 - [x] stream cups protocol (cups/protocol.rs) with its tests, against a test handshake.
 - [x] stream sake (sake/protocol.rs) over `cryptography.handshake.sake`, with its tests.
-- [x] stream sake conformance hashes: not portable on a fiber runtime (see Decisions).
+- [x] stream sake conformance hashes: not ported, by coordinator decision (see Decisions).
 - [x] stream fuzz targets (commonware stream/fuzz: transport, connection, lazy_transport,
   e2e with a corrupting/forging/tampering adversary) in `src/stream/fuzz.zig`, seeded in
   `zig build test` and coverage-guided under `--fuzz`.
