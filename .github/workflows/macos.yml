@@ -1,0 +1,27 @@
+name: macos
+
+# macOS runners are scarce: let the running build finish and keep only the newest push
+# waiting behind it.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: macos-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  test:
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: install zig
+        run: |
+          sh etc/scripts/install-zig.sh "$HOME/zig"
+          echo "$HOME/zig" >> "$GITHUB_PATH"
+      - name: test
+        run: zig build test --summary all
+      - name: test release-safe
+        run: zig build test -Doptimize=ReleaseSafe
