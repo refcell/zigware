@@ -5,7 +5,7 @@ and start when what they build on has landed (or can be stubbed behind an interf
 
 | Wave | Lane | Owns | Starts when |
 | --- | --- | --- | --- |
-| 1 | codec | formatting, conformance, invariants, codec | now |
+| 1 | codec | formatting, conformance, invariants, codec | done |
 | 1 | utils | utils | now |
 | 2 | parallel | parallel, allocator, bench | now (started) |
 | 1 | crypto | cryptography (hashes, ed25519, secp256r1, certificate, handshake, zk, ...) | now |
@@ -20,7 +20,8 @@ and start when what they build on has landed (or can be stubbed behind an interf
 | 3 | broadcast-resolver | broadcast, collector, resolver | p2p simulated |
 | 3 | clearing | clearing | qmdb |
 | 3 | storage-qmdb | storage: qmdb (any, current, immutable, keyless, compact, sync, store) | journal, merkle |
-| 3 | consensus-simplex | consensus: types, simplex, aggregation | p2p, broadcast, resolver |
+| 3 | consensus-simplex | consensus: types, simplex | types now (started); actors after p2p, broadcast, resolver |
+| 3 | consensus-aggregation | consensus: aggregation | simplex types |
 | 3 | consensus-marshal | consensus: marshal | simplex, storage archive |
 | 4 | glue-examples | glue, deployer, examples (log, chat, dkg, bridge, estimator, flood) | consensus |
 

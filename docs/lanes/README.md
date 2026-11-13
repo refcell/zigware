@@ -7,7 +7,7 @@ appends a short dated log line after each push. Other lanes read it to find inte
 
 | Lane | File | Owns | Wave |
 | --- | --- | --- | --- |
-| codec | codec.md | `src/{formatting,conformance,invariants,codec}` | 1 |
+| codec | codec.md | `src/{formatting,conformance,invariants,codec}` (done) | 1 |
 | utils | utils.md | `src/utils` | 1 |
 | parallel | parallel.md | `src/{parallel,allocator,bench}` | 2 |
 | crypto | crypto.md | `src/cryptography` except `bls12381/`, `reed_solomon/` | 1 |
@@ -18,6 +18,7 @@ appends a short dated log line after each push. Other lanes read it to find inte
 | storage-journal | storage-journal.md | `src/storage/{journal,metadata,queue}`, `src/runtime/buffer` | 2 |
 | coding | coding.md | `src/coding`, `src/cryptography/reed_solomon` | 2 |
 | p2p | p2p.md | `src/p2p` | 2 |
+| consensus-simplex | consensus-simplex.md | `src/consensus` except `marshal/`, `aggregation/` | 3 |
 
 Later waves start as their dependencies land; [../ROADMAP.md](../ROADMAP.md) lists them.
 
