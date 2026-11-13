@@ -19,6 +19,9 @@ const RangePlan = proof_module.RangePlan;
 const Blueprint = proof_module.Blueprint;
 const multi_proof_positions = proof_module.multi_proof_positions;
 
+/// Every family the generic checks run under.
+const families = .{ merkle.mmr.Family, merkle.mmb.Family };
+
 fn Mem(comptime F: type) type {
     return merkle.mem.Mem(F, D);
 }
@@ -92,18 +95,20 @@ fn expect_strictly_increasing(positions: []const u64) !void {
     for (positions[1..], positions[0 .. positions.len - 1]) |b, a| try testing.expect(a < b);
 }
 
-const Recorder = struct {
-    reads: merkle.BoundedList(u64, 512) = .{},
-    missing: ?u64 = null,
-    mem: ?*const Mem(merkle.mmr.Family) = null,
+fn Recorder(comptime F: type) type {
+    return struct {
+        reads: merkle.BoundedList(u64, 512) = .{},
+        missing: ?u64 = null,
+        mem: ?*const Mem(F) = null,
 
-    pub fn get_node(self: *Recorder, position: u64) ?D {
-        self.reads.append(position);
-        if (self.missing == position) return null;
-        if (self.mem) |mem| return mem.get_node(position);
-        return test_digest(0);
-    }
-};
+        pub fn get_node(self: *@This(), position: u64) ?D {
+            self.reads.append(position);
+            if (self.missing == position) return null;
+            if (self.mem) |mem| return mem.get_node(position);
+            return test_digest(0);
+        }
+    };
+}
 
 test "proof max encode size uses wire types" {
     const integer = codec.varint.size(u64, std.math.maxInt(u64));
@@ -125,7 +130,7 @@ fn check_range_plan(comptime F: type) !void {
                 for ([_]merkle.Bagging{ .forward_fold, .backward_fold }) |bagging| {
                     const hasher = H.init(bagging);
                     for (0..peaks + 1) |inactive| {
-                        var recorder: Recorder = .{};
+                        var recorder: Recorder(F) = .{};
                         var proof = try plan.build(gpa, &hasher, inactive, &recorder);
                         proof.deinit(gpa);
                         std.mem.sort(u64, recorder.reads.slice_mut(), {}, std.sort.asc(u64));
@@ -139,11 +144,14 @@ fn check_range_plan(comptime F: type) !void {
 }
 
 test "range plan positions independent of bagging and inactive peaks" {
-    try check_range_plan(merkle.mmr.Family);
+    inline for (families) |F| try check_range_plan(F);
 }
 
 test "range plan rejects invalid inputs" {
-    const F = merkle.mmr.Family;
+    inline for (families) |F| try check_range_plan_rejects(F);
+}
+
+fn check_range_plan_rejects(comptime F: type) !void {
     const past_end = RangePlan(F).init(8, .{ .start = 8, .end = 9 });
     try testing.expectError(error.RangeOutOfBounds, past_end);
     try testing.expectError(error.Empty, RangePlan(F).init(8, .{ .start = 3, .end = 3 }));
@@ -158,7 +166,10 @@ test "range plan rejects invalid inputs" {
 }
 
 test "multi proof positions reject invalid inputs" {
-    const F = merkle.mmr.Family;
+    inline for (families) |F| try check_multi_positions_reject(F);
+}
+
+fn check_multi_positions_reject(comptime F: type) !void {
     try testing.expectError(error.RangeOutOfBounds, multi_proof_positions(F, gpa, 8, &.{ 2, 8 }));
     try testing.expectError(error.Empty, multi_proof_positions(F, gpa, 8, &.{}));
     const overflow = multi_proof_positions(F, gpa, 8, &.{std.math.maxInt(u64)});
@@ -203,7 +214,7 @@ fn check_first_invalid_location(comptime F: type) !void {
 }
 
 test "multi proofs report first invalid location" {
-    try check_first_invalid_location(merkle.mmr.Family);
+    inline for (families) |F| try check_first_invalid_location(F);
 }
 
 /// The union of the single-element proof positions, with the same validation order.
@@ -305,8 +316,8 @@ fn check_union_random_and_edges(comptime F: type) !void {
 }
 
 test "multi proof positions match union of element positions" {
-    try check_union_small(merkle.mmr.Family);
-    try check_union_random_and_edges(merkle.mmr.Family);
+    inline for (families) |F| try check_union_small(F);
+    inline for (families) |F| try check_union_random_and_edges(F);
 }
 
 fn check_multi_binding(
@@ -369,17 +380,20 @@ fn check_multi_bind_every_digest(comptime F: type) !void {
 }
 
 test "multi proofs bind every digest and element" {
-    try check_multi_bind_every_digest(merkle.mmr.Family);
+    inline for (families) |F| try check_multi_bind_every_digest(F);
 }
 
 test "range plan build reports the first missing node and rejects before reading" {
-    const F = merkle.mmr.Family;
+    inline for (families) |F| try check_build_missing_node(F);
+}
+
+fn check_build_missing_node(comptime F: type) !void {
     const hasher = H.init(.backward_fold);
     var mem = try build_raw(F, &hasher, 11);
     defer mem.deinit(gpa);
     const plan = try RangePlan(F).init(mem.leaves(), .{ .start = 3, .end = 5 });
     const missing = plan.positions().slice()[1];
-    var recorder: Recorder = .{ .missing = missing, .mem = &mem };
+    var recorder: Recorder(F) = .{ .missing = missing, .mem = &mem };
     try testing.expectError(error.ElementPruned, plan.build(gpa, &hasher, 0, &recorder));
     try testing.expectEqual(missing, recorder.reads.slice()[recorder.reads.len - 1]);
     recorder.reads = .{};
@@ -409,7 +423,7 @@ fn check_empty_proof(comptime F: type) !void {
 }
 
 test "empty proof" {
-    try check_empty_proof(merkle.mmr.Family);
+    inline for (families) |F| try check_empty_proof(F);
 }
 
 fn expect_element_fails(
@@ -475,7 +489,7 @@ fn check_verify_element(comptime F: type) !void {
 }
 
 test "verify element" {
-    try check_verify_element(merkle.mmr.Family);
+    inline for (families) |F| try check_verify_element(F);
 }
 
 fn check_verify_range_valid(
@@ -555,7 +569,7 @@ fn check_verify_range_inserted(
 }
 
 test "verify range" {
-    try check_verify_range(merkle.mmr.Family);
+    inline for (families) |F| try check_verify_range(F);
 }
 
 fn check_retained_after_pruning(comptime F: type) !void {
@@ -577,7 +591,7 @@ fn check_retained_after_pruning(comptime F: type) !void {
 }
 
 test "retained nodes provable after pruning" {
-    try check_retained_after_pruning(merkle.mmr.Family);
+    inline for (families) |F| try check_retained_after_pruning(F);
 }
 
 fn check_ranges_after_pruning(comptime F: type) !void {
@@ -610,7 +624,7 @@ fn check_ranges_after_pruning(comptime F: type) !void {
 }
 
 test "ranges provable after pruning" {
-    try check_ranges_after_pruning(merkle.mmr.Family);
+    inline for (families) |F| try check_ranges_after_pruning(F);
 }
 
 fn check_serialization(comptime F: type) !void {
@@ -646,11 +660,14 @@ fn check_serialization(comptime F: type) !void {
 }
 
 test "proof serialization" {
-    try check_serialization(merkle.mmr.Family);
+    inline for (families) |F| try check_serialization(F);
 }
 
 test "proof decode rejects leaves past max" {
-    const F = merkle.mmr.Family;
+    inline for (families) |F| try check_decode_rejects_leaves_past_max(F);
+}
+
+fn check_decode_rejects_leaves_past_max(comptime F: type) !void {
     var buffer: [32]u8 = undefined;
     var writer = codec.Writer.init(&buffer);
     codec.varint.write(u64, F.max_leaves + 1, &writer);
@@ -699,7 +716,7 @@ fn check_multi_generation(comptime F: type) !void {
 }
 
 test "multi proof generation and verify" {
-    try check_multi_generation(merkle.mmr.Family);
+    inline for (families) |F| try check_multi_generation(F);
 }
 
 fn check_multi_deduplication(comptime F: type) !void {
@@ -720,7 +737,7 @@ fn check_multi_deduplication(comptime F: type) !void {
 }
 
 test "multi proof deduplication" {
-    try check_multi_deduplication(merkle.mmr.Family);
+    inline for (families) |F| try check_multi_deduplication(F);
 }
 
 fn check_leaves_malleability(comptime F: type) !void {
@@ -747,7 +764,7 @@ fn check_leaves_malleability(comptime F: type) !void {
 }
 
 test "proof leaves malleability" {
-    try check_leaves_malleability(merkle.mmr.Family);
+    inline for (families) |F| try check_leaves_malleability(F);
 }
 
 fn check_blueprint_errors(comptime F: type) !void {
@@ -762,7 +779,7 @@ fn check_blueprint_errors(comptime F: type) !void {
 }
 
 test "blueprint errors" {
-    try check_blueprint_errors(merkle.mmr.Family);
+    inline for (families) |F| try check_blueprint_errors(F);
 }
 
 fn check_reconstruction(comptime F: type) !void {
@@ -812,7 +829,7 @@ fn check_range_reconstruction(
 }
 
 test "single element, range, and full range reconstruction" {
-    try check_reconstruction(merkle.mmr.Family);
+    inline for (families) |F| try check_reconstruction(F);
 }
 
 fn check_every_element_contributes(comptime F: type) !void {
@@ -836,7 +853,7 @@ fn check_every_element_contributes(comptime F: type) !void {
 }
 
 test "every element contributes to root" {
-    try check_every_element_contributes(merkle.mmr.Family);
+    inline for (families) |F| try check_every_element_contributes(F);
 }
 
 fn check_tampered_digests(comptime F: type) !void {
@@ -861,7 +878,7 @@ fn check_tampered_digests(comptime F: type) !void {
 }
 
 test "tampered proof digests rejected" {
-    try check_tampered_digests(merkle.mmr.Family);
+    inline for (families) |F| try check_tampered_digests(F);
 }
 
 fn check_no_duplicate_positions(comptime F: type) !void {
@@ -875,7 +892,7 @@ fn check_no_duplicate_positions(comptime F: type) !void {
 }
 
 test "no duplicate positions" {
-    try check_no_duplicate_positions(merkle.mmr.Family);
+    inline for (families) |F| try check_no_duplicate_positions(F);
 }
 
 fn check_full_peak_blueprint(comptime F: type) !void {
@@ -889,7 +906,7 @@ fn check_full_peak_blueprint(comptime F: type) !void {
 }
 
 test "full peak range blueprint does not descend" {
-    try check_full_peak_blueprint(merkle.mmr.Family);
+    inline for (families) |F| try check_full_peak_blueprint(F);
 }
 
 fn check_pinned_nodes_across_sizes(comptime F: type) !void {
@@ -952,7 +969,7 @@ fn check_pinned_nodes_across_sizes(comptime F: type) !void {
 }
 
 test "verify range inclusion with pinned nodes across sizes" {
-    try check_pinned_nodes_across_sizes(merkle.mmr.Family);
+    inline for (families) |F| try check_pinned_nodes_across_sizes(F);
 }
 
 /// The first leaf a range of `width` can start at past the inactive peaks, or the last
@@ -1024,8 +1041,8 @@ fn check_multi_shapes(comptime F: type) !void {
 }
 
 test "range and multi proofs verify for supported root shapes" {
-    try check_range_shapes(merkle.mmr.Family);
-    try check_multi_shapes(merkle.mmr.Family);
+    inline for (families) |F| try check_range_shapes(F);
+    inline for (families) |F| try check_multi_shapes(F);
 }
 
 test "mmr proving digests from range" {
@@ -1097,19 +1114,238 @@ test "mmr proving digests from range" {
     }
 }
 
+/// Appends the roots of `n` raw elements of family `F` under every bagging and inactive
+/// boundary to `roots`, failing if any repeats.
+fn insert_roots(comptime F: type, n: u64, roots: anytype) !void {
+    var mem = try build_raw(F, &H.init(.forward_fold), n);
+    defer mem.deinit(gpa);
+    for ([_]merkle.Bagging{ .forward_fold, .backward_fold }) |bagging| {
+        for (0..peak_count(F, n) + 1) |inactive| {
+            const root = try mem.root(&H.init(bagging), inactive);
+            for (roots.slice()) |other| try testing.expect(!other.eql(root));
+            roots.append(root);
+        }
+    }
+}
+
 test "roots commit family and bagging" {
-    const F = merkle.mmr.Family;
     for (0..65) |n| {
-        var mem = try build_raw(F, &H.init(.forward_fold), n);
-        defer mem.deinit(gpa);
-        var roots: merkle.BoundedList(D, 2 * (merkle.max_pinned_nodes + 1)) = .{};
-        for ([_]merkle.Bagging{ .forward_fold, .backward_fold }) |bagging| {
-            for (0..peak_count(F, n) + 1) |inactive| {
-                const root = try mem.root(&H.init(bagging), inactive);
-                for (roots.slice()) |other| try testing.expect(!other.eql(root));
-                roots.append(root);
+        var roots: merkle.BoundedList(D, 4 * (merkle.max_pinned_nodes + 1)) = .{};
+        inline for (families) |F| try insert_roots(F, n, &roots);
+    }
+}
+
+/// Whether `proof`, re-typed for family `V`, verifies `elements` from `start` against `root`
+/// under `bagging`.
+fn verifies_under(
+    comptime V: type,
+    proof: anytype,
+    bagging: merkle.Bagging,
+    start: u64,
+    elements: anytype,
+    root: *const D,
+) bool {
+    const retyped: Proof(V) = .{
+        .leaves = proof.leaves,
+        .inactive_peaks = proof.inactive_peaks,
+        .digests = proof.digests,
+    };
+    return retyped.verify_range_inclusion(&H.init(bagging), start, elements, root);
+}
+
+/// Every single-element proof over `n` elements of family `F`, at every inactive boundary,
+/// verifies only under `F` and the bagging that produced it, and never under family `G`.
+fn check_proof_binding(comptime F: type, comptime G: type, n: u64) !void {
+    var mem = try build_raw(F, &H.init(.forward_fold), n);
+    defer mem.deinit(gpa);
+    for ([_]merkle.Bagging{ .forward_fold, .backward_fold }) |bagging| {
+        const hasher = H.init(bagging);
+        for (0..peak_count(F, n) + 1) |inactive| {
+            const root = try mem.root(&hasher, inactive);
+            for (0..n) |location| {
+                var proof = try mem.proof(gpa, &hasher, location, inactive);
+                defer proof.deinit(gpa);
+                const element = [_][8]u8{be(location)};
+                for ([_]merkle.Bagging{ .forward_fold, .backward_fold }) |verifier| {
+                    const own = verifies_under(F, &proof, verifier, location, &element, &root);
+                    try testing.expectEqual(verifier == bagging, own);
+                    try testing.expect(
+                        !verifies_under(G, &proof, verifier, location, &element, &root),
+                    );
+                }
             }
         }
+    }
+}
+
+test "proofs verify only under their family and bagging" {
+    for (1..33) |n| {
+        try check_proof_binding(merkle.mmr.Family, merkle.mmb.Family, n);
+        try check_proof_binding(merkle.mmb.Family, merkle.mmr.Family, n);
+    }
+}
+
+fn check_empty_proof_binding(comptime F: type, comptime G: type) !void {
+    const mem: Mem(F) = .empty;
+    const proof: Proof(F) = .{};
+    const none: []const [8]u8 = &.{};
+    for ([_]merkle.Bagging{ .forward_fold, .backward_fold }) |bagging| {
+        const root = try mem.root(&H.init(bagging), 0);
+        for ([_]merkle.Bagging{ .forward_fold, .backward_fold }) |verifier| {
+            const own = verifies_under(F, &proof, verifier, 0, none, &root);
+            try testing.expectEqual(verifier == bagging, own);
+            try testing.expect(!verifies_under(G, &proof, verifier, 0, none, &root));
+        }
+    }
+}
+
+test "empty proofs verify only under their family and bagging" {
+    try check_empty_proof_binding(merkle.mmr.Family, merkle.mmb.Family);
+    try check_empty_proof_binding(merkle.mmb.Family, merkle.mmr.Family);
+}
+
+fn mem_peaks(mem: anytype, buffer: *[merkle.max_pinned_nodes]D) []D {
+    return mem.peaks(buffer);
+}
+
+test "mmb verifier rejects mmr root" {
+    // With 2^k - 1 elements both families have k peaks, and the newest MMR peak is the leaf at
+    // the newest MMB peak's position, so an MMB proof of that leaf can carry the older MMR
+    // peaks. Only the family tag separates the forged root from the MMR root.
+    const hasher = H.init(.backward_fold);
+    for (1..11) |k| {
+        const n = (@as(u64, 1) << @intCast(k)) - 1;
+        var mmr = try build_raw(merkle.mmr.Family, &hasher, n);
+        defer mmr.deinit(gpa);
+        const root = try mmr.root(&hasher, 0);
+        const location = n - 1;
+        const element = be(location);
+        var proof = try mmr.proof(gpa, &hasher, location, 0);
+        defer proof.deinit(gpa);
+        try testing.expect(proof.verify_element_inclusion(&hasher, location, &element, &root));
+        const forged: Proof(merkle.mmb.Family) = .{
+            .leaves = n,
+            .inactive_peaks = 0,
+            .digests = proof.digests,
+        };
+        var buffer: [merkle.max_pinned_nodes]D = undefined;
+        const peaks = mem_peaks(&mmr, &buffer);
+        const mmb_root = try merkle.hasher.root(merkle.mmb.Family, &hasher, n, 0, peaks);
+        const elements = [_][8]u8{element};
+        const reconstructed = try forged.reconstruct_root(&hasher, location, &elements);
+        try testing.expect(mmb_root.eql(reconstructed));
+        try testing.expect(!forged.verify_element_inclusion(&hasher, location, &element, &root));
+    }
+}
+
+test "mmb verifier rejects mmr internal node as element" {
+    // With 76 leaves, MMB location 73 is position 140, and its parent 141 is the fifth of six
+    // MMB peaks. In the MMR, 140 is the parent of 136 and 139, and 141 is the second of three
+    // peaks. An MMB leaf at 140 holding `d136 || d139` has the digest of MMR node 140, an
+    // element the MMR never contained.
+    const hasher = H.init(.forward_fold);
+    var mmr = try build_raw(merkle.mmr.Family, &hasher, 76);
+    defer mmr.deinit(gpa);
+    const root = try mmr.root(&hasher, 0);
+    var element: [64]u8 = undefined;
+    @memcpy(element[0..32], &mmr.get_node(136).?.bytes);
+    @memcpy(element[32..64], &mmr.get_node(139).?.bytes);
+    // A forward MMB proof of location 73 holds the folded prefix of the first four MMB
+    // peaks, the sixth peak, and the sibling of 140: MMR nodes 126, 148, and 133 fill them.
+    var digests = [_]D{ mmr.get_node(126).?, mmr.get_node(148).?, mmr.get_node(133).? };
+    const forged: Proof(merkle.mmb.Family) = .{
+        .leaves = 76,
+        .inactive_peaks = 0,
+        .digests = &digests,
+    };
+    var buffer: [merkle.max_pinned_nodes]D = undefined;
+    const peaks = mem_peaks(&mmr, &buffer);
+    const mmb_root = try merkle.hasher.root(merkle.mmb.Family, &hasher, 76, 0, peaks);
+    const elements = [_][]const u8{&element};
+    try testing.expect(mmb_root.eql(try forged.reconstruct_root(&hasher, 73, &elements)));
+    try testing.expect(!forged.verify_element_inclusion(&hasher, 73, &element, &root));
+}
+
+fn check_backward_fold_suffix(inactive_peaks: usize) !void {
+    const F = merkle.mmb.Family;
+    const hasher = H.init(.backward_fold);
+    var mem = try build_raw(F, &hasher, 123);
+    defer mem.deinit(gpa);
+    const leaves = mem.leaves();
+    const root = try mem.root(&hasher, inactive_peaks);
+    var selected: ?Blueprint(F) = null;
+    for (0..leaves) |location| {
+        const range: Range = .{ .start = location, .end = location + 1 };
+        const blueprint = try Blueprint(F).init(leaves, inactive_peaks, .backward_fold, range);
+        if (blueprint.suffix_peaks.len > 1) {
+            selected = blueprint;
+            break;
+        }
+    }
+    const blueprint = selected.?; // The test tree exposes a multi-peak suffix.
+    const suffix_len = blueprint.suffix_peaks.len;
+    const suffix_index = @as(usize, @intFromBool(blueprint.fold_prefix.len > 0)) +
+        blueprint.prefix_active_peaks.len + blueprint.after_peaks.len;
+    const keyed_len = suffix_index + blueprint.siblings.len + suffix_len;
+    var proof = try blueprint.build_proof(gpa, &hasher, inactive_peaks, &mem);
+    defer proof.deinit(gpa);
+    // The suffix peaks collapse into one accumulator digest.
+    try testing.expectEqual(suffix_len - 1, keyed_len - proof.digests.len);
+    const start = blueprint.range.start;
+    const element = [_][8]u8{be(start)};
+    try testing.expect(proof.verify_range_inclusion(&hasher, start, &element, &root));
+    proof.digests[suffix_index].bytes[0] ^= 1;
+    try testing.expect(!proof.verify_range_inclusion(&hasher, start, &element, &root));
+}
+
+test "mmb backward fold range proof collapses active suffix" {
+    try check_backward_fold_suffix(0);
+}
+
+test "mmb backward fold range proof keeps inactive after peaks individual" {
+    try check_backward_fold_suffix(2);
+}
+
+test "full backward root proves like split zero" {
+    const F = merkle.mmb.Family;
+    const hasher = H.init(.backward_fold);
+    var mem = try build_raw(F, &hasher, 123);
+    defer mem.deinit(gpa);
+    const plan = try RangePlan(F).init(mem.leaves(), .{ .start = 2, .end = 3 });
+    var proof = try plan.build(gpa, &hasher, 0, &mem);
+    defer proof.deinit(gpa);
+    const root = try mem.root(&hasher, 0);
+    const element = [_][8]u8{be(2)};
+    try testing.expect(proof.verify_range_inclusion(&hasher, 2, &element, &root));
+    const locations = [_]u64{ 0, 5, 10 };
+    var multi = try multi_proof(F, &mem, &locations, 0);
+    defer multi.deinit(gpa);
+    const elements = [_][8]u8{ be(0), be(5), be(10) };
+    try testing.expect(try multi_ok(&multi, &hasher, &locations, &elements, &root));
+}
+
+test "mmb last element proof size is two" {
+    const F = merkle.mmb.Family;
+    const hasher = H.init(.forward_fold);
+    var mem = try build_raw(F, &hasher, 1000);
+    defer mem.deinit(gpa);
+    var n: u64 = 1000;
+    while (n <= 5000) : (n += 100) {
+        const leaves = mem.leaves();
+        const root = try mem.root(&hasher, 0);
+        const location = n - 1;
+        const inactive = merkle.inactive_peaks(F, leaves, 0);
+        const range: Range = .{ .start = location, .end = n };
+        const blueprint = try Blueprint(F).init(leaves, inactive, .forward_fold, range);
+        const total = @as(usize, @intFromBool(blueprint.fold_prefix.len > 0)) +
+            blueprint.prefix_active_peaks.len + blueprint.after_peaks.len +
+            blueprint.siblings.len;
+        try testing.expect(total <= 2);
+        var proof = try mem.proof(gpa, &hasher, location, 0);
+        defer proof.deinit(gpa);
+        const element = be(location);
+        try testing.expect(proof.verify_element_inclusion(&hasher, location, &element, &root));
+        for (n..n + 100) |i| try mem.add(gpa, &hasher, &be(i));
     }
 }
 

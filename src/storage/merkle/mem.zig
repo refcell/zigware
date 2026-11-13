@@ -33,6 +33,33 @@ pub fn Mem(comptime F: type, comptime Digest: type) type {
 
         pub const empty: Self = .{};
 
+        /// A structure from its retained `nodes` (starting at the position of
+        /// `boundary`) and the digests pinned at that boundary, in
+        /// `merkle.nodes_to_pin` order (commonware's `Mem::init(Config)`). Copies `nodes`.
+        pub fn init(
+            gpa: Allocator,
+            nodes: []const Digest,
+            boundary: u64,
+            pinned_nodes: []const Digest,
+        ) (merkle.Error || Allocator.Error)!Self {
+            const pruned_size = try merkle.position_from_location(F, boundary);
+            const total = merkle.checked_add(pruned_size, nodes.len, F.max_nodes) orelse
+                return error.InvalidSize;
+            if (!F.is_valid_size(total)) return error.InvalidSize;
+            var positions_buffer: [merkle.max_pinned_nodes]u64 = undefined;
+            const positions = merkle.nodes_to_pin(F, boundary, &positions_buffer);
+            if (pinned_nodes.len != positions.len) return error.InvalidPinnedNodes;
+            var self: Self = .{
+                .pruned_size = pruned_size,
+                .pinned_positions = .from_slice(positions),
+                .pinned_digests = .from_slice(pinned_nodes),
+            };
+            try self.nodes.appendSlice(gpa, nodes);
+            assert(self.size() == total);
+            assert(self.pruning_boundary() == boundary);
+            return self;
+        }
+
         pub fn deinit(self: *Self, gpa: Allocator) void {
             self.nodes.deinit(gpa);
             self.* = undefined;

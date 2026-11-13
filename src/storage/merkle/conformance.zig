@@ -55,3 +55,8 @@ test "conformance MmrRootStability" {
     const actual = try root_stability_hash(merkle.mmr.Family, std.testing.allocator, 200);
     try expect_hash("23151a36602cbbf8cadd68638d5290c44a7679f013a1b1b620007e05a544f533", actual);
 }
+
+test "conformance MmbRootStability" {
+    const actual = try root_stability_hash(merkle.mmb.Family, std.testing.allocator, 200);
+    try expect_hash("8defd2a59ffcea7b24fdef437bff9a954267e17ab72aa6d7c2ef7ed5d3d90238", actual);
+}

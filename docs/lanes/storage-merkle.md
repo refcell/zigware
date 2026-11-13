@@ -14,7 +14,7 @@ variants need `runtime` storage; do them after its interface lands.
   positions and peaks math identical to commonware, proof codec. Port its tests and vectors.
   (Batch API and the Proof `CodecConformance` hash still to do; the latter waits on the
   conformance lane's `arbitrary` emulation.)
-- [ ] merkle/mmb and shared merkle proof types.
+- [x] merkle/mmb and shared merkle proof types.
 - bmt moved to the coding lane (it needs it first).
 - [ ] bitmap (authenticated bitmap over MMR).
 - [ ] index (ordered/unordered, partitioned) over translators.
@@ -46,3 +46,9 @@ variants need `runtime` storage; do them after its interface lands.
   are any slice of byte slices, byte arrays, or digests. `verify_multi_inclusion` takes
   locations and elements as two parallel slices. Mutation checks: reversing sibling DFS order
   fails 11 tests; dropping the multi-proof witness cross-check fails the binding test.
+- merkle/mmb: `merkle.mmb.Family` (domain 1) with the same comptime interface as MMR plus
+  the graftable functions (`leftmost_leaf`, `subtree_root_position`, `chunk_peaks`, which
+  returns a `ChunkPeakIterator` since an MMB chunk can span several peaks). Every generic
+  proof and Mem test runs under both families. MMB root conformance hash
+  (`MmbRootStability`, 200 cases) matches commonware; a domain-tag mutation fails it.
+  `Mem.init(gpa, nodes, boundary, pinned)` ports `Mem::init(Config)`.

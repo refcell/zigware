@@ -13,6 +13,7 @@ const assert = std.debug.assert;
 
 pub const hasher = @import("hasher.zig");
 pub const mem = @import("mem.zig");
+pub const mmb = @import("mmb/mod.zig");
 pub const mmr = @import("mmr/mod.zig");
 pub const conformance = @import("conformance.zig");
 pub const proof = @import("proof.zig");
@@ -250,6 +251,7 @@ pub fn nodes_to_pin(
 test {
     std.testing.refAllDecls(@This());
     _ = @import("proof_test.zig");
+    _ = @import("mem_test.zig");
 }
 
 test "bagging domains are distinct" {
