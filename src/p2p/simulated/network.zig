@@ -14,8 +14,9 @@
 //!   cannot reorder sends that commonware would have batched together.
 //! - A link delivers into the recipient's channel at `deliver_at` directly, instead of over a
 //!   socket the runtime would carry; arrival times and per-link order are the same.
-//! - Latency is drawn with Box-Muller from the runtime RNG, not `rand_distr`'s ziggurat, so
-//!   individual samples differ from commonware's for the same seed.
+//! - Latency is drawn with `rand_distr`'s ziggurat `Normal` (`normal.zig`), so a link gives
+//!   commonware's samples for the same RNG stream; the stream itself also feeds the runtime's
+//!   scheduler, whose task order differs from commonware's actor.
 //! - `deinit` the network after every sender, control, oracle, and manager is gone.
 
 const std = @import("std");
@@ -32,6 +33,8 @@ const SortedMap = @import("sorted_map.zig").SortedMap;
 const Unbounded = @import("channel.zig").Unbounded;
 const tracker_mod = @import("tracker.zig");
 const transmitter = @import("transmitter.zig");
+const normal = @import("normal.zig");
+const Normal = normal.Normal;
 
 const Duration = utils_pkg.Duration;
 const SystemTime = utils_pkg.SystemTime;
@@ -87,13 +90,12 @@ const IoRng = struct {
     }
 };
 
-/// A normal sample with `mean` and `deviation` (Box-Muller), in the same unit.
-fn sample_normal(rng: IoRng, mean: f64, deviation: f64) f64 {
-    if (deviation == 0) return mean;
-    const u1_value = 1.0 - utils_pkg.rng.float64(rng); // (0, 1]
-    const u2_value = utils_pkg.rng.float64(rng);
-    const radius = @sqrt(-2.0 * @log(u1_value));
-    return mean + deviation * radius * @cos(2.0 * std.math.pi * u2_value);
+/// Whether a message on a link with `success_rate` is delivered (commonware
+/// `Probability::sample`): certain outcomes draw nothing from the RNG.
+fn sample_success(rng: IoRng, success_rate: f64) bool {
+    assert(success_rate >= 0 and success_rate <= 1);
+    if (success_rate == 0) return false;
+    return utils_pkg.rng.bernoulli(rng, success_rate);
 }
 
 /// Milliseconds as a `Duration`, saturating like Rust's `f64 as u64` (negative is zero).
@@ -136,7 +138,7 @@ pub fn Network(comptime P: type) type {
             blocked: Watch(P),
         };
 
-        const LinkState = struct { latency_ms: f64, jitter_ms: f64, success_rate: f64 };
+        const LinkState = struct { sampler: Normal, success_rate: f64 };
 
         const Delivery = struct {
             deliver_at: SystemTime,
@@ -488,8 +490,8 @@ pub fn Network(comptime P: type) type {
             if (network.config.disconnect_on_block and blocked) return;
             const link = network.links.get(forward) orelse return;
             const rng: IoRng = .{ .io = network.io };
-            const latency = latency_from_ms(sample_normal(rng, link.latency_ms, link.jitter_ms));
-            const should_deliver = utils_pkg.rng.bernoulli(rng, link.success_rate);
+            const latency = latency_from_ms(link.sampler.sample(rng));
+            const should_deliver = sample_success(rng, link.success_rate);
             payload.refs += 1;
             var completions: Transmitter.Completions = .empty;
             defer completions.deinit(network.gpa);
@@ -672,10 +674,12 @@ pub fn Network(comptime P: type) type {
                 _ = try network.ensure_peer(receiver);
                 const pair: Pair = .{ .origin = sender, .recipient = receiver };
                 if (network.links.contains(pair)) return error.LinkExists;
-                const ns_per_ms: f64 = std.time.ns_per_ms;
+                const latency_ms = normal.duration_ms(link.latency);
+                const jitter_ms = normal.duration_ms(link.jitter);
+                // A Duration is finite, so the deviation is valid.
+                const sampler = Normal.init(latency_ms, jitter_ms) catch unreachable;
                 _ = try network.links.put(network.gpa, pair, .{
-                    .latency_ms = @as(f64, @floatFromInt(link.latency.as_nanos())) / ns_per_ms,
-                    .jitter_ms = @as(f64, @floatFromInt(link.jitter.as_nanos())) / ns_per_ms,
+                    .sampler = sampler,
                     .success_rate = link.success_rate,
                 });
             }

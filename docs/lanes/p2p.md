@@ -45,6 +45,8 @@ handshake and the runtime's network, which the actor-stream and runtime lanes ar
   caller-owned; `check` for the two-step form; `deinit`). `Receiver` has `recv() !Message(P)`
   (free with `message.deinit()`), `try_recv`, `capacity()`, `deinit`. Errors: `NetworkClosed`,
   `LinkingSelf`, `LinkExists`, `LinkMissing`.
+- `p2p.simulated.Normal` (`init(mean, std_dev)`, `sample(rng)`), `simulated.normal.standard`
+  and `duration_ms`: rand_distr's `Normal<f64>`, bit-identical for the same RNG stream.
 - `p2p.Message(P)` owns its payload when `gpa` is set; release it with `deinit`.
 - Senders take a message as parts (`[]const []const u8`, concatenated), like stream frames.
 
@@ -68,9 +70,12 @@ handshake and the runtime's network, which the actor-stream and runtime lanes ar
   deliveries straight into per-(peer, channel) unbounded mailboxes instead of simulated
   sockets. Order of sends, link changes, and arrival times per link match commonware;
   `priority` does not reorder sends.
-- Pending conformance: link latency is sampled with Box-Muller from the runtime RNG, not
-  `rand_distr`'s ziggurat `Normal`, so individual latencies differ from commonware's for the
-  same seed (runs are still deterministic per seed).
+- Link latency uses `simulated.Normal`, a port of `rand_distr` 0.6.0's ziggurat
+  `StandardNormal`; it matches Rust bit for bit over 100k samples from `StdRng` seed 0, and
+  latencies use Rust's `as_secs_f64() * 1000.0` and `as u64`. Success rates sample like
+  `Probability` (0 and 1 draw nothing). Whole-run streams can still differ from commonware's,
+  because the deterministic runtime's scheduler draws from the same RNG and the network's
+  task layout differs from commonware's actor.
 - p2p carries its own seeded fuzz driver (`p2p.fuzz.run`, same as codec's) until
   `invariants.minifuzz` lands.
 
@@ -87,8 +92,7 @@ handshake and the runtime's network, which the actor-stream and runtime lanes ar
   rate, rate-limited senders, receivers, peer-set tracking) with its first tests.
 - [x] simulated: dynamic links, peer-set window and own/network-wide peer sets, and every
   bandwidth test (contention, sharing, staggered, pipe reservation, zero limits).
-- [ ] simulated: ziggurat `Normal` for byte-identical latency samples (next, coordinator
-  priority for the estimator demo).
+- [x] simulated: ziggurat `Normal` for byte-identical latency samples.
 - [ ] simulated: remaining mod.rs tests (blocking and disconnect_on_block, peer-set
   subscriptions, shutdown, socket manager), split senders and receivers.
 - [ ] authenticated: router, relay, throttle, dialing, connection over stream's
@@ -106,3 +110,4 @@ handshake and the runtime's network, which the actor-stream and runtime lanes ar
 - 2026-11-13: simulated network core: Oracle, links, send/receive, peer sets, blocking.
 - 2026-11-13: simulated link, peer-set, and bandwidth tests; fiber stacks end in a zeroed
   frame so stack traces captured on a fiber stop at its top.
+- 2026-11-13: rand_distr ziggurat Normal for link latency, bit-identical to Rust.
