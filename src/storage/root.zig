@@ -19,6 +19,7 @@ pub const mmb = merkle.mmb;
 pub const mmr = merkle.mmr;
 pub const journal = @import("journal/mod.zig");
 pub const metadata = @import("metadata/mod.zig");
+pub const cache = @import("cache/mod.zig");
 
 test {
     std.testing.refAllDecls(@This());
