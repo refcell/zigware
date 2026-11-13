@@ -19,6 +19,7 @@ pub const round = traits.round;
 pub const reporter = @import("reporter.zig");
 pub const Reporters = reporter.Reporters;
 pub const simplex = @import("simplex/root.zig");
+pub const aggregation = @import("aggregation/root.zig");
 
 test {
     std.testing.refAllDecls(@This());
