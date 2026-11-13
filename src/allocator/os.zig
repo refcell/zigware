@@ -1,6 +1,7 @@
 //! The operating-system memory a heap uses: aligned anonymous mappings, unmapping, purging
-//! (decommit with `MADV_DONTNEED`), and prefaulting. Like commonware's allocator, this is the
-//! one layer below the runtime that maps memory itself.
+//! (decommit with `MADV_DONTNEED` on Linux, a fixed zero-fill remap on Darwin), and
+//! prefaulting. Like commonware's allocator, this is the one layer below the runtime that maps
+//! memory itself.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -47,8 +48,22 @@ pub fn unmap(region: Region) void {
 /// whether the system purged it.
 pub fn purge(region: Region) bool {
     assert(region.len % page_size_min == 0);
-    if (builtin.os.tag != .linux and !builtin.os.tag.isDarwin()) return false;
-    posix.madvise(region.ptr, region.len, posix.MADV.DONTNEED) catch return false;
+    if (builtin.os.tag == .linux) {
+        posix.madvise(region.ptr, region.len, posix.MADV.DONTNEED) catch return false;
+        return true;
+    }
+    if (!builtin.os.tag.isDarwin()) return false;
+    // Darwin's MADV_DONTNEED keeps the old contents, so replace the pages with fresh
+    // zero-fill ones in place instead.
+    const remapped = posix.mmap(
+        region.ptr,
+        region.len,
+        .{ .READ = true, .WRITE = true },
+        .{ .TYPE = .PRIVATE, .ANONYMOUS = true, .FIXED = true },
+        -1,
+        0,
+    ) catch return false;
+    assert(remapped.ptr == region.ptr);
     return true;
 }
 
