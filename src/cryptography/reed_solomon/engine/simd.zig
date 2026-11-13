@@ -1,11 +1,12 @@
-//! `Simd`: the `Scalar` transforms over a vector multiply kernel (commonware's AVX2 engine,
-//! `engine_avx2.rs`, uses the same nibble-shuffle multiply).
+//! `Simd`: the `Scalar` transforms over a vector multiply kernel (commonware's AVX2 and NEON
+//! engines, `engine_avx2.rs` and `engine_neon.rs`, use the same nibble-shuffle multiply).
 //!
 //! A chunk is 32 low bytes then 32 high bytes, so one `@Vector(32, u8)` holds the low or high
 //! halves of 32 field elements. Multiplying by `m` looks up each 4-bit nibble of every element
-//! in a 16-entry table with `vpshufb` and XORs the four results, for the low and high output
-//! bytes. Zig has no portable runtime byte shuffle, so the kernel exists only where AVX2 does;
-//! `available` says whether it does, and `DefaultEngine` uses it then.
+//! in a 16-entry table with a byte shuffle (`vpshufb` on x86-64 AVX2, `tbl` on aarch64 NEON)
+//! and XORs the four results, for the low and high output bytes. Zig has no portable runtime
+//! byte shuffle, so the kernel exists only where one of those does; `available` says whether
+//! it does, and `DefaultEngine` uses it then.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -18,18 +19,56 @@ const GfElement = engine.GfElement;
 const Chunk = engine.Chunk;
 const half = engine.SHARD_CHUNK_BYTES / 2;
 const Bytes = @Vector(half, u8);
+const Lane = @Vector(16, u8);
+
+const avx2 = builtin.cpu.arch == .x86_64 and
+    std.Target.x86.featureSetHas(builtin.cpu.features, .avx2);
+const neon = builtin.cpu.arch == .aarch64 and
+    std.Target.aarch64.featureSetHas(builtin.cpu.features, .neon);
 
 /// Whether the target has the byte shuffle the kernel needs.
-pub const available = builtin.cpu.arch == .x86_64 and
-    std.Target.x86.featureSetHas(builtin.cpu.features, .avx2);
+pub const available = avx2 or neon;
+
+/// The name of the vector engine on this target, as commonware's benchmarks label it.
+pub const name = if (avx2) "avx2" else if (neon) "neon" else "scalar";
 
 /// Shuffles each 128-bit lane of `table` by the low four bits of `index` (both lanes of
 /// `table` hold the same 16 entries, and every index is below 16).
 inline fn shuffle(table: Bytes, index: Bytes) Bytes {
-    return asm ("vpshufb %[index], %[table], %[out]"
-        : [out] "=x" (-> Bytes),
-        : [table] "x" (table),
-          [index] "x" (index),
+    comptime assert(available);
+    if (avx2) {
+        return asm ("vpshufb %[index], %[table], %[out]"
+            : [out] "=x" (-> Bytes),
+            : [table] "x" (table),
+              [index] "x" (index),
+        );
+    }
+    const low = lookup(
+        @shuffle(u8, table, undefined, masks.low),
+        @shuffle(u8, index, undefined, masks.low),
+    );
+    const high = lookup(
+        @shuffle(u8, table, undefined, masks.high),
+        @shuffle(u8, index, undefined, masks.high),
+    );
+    return @shuffle(u8, low, high, masks.concat);
+}
+
+/// `@shuffle` masks that split a `Bytes` into its 128-bit lanes and join two lanes back (a
+/// mask selects from the second vector with `~i`).
+const masks = struct {
+    const low: @Vector(16, i32) = std.simd.iota(i32, 16);
+    const high: @Vector(16, i32) = low + @as(@Vector(16, i32), @splat(16));
+    const concat: [32]i32 = @as([16]i32, low) ++ @as([16]i32, ~low);
+};
+
+/// NEON `tbl`: the bytes of `table` at `index` (every index is below 16).
+inline fn lookup(table: Lane, index: Lane) Lane {
+    comptime assert(neon);
+    return asm ("tbl %[out].16b, {%[table].16b}, %[index].16b"
+        : [out] "=w" (-> Lane),
+        : [table] "w" (table),
+          [index] "w" (index),
     );
 }
 

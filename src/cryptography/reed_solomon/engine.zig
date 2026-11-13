@@ -13,7 +13,8 @@
 //!
 //! - `Naive`: simple reference implementation.
 //! - `Scalar`: portable engine without SIMD.
-//! - `Simd`: the `Scalar` transforms with an AVX2 nibble-shuffle multiply (`Scalar` elsewhere).
+//! - `Simd`: the `Scalar` transforms with an AVX2 or NEON nibble-shuffle multiply (`Scalar`
+//!   elsewhere).
 //! - `DefaultEngine`: the engine `Encoder` and `Decoder` use; chosen at compile time.
 //!
 //! `fft` transforms `data[pos..pos + size]`, producing the requested output prefix in
@@ -31,10 +32,13 @@ pub const shards = @import("engine/shards.zig");
 pub const Naive = @import("engine/naive.zig").Naive;
 pub const Scalar = @import("engine/scalar.zig").Scalar;
 pub const Simd = @import("engine/simd.zig").Simd;
+/// The name of `Simd`'s kernel on this target: `avx2`, `neon`, or `scalar` without one.
+pub const simd_name = @import("engine/simd.zig").name;
 pub const Shards = shards.Shards;
 pub const ShardsRefMut = shards.ShardsRefMut;
 
-/// The engine `Encoder` and `Decoder` use: `Simd` where the target has AVX2, else `Scalar`.
+/// The engine `Encoder` and `Decoder` use: `Simd` where the target has AVX2 or NEON, else
+/// `Scalar`.
 pub const DefaultEngine = Simd;
 
 /// Size of a Galois field element in bits.

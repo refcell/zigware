@@ -318,7 +318,9 @@ fn benchmarks_engine_one(runner: *bench.Runner, comptime E: type, name: []const 
 fn benchmarks_engine(runner: *bench.Runner) !void {
     try benchmarks_engine_one(runner, engine.Naive, "naive");
     try benchmarks_engine_one(runner, engine.Scalar, "scalar");
-    if (engine.Simd != engine.Scalar) try benchmarks_engine_one(runner, engine.Simd, "avx2");
+    if (engine.Simd != engine.Scalar) {
+        try benchmarks_engine_one(runner, engine.Simd, engine.simd_name);
+    }
 }
 
 pub fn run(runner: *bench.Runner) !void {

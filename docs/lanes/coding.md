@@ -40,7 +40,8 @@ hashers (on main).
 - Errors carry no payload (Zig); names match commonware's `Error` variants.
 - Rust drops results to reset the coder; here `result.deinit()` does it. Coders take an
   allocator; decoding allocates nothing (erasure scratch lives in `DecoderWork`).
-- The engine is chosen at compile time (`DefaultEngine = Simd`, which is `Scalar` without AVX2)
+- The engine is chosen at compile time (`DefaultEngine = Simd`, which is `Scalar` without AVX2
+  or NEON)
   instead of runtime CPU detection;
   every engine produces identical bytes. The fused 16-shard AVX-512 derivative leaf is not
   ported (output is identical; it is a speedup).
@@ -75,7 +76,8 @@ hashers (on main).
   plus `std.testing.fuzz` targets, with every fixed regression case.
 - [x] reed_solomon: `@Vector` SIMD engine (`engine.Simd`: AVX2 `vpshufb` multiply kernel under the
   shared transforms), checked against `Scalar` and `Naive` and in the differential fuzz.
-- [ ] reed_solomon: an aarch64 (NEON `tbl`) kernel for `Simd`.
+- [x] reed_solomon: an aarch64 NEON `tbl` kernel for `Simd` (each 128-bit lane shuffled
+  alone), checked under qemu-aarch64 with the reed_solomon tests.
 - [x] storage bmt (taken over from storage-merkle): Builder, Tree, single/range/multi proofs and
   verification, codec, every test, RootConformance and CodecConformance<Proof> hashes, and the
   `bmt_operations` fuzz (minifuzz + `std.testing.fuzz`).
@@ -102,3 +104,4 @@ hashers (on main).
 - 2026-11-13: coding ReedSolomon scheme, tests, Chunk conformance hash, and fuzz target.
 - 2026-11-13: reed_solomon Simd engine (AVX2 nibble-shuffle kernel), now the default.
 - 2026-11-13: benches for coding, bmt, reed_solomon, formatting, and codec.
+- 2026-11-13: reed_solomon NEON kernel for `Simd` on aarch64.
