@@ -373,6 +373,10 @@ pub fn Cups(comptime H: type, comptime C: type) type {
             return struct {
                 peer: PublicKey,
                 connection: Connection(StreamType, SinkType),
+
+                pub fn deinit(accepted: *@This(), gpa: Allocator) void {
+                    accepted.connection.deinit(gpa);
+                }
             };
         }
 

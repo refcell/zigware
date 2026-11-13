@@ -47,6 +47,9 @@ see docs/lanes/runtime.md). Write library code against `std.Io`.
   `version`) implements the handshake contract over `cryptography.handshake.sake`;
   `stream.SakeCups(S, C)` is `cups.Cups(sake.Sake(S), C)`, the authenticated transport p2p
   uses. Randomness comes from `io.random` (the runtime RNG), time from `Io.Clock.real`.
+- `stream.utils.Timeout(U)`: `init(upgrader, timeout: Io.Duration)`, `dial`/`listen` with the
+  upgrader's arguments plus `error.Timeout`; the deadline starts at the call, covers the
+  bouncer, and cancels the attempt (releasing its connection) on expiry.
 
 ## Decisions
 - The mailbox guards ready and overflow with one `std.Io.Mutex` and parks the receiver on a
@@ -68,6 +71,10 @@ see docs/lanes/runtime.md). Write library code against `std.Io`.
   steady-state sends do not allocate. Errors carry no payload (commonware reports the
   oversized payload length). `test_recv_decrypts_unique_frame_in_place` has no counterpart:
   records always decrypt in the receiver's own buffer.
+- `Timeout` runs the attempt and the deadline as `std.Io.Select` tasks. An attempt that
+  finishes as the deadline fires still wins (commonware's biased `select!`). A canceled
+  fiber must run to unwind, so a timed-out call returns a few scheduler cycles (1 ms each
+  in the deterministic runtime) after its deadline; commonware drops the future at once.
 - Loom tests (thread interleavings of the lock-free paths) have no counterpart: the paths
   they check do not exist here. Concurrency is covered on the deterministic runtime instead
   (parked receivers, three producers, same-seed replay) plus a seeded FIFO fuzz.
@@ -79,7 +86,7 @@ see docs/lanes/runtime.md). Write library code against `std.Io`.
   counter once the runtime registry lands.
 - [x] stream utils: length-prefixed framing codec (utils/codec.rs) with its tests, a mock
   sink/stream channel, and a seeded wire-bytes fuzz.
-- [ ] stream utils: `Timeout` (utils/timeout.rs), with the `Upgrader` interface (lib.rs).
+- [x] stream utils: `Timeout` (utils/timeout.rs) with the upgrader tests from lib.rs.
 - [x] stream cups protocol (cups/protocol.rs) with its tests, against a test handshake.
 - [x] stream sake (sake/protocol.rs) over `cryptography.handshake.sake`, with its tests.
 - [ ] stream sake conformance hashes (sake/conformance.rs: CupsV0, CupsV1, SakeV0CupsV1,
@@ -93,3 +100,4 @@ see docs/lanes/runtime.md). Write library code against `std.Io`.
 - 2026-11-13: stream framing codec, mock sink/stream channel, framing fuzz.
 - 2026-11-13: stream cups (record protocol, cipher derivation) and the handshake contract.
 - 2026-11-13: stream sake and `SakeCups`; cups sender sends each batch in one sink call.
+- 2026-11-13: stream `Timeout` with lib.rs's upgrader tests.
