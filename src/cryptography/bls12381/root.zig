@@ -4,6 +4,7 @@
 const std = @import("std");
 
 pub const primitives = @import("primitives/root.zig");
+pub const certificate = @import("certificate/root.zig");
 pub const dkg = @import("dkg/root.zig");
 pub const tle = @import("tle.zig");
 

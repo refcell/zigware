@@ -11,6 +11,8 @@ const conformance = @import("conformance");
 const utils = @import("utils");
 const primitives = @import("primitives/root.zig");
 const tle = @import("tle.zig");
+const base_certificate = @import("../certificate.zig");
+const multisig = @import("certificate/multisig.zig");
 
 const arbitrary = codec.arbitrary;
 const Unstructured = arbitrary.Unstructured;
@@ -101,6 +103,37 @@ fn gen_ciphertext(gpa: Allocator, u: *Unstructured) Error!tle.Ciphertext(MinPk) 
     const v = try arbitrary.value(tle.Block, gpa, u);
     const w = try arbitrary.value(tle.Block, gpa, u);
     return .{ .u = point, .v = v, .w = w };
+}
+
+/// `Signers::arbitrary`: up to 9 participants, the first `signer_count` of them signing.
+fn gen_signers(gpa: Allocator, u: *Unstructured) Error!base_certificate.Signers {
+    const participants: u32 = @intCast(u.byte_size() % 10);
+    const signer_count = @min(u.byte_size(), participants);
+    const signers = try gpa.alloc(utils.Participant, signer_count);
+    for (signers, 0..) |*signer, index| signer.* = .from_usize(index);
+    return base_certificate.Signers.init(gpa, participants, signers) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        // Proof: the indices `0..signer_count` are unique and below `participants`.
+        else => unreachable,
+    };
+}
+
+const MultisigCertificate = multisig.Certificate(MinSig);
+
+/// The multisig `Certificate::arbitrary`: signers, then an arbitrary aggregate signature.
+fn gen_multisig_certificate(gpa: Allocator, u: *Unstructured) Error!MultisigCertificate {
+    const signers = try gen_signers(gpa, u);
+    const signature = try gen_wrapper(aggregate.Signature(MinSig))(gpa, u);
+    return .{ .signers = signers, .signature = .init(signature) };
+}
+
+test "conformance: bls12381 multisig certificate" {
+    try skip_slow();
+    try verify(
+        "certificate::multisig::tests::conformance::CodecConformance<Certificate<MinSig>>",
+        MultisigCertificate,
+        gen_multisig_certificate,
+    );
 }
 
 test "conformance: bls12381 group scalars, keys, and shares" {
