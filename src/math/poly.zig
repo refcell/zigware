@@ -11,7 +11,7 @@ const std = @import("std");
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const algebra = @import("algebra.zig");
-const wire = @import("wire.zig");
+const codec = @import("codec");
 const fuzz = @import("fuzz.zig");
 const Unstructured = fuzz.Unstructured;
 
@@ -223,37 +223,37 @@ pub fn Poly(comptime K: type) type {
             return from_owned(out);
         }
 
+        /// The permitted coefficient count (zero is always rejected, as commonware's
+        /// `RangeCfg<NonZeroU32>`) and the coefficient config.
+        pub const Cfg = codec.SliceCfg(codec.Cfg(K));
+
+        /// Accept exactly `count` coefficients.
+        pub fn cfg_exact(count: u32) Cfg {
+            return .{ .range = .exact(count), .item = codec.unit_cfg(codec.Cfg(K)) };
+        }
+
         pub fn encode_size(self: Self) usize {
-            return wire.varint_size(self.required()) + self.coeffs.len * K.encode_size;
+            return codec.encode_size([]const K, self.coeffs);
         }
 
-        /// Upper bound on the encoded size with at most `coefficients` coefficients.
-        pub fn max_encode_size(coefficients: u32) usize {
-            return wire.varint_size(coefficients) + @as(usize, coefficients) * K.encode_size;
+        /// Upper bound on the encoded size with at most `coefficients` coefficients
+        /// (commonware `Poly::max_encode_size`).
+        pub fn max_encode_size_with(coefficients: u32) usize {
+            return codec.util.max_items_size(coefficients, codec.max_encode_size(K).?);
         }
 
-        pub fn write(self: Self, w: *wire.Writer) void {
-            const start = w.position;
-            w.put_varint(self.required());
-            for (self.coeffs) |c| w.put(&c.encode());
-            assert(w.position - start == self.encode_size());
+        pub fn write(self: Self, writer: *codec.Writer) void {
+            assert(self.coeffs.len >= 1);
+            codec.write([]const K, self.coeffs, writer);
         }
 
-        /// Read a polynomial with a coefficient count in `[1, count_max]` and at least
-        /// `count_min` (commonware `RangeCfg<NonZeroU32>`).
-        pub fn read(
-            allocator: Allocator,
-            r: *wire.Reader,
-            count_min: u32,
-            count_max: u32,
-        ) !Self {
-            assert(count_min >= 1 and count_min <= count_max);
-            const count = try r.read_length(count_min, count_max);
-            if (@as(usize, count) * K.encode_size > r.remaining()) return error.EndOfBuffer;
-            const out = try allocator.alloc(K, count);
-            errdefer allocator.free(out);
-            for (out) |*c| c.* = try K.decode(try r.take_array(K.encode_size));
-            return from_owned(out);
+        pub fn read(gpa: Allocator, reader: *codec.Reader, cfg: Cfg) codec.Error!Self {
+            const count = try codec.read_usize(reader, cfg.range);
+            if (count == 0 or count > std.math.maxInt(u32)) {
+                return reader.fail(error.InvalidLength, count);
+            }
+            const coeffs = try codec.read_items(K, gpa, reader, count, cfg.item);
+            return from_owned(@constCast(coeffs));
         }
 
         pub fn arbitrary(allocator: Allocator, u: *Unstructured, count_max: u32) !Self {
@@ -458,20 +458,17 @@ fn expect(ok: bool) !void {
 }
 
 fn check_codec(allocator: Allocator, f: Poly(TF)) !void {
-    const buffer = try allocator.alloc(u8, f.encode_size());
-    defer allocator.free(buffer);
-    var w = wire.Writer.init(buffer);
-    f.write(&w);
-    var r = wire.Reader.init(w.written());
-    var decoded = try Poly(TF).read(allocator, &r, f.required(), f.required());
+    const bytes = try codec.encode(Poly(TF), allocator, f);
+    defer allocator.free(bytes);
+    const cfg = Poly(TF).cfg_exact(f.required());
+    var decoded = try codec.decode_cfg(Poly(TF), allocator, bytes, cfg);
     defer decoded.deinit(allocator);
-    try r.finish();
     try expect(decoded.eql(f));
     // A count outside the configured range is rejected.
-    r = wire.Reader.init(w.written());
-    if (f.required() > 1) {
-        const too_small = Poly(TF).read(allocator, &r, 1, f.required() - 1);
-        if (too_small) |_| return error.AcceptedOutOfRange else |_| {}
+    const too_small: Poly(TF).Cfg = .{ .range = .to(f.required()) };
+    const rejected = codec.decode_cfg(Poly(TF), allocator, bytes, too_small);
+    if (rejected) |_| return error.AcceptedOutOfRange else |err| {
+        if (err != error.InvalidLength) return err;
     }
 }
 

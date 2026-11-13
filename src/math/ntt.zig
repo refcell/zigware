@@ -13,7 +13,7 @@ const std = @import("std");
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const algebra = @import("algebra.zig");
-const wire = @import("wire.zig");
+const codec = @import("codec");
 const fuzz = @import("fuzz.zig");
 const Unstructured = fuzz.Unstructured;
 
@@ -596,32 +596,33 @@ pub fn Matrix(comptime F: type) type {
             return try PolynomialVector(F).init(allocator, min_coefficients, self.cols, self.data);
         }
 
+        /// The most elements (and the largest dimension) to accept, and the element config.
+        pub const Cfg = struct { usize, codec.Cfg(F) };
+
         pub fn encode_size(self: Self) usize {
-            return wire.varint_size(@intCast(self.rows)) + wire.varint_size(@intCast(self.cols)) +
-                wire.varint_size(@intCast(self.data.len)) + self.data.len * F.encode_size;
+            return codec.encode_size(usize, self.rows) + codec.encode_size(usize, self.cols) +
+                codec.encode_size([]const F, self.data);
         }
 
-        pub fn write(self: Self, w: *wire.Writer) void {
-            const start = w.position;
-            w.put_varint(@intCast(self.rows));
-            w.put_varint(@intCast(self.cols));
-            w.put_varint(@intCast(self.data.len));
-            for (self.data) |x| w.put(&x.encode());
-            assert(w.position - start == self.encode_size());
+        pub fn write(self: Self, writer: *codec.Writer) void {
+            codec.write(usize, self.rows, writer);
+            codec.write(usize, self.cols, writer);
+            codec.write([]const F, self.data, writer);
         }
 
-        /// Read with every dimension and the element count at most `elements_max`.
-        pub fn read(allocator: Allocator, r: *wire.Reader, elements_max: u32) !Self {
-            const rows = try r.read_length(0, elements_max);
-            const cols = try r.read_length(0, elements_max);
-            const count = try r.read_length(0, elements_max);
-            if (@as(usize, count) * F.encode_size > r.remaining()) return error.EndOfBuffer;
-            const data = try allocator.alloc(F, count);
-            errdefer allocator.free(data);
-            for (data) |*x| x.* = try F.decode(try r.take_array(F.encode_size));
-            const expected = std.math.mul(usize, rows, cols) catch return error.Invalid;
-            if (count != expected) return error.Invalid;
-            return .{ .rows = rows, .cols = cols, .data = data };
+        pub fn read(gpa: Allocator, reader: *codec.Reader, cfg: Cfg) codec.Error!Self {
+            const range = codec.RangeCfg(usize).to_inclusive(cfg[0]);
+            const rows = try codec.read_usize(reader, range);
+            const cols = try codec.read_usize(reader, range);
+            const count = try codec.read_usize(reader, range);
+            const data = try codec.read_items(F, gpa, reader, count, cfg[1]);
+            errdefer gpa.free(data);
+            const expected = std.math.mul(usize, rows, cols) catch
+                return reader.invalid("Matrix", "matrix dimensions overflow");
+            if (count != expected) {
+                return reader.invalid("Matrix", "matrix element count does not match dimensions");
+            }
+            return .{ .rows = rows, .cols = cols, .data = @constCast(data) };
         }
     };
 }
@@ -1036,13 +1037,12 @@ test "reverse bits" {
 
 test "matrix read rejects length mismatch" {
     var buffer: [64]u8 = undefined;
-    var w = wire.Writer.init(&buffer);
-    w.put_varint(2);
-    w.put_varint(2);
-    w.put_varint(3);
-    for (0..3) |_| w.put(&GF.one.encode());
-    var r = wire.Reader.init(w.written());
-    try testing.expectError(error.Invalid, Matrix(GF).read(testing.allocator, &r, 8));
+    var w = codec.Writer.init(&buffer);
+    codec.write(usize, 2, &w);
+    codec.write(usize, 2, &w);
+    codec.write([]const GF, &.{ GF.one, GF.one, GF.one }, &w);
+    const result = codec.decode_cfg(Matrix(GF), testing.allocator, w.written(), .{ 8, {} });
+    try testing.expectError(error.Invalid, result);
 }
 
 test "matrix codec round trip" {
@@ -1050,15 +1050,15 @@ test "matrix codec round trip" {
     var rng = @import("utils").rng.test_rng();
     var m = try Matrix(GF).random(allocator, &rng, 3, 5);
     defer m.deinit(allocator);
-    const buffer = try allocator.alloc(u8, m.encode_size());
-    defer allocator.free(buffer);
-    var w = wire.Writer.init(buffer);
-    m.write(&w);
-    var r = wire.Reader.init(w.written());
-    var decoded = try Matrix(GF).read(allocator, &r, 15);
+    const bytes = try codec.encode(Matrix(GF), allocator, m);
+    defer allocator.free(bytes);
+    var decoded = try codec.decode_cfg(Matrix(GF), allocator, bytes, .{ 15, {} });
     defer decoded.deinit(allocator);
-    try r.finish();
     try testing.expect(m.eql(decoded));
+    try testing.expectError(
+        error.InvalidLength,
+        codec.decode_cfg(Matrix(GF), allocator, bytes, .{ 14, {} }),
+    );
 }
 
 test "divide matches pointwise inversion" {

@@ -5,6 +5,7 @@
 const std = @import("std");
 const assert = std.debug.assert;
 const utils = @import("utils");
+const codec = @import("codec");
 const algebra = @import("algebra.zig");
 const fuzz = @import("fuzz.zig");
 const Unstructured = fuzz.Unstructured;
@@ -16,8 +17,6 @@ comptime {
     assert(Q == 2 * P + 1);
 }
 
-pub const DecodeError = error{Invalid};
-
 fn mul_mod(a: u64, b: u64, modulus: u64) u64 {
     assert(modulus > 1);
     return @intCast((@as(u128, a) * b) % modulus);
@@ -28,7 +27,7 @@ pub const F = struct {
     value: u64,
 
     pub const max: u64 = P - 1;
-    pub const encode_size = 8;
+    pub const fixed_size = 8;
     pub const zero: F = .{ .value = 0 };
     pub const one: F = .{ .value = 1 };
 
@@ -74,15 +73,13 @@ pub const F = struct {
         return .{ .value = u.int(u64) % P };
     }
 
-    pub fn encode(a: F) [encode_size]u8 {
-        var out: [encode_size]u8 = undefined;
-        std.mem.writeInt(u64, &out, a.value, .big);
-        return out;
+    pub fn write(a: F, writer: *codec.Writer) void {
+        writer.write_int(u64, a.value);
     }
 
-    pub fn decode(bytes: *const [encode_size]u8) DecodeError!F {
-        const value = std.mem.readInt(u64, bytes, .big);
-        if (value >= P) return error.Invalid;
+    pub fn read(_: std.mem.Allocator, reader: *codec.Reader, _: void) codec.Error!F {
+        const value = try reader.read_int(u64);
+        if (value >= P) return reader.invalid("F", "out of range");
         return .{ .value = value };
     }
 };
@@ -93,7 +90,7 @@ pub const G = struct {
     value: u64,
 
     pub const Scalar = F;
-    pub const encode_size = 8;
+    pub const fixed_size = 8;
     pub const zero: G = .{ .value = 1 };
     /// 4 = 2^2 is a non-trivial quadratic residue, so it generates the subgroup of order p.
     pub const generator: G = .{ .value = 4 };
@@ -127,17 +124,17 @@ pub const G = struct {
         return generator.mul(F.arbitrary(u));
     }
 
-    pub fn encode(a: G) [encode_size]u8 {
-        var out: [encode_size]u8 = undefined;
-        std.mem.writeInt(u64, &out, a.value, .big);
-        return out;
+    pub fn write(a: G, writer: *codec.Writer) void {
+        writer.write_int(u64, a.value);
     }
 
-    pub fn decode(bytes: *const [encode_size]u8) DecodeError!G {
-        const value = std.mem.readInt(u64, bytes, .big);
-        if (value >= Q) return error.Invalid;
+    pub fn read(_: std.mem.Allocator, reader: *codec.Reader, _: void) codec.Error!G {
+        const value = try reader.read_int(u64);
+        if (value >= Q) return reader.invalid("G", "out of range");
         const out: G = .{ .value = value };
-        if (value == 0 or algebra.scale(G, out, &.{P}).value != 1) return error.Invalid;
+        if (value == 0 or algebra.scale(G, out, &.{P}).value != 1) {
+            return reader.invalid("G", "not in subgroup");
+        }
         return out;
     }
 };
@@ -152,11 +149,13 @@ pub fn fuzz_plan(_: void, u: *Unstructured) !void {
     switch (u.choose(enum { f_codec, g_codec, fuzz_field, fuzz_space })) {
         .f_codec => {
             const x = F.arbitrary(u);
-            if (!(try F.decode(&x.encode())).eql(x)) return error.RoundTrip;
+            const bytes = codec.encode_fixed(F, x);
+            if (!(try codec.decode_fixed(F, &bytes)).eql(x)) return error.RoundTrip;
         },
         .g_codec => {
             const x = G.arbitrary(u);
-            if (!(try G.decode(&x.encode())).eql(x)) return error.RoundTrip;
+            const bytes = codec.encode_fixed(G, x);
+            if (!(try codec.decode_fixed(G, &bytes)).eql(x)) return error.RoundTrip;
         },
         .fuzz_field => try algebra.test_suites.fuzz_field(F, u),
         .fuzz_space => try algebra.test_suites.fuzz_space(F, G, u),
@@ -183,12 +182,12 @@ test "field and group guards" {
     try testing.expect(x.eql(F.zero) or x.inv().mul(x).eql(F.one));
     var bytes: [8]u8 = undefined;
     std.mem.writeInt(u64, &bytes, P, .big);
-    try testing.expectError(error.Invalid, F.decode(&bytes));
+    try testing.expectError(error.Invalid, codec.decode_fixed(F, &bytes));
     std.mem.writeInt(u64, &bytes, Q, .big);
-    try testing.expectError(error.Invalid, G.decode(&bytes));
+    try testing.expectError(error.Invalid, codec.decode_fixed(G, &bytes));
     std.mem.writeInt(u64, &bytes, 0, .big);
-    try testing.expectError(error.Invalid, G.decode(&bytes));
+    try testing.expectError(error.Invalid, codec.decode_fixed(G, &bytes));
     // q = 3 (mod 4), so -1 is a non-residue and lies outside the order-p subgroup.
     std.mem.writeInt(u64, &bytes, Q - 1, .big);
-    try testing.expectError(error.Invalid, G.decode(&bytes));
+    try testing.expectError(error.Invalid, codec.decode_fixed(G, &bytes));
 }

@@ -29,8 +29,9 @@ variants (MinPk, MinSig) must match exactly.
   with `K.mul(K, R)`, so groups and fields share one `Space` interface.
 - Until `invariants.minifuzz` lands, `math.fuzz` provides `Unstructured` and the seeded and
   `std.testing.fuzz` drivers; fuzz plans are `fn (void, *Unstructured) !void`.
-- Until `codec` lands, fixed-size types expose `encode_size`, `encode() [N]u8`, and
-  `decode(*const [N]u8) error{Invalid}!T` with commonware's byte layout (big-endian ints).
+- Encodings use the `codec` package interface (`fixed_size`/`encode_size`, `write`, `read`,
+  `Cfg`); `Poly(K).Cfg` is `codec.SliceCfg` (zero coefficients always rejected) and
+  `Poly(K).max_encode_size_with(n)` is commonware's `Poly::max_encode_size(n)`.
 - Until `parallel` lands, `Strategy` parameters are omitted (sequential); results are identical.
 - Conformance hashes (math/conformance.toml) wait for the `conformance` harness.
 - Randomness is injected as a `utils.rng` generator pointer (`next_u64`/`fill_bytes`, commonware's

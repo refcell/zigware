@@ -6,14 +6,13 @@
 
 const std = @import("std");
 const assert = std.debug.assert;
+const codec = @import("codec");
 const algebra = @import("../algebra.zig");
 const fuzz = @import("../fuzz.zig");
 const Unstructured = fuzz.Unstructured;
 
 /// The modulus P := 2^64 - 2^32 + 1.
 pub const P: u64 = 0xffff_ffff_0000_0001;
-
-pub const DecodeError = error{Invalid};
 
 /// An element of the Goldilocks field, always reduced (< P).
 pub const F = struct {
@@ -24,7 +23,7 @@ pub const F = struct {
         assert(P == (0 -% (@as(u64, 1) << 32)) + 1);
     }
 
-    pub const encode_size = 8;
+    pub const fixed_size = 8;
 
     pub const zero: F = .{ .value = 0 };
     pub const one: F = .{ .value = 1 };
@@ -166,16 +165,14 @@ pub const F = struct {
         return out;
     }
 
-    pub fn encode(a: F) [encode_size]u8 {
+    pub fn write(a: F, writer: *codec.Writer) void {
         assert(a.value < P);
-        var out: [encode_size]u8 = undefined;
-        std.mem.writeInt(u64, &out, a.value, .big);
-        return out;
+        writer.write_int(u64, a.value);
     }
 
-    pub fn decode(bytes: *const [encode_size]u8) DecodeError!F {
-        const x = std.mem.readInt(u64, bytes, .big);
-        if (x >= P) return error.Invalid;
+    pub fn read(_: std.mem.Allocator, reader: *codec.Reader, _: void) codec.Error!F {
+        const x = try reader.read_int(u64);
+        if (x >= P) return reader.invalid("F", "out of range");
         return .{ .value = x };
     }
 
@@ -268,7 +265,10 @@ pub fn fuzz_plan(_: void, u: *Unstructured) !void {
             const x = u.int_in_range(u64, P, std.math.maxInt(u64));
             var bytes: [8]u8 = undefined;
             std.mem.writeInt(u64, &bytes, x, .big);
-            if (F.decode(&bytes)) |_| return error.AcceptedOutOfRange else |_| {}
+            var reader = codec.Reader.init(&bytes);
+            if (F.read(std.testing.allocator, &reader, {})) |_| {
+                return error.AcceptedOutOfRange;
+            } else |err| if (err != error.Invalid) return err;
         },
         .fuzz_field => try algebra.test_suites.fuzz_field_ntt(F, u),
     }
@@ -291,9 +291,9 @@ test "goldilocks fuzz plan (coverage-guided)" {
 test "read rejects the modulus (regression)" {
     var bytes: [8]u8 = undefined;
     std.mem.writeInt(u64, &bytes, P, .big);
-    try testing.expectError(error.Invalid, F.decode(&bytes));
+    try testing.expectError(error.Invalid, codec.decode_fixed(F, &bytes));
     std.mem.writeInt(u64, &bytes, P - 1, .big);
-    try testing.expectEqual(P - 1, (try F.decode(&bytes)).value);
+    try testing.expectEqual(P - 1, (try codec.decode_fixed(F, &bytes)).value);
 }
 
 test "generator calculation" {
@@ -328,6 +328,6 @@ test "reduce_128 matches u128 modulo" {
 }
 
 test "encode is big-endian" {
-    const bytes = F.from_u64(0x0102030405060708).encode();
+    const bytes = codec.encode_fixed(F, F.from_u64(0x0102030405060708));
     try testing.expectEqualSlices(u8, &.{ 1, 2, 3, 4, 5, 6, 7, 8 }, &bytes);
 }
