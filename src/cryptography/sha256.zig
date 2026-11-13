@@ -1,0 +1,152 @@
+//! SHA-256 implementation of the hasher interface (commonware `cryptography/src/sha256`).
+//!
+//! Backed by `std.crypto.hash.sha2.Sha256`, which uses SHA-NI or ARMv8 SHA2 when the target
+//! has them. Digests encode as their 32 raw bytes.
+
+const std = @import("std");
+const assert = std.debug.assert;
+const hasher = @import("hasher.zig");
+const digest = @import("digest.zig");
+
+pub const Core = std.crypto.hash.sha2.Sha256;
+
+const digest_length = 32;
+
+/// Digest of a SHA-256 hashing operation.
+pub const Digest = digest.Digest(digest_length, "sha256");
+
+/// SHA-256 hasher.
+pub const Sha256 = hasher.Streaming(Core, Digest);
+
+comptime {
+    assert(Core.digest_length == digest_length);
+    hasher.assert_hasher(Sha256);
+}
+
+const testing = std.testing;
+const fuzz = @import("fuzz.zig");
+
+fn hex_digest(comptime text: []const u8) Digest {
+    var out: Digest = undefined;
+    _ = std.fmt.hexToBytes(&out.bytes, text) catch unreachable; // Proof: comptime test vector.
+    return out;
+}
+
+const hello_digest = hex_digest("b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9");
+
+fn streamed(parts: []const []const u8) Digest {
+    var h = Sha256.init();
+    for (parts) |part| h.update(part);
+    return h.finalize();
+}
+
+test "sha256 hello world through streaming and one-shot" {
+    var h = Sha256.init();
+    h.update("hello world");
+    const d = h.finalize();
+    try testing.expect(d.eql(hello_digest));
+    _ = try Digest.decode(&d.bytes);
+    try testing.expect(Sha256.hash(&.{"hello world"}).eql(hello_digest));
+    try testing.expect(Sha256.hash(&.{ "hello", " world" }).eql(hello_digest));
+    // The reset hasher returned by finalize hashes again from scratch.
+    h.update("hello world");
+    try testing.expect(h.finalize().eql(hello_digest));
+}
+
+test "sha256 one-shot matches streaming across padding boundaries" {
+    var data: [300]u8 = undefined;
+    for (&data, 0..) |*byte, i| byte.* = @truncate(i);
+    for (0..data.len + 1) |total| {
+        const mid = total / 3;
+        const parts = [_][]const u8{ data[0..mid], data[mid .. 2 * mid], data[2 * mid .. total] };
+        try testing.expect(Sha256.hash(&parts).eql(streamed(&parts)));
+    }
+}
+
+test "sha256 merkle node shapes match streaming" {
+    var data: [72]u8 = undefined;
+    for (&data, 0..) |*byte, i| byte.* = @truncate(i);
+    const shapes = [_][]const []const u8{
+        &.{ data[0..8], data[8..40], data[40..72] },
+        &.{ data[0..32], data[32..64] },
+        &.{ data[0..8], data[8..40] },
+        &.{ data[0..4], data[4..36] },
+    };
+    for (shapes) |parts| try testing.expect(Sha256.hash(parts).eql(streamed(parts)));
+
+    // The MMR node shape (position || left || right).
+    var left_position: [8]u8 = undefined;
+    var right_position: [8]u8 = undefined;
+    std.mem.writeInt(u64, &left_position, 42, .big);
+    std.mem.writeInt(u64, &right_position, 43, .big);
+    const a: [32]u8 = @splat(0x11);
+    const b: [32]u8 = @splat(0x12);
+    const c: [32]u8 = @splat(0x33);
+    const d: [32]u8 = @splat(0x34);
+    try fuzz.run_plan(Sha256, &.{ &left_position, &a, &b }, &.{ &right_position, &c, &d });
+}
+
+test "sha256 hash_pair matches hash for BMT node shapes" {
+    const zero: [32]u8 = @splat(0);
+    const ff: [32]u8 = @splat(0xff);
+    var ascending: [32]u8 = undefined;
+    var descending: [32]u8 = undefined;
+    for (0..32) |i| {
+        ascending[i] = @truncate(i);
+        descending[i] = @truncate(0xff - i);
+    }
+    var backing: [96]u8 = undefined;
+    for (&backing, 0..) |*byte, i| byte.* = @truncate(i);
+    try fuzz.run_plan(Sha256, &.{ &zero, &zero }, &.{ &zero, &zero });
+    try fuzz.run_plan(Sha256, &.{ &ff, &ff }, &.{ &ff, &ff });
+    try fuzz.run_plan(Sha256, &.{ &ascending, &descending }, &.{ &ff, &zero });
+    try fuzz.run_plan(
+        Sha256,
+        &.{ backing[1..33], backing[17..49] },
+        &.{ backing[2..34], backing[18..50] },
+    );
+}
+
+test "sha256 hash_many matches individual hashes" {
+    const lengths = [_]usize{ 0, 1, 55, 56, 63, 64, 65, 119, 120, 128, 129, 255, 256, 1024 };
+    var storage: [33][1024]u8 = undefined;
+    var messages: [33][]const u8 = undefined;
+    var digests: [33]Digest = undefined;
+    for (lengths) |length| {
+        for (0..33) |lane| {
+            for (0..length) |i| storage[lane][i] = @truncate(i +% lane);
+            messages[lane] = storage[lane][0..length];
+        }
+        for ([_]usize{ 0, 1, 2, 6, 7, 15, 16, 17, 31, 32, 33 }) |count| {
+            Sha256.hash_many(messages[0..count], digests[0..count], {});
+            for (messages[0..count], digests[0..count]) |message, d| {
+                try testing.expect(d.eql(Sha256.hash(&.{message})));
+            }
+        }
+    }
+}
+
+test "sha256 digest codec and size" {
+    const d = Sha256.hash(&.{"hello world"});
+    var encoded: [Digest.size]u8 = undefined;
+    d.encode(&encoded);
+    try testing.expectEqualSlices(u8, &d.bytes, &encoded);
+    try testing.expect((try Digest.decode(&encoded)).eql(d));
+    try testing.expectEqual(@as(usize, 32), Digest.size);
+    try testing.expect(Sha256.hash(&.{}).eql(streamed(&.{})));
+}
+
+test "sha256 fuzz hasher entrypoints" {
+    try fuzz.fuzz_hasher(Sha256, 0x5ad256);
+    try fuzz.fuzz_hash_many(Sha256, 0x5ad256);
+}
+
+test "sha256 fuzz hasher entrypoints (coverage-guided)" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *testing.Smith) anyerror!void {
+            var bytes: [3 * fuzz.message_length_max]u8 = undefined;
+            const length = smith.slice(&bytes);
+            try fuzz.run_arbitrary_plan(Sha256, bytes[0..length]);
+        }
+    }.run, .{});
+}

@@ -9,8 +9,10 @@ it lands, write fixed-size `encode`/`decode` methods and switch when codec's API
 ## Backlog
 - [ ] Core traits as comptime interfaces: `Signer`, `PrivateKey`, `PublicKey`, `Signature`,
   `Verifier`, `BatchVerifier`, `Hasher`, `Digest`, `Committable`/`Digestible` (lib.rs).
-- [ ] Hashes: sha256 (with namespaced union/digest helpers), sha512, blake3, keccak256,
-  crc32. Use `std.crypto` where it is correct and fast; match commonware's test vectors.
+- [x] Hashes: sha256, sha512, blake3, keccak256, crc32 (CRC-32C) on `std.crypto`/`std.hash`,
+  with commonware's test vectors and the hasher differential fuzz (`fuzz.zig`).
+- [ ] Hash codec conformance hashes (`CodecConformance<Digest>`), once codec/conformance ship
+  the `arbitrary` + ChaCha8 value generator.
 - [ ] ed25519: keys, sign/verify with commonware's namespace/union_unique message framing,
   batch verify, codec encodings, `certificate` scheme. Vectors from ed25519/.
 - [ ] secp256r1: standard and recoverable signatures, codec, certificate scheme.
@@ -21,3 +23,11 @@ it lands, write fixed-size `encode`/`decode` methods and switch when codec's API
 - [ ] Fuzz targets (commonware cryptography/fuzz) and conformance hashes.
 
 ## Log
+- Digests are `Digest(length, name)`: one distinct type per hasher, encoded as raw bytes.
+  Until codec lands they carry fixed-size `encode`/`decode`.
+- `Hasher.finalize` resets the hasher in place and returns the digest (Rust returns the reset
+  hasher by value). `hash_many` writes into a caller-provided digest slice instead of
+  returning a `Vec`, so hashing never allocates.
+- `strategy` parameters (`hash_across`, `hash_pair`, `hash_many`) take any value and run on
+  the calling thread until the parallel package lands; the digests are identical.
+- `Crc32.resume` is `Crc32.resume_from` (`resume` is a Zig keyword).
