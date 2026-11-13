@@ -26,6 +26,11 @@ on p2p's simulated network and the deterministic runtime.
   `fetch_one`, reliable `handle` that coalesces by key, `discard`), `FetchKey(K, S, M)`,
   `Pending(K, S, M)` (the overflow), `Targets(P)` metadata (null = unrestricted).
 - `resolver.p2p.mocks.Key` (one-byte test key).
+- Shared, in the utils directory at the coordinator's request: `utils.channel.oneshot`
+  (`channel(T, gpa, io)` -> `.{ sender, receiver }`; `Sender.send` (consumes, `error.Closed`
+  when refused), `is_closed`, `closed()` (wait), `deinit`; `Receiver.recv` (cancelable,
+  `error.Closed`), `try_recv` (`Empty`/`Closed`), `close`, `is_ready`, `deinit`; values that
+  own resources declare `discard`). tokio oneshot semantics over `std.Io` mutex/condition.
 
 ## Decisions
 - No tracing in zigware, so `Fetch`, `Delivery`, and the subscriber tracker carry no spans;
@@ -54,3 +59,4 @@ on p2p's simulated network and the deterministic runtime.
 ## Log
 - 2026-11-13: resolver lib.rs types, subscribers tracker, p2p wire (conformance hashes match).
 - 2026-11-13: resolver ingress (coalescing mailbox policy, targets metadata).
+- 2026-11-13: shared `utils.channel.oneshot` (tokio semantics over std.Io), with a model fuzz.

@@ -36,6 +36,8 @@ pub const net = @import("net.zig");
 
 pub const ordered = @import("ordered.zig");
 
+pub const channel = @import("channel/mod.zig");
+
 pub const time = @import("time.zig");
 pub const Duration = time.Duration;
 pub const SystemTime = time.SystemTime;
