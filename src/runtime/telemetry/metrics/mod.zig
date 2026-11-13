@@ -21,6 +21,10 @@ pub const raw = @import("raw.zig");
 pub const registry = @import("registry.zig");
 pub const scope = @import("scope.zig");
 pub const dtoa = @import("dtoa.zig");
+pub const histogram = @import("histogram.zig");
+pub const batched = @import("batched.zig");
+pub const status = @import("status.zig");
+pub const task = @import("task.zig");
 
 pub const MetricType = encoding.MetricType;
 pub const Registry = registry.Registry;
@@ -28,6 +32,9 @@ pub const Registered = registry.Registered;
 pub const Registration = registry.Registration;
 pub const Attribute = registry.Attribute;
 pub const Scope = scope.Scope;
+pub const Buckets = histogram.Buckets;
+pub const Timed = histogram.Timed;
+pub const Batched = batched.Batched;
 pub const metrics_prefix = registry.metrics_prefix;
 pub const is_valid_label = registry.is_valid_label;
 pub const validate_label = registry.validate_label;
@@ -46,27 +53,6 @@ pub fn CounterFamily(comptime L: type) type {
 pub fn GaugeFamily(comptime L: type) type {
     return Registered(raw.Family(L, raw.Gauge));
 }
-
-/// Bucket layouts in seconds (commonware `histogram::Buckets`).
-pub const Buckets = struct {
-    /// Resolving items over a network: between peers or over hops, rounds, and retries.
-    pub const network = [13]f64{
-        0.010, 0.020, 0.050, 0.100, 0.200, 0.500, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0, 300.0,
-    };
-    /// Local work: no network, but possibly expensive computation or disk access.
-    pub const local = [12]f64{
-        3e-6, 1e-5, 3e-5, 1e-4, 3e-4, 0.001, 0.003, 0.01, 0.03, 0.1, 0.3, 1.0,
-    };
-    /// Cryptographic operations.
-    pub const cryptography = [16]f64{
-        3e-6,  1e-5, 3e-5,  1e-4, 3e-4,  0.001, 0.002, 0.003,
-        0.005, 0.01, 0.015, 0.02, 0.025, 0.03,  0.1,   0.2,
-    };
-
-    comptime {
-        assert(cryptography.len < raw.bucket_count_max);
-    }
-};
 
 /// Whether an encoded sample name is `name` or ends in `_<name>`.
 fn matches_metric_name(full: []const u8, name: []const u8) bool {

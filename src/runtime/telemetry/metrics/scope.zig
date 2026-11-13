@@ -19,13 +19,13 @@ const Registered = registry_module.Registered;
 const Attribute = registry_module.Attribute;
 
 /// Longest label prefix (all `child` labels joined by `_`).
-pub const prefix_size_max = 192;
+pub const prefix_size_max = 128;
 /// Longest metric name passed to `register`.
 pub const name_size_max = 64;
 /// Most attributes on one scope.
-pub const attribute_count_max = 8;
+pub const attribute_count_max = 4;
 /// Longest attribute value (a hex-encoded 48-byte public key is 96).
-pub const attribute_value_size_max = 128;
+pub const attribute_value_size_max = 96;
 
 const StoredAttribute = struct {
     key: []const u8,
@@ -38,6 +38,11 @@ const StoredAttribute = struct {
 };
 
 pub const Scope = struct {
+    comptime {
+        // Small enough to copy into a spawned task's closure with room to spare.
+        assert(@sizeOf(Scope) <= 640);
+    }
+
     registry: *Registry,
     prefix_buffer: [prefix_size_max]u8 = undefined,
     prefix_len: u8 = 0,

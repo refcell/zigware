@@ -46,16 +46,22 @@ the registry API first and report it.
 - Floats are formatted by a port of the `dtoa` crate (Grisu2, not shortest), checked against the
   crate on edge cases and a 200,000-value hash; `std.fmt`'s output differs for some values.
 - Golden expositions in the tests were generated with prometheus-client 0.25 itself.
+- Drop guards (`ScopedTimer`, `CounterGuard`) become explicit `finish` calls for `defer`.
+  `Timed::time_some` (wraps a future) has no counterpart; callers observe a `Timer` on success.
+- `Scope` stays under 640 bytes (asserted) so a context can copy it into a task closure (the
+  deterministic runner caps closures at 1 KiB): prefix up to 128 bytes, 4 attributes of up to
+  96-byte values.
 
 ## Backlog
 - [x] metrics registry: counters, gauges, histograms (bucket layout as commonware), label
   sets, families, registration/scoping by component label, and Prometheus text exposition
   byte-identical to commonware's output for the same metrics. No allocation on the record
   path. Port the tests.
-- [ ] metrics: batched, status, task (per-task metrics), histogram helpers (timers).
+- [x] metrics: batched, status, task (per-task metrics), histogram helpers (timers).
 - [ ] traces: span collector and status for tests (what commonware's tests assert on).
 - [ ] Hook into `runtime.deterministic.Runner` (coordinate with the runtime lane, thread
   T-01a1d57b-1bfd-71b8-940f-5663d558c803) so `Context`/`metrics()` returns the registry.
 
 ## Log
 - 2026-11-13: metrics registry, scopes, raw metrics, dtoa, byte-identical exposition.
+- 2026-11-13: batched, status, task labels, histogram timers.
