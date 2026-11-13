@@ -45,6 +45,14 @@ on p2p's simulated network and the deterministic runtime.
   `Tracker.init_with_signal`, `has_completion_locked`, `close_canceled` for actors that wait
   on one signal.
 - `resolver.p2p.score.Score` (`record(elapsed: utils.Duration, bytes: u64)`, `weight() u64`).
+- `resolver.p2p.Fetcher(P, Key)` (commonware `p2p::fetcher`): `init(gpa, io, scope, Config(P))`
+  (`me`, `fetch_timeout`, `retry_delay`, `priority_requests`), `fetch(*sender)` over any p2p
+  limited sender, `add_ready`, `add_retry`, `retain(predicate with call(key))`,
+  `get_pending_deadline`, `get_active_deadline`, `pop_active`, `pop_response(id, peer)`,
+  `record_response`, `pop_missing`, `reconcile(peers)`, `set_blocked(peers)`, `add_targets`,
+  `clear_targets`, `clear`, `has_targets`, `targets_of`, `len_pending`, `len_active`.
+  Metrics: `peer_performance{peer}`, `requests_created{status}`, `requests_sent{status}`,
+  `resolves` (network buckets).
 - `resolver.p2p.mocks.Key` (one-byte test key), `resolver.p2p.mocks.Consumer(K, S)` (byte
   values, expected values, `next_event`/`try_event`).
 - Shared, in the utils directory (needed by the resolver fetcher): `utils.sampling.WeightedIndex`
@@ -88,15 +96,18 @@ on p2p's simulated network and the deterministic runtime.
   for commonware's context). The status label enum lives in the resolver until runtime ports
   `status::Status`; it prints commonware's variant names.
 - Seeded fuzz uses `p2p.fuzz.run` (the same driver as codec's).
+- The p2p fetcher keeps peers, blocked peers, and per-key targets and retry counts in sorted
+  arrays ordered by `codec.order` instead of hash maps; selection draws from `std.Io`'s
+  randomness and time from `Io.Clock.real`, so it is deterministic under the deterministic
+  runtime (sampling matches commonware's for the same random stream). Its tests reach into
+  fields as commonware's do; `test_add_retry_duplicate_panics` is an assertion here.
 
 ## Backlog
 - [x] resolver: lib.rs, subscribers, ingress, delivery, opaque (with metrics).
-- [ ] resolver p2p: wire.rs (done, conformance hashes match), score (done), fetcher, inflight,
-  config, engine, ingress, mocks; port mod.rs tests on p2p simulated.
-- [ ] broadcast: lib.rs and buffered (engine, ingress, config, mocks) with its tests.
-- [ ] collector: lib.rs and p2p (engine, wire) with its tests.
-- [ ] Fuzz targets (broadcast/fuzz, collector/fuzz) and metrics once the runtime registry
-  lands.
+- [ ] resolver p2p: wire.rs (done, conformance hashes match), score (done), fetcher (done, 60
+  tests), inflight, config, engine, ingress, mocks; port mod.rs tests on p2p simulated.
+- [ ] Resolver fuzz targets.
+- Moved to the broadcast-collector lane: broadcast and collector.
 
 ## Log
 - 2026-11-13: resolver lib.rs types, subscribers tracker, p2p wire (conformance hashes match).
@@ -107,3 +118,4 @@ on p2p's simulated network and the deterministic runtime.
 - 2026-11-13: resolver p2p score (throughput weights, commonware test values).
 - 2026-11-13: resolver opaque actor (all 13 commonware tests) with the fetch metrics family.
 - 2026-11-13: utils sampling (WeightedIndex, commonware vectors), PrioritySet, u128 ranges.
+- 2026-11-13: resolver p2p fetcher with its commonware tests (exact score vectors match).
