@@ -787,3 +787,74 @@ test "metric_samples fuzz" {
         }
     }.one, .{});
 }
+
+// Scope fuzz: random `child` and `with_attribute` chains against a model of the prefix and a
+// sorted attribute map, checked through the encoded labels of a registered gauge.
+
+const scope_keys = [_][]const u8{ "az", "epoch", "region", "shard" };
+const scope_labels = [_][]const u8{ "engine", "worker", "x1" };
+
+fn scope_body(random: *utils.rng.FuzzRng) !void {
+    var registry: Registry = .init(gpa);
+    defer registry.deinit();
+    var scope: Scope = .init(&registry);
+    var prefix: std.ArrayList(u8) = .empty;
+    defer prefix.deinit(gpa);
+    var values: [scope_keys.len]?u32 = @splat(null);
+    for (0..utils.rng.range_less_than(random, u32, 0, 12)) |_| {
+        if (utils.rng.boolean(random)) {
+            const label = scope_labels[utils.rng.range_less_than(random, usize, 0, 3)];
+            if (prefix.items.len + label.len + 1 > 100) continue;
+            scope = scope.child(label);
+            if (prefix.items.len > 0) try prefix.append(gpa, '_');
+            try prefix.appendSlice(gpa, label);
+        } else {
+            const key = utils.rng.range_less_than(random, usize, 0, scope_keys.len);
+            const value = utils.rng.range_less_than(random, u32, 0, 1000);
+            scope = scope.with_attribute(scope_keys[key], value);
+            values[key] = value;
+        }
+    }
+    try testing.expectEqualStrings(prefix.items, scope.prefix());
+    var gauge = try scope.gauge("level", "help");
+    defer gauge.deinit();
+    var expected_buffer: [256]u8 = undefined;
+    var expected: Writer = .fixed(&expected_buffer);
+    try expected.print("{s}{s}level", .{ prefix.items, if (prefix.items.len > 0) "_" else "" });
+    var labels: u32 = 0;
+    for (scope_keys, values) |key, value| {
+        const present = value orelse continue;
+        try expected.writeAll(if (labels == 0) "{" else ",");
+        try expected.print("{s}=\"{d}\"", .{ key, present });
+        labels += 1;
+    }
+    if (labels > 0) try expected.writeByte('}');
+    try expected.writeAll(" 0\n");
+    const text = try registry.encode(gpa);
+    defer gpa.free(text);
+    try expect_contains(text, expected.buffered());
+}
+
+const Writer = std.Io.Writer;
+
+test "scope attributes (seeded fuzz)" {
+    var seeds = utils.rng.TestRng.init(0x7e1e_0003 ^ build_options.fuzz_seed);
+    const total: u64 = 500 * @as(u64, build_options.fuzz_soak);
+    var input: [64]u8 = undefined;
+    for (0..total) |_| {
+        seeds.fill_bytes(&input);
+        var random = utils.rng.FuzzRng.init(&input);
+        try scope_body(&random);
+    }
+}
+
+test "scope attributes fuzz" {
+    try testing.fuzz({}, struct {
+        fn one(_: void, smith: *testing.Smith) anyerror!void {
+            var buffer: [64]u8 = undefined;
+            const len = smith.slice(&buffer);
+            var random = utils.rng.FuzzRng.init(buffer[0..len]);
+            try scope_body(&random);
+        }
+    }.one, .{});
+}
