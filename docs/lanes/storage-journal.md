@@ -24,7 +24,9 @@ resize, sync), `runtime.storage`, with the in-memory backend `runtime.storage.me
   its ported tests.
 - [x] journal/segmented: glob (CRC-trailed values located by an external index) with its
   `Recovery` and ported tests.
-- [ ] journal/segmented: oversized journal.
+- [x] journal/segmented: oversized journal (fixed index plus glob values, checkpoint restore
+  and marker-tracked recovery) with its core tests.
+- [ ] journal/segmented: the rest of oversized.rs's ~60 recovery tests.
 - [x] journal/contiguous: fixed journal (checkpoint, blob partition, recovery with watermark
   and clear intent, bounded open, `init_at_size`, `clear_to_size`, replay batches) with the
   shared contiguous suite and the checkpoint tests.
@@ -98,6 +100,13 @@ resize, sync), `runtime.storage`, with the in-memory backend `runtime.storage.me
   `stage_clear_intent`, `destroy`; the `Backing` entry points `recover`, `clear`, `span`
   returning `Recovery(A)` (`size`, `pruning_boundary`, `recovery_watermark`, `item`,
   `append`, `truncate`, `sync`, `prune`, `clear_to_size`, `publish`, `deinit`); `Config`.
+- `storage.journal.segmented.oversized`: `Oversized(I, V)` where `I` is a fixed-size codec
+  entry with `value_location() Location` and `with_location(offset, size) I`; `Config(V)`,
+  `Checkpoint{section, size}`, `Appended{position, offset, size}`. `init_with_checkpoint`,
+  `init_with_markers(marker_partition)` (returns a `Recovery`: `next`, `drain`, `finish`,
+  `deinit`), `append(section, entry, value)`, `get`, `last`, `get_value`, `sync`,
+  `sync_tracked`, `sync_all`, `prune`, `size`, `value_size`, `pruned`, `oldest_section`,
+  `newest_section`, `destroy`, `deinit`.
 - `storage.metadata`: `Metadata(K, V)` with `init`, `deinit`, `get`, `get_mut`,
   `put`, `put_sync`, `upsert`, `remove`, `clear`, `retain`, `items`, `count`, `sync`,
   `destroy`; `Config(V)`.
@@ -175,6 +184,10 @@ resize, sync), `runtime.storage`, with the in-memory backend `runtime.storage.me
   through the page cache. Metrics are plain counters (`items_read`, `cache_hits`,
   `cache_misses`, blob `synced`/`pruned`).
 
+- oversized: syncs complete synchronously, so tracked barriers are recorded already
+  succeeded and marker generations are never in flight; markers persist with a blocking
+  metadata `sync`.
+
 ## Log
 - 2026-11-13: journal Error, frame encoding/decoding with zstd frames, durability Barrier,
   frame fuzz target.
@@ -194,3 +207,4 @@ resize, sync), `runtime.storage`, with the in-memory backend `runtime.storage.me
 - 2026-11-13: segmented glob with `Recovery` and its ported tests.
 - 2026-11-13: contiguous fixed journal with checkpoint and blob partitions; shared suite.
 - 2026-11-13: first batch of the fixed contiguous journal's own recovery tests.
+- 2026-11-13: segmented oversized journal with its core tests.
