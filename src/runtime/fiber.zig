@@ -32,15 +32,16 @@ pub const Context = struct {
 
 const page_size = std.heap.page_size_min;
 
-/// A mapped stack with an inaccessible guard page at its low end (Linux), so an overflow
-/// faults instead of corrupting the neighbouring allocation.
+/// A mapped stack with an inaccessible guard page at each end (Linux): an overflow faults
+/// instead of corrupting the neighbouring allocation, and so does an unwinder that walks past
+/// the outermost frame.
 pub const Stack = struct {
     memory: []align(page_size) u8,
 
     pub fn map(size_bytes: usize) error{OutOfMemory}!Stack {
         assert(size_bytes >= 16 * 1024);
         assert(size_bytes % page_size == 0);
-        const total = size_bytes + page_size;
+        const total = size_bytes + 2 * page_size;
         const memory = std.posix.mmap(
             null,
             total,
@@ -50,21 +51,23 @@ pub const Stack = struct {
             0,
         ) catch return error.OutOfMemory;
         if (builtin.os.tag == .linux) {
-            const rc = std.os.linux.mprotect(memory.ptr, page_size, .{});
-            assert(std.os.linux.errno(rc) == .SUCCESS);
+            const low = std.os.linux.mprotect(memory.ptr, page_size, .{});
+            assert(std.os.linux.errno(low) == .SUCCESS);
+            const high = std.os.linux.mprotect(memory[total - page_size ..].ptr, page_size, .{});
+            assert(std.os.linux.errno(high) == .SUCCESS);
         }
         assert(memory.len == total);
         return .{ .memory = memory };
     }
 
     pub fn unmap(stack: Stack) void {
-        assert(stack.memory.len > page_size);
+        assert(stack.memory.len > 2 * page_size);
         std.posix.munmap(stack.memory);
     }
 
-    /// One past the highest usable byte.
+    /// One past the highest usable byte (the start of the high guard page).
     pub fn top(stack: Stack) usize {
-        return @intFromPtr(stack.memory.ptr) + stack.memory.len;
+        return @intFromPtr(stack.memory.ptr) + stack.memory.len - page_size;
     }
 
     fn map_flags() std.posix.MAP {
@@ -194,20 +197,25 @@ fn switch_naked() callconv(.naked) void {
     }
 }
 
-/// Where a prepared fiber's first switch returns to: call `entry_fn(argument)`, both left in
-/// callee-saved registers by `prepare`. The stack is 16-byte aligned here, so the call gives
-/// `entry_fn` the ABI's entry alignment.
+/// Where a prepared fiber's first switch returns to: enter `entry_fn(argument)`, both left in
+/// callee-saved registers by `prepare`. The stack is 16-byte aligned here.
+///
+/// `entry_fn` is entered with a null return address (pushed on x86_64, in x30 on aarch64)
+/// instead of called, so it is the outermost frame: every unwinder, DWARF or frame pointer,
+/// stops there. A call would leave a return address into this function, which has no CFI; on
+/// aarch64 its return address is x30 again, so an unwinder repeats this frame forever. The
+/// stack alignment `entry_fn` sees is the same as after a call.
 fn trampoline() callconv(.naked) noreturn {
     switch (builtin.cpu.arch) {
         .x86_64 => asm volatile (
             \\ movq %%r12, %%rdi
-            \\ callq *%%r13
-            \\ ud2
+            \\ pushq $0
+            \\ jmpq *%%r13
         ),
         .aarch64 => asm volatile (
             \\ mov x0, x19
-            \\ blr x20
-            \\ brk #1
+            \\ mov x30, xzr
+            \\ br x20
         ),
         else => @compileError("fibers are not implemented for this architecture"),
     }
@@ -241,6 +249,46 @@ test "fiber runs on its own stack and switches back" {
     try testing.expectEqual(@as(u32, 1), state.steps);
     switch_to(&state.main, &state.fiber);
     try testing.expectEqual(@as(u32, 3), state.steps);
+}
+
+// Regression (899b57d): code on a fiber that captures a stack trace, as testing.allocator does
+// on every free, must stop at the outermost frame instead of reading past the stack (into the
+// high guard page here, a segfault).
+test "stack traces on a fiber stop at the outermost frame" {
+    if (!supported) return error.SkipZigTest;
+    const State = struct {
+        main: Context = .{},
+        fiber: Context = .{},
+        frames_safe: usize = 0,
+        frames_unsafe: usize = 0,
+        freed: bool = false,
+
+        fn entry(argument: *anyopaque) callconv(.c) noreturn {
+            const state: *@This() = @ptrCast(@alignCast(argument));
+            var addresses: [64]usize = undefined;
+            const safe = std.debug.captureCurrentStackTrace(.{}, &addresses);
+            state.frames_safe = safe.return_addresses.len;
+            const unsafe = std.debug.captureCurrentStackTrace(.{
+                .allow_unsafe_unwind = true,
+            }, &addresses);
+            state.frames_unsafe = unsafe.return_addresses.len;
+            if (testing.allocator.alloc(u8, 32)) |bytes| {
+                testing.allocator.free(bytes);
+                state.freed = true;
+            } else |_| {}
+            switch_to(&state.fiber, &state.main);
+            unreachable;
+        }
+    };
+    const stack = try Stack.map(64 * 1024);
+    defer stack.unmap();
+    var state: State = .{};
+    state.fiber = prepare(stack, State.entry, &state);
+    switch_to(&state.main, &state.fiber);
+    try testing.expect(state.freed);
+    // The walk ends at `entry`, the outermost frame, instead of filling the buffer.
+    try testing.expect(state.frames_safe >= 1 and state.frames_safe <= 4);
+    try testing.expect(state.frames_unsafe >= 1 and state.frames_unsafe <= 4);
 }
 
 // Many fibers ping-pong with the scheduler while keeping values live in locals and floats
