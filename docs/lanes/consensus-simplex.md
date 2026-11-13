@@ -40,6 +40,7 @@ resolver; those lanes are running, so do the types first and the actors as they 
   `terms`, `deinit`), `Random(H)` (`init(.v0/.v1)`, `select_leader`, `build(V, n)`),
   `RandomElector(H, V)` (`elect(round, ?*const vrf.Certificate(V))`), `assert_elector`
   (`mode` `.scheduled`/`.dynamic`, `Input`).
+- `consensus.simplex.limits.max_payload_size(S, D, participants)`.
 - `consensus.simplex.scheme.bls12381_threshold.vrf`: `Signature(V)`, `Certificate(V)`,
   `Seed(V)` wire types.
 
@@ -83,7 +84,9 @@ resolver; those lanes are running, so do the types first and the actors as they 
   RoundRobinShuffleConformance matches. (Random V0/V1 hashes: after threshold signing.)
 - [ ] simplex scheme: ed25519 now; bls12381_multisig and bls12381_threshold as the bls-math
   lane lands them; secp256r1 when crypto lands it. elector.rs (leader election).
-- [ ] simplex config, limits, metrics, and the actors (voter, batcher, resolver) and engine,
+- [x] limits.rs (`max_payload_size`), checked against the widest VRF encodings; the
+  per-scheme widest-encoding tests follow with the schemes.
+- [ ] simplex config, metrics, and the actors (voter, batcher, resolver) and engine,
   on p2p's simulated network and the deterministic runtime.
 - [ ] simplex mod.rs tests: the full multi-node DST suite with the Byzantine mocks
   (conflicter, equivocator, impersonator, nuller, outdated, twins, ...), seeded.
@@ -97,3 +100,4 @@ resolver; those lanes are running, so do the types first and the actors as they 
   conformance hashes match.
 - 2026-11-13: types.rs `coding::Commitment`; TestCommitment conformance hash matches.
 - 2026-11-13: elector.rs (RoundRobin, Random); RoundRobinShuffleConformance matches.
+- 2026-11-13: limits.rs (`max_payload_size`).
