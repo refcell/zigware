@@ -18,7 +18,7 @@ pub const Bound = struct { section: u64, end: u64 };
 /// Materialize a crash that retains new page bytes but loses their checksum lengths: one
 /// acknowledged `page` followed by `suffix_pages` copies whose checksum length slots are zero.
 pub fn seed_torn_suffix(
-    storage: *Storage,
+    storage: runtime.storage.Storage,
     partition: []const u8,
     section: u64,
     page: []const u8,
@@ -33,7 +33,7 @@ pub fn seed_torn_suffix(
     var source_partition_buffer: [64]u8 = undefined;
     const source = try std.fmt.bufPrint(&source_partition_buffer, "{s}-source", .{partition});
     const opened = try storage.open(source, "source");
-    var writer = try paged.Writer(memory.MemoryBlob).init(
+    var writer = try paged.Writer.init(
         gpa,
         opened.blob,
         opened.len,
@@ -54,8 +54,8 @@ pub fn seed_torn_suffix(
         @memset(image[footer + 6 ..][0..2], 0);
     }
     const target = try storage.open(partition, &manager_mod.section_name(section));
-    defer target.blob.deinit();
-    try target.blob.write_at(0, image);
+    defer target.blob.close();
+    try target.blob.write_at(0, image, .{});
     try target.blob.sync();
 }
 

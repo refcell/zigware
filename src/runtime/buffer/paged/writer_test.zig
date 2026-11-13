@@ -13,8 +13,7 @@ const CacheRef = paged.CacheRef;
 const Checksum = paged.Checksum;
 
 const Storage = memory.Storage;
-const Blob = memory.MemoryBlob;
-const W = writer_mod.Writer(Blob);
+const W = writer_mod.Writer;
 const gpa = testing.allocator;
 const page_size: usize = 103;
 const physical_page_size: usize = page_size + 12;
@@ -40,13 +39,13 @@ const Harness = struct {
 
     fn writer(self: *Harness, name: []const u8) !W {
         const opened = try self.storage.open(partition, name);
-        errdefer opened.blob.deinit();
+        errdefer opened.blob.close();
         return W.init(gpa, opened.blob, opened.len, buffer_size, &self.cache_ref);
     }
 
     fn recovery(self: *Harness, name: []const u8) !W {
         const opened = try self.storage.open(partition, name);
-        errdefer opened.blob.deinit();
+        errdefer opened.blob.close();
         return W.open_recovery(gpa, opened.blob, opened.len, buffer_size, &self.cache_ref);
     }
 
@@ -61,7 +60,7 @@ const Harness = struct {
     /// The raw bytes of blob `name`; caller frees.
     fn raw(self: *Harness, name: []const u8) ![]u8 {
         const opened = try self.storage.open(partition, name);
-        defer opened.blob.deinit();
+        defer opened.blob.close();
         const bytes = try gpa.alloc(u8, @intCast(opened.len));
         errdefer gpa.free(bytes);
         try opened.blob.read_at(0, bytes);
@@ -71,8 +70,8 @@ const Harness = struct {
     /// Overwrite raw bytes of blob `name` durably.
     fn mangle(self: *Harness, name: []const u8, offset: u64, bytes: []const u8) !void {
         const opened = try self.storage.open(partition, name);
-        defer opened.blob.deinit();
-        try opened.blob.write_at(offset, bytes);
+        defer opened.blob.close();
+        try opened.blob.write_at(offset, bytes, .{});
         try opened.blob.sync();
     }
 
@@ -228,8 +227,8 @@ test "recovery trims an invalid tail and zeroes a stale slot" {
     {
         // Also append a truncated physical page of junk.
         const opened = try h.storage.open(partition, "torn");
-        defer opened.blob.deinit();
-        try opened.blob.write_at(physical_page_size, "junk");
+        defer opened.blob.close();
+        try opened.blob.write_at(physical_page_size, "junk", .{});
         try opened.blob.sync();
     }
     var w = try h.writer("torn");
@@ -380,7 +379,7 @@ test "recoverable prefix stops at a torn interior page" {
     try testing.expectEqual(@as(u64, 0), try w.recoverable_prefix_len_at_most(0, 0));
     w.deinit();
 
-    try paged.corrupt_page(&h.storage, partition, "prefix", 2, page_size);
+    try paged.corrupt_page(h.storage.interface(), partition, "prefix", 2, page_size);
     w = try h.writer("prefix");
     defer w.deinit();
     // Recovery scans backwards and keeps the size; the forward scan finds the hole.
@@ -397,7 +396,7 @@ test "read range and read tail on raw blobs" {
     for (&data, 0..) |*byte, index| byte.* = @truncate(index * 3);
     try h.append_synced("raw", &data);
     const opened = try h.storage.open(partition, "raw");
-    defer opened.blob.deinit();
+    defer opened.blob.close();
     var scratch: [physical_page_size]u8 = undefined;
     var buf: [150]u8 = undefined;
     try paged.read_range(opened.blob, page_size, 100, &buf, &scratch);

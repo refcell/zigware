@@ -16,7 +16,8 @@ const fuzz_bytes = @import("../fuzz_bytes.zig");
 const Crc32 = @import("cryptography").crc32.Crc32;
 
 const Storage = memory.Storage;
-const Store = metadata.Metadata(Storage, u64, []const u8);
+const blob_page_size: u64 = @import("runtime").storage.blob_page_size;
+const Store = metadata.Metadata(u64, []const u8);
 const gpa = testing.allocator;
 
 const config: metadata.Config([]const u8) = .{
@@ -25,7 +26,7 @@ const config: metadata.Config([]const u8) = .{
 };
 
 fn open(storage: *Storage) !Store {
-    return Store.init(gpa, storage, config);
+    return Store.init(gpa, storage.interface(), config);
 }
 
 /// Put a copy of `bytes`, freeing any previous value.
@@ -62,15 +63,15 @@ fn expect_metrics(store: *const Store, rewrites: u64, overwrites: u64, keys: usi
 /// Overwrite the start of blob `name` with junk, durably.
 fn corrupt(storage: *Storage, name: []const u8) !void {
     const opened = try storage.open("test", name);
-    defer opened.blob.deinit();
-    try opened.blob.write_at(0, "corrupted");
+    defer opened.blob.close();
+    try opened.blob.write_at(0, "corrupted", .{});
     try opened.blob.sync();
 }
 
 /// Truncate blob `name` to `len` (or by `shrink` bytes), durably.
 fn truncate(storage: *Storage, name: []const u8, len: ?u64, shrink: u64) !void {
     const opened = try storage.open("test", name);
-    defer opened.blob.deinit();
+    defer opened.blob.close();
     try opened.blob.resize(len orelse opened.len - shrink);
     try opened.blob.sync();
 }
@@ -400,7 +401,7 @@ test "blob resize" {
     // The shrunk blob holds exactly one pair: 8 + 8 + 1 + 100 + 4 bytes.
     const opened = try storage.open("test", "right");
     try testing.expectEqual(@as(u64, 121), opened.len);
-    opened.blob.deinit();
+    opened.blob.close();
     store = try open(&storage);
     try testing.expectEqual(@as(usize, 100), store.get(0).?.len);
     for (1..10) |i| try expect_value(&store, i, null);
@@ -490,7 +491,7 @@ test "upsert inserts a default or returns the existing value" {
 
 test "full overwrite limit and crash survival" {
     // Version, key, 2-byte value length prefix, value, and checksum.
-    for ([_]u64{ memory.blob_page_size, memory.blob_page_size + 1 }) |store_len| {
+    for ([_]u64{ blob_page_size, blob_page_size + 1 }) |store_len| {
         const value_len: usize = @intCast(store_len - 8 - 8 - 2 - 4);
         var storage = Storage.init(gpa);
         defer storage.deinit();
@@ -503,14 +504,14 @@ test "full overwrite limit and crash survival" {
         try put_fill(&store, 1, 2, value_len);
         try store.sync();
         // A store larger than a page writes value, version, and checksum separately.
-        const writes: u64 = if (store_len > memory.blob_page_size) 3 else 1;
+        const writes: u64 = if (store_len > blob_page_size) 3 else 1;
         try testing.expectEqual(writes, storage.writes);
         try expect_metrics(&store, 2, 1, 1);
         store.deinit(); // Crash right after the sync returns.
 
         const opened = try storage.open("test", "left");
         try testing.expectEqual(store_len, opened.len);
-        opened.blob.deinit();
+        opened.blob.close();
         store = try open(&storage);
         defer store.deinit();
         try testing.expectEqual(value_len, store.get(1).?.len);
@@ -519,12 +520,12 @@ test "full overwrite limit and crash survival" {
 }
 
 test "interrupted destroy keeps newest generation" {
-    const Generations = metadata.Metadata(Storage, u64, u64);
+    const Generations = metadata.Metadata(u64, u64);
     const cfg: metadata.Config(u64) = .{ .partition = "destroy-order", .codec_config = {} };
     for ([_]u64{ 2, 3 }) |generations| {
         var storage = Storage.init(gpa);
         defer storage.deinit();
-        var store = try Generations.init(gpa, &storage, cfg);
+        var store = try Generations.init(gpa, storage.interface(), cfg);
         for (1..generations + 1) |generation| {
             _ = try store.put(0, generation);
             try store.sync();
@@ -535,12 +536,11 @@ test "interrupted destroy keeps newest generation" {
         storage.remove_failures_after = null;
         const names = try storage.scan(gpa, "destroy-order");
         defer {
-            for (names) |name| gpa.free(name);
-            gpa.free(names);
+            names.deinit(gpa);
         }
-        try testing.expectEqual(@as(usize, 1), names.len);
+        try testing.expectEqual(@as(usize, 1), names.items.len);
 
-        store = try Generations.init(gpa, &storage, cfg);
+        store = try Generations.init(gpa, storage.interface(), cfg);
         defer store.deinit();
         try testing.expectEqual(generations, store.get(0).?.*);
     }
@@ -563,7 +563,7 @@ test "on-disk layout" {
     @memcpy(expected[0..body.len], &body);
     std.mem.writeInt(u32, expected[body.len..], Crc32.checksum(&body), .big);
     const opened = try storage.open("test", "right");
-    defer opened.blob.deinit();
+    defer opened.blob.close();
     var actual: [expected.len]u8 = undefined;
     try testing.expectEqual(@as(u64, actual.len), opened.len);
     try opened.blob.read_at(0, &actual);

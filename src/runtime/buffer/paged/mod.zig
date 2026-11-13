@@ -32,7 +32,8 @@
 const std = @import("std");
 const assert = std.debug.assert;
 const Crc32 = @import("cryptography").crc32.Crc32;
-const memory = @import("../memory.zig");
+const storage_mod = @import("../../storage.zig");
+const Storage = storage_mod.Storage;
 
 pub const cache = @import("cache.zig");
 pub const tip = @import("tip.zig");
@@ -49,7 +50,7 @@ const slot_len_size: usize = 2;
 const slot_size: usize = 6;
 
 /// Errors from paged blob access: storage errors plus a page failing its checksum.
-pub const Error = memory.Error || error{InvalidChecksum};
+pub const Error = storage_mod.Error || error{InvalidChecksum};
 
 /// The logical page size whose physical page occupies exactly `physical_page_size` bytes.
 ///
@@ -270,7 +271,7 @@ pub fn read_page_with_checksum(
 /// Flip one byte inside physical page `page` of the blob `name`, leaving every other page
 /// valid: a torn interior page. The target must be followed by a complete physical page.
 pub fn corrupt_page(
-    storage: *memory.Storage,
+    storage: Storage,
     partition: []const u8,
     name: []const u8,
     page: u64,
@@ -280,12 +281,12 @@ pub fn corrupt_page(
     const physical_page_size = logical_page_size + checksum_size;
     const offset = page * physical_page_size;
     const opened = try storage.open(partition, name);
-    defer opened.blob.deinit();
+    defer opened.blob.close();
     assert(offset + physical_page_size * 2 <= opened.len); // An interior page.
     var byte: [1]u8 = undefined;
     try opened.blob.read_at(offset, &byte);
     byte[0] ^= 0xFF;
-    try opened.blob.write_at(offset, &byte);
+    try opened.blob.write_at(offset, &byte, .{});
     try opened.blob.sync();
 }
 

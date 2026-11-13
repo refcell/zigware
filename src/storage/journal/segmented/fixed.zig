@@ -28,6 +28,7 @@ const Allocator = std.mem.Allocator;
 const codec = @import("codec");
 const runtime = @import("runtime");
 const paged = runtime.buffer.paged;
+const Storage = runtime.storage.Storage;
 const manager_mod = @import("manager.zig");
 
 /// Configuration for the fixed segmented journal.
@@ -45,15 +46,15 @@ pub const Config = struct {
 /// A validation floor: `items` items of `section` are known durable.
 pub const Floor = struct { section: u64, items: u64 };
 
-pub fn Journal(comptime Storage: type, comptime A: type) type {
+pub fn Journal(comptime A: type) type {
     const chunk_size = codec.fixed_size(A) orelse @compileError("journal items must be fixed-size");
     comptime assert(chunk_size > 0);
     comptime assert(!codec.owns_memory(A));
     return struct {
         const Self = @This();
-        pub const Manager = manager_mod.Manager(Storage);
+        pub const Manager = manager_mod.Manager;
         pub const Error = Manager.Error;
-        pub const Recovery = RecoveryType(Storage, A);
+        pub const Recovery = RecoveryType(A);
         /// Size of each item in bytes.
         pub const chunk: usize = chunk_size;
         const chunk_u64: u64 = chunk_size;
@@ -69,12 +70,12 @@ pub fn Journal(comptime Storage: type, comptime A: type) type {
         }
 
         /// Open every stored section through `ceiling`. Opening discards a torn tail page.
-        fn open(gpa: Allocator, storage: *Storage, cfg: Config, ceiling: u64) Error!Self {
+        fn open(gpa: Allocator, storage: Storage, cfg: Config, ceiling: u64) Error!Self {
             return .{ .manager = try Manager.init(gpa, storage, manager_config(cfg), ceiling) };
         }
 
         /// Open with no validation floors, replaying (and repairing) every section.
-        pub fn init(gpa: Allocator, storage: *Storage, cfg: Config) Error!Self {
+        pub fn init(gpa: Allocator, storage: Storage, cfg: Config) Error!Self {
             var recovery = try Self.preflight_floors(gpa, storage, cfg, &.{});
             try recovery.drain();
             return recovery.finish();
@@ -90,7 +91,7 @@ pub fn Journal(comptime Storage: type, comptime A: type) type {
         /// an item rounds down. All retained data is validated before returning.
         pub fn init_at_most(
             gpa: Allocator,
-            storage: *Storage,
+            storage: Storage,
             cfg: Config,
             section: u64,
             end_requested: u64,
@@ -123,7 +124,7 @@ pub fn Journal(comptime Storage: type, comptime A: type) type {
         /// replays every section from position zero. Every section named by a floor must exist.
         pub fn preflight_floors(
             gpa: Allocator,
-            storage: *Storage,
+            storage: Storage,
             cfg: Config,
             floors: []const Floor,
         ) Error!Recovery {
@@ -160,7 +161,7 @@ pub fn Journal(comptime Storage: type, comptime A: type) type {
         /// truncates `section` to `size` bytes and removes every later section unread.
         pub fn preflight_restore(
             gpa: Allocator,
-            storage: *Storage,
+            storage: Storage,
             cfg: Config,
             section: u64,
             size_bytes: u64,
@@ -191,9 +192,9 @@ pub fn Journal(comptime Storage: type, comptime A: type) type {
 
         /// The terminal entry of an earlier section's retained pages, which must hold whole
         /// items.
-        fn terminal_entry(gpa: Allocator, storage: *Storage, cfg: Config, section: u64) Error!?A {
+        fn terminal_entry(gpa: Allocator, storage: Storage, cfg: Config, section: u64) Error!?A {
             const opened = try storage.open(cfg.partition, &manager_mod.section_name(section));
-            defer opened.blob.deinit();
+            defer opened.blob.close();
             if (opened.len == 0) return null;
             const scratch = try gpa.alloc(u8, cfg.cache_ref.page_size + paged.checksum_size);
             defer gpa.free(scratch);
@@ -212,13 +213,13 @@ pub fn Journal(comptime Storage: type, comptime A: type) type {
         /// The terminal entry of a validated `size`-byte prefix of `section`.
         fn boundary(
             gpa: Allocator,
-            storage: *Storage,
+            storage: Storage,
             cfg: Config,
             section: u64,
             size_bytes: u64,
         ) Error!A {
             const opened = try storage.open(cfg.partition, &manager_mod.section_name(section));
-            defer opened.blob.deinit();
+            defer opened.blob.close();
             const scratch = try gpa.alloc(u8, cfg.cache_ref.page_size + paged.checksum_size);
             defer gpa.free(scratch);
             var entry: [chunk_size]u8 = undefined;
@@ -377,12 +378,12 @@ pub fn Journal(comptime Storage: type, comptime A: type) type {
 /// position zero of every section, repairing invalid trailing data (never below a floor). An
 /// error ends the section that produced it and makes `finish` fail; iteration continues with
 /// the next section. A restore recovery has nothing to replay.
-fn RecoveryType(comptime Storage: type, comptime A: type) type {
+fn RecoveryType(comptime A: type) type {
     return struct {
         const Self = @This();
-        const J = Journal(Storage, A);
+        const J = Journal(A);
         const Error = J.Error;
-        const Replay = paged.Replay(Storage.Blob);
+        const Replay = paged.Replay;
         const chunk_u64: u64 = J.chunk;
 
         pub const Item = struct { section: u64, position: u64, item: A };
@@ -391,7 +392,7 @@ fn RecoveryType(comptime Storage: type, comptime A: type) type {
         const SectionReplay = struct { section: u64, reader: Replay, position: u64 };
 
         gpa: Allocator,
-        storage: *Storage,
+        storage: Storage,
         cfg: Config,
         /// Terminal entry at each validated boundary, by ascending section.
         boundaries: std.ArrayList(Boundary) = .empty,
@@ -407,7 +408,7 @@ fn RecoveryType(comptime Storage: type, comptime A: type) type {
         finished: bool = false,
         errored: bool = false,
 
-        fn init(gpa: Allocator, storage: *Storage, cfg: Config) Self {
+        fn init(gpa: Allocator, storage: Storage, cfg: Config) Self {
             return .{ .gpa = gpa, .storage = storage, .cfg = cfg };
         }
 

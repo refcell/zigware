@@ -40,25 +40,25 @@ build on it. Until then, start with the pure parts (frame.rs, durability, item e
 - `storage.journal.durability.Barrier(Completion)`: durable-boundary tracker.
 - `storage.journal.zstd`: `compress_into`, `compress_bound`, `frame_content_size`,
   `decompress`.
-- `runtime.buffer.memory` (re-exported as `storage.journal.memory`): in-memory `Storage`
-  (`open`, `remove`, `scan`) and `Blob` (`read_at`, `write_at`, `resize`, `sync`, `deinit`),
-  a stand-in for runtime storage.
+- `runtime.buffer.memory` (re-exported as `storage.journal.memory`): in-memory test backend;
+  `Storage.init(gpa)`, `interface()` returns a `runtime.storage.Storage`; counters `reads`,
+  `writes`, `write_bytes`; faults `remove_failures_after`, `allow_mutations`.
 - `runtime.buffer.SyncState`; `runtime.buffer.paged`: `Checksum`, `page_size`, `page_len`,
   `corrupt_page`, `CacheRef` (`init(gpa, page_size, capacity)`, `next_id`, `cache`,
-  `read_cached`, `clear`), `Writer(Blob)` (`init`, `open_recovery`, `truncate`,
+  `read_cached`, `clear`), `Writer` (`init`, `open_recovery`, `truncate`,
   `finish_recovery`, `append`, `try_append`, `try_append_value`, `sync`, `read_into`,
   `read_up_to`, `try_read_sync_into`, `replay`, `recoverable_prefix_len[_at_most]`),
-  `Replay(Blob)` (`ensure`, `bytes`, `advance`, `seek_to`), `read_range` and `read_tail`
+  `Replay` (`ensure`, `bytes`, `advance`, `seek_to`), `read_range` and `read_tail`
   (validated logical reads from a raw paged blob).
-- `storage.journal.segmented.manager`: `Manager(Storage)` (one paged writer per section:
+- `storage.journal.segmented.manager`: `Manager` (one paged writer per section:
   `get`, `get_or_create`, `sync`, `sync_all`, `prune`, `remove_section`, `truncate_pending`,
   `clear`, `destroy`), `truncate_paged_tail`, `stored_sections`, `section_name`.
-- `storage.journal.segmented.fixed`: `Journal(Storage, A)` for fixed-size codec items with
+- `storage.journal.segmented.fixed`: `Journal(A)` for fixed-size codec items with
   `init`, `init_at_most`, `preflight_floors`, `preflight_restore` (returning a `Recovery`
   with `next`, `drain`, `finish`, `boundary_items`), `append`, `get`, `get_many`,
   `try_get_sync`, `last`, `sync`, `sync_all`, `prune`, `section_len`, `size`, `clear`,
   `destroy`; `Config`, `Floor`.
-- `storage.metadata`: `Metadata(Storage, K, V)` with `init`, `deinit`, `get`, `get_mut`,
+- `storage.metadata`: `Metadata(K, V)` with `init`, `deinit`, `get`, `get_mut`,
   `put`, `put_sync`, `upsert`, `remove`, `clear`, `retain`, `items`, `count`, `sync`,
   `destroy`; `Config(V)`.
 
@@ -83,12 +83,12 @@ build on it. Until then, start with the pure parts (frame.rs, durability, item e
   with libzstd's compressor) have no Zig counterpart: codec readers take one slice, and the
   compressor differs by design.
 
-- Storage stand-in: until runtime's storage lands, journal/metadata/queue are comptime
-  generic over a `Storage` type, tested with `journal/memory.zig`. Its names match
-  commonware's (`open`, `remove`, `scan`, `read_at`, `write_at`, `resize`, `sync`); reads
-  fill a caller buffer and writes take one slice instead of `IoBufs`, and read/write options
-  are omitted (they change caching and syscalls, not contents). Unsynced writes are lost
-  when a handle closes, as in commonware's memory storage.
+- Storage: journal, metadata, and the buffers take `runtime.storage.Storage` and
+  `runtime.storage.Blob` vtable values (no comptime storage parameter). Until the runtime's
+  in-memory backend lands, tests run on `runtime.buffer.memory`, a test backend implementing
+  that vtable (live contents published by `sync`; closing without a sync drops unsynced
+  writes), with read/write counters and removal and mutation fault knobs. It does not model
+  the blob header. Read options are not used.
 - metadata: keys are fixed-size codec types sorted by encoded bytes (commonware's `Span`
   ordering); values are owned by the store and must not borrow input (`codec.Bytes`).
   Methods that commonware makes consuming (`sync`, `put_sync`) mark the store failed on
@@ -126,3 +126,5 @@ build on it. Until then, start with the pure parts (frame.rs, durability, item e
 - 2026-11-13: `paged.read_range`/`read_tail`; segmented section manager and fixed segmented
   journal with recovery (floors, restore, torn-page repair) and their ported tests; memory
   storage read counts and mutation faults.
+- 2026-11-13: switched metadata, the paged buffer, and the segmented journal onto
+  `runtime.storage`; the memory stand-in is now a test backend for its vtable.

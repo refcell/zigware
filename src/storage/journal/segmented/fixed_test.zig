@@ -14,7 +14,7 @@ const manager_mod = @import("manager.zig");
 
 const Storage = memory.Storage;
 const CacheRef = paged.CacheRef;
-const J = fixed.Journal(Storage, Digest);
+const J = fixed.Journal(Digest);
 const Item = J.Recovery.Item;
 const gpa = testing.allocator;
 const page_size: u16 = 44;
@@ -58,12 +58,12 @@ const Harness = struct {
     }
 
     fn open(self: *Harness) !J {
-        return J.init(gpa, &self.storage, self.cfg());
+        return J.init(gpa, self.storage.interface(), self.cfg());
     }
 
     /// Open with no floors, collecting every replayed item. Caller frees `items`.
     fn replay(self: *Harness, items: *std.ArrayList(Item)) !J {
-        var recovery = try J.preflight_floors(gpa, &self.storage, self.cfg(), &.{});
+        var recovery = try J.preflight_floors(gpa, self.storage.interface(), self.cfg(), &.{});
         return drain(&recovery, items);
     }
 
@@ -73,12 +73,12 @@ const Harness = struct {
         journal.deinit();
         var config = self.cfg();
         config.replay_buffer = config.write_buffer;
-        return J.init_at_most(gpa, &self.storage, config, section, end);
+        return J.init_at_most(gpa, self.storage.interface(), config, section, end);
     }
 
     fn resize_blob(self: *Harness, section: u64, delta: i64) !void {
         const opened = try self.storage.open(partition, &manager_mod.section_name(section));
-        defer opened.blob.deinit();
+        defer opened.blob.close();
         const target: u64 = @intCast(@as(i64, @intCast(opened.len)) + delta);
         try opened.blob.resize(target);
         try opened.blob.sync();
@@ -86,14 +86,14 @@ const Harness = struct {
 
     fn write_blob(self: *Harness, section: u64, offset: u64, bytes: []const u8) !void {
         const opened = try self.storage.open(partition, &manager_mod.section_name(section));
-        defer opened.blob.deinit();
-        try opened.blob.write_at(offset, bytes);
+        defer opened.blob.close();
+        try opened.blob.write_at(offset, bytes, .{});
         try opened.blob.sync();
     }
 
     fn blob_len(self: *Harness, section: u64) !u64 {
         const opened = try self.storage.open(partition, &manager_mod.section_name(section));
-        defer opened.blob.deinit();
+        defer opened.blob.close();
         return opened.len;
     }
 };
@@ -138,7 +138,7 @@ test "synced sections keep partial pages" {
         var config = h.cfg();
         config.write_buffer = 131072;
         config.replay_buffer = 131072;
-        var journal = try IntJournal.init(gpa, &h.storage, config);
+        var journal = try IntJournal.init(gpa, h.storage.interface(), config);
         defer journal.deinit();
         for (0..sections) |section| {
             for (0..items) |value| _ = try journal.append(section, value);
@@ -165,7 +165,7 @@ test "append across buffer boundaries" {
         var config = h.cfg();
         config.write_buffer = 1;
         config.replay_buffer = 128;
-        var journal = try J.init(gpa, &h.storage, config);
+        var journal = try J.init(gpa, h.storage.interface(), config);
         for ([_]u64{ 1, 3 }) |section| {
             for (0..10) |position| {
                 const item = test_digest(section * 100 + position);
@@ -179,7 +179,7 @@ test "append across buffer boundaries" {
 
         var items: std.ArrayList(Item) = .empty;
         defer items.deinit(gpa);
-        var recovery = try J.preflight_floors(gpa, &h.storage, config, &.{});
+        var recovery = try J.preflight_floors(gpa, h.storage.interface(), config, &.{});
         journal = try drain(&recovery, &items);
         try testing.expectEqual(@as(usize, 20), items.items.len);
         for (items.items, 0..) |item, index| {
@@ -197,7 +197,7 @@ test "append across buffer boundaries" {
 test "replay of empty storage finishes immediately" {
     var h = try Harness.init();
     defer h.deinit();
-    var recovery = try J.preflight_floors(gpa, &h.storage, h.cfg(), &.{});
+    var recovery = try J.preflight_floors(gpa, h.storage.interface(), h.cfg(), &.{});
     var journal = try recovery.finish();
     try journal.destroy();
 }
@@ -209,7 +209,7 @@ test "finishing a replay before it drains fails" {
     _ = try journal.append(1, test_digest(0));
     try journal.sync_all();
     journal.deinit();
-    var recovery = try J.preflight_floors(gpa, &h.storage, h.cfg(), &.{});
+    var recovery = try J.preflight_floors(gpa, h.storage.interface(), h.cfg(), &.{});
     try testing.expectError(error.ReplayFailed, recovery.finish());
 }
 
@@ -449,7 +449,7 @@ test "empty section in the middle" {
     try journal.destroy();
 }
 
-const IntJournal = fixed.Journal(Storage, u64);
+const IntJournal = fixed.Journal(u64);
 
 fn int_cfg(h: *Harness) fixed.Config {
     var config = h.cfg();
@@ -461,13 +461,13 @@ test "pages are validated before trailing bytes" {
     const logical_page_size: u16 = 5;
     var h = try Harness.init_sized(logical_page_size, 4);
     defer h.deinit();
-    var journal = try IntJournal.init(gpa, &h.storage, int_cfg(&h));
+    var journal = try IntJournal.init(gpa, h.storage.interface(), int_cfg(&h));
     for ([_]u64{ 11, 22, 33, 44 }) |value| _ = try journal.append(0, value);
     try journal.sync_all();
     journal.deinit();
     {
         const opened = try h.storage.open(partition, &manager_mod.section_name(0));
-        var writer = try paged.Writer(memory.MemoryBlob).open_recovery(
+        var writer = try paged.Writer.open_recovery(
             gpa,
             opened.blob,
             opened.len,
@@ -487,8 +487,8 @@ test "pages are validated before trailing bytes" {
     // Backward sizing stops at valid page 5 and reports 30 logical bytes. Item alignment alone
     // selects 24, inside torn page 4. Forward page validation finds 20 contiguous bytes and
     // selects the safe item boundary 16.
-    try paged.corrupt_page(&h.storage, partition, &manager_mod.section_name(0), 4, 5);
-    journal = try IntJournal.init(gpa, &h.storage, int_cfg(&h));
+    try paged.corrupt_page(h.storage.interface(), partition, &manager_mod.section_name(0), 4, 5);
+    journal = try IntJournal.init(gpa, h.storage.interface(), int_cfg(&h));
     try testing.expectEqual(@as(u64, 2), try journal.section_len(0));
     try testing.expectEqual(@as(u64, 11), try journal.get(0, 0));
     try testing.expectEqual(@as(u64, 22), try journal.get(0, 1));
@@ -498,14 +498,14 @@ test "pages are validated before trailing bytes" {
 test "repairs a torn interior page" {
     var h = try Harness.init_sized(16, 4);
     defer h.deinit();
-    var journal = try IntJournal.init(gpa, &h.storage, int_cfg(&h));
+    var journal = try IntJournal.init(gpa, h.storage.interface(), int_cfg(&h));
     for (0..6) |value| _ = try journal.append(0, value);
     try journal.sync_all();
     journal.deinit();
     // The three 16-byte pages each hold two items. Tearing the interior page leaves a valid
     // last page, so backward sizing reports 48 bytes; replay must still truncate to 16.
-    try paged.corrupt_page(&h.storage, partition, &manager_mod.section_name(0), 1, 16);
-    journal = try IntJournal.init(gpa, &h.storage, int_cfg(&h));
+    try paged.corrupt_page(h.storage.interface(), partition, &manager_mod.section_name(0), 1, 16);
+    journal = try IntJournal.init(gpa, h.storage.interface(), int_cfg(&h));
     try testing.expectEqual(@as(u64, 2), try journal.section_len(0));
     try testing.expectEqual(@as(u64, 0), try journal.get(0, 0));
     try testing.expectEqual(@as(u64, 1), try journal.get(0, 1));
@@ -514,7 +514,7 @@ test "repairs a torn interior page" {
     try testing.expectEqual(@as(u64, 2), try journal.append(0, 99));
     try journal.sync_all();
     journal.deinit();
-    journal = try IntJournal.init(gpa, &h.storage, int_cfg(&h));
+    journal = try IntJournal.init(gpa, h.storage.interface(), int_cfg(&h));
     try testing.expectEqual(@as(u64, 3), try journal.section_len(0));
     try testing.expectEqual(@as(u64, 0), try journal.get(0, 0));
     try testing.expectEqual(@as(u64, 1), try journal.get(0, 1));
@@ -547,7 +547,7 @@ test "clear" {
     defer h.deinit();
     var config = h.cfg();
     config.write_buffer = 1024;
-    var journal = try J.init(gpa, &h.storage, config);
+    var journal = try J.init(gpa, h.storage.interface(), config);
     for (0..5) |section| {
         try append_digests(&journal, section, section * 1000, section * 1000 + 10);
         try journal.sync(&.{section});
@@ -632,18 +632,19 @@ const BoundedOpen = struct {
 
     pub fn open(storage: *Storage, cache: *CacheRef, bound: ?test_support.Bound) !BoundedOpen {
         const config_value = config(cache);
+        const interface = storage.interface();
         if (bound) |b| {
             return .{
                 .journal = try IntJournal.init_at_most(
                     gpa,
-                    storage,
+                    interface,
                     config_value,
                     b.section,
                     b.end,
                 ),
             };
         }
-        return .{ .journal = try IntJournal.init(gpa, storage, config_value) };
+        return .{ .journal = try IntJournal.init(gpa, interface, config_value) };
     }
 
     pub fn deinit(self: *BoundedOpen) void {
@@ -680,14 +681,14 @@ test "capped init bounds torn suffix reads" {
             for ([_]usize{ 16, 4096 }, &counts) |pages, *count| {
                 var h = try Harness.init_sized(72, 4);
                 defer h.deinit();
-                const source = source_section;
-                try test_support.seed_torn_suffix(&h.storage, partition, source, &page, pages);
+                const store = h.storage.interface();
+                try test_support.seed_torn_suffix(store, partition, source_section, &page, pages);
                 var config = h.cfg();
                 config.write_buffer = 144;
                 config.replay_buffer = 144;
                 // Bounded initialization must read independently of the discarded suffix.
                 const reads = h.storage.reads;
-                var journal = try IntJournal.init_at_most(gpa, &h.storage, config, 0, cap);
+                var journal = try IntJournal.init_at_most(gpa, store, config, 0, cap);
                 const retained = if (source_section == 0) cap else 0;
                 try testing.expectEqual(retained, try journal.size(0));
                 count.* = h.storage.reads - reads;
@@ -695,7 +696,8 @@ test "capped init bounds torn suffix reads" {
                 _ = try journal.append(0, 999);
                 try journal.sync_all();
                 journal.deinit();
-                var recovery = try IntJournal.preflight_floors(gpa, &h.storage, config, &.{});
+                const interface = h.storage.interface();
+                var recovery = try IntJournal.preflight_floors(gpa, interface, config, &.{});
                 var values: std.ArrayList(u64) = .empty;
                 defer values.deinit(gpa);
                 {
@@ -722,13 +724,13 @@ test "bounded initialization bounds its scan" {
         var config = h.cfg();
         config.write_buffer = 65536;
         config.replay_buffer = 65536;
-        var journal = try IntJournal.init(gpa, &h.storage, config);
+        var journal = try IntJournal.init(gpa, h.storage.interface(), config);
         for (0..count) |value| _ = try journal.append(0, value);
         try journal.sync_all();
         journal.deinit();
         // Record the reads required to reopen at the same one-item boundary.
         const before = h.storage.reads;
-        journal = try IntJournal.init_at_most(gpa, &h.storage, config, 0, 8);
+        journal = try IntJournal.init_at_most(gpa, h.storage.interface(), config, 0, 8);
         defer journal.deinit();
         try testing.expectEqual(@as(u64, 1), try journal.section_len(0));
         reads.* = h.storage.reads - before;
@@ -747,7 +749,7 @@ test "bounded initialization recovers a torn page" {
             var config = h.cfg();
             config.write_buffer = 256;
             config.replay_buffer = 256;
-            var journal = try IntJournal.init(gpa, &h.storage, config);
+            var journal = try IntJournal.init(gpa, h.storage.interface(), config);
             for (0..4) |value| _ = try journal.append(0, value);
             _ = try journal.append(1, 100);
             try journal.sync_all();
@@ -755,7 +757,7 @@ test "bounded initialization recovers a torn page" {
             // A valid page prefix may end inside the last item after an interrupted append.
             {
                 const opened = try h.storage.open(partition, &manager_mod.section_name(0));
-                var writer = try paged.Writer(memory.MemoryBlob).open_recovery(
+                var writer = try paged.Writer.open_recovery(
                     gpa,
                     opened.blob,
                     opened.len,
@@ -767,14 +769,16 @@ test "bounded initialization recovers a torn page" {
                 try writer.sync();
             }
             // A valid later page survives after the torn page in section zero.
-            try paged.corrupt_page(&h.storage, partition, &manager_mod.section_name(0), 4, 5);
-            journal = try IntJournal.init_at_most(gpa, &h.storage, config, 0, cap);
+            const name = manager_mod.section_name(0);
+            try paged.corrupt_page(h.storage.interface(), partition, &name, 4, 5);
+            journal = try IntJournal.init_at_most(gpa, h.storage.interface(), config, 0, cap);
             const expected_bytes = @min(cap, 16) / 8 * 8;
             try testing.expectEqual(expected_bytes, try journal.size(0));
             try testing.expectEqual(@as(?u64, 0), journal.newest_section());
             journal.deinit();
             // A normal restart retains the repaired prefix and appends at its exact end.
-            var recovery = try IntJournal.preflight_floors(gpa, &h.storage, config, &.{});
+            const interface = h.storage.interface();
+            var recovery = try IntJournal.preflight_floors(gpa, interface, config, &.{});
             var count: u64 = 0;
             {
                 errdefer recovery.deinit();
@@ -804,7 +808,7 @@ fn lazy_cfg(h: *Harness) fixed.Config {
 
 /// Seed sections `first..=last` with sixteen durable u64 items each.
 fn seed(h: *Harness, first: u64, last: u64) !void {
-    var journal = try IntJournal.init(gpa, &h.storage, lazy_cfg(h));
+    var journal = try IntJournal.init(gpa, h.storage.interface(), lazy_cfg(h));
     defer journal.deinit();
     var section = first;
     while (section <= last) : (section += 1) {
@@ -823,10 +827,10 @@ fn drain_count(recovery: *IntJournal.Recovery) !struct { IntJournal, u64 } {
 }
 
 fn check_cached_get(comptime size: usize) !void {
-    const ArrayJournal = fixed.Journal(Storage, [size]u8);
+    const ArrayJournal = fixed.Journal([size]u8);
     var h = try Harness.init();
     defer h.deinit();
-    var journal = try ArrayJournal.init(gpa, &h.storage, h.cfg());
+    var journal = try ArrayJournal.init(gpa, h.storage.interface(), h.cfg());
     _ = try journal.append(1, @splat(7));
     _ = try journal.append(1, @splat(8));
     try testing.expectEqual(@as(?[size]u8, @splat(7)), journal.try_get_sync(1, 0));
@@ -841,18 +845,18 @@ test "cached get at the stack buffer boundary" {
 }
 
 test "replay leaves the page cache cold" {
-    const PageJournal = fixed.Journal(Storage, [16]u8);
+    const PageJournal = fixed.Journal([16]u8);
     var h = try Harness.init_sized(16, 4);
     defer h.deinit();
     var config = int_cfg(&h);
     config.replay_buffer = 1024;
-    var journal = try PageJournal.init(gpa, &h.storage, config);
+    var journal = try PageJournal.init(gpa, h.storage.interface(), config);
     // Each item fills one logical page, so a synchronous probe checks each page.
     for (0..2) |value| _ = try journal.append(1, @splat(@intCast(value)));
     try journal.sync(&.{1});
     journal.deinit();
     h.cache_ref.clear();
-    journal = try PageJournal.init(gpa, &h.storage, config);
+    journal = try PageJournal.init(gpa, h.storage.interface(), config);
     defer journal.deinit();
     for (0..2) |position| try testing.expect(journal.try_get_sync(1, position) == null);
     var reads = h.storage.reads;
@@ -874,7 +878,7 @@ test "clean recovery uses the replay buffer" {
     config.replay_buffer = 448;
     // A preflight without floors reads nothing; replay reads in replay-buffer batches.
     const before = h.storage.reads;
-    var recovery = try IntJournal.preflight_floors(gpa, &h.storage, config, &.{});
+    var recovery = try IntJournal.preflight_floors(gpa, h.storage.interface(), config, &.{});
     try testing.expectEqual(before, h.storage.reads);
     var journal, const count = try drain_count(&recovery);
     try testing.expectEqual(@as(u64, 16), count);
@@ -890,7 +894,7 @@ test "floor preflight reads only the boundary" {
     try seed(&h, 1, 1);
     // A durable floor proves its prefix: preflight reads only the terminal entry's page.
     const before = h.storage.reads;
-    var recovery = try IntJournal.preflight_floors(gpa, &h.storage, lazy_cfg(&h), &.{
+    var recovery = try IntJournal.preflight_floors(gpa, h.storage.interface(), lazy_cfg(&h), &.{
         .{ .section = 1, .items = 16 },
     });
     try testing.expectEqual(before + 1, h.storage.reads);
@@ -904,13 +908,13 @@ test "floor preflight reads the terminal entry only" {
     defer h.deinit();
     var config = int_cfg(&h);
     config.replay_buffer = 1024;
-    var journal = try J.init(gpa, &h.storage, config);
+    var journal = try J.init(gpa, h.storage.interface(), config);
     for (0..2) |value| _ = try journal.append(1, test_digest(value));
     try journal.sync(&.{1});
     journal.deinit();
     // Two 32-byte items occupy four 16-byte pages; the terminal entry spans two of them.
     const before = h.storage.reads;
-    var recovery = try J.preflight_floors(gpa, &h.storage, config, &.{
+    var recovery = try J.preflight_floors(gpa, h.storage.interface(), config, &.{
         .{ .section = 1, .items = 2 },
     });
     try testing.expectEqual(before + 2, h.storage.reads);
@@ -930,7 +934,7 @@ test "recovery modifies nothing before next" {
     const torn = try h.blob_len(1);
     // A floor below the tear is proven by reading it; a dropped recovery leaves the torn
     // page in place.
-    var recovery = try IntJournal.preflight_floors(gpa, &h.storage, lazy_cfg(&h), &.{
+    var recovery = try IntJournal.preflight_floors(gpa, h.storage.interface(), lazy_cfg(&h), &.{
         .{ .section = 1, .items = 14 },
     });
     try testing.expectEqual(@as(usize, 1), recovery.boundary_items().len);
@@ -939,7 +943,7 @@ test "recovery modifies nothing before next" {
     try testing.expectEqual(torn, try h.blob_len(1));
     // The first call opens the writer and discards the torn page: seven 28-byte physical
     // pages remain, holding the fourteen replayed items.
-    recovery = try IntJournal.preflight_floors(gpa, &h.storage, lazy_cfg(&h), &.{});
+    recovery = try IntJournal.preflight_floors(gpa, h.storage.interface(), lazy_cfg(&h), &.{});
     var journal, const count = try drain_count(&recovery);
     journal.deinit();
     try testing.expectEqual(@as(u64, 14), count);
@@ -952,7 +956,8 @@ test "restore reads only boundaries" {
     try seed(&h, 0, 1);
     // One terminal boundary read per section, independent of the eight pages in each.
     const before = h.storage.reads;
-    var recovery = try IntJournal.preflight_restore(gpa, &h.storage, lazy_cfg(&h), 1, 16 * 8);
+    const interface = h.storage.interface();
+    var recovery = try IntJournal.preflight_restore(gpa, interface, lazy_cfg(&h), 1, 16 * 8);
     try testing.expectEqual(before + 2, h.storage.reads);
     // The checkpoint leaves nothing to replay, and asking opens no writer.
     try testing.expectEqual(@as(?IntJournal.Recovery.Item, null), try recovery.next());
@@ -964,13 +969,13 @@ test "restore reads only boundaries" {
 test "restore retains an empty checkpoint section" {
     var h = try Harness.init_sized(16, 4);
     defer h.deinit();
-    var journal = try IntJournal.init(gpa, &h.storage, lazy_cfg(&h));
+    var journal = try IntJournal.init(gpa, h.storage.interface(), lazy_cfg(&h));
     for (0..3) |section| _ = try journal.append(section, section);
     try journal.sync_all();
     try journal.truncate_pending_section(1, 0);
     try journal.sync(&.{1});
     journal.deinit();
-    var recovery = try IntJournal.preflight_restore(gpa, &h.storage, lazy_cfg(&h), 1, 0);
+    var recovery = try IntJournal.preflight_restore(gpa, h.storage.interface(), lazy_cfg(&h), 1, 0);
     journal = try recovery.finish();
     const open = journal.open_sections();
     try testing.expectEqual(@as(usize, 2), open.len);
@@ -988,8 +993,9 @@ test "floors reject repair below the floor" {
         defer h.deinit();
         try seed(&h, 0, 1);
         // Tear the page holding items four and five; preflight reads only the boundary page.
-        try paged.corrupt_page(&h.storage, partition, &manager_mod.section_name(1), 2, 16);
-        var recovery = try IntJournal.preflight_floors(gpa, &h.storage, lazy_cfg(&h), &.{
+        const name = manager_mod.section_name(1);
+        try paged.corrupt_page(h.storage.interface(), partition, &name, 2, 16);
+        var recovery = try IntJournal.preflight_floors(gpa, h.storage.interface(), lazy_cfg(&h), &.{
             .{ .section = 1, .items = floor },
         });
         const outcome: anyerror = while (true) {
@@ -1013,7 +1019,7 @@ test "restore rejects a damaged earlier boundary" {
     // is committed damage that restore reports and leaves untouched.
     try testing.expectError(
         error.Corruption,
-        IntJournal.preflight_restore(gpa, &h.storage, lazy_cfg(&h), 1, 16 * 8),
+        IntJournal.preflight_restore(gpa, h.storage.interface(), lazy_cfg(&h), 1, 16 * 8),
     );
     try testing.expectEqual(torn, try h.blob_len(0));
 }

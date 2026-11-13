@@ -32,6 +32,9 @@ const std = @import("std");
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const codec = @import("codec");
+const runtime_storage = @import("runtime").storage;
+const Storage = runtime_storage.Storage;
+const Blob = runtime_storage.Blob;
 const Crc32 = @import("cryptography").crc32.Crc32;
 
 /// The names of the two blobs that store metadata.
@@ -39,7 +42,7 @@ const blob_names = [2][]const u8{ "left", "right" };
 const version_size: usize = 8;
 const checksum_size: usize = 4;
 /// Runtime's `BLOB_PAGE_SIZE`.
-const blob_page_size: usize = 4096;
+const blob_page_size: usize = runtime_storage.blob_page_size;
 
 /// Configuration for `Metadata`.
 pub fn Config(comptime V: type) type {
@@ -51,23 +54,21 @@ pub fn Config(comptime V: type) type {
     };
 }
 
-/// A two-blob atomic key-value store over `Storage` (a comptime interface with `open`,
-/// `remove`, and `Blob` handles offering `read_at`, `write_at`, `resize`, `sync`, `deinit`).
+/// A two-blob atomic key-value store over `runtime.storage`.
 ///
 /// The store owns every value put into it and frees them with `codec.free`. Values must not
 /// borrow their decoding input (`codec.Bytes`): the encoded buffer is reused on every sync.
 /// Storage-mutating methods leave the store unusable after an error; only `deinit` may follow.
-pub fn Metadata(comptime Storage: type, comptime K: type, comptime V: type) type {
+pub fn Metadata(comptime K: type, comptime V: type) type {
     const key_size = codec.fixed_size(K) orelse @compileError("metadata keys must be fixed-size");
     comptime assert(!codec.owns_memory(K));
     comptime assert(V != codec.Bytes);
     comptime assert(key_size > 0);
     return struct {
         const Self = @This();
-        const Blob = Storage.Blob;
         const KeyBytes = [key_size]u8;
 
-        pub const Error = Storage.Error || error{ Corruption, OutOfMemory };
+        pub const Error = runtime_storage.Error || error{ Corruption, OutOfMemory };
 
         pub const Entry = struct { key_bytes: KeyBytes, key: K, value: V };
 
@@ -76,7 +77,7 @@ pub fn Metadata(comptime Storage: type, comptime K: type, comptime V: type) type
 
         /// One of the two blobs and what this store knows of its contents.
         const Wrapper = struct {
-            blob: *Blob,
+            blob: Blob,
             version: u64 = 0,
             lengths: std.AutoHashMapUnmanaged(KeyBytes, Info) = .empty,
             /// Keys whose values changed since this blob was last written.
@@ -98,7 +99,7 @@ pub fn Metadata(comptime Storage: type, comptime K: type, comptime V: type) type
         };
 
         gpa: Allocator,
-        storage: *Storage,
+        storage: Storage,
         partition: []u8,
         codec_config: codec.Cfg(V),
         /// Entries sorted by `key_bytes`.
@@ -118,13 +119,13 @@ pub fn Metadata(comptime Storage: type, comptime K: type, comptime V: type) type
         sync_overwrites: u64 = 0,
 
         /// Open the store in `cfg.partition`, recovering the latest valid copy.
-        pub fn init(gpa: Allocator, storage: *Storage, cfg: Config(V)) Error!Self {
+        pub fn init(gpa: Allocator, storage: Storage, cfg: Config(V)) Error!Self {
             const partition = try gpa.dupe(u8, cfg.partition);
             errdefer gpa.free(partition);
             const left = try storage.open(partition, blob_names[0]);
-            errdefer left.blob.deinit();
+            errdefer left.blob.close();
             const right = try storage.open(partition, blob_names[1]);
-            errdefer right.blob.deinit();
+            errdefer right.blob.close();
 
             // Syncs alternate copies and finish before the next starts, so at most one copy is
             // ever mid-write: both failing validation is corruption, and adopting a fresh store
@@ -161,7 +162,7 @@ pub fn Metadata(comptime Storage: type, comptime K: type, comptime V: type) type
 
         /// Close both blobs and free all memory, dropping uncommitted changes.
         pub fn deinit(self: *Self) void {
-            for (&self.blobs) |*wrapper| wrapper.blob.deinit();
+            for (&self.blobs) |*wrapper| wrapper.blob.close();
             self.release();
         }
 
@@ -184,7 +185,7 @@ pub fn Metadata(comptime Storage: type, comptime K: type, comptime V: type) type
 
         /// Read and validate one copy. Bytes that fail the length or checksum check make it
         /// invalid; a checksummed copy that does not decode is corruption.
-        fn load(gpa: Allocator, cfg: codec.Cfg(V), blob: *Blob, len: u64) Error!Loaded {
+        fn load(gpa: Allocator, cfg: codec.Cfg(V), blob: Blob, len: u64) Error!Loaded {
             var loaded: Loaded = .{ .wrapper = .{ .blob = blob }, .valid = true };
             if (len == 0) return loaded;
             errdefer free_loaded(gpa, &loaded);
@@ -473,14 +474,14 @@ pub fn Metadata(comptime Storage: type, comptime K: type, comptime V: type) type
             // A store no larger than one blob page is written whole: its changed values,
             // version, and checksum share that page, so one write replaces several.
             if (data.len <= blob_page_size) {
-                try target.blob.write_at(0, data);
+                try target.blob.write_at(0, data, .{});
             } else {
                 for (target.modified.keys()) |key_bytes| {
                     const info = target.lengths.get(key_bytes).?;
-                    try target.blob.write_at(info.start, data[info.start..][0..info.length]);
+                    try target.blob.write_at(info.start, data[info.start..][0..info.length], .{});
                 }
-                try target.blob.write_at(0, data[0..version_size]);
-                try target.blob.write_at(checksum_index, data[checksum_index..]);
+                try target.blob.write_at(0, data[0..version_size], .{});
+                try target.blob.write_at(checksum_index, data[checksum_index..], .{});
             }
             try target.blob.sync();
             target.modified.clearRetainingCapacity();
@@ -518,7 +519,7 @@ pub fn Metadata(comptime Storage: type, comptime K: type, comptime V: type) type
             writer.write_int(u32, Crc32.checksum(writer.written()));
             assert(writer.end == data_len);
 
-            try target.blob.write_at(0, data);
+            try target.blob.write_at(0, data, .{});
             if (data_len < old_len) try target.blob.resize(data_len);
             try target.blob.sync();
             target.version = version;
@@ -533,7 +534,7 @@ pub fn Metadata(comptime Storage: type, comptime K: type, comptime V: type) type
             assert(!self.failed);
             const storage = self.storage;
             const cursor = self.cursor;
-            for (&self.blobs) |*wrapper| wrapper.blob.deinit();
+            for (&self.blobs) |*wrapper| wrapper.blob.close();
             defer self.release();
 
             for ([_]u1{ 1 - cursor, cursor }) |index| {

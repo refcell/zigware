@@ -12,7 +12,7 @@ const paged = runtime.buffer.paged;
 const manager_mod = @import("manager.zig");
 
 const Storage = memory.Storage;
-const M = manager_mod.Manager(Storage);
+const M = manager_mod.Manager;
 const gpa = testing.allocator;
 const partition = "test";
 
@@ -38,7 +38,7 @@ const Harness = struct {
             .write_buffer = 128,
             .cache_ref = &self.cache_ref,
         };
-        return M.init(gpa, &self.storage, cfg, ceiling);
+        return M.init(gpa, self.storage.interface(), cfg, ceiling);
     }
 
     /// Create empty stored sections.
@@ -50,7 +50,7 @@ const Harness = struct {
 
     /// Expect exactly `sections` to be stored.
     fn expect_stored(self: *Harness, sections: []const u64) !void {
-        const stored = try manager_mod.stored_sections(gpa, &self.storage, partition);
+        const stored = try manager_mod.stored_sections(gpa, self.storage.interface(), partition);
         defer gpa.free(stored);
         try testing.expectEqualSlices(u64, sections, stored);
     }
@@ -129,17 +129,17 @@ test "truncate paged tail removes sections newest first" {
     for ([_]u64{ 1, 2, 5, 6, 7 }) |section| {
         const opened = try h.storage.open(partition, &manager_mod.section_name(section));
         try opened.blob.sync();
-        opened.blob.deinit();
+        opened.blob.close();
     }
     h.storage.remove_failures_after = 1;
     try testing.expectError(
         error.Io,
-        manager_mod.truncate_paged_tail(gpa, &h.storage, partition, 64, 2, 0),
+        manager_mod.truncate_paged_tail(gpa, h.storage.interface(), partition, 64, 2, 0),
     );
     h.storage.remove_failures_after = null;
     try h.expect_stored(&.{ 1, 2, 5, 6 });
     // End 0 gives a physical ceiling of zero bytes, and section 2 is empty: only removals run.
-    try manager_mod.truncate_paged_tail(gpa, &h.storage, partition, 64, 2, 0);
+    try manager_mod.truncate_paged_tail(gpa, h.storage.interface(), partition, 64, 2, 0);
     try h.expect_stored(&.{ 1, 2 });
 }
 
