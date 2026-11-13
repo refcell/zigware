@@ -75,6 +75,11 @@ pub fn Values(comptime V: type) type {
     };
 }
 
+/// The values of a neighboring translated key and whether finding it wrapped around the ends.
+pub fn NeighborOf(comptime ValuesType: type) type {
+    return struct { values: ValuesType, cycled: bool };
+}
+
 /// Where a cursor is in a key's values: the head or an index into the chain.
 const Position = union(enum) { head, overflow: usize };
 
@@ -95,6 +100,7 @@ pub fn Index(comptime T: type, comptime V: type, comptime Heads: type) type {
         const Self = @This();
         const Chain = std.ArrayList(V);
 
+        pub const Translator = T;
         pub const Key = T.Key;
         pub const Value = V;
 
@@ -287,8 +293,7 @@ pub fn Index(comptime T: type, comptime V: type, comptime Heads: type) type {
             }
         }
 
-        /// The values of a translated key and whether finding it wrapped around the ends.
-        pub const Neighbor = struct { values: Values(V), cycled: bool };
+        pub const Neighbor = NeighborOf(Values(V));
 
         /// The values of the largest translated key below `key`'s, or of the largest key if
         /// there is none (`cycled`). Null when the index is empty. Ordered indices only.

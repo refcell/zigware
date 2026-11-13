@@ -17,8 +17,8 @@ variants need `runtime` storage; do them after its interface lands.
 - [x] merkle/mmb and shared merkle proof types.
 - bmt moved to the coding lane (it needs it first).
 - [x] bitmap (authenticated bitmap over MMR).
-- [ ] index (ordered/unordered, partitioned) over translators. Flat unordered and ordered
-  done; partitioned and immutable next.
+- [ ] index (ordered/unordered, partitioned) over translators. Flat and partitioned done;
+  `immutable` and the partitioned `new_range`/`install_range` (qmdb-only) remain.
 - [ ] merkle/persisted (journaled MMR) once runtime storage lands.
 - [ ] Fuzz targets (storage/fuzz entries for these modules).
 
@@ -72,3 +72,10 @@ variants need `runtime` storage; do them after its interface lands.
   emptied key. Closures are a context value plus a comptime fn. The fuzz drives both indices and
   a reference model with every commonware fuzz operation and checks values and counters after
   each step; inserting after the head at the wrong chain end fails it and 3 ported tests.
+- index/partitioned: `partition_index_and_sub_key` and its tests match commonware. A
+  partitioned index is a flat index over the composite key `(partition, sub-key)`
+  (`partitioned.Translator(T, P)`): the unordered one is `unordered.Index` over it, and the
+  ordered one keeps commonware's partitioned semantics (values in insertion order, offset
+  cursor) in one treap instead of per-partition sorted arrays that spill to a `BTreeMap`. Same
+  results and O(log n) operations, so the spill threshold and its tests do not apply. Every
+  generic index test runs against all four indices.

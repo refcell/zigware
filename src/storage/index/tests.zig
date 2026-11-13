@@ -14,13 +14,29 @@ const utils = @import("utils");
 const translator = @import("../translator.zig");
 const unordered = @import("unordered.zig");
 const ordered = @import("ordered.zig");
+const partitioned = @import("partitioned/mod.zig");
 const fuzz_bytes = @import("../fuzz_bytes.zig");
 
 const gpa = testing.allocator;
 const TwoCap = translator.TwoCap;
 
-/// Every index the generic checks run against.
-const indices = .{ unordered.Index(TwoCap, u64), ordered.Index(TwoCap, u64) };
+const OneCap = translator.OneCap;
+const PartitionedUnordered = partitioned.unordered.Index(OneCap, u64, 1);
+const PartitionedOrdered = partitioned.ordered.Index(OneCap, u64, 1);
+
+/// Every index the generic checks run against. A one-byte prefix with `OneCap` translates keys
+/// like `TwoCap` on a flat index, so every index sees the same collisions.
+const indices = .{
+    unordered.Index(TwoCap, u64), ordered.Index(TwoCap, u64),
+    PartitionedUnordered,         PartitionedOrdered,
+};
+
+/// An empty index of type `I` with its default translator.
+fn new(comptime I: type) I {
+    const Tr = I.Translator;
+    const tr: Tr = if (@hasDecl(Tr, "partition_count")) .init(.{}) else .{};
+    return I.init(gpa, tr);
+}
 
 /// The values of `key` in index order. Caller owns the slice.
 fn values(index: anytype, key: []const u8) ![]u64 {
@@ -71,7 +87,7 @@ fn insert_all(index: anytype, key: []const u8, items: []const u64) !void {
 }
 
 fn run_basic(comptime I: type) !void {
-    var index = I.init(gpa, .{});
+    var index = new(I);
     defer index.deinit();
     const key = "duplicate";
     try insert_all(&index, key, &.{ 1, 2, 3 });
@@ -116,7 +132,7 @@ fn no_visit(_: void, _: usize, _: *const u64) void {
 }
 
 fn run_get_many(comptime I: type) !void {
-    var index = I.init(gpa, .{});
+    var index = new(I);
     defer index.deinit();
     try insert_all(&index, "ab", &.{ 1, 2 });
     try index.insert("abX", 3);
@@ -138,7 +154,7 @@ test "index get many" {
 }
 
 fn run_cursor_find(comptime I: type) !void {
-    var index = I.init(gpa, .{});
+    var index = new(I);
     defer index.deinit();
     const key = "test_key";
     try insert_all(&index, key, &.{ 10, 20, 30, 40 });
@@ -170,7 +186,7 @@ test "index cursor find" {
 
 fn run_many_keys(comptime I: type) !void {
     const key_count = 2000;
-    var index = I.init(gpa, .{});
+    var index = new(I);
     defer index.deinit();
     var rng = utils.test_rng();
     var keys: [key_count][32]u8 = undefined;
@@ -195,7 +211,7 @@ test "index many keys" {
 }
 
 fn run_key_lengths_and_metrics(comptime I: type) !void {
-    var index = I.init(gpa, .{});
+    var index = new(I);
     defer index.deinit();
     try index.insert("a", 1);
     try index.insert("ab", 2);
@@ -219,7 +235,7 @@ test "index key lengths and key item metrics" {
 }
 
 fn run_values_and_remove_specific(comptime I: type) !void {
-    var index = I.init(gpa, .{});
+    var index = new(I);
     defer index.deinit();
     try insert_all(&index, "key", &.{ 1, 2, 3 });
     try expect_values(&index, "key", &.{ 1, 2, 3 });
@@ -234,7 +250,7 @@ test "index values and remove specific" {
 }
 
 fn run_empty_key(comptime I: type) !void {
-    var index = I.init(gpa, .{});
+    var index = new(I);
     defer index.deinit();
     try index.insert("", 0);
     try index.insert("\x00", 1);
@@ -251,7 +267,7 @@ test "index empty key" {
 }
 
 fn run_mutate(comptime I: type) !void {
-    var index = I.init(gpa, .{});
+    var index = new(I);
     defer index.deinit();
     try insert_all(&index, "key", &.{ 1, 2, 3 });
     {
@@ -289,25 +305,43 @@ fn delete_at(index: anytype, key: []const u8, position: usize) !void {
     cursor.delete();
 }
 
+/// Removes `expected[position]` from `expected` and checks the index matches it.
+fn expect_deleted(index: anytype, expected: *std.ArrayList(u64), position: usize) !void {
+    try delete_at(index, "key", position);
+    _ = expected.orderedRemove(position);
+    try expect_values_ordered(index, "key", expected.items);
+}
+
+fn reload(index: anytype, expected: *std.ArrayList(u64)) !void {
+    const current = try values(index, "key");
+    defer gpa.free(current);
+    expected.clearRetainingCapacity();
+    try expected.appendSlice(gpa, current);
+}
+
 fn run_remove_through_iterator(comptime I: type) !void {
-    var index = I.init(gpa, .{});
+    var index = new(I);
     defer index.deinit();
     try insert_all(&index, "key", &.{ 10, 20, 30, 40 });
     try expect_values(&index, "key", &.{ 10, 20, 30, 40 });
     try testing.expectEqual(@as(u64, 0), index.pruned());
-    // Index order is newest first: 40, 30, 20, 10.
-    try delete_at(&index, "key", 0);
+    var expected: std.ArrayList(u64) = .empty;
+    defer expected.deinit(gpa);
+    try reload(&index, &expected);
+    try expect_deleted(&index, &expected, 0);
     try testing.expectEqual(@as(u64, 1), index.pruned());
-    try expect_values_ordered(&index, "key", &.{ 30, 20, 10 });
     try index.insert("key", 50);
-    try expect_values(&index, "key", &.{ 30, 20, 10, 50 });
-    try delete_at(&index, "key", 2);
+    try expected.append(gpa, 50);
+    try expect_values(&index, "key", expected.items);
+    try reload(&index, &expected);
+    try expect_deleted(&index, &expected, 2);
     try testing.expectEqual(@as(u64, 2), index.pruned());
-    try expect_values_ordered(&index, "key", &.{ 50, 30, 10 });
     try index.insert("key", 60);
-    try delete_at(&index, "key", 3);
+    try expected.append(gpa, 60);
+    try expect_values(&index, "key", expected.items);
+    try reload(&index, &expected);
+    try expect_deleted(&index, &expected, 3);
     try testing.expectEqual(@as(u64, 3), index.pruned());
-    try expect_values_ordered(&index, "key", &.{ 60, 50, 30 });
     index.remove("key");
     try expect_counters(&index, 0, 0, 6);
 }
@@ -317,7 +351,7 @@ test "index remove through iterator" {
 }
 
 fn run_insert_through_iterator(comptime I: type) !void {
-    var index = I.init(gpa, .{});
+    var index = new(I);
     defer index.deinit();
     try index.insert("key", 1);
     {
@@ -339,7 +373,7 @@ fn run_insert_through_iterator(comptime I: type) !void {
     try index.insert("key", 100);
     try expect_values(&index, "key", &.{ 1, 3, 42, 100 });
     // Inserting after the last value appends.
-    var other = I.init(gpa, .{});
+    var other = new(I);
     defer other.deinit();
     try other.insert("key", 10);
     {
@@ -357,7 +391,7 @@ test "index insert through iterator and after done" {
 }
 
 fn run_remove_to_nothing(comptime I: type, then_add: bool) !void {
-    var index = I.init(gpa, .{});
+    var index = new(I);
     defer index.deinit();
     try insert_all(&index, "key", &.{ 0, 1, 2, 3 });
     {
@@ -394,7 +428,7 @@ test "index remove to nothing, then add" {
 }
 
 fn run_insert_and_remove_cursor(comptime I: type) !void {
-    var index = I.init(gpa, .{});
+    var index = new(I);
     defer index.deinit();
     try index.insert("key", 0);
     {
@@ -413,21 +447,21 @@ test "index insert and remove cursor" {
 
 fn run_insert_and_retain(comptime I: type) !void {
     {
-        var index = I.init(gpa, .{});
+        var index = new(I);
         defer index.deinit();
         try index.insert_and_retain("key", 1, true, constant);
         try expect_values_ordered(&index, "key", &.{1});
         try expect_counters(&index, 1, 1, 0);
     }
     {
-        var index = I.init(gpa, .{});
+        var index = new(I);
         defer index.deinit();
         try index.insert_and_retain("key", 1, false, constant);
         try expect_values(&index, "key", &.{});
         try expect_counters(&index, 0, 0, 0);
     }
     {
-        var index = I.init(gpa, .{});
+        var index = new(I);
         defer index.deinit();
         try index.insert("key", 1);
         try index.insert_and_retain("key", 2, @as(u64, 1), not_equal);
@@ -435,7 +469,7 @@ fn run_insert_and_retain(comptime I: type) !void {
         try expect_counters(&index, 1, 1, 1);
     }
     {
-        var index = I.init(gpa, .{});
+        var index = new(I);
         defer index.deinit();
         try insert_all(&index, "key", &.{ 10, 20 });
         try index.insert_and_retain("key", 30, false, constant);
@@ -449,7 +483,7 @@ test "index insert and retain vacant, replace one, and dead insert" {
 }
 
 fn run_insert_and_retain_single_value(comptime I: type) !void {
-    var index = I.init(gpa, .{});
+    var index = new(I);
     defer index.deinit();
     try index.insert("both", 1);
     try index.insert_and_retain("both", 2, true, constant);
@@ -468,7 +502,7 @@ test "index insert and retain single value" {
 }
 
 fn run_delete_sequences(comptime I: type) !void {
-    var index = I.init(gpa, .{});
+    var index = new(I);
     defer index.deinit();
     // Delete the middle two of four, then continue.
     try insert_all(&index, "a", &.{ 0, 1, 2, 3 });
@@ -503,7 +537,7 @@ test "index remove middle then next and delete last then next" {
 }
 
 fn run_delete_first(comptime I: type, and_insert: bool) !void {
-    var index = I.init(gpa, .{});
+    var index = new(I);
     defer index.deinit();
     try insert_all(&index, "key", &.{ 1, 2, 3 });
     const expected = try values(&index, "key");
@@ -534,7 +568,7 @@ test "index delete first, and then insert" {
 }
 
 fn run_cursor_insert_with_next(comptime I: type) !void {
-    var index = I.init(gpa, .{});
+    var index = new(I);
     defer index.deinit();
     try insert_all(&index, "key", &.{ 1, 2 });
     const expected = try values(&index, "key");
@@ -556,7 +590,7 @@ test "index insert at entry then next, and insert with next" {
 }
 
 fn run_delete_last_then_insert_while_done(comptime I: type) !void {
-    var index = I.init(gpa, .{});
+    var index = new(I);
     defer index.deinit();
     try index.insert("k", 7);
     {
@@ -573,7 +607,7 @@ fn run_delete_last_then_insert_while_done(comptime I: type) !void {
     try expect_counters(&index, 1, 2, null);
     try expect_values_ordered(&index, "k", &.{ 8, 9 });
     // Replacing the only value is not a collision.
-    var other = I.init(gpa, .{});
+    var other = new(I);
     defer other.deinit();
     try other.insert("a", 1);
     {
@@ -592,7 +626,7 @@ test "index delete last then insert while done" {
 }
 
 fn run_drop_mid_iteration(comptime I: type) !void {
-    var index = I.init(gpa, .{});
+    var index = new(I);
     defer index.deinit();
     try insert_all(&index, "z", &.{ 0, 1, 2, 3, 4 });
     const expected = try values(&index, "z");
@@ -612,14 +646,14 @@ test "index drop mid iteration preserves chain" {
 
 fn run_large_collision_chain(comptime I: type) !void {
     const count = 50_000;
-    var index = I.init(gpa, .{});
+    var index = new(I);
     defer index.deinit();
     for (0..count) |i| try index.insert("", i);
     try expect_counters(&index, 1, count, null);
     const actual = try values(&index, "");
     defer gpa.free(actual);
-    // Newest first.
-    for (actual, 0..) |value, i| try testing.expectEqual(@as(u64, count - 1 - i), value);
+    std.mem.sort(u64, actual, {}, std.sort.asc(u64));
+    for (actual, 0..) |value, i| try testing.expectEqual(@as(u64, i), value);
 }
 
 test "index large collision chain" {
@@ -874,4 +908,92 @@ test "fuzz index operations (seeded)" {
 
 test "fuzz index operations" {
     try testing.fuzz({}, fuzz_bytes.smith(1024, fuzz_run), .{});
+}
+
+test "ordered short keys partitioned" {
+    // P=2 with EightCap on the remainder orders by the same full key as the flat EightCap index.
+    const I = partitioned.ordered.Index(translator.EightCap, u64, 2);
+    var index = I.init(gpa, .init(.{}));
+    defer index.deinit();
+    const keys = [_][]const u8{ "\x00\x05", "\x01", "\x02\x09\xab", "\x03", "\xff\xff" };
+    for (keys, 0..) |key, rank| try index.insert(key, rank);
+    try expect_next_values(index.first_translated_key(), &.{0});
+    try expect_next_values(index.last_translated_key(), &.{4});
+    const n = keys.len;
+    for (keys, 0..) |key, i| {
+        try expect_neighbor(index.next_translated_key(key), i + 1 == n, &.{(i + 1) % n});
+        try expect_neighbor(index.prev_translated_key(key), i == 0, &.{(i + n - 1) % n});
+    }
+}
+
+test "partitioned ordered empty and sparse navigation" {
+    var index = new(PartitionedOrdered);
+    defer index.deinit();
+    try testing.expect(index.first_translated_key() == null);
+    try testing.expect(index.last_translated_key() == null);
+    try testing.expect(index.prev_translated_key(&.{ 0x80, 0x00 }) == null);
+    try testing.expect(index.next_translated_key(&.{ 0x80, 0x00 }) == null);
+    try index.insert(&.{ 0x05, 0x01 }, 1);
+    try index.insert(&.{ 0xf0, 0x02 }, 2);
+    try testing.expectEqual(@as(u64, 2), index.keys());
+    try expect_next_values(index.first_translated_key(), &.{1});
+    try expect_next_values(index.last_translated_key(), &.{2});
+    try expect_neighbor(index.next_translated_key(&.{ 0x05, 0x01 }), false, &.{2});
+    try expect_neighbor(index.next_translated_key(&.{ 0xf0, 0x02 }), true, &.{1});
+    try expect_neighbor(index.prev_translated_key(&.{ 0xf0, 0x02 }), false, &.{1});
+    try expect_neighbor(index.prev_translated_key(&.{ 0x05, 0x01 }), true, &.{2});
+    try expect_neighbor(index.prev_translated_key(&.{ 0x80, 0x00 }), false, &.{1});
+    try expect_neighbor(index.next_translated_key(&.{ 0x80, 0x00 }), false, &.{2});
+    index.remove(&.{ 0x05, 0x01 });
+    index.remove(&.{ 0xf0, 0x02 });
+    try testing.expectEqual(@as(u64, 0), index.keys());
+    try testing.expect(index.prev_translated_key(&.{ 0x80, 0x00 }) == null);
+    try testing.expect(index.next_translated_key(&.{ 0x80, 0x00 }) == null);
+}
+
+test "partitioned ordered values in insertion order" {
+    var index = new(PartitionedOrdered);
+    defer index.deinit();
+    const k1 = "\x0b\x02\xaa";
+    const k3 = "\x2d\x06\xee";
+    try index.insert(k1, 1);
+    try index.insert("\x1c\x04\xcc", 21);
+    try index.insert("\x1c\x04\x11", 22);
+    try index.insert(k3, 3);
+    try testing.expectEqual(@as(u64, 3), index.keys());
+    try expect_next_values(index.first_translated_key(), &.{1});
+    try expect_next_values(index.last_translated_key(), &.{3});
+    try expect_neighbor(index.next_translated_key("\x00"), false, &.{1});
+    try expect_neighbor(index.next_translated_key("\x0b\x02\xf2"), false, &.{ 21, 22 });
+    try expect_neighbor(index.next_translated_key(k3), true, &.{1});
+    try expect_neighbor(index.prev_translated_key(k1), true, &.{3});
+    try expect_neighbor(index.prev_translated_key("\x1d\x01\x02"), false, &.{ 21, 22 });
+    var basic = new(PartitionedOrdered);
+    defer basic.deinit();
+    try insert_all(&basic, "duplicate", &.{ 1, 2, 3 });
+    try expect_values_ordered(&basic, "duplicate", &.{ 1, 2, 3 });
+}
+
+test "partitioned ordered exhaustive traversal" {
+    var index = new(PartitionedOrdered);
+    defer index.deinit();
+    const prefixes = [_]u8{ 0x00, 0x05, 0xaa, 0xff };
+    const subkeys = [_]u8{ 0x00, 0x80, 0xff };
+    var keys: [prefixes.len * subkeys.len][2]u8 = undefined;
+    for (prefixes, 0..) |p, i| {
+        for (subkeys, 0..) |s, j| keys[i * subkeys.len + j] = .{ p, s };
+    }
+    const n = keys.len;
+    // Insert scrambled (reversed, then rotated left by 5).
+    for (0..n) |i| {
+        const key = &keys[n - 1 - (i + 5) % n];
+        try index.insert(key, std.mem.readInt(u16, key, .big));
+    }
+    try testing.expectEqual(@as(u64, n), index.keys());
+    for (&keys, 0..) |*key, i| {
+        const next_value = std.mem.readInt(u16, &keys[(i + 1) % n], .big);
+        try expect_neighbor(index.next_translated_key(key), i + 1 == n, &.{next_value});
+        const prev_value = std.mem.readInt(u16, &keys[(i + n - 1) % n], .big);
+        try expect_neighbor(index.prev_translated_key(key), i == 0, &.{prev_value});
+    }
 }

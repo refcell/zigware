@@ -6,10 +6,12 @@
 //! its heads in a hash map and `ordered.Index` in a search tree, which adds
 //! `first/last/prev/next_translated_key`. Closures become a context value plus a comptime
 //! function. Commonware's `keys`/`items`/`pruned` metrics are the counters of the same names.
+//! `partitioned` adds the indices whose first `P` key bytes select a partition.
 
 pub const storage = @import("storage.zig");
 pub const unordered = @import("unordered.zig");
 pub const ordered = @import("ordered.zig");
+pub const partitioned = @import("partitioned/mod.zig");
 pub const Values = storage.Values;
 
 test {
