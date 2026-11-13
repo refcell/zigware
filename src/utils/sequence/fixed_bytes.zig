@@ -60,7 +60,6 @@ pub fn FixedBytes(comptime N: usize) type {
 
 const testing = std.testing;
 const rng = @import("../rng.zig");
-const conformance = @import("../conformance.zig");
 
 test "fixed_bytes: codec" {
     const original = FixedBytes(4).init(.{ 1, 2, 3, 4 });
@@ -139,22 +138,4 @@ test "fixed_bytes: order matches byte order" {
     inline for (.{ 0, 5, 16, 17, 18, 19, 20, 21, 22, 23, 24, 31, 32, 33, 40, 63, 64, 65 }) |n| {
         try check_order(n);
     }
-}
-
-fn arbitrary_fixed_bytes_16(
-    _: void,
-    u: *conformance.Unstructured,
-) conformance.Error!FixedBytes(16) {
-    var bytes: [16]u8 = undefined;
-    u.fill_buffer(&bytes);
-    return .init(bytes);
-}
-
-test "fixed_bytes: conformance" {
-    try conformance.expect_codec_hash(
-        FixedBytes(16),
-        65536,
-        arbitrary_fixed_bytes_16,
-        "f5456580eb69727a23bfb0281e33f467acc0c91273efebd334d3e82c9770ae76",
-    );
 }

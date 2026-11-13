@@ -598,37 +598,6 @@ test "rng: FuzzRng mixes the counter into every block" {
     try testing.expectEqual(mix64(word ^ 1 ^ GOLDEN_RATIO), rng.next_u64());
 }
 
-/// commonware's `FuzzRngConformance::commit`: a seeded input of 1..=64 bytes, then 32
-/// big-endian `u64` blocks of output.
-fn fuzz_rng_commit(seed: u64, output: *[32 * block_bytes]u8) void {
-    var seed_rng = TestRng.init(seed);
-    const len = range_at_most(&seed_rng, usize, 1, 64);
-    var input: [64]u8 = undefined;
-    seed_rng.fill_bytes(input[0..len]);
-    var rng = FuzzRng.init(input[0..len]);
-    for (0..32) |i| std.mem.writeInt(u64, output[i * 8 ..][0..8], rng.next_u64(), .big);
-}
-
-test "rng: FuzzRng conformance hash matches commonware" {
-    // utils/conformance.toml: commonware_utils::rng::tests::conformance::FuzzRngConformance.
-    // The hash is SHA-256 over `len as u64 LE || commit(seed)` for seeds 0..n_cases.
-    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
-    for (0..1024) |seed| {
-        var output: [32 * block_bytes]u8 = undefined;
-        fuzz_rng_commit(seed, &output);
-        var len_bytes: [8]u8 = undefined;
-        std.mem.writeInt(u64, &len_bytes, output.len, .little);
-        hasher.update(&len_bytes);
-        hasher.update(&output);
-    }
-    const digest = hasher.finalResult();
-    const hex = std.fmt.bytesToHex(digest, .lower);
-    try testing.expectEqualStrings(
-        "98c11adc87998940c19bf9c9ce8554ce91409e81375078b99f511fbb64cf3e79",
-        &hex,
-    );
-}
-
 test "rng: std.Random adapter draws from the generator" {
     var a = TestRng.init(9);
     var b = TestRng.init(9);

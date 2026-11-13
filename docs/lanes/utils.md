@@ -30,11 +30,10 @@ encoding parts as soon as `codec` has its core API (see docs/lanes/codec.md).
   samplers in `utils.rng` (not `std.Random`) so values match commonware's tests.
 - `union_unique`, `Participant` (`UInt<u32>`), and `NonEmptyRange(T)` (start, end; rejects
   `start >= end` as `Invalid`) encode through `codec`. Their conformance hashes need codec's
-  `arbitrary` emulation in the conformance harness and are checked once that lands.
-- `src/utils/conformance.zig` emulates codec's `CodecConformance` (ChaCha8 keystream through an
-  `arbitrary` 1.4 `Unstructured`) with each type's `Arbitrary` derive written by hand, so
-  utils/conformance.toml hashes are checked in `zig build test` until the conformance package
-  ships a shared harness. Participant, NonEmptyRange, and every sequence type match.
+  `arbitrary` emulation; they are checked in `conformance_test.zig`.
+- Conformance: `src/utils/conformance_test.zig` checks every utils/conformance.toml entry
+  (copied unchanged next to it) through the shared `conformance.verify` harness with
+  `codec.arbitrary` generators; each type's Rust `Arbitrary` derive is a small generator there.
 - `src/utils/fuzz.zig` is the utils fuzz driver: a body over `*FuzzRng`, run seeded in
   `zig build test` and under `std.testing.fuzz`.
 
@@ -58,3 +57,4 @@ encoding parts as soon as `codec` has its core API (see docs/lanes/codec.md).
   std.testing.fuzz targets; rng.Uniform.
 - 2026-11-13: sequence (FixedBytes, U32, U64, PrefixedU64, VecU64, Unit) with conformance
   hashes; Participant and NonEmptyRange conformance hashes; ChaCha8Rng; utils fuzz driver.
+- 2026-11-13: moved utils conformance onto the shared harness (conformance + codec.arbitrary).

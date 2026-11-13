@@ -175,7 +175,6 @@ pub const Unit = struct {
 };
 
 const testing = std.testing;
-const conformance = @import("../conformance.zig");
 
 test "sequence: U32 and U64" {
     inline for (.{ U32, U64 }) |T| {
@@ -238,45 +237,4 @@ test "sequence: Unit" {
     try testing.expectEqual(@as(usize, 0), (Unit{}).as_slice().len);
     var buffer: [4]u8 = undefined;
     try testing.expectEqualStrings("()", try std.fmt.bufPrint(&buffer, "{f}", .{Unit{}}));
-}
-
-fn arbitrary_bytes(comptime T: type) conformance.Arbitrary(T) {
-    return struct {
-        fn arbitrary(_: void, u: *conformance.Unstructured) conformance.Error!T {
-            var result: T = undefined;
-            u.fill_buffer(&result.bytes);
-            return result;
-        }
-    }.arbitrary;
-}
-
-fn arbitrary_vec_u64(_: void, u: *conformance.Unstructured) conformance.Error!VecU64 {
-    return .init(u.int(u64));
-}
-
-fn arbitrary_unit(_: void, _: *conformance.Unstructured) conformance.Error!Unit {
-    return .{};
-}
-
-test "sequence: conformance" {
-    const hashes = .{
-        .{ U32, "7e51d52b48539110acf575de847ef8d0c0029c877815f50b6a151db0621f2240" },
-        .{ U64, "73102c8e2c269bbe2afd67158252c90a683a347e7ba623e8a1b383197c0d848a" },
-        .{ PrefixedU64, "1c7e1a1fc1925835e28cc501d03a83d03085c800a93c0c8788558b3b2b5d409b" },
-    };
-    inline for (hashes) |entry| {
-        try conformance.expect_codec_hash(entry[0], 65536, arbitrary_bytes(entry[0]), entry[1]);
-    }
-    try conformance.expect_codec_hash(
-        VecU64,
-        65536,
-        arbitrary_vec_u64,
-        "b2714bf2d181f332a44e9701d501d0f2d1cadd38d3bd87634c175fcefd8640fc",
-    );
-    try conformance.expect_codec_hash(
-        Unit,
-        65536,
-        arbitrary_unit,
-        "07854d2fef297a06ba81685e660c332de36d5d18d546927d30daad6d7fda1541",
-    );
 }

@@ -147,25 +147,11 @@ pub fn modulo(bytes: []const u8, n: u64) u64 {
 }
 
 const testing = std.testing;
-const conformance = @import("conformance.zig");
 
 test {
     std.testing.refAllDecls(@This());
-    _ = @import("conformance.zig");
+    _ = @import("conformance_test.zig");
     _ = @import("fuzz.zig");
-}
-
-fn arbitrary_participant(_: void, u: *conformance.Unstructured) conformance.Error!Participant {
-    return .init(u.int(u32));
-}
-
-test "utils: participant conformance" {
-    try conformance.expect_codec_hash(
-        Participant,
-        65536,
-        arbitrary_participant,
-        "f0b66ee345e9e295c50b522d9cf3501d95cd70cecfe7bfd315c970ffa78ede40",
-    );
 }
 
 test "utils: union" {
