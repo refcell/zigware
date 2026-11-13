@@ -30,7 +30,8 @@ handshake), then certificate, secp256r1, the rest, zk and banderwagon last.
 - [x] certificate.rs: `Signers`, `Attestation`, `Verification`, assembly and bisection,
   `Scoped`/`ConstantProvider`, `mocks.Fixture`, and the `Signers`/`Attestation`
   conformance hashes.
-- [ ] certificate mocks: the generic mock scheme (`certificate/mocks.rs` `Generic`).
+- [x] certificate mocks: the ledger-backed mock scheme (`impl_certificate_mock!`,
+  `certificate.mocks.Scheme(Subject, Faults, P, Options)`, `mocks.fixture`).
 - [x] secp256r1: standard and recoverable signatures and codec on `std.crypto.ecc.P256`, with
   its own RFC 6979 signer and key recovery; commonware's vectors, the four `CodecConformance`
   hashes, and the `secp256r1_{standard,recoverable}_decode` fuzz targets.
@@ -89,6 +90,11 @@ handshake), then certificate, secp256r1, the rest, zk and banderwagon last.
   `impl_certificate_secp256r1!` with `Scheme<P>` is
   `secp256r1.certificate.Scheme(Subject, Faults, P)`. Both share
   `certificate.Individual(Sig, context)` for the certificate and its `assemble`.
+- The mock scheme's const generics are `mocks.Options` (`attributable`, `batchable`,
+  `allow_invalid`); its `Shared` ledger is reference counted (each scheme holds one) and
+  guarded by a spin `std.atomic.Mutex`, since mocks get no `std.Io`. Signed subjects are
+  stored as `union_unique(namespace, message)`. `Assembled.deinit` skips certificates
+  without `deinit` (the mock's `U64`).
 - Hashers and ed25519 batch verification take `parallel` strategies (`assert_strategy`);
   `hash_many` is commonware's one-lane `hash_batches` over
   `run_batches`; ed25519 `verify_batch` shards like commonware (one seed per call, one

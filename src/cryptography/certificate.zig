@@ -9,7 +9,8 @@
 //!   `BytesNamespace` is commonware's `Vec<u8>`), and has
 //!   `subject.namespace(*const Namespace) []const u8` and `subject.message(gpa) ![]u8` (the
 //!   caller frees the message).
-//! - A scheme `S` declares `Signature`, `PublicKey`, `Certificate` (with `deinit(gpa)`),
+//! - A scheme `S` declares `Signature`, `PublicKey`, `Certificate` (with `deinit(gpa)` if it
+//!   owns memory),
 //!   `Subject`, and `Faults`, and has `me`, `participants`, `sign`, `verify_attestation`,
 //!   `verify_attestations`, `optimistic_assemble`, `assemble`, `verify_certificate`,
 //!   `verify_certificates`, `is_batchable`, `is_attributable`, `max_certificate_size`,
@@ -188,12 +189,18 @@ pub fn Assembled(comptime S: type) type {
 
         pub fn deinit(self: *@This(), gpa: Allocator) void {
             switch (self.*) {
-                .certificate => |*value| value.deinit(gpa),
+                .certificate => |*value| deinit_certificate(S.Certificate, gpa, value),
                 .verification => |*value| value.deinit(gpa),
             }
             self.* = undefined;
         }
     };
+}
+
+/// Releases a certificate that owns memory; fixed-size certificates (such as the mock
+/// scheme's `U64`) have nothing to release.
+pub fn deinit_certificate(comptime C: type, gpa: Allocator, value: *C) void {
+    if (@hasDecl(C, "deinit")) value.deinit(gpa);
 }
 
 /// One certificate to verify with its subject.
@@ -580,11 +587,11 @@ pub fn optimistic_assemble(
         var certificate = candidate;
         const result = scheme.verify_certificate(gpa, rng, subject, &certificate, strategy);
         const valid = result catch |err| {
-            certificate.deinit(gpa);
+            deinit_certificate(S.Certificate, gpa, &certificate);
             return err;
         };
         if (valid) return .{ .certificate = certificate };
-        certificate.deinit(gpa);
+        deinit_certificate(S.Certificate, gpa, &certificate);
     } else |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => {},
@@ -767,4 +774,5 @@ pub fn ConstantProvider(comptime S: type) type {
 
 test {
     _ = @import("certificate_test.zig");
+    _ = mocks;
 }
