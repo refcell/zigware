@@ -1,0 +1,282 @@
+//! Storage interface: partitions of named blobs (commonware `Storage` and `Blob` traits in
+//! `runtime/src/lib.rs`, and `runtime/src/storage/mod.rs`).
+//!
+//! `Storage` and `Blob` are small vtable interfaces, like `std.Io`, so storage structures take
+//! a `Storage` value and run unchanged on the in-memory backend (deterministic runtime, with
+//! fault injection) and on disk (production runtime).
+//!
+//! - `Storage.open(partition, name)` opens or creates a blob and returns it with its logical
+//!   length (`Opened.len`). Only one handle per blob may be open at a time: a second open returns
+//!   `error.BlobAlreadyOpen` until the first is closed or the blob is removed.
+//! - `Storage.remove(partition, name)` removes one blob, or the whole partition when `name` is
+//!   null. Open handles stay readable (they keep the removed contents).
+//! - `Storage.scan(gpa, partition)` lists blob names, sorted.
+//! - `Blob.read_at` fills a caller buffer with exactly `buffer.len` bytes at `offset`;
+//!   `Blob.write_at` writes bytes (or chunks, `write_at_vectored`) at `offset`, extending the
+//!   blob; `Blob.resize` truncates or zero-extends; `Blob.sync` makes every completed write and
+//!   resize durable. `Blob.close` releases the handle and does not sync.
+//!
+//! Durability: after a crash, data not covered by a completed sync may be lost or torn; data
+//! readable when a run starts is durable. Blob contents start after a runtime-owned header
+//! (`storage/header.zig`, byte-identical to commonware) that records the layout and the
+//! application's blob version.
+//!
+//! Zig errors carry no payload, so commonware's error details (partition, name, reason) are
+//! not returned; the error names match commonware's variants.
+
+const std = @import("std");
+const assert = std.debug.assert;
+
+pub const Error = error{
+    PartitionNameInvalid,
+    PartitionCreationFailed,
+    PartitionMissing,
+    PartitionCorrupt,
+    BlobAlreadyOpen,
+    BlobOpenFailed,
+    BlobMissing,
+    BlobResizeFailed,
+    BlobSyncFailed,
+    BlobInsufficientLength,
+    BlobCorrupt,
+    BlobLayoutMismatch,
+    BlobVersionMismatch,
+    ReadFailed,
+    WriteFailed,
+    OffsetOverflow,
+    Io,
+    Canceled,
+    OutOfMemory,
+};
+
+/// Runtime-owned layout of a blob: its header and data offset (commonware `BlobLayout`).
+pub const BlobLayout = enum(u16) {
+    /// An 8-byte header with data right after it. Deprecated upstream: unaligned pages.
+    v0 = 0,
+    /// A header padded to one 4096-byte page, so data begins page-aligned.
+    v1 = 1,
+
+    pub fn data_offset(layout: BlobLayout) u64 {
+        return switch (layout) {
+            .v0 => 8,
+            .v1 => blob_page_size,
+        };
+    }
+};
+
+/// Layouts a runtime accepts, inclusive.
+pub const LayoutRange = struct {
+    min: BlobLayout,
+    max: BlobLayout,
+
+    pub const all: LayoutRange = .{ .min = .v0, .max = default_blob_layout };
+
+    pub fn only(layout: BlobLayout) LayoutRange {
+        return .{ .min = layout, .max = layout };
+    }
+
+    pub fn contains(range: LayoutRange, layout: BlobLayout) bool {
+        assert(@backingInt(range.min) <= @backingInt(range.max));
+        const value = @backingInt(layout);
+        return value >= @backingInt(range.min) and value <= @backingInt(range.max);
+    }
+};
+
+/// Latest layout, used to create new blobs.
+pub const default_blob_layout: BlobLayout = .v1;
+
+/// Size of a blob page, the unit storage reads and persists in.
+pub const blob_page_size: u32 = 4096;
+
+comptime {
+    assert(std.math.isPowerOfTwo(blob_page_size));
+    assert(default_blob_layout.data_offset() % blob_page_size == 0);
+}
+
+/// Application-owned version of a blob's contents (commonware `BlobVersion`).
+pub const BlobVersion = u16;
+
+/// Version used by `Storage.open`.
+pub const default_blob_version: BlobVersion = 0;
+
+/// Blob versions an application accepts, inclusive. Must be non-empty.
+pub const VersionRange = struct {
+    min: BlobVersion,
+    max: BlobVersion,
+
+    pub fn only(version: BlobVersion) VersionRange {
+        return .{ .min = version, .max = version };
+    }
+
+    pub fn contains(range: VersionRange, version: BlobVersion) bool {
+        assert(range.min <= range.max);
+        return version >= range.min and version <= range.max;
+    }
+};
+
+/// Options for one read (commonware `ReadOptions`).
+pub const ReadOptions = packed struct(u8) {
+    /// Hint: the data need not stay in the OS page cache.
+    dont_cache: bool = false,
+    _padding: u7 = 0,
+};
+
+/// Options for one write (commonware `WriteOptions`).
+pub const WriteOptions = packed struct(u8) {
+    /// Durably persist the written bytes before returning (not a barrier for earlier writes).
+    sync: bool = false,
+    /// Hint: the bytes need not stay in the OS page cache.
+    dont_cache: bool = false,
+    _padding: u6 = 0,
+};
+
+/// An open blob handle.
+pub const Blob = struct {
+    ptr: *anyopaque,
+    vtable: *const VTable,
+
+    pub const VTable = struct {
+        read_at: *const fn (ptr: *anyopaque, offset: u64, buffer: []u8, ReadOptions) Error!void,
+        write_at: *const fn (
+            ptr: *anyopaque,
+            offset: u64,
+            chunks: []const []const u8,
+            options: WriteOptions,
+        ) Error!void,
+        resize: *const fn (ptr: *anyopaque, length: u64) Error!void,
+        sync: *const fn (ptr: *anyopaque) Error!void,
+        close: *const fn (ptr: *anyopaque) void,
+    };
+
+    /// Read exactly `buffer.len` bytes at `offset`; `error.BlobInsufficientLength` if the blob
+    /// is shorter.
+    pub fn read_at(blob: Blob, offset: u64, buffer: []u8) Error!void {
+        return blob.vtable.read_at(blob.ptr, offset, buffer, .{});
+    }
+
+    pub fn read_at_options(blob: Blob, offset: u64, buffer: []u8, options: ReadOptions) Error!void {
+        return blob.vtable.read_at(blob.ptr, offset, buffer, options);
+    }
+
+    pub fn write_at(blob: Blob, offset: u64, bytes: []const u8, options: WriteOptions) Error!void {
+        return blob.vtable.write_at(blob.ptr, offset, &.{bytes}, options);
+    }
+
+    /// Write the chunks as one logical byte sequence at `offset`.
+    pub fn write_at_vectored(
+        blob: Blob,
+        offset: u64,
+        chunks: []const []const u8,
+        options: WriteOptions,
+    ) Error!void {
+        return blob.vtable.write_at(blob.ptr, offset, chunks, options);
+    }
+
+    pub fn resize(blob: Blob, length: u64) Error!void {
+        return blob.vtable.resize(blob.ptr, length);
+    }
+
+    pub fn sync(blob: Blob) Error!void {
+        return blob.vtable.sync(blob.ptr);
+    }
+
+    /// Release the handle. Unsynced changes may be discarded; closing does not sync.
+    pub fn close(blob: Blob) void {
+        blob.vtable.close(blob.ptr);
+    }
+};
+
+/// Result of opening a blob.
+pub const Opened = struct {
+    blob: Blob,
+    /// Logical length in bytes (excluding the header).
+    len: u64,
+    version: BlobVersion,
+};
+
+/// Blob names of one partition, owned by the caller.
+pub const Names = struct {
+    items: [][]u8,
+
+    pub fn deinit(names: Names, gpa: std.mem.Allocator) void {
+        for (names.items) |name| gpa.free(name);
+        gpa.free(names.items);
+    }
+
+    pub fn contains(names: Names, name: []const u8) bool {
+        for (names.items) |item| {
+            if (std.mem.eql(u8, item, name)) return true;
+        }
+        return false;
+    }
+};
+
+pub const Storage = struct {
+    ptr: *anyopaque,
+    vtable: *const VTable,
+
+    pub const VTable = struct {
+        open_versioned: *const fn (
+            ptr: *anyopaque,
+            partition: []const u8,
+            name: []const u8,
+            versions: VersionRange,
+        ) Error!Opened,
+        remove: *const fn (ptr: *anyopaque, partition: []const u8, name: ?[]const u8) Error!void,
+        scan: *const fn (
+            ptr: *anyopaque,
+            gpa: std.mem.Allocator,
+            partition: []const u8,
+        ) Error!Names,
+    };
+
+    /// Open or create a blob with `default_blob_version` as the only accepted version.
+    pub fn open(storage: Storage, partition: []const u8, name: []const u8) Error!Opened {
+        return storage.vtable.open_versioned(storage.ptr, partition, name, .only(0));
+    }
+
+    /// Open or create a blob. A new blob gets `versions.max`; an existing blob whose version
+    /// is outside `versions` returns `error.BlobVersionMismatch`.
+    pub fn open_versioned(
+        storage: Storage,
+        partition: []const u8,
+        name: []const u8,
+        versions: VersionRange,
+    ) Error!Opened {
+        assert(versions.min <= versions.max);
+        return storage.vtable.open_versioned(storage.ptr, partition, name, versions);
+    }
+
+    /// Remove a blob, or the whole partition when `name` is null.
+    pub fn remove(storage: Storage, partition: []const u8, name: ?[]const u8) Error!void {
+        return storage.vtable.remove(storage.ptr, partition, name);
+    }
+
+    /// Every blob name in `partition`, sorted. Free with `Names.deinit`.
+    pub fn scan(storage: Storage, gpa: std.mem.Allocator, partition: []const u8) Error!Names {
+        return storage.vtable.scan(storage.ptr, gpa, partition);
+    }
+};
+
+/// Partition names are non-empty ASCII alphanumerics, `-`, and `_`.
+pub fn validate_partition_name(partition: []const u8) Error!void {
+    if (partition.len == 0) return error.PartitionNameInvalid;
+    for (partition) |c| {
+        if (!(std.ascii.isAlphanumeric(c) or c == '-' or c == '_')) {
+            return error.PartitionNameInvalid;
+        }
+    }
+}
+
+test "partition name validation" {
+    try validate_partition_name("abc-DEF_123");
+    for ([_][]const u8{ "", "a/b", "a.b", "a b", "ä", "a\x00" }) |bad| {
+        try std.testing.expectError(error.PartitionNameInvalid, validate_partition_name(bad));
+    }
+}
+
+test "options are single bits" {
+    try std.testing.expectEqual(@as(u8, 1), @as(u8, @bitCast(WriteOptions{ .sync = true })));
+    try std.testing.expectEqual(@as(u8, 2), @as(u8, @bitCast(WriteOptions{ .dont_cache = true })));
+    try std.testing.expectEqual(@as(u8, 1), @as(u8, @bitCast(ReadOptions{ .dont_cache = true })));
+}
