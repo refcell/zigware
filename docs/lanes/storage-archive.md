@@ -19,6 +19,8 @@ storage-journal (thread T-01a1d58d-a981-75c2-966d-93dcd484f46b).
   (commonware builds it on blobs, not the contiguous journal); recovery, conformance
   (`StorageConformance<OrdinalWorkload>`, `CodecConformance<Record<u32>>`),
   `ordinal_operations` fuzz.
+- [x] freezer and archive on-disk records with their codec conformance hashes (freezer
+  `Checkpoint`, `Cursor`, `Entry`, `Record<U64>`; prunable `Record<U64>`; immutable `Record`).
 - [ ] freezer: the hash table over fixed + oversized journals, checkpoints, resize, recovery
   after crash, conformance hashes for every on-disk format.
 - [ ] archive: the `Archive` interface, prunable (index + journal) and immutable (freezer +
@@ -53,6 +55,9 @@ storage-journal (thread T-01a1d58d-a981-75c2-966d-93dcd484f46b).
   `init_diagnostic`. Commonware's delayed-sync and recording contexts become the storage
   mock's mutation budget and write counter. Whole-section replay reads `replay_buffer`
   bytes at a time straight from the blob.
+- Arbitrary generators: a `#[derive(Arbitrary)]` enum picks its variant as
+  `(u64(u32) * variants) >> 32` (arbitrary 1.4); byte-array newtype keys (`U64`,
+  `FixedBytes`) fill byte by byte (`freezer.records.arbitrary_key`).
 - Tests that commonware runs at 100,000 and 5,000 items (`slow` group) run at 2,000 and 600.
 
 ## Log
@@ -60,3 +65,5 @@ storage-journal (thread T-01a1d58d-a981-75c2-966d-93dcd484f46b).
   `cache_operations` fuzz target.
 - 2026-11-13: ordinal with its ported tests (recovery from committed bits, torn tails,
   clearing unmarked runs), both conformance hashes, and the `ordinal_operations` fuzz target.
+- 2026-11-13: freezer and archive record codecs, the `archive.Identifier` interface type, and
+  six codec conformance hashes.

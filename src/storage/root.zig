@@ -21,6 +21,8 @@ pub const journal = @import("journal/mod.zig");
 pub const metadata = @import("metadata/mod.zig");
 pub const cache = @import("cache/mod.zig");
 pub const ordinal = @import("ordinal/mod.zig");
+pub const freezer = @import("freezer/mod.zig");
+pub const archive = @import("archive/mod.zig");
 
 test {
     std.testing.refAllDecls(@This());
