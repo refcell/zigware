@@ -23,7 +23,8 @@ variants (MinPk, MinSig) must match exactly.
 - [x] bls12381 codec conformance entries (group, partial signature, aggregate types, tle
   Ciphertext) via `conformance.verify` against `src/cryptography/conformance.toml`.
 - [x] bls12381 tle (timelock encryption) with commonware ciphertext vectors.
-- [ ] bls12381 certificate schemes (multisig, threshold); consensus-simplex waits on these.
+- [x] bls12381 certificate schemes (multisig, threshold) on `cryptography.certificate`, with
+  their `Certificate<MinSig>` conformance hashes and mocks fixtures.
 - [ ] bls12381 dkg (the rest of feldman_desmedt: dealers, players, reshare, golden and
   FeldmanTranscript conformance) and scheme.rs.
 - [ ] Fuzz targets (commonware math/fuzz, simd/fuzz, bls parts of cryptography/fuzz).
@@ -54,6 +55,11 @@ variants (MinPk, MinSig) must match exactly.
 - A local Rust oracle (not committed) built against commonware-ref produced the byte vectors
   for points, hashes, dealings, shares, and recovered signatures.
 
+- Certificate schemes fold commonware's `impl_certificate_bls12381_*!` macro and `Generic` into
+  `Scheme(Subject, Faults, P, V)`. The threshold scheme's `#[should_panic]` tests (certificate
+  verifier on a vote, mismatched sharing) still panic but are not ported: Zig cannot catch a
+  panic.
+
 - simd: one `@Vector` implementation per profile (scalar 64-bit, x86_v3 256, x86_v4c 512,
   neon/arm_v9 128) stands in for both commonware's emulated and native tokens; `dispatch`
   picks the compile target's best profile at comptime. Profile-only instructions are `void`
@@ -68,3 +74,5 @@ variants (MinPk, MinSig) must match exactly.
 - 2026-11-13: bls12381 arithmetic, group, variants, ops, aggregate, batch, noble/eth vectors.
 - 2026-11-13: bls12381 sharing, threshold ops, deal_anonymous; vectors match commonware.
 - 2026-11-13: bls12381 tle and the bls12381 codec conformance hashes (11 entries).
+
+- 2026-11-13: bls12381 multisig and threshold certificate schemes with conformance hashes.

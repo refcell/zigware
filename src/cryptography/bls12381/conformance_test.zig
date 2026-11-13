@@ -13,6 +13,7 @@ const primitives = @import("primitives/root.zig");
 const tle = @import("tle.zig");
 const base_certificate = @import("../certificate.zig");
 const multisig = @import("certificate/multisig.zig");
+const threshold_certificate = @import("certificate/threshold.zig");
 
 const arbitrary = codec.arbitrary;
 const Unstructured = arbitrary.Unstructured;
@@ -133,6 +134,22 @@ test "conformance: bls12381 multisig certificate" {
         "certificate::multisig::tests::conformance::CodecConformance<Certificate<MinSig>>",
         MultisigCertificate,
         gen_multisig_certificate,
+    );
+}
+
+const ThresholdCertificate = threshold_certificate.Certificate(MinSig);
+
+/// The threshold `Certificate::arbitrary`: one arbitrary signature.
+fn gen_threshold_certificate(gpa: Allocator, u: *Unstructured) Error!ThresholdCertificate {
+    return .init(try gen_point(MinSig.Signature)(gpa, u));
+}
+
+test "conformance: bls12381 threshold certificate" {
+    try skip_slow();
+    try verify(
+        "certificate::threshold::tests::conformance::CodecConformance<Certificate<MinSig>>",
+        ThresholdCertificate,
+        gen_threshold_certificate,
     );
 }
 

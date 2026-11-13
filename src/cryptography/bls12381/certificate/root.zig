@@ -5,6 +5,7 @@
 const std = @import("std");
 
 pub const multisig = @import("multisig.zig");
+pub const threshold = @import("threshold.zig");
 
 test {
     std.testing.refAllDecls(@This());
