@@ -20,4 +20,6 @@ pub const Rational = rational.Rational;
 test {
     @import("std").testing.refAllDecls(@This());
     _ = @import("network_test.zig");
+    _ = @import("network_peers_test.zig");
+    _ = @import("network_bandwidth_test.zig");
 }

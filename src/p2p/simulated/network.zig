@@ -546,7 +546,15 @@ pub fn Network(comptime P: type) type {
             return .{ .sender = sender, .receiver = receiver };
         }
 
-        pub const Registered = struct { sender: Sender, receiver: Receiver };
+        pub const Registered = struct {
+            sender: Sender,
+            receiver: Receiver,
+
+            pub fn deinit(registered: *Registered) void {
+                registered.sender.deinit();
+                registered.receiver.deinit();
+            }
+        };
 
         /// The network's unlimited sender for one registered channel.
         pub const UnlimitedSender = struct {

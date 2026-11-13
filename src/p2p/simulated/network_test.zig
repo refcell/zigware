@@ -13,16 +13,16 @@ const p2p = @import("../root.zig");
 const network_mod = @import("network.zig");
 const Quota = @import("../rate_limit.zig").Quota;
 
-const Key = cryptography.ed25519.PublicKey;
-const Net = network_mod.Network(Key);
-const Config = network_mod.Config;
-const Link = network_mod.Link;
-const Duration = utils_pkg.Duration;
-const Tracked = p2p.TrackedPeers(Key);
-const AuditState = [8]u8;
+pub const Key = cryptography.ed25519.PublicKey;
+pub const Net = network_mod.Network(Key);
+pub const Config = network_mod.Config;
+pub const Link = network_mod.Link;
+pub const Duration = utils_pkg.Duration;
+pub const Tracked = p2p.TrackedPeers(Key);
+pub const AuditState = [8]u8;
 
 /// Default rate limit set high enough to not interfere with normal operation.
-const test_quota = Quota.per_second(std.math.maxInt(u32));
+pub const test_quota = Quota.per_second(std.math.maxInt(u32));
 
 comptime {
     p2p.assert_limited_sender(Net.Sender);
@@ -30,11 +30,11 @@ comptime {
     p2p.assert_manager(Net.Manager);
 }
 
-fn key(seed: u64) Key {
+pub fn key(seed: u64) Key {
     return cryptography.ed25519.PrivateKey.from_seed(seed).public_key();
 }
 
-fn config(max_peers_per_set: usize, tracked_peer_sets: usize) Config {
+pub fn config(max_peers_per_set: usize, tracked_peer_sets: usize) Config {
     return .{
         .max_size = 1024 * 1024,
         .max_peers_per_set = max_peers_per_set,
@@ -43,7 +43,7 @@ fn config(max_peers_per_set: usize, tracked_peer_sets: usize) Config {
     };
 }
 
-fn link_ms(latency_ms: u64, jitter_ms: u64, success_rate: f64) Link {
+pub fn link_ms(latency_ms: u64, jitter_ms: u64, success_rate: f64) Link {
     return .{
         .latency = Duration.from_millis(latency_ms),
         .jitter = Duration.from_millis(jitter_ms),
@@ -52,55 +52,55 @@ fn link_ms(latency_ms: u64, jitter_ms: u64, success_rate: f64) Link {
 }
 
 /// A running network: `run` executes concurrently until `deinit`.
-const Harness = struct {
+pub const Harness = struct {
     io: Io,
     network: *Net,
     task: Io.Future((Io.Cancelable || Allocator.Error)!void),
 
-    fn start(io: Io, cfg: Config) !Harness {
+    pub fn start(io: Io, cfg: Config) !Harness {
         const network = try Net.init(testing.allocator, io, cfg);
         errdefer network.deinit();
         const task = try io.concurrent(Net.run, .{network});
         return .{ .io = io, .network = network, .task = task };
     }
 
-    fn oracle(harness: *const Harness) Net.Oracle {
+    pub fn oracle(harness: *const Harness) Net.Oracle {
         return harness.network.oracle();
     }
 
     /// Tracks `peers` network-wide at id 0.
-    fn track(harness: *const Harness, peers: []const Key) !void {
+    pub fn track(harness: *const Harness, peers: []const Key) !void {
         const sorted = try testing.allocator.dupe(Key, peers);
         defer testing.allocator.free(sorted);
         Tracked.PeerSet.sort(sorted);
         const manager = harness.oracle().manager();
         try testing.expectEqual(p2p.Feedback.ok, manager.track(0, .init_primary(.init(sorted))));
-        const set = (try manager.peer_set(testing.allocator, 0)).?;
-        set.free(testing.allocator);
+        const tracked = (try manager.peer_set(testing.allocator, 0)).?;
+        tracked.free(testing.allocator);
     }
 
-    fn deinit(harness: *Harness) void {
+    pub fn deinit(harness: *Harness) void {
         harness.network.close();
         harness.task.await(harness.io) catch |err| std.debug.panic("run: {t}", .{err});
         harness.network.deinit();
     }
 };
 
-fn run_deterministic(seed: u64, comptime function: fn (Io) anyerror!void) !AuditState {
+pub fn run_deterministic(seed: u64, comptime function: fn (Io) anyerror!void) !AuditState {
     var runner = try runtime.deterministic.Runner.init(testing.allocator, .{ .seed = seed });
     defer runner.deinit();
     try (try runner.start(function, .{runner.io()}));
     return runner.auditor.state();
 }
 
-fn expect_message(receiver: *Net.Receiver, from: Key, payload: []const u8) !void {
+pub fn expect_message(receiver: *Net.Receiver, from: Key, payload: []const u8) !void {
     var message = try receiver.recv();
     defer message.deinit();
     try testing.expect(Key.order(message.peer, from) == .eq);
     try testing.expectEqualSlices(u8, payload, message.payload);
 }
 
-fn send_one(sender: *Net.Sender, to: Key, payload: []const u8, priority: bool) !usize {
+pub fn send_one(sender: *Net.Sender, to: Key, payload: []const u8, priority: bool) !usize {
     const sent = try sender.send(.{ .one = to }, &.{payload}, priority);
     defer testing.allocator.free(sent);
     return sent.len;
@@ -245,6 +245,41 @@ test "rate limiting skips recipients over quota" {
             try expect_message(&two.receiver, pk1, "message3");
         }
     }.run);
+}
+
+/// Sends "ping" from `sender` to `to` and reports whether `receiver` gets it within a second.
+pub fn delivered(io: Io, sender: *Net.Sender, receiver: *Net.Receiver, to: Key) !bool {
+    testing.allocator.free(try sender.send(.{ .one = to }, &.{"ping"}, false));
+    try io.sleep(.fromSeconds(1), .real);
+    var message = receiver.try_recv() catch |err| switch (err) {
+        error.Empty => return false,
+        error.Disconnected => return err,
+    };
+    message.deinit();
+    return true;
+}
+
+/// The peers `sender` reaches with `Recipients.all`, owned by the caller.
+pub fn all_recipients(sender: *Net.Sender) ![]Key {
+    const checked = switch (try sender.check(.all)) {
+        .checked => |checked| checked,
+        .limited => return error.TestUnexpectedResult,
+    };
+    defer checked.deinit();
+    return testing.allocator.dupe(Key, checked.recipients());
+}
+
+pub fn expect_recipients(sender: *Net.Sender, expected: []const Key) !void {
+    const actual = try all_recipients(sender);
+    defer testing.allocator.free(actual);
+    try testing.expectEqual(expected.len, actual.len);
+    for (expected, actual) |want, got| try testing.expect(Key.order(want, got) == .eq);
+}
+
+/// A sorted peer set over `keys`, sorting them in place.
+pub fn set(keys: []Key) Tracked.PeerSet {
+    Tracked.PeerSet.sort(keys);
+    return .init(keys);
 }
 
 /// Many agents broadcast over lossy links until each received `agent_count` messages.

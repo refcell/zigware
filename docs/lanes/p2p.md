@@ -85,9 +85,12 @@ handshake and the runtime's network, which the actor-stream and runtime lanes ar
 - [x] simulated: unbounded channel and peer-set tracker.
 - [x] simulated: network core (Oracle, Control, Manager, links with latency/jitter/success
   rate, rate-limited senders, receivers, peer-set tracking) with its first tests.
-- [ ] simulated: remaining mod.rs tests (bandwidth via Oracle, dynamic links and peers,
-  blocking and disconnect_on_block, peer-set subscriptions, shutdown), split senders and
-  receivers, ziggurat `Normal` for byte-identical latency samples.
+- [x] simulated: dynamic links, peer-set window and own/network-wide peer sets, and every
+  bandwidth test (contention, sharing, staggered, pipe reservation, zero limits).
+- [ ] simulated: ziggurat `Normal` for byte-identical latency samples (next, coordinator
+  priority for the estimator demo).
+- [ ] simulated: remaining mod.rs tests (blocking and disconnect_on_block, peer-set
+  subscriptions, shutdown, socket manager), split senders and receivers.
 - [ ] authenticated: router, relay, throttle, dialing, connection over stream's
   handshake, then discovery and lookup (actors, types, codec identical to commonware).
 - [ ] Fuzz targets (commonware p2p/fuzz).
@@ -101,3 +104,5 @@ handshake and the runtime's network, which the actor-stream and runtime lanes ar
   utils.Hostname and utils.net.is_global.
 - 2026-11-13: simulated unbounded channel and peer-set tracker.
 - 2026-11-13: simulated network core: Oracle, links, send/receive, peer sets, blocking.
+- 2026-11-13: simulated link, peer-set, and bandwidth tests; fiber stacks end in a zeroed
+  frame so stack traces captured on a fiber stop at its top.
