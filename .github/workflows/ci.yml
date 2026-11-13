@@ -1,15 +1,15 @@
 name: ci
 
-# About fifteen lanes push to main, faster than runs finish. Three slots run at once; each
-# finishes its running build and keeps only the newest push waiting. Jobs time out, so a
-# hung job cannot hold a slot. macOS runs in macos.yml.
+# About fifteen lanes push to main, faster than runs finish: the running build finishes and
+# only the newest push waits behind it. Jobs time out, so a hung job cannot hold the queue.
+# macOS runs in macos.yml.
 on:
   push:
     branches: [main]
   workflow_dispatch:
 
 concurrency:
-  group: ci-${{ github.ref }}-${{ github.run_number % 3 }}
+  group: ci-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
