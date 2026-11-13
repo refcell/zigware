@@ -32,6 +32,7 @@ const cryptography = @import("cryptography");
 const fiber = @import("fiber.zig");
 const storage_mod = @import("storage.zig");
 const network_mod = @import("network.zig");
+const telemetry = @import("telemetry/mod.zig");
 const rng_helpers = @import("rng.zig");
 
 const Rng = utils.rng.TestRng;
@@ -205,6 +206,9 @@ pub const Runner = struct {
     simulated_network: ?network_mod.deterministic.Network = null,
     /// Number of roots started, so a restart can retire the previous run's opens.
     starts: u64 = 0,
+    /// The metrics registry; it carries over between starts. Release every handle before
+    /// `deinit`.
+    metrics_registry: telemetry.metrics.Registry,
 
     pub fn init(allocator: std.mem.Allocator, config: Config) Error!Runner {
         config.validate();
@@ -225,6 +229,7 @@ pub const Runner = struct {
             .batch = batch,
             .stack_pool = stack_pool,
             .memory_storage = .init(allocator),
+            .metrics_registry = .init(allocator),
         };
     }
 
@@ -238,6 +243,7 @@ pub const Runner = struct {
         runner.alarms.deinit(runner.allocator);
         runner.memory_storage.deinit();
         if (runner.simulated_network) |*net| net.deinit();
+        runner.metrics_registry.deinit();
         runner.* = undefined;
     }
 
@@ -257,6 +263,12 @@ pub const Runner = struct {
             runner.simulated_network = .init(runner.allocator, runner.io());
         }
         return &runner.simulated_network.?;
+    }
+
+    /// The root metrics scope (commonware's `Metrics` on the root context): empty label, no
+    /// attributes. The runner must not move once it is used.
+    pub fn metrics(runner: *Runner) telemetry.metrics.Scope {
+        return .init(&runner.metrics_registry);
     }
 
     /// CRC32C digest of all durable blob contents (commonware `storage_audit`).

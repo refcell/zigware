@@ -65,10 +65,17 @@ the registry API first and report it.
   path. Port the tests.
 - [x] metrics: batched, status, task (per-task metrics), histogram helpers (timers).
 - [x] traces: span collector and status for tests (what commonware's tests assert on).
-- [ ] Hook into `runtime.deterministic.Runner` (coordinate with the runtime lane, thread
-  T-01a1d57b-1bfd-71b8-940f-5663d558c803) so `Context`/`metrics()` returns the registry.
+- [x] Hook into `runtime.deterministic.Runner`: the runner owns a registry and `metrics()`
+  returns the root scope (a small additive edit to `deterministic.zig`).
+- [ ] With the runtime lane, once `Context` lands (runtime lane, thread
+  T-01a1d57b-1bfd-71b8-940f-5663d558c803): the context carries a `Scope` (`child`,
+  `with_attribute`, `register`, `encode`), audits `register`/`encode` like commonware, and the
+  executor records `runtime_iterations`, `runtime_tasks_spawned`, `runtime_tasks_running`, and
+  `runtime_task_polls` keyed by `task.Label`; then port `test_count_running_tasks` and
+  `test_metrics_spawn_attribute_cardinality`.
 
 ## Log
 - 2026-11-13: metrics registry, scopes, raw metrics, dtoa, byte-identical exposition.
 - 2026-11-13: batched, status, task labels, histogram timers.
 - 2026-11-13: traces: Tracer, spans, Collector with commonware's assertions, status, traced.
+- 2026-11-13: `deterministic.Runner.metrics()` over a runner-owned registry.
