@@ -29,8 +29,8 @@ zig build -Doptimize=ReleaseFast && ./zig-out/bin/estimator examples/estimator/m
     --distribution us-east-1:5,eu-west-1:5
 ```
 
-`--help` lists the options. `--reload` (re-download latencies from cloudping.co) is not
-supported yet; the latency data in `p50.json` and `p90.json` is embedded.
+`--help` lists the options. The latency data in `p50.json` and `p90.json` is embedded;
+`--reload` downloads the last year's matrices from cloudping.co instead.
 
 Every `.lazy` file in this directory is commonware's. The DSL is documented in commonware's
 README, and the parser, error messages, and semantics are the same here.

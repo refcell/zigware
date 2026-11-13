@@ -115,11 +115,18 @@ fn run(
     };
     defer task.deinit(gpa);
     try report.log_initializing(stdout, ansi, now_us(io), peers, &distribution);
-    if (arguments.reload) {
-        return fail(stdout, stderr, "--reload is not supported yet: the latency data is embedded");
-    }
-    try report.log_loading(stdout, ansi, now_us(io));
-    var latencies = try lib.load_latency_data(gpa);
+    var latencies = if (arguments.reload) blk: {
+        try report.log_message(stdout, ansi, now_us(io), "downloading latency data");
+        try stdout.flush();
+        break :blk lib.download_latency_data(gpa, io) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.DownloadFailed => return fail(stdout, stderr, "failed to download latency data"),
+            error.InvalidLatencyData => return fail(stdout, stderr, "invalid latency data"),
+        };
+    } else blk: {
+        try report.log_message(stdout, ansi, now_us(io), "loading latency data");
+        break :blk try lib.load_latency_data(gpa);
+    };
     defer latencies.deinit();
 
     const input: simulate.Input = .{

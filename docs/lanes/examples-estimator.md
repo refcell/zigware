@@ -25,7 +25,8 @@ statistics, output, CLI) and run against a minimal in-lane stand-in, then switch
   means and medians against a captured commonware run, with tolerances.
 - `--version` prints the build's `version` option (`0.0.0` today), not commonware's crate
   version.
-- `--reload` is not supported (no HTTP client in-lane); it fails with a clear message.
+- `--reload` downloads through `std.http.Client` on the process's `std.Io` in `main`, before
+  any simulation; it is the estimator's only real network access.
 
 ## Backlog
 - [x] `.lazy` DSL parser and task model, with lib.rs's parser tests. Copy the `.lazy` files and
@@ -40,9 +41,10 @@ statistics, output, CLI) and run against a minimal in-lane stand-in, then switch
   with numbers masked, and stall.lazy exits 101 in both.)
 - [x] A short `examples/estimator/README.md` with the commands the README demo uses.
 
-- [ ] `--reload`: fetch cloudping.co through the runtime's network.
+- [x] `--reload`: fetch cloudping.co.
 
 ## Log
 - 2026-11-13: DSL parser, latency data, statistics, clap-identical CLI, colored output, and
   the simulation on runtime.deterministic + p2p.simulated. `zig build run-estimator` works.
 - 2026-11-13: end-to-end test of every completing .lazy file, uncapped and bandwidth-capped.
+- 2026-11-13: `--reload` downloads cloudping.co P50/P90 matrices.

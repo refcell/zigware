@@ -146,10 +146,10 @@ pub fn log_initializing(
     try writer.writeAll("}\n");
 }
 
-/// `debug!("loading latency data")`.
-pub fn log_loading(writer: *Writer, ansi: bool, now_us: u64) !void {
+/// `debug!(message)` from the estimator library (`loading`/`downloading latency data`).
+pub fn log_message(writer: *Writer, ansi: bool, now_us: u64, message: []const u8) !void {
     try debug_prefix(writer, ansi, now_us, "estimator");
-    try writer.writeAll("loading latency data\n");
+    try writer.print("{s}\n", .{message});
 }
 
 /// Maps 1-based line numbers to command indices.
@@ -339,14 +339,14 @@ test "debug lines match tracing's format" {
     // 2026-11-13T16:27:51.676445Z
     const now_us: u64 = 1_794_587_271_676_445;
     try log_initializing(&writer, false, now_us, 3, &distribution);
-    try log_loading(&writer, false, now_us);
+    try log_message(&writer, false, now_us, "loading latency data");
     try testing.expectEqualStrings("2026-11-13T16:27:51.676445Z DEBUG commonware_estimator: " ++
         "Initializing simulator peers=3 args.distribution={\"eu-west-1\": RegionConfig " ++
         "{ count: 2, egress_cap: Some(9), ingress_cap: Some(3) }, \"us-east-1\": RegionConfig " ++
         "{ count: 1, egress_cap: None, ingress_cap: None }}\n" ++
         "2026-11-13T16:27:51.676445Z DEBUG estimator: loading latency data\n", writer.buffered());
     var colored: Writer = .fixed(&buffer);
-    try log_loading(&colored, true, now_us);
+    try log_message(&colored, true, now_us, "loading latency data");
     try testing.expectEqualStrings("\x1b[2m2026-11-13T16:27:51.676445Z\x1b[0m " ++
         "\x1b[34mDEBUG\x1b[0m " ++
         "\x1b[2mestimator\x1b[0m\x1b[2m:\x1b[0m loading latency data\n", colored.buffered());

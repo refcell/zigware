@@ -19,6 +19,10 @@ pub const calculate_threshold = dsl.calculate_threshold;
 pub const can_command_advance = dsl.can_command_advance;
 pub const validate = dsl.validate;
 
+const cloudping_base = "https://www.cloudping.co/api/latencies";
+/// Largest cloudping.co response accepted (the embedded matrices are about 44 KiB).
+const cloudping_size_max: usize = 4 << 20;
+
 /// cloudping.co reports ping times (round trips), not one-way latency.
 const cloudping_divisor: f64 = 2.0;
 
@@ -118,6 +122,34 @@ pub const LatencyError = error{ InvalidLatencyData, OutOfMemory };
 /// The embedded cloudping.co P50 and P90 matrices (commonware `load_latency_data`).
 pub fn load_latency_data(gpa: Allocator) LatencyError!Latencies {
     return populate_latency_map(gpa, p50_json, p90_json);
+}
+
+pub const DownloadError = error{DownloadFailed} || LatencyError;
+
+/// The last year of P50 and P90 matrices from cloudping.co (commonware
+/// `download_latency_data`). This is the estimator's only real network access; it runs before
+/// any simulation, on the process's `std.Io`.
+pub fn download_latency_data(gpa: Allocator, io: std.Io) DownloadError!Latencies {
+    var client: std.http.Client = .{ .allocator = gpa, .io = io };
+    defer client.deinit();
+    const p50 = try download(gpa, &client, cloudping_base ++ "?percentile=p_50&timeframe=1Y");
+    defer gpa.free(p50);
+    const p90 = try download(gpa, &client, cloudping_base ++ "?percentile=p_90&timeframe=1Y");
+    defer gpa.free(p90);
+    return populate_latency_map(gpa, p50, p90);
+}
+
+fn download(gpa: Allocator, client: *std.http.Client, url: []const u8) DownloadError![]u8 {
+    var body: std.Io.Writer.Allocating = .init(gpa);
+    defer body.deinit();
+    const options: std.http.Client.FetchOptions = .{
+        .location = .{ .url = url },
+        .response_writer = &body.writer,
+    };
+    const result = client.fetch(options) catch return error.DownloadFailed;
+    if (result.status != .ok) return error.DownloadFailed;
+    if (body.written().len > cloudping_size_max) return error.DownloadFailed;
+    return body.toOwnedSlice() catch error.OutOfMemory;
 }
 
 /// Latency is half the P50 ping; jitter is half the P90 - P50 spread. Pairs missing from
