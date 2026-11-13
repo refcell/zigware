@@ -86,7 +86,7 @@ const packages = [_]Package{
 
 /// Example binaries at `examples/<name>/main.zig`; each may import any package.
 /// Add an example here once its main.zig exists.
-const examples = [_][]const u8{};
+const examples = [_][]const u8{"estimator"};
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
@@ -145,7 +145,7 @@ pub fn build(b: *std.Build) void {
         b.step(step_name, b.fmt("Run {s} unit tests", .{package.name})).dependOn(&run.step);
     }
 
-    add_examples(b, zigware, target, optimize, test_step, check_step, filters);
+    add_examples(b, zigware, options_module, target, optimize, test_step, check_step, filters);
     add_benches(b, &modules, options_module, target, optimize, test_step, check_step);
 }
 
@@ -246,6 +246,7 @@ fn bench_harness(
 fn add_examples(
     b: *std.Build,
     zigware: *std.Build.Module,
+    options_module: *std.Build.Module,
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
     test_step: *std.Build.Step,
@@ -257,7 +258,10 @@ fn add_examples(
             .root_source_file = b.path(b.fmt("examples/{s}/main.zig", .{name})),
             .target = target,
             .optimize = optimize,
-            .imports = &.{.{ .name = "zigware", .module = zigware }},
+            .imports = &.{
+                .{ .name = "zigware", .module = zigware },
+                .{ .name = "build_options", .module = options_module },
+            },
         });
         const exe = b.addExecutable(.{ .name = name, .root_module = root });
         b.installArtifact(exe);
