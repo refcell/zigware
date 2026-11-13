@@ -35,6 +35,9 @@ pub const crc32 = @import("crc32.zig");
 pub const Crc32 = crc32.Crc32;
 
 pub const ed25519 = @import("ed25519.zig");
+pub const chacha20_poly1305 = @import("chacha20_poly1305.zig");
+pub const ChaCha20Poly1305 = chacha20_poly1305.ChaCha20Poly1305;
+pub const assert_cipher = signer.assert_cipher;
 
 /// The digest type of hasher `H` (commonware `DigestOf<H>`).
 pub fn DigestOf(comptime H: type) type {

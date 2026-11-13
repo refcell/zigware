@@ -10,6 +10,8 @@
 //! - A batch verifier (`BatchVerifier`) has `P.verify_batch(rng, items, projector, strategy)`:
 //!   `projector.project(index, *const Item) BatchEntry(P)` views each item as an entry.
 //! - A recoverable signature (`Recoverable`) has `sig.recover_signer(namespace, message)`.
+//! - A cipher (`Cipher`) has `C.random(rng)`, `c.seal(aad, data) !Tag`, and
+//!   `c.open(aad, data, *const Tag) !void`, both in place; a failure poisons the cipher.
 //!
 //! The namespace is framed into the signed payload as commonware's `union_unique`: the varint
 //! of the namespace length, the namespace, then the message. A signature for one namespace
@@ -107,5 +109,13 @@ pub fn assert_recoverable(comptime T: type) void {
     comptime {
         assert_signature(T);
         assert_decls(T, &.{ "PublicKey", "recover_signer" }, "Recoverable");
+    }
+}
+
+/// Asserts `C` implements `Cipher`.
+pub fn assert_cipher(comptime C: type) void {
+    comptime {
+        assert_decls(C, &.{ "random", "seal", "open" }, "Cipher");
+        assert(codec.fixed_size(C.Tag) != null or @typeInfo(C.Tag) == .array);
     }
 }
