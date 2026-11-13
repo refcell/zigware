@@ -60,6 +60,11 @@ handshake and the runtime's network, which the actor-stream and runtime lanes ar
   once and shared), `router.Router(P)` (connected peers, `content`, `Connected` source), and
   `channels.Channels(P)` (`register(channel, quota)` returns a limited `Sender` and a lossy
   `Receiver` sized `max_peers * burst`).
+- `authenticated.discovery.types`: `Payload(P)` (`data`, `greeting`, `bit_vec`, `peers`;
+  `Cfg = PayloadConfig`), `BitVec`, `Info(P)` (`sign(public_key, namespace, ingress,
+  timestamp, signer)`, `verify`), `InfoVerifier(P)` (`validate(now, infos)`,
+  `validate_info`), and `max_gossip_size(P, max_bit_vec, max_peers)`; all three match
+  commonware's conformance hashes (secp256r1 keys).
 - `p2p.Message(P)` owns its payload when `gpa` is set; release it with `deinit`.
 - Senders take a message as parts (`[]const []const u8`, concatenated), like stream frames.
 
@@ -137,3 +142,4 @@ handshake and the runtime's network, which the actor-stream and runtime lanes ar
 - 2026-11-13: authenticated Data frame and lookup Message with conformance hashes.
 - 2026-11-13: lookup record and directory with their tests.
 - 2026-11-13: authenticated throttle, outbox, router, and channels.
+- 2026-11-13: discovery wire types (Payload, BitVec, Info, InfoVerifier) with conformance.

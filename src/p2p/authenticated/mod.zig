@@ -12,6 +12,7 @@ pub const outbox = @import("outbox.zig");
 pub const router = @import("router.zig");
 pub const channels = @import("channels.zig");
 pub const lookup = @import("lookup/mod.zig");
+pub const discovery = @import("discovery/mod.zig");
 
 test {
     @import("std").testing.refAllDecls(@This());
