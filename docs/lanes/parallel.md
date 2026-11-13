@@ -80,6 +80,11 @@ placeholder until this lands, so land `Strategy` first and tell the coordinator 
   are exact; the mimalloc-only knobs (large OS pages, THP, stats merge threshold) are recorded
   in `effective` but change nothing. A heap is a value, not the process allocator, so
   configuration is per heap rather than once per process.
+- `parallel.topology` ports topology.rs's model: `Topology.detect(io)` (sysfs LLC lists, read
+  through `std.Io`), `from_lists`, `group_width`, `partition`, `reservations`, and `CpuSet`,
+  bounded by `cpus_max` (1024), `domains_max` (256), and `list_len_max` (256). zigware's pool
+  is one group, so group leases, homing, and affinity writes (`sched_setaffinity`) are not
+  ported; a grouped pool will build on this model.
 - Fallible ops return the first error in chunk order (commonware allows any).
 - `run_tiles` plans at most 64 workers (one pool job each); `Tiles.fill_collect` returns an
   allocated slice and `OutOfMemory` if a worker's result list cannot grow.
@@ -92,7 +97,8 @@ placeholder until this lands, so land `Strategy` first and tell the coordinator 
 - [x] parallel: `run_tiles` (`Grid`, `Tiles`, `Shares` claim/steal) with its tests.
 - [x] parallel: `spawn`/`block_on` over the pool.
 - [x] parallel mocks.rs (Explorer, explore, pooled, inlined, pending) with its tests.
-- [ ] parallel policy.rs and topology.rs (CPU topology, pinning policy).
+- [x] parallel policy.rs and topology.rs: the adaptive policy and the topology model.
+- [ ] parallel: let `Rayon` consult a `Policy` (opt-in `with_policy`), timing runs and spawns.
 - [x] allocator: an allocator wrapper with commonware's metrics and purge/reserve
   configuration; no mimalloc (zero deps).
 - [x] bench: the benchmark workload abstraction (lib.rs) and `zig build bench`.
@@ -101,6 +107,7 @@ placeholder until this lands, so land `Strategy` first and tell the coordinator 
 - [ ] Fuzz targets and benches.
 
 ## Log
+- 2026-11-13: parallel topology model (LLC detection, group width, partition, reservations).
 - 2026-11-13: parallel policy (adaptive serial/parallel and inline/offload decisions) with
   ported policy.rs tests.
 - 2026-11-13: allocator `Heap` (mimalloc layout, reserve/purge config, Stats, metrics) with

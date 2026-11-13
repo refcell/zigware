@@ -56,6 +56,8 @@ pub const Task = @import("task.zig").Task;
 pub const mocks = @import("mocks.zig");
 pub const policy = @import("policy.zig");
 pub const Policy = policy.Policy;
+pub const topology = @import("topology.zig");
+pub const Topology = topology.Topology;
 
 pub const Sequential = @import("sequential.zig").Sequential;
 pub const Rayon = @import("rayon.zig").Rayon;
