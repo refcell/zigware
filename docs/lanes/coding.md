@@ -16,7 +16,7 @@ hashers (on main).
   `recovery_iter()`; call `deinit()` before the coder's next round), `Plan` (`init(gpa, k, m,
   original_indices, recovery_indices)`, `deinit`), `Error`, `InitError`, `SHARD_CHUNK_BYTES`.
   Advanced: `rate.{HighRate,LowRate,DefaultRate}(Engine)` with `Encoder`/`Decoder`,
-  `EncoderWork`/`DecoderWork` reuse via `into_parts`, and `engine.{Naive,Scalar,DefaultEngine}`.
+  `EncoderWork`/`DecoderWork` reuse via `into_parts`, and `engine.{Naive,Scalar,Simd,DefaultEngine}`.
 - `coding.Config` (`minimum_shards`, `extra_shards` as non-zero `u16`s; `total_shards()`,
   codec with `fixed_size` 4, `eql`, `order`) and `coding.assert_scheme(S)`, the comptime
   `Scheme` interface (see `src/coding/root.zig`).
@@ -40,7 +40,8 @@ hashers (on main).
 - Errors carry no payload (Zig); names match commonware's `Error` variants.
 - Rust drops results to reset the coder; here `result.deinit()` does it. Coders take an
   allocator; decoding allocates nothing (erasure scratch lives in `DecoderWork`).
-- The engine is chosen at compile time (`DefaultEngine = Scalar`) instead of CPU detection;
+- The engine is chosen at compile time (`DefaultEngine = Simd`, which is `Scalar` without AVX2)
+  instead of runtime CPU detection;
   every engine produces identical bytes. The fused 16-shard AVX-512 derivative leaf is not
   ported (output is identical; it is a speedup).
 - Tables live in static memory behind an atomic once-guard, not on the heap.
@@ -72,7 +73,9 @@ hashers (on main).
   `-Dslow-tests`) and the rate, wrapper, result, and plan tests.
 - [x] reed_solomon: port `fuzz.rs` (engine and rate differential fuzzing) as minifuzz searches
   plus `std.testing.fuzz` targets, with every fixed regression case.
-- [ ] reed_solomon: `@Vector` SIMD engine, checked against `Naive`.
+- [x] reed_solomon: `@Vector` SIMD engine (`engine.Simd`: AVX2 `vpshufb` multiply kernel under the
+  shared transforms), checked against `Scalar` and `Naive` and in the differential fuzz.
+- [ ] reed_solomon: an aarch64 (NEON `tbl`) kernel for `Simd`.
 - [x] storage bmt (taken over from storage-merkle): Builder, Tree, single/range/multi proofs and
   verification, codec, every test, RootConformance and CodecConformance<Proof> hashes, and the
   `bmt_operations` fuzz (minifuzz + `std.testing.fuzz`).
@@ -91,3 +94,4 @@ hashers (on main).
 - 2026-11-13: storage bmt (proofs, codec, conformance, fuzz).
 - 2026-11-13: coding Config with its conformance hash, and the Scheme interface.
 - 2026-11-13: coding ReedSolomon scheme, tests, Chunk conformance hash, and fuzz target.
+- 2026-11-13: reed_solomon Simd engine (AVX2 nibble-shuffle kernel), now the default.

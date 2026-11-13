@@ -36,8 +36,8 @@ const ShardsRefMut = engine.ShardsRefMut;
 const BitSet = std.DynamicBitSetUnmanaged;
 const half = SHARD_CHUNK_BYTES / 2;
 
-/// Engines compared with `Naive` (`DefaultEngine` is `Scalar`).
-const engines = .{Scalar};
+/// Engines compared with `Naive` (`DefaultEngine` is `Simd` on AVX2 targets, else `Scalar`).
+const engines = if (engine.Simd == Scalar) .{Scalar} else .{ Scalar, engine.Simd };
 
 /// Shard lengths for rate cases: one element, one chunk, and one element either side of one
 /// and two chunks.

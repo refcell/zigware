@@ -13,6 +13,7 @@
 //!
 //! - `Naive`: simple reference implementation.
 //! - `Scalar`: portable engine without SIMD.
+//! - `Simd`: the `Scalar` transforms with an AVX2 nibble-shuffle multiply (`Scalar` elsewhere).
 //! - `DefaultEngine`: the engine `Encoder` and `Decoder` use; chosen at compile time.
 //!
 //! `fft` transforms `data[pos..pos + size]`, producing the requested output prefix in
@@ -29,11 +30,12 @@ pub const fwht = @import("engine/fwht.zig");
 pub const shards = @import("engine/shards.zig");
 pub const Naive = @import("engine/naive.zig").Naive;
 pub const Scalar = @import("engine/scalar.zig").Scalar;
+pub const Simd = @import("engine/simd.zig").Simd;
 pub const Shards = shards.Shards;
 pub const ShardsRefMut = shards.ShardsRefMut;
 
-/// The engine `Encoder` and `Decoder` use.
-pub const DefaultEngine = Scalar;
+/// The engine `Encoder` and `Decoder` use: `Simd` where the target has AVX2, else `Scalar`.
+pub const DefaultEngine = Simd;
 
 /// Size of a Galois field element in bits.
 pub const GF_BITS = 16;
@@ -123,6 +125,7 @@ fn expect_identity_transforms(comptime E: type) !void {
 test "transform empty shards and identity" {
     try expect_identity_transforms(Naive);
     try expect_identity_transforms(Scalar);
+    try expect_identity_transforms(Simd);
 }
 
 test "eval_poly matches across engines" {
@@ -148,4 +151,5 @@ test {
     _ = fwht;
     _ = shards;
     _ = @import("engine/scalar.zig");
+    _ = @import("engine/simd.zig");
 }

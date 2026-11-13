@@ -16,100 +16,176 @@ const GfElement = engine.GfElement;
 const Chunk = engine.Chunk;
 const half = engine.SHARD_CHUNK_BYTES / 2;
 
-/// Portable engine without SIMD that works on all CPUs.
-pub const Scalar = struct {
-    mul16: *const tables.Mul16,
-    skew: *const tables.Skew,
+/// The transforms of `Scalar` over a multiply kernel: `Kernel.mul_add(lut, x, y)` computes
+/// `x ^= y * m` for the nibble tables `lut` of `m`, and `Kernel.mul(lut, x)` computes `x *= m`.
+/// Every kernel must produce the same bytes.
+pub fn Engine(comptime Kernel: type) type {
+    return struct {
+        const Self = @This();
 
-    /// Creates a `Scalar` engine and initializes its multiplication and skew tables.
-    pub fn init() Scalar {
-        return .{ .mul16 = tables.get_mul16(), .skew = tables.get_skew() };
-    }
+        mul16: *const tables.Mul16,
+        skew: *const tables.Skew,
 
-    /// In-place decimation-in-time FFT of `data[pos..pos + size]` (see `engine.zig`).
-    pub fn fft(
-        scalar: Scalar,
-        data: ShardsRefMut,
-        pos: usize,
-        size: usize,
-        truncated_size: usize,
-        skew_delta: usize,
-    ) void {
-        engine.validate_transform(data, pos, size, truncated_size, skew_delta);
-        // Apply two butterfly layers per pass.
-        var dist4 = size;
-        var dist = size >> 2;
-        while (dist != 0) {
-            var r: usize = 0;
-            while (r < truncated_size) : (r += dist4) {
-                const base = r + dist + skew_delta - 1;
-                const log_m01 = scalar.skew[base];
-                const log_m02 = scalar.skew[base + dist];
-                const log_m23 = scalar.skew[base + dist * 2];
-                for (r..r + dist) |i| {
-                    scalar.fft_two_layers(data, pos + i, dist, log_m01, log_m23, log_m02);
+        /// Creates a `Scalar` engine and initializes its multiplication and skew tables.
+        pub fn init() Self {
+            return .{ .mul16 = tables.get_mul16(), .skew = tables.get_skew() };
+        }
+
+        /// In-place decimation-in-time FFT of `data[pos..pos + size]` (see `engine.zig`).
+        pub fn fft(
+            scalar: Self,
+            data: ShardsRefMut,
+            pos: usize,
+            size: usize,
+            truncated_size: usize,
+            skew_delta: usize,
+        ) void {
+            engine.validate_transform(data, pos, size, truncated_size, skew_delta);
+            // Apply two butterfly layers per pass.
+            var dist4 = size;
+            var dist = size >> 2;
+            while (dist != 0) {
+                var r: usize = 0;
+                while (r < truncated_size) : (r += dist4) {
+                    const base = r + dist + skew_delta - 1;
+                    const log_m01 = scalar.skew[base];
+                    const log_m02 = scalar.skew[base + dist];
+                    const log_m23 = scalar.skew[base + dist * 2];
+                    for (r..r + dist) |i| {
+                        scalar.fft_two_layers(data, pos + i, dist, log_m01, log_m23, log_m02);
+                    }
                 }
+                dist4 = dist;
+                dist >>= 2;
             }
-            dist4 = dist;
-            dist >>= 2;
-        }
 
-        // An odd log2(size) leaves one final layer.
-        if (dist4 == 2) {
-            var r: usize = 0;
-            while (r < truncated_size) : (r += 2) {
-                const log_m = scalar.skew[r + skew_delta];
-                const x, const y = data.dist2(pos + r, 1);
-                if (log_m == GF_MODULUS) utils.xor(y, x) else scalar.fft_partial(x, y, log_m);
-            }
-        }
-    }
-
-    /// In-place decimation-in-time IFFT of `data[pos..pos + size]` (see `engine.zig`).
-    pub fn ifft(
-        scalar: Scalar,
-        data: ShardsRefMut,
-        pos: usize,
-        size: usize,
-        truncated_size: usize,
-        skew_delta: usize,
-    ) void {
-        engine.validate_transform(data, pos, size, truncated_size, skew_delta);
-        // Apply two butterfly layers per pass.
-        var dist: usize = 1;
-        var dist4: usize = 4;
-        while (dist4 <= size) {
-            var r: usize = 0;
-            while (r < truncated_size) : (r += dist4) {
-                const base = r + dist + skew_delta - 1;
-                const log_m01 = scalar.skew[base];
-                const log_m02 = scalar.skew[base + dist];
-                const log_m23 = scalar.skew[base + dist * 2];
-                for (r..r + dist) |i| {
-                    scalar.ifft_two_layers(data, pos + i, dist, log_m01, log_m23, log_m02);
-                }
-            }
-            dist = dist4;
-            dist4 <<= 2;
-        }
-
-        // An odd log2(size) leaves one final layer.
-        if (dist < size) {
-            const log_m = scalar.skew[dist + skew_delta - 1];
-            if (log_m == GF_MODULUS) {
-                utils.xor_within(data, pos + dist, pos, dist);
-            } else {
-                for (0..dist) |i| {
-                    const x, const y = data.dist2(pos + i, dist);
-                    scalar.ifft_partial(x, y, log_m);
+            // An odd log2(size) leaves one final layer.
+            if (dist4 == 2) {
+                var r: usize = 0;
+                while (r < truncated_size) : (r += 2) {
+                    const log_m = scalar.skew[r + skew_delta];
+                    const x, const y = data.dist2(pos + r, 1);
+                    if (log_m == GF_MODULUS) utils.xor(y, x) else scalar.fft_partial(x, y, log_m);
                 }
             }
         }
-    }
 
-    /// Multiply every field element in `x` by the element with logarithm `log_m`.
-    pub fn mul(scalar: Scalar, x: []Chunk, log_m: GfElement) void {
-        const lut = &scalar.mul16[log_m];
+        /// In-place decimation-in-time IFFT of `data[pos..pos + size]` (see `engine.zig`).
+        pub fn ifft(
+            scalar: Self,
+            data: ShardsRefMut,
+            pos: usize,
+            size: usize,
+            truncated_size: usize,
+            skew_delta: usize,
+        ) void {
+            engine.validate_transform(data, pos, size, truncated_size, skew_delta);
+            // Apply two butterfly layers per pass.
+            var dist: usize = 1;
+            var dist4: usize = 4;
+            while (dist4 <= size) {
+                var r: usize = 0;
+                while (r < truncated_size) : (r += dist4) {
+                    const base = r + dist + skew_delta - 1;
+                    const log_m01 = scalar.skew[base];
+                    const log_m02 = scalar.skew[base + dist];
+                    const log_m23 = scalar.skew[base + dist * 2];
+                    for (r..r + dist) |i| {
+                        scalar.ifft_two_layers(data, pos + i, dist, log_m01, log_m23, log_m02);
+                    }
+                }
+                dist = dist4;
+                dist4 <<= 2;
+            }
+
+            // An odd log2(size) leaves one final layer.
+            if (dist < size) {
+                const log_m = scalar.skew[dist + skew_delta - 1];
+                if (log_m == GF_MODULUS) {
+                    utils.xor_within(data, pos + dist, pos, dist);
+                } else {
+                    for (0..dist) |i| {
+                        const x, const y = data.dist2(pos + i, dist);
+                        scalar.ifft_partial(x, y, log_m);
+                    }
+                }
+            }
+        }
+
+        /// Multiply every field element in `x` by the element with logarithm `log_m`.
+        pub fn mul(scalar: Self, x: []Chunk, log_m: GfElement) void {
+            Kernel.mul(&scalar.mul16[log_m], x);
+        }
+
+        /// `x ^= y * m` for each chunk, where `m` has logarithm `log_m`.
+        fn mul_add(scalar: Self, x: []Chunk, y: []const Chunk, log_m: GfElement) void {
+            assert(x.len == y.len);
+            Kernel.mul_add(&scalar.mul16[log_m], x, y);
+        }
+
+        /// Partial FFT butterfly; the caller handles a `GF_MODULUS` coefficient with `xor`.
+        inline fn fft_partial(scalar: Self, x: []Chunk, y: []Chunk, log_m: GfElement) void {
+            scalar.mul_add(x, y, log_m);
+            utils.xor(y, x);
+        }
+
+        /// Partial IFFT butterfly; the caller handles a `GF_MODULUS` coefficient with `xor`.
+        inline fn ifft_partial(scalar: Self, x: []Chunk, y: []Chunk, log_m: GfElement) void {
+            utils.xor(y, x);
+            scalar.mul_add(x, y, log_m);
+        }
+
+        /// FFT butterfly, or the XOR it reduces to when the coefficient is zero.
+        inline fn fft_butterfly(scalar: Self, x: []Chunk, y: []Chunk, log_m: GfElement) void {
+            if (log_m == GF_MODULUS) utils.xor(y, x) else scalar.fft_partial(x, y, log_m);
+        }
+
+        /// IFFT butterfly, or the XOR it reduces to when the coefficient is zero.
+        inline fn ifft_butterfly(scalar: Self, x: []Chunk, y: []Chunk, log_m: GfElement) void {
+            if (log_m == GF_MODULUS) utils.xor(y, x) else scalar.ifft_partial(x, y, log_m);
+        }
+
+        /// Two FFT layers on shards `pos + k * dist` for `k` in `0..4`.
+        inline fn fft_two_layers(
+            scalar: Self,
+            data: ShardsRefMut,
+            pos: usize,
+            dist: usize,
+            log_m01: GfElement,
+            log_m23: GfElement,
+            log_m02: GfElement,
+        ) void {
+            const s0, const s1, const s2, const s3 = data.dist4(pos, dist);
+            // First layer: (s0, s2) and (s1, s3). Second layer: (s0, s1) and (s2, s3).
+            scalar.fft_butterfly(s0, s2, log_m02);
+            scalar.fft_butterfly(s1, s3, log_m02);
+            scalar.fft_butterfly(s0, s1, log_m01);
+            scalar.fft_butterfly(s2, s3, log_m23);
+        }
+
+        /// Two IFFT layers on shards `pos + k * dist` for `k` in `0..4`.
+        inline fn ifft_two_layers(
+            scalar: Self,
+            data: ShardsRefMut,
+            pos: usize,
+            dist: usize,
+            log_m01: GfElement,
+            log_m23: GfElement,
+            log_m02: GfElement,
+        ) void {
+            const s0, const s1, const s2, const s3 = data.dist4(pos, dist);
+            // First layer: (s0, s1) and (s2, s3). Second layer: (s0, s2) and (s1, s3).
+            scalar.ifft_butterfly(s0, s1, log_m01);
+            scalar.ifft_butterfly(s2, s3, log_m23);
+            scalar.ifft_butterfly(s0, s2, log_m02);
+            scalar.ifft_butterfly(s1, s3, log_m02);
+        }
+    };
+}
+
+/// Multiplies one field element at a time with four nibble-table lookups.
+pub const ScalarKernel = struct {
+    pub fn mul(lut: *const [4][16]GfElement, x: []Chunk) void {
         for (x) |*chunk| {
             for (0..half) |i| {
                 const product = lookup(lut, chunk[i], chunk[i + half]);
@@ -119,10 +195,8 @@ pub const Scalar = struct {
         }
     }
 
-    /// `x ^= y * m` for each chunk, where `m` has logarithm `log_m`.
-    fn mul_add(scalar: Scalar, x: []Chunk, y: []const Chunk, log_m: GfElement) void {
+    pub fn mul_add(lut: *const [4][16]GfElement, x: []Chunk, y: []const Chunk) void {
         assert(x.len == y.len);
-        const lut = &scalar.mul16[log_m];
         for (x, y) |*x_chunk, *y_chunk| {
             for (0..half) |i| {
                 const product = lookup(lut, y_chunk[i], y_chunk[i + half]);
@@ -135,65 +209,10 @@ pub const Scalar = struct {
     inline fn lookup(lut: *const [4][16]GfElement, lo: u8, hi: u8) GfElement {
         return lut[0][lo & 15] ^ lut[1][lo >> 4] ^ lut[2][hi & 15] ^ lut[3][hi >> 4];
     }
-
-    /// Partial FFT butterfly; the caller handles a `GF_MODULUS` coefficient with `xor`.
-    inline fn fft_partial(scalar: Scalar, x: []Chunk, y: []Chunk, log_m: GfElement) void {
-        scalar.mul_add(x, y, log_m);
-        utils.xor(y, x);
-    }
-
-    /// Partial IFFT butterfly; the caller handles a `GF_MODULUS` coefficient with `xor`.
-    inline fn ifft_partial(scalar: Scalar, x: []Chunk, y: []Chunk, log_m: GfElement) void {
-        utils.xor(y, x);
-        scalar.mul_add(x, y, log_m);
-    }
-
-    /// FFT butterfly, or the XOR it reduces to when the coefficient is zero.
-    inline fn fft_butterfly(scalar: Scalar, x: []Chunk, y: []Chunk, log_m: GfElement) void {
-        if (log_m == GF_MODULUS) utils.xor(y, x) else scalar.fft_partial(x, y, log_m);
-    }
-
-    /// IFFT butterfly, or the XOR it reduces to when the coefficient is zero.
-    inline fn ifft_butterfly(scalar: Scalar, x: []Chunk, y: []Chunk, log_m: GfElement) void {
-        if (log_m == GF_MODULUS) utils.xor(y, x) else scalar.ifft_partial(x, y, log_m);
-    }
-
-    /// Two FFT layers on shards `pos + k * dist` for `k` in `0..4`.
-    inline fn fft_two_layers(
-        scalar: Scalar,
-        data: ShardsRefMut,
-        pos: usize,
-        dist: usize,
-        log_m01: GfElement,
-        log_m23: GfElement,
-        log_m02: GfElement,
-    ) void {
-        const s0, const s1, const s2, const s3 = data.dist4(pos, dist);
-        // First layer: (s0, s2) and (s1, s3). Second layer: (s0, s1) and (s2, s3).
-        scalar.fft_butterfly(s0, s2, log_m02);
-        scalar.fft_butterfly(s1, s3, log_m02);
-        scalar.fft_butterfly(s0, s1, log_m01);
-        scalar.fft_butterfly(s2, s3, log_m23);
-    }
-
-    /// Two IFFT layers on shards `pos + k * dist` for `k` in `0..4`.
-    inline fn ifft_two_layers(
-        scalar: Scalar,
-        data: ShardsRefMut,
-        pos: usize,
-        dist: usize,
-        log_m01: GfElement,
-        log_m23: GfElement,
-        log_m02: GfElement,
-    ) void {
-        const s0, const s1, const s2, const s3 = data.dist4(pos, dist);
-        // First layer: (s0, s1) and (s2, s3). Second layer: (s0, s2) and (s1, s3).
-        scalar.ifft_butterfly(s0, s1, log_m01);
-        scalar.ifft_butterfly(s2, s3, log_m23);
-        scalar.ifft_butterfly(s0, s2, log_m02);
-        scalar.ifft_butterfly(s1, s3, log_m02);
-    }
 };
+
+/// Portable engine without SIMD that works on all CPUs.
+pub const Scalar = Engine(ScalarKernel);
 
 test "scalar mul matches naive" {
     const ChaCha8Rng = @import("../test_util.zig").ChaCha8Rng;

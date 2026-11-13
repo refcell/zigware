@@ -123,7 +123,7 @@ fn roundtrip_single(comptime R: type, comptime E: type, cfg: Roundtrip) !void {
     try roundtrip(R, &encoder, &decoder, cfg);
 }
 
-/// `roundtrip_single` with the `Naive` and `Scalar` engines (`DefaultEngine` is `Scalar`).
+/// `roundtrip_single` with the `Naive` and `Scalar` engines (`Simd` is the default with AVX2).
 fn roundtrip_engines(comptime Rate: fn (type) type, cfg: Roundtrip) !void {
     try roundtrip_single(Rate(Naive), Naive, cfg);
     try roundtrip_single(Rate(Scalar), Scalar, cfg);
@@ -142,7 +142,7 @@ fn roundtrip_two_rounds(
     a: Roundtrip,
     b: Roundtrip,
 ) !void {
-    inline for (.{ Naive, Scalar }) |E| {
+    inline for (.{ Naive, Scalar, engine.Simd }) |E| {
         const R = Rate(E);
         var encoder = try R.Encoder.init(
             gpa,
