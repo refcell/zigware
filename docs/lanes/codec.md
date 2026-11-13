@@ -176,6 +176,12 @@ floats, arrays, optionals, structs/tuples, enums (`derive` scaling), or `T.arbit
   `decode_fixed`, `decode` cover the derive), Viewing cursor tests on `Reader` + `Bytes`.
   Chained-buffer and `should_panic` tests have no Zig counterpart (contiguous readers;
   programmer errors are assertions).
+- [ ] benches: port formatting (encode/decode/display) and codec (lazy, utils fixtures)
+  criterion benches once the parallel lane lands `zig build bench`.
+
+Not ported by design: conformance/macros `fixtures` (a nextest-inventory CI tool for stale
+TOML entries; here a missing entry fails `verify` and prints the line to add), and the
+`conformance_tests!` macro (call `conformance.verify` in a test instead).
 
 ## Log
 - 2026-11-13: formatting (hex, from_hex, Hex, hex_literal) and codec core (Reader/Writer,
