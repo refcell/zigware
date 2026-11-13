@@ -13,16 +13,23 @@ time, files, and network: build on it rather than around it where it fits.
   clock (current, sleep, sleep_until, timeouts), RNG, network (`Listener`, `Sink`, `Stream`),
   storage (`Blob` with read_at/write_at/resize/sync, partitions open/remove/scan), metrics
   registry, `Signal`/stop. Mirror lib.rs traits.
-- [ ] deterministic runtime: seeded single-threaded executor, simulated time that jumps to
-  the next timer, `auditor` (hash of all events, compare runs), checkpoint/restart
-  (`recover`), deterministic network and in-memory storage with fault injection (faulty.rs).
-  Port deterministic.rs tests.
+- [x] deterministic runtime executor: seeded single-threaded executor on fibers, simulated
+  time that jumps to the next timer, `auditor`, restart by calling `start` again.
+- [x] storage interface (`storage.zig`: `Storage`, `Blob`, layouts, versions, options).
+- [x] storage header (`storage/header.zig`), conformance hashes V0Blob, V1Blob, Header.
+- [x] in-memory storage (`storage/memory.zig`), storage suite (`storage/tests.zig`), audit
+  digests checked against commonware.
+- [ ] wire storage into `deterministic.Runner` (`storage()`, `storage_audit()`, crash on
+  restart) and faulty.rs fault injection; audited and metered wrappers.
+- [ ] deterministic network (`Listener`, `Sink`, `Stream` matching `src/stream/mocks.zig`),
+  port network/deterministic.rs tests.
+- [ ] Port remaining deterministic.rs tests.
 - [ ] iobuf (IoBuf/IoBufs pooled buffers) and utils (buffer pools, handle, signal,
   supervision).
-- [ ] storage: header.rs blob header format byte-identical, audited, metered, memory.
 - [ ] production runtime over `std.Io` (io_uring on Linux, kqueue on macOS): network and
   storage. Linux tests via `just test-linux`.
-- [ ] telemetry: metrics registry (counters, gauges, histograms) with text exposition.
+- Telemetry (`src/runtime/telemetry/`, metrics registry and traces) moved to the
+  runtime-telemetry lane. `src/runtime/buffer/` belongs to storage-journal.
 
 ## Decisions
 - The deterministic executor implements `std.Io` (`deterministic.Runner.io()`): tasks
@@ -40,6 +47,19 @@ time, files, and network: build on it rather than around it where it fits.
   comparable between zigware runs. Storage audits (contents only) will match commonware.
 - One `Runner` can `start` several roots in sequence; time, RNG, auditor (and later storage)
   carry over. This replaces commonware's `Checkpoint`/`recover`.
+- Fibers switch through an out-of-line naked function (`fiber.switch_naked`) that saves
+  every callee-saved register and the FP control state; `std.Io.fiber.contextSwitch` was
+  dropped because LLVM miscompiled its inline asm in optimized builds on aarch64 and x86_64.
+- `Storage` and `Blob` are vtable values like `std.Io`. Zig errors carry no payload, so
+  storage errors keep commonware's variant names without partition/name details.
+  `Blob.read_at` fills a caller buffer (commonware's `read_at_buf`); `read_many` and
+  `start_sync` are not ported (callers loop, and `sync` is synchronous in zigware).
+  `Blob.close` replaces drop: handles must be closed, and closing does not sync.
+- The memory backend guards its state with one spin lock that never blocks inside, so it
+  is safe across threads and never yields a fiber while held.
 
 ## Log
 - 2026-11-13: fibers, rand-compatible shuffle, deterministic executor implementing `std.Io`.
+- 2026-11-13: naked-function fiber switch (fixes ReleaseSafe crashes on x86_64 and aarch64).
+- 2026-11-13: storage interface, blob header with conformance hashes, memory backend and
+  the storage suite.
