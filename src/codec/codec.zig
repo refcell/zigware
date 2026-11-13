@@ -428,8 +428,16 @@ pub fn read_range(
 fn range_cfg(comptime T: type, range: RangeCfg(usize)) Cfg(T) {
     const C = Cfg(T);
     if (C == RangeCfg(usize)) return range;
-    if (@hasField(C, "range") and @hasField(C, "item")) {
-        return .{ .range = range, .item = unit_cfg(@FieldType(C, "item")) };
+    if (@typeInfo(C) == .@"struct" and @hasField(C, "range")) {
+        // Slices, sets, and maps: the range plus unit configs for their items.
+        const info = @typeInfo(C).@"struct";
+        var result: C = undefined;
+        result.range = range;
+        inline for (info.field_names, info.field_types) |name, field_type| {
+            if (comptime std.mem.eql(u8, name, "range")) continue;
+            @field(result, name) = unit_cfg(field_type);
+        }
+        return result;
     }
     @compileError("codec: config is not a range config: " ++ @typeName(C));
 }
@@ -478,6 +486,50 @@ pub fn decode_range(
 pub fn decode_fixed(comptime T: type, bytes: *const [fixed_size(T).?]u8) Error!T {
     comptime assert(!owns_memory(T));
     return decode_cfg(T, Allocator.failing, bytes, unit_cfg(Cfg(T)));
+}
+
+/// Orders two values the way commonware's `Ord` does (the order maps and sets encode in):
+/// integers and bools by value, arrays/slices/tuples lexicographically, null before any value,
+/// tag enums by tag, pointers by pointee, custom types by their `order(a, b)` declaration.
+pub fn order(comptime T: type, a: T, b: T) std.math.Order {
+    switch (comptime kind(T)) {
+        .bool => return std.math.order(@intFromBool(a), @intFromBool(b)),
+        .int, .usize => return std.math.order(a, b),
+        .float => @compileError("codec: floats have no total order (Rust f32/f64 are not Ord)"),
+        .tag => return std.math.order(@backingInt(a), @backingInt(b)),
+        .optional => {
+            const left = a orelse return if (b == null) .eq else .lt;
+            const right = b orelse return .gt;
+            return order(@TypeOf(left), left, right);
+        },
+        .array => return order_items(@typeInfo(T).array.child, &a, &b),
+        .slice => return order_items(@typeInfo(T).pointer.child, a, b),
+        .pointer => return order(@typeInfo(T).pointer.child, a.*, b.*),
+        .tuple => {
+            inline for (@typeInfo(T).@"struct".field_types, 0..) |field_type, index| {
+                const field_order = order(field_type, a[index], b[index]);
+                if (field_order != .eq) return field_order;
+            }
+            return .eq;
+        },
+        .custom => {
+            if (!@hasDecl(T, "order")) {
+                @compileError("codec: " ++ @typeName(T) ++ " has no `order`");
+            }
+            return T.order(a, b);
+        },
+    }
+}
+
+/// Lexicographic order of two item sequences, then shorter first.
+pub fn order_items(comptime T: type, a: []const T, b: []const T) std.math.Order {
+    if (T == u8) return std.mem.order(u8, a, b);
+    const common = @min(a.len, b.len);
+    for (a[0..common], b[0..common]) |left, right| {
+        const item_order = order(T, left, right);
+        if (item_order != .eq) return item_order;
+    }
+    return std.math.order(a.len, b.len);
 }
 
 /// Writes `value` into the front of `out` and returns the written bytes. `out` must hold

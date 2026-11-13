@@ -205,6 +205,10 @@ pub fn UInt(comptime T: type) type {
             return size(T, self.value);
         }
 
+        pub fn order(a: Self, b: Self) std.math.Order {
+            return std.math.order(a.value, b.value);
+        }
+
         pub fn read(_: Allocator, reader: *Reader, _: void) Error!Self {
             return .{ .value = try read_unsigned(T, reader) };
         }
@@ -226,6 +230,10 @@ pub fn SInt(comptime S: type) type {
 
         pub fn encode_size(self: Self) usize {
             return size_signed(S, self.value);
+        }
+
+        pub fn order(a: Self, b: Self) std.math.Order {
+            return std.math.order(a.value, b.value);
         }
 
         pub fn read(_: Allocator, reader: *Reader, _: void) Error!Self {

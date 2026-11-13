@@ -35,6 +35,10 @@ pub const Bytes = struct {
         return codec.encode_size(usize, self.data.len) + self.data.len;
     }
 
+    pub fn order(a: Bytes, b: Bytes) std.math.Order {
+        return std.mem.order(u8, a.data, b.data);
+    }
+
     pub fn read(_: Allocator, reader: *Reader, range: Cfg) Error!Bytes {
         const len = try codec.read_usize(reader, range);
         const data = try reader.take(len);

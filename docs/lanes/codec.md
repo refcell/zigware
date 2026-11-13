@@ -34,6 +34,8 @@ Every value goes through comptime dispatch on its type (`src/codec/codec.zig` ha
 | tuple `struct { A, B }` | `(A, B)` | fields in order; cfg is the tuple of cfgs |
 | `enum(u8)` without methods | tag enums | tag; unknown tag is `InvalidEnum` |
 | `codec.UInt(T)`, `codec.SInt(S)` | `UInt`, `SInt` | varint / ZigZag varint, any width |
+| `codec.Map(K, V)`, `codec.HashMap(K, V)` | `BTreeMap`, `HashMap` | usize count + key/value pairs, keys strictly ascending |
+| `codec.Set(K)`, `codec.HashSet(K)` | `BTreeSet`, `HashSet` | usize count + items strictly ascending |
 
 Operations (`T` is always the first, comptime argument):
 
@@ -81,6 +83,12 @@ pub fn deinit(self: *Self, gpa: Allocator) void   // optional: frees what read a
 
 Use `reader.invalid("Type", "message")` for `Error::Invalid(ctx, msg)`.
 
+Maps and sets wrap a sorted slice: `M.sort(entries)` then `M.init(entries)` (asserts strictly
+ascending keys), `.get(key)` / `.contains(item)` by binary search. Map cfg is
+`.{ .range, .key, .value }` (void parts default), set cfg is `.{ .range, .item }`.
+Decoded maps/sets own their slice: free with `codec.free(M, gpa, m)` or `m.deinit(gpa)`.
+`codec.order(T, a, b)` is Rust's `Ord` (custom types declare `order(a, b) std.math.Order`).
+
 ## Decisions
 
 - Zig errors carry no payload; payloads live in `Reader.diagnostic`.
@@ -89,6 +97,8 @@ Use `reader.invalid("Type", "message")` for `Error::Invalid(ctx, msg)`.
 - Decoding takes an explicit allocator; non-allocating types ignore it. `read_fixed` and
   `decode_fixed` use `Allocator.failing`.
 - `write_bufs`/`BufsMut` (vectored writes) are not ported yet; writes go to one buffer.
+- One map and one set implementation serve both BTree and Hash flavors (same wire format);
+  the flavor only picks the `Invalid` error context ("BTreeMap" vs "HashMap").
 - `**` array repetition is gone in Zig 0.17.1: use `@splat`.
 - Variable-size slice decoding reserves `min(len, remaining)` items up front like commonware;
   fixed-size elements check `len * size` bytes remain before allocating.
@@ -107,15 +117,16 @@ Use `reader.invalid("Type", "message")` for `Error::Invalid(ctx, msg)`.
 - [x] codec fuzz: `codec/fuzz.zig` seeded driver (Smith over a seeded PRNG, `fuzz_soak`,
   `fuzz_seed`, then `std.testing.fuzz`); targets port codec_roundtrip.rs plus a
   decode-canonical target (any successful decode re-encodes to the exact input).
-- [ ] codec types: maps/sets (sorted, canonical, reject duplicates/unsorted), net addrs, lazy,
-  mode (`Mode`/`Modes`), `U256`/uint.rs. Port every test in codec/src/types.
+- [x] codec types: maps/sets (sorted, canonical, reject duplicates/unsorted), with tests.
+- [ ] codec types: net addrs, lazy, mode (`Mode`/`Modes`), `U256`/uint.rs (Zig `u256`).
 - [ ] conformance: hash-of-encodings harness (conformance/src/lib.rs), TOML reader, codec's
   conformance.rs (ChaCha8 + `arbitrary` emulation) so codec/conformance.toml hashes match.
 - [ ] invariants: minifuzz (deterministic seeded fuzz driver over `std.testing.Smith`;
   `build_options.fuzz_seed`/`fuzz_soak`).
-- [ ] extend the codec fuzz targets as maps/sets/net/lazy/mode land.
+- [ ] extend the codec fuzz targets as net/lazy/mode land (maps/sets done).
 
 ## Log
 - 2026-11-13: formatting (hex, from_hex, Hex, hex_literal) and codec core (Reader/Writer,
   Error, RangeCfg, varint, primitives, arrays, optional, vec, tuple, Bytes, pointer) landed.
 - 2026-11-13: remaining varint tests; codec seeded fuzz driver and roundtrip/canonical targets.
+- 2026-11-13: canonical Map/HashMap/Set/HashSet and `codec.order`, with tests and fuzz.

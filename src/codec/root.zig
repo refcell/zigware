@@ -34,6 +34,14 @@ pub const RangeCfg = config.RangeCfg;
 pub const UInt = varint.UInt;
 pub const SInt = varint.SInt;
 pub const Bytes = @import("types/bytes.zig").Bytes;
+const map = @import("types/map.zig");
+pub const Map = map.Map;
+pub const HashMap = map.HashMap;
+pub const Set = map.Set;
+pub const HashSet = map.HashSet;
+pub const OrderedMap = map.OrderedMap;
+pub const OrderedSet = map.OrderedSet;
+pub const MapCfg = map.MapCfg;
 
 pub const Cfg = codec_mod.Cfg;
 pub const SliceCfg = codec_mod.SliceCfg;
@@ -61,6 +69,8 @@ pub const encode_to = codec_mod.encode_to;
 pub const encode_fixed = codec_mod.encode_fixed;
 pub const free = codec_mod.free;
 pub const free_items = codec_mod.free_items;
+pub const order = codec_mod.order;
+pub const order_items = codec_mod.order_items;
 
 test {
     std.testing.refAllDecls(@This());
@@ -73,6 +83,7 @@ test {
     _ = @import("types/primitives.zig");
     _ = @import("types/vec.zig");
     _ = @import("types/tuple.zig");
+    _ = @import("types/map_test.zig");
     _ = @import("codec_test.zig");
     _ = @import("fuzz_test.zig");
 }

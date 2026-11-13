@@ -13,6 +13,7 @@ const varint = @import("varint.zig");
 const Bytes = @import("types/bytes.zig").Bytes;
 const fuzz = @import("fuzz.zig");
 const RangeCfg = @import("config.zig").RangeCfg;
+const map = @import("types/map.zig");
 
 const gpa = testing.allocator;
 
@@ -70,6 +71,53 @@ fn expect_varint_overflow_never_panics(smith: *Smith) !void {
     }
 }
 
+/// Builds a map from fuzz input: sorted, with duplicate keys dropped.
+fn roundtrip_map(comptime M: type, smith: *Smith) !void {
+    const K = @FieldType(M.Entry, "key");
+    const V = @FieldType(M.Entry, "value");
+    var entries: [64]M.Entry = undefined;
+    var len: usize = 0;
+    while (len < entries.len and !smith.eos()) : (len += 1) {
+        entries[len] = .{ .key = smith.value(K), .value = smith.value(V) };
+    }
+    M.sort(entries[0..len]);
+    var unique: usize = 0;
+    for (entries[0..len]) |entry| {
+        if (unique > 0 and entries[unique - 1].key == entry.key) continue;
+        entries[unique] = entry;
+        unique += 1;
+    }
+    const value = M.init(entries[0..unique]);
+    const encoded = try codec.encode(M, gpa, value);
+    defer gpa.free(encoded);
+    try testing.expectEqual(codec.encode_size(M, value), encoded.len);
+    var decoded = try codec.decode_cfg(M, gpa, encoded, .{ .range = .exact(unique) });
+    defer decoded.deinit(gpa);
+    try testing.expectEqualSlices(M.Entry, value.entries, decoded.entries);
+}
+
+/// Builds a set from fuzz input: sorted, with duplicates dropped.
+fn roundtrip_set(comptime S: type, smith: *Smith) !void {
+    const K = @typeInfo(@FieldType(S, "items")).pointer.child;
+    var items: [64]K = undefined;
+    var len: usize = 0;
+    while (len < items.len and !smith.eos()) : (len += 1) items[len] = smith.value(K);
+    S.sort(items[0..len]);
+    var unique: usize = 0;
+    for (items[0..len]) |item| {
+        if (unique > 0 and items[unique - 1] == item) continue;
+        items[unique] = item;
+        unique += 1;
+    }
+    const value = S.init(items[0..unique]);
+    const encoded = try codec.encode(S, gpa, value);
+    defer gpa.free(encoded);
+    try testing.expectEqual(codec.encode_size(S, value), encoded.len);
+    var decoded = try codec.decode_cfg(S, gpa, encoded, .{ .range = .exact(unique) });
+    defer decoded.deinit(gpa);
+    try testing.expectEqualSlices(K, value.items, decoded.items);
+}
+
 fn roundtrip_scalars(smith: *Smith, choice: u8) !void {
     switch (choice) {
         0 => try expect_roundtrip(bool, smith.value(bool)),
@@ -117,12 +165,16 @@ fn roundtrip_composites(smith: *Smith, choice: u8) !void {
             .{ smith.value(u32), smith.value(u64), smith.value(u128) },
         ),
         10 => try expect_varint_overflow_never_panics(smith),
+        11 => try roundtrip_map(map.HashMap(u64, u64), smith),
+        12 => try roundtrip_map(map.Map(u32, u32), smith),
+        13 => try roundtrip_set(map.HashSet(u64), smith),
+        14 => try roundtrip_set(map.Set(u32), smith),
         else => unreachable,
     }
 }
 
 const scalar_count = 24;
-const composite_count = 11;
+const composite_count = 15;
 
 fn roundtrip(_: void, smith: *Smith) anyerror!void {
     const choice = smith.value(u8) % (scalar_count + composite_count);
@@ -157,6 +209,9 @@ fn decode_canonical(_: void, smith: *Smith) anyerror!void {
     const Nested = []const []const u8;
     try expect_canonical(Nested, input, .{ .range = .full(), .item = .{ .range = .full() } });
     try expect_canonical(struct { u8, ?u16, usize }, input, .{ {}, {}, .full() });
+    try expect_canonical(map.Map(u8, u16), input, .{ .range = .full() });
+    try expect_canonical(map.Set(u16), input, .{ .range = .full() });
+    try expect_canonical(map.HashSet(Bytes), input, .{ .range = .full(), .item = .full() });
     inline for (.{ u0, u4, u8, u14, u16, u32, u36, u64, u128, u256 }) |T| {
         try expect_canonical(varint.UInt(T), input, {});
     }
