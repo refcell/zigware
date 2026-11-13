@@ -26,6 +26,8 @@ const actor = @import("actor");
 pub const subscribers = @import("subscribers.zig");
 pub const ingress = @import("ingress.zig");
 pub const delivery = @import("delivery.zig");
+/// The opaque-fetcher resolver (commonware `opaque`, a Zig keyword).
+pub const @"opaque" = @import("opaque.zig");
 pub const p2p = @import("p2p/mod.zig");
 
 pub const Feedback = actor.Feedback;
@@ -99,6 +101,15 @@ pub fn Delivery(comptime K: type, comptime S: type) type {
             }
             return std.math.order(a.subscribers.len, b.subscribers.len);
         }
+    };
+}
+
+/// A fetch with target peer hints (`TargetedResolver.fetch_all_targeted` items).
+pub fn Targeted(comptime K: type, comptime S: type, comptime P: type) type {
+    return struct {
+        fetch: Fetch(K, S),
+        /// Never empty.
+        targets: []const P,
     };
 }
 

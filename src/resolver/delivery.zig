@@ -28,6 +28,14 @@ const resolver = @import("root.zig");
 const oneshot = utils.channel.oneshot;
 const Outcome = resolver.Outcome;
 
+/// A wake-up shared by every event source of one actor: the delivery tracker broadcasts it
+/// when a verdict arrives, and actors with other sources (fetch tasks, a mailbox forwarder)
+/// broadcast the same condition, so one wait covers them all.
+pub const Signal = struct {
+    mutex: Io.Mutex = .init,
+    condition: Io.Condition = .init,
+};
+
 /// `next_completion` failed: a canceled delivery closed without a verdict (commonware
 /// `Aborted`), or the wait was canceled.
 pub const NextError = error{Aborted} || Io.Cancelable;
@@ -89,8 +97,9 @@ pub fn Tracker(comptime C: type, comptime Context: type, comptime State: type) t
         };
 
         const Shared = struct {
-            mutex: Io.Mutex = .init,
-            condition: Io.Condition = .init,
+            /// `own_signal`, or the actor's signal given to `init_with_signal`.
+            signal: *Signal,
+            own_signal: Signal = .{},
             /// Slots whose verdict wait finished, oldest first. Capacity is reserved for
             /// every live slot, so tasks never allocate.
             done: std.ArrayList(*Slot) = .empty,
@@ -121,9 +130,26 @@ pub fn Tracker(comptime C: type, comptime Context: type, comptime State: type) t
 
         /// An empty tracker backed by `consumer`.
         pub fn init(gpa: Allocator, io: Io, consumer: C) Allocator.Error!Self {
+            return init_with_signal(gpa, io, consumer, null);
+        }
+
+        /// A tracker that guards its completions with `signal` (which must outlive it) and
+        /// broadcasts it on every verdict; null uses a signal of its own.
+        pub fn init_with_signal(
+            gpa: Allocator,
+            io: Io,
+            consumer: C,
+            signal: ?*Signal,
+        ) Allocator.Error!Self {
             const shared = try gpa.create(Shared);
-            shared.* = .{};
+            shared.* = .{ .signal = undefined };
+            shared.signal = signal orelse &shared.own_signal;
             return .{ .gpa = gpa, .io = io, .consumer = consumer, .shared = shared };
+        }
+
+        /// Whether a completion is queued. The caller holds the signal's mutex.
+        pub fn has_completion_locked(self: *const Self) bool {
+            return self.shared.done.items.len > 0;
         }
 
         /// Cancels every pending verdict wait and frees everything.
@@ -275,10 +301,11 @@ pub fn Tracker(comptime C: type, comptime Context: type, comptime State: type) t
         pub fn next_completion(self: *Self) NextError!Done {
             self.close_canceled();
             const slot = blk: {
-                self.shared.mutex.lockUncancelable(self.io);
-                defer self.shared.mutex.unlock(self.io);
+                self.shared.signal.mutex.lockUncancelable(self.io);
+                defer self.shared.signal.mutex.unlock(self.io);
                 while (self.shared.done.items.len == 0) {
-                    try self.shared.condition.wait(self.io, &self.shared.mutex);
+                    const signal = self.shared.signal;
+                    try signal.condition.wait(self.io, &signal.mutex);
                 }
                 break :blk self.shared.done.orderedRemove(0);
             };
@@ -289,8 +316,8 @@ pub fn Tracker(comptime C: type, comptime Context: type, comptime State: type) t
         pub fn try_next_completion(self: *Self) error{Aborted}!?Done {
             self.close_canceled();
             const slot = blk: {
-                self.shared.mutex.lockUncancelable(self.io);
-                defer self.shared.mutex.unlock(self.io);
+                self.shared.signal.mutex.lockUncancelable(self.io);
+                defer self.shared.signal.mutex.unlock(self.io);
                 if (self.shared.done.items.len == 0) return null;
                 break :blk self.shared.done.orderedRemove(0);
             };
@@ -313,8 +340,8 @@ pub fn Tracker(comptime C: type, comptime Context: type, comptime State: type) t
             errdefer self.gpa.destroy(slot);
             try self.live.ensureUnusedCapacity(self.gpa, 1);
             {
-                self.shared.mutex.lockUncancelable(self.io);
-                defer self.shared.mutex.unlock(self.io);
+                self.shared.signal.mutex.lockUncancelable(self.io);
+                defer self.shared.signal.mutex.unlock(self.io);
                 const needed = self.live.items.len + 1;
                 try self.shared.done.ensureTotalCapacity(self.gpa, needed);
             }
@@ -346,12 +373,12 @@ pub fn Tracker(comptime C: type, comptime Context: type, comptime State: type) t
                 // Shutdown: the owner frees the slot.
                 error.Canceled => return,
             };
-            shared.mutex.lockUncancelable(io);
-            defer shared.mutex.unlock(io);
+            shared.signal.mutex.lockUncancelable(io);
+            defer shared.signal.mutex.unlock(io);
             slot.outcome = outcome;
             assert(shared.done.items.len < shared.done.capacity);
             shared.done.appendAssumeCapacity(slot);
-            shared.condition.signal(io);
+            shared.signal.condition.broadcast(io);
         }
 
         fn finish(self: *Self, slot: *Slot) error{Aborted}!Done {
@@ -384,8 +411,9 @@ pub fn Tracker(comptime C: type, comptime Context: type, comptime State: type) t
         }
 
         /// Close the receivers of canceled deliveries so their waits end; a verdict already
-        /// sent stays readable.
-        fn close_canceled(self: *Self) void {
+        /// sent stays readable. `next_completion` does this first; actors that wait on a shared
+        /// signal call it before each wait.
+        pub fn close_canceled(self: *Self) void {
             for (self.live.items) |slot| {
                 if (!slot.canceled or slot.closed) continue;
                 slot.receiver.close();

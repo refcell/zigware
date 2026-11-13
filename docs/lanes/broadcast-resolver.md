@@ -33,6 +33,16 @@ on p2p's simulated network and the deterministic runtime.
 - Consumer contract: `C.Key`, `C.Value`, `C.Subscriber`, `C.Outcome` (`bool` or `Outcome`),
   `deliver(self, Delivery, value) !utils.channel.oneshot.Receiver(C.Outcome)`, optional
   `deinit_value(gpa, value)`.
+- `resolver.@"opaque"` (commonware `opaque`; `opaque` is a Zig keyword): `Actor(F, C)` with
+  `spawn(P, gpa, io, scope, fetcher, consumer, config)` returning `.{ resolver, future, actor }`
+  (stop: `resolver.deinit()`, then `future.await(io)`), `create`/`run`/`destroy` for driving
+  it by hand, `fetch_count(status)`; `Resolver(K, S, P)` handle (`fetch`, `fetch_all`,
+  `retain`, `fetch_targeted`, `fetch_all_targeted`, `clone`, `deinit`); `Config`
+  (`mailbox_size`, `fetch_retry_delay_ns`); `Status`. Fetcher contract:
+  `fetch(self, io, key) Io.Cancelable!?Value`. Metrics: `<scope>_actor_fetch_total{status}`.
+- `resolver.Targeted(K, S, P)` (`fetch`, `targets`); `resolver.delivery.Signal` and
+  `Tracker.init_with_signal`, `has_completion_locked`, `close_canceled` for actors that wait
+  on one signal.
 - `resolver.p2p.score.Score` (`record(elapsed: utils.Duration, bytes: u64)`, `weight() u64`).
 - `resolver.p2p.mocks.Key` (one-byte test key), `resolver.p2p.mocks.Consumer(K, S)` (byte
   values, expected values, `next_event`/`try_event`).
@@ -63,10 +73,17 @@ on p2p's simulated network and the deterministic runtime.
   assertion here.
 - `utils.channel.oneshot.Receiver.recv` returns `error.Closed` once the receiver is closed
   without a value (tokio behavior; the delivery tracker relies on it).
+- Actors wait on one `delivery.Signal` instead of `select_loop!`: fetch and verdict tasks
+  queue results and broadcast it, a forwarder task moves mailbox messages into a one-message
+  inbox (keeping mailbox backpressure), and retry deadlines bound the wait. Each turn handles
+  one event in commonware's arm order. Fetch aborts are `std.Io` cancelations.
+- Metrics go to `runtime.telemetry.metrics` through a `Scope` the caller passes (it stands in
+  for commonware's context). The status label enum lives in the resolver until runtime ports
+  `status::Status`; it prints commonware's variant names.
 - Seeded fuzz uses `p2p.fuzz.run` (the same driver as codec's).
 
 ## Backlog
-- [ ] resolver: lib.rs, subscribers, ingress, delivery (done); opaque.rs.
+- [x] resolver: lib.rs, subscribers, ingress, delivery, opaque (with metrics).
 - [ ] resolver p2p: wire.rs (done, conformance hashes match), score (done), fetcher, inflight,
   config, engine, ingress, mocks; port mod.rs tests on p2p simulated.
 - [ ] broadcast: lib.rs and buffered (engine, ingress, config, mocks) with its tests.
@@ -81,3 +98,4 @@ on p2p's simulated network and the deterministic runtime.
 
 - 2026-11-13: resolver delivery tracker and mock consumer; oneshot recv wakes on close.
 - 2026-11-13: resolver p2p score (throughput weights, commonware test values).
+- 2026-11-13: resolver opaque actor (all 13 commonware tests) with the fetch metrics family.
