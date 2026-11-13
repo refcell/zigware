@@ -35,8 +35,8 @@ const SignedDealerLog = messages.SignedDealerLog;
 const Output = messages.Output;
 
 const namespace_dkg = "_COMMONWARE_CRYPTOGRAPHY_BLS12381_DKG";
-const sig_ack = "ack";
-const sig_log = "log";
+pub const sig_ack = "ack";
+pub const sig_log = "log";
 pub const noise_pre_verify = "pre_verify";
 /// Feldman's packets have canonical encodings at fixed positions, so it uses V0.
 pub const transcript_version: transcript_mod.Version = .v0;

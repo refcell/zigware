@@ -25,8 +25,10 @@ variants (MinPk, MinSig) must match exactly.
 - [x] bls12381 tle (timelock encryption) with commonware ciphertext vectors.
 - [x] bls12381 certificate schemes (multisig, threshold) on `cryptography.certificate`, with
   their `Certificate<MinSig>` conformance hashes and mocks fixtures.
-- [ ] bls12381 dkg (the rest of feldman_desmedt: dealers, players, reshare, golden and
-  FeldmanTranscript conformance) and scheme.rs.
+- [x] bls12381 dkg feldman_desmedt: Info, Dealer, Player, Logs, observe, deal, reshare,
+  the test plan and its tests, and the message and FeldmanTranscript conformance hashes.
+- [ ] bls12381 scheme.rs (PrivateKey, PublicKey, Signature) with its conformance hashes.
+- [ ] bls12381 dkg golden (commonware `dkg::golden`) with its tests and conformance hashes.
 - [ ] Fuzz targets (commonware math/fuzz, simd/fuzz, bls parts of cryptography/fuzz).
 
 ## Decisions
@@ -60,6 +62,17 @@ variants (MinPk, MinSig) must match exactly.
   verifier on a vote, mismatched sharing) still panic but are not ported: Zig cannot catch a
   panic.
 
+- feldman_desmedt: `Dealer`, `Player`, and `Logs` borrow their `Info` (commonware moves a
+  clone into each), so the `Info` must outlive them. `Logs.select` returns a `Selection` of
+  log pointers borrowed from the `Logs`; `select`, `observe`, and `Player.finalize` take
+  `*Logs` and update its check cache where commonware consumes a clone. Errors carry no
+  data: `Failure::InsufficientLogs` is `error.InsufficientLogs` plus an optional `*Failure`
+  out-parameter (faults as a sorted slice, since `FaultReason` has no wire format), and
+  `DealerMessageError::InvalidCommitmentDegree` drops its expected/actual degrees (the
+  signed-log `FaultReason` keeps them). `Player.resume_from` takes the logs as a slice of
+  `{ dealer, log }` pairs. The test plan's 3+ round cases run only in release builds or with
+  `-Dslow-tests`.
+
 - simd: one `@Vector` implementation per profile (scalar 64-bit, x86_v3 256, x86_v4c 512,
   neon/arm_v9 128) stands in for both commonware's emulated and native tokens; `dispatch`
   picks the compile target's best profile at comptime. Profile-only instructions are `void`
@@ -76,3 +89,6 @@ variants (MinPk, MinSig) must match exactly.
 - 2026-11-13: bls12381 tle and the bls12381 codec conformance hashes (11 entries).
 
 - 2026-11-13: bls12381 multisig and threshold certificate schemes with conformance hashes.
+- 2026-11-13: feldman_desmedt messages and their 8 conformance hashes; round info, dealer,
+  and the FeldmanTranscript conformance hashes.
+- 2026-11-13: feldman_desmedt Logs, observe, Player, deal, the test plan, and 48 tests.
