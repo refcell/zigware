@@ -503,3 +503,189 @@ test "changing peer sets" {
         }
     }.body);
 }
+
+/// The sum of `name`'s samples whose labels carry `status="<status>"`.
+pub fn status_total(text: []const u8, name: []const u8, status: []const u8) !u64 {
+    var buffer: [64]u8 = undefined;
+    const label = try std.fmt.bufPrint(&buffer, "status=\"{s}\"", .{status});
+    var samples = metrics.metric_samples(text, name);
+    var total: u64 = 0;
+    while (samples.next()) |sample| {
+        if (std.mem.indexOf(u8, sample.labels, label) == null) continue;
+        total += try std.fmt.parseInt(u64, sample.value, 10);
+    }
+    return total;
+}
+
+pub fn fetch_success_total(setup: *Setup) !u64 {
+    const text = try setup.encode();
+    defer gpa.free(text);
+    return status_total(text, "actor_fetch_total", "Success");
+}
+
+/// Expects `expected` successful fetches. The mock consumer records an event before the engine
+/// reads its verdict (a separate task here, the same poll in commonware), so this lets the
+/// engine run for up to 10ms of simulated time first.
+pub fn expect_success_total(setup: *Setup, expected: u64) !void {
+    for (0..10) |_| {
+        if (try fetch_success_total(setup) == expected) return;
+        try setup.sleep(Duration.from_millis(1));
+    }
+    try testing.expectEqual(expected, try fetch_success_total(setup));
+}
+
+pub fn fetch_targeted(
+    setup: *const Setup,
+    mailbox: *Mailbox,
+    value: u8,
+    targets: []const usize,
+) !void {
+    var peers: [peers_max]PublicKey = undefined;
+    for (targets, 0..) |target, index| peers[index] = setup.peers[target];
+    _ = try mailbox.fetch_targeted(Fetch.from_key(key(value)), peers[0..targets.len]);
+}
+
+test "fetch targeted" {
+    try run(10, struct {
+        fn body(io: Io) !void {
+            // Both servers stay reachable so the healthy non-target could answer a fallback.
+            const setup = try Setup.init(io, &.{ 1, 2, 3 }, .{});
+            defer setup.deinit();
+            try setup.add_link(link, 0, 1);
+            try setup.add_link(link, 0, 2);
+            // The target serves invalid data, while the non-target holds a valid copy.
+            const consumer = try setup.make_consumer();
+            try consumer.add_expected(key(1), "valid data");
+            const mailbox1 = try setup.spawn(0, consumer, try setup.make_producer(&.{}));
+            const prod2 = try setup.make_producer(&.{.{ 1, "invalid data" }});
+            _ = try setup.spawn(1, try setup.make_consumer(), prod2);
+            const prod3 = try setup.make_producer(&.{.{ 1, "valid data" }});
+            _ = try setup.spawn(2, try setup.make_consumer(), prod3);
+            try setup.sleep(Duration.from_millis(100));
+
+            // Target only peer 2 and wait for its invalid response to get it blocked.
+            try fetch_targeted(setup, mailbox1, 1, &.{1});
+            try setup.wait_for_blocked(0, 1);
+            const blocked = try setup.oracle().blocked(gpa);
+            defer gpa.free(blocked);
+            try testing.expectEqual(@as(usize, 1), blocked.len);
+
+            // The healthy non-target stays unused while the only target is blocked.
+            try expect_no_event(setup, consumer, 1000);
+            try expect_success_total(setup, 0);
+
+            // Adding peer 3 as a target lets the fetch succeed, exactly once.
+            try fetch_targeted(setup, mailbox1, 1, &.{2});
+            try expect_event(consumer, 1, "valid data");
+            try expect_success_total(setup, 1);
+        }
+    }.body);
+}
+
+test "fetch targeted no fallback" {
+    try run(10, struct {
+        fn body(io: Io) !void {
+            const setup = try Setup.init(io, &.{ 1, 2, 3, 4 }, .{});
+            defer setup.deinit();
+            for (1..4) |peer| try setup.add_link(link, 0, peer);
+            const consumer = try setup.make_consumer();
+            const mailbox1 = try setup.spawn(0, consumer, try setup.make_producer(&.{}));
+            _ = try setup.spawn(1, try setup.make_consumer(), try setup.make_producer(&.{}));
+            _ = try setup.spawn(2, try setup.make_consumer(), try setup.make_producer(&.{}));
+            const prod4 = try setup.make_producer(&.{.{ 1, "data from peer 4" }});
+            _ = try setup.spawn(3, try setup.make_consumer(), prod4);
+            try setup.sleep(Duration.from_millis(100));
+
+            // Neither target has the data, and peer 4 is never tried.
+            try fetch_targeted(setup, mailbox1, 1, &.{ 1, 2 });
+            try expect_no_event(setup, consumer, 3000);
+        }
+    }.body);
+}
+
+test "fetch all targeted" {
+    try run(10, struct {
+        fn body(io: Io) !void {
+            const setup = try Setup.init(io, &.{ 1, 2, 3, 4 }, .{});
+            defer setup.deinit();
+            for (1..4) |peer| try setup.add_link(link, 0, peer);
+            const consumer = try setup.make_consumer();
+            try consumer.add_expected(key(1), "data for key 1");
+            try consumer.add_expected(key(2), "data for key 2");
+            try consumer.add_expected(key(3), "data for key 3");
+            const mailbox1 = try setup.spawn(0, consumer, try setup.make_producer(&.{}));
+            const prod2 = try setup.make_producer(&.{.{ 1, "data for key 1" }});
+            _ = try setup.spawn(1, try setup.make_consumer(), prod2);
+            const prod3 = try setup.make_producer(&.{.{ 3, "data for key 3" }});
+            _ = try setup.spawn(2, try setup.make_consumer(), prod3);
+            const prod4 = try setup.make_producer(&.{.{ 2, "data for key 2" }});
+            _ = try setup.spawn(3, try setup.make_consumer(), prod4);
+            try setup.sleep(Duration.from_millis(100));
+
+            // Key 1 targets peer 2, key 2 targets peer 4, and key 3 may use any peer.
+            const T = resolver.Targeted(MockKey, void, PublicKey);
+            const items = [_]T{
+                .{ .fetch = Fetch.from_key(key(1)), .targets = &.{setup.peers[1]} },
+                .{ .fetch = Fetch.from_key(key(2)), .targets = &.{setup.peers[3]} },
+            };
+            _ = try mailbox1.fetch_all_targeted(&items);
+            try fetch(mailbox1, 3);
+
+            var found: [3]bool = @splat(false);
+            for (0..3) |_| {
+                var event = try consumer.next_event();
+                defer event.deinit(gpa);
+                try testing.expect(event.key.value >= 1 and event.key.value <= 3);
+                found[event.key.value - 1] = true;
+            }
+            try testing.expect(found[0] and found[1] and found[2]);
+            try expect_success_total(setup, 3);
+        }
+    }.body);
+}
+
+test "fetch clears targets" {
+    try run(10, struct {
+        fn body(io: Io) !void {
+            const setup = try Setup.init(io, &.{ 1, 2, 3 }, .{});
+            defer setup.deinit();
+            try setup.add_link(link, 0, 1);
+            try setup.add_link(link, 0, 2);
+            const consumer = try setup.make_consumer();
+            const mailbox1 = try setup.spawn(0, consumer, try setup.make_producer(&.{}));
+            _ = try setup.spawn(1, try setup.make_consumer(), try setup.make_producer(&.{}));
+            const prod3 = try setup.make_producer(&.{.{ 1, "valid data" }});
+            _ = try setup.spawn(2, try setup.make_consumer(), prod3);
+            try setup.sleep(Duration.from_millis(100));
+
+            // Target peer 2 (no data), let it fail, then clear targets with a plain fetch.
+            try fetch_targeted(setup, mailbox1, 1, &.{1});
+            try setup.sleep(Duration.from_millis(500));
+            try fetch(mailbox1, 1);
+            try expect_event(consumer, 1, "valid data");
+        }
+    }.body);
+}
+
+test "fetch targeted does not restrict all" {
+    try run(10, struct {
+        fn body(io: Io) !void {
+            const setup = try Setup.init(io, &.{ 1, 2, 3 }, .{});
+            defer setup.deinit();
+            try setup.add_link(link, 0, 1);
+            try setup.add_link(link, 0, 2);
+            const consumer = try setup.make_consumer();
+            const mailbox1 = try setup.spawn(0, consumer, try setup.make_producer(&.{}));
+            _ = try setup.spawn(1, try setup.make_consumer(), try setup.make_producer(&.{}));
+            const prod3 = try setup.make_producer(&.{.{ 1, "valid data" }});
+            _ = try setup.spawn(2, try setup.make_consumer(), prod3);
+            try setup.sleep(Duration.from_millis(100));
+
+            // An unrestricted fetch stays unrestricted after a targeted one.
+            try fetch(mailbox1, 1);
+            try setup.sleep(Duration.from_millis(50));
+            try fetch_targeted(setup, mailbox1, 1, &.{1});
+            try expect_event(consumer, 1, "valid data");
+        }
+    }.body);
+}
