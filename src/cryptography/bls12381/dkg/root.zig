@@ -6,4 +6,5 @@ pub const feldman_desmedt = @import("feldman_desmedt.zig");
 
 test {
     std.testing.refAllDecls(@This());
+    _ = @import("conformance_test.zig");
 }

@@ -29,7 +29,7 @@ const prefix = "commonware_cryptography::bls12381::";
 
 /// Every case multiplies a point by a scalar; Debug builds take minutes, so they run only in
 /// optimized builds or with `-Dslow-tests`.
-fn skip_slow() error{SkipZigTest}!void {
+pub fn skip_slow() error{SkipZigTest}!void {
     if (builtin.mode == .debug and !build_options.slow_tests) return error.SkipZigTest;
 }
 
@@ -44,7 +44,11 @@ fn CodecConformance(comptime T: type, comptime gen: arbitrary.Generator(T)) type
     };
 }
 
-fn verify(comptime name: []const u8, comptime T: type, comptime gen: arbitrary.Generator(T)) !void {
+pub fn verify(
+    comptime name: []const u8,
+    comptime T: type,
+    comptime gen: arbitrary.Generator(T),
+) !void {
     try conformance.verify(
         CodecConformance(T, gen),
         std.heap.smp_allocator,
@@ -55,7 +59,7 @@ fn verify(comptime name: []const u8, comptime T: type, comptime gen: arbitrary.G
 }
 
 /// `Scalar::from_ikm(&u.arbitrary::<[u8; 64]>()?)`.
-fn gen_scalar(gpa: Allocator, u: *Unstructured) Error!Scalar {
+pub fn gen_scalar(gpa: Allocator, u: *Unstructured) Error!Scalar {
     const ikm = try arbitrary.value([64]u8, gpa, u);
     return Scalar.from_ikm(&ikm);
 }
@@ -71,7 +75,7 @@ fn gen_share(gpa: Allocator, u: *Unstructured) Error!group.Share {
 }
 
 /// `G::generator() * &u.arbitrary::<Scalar>()?`.
-fn gen_point(comptime G: type) arbitrary.Generator(G) {
+pub fn gen_point(comptime G: type) arbitrary.Generator(G) {
     return struct {
         fn generate(gpa: Allocator, u: *Unstructured) Error!G {
             return G.generator.mul(try gen_scalar(gpa, u));

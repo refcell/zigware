@@ -18,6 +18,18 @@ const Private = group.Private;
 const Mode = sharing_mod.Mode;
 const Sharing = sharing_mod.Sharing;
 const Poly = sharing_mod.Poly;
+const messages = @import("feldman_desmedt/messages.zig");
+
+pub const Reveal = messages.Reveal;
+pub const DealerPubMsg = messages.DealerPubMsg;
+pub const DealerPrivMsg = messages.DealerPrivMsg;
+pub const PlayerAck = messages.PlayerAck;
+pub const AckOrReveal = messages.AckOrReveal;
+pub const DealerResult = messages.DealerResult;
+pub const DealerLog = messages.DealerLog;
+pub const DealerLogSummary = messages.DealerLogSummary;
+pub const SignedDealerLog = messages.SignedDealerLog;
+pub const Output = messages.Output;
 
 /// Bytes of the transcript summary a dealing draws after its polynomial.
 const summary_length = 32;
@@ -70,3 +82,22 @@ pub fn deal_anonymous(
     const sharing = try Sharing(V).init(gpa, mode, n, committed);
     return .{ .sharing = sharing, .shares = shares };
 }
+
+test {
+    std.testing.refAllDecls(messages);
+    inline for (.{ variant_types.MinPk, variant_types.MinSig }) |V| {
+        _ = DealerPubMsg(V);
+        _ = DealerLog(V, ed25519.PublicKey);
+        _ = SignedDealerLog(V, ed25519.PublicKey);
+        _ = Output(V, ed25519.PublicKey);
+        std.testing.refAllDecls(DealerLog(V, ed25519.PublicKey));
+        std.testing.refAllDecls(SignedDealerLog(V, ed25519.PublicKey));
+        std.testing.refAllDecls(Output(V, ed25519.PublicKey));
+        std.testing.refAllDecls(DealerPubMsg(V));
+    }
+    std.testing.refAllDecls(AckOrReveal(ed25519.PublicKey));
+    std.testing.refAllDecls(DealerResult(ed25519.PublicKey));
+}
+
+const variant_types = primitives.variant;
+const ed25519 = @import("../../ed25519.zig");
