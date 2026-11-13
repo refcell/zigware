@@ -15,12 +15,15 @@ const Allocator = std.mem.Allocator;
 const merkle = @import("mod.zig");
 const hasher_module = @import("hasher.zig");
 const proof_module = @import("proof.zig");
+const batch_module = @import("batch.zig");
 
 pub fn Mem(comptime F: type, comptime Digest: type) type {
     merkle.check_family(F);
     return struct {
         const Self = @This();
         pub const Proof = proof_module.Proof(F, Digest);
+        pub const Batch = batch_module.Unmerkleized(F, Digest);
+        pub const MerkleizedBatch = batch_module.Merkleized(F, Digest);
 
         /// Digests of the retained nodes, starting at `pruned_size`.
         nodes: std.ArrayList(Digest) = .empty,
@@ -63,6 +66,14 @@ pub fn Mem(comptime F: type, comptime Digest: type) type {
         pub fn deinit(self: *Self, gpa: Allocator) void {
             self.nodes.deinit(gpa);
             self.* = undefined;
+        }
+
+        /// An independent copy of the structure.
+        pub fn clone(self: *const Self, gpa: Allocator) Allocator.Error!Self {
+            var copy = self.*;
+            copy.nodes = try self.nodes.clone(gpa);
+            assert(copy.size() == self.size());
+            return copy;
         }
 
         /// Total node count, irrespective of pruning.
@@ -279,6 +290,79 @@ pub fn Mem(comptime F: type, comptime Digest: type) type {
         ) (merkle.Error || Allocator.Error)!Proof {
             const plan = try proof_module.RangePlan(F).init(self.leaves(), range);
             return plan.build(gpa, hasher, inactive_peaks, self);
+        }
+
+        /// A speculative batch on top of the committed state.
+        pub fn new_batch(self: *const Self, gpa: Allocator) Allocator.Error!Batch {
+            const root_batch = try MerkleizedBatch.from_mem(gpa, self);
+            defer root_batch.release(gpa);
+            const batch = root_batch.new_batch();
+            assert(batch.size() == self.size());
+            return batch;
+        }
+
+        /// Overwrites the node at `position`, which may have been pruned since the batch was
+        /// merkleized: a pinned node takes the digest, any other pruned node no longer counts.
+        fn overwrite(self: *Self, position: u64, digest: Digest) void {
+            if (position >= self.pruned_size) {
+                self.nodes.items[@intCast(position - self.pruned_size)] = digest;
+                return;
+            }
+            const pinned = self.pinned_positions.slice();
+            const slot = std.mem.indexOfScalar(u64, pinned, position) orelse return;
+            self.pinned_digests.slice_mut()[slot] = digest;
+        }
+
+        fn at_state(self: *const Self, size_expected: u64, peaks_expected: []const Digest) bool {
+            if (self.size() != size_expected) return false;
+            var buffer: [merkle.max_pinned_nodes]Digest = undefined;
+            const current = self.peaks(&buffer);
+            if (current.len != peaks_expected.len) return false;
+            for (current, peaks_expected) |a, b| if (!a.eql(b)) return false;
+            return true;
+        }
+
+        /// The index of the first retained ancestor of `batch` to replay: the structure must
+        /// be at the state before the oldest retained ancestor (or the batch itself), or after
+        /// one of them. A batch applies once.
+        fn validate_batch(self: *const Self, batch: *const MerkleizedBatch) merkle.Error!usize {
+            const oldest = if (batch.ancestors.len > 0) batch.ancestors[0] else batch.data;
+            if (self.at_state(oldest.parent_size, oldest.parent_peaks.slice())) return 0;
+            var index = batch.ancestors.len;
+            while (index > 0) {
+                index -= 1;
+                const ancestor = batch.ancestors[index];
+                if (self.at_state(ancestor.size(), ancestor.tip_peaks.slice())) return index + 1;
+            }
+            const size_now = self.size();
+            if (size_now >= batch.base_size and size_now < oldest.parent_size) {
+                return error.AncestorDropped;
+            }
+            return error.StaleBatch;
+        }
+
+        /// Commits `batch`, replaying its uncommitted ancestors first. Pruning after the batch
+        /// was merkleized does not invalidate it (prune and apply commute). Fails, changing
+        /// nothing, with `AncestorDropped` when it needs nodes of an ancestor released before it
+        /// was merkleized, or `StaleBatch` when the structure is at no state of its chain.
+        pub fn apply_batch(
+            self: *Self,
+            gpa: Allocator,
+            batch: *const MerkleizedBatch,
+        ) (merkle.Error || Allocator.Error)!void {
+            const start = try self.validate_batch(batch);
+            const appended_total = batch.size() - self.size();
+            try self.nodes.ensureUnusedCapacity(gpa, @intCast(appended_total));
+            for (batch.ancestors[start..]) |data| self.apply_data(data);
+            self.apply_data(batch.data);
+            assert(self.size() == batch.size());
+        }
+
+        fn apply_data(self: *Self, data: *const MerkleizedBatch.BatchData) void {
+            assert(self.size() == data.parent_size);
+            var overwrites = data.overwrites.iterator();
+            while (overwrites.next()) |entry| self.overwrite(entry.key_ptr.*, entry.value_ptr.*);
+            self.nodes.appendSliceAssumeCapacity(data.appended.items);
         }
 
         /// The digests of the nodes pinned when pruning to `location`, in pin order.

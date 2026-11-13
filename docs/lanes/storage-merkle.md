@@ -12,8 +12,10 @@ variants need `runtime` storage; do them after its interface lands.
 - [x] translator.rs (key translators) and rmap (range map).
 - [x] merkle/mmr: in-memory MMR (append, root, proofs, range proofs, verification), node
   positions and peaks math identical to commonware, proof codec. Port its tests and vectors.
-  (Batch API and the Proof `CodecConformance` hash still to do; the latter waits on the
-  conformance lane's `arbitrary` emulation.)
+  (The Proof `CodecConformance` hash still waits on the conformance lane's `arbitrary`
+  emulation.)
+- [x] merkle/batch: stacked speculative batches (`Mem.new_batch`, `merkleize`,
+  `Mem.apply_batch`, `add_many`, leaf updates) with commonware's batch.rs and mem.rs tests.
 - [x] merkle/mmb and shared merkle proof types.
 - bmt moved to the coding lane (it needs it first).
 - [x] bitmap (authenticated bitmap over MMR).
@@ -26,8 +28,8 @@ variants need `runtime` storage; do them after its interface lands.
 - [ ] Fuzz targets (storage/fuzz entries for these modules). Done: rmap, bitmap, index
   (unordered, ordered, immutable), merkle_family_operations, merkle_range_proof,
   merkle_proof_store, and the Merkle half of proofs_malleability (its BMT half goes with bmt).
-  Remaining: merkle_batch_operations (with the batch API), merkle_full_operations and
-  merkle_full_recovery (with persisted).
+  merkle_batch_operations. Remaining: merkle_full_operations and merkle_full_recovery (with
+  persisted).
 
 ## Log
 - translator: Rust's `Translator`/`BuildHasher` traits become a comptime interface
@@ -100,3 +102,13 @@ variants need `runtime` storage; do them after its interface lands.
   real trees (commonware's raw-bytes proofs almost never verify) and requires every sub-range to
   re-prove; swapping the suffix fold order fails it at iteration 15. The family-operations fuzz
   also rebuilds the root from the reference leaves.
+- merkle/batch: commonware's `Arc`/`Weak` batch chain is hand-counted: `Merkleized.retain`/
+  `release` are the strong references (`release` is `drop`), a child's parent link is weak, and
+  each batch's changes (`batch.Data`) are reference counted so merkleized descendants can replay
+  released-but-unapplied ancestors. Builders mutate in place (`batch.add(gpa, hasher, bytes)`)
+  instead of consuming and returning the batch; `merkleize` consumes it on success. `add_many`
+  takes a comptime item type and hashes each item's codec encoding. Merkleize and `add_many`
+  hash sequentially (commonware's strategy split gives the same digests), so the
+  parallel-shape tests (`level_batches_keep_pairs`, worker counts) have no counterpart. The
+  `hash_plan` exactness tests live in batch.zig (they call the private plan). The
+  `merkle_batch_operations` fuzz catches a skipped add_many update record at iteration 0.

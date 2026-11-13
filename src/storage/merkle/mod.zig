@@ -13,6 +13,7 @@ const assert = std.debug.assert;
 
 pub const hasher = @import("hasher.zig");
 pub const mem = @import("mem.zig");
+pub const batch = @import("batch.zig");
 pub const mmb = @import("mmb/mod.zig");
 pub const mmr = @import("mmr/mod.zig");
 pub const conformance = @import("conformance.zig");
@@ -257,6 +258,7 @@ test {
     _ = @import("mem_test.zig");
     _ = @import("verification_test.zig");
     _ = @import("fuzz_test.zig");
+    _ = @import("batch_test.zig");
 }
 
 test "bagging domains are distinct" {
