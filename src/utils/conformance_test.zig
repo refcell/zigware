@@ -190,6 +190,16 @@ const entries = .{
         bitmap.roaring.Run,
         arbitrary.default_generator(bitmap.roaring.Run),
     ),
+    Codec(
+        "bitmap::roaring::container" ++ conformance_suffix ++ "super::Container>",
+        bitmap.roaring.Container,
+        arbitrary.default_generator(bitmap.roaring.Container),
+    ),
+    Entry(
+        "bitmap::roaring::container::tests::conformance::ContainerTransitionsConformance",
+        @import("bitmap/roaring/container_test.zig").TransitionsConformance,
+        1024,
+    ),
 };
 
 test "utils conformance hashes match commonware" {

@@ -10,7 +10,10 @@ pub const bitmap = @import("roaring/bitmap.zig");
 pub const Bitmap = bitmap.Bitmap;
 pub const run = @import("roaring/run.zig");
 pub const Run = run.Run;
+pub const container = @import("roaring/container.zig");
+pub const Container = container.Container;
 
 test {
     std.testing.refAllDecls(@This());
+    _ = @import("roaring/container_test.zig");
 }
