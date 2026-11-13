@@ -15,7 +15,7 @@
 //! Arithmetic never fails silently: only `next`, `View.term_end`, and `View.next_term_start`
 //! panic on overflow, like commonware; everything else saturates or returns an optional.
 //!
-//! `coding::Commitment` waits for the coding lane's `Config`.
+//! `coding.Commitment` (commonware `types::coding::Commitment`) is in `commitment.zig`.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -24,6 +24,7 @@ const codec = @import("codec");
 const utils = @import("utils");
 
 pub const Participant = utils.Participant;
+pub const coding = @import("commitment.zig");
 
 const Kind = enum { epoch, height, view };
 
@@ -454,4 +455,5 @@ comptime {
 
 test {
     _ = @import("types_test.zig");
+    _ = coding;
 }

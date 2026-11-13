@@ -18,6 +18,10 @@ resolver; those lanes are running, so do the types first and the actors as they 
   `term_index`, `covers`, `covering_range`, `admits`), `Round` (packed, `==` works; `new`,
   `order`, codec epoch then view), `EpochInfo`, `EpochPhase`, `FixedEpocher`,
   `assert_epocher`, `Participant` (re-export of `utils.Participant`).
+- `consensus.types.coding`: `Commitment(BlockDigest, Root, Context)` (100 bytes: three
+  32-byte zero-padded digest fields and a `coding.Config`; `init`, `block`, `root`,
+  `context`, `config`, `empty`, `eql`, `order`, codec validating every field),
+  `commitment_size`, `commitment_digest_size`.
 - `consensus.traits` (lib.rs as comptime interfaces): `assert_epochable`/`viewable`/
   `heightable`, `round(x)`, `assert_block`, `assert_certifiable_block`, `assert_automaton`,
   `assert_certifiable_automaton` with default-supplying `prepare`/`certify`, `Handoff(D)`,
@@ -39,8 +43,6 @@ resolver; those lanes are running, so do the types first and the actors as they 
   hash, and never mix with each other or raw integers (commonware's newtypes).
 - `Round` is a `packed struct(u128)` so `==` works; its fields are public (`round.epoch`).
 - `covering_range` returns the inclusive pair `{ start, end }` instead of `RangeInclusive`.
-- `coding::Commitment` (and its `TestCommitment` conformance hash) waits for the coding
-  lane's `Config`.
 - Automaton/CertifiableAutomaton methods block on `std.Io` (`propose(io, ctx) !?Digest`)
   instead of returning oneshot receivers; null is a closed channel. Callers run them with
   `io.async` to wait on several at once.
@@ -57,7 +59,7 @@ resolver; those lanes are running, so do the types first and the actors as they 
 
 ## Backlog
 - [x] types.rs: Epoch, Height, View, deltas, ranges, TermLength, Round, FixedEpocher, with
-  every test and the Epoch/Height/View/Round conformance hashes. (Commitment: see Decisions.)
+  every test and the Epoch/Height/View/Round conformance hashes. 
 - [x] consensus lib.rs traits (`Automaton`, `CertifiableAutomaton`, `Handoff`, `Relay`,
   `Reporter`, `Monitor`, `Epochable`, `Viewable`, `Block`, ...) as comptime interfaces;
   reporter.rs.
@@ -65,7 +67,8 @@ resolver; those lanes are running, so do the types first and the actors as they 
   Vote/Certificate/Artifact/Activity, the attributable faults, AttributableMap; all 15
   simplex types hashes and the 3 threshold-VRF wire-type hashes match. (Signing tests follow
   with the schemes.)
-- [ ] types.rs `coding::Commitment` and the `TestCommitment` hash (coding.Config landed).
+- [x] types.rs `coding::Commitment` (`types.coding.Commitment(BlockDigest, Root, Context)`)
+  with its tests and the `TestCommitment` conformance hash.
 - [ ] simplex scheme: ed25519 now; bls12381_multisig and bls12381_threshold as the bls-math
   lane lands them; secp256r1 when crypto lands it. elector.rs (leader election).
 - [ ] simplex config, limits, metrics, and the actors (voter, batcher, resolver) and engine,
@@ -80,3 +83,4 @@ resolver; those lanes are running, so do the types first and the actors as they 
 - 2026-11-13: lib.rs traits as comptime interfaces (`traits.zig`) and reporter.rs.
 - 2026-11-13: simplex wire types, attestation stand-in, VRF Signature/Certificate/Seed; 18
   conformance hashes match.
+- 2026-11-13: types.rs `coding::Commitment`; TestCommitment conformance hash matches.
