@@ -22,6 +22,7 @@ appends a short dated log line after each push. Other lanes read it to find inte
 | runtime-telemetry | runtime-telemetry.md | `src/runtime/telemetry`, `src/runtime/production` | 3 |
 | broadcast-resolver | broadcast-resolver.md | `src/{broadcast,resolver,collector}` | 3 |
 | examples-estimator | examples-estimator.md | `examples/estimator` | 3 |
+| consensus-marshal | consensus-marshal.md | `src/consensus/{aggregation,marshal}` | 3 |
 | consensus-simplex | consensus-simplex.md | `src/consensus` except `marshal/`, `aggregation/` | 3 |
 
 Later waves start as their dependencies land; [../ROADMAP.md](../ROADMAP.md) lists them.

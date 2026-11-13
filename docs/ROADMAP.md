@@ -23,8 +23,7 @@ and start when what they build on has landed (or can be stubbed behind an interf
 | 3 | clearing | clearing | qmdb |
 | 3 | storage-qmdb | storage: qmdb (any, current, immutable, keyless, compact, sync, store) | journal, merkle |
 | 3 | consensus-simplex | consensus: types, simplex | types now (started); actors after p2p, broadcast, resolver |
-| 3 | consensus-aggregation | consensus: aggregation | simplex types |
-| 3 | consensus-marshal | consensus: marshal | simplex, storage archive |
+| 3 | consensus-marshal | consensus: aggregation, marshal | aggregation now (started); marshal actors after broadcast, resolver, archive |
 | 4 | glue-examples | glue, deployer, examples (log, chat, dkg, bridge, estimator, flood) | consensus |
 
 Demo recordings for the README come from the examples as they become runnable.
