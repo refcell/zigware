@@ -17,7 +17,9 @@ and start when what they build on has landed (or can be stubbed behind an interf
 | 2 | storage-archive | storage: archive, freezer, ordinal, cache | segmented journal |
 | 2 | p2p | p2p: simulated first, then authenticated | deterministic runtime (started) |
 | 2 | coding | coding, cryptography/reed_solomon | bmt (started) |
-| 3 | broadcast-resolver | broadcast, collector, resolver | p2p simulated |
+| 3 | broadcast-resolver | broadcast, collector, resolver | wire types now (started); engines after p2p simulated |
+| 3 | runtime-telemetry | runtime telemetry (metrics registry, traces) | now (started) |
+| 3 | examples-estimator | the estimator example, the first README demo | DSL now (started); simulation after p2p simulated |
 | 3 | clearing | clearing | qmdb |
 | 3 | storage-qmdb | storage: qmdb (any, current, immutable, keyless, compact, sync, store) | journal, merkle |
 | 3 | consensus-simplex | consensus: types, simplex | types now (started); actors after p2p, broadcast, resolver |
