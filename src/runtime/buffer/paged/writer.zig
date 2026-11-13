@@ -602,6 +602,75 @@ pub fn Writer(comptime Blob: type) type {
     };
 }
 
+/// Read the logical range `[offset, offset + buf.len)` directly from a raw paged blob,
+/// validating every page it spans. Fails with `BlobInsufficientLength` when valid page
+/// contents do not cover the range. `scratch` holds one physical page.
+pub fn read_range(
+    blob: anytype,
+    logical_page_size: usize,
+    offset: u64,
+    buf: []u8,
+    scratch: []u8,
+) Error!void {
+    assert(logical_page_size > 0);
+    assert(scratch.len == logical_page_size + checksum_size);
+    const end = std.math.add(u64, offset, buf.len) catch return error.OffsetOverflow;
+    if (buf.len == 0) return;
+    const first_page = offset / logical_page_size;
+    const last_page = (end - 1) / logical_page_size;
+    var done: usize = 0;
+    var page = first_page;
+    while (page <= last_page) : (page += 1) {
+        const logical, _ =
+            try paged.read_page_with_checksum(blob, page, logical_page_size, scratch);
+        const page_start = page * logical_page_size;
+        const overlap_start = @max(offset, page_start);
+        const overlap_end = @min(end, page_start + logical.len);
+        if (overlap_start >= overlap_end) return error.BlobInsufficientLength;
+        const piece_start: usize = @intCast(overlap_start - page_start);
+        const piece_end: usize = @intCast(overlap_end - page_start);
+        const piece = logical[piece_start..piece_end];
+        @memcpy(buf[done..][0..piece.len], piece);
+        done += piece.len;
+    }
+    // A short terminal page can leave the range only partially covered.
+    if (done != buf.len) return error.BlobInsufficientLength;
+}
+
+/// Read the last `buf.len` logical bytes of a raw paged blob of `physical_size` bytes (whole
+/// physical pages only) and return its logical size. The last page decides the logical end.
+pub fn read_tail(
+    blob: anytype,
+    physical_size: u64,
+    logical_page_size: usize,
+    buf: []u8,
+    scratch: []u8,
+) Error!u64 {
+    assert(logical_page_size > 0);
+    assert(scratch.len == logical_page_size + checksum_size);
+    if (physical_size == 0) {
+        if (buf.len == 0) return 0;
+        return error.BlobInsufficientLength;
+    }
+    const physical = logical_page_size + checksum_size;
+    if (physical_size % physical != 0) return error.BlobInsufficientLength;
+    const page = physical_size / physical - 1;
+    const tail, _ = try paged.read_page_with_checksum(blob, page, logical_page_size, scratch);
+    const page_start = page * logical_page_size;
+    const logical_size = page_start + tail.len;
+    const offset = std.math.sub(u64, logical_size, buf.len) catch
+        return error.BlobInsufficientLength;
+    // Copy the validated suffix first: reading the prefix reuses `scratch`.
+    const tail_start: usize = @intCast(@max(offset, page_start) - page_start);
+    const suffix = tail[tail_start..];
+    const prefix_len = buf.len - suffix.len;
+    @memcpy(buf[prefix_len..], suffix);
+    if (prefix_len > 0) {
+        try read_range(blob, logical_page_size, offset, buf[0..prefix_len], scratch);
+    }
+    return logical_size;
+}
+
 /// Replays the logical bytes of a paged blob, validating every page.
 ///
 /// Full pages are read from the blob in batches; the final partial page is a frozen copy taken

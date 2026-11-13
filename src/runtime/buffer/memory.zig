@@ -8,8 +8,11 @@
 //! open; removing a blob unlinks it, and its open handle stays readable but can no longer sync.
 //!
 //! `write_bytes` and `writes` count every `write_at`, standing in for the runtime's
-//! `runtime_storage_write_bytes_total` metric, and `remove_failures_after` injects a removal
-//! fault after that many successful removals.
+//! `runtime_storage_write_bytes_total` metric, `reads` counts every `read_at` (commonware's
+//! `RecordingContext`), and `remove_failures_after` injects a removal fault after that many
+//! successful removals. `mutations_allowed` is commonware's `MutationFaults`: once set, that
+//! many more mutations (blob creation, `remove`, `write_at`, `resize`, `sync`) succeed and every
+//! later one fails with `Io`, recording `mutation_refused`.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -62,6 +65,12 @@ pub const Storage = struct {
     writes: u64 = 0,
     /// When set, removals fail with `Io` once this many more have succeeded.
     remove_failures_after: ?u32 = null,
+    /// Calls to `read_at` across all blobs.
+    reads: u64 = 0,
+    /// When set, mutations fail with `Io` once this many more have succeeded.
+    mutations_allowed: ?u64 = null,
+    /// Whether a mutation failed since `mutations_allowed` was last set.
+    mutation_refused: bool = false,
 
     pub const Error = memory_error;
     pub const Blob = MemoryBlob;
@@ -69,6 +78,22 @@ pub const Storage = struct {
 
     pub fn init(gpa: Allocator) Storage {
         return .{ .gpa = gpa };
+    }
+
+    /// Let `operations` more mutations succeed, then fail every later one.
+    pub fn allow_mutations(self: *Storage, operations: u64) void {
+        self.mutations_allowed = operations;
+        self.mutation_refused = false;
+    }
+
+    /// Charge one mutation against `mutations_allowed`.
+    fn check_mutation(self: *Storage) memory_error!void {
+        const allowed = &(self.mutations_allowed orelse return);
+        if (allowed.* == 0) {
+            self.mutation_refused = true;
+            return error.Io;
+        }
+        allowed.* -= 1;
     }
 
     /// Frees every blob. Every handle must be closed first.
@@ -104,6 +129,16 @@ pub const Storage = struct {
             partition_entry.value_ptr.* = .empty;
         }
         const blobs = partition_entry.value_ptr;
+        // Opening a blob that is not stored creates it. Creation is a mutation.
+        if (!blobs.contains(name)) {
+            self.check_mutation() catch |err| {
+                if (blobs.count() == 0 and !partition_entry.found_existing) {
+                    self.gpa.free(partition_entry.key_ptr.*);
+                    self.partitions.swapRemoveAt(partition_entry.index);
+                }
+                return err;
+            };
+        }
         const blob_entry = try blobs.getOrPut(gpa, name);
         if (!blob_entry.found_existing) {
             blob_entry.key_ptr.* = gpa.dupe(u8, name) catch |err| {
@@ -128,6 +163,7 @@ pub const Storage = struct {
     /// Remove the blob `name` from `partition`, or the whole partition if `name` is null.
     pub fn remove(self: *Storage, partition: []const u8, name: ?[]const u8) memory_error!void {
         try validate_partition_name(partition);
+        try self.check_mutation();
         if (self.remove_failures_after) |*budget| {
             if (budget.* == 0) return error.Io;
             budget.* -= 1;
@@ -210,12 +246,14 @@ pub const MemoryBlob = struct {
         const end = std.math.add(u64, offset, buf.len) catch return error.OffsetOverflow;
         if (end > self.live.items.len) return error.BlobInsufficientLength;
         @memcpy(buf, self.live.items[@intCast(offset)..@intCast(end)]);
+        self.storage.reads += 1;
     }
 
     /// Write `bytes` at `offset`, zero-filling any gap past the current end.
     pub fn write_at(self: *MemoryBlob, offset: u64, bytes: []const u8) Error!void {
         const end = std.math.add(u64, offset, bytes.len) catch return error.OffsetOverflow;
         const end_index = std.math.cast(usize, end) orelse return error.OffsetOverflow;
+        try self.storage.check_mutation();
         if (end_index > self.live.items.len) {
             const old_len = self.live.items.len;
             try self.live.resize(self.storage.gpa, end_index);
@@ -230,6 +268,7 @@ pub const MemoryBlob = struct {
     /// Set the blob's length, truncating or zero-extending.
     pub fn resize(self: *MemoryBlob, len: u64) Error!void {
         const len_index = std.math.cast(usize, len) orelse return error.OffsetOverflow;
+        try self.storage.check_mutation();
         const old_len = self.live.items.len;
         try self.live.resize(self.storage.gpa, len_index);
         if (len_index > old_len) @memset(self.live.items[old_len..], 0);
@@ -238,6 +277,7 @@ pub const MemoryBlob = struct {
 
     /// Publish the live contents, so they survive closing the handle.
     pub fn sync(self: *MemoryBlob) Error!void {
+        try self.storage.check_mutation();
         const durable = self.durable_lookup() orelse return error.BlobMissing;
         durable.bytes.clearRetainingCapacity();
         try durable.bytes.appendSlice(self.storage.gpa, self.live.items);
@@ -335,4 +375,43 @@ test "remove fault injection" {
     try testing.expectError(error.Io, storage.remove("p", "b"));
     storage.remove_failures_after = null;
     try storage.remove("p", "b");
+}
+
+test "mutation faults fail after allowed operations" {
+    const gpa = testing.allocator;
+    var storage = Storage.init(gpa);
+    defer storage.deinit();
+    var opened = try storage.open("mutation", "blob");
+    // Two mutations succeed, then every later one fails, whatever its kind.
+    storage.allow_mutations(2);
+    try opened.blob.write_at(0, "data");
+    try opened.blob.sync();
+    try testing.expect(!storage.mutation_refused);
+    try testing.expectError(error.Io, opened.blob.resize(2));
+    try testing.expect(storage.mutation_refused);
+    try testing.expectError(error.Io, opened.blob.write_at(0, "more"));
+    try testing.expectError(error.Io, opened.blob.sync());
+    try testing.expectError(error.Io, storage.remove("mutation", "blob"));
+    try testing.expectError(error.Io, storage.open("mutation", "created"));
+    try testing.expectError(error.Io, storage.open("fresh", "created"));
+    // Reads still succeed, and no failed mutation reached storage.
+    var read: [4]u8 = undefined;
+    const reads = storage.reads;
+    try opened.blob.read_at(0, &read);
+    try testing.expectEqualStrings("data", &read);
+    try testing.expectEqual(reads + 1, storage.reads);
+    const names = try storage.scan(gpa, "mutation");
+    defer {
+        for (names) |name| gpa.free(name);
+        gpa.free(names);
+    }
+    try testing.expectEqual(@as(usize, 1), names.len);
+    try testing.expectError(error.PartitionMissing, storage.scan(gpa, "fresh"));
+    // Opening a stored blob is not a mutation.
+    opened.blob.deinit();
+    opened = try storage.open("mutation", "blob");
+    defer opened.blob.deinit();
+    // Disarming lets mutations through again.
+    storage.mutations_allowed = null;
+    try opened.blob.resize(2);
 }

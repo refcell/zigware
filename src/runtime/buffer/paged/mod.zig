@@ -40,6 +40,8 @@ pub const writer = @import("writer.zig");
 pub const CacheRef = cache.CacheRef;
 pub const Writer = writer.Writer;
 pub const Replay = writer.Replay;
+pub const read_range = writer.read_range;
+pub const read_tail = writer.read_tail;
 
 /// Size in bytes of the checksum record appended to each logical page.
 pub const checksum_size: u64 = 12;

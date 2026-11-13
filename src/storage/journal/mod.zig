@@ -12,6 +12,7 @@ const codec = @import("codec");
 pub const frame = @import("frame.zig");
 pub const durability = @import("durability.zig");
 pub const zstd = @import("zstd.zig");
+pub const segmented = @import("segmented/mod.zig");
 /// The in-memory storage stand-in (`runtime.buffer.memory`), re-exported for journal users.
 pub const memory = @import("runtime").buffer.memory;
 

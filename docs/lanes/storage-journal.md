@@ -15,11 +15,13 @@ build on it. Until then, start with the pure parts (frame.rs, durability, item e
   `Writer` (append, bulk append, sync, recovery open/truncate with staged shrink), `Replay`,
   `recoverable_prefix_len`; `runtime.buffer`.
 - [ ] runtime buffer rest: `Sealed`/`seal`/`snapshot`, `read_many_into`/`read_ranges_into`,
-  `read_range`/`read_tail`, plain `Read`/`Write` buffers (read.rs, write.rs, tip.rs), and the
+  plain `Read`/`Write` buffers (read.rs, write.rs, tip.rs), and the
   remaining writer tests.
 - [x] journal frame format and durability (frame.rs, durability.rs), byte-identical.
-- [ ] journal/segmented: fixed and variable segmented journals (append, read, replay,
-  prune, rewind, sync), recovery from torn writes; port the tests incl. corruption tests.
+- [x] journal/segmented: section manager and fixed segmented journal (append, read, replay,
+  prune, bounded init, floors and checkpoint restore), torn-page repair; tests incl.
+  corruption and interrupted-open crash tests.
+- [ ] journal/segmented: variable, glob, and oversized journals.
 - [ ] journal/contiguous: fixed and variable contiguous journals.
 - [ ] journal/authenticated.rs.
 - [x] metadata (two-blob atomic key-value store), over the in-lane memory storage.
@@ -46,7 +48,16 @@ build on it. Until then, start with the pure parts (frame.rs, durability, item e
   `read_cached`, `clear`), `Writer(Blob)` (`init`, `open_recovery`, `truncate`,
   `finish_recovery`, `append`, `try_append`, `try_append_value`, `sync`, `read_into`,
   `read_up_to`, `try_read_sync_into`, `replay`, `recoverable_prefix_len[_at_most]`),
-  `Replay(Blob)` (`ensure`, `bytes`, `advance`, `seek_to`).
+  `Replay(Blob)` (`ensure`, `bytes`, `advance`, `seek_to`), `read_range` and `read_tail`
+  (validated logical reads from a raw paged blob).
+- `storage.journal.segmented.manager`: `Manager(Storage)` (one paged writer per section:
+  `get`, `get_or_create`, `sync`, `sync_all`, `prune`, `remove_section`, `truncate_pending`,
+  `clear`, `destroy`), `truncate_paged_tail`, `stored_sections`, `section_name`.
+- `storage.journal.segmented.fixed`: `Journal(Storage, A)` for fixed-size codec items with
+  `init`, `init_at_most`, `preflight_floors`, `preflight_restore` (returning a `Recovery`
+  with `next`, `drain`, `finish`, `boundary_items`), `append`, `get`, `get_many`,
+  `try_get_sync`, `last`, `sync`, `sync_all`, `prune`, `section_len`, `size`, `clear`,
+  `destroy`; `Config`, `Floor`.
 - `storage.metadata`: `Metadata(Storage, K, V)` with `init`, `deinit`, `get`, `get_mut`,
   `put`, `put_sync`, `upsert`, `remove`, `clear`, `retain`, `items`, `count`, `sync`,
   `destroy`; `Config(V)`.
@@ -94,6 +105,17 @@ build on it. Until then, start with the pure parts (frame.rs, durability, item e
   Large appends write their bulk pages in buffer-capacity chunks rather than one write; the
   bytes on disk are identical. `recoverable_prefix_len` reads one page at a time.
 
+- segmented: `Recovery.next` returns `?Item` with errors through the error union (commonware's
+  `Option<Result>`); an error ends that section and makes `finish` fail. `finish` and
+  `drain` consume the recovery even on error. Replay reads options (`DONT_CACHE`) do not
+  exist, so `replay_propagates_read_options` has no counterpart; the replay never fills the
+  page cache. Tests of in-flight `start_sync` handles and of dropping a `next` mid-repair
+  have no counterpart: syncs and repairs complete synchronously. Removing a section removes
+  its blob name before closing its writer, as commonware does.
+- memory storage gained `reads` (commonware's `RecordingContext` read count) and
+  `allow_mutations`/`mutation_refused` (commonware's `MutationFaults`). A clean replay of
+  eight pages takes one read where commonware takes two (larger batches).
+
 ## Log
 - 2026-11-13: journal Error, frame encoding/decoding with zstd frames, durability Barrier,
   frame fuzz target.
@@ -101,3 +123,6 @@ build on it. Until then, start with the pure parts (frame.rs, durability, item e
   metadata_operations fuzz target.
 - 2026-11-13: moved the memory storage stand-in to `runtime.buffer.memory`; paged buffer
   core (page format, tip, cache, Writer, Replay) with tests and a seeded crash fuzz.
+- 2026-11-13: `paged.read_range`/`read_tail`; segmented section manager and fixed segmented
+  journal with recovery (floors, restore, torn-page repair) and their ported tests; memory
+  storage read counts and mutation faults.

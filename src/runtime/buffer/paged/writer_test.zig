@@ -390,6 +390,37 @@ test "recoverable prefix stops at a torn interior page" {
     try testing.expectEqual(@as(u64, 600), try w.recoverable_prefix_len(3 * page_size));
 }
 
+test "read range and read tail on raw blobs" {
+    var h = try Harness.init();
+    defer h.deinit();
+    var data: [300]u8 = undefined;
+    for (&data, 0..) |*byte, index| byte.* = @truncate(index * 3);
+    try h.append_synced("raw", &data);
+    const opened = try h.storage.open(partition, "raw");
+    defer opened.blob.deinit();
+    var scratch: [physical_page_size]u8 = undefined;
+    var buf: [150]u8 = undefined;
+    try paged.read_range(opened.blob, page_size, 100, &buf, &scratch);
+    try testing.expectEqualSlices(u8, data[100..250], &buf);
+    try testing.expectError(
+        error.BlobInsufficientLength,
+        paged.read_range(opened.blob, page_size, 200, &buf, &scratch),
+    );
+    var tail: [120]u8 = undefined;
+    const size = try paged.read_tail(opened.blob, opened.len, page_size, &tail, &scratch);
+    try testing.expectEqual(@as(u64, 300), size);
+    try testing.expectEqualSlices(u8, data[180..], &tail);
+    var too_much: [301]u8 = undefined;
+    try testing.expectError(
+        error.BlobInsufficientLength,
+        paged.read_tail(opened.blob, opened.len, page_size, &too_much, &scratch),
+    );
+    try testing.expectError(
+        error.BlobInsufficientLength,
+        paged.read_tail(opened.blob, opened.len - 1, page_size, &tail, &scratch),
+    );
+}
+
 test "try append respects capacity" {
     var h = try Harness.init();
     defer h.deinit();
