@@ -1,6 +1,7 @@
 # Lane: examples-estimator
 
-Owns `examples/estimator/` and its entry in `build.zig`'s `examples` list. The estimator is
+Owns `examples/estimator/`, `examples/flood/`, `examples/chat/`, their entries in
+`build.zig`'s `examples` list, and their recipes in `etc/scripts/record-demo.sh`. The estimator is
 zigware's first runnable example and the first README demo.
 
 Reference: `~/.cache/zigware/commonware-ref/examples/estimator` (lib.rs, main.rs, p50/p90
@@ -27,6 +28,10 @@ statistics, output, CLI) and run against a minimal in-lane stand-in, then switch
   version.
 - `--reload` downloads through `std.http.Client` on the process's `std.Io` in `main`, before
   any simulation; it is the estimator's only real network access.
+- flood reads YAML with an in-lane subset parser (`examples/flood/yaml.zig`) because no
+  serde_yaml exists in zigware; it rejects anything outside what serde_yaml writes for flood's
+  config and the deployer's hosts file. Until p2p's authenticated network lands, the flood
+  binary loads its configuration and exits 1 with a message.
 
 ## Backlog
 - [x] `.lazy` DSL parser and task model, with lib.rs's parser tests. Copy the `.lazy` files and
@@ -43,8 +48,21 @@ statistics, output, CLI) and run against a minimal in-lane stand-in, then switch
 
 - [x] `--reload`: fetch cloudping.co.
 
+### flood (commonware `examples/flood`)
+- [x] Config and deployer hosts files (`yaml.zig`: the subset serde_yaml 0.9 writes, with its
+  quoting rules), `SmallRng` (rand 0.10 xoshiro256++, checked against Rust), and the sender and
+  receiver tasks over p2p's sender/receiver interfaces, tested flooding on p2p.simulated.
+- [ ] Binary on `runtime.production.Runner` and p2p `authenticated::discovery` once it lands;
+  metrics endpoint; demo recipe.
+- [ ] `setup` (config generation); needs deployer's aws config types.
+
+### chat (commonware `examples/chat`)
+- [ ] Logger and handler (TUI with plain ANSI, no deps), CLI, `peer_set_limit` test.
+- [ ] Wire to `authenticated::discovery`; demo recipe.
+
 ## Log
 - 2026-11-13: DSL parser, latency data, statistics, clap-identical CLI, colored output, and
   the simulation on runtime.deterministic + p2p.simulated. `zig build run-estimator` works.
 - 2026-11-13: end-to-end test of every completing .lazy file, uncapped and bandwidth-capped.
 - 2026-11-13: `--reload` downloads cloudping.co P50/P90 matrices.
+- 2026-11-13: flood config/hosts YAML, SmallRng, sender/receiver tasks on p2p.simulated.
