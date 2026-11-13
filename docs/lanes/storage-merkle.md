@@ -1,6 +1,6 @@
 # Lane: storage-merkle
 
-Owns `src/storage/{merkle,bmt,bitmap,index,rmap}`, `src/storage/translator.zig`, and
+Owns `src/storage/{merkle,bitmap,index,rmap}` (`bmt` moved to the coding lane), `src/storage/translator.zig`, and
 `src/storage/root.zig` (other storage lanes add their `pub const` lines there).
 
 Reference: `~/.cache/zigware/commonware-ref/storage/src`. These modules are mostly pure data
@@ -15,7 +15,7 @@ variants need `runtime` storage; do them after its interface lands.
   (Batch API and the Proof `CodecConformance` hash still to do; the latter waits on the
   conformance lane's `arbitrary` emulation.)
 - [ ] merkle/mmb and shared merkle proof types.
-- [ ] bmt (binary merkle tree) with proofs and multi-proofs.
+- bmt moved to the coding lane (it needs it first).
 - [ ] bitmap (authenticated bitmap over MMR).
 - [ ] index (ordered/unordered, partitioned) over translators.
 - [ ] merkle/persisted (journaled MMR) once runtime storage lands.

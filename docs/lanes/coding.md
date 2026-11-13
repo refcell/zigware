@@ -1,6 +1,6 @@
 # Lane: coding
 
-Owns `src/coding` and `src/cryptography/reed_solomon/` (taken over from the crypto lane;
+Owns `src/coding`, `src/storage/bmt/`, and `src/cryptography/reed_solomon/` (taken over from the crypto lane;
 add the `pub const reed_solomon` line to `src/cryptography/root.zig`, additive edit).
 
 Reference: `~/.cache/zigware/commonware-ref/{coding,cryptography/src/reed_solomon}`. Coding
@@ -32,6 +32,9 @@ hashers (on main).
   search limits; the `std.testing.fuzz` targets skip input-rejection errors.
 
 ## Backlog
+- [ ] storage bmt (moved from storage-merkle): the whole of commonware's storage/src/bmt
+  (Builder, root, proofs, multi-proofs, range proofs, codec, conformance, fuzz) at
+  `src/storage/bmt/`, with `pub const bmt` in `src/storage/root.zig` (additive edit).
 - [x] reed_solomon: GF(2^16) arithmetic, naive and scalar engines, high/low/default rate
   encoders and decoders, wrappers, results, plans; every recovery-hash vector (slow ones under
   `-Dslow-tests`) and the rate, wrapper, result, and plan tests.
