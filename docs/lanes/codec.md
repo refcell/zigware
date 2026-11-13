@@ -39,6 +39,7 @@ Every value goes through comptime dispatch on its type (`src/codec/codec.zig` ha
 | `codec.Set(K)`, `codec.HashSet(K)` | `BTreeSet`, `HashSet` | usize count + items strictly ascending |
 | `codec.Ipv4`, `Ipv6`, `SocketAddrV4`, `SocketAddrV6` | std::net types | octets (+ u16 port) |
 | `codec.IpAddr` (union v4/v6), `codec.SocketAddr` | `IpAddr`, `SocketAddr` | version byte 4/6 + addr (+ port) |
+| `codec.NonZero(u16/u32/u64)` | `NonZeroU16/32/64` | the integer; zero is `Invalid` |
 | `codec.Lazy(T)` | `Lazy<T>` | `T`'s bytes; read defers fixed-size `T`, `get(gpa)` decodes once |
 | `codec.Modes(N)` from `[N]u7` (`codec.mode(u8) ?u7`) | `Modes<N>`, `Mode` | continuation-bit packet |
 
@@ -94,6 +95,15 @@ ascending keys), `.get(key)` / `.contains(item)` by binary search. Map cfg is
 Decoded maps/sets own their slice: free with `codec.free(M, gpa, m)` or `m.deinit(gpa)`.
 `codec.order(T, a, b)` is Rust's `Ord` (custom types declare `order(a, b) std.math.Order`).
 
+### conformance (for other lanes)
+
+A conformance type declares `pub fn commit(gpa, seed: u64) ![]u8`. Copy the crate's
+`conformance.toml` next to the test and call
+`conformance.verify(C, gpa, "<rust type path>", conformance.default_cases, @embedFile(...))`.
+For codec types, build values with `codec.arbitrary.generate(T, gen, arena, seed)` where `gen`
+is `codec.arbitrary.default_generator(T)` or a hand-written port of the Rust `Arbitrary` impl
+(see `src/codec/conformance_test.zig`). Pass `std.heap.smp_allocator` for 65536-case runs.
+
 ## Decisions
 
 - Zig errors carry no payload; payloads live in `Reader.diagnostic`.
@@ -109,6 +119,8 @@ Decoded maps/sets own their slice: free with `codec.free(M, gpa, m)` or `m.deini
   fixed-size elements check `len * size` bytes remain before allocating.
 - formatting/codec/conformance/invariants sit below `utils`, so their tests cannot use
   `utils.rng.TestRng`; the conformance generator ports ChaCha8 `seed_from_u64` itself.
+- conformance does no file I/O: TOML text comes in via `@embedFile`, and a missing entry fails
+  and prints the entry to add (commonware writes the file instead).
 
 ## Backlog
 - [x] formatting: hex encode/decode (`hex`, `from_hex`), display helper (`Hex`), comptime hex
@@ -125,8 +137,10 @@ Decoded maps/sets own their slice: free with `codec.free(M, gpa, m)` or `m.deini
 - [x] codec types: maps/sets (sorted, canonical, reject duplicates/unsorted), with tests.
 - [x] codec types: net addrs, mode (`Mode`/`Modes`), with tests and fuzz.
 - [x] codec types: lazy, uint.rs (any-width unsigned `uN`, incl. `u256`), with tests.
-- [ ] conformance: hash-of-encodings harness (conformance/src/lib.rs), TOML reader, codec's
-  conformance.rs (ChaCha8 + `arbitrary` emulation) so codec/conformance.toml hashes match.
+- [x] conformance: hash-of-encodings harness (`conformance.compute_hash`, `find`, `verify`
+  over an `@embedFile`d TOML), with the crate's tests.
+- [x] codec conformance: `codec.arbitrary` reproduces rand_core `seed_from_u64` + ChaCha8 and
+  arbitrary 1.4 bit for bit; all 51 hashes in commonware's codec/conformance.toml match.
 - [ ] invariants: minifuzz (deterministic seeded fuzz driver over `std.testing.Smith`;
   `build_options.fuzz_seed`/`fuzz_soak`).
 - [ ] extend the codec fuzz targets as net/lazy/mode land (maps/sets done).
@@ -138,3 +152,4 @@ Decoded maps/sets own their slice: free with `codec.free(M, gpa, m)` or `m.deini
 - 2026-11-13: canonical Map/HashMap/Set/HashSet and `codec.order`, with tests and fuzz.
 - 2026-11-13: net addresses (Ipv4/Ipv6/SocketAddr*/IpAddr) and Modes, with tests and fuzz.
 - 2026-11-13: any-width unsigned integers (Uint/U256) and Lazy, with tests and fuzz.
+- 2026-11-13: conformance harness, codec arbitrary/ChaCha8 port, NonZero; all 51 commonware codec conformance hashes match.\n

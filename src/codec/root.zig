@@ -53,6 +53,8 @@ const mode_mod = @import("mode.zig");
 pub const mode = mode_mod.mode;
 pub const Modes = mode_mod.Modes;
 pub const Lazy = @import("types/lazy.zig").Lazy;
+pub const NonZero = @import("types/nonzero.zig").NonZero;
+pub const arbitrary = @import("arbitrary.zig");
 
 pub const Cfg = codec_mod.Cfg;
 pub const SliceCfg = codec_mod.SliceCfg;
@@ -98,6 +100,8 @@ test {
     _ = @import("types/net.zig");
     _ = @import("types/uint.zig");
     _ = @import("types/lazy.zig");
+    _ = @import("types/nonzero.zig");
+    _ = @import("conformance_test.zig");
     _ = @import("mode.zig");
     _ = @import("codec_test.zig");
     _ = @import("fuzz_test.zig");
