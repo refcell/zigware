@@ -30,6 +30,7 @@ const utils = @import("utils");
 const cryptography = @import("cryptography");
 
 const fiber = @import("fiber.zig");
+const storage_mod = @import("storage.zig");
 const rng_helpers = @import("rng.zig");
 
 const Rng = utils.rng.TestRng;
@@ -197,6 +198,10 @@ pub const Runner = struct {
     futex_waiters: std.DoublyLinkedList = .{},
     groups: std.DoublyLinkedList = .{},
     stack_pool: std.ArrayList(fiber.Stack),
+    /// In-memory storage; durable contents carry over between starts.
+    memory_storage: storage_mod.memory.Storage,
+    /// Number of roots started, so a restart can retire the previous run's opens.
+    starts: u64 = 0,
 
     pub fn init(allocator: std.mem.Allocator, config: Config) Error!Runner {
         config.validate();
@@ -216,6 +221,7 @@ pub const Runner = struct {
             .ready = ready,
             .batch = batch,
             .stack_pool = stack_pool,
+            .memory_storage = .init(allocator),
         };
     }
 
@@ -227,12 +233,23 @@ pub const Runner = struct {
         runner.ready.deinit(runner.allocator);
         runner.batch.deinit(runner.allocator);
         runner.alarms.deinit(runner.allocator);
+        runner.memory_storage.deinit();
         runner.* = undefined;
     }
 
     /// The `std.Io` backed by this runtime: simulated clock, seeded randomness, and tasks.
     pub fn io(runner: *Runner) Io {
         return .{ .userdata = runner, .vtable = &vtable };
+    }
+
+    /// The runtime's in-memory storage. The runner must not move once it is used.
+    pub fn storage(runner: *Runner) storage_mod.Storage {
+        return runner.memory_storage.storage();
+    }
+
+    /// CRC32C digest of all durable blob contents (commonware `storage_audit`).
+    pub fn storage_audit(runner: *Runner) [4]u8 {
+        return runner.memory_storage.audit();
     }
 
     /// Simulated time, in nanoseconds since the Unix epoch.
@@ -258,6 +275,10 @@ pub const Runner = struct {
         };
         assert(runner.current == null);
         assert(runner.task_count == 0);
+        // A restart recovers like commonware's checkpoint: only synced contents survive, and
+        // handles from the previous run can no longer publish.
+        if (runner.starts > 0) runner.memory_storage.crash();
+        runner.starts += 1;
         const root = try runner.spawn_task(
             std.mem.asBytes(&args),
             .of(Args),
@@ -1090,4 +1111,30 @@ test "state carries over between starts (test_recover_time_persists)" {
     try (try runner.start(Root.run, .{runner.io()}));
     try testing.expect(runner.now_ns() >= after_first + 10 * std.time.ns_per_s);
     try testing.expect(!std.mem.eql(u8, &audit_first, &runner.auditor.state()));
+}
+
+test "storage survives a restart with only synced contents (test_recover_storage)" {
+    var runner = try test_runner(.{});
+    defer runner.deinit();
+    const Root = struct {
+        fn write(store: storage_mod.Storage) !void {
+            const blob = (try store.open("partition", "blob")).blob;
+            defer blob.close();
+            try blob.write_at(0, "synced", .{});
+            try blob.sync();
+            try blob.write_at(6, " lost", .{});
+        }
+        fn read(store: storage_mod.Storage) !u64 {
+            const opened = try store.open("partition", "blob");
+            defer opened.blob.close();
+            var buffer: [6]u8 = undefined;
+            try opened.blob.read_at(0, &buffer);
+            try testing.expectEqualSlices(u8, "synced", &buffer);
+            return opened.len;
+        }
+    };
+    try (try runner.start(Root.write, .{runner.storage()}));
+    const audit = runner.storage_audit();
+    try testing.expectEqual(@as(u64, 6), try (try runner.start(Root.read, .{runner.storage()})));
+    try testing.expectEqualSlices(u8, &audit, &runner.storage_audit());
 }
