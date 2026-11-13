@@ -60,6 +60,18 @@ the registry API first and report it.
 - OTLP export is not ported (no OpenTelemetry dependency); `status` records the status on the
   span so tests can check it.
 
+- `std.Io.Uring` (and so `std.Io.Evented` on Linux) does not compile in Zig 0.17.1
+  (`batchAwaitConcurrent` switches on a `net_accept` operation `Io.Operation` lacks). The
+  production runtime therefore runs on `std.Io.Threaded` (Linux and macOS); io_uring comes
+  from our own backend over `std.os.linux.IoUring` behind the same storage/network vtables.
+- Production storage (`production/storage.zig`) works on any `Io`: `<root>/<partition>/
+  <hex(name)>`, `.hold` advisory lock, creation fsyncs the directory (and the root for a new
+  partition) then writes the header with set_len(0)/write/fsync, removal fsyncs the parent,
+  and the first open of an existing blob per instance fsyncs it. Commonware's async-drop
+  settlement (`pending.rs`) has no counterpart: `close` is synchronous, so a handle's writes
+  have reached the file before the next open. `dont_cache` read/write hints are accepted and
+  ignored (std.Io has no per-call cache control).
+
 ## Backlog
 - [ ] production runtime over `std.Io` (`std.Io.Uring` on Linux, kqueue/Threaded on macOS):
   a `Runner` with the same surface as `deterministic.Runner` (io, storage, network, metrics),
@@ -88,3 +100,4 @@ the registry API first and report it.
 - 2026-11-13: batched, status, task labels, histogram timers.
 - 2026-11-13: traces: Tracer, spans, Collector with commonware's assertions, status, traced.
 - 2026-11-13: `deterministic.Runner.metrics()` over a runner-owned registry.
+- 2026-11-13: production file storage passes `run_storage_tests` plus tokio's file tests.

@@ -1,0 +1,463 @@
+//! File-backed storage for the production runtime (commonware `storage::tokio` and
+//! `storage::iouring`), over `std.Io` files, so it runs on any `Io`: `std.Io.Uring` on Linux,
+//! kqueue or `std.Io.Threaded` elsewhere.
+//!
+//! Layout: `<root>/<partition>/<hex(name)>`, each blob starting with the runtime header
+//! (`storage/header.zig`). `<root>/.hold` carries an exclusive advisory lock for the life of the
+//! storage, so two processes never share a directory (commonware `hold.rs`).
+//!
+//! Durability follows commonware: creating a blob makes its directory entry durable (fsyncs
+//! the partition directory, and the root when the partition is new), then writes the header
+//! with set_len(0), write, fsync, so a torn creation is recognized and healed on the next open.
+//! Removal fsyncs the parent directory. The first open of an existing blob through a storage
+//! instance fsyncs the file before trusting its length (commonware's first-open flush debt).
+//! Writes reach the file at once; `sync` (or `WriteOptions.sync`) makes them durable.
+//!
+//! One `Io.Mutex` serializes namespace operations (open, remove, scan), as commonware's
+//! dispatch lock does. Blob I/O runs without it. A blob has one live handle: a second open
+//! returns `error.BlobAlreadyOpen` until the first closes or the blob is removed. A removed
+//! blob's handles keep reading and writing its unlinked file.
+
+const std = @import("std");
+const iface = @import("../storage.zig");
+const header = @import("../storage/header.zig");
+const assert = std.debug.assert;
+const Allocator = std.mem.Allocator;
+const Io = std.Io;
+const Dir = Io.Dir;
+const File = Io.File;
+const Error = iface.Error;
+
+/// Name of the hold file at the storage root. Partition names cannot contain `.`.
+pub const hold_name = ".hold";
+
+/// Longest blob name: its hex form must fit a 255-byte file name.
+pub const name_size_max = 127;
+
+pub const Config = struct {
+    /// Layouts this storage accepts when opening existing blobs.
+    layouts: iface.LayoutRange = .all,
+    /// Layout of new blobs.
+    layout: iface.BlobLayout = iface.default_blob_layout,
+};
+
+pub const Storage = struct {
+    io: Io,
+    gpa: Allocator,
+    config: Config,
+    root: Dir,
+    hold: File,
+    mutex: Io.Mutex = .init,
+    /// The live handle of each open blob, keyed by `partition/hex(name)` (owned by the blob).
+    live: std.StringArrayHashMapUnmanaged(*Blob) = .empty,
+    /// Keys whose first-open flush has run (or that were created) through this instance.
+    flushed: std.StringArrayHashMapUnmanaged(void) = .empty,
+
+    /// Takes ownership of `root` and acquires its hold, waiting while another storage holds
+    /// it.
+    pub fn init(io: Io, gpa: Allocator, root: Dir, config: Config) Error!Storage {
+        assert(config.layouts.contains(config.layout));
+        const hold = root.createFile(io, hold_name, .{
+            .truncate = false,
+            .lock = .exclusive,
+        }) catch return error.Io;
+        return .{ .io = io, .gpa = gpa, .config = config, .root = root, .hold = hold };
+    }
+
+    /// Every handle must be closed first. Releases the hold and closes the root.
+    pub fn deinit(self: *Storage) void {
+        assert(self.live.count() == 0);
+        for (self.flushed.keys()) |key| self.gpa.free(key);
+        self.flushed.deinit(self.gpa);
+        self.live.deinit(self.gpa);
+        self.hold.close(self.io);
+        self.root.close(self.io);
+        self.* = undefined;
+    }
+
+    pub fn storage(self: *Storage) iface.Storage {
+        return .{ .ptr = self, .vtable = &vtable };
+    }
+
+    const vtable: iface.Storage.VTable = .{
+        .open_versioned = open_erased,
+        .remove = remove_erased,
+        .scan = scan_erased,
+    };
+
+    fn open_erased(
+        ptr: *anyopaque,
+        partition: []const u8,
+        name: []const u8,
+        versions: iface.VersionRange,
+    ) Error!iface.Opened {
+        const self: *Storage = @ptrCast(@alignCast(ptr));
+        return self.open_versioned(partition, name, versions);
+    }
+
+    fn remove_erased(ptr: *anyopaque, partition: []const u8, name: ?[]const u8) Error!void {
+        const self: *Storage = @ptrCast(@alignCast(ptr));
+        return self.remove(partition, name);
+    }
+
+    fn scan_erased(ptr: *anyopaque, gpa: Allocator, partition: []const u8) Error!iface.Names {
+        const self: *Storage = @ptrCast(@alignCast(ptr));
+        return self.scan(gpa, partition);
+    }
+
+    /// Open or create a blob accepting only `default_blob_version`.
+    pub fn open(self: *Storage, partition: []const u8, name: []const u8) Error!iface.Opened {
+        return self.open_versioned(partition, name, .only(iface.default_blob_version));
+    }
+
+    /// Open or create a blob (see `iface.Storage.open_versioned`).
+    pub fn open_versioned(
+        self: *Storage,
+        partition: []const u8,
+        name: []const u8,
+        versions: iface.VersionRange,
+    ) Error!iface.Opened {
+        assert(versions.min <= versions.max);
+        try iface.validate_partition_name(partition);
+        if (name.len > name_size_max) return error.BlobOpenFailed;
+        var key_buffer: [key_size_max]u8 = undefined;
+        const key = blob_key(&key_buffer, partition, name);
+        self.mutex.lock(self.io) catch return error.Canceled;
+        defer self.mutex.unlock(self.io);
+        if (self.live.contains(key)) return error.BlobAlreadyOpen;
+        try self.live.ensureUnusedCapacity(self.gpa, 1);
+        try self.flushed.ensureUnusedCapacity(self.gpa, 1);
+        const partition_dir = try self.partition_create(partition);
+        defer partition_dir.close(self.io);
+        const file = partition_dir.createFile(self.io, key[partition.len + 1 ..], .{
+            .read = true,
+            .truncate = false,
+        }) catch return error.BlobOpenFailed;
+        errdefer file.close(self.io);
+        const resolved = try self.header_resolve_or_create(partition_dir, file, .{
+            .key = key,
+            .partition = partition,
+            .name = name,
+        }, versions);
+        const handle = try Blob.create(self, file, key, resolved.data_offset);
+        self.live.putAssumeCapacityNoClobber(handle.key, handle);
+        assert(self.live.get(key).? == handle);
+        return .{ .blob = handle.blob(), .len = resolved.len, .version = resolved.blob_version };
+    }
+
+    /// Creates the partition directory if needed, making a new one durable in the root.
+    fn partition_create(self: *Storage, partition: []const u8) Error!Dir {
+        const status = self.root.createDirPathStatus(self.io, partition, .default_dir) catch
+            return error.PartitionCreationFailed;
+        if (status == .created) try sync_dir(self.io, self.root);
+        return self.root.openDir(self.io, partition, .{}) catch error.PartitionCreationFailed;
+    }
+
+    fn header_resolve_or_create(
+        self: *Storage,
+        partition_dir: Dir,
+        file: File,
+        path: Path,
+        versions: iface.VersionRange,
+    ) Error!header.Resolved {
+        const key = path.key;
+        const raw_len = file.length(self.io) catch return error.ReadFailed;
+        var raw_buffer: [header.region_max]u8 = undefined;
+        const raw = raw_buffer[0..header.resolve_len(raw_len)];
+        const read = file.readPositionalAll(self.io, raw, 0) catch return error.ReadFailed;
+        if (read != raw.len) return error.ReadFailed;
+        const layouts = self.config.layouts;
+        const resolved = try header.resolve(
+            raw,
+            raw_len,
+            layouts,
+            versions,
+            path.partition,
+            path.name,
+        );
+        if (resolved) |existing| {
+            if (!self.flushed.contains(key)) {
+                // The previous run may have left writes in the page cache: settle them first.
+                file.sync(self.io) catch return error.BlobSyncFailed;
+                self.flushed.putAssumeCapacityNoClobber(try self.gpa.dupe(u8, key), {});
+            }
+            return existing;
+        }
+        // A new blob (or one torn during creation): make its directory entry durable, then
+        // write the header region over an emptied file.
+        try sync_dir(self.io, partition_dir);
+        var region: [header.region_max]u8 = undefined;
+        const created = header.create(.only(self.config.layout), versions, &region);
+        file.setLength(self.io, 0) catch return error.BlobResizeFailed;
+        file.writePositionalAll(self.io, created.region, 0) catch return error.WriteFailed;
+        file.sync(self.io) catch return error.BlobSyncFailed;
+        if (!self.flushed.contains(key)) {
+            self.flushed.putAssumeCapacityNoClobber(try self.gpa.dupe(u8, key), {});
+        }
+        return .{
+            .len = 0,
+            .blob_version = created.blob_version,
+            .data_offset = created.region.len,
+        };
+    }
+
+    /// Remove a blob, or the whole partition when `name` is null. Open handles stay usable.
+    pub fn remove(self: *Storage, partition: []const u8, name: ?[]const u8) Error!void {
+        try iface.validate_partition_name(partition);
+        self.mutex.lock(self.io) catch return error.Canceled;
+        defer self.mutex.unlock(self.io);
+        if (name) |blob_name| {
+            if (blob_name.len > name_size_max) return error.BlobMissing;
+            var key_buffer: [key_size_max]u8 = undefined;
+            const key = blob_key(&key_buffer, partition, blob_name);
+            const partition_dir = self.root.openDir(self.io, partition, .{}) catch
+                return error.BlobMissing;
+            defer partition_dir.close(self.io);
+            partition_dir.deleteFile(self.io, key[partition.len + 1 ..]) catch
+                return error.BlobMissing;
+            self.forget(key, false);
+            try sync_dir(self.io, partition_dir);
+        } else {
+            const partition_dir = self.root.openDir(self.io, partition, .{}) catch |err|
+                return if (err == error.FileNotFound) error.PartitionMissing else error.Io;
+            partition_dir.close(self.io);
+            self.root.deleteTree(self.io, partition) catch return error.Io;
+            var prefix_buffer: [iface_partition_size_max + 1]u8 = undefined;
+            if (partition.len > iface_partition_size_max) return error.PartitionNameInvalid;
+            @memcpy(prefix_buffer[0..partition.len], partition);
+            prefix_buffer[partition.len] = '/';
+            self.forget(prefix_buffer[0 .. partition.len + 1], true);
+            try sync_dir(self.io, self.root);
+        }
+    }
+
+    /// Drops the live claim and first-open record of `key`, or of every key it prefixes.
+    fn forget(self: *Storage, key: []const u8, prefix: bool) void {
+        var index: usize = 0;
+        while (index < self.live.count()) {
+            const live_key = self.live.keys()[index];
+            if (key_matches(live_key, key, prefix)) {
+                self.live.swapRemoveAt(index);
+            } else index += 1;
+        }
+        index = 0;
+        while (index < self.flushed.count()) {
+            const flushed_key = self.flushed.keys()[index];
+            if (key_matches(flushed_key, key, prefix)) {
+                self.flushed.swapRemoveAt(index);
+                self.gpa.free(flushed_key);
+            } else index += 1;
+        }
+    }
+
+    /// Every blob name in `partition`, sorted.
+    pub fn scan(self: *Storage, gpa: Allocator, partition: []const u8) Error!iface.Names {
+        try iface.validate_partition_name(partition);
+        self.mutex.lock(self.io) catch return error.Canceled;
+        defer self.mutex.unlock(self.io);
+        const options: Dir.OpenOptions = .{ .iterate = true };
+        const partition_dir = self.root.openDir(self.io, partition, options) catch |err|
+            return if (err == error.FileNotFound) error.PartitionMissing else error.ReadFailed;
+        defer partition_dir.close(self.io);
+        var names: std.ArrayList([]u8) = .empty;
+        errdefer {
+            for (names.items) |item| gpa.free(item);
+            names.deinit(gpa);
+        }
+        var iterator = partition_dir.iterate();
+        while (iterator.next(self.io) catch return error.ReadFailed) |entry| {
+            if (entry.kind != .file) return error.PartitionCorrupt;
+            const decoded = try gpa.alloc(u8, entry.name.len / 2);
+            errdefer gpa.free(decoded);
+            if (!hex_decode(decoded, entry.name)) return error.PartitionCorrupt;
+            try names.append(gpa, decoded);
+        }
+        std.mem.sortUnstable([]u8, names.items, {}, order_names);
+        return .{ .items = try names.toOwnedSlice(gpa) };
+    }
+};
+
+/// A blob's partition, name, and key (`partition/hex(name)`).
+const Path = struct { key: []const u8, partition: []const u8, name: []const u8 };
+
+const iface_partition_size_max = 255;
+const key_size_max = iface_partition_size_max + 1 + 2 * name_size_max;
+
+fn order_names(_: void, a: []u8, b: []u8) bool {
+    return std.mem.order(u8, a, b) == .lt;
+}
+
+fn key_matches(candidate: []const u8, key: []const u8, prefix: bool) bool {
+    if (prefix) return std.mem.startsWith(u8, candidate, key);
+    return std.mem.eql(u8, candidate, key);
+}
+
+/// `partition/hex(name)`, the blob's path below the root.
+fn blob_key(buffer: *[key_size_max]u8, partition: []const u8, name: []const u8) []const u8 {
+    assert(partition.len <= iface_partition_size_max);
+    assert(name.len <= name_size_max);
+    @memcpy(buffer[0..partition.len], partition);
+    buffer[partition.len] = '/';
+    const digits = "0123456789abcdef";
+    for (name, 0..) |byte, index| {
+        buffer[partition.len + 1 + 2 * index] = digits[byte >> 4];
+        buffer[partition.len + 2 + 2 * index] = digits[byte & 0xf];
+    }
+    return buffer[0 .. partition.len + 1 + 2 * name.len];
+}
+
+/// Decodes lowercase hex (commonware rejects names that do not round-trip).
+fn hex_decode(out: []u8, text: []const u8) bool {
+    if (text.len != out.len * 2) return false;
+    for (out, 0..) |*byte, index| {
+        const high = hex_digit(text[2 * index]) orelse return false;
+        const low = hex_digit(text[2 * index + 1]) orelse return false;
+        byte.* = high << 4 | low;
+    }
+    return true;
+}
+
+fn hex_digit(char: u8) ?u8 {
+    return switch (char) {
+        '0'...'9' => char - '0',
+        'a'...'f' => char - 'a' + 10,
+        else => null,
+    };
+}
+
+/// Makes a directory's entries durable (commonware `sync_dir`).
+fn sync_dir(io: Io, dir: Dir) Error!void {
+    // A directory opened without `iterate` is an `O_PATH` handle on Linux, which cannot be
+    // synced: reopen it readable.
+    const readable = dir.openDir(io, ".", .{ .iterate = true }) catch return error.BlobSyncFailed;
+    defer readable.close(io);
+    const file: File = .{ .handle = readable.handle, .flags = .{ .nonblocking = false } };
+    file.sync(io) catch return error.BlobSyncFailed;
+}
+
+pub const Blob = struct {
+    storage: *Storage,
+    file: File,
+    data_offset: u64,
+    key: []u8,
+
+    fn create(storage: *Storage, file: File, key: []const u8, data_offset: u64) Error!*Blob {
+        assert(data_offset <= header.region_max);
+        const handle = try storage.gpa.create(Blob);
+        errdefer storage.gpa.destroy(handle);
+        handle.* = .{
+            .storage = storage,
+            .file = file,
+            .data_offset = data_offset,
+            .key = try storage.gpa.dupe(u8, key),
+        };
+        return handle;
+    }
+
+    pub fn blob(self: *Blob) iface.Blob {
+        return .{ .ptr = self, .vtable = &blob_vtable };
+    }
+
+    const blob_vtable: iface.Blob.VTable = .{
+        .read_at = read_erased,
+        .write_at = write_erased,
+        .resize = resize_erased,
+        .sync = sync_erased,
+        .close = close_erased,
+    };
+
+    fn read_erased(
+        ptr: *anyopaque,
+        offset: u64,
+        buffer: []u8,
+        options: iface.ReadOptions,
+    ) Error!void {
+        const self: *Blob = @ptrCast(@alignCast(ptr));
+        return self.read_at(offset, buffer, options);
+    }
+
+    fn write_erased(
+        ptr: *anyopaque,
+        offset: u64,
+        chunks: []const []const u8,
+        options: iface.WriteOptions,
+    ) Error!void {
+        const self: *Blob = @ptrCast(@alignCast(ptr));
+        return self.write_at(offset, chunks, options);
+    }
+
+    fn resize_erased(ptr: *anyopaque, length: u64) Error!void {
+        const self: *Blob = @ptrCast(@alignCast(ptr));
+        return self.resize(length);
+    }
+
+    fn sync_erased(ptr: *anyopaque) Error!void {
+        const self: *Blob = @ptrCast(@alignCast(ptr));
+        return self.sync();
+    }
+
+    fn close_erased(ptr: *anyopaque) void {
+        const self: *Blob = @ptrCast(@alignCast(ptr));
+        self.close();
+    }
+
+    fn raw_offset(self: *const Blob, offset: u64, length: usize) Error!u64 {
+        const start = std.math.add(u64, self.data_offset, offset) catch return error.OffsetOverflow;
+        _ = std.math.add(u64, start, length) catch return error.OffsetOverflow;
+        return start;
+    }
+
+    pub fn read_at(self: *Blob, offset: u64, buffer: []u8, options: iface.ReadOptions) Error!void {
+        _ = options; // `dont_cache` is a hint; std.Io has no per-read cache control.
+        const start = try self.raw_offset(offset, buffer.len);
+        if (buffer.len == 0) return;
+        const io = self.storage.io;
+        const read = self.file.readPositionalAll(io, buffer, start) catch return error.ReadFailed;
+        if (read < buffer.len) return error.BlobInsufficientLength;
+        assert(read == buffer.len);
+    }
+
+    pub fn write_at(
+        self: *Blob,
+        offset: u64,
+        chunks: []const []const u8,
+        options: iface.WriteOptions,
+    ) Error!void {
+        var total: usize = 0;
+        for (chunks) |chunk| total += chunk.len;
+        var position = try self.raw_offset(offset, total);
+        if (total == 0) return;
+        const io = self.storage.io;
+        for (chunks) |chunk| {
+            self.file.writePositionalAll(io, chunk, position) catch return error.WriteFailed;
+            position += chunk.len;
+        }
+        assert(position == self.data_offset + offset + total);
+        if (options.sync) self.file.sync(io) catch return error.BlobSyncFailed;
+    }
+
+    pub fn resize(self: *Blob, length: u64) Error!void {
+        const raw_length = try self.raw_offset(length, 0);
+        self.file.setLength(self.storage.io, raw_length) catch return error.BlobResizeFailed;
+    }
+
+    pub fn sync(self: *Blob) Error!void {
+        self.file.sync(self.storage.io) catch return error.BlobSyncFailed;
+    }
+
+    /// Releases the handle without syncing.
+    pub fn close(self: *Blob) void {
+        const storage = self.storage;
+        storage.mutex.lockUncancelable(storage.io);
+        if (storage.live.get(self.key)) |live| {
+            if (live == self) {
+                const removed = storage.live.swapRemove(self.key);
+                assert(removed);
+            }
+        }
+        storage.mutex.unlock(storage.io);
+        self.file.close(storage.io);
+        storage.gpa.free(self.key);
+        storage.gpa.destroy(self);
+    }
+};
