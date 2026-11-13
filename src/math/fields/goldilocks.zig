@@ -8,8 +8,9 @@ const std = @import("std");
 const assert = std.debug.assert;
 const codec = @import("codec");
 const algebra = @import("../algebra.zig");
-const fuzz = @import("../fuzz.zig");
-const Unstructured = fuzz.Unstructured;
+const minifuzz = @import("invariants").minifuzz;
+const Unstructured = minifuzz.Unstructured;
+const testing_types = @import("../testing.zig");
 
 /// The modulus P := 2^64 - 2^32 + 1.
 pub const P: u64 = 0xffff_ffff_0000_0001;
@@ -155,8 +156,8 @@ pub const F = struct {
         }
     }
 
-    pub fn arbitrary(u: *Unstructured) F {
-        return from_u64(u.int(u64));
+    pub fn arbitrary(u: *Unstructured) minifuzz.Error!F {
+        return from_u64(try u.arbitrary(u64));
     }
 
     pub fn to_le_bytes(a: F) [8]u8 {
@@ -244,48 +245,56 @@ comptime {
     algebra.assert_field_ntt(F);
 }
 
+/// Most words `stream_roundtrip` collects; a longer arbitrary `Vec<u64>` is truncated.
+const stream_words_max = 1024;
+
 /// The goldilocks fuzz plan (commonware `fields::goldilocks::fuzz::Plan`).
 pub fn fuzz_plan(_: void, u: *Unstructured) !void {
-    switch (u.choose(enum { stream_roundtrip, read_rejects_out_of_range, fuzz_field })) {
+    switch (try u.arbitrary(enum { stream_roundtrip, read_rejects_out_of_range, fuzz_field })) {
         .stream_roundtrip => {
-            var data: [64]u64 = undefined;
-            const count = u.length(data.len);
-            for (data[0..count]) |*word| word.* = u.int(u64);
-            var elements: [66]F = undefined;
-            var element_count: usize = 0;
+            // arbitrary's Vec<u64>: a continue flag before each element.
+            var data: [stream_words_max]u64 = undefined;
+            var count: usize = 0;
+            while (count < data.len and try u.arbitrary(bool)) : (count += 1) {
+                data[count] = try u.arbitrary(u64);
+            }
             var from = stream_from_u64s(data[0..count]);
-            while (from.next()) |element| : (element_count += 1) elements[element_count] = element;
+            var to_buffer: [F.bits_to_elements(64 * stream_words_max)]F = undefined;
+            var element_count: usize = 0;
+            while (from.next()) |element| : (element_count += 1) {
+                to_buffer[element_count] = element;
+            }
             assert(element_count == F.bits_to_elements(64 * count));
-            var to = stream_to_u64s(elements[0..element_count]);
+            var to = stream_to_u64s(to_buffer[0..element_count]);
             for (data[0..count]) |word| {
                 if (to.next() != word) return error.StreamMismatch;
             }
         },
         .read_rejects_out_of_range => {
-            const x = u.int_in_range(u64, P, std.math.maxInt(u64));
-            var bytes: [8]u8 = undefined;
-            std.mem.writeInt(u64, &bytes, x, .big);
-            var reader = codec.Reader.init(&bytes);
-            if (F.read(std.testing.allocator, &reader, {})) |_| {
-                return error.AcceptedOutOfRange;
-            } else |err| if (err != error.Invalid) return err;
+            try check_read_rejects(u.int_in_range(u64, P, std.math.maxInt(u64)));
         },
         .fuzz_field => try algebra.test_suites.fuzz_field_ntt(F, u),
     }
 }
 
+fn check_read_rejects(x: u64) !void {
+    assert(x >= P);
+    var bytes: [8]u8 = undefined;
+    std.mem.writeInt(u64, &bytes, x, .big);
+    var reader = codec.Reader.init(&bytes);
+    if (F.read(std.testing.allocator, &reader, {})) |_| {
+        return error.AcceptedOutOfRange;
+    } else |err| if (err != error.Invalid) return err;
+}
+
 const testing = std.testing;
 
-test "goldilocks fuzz plan (seeded)" {
-    try fuzz.run_seeded(0x601d, 2000, {}, fuzz_plan);
+test "goldilocks fuzz plan" {
+    try minifuzz.run(testing.allocator, {}, fuzz_plan);
 }
 
 test "goldilocks fuzz plan (coverage-guided)" {
-    try testing.fuzz({}, struct {
-        fn one(_: void, smith: *testing.Smith) anyerror!void {
-            try fuzz.run_smith({}, smith, fuzz_plan);
-        }
-    }.one, .{});
+    try testing.fuzz({}, testing_types.smith_body(void, fuzz_plan), .{});
 }
 
 test "read rejects the modulus (regression)" {

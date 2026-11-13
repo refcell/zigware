@@ -69,9 +69,10 @@ test "ops: proof of possession, namespaces, and single messages" {
     }
 }
 
-/// Every vector runs in optimized builds and with `-Dslow-tests`; a Debug run checks every
-/// 16th (the full sets take over a minute there).
-const vector_stride: usize = if (builtin.mode == .debug and !build_options.slow_tests) 16 else 1;
+/// Optimized builds and `-Dslow-tests` run the full sets; a Debug run (where they take
+/// minutes) checks every 16th vector and the smaller bisection shapes.
+const slow = builtin.mode != .debug or build_options.slow_tests;
+const vector_stride: usize = if (slow) 1 else 16;
 
 /// Runs the noble-curves vectors for one variant: each signs, verifies, and fails once
 /// tampered; the whole set batch-verifies, and fails once one signature is tampered.
@@ -369,7 +370,9 @@ fn check_bisection(comptime V: type) !void {
             .signature = ops.sign_message(V, pair.private, "test", "message"),
         };
     }
-    for ([_]usize{ 1, 2, 5, 9 }) |total| {
+    const totals_slow = [_]usize{ 1, 2, 3, 4, 5, 6, 7, 8, 9 };
+    const totals = if (slow) &totals_slow else totals_slow[0..3];
+    for (totals) |total| {
         for (0..total) |first| {
             for (first..total) |second| {
                 var entries = valid;

@@ -7,7 +7,7 @@
 const std = @import("std");
 const assert = std.debug.assert;
 const codec = @import("codec");
-const math = @import("math");
+const minifuzz = @import("invariants").minifuzz;
 const ops = @import("../ops.zig");
 const variant = @import("../variant.zig");
 
@@ -43,8 +43,8 @@ fn Wrapper(comptime Element: type, comptime kind: Kind) type {
             return .{ .value = try Element.read(gpa, reader, {}) };
         }
 
-        pub fn arbitrary(u: *math.fuzz.Unstructured) Self {
-            return .{ .value = Element.arbitrary(u) };
+        pub fn arbitrary(u: *minifuzz.Unstructured) minifuzz.Error!Self {
+            return .{ .value = try Element.arbitrary(u) };
         }
     };
 }

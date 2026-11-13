@@ -6,8 +6,10 @@
 //! - `algebra`: comptime interfaces for additive groups, rings, fields, modules (`Space`),
 //!   cryptographic groups, and the generic algorithms behind them (`exp`, `scale`, `msm`).
 //! - `fields.goldilocks`: the 64-bit Goldilocks field.
-//! - `testing`: tiny field and group types for testing generic code.
-//! - `fuzz`: structured fuzz input and drivers shared with packages that build on math.
+//! - `testing`: tiny field and group types for testing generic code, and the adapter that
+//!   runs minifuzz bodies under `std.testing.fuzz`.
+//!
+//! Property tests draw from `invariants.minifuzz`, the port of commonware's minifuzz.
 
 const std = @import("std");
 
@@ -19,7 +21,6 @@ pub const ntt = @import("ntt.zig");
 pub const poly = @import("poly.zig");
 pub const synthetic = @import("synthetic.zig");
 pub const testing = @import("testing.zig");
-pub const fuzz = @import("fuzz.zig");
 
 test {
     std.testing.refAllDecls(@This());

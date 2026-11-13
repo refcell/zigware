@@ -12,7 +12,7 @@ const std = @import("std");
 const assert = std.debug.assert;
 const codec = @import("codec");
 const utils = @import("utils");
-const math = @import("math");
+const minifuzz = @import("invariants").minifuzz;
 const group = @import("group.zig");
 
 const Allocator = std.mem.Allocator;
@@ -133,9 +133,9 @@ pub fn PartialSignature(comptime V: type) type {
             return .{ .index = index, .value = value };
         }
 
-        pub fn arbitrary(u: *math.fuzz.Unstructured) Self {
-            const index = utils.Participant.init(u.int(u32));
-            return .{ .index = index, .value = V.Signature.generator.mul(Scalar.arbitrary(u)) };
+        pub fn arbitrary(u: *minifuzz.Unstructured) minifuzz.Error!Self {
+            const index = try u.arbitrary(utils.Participant);
+            return .{ .index = index, .value = V.Signature.generator.mul(try Scalar.arbitrary(u)) };
         }
 
         pub fn eql(a: Self, b: Self) bool {

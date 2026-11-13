@@ -10,8 +10,8 @@ const std = @import("std");
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const algebra = @import("algebra.zig");
-const fuzz = @import("fuzz.zig");
-const Unstructured = fuzz.Unstructured;
+const minifuzz = @import("invariants").minifuzz;
+const Unstructured = minifuzz.Unstructured;
 
 pub fn Synthetic(comptime F: type, comptime G: type) type {
     algebra.assert_additive(F);
@@ -155,14 +155,16 @@ pub fn Synthetic(comptime F: type, comptime G: type) type {
             return (try difference.eval(allocator, &.{})).eql(G.zero);
         }
 
+        /// commonware's `Arbitrary`: up to eight free terms (index in 0..=32, then weight;
+        /// a later duplicate index replaces the earlier one, as a BTreeMap collect), then
+        /// arbitrary's `Vec<(F, G)>` of concrete terms.
         pub fn arbitrary(allocator: Allocator, u: *Unstructured) !Self {
             var out: Self = .{};
             errdefer out.deinit(allocator);
-            const free_count = u.int_in_range(u8, 0, 8);
+            const free_count = u.int_in_range(usize, 0, 8);
             for (0..free_count) |_| {
                 const index = u.int_in_range(u32, 0, 32);
-                const weight = F.arbitrary(u);
-                // Like a BTreeMap collect: a later duplicate index replaces the earlier one.
+                const weight = try u.arbitrary(F);
                 var position: usize = 0;
                 while (position < out.free.items.len and out.free.items[position].index < index) {
                     position += 1;
@@ -174,19 +176,28 @@ pub fn Synthetic(comptime F: type, comptime G: type) type {
                     try out.free.insert(allocator, position, .{ .index = index, .weight = weight });
                 }
             }
-            const concrete_count = u.length(8);
-            for (0..concrete_count) |_| {
-                try out.concrete.append(allocator, .{
-                    .weight = F.arbitrary(u),
-                    .point = G.arbitrary(u),
-                });
-            }
+            try arbitrary_concrete(allocator, u, &out.concrete);
             return out;
+        }
+
+        /// arbitrary's `Vec<(F, G)>`: a continue flag before each term.
+        pub fn arbitrary_concrete(
+            allocator: Allocator,
+            u: *Unstructured,
+            terms: *std.ArrayList(ConcreteTerm),
+        ) !void {
+            const flags_max = u.len() + 1;
+            var flags: usize = 0;
+            while (flags < flags_max and try u.arbitrary(bool)) : (flags += 1) {
+                const weight = try u.arbitrary(F);
+                try terms.append(allocator, .{ .weight = weight, .point = try u.arbitrary(G) });
+            }
         }
     };
 }
 
 const testing_types = @import("testing.zig");
+const build_options = @import("build_options");
 const TF = testing_types.F;
 const TG = testing_types.G;
 const S = Synthetic(TF, TG);
@@ -195,38 +206,49 @@ fn expect(ok: bool) !void {
     if (!ok) return error.LawViolated;
 }
 
+/// arbitrary's `Vec<T>` for value types: a continue flag before each element.
+fn arbitrary_list(comptime T: type, allocator: Allocator, u: *Unstructured) !std.ArrayList(T) {
+    var out: std.ArrayList(T) = .empty;
+    errdefer out.deinit(allocator);
+    const flags_max = u.len() + 1;
+    while (out.items.len < flags_max and try u.arbitrary(bool)) {
+        try out.append(allocator, try u.arbitrary(T));
+    }
+    return out;
+}
+
 fn eval_matches_msm(allocator: Allocator, u: *Unstructured) !void {
-    var free_weights: [8]TF = undefined;
-    const free_count = u.length(free_weights.len);
+    var free_weights = try arbitrary_list(TF, allocator, u);
+    defer free_weights.deinit(allocator);
+    var concrete: std.ArrayList(S.ConcreteTerm) = .empty;
+    defer concrete.deinit(allocator);
+    try S.arbitrary_concrete(allocator, u, &concrete);
     var expression: S = .{};
     defer expression.deinit(allocator);
-    for (free_weights[0..free_count], 0..) |*w, i| {
-        w.* = TF.arbitrary(u);
-        var term = try S.generator(allocator, @intCast(i));
+    for (free_weights.items, 0..) |weight, index| {
+        var term = try S.generator(allocator, @intCast(index));
         defer term.deinit(allocator);
-        term.mul_assign(w.*);
+        term.mul_assign(weight);
         try expression.add_assign(allocator, term);
     }
-    var concrete: [8]S.ConcreteTerm = undefined;
-    const concrete_count = u.length(concrete.len);
-    for (concrete[0..concrete_count]) |*c| {
-        c.* = .{ .weight = TF.arbitrary(u), .point = TG.arbitrary(u) };
-    }
-    var concrete_part = try S.init_concrete(allocator, concrete[0..concrete_count]);
+    var concrete_part = try S.init_concrete(allocator, concrete.items);
     defer concrete_part.deinit(allocator);
     try expression.add_assign(allocator, concrete_part);
-    var points: [16]TG = undefined;
-    var weights: [16]TF = undefined;
-    for (0..free_count) |i| {
-        points[i] = TG.arbitrary(u);
-        weights[i] = free_weights[i];
+    const count = free_weights.items.len + concrete.items.len;
+    const points = try allocator.alloc(TG, count);
+    defer allocator.free(points);
+    const weights = try allocator.alloc(TF, count);
+    defer allocator.free(weights);
+    const free_count = free_weights.items.len;
+    for (points[0..free_count], weights[0..free_count], free_weights.items) |*p, *w, weight| {
+        p.* = try u.arbitrary(TG);
+        w.* = weight;
     }
-    for (concrete[0..concrete_count], 0..) |c, i| {
-        points[free_count + i] = c.point;
-        weights[free_count + i] = c.weight;
+    for (points[free_count..], weights[free_count..], concrete.items) |*p, *w, term| {
+        p.* = term.point;
+        w.* = term.weight;
     }
-    const count = free_count + concrete_count;
-    const expected = algebra.msm(TG, TF, points[0..count], weights[0..count]);
+    const expected = algebra.msm(TG, TF, points, weights);
     try expect((try expression.eval(allocator, points[0..free_count])).eql(expected));
 }
 
@@ -235,26 +257,52 @@ fn eval_is_linear(allocator: Allocator, u: *Unstructured) !void {
     defer lhs.deinit(allocator);
     var rhs = try S.arbitrary(allocator, u);
     defer rhs.deinit(allocator);
-    var generators: [33]TG = undefined;
-    for (&generators) |*g| g.* = TG.arbitrary(u);
-    const lhs_eval = try lhs.eval(allocator, &generators);
-    const rhs_eval = try rhs.eval(allocator, &generators);
+    var generators = try arbitrary_list(TG, allocator, u);
+    defer generators.deinit(allocator);
+    // cover_generators: draw more until every free index has one.
+    const lhs_needed = if (lhs.max_free_index()) |m| m + 1 else 0;
+    const rhs_needed = if (rhs.max_free_index()) |m| m + 1 else 0;
+    const needed = @max(lhs_needed, rhs_needed);
+    while (generators.items.len < needed) try generators.append(allocator, try u.arbitrary(TG));
+    const lhs_eval = try lhs.eval(allocator, generators.items);
+    const rhs_eval = try rhs.eval(allocator, generators.items);
     try lhs.add_assign(allocator, rhs);
-    try expect((try lhs.eval(allocator, &generators)).eql(lhs_eval.add(rhs_eval)));
+    try expect((try lhs.eval(allocator, generators.items)).eql(lhs_eval.add(rhs_eval)));
 }
 
+fn sum(allocator: Allocator, a: S, b: S) !S {
+    var out = try a.clone(allocator);
+    errdefer out.deinit(allocator);
+    try out.add_assign(allocator, b);
+    return out;
+}
+
+fn scaled(allocator: Allocator, a: S, x: TF) !S {
+    var out = try a.clone(allocator);
+    out.mul_assign(x);
+    return out;
+}
+
+/// `test_suites::fuzz_additive::<Synthetic<F, G>>` with allocating values.
 fn fuzz_additive(allocator: Allocator, u: *Unstructured) !void {
     var a = try S.arbitrary(allocator, u);
     defer a.deinit(allocator);
     var b = try S.arbitrary(allocator, u);
     defer b.deinit(allocator);
-    var ab = try a.clone(allocator);
+    var c = try S.arbitrary(allocator, u);
+    defer c.deinit(allocator);
+    var ab = try sum(allocator, a, b);
     defer ab.deinit(allocator);
-    try ab.add_assign(allocator, b);
-    var ba = try b.clone(allocator);
+    var ba = try sum(allocator, b, a);
     defer ba.deinit(allocator);
-    try ba.add_assign(allocator, a);
     try expect(try ab.eql(ba, allocator));
+    var ab_c = try sum(allocator, ab, c);
+    defer ab_c.deinit(allocator);
+    var bc = try sum(allocator, b, c);
+    defer bc.deinit(allocator);
+    var a_bc = try sum(allocator, a, bc);
+    defer a_bc.deinit(allocator);
+    try expect(try ab_c.eql(a_bc, allocator));
     var difference = try a.clone(allocator);
     defer difference.deinit(allocator);
     try difference.sub_assign(allocator, a);
@@ -266,47 +314,81 @@ fn fuzz_additive(allocator: Allocator, u: *Unstructured) !void {
     try expect(try negated.eql(S.zero, allocator));
 }
 
+/// `test_suites::fuzz_space_ring::<F, Synthetic<F, G>>`, drawing in the same order.
 fn fuzz_space_ring(allocator: Allocator, u: *Unstructured) !void {
+    {
+        var a = try S.arbitrary(allocator, u);
+        defer a.deinit(allocator);
+        var b = try S.arbitrary(allocator, u);
+        defer b.deinit(allocator);
+        const x = try u.arbitrary(TF);
+        var ab = try sum(allocator, a, b);
+        defer ab.deinit(allocator);
+        var left = try scaled(allocator, ab, x);
+        defer left.deinit(allocator);
+        var ax = try scaled(allocator, a, x);
+        defer ax.deinit(allocator);
+        var bx = try scaled(allocator, b, x);
+        defer bx.deinit(allocator);
+        var right = try sum(allocator, ax, bx);
+        defer right.deinit(allocator);
+        try expect(try left.eql(right, allocator));
+        _ = try u.arbitrary(TF); // `a *= c` against `a * c`: the same call here.
+    }
+    try check_msm(allocator, u);
+    {
+        var a = try S.arbitrary(allocator, u);
+        defer a.deinit(allocator);
+        const x = try u.arbitrary(TF);
+        const y = try u.arbitrary(TF);
+        var axy = try scaled(allocator, a, x);
+        defer axy.deinit(allocator);
+        axy.mul_assign(y);
+        var a_xy = try scaled(allocator, a, x.mul(y));
+        defer a_xy.deinit(allocator);
+        try expect(try axy.eql(a_xy, allocator));
+    }
     var a = try S.arbitrary(allocator, u);
     defer a.deinit(allocator);
-    var b = try S.arbitrary(allocator, u);
-    defer b.deinit(allocator);
-    const x = TF.arbitrary(u);
-    const y = TF.arbitrary(u);
-    // (a + b) * x == a * x + b * x
-    var left = try a.clone(allocator);
-    defer left.deinit(allocator);
-    try left.add_assign(allocator, b);
-    left.mul_assign(x);
-    var right = try a.clone(allocator);
-    defer right.deinit(allocator);
-    right.mul_assign(x);
-    var bx = try b.clone(allocator);
-    defer bx.deinit(allocator);
-    bx.mul_assign(x);
-    try right.add_assign(allocator, bx);
-    try expect(try left.eql(right, allocator));
-    // (a * x) * y == a * (x * y), a * 1 == a, a * 0 == 0.
-    var axy = try a.clone(allocator);
-    defer axy.deinit(allocator);
-    axy.mul_assign(x);
-    axy.mul_assign(y);
-    var a_xy = try a.clone(allocator);
-    defer a_xy.deinit(allocator);
-    a_xy.mul_assign(x.mul(y));
-    try expect(try axy.eql(a_xy, allocator));
-    var scaled = try a.clone(allocator);
-    defer scaled.deinit(allocator);
-    scaled.mul_assign(TF.one);
-    try expect(try scaled.eql(a, allocator));
-    scaled.mul_assign(TF.zero);
-    try expect(try scaled.eql(S.zero, allocator));
+    var one = try scaled(allocator, a, TF.one);
+    defer one.deinit(allocator);
+    try expect(try one.eql(a, allocator));
+    var zero = try scaled(allocator, a, TF.zero);
+    defer zero.deinit(allocator);
+    try expect(try zero.eql(S.zero, allocator));
+}
+
+/// The msm law of `fuzz_space`. Synthetic has no faster msm, so commonware's check
+/// compares the default sum with itself; this compares sums taken in both orders.
+fn check_msm(allocator: Allocator, u: *Unstructured) !void {
+    const count = u.int_in_range(usize, 0, 16);
+    var values: [16]S = undefined;
+    var built: usize = 0;
+    defer for (values[0..built]) |*v| v.deinit(allocator);
+    while (built < count) : (built += 1) values[built] = try S.arbitrary(allocator, u);
+    var scalars: [16]TF = undefined;
+    for (scalars[0..count]) |*scalar| scalar.* = try u.arbitrary(TF);
+    var forward: S = .{};
+    defer forward.deinit(allocator);
+    var backward: S = .{};
+    defer backward.deinit(allocator);
+    for (0..count) |index| {
+        var term = try scaled(allocator, values[index], scalars[index]);
+        defer term.deinit(allocator);
+        try forward.add_assign(allocator, term);
+        const back = count - 1 - index;
+        var back_term = try scaled(allocator, values[back], scalars[back]);
+        defer back_term.deinit(allocator);
+        try backward.add_assign(allocator, back_term);
+    }
+    try expect(try forward.eql(backward, allocator));
 }
 
 /// The synthetic fuzz plan (commonware `synthetic::fuzz::Plan`).
 pub fn fuzz_plan(_: void, u: *Unstructured) !void {
     const allocator = std.testing.allocator;
-    switch (u.choose(enum { eval_matches_msm, eval_is_linear, fuzz_additive, fuzz_space_ring })) {
+    const Plan = enum { eval_matches_msm, eval_is_linear, fuzz_additive, fuzz_space_ring };
+    switch (try u.arbitrary(Plan)) {
         .eval_matches_msm => try eval_matches_msm(allocator, u),
         .eval_is_linear => try eval_is_linear(allocator, u),
         .fuzz_additive => try fuzz_additive(allocator, u),
@@ -316,16 +398,13 @@ pub fn fuzz_plan(_: void, u: *Unstructured) !void {
 
 const testing = std.testing;
 
-test "synthetic fuzz plan (seeded)" {
-    try fuzz.run_seeded(0x5e7, 500, {}, fuzz_plan);
+test "synthetic fuzz plan" {
+    try (minifuzz.Builder{}).with_search_limit(2000 * build_options.fuzz_soak)
+        .run(testing.allocator, {}, fuzz_plan);
 }
 
 test "synthetic fuzz plan (coverage-guided)" {
-    try testing.fuzz({}, struct {
-        fn one(_: void, smith: *testing.Smith) anyerror!void {
-            try fuzz.run_smith({}, smith, fuzz_plan);
-        }
-    }.one, .{});
+    try testing.fuzz({}, testing_types.smith_body(void, fuzz_plan), .{});
 }
 
 test "generators track indices" {

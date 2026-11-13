@@ -14,11 +14,11 @@ const std = @import("std");
 const assert = std.debug.assert;
 const codec = @import("codec");
 const utils = @import("utils");
-const math = @import("math");
+const minifuzz = @import("invariants").minifuzz;
 const arithmetic = @import("arithmetic/root.zig");
 
 const Allocator = std.mem.Allocator;
-const Unstructured = math.fuzz.Unstructured;
+const Unstructured = minifuzz.Unstructured;
 const Sha256 = std.crypto.hash.sha2.Sha256;
 const HkdfSha256 = std.crypto.kdf.hkdf.HkdfSha256;
 const Fr = arithmetic.Fr;
@@ -161,9 +161,9 @@ pub const Scalar = struct {
         return from_ikm(&ikm);
     }
 
-    pub fn arbitrary(u: *Unstructured) Scalar {
-        var ikm: [ikm_length]u8 = undefined;
-        u.bytes(&ikm);
+    /// KeyGen over 64 arbitrary bytes of key material.
+    pub fn arbitrary(u: *Unstructured) minifuzz.Error!Scalar {
+        const ikm = try u.arbitrary([ikm_length]u8);
         return from_ikm(&ikm);
     }
 
@@ -350,8 +350,8 @@ pub const Private = struct {
         return .{ .scalar = Scalar.random(rng) };
     }
 
-    pub fn arbitrary(u: *Unstructured) Private {
-        return .{ .scalar = Scalar.arbitrary(u) };
+    pub fn arbitrary(u: *Unstructured) minifuzz.Error!Private {
+        return .{ .scalar = try Scalar.arbitrary(u) };
     }
 
     pub fn eql(a: Private, b: Private) bool {
@@ -389,9 +389,9 @@ pub const Share = struct {
         return V.Public.generator.mul(self.private.scalar);
     }
 
-    pub fn arbitrary(u: *Unstructured) Share {
-        const index = utils.Participant.init(u.int(u32));
-        return .{ .index = index, .private = Private.arbitrary(u) };
+    pub fn arbitrary(u: *Unstructured) minifuzz.Error!Share {
+        const index = try u.arbitrary(utils.Participant);
+        return .{ .index = index, .private = try Private.arbitrary(u) };
     }
 
     pub fn eql(a: Share, b: Share) bool {
@@ -645,8 +645,8 @@ fn Point(comptime kind: PointKind) type {
             return from_affine(affine);
         }
 
-        pub fn arbitrary(u: *Unstructured) Self {
-            return generator.mul(ScalarType.arbitrary(u));
+        pub fn arbitrary(u: *Unstructured) minifuzz.Error!Self {
+            return generator.mul(try ScalarType.arbitrary(u));
         }
 
         pub fn to_bytes(self: Self) [fixed_size]u8 {

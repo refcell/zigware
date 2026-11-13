@@ -14,8 +14,8 @@ const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const algebra = @import("algebra.zig");
 const codec = @import("codec");
-const fuzz = @import("fuzz.zig");
-const Unstructured = fuzz.Unstructured;
+const minifuzz = @import("invariants").minifuzz;
+const Unstructured = minifuzz.Unstructured;
 
 /// Size of the polynomials computed naively in `vanishing` (benchmarked by commonware).
 const lg_vanishing_base: u32 = 8;
@@ -879,6 +879,8 @@ pub fn lagrange_coefficients(
 }
 
 const goldilocks = @import("fields/goldilocks.zig");
+const testing_types = @import("testing.zig");
+const build_options = @import("build_options");
 const GF = goldilocks.F;
 
 fn arbitrary_polynomial_vector(
@@ -888,11 +890,11 @@ fn arbitrary_polynomial_vector(
     cols_max: usize,
 ) !PolynomialVector(GF) {
     const lg_rows = u.int_in_range(u32, 0, lg_rows_max);
-    const cols: usize = @intCast(u.int_in_range(u64, 1, cols_max));
+    const cols = u.int_in_range(usize, 1, cols_max);
     const rows = @as(usize, 1) << @intCast(lg_rows);
     const coefficients = try allocator.alloc(GF, rows * cols);
     defer allocator.free(coefficients);
-    for (coefficients) |*c| c.* = GF.arbitrary(u);
+    for (coefficients) |*c| c.* = try u.arbitrary(GF);
     return PolynomialVector(GF).init(allocator, rows, cols, coefficients);
 }
 
@@ -902,10 +904,11 @@ fn arbitrary_points_not_all_vanishing(
     lg_rows_max: u32,
 ) !VanishingPoints {
     const lg_rows = u.int_in_range(u32, 0, lg_rows_max);
-    const rows = @as(u64, 1) << @intCast(lg_rows);
-    const set_row = u.int_in_range(u64, 0, rows - 1);
+    const rows = @as(usize, 1) << @intCast(lg_rows);
+    const set_row = u.int_in_range(usize, 0, rows - 1);
     var out = try VanishingPoints.init(allocator, lg_rows);
-    for (0..rows) |i| out.set(i, u.boolean() or i == set_row);
+    errdefer out.deinit(allocator);
+    for (0..rows) |i| out.set(i, (try u.arbitrary(bool)) or i == set_row);
     return out;
 }
 
@@ -924,19 +927,19 @@ pub const RecoverySetup = struct {
     }
 
     pub fn arbitrary(allocator: Allocator, u: *Unstructured) !RecoverySetup {
-        const n: usize = @intCast(u.int_in_range(u64, 1, 128));
-        const k: usize = @intCast(u.int_in_range(u64, 0, 128));
-        const cols: usize = @intCast(u.int_in_range(u64, 1, 4));
+        const n = u.int_in_range(usize, 1, 128);
+        const k = u.int_in_range(usize, 0, 128);
+        const cols = u.int_in_range(usize, 1, 4);
         const data = try allocator.alloc(GF, n * cols);
         errdefer allocator.free(data);
-        for (data) |*x| x.* = GF.arbitrary(u);
+        for (data) |*x| x.* = try u.arbitrary(GF);
         const padded = std.math.ceilPowerOfTwoAssert(usize, n + k);
-        const present_count: usize = @intCast(u.int_in_range(u64, n, padded));
+        const present_count = u.int_in_range(usize, n, padded);
         const indices = try allocator.alloc(usize, padded);
         defer allocator.free(indices);
         for (indices, 0..) |*x, i| x.* = i;
         for (0..present_count) |i| {
-            const j: usize = @intCast(u.int_in_range(u64, i, padded - 1));
+            const j = u.int_in_range(usize, i, padded - 1);
             std.mem.swap(usize, &indices[i], &indices[j]);
         }
         var present = try VanishingPoints.init(allocator, lg_of(padded));
@@ -1016,16 +1019,13 @@ pub fn fuzz_plan(_: void, u: *Unstructured) !void {
 
 const testing = std.testing;
 
-test "ntt fuzz plan (seeded)" {
-    try fuzz.run_seeded(0x177, 300, {}, fuzz_plan);
+test "ntt fuzz plan" {
+    try (minifuzz.Builder{}).with_search_limit(300 * build_options.fuzz_soak)
+        .run(testing.allocator, {}, fuzz_plan);
 }
 
 test "ntt fuzz plan (coverage-guided)" {
-    try testing.fuzz({}, struct {
-        fn one(_: void, smith: *testing.Smith) anyerror!void {
-            try fuzz.run_smith({}, smith, fuzz_plan);
-        }
-    }.one, .{});
+    try testing.fuzz({}, testing_types.smith_body(void, fuzz_plan), .{});
 }
 
 test "reverse bits" {

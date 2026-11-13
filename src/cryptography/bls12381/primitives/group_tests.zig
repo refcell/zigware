@@ -3,6 +3,7 @@
 //! their G1/G2 multiples, then one `SmallScalar::random` draw.
 
 const std = @import("std");
+const build_options = @import("build_options");
 const testing = std.testing;
 const codec = @import("codec");
 const utils = @import("utils");
@@ -15,7 +16,7 @@ const G1 = group.G1;
 const G2 = group.G2;
 const Private = group.Private;
 const Share = group.Share;
-const fuzz = math.fuzz;
+const minifuzz = @import("invariants").minifuzz;
 const test_suites = math.algebra.test_suites;
 const hex = @import("formatting").hex_literal;
 
@@ -112,34 +113,41 @@ test "group: scalar map and hash to group match commonware" {
     );
 }
 
-fn field_body(_: void, u: *fuzz.Unstructured) anyerror!void {
+fn field_body(_: void, u: *minifuzz.Unstructured) anyerror!void {
     try test_suites.fuzz_field_ntt(Scalar, u);
 }
 
-fn g1_space_body(_: void, u: *fuzz.Unstructured) anyerror!void {
+fn g1_space_body(_: void, u: *minifuzz.Unstructured) anyerror!void {
     try test_suites.fuzz_space_ring(Scalar, G1, u);
 }
 
-fn g2_space_body(_: void, u: *fuzz.Unstructured) anyerror!void {
+fn g2_space_body(_: void, u: *minifuzz.Unstructured) anyerror!void {
     try test_suites.fuzz_space_ring(Scalar, G2, u);
 }
 
-fn hash_body(_: void, u: *fuzz.Unstructured) anyerror!void {
+fn hash_body(_: void, u: *minifuzz.Unstructured) anyerror!void {
     try test_suites.fuzz_hash_to_group(G1, u);
     try test_suites.fuzz_hash_to_group(G2, u);
 }
 
+/// Runs a minifuzz body over `cases` inputs (times `-Dfuzz-soak`). Point arithmetic is slow
+/// in Debug builds, so these use fewer cases than commonware's time-bounded default.
+fn fuzz_cases(cases: u64, body: fn (void, *minifuzz.Unstructured) anyerror!void) !void {
+    try (minifuzz.Builder{}).with_search_limit(cases * build_options.fuzz_soak)
+        .run(testing.allocator, {}, body);
+}
+
 test "group: scalar is a field with an NTT domain" {
-    try fuzz.run_seeded(0xb15, 200, {}, field_body);
+    try fuzz_cases(200, field_body);
 }
 
 test "group: G1 and G2 are spaces over the scalars" {
-    try fuzz.run_seeded(0xb16, 8, {}, g1_space_body);
-    try fuzz.run_seeded(0xb17, 4, {}, g2_space_body);
+    try fuzz_cases(8, g1_space_body);
+    try fuzz_cases(4, g2_space_body);
 }
 
 test "group: hash to group is deterministic and separating" {
-    try fuzz.run_seeded(0xb18, 8, {}, hash_body);
+    try fuzz_cases(8, hash_body);
 }
 
 test "group: basic group doubling" {

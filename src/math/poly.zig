@@ -12,9 +12,9 @@ const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const algebra = @import("algebra.zig");
 const codec = @import("codec");
-const fuzz = @import("fuzz.zig");
+const minifuzz = @import("invariants").minifuzz;
 const ntt = @import("ntt.zig");
-const Unstructured = fuzz.Unstructured;
+const Unstructured = minifuzz.Unstructured;
 
 /// Below this many polynomials, `Poly.msm` uses the naive algorithm.
 const msm_points_min = 2;
@@ -257,12 +257,19 @@ pub fn Poly(comptime K: type) type {
             return from_owned(@constCast(coeffs));
         }
 
-        pub fn arbitrary(allocator: Allocator, u: *Unstructured, count_max: u32) !Self {
-            assert(count_max >= 1);
-            const count = 1 + u.length(count_max - 1);
-            const out = try allocator.alloc(K, count);
-            for (out) |*c| c.* = K.arbitrary(u);
-            return from_owned(out);
+        /// commonware's `Arbitrary`: the constant coefficient, then arbitrary's `Vec<K>`
+        /// (a continue flag before each further coefficient).
+        pub fn arbitrary(allocator: Allocator, u: *Unstructured) !Self {
+            var coefficients: std.ArrayList(K) = .empty;
+            errdefer coefficients.deinit(allocator);
+            try coefficients.append(allocator, try u.arbitrary(K));
+            // Each flag consumes a byte until the input runs out, which ends the list.
+            const flags_max = u.len() + 1;
+            var flags: usize = 0;
+            while (flags < flags_max and try u.arbitrary(bool)) : (flags += 1) {
+                try coefficients.append(allocator, try u.arbitrary(K));
+            }
+            return from_owned(try coefficients.toOwnedSlice(allocator));
         }
     };
 }
@@ -443,6 +450,7 @@ pub fn Interpolator(comptime I: type, comptime F: type) type {
 }
 
 const testing_types = @import("testing.zig");
+const build_options = @import("build_options");
 const TF = testing_types.F;
 const TG = testing_types.G;
 
@@ -463,48 +471,53 @@ const PlanKind = enum {
     fuzz_space_ring,
 };
 
-/// The polynomial fuzz plan (commonware `poly::fuzz::Plan`), run with `testing.allocator`.
+/// The polynomial fuzz plan (commonware `poly::fuzz::Plan`): a derived enum tag, then the
+/// variant's fields in order. Runs with `testing.allocator`.
 pub fn fuzz_plan(_: void, u: *Unstructured) !void {
     const allocator = std.testing.allocator;
-    const kind = u.choose(PlanKind);
-    var f = try Poly(TF).arbitrary(allocator, u, 24);
+    const kind = try u.arbitrary(PlanKind);
+    switch (kind) {
+        .fuzz_additive => return fuzz_additive(allocator, u),
+        .fuzz_space_ring => return fuzz_space_ring(allocator, u),
+        .roots_of_unity_eq_naive => return check_roots_of_unity(allocator, try u.arbitrary(u16)),
+        else => {},
+    }
+    var f = try Poly(TF).arbitrary(allocator, u);
     defer f.deinit(allocator);
     switch (kind) {
         .codec => try check_codec(allocator, f),
         .eval_add => {
-            var g = try Poly(TF).arbitrary(allocator, u, 24);
+            var g = try Poly(TF).arbitrary(allocator, u);
             defer g.deinit(allocator);
-            const x = TF.arbitrary(u);
+            const x = try u.arbitrary(TF);
             const expected = f.eval(TF, x).add(g.eval(TF, x));
             try f.add_assign(allocator, g);
             try expect(f.eval(TF, x).eql(expected));
         },
         .eval_scale => {
-            const x = TF.arbitrary(u);
-            const w = TF.arbitrary(u);
+            const x = try u.arbitrary(TF);
+            const w = try u.arbitrary(TF);
             const expected = f.eval(TF, x).mul(w);
             f.mul_assign(TF, w);
             try expect(f.eval(TF, x).eql(expected));
         },
         .eval_zero => try expect(f.eval(TF, TF.zero).eql(f.constant())),
         .eval_msm => {
-            const x = TF.arbitrary(u);
+            const x = try u.arbitrary(TF);
             try expect(f.eval(TF, x).eql(try f.eval_msm(allocator, TF, x)));
         },
         .lin_comb_eval => try check_lin_comb_eval(allocator, f, u),
         .interpolate => try check_interpolate(allocator, f, .shifted),
         .interpolate_with_zero_point => try check_interpolate(allocator, f, .from_zero),
         .interpolate_with_zero_point_middle => try check_interpolate(allocator, f, .zero_last),
-        .translate_scale => try check_translate_scale(allocator, f, TF.arbitrary(u)),
+        .translate_scale => try check_translate_scale(allocator, f, try u.arbitrary(TF)),
         .commit_eval => {
-            const x = TF.arbitrary(u);
+            const x = try u.arbitrary(TF);
             var committed = try commit(allocator, TG, f);
             defer committed.deinit(allocator);
             try expect(TG.generator.mul(f.eval(TF, x)).eql(committed.eval(TF, x)));
         },
-        .roots_of_unity_eq_naive => try check_roots_of_unity(allocator, u.int(u16)),
-        .fuzz_additive => try fuzz_additive(allocator, f, u),
-        .fuzz_space_ring => try fuzz_space_ring(allocator, f, u),
+        .roots_of_unity_eq_naive, .fuzz_additive, .fuzz_space_ring => unreachable,
     }
 }
 
@@ -528,14 +541,17 @@ fn check_codec(allocator: Allocator, f: Poly(TF)) !void {
 }
 
 fn check_lin_comb_eval(allocator: Allocator, f: Poly(TF), u: *Unstructured) !void {
-    var pairs: [16][2]TF = undefined;
-    const count = u.length(pairs.len);
+    // arbitrary's Vec<(F, F)>: a continue flag before each pair.
+    var pairs: std.ArrayList([2]TF) = .empty;
+    defer pairs.deinit(allocator);
     var naive = TF.zero;
-    for (pairs[0..count]) |*pair| {
-        pair.* = .{ TF.arbitrary(u), TF.arbitrary(u) };
+    const flags_max = u.len() + 1;
+    while (pairs.items.len < flags_max and try u.arbitrary(bool)) {
+        const pair = [2]TF{ try u.arbitrary(TF), try u.arbitrary(TF) };
         naive = naive.add(pair[0].mul(f.eval(TF, pair[1])));
+        try pairs.append(allocator, pair);
     }
-    try expect(naive.eql(try f.lin_comb_eval(allocator, TF, pairs[0..count])));
+    try expect(naive.eql(try f.lin_comb_eval(allocator, TF, pairs.items)));
 }
 
 const InterpolationPoints = enum { shifted, from_zero, zero_last };
@@ -596,16 +612,26 @@ fn check_translate_scale(allocator: Allocator, f: Poly(TF), x: TF) !void {
     try expect(translated.eql(scaled));
 }
 
-fn fuzz_additive(allocator: Allocator, a: Poly(TF), u: *Unstructured) !void {
-    var b = try Poly(TF).arbitrary(allocator, u, 24);
+/// `test_suites::fuzz_additive::<Poly<F>>` with allocating polynomials.
+fn fuzz_additive(allocator: Allocator, u: *Unstructured) !void {
+    var a = try Poly(TF).arbitrary(allocator, u);
+    defer a.deinit(allocator);
+    var b = try Poly(TF).arbitrary(allocator, u);
     defer b.deinit(allocator);
-    var ab = try a.clone(allocator);
+    var c = try Poly(TF).arbitrary(allocator, u);
+    defer c.deinit(allocator);
+    var ab = try sum(allocator, a, b);
     defer ab.deinit(allocator);
-    try ab.add_assign(allocator, b);
-    var ba = try b.clone(allocator);
+    var ba = try sum(allocator, b, a);
     defer ba.deinit(allocator);
-    try ba.add_assign(allocator, a);
     try expect(ab.eql(ba));
+    var ab_c = try sum(allocator, ab, c);
+    defer ab_c.deinit(allocator);
+    var bc = try sum(allocator, b, c);
+    defer bc.deinit(allocator);
+    var a_bc = try sum(allocator, a, bc);
+    defer a_bc.deinit(allocator);
+    try expect(ab_c.eql(a_bc));
     // a - a == 0, even though it keeps the high zero coefficients.
     var difference = try a.clone(allocator);
     defer difference.deinit(allocator);
@@ -618,54 +644,99 @@ fn fuzz_additive(allocator: Allocator, a: Poly(TF), u: *Unstructured) !void {
     var left = try a.clone(allocator);
     defer left.deinit(allocator);
     try left.sub_assign(allocator, b);
-    var right = try a.clone(allocator);
+    var right = try sum(allocator, a, negated);
     defer right.deinit(allocator);
-    try right.add_assign(allocator, negated);
     try expect(left.eql(right));
 }
 
-fn fuzz_space_ring(allocator: Allocator, a: Poly(TF), u: *Unstructured) !void {
-    var polys: [6]Poly(TF) = undefined;
-    var scalars: [6]TF = undefined;
-    const count = u.length(polys.len);
+fn sum(allocator: Allocator, a: Poly(TF), b: Poly(TF)) !Poly(TF) {
+    var out = try a.clone(allocator);
+    errdefer out.deinit(allocator);
+    try out.add_assign(allocator, b);
+    return out;
+}
+
+fn scale_of(allocator: Allocator, a: Poly(TF), x: TF) !Poly(TF) {
+    var out = try a.clone(allocator);
+    out.mul_assign(TF, x);
+    return out;
+}
+
+/// `test_suites::fuzz_space_ring::<F, Poly<F>>` with allocating polynomials, drawing in
+/// the same order.
+fn fuzz_space_ring(allocator: Allocator, u: *Unstructured) !void {
+    {
+        var a = try Poly(TF).arbitrary(allocator, u);
+        defer a.deinit(allocator);
+        var b = try Poly(TF).arbitrary(allocator, u);
+        defer b.deinit(allocator);
+        const x = try u.arbitrary(TF);
+        var ab = try sum(allocator, a, b);
+        defer ab.deinit(allocator);
+        var left = try scale_of(allocator, ab, x);
+        defer left.deinit(allocator);
+        var ax = try scale_of(allocator, a, x);
+        defer ax.deinit(allocator);
+        var bx = try scale_of(allocator, b, x);
+        defer bx.deinit(allocator);
+        var right = try sum(allocator, ax, bx);
+        defer right.deinit(allocator);
+        try expect(left.eql(right));
+        _ = try u.arbitrary(TF); // `a *= c` against `a * c`: the same call here.
+    }
+    try check_poly_msm(allocator, u);
+    {
+        var a = try Poly(TF).arbitrary(allocator, u);
+        defer a.deinit(allocator);
+        const b = try u.arbitrary(TF);
+        const c = try u.arbitrary(TF);
+        var ab = try scale_of(allocator, a, b);
+        defer ab.deinit(allocator);
+        var ab_c = try scale_of(allocator, ab, c);
+        defer ab_c.deinit(allocator);
+        var a_bc = try scale_of(allocator, a, b.mul(c));
+        defer a_bc.deinit(allocator);
+        try expect(ab_c.eql(a_bc));
+    }
+    var a = try Poly(TF).arbitrary(allocator, u);
+    defer a.deinit(allocator);
+    var one = try scale_of(allocator, a, TF.one);
+    defer one.deinit(allocator);
+    try expect(one.eql(a));
+    var zero = try scale_of(allocator, a, TF.zero);
+    defer zero.deinit(allocator);
+    try expect(zero.degree_exact() == 0 and zero.constant().eql(TF.zero));
+}
+
+fn check_poly_msm(allocator: Allocator, u: *Unstructured) !void {
+    const count = u.int_in_range(usize, 0, 16);
+    var polys: [16]Poly(TF) = undefined;
     var built: usize = 0;
     defer for (polys[0..built]) |*p| p.deinit(allocator);
-    while (built < count) : (built += 1) {
-        polys[built] = try Poly(TF).arbitrary(allocator, u, 8);
-        scalars[built] = TF.arbitrary(u);
-    }
+    while (built < count) : (built += 1) polys[built] = try Poly(TF).arbitrary(allocator, u);
+    var scalars: [16]TF = undefined;
+    for (scalars[0..count]) |*scalar| scalar.* = try u.arbitrary(TF);
     var fast = try Poly(TF).msm(allocator, TF, polys[0..count], scalars[0..count]);
     defer fast.deinit(allocator);
     var naive = try Poly(TF).zero(allocator);
     defer naive.deinit(allocator);
-    for (polys[0..count], scalars[0..count]) |p, s| {
-        var term = try p.clone(allocator);
+    for (polys[0..count], scalars[0..count]) |p, x| {
+        var term = try scale_of(allocator, p, x);
         defer term.deinit(allocator);
-        term.mul_assign(TF, s);
         try naive.add_assign(allocator, term);
     }
     try expect(fast.eql(naive));
-    // (a * 1) == a and (a * 0) == 0.
-    var scaled = try a.clone(allocator);
-    defer scaled.deinit(allocator);
-    scaled.mul_assign(TF, TF.one);
-    try expect(scaled.eql(a));
-    scaled.mul_assign(TF, TF.zero);
-    try expect(scaled.degree_exact() == 0 and scaled.constant().eql(TF.zero));
 }
 
 const testing = std.testing;
 
-test "poly fuzz plan (seeded)" {
-    try fuzz.run_seeded(0x9017, 1000, {}, fuzz_plan);
+test "poly fuzz plan" {
+    try (minifuzz.Builder{}).with_search_limit(2000 * build_options.fuzz_soak)
+        .run(testing.allocator, {}, fuzz_plan);
 }
 
 test "poly fuzz plan (coverage-guided)" {
-    try testing.fuzz({}, struct {
-        fn one(_: void, smith: *testing.Smith) anyerror!void {
-            try fuzz.run_smith({}, smith, fuzz_plan);
-        }
-    }.one, .{});
+    try testing.fuzz({}, testing_types.smith_body(void, fuzz_plan), .{});
 }
 
 fn poly_of(allocator: Allocator, values: []const u8) !Poly(TF) {

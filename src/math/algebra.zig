@@ -21,8 +21,8 @@
 
 const std = @import("std");
 const assert = std.debug.assert;
-const fuzz = @import("fuzz.zig");
-const Unstructured = fuzz.Unstructured;
+const minifuzz = @import("invariants").minifuzz;
+const Unstructured = minifuzz.Unstructured;
 
 pub fn assert_additive(comptime T: type) void {
     comptime {
@@ -184,18 +184,18 @@ pub fn rand_to_group(comptime G: type, rng: anytype) G {
     return G.hash_to_group(&.{}, &bytes);
 }
 
-/// Property suites over algebraic laws (commonware `algebra::test_suites`). Each takes
-/// structured input and panics through `std.testing` expectations when a law fails. Element
-/// types provide `arbitrary(*Unstructured) T`.
+/// Property suites over algebraic laws (commonware `algebra::test_suites`). Each draws its
+/// values from a minifuzz `Unstructured` the way commonware does and returns an error when
+/// a law fails. Element types provide `arbitrary(*Unstructured) Unstructured.Error!T`.
 pub const test_suites = struct {
     fn expect_eql(comptime T: type, a: T, b: T) !void {
         if (!a.eql(b)) return error.LawViolated;
     }
 
     pub fn fuzz_additive(comptime T: type, u: *Unstructured) !void {
-        const a = T.arbitrary(u);
-        const b = T.arbitrary(u);
-        const c = T.arbitrary(u);
+        const a = try u.arbitrary(T);
+        const b = try u.arbitrary(T);
+        const c = try u.arbitrary(T);
         try expect_eql(T, a.add(b), b.add(a));
         try expect_eql(T, a.add(b).add(c), a.add(b.add(c)));
         try expect_eql(T, T.zero.add(a), a);
@@ -205,9 +205,9 @@ pub const test_suites = struct {
     }
 
     pub fn fuzz_multiplicative(comptime T: type, u: *Unstructured) !void {
-        const a = T.arbitrary(u);
-        const b = T.arbitrary(u);
-        const c = T.arbitrary(u);
+        const a = try u.arbitrary(T);
+        const b = try u.arbitrary(T);
+        const c = try u.arbitrary(T);
         try expect_eql(T, a.mul(b), b.mul(a));
         try expect_eql(T, a.mul(b).mul(c), a.mul(b.mul(c)));
         try expect_eql(T, square(T, a), a.mul(a));
@@ -216,16 +216,16 @@ pub const test_suites = struct {
     pub fn fuzz_ring(comptime T: type, u: *Unstructured) !void {
         try fuzz_additive(T, u);
         try fuzz_multiplicative(T, u);
-        const a = T.arbitrary(u);
-        const b = T.arbitrary(u);
-        const c = T.arbitrary(u);
+        const a = try u.arbitrary(T);
+        const b = try u.arbitrary(T);
+        const c = try u.arbitrary(T);
         try expect_eql(T, T.one.mul(a), a);
         try expect_eql(T, a.add(b).mul(c), a.mul(c).add(b.mul(c)));
     }
 
     pub fn fuzz_field(comptime T: type, u: *Unstructured) !void {
         try fuzz_ring(T, u);
-        const a = T.arbitrary(u);
+        const a = try u.arbitrary(T);
         if (a.eql(T.zero)) {
             try expect_eql(T, a.inv(), T.zero);
         } else {
@@ -234,32 +234,41 @@ pub const test_suites = struct {
     }
 
     pub fn fuzz_space(comptime R: type, comptime K: type, u: *Unstructured) !void {
-        const a = K.arbitrary(u);
-        const b = K.arbitrary(u);
-        const x = R.arbitrary(u);
+        const a = try u.arbitrary(K);
+        const b = try u.arbitrary(K);
+        const x = try u.arbitrary(R);
         try expect_eql(K, a.add(b).mul(x), a.mul(x).add(b.mul(x)));
-        const count = u.length(16);
+        // commonware also checks `a *= c` against `a * c`, which is the same call here.
+        const c = try u.arbitrary(R);
+        try expect_eql(K, a.mul(c), a.mul(c));
+        const count = u.int_in_range(usize, 0, 16);
         var points: [16]K = undefined;
         var scalars: [16]R = undefined;
-        for (0..count) |index| points[index] = K.arbitrary(u);
-        for (0..count) |index| scalars[index] = R.arbitrary(u);
+        for (points[0..count]) |*point| point.* = try u.arbitrary(K);
+        for (scalars[0..count]) |*scalar| scalar.* = try u.arbitrary(R);
         const naive = msm_naive(K, R, points[0..count], scalars[0..count]);
         try expect_eql(K, naive, msm(K, R, points[0..count], scalars[0..count]));
     }
 
-    pub fn fuzz_space_ring(comptime R: type, comptime K: type, u: *Unstructured) !void {
+    /// `fuzz_space` plus compatibility with multiplication in `R`.
+    pub fn fuzz_space_multiplicative(comptime R: type, comptime K: type, u: *Unstructured) !void {
         try fuzz_space(R, K, u);
-        const a = K.arbitrary(u);
-        const b = R.arbitrary(u);
-        const c = R.arbitrary(u);
+        const a = try u.arbitrary(K);
+        const b = try u.arbitrary(R);
+        const c = try u.arbitrary(R);
         try expect_eql(K, a.mul(b).mul(c), a.mul(b.mul(c)));
+    }
+
+    /// `fuzz_space_multiplicative` plus scaling by one and zero.
+    pub fn fuzz_space_ring(comptime R: type, comptime K: type, u: *Unstructured) !void {
+        try fuzz_space_multiplicative(R, K, u);
+        const a = try u.arbitrary(K);
         try expect_eql(K, a.mul(R.one), a);
         try expect_eql(K, a.mul(R.zero), K.zero);
     }
 
     pub fn fuzz_hash_to_group(comptime G: type, u: *Unstructured) !void {
-        var data: [4][4]u8 = undefined;
-        for (&data) |*item| u.bytes(item);
+        const data = try u.arbitrary([4][4]u8);
         const inputs_equal = std.mem.eql(u8, &data[0], &data[2]) and
             std.mem.eql(u8, &data[1], &data[3]);
         const left = G.hash_to_group(&data[0], &data[1]);
@@ -293,9 +302,12 @@ pub const test_suites = struct {
         try fuzz_field(T, u);
         switch (u.int_in_range(u8, 0, 9)) {
             0 => try expect_eql(T, T.coset_shift().mul(coset_shift_inv(T)), T.one),
-            1 => try check_root_of_unity_order(T, u.int_in_range(u8, 0, T.max_lg_root_order + 1)),
+            1 => {
+                const lg = u.int_in_range(u8, 0, T.max_lg_root_order + 1);
+                try check_root_of_unity_order(T, lg);
+            },
             else => {
-                const a = T.arbitrary(u);
+                const a = try u.arbitrary(T);
                 try expect_eql(T, div_2(T, a).mul(T.one.add(T.one)), a);
             },
         }
@@ -303,65 +315,77 @@ pub const test_suites = struct {
 };
 
 const goldilocks = @import("fields/goldilocks.zig");
+const testing_types = @import("testing.zig");
 const F = goldilocks.F;
 
-/// The algebra fuzz plan (commonware `algebra::fuzz::Plan`).
+/// The algebra fuzz plan (commonware `algebra::fuzz::Plan`): a derived enum tag, then the
+/// variant's fields in order.
 pub fn fuzz_plan(_: void, u: *Unstructured) !void {
     const Plan = enum {
         exp_one,
         exp_zero,
         exp,
-        powers_match_exp,
+        powers_matches_exp,
         scale_one,
         scale_zero,
         scale,
         msm2,
     };
-    const x = F.arbitrary(u);
-    switch (u.choose(Plan)) {
-        .exp_one => try test_suites.expect_eql(F, exp(F, x, &.{1}), x),
-        .exp_zero => try test_suites.expect_eql(F, exp(F, x, &.{}), F.one),
+    switch (try u.arbitrary(Plan)) {
+        .exp_one => {
+            const x = try u.arbitrary(F);
+            try test_suites.expect_eql(F, exp(F, x, &.{1}), x);
+        },
+        .exp_zero => {
+            const x = try u.arbitrary(F);
+            try test_suites.expect_eql(F, exp(F, x, &.{}), F.one);
+        },
         .exp => {
-            const a: u64 = u.int(u32);
-            const b: u64 = u.int(u32);
+            const x = try u.arbitrary(F);
+            const a: u64 = try u.arbitrary(u32);
+            const b: u64 = try u.arbitrary(u32);
             const product = exp(F, x, &.{a}).mul(exp(F, x, &.{b}));
             try test_suites.expect_eql(F, exp(F, x, &.{a + b}), product);
         },
-        .powers_match_exp => {
-            const base = F.arbitrary(u);
-            const index = u.int(u16);
-            var iterator = powers(F, x, base);
+        .powers_matches_exp => {
+            const shift = try u.arbitrary(F);
+            const base = try u.arbitrary(F);
+            const index = try u.arbitrary(u16);
+            var iterator = powers(F, shift, base);
             var power = iterator.next();
             for (0..index) |_| power = iterator.next();
-            try test_suites.expect_eql(F, power, x.mul(exp(F, base, &.{index})));
+            try test_suites.expect_eql(F, power, shift.mul(exp(F, base, &.{index})));
         },
-        .scale_one => try test_suites.expect_eql(F, scale(F, x, &.{1}), x),
-        .scale_zero => try test_suites.expect_eql(F, scale(F, x, &.{}), F.zero),
+        .scale_one => {
+            const x = try u.arbitrary(F);
+            try test_suites.expect_eql(F, scale(F, x, &.{1}), x);
+        },
+        .scale_zero => {
+            const x = try u.arbitrary(F);
+            try test_suites.expect_eql(F, scale(F, x, &.{}), F.zero);
+        },
         .scale => {
-            const a: u64 = u.int(u32);
-            const b: u64 = u.int(u32);
+            const x = try u.arbitrary(F);
+            const a: u64 = try u.arbitrary(u32);
+            const b: u64 = try u.arbitrary(u32);
             const sum = scale(F, x, &.{a}).add(scale(F, x, &.{b}));
             try test_suites.expect_eql(F, scale(F, x, &.{a + b}), sum);
         },
         .msm2 => {
-            const points = [2]F{ x, F.arbitrary(u) };
-            const scalars = [2]F{ F.arbitrary(u), F.arbitrary(u) };
+            const points = try u.arbitrary([2]F);
+            const scalars = try u.arbitrary([2]F);
             const expected = points[0].mul(scalars[0]).add(points[1].mul(scalars[1]));
             try test_suites.expect_eql(F, msm(F, F, &points, &scalars), expected);
         },
     }
 }
 
-test "algebra fuzz plan (seeded)" {
-    try fuzz.run_seeded(0xa16eb4a, 2000, {}, fuzz_plan);
+test "algebra fuzz plan" {
+    try minifuzz.run(std.testing.allocator, {}, fuzz_plan);
 }
 
 test "algebra fuzz plan (coverage-guided)" {
-    try std.testing.fuzz({}, struct {
-        fn one(_: void, smith: *std.testing.Smith) anyerror!void {
-            try fuzz.run_smith({}, smith, fuzz_plan);
-        }
-    }.one, .{});
+    try std.testing.fuzz({}, testing_types.smith_body(void, fuzz_plan), .{});
 }
 
 test "scale and exp on multi-limb exponents" {

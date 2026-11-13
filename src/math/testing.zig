@@ -7,8 +7,8 @@ const assert = std.debug.assert;
 const utils = @import("utils");
 const codec = @import("codec");
 const algebra = @import("algebra.zig");
-const fuzz = @import("fuzz.zig");
-const Unstructured = fuzz.Unstructured;
+const minifuzz = @import("invariants").minifuzz;
+const Unstructured = minifuzz.Unstructured;
 
 const P: u64 = 4_611_686_018_427_389_243;
 const Q: u64 = 9_223_372_036_854_778_487;
@@ -69,8 +69,8 @@ pub const F = struct {
         return .{ .value = std.mem.readInt(u64, &bytes, .little) % P };
     }
 
-    pub fn arbitrary(u: *Unstructured) F {
-        return .{ .value = u.int(u64) % P };
+    pub fn arbitrary(u: *Unstructured) minifuzz.Error!F {
+        return .{ .value = try u.arbitrary(u64) % P };
     }
 
     pub fn write(a: F, writer: *codec.Writer) void {
@@ -120,8 +120,8 @@ pub const G = struct {
         return a.value == b.value;
     }
 
-    pub fn arbitrary(u: *Unstructured) G {
-        return generator.mul(F.arbitrary(u));
+    pub fn arbitrary(u: *Unstructured) minifuzz.Error!G {
+        return generator.mul(try u.arbitrary(F));
     }
 
     pub fn write(a: G, writer: *codec.Writer) void {
@@ -146,14 +146,14 @@ comptime {
 
 /// The test-types fuzz plan (commonware `math::test::fuzz::Plan`).
 pub fn fuzz_plan(_: void, u: *Unstructured) !void {
-    switch (u.choose(enum { f_codec, g_codec, fuzz_field, fuzz_space })) {
+    switch (try u.arbitrary(enum { f_codec, g_codec, fuzz_field, fuzz_space })) {
         .f_codec => {
-            const x = F.arbitrary(u);
+            const x = try u.arbitrary(F);
             const bytes = codec.encode_fixed(F, x);
             if (!(try codec.decode_fixed(F, &bytes)).eql(x)) return error.RoundTrip;
         },
         .g_codec => {
-            const x = G.arbitrary(u);
+            const x = try u.arbitrary(G);
             const bytes = codec.encode_fixed(G, x);
             if (!(try codec.decode_fixed(G, &bytes)).eql(x)) return error.RoundTrip;
         },
@@ -162,18 +162,37 @@ pub fn fuzz_plan(_: void, u: *Unstructured) !void {
     }
 }
 
+/// Bytes a coverage-guided run hands to one `Unstructured`.
+const smith_input_max = 4096;
+
+/// Adapts a minifuzz body for `std.testing.fuzz`: the fuzzer's bytes become one
+/// `Unstructured`, and inputs the body rejects for lack of data or format pass.
+pub fn smith_body(
+    comptime Context: type,
+    comptime body: fn (Context, *Unstructured) anyerror!void,
+) fn (Context, *std.testing.Smith) anyerror!void {
+    return struct {
+        fn run(context: Context, smith: *std.testing.Smith) anyerror!void {
+            var buffer: [smith_input_max]u8 = undefined;
+            const size = smith.slice(&buffer);
+            assert(size <= buffer.len);
+            var u = Unstructured.init(buffer[0..size]);
+            body(context, &u) catch |err| switch (err) {
+                error.NotEnoughData, error.IncorrectFormat => {},
+                else => return err,
+            };
+        }
+    }.run;
+}
+
 const testing = std.testing;
 
-test "test types fuzz plan (seeded)" {
-    try fuzz.run_seeded(0x7e57, 500, {}, fuzz_plan);
+test "test types fuzz plan" {
+    try minifuzz.run(testing.allocator, {}, fuzz_plan);
 }
 
 test "test types fuzz plan (coverage-guided)" {
-    try testing.fuzz({}, struct {
-        fn one(_: void, smith: *testing.Smith) anyerror!void {
-            try fuzz.run_smith({}, smith, fuzz_plan);
-        }
-    }.one, .{});
+    try testing.fuzz({}, smith_body(void, fuzz_plan), .{});
 }
 
 test "field and group guards" {
