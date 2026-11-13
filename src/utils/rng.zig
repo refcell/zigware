@@ -52,86 +52,101 @@ fn pcg32(state: *u64) [4]u8 {
     return out;
 }
 
-/// Deterministic RNG for tests: ChaCha12 with a 64-bit block counter and zero stream id,
-/// buffered four blocks at a time, exactly as Rust `rand` 0.10's `StdRng`.
-pub const TestRng = struct {
-    const ChaCha = std.crypto.stream.chacha.ChaCha12With64BitNonce;
-    const block_words = 16;
-    const buffer_blocks = 4;
-    const buffer_words = block_words * buffer_blocks;
-
-    key: [32]u8,
-    /// Block counter of the next buffer to generate.
-    block_counter: u64,
-    words: [buffer_words]u32,
-    /// Next word to return; `buffer_words` means the buffer is exhausted.
-    index: usize,
-
-    /// Returns a deterministic RNG seeded with `seed` (Rust `StdRng::seed_from_u64`).
-    pub fn init(seed: u64) TestRng {
-        var key: [32]u8 = undefined;
-        var state = seed;
-        var chunk: usize = 0;
-        while (chunk < key.len / 4) : (chunk += 1) {
-            key[chunk * 4 ..][0..4].* = pcg32(&state);
-        }
-        return init_key(key);
-    }
-
-    /// Returns a deterministic RNG from a 32-byte ChaCha key (Rust `StdRng::from_seed`).
-    pub fn init_key(key: [32]u8) TestRng {
-        const rng: TestRng = .{
-            .key = key,
-            .block_counter = 0,
-            .words = undefined,
-            .index = buffer_words,
+/// ChaCha with `rounds` rounds, a 64-bit block counter, and a zero stream id, buffered four
+/// blocks at a time, exactly as Rust's `chacha20` / `rand_chacha` 0.10 RNGs.
+pub fn ChaChaRng(comptime rounds: u8) type {
+    return struct {
+        const Self = @This();
+        const ChaCha = switch (rounds) {
+            8 => std.crypto.stream.chacha.ChaCha8With64BitNonce,
+            12 => std.crypto.stream.chacha.ChaCha12With64BitNonce,
+            20 => std.crypto.stream.chacha.ChaCha20With64BitNonce,
+            else => @compileError("ChaCha rounds must be 8, 12, or 20"),
         };
-        assert(rng.index == buffer_words);
-        return rng;
-    }
+        const block_words = 16;
+        const buffer_blocks = 4;
+        const buffer_words = block_words * buffer_blocks;
 
-    fn generate(rng: *TestRng) void {
-        var bytes: [buffer_words * 4]u8 = undefined;
-        ChaCha.stream(&bytes, rng.block_counter, rng.key, @splat(0));
-        for (&rng.words, 0..) |*word, i| {
-            word.* = std.mem.readInt(u32, bytes[i * 4 ..][0..4], .little);
+        key: [32]u8,
+        /// Block counter of the next buffer to generate.
+        block_counter: u64,
+        words: [buffer_words]u32,
+        /// Next word to return; `buffer_words` means the buffer is exhausted.
+        index: usize,
+
+        /// Returns a deterministic RNG seeded with `seed` (Rust `SeedableRng::seed_from_u64`).
+        pub fn init(seed: u64) Self {
+            var key: [32]u8 = undefined;
+            var state = seed;
+            var chunk: usize = 0;
+            while (chunk < key.len / 4) : (chunk += 1) {
+                key[chunk * 4 ..][0..4].* = pcg32(&state);
+            }
+            return init_key(key);
         }
-        rng.block_counter +%= buffer_blocks;
-        rng.index = 0;
-    }
 
-    pub fn next_u32(rng: *TestRng) u32 {
-        assert(rng.index <= buffer_words);
-        if (rng.index == buffer_words) rng.generate();
-        const value = rng.words[rng.index];
-        rng.index += 1;
-        assert(rng.index <= buffer_words);
-        return value;
-    }
-
-    /// Two consecutive words, low then high; mirrors `BlockRng::next_u64_from_u32`, which
-    /// straddles a buffer refill when only one word is left.
-    pub fn next_u64(rng: *TestRng) u64 {
-        assert(rng.index <= buffer_words);
-        const low = rng.next_u32();
-        const high = rng.next_u32();
-        return (@as(u64, high) << 32) | low;
-    }
-
-    /// Fills `dest` with little-endian words; a partially used final word is discarded.
-    pub fn fill_bytes(rng: *TestRng, dest: []u8) void {
-        var written: usize = 0;
-        while (written < dest.len) {
-            const word = rng.next_u32();
-            var bytes: [4]u8 = undefined;
-            std.mem.writeInt(u32, &bytes, word, .little);
-            const take = @min(bytes.len, dest.len - written);
-            @memcpy(dest[written..][0..take], bytes[0..take]);
-            written += take;
+        /// Returns a deterministic RNG from a 32-byte ChaCha key (Rust `from_seed`).
+        pub fn init_key(key: [32]u8) Self {
+            const rng: Self = .{
+                .key = key,
+                .block_counter = 0,
+                .words = undefined,
+                .index = buffer_words,
+            };
+            assert(rng.index == buffer_words);
+            return rng;
         }
-        assert(written == dest.len);
-    }
-};
+
+        fn generate(rng: *Self) void {
+            var bytes: [buffer_words * 4]u8 = undefined;
+            ChaCha.stream(&bytes, rng.block_counter, rng.key, @splat(0));
+            for (&rng.words, 0..) |*word, i| {
+                word.* = std.mem.readInt(u32, bytes[i * 4 ..][0..4], .little);
+            }
+            rng.block_counter +%= buffer_blocks;
+            rng.index = 0;
+        }
+
+        pub fn next_u32(rng: *Self) u32 {
+            assert(rng.index <= buffer_words);
+            if (rng.index == buffer_words) rng.generate();
+            const value = rng.words[rng.index];
+            rng.index += 1;
+            assert(rng.index <= buffer_words);
+            return value;
+        }
+
+        /// Two consecutive words, low then high; mirrors `BlockRng::next_u64_from_u32`, which
+        /// straddles a buffer refill when only one word is left.
+        pub fn next_u64(rng: *Self) u64 {
+            assert(rng.index <= buffer_words);
+            const low = rng.next_u32();
+            const high = rng.next_u32();
+            return (@as(u64, high) << 32) | low;
+        }
+
+        /// Fills `dest` with little-endian words; a partially used final word is discarded.
+        pub fn fill_bytes(rng: *Self, dest: []u8) void {
+            var written: usize = 0;
+            while (written < dest.len) {
+                const word = rng.next_u32();
+                var bytes: [4]u8 = undefined;
+                std.mem.writeInt(u32, &bytes, word, .little);
+                const take = @min(bytes.len, dest.len - written);
+                @memcpy(dest[written..][0..take], bytes[0..take]);
+                written += take;
+            }
+            assert(written == dest.len);
+        }
+    };
+}
+
+/// Deterministic RNG for tests, byte-identical to commonware's `TestRng` (Rust `rand` 0.10's
+/// `StdRng`, which is ChaCha12).
+pub const TestRng = ChaChaRng(12);
+
+/// Rust `rand_chacha::ChaCha8Rng`, which commonware's codec conformance tests seed.
+pub const ChaCha8Rng = ChaChaRng(8);
 
 /// Returns `TestRng` seeded with 0 (commonware's `test_rng()`).
 pub fn test_rng() TestRng {
@@ -248,6 +263,7 @@ pub const FuzzRng = struct {
 
 comptime {
     assert_rng(TestRng);
+    assert_rng(ChaCha8Rng);
     assert_rng(ScriptedRng);
     assert_rng(FuzzRng);
 }

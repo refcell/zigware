@@ -200,3 +200,33 @@ test "range: NonEmptyRange encode and decode" {
     const short = codec.decode(R, testing.allocator, &.{ 0, 0, 0, 1 });
     try testing.expectError(error.EndOfBuffer, short);
 }
+
+const conformance = @import("conformance.zig");
+
+const Arbitrary = conformance.Arbitrary;
+
+fn arbitrary_range(comptime T: type) Arbitrary(NonEmptyRange(T)) {
+    return struct {
+        fn arbitrary(_: void, u: *conformance.Unstructured) conformance.Error!NonEmptyRange(T) {
+            const a = u.int(T);
+            const b = u.int(T);
+            if (a == b) return error.IncorrectFormat;
+            return NonEmptyRange(T).init(@min(a, b), @max(a, b)) catch unreachable; // a != b.
+        }
+    }.arbitrary;
+}
+
+test "range: NonEmptyRange conformance" {
+    try conformance.expect_codec_hash(
+        NonEmptyRange(u32),
+        65536,
+        arbitrary_range(u32),
+        "8774a58c91305fc9bf1a9780d269f3f880185f7407aa8c732f7369e35af75c02",
+    );
+    try conformance.expect_codec_hash(
+        NonEmptyRange(u64),
+        65536,
+        arbitrary_range(u64),
+        "325e95b11c01813a05e248096ac421c3224dd0ca5b9af362291bd568b473a4fc",
+    );
+}

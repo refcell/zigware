@@ -18,6 +18,10 @@ encoding parts as soon as `codec` has its core API (see docs/lanes/codec.md).
 - `utils.time`: `Duration` (Rust `Duration` semantics, `parse`, `from_nanos_saturating`,
   `as_millis_u64`), `SystemTime` (`epoch`, `epoch_millis`, `add_jittered`, `limit`,
   `saturating_add`, `from_timestamp(std.Io.Timestamp)`), `sample_duration` (rand-identical).
+- `utils.sequence`: `FixedBytes(N)` (`init`, comptime `from_hex`, `zeroize`), `U32`, `U64`,
+  `PrefixedU64` (`prefix`, `value`), `VecU64`, `Unit`; all with codec encodings, `order`,
+  `eql`, `as_slice`, `{f}` formatting. `utils.Array(T)`/`utils.Span(T)` are comptime checks.
+- `utils.rng.ChaChaRng(rounds)`, `ChaCha8Rng` (Rust `rand_chacha` 0.10).
 - `utils`: `modulo`, `union`, `union_unique`, `Participant`, `NonZero(T)`/`nz`, `GOLDEN_RATIO`,
   `MAX_ALLOCATION_BYTES`.
 
@@ -27,6 +31,12 @@ encoding parts as soon as `codec` has its core API (see docs/lanes/codec.md).
 - `union_unique`, `Participant` (`UInt<u32>`), and `NonEmptyRange(T)` (start, end; rejects
   `start >= end` as `Invalid`) encode through `codec`. Their conformance hashes need codec's
   `arbitrary` emulation in the conformance harness and are checked once that lands.
+- `src/utils/conformance.zig` emulates codec's `CodecConformance` (ChaCha8 keystream through an
+  `arbitrary` 1.4 `Unstructured`) with each type's `Arbitrary` derive written by hand, so
+  utils/conformance.toml hashes are checked in `zig build test` until the conformance package
+  ships a shared harness. Participant, NonEmptyRange, and every sequence type match.
+- `src/utils/fuzz.zig` is the utils fuzz driver: a body over `*FuzzRng`, run seeded in
+  `zig build test` and under `std.testing.fuzz`.
 
 ## Backlog
 - [ ] utils basics (done: faults, modulo, union/union_unique, NZ, Participant, rng, range
@@ -34,7 +44,7 @@ encoding parts as soon as `codec` has its core API (see docs/lanes/codec.md).
   re-exports, `modulo`, `NZ*` non-zero helpers, quorum math (`quorum`, `max_faults`),
   `time.rs`, `range.rs`, `iter.rs`, `vec.rs` (NonEmptyVec), `rational`, `probability`,
   `sampling`, `rng.rs` (deterministic test RNG matching commonware's where tests depend on it).
-- [ ] utils sequence: fixed_bytes, u32, u64, prefixed_u64, vec_u64, unit — with codec.
+- [x] utils sequence: fixed_bytes, u32, u64, prefixed_u64, vec_u64, unit — with codec.
 - [ ] utils bitmap: BitMap, prunable, historical, roaring; codec encodings identical.
 - [ ] utils ordered (Set/Map/Quorum), priority_set, cache (LRU etc.), acknowledgement,
   channel (bounded mpsc, ring, reservation, tracked) — channels over `std.Io` primitives.
@@ -46,3 +56,5 @@ encoding parts as soon as `codec` has its core API (see docs/lanes/codec.md).
 - 2026-11-13: switched union_unique to codec; Participant and NonEmptyRange codec encodings.
 - 2026-11-13: time (Duration, SystemTime, parse, rand-identical jitter) with seeded and
   std.testing.fuzz targets; rng.Uniform.
+- 2026-11-13: sequence (FixedBytes, U32, U64, PrefixedU64, VecU64, Unit) with conformance
+  hashes; Participant and NonEmptyRange conformance hashes; ChaCha8Rng; utils fuzz driver.
