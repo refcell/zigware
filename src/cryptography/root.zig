@@ -33,6 +33,7 @@ pub const keccak256 = @import("keccak256.zig");
 pub const Keccak256 = keccak256.Keccak256;
 pub const crc32 = @import("crc32.zig");
 pub const Crc32 = crc32.Crc32;
+pub const reed_solomon = @import("reed_solomon/root.zig");
 
 pub const ed25519 = @import("ed25519.zig");
 pub const chacha20_poly1305 = @import("chacha20_poly1305.zig");
