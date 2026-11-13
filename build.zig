@@ -44,7 +44,7 @@ const packages = [_]Package{
     .{ .name = "actor", .deps = &.{ "runtime", "utils" } },
     .{ .name = "storage", .deps = &.{
         "codec",       "cryptography", "formatting", "parallel", "runtime", "utils", "math",
-        "conformance",
+        "conformance", "invariants",
     } },
     .{ .name = "stream", .deps = &.{
         "codec", "cryptography", "formatting", "math", "runtime", "utils",

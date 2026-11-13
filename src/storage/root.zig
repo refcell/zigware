@@ -11,6 +11,7 @@ pub const translator = @import("translator.zig");
 pub const rmap = @import("rmap/mod.zig");
 pub const RMap = rmap.RMap;
 pub const merkle = @import("merkle/mod.zig");
+pub const bmt = @import("bmt/mod.zig");
 pub const mmr = merkle.mmr;
 pub const journal = @import("journal/mod.zig");
 pub const metadata = @import("metadata/mod.zig");
