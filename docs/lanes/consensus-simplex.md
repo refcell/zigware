@@ -33,8 +33,13 @@ resolver; those lanes are running, so do the types first and the actors as they 
   `Attestation(S)`), `Notarization`/`Nullification`/`Finalization`, `ConflictingNotarize`,
   `ConflictingFinalize`, `NullifyFinalize`, the `Vote`/`Certificate`/`Artifact`/`Activity`
   unions (`epoch`, `view`, `eql`, codec), `Certification`, `AttributableMap(T)`.
-- `consensus.simplex.Attestation(S)` and `Deferred(T)` (a fixed-size value kept as its
-  bytes and decoded on demand, commonware's `Lazy`).
+- `consensus.simplex.Attestation(S)` and `Deferred(T)`: re-exports of
+  `cryptography.certificate`'s. `Subject(D)` implements `certificate.assert_subject`
+  (`Namespace`, `namespace`, `message(gpa)`, plus allocation-free `message_to(buffer)`).
+- `consensus.simplex.scheme.Namespace` (`derive`, `clone`, `deinit`, `of(subject)`; the
+  `_NOTARIZE`/`_NULLIFY`/`_FINALIZE`/`_SEED` suffixes).
+- `consensus.simplex.scheme.ed25519`: `Scheme(D)` (crypto's `ed25519.certificate.Scheme`
+  over `Subject(D)` and `N3f1`) and `fixture(D, gpa, rng, namespace, n)`.
 - `consensus.simplex.elector`: `Terms` (`rotating`, `stable`), `RoundRobin(H)` (`default`,
   `shuffled(seed)`, `with_term`, `build(gpa, n)`), `RoundRobinElector` (`elect(round, {})`,
   `terms`, `deinit`), `Random(H)` (`init(.v0/.v1)`, `select_leader`, `build(V, n)`),
@@ -42,8 +47,8 @@ resolver; those lanes are running, so do the types first and the actors as they 
   (`mode` `.scheduled`/`.dynamic`, `Input`).
 - `consensus.simplex.limits.max_payload_size(S, D, participants)`.
 - `consensus.simplex.config`: `Config(P)` (P declares `Scheme`, `Elector`, `Blocker`,
-  `Digest`, `Automaton`, `Relay`, `Reporter`, `Strategy`; `check(rng) ?[]const u8`,
-  `assert_valid(rng)`), `Floor(S, D)`, `SkipPolicy`, `SkipBudget`, `ForwardPolicy`.
+  `Digest`, `Automaton`, `Relay`, `Reporter`, `Strategy`;
+  `check(gpa, rng) !?[]const u8`, `assert_valid(gpa, rng)`), `Floor(S, D)`, `SkipPolicy`, `SkipBudget`, `ForwardPolicy`.
 - `consensus.simplex.scheme.bls12381_threshold.vrf`: `Signature(V)`, `Certificate(V)`,
   `Seed(V)` wire types.
 
@@ -55,8 +60,8 @@ resolver; those lanes are running, so do the types first and the actors as they 
 - Automaton/CertifiableAutomaton methods block on `std.Io` (`propose(io, ctx) !?Digest`)
   instead of returning oneshot receivers; null is a closed channel. Callers run them with
   `io.async` to wait on several at once.
-- `Attestation(S)` lives in `simplex/attestation.zig` until the crypto lane ports
-  `certificate.rs`; same wire format, then switch to `cryptography.certificate`.
+- `Attestation(S)` and `Deferred(T)` come from `cryptography.certificate` (the stand-in is
+  gone); simplex keeps only the `Attestation::arbitrary` generator its conformance needs.
 - Signatures in attestations and VRF certificates are `Deferred(T)`: the fixed bytes inline,
   decoded on `get()` (no cache), instead of `Lazy`'s borrowed view, so a decoded vote never
   points into a network buffer. Equality is byte equality.
@@ -70,8 +75,8 @@ resolver; those lanes are running, so do the types first and the actors as they 
   computed values instead.
 - `Config(P)` takes one parameter type declaring commonware's eight type parameters.
   `check` returns the violated rule's message so tests can see it, and `assert_valid` panics
-  with it. The floor check expects the scheme surface
-  `verify_certificate(rng, Subject(D), *const Certificate, strategy) bool`.
+  with it. The floor check uses the certificate scheme surface
+  `verify_certificate(gpa, rng, Subject(D), *const Certificate, strategy) !bool`.
 - consensus also imports `conformance` and `invariants` (test-only, like commonware's
   dev-dependencies).
 
@@ -89,7 +94,7 @@ resolver; those lanes are running, so do the types first and the actors as they 
   with its tests and the `TestCommitment` conformance hash.
 - [x] elector.rs: RoundRobin (shuffled, stable terms) and Random (V0/V1) with their tests;
   RoundRobinShuffleConformance matches. (Random V0/V1 hashes: after threshold signing.)
-- [ ] simplex scheme: ed25519 now; bls12381_multisig and bls12381_threshold as the bls-math
+- [ ] simplex scheme: ed25519 done (on crypto's certificate.rs); bls12381_multisig and bls12381_threshold as the bls-math
   lane lands them; secp256r1 when crypto lands it. elector.rs (leader election).
 - [x] limits.rs (`max_payload_size`), checked against the widest VRF encodings; the
   per-scheme widest-encoding tests follow with the schemes.
@@ -110,3 +115,5 @@ resolver; those lanes are running, so do the types first and the actors as they 
 - 2026-11-13: elector.rs (RoundRobin, Random); RoundRobinShuffleConformance matches.
 - 2026-11-13: limits.rs (`max_payload_size`).
 - 2026-11-13: config.rs (Config, Floor, SkipPolicy, ForwardPolicy).
+- 2026-11-13: simplex ed25519 scheme and Namespace on crypto's certificate.rs; the
+  Attestation stand-in is removed.

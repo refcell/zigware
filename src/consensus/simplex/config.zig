@@ -3,8 +3,9 @@
 //! Commonware's `Config<S, L, B, D, A, R, F, T>` takes eight type parameters; here they are the
 //! declarations of one comptime parameter type `P`:
 //!
-//! - `P.Scheme`: the signing scheme. `config.check` uses `participants() []const PublicKey`
-//!   and `verify_certificate(rng, Subject(D), *const Certificate, strategy) bool`.
+//! - `P.Scheme`: the signing scheme (`cryptography.certificate.assert_scheme`). `config.check`
+//!   uses `participants().len()` and
+//!   `verify_certificate(gpa, rng, Subject(D), *const Certificate, strategy) !bool`.
 //! - `P.Elector`: the elector configuration (`elector.RoundRobin(H)`, `elector.Random(H)`).
 //! - `P.Blocker`, `P.Digest`, `P.Automaton`, `P.Relay`, `P.Reporter`, `P.Strategy`.
 //!
@@ -76,11 +77,12 @@ pub fn Floor(comptime S: type, comptime D: type) type {
         /// The first rule the floor breaks, or null.
         pub fn check(
             self: *const Self,
+            gpa: std.mem.Allocator,
             epoch: Epoch,
             rng: anytype,
             scheme: anytype,
             strategy: anytype,
-        ) ?[]const u8 {
+        ) std.mem.Allocator.Error!?[]const u8 {
             const finalization = switch (self.*) {
                 .genesis => return null,
                 .finalized => |*finalization| finalization,
@@ -90,7 +92,8 @@ pub fn Floor(comptime S: type, comptime D: type) type {
             }
             if (finalization.view().is_zero()) return "use Floor::Genesis for the genesis view";
             const subject: types.Subject(D) = .{ .finalize = &finalization.proposal };
-            if (!scheme.verify_certificate(rng, subject, &finalization.certificate, strategy)) {
+            const certificate = &finalization.certificate;
+            if (!try scheme.verify_certificate(gpa, rng, subject, certificate, strategy)) {
                 return "floor finalization must verify";
             }
             return null;
@@ -143,8 +146,12 @@ pub fn Config(comptime P: type) type {
         /// The first rule the configuration breaks, or null. The timeouts must satisfy
         /// `certification > leader > 0`, and when skipping is enabled, the skip timeout must
         /// exceed both the certification timeout and the retry interval.
-        pub fn check(self: *const Self, rng: anytype) ?[]const u8 {
-            if (self.scheme.participants().len == 0) {
+        pub fn check(
+            self: *const Self,
+            gpa: std.mem.Allocator,
+            rng: anytype,
+        ) std.mem.Allocator.Error!?[]const u8 {
+            if (self.scheme.participants().len() == 0) {
                 return "there must be at least one participant";
             }
             if (self.leader_timeout.is_zero()) return "leader timeout must be greater than zero";
@@ -170,12 +177,13 @@ pub fn Config(comptime P: type) type {
             }
             if (self.fetch_timeout.is_zero()) return "fetch timeout must be greater than zero";
             if (self.mailbox_size == 0) return "mailbox size must be greater than zero";
-            return self.floor.check(self.epoch, rng, &self.scheme, self.strategy);
+            return self.floor.check(gpa, self.epoch, rng, &self.scheme, self.strategy);
         }
 
         /// Panics with the first rule the configuration breaks (commonware `Config::assert`).
-        pub fn assert_valid(self: *const Self, rng: anytype) void {
-            if (self.check(rng)) |message| @panic(message);
+        pub fn assert_valid(self: *const Self, gpa: std.mem.Allocator, rng: anytype) void {
+            const broken = self.check(gpa, rng) catch @panic("out of memory checking config");
+            if (broken) |message| @panic(message);
         }
     };
 }
@@ -199,7 +207,7 @@ const MockScheme = struct {
     pub const Certificate = struct {
         byte: u8,
         pub const fixed_size: usize = 1;
-        pub fn eql(a: Certificate, b: Certificate) bool {
+        pub fn eql(a: *const Certificate, b: *const Certificate) bool {
             return a.byte == b.byte;
         }
         pub fn write(self: Certificate, writer: *@import("codec").Writer) void {
@@ -214,17 +222,25 @@ const MockScheme = struct {
         }
     };
 
-    pub fn participants(self: *const MockScheme) []const u32 {
-        return self.participants_list;
+    const Participants = struct {
+        list: []const u32,
+        pub fn len(self: *const Participants) usize {
+            return self.list.len;
+        }
+    };
+
+    pub fn participants(self: *const MockScheme) Participants {
+        return .{ .list = self.participants_list };
     }
 
     pub fn verify_certificate(
         self: *const MockScheme,
+        _: std.mem.Allocator,
         _: anytype,
         subject: types.Subject(Digest),
         _: *const Certificate,
         _: anytype,
-    ) bool {
+    ) std.mem.Allocator.Error!bool {
         assert(subject == .finalize);
         return self.certificates_valid;
     }
@@ -242,6 +258,10 @@ const Parameters = struct {
     pub const Reporter = void;
     pub const Strategy = void;
 };
+
+fn check(config: *const Config(Parameters)) std.mem.Allocator.Error!?[]const u8 {
+    return config.check(testing.allocator, {});
+}
 
 fn valid_config(cache: *runtime.buffer.paged.CacheRef) Config(Parameters) {
     return .{
@@ -275,26 +295,26 @@ test "config check names the violated rule" {
     var cache = try runtime.buffer.paged.CacheRef.init(testing.allocator, 64, 4);
     defer cache.deinit();
     var config = valid_config(&cache);
-    try testing.expectEqual(null, config.check({}));
-    config.assert_valid({});
+    try testing.expectEqual(null, (try check(&config)));
+    config.assert_valid(testing.allocator, {});
 
     config.certification_timeout = .from_secs(1);
     try testing.expectEqualStrings(
         "certification timeout must be greater than leader timeout",
-        config.check({}).?,
+        (try check(&config)).?,
     );
     config.certification_timeout = .from_secs(2);
     config.skip = .{ .enabled = .{ .timeout = .from_secs(5) } };
     try testing.expectEqualStrings(
         "skip timeout must be greater than timeout retry",
-        config.check({}).?,
+        (try check(&config)).?,
     );
     config.skip = .{ .enabled = .{ .timeout = .from_secs(20) } };
-    try testing.expectEqual(null, config.check({}));
+    try testing.expectEqual(null, (try check(&config)));
     config.view_retention = .zero();
     try testing.expectEqualStrings(
         "view retention timeout must be greater than zero",
-        config.check({}).?,
+        (try check(&config)).?,
     );
 }
 
@@ -308,16 +328,17 @@ test "config floor must be a verified finalization in the epoch" {
         .certificate = .{ .byte = 0 },
     } };
     try testing.expectEqual(View.new(7), config.floor.view());
-    try testing.expectEqual(null, config.check({}));
+    try testing.expectEqual(null, (try check(&config)));
     config.scheme.certificates_valid = false;
-    try testing.expectEqualStrings("floor finalization must verify", config.check({}).?);
+    try testing.expectEqualStrings("floor finalization must verify", (try check(&config)).?);
     config.scheme.certificates_valid = true;
     config.epoch = .new(4);
     try testing.expectEqualStrings(
         "floor finalization must be in the configured epoch",
-        config.check({}).?,
+        (try check(&config)).?,
     );
     config.epoch = .new(3);
     config.floor.finalized.proposal.round.view = .zero();
-    try testing.expectEqualStrings("use Floor::Genesis for the genesis view", config.check({}).?);
+    const genesis_message = "use Floor::Genesis for the genesis view";
+    try testing.expectEqualStrings(genesis_message, (try check(&config)).?);
 }

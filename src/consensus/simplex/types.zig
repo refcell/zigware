@@ -21,7 +21,8 @@ const Allocator = std.mem.Allocator;
 const codec = @import("codec");
 const consensus_types = @import("../types.zig");
 const tagged = @import("tagged.zig");
-const attestation = @import("attestation.zig");
+const cryptography = @import("cryptography");
+const namespace_mod = @import("scheme/namespace.zig");
 
 const Epoch = consensus_types.Epoch;
 const View = consensus_types.View;
@@ -30,7 +31,18 @@ const Participant = consensus_types.Participant;
 const Unstructured = codec.arbitrary.Unstructured;
 const ArbitraryError = codec.arbitrary.Error;
 
-pub const Attestation = attestation.Attestation;
+pub const Attestation = cryptography.certificate.Attestation;
+
+/// commonware's `Attestation::arbitrary`: `Participant::arbitrary`, then the signature.
+fn arbitrary_attestation(
+    comptime S: type,
+    gpa: Allocator,
+    u: *Unstructured,
+) ArbitraryError!Attestation(S) {
+    const signer = Participant.init(u.int(u32));
+    const signature = try codec.arbitrary.value(S.Signature, gpa, u);
+    return .init(signer, signature);
+}
 
 /// Metadata consensus gives the application with a payload: the round, its leader, and the
 /// parent (view and digest) the payload builds on.
@@ -151,6 +163,9 @@ pub fn Proposal(comptime D: type) type {
 pub fn Subject(comptime D: type) type {
     return union(enum) {
         const Self = @This();
+        pub const Digest = D;
+        pub const Namespace = namespace_mod.Namespace;
+        pub const message_max_size: usize = Proposal(D).max_encode_size;
 
         notarize: *const Proposal(D),
         nullify: Round,
@@ -163,12 +178,26 @@ pub fn Subject(comptime D: type) type {
             };
         }
 
-        /// The signed message: the encoded proposal, or the encoded round for nullify.
-        pub fn message(self: Self, buffer: *[Proposal(D).max_encode_size]u8) []u8 {
+        /// The signed message, written into `buffer`: the encoded proposal, or the encoded
+        /// round for nullify.
+        pub fn message_to(self: Self, buffer: *[message_max_size]u8) []u8 {
             return switch (self) {
                 .notarize, .finalize => |proposal| codec.encode_to(Proposal(D), proposal.*, buffer),
                 .nullify => |round| codec.encode_to(Round, round, buffer),
             };
+        }
+
+        /// The signed message (`certificate::Subject::message`); the caller frees it.
+        pub fn message(self: Self, gpa: Allocator) Allocator.Error![]u8 {
+            var buffer: [message_max_size]u8 = undefined;
+            const encoded = self.message_to(&buffer);
+            assert(encoded.len > 0 and encoded.len <= message_max_size);
+            return gpa.dupe(u8, encoded);
+        }
+
+        /// The namespace this subject signs under (`certificate::Subject::namespace`).
+        pub fn namespace(self: Self, derived: *const Namespace) []const u8 {
+            return derived.of(self);
         }
     };
 }
@@ -223,7 +252,7 @@ fn ProposalVote(comptime S: type, comptime D: type, comptime kind: ProposalKind)
 
         pub fn arbitrary(gpa: Allocator, u: *Unstructured) ArbitraryError!Self {
             const proposal = try Proposal(D).arbitrary(gpa, u);
-            return .{ .proposal = proposal, .attestation = try .arbitrary(gpa, u) };
+            return .{ .proposal = proposal, .attestation = try arbitrary_attestation(S, gpa, u) };
         }
     };
 }
@@ -280,7 +309,7 @@ pub fn Nullify(comptime S: type) type {
 
         pub fn arbitrary(gpa: Allocator, u: *Unstructured) ArbitraryError!Self {
             const round = try Round.arbitrary(gpa, u);
-            return .{ .round = round, .attestation = try .arbitrary(gpa, u) };
+            return .{ .round = round, .attestation = try arbitrary_attestation(S, gpa, u) };
         }
     };
 }
@@ -313,7 +342,7 @@ fn ProposalCertificate(comptime S: type, comptime D: type, comptime kind: Propos
         }
 
         pub fn eql(a: Self, b: Self) bool {
-            return a.proposal.eql(b.proposal) and a.certificate.eql(b.certificate);
+            return a.proposal.eql(b.proposal) and a.certificate.eql(&b.certificate);
         }
 
         pub fn write(self: Self, writer: *codec.Writer) void {
@@ -377,7 +406,7 @@ pub fn Nullification(comptime S: type) type {
         }
 
         pub fn eql(a: Self, b: Self) bool {
-            return a.round == b.round and a.certificate.eql(b.certificate);
+            return a.round == b.round and a.certificate.eql(&b.certificate);
         }
 
         pub fn write(self: Self, writer: *codec.Writer) void {

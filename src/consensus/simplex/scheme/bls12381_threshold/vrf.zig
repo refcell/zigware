@@ -11,7 +11,6 @@ const Allocator = std.mem.Allocator;
 const codec = @import("codec");
 const cryptography = @import("cryptography");
 const consensus_types = @import("../../../types.zig");
-const attestation = @import("../../attestation.zig");
 
 const group = cryptography.bls12381.primitives.group;
 const Round = consensus_types.Round;
@@ -71,7 +70,7 @@ pub fn Signature(comptime V: type) type {
 pub fn Certificate(comptime V: type) type {
     return struct {
         const Self = @This();
-        const Inner = attestation.Deferred(Signature(V));
+        const Inner = cryptography.certificate.Deferred(Signature(V));
 
         signature: Inner,
 
@@ -86,7 +85,7 @@ pub fn Certificate(comptime V: type) type {
             return self.signature.get();
         }
 
-        pub fn eql(a: Self, b: Self) bool {
+        pub fn eql(a: *const Self, b: *const Self) bool {
             return a.signature.eql(b.signature);
         }
 
