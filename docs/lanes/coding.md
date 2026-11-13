@@ -17,6 +17,9 @@ hashers (on main).
   original_indices, recovery_indices)`, `deinit`), `Error`, `InitError`, `SHARD_CHUNK_BYTES`.
   Advanced: `rate.{HighRate,LowRate,DefaultRate}(Engine)` with `Encoder`/`Decoder`,
   `EncoderWork`/`DecoderWork` reuse via `into_parts`, and `engine.{Naive,Scalar,DefaultEngine}`.
+- `coding.Config` (`minimum_shards`, `extra_shards` as non-zero `u16`s; `total_shards()`,
+  codec with `fixed_size` 4, `eql`, `order`) and `coding.assert_scheme(S)`, the comptime
+  `Scheme` interface (see `src/coding/root.zig`).
 - `storage.bmt`: `Builder(H)` (`init(gpa, leaves)`, `add(gpa, *digest) u32`, `build(gpa)`,
   `deinit`), `Tree(D)` (`root()`, `proof(gpa, position, diag)`, `range_proof(gpa, start, end,
   diag)`, `multi_proof(gpa, positions, diag)`, `level(i)`, `deinit`), `Proof(D)` (`leaf_count`,
@@ -59,6 +62,7 @@ hashers (on main).
   verification, codec, every test, RootConformance and CodecConformance<Proof> hashes, and the
   `bmt_operations` fuzz (minifuzz + `std.testing.fuzz`).
 - [ ] storage bmt benches once `zig build bench` exists.
+- [x] coding: Config (codec, CodecConformance<Config> hash) and the Scheme interface.
 - [ ] coding: the Scheme interface, reed_solomon scheme (encode into shards with a BMT
   commitment, check, reshard, decode from any k shards), shard selection, codec encodings
   identical to commonware's. Port lib.rs and reed_solomon.rs tests.
@@ -68,3 +72,4 @@ hashers (on main).
 - 2026-11-13: reed_solomon engines, rates, wrappers, results, plans, and test vectors.
 - 2026-11-13: reed_solomon differential fuzzing (engine and rate plans, field oracle).
 - 2026-11-13: storage bmt (proofs, codec, conformance, fuzz).
+- 2026-11-13: coding Config with its conformance hash, and the Scheme interface.

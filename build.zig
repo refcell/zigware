@@ -50,7 +50,8 @@ const packages = [_]Package{
         "codec", "cryptography", "formatting", "math", "runtime", "utils",
     } },
     .{ .name = "coding", .deps = &.{
-        "codec", "cryptography", "parallel", "storage", "utils", "runtime", "invariants",
+        "codec",       "cryptography", "parallel", "storage", "utils", "runtime", "invariants",
+        "conformance",
     } },
     .{ .name = "clearing", .deps = &.{
         "codec", "cryptography", "formatting", "parallel", "storage", "utils", "runtime",
