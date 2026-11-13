@@ -1,0 +1,25 @@
+# Lane: bls-math
+
+Owns `src/math`, `src/simd`, `src/cryptography/bls12381/`. Add
+`pub const bls12381 = @import("bls12381/root.zig");` to `src/cryptography/root.zig` (owned by
+lane crypto; additive edit).
+
+Reference: `~/.cache/zigware/commonware-ref/{math,simd,cryptography/src/bls12381}`.
+A from-scratch zero-dependency BLS12-381 (fields, G1/G2, pairing, hash-to-curve, MSM) already
+exists in `~/needlefish/src/common/crypto/bls12_381` and `montgomery.zig` (same author, MIT);
+adapting it is allowed and faster than starting over. Commonware's encodings, DSTs, and
+variants (MinPk, MinSig) must match exactly.
+
+## Backlog
+- [ ] math: algebra traits, fields (goldilocks), poly (polynomials, evaluation,
+  interpolation), ntt, synthetic. Port math's tests.
+- [ ] simd: the operations commonware abstracts (simd/src/core.rs), scalar + `@Vector`
+  implementations with the consistency tests.
+- [ ] bls12381 primitives: group elements, scalars, compressed codec, hash-to-curve with
+  commonware's DSTs, sign/verify, aggregate, MinPk and MinSig variants, batch verify. Vectors.
+- [ ] bls12381 threshold: polynomial shares, partial signatures, recovery (primitives/ops).
+- [ ] bls12381 dkg (Joint-Feldman / reshare) and tle (timelock encryption).
+- [ ] bls12381 certificate schemes (multisig, threshold) and scheme.rs.
+- [ ] Fuzz targets (commonware math/fuzz, simd/fuzz, bls parts of cryptography/fuzz).
+
+## Log
