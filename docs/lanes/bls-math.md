@@ -11,8 +11,9 @@ adapting it is allowed and faster than starting over. Commonware's encodings, DS
 variants (MinPk, MinSig) must match exactly.
 
 ## Backlog
-- [ ] math: algebra traits, fields (goldilocks), poly (polynomials, evaluation,
-  interpolation), ntt, synthetic. Port math's tests.
+- [x] math: algebra traits, fields (goldilocks), poly (polynomials, evaluation,
+  interpolation), ntt, synthetic. Port math's tests. (Conformance hashes wait for the
+  `conformance` harness.)
 - [ ] simd: the operations commonware abstracts (simd/src/core.rs), scalar + `@Vector`
   implementations with the consistency tests.
 - [ ] bls12381 primitives: group elements, scalars, compressed codec, hash-to-curve with
@@ -40,3 +41,4 @@ variants (MinPk, MinSig) must match exactly.
 ## Log
 - 2026-11-13: math algebra interfaces, goldilocks field, test field/group, fuzz driver.
 - 2026-11-13: math poly (Poly, commit, Interpolator) and varint wire helpers.
+- 2026-11-13: math ntt (NTT, recovery, vanishing, Lagrange), synthetic, codec migration.

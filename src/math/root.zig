@@ -17,6 +17,7 @@ pub const fields = struct {
 };
 pub const ntt = @import("ntt.zig");
 pub const poly = @import("poly.zig");
+pub const synthetic = @import("synthetic.zig");
 pub const testing = @import("testing.zig");
 pub const fuzz = @import("fuzz.zig");
 

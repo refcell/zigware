@@ -13,6 +13,7 @@ const Allocator = std.mem.Allocator;
 const algebra = @import("algebra.zig");
 const codec = @import("codec");
 const fuzz = @import("fuzz.zig");
+const ntt = @import("ntt.zig");
 const Unstructured = fuzz.Unstructured;
 
 /// Below this many polynomials, `Poly.msm` uses the naive algorithm.
@@ -372,6 +373,58 @@ pub fn Interpolator(comptime I: type, comptime F: type) type {
             }
         }
 
+        /// An interpolator for evaluation points `w^exponents[i]`, where `w` has order
+        /// `next_power_of_two(total)`, using the O(n log n) `ntt.lagrange_coefficients`.
+        /// `keys` and `exponents` must each be unique (a bijection); exponents >= total are
+        /// ignored.
+        pub fn init_roots_of_unity(
+            allocator: Allocator,
+            total: u32,
+            keys: []const I,
+            exponents: []const u32,
+        ) !Self {
+            comptime algebra.assert_field_ntt(F);
+            assert(keys.len == exponents.len);
+            const coefficients = try ntt.lagrange_coefficients(F, allocator, total, exponents);
+            defer allocator.free(coefficients);
+            const entries = try allocator.alloc(Entry, coefficients.len);
+            defer allocator.free(entries);
+            for (entries, coefficients) |*e, c| {
+                const position = std.mem.indexOfScalar(u32, exponents, c.index).?;
+                e.* = .{ .key = keys[position], .point = c.coefficient };
+            }
+            std.mem.sort(Entry, entries, {}, entry_less);
+            const keys_out = try allocator.alloc(I, entries.len);
+            errdefer allocator.free(keys_out);
+            const weights_out = try allocator.alloc(F, entries.len);
+            for (keys_out, weights_out, entries) |*k, *w, e| {
+                k.* = e.key;
+                w.* = e.point;
+            }
+            return .{ .keys = keys_out, .weights = weights_out };
+        }
+
+        /// `init_roots_of_unity` by the naive O(n^2) algorithm (testing aid).
+        fn init_roots_of_unity_naive(
+            allocator: Allocator,
+            total: u32,
+            keys: []const I,
+            exponents: []const u32,
+        ) !Self {
+            const size = std.math.ceilPowerOfTwoAssert(u64, total);
+            const w = F.root_of_unity(@intCast(std.math.log2_int(u64, size))).?;
+            var kept_keys: std.ArrayList(I) = .empty;
+            defer kept_keys.deinit(allocator);
+            var points: std.ArrayList(F) = .empty;
+            defer points.deinit(allocator);
+            for (keys, exponents) |k, e| {
+                if (e >= total) continue;
+                try kept_keys.append(allocator, k);
+                try points.append(allocator, algebra.exp(F, w, &.{e}));
+            }
+            return init(allocator, kept_keys.items, points.items);
+        }
+
         /// The constant term, or null when `keys` differ from the interpolator's keys.
         pub fn interpolate(
             self: Self,
@@ -405,6 +458,7 @@ const PlanKind = enum {
     interpolate_with_zero_point_middle,
     translate_scale,
     commit_eval,
+    roots_of_unity_eq_naive,
     fuzz_additive,
     fuzz_space_ring,
 };
@@ -448,6 +502,7 @@ pub fn fuzz_plan(_: void, u: *Unstructured) !void {
             defer committed.deinit(allocator);
             try expect(TG.generator.mul(f.eval(TF, x)).eql(committed.eval(TF, x)));
         },
+        .roots_of_unity_eq_naive => try check_roots_of_unity(allocator, u.int(u16)),
         .fuzz_additive => try fuzz_additive(allocator, f, u),
         .fuzz_space_ring => try fuzz_space_ring(allocator, f, u),
     }
@@ -512,6 +567,20 @@ fn check_interpolate(allocator: Allocator, f: Poly(TF), points_kind: Interpolati
     try expect(recovered.eql(f.constant()));
     // One evaluation short: the key sets differ, so interpolation refuses.
     try expect(interpolator.interpolate(TF, keys[0 .. n - 1], evals[0 .. n - 1]) == null);
+}
+
+fn check_roots_of_unity(allocator: Allocator, seed: u16) !void {
+    const GF = @import("fields/goldilocks.zig").F;
+    const n: u32 = @as(u32, seed % 256) + 1;
+    const keys = try allocator.alloc(u32, n);
+    defer allocator.free(keys);
+    for (keys, 0..) |*k, i| k.* = @intCast(i);
+    var fast = try Interpolator(u32, GF).init_roots_of_unity(allocator, n, keys, keys);
+    defer fast.deinit(allocator);
+    var naive = try Interpolator(u32, GF).init_roots_of_unity_naive(allocator, n, keys, keys);
+    defer naive.deinit(allocator);
+    try expect(std.mem.eql(u32, fast.keys, naive.keys));
+    for (fast.weights, naive.weights) |a, b| try expect(a.eql(b));
 }
 
 fn check_translate_scale(allocator: Allocator, f: Poly(TF), x: TF) !void {
@@ -670,4 +739,19 @@ test "interpolator keeps the first duplicate and sorts keys" {
     const evals = [_]TF{ f.eval(TF, points[1]), f.eval(TF, points[0]) };
     const recovered = interpolator.interpolate(TF, &.{ 2, 7 }, &evals).?;
     try testing.expect(recovered.eql(TF.from_u64(9)));
+}
+
+test "roots of unity interpolator maps exponents back to keys" {
+    const allocator = testing.allocator;
+    const GF = @import("fields/goldilocks.zig").F;
+    const keys = [_]u32{ 30, 10, 20 };
+    const exponents = [_]u32{ 2, 0, 7 };
+    var fast = try Interpolator(u32, GF).init_roots_of_unity(allocator, 5, &keys, &exponents);
+    defer fast.deinit(allocator);
+    const Naive = Interpolator(u32, GF);
+    var naive = try Naive.init_roots_of_unity_naive(allocator, 5, &keys, &exponents);
+    defer naive.deinit(allocator);
+    try testing.expectEqualSlices(u32, &.{ 10, 30 }, fast.keys);
+    try testing.expectEqualSlices(u32, naive.keys, fast.keys);
+    for (fast.weights, naive.weights) |a, b| try testing.expect(a.eql(b));
 }
