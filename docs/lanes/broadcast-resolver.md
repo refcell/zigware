@@ -47,6 +47,12 @@ on p2p's simulated network and the deterministic runtime.
 - `resolver.p2p.score.Score` (`record(elapsed: utils.Duration, bytes: u64)`, `weight() u64`).
 - `resolver.p2p.mocks.Key` (one-byte test key), `resolver.p2p.mocks.Consumer(K, S)` (byte
   values, expected values, `next_event`/`try_event`).
+- Shared, in the utils directory (needed by the resolver fetcher): `utils.sampling.WeightedIndex`
+  (`init(gpa, weights)`, `set`, `weight`, `total`, `sample(rng)`, `sample_uniform(rng)`,
+  `without_replacement(gpa)`, `into_without_replacement(gpa)`) and `WithoutReplacement`
+  (`sample`, `sample_uniform`, `is_empty`, `deinit` restores weights), matching commonware's
+  draws; `utils.PrioritySet(I, P)` (`put`, `get`, `remove`, `reconcile`, `retain`, `peek`,
+  `pop`, `items` ascending); `utils.rng.range_at_most`/`range_less_than` accept `u128`.
 - Shared, in the utils directory at the coordinator's request: `utils.channel.oneshot`
   (`channel(T, gpa, io)` -> `.{ sender, receiver }`; `Sender.send` (consumes, `error.Closed`
   when refused), `is_closed`, `closed()` (wait), `deinit`; `Receiver.recv` (cancelable,
@@ -100,3 +106,4 @@ on p2p's simulated network and the deterministic runtime.
 - 2026-11-13: resolver delivery tracker and mock consumer; oneshot recv wakes on close.
 - 2026-11-13: resolver p2p score (throughput weights, commonware test values).
 - 2026-11-13: resolver opaque actor (all 13 commonware tests) with the fetch metrics family.
+- 2026-11-13: utils sampling (WeightedIndex, commonware vectors), PrioritySet, u128 ranges.

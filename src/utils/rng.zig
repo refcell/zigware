@@ -283,18 +283,24 @@ fn wide_multiply(comptime T: type, a: T, b: T) struct { T, T } {
     return .{ @truncate(product >> @bitSizeOf(T)), @truncate(product) };
 }
 
-/// Draws a full-width `T` the way `rand` does: `u8`/`u16`/`u32` truncate `next_u32`.
+/// Draws a full-width `T` the way `rand` does: `u8`/`u16`/`u32` truncate `next_u32`, and a
+/// `u128` is two `next_u64` words, low word first.
 fn draw(rng: anytype, comptime T: type) T {
     comptime assert(@typeInfo(T).int.signedness == .unsigned);
     return switch (@bitSizeOf(T)) {
         0...32 => @truncate(rng.next_u32()),
         33...64 => @truncate(rng.next_u64()),
+        128 => {
+            const low: u128 = rng.next_u64();
+            const high: u128 = rng.next_u64();
+            return (high << 64) | low;
+        },
         else => @compileError("unsupported width"),
     };
 }
 
 /// Uniform sample in `[low, high]` with `rand` 0.10's biased Canon method
-/// (`UniformInt::sample_single_inclusive`). `T` is an unsigned integer up to 64 bits;
+/// (`UniformInt::sample_single_inclusive`). `T` is an unsigned integer up to 64 bits or `u128`;
 /// `usize` follows `rand`'s `UniformUsize`, which samples 32-bit when `high` fits in `u32`.
 pub fn range_at_most(rng: anytype, comptime T: type, low: T, high: T) T {
     assert(low <= high);
@@ -305,7 +311,8 @@ pub fn range_at_most(rng: anytype, comptime T: type, low: T, high: T) T {
         return range_at_most(rng, u32, @intCast(low), @intCast(high));
     }
     // Rust samples u8 and u16 ranges with u32 words.
-    const Sample = if (@bitSizeOf(T) <= 32) u32 else u64;
+    comptime assert(@bitSizeOf(T) <= 64 or T == u128);
+    const Sample = if (@bitSizeOf(T) <= 32) u32 else if (@bitSizeOf(T) <= 64) u64 else u128;
     const range: Sample = @as(Sample, high - low) +% 1;
     if (range == 0) return draw(rng, T);
     var result, const low_order = wide_multiply(Sample, draw(rng, Sample), range);
@@ -606,4 +613,28 @@ test "rng: std.Random adapter draws from the generator" {
     var actual: [12]u8 = undefined;
     random(&a).bytes(&actual);
     try testing.expectEqualSlices(u8, &expected, &actual);
+}
+
+test "rng: u128 ranges match rand 0.10" {
+    // Reference values from Rust `rand` 0.10 (`random_range` over `StdRng::seed_from_u64`).
+    var rng = TestRng.init(0);
+    const high: u128 = std.math.maxInt(u128) / 3 + 7;
+    const expected = [_]u128{
+        87731620750275100071116572160849880367,
+        66259698770146232048501622136865052854,
+        90028897897457798781066550614835319563,
+        109904143429765703673625622580739123861,
+    };
+    for (expected) |value| try testing.expectEqual(value, range_less_than(&rng, u128, 0, high));
+    var narrow = TestRng.init(1);
+    const narrow_high: u128 = @as(u128, std.math.maxInt(u64)) * 3;
+    const narrow_expected = [_]u128{
+        38253139215780428766,
+        9716972792518046073,
+        53270661361020387246,
+        39209015882650248020,
+    };
+    for (narrow_expected) |value| {
+        try testing.expectEqual(value, range_less_than(&narrow, u128, 0, narrow_high));
+    }
 }

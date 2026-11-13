@@ -38,6 +38,10 @@ pub const ordered = @import("ordered.zig");
 
 pub const channel = @import("channel/mod.zig");
 
+pub const sampling = @import("sampling.zig");
+pub const priority_set = @import("priority_set.zig");
+pub const PrioritySet = priority_set.PrioritySet;
+
 pub const time = @import("time.zig");
 pub const Duration = time.Duration;
 pub const SystemTime = time.SystemTime;
