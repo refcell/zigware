@@ -43,6 +43,7 @@ pub const bls12381 = @import("bls12381/root.zig");
 pub const transcript = @import("transcript.zig");
 pub const Transcript = transcript.Transcript;
 pub const handshake = @import("handshake.zig");
+pub const secp256r1 = @import("secp256r1.zig");
 pub const secret = @import("secret.zig");
 pub const Secret = secret.Secret;
 

@@ -26,9 +26,12 @@ handshake), then certificate, secp256r1, the rest, zk and banderwagon last.
 - [x] secret.rs: `Secret(T)` (redacted format, constant-time `eql`, zeroizing `deinit`).
 - [x] handshake (sake) used by `stream`: V0/V1, X25519 on std, `SakeV0`/`SakeV1`
   conformance hashes, RFC 7748 and Wycheproof X25519 vectors, message decode fuzz.
-- [ ] sake: `test_v1_rejects_derived_identity` (needs secp256r1).
+- [x] sake: `test_v1_rejects_derived_identity` (secp256r1 key substitution).
 - [ ] certificate.rs: the certificate scheme abstraction and mocks.
-- [ ] secp256r1: standard and recoverable signatures, codec, certificate scheme.
+- [x] secp256r1: standard and recoverable signatures and codec on `std.crypto.ecc.P256`, with
+  its own RFC 6979 signer and key recovery; commonware's vectors, the four `CodecConformance`
+  hashes, and the `secp256r1_{standard,recoverable}_decode` fuzz targets.
+- [ ] secp256r1 `certificate` scheme (after certificate.rs).
 - [ ] lthash, bloomfilter (+ conformance).
 - [ ] banderwagon, zk (bulletproofs, pedersen) last.
 - [ ] Fuzz targets (commonware cryptography/fuzz) and conformance hashes.
@@ -60,3 +63,11 @@ handshake), then certificate, secp256r1, the rest, zk and banderwagon last.
   `dial_end`, `listen_end`; results are structs (`DialStart`, `ListenStart`, `DialEnd`).
   Errors carry no payload (`InvalidTimestamp` drops the value and range). Ephemeral and
   shared secrets are zeroized once used.
+- secp256r1 signs with its own RFC 6979 nonce generator (HMAC-SHA256, no additional data)
+  instead of `std.crypto.sign.ecdsa`, whose nonce mixes in a noise block and is not RFC 6979;
+  only std's P256 field, scalar, and point arithmetic is used. Verification is plain ECDSA
+  (commonware verifies with aws-lc-rs on x86_64 and aarch64 and `p256` elsewhere; both
+  agree on decoded, low-s signatures). Keys are `PrivateKey.from_bytes`, signatures
+  `sign_raw`/`verify_raw` without namespace framing, as for ed25519.
+- certificate.rs waits for `utils.BitMap` (the `Signers` encoding) and `utils.ordered.Set`;
+  secp256r1 came first because it needs neither.

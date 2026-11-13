@@ -10,6 +10,7 @@ const fuzz = @import("../fuzz.zig");
 const conformance = @import("../conformance.zig");
 const transcript_mod = @import("../transcript.zig");
 const sake = @import("sake.zig");
+const secp256r1 = @import("../secp256r1.zig");
 
 const PrivateKey = ed25519.PrivateKey;
 const PublicKey = ed25519.PublicKey;
@@ -130,17 +131,18 @@ test "sake rejects timestamps outside the accepted range" {
 
 /// A transcript over the dialer's signed fields, with or without its identity.
 fn syn_transcript(
+    comptime P: type,
     version: Version,
-    syn: *const Protocol.Syn,
-    listener: PublicKey,
-    dialer: ?PublicKey,
+    syn: anytype,
+    listener: P,
+    dialer: ?P,
 ) transcript_mod.Transcript {
     const base = transcript_mod.Transcript.init(namespace, version.transcript_version());
     var t = base.fork(version.namespace());
     if (version == .v1) t.commit(&.{1});
     t.commit(&codec.encode_fixed(u64, syn.time_ms));
-    t.commit(&codec.encode_fixed(PublicKey, listener));
-    if (dialer) |key| t.commit(&codec.encode_fixed(PublicKey, key));
+    t.commit(&codec.encode_fixed(P, listener));
+    if (dialer) |key| t.commit(&codec.encode_fixed(P, key));
     t.commit(&syn.epk.bytes);
     return t;
 }
@@ -151,10 +153,87 @@ test "sake syn signature covers the dialer identity only in v1" {
         const dialer = peers.dialer.public_key();
         const listener = peers.listener.public_key();
         const dial = peers.dial(namespace, case[0]);
-        const with = syn_transcript(case[0], &dial.syn, listener, dialer);
-        const without = syn_transcript(case[0], &dial.syn, listener, null);
+        const with = syn_transcript(PublicKey, case[0], &dial.syn, listener, dialer);
+        const without = syn_transcript(PublicKey, case[0], &dial.syn, listener, null);
         try testing.expectEqual(case[1], with.verify(&dialer, &dial.syn.signature));
         try testing.expectEqual(!case[1], without.verify(&dialer, &dial.syn.signature));
+    }
+}
+
+/// A second secp256r1 key under which `signature` over `summary` also verifies:
+/// `-Q - 2 * e * r^-1 * G` recovers `-R`, which has the same x coordinate as `R`.
+fn substitute(
+    key: secp256r1.standard.PublicKey,
+    summary: transcript_mod.Summary,
+    signature: secp256r1.standard.Signature,
+) !secp256r1.standard.PublicKey {
+    const P256 = std.crypto.ecc.P256;
+    const Scalar = P256.scalar.Scalar;
+    // Transcript signatures use an empty namespace.
+    const hash = secp256r1.common.payload_hash("", &summary.bytes);
+    const e = Scalar.fromBytes48(@as([16]u8, @splat(0)) ++ hash, .big);
+    const r = try Scalar.fromBytes(signature.raw[0..32].*, .big);
+    const t = e.mul(r.invert()).dbl();
+    const t_g = try P256.basePoint.mul(t.toBytes(.big), .big);
+    const derived = key.inner.point.add(t_g).neg();
+    return secp256r1.standard.PublicKey.from_bytes(derived.toCompressedSec1()).?;
+}
+
+test "sake v1 rejects a derived dialer identity" {
+    const Secp = sake.Sake(secp256r1.standard.PrivateKey);
+    for (versions) |version| {
+        var rng = utils.rng.test_rng();
+        const dialer = secp256r1.standard.PrivateKey.random(&rng);
+        const listener = secp256r1.standard.PrivateKey.random(&rng);
+        const dialer_key = dialer.public_key();
+        const listener_key = listener.public_key();
+
+        // The dialer signs a Syn with its own key.
+        const dial_context = Secp.Context.init(
+            namespace,
+            0,
+            zero_range,
+            dialer,
+            listener_key,
+            version,
+        );
+        const dial = Secp.dial_start(&rng, dial_context);
+
+        // It derives a second identity under which that signature verifies and claims it.
+        const bound: ?secp256r1.standard.PublicKey =
+            if (version.binds_identity_before_syn()) dialer_key else null;
+        const P = secp256r1.standard.PublicKey;
+        const signed = syn_transcript(P, version, &dial.syn, listener_key, bound).summarize();
+        const derived = try substitute(dialer_key, signed, dial.syn.signature);
+        try testing.expect(!derived.eql(dialer_key));
+        try testing.expect(transcript_mod.verify_summary(signed, &derived, &dial.syn.signature));
+
+        // Rebuild the dialer transcript with the derived identity in its V0 position.
+        var claimed = syn_transcript(P, version, &dial.syn, listener_key, null);
+        claimed.commit(&codec.encode_fixed(P, derived));
+        const listen_context = Secp.Context.init(
+            namespace,
+            0,
+            zero_range,
+            listener,
+            derived,
+            version,
+        );
+        const result = Secp.listen_start(&rng, listen_context, dial.syn);
+
+        // V1 fails the Syn signature check: the signature covers the real dialer identity.
+        if (version == .v1) {
+            try testing.expectError(error.InvalidSignature, result);
+            continue;
+        }
+
+        // Under V0 the dialer finishes the exchange under the derived identity.
+        const listen = try result;
+        var state = dial.state;
+        state.transcript = claimed;
+        const end = try Secp.dial_end(state, listen.syn_ack);
+        const listener_transcript = try Secp.listen_end(listen.state, end.ack);
+        try testing.expect(end.transcript.summarize().eql(listener_transcript.summarize()));
     }
 }
 
@@ -167,7 +246,8 @@ test "sake rejects a low-order ephemeral key" {
         const dialer = peers.dialer.public_key();
         const binds = version.binds_identity_before_syn();
         const listener = peers.listener.public_key();
-        const t = syn_transcript(version, &dial.syn, listener, if (binds) dialer else null);
+        const bound: ?PublicKey = if (binds) dialer else null;
+        const t = syn_transcript(PublicKey, version, &dial.syn, listener, bound);
         dial.syn.signature = t.sign(&peers.dialer);
         const result = peers.listen(namespace, version, dialer, dial.syn);
         try testing.expectError(error.InvalidEphemeralKey, result);

@@ -22,6 +22,7 @@ const Blake3 = @import("blake3.zig").Blake3;
 const Keccak256 = @import("keccak256.zig").Keccak256;
 const Crc32 = @import("crc32.zig").Crc32;
 const ed25519 = @import("ed25519.zig");
+const secp256r1 = @import("secp256r1.zig");
 const Summary = @import("transcript.zig").Summary;
 const sake = @import("handshake/sake.zig");
 
@@ -45,6 +46,22 @@ fn verify(comptime name: []const u8, comptime T: type, comptime gen: arbitrary.G
         std.heap.smp_allocator,
         prefix ++ name,
         conformance.default_cases,
+        conformance_file,
+    );
+}
+
+/// Like `verify`, with the case count recorded in the conformance file (`=> 1024`).
+fn verify_n(
+    comptime name: []const u8,
+    comptime T: type,
+    comptime gen: arbitrary.Generator(T),
+) !void {
+    const entry = (try conformance.find(conformance_file, prefix ++ name)).?;
+    try conformance.verify(
+        CodecConformance(T, gen),
+        std.heap.smp_allocator,
+        prefix ++ name,
+        entry.n_cases,
         conformance_file,
     );
 }
@@ -99,6 +116,37 @@ fn gen_signature(gpa: Allocator, u: *Unstructured) Error!ed25519.Signature {
     while (message.items.len < len and u.keep_going()) try message.append(gpa, u.int(u8));
     assert(message.items.len <= len);
     return private_key.sign("", message.items);
+}
+
+/// The secp256r1 `PrivateKeyInner::random(StdRng::from_seed(..))` for either scheme.
+fn gen_secp_private_key(comptime M: type) arbitrary.Generator(M.PrivateKey) {
+    return struct {
+        fn generate(gpa: Allocator, u: *Unstructured) Error!M.PrivateKey {
+            var rng = utils.rng.TestRng.init_key(try bytes32(gpa, u));
+            return M.PrivateKey.random(&rng);
+        }
+    }.generate;
+}
+
+fn gen_secp_public_key(gpa: Allocator, u: *Unstructured) Error!secp256r1.standard.PublicKey {
+    const private_key = try gen_secp_private_key(secp256r1.standard)(gpa, u);
+    return private_key.public_key();
+}
+
+/// Like `gen_signature`: a random key signs up to 255 bytes under the empty namespace.
+fn gen_secp_signature(comptime M: type) arbitrary.Generator(M.Signature) {
+    return struct {
+        fn generate(gpa: Allocator, u: *Unstructured) Error!M.Signature {
+            const private_key = try gen_secp_private_key(M)(gpa, u);
+            const len = try arbitrary.value(usize, gpa, u) % 256;
+            var message: std.ArrayList(u8) = .empty;
+            while (message.items.len < len and u.keep_going()) {
+                try message.append(gpa, u.int(u8));
+            }
+            assert(message.items.len <= len);
+            return private_key.sign("", message.items);
+        }
+    }.generate;
 }
 
 const Protocol = sake.Sake(ed25519.PrivateKey);
@@ -159,5 +207,31 @@ test "conformance: sake syn and syn_ack" {
         sake_prefix ++ "CodecConformance<SynAck<crate::ed25519::Signature>>",
         Protocol.SynAck,
         gen_syn_ack,
+    );
+}
+
+test "conformance: secp256r1 keys and signatures" {
+    try slow.skip_slow();
+    const standard = secp256r1.standard;
+    const recoverable = secp256r1.recoverable;
+    try verify_n(
+        "secp256r1::common::tests::conformance::CodecConformance<PrivateKeyInner>",
+        standard.PrivateKey,
+        gen_secp_private_key(standard),
+    );
+    try verify_n(
+        "secp256r1::common::tests::conformance::CodecConformance<PublicKeyInner>",
+        standard.PublicKey,
+        gen_secp_public_key,
+    );
+    try verify_n(
+        "secp256r1::standard::tests::conformance::CodecConformance<Signature>",
+        standard.Signature,
+        gen_secp_signature(standard),
+    );
+    try verify_n(
+        "secp256r1::recoverable::tests::conformance::CodecConformance<Signature>",
+        recoverable.Signature,
+        gen_secp_signature(recoverable),
     );
 }
