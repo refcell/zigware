@@ -12,7 +12,8 @@ handshake), then certificate, secp256r1, the rest, zk and banderwagon last.
 `reed_solomon/` belongs to the coding lane.
 - [x] Core signing traits as comptime interfaces (`signer.zig`): `Signer`/`PrivateKey`,
   `Verifier`/`PublicKey`, `Signature`, `BatchVerifier` + `BatchEntry`, `Recoverable`.
-- [ ] Remaining lib.rs traits: `Digestible`, `Committable`, `Digested`, `Cipher`.
+- [x] Remaining lib.rs traits: `Digestible`, `Committable`, `Digested` (`digestible.zig`);
+  `Cipher` is in `signer.zig`.
 - [x] Hashes: sha256, sha512, blake3, keccak256, crc32 (CRC-32C) on `std.crypto`/`std.hash`,
   with commonware's test vectors and the hasher differential fuzz (`fuzz.zig`).
 - [x] `CodecConformance` hashes (`codec_conformance_test.zig`, commonware's
@@ -107,3 +108,7 @@ handshake), then certificate, secp256r1, the rest, zk and banderwagon last.
   subtree hashing needs chaining values that `std.crypto.hash.Blake3` does not expose.
 - `{}` passed as a strategy still means `parallel.sequential` (`hasher.resolve_strategy`), so
   other lanes' placeholder calls keep compiling until they switch.
+- `Digested(T)` holds a borrowed `*const T` instead of an `Arc<T>`: the owner keeps the value
+  alive and unchanged while a `Digested` refers to it. `compute(value, strategy)` hashes
+  synchronously through `digest_across` (no future). It has `write`/`encode_size` but no
+  `read`, so it is not a codec type; encode it with `digested.write(writer)`.
