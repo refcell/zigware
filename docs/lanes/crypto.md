@@ -15,18 +15,18 @@ handshake), then certificate, secp256r1, the rest, zk and banderwagon last.
 - [ ] Remaining lib.rs traits: `Digestible`, `Committable`, `Digested`, `Cipher`.
 - [x] Hashes: sha256, sha512, blake3, keccak256, crc32 (CRC-32C) on `std.crypto`/`std.hash`,
   with commonware's test vectors and the hasher differential fuzz (`fuzz.zig`).
-- [ ] Hash codec conformance hashes (`CodecConformance<Digest>`), once codec/conformance ship
-  the `arbitrary` + ChaCha8 value generator.
+- [x] `CodecConformance` hashes (`codec_conformance_test.zig`, commonware's
+  `conformance.toml` copied unchanged): the five digests, `Summary`, ed25519 keys and
+  signatures, and the sake `Ack`/`Syn`/`SynAck`/`EphemeralPublicKey`.
 - [x] ed25519: keys, namespaced sign/verify, ZIP-215 verification, batch verify, codec;
   RFC 8032, Wycheproof, and ZIP-215 vectors; decode and batch fuzz targets.
-- [ ] ed25519 conformance hashes and `certificate` scheme (after certificate.rs).
+- [ ] ed25519 `certificate` scheme and its conformance hash (after certificate.rs).
 - [x] chacha20_poly1305 (`Cipher`) with the `Seal` conformance hash.
 - [x] transcript.rs with the `TranscriptV0Ops`/`TranscriptV1Ops` conformance hashes.
 - [x] secret.rs: `Secret(T)` (redacted format, constant-time `eql`, zeroizing `deinit`).
 - [x] handshake (sake) used by `stream`: V0/V1, X25519 on std, `SakeV0`/`SakeV1`
   conformance hashes, RFC 7748 and Wycheproof X25519 vectors, message decode fuzz.
-- [ ] sake: `test_v1_rejects_derived_identity` (needs secp256r1) and `CodecConformance` of
-  Syn/SynAck/Ack (needs the codec `arbitrary` generator).
+- [ ] sake: `test_v1_rejects_derived_identity` (needs secp256r1).
 - [ ] certificate.rs: the certificate scheme abstraction and mocks.
 - [ ] secp256r1: standard and recoverable signatures, codec, certificate scheme.
 - [ ] lthash, bloomfilter (+ conformance).

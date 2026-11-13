@@ -75,4 +75,5 @@ test "hasher multiple runs" {
 
 test {
     std.testing.refAllDecls(@This());
+    _ = @import("codec_conformance_test.zig");
 }
