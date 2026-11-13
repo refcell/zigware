@@ -4,6 +4,7 @@
 const std = @import("std");
 
 pub const primitives = @import("primitives/root.zig");
+pub const dkg = @import("dkg/root.zig");
 
 test {
     std.testing.refAllDecls(@This());

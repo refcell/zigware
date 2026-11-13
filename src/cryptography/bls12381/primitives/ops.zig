@@ -7,7 +7,7 @@
 //!
 //! - `aggregate`: aggregation of public keys and signatures.
 //! - `batch`: batch verification of many signatures.
-//! - `threshold` (pending): threshold signatures over a `Sharing`.
+//! - `threshold`: threshold signatures over a `Sharing`.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -16,6 +16,7 @@ const variant = @import("variant.zig");
 
 pub const aggregate = @import("ops/aggregate.zig");
 pub const batch = @import("ops/batch.zig");
+pub const threshold = @import("ops/threshold.zig");
 
 const Private = group.Private;
 const Error = variant.Error;
@@ -116,4 +117,5 @@ pub fn verify_proof_of_possession(
 
 test {
     _ = @import("ops/tests.zig");
+    _ = threshold;
 }
