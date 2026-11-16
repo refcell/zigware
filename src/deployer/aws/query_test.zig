@@ -120,3 +120,24 @@ fn scan_any(_: void, random: *utils.rng.FuzzRng) anyerror!void {
 test "query: fuzz scan and decode never panic" {
     try utils.fuzz.run({}, scan_any, 0x786d_6c21, 4_000);
 }
+
+test "query: elements and texts read nested items" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const xml =
+        \\<R><set><item><id>a&amp;1</id><tags><item><id>no</id></item></tags></item>
+        \\<item><id>b</id></item><item/></set></R>
+    ;
+    const items = try query.elements(arena, xml, &.{ "R", "set", "item" });
+    try testing.expectEqual(@as(usize, 3), items.len);
+    try testing.expectEqualStrings("a&amp;1", (try query.first_text(items[0], &.{"id"})).?);
+    try testing.expectEqualStrings("a&1", (try query.decoded_text(arena, items[0], &.{"id"})).?);
+    try testing.expectEqualStrings("", items[2]);
+    const ids = try query.texts(arena, xml, &.{ "R", "set", "item", "id" });
+    try testing.expectEqual(@as(usize, 2), ids.len);
+    try testing.expectEqualStrings("a&1", ids[0]);
+    try testing.expectEqualStrings("b", ids[1]);
+    const bad = query.texts(arena, "<R><x>&bad;</x></R>", &.{ "R", "x" });
+    try testing.expectError(error.MalformedXml, bad);
+}

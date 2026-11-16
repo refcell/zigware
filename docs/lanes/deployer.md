@@ -45,6 +45,10 @@ test vectors. Tests never call AWS and never hold credentials.
   start_index)` returns `.ok` (`Launched{ instance_ids, az }`) or `.failure`;
   `run_instances_body`, `new_client_token`. `deployer.aws.create.run_launches(Launcher, io,
   gpa, launcher, monitoring_region, regions)` runs regional launch queues concurrently.
+- `deployer.aws.ec2_api`: `Ec2{ client, arena }` (a refused call returns `error.AwsEc2` with
+  the `ApiError` in `failure`) and one function per commonware EC2 call (`create_vpc`,
+  `wait_for_instances_running`, `find_az_instance_support`, ...). `deployer.aws.query`
+  also has `elements`, `texts`, and `decoded_text` for nested responses.
 - `utils.fuzz` is now exported (the seeded fuzz driver over `FuzzRng`).
 
 ## Decisions
@@ -108,8 +112,10 @@ test vectors. Tests never call AWS and never hold credentials.
   client, tested against scripted responses. `HttpTransport` was checked by hand against a
   public HTTPS server (GET, HEAD, POST, DNS failure), never against AWS.
 - [ ] `upload_instance_files` and `hash_files`.
-- [ ] The remaining EC2 calls (VPC, subnets, security groups, key pairs, describe/terminate,
-  peering) over the client, then the create, update,
+- [x] The remaining EC2 calls (`deployer.aws.ec2_api`: key pairs, instance types, AMIs, VPCs,
+  gateways, route tables, subnets, security groups, instances and their waits, peering, tag
+  lookups, teardown, AZ offerings, enabled regions), tested against scripted responses.
+- [ ] The create, update,
   authorize, destroy, clean, profile, and attach flows and the `deployer` binary.
 - [ ] Fuzz: YAML parse/write round trips, config validation, SigV4 canonicalization.
 

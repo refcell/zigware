@@ -55,9 +55,10 @@ pub const depth_max = 32;
 
 pub const ScanError = error{MalformedXml};
 
-/// The text of each element whose path from the root is `path`, in document order, passed to
-/// `visit` still entity-encoded, until `visit` returns false. The whole document is checked for
-/// well-formed nesting either way.
+/// The content of each element whose path from the root is `path` (its text, or for an element
+/// with children its inner XML), in document order, passed to `visit` still entity-encoded,
+/// until `visit` returns false. The whole document is checked for well-formed nesting either
+/// way.
 pub fn scan(
     xml: []const u8,
     path: []const []const u8,
@@ -66,6 +67,8 @@ pub fn scan(
 ) ScanError!void {
     assert(path.len > 0 and path.len <= depth_max);
     var stack: [depth_max][]const u8 = undefined;
+    // Where each open element's content starts.
+    var starts: [depth_max]usize = undefined;
     var depth: usize = 0;
     var index: usize = 0;
     var visiting = true;
@@ -88,6 +91,9 @@ pub fn scan(
                 if (!std.mem.eql(u8, std.mem.trimEnd(u8, tag[1..], " \t\r\n"), stack[depth])) {
                     return error.MalformedXml;
                 }
+                if (visiting and depth + 1 == path.len and matches_path(stack[0..path.len], path)) {
+                    visiting = visit(context, xml[starts[depth]..open]);
+                }
             },
             else => {
                 const self_closing = tag[tag.len - 1] == '/';
@@ -95,18 +101,14 @@ pub fn scan(
                 if (name_end == 0) return error.MalformedXml;
                 if (depth == depth_max) return error.MalformedXml;
                 stack[depth] = tag[0..name_end];
-                const matches = visiting and depth + 1 == path.len and
-                    matches_path(stack[0 .. depth + 1], path);
                 if (self_closing) {
-                    if (matches) visiting = visit(context, "");
+                    const matches = depth + 1 == path.len and
+                        matches_path(stack[0 .. depth + 1], path);
+                    if (visiting and matches) visiting = visit(context, "");
                     continue;
                 }
+                starts[depth] = index;
                 depth += 1;
-                if (matches) {
-                    const end = std.mem.indexOfScalarPos(u8, xml, index, '<') orelse
-                        return error.MalformedXml;
-                    visiting = visit(context, xml[index..end]);
-                }
             },
         }
     }
@@ -120,6 +122,54 @@ fn matches_path(stack: []const []const u8, path: []const []const u8) bool {
         if (!std.mem.eql(u8, name, wanted)) return false;
     }
     return true;
+}
+
+/// The decoded text of each element at `path`, in order (allocates from `arena`).
+pub fn texts(arena: Allocator, xml: []const u8, path: []const []const u8) ![]const []const u8 {
+    return collect(arena, xml, path, true);
+}
+
+/// The raw inner XML of each element at `path`, in order, for reading per-item fields with
+/// paths relative to the item (allocates from `arena`).
+pub fn elements(arena: Allocator, xml: []const u8, path: []const []const u8) ![]const []const u8 {
+    return collect(arena, xml, path, false);
+}
+
+fn collect(
+    arena: Allocator,
+    xml: []const u8,
+    path: []const []const u8,
+    decode: bool,
+) ![]const []const u8 {
+    const Collector = struct {
+        list: std.ArrayList([]const u8) = .empty,
+        arena: Allocator,
+        decode: bool,
+        failed: ?error{ OutOfMemory, MalformedXml } = null,
+
+        fn visit(c: *@This(), text: []const u8) bool {
+            const value = if (c.decode) decode_text(c.arena, text) catch |err| {
+                c.failed = err;
+                return false;
+            } else text;
+            c.list.append(c.arena, value) catch |err| {
+                c.failed = err;
+                return false;
+            };
+            return true;
+        }
+    };
+    var collector: Collector = .{ .arena = arena, .decode = decode };
+    try scan(xml, path, &collector, Collector.visit);
+    if (collector.failed) |err| return err;
+    assert(collector.list.items.len <= xml.len);
+    return collector.list.items;
+}
+
+/// The decoded text of the first element at `path`, or null (allocates from `arena`).
+pub fn decoded_text(arena: Allocator, xml: []const u8, path: []const []const u8) !?[]const u8 {
+    const text = try first_text(xml, path) orelse return null;
+    return try decode_text(arena, text);
 }
 
 /// The (still entity-encoded) text of the first element at `path`, or null.
