@@ -164,7 +164,8 @@ pub fn Engine(comptime P: type) type {
             self.condition.broadcast(self.io);
         }
 
-        fn wait_stopped(self: *Self) Io.Cancelable!void {
+        /// Waits until an actor stopped or the runtime stopped the engine.
+        pub fn wait_stopped(self: *Self) Io.Cancelable!void {
             self.mutex.lockUncancelable(self.io);
             defer self.mutex.unlock(self.io);
             // Each wake re-checks the flag; the wait ends when an actor stops or on cancel.
@@ -221,8 +222,19 @@ pub fn Engine(comptime P: type) type {
                 };
         }
 
-        /// The engine task: runs the actors until any of them stops (commonware's `select!`
-        /// over the three handles), then aborts the rest.
+        /// Marks the engine stopped once the runtime stops (commonware selects on
+        /// `context.stopped()`), releasing the signal so `stop` can complete.
+        fn watch_shutdown(ctx: Ctx, self: *Self) void {
+            var shutdown = ctx.stopped();
+            defer shutdown.deinit();
+            _ = shutdown.wait() catch return; // Canceled: the engine ended first.
+            assert(shutdown.peek() != null);
+            self.mark_stopped();
+        }
+
+        /// The engine task: runs the actors until any of them stops or the runtime stops
+        /// (commonware's `select!` over `stopped()` and the three handles), then aborts the
+        /// rest.
         pub fn run(
             ctx: Ctx,
             self: *Self,
@@ -249,7 +261,9 @@ pub fn Engine(comptime P: type) type {
             const voter_task = try ctx.child("voter").spawn(run_voter, .{
                 self, &channels[0].sender, &channels[1].sender,
             });
+            const shutdown_task = try ctx.child("shutdown").spawn(watch_shutdown, .{self});
             defer {
+                shutdown_task.abort() catch {};
                 voter_task.abort() catch {};
                 resolver_task.abort() catch {};
                 batcher_task.abort() catch {};

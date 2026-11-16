@@ -191,7 +191,8 @@ resolver; those lanes are running, so do the types first and the actors as they 
   backfill, unclean_shutdown (100 views across journal-recovering restarts), one_offline
   (its leader-labelled metrics wait on the actor metrics), slow_validator, all_recovery,
   all_crash_after_nullify, equivocator, received_certificates_are_reported, and
-  survives_burst. Next: engine_shutdown, attributable_reporter_filtering, reconfigurer,
+  survives_burst, and engine_shutdown (abort and graceful; commonware's running-task count
+  waits on the runtime's task metrics). Next: attributable_reporter_filtering, reconfigurer,
   nullify_only, split views, certified splits, twins, hailstorm, and the rest, seeded.
 - [ ] Fuzz targets (commonware consensus/fuzz).
 
@@ -231,3 +232,5 @@ resolver; those lanes are running, so do the types first and the actors as they 
   engine now signs through the wrapper.
 - 2026-11-16: received_certificates_are_reported and survives_burst DSTs; the application
   mock can stall proposals.
+- 2026-11-16: the engine ends on `context.stopped()`, as commonware's does; engine_shutdown
+  DSTs (abort and graceful stop).

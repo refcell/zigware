@@ -1047,6 +1047,40 @@ test "survives burst: a mailbox of one drains a certificate burst" {
     _ = try run_seeded(0, survives_burst_scenario, .{});
 }
 
+/// commonware `engine_shutdown`: a lone validator finalizes on its own; after a graceful
+/// `stop` or an abort its engine ends, and nothing finalizes afterwards. (commonware counts
+/// running engine tasks; that waits on the runtime's task metrics.)
+fn engine_shutdown_scenario(ctx: Context, graceful: bool) !void {
+    var harness: Harness = undefined;
+    try harness.start(ctx, 1, null, .honest);
+    defer harness.deinit();
+    try ctx.sleep(.fromMilliseconds(1000));
+    const early = harness.max_finalized();
+    try ctx.sleep(.fromMilliseconds(1500));
+    try testing.expect(harness.max_finalized() > early); // The engine is still running.
+    const validator = harness.honest(0).?;
+    const handle = validator.handle.?;
+    validator.handle = null;
+    if (graceful) {
+        try ctx.child("stop").stop(0, .fromSeconds(5));
+        try validator.engine.wait_stopped();
+        try (try handle.join()); // The engine returned on its own.
+    } else if (handle.abort()) |result| {
+        try result;
+    } else |_| {} // Aborted before it returned.
+    const ended = harness.max_finalized();
+    try ctx.sleep(.fromMilliseconds(1000));
+    try testing.expectEqual(ended, harness.max_finalized());
+}
+
+test "engine shutdown: an aborted engine stops its actors" {
+    for (0..3) |seed| _ = try run_seeded(seed, engine_shutdown_scenario, .{false});
+}
+
+test "engine shutdown: a graceful stop ends the engine" {
+    for (0..3) |seed| _ = try run_seeded(seed, engine_shutdown_scenario, .{true});
+}
+
 /// One run of commonware `unclean_shutdown`: start every validator from its journal, stop
 /// them all at a random point within 2 s, and report whether all reached `required`. Short
 /// timeouts let a restarted cluster time out of views it cannot finish, as in commonware.
