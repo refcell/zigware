@@ -4,6 +4,8 @@
 //! fuzzing (`zig build test --fuzz`) and here, where `zig build test` feeds it seeded random
 //! inputs. Iterations scale with `build_options.fuzz_soak`; `build_options.fuzz_seed` is mixed
 //! into every seed. (Same driver as codec's; switch to `invariants.minifuzz` once it lands.)
+//! Bodies draw values with `codec.fuzz.Draws`, since Smith's typed draws, `eos`, and `slice`
+//! are nearly inert on seeded random input.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -57,7 +59,7 @@ fn expect_canonical(comptime T: type, input: []const u8) !void {
 
 fn decode_canonical(_: void, smith: *Smith) anyerror!void {
     var data: [512]u8 = undefined;
-    const input = data[0..smith.slice(&data)];
+    const input = codec.fuzz.Draws.init(smith).slice(&data);
     try expect_canonical(types.Ingress, input);
     try expect_canonical(types.Address, input);
 }

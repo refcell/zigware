@@ -7,6 +7,7 @@ const testing = std.testing;
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const Smith = std.testing.Smith;
+const Draws = @import("utils").fuzz.Draws;
 const build_options = @import("build_options");
 const runtime = @import("runtime");
 const metrics = runtime.telemetry.metrics;
@@ -664,15 +665,16 @@ fn fuzz_run(comptime body: fn (void, *Smith) anyerror!void, seed: u64, iteration
 }
 
 fn fuzz_fifo(_: void, smith: *Smith) anyerror!void {
-    const capacity = smith.valueRangeAtMost(u32, 1, 8);
+    const draws: Draws = .init(smith);
+    const capacity = draws.range_at_most(u32, 1, 8);
     var pair = try open(Sequenced, capacity);
     defer pair.receiver.deinit();
     var sent: u64 = 0;
     var received: u64 = 0;
     var backoffs: u64 = 0;
-    var steps: u32 = 0;
-    while (steps < 512 and !smith.eos()) : (steps += 1) {
-        if (smith.value(bool)) {
+    const steps = draws.range_at_most(u32, 0, 512);
+    for (0..steps) |_| {
+        if (draws.value(bool)) {
             // Overflow is only non-empty while ready is full, so feedback follows the count.
             const queued = sent - received;
             const feedback = try pair.sender.enqueue(.{ .producer = 0, .index = sent });

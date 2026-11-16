@@ -313,6 +313,7 @@ pub fn resolve(
 // Tests (commonware `storage::header::tests`).
 
 const testing = std.testing;
+const Draws = @import("utils").fuzz.Draws;
 const codec = @import("codec");
 const conformance = @import("conformance");
 const conformance_file = @embedFile("../conformance.toml");
@@ -628,25 +629,27 @@ test "header conformance: CodecConformance<Header>" {
 // only ever a short torn V1 creation.
 
 fn fuzz_resolve(_: void, smith: *std.testing.Smith) anyerror!void {
+    const draws: Draws = .init(smith);
     var raw: [region_max + 16]u8 = undefined;
     var raw_len: usize = 0;
-    if (smith.value(bool)) {
-        const layout: BlobLayout = if (smith.value(bool)) .v1 else .v0;
+    if (draws.value(bool)) {
+        const layout: BlobLayout = if (draws.value(bool)) .v1 else .v0;
         var region: [region_max]u8 = undefined;
-        const created = create(.only(layout), .only(smith.value(u16)), &region);
-        raw_len = smith.valueRangeAtMost(u32, 0, raw.len);
+        const created = create(.only(layout), .only(draws.value(u16)), &region);
+        raw_len = draws.range_at_most(usize, 0, raw.len);
         @memset(&raw, 0);
         const copied = @min(raw_len, created.region.len);
         @memcpy(raw[0..copied], created.region[0..copied]);
-        const flips = smith.valueRangeAtMost(u8, 0, 3);
+        const flips = draws.range_at_most(u8, 0, 3);
         for (0..flips) |_| {
             if (raw_len == 0) break;
-            raw[smith.index(raw_len)] ^= smith.value(u8);
+            raw[draws.index(raw_len)] ^= draws.value(u8);
         }
     } else {
-        raw_len = smith.slice(raw[0..parse_len]);
+        raw_len = draws.range_at_most(usize, 0, parse_len);
+        draws.bytes(raw[0..raw_len]);
     }
-    try check_resolve(raw[0..raw_len], smith.value(bool));
+    try check_resolve(raw[0..raw_len], draws.value(bool));
 }
 
 fn check_resolve(raw: []const u8, restrict: bool) !void {

@@ -311,8 +311,9 @@ fn fuzz_run(comptime body: fn (void, *std.testing.Smith) anyerror!void, seed: u6
     while (iteration < total) : (iteration += 1) {
         const len = random.uintAtMost(usize, input.len);
         random.bytes(input[0..len]);
-        // Bias the first byte toward short frames so several decode.
-        if (len > 0 and random.boolean()) input[0] &= 0x3f;
+        // Bias the first wire byte (after the two bytes of `max`) toward short frames so
+        // several decode.
+        if (len > 2 and random.boolean()) input[2] &= 0x3f;
         var smith: std.testing.Smith = .{ .in = input[0..len] };
         body({}, &smith) catch |err| {
             std.debug.print("fuzz: seed {d} iteration {d} failed: {t}\n", .{
@@ -325,12 +326,14 @@ fn fuzz_run(comptime body: fn (void, *std.testing.Smith) anyerror!void, seed: u6
 }
 
 fn fuzz_recv_frame(_: void, smith: *std.testing.Smith) anyerror!void {
-    var wire: [2048]u8 = undefined;
-    const wire_len = smith.slice(&wire);
-    const max = smith.valueRangeAtMost(u32, 0, 512);
+    const draws: utils.fuzz.Draws = .init(smith);
+    const max = draws.range_at_most(u32, 0, 512);
+    var wire_buffer: [2048]u8 = undefined;
+    const wire = draws.slice(&wire_buffer);
+    const wire_len = wire.len;
     var pair = try mocks.channel(testing.allocator, testing.io);
     defer pair.stream.deinit();
-    try pair.sink.send(&.{wire[0..wire_len]});
+    try pair.sink.send(&.{wire});
     pair.sink.deinit();
 
     var buffer: [512]u8 = undefined;

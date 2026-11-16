@@ -254,7 +254,7 @@ test "conformance: Message and Payload encodings match commonware" {
 /// Any successful decode re-encodes to exactly the input (commonware's codec fuzzing).
 fn decode_canonical(_: void, smith: *std.testing.Smith) anyerror!void {
     var data: [256]u8 = undefined;
-    const input = data[0..smith.slice(&data)];
+    const input = codec.fuzz.Draws.init(smith).slice(&data);
     const M = Message([4]u8);
     const message = codec.decode(M, testing.allocator, input) catch return;
     var buffer: [data.len]u8 = undefined;

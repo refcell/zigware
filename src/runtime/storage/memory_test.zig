@@ -4,6 +4,7 @@ const std = @import("std");
 const assert = std.debug.assert;
 const Io = std.Io;
 const testing = std.testing;
+const Draws = @import("utils").fuzz.Draws;
 const iface = @import("../storage.zig");
 const header = @import("header.zig");
 const memory = @import("memory.zig");
@@ -417,18 +418,20 @@ fn fuzz_memory(_: void, smith: *std.testing.Smith) anyerror!void {
     defer model.deinit();
     var blob = (try storage.open("fuzz", "blob")).blob;
     defer blob.close();
-    var steps: u32 = 0;
-    while (steps < 64 and !smith.eos()) : (steps += 1) {
-        switch (smith.valueRangeAtMost(u8, 0, 5)) {
+    const draws: Draws = .init(smith);
+    const steps = draws.range_at_most(u32, 0, 64);
+    for (0..steps) |_| {
+        switch (draws.range_at_most(u8, 0, 5)) {
             0, 1 => {
-                var bytes: [16]u8 = undefined;
-                const length = smith.slice(&bytes);
-                const offset = smith.valueRangeAtMost(u32, 0, 64);
-                try blob.write_at(offset, bytes[0..length], .{});
-                try model.write(offset, bytes[0..length]);
+                var buffer: [16]u8 = undefined;
+                const bytes = buffer[0..draws.range_at_most(usize, 0, buffer.len)];
+                draws.bytes(bytes);
+                const offset = draws.range_at_most(u32, 0, 64);
+                try blob.write_at(offset, bytes, .{});
+                try model.write(offset, bytes);
             },
             2 => {
-                const length = smith.valueRangeAtMost(u32, 0, 80);
+                const length = draws.range_at_most(u32, 0, 80);
                 try blob.resize(length);
                 try model.resize(length);
             },
