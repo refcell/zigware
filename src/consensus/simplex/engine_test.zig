@@ -223,19 +223,14 @@ const Harness = struct {
     }
 
     fn deinit(harness: *Harness) void {
-        // Abort every engine before freeing any mock: live voters relay to all applications.
         const validators = harness.validators;
-        for (validators) |*validator| switch (validator.state) {
-            .absent => {},
-            .honest => abort(validator),
-            .byzantine => validator.byzantine.stop(),
-        };
-        harness.relay.deregister_all();
-        for (validators) |*validator| switch (validator.state) {
-            .absent => {},
-            .honest => stop_actors(validator),
-            .byzantine => gpa.destroy(validator.byzantine),
-        };
+        for (validators) |*validator| {
+            if (validator.state == .byzantine) validator.byzantine.stop();
+        }
+        harness.crash_all();
+        for (validators) |*validator| {
+            if (validator.state == .byzantine) gpa.destroy(validator.byzantine);
+        }
         gpa.free(harness.validators);
         harness.relay.deinit();
         harness.network.close();
@@ -243,6 +238,23 @@ const Harness = struct {
         harness.network.deinit();
         harness.fixture.deinit(gpa);
         harness.* = undefined;
+    }
+
+    /// Aborts every engine and frees its mocks; the validators become absent, and their
+    /// journals stay in storage for `start_validator` to recover.
+    fn crash_all(harness: *Harness) void {
+        const validators = harness.validators;
+        // Abort every engine before freeing any mock: live voters relay to all applications.
+        for (validators) |*validator| {
+            if (validator.state == .honest) abort(validator);
+        }
+        harness.relay.deregister_all();
+        for (validators) |*validator| {
+            if (validator.state != .honest) continue;
+            stop_actors(validator);
+            validator.state = .absent;
+        }
+        for (validators) |*validator| assert(validator.state != .honest);
     }
 
     /// Replaces the link of every ordered pair `restrict` admits (commonware `Update`).
@@ -705,6 +717,74 @@ fn slow_validator_scenario(ctx: Context) !void {
 
 test "slow validator: the others finalize without its votes" {
     _ = try run_seeded(0, slow_validator_scenario, .{});
+}
+
+/// commonware `all_recovery`: over 3 s links no view finishes for a minute; after a minute
+/// fully cut off and relinking at 10 ms, the views right after the highest nullified one are
+/// nearly all notarized (the skip timeout recovers quickly).
+fn all_recovery_scenario(ctx: Context) !void {
+    var harness: Harness = undefined;
+    const n = 5;
+    try harness.start(ctx, n, link_ms(3000, 0, 1.0), .honest);
+    defer harness.deinit();
+    try ctx.sleep(.fromSeconds(60));
+    try testing.expectEqual(0, harness.max_finalized()); // Nothing finalizes over slow links.
+    try harness.link_all(null, null);
+    try ctx.sleep(.fromSeconds(60));
+    var latest: u64 = 0;
+    for (harness.validators) |*validator| {
+        latest = @max(latest, validator.reporter.max_nullify_view().get());
+    }
+    try testing.expect(latest > 0);
+    try harness.link_all(link_ms(10, 1, 1.0), null);
+    const required = 100;
+    try harness.wait_all(required);
+    const view_retention = 10;
+    const tolerated_missing = 3;
+    for (harness.validators) |*validator| {
+        validator.reporter.assert_no_faults();
+        validator.reporter.assert_no_invalid();
+        var found: u32 = 0;
+        for (latest..latest + view_retention) |view| {
+            if (validator.reporter.notarized(.new(view))) found += 1;
+        }
+        try testing.expect(found >= view_retention - tolerated_missing);
+    }
+    const blocked = try harness.oracle().blocked(gpa);
+    defer gpa.free(blocked);
+    try testing.expectEqual(0, blocked.len);
+}
+
+test "all recovery: the cluster recovers quickly after relinking" {
+    _ = try run_seeded(0, all_recovery_scenario, .{});
+}
+
+/// commonware `all_crash_after_nullify`: validator 0 never starts and nothing is linked, so
+/// the rest only nullify view 1; they crash before a nullification can form, and once
+/// restarted from their journals and linked, they rebuild it and finalize.
+fn all_crash_after_nullify_scenario(ctx: Context) !void {
+    var harness: Harness = undefined;
+    try harness.start(ctx, 4, null, .absent);
+    defer harness.deinit();
+    // Wait for every online validator to have its nullify for view 1 reported.
+    const stalled: View = .new(1);
+    for (1..harness.validators.len) |index| {
+        const own: Reporter.Signers = @as(Reporter.Signers, 1) << @intCast(index);
+        const reporter = &harness.validators[index].reporter;
+        while (reporter.votes(stalled).nullify & own == 0) try ctx.sleep(.fromMilliseconds(100));
+    }
+    // The batcher reports a vote before the voter's journal syncs it; let it sync.
+    try ctx.sleep(.fromSeconds(1));
+    try testing.expectEqual(0, harness.max_finalized());
+    harness.crash_all();
+    try harness.link_all(link_ms(10, 1, 1.0), &not_zero);
+    for (1..harness.validators.len) |index| try harness.start_validator(index);
+    // Validator 0 never votes, so every restarted vote is needed for a quorum.
+    try harness.wait_all(10);
+}
+
+test "all crash after nullify: restarted validators rebuild the nullification" {
+    _ = try run_seeded(0, all_crash_after_nullify_scenario, .{});
 }
 
 /// One run of commonware `unclean_shutdown`: start every validator from its journal, stop

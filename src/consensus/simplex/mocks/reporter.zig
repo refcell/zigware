@@ -198,6 +198,18 @@ pub fn Reporter(comptime S: type, comptime D: type) type {
             };
         }
 
+        /// The highest view with a reported nullify vote (zero when there is none).
+        pub fn max_nullify_view(self: *Self) View {
+            self.mutex.lockUncancelable(self.io);
+            defer self.mutex.unlock(self.io);
+            var highest: View = .zero();
+            var views = self.nullifies.keyIterator();
+            while (views.next()) |view| {
+                if (view.get() > highest.get()) highest = view.*;
+            }
+            return highest;
+        }
+
         /// Whether a notarization (or certification) of `view` was reported.
         pub fn notarized(self: *Self, view: View) bool {
             self.mutex.lockUncancelable(self.io);
