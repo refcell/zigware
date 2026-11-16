@@ -58,6 +58,7 @@ const Partition = blobs_mod.Partition;
 const PendingBlob = blobs_mod.PendingBlob;
 const Writable = blobs_mod.Writable;
 const position_to_blob = contiguous.position_to_blob;
+const Metrics = @import("metrics.zig").Metrics;
 
 pub const Error = blobs_mod.Error || checkpoint_mod.Error;
 
@@ -73,6 +74,9 @@ pub const Config = struct {
     write_buffer: usize,
     /// Buffer size for sequential reads during recovery and replay.
     replay_buffer: usize,
+    /// Where to register the journal's metrics (commonware's context metrics); without a
+    /// scope they are recorded unregistered.
+    metrics: ?runtime.telemetry.metrics.Scope = null,
 };
 
 /// A sync completion that has already succeeded: syncs complete synchronously.
@@ -645,6 +649,9 @@ pub fn Recovery(comptime A: type) type {
                 try self.checkpoint.persist(items_per_blob, self.bounds.start, size_new);
             }
             const watermark = self.checkpoint.watermark().?;
+            var metrics = try Metrics.init(self.gpa, self.cfg.metrics);
+            errdefer metrics.deinit();
+            metrics.update(size_new, self.bounds.start, items_per_blob);
             const journal: Journal(A) = .{
                 .gpa = self.gpa,
                 .prefix = self.prefix,
@@ -653,6 +660,7 @@ pub fn Recovery(comptime A: type) type {
                 .bounds = .{ .start = self.bounds.start, .end = size_new },
                 .items_per_blob = items_per_blob,
                 .barrier = .init(watermark),
+                .metrics = metrics,
             };
             self.pending.deinit(self.gpa);
             self.discarded.deinit(self.gpa);
@@ -709,10 +717,7 @@ pub fn Journal(comptime A: type) type {
         /// Reused encoding buffer of `append_many`.
         scratch: std.ArrayList(u8) = .empty,
         failed: bool = false,
-        /// Metrics.
-        items_read: u64 = 0,
-        cache_hits: u64 = 0,
-        cache_misses: u64 = 0,
+        metrics: Metrics,
 
         /// Open the journal, recovering every retained item.
         pub fn init(gpa: Allocator, storage: Storage, cfg: Config) Error!Self {
@@ -796,6 +801,7 @@ pub fn Journal(comptime A: type) type {
 
         /// Close every blob (dropping unsynced items).
         pub fn deinit(self: *Self) void {
+            self.metrics.deinit();
             self.scratch.deinit(self.gpa);
             self.blobs.deinit();
             self.checkpoint.deinit();
@@ -820,6 +826,7 @@ pub fn Journal(comptime A: type) type {
         /// Durably persist the journal so the current state survives a crash.
         pub fn commit(self: *Self) Error!void {
             assert(!self.failed);
+            self.metrics.commit_calls.metric().inc();
             errdefer self.failed = true;
             try self.blobs.sync();
             self.barrier.mark_durable(self.bounds.end);
@@ -829,6 +836,7 @@ pub fn Journal(comptime A: type) type {
         /// advances to the current size.
         pub fn start_sync(self: *Self) Error!void {
             assert(!self.failed);
+            self.metrics.start_sync_calls.metric().inc();
             errdefer self.failed = true;
             try self.blobs.sync();
             self.barrier.record(self.bounds.end, .{});
@@ -838,6 +846,7 @@ pub fn Journal(comptime A: type) type {
         /// Durably persist the journal and its watermark, so no recovery is needed on startup.
         pub fn sync(self: *Self) Error!void {
             assert(!self.failed);
+            self.metrics.sync_calls.metric().inc();
             errdefer self.failed = true;
             const size_now = self.bounds.end;
             try self.blobs.sync();
@@ -848,6 +857,7 @@ pub fn Journal(comptime A: type) type {
         /// Append `value`, returning its position.
         pub fn append(self: *Self, value: A) Error!u64 {
             assert(!self.failed);
+            self.metrics.append_calls.metric().inc();
             const size_new = std.math.add(u64, self.bounds.end, 1) catch return error.SizeOverflow;
             if (self.blobs.tail.try_append_value(A, value) == null) {
                 const bytes = codec.encode_fixed(A, value);
@@ -867,6 +877,7 @@ pub fn Journal(comptime A: type) type {
         /// Append every slice of `nested` in order, returning the last position.
         pub fn append_many_nested(self: *Self, nested: []const []const A) Error!u64 {
             assert(!self.failed);
+            self.metrics.append_many_calls.metric().inc();
             self.scratch.clearRetainingCapacity();
             try encode_items(self.gpa, &self.scratch, nested);
             return self.write_encoded(self.scratch.items);
@@ -896,6 +907,7 @@ pub fn Journal(comptime A: type) type {
         /// Append prepared items, freeing them. Returns the last position.
         pub fn append_prepared(self: *Self, prepared: *PreparedAppend) Error!u64 {
             defer prepared.deinit(self.gpa);
+            self.metrics.append_prepared_calls.metric().inc();
             return self.write_encoded(prepared.bytes);
         }
 
@@ -926,6 +938,7 @@ pub fn Journal(comptime A: type) type {
         fn advance_tail(self: *Self, size_new: u64) Error!void {
             assert(size_new > self.bounds.end);
             self.bounds.end = size_new;
+            self.update_metrics();
             if (size_new % self.items_per_blob == 0) try self.blobs.seal_tail();
         }
 
@@ -945,6 +958,7 @@ pub fn Journal(comptime A: type) type {
             const boundary = try contiguous.blob_first_position(min_blob, self.items_per_blob);
             try self.blobs.prune(min_blob);
             self.bounds.start = boundary;
+            self.update_metrics();
             return true;
         }
 
@@ -961,6 +975,7 @@ pub fn Journal(comptime A: type) type {
         pub fn destroy_cleared(self: *Self, dependents: anytype) Error!void {
             assert(!self.failed);
             defer self.* = undefined;
+            defer self.metrics.deinit();
             defer self.gpa.free(self.prefix);
             defer self.scratch.deinit(self.gpa);
             self.checkpoint.stage_clear(0) catch |err| {
@@ -990,6 +1005,7 @@ pub fn Journal(comptime A: type) type {
             try self.checkpoint.stage_clear(size_new);
             try self.blobs.clear(position_to_blob(size_new, self.items_per_blob));
             self.bounds = .{ .start = size_new, .end = size_new };
+            self.update_metrics();
             self.barrier = .init(size_new);
             try self.checkpoint.finish_clear(self.items_per_blob, size_new);
         }
@@ -1001,6 +1017,10 @@ pub fn Journal(comptime A: type) type {
             if (size_new < self.bounds.end) return error.ItemOutOfRange;
             errdefer self.failed = true;
             try self.checkpoint.stage_clear(size_new);
+        }
+
+        fn update_metrics(self: *Self) void {
+            self.metrics.update(self.bounds.end, self.bounds.start, self.items_per_blob);
         }
 
         fn validate_readable(self: *const Self, position: u64) Error!void {
@@ -1022,13 +1042,19 @@ pub fn Journal(comptime A: type) type {
 
         /// Read the item at `position`.
         pub fn read(self: *Self, position: u64) Error!A {
+            self.metrics.read_calls.metric().inc();
+            return self.read_item(position);
+        }
+
+        /// `read` without counting a call (`read_many` counts one per batch).
+        fn read_item(self: *Self, position: u64) Error!A {
             if (self.try_read_sync(position)) |value| return value;
             const located = try self.locate(position);
-            self.cache_misses += 1;
+            self.metrics.cache_misses.metric().inc();
             var bytes: [chunk]u8 = undefined;
             try located.writer.read_into(&bytes, located.offset);
             const value = try codec.decode_fixed(A, &bytes);
-            self.items_read += 1;
+            self.metrics.items_read.metric().inc();
             return value;
         }
 
@@ -1039,7 +1065,8 @@ pub fn Journal(comptime A: type) type {
                 if (index > 0) assert(positions[index - 1] < position);
                 try self.validate_readable(position);
             }
-            for (positions, out) |position, *value| value.* = try self.read(position);
+            if (positions.len > 0) self.metrics.read_many_calls.metric().inc();
+            for (positions, out) |position, *value| value.* = try self.read_item(position);
         }
 
         /// The item if it can be read without I/O; decode failures also decline.
@@ -1048,8 +1075,8 @@ pub fn Journal(comptime A: type) type {
             var bytes: [chunk]u8 = undefined;
             if (!located.writer.try_read_sync_into(&bytes, located.offset)) return null;
             const value = codec.decode_fixed(A, &bytes) catch return null;
-            self.cache_hits += 1;
-            self.items_read += 1;
+            self.metrics.cache_hits.metric().inc();
+            self.metrics.items_read.metric().inc();
             return value;
         }
 

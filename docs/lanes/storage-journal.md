@@ -63,8 +63,9 @@ resize, sync), `runtime.storage`, with the in-memory backend `runtime.storage.me
   output byte-identical to libzstd level 3 (with storage-merkle's compressor).
 - [x] Metrics: metadata (`sync_rewrites`, `sync_overwrites`, `keys`) and queue (`tip`, `floor`,
   `next`) through `runtime.telemetry.metrics`.
-- [ ] Metrics: contiguous journals (`size`, `pruning_boundary`, `retained`, `tail_items`, call
-  and read counters) and the blob/section managers (`tracked`, `synced`, `pruned`).
+- [x] Metrics: contiguous fixed and variable journals (`size`, `pruning_boundary`, `retained`,
+  `tail_items`, call and read counters; the variable journal's offsets under `offsets`).
+- [ ] Metrics: the blob and section managers (`tracked`, `synced`, `pruned`).
 - Handed to storage-merkle (2026-11-16): `src/storage/journal/zstd.zig`'s real compressor and
   the `journal_fixed_operations` and `queue_operations` fuzz targets.
 
@@ -302,6 +303,8 @@ resize, sync), `runtime.storage`, with the in-memory backend `runtime.storage.me
   store, instead of failing the next sync (commonware's dropped-handle and failure tests map
   onto that, on faulty storage).
 
+- Contiguous journal duration histograms (`*_duration`) are not ported: journals hold no clock.
+  Their scope is `Config.metrics` (null by default).
 - Metrics record through `runtime.telemetry.metrics` handles; without a scope, handles are
   `detached` (recorded, not registered), so tests read them without a registry. Metadata takes
   its scope in `Config`, the queue as an `init` argument (its `Config` is the journal's).
