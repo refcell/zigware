@@ -95,3 +95,45 @@ test "the production runner does the same over io_uring" {
     probe.deinit();
     try run_twice(.{ .entries = 64 });
 }
+
+const Context = production.Context;
+
+fn store(ctx: Context, name: []const u8) anyerror!u64 {
+    const opened = try ctx.storage.open("tasks", name);
+    defer opened.blob.close();
+    try opened.blob.write_at(0, name, .{ .sync = true });
+    var stored = try ctx.scope.counter("stored", "Blobs stored");
+    defer stored.deinit();
+    stored.metric().inc();
+    // The child label prefixes the task's metrics.
+    const encoded = try ctx.encode(testing.allocator);
+    defer testing.allocator.free(encoded);
+    try testing.expect(std.mem.indexOf(u8, encoded, "writer_stored_total 1\n") != null);
+    return name.len;
+}
+
+fn wait_forever(ctx: Context, started: *std.Io.Event) anyerror!void {
+    started.set(ctx.io());
+    try ctx.sleep(.fromSeconds(3600));
+}
+
+fn context_root(ctx: Context, started: *std.Io.Event) anyerror!void {
+    const handle = try ctx.child("writer").spawn(store, .{"blob"});
+    try testing.expectEqual(@as(u64, 4), try (try handle.join()));
+    // Left running: the root's return aborts it.
+    const pending = try ctx.child("pending").spawn(wait_forever, .{started});
+    pending.detach();
+    try started.wait(ctx.io());
+}
+
+test "the production runner runs a supervised Context root (start_context)" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [64]u8 = undefined;
+    const path = storage_directory(&path_buffer, &tmp);
+    var runner: Runner = undefined;
+    try runner.init(testing.allocator, .{ .storage_directory = path });
+    defer runner.deinit();
+    var started: std.Io.Event = .unset;
+    try (try runner.start_context(context_root, .{&started}));
+}

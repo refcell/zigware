@@ -87,7 +87,14 @@ the registry API first and report it.
   `Io.Duration` or `Io.Clock.Timestamp`) is overrun by up to 8 bytes, which corrupts the heap.
   Sinks and streams keep their timeouts as `u64` nanoseconds for this reason.
 - `production.Runner` owns its `std.Io.Threaded`, initializes in place (storage and network
-  hold its `Io`), and `start` runs the root function on the calling thread.
+  hold its `Io`), and `start` runs the root function on the calling thread. `start_context`
+  runs it with a root `production.Context` (the runtime lane's `Context` over TCP), like
+  `deterministic.Runner.start_context`; tasks it spawns are aborted when it returns.
+- macOS CI (ReleaseSafe) once failed the TCP stress test with 552 leaks: one stress client
+  returned an error mid-stream (96 accepted plus 95 dialed connections leaked; no data
+  mismatch was reported), and the suite's early return leaked the rest. The cause is not
+  known yet. The stress cases now log the failing step and error, and `macos-slow.yml` runs
+  `-Dslow-tests` on macOS in Debug by hand.
 - io_uring (`production/ring.zig`) is a driver, not an executor: tasks stay on `std.Io`, and
   blob read/write/fsync and socket recv/sendmsg go through one ring. As each commonware worker
   owns its ring (`SINGLE_ISSUER | DEFER_TASKRUN`), one ring thread is the only one to enter
@@ -151,3 +158,4 @@ the registry API first and report it.
 - 2026-11-13: io_uring driver; storage and TCP pass their suites over it; `Config.io_uring`.
 - 2026-11-13: `production.telemetry`: the `/metrics` HTTP endpoint.
 - 2026-11-13: io_uring: one ring thread issues every entry (`SINGLE_ISSUER | DEFER_TASKRUN`).
+- 2026-11-16: `production.Runner.start_context`; stress-test diagnostics and `macos-slow.yml`.

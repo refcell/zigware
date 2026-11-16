@@ -1,6 +1,6 @@
 //! The production runner (commonware `runtime::tokio::Runner`): the same surface as
-//! `deterministic.Runner` (`io`, `storage`, `network`, `metrics`, `start`) over a real
-//! `std.Io.Threaded`, file storage under a held directory, and TCP.
+//! `deterministic.Runner` (`io`, `storage`, `network`, `metrics`, `start`, `start_context`)
+//! over a real `std.Io.Threaded`, file storage under a held directory, and TCP.
 //!
 //! `std.Io.Uring` does not compile in Zig 0.17.1, so the runner uses `std.Io.Threaded` on
 //! every platform; on Linux, `Config.io_uring` moves blob and socket I/O onto our own ring
@@ -16,8 +16,12 @@ const telemetry = @import("../telemetry/mod.zig");
 const file_storage = @import("storage.zig");
 const tcp_network = @import("network.zig");
 const ring_mod = @import("ring.zig");
+const context_mod = @import("../context.zig");
 
 pub const Error = iface.Error;
+
+/// The production runtime's context (see `context.zig`).
+pub const Context = context_mod.Context(tcp_network.Network);
 
 /// commonware `tokio::Config`.
 pub const Config = struct {
@@ -29,6 +33,8 @@ pub const Config = struct {
     io_uring: ?ring_mod.Config = null,
     /// Threads running tasks besides the caller's; null uses one per logical CPU, less one.
     worker_threads: ?u32 = null,
+    /// Capacity of the supervision tree: contexts alive at once.
+    max_contexts: u32 = context_mod.default_max_contexts,
     thread_stack_size_bytes: usize = std.Thread.SpawnConfig.default_stack_size,
 
     pub fn validate(config: Config) void {
@@ -49,6 +55,10 @@ pub const Runner = struct {
     tcp: tcp_network.Network,
     /// The metrics registry. Release every handle before `deinit`.
     metrics_registry: telemetry.metrics.Registry,
+    /// What every `Context` shares, created by the first `start_context`.
+    context_runtime: ?context_mod.Runtime,
+    max_contexts: u32,
+    gpa: Allocator,
 
     /// Initializes in place: the storage and network hold the runner's `Io`, so the runner
     /// must not move. Holds `storage_directory` until `deinit`.
@@ -75,11 +85,15 @@ pub const Runner = struct {
         runner.file_storage = try .init(runner_io, gpa, root, storage_config);
         runner.tcp = .init(gpa, runner_io, network_config);
         runner.metrics_registry = .init(gpa);
+        runner.context_runtime = null;
+        runner.max_contexts = config.max_contexts;
+        runner.gpa = gpa;
         assert(runner.tcp.io.userdata == runner.file_storage.io.userdata);
     }
 
     /// Every blob, listener, and connection must be closed first.
     pub fn deinit(runner: *Runner) void {
+        if (runner.context_runtime) |*runtime| runtime.deinit();
         runner.metrics_registry.deinit();
         runner.tcp.deinit();
         runner.file_storage.deinit();
@@ -118,5 +132,23 @@ pub const Runner = struct {
         // The runner has not moved since `init`.
         assert(runner.tcp.io.userdata == @as(?*anyopaque, &runner.threaded));
         return @call(.auto, function, args);
+    }
+
+    /// Runs `function(ctx, args...)` on the calling thread with a root `Context` over this
+    /// runner's io, storage, network, and metrics. When it returns, every task it spawned is
+    /// aborted.
+    pub fn start_context(
+        runner: *Runner,
+        comptime function: anytype,
+        args: anytype,
+    ) Allocator.Error!context_mod.Return(function) {
+        assert(runner.tcp.io.userdata == @as(?*anyopaque, &runner.threaded));
+        if (runner.context_runtime == null) {
+            const io_ = runner.io();
+            runner.context_runtime = try .init(runner.gpa, io_, runner.max_contexts, null);
+        }
+        const runtime = &runner.context_runtime.?;
+        const ctx: Context = .root(runtime, runner.storage(), runner.network(), runner.metrics());
+        return ctx.run_root(function, args);
     }
 };
