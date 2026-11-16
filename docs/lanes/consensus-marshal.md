@@ -113,6 +113,12 @@ then the core and standard actors as those packages land.
 - `consensus.marshal.application.relay.broadcast(S, V, gates, marshal, commitment, plan)`:
   relays a simplex `Plan` (prepare once, persist on propose, forward a copy of the plan's
   borrowed recipients).
+- `consensus.marshal.application.build`: `Resolved(D, S, N, M)` (`reuse{digest, block}`,
+  `skip`, `build{ancestry, metadata}`), `propose(D, ctx, application, registry,
+  consensus_context, checks, seal, build_duration) !oneshot.Receiver(D)`, and `prepare(...)
+  !oneshot.Receiver(Handoff(D))`. Each runs detached from `ctx.child`; the contracts for
+  `application`, `checks`, and `seal` are in the file's header. Dropping the receiver
+  cancels the checks and the build.
 
 ## Decisions
 - Marshal blocks keep commonware's trait method names (`height()`, `parent()`, `digest()`,
@@ -195,8 +201,8 @@ then the core and standard actors as those packages land.
 - [x] marshal: core mailbox with its overflow policy and tests.
 - [x] marshal: application relay.
 - [x] marshal: resolver handler messages and p2p init.
-- [ ] marshal: core actor, application build (it needs an `Application` contract; port it
-  with the standard wrappers).
+- [x] marshal: application build (prepare and propose tasks).
+- [ ] marshal: core actor, then the shared mocks and harness, then the standard wrappers.
 - [x] aggregation: the full `distinct states` comparison on the new runtime auditor.
 - (marshal/coding/ belongs to the broadcast-collector lane: types, shards, variant,
   validation, marshaled, and coding/mod.rs tests, on top of core.)
@@ -215,3 +221,5 @@ then the core and standard actors as those packages land.
 - 2026-11-16: marshal ancestry streams, application validation, and certification gates.
 - 2026-11-16: marshal core mailbox, overflow policy, and its commonware tests; relay;
   resolver handler messages and the p2p resolver wiring.
+- 2026-11-16: marshal ancestry provider on the mailbox; application prepare and propose
+  tasks.

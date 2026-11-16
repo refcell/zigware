@@ -2,6 +2,7 @@
 
 const std = @import("std");
 
+pub const build = @import("build.zig");
 pub const gates = @import("gates.zig");
 pub const relay = @import("relay.zig");
 pub const validation = @import("validation.zig");
