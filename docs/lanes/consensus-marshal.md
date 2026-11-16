@@ -99,6 +99,9 @@ then the core and standard actors as those packages land.
   `get_verified`, `hint_finalized`, `subscribe_by_digest`, `subscribe_by_commitment`,
   `hint_notarized`, `proposed`, `prepared`, `verified_deferred`, `verified`, `certified`,
   `set_floor`, `prune`, `forward`, and the consensus `Reporter` `report`).
+- `consensus.marshal.application.relay.broadcast(S, V, gates, marshal, commitment, plan)`:
+  relays a simplex `Plan` (prepare once, persist on propose, forward a copy of the plan's
+  borrowed recipients).
 
 ## Decisions
 - Marshal blocks keep commonware's trait method names (`height()`, `parent()`, `digest()`,
@@ -179,8 +182,9 @@ then the core and standard actors as those packages land.
   cache.
 - [x] marshal: ancestry, application validation and gates.
 - [x] marshal: core mailbox with its overflow policy and tests.
-- [ ] marshal: application build and relay (they need an `Application` contract), core
-  actor.
+- [x] marshal: application relay.
+- [ ] marshal: resolver handler messages and p2p init, core actor, application build (it
+  needs an `Application` contract; port it with the standard wrappers).
 - [x] aggregation: the full `distinct states` comparison on the new runtime auditor.
 - (marshal/coding/ belongs to the broadcast-collector lane: types, shards, variant,
   validation, marshaled, and coding/mod.rs tests, on top of core.)
@@ -197,4 +201,4 @@ then the core and standard actors as those packages land.
   store adapters, config; core floor, staged, certified, acks, durability, stream,
   subscriptions, and cache with their commonware tests.
 - 2026-11-16: marshal ancestry streams, application validation, and certification gates.
-- 2026-11-16: marshal core mailbox, overflow policy, and its commonware tests.
+- 2026-11-16: marshal core mailbox, overflow policy, and its commonware tests; relay.
