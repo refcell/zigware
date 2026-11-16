@@ -209,6 +209,19 @@ fn connectivity(io: Io, transport: *Transport, scope: metrics.Scope, n: usize) !
         try io.sleep(.fromMilliseconds(100), .real);
     }
     try expect_no_rate_limiting(scope);
+    try expect_connected(scope, n);
+}
+
+/// Node 0's directory records a connection to each of its `n - 1` peers.
+fn expect_connected(scope: metrics.Scope, n: usize) !void {
+    const text = try scope.encode(gpa);
+    defer gpa.free(text);
+    var samples = metrics.metric_samples(text, "peer_network_tracker_directory_connected");
+    var count: usize = 0;
+    while (samples.next()) |sample| {
+        if (std.mem.startsWith(u8, sample.labels, "index=\"0\",")) count += 1;
+    }
+    try testing.expectEqual(n - 1, count);
 }
 
 fn all_heard(heard: *const [peers_max][peers_max]bool, n: usize) bool {

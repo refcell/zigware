@@ -8,6 +8,7 @@ const Io = std.Io;
 const codec = @import("codec");
 const cryptography = @import("cryptography");
 const runtime = @import("runtime");
+const metrics = runtime.telemetry.metrics;
 const types = @import("../../types.zig");
 const Outbox = @import("../outbox.zig").Outbox;
 const tracker_mod = @import("tracker.zig");
@@ -95,11 +96,16 @@ fn run(comptime function: anytype, args: anytype) !void {
 
 /// A tracker with its unblock timer running, stopped and freed by `stop`.
 const Harness = struct {
+    registry: metrics.Registry,
     tracker: Tracker,
     unblock: Io.Future(Io.Cancelable!void),
 
     fn start(harness: *Harness, io: Io, config: Tracker.Config) !void {
-        harness.tracker = try .init(gpa, io, config);
+        // A registry per tracker: tests start several with the same series.
+        harness.registry = metrics.Registry.init(gpa);
+        errdefer harness.registry.deinit();
+        const scope = metrics.Scope.init(&harness.registry).child("tracker");
+        harness.tracker = try .init(gpa, io, &scope, config);
         harness.unblock = try io.concurrent(Tracker.run_unblock, .{&harness.tracker});
     }
 
@@ -107,6 +113,7 @@ const Harness = struct {
         harness.unblock.cancel(io) catch {};
         harness.tracker.close();
         harness.tracker.deinit();
+        harness.registry.deinit();
     }
 };
 

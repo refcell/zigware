@@ -4,18 +4,23 @@
 //!
 //! Callers pass the current time and an RNG instead of a runtime context. Iteration follows
 //! key order, so every result is deterministic (commonware sorts the same results).
+//!
+//! Metrics (commonware `lookup/actors/tracker/metrics.rs`) are discovery's: the same six
+//! series with the same names and help.
 
 const std = @import("std");
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const codec = @import("codec");
 const utils = @import("utils");
+const metrics = @import("runtime").telemetry.metrics;
 const p2p = @import("../../root.zig");
 const types = @import("../../types.zig");
 const dialing = @import("../dialing.zig");
 const SortedMap = @import("../../simulated/sorted_map.zig").SortedMap;
 const sim_tracker = @import("../../simulated/tracker.zig");
 const record_mod = @import("record.zig");
+const discovery_directory = @import("../discovery/directory.zig");
 
 const Duration = utils.Duration;
 const SystemTime = utils.SystemTime;
@@ -68,13 +73,25 @@ pub fn Directory(comptime P: type) type {
         config: Config,
         peers: SortedMap(P, Record) = .empty,
         peer_sets: SortedMap(u64, Sets) = .empty,
-        /// Blocked peers and when each block ends.
+        /// Blocked peers and when each block ends; kept even when a record is deleted.
         blocked: SortedMap(P, SystemTime) = .empty,
+        metrics: Metrics,
 
-        pub fn init(gpa: Allocator, myself: P, config: Config) Allocator.Error!Self {
+        pub const Metrics = discovery_directory.Metrics(P);
+
+        /// Records ourselves; metrics register under `scope`.
+        pub fn init(
+            gpa: Allocator,
+            myself: P,
+            config: Config,
+            scope: *const metrics.Scope,
+        ) Allocator.Error!Self {
             assert(config.max_sets > 0);
-            var directory: Self = .{ .gpa = gpa, .config = config };
+            var directory: Self = .{ .gpa = gpa, .config = config, .metrics = try .init(scope) };
+            errdefer directory.deinit();
             _ = try directory.peers.put(gpa, myself, Record.myself());
+            // Excludes ourselves.
+            _ = directory.metrics.tracked.metric().try_set(directory.peers.count() - 1) catch {};
             return directory;
         }
 
@@ -83,7 +100,20 @@ pub fn Directory(comptime P: type) type {
             directory.peer_sets.deinit(directory.gpa);
             directory.peers.deinit(directory.gpa);
             directory.blocked.deinit(directory.gpa);
+            directory.metrics.deinit();
             directory.* = undefined;
+        }
+
+        /// Sets `peer`'s series in a gauge family to `millis`. A series whose label cannot be
+        /// allocated goes unrecorded.
+        fn set_gauge(family: anytype, peer: P, millis: u64) void {
+            const gauge = family.metric().get_or_create(.{ .peer = peer }) catch return;
+            _ = gauge.try_set(millis) catch {};
+        }
+
+        fn count(family: anytype, peer: P) void {
+            const counter = family.metric().get_or_create(.{ .peer = peer }) catch return;
+            counter.inc();
         }
 
         fn free_sets(directory: *Self, sets: Sets) void {
@@ -96,12 +126,17 @@ pub fn Directory(comptime P: type) type {
             const peer = metadata.public_key();
             const record = directory.peers.get(peer) orelse return;
             record.release();
+            _ = directory.metrics.connected.metric().remove(.{ .peer = peer });
+            directory.metrics.reserved.metric().dec();
             directory.delete_if_needed(peer);
         }
 
-        /// Promotes a reservation to a connection; false if its address changed meanwhile.
-        pub fn connect(directory: *Self, peer: P) bool {
-            return directory.peers.get(peer).?.connect();
+        /// Promotes a reservation to a connection at `now`; false if its address changed
+        /// meanwhile.
+        pub fn connect(directory: *Self, now: SystemTime, peer: P) bool {
+            if (!directory.peers.get(peer).?.connect()) return false;
+            set_gauge(&directory.metrics.connected, peer, now.epoch_millis());
+            return true;
         }
 
         /// Tracks `peers` at `index`, which must exceed every tracked index. Returns the peers
@@ -159,12 +194,15 @@ pub fn Directory(comptime P: type) type {
             kill: *std.ArrayList(P),
         ) Allocator.Error!*Record {
             if (directory.peers.get(peer)) |record| {
-                if (record.update(address) and record.is_reserved_or_connected()) {
-                    try kill.append(directory.gpa, peer);
+                if (record.update(address)) {
+                    count(&directory.metrics.updates, peer);
+                    if (record.is_reserved_or_connected()) try kill.append(directory.gpa, peer);
                 }
                 return record;
             }
-            return directory.peers.get_or_put(directory.gpa, peer, Record.known(address));
+            const record = try directory.peers.get_or_put(directory.gpa, peer, .known(address));
+            directory.metrics.tracked.metric().inc();
+            return record;
         }
 
         fn evict_oldest(directory: *Self, kill: *std.ArrayList(P)) Allocator.Error!void {
@@ -193,7 +231,10 @@ pub fn Directory(comptime P: type) type {
 
         fn delete_if_needed(directory: *Self, peer: P) void {
             const record = directory.peers.get(peer) orelse return;
-            if (record.deletable()) _ = directory.peers.remove(peer);
+            if (!record.deletable()) return;
+            // The blocked series stays: the block outlives the record until it expires.
+            _ = directory.peers.remove(peer);
+            directory.metrics.tracked.metric().dec();
         }
 
         /// Updates a tracked peer's address. Returns whether it changed.
@@ -281,10 +322,17 @@ pub fn Directory(comptime P: type) type {
             if (!directory.eligible(now, peer)) return null;
             const record = directory.peers.get(peer).?;
             const cooldown = directory.config.peer_connection_cooldown;
-            return switch (record.reserve(rng, now, cooldown)) {
-                .reserved => metadata,
-                .rate_limited, .unavailable => null,
-            };
+            switch (record.reserve(rng, now, cooldown)) {
+                .reserved => {
+                    directory.metrics.reserved.metric().inc();
+                    return metadata;
+                },
+                .rate_limited => {
+                    count(&directory.metrics.limits, peer);
+                    return null;
+                },
+                .unavailable => return null,
+            }
         }
 
         fn is_blocked(directory: *const Self, now: SystemTime, peer: P) bool {
@@ -300,6 +348,7 @@ pub fn Directory(comptime P: type) type {
             }
             const until = now.saturating_add(directory.config.block_duration);
             _ = try directory.blocked.put(directory.gpa, peer, until);
+            set_gauge(&directory.metrics.blocked, peer, until.epoch_millis());
             return true;
         }
 
@@ -388,6 +437,7 @@ pub fn Directory(comptime P: type) type {
                     continue;
                 }
                 _ = directory.blocked.remove(entry.key);
+                _ = directory.metrics.blocked.metric().remove(.{ .peer = entry.key });
                 any = true;
             }
             return any;

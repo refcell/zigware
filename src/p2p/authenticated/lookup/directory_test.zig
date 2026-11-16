@@ -5,6 +5,7 @@ const testing = std.testing;
 const codec = @import("codec");
 const cryptography = @import("cryptography");
 const utils = @import("utils");
+const metrics = @import("runtime").telemetry.metrics;
 const types = @import("../../types.zig");
 const directory_mod = @import("directory.zig");
 
@@ -43,6 +44,12 @@ const config: directory_mod.Config = .{
 
 const epoch: SystemTime = .UNIX_EPOCH;
 
+/// A directory for `key(0)` with metrics under `directory` in `registry`.
+fn init_dir(registry: *metrics.Registry, dir_config: directory_mod.Config) !Dir {
+    const scope = metrics.Scope.init(registry).child("directory");
+    return Dir.init(gpa, key(0), dir_config, &scope);
+}
+
 fn at_ms(ms: u64) SystemTime {
     return epoch.saturating_add(.from_millis(ms));
 }
@@ -74,7 +81,9 @@ fn expect_kills(result: ?[]Key, expected: []const Key) !void {
 }
 
 test "track returns only live peers for teardown" {
-    var dir = try Dir.init(gpa, key(0), config);
+    var registry = metrics.Registry.init(gpa);
+    defer registry.deinit();
+    var dir = try init_dir(&registry, config);
     defer dir.deinit();
     const one: Entry = .{ .key = key(1), .value = local(1235) };
     const two: Entry = .{ .key = key(2), .value = local(1236) };
@@ -90,12 +99,14 @@ test "track returns only live peers for teardown" {
 
 test "track kills a connected peer removed from every set" {
     var rng = TestRng.init(0);
-    var dir = try Dir.init(gpa, key(0), config);
+    var registry = metrics.Registry.init(gpa);
+    defer registry.deinit();
+    var dir = try init_dir(&registry, config);
     defer dir.deinit();
     const pk1 = key(1);
     try expect_kills(try track(&dir, 0, &.{.{ .key = pk1, .value = local(1235) }}, &.{}), &.{});
     const metadata = dir.listen(&rng, epoch, pk1, ip(127, 0, 0, 1)).?;
-    try testing.expect(dir.connect(pk1));
+    try testing.expect(dir.connect(epoch, pk1));
     const two: Entry = .{ .key = key(2), .value = local(1236) };
     try expect_kills(try track(&dir, 1, &.{two}, &.{}), &.{pk1});
     try testing.expect(!dir.peers.get(pk1).?.deletable());
@@ -107,7 +118,9 @@ test "track kills a connected peer removed from every set" {
 test "secondary sets remain until eviction and primary wins overlap" {
     var two_sets = config;
     two_sets.max_sets = 2;
-    var dir = try Dir.init(gpa, key(0), two_sets);
+    var registry = metrics.Registry.init(gpa);
+    defer registry.deinit();
+    var dir = try init_dir(&registry, two_sets);
     defer dir.deinit();
     const pk1 = key(1);
     const pk2 = key(2);
@@ -138,7 +151,9 @@ test "secondary sets remain until eviction and primary wins overlap" {
 
 test "overwrite updates tracked peers only" {
     var rng = TestRng.init(0);
-    var dir = try Dir.init(gpa, key(0), config);
+    var registry = metrics.Registry.init(gpa);
+    defer registry.deinit();
+    var dir = try init_dir(&registry, config);
     defer dir.deinit();
     const pk1 = key(1);
     try expect_kills(try track(&dir, 0, &.{.{ .key = pk1, .value = local(1235) }}, &.{}), &.{});
@@ -150,13 +165,15 @@ test "overwrite updates tracked peers only" {
     try testing.expectEqual(@as(u16, 2000), dialed.ingress.socket.port);
     // A new address while reserved forces teardown on the next track.
     try testing.expect(dir.overwrite(pk1, local(3000)));
-    try testing.expect(!dir.connect(pk1));
+    try testing.expect(!dir.connect(epoch, pk1));
     dir.release(dialed.metadata);
 }
 
 test "blocked peers are not dialable, acceptable, listenable, or eligible" {
     var rng = TestRng.init(0);
-    var dir = try Dir.init(gpa, key(0), config);
+    var registry = metrics.Registry.init(gpa);
+    defer registry.deinit();
+    var dir = try init_dir(&registry, config);
     defer dir.deinit();
     const pk1 = key(1);
     try expect_kills(try track(&dir, 0, &.{.{ .key = pk1, .value = local(1235) }}, &.{}), &.{});
@@ -190,14 +207,18 @@ test "blocked peers are not dialable, acceptable, listenable, or eligible" {
 test "block with an unbounded duration saturates" {
     var unbounded = config;
     unbounded.block_duration = .max;
-    var dir = try Dir.init(gpa, key(0), unbounded);
+    var registry = metrics.Registry.init(gpa);
+    defer registry.deinit();
+    var dir = try init_dir(&registry, unbounded);
     defer dir.deinit();
     try testing.expect(try dir.block(epoch, key(1)));
     try testing.expect(!dir.eligible(.{ .nanos_since_epoch = 1 << 100 }, key(1)));
 }
 
 test "blocking a peer before it is tracked" {
-    var dir = try Dir.init(gpa, key(0), config);
+    var registry = metrics.Registry.init(gpa);
+    defer registry.deinit();
+    var dir = try init_dir(&registry, config);
     defer dir.deinit();
     const pk1 = key(1);
     try testing.expect(try dir.block(epoch, pk1));
@@ -208,7 +229,9 @@ test "blocking a peer before it is tracked" {
 
 test "reservations rate limit redials and set next_query_at" {
     var rng = TestRng.init(0);
-    var dir = try Dir.init(gpa, key(0), config);
+    var registry = metrics.Registry.init(gpa);
+    defer registry.deinit();
+    var dir = try init_dir(&registry, config);
     defer dir.deinit();
     const pk1 = key(1);
     try expect_kills(try track(&dir, 0, &.{.{ .key = pk1, .value = local(1235) }}, &.{}), &.{});
@@ -231,7 +254,9 @@ test "dns and private addresses follow the config" {
     var strict = config;
     strict.allow_dns = false;
     strict.allow_private_ips = false;
-    var dir = try Dir.init(gpa, key(0), strict);
+    var registry = metrics.Registry.init(gpa);
+    defer registry.deinit();
+    var dir = try init_dir(&registry, strict);
     defer dir.deinit();
     const host = utils.Hostname.literal("example.com");
     const dns: types.Address = .{ .asymmetric = .{
@@ -247,4 +272,125 @@ test "dns and private addresses follow the config" {
     defer gpa.free(ips);
     try testing.expectEqual(@as(usize, 1), ips.len);
     try testing.expect(ips[0].order(ip(8, 8, 8, 8)) == .eq);
+}
+
+/// The value of `name`'s sample for `peer`, if any (commonware's `metric_value`).
+fn metric_value(registry: *metrics.Registry, name: []const u8, peer: Key) !?i64 {
+    const text = try registry.encode(gpa);
+    defer gpa.free(text);
+    var prefix_buffer: [256]u8 = undefined;
+    const prefix = try std.fmt.bufPrint(&prefix_buffer, "{s}{{peer=\"{f}\"}} ", .{ name, peer });
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |line| {
+        if (!std.mem.startsWith(u8, line, prefix)) continue;
+        return try std.fmt.parseInt(i64, line[prefix.len..], 10);
+    }
+    return null;
+}
+
+fn has_value(registry: *metrics.Registry, name: []const u8, value: anytype) !bool {
+    const text = try registry.encode(gpa);
+    defer gpa.free(text);
+    return metrics.has_metric_value(text, name, value);
+}
+
+test "the connected metric tracks active peers" {
+    // commonware `test_connected_metric_tracks_active_peers`, plus the tracked and reserved
+    // gauges along the way.
+    var rng = TestRng.init(0);
+    var registry = metrics.Registry.init(gpa);
+    defer registry.deinit();
+    var dir = try init_dir(&registry, config);
+    defer dir.deinit();
+    const pk1 = key(1);
+    try testing.expect(try has_value(&registry, "directory_tracked", 0));
+    try expect_kills(try track(&dir, 0, &.{.{ .key = pk1, .value = local(1235) }}, &.{}), &.{});
+    const reservation = dir.listen(&rng, at_ms(1_000), pk1, ip(127, 0, 0, 1)).?;
+    try testing.expect(dir.connect(at_ms(1_234), pk1));
+    const connected = "directory_connected";
+    try testing.expectEqual(@as(?i64, 1_234), try metric_value(&registry, connected, pk1));
+    try testing.expect(try has_value(&registry, "directory_tracked", 1));
+    try testing.expect(try has_value(&registry, "directory_reserved", 1));
+    dir.release(reservation);
+    try testing.expectEqual(@as(?i64, null), try metric_value(&registry, connected, pk1));
+    try testing.expect(try has_value(&registry, "directory_reserved", 0));
+}
+
+test "an address change of a secondary peer counts an update" {
+    // commonware `test_track_updates_metric_for_secondary_address_change`.
+    var registry = metrics.Registry.init(gpa);
+    defer registry.deinit();
+    var three_sets = config;
+    three_sets.max_sets = 3;
+    var dir = try init_dir(&registry, three_sets);
+    defer dir.deinit();
+    const pk1 = key(1);
+    const updates = "directory_updates_total";
+    try expect_kills(try track(&dir, 0, &.{}, &.{.{ .key = pk1, .value = local(1235) }}), &.{});
+    try testing.expectEqual(@as(?i64, null), try metric_value(&registry, updates, pk1));
+    try expect_kills(try track(&dir, 1, &.{}, &.{.{ .key = pk1, .value = local(1236) }}), &.{});
+    try testing.expectEqual(@as(?i64, 1), try metric_value(&registry, updates, pk1));
+}
+
+test "the blocked metric outlives the record until the block expires" {
+    // commonware `test_unblock_expired_peer_removed_and_readded`.
+    var registry = metrics.Registry.init(gpa);
+    defer registry.deinit();
+    var dir = try init_dir(&registry, config);
+    defer dir.deinit();
+    const pk1 = key(1);
+    const blocked = "directory_blocked";
+    const entry_1: Entry = .{ .key = pk1, .value = local(1235) };
+    try testing.expectEqual(@as(?i64, null), try metric_value(&registry, blocked, pk1));
+    try expect_kills(try track(&dir, 0, &.{entry_1}, &.{}), &.{});
+    try testing.expect(try dir.block(at_ms(500), pk1));
+    // block_duration is 100 s.
+    try testing.expectEqual(@as(?i64, 100_500), try metric_value(&registry, blocked, pk1));
+    // Evicting the only set deletes pk1's record; its block and series remain.
+    try expect_kills(try track(&dir, 1, &.{.{ .key = key(2), .value = local(1236) }}, &.{}), &.{});
+    try testing.expect(!dir.peers.contains(pk1));
+    try testing.expect(try has_value(&registry, "directory_tracked", 1));
+    try testing.expectEqual(@as(?i64, 100_500), try metric_value(&registry, blocked, pk1));
+    try expect_kills(try track(&dir, 2, &.{entry_1}, &.{}), &.{});
+    try testing.expect(!dir.eligible(at_ms(500), pk1));
+    try testing.expectEqual(@as(?i64, 100_500), try metric_value(&registry, blocked, pk1));
+    try testing.expect(dir.unblock_expired(at_ms(101_500)));
+    try testing.expectEqual(@as(?i64, null), try metric_value(&registry, blocked, pk1));
+}
+
+test "the blocked metric covers several peers" {
+    // commonware `test_blocked_metric_multiple_peers`.
+    var registry = metrics.Registry.init(gpa);
+    defer registry.deinit();
+    var dir = try init_dir(&registry, config);
+    defer dir.deinit();
+    const peers = [_]Entry{
+        .{ .key = key(1), .value = local(1235) },
+        .{ .key = key(2), .value = local(1236) },
+        .{ .key = key(3), .value = local(1237) },
+    };
+    try expect_kills(try track(&dir, 0, &peers, &.{}), &.{});
+    for (peers) |peer| {
+        try testing.expect(try dir.block(epoch, peer.key));
+        const value = try metric_value(&registry, "directory_blocked", peer.key);
+        try testing.expectEqual(@as(?i64, 100_000), value);
+    }
+    try testing.expect(!try dir.block(epoch, peers[0].key));
+    try testing.expect(dir.unblock_expired(at_ms(101_000)));
+    for (peers) |peer| {
+        const value = try metric_value(&registry, "directory_blocked", peer.key);
+        try testing.expectEqual(@as(?i64, null), value);
+    }
+}
+
+test "blocking ourselves records nothing" {
+    // commonware `test_block_myself_no_panic_on_expiry`.
+    var registry = metrics.Registry.init(gpa);
+    defer registry.deinit();
+    var dir = try init_dir(&registry, config);
+    defer dir.deinit();
+    try testing.expect(!try dir.block(epoch, key(0)));
+    const value = try metric_value(&registry, "directory_blocked", key(0));
+    try testing.expectEqual(@as(?i64, null), value);
+    try testing.expect(!dir.unblock_expired(at_ms(101_000)));
 }

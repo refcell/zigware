@@ -204,7 +204,8 @@ pub fn Network(comptime U: type, comptime Transport: type) type {
             errdefer network.families.deinit();
             network.router = try Router.init(gpa, io);
             errdefer network.router.deinit();
-            network.tracker = try Tracker.init(gpa, io, network.tracker_config());
+            const tracker_scope = scope.child("tracker");
+            network.tracker = try Tracker.init(gpa, io, &tracker_scope, network.tracker_config());
             errdefer network.tracker.deinit();
             const sets = config.tracked_peer_sets;
             const max_peers = sizing.max_retained_peers(config.max_peers_per_set, sets, 0);

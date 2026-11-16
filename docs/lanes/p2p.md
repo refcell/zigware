@@ -160,6 +160,16 @@ handshake and the runtime's network, which the actor-stream and runtime lanes ar
   listener. The listener's registered-IP set is tracker state refreshed exactly where
   commonware's tracker sends `listener.set`, and read under the tracker's lock. Pings are
   sent alone or ahead of a batch of queued frames.
+- Lookup tests not ported, and why: the four DNS tests wait for a resolver in the runtime
+  (the dialer skips DNS ingress until then); `test_broadcast_slow_peer_no_blocking` exercises
+  only the shared router and is router.zig's "a full slow peer does not block broadcasts";
+  `test_message_too_large` and the panicking halves of
+  `test_construction_enforces_handshake_message_limit` /
+  `test_max_message_size_exceeds_stream_limit` expect panics, which Zig tests cannot catch
+  (the accepted boundaries are tested). The shutdown tests check that canceling `run`
+  returns with no handshake in flight and receivers closed, instead of counting tasks per
+  actor: one `Io.Group` owns every task. Lookup's directory reuses discovery's `Metrics(P)`
+  (same six series, names, and help) under `<network>_tracker_directory`.
 - p2p carries its own seeded fuzz driver (`p2p.fuzz.run`, same as codec's) until
   `invariants.minifuzz` lands.
 
@@ -197,15 +207,18 @@ handshake and the runtime's network, which the actor-stream and runtime lanes ar
 - [ ] discovery mod.rs tests: DNS bootstrappers and resolution (after the runtime has a
   resolver).
 - [x] discovery: tracing events at commonware's sites (runtime.telemetry.traces).
-- [ ] lookup (parallel lane): tracker, peer, dialer, listener, Network with Config and Oracle
-  (done, with connectivity); the rest of commonware's lookup mod.rs tests and the directory's
-  metrics.
+- [x] lookup (parallel lane): tracker, peer, dialer, listener, Network with Config and Oracle,
+  commonware's mod.rs tests (but DNS, see decisions), and the directory's metrics.
+- [ ] lookup DNS tests, once the deterministic runtime has a resolver.
 - [ ] utils codec, mux, mocks, and `WrappedBackgroundReceiver` (bls-math lane, under
   src/p2p/utils/ beside limited, watch, io_rng, and shuffle): it tells broadcast-collector
   when buffered's config can take the Strategy.
 - [ ] Fuzz targets (commonware p2p/fuzz).
 
 ## Log
+- 2026-11-16: (parallel lane) lookup: graceful and clean shutdown, rate limiting, restarts,
+  duplicate addresses, multi-index, and custom handshake tests; directory metrics with
+  commonware's metric tests.
 - 2026-11-16: (parallel lane) lookup Network: peer connections (pings, data), dialer,
   listener with registered-IP admission, and connectivity over the deterministic network.
 - 2026-11-16: (parallel lane) lookup Config and tracker (locked state: track with addresses,

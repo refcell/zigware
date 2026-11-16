@@ -13,6 +13,7 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const codec = @import("codec");
 const utils = @import("utils");
+const metrics = @import("runtime").telemetry.metrics;
 const p2p = @import("../../root.zig");
 const types = @import("../../types.zig");
 const SortedMap = @import("../../simulated/sorted_map.zig").SortedMap;
@@ -68,9 +69,17 @@ pub fn Tracker(comptime P: type) type {
         /// Egress IPs the listener accepts (sorted, unique), as last sent to the listener.
         registered_ips: []codec.IpAddr = &.{},
 
-        pub fn init(gpa: Allocator, io: Io, config: Config) Allocator.Error!Self {
+        /// Metrics register under `scope` (commonware's tracker context): the directory's
+        /// under its `directory` child.
+        pub fn init(
+            gpa: Allocator,
+            io: Io,
+            scope: *const metrics.Scope,
+            config: Config,
+        ) Allocator.Error!Self {
             assert(config.max_peers_per_set > 0);
             assert(config.tracked_peer_sets > 0);
+            const directory_scope = scope.child("directory");
             const directory = try Directory.init(gpa, config.public_key, .{
                 .allow_private_ips = config.allow_private_ips,
                 .allow_dns = config.allow_dns,
@@ -78,7 +87,7 @@ pub fn Tracker(comptime P: type) type {
                 .max_sets = config.tracked_peer_sets,
                 .peer_connection_cooldown = config.peer_connection_cooldown,
                 .block_duration = config.block_duration,
-            });
+            }, &directory_scope);
             return .{
                 .gpa = gpa,
                 .io = io,
@@ -164,7 +173,7 @@ pub fn Tracker(comptime P: type) type {
             tracker.lock();
             defer tracker.unlock();
             if (tracker.closed or !tracker.directory.eligible(tracker.now(), peer)) return false;
-            if (!tracker.directory.connect(peer)) return false;
+            if (!tracker.directory.connect(tracker.now(), peer)) return false;
             _ = tracker.mailboxes.put(tracker.gpa, peer, outbox) catch return false;
             return true;
         }
