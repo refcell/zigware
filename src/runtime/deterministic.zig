@@ -149,9 +149,21 @@ const max_closure_bytes = 1024;
 const max_result_bytes = 1024;
 const max_alignment: std.mem.Alignment = .@"16";
 
+const TaskLabel = telemetry.metrics.task.Label;
+const PollCounter = telemetry.metrics.raw.Counter;
+const PollFamily = telemetry.metrics.raw.Family(TaskLabel, PollCounter);
+const label_size_max = telemetry.metrics.scope.prefix_size_max;
+
 const Task = struct {
     id: u64,
-    label: []const u8,
+    /// The task's name (commonware `Label::name`): the spawning `Context`'s label, the
+    /// spawning task's name for a plain `io.concurrent` fiber, empty for the root. Copied, so
+    /// it outlives whatever named it.
+    label_buffer: [label_size_max]u8,
+    label_len: u8,
+    label_kind: telemetry.metrics.task.Kind,
+    /// This task's `runtime_task_polls` entry.
+    polls: *PollCounter,
     context: fiber.Context,
     stack: ?fiber.Stack,
     state: enum { ready, running, blocked, finished },
@@ -184,6 +196,14 @@ const Task = struct {
     futex_node: std.DoublyLinkedList.Node,
     group_node: std.DoublyLinkedList.Node,
     all_node: std.DoublyLinkedList.Node,
+
+    fn label(task: *const Task) []const u8 {
+        return task.label_buffer[0..task.label_len];
+    }
+
+    fn task_label(task: *const Task) TaskLabel {
+        return .{ .name = task.label(), .kind = task.label_kind, .execution = .shared };
+    }
 
     fn cancel_point_open(task: *const Task) bool {
         return task.cancel_protection == .unblocked and !task.cancel_acknowledged;
@@ -255,6 +275,10 @@ pub const Runner = struct {
     /// `runtime_iterations` (commonware's executor metric): scheduler cycles run. Registered
     /// by the first `start`, once the runner no longer moves (a handle points at its registry).
     iterations_counter: ?telemetry.metrics.Registered(telemetry.metrics.raw.Counter) = null,
+    /// `runtime_task_polls`: fiber resumes per task label, registered with the counter above.
+    task_polls: ?telemetry.metrics.Registered(PollFamily) = null,
+    /// The name `Context.spawn` gave the fiber it is about to start (`label_next`).
+    next_label: ?[]const u8 = null,
 
     pub fn init(allocator: std.mem.Allocator, config: Config) Error!Runner {
         config.validate();
@@ -293,6 +317,7 @@ pub const Runner = struct {
         if (runner.context_runtime) |*runtime| runtime.deinit();
         if (runner.simulated_network) |*net| net.deinit();
         if (runner.iterations_counter) |*counter| counter.deinit();
+        if (runner.task_polls) |*polls| polls.deinit();
         runner.metrics_registry.deinit();
         runner.* = undefined;
     }
@@ -379,6 +404,7 @@ pub const Runner = struct {
             const max = runner.config.max_contexts;
             const scope = runner.metrics();
             runner.context_runtime = try .init(runner.allocator, runner.io(), max, auditor, scope);
+            runner.context_runtime.?.label_hook = .{ .userdata = runner, .label_next = label_next };
         }
         const runtime = &runner.context_runtime.?;
         const ctx: Context = .root(runtime, runner.storage(), runner.network(), runner.metrics());
@@ -412,6 +438,8 @@ pub const Runner = struct {
             const scope = runner.metrics().sub_registry("runtime");
             const help = "Total number of iterations";
             runner.iterations_counter = try scope.counter("iterations", help);
+            const polls_help = "Total number of task polls";
+            runner.task_polls = try scope.family(TaskLabel, PollCounter, "task_polls", polls_help);
         }
         const root = try runner.spawn_task(
             std.mem.asBytes(&args),
@@ -451,12 +479,21 @@ pub const Runner = struct {
         assert(closure_alignment.compare(.lte, max_alignment));
         assert(result_alignment.compare(.lte, max_alignment));
         if (runner.task_count >= runner.config.max_tasks) return error.OutOfMemory;
+        // A name set for this spawn applies to it alone, even if the spawn fails.
+        const named = runner.next_label;
+        runner.next_label = null;
+        var label_buffer: [label_size_max]u8 = undefined;
+        const task_label = runner.spawn_label(kind, named, &label_buffer);
+        const polls = try runner.task_polls.?.metric().get_or_create(task_label);
         const stack = try runner.acquire_stack();
         errdefer runner.release_stack(stack);
         const task = try runner.allocator.create(Task);
         task.* = .{
             .id = runner.next_task_id,
-            .label = "",
+            .label_buffer = label_buffer,
+            .label_len = @intCast(task_label.name.len),
+            .label_kind = task_label.kind,
+            .polls = polls,
             .context = undefined,
             .stack = stack,
             .state = .ready,
@@ -657,7 +694,8 @@ pub const Runner = struct {
             assert(task.state == .ready);
             var id: [16]u8 = undefined;
             std.mem.writeInt(u128, &id, task.id, .big);
-            runner.auditor.event("process_task", &.{ &id, task.label });
+            runner.auditor.event("process_task", &.{ &id, task.label() });
+            task.polls.inc();
             runner.resume_task(task);
             if (stop_at_root and runner.root_finished) {
                 // Tasks not reached this iteration stay ready for the drain.
@@ -804,6 +842,37 @@ pub const Runner = struct {
             start_fn(context.ptr, result.ptr);
             return null;
         };
+    }
+
+    /// The label of a task about to be spawned, its name copied into `buffer`.
+    fn spawn_label(
+        runner: *const Runner,
+        kind: @FieldType(Task, "kind"),
+        named: ?[]const u8,
+        buffer: *[label_size_max]u8,
+    ) TaskLabel {
+        if (kind == .root) {
+            assert(named == null);
+            return .root();
+        }
+        if (named) |name| {
+            assert(name.len <= label_size_max);
+            @memcpy(buffer[0..name.len], name);
+            return .task(buffer[0..name.len], .shared);
+        }
+        // A plain fiber is part of the task that started it, as commonware polls a task's
+        // inner futures within the task.
+        const parent = runner.current orelse return .root();
+        const name = parent.label();
+        @memcpy(buffer[0..name.len], name);
+        return .{ .name = buffer[0..name.len], .kind = parent.label_kind, .execution = .shared };
+    }
+
+    /// Names the next fiber this runner spawns (a `Context` task), or clears the name.
+    fn label_next(userdata: *anyopaque, name: ?[]const u8) void {
+        const runner: *Runner = @ptrCast(@alignCast(userdata));
+        assert(name == null or runner.next_label == null);
+        runner.next_label = name;
     }
 
     fn io_concurrent(

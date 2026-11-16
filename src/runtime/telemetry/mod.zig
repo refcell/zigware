@@ -36,13 +36,19 @@ test "runner metrics (test_metrics on the deterministic runtime)" {
     // over to the next start.
     const text = try scope.encode(std.testing.allocator);
     defer std.testing.allocator.free(text);
+    const root_polls = runner.task_polls.?.metric().get(.root()).?.get();
+    // The root ran, slept, and woke: at least two polls.
+    try std.testing.expect(root_polls >= 2);
     const expected = try std.fmt.allocPrint(std.testing.allocator,
         \\# HELP runtime_iterations Total number of iterations.
         \\# TYPE runtime_iterations counter
         \\runtime_iterations_total {d}
+        \\# HELP runtime_task_polls Total number of task polls.
+        \\# TYPE runtime_task_polls counter
+        \\runtime_task_polls_total{{name="",kind="Root",execution="Shared"}} {d}
         \\# EOF
         \\
-    , .{runner.iterations});
+    , .{ runner.iterations, root_polls });
     defer std.testing.allocator.free(expected);
     try std.testing.expect(runner.iterations > 0);
     try std.testing.expectEqualStrings(expected, text);

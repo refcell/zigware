@@ -146,8 +146,11 @@ the registry API first and report it.
   context's label, never its attributes). Ported `test_count_running_tasks`,
   `test_metrics_spawn_attribute_cardinality`, and handle.rs's `tasks_running_*` tests; they
   run on both runners.
-- [ ] `runtime_task_polls` (deterministic: one per fiber resume) and the root task's
-  `kind="Root"` series.
+- [x] `runtime_task_polls` (deterministic: one per fiber resume) and the root task's
+  `kind="Root"` series. `Context.spawn` names the fiber it starts through
+  `Runtime.label_hook`; the deterministic runner copies the name into the task (also what
+  `process_task` audits, as commonware's `label.name()`). A plain `io.concurrent` fiber takes
+  its spawner's label, as commonware polls a task's inner futures within the task.
 
 ## Log
 - 2026-11-13: metrics registry, scopes, raw metrics, dtoa, byte-identical exposition.
@@ -161,6 +164,7 @@ the registry API first and report it.
 - 2026-11-13: `production.telemetry`: the `/metrics` HTTP endpoint.
 - 2026-11-13: io_uring: one ring thread issues every entry (`SINGLE_ISSUER | DEFER_TASKRUN`).
 - 2026-11-16: `production.Runner.start_context`; stress-test diagnostics and `macos-slow.yml`.
+- 2026-11-16: `runtime_task_polls` with task labels on deterministic fibers.
 - 2026-11-16: `runtime_iterations`, `runtime_tasks_spawned`, `runtime_tasks_running`. The
   manual macOS slow run (Debug) passed the TCP stress test in 57 s; the ReleaseSafe failure
   has not recurred.

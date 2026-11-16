@@ -671,8 +671,10 @@ fn Suite(comptime Context: type) type {
                 // One series each (spawned and running), however many attribute values the
                 // tasks were spawned with.
                 const label = "{name=\"deferred_verify\",kind=\"Task\",execution=\"Shared\"}";
-                const named = std.mem.count(u8, text, "name=\"deferred_verify\"");
-                try testing.expectEqual(@as(usize, 2), named);
+                const spawned_key = "runtime_tasks_spawned_total{name=\"deferred_verify\"";
+                const running_key = "runtime_tasks_running{name=\"deferred_verify\"";
+                try testing.expectEqual(@as(usize, 1), std.mem.count(u8, text, spawned_key));
+                try testing.expectEqual(@as(usize, 1), std.mem.count(u8, text, running_key));
                 try expect_contains(text, "runtime_tasks_spawned_total" ++ label ++ " 128\n");
                 try expect_contains(text, "runtime_tasks_running" ++ label ++ " 0\n");
             }
@@ -760,5 +762,59 @@ test "register and encode are audited" {
         digest.* = runner.auditor.state();
     }
     // Attribute values feed the audit.
+    try testing.expect(!std.mem.eql(u8, &digests[0], &digests[1]));
+}
+
+test "task polls count each task's resumes under its label (runtime_task_polls)" {
+    const Body = struct {
+        fn nap(io: Io) Io.Cancelable!void {
+            try io.sleep(.fromMilliseconds(1), .awake);
+        }
+
+        fn worker(ctx: deterministic.Context) anyerror!void {
+            for (0..3) |_| try ctx.sleep(.fromMilliseconds(1));
+            // A plain fiber the task starts is part of the task.
+            var inner = try ctx.io().concurrent(nap, .{ctx.io()});
+            try inner.await(ctx.io());
+        }
+
+        fn body(ctx: deterministic.Context) !void {
+            const handle = try ctx.child("worker").spawn(worker, .{});
+            try (try handle.join());
+        }
+    };
+    var runner = try deterministic.Runner.init(testing.allocator, .{});
+    defer runner.deinit();
+    try (try runner.start_context(Body.body, .{}));
+    const polls = runner.task_polls.?.metric();
+    const label = telemetry.metrics.task.Label;
+    // Start, three wakes, the inner fiber's start and wake, and the await's wake.
+    const worker = polls.get(label.task("worker", .shared)).?.get();
+    try testing.expect(worker >= 6);
+    try testing.expect(polls.get(label.root()).?.get() >= 2);
+    try testing.expectEqual(@as(usize, 2), polls.count());
+    const text = try runner.metrics().encode(testing.allocator);
+    defer testing.allocator.free(text);
+    const root_series = "runtime_task_polls_total{name=\"\",kind=\"Root\",execution=\"Shared\"} ";
+    try testing.expect(std.mem.indexOf(u8, text, root_series) != null);
+}
+
+test "task labels feed the audit" {
+    var digests: [2][8]u8 = undefined;
+    for (&digests, [_][]const u8{ "alpha", "bravo" }) |*digest, name| {
+        var runner = try deterministic.Runner.init(testing.allocator, .{});
+        defer runner.deinit();
+        try (try runner.start_context(struct {
+            fn nothing(ctx: deterministic.Context) anyerror!void {
+                _ = ctx;
+            }
+
+            fn body(ctx: deterministic.Context, label: []const u8) !void {
+                const handle = try ctx.child(label).spawn(nothing, .{});
+                try (try handle.join());
+            }
+        }.body, .{name}));
+        digest.* = runner.auditor.state();
+    }
     try testing.expect(!std.mem.eql(u8, &digests[0], &digests[1]));
 }

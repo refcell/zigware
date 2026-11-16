@@ -55,6 +55,16 @@ pub const Runtime = struct {
     /// with a varying attribute does not grow them.
     tasks_spawned: Registered(raw.Family(TaskLabel, raw.Counter)),
     tasks_running: Registered(raw.Family(TaskLabel, raw.Gauge)),
+    /// Names the fiber a spawn is about to start, for runtimes that track task labels
+    /// themselves (the deterministic runner's `runtime_task_polls` and audit).
+    label_hook: ?LabelHook = null,
+
+    pub const LabelHook = struct {
+        userdata: *anyopaque,
+        /// Called with the task's label right before its fiber starts, and with null if the
+        /// start failed.
+        label_next: *const fn (userdata: *anyopaque, name: ?[]const u8) void,
+    };
 
     /// `scope` is the runner's root scope; the task metrics register below `runtime`.
     pub fn init(
@@ -257,7 +267,11 @@ pub fn Context(comptime Network: type) type {
             state.context.node = task_node;
             state.header.node = ctx.node;
             tree.starting();
+            const hook = ctx.runtime.label_hook;
+            // The label lives in the task's state, which outlives its fiber.
+            if (hook) |h| h.label_next(h.userdata, state.context.scope.prefix());
             state.future = ctx.io().concurrent(State.run, .{state}) catch |err| {
+                if (hook) |h| h.label_next(h.userdata, null);
                 tree.start_failed();
                 running.dec();
                 tree.abort(task_node, null);
