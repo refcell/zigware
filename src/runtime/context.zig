@@ -34,6 +34,8 @@ const Scope = telemetry.metrics.Scope;
 const NodeRef = supervision.NodeRef;
 const raw = telemetry.metrics.raw;
 const TaskLabel = telemetry.metrics.task.Label;
+pub const Execution = telemetry.metrics.task.Execution;
+const parallel = @import("parallel");
 const Registered = telemetry.metrics.Registered;
 const traces = telemetry.traces;
 
@@ -61,6 +63,9 @@ pub const Runtime = struct {
     label_hook: ?LabelHook = null,
     /// Where events from `Context.tracer` go (the runner's `Config.subscriber`), if anywhere.
     subscriber: ?traces.Subscriber = null,
+    /// Whether `Context.strategy` runs parallel work inline on the calling task (the
+    /// deterministic runner: one OS thread, so results never depend on thread timing).
+    strategy_inline: bool = false,
 
     pub const LabelHook = struct {
         userdata: *anyopaque,
@@ -114,8 +119,12 @@ pub const Runtime = struct {
 
     /// Counts a task spawned under `name` and returns its running gauge, which the task
     /// decrements when it ends.
-    fn task_started(runtime: *Runtime, name: []const u8) Allocator.Error!*raw.Gauge {
-        const label: TaskLabel = .task(name, .shared);
+    fn task_started(
+        runtime: *Runtime,
+        name: []const u8,
+        execution: Execution,
+    ) Allocator.Error!*raw.Gauge {
+        const label: TaskLabel = .task(name, execution);
         const spawned = try runtime.tasks_spawned.metric().get_or_create(label);
         const running = try runtime.tasks_running.metric().get_or_create(label);
         spawned.inc();
@@ -176,6 +185,19 @@ pub fn Handle(comptime T: type) type {
     };
 }
 
+pub const ThreadPoolError = parallel.ThreadPool.Error;
+
+/// A parallel strategy from `Context.strategy`, owning its thread pool.
+pub const Strategy = struct {
+    rayon: parallel.Rayon,
+
+    /// Stops the pool's workers. No operation may be in progress.
+    pub fn deinit(strategy: *Strategy) void {
+        strategy.rayon.pool.destroy();
+        strategy.* = undefined;
+    }
+};
+
 pub fn Context(comptime Network: type) type {
     return struct {
         const Self = @This();
@@ -185,6 +207,8 @@ pub fn Context(comptime Network: type) type {
         storage: storage_mod.Storage,
         network: *Network,
         scope: Scope,
+        /// How the next `spawn` runs its task; reset for every new context.
+        execution: Execution = .shared,
 
         /// The root context of a run; `run_root` gives it its supervision node.
         pub fn root(
@@ -230,7 +254,43 @@ pub fn Context(comptime Network: type) type {
             var result = ctx;
             result.scope = ctx.scope.child(label);
             result.node = ctx.runtime.tree.child(ctx.node);
+            result.execution = .shared;
             return result;
+        }
+
+        /// The next `spawn` runs its task on a dedicated thread (commonware
+        /// `Spawner::dedicated`). `std.Io` already runs each concurrent task on its own fiber
+        /// (deterministic) or pool thread (production), so this changes only the task's
+        /// `execution` metric label.
+        pub fn dedicated(ctx: Self) Self {
+            var result = ctx;
+            result.execution = .dedicated;
+            return result;
+        }
+
+        /// The next `spawn` runs its task on the shared runtime, which `blocking` marks as
+        /// allowed to block (commonware `Spawner::shared`). Like `dedicated`, only the metric
+        /// label changes.
+        pub fn shared(ctx: Self, blocking: bool) Self {
+            var result = ctx;
+            result.execution = if (blocking) .shared_blocking else .shared;
+            return result;
+        }
+
+        /// A parallel strategy planning for `parallelism` threads (commonware
+        /// `Strategizer::strategy`). The deterministic runner runs its work inline on the
+        /// calling task, as commonware's single registered Rayon thread does; the production
+        /// runner starts `parallelism - 1` workers, and the caller runs jobs too. Release
+        /// with `Strategy.deinit`.
+        pub fn strategy(ctx: *const Self, parallelism: u32) ThreadPoolError!Strategy {
+            assert(parallelism >= 1);
+            const threads = if (ctx.runtime.strategy_inline) 0 else parallelism - 1;
+            const pool = try parallel.ThreadPool.create(ctx.gpa(), ctx.io(), .{
+                .threads = threads,
+            });
+            const rayon = parallel.Rayon.init(pool).with_parallelism(parallelism);
+            assert(rayon.parallelism() == parallelism);
+            return .{ .rayon = rayon };
         }
 
         /// A tracer emitting under `target` (a module path, as tracing's `target:`) to the
@@ -268,13 +328,15 @@ pub fn Context(comptime Network: type) type {
                 tree.abort(task_node, null);
                 return err;
             };
-            const running = ctx.runtime.task_started(ctx.scope.prefix()) catch |err| {
+            const name = ctx.scope.prefix();
+            const running = ctx.runtime.task_started(name, ctx.execution) catch |err| {
                 tree.abort(task_node, null);
                 ctx.gpa().destroy(state);
                 return err;
             };
             state.* = .{ .context = ctx, .args = args, .running = running };
             state.context.node = task_node;
+            state.context.execution = .shared;
             state.header.node = ctx.node;
             tree.starting();
             const hook = ctx.runtime.label_hook;

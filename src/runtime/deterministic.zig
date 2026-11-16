@@ -432,6 +432,7 @@ pub const Runner = struct {
             runner.context_runtime = try .init(runner.allocator, runner.io(), max, auditor, scope);
             runner.context_runtime.?.label_hook = .{ .userdata = runner, .label_next = label_next };
             runner.context_runtime.?.subscriber = runner.config.subscriber;
+            runner.context_runtime.?.strategy_inline = true;
         }
         const runtime = &runner.context_runtime.?;
         const ctx: Context = .root(runtime, runner.storage(), runner.network(), runner.metrics());

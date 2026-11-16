@@ -50,8 +50,26 @@ time, files, and network: build on it rather than around it where it fits.
   clock helpers (`timeout`, `sleep_until`); deterministic `register`/`encode`/`stop` audits;
   `deterministic.Runner.start_context`. lib.rs clock, spawn, shutdown, metrics, and storage
   tests (`context_test.zig`: storage operations, blob read/write, resize, many partitions,
-  read past length, duplicate open). `read_options_compose`/`write_options_compose` have no
-  counterpart (the options are packed structs of bools).
+  read past length, duplicate open, shared concurrent read).
+- [x] Context execution modes: `dedicated()`, `shared(blocking)` (they set the task's
+  `execution` metric label; `std.Io` already gives every task its own fiber or pool thread),
+  and `strategy(parallelism)` (a `parallel.Rayon` over its own pool: inline on the
+  deterministic runner, `parallelism - 1` workers in production). Tests: spawn_dedicated,
+  spawn_blocking, select_loop, strategy, nested_strategy_runs_inline.
+- lib.rs tests with no counterpart, and why:
+  - `read_options_compose`, `write_options_compose`: the options are packed structs of
+    bools, with no flag algebra to test.
+  - `panic_aborts_root`, `panic_aborts_spawn(_caught)`, `multiple_panics(_caught)`,
+    `spawn_blocking_panic(_caught)`, `factory_panic_finishes_running_metric`: Zig cannot
+    catch a panic; failures are error unions, which `join` returns.
+  - `clock_futures_move_between_tasks`, `handle_can_use_futures_pool`, `late_waker`,
+    `circular_reference_prevents_cleanup`, `error_future`: Rust future, waker, and `Drop`
+    semantics. A Zig task's function runs on its own fiber and cannot be polled partway
+    and moved; handles are joined explicitly.
+  - `select_loop`'s middle step (a ready `async {}` branch beats a ready receive) depends
+    on `select!` polling branches in order; `std.Io.Select` does not order ready branches.
+  - The metrics tests (`metrics_with_attribute`, `register_and_encode`, ...) are ported in
+    runtime-telemetry's `registry_test.zig` under descriptive names.
 - [x] Context on `production.Runner` (runtime-telemetry's `start_context`); the Context
   suite runs on both runners.
 - [x] Runtime task metrics (`runtime_tasks_spawned`/`running`, `runtime_iterations`), written

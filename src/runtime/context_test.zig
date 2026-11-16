@@ -8,6 +8,7 @@ const deterministic = @import("deterministic.zig");
 const context = @import("context.zig");
 const telemetry = @import("telemetry/mod.zig");
 const Counter = telemetry.metrics.raw.Counter;
+const parallel = @import("parallel");
 
 const production = @import("production/runner.zig");
 
@@ -138,6 +139,30 @@ test "blob read past length (test_blob_read_past_length)" {
 
 test "duplicate open returns error (test_duplicate_open_returns_error)" {
     try run("duplicate open returns error");
+}
+
+test "spawn dedicated (test_spawn_dedicated)" {
+    try run("spawn dedicated");
+}
+
+test "spawn blocking (test_spawn_blocking)" {
+    try run("spawn blocking");
+}
+
+test "select loop (test_select_loop)" {
+    try run("select loop");
+}
+
+test "blob shared concurrent read (test_blob_shared_concurrent_read)" {
+    try run("blob shared concurrent read");
+}
+
+test "strategy (test_strategy)" {
+    try run("strategy");
+}
+
+test "nested strategy runs inline (test_nested_strategy_runs_inline)" {
+    try run("nested strategy runs inline");
 }
 
 test "register and encode" {
@@ -954,6 +979,141 @@ fn Suite(comptime Context: type) type {
                 defer reopened.blob.close();
                 try testing.expectEqual(@as(u64, 11), reopened.len);
                 try expect_read(reopened.blob, 0, "replacement");
+            }
+        }.body;
+
+        fn answer(ctx: Context) anyerror!u64 {
+            _ = ctx;
+            return 42;
+        }
+
+        fn spawn_with(
+            ctx: Context,
+            comptime label: []const u8,
+            comptime execution: []const u8,
+        ) !void {
+            const spawner = if (comptime std.mem.eql(u8, execution, "Dedicated"))
+                ctx.child(label).dedicated()
+            else
+                ctx.child(label).shared(true);
+            const handle = try spawner.spawn(answer, .{});
+            try testing.expectEqual(@as(u64, 42), try (try handle.join()));
+            const text = try ctx.encode(testing.allocator);
+            defer testing.allocator.free(text);
+            const series = "runtime_tasks_spawned_total{name=\"" ++ label ++
+                "\",kind=\"Task\",execution=\"" ++ execution ++ "\"} 1\n";
+            try expect_contains(text, series);
+        }
+
+        pub const @"spawn dedicated" = struct {
+            fn body(ctx: Context) !void {
+                try spawn_with(ctx, "dedicated_task", "Dedicated");
+            }
+        }.body;
+
+        pub const @"spawn blocking" = struct {
+            fn body(ctx: Context) !void {
+                try spawn_with(ctx, "blocking_task", "SharedBlocking");
+                // A spawned task's own context is shared again.
+                const handle = try ctx.child("reset").dedicated().spawn(execution_of, .{});
+                try testing.expectEqual(context.Execution.shared, try (try handle.join()));
+            }
+
+            fn execution_of(task_ctx: Context) anyerror!context.Execution {
+                return task_ctx.child("inner").execution;
+            }
+        }.body;
+
+        pub const @"select loop" = struct {
+            fn receive(queue: *Io.Queue(u32), io: Io) !u32 {
+                return queue.getOne(io);
+            }
+
+            fn body(ctx: Context) !void {
+                const io = ctx.io();
+                var storage: [4]u32 = undefined;
+                var queue: Io.Queue(u32) = .init(&storage);
+                // Nothing to receive: the sleep wins, twice.
+                for (0..2) |_| {
+                    const result = ctx.timeout(ms(100), receive, .{ &queue, io });
+                    try testing.expectError(error.Timeout, result);
+                }
+                try queue.putOne(io, 0);
+                try queue.putOne(io, 1);
+                // The values arrive in order, before the sleep.
+                for (0..2) |index| {
+                    const value = try (try ctx.timeout(ms(100), receive, .{ &queue, io }));
+                    try testing.expectEqual(@as(u32, @intCast(index)), value);
+                }
+            }
+        }.body;
+
+        pub const @"blob shared concurrent read" = struct {
+            const data = "Hello, Storage!";
+
+            fn check(task_ctx: Context, blob: @import("storage.zig").Blob) anyerror!void {
+                _ = task_ctx;
+                try expect_read(blob, 0, data);
+            }
+
+            fn body(ctx: Context) !void {
+                const blob = (try ctx.storage.open("test_partition", "test_blob_rw")).blob;
+                defer blob.close();
+                try blob.write_at(0, data, .{});
+                try blob.sync();
+                const first = try ctx.child("check1").spawn(check, .{blob});
+                const second = try ctx.child("check2").spawn(check, .{blob});
+                try (try first.join());
+                try (try second.join());
+            }
+        }.body;
+
+        const SumRange = struct {
+            pub fn identity(_: SumRange) i64 {
+                return 0;
+            }
+            pub fn fold(_: SumRange, acc: i64, index: usize) i64 {
+                return acc + @as(i64, @intCast(index));
+            }
+            pub fn reduce(_: SumRange, a: i64, b: i64) i64 {
+                return a + b;
+            }
+        };
+
+        pub const strategy = struct {
+            fn body(ctx: Context) !void {
+                var pool = try ctx.child("pool").strategy(4);
+                defer pool.deinit();
+                try testing.expectEqual(@as(usize, 4), pool.rayon.parallelism());
+                const sum = pool.rayon.fold(parallel.Range.upto(10000), SumRange{});
+                try testing.expectEqual(@as(i64, 10000 * 9999 / 2), sum);
+            }
+        }.body;
+
+        pub const @"nested strategy runs inline" = struct {
+            const Increment = struct {
+                pub fn map(_: Increment, index: usize) usize {
+                    return index + 1;
+                }
+            };
+
+            const Nested = struct {
+                rayon: parallel.Rayon,
+
+                pub fn call(op: Nested) std.mem.Allocator.Error![]usize {
+                    const items = parallel.Range.upto(2);
+                    return op.rayon.map_collect(testing.allocator, items, Increment{});
+                }
+            };
+
+            fn body(ctx: Context) !void {
+                var pool = try ctx.child("pool").strategy(1);
+                defer pool.deinit();
+                var task: parallel.Task(Nested) = .init(.{ .rayon = pool.rayon });
+                pool.rayon.spawn(2, &task);
+                const output = try pool.rayon.block_on(&task);
+                defer testing.allocator.free(output);
+                try testing.expectEqualSlices(usize, &.{ 1, 2 }, output);
             }
         }.body;
 
