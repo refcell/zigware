@@ -145,3 +145,20 @@ test "sharing: codec round trip and partial publics" {
     }
     try testing.expectError(error.InvalidIndex, shared.partial_public(Participant.init(5)));
 }
+
+test "sharing: partial publics span multi-scalar chunks" {
+    // 300 coefficients cross the 256-point chunk of the MSM evaluation.
+    var rng = utils.test_rng();
+    var poly = try Poly(Scalar).random(gpa, &rng, 299);
+    defer poly.deinit(gpa);
+    const MinPk = variant.MinPk;
+    const committed = try @import("math").poly.commit(gpa, MinPk.Public, poly);
+    var shared = try Sharing(MinPk).init(gpa, .non_zero_counter, 400, committed);
+    defer shared.deinit(gpa);
+    for ([_]usize{ 0, 1, 399 }) |i| {
+        const participant = Participant.from_usize(i);
+        const point = shared.scalar(participant).?;
+        const expected = MinPk.Public.generator.mul(poly.eval(Scalar, point));
+        try testing.expect((try shared.partial_public(participant)).eql(expected));
+    }
+}

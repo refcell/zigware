@@ -178,6 +178,26 @@ pub const Mode = enum(u8) {
 };
 
 /// Which modes a decoder accepts, so newer modes can be rolled out gradually.
+/// `poly(x)` as multi-scalar multiplications against `1, x, x^2, ...` (commonware's
+/// `eval_msm`), in chunks so no allocation is needed. Equal to Horner's `poly.eval`.
+fn eval_msm(comptime K: type, poly: Poly(K), x: Scalar) K {
+    const chunk = 256;
+    var weights: [chunk]Scalar = undefined;
+    var power = Scalar.one;
+    var result = K.zero;
+    var start: usize = 0;
+    while (start < poly.coeffs.len) : (start += chunk) {
+        const count = @min(chunk, poly.coeffs.len - start);
+        for (weights[0..count]) |*weight| {
+            weight.* = power;
+            power = power.mul(x);
+        }
+        result = result.add(K.msm(poly.coeffs[start..][0..count], weights[0..count]));
+    }
+    assert(start >= poly.coeffs.len);
+    return result;
+}
+
 pub const ModeVersion = enum(u8) {
     /// `non_zero_counter` only.
     v0 = 0,
@@ -269,7 +289,7 @@ pub fn Sharing(comptime V: type) type {
             if (i.get() >= self.total) return error.InvalidIndex;
             const slot = &self.evals[i.get()];
             if (slot.*) |cached| return cached;
-            const value = self.poly.eval(Scalar, self.scalar(i).?);
+            const value = eval_msm(V.Public, self.poly, self.scalar(i).?);
             slot.* = value;
             return value;
         }
