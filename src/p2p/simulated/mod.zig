@@ -29,4 +29,5 @@ test {
     _ = @import("network_peers_test.zig");
     _ = @import("network_bandwidth_test.zig");
     _ = @import("split_test.zig");
+    _ = @import("network_channels_test.zig");
 }
