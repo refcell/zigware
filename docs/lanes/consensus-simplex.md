@@ -240,8 +240,16 @@ resolver; those lanes are running, so do the types first and the actors as they 
   nullification. The three certified-split DSTs (group-led view, lone holder leads
   first, displaced certified view) heal through targeted repair, and both cross-term
   certified splits (terms of 5 views; backfill suppressed or allowed) finalize view 26
-  through recursive parent repair. Next: twins pipelined handoff and per-scheme twins,
-  hailstorm, observer, and the rest, seeded.
+  through recursive parent repair. hailstorm (10 restarts of a random validator, keeping
+  its reporter, then commonware's fork checks; two runs replay the same auditor state;
+  rotating and stable leader) runs in slow and ReleaseSafe builds. Debug runs without
+  `-Dslow-tests` shrink the heavier DSTs (`quick` in engine_test.zig: fewer views and
+  seeds; one twins case per campaign; MinPk only for the threshold VRF tests) so
+  test-consensus stays near 2 minutes. observer (a linked peer outside the committee),
+  non_genesis_floor_joiner (rotating and stable leader; the joiner starts from a mid-term
+  finalization), and dishonest_leader_certification_rejected (ed25519) pass. Twins nodes
+  reject mismatched payloads, as commonware's `mocks` build does. Next: twins pipelined
+  handoff and per-scheme twins, the per-scheme fixture variants, and the rest, seeded.
 - [ ] Tracing: actor events are done (voter, batcher, resolver, engine); spans and the
   voter state machine's events follow.
 - [x] Fuzz targets (commonware consensus/fuzz): owned by the crypto lane in
@@ -303,3 +311,6 @@ resolver; those lanes are running, so do the types first and the actors as they 
 - 2026-11-16: the certified-split DSTs; the mock reporter answers `certified(view)`.
 - 2026-11-16: the cross-term certified-split DSTs (commonware's epoch 2 schedule is kept by
   naming each honest validator by the term it leads).
+- 2026-11-16: hailstorm DSTs; Debug-only DST sizes (`quick`) cut test-consensus's Debug time.
+- 2026-11-16: observer, non-genesis floor joiner, and dishonest-leader DSTs; the Harness takes
+  a floor finalization and a certifier; the mock reporter keeps finalizations.

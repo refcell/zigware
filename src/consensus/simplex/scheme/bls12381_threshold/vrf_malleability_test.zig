@@ -3,6 +3,8 @@
 //! aggregate check passing, so each component must be verified on its own.
 
 const std = @import("std");
+const builtin = @import("builtin");
+const build_options = @import("build_options");
 const testing = std.testing;
 const codec = @import("codec");
 const cryptography = @import("cryptography");
@@ -20,7 +22,12 @@ const Round = consensus_types.Round;
 const Participant = utils.Participant;
 const N3f1 = utils.N3f1;
 const sequential = parallel.sequential;
-const variants = .{ primitives.MinPk, primitives.MinSig };
+/// Debug runs without `-Dslow-tests` cover MinPk only, to keep the suite fast; ReleaseSafe
+/// covers both variants.
+const variants = if (builtin.mode == .debug and !build_options.slow_tests)
+    .{primitives.MinPk}
+else
+    .{ primitives.MinPk, primitives.MinSig };
 const namespace = "bls-threshold-signing-scheme";
 const gpa = testing.allocator;
 
@@ -279,6 +286,8 @@ fn contains(items: []const Participant, item: Participant) bool {
 }
 
 test "vrf: optimistic assembly verifies both components" {
+    // Exploring every schedule takes over a minute in Debug; ReleaseSafe runs it.
+    if (builtin.mode == .debug and !build_options.slow_tests) return error.SkipZigTest;
     inline for (variants) |V| {
         const explored = try parallel.mocks.explore(gpa, testing.io, OptimisticAssemble(V){});
         // A threshold signature is unique, so both paths recover the same certificate.

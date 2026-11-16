@@ -2,6 +2,8 @@
 //! quorum recovers both, and a certificate or seed verifies only for its own round.
 
 const std = @import("std");
+const builtin = @import("builtin");
+const build_options = @import("build_options");
 const testing = std.testing;
 const codec = @import("codec");
 const cryptography = @import("cryptography");
@@ -21,7 +23,12 @@ const View = consensus_types.View;
 const Participant = utils.Participant;
 const N3f1 = utils.N3f1;
 const sequential = parallel.sequential;
-const variants = .{ primitives.MinPk, primitives.MinSig };
+/// Debug runs without `-Dslow-tests` cover MinPk only, to keep the suite fast; ReleaseSafe
+/// covers both variants.
+const variants = if (builtin.mode == .debug and !build_options.slow_tests)
+    .{primitives.MinPk}
+else
+    .{ primitives.MinPk, primitives.MinSig };
 const namespace = "bls-threshold-signing-scheme";
 
 fn SchemeOf(comptime V: type) type {

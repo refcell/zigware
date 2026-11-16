@@ -25,6 +25,7 @@ pub fn Reporter(comptime S: type, comptime D: type) type {
         const Self = @This();
         pub const Activity = types.Activity(S, D);
         pub const Notarization = types.Notarization(S, D);
+        pub const Finalization = types.Finalization(S, D);
         const ViewSet = std.AutoHashMapUnmanaged(View, void);
         /// The signers of a view's votes, one bit per participant index (commonware keeps a
         /// set of public keys per view; test committees stay below 64 validators).
@@ -49,6 +50,8 @@ pub fn Reporter(comptime S: type, comptime D: type) type {
         certifications: ViewSet = .empty,
         nullifications: ViewSet = .empty,
         finalizations: std.AutoHashMapUnmanaged(View, Finalized) = .empty,
+        /// The first finalization reported for each view.
+        finalization_certificates: std.AutoHashMapUnmanaged(View, Finalization) = .empty,
         faults: std.ArrayList(Fault) = .empty,
         invalid_votes: u64 = 0,
         invalid_certificates: u64 = 0,
@@ -77,6 +80,9 @@ pub fn Reporter(comptime S: type, comptime D: type) type {
             self.certifications.deinit(self.gpa);
             self.nullifications.deinit(self.gpa);
             self.finalizations.deinit(self.gpa);
+            var finalizations = self.finalization_certificates.valueIterator();
+            while (finalizations.next()) |certificate| certificate.deinit(self.gpa);
+            self.finalization_certificates.deinit(self.gpa);
             self.faults.deinit(self.gpa);
             self.vote_payloads.deinit(self.gpa);
             self.* = undefined;
@@ -116,9 +122,9 @@ pub fn Reporter(comptime S: type, comptime D: type) type {
                     if (!self.record_certificate(nullification)) return .ok;
                     put(self.gpa, &self.nullifications, nullification.view());
                 },
-                .finalization => |*finalization| {
-                    if (!self.record_certificate(finalization)) return .ok;
-                    self.record_finalization(finalization);
+                .finalization => |*certificate| {
+                    if (!self.record_certificate(certificate)) return .ok;
+                    self.record_finalization(certificate);
                 },
                 inline .conflicting_notarize, .conflicting_finalize, .nullify_finalize => |*fault| {
                     if (!self.verified(fault)) {
@@ -151,6 +157,15 @@ pub fn Reporter(comptime S: type, comptime D: type) type {
             self.mutex.lockUncancelable(self.io);
             defer self.mutex.unlock(self.io);
             const kept = self.notarization_certificates.getPtr(view) orelse return null;
+            return try kept.clone(self.gpa);
+        }
+
+        /// A copy of the first finalization reported for `view`, if any (the caller frees
+        /// it).
+        pub fn finalization(self: *Self, view: View) Allocator.Error!?Finalization {
+            self.mutex.lockUncancelable(self.io);
+            defer self.mutex.unlock(self.io);
+            const kept = self.finalization_certificates.getPtr(view) orelse return null;
             return try kept.clone(self.gpa);
         }
 
@@ -205,16 +220,19 @@ pub fn Reporter(comptime S: type, comptime D: type) type {
             return true;
         }
 
-        fn record_finalization(self: *Self, finalization: *const types.Finalization(S, D)) void {
-            const view = finalization.view();
+        fn record_finalization(self: *Self, certificate: *const Finalization) void {
+            const view = certificate.view();
             const entry = self.finalizations.getOrPut(self.gpa, view) catch @panic("out of memory");
             if (entry.found_existing) {
                 // Every finalization of a view names the same payload, or safety failed.
-                const payload = finalization.proposal.payload;
+                const payload = certificate.proposal.payload;
                 assert(codec.order(D, entry.value_ptr.payload, payload) == .eq);
                 entry.value_ptr.count += 1;
             } else {
-                entry.value_ptr.* = .{ .payload = finalization.proposal.payload, .count = 1 };
+                entry.value_ptr.* = .{ .payload = certificate.proposal.payload, .count = 1 };
+                const copy = certificate.clone(self.gpa) catch @panic("out of memory");
+                self.finalization_certificates.put(self.gpa, view, copy) catch
+                    @panic("out of memory");
             }
             if (view.get() > self.latest.get()) self.latest = view;
             self.condition.broadcast(self.io);
@@ -346,6 +364,53 @@ pub fn Reporter(comptime S: type, comptime D: type) type {
             }
             assert(highest.get() == 0 or self.nullifications.contains(highest));
             return highest;
+        }
+
+        const PayloadKey = struct { view: View, finalize: bool };
+        const Payloads = std.AutoHashMapUnmanaged(PayloadKey, D);
+
+        /// commonware's hailstorm fork checks over views in [1, `end`): every notarize vote
+        /// of a view names one payload, as does every finalize vote; the view's notarization
+        /// and finalization name those payloads; and no signer both nullified and finalized
+        /// it. A signer seen voting for two payloads in any view is a fork too.
+        pub fn check_no_forks(self: *Self, end: View) error{ Fork, OutOfMemory }!void {
+            self.mutex.lockUncancelable(self.io);
+            defer self.mutex.unlock(self.io);
+            if (self.equivocators != 0) return error.Fork;
+            var payloads: Payloads = .empty;
+            defer payloads.deinit(self.gpa);
+            var entries = self.vote_payloads.iterator();
+            while (entries.next()) |entry| {
+                const key = entry.key_ptr.*;
+                if (key.view.get() < 1 or key.view.get() >= end.get()) continue;
+                const payload_key: PayloadKey = .{ .view = key.view, .finalize = key.finalize };
+                const slot = try payloads.getOrPut(self.gpa, payload_key);
+                if (!slot.found_existing) {
+                    slot.value_ptr.* = entry.value_ptr.*;
+                } else if (codec.order(D, slot.value_ptr.*, entry.value_ptr.*) != .eq) {
+                    return error.Fork;
+                }
+            }
+            var view: u64 = 1;
+            while (view < end.get()) : (view += 1) try self.check_view(&payloads, .new(view));
+        }
+
+        fn check_view(self: *Self, payloads: *const Payloads, view: View) error{Fork}!void {
+            assert(view.get() > 0);
+            if (payloads.get(.{ .view = view, .finalize = false })) |payload| {
+                if (self.notarization_certificates.getPtr(view)) |kept| {
+                    const named = kept.proposal.payload;
+                    if (codec.order(D, named, payload) != .eq) return error.Fork;
+                }
+            }
+            if (payloads.get(.{ .view = view, .finalize = true })) |payload| {
+                if (self.finalizations.get(view)) |finalized_view| {
+                    if (codec.order(D, finalized_view.payload, payload) != .eq) return error.Fork;
+                }
+            }
+            const finalizers = self.finalizes.get(view) orelse 0;
+            const nullifiers = self.nullifies.get(view) orelse 0;
+            if (finalizers & nullifiers != 0) return error.Fork;
         }
 
         pub fn assert_no_faults(self: *Self) void {

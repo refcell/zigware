@@ -76,6 +76,9 @@ const Engine = engine_mod.Engine(Params);
 const Channel = engine_mod.Channel(Params);
 
 const test_quota = p2p.Quota.per_second(1024);
+/// Debug runs without `-Dslow-tests` shrink the DSTs (fewer views and seeds) to keep the
+/// suite fast; ReleaseSafe runs them at full size.
+const quick = builtin.mode == .debug and !build_options.slow_tests;
 const epoch: Epoch = .new(333);
 const page_size = 1024;
 const page_cache_size = 10;
@@ -203,6 +206,11 @@ const Harness = struct {
     propose_latency: ?application_mod.Latency = null,
     verify_latency: ?application_mod.Latency = null,
     certify_latency: ?*const fn (index: usize) application_mod.Latency = null,
+    /// A finalization the next validator started takes as its floor (genesis when null);
+    /// the engine takes ownership.
+    floor: ?Reporter.Finalization = null,
+    /// How applications started from now on answer certification requests.
+    should_certify: application_mod.Certifier(Digest) = .always,
 
     const Timeouts = struct {
         leader_ms: u64 = 1000,
@@ -297,6 +305,8 @@ const Harness = struct {
         harness.propose_latency = null;
         harness.verify_latency = null;
         harness.certify_latency = null;
+        harness.floor = null;
+        harness.should_certify = .always;
     }
 
     /// Starts validator `index` as the Byzantine mock `role`.
@@ -360,6 +370,13 @@ const Harness = struct {
     /// Aborts validator `index`'s engine and frees its mocks; its journal stays in storage
     /// for `start_validator` to recover.
     fn crash(harness: *Harness, index: usize) void {
+        harness.shutdown(index);
+        harness.validators[index].reporter.deinit();
+    }
+
+    /// `crash`, but the reporter lives on for `restart` (commonware hands the restarted
+    /// engine the same reporter, so its checks span both runs).
+    fn shutdown(harness: *Harness, index: usize) void {
         const validator = harness.honest(index).?;
         abort(validator);
         // No broadcast reaches the application once deregistered, so it can be freed.
@@ -367,6 +384,13 @@ const Harness = struct {
         stop_actors(validator);
         validator.state = .absent;
         assert(harness.honest(index) == null);
+    }
+
+    /// Starts validator `index`, shut down with `shutdown`, from its journal on new channels,
+    /// reporting to the reporter it kept.
+    fn restart(harness: *Harness, index: usize) !void {
+        const channels = try register(harness.oracle(), harness.keys()[index]);
+        try harness.start_engine(index, channels, .keep);
     }
 
     /// Aborts every engine and frees its mocks; the validators become absent, and their
@@ -381,6 +405,7 @@ const Harness = struct {
         for (validators) |*validator| {
             if (validator.state != .honest) continue;
             stop_actors(validator);
+            validator.reporter.deinit();
             validator.state = .absent;
         }
         for (validators) |*validator| assert(validator.state != .honest);
@@ -414,10 +439,22 @@ const Harness = struct {
 
     /// Starts validator `index`'s engine on `channels`, registered for it beforehand.
     fn start_validator_on(harness: *Harness, index: usize, channels: [3]Channel) !void {
+        try harness.start_engine(index, channels, .new);
+    }
+
+    /// Starts validator `index`'s engine on `channels` with a new reporter, or the one it
+    /// kept through `shutdown`.
+    fn start_engine(
+        harness: *Harness,
+        index: usize,
+        channels: [3]Channel,
+        reporter: enum { new, keep },
+    ) !void {
         const io = harness.ctx.io();
         const validator = &harness.validators[index];
         const key = harness.keys()[index];
         assert(validator.state == .absent);
+        const kept = validator.reporter;
         validator.* = undefined;
         validator.handle = null;
         const slow = index == 0 and harness.role == .slow;
@@ -431,11 +468,12 @@ const Harness = struct {
             .propose_latency = if (slow) .{ .mean = 10_000, .std_dev = 0 } else propose_time,
             .verify_latency = if (slow) .{ .mean = 10_000, .std_dev = 5 } else verify_time,
             .certify_latency = if (slow) .{ .mean = 10_000, .std_dev = 5 } else certify_time,
+            .should_certify = harness.should_certify,
         });
         validator.application.stall_proposals = harness.stall_proposals;
         validator.application.handoff = harness.handoff;
         try validator.application.register();
-        validator.reporter = .init(gpa, io, &harness.verifier);
+        validator.reporter = if (reporter == .keep) kept else .init(gpa, io, &harness.verifier);
         const rng: IoRng = .{ .io = io };
         const verify = harness.verify_reports;
         const scheme = harness.schemes[index];
@@ -454,6 +492,8 @@ const Harness = struct {
         cfg.certification_timeout = .from_millis(harness.timeouts.certification_ms);
         cfg.timeout_retry = .from_millis(harness.timeouts.retry_ms);
         cfg.skip = .{ .enabled = .{ .timeout = .from_millis(harness.timeouts.skip_ms) } };
+        if (harness.floor) |floor| cfg.floor = .{ .finalized = floor };
+        harness.floor = null;
         try validator.engine.init(harness.ctx, cfg);
         validator.handle = try harness.ctx.child("engine").spawn(Engine.run, .{
             &validator.engine, channels[0], channels[1], channels[2],
@@ -606,7 +646,6 @@ fn stop_actors(validator: *Validator) void {
     validator.engine.deinit();
     validator.elector.deinit(gpa);
     validator.page_cache.deinit();
-    validator.reporter.deinit();
     validator.application.deinit();
 }
 
@@ -633,7 +672,7 @@ test "four honest validators finalize" {
 }
 
 test "all online" {
-    _ = try run_seeded(0, all_online, .{ 5, 50 });
+    _ = try run_seeded(0, all_online, .{ 5, if (quick) 20 else 50 });
 }
 
 test "the voter traces startup and finalization at commonware's target" {
@@ -661,24 +700,24 @@ test "the voter traces startup and finalization at commonware's target" {
 }
 
 /// commonware `slow_and_lossy_links_seeded`: half the messages drop.
-fn slow_and_lossy_links(ctx: Context) !void {
+fn slow_and_lossy_links(ctx: Context, required: u64) !void {
     var harness: Harness = undefined;
     try harness.start(ctx, 5, link_ms(200, 150, 0.5), .honest);
     defer harness.deinit();
-    const required = 20;
     try harness.wait_all(required);
     try harness.check(required);
 }
 
 test "slow and lossy links" {
-    _ = try run_seeded(6, slow_and_lossy_links, .{});
+    _ = try run_seeded(6, slow_and_lossy_links, .{if (quick) 10 else 20});
 }
 
 test "determinism: the same seed replays the same run" {
+    const required: u64 = if (quick) 5 else 20;
     var states: [2][8]u8 = undefined;
     for (&states, 0..) |*state, seed| {
-        state.* = try run_seeded(seed, slow_and_lossy_links, .{});
-        const again = try run_seeded(seed, slow_and_lossy_links, .{});
+        state.* = try run_seeded(seed, slow_and_lossy_links, .{required});
+        const again = try run_seeded(seed, slow_and_lossy_links, .{required});
         try testing.expectEqualSlices(u8, state, &again);
     }
     // A different seed takes a different path.
@@ -696,13 +735,13 @@ fn partition(ctx: Context) !void {
     const link = link_ms(10, 1, 1.0);
     try harness.start(ctx, 10, link, .honest);
     defer harness.deinit();
-    const required = 20;
+    const required: u64 = if (quick) 5 else 20;
     try harness.wait_all(required);
     try harness.link_all(null, &separated);
     // Let in-progress notarizations and finalizations finish.
     try ctx.sleep(.fromSeconds(10));
     const before = harness.max_finalized();
-    try ctx.sleep(.fromSeconds(60));
+    try ctx.sleep(.fromSeconds(if (quick) 20 else 60));
     try testing.expectEqual(before, harness.max_finalized()); // Nothing finalizes while split.
     try harness.link_all(link, &separated);
     try harness.wait_all(before + required);
@@ -826,7 +865,7 @@ fn one_offline_scenario(ctx: Context) !void {
     try harness.start(ctx, n, null, .absent);
     defer harness.deinit();
     try harness.link_all(link_ms(10, 1, 1.0), &not_zero);
-    const required = 100;
+    const required: u64 = if (quick) 30 else 100;
     try harness.wait_all(required);
     for (0..n) |index| {
         const validator = harness.honest(index) orelse continue;
@@ -875,7 +914,7 @@ fn slow_validator_scenario(ctx: Context) !void {
     var harness: Harness = undefined;
     try harness.start(ctx, 5, link_ms(10, 1, 1.0), .slow);
     defer harness.deinit();
-    const required = 50;
+    const required: u64 = if (quick) 20 else 50;
     try harness.wait_all(required); // The slow validator learns finalizations from the rest.
     for (harness.validators) |*validator| {
         validator.reporter.assert_no_faults();
@@ -912,9 +951,10 @@ fn all_recovery_scenario(ctx: Context) !void {
     }
     try testing.expect(latest > 0);
     try harness.link_all(link_ms(10, 1, 1.0), null);
-    const required = 100;
-    try harness.wait_all(required);
     const view_retention = 10;
+    // Quick runs wait only until the checked views are past retention.
+    const required: u64 = if (quick) latest + 2 * view_retention else 100;
+    try harness.wait_all(required);
     const tolerated_missing = 3;
     for (harness.validators) |*validator| {
         validator.reporter.assert_no_faults();
@@ -970,7 +1010,7 @@ fn equivocator_run(ctx: Context) !bool {
     var harness: Harness = undefined;
     try harness.start(ctx, 7, link_ms(10, 1, 1.0), .equivocator);
     defer harness.deinit();
-    const required = 50;
+    const required: u64 = if (quick) 10 else 50;
     try harness.wait_all(required);
     const rng: IoRng = .{ .io = ctx.io() };
     const index = 1 + rng.next_u64() % (harness.validators.len - 1);
@@ -1006,7 +1046,7 @@ fn invalid_scenario(ctx: Context) !void {
     var harness: Harness = undefined;
     try harness.start(ctx, 4, link_ms(10, 1, 1.0), .invalid);
     defer harness.deinit();
-    const required = 50;
+    const required: u64 = if (quick) 20 else 50;
     // Validator 0 never finalizes: its certificates carry its own invalid signature.
     for (1..harness.validators.len) |index| {
         try harness.validators[index].reporter.wait_for_finalized(.new(required));
@@ -1026,7 +1066,8 @@ fn invalid_scenario(ctx: Context) !void {
 }
 
 test "invalid signatures are reported and blocked" {
-    for (0..2) |seed| _ = try run_seeded(seed, invalid_scenario, .{});
+    const seeds: u64 = if (quick) 1 else 2;
+    for (0..seeds) |seed| _ = try run_seeded(seed, invalid_scenario, .{});
 }
 
 fn zero_only_to_one(_: usize, a: usize, b: usize) bool {
@@ -1372,7 +1413,8 @@ test "unclean shutdown: repeated crashes recover from the journal" {
     const restarts_max = 200;
     // Each start after the first crashes storage, keeping only synced journal contents.
     const restarts = for (0..restarts_max) |restart| {
-        if (try (try runner.start_context(unclean_run, .{100}))) break restart;
+        const required: u64 = if (quick) 15 else 100;
+        if (try (try runner.start_context(unclean_run, .{required}))) break restart;
     } else return error.TestUnexpectedResult;
     try testing.expect(restarts > 0);
 }
@@ -1791,4 +1833,191 @@ test "stable leader cross-term certified split recovers" {
 
 test "stable leader cross-term certified split is backfillable" {
     _ = try run_seeded(0, cross_term_split_scenario, .{false});
+}
+
+/// commonware `run_hailstorm`: five validators; each round, once all finalized the next 15
+/// views, a random validator shuts down, the rest finalize 15 more, and it restarts from
+/// its journal with the reporter it kept; then all finalize 15 more. No reporter may see a
+/// fork below the last target minus the view retention.
+fn hailstorm_scenario(ctx: Context, round_robin: RoundRobin, shutdowns: u32) !void {
+    var harness: Harness = undefined;
+    try harness.start_network(ctx, 5, link_ms(10, 1, 1.0), .honest, .{});
+    defer harness.deinit();
+    harness.round_robin = round_robin;
+    for (0..5) |index| try harness.start_validator(index);
+    const interval = 15;
+    const rng: IoRng = .{ .io = ctx.io() };
+    var target: u64 = 0;
+    for (0..shutdowns) |_| {
+        target += interval;
+        try harness.wait_all(target);
+        target += interval;
+        const index: usize = @intCast(rng.next_u64() % 5);
+        harness.shutdown(index);
+        try harness.wait_all(target);
+        target += interval;
+        try harness.restart(index);
+        try harness.wait_all(target);
+    }
+    // Views within the retention of the last target may still lack activity.
+    const view_retention = 10;
+    assert(target > view_retention);
+    for (harness.validators) |*validator| {
+        validator.reporter.assert_no_faults();
+        validator.reporter.assert_no_invalid();
+        try validator.reporter.check_no_forks(.new(target - view_retention));
+    }
+    const blocked = try harness.oracle().blocked(gpa);
+    defer gpa.free(blocked);
+    try testing.expectEqual(0, blocked.len);
+}
+
+/// Two hailstorm runs of 10 shutdowns with one seed reach the same auditor state.
+fn hailstorm(round_robin: RoundRobin) !void {
+    // Two shutdowns take about 30 s in Debug; ReleaseSafe runs all 10.
+    if (builtin.mode == .debug and !build_options.slow_tests) return error.SkipZigTest;
+    const first = try run_seeded(0, hailstorm_scenario, .{ round_robin, 10 });
+    const second = try run_seeded(0, hailstorm_scenario, .{ round_robin, 10 });
+    try testing.expectEqualSlices(u8, &first, &second);
+}
+
+test "hailstorm: restarts under load replay deterministically" {
+    try hailstorm(RoundRobin.default());
+}
+
+test "hailstorm with a stable leader" {
+    const term: consensus_types.TermLength = .new(utils.NonZero(u32).init(3).?);
+    try hailstorm(RoundRobin.default().with_term(term, .from_secs(12), .new(0)));
+}
+
+/// commonware `observer`: a sixth peer outside the committee is registered, tracked as
+/// secondary, and linked with all five validators. commonware's loop starts engines only
+/// for the participants, so the observer never runs one; the five still finalize without
+/// faults, invalid activity, or blocks.
+fn observer_scenario(ctx: Context, required: u64) !void {
+    var harness: Harness = undefined;
+    const link = link_ms(10, 1, 1.0);
+    try harness.start_network(ctx, 5, link, .honest, .{ .skip_ms = 12_000 });
+    defer harness.deinit();
+    const observer = cryptography.ed25519.PrivateKey.from_seed(5).public_key();
+    for (harness.keys()) |key| assert(key.order(observer) != .eq);
+    var channels = try register(harness.oracle(), observer);
+    defer for (&channels) |*channel| {
+        channel.sender.deinit();
+        channel.receiver.deinit();
+    };
+    for (harness.keys()) |key| {
+        try harness.oracle().add_link(observer, key, link);
+        try harness.oracle().add_link(key, observer, link);
+    }
+    const tracked: p2p.TrackedPeers(Key) = .{
+        .primary = .init(harness.keys()),
+        .secondary = .init(&.{observer}),
+    };
+    _ = harness.oracle().manager().track(1, tracked);
+    for (0..5) |index| try harness.start_validator(index);
+    try harness.wait_all(required);
+    try harness.check(required);
+}
+
+test "observer: a linked peer outside the committee changes nothing" {
+    _ = try run_seeded(0, observer_scenario, .{if (quick) 20 else 100});
+}
+
+fn among_active(_: usize, a: usize, b: usize) bool {
+    return a < 4 and b < 4;
+}
+
+/// The lowest finalized view in (0, `tip`) that `reporter` holds and that is not a term
+/// start (the lowest finalized one when every view starts a term).
+fn mid_term_floor(reporter: *Reporter, round_robin: RoundRobin, tip: u64) ?u64 {
+    var first: ?u64 = null;
+    for (1..tip) |view| {
+        if (reporter.finalized(.new(view)) == null) continue;
+        if (first == null) first = view;
+        if (!View.new(view).is_term_start(round_robin.terms.length)) return view;
+    }
+    return first;
+}
+
+/// commonware `non_genesis_floor_joiner_catches_tip`: four of five validators finalize
+/// past view 15; the fifth then links in and starts from a mid-term finalization below
+/// that tip as its floor, catches up to the tip, and finalizes 5 views past it.
+fn floor_joiner_scenario(ctx: Context, round_robin: RoundRobin) !void {
+    var harness: Harness = undefined;
+    try harness.start_network(ctx, 5, null, .honest, .{ .retry_ms = 1000, .skip_ms = 5000 });
+    defer harness.deinit();
+    harness.round_robin = round_robin;
+    const link = link_ms(10, 1, 1.0);
+    try harness.link_all(link, &among_active);
+    for (0..4) |index| try harness.start_validator(index);
+    try harness.wait_all(15);
+    const tip = harness.min_finalized();
+    const reporter = &harness.validators[0].reporter;
+    const floor = mid_term_floor(reporter, round_robin, tip).?;
+    assert(floor > 0 and floor < tip);
+    if (round_robin.terms.length.get() > 1) {
+        try testing.expect(!View.new(floor).is_term_start(round_robin.terms.length));
+    }
+    const joiner = harness.keys()[4];
+    for (harness.keys()[0..4]) |key| {
+        try harness.oracle().add_link(joiner, key, link);
+        try harness.oracle().add_link(key, joiner, link);
+    }
+    harness.floor = (try reporter.finalization(.new(floor))).?;
+    try harness.start_validator(4);
+    try harness.validators[4].reporter.wait_for_finalized(.new(tip));
+    try harness.validators[4].reporter.wait_for_finalized(.new(tip + 5));
+    for (harness.validators) |*validator| {
+        validator.reporter.assert_no_faults();
+        validator.reporter.assert_no_invalid();
+    }
+    const blocked = try harness.oracle().blocked(gpa);
+    defer gpa.free(blocked);
+    try testing.expectEqual(0, blocked.len);
+}
+
+test "non-genesis floor: a joiner from a finalization catches the tip" {
+    _ = try run_seeded(0, floor_joiner_scenario, .{RoundRobin.default()});
+}
+
+test "non-genesis floor: a stable-leader joiner starts mid-term" {
+    const term: consensus_types.TermLength = .new(utils.NonZero(u32).init(3).?);
+    const round_robin = RoundRobin.default().with_term(term, .from_secs(12), .new(0));
+    _ = try run_seeded(0, floor_joiner_scenario, .{round_robin});
+}
+
+/// Whether the default round robin over five validators elects someone other than
+/// validator 0 in `round`.
+fn led_honestly(round: consensus_types.Round, _: Digest) bool {
+    var schedule = RoundRobin.default().build(gpa, 5) catch @panic("out of memory");
+    defer schedule.deinit(gpa);
+    return schedule.elect(round, {}).get() != 0;
+}
+
+/// commonware `dishonest_leader_certification_rejected`: every application refuses to
+/// certify the views validator 0 leads; the five still finalize 50 views without faults or
+/// invalid activity.
+fn dishonest_leader_scenario(ctx: Context, required: u64) !void {
+    var harness: Harness = undefined;
+    try harness.start_network(ctx, 5, link_ms(10, 1, 1.0), .honest, .{ .skip_ms = 12_000 });
+    defer harness.deinit();
+    harness.should_certify = .{ .custom = &led_honestly };
+    for (0..5) |index| try harness.start_validator(index);
+    try harness.wait_all(required);
+    for (harness.validators) |*validator| {
+        validator.reporter.assert_no_faults();
+        validator.reporter.assert_no_invalid();
+        // Views validator 0 led never certify.
+        for (1..required + 1) |view| {
+            const round: consensus_types.Round = .new(epoch, .new(view));
+            if (!led_honestly(round, undefined)) {
+                try testing.expect(!validator.reporter.certified(.new(view)));
+            }
+        }
+    }
+}
+
+test "dishonest leader: views it leads never certify" {
+    _ = try run_seeded(0, dishonest_leader_scenario, .{if (quick) 20 else 50});
 }

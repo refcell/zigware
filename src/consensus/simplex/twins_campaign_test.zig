@@ -84,12 +84,12 @@ const Campaign = struct {
     optimistic_views: u64 = 0,
 };
 
-/// commonware `TWINS_CAMPAIGN`. Debug builds without `-Dslow-tests` run 2 of its 20 cases.
+/// commonware `TWINS_CAMPAIGN`. Debug builds without `-Dslow-tests` run 1 of its 20 cases.
 const twins_campaign: Campaign = .{
     .n = 5,
     .rounds = 3,
     .mode = .sampled,
-    .max_cases = if (builtin.mode == .debug and !build_options.slow_tests) 2 else 20,
+    .max_cases = if (builtin.mode == .debug and !build_options.slow_tests) 1 else 20,
     .trailing_finalizations = 10,
 };
 
@@ -290,6 +290,9 @@ fn start_node(case: *Case, index: usize, name: []const u8, channels: [3]Channel)
         .certify_latency = normal,
     });
     errdefer node.application.deinit();
+    // commonware's tests build with the `mocks` feature, so a twin's payload that names
+    // another round or parent fails verification instead of panicking.
+    node.application.reject_mismatches = true;
     try node.application.register();
     node.reporter = .init(gpa, io, &case.fixture.verifier);
     errdefer node.reporter.deinit();
