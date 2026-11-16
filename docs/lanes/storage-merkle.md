@@ -38,14 +38,14 @@ variants need `runtime` storage; do them after its interface lands.
   invalid journal size, genesis and lower-range syncs dropping stale pins, stale batch, and
   update_leaf after sync.
 - [x] merkle/persisted/full blob-level init_sync tests: ahead skips discarded blobs (clean and
-  torn), ahead within the end blob, reset leaves retained blobs unopened (clean and torn), and
-  invalid pins leave the pruned journal intact. A recording storage wrapper checks which node
-  blobs open, standing in for commonware's sync and read counters.
-- [ ] merkle/persisted/full: the remaining blob-level init_sync tests (interrupted bounded
-  publication, interrupted clear, torn tail repair, start below retained and stale below start
-  leave blobs unopened; these also pin the journal probe at the highest missing pin) and the
-  watermark test. Commonware's start_sync-handle tests (clean start_sync failure, destroy
-  observing a failed sync) need delayed sync completion, which this synchronous port lacks.
+  torn), ahead within the end blob, reset / start below retained / stale below start leave
+  blobs unopened (clean and torn), torn tail repair, invalid pins leave the pruned journal
+  intact, and the watermark publication. A recording storage wrapper checks which node blobs
+  open, standing in for commonware's sync and read counters; a journal `commit` (data durable,
+  watermark behind) stands in for commonware's parked `start_sync`.
+- [ ] merkle/persisted/full: interrupted bounded publication and interrupted clear init_sync
+  tests. Commonware's start_sync-handle tests (clean start_sync failure, destroy observing a
+  failed sync) need delayed sync completion, which this synchronous port lacks.
 - [x] merkle/persisted/full historical proof tests (basic, with pruning, large, singleton,
   pruned elements, appends while available, after sync, after pruning, edge cases, range
   validation, non-size prune) and interrupted destroy (swept budget, and bounded reopen).
