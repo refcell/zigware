@@ -151,6 +151,29 @@ pub fn SetupWith(comptime C: type) type {
             try testing.expectEqual(p2p.Feedback.ok, feedback);
         }
 
+        /// Tracks the peers at indices `primary` and `secondary` network-wide at `id`.
+        pub fn track_roles(
+            setup: *const Self,
+            id: u64,
+            primary: []const usize,
+            secondary: []const usize,
+        ) !void {
+            var primary_keys: [peers_max]PublicKey = undefined;
+            var secondary_keys: [peers_max]PublicKey = undefined;
+            for (primary, 0..) |index, slot| primary_keys[slot] = setup.peers[index];
+            for (secondary, 0..) |index, slot| secondary_keys[slot] = setup.peers[index];
+            const primary_set = primary_keys[0..primary.len];
+            const secondary_set = secondary_keys[0..secondary.len];
+            Tracked.PeerSet.sort(primary_set);
+            Tracked.PeerSet.sort(secondary_set);
+            const tracked: Tracked = .{
+                .primary = .init(primary_set),
+                .secondary = .init(secondary_set),
+            };
+            const feedback = setup.oracle().manager().track(id, tracked);
+            try testing.expectEqual(p2p.Feedback.ok, feedback);
+        }
+
         /// Adds links both ways between peers `from` and `to`.
         pub fn add_link(
             setup: *const Self,
@@ -900,6 +923,146 @@ test "self exclusion" {
             try setup.sleep(Duration.from_millis(100));
             try fetch(mailbox1, 1);
             try expect_event(consumer, 1, "shared data");
+        }
+    }.body);
+}
+
+const untracked: Setup.Options = .{ .tracked_peer_sets = 1, .track = false };
+
+test "fetch uses secondary peers" {
+    try run(10, struct {
+        fn body(io: Io) !void {
+            const setup = try Setup.init(io, &.{ 1, 2, 3 }, untracked);
+            defer setup.deinit();
+            // Peers 1 and 2 are primary (2 has no data); peer 3 is secondary with the data.
+            try setup.add_link(link, 0, 1);
+            try setup.add_link(link, 0, 2);
+            try setup.track_roles(1, &.{ 0, 1 }, &.{2});
+            try setup.sleep(Duration.from_millis(100));
+            const consumer = try setup.make_consumer();
+            const mailbox1 = try setup.spawn(0, consumer, try setup.make_producer(&.{}));
+            _ = try setup.spawn(1, try setup.make_consumer(), try setup.make_producer(&.{}));
+            const prod3 = try setup.make_producer(&.{.{ 1, "secondary only data" }});
+            _ = try setup.spawn(2, try setup.make_consumer(), prod3);
+
+            try fetch(mailbox1, 1);
+            try expect_event(consumer, 1, "secondary only data");
+        }
+    }.body);
+}
+
+test "fetch targeted reaches secondary peer" {
+    try run(10, struct {
+        fn body(io: Io) !void {
+            const setup = try Setup.init(io, &.{ 1, 2, 3 }, untracked);
+            defer setup.deinit();
+            try setup.add_link(link, 0, 1);
+            try setup.add_link(link, 0, 2);
+            try setup.track_roles(1, &.{ 0, 1 }, &.{2});
+            try setup.sleep(Duration.from_millis(100));
+            const consumer = try setup.make_consumer();
+            const mailbox1 = try setup.spawn(0, consumer, try setup.make_producer(&.{}));
+            _ = try setup.spawn(1, try setup.make_consumer(), try setup.make_producer(&.{}));
+            const prod3 = try setup.make_producer(&.{
+                .{ 1, "secondary only data" },
+                .{ 2, "secondary only data" },
+            });
+            _ = try setup.spawn(2, try setup.make_consumer(), prod3);
+
+            // With both peers targeted, only the secondary peer can serve the key.
+            try fetch_targeted(setup, mailbox1, 1, &.{ 1, 2 });
+            try expect_event(consumer, 1, "secondary only data");
+            // Targeting only the secondary peer also succeeds.
+            try fetch_targeted(setup, mailbox1, 2, &.{2});
+            try expect_event(consumer, 2, "secondary only data");
+        }
+    }.body);
+}
+
+const two_sets: Setup.Options = .{ .tracked_peer_sets = 2, .track = false };
+
+test "fetch uses latest set only" {
+    try run(10, struct {
+        fn body(io: Io) !void {
+            const setup = try Setup.init(io, &.{ 1, 2, 3 }, two_sets);
+            defer setup.deinit();
+            try setup.add_link(link, 0, 1);
+            try setup.add_link(link, 0, 2);
+            try setup.track_roles(0, &.{ 0, 1 }, &.{});
+            try setup.sleep(Duration.from_millis(100));
+            const consumer = try setup.make_consumer();
+            const mailbox1 = try setup.spawn(0, consumer, try setup.make_producer(&.{}));
+            // Peer 2 is the old primary, kept only in the overlap window; it has keys 7 and 8.
+            const prod2 = try setup.make_producer(&.{
+                .{ 7, "old primary data" },
+                .{ 8, "old primary data" },
+            });
+            _ = try setup.spawn(1, try setup.make_consumer(), prod2);
+            // Peer 3 is the latest secondary, with only key 9.
+            const prod3 = try setup.make_producer(&.{.{ 9, "old primary data" }});
+            _ = try setup.spawn(2, try setup.make_consumer(), prod3);
+            try setup.sleep(Duration.from_millis(100));
+            try setup.track_roles(1, &.{0}, &.{2});
+            try setup.sleep(Duration.from_millis(100));
+
+            // Neither a plain nor a targeted fetch reaches the overlap-only peer.
+            try fetch(mailbox1, 7);
+            try expect_no_event(setup, consumer, 1000);
+            try fetch_targeted(setup, mailbox1, 8, &.{1});
+            try expect_no_event(setup, consumer, 1000);
+            // The latest set's secondary peer serves a fetch without targets.
+            try fetch(mailbox1, 9);
+            try expect_event(consumer, 9, "old primary data");
+        }
+    }.body);
+}
+
+test "fetch after cutover relies on latest primary history" {
+    try run(10, struct {
+        fn body(io: Io) !void {
+            const setup = try Setup.init(io, &.{ 1, 2, 3 }, two_sets);
+            defer setup.deinit();
+            try setup.add_link(link, 0, 1);
+            try setup.add_link(link, 0, 2);
+            try setup.track_roles(0, &.{ 0, 1 }, &.{});
+            try setup.sleep(Duration.from_millis(100));
+            const consumer = try setup.make_consumer();
+            try consumer.add_expected(key(9), "latest primary history");
+            const mailbox1 = try setup.spawn(0, consumer, try setup.make_producer(&.{}));
+            // Peer 2 (overlap only) would be blocked for its stale history if queried.
+            const prod2 = try setup.make_producer(&.{.{ 9, "stale overlap history" }});
+            _ = try setup.spawn(1, try setup.make_consumer(), prod2);
+            const prod3 = try setup.make_producer(&.{.{ 9, "latest primary history" }});
+            _ = try setup.spawn(2, try setup.make_consumer(), prod3);
+            try setup.sleep(Duration.from_millis(100));
+            try setup.track_roles(1, &.{ 0, 2 }, &.{});
+            try setup.sleep(Duration.from_millis(100));
+
+            try fetch(mailbox1, 9);
+            try expect_event(consumer, 9, "latest primary history");
+            const blocked = try setup.oracle().blocked(gpa);
+            defer gpa.free(blocked);
+            try testing.expectEqual(@as(usize, 0), blocked.len);
+        }
+    }.body);
+}
+
+test "secondary peer requests are served" {
+    try run(10, struct {
+        fn body(io: Io) !void {
+            const setup = try Setup.init(io, &.{ 1, 2 }, .{});
+            defer setup.deinit();
+            // Peer 1 is primary with the data; peer 2 is secondary and requests it.
+            try setup.add_link(link, 0, 1);
+            try setup.track_roles(1, &.{0}, &.{1});
+            try setup.sleep(Duration.from_millis(100));
+            const prod1 = try setup.make_producer(&.{.{ 9, "served to secondary" }});
+            _ = try setup.spawn(0, try setup.make_consumer(), prod1);
+            const consumer = try setup.make_consumer();
+            try consumer.add_expected(key(9), "served to secondary");
+            const mailbox2 = try setup.spawn(1, consumer, try setup.make_producer(&.{}));
+            try fetch_targeted(setup, mailbox2, 9, &.{0});
+            try expect_event(consumer, 9, "served to secondary");
         }
     }.body);
 }
