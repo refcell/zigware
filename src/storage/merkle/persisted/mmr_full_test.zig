@@ -4,6 +4,8 @@
 //! leaves the structure closed, so those tests free it only on success.
 
 const std = @import("std");
+const builtin = @import("builtin");
+const build_options = @import("build_options");
 const assert = std.debug.assert;
 const testing = std.testing;
 const merkle = @import("../mod.zig");
@@ -133,6 +135,8 @@ fn pop(comptime F: type) !void {
 }
 
 test "persisted mmr pop" {
+    // Minutes in Debug, so it runs in optimized builds (CI's ReleaseSafe job) or -Dslow-tests.
+    if (builtin.mode == .debug and !build_options.slow_tests) return error.SkipZigTest;
     inline for (families) |F| try pop(F);
 }
 

@@ -3,6 +3,8 @@
 //! panics themselves and are not ported (Zig tests cannot catch a panic).
 
 const std = @import("std");
+const builtin = @import("builtin");
+const build_options = @import("build_options");
 const codec = @import("codec");
 const BitMap = @import("bitmap.zig").BitMap;
 const prunable = @import("prunable.zig");
@@ -412,6 +414,8 @@ fn scan(comptime N: usize, bits: *const Prunable(N), from: u64, end: u64) ?u64 {
 }
 
 test "prunable: ones_iter_range matches bit scan" {
+    // Minutes in Debug, so it runs in optimized builds (CI's ReleaseSafe job) or -Dslow-tests.
+    if (builtin.mode == .debug and !build_options.slow_tests) return error.SkipZigTest;
     inline for (.{ 1, 7, 8, 9, 32, 64 }) |n| try check_ones_iter_ranges(n);
 }
 

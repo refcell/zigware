@@ -556,6 +556,8 @@ fn threshold_body(_: void, u: *Unstructured) !void {
 }
 
 test "bls12381 fuzz: threshold operations" {
+    // Minutes in Debug, so it runs in optimized builds (CI's ReleaseSafe job) or -Dslow-tests.
+    if (builtin.mode == .debug and !build_options.slow_tests) return error.SkipZigTest;
     try (minifuzz.Builder{}).with_search_limit(search_limit(2, 32))
         .run(testing.allocator, {}, threshold_body);
 }

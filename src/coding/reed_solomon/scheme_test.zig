@@ -2,6 +2,7 @@
 //! codec bounds and conformance, and the `lib.rs` scheme tests.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const testing = std.testing;
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
@@ -512,6 +513,8 @@ fn roundtrip_body(_: void, u: *minifuzz.Unstructured) !void {
 }
 
 test "minifuzz roundtrip reed solomon" {
+    // Minutes in Debug, so it runs in optimized builds (CI's ReleaseSafe job) or -Dslow-tests.
+    if (builtin.mode == .debug and !build_options.slow_tests) return error.SkipZigTest;
     try minifuzz.run(gpa, {}, roundtrip_body);
 }
 

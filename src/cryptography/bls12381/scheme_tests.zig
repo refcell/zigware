@@ -2,6 +2,8 @@
 //! including their `CodecConformance` hashes.
 
 const std = @import("std");
+const builtin = @import("builtin");
+const build_options = @import("build_options");
 const assert = std.debug.assert;
 const testing = std.testing;
 const Allocator = std.mem.Allocator;
@@ -120,6 +122,8 @@ const Batch = struct {
 };
 
 test "bls12381 scheme: projected batch indexes zero-sized items" {
+    // Minutes in Debug, so it runs in optimized builds (CI's ReleaseSafe job) or -Dslow-tests.
+    if (builtin.mode == .debug and !build_options.slow_tests) return error.SkipZigTest;
     var rng = utils.test_rng();
     var keys: [3]PrivateKey = undefined;
     for (&keys) |*key| key.* = PrivateKey.random(&rng);

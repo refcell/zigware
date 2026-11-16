@@ -3,6 +3,8 @@
 //! verify and every malicious tweak (product, length, round commitments, namespace) must not.
 
 const std = @import("std");
+const builtin = @import("builtin");
+const build_options = @import("build_options");
 const testing = std.testing;
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
@@ -182,6 +184,8 @@ pub fn plan_body(setup: *const Setup, u: *Unstructured) anyerror!void {
 }
 
 test "ipa fuzz plan: honest proofs verify, tweaked ones do not (minifuzz)" {
+    // Minutes in Debug, so it runs in optimized builds (CI's ReleaseSafe job) or -Dslow-tests.
+    if (builtin.mode == .debug and !build_options.slow_tests) return error.SkipZigTest;
     var setup = try test_setup();
     defer setup.deinit(gpa);
     try minifuzz.run(gpa, @as(*const Setup, &setup), plan_body);
@@ -328,6 +332,8 @@ fn codec_body(_: void, u: *Unstructured) anyerror!void {
 }
 
 test "ipa codec roundtrip (minifuzz)" {
+    // Minutes in Debug, so it runs in optimized builds (CI's ReleaseSafe job) or -Dslow-tests.
+    if (builtin.mode == .debug and !build_options.slow_tests) return error.SkipZigTest;
     try minifuzz.run(gpa, {}, codec_body);
 }
 

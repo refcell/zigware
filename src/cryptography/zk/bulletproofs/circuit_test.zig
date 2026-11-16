@@ -3,6 +3,8 @@
 //! satisfaction, setup roundtrips, the prove/verify fuzz plan, and batched checks.
 
 const std = @import("std");
+const builtin = @import("builtin");
+const build_options = @import("build_options");
 const testing = std.testing;
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
@@ -235,6 +237,8 @@ pub fn plan_body(setup: *const Setup, u: *Unstructured) anyerror!void {
 }
 
 test "bulletproofs circuit fuzz plan (minifuzz)" {
+    // Minutes in Debug, so it runs in optimized builds (CI's ReleaseSafe job) or -Dslow-tests.
+    if (builtin.mode == .debug and !build_options.slow_tests) return error.SkipZigTest;
     var setup = try test_setup();
     defer setup.deinit(gpa);
     try minifuzz.run(gpa, @as(*const Setup, &setup), plan_body);
@@ -253,6 +257,8 @@ fn zkc_body(setup: *const Setup, u: *Unstructured) anyerror!void {
 }
 
 test "bulletproofs zkc conversion preserves satisfaction (minifuzz)" {
+    // Minutes in Debug, so it runs in optimized builds (CI's ReleaseSafe job) or -Dslow-tests.
+    if (builtin.mode == .debug and !build_options.slow_tests) return error.SkipZigTest;
     var setup = try test_setup();
     defer setup.deinit(gpa);
     try minifuzz.run(gpa, @as(*const Setup, &setup), zkc_body);

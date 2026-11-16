@@ -259,6 +259,8 @@ fn gen_message(gpa: Allocator, u: *Unstructured) Error!types.Message(MinSig, P) 
 const addressed = "Addresses<\ned25519::PublicKey>";
 
 test "conformance: dkg epoch outcome, participants, and addresses" {
+    // Minutes in Debug, so it runs in optimized builds (CI's ReleaseSafe job) or -Dslow-tests.
+    if (builtin.mode == .debug and !build_options.slow_tests) return error.SkipZigTest;
     const cases = conformance.default_cases;
     try verify(
         "types::conformance::CodecConformance<EpochOutcome>",

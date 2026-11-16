@@ -4,6 +4,8 @@
 //! canonical roots must match the roots rebuilt on reopen.
 
 const std = @import("std");
+const builtin = @import("builtin");
+const build_options = @import("build_options");
 const assert = std.debug.assert;
 const testing = std.testing;
 const Allocator = std.mem.Allocator;
@@ -225,6 +227,8 @@ fn check_key_value_proofs(comptime Db: type, db: *Db) !void {
 
 // Commonware's `test_current_db_key_value_proof`.
 test "current key-value proofs of every active key" {
+    // Minutes in Debug, so it runs in optimized builds (CI's ReleaseSafe job) or -Dslow-tests.
+    if (builtin.mode == .debug and !build_options.slow_tests) return error.SkipZigTest;
     inline for (all_dbs) |Db| {
         var harness = try support.Harness.init(gpa);
         defer harness.deinit();
@@ -314,6 +318,8 @@ fn verify_ranged(
 // Commonware's `test_sync_persists_bitmap_pruning_boundary`, then more writes on the pruned
 // database and another reopen.
 test "current prune and sync persist the bitmap pruning boundary" {
+    // Minutes in Debug, so it runs in optimized builds (CI's ReleaseSafe job) or -Dslow-tests.
+    if (builtin.mode == .debug and !build_options.slow_tests) return error.SkipZigTest;
     inline for (all_dbs) |Db| {
         var harness = try support.Harness.init(gpa);
         defer harness.deinit();
@@ -427,6 +433,8 @@ fn check_random_chains(comptime Db: type, seed: u64) !void {
 }
 
 test "current randomized chains match the rebuilt canonical root" {
+    // Minutes in Debug, so it runs in optimized builds (CI's ReleaseSafe job) or -Dslow-tests.
+    if (builtin.mode == .debug and !build_options.slow_tests) return error.SkipZigTest;
     inline for (all_dbs) |Db| {
         try check_random_chains(Db, 0xc0ffee);
     }

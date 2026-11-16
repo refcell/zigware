@@ -3,6 +3,8 @@
 //! verifies and every tweak (claims, masks, responses, namespace) is rejected.
 
 const std = @import("std");
+const builtin = @import("builtin");
+const build_options = @import("build_options");
 const testing = std.testing;
 const codec = @import("codec");
 const math = @import("math");
@@ -120,6 +122,8 @@ pub fn plan_body(_: void, u: *Unstructured) anyerror!void {
 }
 
 test "pedersen_to_plain fuzz plan (minifuzz)" {
+    // Minutes in Debug, so it runs in optimized builds (CI's ReleaseSafe job) or -Dslow-tests.
+    if (builtin.mode == .debug and !build_options.slow_tests) return error.SkipZigTest;
     try (minifuzz.Builder{}).with_search_limit(64).run(gpa, {}, plan_body);
 }
 
