@@ -6,7 +6,6 @@
 //! must round-trip the same way, and bytes that do not decode must be refused without a crash
 //! or a leak. Beyond commonware's target, the drawn value's encoding is also decoded with two
 //! bytes flipped, which reaches the decoders' later checks far more often than raw bytes.
-//! `BalanceProof` waits on qmdb `current` (docs/lanes/clearing.md).
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -54,6 +53,7 @@ const types = [_]type{
     bajillion.Summary(Sha256),
     bajillion.Payout(PublicKey, u64),
     bajillion.PayoutProof(PublicKey, Digest, u64),
+    bajillion.BalanceProof(Digest, u64),
 };
 
 /// Whether `a` equals `b`, through `T.eql` by value or by pointer.

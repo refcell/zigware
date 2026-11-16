@@ -98,6 +98,66 @@ pub fn PayoutOperation(comptime P: type, comptime A: type) type {
     return qmdb.keyless.Operation(Mmr, qmdb.value.Fixed(Payout(P, A)));
 }
 
+/// Bytes per chunk of the balances database's activity bitmap (commonware `CHUNK`).
+pub const balances_chunk_size: usize = 32;
+
+/// Proof of an account's balance under a balances root (commonware `BalanceProof<D, A>`).
+/// Owns its proof.
+///
+/// A proof reveals the balance, and verifies only for a positive one, because the balances
+/// database holds no zero balance. Verification lands with qmdb `current`'s database; the
+/// codec is here so the type round-trips and matches commonware's conformance hash.
+pub fn BalanceProof(comptime D: type, comptime A: type) type {
+    mod.assert_amount(A);
+    return struct {
+        const Self = @This();
+        pub const Proof = qmdb.current.unordered.proof.constant.KeyValue(
+            storage.mmb.Family,
+            D,
+            balances_chunk_size,
+        );
+
+        /// The account's balance.
+        balance: A,
+        /// Opening of the balance under the balances root.
+        proof: Proof,
+
+        pub fn deinit(self: *Self, gpa: Allocator) void {
+            self.proof.deinit(gpa);
+            self.* = undefined;
+        }
+
+        pub fn eql(a: *const Self, b: *const Self) bool {
+            return a.balance == b.balance and a.proof.eql(b.proof);
+        }
+
+        pub fn write(self: Self, writer: *codec.Writer) void {
+            codec.write(A, self.balance, writer);
+            self.proof.write(writer);
+        }
+
+        pub fn encode_size(self: Self) usize {
+            return codec.fixed_size(A).? + self.proof.encode_size();
+        }
+
+        pub fn read(gpa: Allocator, reader: *codec.Reader, _: void) codec.Error!Self {
+            const balance = try codec.read(A, gpa, reader);
+            const max_digests = merkle.proof.max_proof_digests_per_element;
+            return .{ .balance = balance, .proof = try Proof.read(gpa, reader, max_digests) };
+        }
+
+        pub fn arbitrary(gpa: Allocator, u: *arb.Unstructured) arb.Error!Self {
+            const balance = try arb.value(A, gpa, u);
+            var proof = try Proof.arbitrary(gpa, u);
+            const digests = &proof.proof.range_proof.proof.digests;
+            const max_digests = merkle.proof.max_proof_digests_per_element;
+            if (digests.len > max_digests) digests.* = try gpa.realloc(digests.*, max_digests);
+            assert(digests.len <= max_digests);
+            return .{ .balance = balance, .proof = proof };
+        }
+    };
+}
+
 /// The validators' payout log (commonware `Payouts<E, P, H, S, A>`): a keyless database over
 /// the MMR whose operations are payouts and commits, on a fixed journal.
 pub fn Payouts(comptime P: type, comptime H: type, comptime A: type) type {

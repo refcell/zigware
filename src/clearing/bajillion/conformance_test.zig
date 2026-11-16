@@ -132,4 +132,8 @@ test "conformance: validator" {
         tests ++ "CodecConformance<PayoutProof<PublicKey,Digest,u64>>",
         mod.PayoutProof(PublicKey, Digest, u64),
     );
+    try verify(
+        tests ++ "CodecConformance<BalanceProof<Digest,u64>>",
+        mod.BalanceProof(Digest, u64),
+    );
 }

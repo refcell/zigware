@@ -43,6 +43,19 @@ formatting, and the deterministic runtime for tests. qmdb is only mentioned in c
   `Limits`, `Close(P, O, A)` (`sign`/`assemble` take ownership of the row and withdrawal
   slices; `assemble` returns `Assembled{ close, flows }`; `message`, `matrix_root`,
   `matrix(H, gpa, strategy)`, codec with cfg `Limits`), `AssemblyError`.
+- `summary`: `Processed(D)` (`start`, `next(H, R, requests)`, codec), `Summary(H)` (`genesis(P,
+  A, balances)`, `digest`, `verify(gpa, rng, verifier, certificate, epoch, parent, deposits,
+  forced_withdrawals, strategy)`, codec; a certificate subject: certify it with
+  `cryptography.ed25519.certificate.Scheme(Summary(H), utils.N3f1)`), `CountRange`,
+  `SummaryError`.
+- `validator`: `Payout(P, A)` (`stage(log, payouts)` returns the log's merkleized batch),
+  `Payouts(P, H, A)` (the payout log: `storage.qmdb.keyless.Db` over the MMR on a fixed
+  journal), `PayoutOperation(P, A)`, `PayoutProof(P, D, A)` (`verify(H, root)`, codec, owns
+  its proof), `BalanceProof(D, A)` (codec and arbitrary; `verify` waits on `current`'s
+  database), `Checkpoint(P, H, A)` (`clone`, `deinit`), `Checked(P, H, A)` (`check(O, gpa,
+  close, namespace, operator, parent, queue, strategy)`, commonware's `Close::check`; the
+  close stays the caller's), `CheckError`.
+- `src/clearing/fuzz/{decode,verify}.zig`: the fuzz targets; `src/clearing/benches.zig`.
 
 ## Decisions
 - Errors carry no payload (`WrongEpoch`'s expected/found are dropped), as in other lanes.
@@ -81,12 +94,16 @@ formatting, and the deterministic runtime for tests. qmdb is only mentioned in c
 - [x] validator: Payout, PayoutProof (codec, verify), Checkpoint, `Checked.check` with the
   check tests; Payout and PayoutProof conformance hashes match.
 - [x] validator: `Payouts` (keyless `Db` over the MMR), `Payout.stage`, and the payout-log tests.
-- [ ] validator: BalanceProof, `settle`, `apply`, and the database tests need qmdb `current`
-  (after `any` unordered fixed in storage-qmdb). The check tests build parents without
-  settling until then.
-- [ ] tests.rs ledger vector, and the integration tests (clearing/tests/bajillion).
+- [x] validator: BalanceProof codec and arbitrary on storage's `current` KeyValueProof; its
+  conformance hash matches, so all 19 do.
+- [ ] validator: `BalanceProof.verify`, `Balances`, `settle`, `apply`, `Proposal`, and the
+  database tests need qmdb `current`'s database (after `any` unordered fixed in storage-qmdb).
+  The check tests build parents without settling until then.
+- [ ] tests.rs ledger vector beyond genesis, and the integration tests (clearing/tests/bajillion,
+  about 7.6k lines with the five reference roles); both need the balances database.
 - [x] Fuzz targets `src/clearing/fuzz/{decode,verify}.zig` (commonware clearing/fuzz), seeded
-  in `zig build test` and under `std.testing.fuzz`; BalanceProof joins them with qmdb `current`.
+  in `zig build test` and under `std.testing.fuzz`; the verify target adds BalanceProof with
+  its `verify`.
 - [x] Benches `src/clearing/benches.zig` (zigware's own; commonware's clearing has none):
   `clearing::amounts_root`, `clearing::matrix_open`, `clearing::close_check`.
 
@@ -106,3 +123,5 @@ formatting, and the deterministic runtime for tests. qmdb is only mentioned in c
   in ReleaseSafe soaks.
 - 2026-11-16: benches. ReleaseFast, 256 rows: payment-map root 47 µs, matrix opening and
   verify 1.4 µs, close check 17 ms (about 66 µs per row, mostly the row signature).
+- 2026-11-16: BalanceProof codec on storage's `current` proof codecs; all 19 clearing
+  conformance hashes match commonware.

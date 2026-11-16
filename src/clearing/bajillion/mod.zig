@@ -60,6 +60,7 @@ pub const SummaryError = summary.SummaryError;
 pub const CountRange = summary.CountRange;
 pub const Payout = validator.Payout;
 pub const PayoutProof = validator.PayoutProof;
+pub const BalanceProof = validator.BalanceProof;
 pub const Checkpoint = validator.Checkpoint;
 pub const Checked = validator.Checked;
 pub const CheckError = validator.CheckError;
