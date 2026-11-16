@@ -12,6 +12,7 @@ const p2p = @import("p2p");
 const cryptography = @import("cryptography");
 const resolver = @import("../root.zig");
 const engine_mod = @import("engine.zig");
+const fetcher_mod = @import("fetcher.zig");
 const MockKey = @import("mocks/key.zig").Key;
 const MockConsumer = @import("mocks/consumer.zig").Consumer;
 const MockProducer = @import("mocks/producer.zig").Producer;
@@ -808,6 +809,97 @@ test "deliver receives multiple subscribers" {
     try run(10, struct {
         fn body(io: Io) !void {
             try deliver_subscribers(io, 49, 50);
+        }
+    }.body);
+}
+
+fn now_of(setup: *const Setup) utils.SystemTime {
+    return utils.SystemTime.from_timestamp(Io.Clock.real.now(setup.io));
+}
+
+/// Collects `count` events and checks each key's value is "data for key <key>".
+fn expect_keyed_events(consumer: Consumer, count: usize) !void {
+    var seen: u32 = 0;
+    for (0..count) |_| {
+        var event = try consumer.next_event();
+        defer event.deinit(gpa);
+        var buffer: [32]u8 = undefined;
+        const expected = try std.fmt.bufPrint(&buffer, "data for key {d}", .{event.key.value});
+        try testing.expectEqualStrings(expected, event.value);
+        const bit = @as(u32, 1) << @intCast(event.key.value);
+        try testing.expect(seen & bit == 0);
+        seen |= bit;
+    }
+    try testing.expectEqual(count, @popCount(seen));
+}
+
+test "rate limit spillover" {
+    try run(30, struct {
+        fn body(io: Io) !void {
+            // One request per second per peer.
+            const setup = try Setup.init(io, &.{ 1, 2, 3 }, .{ .quota = p2p.Quota.per_second(1) });
+            defer setup.deinit();
+            try setup.add_link(link, 0, 1);
+            try setup.add_link(link, 0, 2);
+            const entries = .{ .{ 0, "data for key 0" }, .{ 1, "data for key 1" } };
+            const consumer = try setup.make_consumer();
+            const mailbox1 = try setup.spawn(0, consumer, try setup.make_producer(&.{}));
+            _ = try setup.spawn(1, try setup.make_consumer(), try setup.make_producer(&entries));
+            _ = try setup.spawn(2, try setup.make_consumer(), try setup.make_producer(&entries));
+            try setup.sleep(Duration.from_millis(100));
+
+            // Two fetches spill over to the two peers, completing well under a second.
+            const start = now_of(setup);
+            try fetch(mailbox1, 0);
+            try fetch(mailbox1, 1);
+            try expect_keyed_events(consumer, 2);
+            const elapsed = fetcher_mod.duration_since(now_of(setup), start);
+            try testing.expect(elapsed.order(Duration.from_millis(500)) == .lt);
+        }
+    }.body);
+}
+
+test "rate limit retry after reset" {
+    try run(30, struct {
+        fn body(io: Io) !void {
+            const setup = try Setup.init(io, &.{ 1, 2 }, .{ .quota = p2p.Quota.per_second(1) });
+            defer setup.deinit();
+            try setup.add_link(link, 0, 1);
+            const consumer = try setup.make_consumer();
+            const mailbox1 = try setup.spawn(0, consumer, try setup.make_producer(&.{}));
+            const prod2 = try setup.make_producer(&.{
+                .{ 1, "data for key 1" },
+                .{ 2, "data for key 2" },
+                .{ 3, "data for key 3" },
+            });
+            _ = try setup.spawn(1, try setup.make_consumer(), prod2);
+            try setup.sleep(Duration.from_millis(100));
+
+            // Three fetches to one peer at 1/s: the last two wait for the limit to reset.
+            const start = now_of(setup);
+            for ([_]u8{ 1, 2, 3 }) |value| try fetch(mailbox1, value);
+            try expect_keyed_events(consumer, 3);
+            const elapsed = fetcher_mod.duration_since(now_of(setup), start);
+            try testing.expect(elapsed.order(Duration.from_secs(2)) == .gt);
+        }
+    }.body);
+}
+
+test "self exclusion" {
+    try run(10, struct {
+        fn body(io: Io) !void {
+            const setup = try Setup.init(io, &.{ 1, 2 }, .{});
+            defer setup.deinit();
+            try setup.add_link(link, 0, 1);
+            // Both peers have the data; the requester never fetches from itself.
+            const prod1 = try setup.make_producer(&.{.{ 1, "shared data" }});
+            const consumer = try setup.make_consumer();
+            const mailbox1 = try setup.spawn(0, consumer, prod1);
+            const prod2 = try setup.make_producer(&.{.{ 1, "shared data" }});
+            _ = try setup.spawn(1, try setup.make_consumer(), prod2);
+            try setup.sleep(Duration.from_millis(100));
+            try fetch(mailbox1, 1);
+            try expect_event(consumer, 1, "shared data");
         }
     }.body);
 }
