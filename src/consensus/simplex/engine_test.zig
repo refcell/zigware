@@ -63,7 +63,8 @@ const page_size = 1024;
 const page_cache_size = 10;
 
 /// What validator 0 runs: the engine, or one of the Byzantine mocks.
-const Role = enum { honest, conflicter, nuller, impersonator, outdated };
+/// `absent` leaves validator 0 offline until the test starts it.
+const Role = enum { honest, absent, conflicter, nuller, impersonator, outdated };
 
 /// A Byzantine mock on the vote channel; the other channels stay registered and unused.
 const Byzantine = struct {
@@ -79,7 +80,7 @@ const Byzantine = struct {
         _ = ctx;
         const votes = &byzantine.channels[0];
         switch (byzantine.role) {
-            .honest => unreachable, // Proof: only Byzantine roles start this task.
+            .honest, .absent => unreachable, // Proof: only Byzantine roles start this task.
             .conflicter => byzantine.conflicter.run(&votes.sender, &votes.receiver),
             .nuller => byzantine.nuller.run(&votes.sender, &votes.receiver),
             .impersonator => byzantine.impersonator.run(&votes.sender, &votes.receiver),
@@ -99,7 +100,8 @@ const Byzantine = struct {
 
 /// One validator's engine and mocks. Must not move once started.
 const Validator = struct {
-    byzantine: ?*Byzantine = null,
+    state: enum { absent, honest, byzantine },
+    byzantine: *Byzantine,
     application: Application,
     reporter: Reporter,
     page_cache: runtime.buffer.paged.CacheRef,
@@ -117,7 +119,6 @@ const Harness = struct {
     network_task: std.Io.Future((std.Io.Cancelable || Allocator.Error)!void),
     relay: Relay,
     validators: []Validator,
-    started: usize = 0,
     /// Whether honest validators keep votes of finalized views (commonware's Byzantine
     /// tests set it).
     track_historical_votes: bool = false,
@@ -132,8 +133,9 @@ const Harness = struct {
         return harness.network.oracle();
     }
 
-    /// Starts `n` validators, every pair linked by `link`; validator 0 plays `role`.
-    fn start(harness: *Harness, ctx: Context, n: u32, link: Link, role: Role) !void {
+    /// Starts `n` validators, every pair linked by `link` (when given); validator 0 plays
+    /// `role`.
+    fn start(harness: *Harness, ctx: Context, n: u32, link: ?Link, role: Role) !void {
         const io = ctx.io();
         var rng = utils.rng.test_rng();
         harness.* = undefined;
@@ -149,18 +151,18 @@ const Harness = struct {
         harness.network_task = try io.concurrent(Net.run, .{harness.network});
         harness.relay = .init(gpa, io);
         harness.validators = try gpa.alloc(Validator, n);
-        harness.started = 0;
+        for (harness.validators) |*validator| validator.state = .absent;
         const peers = harness.keys();
         _ = harness.oracle().manager().track(0, .init_primary(.init(peers)));
-        try harness.link_all(link, null);
-        harness.track_historical_votes = role != .honest;
+        if (link) |value| try harness.link_all(value, null);
+        harness.track_historical_votes = role != .honest and role != .absent;
         for (harness.validators, peers, 0..) |*validator, key, index| {
+            if (index == 0 and role == .absent) continue;
             if (index == 0 and role != .honest) {
                 try harness.start_byzantine(validator, key, role);
             } else {
-                try harness.start_validator(validator, key, index);
+                try harness.start_validator(index);
             }
-            harness.started += 1;
         }
     }
 
@@ -182,24 +184,29 @@ const Harness = struct {
         byzantine.handle = try harness.ctx.child("byzantine").spawn(Byzantine.run, .{byzantine});
         validator.* = undefined;
         validator.byzantine = byzantine;
+        validator.state = .byzantine;
     }
 
-    /// The validators running the engine.
+    /// The validator at `index` when it runs the engine.
     fn honest(harness: *Harness, index: usize) ?*Validator {
         const validator = &harness.validators[index];
-        return if (validator.byzantine == null) validator else null;
+        return if (validator.state == .honest) validator else null;
     }
 
     fn deinit(harness: *Harness) void {
         // Abort every engine before freeing any mock: live voters relay to all applications.
-        const validators = harness.validators[0..harness.started];
-        for (validators) |*validator| {
-            if (validator.byzantine) |byzantine| byzantine.stop() else abort(validator);
-        }
+        const validators = harness.validators;
+        for (validators) |*validator| switch (validator.state) {
+            .absent => {},
+            .honest => abort(validator),
+            .byzantine => validator.byzantine.stop(),
+        };
         harness.relay.deregister_all();
-        for (validators) |*validator| {
-            if (validator.byzantine) |byzantine| gpa.destroy(byzantine) else stop_actors(validator);
-        }
+        for (validators) |*validator| switch (validator.state) {
+            .absent => {},
+            .honest => stop_actors(validator),
+            .byzantine => gpa.destroy(validator.byzantine),
+        };
         gpa.free(harness.validators);
         harness.relay.deinit();
         harness.network.close();
@@ -207,6 +214,12 @@ const Harness = struct {
         harness.network.deinit();
         harness.fixture.deinit(gpa);
         harness.* = undefined;
+    }
+
+    /// Replaces the link of every ordered pair `restrict` admits (commonware `Update`).
+    fn relink_all(harness: *Harness, link: Link, restrict: ?*const Restrict) !void {
+        try harness.link_all(null, restrict);
+        try harness.link_all(link, restrict);
     }
 
     /// Links (or, with `link == null`, unlinks) every ordered pair `restrict` admits.
@@ -223,10 +236,13 @@ const Harness = struct {
         };
     }
 
-    fn start_validator(harness: *Harness, validator: *Validator, key: Key, index: usize) !void {
+    /// Starts the engine of validator `index`.
+    fn start_validator(harness: *Harness, index: usize) !void {
         const io = harness.ctx.io();
+        const validator = &harness.validators[index];
+        const key = harness.keys()[index];
+        assert(validator.state == .absent);
         validator.* = undefined;
-        validator.byzantine = null;
         validator.handle = null;
         validator.application = try .init(gpa, io, .{
             .relay = &harness.relay,
@@ -250,6 +266,7 @@ const Harness = struct {
         validator.handle = try harness.ctx.child("engine").spawn(Engine.run, .{
             &validator.engine, channels[0], channels[1], channels[2],
         });
+        validator.state = .honest;
     }
 
     /// Waits until every validator finalized `view`.
@@ -522,4 +539,48 @@ fn outdated_scenario(ctx: Context) !void {
 
 test "outdated votes are ignored" {
     _ = try run_seeded(0, outdated_scenario, .{});
+}
+
+fn not_zero(_: usize, a: usize, b: usize) bool {
+    return a != 0 and b != 0;
+}
+
+fn one_not_zero(_: usize, a: usize, b: usize) bool {
+    return (a == 1 or b == 1) and a != 0 and b != 0;
+}
+
+fn zero_not_one(_: usize, a: usize, b: usize) bool {
+    return (a == 0 or b == 0) and a != 1 and b != 1;
+}
+
+fn not_one(_: usize, a: usize, b: usize) bool {
+    return a != 1 and b != 1;
+}
+
+/// commonware `backfill`: validator 0 joins late, after the others accrued nullifications
+/// over slow links, and catches up through the resolver while validator 1 is cut off.
+fn backfill_scenario(ctx: Context) !void {
+    var harness: Harness = undefined;
+    try harness.start(ctx, 4, null, .absent);
+    defer harness.deinit();
+    try harness.link_all(link_ms(10, 1, 1.0), &not_zero);
+    const required = 50;
+    try harness.wait_all(required);
+    // Degrade the online links and let nullifications accrue.
+    const slow = link_ms(3000, 0, 1.0);
+    try harness.relink_all(slow, &not_zero);
+    try ctx.sleep(.fromSeconds(60));
+    // Cut validator 1 off, and link validator 0 to the rest.
+    try harness.link_all(null, &one_not_zero);
+    try harness.link_all(slow, &zero_not_one);
+    try harness.relink_all(link_ms(10, 3, 1.0), &not_one);
+    try harness.start_validator(0);
+    try harness.validators[0].reporter.wait_for_finalized(.new(required));
+    const blocked = try harness.oracle().blocked(gpa);
+    defer gpa.free(blocked);
+    try testing.expectEqual(0, blocked.len);
+}
+
+test "backfill: a late validator catches up through the resolver" {
+    _ = try run_seeded(0, backfill_scenario, .{});
 }
