@@ -94,6 +94,14 @@ encoding parts as soon as `codec` has its core API (see docs/lanes/codec.md).
 - `utils.prefetch`: `prefetch(ptr)`, `prefetch_lines(T, ptr, len, lines_max)` (`@prefetch`),
   `Lookahead.init(distance).advance(T, remaining)`.
 - `utils.NonZeroDuration` (`utils.time`): `init` -> `?NonZeroDuration`, `init_panic`, `get`.
+- `utils.bitmap.Atomic`: `zeroes(gpa, len)`, concurrent `set(bit)` (monotonic),
+  `into_bitmap(gpa)` -> default `BitMap` (consumes), `deinit`.
+- `utils.thread_local`: `threadlocal var slot: Slot(T) = .{}` and `Cached(T).take(&slot,
+  maker)` (`maker.create() !T`, `maker.reset(*T) !void`), guard `.value`, `deinit` returns it.
+- `utils.amount`: `assert_amount(T)` (unsigned ints, `u256` for `U256`), `zero`,
+  `overflowing_add`/`overflowing_sub`, `checked_add`/`checked_sub`.
+- `utils.sync.UpgradableRwLock(T)` over `std.Io.RwLock`/`Mutex`: `read`, `write`, `try_write`,
+  `upgradable_read` -> `upgrade`, `downgrade_to_upgradable`; guards `get`/`deinit`.
 - `utils.Hostname` (`utils.hostname`): validated RFC 1035/1123 hostname stored inline
   (`init`, `literal`, `as_str`, `eql`, `order`, `{f}`, `len_max`, `label_len_max`,
   `max_encode_size` = 258), codec as a `RangeCfg(..=253)` byte string; `hostname.Error`.
@@ -124,6 +132,9 @@ encoding parts as soon as `codec` has its core API (see docs/lanes/codec.md).
   `Eq + Hash + Clone`, including `Arc`s with destructors), so commonware's
   `batch_destructor_can_read_watermark` has no counterpart; guards are (tracker, sequence)
   pairs with per-sequence reference counts instead of per-message `Arc`s.
+- `sync`: commonware's re-exported `parking_lot`/`tokio` locks are `std.Io.Mutex`/`RwLock`/
+  `Condition`; `Exclusive` (a `Sync` marker) and the traced locks (tracing spans) have no Zig
+  counterpart. `Widen` is `@as`, and `max` is `@max`.
 - `src/utils/fuzz.zig` is the utils fuzz driver: a body over `*FuzzRng`, run seeded in
   `zig build test` and under `std.testing.fuzz`.
 
@@ -174,6 +185,6 @@ encoding parts as soon as `codec` has its core API (see docs/lanes/codec.md).
   fuzz, and a tracked model fuzz (watermark and per-batch pending against a model).
 - 2026-11-16: cache model fuzz, Ghost collision churn and ownership, colliding resident keys.
 - 2026-11-16: vec (Bounded, NonEmptyVec with codec and arbitrary) and iter (NonEmpty, zip_eq).
-
 - 2026-11-16: NonZeroDuration, concurrency limiters, prefetch/Lookahead, and the lib_functions,
   net, and sequence fuzz targets.
+- 2026-11-16: bitmap Atomic, thread_local Cached, amount, and sync UpgradableRwLock.

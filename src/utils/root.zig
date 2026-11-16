@@ -69,6 +69,13 @@ pub const concurrency = @import("concurrency.zig");
 
 pub const prefetch = @import("prefetch.zig");
 
+pub const thread_local = @import("thread_local.zig");
+pub const Cached = thread_local.Cached;
+
+pub const amount = @import("amount.zig");
+
+pub const sync = @import("sync.zig");
+
 /// 64-bit golden-ratio-derived odd mixing constant, `floor(2^64 / phi)`.
 pub const GOLDEN_RATIO: u64 = rng.GOLDEN_RATIO;
 
