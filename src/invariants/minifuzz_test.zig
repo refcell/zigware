@@ -73,7 +73,8 @@ test "search_limit_reduces_min_iterations" {
     var calls: u64 = 0;
     const builder = (Builder{}).with_min_iterations(1000).with_search_limit(1).with_seed(0);
     try builder.run(testing.allocator, &calls, body);
-    try testing.expectEqual(@as(u64, 1), calls);
+    // One search try, then one long-input case (as many as the search had tries).
+    try testing.expectEqual(@as(u64, 1 + 1), calls);
 }
 
 test "incorrect_format_does_not_count_as_try" {
@@ -85,7 +86,8 @@ test "incorrect_format_does_not_count_as_try" {
     }.body;
     var calls: u64 = 0;
     try (Builder{}).with_search_limit(1).with_seed(0).run(testing.allocator, &calls, body);
-    try testing.expectEqual(@as(u64, 2), calls);
+    // A rejected input and one counted try, then one long-input case.
+    try testing.expectEqual(@as(u64, 2 + 1), calls);
 }
 
 test "min_iterations_overrides_search_time" {
@@ -121,4 +123,23 @@ test "Branch tokens" {
     );
     try testing.expectEqual(@as(?Branch, null), Branch.parse("0x00"));
     try testing.expectEqual(@as(?Branch, null), Branch.parse("0xzz00002a0000002b00000003"));
+}
+
+test "long-input cases reach what short searches miss, and replay" {
+    // Fails only on inputs of 128 bytes or more, which a 16-try search never builds, since
+    // the body never asks for more data (like a generator that pads with zeros).
+    const body = struct {
+        fn body(_: void, u: *Unstructured) !void {
+            if (u.len() >= 128) return error.TestUnexpectedResult;
+            _ = u.take_rest();
+        }
+    }.body;
+    const builder = (Builder{}).with_search_limit(16).with_seed(0);
+    const failure = try expect_failure(try builder.search(testing.allocator, {}, body));
+    try testing.expect(failure.branch.is_long());
+    var token: [26]u8 = undefined;
+    const text = try std.fmt.bufPrint(&token, "{f}", .{failure.branch});
+    const replay = (Builder{}).with_reproduce(text);
+    const replayed = try expect_failure(try replay.search(testing.allocator, {}, body));
+    try testing.expectEqual(failure.branch, replayed.branch);
 }

@@ -25,6 +25,15 @@
 //! the same strategies and the same ChaCha8 stream as commonware, so a branch token names
 //! the same byte sequences in both.
 //!
+//! After commonware's search passes, minifuzz runs a long-input phase: as many cases as the
+//! search had tries (`long_cases_min` to `long_cases_max`), each a fresh ChaCha8 buffer of
+//! 128, 512, or 2048 bytes in turn. Each branch of the search starts again from 8 bytes and
+//! branch `k` yields `k + 1` samples, so a search of a few dozen tries never sees more than
+//! about 30 bytes, and a body whose generator pads with zeros (like `arbitrary`) never asks
+//! for more: such a body would reach only its first action or two. A long case prints a
+//! token like any failure (its `size` has `long_input_bit` set), so it replays the same way.
+//! This phase is zigware's addition; the search before it is byte-for-byte commonware's.
+//!
 //! Deviations from commonware, all forced by Zig: the default search bound is a case count
 //! (`default_search_limit` times `-Dfuzz-soak`) rather than ten seconds, since time needs an
 //! `std.Io` (`with_search_time` takes one); the default seed is `-Dfuzz-seed` rather than
@@ -48,6 +57,17 @@ pub const env_var = "MINIFUZZ_BRANCH";
 
 /// Cases run by a default `Builder`, before scaling by `-Dfuzz-soak`.
 pub const default_search_limit: u64 = 10_000;
+
+/// `Branch.size` with this bit names long-input case `size & ~long_input_bit` (commonware's
+/// sizes count samples and never get near it).
+pub const long_input_bit: u32 = 1 << 31;
+/// Bounds on the long-input cases after a search, which runs as many as it had tries.
+pub const long_cases_min: u64 = 1;
+pub const long_cases_max: u64 = 256;
+/// The lengths of the long-input cases, in turn.
+const long_input_lens = [_]usize{ 128, 512, 2048 };
+/// Mixed into a long-input case's ChaCha8 seed ("long").
+const long_input_salt: u64 = 0x6c6f_6e67;
 
 /// A point in the search: the seed, a thread (the current ChaCha8 stream), and a size (how
 /// many samples the stream yields before the search moves to the next thread).
@@ -76,6 +96,23 @@ pub const Branch = struct {
 
     pub fn next(self: Branch) Branch {
         return .{ .seed = self.seed, .thread = self.thread +% 1, .size = self.size +| 1 };
+    }
+
+    /// Long-input case `index` of a search that started at `start`.
+    pub fn long(start: Branch, index: u32) Branch {
+        assert(index < long_input_bit);
+        return .{ .seed = start.seed, .thread = start.thread, .size = long_input_bit | index };
+    }
+
+    pub fn is_long(self: Branch) bool {
+        return self.size & long_input_bit != 0;
+    }
+
+    /// The input length of a long-input case.
+    fn long_len(self: Branch) usize {
+        assert(self.is_long());
+        const index = self.size & ~long_input_bit;
+        return long_input_lens[index % long_input_lens.len];
     }
 
     pub fn rng_seed(self: Branch) u64 {
@@ -367,39 +404,92 @@ pub const Builder = struct {
 
     /// Like `run`, but returns how the search ended instead of printing.
     pub fn search(self: Builder, gpa: Allocator, context: anytype, body: anytype) !Outcome {
-        var search_state: Search = .init(self);
-        var sampler: Sampler = try .init(gpa, search_state.branch);
-        defer sampler.deinit(gpa);
-        // Bounded by the search limit or deadline once `min_iterations` tries pass.
-        while (true) {
-            while (try sampler.next(gpa)) |sample| {
-                if (search_state.done()) return .{ .passed = search_state.branch };
-                var u: Unstructured = .init(sample);
-                const started = search_state.now();
-                const result = body(context, &u);
-                search_state.record_case(started);
-                const used = sample.len - u.len();
-                if (result) |_| {
-                    sampler.last_bytes_used = used;
-                    search_state.tries += 1;
-                } else |err| {
-                    const any: anyerror = err;
-                    if (any == error.NotEnoughData) {
-                        try sampler.add_bytes(gpa, true);
-                    } else if (any == error.IncorrectFormat) {
-                        sampler.last_bytes_used = used;
-                    } else return .{ .failed = .{
-                        .branch = search_state.branch,
-                        .err = any,
-                        .sampling = any == error.EmptyChoose,
-                    } };
-                }
-            }
-            search_state.branch = search_state.branch.next();
-            sampler.switch_to(search_state.branch);
+        const first = self.start();
+        if (first.is_long()) {
+            // Replaying a long-input case: run just that case.
+            const failure = try search_long(gpa, context, body, first, 1);
+            return if (failure) |found| .{ .failed = found } else .{ .passed = first };
         }
+        var search_state: Search = .init(self);
+        assert(std.meta.eql(search_state.branch, first));
+        const outcome = try search_samples(gpa, context, body, &search_state);
+        if (outcome == .failed) return outcome;
+        const cases = std.math.clamp(search_state.tries, long_cases_min, long_cases_max);
+        const failure = try search_long(gpa, context, body, .long(first, 0), cases);
+        return if (failure) |found| .{ .failed = found } else outcome;
     }
 };
+
+/// commonware's search: samples from each branch in turn until the search bound.
+fn search_samples(
+    gpa: Allocator,
+    context: anytype,
+    body: anytype,
+    search_state: *Search,
+) !Outcome {
+    assert(search_state.tries == 0);
+    var sampler: Sampler = try .init(gpa, search_state.branch);
+    defer sampler.deinit(gpa);
+    // Bounded by the search limit or deadline once `min_iterations` tries pass.
+    while (true) {
+        while (try sampler.next(gpa)) |sample| {
+            if (search_state.done()) return .{ .passed = search_state.branch };
+            var u: Unstructured = .init(sample);
+            const started = search_state.now();
+            const result = body(context, &u);
+            search_state.record_case(started);
+            const used = sample.len - u.len();
+            if (result) |_| {
+                sampler.last_bytes_used = used;
+                search_state.tries += 1;
+            } else |err| {
+                const any: anyerror = err;
+                if (any == error.NotEnoughData) {
+                    try sampler.add_bytes(gpa, true);
+                } else if (any == error.IncorrectFormat) {
+                    sampler.last_bytes_used = used;
+                } else return .{ .failed = .{
+                    .branch = search_state.branch,
+                    .err = any,
+                    .sampling = any == error.EmptyChoose,
+                } };
+            }
+        }
+        search_state.branch = search_state.branch.next();
+        sampler.switch_to(search_state.branch);
+    }
+}
+
+/// Runs `cases` long-input cases from `first`, each a fresh ChaCha8 buffer; returns the
+/// first failure. Inputs that run short or are rejected are skipped.
+fn search_long(
+    gpa: Allocator,
+    context: anytype,
+    body: anytype,
+    first: Branch,
+    cases: u64,
+) !?Failure {
+    assert(first.is_long());
+    assert(cases >= 1 and cases <= long_cases_max);
+    const buffer = try gpa.alloc(u8, std.mem.max(usize, &long_input_lens));
+    defer gpa.free(buffer);
+    var branch = first;
+    for (0..cases) |case| {
+        if (case > 0) branch = .long(first, (branch.size & ~long_input_bit) + 1);
+        const input = buffer[0..branch.long_len()];
+        // Mixed so the stream differs from the search branch with the same seed.
+        var rng: Rng = .init((branch.rng_seed() ^ long_input_salt) +% branch.size);
+        rng.fill_bytes(input);
+        var u: Unstructured = .init(input);
+        body(context, &u) catch |err| {
+            const any: anyerror = err;
+            if (any == error.NotEnoughData or any == error.IncorrectFormat) continue;
+            return .{ .branch = branch, .err = any, .sampling = any == error.EmptyChoose };
+        };
+    }
+    assert(branch.is_long());
+    return null;
+}
 
 /// The progress of one `Builder.search`.
 const Search = struct {

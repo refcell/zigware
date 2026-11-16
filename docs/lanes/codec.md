@@ -121,6 +121,10 @@ The body fails by returning an error (use `testing.expect*`, not `assert`);
 `error.NotEnoughData` asks for more input and `error.IncorrectFormat` rejects it. A failure
 prints `failure (MINIFUZZ_BRANCH = 0x...)`; replay one test with `with_reproduce`, or all with
 `zig build test -Dminifuzz-branch=0x...`.
+After the search passes, minifuzz runs as many long-input cases (128, 512, and 2048 random
+bytes in turn, at most `long_cases_max`) as the search had tries, so bodies whose generators
+pad with zeros reach their later actions. A long case's token has `long_input_bit` set in its
+size and replays the same way.
 
 `Unstructured` (arbitrary 1.4, same bytes to same values): `arbitrary(T)` for bool, ints,
 floats, arrays, optionals, structs/tuples, enums (`derive` scaling), or `T.arbitrary(u)`;
