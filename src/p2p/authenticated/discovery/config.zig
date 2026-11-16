@@ -9,6 +9,7 @@ const std = @import("std");
 const assert = std.debug.assert;
 const utils = @import("utils");
 const traces = @import("runtime").telemetry.traces;
+const Resolver = @import("runtime").resolver.Resolver;
 const p2p_types = @import("../../types.zig");
 const rate_limit = @import("../../rate_limit.zig");
 const types = @import("types.zig");
@@ -81,6 +82,10 @@ pub fn Config(comptime U: type) type {
         /// Where the network's tracing events go (commonware's `tracing` subscriber); each part
         /// emits under its commonware module path. Set it from the runtime context's tracer.
         tracer: traces.Tracer = .none,
+        /// Resolves DNS ingress before dialing (commonware's runtime `Resolver`): the
+        /// deterministic runner's `dns.resolver()` or the production runner's resolver. Without
+        /// one, DNS ingress is never dialed.
+        resolver: ?Resolver = null,
 
         /// The fields every constructor sets the same way.
         pub const Base = struct {

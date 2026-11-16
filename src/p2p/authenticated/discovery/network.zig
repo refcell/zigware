@@ -593,11 +593,42 @@ pub fn Network(comptime U: type, comptime Transport: type) type {
             return target;
         }
 
+        /// The address to dial for `ingress` (commonware `Ingress::resolve_filtered`, then a
+        /// random choice): a socket as is, or one of a host's resolved addresses at its port,
+        /// leaving out private addresses unless allowed. Null when none remains.
+        fn resolve(network: *Self, ingress: Ingress) Io.Cancelable!?IpAddress {
+            const allow_private_ips = network.config.allow_private_ips;
+            const dns = switch (ingress) {
+                .socket => |socket| {
+                    if (!allow_private_ips and !utils.net.is_global(socket.ip)) return null;
+                    return to_address(socket);
+                },
+                .dns => |dns| dns,
+            };
+            const resolver = network.config.resolver orelse return null;
+            const ips = resolver.resolve(network.gpa, dns.host.as_str()) catch |err| {
+                if (err == error.Canceled) return error.Canceled;
+                return null;
+            };
+            defer network.gpa.free(ips);
+            var kept: usize = 0;
+            for (ips) |ip| {
+                if (!allow_private_ips and !utils.net.is_global(ip)) continue;
+                ips[kept] = ip;
+                kept += 1;
+            }
+            if (kept == 0) return null;
+            const rng: IoRng = .{ .io = network.io };
+            const index: usize = @intCast((@as(u128, rng.next_u64()) * kept) >> 64);
+            assert(index < kept);
+            return to_address(.{ .ip = ips[index], .port = dns.port });
+        }
+
         fn dial_peer(network: *Self, metadata: Metadata) Io.Cancelable!void {
             const target = metadata.dialer;
             const tracer = network.tracers.dialer;
             const fields = .{ .peer = target.peer, .ingress = target.ingress };
-            const address = resolve(target.ingress, network.config.allow_private_ips) orelse {
+            const address = try network.resolve(target.ingress) orelse {
                 const message = "failed to resolve or no valid addresses";
                 tracer.event(.debug, message, .{ .ingress = target.ingress });
                 network.tracker.release(metadata);
@@ -627,18 +658,6 @@ pub fn Network(comptime U: type, comptime Transport: type) type {
             tracer.event(.debug, "upgraded connection", fields);
             return network.serve(target.peer, &upgraded, metadata);
         }
-    };
-}
-
-/// The address to dial for `ingress`. DNS ingress needs a resolver, which the runtime does
-/// not provide yet, so it is never dialed.
-fn resolve(ingress: Ingress, allow_private_ips: bool) ?IpAddress {
-    return switch (ingress) {
-        .socket => |socket| {
-            if (!allow_private_ips and !utils.net.is_global(socket.ip)) return null;
-            return to_address(socket);
-        },
-        .dns => null,
     };
 }
 

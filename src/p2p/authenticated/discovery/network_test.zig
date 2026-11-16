@@ -1252,3 +1252,199 @@ test "the network emits commonware's tracing events" {
     try debug.expect_event({}, is_listener_handshake);
     try testing.expectEqual(@as(u64, 0), collector.dropped);
 }
+
+const Dns = runtime.resolver.Dns;
+
+/// `run_deterministic` that also passes the runner's DNS table after the metrics scope.
+fn run_with_dns(seed: u64, comptime function: anytype, args: anytype) !struct { [8]u8, u64 } {
+    const timeout_ns = 600 * std.time.ns_per_s;
+    const config: runtime.deterministic.Config = .{ .seed = seed, .timeout_ns = timeout_ns };
+    var runner = try runtime.deterministic.Runner.init(gpa, config);
+    defer runner.deinit();
+    const args_all = .{ runner.io(), runner.network(), runner.metrics(), &runner.dns } ++ args;
+    try (try runner.start(function, args_all));
+    return .{ runner.auditor.state(), runner.now_ns() };
+}
+
+fn dns_ingress(comptime host: []const u8, port: u16) p2p.Ingress {
+    return .{ .dns = .{ .host = utils.Hostname.literal(host), .port = port } };
+}
+
+fn localhost() codec.IpAddr {
+    return .{ .v4 = codec.Ipv4.init(127, 0, 0, 1) };
+}
+
+/// The identities of peers `0..keys.len`, and the same sorted.
+fn dns_keys(keys: []PublicKey, sorted: []PublicKey) void {
+    for (keys, 0..) |*key, index| key.* = PrivateKey.from_seed(index).public_key();
+    @memcpy(sorted, keys);
+    std.sort.pdq(PublicKey, sorted, {}, PublicKey.less_than);
+}
+
+/// Starts peer `index` on `base_port + index`, resolving through `dns`.
+fn start_dns_node(
+    io: Io,
+    transport: *Transport,
+    scope: metrics.Scope,
+    dns: *Dns,
+    sorted: []const PublicKey,
+    index: usize,
+    bootstrappers: []const Bootstrapper,
+    allow_private_ips: bool,
+) !Node {
+    const port = base_port + @as(u16, @intCast(index));
+    var config = peer_config(index, port, bootstrappers);
+    config.resolver = dns.resolver();
+    config.allow_private_ips = allow_private_ips;
+    return start_node(io, transport, node_scope(scope, index), config, sorted, .per_second(100));
+}
+
+/// commonware `run_dns_connectivity`: peers 1 and 2 find peer 0 through `boot.local`.
+fn dns_connectivity(io: Io, transport: *Transport, scope: metrics.Scope, dns: *Dns) !void {
+    const n = 3;
+    try dns.register("boot.local", &.{localhost()});
+    var keys: [n]PublicKey = undefined;
+    var sorted: [n]PublicKey = undefined;
+    dns_keys(&keys, &sorted);
+    const bootstrap = [_]Bootstrapper{.{
+        .peer = keys[0],
+        .ingress = dns_ingress("boot.local", base_port),
+    }};
+    var nodes: [n]Node = undefined;
+    var started: usize = 0;
+    defer stop_nodes(io, nodes[0..started]);
+    for (&nodes, 0..) |*node, index| {
+        const bootstrappers: []const Bootstrapper = if (index == 0) &.{} else &bootstrap;
+        node.* = try start_dns_node(io, transport, scope, dns, &sorted, index, bootstrappers, true);
+        started += 1;
+    }
+    try expect_full_connectivity(io, &keys, &nodes);
+    const text = try scope.encode(gpa);
+    defer gpa.free(text);
+    try expect_no_rate_limiting(text);
+}
+
+test "peers bootstrap through a DNS name" {
+    // commonware `test_dns_bootstrapper_resolution`.
+    _ = try run_with_dns(0, dns_connectivity, .{});
+}
+
+test "DNS bootstrapping is deterministic" {
+    // commonware `test_dns_resolution_determinism`.
+    const first = try run_with_dns(42, dns_connectivity, .{});
+    const second = try run_with_dns(42, dns_connectivity, .{});
+    try testing.expectEqualSlices(u8, &first[0], &second[0]);
+    try testing.expectEqual(first[1], second[1]);
+}
+
+fn recipients_of_all(node: *Node, keys: []const PublicKey, me: usize) !usize {
+    const sent = try node.registered.sender.send(.all, &.{&keys[me].key.bytes}, true);
+    defer gpa.free(sent);
+    return sent.len;
+}
+
+fn dns_failure_then_success(io: Io, transport: *Transport, scope: metrics.Scope, dns: *Dns) !void {
+    var keys: [2]PublicKey = undefined;
+    var sorted: [2]PublicKey = undefined;
+    dns_keys(&keys, &sorted);
+    const bootstrap = [_]Bootstrapper{.{
+        .peer = keys[0],
+        .ingress = dns_ingress("boot.local", base_port),
+    }};
+    var nodes: [2]Node = undefined;
+    var started: usize = 0;
+    defer stop_nodes(io, nodes[0..started]);
+    nodes[0] = try start_dns_node(io, transport, scope, dns, &sorted, 0, &.{}, true);
+    started += 1;
+    nodes[1] = try start_dns_node(io, transport, scope, dns, &sorted, 1, &bootstrap, true);
+    started += 1;
+    // `boot.local` resolves to nothing yet, so peer 1 cannot reach its bootstrapper.
+    try io.sleep(.fromSeconds(2), .real);
+    try testing.expectEqual(0, try recipients_of_all(&nodes[0], &keys, 0));
+    try dns.register("boot.local", &.{localhost()});
+    try expect_full_connectivity(io, &keys, &nodes);
+}
+
+test "a bootstrapper whose name resolves later is dialed once it does" {
+    // commonware `test_dns_resolution_failure_then_success`.
+    _ = try run_with_dns(0, dns_failure_then_success, .{});
+}
+
+fn dns_private_ip_not_dialed(io: Io, transport: *Transport, scope: metrics.Scope, dns: *Dns) !void {
+    try dns.register("boot.local", &.{localhost()});
+    var keys: [2]PublicKey = undefined;
+    var sorted: [2]PublicKey = undefined;
+    dns_keys(&keys, &sorted);
+    const bootstrap = [_]Bootstrapper{.{
+        .peer = keys[0],
+        .ingress = dns_ingress("boot.local", base_port),
+    }};
+    var nodes: [2]Node = undefined;
+    var started: usize = 0;
+    defer stop_nodes(io, nodes[0..started]);
+    nodes[0] = try start_dns_node(io, transport, scope, dns, &sorted, 0, &.{}, true);
+    started += 1;
+    // Peer 1 refuses private addresses, and its bootstrapper resolves only to loopback.
+    nodes[1] = try start_dns_node(io, transport, scope, dns, &sorted, 1, &bootstrap, false);
+    started += 1;
+    try io.sleep(.fromSeconds(5), .real);
+    try testing.expectEqual(0, try recipients_of_all(&nodes[1], &keys, 1));
+    try io.sleep(.fromSeconds(1), .real);
+    try testing.expectError(error.Empty, nodes[0].registered.receiver.try_recv());
+}
+
+test "a name resolving only to private addresses is not dialed" {
+    // commonware `test_dns_resolving_to_private_ip_not_dialed`.
+    _ = try run_with_dns(0, dns_private_ip_not_dialed, .{});
+}
+
+/// `127.0.0.<base + 1..3>` (nobody listens there), then loopback, where the peer listens.
+fn mixed_ips(base: u8) [4]codec.IpAddr {
+    var ips: [4]codec.IpAddr = undefined;
+    for (ips[0..3], 1..) |*ip, offset| {
+        ip.* = .{ .v4 = codec.Ipv4.init(127, 0, 0, base + @as(u8, @intCast(offset))) };
+    }
+    ips[3] = localhost();
+    return ips;
+}
+
+fn dns_mixed_ips(io: Io, transport: *Transport, scope: metrics.Scope, dns: *Dns) !void {
+    try dns.register("peer-0.local", &mixed_ips(100));
+    try dns.register("peer-1.local", &mixed_ips(110));
+    var keys: [2]PublicKey = undefined;
+    var sorted: [2]PublicKey = undefined;
+    dns_keys(&keys, &sorted);
+    const port_1 = base_port + 1;
+    const bootstrap_0 = [_]Bootstrapper{.{
+        .peer = keys[1],
+        .ingress = dns_ingress("peer-1.local", port_1),
+    }};
+    const bootstrap_1 = [_]Bootstrapper{.{
+        .peer = keys[0],
+        .ingress = dns_ingress("peer-0.local", base_port),
+    }};
+    var nodes: [2]Node = undefined;
+    var started: usize = 0;
+    defer stop_nodes(io, nodes[0..started]);
+    nodes[0] = try start_dns_node(io, transport, scope, dns, &sorted, 0, &bootstrap_0, true);
+    started += 1;
+    nodes[1] = try start_dns_node(io, transport, scope, dns, &sorted, 1, &bootstrap_1, true);
+    started += 1;
+    // Dials pick a resolved address at random; the peers connect once a dial picks loopback.
+    for (0..1_200) |_| {
+        _ = try recipients_of_all(&nodes[1], &keys, 1);
+        try io.sleep(.fromMilliseconds(100), .real);
+        var message = nodes[0].registered.receiver.try_recv() catch continue;
+        defer message.deinit();
+        try testing.expect(message.peer.eql(keys[1]));
+        try testing.expectEqualSlices(u8, &keys[1].key.bytes, message.payload);
+        return;
+    }
+    return error.TestUnexpectedResult;
+}
+
+test "peers connect through names that also resolve to dead addresses" {
+    // commonware `test_dns_mixed_ips_connectivity` (seeds 0..25; fewer in Debug).
+    const seeds: u64 = if (peers_full) 25 else 3;
+    for (0..seeds) |seed| _ = try run_with_dns(seed, dns_mixed_ips, .{});
+}

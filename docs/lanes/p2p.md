@@ -94,7 +94,10 @@ handshake and the runtime's network, which the actor-stream and runtime lanes ar
   tracing events, each under its commonware module path (`commonware_p2p::authenticated::
   discovery::{network, actors::listener, actors::dialer, actors::spawner::actor,
   actors::peer::actor, actors::tracker::directory}`). `p2p.Ingress` formats like Rust's
-  `Debug` (`Socket(1.2.3.4:5)`, `Dns { host: Hostname("x"), port: 5 }`).
+  `Debug` (`Socket(1.2.3.4:5)`, `Dns { host: Hostname("x"), port: 5 }`). `Net.Config.resolver`
+  (`?runtime.resolver.Resolver`: `runner.dns.resolver()` on the deterministic runner, the
+  production runner's system resolver) resolves DNS ingress before dialing; without it DNS
+  ingress is never dialed.
 - `authenticated.lookup.Network(U, Transport)` (parallel lane): like discovery's, with
   `Net.Config.local/recommended(.{ upgrader, namespace, listen, max_peers_per_set,
   max_message_size, mailbox_size })`, `create(gpa, io, *transport, scope, config)`,
@@ -212,8 +215,8 @@ handshake and the runtime's network, which the actor-stream and runtime lanes ar
   fuzz soak: 100 peers hold about 10,000 connections and 3 GB in one process).
 - [x] discovery mod.rs tests: restarts (many, simultaneous, new address that must be dialed
   by the other side), duplicate addresses (disconnected over 25 seeds, connected).
-- [ ] discovery mod.rs tests: DNS bootstrappers and resolution (after the runtime has a
-  resolver).
+- [x] discovery: DNS ingress dialing through `Config.resolver`, with the mod.rs DNS tests
+  (bootstrapper resolution, determinism, failure then success, private IPs, mixed IPs).
 - [x] discovery: tracing events at commonware's sites (runtime.telemetry.traces).
 - [x] lookup (parallel lane): tracker, peer, dialer, listener, Network with Config and Oracle,
   commonware's mod.rs tests (but DNS, see decisions), and the directory's metrics.
@@ -266,3 +269,5 @@ handshake and the runtime's network, which the actor-stream and runtime lanes ar
   tracing events.
 - 2026-11-16: simulated channel, link, payload-limit, burst-order, subscription, and
   clean-shutdown tests.
+- 2026-11-16: discovery dials DNS ingress through the runtime resolver; DNS tests; slow
+  discovery and transmitter tests shrink in Debug.
