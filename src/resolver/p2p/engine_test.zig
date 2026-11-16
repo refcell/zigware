@@ -75,6 +75,8 @@ pub fn SetupWith(comptime C: type) type {
         peer_count: usize = 0,
         connections: [peers_max]?Net.Registered = @splat(null),
         engines: [peers_max]?EngineT.Spawned = @splat(null),
+        /// Engines aborted with `stop`; their mailboxes stay usable (sends report closed).
+        stopped: [peers_max]bool = @splat(false),
         consumers: std.ArrayList(C) = .empty,
         producers: std.ArrayList(Producer) = .empty,
 
@@ -116,10 +118,14 @@ pub fn SetupWith(comptime C: type) type {
         }
 
         pub fn deinit(setup: *Self) void {
-            for (&setup.engines) |*slot| {
+            for (&setup.engines, setup.stopped) |*slot, stopped| {
                 const spawned = &(slot.* orelse continue);
                 spawned.mailbox.deinit();
-                spawned.future.await(setup.io) catch |err| std.debug.panic("engine: {t}", .{err});
+                if (!stopped) {
+                    spawned.future.await(setup.io) catch |err| {
+                        std.debug.panic("engine: {t}", .{err});
+                    };
+                }
                 slot.* = null;
             }
             for (&setup.connections) |*slot| if (slot.*) |*connection| connection.deinit();
@@ -230,6 +236,15 @@ pub fn SetupWith(comptime C: type) type {
                 .priority_responses = false,
             }, connection.sender, connection.receiver);
             return &setup.engines[index].?.mailbox;
+        }
+
+        /// Aborts peer `index`'s engine (commonware `Handle::abort`): its task is canceled
+        /// and the engine frees everything it owns.
+        pub fn stop(setup: *Self, index: usize) void {
+            const spawned = &setup.engines[index].?;
+            assert(!setup.stopped[index]);
+            spawned.future.cancel(setup.io) catch {};
+            setup.stopped[index] = true;
         }
 
         pub fn sleep(setup: *const Self, duration: Duration) !void {
@@ -1065,4 +1080,63 @@ test "secondary peer requests are served" {
             try expect_event(consumer, 9, "served to secondary");
         }
     }.body);
+}
+
+test "operations after shutdown do not panic" {
+    try run(10, struct {
+        fn body(io: Io) !void {
+            const setup = try Setup.init(io, &.{ 1, 2 }, .{});
+            defer setup.deinit();
+            try setup.add_link(link, 0, 1);
+            const consumer = try setup.make_consumer();
+            const mailbox1 = try setup.spawn(0, consumer, try setup.make_producer(&.{}));
+            const prod2 = try setup.make_producer(&.{.{ 1, "data for key 1" }});
+            _ = try setup.spawn(1, try setup.make_consumer(), prod2);
+            try fetch(mailbox1, 1);
+            try expect_event(consumer, 1, "data for key 1");
+
+            setup.stop(0);
+            setup.stop(1);
+            try setup.sleep(Duration.from_millis(100));
+            // Every mailbox operation reports a closed engine instead of failing.
+            try fetch(mailbox1, 2);
+            try retain_except(mailbox1, 2);
+            const keep_all = Predicate.init({}, struct {
+                fn keep(_: void, _: MockKey, _: void) bool {
+                    return true;
+                }
+            }.keep);
+            _ = try mailbox1.retain(keep_all);
+            try fetch_targeted(setup, mailbox1, 3, &.{1});
+        }
+    }.body);
+}
+
+fn clean_shutdown(io: Io) !void {
+    const setup = try Setup.init(io, &.{ 1, 2 }, .{});
+    defer setup.deinit();
+    try setup.add_link(link, 0, 1);
+    const consumer = try setup.make_consumer();
+    const mailbox1 = try setup.spawn(0, consumer, try setup.make_producer(&.{}));
+    const prod2 = try setup.make_producer(&.{.{ 1, "data for key 1" }});
+    _ = try setup.spawn(1, try setup.make_consumer(), prod2);
+    try setup.sleep(Duration.from_millis(100));
+    try fetch(mailbox1, 1);
+    try expect_event(consumer, 1, "data for key 1");
+    // Aborting frees every engine resource; testing.allocator reports any leak, and the
+    // runner returns only once no task is left running.
+    setup.stop(0);
+    setup.stop(1);
+    try setup.sleep(Duration.from_millis(100));
+}
+
+test "clean shutdown" {
+    for (0..25) |seed| {
+        var runner = try runtime.deterministic.Runner.init(gpa, .{
+            .seed = seed,
+            .timeout_ns = 30 * std.time.ns_per_s,
+        });
+        defer runner.deinit();
+        try try runner.start(clean_shutdown, .{runner.io()});
+    }
 }
