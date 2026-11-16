@@ -7,14 +7,14 @@
 //! without a pass over the live entries: each retired slot names the key whose positions lose
 //! it. Positions never indexed hold a copy of a neighboring key and retire nothing.
 //!
-//! Commonware stores only positions, in `commonware_utils::handles::Table`, a hash table that
-//! rehashes through the ring. Until the utils lane ports that table, the positions live in a
-//! hash map from translated key to its positions; results are the same.
+//! As in commonware, the table holds only positions, in `utils.handles.Table`, under the hash of
+//! their translated key. It stores no keys: a lookup confirms each candidate position against
+//! its ring slot, and growth rehashes each held position through the ring.
 
 const std = @import("std");
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
-const storage = @import("storage.zig");
+const handles = @import("utils").handles;
 const translator_module = @import("../translator.zig");
 
 /// Positions of retained keys by translated key.
@@ -22,58 +22,73 @@ pub fn Index(comptime T: type) type {
     translator_module.check(T);
     return struct {
         const Self = @This();
-        const Positions = std.ArrayList(u64);
-        const Table = std.HashMapUnmanaged(T.Key, Positions, storage.Context(T), 80);
 
         gpa: Allocator,
         translator: T,
-        table: Table = .empty,
+        /// Every indexed position, under the hash of its translated key.
+        table: handles.Table(u64) = .empty,
         /// The translated key at each position from `start` through the last indexed one.
+        /// Positions never indexed hold a copy of some key that is never resolved.
         keys: std.Deque(T.Key) = .empty,
         /// Positions below this were never indexed or have been retired.
         start: u64,
-        /// Indexed positions (commonware's `items`).
-        count: u64 = 0,
-        /// Positions retired by `prune` (commonware's `pruned`).
+        /// Positions retired by `prune` (commonware's `pruned` counter).
         pruned: u64 = 0,
 
         /// An empty index for positions at or above `start`, with room for `capacity` positions
-        /// before the key ring grows.
+        /// before the table or the key ring grows.
         pub fn init(gpa: Allocator, translator: T, start: u64, capacity: usize) !Self {
-            var self: Self = .{ .gpa = gpa, .translator = translator, .start = start };
+            var table: handles.Table(u64) = try .init_capacity(gpa, capacity);
+            errdefer table.deinit(gpa);
+            var self: Self = .{
+                .gpa = gpa,
+                .translator = translator,
+                .table = table,
+                .start = start,
+            };
             try self.keys.ensureTotalCapacity(gpa, capacity);
+            assert(self.table.capacity() >= capacity);
+            assert(self.is_empty());
             return self;
         }
 
         pub fn deinit(self: *Self) void {
-            var lists = self.table.valueIterator();
-            while (lists.next()) |list| list.deinit(self.gpa);
             self.table.deinit(self.gpa);
             self.keys.deinit(self.gpa);
             self.* = undefined;
         }
 
-        fn context(self: *const Self) storage.Context(T) {
-            return .{ .translator = self.translator };
-        }
-
         fn offset(self: *const Self, position: u64) usize {
             assert(position >= self.start); // Retained positions are at or above the start.
-            return @intCast(position - self.start);
+            const result: usize = @intCast(position - self.start);
+            assert(self.start + result == position);
+            return result;
         }
+
+        /// The translated key at `position`, which must be within the ring.
+        fn key_at(self: *const Self, position: u64) T.Key {
+            const slot = self.offset(position);
+            assert(slot < self.keys.len);
+            return self.keys.at(slot);
+        }
+
+        /// Resolves a held position back to its key's hash when the table grows.
+        const Rehash = struct {
+            index: *const Self,
+
+            pub fn rehash(ctx: Rehash, position: u64) u64 {
+                return ctx.index.translator.hash(ctx.index.key_at(position));
+            }
+        };
 
         /// Indexes `key` at `position`, which must be at or above the start and not indexed.
         pub fn insert(self: *Self, key: []const u8, position: u64) Allocator.Error!void {
             assert(position >= self.start); // position must be at or above the index start
             const translated = self.translator.transform(key);
-            const entry = try self.table.getOrPutContext(self.gpa, translated, self.context());
-            if (!entry.found_existing) entry.value_ptr.* = .empty;
-            errdefer if (!entry.found_existing) {
-                assert(self.table.removeContext(translated, self.context()));
-            };
-            try entry.value_ptr.ensureUnusedCapacity(self.gpa, 1);
+            const len_before = self.table.len;
             // Record the key in the ring, extending it through this position (filling skipped
-            // slots with this key) when the position is further ahead.
+            // slots with this key) when the position is further ahead. A failed table insert
+            // below leaves only unindexed slots changed, which retire nothing.
             const slot = self.offset(position);
             if (slot < self.keys.len) {
                 self.keys.atPtr(slot).* = translated;
@@ -82,53 +97,61 @@ pub fn Index(comptime T: type) type {
                 try self.keys.ensureUnusedCapacity(self.gpa, missing);
                 for (0..missing) |_| self.keys.pushBackAssumeCapacity(translated);
             }
-            entry.value_ptr.appendAssumeCapacity(position);
-            self.count += 1;
+            const hash = self.translator.hash(translated);
+            try self.table.insert(self.gpa, hash, position, Rehash{ .index = self });
             assert(self.keys.len > slot);
+            assert(self.table.len == len_before + 1);
         }
 
-        /// The positions indexed under `key`'s translated key, in insertion order.
-        pub fn get(self: *const Self, key: []const u8) []const u64 {
+        /// The positions indexed under a translated key, in no particular order.
+        pub const Positions = struct {
+            index: *const Self,
+            translated: T.Key,
+            candidates: handles.Table(u64).Candidates,
+
+            pub fn next(it: *Positions) ?u64 {
+                while (it.candidates.next()) |position| {
+                    assert(position >= it.index.start);
+                    if (T.eql(it.index.key_at(position), it.translated)) return position;
+                }
+                return null;
+            }
+        };
+
+        /// The indexed positions whose translated key is that of `key`, in no particular order.
+        pub fn get(self: *const Self, key: []const u8) Positions {
             const translated = self.translator.transform(key);
-            const list = self.table.getPtrContext(translated, self.context()) orelse return &.{};
-            return list.items;
+            const hash = self.translator.hash(translated);
+            assert(self.table.len <= self.keys.len);
+            return .{ .index = self, .translated = translated, .candidates = self.table.get(hash) };
         }
 
         /// Retires every indexed position below `start`.
         pub fn prune(self: *Self, start: u64) void {
             if (start <= self.start) return;
+            // Remove each retired position under the key its slot holds. A slot that was never
+            // indexed holds a key whose entries all carry other positions, so it removes nothing.
             const retired = @min(self.offset(start), self.keys.len);
+            const len_before = self.table.len;
             var removed: u64 = 0;
             for (0..retired) |slot| {
                 const key = self.keys.popFront().?;
-                removed += @intFromBool(self.remove_position(key, self.start + slot));
+                const hash = self.translator.hash(key);
+                removed += @intFromBool(self.table.remove(hash, self.start + slot));
             }
             self.start = start;
-            assert(removed <= self.count);
-            self.count -= removed;
             self.pruned += removed;
-        }
-
-        /// Removes `position` from `key`'s positions; false if it is not among them.
-        fn remove_position(self: *Self, key: T.Key, position: u64) bool {
-            const ctx = self.context();
-            const list = self.table.getPtrContext(key, ctx) orelse return false;
-            const at = std.mem.indexOfScalar(u64, list.items, position) orelse return false;
-            _ = list.orderedRemove(at);
-            if (list.items.len == 0) {
-                list.deinit(self.gpa);
-                assert(self.table.removeContext(key, ctx));
-            }
-            return true;
+            assert(self.table.len + removed == len_before);
+            assert(self.table.len <= self.keys.len);
         }
 
         /// The number of indexed positions.
         pub fn len(self: *const Self) u64 {
-            return self.count;
+            return self.table.len;
         }
 
         pub fn is_empty(self: *const Self) bool {
-            return self.count == 0;
+            return self.table.len == 0;
         }
     };
 }
@@ -137,10 +160,12 @@ const testing = std.testing;
 const test_gpa = testing.allocator;
 
 fn expect_positions(index: anytype, key: []const u8, expected: []const u64) !void {
-    const actual = try test_gpa.dupe(u64, index.get(key));
-    defer test_gpa.free(actual);
-    std.mem.sort(u64, actual, {}, std.sort.asc(u64));
-    try testing.expectEqualSlices(u64, expected, actual);
+    var actual: std.ArrayList(u64) = .empty;
+    defer actual.deinit(test_gpa);
+    var positions = index.get(key);
+    while (positions.next()) |position| try actual.append(test_gpa, position);
+    std.mem.sort(u64, actual.items, {}, std.sort.asc(u64));
+    try testing.expectEqualSlices(u64, expected, actual.items);
 }
 
 test "get confirms translated key" {
@@ -157,7 +182,7 @@ test "get confirms translated key" {
     try testing.expectEqual(@as(u64, 3), index.len());
 }
 
-test "get rejects keys sharing a hash slot and fingerprint" {
+test "get rejects candidates sharing slot and fingerprint" {
     // The golden ratio's inverse mod 2^64: adding `inverse << 16` to a key adds `1 << 16` to
     // its hash, so commonware's table yields each key as a candidate for the other.
     const inverse: u64 = 0xf1de_83e1_9937_733d;
@@ -232,11 +257,13 @@ fn growth_key(i: u32) [3]u8 {
 }
 
 fn contains(index: anytype, key: []const u8, position: u64) bool {
-    return std.mem.indexOfScalar(u64, index.get(key), position) != null;
+    var positions = index.get(key);
+    while (positions.next()) |candidate| if (candidate == position) return true;
+    return false;
 }
 
-test "growth keeps every position" {
-    // Four positions per translated key under TwoCap.
+test "growth rehashes through the keys" {
+    // Enough keys to grow the table several times, four per translated key under TwoCap.
     var index = try Index(translator_module.TwoCap).init(test_gpa, .{}, 0, 0);
     defer index.deinit();
     for (0..20_000) |i| try index.insert(&growth_key(@intCast(i)), 2 * i + 1);

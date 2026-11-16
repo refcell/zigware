@@ -31,8 +31,8 @@ variants need `runtime` storage; do them after its interface lands.
 - [ ] merkle/persisted/full: `init_sync` (over `journal.authenticated.Stored`), the historical
   proof, destroy-interruption, and init_sync tests, and the merkle_full_operations and
   merkle_full_recovery fuzz targets.
-- [ ] merkle/persisted/compact.
-- [ ] index/immutable: switch to `utils.handles.Table` (now on main).
+- [ ] merkle/persisted/compact (storage-qmdb's preferred order: compact, then init_sync).
+- [x] index/immutable on `utils.handles.Table`, with all of immutable.rs's tests.
 - [ ] Fuzz targets (storage/fuzz entries for these modules). Done: rmap, bitmap, index
   (unordered, ordered, immutable), merkle_family_operations, merkle_range_proof,
   merkle_proof_store, and the Merkle half of proofs_malleability (its BMT half goes with bmt).
@@ -97,8 +97,8 @@ variants need `runtime` storage; do them after its interface lands.
   results and O(log n) operations, so the spill threshold and its tests do not apply. Every
   generic index test runs against all four indices.
 - index/immutable: same ring of translated keys by position and exact prefix retirement.
-  Commonware's position-only `utils::handles::Table` belongs to the utils lane; until it lands
-  the positions sit in a hash map from translated key to positions (same results). Seeded and
+  Positions live in `utils.handles.Table(u64)` as in commonware: `get` returns an iterator that
+  confirms each candidate against its ring slot, and growth rehashes through the ring. Seeded and
   `std.testing.fuzz` targets check it against a model of live (position, key) pairs.
 - merkle/storage + verification: commonware's async `Storage` trait is a comptime interface:
   `size()` and `get_node(position)` returning `?Digest` or `!?Digest`, with an optional
