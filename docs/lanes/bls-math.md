@@ -29,9 +29,11 @@ variants (MinPk, MinSig) must match exactly.
   the test plan and its tests, and the message and FeldmanTranscript conformance hashes.
 - [x] bls12381 scheme.rs (PrivateKey, PublicKey, Signature) with its conformance hashes.
 - [ ] bls12381 dkg golden (commonware `dkg::golden`) with its tests and conformance hashes.
-  Blocked: its eVRF needs crypto's zk bulletproofs and banderwagon (crypto lane backlog).
-- [ ] Fuzz targets (commonware math/fuzz, simd/fuzz, bls parts of cryptography/fuzz): done
-  for decode, dkg_feldman_desmedt, aggregate, batch, tle, and threshold; primitive remains.
+  Blocked: its eVRF needs crypto's zk bulletproofs (crypto lane) and banderwagon (below).
+- [x] Fuzz targets: math (the crate plan), simd (differential), and the bls12381 decode,
+  primitive, threshold, aggregate, batch, tle, and dkg_feldman_desmedt targets.
+- [ ] banderwagon (`bls12381/dkg/golden/evrf/banderwagon.rs`, moved from the crypto lane) with
+  its tests, conformance hashes, and fuzz.
 
 ## Decisions
 - Algebraic types are value types with `zero`/`one` decls and `add`/`sub`/`neg`/`mul`/`inv`/

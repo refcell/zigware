@@ -563,3 +563,204 @@ test "bls12381 fuzz: threshold operations" {
 test "bls12381 fuzz: threshold operations (coverage-guided)" {
     try testing.fuzz({}, math.testing.smith_body(void, threshold_body), .{});
 }
+
+const Scalar = primitives.group.Scalar;
+const G1 = primitives.group.G1;
+const G2 = primitives.group.G2;
+const ops = primitives.ops;
+
+fn arbitrary_scalars(gpa: Allocator, u: *Unstructured, max: usize) ![]Scalar {
+    const scalars = try gpa.alloc(Scalar, u.int_in_range(usize, 0, max));
+    errdefer gpa.free(scalars);
+    for (scalars) |*scalar| scalar.* = try u.arbitrary(Scalar);
+    return scalars;
+}
+
+/// commonware `arbitrary_poly_scalar`: a degree in `0..=10`, an RNG seed, and the constant.
+fn arbitrary_poly_scalar(gpa: Allocator, u: *Unstructured) !sharing_mod.Poly(Scalar) {
+    const degree = u.int_in_range(u32, 0, 10);
+    var rng = utils.rng.TestRng.init_key(try u.arbitrary([32]u8));
+    const constant = try u.arbitrary(Scalar);
+    return sharing_mod.Poly(Scalar).random_with_constant(gpa, &rng, degree, constant);
+}
+
+/// Encodes `value` and expects it to decode (with `cfg`) to the same value when it decodes.
+fn expect_serialize(comptime T: type, value: T, cfg: anytype) !void {
+    var buffer: [T.fixed_size]u8 = undefined;
+    var writer = codec.Writer.init(&buffer);
+    value.write(&writer);
+    var reader = codec.Reader.init(writer.written());
+    const decoded = T.read(testing.allocator, &reader, cfg) catch return;
+    try testing.expect(decoded.eql(value));
+}
+
+/// Scalar operations: choices 0 to 2 and 30.
+fn scalar_operation(choice: u32, u: *Unstructured) !void {
+    const a = try u.arbitrary(Scalar);
+    switch (choice) {
+        0 => {
+            const b = try u.arbitrary(Scalar);
+            _ = a.add(b);
+            _ = a.mul(b);
+        },
+        1 => _ = a.sub(try u.arbitrary(Scalar)),
+        2 => {
+            const inverse = a.inv();
+            if (a.eql(Scalar.zero)) {
+                try testing.expect(inverse.eql(Scalar.zero));
+            } else {
+                try testing.expect(a.mul(inverse).eql(Scalar.one));
+            }
+        },
+        else => try expect_serialize(Scalar, a, .reject_zero),
+    }
+}
+
+/// Point operations in `G`: arithmetic, scalar multiplication, MSM, hash to point, and
+/// serialization.
+fn point_operation(comptime G: type, kind: u32, gpa: Allocator, u: *Unstructured) !void {
+    switch (kind) {
+        0 => _ = (try arbitrary_point(G, u)).add(try arbitrary_point(G, u)),
+        1 => _ = (try arbitrary_point(G, u)).mul(try u.arbitrary(Scalar)),
+        2 => {
+            const points = try arbitrary_points(G, gpa, u, 10);
+            defer gpa.free(points);
+            const scalars = try arbitrary_scalars(gpa, u, 10);
+            defer gpa.free(scalars);
+            const len = @min(points.len, scalars.len);
+            if (len > 0) _ = G.msm(points[0..len], scalars[0..len]);
+        },
+        3 => _ = G.hash_to_group(G.message_dst, try arbitrary_bytes(u, 0, 100)),
+        else => try expect_serialize(G, try arbitrary_point(G, u), {}),
+    }
+}
+
+/// Keys and hashes: choices 11 to 15.
+fn key_operation(choice: u32, u: *Unstructured) !void {
+    switch (choice) {
+        11 => {}, // Key generation draws from an RNG; commonware skips it here too.
+        12 => {
+            const private = try u.arbitrary(Private);
+            _ = ops.compute_public(MinPk, private);
+            _ = ops.compute_public(MinSig, private);
+        },
+        13 => {
+            const share = try arbitrary_share(u);
+            if (try u.arbitrary(bool)) _ = share.public(MinPk) else _ = share.public(MinSig);
+        },
+        14 => {
+            const message = try arbitrary_bytes(u, 0, 100);
+            if (try u.arbitrary(bool)) {
+                _ = ops.hash(MinPk, MinPk.message, message);
+            } else {
+                _ = ops.hash(MinSig, MinSig.message, message);
+            }
+        },
+        else => {
+            const namespace = try arbitrary_bytes(u, 0, 50);
+            const message = try arbitrary_bytes(u, 0, 100);
+            if (try u.arbitrary(bool)) {
+                _ = ops.hash_with_namespace(MinPk, MinPk.message, namespace, message);
+            } else {
+                _ = ops.hash_with_namespace(MinSig, MinSig.message, namespace, message);
+            }
+        },
+    }
+}
+
+/// Signatures in `V`: sign, sign low-level, verify, verify low-level. A fresh signature
+/// must verify (commonware ignores the result).
+fn signature_operation(comptime V: type, kind: u32, u: *Unstructured) !void {
+    switch (kind) {
+        0, 1 => {
+            const private = try u.arbitrary(Private);
+            const namespace = if (kind == 0) try arbitrary_bytes(u, 0, 50) else "";
+            const message = try arbitrary_bytes(u, 0, 100);
+            const public = ops.compute_public(V, private);
+            if (kind == 0) {
+                const signature = ops.sign_message(V, private, namespace, message);
+                try ops.verify_message(V, public, namespace, message, signature);
+            } else {
+                const signature = ops.sign(V, private, V.message, message);
+                try ops.verify(V, public, V.message, message, signature);
+            }
+        },
+        else => {
+            const public = try arbitrary_point(V.Public, u);
+            const namespace = if (kind == 2) try arbitrary_bytes(u, 0, 50) else "";
+            const message = try arbitrary_bytes(u, 0, 100);
+            const signature = try arbitrary_point(V.Signature, u);
+            if (kind == 2) {
+                ops.verify_message(V, public, namespace, message, signature) catch {};
+            } else {
+                ops.verify(V, public, V.message, message, signature) catch {};
+            }
+        },
+    }
+}
+
+/// Proofs of possession in `V`: sign (which must verify) or verify arbitrary inputs.
+fn proof_of_possession_operation(comptime V: type, sign: bool, u: *Unstructured) !void {
+    if (sign) {
+        const private = try u.arbitrary(Private);
+        const namespace = try arbitrary_bytes(u, 0, 50);
+        const signature = ops.sign_proof_of_possession(V, private, namespace);
+        const public = ops.compute_public(V, private);
+        try ops.verify_proof_of_possession(V, public, namespace, signature);
+    } else {
+        const public = try arbitrary_point(V.Public, u);
+        const namespace = try arbitrary_bytes(u, 0, 50);
+        const signature = try arbitrary_point(V.Signature, u);
+        ops.verify_proof_of_possession(V, public, namespace, signature) catch {};
+    }
+}
+
+/// Polynomials: addition (choice 28) and commitment (29).
+fn poly_operation(choice: u32, gpa: Allocator, u: *Unstructured) !void {
+    var a = try arbitrary_poly_scalar(gpa, u);
+    defer a.deinit(gpa);
+    if (choice == 28) {
+        var b = try arbitrary_poly_scalar(gpa, u);
+        defer b.deinit(gpa);
+        try a.add_assign(gpa, b);
+    } else if (try u.arbitrary(bool)) {
+        var committed = try math.poly.commit(gpa, G1, a);
+        committed.deinit(gpa);
+    } else {
+        var committed = try math.poly.commit(gpa, G2, a);
+        committed.deinit(gpa);
+    }
+}
+
+fn primitive_operation(choice: u32, gpa: Allocator, u: *Unstructured) !void {
+    switch (choice) {
+        0...2, 30 => try scalar_operation(choice, u),
+        3...6 => try point_operation(G1, choice - 3, gpa, u),
+        7...10 => try point_operation(G2, choice - 7, gpa, u),
+        31 => try point_operation(G1, 4, gpa, u),
+        32 => try point_operation(G2, 4, gpa, u),
+        11...15 => try key_operation(choice, u),
+        16...19 => try signature_operation(MinPk, choice - 16, u),
+        20...23 => try signature_operation(MinSig, choice - 20, u),
+        24, 25 => try proof_of_possession_operation(MinPk, choice == 24, u),
+        26, 27 => try proof_of_possession_operation(MinSig, choice == 26, u),
+        28, 29 => try poly_operation(choice, gpa, u),
+        else => unreachable,
+    }
+}
+
+fn primitive_body(_: void, u: *Unstructured) !void {
+    // `Vec<FuzzOperation>`: a continuation bit before each operation.
+    while (u.arbitrary(bool) catch false) {
+        try primitive_operation(u.int_in_range(u32, 0, 32), testing.allocator, u);
+    }
+}
+
+test "bls12381 fuzz: primitive operations" {
+    try (minifuzz.Builder{}).with_search_limit(search_limit(4, 64))
+        .run(testing.allocator, {}, primitive_body);
+}
+
+test "bls12381 fuzz: primitive operations (coverage-guided)" {
+    try testing.fuzz({}, math.testing.smith_body(void, primitive_body), .{});
+}
