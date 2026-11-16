@@ -67,11 +67,11 @@ const Options = struct {
     epoch: u64 = 1,
     view_retention: u64 = 10,
     term_length: u32 = 1,
-    stall_timeout_secs: u64 = 30,
+    stall_timeout_ms: u64 = 30_000,
     optimistic_views: u64 = 0,
-    leader_timeout_secs: u64 = 1,
-    certification_timeout_secs: u64 = 2,
-    timeout_retry_secs: u64 = 3,
+    leader_timeout_ms: u64 = 1000,
+    certification_timeout_ms: u64 = 2000,
+    timeout_retry_ms: u64 = 3000,
 };
 
 /// A 4-participant fixture and a state that entered view 1. Must not move once started.
@@ -87,7 +87,7 @@ const Env = struct {
         var builder = elector.RoundRobin(cryptography.Sha256).default();
         if (options.term_length > 1) builder = builder.with_term(
             .new(utils.NonZero(u32).init(options.term_length).?),
-            .from_secs(options.stall_timeout_secs),
+            .from_millis(options.stall_timeout_ms),
             .new(options.optimistic_views),
         );
         self.elector = try builder.build(gpa, 4);
@@ -97,9 +97,9 @@ const Env = struct {
             .elector = self.elector,
             .epoch = .new(options.epoch),
             .view_retention = .new(options.view_retention),
-            .leader_timeout = .from_secs(options.leader_timeout_secs),
-            .certification_timeout = .from_secs(options.certification_timeout_secs),
-            .timeout_retry = .from_secs(options.timeout_retry_secs),
+            .leader_timeout = .from_millis(options.leader_timeout_ms),
+            .certification_timeout = .from_millis(options.certification_timeout_ms),
+            .timeout_retry = .from_millis(options.timeout_retry_ms),
             .skip_budget = 4,
         });
         try self.state.set_genesis(genesis());
@@ -314,7 +314,7 @@ const terms_of_five: Options = .{
     .signer = 0,
     .view_retention = 20,
     .term_length = 5,
-    .stall_timeout_secs = 4,
+    .stall_timeout_ms = 4000,
 };
 
 test "voter state nullification skips to the next term start" {
@@ -422,9 +422,9 @@ test "voter state try verify waits for missing parent certification" {
             var env: Env = undefined;
             try env.start(io, .{
                 .view_retention = 5,
-                .leader_timeout_secs = 10,
-                .certification_timeout_secs = 10,
-                .timeout_retry_secs = 30,
+                .leader_timeout_ms = 10_000,
+                .certification_timeout_ms = 10_000,
+                .timeout_retry_ms = 30_000,
             });
             defer env.stop();
             const state = &env.state;
@@ -474,4 +474,373 @@ test "voter state honest path: propose, notarize, certify, finalize" {
 test "voter state declarations all compile" {
     std.testing.refAllDecls(State);
     std.testing.refAllDecls(State.Round);
+}
+
+const ms_ns: i96 = std.time.ns_per_ms;
+
+/// Sets view `view`'s proposal (naming `parent`), verifies it, and adds its notarization.
+fn verify_and_notarize(env: *Env, view: u64, parent: u64, payload: u8) !void {
+    const state = &env.state;
+    const value = proposal(env.state.epoch.get(), view, parent, payload);
+    try testing.expect(try state.set_proposal(.new(view), &value));
+    try testing.expect(state.try_verify() == .ready);
+    try testing.expect(state.verified(.new(view)));
+    const added = try state.add_notarization(try build_notarization(&env.fixture, value));
+    try testing.expect(added.added);
+}
+
+test "voter state nullify preserves retry backoff after the first timeout vote" {
+    try run(struct {
+        fn body(io: Io) !void {
+            var env: Env = undefined;
+            try env.start(io, .{ .signer = 0, .epoch = 30, .view_retention = 2 });
+            defer env.stop();
+            const state = &env.state;
+            const view = state.current_view();
+            try testing.expect(!(try state.construct_nullify(view, .leader_timeout)).?.retry);
+            try io.sleep(.fromSeconds(2), .awake);
+            const retry_deadline = state.next_timeout();
+            try testing.expectEqual(context.now_ns(io) + 3 * second_ns, retry_deadline.deadline);
+            try testing.expectEqual(.retry, retry_deadline.reason);
+            // Repeated timeout hints for the same view do not reset the retry backoff.
+            state.trigger_timeout(view, .leader_nullify);
+            try testing.expectEqual(retry_deadline, state.next_timeout());
+        }
+    }.body);
+}
+
+test "voter state nullify takes its reason from next timeout" {
+    try run(struct {
+        fn body(io: Io) !void {
+            var env: Env = undefined;
+            try env.start(io, .{ .signer = 0, .epoch = 31, .view_retention = 2 });
+            defer env.stop();
+            const state = &env.state;
+            const view = state.current_view();
+            state.trigger_timeout(view, .missing_proposal);
+            const latched = state.next_timeout();
+            try testing.expectEqual(.missing_proposal, latched.reason);
+            try testing.expect(!(try state.construct_nullify(view, latched.reason)).?.retry);
+            // Retries follow the retry cadence whatever reason is passed.
+            const retried = state.next_timeout();
+            try testing.expectEqual(.retry, retried.reason);
+            try testing.expect((try state.construct_nullify(view, retried.reason)).?.retry);
+        }
+    }.body);
+}
+
+test "voter state notarization keeps the certification timeout pending certification" {
+    try run(struct {
+        fn body(io: Io) !void {
+            var env: Env = undefined;
+            try env.start(io, .{ .signer = 0, .epoch = 32, .view_retention = 2 });
+            defer env.stop();
+            const state = &env.state;
+            const view = state.current_view();
+            const value = proposal(32, view.get(), 0, 52);
+            // A proposal clears the leader timeout and leaves the certification timeout.
+            try testing.expect(try state.set_proposal(view, &value));
+            const certification = state.next_timeout();
+            try testing.expectEqual(context.now_ns(io) + 2 * second_ns, certification.deadline);
+            try testing.expectEqual(.certification_timeout, certification.reason);
+            const added = try state.add_notarization(try build_notarization(&env.fixture, value));
+            try testing.expect(added.added and added.equivocator == null);
+            try testing.expectEqual(certification, state.next_timeout());
+            // A certification stalled past its timeout leaves the view timed out.
+            try io.sleep(.fromSeconds(3), .awake);
+            try testing.expect(state.next_timeout().deadline <= context.now_ns(io));
+        }
+    }.body);
+}
+
+const terms_of_three: Options = .{
+    .signer = 0,
+    .epoch = 33,
+    .term_length = 3,
+    .stall_timeout_ms = 4000,
+};
+
+test "voter state stall timeout tracks the oldest unfinalized view" {
+    try run(struct {
+        fn body(io: Io) !void {
+            var env: Env = undefined;
+            try env.start(io, terms_of_three);
+            defer env.stop();
+            const state = &env.state;
+            const oldest = context.now_ns(io) + 4 * second_ns;
+            try verify_and_notarize(&env, 1, 0, 1);
+            try io.sleep(.fromSeconds(1), .awake);
+            try testing.expect(try state.certified(.new(1), true) != null);
+            try testing.expectEqual(2, state.current_view().get());
+            try verify_and_notarize(&env, 2, 1, 2);
+            try io.sleep(.fromMilliseconds(1500), .awake);
+            try testing.expect(try state.certified(.new(2), true) != null);
+            try testing.expectEqual(3, state.current_view().get());
+            const v3_certification = context.now_ns(io) + 2 * second_ns;
+            const v3 = proposal(33, 3, 2, 3);
+            try testing.expect(try state.set_proposal(.new(3), &v3));
+            try testing.expect(state.try_verify() == .ready);
+            try testing.expect(state.verified(.new(3)));
+            const stall = state.next_timeout();
+            try testing.expectEqual(oldest, stall.deadline);
+            try testing.expectEqual(.stall_timeout, stall.reason);
+            // Once the round's own timeout expired too, its reason takes precedence.
+            try io.sleep(.fromSeconds(2), .awake);
+            const expired = state.next_timeout();
+            try testing.expectEqual(v3_certification, expired.deadline);
+            try testing.expectEqual(.certification_timeout, expired.reason);
+        }
+    }.body);
+}
+
+test "voter state stall timeout ignores prior terms" {
+    try run(struct {
+        fn body(io: Io) !void {
+            var env: Env = undefined;
+            var options = terms_of_three;
+            options.epoch = 34;
+            options.stall_timeout_ms = 12_000;
+            options.leader_timeout_ms = 10_000;
+            options.certification_timeout_ms = 11_000;
+            try env.start(io, options);
+            defer env.stop();
+            const state = &env.state;
+            try io.sleep(.fromSeconds(3), .awake);
+            const nullified = try build_nullification(&env.fixture, .new(.new(34), .new(1)));
+            try testing.expect(try state.add_nullification(nullified));
+            try testing.expectEqual(4, state.current_view().get());
+            const leader = context.now_ns(io) + 10 * second_ns;
+            // View 1's stall deadline has passed; a leak from the prior term would win here.
+            try io.sleep(.fromMilliseconds(9500), .awake);
+            const timeout = state.next_timeout();
+            try testing.expectEqual(leader, timeout.deadline);
+            try testing.expectEqual(.leader_timeout, timeout.reason);
+        }
+    }.body);
+}
+
+test "voter state retry takes precedence over an expired same-term timeout" {
+    try run(struct {
+        fn body(io: Io) !void {
+            var env: Env = undefined;
+            try env.start(io, .{
+                .signer = 0,
+                .epoch = 35,
+                .term_length = 3,
+                .stall_timeout_ms = 30,
+                .leader_timeout_ms = 10,
+                .certification_timeout_ms = 20,
+                .timeout_retry_ms = 3,
+            });
+            defer env.stop();
+            const state = &env.state;
+            const oldest = context.now_ns(io) + 30 * ms_ns;
+            const value = proposal(35, 1, 0, 35);
+            const added = try state.add_notarization(try build_notarization(&env.fixture, value));
+            try testing.expect(added.added);
+            try io.sleep(.fromMilliseconds(25), .awake);
+            try testing.expect(try state.certified(.new(1), true) != null);
+            try testing.expectEqual(2, state.current_view().get());
+            try io.sleep(.fromMilliseconds(5), .awake);
+            const stall = state.next_timeout();
+            try testing.expectEqual(oldest, stall.deadline);
+            try testing.expectEqual(.stall_timeout, stall.reason);
+            const view = state.current_view();
+            try testing.expect(!(try state.construct_nullify(view, .stall_timeout)).?.retry);
+            // An expired same-term deadline must not override the retry cadence.
+            const retry = state.next_timeout();
+            try testing.expectEqual(context.now_ns(io) + 3 * ms_ns, retry.deadline);
+            try testing.expectEqual(.retry, retry.reason);
+        }
+    }.body);
+}
+
+test "voter state local nullify preserves the stall timeout" {
+    try run(struct {
+        fn body(io: Io) !void {
+            var env: Env = undefined;
+            var options = terms_of_three;
+            options.epoch = 36;
+            try env.start(io, options);
+            defer env.stop();
+            const state = &env.state;
+            const view = state.current_view();
+            const oldest = context.now_ns(io) + 4 * second_ns;
+            // The actor's timeout sequence: latch the reason, then construct the nullify.
+            state.trigger_timeout(view, .leader_timeout);
+            try testing.expect(!(try state.construct_nullify(view, .leader_timeout)).?.retry);
+            const value = proposal(36, 1, 0, 36);
+            const added = try state.add_notarization(try build_notarization(&env.fixture, value));
+            try testing.expect(added.added);
+            try io.sleep(.fromSeconds(4), .awake);
+            try testing.expect(try state.certified(view, true) != null);
+            try testing.expectEqual(2, state.current_view().get());
+            const stall = state.next_timeout();
+            try testing.expectEqual(oldest, stall.deadline);
+            try testing.expectEqual(.stall_timeout, stall.reason);
+        }
+    }.body);
+}
+
+/// Builds and records `payload` as our view-1 proposal on genesis, then casts our notarize
+/// vote for it (commonware `propose_and_notarize_view1`).
+fn propose_and_notarize_view1(env: *Env, payload: u8) !Proposal {
+    const state = &env.state;
+    _ = try state.create_round(.new(1));
+    const request: State.Context = .{
+        .round = .new(state.epoch, .new(1)),
+        .leader = env.fixture.participants[0],
+        .parent = .{ genesis_view, genesis() },
+    };
+    try testing.expect(state.proposed(&request, .fill(payload)));
+    try testing.expect(try state.construct_notarize(.new(1)) != null);
+    return proposal(state.epoch.get(), 1, 0, payload);
+}
+
+test "voter state stall timeout survives a certificate jump" {
+    try run(struct {
+        fn body(io: Io) !void {
+            var env: Env = undefined;
+            var options = terms_of_three;
+            options.epoch = 7;
+            options.term_length = 5;
+            try env.start(io, options);
+            defer env.stop();
+            const state = &env.state;
+            // Certifying view 7 (term 6..10) at view 1 jumps to view 8; view 6 was never
+            // entered and has no deadline.
+            const value = proposal(7, 7, 0, 7);
+            const added = try state.add_notarization(try build_notarization(&env.fixture, value));
+            try testing.expect(added.added);
+            const entered = context.now_ns(io);
+            try testing.expect(try state.certified(.new(7), true) != null);
+            try testing.expectEqual(8, state.current_view().get());
+            // The anchor is the oldest entered, unfinalized view of the term (view 8).
+            try testing.expectEqual(entered + 4 * second_ns, state.next_stall_timeout().?);
+        }
+    }.body);
+}
+
+test "voter state arms no stall deadline when unconfigured" {
+    try run(struct {
+        fn body(io: Io) !void {
+            var env: Env = undefined;
+            try env.start(io, .{ .signer = 0, .epoch = 33 });
+            defer env.stop();
+            const entered = context.now_ns(io);
+            try testing.expectEqual(null, env.state.next_stall_timeout());
+            const timeout = env.state.next_timeout();
+            try testing.expectEqual(entered + second_ns, timeout.deadline);
+            try testing.expectEqual(.leader_timeout, timeout.reason);
+        }
+    }.body);
+}
+
+test "voter state expired latch keeps its reason over an expired anchor" {
+    try run(struct {
+        fn body(io: Io) !void {
+            var env: Env = undefined;
+            var options = terms_of_three;
+            options.epoch = 9;
+            options.timeout_retry_ms = 10_000;
+            try env.start(io, options);
+            defer env.stop();
+            // The term's stall deadline expires, then an event latches a timeout.
+            try io.sleep(.fromSeconds(5), .awake);
+            env.state.trigger_timeout(env.state.current_view(), .leader_nullify);
+            try testing.expectEqual(.leader_nullify, env.state.next_timeout().reason);
+        }
+    }.body);
+}
+
+test "voter state ignores timeouts for old rounds" {
+    try run(struct {
+        fn body(io: Io) !void {
+            var env: Env = undefined;
+            try env.start(io, .{ .signer = 0, .epoch = 12, .view_retention = 3 });
+            defer env.stop();
+            const state = &env.state;
+            const deadline_v1 = state.next_timeout();
+            state.trigger_timeout(.zero(), .inactivity);
+            try testing.expectEqual(1, state.current_view().get());
+            try testing.expectEqual(deadline_v1, state.next_timeout());
+            // The ignored timeout creates no round for view 0.
+            try testing.expect(state.rounds.get(.zero()) == null);
+            const nullified = try build_nullification(&env.fixture, .new(.new(12), .new(1)));
+            try testing.expect(try state.add_nullification(nullified));
+            try testing.expectEqual(2, state.current_view().get());
+            const deadline_v2 = state.next_timeout();
+            state.trigger_timeout(.new(1), .inactivity);
+            try testing.expectEqual(2, state.current_view().get());
+            try testing.expectEqual(deadline_v2, state.next_timeout());
+        }
+    }.body);
+}
+
+const optimistic_terms: Options = .{
+    .signer = 1,
+    .epoch = 15,
+    .term_length = 5,
+    .stall_timeout_ms = 20_000,
+    .optimistic_views = 1,
+    .leader_timeout_ms = 10_000,
+    .certification_timeout_ms = 10_000,
+    .timeout_retry_ms = 30_000,
+};
+
+/// Finalizes our view-1 proposal so the state enters view 2.
+fn enter_view_two(env: *Env, payload: u8) !void {
+    const parent = try propose_and_notarize_view1(env, payload);
+    const added = try env.state.add_finalization(try build_finalization(&env.fixture, parent));
+    try testing.expect(added.added);
+    try testing.expectEqual(2, env.state.current_view().get());
+}
+
+test "voter state inactivity timeout ignores a buffered current proposal" {
+    try run(struct {
+        fn body(io: Io) !void {
+            var env: Env = undefined;
+            try env.start(io, optimistic_terms);
+            defer env.stop();
+            const state = &env.state;
+            try enter_view_two(&env, 118);
+            // A buffered, unverified proposal suppresses the inactivity hint.
+            const child = proposal(15, 2, 1, 119);
+            try testing.expect(try state.set_proposal(.new(2), &child));
+            const now = context.now_ns(io);
+            state.trigger_timeout(.new(2), .inactivity);
+            const certification = state.next_timeout();
+            try testing.expectEqual(.certification_timeout, certification.reason);
+            try testing.expectEqual(now + 10 * second_ns, certification.deadline);
+            // The leader's own nullify still latches an immediate timeout.
+            state.trigger_timeout(.new(2), .leader_nullify);
+            const latched = state.next_timeout();
+            try testing.expectEqual(.leader_nullify, latched.reason);
+            try testing.expectEqual(now, latched.deadline);
+        }
+    }.body);
+}
+
+test "voter state inactivity timeout latches on an equivocated proposal" {
+    try run(struct {
+        fn body(io: Io) !void {
+            var env: Env = undefined;
+            var options = optimistic_terms;
+            options.stall_timeout_ms = 4000;
+            options.leader_timeout_ms = 1000;
+            options.certification_timeout_ms = 2000;
+            options.timeout_retry_ms = 3000;
+            try env.start(io, options);
+            defer env.stop();
+            const state = &env.state;
+            try enter_view_two(&env, 120);
+            try testing.expect(try state.set_proposal(.new(2), &proposal(15, 2, 1, 121)));
+            try testing.expect(!try state.set_proposal(.new(2), &proposal(15, 2, 1, 122)));
+            const now = context.now_ns(io);
+            state.trigger_timeout(.new(2), .inactivity);
+            const latched = state.next_timeout();
+            try testing.expectEqual(.inactivity, latched.reason);
+            try testing.expectEqual(now, latched.deadline);
+        }
+    }.body);
 }

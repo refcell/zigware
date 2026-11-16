@@ -386,7 +386,7 @@ pub fn State(comptime S: type, comptime E: type, comptime D: type) type {
 
         /// The oldest entered, unfinalized view's stall deadline in the current term,
         /// advancing the cached anchor past skipped rounds.
-        fn next_stall_timeout(self: *Self) ?Instant {
+        pub fn next_stall_timeout(self: *Self) ?Instant {
             const term_start = self.view.term_start(self.term_length());
             const unfinalized = self.last_finalized_.next();
             const floor: View = .new(@max(unfinalized.get(), term_start.get()));

@@ -314,3 +314,5 @@ resolver; those lanes are running, so do the types first and the actors as they 
 - 2026-11-16: hailstorm DSTs; Debug-only DST sizes (`quick`) cut test-consensus's Debug time.
 - 2026-11-16: observer, non-genesis floor joiner, and dishonest-leader DSTs; the Harness takes
   a floor finalization and a certifier; the mock reporter keeps finalizations.
+- 2026-11-16: voter state.rs timeout, stall, and inactivity tests (26 of 141); timeout-metric
+  assertions wait on the voter's metrics.
