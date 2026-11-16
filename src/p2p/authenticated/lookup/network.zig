@@ -519,4 +519,5 @@ fn resolve(ingress: Ingress, allow_private_ips: bool) ?IpAddress {
 
 test {
     _ = @import("network_test.zig");
+    _ = @import("network_oracle_test.zig");
 }
