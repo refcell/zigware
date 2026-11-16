@@ -55,7 +55,12 @@ time, files, and network: build on it rather than around it where it fits.
 - [x] Runtime task metrics (`runtime_tasks_spawned`/`running`, `runtime_iterations`), written
   by runtime-telemetry (515cd03, 6929fea). Not yet: `runtime_task_polls` and the root's
   `kind="Root"` series.
-- [ ] iobuf (IoBuf/IoBufs pooled buffers) and utils (buffer pools, handle, supervision).
+- [x] iobuf (`iobuf.zig`): `IoBuf` (refcounted immutable view: clone, slice, split_to,
+  advance, try_into_mut), `IoBufMut` (fixed capacity, aligned, freeze), `IoBufs` (chunk
+  sequence: append, prepend, advance, split_to, coalesce, slices), the IoBuf codec with
+  zero-copy `take_encoded`, and `CodecConformance<IoBuf>`.
+- [ ] iobuf `IoBufsMut`, `Builder`, and `encode_iobufs` (vectored codec writes).
+- [ ] utils: buffer pools, handle and abort leftovers (Context covers spawn, join, abort).
 - Moved to the runtime-telemetry lane: telemetry (`src/runtime/telemetry/`) and the
   production runtime (`src/runtime/production/`, io_uring/kqueue storage and network).
   `src/runtime/buffer/` belongs to storage-journal.
@@ -131,6 +136,13 @@ time, files, and network: build on it rather than around it where it fits.
   Metered network works the same way; the production network can count into the same
   `network.metered.Metrics`. Not ported: metered `start_sync` and shared-owner tests (no
   `start_sync`; a Zig blob handle has one owner).
+- `IoBuf` keeps commonware's ownership rules with explicit `deinit`: a native buffer is one
+  allocation with a refcounted header, so building one allocates once and clones, slices, and
+  splits allocate nothing (commonware avoids even the header record until the first share).
+  `IoBuf.deinit` takes a `gpa` it ignores, to fit the codec's `deinit(gpa)` contract.
+  `IoBufs` keeps up to three chunks inline and moves them to a list on the fourth; it stays a
+  list afterwards (commonware shrinks back to Single/Pair/Triple). The network `Sink.send`
+  contract still takes `[]const []const u8`; `IoBufs.slices` adapts a chunk sequence to it.
 - The runner registers its storage and network metrics on first `storage()`/`network()`
   (the runner must not move by then) and panics if that registration runs out of memory.
 
@@ -145,4 +157,4 @@ time, files, and network: build on it rather than around it where it fits.
 - 2026-11-16: Context suite on production; faulty storage wired into the runner.
 - 2026-11-16: remaining deterministic.rs tests.
 - 2026-11-16: detached-task drain race and canceled-after-return race fixed; auditor records
-  rand, storage, and network events; metered storage and network.
+  rand, storage, and network events; metered storage and network; iobuf.
