@@ -41,14 +41,17 @@ handshake), then certificate, secp256r1, the rest, zk last. banderwagon moved to
   hash, and the `lthash_operations`/`metamorph_lthash` fuzz targets.
 - [x] bloomfilter: `BloomFilter(H)` with its tests, `CodecConformance<BloomFilter>`, and the
   `bloomfilter` fuzz target (`New` constructor).
-- [ ] bloomfilter `with_rate`/`optimal_*`/estimates and the `RationalOptimalBits` hash (waits
-  for `utils.rational`'s `BigRational` and `log2_floor`).
+- [x] bloomfilter `with_rate`/`optimal_*`/estimates, the `RationalOptimalBits` hash, and the
+  fuzz target's `WithRate` constructor (over `utils.BigRational`).
 - [x] zk circuit (`zk/circuit.zig`): `Context`, `Var`, `BoolVar`, `Selector`, and the
   minifuzz satisfaction plan.
 - [x] zk bulletproofs ipa (`zk/bulletproofs/ipa.zig`): `Setup`, `Claim`, `Witness`, `Proof`,
   `prove`, `verify`, `Setup.eval`, the prover fuzz plan, and its 3 conformance hashes.
-- [ ] zk bulletproofs circuit and `pedersen_to_plain` (bls-math's dkg golden waits on them;
-  banderwagon moved to bls-math).
+- [x] zk bulletproofs circuit (`zk/bulletproofs/circuit.zig`, `zkc.zig`): `SparseMatrix`,
+  `Circuit`, `Setup` (`hashed`, `eval`, `eval_check_batched`), `Witness`, `Claim`, `Proof`,
+  `prove`, `verify`, the `zk.circuit` converter, and the fuzz plan.
+- [x] zk `pedersen_to_plain`: `Setup`, `Witness`, `Claim`, `Proof`, `prove`, `verify`, the
+  BLS12-381 prover plan, and its 3 conformance hashes. (banderwagon moved to bls-math.)
 - [ ] Fuzz targets (commonware cryptography/fuzz) and conformance hashes.
 
 ## Log
@@ -130,3 +133,17 @@ handshake), then certificate, secp256r1, the rest, zk last. banderwagon moved to
   closure. The prover folds generators with `strategy.join` of two `map_into`s, like
   commonware; MSMs use `math.algebra.msm`, which takes no strategy. `verify` returns null
   for a setup shorter than the claimed length, where commonware panics on the slice.
+
+- zk bulletproofs circuit: commonware gives `SparseMatrix`, `Circuit`, and `Claim` only
+  `Write`; zigware encodes them with `circuit.encode_write_only` (the codec functions also
+  require `read`). `SparseMatrix` keeps its entries sorted by `(row, col)` in a list (Rust's
+  `BTreeMap`) and inserts zeros through `entry`, like `IndexMut`. `prove` and `verify` keep
+  their temporaries in an arena. `prove` returns null for witness lengths that do not match
+  the circuit, where commonware would panic. The `zkc` converter keeps commonware's visit
+  order, explicit stack, and `Location` ordering, so converted circuits match column for
+  column. `Setup.eval_check_batched` uses an explicit stack of index ranges.
+- bloomfilter sizing: `with_rate(gpa, n, &fp_rate)`, `optimal_bits`, and `optimal_hashers` take
+  `u64` counts (Rust `usize`). `optimal_bits` truncates the u128 ceiling to u64 like Rust's `as
+  usize`. In Debug a `with_rate` costs about a second (exact log2 squares ~1M-bit integers), so
+  the seeded fuzz draws `WithRate` only in its first four iterations, and `RationalOptimalBits`
+  is a slow test.

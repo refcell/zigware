@@ -7,8 +7,9 @@
 //! Encoded as the hasher count (`u8`), then the bits as a `BitMap` (big-endian `u64` bit
 //! length, then 8-byte chunks).
 //!
-//! The rational-arithmetic parts (`with_rate`, `optimal_bits`, `optimal_hashers`, and the
-//! estimates) wait for `utils.rational` (commonware `BigRationalExt::log2_floor`).
+//! Sizing (`with_rate`, `optimal_bits`, `optimal_hashers`) and the estimates use exact
+//! `utils.BigRational` arithmetic with commonware's rational ln(2) constants and
+//! `log2_floor(16)`, so every platform picks the same sizes as commonware.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -18,6 +19,12 @@ const utils = @import("utils");
 const Sha256 = @import("sha256.zig").Sha256;
 
 const BitMap = utils.bitmap.DefaultBitMap;
+const BigRational = utils.BigRational;
+
+/// ln(2) as a rational approximation (commonware's `LN2`).
+const ln2: [2]u64 = .{ 14397, 20769 };
+/// 1 / ln(2) as a rational approximation (commonware's `LN2_INV`).
+const ln2_inv: [2]u64 = .{ 29145, 20201 };
 
 /// A Bloom filter hashing items with `H`, whose digest must be at least 16 bytes. Use a
 /// cryptographic, unkeyed hasher when items are untrusted or the filter must be
@@ -43,6 +50,92 @@ pub fn BloomFilter(comptime H: type) type {
             const length = std.math.ceilPowerOfTwo(u64, bits) catch 1 << 63;
             assert(std.math.isPowerOfTwo(length));
             return .{ .hashers = hashers, .bits = try BitMap.zeroes(gpa, length) };
+        }
+
+        /// A filter sized for `expected_items` (non-zero) at false positive rate `fp_rate`,
+        /// which must lie in (0, 1): `optimal_bits` bits and `optimal_hashers` hashers.
+        pub fn with_rate(gpa: Allocator, expected_items: u64, fp_rate: *const BigRational) !Self {
+            assert(expected_items > 0);
+            const bits = try optimal_bits(gpa, expected_items, fp_rate);
+            const hashers = try optimal_hashers(gpa, expected_items, bits);
+            assert(std.math.isPowerOfTwo(bits));
+            return init(gpa, hashers, bits);
+        }
+
+        /// `k = (m / n) ln(2)`, truncated and clamped to [1, 16]; 1 when `n` is zero.
+        pub fn optimal_hashers(gpa: Allocator, expected_items: u64, bits: u64) !u8 {
+            if (expected_items == 0) return 1;
+            var m = try BigRational.from_u64(gpa, bits);
+            defer m.deinit();
+            var ln2_value = try BigRational.from_frac_u64(gpa, ln2[0], ln2[1]);
+            defer ln2_value.deinit();
+            var n = try BigRational.from_u64(gpa, expected_items);
+            defer n.deinit();
+            var product = try m.mul(&ln2_value);
+            defer product.deinit();
+            var ratio = try product.div(&n);
+            defer ratio.deinit();
+            var integer = try ratio.to_integer();
+            defer integer.deinit();
+            // Rust's `to_u8().unwrap_or(16)`: anything outside u8 becomes 16.
+            const hashers = std.math.clamp(integer.toInt(u8) catch 16, 1, 16);
+            assert(hashers >= 1 and hashers <= 16);
+            return hashers;
+        }
+
+        /// `m = -n log2(p) / ln(2)`, with `log2` floored to 16 fractional bits (more bits,
+        /// never a higher rate), rounded up to a power of two (2^63 on overflow). Asserts
+        /// `fp_rate` lies in (0, 1).
+        pub fn optimal_bits(gpa: Allocator, expected_items: u64, fp_rate: *const BigRational) !u64 {
+            var one = try BigRational.one(gpa);
+            defer one.deinit();
+            assert(fp_rate.is_positive() and try fp_rate.order(&one) == .lt);
+            var log2_p = try fp_rate.log2_floor(16);
+            defer log2_p.deinit();
+            var n = try BigRational.from_u64(gpa, expected_items);
+            defer n.deinit();
+            var inverse = try BigRational.from_frac_u64(gpa, ln2_inv[0], ln2_inv[1]);
+            defer inverse.deinit();
+            var scaled = try n.mul(&log2_p);
+            defer scaled.deinit();
+            var negative_bits = try scaled.mul(&inverse);
+            defer negative_bits.deinit();
+            var bits = try negative_bits.neg();
+            defer bits.deinit();
+            // Rust casts the u128 ceiling `as usize`, truncating.
+            const raw: u64 = @truncate(try bits.ceil_to_u128());
+            const result = std.math.ceilPowerOfTwo(u64, @max(raw, 1)) catch 1 << 63;
+            assert(std.math.isPowerOfTwo(result));
+            return result;
+        }
+
+        /// `f^k` for the fill ratio `f` (set bits over all bits). The caller frees it.
+        pub fn estimated_false_positive_rate(self: *const Self, gpa: Allocator) !BigRational {
+            var fill = try BigRational.from_frac_u64(gpa, self.bits.count_ones(), self.bits.len());
+            defer fill.deinit();
+            return fill.pow(self.hashers);
+        }
+
+        /// The inserted item count `-(m / k) ln(1 - x / m)`, with `ln` from `log2_floor(16)`
+        /// times the rational ln(2); `usize::MAX` once every bit is set. The caller frees it.
+        pub fn estimated_count(self: *const Self, gpa: Allocator) !BigRational {
+            const m = self.bits.len();
+            const x = self.bits.count_ones();
+            assert(x <= m);
+            if (x >= m) return BigRational.from_u64(gpa, std.math.maxInt(u64));
+            var one_minus_fill = try BigRational.from_frac_u64(gpa, m - x, m);
+            defer one_minus_fill.deinit();
+            var log2_value = try one_minus_fill.log2_floor(16);
+            defer log2_value.deinit();
+            var ln2_value = try BigRational.from_frac_u64(gpa, ln2[0], ln2[1]);
+            defer ln2_value.deinit();
+            var ln_value = try log2_value.mul(&ln2_value);
+            defer ln_value.deinit();
+            var m_over_k = try BigRational.from_frac_u64(gpa, m, self.hashers);
+            defer m_over_k.deinit();
+            var negative = try m_over_k.mul(&ln_value);
+            defer negative.deinit();
+            return negative.neg();
         }
 
         pub fn deinit(self: *Self, gpa: Allocator) void {
