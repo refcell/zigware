@@ -102,6 +102,10 @@ encoding parts as soon as `codec` has its core API (see docs/lanes/codec.md).
   `overflowing_add`/`overflowing_sub`, `checked_add`/`checked_sub`.
 - `utils.sync.UpgradableRwLock(T)` over `std.Io.RwLock`/`Mutex`: `read`, `write`, `try_write`,
   `upgradable_read` -> `upgrade`, `downgrade_to_upgradable`; guards `get`/`deinit`.
+- `utils.futures`: `Pool(T).init(gpa, io, capacity)` (`push(function, args)`,
+  `next_completed`, `cancel_all`, `len`), `AbortablePool(T)` (tasks return `Io.Cancelable!T`;
+  `push` -> `Aborter`, `abort()`; `next_completed` -> `error.Aborted` for aborted tasks), and
+  `try_join_all(T, E, gpa, io, function, arguments)` (input order, first error cancels the rest).
 - `utils.Hostname` (`utils.hostname`): validated RFC 1035/1123 hostname stored inline
   (`init`, `literal`, `as_str`, `eql`, `order`, `{f}`, `len_max`, `label_len_max`,
   `max_encode_size` = 258), codec as a `RangeCfg(..=253)` byte string; `hostname.Error`.
@@ -135,6 +139,9 @@ encoding parts as soon as `codec` has its core API (see docs/lanes/codec.md).
 - `sync`: commonware's re-exported `parking_lot`/`tokio` locks are `std.Io.Mutex`/`RwLock`/
   `Condition`; `Exclusive` (a `Sync` marker) and the traced locks (tracing spans) have no Zig
   counterpart. `Widen` is `@as`, and `max` is `@max`.
+- `futures`: pools run functions as `std.Io` tasks instead of holding futures; aborting is an
+  explicit `Aborter.abort()` (Rust aborts on drop). `OptionFuture`, `rebind`/`rebind_entry`,
+  and `Shared` exist for Rust ownership and polling and are not ported.
 - `src/utils/fuzz.zig` is the utils fuzz driver: a body over `*FuzzRng`, run seeded in
   `zig build test` and under `std.testing.fuzz`.
 
@@ -151,7 +158,7 @@ encoding parts as soon as `codec` has its core API (see docs/lanes/codec.md).
 - [x] utils priority_set (resolver lane, audited), acknowledgement, cache (unit tests,
   colliding keys, model fuzz), channel mpsc/ring/reservation/fallible/tracked.
 - [x] utils handles (`Table`, `partition`), requested by storage-merkle.
-- [ ] Fuzz targets for every decoder (commonware utils/fuzz): done except futures.
+- [x] Fuzz targets for every commonware utils/fuzz target.
 
 ## Log
 - 2026-11-13: faults, rng (TestRng/ScriptedRng/FuzzRng + FuzzRng conformance hash), range,
@@ -188,3 +195,4 @@ encoding parts as soon as `codec` has its core API (see docs/lanes/codec.md).
 - 2026-11-16: NonZeroDuration, concurrency limiters, prefetch/Lookahead, and the lib_functions,
   net, and sequence fuzz targets.
 - 2026-11-16: bitmap Atomic, thread_local Cached, amount, and sync UpgradableRwLock.
+- 2026-11-16: futures Pool, AbortablePool, try_join_all, and the futures fuzz target.
