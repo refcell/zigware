@@ -26,9 +26,11 @@ const mem_module = @import("../mem.zig");
 const verification = @import("../verification.zig");
 const fixed = @import("../../journal/contiguous/fixed.zig");
 const metadata = @import("../../metadata/mod.zig");
+const authenticated = @import("../../journal/authenticated.zig");
 
 const Storage = runtime.storage.Storage;
 const Key = utils.sequence.PrefixedU64;
+const Bounds = @import("../../journal/contiguous/mod.zig").Bounds;
 const max_pins = merkle.max_pinned_nodes;
 
 /// Metadata key prefix of pinned nodes (keyed by position).
@@ -145,6 +147,157 @@ pub fn Merkle(comptime F: type, comptime Digest: type) type {
             const retain: Retain = .{ .at_most = max_leaves };
             var recovery = try Recovery.prepare(gpa, storage, hasher, cfg, retain);
             return recovery.finish();
+        }
+
+        /// `init_sync`'s configuration (commonware's `SyncConfig`).
+        pub const SyncConfig = struct {
+            config: Config,
+            /// The leaf range to sync; must not be empty.
+            range: merkle.Range,
+            /// The pins at `range.start`, in `merkle.nodes_to_pin` order, or null to take them
+            /// from metadata (first) or the journal.
+            pinned_nodes: ?[]const Digest = null,
+        };
+
+        /// Opens the structure for state sync of `cfg.range`, reusing what local storage holds:
+        /// - fresh start: retained data ends before the range start; discard it and start empty
+        ///   at the range start;
+        /// - prune and reuse: the range contains retained data; prune it to the range start;
+        /// - ahead: retained data extends past the range end; truncate to the range end;
+        /// - incompatible: retained data starts after the range start; discard it.
+        /// Without `pinned_nodes`, boundary pins already in metadata take precedence over
+        /// journal nodes. If interrupted, retry with the same range and pins.
+        pub fn init_sync(gpa: Allocator, storage: Storage, cfg: SyncConfig) Error!Self {
+            assert(cfg.range.start < cfg.range.end); // The sync range must not be empty.
+            const prune_loc = cfg.range.start;
+            const prune_pos = try merkle.position_from_location(F, prune_loc);
+            const end_pos = try merkle.position_from_location(F, cfg.range.end);
+            var store = try open_metadata(gpa, storage, cfg.config);
+            errdefer store.deinit();
+            var positions_buffer: [max_pins]u64 = undefined;
+            const pins = merkle.nodes_to_pin(F, prune_loc, &positions_buffer);
+            // Without caller pins, every pin missing from metadata must come from the journal:
+            // probe the highest, so the journal stays unopened when it lies past every blob.
+            const probe = if (cfg.pinned_nodes == null)
+                highest_missing_pin(&store, pins) orelse prune_pos
+            else
+                prune_pos;
+            const journal_cfg = cfg.config.journal();
+            var stored = try authenticated.Stored(Journal).open(
+                gpa,
+                storage,
+                journal_cfg,
+                probe,
+                end_pos,
+            );
+            errdefer switch (stored) {
+                .opened => |*recovery| recovery.deinit(),
+                .unopened => {},
+            };
+            const opened: ?*JournalRecovery = switch (stored) {
+                .opened => |*recovery| recovery,
+                .unopened => null,
+            };
+            // An opened journal starts at or below the sync start and ends at most at the
+            // range end. A complete tree ending at or before the sync start cannot serve the
+            // range, so it is reset unless the journal is already empty there.
+            const span: Bounds = if (opened) |recovery|
+                recovery.get_bounds()
+            else
+                .{ .start = prune_pos, .end = prune_pos };
+            const journal_size = @max(F.to_nearest_size(span.end), prune_pos);
+            const reset = journal_size == prune_pos and
+                (span.start != prune_pos or span.end != prune_pos);
+            try persist_sync_boundary(gpa, &store, opened, pins, prune_loc, cfg.pinned_nodes);
+            // Build the in-memory structure before pruning or reset removes pin sources.
+            const journal_leaves = F.position_to_location(journal_size).?;
+            var mem = try pinned(gpa, &store, opened, journal_leaves, prune_loc);
+            errdefer mem.deinit(gpa);
+            // Pins must be durable before reset or pruning removes their journal sources.
+            try store.sync();
+            var recovery = switch (stored) {
+                .opened => |opened_recovery| opened_recovery,
+                .unopened => try Journal.clear(gpa, storage, journal_cfg, prune_pos),
+            };
+            stored = .unopened; // The recovery is owned below.
+            const journal = try publish_sync_journal(&recovery, reset, prune_pos, journal_size);
+            assert(mem.size() == journal_size);
+            return .{
+                .gpa = gpa,
+                .mem = mem,
+                .pruned_to_pos = prune_pos,
+                .journal = journal,
+                .metadata = store,
+            };
+        }
+
+        /// The highest-positioned pin among `pins` that metadata lacks.
+        fn highest_missing_pin(store: *const Store, pins: []const u64) ?u64 {
+            var highest: ?u64 = null;
+            for (pins) |position| {
+                if (store.get(Key.init(node_prefix, position)) != null) continue;
+                highest = @max(highest orelse position, position);
+            }
+            assert(highest == null or std.mem.indexOfScalar(u64, pins, highest.?) != null);
+            return highest;
+        }
+
+        /// Stages the sync boundary and its pins in metadata, dropping every other pin: an
+        /// interrupted sync can leave metadata ahead of the journal, and recovery must not
+        /// prefer abandoned pins over journal nodes.
+        fn persist_sync_boundary(
+            gpa: Allocator,
+            store: *Store,
+            journal: ?*JournalRecovery,
+            pins: []const u64,
+            prune_loc: u64,
+            pinned_nodes: ?[]const Digest,
+        ) Error!void {
+            store.retain(pins, keep_boundary_pin);
+            try put_owned(gpa, store, Key.init(pruned_to_prefix, 0), &be_bytes(prune_loc));
+            if (pinned_nodes) |digests| {
+                if (digests.len != pins.len) return error.InvalidPinnedNodes;
+                for (pins, digests) |position, digest| {
+                    try put_owned(gpa, store, Key.init(node_prefix, position), &digest.bytes);
+                }
+            } else {
+                // Recovery may delete the journal nodes supplying these pins: preserve each
+                // in metadata before syncing it and removing its source.
+                for (pins) |position| {
+                    const digest = try get_from_recovery(store, journal, position);
+                    try put_owned(gpa, store, Key.init(node_prefix, position), &digest.bytes);
+                }
+            }
+            assert(store.get(Key.init(pruned_to_prefix, 0)) != null);
+        }
+
+        fn keep_boundary_pin(pins: []const u64, key: Key, _: *const []const u8) bool {
+            if (key.prefix() != node_prefix) return true;
+            return std.mem.indexOfScalar(u64, pins, key.value()) != null;
+        }
+
+        /// Resets or truncates the sync journal, prunes it to the boundary, and publishes it.
+        /// Consumes the recovery, also on error.
+        fn publish_sync_journal(
+            recovery: *JournalRecovery,
+            reset: bool,
+            prune_pos: u64,
+            journal_size: u64,
+        ) Error!Journal {
+            assert(journal_size >= prune_pos);
+            const prepared: Error!void = prepared: {
+                if (reset) {
+                    recovery.clear_to_size(prune_pos) catch |err| break :prepared err;
+                } else {
+                    recovery.truncate(journal_size) catch |err| break :prepared err;
+                }
+                _ = recovery.prune(prune_pos) catch |err| break :prepared err;
+            };
+            prepared catch |err| {
+                recovery.deinit();
+                return err;
+            };
+            return recovery.finish(journal_size);
         }
 
         /// A validated prefix whose storage is not truncated yet (commonware's `Recovery`).
@@ -508,12 +661,18 @@ pub fn Merkle(comptime F: type, comptime Digest: type) type {
         }
 
         fn put_metadata(self: *Self, key: Key, bytes: []const u8) Error!void {
-            const owned = try self.gpa.dupe(u8, bytes);
-            const previous = self.metadata.put(key, owned) catch |err| {
-                self.gpa.free(owned);
+            try put_owned(self.gpa, &self.metadata, key, bytes);
+        }
+
+        /// Stores a copy of `bytes` under `key`, freeing any value it replaces.
+        fn put_owned(gpa: Allocator, store: *Store, key: Key, bytes: []const u8) Error!void {
+            const owned = try gpa.dupe(u8, bytes);
+            const previous = store.put(key, owned) catch |err| {
+                gpa.free(owned);
                 return err;
             };
-            if (previous) |old| self.gpa.free(old);
+            if (previous) |old| gpa.free(old);
+            assert(store.get(key) != null);
         }
 
         /// The root, with the oldest `inactive_peaks` peaks folded.
@@ -679,4 +838,5 @@ pub fn Merkle(comptime F: type, comptime Digest: type) type {
 
 test {
     _ = @import("full_test.zig");
+    _ = @import("full_sync_test.zig");
 }

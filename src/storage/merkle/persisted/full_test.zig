@@ -13,46 +13,46 @@ const full = @import("full.zig");
 const fixed = @import("../../journal/contiguous/fixed.zig");
 
 const Sha256 = cryptography.Sha256;
-const D = Sha256.Digest;
+pub const D = Sha256.Digest;
 const H = merkle.hasher.Standard(Sha256);
-const gpa = testing.allocator;
-const families = .{ merkle.mmr.Family, merkle.mmb.Family };
-const hasher = H.init(.forward_fold);
-const Key = utils.sequence.PrefixedU64;
+pub const gpa = testing.allocator;
+pub const families = .{ merkle.mmr.Family, merkle.mmb.Family };
+pub const hasher = H.init(.forward_fold);
+pub const Key = utils.sequence.PrefixedU64;
 
-fn Merkle(comptime F: type) type {
+pub fn Merkle(comptime F: type) type {
     return full.Merkle(F, D);
 }
 
 /// Commonware's `test_digest(v)`: the hash of `v` as 8 big-endian bytes.
-fn test_digest(value: u64) D {
+pub fn test_digest(value: u64) D {
     var bytes: [8]u8 = undefined;
     std.mem.writeInt(u64, &bytes, value, .big);
     return Sha256.hash(&.{&bytes});
 }
 
-const Harness = struct {
+pub const Harness = struct {
     storage: runtime.buffer.mocks.Storage,
     cache_ref: runtime.buffer.paged.CacheRef,
     items_per_blob: u64 = 7,
 
-    fn init() !Harness {
+    pub fn init() !Harness {
         return .{
             .storage = .init(gpa),
             .cache_ref = try .init(gpa, 111, 5),
         };
     }
 
-    fn deinit(self: *Harness) void {
+    pub fn deinit(self: *Harness) void {
         self.cache_ref.deinit();
         self.storage.deinit();
     }
 
-    fn cfg(self: *Harness) full.Config {
+    pub fn cfg(self: *Harness) full.Config {
         return self.cfg_in("journal-partition", "metadata-partition");
     }
 
-    fn cfg_in(self: *Harness, journal: []const u8, meta: []const u8) full.Config {
+    pub fn cfg_in(self: *Harness, journal: []const u8, meta: []const u8) full.Config {
         return .{
             .journal_partition = journal,
             .metadata_partition = meta,
@@ -63,13 +63,13 @@ const Harness = struct {
         };
     }
 
-    fn open(self: *Harness, comptime F: type) !Merkle(F) {
+    pub fn open(self: *Harness, comptime F: type) !Merkle(F) {
         return Merkle(F).init(gpa, self.storage.interface(), &hasher, self.cfg());
     }
 };
 
 /// Appends `test_digest(from..to)` through one batch.
-fn add_digests(comptime F: type, structure: *Merkle(F), from: u64, to: u64) !void {
+pub fn add_digests(comptime F: type, structure: *Merkle(F), from: u64, to: u64) !void {
     var batch = try structure.new_batch();
     for (from..to) |i| {
         batch.add(gpa, &hasher, &test_digest(i).bytes) catch |err| {

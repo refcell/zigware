@@ -28,8 +28,15 @@ variants need `runtime` storage; do them after its interface lands.
   Recovery prepare/finish, flush/sync/start_sync, prune/prune_all, get_node(s), proofs,
   historical proofs, append-only batches, destroy) with commonware's empty, basic, get_nodes,
   flush, crash, orphan-leaf recovery, pruning, and recovery-with-pruning tests.
-- [ ] merkle/persisted/full: `init_sync` (over `journal.authenticated.Stored`), the historical
-  proof, destroy-interruption, and init_sync tests, and the merkle_full_operations and
+- [x] merkle/persisted/full `init_sync(gpa, storage, SyncConfig{config, range, pinned_nodes})`
+  over `journal.authenticated.Stored`, with the init_sync tests: empty, empty-at-start keeps
+  journal, exact match, partial overlap, recovered pins reopen and crash, metadata ahead of
+  journal, malformed/missing/extra pins, truncation past the range, pruned past the range,
+  stale pinned metadata, and pins read before pruning.
+- [ ] merkle/persisted/full: the blob-level init_sync tests (interrupted bounded publication,
+  interrupted clear, ahead skips discarded blobs, reset or stale-below-start leave blobs
+  unopened, torn tail repair; these also pin the journal probe at the highest missing pin),
+  the historical proof and destroy-interruption tests, and the merkle_full_operations and
   merkle_full_recovery fuzz targets.
 - [x] merkle/persisted/compact: `storage.merkle.compact.Merkle(F, Digest)` (init,
   from_compact_state, prune_to_frontier, append_leaf, root, leaves, snapshot, new_batch,
@@ -102,6 +109,9 @@ variants need `runtime` storage; do them after its interface lands.
   Positions live in `utils.handles.Table(u64)` as in commonware: `get` returns an iterator that
   confirms each candidate against its ring slot, and growth rehashes through the ring. Seeded and
   `std.testing.fuzz` targets check it against a model of live (position, key) pairs.
+- merkle/persisted/full init_sync: commonware's seeded storage-fault runs (`recovered_pins_crash`)
+  become a deterministic sweep: fail every mutation after the first `n`, crash, and reopen,
+  for each `n` until the sync completes.
 - merkle/persisted/compact: commonware's `Arc<Mem>` with copy-on-write mutators becomes an
   owned `Mem`; `snapshot` returns an owned clone, so it still never observes later mutations.
   Merkleizing is sequential, so there is no strategy parameter.
