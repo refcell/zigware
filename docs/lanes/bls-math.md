@@ -51,7 +51,8 @@ variants (MinPk, MinSig) must match exactly.
 - [x] p2p utils mux: `Muxer`, `MuxHandle`, `SubSender`, `SubReceiver`, `GlobalSender`,
   backup channel, `parse`, `prefixed`, with mux.rs's tests (not the `should_panic` one).
 - [x] p2p utils mocks: inert sender and receiver with their tests.
-- [ ] Check marshal's and aggregation's threshold paths against the simplex VRF scheme.
+- [x] Check marshal's and aggregation's threshold paths against the simplex VRF scheme:
+  aggregation's matched; marshal limits gained commonware's two VRF fixture cases.
 
 ## Decisions
 - p2p utils codec: payloads are byte slices, so decoded values are copies, not views of the

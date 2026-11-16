@@ -180,4 +180,7 @@ test "variable and fixed certificate overhead (secp256r1 and bls12381)" {
     const threshold = simplex_scheme.bls12381_threshold.standard;
     try check_fixture(V, threshold.Scheme(D, PublicKey, MinSig), threshold.fixture, 4, 0);
     try check_fixture(V, threshold.Scheme(D, PublicKey, MinPk), threshold.fixture, 4, 1000);
+    const vrf = simplex_scheme.bls12381_threshold.vrf;
+    try check_fixture(V, vrf.Scheme(D, PublicKey, MinSig), vrf.fixture, 4, 0);
+    try check_fixture(V, vrf.Scheme(D, PublicKey, MinPk), vrf.fixture, 4, 1000);
 }
