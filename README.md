@@ -26,6 +26,17 @@ latencies, and reports when each region crosses each step
 three regions in about 114 ms at the mean. `zig build run-estimator -- <file.lazy>
 --distribution <region:count,...>` runs any protocol in [examples/estimator](examples/estimator).
 
+<p align="center">
+  <img src="docs/assets/flood-demo.gif" width="800"
+    alt="Four flood peers exchange messages over authenticated p2p on real TCP">
+</p>
+
+[flood](examples/flood) runs four peers as separate processes on real TCP sockets. They find
+each other through authenticated p2p discovery, encrypt every connection, and send each other
+random messages as fast as the network accepts them. Each peer prints its throughput and
+latency every 2 s ([video](docs/assets/flood-demo.mp4)): about 620 messages per second per
+peer at around 1 ms mean latency. `etc/scripts/record-demo.sh flood` runs it locally.
+
 > [!WARNING]
 > zigware is pre-alpha and being ported now. Do not use it in production.
 
