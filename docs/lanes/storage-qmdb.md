@@ -25,7 +25,9 @@ that don't need them and keep a small interface where you must.
 - [x] cache (set-associative `location -> key` cache for snapshot rebuilds) with its tests.
 - [x] snapshot: serial rebuild of the key index and activity bitmap from the log, with
   model-checked tests (colliding and collision-free translators, with and without the cache).
-- [ ] Shared rest: bitmap, metrics, and the store traits.
+- [x] bitmap (`fill_from` floor-walk candidates over the activity bitmap, oracle-checked) and
+  metrics (the shared metric set over `runtime.telemetry.metrics`).
+- [ ] store (`store/db.rs`, the unauthenticated keyed store) and the `any` traits.
 - [ ] keyless (with its tests and conformance hashes).
 - [ ] immutable.
 - [ ] any (ordered and unordered, fixed and variable).
@@ -58,6 +60,10 @@ that don't need them and keep a small interface where you must.
   (`active_keys`, `activity` bitmap), `build_from_log(..., context)` (`context.status(is_active,
   superseded)`), `update_key`, `delete_key`. A reader has `get_bounds()` and
   `read(position) !Op`.
+- `storage.qmdb.bitmap`: `Shared(N)` (a `utils.bitmap.Prunable(N)`), `fill_from(gpa, bitmap,
+  scan_from, tip, limit, out)`.
+- `storage.qmdb.metrics.Metrics`: `init(scope)`, `deinit`, `update(size, pruning_boundary,
+  inactivity_floor, last_commit)`, the counters, and `Timed` durations (`*_duration.scoped(io)`).
 - `storage.qmdb`: `Error`, `root_bagging`, `hasher(H)`, `single_operation_root(F, H, bytes)`,
   `validate_initialization_bound`, `validate_initialization_commit`,
   `find_inactivity_floor_at`, `inactive_peaks_at`.
@@ -88,6 +94,7 @@ that don't need them and keep a small interface where you must.
   for a reason to spawn work during init; its results are identical. The build reads the log
   one position at a time through `read` rather than a replay stream, so any reader (the fixed
   journal, an in-memory log) fits.
+- bitmap: no `RwLock` around the activity bitmap; databases are single-owner.
 - Display formats an encoding of up to 4096 bytes as hex and prints `<N bytes>` beyond that
   (formatting does not allocate).
 
@@ -97,3 +104,4 @@ that don't need them and keep a small interface where you must.
 - 2026-11-13: verify (operation proofs) with its tests under MMR and MMB.
 - 2026-11-13: snapshot-rebuild key cache.
 - 2026-11-16: snapshot rebuild (serial) with model-checked tests.
+- 2026-11-16: floor-walk candidates (`bitmap.fill_from`) and the shared metric set.
