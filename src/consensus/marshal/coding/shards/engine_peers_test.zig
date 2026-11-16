@@ -358,3 +358,45 @@ test "cached observations refresh reconstruction state round" {
         }
     }.run);
 }
+
+// When peer gossip reconstructs the block before the leader's direct shard arrives, the
+// late leader shard is still accepted and verified (so the receiver relays it to slower
+// peers), and gossip after both is ignored without blocking anyone.
+test "late leader shard accepted after quorum transition" {
+    try harness.run_deterministic(struct {
+        fn run(io: Io) !void {
+            const fixture = try Fixture.init(io, .{ .primary = 10 });
+            defer fixture.deinit();
+            var block = try harness.encode(fixture.coding_config, 1, 100);
+            defer block.deinit(gpa);
+            const commitment = block.commitment();
+            const leader: usize = 0;
+            const victim: usize = 1;
+            const oracle = fixture.network.oracle();
+            try oracle.remove_link(fixture.peers[leader], fixture.peers[victim]);
+            try fixture.mailbox(leader).disperse(at(1), block.clone());
+            for (1..10) |index| try fixture.mailbox(index).gather(commitment, at(1));
+            try fixture.latency(4);
+            // The victim reconstructs from gossip before verifying its own shard.
+            var block_sub = try fixture.mailbox(victim).subscribe(commitment);
+            defer block_sub.deinit();
+            var reconstructed = try harness.expect_resolves(io, &block_sub);
+            defer reconstructed.deinit(gpa);
+            try testing.expect(reconstructed.commitment().eql(commitment));
+            const mailbox = fixture.mailbox(victim);
+            var shard_sub = try mailbox.subscribe_assigned_shard_verified(commitment);
+            defer shard_sub.deinit();
+            try harness.expect_pending(&shard_sub);
+            // Restore the link and resend the leader's shard, which arrives late.
+            try oracle.add_link(fixture.peers[leader], fixture.peers[victim], harness.default_link);
+            try send_index(fixture, leader, victim, &block, victim);
+            try fixture.latency(2);
+            try harness.expect_resolves(io, &shard_sub);
+            try testing.expectEqual(@as(usize, 0), try harness.blocked_count(fixture.network));
+            // Gossip after reconstruction and assigned-shard verification is dropped silently.
+            try send_index(fixture, 2, victim, &block, 2);
+            try fixture.latency(2);
+            try testing.expectEqual(@as(usize, 0), try harness.blocked_count(fixture.network));
+        }
+    }.run);
+}

@@ -6,7 +6,10 @@
 const std = @import("std");
 const testing = std.testing;
 const Io = std.Io;
+const codec = @import("codec");
+const coding = @import("coding");
 const cryptography = @import("cryptography");
+const parallel = @import("parallel");
 
 const harness = @import("engine_harness.zig");
 
@@ -509,6 +512,61 @@ test "non participant holds proposer shard as gossip" {
                 return error.NoProbe;
             try harness.expect_gossip(received, engine.me(), &probe);
             try expect_no_blocks(engine);
+        }
+    }.run);
+}
+
+// Regression test for commonware issue 5223: a peer that claims one minimum shard sends
+// twice `peer_buffer_size` of the widest shards the receiver admits, for commitments
+// consensus never gathers. The peer's buffer retains exactly `peer_buffer_size` of them.
+test "issue 5223 regression peer buffer bound" {
+    try harness.run_deterministic(struct {
+        fn run(io: Io) !void {
+            const one: coding.Config = .{ .minimum_shards = 1, .extra_shards = 1 };
+            const engine = try Unstarted.init(io, .{});
+            defer engine.deinit();
+            const peer = engine.peers[1];
+            const slots = engine.engine.config.peer_buffer_size;
+            // Under the one-shard config, each shard carries the whole coded payload of the
+            // largest block, wider than any shard an honest committee codes.
+            const max_block_size = harness.B.max_encode_size;
+            const payload: [max_block_size + coding.Config.fixed_size]u8 = @splat(0);
+            var encoding = try harness.C.encode(gpa, one, &payload, parallel.sequential);
+            defer encoding.deinit(gpa);
+            for (0..2 * slots) |salt| {
+                var salt_bytes: [8]u8 = undefined;
+                std.mem.writeInt(u64, &salt_bytes, salt, .big);
+                const block = harness.Sha256.hash(&.{&salt_bytes});
+                const commitment = Commitment.init(block, encoding.commitment, .empty, one);
+                const shard = harness.ShardType.init(commitment, 1, encoding.shards[1]);
+                // Decode it as the background receiver does.
+                const bytes = try codec.encode(harness.ShardType, gpa, shard);
+                defer gpa.free(bytes);
+                const decoded = try codec.decode_cfg(harness.ShardType, gpa, bytes, max_block_size);
+                try engine.engine.handle_network_shard(peer, decoded);
+            }
+            const queue = engine.engine.peer_buffers.get(peer) orelse return error.NotBuffered;
+            try testing.expectEqual(slots, queue.len);
+            try expect_no_blocks(engine);
+        }
+    }.run);
+}
+
+test "peer buffer lifetime tracks primary peers" {
+    try harness.run_deterministic(struct {
+        fn run(io: Io) !void {
+            const engine = try Unstarted.init(io, .{});
+            defer engine.deinit();
+            const sender = engine.peers[1];
+            // Only the sender is a tracked primary, so only it may hold a buffer.
+            try engine.engine.update_primary_peers(&.{sender});
+            var block = try make_block(engine.coding_config, 1);
+            defer block.deinit(gpa);
+            try engine.engine.handle_network_shard(sender, try shard_of(&block, 0));
+            try testing.expectEqual(@as(usize, 1), engine.buffered(1, block.commitment()));
+            // With no primary left, the sender's buffer is evicted.
+            try engine.engine.update_primary_peers(&.{});
+            try testing.expect(engine.engine.peer_buffers.get(sender) == null);
         }
     }.run);
 }

@@ -97,16 +97,21 @@ pub const ProviderRef = struct {
     }
 };
 
-pub const Types = struct {
-    pub const Block = B;
-    pub const Coding = C;
-    pub const Hasher = H;
-    pub const Provider = ProviderRef;
-    pub const Blocker = Net.Control;
-    pub const PeerProvider = Net.Manager;
-    pub const Network = Net;
-    pub const Strategy = parallel.Sequential;
-};
+pub const Types = TypesOf(C);
+
+/// The engine's types with coding scheme `Coding`.
+pub fn TypesOf(comptime CodingScheme: type) type {
+    return struct {
+        pub const Block = B;
+        pub const Coding = CodingScheme;
+        pub const Hasher = H;
+        pub const Provider = ProviderRef;
+        pub const Blocker = Net.Control;
+        pub const PeerProvider = Net.Manager;
+        pub const Network = Net;
+        pub const Strategy = parallel.Sequential;
+    };
+}
 
 pub const ShardEngine = engine_module.Engine(Types);
 pub const Mailbox = ShardEngine.Mailbox;
@@ -115,7 +120,7 @@ pub const Mailbox = ShardEngine.Mailbox;
 pub const test_quota = p2p.Quota.per_second(1_024);
 /// Latency of every default link.
 pub const link_latency_ms = 50;
-pub const peers_max = 16;
+pub const peers_max = 24;
 pub const default_link: p2p.simulated.Link = .{
     .latency = utils.Duration.from_millis(link_latency_ms),
     .jitter = utils.Duration.from_millis(0),
@@ -461,151 +466,164 @@ pub const Fixture = struct {
 
 /// commonware's `unstarted`: an engine for the participant at `index` of `count` peers that
 /// tests drive through its handlers. Every participant is a tracked primary.
-pub const Unstarted = struct {
-    pub const Options = struct {
-        count: usize = 4,
-        index: usize = 0,
-        records: usize = 16,
-        /// Run a member scheme (knows its index, cannot sign) instead of a signer.
-        member: bool = false,
-        /// Run outside the committee (seed `count`, a verifier scheme); `index` is unused.
-        outsider: bool = false,
-    };
+pub const Unstarted = UnstartedOf(ShardEngine);
 
-    io: Io,
-    network: *Net,
-    network_task: Io.Future((Io.Cancelable || Allocator.Error)!void),
-    registry: *metrics.Registry,
-    count: usize,
-    index: usize,
-    outsider: bool,
-    keys: [peers_max]PrivateKey = undefined,
-    peers: [peers_max]Key = undefined,
-    provider: MultiEpochProvider = .{},
-    engine: *ShardEngine = undefined,
-    mailbox: Mailbox = undefined,
-    receiver: ?Net.Receiver = null,
-    observers: [peers_max]?Net.Registered = @splat(null),
-    coding_config: coding.Config,
+/// commonware's `unstarted`: an `Engine` (any coding scheme) driven through its handlers.
+pub fn UnstartedOf(comptime Engine: type) type {
+    return struct {
+        const Self = @This();
 
-    pub fn init(io: Io, options: Options) !*Unstarted {
-        assert(options.count <= peers_max and options.index < options.count);
-        const self = try gpa.create(Unstarted);
-        errdefer gpa.destroy(self);
-        const registry = try gpa.create(metrics.Registry);
-        registry.* = .init(gpa);
-        const size = options.count + @intFromBool(options.outsider);
-        const network = try Net.init(gpa, io, network_config(size, size));
-        self.* = .{
-            .io = io,
-            .network = network,
-            .network_task = try io.concurrent(Net.run, .{network}),
-            .registry = registry,
-            .count = options.count,
-            .index = options.index,
-            .outsider = options.outsider,
-            .coding_config = types.coding_config_for_participants(@intCast(options.count)),
+        pub const Options = struct {
+            count: usize = 4,
+            index: usize = 0,
+            records: usize = 16,
+            /// Run a member scheme (knows its index, cannot sign) instead of a signer.
+            member: bool = false,
+            /// Run outside the committee (seed `count`, a verifier scheme); `index` is unused.
+            outsider: bool = false,
         };
-        sorted_keys(self.keys[0..self.count], self.peers[0..self.count], 0);
-        const set = try Scheme.Participants.init(gpa, self.peers[0..self.count]);
-        const scheme = if (options.outsider)
-            try Scheme.verifier(gpa, scheme_namespace, set)
-        else if (options.member)
-            (try Scheme.member(gpa, scheme_namespace, set, self.me())).?
-        else
-            (try Scheme.signer(gpa, scheme_namespace, set, self.keys[options.index])).?;
-        try self.provider.add(0, scheme);
-        try self.create(options.records);
-        return self;
-    }
 
-    fn create(self: *Unstarted, records: usize) !void {
-        const control = self.network.oracle().control(self.me());
-        const registered = try control.register(0, test_quota);
-        self.receiver = registered.receiver;
-        const scope = metrics.Scope.init(self.registry).child("engine");
-        const created = try ShardEngine.init(gpa, self.io, &scope, .{
-            .scheme_provider = .{ .provider = &self.provider },
-            .blocker = control,
-            .block_codec_config = {},
-            .strategy = parallel.sequential,
-            .mailbox_size = 16,
-            .peer_buffer_size = 4,
-            .records = records,
-            .peer_provider = self.network.oracle().manager(),
-        });
-        self.engine = created.engine;
-        self.mailbox = created.mailbox;
-        self.engine.attach_sender(registered.sender);
-        try self.engine.update_primary_peers(self.peers[0..self.count]);
-    }
+        io: Io,
+        network: *Net,
+        network_task: Io.Future((Io.Cancelable || Allocator.Error)!void),
+        registry: *metrics.Registry,
+        count: usize,
+        index: usize,
+        outsider: bool,
+        keys: [peers_max]PrivateKey = undefined,
+        peers: [peers_max]Key = undefined,
+        provider: MultiEpochProvider = .{},
+        engine: *Engine = undefined,
+        mailbox: Engine.Mailbox = undefined,
+        receiver: ?Net.Receiver = null,
+        observers: [peers_max]?Net.Registered = @splat(null),
+        coding_config: coding.Config,
 
-    pub fn me(self: *const Unstarted) Key {
-        if (self.outsider) return PrivateKey.from_seed(self.count).public_key();
-        return self.peers[self.index];
-    }
+        pub fn init(io: Io, options: Options) !*Self {
+            assert(options.count <= peers_max and options.index < options.count);
+            const self = try gpa.create(Self);
+            errdefer gpa.destroy(self);
+            const registry = try gpa.create(metrics.Registry);
+            registry.* = .init(gpa);
+            const size = options.count + @intFromBool(options.outsider);
+            const network = try Net.init(gpa, io, network_config(size, size));
+            self.* = .{
+                .io = io,
+                .network = network,
+                .network_task = try io.concurrent(Net.run, .{network}),
+                .registry = registry,
+                .count = options.count,
+                .index = options.index,
+                .outsider = options.outsider,
+                .coding_config = types.coding_config_for_participants(@intCast(options.count)),
+            };
+            sorted_keys(self.keys[0..self.count], self.peers[0..self.count], 0);
+            const set = try Scheme.Participants.init(gpa, self.peers[0..self.count]);
+            const scheme = if (options.outsider)
+                try Scheme.verifier(gpa, scheme_namespace, set)
+            else if (options.member)
+                (try Scheme.member(gpa, scheme_namespace, set, self.me())).?
+            else
+                (try Scheme.signer(gpa, scheme_namespace, set, self.keys[options.index])).?;
+            try self.provider.add(0, scheme);
+            try self.create(options.records);
+            return self;
+        }
 
-    /// Registers peer `index` to observe the engine's gossip, links the engine to it, and
-    /// tracks every participant (commonware's observer setup).
-    pub fn observe(self: *Unstarted, index: usize) !*Net.Receiver {
-        assert(self.outsider or index != self.index);
-        assert(self.observers[index] == null);
-        const oracle = self.network.oracle();
-        self.observers[index] = try oracle.control(self.peers[index]).register(0, test_quota);
-        try oracle.add_link(self.me(), self.peers[index], default_link);
-        try self.track_all();
-        return &self.observers[index].?.receiver;
-    }
+        fn create(self: *Self, records: usize) !void {
+            const control = self.network.oracle().control(self.me());
+            const registered = try control.register(0, test_quota);
+            self.receiver = registered.receiver;
+            const scope = metrics.Scope.init(self.registry).child("engine");
+            const created = try Engine.init(gpa, self.io, &scope, .{
+                .scheme_provider = .{ .provider = &self.provider },
+                .blocker = control,
+                .block_codec_config = {},
+                .strategy = parallel.sequential,
+                .mailbox_size = 16,
+                .peer_buffer_size = 4,
+                .records = records,
+                .peer_provider = self.network.oracle().manager(),
+            });
+            self.engine = created.engine;
+            self.mailbox = created.mailbox;
+            self.engine.attach_sender(registered.sender);
+            try self.engine.update_primary_peers(self.peers[0..self.count]);
+        }
 
-    /// Tracks every participant as primary (and an outsider engine as secondary).
-    pub fn track_all(self: *Unstarted) !void {
-        const secondary: []const Key = if (self.outsider) &.{self.me()} else &.{};
-        try track(self.network, 0, self.peers[0..self.count], secondary);
-        try sleep_ms(self.io, 10);
-    }
+        pub fn me(self: *const Self) Key {
+            if (self.outsider) return PrivateKey.from_seed(self.count).public_key();
+            return self.peers[self.index];
+        }
 
-    pub fn shard(self: *Unstarted, from: usize, value: ShardType) !void {
-        try self.engine.handle_network_shard(self.peers[from], value);
-    }
+        /// Registers peer `index` to observe the engine's gossip, links the engine to it, and
+        /// tracks every participant (commonware's observer setup).
+        pub fn observe(self: *Self, index: usize) !*Net.Receiver {
+            assert(self.outsider or index != self.index);
+            assert(self.observers[index] == null);
+            const oracle = self.network.oracle();
+            self.observers[index] = try oracle.control(self.peers[index]).register(0, test_quota);
+            try oracle.add_link(self.me(), self.peers[index], default_link);
+            try self.track_all();
+            return &self.observers[index].?.receiver;
+        }
 
-    pub fn gather(self: *Unstarted, commitment: Commitment, at_round: Round) !void {
-        try self.engine.handle_gather(commitment, at_round);
-    }
+        /// Tracks every participant as primary (and an outsider engine as secondary).
+        pub fn track_all(self: *Self) !void {
+            const secondary: []const Key = if (self.outsider) &.{self.me()} else &.{};
+            try track(self.network, 0, self.peers[0..self.count], secondary);
+            try sleep_ms(self.io, 10);
+        }
 
-    pub fn has_record(self: *const Unstarted, commitment: Commitment) bool {
-        return self.engine.records.contains(commitment);
-    }
+        pub fn shard(self: *Self, from: usize, value: Engine.ShardType) !void {
+            try self.engine.handle_network_shard(self.peers[from], value);
+        }
 
-    pub fn buffered(self: *const Unstarted, from: usize, commitment: Commitment) usize {
-        return self.engine.buffered(self.peers[from], commitment);
-    }
+        pub fn gather(self: *Self, commitment: Engine.Commitment, at_round: Round) !void {
+            try self.engine.handle_gather(commitment, at_round);
+        }
 
-    pub fn subscribe_assigned(self: *Unstarted, commitment: Commitment) !oneshot.Receiver(void) {
-        const pair = try oneshot.channel(void, gpa, self.io);
-        try self.engine.subscribe_assigned(commitment, pair.sender);
-        return pair.receiver;
-    }
+        pub fn has_record(self: *const Self, commitment: Engine.Commitment) bool {
+            return self.engine.records.contains(commitment);
+        }
 
-    pub fn subscribe(self: *Unstarted, commitment: Commitment) !oneshot.Receiver(Coded) {
-        const pair = try oneshot.channel(Coded, gpa, self.io);
-        try self.engine.subscribe_commitment(commitment, pair.sender);
-        return pair.receiver;
-    }
+        pub fn buffered(self: *const Self, from: usize, commitment: Engine.Commitment) usize {
+            return self.engine.buffered(self.peers[from], commitment);
+        }
 
-    pub fn deinit(self: *Unstarted) void {
-        self.engine.destroy();
-        self.mailbox.deinit();
-        if (self.receiver) |*value| value.deinit();
-        for (&self.observers) |*observer| if (observer.*) |*value| value.deinit();
-        self.provider.deinit();
-        self.network.close();
-        self.network_task.await(self.io) catch |err| std.debug.panic("run: {t}", .{err});
-        self.network.deinit();
-        self.registry.deinit();
-        gpa.destroy(self.registry);
-        gpa.destroy(self);
-    }
-};
+        pub fn subscribe_assigned(
+            self: *Self,
+            commitment: Engine.Commitment,
+        ) !oneshot.Receiver(void) {
+            const pair = try oneshot.channel(void, gpa, self.io);
+            try self.engine.subscribe_assigned(commitment, pair.sender);
+            return pair.receiver;
+        }
+
+        pub fn subscribe(
+            self: *Self,
+            commitment: Engine.Commitment,
+        ) !oneshot.Receiver(Engine.Coded) {
+            const pair = try oneshot.channel(Engine.Coded, gpa, self.io);
+            try self.engine.subscribe_commitment(commitment, pair.sender);
+            return pair.receiver;
+        }
+
+        pub fn deinit(self: *Self) void {
+            self.engine.destroy();
+            self.mailbox.deinit();
+            if (self.receiver) |*value| value.deinit();
+            for (&self.observers) |*observer| if (observer.*) |*value| value.deinit();
+            self.provider.deinit();
+            self.network.close();
+            self.network_task.await(self.io) catch |err| std.debug.panic("run: {t}", .{err});
+            self.network.deinit();
+            self.registry.deinit();
+            gpa.destroy(self.registry);
+            gpa.destroy(self);
+        }
+    };
+}
 
 /// Expects `receiver` to hold nothing yet.
 pub fn expect_pending(receiver: anytype) !void {

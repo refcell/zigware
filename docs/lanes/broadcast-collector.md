@@ -130,12 +130,11 @@ that harness. It builds on `coding` (ReedSolomon), `consensus.types.coding.Commi
 - [ ] Once ancestry and application land: move validation's copies of `has_contiguous_height`
   and `is_block_in_expected_epoch` to `marshal.ancestry` and `marshal.application.validation`.
 - [x] marshal coding `shards`: mailbox, metrics, reconstruction state, engine, e2e test.
-- [ ] marshal coding `shards`: the rest of engine.rs's tests (60 of about 70 ported; left:
-  peer-set buffer lifetime, issue 5223, old-epoch cutover, evicted node, late leader shard,
-  and the BatchChecking/Gated/Recording scheme tests; the job-only tests
-  (`reconstruction_job_does_not_stall_engine`, `reconstruction_result_discarded_with_its_record`,
-  `mid_job_shards_merge_with_insufficient_result`, `job_len_counts_taken_shards`) have no
-  counterpart while reconstruction runs inline).
+- [x] marshal coding `shards`: engine.rs's tests (66 ported). commonware's `Gated` and
+  `Recording` schemes back only its job tests (`reconstruction_job_does_not_stall_engine`,
+  `reconstruction_result_discarded_with_its_record`,
+  `mid_job_shards_merge_with_insufficient_result`, `job_len_counts_taken_shards`), which have
+  no counterpart while reconstruction runs inline.
 - [ ] marshal coding `variant` (Coding) against core's `assert_variant` (with `clone_block`,
   `deinit_block`) and `assert_buffer` on the shards Mailbox.
 - [x] marshal coding `validation` (proposal, block, reconstruction) with its 17 tests.
@@ -160,3 +159,6 @@ that harness. It builds on `coding` (ReedSolomon), `consensus.types.coding.Commi
   on an unstarted engine (`engine_harness.zig`).
 - 2026-11-16: 35 more shards engine tests (peers, buffers, invalid shards, epochs and
   provider churn, failed reconstruction, withholding leaders, non-participants, members).
+- 2026-11-16: the last shards engine tests (peer-set buffer lifetime, issue 5223, old-epoch
+  cutover, evicted node, late leader shard, BatchChecking at quorum); the harness's
+  `UnstartedOf`/`TypesOf` take any coding scheme.
