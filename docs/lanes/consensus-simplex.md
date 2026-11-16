@@ -111,8 +111,8 @@ resolver; those lanes are running, so do the types first and the actors as they 
   Framework{participants, faults, rounds, mode, max_cases})` returns owned `Case`s
   (`compromised` indices and a `Scenario`; `free_cases`). `Scenario.masks/route(view,
   term_length, ...)`, `view_masks`/`view_route`, `partition`, `index_of`, and
-  `Elector(E)` (scripted leaders per term, then fallback `E`). `SplitTarget` is a local
-  stand-in until p2p's split senders land. Drawing matches rand 0.10 for the same RNG.
+  `Elector(E)` (scripted leaders per term, then fallback `E`). `SplitTarget` is p2p's
+  `simulated.SplitTarget`. Drawing matches rand 0.10 for the same RNG.
 - `consensus.simplex.mocks`: `relay.Relay(D, P)` (`deregister(key)` and `deregister_all`
   return once no delivery can reach the removed listeners), `application.Application(H, P)`
   (the automaton and relay, with simulated latency from p2p's `Normal`),
@@ -216,8 +216,8 @@ resolver; those lanes are running, so do the types first and the actors as they 
   received_certificates_are_reported, survives_burst, engine_shutdown (abort and graceful;
   commonware's running-task count waits on the runtime's task metrics), and
   attributable_reporter_filtering, and split_views_no_lockup (with the nullify-only mock).
-  Next: certified splits, hailstorm, and the rest, seeded; the twins campaigns once p2p's
-  split senders and receivers land.
+  Next: the twins campaigns (on p2p's split senders and receivers), certified splits,
+  hailstorm, and the rest, seeded.
 - [ ] Fuzz targets (commonware consensus/fuzz).
 
 ## Log
@@ -265,3 +265,4 @@ resolver; those lanes are running, so do the types first and the actors as they 
 - 2026-11-16: twins scenario generator (mocks/twins.rs), iterative, with its core tests.
 - 2026-11-16: bls12381_threshold vrf Scheme (signing, seeds, Seedable) with vrf.rs's tests;
   Random V0/V1 select-leader conformance hashes match.
+- 2026-11-16: twins uses p2p's `simulated.SplitTarget` (5826612); the stand-in is removed.

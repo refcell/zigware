@@ -25,6 +25,7 @@ const std = @import("std");
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const codec = @import("codec");
+const p2p = @import("p2p");
 const runtime = @import("runtime");
 const utils = @import("utils");
 const consensus_types = @import("../../types.zig");
@@ -38,9 +39,8 @@ const TermLength = consensus_types.TermLength;
 /// The most participants a scenario supports.
 pub const participants_max = generator_mod.participants_max;
 
-/// Which twin halves receive a message (commonware p2p `simulated::SplitTarget`; a local
-/// stand-in until p2p's split senders and receivers land).
-pub const SplitTarget = enum { none, primary, secondary, both };
+/// Which twin halves receive a message (p2p `simulated.SplitTarget`).
+pub const SplitTarget = p2p.simulated.SplitTarget;
 
 /// One round's adversarial setting: its leader and the participants each twin half
 /// exchanges messages with (the masks may overlap).
