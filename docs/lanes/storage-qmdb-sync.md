@@ -37,7 +37,9 @@ it comes first once `any` lands.
   proof, prune, staged, and random-chain tests also run over ordered.
 - [ ] current variable (once `any` variable lands).
 - [ ] current sync glue.
-- [ ] sync engine (with `requests`), database, journal, source, harness; per-variant sync glue
+- [x] sync journal (`journal.init`/`resize`/`append` over contiguous journals, `Memory(Op)`)
+  and the request tracker (`requests.Requests(F)`), with their commonware tests.
+- [ ] sync engine, database, source, harness; per-variant sync glue
   (`keyless/sync.zig`, `immutable/sync.zig`, `any/sync/`), which this lane owns.
 - [ ] compact (db, batch, operation, witness, sync) once persisted merkle compact lands.
 - [ ] Fuzz targets and benches for these modules.

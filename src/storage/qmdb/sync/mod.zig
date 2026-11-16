@@ -3,7 +3,7 @@
 //! Sources are untrusted: their responses are verified against the requested target. The
 //! target itself is a trusted input chosen by the caller. Target updates form a forward-only
 //! sequence: sync adopts only strictly advancing targets and discards the rest. The engine,
-//! journal, database interface, and sources land in later pieces.
+//! database interface, and sources land in later pieces.
 
 const std = @import("std");
 
@@ -12,6 +12,8 @@ pub const ServeError = errors.ServeError;
 pub const EngineError = errors.EngineError;
 pub const Error = errors.Error;
 pub const gaps = @import("gaps.zig");
+pub const journal = @import("journal.zig");
+pub const requests = @import("requests.zig");
 pub const metrics = @import("metrics.zig");
 pub const Metrics = metrics.Metrics;
 pub const source = @import("source.zig");
