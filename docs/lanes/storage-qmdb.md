@@ -23,8 +23,9 @@ that don't need them and keep a small interface where you must.
 - [x] verify (`ProofExt`: operation range, pinned-node, extract, proof-store, and multi
   proofs) with its tests under both families.
 - [x] cache (set-associative `location -> key` cache for snapshot rebuilds) with its tests.
-- [ ] Shared rest: snapshot (needs index cursors over a contiguous reader), bitmap, metrics,
-  and the store traits.
+- [x] snapshot: serial rebuild of the key index and activity bitmap from the log, with
+  model-checked tests (colliding and collision-free translators, with and without the cache).
+- [ ] Shared rest: bitmap, metrics, and the store traits.
 - [ ] keyless (with its tests and conformance hashes).
 - [ ] immutable.
 - [ ] any (ordered and unordered, fixed and variable).
@@ -53,6 +54,10 @@ that don't need them and keep a small interface where you must.
   (each `(F, H, O, gpa, proof, ...)` over operations of codec type `O`), `encode_all`.
 - `storage.qmdb.cache.Cache(K)`: `init(gpa, capacity)`, `get`, `put(gpa, location, key)`
   (takes ownership), `remove`, `deinit`.
+- `storage.qmdb.snapshot`: `build(Op, gpa, floor, reader, index, cache_size) Build`
+  (`active_keys`, `activity` bitmap), `build_from_log(..., context)` (`context.status(is_active,
+  superseded)`), `update_key`, `delete_key`. A reader has `get_bounds()` and
+  `read(position) !Op`.
 - `storage.qmdb`: `Error`, `root_bagging`, `hasher(H)`, `single_operation_root(F, H, bytes)`,
   `validate_initialization_bound`, `validate_initialization_commit`,
   `find_inactivity_floor_at`, `inactive_peaks_at`.
@@ -78,6 +83,11 @@ that don't need them and keep a small interface where you must.
 - verify: commonware's `ProofExt` trait methods are free functions; `verify_multi` takes
   locations and operations as two parallel slices (mismatched lengths fail), like
   `merkle.Proof.verify_multi_inclusion`. Operations are encoded into scratch from `gpa`.
+- snapshot: only the serial build is ported (commonware's `Sequential` path). The parallel
+  build over partitioned indices (decoder tasks, worker channels, prefetch pipelining) waits
+  for a reason to spawn work during init; its results are identical. The build reads the log
+  one position at a time through `read` rather than a replay stream, so any reader (the fixed
+  journal, an in-memory log) fits.
 - Display formats an encoding of up to 4096 bytes as hex and prints `<N bytes>` beyond that
   (formatting does not allocate).
 
@@ -86,3 +96,4 @@ that don't need them and keep a small interface where you must.
   keyless/immutable/any operations with all 21 codec conformance hashes, decoder fuzz.
 - 2026-11-13: verify (operation proofs) with its tests under MMR and MMB.
 - 2026-11-13: snapshot-rebuild key cache.
+- 2026-11-16: snapshot rebuild (serial) with model-checked tests.
