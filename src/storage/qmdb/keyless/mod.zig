@@ -15,5 +15,6 @@ pub const initial_root = db.initial_root;
 test {
     std.testing.refAllDecls(@This());
     _ = @import("db_test.zig");
+    _ = @import("variable_test.zig");
     _ = @import("conformance_test.zig");
 }

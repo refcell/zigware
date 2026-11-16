@@ -7,8 +7,9 @@
 //! weak link to its parent, and the journal batch keeps every live ancestor's operations so
 //! reads stay exact after ancestors are released.
 //!
-//! Values must not own memory yet (the journal's batches own their items; variable values
-//! come later). After a storage error only `deinit` may follow.
+//! Values may own memory (variable values such as `[]const u8`): a batch owns what it is
+//! given through `append` and `with_metadata`, and every read returns a copy the caller owns.
+//! After a storage error only `deinit` may follow.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -52,9 +53,6 @@ fn check_floor(location: u64, floor: u64) qmdb.Error!void {
 pub fn Db(comptime F: type, comptime E: type, comptime C: type, comptime H: type) type {
     return struct {
         const Self = @This();
-        comptime {
-            assert(!codec.owns_memory(E.Value));
-        }
         pub const Operation = operation.Operation(F, E);
         pub const Value = E.Value;
         pub const Journal = authenticated.Journal(F, C, H);
@@ -360,10 +358,12 @@ pub fn Db(comptime F: type, comptime E: type, comptime C: type, comptime H: type
             /// The commitment this batch builds on.
             base: Commitment,
 
-            /// Discards the batch.
+            /// Discards the batch and the values it owns.
             pub fn deinit(self: *UnmerkleizedBatch) void {
                 self.journal_batch.deinit(self.gpa);
+                codec.free_items(Value, self.gpa, self.appends.items);
                 self.appends.deinit(self.gpa);
+                codec.free(?Value, self.gpa, self.metadata);
                 if (self.parent) |parent| parent.release();
                 self.* = undefined;
             }
@@ -373,8 +373,10 @@ pub fn Db(comptime F: type, comptime E: type, comptime C: type, comptime H: type
                 return self.base.size + self.appends.items.len;
             }
 
-            /// Sets the metadata of this batch's commit (not inherited by children).
+            /// Sets the metadata of this batch's commit (not inherited by children). The batch
+            /// owns `metadata` and frees any it held before.
             pub fn with_metadata(self: *UnmerkleizedBatch, metadata: ?Value) void {
+                codec.free(?Value, self.gpa, self.metadata);
                 self.metadata = metadata;
             }
 
@@ -383,6 +385,7 @@ pub fn Db(comptime F: type, comptime E: type, comptime C: type, comptime H: type
                 self.inactivity_floor = floor;
             }
 
+            /// Appends `value`, which the batch owns on success (the caller keeps it on error).
             pub fn append(self: *UnmerkleizedBatch, value: Value) !void {
                 try self.appends.append(self.gpa, value);
             }
@@ -460,14 +463,7 @@ pub fn Db(comptime F: type, comptime E: type, comptime C: type, comptime H: type
                 const floor_new = self.inactivity_floor;
                 const commit_location = self.size();
                 try chain.validate_merkleize_floor(start_floor, floor_new, commit_location);
-                for (self.appends.items) |value| {
-                    try self.journal_batch.add(gpa, .{ .append = value });
-                }
-                const commit_op: Operation = .{ .commit = .{
-                    .metadata = self.metadata,
-                    .floor = floor_new,
-                } };
-                try self.journal_batch.add(gpa, commit_op);
+                try self.hand_over(floor_new);
                 const merkleized = try gpa.create(MerkleizedBatch);
                 errdefer gpa.destroy(merkleized);
                 const journal_batch = try self.journal_batch.merkleize(gpa, &db.journal);
@@ -482,6 +478,21 @@ pub fn Db(comptime F: type, comptime E: type, comptime C: type, comptime H: type
                 if (self.parent) |parent| parent.release();
                 self.* = undefined;
                 return merkleized;
+            }
+
+            /// Moves the appends and the commit into the journal batch, which owns them after.
+            fn hand_over(self: *UnmerkleizedBatch, floor_new: u64) !void {
+                const gpa = self.gpa;
+                const count = self.appends.items.len;
+                const ops = try gpa.alloc(Operation, count + 1);
+                defer gpa.free(ops);
+                for (self.appends.items, ops[0..count]) |value, *op| op.* = .{ .append = value };
+                ops[count] = .{ .commit = .{ .metadata = self.metadata, .floor = floor_new } };
+                const size_before = self.journal_batch.size();
+                try self.journal_batch.add_many(gpa, ops);
+                self.appends.clearRetainingCapacity();
+                self.metadata = null;
+                assert(self.journal_batch.size() == size_before + count + 1);
             }
 
             /// The base, boundary, and live ancestor tips of the new batch, validated against

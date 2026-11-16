@@ -31,8 +31,10 @@ which every database here is built on.
 - [x] keyless: `Db` and its batches over the authenticated journal, with mod.rs's
   core scenarios under MMR and MMB (fixed values).
 - [x] keyless: `KeylessMmrFixedConf`/`KeylessMmbFixedConf` root conformance (matches).
-- [ ] keyless: the remaining mod.rs/fixed.rs scenarios, variable values over the contiguous
-  variable journal (`Keyless*VariableConf`).
+- [x] keyless: variable values over the contiguous variable journal; batches own their
+  values and reads return owned copies; `KeylessMmr/MmbVariableConf` root conformance
+  (matches).
+- [ ] keyless: the remaining mod.rs/fixed.rs scenarios.
 - [x] Switch the interim `qmdb.authenticated` to storage-journal's
   `journal.authenticated.Journal` (keyless, any, immutable); the interim copy is deleted.
 - [x] any, unordered fixed (MMR and MMB): `Db`, batches with chaining, the floor walk under
@@ -163,8 +165,10 @@ which every database here is built on.
 - Display formats an encoding of up to 4096 bytes as hex and prints `<N bytes>` beyond that
   (formatting does not allocate).
 
-- keyless: built on `journal.authenticated.Journal`, whose batches own their items, so values
-  must not own memory (a comptime check) until variable values land. A merkleized batch holds
+- keyless: built on `journal.authenticated.Journal`, whose batches own their items. Values may
+  own memory: `append` and `with_metadata` hand the value to the batch (freed on `deinit`, or
+  moved into the journal batch by `merkleize`), and every read returns an owned copy. A
+  merkleized batch holds
   a weak link to its parent; its journal batch keeps the item chunks of its live ancestors
   (contiguous below its own items), so reads and applies stay exact after ancestors are
   released.
@@ -207,3 +211,5 @@ which every database here is built on.
 - 2026-11-16: any staging (`stage`, `expand`, `Slot`, `StagedLoc`, `resolve_updates`).
 - 2026-11-16: any (ordered, fixed): link maintenance, span and neighbor lookups, root
   conformance hashes (MMR and MMB) match commonware.
+- 2026-11-16: keyless variable values; variable root conformance hashes (MMR and MMB) match
+  commonware.
