@@ -47,24 +47,9 @@ pub const Config = struct {
     fetch_retry_delay_ns: u64,
 };
 
-/// The statuses the `fetch` counter family records (commonware
-/// `telemetry::metrics::status::Status`, which exposes variant names as label values).
-pub const Status = enum {
-    success,
-    ambiguous,
-    dropped,
-
-    pub fn label_value(status: Status) []const u8 {
-        return switch (status) {
-            .success => "Success",
-            .ambiguous => "Ambiguous",
-            .dropped => "Dropped",
-        };
-    }
-};
-
-const StatusLabel = struct { status: Status };
-const FetchFamily = metrics.raw.Family(StatusLabel, metrics.raw.Counter);
+/// The statuses the `fetch` counter records (commonware `telemetry::metrics::status::Status`):
+/// `success`, `ambiguous`, and `dropped`.
+pub const Status = metrics.status.Status;
 
 /// Handle to an opaque-fetcher resolver actor (`Resolver`, `TargetedResolver`).
 pub fn Resolver(comptime K: type, comptime S: type, comptime P: type) type {
@@ -206,7 +191,7 @@ pub fn Actor(comptime F: type, comptime C: type) type {
         retry_schedule: std.ArrayList(Retry) = .empty,
         /// `fetch_total{status}`: useful and dropped responses, each counted once even when
         /// redelivered. A status appears in the output once first counted.
-        fetch: metrics.Registered(FetchFamily),
+        fetch: metrics.status.Counter,
         removed: std.ArrayList(K) = .empty,
 
         /// Spawn an actor and return a handle to it (commonware `init`). Its metrics register
@@ -264,12 +249,7 @@ pub fn Actor(comptime F: type, comptime C: type) type {
                 .deliveries = undefined,
                 .fetch = undefined,
             };
-            self.fetch = try scope.family(
-                StatusLabel,
-                metrics.raw.Counter,
-                "fetch",
-                "Number of fetches by status",
-            );
+            self.fetch = try .register(&scope, "fetch", "Number of fetches by status");
             errdefer self.fetch.deinit();
             self.deliveries = try .init_with_signal(gpa, io, consumer, &self.signal);
             return self;
@@ -597,14 +577,12 @@ pub fn Actor(comptime F: type, comptime C: type) type {
         }
 
         fn count(self: *Self, status: Status) Allocator.Error!void {
-            const counter = try self.fetch.metric().get_or_create(.{ .status = status });
-            counter.inc();
+            try self.fetch.inc(status);
         }
 
         /// The `fetch_total` count for `status` (zero until first counted).
         pub fn fetch_count(self: *Self, status: Status) u64 {
-            const counter = self.fetch.metric().get(.{ .status = status }) orelse return 0;
-            return counter.get();
+            return self.fetch.get(status);
         }
 
         fn drop_value(self: *Self, value: V) void {

@@ -117,8 +117,8 @@ on p2p's simulated network and the deterministic runtime.
   inbox (keeping mailbox backpressure), and retry deadlines bound the wait. Each turn handles
   one event in commonware's arm order. Fetch aborts are `std.Io` cancelations.
 - Metrics go to `runtime.telemetry.metrics` through a `Scope` the caller passes (it stands in
-  for commonware's context). The status label enum lives in the resolver until runtime ports
-  `status::Status`; it prints commonware's variant names.
+  for commonware's context). Status counters use runtime's `metrics.status.Counter`
+  (`resolver.@"opaque".Status` is its `Status`).
 - Seeded fuzz uses `p2p.fuzz.run` (the same driver as codec's). Fuzz bodies draw their
   operations from `smith.bytes` rather than `smith.value`/`eos`: on random seeded input,
   `value` of a small type returns its minimum and `eos` ends the input almost at once. Models
