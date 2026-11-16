@@ -28,6 +28,7 @@ and start when what they build on has landed (or can be stubbed behind an interf
 | 3 | consensus-marshal | consensus: aggregation, marshal | aggregation now (started); marshal actors after broadcast, resolver, archive |
 | 3 | deployer | deployer (config types, CLI, non-cloud logic, SigV4 signer) | now (started) |
 | 3 | curve25519 | cryptography/curve25519 (Ed25519 ZIP-215, X25519, vectors, fuzz, benches) | now (started) |
-| 4 | glue-examples | glue, examples (log, chat, dkg, bridge, estimator, flood) | consensus |
+| 4 | glue | glue: simulate, transfers, then stateful and dkg | simulate now (started); rest as qmdb and consensus land |
+| 4 | glue-examples | examples (log, chat, dkg, bridge, estimator, flood) | consensus |
 
 Demo recordings for the README come from the examples as they become runnable.
