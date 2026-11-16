@@ -212,4 +212,5 @@ test {
     _ = @import("cursor.zig");
     _ = @import("queue_test.zig");
     _ = @import("recovery_fuzz_test.zig");
+    _ = @import("conformance_test.zig");
 }

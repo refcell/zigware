@@ -49,19 +49,23 @@ resize, sync), `runtime.storage`, with the in-memory backend `runtime.storage.me
 - [x] metadata (two-blob atomic key-value store).
 - [x] metadata: the `metadata_recovery` fuzz target and the overwrite-crash-during-sync test
   on `runtime.storage.faulty` (with storage-archive's `archive/faults.zig` harness).
-- [ ] metadata: `start_sync` (pipelined syncs) and the conformance hash (`MetadataWorkload`).
+- [x] metadata: `start_sync` with its tests, and the `MetadataWorkload` conformance hash.
 - [x] `queue_recovery` fuzz target on faulty storage.
 - [x] `journal_segmented_variable_recovery` fuzz target on faulty storage (raw-image oracle).
 - [x] `journal_oversized_recovery` fuzz target on faulty storage (marker-floor oracle).
 - [x] `journal_contiguous_recovery` fuzz target on faulty storage (multi-cycle, both kinds).
 - [x] queue (durable at-least-once queue over the contiguous variable journal, with its
   cursor) with storage.rs's tests and the `QueueWorkload` round trip.
-- [ ] queue: conformance hash for `QueueWorkload` (needs a storage conformance harness).
-- [ ] Conformance hashes for every on-disk format, fuzz targets (storage/fuzz).
+- [x] queue: the `QueueWorkload` conformance hash.
+- [x] Journal conformance hashes: contiguous fixed and variable, segmented fixed, glob,
+  variable, and oversized, and authenticated over MMR and MMB, all matching commonware's.
+- [ ] Journal conformance hashes of the compressed (`<true>`) workloads: they need zstd
+  output byte-identical to libzstd level 3 (with storage-merkle's compressor).
 - [ ] Metrics: record through `runtime.telemetry.metrics` where commonware has metrics
   (journal and manager counters, metadata `sync_rewrites`/`sync_overwrites`), replacing
   the plain fields.
-- [ ] zstd: a real compressor (LZ matches, FSE/Huffman) so compressed journals shrink.
+- Handed to storage-merkle (2026-11-16): `src/storage/journal/zstd.zig`'s real compressor and
+  the `journal_fixed_operations` and `queue_operations` fuzz targets.
 
 ## Public API (on main)
 - `storage.journal.Error`: commonware's `journal::Error` variants plus `codec.Error`.
@@ -165,7 +169,7 @@ resize, sync), `runtime.storage`, with the in-memory backend `runtime.storage.me
   `ack_up_to`, `is_acked`, `floor`, `read_position`, `is_empty`, `reset`, `pending`;
   `Config(V)` is `journal.contiguous.variable.Config(V)`; `cursor.Cursor`.
 - `storage.metadata`: `Metadata(K, V)` with `init`, `deinit`, `get`, `get_mut`,
-  `put`, `put_sync`, `upsert`, `remove`, `clear`, `retain`, `items`, `count`, `sync`,
+  `put`, `put_sync`, `upsert`, `remove`, `clear`, `retain`, `items`, `count`, `sync`, `start_sync`,
   `destroy`; `Config(V)`.
 
 ## Decisions
@@ -287,6 +291,14 @@ resize, sync), `runtime.storage`, with the in-memory backend `runtime.storage.me
   16-bit, appends get 5 of 16 op draws, and `items_per_section` is biased toward small
   sections so seeded runs reach prunes.
 
+- Storage conformance workloads follow storage-archive's harness (`cache/conformance_test.zig`):
+  in-memory storage, `TestRng` seeded with the case seed, and the storage audit committed. The
+  six large journal workloads (up to 16k items per case) run in Debug only with
+  `-Dslow-tests`, like other lanes' large conformance tests.
+- metadata `start_sync` is `sync`: a failed started sync fails at the call and consumes the
+  store, instead of failing the next sync (commonware's dropped-handle and failure tests map
+  onto that, on faulty storage).
+
 ## Log
 - 2026-11-13: journal Error, frame encoding/decoding with zstd frames, durability Barrier,
   frame fuzz target.
@@ -316,5 +328,7 @@ resize, sync), `runtime.storage`, with the in-memory backend `runtime.storage.me
 - 2026-11-16: queue_recovery fuzz target on faulty storage.
 - 2026-11-16: journal_segmented_variable_recovery fuzz target on faulty storage.
 - 2026-11-16: journal_oversized_recovery fuzz target on faulty storage.
+- 2026-11-16: journal, metadata, and queue conformance hashes (10 workloads, all matching);
+  metadata `start_sync` and its tests.
 - 2026-11-16: contiguous replay no longer flushes the write buffer (found by the
   journal_contiguous_recovery port, which landed with it).

@@ -46,4 +46,5 @@ pub const Error = error{
 
 test {
     std.testing.refAllDecls(@This());
+    _ = @import("conformance_test.zig");
 }

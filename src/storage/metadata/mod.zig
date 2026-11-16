@@ -420,6 +420,13 @@ pub fn Metadata(comptime K: type, comptime V: type) type {
             try self.write_next_version();
         }
 
+        /// commonware's `start_sync`: blobs sync synchronously here, so the sync completes
+        /// (or fails, leaving the store failed) before this returns, and no second sync can
+        /// overlap it.
+        pub fn start_sync(self: *Self) Error!void {
+            return self.sync();
+        }
+
         /// Write and persist the next version of the store to the target blob.
         fn write_next_version(self: *Self) Error!void {
             const next_version = self.next_version;
@@ -552,4 +559,6 @@ pub fn Metadata(comptime K: type, comptime V: type) type {
 test {
     _ = @import("tests.zig");
     _ = @import("recovery_fuzz_test.zig");
+    _ = @import("conformance_test.zig");
+    _ = @import("start_sync_test.zig");
 }
