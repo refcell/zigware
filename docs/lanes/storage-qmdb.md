@@ -11,9 +11,9 @@ Builds on (all on main unless noted): `storage.journal.contiguous.fixed` (9717c0
 partitioned, immutable), `storage.merkle` (MMR and MMB, Mem, proofs, ProofStore),
 `storage.AuthenticatedBitMap`, `storage.metadata`, `runtime.storage.memory`,
 `runtime.buffer`, `runtime.telemetry.metrics`, and the deterministic runner's storage.
-Not yet on main: persisted merkle (storage-merkle lane) and `journal/authenticated.rs`
-(storage-journal lane). Both lanes are porting them now; until they land, work on the parts
-that don't need them and keep a small interface where you must.
+Also on main: persisted merkle (`storage.merkle.full`, storage-merkle lane) and the
+authenticated journal (`storage.journal.authenticated.Journal`, storage-journal lane, c6b5f78),
+which every database here is built on.
 
 ## Backlog
 - [x] Shared codecs: value encodings, operation commit codecs, floor policies and `Walk`,
@@ -28,13 +28,13 @@ that don't need them and keep a small interface where you must.
 - [x] bitmap (`fill_from` floor-walk candidates over the activity bitmap, oracle-checked) and
   metrics (the shared metric set over `runtime.telemetry.metrics`).
 - [ ] store (`store/db.rs`, the unauthenticated keyed store) and the `any` traits.
-- [x] keyless: `Db` and its batches over the interim authenticated journal, with mod.rs's
+- [x] keyless: `Db` and its batches over the authenticated journal, with mod.rs's
   core scenarios under MMR and MMB (fixed values).
 - [x] keyless: `KeylessMmrFixedConf`/`KeylessMmbFixedConf` root conformance (matches).
 - [ ] keyless: the remaining mod.rs/fixed.rs scenarios, variable values over the contiguous
   variable journal (`Keyless*VariableConf`).
-- [ ] Switch `qmdb.authenticated` to storage-journal's `journal.authenticated.Journal` when it
-  lands (same method names).
+- [x] Switch the interim `qmdb.authenticated` to storage-journal's
+  `journal.authenticated.Journal` (keyless, any, immutable); the interim copy is deleted.
 - [x] any, unordered fixed (MMR and MMB): `Db`, batches with chaining, the floor walk under
   non-evicting policies, `AnyMmr/MmbUnorderedFixedConf` root conformance (matches), and
   scenario plus randomized chain tests against a model and the reopened rebuild.
@@ -64,12 +64,6 @@ that don't need them and keep a small interface where you must.
   `get_many`, `merkleize(&db)`, `deinit`. `MerkleizedBatch` (refcounted `retain`/`release`):
   `root`, `bounds`, `operations`, `proof`, `pinned_nodes`, `get`, `get_many`, `new_batch`.
   `keyless.initial_root(F, E, H)`.
-- `storage.qmdb.authenticated.Journal(F, C, Hash)`: the interim authenticated journal
-  (storage-journal's planned API): `prepare`/`Recovery.finish`, `init`, `size`, `get_bounds`,
-  `read`, `read_many`, `root`, `append`, `commit`, `sync`, `start_sync`, `prune`, `destroy`,
-  `new_batch` → `Batch.add`/`add_many`/`merkleize` → `MerkleizedBatch` (refcounted, keeps
-  live ancestors' items), `apply_batch`, `historical_proof`/`proof`, `speculative_proof`,
-  `speculative_pinned_nodes`.
 - `storage.qmdb.init_journal(J, gpa, storage, merkle_cfg, journal_cfg, InitOptions)`.
 - `storage.qmdb.immutable.Db(F, K, E, C, H, T)` (`T` the translator of its
   `index.immutable.Index`), with public fields `journal`, `snapshot`, `inactivity_floor_loc`,
@@ -156,11 +150,11 @@ that don't need them and keep a small interface where you must.
 - Display formats an encoding of up to 4096 bytes as hex and prints `<N bytes>` beyond that
   (formatting does not allocate).
 
-- keyless: until storage-journal's authenticated `Journal` lands, `qmdb.authenticated` pairs
-  `merkle.full` with the contiguous journal under the same API. Values put in a batch are
-  shallow copies (kept alive by the caller until the batch is applied or released); every
-  read returns owned values. A merkleized batch holds a weak link to its parent and the item
-  chunks of its live ancestors, so reads and applies stay exact after ancestors are released.
+- keyless: built on `journal.authenticated.Journal`, whose batches own their items, so values
+  must not own memory (a comptime check) until variable values land. A merkleized batch holds
+  a weak link to its parent; its journal batch keeps the item chunks of its live ancestors
+  (contiguous below its own items), so reads and applies stay exact after ancestors are
+  released.
   Mutators take `*Self` (commonware threads the database by value); `start_sync` returns no
   handle; there is no `strategy`.
 
@@ -187,3 +181,5 @@ that don't need them and keep a small interface where you must.
 - 2026-11-16: any takes the bitmap chunk size `N` as a parameter (current needs 32).
 - 2026-11-16: immutable (fixed): Db, chained batches, root conformance hashes (MMR and MMB)
   match commonware.
+- 2026-11-16: keyless, any, and immutable moved onto `journal.authenticated.Journal`; the
+  interim `qmdb.authenticated` is gone.

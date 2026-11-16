@@ -7,10 +7,8 @@
 //! weak link to its parent, and the journal batch keeps every live ancestor's operations so
 //! reads stay exact after ancestors are released.
 //!
-//! Ownership: values handed to a batch are shallow copies, so the caller keeps any memory they
-//! borrow alive until the batch is applied or released. Every read (`get`, `get_many`,
-//! `get_metadata`, from the database or a batch) returns owned values; free them with
-//! `codec.free`. After a storage error only `deinit` may follow.
+//! Values must not own memory yet (the journal's batches own their items; variable values
+//! come later). After a storage error only `deinit` may follow.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -21,7 +19,7 @@ const merkle = @import("../../merkle/mod.zig");
 const qmdb = @import("../mod.zig");
 const chain = @import("../chain.zig");
 const value_mod = @import("../value.zig");
-const authenticated = @import("../authenticated.zig");
+const authenticated = @import("../../journal/authenticated.zig");
 const metrics_mod = @import("../metrics.zig");
 const operation = @import("operation.zig");
 
@@ -54,6 +52,9 @@ fn check_floor(location: u64, floor: u64) qmdb.Error!void {
 pub fn Db(comptime F: type, comptime E: type, comptime C: type, comptime H: type) type {
     return struct {
         const Self = @This();
+        comptime {
+            assert(!codec.owns_memory(E.Value));
+        }
         pub const Operation = operation.Operation(F, E);
         pub const Value = E.Value;
         pub const Journal = authenticated.Journal(F, C, H);
@@ -62,7 +63,7 @@ pub fn Db(comptime F: type, comptime E: type, comptime C: type, comptime H: type
         pub const Bounds = chain.Bounds(F, Digest);
         pub const Proof = Journal.Proof;
         /// A proof and the operations it covers (`deinit` frees both).
-        pub const ProofOps = Journal.ProofItems;
+        pub const ProofOps = Journal.Proved;
         pub const Cfg = Config(C.BackingConfig);
 
         gpa: Allocator,
@@ -291,21 +292,23 @@ pub fn Db(comptime F: type, comptime E: type, comptime C: type, comptime H: type
             return batch;
         }
 
-        /// The operation at `location` if a batch in `batch`'s chain holds it.
+        /// The operation at `location` if a batch in `batch`'s chain holds it: its own items,
+        /// then its live ancestors' (contiguous below it, nearest last).
         fn read_chain_op(batch: *const MerkleizedBatch, location: u64) ?Operation {
             const journal_batch = batch.journal_batch;
-            if (read_chunk(journal_batch.items, location)) |op| return op;
-            var index = journal_batch.ancestor_items.len;
-            while (index > 0) {
+            const chunks = journal_batch.ancestor_items;
+            var items = journal_batch.batch_items();
+            var end = journal_batch.size();
+            var index = chunks.len;
+            while (true) {
+                assert(items.len <= end);
+                const start = end - items.len;
+                if (location >= start and location < end) return items[@intCast(location - start)];
+                if (location >= end or index == 0) return null;
                 index -= 1;
-                if (read_chunk(journal_batch.ancestor_items[index], location)) |op| return op;
+                items = chunks[index].items;
+                end = start;
             }
-            return null;
-        }
-
-        fn read_chunk(chunk: *const Journal.Chunk, location: u64) ?Operation {
-            if (location < chunk.start() or location >= chunk.end) return null;
-            return chunk.items[@intCast(location - chunk.start())];
         }
 
         /// A clone of the value of `op`, owned by the caller.
@@ -350,7 +353,7 @@ pub fn Db(comptime F: type, comptime E: type, comptime C: type, comptime H: type
             gpa: Allocator,
             metadata: ?Value = null,
             inactivity_floor: u64,
-            journal_batch: Journal.Batch,
+            journal_batch: Journal.UnmerkleizedBatch,
             appends: std.ArrayList(Value) = .empty,
             /// A strong reference to the parent, null for a batch on the database.
             parent: ?*MerkleizedBatch,
@@ -359,7 +362,7 @@ pub fn Db(comptime F: type, comptime E: type, comptime C: type, comptime H: type
 
             /// Discards the batch.
             pub fn deinit(self: *UnmerkleizedBatch) void {
-                self.journal_batch.deinit();
+                self.journal_batch.deinit(self.gpa);
                 self.appends.deinit(self.gpa);
                 if (self.parent) |parent| parent.release();
                 self.* = undefined;
@@ -457,19 +460,22 @@ pub fn Db(comptime F: type, comptime E: type, comptime C: type, comptime H: type
                 const floor_new = self.inactivity_floor;
                 const commit_location = self.size();
                 try chain.validate_merkleize_floor(start_floor, floor_new, commit_location);
-                for (self.appends.items) |value| try self.journal_batch.add(.{ .append = value });
+                for (self.appends.items) |value| {
+                    try self.journal_batch.add(gpa, .{ .append = value });
+                }
                 const commit_op: Operation = .{ .commit = .{
                     .metadata = self.metadata,
                     .floor = floor_new,
                 } };
-                try self.journal_batch.add(commit_op);
+                try self.journal_batch.add(gpa, commit_op);
                 const merkleized = try gpa.create(MerkleizedBatch);
                 errdefer gpa.destroy(merkleized);
-                const journal_batch = try self.journal_batch.merkleize(&db.journal);
-                errdefer journal_batch.release();
+                const journal_batch = try self.journal_batch.merkleize(gpa, &db.journal);
+                errdefer journal_batch.release(gpa);
                 const tip_size = commit_location + 1;
                 const inactive_peaks = merkle.inactive_peaks(F, tip_size, floor_new);
-                state.tip = .{ .size = tip_size, .root = try journal_batch.root(inactive_peaks) };
+                const tip_root = try journal_batch.root(&db.journal.hasher, inactive_peaks);
+                state.tip = .{ .size = tip_size, .root = tip_root };
                 state.inactivity_floor = floor_new;
                 merkleized.init(gpa, journal_batch, self.parent, state);
                 self.appends.deinit(gpa);
@@ -547,7 +553,7 @@ pub fn Db(comptime F: type, comptime E: type, comptime C: type, comptime H: type
                 assert(self.strong > 0);
                 self.strong -= 1;
                 if (self.strong > 0) return;
-                self.journal_batch.release();
+                self.journal_batch.release(self.gpa);
                 self.bounds.deinit(self.gpa);
                 if (self.parent) |parent| parent.release_weak();
                 self.parent = null;
@@ -576,7 +582,7 @@ pub fn Db(comptime F: type, comptime E: type, comptime C: type, comptime H: type
 
             /// This batch's own operations and the location of the first.
             pub fn operations(self: *const MerkleizedBatch) struct { u64, []const Operation } {
-                return .{ self.bounds.base.size, self.journal_batch.get_items() };
+                return .{ self.bounds.base.size, self.journal_batch.batch_items() };
             }
 
             /// A proof of this batch's operations against its root. Caller owns it.

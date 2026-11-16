@@ -21,7 +21,7 @@ const qmdb = @import("../mod.zig");
 const chain = @import("../chain.zig");
 const value_mod = @import("../value.zig");
 const diff_mod = @import("../any/diff.zig");
-const authenticated = @import("../authenticated.zig");
+const authenticated = @import("../../journal/authenticated.zig");
 const metrics_mod = @import("../metrics.zig");
 const operation = @import("operation.zig");
 
@@ -111,7 +111,7 @@ pub fn Db(F: type, K: type, E: type, C: type, H: type, T: type) type {
         pub const Bounds = chain.Bounds(F, Digest);
         pub const Proof = Journal.Proof;
         /// A proof and the operations it covers (`deinit` frees both).
-        pub const ProofOps = Journal.ProofItems;
+        pub const ProofOps = Journal.Proved;
         pub const Cfg = Config(T, C.BackingConfig);
         pub const BatchDiff = Diff(K, Value);
         pub const Set = Operation.Set;
@@ -411,7 +411,7 @@ fn Unmerkleized(comptime D: type) type {
         gpa: Allocator,
         metadata: ?V = null,
         inactivity_floor: u64,
-        journal_batch: D.Journal.Batch,
+        journal_batch: D.Journal.UnmerkleizedBatch,
         /// Sets in order; a later set of a key replaces an earlier one.
         sets: std.ArrayList(D.Set) = .empty,
         /// A strong reference to the parent, null for a batch on the database.
@@ -421,7 +421,7 @@ fn Unmerkleized(comptime D: type) type {
 
         /// Discards the batch.
         pub fn deinit(self: *Self) void {
-            self.journal_batch.deinit();
+            self.journal_batch.deinit(self.gpa);
             self.sets.deinit(self.gpa);
             if (self.parent) |parent| parent.release();
             self.* = undefined;
@@ -487,20 +487,21 @@ fn Unmerkleized(comptime D: type) type {
             const floor = self.inactivity_floor;
             try chain.validate_merkleize_floor(self.base_floor(db), floor, commit_location);
             for (entries) |e| {
-                try self.journal_batch.add(.{ .set = .{ .key = e.key, .value = e.value } });
+                try self.journal_batch.add(gpa, .{ .set = .{ .key = e.key, .value = e.value } });
             }
             const commit_op: D.Operation = .{ .commit = .{
                 .metadata = self.metadata,
                 .floor = floor,
             } };
-            try self.journal_batch.add(commit_op);
+            try self.journal_batch.add(gpa, commit_op);
             const merkleized = try gpa.create(D.MerkleizedBatch);
             errdefer gpa.destroy(merkleized);
-            const journal_batch = try self.journal_batch.merkleize(&db.journal);
-            errdefer journal_batch.release();
+            const journal_batch = try self.journal_batch.merkleize(gpa, &db.journal);
+            errdefer journal_batch.release(gpa);
             const tip_size = commit_location + 1;
             const inactive_peaks = merkle.inactive_peaks(D.Family, tip_size, floor);
-            links.state.tip = .{ .size = tip_size, .root = try journal_batch.root(inactive_peaks) };
+            const tip_root = try journal_batch.root(&db.journal.hasher, inactive_peaks);
+            links.state.tip = .{ .size = tip_size, .root = tip_root };
             links.state.inactivity_floor = floor;
             const own_diff = try D.BatchDiff.create(gpa, entries);
             entries_owned = false;
@@ -645,7 +646,7 @@ fn Merkleized(comptime D: type) type {
             assert(self.strong > 0);
             self.strong -= 1;
             if (self.strong > 0) return;
-            self.journal_batch.release();
+            self.journal_batch.release(self.gpa);
             self.diff.release(self.gpa);
             for (self.ancestor_diffs) |d| d.release(self.gpa);
             self.gpa.free(self.ancestor_diffs);
@@ -677,7 +678,7 @@ fn Merkleized(comptime D: type) type {
 
         /// This batch's own operations and the location of the first.
         pub fn operations(self: *const Self) struct { u64, []const D.Operation } {
-            return .{ self.bounds.base.size, self.journal_batch.get_items() };
+            return .{ self.bounds.base.size, self.journal_batch.batch_items() };
         }
 
         /// A proof of this batch's operations against its root. Caller owns it.

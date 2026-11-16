@@ -22,7 +22,7 @@ const merkle = @import("../../merkle/mod.zig");
 const qmdb = @import("../mod.zig");
 const chain = @import("../chain.zig");
 const value_mod = @import("../value.zig");
-const authenticated = @import("../authenticated.zig");
+const authenticated = @import("../../journal/authenticated.zig");
 const metrics_mod = @import("../metrics.zig");
 const snapshot_mod = @import("../snapshot.zig");
 const bitmap_mod = @import("../bitmap.zig");
@@ -70,7 +70,7 @@ pub fn Db(F: type, U: type, C: type, I: type, H: type, comptime N: usize) type {
         pub const Bitmap = bitmap_mod.Shared(N);
         pub const Proof = Log.Proof;
         /// A proof and the operations it covers (`deinit` frees both).
-        pub const ProofOps = Log.ProofItems;
+        pub const ProofOps = Log.Proved;
         pub const Cfg = Config(I.Translator, C.BackingConfig);
         pub const UnmerkleizedBatch = batch_mod.Unmerkleized(Self);
         pub const MerkleizedBatch = batch_mod.Merkleized(Self);

@@ -23,7 +23,6 @@ pub const cache = @import("cache.zig");
 pub const snapshot = @import("snapshot.zig");
 pub const bitmap = @import("bitmap.zig");
 pub const metrics = @import("metrics.zig");
-pub const authenticated = @import("authenticated.zig");
 pub const keyless = @import("keyless/mod.zig");
 pub const immutable = @import("immutable/mod.zig");
 pub const any = @import("any/mod.zig");

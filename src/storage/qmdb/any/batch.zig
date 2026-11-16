@@ -29,7 +29,7 @@ pub fn Unmerkleized(comptime D: type) type {
         pub const Mutation = struct { key: K, value: ?V };
 
         gpa: Allocator,
-        journal_batch: D.Log.Batch,
+        journal_batch: D.Log.UnmerkleizedBatch,
         metadata: ?V = null,
         /// Writes in order; a later write of a key replaces an earlier one.
         mutations: std.ArrayList(Mutation) = .empty,
@@ -42,7 +42,7 @@ pub fn Unmerkleized(comptime D: type) type {
 
         /// Discards the batch.
         pub fn deinit(self: *Self) void {
-            self.journal_batch.deinit();
+            self.journal_batch.deinit(self.gpa);
             self.mutations.deinit(self.gpa);
             if (self.parent) |parent| parent.release();
             self.* = undefined;
@@ -297,9 +297,10 @@ fn Merkleizer(comptime D: type) type {
             assert(loc >= self.db_state.size);
             if (loc >= self.base_state.size) return ops[@intCast(loc - self.base_state.size)];
             for (self.ancestors) |ancestor| {
-                const chunk = ancestor.journal_batch.items;
-                if (loc >= chunk.start() and loc < chunk.end) {
-                    return chunk.items[@intCast(loc - chunk.start())];
+                const items = ancestor.journal_batch.batch_items();
+                const end = ancestor.journal_batch.size();
+                if (loc >= end - items.len and loc < end) {
+                    return items[@intCast(loc - (end - items.len))];
                 }
             }
             unreachable; // The ancestors cover [boundary, base) contiguously.
@@ -550,7 +551,7 @@ fn Merkleizer(comptime D: type) type {
             walked: *Walked(D),
             walk_floor: u64,
             metadata: ?V,
-            journal_batch: *D.Log.Batch,
+            journal_batch: *D.Log.UnmerkleizedBatch,
         ) !*D.MerkleizedBatch {
             const gpa = self.gpa;
             const commit_loc = walked.next_loc();
@@ -572,11 +573,12 @@ fn Merkleizer(comptime D: type) type {
             errdefer gpa.free(diffs);
             const merkleized = try gpa.create(D.MerkleizedBatch);
             errdefer gpa.destroy(merkleized);
-            try journal_batch.add_many(walked.ops.items);
-            const journal = try journal_batch.merkleize(&self.db.log);
-            errdefer journal.release();
+            try journal_batch.add_many(gpa, walked.ops.items);
+            const journal = try journal_batch.merkleize(gpa, &self.db.log);
+            errdefer journal.release(gpa);
             const tip_size = commit_loc + 1;
-            const root = try journal.root(merkle.inactive_peaks(D.Family, tip_size, floor));
+            const peaks = merkle.inactive_peaks(D.Family, tip_size, floor);
+            const root = try journal.root(&self.db.log.hasher, peaks);
             for (self.ancestors, diffs) |a, *d| d.* = a.diff.retain();
             merkleized.* = .{
                 .gpa = gpa,
@@ -697,7 +699,7 @@ pub fn Merkleized(comptime D: type) type {
             self.strong -= 1;
             if (self.strong > 0) return;
             const gpa = self.gpa;
-            self.journal_batch.release();
+            self.journal_batch.release(gpa);
             self.diff.release(gpa);
             for (self.ancestor_diffs) |d| d.release(gpa);
             gpa.free(self.ancestor_diffs);
@@ -730,7 +732,7 @@ pub fn Merkleized(comptime D: type) type {
 
         /// This batch's own operations and the location of the first.
         pub fn operations(self: *const Self) struct { u64, []const D.Operation } {
-            return .{ self.bounds.base.size, self.journal_batch.get_items() };
+            return .{ self.bounds.base.size, self.journal_batch.batch_items() };
         }
 
         /// A proof of this batch's operations against its root. Caller owns it.
