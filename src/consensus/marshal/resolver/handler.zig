@@ -10,7 +10,7 @@ const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const codec = @import("codec");
 const types = @import("../../types.zig");
-
+const Cutoff = @import("../core/floor.zig").Cutoff;
 const Height = types.Height;
 const Round = types.Round;
 
@@ -170,6 +170,16 @@ pub fn Request(comptime D: type) type {
             };
         }
 
+        /// Whether the request stays above the processed round floor `cutoff` (requests without
+        /// a round stay).
+        pub fn above_round_floor(self: Self, cutoff: Cutoff) bool {
+            return switch (self) {
+                .notarized => |round| !cutoff.covers(round),
+                .finalized_by_round => |value| !cutoff.covers(value.bound),
+                .finalized, .untrusted, .certified, .finalized_by_height => true,
+            };
+        }
+
         /// The resolver key and the subscriber annotation.
         pub fn split(self: Self) struct { Key(D), Annotation } {
             return switch (self) {
@@ -219,6 +229,28 @@ pub fn above_height_floor(
             .notarization => true,
         },
         .notarized => true,
+    };
+}
+
+/// Whether a pending fetch stays above the processed round floor `cutoff` (commonware
+/// `above_round_floor`): round-bound requests are pruned once the cutoff covers them; others
+/// stay.
+pub fn above_round_floor(
+    comptime D: type,
+    cutoff: Cutoff,
+    key: Key(D),
+    annotation: Annotation,
+) bool {
+    return switch (key) {
+        .notarized => |round| !cutoff.covers(round),
+        .block => switch (annotation) {
+            .finalized => |finalized| switch (finalized) {
+                .by_round => |round| !cutoff.covers(round),
+                .by_height => true,
+            },
+            .notarization, .untrusted, .certified => true,
+        },
+        .finalized => true,
     };
 }
 
@@ -312,6 +344,85 @@ test "requests split into matching keys and annotations" {
     try testing.expect(above_height_floor(D, .new(9), key, annotation));
     const finalized_key, const finalized_annotation = (Request(D){ .finalized = .new(3) }).split();
     try testing.expect(!above_height_floor(D, .new(3), finalized_key, finalized_annotation));
+}
+
+test "height floor predicate prunes height-bound requests at the floor" {
+    const D = Sha256.Digest;
+    const height_floor: Height = .new(100);
+    const block: Key(D) = .{ .block = Sha256.hash(&.{"block"}) };
+    const notarized_round: Round = .new(.new(333), .new(150));
+    const kept = [_]struct { Key(D), Annotation }{
+        .{ .{ .finalized = .new(200) }, .{ .finalized = .{ .by_height = .new(200) } } },
+        .{ .{ .notarized = notarized_round }, .{ .notarization = notarized_round } },
+        .{ block, .{ .certified = .new(101) } },
+        .{ block, .{ .untrusted = .new(101) } },
+    };
+    for (kept) |entry| try testing.expect(above_height_floor(D, height_floor, entry[0], entry[1]));
+    const pruned = [_]struct { Key(D), Annotation }{
+        .{ .{ .finalized = .new(100) }, .{ .finalized = .{ .by_height = .new(100) } } },
+        .{ block, .{ .finalized = .{ .by_height = .new(100) } } },
+        .{ block, .{ .certified = .new(100) } },
+        .{ block, .{ .untrusted = .new(100) } },
+    };
+    for (pruned) |entry| {
+        try testing.expect(!above_height_floor(D, height_floor, entry[0], entry[1]));
+    }
+}
+
+test "round floor predicate prunes covered rounds" {
+    const D = Sha256.Digest;
+    const cutoff: Cutoff = .{ .round = .new(.new(1), .new(10)) };
+    const block: Key(D) = .{ .block = Sha256.hash(&.{"block"}) };
+    const higher: Round = .new(.new(1), .new(11));
+    const same: Round = .new(.new(1), .new(10));
+    try testing.expect(above_round_floor(D, cutoff, .{ .notarized = higher }, .{
+        .notarization = higher,
+    }));
+    try testing.expect(above_round_floor(D, cutoff, .{ .finalized = .new(100) }, .{
+        .finalized = .{ .by_height = .new(100) },
+    }));
+    try testing.expect(above_round_floor(D, cutoff, block, .{
+        .finalized = .{ .by_round = higher },
+    }));
+    try testing.expect(!above_round_floor(D, cutoff, .{ .notarized = same }, .{
+        .notarization = same,
+    }));
+    try testing.expect(!above_round_floor(D, cutoff, block, .{
+        .finalized = .{ .by_round = same },
+    }));
+}
+
+test "epoch round floor predicate prunes the whole covered epoch" {
+    const D = Sha256.Digest;
+    const cutoff: Cutoff = .{ .epoch = .new(1) };
+    const block: Key(D) = .{ .block = Sha256.hash(&.{"block"}) };
+    // Every round of the covered epoch is pruned, through its last view.
+    const covered = [_]Round{ .new(.new(1), .zero()), .new(.new(1), .new(std.math.maxInt(u64))) };
+    for (covered) |round| {
+        try testing.expect(!above_round_floor(D, cutoff, .{ .notarized = round }, .{
+            .notarization = round,
+        }));
+        try testing.expect(!above_round_floor(D, cutoff, block, .{
+            .finalized = .{ .by_round = round },
+        }));
+        const request: Request(D) = .{ .notarized = round };
+        try testing.expect(!request.above_round_floor(cutoff));
+    }
+    // The next epoch's first round and height-bound requests are retained.
+    const next: Round = .new(.new(2), .zero());
+    try testing.expect(above_round_floor(D, cutoff, .{ .notarized = next }, .{
+        .notarization = next,
+    }));
+    const next_by_round: Annotation = .{ .finalized = .{ .by_round = next } };
+    try testing.expect(above_round_floor(D, cutoff, block, next_by_round));
+    try testing.expect(above_round_floor(D, cutoff, .{ .finalized = .new(100) }, .{
+        .finalized = .{ .by_height = .new(100) },
+    }));
+    const by_round: Request(D) = .{
+        .finalized_by_round = .{ .commitment = block.block, .bound = next },
+    };
+    try testing.expect(by_round.above_round_floor(cutoff));
+    try testing.expect((Request(D){ .finalized = .new(0) }).above_round_floor(cutoff));
 }
 
 /// A SHA-256 digest drawn as commonware's `Arbitrary`: the hash of arbitrary bytes.
