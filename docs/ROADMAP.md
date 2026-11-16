@@ -23,7 +23,7 @@ and start when what they build on has landed (or can be stubbed behind an interf
 | 3 | examples-estimator | the estimator example, the first README demo | DSL now (started); simulation after p2p simulated |
 | 3 | clearing | clearing | bmt, merkle (started) |
 | 3 | storage-qmdb | storage: qmdb shared modules, keyless, immutable, any (started) | journal, merkle |
-| 3 | storage-qmdb-sync | storage: qmdb current, sync, compact | qmdb any |
+| 3 | storage-qmdb-sync | storage: qmdb current, sync, compact | pure parts now (started); rest after qmdb any |
 | 3 | consensus-simplex | consensus: types, simplex | types now (started); actors after p2p, broadcast, resolver |
 | 3 | consensus-marshal | consensus: aggregation, marshal | aggregation now (started); marshal actors after broadcast, resolver, archive |
 | 4 | glue-examples | glue, deployer, examples (log, chat, dkg, bridge, estimator, flood) | consensus |
