@@ -998,3 +998,231 @@ test "cache: correlation age survives an admission counter wrap" {
     try expectEqual(0, wrapped.small.admissions);
     try check_invariants(&wrapped);
 }
+
+// Colliding keys and Ghost ownership.
+
+/// A key whose hash always collides; live keys are counted through `owner` (Rust `Rc`).
+const GhostKey = struct {
+    value: u64,
+    owner: *usize,
+
+    fn init(value: u64, owner: *usize) GhostKey {
+        owner.* += 1;
+        return .{ .value = value, .owner = owner };
+    }
+
+    pub fn hash(_: GhostKey) u64 {
+        return 0;
+    }
+
+    pub fn eql(a: GhostKey, b: GhostKey) bool {
+        return a.value == b.value;
+    }
+
+    pub fn discard(key: GhostKey) void {
+        std.debug.assert(key.owner.* > 0);
+        key.owner.* -= 1;
+    }
+};
+
+fn exercise_colliding_ghost(capacity: usize) !void {
+    var owner: usize = 0;
+    var ghost = try cache_mod.GhostQueue(GhostKey).init(gpa, capacity);
+    var expected: std.ArrayList(u64) = .empty;
+    defer expected.deinit(gpa);
+    for (0..2048) |step| {
+        const value: u64 = (step * 17 + step / 5) % 127;
+        const position = std.mem.indexOfScalar(u64, expected.items, value);
+        const requested = GhostKey.init(value, &owner);
+        try expectEqual(position != null, ghost.forget(requested, requested.hash()));
+        requested.discard();
+        if (position) |index| _ = expected.orderedRemove(index);
+        if (step % 5 != 0) {
+            const historical = GhostKey.init(value, &owner);
+            ghost.push(historical, historical.hash());
+            if (capacity != 0) {
+                try expected.insert(gpa, 0, value);
+                if (expected.items.len > capacity) expected.shrinkRetainingCapacity(capacity);
+            }
+        }
+        if (step == 777 or step == 1333) {
+            ghost.clear();
+            expected.clearRetainingCapacity();
+        }
+        try expect_ghost(&ghost, expected.items);
+        // Each live historical key holds one reference.
+        try expectEqual(expected.items.len, owner);
+    }
+    ghost.deinit(gpa);
+    try expectEqual(0, owner);
+}
+
+fn expect_ghost(ghost: anytype, expected: []const u64) !void {
+    const order = try ghost_order(ghost);
+    defer gpa.free(order);
+    try expectEqual(expected.len, order.len);
+    try expectEqual(expected.len, ghost.len());
+    try expect(ghost.slots.items.len <= ghost.capacity);
+    var previous: ?usize = null;
+    for (order, expected) |slot, value| {
+        const entry = ghost.slots.items[slot];
+        try expectEqual(value, entry.key.?.value);
+        try expectEqual(previous, linked(entry.prev));
+        try expectEqual(@as(?usize, slot), ghost.find(entry.key.?, 0));
+        previous = slot;
+    }
+    try expectEqual(previous, ghost.tail);
+    var free: usize = 0;
+    var current = ghost.free_head;
+    while (current) |slot| : (current = linked(ghost.slots.items[slot].next)) {
+        try expect(ghost.slots.items[slot].key == null);
+        free += 1;
+        try expect(free <= ghost.slots.items.len);
+    }
+    try expectEqual(ghost.slots.items.len, order.len + free);
+}
+
+test "cache: Ghost collision churn and key ownership" {
+    for ([_]usize{ 0, 1, 2, 31 }) |capacity| try exercise_colliding_ghost(capacity);
+}
+
+const CollidingKey = struct {
+    value: u64,
+
+    pub fn hash(_: CollidingKey) u64 {
+        return 0;
+    }
+};
+
+test "cache: colliding keys share resident and Ghost indexes" {
+    var cache = try Cache(CollidingKey, u64).init(gpa, 20);
+    defer cache.deinit(gpa);
+    for (0..256) |key| {
+        _ = cache.put(.{ .value = key }, key);
+        try check_invariants(&cache);
+    }
+    const ghost = try ghost_keys(&cache);
+    defer gpa.free(ghost);
+    try expectEqual(cache.ghost.capacity, ghost.len);
+    for (ghost, 0..) |key, index| {
+        try expect(!cache.contains(key));
+        for (ghost[index + 1 ..]) |other| try expect(key.value != other.value);
+    }
+
+    // Constant hashes still consume only the exact requested history key.
+    const requested = ghost[ghost.len / 2];
+    _ = cache.put(requested, std.math.maxInt(u64));
+    try expectEqual(@as(?u64, std.math.maxInt(u64)), value_of(u64, cache.get(requested)));
+    const after = try ghost_keys(&cache);
+    defer gpa.free(after);
+    for (after) |key| try expect(key.value != requested.value);
+    try check_invariants(&cache);
+}
+
+test "cache: slice keys keep independent Ghost history" {
+    // Rust borrows `&str` keys; here the keys are slices compared by contents.
+    const names = [_][]const u8{ "first", "second", "third" };
+    var cache = try Cache([]const u8, usize).init(gpa, 2);
+    defer cache.deinit(gpa);
+    for (names, 0..) |name, value| _ = cache.put(name, value);
+    const ghost = try ghost_keys(&cache);
+    defer gpa.free(ghost);
+    try expectEqual(1, ghost.len);
+    try testing.expectEqualStrings("first", ghost[0]);
+    const copy = "first".*;
+    try expect(!cache.remove(&copy));
+    try expectEqual(0, cache.ghost.len());
+    try expectEqual(@as(?usize, 2), value_of(usize, cache.get("third")));
+    try check_invariants(&cache);
+}
+
+// Model fuzz (commonware `utils/fuzz/fuzz_targets/cache.rs`).
+
+/// Keys confined to a small space so a small cache churns and evicts heavily.
+const key_space = 64;
+/// Clock2Q+ gives Small more than one slot only from capacity 20.
+const capacity_max = 48;
+
+const Model = [key_space]?u16;
+
+const Factory = Constant(u16);
+
+fn fuzz_step(
+    generator: *rng.FuzzRng,
+    cache: *Cache(u8, u16),
+    model: *Model,
+) !void {
+    const key = rng.range_less_than(generator, u8, 0, key_space);
+    const value = generator.next_u32() & 0xffff;
+    const v: u16 = @intCast(value);
+    switch (rng.range_less_than(generator, u8, 0, 10)) {
+        0 => try expectEqual(value_of(u16, cache.peek(key)), value_of(u16, cache.get(key))),
+        1 => try expectEqual(cache.contains(key), cache.peek(key) != null),
+        2 => if (cache.get_mut(key)) |slot| {
+            slot.* = v;
+            model[key] = v;
+        },
+        3 => {
+            _ = cache.put(key, v);
+            model[key] = v;
+            try expectEqual(@as(?u16, v), value_of(u16, cache.peek(key)));
+        },
+        4 => {
+            const stored = cache.get_or_insert_with(key, Factory{ .value = v }).*;
+            model[key] = stored;
+            try expectEqual(@as(?u16, stored), value_of(u16, cache.peek(key)));
+        },
+        5 => {
+            cache.get_or_insert_mut(key, Factory{ .value = v }).value.* = v;
+            model[key] = v;
+            try expectEqual(@as(?u16, v), value_of(u16, cache.peek(key)));
+        },
+        6 => {
+            const had = cache.contains(key);
+            try expectEqual(had, cache.remove(key));
+            model[key] = null;
+            try expect(!cache.contains(key));
+        },
+        7 => {
+            cache.retain(Below{ .bound = key });
+            for (model[key..]) |*entry| entry.* = null;
+        },
+        8 => {
+            cache.clear();
+            model.* = @splat(null);
+            try expect(cache.is_empty());
+        },
+        9 => try expect(cache.len() <= cache.capacity),
+        else => unreachable,
+    }
+}
+
+fn fuzz_cache(_: void, generator: *rng.FuzzRng) !void {
+    const capacity = rng.range_at_most(generator, usize, 1, capacity_max);
+    var cache = try Cache(u8, u16).init(gpa, capacity);
+    defer cache.deinit(gpa);
+    if (rng.boolean(generator)) cache.prefill(Factory{ .value = 0 });
+    // The last value written for each logically present key; an evicted key is absent.
+    var model: Model = @splat(null);
+    for (0..rng.range_at_most(generator, u32, 0, 256)) |_| {
+        try fuzz_step(generator, &cache, &model);
+        try expect(cache.len() <= capacity);
+        var present: usize = 0;
+        for (0..key_space) |index| {
+            const key: u8 = @intCast(index);
+            const resident = cache.peek(key);
+            try expectEqual(cache.contains(key), resident != null);
+            if (resident) |stored| {
+                present += 1;
+                try expectEqual(model[index], stored.*);
+            }
+        }
+        try expectEqual(present, cache.len());
+        try expectEqual(present == 0, cache.is_empty());
+    }
+    try check_invariants(&cache);
+}
+
+test "fuzz cache" {
+    try fuzz.run({}, fuzz_cache, 0x6361_6368, 200);
+}

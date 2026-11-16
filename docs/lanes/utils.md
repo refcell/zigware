@@ -123,8 +123,8 @@ encoding parts as soon as `codec` has its core API (see docs/lanes/codec.md).
 - [x] utils bitmap: BitMap, prunable, historical, roaring (containers, Bitmap, Prunable, ops,
   fuzz Plan); codec encodings identical, all bitmap conformance hashes match.
 - [x] utils ordered (Set/Map/BiMap/Quorum) with conformance hashes.
-- [ ] utils cache model fuzz + colliding-key tests (done: priority_set (resolver lane, audited),
-  acknowledgement, cache with its unit tests, channel mpsc/ring/reservation/fallible/tracked).
+- [x] utils priority_set (resolver lane, audited), acknowledgement, cache (unit tests,
+  colliding keys, model fuzz), channel mpsc/ring/reservation/fallible/tracked.
 - [x] utils handles (`Table`, `partition`), requested by storage-merkle.
 - [ ] Fuzz targets for every decoder (commonware utils/fuzz).
 
@@ -158,3 +158,4 @@ encoding parts as soon as `codec` has its core API (see docs/lanes/codec.md).
 - 2026-11-16: Probability with the probability.rs tests (thresholds, sampling, round trips).
 - 2026-11-16: channel mpsc, ring, reservation, fallible, tracked with their tests, an mpsc model
   fuzz, and a tracked model fuzz (watermark and per-batch pending against a model).
+- 2026-11-16: cache model fuzz, Ghost collision churn and ownership, colliding resident keys.
