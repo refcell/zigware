@@ -8,6 +8,7 @@ pub const Block = block.Block;
 pub const ready = block.ready;
 pub const verifying = @import("verifying.zig");
 pub const store = @import("store.zig");
+pub const resolver = @import("resolver.zig");
 
 test {
     std.testing.refAllDecls(@This());
