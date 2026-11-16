@@ -159,6 +159,10 @@ fn check_range_plan_rejects(comptime F: type) !void {
         const plan = RangePlan(F).init(leaves, .{ .start = 0, .end = 1 });
         try testing.expectError(error.LocationOverflow, plan);
     }
+    // The largest leaf count still proves its last leaf, alone or in a multi proof.
+    const max = F.max_leaves;
+    _ = try RangePlan(F).init(max, .{ .start = max - 1, .end = max });
+    gpa.free(try multi_proof_positions(F, gpa, max, &.{max - 1}));
     try testing.expectError(error.RangeOutOfBounds, RangePlan(F).init_element(8, 8));
     for ([_]u64{ F.max_leaves, std.math.maxInt(u64) }) |location| {
         try testing.expectError(error.LocationOverflow, RangePlan(F).init_element(8, location));
@@ -912,10 +916,15 @@ test "full peak range blueprint does not descend" {
 fn check_pinned_nodes_across_sizes(comptime F: type) !void {
     const Case = struct { n: u64, start: u64 };
     const cases = [_]Case{
-        .{ .n = 5, .start = 4 },      .{ .n = 10, .start = 3 },     .{ .n = 20, .start = 5 },
-        .{ .n = 50, .start = 10 },    .{ .n = 100, .start = 10 },   .{ .n = 100, .start = 30 },
-        .{ .n = 200, .start = 50 },   .{ .n = 500, .start = 100 },  .{ .n = 1000, .start = 100 },
-        .{ .n = 1000, .start = 300 }, .{ .n = 2000, .start = 500 },
+        // Commonware's MMR sibling case: the pin at position 0 is a sibling inside the range
+        // peak, not a fold-prefix peak. Then its fold-prefix case: the first peak is all pin.
+        .{ .n = 3, .start = 1 },      .{ .n = 10, .start = 8 },
+        .{ .n = 5, .start = 4 },      .{ .n = 10, .start = 3 },
+        .{ .n = 20, .start = 5 },     .{ .n = 50, .start = 10 },
+        .{ .n = 100, .start = 10 },   .{ .n = 100, .start = 30 },
+        .{ .n = 200, .start = 50 },   .{ .n = 500, .start = 100 },
+        .{ .n = 1000, .start = 100 }, .{ .n = 1000, .start = 300 },
+        .{ .n = 2000, .start = 500 },
     };
     const hasher = H.init(.forward_fold);
     for (cases) |case| {
@@ -1043,6 +1052,35 @@ fn check_multi_shapes(comptime F: type) !void {
 test "range and multi proofs verify for supported root shapes" {
     inline for (families) |F| try check_range_shapes(F);
     inline for (families) |F| try check_multi_shapes(F);
+}
+
+// The worst single-element proof: 62 peaks of heights 61 down to 0 (`2^62 - 1` leaves), with
+// the element in the tallest tree, needs 61 siblings and 61 other peaks.
+test "mmr max proof digests per element sufficient" {
+    const F = merkle.mmr.Family;
+    const leaves = (@as(u64, 1) << 62) - 1;
+    const size = F.location_to_position(leaves);
+    try testing.expectEqual((@as(u64, 1) << 63) - 64, size);
+    try testing.expect(F.is_valid_size(size));
+    var peaks = F.peaks(size);
+    var count: u32 = 0;
+    while (peaks.next()) |peak| : (count += 1) try testing.expectEqual(61 - count, peak.height);
+    try testing.expectEqual(@as(u32, 62), count);
+    const first = try RangePlan(F).init_element(leaves, 0);
+    const max_digests = proof_module.max_proof_digests_per_element;
+    try testing.expectEqual(@as(usize, max_digests), first.positions().len);
+    const last = try RangePlan(F).init_element(leaves, leaves - 1);
+    try testing.expectEqual(@as(usize, 61), last.positions().len);
+}
+
+// 63 peaks would need `2^63 - 1` leaves, a size of `2^64 - 65`, past the maximum size.
+test "mmr max proof digests per element is maximum" {
+    const F = merkle.mmr.Family;
+    const leaves: u128 = (1 << 63) - 1;
+    const size: u128 = 2 * leaves - 63;
+    try testing.expectEqual((@as(u128, 1) << 64) - 65, size);
+    try testing.expect(size > F.max_nodes);
+    try testing.expect(!F.is_valid_size(@intCast(size)));
 }
 
 test "mmr proving digests from range" {
