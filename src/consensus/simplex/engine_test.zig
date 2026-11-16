@@ -2,6 +2,8 @@
 //! validators on `p2p.simulated` under the deterministic runtime.
 
 const std = @import("std");
+const builtin = @import("builtin");
+const build_options = @import("build_options");
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const testing = std.testing;
@@ -46,6 +48,8 @@ const Nuller = nuller_mod.Nuller(Scheme, Sha256);
 const Impersonator = @import("mocks/impersonator.zig").Impersonator(Scheme, Sha256);
 const Outdated = @import("mocks/outdated.zig").Outdated(Scheme, Sha256);
 const Elector = elector_mod.RoundRobinElector;
+const RoundRobin = elector_mod.RoundRobin(Sha256);
+const HandoffKind = std.meta.Tag(@import("../traits.zig").Handoff(Digest));
 const Equivocator = @import("mocks/equivocator.zig").Equivocator(Scheme, Sha256, Key, Elector);
 const IoRng = @import("actors/context.zig").IoRng;
 const Reconfigurer = @import("mocks/reconfigurer.zig").Reconfigurer(Scheme, Sha256);
@@ -192,6 +196,12 @@ const Harness = struct {
     mailbox_size: u32 = 1024,
     stall_proposals: bool = false,
     verify_reports: bool = false,
+    /// The elector configuration, the applications' handoff decision, and their verify and
+    /// certify latencies (the defaults when null), for validators started from now on.
+    round_robin: RoundRobin = .default(),
+    handoff: HandoffKind = .wait,
+    verify_latency: ?application_mod.Latency = null,
+    certify_latency: ?*const fn (index: usize) application_mod.Latency = null,
 
     const Timeouts = struct {
         leader_ms: u64 = 1000,
@@ -281,6 +291,10 @@ const Harness = struct {
         harness.mailbox_size = 1024;
         harness.stall_proposals = false;
         harness.verify_reports = false;
+        harness.round_robin = .default();
+        harness.handoff = .wait;
+        harness.verify_latency = null;
+        harness.certify_latency = null;
     }
 
     /// Starts validator `index` as the Byzantine mock `role`.
@@ -406,14 +420,17 @@ const Harness = struct {
         validator.handle = null;
         const slow = index == 0 and harness.role == .slow;
         const normal: application_mod.Latency = .{ .mean = 10, .std_dev = 5 };
+        const verify_time = harness.verify_latency orelse normal;
+        const certify_time = if (harness.certify_latency) |latency| latency(index) else normal;
         validator.application = try .init(gpa, io, .{
             .relay = &harness.relay,
             .me = key,
             .propose_latency = if (slow) .{ .mean = 10_000, .std_dev = 0 } else normal,
-            .verify_latency = if (slow) .{ .mean = 10_000, .std_dev = 5 } else normal,
-            .certify_latency = if (slow) .{ .mean = 10_000, .std_dev = 5 } else normal,
+            .verify_latency = if (slow) .{ .mean = 10_000, .std_dev = 5 } else verify_time,
+            .certify_latency = if (slow) .{ .mean = 10_000, .std_dev = 5 } else certify_time,
         });
         validator.application.stall_proposals = harness.stall_proposals;
+        validator.application.handoff = harness.handoff;
         try validator.application.register();
         validator.reporter = .init(gpa, io, &harness.verifier);
         const rng: IoRng = .{ .io = io };
@@ -423,7 +440,7 @@ const Harness = struct {
             .init(gpa, io, rng, scheme, &validator.reporter, parallel.sequential, verify);
         validator.page_cache = try .init(gpa, page_size, page_cache_size);
         const n: u32 = @intCast(harness.validators.len);
-        validator.elector = try elector_mod.RoundRobin(Sha256).default().build(gpa, n);
+        validator.elector = try harness.round_robin.build(gpa, n);
         validator.partition = @splat(0);
         _ = try std.fmt.bufPrint(&validator.partition, "validator-{d}", .{index});
         const control = harness.oracle().control(key);
@@ -1353,4 +1370,60 @@ test "unclean shutdown: repeated crashes recover from the journal" {
         if (try (try runner.start_context(unclean_run, .{100}))) break restart;
     } else return error.TestUnexpectedResult;
     try testing.expect(restarts > 0);
+}
+
+/// commonware `slow_certifiers_finalize_without_nullification`: the last two of five
+/// validators certify eight times slower, so every quorum holds a slow certifier, yet no
+/// view is nullified and at least 200 views finalize in 30 virtual seconds.
+fn slow_certifiers_scenario(ctx: Context, round_robin: RoundRobin, handoff: HandoffKind) !void {
+    // Each run finalizes over 200 views; Debug takes about a minute per run.
+    if (builtin.mode == .debug and !build_options.slow_tests) return error.SkipZigTest;
+    var harness: Harness = undefined;
+    try harness.start_network(ctx, 5, link_ms(10, 1, 1.0), .honest, .{
+        .leader_ms = 1500,
+        .certification_ms = 3500,
+        .retry_ms = 10_000,
+        .skip_ms = 12_000,
+    });
+    defer harness.deinit();
+    harness.round_robin = round_robin;
+    harness.handoff = handoff;
+    harness.verify_latency = .{ .mean = 1, .std_dev = 0 };
+    harness.certify_latency = struct {
+        fn latency(index: usize) application_mod.Latency {
+            return if (index >= 3) .{ .mean = 80, .std_dev = 5 } else .{ .mean = 10, .std_dev = 5 };
+        }
+    }.latency;
+    for (0..5) |index| try harness.start_validator(index);
+    try ctx.sleep(.fromSeconds(30));
+    for (harness.validators) |*validator| {
+        validator.reporter.assert_no_invalid();
+        validator.reporter.assert_no_faults();
+        try testing.expectEqual(0, validator.reporter.nullifications.count());
+        try testing.expect(validator.reporter.finalizations.count() >= 200);
+    }
+    const blocked = try harness.oracle().blocked(gpa);
+    defer gpa.free(blocked);
+    try testing.expectEqual(0, blocked.len);
+}
+
+fn stable_terms(length: u32, optimistic_views: u64) RoundRobin {
+    const term: consensus_types.TermLength = .new(utils.NonZero(u32).init(length).?);
+    return RoundRobin.default().with_term(term, .from_secs(30), .new(optimistic_views));
+}
+
+test "stable leader optimistic tolerates slow certifiers" {
+    _ = try run_seeded(0, slow_certifiers_scenario, .{ stable_terms(50, 2), .wait });
+}
+
+test "stable leader handoff vote tolerates slow certifiers" {
+    _ = try run_seeded(0, slow_certifiers_scenario, .{ stable_terms(7, 2), .vote });
+}
+
+test "rotating handoff vote tolerates slow certifiers" {
+    _ = try run_seeded(0, slow_certifiers_scenario, .{ RoundRobin.default(), .vote });
+}
+
+test "short term handoff vote tolerates slow certifiers" {
+    _ = try run_seeded(0, slow_certifiers_scenario, .{ stable_terms(3, 2), .vote });
 }

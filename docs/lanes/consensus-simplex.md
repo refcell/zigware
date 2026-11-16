@@ -235,7 +235,9 @@ resolver; those lanes are running, so do the types first and the actors as they 
   The twins campaigns (sampled, sustained, stable leader, optimistic; the large ones in
   slow builds) run on the mock scheme.
   tle (threshold VRF, Random elector, MinPk and MinSig; slow builds) decrypts at the target
-  round's seed. Next: twins pipelined handoff and per-scheme twins,
+  round's seed. The four slow-certifier DSTs (stable leader optimistic, stable leader,
+  rotating, and short-term handoff votes; slow builds) finalize 200 views with no
+  nullification. Next: twins pipelined handoff and per-scheme twins,
   certified splits, hailstorm, and the rest, seeded.
 - [ ] Tracing: actor events are done (voter, batcher, resolver, engine); spans and the
   voter state machine's events follow.
@@ -293,3 +295,5 @@ resolver; those lanes are running, so do the types first and the actors as they 
 - 2026-11-16: simplex mocks/scheme.rs (the mock certificate scheme) and the twins campaigns
   on p2p's split senders and receivers.
 - 2026-11-16: the tle DST on the threshold VRF scheme; the mock reporter keeps notarizations.
+- 2026-11-16: the slow-certifier DSTs; the Harness takes the round-robin terms, the handoff
+  decision, and verify/certify latencies.
