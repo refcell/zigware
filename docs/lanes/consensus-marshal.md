@@ -257,3 +257,6 @@ then the core and standard actors as those packages land.
   stand-in marshal actor until the harness lands), and mocks verifying, store, resolver,
   and application (`mocks.Application(B)`: shared handle with clone/deinit, auto or manual
   acknowledgement).
+- 2026-11-16 (parallel lane): the deferred standard wrapper (`standard.Deferred`) with
+  commonware's deferred.rs tests on a stand-in marshal actor. The restart halves of the two
+  restart tests wait for the harness.
