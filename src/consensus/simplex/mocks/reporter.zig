@@ -152,6 +152,13 @@ pub fn Reporter(comptime S: type, comptime D: type) type {
             assert(self.latest.get() >= view.get());
         }
 
+        /// The highest finalized view reported so far.
+        pub fn latest_finalized(self: *Self) View {
+            self.mutex.lockUncancelable(self.io);
+            defer self.mutex.unlock(self.io);
+            return self.latest;
+        }
+
         /// The payload finalized at `view`, if any.
         pub fn finalized(self: *Self, view: View) ?D {
             self.mutex.lockUncancelable(self.io);

@@ -178,7 +178,9 @@ resolver; those lanes are running, so do the types first and the actors as they 
   simulated network and the deterministic runtime: 4 honest nodes finalize.
 - [ ] Port the rest of state.rs's tests (13 of 141), the resolver state.rs and actor.rs
   tests, and the voter/resolver ingress tests; add actor metrics.
-- [ ] simplex mod.rs tests: the full multi-node DST suite with the Byzantine mocks
+- [ ] simplex mod.rs tests: all_online, partition, slow_and_lossy_links, and determinism
+  done (ed25519, round robin; Debug runs 50 views where commonware runs 100); next the
+  rest of the multi-node DST suite with the Byzantine mocks
   (conflicter, equivocator, impersonator, nuller, outdated, twins, ...), seeded.
 - [ ] Fuzz targets (commonware consensus/fuzz).
 
@@ -203,3 +205,4 @@ resolver; those lanes are running, so do the types first and the actors as they 
 - 2026-11-16: voter Slot and Round with their commonware tests.
 - 2026-11-16: voter State with the core state.rs tests (13 of 141 so far).
 - 2026-11-16: voter and resolver actors, engine, mocks; 4 honest nodes finalize (DST).
+- 2026-11-16: DST: all_online, partition heals, slow and lossy links, seed determinism.

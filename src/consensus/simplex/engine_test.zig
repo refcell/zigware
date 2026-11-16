@@ -31,6 +31,7 @@ const Relay = relay_mod.Relay(Digest, Key);
 const Reporter = reporter_mod.Reporter(Scheme, Digest);
 const Elector = elector_mod.RoundRobinElector;
 const Duration = utils.Duration;
+const Link = p2p.simulated.Link;
 const View = consensus_types.View;
 const Epoch = consensus_types.Epoch;
 
@@ -66,20 +67,152 @@ const Validator = struct {
     handle: ?runtime.context.Handle(Engine.RunResult) = null,
 };
 
-const Options = struct {
-    n: u32,
-    required: u64,
-    latency_ms: u64 = 10,
+/// One simulated network of validators. Must not move once started.
+const Harness = struct {
+    ctx: Context,
+    fixture: Fixture,
+    network: *Net,
+    network_task: std.Io.Future((std.Io.Cancelable || Allocator.Error)!void),
+    relay: Relay,
+    validators: []Validator,
+    started: usize = 0,
+
+    const Fixture = cryptography.certificate.mocks.Fixture(Scheme);
+
+    fn keys(harness: *const Harness) []const Key {
+        return harness.fixture.participants;
+    }
+
+    fn oracle(harness: *const Harness) Net.Oracle {
+        return harness.network.oracle();
+    }
+
+    /// Starts `n` validators, every pair linked by `link`.
+    fn start(harness: *Harness, ctx: Context, n: u32, link: Link) !void {
+        const io = ctx.io();
+        var rng = utils.rng.test_rng();
+        harness.* = undefined;
+        harness.ctx = ctx;
+        harness.fixture = try ed25519.fixture(Digest, gpa, &rng, "consensus", n);
+        errdefer harness.fixture.deinit(gpa);
+        harness.network = try Net.init(gpa, io, .{
+            .max_size = 1024 * 1024,
+            .max_peers_per_set = n + 1,
+            .disconnect_on_block = true,
+            .tracked_peer_sets = 1,
+        });
+        harness.network_task = try io.concurrent(Net.run, .{harness.network});
+        harness.relay = .init(gpa, io);
+        harness.validators = try gpa.alloc(Validator, n);
+        harness.started = 0;
+        const peers = harness.keys();
+        _ = harness.oracle().manager().track(0, .init_primary(.init(peers)));
+        try harness.link_all(link, null);
+        for (harness.validators, peers, 0..) |*validator, key, index| {
+            try harness.start_validator(validator, key, index);
+            harness.started += 1;
+        }
+    }
+
+    fn deinit(harness: *Harness) void {
+        // Abort every engine before freeing any mock: live voters relay to all applications.
+        const validators = harness.validators[0..harness.started];
+        for (validators) |*validator| abort(validator);
+        harness.relay.deregister_all();
+        for (validators) |*validator| stop_actors(validator);
+        gpa.free(harness.validators);
+        harness.relay.deinit();
+        harness.network.close();
+        harness.network_task.await(harness.ctx.io()) catch {};
+        harness.network.deinit();
+        harness.fixture.deinit(gpa);
+        harness.* = undefined;
+    }
+
+    /// Links (or, with `link == null`, unlinks) every ordered pair `restrict` admits.
+    fn link_all(harness: *Harness, link: ?Link, restrict: ?*const Restrict) !void {
+        const peers = harness.keys();
+        for (peers, 0..) |from, a| for (peers, 0..) |to, b| {
+            if (a == b) continue;
+            if (restrict) |admits| if (!admits(peers.len, a, b)) continue;
+            if (link) |value| {
+                try harness.oracle().add_link(from, to, value);
+            } else {
+                try harness.oracle().remove_link(from, to);
+            }
+        };
+    }
+
+    fn start_validator(harness: *Harness, validator: *Validator, key: Key, index: usize) !void {
+        const io = harness.ctx.io();
+        validator.* = undefined;
+        validator.handle = null;
+        validator.application = try .init(gpa, io, .{
+            .relay = &harness.relay,
+            .me = key,
+            .propose_latency = .{ .mean = 10, .std_dev = 5 },
+            .verify_latency = .{ .mean = 10, .std_dev = 5 },
+            .certify_latency = .{ .mean = 10, .std_dev = 5 },
+        });
+        try validator.application.register();
+        validator.reporter = .init(gpa, io, &harness.fixture.verifier);
+        validator.page_cache = try .init(gpa, page_size, page_cache_size);
+        const n: u32 = @intCast(harness.validators.len);
+        validator.elector = try elector_mod.RoundRobin(Sha256).default().build(gpa, n);
+        validator.partition = @splat(0);
+        _ = try std.fmt.bufPrint(&validator.partition, "validator-{d}", .{index});
+        const control = harness.oracle().control(key);
+        const cfg = engine_config(validator, harness.fixture.schemes[index], control);
+        try validator.engine.init(harness.ctx, cfg);
+        const channels = try register(harness.oracle(), key);
+        validator.handle = try harness.ctx.child("engine").spawn(Engine.run, .{
+            &validator.engine, channels[0], channels[1], channels[2],
+        });
+    }
+
+    /// Waits until every validator finalized `view`.
+    fn wait_all(harness: *Harness, view: u64) !void {
+        for (harness.validators) |*validator| {
+            try validator.reporter.wait_for_finalized(.new(view));
+        }
+    }
+
+    /// The highest finalized view across validators.
+    fn max_finalized(harness: *Harness) u64 {
+        var highest: u64 = 0;
+        for (harness.validators) |*validator| {
+            highest = @max(highest, validator.reporter.latest_finalized().get());
+        }
+        return highest;
+    }
+
+    /// No faults, no invalid activity, one payload per finalized view, and no blocks.
+    fn check(harness: *Harness, through: u64) !void {
+        for (harness.validators) |*validator| {
+            validator.reporter.assert_no_faults();
+            validator.reporter.assert_no_invalid();
+        }
+        for (1..through + 1) |view| {
+            var expected: ?Digest = null;
+            for (harness.validators) |*validator| {
+                const payload = validator.reporter.finalized(.new(view)) orelse continue;
+                if (expected) |digest| try testing.expect(digest.order(payload) == .eq);
+                expected = payload;
+            }
+        }
+        const blocked = try harness.oracle().blocked(gpa);
+        defer gpa.free(blocked);
+        try testing.expectEqual(0, blocked.len);
+    }
 };
 
-fn link_all(oracle: Net.Oracle, keys: []const Key, latency_ms: u64) !void {
-    for (keys) |from| for (keys) |to| {
-        if (from.order(to) == .eq) continue;
-        try oracle.add_link(from, to, .{
-            .latency = Duration.from_millis(latency_ms),
-            .jitter = Duration.from_millis(1),
-            .success_rate = 1.0,
-        });
+const Restrict = fn (n: usize, a: usize, b: usize) bool;
+
+fn link_ms(latency_ms: u64, jitter_ms: u64, success_rate: f64) Link {
+    return .{
+        .latency = Duration.from_millis(latency_ms),
+        .jitter = Duration.from_millis(jitter_ms),
+        .success_rate = success_rate,
     };
 }
 
@@ -113,102 +246,18 @@ fn engine_config(validator: *Validator, scheme: Scheme, blocker: Net.Control) En
         .certification_timeout = .from_secs(2),
         .timeout_retry = .from_secs(10),
         .view_retention = .new(10),
-        .skip = .disabled,
+        .skip = .{ .enabled = .{ .timeout = .from_secs(11) } },
         .fetch_timeout = .from_secs(1),
         .fetch_retry_delay = .from_millis(100),
         .forward = .disabled,
     };
 }
 
-fn all_online(ctx: Context, options: Options) !void {
-    const io = ctx.io();
-    var rng = utils.rng.test_rng();
-    var fixture = try ed25519.fixture(Digest, gpa, &rng, "consensus", options.n);
-    defer fixture.deinit(gpa);
-    const keys = fixture.participants;
-    const network = try Net.init(gpa, io, .{
-        .max_size = 1024 * 1024,
-        .max_peers_per_set = options.n + 1,
-        .disconnect_on_block = true,
-        .tracked_peer_sets = 1,
-    });
-    defer network.deinit();
-    var network_task = try io.concurrent(Net.run, .{network});
-    defer {
-        network.close();
-        network_task.await(io) catch {};
-    }
-    const oracle = network.oracle();
-    _ = oracle.manager().track(0, .init_primary(.init(keys)));
-    try link_all(oracle, keys, options.latency_ms);
-
-    var relay: Relay = .init(gpa, io);
-    defer relay.deinit();
-    const validators = try gpa.alloc(Validator, options.n);
-    defer gpa.free(validators);
-    var started: usize = 0;
-    defer for (validators[0..started]) |*validator| stop(validator);
-    for (validators, keys, 0..) |*validator, key, index| {
-        try start(ctx, validator, &relay, &fixture, oracle, key, index);
-        started += 1;
-    }
-    for (validators) |*validator| try validator.reporter.wait_for_finalized(.new(options.required));
-    for (validators) |*validator| {
-        validator.reporter.assert_no_faults();
-        validator.reporter.assert_no_invalid();
-    }
-    // Every validator finalized the same payload at each view both saw finalized.
-    for (1..options.required + 1) |view| {
-        var expected: ?Digest = null;
-        for (validators) |*validator| {
-            const payload = validator.reporter.finalized(.new(view)) orelse continue;
-            if (expected) |digest| try testing.expect(digest.order(payload) == .eq);
-            expected = payload;
-        }
-    }
-}
-
-fn start(
-    ctx: Context,
-    validator: *Validator,
-    relay: *Relay,
-    fixture: anytype,
-    oracle: Net.Oracle,
-    key: Key,
-    index: usize,
-) !void {
-    const io = ctx.io();
-    validator.* = undefined;
+fn abort(validator: *Validator) void {
+    const handle = validator.handle orelse return;
     validator.handle = null;
-    validator.application = try .init(gpa, io, .{
-        .relay = relay,
-        .me = key,
-        .propose_latency = .{ .mean = 10, .std_dev = 5 },
-        .verify_latency = .{ .mean = 10, .std_dev = 5 },
-        .certify_latency = .{ .mean = 10, .std_dev = 5 },
-    });
-    try validator.application.register();
-    validator.reporter = .init(gpa, io, &fixture.verifier);
-    validator.page_cache = try .init(gpa, page_size, page_cache_size);
-    const n: u32 = @intCast(fixture.schemes.len);
-    validator.elector = try elector_mod.RoundRobin(Sha256).default().build(gpa, n);
-    validator.partition = @splat(0);
-    _ = try std.fmt.bufPrint(&validator.partition, "validator-{d}", .{index});
-    const control = oracle.control(key);
-    const cfg = engine_config(validator, fixture.schemes[index], control);
-    try validator.engine.init(ctx, cfg);
-    const channels = try register(oracle, key);
-    validator.handle = try ctx.child("engine").spawn(Engine.run, .{
-        &validator.engine, channels[0], channels[1], channels[2],
-    });
-}
-
-fn stop(validator: *Validator) void {
-    if (validator.handle) |handle| {
-        const result = handle.abort() catch return stop_actors(validator);
-        result catch |err| std.debug.panic("engine failed: {t}", .{err});
-    }
-    stop_actors(validator);
+    const result = handle.abort() catch return; // Aborted before it returned.
+    result catch |err| std.debug.panic("engine failed: {t}", .{err});
 }
 
 fn stop_actors(validator: *Validator) void {
@@ -219,12 +268,81 @@ fn stop_actors(validator: *Validator) void {
     validator.application.deinit();
 }
 
-fn run_all_online(seed: u64, options: Options) !void {
+/// Runs `scenario(ctx, args...)` on a fresh runner seeded with `seed`; returns the auditor
+/// state (commonware `context.auditor().state()`).
+fn run_seeded(seed: u64, comptime scenario: anytype, args: anytype) ![8]u8 {
     var runner = try runtime.deterministic.Runner.init(gpa, .{ .seed = seed });
     defer runner.deinit();
-    try (try runner.start_context(all_online, .{options}));
+    try (try runner.start_context(scenario, args));
+    return runner.auditor.state();
+}
+
+/// commonware `all_online` (ed25519, round robin; 50 views rather than 100 in Debug).
+fn all_online(ctx: Context, n: u32, required: u64) !void {
+    var harness: Harness = undefined;
+    try harness.start(ctx, n, link_ms(200, 1, 1.0));
+    defer harness.deinit();
+    try harness.wait_all(required);
+    try harness.check(required);
 }
 
 test "four honest validators finalize" {
-    try run_all_online(0, .{ .n = 4, .required = 10 });
+    _ = try run_seeded(0, all_online, .{ 4, 10 });
+}
+
+test "all online" {
+    _ = try run_seeded(0, all_online, .{ 5, 50 });
+}
+
+/// commonware `slow_and_lossy_links_seeded`: half the messages drop.
+fn slow_and_lossy_links(ctx: Context) !void {
+    var harness: Harness = undefined;
+    try harness.start(ctx, 5, link_ms(200, 150, 0.5));
+    defer harness.deinit();
+    const required = 20;
+    try harness.wait_all(required);
+    try harness.check(required);
+}
+
+test "slow and lossy links" {
+    _ = try run_seeded(6, slow_and_lossy_links, .{});
+}
+
+test "determinism: the same seed replays the same run" {
+    var states: [2][8]u8 = undefined;
+    for (&states, 0..) |*state, seed| {
+        state.* = try run_seeded(seed, slow_and_lossy_links, .{});
+        const again = try run_seeded(seed, slow_and_lossy_links, .{});
+        try testing.expectEqualSlices(u8, state, &again);
+    }
+    // A different seed takes a different path.
+    try testing.expect(!std.mem.eql(u8, &states[0], &states[1]));
+}
+
+fn separated(n: usize, a: usize, b: usize) bool {
+    const m = n / 2;
+    return (a < m and b >= m) or (a >= m and b < m);
+}
+
+/// commonware `partition`: cut the validators in half, check nothing finalizes, then heal.
+fn partition(ctx: Context) !void {
+    var harness: Harness = undefined;
+    const link = link_ms(10, 1, 1.0);
+    try harness.start(ctx, 10, link);
+    defer harness.deinit();
+    const required = 20;
+    try harness.wait_all(required);
+    try harness.link_all(null, &separated);
+    // Let in-progress notarizations and finalizations finish.
+    try ctx.sleep(.fromSeconds(10));
+    const before = harness.max_finalized();
+    try ctx.sleep(.fromSeconds(60));
+    try testing.expectEqual(before, harness.max_finalized()); // Nothing finalizes while split.
+    try harness.link_all(link, &separated);
+    try harness.wait_all(before + required);
+    try harness.check(before + required);
+}
+
+test "partition heals" {
+    _ = try run_seeded(0, partition, .{});
 }
