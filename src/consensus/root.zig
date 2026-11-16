@@ -24,4 +24,5 @@ pub const marshal = @import("marshal/root.zig");
 
 test {
     std.testing.refAllDecls(@This());
+    _ = @import("fuzz/root.zig");
 }
