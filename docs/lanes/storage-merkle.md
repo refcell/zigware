@@ -36,7 +36,11 @@ variants need `runtime` storage; do them after its interface lands.
 - [ ] merkle/persisted/full: the blob-level init_sync tests (interrupted bounded publication,
   interrupted clear, ahead skips discarded blobs, reset or stale-below-start leave blobs
   unopened, torn tail repair; these also pin the journal probe at the highest missing pin),
-  and the historical proof and destroy-interruption tests.
+  init's stale/ahead-metadata and prune-boundary tests, recovery prune crash, initialization
+  bounds, start_sync failure observation, and destroy observing a failed sync.
+- [x] merkle/persisted/full historical proof tests (basic, with pruning, large, singleton,
+  pruned elements, appends while available, after sync, after pruning, edge cases, range
+  validation, non-size prune) and interrupted destroy (swept budget, and bounded reopen).
 - [x] merkle/persisted/compact: `storage.merkle.compact.Merkle(F, Digest)` (init,
   from_compact_state, prune_to_frontier, append_leaf, root, leaves, snapshot, new_batch,
   to_batch, apply_batch) with compact.rs's tests.

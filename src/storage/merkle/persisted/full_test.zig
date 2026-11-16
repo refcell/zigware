@@ -418,3 +418,71 @@ test "persisted merkle pruning" {
 test "persisted merkle recovery with pruning" {
     inline for (families) |F| try recovery_with_pruning(F);
 }
+
+/// A tree of 100 leaves pruned to 60: metadata holds the boundary and pins the journal lacks.
+fn pruned_tree(comptime F: type, harness: *Harness) !Merkle(F) {
+    var structure = try harness.open(F);
+    errdefer structure.deinit();
+    try add_digests(F, &structure, 0, 100);
+    try structure.prune(60);
+    return structure;
+}
+
+/// A destroy interrupted at every mutation leaves a store that reopens as the synced tree or
+/// empty, and that a retried destroy empties. Commonware samples sync and removal faults by
+/// seed; this sweeps a mutation budget until the destroy completes.
+fn interrupted_destroy_reopens(comptime F: type) !void {
+    var unchanged: u32 = 0;
+    var emptied: u32 = 0;
+    var budget: u64 = 0;
+    while (budget < 1_000) : (budget += 1) {
+        var harness = try Harness.init();
+        defer harness.deinit();
+        var structure = try pruned_tree(F, &harness);
+        const root = try structure.root(&hasher, 0);
+        const leaves = structure.leaves();
+        harness.storage.allow_mutations(budget);
+        const result = structure.destroy();
+        harness.storage.mutations_allowed = null;
+        if (result) |_| break else |_| {}
+        harness.storage.crash();
+
+        structure = try harness.open(F);
+        if (structure.leaves() == leaves) {
+            try testing.expect((try structure.root(&hasher, 0)).eql(root));
+            unchanged += 1;
+        } else {
+            try testing.expectEqual(@as(u64, 0), structure.leaves());
+            emptied += 1;
+        }
+        try structure.destroy();
+        structure = try harness.open(F);
+        defer structure.deinit();
+        try testing.expectEqual(@as(u64, 0), structure.leaves());
+    } else return error.TestUnexpectedResult; // The destroy never completed.
+    try testing.expect(unchanged > 0 and emptied > 0);
+}
+
+/// A journal left behind by a destroy interrupted after its metadata was removed reopens
+/// empty under a leaf cap below its pruned start, as it does without a cap.
+fn interrupted_destroy_reopens_bounded(comptime F: type) !void {
+    var harness = try Harness.init();
+    defer harness.deinit();
+    var structure = try pruned_tree(F, &harness);
+    structure.deinit();
+    try harness.storage.interface().remove("metadata-partition", null);
+    const storage = harness.storage.interface();
+    structure = try Merkle(F).init_at_most(gpa, storage, &hasher, harness.cfg(), 30);
+    try testing.expectEqual(@as(u64, 0), structure.leaves());
+    try structure.destroy();
+    structure = try harness.open(F);
+    defer structure.deinit();
+    try testing.expectEqual(@as(u64, 0), structure.leaves());
+}
+
+test "persisted merkle interrupted destroy reopens" {
+    inline for (families) |F| {
+        try interrupted_destroy_reopens(F);
+        try interrupted_destroy_reopens_bounded(F);
+    }
+}
