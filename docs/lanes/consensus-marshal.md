@@ -253,3 +253,7 @@ then the core and standard actors as those packages land.
   tasks.
 - 2026-11-16: marshal core actor (mailbox, resolver backfill, finalized chain, floors,
   repair, dispatch), delivery, and `Update`.
+- 2026-11-16 (parallel lane): standard validation, the inline standard wrapper (tests on a
+  stand-in marshal actor until the harness lands), and mocks verifying, store, resolver,
+  and application (`mocks.Application(B)`: shared handle with clone/deinit, auto or manual
+  acknowledgement).
