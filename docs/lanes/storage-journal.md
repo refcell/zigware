@@ -51,8 +51,9 @@ resize, sync), `runtime.storage`, with the in-memory backend `runtime.storage.me
   on `runtime.storage.faulty` (with storage-archive's `archive/faults.zig` harness).
 - [ ] metadata: `start_sync` (pipelined syncs) and the conformance hash (`MetadataWorkload`).
 - [x] `queue_recovery` fuzz target on faulty storage.
+- [x] `journal_segmented_variable_recovery` fuzz target on faulty storage (raw-image oracle).
 - [ ] Recovery fuzz targets on faulty storage: `journal_contiguous_recovery`,
-  `journal_segmented_variable_recovery`, `journal_oversized_recovery`.
+  `journal_oversized_recovery`.
 - [x] queue (durable at-least-once queue over the contiguous variable journal, with its
   cursor) with storage.rs's tests and the `QueueWorkload` round trip.
 - [ ] queue: conformance hash for `QueueWorkload` (needs a storage conformance harness).
@@ -298,3 +299,4 @@ resize, sync), `runtime.storage`, with the in-memory backend `runtime.storage.me
 - 2026-11-16: authenticated equal-length-branch crash test on faulty storage.
 - 2026-11-16: metadata_recovery fuzz target and overwrite-crash test on faulty storage.
 - 2026-11-16: queue_recovery fuzz target on faulty storage.
+- 2026-11-16: journal_segmented_variable_recovery fuzz target on faulty storage.
