@@ -236,6 +236,7 @@ fn bench_batch_to_affine(runner: *bench.Runner) !void {
 pub fn run(runner: *bench.Runner) !void {
     try @import("benches/assemble.zig").run(runner);
     try @import("benches/dkg.zig").run(runner);
+    try @import("benches/golden.zig").run(runner);
     try @import("benches/threshold.zig").run(runner);
     try @import("benches/verify.zig").run(runner);
     try bench_batch_to_affine(runner);
