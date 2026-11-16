@@ -63,6 +63,11 @@ pub const PrioritySet = priority_set.PrioritySet;
 pub const time = @import("time.zig");
 pub const Duration = time.Duration;
 pub const SystemTime = time.SystemTime;
+pub const NonZeroDuration = time.NonZeroDuration;
+
+pub const concurrency = @import("concurrency.zig");
+
+pub const prefetch = @import("prefetch.zig");
 
 /// 64-bit golden-ratio-derived odd mixing constant, `floor(2^64 / phi)`.
 pub const GOLDEN_RATIO: u64 = rng.GOLDEN_RATIO;
@@ -187,6 +192,7 @@ test {
     _ = @import("conformance_test.zig");
     _ = @import("ordered_test.zig");
     _ = @import("fuzz.zig");
+    _ = @import("lib_test.zig");
 }
 
 test "utils: union" {

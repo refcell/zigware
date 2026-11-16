@@ -257,6 +257,28 @@ pub const SystemTime = struct {
     }
 };
 
+/// A `Duration` that is never zero (commonware `NonZeroDuration`; `NZDuration!` is
+/// `init_panic`).
+pub const NonZeroDuration = struct {
+    duration: Duration,
+
+    /// Returns null when `duration` is zero.
+    pub fn init(duration: Duration) ?NonZeroDuration {
+        if (duration.is_zero()) return null;
+        return .{ .duration = duration };
+    }
+
+    /// Panics when `duration` is zero.
+    pub fn init_panic(duration: Duration) NonZeroDuration {
+        return init(duration) orelse @panic("duration must be non-zero");
+    }
+
+    pub fn get(self: NonZeroDuration) Duration {
+        assert(!self.duration.is_zero());
+        return self.duration;
+    }
+};
+
 /// A uniform duration in `[low, high]`, matching `rand` 0.10's `UniformDuration`.
 pub fn sample_duration(rng: anytype, low: Duration, high: Duration) Duration {
     assert(low.order(high) != .gt);

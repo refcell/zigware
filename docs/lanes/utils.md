@@ -88,6 +88,12 @@ encoding parts as soon as `codec` has its core API (see docs/lanes/codec.md).
   as `Invalid`. Owns its items. Also `utils.NonEmptyVec`.
 - `utils.iter`: `NonEmpty(I)` (`init`, `try_init`, `into_parts`, `next`), `zip_eq(a, b)`
   (panics on unequal lengths), `slice(T, items)`; iterators are types with `next() ?Item`.
+- `utils.concurrency`: `Limiter.init(max)` (`try_acquire` -> `?Reservation`, `deinit` releases)
+  and `KeyedLimiter(K).init(gpa, io, max)` (one reservation per key, at most `max` keys,
+  allocation-free after `init`). Limiters must outlive their reservations.
+- `utils.prefetch`: `prefetch(ptr)`, `prefetch_lines(T, ptr, len, lines_max)` (`@prefetch`),
+  `Lookahead.init(distance).advance(T, remaining)`.
+- `utils.NonZeroDuration` (`utils.time`): `init` -> `?NonZeroDuration`, `init_panic`, `get`.
 - `utils.Hostname` (`utils.hostname`): validated RFC 1035/1123 hostname stored inline
   (`init`, `literal`, `as_str`, `eql`, `order`, `{f}`, `len_max`, `label_len_max`,
   `max_encode_size` = 258), codec as a `RangeCfg(..=253)` byte string; `hostname.Error`.
@@ -134,7 +140,7 @@ encoding parts as soon as `codec` has its core API (see docs/lanes/codec.md).
 - [x] utils priority_set (resolver lane, audited), acknowledgement, cache (unit tests,
   colliding keys, model fuzz), channel mpsc/ring/reservation/fallible/tracked.
 - [x] utils handles (`Table`, `partition`), requested by storage-merkle.
-- [ ] Fuzz targets for every decoder (commonware utils/fuzz).
+- [ ] Fuzz targets for every decoder (commonware utils/fuzz): done except futures.
 
 ## Log
 - 2026-11-13: faults, rng (TestRng/ScriptedRng/FuzzRng + FuzzRng conformance hash), range,
@@ -168,3 +174,6 @@ encoding parts as soon as `codec` has its core API (see docs/lanes/codec.md).
   fuzz, and a tracked model fuzz (watermark and per-batch pending against a model).
 - 2026-11-16: cache model fuzz, Ghost collision churn and ownership, colliding resident keys.
 - 2026-11-16: vec (Bounded, NonEmptyVec with codec and arbitrary) and iter (NonEmpty, zip_eq).
+
+- 2026-11-16: NonZeroDuration, concurrency limiters, prefetch/Lookahead, and the lib_functions,
+  net, and sequence fuzz targets.

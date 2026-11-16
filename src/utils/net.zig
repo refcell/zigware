@@ -214,3 +214,76 @@ test "net: is_global v6" {
     };
     for (local) |segments| try testing.expect(!is_global(ip6(segments)));
 }
+
+// Fuzz (commonware `utils/fuzz/fuzz_targets/net.rs`), with the properties checked against an
+// independent model of prefix masking.
+
+const fuzz = @import("fuzz.zig");
+const rng = @import("rng.zig");
+
+fn draw_address(generator: *rng.FuzzRng) IpAddr {
+    if (rng.boolean(generator)) {
+        var octets: [4]u8 = undefined;
+        generator.fill_bytes(&octets);
+        return .{ .v4 = .{ .octets = octets } };
+    }
+    var octets: [16]u8 = undefined;
+    generator.fill_bytes(&octets);
+    // Exercise the IPv4-mapped grouping often.
+    if (rng.boolean(generator)) octets[0..12].* = .{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff };
+    return .{ .v6 = .{ .octets = octets } };
+}
+
+/// The address as (is IPv4 after unmapping, value) for the model.
+fn model_value(ip: IpAddr) struct { bool, u128 } {
+    return switch (ip) {
+        .v4 => |v4| .{ true, std.mem.readInt(u32, &v4.octets, .big) },
+        .v6 => |v6| if (to_ipv4_mapped(v6)) |v4|
+            .{ true, std.mem.readInt(u32, &v4.octets, .big) }
+        else
+            .{ false, std.mem.readInt(u128, &v6.octets, .big) },
+    };
+}
+
+fn model_same_subnet(a: IpAddr, b: IpAddr, ipv4_bits: u8, ipv6_bits: u8) bool {
+    const a_v4, const a_value = model_value(a);
+    const b_v4, const b_value = model_value(b);
+    if (a_v4 != b_v4) return false;
+    const width: u8 = if (a_v4) 32 else 128;
+    const bits = @min(if (a_v4) ipv4_bits else ipv6_bits, width);
+    if (bits == 0) return true;
+    const shift: u7 = @intCast(width - bits);
+    return (a_value >> shift) == (b_value >> shift);
+}
+
+fn fuzz_net(_: void, generator: *rng.FuzzRng) !void {
+    const ipv4_bits = rng.range_at_most(generator, u8, 0, 40);
+    const ipv6_bits = rng.range_at_most(generator, u8, 0, 140);
+    const mask = SubnetMask.init(ipv4_bits, ipv6_bits);
+    const a = draw_address(generator);
+    // Often derive the second address from the first so subnets collide.
+    var b = draw_address(generator);
+    if (rng.boolean(generator)) {
+        b = a;
+        switch (b) {
+            .v4 => |*v4| v4.octets[3] ^= @truncate(generator.next_u32()),
+            .v6 => |*v6| v6.octets[15] ^= @truncate(generator.next_u32()),
+        }
+    }
+    const subnet_a = subnet(a, mask);
+    const subnet_b = subnet(b, mask);
+    try testing.expectEqual(model_same_subnet(a, b, ipv4_bits, ipv6_bits), subnet_a.eql(subnet_b));
+    // Grouping is idempotent, and a subnet's address never needs unmapping again.
+    try testing.expect(subnet(subnet_a.addr, mask).eql(subnet_a));
+    if (subnet_a.addr == .v6) try testing.expect(to_ipv4_mapped(subnet_a.addr.v6) == null);
+    // Private, loopback, and unspecified IPv4 ranges are never global.
+    if (a == .v4) {
+        const first = a.v4.octets[0];
+        if (first == 0 or first == 10 or first == 127) try testing.expect(!is_global(a));
+        if (first == 192 and a.v4.octets[1] == 168) try testing.expect(!is_global(a));
+    }
+}
+
+test "fuzz net" {
+    try fuzz.run({}, fuzz_net, 0x6e65_7400, 500);
+}

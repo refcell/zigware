@@ -48,4 +48,5 @@ test {
     std.testing.refAllDecls(@This());
     _ = uint;
     _ = fixed_bytes;
+    _ = @import("sequence/fuzz_test.zig");
 }
