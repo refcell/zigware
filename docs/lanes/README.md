@@ -30,7 +30,7 @@ appends a short dated log line after each push. Other lanes read it to find inte
 | consensus-simplex | consensus-simplex.md | `src/consensus` except `marshal/`, `aggregation/` | 3 |
 | deployer | deployer.md | `src/deployer` | 3 |
 | curve25519 | curve25519.md | `src/cryptography/curve25519` | 3 |
-| glue | glue.md | `src/glue` (run by the clearing lane while it waits on qmdb `current`) | 4 |
+| glue | glue.md | `src/glue` (run by the clearing lane while it waits on qmdb `current`); `stateful/` by the curve25519 thread, `dkg/` by the coding thread | 4 |
 
 Later waves start as their dependencies land; [../ROADMAP.md](../ROADMAP.md) lists them.
 

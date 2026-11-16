@@ -5,10 +5,12 @@
 //! docs/lanes/glue.md).
 //!
 //! - `simulate`: a harness for deterministic simulations of validator stacks.
+//! - `stateful`: speculative and finalized QMDB state for applications built on consensus.
 
 const std = @import("std");
 
 pub const simulate = @import("simulate/mod.zig");
+pub const stateful = @import("stateful/mod.zig");
 
 test {
     std.testing.refAllDecls(@This());
