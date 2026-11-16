@@ -96,4 +96,5 @@ test "contiguous: batch count to blob boundary" {
 
 test {
     std.testing.refAllDecls(@This());
+    _ = @import("recovery_fuzz_test.zig");
 }

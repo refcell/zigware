@@ -53,7 +53,7 @@ resize, sync), `runtime.storage`, with the in-memory backend `runtime.storage.me
 - [x] `queue_recovery` fuzz target on faulty storage.
 - [x] `journal_segmented_variable_recovery` fuzz target on faulty storage (raw-image oracle).
 - [x] `journal_oversized_recovery` fuzz target on faulty storage (marker-floor oracle).
-- [ ] `journal_contiguous_recovery` fuzz target on faulty storage.
+- [x] `journal_contiguous_recovery` fuzz target on faulty storage (multi-cycle, both kinds).
 - [x] queue (durable at-least-once queue over the contiguous variable journal, with its
   cursor) with storage.rs's tests and the `QueueWorkload` round trip.
 - [ ] queue: conformance hash for `QueueWorkload` (needs a storage conformance harness).
@@ -278,6 +278,15 @@ resize, sync), `runtime.storage`, with the in-memory backend `runtime.storage.me
   each section's index or value blob arrives first, since commonware's barriers race; without
   it an index could never outlive its values and value verification went untested.
 
+- Contiguous `replay` reads through `paged.Writer.view_replay`, which reads flushed pages from
+  the blob and the buffered tail from memory, as commonware replays through a reader view.
+  The flushing `Writer.replay` stays for recovery, where buffers are empty. Before this,
+  a replay issued writes, so it failed under write faults and left unsynced bytes for a crash.
+- `journal_contiguous_recovery`: a held `start_sync` handle counts as completed at the call
+  (syncs are synchronous), `Snapshot` does nothing (no snapshot readers), positions are
+  16-bit, appends get 5 of 16 op draws, and `items_per_section` is biased toward small
+  sections so seeded runs reach prunes.
+
 ## Log
 - 2026-11-13: journal Error, frame encoding/decoding with zstd frames, durability Barrier,
   frame fuzz target.
@@ -307,3 +316,5 @@ resize, sync), `runtime.storage`, with the in-memory backend `runtime.storage.me
 - 2026-11-16: queue_recovery fuzz target on faulty storage.
 - 2026-11-16: journal_segmented_variable_recovery fuzz target on faulty storage.
 - 2026-11-16: journal_oversized_recovery fuzz target on faulty storage.
+- 2026-11-16: contiguous replay no longer flushes the write buffer (found by the
+  journal_contiguous_recovery port, which landed with it).
