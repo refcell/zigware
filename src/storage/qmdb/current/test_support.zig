@@ -28,6 +28,14 @@ pub fn UnorderedFixedChunks(comptime F: type, comptime N: usize) type {
     return current.Db(F, U, Journal, any_support.Index, Sha256, N);
 }
 
+/// The ordered fixed `current` database of commonware's conformance types.
+pub fn OrderedFixed(comptime F: type) type {
+    const E = any_support.Encoding;
+    const Journal = fixed.Journal(any.operation.Ordered(F, Digest, E));
+    const U = any.operation.update.Ordered(Digest, E);
+    return current.Db(F, U, Journal, any_support.OrderedIndex, Sha256, 32);
+}
+
 /// `any`'s storage harness, opening `current` databases.
 pub const Harness = struct {
     inner: any_support.Harness,

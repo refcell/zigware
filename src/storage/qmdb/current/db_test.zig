@@ -14,6 +14,8 @@ const merkle = @import("../../merkle/mod.zig");
 const qmdb_support = @import("../test_support.zig");
 const any_conformance = @import("../any/conformance_test.zig");
 const unordered_proof = @import("unordered/proof.zig");
+const ordered_proof = @import("ordered/proof.zig");
+const proof_mod = @import("proof.zig");
 const verification = @import("verification.zig");
 const support = @import("test_support.zig");
 
@@ -25,8 +27,7 @@ const Write = support.Write;
 const key = support.to_digest;
 const val = support.to_val;
 
-fn CurrentConformance(comptime F: type) type {
-    const Db = support.UnorderedFixed(F);
+fn CurrentConformance(comptime Db: type) type {
     return struct {
         pub fn commit(allocator: Allocator, seed: u64) ![]u8 {
             var harness = try support.Harness.init(allocator);
@@ -47,17 +48,39 @@ const name_prefix = "commonware_storage::qmdb::conformance::tests::";
 
 test "current root conformance (MMR unordered fixed)" {
     const allocator = std.heap.smp_allocator;
-    const C = CurrentConformance(merkle.mmr.Family);
+    const C = CurrentConformance(support.UnorderedFixed(merkle.mmr.Family));
     const name = name_prefix ++ "CurrentMmrUnorderedFixedConf";
     try conformance.verify(C, allocator, name, 200, qmdb_support.conformance_file);
 }
 
 test "current root conformance (MMB unordered fixed)" {
     const allocator = std.heap.smp_allocator;
-    const C = CurrentConformance(merkle.mmb.Family);
+    const C = CurrentConformance(support.UnorderedFixed(merkle.mmb.Family));
     const name = name_prefix ++ "CurrentMmbUnorderedFixedConf";
     try conformance.verify(C, allocator, name, 200, qmdb_support.conformance_file);
 }
+
+test "current root conformance (MMR ordered fixed)" {
+    const allocator = std.heap.smp_allocator;
+    const C = CurrentConformance(support.OrderedFixed(merkle.mmr.Family));
+    const name = name_prefix ++ "CurrentMmrOrderedFixedConf";
+    try conformance.verify(C, allocator, name, 200, qmdb_support.conformance_file);
+}
+
+test "current root conformance (MMB ordered fixed)" {
+    const allocator = std.heap.smp_allocator;
+    const C = CurrentConformance(support.OrderedFixed(merkle.mmb.Family));
+    const name = name_prefix ++ "CurrentMmbOrderedFixedConf";
+    try conformance.verify(C, allocator, name, 200, qmdb_support.conformance_file);
+}
+
+/// The unordered and ordered fixed databases of each family.
+const all_dbs = .{
+    support.UnorderedFixed(merkle.mmr.Family),
+    support.UnorderedFixed(merkle.mmb.Family),
+    support.OrderedFixed(merkle.mmr.Family),
+    support.OrderedFixed(merkle.mmb.Family),
+};
 
 fn expect_value(db: anytype, k: Digest, expected: ?Digest) !void {
     const actual = try db.get(&k);
@@ -164,7 +187,8 @@ fn expect_key_value_proof(
 
 /// Checks the key-value proof of every active update from the floor, in both the constant
 /// and the dynamic codec forms.
-fn check_key_value_proofs(comptime F: type, comptime Db: type, db: *Db) !void {
+fn check_key_value_proofs(comptime Db: type, db: *Db) !void {
+    const F = Db.Family;
     const root = db.root();
     const bad_key = Digest{ .bytes = @splat(0xAA) };
     try testing.expectError(error.KeyNotFound, db.key_value_proof(&bad_key));
@@ -180,11 +204,17 @@ fn check_key_value_proofs(comptime F: type, comptime Db: type, db: *Db) !void {
         try expect_key_value_proof(Db, &proved.proof, op.update.key, proved.value, &root);
         const verify = Db.verify_key_value_proof;
         try testing.expect(verify(&proved.proof, op.update.key, proved.value, &root));
-        const Dynamic = unordered_proof.KeyValueProof(F, Digest, null);
+        const ordered = Db.Any.Update.siblings;
+        const Dynamic = if (ordered)
+            ordered_proof.KeyValueProof(F, Digest, Digest, null)
+        else
+            unordered_proof.KeyValueProof(F, Digest, null);
         const encoded = try codec.encode(Db.KeyValueProof, gpa, proved.proof);
         defer gpa.free(encoded);
         const max_digests = proved.proof.proof.range_proof.proof.digests.len;
-        const cfg: Dynamic.Cfg = .{ .chunk_size = Db.chunk_bytes, .max_digests = max_digests };
+        const OpCfg = proof_mod.OperationProof(F, Digest, null).Cfg;
+        const op_cfg: OpCfg = .{ .chunk_size = Db.chunk_bytes, .max_digests = max_digests };
+        const cfg: Dynamic.Cfg = if (ordered) .{ op_cfg, {} } else op_cfg;
         var dynamic = try codec.decode_cfg(Dynamic, gpa, encoded, cfg);
         defer dynamic.deinit(gpa);
         try expect_key_value_proof(Db, &dynamic, op.update.key, proved.value, &root);
@@ -195,8 +225,7 @@ fn check_key_value_proofs(comptime F: type, comptime Db: type, db: *Db) !void {
 
 // Commonware's `test_current_db_key_value_proof`.
 test "current key-value proofs of every active key" {
-    inline for (families) |F| {
-        const Db = support.UnorderedFixed(F);
+    inline for (all_dbs) |Db| {
         var harness = try support.Harness.init(gpa);
         defer harness.deinit();
         var db = try harness.open(Db, null);
@@ -204,14 +233,13 @@ test "current key-value proofs of every active key" {
         try apply_random_ops(Db, &db, 300, 0x6b76);
         try support.apply_writes(Db, &db, &.{});
         try testing.expect(db.any.bitmap.complete_chunks() > 1);
-        try check_key_value_proofs(F, Db, &db);
+        try check_key_value_proofs(Db, &db);
     }
 }
 
 // Commonware's `test_current_db_proving_repeated_updates`.
 test "current proofs track a repeatedly updated key" {
-    inline for (families) |F| {
-        const Db = support.UnorderedFixed(F);
+    inline for (all_dbs) |Db| {
         var harness = try support.Harness.init(gpa);
         defer harness.deinit();
         var db = try harness.open(Db, null);
@@ -235,8 +263,7 @@ test "current proofs track a repeatedly updated key" {
 
 // Commonware's `test_current_db_range_proofs`.
 test "current range proofs verify from the floor to the tip" {
-    inline for (families) |F| {
-        const Db = support.UnorderedFixed(F);
+    inline for (all_dbs) |Db| {
         var harness = try support.Harness.init(gpa);
         defer harness.deinit();
         var db = try harness.open(Db, null);
@@ -287,8 +314,7 @@ fn verify_ranged(
 // Commonware's `test_sync_persists_bitmap_pruning_boundary`, then more writes on the pruned
 // database and another reopen.
 test "current prune and sync persist the bitmap pruning boundary" {
-    inline for (families) |F| {
-        const Db = support.UnorderedFixed(F);
+    inline for (all_dbs) |Db| {
         var harness = try support.Harness.init(gpa);
         defer harness.deinit();
         var db = try harness.open(Db, null);
@@ -309,7 +335,7 @@ test "current prune and sync persist the bitmap pruning boundary" {
         const root_after = db.root();
         try reopen(Db, &harness, &db);
         try testing.expect(db.root().eql(root_after));
-        try check_key_value_proofs(F, Db, &db);
+        try check_key_value_proofs(Db, &db);
     }
 }
 
@@ -401,8 +427,8 @@ fn check_random_chains(comptime Db: type, seed: u64) !void {
 }
 
 test "current randomized chains match the rebuilt canonical root" {
-    inline for (families) |F| {
-        try check_random_chains(support.UnorderedFixed(F), 0xc0ffee);
+    inline for (all_dbs) |Db| {
+        try check_random_chains(Db, 0xc0ffee);
     }
 }
 
@@ -459,8 +485,7 @@ fn merkleize_explicit(
 // `..._staged_ancestor_applied_before_merkleize`): staged reads and slots give the explicit
 // writes' canonical root, on the database and on an unapplied or applied parent.
 test "current staged merkleize matches explicit writes" {
-    inline for (families) |F| {
-        const Db = support.UnorderedFixed(F);
+    inline for (all_dbs) |Db| {
         var harness = try support.Harness.init(gpa);
         defer harness.deinit();
         var db = try harness.open(Db, null);
@@ -484,5 +509,70 @@ test "current staged merkleize matches explicit writes" {
         try db.apply_batch(after);
         try testing.expect(db.root().eql(child_explicit.root()));
         try testing.expect((try db.get_metadata()).?.eql(val(9, 9)));
+    }
+}
+
+fn fill(byte: u8) Digest {
+    return .{ .bytes = @splat(byte) };
+}
+
+/// Whether `db`'s exclusion proof of `absent` verifies for each of `keys` (in order).
+fn expect_exclusions(
+    comptime Db: type,
+    db: *Db,
+    absent: Digest,
+    keys: []const Digest,
+    expected: []const bool,
+) !void {
+    var proof = try db.exclusion_proof(&absent);
+    defer proof.deinit(gpa);
+    const root = db.root();
+    for (keys, expected) |k, ok| {
+        try testing.expectEqual(ok, Db.verify_exclusion_proof(&proof, k, &root));
+    }
+    const wrong_root = fill(0xDD);
+    try testing.expect(!Db.verify_exclusion_proof(&proof, absent, &wrong_root));
+}
+
+// Commonware's ordered `test_exclusion_proofs`.
+test "current ordered exclusion proofs" {
+    inline for (families) |F| {
+        const Db = support.OrderedFixed(F);
+        var harness = try support.Harness.init(gpa);
+        defer harness.deinit();
+        var db = try harness.open(Db, null);
+        defer db.deinit();
+        const k1 = fill(0x10);
+        const k2 = fill(0x30);
+        try expect_exclusions(Db, &db, k1, &.{ k1, k2 }, &.{ true, true });
+        const empty_root = db.root();
+        var empty_proof = try db.exclusion_proof(&k1);
+        defer empty_proof.deinit(gpa);
+        try support.apply_writes(Db, &db, &.{.{ .key = k1, .value = fill(0xA1) }});
+        try testing.expectError(error.KeyExists, db.exclusion_proof(&k1));
+        const any_keys = [_]Digest{ fill(0xFF), fill(0x00), k1 };
+        try expect_exclusions(Db, &db, fill(0xFF), &any_keys, &.{ true, true, false });
+        try expect_exclusions(Db, &db, fill(0x00), &any_keys, &.{ true, true, false });
+        try support.apply_writes(Db, &db, &.{.{ .key = k2, .value = fill(0xB2) }});
+        const keys = [_]Digest{ fill(0x31), fill(0x0F), fill(0x20), k1, k2, fill(0x11) };
+        // The span wrapping from k2 to k1, then the inner span [k1, k2).
+        const outer = [_]bool{ true, true, false, false, false, false };
+        const inner = [_]bool{ false, false, true, false, false, true };
+        try expect_exclusions(Db, &db, fill(0x31), &keys, &outer);
+        try expect_exclusions(Db, &db, fill(0x0F), &keys, &outer);
+        try expect_exclusions(Db, &db, fill(0x20), &keys, &inner);
+        try testing.expectEqual(@as(?Digest, null), try db.get_next_key(&k2));
+        try testing.expect((try db.get_next_key(&k1)).?.eql(k2));
+        try testing.expect((try db.get_prev_key(&k2)).?.eql(k1));
+        try support.apply_writes(Db, &db, &.{
+            .{ .key = k1, .value = null },
+            .{ .key = k2, .value = null },
+        });
+        try db.sync();
+        try testing.expect(db.is_empty());
+        try testing.expect(!db.root().eql(empty_root));
+        try expect_exclusions(Db, &db, k1, &.{ k1, k2 }, &.{ true, true });
+        const root = db.root();
+        try testing.expect(!Db.verify_exclusion_proof(&empty_proof, k1, &root));
     }
 }

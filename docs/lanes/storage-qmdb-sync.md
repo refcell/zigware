@@ -31,7 +31,11 @@ it comes first once `any` lands.
   `CurrentMmr/MmbUnorderedFixedConf`, and commonware's small-db, proof, prune-boundary, and
   commit-after-sync tests plus randomized chains checked against the reopened rebuild.
 - [x] current staged batches (`stage`/`expand`, `Slot`), with the staged-parity tests.
-- [ ] current ordered (exclusion proofs) and variable.
+- [x] current ordered fixed: `exclusion_proof`, ordered `KeyValueProof` (with next key),
+  `KeyValueProof.verify`/`ExclusionProof.verify`, `get_span`/`get_next_key`/`get_prev_key`,
+  `CurrentMmr/MmbOrderedFixedConf`, and commonware's exclusion-proof test; the unordered
+  proof, prune, staged, and random-chain tests also run over ordered.
+- [ ] current variable (once `any` variable lands).
 - [ ] current sync glue.
 - [ ] sync engine (with `requests`), database, journal, source, harness; per-variant sync glue
   (`keyless/sync.zig`, `immutable/sync.zig`, `any/sync/`), which this lane owns.
@@ -99,7 +103,10 @@ it comes first once `any` lands.
   field `any` is the underlying `any.Db`. Staged: `var s = try b.stage(keys, &db, out)`,
   `s.expand(keys, &db, out)`, `s.with_metadata`, `s.merkleize(slots, unstaged, &db)` with
   `Db.Slot` (`.keep`, `.put = v`, `.delete`) and `Db.StagedBatch.Mutation`; it consumes the
-  staged batch, also on error.
+  staged batch, also on error. Ordered (`current/test_support.zig` `OrderedFixed(F)`):
+  `KeyValueProof` is `ordered.proof.KeyValueProof(F, K, D, N)` (carries `next_key`),
+  `exclusion_proof(&key) -> ExclusionProof` (`KeyExists` if active),
+  `verify_exclusion_proof(proof, key, &root)`, `get_span`, `get_next_key`, `get_prev_key`.
 
 ## Decisions
 - current's per-batch activity chunks are a refcounted `Layer` chain ending at the
@@ -135,4 +142,5 @@ it comes first once `any` lands.
 - 2026-11-16: current's grafting and canonical-root helpers; grafted range proofs and their
   verification.
 - 2026-11-16: current unordered fixed `Db` and batches (clearing's Balances DB) with
-  `CurrentMmr/MmbUnorderedFixedConf`.
+  `CurrentMmr/MmbUnorderedFixedConf`; staged batches; ordered fixed current with exclusion
+  proofs and `CurrentMmr/MmbOrderedFixedConf`.

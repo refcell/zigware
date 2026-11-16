@@ -36,13 +36,9 @@ pub fn KeyValueProof(comptime F: type, comptime D: type, comptime chunk_size: ?u
             root: *const D,
         ) bool {
             const Op = operation.Operation(F, U);
-            const size = comptime codec.fixed_size(Op) orelse
-                @compileError("verify needs a fixed-size operation");
+            comptime assert(!U.siblings);
             const op: Op = .{ .update = .{ .key = key, .value = value } };
-            var buffer: [size]u8 = undefined;
-            const encoded = codec.encode_to(Op, op, &buffer);
-            assert(encoded.len == size);
-            return verification.verify_operation(F, H, &self.proof, encoded, root);
+            return verification.verify_fixed_operation(F, H, Op, &self.proof, op, root);
         }
 
         pub fn eql(a: Self, b: Self) bool {

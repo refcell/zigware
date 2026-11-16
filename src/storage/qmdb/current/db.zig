@@ -22,6 +22,7 @@ const grafted_mod = @import("grafted.zig");
 const canonical = @import("canonical.zig");
 const proof_mod = @import("proof.zig");
 const unordered_proof = @import("unordered/proof.zig");
+const ordered_proof = @import("ordered/proof.zig");
 const batch_mod = @import("batch.zig");
 
 const Storage = runtime.storage.Storage;
@@ -73,7 +74,16 @@ pub fn Db(F: type, U: type, C: type, I: type, H: type, comptime N: usize) type {
         pub const Witness = proof_mod.OpsRootWitness(F, Digest);
         pub const RangeProof = proof_mod.RangeProof(F, Digest);
         pub const OperationProof = proof_mod.OperationProof(F, Digest, N);
-        pub const KeyValueProof = unordered_proof.KeyValueProof(F, Digest, N);
+        /// The key-value proof: ordered proofs also carry the key's next key.
+        pub const KeyValueProof = if (U.siblings)
+            ordered_proof.KeyValueProof(F, Key, Digest, N)
+        else
+            unordered_proof.KeyValueProof(F, Digest, N);
+        /// The exclusion proof of an ordered database.
+        pub const ExclusionProof = if (U.siblings)
+            ordered_proof.ExclusionProof(F, Key, U.Encoding, Digest, N)
+        else
+            void;
         pub const Cfg = Config(I.Translator, C.BackingConfig);
         pub const UnmerkleizedBatch = batch_mod.Unmerkleized(Self);
         pub const MerkleizedBatch = batch_mod.Merkleized(Self);
@@ -393,7 +403,57 @@ pub fn Db(F: type, U: type, C: type, I: type, H: type, comptime N: usize) type {
             assert(std.mem.eql(u8, std.mem.asBytes(&located.update.key), std.mem.asBytes(key)));
             const proof = try self.operation_proof(located.location);
             assert(proof.loc == located.location);
-            return .{ .proof = .{ .proof = proof }, .value = located.update.value };
+            const kv: KeyValueProof = if (comptime U.siblings)
+                .{ .proof = proof, .next_key = located.update.next_key }
+            else
+                .{ .proof = proof };
+            return .{ .proof = kv, .value = located.update.value };
+        }
+
+        /// The proof that `key` is absent (ordered databases): the active update whose span
+        /// covers it, or an empty database's last commit. Fails with `KeyExists` if `key` is
+        /// active.
+        pub fn exclusion_proof(self: *Self, key: *const Key) !ExclusionProof {
+            comptime assert(U.siblings);
+            if (try self.any.get_span(key)) |span| {
+                const bytes = std.mem.asBytes;
+                if (std.mem.eql(u8, bytes(&span.update.key), bytes(key))) return error.KeyExists;
+                const proof = try self.operation_proof(span.location);
+                return .{ .key_value = .{ .proof = proof, .update = span.update } };
+            }
+            const last = self.any.log.size() - 1;
+            const op = try self.any.log.read(last);
+            if (op != .commit) return error.DataCorrupted; // The log ends with a commit.
+            // An empty database's last commit raised its floor to itself.
+            if (op.commit.floor != last) return error.DataCorrupted;
+            const proof = try self.operation_proof(last);
+            assert(proof.loc == last);
+            return .{ .commit = .{ .proof = proof, .value = op.commit.metadata } };
+        }
+
+        /// Whether `proof` shows `key` absent from a database with canonical `root`.
+        pub fn verify_exclusion_proof(
+            proof: *const ExclusionProof,
+            key: Key,
+            root_value: *const Digest,
+        ) bool {
+            comptime assert(U.siblings);
+            return proof.verify(H, key, root_value);
+        }
+
+        /// The active key after `key` (not wrapping), as in `any`.
+        pub fn get_next_key(self: *Self, key: *const Key) !?Key {
+            return self.any.get_next_key(key);
+        }
+
+        /// The active key before `key` (not wrapping), as in `any`.
+        pub fn get_prev_key(self: *Self, key: *const Key) !?Key {
+            return self.any.get_prev_key(key);
+        }
+
+        /// The active update whose span covers `key`, and its location, as in `any`.
+        pub fn get_span(self: *Self, key: *const Key) !?Any.Located {
+            return self.any.get_span(key);
         }
 
         /// Whether `proof` shows `key` holds `value` in a database with canonical `root`.

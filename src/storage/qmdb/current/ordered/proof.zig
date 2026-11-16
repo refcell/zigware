@@ -1,7 +1,7 @@
 //! Ordered current proofs (commonware's `qmdb/current/ordered/proof.rs`): a key-value proof
 //! carries the key's next key, and an exclusion proof shows a key is absent through the
 //! active update whose `[key, next_key)` span covers it, or through the commit of an empty
-//! database. Verification lands with current's database.
+//! database.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -10,6 +10,8 @@ const codec = @import("codec");
 const any = @import("../../any/operation.zig");
 const value = @import("../../value.zig");
 const proof = @import("../proof.zig");
+const verification = @import("../verification.zig");
+const ordered = @import("../../any/ordered.zig");
 
 /// Exclusion-proof tag of a key-value span.
 pub const key_value_context: u8 = 0;
@@ -35,6 +37,21 @@ pub fn KeyValueProof(
             self.proof.deinit(gpa);
             codec.free(K, gpa, self.next_key);
             self.* = undefined;
+        }
+
+        /// Whether this proves that `key` holds `value` (with this proof's next key) in a
+        /// database with canonical `root`; `U` is the database's ordered update type.
+        pub fn verify(
+            self: *const Self,
+            comptime H: type,
+            comptime U: type,
+            key: K,
+            value_of_key: U.Value,
+            root: *const D,
+        ) bool {
+            comptime assert(U.siblings and U.Key == K);
+            const update: U = .{ .key = key, .value = value_of_key, .next_key = self.next_key };
+            return verify_update(F, H, U, &self.proof, update, root);
         }
 
         pub fn eql(a: Self, b: Self) bool {
@@ -92,17 +109,12 @@ pub fn ExclusionProof(
         commit: struct { proof: Operation, value: ?Value },
 
         pub fn deinit(self: *Self, gpa: Allocator) void {
-            switch (self.*) {
-                .key_value => |*span| {
-                    span.proof.deinit(gpa);
-                    span.update.deinit(gpa);
-                },
-                .commit => |*commit| {
-                    commit.proof.deinit(gpa);
-                    codec.free(?Value, gpa, commit.value);
-                },
-            }
-            self.* = undefined;
+            deinit_exclusion(Self, self, gpa);
+        }
+
+        /// Whether this proves `key` absent from a database with canonical `root`.
+        pub fn verify(self: *const Self, comptime H: type, key: K, root: *const D) bool {
+            return verify_exclusion(F, H, Self, self, key, root);
         }
 
         pub fn eql(a: Self, b: Self) bool {
@@ -141,6 +153,62 @@ pub fn ExclusionProof(
             return arbitrary_exclusion(Self, gpa, u);
         }
     };
+}
+
+fn deinit_exclusion(comptime Self: type, self: *Self, gpa: Allocator) void {
+    switch (self.*) {
+        .key_value => |*span| {
+            span.proof.deinit(gpa);
+            span.update.deinit(gpa);
+        },
+        .commit => |*commit| {
+            commit.proof.deinit(gpa);
+            codec.free(?Self.Value, gpa, commit.value);
+        },
+    }
+    self.* = undefined;
+}
+
+/// Whether `operation_proof` shows the ordered update `update` active under `root`.
+fn verify_update(
+    comptime F: type,
+    comptime H: type,
+    comptime U: type,
+    operation_proof: anytype,
+    update: U,
+    root: *const H.Digest,
+) bool {
+    comptime assert(U.siblings);
+    const Op = any.Operation(F, U);
+    const op: Op = .{ .update = update };
+    return verification.verify_fixed_operation(F, H, Op, operation_proof, op, root);
+}
+
+/// `ExclusionProof.verify`: the proven update's cyclic span `[key, next_key)` covers `key` and
+/// is not its own, or the proven commit is an empty database's (its floor is its location).
+fn verify_exclusion(
+    comptime F: type,
+    comptime H: type,
+    comptime Self: type,
+    self: *const Self,
+    key: Self.Update.Key,
+    root: *const H.Digest,
+) bool {
+    const K = Self.Update.Key;
+    switch (self.*) {
+        .key_value => |*span| {
+            const update = &span.update;
+            if (value.eql(K, update.key, key)) return false;
+            if (!ordered.in_span(K, &update.key, &update.next_key, &key)) return false;
+            return verify_update(F, H, Self.Update, &span.proof, update.*, root);
+        },
+        .commit => |*commit| {
+            const Op = any.Operation(F, Self.Update);
+            const floor = commit.proof.loc;
+            const op: Op = .{ .commit = .{ .metadata = commit.value, .floor = floor } };
+            return verification.verify_fixed_operation(F, H, Op, &commit.proof, op, root);
+        },
+    }
 }
 
 fn write_exclusion(comptime Self: type, self: Self, writer: *codec.Writer) void {

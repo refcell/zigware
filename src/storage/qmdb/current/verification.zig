@@ -9,6 +9,7 @@
 
 const std = @import("std");
 const assert = std.debug.assert;
+const codec = @import("codec");
 const merkle = @import("../../merkle/mod.zig");
 const grafting = @import("grafting.zig");
 const proof_mod = @import("proof.zig");
@@ -146,4 +147,21 @@ pub fn verify_operation(
         chunk.len,
         root,
     );
+}
+
+/// `verify_operation` of the fixed-size operation `op` of type `Op`, encoded here.
+pub fn verify_fixed_operation(
+    comptime F: type,
+    comptime H: type,
+    comptime Op: type,
+    operation_proof: anytype,
+    op: Op,
+    root: *const H.Digest,
+) bool {
+    const size = comptime codec.fixed_size(Op) orelse
+        @compileError("verify_fixed_operation needs a fixed-size operation");
+    var buffer: [size]u8 = undefined;
+    const encoded = codec.encode_to(Op, op, &buffer);
+    assert(encoded.len == size);
+    return verify_operation(F, H, operation_proof, encoded, root);
 }
