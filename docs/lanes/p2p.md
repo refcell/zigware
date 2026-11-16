@@ -65,6 +65,10 @@ handshake and the runtime's network, which the actor-stream and runtime lanes ar
   timestamp, signer)`, `verify`), `InfoVerifier(P)` (`validate(now, infos)`,
   `validate_info`), and `max_gossip_size(P, max_bit_vec, max_peers)`; all three match
   commonware's conformance hashes (secp256r1 keys).
+- `authenticated.discovery.directory.Directory(P)` (bootstrappers, track with knowledge bit
+  sets, update_peers, dial/listen reservations with `Metadata`, connect/release, blocks,
+  `infos(bit_vec)`, `random_bit_vec`, dialable/acceptable), with `record.Record(P)` and
+  `bit_set.BitSet(P)`; callers pass `now` and an RNG.
 - `p2p.Message(P)` owns its payload when `gpa` is set; release it with `deinit`.
 - Senders take a message as parts (`[]const []const u8`, concatenated), like stream frames.
 
@@ -143,3 +147,4 @@ handshake and the runtime's network, which the actor-stream and runtime lanes ar
 - 2026-11-13: lookup record and directory with their tests.
 - 2026-11-13: authenticated throttle, outbox, router, and channels.
 - 2026-11-13: discovery wire types (Payload, BitVec, Info, InfoVerifier) with conformance.
+- 2026-11-16: discovery tracker record, bit set, and directory with their tests.

@@ -1,0 +1,344 @@
+//! Tests of the discovery directory (commonware `discovery/actors/tracker/directory.rs` tests).
+
+const std = @import("std");
+const testing = std.testing;
+const codec = @import("codec");
+const cryptography = @import("cryptography");
+const utils = @import("utils");
+const p2p_types = @import("../../types.zig");
+const directory_mod = @import("directory.zig");
+const types = @import("types.zig");
+
+const PrivateKey = cryptography.ed25519.PrivateKey;
+const Key = cryptography.ed25519.PublicKey;
+const Dir = directory_mod.Directory(Key);
+const Info = Dir.Info;
+const Ingress = p2p_types.Ingress;
+const Duration = utils.Duration;
+const SystemTime = utils.SystemTime;
+const gpa = testing.allocator;
+
+const namespace = "test";
+
+fn key(seed: u64) Key {
+    return PrivateKey.from_seed(seed).public_key();
+}
+
+fn socket(a: u8, b: u8, c: u8, d: u8, port: u16) Ingress {
+    return .{ .socket = .{ .ip = .{ .v4 = codec.Ipv4.init(a, b, c, d) }, .port = port } };
+}
+
+fn info_at(seed: u64, ingress: Ingress, timestamp: u64) Info {
+    const signer = PrivateKey.from_seed(seed);
+    return Info.sign(signer.public_key(), namespace, ingress, timestamp, &signer);
+}
+
+fn my_info() Info {
+    return info_at(0, socket(8, 8, 8, 8, 8080), 100);
+}
+
+fn config(max_sets: usize, allow_private_ips: bool) directory_mod.Config {
+    return .{
+        .allow_private_ips = allow_private_ips,
+        .allow_dns = true,
+        .max_sets = max_sets,
+        .dial_fail_limit = 1,
+        .peer_connection_cooldown = .from_millis(100),
+        .block_duration = .from_secs(100),
+    };
+}
+
+const epoch: SystemTime = .UNIX_EPOCH;
+
+fn at_ms(ms: u64) SystemTime {
+    return epoch.saturating_add(.from_millis(ms));
+}
+
+fn sorted(keys: []const Key) ![]Key {
+    const copy = try gpa.dupe(Key, keys);
+    std.sort.pdq(Key, copy, {}, Key.less_than);
+    return copy;
+}
+
+/// Tracks `primary` and `secondary` (sorted here) at `index`; returns the teardown list.
+fn track(dir: *Dir, index: u64, primary: []const Key, secondary: []const Key) !?[]Key {
+    const first = try sorted(primary);
+    defer gpa.free(first);
+    const second = try sorted(secondary);
+    defer gpa.free(second);
+    return dir.track(index, .{ .primary = .init(first), .secondary = .init(second) });
+}
+
+fn expect_tracked(result: ?[]Key, kills: []const Key) !void {
+    const got = result orelse return error.TestExpectedTracked;
+    defer gpa.free(got);
+    try testing.expectEqual(kills.len, got.len);
+    for (kills, got) |want, have| try testing.expect(want.eql(have));
+}
+
+fn contains(keys: []const Key, peer: Key) bool {
+    for (keys) |item| if (item.eql(peer)) return true;
+    return false;
+}
+
+test "track kills a connected peer removed from every set" {
+    var rng = utils.rng.test_rng();
+    var dir = try Dir.init(gpa, &.{}, my_info(), config(1, true));
+    defer dir.deinit();
+    try expect_tracked(try track(&dir, 0, &.{key(1)}, &.{}), &.{});
+    const reservation = dir.listen(&rng, epoch, key(1)).?;
+    dir.connect(key(1), false);
+    try expect_tracked(try track(&dir, 1, &.{key(2)}, &.{}), &.{key(1)});
+    try testing.expect(!dir.peers.get(key(1)).?.deletable());
+    dir.release(reservation);
+    try testing.expect(!dir.peers.contains(key(1)));
+    try testing.expect(reservation.public_key().eql(key(1)));
+}
+
+test "blocking ourselves is ignored" {
+    var dir = try Dir.init(gpa, &.{}, my_info(), config(3, false));
+    defer dir.deinit();
+    try testing.expect(!try dir.block(epoch, key(0)));
+    try testing.expectEqual(@as(usize, 0), dir.blocked.count());
+    try testing.expect(!dir.unblock_expired(at_ms(101_000)));
+}
+
+test "secondary sets remain until eviction" {
+    var dir = try Dir.init(gpa, &.{}, my_info(), config(2, false));
+    defer dir.deinit();
+    try expect_tracked(try track(&dir, 0, &.{key(1)}, &.{key(4)}), &.{});
+    try testing.expect(dir.eligible(epoch, key(4)));
+    try expect_tracked(try track(&dir, 1, &.{key(2)}, &.{key(5)}), &.{});
+    try testing.expect(dir.eligible(epoch, key(4)) and dir.eligible(epoch, key(5)));
+    try expect_tracked(try track(&dir, 2, &.{key(3)}, &.{}), &.{});
+    try testing.expect(!dir.peers.contains(key(4)));
+    try testing.expect(dir.eligible(epoch, key(5)));
+}
+
+test "a peer in both roles is tracked as primary only" {
+    var dir = try Dir.init(gpa, &.{}, my_info(), config(3, false));
+    defer dir.deinit();
+    try expect_tracked(try track(&dir, 0, &.{ key(1), key(2) }, &.{ key(2), key(3) }), &.{});
+    const set = (try dir.peer_set(gpa, 0)).?;
+    defer set.free(gpa);
+    try testing.expectEqual(@as(usize, 1), set.secondary.len);
+    try testing.expect(set.secondary[0].eql(key(3)));
+    try testing.expectEqual(@as(usize, 1), dir.peers.get(key(2)).?.primary_sets);
+    try testing.expectEqual(@as(usize, 0), dir.peers.get(key(2)).?.secondary_sets);
+    try testing.expectEqual(@as(usize, 1), dir.peers.get(key(3)).?.secondary_sets);
+    var update = (try dir.latest_update(gpa)).?;
+    defer update.deinit();
+    try testing.expect(contains(update.latest.primary, key(2)));
+    try testing.expect(!contains(update.latest.secondary, key(2)));
+    try testing.expect(contains(update.all.primary, key(2)));
+    try testing.expect(!contains(update.all.secondary, key(2)));
+}
+
+test "demotion from primary to secondary" {
+    var dir = try Dir.init(gpa, &.{}, my_info(), config(2, false));
+    defer dir.deinit();
+    const x = key(1);
+    const y = key(2);
+    try expect_tracked(try track(&dir, 0, &.{x}, &.{y}), &.{});
+    try expect_tracked(try track(&dir, 1, &.{y}, &.{x}), &.{});
+    try testing.expectEqual(@as(usize, 1), dir.peers.get(x).?.primary_sets);
+    try testing.expectEqual(@as(usize, 1), dir.peers.get(x).?.secondary_sets);
+    const both = try dir.all(gpa);
+    defer both.free(gpa);
+    try testing.expectEqual(@as(usize, 2), both.primary.len);
+    try testing.expectEqual(@as(usize, 0), both.secondary.len);
+
+    // Index 2 evicts index 0, where X was primary.
+    try expect_tracked(try track(&dir, 2, &.{y}, &.{x}), &.{});
+    try testing.expectEqual(@as(usize, 0), dir.peers.get(x).?.primary_sets);
+    try testing.expectEqual(@as(usize, 2), dir.peers.get(x).?.secondary_sets);
+    try testing.expectEqual(@as(usize, 2), dir.peers.get(y).?.primary_sets);
+    const after = try dir.all(gpa);
+    defer after.free(gpa);
+    try testing.expect(contains(after.primary, y) and contains(after.secondary, x));
+    try testing.expect(!contains(after.primary, x) and !contains(after.secondary, y));
+}
+
+test "tracking needs increasing indices" {
+    var dir = try Dir.init(gpa, &.{}, my_info(), config(3, false));
+    defer dir.deinit();
+    try expect_tracked(try track(&dir, 5, &.{key(1)}, &.{}), &.{});
+    try testing.expect((try track(&dir, 5, &.{key(2)}, &.{})) == null);
+    try testing.expect((try track(&dir, 4, &.{key(2)}, &.{})) == null);
+    try testing.expectEqual(@as(?u64, 5), dir.latest_set_index());
+}
+
+test "a peer blocked before joining a set stays blocked" {
+    var rng = utils.rng.test_rng();
+    var dir = try Dir.init(gpa, &.{}, my_info(), config(3, true));
+    defer dir.deinit();
+    const unknown = key(99);
+    try testing.expect(try dir.block(epoch, unknown));
+    try testing.expect(!try dir.block(epoch, unknown));
+    try expect_tracked(try track(&dir, 0, &.{unknown}, &.{}), &.{});
+    try testing.expect(!dir.eligible(epoch, unknown));
+    try testing.expect(!dir.acceptable(epoch, unknown));
+    try testing.expect(dir.listen(&rng, epoch, unknown) == null);
+    const blocked = try dir.blocked_peers(gpa, epoch);
+    defer gpa.free(blocked);
+    try testing.expectEqual(@as(usize, 1), blocked.len);
+
+    // After the block expires the peer is eligible again.
+    const later = at_ms(100_001);
+    try testing.expectEqual(@as(?SystemTime, at_ms(100_000)), dir.next_unblock());
+    try testing.expect(dir.unblock_expired(later));
+    try testing.expect(dir.next_unblock() == null);
+    try testing.expect(dir.eligible(later, unknown));
+    try testing.expect(dir.listen(&rng, later, unknown) != null);
+}
+
+test "blocked peers are neither dialable nor shared" {
+    var rng = utils.rng.test_rng();
+    var dir = try Dir.init(gpa, &.{}, my_info(), config(3, true));
+    defer dir.deinit();
+    const peer = key(1);
+    const other = key(2);
+    try expect_tracked(try track(&dir, 0, &.{ peer, other }, &.{}), &.{});
+    dir.update_peers(&.{
+        info_at(1, socket(127, 0, 0, 1, 9001), 50),
+        info_at(2, socket(127, 0, 0, 1, 9002), 50),
+    });
+    var dialable = try dir.dialable(gpa, epoch);
+    try testing.expectEqual(@as(usize, 2), dialable.peers.len);
+    gpa.free(dialable.peers);
+
+    // Connect both so their info is sharable, then block one.
+    for ([_]Key{ peer, other }) |each| {
+        _ = dir.listen(&rng, epoch, each).?;
+        dir.connect(each, false);
+    }
+    try testing.expect(try dir.block(epoch, peer));
+    const bits = try types.BitMap.zeroes(gpa, 2);
+    var bit_vec: types.BitVec = .{ .index = 0, .bits = bits };
+    defer bit_vec.deinit(gpa);
+    const shared = (try dir.infos(gpa, at_ms(100), &bit_vec)).?;
+    defer gpa.free(shared);
+    // `infos` shares what records hold; the tracker kills a blocked peer's connection.
+    try testing.expectEqual(@as(usize, 2), shared.len);
+    dialable = try dir.dialable(gpa, epoch);
+    defer gpa.free(dialable.peers);
+    try testing.expectEqual(@as(usize, 0), dialable.peers.len);
+    try testing.expectEqual(@as(?SystemTime, at_ms(100_000)), dialable.next_query_at);
+}
+
+test "infos rejects a malformed bit vector and skips future timestamps" {
+    var rng = utils.rng.test_rng();
+    var dir = try Dir.init(gpa, &.{}, my_info(), config(3, true));
+    defer dir.deinit();
+    try expect_tracked(try track(&dir, 0, &.{ key(0), key(1), key(2) }, &.{}), &.{});
+    dir.update_peers(&.{info_at(1, socket(127, 0, 0, 1, 9001), 50)});
+    dir.update_peers(&.{info_at(2, socket(127, 0, 0, 1, 9002), 5_000)});
+    for ([_]Key{ key(1), key(2) }) |each| {
+        _ = dir.listen(&rng, epoch, each).?;
+        dir.connect(each, false);
+    }
+    var short: types.BitVec = .{ .index = 0, .bits = try types.BitMap.zeroes(gpa, 2) };
+    defer short.deinit(gpa);
+    try testing.expect((try dir.infos(gpa, at_ms(1_000), &short)) == null);
+
+    var unknown_index: types.BitVec = .{ .index = 7, .bits = try types.BitMap.zeroes(gpa, 2) };
+    defer unknown_index.deinit(gpa);
+    const none = (try dir.infos(gpa, at_ms(1_000), &unknown_index)).?;
+    try testing.expectEqual(@as(usize, 0), none.len);
+    gpa.free(none);
+
+    // Ourselves (signed at 100) and peer 1 (at 50) are shared; peer 2 (at 5000) is not yet.
+    var want_all: types.BitVec = .{ .index = 0, .bits = try types.BitMap.zeroes(gpa, 3) };
+    defer want_all.deinit(gpa);
+    const shared = (try dir.infos(gpa, at_ms(1_000), &want_all)).?;
+    defer gpa.free(shared);
+    try testing.expectEqual(@as(usize, 2), shared.len);
+    for (shared) |item| try testing.expect(!item.public_key.eql(key(2)));
+}
+
+test "knowledge bits follow connections and gossip" {
+    var rng = utils.rng.test_rng();
+    var dir = try Dir.init(gpa, &.{}, my_info(), config(3, true));
+    defer dir.deinit();
+    try expect_tracked(try track(&dir, 0, &.{ key(0), key(1) }, &.{}), &.{});
+    const self_slot: usize = if (Key.order(key(0), key(1)) == .lt) 0 else 1;
+    // We know ourselves, not peer 1.
+    var before = (try dir.random_bit_vec(gpa, &rng)).?;
+    defer before.deinit(gpa);
+    try testing.expect(before.bits.get(self_slot) and !before.bits.get(1 - self_slot));
+    // Gossip about peer 1 makes it known.
+    dir.update_peers(&.{info_at(1, socket(127, 0, 0, 1, 9001), 50)});
+    var gossiped = (try dir.random_bit_vec(gpa, &rng)).?;
+    defer gossiped.deinit(gpa);
+    try testing.expect(gossiped.bits.get(1 - self_slot));
+    // A failed dial reaches the fail limit (1), so we ask for its info again.
+    dir.release(dir.dial(&rng, epoch, key(1)).?);
+    var failed = (try dir.random_bit_vec(gpa, &rng)).?;
+    defer failed.deinit(gpa);
+    try testing.expect(!failed.bits.get(1 - self_slot));
+    // A successful dial clears the failures.
+    _ = dir.dial(&rng, at_ms(1_000), key(1)).?;
+    dir.connect(key(1), true);
+    var connected = (try dir.random_bit_vec(gpa, &rng)).?;
+    defer connected.deinit(gpa);
+    try testing.expect(connected.bits.get(1 - self_slot));
+}
+
+test "the reservation cooldown rate limits redials" {
+    var rng = utils.rng.test_rng();
+    const bootstrappers = [_]Dir.Bootstrapper{
+        .{ .peer = key(1), .ingress = socket(127, 0, 0, 1, 9001) },
+    };
+    var dir = try Dir.init(gpa, &bootstrappers, my_info(), config(3, true));
+    defer dir.deinit();
+    const reservation = dir.dial(&rng, epoch, key(1)).?;
+    try testing.expect(reservation.dialer.ingress.eql(socket(127, 0, 0, 1, 9001)));
+    dir.release(reservation);
+    try testing.expect(dir.dial(&rng, epoch, key(1)) == null);
+    const dialable = try dir.dialable(gpa, epoch);
+    defer gpa.free(dialable.peers);
+    try testing.expectEqual(@as(usize, 0), dialable.peers.len);
+    const next = dialable.next_query_at.?;
+    try testing.expect(next.order(at_ms(100)) != .lt and next.order(at_ms(200)) != .gt);
+    try testing.expect(dir.dial(&rng, next, key(1)) != null);
+}
+
+test "dial rejects a peer demoted to secondary" {
+    var rng = utils.rng.test_rng();
+    var dir = try Dir.init(gpa, &.{}, my_info(), config(1, true));
+    defer dir.deinit();
+    try expect_tracked(try track(&dir, 0, &.{key(1)}, &.{}), &.{});
+    dir.update_peers(&.{info_at(1, socket(127, 0, 0, 1, 9001), 50)});
+    try expect_tracked(try track(&dir, 1, &.{}, &.{key(1)}), &.{});
+    try testing.expect(dir.dial(&rng, epoch, key(1)) == null);
+    // Still acceptable inbound.
+    try testing.expect(dir.listen(&rng, epoch, key(1)) != null);
+}
+
+test "dial rejects an ingress disallowed after an update" {
+    var rng = utils.rng.test_rng();
+    var dir = try Dir.init(gpa, &.{}, my_info(), config(1, false));
+    defer dir.deinit();
+    try expect_tracked(try track(&dir, 0, &.{key(1)}, &.{}), &.{});
+    dir.update_peers(&.{info_at(1, socket(8, 8, 4, 4, 9001), 50)});
+    const snapshot = try dir.dialable(gpa, epoch);
+    defer gpa.free(snapshot.peers);
+    try testing.expectEqual(@as(usize, 1), snapshot.peers.len);
+    // A newer record with a private address replaces the public one.
+    dir.update_peers(&.{info_at(1, socket(10, 0, 0, 1, 9001), 60)});
+    try testing.expect(dir.dial(&rng, epoch, key(1)) == null);
+}
+
+test "a bootstrapper stays after blocking and set eviction" {
+    const bootstrappers = [_]Dir.Bootstrapper{
+        .{ .peer = key(1), .ingress = socket(8, 8, 8, 8, 1) },
+    };
+    var dir = try Dir.init(gpa, &bootstrappers, my_info(), config(1, false));
+    defer dir.deinit();
+    try testing.expect(try dir.block(epoch, key(1)));
+    try expect_tracked(try track(&dir, 0, &.{key(1)}, &.{}), &.{});
+    try expect_tracked(try track(&dir, 1, &.{key(2)}, &.{}), &.{});
+    try testing.expect(dir.peers.contains(key(1)));
+    try testing.expect(!dir.eligible(epoch, key(1)));
+    try testing.expect(dir.eligible(at_ms(100_000), key(1)));
+}

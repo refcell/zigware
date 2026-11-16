@@ -47,6 +47,11 @@ pub fn SortedMap(comptime K: type, comptime V: type) type {
             return map.index_of(key) != null;
         }
 
+        /// Reserves room for `additional` inserts, so they cannot fail.
+        pub fn ensure_unused_capacity(map: *Self, gpa: Allocator, additional: usize) !void {
+            try map.entries.ensureUnusedCapacity(gpa, additional);
+        }
+
         /// The value for `key`, inserting `default` first when absent.
         pub fn get_or_put(map: *Self, gpa: Allocator, key: K, default: V) Allocator.Error!*V {
             const index = map.lower_bound(key);
