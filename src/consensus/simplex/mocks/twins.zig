@@ -99,7 +99,7 @@ pub const Scenario = struct {
 };
 
 /// The 0-based scripted round of `view`'s term (genesis shares round 0 with the first term).
-fn term_index(view: View, term_length: TermLength) usize {
+pub fn term_index(view: View, term_length: TermLength) usize {
     return @intCast(view.term_index(term_length) -| 1);
 }
 

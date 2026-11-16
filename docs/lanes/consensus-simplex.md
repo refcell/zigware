@@ -113,6 +113,9 @@ resolver; those lanes are running, so do the types first and the actors as they 
   term_length, ...)`, `view_masks`/`view_route`, `partition`, `index_of`, and
   `Elector(E)` (scripted leaders per term, then fallback `E`). `SplitTarget` is p2p's
   `simulated.SplitTarget`. Drawing matches rand 0.10 for the same RNG.
+- `consensus.simplex.mocks.scheme` (commonware `mocks/scheme.rs`): `Scheme(D)` (crypto's mock
+  certificate scheme over simplex subjects, N3f1, ed25519 identities) and `fixture(D, gpa, rng,
+  namespace, n)`.
 - `consensus.simplex.mocks`: `relay.Relay(D, P)` (`deregister(key)` and `deregister_all`
   return once no delivery can reach the removed listeners), `application.Application(H, P)`
   (the automaton and relay, with simulated latency from p2p's `Normal`),
@@ -163,10 +166,17 @@ resolver; those lanes are running, so do the types first and the actors as they 
   randomness come from `std.Io` (`actors/context.zig`), so the deterministic runtime replays
   a run. Batcher rounds live in a view-sorted list rather than a `BTreeMap`. Certificate
   construction runs inline (no offload). Metrics and tracing spans in the actors follow.
+- Twins campaigns (`twins_campaign_test.zig`) send every engine's traffic through p2p's
+  split senders: honest validators keep the primary half of a pass-through split, twins split
+  by the scenario's per-round recipient sets, and a twin's resolver channel drops sends and
+  routes nothing (commonware's `inert_channel`). A message's view is read from its tag and
+  leading round. Debug builds run 2 of the 20 cases per campaign. The mock reporter flags
+  signers that vote for two payloads in one view (`equivocating_signers`), standing in for
+  commonware's per-payload signer maps.
 - Tracing: each actor holds a `traces.Tracer` (default `.none`) that the engine sets from the
   actor's child context under commonware's module path (`trace_target`), and emits
   commonware's events at the same sites and levels. View and epoch fields go out as integers
-  (`.get()`): the telemetry encoder cannot print a non-exhaustive enum yet. Spans and the
+  (`.get()`), which print the same as their `format`. Spans and the
   events inside voter `state.rs`/`round.rs`/`slot.rs` (no tracer in the state machine yet)
   follow.
 - The voter runs each automaton request as an `io.concurrent` task that pushes its answer
@@ -222,8 +232,11 @@ resolver; those lanes are running, so do the types first and the actors as they 
   received_certificates_are_reported, survives_burst, engine_shutdown (abort and graceful;
   commonware's running-task count waits on the runtime's task metrics), and
   attributable_reporter_filtering, and split_views_no_lockup (with the nullify-only mock).
-  Next: the twins campaigns (on p2p's split senders and receivers), certified splits,
-  hailstorm, and the rest, seeded.
+  The twins campaigns (sampled, sustained, stable leader, optimistic; the large ones in
+  slow builds) run on the mock scheme.
+  tle (threshold VRF, Random elector, MinPk and MinSig; slow builds) decrypts at the target
+  round's seed. Next: twins pipelined handoff and per-scheme twins,
+  certified splits, hailstorm, and the rest, seeded.
 - [ ] Tracing: actor events are done (voter, batcher, resolver, engine); spans and the
   voter state machine's events follow.
 - [x] Fuzz targets (commonware consensus/fuzz): owned by the crypto lane in
@@ -277,3 +290,6 @@ resolver; those lanes are running, so do the types first and the actors as they 
 - 2026-11-16: twins uses p2p's `simulated.SplitTarget` (5826612); the stand-in is removed.
 - 2026-11-16: commonware's tracing events in the voter, batcher, resolver, and engine, at
   commonware's targets, with a Collector-checked DST.
+- 2026-11-16: simplex mocks/scheme.rs (the mock certificate scheme) and the twins campaigns
+  on p2p's split senders and receivers.
+- 2026-11-16: the tle DST on the threshold VRF scheme; the mock reporter keeps notarizations.

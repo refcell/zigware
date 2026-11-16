@@ -24,6 +24,7 @@ pub fn Reporter(comptime S: type, comptime D: type) type {
     return struct {
         const Self = @This();
         pub const Activity = types.Activity(S, D);
+        pub const Notarization = types.Notarization(S, D);
         const ViewSet = std.AutoHashMapUnmanaged(View, void);
         /// The signers of a view's votes, one bit per participant index (commonware keeps a
         /// set of public keys per view; test committees stay below 64 validators).
@@ -43,6 +44,8 @@ pub fn Reporter(comptime S: type, comptime D: type) type {
         nullifies: ViewSigners = .empty,
         finalizes: ViewSigners = .empty,
         notarizations: ViewSet = .empty,
+        /// The first notarization reported for each view (commonware keeps them all).
+        notarization_certificates: std.AutoHashMapUnmanaged(View, Notarization) = .empty,
         certifications: ViewSet = .empty,
         nullifications: ViewSet = .empty,
         finalizations: std.AutoHashMapUnmanaged(View, Finalized) = .empty,
@@ -50,6 +53,13 @@ pub fn Reporter(comptime S: type, comptime D: type) type {
         invalid_votes: u64 = 0,
         invalid_certificates: u64 = 0,
         latest: View = .zero(),
+        /// The payload each signer's notarize and finalize votes named, per view.
+        vote_payloads: std.AutoHashMapUnmanaged(VoteKey, D) = .empty,
+        /// Signers seen voting for two payloads in one view (commonware's twins campaign
+        /// checks this per payload).
+        equivocators: Signers = 0,
+
+        const VoteKey = struct { view: View, signer: u32, finalize: bool };
 
         /// `scheme` verifies activities (a verifier is enough).
         pub fn init(gpa: Allocator, io: Io, scheme: *const S) Self {
@@ -61,10 +71,14 @@ pub fn Reporter(comptime S: type, comptime D: type) type {
             self.nullifies.deinit(self.gpa);
             self.finalizes.deinit(self.gpa);
             self.notarizations.deinit(self.gpa);
+            var certificates = self.notarization_certificates.valueIterator();
+            while (certificates.next()) |certificate| certificate.deinit(self.gpa);
+            self.notarization_certificates.deinit(self.gpa);
             self.certifications.deinit(self.gpa);
             self.nullifications.deinit(self.gpa);
             self.finalizations.deinit(self.gpa);
             self.faults.deinit(self.gpa);
+            self.vote_payloads.deinit(self.gpa);
             self.* = undefined;
         }
 
@@ -90,11 +104,12 @@ pub fn Reporter(comptime S: type, comptime D: type) type {
                 .notarize => |vote| self.record_vote(vote, &self.notarizes),
                 .nullify => |vote| self.record_vote(vote, &self.nullifies),
                 .finalize => |vote| self.record_vote(vote, &self.finalizes),
-                .notarization, .certification => |*notarization| {
-                    if (!self.record_certificate(notarization)) return .ok;
-                    put(self.gpa, &self.notarizations, notarization.view());
+                .notarization, .certification => |*certificate| {
+                    if (!self.record_certificate(certificate)) return .ok;
+                    put(self.gpa, &self.notarizations, certificate.view());
+                    self.keep_notarization(certificate);
                     if (activity == .certification) {
-                        put(self.gpa, &self.certifications, notarization.view());
+                        put(self.gpa, &self.certifications, certificate.view());
                     }
                 },
                 .nullification => |*nullification| {
@@ -118,6 +133,27 @@ pub fn Reporter(comptime S: type, comptime D: type) type {
             return .ok;
         }
 
+        fn keep_notarization(self: *Self, certificate: *const Notarization) void {
+            const map = &self.notarization_certificates;
+            const entry = map.getOrPut(self.gpa, certificate.view()) catch
+                @panic("out of memory");
+            if (entry.found_existing) return;
+            entry.value_ptr.* = certificate.clone(self.gpa) catch {
+                map.removeByPtr(entry.key_ptr);
+                @panic("out of memory");
+            };
+            assert(map.contains(certificate.view()));
+        }
+
+        /// A copy of the first notarization reported for `view`, if any (the caller frees
+        /// it).
+        pub fn notarization(self: *Self, view: View) Allocator.Error!?Notarization {
+            self.mutex.lockUncancelable(self.io);
+            defer self.mutex.unlock(self.io);
+            const kept = self.notarization_certificates.getPtr(view) orelse return null;
+            return try kept.clone(self.gpa);
+        }
+
         fn put(gpa: Allocator, set: *ViewSet, view: View) void {
             set.put(gpa, view, {}) catch @panic("out of memory");
         }
@@ -133,6 +169,30 @@ pub fn Reporter(comptime S: type, comptime D: type) type {
             const entry = signers.getOrPut(self.gpa, vote.view()) catch @panic("out of memory");
             if (!entry.found_existing) entry.value_ptr.* = 0;
             entry.value_ptr.* |= @as(Signers, 1) << @intCast(signer);
+            if (@hasField(@TypeOf(vote), "proposal")) {
+                const finalize = signers == &self.finalizes;
+                self.record_payload(vote.view(), signer, finalize, vote.proposal.payload);
+            }
+        }
+
+        /// Records the payload `signer` voted for at `view`, flagging a second payload.
+        fn record_payload(self: *Self, view: View, signer: u32, finalize: bool, payload: D) void {
+            const key: VoteKey = .{ .view = view, .signer = signer, .finalize = finalize };
+            const entry = self.vote_payloads.getOrPut(self.gpa, key) catch
+                @panic("out of memory");
+            if (!entry.found_existing) {
+                entry.value_ptr.* = payload;
+            } else if (codec.order(D, entry.value_ptr.*, payload) != .eq) {
+                self.equivocators |= @as(Signers, 1) << @intCast(signer);
+            }
+            assert(self.vote_payloads.contains(key));
+        }
+
+        /// The signers seen voting for two payloads in one view.
+        pub fn equivocating_signers(self: *Self) Signers {
+            self.mutex.lockUncancelable(self.io);
+            defer self.mutex.unlock(self.io);
+            return self.equivocators;
         }
 
         fn record_certificate(self: *Self, certificate: anytype) bool {
@@ -167,6 +227,31 @@ pub fn Reporter(comptime S: type, comptime D: type) type {
             // Each wake re-checks the latest finalized view.
             while (self.latest.get() < view.get()) try self.condition.wait(self.io, &self.mutex);
             assert(self.latest.get() >= view.get());
+        }
+
+        /// Waits until finalizations of `count` distinct views above `view` were reported
+        /// (commonware counts monitor events past the twins prefix).
+        pub fn wait_for_finalizations_above(
+            self: *Self,
+            view: View,
+            count: u32,
+        ) Io.Cancelable!void {
+            assert(count > 0);
+            self.mutex.lockUncancelable(self.io);
+            defer self.mutex.unlock(self.io);
+            // Each wake recounts; finalizations only grow.
+            while (self.finalizations_above(view) < count) {
+                try self.condition.wait(self.io, &self.mutex);
+            }
+        }
+
+        fn finalizations_above(self: *const Self, view: View) u32 {
+            var count: u32 = 0;
+            var views = self.finalizations.keyIterator();
+            while (views.next()) |finalized_view| {
+                if (finalized_view.get() > view.get()) count += 1;
+            }
+            return count;
         }
 
         /// The highest finalized view reported so far.

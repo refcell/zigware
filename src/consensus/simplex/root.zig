@@ -55,6 +55,7 @@ pub const mocks = struct {
     pub const nullify_only = @import("mocks/nullify_only.zig");
     pub const twins = @import("mocks/twins.zig");
     pub const wrapped = @import("mocks/wrapped.zig");
+    pub const scheme = @import("mocks/scheme.zig");
 };
 
 pub const scheme = struct {
@@ -91,6 +92,8 @@ test {
     _ = actors.resolver.state;
     _ = @import("actors/resolver/state_test.zig");
     _ = @import("engine_test.zig");
+    _ = @import("twins_campaign_test.zig");
+    _ = @import("tle_test.zig");
     _ = scheme.bls12381_threshold.vrf;
     _ = scheme.bls12381_threshold.standard;
     _ = scheme.namespace;
