@@ -775,7 +775,8 @@ pub fn Recovery(comptime V: type) type {
             self.partition = null;
             const pending = self.pending.items;
             self.pending.items.len = 0;
-            var blobs = try Writable.recover(partition, pending, tail);
+            const data_scope = if (self.cfg.metrics) |scope| scope.child("data") else null;
+            var blobs = try Writable.recover(partition, pending, tail, data_scope);
             errdefer blobs.deinit();
             var metrics = try Metrics.init(self.gpa, self.cfg.metrics);
             errdefer metrics.deinit();

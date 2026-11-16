@@ -65,7 +65,7 @@ resize, sync), `runtime.storage`, with the in-memory backend `runtime.storage.me
   `next`) through `runtime.telemetry.metrics`.
 - [x] Metrics: contiguous fixed and variable journals (`size`, `pruning_boundary`, `retained`,
   `tail_items`, call and read counters; the variable journal's offsets under `offsets`).
-- [ ] Metrics: the blob and section managers (`tracked`, `synced`, `pruned`).
+- [x] Metrics: the blob and section managers (`tracked`, `synced`, `pruned`).
 - Handed to storage-merkle (2026-11-16): `src/storage/journal/zstd.zig`'s real compressor and
   the `journal_fixed_operations` and `queue_operations` fuzz targets.
 
@@ -308,6 +308,10 @@ resize, sync), `runtime.storage`, with the in-memory backend `runtime.storage.me
 - Metrics record through `runtime.telemetry.metrics` handles; without a scope, handles are
   `detached` (recorded, not registered), so tests read them without a registry. Metadata takes
   its scope in `Config`, the queue as an `init` argument (its `Config` is the journal's).
+- Blob and section managers register `tracked`, `synced`, and `pruned` under the journal's
+  scope, with commonware's child names: contiguous fixed under `blobs`, variable under `data`
+  (its offsets journal under `offsets`, then `blobs`); segmented fixed, variable, and glob directly in
+  `Config.metrics`; oversized under `index`, `values`, and its markers under `metadata`.
 
 ## Log
 - 2026-11-13: journal Error, frame encoding/decoding with zstd frames, durability Barrier,
@@ -342,3 +346,4 @@ resize, sync), `runtime.storage`, with the in-memory backend `runtime.storage.me
   metadata `start_sync` and its tests.
 - 2026-11-16: contiguous replay no longer flushes the write buffer (found by the
   journal_contiguous_recovery port, which landed with it).
+- 2026-11-16: blob and section manager metrics (contiguous and segmented journals).

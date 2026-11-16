@@ -84,6 +84,9 @@ pub fn Config(comptime V: type) type {
         compression: ?u8 = null,
         /// Codec configuration for values.
         codec_config: codec.Cfg(V),
+        /// Registers the index, value, and marker metrics under `index`, `values`, and
+        /// `metadata` children.
+        metrics: ?runtime.telemetry.metrics.Scope = null,
     };
 }
 
@@ -225,7 +228,13 @@ pub fn Oversized(comptime I: type, comptime V: type) type {
                 .cache_ref = cfg.index_cache_ref,
                 .write_buffer = cfg.index_write_buffer,
                 .replay_buffer = cfg.replay_buffer,
+                .metrics = child(cfg, "index"),
             };
+        }
+
+        fn child(cfg: Cfg, name: []const u8) ?runtime.telemetry.metrics.Scope {
+            const scope = cfg.metrics orelse return null;
+            return scope.child(name);
         }
 
         fn value_config(cfg: Cfg) glob_mod.Config(V) {
@@ -234,6 +243,7 @@ pub fn Oversized(comptime I: type, comptime V: type) type {
                 .compression = cfg.compression,
                 .codec_config = cfg.codec_config,
                 .write_buffer = cfg.value_write_buffer,
+                .metrics = child(cfg, "values"),
             };
         }
 
@@ -274,6 +284,7 @@ pub fn Oversized(comptime I: type, comptime V: type) type {
             var metadata = try Markers.init(gpa, storage, .{
                 .partition = marker_partition,
                 .codec_config = {},
+                .metrics = child(cfg, "metadata"),
             });
             errdefer metadata.deinit();
             const entries = metadata.items();

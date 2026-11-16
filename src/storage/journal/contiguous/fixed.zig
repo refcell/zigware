@@ -642,7 +642,8 @@ pub fn Recovery(comptime A: type) type {
             self.partition = null;
             const pending = self.pending.items;
             self.pending.items.len = 0;
-            var blobs = try Writable.recover(partition, pending, tail_blob);
+            const blobs_scope = if (self.cfg.metrics) |scope| scope.child("blobs") else null;
+            var blobs = try Writable.recover(partition, pending, tail_blob, blobs_scope);
             errdefer blobs.deinit();
             // A bounded open publishes the selected end once every retained blob is durable.
             if (self.bounded and self.checkpoint.watermark() != size_new) {

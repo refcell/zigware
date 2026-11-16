@@ -9,6 +9,7 @@ const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const runtime = @import("runtime");
 const paged = runtime.buffer.paged;
+const metrics = runtime.telemetry.metrics;
 const manager_mod = @import("../segmented/manager.zig");
 const journal = @import("../mod.zig");
 
@@ -120,6 +121,59 @@ pub fn select(gpa: Allocator, storage: Storage, prefix: []const u8) Error!Select
 /// A recovered blob awaiting publication, keyed by index.
 pub const PendingBlob = struct { index: u64, writer: Writer };
 
+/// The blob manager's metrics (commonware's `contiguous/blobs.rs` `Metrics`).
+pub const Metrics = struct {
+    /// Blobs held.
+    tracked: metrics.Gauge,
+    /// Blob sync requests.
+    synced: metrics.Counter,
+    /// Blobs pruned.
+    pruned: metrics.Counter,
+
+    /// Help strings: commonware's contiguous and segmented managers word them differently.
+    pub const Help = struct {
+        tracked: []const u8,
+        synced: []const u8,
+        pruned: []const u8,
+    };
+
+    pub const contiguous_help: Help = .{
+        .tracked = "Number of blobs held",
+        .synced = "Number of blob sync requests",
+        .pruned = "Number of blobs pruned",
+    };
+
+    /// Registers under `scope`, or records unregistered without one.
+    pub fn init(gpa: Allocator, scope: ?metrics.Scope) Allocator.Error!Metrics {
+        return init_with_help(gpa, scope, contiguous_help);
+    }
+
+    pub fn init_with_help(
+        gpa: Allocator,
+        scope: ?metrics.Scope,
+        help: Help,
+    ) Allocator.Error!Metrics {
+        const s = scope orelse return .{
+            .tracked = try metrics.Gauge.detached(gpa, .{}),
+            .synced = try metrics.Counter.detached(gpa, .{}),
+            .pruned = try metrics.Counter.detached(gpa, .{}),
+        };
+        var tracked = try s.gauge("tracked", help.tracked);
+        errdefer tracked.deinit();
+        var synced = try s.counter("synced", help.synced);
+        errdefer synced.deinit();
+        const pruned = try s.counter("pruned", help.pruned);
+        return .{ .tracked = tracked, .synced = synced, .pruned = pruned };
+    }
+
+    pub fn deinit(self: *Metrics) void {
+        self.tracked.deinit();
+        self.synced.deinit();
+        self.pruned.deinit();
+        self.* = undefined;
+    }
+};
+
 /// A journal's blobs: contiguous sealed blobs ending in one writable tail.
 pub const Writable = struct {
     partition: Partition,
@@ -129,20 +183,26 @@ pub const Writable = struct {
     oldest_blob_index: u64,
     /// Sealed (fully synced) historical blobs.
     sealed: std.ArrayList(Writer) = .empty,
-    /// Metrics: blob sync requests and pruned blobs (`tracked` is `sealed.items.len + 1`).
-    synced: u64 = 0,
-    pruned: u64 = 0,
+    metrics: Metrics,
     /// Set while `clear` has closed the tail; a failed reopen leaves it set for `deinit`.
     tail_closed: bool = false,
 
     /// Build from recovered writers (ascending, contiguous, none above `tail_blob`, ending at
     /// it): seal every blob below `tail_blob` and install the tail, opening an empty one if
     /// absent. Takes ownership of `partition` and of every pending writer, also on error.
-    pub fn recover(partition_in: Partition, pending: []PendingBlob, tail_blob: u64) Error!Writable {
+    /// Metrics register under `scope`.
+    pub fn recover(
+        partition_in: Partition,
+        pending: []PendingBlob,
+        tail_blob: u64,
+        scope: ?metrics.Scope,
+    ) Error!Writable {
         var partition = partition_in;
         var taken: usize = 0;
         errdefer for (pending[taken..]) |*entry| entry.writer.deinit();
         errdefer partition.deinit();
+        var blob_metrics = try Metrics.init(partition.gpa, scope);
+        errdefer blob_metrics.deinit();
         if (pending.len > 0 and pending[pending.len - 1].index > tail_blob) {
             return error.Corruption;
         }
@@ -173,11 +233,13 @@ pub const Writable = struct {
         if (count > tail_blob) return error.Corruption;
         if (count > 0 and pending[0].index != tail_blob - count) return error.Corruption;
         const tail_writer = tail orelse try partition.open(tail_blob);
+        _ = blob_metrics.tracked.metric().set(@intCast(count + 1));
         return .{
             .partition = partition,
             .tail = tail_writer,
             .oldest_blob_index = tail_blob - count,
             .sealed = sealed,
+            .metrics = blob_metrics,
         };
     }
 
@@ -187,6 +249,7 @@ pub const Writable = struct {
         self.sealed.deinit(self.partition.gpa);
         if (!self.tail_closed) self.tail.deinit();
         self.partition.deinit();
+        self.metrics.deinit();
         self.* = undefined;
     }
 
@@ -209,10 +272,11 @@ pub const Writable = struct {
             return error.OffsetOverflow;
         try self.sealed.ensureUnusedCapacity(self.partition.gpa, 1);
         try self.tail.sync();
-        self.synced += 1;
+        self.metrics.synced.metric().inc();
         const next = try self.partition.open(next_blob);
         self.sealed.appendAssumeCapacity(self.tail);
         self.tail = next;
+        self.metrics.tracked.metric().inc();
         assert(self.tail_blob_index() == next_blob);
     }
 
@@ -230,7 +294,8 @@ pub const Writable = struct {
         var blob = previous;
         while (blob < min_blob) : (blob += 1) {
             try self.partition.remove(blob);
-            self.pruned += 1;
+            self.metrics.tracked.metric().dec();
+            self.metrics.pruned.metric().inc();
         }
     }
 
@@ -243,16 +308,18 @@ pub const Writable = struct {
         self.tail.deinit();
         var blob = self.oldest_blob_index;
         while (blob <= newest) : (blob += 1) try self.partition.remove(blob);
+        _ = self.metrics.tracked.metric().set(0);
         self.oldest_blob_index = tail_blob;
         self.tail = try self.partition.open(tail_blob);
         self.tail_closed = false;
+        self.metrics.tracked.metric().inc();
         assert(self.tail_blob_index() == tail_blob);
     }
 
     /// Make the tail durable (every sealed blob already is).
     pub fn sync(self: *Writable) Error!void {
         try self.tail.sync();
-        self.synced += 1;
+        self.metrics.synced.metric().inc();
     }
 
     /// Remove every blob and the partition, freeing the blobs.
@@ -263,6 +330,7 @@ pub const Writable = struct {
         for (self.sealed.items) |*writer| writer.deinit();
         self.sealed.deinit(self.partition.gpa);
         self.tail.deinit();
+        self.metrics.deinit();
         var partition = self.partition;
         self.* = undefined;
         defer partition.deinit();

@@ -154,4 +154,8 @@ test "variable journal metrics register with the offsets journal under its child
     try expect(metrics.has_metric_value(text, "journal_items_read_total", "1"));
     try expect(metrics.has_metric_value(text, "journal_sync_calls_total", "1"));
     try expect(metrics.has_metric_value(text, "journal_offsets_size", "10"));
+    // Data blobs [1, 2] remain after pruning blob 0; offsets blobs too.
+    try expect(metrics.has_metric_value(text, "journal_data_tracked", "2"));
+    try expect(metrics.has_metric_value(text, "journal_data_pruned_total", "1"));
+    try expect(metrics.has_metric_value(text, "journal_offsets_blobs_tracked", "2"));
 }

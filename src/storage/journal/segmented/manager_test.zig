@@ -224,5 +224,5 @@ test "sync counts every selected section" {
     try manager.sync_all();
     try testing.expect(!(try manager.get(1)).?.needs_sync());
     try expect_open(&manager, &.{ 1, 2 });
-    try testing.expectEqual(@as(u64, 10), manager.synced);
+    try testing.expectEqual(@as(u64, 10), manager.metrics.synced.metric().get());
 }

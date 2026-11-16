@@ -155,7 +155,7 @@ test "multiple appends and reads" {
         try journal.sync(&.{entry[0]});
     }
     try testing.expectEqual(@as(usize, 3), journal.num_sections());
-    try testing.expectEqual(@as(u64, 4), journal.manager.synced);
+    try testing.expectEqual(@as(u64, 4), journal.manager.metrics.synced.metric().get());
     journal.deinit();
     var items: Items(u32) = .empty;
     defer items.deinit(gpa);
@@ -195,10 +195,10 @@ test "prune blobs" {
     _ = try journal.append(2, 99);
     try journal.sync(&.{2});
     try testing.expect(try journal.prune(3));
-    try testing.expectEqual(@as(u64, 2), journal.manager.pruned_count);
+    try testing.expectEqual(@as(u64, 2), journal.manager.metrics.pruned.metric().get());
     // A prune below the floor is a no-op.
     try testing.expect(!try journal.prune(2));
-    try testing.expectEqual(@as(u64, 2), journal.manager.pruned_count);
+    try testing.expectEqual(@as(u64, 2), journal.manager.metrics.pruned.metric().get());
     journal.deinit();
 
     var items: Items(u64) = .empty;

@@ -52,6 +52,8 @@ pub fn Config(comptime V: type) type {
         write_buffer: usize,
         /// Buffer size used to replay each section when the journal opens.
         replay_buffer: usize,
+        /// Where the section manager registers `tracked`, `synced`, and `pruned`.
+        metrics: ?runtime.telemetry.metrics.Scope = null,
     };
 }
 
@@ -81,6 +83,7 @@ pub fn Journal(comptime V: type) type {
             return .{
                 .partition = cfg.partition,
                 .factory = .{ .write_buffer = cfg.write_buffer, .cache_ref = cfg.cache_ref },
+                .metrics = cfg.metrics,
             };
         }
 

@@ -52,6 +52,8 @@ pub fn Config(comptime V: type) type {
         codec_config: codec.Cfg(V),
         /// The size of the write buffer of each section.
         write_buffer: usize,
+        /// Where the section manager registers `tracked`, `synced`, and `pruned`.
+        metrics: ?runtime.telemetry.metrics.Scope = null,
     };
 }
 
@@ -87,6 +89,7 @@ pub fn Glob(comptime V: type) type {
             const manager_cfg: manager_mod.Config(Factory) = .{
                 .partition = cfg.partition,
                 .factory = .{ .capacity = cfg.write_buffer },
+                .metrics = cfg.metrics,
             };
             const manager = try Manager.init(gpa, storage, manager_cfg, ceiling);
             assert(manager.ceiling == ceiling);

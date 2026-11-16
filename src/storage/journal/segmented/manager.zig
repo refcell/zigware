@@ -16,6 +16,8 @@ const paged = runtime.buffer.paged;
 const Storage = runtime.storage.Storage;
 const Blob = runtime.storage.Blob;
 const journal = @import("../mod.zig");
+const metrics = runtime.telemetry.metrics;
+const BlobMetrics = @import("../contiguous/blobs.zig").Metrics;
 
 /// List stored blob names, treating a missing partition as empty. Free with `Names.deinit`.
 pub fn stored_names(
@@ -130,6 +132,9 @@ pub fn Config(comptime Factory: type) type {
         partition: []const u8,
         /// Creates the buffer of each section.
         factory: Factory,
+        /// Where to register `tracked`, `synced`, and `pruned` (commonware's context
+        /// metrics); without a scope they are recorded unregistered.
+        metrics: ?metrics.Scope = null,
     };
 }
 
@@ -156,9 +161,8 @@ pub fn Manager(comptime Factory: type) type {
         oldest_retained_section: u64 = 0,
         failed: bool = false,
 
-        /// Metrics: sections tracked is `num_sections()`.
-        synced: u64 = 0,
-        pruned_count: u64 = 0,
+        /// Sections tracked, sync requests (every selected section counts), and pruned blobs.
+        metrics: BlobMetrics,
 
         /// Open stored sections through `ceiling`, recording later ones for removal.
         pub fn init(
@@ -173,6 +177,15 @@ pub fn Manager(comptime Factory: type) type {
                 .partition = try gpa.dupe(u8, cfg.partition),
                 .factory = cfg.factory,
                 .ceiling = ceiling,
+                .metrics = undefined,
+            };
+            self.metrics = BlobMetrics.init_with_help(gpa, cfg.metrics, .{
+                .tracked = "Number of blobs",
+                .synced = "Number of syncs",
+                .pruned = "Number of blobs pruned",
+            }) catch |err| {
+                gpa.free(self.partition);
+                return err;
             };
             errdefer self.deinit();
             const sections = try stored_sections(gpa, storage, self.partition);
@@ -186,6 +199,7 @@ pub fn Manager(comptime Factory: type) type {
                 try self.sections.append(gpa, .{ .section = section, .buffer = buffer });
             }
             assert(std.sort.isSorted(u64, self.discarded.items, {}, std.sort.asc(u64)));
+            _ = self.metrics.tracked.metric().set(@intCast(self.sections.items.len));
             return self;
         }
 
@@ -195,6 +209,7 @@ pub fn Manager(comptime Factory: type) type {
             self.sections.deinit(self.gpa);
             self.discarded.deinit(self.gpa);
             self.gpa.free(self.partition);
+            self.metrics.deinit();
             self.* = undefined;
         }
 
@@ -243,6 +258,7 @@ pub fn Manager(comptime Factory: type) type {
                 .section = section,
                 .buffer = buffer,
             });
+            self.metrics.tracked.metric().inc();
             return &self.sections.items[position.index].buffer;
         }
 
@@ -256,7 +272,7 @@ pub fn Manager(comptime Factory: type) type {
                 if (!position.found) continue;
                 const buffer = &self.sections.items[position.index].buffer;
                 if (buffer.needs_sync()) try buffer.sync();
-                self.synced += 1;
+                self.metrics.synced.metric().inc();
             }
         }
 
@@ -271,7 +287,7 @@ pub fn Manager(comptime Factory: type) type {
             errdefer self.failed = true;
             for (self.sections.items) |*entry| {
                 if (entry.buffer.needs_sync()) try entry.buffer.sync();
-                self.synced += 1;
+                self.metrics.synced.metric().inc();
             }
         }
 
@@ -282,6 +298,7 @@ pub fn Manager(comptime Factory: type) type {
             try self.storage.remove(self.partition, &section_name(section));
             var entry = self.sections.orderedRemove(index);
             entry.buffer.deinit();
+            self.metrics.tracked.metric().dec();
             assert(self.search(section).found == false);
         }
 
@@ -293,7 +310,7 @@ pub fn Manager(comptime Factory: type) type {
             while (self.sections.items.len > 0 and self.sections.items[0].section < min) {
                 try self.remove_at(0);
                 any_pruned = true;
-                self.pruned_count += 1;
+                self.metrics.pruned.metric().inc();
             }
             // Reject pruned sections for the rest of this execution.
             if (any_pruned) self.oldest_retained_section = min;

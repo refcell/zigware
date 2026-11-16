@@ -174,3 +174,29 @@ test "oversized: prune" {
     try testing.expectError(error.AlreadyPrunedToSection, journal.get(1, 0));
     try journal.destroy();
 }
+
+test "oversized: metrics register under index, values, and metadata" {
+    const metrics = runtime.telemetry.metrics;
+    var registry = metrics.Registry.init(gpa);
+    defer registry.deinit();
+    var h = try Harness.init();
+    defer h.deinit();
+    var cfg = h.cfg();
+    cfg.metrics = metrics.Scope.init(&registry).child("oversized");
+    var recovery = try Journal.init_with_markers(gpa, h.storage.interface(), cfg, "test-markers");
+    try recovery.drain();
+    var journal = try recovery.finish();
+    defer journal.deinit();
+    for (1..6) |section| _ = try journal.append(section, entry(section), value_of(section));
+    try journal.sync_all();
+    try testing.expect(try journal.prune(3));
+    const text = try registry.encode(gpa);
+    defer gpa.free(text);
+    // Sections 3, 4, and 5 remain in each journal after pruning 1 and 2.
+    try testing.expect(metrics.has_metric_value(text, "oversized_index_tracked", "3"));
+    try testing.expect(metrics.has_metric_value(text, "oversized_index_pruned_total", "2"));
+    try testing.expect(metrics.has_metric_value(text, "oversized_values_tracked", "3"));
+    try testing.expect(metrics.has_metric_value(text, "oversized_values_pruned_total", "2"));
+    try testing.expect(metrics.has_metric_value(text, "oversized_index_synced_total", "5"));
+    try testing.expect(std.mem.indexOf(u8, text, "oversized_metadata_keys") != null);
+}
