@@ -36,6 +36,9 @@ const NodeRef = supervision.NodeRef;
 /// Default capacity of the supervision tree: live contexts at once.
 pub const default_max_contexts = 16 * 1024;
 
+/// The latest deadline `sleep_until` waits for (commonware `SystemTime::limit` stand-in).
+pub const deadline_max: Io.Timestamp = .fromNanoseconds(std.math.maxInt(i64));
+
 /// State every context of one runner shares.
 pub const Runtime = struct {
     gpa: Allocator,
@@ -223,9 +226,15 @@ pub fn Context(comptime Network: type) type {
             return ctx.io().sleep(duration, .awake);
         }
 
-        /// Sleeps until the wall clock reaches `deadline`.
+        /// Sleeps until the wall clock reaches `deadline`. Deadlines past `deadline_max` (in
+        /// 2262) sleep until it, since `std.Io.Threaded` cannot represent later ones.
         pub fn sleep_until(ctx: *const Self, deadline: Io.Timestamp) Io.Cancelable!void {
-            const limit: Io.Timeout = .{ .deadline = .{ .raw = deadline, .clock = .real } };
+            const clamped = if (deadline.nanoseconds > deadline_max.nanoseconds)
+                deadline_max
+            else
+                deadline;
+            assert(clamped.nanoseconds <= deadline_max.nanoseconds);
+            const limit: Io.Timeout = .{ .deadline = .{ .raw = clamped, .clock = .real } };
             return limit.sleep(ctx.io());
         }
 
