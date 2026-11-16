@@ -8,6 +8,8 @@ const Io = std.Io;
 const testing = std.testing;
 const cryptography = @import("cryptography");
 const runtime = @import("runtime");
+const metrics = runtime.telemetry.metrics;
+const traces = runtime.telemetry.traces;
 const utils_pkg = @import("utils");
 const p2p = @import("../root.zig");
 const network_mod = @import("network.zig");
@@ -444,4 +446,85 @@ test "operations after shutdown do not panic" {
             try testing.expectEqual(p2p.Feedback.closed, control1.block(pk2));
         }
     }.run);
+}
+
+/// Whether `text` holds the sample `<name>{origin="..",recipient="..",channel=".."} <value>`.
+fn has_message_sample(
+    text: []const u8,
+    name: []const u8,
+    origin: Key,
+    recipient: Key,
+    channel: p2p.Channel,
+    value: u64,
+) !bool {
+    const line = try std.fmt.allocPrint(
+        testing.allocator,
+        "{s}{{origin=\"{f}\",recipient=\"{f}\",channel=\"{d}\"}} {d}\n",
+        .{ name, origin, recipient, channel, value },
+    );
+    defer testing.allocator.free(line);
+    return std.mem.indexOf(u8, text, line) != null;
+}
+
+fn counts_and_traces(io: Io) !void {
+    var registry = metrics.Registry.init(testing.allocator);
+    defer registry.deinit();
+    var collector = traces.Collector.init(testing.allocator, .{});
+    defer collector.deinit();
+    var cfg = config(3, 1);
+    cfg.scope = metrics.Scope.init(&registry).child("network");
+    cfg.tracer = collector.tracer("");
+    var harness = try Harness.start(io, cfg);
+    defer harness.deinit();
+    const oracle = harness.oracle();
+    const pk1 = key(0);
+    const pk2 = key(1);
+    const outsider = key(2);
+    var one = try oracle.control(pk1).register(0, test_quota);
+    defer one.sender.deinit();
+    defer one.receiver.deinit();
+    // The recipient never registers channel 0: its link still delivers (and counts) each
+    // message, which the recipient then drops.
+    var two = try oracle.control(pk2).register(1, test_quota);
+    defer two.sender.deinit();
+    defer two.receiver.deinit();
+    try harness.track(&.{ pk1, pk2 });
+    try oracle.add_link(pk1, pk2, link_ms(5, 0, 1.0));
+    for (0..2) |_| _ = try send_one(&one.sender, pk2, "hello", false);
+    // No link back, and an untracked recipient: neither counts as sent.
+    _ = try send_one(&two.sender, pk1, "back", false);
+    _ = try send_one(&one.sender, outsider, "lost", false);
+    try io.sleep(.fromSeconds(1), .real);
+    try testing.expectError(error.Empty, two.receiver.try_recv());
+
+    const text = try registry.encode(testing.allocator);
+    defer testing.allocator.free(text);
+    const sent = "network_messages_sent_total";
+    const received = "network_messages_received_total";
+    try testing.expect(try has_message_sample(text, sent, pk1, pk2, 0, 2));
+    try testing.expect(try has_message_sample(text, received, pk1, pk2, 0, 2));
+    try testing.expect(!try has_message_sample(text, sent, pk2, pk1, 1, 1));
+
+    const events = collector.get_by_level(.trace);
+    const target = "commonware_p2p::simulated::network";
+    for (events.all) |event| try testing.expectEqualStrings(target, event.target);
+    try events.expect_event({}, struct {
+        fn missing_channel(_: void, event: traces.collector.RecordedEvent) bool {
+            event.metadata.expect_content_exact("dropping message") catch return false;
+            event.metadata.expect_field_exact("reason", "missing channel") catch return false;
+            return true;
+        }
+    }.missing_channel);
+    for ([_][]const u8{ "no link", "not tracked by both peers" }) |reason| {
+        var found = false;
+        for (events.all) |event| {
+            event.metadata.expect_field_exact("reason", reason) catch continue;
+            found = true;
+        }
+        try testing.expect(found);
+    }
+}
+
+test "the network counts messages per link and channel and traces each drop" {
+    _ = try run_deterministic(0, counts_and_traces);
 }

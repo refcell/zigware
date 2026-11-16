@@ -47,7 +47,11 @@ handshake and the runtime's network, which the actor-stream and runtime lanes ar
   `LimitedSender` (`send(recipients, parts, priority) ![]P` returns the attempted peers,
   caller-owned; `check` for the two-step form; `deinit`). `Receiver` has `recv() !Message(P)`
   (free with `message.deinit()`), `try_recv`, `capacity()`, `deinit`. Errors: `NetworkClosed`,
-  `LinkingSelf`, `LinkExists`, `LinkMissing`.
+  `LinkingSelf`, `LinkExists`, `LinkMissing`. Optional `Config.scope` (a metrics `Scope`, as
+  commonware's network context) registers `messages_sent` and `messages_received`
+  (`simulated.metrics.Message{origin, recipient, channel}` labels); optional `Config.tracer`
+  receives commonware's events under `commonware_p2p::simulated::network` (trace-level
+  `dropping message` with its reason, eviction debug events, `overwriting existing channel`).
 - `p2p.simulated.Normal` (`init(mean, std_dev)`, `sample(rng)`), `simulated.normal.standard`
   and `duration_ms`: rand_distr's `Normal<f64>`, bit-identical for the same RNG stream.
 - `p2p.authenticated.Data` (wire frame: channel varint, length-prefixed message),
@@ -188,8 +192,9 @@ handshake and the runtime's network, which the actor-stream and runtime lanes ar
 - [x] simulated: blocked subscriptions, disconnect_on_block, operations after shutdown.
 - [x] simulated: split senders and receivers (`SplitTarget`, `SplitOrigin`, forwarders,
   routers) with commonware's split tests.
+- [x] simulated: metrics (`messages_sent`, `messages_received`) and tracing events.
 - [ ] simulated: remaining mod.rs tests (peer-set subscriptions, socket manager, clean
-  shutdown, duplicate channel), metrics (runtime.telemetry).
+  shutdown, duplicate channel).
 - [x] authenticated: router, relay, throttle, dialing, channels.
 - [x] discovery: types (conformance), tracker record/bit set/directory, tracker, peer
   connections, dialer, listener, Network/Config/Oracle, connectivity over the deterministic
@@ -254,3 +259,5 @@ handshake and the runtime's network, which the actor-stream and runtime lanes ar
 - 2026-11-16: simulated split senders and receivers for twins, with the split tests.
 - 2026-11-16: discovery restart and duplicate-address tests.
 - 2026-11-16: discovery tracing events at commonware's sites, with Collector tests.
+- 2026-11-16: simulated metrics (messages sent and received per link and channel) and
+  tracing events.

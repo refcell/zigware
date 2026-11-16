@@ -17,6 +17,7 @@ pub const Network = network.Network;
 pub const Config = network.Config;
 pub const Link = network.Link;
 pub const Error = network.Error;
+pub const metrics = @import("metrics.zig");
 pub const split = @import("split.zig");
 pub const SplitTarget = split.SplitTarget;
 pub const SplitOrigin = split.SplitOrigin;

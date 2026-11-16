@@ -10,6 +10,7 @@ const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const p2p = @import("../root.zig");
+const traces = @import("runtime").telemetry.traces;
 const SortedMap = @import("sorted_map.zig").SortedMap;
 const Unbounded = @import("channel.zig").Unbounded;
 
@@ -68,6 +69,8 @@ pub fn Tracker(comptime P: type) type {
         sets: std.ArrayList(Set) = .empty,
         counts: SortedMap(P, Counts) = .empty,
         subscribers: std.ArrayList(Unbounded(Update).Sender) = .empty,
+        /// Under commonware's `simulated::network` target; forks inherit it.
+        tracer: traces.Tracer = .none,
 
         pub fn init(gpa: Allocator, io: Io) Self {
             return .{ .gpa = gpa, .io = io };
@@ -86,6 +89,7 @@ pub fn Tracker(comptime P: type) type {
         pub fn fork(tracker: *const Self) Allocator.Error!Self {
             var copy = Self.init(tracker.gpa, tracker.io);
             errdefer copy.deinit();
+            copy.tracer = tracker.tracer;
             try copy.sets.ensureTotalCapacity(tracker.gpa, tracker.sets.items.len);
             for (tracker.sets.items) |set| {
                 const peers_copy = try set.peers.clone(tracker.gpa);
@@ -150,6 +154,7 @@ pub fn Tracker(comptime P: type) type {
         fn evict_oldest(tracker: *Self) void {
             const set = tracker.sets.orderedRemove(0);
             defer set.peers.free(tracker.gpa);
+            tracker.tracer.event(.debug, "removed oldest tracked peer sets", .{ .index = set.id });
             for (set.peers.primary) |peer| tracker.release(peer, true);
             for (set.peers.secondary) |peer| tracker.release(peer, false);
         }
@@ -159,7 +164,10 @@ pub fn Tracker(comptime P: type) type {
             const count = if (primary) &counts.primary else &counts.secondary;
             assert(count.* > 0);
             count.* -= 1;
-            if (counts.primary == 0 and counts.secondary == 0) _ = tracker.counts.remove(peer);
+            if (counts.primary > 0 or counts.secondary > 0) return;
+            _ = tracker.counts.remove(peer);
+            const message = "removed peer no longer in any tracked peer set";
+            tracker.tracer.event(.debug, message, .{ .public_key = peer });
         }
 
         /// Sends the latest update to every subscriber, dropping the ones that are gone.
@@ -237,6 +245,10 @@ const Peer = struct {
     }
     pub fn read(_: Allocator, reader: *codec.Reader, _: void) codec.Error!Peer {
         return .{ .id = try reader.read_byte() };
+    }
+    /// Public keys display (commonware's `PublicKey: Display`), as tracing fields need.
+    pub fn format(peer: Peer, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+        try writer.print("{d}", .{peer.id});
     }
 };
 

@@ -24,6 +24,8 @@ const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const utils_pkg = @import("utils");
+const metrics = @import("runtime").telemetry.metrics;
+const traces = @import("runtime").telemetry.traces;
 const p2p = @import("../root.zig");
 const sizing = @import("../sizing.zig");
 const limited = @import("../utils/limited.zig");
@@ -35,6 +37,7 @@ const Unbounded = @import("channel.zig").Unbounded;
 const tracker_mod = @import("tracker.zig");
 const transmitter = @import("transmitter.zig");
 const normal = @import("normal.zig");
+const labels = @import("metrics.zig");
 const Normal = normal.Normal;
 
 const Duration = utils_pkg.Duration;
@@ -60,7 +63,14 @@ pub const Config = struct {
     disconnect_on_block: bool,
     /// Peer sets each peer keeps; tracking a newer one evicts the oldest.
     tracked_peer_sets: usize,
+    /// Where `messages_sent` and `messages_received` are registered (commonware's network
+    /// context); none without it.
+    scope: ?metrics.Scope = null,
+    /// Where tracing events go, under commonware's `simulated::network` target.
+    tracer: traces.Tracer = .none,
 };
+
+const target = "commonware_p2p::simulated::network";
 
 /// Link behavior from a sender to a receiver.
 pub const Link = struct {
@@ -106,6 +116,32 @@ pub fn Network(comptime P: type) type {
         const Pair = Transmitter.Pair;
         const Message = p2p.Message(P);
         const Mailbox = Unbounded(Message);
+        const Label = labels.Message(P);
+        const Family = metrics.raw.Family(Label, metrics.raw.Counter);
+
+        /// Messages sent once a link to the recipient exists, and messages a link delivered.
+        const Families = struct {
+            sent: metrics.Registered(Family),
+            received: metrics.Registered(Family),
+
+            fn init(scope: *const metrics.Scope) Allocator.Error!Families {
+                const Counter = metrics.raw.Counter;
+                var sent = try scope.family(Label, Counter, "messages_sent", "messages sent");
+                errdefer sent.deinit();
+                const name = "messages_received";
+                const received = try scope.family(Label, Counter, name, "messages received");
+                return .{ .sent = sent, .received = received };
+            }
+
+            fn deinit(families: *Families) void {
+                families.sent.deinit();
+                families.received.deinit();
+            }
+
+            fn count(family: *metrics.Registered(Family), label: Label) Allocator.Error!void {
+                (try family.metric().get_or_create(label)).inc();
+            }
+        };
 
         pub const PublicKey = P;
         pub const Limited = limited.LimitedSender(UnlimitedSender, Connected);
@@ -156,6 +192,8 @@ pub fn Network(comptime P: type) type {
         transmitter: Transmitter,
         deliveries: std.PriorityQueue(Delivery, void, Delivery.order) = .empty,
         delivery_sequence: u64 = 0,
+        families: ?Families,
+        tracer: traces.Tracer,
 
         /// Creates a network. Panics when `max_size` exceeds `max_size_limit`.
         pub fn init(gpa: Allocator, io: Io, config: Config) Allocator.Error!*Self {
@@ -163,6 +201,10 @@ pub fn Network(comptime P: type) type {
             assert(config.max_peers_per_set > 0);
             assert(config.tracked_peer_sets > 0);
             const network = try gpa.create(Self);
+            errdefer gpa.destroy(network);
+            var families: ?Families = if (config.scope) |*scope| try .init(scope) else null;
+            errdefer if (families) |*registered| registered.deinit();
+            const tracer = config.tracer.with_target(target);
             network.* = .{
                 .gpa = gpa,
                 .io = io,
@@ -174,7 +216,10 @@ pub fn Network(comptime P: type) type {
                 ),
                 .network_tracker = .init(gpa, io),
                 .transmitter = .init(gpa),
+                .families = families,
+                .tracer = tracer,
             };
+            network.network_tracker.tracer = tracer;
             return network;
         }
 
@@ -211,6 +256,7 @@ pub fn Network(comptime P: type) type {
             network.transmitter.deinit();
             while (network.deliveries.pop()) |delivery| network.release(delivery.payload);
             network.deliveries.deinit(gpa);
+            if (network.families) |*families| families.deinit();
             gpa.destroy(network);
         }
 
@@ -298,11 +344,15 @@ pub fn Network(comptime P: type) type {
                     .origin = completion.origin,
                     .recipient = completion.recipient,
                 };
+                const fields = .{ .origin = pair.origin, .recipient = pair.recipient };
                 const deliver_at = completion.deliver_at orelse {
+                    network.tracer.event(.trace, "message dropped before delivery", fields);
                     network.release(completion.message);
                     continue;
                 };
                 if (!network.links.contains(pair)) {
+                    // The link was removed before the message was delivered.
+                    network.tracer.event(.trace, "missing link for completion", fields);
                     network.release(completion.message);
                     continue;
                 }
@@ -323,8 +373,20 @@ pub fn Network(comptime P: type) type {
         /// or its receiver is gone.
         fn deliver(network: *Self, delivery: Delivery) Allocator.Error!void {
             defer network.release(delivery.payload);
+            const channel = delivery.channel;
+            if (network.families) |*families| {
+                const label: Label = .new(delivery.origin, delivery.recipient, channel);
+                try Families.count(&families.received, label);
+            }
             const peer = network.peers.get(delivery.recipient) orelse return;
-            const registration = peer.*.channels.get(delivery.channel) orelse return;
+            const registration = peer.*.channels.get(channel) orelse {
+                network.tracer.event(.trace, "dropping message", .{
+                    .recipient = delivery.recipient,
+                    .channel = channel,
+                    .reason = "missing channel",
+                });
+                return;
+            };
             const payload = try network.gpa.dupe(u8, delivery.payload.bytes);
             const message: Message = .{
                 .peer = delivery.origin,
@@ -469,13 +531,19 @@ pub fn Network(comptime P: type) type {
             recipient: P,
             payload: *Payload,
         ) Allocator.Error!void {
-            if (P.order(origin, recipient) == .eq) return;
-            if (!network.is_connectable(origin, recipient)) return;
+            const reason = network.drop_reason(origin, recipient);
+            if (reason) |text| {
+                const message = "dropping message";
+                const fields = .{ .origin = origin, .recipient = recipient, .reason = text };
+                network.tracer.event(.trace, message, fields);
+                return;
+            }
             const forward: Pair = .{ .origin = origin, .recipient = recipient };
-            const backward: Pair = .{ .origin = recipient, .recipient = origin };
-            const blocked = network.blocks.contains(forward) or network.blocks.contains(backward);
-            if (network.config.disconnect_on_block and blocked) return;
-            const link = network.links.get(forward) orelse return;
+            const link = network.links.get(forward).?;
+            // A link to the recipient approximates an open connection.
+            if (network.families) |*families| {
+                try Families.count(&families.sent, .new(origin, recipient, channel));
+            }
             const rng: IoRng = .{ .io = network.io };
             const latency = latency_from_ms(link.sampler.sample(rng));
             const should_deliver = sample_success(rng, link.success_rate);
@@ -493,6 +561,18 @@ pub fn Network(comptime P: type) type {
                 &completions,
             );
             try network.process_completions(completions.items);
+        }
+
+        /// Why a message from `origin` to `recipient` is dropped before its link, if it is.
+        fn drop_reason(network: *const Self, origin: P, recipient: P) ?[]const u8 {
+            if (P.order(origin, recipient) == .eq) return "self";
+            if (!network.is_connectable(origin, recipient)) return "not tracked by both peers";
+            const forward: Pair = .{ .origin = origin, .recipient = recipient };
+            const backward: Pair = .{ .origin = recipient, .recipient = origin };
+            const blocked = network.blocks.contains(forward) or network.blocks.contains(backward);
+            if (network.config.disconnect_on_block and blocked) return "blocked";
+            if (!network.links.contains(forward)) return "no link";
+            return null;
         }
 
         /// Registers `channel` for `public_key`, replacing (and closing) an earlier registration.
@@ -517,6 +597,8 @@ pub fn Network(comptime P: type) type {
                     .generation = network.next_generation,
                 };
                 if (try peer.channels.put(network.gpa, channel, registration)) |replaced| {
+                    const fields = .{ .public_key = public_key, .channel = channel };
+                    network.tracer.event(.warn, "overwriting existing channel", fields);
                     var old = replaced.mailbox;
                     old.deinit();
                 }
