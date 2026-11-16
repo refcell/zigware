@@ -12,6 +12,7 @@ const codec = @import("codec.zig");
 const varint = @import("varint.zig");
 const Bytes = @import("types/bytes.zig").Bytes;
 const fuzz = @import("fuzz.zig");
+const Draws = fuzz.Draws;
 const RangeCfg = @import("config.zig").RangeCfg;
 const map = @import("types/map.zig");
 const net = @import("types/net.zig");
@@ -61,11 +62,11 @@ fn expect_bytes_roundtrip(data: []const u8) !void {
     try testing.expectEqualSlices(u8, data, decoded.data);
 }
 
-fn expect_varint_overflow_never_panics(smith: *Smith) !void {
+fn expect_varint_overflow_never_panics(draws: Draws) !void {
     var input: [41]u8 = undefined;
-    const continuation_bytes = smith.value(u8) % 41;
+    const continuation_bytes = draws.index(input.len);
     @memset(input[0..continuation_bytes], 0xff);
-    input[continuation_bytes] = smith.value(u8);
+    input[continuation_bytes] = draws.value(u8);
     const bytes = input[0 .. continuation_bytes + 1];
     inline for (.{ u16, u32, u64, u128, u256 }) |T| {
         _ = codec.decode(varint.UInt(T), gpa, bytes) catch {};
@@ -76,14 +77,12 @@ fn expect_varint_overflow_never_panics(smith: *Smith) !void {
 }
 
 /// Builds a map from fuzz input: sorted, with duplicate keys dropped.
-fn roundtrip_map(comptime M: type, smith: *Smith) !void {
+fn roundtrip_map(comptime M: type, draws: Draws) !void {
     const K = @FieldType(M.Entry, "key");
     const V = @FieldType(M.Entry, "value");
     var entries: [64]M.Entry = undefined;
-    var len: usize = 0;
-    while (len < entries.len and !smith.eos()) : (len += 1) {
-        entries[len] = .{ .key = smith.value(K), .value = smith.value(V) };
-    }
+    const len = draws.range_at_most(usize, 0, entries.len);
+    for (entries[0..len]) |*entry| entry.* = .{ .key = draws.value(K), .value = draws.value(V) };
     M.sort(entries[0..len]);
     var unique: usize = 0;
     for (entries[0..len]) |entry| {
@@ -101,11 +100,11 @@ fn roundtrip_map(comptime M: type, smith: *Smith) !void {
 }
 
 /// Builds a set from fuzz input: sorted, with duplicates dropped.
-fn roundtrip_set(comptime S: type, smith: *Smith) !void {
+fn roundtrip_set(comptime S: type, draws: Draws) !void {
     const K = @typeInfo(@FieldType(S, "items")).pointer.child;
     var items: [64]K = undefined;
-    var len: usize = 0;
-    while (len < items.len and !smith.eos()) : (len += 1) items[len] = smith.value(K);
+    const len = draws.range_at_most(usize, 0, items.len);
+    for (items[0..len]) |*item| item.* = draws.value(K);
     S.sort(items[0..len]);
     var unique: usize = 0;
     for (items[0..len]) |item| {
@@ -122,74 +121,79 @@ fn roundtrip_set(comptime S: type, smith: *Smith) !void {
     try testing.expectEqualSlices(K, value.items, decoded.items);
 }
 
-fn roundtrip_net(smith: *Smith) !void {
-    const v4 = net.Ipv4{ .octets = smith.value([4]u8) };
-    const v6 = net.Ipv6{ .octets = smith.value([16]u8) };
-    const port = smith.value(u16);
+fn roundtrip_net(draws: Draws) !void {
+    const v4 = net.Ipv4{ .octets = draws.value([4]u8) };
+    const v6 = net.Ipv6{ .octets = draws.value([16]u8) };
+    const port = draws.value(u16);
     try expect_roundtrip(net.Ipv4, v4);
     try expect_roundtrip(net.Ipv6, v6);
     try expect_roundtrip(net.SocketAddrV4, .{ .ip = v4, .port = port });
     try expect_roundtrip(net.SocketAddrV6, .{ .ip = v6, .port = port });
-    const ip: net.IpAddr = if (smith.value(bool)) .{ .v4 = v4 } else .{ .v6 = v6 };
+    const ip: net.IpAddr = if (draws.value(bool)) .{ .v4 = v4 } else .{ .v6 = v6 };
     try expect_roundtrip(net.IpAddr, ip);
     const socket = net.SocketAddr{ .ip = ip, .port = port };
     try expect_roundtrip(net.SocketAddr, socket);
     try testing.expectEqual(1 + 2 + @as(usize, if (ip == .v4) 4 else 16), socket.encode_size());
 }
 
-fn roundtrip_scalars(smith: *Smith, choice: u8) !void {
+fn roundtrip_scalars(draws: Draws, choice: u8) !void {
     switch (choice) {
-        0 => try expect_roundtrip(bool, smith.value(bool)),
-        1 => try expect_roundtrip(usize, smith.value(u32)),
-        2 => try expect_roundtrip(u8, smith.value(u8)),
-        3 => try expect_roundtrip(u16, smith.value(u16)),
-        4 => try expect_roundtrip(u32, smith.value(u32)),
-        5 => try expect_roundtrip(u64, smith.value(u64)),
-        6 => try expect_roundtrip(u128, smith.value(u128)),
-        7 => try expect_roundtrip(u256, smith.value(u256)),
-        8 => try expect_roundtrip(i8, smith.value(i8)),
-        9 => try expect_roundtrip(i16, smith.value(i16)),
-        10 => try expect_roundtrip(i32, smith.value(i32)),
-        11 => try expect_roundtrip(i64, smith.value(i64)),
-        12 => try expect_roundtrip(i128, smith.value(i128)),
-        13 => try expect_roundtrip(f32, @bitCast(smith.value(u32))),
-        14 => try expect_roundtrip(f64, @bitCast(smith.value(u64))),
-        15 => try expect_roundtrip(varint.UInt(u16), .{ .value = smith.value(u16) }),
-        16 => try expect_roundtrip(varint.UInt(u32), .{ .value = smith.value(u32) }),
-        17 => try expect_roundtrip(varint.UInt(u64), .{ .value = smith.value(u64) }),
-        18 => try expect_roundtrip(varint.UInt(u128), .{ .value = smith.value(u128) }),
-        19 => try expect_roundtrip(varint.UInt(u256), .{ .value = smith.value(u256) }),
-        20 => try expect_roundtrip(varint.SInt(i16), .{ .value = smith.value(i16) }),
-        21 => try expect_roundtrip(varint.SInt(i32), .{ .value = smith.value(i32) }),
-        22 => try expect_roundtrip(varint.SInt(i64), .{ .value = smith.value(i64) }),
-        23 => try expect_roundtrip(varint.SInt(i128), .{ .value = smith.value(i128) }),
+        0 => try expect_roundtrip(bool, draws.value(bool)),
+        1 => try expect_roundtrip(usize, draws.value(u32)),
+        2 => try expect_roundtrip(u8, draws.value(u8)),
+        3 => try expect_roundtrip(u16, draws.value(u16)),
+        4 => try expect_roundtrip(u32, draws.value(u32)),
+        5 => try expect_roundtrip(u64, draws.value(u64)),
+        6 => try expect_roundtrip(u128, draws.value(u128)),
+        7 => try expect_roundtrip(u256, draws.value(u256)),
+        8 => try expect_roundtrip(i8, draws.value(i8)),
+        9 => try expect_roundtrip(i16, draws.value(i16)),
+        10 => try expect_roundtrip(i32, draws.value(i32)),
+        11 => try expect_roundtrip(i64, draws.value(i64)),
+        12 => try expect_roundtrip(i128, draws.value(i128)),
+        13 => try expect_roundtrip(f32, @bitCast(draws.value(u32))),
+        14 => try expect_roundtrip(f64, @bitCast(draws.value(u64))),
+        15 => try expect_roundtrip(varint.UInt(u16), .{ .value = draws.value(u16) }),
+        16 => try expect_roundtrip(varint.UInt(u32), .{ .value = draws.value(u32) }),
+        17 => try expect_roundtrip(varint.UInt(u64), .{ .value = draws.value(u64) }),
+        18 => try expect_roundtrip(varint.UInt(u128), .{ .value = draws.value(u128) }),
+        19 => try expect_roundtrip(varint.UInt(u256), .{ .value = draws.value(u256) }),
+        20 => try expect_roundtrip(varint.SInt(i16), .{ .value = draws.value(i16) }),
+        21 => try expect_roundtrip(varint.SInt(i32), .{ .value = draws.value(i32) }),
+        22 => try expect_roundtrip(varint.SInt(i64), .{ .value = draws.value(i64) }),
+        23 => try expect_roundtrip(varint.SInt(i128), .{ .value = draws.value(i128) }),
         else => unreachable,
     }
 }
 
-fn roundtrip_composites(smith: *Smith, choice: u8) !void {
+fn roundtrip_composites(draws: Draws, choice: u8) !void {
     var data: [256]u8 = undefined;
     switch (choice) {
-        0 => try expect_bytes_roundtrip(data[0..smith.slice(&data)]),
-        1 => try expect_slice_roundtrip(u8, data[0..smith.slice(&data)]),
-        2 => try expect_roundtrip([4]u8, smith.value([4]u8)),
-        3 => try expect_roundtrip([8]u8, smith.value([8]u8)),
-        4 => try expect_roundtrip([16]u8, smith.value([16]u8)),
-        5 => try expect_roundtrip([32]u8, smith.value([32]u8)),
-        6 => try expect_roundtrip(?u32, smith.value(u32)),
+        0, 1 => {
+            const bytes = data[0..draws.range_at_most(usize, 0, data.len)];
+            draws.bytes(bytes);
+            if (choice == 0) try expect_bytes_roundtrip(bytes) else {
+                try expect_slice_roundtrip(u8, bytes);
+            }
+        },
+        2 => try expect_roundtrip([4]u8, draws.value([4]u8)),
+        3 => try expect_roundtrip([8]u8, draws.value([8]u8)),
+        4 => try expect_roundtrip([16]u8, draws.value([16]u8)),
+        5 => try expect_roundtrip([32]u8, draws.value([32]u8)),
+        6 => try expect_roundtrip(?u32, draws.value(u32)),
         7 => try expect_roundtrip(?u32, null),
-        8 => try expect_roundtrip(struct { u8, u16 }, .{ smith.value(u8), smith.value(u16) }),
+        8 => try expect_roundtrip(struct { u8, u16 }, .{ draws.value(u8), draws.value(u16) }),
         9 => try expect_roundtrip(
             struct { u32, u64, u128 },
-            .{ smith.value(u32), smith.value(u64), smith.value(u128) },
+            .{ draws.value(u32), draws.value(u64), draws.value(u128) },
         ),
-        10 => try expect_varint_overflow_never_panics(smith),
-        11 => try roundtrip_map(map.HashMap(u64, u64), smith),
-        12 => try roundtrip_map(map.Map(u32, u32), smith),
-        13 => try roundtrip_set(map.HashSet(u64), smith),
-        14 => try roundtrip_set(map.Set(u32), smith),
-        15 => try roundtrip_net(smith),
-        16 => if (Modes(3).init(smith.value([3]u7))) |packet| {
+        10 => try expect_varint_overflow_never_panics(draws),
+        11 => try roundtrip_map(map.HashMap(u64, u64), draws),
+        12 => try roundtrip_map(map.Map(u32, u32), draws),
+        13 => try roundtrip_set(map.HashSet(u64), draws),
+        14 => try roundtrip_set(map.Set(u32), draws),
+        15 => try roundtrip_net(draws),
+        16 => if (Modes(3).init(draws.value([3]u7))) |packet| {
             try expect_roundtrip(Modes(3), packet);
         },
         else => unreachable,
@@ -200,9 +204,10 @@ const scalar_count = 24;
 const composite_count = 17;
 
 fn roundtrip(_: void, smith: *Smith) anyerror!void {
-    const choice = smith.value(u8) % (scalar_count + composite_count);
-    if (choice < scalar_count) return roundtrip_scalars(smith, choice);
-    return roundtrip_composites(smith, choice - scalar_count);
+    const draws: Draws = .init(smith);
+    const choice: u8 = @intCast(draws.index(scalar_count + composite_count));
+    if (choice < scalar_count) return roundtrip_scalars(draws, choice);
+    return roundtrip_composites(draws, choice - scalar_count);
 }
 
 fn expect_canonical(comptime T: type, input: []const u8, cfg: codec.Cfg(T)) !void {
@@ -218,7 +223,7 @@ fn expect_canonical(comptime T: type, input: []const u8, cfg: codec.Cfg(T)) !voi
 
 fn decode_canonical(_: void, smith: *Smith) anyerror!void {
     var data: [512]u8 = undefined;
-    const input = data[0..smith.slice(&data)];
+    const input = Draws.init(smith).slice(&data);
     try expect_canonical(bool, input, {});
     try expect_canonical(u32, input, {});
     try expect_canonical(f64, input, {});
