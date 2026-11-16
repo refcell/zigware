@@ -50,6 +50,9 @@ statistics, output, CLI) and run against a minimal in-lane stand-in, then switch
   collector, so a value prints bare when it reads as a JSON number or boolean. Message stamps
   use the local zone from `$TZ` or `/etc/localtime` (TZif plus its POSIX footer), as chrono's
   `Local` does.
+- commonware's chat README points at a `p2p_connections` gauge that commonware removed
+  (#3324); the Metrics pane shows `network_tracker_directory_connected` samples, one per
+  connected friend, instead.
 
 ## Backlog
 - [x] `.lazy` DSL parser and task model, with lib.rs's parser tests. Copy the `.lazy` files and
@@ -78,7 +81,9 @@ statistics, output, CLI) and run against a minimal in-lane stand-in, then switch
 ### chat (commonware `examples/chat`)
 - [x] Logger and handler (TUI with plain ANSI, no deps), CLI, `peer_set_limit` test. The
   handler is tested chatting over p2p.simulated; the CLI matches clap's output for 23 cases.
-- [ ] Wire to `authenticated::discovery`; demo recipe.
+- [x] Wire to `authenticated::discovery` on the production runner; 3 friends chat over TCP
+  in tmux and quit cleanly on ESC.
+- [ ] Demo recipe and recording.
 
 ## Log
 - 2026-11-13: DSL parser, latency data, statistics, clap-identical CLI, colored output, and
