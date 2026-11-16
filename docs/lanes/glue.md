@@ -115,3 +115,41 @@ marshal's actors (consensus-marshal) for the actor; until then it ports what is 
   commonware tests.
 
 - 2026-11-16 (stateful): probe sample, wire messages, and payload bound.
+## dkg (owner: coding lane, thread T-01a1d58d-bff1-75a1-8ccb-4b8dd7bc9755)
+
+Owns `src/glue/dkg`. Reference: `glue/src/dkg` (about 24k Rust lines).
+
+### Public API (on main)
+- `glue.dkg`: `assert_reshare_block`, `assert_registrar`, `assert_secret_store`,
+  `assert_participants_provider` (commonware's `ReshareBlock`, `Registrar`, `SecretStore`,
+  `ParticipantsProvider` as comptime interfaces), `max_payload_size(V, P, max)`.
+- `dkg.types`: `SchemeInfo(V, P)` (`init(public_key, players, sharing, ?share)` picks
+  `signer`/`member`/`verifier`), `EpochOutcome`, `Participants(P)` (`validate`,
+  `tracked_peers`, codec cfg = max participants), `EpochInfo(V, P, D)` (`participants`,
+  `peers`, `max_encode_size_with`; decode rejects a directory that does not name exactly the
+  epoch's peers), `Payload(V, P, D)` (`dealer_log`/`epoch_info`), `Message(V, P)`
+  (`dealer`/`ack`), `InfoCfg`, `max_participants`. All own their memory (`deinit`, `clone`,
+  `eql`).
+- `dkg.network`: `Addresses(P)` (address directory), `DirectoryOps(P, D)` (dispatch over
+  `utils.sequence.Unit` and `Addresses`), `Tracked(P)`, `assert_manager`,
+  `KeyOnlyManager(M)`, `AddressableManager(M)` (`track` fails with `MissingAddress` before
+  activating anyone; `missing_address` names the peer).
+- `dkg.fence`: `Fence` (`init(io)`, `mark`, `close`, `gate`), `Gate` (`wait`, `poll`).
+
+### Decisions
+- Rust's async trait methods block on the runtime's `std.Io` (as in `consensus.traits`).
+- `Fence` is one shared object: the owner calls `close` where Rust drops the `Fence`.
+- `MissingAddress(P)` is an error code; `network.missing_address` returns the peer.
+
+### Backlog
+- [x] types (with conformance hashes), limits, fence, network.
+- [ ] state_sync (`Plan`, `StateSync` codec and conformance).
+- [ ] reshare: store (journal `Event` codec and conformance), mailbox, actor (setup, dealing,
+  inclusion, follower, dkg), application, metrics.
+- [ ] bootstrap, probe (wire with conformance, discovery, service), orchestrator.
+- [ ] tests: the dkg and reshare harnesses, properties, and mocks; lookup's peer-activation
+  test.
+
+### Log
+- 2026-11-16: types, network, limits, and fence with their tests; 7 types and network
+  conformance hashes match commonware's.

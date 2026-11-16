@@ -88,9 +88,9 @@ const packages = [_]Package{
         "utils", "conformance", "invariants",
     } },
     .{ .name = "glue", .deps = &.{
-        "actor",  "broadcast", "codec",    "coding",   "consensus", "cryptography",
-        "math",   "p2p",       "parallel", "resolver", "runtime",   "storage",
-        "stream", "utils",
+        "actor",  "broadcast", "codec",       "coding",     "consensus", "cryptography",
+        "math",   "p2p",       "parallel",    "resolver",   "runtime",   "storage",
+        "stream", "utils",     "conformance", "invariants",
     } },
     .{ .name = "deployer", .deps = &.{ "cryptography", "utils" } },
 };
