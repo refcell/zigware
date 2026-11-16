@@ -40,7 +40,7 @@ pub const scalar_bits: u32 = 255;
 /// In circuit the secret is witnessed directly as its `bit_count` little-endian bits with
 /// no canonicity constraint: every use feeds them into a scalar multiplication, which is
 /// well defined modulo `r`, so an alias `>= r` of the same residue gives the same result.
-pub const F = struct {
+pub const F = packed struct {
     value: u256,
 
     /// The bit-width of `r`.

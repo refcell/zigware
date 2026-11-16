@@ -7,5 +7,5 @@ pub const feldman_desmedt = @import("feldman_desmedt.zig");
 test {
     std.testing.refAllDecls(@This());
     _ = @import("conformance_test.zig");
-    _ = @import("golden/evrf/banderwagon.zig");
+    _ = @import("golden/evrf.zig");
 }

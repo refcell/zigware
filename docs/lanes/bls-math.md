@@ -29,7 +29,11 @@ variants (MinPk, MinSig) must match exactly.
   the test plan and its tests, and the message and FeldmanTranscript conformance hashes.
 - [x] bls12381 scheme.rs (PrivateKey, PublicKey, Signature) with its conformance hashes.
 - [ ] bls12381 dkg golden (commonware `dkg::golden`) with its tests and conformance hashes.
-  Blocked: its eVRF needs crypto's zk bulletproofs (crypto lane).
+  Done so far: the eVRF over banderwagon (vrf_send/recv, point_hash, the zk.circuit
+  gadget with its exact capacity) and the eVRF keys (PrivateKey, PublicKey, Schnorr
+  Signature, checked against commonware signatures). Blocked on crypto's zk bulletproofs
+  for the rest: Setup, vrf_batch_checked and its conversion, VrfCommitments, and golden
+  mod.rs (deal, observe, play) with its tests and fuzz target.
 - [x] Fuzz targets: math (the crate plan), simd (differential), and the bls12381 decode,
   primitive, threshold, aggregate, batch, tle, and dkg_feldman_desmedt targets.
 - [x] banderwagon (commonware `cryptography/src/banderwagon.rs`, moved from the crypto lane) as
