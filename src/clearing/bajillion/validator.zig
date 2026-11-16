@@ -98,15 +98,50 @@ pub fn PayoutOperation(comptime P: type, comptime A: type) type {
     return qmdb.keyless.Operation(Mmr, qmdb.value.Fixed(Payout(P, A)));
 }
 
+/// Why a checked close does not settle (commonware `SettleError`), besides the flow errors
+/// `Flows.settle` returns and the balances database's and payout log's own errors.
+pub const SettleError = error{
+    /// The databases are not at the parent's roots.
+    InvalidCheckpoint,
+};
+
+/// Why a proposal does not apply (commonware `ApplyError`), besides the databases' own errors.
+pub const ApplyError = error{
+    /// The summary did not post, or the databases are not at the parent's roots.
+    InvalidCheckpoint,
+};
+
 /// Bytes per chunk of the balances database's activity bitmap (commonware `CHUNK`).
 pub const balances_chunk_size: usize = 32;
+
+/// The update a balances operation carries: an account and its balance.
+pub fn BalanceUpdate(comptime P: type, comptime A: type) type {
+    return qmdb.any.operation.update.Unordered(P, qmdb.value.Fixed(A));
+}
+
+/// The validators' balances database over the unordered index `I` (commonware
+/// `Balances<E, P, H, I, S, A>`): a `current` database over the MMB on a fixed journal.
+///
+/// It maps each account with a positive balance to that balance. Its root after each posted
+/// close is the balances root that close's summary certifies. Its metadata is zero once a
+/// close applied, so a database with no metadata has applied none.
+pub fn Balances(comptime P: type, comptime H: type, comptime I: type, comptime A: type) type {
+    mod.assert_amount(A);
+    const Mmb = storage.mmb.Family;
+    const E = qmdb.value.Fixed(A);
+    const Journal = storage.journal.contiguous.fixed.Journal(qmdb.any.operation.Unordered(
+        Mmb,
+        P,
+        E,
+    ));
+    return qmdb.current.Db(Mmb, BalanceUpdate(P, A), Journal, I, H, balances_chunk_size);
+}
 
 /// Proof of an account's balance under a balances root (commonware `BalanceProof<D, A>`).
 /// Owns its proof.
 ///
 /// A proof reveals the balance, and verifies only for a positive one, because the balances
-/// database holds no zero balance. Verification lands with qmdb `current`'s database; the
-/// codec is here so the type round-trips and matches commonware's conformance hash.
+/// database holds no zero balance.
 pub fn BalanceProof(comptime D: type, comptime A: type) type {
     mod.assert_amount(A);
     return struct {
@@ -129,6 +164,18 @@ pub fn BalanceProof(comptime D: type, comptime A: type) type {
 
         pub fn eql(a: *const Self, b: *const Self) bool {
             return a.balance == b.balance and a.proof.eql(b.proof);
+        }
+
+        /// Returns whether `account` has `self.balance` under the balances root `root`.
+        pub fn verify(
+            self: *const Self,
+            comptime H: type,
+            comptime P: type,
+            root: *const D,
+            account: P,
+        ) bool {
+            comptime assert(H.Digest == D);
+            return self.proof.verify(H, BalanceUpdate(P, A), account, self.balance, root);
         }
 
         pub fn write(self: Self, writer: *codec.Writer) void {
@@ -350,6 +397,88 @@ pub fn Checked(comptime P: type, comptime H: type, comptime A: type) type {
             };
         }
 
+        /// Settles the close on top of `balances` and `log` and stages a batch on each
+        /// (commonware `Checked::settle`). The balances batch writes exactly the balances that
+        /// change, with a zero balance written as a delete, and commits with metadata zero, so
+        /// a balances database with no metadata has applied no close. The log batch is the one
+        /// `Payout.stage` builds from the close's payouts. The caller deinits the proposal.
+        pub fn settle(
+            self: *const Self,
+            gpa: Allocator,
+            balances: anytype,
+            log: *Payouts(P, H, A),
+        ) !Proposal(P, H, A, @TypeOf(balances.*)) {
+            if (!balances.root().eql(self.parent.balances) or
+                !log.root().eql(self.parent.payouts.root)) return error.InvalidCheckpoint;
+            const batch, var payouts = try self.stage_balances(gpa, balances);
+            errdefer batch.release();
+            errdefer payouts.deinit(gpa);
+            const appends = try Payout(P, A).stage(log, &payouts);
+            assert(appends.commitment().size == log.bounds().end + payouts.entries.len + 1);
+            const summary: summary_module.Summary(H) = .{
+                .epoch = self.epoch,
+                .parent = self.parent.digest(),
+                .matrix = self.matrix.root(),
+                .balances = batch.root(),
+                .payouts = appends.commitment(),
+                .deposits = self.deposits,
+                .forced_withdrawals = self.forced_withdrawals,
+            };
+            return .{
+                .summary = summary,
+                .parent = self.parent,
+                .matrix = self.matrix.clone(),
+                .payouts = payouts,
+                .batch = batch,
+                .appends = appends,
+            };
+        }
+
+        /// Stages the flows' accounts on `balances`, settles the flows on their balances, and
+        /// merkleizes the balance writes. Staging keeps the location each balance was read
+        /// from, so writing an account does not look it up again.
+        fn stage_balances(self: *const Self, gpa: Allocator, balances: anytype) !struct {
+            *@TypeOf(balances.*).MerkleizedBatch,
+            amounts_module.Amounts(P, A),
+        } {
+            const Db = @TypeOf(balances.*);
+            const count = self.flows.len();
+            const accounts = try gpa.alloc(P, count);
+            defer gpa.free(accounts);
+            const read = try gpa.alloc(?A, count);
+            defer gpa.free(read);
+            const previous = try gpa.alloc(A, count);
+            defer gpa.free(previous);
+            const slots = try gpa.alloc(Db.Slot, count);
+            defer gpa.free(slots);
+            for (self.flows.flows, accounts) |entry, *account| account.* = entry[0];
+
+            var batch = try balances.new_batch();
+            batch.with_metadata(0);
+            var staged = batch.stage(accounts, balances, read) catch |err| {
+                batch.deinit();
+                return err;
+            };
+            var settled = settled: {
+                errdefer staged.deinit();
+                for (read, previous) |balance, *before| before.* = balance orelse 0;
+                break :settled try self.flows.settle(gpa, previous);
+            };
+            defer gpa.free(settled.balances);
+            errdefer settled.payouts.deinit(gpa);
+            assert(settled.balances.len == count);
+            for (settled.balances, slots) |balance, *slot| {
+                const value = balance orelse {
+                    slot.* = .keep;
+                    continue;
+                };
+                slot.* = if (value == 0) .delete else .{ .put = value };
+            }
+            // Merkleizing consumes the staged batch, also on error.
+            const merkleized = try staged.merkleize(slots, &.{}, balances);
+            return .{ merkleized, settled.payouts };
+        }
+
         fn verify_operator(
             comptime O: type,
             gpa: Allocator,
@@ -424,6 +553,64 @@ pub fn Checked(comptime P: type, comptime H: type, comptime A: type) type {
             };
             const count = close.rows.len + close.withdrawals.len;
             return strategy.try_fold(parallel.Range.upto(count), op);
+        }
+    };
+}
+
+/// A settled close with its summary, payment matrix, payouts, and the batches staged on the
+/// balances database `B` and the payout log (commonware `Proposal<P, H, S, A>`). Owns its
+/// payouts, a reference to its matrix, and a reference to each batch.
+pub fn Proposal(comptime P: type, comptime H: type, comptime A: type, comptime B: type) type {
+    return struct {
+        const Self = @This();
+        const D = H.Digest;
+        const Log = Payouts(P, H, A);
+
+        /// Summary to certify.
+        summary: summary_module.Summary(H),
+        /// Summary of the parent close. Both batches apply on top of its roots.
+        parent: summary_module.Summary(H),
+        /// Payment matrix of the close.
+        matrix: matrix_module.Matrix(P, H, A),
+        /// Payouts the close appends to the payout log, in account order. With p the parent's
+        /// payouts size and s this summary's, they take the indices [p, s - 1) before the
+        /// commit at s - 1, so an account's payout sits at p plus its position in them.
+        payouts: amounts_module.Amounts(P, A),
+        /// The balance writes.
+        batch: *B.MerkleizedBatch,
+        /// The payouts and commit appended to the payout log.
+        appends: *Log.MerkleizedBatch,
+
+        pub fn deinit(self: *Self, gpa: Allocator) void {
+            self.matrix.deinit();
+            self.payouts.deinit(gpa);
+            self.batch.release();
+            self.appends.release();
+            self.* = undefined;
+        }
+
+        /// Applies the staged batches to `balances` and `log` once the summary posts with
+        /// digest `posted`, and returns this close's checkpoint (commonware
+        /// `Proposal::apply`). The log's appends are durable before the balances change, so
+        /// after any crash the log is at or past the close the balances hold. The balance
+        /// writes are not yet durable. A refusal writes to neither database; after a
+        /// database error both must be reopened as after a restart. The proposal stays the
+        /// caller's.
+        pub fn apply(
+            self: *const Self,
+            balances: *B,
+            log: *Log,
+            posted: *const D,
+        ) !Checkpoint(P, H, A) {
+            if (!posted.eql(self.summary.digest()) or
+                !balances.root().eql(self.parent.balances) or
+                !log.root().eql(self.parent.payouts.root)) return error.InvalidCheckpoint;
+            try log.apply_batch(self.appends);
+            try log.commit();
+            try balances.apply_batch(self.batch);
+            assert(log.root().eql(self.summary.payouts.root));
+            assert(balances.root().eql(self.summary.balances));
+            return .{ .summary = self.summary, .matrix = self.matrix.clone() };
         }
     };
 }

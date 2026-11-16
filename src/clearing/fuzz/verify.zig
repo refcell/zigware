@@ -4,8 +4,7 @@
 //! whatever they are checked against. A payments case builds the honest proofs of four
 //! accounts' promised and posted payments in one epoch, checks them, and then checks that no
 //! proof spliced from two honest ones, and no change to the bytes of one sender and receiver's
-//! proofs, verifies as anything the case does not hold. `BalanceProof` waits on qmdb `current`
-//! (docs/lanes/clearing.md). Each input runs in its own arena.
+//! proofs, verifies as anything the case does not hold. Each input runs in its own arena.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -29,6 +28,7 @@ const Opening = bajillion.Opening(PublicKey, Digest, u64);
 const Receipt = bajillion.Receipt(PublicKey, PublicKey, Digest, u64);
 const Challenge = bajillion.Challenge(PublicKey, PublicKey, Digest, u64);
 const PayoutProof = bajillion.PayoutProof(PublicKey, Digest, u64);
+const BalanceProof = bajillion.BalanceProof(Digest, u64);
 const Close = bajillion.Close(PublicKey, PublicKey, u64);
 const Matrix = bajillion.Matrix(PublicKey, Sha256, u64);
 
@@ -436,6 +436,12 @@ fn arbitrary_proof(arena: Allocator, choice: u64, seed: u64, namespace: anytype)
                 try generate(struct { PayoutProof, Digest }, arena, seed) orelse return;
             _ = proof.verify(Sha256, &root);
         },
+        4 => {
+            const proof, const root, const account =
+                try generate(struct { BalanceProof, Digest, PublicKey }, arena, seed) orelse
+                return;
+            _ = proof.verify(Sha256, PublicKey, &root, account);
+        },
         else => unreachable,
     }
 }
@@ -446,8 +452,8 @@ pub fn run_one(input: []const u8) anyerror!void {
     defer arena_state.deinit();
     const arena = arena_state.allocator();
     var reader = bytes.Reader.init(input);
-    const choice = reader.below(5);
-    if (choice == 4) return check_payments(arena, &reader);
+    const choice = reader.below(6);
+    if (choice == 5) return check_payments(arena, &reader);
     const namespace = try bajillion.Namespace.init(arena, namespace_bytes);
     try arbitrary_proof(arena, choice, reader.int(u32), &namespace);
 }

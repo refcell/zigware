@@ -63,6 +63,11 @@ pub const PayoutProof = validator.PayoutProof;
 pub const BalanceProof = validator.BalanceProof;
 pub const Checkpoint = validator.Checkpoint;
 pub const Checked = validator.Checked;
+pub const Proposal = validator.Proposal;
+pub const Balances = validator.Balances;
+pub const Payouts = validator.Payouts;
+pub const SettleError = validator.SettleError;
+pub const ApplyError = validator.ApplyError;
 pub const CheckError = validator.CheckError;
 
 /// An epoch number. Epochs start at one, and epoch zero names the state before the first close.
@@ -95,5 +100,7 @@ test {
     _ = @import("close_test.zig");
     _ = @import("summary_test.zig");
     _ = @import("validator_test.zig");
+    _ = @import("ledger_test.zig");
+    _ = @import("validator_db_test.zig");
     _ = @import("conformance_test.zig");
 }

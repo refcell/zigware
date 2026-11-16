@@ -6,7 +6,8 @@ Reference: `~/.cache/zigware/commonware-ref/clearing` (about 16k Rust lines: lib
 `bajillion`: amounts, close, lookup, matrix, namespace, payment, settlement, summary,
 validator, tests). Its dependencies are all on main: codec, cryptography (incl. bls12381 and
 the certificate mocks), parallel, utils, storage `bmt` and `merkle` (mmr, mmb), conformance,
-formatting, and the deterministic runtime for tests. qmdb is only mentioned in comments.
+formatting, and the deterministic runtime for tests. The validator databases are storage's
+qmdb `current` (balances, over the MMB) and `keyless` (payout log, over the MMR).
 
 ## Public API (on main)
 - `clearing.bajillion`: `Epoch` (`u64`), `assert_amount(A)` (any unsigned integer type,
@@ -51,10 +52,14 @@ formatting, and the deterministic runtime for tests. qmdb is only mentioned in c
 - `validator`: `Payout(P, A)` (`stage(log, payouts)` returns the log's merkleized batch),
   `Payouts(P, H, A)` (the payout log: `storage.qmdb.keyless.Db` over the MMR on a fixed
   journal), `PayoutOperation(P, A)`, `PayoutProof(P, D, A)` (`verify(H, root)`, codec, owns
-  its proof), `BalanceProof(D, A)` (codec and arbitrary; `verify` waits on `current`'s
-  database), `Checkpoint(P, H, A)` (`clone`, `deinit`), `Checked(P, H, A)` (`check(O, gpa,
+  its proof), `Balances(P, H, I, A)` (the balances database: `storage.qmdb.current.Db` over
+  the MMB on a fixed journal with index `I`, chunk `balances_chunk_size` = 32),
+  `BalanceUpdate(P, A)`, `BalanceProof(D, A)` (`verify(H, P, root, account)`, codec,
+  arbitrary), `Checkpoint(P, H, A)` (`clone`, `deinit`), `Checked(P, H, A)` (`check(O, gpa,
   close, namespace, operator, parent, queue, strategy)`, commonware's `Close::check`; the
-  close stays the caller's), `CheckError`.
+  close stays the caller's; `settle(gpa, *balances, *log) -> Proposal`), `Proposal(P, H, A,
+  B)` (`summary`, `parent`, `matrix`, `payouts`, `batch`, `appends`; `apply(*balances, *log,
+  posted) -> Checkpoint`; `deinit`), `CheckError`, `SettleError`, `ApplyError`.
 - `src/clearing/fuzz/{decode,verify}.zig`: the fuzz targets; `src/clearing/benches.zig`.
 
 ## Decisions
@@ -80,6 +85,15 @@ formatting, and the deterministic runtime for tests. qmdb is only mentioned in c
   bytes flipped, which commonware's does not. The verify target runs 8 seeded cases in Debug
   (signatures dominate) and 256 otherwise; each input runs in an arena.
 - build.zig: clearing also imports `conformance` and `invariants` (commonware dev-deps).
+- `settle` and `apply` borrow the databases instead of consuming and returning them, and
+  `apply` borrows the proposal (cloning its matrix into the checkpoint), so the caller deinits
+  a proposal whether or not it applied. After a database error the caller reopens both
+  databases, as commonware's dropped handles require. Settle and apply errors are inferred:
+  `InvalidCheckpoint`, a `FlowError`, or the databases' own errors.
+- `testing.zig` holds commonware's `tests.rs` helpers: `Harness` (in-memory storage; each
+  database registers its metrics afresh on open) and `Store(I)` with `settle`, `apply`,
+  `commit`, `roots`, `post`. The database tests are in `validator_db_test.zig`, the ledger
+  vector in `ledger_test.zig`.
 
 ## Backlog
 - [x] lib.rs types and traits (`Epoch`, `Amount`), namespace.
@@ -96,14 +110,13 @@ formatting, and the deterministic runtime for tests. qmdb is only mentioned in c
 - [x] validator: `Payouts` (keyless `Db` over the MMR), `Payout.stage`, and the payout-log tests.
 - [x] validator: BalanceProof codec and arbitrary on storage's `current` KeyValueProof; its
   conformance hash matches, so all 19 do.
-- [ ] validator: `BalanceProof.verify`, `Balances`, `settle`, `apply`, `Proposal`, and the
-  database tests need qmdb `current`'s database (after `any` unordered fixed in storage-qmdb).
-  The check tests build parents without settling until then.
-- [ ] tests.rs ledger vector beyond genesis, and the integration tests (clearing/tests/bajillion,
-  about 7.6k lines with the five reference roles); both need the balances database.
+- [x] validator: `BalanceProof.verify`, `Balances`, `settle`, `apply`, `Proposal`, and all 15
+  validator tests on the databases.
+- [x] tests.rs ledger vector in full: every pinned root, digest, and encoding matches.
+- [ ] Integration tests (clearing/tests/bajillion: ledger, lifecycle, model, operator,
+  payments, validator, and the reference roles; about 5.6k lines).
 - [x] Fuzz targets `src/clearing/fuzz/{decode,verify}.zig` (commonware clearing/fuzz), seeded
-  in `zig build test` and under `std.testing.fuzz`; the verify target adds BalanceProof with
-  its `verify`.
+  in `zig build test` and under `std.testing.fuzz`; the verify target includes BalanceProof.
 - [x] Benches `src/clearing/benches.zig` (zigware's own; commonware's clearing has none):
   `clearing::amounts_root`, `clearing::matrix_open`, `clearing::close_check`.
 
@@ -125,3 +138,8 @@ formatting, and the deterministic runtime for tests. qmdb is only mentioned in c
   verify 1.4 µs, close check 17 ms (about 66 µs per row, mostly the row signature).
 - 2026-11-16: BalanceProof codec on storage's `current` proof codecs; all 19 clearing
   conformance hashes match commonware.
+- 2026-11-16: settle and apply on storage's `current` balances database: `Balances`,
+  `BalanceProof.verify`, `Checked.settle`, `Proposal.apply`, the 15 validator tests, and the
+  full ledger vector (balances, summary, balance-proof, and payout-proof encodings match).
+  Storage fixes: `current`'s bounded reopen now checks its bitmap floor before the journal
+  discards history, and `key_value_proof` compares keys by value.

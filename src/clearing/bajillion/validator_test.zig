@@ -1,5 +1,4 @@
-//! Tests of `validator.zig` (commonware `bajillion/validator.rs` tests). Until the balances
-//! database lands, parents are built from checked closes directly instead of being settled.
+//! Tests of `validator.zig` (commonware `bajillion/validator.rs` tests).
 
 const std = @import("std");
 const testing = std.testing;
@@ -25,96 +24,13 @@ const Checked = validator.Checked(PublicKey, Sha256, u64);
 const TestSummary = summary.Summary(Sha256);
 const gpa = testing.allocator;
 
-/// Returns a row of `sender` for `epoch` paying `entries`, signed on top of `previous`.
-fn row(epoch: u64, sender: u64, entries: []const [2]u64, previous: Digest) !Row {
-    var namespace = try t.namespace(gpa);
-    defer namespace.deinit(gpa);
-    const payments = try t.amounts(gpa, entries);
-    const state: mod.State(PublicKey, Digest) = .{
-        .epoch = epoch,
-        .account = t.account(sender),
-        .payments = payments.root(Sha256),
-        .previous = previous,
-    };
-    const signer = t.user(sender);
-    return .{
-        .account = t.account(sender),
-        .payments = payments,
-        .signature = state.sign(&signer, &namespace),
-    };
-}
+const TestStore = t.Store(t.DefaultIndex);
 
-fn less_row(_: void, a: Row, b: Row) bool {
-    return a.account.order(b.account) == .lt;
-}
-
-/// Signs a close of `rows` and `withdrawals` as `operator`, without checking its contents.
-/// Takes ownership of the rows.
-fn sign_close(
-    operator: *const PrivateKey,
-    epoch: u64,
-    rows: []const Row,
-    withdrawals: []const Withdrawal,
-    deposits: u64,
-    forced_withdrawals: u64,
-) !TestClose {
-    var namespace = try t.namespace(gpa);
-    defer namespace.deinit(gpa);
-    const owned_rows = try gpa.dupe(Row, rows);
-    std.mem.sort(Row, owned_rows, {}, less_row);
-    const owned_withdrawals = try gpa.dupe(Withdrawal, withdrawals);
-    return TestClose.sign(
-        Sha256,
-        gpa,
-        operator,
-        &namespace,
-        epoch,
-        owned_rows,
-        owned_withdrawals,
-        deposits,
-        forced_withdrawals,
-        parallel.sequential,
-    );
-}
-
-fn queue(
-    epoch: u64,
-    deposits: []const Deposit,
-    forced: []const Forced,
-) Queue {
-    return .{
-        .epoch = epoch,
-        .deposits = deposits,
-        .required_deposits = 0,
-        .forced_withdrawals = forced,
-        .required_forced_withdrawals = 0,
-    };
-}
-
-fn genesis() !Checkpoint {
-    return .{
-        .summary = TestSummary.genesis(PublicKey, u64, Sha256.hash(&.{"balances"})),
-        .matrix = try mod.Matrix(PublicKey, Sha256, u64).empty(gpa),
-    };
-}
-
-/// Checks `close` as the successor of `parent` against `queue`, then frees the close.
-fn check(close: TestClose, parent: *const Checkpoint, ledger: *const Queue) !Checked {
-    var owned = close;
-    defer owned.deinit(gpa);
-    var namespace = try t.namespace(gpa);
-    defer namespace.deinit(gpa);
-    const operator = t.operator_key().public_key();
-    return Checked.check(
-        PublicKey,
-        gpa,
-        &owned,
-        &namespace,
-        &operator,
-        parent,
-        ledger,
-        parallel.sequential,
-    );
+/// Settles `checked` on `store` and drops the proposal, then frees `checked`.
+fn expect_settles(store: *TestStore, checked: *Checked) !void {
+    defer checked.deinit(gpa);
+    var proposal = try store.settle(checked);
+    proposal.deinit(gpa);
 }
 
 fn expect_check_error(
@@ -123,26 +39,9 @@ fn expect_check_error(
     parent: *const Checkpoint,
     ledger: *const Queue,
 ) !void {
-    var result = check(close, parent, ledger);
+    var result = t.check(close, parent, ledger);
     if (result) |*checked| checked.deinit(gpa) else |_| {}
     try testing.expectError(expected, result);
-}
-
-/// The checkpoint `checked` leaves once it posts, standing in for settling it.
-fn post(checked: *Checked) Checkpoint {
-    defer checked.deinit(gpa);
-    return .{
-        .summary = .{
-            .epoch = checked.epoch,
-            .parent = checked.parent.digest(),
-            .matrix = checked.matrix.root(),
-            .balances = checked.parent.balances,
-            .payouts = checked.parent.payouts,
-            .deposits = checked.deposits,
-            .forced_withdrawals = checked.forced_withdrawals,
-        },
-        .matrix = checked.matrix.clone(),
-    };
 }
 
 test "validator: payout codec" {
@@ -159,60 +58,60 @@ test "validator: validators reject invalid closes" {
 
 fn check_rejections() !void {
     const operator = t.operator_key();
-    var start = try genesis();
+    var harness = try t.Harness.init();
+    defer harness.deinit();
+    var store = try harness.open(t.DefaultIndex, .{});
+    defer store.deinit();
+    var start = try t.genesis(store.balances.root());
     defer start.deinit();
     const funding = [_]Deposit{.{ .account = t.account(0), .amount = 10 }};
-    var funded = try check(
-        try sign_close(&operator, 1, &.{}, &.{}, 1, 0),
-        &start,
-        &queue(1, &funding, &.{}),
-    );
-    var parent = post(&funded);
+    const funded = try t.sign_close(&operator, 1, &.{}, &.{}, 1, 0);
+    var parent = try store.post(&start, funded, &t.queue(1, &funding, &.{}));
     defer parent.deinit();
     const deposits = [_]Deposit{.{ .account = t.account(1), .amount = 5 }};
     const forced = [_]Forced{.{ .account = t.account(0), .amount = 1 }};
-    const queued = queue(2, &deposits, &forced);
+    const queued = t.queue(2, &deposits, &forced);
     const empty = t.empty_root();
 
     // A close of the next epoch processing the queue is valid.
-    var valid = try check(
-        try sign_close(&operator, 2, &.{try row(2, 0, &.{.{ 1, 10 }}, empty)}, &.{}, 1, 1),
+    var valid = try t.check(
+        try t.sign_close(&operator, 2, &.{try t.row(2, 0, &.{.{ 1, 10 }}, empty)}, &.{}, 1, 1),
         &parent,
         &queued,
     );
-    valid.deinit(gpa);
+    try expect_settles(&store, &valid);
 
     // It must be the next epoch and process the queue within its bounds.
-    try expect_check_error(error.WrongEpoch, try sign_close(
+    try expect_check_error(error.WrongEpoch, try t.sign_close(
         &operator,
         3,
-        &.{try row(2, 0, &.{.{ 1, 10 }}, empty)},
+        &.{try t.row(2, 0, &.{.{ 1, 10 }}, empty)},
         &.{},
         1,
         1,
     ), &parent, &queued);
     for ([_][2]u64{ .{ 2, 1 }, .{ 1, 2 } }) |counts| {
-        const close = try sign_close(&operator, 2, &.{}, &.{}, counts[0], counts[1]);
+        const close = try t.sign_close(&operator, 2, &.{}, &.{}, counts[0], counts[1]);
         try expect_check_error(error.InvalidCount, close, &parent, &queued);
     }
     var required = queued;
     required.required_deposits = 1;
     required.required_forced_withdrawals = 1;
     for ([_][2]u64{ .{ 0, 1 }, .{ 1, 0 } }) |counts| {
-        const close = try sign_close(&operator, 2, &.{}, &.{}, counts[0], counts[1]);
+        const close = try t.sign_close(&operator, 2, &.{}, &.{}, counts[0], counts[1]);
         try expect_check_error(error.InvalidCount, close, &parent, &required);
     }
 
     // The queue must be the ledger's while it expects this close.
     var stale = queued;
     stale.epoch = 3;
-    const valid_row = try row(2, 0, &.{.{ 1, 10 }}, empty);
-    const close = try sign_close(&operator, 2, &.{valid_row}, &.{}, 1, 1);
+    const valid_row = try t.row(2, 0, &.{.{ 1, 10 }}, empty);
+    const close = try t.sign_close(&operator, 2, &.{valid_row}, &.{}, 1, 1);
     try expect_check_error(error.WrongEpoch, close, &parent, &stale);
 
     try check_operator_signature(&parent, &queued);
-    try check_user_signatures(&parent, &queued);
-    try check_checkpoint(&parent);
+    try check_user_signatures(&store, &parent, &queued);
+    try check_checkpoint(&store, &parent);
 }
 
 /// Validators reject a close the operator did not sign before checking any user signature,
@@ -223,27 +122,27 @@ fn check_operator_signature(parent: *const Checkpoint, queued: *const Queue) !vo
     var namespace = try t.namespace(gpa);
     defer namespace.deinit(gpa);
     const impostor = t.user(5);
-    var forged = try row(2, 0, &.{.{ 1, 10 }}, empty);
+    var forged = try t.row(2, 0, &.{.{ 1, 10 }}, empty);
     forged.signature = impostor.sign("forged", "forged");
-    var close = try sign_close(&impostor, 2, &.{forged}, &.{}, 1, 1);
+    var close = try t.sign_close(&impostor, 2, &.{forged}, &.{}, 1, 1);
     try expect_check_error(error.InvalidOperatorSignature, close, parent, queued);
 
-    close = try sign_close(&operator, 2, &.{try row(2, 0, &.{.{ 1, 10 }}, empty)}, &.{}, 1, 1);
+    close = try t.sign_close(&operator, 2, &.{try t.row(2, 0, &.{.{ 1, 10 }}, empty)}, &.{}, 1, 1);
     close.deposits = 0;
     try expect_check_error(error.InvalidOperatorSignature, close, parent, queued);
 
     // Adding a row or a soft withdrawal its account signed breaks the operator's signature.
-    close = try sign_close(&operator, 2, &.{try row(2, 0, &.{.{ 1, 10 }}, empty)}, &.{}, 1, 1);
-    const added = try row(2, 1, &.{.{ 0, 1 }}, empty);
+    close = try t.sign_close(&operator, 2, &.{try t.row(2, 0, &.{.{ 1, 10 }}, empty)}, &.{}, 1, 1);
+    const added = try t.row(2, 1, &.{.{ 0, 1 }}, empty);
     const rows = try gpa.alloc(Row, 2);
     rows[0] = close.rows[0];
     rows[1] = added;
-    std.mem.sort(Row, rows, {}, less_row);
+    std.mem.sort(Row, rows, {}, t.less_row);
     gpa.free(close.rows);
     close.rows = rows;
     try expect_check_error(error.InvalidOperatorSignature, close, parent, queued);
 
-    close = try sign_close(&operator, 2, &.{try row(2, 0, &.{.{ 1, 10 }}, empty)}, &.{}, 1, 1);
+    close = try t.sign_close(&operator, 2, &.{try t.row(2, 0, &.{.{ 1, 10 }}, empty)}, &.{}, 1, 1);
     const signer = t.user(0);
     gpa.free(close.withdrawals);
     close.withdrawals = try gpa.dupe(Withdrawal, &.{Withdrawal.sign(&signer, &namespace, 2, 1, 0)});
@@ -252,12 +151,16 @@ fn check_operator_signature(parent: *const Checkpoint, queued: *const Queue) !vo
 
 /// Every sender must sign its row for this epoch on top of its row in the parent close, and
 /// soft withdrawals must be for this epoch and signed by their account.
-fn check_user_signatures(parent: *const Checkpoint, queued: *const Queue) !void {
+fn check_user_signatures(
+    store: *TestStore,
+    parent: *const Checkpoint,
+    queued: *const Queue,
+) !void {
     const operator = t.operator_key();
     const empty = t.empty_root();
     var namespace = try t.namespace(gpa);
     defer namespace.deinit(gpa);
-    var altered = try row(2, 0, &.{.{ 1, 10 }}, empty);
+    var altered = try t.row(2, 0, &.{.{ 1, 10 }}, empty);
     var nine = try t.amounts(gpa, &.{.{ 1, 9 }});
     std.mem.swap(t.TestAmounts, &altered.payments, &nine);
     nine.deinit(gpa);
@@ -265,63 +168,70 @@ fn check_user_signatures(parent: *const Checkpoint, queued: *const Queue) !void 
     defer elsewhere.deinit(gpa);
     const rows = [_]Row{
         altered,
-        try row(1, 0, &.{.{ 1, 10 }}, empty),
-        try row(2, 0, &.{.{ 1, 10 }}, elsewhere.root(Sha256)),
+        try t.row(1, 0, &.{.{ 1, 10 }}, empty),
+        try t.row(2, 0, &.{.{ 1, 10 }}, elsewhere.root(Sha256)),
     };
     for (rows) |invalid| {
-        const close = try sign_close(&operator, 2, &.{invalid}, &.{}, 1, 1);
+        const close = try t.sign_close(&operator, 2, &.{invalid}, &.{}, 1, 1);
         try expect_check_error(error.InvalidSignature, close, parent, queued);
     }
 
     const signer = t.user(0);
     const wrong_epoch = Withdrawal.sign(&signer, &namespace, 3, 1, 0);
-    var close = try sign_close(&operator, 2, &.{}, &.{wrong_epoch}, 1, 1);
+    var close = try t.sign_close(&operator, 2, &.{}, &.{wrong_epoch}, 1, 1);
     try expect_check_error(error.WrongEpoch, close, parent, queued);
     var forged = Withdrawal.sign(&signer, &namespace, 2, 1, 0);
     forged.amount = 2;
-    close = try sign_close(&operator, 2, &.{}, &.{forged}, 1, 1);
+    close = try t.sign_close(&operator, 2, &.{}, &.{forged}, 1, 1);
     try expect_check_error(error.InvalidSignature, close, parent, queued);
 
-    // An overdraft checks; settling refuses it.
-    close = try sign_close(&operator, 2, &.{try row(2, 1, &.{.{ 0, 6 }}, empty)}, &.{}, 1, 1);
-    var overdraft = try check(close, parent, queued);
-    overdraft.deinit(gpa);
+    // No balance may go negative, even when the sender signed the payment.
+    close = try t.sign_close(&operator, 2, &.{try t.row(2, 1, &.{.{ 0, 6 }}, empty)}, &.{}, 1, 1);
+    var overdraft = try t.check(close, parent, queued);
+    defer overdraft.deinit(gpa);
+    try testing.expectError(error.Overdraft, store.settle(&overdraft));
 }
 
 /// A sender's next row builds on the map the posted close settled for it, and a checkpoint
 /// whose matrix is not its summary's is refused.
-fn check_checkpoint(grandparent: *const Checkpoint) !void {
+fn check_checkpoint(store: *TestStore, grandparent: *const Checkpoint) !void {
     const operator = t.operator_key();
     const empty = t.empty_root();
     const deposits = [_]Deposit{.{ .account = t.account(1), .amount = 5 }};
     const forced = [_]Forced{.{ .account = t.account(0), .amount = 1 }};
-    var paying = try check(
-        try sign_close(&operator, 2, &.{try row(2, 0, &.{.{ 1, 5 }}, empty)}, &.{}, 1, 1),
+    const paying = try t.row(2, 0, &.{.{ 1, 5 }}, empty);
+    var parent = try store.post(
         grandparent,
-        &queue(2, &deposits, &forced),
+        try t.sign_close(&operator, 2, &.{paying}, &.{}, 1, 1),
+        &t.queue(2, &deposits, &forced),
     );
-    var parent = post(&paying);
     defer parent.deinit();
-    const next = queue(3, &.{}, &.{});
-    var close = try sign_close(&operator, 3, &.{try row(3, 0, &.{.{ 1, 1 }}, empty)}, &.{}, 0, 0);
+    const next = t.queue(3, &.{}, &.{});
+    const unanchored = try t.row(3, 0, &.{.{ 1, 1 }}, empty);
+    var close = try t.sign_close(&operator, 3, &.{unanchored}, &.{}, 0, 0);
     try expect_check_error(error.InvalidSignature, close, &parent, &next);
     var settled = try t.amounts(gpa, &.{.{ 1, 5 }});
     defer settled.deinit(gpa);
-    const anchored = try row(3, 0, &.{.{ 1, 1 }}, settled.root(Sha256));
-    var checked = try check(try sign_close(&operator, 3, &.{anchored}, &.{}, 0, 0), &parent, &next);
-    checked.deinit(gpa);
+    const anchored = try t.row(3, 0, &.{.{ 1, 1 }}, settled.root(Sha256));
+    const anchored_close = try t.sign_close(&operator, 3, &.{anchored}, &.{}, 0, 0);
+    var checked = try t.check(anchored_close, &parent, &next);
+    try expect_settles(store, &checked);
 
     var mismatched = parent.clone();
     mismatched.matrix.deinit();
     mismatched.matrix = try mod.Matrix(PublicKey, Sha256, u64).empty(gpa);
     defer mismatched.deinit();
-    close = try sign_close(&operator, 3, &.{}, &.{}, 0, 0);
+    close = try t.sign_close(&operator, 3, &.{}, &.{}, 0, 0);
     try expect_check_error(error.InvalidCheckpoint, close, &mismatched, &next);
 }
 
 test "validator: check chains the running hashes" {
     const operator = t.operator_key();
-    var start = try genesis();
+    var harness = try t.Harness.init();
+    defer harness.deinit();
+    var store = try harness.open(t.DefaultIndex, .{});
+    defer store.deinit();
+    var start = try t.genesis(store.balances.root());
     defer start.deinit();
 
     // The close of epoch 1 processes two of three deposits and the forced withdrawal.
@@ -331,93 +241,33 @@ test "validator: check chains the running hashes" {
         .{ .account = t.account(2), .amount = 30 },
     };
     const forced = [_]Forced{.{ .account = t.account(0), .amount = 3 }};
-    var checked = try check(
-        try sign_close(&operator, 1, &.{}, &.{}, 2, 1),
-        &start,
-        &queue(1, &all, &forced),
-    );
-    var first = post(&checked);
+    const close = try t.sign_close(&operator, 1, &.{}, &.{}, 2, 1);
+    var first = try store.post(&start, close, &t.queue(1, &all, &forced));
     defer first.deinit();
     const deposits = first.summary.deposits;
     try testing.expectEqual(@as(u64, 2), deposits.count);
-    try testing.expect(deposits.hash.eql(chain(Deposit, .empty, all[0..2])));
+    try testing.expect(deposits.hash.eql(t.chain(Deposit, .empty, all[0..2])));
     try testing.expectEqual(@as(u64, 1), first.summary.forced_withdrawals.count);
-    try testing.expect(first.summary.forced_withdrawals.hash.eql(chain(Forced, .empty, &forced)));
+    try testing.expect(first.summary.forced_withdrawals.hash.eql(t.chain(Forced, .empty, &forced)));
 
     // The close of epoch 2 processes the remaining deposit and no forced withdrawal.
-    var queued = queue(2, all[2..], &.{});
+    var queued = t.queue(2, all[2..], &.{});
     queued.required_deposits = 1;
-    checked = try check(try sign_close(&operator, 2, &.{}, &.{}, 1, 0), &first, &queued);
-    var second = post(&checked);
+    const next_close = try t.sign_close(&operator, 2, &.{}, &.{}, 1, 0);
+    var second = try store.post(&first, next_close, &queued);
     defer second.deinit();
     const next = second.summary.deposits;
     try testing.expectEqual(@as(u64, 1), next.count);
-    try testing.expect(next.hash.eql(chain(Deposit, deposits.hash, all[2..])));
-    try testing.expect(next.hash.eql(chain(Deposit, .empty, &all)));
+    try testing.expect(next.hash.eql(t.chain(Deposit, deposits.hash, all[2..])));
+    try testing.expect(next.hash.eql(t.chain(Deposit, .empty, &all)));
     try testing.expectEqual(@as(u64, 0), second.summary.forced_withdrawals.count);
     const carried = first.summary.forced_withdrawals.hash;
     try testing.expect(second.summary.forced_withdrawals.hash.eql(carried));
 }
 
-/// Returns `hash` extended by `H(hash || request)` for each of `requests`.
-fn chain(comptime R: type, hash: Digest, requests: []const R) Digest {
-    var result = hash;
-    for (requests) |request| {
-        const encoded = codec.encode_fixed(R, request);
-        result = Sha256.hash(&.{ &result.bytes, &encoded });
-    }
-    return result;
-}
-
-const runtime = @import("runtime");
-const storage = @import("storage");
-const metrics = runtime.telemetry.metrics;
 const Log = validator.Payouts(PublicKey, Sha256, u64);
 const Payout = validator.Payout(PublicKey, u64);
 const PayoutProof = validator.PayoutProof(PublicKey, Digest, u64);
-
-/// In-memory storage for a payout log (commonware's `open_log` on the deterministic runtime).
-const LogHarness = struct {
-    storage: runtime.buffer.mocks.Storage,
-    cache_ref: runtime.buffer.paged.CacheRef,
-    registry: metrics.Registry,
-
-    fn init() !LogHarness {
-        return .{
-            .storage = .init(gpa),
-            .cache_ref = try .init(gpa, 101, 11),
-            .registry = metrics.Registry.init(gpa),
-        };
-    }
-
-    fn deinit(self: *LogHarness) void {
-        self.registry.deinit();
-        self.cache_ref.deinit();
-        self.storage.deinit();
-    }
-
-    fn open(self: *LogHarness) !Log {
-        const cfg: Log.Cfg = .{
-            .merkle = .{
-                .journal_partition = "payouts-merkle",
-                .metadata_partition = "payouts-metadata",
-                .items_per_blob = 11,
-                .write_buffer = 1024,
-                .replay_buffer = 1024,
-                .cache_ref = &self.cache_ref,
-            },
-            .log = .{
-                .partition = "payouts-log",
-                .items_per_blob = 7,
-                .cache_ref = &self.cache_ref,
-                .write_buffer = 1024,
-                .replay_buffer = 1024,
-            },
-        };
-        const scope = metrics.Scope.init(&self.registry).child("log");
-        return Log.init(gpa, self.storage.interface(), scope, cfg, null);
-    }
-};
 
 /// Stages and applies the payouts `entries` of one posted close on `log`.
 fn pay(log: *Log, entries: []const [2]u64) !void {
@@ -443,9 +293,9 @@ fn prove(log: *Log, index: u64) !struct { PayoutProof.Proof, ?Payout } {
 }
 
 test "validator: stage keeps the floor at zero" {
-    var harness = try LogHarness.init();
+    var harness = try t.Harness.init();
     defer harness.deinit();
-    var log = try harness.open();
+    var log = try harness.open_log(null);
     defer log.deinit();
     try pay(&log, &.{ .{ 0, 4 }, .{ 2, 30 } });
     try testing.expectEqual(@as(u64, 0), log.inactivity_floor());
@@ -467,9 +317,9 @@ test "validator: stage keeps the floor at zero" {
 }
 
 test "validator: payout proof verifies only the logged payout" {
-    var harness = try LogHarness.init();
+    var harness = try t.Harness.init();
     defer harness.deinit();
-    var log = try harness.open();
+    var log = try harness.open_log(null);
     defer log.deinit();
     // The close of epoch 1 pays out 3 and 4 on the forced withdrawals of users 0 and 1.
     try pay(&log, &.{ .{ 0, 3 }, .{ 1, 4 } });
@@ -531,9 +381,9 @@ test "validator: payout proof verifies only the logged payout" {
 }
 
 test "validator: payout proof distinguishes payouts from commits" {
-    var harness = try LogHarness.init();
+    var harness = try t.Harness.init();
     defer harness.deinit();
-    var log = try harness.open();
+    var log = try harness.open_log(null);
     defer log.deinit();
     const payout: Payout = .{ .account = t.account(0), .amount = 7 };
     var batch = try log.new_batch();
