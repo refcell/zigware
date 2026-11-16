@@ -878,4 +878,5 @@ pub fn Fetcher(comptime P: type, comptime Key: type) type {
 
 test {
     _ = @import("fetcher_test.zig");
+    _ = @import("fetcher_fuzz_test.zig");
 }
