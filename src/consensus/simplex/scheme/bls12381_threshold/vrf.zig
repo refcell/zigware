@@ -788,4 +788,5 @@ pub fn fixture(
 
 test {
     _ = @import("vrf_test.zig");
+    _ = @import("vrf_malleability_test.zig");
 }
