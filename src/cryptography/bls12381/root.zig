@@ -16,4 +16,5 @@ test {
     std.testing.refAllDecls(@This());
     _ = @import("conformance_test.zig");
     _ = @import("scheme_tests.zig");
+    _ = @import("fuzz_tests.zig");
 }

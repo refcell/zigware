@@ -29,7 +29,9 @@ variants (MinPk, MinSig) must match exactly.
   the test plan and its tests, and the message and FeldmanTranscript conformance hashes.
 - [x] bls12381 scheme.rs (PrivateKey, PublicKey, Signature) with its conformance hashes.
 - [ ] bls12381 dkg golden (commonware `dkg::golden`) with its tests and conformance hashes.
-- [ ] Fuzz targets (commonware math/fuzz, simd/fuzz, bls parts of cryptography/fuzz).
+  Blocked: its eVRF needs crypto's zk bulletproofs and banderwagon (crypto lane backlog).
+- [ ] Fuzz targets (commonware math/fuzz, simd/fuzz, bls parts of cryptography/fuzz): done
+  for decode and dkg_feldman_desmedt; primitive, threshold, aggregate, batch, and tle remain.
 
 ## Decisions
 - Algebraic types are value types with `zero`/`one` decls and `add`/`sub`/`neg`/`mul`/`inv`/
@@ -77,6 +79,9 @@ variants (MinPk, MinSig) must match exactly.
   combination per 64 entries, drawing scalars in commonware's order); the
   `projected_batch_indexes_zero_sized_items` test runs on `parallel.sequential` only, not
   commonware's `mocks::explore` shapes.
+
+- Fuzz: `bls12381_decode` checks round-trips and agreement with the group decoders instead
+  of differential checks against blst, which zigware does not have.
 
 - simd: one `@Vector` implementation per profile (scalar 64-bit, x86_v3 256, x86_v4c 512,
   neon/arm_v9 128) stands in for both commonware's emulated and native tokens; `dispatch`

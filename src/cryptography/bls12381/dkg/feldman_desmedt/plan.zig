@@ -811,3 +811,125 @@ fn expect_roundtrip(gpa: Allocator, comptime T: type, value: T, cfg: anytype) !v
         value.eql(decoded);
     try testing.expect(equal);
 }
+
+/// Most participants and rounds in an arbitrary plan.
+pub const max_num_participants: u32 = 20;
+pub const max_rounds: u32 = 10;
+
+const Unstructured = @import("invariants").minifuzz.Unstructured;
+const UError = @import("invariants").minifuzz.Error;
+
+/// `Vec<u8>::arbitrary`: a continuation bit before each byte.
+fn arbitrary_bytes(arena: Allocator, u: *Unstructured) ![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    while (u.arbitrary(bool) catch false) try out.append(arena, try u.arbitrary(u8));
+    return out.items;
+}
+
+fn arbitrary_masks(arena: Allocator, u: *Unstructured) !Masks {
+    return .{
+        .info_summary = try arbitrary_bytes(arena, u),
+        .dealer = try arbitrary_bytes(arena, u),
+        .pub_msg = try arbitrary_bytes(arena, u),
+        .log = try arbitrary_bytes(arena, u),
+    };
+}
+
+/// At most `num` elements of `data` in random order (a partial Fisher-Yates shuffle).
+fn pick(comptime T: type, u: *Unstructured, num: usize, data: []T) []T {
+    const count = @min(num, data.len);
+    for (0..count) |start| {
+        std.mem.swap(T, &data[start], &data[u.int_in_range(usize, start, data.len - 1)]);
+    }
+    return data[0..count];
+}
+
+/// A random subset of `items`, as a sorted set (Rust's `BTreeSet`).
+fn pick_set(comptime T: type, arena: Allocator, u: *Unstructured, items: []const T) ![]T {
+    const num = u.int_in_range(usize, 0, items.len);
+    if (num == 0) return &.{};
+    const picked = pick(T, u, num, try arena.dupe(T, items));
+    std.mem.sort(T, picked, {}, struct {
+        fn less(_: void, a: T, b: T) bool {
+            if (T == u32) return a < b;
+            return a[0] < b[0] or (a[0] == b[0] and a[1] < b[1]);
+        }
+    }.less);
+    return picked;
+}
+
+fn range(arena: Allocator, n: u32) ![]u32 {
+    const out = try arena.alloc(u32, n);
+    for (out, 0..) |*value, i| value.* = @intCast(i);
+    return out;
+}
+
+/// commonware `arbitrary_round`: dealers (a quorum or more of the last successful players
+/// when there is one), players, then each perturbation set in field order.
+fn arbitrary_round(arena: Allocator, u: *Unstructured, n: u32, last: ?[]const u32) !Round {
+    const dealers = if (last) |players| pick(
+        u32,
+        u,
+        u.int_in_range(usize, N3f1.quorum(players.len), players.len),
+        try arena.dupe(u32, players),
+    ) else pick(u32, u, u.int_in_range(usize, 1, n), try range(arena, n));
+    const players = pick(u32, u, u.int_in_range(usize, 1, n), try range(arena, n));
+    const pairs = try arena.alloc([2]u32, dealers.len * players.len);
+    for (dealers, 0..) |d, i| for (players, 0..) |p, j| {
+        pairs[i * players.len + j] = .{ d, p };
+    };
+    const no_acks = try pick_set([2]u32, arena, u, pairs);
+    const bad_shares = try pick_set([2]u32, arena, u, pairs);
+    const sig_pairs = try pick_set([2]u32, arena, u, pairs);
+    const bad_player_sigs = try arena.alloc(PlayerMasks, sig_pairs.len);
+    for (bad_player_sigs, sig_pairs) |*entry, pair| {
+        entry.* = .{ .dealer = pair[0], .player = pair[1], .masks = try arbitrary_masks(arena, u) };
+    }
+    const bad_reveals = try pick_set([2]u32, arena, u, pairs);
+    const sig_dealers = try pick_set(u32, arena, u, dealers);
+    const bad_dealer_sigs = try arena.alloc(DealerMasks, sig_dealers.len);
+    for (bad_dealer_sigs, sig_dealers) |*entry, dealer| {
+        entry.* = .{ .dealer = dealer, .masks = try arbitrary_masks(arena, u) };
+    }
+    const replace_shares = try pick_set(u32, arena, u, dealers);
+    const shift_dealers = try pick_set(u32, arena, u, dealers);
+    const shift_degrees = try arena.alloc(Shift, shift_dealers.len);
+    const expected: i32 = @as(i32, @intCast(N3f1.quorum(players.len))) - 1;
+    for (shift_degrees, shift_dealers) |*entry, dealer| {
+        const magnitude = u.int_in_range(i32, 1, @max(expected, 1));
+        const negative = try u.arbitrary(bool);
+        entry.* = .{ .dealer = dealer, .shift = if (negative) -magnitude else magnitude };
+    }
+    return .{
+        .dealers = dealers,
+        .players = players,
+        .no_acks = no_acks,
+        .bad_shares = bad_shares,
+        .bad_player_sigs = bad_player_sigs,
+        .bad_reveals = bad_reveals,
+        .bad_dealer_sigs = bad_dealer_sigs,
+        .replace_shares = replace_shares,
+        .shift_degrees = shift_degrees,
+    };
+}
+
+/// commonware `Plan::arbitrary`, allocated in `arena`; `IncorrectFormat` when invalid.
+pub fn arbitrary_plan(arena: Allocator, u: *Unstructured) !Plan {
+    const n = u.int_in_range(u32, 1, max_num_participants);
+    var rounds: std.ArrayList(Round) = .empty;
+    var last: ?[]const u32 = null;
+    // `arbitrary_loop(None, Some(max_rounds))`: a continuation bit before each round.
+    while (rounds.items.len < max_rounds and (u.arbitrary(bool) catch false)) {
+        const r = try arbitrary_round(arena, u, n, last);
+        const previous: ?u32 = if (last) |p| @intCast(p.len) else null;
+        if (!r.expect_failure(previous)) {
+            const sorted = try arena.dupe(u32, r.players);
+            std.mem.sort(u32, sorted, {}, std.sort.asc(u32));
+            last = sorted;
+        }
+        try rounds.append(arena, r);
+    }
+    const plan: Plan = .{ .num_participants = n, .rounds = rounds.items };
+    if (!plan.validate()) return UError.IncorrectFormat;
+    return plan;
+}

@@ -47,6 +47,30 @@ fn run(num_participants: u32, rounds: []const plan_mod.Round) !void {
 
 const all4: []const u32 = &.{ 0, 1, 2, 3 };
 
+/// commonware's `bls12381_dkg_feldman_desmedt` fuzz target: an arbitrary plan, a seed,
+/// and a variant; every valid plan must run to completion.
+fn fuzz_plan_body(_: void, u: *minifuzz.Unstructured) !void {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const plan = try plan_mod.arbitrary_plan(arena.allocator(), u);
+    const seed = try u.arbitrary(u64);
+    const Variant = enum { min_pk, min_sig };
+    switch (try u.arbitrary(Variant)) {
+        .min_pk => try plan.run(MinPk, testing.allocator, seed),
+        .min_sig => try plan.run(primitives.variant.MinSig, testing.allocator, seed),
+    }
+}
+
+test "feldman-desmedt: fuzz plan" {
+    try shared.skip_slow();
+    try (minifuzz.Builder{}).with_search_limit(32 * build_options.fuzz_soak)
+        .run(testing.allocator, {}, fuzz_plan_body);
+}
+
+test "feldman-desmedt: fuzz plan (coverage-guided)" {
+    try testing.fuzz({}, math.testing.smith_body(void, fuzz_plan_body), .{});
+}
+
 test "feldman-desmedt: single round" {
     try run(4, &.{.{ .dealers = all4, .players = all4 }});
 }
