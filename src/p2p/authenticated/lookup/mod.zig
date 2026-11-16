@@ -11,6 +11,10 @@ pub const config = @import("config.zig");
 pub const Config = config.Config;
 pub const tracker = @import("tracker.zig");
 pub const Tracker = tracker.Tracker;
+pub const metrics = @import("metrics.zig");
+pub const peer = @import("peer.zig");
+pub const network = @import("network.zig");
+pub const Network = network.Network;
 
 test {
     @import("std").testing.refAllDecls(@This());

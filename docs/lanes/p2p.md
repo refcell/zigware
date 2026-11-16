@@ -86,6 +86,12 @@ handshake and the runtime's network, which the actor-stream and runtime lanes ar
   receivers report `NetworkClosed`), and `destroy()` after deinitializing senders. Shared
   pieces: `discovery.tracker.Tracker(P)`, `discovery.peer.Peer(P)`, `utils.IoRng`, and
   `utils.shuffle` (rand 0.10 `shuffle`/`partial_shuffle`).
+- `authenticated.lookup.Network(U, Transport)` (parallel lane): like discovery's, with
+  `Net.Config.local/recommended(.{ upgrader, namespace, listen, max_peers_per_set,
+  max_message_size, mailbox_size })`, `create(gpa, io, *transport, scope, config)`,
+  `register`, `run`, `destroy`. `oracle()` is an `AddressableManager`: `track(index,
+  AddressableTrackedPeers)`, `overwrite(PeerMap)`, `peer_set`, `subscribe`, `block`,
+  `blocked`. `lookup.Tracker(P)` is the locked tracker it uses.
 - `p2p.Message(P)` owns its payload when `gpa` is set; release it with `deinit`.
 - Senders take a message as parts (`[]const []const u8`, concatenated), like stream frames.
 
@@ -136,6 +142,10 @@ handshake and the runtime's network, which the actor-stream and runtime lanes ar
   Recording a per-peer series never fails an operation: when its label cannot be allocated,
   the sample is skipped. Simulated link success rates sample through `utils.Probability`
   and must be exactly representable (as `probability!` requires).
+- Lookup (parallel lane) mirrors discovery's task layout and keeps its own peer, dialer, and
+  listener. The listener's registered-IP set is tracker state refreshed exactly where
+  commonware's tracker sends `listener.set`, and read under the tracker's lock. Pings are
+  sent alone or ahead of a batch of queued frames.
 - p2p carries its own seeded fuzz driver (`p2p.fuzz.run`, same as codec's) until
   `invariants.minifuzz` lands.
 
@@ -163,14 +173,17 @@ handshake and the runtime's network, which the actor-stream and runtime lanes ar
 - [x] discovery: metrics (directory, listener, dialer, per-connection messages).
 - [ ] discovery: remaining mod.rs tests (rate limiting, message size, graceful shutdown,
   restarts, duplicate addresses, slow peers).
-- [ ] lookup (parallel lane): tracker (done), peer, dialer, listener, Network with Config and
-  Oracle, and commonware's lookup mod.rs tests.
+- [ ] lookup (parallel lane): tracker, peer, dialer, listener, Network with Config and Oracle
+  (done, with connectivity); the rest of commonware's lookup mod.rs tests and the directory's
+  metrics.
 - [ ] utils codec: `WrappedBackgroundReceiver` (decode on a parallel Strategy); then tell
   broadcast-collector so buffered's config can take the Strategy (low priority, after
   discovery).
 - [ ] Fuzz targets (commonware p2p/fuzz).
 
 ## Log
+- 2026-11-16: (parallel lane) lookup Network: peer connections (pings, data), dialer,
+  listener with registered-IP admission, and connectivity over the deterministic network.
 - 2026-11-16: (parallel lane) lookup Config and tracker (locked state: track with addresses,
   overwrite, registered IPs for the listener, blocks, subscriptions) with the tracker actor
   tests.
