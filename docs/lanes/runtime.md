@@ -95,6 +95,16 @@ time, files, and network: build on it rather than around it where it fits.
 - [x] Logical opens (memory backend): open.rs's `test_replace_retires_only_matching_
   registrations` ("memory removal retires only matching opens"). `test_open_racing_last_
   blob_drop` relies on Rust `Arc` drop racing an open on another thread: no counterpart.
+- [x] Storage test wrappers (`storage/mocks.zig`, commonware mocks.rs and
+  mocks/read_gate.rs): `Recording`, `WriteFault`, `SyncFault`, `MutationFault` (fail or park
+  after n mutations), and `ReadGated`, each a `Wrapper(Policy)` over `storage.Storage`, with
+  mocks.rs's wrapper tests. No counterpart: `DelayedSyncContext`/`PendingSyncs` (no
+  `start_sync`), `MigratingReadBlob` (moves a half-polled read), read batches (no
+  `read_many`).
+- [x] `conformance.StorageConformance(Workload)` (conformance.rs): runs a workload on a
+  runner seeded with the case seed and commits `storage_audit()`, in `conformance.verify`'s
+  `commit(gpa, seed)` shape; its three audit tests.
+- [x] memory/mod.rs: crash-write merging and subset writes keeping v0/v1 headers.
 - Moved to the runtime-telemetry lane: telemetry (`src/runtime/telemetry/`) and the
   production runtime (`src/runtime/production/`, io_uring/kqueue storage and network).
   `src/runtime/buffer/` belongs to storage-journal.
@@ -197,3 +207,4 @@ time, files, and network: build on it rather than around it where it fits.
   rand, storage, and network events; metered storage and network; iobuf.
 - 2026-11-16: `select`; `join` claims only ended tasks (an aborted joiner no longer
   blocks its child's abort); supervision.rs tests; utils triage.
+- 2026-11-16: storage test wrappers; remaining memory and iobuf tests.

@@ -13,6 +13,7 @@ pub const resolver = @import("resolver.zig");
 pub const signal = @import("signal.zig");
 pub const supervision = @import("supervision.zig");
 pub const context = @import("context.zig");
+pub const conformance = @import("conformance.zig");
 pub const buffer = @import("buffer/mod.zig");
 pub const telemetry = @import("telemetry/mod.zig");
 pub const production = @import("production/mod.zig");
