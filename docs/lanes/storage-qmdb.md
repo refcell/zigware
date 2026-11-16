@@ -28,7 +28,14 @@ that don't need them and keep a small interface where you must.
 - [x] bitmap (`fill_from` floor-walk candidates over the activity bitmap, oracle-checked) and
   metrics (the shared metric set over `runtime.telemetry.metrics`).
 - [ ] store (`store/db.rs`, the unauthenticated keyed store) and the `any` traits.
-- [ ] keyless (with its tests and conformance hashes).
+- [x] keyless: `Db` and its batches over the interim authenticated journal, with mod.rs's
+  core scenarios under MMR and MMB (fixed values).
+- [ ] keyless: the remaining mod.rs/fixed.rs scenarios, variable values over the contiguous
+  variable journal, and the `Keyless*Conf` storage conformance hashes.
+- [ ] Switch `qmdb.authenticated` to storage-journal's `journal.authenticated.Journal` when it
+  lands (same method names).
+- [ ] any, unordered fixed over MMB first (storage-qmdb-sync needs it for current), ahead of
+  immutable.
 - [ ] immutable.
 - [ ] any (ordered and unordered, fixed and variable).
 - [ ] Fuzz targets under storage/fuzz for these databases; benches under `benches.zig`.
@@ -40,6 +47,22 @@ that don't need them and keep a small interface where you must.
   variable commit codecs, `write_location`/`read_location(F)`/`location_size`,
   `arbitrary_location(F)`, `format_commit`, `format_encoded`.
 - `storage.qmdb.keyless.Operation(F, E)`: `append: V`, `commit: Commit`.
+- `storage.qmdb.keyless.Db(F, E, C, H)` (`C` the backing contiguous journal, `H` the hash):
+  `init(gpa, storage, scope, Config, ?max_size)`, `deinit`, `get`, `get_many`,
+  `get_metadata`, `root`, `bounds`, `inactivity_floor`, `proof`/`historical_proof` (a
+  `ProofOps` of proof and operations), `pinned_nodes_at`, `prune`, `commit`, `sync`,
+  `start_sync`, `destroy`, `new_batch`, `to_batch`, `validate_batch`, `apply_batch`.
+  `UnmerkleizedBatch`: `append`, `with_metadata`, `with_inactivity_floor`, `size`, `get`,
+  `get_many`, `merkleize(&db)`, `deinit`. `MerkleizedBatch` (refcounted `retain`/`release`):
+  `root`, `bounds`, `operations`, `proof`, `pinned_nodes`, `get`, `get_many`, `new_batch`.
+  `keyless.initial_root(F, E, H)`.
+- `storage.qmdb.authenticated.Journal(F, C, Hash)`: the interim authenticated journal
+  (storage-journal's planned API): `prepare`/`Recovery.finish`, `init`, `size`, `get_bounds`,
+  `read`, `read_many`, `root`, `append`, `commit`, `sync`, `start_sync`, `prune`, `destroy`,
+  `new_batch` → `Batch.add`/`add_many`/`merkleize` → `MerkleizedBatch` (refcounted, keeps
+  live ancestors' items), `apply_batch`, `historical_proof`/`proof`, `speculative_proof`,
+  `speculative_pinned_nodes`.
+- `storage.qmdb.init_journal(J, gpa, storage, merkle_cfg, journal_cfg, InitOptions)`.
 - `storage.qmdb.immutable.Operation(F, K, E)`: `set: {key, value}`, `commit: Commit`.
 - `storage.qmdb.any.Operation(F, S)`, `any.Ordered(F, K, E)`, `any.Unordered(F, K, E)`:
   `delete: K`, `update: S`, `commit: Commit`; `any.operation.update.{Ordered,Unordered}(K, E)`
@@ -98,6 +121,14 @@ that don't need them and keep a small interface where you must.
 - Display formats an encoding of up to 4096 bytes as hex and prints `<N bytes>` beyond that
   (formatting does not allocate).
 
+- keyless: until storage-journal's authenticated `Journal` lands, `qmdb.authenticated` pairs
+  `merkle.full` with the contiguous journal under the same API. Values put in a batch are
+  shallow copies (kept alive by the caller until the batch is applied or released); every
+  read returns owned values. A merkleized batch holds a weak link to its parent and the item
+  chunks of its live ancestors, so reads and applies stay exact after ancestors are released.
+  Mutators take `*Self` (commonware threads the database by value); `start_sync` returns no
+  handle; there is no `strategy`.
+
 ## Log
 - 2026-11-13: shared codecs (value, operation, floor, chain, Error, initialization checks),
   keyless/immutable/any operations with all 21 codec conformance hashes, decoder fuzz.
@@ -105,3 +136,4 @@ that don't need them and keep a small interface where you must.
 - 2026-11-13: snapshot-rebuild key cache.
 - 2026-11-16: snapshot rebuild (serial) with model-checked tests.
 - 2026-11-16: floor-walk candidates (`bitmap.fill_from`) and the shared metric set.
+- 2026-11-16: keyless `Db` and batches over the interim authenticated journal.

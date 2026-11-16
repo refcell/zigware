@@ -23,6 +23,7 @@ pub const cache = @import("cache.zig");
 pub const snapshot = @import("snapshot.zig");
 pub const bitmap = @import("bitmap.zig");
 pub const metrics = @import("metrics.zig");
+pub const authenticated = @import("authenticated.zig");
 pub const keyless = @import("keyless/mod.zig");
 pub const immutable = @import("immutable/mod.zig");
 pub const any = @import("any/mod.zig");
@@ -103,6 +104,62 @@ pub fn validate_initialization_commit(
     if (replay_from_floor and inactivity_floor < start) return error.HistoricalFloorPruned;
     assert(inactivity_floor < size);
     return inactivity_floor;
+}
+
+/// Options of `init_journal`.
+pub const InitOptions = struct {
+    /// Retain at most this many operations (the last commit within them).
+    max_size: ?u64 = null,
+    /// Whether the variant rebuilds a snapshot from the floor, which must then be retained.
+    replay_from_floor: bool = false,
+};
+
+/// Opens the authenticated journal `J` of a QMDB variant, selecting the last commit (within
+/// `options.max_size`) and validating it before any history is discarded (commonware's
+/// `init_journal`).
+pub fn init_journal(
+    comptime J: type,
+    gpa: std.mem.Allocator,
+    storage: runtime_storage.Storage,
+    merkle_cfg: merkle.full.Config,
+    journal_cfg: anytype,
+    options: InitOptions,
+) !J {
+    try validate_initialization_bound(options.max_size);
+    const Floored = struct {
+        fn floored(op: J.Item) bool {
+            return op.inactivity_floor() != null;
+        }
+    };
+    var pending = try J.prepare(
+        gpa,
+        storage,
+        merkle_cfg,
+        journal_cfg,
+        options.max_size,
+        Floored.floored,
+        root_bagging,
+    );
+    validate_pending(J, gpa, &pending, options.replay_from_floor) catch |err| {
+        pending.deinit();
+        return err;
+    };
+    return pending.finish(); // Consumes `pending`, also on error.
+}
+
+fn validate_pending(
+    comptime J: type,
+    gpa: std.mem.Allocator,
+    pending: anytype,
+    replay: bool,
+) !void {
+    const bounds = pending.bounds();
+    assert(bounds.start <= bounds.end);
+    var commit: ?J.Item = if (bounds.end == 0) null else try pending.read(bounds.end - 1);
+    defer if (commit) |*op| op.deinit(gpa);
+    const commit_floor: ??u64 = if (commit) |op| op.inactivity_floor() else null;
+    const fresh = pending.is_fresh();
+    _ = try validate_initialization_commit(bounds.start, bounds.end, fresh, commit_floor, replay);
 }
 
 /// The inactivity floor declared at the commit immediately preceding `op_count`
