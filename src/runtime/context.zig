@@ -32,6 +32,9 @@ const Auditor = @import("deterministic.zig").Auditor;
 
 const Scope = telemetry.metrics.Scope;
 const NodeRef = supervision.NodeRef;
+const raw = telemetry.metrics.raw;
+const TaskLabel = telemetry.metrics.task.Label;
+const Registered = telemetry.metrics.Registered;
 
 /// Default capacity of the supervision tree: live contexts at once.
 pub const default_max_contexts = 16 * 1024;
@@ -47,20 +50,65 @@ pub const Runtime = struct {
     stopper: signal.Stopper,
     /// The deterministic runtime's auditor, if any.
     auditor: ?*Auditor,
+    /// `runtime_tasks_spawned` and `runtime_tasks_running` (commonware's executor metrics),
+    /// keyed by the spawning context's label. Attributes never reach the key, so spawning
+    /// with a varying attribute does not grow them.
+    tasks_spawned: Registered(raw.Family(TaskLabel, raw.Counter)),
+    tasks_running: Registered(raw.Family(TaskLabel, raw.Gauge)),
 
-    pub fn init(gpa: Allocator, io: Io, max_contexts: u32, auditor: ?*Auditor) !Runtime {
+    /// `scope` is the runner's root scope; the task metrics register below `runtime`.
+    pub fn init(
+        gpa: Allocator,
+        io: Io,
+        max_contexts: u32,
+        auditor: ?*Auditor,
+        scope: Scope,
+    ) !Runtime {
+        assert(scope.prefix().len == 0);
+        var tree: supervision.Tree = try .init(gpa, io, max_contexts);
+        errdefer tree.deinit(gpa);
+        const runtime_scope = scope.sub_registry("runtime");
+        var spawned = try runtime_scope.family(
+            TaskLabel,
+            raw.Counter,
+            "tasks_spawned",
+            "Total number of tasks spawned",
+        );
+        errdefer spawned.deinit();
+        const running = try runtime_scope.family(
+            TaskLabel,
+            raw.Gauge,
+            "tasks_running",
+            "Number of tasks currently running",
+        );
         return .{
             .gpa = gpa,
             .io = io,
-            .tree = try .init(gpa, io, max_contexts),
+            .tree = tree,
             .stopper = .init(io),
             .auditor = auditor,
+            .tasks_spawned = spawned,
+            .tasks_running = running,
         };
     }
 
     pub fn deinit(runtime: *Runtime) void {
+        runtime.tasks_running.deinit();
+        runtime.tasks_spawned.deinit();
         runtime.tree.deinit(runtime.gpa);
         runtime.* = undefined;
+    }
+
+    /// Counts a task spawned under `name` and returns its running gauge, which the task
+    /// decrements when it ends.
+    fn task_started(runtime: *Runtime, name: []const u8) Allocator.Error!*raw.Gauge {
+        const label: TaskLabel = .task(name, .shared);
+        const spawned = try runtime.tasks_spawned.metric().get_or_create(label);
+        const running = try runtime.tasks_running.metric().get_or_create(label);
+        spawned.inc();
+        running.inc();
+        assert(running.get() > 0);
+        return running;
     }
 
     fn audit(runtime: *Runtime, label: []const u8, fields: []const []const u8) void {
@@ -199,10 +247,16 @@ pub fn Context(comptime Network: type) type {
                 tree.abort(task_node, null);
                 return err;
             };
-            state.* = .{ .context = ctx, .args = args };
+            const running = ctx.runtime.task_started(ctx.scope.prefix()) catch |err| {
+                tree.abort(task_node, null);
+                ctx.gpa().destroy(state);
+                return err;
+            };
+            state.* = .{ .context = ctx, .args = args, .running = running };
             state.context.node = task_node;
             state.header.node = ctx.node;
             state.future = ctx.io().concurrent(State.run, .{state}) catch |err| {
+                running.dec();
                 tree.abort(task_node, null);
                 ctx.gpa().destroy(state);
                 return err;
@@ -336,12 +390,16 @@ fn TaskState(comptime Ctx: type, comptime function: anytype, comptime Args: type
         result: T = undefined,
         context: Ctx,
         args: Args,
+        /// This task's `runtime_tasks_running` entry, decremented when it ends.
+        running: *raw.Gauge,
 
         const vtable: supervision.Header.VTable = .{ .finish = finish, .destroy = destroy };
 
         fn run(state: *State) T {
             const tree = &state.context.runtime.tree;
             const result = @call(.auto, function, .{state.context} ++ state.args);
+            assert(state.running.get() > 0);
+            state.running.dec();
             // Abort everything spawned below this task's context, then report it ended.
             tree.abort(state.header.node, &state.header);
             tree.ended(&state.header);

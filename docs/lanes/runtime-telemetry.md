@@ -131,7 +131,7 @@ the registry API first and report it.
   since `std.Io.Uring` does not compile, passing `run_storage_tests` and `run_network_tests`.
 - [x] io_uring throughput: one issuing ring thread with batched submission (about 3× faster).
 - [ ] io_uring: one ring per worker thread, or an executor on the ring (commonware's design).
-- [ ] Executor-side `runtime_tasks_*` metrics, if the runtime lane hands them over.
+- [x] Executor-side `runtime_tasks_*` metrics (handed over by the runtime lane).
 - [x] metrics registry: counters, gauges, histograms (bucket layout as commonware), label
   sets, families, registration/scoping by component label, and Prometheus text exposition
   byte-identical to commonware's output for the same metrics. No allocation on the record
@@ -140,12 +140,14 @@ the registry API first and report it.
 - [x] traces: span collector and status for tests (what commonware's tests assert on).
 - [x] Hook into `runtime.deterministic.Runner`: the runner owns a registry and `metrics()`
   returns the root scope (a small additive edit to `deterministic.zig`).
-- [ ] With the runtime lane, once `Context` lands (runtime lane, thread
-  T-01a1d57b-1bfd-71b8-940f-5663d558c803): the context carries a `Scope` (`child`,
-  `with_attribute`, `register`, `encode`), audits `register`/`encode` like commonware, and the
-  executor records `runtime_iterations`, `runtime_tasks_spawned`, `runtime_tasks_running`, and
-  `runtime_task_polls` keyed by `task.Label`; then port `test_count_running_tasks` and
-  `test_metrics_spawn_attribute_cardinality`.
+- [x] With the runtime lane's `Context`: the context carries a `Scope` (runtime lane), the
+  deterministic runner records `runtime_iterations`, and `Context.spawn` records
+  `runtime_tasks_spawned` and `runtime_tasks_running` keyed by `task.Label` (the spawning
+  context's label, never its attributes). Ported `test_count_running_tasks`,
+  `test_metrics_spawn_attribute_cardinality`, and handle.rs's `tasks_running_*` tests; they
+  run on both runners.
+- [ ] `runtime_task_polls` (deterministic: one per fiber resume) and the root task's
+  `kind="Root"` series.
 
 ## Log
 - 2026-11-13: metrics registry, scopes, raw metrics, dtoa, byte-identical exposition.
@@ -159,3 +161,6 @@ the registry API first and report it.
 - 2026-11-13: `production.telemetry`: the `/metrics` HTTP endpoint.
 - 2026-11-13: io_uring: one ring thread issues every entry (`SINGLE_ISSUER | DEFER_TASKRUN`).
 - 2026-11-16: `production.Runner.start_context`; stress-test diagnostics and `macos-slow.yml`.
+- 2026-11-16: `runtime_iterations`, `runtime_tasks_spawned`, `runtime_tasks_running`. The
+  manual macOS slow run (Debug) passed the TCP stress test in 57 s; the ReleaseSafe failure
+  has not recurred.

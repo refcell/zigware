@@ -6,7 +6,8 @@ const Io = std.Io;
 const testing = std.testing;
 const deterministic = @import("deterministic.zig");
 const context = @import("context.zig");
-const Counter = @import("telemetry/mod.zig").metrics.raw.Counter;
+const telemetry = @import("telemetry/mod.zig");
+const Counter = telemetry.metrics.raw.Counter;
 
 const production = @import("production/runner.zig");
 
@@ -117,6 +118,26 @@ test "metrics" {
 
 test "register and encode" {
     try run("register and encode");
+}
+
+test "count running tasks (test_count_running_tasks)" {
+    try run("count running tasks");
+}
+
+test "task metrics ignore attributes (test_metrics_spawn_attribute_cardinality)" {
+    try run("task metrics ignore attributes");
+}
+
+test "tasks_running drops after completion (tasks_running_decreased_after_completion)" {
+    try run("tasks_running drops after completion");
+}
+
+test "tasks_running holds after detach (tasks_running_unchanged_when_handle_dropped)" {
+    try run("tasks_running holds after detach");
+}
+
+test "tasks_running drops on abort (tasks_running_decreased_immediately_on_abort_via_handle)" {
+    try run("tasks_running drops on abort");
 }
 
 fn Suite(comptime Context: type) type {
@@ -548,6 +569,104 @@ fn Suite(comptime Context: type) type {
                 defer testing.allocator.free(nested_text);
                 try expect_contains(nested_text, "nested_test_total 1");
                 try expect_contains(nested_text, "test_total 1");
+            }
+        }.body;
+
+        /// commonware `count_running_tasks`: running tasks whose label starts with `prefix`.
+        fn running(ctx: Context, prefix: []const u8) !u64 {
+            const text = try ctx.encode(testing.allocator);
+            defer testing.allocator.free(text);
+            return telemetry.metrics.task.count_running_tasks(text, prefix);
+        }
+
+        pub const @"count running tasks" = struct {
+            fn body(ctx: Context) !void {
+                try testing.expectEqual(@as(u64, 0), try running(ctx, "worker"));
+                const first = try ctx.child("worker").spawn(pending, .{});
+                try testing.expectEqual(@as(u64, 1), try running(ctx, "worker"));
+                try testing.expectEqual(@as(u64, 0), try running(ctx, "other"));
+                // A nested label shares the prefix.
+                const nested = try ctx.child("worker").child("child").spawn(pending, .{});
+                try testing.expectEqual(@as(u64, 2), try running(ctx, "worker"));
+                try testing.expectError(error.Closed, first.abort());
+                try testing.expectEqual(@as(u64, 1), try running(ctx, "worker"));
+                try testing.expectError(error.Closed, nested.abort());
+                try testing.expectEqual(@as(u64, 0), try running(ctx, "worker"));
+            }
+        }.body;
+
+        fn round_value(ctx: Context, round: u64) anyerror!u64 {
+            _ = ctx;
+            return round;
+        }
+
+        pub const @"task metrics ignore attributes" = struct {
+            const rounds = 128;
+
+            fn body(ctx: Context) !void {
+                var handles: [rounds]context.Handle(anyerror!u64) = undefined;
+                for (&handles, 0..) |*handle, round| {
+                    const scoped = ctx.child("deferred_verify").with_attribute("round", round);
+                    handle.* = try scoped.spawn(round_value, .{@as(u64, round)});
+                }
+                for (handles, 0..) |handle, round| {
+                    try testing.expectEqual(@as(u64, round), try (try handle.join()));
+                }
+                try testing.expectEqual(@as(u64, 0), try running(ctx, "deferred_verify"));
+                const text = try ctx.encode(testing.allocator);
+                defer testing.allocator.free(text);
+                // One series each (spawned and running), however many attribute values the
+                // tasks were spawned with.
+                const label = "{name=\"deferred_verify\",kind=\"Task\",execution=\"Shared\"}";
+                const named = std.mem.count(u8, text, "name=\"deferred_verify\"");
+                try testing.expectEqual(@as(usize, 2), named);
+                try expect_contains(text, "runtime_tasks_spawned_total" ++ label ++ " 128\n");
+                try expect_contains(text, "runtime_tasks_running" ++ label ++ " 0\n");
+            }
+        }.body;
+
+        fn finished(ctx: Context) anyerror![]const u8 {
+            _ = ctx;
+            return "done";
+        }
+
+        /// `runtime_tasks_running` for exactly `name`.
+        fn running_exactly(ctx: Context, comptime name: []const u8) !?i64 {
+            const text = try ctx.encode(testing.allocator);
+            defer testing.allocator.free(text);
+            const prefix = "runtime_tasks_running{name=\"" ++ name ++ "\",";
+            const at = std.mem.indexOf(u8, text, prefix) orelse return null;
+            const line_end = std.mem.indexOfScalarPos(u8, text, at, '\n').?;
+            const space = std.mem.lastIndexOfScalar(u8, text[at..line_end], ' ').?;
+            return try std.fmt.parseInt(i64, text[at + space + 1 .. line_end], 10);
+        }
+
+        pub const @"tasks_running drops after completion" = struct {
+            fn body(ctx: Context) !void {
+                const label = "tasks_running_after_completion";
+                const handle = try ctx.child(label).spawn(finished, .{});
+                try testing.expectEqualStrings("done", try (try handle.join()));
+                try testing.expectEqual(@as(?i64, 0), try running_exactly(ctx, label));
+            }
+        }.body;
+
+        pub const @"tasks_running holds after detach" = struct {
+            fn body(ctx: Context) !void {
+                const label = "tasks_running_unchanged";
+                const handle = try ctx.child(label).spawn(pending, .{});
+                try testing.expectEqual(@as(?i64, 1), try running_exactly(ctx, label));
+                handle.detach();
+                try testing.expectEqual(@as(?i64, 1), try running_exactly(ctx, label));
+            }
+        }.body;
+
+        pub const @"tasks_running drops on abort" = struct {
+            fn body(ctx: Context) !void {
+                const label = "tasks_running_abort_via_handle";
+                const handle = try ctx.child(label).spawn(pending, .{});
+                try testing.expectEqual(@as(?i64, 1), try running_exactly(ctx, label));
+                try testing.expectError(error.Closed, handle.abort());
+                try testing.expectEqual(@as(?i64, 0), try running_exactly(ctx, label));
             }
         }.body;
 

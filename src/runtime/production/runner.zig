@@ -145,7 +145,8 @@ pub const Runner = struct {
         assert(runner.tcp.io.userdata == @as(?*anyopaque, &runner.threaded));
         if (runner.context_runtime == null) {
             const io_ = runner.io();
-            runner.context_runtime = try .init(runner.gpa, io_, runner.max_contexts, null);
+            const max = runner.max_contexts;
+            runner.context_runtime = try .init(runner.gpa, io_, max, null, runner.metrics());
         }
         const runtime = &runner.context_runtime.?;
         const ctx: Context = .root(runtime, runner.storage(), runner.network(), runner.metrics());

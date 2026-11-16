@@ -340,7 +340,8 @@ pub const Runner = struct {
         if (runner.context_runtime == null) {
             const auditor = &runner.auditor;
             const max = runner.config.max_contexts;
-            runner.context_runtime = try .init(runner.allocator, runner.io(), max, auditor);
+            const scope = runner.metrics();
+            runner.context_runtime = try .init(runner.allocator, runner.io(), max, auditor, scope);
         }
         const runtime = &runner.context_runtime.?;
         const ctx: Context = .root(runtime, runner.storage(), runner.network(), runner.metrics());
