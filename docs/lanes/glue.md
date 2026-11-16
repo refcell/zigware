@@ -112,6 +112,10 @@ marshal's actors (consensus-marshal) for the actor; until then it ports what is 
   `record_tip_update`, `next_action`, `should_dispatch`, `mark_reached_same_target`).
 - `glue.stateful.db.p2p.max_payload_size(F, D, max_serve_ops, op_size)`: the bound on every
   state sync request and response framed by the resolver.
+- `glue.stateful.db.p2p.Handler(F, S)`: the resolver engine's consumer (`deliver(delivery,
+  value)` → `oneshot.Receiver(bool)`) and producer (`produce(key)` →
+  `oneshot.Receiver(Produced)`), forwarding `EngineMessage(F, S)` (`deliver`, `produce`) to the
+  actor's `actor.mailbox`; `Subscriber(Reply)` compares by `id`.
 - `glue.stateful.probe`: `Sample(S, D)` (`init(gpa, minimum_epoch)`, `awaits(peer)`,
   `record(peer, finalization)` taking ownership, `select(committee_size, judge)` with
   `judge.judgeable(*const Finalization)`, `get_floor`, `reset`, `deinit`), `Message(S, V)`
@@ -151,6 +155,8 @@ marshal's actors (consensus-marshal) for the actor; until then it ports what is 
 - `CoordinatorState` holds at most `max_databases` (8) databases and their assigned
   generations in fixed arrays (commonware: a `Vec` and a `BTreeMap`); generations are `u64`.
   `max_payload_size` returns `error.TooManyOperations` above `u32` where commonware panics.
+- `EngineMessage.deliver` owns copies of the delivery's subscribers and value (the engine
+  lends them); the overflow policy drops peer requests and deliveries whose requester left.
 - `Pruning` keeps its retention window in a ring allocated at init (commonware grows a
   `VecDeque`); an invalid config or phase returns `error.InvalidPruneConfig` where commonware
   panics.
@@ -168,8 +174,10 @@ marshal's actors (consensus-marshal) for the actor; until then it ports what is 
 - [x] db: `Anchor`, `TipUpdate`, `dispatch_queued_tips`, and the generation coordinator with
   mod.rs's tests of them, a regroup test, and the channel edge cases.
 - [x] db/p2p: `max_payload_size` with limits.rs's widest-encodings test.
+- [x] db/p2p: `Handler` and `EngineMessage` with handler.rs's overflow test.
 - [ ] db: state sync engines (`StateSyncDb`, `StateSyncSet`, `drain_generation_updates`, the
-  single and tuple sync loops) and their tests; db/p2p (handler, actor, mailbox).
+  single and tuple sync loops) and their tests; db/p2p (actor, mailbox; waits on qmdb's sync
+  `Source` and engine).
 - [x] probe: `Sample`, wire `Message`, `max_payload_size` with limits.rs's widest-encodings
   test and sample selection tests.
 - [ ] probe: the actor (solicit, collect, retry, serve), after marshal's mailbox.
@@ -194,6 +202,7 @@ marshal's actors (consensus-marshal) for the actor; until then it ports what is 
 - 2026-11-16 (stateful): the `current` ManagedDb adapter with staging.
 - 2026-11-16 (stateful): state sync anchors, tip updates, the generation coordinator, and the
   p2p payload bound.
+- 2026-11-16 (stateful): the db/p2p resolver handler.
 
 ## dkg (owner: coding lane, thread T-01a1d58d-bff1-75a1-8ccb-4b8dd7bc9755)
 
