@@ -14,6 +14,7 @@ pub const max_payload_size = limits.max_payload_size;
 pub const mocks = @import("mocks/root.zig");
 pub const resolver = @import("resolver/root.zig");
 pub const standard = @import("standard/root.zig");
+pub const store = @import("store.zig");
 
 test {
     std.testing.refAllDecls(@This());
