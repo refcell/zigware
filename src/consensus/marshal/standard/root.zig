@@ -5,6 +5,7 @@ const std = @import("std");
 
 pub const variant = @import("variant.zig");
 pub const Standard = variant.Standard;
+pub const validation = @import("validation.zig");
 
 test {
     std.testing.refAllDecls(@This());

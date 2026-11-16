@@ -385,7 +385,7 @@ pub fn resolve(verdict: ?bool, durable: bool) ?bool {
 }
 
 /// The result of `input` unless `output`'s receiver closes first (null).
-fn recv_unless_closed(
+pub fn recv_unless_closed(
     comptime T: type,
     comptime U: type,
     io: Io,
