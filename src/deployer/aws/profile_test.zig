@@ -201,7 +201,8 @@ test "download: retries failed attempts, then fails the command" {
     try harness.init(&outcomes);
     defer harness.deinit();
     const url = "https://example.com/file";
-    try testing.expectError(error.Failed, harness.session.download(url));
+    const arena = harness.arena_state.allocator();
+    try testing.expectError(error.Failed, harness.session.download(arena, url));
     try harness.expect_failure("download failed: " ++ url);
     try testing.expectEqual(outcomes.len, harness.sent().len);
 }
@@ -216,7 +217,9 @@ test "download: a relative redirect stays on the host; a body arrives after a fa
     } } };
     try harness.init(&.{ .io_failure, redirect, respond(200, "data") });
     defer harness.deinit();
-    try testing.expectEqualStrings("data", try harness.session.download("https://h.example"));
+    const arena = harness.arena_state.allocator();
+    const body = try harness.session.download(arena, "https://h.example");
+    try testing.expectEqualStrings("data", body);
     const sent = harness.sent();
     try testing.expectEqualStrings("/", sent[0].path);
     try testing.expectEqualStrings("h.example", sent[2].host);

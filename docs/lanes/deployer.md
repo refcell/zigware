@@ -97,6 +97,10 @@ test vectors. Tests never call AWS and never hold credentials.
 - `profile` holds samply's release archive in memory before caching it in S3 instead of
   staging it in the deployment directory, and writes its scratch files under `Session.temp`
   (`/tmp`, as commonware). `list` prints creation times in UTC (no time zone database).
+- `create` uploads to S3 and waits for instances one at a time (commonware overlaps them), and
+  caches container images one at a time; the resulting objects and URLs are the same. Binary
+  instances are listed in configuration order in `hosts.yaml` and `prometheus.yml` (commonware's
+  order comes from a `HashMap`). Downloaded tools are held in scratch memory, not staged on disk.
 
 ## Backlog
 - [x] Config types and YAML: `Config`, `InstanceConfig`, `MonitoringConfig`, `PortConfig`,
@@ -141,7 +145,15 @@ test vectors. Tests never call AWS and never hold credentials.
   in S3 (downloaded from GitHub through redirects with commonware's 10 attempts via
   `Session.download`), the remote script byte for byte, scp of the profile, and the symbol
   directory. `capture` is tested over scripted responses; `profile` adds `samply load`.
-- [ ] The create flow and the `deployer` binary.
+- [x] `create` (`deployer.aws.create_flow.create_deployment`) and `images.rs`
+  (`deployer.aws.images.cache_image`): region checks, `ssh-keygen`, metadata, architecture and
+  NVMe detection, tools and images cached in S3, per-region networks built concurrently, AZ
+  groups, peering, launches through `run_launches`, instance waits, monitoring ingress, every
+  config uploaded once per digest, instance setup over `Remote` (`concurrency` at a time,
+  alongside monitoring), and monitoring's log/profile/trace ports. Local commands go through
+  `session.Local` (`Processes` in production). Tested end to end over scripted responses, plus
+  refusals and a cold image cache.
+- [ ] The `deployer` binary.
 - [ ] Fuzz: YAML parse/write round trips, config validation, SigV4 canonicalization.
 
 ## Log

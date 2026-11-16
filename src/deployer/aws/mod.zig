@@ -32,6 +32,8 @@ pub const commands = @import("commands.zig");
 pub const destroy = @import("destroy.zig");
 pub const update = @import("update.zig");
 pub const profile = @import("profile.zig");
+pub const create_flow = @import("create_flow.zig");
+pub const images = @import("images.zig");
 pub const Failure = @import("failure.zig").Failure;
 
 pub const Error = yaml.Error;

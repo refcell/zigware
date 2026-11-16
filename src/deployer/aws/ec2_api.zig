@@ -427,6 +427,35 @@ pub fn add_monitoring_ingress(ec2: *Ec2, sg_id: []const u8, monitoring_ip: []con
     _ = try ec2.run("AuthorizeSecurityGroupIngress", params.list.items);
 }
 
+/// Where the monitoring instance accepts logs, profiles, and traces from: the binary security
+/// group in its own region, or a binary VPC's CIDR in another region.
+pub const MonitoringSource = union(enum) { group: []const u8, cidr: []const u8 };
+
+/// Opens the logs, profiles, and traces ports of the monitoring security group to `source`
+/// (commonware `create`'s final ingress rules).
+pub fn authorize_monitoring_ports(
+    ec2: *Ec2,
+    monitoring_sg_id: []const u8,
+    source: MonitoringSource,
+) Error!void {
+    assert(monitoring_sg_id.len > 0);
+    var params = params_of(ec2);
+    try params.add("GroupId", monitoring_sg_id);
+    const ports = [_]u16{ aws.logs_port, aws.profiles_port, aws.traces_port };
+    for (ports, 1..) |port, index| {
+        try params.addf("IpPermissions.{d}.IpProtocol", .{index}, "tcp");
+        const text = try std.fmt.allocPrint(ec2.arena, "{d}", .{port});
+        try params.addf("IpPermissions.{d}.FromPort", .{index}, text);
+        try params.addf("IpPermissions.{d}.ToPort", .{index}, text);
+        switch (source) {
+            .group => |id| try params.addf("IpPermissions.{d}.Groups.1.GroupId", .{index}, id),
+            .cidr => |cidr| try params.addf("IpPermissions.{d}.IpRanges.1.CidrIp", .{index}, cidr),
+        }
+    }
+    assert(params.list.items.len == 1 + ports.len * 4);
+    _ = try ec2.run("AuthorizeSecurityGroupIngress", params.list.items);
+}
+
 // --- Instances ---------------------------------------------------------------------------------
 
 fn instance_items(ec2: *Ec2, xml: []const u8) Error![]const []const u8 {

@@ -184,6 +184,52 @@ pub const Ssh = struct {
     }
 };
 
+/// Commands on the deployer's own machine (`ssh-keygen`, `docker`, `gzip`): processes in
+/// production (`Processes`), recorded in tests.
+pub const Local = struct {
+    context: *anyopaque,
+    run_fn: *const fn (*anyopaque, Allocator, []const []const u8) anyerror!?[]const u8,
+
+    /// For commands that run nothing locally: every command fails to start.
+    pub const none: Local = .{ .context = undefined, .run_fn = struct {
+        fn f(_: *anyopaque, _: Allocator, _: []const []const u8) anyerror!?[]const u8 {
+            return error.FileNotFound;
+        }
+    }.f };
+
+    /// Runs `argv` to completion: null when it exits with status 0, else its output as
+    /// commonware reports it (stderr, then stdout, each trimmed), allocated from `arena`.
+    pub fn run(local: Local, arena: Allocator, argv: []const []const u8) !?[]const u8 {
+        assert(argv.len > 0);
+        assert(argv[0].len > 0);
+        return local.run_fn(local.context, arena, argv);
+    }
+};
+
+/// The production `Local`: child processes.
+pub const Processes = struct {
+    io: Io,
+
+    pub fn local(processes: *Processes) Local {
+        return .{ .context = processes, .run_fn = run };
+    }
+
+    fn run(context: *anyopaque, arena: Allocator, argv: []const []const u8) anyerror!?[]const u8 {
+        const processes: *Processes = @ptrCast(@alignCast(context));
+        const result = try std.process.run(arena, processes.io, .{
+            .argv = argv,
+            .stdout_limit = .limited(1 << 20),
+            .stderr_limit = .limited(1 << 20),
+        });
+        if (result.term == .exited and result.term.exited == 0) return null;
+        const stderr = std.mem.trim(u8, result.stderr, &std.ascii.whitespace);
+        const stdout = std.mem.trim(u8, result.stdout, &std.ascii.whitespace);
+        if (stdout.len == 0) return stderr;
+        if (stderr.len == 0) return stdout;
+        return try std.fmt.allocPrint(arena, "{s}\n{s}", .{ stderr, stdout });
+    }
+};
+
 pub const Session = struct {
     io: Io,
     /// Scratch for retried requests.
@@ -194,6 +240,7 @@ pub const Session = struct {
     credentials: sigv4.Credentials,
     transport: client_module.Transport,
     remote: Remote = .none,
+    local: Local = .none,
     /// Where commands put local scratch files (commonware uses `/tmp`).
     temp: []const u8 = "/tmp",
     /// Why the command failed; the first failure wins when region jobs run concurrently.
@@ -321,12 +368,12 @@ pub const Session = struct {
         return ip;
     }
 
-    /// Downloads `url` (HTTPS), following redirects, with commonware's `download_file`
-    /// retries; fails the command with `download_failed` after the last attempt.
-    pub fn download(session: *Session, url: []const u8) ![]const u8 {
-        assert(std.mem.startsWith(u8, url, "https://"));
+    /// Downloads `url` (HTTP or HTTPS) into `arena`, following redirects, with commonware's
+    /// `download_file` retries; fails the command with `download_failed` after the last attempt.
+    pub fn download(session: *Session, arena: Allocator, url: []const u8) ![]const u8 {
+        assert(split_url(url) != null);
         for (0..aws_utils.max_download_attempts) |attempt| {
-            if (try session.download_once(url)) |body| {
+            if (try session.download_once(arena, url)) |body| {
                 log.info("downloaded file: url={s} size={d}", .{ url, body.len });
                 return body;
             }
@@ -339,18 +386,19 @@ pub const Session = struct {
     }
 
     /// One download attempt: the body of the first 2xx response, or null on failure.
-    fn download_once(session: *Session, url: []const u8) !?[]const u8 {
+    fn download_once(session: *Session, arena: Allocator, url: []const u8) !?[]const u8 {
         var location = url;
         for (0..redirects_max + 1) |_| {
             const target = split_url(location) orelse return null;
             const request: client_module.Request = .{
                 .method = "GET",
+                .scheme = target.scheme,
                 .host = target.host,
                 .path = target.path,
                 .headers = &.{},
                 .body = "",
             };
-            const outcome = try session.transport.send(session.arena, &request);
+            const outcome = try session.transport.send(arena, &request);
             const response = switch (outcome) {
                 .response => |response| response,
                 else => return null,
@@ -365,9 +413,11 @@ pub const Session = struct {
                 return null;
             };
             location = if (std.mem.startsWith(u8, next, "/"))
-                try std.fmt.allocPrint(session.arena, "https://{s}{s}", .{ target.host, next })
+                try std.fmt.allocPrint(session.arena, "{s}://{s}{s}", .{
+                    target.scheme, target.host, next,
+                })
             else
-                next;
+                try session.arena.dupe(u8, next);
         }
         log.warn("download failed: too many redirects: {s}", .{url});
         return null;
@@ -394,13 +444,16 @@ pub const Session = struct {
     }
 };
 
-/// An HTTPS URL's host and path (with any query); null for other schemes.
-fn split_url(url: []const u8) ?struct { host: []const u8, path: []const u8 } {
-    const scheme = "https://";
-    const rest = if (std.mem.startsWith(u8, url, scheme)) url[scheme.len..] else return null;
+/// An HTTP or HTTPS URL's scheme, host, and path (with any query); null for other schemes.
+fn split_url(url: []const u8) ?struct { scheme: []const u8, host: []const u8, path: []const u8 } {
+    const scheme: []const u8 = for ([_][]const u8{ "https", "http" }) |name| {
+        if (url.len > name.len + 3 and std.mem.startsWith(u8, url, name) and
+            std.mem.eql(u8, url[name.len..][0..3], "://")) break name;
+    } else return null;
+    const rest = url[scheme.len + 3 ..];
     const slash = std.mem.indexOfScalar(u8, rest, '/') orelse rest.len;
     if (slash == 0) return null;
     const path = if (slash == rest.len) "/" else rest[slash..];
     assert(path[0] == '/');
-    return .{ .host = rest[0..slash], .path = path };
+    return .{ .scheme = scheme, .host = rest[0..slash], .path = path };
 }

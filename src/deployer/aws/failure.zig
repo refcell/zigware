@@ -50,6 +50,8 @@ pub const Failure = union(enum) {
     instance_not_found: []const u8,
     download_failed: []const u8,
     symbolication: []const u8,
+    keygen_failed,
+    command_failed: struct { command: []const u8, stderr: []const u8 },
     metadata_not_found: []const u8,
     missing_tag_or_config,
     regions_not_enabled: []const []const u8,
@@ -139,6 +141,10 @@ fn format_operation(failure: Failure, writer: *Io.Writer) Io.Writer.Error!void {
         .instance_not_found => |ip| try writer.print("instance not found: {s}", .{ip}),
         .download_failed => |url| try writer.print("download failed: {s}", .{url}),
         .symbolication => |why| try writer.print("symbolication failed: {s}", .{why}),
+        .keygen_failed => try writer.writeAll("keygen failed"),
+        .command_failed => |f| try writer.print("command failed: {s}: {s}", .{
+            f.command, f.stderr,
+        }),
         .metadata_not_found => |tag| try writer.print(
             "metadata not found for deployment: {s}",
             .{tag},

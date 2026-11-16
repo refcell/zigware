@@ -166,7 +166,7 @@ fn samply_presigned_url(session: *Session, architecture: aws.Architecture) ![]co
     var url: Io.Writer.Allocating = .init(session.arena);
     try services.write_samply_download_url(&url.writer, services.samply_version, architecture);
     // commonware stages the archive in the deployment directory; it is held in memory here.
-    const archive = try session.download(url.written());
+    const archive = try session.download(session.arena, url.written());
     const source: s3.UploadSource = .{ .static = archive };
     const expires_s = s3.presign_duration_s;
     const cached = try s3.cache_and_presign(

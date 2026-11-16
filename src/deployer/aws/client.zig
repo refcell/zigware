@@ -16,6 +16,8 @@ const log = std.log.scoped(.deployer);
 
 pub const Request = struct {
     method: []const u8,
+    /// `https`, or `http` for the plain downloads commonware makes (Ubuntu's package archive).
+    scheme: []const u8 = "https",
     host: []const u8,
     /// Already percent-encoded.
     path: []const u8,
@@ -373,8 +375,8 @@ pub const HttpTransport = struct {
         method: std.http.Method,
         request: *const Request,
     ) !Response {
-        const location = .{ request.host, request.path };
-        const url = try std.fmt.allocPrint(arena, "https://{s}{s}", location);
+        const location = .{ request.scheme, request.host, request.path };
+        const url = try std.fmt.allocPrint(arena, "{s}://{s}{s}", location);
         var content_type: std.http.Client.Request.Headers.Value = .default;
         var extra: std.ArrayList(std.http.Header) = .empty;
         for (request.headers) |header| {
@@ -455,6 +457,7 @@ pub const Replay = struct {
         }
         return .{
             .method = try gpa.dupe(u8, request.method),
+            .scheme = try gpa.dupe(u8, request.scheme),
             .host = try gpa.dupe(u8, request.host),
             .path = try gpa.dupe(u8, request.path),
             .headers = headers,
