@@ -37,6 +37,17 @@ random messages as fast as the network accepts them. Each peer prints its throug
 latency every 2 s ([video](docs/assets/flood-demo.mp4)): about 620 messages per second per
 peer at around 1 ms mean latency. `etc/scripts/record-demo.sh flood` runs it locally.
 
+<p align="center">
+  <img src="docs/assets/chat-demo.gif" width="800"
+    alt="Three chat peers exchange encrypted messages over authenticated p2p">
+</p>
+
+[chat](examples/chat) is an encrypted group chat between friends who know each other's public
+keys. Here three peers run as separate processes on the production runtime, connect through
+authenticated p2p discovery, and trade messages; each terminal shows the conversation, the
+peer's live metrics, and its logs ([video](docs/assets/chat-demo.mp4)).
+`etc/scripts/record-demo.sh chat` records it again.
+
 > [!WARNING]
 > zigware is pre-alpha and being ported now. Do not use it in production.
 
