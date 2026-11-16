@@ -6,8 +6,9 @@
 //! it spreads the load of block dissemination across all participants.
 //!
 //! Ported so far: `types` (shards, coded blocks, stored coded blocks), `validation`, the
-//! `shards` engine, and the `Coding` variant with its `Buffer`. docs/lanes/
-//! broadcast-collector.md tracks the rest (marshaled, the harness, and the mod.rs tests).
+//! `shards` engine, the `Coding` variant with its `Buffer`, and the `Marshaled` application
+//! wrapper. docs/lanes/broadcast-collector.md tracks the rest (the harness and the mod.rs
+//! tests).
 
 pub const types = @import("types.zig");
 pub const Shard = types.Shard;
@@ -21,12 +22,16 @@ pub const max_buffer_payload_size = types.max_buffer_payload_size;
 pub const variant = @import("variant.zig");
 pub const Coding = variant.Coding;
 pub const Buffer = variant.Buffer;
+pub const marshaled = @import("marshaled.zig");
+pub const Marshaled = marshaled.Marshaled;
+pub const MarshaledConfig = marshaled.MarshaledConfig;
 
 test {
     @import("std").testing.refAllDecls(@This());
     _ = @import("types_test.zig");
     _ = @import("validation_test.zig");
     _ = @import("variant_test.zig");
+    _ = @import("marshaled.zig");
     _ = @import("fuzz.zig");
     _ = @import("test_block.zig");
     _ = @import("shards/root.zig");

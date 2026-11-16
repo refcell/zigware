@@ -145,8 +145,15 @@ that harness. It builds on `coding` (ReedSolomon), `consensus.types.coding.Commi
   type from the variant (`ancestry.ParentReceiver`, `Mailbox.ParentReceiver`) instead of
   requiring `oneshot.Receiver`, so no forwarding task is needed.
 - [x] marshal coding `validation` (proposal, block, reconstruction) with its 17 tests.
-- [ ] marshal coding `marshaled` (Marshaled, MarshaledConfig), once consensus-marshal's core
-  lands.
+- [x] marshal coding `marshaled` (Marshaled, MarshaledConfig): automaton, relay, and reporter.
+  `Marshaled(T)` takes its types as one namespace (Context, Application, Block, Coding,
+  Hasher, Provider, Strategy, Epocher) and is a shared handle. The `start_*` methods return
+  commonware's oneshot receivers; `propose`/`verify`/`prepare`/`certify` block on them for
+  the Zig `Automaton` contract. Its tasks live in `marshaled_tasks.zig`. Commonware's only
+  marshaled.rs test item is a `gates()` accessor (`gates_of` here); 8 tests in
+  `marshaled_test.zig` drive the wrapper against scripted marshal and shard mailboxes, and the
+  coding mod.rs tests cover it on the harness. Application calls run through a pointer, as in
+  application/build.zig, because the deterministic runtime caps a task closure at 1024 bytes.
 - [x] marshal coding fuzz: commonware's consensus/fuzz has no coding target, so
   `coding/fuzz.zig` fuzzes the decoders (`Coding.decode_block`, `StoredCodedBlock`, `Shard`)
   on mutated encodings (minifuzz and coverage-guided).
@@ -177,3 +184,4 @@ that harness. It builds on `coding` (ReedSolomon), `consensus.types.coding.Commi
 - 2026-11-16: marshal coding decoder fuzz target.
 
 - 2026-11-16: Coding's `subscribe_parent` (BlockProvider for core's mailbox).
+- 2026-11-16: marshal coding `Marshaled` with 8 tests.
