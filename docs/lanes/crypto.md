@@ -61,9 +61,10 @@ handshake), then certificate, secp256r1, the rest, zk last. banderwagon moved to
 - [x] Consensus engine fuzzers (`fuzz/strategy.zig`, `disrupter.zig`, `recorder.zig`,
   `harness.zig`, `simplex.zig`): simplex_ed25519, simplex_secp256r1, and simplex_bls12381
   multisig and threshold (MinPk, MinSig), with commonware's connected tests.
-- [ ] The `_twin` engine fuzzers (twins mock and p2p split channels are on main).
-- [ ] Benches (`benches.zig`): blake3, bloomfilter, chacha20_poly1305, ed25519, sake, lthash,
-  secp256r1, sha256, sha512, and zk bulletproofs, with commonware's names and cases.
+- [x] The `_twin` engine fuzzers (`fuzz/twin.zig` splits a Byzantine identity's channels
+  per view with simplex's `twins.view_masks`/`view_route` over p2p's split senders and
+  receivers; the primary half runs the engine, the secondary a disrupter).
+- Benches moved to bls-math (coordinator handover).
 
 ## Log
 - Digests are `Digest(length, name)`: one distinct type per hasher, encoded as raw bytes.
@@ -176,9 +177,11 @@ handshake), then certificate, secp256r1, the rest, zk last. banderwagon moved to
   verified certificates (`recorder.zig`), and `invariants.find` checks them after the run.
   Honest applications set simplex's `reject_mismatches` (commonware's `mocks` feature):
   replayed payloads at another round or parent fail verification instead of panicking. In
-  Debug only ed25519 runs its seeded fuzz by default (2 cases); the other schemes run a
-  seeded connected test (BLS12-381 to view 3), and their seeded fuzz needs `-Dslow-tests` or
-  `-Dfuzz-soak`. Planted bug: `N3f1.quorum` off by one makes honest engines assemble
+  Debug only ed25519 runs its seeded fuzz by default (2 cases; 1 for the twin); the other
+  schemes run a seeded connected test (BLS12-381 to view 3), and their seeded fuzz,
+  single-input `std.testing.fuzz` runs, and twin runs (5 to 30 s each in Debug, because the
+  disrupter signs every 100 ms) need ReleaseSafe, `-Dslow-tests`, `-Dfuzz-soak`, or `--fuzz`.
+  Twin runs use 500 ms links and a 1.5 s certification timeout, as commonware's do. Planted bug: `N3f1.quorum` off by one makes honest engines assemble
   2-of-4 certificates, which the connected test and the first fuzz case report as
   `insufficient_signatures`. A planted missing-nullification check and finalize-after-
   nullify went undetected in 32 cases: the disrupter cannot get a skipping proposal past

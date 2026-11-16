@@ -11,4 +11,5 @@ test {
     _ = @import("invariants.zig");
     _ = @import("strategy.zig");
     _ = @import("simplex.zig");
+    _ = @import("twin.zig");
 }

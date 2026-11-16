@@ -26,6 +26,7 @@ const strategy_mod = @import("strategy.zig");
 const invariants = @import("invariants.zig");
 const recorder_mod = @import("recorder.zig");
 const disrupter_mod = @import("disrupter.zig");
+const twin_mod = @import("twin.zig");
 
 const Digest = fuzz_types.Digest;
 const Configuration = fuzz_types.Configuration;
@@ -207,19 +208,24 @@ fn Fixture(comptime S: type) type {
     return cryptography.certificate.mocks.Fixture(S);
 }
 
+/// How Byzantine validators behave (commonware `FuzzMode`): `standard` runs a disrupter;
+/// `twin` runs a twin whose primary half is an honest engine and whose secondary half is a
+/// disrupter, the network split between them per view (`twin.zig`).
+pub const Mode = enum { standard, twin };
+
 /// Runs `input` against target `T` on a fresh deterministic runtime; fails on an invariant
 /// violation or when the run outlives `run_timeout_ns`.
-pub fn run(comptime T: type, gpa: Allocator, input: Input) !void {
+pub fn run(comptime T: type, comptime mode: Mode, gpa: Allocator, input: Input) !void {
     const config: runtime.deterministic.Config = .{
         .seed = input.seed,
         .timeout_ns = run_timeout_ns,
     };
     var runner = try runtime.deterministic.Runner.init(gpa, config);
     defer runner.deinit();
-    try (try runner.start_context(Run(T).scenario, .{ gpa, input }));
+    try (try runner.start_context(Run(T, mode).scenario, .{ gpa, input }));
 }
 
-pub fn Run(comptime T: type) type {
+pub fn Run(comptime T: type, comptime mode: Mode) type {
     return struct {
         const Self = @This();
         const S = T.Scheme;
@@ -238,27 +244,53 @@ pub fn Run(comptime T: type) type {
             pub const Sender = Net.Sender;
             pub const Receiver = Net.Receiver;
         };
-        const Engine = simplex.engine.Engine(Params);
-        const Channel = simplex.engine.Channel(Params);
-
-        /// An honest validator's engine and mocks. Must not move once started.
-        const Honest = struct {
-            started: bool = false,
-            application: Application,
-            recorder: Recorder,
-            page_cache: runtime.buffer.paged.CacheRef,
-            elector: Elector,
-            engine: Engine,
-            partition: [32]u8,
-            handle: ?runtime.context.Handle(Engine.RunResult),
+        const Splitter = twin_mod.Splitter(S);
+        const TwinSender = Net.SplitSender(Splitter.Forwarder);
+        /// The twin's primary half: the honest engine over split senders.
+        const TwinParams = struct {
+            pub const Context = Params.Context;
+            pub const Scheme = S;
+            pub const Elector = Params.Elector;
+            pub const Blocker = Params.Blocker;
+            pub const Digest = Params.Digest;
+            pub const Automaton = Params.Automaton;
+            pub const Relay = Params.Relay;
+            pub const Reporter = Params.Reporter;
+            pub const Strategy = Params.Strategy;
+            pub const Sender = TwinSender;
+            pub const Receiver = Net.Receiver;
         };
+        const Channel = simplex.engine.Channel(Params);
+        const twin = mode == .twin;
+        /// The disrupter's channels: whole, or the secondary halves of a twin's.
+        const DisrupterChannel = if (twin) simplex.engine.Channel(TwinParams) else Channel;
+        const Honest = Node(Params);
+        const certification_timeout_ms: u64 = if (twin) 1500 else 2000;
 
-        /// A Byzantine validator's disrupter. Must not move once started.
+        /// An engine and its mocks. Must not move once started.
+        fn Node(comptime P: type) type {
+            return struct {
+                const Engine = simplex.engine.Engine(P);
+
+                started: bool = false,
+                application: Application,
+                recorder: Recorder,
+                page_cache: runtime.buffer.paged.CacheRef,
+                elector: Elector,
+                engine: Engine,
+                partition: [32]u8,
+                handle: ?runtime.context.Handle(Engine.RunResult),
+            };
+        }
+
+        /// A Byzantine validator: a disrupter, and in twin mode a primary engine. Must not
+        /// move once started.
         const Byzantine = struct {
             started: bool = false,
             disrupter: Disrupter,
-            channels: [3]Channel,
+            channels: [3]DisrupterChannel,
             handle: ?runtime.context.Handle(void),
+            primary: if (twin) Node(TwinParams) else void,
 
             fn run_task(ctx: Context, node: *Byzantine) void {
                 _ = ctx;
@@ -274,6 +306,7 @@ pub fn Run(comptime T: type) type {
         network: *Net,
         network_task: std.Io.Future((std.Io.Cancelable || Allocator.Error)!void),
         relay: Relay,
+        splitter: Splitter,
         /// Validators `0..faults` are Byzantine, the rest honest (in participant order).
         byzantine: []Byzantine,
         honest: []Honest,
@@ -309,7 +342,10 @@ pub fn Run(comptime T: type) type {
             errdefer self.fixture.deinit(gpa);
             self.byzantine = try gpa.alloc(Byzantine, configuration.faults);
             errdefer gpa.free(self.byzantine);
-            for (self.byzantine) |*node| node.started = false;
+            for (self.byzantine) |*node| {
+                node.started = false;
+                if (twin) node.primary.started = false;
+            }
             self.honest = try gpa.alloc(Honest, configuration.correct);
             errdefer gpa.free(self.honest);
             for (self.honest) |*node| node.started = false;
@@ -322,17 +358,28 @@ pub fn Run(comptime T: type) type {
             self.network_task = try io.concurrent(Net.run, .{self.network});
             self.relay = .init(gpa, io);
             _ = self.oracle().manager().track(0, .init_primary(.init(self.keys())));
+            self.splitter = .{
+                .gpa = gpa,
+                .keys = self.keys(),
+                .term_length = input.term_length,
+                .certificate_cfg = self.fixture.verifier.certificate_codec_config(),
+            };
             try self.link_all(link_ms(10, 1, 1.0), false);
             const standard = std.meta.eql(configuration, fuzz_types.n4f1c3);
             if (input.partition == .connected and standard and input.degraded_network) {
                 try self.degrade_last();
             }
+            // Twins run on slow links, so the halves' views drift apart.
+            if (twin) try self.link_all(link_ms(500, 500, 1.0), true);
         }
 
         fn deinit(self: *Self) void {
             // Abort every engine before freeing any mock: live voters relay to every
             // application.
             for (self.honest) |*node| if (node.started) abort_engine(node);
+            if (twin) for (self.byzantine) |*node| {
+                if (node.primary.started) abort_engine(&node.primary);
+            };
             self.relay.deregister_all();
             for (self.byzantine) |*node| if (node.started) {
                 if (node.handle) |handle| handle.abort() catch {};
@@ -341,12 +388,9 @@ pub fn Run(comptime T: type) type {
                     channel.receiver.deinit();
                 }
             };
-            for (self.honest) |*node| if (node.started) {
-                node.engine.deinit();
-                node.elector.deinit(self.gpa);
-                node.page_cache.deinit();
-                node.recorder.deinit();
-                node.application.deinit();
+            for (self.honest) |*node| if (node.started) self.stop_node(node);
+            if (twin) for (self.byzantine) |*node| {
+                if (node.primary.started) self.stop_node(&node.primary);
             };
             self.gpa.free(self.honest);
             self.gpa.free(self.byzantine);
@@ -358,7 +402,17 @@ pub fn Run(comptime T: type) type {
             self.* = undefined;
         }
 
-        fn abort_engine(node: *Honest) void {
+        /// Releases a node's engine (and the channels it owns) and mocks.
+        fn stop_node(self: *Self, node: anytype) void {
+            node.engine.deinit();
+            node.elector.deinit(self.gpa);
+            node.page_cache.deinit();
+            node.recorder.deinit();
+            node.application.deinit();
+            node.started = false;
+        }
+
+        fn abort_engine(node: anytype) void {
             const handle = node.handle orelse return;
             node.handle = null;
             const result = handle.abort() catch return; // Aborted before it returned.
@@ -401,16 +455,17 @@ pub fn Run(comptime T: type) type {
 
         fn start_nodes(self: *Self) !void {
             for (self.byzantine, 0..) |*node, index| {
-                node.* = .{
-                    .disrupter = .init(
-                        self.gpa,
-                        self.ctx.io(),
-                        &self.fixture.schemes[index],
-                        self.input.strategy,
-                    ),
-                    .channels = try self.register(self.keys()[index]),
-                    .handle = null,
-                };
+                const channels = try self.register(self.keys()[index]);
+                if (twin) {
+                    const primary = try self.split(channels, &node.channels);
+                    try self.start_engine(TwinParams, &node.primary, index, primary, "twin");
+                } else {
+                    node.channels = channels;
+                }
+                const scheme = &self.fixture.schemes[index];
+                const strategy = self.input.strategy;
+                node.disrupter = .init(self.gpa, self.ctx.io(), scheme, strategy);
+                node.handle = null;
                 node.started = true;
                 const child = self.ctx.child("disrupter");
                 node.handle = try child.spawn(Byzantine.run_task, .{node});
@@ -418,11 +473,45 @@ pub fn Run(comptime T: type) type {
             const faults = self.byzantine.len;
             for (self.honest, faults..) |*node, index| {
                 const channels = try self.register(self.keys()[index]);
-                try self.start_honest(node, index, channels);
+                try self.start_engine(Params, node, index, channels, "validator");
             }
         }
 
-        fn start_honest(self: *Self, node: *Honest, index: usize, channels: [3]Channel) !void {
+        /// Splits a twin's channels: returns the primary halves and writes the secondary
+        /// halves to `secondary`.
+        fn split(
+            self: *Self,
+            channels: [3]Channel,
+            secondary: *[3]DisrupterChannel,
+        ) ![3]simplex.engine.Channel(TwinParams) {
+            comptime assert(twin);
+            const kinds = [3]twin_mod.Kind{ .votes, .certificates, .resolver };
+            var primary: [3]simplex.engine.Channel(TwinParams) = undefined;
+            for (channels, kinds, 0..) |channel, kind, index| {
+                const senders = channel.sender.split_with(self.splitter.forwarder(kind));
+                const router = self.splitter.router(kind);
+                const io = self.ctx.io();
+                const receivers = try channel.receiver.split_with(self.gpa, io, router);
+                primary[index] = .{ .sender = senders.primary, .receiver = receivers.primary };
+                const half: DisrupterChannel = .{
+                    .sender = senders.secondary,
+                    .receiver = receivers.secondary,
+                };
+                secondary[index] = half;
+            }
+            return primary;
+        }
+
+        /// Starts validator `index`'s engine (an honest one, or a twin's primary half) on
+        /// `channels`, which it owns from then on.
+        fn start_engine(
+            self: *Self,
+            comptime P: type,
+            node: *Node(P),
+            index: usize,
+            channels: [3]simplex.engine.Channel(P),
+            comptime label: []const u8,
+        ) !void {
             const io = self.ctx.io();
             const gpa = self.gpa;
             const key = self.keys()[index];
@@ -442,13 +531,13 @@ pub fn Run(comptime T: type) type {
             node.page_cache = try .init(gpa, page_size, page_cache_size);
             node.elector = try self.elector_config(index).build(gpa, n);
             node.partition = @splat(0);
-            _ = try std.fmt.bufPrint(&node.partition, "validator-{d}", .{index});
+            _ = try std.fmt.bufPrint(&node.partition, label ++ "-{d}", .{index});
             node.handle = null;
             node.started = true;
             const control = self.oracle().control(key);
-            const cfg = engine_config(node, self.fixture.schemes[index], control);
+            const cfg = engine_config(P, node, self.fixture.schemes[index], control);
             try node.engine.init(self.ctx, cfg);
-            node.handle = try self.ctx.child("engine").spawn(Engine.run, .{
+            node.handle = try self.ctx.child("engine").spawn(Node(P).Engine.run, .{
                 &node.engine, channels[0], channels[1], channels[2],
             });
         }
@@ -464,7 +553,12 @@ pub fn Run(comptime T: type) type {
             return config.with_term(term_length, Duration.from_secs(12), optimistic);
         }
 
-        fn engine_config(node: *Honest, scheme: S, blocker: Net.Control) Engine.Config {
+        fn engine_config(
+            comptime P: type,
+            node: *Node(P),
+            scheme: S,
+            blocker: Net.Control,
+        ) Node(P).Engine.Config {
             const genesis = simplex.mocks.application.genesis(Sha256, fuzz_types.epoch);
             return .{
                 .scheme = scheme,
@@ -483,7 +577,7 @@ pub fn Run(comptime T: type) type {
                 .write_buffer = 1024 * 1024,
                 .page_cache = &node.page_cache,
                 .leader_timeout = .from_secs(1),
-                .certification_timeout = .from_secs(2),
+                .certification_timeout = .from_millis(certification_timeout_ms),
                 .timeout_retry = .from_secs(10),
                 .view_retention = .new(10),
                 .skip = .{ .enabled = .{ .timeout = .from_secs(11) } },
