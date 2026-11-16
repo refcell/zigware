@@ -316,6 +316,7 @@ pub fn sample_duration(rng: anytype, low: Duration, high: Duration) Duration {
 }
 
 const testing = std.testing;
+const Draws = @import("fuzz.zig").Draws;
 
 test "time: NonZeroDuration" {
     try testing.expectEqual(null, NonZeroDuration.init(Duration.zero));
@@ -542,12 +543,14 @@ test "fuzz time seeded" {
 test "fuzz time" {
     try testing.fuzz({}, struct {
         fn run(_: void, smith: *testing.Smith) anyerror!void {
-            var input: [64]u8 = undefined;
-            const len = smith.slice(&input);
+            // A corpus entry is used as written (see `Draws.slice`); its entropy is zero.
+            const draws: Draws = .init(smith);
+            var buffer: [64]u8 = undefined;
+            const input = draws.slice(&buffer);
             var entropy: [16]u8 = undefined;
-            smith.bytes(&entropy);
+            draws.bytes(&entropy);
             var generator = rng_mod.FuzzRng.init(&entropy);
-            try fuzz_time(input[0..len], &generator);
+            try fuzz_time(input, &generator);
         }
     }.run, .{ .corpus = &.{ "30s", "500 ms", "18446744073709551615h" } });
 }

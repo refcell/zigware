@@ -290,23 +290,38 @@ test "hex_literal usable in const" {
     comptime assert(bytes.len == 4);
 }
 
+/// The fuzz input as one byte string. A fixed input (a corpus entry under `zig build test`)
+/// is used as written, since `smith.slice` would read its first four bytes as a length.
+/// (formatting sits below codec, so it does not use `codec.fuzz.Draws`.)
+fn fuzz_input(smith: *testing.Smith, buffer: []u8) []const u8 {
+    if (smith.in) |in| {
+        const len = @min(in.len, buffer.len);
+        smith.bytes(buffer[0..len]);
+        assert(smith.in.?.len == in.len - len);
+        return buffer[0..len];
+    }
+    const len = smith.slice(buffer);
+    assert(len <= buffer.len);
+    return buffer[0..len];
+}
+
 fn fuzz_hex_roundtrip(_: void, smith: *testing.Smith) anyerror!void {
-    var input: [256]u8 = undefined;
-    const len = smith.slice(&input);
-    const encoded = try hex(testing.allocator, input[0..len]);
+    var buffer: [256]u8 = undefined;
+    const input = fuzz_input(smith, &buffer);
+    const encoded = try hex(testing.allocator, input);
     defer testing.allocator.free(encoded);
     const decoded = (try from_hex(testing.allocator, encoded)).?;
     defer testing.allocator.free(decoded);
-    try testing.expectEqualSlices(u8, input[0..len], decoded);
+    try testing.expectEqualSlices(u8, input, decoded);
 }
 
 fn fuzz_from_hex(_: void, smith: *testing.Smith) anyerror!void {
-    var input: [256]u8 = undefined;
-    const len = smith.slice(&input);
-    const decoded = try from_hex(testing.allocator, input[0..len]);
+    var buffer: [256]u8 = undefined;
+    const input = fuzz_input(smith, &buffer);
+    const decoded = try from_hex(testing.allocator, input);
     if (decoded) |bytes| {
         defer testing.allocator.free(bytes);
-        try testing.expect(bytes.len * 2 <= len);
+        try testing.expect(bytes.len * 2 <= input.len);
     }
 }
 
