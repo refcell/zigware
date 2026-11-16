@@ -11,6 +11,7 @@ pub const utils = @import("utils");
 pub const parallel = @import("parallel");
 pub const math = @import("math");
 pub const cryptography = @import("cryptography");
+pub const curve25519 = @import("curve25519");
 pub const runtime = @import("runtime");
 pub const actor = @import("actor");
 pub const storage = @import("storage");

@@ -22,6 +22,12 @@ const Package = struct {
     /// Packages this one may `@import`, by name. Mirrors the crate's Cargo.toml
     /// `[dependencies]` (proc-macro crates are comptime code in Zig and have no package).
     deps: []const []const u8,
+    /// Directory under `src/` when it differs from `name` (a crate nested in another's).
+    dir: ?[]const u8 = null,
+
+    fn path(package: Package) []const u8 {
+        return package.dir orelse package.name;
+    }
 };
 
 /// Every package, in dependency order. Add a dependency edge here when a package needs
@@ -39,6 +45,10 @@ const packages = [_]Package{
     .{ .name = "math", .deps = &.{ "codec", "invariants", "parallel", "utils", "simd" } },
     .{ .name = "cryptography", .deps = &.{
         "codec", "formatting", "math", "parallel", "utils", "invariants", "simd", "conformance",
+    } },
+    .{ .name = "curve25519", .dir = "cryptography/curve25519", .deps = &.{
+        "codec",      "cryptography", "formatting", "math", "parallel", "utils", "conformance",
+        "invariants",
     } },
     .{ .name = "runtime", .deps = &.{
         "codec", "cryptography", "formatting", "parallel", "utils", "conformance",
@@ -114,7 +124,7 @@ pub fn build(b: *std.Build) void {
     var modules: [packages.len]*std.Build.Module = undefined;
     for (packages, 0..) |package, index| {
         modules[index] = b.addModule(package.name, .{
-            .root_source_file = b.path(b.fmt("src/{s}/root.zig", .{package.name})),
+            .root_source_file = b.path(b.fmt("src/{s}/root.zig", .{package.path()})),
             .target = target,
             .optimize = optimize,
         });
@@ -180,7 +190,7 @@ fn add_benches(
     var measured_modules: [packages.len]*std.Build.Module = undefined;
     for (packages, 0..) |package, index| {
         measured_modules[index] = b.createModule(.{
-            .root_source_file = b.path(b.fmt("src/{s}/root.zig", .{package.name})),
+            .root_source_file = b.path(b.fmt("src/{s}/root.zig", .{package.path()})),
             .target = target,
             .optimize = bench_optimize,
         });
@@ -192,8 +202,8 @@ fn add_benches(
         }
     }
     for (packages, 0..) |package, index| {
-        const path = b.fmt("src/{s}/benches.zig", .{package.name});
-        b.dependOnDirectoryContents(b.path(b.fmt("src/{s}", .{package.name})));
+        const path = b.fmt("src/{s}/benches.zig", .{package.path()});
+        b.dependOnDirectoryContents(b.path(b.fmt("src/{s}", .{package.path()})));
         b.root.access(b.graph.io, path, .{}) catch continue;
         for ([_]std.builtin.OptimizeMode{ optimize, bench_optimize }, 0..) |mode, measured| {
             const graph = if (measured == 0) modules else &measured_modules;
