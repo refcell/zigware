@@ -211,4 +211,5 @@ pub fn Queue(comptime V: type) type {
 test {
     _ = @import("cursor.zig");
     _ = @import("queue_test.zig");
+    _ = @import("recovery_fuzz_test.zig");
 }

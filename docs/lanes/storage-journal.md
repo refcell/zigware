@@ -50,9 +50,9 @@ resize, sync), `runtime.storage`, with the in-memory backend `runtime.storage.me
 - [x] metadata: the `metadata_recovery` fuzz target and the overwrite-crash-during-sync test
   on `runtime.storage.faulty` (with storage-archive's `archive/faults.zig` harness).
 - [ ] metadata: `start_sync` (pipelined syncs) and the conformance hash (`MetadataWorkload`).
-- [ ] Recovery fuzz targets on faulty storage: `queue_recovery`,
-  `journal_contiguous_recovery`, `journal_segmented_variable_recovery`,
-  `journal_oversized_recovery`.
+- [x] `queue_recovery` fuzz target on faulty storage.
+- [ ] Recovery fuzz targets on faulty storage: `journal_contiguous_recovery`,
+  `journal_segmented_variable_recovery`, `journal_oversized_recovery`.
 - [x] queue (durable at-least-once queue over the contiguous variable journal, with its
   cursor) with storage.rs's tests and the `QueueWorkload` round trip.
 - [ ] queue: conformance hash for `QueueWorkload` (needs a storage conformance harness).
@@ -258,6 +258,10 @@ resize, sync), `runtime.storage`, with the in-memory backend `runtime.storage.me
 - authenticated: commonware's `Backing`/`BackingRecovery` traits are a comptime contract
   (`assert_backing`) over decl names; contexts become `(gpa, storage)`, and
   `last_matching`'s closure is a `(context, comptime predicate)` pair.
+- Recovery fuzz targets decode inputs with 1- to 2-byte fields and bias fault rates toward low
+  values (cubically, every rate still reachable), so seeded random inputs reach deep states
+  instead of failing within a few operations. `queue_recovery` checks the reader's drain after
+  the queue is dropped only without a failed operation: one `Queue` holds both sides here.
 - authenticated `Journal`: locations are plain `u64`; errors are the merged
   `merkle.full.Merkle.Error` set (`StaleBatch`, `AncestorDropped`, `RangeOutOfBounds`,
   `ItemPruned`, ...) without payloads. Batches are hand-refcounted like `merkle.batch`:
@@ -293,3 +297,4 @@ resize, sync), `runtime.storage`, with the in-memory backend `runtime.storage.me
 - 2026-11-16: authenticated `Journal` (recovery, batches, proofs) with its ported tests.
 - 2026-11-16: authenticated equal-length-branch crash test on faulty storage.
 - 2026-11-16: metadata_recovery fuzz target and overwrite-crash test on faulty storage.
+- 2026-11-16: queue_recovery fuzz target on faulty storage.
