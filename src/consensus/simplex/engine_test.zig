@@ -122,6 +122,13 @@ const Harness = struct {
     /// Whether honest validators keep votes of finalized views (commonware's Byzantine
     /// tests set it).
     track_historical_votes: bool = false,
+    timeouts: Timeouts,
+
+    const Timeouts = struct {
+        leader_ms: u64 = 1000,
+        certification_ms: u64 = 2000,
+        retry_ms: u64 = 10_000,
+    };
 
     const Fixture = cryptography.certificate.mocks.Fixture(Scheme);
 
@@ -136,10 +143,24 @@ const Harness = struct {
     /// Starts `n` validators, every pair linked by `link` (when given); validator 0 plays
     /// `role`.
     fn start(harness: *Harness, ctx: Context, n: u32, link: ?Link, role: Role) !void {
+        try harness.start_timed(ctx, n, link, role, .{});
+    }
+
+    /// `start` with the engines' leader, certification, and retry timeouts.
+    fn start_timed(
+        harness: *Harness,
+        ctx: Context,
+        n: u32,
+        link: ?Link,
+        role: Role,
+        timeouts: Timeouts,
+    ) !void {
+        assert(timeouts.leader_ms <= timeouts.certification_ms);
         const io = ctx.io();
         var rng = utils.rng.test_rng();
         harness.* = undefined;
         harness.ctx = ctx;
+        harness.timeouts = timeouts;
         harness.fixture = try ed25519.fixture(Digest, gpa, &rng, "consensus", n);
         errdefer harness.fixture.deinit(gpa);
         harness.network = try Net.init(gpa, io, .{
@@ -261,6 +282,9 @@ const Harness = struct {
         const control = harness.oracle().control(key);
         var cfg = engine_config(validator, harness.fixture.schemes[index], control);
         cfg.track_historical_votes = harness.track_historical_votes;
+        cfg.leader_timeout = .from_millis(harness.timeouts.leader_ms);
+        cfg.certification_timeout = .from_millis(harness.timeouts.certification_ms);
+        cfg.timeout_retry = .from_millis(harness.timeouts.retry_ms);
         try validator.engine.init(harness.ctx, cfg);
         const channels = try register(harness.oracle(), key);
         validator.handle = try harness.ctx.child("engine").spawn(Engine.run, .{
@@ -275,6 +299,17 @@ const Harness = struct {
             const validator = harness.honest(index) orelse continue;
             try validator.reporter.wait_for_finalized(.new(view));
         }
+    }
+
+    /// The lowest finalized view across honest validators.
+    fn min_finalized(harness: *Harness) u64 {
+        var lowest: u64 = std.math.maxInt(u64);
+        for (0..harness.validators.len) |index| {
+            const validator = harness.honest(index) orelse continue;
+            lowest = @min(lowest, validator.reporter.latest_finalized().get());
+        }
+        assert(lowest != std.math.maxInt(u64));
+        return lowest;
     }
 
     /// The highest finalized view across validators.
@@ -583,4 +618,37 @@ fn backfill_scenario(ctx: Context) !void {
 
 test "backfill: a late validator catches up through the resolver" {
     _ = try run_seeded(0, backfill_scenario, .{});
+}
+
+/// One run of commonware `unclean_shutdown`: start every validator from its journal, stop
+/// them all at a random point within 2 s, and report whether all reached `required`. Short
+/// timeouts let a restarted cluster time out of views it cannot finish, as in commonware.
+fn unclean_run(ctx: Context, required: u64) !bool {
+    var harness: Harness = undefined;
+    const timeouts: Harness.Timeouts = .{
+        .leader_ms = 500,
+        .certification_ms = 1000,
+        .retry_ms = 500,
+    };
+    try harness.start_timed(ctx, 5, link_ms(50, 50, 1.0), .honest, timeouts);
+    defer harness.deinit();
+    const rng: @import("actors/context.zig").IoRng = .{ .io = ctx.io() };
+    const wait_ms = 100 + rng.next_u64() % 1900;
+    try ctx.sleep(.fromMilliseconds(@intCast(wait_ms)));
+    for (harness.validators) |*validator| validator.reporter.assert_no_faults();
+    const blocked = try harness.oracle().blocked(gpa);
+    defer gpa.free(blocked);
+    try testing.expectEqual(0, blocked.len);
+    return harness.min_finalized() >= required;
+}
+
+test "unclean shutdown: repeated crashes recover from the journal" {
+    var runner = try runtime.deterministic.Runner.init(gpa, .{ .seed = 0 });
+    defer runner.deinit();
+    const restarts_max = 200;
+    // Each start after the first crashes storage, keeping only synced journal contents.
+    const restarts = for (0..restarts_max) |restart| {
+        if (try (try runner.start_context(unclean_run, .{100}))) break restart;
+    } else return error.TestUnexpectedResult;
+    try testing.expect(restarts > 0);
 }

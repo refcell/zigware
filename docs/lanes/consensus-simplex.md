@@ -183,9 +183,9 @@ resolver; those lanes are running, so do the types first and the actors as they 
   voter/resolver ingress tests; add actor metrics. (Resolver state.rs: all 23 done.)
 - [ ] simplex mod.rs tests: all_online, partition, slow_and_lossy_links, and determinism
   done (ed25519, round robin; Debug runs 50 views where commonware runs 100); conflicter,
-  nuller, impersonator (2 seeds each), outdated, and backfill done; next the rest of the multi-node
-  DST suite with the Byzantine mocks
-  (conflicter, equivocator, impersonator, nuller, outdated, twins, ...), seeded.
+  nuller, impersonator (2 seeds each), outdated, backfill, and unclean_shutdown (100 views
+  across journal-recovering restarts) done; next one_offline, slow_validator, the crash and
+  recovery tests, equivocator, twins, and the rest of the multi-node DST suite, seeded.
 - [ ] Fuzz targets (commonware consensus/fuzz).
 
 ## Log
@@ -214,3 +214,4 @@ resolver; those lanes are running, so do the types first and the actors as they 
 - 2026-11-16: Byzantine impersonator and outdated mocks with their DSTs.
 - 2026-11-16: backfill DST (a late validator catches up while another is cut off).
 - 2026-11-16: resolver state.rs tests (all 23).
+- 2026-11-16: unclean_shutdown DST (random crashes, journal recovery, 100 views).
