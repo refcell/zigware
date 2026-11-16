@@ -26,6 +26,10 @@ test vectors. Tests never call AWS and never hold credentials.
   (`write_install_*_cmd`, `write_promtail_config`, `write_prometheus_config`,
   `write_pyroscope_script`, static files), S3 keys, and download URLs; `deployer.aws.s3` holds
   the key prefixes and `wget`; `deployer.aws.utils` the SSH/SCP helpers.
+- `deployer.aws.create`: `validate_names`, `validate_storage_config`,
+  `select_availability_zone_groups`, `grouped_subnets`; `deployer.aws.ec2`: `VolumeType`,
+  `validate_storage_options`, launch-error classification; `deployer.aws.Failure` carries
+  commonware's configuration errors with their payloads and `Display` text.
 - `utils.fuzz` is now exported (the seeded fuzz driver over `FuzzRng`).
 
 ## Decisions
@@ -39,6 +43,8 @@ test vectors. Tests never call AWS and never hold credentials.
 - `services` templates are commonware's raw strings verbatim, rendered at comptime-parsed
   `format!` syntax; `deployer_version` is commonware's (`2026.10.0`) so both share an S3 config
   cache. The home directory is spliced in at comptime so no source line spells it out.
+- Zig errors carry no payload, so validation returns `?Failure` (commonware's error variant
+  and fields) instead of an error; `VolumeType` lists the EC2 API's documented values.
 - Commonware's upper-case constants (`METRICS_PORT`, `CREATE_CMD`, ...) are snake_case
   (`metrics_port`, `create_cmd`), per TigerStyle naming.
 - `IpAddr` is the deployer's own: Rust's `IpAddr` parsing and display (RFC 5952 compression,
@@ -51,8 +57,10 @@ test vectors. Tests never call AWS and never hold credentials.
 - [x] `utils.rs` pure helpers (SSH/SCP targets, attach exit codes, CIDR) with their tests.
 - [x] `services.rs`: generated service files, install scripts, and S3 keys (10 tests, plus
   SHA-256 conformance hashes of every generated file).
-- [ ] `attach.rs` host lookup (4 tests); `create.rs` validation and AZ-group planning (24
-  tests); `ec2.rs` pure logic (12 tests).
+- [x] `create.rs` validation and AZ-group planning (22 sync tests); `ec2.rs` storage
+  limits and RunInstances error classification.
+- [ ] `attach.rs` host lookup (4 tests); `create.rs`'s `run_launches` ordering (2 async
+  tests); `ec2.rs`'s launch retry loop (11 async tests, over a mock client).
 - [ ] SigV4 signer with the AWS documentation's test vectors; S3 presigned URLs.
 - [ ] Deployment directory, metadata, and status files; `list`.
 - [ ] CLI (`deployer aws <command>`) with argument parsing tests.

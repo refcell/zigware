@@ -19,6 +19,9 @@ const IpAddr = @import("../ip.zig").IpAddr;
 pub const utils = @import("utils.zig");
 pub const s3 = @import("s3.zig");
 pub const services = @import("services.zig");
+pub const ec2 = @import("ec2.zig");
+pub const create = @import("create.zig");
+pub const Failure = @import("failure.zig").Failure;
 
 pub const Error = yaml.Error;
 pub const WriteError = yaml.Emitter.WriteError;
