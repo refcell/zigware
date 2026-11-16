@@ -147,7 +147,11 @@ pub fn SetupFull(comptime C: type, comptime Pro: type, comptime B: type) type {
             }
             for (&setup.connections) |*slot| if (slot.*) |*connection| connection.deinit();
             setup.network.close();
-            setup.task.await(setup.io) catch |err| std.debug.panic("network: {t}", .{err});
+            // A runner that timed out cancels the network task; its error reports the timeout.
+            setup.task.await(setup.io) catch |err| switch (err) {
+                error.Canceled => {},
+                else => std.debug.panic("network: {t}", .{err}),
+            };
             setup.network.deinit();
             for (setup.consumers.items) |item| item.deinit();
             setup.consumers.deinit(gpa);
@@ -1159,5 +1163,84 @@ test "clean shutdown" {
         });
         defer runner.deinit();
         try try runner.start(clean_shutdown, .{runner.io()});
+    }
+}
+
+/// Keys the DST requester fetches; key `k` is served only by peer `1 + k % 3`.
+const dst_keys = 12;
+
+fn dst_case(io: Io, retain_delay_ms: u64) !void {
+    const setup = try Setup.init(io, &.{ 1, 2, 3, 4 }, .{});
+    defer setup.deinit();
+    for (1..4) |server| try setup.add_link(link_unreliable, 0, server);
+    const consumer = try setup.make_consumer();
+    const mailbox = try setup.spawn(0, consumer, try setup.make_producer(&.{}));
+    var data: [dst_keys + 1][32]u8 = undefined;
+    var lengths: [dst_keys + 1]usize = undefined;
+    for (1..4) |server| {
+        const producer = try setup.make_producer(&.{});
+        for (1..dst_keys + 1) |value| {
+            const text = try std.fmt.bufPrint(&data[value], "data for key {d}", .{value});
+            lengths[value] = text.len;
+            if (1 + value % 3 == server) try producer.insert(key(@intCast(value)), text);
+        }
+        _ = try setup.spawn(server, try setup.make_consumer(), producer);
+    }
+    for (1..dst_keys + 1) |value| {
+        try consumer.add_expected(key(@intCast(value)), data[value][0..lengths[value]]);
+        try fetch(mailbox, @intCast(value));
+    }
+    // Drop every fourth key mid-flight; the rest must still arrive over the lossy links.
+    try setup.sleep(Duration.from_millis(retain_delay_ms));
+    const predicate = Predicate.init({}, struct {
+        fn keep(_: void, item: MockKey, _: void) bool {
+            return item.value % 4 != 0;
+        }
+    }.keep);
+    _ = try mailbox.retain(predicate);
+    try dst_expect_kept(setup, consumer);
+}
+
+/// Waits until every kept key is delivered, each at most once and with its own value; a
+/// dropped key may have been delivered before the retain, also at most once.
+fn dst_expect_kept(setup: *Setup, consumer: Consumer) !void {
+    var delivered: [dst_keys + 1]bool = @splat(false);
+    var kept_missing: usize = 0;
+    for (1..dst_keys + 1) |value| kept_missing += @intFromBool(value % 4 != 0);
+    // Bounded by the runner's timeout.
+    while (kept_missing > 0) {
+        var event = try consumer.next_event();
+        defer event.deinit(gpa);
+        const value = event.key.value;
+        try testing.expect(value >= 1 and value <= dst_keys);
+        try testing.expect(!delivered[value]);
+        delivered[value] = true;
+        if (value % 4 != 0) kept_missing -= 1;
+    }
+    // Late duplicates would show up here.
+    try setup.sleep(Duration.from_secs(2));
+    while (consumer.try_event()) |event| {
+        var owned = event;
+        defer owned.deinit(gpa);
+        try testing.expect(owned.key.value % 4 == 0 and !delivered[owned.key.value]);
+        delivered[owned.key.value] = true;
+    }
+}
+
+test "dst: lossy links deliver every retained fetch exactly once" {
+    for (0..16) |seed| {
+        var runner = try runtime.deterministic.Runner.init(gpa, .{
+            .seed = seed,
+            .timeout_ns = 120 * std.time.ns_per_s,
+        });
+        defer runner.deinit();
+        const retain_delay_ms = (seed * 37) % 200;
+        runner.start(dst_case, .{ runner.io(), retain_delay_ms }) catch |err| {
+            std.debug.print("dst: seed {d} failed: {t}\n", .{ seed, err });
+            return err;
+        } catch |err| {
+            std.debug.print("dst: seed {d} failed: {t}\n", .{ seed, err });
+            return err;
+        };
     }
 }

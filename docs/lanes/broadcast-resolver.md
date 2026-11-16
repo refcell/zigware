@@ -140,6 +140,9 @@ on p2p's simulated network and the deterministic runtime.
   Blocking consumer mocks resolve gates on the test's task instead of a per-delivery task.
   `test_stale_response_after_requester_restart_is_ignored` waits for p2p's authenticated
   lookup network.
+- Beyond commonware's tests, a DST seed sweep (16 seeds) runs the engine on 50%-loss links
+  with keys spread over three servers and a mid-flight retain: every kept key arrives exactly
+  once with its value. A failing seed prints itself; the run replays from it.
 
 ## Backlog
 - [x] resolver: lib.rs, subscribers, ingress, delivery, opaque (with metrics).
