@@ -36,18 +36,15 @@ variants need `runtime` storage; do them after its interface lands.
 - [ ] merkle/persisted/full: the blob-level init_sync tests (interrupted bounded publication,
   interrupted clear, ahead skips discarded blobs, reset or stale-below-start leave blobs
   unopened, torn tail repair; these also pin the journal probe at the highest missing pin),
-  the historical proof and destroy-interruption tests, and the merkle_full_operations and
-  merkle_full_recovery fuzz targets.
+  and the historical proof and destroy-interruption tests.
 - [x] merkle/persisted/compact: `storage.merkle.compact.Merkle(F, Digest)` (init,
   from_compact_state, prune_to_frontier, append_leaf, root, leaves, snapshot, new_batch,
   to_batch, apply_batch) with compact.rs's tests.
 - [x] index/immutable on `utils.handles.Table`, with all of immutable.rs's tests.
-- [ ] Fuzz targets (storage/fuzz entries for these modules). Done: rmap, bitmap, index
-  (unordered, ordered, immutable), merkle_family_operations, merkle_range_proof,
-  merkle_proof_store, and the Merkle half of proofs_malleability (its BMT half goes with bmt).
-  merkle_batch_operations. Remaining: merkle_full_operations and merkle_full_recovery (with
-  persisted).
-
+- [x] Fuzz targets (storage/fuzz entries for these modules): rmap, bitmap, index (unordered,
+  ordered, immutable), merkle_family_operations, merkle_range_proof, merkle_proof_store,
+  merkle_batch_operations, merkle_full_operations, merkle_full_recovery, and the Merkle half of
+  proofs_malleability (its BMT half goes with bmt, now in the coding lane).
 ## Log
 - translator: Rust's `Translator`/`BuildHasher` traits become a comptime interface
   (`Key`, `ordered`, `transform`, `hash`, `order`, `eql`; `translator.check`). `Hashed`
@@ -112,6 +109,13 @@ variants need `runtime` storage; do them after its interface lands.
 - merkle/persisted/full init_sync: commonware's seeded storage-fault runs (`recovered_pins_crash`)
   become a deterministic sweep: fail every mutation after the first `n`, crash, and reopen,
   for each `n` until the sync completes.
+- merkle_full_operations / merkle_full_recovery fuzz: leaf data is capped at 16 bytes and
+  proof ranges are drawn within the current leaves, so short inputs reach verification (the
+  u8 ranges of commonware's target almost never do). The recovery target replaces sampled
+  sync/write/remove fault rates with a mutation budget (every mutation after the first `n`
+  fails) plus a removal budget armed around prunes, and one faulted recovery attempt; syncs
+  complete synchronously, so `start_sync` is a barrier. Both check the final root against a
+  rebuilt reference.
 - merkle/persisted/compact: commonware's `Arc<Mem>` with copy-on-write mutators becomes an
   owned `Mem`; `snapshot` returns an owned clone, so it still never observes later mutations.
   Merkleizing is sequential, so there is no strategy parameter.
