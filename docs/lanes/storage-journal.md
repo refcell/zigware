@@ -47,8 +47,12 @@ resize, sync), `runtime.storage`, with the in-memory backend `runtime.storage.me
   regression (issue 5668) over both backings and the equal-length-branch crash on
   `runtime.storage.faulty` (unsynced writes kept, unsynced resizes lost).
 - [x] metadata (two-blob atomic key-value store).
-- [ ] metadata: `start_sync` (pipelined syncs), conformance hash (`MetadataWorkload`), and
-  the fault-injection tests (torn writes, failed syncs), once runtime storage lands.
+- [x] metadata: the `metadata_recovery` fuzz target and the overwrite-crash-during-sync test
+  on `runtime.storage.faulty` (with storage-archive's `archive/faults.zig` harness).
+- [ ] metadata: `start_sync` (pipelined syncs) and the conformance hash (`MetadataWorkload`).
+- [ ] Recovery fuzz targets on faulty storage: `queue_recovery`,
+  `journal_contiguous_recovery`, `journal_segmented_variable_recovery`,
+  `journal_oversized_recovery`.
 - [x] queue (durable at-least-once queue over the contiguous variable journal, with its
   cursor) with storage.rs's tests and the `QueueWorkload` round trip.
 - [ ] queue: conformance hash for `QueueWorkload` (needs a storage conformance harness).
@@ -288,3 +292,4 @@ resize, sync), `runtime.storage`, with the in-memory backend `runtime.storage.me
 - 2026-11-16: variable recovery tests (torn interior page, watermark beyond data); queue.
 - 2026-11-16: authenticated `Journal` (recovery, batches, proofs) with its ported tests.
 - 2026-11-16: authenticated equal-length-branch crash test on faulty storage.
+- 2026-11-16: metadata_recovery fuzz target and overwrite-crash test on faulty storage.

@@ -551,4 +551,5 @@ pub fn Metadata(comptime K: type, comptime V: type) type {
 
 test {
     _ = @import("tests.zig");
+    _ = @import("recovery_fuzz_test.zig");
 }
