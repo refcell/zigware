@@ -164,6 +164,69 @@ test "tasks_running drops on abort (tasks_running_decreased_immediately_on_abort
     try run("tasks_running drops on abort");
 }
 
+fn Traced(comptime Context: type) type {
+    return struct {
+        fn worker(ctx: Context) anyerror!void {
+            const span = ctx.tracer("commonware_runtime::worker").span("task", .{ .id = 7 });
+            span.event(.debug, "worker ran", .{ .ok = true });
+        }
+
+        fn body(ctx: Context) !void {
+            const tracer = ctx.tracer("commonware_runtime::tests");
+            tracer.event(.info, "started", .{ .tasks = 1 });
+            tracer.event(.trace, "filtered out", .{});
+            const handle = try ctx.child("worker").spawn(worker, .{});
+            try (try handle.join());
+        }
+    };
+}
+
+fn expect_traced(collector: *telemetry.traces.Collector) !void {
+    const all = collector.get_all();
+    try testing.expectEqual(@as(usize, 2), all.len());
+    const started = all.get(0).?;
+    try testing.expectEqualStrings("commonware_runtime::tests", started.target);
+    try started.metadata.expect_content_exact("started");
+    try started.metadata.expect_field_exact("tasks", "1");
+    const ran = collector.get_by_level(.debug).get(0).?;
+    try testing.expectEqualStrings("commonware_runtime::worker", ran.target);
+    try ran.metadata.expect_field_exact("ok", "true");
+    try ran.spans[0].expect_content_exact("task");
+    try ran.spans[0].expect_field_exact("id", "7");
+}
+
+test "context tracers emit to the runner's subscriber, filtered by level" {
+    const Collector = telemetry.traces.Collector;
+    {
+        var collector: Collector = .init(testing.allocator, .{});
+        defer collector.deinit();
+        var subscriber = collector.subscriber();
+        subscriber.level = .debug;
+        const config: deterministic.Config = .{ .subscriber = subscriber };
+        var runner = try deterministic.Runner.init(testing.allocator, config);
+        defer runner.deinit();
+        try (try runner.start_context(Traced(deterministic.Context).body, .{}));
+        try expect_traced(&collector);
+    }
+    var collector: Collector = .init(testing.allocator, .{});
+    defer collector.deinit();
+    var subscriber = collector.subscriber();
+    subscriber.level = .debug;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var buffer: [128]u8 = undefined;
+    const directory = std.fmt.bufPrint(&buffer, ".zig-cache/tmp/{s}/runner", .{tmp.sub_path}) catch
+        unreachable; // The buffer fits the fixed-length temporary path.
+    var runner: production.Runner = undefined;
+    try runner.init(testing.allocator, .{
+        .storage_directory = directory,
+        .subscriber = subscriber,
+    });
+    defer runner.deinit();
+    try (try runner.start_context(Traced(production.Context).body, .{}));
+    try expect_traced(&collector);
+}
+
 /// A detached parent whose child needs 100 ms of cleanup once canceled: while the parent's
 /// own abort awaits that cleanup, the parent has returned but not reported `ended`.
 fn Draining(comptime Context: type) type {

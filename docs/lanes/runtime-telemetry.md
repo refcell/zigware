@@ -54,7 +54,9 @@ the registry API first and report it.
   deterministic runner caps closures at 1 KiB): prefix up to 128 bytes, 4 attributes of up to
   96-byte values.
 - Traces have no global subscriber (library code never touches global state): components take
-  a `Tracer` (from the runtime context once hooked up) and tests read a `Collector`. Spans are
+  a `Tracer` (from `Context.tracer(target)`, over the runner's `Config.subscriber`) and tests
+  read a `Collector`. A subscriber is a type-erased callback with a level filter, so a
+  component without one pays one branch per event and formats nothing. Spans are
   explicit values with parent pointers instead of a task-local current span. The collector is
   bounded (`event_count_max`, overflow counted in `dropped`); commonware keeps every event.
 - OTLP export is not ported (no OpenTelemetry dependency); `status` records the status on the
@@ -127,7 +129,8 @@ the registry API first and report it.
   `tokio::telemetry::init`'s axum route, same `text/plain; version=0.0.4` content type) on its
   own `std.Io.net.Server`, outside the runtime network like commonware. It answers one request
   per connection, one connection at a time, until canceled; run it with `io.concurrent`.
-  Log and OTLP setup are not ported (no global subscriber; see traces above).
+  Log and OTLP setup are not ported: there is no global subscriber, and a runner's
+  `Config.subscriber` takes events instead (see traces above).
 - The production network stress tests run only with `-Dslow-tests` (commonware's
   `test_group("slow")`).
 
@@ -141,9 +144,9 @@ the registry API first and report it.
 - [x] io_uring throughput: one issuing ring thread with batched submission (about 3× faster).
 - [x] io_uring: one ring per worker thread (commonware's layout), at parity with Threaded;
   `runtime::network::echo` and `runtime::storage` benches; io_uring stays opt-in.
-- [ ] Tracing events: level, target, message, and fields, delivered to a subscriber the
-  runtime or Context carries, free when nobody subscribes; examples/ui's logger subscribes
-  with its JSON and text formats. Then tell p2p and consensus-simplex.
+- [x] Tracing events: level, target, message, and fields, delivered to a subscriber the
+  runner carries (`Config.subscriber`, `Context.tracer`), free when nobody subscribes; a
+  `Collector` subscribes for examples/ui's logger. Told p2p and consensus-simplex.
 - [x] Executor-side `runtime_tasks_*` metrics (handed over by the runtime lane).
 - [x] metrics registry: counters, gauges, histograms (bucket layout as commonware), label
   sets, families, registration/scoping by component label, and Prometheus text exposition
@@ -182,3 +185,4 @@ the registry API first and report it.
   manual macOS slow run (Debug) passed the TCP stress test in 57 s; the ReleaseSafe failure
   has not recurred.
 - 2026-11-16: io_uring: one worker ring per thread; runtime benches; io_uring stays opt-in.
+- 2026-11-16: traces: `Subscriber`, `Event`, and `Context.tracer` over the runner's subscriber.

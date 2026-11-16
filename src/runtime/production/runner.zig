@@ -36,6 +36,9 @@ pub const Config = struct {
     /// Capacity of the supervision tree: contexts alive at once.
     max_contexts: u32 = context_mod.default_max_contexts,
     thread_stack_size_bytes: usize = std.Thread.SpawnConfig.default_stack_size,
+    /// Receives the events of `Context.tracer` (tracing's installed subscriber); none drops
+    /// them unformatted.
+    subscriber: ?telemetry.traces.Subscriber = null,
 
     pub fn validate(config: Config) void {
         assert(config.storage_directory.len > 0);
@@ -58,6 +61,7 @@ pub const Runner = struct {
     /// What every `Context` shares, created by the first `start_context`.
     context_runtime: ?context_mod.Runtime,
     max_contexts: u32,
+    subscriber: ?telemetry.traces.Subscriber,
     gpa: Allocator,
 
     /// Initializes in place: the storage and network hold the runner's `Io`, so the runner
@@ -87,6 +91,7 @@ pub const Runner = struct {
         runner.metrics_registry = .init(gpa);
         runner.context_runtime = null;
         runner.max_contexts = config.max_contexts;
+        runner.subscriber = config.subscriber;
         runner.gpa = gpa;
         assert(runner.tcp.io.userdata == runner.file_storage.io.userdata);
     }
@@ -147,6 +152,7 @@ pub const Runner = struct {
             const io_ = runner.io();
             const max = runner.max_contexts;
             runner.context_runtime = try .init(runner.gpa, io_, max, null, runner.metrics());
+            runner.context_runtime.?.subscriber = runner.subscriber;
         }
         const runtime = &runner.context_runtime.?;
         const ctx: Context = .root(runtime, runner.storage(), runner.network(), runner.metrics());

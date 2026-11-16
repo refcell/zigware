@@ -12,10 +12,7 @@ const Level = traces.Level;
 
 pub const Error = error{TraceAssertion};
 
-pub const Field = struct {
-    name: []const u8,
-    value: []const u8,
-};
+pub const Field = traces.Field;
 
 /// An event's or span's content and fields (commonware `EventMetadata`). For a span the
 /// content is its name.
@@ -195,9 +192,19 @@ pub const Collector = struct {
         collector.* = undefined;
     }
 
+    /// A subscriber that records every event into this collector.
+    pub fn subscriber(collector: *Collector) traces.Subscriber {
+        return .{ .ptr = collector, .on_event = on_event };
+    }
+
     /// A tracer that records into this collector under `target`.
     pub fn tracer(collector: *Collector, target: []const u8) traces.Tracer {
-        return .{ .collector = collector, .target = target };
+        return .init(collector.subscriber(), target);
+    }
+
+    fn on_event(ptr: *anyopaque, event: *const traces.Event) void {
+        const collector: *Collector = @ptrCast(@alignCast(ptr));
+        collector.record(event);
     }
 
     /// Every recorded event (commonware `get_all`). Valid until the next event is recorded.
@@ -214,55 +221,39 @@ pub const Collector = struct {
         return collector.events.items.len == 0;
     }
 
-    pub fn record(
-        collector: *Collector,
-        level: Level,
-        target: []const u8,
-        span: ?*const traces.Span,
-        message: []const u8,
-        fields: anytype,
-    ) void {
+    /// Keeps a copy of `event`, or counts it in `dropped`.
+    pub fn record(collector: *Collector, event: *const traces.Event) void {
         collector.lock.lock();
         defer collector.lock.unlock();
         if (collector.events.items.len >= collector.config.event_count_max) {
             collector.dropped += 1;
             return;
         }
-        const event = collector.build(level, target, span, message, fields) catch {
+        const recorded = collector.build(event) catch {
             collector.dropped += 1;
             return;
         };
         const gpa = collector.arena.allocator();
-        collector.events.append(gpa, event) catch {
+        collector.events.append(gpa, recorded) catch {
             collector.dropped += 1;
         };
     }
 
-    fn build(
-        collector: *Collector,
-        level: Level,
-        target: []const u8,
-        span: ?*const traces.Span,
-        message: []const u8,
-        fields: anytype,
-    ) Allocator.Error!RecordedEvent {
+    fn build(collector: *Collector, event: *const traces.Event) Allocator.Error!RecordedEvent {
         const arena = collector.arena.allocator();
-        const names = @typeInfo(@TypeOf(fields)).@"struct".field_names;
-        const event_fields = try arena.alloc(Field, names.len);
-        inline for (names, 0..) |name, index| {
-            var buffer: [traces.field_value_size_max]u8 = undefined;
-            var writer: Writer = .fixed(&buffer);
-            traces.write_field_value(&writer, @field(fields, name)) catch {}; // Truncates.
-            event_fields[index] = .{ .name = name, .value = try arena.dupe(u8, writer.buffered()) };
+        const event_fields = try arena.alloc(Field, event.fields.len);
+        for (event_fields, event.fields) |*copy, field| {
+            const name = try arena.dupe(u8, field.name);
+            copy.* = .{ .name = name, .value = try arena.dupe(u8, field.value) };
         }
         var depth: usize = 0;
-        var cursor = span;
+        var cursor = event.span;
         while (cursor) |active| : (cursor = active.parent) {
             depth += 1;
             assert(depth <= traces.span_depth_max);
         }
         const spans = try arena.alloc(EventMetadata, depth);
-        cursor = span;
+        cursor = event.span;
         for (spans) |*slot| {
             const active = cursor.?;
             const span_fields = try arena.alloc(Field, active.field_count);
@@ -277,10 +268,13 @@ pub const Collector = struct {
         }
         assert(cursor == null);
         return .{
-            .level = level,
-            .target = try arena.dupe(u8, target),
+            .level = event.level,
+            .target = try arena.dupe(u8, event.target),
             .spans = spans,
-            .metadata = .{ .content = try arena.dupe(u8, message), .fields = event_fields },
+            .metadata = .{
+                .content = try arena.dupe(u8, event.message),
+                .fields = event_fields,
+            },
         };
     }
 };
@@ -343,4 +337,67 @@ test "collector bounds its events" {
     try testing.expectEqual(@as(usize, 2), collector.get_all().len());
     try testing.expectEqual(@as(u64, 3), collector.dropped);
     traces.Tracer.none.event(.info, "ignored", .{});
+}
+
+/// A field value that counts how often it is formatted.
+const Counted = struct {
+    count: *u32,
+
+    pub fn format(counted: Counted, writer: *Writer) Writer.Error!void {
+        counted.count.* += 1;
+        try writer.writeAll("counted");
+    }
+};
+
+test "an event nobody takes formats no field" {
+    var formatted: u32 = 0;
+    const value: Counted = .{ .count = &formatted };
+    traces.Tracer.none.event(.@"error", "dropped", .{ .value = value });
+    var span = traces.Tracer.none.span("quiet", .{ .value = value });
+    span.record("later", value);
+    span.event(.@"error", "dropped", .{ .value = value });
+    try testing.expectEqual(@as(u32, 0), formatted);
+
+    var collector: Collector = .init(testing.allocator, .{});
+    defer collector.deinit();
+    var subscriber = collector.subscriber();
+    subscriber.level = .info;
+    const tracer: traces.Tracer = .init(subscriber, "filtered");
+    try testing.expect(!tracer.enabled(.debug) and tracer.enabled(.warn));
+    tracer.event(.debug, "too verbose", .{ .value = value });
+    try testing.expectEqual(@as(u32, 0), formatted);
+    tracer.event(.info, "kept", .{ .value = value });
+    try testing.expectEqual(@as(u32, 1), formatted);
+    try testing.expectEqual(@as(usize, 1), collector.get_all().len());
+    try collector.get_all().get(0).?.metadata.expect_field_exact("value", "counted");
+}
+
+/// A subscriber that keeps the last event's target, message, and innermost span name.
+const Last = struct {
+    target: [32]u8 = undefined,
+    target_len: usize = 0,
+    span_name: []const u8 = "",
+    field_count: usize = 0,
+
+    fn on_event(ptr: *anyopaque, event: *const traces.Event) void {
+        const last: *Last = @ptrCast(@alignCast(ptr));
+        @memcpy(last.target[0..event.target.len], event.target);
+        last.target_len = event.target.len;
+        last.span_name = if (event.span) |span| span.name else "";
+        last.field_count = event.fields.len;
+    }
+};
+
+test "a custom subscriber sees the target, fields, and active span" {
+    var last: Last = .{};
+    const tracer: traces.Tracer = .init(.{ .ptr = &last, .on_event = Last.on_event }, "p2p");
+    tracer.with_target("p2p::tracker").event(.info, "peer", .{ .a = 1, .b = "x" });
+    try testing.expectEqualStrings("p2p::tracker", last.target[0..last.target_len]);
+    try testing.expectEqual(@as(usize, 2), last.field_count);
+    try testing.expectEqualStrings("", last.span_name);
+    const outer = tracer.span("dial", .{});
+    const inner = outer.child("handshake", .{ .peer = 7 });
+    inner.event(.warn, "failed", .{});
+    try testing.expectEqualStrings("handshake", last.span_name);
+    try testing.expectEqual(@as(usize, 0), last.field_count);
 }

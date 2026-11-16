@@ -57,6 +57,9 @@ pub const Config = struct {
     max_contexts: u32 = context_mod.default_max_contexts,
     /// Storage fault injection (commonware `with_storage_fault_config`); none by default.
     storage_faults: storage_mod.faulty.Config = .{},
+    /// Receives the events of `Context.tracer` (tracing's installed subscriber); none drops
+    /// them unformatted.
+    subscriber: ?telemetry.traces.Subscriber = null,
 
     pub fn validate(config: Config) void {
         assert(config.cycle_ns > 0 or config.timeout_ns == null);
@@ -428,6 +431,7 @@ pub const Runner = struct {
             const scope = runner.metrics();
             runner.context_runtime = try .init(runner.allocator, runner.io(), max, auditor, scope);
             runner.context_runtime.?.label_hook = .{ .userdata = runner, .label_next = label_next };
+            runner.context_runtime.?.subscriber = runner.config.subscriber;
         }
         const runtime = &runner.context_runtime.?;
         const ctx: Context = .root(runtime, runner.storage(), runner.network(), runner.metrics());

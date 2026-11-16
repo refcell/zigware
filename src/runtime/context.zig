@@ -35,6 +35,7 @@ const NodeRef = supervision.NodeRef;
 const raw = telemetry.metrics.raw;
 const TaskLabel = telemetry.metrics.task.Label;
 const Registered = telemetry.metrics.Registered;
+const traces = telemetry.traces;
 
 /// Default capacity of the supervision tree: live contexts at once.
 pub const default_max_contexts = 16 * 1024;
@@ -58,6 +59,8 @@ pub const Runtime = struct {
     /// Names the fiber a spawn is about to start, for runtimes that track task labels
     /// themselves (the deterministic runner's `runtime_task_polls` and audit).
     label_hook: ?LabelHook = null,
+    /// Where events from `Context.tracer` go (the runner's `Config.subscriber`), if anywhere.
+    subscriber: ?traces.Subscriber = null,
 
     pub const LabelHook = struct {
         userdata: *anyopaque,
@@ -228,6 +231,13 @@ pub fn Context(comptime Network: type) type {
             result.scope = ctx.scope.child(label);
             result.node = ctx.runtime.tree.child(ctx.node);
             return result;
+        }
+
+        /// A tracer emitting under `target` (a module path, as tracing's `target:`) to the
+        /// runner's subscriber; with none, its events cost nothing.
+        pub fn tracer(ctx: *const Self, target: []const u8) traces.Tracer {
+            assert(target.len > 0);
+            return .init(ctx.runtime.subscriber, target);
         }
 
         /// Adds `key="value"` to every metric registered below (commonware

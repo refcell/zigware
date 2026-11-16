@@ -27,7 +27,9 @@ pub fn @"error"(span: *traces.Span, description: []const u8, err: ?anyerror) voi
 }
 
 test "status sets the span status and error field" {
-    var span = traces.Tracer.none.span("request", .{});
+    var collector: traces.Collector = .init(std.testing.allocator, .{});
+    defer collector.deinit();
+    var span = collector.tracer("server").span("request", .{});
     try std.testing.expect(span.otel_status == .unset);
     ok(&span);
     try std.testing.expect(span.otel_status == .ok);
