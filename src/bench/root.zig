@@ -31,6 +31,7 @@ pub const runner_module = @import("runner.zig");
 pub const Runner = runner_module.Runner;
 pub const RunnerConfig = runner_module.Config;
 pub const Summary = runner_module.Summary;
+pub const tracker = @import("tracker/root.zig");
 
 /// Environment variable naming a JSONL file for custom benchmark metrics.
 pub const metrics_path_env = "COMMONWARE_BENCH_METRICS_PATH";

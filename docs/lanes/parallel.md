@@ -92,6 +92,9 @@ placeholder until this lands, so land `Strategy` first and tell the coordinator 
   identity to record), and a measured offloaded job reports its job and round-trip times when
   `block_on` takes its result, since every Zig task is awaited. Descendant placement is not
   chosen: the pool is one group.
+- bench tracker: commonware reads TOML with the `toml` crate; `bench.tracker.toml` is a small
+  iterative TOML subset (no multi-line strings or dates) bounded by `depth_max`. Config
+  errors keep commonware's messages (`unknown field`, `must be a non-empty array`, ...).
 - Fallible ops return the first error in chunk order (commonware allows any).
 - `run_tiles` plans at most 64 workers (one pool job each); `Tiles.fill_collect` returns an
   allocated slice and `OutOfMemory` if a worker's result list cannot grow.
@@ -115,6 +118,8 @@ placeholder until this lands, so land `Strategy` first and tell the coordinator 
 - [ ] Fuzz targets and benches.
 
 ## Log
+- 2026-11-16: bench tracker config (`bench.tracker.load_config`) over a TOML subset, with
+  commonware's config tests and its tracking config as a fixture.
 - 2026-11-16: adaptive spawn: `Rayon.with_policy` inlines or offloads per call site.
 - 2026-11-13: `Rayon.with_policy`: operations adapt once at their outermost call (keyed by
   return address, length bucket, work bucket), meter pool-job busy time, record only successes.
