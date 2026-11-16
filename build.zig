@@ -56,7 +56,8 @@ const packages = [_]Package{
         "conformance",
     } },
     .{ .name = "clearing", .deps = &.{
-        "codec", "cryptography", "formatting", "parallel", "storage", "utils", "runtime",
+        "codec",   "cryptography", "formatting", "parallel", "storage", "utils",
+        "runtime", "conformance",  "invariants",
     } },
     .{ .name = "p2p", .deps = &.{
         "actor",       "codec", "cryptography", "math", "parallel", "runtime", "stream", "utils",
