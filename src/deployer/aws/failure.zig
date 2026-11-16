@@ -1,9 +1,10 @@
-//! Why a deployment was refused before any AWS call: the configuration variants of commonware's
+//! Why a deployment failed: the configuration and launch variants of commonware's
 //! `deployer::aws::Error`, with their payloads. Zig errors carry no data, so validation returns
 //! a `Failure` (null when valid); `format` prints commonware's `Display` text.
 
 const std = @import("std");
 const Io = std.Io;
+const LaunchError = @import("ec2.zig").LaunchError;
 
 pub const Failure = union(enum) {
     invalid_tag: []const u8,
@@ -24,6 +25,9 @@ pub const Failure = union(enum) {
         /// Sorted and distinct, as commonware's `BTreeSet` yields them.
         instance_types: []const []const u8,
     },
+    unsupported_instance_type: []const u8,
+    no_subnets_available,
+    aws_ec2: LaunchError,
 
     pub fn format(failure: Failure, writer: *Io.Writer) Io.Writer.Error!void {
         switch (failure) {
@@ -59,6 +63,12 @@ pub const Failure = union(enum) {
                 "storage_throughput for {s} must be between 125 and 2000 MiB/s: {d}",
                 .{ f.target, f.storage_throughput },
             ),
+            .unsupported_instance_type => |instance_type| try writer.print(
+                "no subnet supports instance type: {s}",
+                .{instance_type},
+            ),
+            .no_subnets_available => try writer.writeAll("no subnets available"),
+            .aws_ec2 => |err| try writer.print("AWS EC2 error: {f}", .{err}),
             .availability_zone_group_unsupported => |f| {
                 try writer.print(
                     "availability zone group '{s}' in region '{s}' has no mutually-supported " ++

@@ -1,11 +1,20 @@
-//! The pure parts of commonware's `deployer::aws::ec2`: EBS storage classes and their
-//! request-side limits, and how a failed `RunInstances` call is classified (retry the same
-//! request, try another availability zone, or give up). The EC2 calls themselves go through
-//! the AWS client.
+//! commonware's `deployer::aws::ec2`: EBS storage classes and their request-side limits, how a
+//! failed `RunInstances` call is classified (retry the same request, try another availability
+//! zone, or give up), and `launch_instances`, which sends `RunInstances` through the AWS client.
 
 const std = @import("std");
 const assert = std.debug.assert;
+const builtin = @import("builtin");
+const Allocator = std.mem.Allocator;
+const Io = std.Io;
 const Failure = @import("failure.zig").Failure;
+const aws = @import("mod.zig");
+const aws_utils = @import("utils.zig");
+const create = @import("create.zig");
+const query = @import("query.zig");
+const Client = @import("client.zig").Client;
+
+const log = std.log.scoped(.deployer);
 
 /// EBS volume types (the EC2 API's `VolumeType`). Any other storage class is refused, as the
 /// SDK's `VolumeType::try_parse` refuses unknown values.
@@ -117,10 +126,27 @@ const retryable_launch_status_codes = [_]u16{ 500, 502, 503, 504 };
 /// How a RunInstances call failed: a service error with its code and HTTP status, or a
 /// transport failure (timeout, I/O, or an unparseable response), which may resolve on retry.
 pub const LaunchError = union(enum) {
-    service: struct { code: ?[]const u8, status: u16 },
+    service: struct { code: ?[]const u8, status: u16, message: ?[]const u8 = null },
     transport,
     /// Request construction failed; retrying the same request cannot help.
     construction,
+    /// A dispatch failure the transport did not classify as transient (such as failing to
+    /// resolve credentials); retrying cannot help.
+    dispatch,
+
+    /// The SDK's error text differs; this names the same facts.
+    pub fn format(err: LaunchError, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+        switch (err) {
+            .service => |service| {
+                try writer.print("service error (status {d})", .{service.status});
+                if (service.code) |code| try writer.print(": {s}", .{code});
+                if (service.message) |message| try writer.print(": {s}", .{message});
+            },
+            .transport => try writer.writeAll("transport failure"),
+            .construction => try writer.writeAll("request construction failure"),
+            .dispatch => try writer.writeAll("dispatch failure"),
+        }
+    }
 };
 
 /// Whether the region may have capacity for the instance type later.
@@ -154,7 +180,7 @@ pub fn is_fatal_launch_error_code(code: []const u8) bool {
 pub fn is_retryable_launch_error(err: LaunchError) bool {
     const service = switch (err) {
         .transport => return true,
-        .construction => return false,
+        .construction, .dispatch => return false,
         .service => |service| service,
     };
     if (service.code) |code| {
@@ -164,6 +190,258 @@ pub fn is_retryable_launch_error(err: LaunchError) bool {
         }
     }
     return std.mem.indexOfScalar(u16, &retryable_launch_status_codes, service.status) != null;
+}
+
+// --- RunInstances ------------------------------------------------------------------------------
+
+/// How long `launch_instances` waits before retrying (zero in tests, as in commonware).
+pub const launch_retry_interval_ms: u64 = if (builtin.is_test) 0 else aws_utils.retry_interval_ms;
+
+/// What to launch: commonware `launch_instances`' arguments other than the subnets.
+pub const LaunchRequest = struct {
+    ami_id: []const u8,
+    instance_type: []const u8,
+    storage_size: i32,
+    storage_class: VolumeType,
+    storage_iops: ?i32 = null,
+    storage_throughput: ?i32 = null,
+    bandwidth_weighting: aws.BandwidthWeighting = .default,
+    key_name: []const u8,
+    sg_id: []const u8,
+    count: i32,
+    name: []const u8,
+    tag: []const u8,
+};
+
+pub const Launched = struct { instance_ids: []const []const u8, az: []const u8 };
+
+pub const LaunchResult = union(enum) { ok: Launched, failure: Failure };
+
+/// The `RunInstances` Query body for one probe of `subnet_id` (allocates from `arena`).
+/// Parameter order is not significant to EC2.
+pub fn run_instances_body(
+    arena: Allocator,
+    request: *const LaunchRequest,
+    subnet_id: []const u8,
+    client_token: []const u8,
+) ![]const u8 {
+    assert(subnet_id.len > 0);
+    assert(client_token.len > 0);
+    var body = try query.Body.init(arena, "RunInstances", query.ec2_version);
+    try body.add("BlockDeviceMapping.1.DeviceName", "/dev/sda1");
+    try body.add("BlockDeviceMapping.1.Ebs.DeleteOnTermination", "true");
+    if (request.storage_iops) |iops| try body.add_int("BlockDeviceMapping.1.Ebs.Iops", iops);
+    if (request.storage_throughput) |throughput| {
+        try body.add_int("BlockDeviceMapping.1.Ebs.Throughput", throughput);
+    }
+    try body.add_int("BlockDeviceMapping.1.Ebs.VolumeSize", request.storage_size);
+    try body.add("BlockDeviceMapping.1.Ebs.VolumeType", request.storage_class.as_str());
+    try body.add("ImageId", request.ami_id);
+    try body.add("InstanceType", request.instance_type);
+    try body.add("KeyName", request.key_name);
+    try body.add_int("MaxCount", request.count);
+    try body.add_int("MinCount", request.count);
+    try body.add("TagSpecification.1.ResourceType", "instance");
+    try body.add("TagSpecification.1.Tag.1.Key", "deployer");
+    try body.add("TagSpecification.1.Tag.1.Value", request.tag);
+    try body.add("TagSpecification.1.Tag.2.Key", "name");
+    try body.add("TagSpecification.1.Tag.2.Value", request.name);
+    try body.add("ClientToken", client_token);
+    try body.add("NetworkInterface.1.AssociatePublicIpAddress", "true");
+    try body.add("NetworkInterface.1.DeviceIndex", "0");
+    try body.add("NetworkInterface.1.SecurityGroupId.1", request.sg_id);
+    try body.add("NetworkInterface.1.SubnetId", subnet_id);
+    // The standard split is left unset so instance types without configurable weighting
+    // launch unchanged.
+    if (!request.bandwidth_weighting.is_default()) {
+        const weighting = request.bandwidth_weighting.name();
+        try body.add("NetworkPerformanceOptions.BandwidthWeighting", weighting);
+    }
+    return body.written();
+}
+
+/// A random (version 4) UUID, as `uuid::Uuid::new_v4().to_string()` formats it.
+pub fn new_client_token(io: Io) [36]u8 {
+    var bytes: [16]u8 = undefined;
+    io.random(&bytes);
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    const hex = std.fmt.bytesToHex(bytes, .lower);
+    var out: [36]u8 = undefined;
+    _ = std.fmt.bufPrint(&out, "{s}-{s}-{s}-{s}-{s}", .{
+        hex[0..8], hex[8..12], hex[12..16], hex[16..20], hex[20..32],
+    }) catch unreachable; // Proof: 32 hex digits and 4 dashes fill exactly 36 bytes.
+    assert(out[14] == '4');
+    return out;
+}
+
+const Attempt = union(enum) { instances: []const []const u8, failed: LaunchError };
+
+/// Sends one `RunInstances` request. Results are allocated from `arena`.
+fn try_launch_instances(client: *const Client, arena: Allocator, body: []const u8) !Attempt {
+    assert(body.len > 0);
+    const outcome = try client.ec2_query(arena, body);
+    const response = switch (outcome) {
+        .io_failure, .timeout => return .{ .failed = .transport },
+        .other => |other| return .{ .failed = if (other.transient) .transport else .dispatch },
+        .response => |response| response,
+    };
+    if (response.status < 200 or response.status >= 300) {
+        // An unreadable error body is still a service error, classified by its status.
+        const parsed = query.service_error(arena, response.body) catch
+            query.ServiceError{ .code = null, .message = null };
+        return .{ .failed = .{ .service = .{
+            .code = parsed.code,
+            .status = response.status,
+            .message = parsed.message,
+        } } };
+    }
+    var ids: std.ArrayList([]const u8) = .empty;
+    const path = [_][]const u8{ "RunInstancesResponse", "instancesSet", "item", "instanceId" };
+    const Collector = struct { list: *std.ArrayList([]const u8), arena: Allocator, failed: bool };
+    var collector: Collector = .{ .list = &ids, .arena = arena, .failed = false };
+    query.scan(response.body, &path, &collector, struct {
+        fn visit(c: *Collector, text: []const u8) bool {
+            c.list.append(c.arena, text) catch {
+                c.failed = true;
+                return false;
+            };
+            return true;
+        }
+    }.visit) catch return .{ .failed = .transport }; // Like the SDK's response error.
+    if (collector.failed) return error.OutOfMemory;
+    if (ids.items.len == 0) return .{ .failed = .transport };
+    return .{ .instances = ids.items };
+}
+
+/// Launches EC2 instances (commonware `launch_instances`). Filters `subnets` to availability
+/// zones that offer the instance type, probes them in turn from `start_index`, and rescans every
+/// usable subnet after a capacity failure; a subnet out of addresses is dropped for this launch.
+/// Each probe owns one client token across retries of the same request. Results are allocated
+/// from `arena`; each attempt's scratch comes from `gpa` and is freed.
+pub fn launch_instances(
+    client: *const Client,
+    gpa: Allocator,
+    arena: Allocator,
+    request: *const LaunchRequest,
+    subnets: []const create.Subnet,
+    az_support: []const create.AzSupport,
+    start_index: usize,
+) !LaunchResult {
+    if (validate_storage_options(
+        request.name,
+        request.storage_class,
+        request.storage_size,
+        request.storage_iops,
+        request.storage_throughput,
+    )) |failure| return .{ .failure = failure };
+    const eligible = try eligible_subnets(arena, request.instance_type, subnets, az_support);
+    if (eligible.len == 0) {
+        return .{ .failure = .{ .unsupported_instance_type = request.instance_type } };
+    }
+    const unavailable = try arena.alloc(bool, eligible.len);
+    @memset(unavailable, false);
+    var scratch: std.heap.ArenaAllocator = .init(gpa);
+    defer scratch.deinit();
+    var last_error: ?LaunchError = null;
+    var scan: u64 = 0;
+    // Retries until capacity returns, as commonware does; a canceled sleep ends it.
+    while (true) {
+        scan +|= 1;
+        var retry_capacity = false;
+        for (0..eligible.len) |offset| {
+            const index = (start_index + offset) % eligible.len;
+            if (unavailable[index]) continue;
+            const subnet = eligible[index];
+            const err = switch (try probe(client, &scratch, arena, request, subnet.id)) {
+                .instances => |ids| return .{ .ok = .{ .instance_ids = ids, .az = subnet.az } },
+                .failed => |err| err,
+            };
+            last_error = err;
+            if (is_capacity_error(err)) {
+                retry_capacity = true;
+                log.warn("insufficient instance capacity, trying next subnet: name={s} " ++
+                    "az={s} scan={d} error={f}", .{ request.name, subnet.az, scan, err });
+            } else if (is_subnet_unavailable_error(err)) {
+                unavailable[index] = true;
+                log.debug("subnet unavailable, trying next subnet: name={s} az={s} error={f}", .{
+                    request.name, subnet.az, err,
+                });
+            } else return .{ .failure = .{ .aws_ec2 = err } };
+        }
+        // Another scan starts only after a capacity failure; other completed scans are final.
+        if (!retry_capacity) break;
+        try client.io.sleep(.fromMilliseconds(launch_retry_interval_ms), .awake);
+    }
+    // Proof: the first scan probes every eligible subnet, and there is at least one.
+    return .{ .failure = .{ .aws_ec2 = last_error.? } };
+}
+
+/// The subnets whose availability zone offers `instance_type`, in order.
+fn eligible_subnets(
+    arena: Allocator,
+    instance_type: []const u8,
+    subnets: []const create.Subnet,
+    az_support: []const create.AzSupport,
+) ![]const create.Subnet {
+    assert(instance_type.len > 0);
+    var eligible: std.ArrayList(create.Subnet) = try .initCapacity(arena, subnets.len);
+    for (subnets) |subnet| {
+        const support = for (az_support) |support| {
+            if (std.mem.eql(u8, support.az, subnet.az)) break support;
+        } else continue;
+        for (support.instance_types) |offered| {
+            if (std.mem.eql(u8, offered, instance_type)) {
+                eligible.appendAssumeCapacity(subnet);
+                break;
+            }
+        }
+    }
+    assert(eligible.items.len <= subnets.len);
+    return eligible.items;
+}
+
+/// Probes one subnet: retries the same request, with the same client token, while the failure
+/// is retryable and says nothing about capacity or addresses. The result is copied to `arena`.
+fn probe(
+    client: *const Client,
+    scratch: *std.heap.ArenaAllocator,
+    arena: Allocator,
+    request: *const LaunchRequest,
+    subnet_id: []const u8,
+) !Attempt {
+    const token = new_client_token(client.io);
+    while (true) {
+        _ = scratch.reset(.retain_capacity);
+        const allocator = scratch.allocator();
+        const body = try run_instances_body(allocator, request, subnet_id, &token);
+        const err = switch (try try_launch_instances(client, allocator, body)) {
+            .instances => |ids| {
+                const owned = try arena.alloc([]const u8, ids.len);
+                for (owned, ids) |*slot, id| slot.* = try arena.dupe(u8, id);
+                return .{ .instances = owned };
+            },
+            .failed => |err| err,
+        };
+        const moves_on = is_capacity_error(err) or is_subnet_unavailable_error(err);
+        if (moves_on or !is_retryable_launch_error(err)) {
+            return .{ .failed = try dupe_launch_error(arena, err) };
+        }
+        log.debug("launch_instances failed, retrying: name={s} error={f}", .{ request.name, err });
+        try client.io.sleep(.fromMilliseconds(launch_retry_interval_ms), .awake);
+    }
+}
+
+fn dupe_launch_error(arena: Allocator, err: LaunchError) !LaunchError {
+    const service = switch (err) {
+        .service => |service| service,
+        else => return err,
+    };
+    return .{ .service = .{
+        .code = if (service.code) |code| try arena.dupe(u8, code) else null,
+        .status = service.status,
+        .message = if (service.message) |message| try arena.dupe(u8, message) else null,
+    } };
 }
 
 const testing = std.testing;
@@ -190,6 +468,11 @@ test "launch errors are classified as commonware classifies them" {
     try testing.expect(!is_retryable_launch_error(service_error(null, 400)));
     try testing.expect(is_retryable_launch_error(.transport));
     try testing.expect(!is_retryable_launch_error(.construction));
+    try testing.expect(!is_retryable_launch_error(.dispatch));
+}
+
+test {
+    _ = @import("ec2_test.zig");
 }
 
 test "storage boundaries follow the AWS limits" {

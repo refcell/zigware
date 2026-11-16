@@ -34,6 +34,14 @@ test vectors. Tests never call AWS and never hold credentials.
 - `deployer.cli`: `parse(args)` returns `.ok` (`Parsed{ verbose, command }`, where `command`
   is `.help`, `.version`, `.none`, or `.aws` with each subcommand's options) or `.failure`
   (`Failure{ kind, argument }`); `usage` and `version`.
+- `deployer.aws.client`: `Client{ io, transport, credentials, region }` with `ec2_query`
+  (SigV4-signed EC2 Query POST); `Transport` (`send` returns an `Outcome`: a response,
+  `io_failure`, `timeout`, or `other{ transient }`), `HttpTransport` over `std.http.Client`, and
+  `Replay` (scripted outcomes for tests). `deployer.aws.query`: Query bodies (`Body`) and the
+  XML scanner (`scan`, `first_text`, `decode_text`, `service_error`).
+- `deployer.aws.ec2.launch_instances(client, gpa, arena, request, subnets, az_support,
+  start_index)` returns `.ok` (`Launched{ instance_ids, az }`) or `.failure`;
+  `run_instances_body`, `new_client_token`.
 - `utils.fuzz` is now exported (the seeded fuzz driver over `FuzzRng`).
 
 ## Decisions
@@ -62,6 +70,12 @@ test vectors. Tests never call AWS and never hold credentials.
   `--name=value`, required options, defaults, a repeated option fails, a flag-like word is not
   a value, Rust's `u64::from_str` for numbers, empty paths rejected), but returns a
   `Failure` instead of printing clap's messages; `usage` is a short summary, not clap's text.
+- AWS calls go through `client.Transport`, which tests replace with `Replay` the way
+  commonware's tests replace the SDK's HTTP connector; nothing in the suite opens a socket to
+  AWS. `RunInstances` parameters are written in our own order (EC2 does not care), and
+  `aws_ec2` failures print the code, status, and message rather than the SDK's error text.
+  As in commonware, `launch_instances` retries capacity failures until capacity returns;
+  canceling its task ends it.
 - `IpAddr` is the deployer's own: Rust's `IpAddr` parsing and display (RFC 5952 compression,
   `::ffff:a.b.c.d` for IPv4-mapped addresses), since `std.Io.net.IpAddress` formats ports.
 
@@ -76,14 +90,17 @@ test vectors. Tests never call AWS and never hold credentials.
   limits and RunInstances error classification.
 - [x] `attach.rs` host lookup (4 tests), `list.rs` loading and ordering, and the deployment
   directory (`deployer.aws.deployments`).
-- [ ] `create.rs`'s `run_launches` ordering (2 async
-  tests); `ec2.rs`'s launch retry loop (11 async tests, over a mock client).
+- [x] `ec2.rs`'s launch retry loop (`launch_instances` and its 11 tests, over `Replay`).
+- [ ] `create.rs`'s `run_launches` ordering (2 async tests).
 - [x] SigV4 signer with the AWS documentation's test vectors; S3 presigned URLs
   (`deployer.aws.sigv4`).
 - [x] CLI argument parsing (`deployer.cli`) with tests and a seeded fuzz. The `deployer`
   binary itself waits for the AWS client.
-- [ ] AWS client interface (EC2 and S3 query/REST calls over `std.http`), never exercised
+- [x] AWS client interface: SigV4-signed EC2 Query requests over `std.http`, never exercised
   against AWS in tests.
+- [ ] The remaining EC2 calls (VPC, subnets, security groups, key pairs, describe/terminate,
+  peering) and S3 (bucket, upload, presign) over the client, then the create, update,
+  authorize, destroy, clean, profile, and attach flows and the `deployer` binary.
 - [ ] Fuzz: YAML parse/write round trips, config validation, SigV4 canonicalization.
 
 ## Log
