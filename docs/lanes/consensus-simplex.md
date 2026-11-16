@@ -163,6 +163,12 @@ resolver; those lanes are running, so do the types first and the actors as they 
   randomness come from `std.Io` (`actors/context.zig`), so the deterministic runtime replays
   a run. Batcher rounds live in a view-sorted list rather than a `BTreeMap`. Certificate
   construction runs inline (no offload). Metrics and tracing spans in the actors follow.
+- Tracing: each actor holds a `traces.Tracer` (default `.none`) that the engine sets from the
+  actor's child context under commonware's module path (`trace_target`), and emits
+  commonware's events at the same sites and levels. View and epoch fields go out as integers
+  (`.get()`): the telemetry encoder cannot print a non-exhaustive enum yet. Spans and the
+  events inside voter `state.rs`/`round.rs`/`slot.rs` (no tracer in the state machine yet)
+  follow.
 - The voter runs each automaton request as an `io.concurrent` task that pushes its answer
   into the inbox; ids discard answers that raced a cancelation. Senders are held by pointer
   (p2p's limited sender is stateful) and the peers each send returns are freed.
@@ -218,7 +224,10 @@ resolver; those lanes are running, so do the types first and the actors as they 
   attributable_reporter_filtering, and split_views_no_lockup (with the nullify-only mock).
   Next: the twins campaigns (on p2p's split senders and receivers), certified splits,
   hailstorm, and the rest, seeded.
-- [ ] Fuzz targets (commonware consensus/fuzz).
+- [ ] Tracing: actor events are done (voter, batcher, resolver, engine); spans and the
+  voter state machine's events follow.
+- [x] Fuzz targets (commonware consensus/fuzz): owned by the crypto lane in
+  `src/consensus/fuzz/`.
 
 ## Log
 - 2026-11-13: types.rs (Epoch/Height/View/Round, term math, FixedEpocher); 4 conformance
@@ -266,3 +275,5 @@ resolver; those lanes are running, so do the types first and the actors as they 
 - 2026-11-16: bls12381_threshold vrf Scheme (signing, seeds, Seedable) with vrf.rs's tests;
   Random V0/V1 select-leader conformance hashes match.
 - 2026-11-16: twins uses p2p's `simulated.SplitTarget` (5826612); the stand-in is removed.
+- 2026-11-16: commonware's tracing events in the voter, batcher, resolver, and engine, at
+  commonware's targets, with a Collector-checked DST.

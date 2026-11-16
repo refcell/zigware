@@ -3,7 +3,8 @@
 //! verifies, and hands certificates to the voter.
 //!
 //! `P` declares `Scheme`, `Blocker`, `Digest`, `Reporter`, `Relay`, `Strategy`, and
-//! `Receiver` (a p2p receiver). Metrics and tracing spans are not ported yet.
+//! `Receiver` (a p2p receiver). Events go to `tracer` under commonware's target; its spans
+//! and metrics are not ported yet.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -22,6 +23,10 @@ const inbox_mod = @import("../inbox.zig");
 const ingress = @import("ingress.zig");
 const round_mod = @import("round.zig");
 const voter_ingress = @import("../voter/ingress.zig");
+const Tracer = @import("runtime").telemetry.traces.Tracer;
+
+/// The tracing target of the batcher's events (commonware's module path).
+pub const trace_target = "commonware_consensus::simplex::actors::batcher";
 
 const View = consensus_types.View;
 const Epoch = consensus_types.Epoch;
@@ -93,6 +98,8 @@ pub fn Actor(comptime P: type) type {
         /// Rounds by ascending view.
         work: std.ArrayList(Entry) = .empty,
         dirty_views: std.ArrayList(View) = .empty,
+        /// Receives the batcher's events; the engine sets it from its context.
+        tracer: Tracer = .none,
 
         pub fn init(gpa: Allocator, io: Io, cfg: Config(P)) !struct { Self, Mailbox } {
             const participants = cfg.scheme.participants();
@@ -155,7 +162,10 @@ pub fn Actor(comptime P: type) type {
             while (true) {
                 const event = try inbox.next();
                 switch (event) {
-                    .closed => return,
+                    .closed => {
+                        self.tracer.event(.debug, "source closed, stopping batcher", .{});
+                        return;
+                    },
                     .mailbox => |message| try self.handle_mailbox(voter_mailbox, message),
                     .certificate => |message| {
                         var owned = message;
@@ -253,7 +263,13 @@ pub fn Actor(comptime P: type) type {
             self.record_peer_activity(sender);
             if (!self.viewport().admits_certificate(view)) return;
             const kind = std.meta.activeTag(message);
-            if (self.find(view)) |existing| if (existing.has_certificate(kind)) return;
+            if (self.find(view)) |existing| if (existing.has_certificate(kind)) {
+                self.tracer.event(.trace, "skipping duplicate certificate", .{
+                    .view = view.get(),
+                    .kind = kind,
+                });
+                return;
+            };
             var rng: context.IoRng = .{ .io = self.io };
             const scheme = self.cfg.scheme;
             if (!try message.verify(self.gpa, &rng, scheme, self.cfg.strategy)) {
@@ -305,8 +321,14 @@ pub fn Actor(comptime P: type) type {
                 if (me) |signer| if (round.try_forward_proposal(signer)) |proposal| {
                     try voter.proposal(proposal);
                 };
-                if (!self.cfg.lookahead.admits(self.current.view, view)) continue;
-                try self.process_view(voter, round);
+                if (!self.cfg.lookahead.admits(self.current.view, view)) {
+                    self.tracer.event(.trace, "skipping out-of-window round processing", .{
+                        .current = self.current.view.get(),
+                        .view = view.get(),
+                    });
+                    continue;
+                }
+                try self.process_view(voter, view, round);
             }
             self.dirty_views.clearRetainingCapacity();
             const window = self.viewport();
@@ -318,7 +340,7 @@ pub fn Actor(comptime P: type) type {
             self.work.replaceRangeAssumeCapacity(0, pruned, &.{});
         }
 
-        fn process_view(self: *Self, voter: VoterMailbox, round: *Round) !void {
+        fn process_view(self: *Self, voter: VoterMailbox, view: View, round: *Round) !void {
             var rng: context.IoRng = .{ .io = self.io };
             const participants = self.cfg.scheme.participants();
             // Each batch either consumes pending votes (at most one of each kind per
@@ -326,8 +348,10 @@ pub fn Actor(comptime P: type) type {
             const attempts_max = 3 * (participants.len() + 1);
             assert(attempts_max > 3);
             for (0..attempts_max) |_| {
-                var batch = try round.try_construct(self.gpa, &rng, self.cfg.strategy) orelse
+                var batch = try round.try_construct(self.gpa, &rng, self.cfg.strategy) orelse {
+                    self.tracer.event(.trace, "no verifier ready", .{ .view = view.get() });
                     return;
+                };
                 defer batch.deinit(self.gpa);
                 for (batch.invalid) |participant| {
                     const key = participants.key(participant) orelse continue;
@@ -335,7 +359,17 @@ pub fn Actor(comptime P: type) type {
                 }
                 if (batch.certificate) |certificate| {
                     batch.certificate = null;
+                    self.tracer.event(.debug, "recovered certificate, forwarding to voter", .{
+                        .view = view.get(),
+                        .kind = std.meta.activeTag(certificate),
+                    });
                     try voter.recovered(self.gpa, certificate);
+                }
+                if (batch.processed != 0) {
+                    self.tracer.event(.trace, "processed votes", .{
+                        .view = view.get(),
+                        .batch = batch.processed,
+                    });
                 }
             }
             unreachable; // Proof: the verifier runs out of work within `attempts_max` batches.

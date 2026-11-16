@@ -18,6 +18,9 @@ const batcher = @import("actors/batcher/actor.zig");
 const voter = @import("actors/voter/actor.zig");
 const resolver = @import("actors/resolver/actor.zig");
 
+/// The tracing target of the engine's events (commonware's module path).
+const trace_target = "commonware_consensus::simplex::engine";
+
 /// One network channel: a sender and a receiver (both owned by the engine once started).
 pub fn Channel(comptime P: type) type {
     return struct { sender: P.Sender, receiver: P.Receiver };
@@ -180,8 +183,8 @@ pub fn Engine(comptime P: type) type {
             votes: *P.Receiver,
             certificates: *P.Receiver,
         ) void {
-            _ = ctx;
             defer self.mark_stopped();
+            self.batcher.tracer = ctx.tracer(batcher.trace_target);
             self.batcher.run(voter_mailbox, votes, certificates) catch |err| switch (err) {
                 error.Canceled => {},
                 else => std.debug.panic("simplex batcher failed: {t}", .{err}),
@@ -194,8 +197,8 @@ pub fn Engine(comptime P: type) type {
             vote_sender: *P.Sender,
             certificate_sender: *P.Sender,
         ) void {
-            _ = ctx;
             defer self.mark_stopped();
+            self.voter.tracer = ctx.tracer(voter.trace_target);
             self.voter.run(
                 self.batcher_mailbox,
                 self.resolver_mailbox,
@@ -214,6 +217,7 @@ pub fn Engine(comptime P: type) type {
             backfill: Channel(P),
         ) void {
             defer self.mark_stopped();
+            self.resolver.tracer = ctx.tracer(resolver.trace_target);
             const scope = ctx.scope;
             self.resolver.run(scope, voter_mailbox, backfill.sender, backfill.receiver) catch |err|
                 switch (err) {
@@ -229,6 +233,7 @@ pub fn Engine(comptime P: type) type {
             defer shutdown.deinit();
             _ = shutdown.wait() catch return; // Canceled: the engine ended first.
             assert(shutdown.peek() != null);
+            ctx.tracer(trace_target).event(.debug, "context shutdown, stopping engine", .{});
             self.mark_stopped();
         }
 

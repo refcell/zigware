@@ -616,6 +616,30 @@ test "all online" {
     _ = try run_seeded(0, all_online, .{ 5, 50 });
 }
 
+test "the voter traces startup and finalization at commonware's target" {
+    const traces = runtime.telemetry.traces;
+    var collector = traces.Collector.init(gpa, .{});
+    defer collector.deinit();
+    var subscriber = collector.subscriber();
+    subscriber.level = .debug;
+    const config: runtime.deterministic.Config = .{ .seed = 0, .subscriber = subscriber };
+    var runner = try runtime.deterministic.Runner.init(gpa, config);
+    defer runner.deinit();
+    try (try runner.start_context(all_online, .{ 4, 5 }));
+    try collector.get_by_level(.info).expect_message_exact("consensus initialized");
+    try collector.get_by_level(.debug).expect_message_exact("broadcasting finalization");
+    try collector.get_by_level(.debug).expect_message_exact("broadcasting notarize");
+    const at_voter = struct {
+        fn check(_: void, event: traces.collector.RecordedEvent) bool {
+            const voter_target = "commonware_consensus::simplex::actors::voter";
+            return std.mem.eql(u8, event.target, voter_target) and
+                std.mem.eql(u8, event.metadata.content, "consensus initialized");
+        }
+    }.check;
+    try collector.get_all().expect_event({}, at_voter);
+    try testing.expect(collector.get_by_level(.warn).is_empty());
+}
+
 /// commonware `slow_and_lossy_links_seeded`: half the messages drop.
 fn slow_and_lossy_links(ctx: Context) !void {
     var harness: Harness = undefined;

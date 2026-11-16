@@ -7,7 +7,8 @@
 //! Commonware's `select_loop!` becomes one `Inbox`: the mailbox is pumped into it, and each
 //! automaton request runs as a task that pushes its response. A task is canceled to abort its
 //! request; ids discard responses that raced the cancelation. Reported activities and relayed
-//! payloads are borrowed for the call. Metrics and tracing spans are not ported yet.
+//! payloads are borrowed for the call. Events go to `tracer` under commonware's target; its
+//! per-view spans and metrics are not ported yet.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -23,6 +24,7 @@ const types = @import("../../types.zig");
 const config_mod = @import("../../config.zig");
 const metrics = @import("../../metrics.zig");
 const inbox_mod = @import("../inbox.zig");
+const context_mod = @import("../context.zig");
 const batcher_ingress = @import("../batcher/ingress.zig");
 const resolver_ingress = @import("../resolver/ingress.zig");
 const ingress = @import("ingress.zig");
@@ -35,6 +37,10 @@ const Rnd = consensus_types.Round;
 const Duration = utils.Duration;
 const TimeoutReason = metrics.TimeoutReason;
 const variable = storage.journal.segmented.variable;
+const Tracer = runtime.telemetry.traces.Tracer;
+
+/// The tracing target of the voter's events (commonware's module path).
+pub const trace_target = "commonware_consensus::simplex::actors::voter";
 
 pub fn Config(comptime P: type) type {
     return struct {
@@ -169,6 +175,8 @@ pub fn Actor(comptime P: type) type {
         pending_verify: ?PendingVerify = null,
         certify_tasks: std.ArrayList(CertifyTask) = .empty,
         next_id: u64 = 0,
+        /// Receives the voter's events; the engine sets it from its context.
+        tracer: Tracer = .none,
 
         pub fn init(gpa: Allocator, io: Io, cfg: Config(P)) !struct { Self, Mailbox } {
             const pair = try @import("actor").mailbox.new(Message, gpa, io, cfg.mailbox_size);
@@ -245,6 +253,13 @@ pub fn Actor(comptime P: type) type {
             defer removed.deinit(self.gpa);
             try self.state.prune(&removed);
             if (removed.items.len == 0) return;
+            const last_finalized = self.state.last_finalized();
+            for (removed.items) |view| {
+                self.tracer.event(.debug, "pruned view", .{
+                    .view = view.get(),
+                    .last_finalized = last_finalized.get(),
+                });
+            }
             if (self.journal) |*journal| _ = try journal.prune(self.state.min_active().get());
         }
 
@@ -320,6 +335,10 @@ pub fn Actor(comptime P: type) type {
         fn try_propose(self: *Self, inbox: *Inbox) !void {
             assert(self.pending_propose == null);
             const request = self.state.try_propose() orelse return;
+            self.tracer.event(.debug, "requested proposal from automaton", .{
+                .round = request.context().round,
+                .handoff = request.is_handoff(),
+            });
             const id = self.take_id();
             const future = try self.io.concurrent(propose_task, .{ self, inbox, request, id });
             self.pending_propose = .{
@@ -345,6 +364,9 @@ pub fn Actor(comptime P: type) type {
                 },
                 .wait => return,
             };
+            self.tracer.event(.debug, "requested proposal verification", .{
+                .round = ready.proposal.round,
+            });
             const id = self.take_id();
             const args = .{ self, links.inbox, ready.context, ready.proposal.payload, id };
             const future = try self.io.concurrent(verify_task, args);
@@ -421,10 +443,11 @@ pub fn Actor(comptime P: type) type {
             }
             try self.certify_tasks.ensureUnusedCapacity(self.gpa, ready.items.len);
             for (ready.items) |candidate| {
+                const view = candidate.view();
+                self.tracer.event(.debug, "attempting certification", .{ .view = view.get() });
                 const id = self.take_id();
                 const args = .{ self, links.inbox, candidate.round, candidate.payload, id };
                 const future = try self.io.concurrent(certify_task, args);
-                const view = candidate.view();
                 const task: CertifyTask = .{ .view = view, .id = id, .future = future };
                 self.certify_tasks.appendAssumeCapacity(task);
                 try self.state.set_certify_outstanding(view);
@@ -565,12 +588,24 @@ pub fn Actor(comptime P: type) type {
         ) ?View {
             const request_context = request.context();
             const view = request_context.view();
+            const round = request_context.round;
             const value = payload orelse {
+                self.tracer.event(.debug, "failed to propose container", .{ .round = round });
                 self.state.trigger_timeout(view, .missing_proposal);
                 return null;
             };
-            if (view.get() < self.state.current_view().get()) return null;
-            if (!self.state.proposed(&request_context, value)) return null;
+            const current = self.state.current_view();
+            if (view.get() < current.get()) {
+                self.tracer.event(.debug, "dropping requested proposal", .{
+                    .round = round,
+                    .current = current.get(),
+                });
+                return null;
+            }
+            if (!self.state.proposed(&request_context, value)) {
+                self.tracer.event(.warn, "dropped our proposal", .{ .round = round });
+                return null;
+            }
             // Relay before the notarize vote's journal sync: extra payload bytes are harmless.
             _ = self.relay.broadcast(value, .{ .propose = .{ .round = request_context.round } });
             return view;
@@ -637,8 +672,14 @@ pub fn Actor(comptime P: type) type {
             if (result) |valid| {
                 if (valid) {
                     _ = self.state.verified(view);
-                } else self.state.verification_failed(view, .invalid_proposal);
-            } else self.state.verification_failed(view, .ignored_proposal);
+                } else {
+                    self.tracer.event(.warn, "proposal failed verification", .{ .round = round });
+                    self.state.verification_failed(view, .invalid_proposal);
+                }
+            } else {
+                self.tracer.event(.debug, "failed to verify proposal", .{ .round = round });
+                self.state.verification_failed(view, .ignored_proposal);
+            }
             return .{ .notify = .{ .view = view, .staged = .{} } };
         }
 
@@ -649,7 +690,13 @@ pub fn Actor(comptime P: type) type {
             var task = self.certify_tasks.swapRemove(index);
             task.future.await(self.io);
             // A missing verdict is re-requested on restart; failing it could halt the view.
-            const certified = result orelse return .skip;
+            const certified = result orelse {
+                self.tracer.event(.debug, "failed to certify proposal", .{ .round = round });
+                return .skip;
+            };
+            if (!certified) {
+                self.tracer.event(.warn, "proposal failed certification", .{ .round = round });
+            }
             const notarization = try self.handle_certification(round.view, certified) orelse
                 return .skip;
             return .{ .notify = .{ .view = round.view, .staged = .{ .certification = .{
@@ -663,7 +710,12 @@ pub fn Actor(comptime P: type) type {
             switch (message) {
                 .proposal => |proposal| {
                     const view = proposal.view();
-                    if (!self.state.admits_vote(view)) return .skip;
+                    if (!self.state.admits_vote(view)) {
+                        const outside = "proposal outside viewport";
+                        self.tracer.event(.trace, outside, .{ .view = view.get() });
+                        return .skip;
+                    }
+                    self.tracer.event(.trace, "received proposal", .{ .view = view.get() });
                     if (!try self.state.set_proposal(view, &proposal)) return .skip;
                     return .{ .notify = .{ .view = view, .staged = .{} } };
                 },
@@ -672,10 +724,18 @@ pub fn Actor(comptime P: type) type {
                     assert(verified.gpa.ptr == self.gpa.ptr); // One allocator per engine.
                     const view = certificate.view();
                     if (!self.state.admits_certificate(view)) {
+                        const outside = "certificate outside viewport";
+                        self.tracer.event(.trace, outside, .{ .view = view.get() });
                         Message.discard(message);
                         return .skip;
                     }
                     const kind = std.meta.activeTag(certificate);
+                    const received = switch (kind) {
+                        .notarization => "received notarization",
+                        .nullification => "received nullification",
+                        .finalization => "received finalization",
+                    };
+                    self.tracer.event(.trace, received, .{ .view = view.get() });
                     if (try self.handle_certificate(certificate)) {
                         const clone = try self.clone_certificate(kind, view);
                         try links.resolver.updated(self.gpa, clone);
@@ -684,7 +744,10 @@ pub fn Actor(comptime P: type) type {
                 },
                 .timeout => |timeout_message| {
                     const view = timeout_message.round.view;
-                    self.state.trigger_timeout(view, timeout_message.reason);
+                    const reason = timeout_message.reason;
+                    const fields = .{ .view = view.get(), .reason = reason };
+                    self.tracer.event(.debug, "timing out view", fields);
+                    self.state.trigger_timeout(view, reason);
                     return .{ .notify = .{ .view = view, .staged = .{} } };
                 },
             }
@@ -703,6 +766,7 @@ pub fn Actor(comptime P: type) type {
                 }
             }
             if (staged.nullify) |*nullify| {
+                self.tracer.event(.debug, "broadcasting nullify", .{ .round = nullify.vote.round });
                 try self.publish_vote(links, .{ .nullify = nullify.vote });
                 if (nullify.entry) |*entry| {
                     defer entry.deinit(self.gpa);
@@ -710,20 +774,39 @@ pub fn Actor(comptime P: type) type {
                 }
                 nullify.entry = null;
             }
-            if (staged.notarize) |notarize| try self.publish_vote(links, .{ .notarize = notarize });
+            if (staged.notarize) |notarize| {
+                self.trace_proposal("broadcasting notarize", notarize.proposal);
+                try self.publish_vote(links, .{ .notarize = notarize });
+            }
             if (staged.notarization) |notarization| {
+                self.trace_proposal("broadcasting notarization", notarization.proposal);
                 try self.broadcast_certificate(links, .{ .notarization = notarization.* });
                 _ = self.reporter.report(.{ .notarization = notarization.* });
             }
             if (staged.nullification) |nullification| {
+                self.tracer.event(.debug, "broadcasting nullification", .{
+                    .round = nullification.round,
+                });
                 try self.broadcast_certificate(links, .{ .nullification = nullification.* });
                 _ = self.reporter.report(.{ .nullification = nullification.* });
             }
-            if (staged.finalize) |finalize| try self.publish_vote(links, .{ .finalize = finalize });
+            if (staged.finalize) |finalize| {
+                self.trace_proposal("broadcasting finalize", finalize.proposal);
+                try self.publish_vote(links, .{ .finalize = finalize });
+            }
             if (staged.finalization) |finalization| {
+                self.trace_proposal("broadcasting finalization", finalization.proposal);
                 try self.broadcast_certificate(links, .{ .finalization = finalization.* });
                 _ = self.reporter.report(.{ .finalization = finalization.* });
             }
+        }
+
+        /// A debug event naming a proposal by its round and parent.
+        fn trace_proposal(self: *Self, message: []const u8, proposal: Proposal) void {
+            self.tracer.event(.debug, message, .{
+                .round = proposal.round,
+                .parent = proposal.parent.get(),
+            });
         }
 
         // Startup.
@@ -815,15 +898,22 @@ pub fn Actor(comptime P: type) type {
             defer inbox.shutdown();
             defer self.cancel_all();
             try inbox.forward(.mailbox, &self.mailbox_receiver);
+            const start_ns = context_mod.now_ns(self.io);
             if (try self.recover(&links)) |view| {
                 try self.append_journal(.{ .finalization = self.state.finalization(view).?.* });
                 try self.sync_journal();
             }
             const current = self.state.current_view();
+            const elapsed_ns: u64 = @intCast(context_mod.now_ns(self.io) - start_ns);
+            self.tracer.event(.info, "consensus initialized", .{
+                .observed_view = current.get(),
+                .elapsed_ms = elapsed_ns / std.time.ns_per_ms,
+            });
             const leader = self.state.leader_index(current) orelse @panic("leader not set");
             try links.batcher.update(current, leader, self.state.last_finalized(), null);
             // Runs for the actor's lifetime; each turn handles one event.
             while (try self.iteration(&links)) {}
+            self.tracer.event(.debug, "mailbox closed, stopping voter", .{});
             if (self.journal) |*journal| try journal.sync_all();
         }
 

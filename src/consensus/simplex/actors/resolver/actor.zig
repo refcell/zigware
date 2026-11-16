@@ -4,8 +4,9 @@
 //!
 //! `P` declares `Scheme`, `Digest`, `Blocker` (a p2p blocker that also reports its blocked
 //! set), `Strategy`, `NetSender`, and `NetReceiver` (the resolver channel). Commonware's
-//! `select_loop!` over the mailbox and the handler becomes one `Inbox`. Tracing spans are not
-//! ported; the engine's metrics go to the scope `run` receives.
+//! `select_loop!` over the mailbox and the handler becomes one `Inbox`. Events go to `tracer`
+//! under commonware's target (spans are not ported); the engine's metrics go to the scope
+//! `run` receives.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -36,6 +37,10 @@ const HandlerMessage = ingress.HandlerMessage;
 const Effect = state_mod.Effect;
 const oneshot = utils.channel.oneshot;
 const Scope = runtime.telemetry.metrics.Scope;
+const Tracer = runtime.telemetry.traces.Tracer;
+
+/// The tracing target of the resolver's events (commonware's module path).
+pub const trace_target = "commonware_consensus::simplex::actors::resolver";
 
 pub fn Config(comptime P: type) type {
     return struct {
@@ -154,6 +159,8 @@ pub fn Actor(comptime P: type) type {
         fetch_retry_delay: Duration,
         state: State,
         mailbox_receiver: actor.mailbox.Receiver(Message),
+        /// Receives the resolver's events; the engine sets it from its context.
+        tracer: Tracer = .none,
 
         pub fn init(gpa: Allocator, io: Io, cfg: Config(P)) !struct { Self, Mailbox } {
             assert(cfg.mailbox_size > 0);
@@ -240,7 +247,7 @@ pub fn Actor(comptime P: type) type {
             // Runs for the actor's lifetime; each turn handles one message.
             while (true) {
                 switch (try inbox.next()) {
-                    .closed => return,
+                    .closed => return self.tracer.event(.debug, "mailbox closed, stopping", .{}),
                     .mailbox => |message| try self.handle_mailbox(spawned.mailbox, message),
                     .handler => |message| {
                         if (message.response_closed()) {
@@ -356,13 +363,35 @@ pub fn Actor(comptime P: type) type {
                 ),
                 .notarization, .finalization => incoming.view().get() >= view.get(),
             };
-            var rng: context.IoRng = .{ .io = self.io };
-            const valid = servable and incoming.epoch() == self.epoch and
-                try incoming.verify(self.gpa, &rng, self.scheme, self.strategy);
-            if (!valid) {
+            const received = incoming.view();
+            if (!servable) {
+                self.tracer.event(.debug, "certificate below requested view", .{
+                    .view = view.get(),
+                    .received = received.get(),
+                });
                 incoming.deinit(self.gpa);
                 return null;
             }
+            if (incoming.epoch() != self.epoch) {
+                self.tracer.event(.debug, "rejecting certificate from different epoch", .{
+                    .view = view.get(),
+                    .epoch = incoming.epoch().get(),
+                    .expected = self.epoch.get(),
+                });
+                incoming.deinit(self.gpa);
+                return null;
+            }
+            var rng: context.IoRng = .{ .io = self.io };
+            if (!try incoming.verify(self.gpa, &rng, self.scheme, self.strategy)) {
+                const failed = "certificate failed verification";
+                self.tracer.event(.debug, failed, .{ .view = view.get() });
+                incoming.deinit(self.gpa);
+                return null;
+            }
+            self.tracer.event(.debug, "received certificate for request", .{
+                .view = view.get(),
+                .received = received.get(),
+            });
             return incoming;
         }
 
