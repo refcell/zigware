@@ -104,7 +104,6 @@ Read this whole file before you change anything. These rules are not optional.
 - `std.Io.Uring` does not compile; `runtime.production.Runner` runs on `std.Io.Threaded`.
   `Threaded` panics on connect with a timeout and its poll timeouts can fire up to 1 ms
   early; `runtime.production.network` works around both (docs/lanes/runtime-telemetry.md).
-
 - `std.Io.Condition` counts signals, not waiters: a waiter whose timeout fired can consume a
   signal meant for another waiter. Give each waiter its own condition (or a queue) instead of
   sharing one across waiters with timeouts (found in aggregation's engine, d35ed1a).
