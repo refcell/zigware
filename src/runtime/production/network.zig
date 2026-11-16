@@ -425,7 +425,8 @@ pub const Network = struct {
     pub fn bind(network_: *const Network, address: Address) Error!*Listener {
         const listener = try network_.gpa.create(Listener);
         errdefer network_.gpa.destroy(listener);
-        const server = address.listen(network_.io, .{}) catch |err| return switch (err) {
+        const options: net.IpAddress.ListenOptions = .{ .kernel_backlog = listen_backlog };
+        const server = address.listen(network_.io, options) catch |err| return switch (err) {
             error.Canceled => error.Canceled,
             else => error.BindFailed,
         };
@@ -443,6 +444,9 @@ pub const Network = struct {
         return .{ .sink = halves.sink, .stream = halves.stream };
     }
 };
+
+/// tokio's `TcpListener::bind` backlog; the kernel clamps it (`somaxconn`, 128 on macOS).
+const listen_backlog = 1024;
 
 /// How long a connect waits in `poll` before checking whether its task was canceled.
 const connect_slice_ms = 20;

@@ -413,16 +413,23 @@ fn Cases(comptime N: type) type {
             }
         }
 
-        fn stress_server(io: Io, listener: *Listener, out: *[stress_clients]Accepted) !void {
-            for (out, 0..) |*accepted, index| {
-                accepted.* = listener.accept() catch |err| {
-                    std.log.err("stress server: accept {d} failed: {t}", .{ index, err });
+        /// Accepts every client and echoes each on its own task. It closes what it accepted,
+        /// also when it fails or is canceled.
+        fn stress_server(io: Io, listener: *Listener) anyerror!void {
+            var accepted: [stress_clients]Accepted = undefined;
+            var count: usize = 0;
+            defer for (accepted[0..count]) |*connection| connection.deinit();
+            while (count < stress_clients) : (count += 1) {
+                accepted[count] = listener.accept() catch |err| {
+                    std.log.err("stress server: accept {d} failed: {t}", .{ count, err });
                     return err;
                 };
             }
             var futures: [stress_clients]Io.Future(anyerror!void) = undefined;
-            for (&futures, out) |*future, *accepted| {
-                future.* = try io.concurrent(stress_echo, .{accepted});
+            var started: usize = 0;
+            defer for (futures[0..started]) |*future| future.cancel(io) catch {};
+            while (started < stress_clients) : (started += 1) {
+                futures[started] = try io.concurrent(stress_echo, .{&accepted[started]});
             }
             for (&futures) |*future| try future.await(io);
         }
@@ -450,20 +457,27 @@ fn Cases(comptime N: type) type {
             return connection;
         }
 
+        /// Closes a client's connection once it is done or canceled.
+        fn stress_close(io: Io, client: *Io.Future(anyerror!Connection)) void {
+            var connection = client.cancel(io) catch return;
+            connection.deinit();
+        }
+
         fn stress_concurrent_streams(io: Io, net: *N) !void {
             const listener = try net.bind(any_port);
             defer listener.deinit();
-            var accepted: [stress_clients]Accepted = undefined;
-            var server = try io.concurrent(stress_server, .{ io, listener, &accepted });
+            var server = try io.concurrent(stress_server, .{ io, listener });
+            defer server.cancel(io) catch {};
             var clients: [stress_clients]Io.Future(anyerror!Connection) = undefined;
-            for (&clients) |*client| {
-                client.* = try io.concurrent(stress_client, .{ net, listener.local_addr() });
+            var started: usize = 0;
+            // Every path closes every connection: a failed client cancels the rest.
+            defer for (clients[0..started]) |*client| stress_close(io, client);
+            const address = listener.local_addr();
+            while (started < stress_clients) : (started += 1) {
+                clients[started] = try io.concurrent(stress_client, .{ net, address });
             }
-            var connections: [stress_clients]Connection = undefined;
-            for (&clients, &connections) |*client, *connection| connection.* = try client.await(io);
-            defer for (&connections) |*connection| connection.deinit();
+            for (&clients) |*client| _ = try client.await(io);
             try server.await(io);
-            for (&accepted) |*connection| connection.deinit();
         }
     };
 }
