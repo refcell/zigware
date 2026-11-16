@@ -36,6 +36,8 @@ const Nuller = nuller_mod.Nuller(Scheme, Sha256);
 const Impersonator = @import("mocks/impersonator.zig").Impersonator(Scheme, Sha256);
 const Outdated = @import("mocks/outdated.zig").Outdated(Scheme, Sha256);
 const Elector = elector_mod.RoundRobinElector;
+const Equivocator = @import("mocks/equivocator.zig").Equivocator(Scheme, Sha256, Key, Elector);
+const IoRng = @import("actors/context.zig").IoRng;
 const Duration = utils.Duration;
 const Link = p2p.simulated.Link;
 const View = consensus_types.View;
@@ -65,7 +67,24 @@ const page_cache_size = 10;
 /// What validator 0 runs: the engine, or one of the Byzantine mocks.
 /// `absent` leaves validator 0 offline until the test starts it; `slow` runs the engine with
 /// an application that takes 10 s to propose, verify, and certify.
-const Role = enum { honest, absent, slow, conflicter, nuller, impersonator, outdated };
+const Role = enum {
+    honest,
+    absent,
+    slow,
+    conflicter,
+    nuller,
+    impersonator,
+    outdated,
+    equivocator,
+
+    /// Whether validator 0 runs a Byzantine mock instead of the engine.
+    fn is_byzantine(role: Role) bool {
+        return switch (role) {
+            .honest, .absent, .slow => false,
+            .conflicter, .nuller, .impersonator, .outdated, .equivocator => true,
+        };
+    }
+};
 
 /// A Byzantine mock on the vote channel; the other channels stay registered and unused.
 const Byzantine = struct {
@@ -74,6 +93,8 @@ const Byzantine = struct {
     nuller: Nuller,
     impersonator: Impersonator,
     outdated: Outdated,
+    elector: Elector,
+    equivocator: Equivocator,
     channels: [3]Channel,
     handle: runtime.context.Handle(void),
 
@@ -87,12 +108,18 @@ const Byzantine = struct {
             .nuller => byzantine.nuller.run(&votes.sender, &votes.receiver),
             .impersonator => byzantine.impersonator.run(&votes.sender, &votes.receiver),
             .outdated => byzantine.outdated.run(&votes.sender, &votes.receiver),
+            .equivocator => {
+                const certificates = &byzantine.channels[1].receiver;
+                byzantine.equivocator.run(&votes.sender, certificates);
+            },
         }
     }
 
     fn stop(byzantine: *Byzantine) void {
         byzantine.handle.abort() catch {};
         byzantine.outdated.deinit();
+        byzantine.equivocator.deinit();
+        byzantine.elector.deinit(gpa);
         for (&byzantine.channels) |*channel| {
             channel.sender.deinit();
             channel.receiver.deinit();
@@ -180,14 +207,11 @@ const Harness = struct {
         const peers = harness.keys();
         _ = harness.oracle().manager().track(0, .init_primary(.init(peers)));
         if (link) |value| try harness.link_all(value, null);
-        harness.track_historical_votes = switch (role) {
-            .honest, .absent, .slow => false,
-            .conflicter, .nuller, .impersonator, .outdated => true,
-        };
+        // commonware's equivocator test keeps the default; its other Byzantine tests set it.
+        harness.track_historical_votes = role.is_byzantine() and role != .equivocator;
         for (harness.validators, peers, 0..) |*validator, key, index| {
             if (index == 0 and role == .absent) continue;
-            // Only the Byzantine roles keep historical votes.
-            if (index == 0 and harness.track_historical_votes) {
+            if (index == 0 and role.is_byzantine()) {
                 try harness.start_byzantine(validator, key, role);
             } else {
                 try harness.start_validator(index);
@@ -200,6 +224,9 @@ const Harness = struct {
         const byzantine = try gpa.create(Byzantine);
         errdefer gpa.destroy(byzantine);
         const scheme = &harness.fixture.schemes[0];
+        const n: u32 = @intCast(harness.validators.len);
+        var elector = try elector_mod.RoundRobin(Sha256).default().build(gpa, n);
+        errdefer elector.deinit(gpa);
         byzantine.* = .{
             .role = role,
             .conflicter = .init(gpa, io, scheme),
@@ -207,6 +234,8 @@ const Harness = struct {
             .impersonator = .init(gpa, scheme),
             // Four times the view retention, as in commonware's `outdated` test.
             .outdated = .init(gpa, scheme, .new(40)),
+            .elector = elector,
+            .equivocator = .init(gpa, io, scheme, elector, epoch, &harness.relay),
             .channels = try register(harness.oracle(), key),
             .handle = undefined,
         };
@@ -238,6 +267,18 @@ const Harness = struct {
         harness.network.deinit();
         harness.fixture.deinit(gpa);
         harness.* = undefined;
+    }
+
+    /// Aborts validator `index`'s engine and frees its mocks; its journal stays in storage
+    /// for `start_validator` to recover.
+    fn crash(harness: *Harness, index: usize) void {
+        const validator = harness.honest(index).?;
+        abort(validator);
+        // No broadcast reaches the application once deregistered, so it can be freed.
+        harness.relay.deregister(harness.keys()[index]);
+        stop_actors(validator);
+        validator.state = .absent;
+        assert(harness.honest(index) == null);
     }
 
     /// Aborts every engine and frees its mocks; the validators become absent, and their
@@ -787,6 +828,42 @@ test "all crash after nullify: restarted validators rebuild the nullification" {
     _ = try run_seeded(0, all_crash_after_nullify_scenario, .{});
 }
 
+/// One run of commonware `equivocator_seeded`: validator 0 leads with two proposals, one for
+/// a random victim and one for the rest. The honest six finalize through a crash and
+/// restart of one of them; returns whether anyone blocked the equivocator (only it may be
+/// blocked).
+fn equivocator_run(ctx: Context) !bool {
+    var harness: Harness = undefined;
+    try harness.start(ctx, 7, link_ms(10, 1, 1.0), .equivocator);
+    defer harness.deinit();
+    const required = 50;
+    try harness.wait_all(required);
+    const rng: IoRng = .{ .io = ctx.io() };
+    const index = 1 + rng.next_u64() % (harness.validators.len - 1);
+    harness.crash(index);
+    try harness.wait_all(required * 2);
+    try harness.start_validator(index);
+    try harness.wait_all(required * 3);
+    try harness.check_agreement(required * 3);
+    const byzantine = harness.keys()[0];
+    const blocked = try harness.oracle().blocked(gpa);
+    defer gpa.free(blocked);
+    for (blocked) |pair| {
+        try testing.expect(pair.origin.order(byzantine) != .eq);
+        try testing.expect(pair.recipient.order(byzantine) == .eq);
+    }
+    return blocked.len > 0;
+}
+
+test "equivocator is blocked for at least one seed" {
+    const detected = for (0..5) |seed| {
+        var runner = try runtime.deterministic.Runner.init(gpa, .{ .seed = seed });
+        defer runner.deinit();
+        if (try (try runner.start_context(equivocator_run, .{}))) break true;
+    } else false;
+    try testing.expect(detected);
+}
+
 /// One run of commonware `unclean_shutdown`: start every validator from its journal, stop
 /// them all at a random point within 2 s, and report whether all reached `required`. Short
 /// timeouts let a restarted cluster time out of views it cannot finish, as in commonware.
@@ -799,7 +876,7 @@ fn unclean_run(ctx: Context, required: u64) !bool {
     };
     try harness.start_timed(ctx, 5, link_ms(50, 50, 1.0), .honest, timeouts);
     defer harness.deinit();
-    const rng: @import("actors/context.zig").IoRng = .{ .io = ctx.io() };
+    const rng: IoRng = .{ .io = ctx.io() };
     const wait_ms = 100 + rng.next_u64() % 1900;
     try ctx.sleep(.fromMilliseconds(@intCast(wait_ms)));
     for (harness.validators) |*validator| validator.reporter.assert_no_faults();

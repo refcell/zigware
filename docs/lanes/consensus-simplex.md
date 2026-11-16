@@ -98,13 +98,16 @@ resolver; those lanes are running, so do the types first and the actors as they 
   `Engine.run(ctx, *engine, votes, certificates, backfill)` (each a `Channel(P)` of sender
   and receiver) as a task, abort its handle to stop, then `deinit`. `P` adds `Context`,
   `Sender`, and `Receiver` to `Config`'s parameters; `P.Automaton` is a pointer.
-- `consensus.simplex.mocks`: `relay.Relay(D, P)`, `application.Application(H, P)` (the
-  automaton and relay, with simulated latency from p2p's `Normal`), `application.genesis`,
-  and `reporter.Reporter(S, D)` (verifies and records activity; `wait_for_finalized`,
-  `finalized`, `latest_finalized`, `fault_list`, `assert_no_faults`, `assert_no_invalid`);
-  Byzantine `conflicter.Conflicter(S, H)`, `nuller.Nuller(S, H)`,
+- `consensus.simplex.mocks`: `relay.Relay(D, P)` (`deregister(key)` and `deregister_all`
+  return once no delivery can reach the removed listeners), `application.Application(H, P)`
+  (the automaton and relay, with simulated latency from p2p's `Normal`),
+  `application.genesis`, and `reporter.Reporter(S, D)` (verifies and records activity;
+  `wait_for_finalized`, `finalized`, `latest_finalized`, `votes(view)` signer bitmaps,
+  `notarized`, `nullified`, `max_nullify_view`, `fault_list`, `assert_no_faults`,
+  `assert_no_invalid`); Byzantine `conflicter.Conflicter(S, H)`, `nuller.Nuller(S, H)`,
   `impersonator.Impersonator(S, H)`, and `outdated.Outdated(S, H)` (`run(sender, receiver)`
-  on the vote channel).
+  on the vote channel), and `equivocator.Equivocator(S, H, P, E)` (`run(votes,
+  certificates)`).
 
 ## Decisions
 - `Epoch`/`Height`/`View`/deltas are non-exhaustive `enum(u64)` so they compare with `==`,
@@ -185,8 +188,8 @@ resolver; those lanes are running, so do the types first and the actors as they 
   done (ed25519, round robin; Debug runs 50 views where commonware runs 100); conflicter,
   nuller, impersonator (2 seeds each), outdated, backfill, and unclean_shutdown (100 views
   across journal-recovering restarts), and one_offline (its leader-labelled metrics wait on
-  the actor metrics), slow_validator, all_recovery, and all_crash_after_nullify done; next
-  equivocator, invalid, survives_burst, engine_shutdown, twins, hailstorm, and the rest of
+  the actor metrics), slow_validator, all_recovery, and all_crash_after_nullify, and equivocator done;
+  next invalid, survives_burst, engine_shutdown, twins, hailstorm, and the rest of
   the multi-node DST suite, seeded.
 - [ ] Fuzz targets (commonware consensus/fuzz).
 
@@ -220,3 +223,5 @@ resolver; those lanes are running, so do the types first and the actors as they 
 - 2026-11-16: one_offline DST; the reporter mock records vote signers per view.
 - 2026-11-16: slow_validator DST.
 - 2026-11-16: all_recovery and all_crash_after_nullify DSTs.
+- 2026-11-16: Byzantine equivocator mock with its DST; the relay mock deregisters one
+  validator (waiting out in-flight deliveries) so one engine can crash and restart.

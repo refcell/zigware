@@ -27,6 +27,9 @@ pub fn Relay(comptime D: type, comptime P: type) type {
         io: Io,
         mutex: Io.Mutex = .init,
         listeners: std.ArrayList(Listener) = .empty,
+        /// Broadcasts delivering outside the lock; deregistration waits for them to end.
+        delivering: u32 = 0,
+        idle: Io.Condition = .init,
 
         pub fn init(gpa: Allocator, io: Io) Self {
             return .{ .gpa = gpa, .io = io };
@@ -50,7 +53,31 @@ pub fn Relay(comptime D: type, comptime P: type) type {
             self.mutex.lockUncancelable(self.io);
             defer self.mutex.unlock(self.io);
             self.listeners.clearRetainingCapacity();
+            self.wait_idle();
             assert(self.listeners.items.len == 0);
+        }
+
+        /// Removes `key`'s listeners. On return no broadcast can still reach them, so their
+        /// contexts may be freed.
+        pub fn deregister(self: *Self, key: P) void {
+            self.mutex.lockUncancelable(self.io);
+            defer self.mutex.unlock(self.io);
+            var kept: usize = 0;
+            for (self.listeners.items) |listener| {
+                if (same(listener.key, key)) continue;
+                self.listeners.items[kept] = listener;
+                kept += 1;
+            }
+            self.listeners.shrinkRetainingCapacity(kept);
+            self.wait_idle();
+            for (self.listeners.items) |listener| assert(!same(listener.key, key));
+        }
+
+        /// Waits until no broadcast is delivering (the caller holds `mutex`).
+        fn wait_idle(self: *Self) void {
+            // Each wake re-checks the count; every delivery ends in bounded time.
+            while (self.delivering > 0) self.idle.waitUncancelable(self.io, &self.mutex);
+            assert(self.delivering == 0);
         }
 
         fn same(a: P, b: P) bool {
@@ -85,12 +112,18 @@ pub fn Relay(comptime D: type, comptime P: type) type {
                     selected[count] = listener;
                     count += 1;
                 }
+                self.delivering += 1;
             }
             assert(count <= listeners_max);
             // Deliver outside the lock: a listener may take its own.
             for (selected[0..count]) |listener| {
                 listener.deliver(listener.context, payload, contents);
             }
+            self.mutex.lockUncancelable(self.io);
+            defer self.mutex.unlock(self.io);
+            assert(self.delivering > 0);
+            self.delivering -= 1;
+            if (self.delivering == 0) self.idle.broadcast(self.io);
         }
     };
 }

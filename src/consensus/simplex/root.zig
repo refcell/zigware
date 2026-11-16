@@ -50,6 +50,7 @@ pub const mocks = struct {
     pub const nuller = @import("mocks/nuller.zig");
     pub const impersonator = @import("mocks/impersonator.zig");
     pub const outdated = @import("mocks/outdated.zig");
+    pub const equivocator = @import("mocks/equivocator.zig");
 };
 
 pub const scheme = struct {
