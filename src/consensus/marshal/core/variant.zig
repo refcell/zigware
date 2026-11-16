@@ -84,9 +84,14 @@ const buffer_decls = [_][]const u8{
     "send",
 };
 
-/// A buffer of blocks not yet finalized (commonware `Buffer<V>`): `find_by_digest`,
-/// `find_by_commitment`, `subscribe_by_digest` and `subscribe_by_commitment` (each null when
-/// the buffer cannot deliver), and `send(round, block, recipients)`.
+/// A buffer of blocks not yet finalized (commonware `Buffer<V>`), called on a pointer:
+///
+/// - `find_by_digest(V.Block.Digest) !?V.Block` and `find_by_commitment(V.Commitment)
+///   !?V.Block`: a block the buffer holds now; the caller owns it.
+/// - `subscribe_by_digest(V.Block.Digest) !?oneshot.Receiver(V.Block)` and
+///   `subscribe_by_commitment(V.Commitment) !?oneshot.Receiver(V.Block)`: a receiver that
+///   resolves once the buffer sees the block, or null when the buffer cannot deliver.
+/// - `send(Round, V.Block, recipients) !void`: disseminates a block (taking ownership).
 pub fn assert_buffer(comptime B: type) void {
     comptime {
         for (buffer_decls) |decl| {

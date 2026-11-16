@@ -11,6 +11,7 @@ pub const Floor = floor.Floor;
 pub const Processed = floor.Processed;
 pub const staged = @import("staged.zig");
 pub const stream = @import("stream.zig");
+pub const subscriptions = @import("subscriptions.zig");
 pub const variant = @import("variant.zig");
 pub const ExpectedCommitment = variant.ExpectedCommitment;
 pub const assert_variant = variant.assert_variant;
