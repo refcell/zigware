@@ -11,6 +11,8 @@ pub const IpAddr = ip.IpAddr;
 pub const yaml = @import("yaml.zig");
 /// AWS EC2 deployer (commonware `deployer::aws`).
 pub const aws = @import("aws/mod.zig");
+/// The `deployer` command line (commonware `deployer/src/main.rs`).
+pub const cli = @import("cli.zig");
 
 test {
     std.testing.refAllDecls(@This());

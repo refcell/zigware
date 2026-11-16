@@ -30,6 +30,10 @@ test vectors. Tests never call AWS and never hold credentials.
   `select_availability_zone_groups`, `grouped_subnets`; `deployer.aws.ec2`: `VolumeType`,
   `validate_storage_options`, launch-error classification; `deployer.aws.Failure` carries
   commonware's configuration errors with their payloads and `Display` text.
+- `deployer.aws.sigv4`: `sign`, `presign`, `signing_key`, `amz_date`, `write_uri_encoded`.
+- `deployer.cli`: `parse(args)` returns `.ok` (`Parsed{ verbose, command }`, where `command`
+  is `.help`, `.version`, `.none`, or `.aws` with each subcommand's options) or `.failure`
+  (`Failure{ kind, argument }`); `usage` and `version`.
 - `utils.fuzz` is now exported (the seeded fuzz driver over `FuzzRng`).
 
 ## Decisions
@@ -54,6 +58,10 @@ test vectors. Tests never call AWS and never hold credentials.
   vectors. The S3 docs' example key ID is split in source so the secret scanner passes.
 - Commonware's upper-case constants (`METRICS_PORT`, `CREATE_CMD`, ...) are snake_case
   (`metrics_port`, `create_cmd`), per TigerStyle naming.
+- The CLI follows clap's rules for the options commonware declares (`--name value` and
+  `--name=value`, required options, defaults, a repeated option fails, a flag-like word is not
+  a value, Rust's `u64::from_str` for numbers, empty paths rejected), but returns a
+  `Failure` instead of printing clap's messages; `usage` is a short summary, not clap's text.
 - `IpAddr` is the deployer's own: Rust's `IpAddr` parsing and display (RFC 5952 compression,
   `::ffff:a.b.c.d` for IPv4-mapped addresses), since `std.Io.net.IpAddress` formats ports.
 
@@ -72,7 +80,8 @@ test vectors. Tests never call AWS and never hold credentials.
   tests); `ec2.rs`'s launch retry loop (11 async tests, over a mock client).
 - [x] SigV4 signer with the AWS documentation's test vectors; S3 presigned URLs
   (`deployer.aws.sigv4`).
-- [ ] CLI (`deployer aws <command>`) with argument parsing tests.
+- [x] CLI argument parsing (`deployer.cli`) with tests and a seeded fuzz. The `deployer`
+  binary itself waits for the AWS client.
 - [ ] AWS client interface (EC2 and S3 query/REST calls over `std.http`), never exercised
   against AWS in tests.
 - [ ] Fuzz: YAML parse/write round trips, config validation, SigV4 canonicalization.
