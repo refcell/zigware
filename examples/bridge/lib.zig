@@ -31,7 +31,11 @@ pub const max_message_size: u32 = 1024 * 1024;
 pub const mailbox_size: u32 = 1_000;
 
 pub const types = @import("types.zig");
+pub const store = @import("store.zig");
+pub const application = @import("application.zig");
 
 test {
     _ = types;
+    _ = store;
+    _ = application;
 }

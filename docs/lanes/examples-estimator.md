@@ -108,7 +108,12 @@ statistics, output, CLI) and run against a minimal in-lane stand-in, then switch
   variant's encoding matches commonware's (`testdata/types_vectors.txt`, printed by commonware
   for the values its own codec tests build), plus invalid tags and a seeded fuzz of the
   decoders on mutated vectors.
-- [ ] The application (proposes random data or the other network's finalization).
+- [x] The indexer's store (`store.zig`): blocks by digest and the highest verified
+  finalization per network; tested with threshold-signed finalizations.
+- [x] The application (`application.zig`): propose, verify, report, and posting
+  finalizations, tested against the store as an in-process indexer. Propose and verify run on
+  the voter's tasks and share the indexer connection under a mutex instead of commonware's
+  single actor; finalizations to post go through a mailbox to `run`.
 - [ ] `indexer` and `validator` binaries on discovery and simplex (bls12381 threshold).
 - [ ] Demo: two networks of 4 validators and an indexer.
 
@@ -116,7 +121,7 @@ statistics, output, CLI) and run against a minimal in-lane stand-in, then switch
 - [x] Pass `.subscriber = collector.subscriber()` to the runner (runtime 1ead8cc) once p2p and
   simplex emit commonware's events; re-record the log demo (and chat's, if its logs gain
   events) so the Logs panes show them.
-- [ ] flood `setup` on `deployer.aws` (b126fe1).
+- [x] flood `setup` on `deployer.aws`: moved to the deployer lane.
 
 ## Log
 - 2026-11-13: DSL parser, latency data, statistics, clap-identical CLI, colored output, and
@@ -133,3 +138,4 @@ statistics, output, CLI) and run against a minimal in-lane stand-in, then switch
 - 2026-11-16: log demo recorded; production storage now reports a canceled write as Canceled.
 - 2026-11-16: bridge's dealer; build.zig builds `<name>/<binary>` entries as `<name>-<binary>`.
 - 2026-11-16: log and chat Logs panes show p2p and simplex events; bridge wire types.
+- 2026-11-16: bridge's indexer store and application.
