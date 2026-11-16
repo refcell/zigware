@@ -68,7 +68,7 @@ fn socket_pair() ![2]Io.net.Socket {
 
 test "a recv with no data times out, and the ring stays usable" {
     var ring: Ring = undefined;
-    try init_ring(&ring, 2);
+    try init_ring(&ring, 4); // One operation at a time.
     defer ring.deinit();
     const pair = try socket_pair();
     defer Io.net.Socket.closeMany(io, &pair);
@@ -89,7 +89,7 @@ fn blocked_recv(ring: *Ring, fd: std.posix.fd_t) anyerror!i32 {
 
 test "canceling a waiter cancels its operation" {
     var ring: Ring = undefined;
-    try init_ring(&ring, 2);
+    try init_ring(&ring, 4); // One operation at a time.
     defer ring.deinit();
     const pair = try socket_pair();
     defer Io.net.Socket.closeMany(io, &pair);

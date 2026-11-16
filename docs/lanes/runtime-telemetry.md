@@ -89,13 +89,21 @@ the registry API first and report it.
 - `production.Runner` owns its `std.Io.Threaded`, initializes in place (storage and network
   hold its `Io`), and `start` runs the root function on the calling thread.
 - io_uring (`production/ring.zig`) is a driver, not an executor: tasks stay on `std.Io`, and
-  blob read/write/fsync and socket recv/sendmsg go through one ring. Submitters push under a
-  mutex and wait on an `Io.Event`; one reaper thread wakes them. A canceled or timed-out
-  waiter submits `ASYNC_CANCEL` and waits for both completions, so its buffers outlive the
-  kernel's use. Operations use at most half the queue, so a cancellation always fits and the
-  completion queue never overflows. Commonware's iouring executor (its own task scheduler on
-  the ring thread) is not ported. `Config.io_uring` (off by default, like commonware's
-  `iouring-*` features) turns it on in the runner.
+  blob read/write/fsync and socket recv/sendmsg go through one ring. As each commonware worker
+  owns its ring (`SINGLE_ISSUER | DEFER_TASKRUN`), one ring thread is the only one to enter
+  it: submitters queue entries under a mutex, wake it through an eventfd with a read always
+  pending on the ring, and wait on an `Io.Event`. A canceled or timed-out waiter queues
+  `ASYNC_CANCEL` and waits for both completions, so its buffers outlive the kernel's use.
+  Operations are capped at `entries / 2 - 1`, so each cancellation and the wake read fit and
+  the completion queue never overflows. Kernels before 6.1 fall back to a plain ring.
+  Commonware's iouring executor (tasks scheduled on the ring thread) is not ported.
+  `Config.io_uring` (off by default, like commonware's `iouring-*` features) turns it on.
+- io_uring throughput, 16 loopback connections echoing 4000 × 4 KiB messages (ReleaseSafe, a
+  loaded 32-core desktop): `std.Io.Threaded` about 60-90 ms; the first ring (every submitter
+  entering the ring under its mutex) 1.7-2.1 s; entering outside the mutex 1.0-1.7 s; with
+  SQPOLL about 0.5 s; one issuing ring thread about 0.54 s, without SQPOLL's spinning kernel
+  thread. The remaining gap is a futex wake per completion and one ring thread; one ring per
+  worker (commonware's layout) or an executor on the ring would close it.
 - io_uring tests skip when the kernel cannot give a ring: unsupported, or `io_uring_setup`
   fails with ENOMEM because the user's locked-memory limit (shared by all of the user's
   processes, 8 MiB by default) is used up by other rings on the machine.
@@ -105,9 +113,7 @@ the registry API first and report it.
   per connection, one connection at a time, until canceled; run it with `io.concurrent`.
   Log and OTLP setup are not ported (no global subscriber; see traces above).
 - The production network stress tests run only with `-Dslow-tests` (commonware's
-  `test_group("slow")`). Over the ring the stress test is about 20 times slower than over
-  `std.Io.Threaded` (a submit syscall under the mutex plus a cross-thread wakeup per
-  operation); SQPOLL or batched submission would close that gap.
+  `test_group("slow")`).
 
 ## Backlog
 - [x] production runtime over `std.Io`: a `Runner` with the same surface as
@@ -116,7 +122,8 @@ the registry API first and report it.
   suite, and tokio's own storage and network tests.
 - [x] Our own io_uring backend (`std.os.linux.IoUring`) behind the same storage and network,
   since `std.Io.Uring` does not compile, passing `run_storage_tests` and `run_network_tests`.
-- [ ] io_uring throughput: SQPOLL or batched submission, measured with the stress test.
+- [x] io_uring throughput: one issuing ring thread with batched submission (about 3× faster).
+- [ ] io_uring: one ring per worker thread, or an executor on the ring (commonware's design).
 - [ ] Executor-side `runtime_tasks_*` metrics, if the runtime lane hands them over.
 - [x] metrics registry: counters, gauges, histograms (bucket layout as commonware), label
   sets, families, registration/scoping by component label, and Prometheus text exposition
@@ -143,3 +150,4 @@ the registry API first and report it.
   tests; `production.Runner` ties io, file storage, TCP, and metrics together.
 - 2026-11-13: io_uring driver; storage and TCP pass their suites over it; `Config.io_uring`.
 - 2026-11-13: `production.telemetry`: the `/metrics` HTTP endpoint.
+- 2026-11-13: io_uring: one ring thread issues every entry (`SINGLE_ISSUER | DEFER_TASKRUN`).
