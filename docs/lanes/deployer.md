@@ -2,6 +2,9 @@
 
 Owns `src/deployer` (commonware `deployer`, about 8.8k Rust lines). Its packages: cryptography
 and utils.
+Also owns flood's deployer integration: `examples/flood/setup.zig` and `setup_test.zig`
+(commonware `examples/flood/src/bin/setup.rs`); the rest of `examples/flood` belongs to the
+examples lane.
 
 Reference: `~/.cache/zigware/commonware-ref/deployer`. Everything in `deployer::aws` that
 does not call a cloud API is ported with commonware's tests: the configuration types and their
@@ -168,3 +171,7 @@ test vectors. Tests never call AWS and never hold credentials.
 - 2026-11-16: `deployer.yaml`, `deployer.IpAddr`, and the aws config types landed with
   serde_yaml 0.9.34 golden files and the `mod.rs` test. The YAML round-trip fuzz found that
   quoted keys with `\"` or `''` escapes split at the wrong colon; fixed.
+- 2026-11-16: flood's `setup` binary (`zig build run-flood-setup`) landed on `deployer.aws`:
+  keys, rand 0.10's reservoir sample of bootstrappers, peer configs, and `config.yaml`, checked
+  against serde_yaml's layout of commonware's types, plus a test that flood reads the hosts file
+  `deployer.aws.Hosts.write` produces. No other example (log, chat, bridge) uses the deployer.

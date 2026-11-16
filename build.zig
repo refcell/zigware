@@ -100,7 +100,9 @@ const packages = [_]Package{
 /// binaries lists each as `<name>/<binary>`, built from `examples/<name>/<binary>.zig` as
 /// `<name>-<binary>`.
 /// Add an example here once its main.zig exists.
-const examples = [_][]const u8{ "estimator", "flood", "chat", "log", "bridge/dealer" };
+const examples = [_][]const u8{
+    "estimator", "flood", "chat", "log", "bridge/dealer", "flood/setup",
+};
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
