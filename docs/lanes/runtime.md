@@ -86,7 +86,15 @@ time, files, and network: build on it rather than around it where it fits.
   zigware's codec has no `write_bufs`, so containers of `IoBuf` (`Vec<IoBuf>`, maps, `Lazy`)
   encode inline: the bytes match, but the payloads are copied. The nested-container, map,
   lazy, and allocation-count `encode_iobufs` tests need that codec support and are not ported.
-- [ ] utils: buffer pools, handle and abort leftovers (Context covers spawn, join, abort).
+- [x] utils: `context.select` (commonware `Handle::select`, at most `select_max` handles)
+  with handle.rs's select and abort tests; supervision.rs's cascade, sibling, deep-chain
+  (50,000 levels), and wide-fanout tests on `supervision.Tree`. No counterpart: buffer pools
+  (only io_uring's `pool.rs`, which belongs to the production runtime), `abort.rs` (waker
+  registration), `cell.rs` (a spawn macro), `thread.rs` (`RUST_MIN_STACK`), and
+  supervision.rs's drop and weak-link compaction tests (nodes retire explicitly here).
+- [x] Logical opens (memory backend): open.rs's `test_replace_retires_only_matching_
+  registrations` ("memory removal retires only matching opens"). `test_open_racing_last_
+  blob_drop` relies on Rust `Arc` drop racing an open on another thread: no counterpart.
 - Moved to the runtime-telemetry lane: telemetry (`src/runtime/telemetry/`) and the
   production runtime (`src/runtime/production/`, io_uring/kqueue storage and network).
   `src/runtime/buffer/` belongs to storage-journal.
@@ -133,7 +141,10 @@ time, files, and network: build on it rather than around it where it fits.
   tasks from `ctx.child(label)`; spawning twice from one context panics. A `Handle` must be
   joined, aborted, or detached exactly once (Rust drops it; a detached task keeps running
   under supervision and is reaped later). Abort is a `std.Io` cancelation, so an aborted
-  task's result is `error.Closed` only if it had not already returned.
+  task's result is `error.Closed` only if it had not already returned. `join` claims the
+  task only after it ended, so an ancestor aborted while a task joins its child still
+  cancels that child; a canceled `join` returns `error.Canceled` and detaches the task, as
+  dropping a commonware `Handle` future does.
 - Supervision nodes live in a fixed pool (`Config.max_contexts`, default 16384); a full
   pool panics. `child` reserves a node at once (so children made before a spawn die with
   that task, as in commonware), and the node is reclaimed when its subtree is aborted, i.e.
@@ -184,3 +195,5 @@ time, files, and network: build on it rather than around it where it fits.
 - 2026-11-16: remaining deterministic.rs tests.
 - 2026-11-16: detached-task drain race and canceled-after-return race fixed; auditor records
   rand, storage, and network events; metered storage and network; iobuf.
+- 2026-11-16: `select`; `join` claims only ended tasks (an aborted joiner no longer
+  blocks its child's abort); supervision.rs tests; utils triage.

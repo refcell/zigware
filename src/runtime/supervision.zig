@@ -62,6 +62,9 @@ pub const Header = struct {
     closed: bool = false,
     /// The handle and the future.
     references: u8 = 2,
+    /// Set once the task reported `ended`. A joiner waits on it before claiming, so an
+    /// aborting ancestor can still claim and cancel a task that is being joined.
+    finished: Io.Event = .unset,
     /// Set once the claimer stored the result.
     done: Io.Event = .unset,
     /// Zombie list link.
@@ -288,6 +291,7 @@ pub const Tree = struct {
         assert(header.returned);
         assert(tree.running > 0);
         header.ended = true;
+        header.finished.set(tree.io);
         tree.running -= 1;
         if (header.detached and tree.claim_locked(header, false)) {
             header.next = tree.zombies;
@@ -372,4 +376,89 @@ test "a task canceled after it returned keeps its result" {
     try testing.expect(tree.attach(&pending));
     tree.abort(root_node, null);
     try testing.expect(pending.claimed and pending.closed);
+}
+
+/// A registered test task at a new node below `parent`.
+fn register_test_task(
+    tree: *Tree,
+    header: *Header,
+    vtable: *const Header.VTable,
+    parent: NodeRef,
+) NodeRef {
+    const node = tree.child(parent);
+    assert(tree.live(node));
+    header.* = .{ .vtable = vtable, .node = node };
+    assert(tree.attach(header));
+    return node;
+}
+
+fn aborted(header: *const Header) bool {
+    return header.claimed and header.closed;
+}
+
+test "abort cascades to children (abort_cascades_to_children)" {
+    var tree: Tree = try .init(testing.allocator, testing.io, 8);
+    defer tree.deinit(testing.allocator);
+    const vtable: Header.VTable = .{ .finish = finish_nothing, .destroy = destroy_nothing };
+    var parent: Header = undefined;
+    var child_task: Header = undefined;
+    const parent_node = register_test_task(&tree, &parent, &vtable, tree.root());
+    _ = register_test_task(&tree, &child_task, &vtable, parent_node);
+    tree.abort(parent_node, null);
+    try testing.expect(aborted(&parent));
+    try testing.expect(aborted(&child_task));
+}
+
+test "idle child survives descendant abort (idle_child_survives_descendant_abort)" {
+    var tree: Tree = try .init(testing.allocator, testing.io, 8);
+    defer tree.deinit(testing.allocator);
+    const vtable: Header.VTable = .{ .finish = finish_nothing, .destroy = destroy_nothing };
+    const parent = tree.child(tree.root());
+    var first: Header = undefined;
+    var second: Header = undefined;
+    _ = register_test_task(&tree, &first, &vtable, parent);
+    const second_node = register_test_task(&tree, &second, &vtable, parent);
+    tree.abort(second_node, null);
+    try testing.expect(aborted(&second));
+    try testing.expect(!first.claimed);
+    try testing.expect(tree.live(parent));
+}
+
+test "abort deep chain without stack growth (abort_deep_chain_without_stack_growth)" {
+    const depth = 50_000;
+    var tree: Tree = try .init(testing.allocator, testing.io, depth + 1);
+    defer tree.deinit(testing.allocator);
+    const vtable: Header.VTable = .{ .finish = finish_nothing, .destroy = destroy_nothing };
+    const headers = try testing.allocator.alloc(Header, depth);
+    defer testing.allocator.free(headers);
+    const root_node = tree.root();
+    var current = root_node;
+    for (headers) |*header| current = register_test_task(&tree, header, &vtable, current);
+    tree.abort(root_node, null);
+    for (headers) |*header| try testing.expect(aborted(header));
+    try testing.expectEqual(@as(u32, 0), tree.live_count);
+}
+
+test "abort wide sibling fanout (abort_wide_sibling_fanout_after_batched_reaping)" {
+    // commonware compacts dropped siblings' weak links before the cascade; here siblings
+    // retire by their own abort, unlinking from the middle of the parent's list.
+    const total = 64;
+    var tree: Tree = try .init(testing.allocator, testing.io, total + 2);
+    defer tree.deinit(testing.allocator);
+    const vtable: Header.VTable = .{ .finish = finish_nothing, .destroy = destroy_nothing };
+    const parent = tree.child(tree.root());
+    var headers: [total]Header = undefined;
+    var nodes: [total]NodeRef = undefined;
+    for (&headers, &nodes) |*header, *node| {
+        node.* = register_test_task(&tree, header, &vtable, parent);
+    }
+    for (nodes, 0..) |node, index| {
+        if (index % 3 != 0) tree.abort(node, null);
+    }
+    var trigger: Header = undefined;
+    _ = register_test_task(&tree, &trigger, &vtable, parent);
+    tree.abort(parent, null);
+    try testing.expect(aborted(&trigger));
+    for (&headers) |*header| try testing.expect(aborted(header));
+    try testing.expectEqual(@as(u32, 1), tree.live_count); // The root.
 }

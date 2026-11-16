@@ -61,6 +61,41 @@ test "memory logical open contract" {
     }
 }
 
+// Removing a name or a partition retires only the opens it covers, and a failed removal
+// retires none (commonware `open::tests::test_replace_retires_only_matching_registrations`).
+test "memory removal retires only matching opens" {
+    var storage: Storage = .init(testing.allocator);
+    defer storage.deinit();
+    const s = storage.storage();
+    const ax = (try s.open("a", "x")).blob;
+    const ay = (try s.open("a", "y")).blob;
+    const bx = (try s.open("b", "x")).blob;
+    const Refused = struct {
+        fn all(st: iface.Storage, names: []const [2][]const u8) !void {
+            for (names) |pair| {
+                try testing.expectError(error.BlobAlreadyOpen, st.open(pair[0], pair[1]));
+            }
+        }
+    };
+    // A failed removal leaves every open intact.
+    try testing.expectError(error.PartitionMissing, s.remove("c", null));
+    try Refused.all(s, &.{ .{ "a", "x" }, .{ "a", "y" }, .{ "b", "x" } });
+    // Removing a name retires only that name; the old handle cannot release the new one.
+    try s.remove("a", "x");
+    try Refused.all(s, &.{ .{ "a", "y" }, .{ "b", "x" } });
+    const current = (try s.open("a", "x")).blob;
+    ax.close();
+    try Refused.all(s, &.{.{ "a", "x" }});
+    // Removing a partition retires its live names but not another partition's.
+    try s.remove("a", null);
+    (try s.open("a", "x")).blob.close();
+    (try s.open("a", "y")).blob.close();
+    try Refused.all(s, &.{.{ "b", "x" }});
+    current.close();
+    ay.close();
+    bx.close();
+}
+
 test "memory empty write semantics" {
     var storage: Storage = .init(testing.allocator);
     defer storage.deinit();

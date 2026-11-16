@@ -69,6 +69,10 @@ test "spawn abort on parent abort" {
     try run("spawn abort on parent abort");
 }
 
+test "aborting a joining parent aborts the joined child" {
+    try run("aborting a joining parent aborts the joined child");
+}
+
 test "spawn abort on parent completion" {
     try run("spawn abort on parent completion");
 }
@@ -163,6 +167,106 @@ test "strategy (test_strategy)" {
 
 test "nested strategy runs inline (test_nested_strategy_runs_inline)" {
     try run("nested strategy runs inline");
+}
+
+/// Runs `Handles(deterministic.Context)`'s case `name` on the deterministic runner, as
+/// commonware runs `utils::handle` tests.
+fn run_handles(comptime name: []const u8) !void {
+    var runner = try deterministic.Runner.init(testing.allocator, .{});
+    defer runner.deinit();
+    try (try runner.start_context(@field(Handles(deterministic.Context), name), .{}));
+}
+
+test "select aborts remaining tasks (select_aborts_remaining_tasks)" {
+    try run_handles("select aborts remaining tasks");
+}
+
+test "select of no handles is closed (select_empty_returns_closed)" {
+    try run_handles("select of no handles is closed");
+}
+
+test "abort after completion keeps output (abort_after_completion_keeps_output)" {
+    try run_handles("abort after completion keeps output");
+}
+
+test "a canceled select still aborts and reaps its tasks" {
+    try run_handles("a canceled select still aborts and reaps its tasks");
+}
+
+/// commonware `utils::handle::tests`.
+fn Handles(comptime Context: type) type {
+    return struct {
+        const Unit = context.Handle(anyerror!void);
+
+        fn pending(ctx: Context) anyerror!void {
+            var never: Io.Event = .unset;
+            try never.wait(ctx.io());
+            return error.Unreachable;
+        }
+
+        fn nothing(ctx: Context) anyerror!void {
+            _ = ctx;
+        }
+
+        fn running(ctx: Context, prefix: []const u8) !u64 {
+            const text = try ctx.encode(testing.allocator);
+            defer testing.allocator.free(text);
+            return telemetry.metrics.task.count_running_tasks(text, prefix);
+        }
+
+        pub const @"select aborts remaining tasks" = struct {
+            fn body(ctx: Context) !void {
+                const label = "tasks_running_select_remaining";
+                const handles = [_]Unit{
+                    try ctx.child("select_completed").spawn(nothing, .{}),
+                    try ctx.child(label).spawn(pending, .{}),
+                };
+                try (try context.select(anyerror!void, ctx.io(), &handles));
+                try testing.expectEqual(@as(u64, 0), try running(ctx, label));
+            }
+        }.body;
+
+        pub const @"select of no handles is closed" = struct {
+            fn body(ctx: Context) !void {
+                const result = context.select(anyerror!void, ctx.io(), &.{});
+                try testing.expectError(error.Closed, result);
+            }
+        }.body;
+
+        pub const @"abort after completion keeps output" = struct {
+            fn seven(ctx: Context, done: *Io.Event) anyerror!u64 {
+                done.set(ctx.io());
+                return 7;
+            }
+
+            fn body(ctx: Context) !void {
+                var done: Io.Event = .unset;
+                const handle = try ctx.child("done").spawn(seven, .{&done});
+                try done.wait(ctx.io());
+                try ctx.sleep(.fromMilliseconds(1));
+                try testing.expectEqual(@as(u64, 7), try (try handle.abort()));
+            }
+        }.body;
+
+        pub const @"a canceled select still aborts and reaps its tasks" = struct {
+            fn selecting(ctx: Context) anyerror!void {
+                const handles = [_]Unit{
+                    try ctx.child("first").spawn(pending, .{}),
+                    try ctx.child("second").spawn(pending, .{}),
+                };
+                return try context.select(anyerror!void, ctx.io(), &handles);
+            }
+
+            fn body(ctx: Context) !void {
+                const label = "selector";
+                const handle = try ctx.child(label).spawn(selecting, .{});
+                try ctx.sleep(.fromMilliseconds(10));
+                try testing.expectEqual(@as(u64, 3), try running(ctx, label));
+                try testing.expectError(error.Closed, handle.abort());
+                try testing.expectEqual(@as(u64, 0), try running(ctx, label));
+            }
+        }.body;
+    };
 }
 
 test "register and encode" {
@@ -434,6 +538,22 @@ fn Suite(comptime Context: type) type {
                 try family.initialized.wait(ctx.io());
                 try testing.expectError(error.Closed, parent.abort());
                 try testing.expectError(error.Closed, family.child.?.join());
+            }
+        }.body;
+
+        pub const @"aborting a joining parent aborts the joined child" = struct {
+            fn joining(ctx: Context, started: *Io.Event) anyerror!void {
+                const handle = try ctx.child("joined").spawn(pending, .{});
+                started.set(ctx.io());
+                return try handle.join();
+            }
+
+            fn body(ctx: Context) !void {
+                var started: Io.Event = .unset;
+                const parent = try ctx.child("joining").spawn(joining, .{&started});
+                try started.wait(ctx.io());
+                try ctx.sleep(.fromMilliseconds(1));
+                try testing.expectError(error.Closed, parent.abort());
             }
         }.body;
 

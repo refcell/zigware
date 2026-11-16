@@ -145,6 +145,71 @@ pub fn Return(comptime function: anytype) type {
     return @typeInfo(@TypeOf(function)).@"fn".return_type.?;
 }
 
+/// The most handles one `select` waits on.
+pub const select_max = 64;
+
+/// Waits for the first of `handles` to finish, aborts the rest, and returns the first one's
+/// result (commonware `Handle::select`). Consumes every handle. `error.Closed` if `handles` is
+/// empty. Returns only once every task has ended, even when the caller is canceled.
+pub fn select(
+    comptime T: type,
+    io: Io,
+    handles: []const Handle(T),
+) (JoinError || Io.ConcurrentError)!T {
+    if (handles.len == 0) return error.Closed;
+    assert(handles.len <= select_max);
+    const Done = struct { index: usize, result: JoinError!T };
+    const Race = union(enum) { done: Done };
+    const Waiter = struct {
+        fn wait(handle: Handle(T), index: usize) Done {
+            return .{ .index = index, .result = handle.join() };
+        }
+    };
+    // A joined handle may free its task state, so abort through copies of the nodes: a
+    // retired node's generation makes a stale copy a no-op.
+    var nodes: [select_max]NodeRef = undefined;
+    for (handles, nodes[0..handles.len]) |handle, *node| {
+        node.* = if (handle.header) |header| header.node else .aborted;
+    }
+    const tree = handles[0].tree;
+    var buffer: [select_max]Race = undefined;
+    var race: Io.Select(Race) = .init(io, buffer[0..handles.len]);
+    var started: usize = 0;
+    while (started < handles.len) : (started += 1) {
+        race.concurrent(.done, Waiter.wait, .{ handles[started], started }) catch |err| {
+            for (handles[started..]) |handle| {
+                if (handle.abort()) |_| {} else |_| {}
+            }
+            abort_all(tree, nodes[0..started]);
+            drain(Race, &race, started);
+            return err;
+        };
+    }
+    const first = race.await() catch |err| {
+        abort_all(tree, nodes[0..handles.len]);
+        drain(Race, &race, handles.len);
+        return err;
+    };
+    abort_all(tree, nodes[0..handles.len]);
+    drain(Race, &race, handles.len - 1);
+    assert(first.done.index < handles.len);
+    return first.done.result;
+}
+
+/// Aborts the subtree of every node in `nodes`.
+fn abort_all(tree: *supervision.Tree, nodes: []const NodeRef) void {
+    assert(nodes.len <= select_max);
+    for (nodes) |node| tree.abort(node, null);
+}
+
+/// Collects `count` results the caller will not use, then releases the select.
+fn drain(comptime Race: type, race: *Io.Select(Race), count: usize) void {
+    for (0..count) |_| {
+        _ = race.queue.getOneUncancelable(race.io) catch unreachable; // Never closed here.
+    }
+    race.cancelDiscard();
+}
+
 /// A spawned task's result (commonware `Handle`). Join, abort, or detach it exactly once.
 pub fn Handle(comptime T: type) type {
     return struct {
@@ -156,16 +221,28 @@ pub fn Handle(comptime T: type) type {
         result: *const T,
 
         /// Waits for the task's result. `error.Closed` if it was aborted before it returned.
+        /// A canceled join leaves the task running detached, as dropping commonware's
+        /// `Handle` future does.
         pub fn join(handle: Self) JoinError!T {
             const header = handle.header orelse return error.Closed;
-            if (handle.tree.claim(header, false)) {
-                handle.tree.finish(header, false);
+            const tree = handle.tree;
+            // Claim only once the task ended: claiming earlier would await the future
+            // uncancelably, and an aborting ancestor could no longer cancel the task.
+            header.finished.wait(tree.io) catch |err| {
+                tree.detach(header);
+                return err;
+            };
+            assert(header.ended);
+            if (tree.claim(header, false)) {
+                tree.finish(header, false);
             } else {
-                try header.done.wait(handle.tree.io);
+                // The claimer's await returns at once: the task already ended.
+                header.done.waitUncancelable(tree.io);
             }
+            assert(header.claimed);
             const closed = header.closed;
             const result = handle.result.*;
-            handle.tree.release(header);
+            tree.release(header);
             return if (closed) error.Closed else result;
         }
 
@@ -394,11 +471,11 @@ pub fn Context(comptime Network: type) type {
             const T = Return(function);
             const Race = union(enum) { value: T, expired: Io.Cancelable!void };
             var buffer: [2]Race = undefined;
-            var select: Io.Select(Race) = .init(ctx.io(), &buffer);
-            defer select.cancelDiscard();
-            try select.concurrent(.value, function, args);
-            try select.concurrent(.expired, sleep_for, .{ ctx.io(), duration });
-            return switch (try select.await()) {
+            var race: Io.Select(Race) = .init(ctx.io(), &buffer);
+            defer race.cancelDiscard();
+            try race.concurrent(.value, function, args);
+            try race.concurrent(.expired, sleep_for, .{ ctx.io(), duration });
+            return switch (try race.await()) {
                 .value => |value| value,
                 .expired => |expired| {
                     try expired;
