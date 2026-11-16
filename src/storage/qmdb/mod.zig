@@ -112,6 +112,12 @@ pub const InitOptions = struct {
     max_size: ?u64 = null,
     /// Whether the variant rebuilds a snapshot from the floor, which must then be retained.
     replay_from_floor: bool = false,
+    /// Operations a pruned activity bitmap no longer covers; the selected commit and its floor
+    /// must not lie below them (`current`'s pruned bits).
+    pruned_bits: u64 = 0,
+    /// The fewest operations the selected commit may retain (`current`'s pair-absorption
+    /// threshold).
+    minimum_size: u64 = 0,
 };
 
 /// Opens the authenticated journal `J` of a QMDB variant, selecting the last commit (within
@@ -140,7 +146,7 @@ pub fn init_journal(
         Floored.floored,
         root_bagging,
     );
-    validate_pending(J, gpa, &pending, options.replay_from_floor) catch |err| {
+    validate_pending(J, gpa, &pending, options) catch |err| {
         pending.deinit();
         return err;
     };
@@ -151,15 +157,28 @@ fn validate_pending(
     comptime J: type,
     gpa: std.mem.Allocator,
     pending: anytype,
-    replay: bool,
+    options: InitOptions,
 ) !void {
     const bounds = pending.bounds();
     assert(bounds.start <= bounds.end);
+    // Checked before publishing, so a refused bound discards no history.
+    if (bounds.end < options.pruned_bits) return error.HistoricalFloorPruned;
     var commit: ?J.Item = if (bounds.end == 0) null else try pending.read(bounds.end - 1);
     defer if (commit) |*op| op.deinit(gpa);
     const commit_floor: ??u64 = if (commit) |op| op.inactivity_floor() else null;
     const fresh = pending.is_fresh();
-    _ = try validate_initialization_commit(bounds.start, bounds.end, fresh, commit_floor, replay);
+    const replay = options.replay_from_floor;
+    const selected_floor = try validate_initialization_commit(
+        bounds.start,
+        bounds.end,
+        fresh,
+        commit_floor,
+        replay,
+    );
+    if (selected_floor) |selected| {
+        if (selected < options.pruned_bits) return error.HistoricalFloorPruned;
+    }
+    if (bounds.end < options.minimum_size) return error.HistoricalFloorPruned;
 }
 
 /// The inactivity floor declared at the commit immediately preceding `op_count`

@@ -14,6 +14,7 @@ const codec = @import("codec");
 const runtime = @import("runtime");
 const utils = @import("utils");
 const merkle = @import("../../merkle/mod.zig");
+const value_mod = @import("../value.zig");
 const metadata_mod = @import("../../metadata/mod.zig");
 const any = @import("../any/mod.zig");
 const qmdb = @import("../mod.zig");
@@ -135,7 +136,13 @@ pub fn Db(F: type, U: type, C: type, I: type, H: type, comptime N: usize) type {
                 .translator = cfg.translator,
                 .init_cache = cfg.init_cache,
             };
-            var any_db = try Any.init(gpa, storage, scope.child("any"), any_cfg, max_size);
+            const options: qmdb.InitOptions = .{
+                .max_size = max_size,
+                .replay_from_floor = true,
+                .pruned_bits = pruned_chunks * chunk_bits,
+                .minimum_size = canonical.pair_absorption_threshold(F, N, pruned_chunks) orelse 0,
+            };
+            var any_db = try Any.init_with(gpa, storage, scope.child("any"), any_cfg, options);
             errdefer any_db.deinit();
             try prune_any_bitmap(&any_db, pruned_chunks);
             return finish_init(gpa, scope, any_db, metadata, pinned);
@@ -400,7 +407,7 @@ pub fn Db(F: type, U: type, C: type, I: type, H: type, comptime N: usize) type {
         /// The proof of `key`'s current value. Fails with `KeyNotFound` if it has none.
         pub fn key_value_proof(self: *Self, key: *const Key) !ProvedValue {
             const located = try self.any.get_with_loc(key) orelse return error.KeyNotFound;
-            assert(std.mem.eql(u8, std.mem.asBytes(&located.update.key), std.mem.asBytes(key)));
+            assert(value_mod.eql(Key, located.update.key, key.*));
             const proof = try self.operation_proof(located.location);
             assert(proof.loc == located.location);
             const kv: KeyValueProof = if (comptime U.siblings)

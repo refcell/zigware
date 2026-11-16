@@ -100,10 +100,21 @@ pub fn Db(F: type, U: type, C: type, I: type, H: type, comptime N: usize) type {
             cfg: Cfg,
             max_size: ?u64,
         ) !Self {
-            var log = try qmdb.init_journal(Log, gpa, storage, cfg.merkle, cfg.log, .{
-                .max_size = max_size,
-                .replay_from_floor = true,
-            });
+            const options: qmdb.InitOptions = .{ .max_size = max_size, .replay_from_floor = true };
+            return init_with(gpa, storage, scope, cfg, options);
+        }
+
+        /// `init` with the journal selection constraints `options` (commonware's
+        /// `init_with_bitmap`), checked before any history is discarded.
+        pub fn init_with(
+            gpa: Allocator,
+            storage: Storage,
+            scope: Scope,
+            cfg: Cfg,
+            options: qmdb.InitOptions,
+        ) !Self {
+            assert(options.replay_from_floor);
+            var log = try qmdb.init_journal(Log, gpa, storage, cfg.merkle, cfg.log, options);
             errdefer log.deinit();
             if (log.size() == 0) {
                 _ = try log.append(.{ .commit = .{ .metadata = null, .floor = 0 } });
