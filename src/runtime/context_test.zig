@@ -116,6 +116,30 @@ test "metrics" {
     try run("metrics");
 }
 
+test "storage operations (test_storage_operations)" {
+    try run("storage operations");
+}
+
+test "blob read write (test_blob_read_write)" {
+    try run("blob read write");
+}
+
+test "blob resize (test_blob_resize)" {
+    try run("blob resize");
+}
+
+test "many partition read write (test_many_partition_read_write)" {
+    try run("many partition read write");
+}
+
+test "blob read past length (test_blob_read_past_length)" {
+    try run("blob read past length");
+}
+
+test "duplicate open returns error (test_duplicate_open_returns_error)" {
+    try run("duplicate open returns error");
+}
+
 test "register and encode" {
     try run("register and encode");
 }
@@ -722,6 +746,151 @@ fn Suite(comptime Context: type) type {
                 try testing.expectEqual(@as(?i64, 1), try running_exactly(ctx, label));
                 try testing.expectError(error.Closed, handle.abort());
                 try testing.expectEqual(@as(?i64, 0), try running_exactly(ctx, label));
+            }
+        }.body;
+
+        fn expect_read(blob: anytype, offset: u64, expected: []const u8) !void {
+            var buffer: [64]u8 = undefined;
+            const out = buffer[0..expected.len];
+            try blob.read_at(offset, out);
+            try testing.expectEqualSlices(u8, expected, out);
+        }
+
+        pub const @"storage operations" = struct {
+            fn body(ctx: Context) !void {
+                const storage = ctx.storage;
+                const opened = try storage.open("test_partition", "test_blob");
+                try testing.expectEqual(@as(u64, 0), opened.len);
+                const data = "Hello, Storage!";
+                try opened.blob.write_at(0, data, .{});
+                try opened.blob.sync();
+                try expect_read(opened.blob, 0, data);
+                var names = try storage.scan(testing.allocator, "test_partition");
+                try testing.expect(names.contains("test_blob"));
+                names.deinit(testing.allocator);
+                opened.blob.close();
+                const reopened = try storage.open("test_partition", "test_blob");
+                try testing.expectEqual(@as(u64, data.len), reopened.len);
+                try expect_read(reopened.blob, 7, "Storage");
+                try reopened.blob.sync();
+                reopened.blob.close();
+                try storage.remove("test_partition", "test_blob");
+                names = try storage.scan(testing.allocator, "test_partition");
+                try testing.expect(!names.contains("test_blob"));
+                names.deinit(testing.allocator);
+                try storage.remove("test_partition", null);
+                const missing = storage.scan(testing.allocator, "test_partition");
+                try testing.expectError(error.PartitionMissing, missing);
+            }
+        }.body;
+
+        pub const @"blob read write" = struct {
+            fn body(ctx: Context) !void {
+                const blob = (try ctx.storage.open("test_partition", "test_blob_rw")).blob;
+                defer blob.close();
+                try blob.write_at(0, "Hello", .{});
+                try blob.write_at(5, "World", .{});
+                try expect_read(blob, 0, "HelloWorld");
+                var buffer: [10]u8 = undefined;
+                try testing.expectError(error.BlobInsufficientLength, blob.read_at(10, &buffer));
+                try blob.write_at(5, "Store", .{});
+                try expect_read(blob, 0, "HelloStore");
+                try testing.expectError(error.BlobInsufficientLength, blob.read_at(10, &buffer));
+            }
+        }.body;
+
+        pub const @"blob resize" = struct {
+            fn reopen(ctx: Context, expected_len: u64) !@import("storage.zig").Blob {
+                const opened = try ctx.storage.open("test_partition_resize", "test_blob_resize");
+                try testing.expectEqual(expected_len, opened.len);
+                return opened.blob;
+            }
+
+            fn body(ctx: Context) !void {
+                const data = "some data";
+                var blob = try reopen(ctx, 0);
+                try blob.write_at(0, data, .{});
+                try blob.sync();
+                blob.close();
+                blob = try reopen(ctx, data.len);
+                try blob.resize(data.len * 2);
+                try blob.sync();
+                blob.close();
+                blob = try reopen(ctx, data.len * 2);
+                try expect_read(blob, 0, data);
+                const zeros: [data.len]u8 = @splat(0);
+                try expect_read(blob, data.len, &zeros);
+                try blob.resize(data.len);
+                try blob.sync();
+                blob.close();
+                blob = try reopen(ctx, data.len);
+                try expect_read(blob, 0, data);
+                try blob.sync();
+                blob.close();
+            }
+        }.body;
+
+        pub const @"many partition read write" = struct {
+            fn body(ctx: Context) !void {
+                const partitions = [_][]const u8{ "partition1", "partition2", "partition3" };
+                for (partitions, 0..) |partition, additional| {
+                    const blob = (try ctx.storage.open(partition, "test_blob_rw")).blob;
+                    defer blob.close();
+                    try blob.write_at(0, "Hello", .{});
+                    try blob.write_at(5 + additional, "World", .{});
+                    try blob.sync();
+                }
+                for (partitions, 0..) |partition, additional| {
+                    const opened = try ctx.storage.open(partition, "test_blob_rw");
+                    defer opened.blob.close();
+                    try testing.expectEqual(@as(u64, 10 + additional), opened.len);
+                    try expect_read(opened.blob, 0, "Hello");
+                    try expect_read(opened.blob, 5 + additional, "World");
+                }
+            }
+        }.body;
+
+        pub const @"blob read past length" = struct {
+            fn body(ctx: Context) !void {
+                const blob = (try ctx.storage.open("test_partition", "test_blob_rw")).blob;
+                defer blob.close();
+                var buffer: [20]u8 = undefined;
+                const short = error.BlobInsufficientLength;
+                try testing.expectError(short, blob.read_at(0, buffer[0..10]));
+                try blob.write_at(0, "Hello, Storage!", .{});
+                try testing.expectError(short, blob.read_at(0, &buffer));
+            }
+        }.body;
+
+        pub const @"duplicate open returns error" = struct {
+            fn body(ctx: Context) !void {
+                const storage = ctx.storage;
+                const partition = "duplicate_open";
+                const first = (try storage.open(partition, "blob")).blob;
+                try first.write_at(0, "old", .{});
+                try testing.expectError(error.BlobAlreadyOpen, storage.open(partition, "blob"));
+                const versioned = storage.open_versioned(partition, "blob", .only(0));
+                try testing.expectError(error.BlobAlreadyOpen, versioned);
+                try expect_read(first, 0, "old");
+                try first.write_at(0, "new", .{});
+                try first.sync();
+                first.close();
+                const old = try storage.open(partition, "blob");
+                try testing.expectEqual(@as(u64, 3), old.len);
+                try expect_read(old.blob, 0, "new");
+                // A removed blob opens afresh while a handle to the old one is still open.
+                try storage.remove(partition, "blob");
+                const current = try storage.open(partition, "blob");
+                try testing.expectEqual(@as(u64, 0), current.len);
+                old.blob.close();
+                try testing.expectError(error.BlobAlreadyOpen, storage.open(partition, "blob"));
+                try current.blob.write_at(0, "replacement", .{});
+                try current.blob.sync();
+                current.blob.close();
+                const reopened = try storage.open(partition, "blob");
+                defer reopened.blob.close();
+                try testing.expectEqual(@as(u64, 11), reopened.len);
+                try expect_read(reopened.blob, 0, "replacement");
             }
         }.body;
 

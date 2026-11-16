@@ -48,8 +48,10 @@ time, files, and network: build on it rather than around it where it fits.
   (runtime-telemetry's), labeled `child`/`with_attribute`, `spawn` with mandatory
   supervision (a finished or aborted parent aborts its descendants), `stop`/`stopped`,
   clock helpers (`timeout`, `sleep_until`); deterministic `register`/`encode`/`stop` audits;
-  `deterministic.Runner.start_context`. lib.rs clock, spawn, shutdown, and metrics tests
-  (`context_test.zig`).
+  `deterministic.Runner.start_context`. lib.rs clock, spawn, shutdown, metrics, and storage
+  tests (`context_test.zig`: storage operations, blob read/write, resize, many partitions,
+  read past length, duplicate open). `read_options_compose`/`write_options_compose` have no
+  counterpart (the options are packed structs of bools).
 - [x] Context on `production.Runner` (runtime-telemetry's `start_context`); the Context
   suite runs on both runners.
 - [x] Runtime task metrics (`runtime_tasks_spawned`/`running`, `runtime_iterations`), written
