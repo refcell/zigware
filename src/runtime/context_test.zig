@@ -1,5 +1,5 @@
 //! Tests of `Context` (commonware `runtime/src/lib.rs` tests that go through the context), on
-//! the deterministic runtime and, once it has `start_context`, the production runtime.
+//! the deterministic and the production runtime.
 
 const std = @import("std");
 const Io = std.Io;
@@ -20,8 +20,6 @@ fn run(comptime name: []const u8) !void {
         defer runner.deinit();
         try (try runner.start_context(@field(Suite(deterministic.Context), name), .{}));
     }
-    // The production `start_context` lands from the runtime-telemetry lane.
-    if (comptime !@hasDecl(production.Runner, "start_context")) return;
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
     var buffer: [128]u8 = undefined;

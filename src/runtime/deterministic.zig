@@ -55,6 +55,8 @@ pub const Config = struct {
     stack_size_bytes: usize = 8 * 1024 * 1024,
     /// Capacity of the supervision tree: contexts alive at once.
     max_contexts: u32 = context_mod.default_max_contexts,
+    /// Storage fault injection (commonware `with_storage_fault_config`); none by default.
+    storage_faults: storage_mod.faulty.Config = .{},
 
     pub fn validate(config: Config) void {
         assert(config.cycle_ns > 0 or config.timeout_ns == null);
@@ -210,12 +212,13 @@ pub const Runner = struct {
     stack_pool: std.ArrayList(fiber.Stack),
     /// In-memory storage; durable contents carry over between starts.
     memory_storage: storage_mod.memory.Storage,
+    /// Fault injection over `memory_storage`, drawing from the runtime RNG; created on first
+    /// use.
+    faulty_storage: ?storage_mod.faulty.Storage(Rng) = null,
     /// The simulated network, created on first use; it carries over between starts.
     simulated_network: ?network_mod.deterministic.Network = null,
     /// What every `Context` shares, created by the first `start_context`.
     context_runtime: ?context_mod.Runtime = null,
-    /// Number of roots started, so a restart can retire the previous run's opens.
-    starts: u64 = 0,
     /// The metrics registry; it carries over between starts. Release every handle before
     /// `deinit`.
     metrics_registry: telemetry.metrics.Registry,
@@ -254,6 +257,7 @@ pub const Runner = struct {
         runner.ready.deinit(runner.allocator);
         runner.batch.deinit(runner.allocator);
         runner.alarms.deinit(runner.allocator);
+        if (runner.faulty_storage) |*faults| faults.deinit();
         runner.memory_storage.deinit();
         if (runner.context_runtime) |*runtime| runtime.deinit();
         if (runner.simulated_network) |*net| net.deinit();
@@ -267,9 +271,36 @@ pub const Runner = struct {
         return .{ .userdata = runner, .vtable = &vtable };
     }
 
-    /// The runtime's in-memory storage. The runner must not move once it is used.
+    /// The runtime's in-memory storage, with `Config.storage_faults` injected. The runner must
+    /// not move once it is used.
     pub fn storage(runner: *Runner) storage_mod.Storage {
-        return runner.memory_storage.storage();
+        return runner.storage_faulty().storage();
+    }
+
+    /// The live fault configuration (commonware `storage_fault_config`): changes take effect
+    /// at the next storage operation and carry over between starts.
+    pub fn storage_fault_config(runner: *Runner) *storage_mod.faulty.Config {
+        return &runner.storage_faulty().config;
+    }
+
+    fn storage_faulty(runner: *Runner) *storage_mod.faulty.Storage(Rng) {
+        if (runner.faulty_storage == null) {
+            const faults = runner.config.storage_faults;
+            const memory = &runner.memory_storage;
+            runner.faulty_storage = .init(runner.allocator, memory, &runner.rng, faults);
+        }
+        assert(runner.faulty_storage.?.inner == &runner.memory_storage);
+        return &runner.faulty_storage.?;
+    }
+
+    /// Crash storage as a run ends (commonware `Runner::run`): unsynced writes and resizes
+    /// survive as the fault configuration selected, only durable contents remain, and the
+    /// run's handles can no longer publish.
+    fn crash_storage(runner: *Runner) void {
+        if (runner.faulty_storage) |*faults| {
+            faults.crash() catch @panic("deterministic: replaying storage crash failed");
+        }
+        runner.memory_storage.crash();
     }
 
     /// The runtime's deterministic network. The runner must not move once it is used.
@@ -339,10 +370,6 @@ pub const Runner = struct {
         };
         assert(runner.current == null);
         assert(runner.task_count == 0);
-        // A restart recovers like commonware's checkpoint: only synced contents survive, and
-        // handles from the previous run can no longer publish.
-        if (runner.starts > 0) runner.memory_storage.crash();
-        runner.starts += 1;
         if (runner.iterations_counter == null) {
             const scope = runner.metrics().sub_registry("runtime");
             const help = "Total number of iterations";
@@ -359,6 +386,8 @@ pub const Runner = struct {
         runner.root_finished = false;
         const outcome = runner.run_until_root();
         runner.shutdown();
+        // A restart recovers like commonware's checkpoint: only what survived the crash.
+        runner.crash_storage();
         outcome catch |err| {
             runner.destroy_task(root);
             return err;
@@ -1238,6 +1267,154 @@ test "storage survives a restart with only synced contents (test_recover_storage
     const audit = runner.storage_audit();
     try testing.expectEqual(@as(u64, 6), try (try runner.start(Root.read, .{runner.storage()})));
     try testing.expectEqualSlices(u8, &audit, &runner.storage_audit());
+}
+
+test "storage faults are injected and recovered from (test_storage_fault_injection_and_recovery)" {
+    var runner = try test_runner(.{ .storage_faults = .{ .sync_rate = .one } });
+    defer runner.deinit();
+    const Root = struct {
+        fn fail(store: storage_mod.Storage) !void {
+            const blob = (try store.open("test_fault", "blob")).blob;
+            defer blob.close();
+            try blob.write_at(0, "data", .{});
+            try testing.expectError(error.Io, blob.sync());
+        }
+        fn recover(store: storage_mod.Storage) !void {
+            const opened = try store.open("test_fault", "blob");
+            defer opened.blob.close();
+            try testing.expectEqual(@as(u64, 0), opened.len); // Unsynced data is lost.
+            try opened.blob.write_at(0, "recovered", .{});
+            try opened.blob.sync();
+            var buffer: [9]u8 = undefined;
+            try opened.blob.read_at(0, &buffer);
+            try testing.expectEqualStrings("recovered", &buffer);
+        }
+    };
+    try (try runner.start(Root.fail, .{runner.storage()}));
+    runner.storage_fault_config().* = .{};
+    try (try runner.start(Root.recover, .{runner.storage()}));
+}
+
+test "storage fault config changes take effect at once (test_storage_fault_dynamic_config)" {
+    var runner = try test_runner(.{});
+    defer runner.deinit();
+    const Root = struct {
+        fn body(owner: *Runner) !void {
+            const blob = (try owner.storage().open("test_dynamic", "blob")).blob;
+            defer blob.close();
+            try blob.write_at(0, "initial", .{});
+            try blob.sync();
+            owner.storage_fault_config().sync_rate = .one;
+            try blob.write_at(0, "updated", .{});
+            try testing.expectError(error.Io, blob.sync());
+            owner.storage_fault_config().sync_rate = .zero;
+            try blob.sync();
+        }
+    };
+    try (try runner.start(Root.body, .{&runner}));
+}
+
+test "a restart replays the unsynced writes the fault config retains" {
+    const retain_all: storage_mod.faulty.WriteConfig =
+        .{ .failure_rate = .zero, .retention_rate = .one, .mode = .prefix };
+    var runner = try test_runner(.{ .storage_faults = .{ .write_rate = retain_all } });
+    defer runner.deinit();
+    const Root = struct {
+        fn write(store: storage_mod.Storage) !void {
+            const blob = (try store.open("partition", "blob")).blob;
+            defer blob.close();
+            try blob.write_at(0, "........", .{ .sync = true });
+            try blob.write_at(0, "AB", .{});
+        }
+        fn read(store: storage_mod.Storage) ![8]u8 {
+            const opened = try store.open("partition", "blob");
+            defer opened.blob.close();
+            var buffer: [8]u8 = undefined;
+            try opened.blob.read_at(0, &buffer);
+            return buffer;
+        }
+    };
+    try (try runner.start(Root.write, .{runner.storage()}));
+    const contents = try (try runner.start(Root.read, .{runner.storage()}));
+    try testing.expectEqualStrings("AB......", &contents);
+}
+
+fn storage_fault_opens(seed: u64) ![20]bool {
+    const faults: storage_mod.faulty.Config = .{ .open_rate = .literal(0.5) };
+    var runner = try test_runner(.{ .seed = seed, .storage_faults = faults });
+    defer runner.deinit();
+    const Root = struct {
+        fn body(store: storage_mod.Storage) ![20]bool {
+            var results: [20]bool = undefined;
+            for (&results, 0..) |*result, index| {
+                var name_buffer: [8]u8 = undefined;
+                const name = try std.fmt.bufPrint(&name_buffer, "blob{d}", .{index});
+                const opened = store.open("test_determinism", name);
+                result.* = if (opened) |ok| blk: {
+                    ok.blob.close();
+                    break :blk true;
+                } else |_| false;
+            }
+            return results;
+        }
+    };
+    return try runner.start(Root.body, .{runner.storage()});
+}
+
+test "storage faults replay with the seed (test_storage_fault_determinism)" {
+    const first = try storage_fault_opens(12345);
+    try testing.expectEqual(first, try storage_fault_opens(12345));
+    try testing.expect(!std.mem.eql(bool, &first, &try storage_fault_opens(99999)));
+}
+
+fn storage_fault_tasks(seed: u64) ![5]u32 {
+    const faults: storage_mod.faulty.Config = .{
+        .open_rate = .literal(0.5),
+        .write_rate = .{
+            .failure_rate = .literal(0.3),
+            .retention_rate = .zero,
+            .mode = .prefix,
+        },
+        .sync_rate = .literal(0.2),
+    };
+    var runner = try test_runner(.{ .seed = seed, .storage_faults = faults });
+    defer runner.deinit();
+    const Root = struct {
+        fn task(ctx: Context, task_index: usize) anyerror!u32 {
+            var successes: u32 = 0;
+            for (0..4) |blob_index| {
+                var name_buffer: [32]u8 = undefined;
+                const name = try std.fmt.bufPrint(
+                    &name_buffer,
+                    "task{d}_blob{d}",
+                    .{ task_index, blob_index },
+                );
+                const opened = ctx.storage.open("partition", name) catch continue;
+                defer opened.blob.close();
+                successes += 1;
+                if (opened.blob.write_at(0, "data", .{})) |_| successes += 1 else |_| {}
+                if (opened.blob.sync()) |_| successes += 1 else |_| {}
+            }
+            return successes;
+        }
+
+        fn body(ctx: Context) ![5]u32 {
+            var handles: [5]context_mod.Handle(anyerror!u32) = undefined;
+            for (&handles, 0..) |*handle, index| {
+                handle.* = try ctx.child("task").spawn(task, .{index});
+            }
+            var results: [5]u32 = undefined;
+            for (handles, &results) |handle, *result| result.* = try (try handle.join());
+            return results;
+        }
+    };
+    return try runner.start_context(Root.body, .{});
+}
+
+test "storage faults and task order replay together (test_storage_fault_determinism_multi_task)" {
+    const first = try storage_fault_tasks(42);
+    try testing.expectEqual(first, try storage_fault_tasks(42));
+    try testing.expect(!std.mem.eql(u32, &first, &try storage_fault_tasks(99999)));
 }
 
 test "the runner's network connects tasks" {

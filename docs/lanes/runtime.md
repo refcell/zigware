@@ -20,7 +20,11 @@ time, files, and network: build on it rather than around it where it fits.
 - [x] in-memory storage (`storage/memory.zig`), storage suite (`storage/tests.zig`), audit
   digests checked against commonware.
 - [x] storage in `deterministic.Runner` (`storage()`, `storage_audit()`, crash on restart).
-- [ ] faulty.rs storage fault injection; audited and metered storage wrappers.
+- [x] faulty.rs storage fault injection (`storage/faulty.zig`, `faulty_test.zig`):
+  open/read/write/sync/resize/remove/scan fault rates, torn writes (prefix or subset
+  retention), partial resizes, a crash journal replayed in issue order;
+  `deterministic.Config.storage_faults`, `Runner.storage_fault_config()`.
+- [ ] audited and metered storage wrappers.
 - [x] mock channel (`mocks.zig`), deterministic network (`network/deterministic.zig`),
   network suite (`network/tests.zig`), `Runner.network()`.
 - [ ] audited and metered network wrappers.
@@ -32,8 +36,10 @@ time, files, and network: build on it rather than around it where it fits.
   clock helpers (`timeout`, `sleep_until`); deterministic `register`/`encode`/`stop` audits;
   `deterministic.Runner.start_context`. lib.rs clock, spawn, shutdown, and metrics tests
   (`context_test.zig`).
-- [ ] Context on `production.Runner` (with runtime-telemetry) and runtime task metrics
-  (`runtime_tasks_*`).
+- [x] Context on `production.Runner` (runtime-telemetry's `start_context`); the Context
+  suite runs on both runners.
+- [ ] Runtime task metrics (`runtime_tasks_*`, `runtime_iterations`): runtime-telemetry is
+  writing them in `context.zig`.
 - [ ] iobuf (IoBuf/IoBufs pooled buffers) and utils (buffer pools, handle, supervision).
 - Moved to the runtime-telemetry lane: telemetry (`src/runtime/telemetry/`) and the
   production runtime (`src/runtime/production/`, io_uring/kqueue storage and network).
@@ -88,6 +94,13 @@ time, files, and network: build on it rather than around it where it fits.
   when the task spawned from it (or an ancestor) ends. Zig has no drop, so a child context
   that never spawns holds its node until then: make long-lived child contexts once rather
   than per message.
+- Faulty storage draws from the runtime RNG and journals by the memory backend's blob
+  generation. It has no `start_sync` (zigware's `sync` is synchronous), so commonware's
+  start_sync, async-gating, and read-option recording tests are not ported. The runner
+  crashes storage when each run ends, as commonware does, so `storage_audit` after a run
+  includes the crash replay.
+- `Context.sleep_until` clamps deadlines past `context.deadline_max` (2262):
+  `std.Io.Threaded` cannot represent later ones.
 - The memory backend guards its state with one spin lock that never blocks inside, so it
   is safe across threads and never yields a fiber while held.
 
@@ -99,3 +112,4 @@ time, files, and network: build on it rather than around it where it fits.
 - 2026-11-13: runner storage, mock channel, deterministic network and network suite.
 - 2026-11-13: fiber unwind fix for aarch64 (stack traces on fibers), signal/Stopper.
 - 2026-11-16: Context with supervision, clock, stop, and metrics on `deterministic.Runner`.
+- 2026-11-16: Context suite on production; faulty storage wired into the runner.

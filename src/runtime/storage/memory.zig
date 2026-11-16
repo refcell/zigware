@@ -315,6 +315,69 @@ pub const Storage = struct {
         assert(self.partitions.items.len == 0 or self.partitions.items[0].name.len > 0);
     }
 
+    /// The durable entry whose current incarnation is `generation`. Called with the lock held.
+    fn entry_of_generation(self: *Storage, generation: u64) ?*Entry {
+        for (self.partitions.items) |*partition| {
+            for (partition.entries.items) |*entry| {
+                if (entry.generation == generation) return entry;
+            }
+        }
+        return null;
+    }
+
+    /// Whether `generation` is still a blob's current incarnation (not removed, replaced, or
+    /// crashed).
+    pub fn generation_live(self: *Storage, generation: u64) bool {
+        self.lock();
+        defer self.unlock();
+        return self.entry_of_generation(generation) != null;
+    }
+
+    /// Merge the `selected` bytes of a write at physical `offset` into the durable contents of
+    /// incarnation `generation`, leaving live handles untouched (commonware
+    /// `retain_crash_write`). Does nothing if the incarnation is gone.
+    pub fn retain_crash_write(
+        self: *Storage,
+        generation: u64,
+        offset: u64,
+        bytes: []const u8,
+        selected: []const bool,
+    ) Error!void {
+        assert(bytes.len == selected.len);
+        const end = std.math.add(u64, offset, bytes.len) catch return error.OffsetOverflow;
+        const start = std.math.cast(usize, offset) orelse return error.OffsetOverflow;
+        _ = std.math.cast(usize, end) orelse return error.OffsetOverflow;
+        self.lock();
+        defer self.unlock();
+        const entry = self.entry_of_generation(generation) orelse return;
+        const content = &entry.content;
+        for (bytes, selected, 0..) |byte, keep, index| {
+            if (!keep) continue;
+            const position = start + index;
+            if (position >= content.items.len) {
+                try content.appendNTimes(self.gpa, 0, position + 1 - content.items.len);
+            }
+            content.items[position] = byte;
+        }
+    }
+
+    /// Truncate or zero-extend the durable contents of incarnation `generation` to physical
+    /// `length`, leaving live handles untouched (commonware `retain_crash_resize`). Does
+    /// nothing if the incarnation is gone.
+    pub fn retain_crash_resize(self: *Storage, generation: u64, length: u64) Error!void {
+        const end = std.math.cast(usize, length) orelse return error.OffsetOverflow;
+        self.lock();
+        defer self.unlock();
+        const entry = self.entry_of_generation(generation) orelse return;
+        const content = &entry.content;
+        if (end > content.items.len) {
+            try content.appendNTimes(self.gpa, 0, end - content.items.len);
+        } else {
+            content.shrinkRetainingCapacity(end);
+        }
+        assert(content.items.len == end);
+    }
+
     /// A copy of a blob's durable raw contents, header included, or null if it is missing.
     pub fn raw_blob(
         self: *Storage,
