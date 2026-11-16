@@ -13,7 +13,7 @@
 //! Contracts (comptime):
 //! - Provider `D`: `subscribe() !Subscription` whose `recv() !?Update` yields updates with
 //!   `index`, `view().latest` (`p2p.TrackedPeers`), and `deinit` (p2p.simulated's `Manager`).
-//! - Blocker `B`: `block(peer) Feedback` and `blocked() !Subscription` whose
+//! - Blocker `B`: `block(peer) Feedback` and `blocked() (!)Subscription` whose
 //!   `recv(gpa) !?[]P` yields the blocked set (owned by the caller).
 //! - Consumer `C`: a resolver consumer with `C.Value == []const u8`.
 //! - Producer `Pro`: `Pro.Key` and `produce(key) !oneshot.Receiver(Produced)`; a closed
@@ -227,7 +227,12 @@ pub fn Engine(comptime T: type) type {
             errdefer fetcher.deinit();
             var peer_sets = try config.peer_provider.subscribe();
             errdefer peer_sets.deinit();
-            const blocked = try config.blocker.blocked();
+            // Blockers that cannot fail (p2p lookup's oracle) return the subscription itself.
+            const blocked_result = config.blocker.blocked();
+            const blocked = if (@typeInfo(@TypeOf(blocked_result)) == .error_union)
+                try blocked_result
+            else
+                blocked_result;
             self.* = .{
                 .gpa = gpa,
                 .io = io,

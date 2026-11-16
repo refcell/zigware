@@ -1105,6 +1105,7 @@ test "secondary peer requests are served" {
 
 test {
     _ = @import("engine_delivery_test.zig");
+    _ = @import("engine_lookup_test.zig");
 }
 
 test "operations after shutdown do not panic" {

@@ -138,8 +138,9 @@ on p2p's simulated network and the deterministic runtime.
   `engine_delivery_test.zig`). Commonware's `count_running_tasks` checks have no runtime
   counterpart: aborts await every engine task and `testing.allocator` reports leaks. The
   Blocking consumer mocks resolve gates on the test's task instead of a per-delivery task.
-  `test_stale_response_after_requester_restart_is_ignored` waits for p2p's authenticated
-  lookup network.
+  `test_stale_response_after_requester_restart_is_ignored` runs on p2p's authenticated
+  lookup network over the deterministic transport (`engine_lookup_test.zig`); answering the
+  new request with the old value makes it time out, so it checks the request-ID guard.
 - Beyond commonware's tests, a DST seed sweep (16 seeds) runs the engine on 50%-loss links
   with keys spread over three servers and a mid-flight retain: every kept key arrives exactly
   once with its value. A failing seed prints itself; the run replays from it.
@@ -147,10 +148,8 @@ on p2p's simulated network and the deterministic runtime.
 ## Backlog
 - [x] resolver: lib.rs, subscribers, ingress, delivery, opaque (with metrics).
 - [x] resolver p2p: wire.rs (conformance hashes match), score, fetcher (60 tests), inflight,
-  config, metrics, engine, ingress, mocks; 49 of commonware's 50 mod.rs tests on p2p
-  simulated.
-- [ ] resolver p2p: `test_stale_response_after_requester_restart_is_ignored` once p2p's
-  authenticated lookup network lands.
+  config, metrics, engine, ingress, mocks; all 50 of commonware's mod.rs tests (49 on p2p
+  simulated, the requester-restart test on p2p authenticated lookup).
 - [x] Resolver fuzz targets (commonware has no resolver fuzz crate): wire decode is canonical;
   model checks of the subscriber tracker, ingress coalescing, the p2p fetcher state machine,
   and the delivery tracker lifecycle. Each model check was mutation-tested (a planted bug in
