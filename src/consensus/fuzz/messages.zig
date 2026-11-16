@@ -8,8 +8,7 @@
 //! with a participant-bounded codec also draw `participants` (clamped to 4..=255). The data
 //! is the drawn bytes, as in commonware, or, so that the seeded run reaches decodable
 //! messages without coverage guidance, a valid encoding for the arm with up to three drawn
-//! edits. The threshold VRF scheme needs only its wire types to decode, so it is a
-//! wire-only stand-in until consensus-simplex ports its signing.
+//! edits.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -35,20 +34,8 @@ const MinSig = cryptography.bls12381.primitives.MinSig;
 const Ed25519 = simplex.scheme.ed25519.Scheme(Digest);
 const MultisigMinPk = multisig.Scheme(Digest, PublicKey, MinPk);
 const MultisigMinSig = multisig.Scheme(Digest, PublicKey, MinSig);
-const ThresholdMinPk = Threshold(MinPk);
-const ThresholdMinSig = Threshold(MinSig);
-
-/// The wire types of `bls12381_threshold::vrf::Scheme<_, V>`.
-fn Threshold(comptime V: type) type {
-    return struct {
-        pub const Signature = vrf.Signature(V);
-        pub const Certificate = vrf.Certificate(V);
-
-        pub fn max_certificate_size(_: u32) usize {
-            return vrf.Certificate(V).fixed_size;
-        }
-    };
-}
+const ThresholdMinPk = vrf.Scheme(Digest, PublicKey, MinPk);
+const ThresholdMinSig = vrf.Scheme(Digest, PublicKey, MinSig);
 
 /// commonware's `FuzzInput` arms, in declaration order.
 pub const Target = enum {
@@ -97,8 +84,12 @@ pub const Seeds = struct {
         var min_sig_fixture = try multisig.fixture(MultisigMinSig, gpa, &rng, "fuzz", 4);
         defer min_sig_fixture.deinit(gpa);
         try signed_seeds(MultisigMinSig, gpa, &min_sig_fixture, seeds.encodings[4..6]);
-        try threshold_seeds(MinPk, gpa, seeds.encodings[6..8]);
-        try threshold_seeds(MinSig, gpa, seeds.encodings[8..10]);
+        var vrf_min_pk_fixture = try vrf.fixture(ThresholdMinPk, gpa, &rng, "fuzz", 4);
+        defer vrf_min_pk_fixture.deinit(gpa);
+        try signed_seeds(ThresholdMinPk, gpa, &vrf_min_pk_fixture, seeds.encodings[6..8]);
+        var vrf_min_sig_fixture = try vrf.fixture(ThresholdMinSig, gpa, &rng, "fuzz", 4);
+        defer vrf_min_sig_fixture.deinit(gpa);
+        try signed_seeds(ThresholdMinSig, gpa, &vrf_min_sig_fixture, seeds.encodings[8..10]);
         for (seeds.encodings) |encoding| {
             assert(encoding.len > 0 and encoding.len <= input_size_max);
         }
@@ -130,29 +121,6 @@ fn signed_seeds(comptime S: type, gpa: Allocator, fixture: anytype, out: *[2][]u
     defer notarization.deinit(gpa);
     out[0] = try codec.encode(types.Vote(S, Digest), gpa, .{ .notarize = notarizes[1] });
     const certificate: types.Certificate(S, Digest) = .{ .notarization = notarization };
-    out[1] = try codec.encode(types.Certificate(S, Digest), gpa, certificate);
-    assert(out[0].len > 0 and out[1].len > 0);
-}
-
-/// A notarize vote and a notarization of the wire-only threshold VRF scheme.
-fn threshold_seeds(comptime V: type, gpa: Allocator, out: *[2][]u8) !void {
-    const S = Threshold(V);
-    const Point = V.Signature;
-    const Scalar = cryptography.bls12381.primitives.group.Scalar;
-    const signature: S.Signature = .{
-        .vote_signature = Point.generator.mul(Scalar.from_ikm(&@splat(1))),
-        .seed_signature = Point.generator.mul(Scalar.from_ikm(&@splat(2))),
-    };
-    const proposal = seed_proposal();
-    const vote: types.Vote(S, Digest) = .{ .notarize = .{
-        .proposal = proposal,
-        .attestation = .init(.init(2), signature),
-    } };
-    out[0] = try codec.encode(types.Vote(S, Digest), gpa, vote);
-    const certificate: types.Certificate(S, Digest) = .{ .notarization = .{
-        .proposal = proposal,
-        .certificate = S.Certificate.init(signature),
-    } };
     out[1] = try codec.encode(types.Certificate(S, Digest), gpa, certificate);
     assert(out[0].len > 0 and out[1].len > 0);
 }

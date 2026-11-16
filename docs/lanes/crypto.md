@@ -56,8 +56,10 @@ handshake), then certificate, secp256r1, the rest, zk last. banderwagon moved to
   every `conformance.toml` entry outside bls12381/ and reed_solomon/ has a Zig counterpart.
 - [x] Consensus fuzz (commonware `consensus/fuzz`, in `src/consensus/fuzz/`, owned here by
   agreement with consensus-simplex): simplex_messages, simplex_elector, attributable_map.
-- [ ] Consensus engine fuzzers (`consensus/fuzz/src`: disrupter, strategy, invariants,
-  bounds) per scheme: ed25519, secp256r1, bls12381 multisig and threshold (MinPk, MinSig);
+- [x] Consensus fuzz `bounds`, `types`, and `invariants` (the safety checker, `find`/`check`,
+  with commonware's ten invariant tests; a violation is a `Kind` and a view, not a panic).
+- [ ] Consensus engine fuzzers (`consensus/fuzz/src`: disrupter, strategy, the run harness)
+  per scheme: ed25519, secp256r1, bls12381 multisig and threshold (MinPk, MinSig);
   then the `_twin` variants once simplex's twins mock and threshold-VRF Scheme land.
 - [ ] Benches (`benches.zig`): blake3, bloomfilter, chacha20_poly1305, ed25519, sake, lthash,
   secp256r1, sha256, sha512, and zk bulletproofs, with commonware's names and cases.
@@ -158,8 +160,8 @@ handshake), then certificate, secp256r1, the rest, zk last. banderwagon moved to
 - Consensus fuzz targets (`src/consensus/fuzz/`) keep commonware's properties but draw some
   inputs differently so the debug-mode seeded runs stay fast and reach real cases.
   simplex_messages also edits a valid encoding per arm (overwrite, bit flip, truncate,
-  append) besides decoding raw bytes. The threshold VRF scheme is a wire-only stand-in until
-  simplex ports its signing. simplex_elector draws only the committee size (electors never
+  append) besides decoding raw bytes. Its threshold VRF seeds are signed with simplex's
+  `vrf.Scheme` fixture. simplex_elector draws only the committee size (electors never
   see keys) and draws certificate points from a table. The round-robin arms also run alone
   at minifuzz's default bound; all arms together run 256 cases, because a random elector
   decodes points on every election. attributable_map picks one of 8 precomputed dummy

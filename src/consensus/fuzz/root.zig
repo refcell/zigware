@@ -6,4 +6,7 @@ test {
     _ = @import("messages.zig");
     _ = @import("elector.zig");
     _ = @import("attributable_map.zig");
+    _ = @import("bounds.zig");
+    _ = @import("types.zig");
+    _ = @import("invariants.zig");
 }
