@@ -355,7 +355,7 @@ pub fn Mem(comptime F: type, comptime Digest: type) type {
         /// The index of the first retained ancestor of `batch` to replay: the structure must
         /// be at the state before the oldest retained ancestor (or the batch itself), or after
         /// one of them. A batch applies once.
-        fn validate_batch(self: *const Self, batch: *const MerkleizedBatch) merkle.Error!usize {
+        pub fn validate_batch(self: *const Self, batch: *const MerkleizedBatch) merkle.Error!usize {
             const oldest = if (batch.ancestors.len > 0) batch.ancestors[0] else batch.data;
             if (self.at_state(oldest.parent_size, oldest.parent_peaks.slice())) return 0;
             var index = batch.ancestors.len;

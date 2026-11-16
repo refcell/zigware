@@ -42,8 +42,11 @@ resize, sync), `runtime.storage`, with the in-memory backend `runtime.storage.me
   injection, read_many accounting, interrupted clears at each crash point).
 - [x] journal/authenticated.rs backing contract: `assert_backing`, `last_matching`, `covers`,
   `Stored`, `init_sync`, with the fixed journal as a backing; init_sync and last_matching tests.
-- [ ] journal/authenticated.rs `Journal` (items plus persisted Merkle, batches, proofs): needs
-  storage-merkle's persisted Merkle, which itself needs the backing contract.
+- [x] journal/authenticated.rs `Journal` (items plus persisted Merkle, recovery, batches,
+  proofs) with its ported tests under both families, including the interrupted-destroy
+  regression (issue 5668) over both backings.
+- [ ] journal/authenticated.rs: the equal-length-branch crash test on
+  `runtime.storage.faulty` (torn writes, lost resizes).
 - [x] metadata (two-blob atomic key-value store).
 - [ ] metadata: `start_sync` (pipelined syncs), conformance hash (`MetadataWorkload`), and
   the fault-injection tests (torn writes, failed syncs), once runtime storage lands.
@@ -132,6 +135,26 @@ resize, sync), `runtime.storage`, with the in-memory backend `runtime.storage.me
   `clear(gpa, storage, cfg, size)`, `span(gpa, storage, cfg) Bounds`; its recovery declares
   `Item`, `get_bounds`, `read`, `reset`, `finish(size) J` (consumes, also on error), `deinit`.
   `contiguous.fixed.Journal(A)` implements it.
+- `storage.journal.authenticated.Journal(F, C, H)` (F a Merkle family, C a backing
+  contiguous journal, H a cryptography hasher such as `Sha256`): fields `merkle`
+  (`merkle.full.Merkle(F, H.Digest)`), `journal: C`, `hasher` (`merkle.hasher.Standard(H)`).
+  Open with `init(gpa, storage, merkle_cfg, journal_cfg, comptime predicate, bagging)`,
+  `init_at_most(..., max_size, ...)`, or `prepare(..., ?max_size, predicate, bagging)`
+  returning a `Recovery` (`bounds`, `is_fresh`, `read`, `finish`, `deinit`);
+  `from_components(gpa, merkle, journal, hasher, batch_size)`; `align_merkle`. Reads:
+  `size`, `get_bounds`, `read`, `read_many(positions, out)`, `try_read_sync`, `replay`,
+  `root(inactive_peaks)`. Mutators (`*Self`; after an error only `deinit`): `append(item)`
+  (borrowed) `u64`, `append_many`, `append_many_nested`, `apply_batch(*const
+  MerkleizedBatch)`, `prune(loc) u64` and `prune_reporting(loc) Pruned{boundary, pruned}`,
+  `commit`, `start_sync`, `sync`, `destroy`, `deinit`. Batches: `new_batch()`
+  `UnmerkleizedBatch` (`add(gpa, item)`, `add_many(gpa, items)`, the batch owns added items;
+  `merkleize(gpa, *const journal)`; `size`; `deinit`), `merkleize(&batch, items,
+  inactive_peaks) Merkleized{batch, root}`, `to_merkleized_batch()`. `MerkleizedBatch` is
+  refcounted (`retain`, `release(gpa)`): `size`, `batch_items`, `root(hasher, inactive)`,
+  `get_node`, `proof`, `range_proof`, `new_batch()`, fields `inner` and `ancestor_items`.
+  Proofs: `proof(start, max_ops, inactive)` and `historical_proof(leaves, start, max_ops,
+  inactive)` return `Proved{proof, items}` (`deinit(gpa)`); `speculative_proof(batch,
+  inactive)`, `speculative_pinned_nodes(batch, *[max_pinned_nodes]Digest) []Digest`.
 - `storage.queue`: `Queue(V)` with `init(gpa, storage, Config(V))`, `deinit`, `destroy`,
   `append`, `enqueue`, `enqueue_bulk(items) Range`, `commit`, `sync` (prunes below the ack
   floor), `size`, and the reader side `try_recv() ?Received{position, item}`, `ack`,
@@ -232,6 +255,14 @@ resize, sync), `runtime.storage`, with the in-memory backend `runtime.storage.me
 - authenticated: commonware's `Backing`/`BackingRecovery` traits are a comptime contract
   (`assert_backing`) over decl names; contexts become `(gpa, storage)`, and
   `last_matching`'s closure is a `(context, comptime predicate)` pair.
+- authenticated `Journal`: locations are plain `u64`; errors are the merged
+  `merkle.full.Merkle.Error` set (`StaleBatch`, `AncestorDropped`, `RangeOutOfBounds`,
+  `ItemPruned`, ...) without payloads. Batches are hand-refcounted like `merkle.batch`:
+  `MerkleizedBatch.release` is the `Arc` drop, parent links are weak, and items live in
+  refcounted chunks shared with descendants' `ancestor_items`. `merkleize` and `align_merkle`
+  hash sequentially (no strategy), `read_many` is not sharded, and `start_sync` completes at
+  once. Tests use a fixed stand-in `Op` (tag, key, value) for qmdb's operation, since they
+  compare roots between journals only.
 
 ## Log
 - 2026-11-13: journal Error, frame encoding/decoding with zstd frames, durability Barrier,
@@ -256,3 +287,4 @@ resize, sync), `runtime.storage`, with the in-memory backend `runtime.storage.me
 - 2026-11-13: authenticated backing contract (`init_sync`, `Stored`, `last_matching`).
 - 2026-11-16: contiguous variable journal with the shared suite and core recovery tests.
 - 2026-11-16: variable recovery tests (torn interior page, watermark beyond data); queue.
+- 2026-11-16: authenticated `Journal` (recovery, batches, proofs) with its ported tests.

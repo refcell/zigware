@@ -4,8 +4,8 @@
 //! An authenticated journal keeps a contiguous journal of items alongside a Merkle structure
 //! whose leaf `i` is item `i`. The journal backing it must support initialization-owned
 //! recovery, so the Merkle structure can select the retained prefix before the journal is
-//! published. The authenticated `Journal` itself builds on storage-merkle's persisted Merkle
-//! and lands once that exists.
+//! published. The authenticated `Journal` itself, over storage-merkle's persisted Merkle, is
+//! in `authenticated_journal.zig`.
 //!
 //! # The backing contract
 //!
@@ -28,15 +28,20 @@
 const std = @import("std");
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
+const codec = @import("codec");
 const runtime = @import("runtime");
 const contiguous = @import("contiguous/mod.zig");
 
 const Storage = runtime.storage.Storage;
 const Bounds = contiguous.Bounds;
 
+/// The authenticated journal (`authenticated_journal.zig`).
+pub const Journal = @import("authenticated_journal.zig").Journal;
+
 /// Check at comptime that `J` satisfies the backing contract.
 pub fn assert_backing(comptime J: type) void {
     comptime {
+        @setEvalBranchQuota(10_000);
         assert(@hasDecl(J, "BackingConfig"));
         assert(@hasDecl(J, "BackingRecovery"));
         assert(@hasDecl(J, "recover"));
@@ -66,7 +71,9 @@ pub fn last_matching(
     // Search backward and return the end immediately after the latest match.
     var end = @min(bounds.end, ceiling);
     while (end > bounds.start) : (end -= 1) {
-        if (predicate(context, try recovery.read(end - 1))) return end;
+        const item = try recovery.read(end - 1);
+        defer codec.free(@TypeOf(item), recovery.gpa, item);
+        if (predicate(context, item)) return end;
     }
     assert(end == bounds.start);
     // Only an unpruned journal can establish genesis when no retained item matches.
@@ -141,4 +148,5 @@ pub fn init_sync(
 
 test {
     _ = @import("authenticated_test.zig");
+    _ = @import("authenticated_journal.zig");
 }
