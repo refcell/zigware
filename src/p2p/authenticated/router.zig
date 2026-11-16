@@ -186,3 +186,30 @@ test "content reaches connected recipients only" {
     const closed = router.content(.all, 1, &.{}, false);
     try testing.expectEqual(Unreliable(Feedback).new(.closed), closed);
 }
+
+test "a full slow peer does not block broadcasts to the others" {
+    // commonware `test_broadcast_slow_peer_no_blocking`: the slow peer's outbox fills and then
+    // drops, while the fast peer receives every broadcast.
+    var runner = try runtime.deterministic.Runner.init(testing.allocator, .{});
+    defer runner.deinit();
+    const io = runner.io();
+    var router = try Router(Peer).init(testing.allocator, io);
+    defer router.deinit();
+    var slow = Outbox.init(testing.allocator, io, 10);
+    defer slow.deinit();
+    var fast = Outbox.init(testing.allocator, io, 100);
+    defer fast.deinit();
+    try testing.expect(try router.ready(.{ .id = 0 }, &slow));
+    try testing.expect(try router.ready(.{ .id = 1 }, &fast));
+    const message: [100]u8 = @splat(0);
+    for (0..11) |_| {
+        const sent = router.content(.all, 0, &.{&message}, false);
+        try testing.expect(!std.meta.eql(sent, Unreliable(Feedback).new(.closed)));
+        fast.try_next().?.frame.release();
+    }
+    // The slow peer kept its first ten and dropped the eleventh.
+    var kept: u32 = 0;
+    while (slow.try_next()) |next| : (kept += 1) next.frame.release();
+    try testing.expectEqual(@as(u32, 10), kept);
+    router.close();
+}
