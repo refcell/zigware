@@ -43,9 +43,11 @@ variants need `runtime` storage; do them after its interface lands.
   intact, and the watermark publication. A recording storage wrapper checks which node blobs
   open, standing in for commonware's sync and read counters; a journal `commit` (data durable,
   watermark behind) stands in for commonware's parked `start_sync`.
-- [ ] merkle/persisted/full: interrupted bounded publication and interrupted clear init_sync
-  tests. Commonware's start_sync-handle tests (clean start_sync failure, destroy observing a
-  failed sync) need delayed sync completion, which this synchronous port lacks.
+- [x] merkle/persisted/full interrupted bounded publication (a swept mutation budget reaches
+  commonware's parked-sync crash shape; pins the journal probe at the highest missing pin) and
+  interrupted clear init_sync tests. Not ported: commonware's start_sync-handle tests (clean
+  start_sync failure, destroy observing a failed sync) need delayed sync completion, which
+  this synchronous port does not have.
 - [x] merkle/persisted/full historical proof tests (basic, with pruning, large, singleton,
   pruned elements, appends while available, after sync, after pruning, edge cases, range
   validation, non-size prune) and interrupted destroy (swept budget, and bounded reopen).

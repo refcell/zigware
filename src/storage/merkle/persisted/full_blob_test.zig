@@ -461,3 +461,191 @@ test "persisted merkle init_sync stale below start leaves blobs unopened" {
         try stale_below_start_leaves_blobs_unopened(F, true);
     }
 }
+
+/// The sorted indices of the node blobs in storage.
+fn node_blob_indices(harness: *Harness, out: []u64) ![]u64 {
+    const names = try harness.storage.interface().scan(gpa, node_blobs);
+    defer names.deinit(gpa);
+    if (names.items.len > out.len) return error.TestUnexpectedResult;
+    for (names.items, out[0..names.items.len]) |name, *index| {
+        index.* = std.mem.readInt(u64, name[0..8], .big);
+    }
+    std.mem.sort(u64, out[0..names.items.len], {}, std.sort.asc(u64));
+    return out[0..names.items.len];
+}
+
+const Roots = struct { boundary: D, end: D };
+
+/// One blob holds exactly the tree of `boundary` leaves, and the tree of twice as many spans
+/// blobs 0 through 2. Syncs both, keeping both roots; with 11 leaves, prunes to 10 so some
+/// boundary pins sit in metadata and the rest in the journal.
+fn seed_two_blobs(comptime F: type, harness: *Harness, boundary: u64) !Roots {
+    var structure = try harness.open(F);
+    defer structure.deinit();
+    try add_digests(F, &structure, 0, boundary);
+    try structure.sync();
+    const at_boundary = try structure.root(hasher, 0);
+    try add_digests(F, &structure, boundary, 2 * boundary);
+    try structure.sync();
+    if (boundary == 11) try structure.prune(10);
+    try testing.expectEqual(@as(u64, 0), structure.journal.pruning_boundary());
+    return .{ .boundary = at_boundary, .end = try structure.root(hasher, 0) };
+}
+
+/// A bounded open crashed after removing the blobs past its cap but before creating the
+/// empty tail, leaving only blob 0 with the watermark at the boundary: the journal's blob span
+/// ends at the sync start, so `init_sync` must probe the highest boundary pin missing from
+/// metadata (inside the span) instead of the sync start. Commonware parks the open's sync to
+/// freeze it there; this sweeps a mutation budget and checks every budget reaching that state.
+fn after_interrupted_bounded_publication(comptime F: type, boundary: u64) !void {
+    const boundary_pos = F.location_to_position(boundary);
+    var reached: u32 = 0;
+    var budget: u64 = 0;
+    while (budget < 200) : (budget += 1) {
+        var harness = try Harness.init();
+        defer harness.deinit();
+        harness.items_per_blob = boundary_pos;
+        const roots = try seed_two_blobs(F, &harness, boundary);
+        var buffer: [8]u64 = undefined;
+        const stored = try node_blob_indices(&harness, &buffer);
+        try testing.expectEqualSlices(u64, &.{ 0, 1, 2 }, stored);
+        harness.storage.allow_mutations(budget);
+        const storage = harness.storage.interface();
+        const capped = open_at_most_result(F, &harness, storage, boundary);
+        harness.storage.mutations_allowed = null;
+        harness.storage.crash();
+        if (capped) break;
+        const blobs = try node_blob_indices(&harness, &buffer);
+        if (blobs.len != 1 or try persisted_watermark(&harness) != boundary_pos) continue;
+        reached += 1;
+
+        var structure = try init_sync(F, &harness, boundary, 2 * boundary, null);
+        const synced: merkle.Range = .{ .start = boundary, .end = boundary };
+        try testing.expectEqual(synced, structure.bounds());
+        try testing.expect((try structure.root(hasher, 0)).eql(roots.boundary));
+        try add_digests(F, &structure, boundary, 2 * boundary);
+        try testing.expect((try structure.root(hasher, 0)).eql(roots.end));
+        try structure.sync();
+        structure.deinit();
+        structure = try harness.open(F);
+        defer structure.destroy() catch unreachable; // The in-memory storage cannot fail here.
+        const reopened: merkle.Range = .{ .start = boundary, .end = 2 * boundary };
+        try testing.expectEqual(reopened, structure.bounds());
+        try testing.expect((try structure.root(hasher, 0)).eql(roots.end));
+    }
+    try testing.expect(reached > 0); // Some budget stopped the open at the crash shape.
+}
+
+/// Whether a bounded open completed; a storage failure leaves it to the crash.
+fn open_at_most_result(comptime F: type, harness: *Harness, storage: Storage, cap: u64) bool {
+    var structure = Merkle(F).init_at_most(gpa, storage, hasher, harness.cfg(), cap) catch
+        return false;
+    structure.deinit();
+    return true;
+}
+
+fn init_sync(
+    comptime F: type,
+    harness: *Harness,
+    start: u64,
+    end: u64,
+    pins: ?[]const D,
+) !Merkle(F) {
+    return Merkle(F).init_sync(gpa, harness.storage.interface(), .{
+        .config = harness.cfg(),
+        .range = .{ .start = start, .end = end },
+        .pinned_nodes = pins,
+    });
+}
+
+test "persisted merkle init_sync after an interrupted bounded publication" {
+    inline for (support.families) |F| {
+        try after_interrupted_bounded_publication(F, 8);
+        try after_interrupted_bounded_publication(F, 11);
+    }
+}
+
+const ClearCase = struct { start: u64, target: u64, end: u64, removed: bool, pinned: bool };
+
+/// Durably drops every pin from metadata, keeping the pruning boundary.
+fn drop_pins(comptime F: type, harness: *Harness) !void {
+    var store = try Merkle(F).Store.init(gpa, harness.storage.interface(), .{
+        .partition = "metadata-partition",
+        .codec_config = .{ .range = .full(), .item = {} },
+    });
+    defer store.deinit();
+    store.retain({}, struct {
+        fn keep(_: void, key: Key, _: *const []const u8) bool {
+            return key.prefix() != full.node_prefix;
+        }
+    }.keep);
+    try store.sync();
+}
+
+/// A node-journal clear to `target` was staged (and with `removed`, its blobs removed) after
+/// a sync to `start` persisted its boundary; `init_sync` must leave the journal empty at the
+/// sync start whichever route it takes.
+fn after_interrupted_clear(comptime F: type, case: ClearCase) !void {
+    var harness = try Harness.init();
+    defer harness.deinit();
+    const local_start = 7;
+    const local_end = 12;
+    const reference_cfg = harness.cfg_in("journal-reference", "metadata-reference");
+    const storage = harness.storage.interface();
+    var reference = try Merkle(F).init(gpa, storage, hasher, reference_cfg);
+    try add_digests(F, &reference, 0, case.end);
+    const root = try reference.root(hasher, 0);
+    var local_buffer: [max_pins]D = undefined;
+    const local_pins = try reference.pinned_nodes_at(local_start, &local_buffer);
+    var pins_buffer: [max_pins]D = undefined;
+    const pins = try reference.pinned_nodes_at(case.start, &pins_buffer);
+    try reference.destroy();
+
+    // A local tree synced from a mid-blob start.
+    var structure = try init_sync(F, &harness, local_start, local_end, local_pins);
+    try add_digests(F, &structure, local_start, local_end);
+    try structure.sync();
+    structure.deinit();
+    // The sync's boundary metadata, then its staged clear.
+    try drop_pins(F, &harness);
+    try support.write_boundary(F, &harness, case.start, pins);
+    const target = F.location_to_position(case.target);
+    try fixed.Journal(D).test_stage_clear(gpa, storage, "journal-partition", target);
+    if (case.removed) try storage.remove(node_blobs, null);
+
+    structure = try init_sync(F, &harness, case.start, case.end, if (case.pinned) pins else null);
+    try testing.expectEqual(F.location_to_position(case.start), structure.size());
+    try add_digests(F, &structure, case.start, case.end);
+    try testing.expect((try structure.root(hasher, 0)).eql(root));
+    try structure.sync();
+    structure.deinit();
+    structure = try harness.open(F);
+    defer structure.destroy() catch unreachable; // The in-memory storage cannot fail here.
+    const synced: merkle.Range = .{ .start = case.start, .end = case.end };
+    try testing.expectEqual(synced, structure.bounds());
+    try testing.expect((try structure.root(hasher, 0)).eql(root));
+}
+
+test "persisted merkle init_sync after an interrupted clear" {
+    // The local tree starts mid-blob, so its checkpoint records that start.
+    try testing.expect(merkle.mmr.Family.location_to_position(7) % 7 != 0);
+    // A start equal to the target models one interrupted reset, above or below the local
+    // tree; a start below the target, a retry that persisted its boundary first.
+    const ranges = [_][3]u64{ .{ 20, 20, 28 }, .{ 4, 4, 12 }, .{ 9, 20, 16 } };
+    inline for (support.families) |F| {
+        for (ranges) |range| {
+            const flag_cases = [_][2]bool{
+                .{ false, true }, .{ false, false }, .{ true, true }, .{ true, false },
+            };
+            for (flag_cases) |flags| {
+                try after_interrupted_clear(F, .{
+                    .start = range[0],
+                    .target = range[1],
+                    .end = range[2],
+                    .removed = flags[0],
+                    .pinned = flags[1],
+                });
+            }
+        }
+    }
+}
