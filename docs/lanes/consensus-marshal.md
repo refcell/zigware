@@ -80,6 +80,17 @@ then the core and standard actors as those packages land.
   `cache.Manager(V, S)` (per-epoch prunable archives: `put_verified`, `put_certified`,
   `put_notarized`, `put_notarization`, `put_finalization`, getters, `find_block_matching`,
   `prune_by_view`, `prune_by_height`, `load_persisted_epochs`).
+- `consensus.marshal.ancestry`: `assert_ancestry` (`Block`, `peek`, `next`, `clone`,
+  `deinit`), `assert_block_provider` (`subscribe_parent(*const Digested) !Receiver`),
+  `from_iter(B, gpa, blocks)` (`Bounded(B)`), `with_prefix(Tail, gpa, blocks, tail)`
+  (`Prefixed(Tail)`), `AncestorStream(M)` (prefetching parent walk), `has_contiguous_height`,
+  `is_parent`, `is_contiguous_chain`.
+- `consensus.marshal.application.validation`: `Stage` (`store(marshal, round, block)`),
+  `is_valid_reproposal_at_verify`, `is_inferred_reproposal_at_certify`,
+  `is_block_in_expected_epoch`.
+- `consensus.marshal.application.gates`: `Gates(D, V)` (shared handle: `insert`, `take`,
+  `take_staged`, `send_staged`, `claim`, `retain_after`, `stage`), `GateOutcome`, `Gate`,
+  `Ack`, `Staged(B)`, `resolve`, `forward`, `drive`.
 
 ## Decisions
 - Marshal blocks keep commonware's trait method names (`height()`, `parent()`, `digest()`,
@@ -132,6 +143,13 @@ then the core and standard actors as those packages land.
   parameter (`abort(*Aborter)`), which the actor supplies from its waiter tasks (one inbox
   fed by tasks, as simplex's voter does).
 
+- Ancestry streams block in `next` on the runtime's `std.Io` instead of being polled; a
+  parent already available when subscribed is buffered at once, so `peek` and prefetching
+  behave as in commonware. Commonware's `should_panic` ancestry cases are covered through
+  `is_contiguous_chain` (Zig cannot catch panics).
+- The gates' staged ack is `oneshot.Sender(void)`, sent once the block is persisted (the
+  Zig caches are durable on return), instead of a sync handle.
+
 ## Backlog
 - [x] aggregation: types (all 5 conformance hashes match), scheme, limits, safe_tip.
 - [x] aggregation: config, metrics, engine, mocks; mod.rs `all_online` with ed25519.
@@ -145,7 +163,9 @@ then the core and standard actors as those packages land.
 - [x] marshal: config.
 - [x] marshal core: floor, staged, certified, acks, durability, stream, subscriptions,
   cache.
-- [ ] marshal: ancestry, application traits (validation, gates, build, relay), core mailbox.
+- [x] marshal: ancestry, application validation and gates.
+- [ ] marshal: core mailbox, application build and relay (they need the mailbox and an
+  `Application` contract), core actor.
 - [x] aggregation: the full `distinct states` comparison on the new runtime auditor.
 - (marshal/coding/ belongs to the broadcast-collector lane: types, shards, variant,
   validation, marshaled, and coding/mod.rs tests, on top of core.)
@@ -161,3 +181,4 @@ then the core and standard actors as those packages land.
 - 2026-11-16: marshal variant contract, standard variant, resolver key, limits, block mocks,
   store adapters, config; core floor, staged, certified, acks, durability, stream,
   subscriptions, and cache with their commonware tests.
+- 2026-11-16: marshal ancestry streams, application validation, and certification gates.
