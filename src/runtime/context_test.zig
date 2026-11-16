@@ -140,6 +140,59 @@ test "tasks_running drops on abort (tasks_running_decreased_immediately_on_abort
     try run("tasks_running drops on abort");
 }
 
+/// A detached parent whose child needs 100 ms of cleanup once canceled: while the parent's
+/// own abort awaits that cleanup, the parent has returned but not reported `ended`.
+fn Draining(comptime Context: type) type {
+    return struct {
+        var cleaned: std.atomic.Value(bool) = .init(false);
+
+        fn child(ctx: Context) anyerror!void {
+            var never: Io.Event = .unset;
+            never.wait(ctx.io()) catch |err| switch (err) {
+                error.Canceled => {},
+            };
+            // A cancel at the end of the run would cut this short.
+            ctx.sleep(.fromMilliseconds(100)) catch return;
+            cleaned.store(true, .release);
+        }
+
+        fn parent(ctx: Context, started: *Io.Event) anyerror!void {
+            const handle = try ctx.child("cleanup").spawn(child, .{});
+            handle.detach();
+            started.set(ctx.io());
+        }
+
+        fn body(ctx: Context) anyerror!void {
+            cleaned.store(false, .release);
+            var started: Io.Event = .unset;
+            const handle = try ctx.child("parent").spawn(parent, .{&started});
+            handle.detach();
+            try started.wait(ctx.io());
+        }
+    };
+}
+
+test "a run ends only after every task has ended" {
+    {
+        var runner = try deterministic.Runner.init(testing.allocator, .{});
+        defer runner.deinit();
+        const Case = Draining(deterministic.Context);
+        try (try runner.start_context(Case.body, .{}));
+        try testing.expect(Case.cleaned.load(.acquire));
+    }
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var buffer: [128]u8 = undefined;
+    const directory = std.fmt.bufPrint(&buffer, ".zig-cache/tmp/{s}/runner", .{tmp.sub_path}) catch
+        unreachable; // The buffer fits the fixed-length temporary path.
+    var runner: production.Runner = undefined;
+    try runner.init(testing.allocator, .{ .storage_directory = directory });
+    defer runner.deinit();
+    const Case = Draining(production.Context);
+    try (try runner.start_context(Case.body, .{}));
+    try testing.expect(Case.cleaned.load(.acquire));
+}
+
 fn Suite(comptime Context: type) type {
     return struct {
         /// A task that waits until it is aborted (commonware `pending()`).

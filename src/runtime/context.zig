@@ -205,7 +205,8 @@ pub fn Context(comptime Network: type) type {
             root_ctx.node = tree.root();
             defer {
                 tree.abort(root_ctx.node, null);
-                tree.reap();
+                // Await tasks that returned but had not reported `ended`, and detached ones.
+                tree.drain();
             }
             return @call(.auto, function, .{root_ctx} ++ args);
         }
@@ -255,7 +256,9 @@ pub fn Context(comptime Network: type) type {
             state.* = .{ .context = ctx, .args = args, .running = running };
             state.context.node = task_node;
             state.header.node = ctx.node;
+            tree.starting();
             state.future = ctx.io().concurrent(State.run, .{state}) catch |err| {
+                tree.start_failed();
                 running.dec();
                 tree.abort(task_node, null);
                 ctx.gpa().destroy(state);

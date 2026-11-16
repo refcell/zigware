@@ -79,6 +79,10 @@ pub const Tree = struct {
     live_count: u32 = 0,
     /// Detached tasks that ended; their futures still need awaiting.
     zombies: ?*Header = null,
+    /// Tasks started and not yet ended.
+    running: u32 = 0,
+    /// Broadcast whenever a task ends.
+    task_ended: Io.Condition = .init,
 
     pub fn init(gpa: Allocator, io: Io, capacity: u32) Allocator.Error!Tree {
         assert(capacity > 0 and capacity < none);
@@ -92,6 +96,7 @@ pub const Tree = struct {
     /// Every task must be joined, aborted, or reaped first.
     pub fn deinit(tree: *Tree, gpa: Allocator) void {
         assert(tree.zombies == null);
+        assert(tree.running == 0);
         gpa.free(tree.slots);
         tree.* = undefined;
     }
@@ -252,16 +257,55 @@ pub const Tree = struct {
         tree.live_count -= 1;
     }
 
+    /// A task is about to start; it reports `ended` (or `start_failed`) exactly once.
+    pub fn starting(tree: *Tree) void {
+        tree.lock();
+        defer tree.unlock();
+        tree.running += 1;
+        assert(tree.running > 0);
+    }
+
+    /// A task counted by `starting` never started.
+    pub fn start_failed(tree: *Tree) void {
+        tree.lock();
+        defer tree.unlock();
+        assert(tree.running > 0);
+        tree.running -= 1;
+    }
+
     /// The task's function returned: a detached, unclaimed task becomes a zombie.
     pub fn ended(tree: *Tree, header: *Header) void {
         tree.lock();
         defer tree.unlock();
         assert(!header.ended);
+        assert(tree.running > 0);
         header.ended = true;
+        tree.running -= 1;
         if (header.detached and tree.claim_locked(header, false)) {
             header.next = tree.zombies;
             tree.zombies = header;
         }
+        tree.task_ended.broadcast(tree.io);
+    }
+
+    /// Waits until every started task has ended, awaiting each detached one (the end of a
+    /// run, after the root's subtree is aborted). `abort` alone misses a task that returned
+    /// but has not reported `ended`: its own abort already retired its node, and it is not a
+    /// zombie yet.
+    pub fn drain(tree: *Tree) void {
+        tree.lock();
+        // Each pass reaps at least one zombie or waits for a task to end; tasks only end.
+        while (tree.zombies != null or tree.running > 0) {
+            if (tree.zombies != null) {
+                tree.unlock();
+                tree.reap();
+                tree.lock();
+            } else {
+                tree.task_ended.waitUncancelable(tree.io, &tree.mutex);
+            }
+        }
+        assert(tree.running == 0);
+        tree.unlock();
     }
 
     /// The handle is released without joining.
