@@ -1235,3 +1235,118 @@ test "due retry precedes queued fresh request" {
         }
     }.body);
 }
+
+fn late_subscriber_unrelated_waiter(io: Io) !void {
+    const setup = try BlockingTagged.init(io, &.{ 1, 2, 3 }, .{});
+    defer setup.deinit();
+    try setup.add_link(base.link, 0, 1);
+    try setup.add_link(base.link, 0, 2);
+    const consumer = try setup.make_consumer();
+    const first_gate = try consumer.gate(.invalid);
+    const second_gate = try consumer.gate(complete);
+    const mailbox = try setup.spawn(0, consumer, try setup.make_producer(&.{}));
+    const prod2 = try setup.make_producer(&.{.{ 4, "bad data" }});
+    _ = try setup.spawn(1, try setup.make_consumer(), prod2);
+    const prod3 = try setup.make_producer(&.{.{ 6, "data for key 6" }});
+    _ = try setup.spawn(2, try setup.make_consumer(), prod3);
+
+    // Block peer 1, then arm a waiter that can only be served by it.
+    try fetch_as(mailbox, 4, 1);
+    var started = try consumer.next_started();
+    started.deinit();
+    consumer.open(first_gate);
+    try setup.wait_for_blocked(0, 1);
+    var target = [_]base.PublicKey{setup.peers[1]};
+    _ = try mailbox.fetch_targeted(.{ .key = key(5), .subscriber = 2 }, &target);
+    try setup.sleep(Duration.from_millis(100));
+
+    try fetch_as(mailbox, 6, 3);
+    started = try consumer.next_started();
+    try started.expect(6, &.{3});
+    started.deinit();
+    try fetch_as(mailbox, 6, 4);
+    try setup.sleep(Duration.from_millis(100));
+    consumer.open(second_gate);
+    var event = try consumer.next_event();
+    defer event.deinit();
+    try event.seen.expect(6, &.{3});
+    try testing.expectEqualStrings("data for key 6", event.value);
+    // The late subscriber is delivered while the unrelated waiter stays armed.
+    started = try consumer.next_started();
+    defer started.deinit();
+    try started.expect(6, &.{4});
+}
+
+test "late subscriber delivery ignores unrelated waiter" {
+    try base.run(10, late_subscriber_unrelated_waiter);
+}
+
+const TaggedSetup = base.SetupWith(@import("mocks/consumer.zig").Consumer(MockKey, u16));
+
+fn single_subscriber(io: Io, retain_first: bool) !void {
+    const setup = try TaggedSetup.init(io, &.{ 1, 2 }, .{});
+    defer setup.deinit();
+    const consumer = try setup.make_consumer();
+    const mailbox = try setup.spawn(0, consumer, try setup.make_producer(&.{}));
+    const prod2 = try setup.make_producer(&.{.{ 5, "data for key 5" }});
+    _ = try setup.spawn(1, try setup.make_consumer(), prod2);
+
+    try fetch_as(mailbox, 5, 50);
+    if (retain_first) {
+        // Retaining the only subscriber keeps the fetch.
+        try setup.sleep(Duration.from_millis(100));
+        const predicate = resolver.Predicate(MockKey, u16).init({}, struct {
+            fn keep(_: void, _: MockKey, subscriber: u16) bool {
+                return subscriber == 50;
+            }
+        }.keep);
+        _ = try mailbox.retain(predicate);
+        try setup.sleep(Duration.from_millis(100));
+    }
+    try setup.add_link(base.link, 0, 1);
+    var event = try consumer.next_event();
+    defer event.deinit(gpa);
+    try testing.expectEqual(key(5), event.key);
+    try testing.expectEqualSlices(u16, &.{50}, event.subscribers);
+    try testing.expectEqualStrings("data for key 5", event.value);
+}
+
+test "deliver receives distinct subscriber type" {
+    try base.run(10, struct {
+        fn body(io: Io) !void {
+            try single_subscriber(io, true);
+        }
+    }.body);
+}
+
+test "deliver receives single subscriber" {
+    try base.run(10, struct {
+        fn body(io: Io) !void {
+            try single_subscriber(io, false);
+        }
+    }.body);
+}
+
+test "retain drops all" {
+    try base.run(10, struct {
+        fn body(io: Io) !void {
+            const setup = try base.Setup.init(io, &.{ 1, 2 }, .{});
+            defer setup.deinit();
+            // No link yet, so the fetch stays in flight.
+            const consumer = try setup.make_consumer();
+            const mailbox = try setup.spawn(0, consumer, try setup.make_producer(&.{}));
+            const prod2 = try setup.make_producer(&.{.{ 6, "data for key 6" }});
+            _ = try setup.spawn(1, try setup.make_consumer(), prod2);
+
+            // Pruning before fetching has no effect.
+            try retain_none(mailbox, void);
+            try base.expect_no_event(setup, consumer, 100);
+            try base.fetch(mailbox, 6);
+            try retain_none(mailbox, void);
+            try setup.add_link(base.link, 0, 1);
+            // Had the in-flight entry survived, this fetch would be dropped as a duplicate.
+            try base.fetch(mailbox, 6);
+            try base.expect_event(consumer, 6, "data for key 6");
+        }
+    }.body);
+}
