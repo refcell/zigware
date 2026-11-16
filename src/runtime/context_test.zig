@@ -462,6 +462,9 @@ test "context tracers emit to the runner's subscriber, filtered by level" {
 fn Draining(comptime Context: type) type {
     return struct {
         var cleaned: std.atomic.Value(bool) = .init(false);
+        /// Not on the body's stack: the detached parent's last act is `started.set`, which
+        /// may still touch the event after the body has woken and returned.
+        var parent_started: Io.Event = .unset;
 
         fn child(ctx: Context) anyerror!void {
             var never: Io.Event = .unset;
@@ -481,10 +484,10 @@ fn Draining(comptime Context: type) type {
 
         fn body(ctx: Context) anyerror!void {
             cleaned.store(false, .release);
-            var started: Io.Event = .unset;
-            const handle = try ctx.child("parent").spawn(parent, .{&started});
+            parent_started = .unset;
+            const handle = try ctx.child("parent").spawn(parent, .{&parent_started});
             handle.detach();
-            try started.wait(ctx.io());
+            try parent_started.wait(ctx.io());
         }
     };
 }
@@ -820,8 +823,13 @@ fn Suite(comptime Context: type) type {
         }.body;
 
         pub const @"detached tasks keep running and are reaped" = struct {
+            /// Not on the body's stack: the body returns once `started.set` wakes it, while
+            /// the detached task may still be inside `set` or `complete.wait`. A run drains
+            /// every task before it ends, so this outlives the task.
+            var done: Io.Event = .unset;
+
             fn body(ctx: Context) !void {
-                var done: Io.Event = .unset;
+                done = .unset;
                 const handle = try ctx.child("detached").spawn(Siblings.task, .{ &done, &done });
                 handle.detach();
                 try done.wait(ctx.io());
