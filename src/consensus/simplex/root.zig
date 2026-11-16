@@ -83,6 +83,7 @@ test {
     _ = actors.voter.state;
     _ = actors.ask;
     _ = actors.resolver.state;
+    _ = @import("actors/resolver/state_test.zig");
     _ = @import("engine_test.zig");
     _ = scheme.bls12381_threshold.vrf;
     _ = scheme.bls12381_threshold.standard;

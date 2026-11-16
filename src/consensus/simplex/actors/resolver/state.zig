@@ -52,8 +52,12 @@ fn ViewMap(comptime V: type) type {
             self.entries.deinit(gpa);
         }
 
+        pub fn len(self: *const Self) usize {
+            return self.entries.items.len;
+        }
+
         /// The index of the first entry at or above `view`.
-        fn lower_bound(self: *const Self, view: View) usize {
+        pub fn lower_bound(self: *const Self, view: View) usize {
             const Context = struct {
                 fn compare(target: View, entry: Entry) std.math.Order {
                     return std.math.order(target.get(), entry.view.get());
@@ -63,24 +67,24 @@ fn ViewMap(comptime V: type) type {
             return std.sort.lowerBound(Entry, items, view, Context.compare);
         }
 
-        fn find(self: *const Self, view: View) ?usize {
+        pub fn find(self: *const Self, view: View) ?usize {
             const index = self.lower_bound(view);
             if (index == self.entries.items.len) return null;
             if (self.entries.items[index].view != view) return null;
             return index;
         }
 
-        fn get(self: *const Self, view: View) ?V {
+        pub fn get(self: *const Self, view: View) ?V {
             const index = self.find(view) orelse return null;
             return self.entries.items[index].value;
         }
 
-        fn contains(self: *const Self, view: View) bool {
+        pub fn contains(self: *const Self, view: View) bool {
             return self.find(view) != null;
         }
 
         /// Inserts `value` at `view` unless present; returns whether it was inserted.
-        fn insert(self: *Self, gpa: Allocator, view: View, value: V) Allocator.Error!bool {
+        pub fn insert(self: *Self, gpa: Allocator, view: View, value: V) Allocator.Error!bool {
             const index = self.lower_bound(view);
             const items = self.entries.items;
             if (index < items.len and items[index].view == view) return false;
@@ -90,13 +94,13 @@ fn ViewMap(comptime V: type) type {
         }
 
         /// Removes `view`, returning its value.
-        fn remove(self: *Self, view: View) ?V {
+        pub fn remove(self: *Self, view: View) ?V {
             const index = self.find(view) orelse return null;
             return self.entries.orderedRemove(index).value;
         }
 
         /// The value of the highest entry in `[start, end]`.
-        fn last_in(self: *const Self, start: View, end: View) ?V {
+        pub fn last_in(self: *const Self, start: View, end: View) ?V {
             assert(start.get() <= end.get());
             const index = self.lower_bound(end.next());
             if (index == 0) return null;
@@ -348,7 +352,7 @@ pub fn State(comptime S: type, comptime D: type) type {
         }
 
         /// The stored nullification covering `view`, if any.
-        fn covering_nullification(self: *const Self, view: View) ?[]const u8 {
+        pub fn covering_nullification(self: *const Self, view: View) ?[]const u8 {
             const start, const end = view.covering_range(self.term_length);
             return self.nullifications.last_in(start, end);
         }

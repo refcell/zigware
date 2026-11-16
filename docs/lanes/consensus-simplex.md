@@ -179,8 +179,8 @@ resolver; those lanes are running, so do the types first and the actors as they 
 - [x] config.rs (Config, Floor, skip and forward policies) with its validation rules.
 - [x] simplex metrics, and the actors (voter, batcher, resolver) and engine, on p2p's
   simulated network and the deterministic runtime: 4 honest nodes finalize.
-- [ ] Port the rest of state.rs's tests (13 of 141), the resolver state.rs and actor.rs
-  tests, and the voter/resolver ingress tests; add actor metrics.
+- [ ] Port the rest of state.rs's tests (13 of 141), the resolver actor.rs tests, and the
+  voter/resolver ingress tests; add actor metrics. (Resolver state.rs: all 23 done.)
 - [ ] simplex mod.rs tests: all_online, partition, slow_and_lossy_links, and determinism
   done (ed25519, round robin; Debug runs 50 views where commonware runs 100); conflicter,
   nuller, impersonator (2 seeds each), outdated, and backfill done; next the rest of the multi-node
@@ -213,3 +213,4 @@ resolver; those lanes are running, so do the types first and the actors as they 
 - 2026-11-16: Byzantine conflicter and nuller mocks with their DSTs (reported and blocked).
 - 2026-11-16: Byzantine impersonator and outdated mocks with their DSTs.
 - 2026-11-16: backfill DST (a late validator catches up while another is cut off).
+- 2026-11-16: resolver state.rs tests (all 23).
