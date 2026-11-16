@@ -8,7 +8,9 @@
 //! it keeps a sorted diff of its sets and its live ancestors' diffs, so reads and applies stay
 //! exact after ancestors are released.
 //!
-//! Keys and values must not own memory. After a storage error only `deinit` may follow.
+//! Values may own memory (variable values such as `[]const u8`): a batch owns what `set` and
+//! `with_metadata` give it, a diff owns its entries' values, and every read returns a copy the
+//! caller owns. Keys must not own memory. After a storage error only `deinit` may follow.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -69,6 +71,7 @@ pub fn Diff(comptime K: type, comptime V: type) type {
             assert(self.references > 0);
             self.references -= 1;
             if (self.references > 0) return;
+            for (self.entries) |entry| codec.free(V, gpa, entry.value);
             gpa.free(self.entries);
             gpa.destroy(self);
         }
@@ -98,7 +101,7 @@ pub fn Db(F: type, K: type, E: type, C: type, H: type, T: type) type {
     return struct {
         const Self = @This();
         comptime {
-            assert(!codec.owns_memory(K) and !codec.owns_memory(E.Value));
+            assert(!codec.owns_memory(K));
         }
         pub const Family = F;
         pub const Key = K;
@@ -145,7 +148,8 @@ pub fn Db(F: type, K: type, E: type, C: type, H: type, T: type) type {
                 try journal.sync();
             }
             const last_commit = journal.size() - 1;
-            const op = try journal.read(last_commit);
+            var op = try journal.read(last_commit);
+            defer op.deinit(gpa);
             const floor = op.inactivity_floor().?; // Recovery selected a commit.
             var snapshot = try build_snapshot(gpa, cfg.translator, floor, &journal);
             errdefer snapshot.deinit();
@@ -172,8 +176,10 @@ pub fn Db(F: type, K: type, E: type, C: type, H: type, T: type) type {
             errdefer snapshot.deinit();
             var loc = floor;
             while (loc < end) : (loc += 1) {
-                switch (try journal.read(loc)) {
-                    .set => |set| try snapshot.insert(value_mod.bytes(K, &set.key), loc),
+                var op = try journal.read(loc);
+                defer op.deinit(gpa);
+                switch (op) {
+                    .set => |*set| try snapshot.insert(value_mod.bytes(K, &set.key), loc),
                     .commit => {},
                 }
             }
@@ -210,7 +216,8 @@ pub fn Db(F: type, K: type, E: type, C: type, H: type, T: type) type {
             return self.inactivity_floor_loc;
         }
 
-        /// The value of `key`, or null if it was never set (or its set was pruned).
+        /// The value of `key`, or null if it was never set (or its set was pruned). The caller
+        /// owns it.
         pub fn get(self: *Self, key: *const K) !?Value {
             self.metrics.get_calls.metric().inc();
             self.metrics.lookups_requested.metric().inc();
@@ -232,25 +239,34 @@ pub fn Db(F: type, K: type, E: type, C: type, H: type, T: type) type {
             return self.get_many_from(keys, 0, out);
         }
 
-        /// The values of `keys` held by sets at or above `floor` into `out`.
+        /// The values of `keys` held by sets at or above `floor` into `out`. The caller owns
+        /// them.
         pub fn get_many_from(self: *Self, keys: []const K, floor: u64, out: []?Value) !void {
             assert(keys.len == out.len);
             if (keys.len == 0) return;
             self.metrics.get_many_calls.metric().inc();
             self.metrics.lookups_requested.metric().inc_by(keys.len);
-            for (keys, out) |*key, *slot| slot.* = try self.get_from(key, floor);
+            var filled: usize = 0;
+            errdefer for (out[0..filled]) |value| codec.free(?Value, self.gpa, value);
+            for (keys, out) |*key, *slot| {
+                slot.* = try self.get_from(key, floor);
+                filled += 1;
+            }
         }
 
         /// The value at `loc` if the set there is of `key`.
         fn value_at(self: *Self, key: *const K, loc: u64) !?Value {
             if (loc < self.journal.get_bounds().start) return error.OperationPruned;
-            const op = try self.journal.read(loc);
+            var op = try self.journal.read(loc);
             assert(op == .set); // The index holds only the locations of sets.
-            if (!value_mod.eql(K, op.set.key, key.*)) return null;
-            return op.set.value;
+            if (!value_mod.eql(K, op.set.key, key.*)) {
+                op.deinit(self.gpa);
+                return null;
+            }
+            return op.set.value; // The key owns no memory, so the value is all `op` owns.
         }
 
-        /// The metadata of the last commit.
+        /// The metadata of the last commit. The caller owns it.
         pub fn get_metadata(self: *Self) !?Value {
             const op = try self.journal.read(self.journal.size() - 1);
             assert(op == .commit); // The log always ends with a commit.
@@ -400,6 +416,21 @@ pub fn Db(F: type, K: type, E: type, C: type, H: type, T: type) type {
     };
 }
 
+/// Reads each of `keys` through `reader` (a batch) into `out`, freeing the values read so far
+/// on error.
+fn get_each(reader: anytype, keys: anytype, db: anytype, out: anytype) !void {
+    assert(keys.len == out.len);
+    const V = @typeInfo(@TypeOf(out)).pointer.child;
+    var filled: usize = 0;
+    errdefer for (out[0..filled]) |value| codec.free(V, reader.gpa, value);
+    assert(filled == 0);
+    for (keys, out) |*key, *slot| {
+        slot.* = try reader.get(key, db);
+        filled += 1;
+    }
+    assert(filled == out.len);
+}
+
 /// A batch of sets not yet hashed, on the database `D`.
 fn Unmerkleized(comptime D: type) type {
     return struct {
@@ -419,16 +450,20 @@ fn Unmerkleized(comptime D: type) type {
         /// The commitment this batch builds on.
         base: D.Commitment,
 
-        /// Discards the batch.
+        /// Discards the batch and the values it owns.
         pub fn deinit(self: *Self) void {
             self.journal_batch.deinit(self.gpa);
+            for (self.sets.items) |pending| codec.free(V, self.gpa, pending.value);
             self.sets.deinit(self.gpa);
+            codec.free(?V, self.gpa, self.metadata);
             if (self.parent) |parent| parent.release();
             self.* = undefined;
         }
 
-        /// Sets the metadata of this batch's commit (not inherited by children).
+        /// Sets the metadata of this batch's commit (not inherited by children). The batch owns
+        /// `metadata` and frees any it held before.
         pub fn with_metadata(self: *Self, metadata: ?V) void {
+            codec.free(?V, self.gpa, self.metadata);
             self.metadata = metadata;
         }
 
@@ -437,7 +472,8 @@ fn Unmerkleized(comptime D: type) type {
             self.inactivity_floor = floor;
         }
 
-        /// Sets `key` to `value`. The key must not be set elsewhere in the database's history.
+        /// Sets `key` to `value`, which the batch owns on success. The key must not be set
+        /// elsewhere in the database's history.
         pub fn set(self: *Self, key: K, value: V) !void {
             try self.sets.append(self.gpa, .{ .key = key, .value = value });
         }
@@ -452,26 +488,28 @@ fn Unmerkleized(comptime D: type) type {
             return parent.bounds.compatible(db.commitment());
         }
 
-        /// The value of `key` after this batch, its chain, and `db`.
+        /// The value of `key` after this batch, its chain, and `db`. The caller owns it.
         pub fn get(self: *const Self, key: *const K, db: *D) !?V {
             try self.compatible(db);
             var at = self.sets.items.len;
             while (at > 0) {
                 at -= 1;
                 const pending = self.sets.items[at];
-                if (value_mod.eql(K, pending.key, key.*)) return pending.value;
+                if (!value_mod.eql(K, pending.key, key.*)) continue;
+                return try value_mod.clone(V, self.gpa, pending.value);
             }
             const floor = self.base_floor(db);
             if (self.parent) |parent| {
-                if (parent.lookup_chain(key, floor, db.journal.size())) |e| return e.value;
+                if (parent.lookup_chain(key, floor, db.journal.size())) |entry| {
+                    return try value_mod.clone(V, self.gpa, entry.value);
+                }
             }
             return db.get_from(key, floor);
         }
 
-        /// The values of `keys` into `out`.
+        /// The values of `keys` into `out`. The caller owns them.
         pub fn get_many(self: *const Self, keys: []const K, db: *D, out: []?V) !void {
-            assert(keys.len == out.len);
-            for (keys, out) |*key, *slot| slot.* = try self.get(key, db);
+            return get_each(self, keys, db, out);
         }
 
         /// Hashes the batch (its sets in key order, then a commit). Consumes the batch on
@@ -480,20 +518,14 @@ fn Unmerkleized(comptime D: type) type {
             const gpa = self.gpa;
             var links = try Links.collect(self, db);
             defer links.deinit(gpa);
+            try self.keep_last_sets();
             const entries = try self.sorted_entries();
             var entries_owned = true;
             defer if (entries_owned) gpa.free(entries);
             const commit_location = self.base.size + entries.len;
             const floor = self.inactivity_floor;
             try chain.validate_merkleize_floor(self.base_floor(db), floor, commit_location);
-            for (entries) |e| {
-                try self.journal_batch.add(gpa, .{ .set = .{ .key = e.key, .value = e.value } });
-            }
-            const commit_op: D.Operation = .{ .commit = .{
-                .metadata = self.metadata,
-                .floor = floor,
-            } };
-            try self.journal_batch.add(gpa, commit_op);
+            try self.hand_over(entries, floor);
             const merkleized = try gpa.create(D.MerkleizedBatch);
             errdefer gpa.destroy(merkleized);
             const journal_batch = try self.journal_batch.merkleize(gpa, &db.journal);
@@ -507,31 +539,63 @@ fn Unmerkleized(comptime D: type) type {
             entries_owned = false;
             merkleized.init(gpa, journal_batch, own_diff, links.diffs, self.parent, links.state);
             links.moved = true;
-            self.sets.deinit(gpa);
+            self.sets.deinit(gpa); // The diff owns the values now.
             if (self.parent) |parent| parent.release();
             self.* = undefined;
             return merkleized;
         }
 
-        /// The last set of each key, sorted by key, at their locations in this batch.
+        /// Sorts the sets by key and keeps only each key's last, freeing the values of the
+        /// others (reads through the batch see the same values after).
+        fn keep_last_sets(self: *Self) !void {
+            const sets = self.sets.items;
+            // A stable sort keeps each key's sets in order, so the last is the newest.
+            std.mem.sort(D.Set, sets, {}, less);
+            var kept: usize = 0;
+            for (sets, 0..) |pending, at| {
+                const last = at + 1 == sets.len or
+                    diff_mod.order(K, &pending.key, &sets[at + 1].key) != .eq;
+                if (!last) {
+                    codec.free(V, self.gpa, pending.value);
+                    continue;
+                }
+                sets[kept] = pending;
+                kept += 1;
+            }
+            self.sets.shrinkRetainingCapacity(kept);
+            assert(kept <= sets.len);
+        }
+
+        /// The sets (one per key, sorted) at their locations in this batch, borrowing values.
         fn sorted_entries(self: *const Self) ![]Entry {
             const gpa = self.gpa;
-            const sorted = try gpa.dupe(D.Set, self.sets.items);
-            defer gpa.free(sorted);
-            // A stable sort keeps each key's sets in order, so the last is the newest.
-            std.mem.sort(D.Set, sorted, {}, less);
-            var entries: std.ArrayList(Entry) = .empty;
-            errdefer entries.deinit(gpa);
-            for (sorted, 0..) |pending, at| {
-                const last = at + 1 == sorted.len or
-                    diff_mod.order(K, &pending.key, &sorted[at + 1].key) != .eq;
-                if (!last) continue;
-                const loc = self.base.size + entries.items.len;
-                const entry: Entry = .{ .key = pending.key, .value = pending.value, .loc = loc };
-                try entries.append(gpa, entry);
+            const entries = try gpa.alloc(Entry, self.sets.items.len);
+            for (self.sets.items, entries, 0..) |pending, *entry, at| {
+                const loc = self.base.size + at;
+                entry.* = .{ .key = pending.key, .value = pending.value, .loc = loc };
             }
-            assert(entries.items.len <= self.sets.items.len);
-            return entries.toOwnedSlice(gpa);
+            assert(entries.len == self.sets.items.len);
+            return entries;
+        }
+
+        /// Adds the sets (copies of their values) and the commit (which takes the metadata) to
+        /// the journal batch, which owns them after.
+        fn hand_over(self: *Self, entries: []const Entry, floor: u64) !void {
+            const gpa = self.gpa;
+            const ops = try gpa.alloc(D.Operation, entries.len + 1);
+            defer gpa.free(ops);
+            var cloned: usize = 0;
+            errdefer for (ops[0..cloned]) |*op| op.deinit(gpa);
+            for (entries, ops[0..entries.len]) |entry, *op| {
+                const value = try value_mod.clone(V, gpa, entry.value);
+                op.* = .{ .set = .{ .key = entry.key, .value = value } };
+                cloned += 1;
+            }
+            ops[entries.len] = .{ .commit = .{ .metadata = self.metadata, .floor = floor } };
+            const size_before = self.journal_batch.size();
+            try self.journal_batch.add_many(gpa, ops);
+            self.metadata = null;
+            assert(self.journal_batch.size() == size_before + ops.len);
         }
 
         fn less(_: void, a: D.Set, b: D.Set) bool {
@@ -720,18 +784,19 @@ fn Merkleized(comptime D: type) type {
             return null;
         }
 
-        /// The value of `key` after this batch's chain and `db`.
+        /// The value of `key` after this batch's chain and `db`. The caller owns it.
         pub fn get(self: *const Self, key: *const K, db: *D) !?V {
             try self.bounds.compatible(db.commitment());
             const floor = self.bounds.inactivity_floor;
-            if (self.lookup_chain(key, floor, db.journal.size())) |entry| return entry.value;
+            if (self.lookup_chain(key, floor, db.journal.size())) |entry| {
+                return try value_mod.clone(V, self.gpa, entry.value);
+            }
             return db.get_from(key, floor);
         }
 
-        /// The values of `keys` into `out`.
+        /// The values of `keys` into `out`. The caller owns them.
         pub fn get_many(self: *const Self, keys: []const K, db: *D, out: []?V) !void {
-            assert(keys.len == out.len);
-            for (keys, out) |*key, *slot| slot.* = try self.get(key, db);
+            return get_each(self, keys, db, out);
         }
 
         /// A child batch on top of this one.

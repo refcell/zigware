@@ -56,7 +56,9 @@ which every database here is built on.
   scenarios, and a randomized chain check against the reopened rebuild.
 - [x] immutable: `ImmutableMmr/MmbVariableConf` root conformance over the variable journal
   (matches).
-- [ ] immutable: owned (variable) values, the remaining mod.rs/fixed.rs
+- [x] immutable: owned (variable) values; batches own their sets and metadata, diffs own
+  their values, reads return owned copies.
+- [ ] immutable: the remaining mod.rs/fixed.rs
   scenarios (bounded initialization, failed-sync recovery), compact.
 - [ ] Fuzz targets under storage/fuzz for these databases; benches under `benches.zig`.
 
@@ -193,6 +195,9 @@ which every database here is built on.
 - any ordered: emission lives in `any/ordered.zig`; predecessor candidates keep the nearest
   ancestor's update of a key (commonware's `Shadow`), and the floor walk's moves keep each
   update's `next_key`.
+- immutable: values may own memory (keys may not). Merkleize keeps each key's last set (the
+  superseded values are freed then), moves the values into the batch's diff, and hands the
+  journal batch copies; the diff frees its values when its last holder releases it.
 - immutable: the index rebuild reads the log from the floor one position at a time (no replay
   stream). `get_many` loops over `get` (commonware batches the reads by position).
 
@@ -219,3 +224,4 @@ which every database here is built on.
   commonware.
 - 2026-11-16: immutable and any variable root conformance hashes (MMR and MMB, ordered and
   unordered) match commonware.
+- 2026-11-16: immutable owned (variable) values.

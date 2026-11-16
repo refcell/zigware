@@ -34,6 +34,13 @@ pub fn Variable(comptime F: type) type {
     return immutable.Db(F, Digest, E, Journal, Sha256, translator.TwoCap);
 }
 
+/// A database of owned byte values (`Vec<u8>`), for the ownership tests.
+pub fn Bytes(comptime F: type) type {
+    const E = value.Variable([]const u8);
+    const Journal = variable.Journal(immutable.Operation(F, Digest, E));
+    return immutable.Db(F, Digest, E, Journal, Sha256, translator.TwoCap);
+}
+
 /// Commonware's `Sha256::fill(byte)`: a digest of 32 copies of `byte`.
 pub fn fill(byte: u8) Digest {
     return .{ .bytes = @splat(byte) };

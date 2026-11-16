@@ -39,14 +39,15 @@ pub fn verify_codec(comptime T: type, type_name: []const u8) !void {
 
 /// Commonware's conformance log configuration for the database log type `LogCfg`: the fixed
 /// journal with 7 items per blob, or the variable journal with 7 items per section, no
-/// compression, and a unit codec configuration, both under the partition `cf-log`.
+/// compression, and a codec configuration bounding byte values to 10000 bytes (commonware's
+/// `(0..=10000).into()`), both under the partition `cf-log`.
 pub fn log_config(comptime LogCfg: type, cache_ref: *runtime.buffer.paged.CacheRef) LogCfg {
     if (comptime @hasField(LogCfg, "items_per_section")) {
         const CodecCfg = @FieldType(LogCfg, "codec_config");
         return .{
             .partition = "cf-log",
             .items_per_section = 7,
-            .codec_config = codec.unit_cfg(CodecCfg),
+            .codec_config = codec_config(CodecCfg),
             .cache_ref = cache_ref,
             .write_buffer = 1024,
             .replay_buffer = 1024,
@@ -59,4 +60,24 @@ pub fn log_config(comptime LogCfg: type, cache_ref: *runtime.buffer.paged.CacheR
         .write_buffer = 1024,
         .replay_buffer = 1024,
     };
+}
+
+/// The codec configuration of a test operation: units stay units, and slices (a field
+/// `range`) are bounded to 10000 items. Operation configurations nest at most one tuple deep.
+fn codec_config(comptime C: type) C {
+    if (comptime is_slice_cfg(C) or C == void) return leaf_config(C);
+    var result: C = undefined;
+    inline for (@typeInfo(C).@"struct".field_types, 0..) |field_type, index| {
+        result[index] = leaf_config(field_type);
+    }
+    return result;
+}
+
+fn is_slice_cfg(comptime C: type) bool {
+    return @typeInfo(C) == .@"struct" and @hasField(C, "range");
+}
+
+fn leaf_config(comptime C: type) C {
+    if (comptime is_slice_cfg(C)) return .{ .range = .inclusive(0, 10000) };
+    return codec.unit_cfg(C);
 }
