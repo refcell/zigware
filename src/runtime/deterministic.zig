@@ -32,6 +32,7 @@ const cryptography = @import("cryptography");
 const fiber = @import("fiber.zig");
 const storage_mod = @import("storage.zig");
 const network_mod = @import("network.zig");
+const context_mod = @import("context.zig");
 const telemetry = @import("telemetry/mod.zig");
 const rng_helpers = @import("rng.zig");
 
@@ -52,6 +53,8 @@ pub const Config = struct {
     max_tasks: u32 = 4096,
     /// Bytes of stack mapped for each task (only touched pages are backed by memory).
     stack_size_bytes: usize = 8 * 1024 * 1024,
+    /// Capacity of the supervision tree: contexts alive at once.
+    max_contexts: u32 = context_mod.default_max_contexts,
 
     pub fn validate(config: Config) void {
         assert(config.cycle_ns > 0 or config.timeout_ns == null);
@@ -177,6 +180,9 @@ const Alarm = struct {
     }
 };
 
+/// The deterministic runtime's context (see `context.zig`).
+pub const Context = context_mod.Context(network_mod.deterministic.Network);
+
 /// Implementation of the deterministic runtime. One `Runner` may `start` several root tasks in
 /// sequence: simulated time, the RNG, and the auditor carry over, like recovering from
 /// commonware's `Checkpoint`.
@@ -206,6 +212,8 @@ pub const Runner = struct {
     memory_storage: storage_mod.memory.Storage,
     /// The simulated network, created on first use; it carries over between starts.
     simulated_network: ?network_mod.deterministic.Network = null,
+    /// What every `Context` shares, created by the first `start_context`.
+    context_runtime: ?context_mod.Runtime = null,
     /// Number of roots started, so a restart can retire the previous run's opens.
     starts: u64 = 0,
     /// The metrics registry; it carries over between starts. Release every handle before
@@ -244,6 +252,7 @@ pub const Runner = struct {
         runner.batch.deinit(runner.allocator);
         runner.alarms.deinit(runner.allocator);
         runner.memory_storage.deinit();
+        if (runner.context_runtime) |*runtime| runtime.deinit();
         if (runner.simulated_network) |*net| net.deinit();
         runner.metrics_registry.deinit();
         runner.* = undefined;
@@ -281,6 +290,31 @@ pub const Runner = struct {
     /// Simulated time, in nanoseconds since the Unix epoch.
     pub fn now_ns(runner: *const Runner) u64 {
         return runner.time_ns;
+    }
+
+    /// Run `function(ctx, args...)` as the root task with a root `Context`: storage, the
+    /// network, metrics, and supervision (commonware `Runner::start`). Tasks it spawns are
+    /// aborted when it returns.
+    pub fn start_context(
+        runner: *Runner,
+        comptime function: anytype,
+        args: anytype,
+    ) Error!context_mod.Return(function) {
+        const Result = context_mod.Return(function);
+        const Args = @TypeOf(args);
+        if (runner.context_runtime == null) {
+            const auditor = &runner.auditor;
+            const max = runner.config.max_contexts;
+            runner.context_runtime = try .init(runner.allocator, runner.io(), max, auditor);
+        }
+        const runtime = &runner.context_runtime.?;
+        const ctx: Context = .root(runtime, runner.storage(), runner.network(), runner.metrics());
+        const Root = struct {
+            fn call(root_ctx: *const Context, root_args: *const Args) Result {
+                return root_ctx.run_root(function, root_args.*);
+            }
+        };
+        return runner.start(Root.call, .{ &ctx, &args });
     }
 
     /// Run `function(args...)` as the root task until it returns, then cancel and drain every

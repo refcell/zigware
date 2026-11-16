@@ -9,7 +9,7 @@ fibers, io_uring (`std/Io/Uring.zig`), kqueue, threads, and an interface (vtable
 time, files, and network: build on it rather than around it where it fits.
 
 ## Backlog
-- [ ] Interface: `Context` with spawner (spawn, labeled children, abort, join handles),
+- [x] Interface: `Context` with spawner (spawn, labeled children, abort, join handles),
   clock (current, sleep, sleep_until, timeouts), RNG, network (`Listener`, `Sink`, `Stream`),
   storage (`Blob` with read_at/write_at/resize/sync, partitions open/remove/scan), metrics
   registry, `Signal`/stop. Mirror lib.rs traits.
@@ -26,10 +26,14 @@ time, files, and network: build on it rather than around it where it fits.
 - [ ] audited and metered network wrappers.
 - [ ] Port remaining deterministic.rs tests.
 - [x] signal (`signal.zig`: `Signaler`, `Signal`, `Stopper`), commonware's shutdown tests.
-- [ ] Context: io, storage, network, `metrics.Scope` (runtime-telemetry's), labeled
-  `child`/`with_attribute`, `spawn` with mandatory supervision (a finished or aborted parent
-  aborts its descendants), `stop`/`stopped`, clock helpers (`timeout`, `sleep_until`);
-  deterministic `register`/`encode` audits; runtime task metrics. Port the lib.rs tests.
+- [x] Context (`context.zig`, `supervision.zig`): io, storage, network, `metrics.Scope`
+  (runtime-telemetry's), labeled `child`/`with_attribute`, `spawn` with mandatory
+  supervision (a finished or aborted parent aborts its descendants), `stop`/`stopped`,
+  clock helpers (`timeout`, `sleep_until`); deterministic `register`/`encode`/`stop` audits;
+  `deterministic.Runner.start_context`. lib.rs clock, spawn, shutdown, and metrics tests
+  (`context_test.zig`).
+- [ ] Context on `production.Runner` (with runtime-telemetry) and runtime task metrics
+  (`runtime_tasks_*`).
 - [ ] iobuf (IoBuf/IoBufs pooled buffers) and utils (buffer pools, handle, supervision).
 - Moved to the runtime-telemetry lane: telemetry (`src/runtime/telemetry/`) and the
   production runtime (`src/runtime/production/`, io_uring/kqueue storage and network).
@@ -71,6 +75,19 @@ time, files, and network: build on it rather than around it where it fits.
 - The mock channel accepts a zero buffer size, as commonware does. Like commonware, a recv
   waiting for n bytes and a send of fewer than n that exceeds the buffer block each other;
   callers frame their reads.
+- `Context(Network)` is a plain value, generic over the backend's network type
+  (`deterministic.Context` for the simulated network). `spawn(function, args)` calls
+  `function(task_ctx, args...)` and consumes the context, as commonware does: spawn several
+  tasks from `ctx.child(label)`; spawning twice from one context panics. A `Handle` must be
+  joined, aborted, or detached exactly once (Rust drops it; a detached task keeps running
+  under supervision and is reaped later). Abort is a `std.Io` cancelation, so an aborted
+  task's result is `error.Closed` only if it had not already returned.
+- Supervision nodes live in a fixed pool (`Config.max_contexts`, default 16384); a full
+  pool panics. `child` reserves a node at once (so children made before a spawn die with
+  that task, as in commonware), and the node is reclaimed when its subtree is aborted, i.e.
+  when the task spawned from it (or an ancestor) ends. Zig has no drop, so a child context
+  that never spawns holds its node until then: make long-lived child contexts once rather
+  than per message.
 - The memory backend guards its state with one spin lock that never blocks inside, so it
   is safe across threads and never yields a fiber while held.
 
@@ -81,3 +98,4 @@ time, files, and network: build on it rather than around it where it fits.
   the storage suite.
 - 2026-11-13: runner storage, mock channel, deterministic network and network suite.
 - 2026-11-13: fiber unwind fix for aarch64 (stack traces on fibers), signal/Stopper.
+- 2026-11-16: Context with supervision, clock, stop, and metrics on `deterministic.Runner`.
