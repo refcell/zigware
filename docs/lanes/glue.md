@@ -102,6 +102,16 @@ marshal's actors (consensus-marshal) for the actor; until then it ports what is 
   `merkleize(slots, unstaged)`, `deinit`), and `Merkleized` (`root`, `ops_root`, `new_batch`,
   `get`, `get_many`, `clone`, `deinit`). Its `SyncTarget` is the ops root over
   `[sync_boundary, size)`.
+- `glue.stateful.db.sync` (also `db.Anchor`, `db.TipUpdate`): `Anchor(D)` (`height`, `round`,
+  `digest`, `eql`), `TipUpdate(D, T)` (`init`, `with_observation(gpa, io, anchor, targets)`
+  → update and a `oneshot.Receiver(void)`, `record(context)` calling
+  `context.record(anchor, targets)` then resolving the observer, `discard`),
+  `dispatch_queued_tips(D, T, *?ring.Receiver(TipUpdate), ring.Sender(T), *Anchor, *T)`,
+  `DbSyncState`, `CoordinatorAction(D, T)` (`wait`, `dispatch`, `converged`), and
+  `CoordinatorState(D, T)` (`init(db_count, anchor, targets)`, `record_reached`,
+  `record_tip_update`, `next_action`, `should_dispatch`, `mark_reached_same_target`).
+- `glue.stateful.db.p2p.max_payload_size(F, D, max_serve_ops, op_size)`: the bound on every
+  state sync request and response framed by the resolver.
 - `glue.stateful.probe`: `Sample(S, D)` (`init(gpa, minimum_epoch)`, `awaits(peer)`,
   `record(peer, finalization)` taking ownership, `select(committee_size, judge)` with
   `judge.judgeable(*const Finalization)`, `get_floor`, `reset`, `deinit`), `Message(S, V)`
@@ -138,6 +148,9 @@ marshal's actors (consensus-marshal) for the actor; until then it ports what is 
 - `Current` covers unordered fixed `current` databases, the only ones on main; ordered and
   variable follow storage-qmdb-sync. Its crash-recovery test (deterministic storage faults)
   waits on a storage fault harness; the bounded-init test covers its durable-discard checks.
+- `CoordinatorState` holds at most `max_databases` (8) databases and their assigned
+  generations in fixed arrays (commonware: a `Vec` and a `BTreeMap`); generations are `u64`.
+  `max_payload_size` returns `error.TooManyOperations` above `u32` where commonware panics.
 - `Pruning` keeps its retention window in a ring allocated at init (commonware grows a
   `VecDeque`); an invalid config or phase returns `error.InvalidPruneConfig` where commonware
   panics.
@@ -152,8 +165,11 @@ marshal's actors (consensus-marshal) for the actor; until then it ports what is 
 - [x] db/current: the unordered fixed ManagedDb with staging and current.rs's tests.
 - [ ] db/current: ordered and variable (after storage-qmdb-sync), the crash-recovery test.
 - [ ] db: keyless, immutable, compact.
-- [ ] db: state sync (`StateSyncDb`, `StateSyncSet`, `Anchor`, `TipUpdate`, the generation
-  coordinator) and its tests; db/p2p (handler, actor, mailbox, limits).
+- [x] db: `Anchor`, `TipUpdate`, `dispatch_queued_tips`, and the generation coordinator with
+  mod.rs's tests of them, a regroup test, and the channel edge cases.
+- [x] db/p2p: `max_payload_size` with limits.rs's widest-encodings test.
+- [ ] db: state sync engines (`StateSyncDb`, `StateSyncSet`, `drain_generation_updates`, the
+  single and tuple sync loops) and their tests; db/p2p (handler, actor, mailbox).
 - [x] probe: `Sample`, wire `Message`, `max_payload_size` with limits.rs's widest-encodings
   test and sample selection tests.
 - [ ] probe: the actor (solicit, collect, retry, serve), after marshal's mailbox.
@@ -176,6 +192,8 @@ marshal's actors (consensus-marshal) for the actor; until then it ports what is 
   `transfers.Slot` is qmdb's `any.batch.Slot`. The transfers lane
   (T-01a1d58d-7682-700c-a399-735d897bbd46) takes over the benches and database tests.
 - 2026-11-16 (stateful): the `current` ManagedDb adapter with staging.
+- 2026-11-16 (stateful): state sync anchors, tip updates, the generation coordinator, and the
+  p2p payload bound.
 
 ## dkg (owner: coding lane, thread T-01a1d58d-bff1-75a1-8ccb-4b8dd7bc9755)
 

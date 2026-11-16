@@ -47,6 +47,10 @@ const runtime = @import("runtime");
 
 pub const any = @import("any.zig");
 pub const current = @import("current.zig");
+pub const p2p = @import("p2p/mod.zig");
+pub const sync = @import("sync.zig");
+pub const Anchor = sync.Anchor;
+pub const TipUpdate = sync.TipUpdate;
 
 /// What a QMDB database needs to open: memory, storage, and a metrics scope (commonware's
 /// runtime context `E`). Sets pass each member `env.child("db_<index>")`.
