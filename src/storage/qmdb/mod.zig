@@ -26,6 +26,7 @@ pub const metrics = @import("metrics.zig");
 pub const keyless = @import("keyless/mod.zig");
 pub const immutable = @import("immutable/mod.zig");
 pub const any = @import("any/mod.zig");
+pub const sync = @import("sync/mod.zig");
 
 /// Errors from an authenticated database (commonware's `qmdb::Error`). Payloads (locations,
 /// sizes, the failed check's name) are not carried: Zig errors have none.
