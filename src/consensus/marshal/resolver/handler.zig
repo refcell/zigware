@@ -4,15 +4,27 @@
 //! a commitment, a height, or a round. `Annotation` is the local metadata a request carries:
 //! two subscribers of one key can update different stores and trust the commitment
 //! differently. `Request(D)` pairs a key with the only annotation that matches it.
+//!
+//! `Handler(D)` is the resolver's consumer and producer: it forwards deliveries (copies of
+//! the borrowed value and subscribers) and produce requests to the actor as `Message(D)`.
+//! When the actor's inbox is full, overflow drops produce requests (a peer can ask a less
+//! loaded peer) and deliveries whose requester left.
 
 const std = @import("std");
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
+const Io = std.Io;
+const actor = @import("actor");
 const codec = @import("codec");
+const resolver_api = @import("resolver");
+const utils = @import("utils");
+const metrics = @import("runtime").telemetry.metrics;
 const types = @import("../../types.zig");
 const Cutoff = @import("../core/floor.zig").Cutoff;
 const Height = types.Height;
 const Round = types.Round;
+const oneshot = utils.channel.oneshot;
+const Produced = resolver_api.p2p.Produced;
 
 /// The subject byte of each key.
 const Subject = enum(u8) {
@@ -20,6 +32,8 @@ const Subject = enum(u8) {
     finalized = 1,
     notarized = 2,
 };
+
+const KeyOf = Key;
 
 /// A raw resolver key for backfilling data.
 pub fn Key(comptime D: type) type {
@@ -115,6 +129,16 @@ pub const Finalized = union(enum) {
     /// Only the finalization round is known (a finalization names the commitment, not the
     /// height).
     by_round: Round,
+
+    /// Rust's derived `Ord`: by variant, then by value.
+    pub fn order(a: Finalized, b: Finalized) std.math.Order {
+        const by_tag = std.math.order(@backingInt(a), @backingInt(b));
+        if (by_tag != .eq) return by_tag;
+        return switch (a) {
+            .by_height => |height| std.math.order(height.get(), b.by_height.get()),
+            .by_round => |round| round.order(b.by_round),
+        };
+    }
 };
 
 /// The local processing metadata of a request.
@@ -133,6 +157,19 @@ pub const Annotation = union(enum) {
 
     pub fn eql(a: Annotation, b: Annotation) bool {
         return std.meta.eql(a, b);
+    }
+
+    /// Rust's derived `Ord`: by variant, then by value. The resolver keeps subscribers in
+    /// this order.
+    pub fn order(a: Annotation, b: Annotation) std.math.Order {
+        const by_tag = std.math.order(@backingInt(a), @backingInt(b));
+        if (by_tag != .eq) return by_tag;
+        return switch (a) {
+            .notarization => |round| round.order(b.notarization),
+            .untrusted => |height| std.math.order(height.get(), b.untrusted.get()),
+            .certified => |height| std.math.order(height.get(), b.certified.get()),
+            .finalized => |finalized| finalized.order(b.finalized),
+        };
     }
 };
 
@@ -251,6 +288,185 @@ pub fn above_round_floor(
             .notarization, .untrusted, .certified => true,
         },
         .finalized => true,
+    };
+}
+
+/// A message from the resolver's consumer or producer to the marshal actor (commonware
+/// `handler::Message`). It owns its value, subscribers, and responder, and the allocator that
+/// frees them if the mailbox drops it.
+pub fn Message(comptime D: type) type {
+    return struct {
+        const Self = @This();
+        pub const Delivery = resolver_api.Delivery(Key(D), Annotation);
+        pub const Overflow = Pending(D);
+
+        gpa: Allocator,
+        body: Body,
+
+        pub const Body = union(enum) {
+            /// A value resolved for `delivery`; the disposition goes back through `response`.
+            deliver: struct {
+                delivery: Delivery,
+                value: []const u8,
+                response: oneshot.Sender(resolver_api.Outcome),
+            },
+            /// A peer requests the value at `key`.
+            produce: struct { key: Key(D), response: oneshot.Sender(Produced) },
+        };
+
+        /// Whether the requester stopped waiting for the response.
+        pub fn response_closed(self: *const Self) bool {
+            return switch (self.body) {
+                inline else => |body| body.response.is_closed(),
+            };
+        }
+
+        /// Releases a message the mailbox drops, closing its responder.
+        pub fn discard(message: Self) void {
+            switch (message.body) {
+                .deliver => |body| {
+                    var response = body.response;
+                    response.deinit();
+                    message.gpa.free(body.value);
+                    message.gpa.free(body.delivery.subscribers);
+                },
+                .produce => |body| {
+                    var response = body.response;
+                    response.deinit();
+                },
+            }
+        }
+
+        /// The overflow policy: drops produce requests, so the serve backlog stays bounded
+        /// by the ready queue (a peer can ask a less loaded peer), and keeps deliveries whose
+        /// requester still waits.
+        pub fn handle(gpa: Allocator, overflow: *Overflow, message: Self) Allocator.Error!void {
+            if (message.body == .produce or message.response_closed()) return discard(message);
+            errdefer discard(message);
+            try overflow.messages.pushBack(gpa, message);
+            assert(!overflow.is_empty());
+        }
+    };
+}
+
+/// Deliveries held while the actor's inbox is full (commonware `handler::Pending`).
+pub fn Pending(comptime D: type) type {
+    return struct {
+        const Self = @This();
+        const M = Message(D);
+
+        messages: std.Deque(M) = .empty,
+
+        pub const empty: Self = .{};
+
+        pub fn deinit(self: *Self, gpa: Allocator) void {
+            while (self.messages.popFront()) |message| M.discard(message);
+            self.messages.deinit(gpa);
+            self.* = undefined;
+        }
+
+        pub fn is_empty(self: *const Self) bool {
+            return self.messages.len == 0;
+        }
+
+        /// Hands the queue in order, skipping deliveries whose requester left.
+        pub fn drain(self: *Self, pusher: anytype) void {
+            while (self.messages.popFront()) |message| {
+                if (message.response_closed()) {
+                    M.discard(message);
+                    continue;
+                }
+                if (pusher.push(message)) |rejected| {
+                    self.messages.pushFrontAssumeCapacity(rejected);
+                    break;
+                }
+            }
+        }
+    };
+}
+
+/// Forwards the resolver's deliveries and produce requests to the marshal actor (commonware
+/// `Handler`): the resolver's `Consumer` and `Producer`.
+pub fn Handler(comptime D: type) type {
+    return struct {
+        const Self = @This();
+        const M = Message(D);
+        pub const Key = KeyOf(D);
+        pub const Value = []const u8;
+        pub const Subscriber = Annotation;
+        pub const Outcome = resolver_api.Outcome;
+
+        gpa: Allocator,
+        io: Io,
+        sender: actor.mailbox.Sender(M),
+
+        pub fn clone(self: Self) Self {
+            var copy = self;
+            copy.sender = self.sender.clone();
+            return copy;
+        }
+
+        pub fn deinit(self: *Self) void {
+            self.sender.deinit();
+            self.* = undefined;
+        }
+
+        /// Forwards a copy of `delivery` and `value` (both borrowed).
+        pub fn deliver(
+            self: Self,
+            delivery: M.Delivery,
+            value: []const u8,
+        ) Allocator.Error!oneshot.Receiver(Outcome) {
+            assert(delivery.subscribers.len > 0);
+            const subscribers = try self.gpa.dupe(Annotation, delivery.subscribers);
+            errdefer self.gpa.free(subscribers);
+            const bytes = try self.gpa.dupe(u8, value);
+            errdefer self.gpa.free(bytes);
+            var pair = try oneshot.channel(Outcome, self.gpa, self.io);
+            errdefer pair.receiver.deinit();
+            _ = try self.sender.enqueue(.{ .gpa = self.gpa, .body = .{ .deliver = .{
+                .delivery = .{ .key = delivery.key, .subscribers = subscribers },
+                .value = bytes,
+                .response = pair.sender,
+            } } });
+            return pair.receiver;
+        }
+
+        /// Asks the actor to serve `key`; a receiver closed without a value means no data.
+        pub fn produce(self: Self, key: KeyOf(D)) Allocator.Error!oneshot.Receiver(Produced) {
+            var pair = try oneshot.channel(Produced, self.gpa, self.io);
+            errdefer pair.receiver.deinit();
+            _ = try self.sender.enqueue(.{ .gpa = self.gpa, .body = .{ .produce = .{
+                .key = key,
+                .response = pair.sender,
+            } } });
+            return pair.receiver;
+        }
+    };
+}
+
+/// The actor's end of the handler mailbox and the handler that feeds it.
+pub fn Channel(comptime D: type) type {
+    return struct {
+        receiver: actor.mailbox.Receiver(Message(D)),
+        handler: Handler(D),
+    };
+}
+
+/// Creates a handler and the receiver the actor reads (commonware `handler::init`), holding
+/// up to `capacity` messages before overflow.
+pub fn init(
+    comptime D: type,
+    gpa: Allocator,
+    io: Io,
+    scope: *const metrics.Scope,
+    capacity: u32,
+) Allocator.Error!Channel(D) {
+    assert(capacity > 0);
+    const pair = try actor.mailbox.new_with_metrics(Message(D), gpa, io, scope, capacity);
+    return .{
+        .receiver = pair.receiver,
+        .handler = .{ .gpa = gpa, .io = io, .sender = pair.sender },
     };
 }
 
@@ -477,4 +693,97 @@ test "key conformance hash matches commonware" {
         conformance.default_cases,
         @embedFile("../../conformance.toml"),
     );
+}
+
+const TestMessage = Message(Sha256.Digest);
+
+/// Accepts every drained message.
+const Collector = struct {
+    items: std.ArrayList(TestMessage),
+
+    pub fn push(self: *Collector, message: TestMessage) ?TestMessage {
+        self.items.appendAssumeCapacity(message);
+        return null;
+    }
+};
+
+fn test_deliver(
+    gpa: Allocator,
+    height: u64,
+    response: oneshot.Sender(resolver_api.Outcome),
+) !TestMessage {
+    const annotation: Annotation = .{ .finalized = .{ .by_height = .new(height) } };
+    return .{ .gpa = gpa, .body = .{ .deliver = .{
+        .delivery = .{
+            .key = .{ .finalized = .new(height) },
+            .subscribers = try gpa.dupe(Annotation, &.{annotation}),
+        },
+        .value = try gpa.dupe(u8, "bytes"),
+        .response = response,
+    } } };
+}
+
+test "handle retains open deliveries only" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var overflow: TestMessage.Overflow = .empty;
+    defer overflow.deinit(gpa);
+
+    // An overflowed produce request is dropped and its requester sees the closed response.
+    var produce = try oneshot.channel(Produced, gpa, io);
+    defer produce.receiver.deinit();
+    try TestMessage.handle(gpa, &overflow, .{ .gpa = gpa, .body = .{ .produce = .{
+        .key = .{ .finalized = .new(1) },
+        .response = produce.sender,
+    } } });
+    try testing.expectError(error.Closed, produce.receiver.try_recv());
+
+    // Deliveries are retained, and drain skips one whose requester left.
+    var closed = try oneshot.channel(resolver_api.Outcome, gpa, io);
+    try TestMessage.handle(gpa, &overflow, try test_deliver(gpa, 2, closed.sender));
+    var open = try oneshot.channel(resolver_api.Outcome, gpa, io);
+    defer open.receiver.deinit();
+    try TestMessage.handle(gpa, &overflow, try test_deliver(gpa, 3, open.sender));
+    closed.receiver.deinit();
+
+    var collector: Collector = .{ .items = try .initCapacity(gpa, 4) };
+    defer collector.items.deinit(gpa);
+    overflow.drain(&collector);
+    defer for (collector.items.items) |message| TestMessage.discard(message);
+    try testing.expectEqual(1, collector.items.items.len);
+    const delivered = collector.items.items[0].body.deliver;
+    try testing.expectEqual(3, delivered.delivery.key.finalized.get());
+}
+
+test "handler forwards copies of deliveries and produce requests" {
+    const gpa = testing.allocator;
+    const io = testing.io;
+    var registry = metrics.Registry.init(gpa);
+    defer registry.deinit();
+    const scope = metrics.Scope.init(&registry);
+    var channel = try init(Sha256.Digest, gpa, io, &scope, 4);
+    defer channel.receiver.deinit();
+    defer channel.handler.deinit();
+
+    var value = [_]u8{ 1, 2, 3 };
+    const subscribers = [_]Annotation{.{ .notarization = .new(.zero(), .new(4)) }};
+    var outcome = try channel.handler.deliver(.{
+        .key = .{ .notarized = .new(.zero(), .new(4)) },
+        .subscribers = &subscribers,
+    }, &value);
+    defer outcome.deinit();
+    var produced = try channel.handler.produce(.{ .finalized = .new(9) });
+    defer produced.deinit();
+    value[0] = 7; // The borrowed value may change once `deliver` returns.
+
+    const delivered = try channel.receiver.try_recv();
+    defer TestMessage.discard(delivered);
+    const body = delivered.body.deliver;
+    try testing.expectEqualSlices(u8, &.{ 1, 2, 3 }, body.value);
+    try testing.expect(body.delivery.subscribers.ptr != &subscribers);
+    try testing.expect(body.delivery.subscribers[0].eql(subscribers[0]));
+    var request = try channel.receiver.try_recv();
+    try testing.expectEqual(9, request.body.produce.key.finalized.get());
+    try request.body.produce.response.send(.{ .bytes = "served" });
+    try testing.expectEqualStrings("served", (try produced.try_recv()).bytes);
 }

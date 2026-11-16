@@ -3,6 +3,7 @@
 const std = @import("std");
 
 pub const handler = @import("handler.zig");
+pub const p2p = @import("p2p.zig");
 pub const Key = handler.Key;
 pub const Annotation = handler.Annotation;
 pub const Finalized = handler.Finalized;

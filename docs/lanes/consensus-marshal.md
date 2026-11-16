@@ -99,6 +99,13 @@ then the core and standard actors as those packages land.
   `get_verified`, `hint_finalized`, `subscribe_by_digest`, `subscribe_by_commitment`,
   `hint_notarized`, `proposed`, `prepared`, `verified_deferred`, `verified`, `certified`,
   `set_floor`, `prune`, `forward`, and the consensus `Reporter` `report`).
+- `consensus.marshal.resolver.handler`: `Message(D)` (`deliver`/`produce`, with its overflow
+  policy), `Handler(D)` (the resolver `Consumer` and `Producer`; copies borrowed deliveries),
+  `init(D, gpa, io, scope, capacity)` returning `{ receiver, handler }`; `Annotation.order`
+  and `Finalized.order` (Rust's derived `Ord`).
+- `consensus.marshal.resolver.p2p`: `Config(P, C, B)`, `Mailbox(D, P)`, and
+  `Resolver(D, P, C, B, NetS, NetR)` with `init(gpa, io, scope, config, sender, receiver)`
+  returning `{ receiver, handler, mailbox, future }` (the engine borrows `handler`).
 - `consensus.marshal.application.relay.broadcast(S, V, gates, marshal, commitment, plan)`:
   relays a simplex `Plan` (prepare once, persist on propose, forward a copy of the plan's
   borrowed recipients).
@@ -183,8 +190,9 @@ then the core and standard actors as those packages land.
 - [x] marshal: ancestry, application validation and gates.
 - [x] marshal: core mailbox with its overflow policy and tests.
 - [x] marshal: application relay.
-- [ ] marshal: resolver handler messages and p2p init, core actor, application build (it
-  needs an `Application` contract; port it with the standard wrappers).
+- [x] marshal: resolver handler messages and p2p init.
+- [ ] marshal: core actor, application build (it needs an `Application` contract; port it
+  with the standard wrappers).
 - [x] aggregation: the full `distinct states` comparison on the new runtime auditor.
 - (marshal/coding/ belongs to the broadcast-collector lane: types, shards, variant,
   validation, marshaled, and coding/mod.rs tests, on top of core.)
@@ -201,4 +209,5 @@ then the core and standard actors as those packages land.
   store adapters, config; core floor, staged, certified, acks, durability, stream,
   subscriptions, and cache with their commonware tests.
 - 2026-11-16: marshal ancestry streams, application validation, and certification gates.
-- 2026-11-16: marshal core mailbox, overflow policy, and its commonware tests; relay.
+- 2026-11-16: marshal core mailbox, overflow policy, and its commonware tests; relay;
+  resolver handler messages and the p2p resolver wiring.
