@@ -52,7 +52,10 @@ handshake), then certificate, secp256r1, the rest, zk last. banderwagon moved to
   `prove`, `verify`, the `zk.circuit` converter, and the fuzz plan.
 - [x] zk `pedersen_to_plain`: `Setup`, `Witness`, `Claim`, `Proof`, `prove`, `verify`, the
   BLS12-381 prover plan, and its 3 conformance hashes. (banderwagon moved to bls-math.)
-- [ ] Fuzz targets (commonware cryptography/fuzz) and conformance hashes.
+- [x] Fuzz targets (commonware cryptography/fuzz) and conformance hashes: every target and
+  every `conformance.toml` entry outside bls12381/ and reed_solomon/ has a Zig counterpart.
+- [ ] Benches (`benches.zig`): blake3, bloomfilter, chacha20_poly1305, ed25519, sake, lthash,
+  secp256r1, sha256, sha512, and zk bulletproofs, with commonware's names and cases.
 
 ## Log
 - Digests are `Digest(length, name)`: one distinct type per hasher, encoded as raw bytes.
