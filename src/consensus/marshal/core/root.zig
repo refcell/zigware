@@ -3,8 +3,11 @@
 const std = @import("std");
 
 pub const acks = @import("acks.zig");
+pub const actor = @import("actor.zig");
+pub const Actor = actor.Actor;
 pub const cache = @import("cache.zig");
 pub const certified = @import("certified.zig");
+pub const delivery = @import("delivery.zig");
 pub const durability = @import("durability.zig");
 pub const floor = @import("floor.zig");
 pub const Cutoff = floor.Cutoff;
@@ -23,6 +26,7 @@ pub const variant = @import("variant.zig");
 pub const ExpectedCommitment = variant.ExpectedCommitment;
 pub const assert_variant = variant.assert_variant;
 pub const assert_buffer = variant.assert_buffer;
+pub const NoBuffer = variant.NoBuffer;
 
 test {
     std.testing.refAllDecls(@This());

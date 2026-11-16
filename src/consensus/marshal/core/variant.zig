@@ -27,7 +27,10 @@
 //! Rust's async `decode_block` and `restore_across` run on a strategy; here they block on it.
 
 const std = @import("std");
+const Allocator = std.mem.Allocator;
+const utils = @import("utils");
 const traits = @import("../../traits.zig");
+const types = @import("../../types.zig");
 
 /// The commitment a fetched block must match (commonware `ExpectedCommitment`). A trusted
 /// commitment came from a certificate this node verified; an untrusted one only names what
@@ -98,6 +101,39 @@ pub fn assert_buffer(comptime B: type) void {
             if (!@hasDecl(B, decl)) @compileError(@typeName(B) ++ " lacks Buffer." ++ decl);
         }
     }
+}
+
+/// A buffer that holds nothing (commonware `NoBuffer`), for an actor started without a
+/// broadcast buffer. `send` releases the block.
+pub fn NoBuffer(comptime V: type, comptime P: type) type {
+    return struct {
+        const Self = @This();
+        const Receiver = utils.channel.oneshot.Receiver(V.Block);
+        pub const PublicKey = P;
+
+        gpa: Allocator,
+
+        pub fn find_by_digest(_: *Self, _: V.Block.Digest) error{}!?V.Block {
+            return null;
+        }
+
+        pub fn find_by_commitment(_: *Self, _: V.Commitment) error{}!?V.Block {
+            return null;
+        }
+
+        pub fn subscribe_by_digest(_: *Self, _: V.Block.Digest) error{}!?Receiver {
+            return null;
+        }
+
+        pub fn subscribe_by_commitment(_: *Self, _: V.Commitment) error{}!?Receiver {
+            return null;
+        }
+
+        pub fn send(self: *Self, _: types.Round, block: V.Block, _: anytype) error{}!void {
+            var owned = block;
+            V.deinit_block(self.gpa, &owned);
+        }
+    };
 }
 
 test "expected commitment" {

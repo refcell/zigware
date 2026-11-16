@@ -119,6 +119,19 @@ then the core and standard actors as those packages land.
   !oneshot.Receiver(Handoff(D))`. Each runs detached from `ctx.child`; the contracts for
   `application`, `checks`, and `seal` are in the file's header. Dropping the receiver
   cancels the checks and the build.
+- `consensus.marshal.core.Actor(P)`: `P` declares the `Config` parameters plus `Variant`,
+  `Acknowledgement`, `Certificates`/`Blocks` (`store` adapters), `Application` (a `Reporter`
+  of `Update`), `Buffer` (`assert_buffer`), `Resolver` (a targeted resolver of
+  `handler.Key`), and optionally `Context` (default `runtime.deterministic.Context`).
+  `init(ctx, finalizations_by_height, finalized_blocks, config) !{ actor, mailbox, floor }`
+  (borrows the archives, takes `config.start`); `actor.start(application, buffer,
+  resolver_receiver, resolver) !Handle(anyerror!void)` takes ownership of all four and runs
+  until the mailbox or the handler closes, an acknowledgement is dropped, or the task is
+  aborted; the actor frees itself. `actor.deinit()` frees one never started.
+- `consensus.marshal.core.NoBuffer(V, PublicKey)` (`.{ .gpa = gpa }`), for an actor without
+  a broadcast buffer (commonware `start_unbuffered`); `core.delivery.PendingVerification`.
+- `consensus.marshal.Update(B, A)`: `tip{round, height, digest}` and `block{block:
+  broadcast.Digested(B), ack: A}`; the application owns both and must acknowledge.
 
 ## Decisions
 - Marshal blocks keep commonware's trait method names (`height()`, `parent()`, `digest()`,
@@ -184,6 +197,17 @@ then the core and standard actors as those packages land.
   (as simplex's voter expects), sends a copy, and panics on allocation failure as Rust
   aborts, since the `Reporter` contract cannot return an error.
 
+- The actor is one task over the simplex `Inbox`: pumps feed it the mailbox and the
+  resolver handler, buffer waiters and a watcher on the current application ack push their
+  completions, and events are handled in arrival order rather than `select_loop!`'s
+  priority. Archive writes are durable when they return, so commonware's pooled syncs
+  (`start_finalized_sync`, notarization syncs) complete inside the event that starts them
+  and release the dispatch gate there; the gate still holds dispatch between a buffered
+  write and that sync. A storage or allocation error ends the actor with the error where
+  commonware panics. The actor is split into `actor.zig` (state, init, loop, waiters),
+  `actor_ingress.zig` (mailbox), `actor_backfill.zig` (resolver), and `actor_finalize.zig`
+  (storage, floors, repair, dispatch) to keep files and functions within TigerStyle.
+
 ## Backlog
 - [x] aggregation: types (all 5 conformance hashes match), scheme, limits, safe_tip.
 - [x] aggregation: config, metrics, engine, mocks; mod.rs `all_online` with ed25519.
@@ -202,7 +226,11 @@ then the core and standard actors as those packages land.
 - [x] marshal: application relay.
 - [x] marshal: resolver handler messages and p2p init.
 - [x] marshal: application build (prepare and propose tasks).
-- [ ] marshal: core actor, then the shared mocks and harness, then the standard wrappers.
+- [x] marshal: core actor, delivery, `Update` (smoke tests: in-order dispatch, two-node
+  produce/deliver backfill with walkback repair and a forged certificate).
+- [ ] marshal: mocks/harness.rs, then standard/mod.rs's tests (shared with the lookup
+  thread, which owns standard/{validation,inline,deferred} and mocks/{application,
+  resolver,store,strategy,verifying}).
 - [x] aggregation: the full `distinct states` comparison on the new runtime auditor.
 - (marshal/coding/ belongs to the broadcast-collector lane: types, shards, variant,
   validation, marshaled, and coding/mod.rs tests, on top of core.)
@@ -223,3 +251,5 @@ then the core and standard actors as those packages land.
   resolver handler messages and the p2p resolver wiring.
 - 2026-11-16: marshal ancestry provider on the mailbox; application prepare and propose
   tasks.
+- 2026-11-16: marshal core actor (mailbox, resolver backfill, finalized chain, floors,
+  repair, dispatch), delivery, and `Update`.

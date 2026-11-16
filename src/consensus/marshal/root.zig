@@ -21,6 +21,8 @@ pub const mocks = @import("mocks/root.zig");
 pub const resolver = @import("resolver/root.zig");
 pub const standard = @import("standard/root.zig");
 pub const store = @import("store.zig");
+pub const update = @import("update.zig");
+pub const Update = update.Update;
 
 test {
     std.testing.refAllDecls(@This());
