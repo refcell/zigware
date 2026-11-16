@@ -44,7 +44,8 @@ pub const Runner = struct {
     /// Benchmarks run (or listed) so far.
     ran: u32 = 0,
 
-    fn matches(runner: *const Runner, name: []const u8) bool {
+    /// Whether the filters select `name`.
+    pub fn matches(runner: *const Runner, name: []const u8) bool {
         if (runner.filters.len == 0) return true;
         for (runner.filters) |filter| {
             if (std.mem.indexOf(u8, name, filter) != null) return true;

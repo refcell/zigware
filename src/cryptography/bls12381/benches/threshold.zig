@@ -12,6 +12,13 @@ const Allocator = std.mem.Allocator;
 const bench = @import("bench");
 const cryptography = @import("cryptography");
 const utils = @import("utils");
+const common = @import("common.zig");
+const skip = common.skip;
+const mode_name = common.mode_name;
+
+fn cases(runner: *const bench.Runner, all: []const u32) []const u32 {
+    return common.cases(runner, u32, all);
+}
 
 const bls12381 = cryptography.bls12381;
 const primitives = bls12381.primitives;
@@ -26,18 +33,6 @@ const N3f1 = utils.N3f1;
 const namespace = "benchmark";
 const message = "hello";
 const modes = [_]Mode{ .non_zero_counter, .roots_of_unity };
-
-/// commonware's `{mode:?}`.
-fn mode_name(mode: Mode) []const u8 {
-    return switch (mode) {
-        .non_zero_counter => "NonZeroCounter",
-        .roots_of_unity => "RootsOfUnity",
-    };
-}
-
-fn cases(runner: *const bench.Runner, all: []const u32) []const u32 {
-    return runner.inputs.pick([]const u32, all[0..1], all, all);
-}
 
 /// A sharing dealt to `n` players from `test_rng()`, as commonware's `deal` draws it.
 const Dealt = struct {
@@ -86,26 +81,17 @@ fn bench_recover(runner: *bench.Runner) !void {
     const sizes = [_]u32{ 5, 10, 20, 50, 100, 250, 500, 1000, 2000, 4000 };
     for (modes) |mode| {
         for (cases(runner, &sizes)) |n| {
+            const name = bench.Benchmark.init("bls12381::threshold_recover")
+                .with_param("mode", mode_name(mode))
+                .with_param("n", n).with_param("t", N3f1.quorum(n));
+            if (try skip(runner, name)) continue;
             var dealt = try Dealt.init(gpa, mode, n);
             defer dealt.deinit(gpa);
             const partials = try dealt.sign_all(gpa, 0);
             defer gpa.free(partials);
             var workload: Recover = .{ .gpa = gpa, .sharing = dealt.sharing, .partials = partials };
-            const name = bench.Benchmark.init("bls12381::threshold_recover")
-                .with_param("mode", mode_name(mode))
-                .with_param("n", n).with_param("t", N3f1.quorum(n));
             try runner.run(name, &workload);
         }
-    }
-}
-
-/// Fisher-Yates, as rand's `SliceRandom::shuffle`.
-fn shuffle(rng: *utils.TestRng, items: []Partial) void {
-    var index = items.len;
-    while (index > 1) {
-        index -= 1;
-        const other = utils.rng.range_at_most(rng, usize, 0, index);
-        std.mem.swap(Partial, &items[index], &items[other]);
     }
 }
 
@@ -123,7 +109,7 @@ const SameMessage = struct {
     }
 
     pub fn iter(workload: *SameMessage) !usize {
-        if (workload.invalid > 0) shuffle(&workload.rng, workload.partials);
+        if (workload.invalid > 0) common.shuffle(Partial, &workload.rng, workload.partials);
         const invalid = try threshold.batch_verify_same_message(
             MinSig,
             workload.gpa,
@@ -149,6 +135,10 @@ fn bench_same_message(runner: *bench.Runner, precomputed: bool) !void {
         for (cases(runner, &.{ 5, 10, 20, 50, 100, 250, 500 })) |n| {
             const t = N3f1.quorum(n);
             for ([_]u32{ 0, n - t }) |invalid| {
+                const name = bench.Benchmark.init(prefix)
+                    .with_param("n", n).with_param("t", t).with_param("invalid", invalid)
+                    .with_param("conc", 1).with_param("mode", mode_name(mode));
+                if (try skip(runner, name)) continue;
                 var dealt = try Dealt.init(gpa, mode, n);
                 defer dealt.deinit(gpa);
                 if (precomputed) dealt.sharing.precompute_partial_publics();
@@ -162,9 +152,6 @@ fn bench_same_message(runner: *bench.Runner, precomputed: bool) !void {
                     .invalid = invalid,
                     .precomputed = precomputed,
                 };
-                const name = bench.Benchmark.init(prefix)
-                    .with_param("n", n).with_param("t", t).with_param("invalid", invalid)
-                    .with_param("conc", 1).with_param("mode", mode_name(mode));
                 try runner.run(name, &workload);
             }
         }
@@ -199,6 +186,11 @@ fn bench_same_signer(runner: *bench.Runner) !void {
     for (modes) |mode| {
         for (cases(runner, &.{ 5, 10, 20, 50, 100, 250, 500 })) |n| {
             for ([_]u32{ 10, 100 }) |count| {
+                const name = bench.Benchmark.init("bls12381::threshold_batch_verify_same_signer")
+                    .with_param("n", n).with_param("t", N3f1.quorum(n))
+                    .with_param("msgs", count).with_param("conc", 1)
+                    .with_param("mode", mode_name(mode));
+                if (try skip(runner, name)) continue;
                 var dealt = try Dealt.init(gpa, mode, n);
                 defer dealt.deinit(gpa);
                 const signer = dealt.shares[0];
@@ -221,10 +213,6 @@ fn bench_same_signer(runner: *bench.Runner) !void {
                     .index = signer.index,
                     .entries = entries,
                 };
-                const name = bench.Benchmark.init("bls12381::threshold_batch_verify_same_signer")
-                    .with_param("n", n).with_param("t", N3f1.quorum(n))
-                    .with_param("msgs", count).with_param("conc", 1)
-                    .with_param("mode", mode_name(mode));
                 try runner.run(name, &workload);
             }
         }

@@ -8,6 +8,7 @@ const Allocator = std.mem.Allocator;
 const bench = @import("bench");
 const cryptography = @import("cryptography");
 const utils = @import("utils");
+const common = @import("common.zig");
 
 const bls12381 = cryptography.bls12381;
 const fd = bls12381.dkg.feldman_desmedt;
@@ -147,17 +148,18 @@ fn bench_dkg(runner: *bench.Runner, reshare: bool) !void {
     const counts = runner.inputs.pick([]const u32, standard[0..1], &standard, &full);
     var rng = utils.test_rng();
     for (counts) |n| {
-        var round: Round = undefined;
-        try round.init(gpa, &rng, reshare, n);
-        defer round.deinit(gpa);
-        var workload: Finalize = .{ .gpa = gpa, .round = &round };
-        defer workload.teardown();
         const prefix = if (reshare)
             "bls12381::dkg::feldman_desmedt_reshare_recovery"
         else
             "bls12381::dkg::feldman_desmedt_recovery";
         const name = bench.Benchmark.init(prefix)
             .with_param("n", n).with_param("t", N3f1.quorum(n)).with_param("conc", 1);
+        if (try common.skip(runner, name)) continue;
+        var round: Round = undefined;
+        try round.init(gpa, &rng, reshare, n);
+        defer round.deinit(gpa);
+        var workload: Finalize = .{ .gpa = gpa, .round = &round };
+        defer workload.teardown();
         try runner.run(name, &workload);
     }
 }

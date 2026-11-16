@@ -23,20 +23,13 @@ const G1 = group.G1;
 const G2 = group.G2;
 const Private = group.Private;
 const tle = bls12381.tle;
+const common = @import("benches/common.zig");
+const cases = common.cases;
+const skip = common.skip;
+const random_messages = common.random_messages;
+const Message = common.Message;
 
 const namespace = "namespace";
-const Message = [32]u8;
-
-fn random_messages(gpa: Allocator, rng: *utils.TestRng, count: usize) ![]Message {
-    const messages = try gpa.alloc(Message, count);
-    for (messages) |*message| rng.fill_bytes(message);
-    return messages;
-}
-
-/// The cases for this run: the smallest one under `zig build test`, else all of them.
-fn cases(runner: *const bench.Runner, comptime T: type, all: []const T) []const T {
-    return runner.inputs.pick([]const T, all[0..1], all, all);
-}
 
 const SignatureGeneration = struct {
     key: bls12381.PrivateKey,
@@ -64,18 +57,20 @@ fn bench_signatures(runner: *bench.Runner) !void {
     var message: Message = undefined;
     rng.fill_bytes(&message);
     const key = bls12381.PrivateKey.random(&rng);
-    var generation: SignatureGeneration = .{ .key = key, .message = &message };
     const generation_name = bench.Benchmark.init("bls12381::signature_generation")
         .with_param("ns_len", namespace.len).with_param("msg_len", message.len);
-    try runner.run(generation_name, &generation);
-
+    if (!try skip(runner, generation_name)) {
+        var generation: SignatureGeneration = .{ .key = key, .message = &message };
+        try runner.run(generation_name, &generation);
+    }
+    const verification_name = bench.Benchmark.init("bls12381::signature_verification")
+        .with_param("ns_len", namespace.len).with_param("msg_len", message.len);
+    if (try skip(runner, verification_name)) return;
     var verification: SignatureVerification = .{
         .public = key.public_key(),
         .signature = key.sign(namespace, &message),
         .message = &message,
     };
-    const verification_name = bench.Benchmark.init("bls12381::signature_verification")
-        .with_param("ns_len", namespace.len).with_param("msg_len", message.len);
     try runner.run(verification_name, &verification);
 }
 
@@ -94,13 +89,14 @@ fn bench_hash_to_curve(runner: *bench.Runner) !void {
     const gpa = runner.allocator;
     var rng = utils.test_rng();
     for (cases(runner, usize, &.{ 10, 50, 100, 200 })) |n| {
+        const name = bench.Benchmark.init("bls12381::hash_to_curve")
+            .with_param("n", n).with_param("conc", 1);
+        if (try skip(runner, name)) continue;
         const messages = try random_messages(gpa, &rng, n);
         defer gpa.free(messages);
         const out = try gpa.alloc(G1, n);
         defer gpa.free(out);
         var workload: HashToCurve = .{ .messages = messages, .out = out };
-        const name = bench.Benchmark.init("bls12381::hash_to_curve")
-            .with_param("n", n).with_param("conc", 1);
         try runner.run(name, &workload);
     }
 }
@@ -146,13 +142,15 @@ fn bench_tle(runner: *bench.Runner) !void {
         .target = target,
         .message = message,
     };
-    try runner.run(bench.Benchmark.init("bls12381::tle_encrypt"), &encrypt);
-
+    const encrypt_name = bench.Benchmark.init("bls12381::tle_encrypt");
+    if (!try skip(runner, encrypt_name)) try runner.run(encrypt_name, &encrypt);
+    const decrypt_name = bench.Benchmark.init("bls12381::tle_decrypt");
+    if (try skip(runner, decrypt_name)) return;
     var decrypt: TleDecrypt = .{
         .signature = ops.sign_message(MinSig, master.private, tle_namespace, &target),
         .ciphertext = try encrypt.iter(),
     };
-    try runner.run(bench.Benchmark.init("bls12381::tle_decrypt"), &decrypt);
+    try runner.run(decrypt_name, &decrypt);
 }
 
 const CombinePublicKeys = struct {
@@ -175,14 +173,17 @@ fn bench_combine(runner: *bench.Runner) !void {
     const gpa = runner.allocator;
     var rng = utils.test_rng();
     for (cases(runner, usize, &.{ 10, 100, 1000, 10000 })) |n| {
+        const name = bench.Benchmark.init("bls12381::combine_public_keys").with_param("pks", n);
+        if (try skip(runner, name)) continue;
         const public_keys = try gpa.alloc(G2, n);
         defer gpa.free(public_keys);
         for (public_keys) |*public_key| public_key.* = ops.keypair(MinSig, &rng).public;
         var workload: CombinePublicKeys = .{ .public_keys = public_keys };
-        const name = bench.Benchmark.init("bls12381::combine_public_keys").with_param("pks", n);
         try runner.run(name, &workload);
     }
     for (cases(runner, usize, &.{ 10, 100, 1000, 10000 })) |n| {
+        const name = bench.Benchmark.init("bls12381::combine_signatures").with_param("sigs", n);
+        if (try skip(runner, name)) continue;
         const messages = try random_messages(gpa, &rng, n);
         defer gpa.free(messages);
         const private = ops.keypair(MinSig, &rng).private;
@@ -192,7 +193,6 @@ fn bench_combine(runner: *bench.Runner) !void {
             signature.* = ops.sign_message(MinSig, private, namespace, message);
         }
         var workload: CombineSignatures = .{ .signatures = signatures };
-        const name = bench.Benchmark.init("bls12381::combine_signatures").with_param("sigs", n);
         try runner.run(name, &workload);
     }
 }
@@ -211,6 +211,9 @@ fn BatchToAffine(comptime P: type) type {
 
 fn bench_batch_to_affine_group(runner: *bench.Runner, comptime P: type, n: usize) !void {
     const gpa = runner.allocator;
+    const name = bench.Benchmark.init("bls12381::batch_to_affine")
+        .with_param("group", if (P == G1) "g1" else "g2").with_param("n", n);
+    if (try skip(runner, name)) return;
     var rng = utils.test_rng();
     const points = try gpa.alloc(P.Jacobian, n);
     defer gpa.free(points);
@@ -220,8 +223,6 @@ fn bench_batch_to_affine_group(runner: *bench.Runner, comptime P: type, n: usize
     const scratch = try gpa.alloc(P.Jacobian.Field, n);
     defer gpa.free(scratch);
     var workload: BatchToAffine(P) = .{ .points = points, .out = out, .scratch = scratch };
-    const name = bench.Benchmark.init("bls12381::batch_to_affine")
-        .with_param("group", if (P == G1) "g1" else "g2").with_param("n", n);
     try runner.run(name, &workload);
 }
 
@@ -233,6 +234,7 @@ fn bench_batch_to_affine(runner: *bench.Runner) !void {
 }
 
 pub fn run(runner: *bench.Runner) !void {
+    try @import("benches/assemble.zig").run(runner);
     try @import("benches/dkg.zig").run(runner);
     try @import("benches/threshold.zig").run(runner);
     try @import("benches/verify.zig").run(runner);

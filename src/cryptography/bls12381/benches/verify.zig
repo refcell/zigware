@@ -22,18 +22,13 @@ const Scalar = group.Scalar;
 const G1 = group.G1;
 const G2 = group.G2;
 
+const common = @import("common.zig");
+const cases = common.cases;
+const skip = common.skip;
+const random_messages = common.random_messages;
+const Message = common.Message;
+
 const namespace = "namespace";
-const Message = [32]u8;
-
-fn cases(runner: *const bench.Runner, comptime T: type, all: []const T) []const T {
-    return runner.inputs.pick([]const T, all[0..1], all, all);
-}
-
-fn random_messages(gpa: Allocator, rng: *utils.TestRng, count: usize) ![]Message {
-    const messages = try gpa.alloc(Message, count);
-    for (messages) |*message| rng.fill_bytes(message);
-    return messages;
-}
 
 /// Combines the public keys, then verifies the aggregate signature over one message.
 const AggregateSameMessage = struct {
@@ -59,6 +54,9 @@ fn bench_aggregate_same_message(runner: *bench.Runner) !void {
     var message: Message = undefined;
     rng.fill_bytes(&message);
     for (cases(runner, usize, &.{ 10, 100, 1000, 10000 })) |n| {
+        const name = bench.Benchmark.init("bls12381::aggregate_verify_same_message")
+            .with_param("pks", n);
+        if (try skip(runner, name)) continue;
         const public_keys = try gpa.alloc(G2, n);
         defer gpa.free(public_keys);
         const signatures = try gpa.alloc(G1, n);
@@ -73,8 +71,6 @@ fn bench_aggregate_same_message(runner: *bench.Runner) !void {
             .signature = aggregate.combine_signatures(MinSig, signatures),
             .message = &message,
         };
-        const name = bench.Benchmark.init("bls12381::aggregate_verify_same_message")
-            .with_param("pks", n);
         try runner.run(name, &workload);
     }
 }
@@ -110,6 +106,9 @@ fn bench_aggregate_same_signer(runner: *bench.Runner) !void {
     const gpa = runner.allocator;
     var rng = utils.test_rng();
     for (cases(runner, usize, &.{ 2, 10, 100, 1000, 10000 })) |n| {
+        const name = bench.Benchmark.init("bls12381::aggregate_verify_same_signer")
+            .with_param("conc", 1).with_param("msgs", n);
+        if (try skip(runner, name)) continue;
         const messages = try random_messages(gpa, &rng, n);
         defer gpa.free(messages);
         const signed = try Signed.init(gpa, &rng, messages);
@@ -124,8 +123,6 @@ fn bench_aggregate_same_signer(runner: *bench.Runner) !void {
             .messages = namespaced,
             .signature = aggregate.combine_signatures(MinSig, signed.signatures),
         };
-        const name = bench.Benchmark.init("bls12381::aggregate_verify_same_signer")
-            .with_param("conc", 1).with_param("msgs", n);
         try runner.run(name, &workload);
     }
 }
@@ -144,6 +141,9 @@ fn bench_batch_same_signer(runner: *bench.Runner) !void {
     const gpa = runner.allocator;
     var rng = utils.test_rng();
     for (cases(runner, usize, &.{ 2, 10, 100, 1000, 10000 })) |n| {
+        const name = bench.Benchmark.init("bls12381::batch_verify_same_signer")
+            .with_param("conc", 1).with_param("msgs", n);
+        if (try skip(runner, name)) continue;
         const messages = try random_messages(gpa, &rng, n);
         defer gpa.free(messages);
         const signed = try Signed.init(gpa, &rng, messages);
@@ -158,8 +158,6 @@ fn bench_batch_same_signer(runner: *bench.Runner) !void {
             .public = signed.public,
             .entries = entries,
         };
-        const name = bench.Benchmark.init("bls12381::batch_verify_same_signer")
-            .with_param("conc", 1).with_param("msgs", n);
         try runner.run(name, &workload);
     }
 }
@@ -190,6 +188,9 @@ fn bench_scheme_same_message(runner: *bench.Runner) !void {
     var message: Message = undefined;
     rng.fill_bytes(&message);
     for (cases(runner, usize, &.{ 1, 10, 100, 1000, 10000 })) |n| {
+        const name = bench.Benchmark.init("bls12381::scheme_batch_verify_same_message")
+            .with_param("pks", n).with_param("conc", 1);
+        if (try skip(runner, name)) continue;
         const keyed = try gpa.alloc(Keyed, n);
         defer gpa.free(keyed);
         const entries = try gpa.alloc(Entry, n);
@@ -208,8 +209,6 @@ fn bench_scheme_same_message(runner: *bench.Runner) !void {
             };
         }
         var workload: SchemeBatch = .{ .rng = .init(1), .entries = entries };
-        const name = bench.Benchmark.init("bls12381::scheme_batch_verify_same_message")
-            .with_param("pks", n).with_param("conc", 1);
         try runner.run(name, &workload);
     }
 }
@@ -218,6 +217,9 @@ fn bench_scheme_same_signer(runner: *bench.Runner) !void {
     const gpa = runner.allocator;
     var rng = utils.test_rng();
     for (cases(runner, usize, &.{ 1, 10, 100, 1000, 10000 })) |n| {
+        const name = bench.Benchmark.init("bls12381::scheme_batch_verify_same_signer")
+            .with_param("msgs", n).with_param("conc", 1);
+        if (try skip(runner, name)) continue;
         const messages = try random_messages(gpa, &rng, n);
         defer gpa.free(messages);
         const signer = bls12381.PrivateKey.random(&rng);
@@ -236,8 +238,6 @@ fn bench_scheme_same_signer(runner: *bench.Runner) !void {
             };
         }
         var workload: SchemeBatch = .{ .rng = .init(1), .entries = entries };
-        const name = bench.Benchmark.init("bls12381::scheme_batch_verify_same_signer")
-            .with_param("msgs", n).with_param("conc", 1);
         try runner.run(name, &workload);
     }
 }
@@ -255,6 +255,10 @@ fn Msm(comptime P: type) type {
 
 fn bench_msm_group(runner: *bench.Runner, comptime P: type, n: usize) !void {
     const gpa = runner.allocator;
+    const name = bench.Benchmark.init("bls12381::msm")
+        .with_param("group", if (P == G1) "g1" else "g2")
+        .with_param("n", n).with_param("conc", 1);
+    if (try skip(runner, name)) return;
     var rng = utils.test_rng();
     const points = try gpa.alloc(P, n);
     defer gpa.free(points);
@@ -263,9 +267,6 @@ fn bench_msm_group(runner: *bench.Runner, comptime P: type, n: usize) !void {
     defer gpa.free(scalars);
     for (scalars) |*scalar| scalar.* = Scalar.random(&rng);
     var workload: Msm(P) = .{ .points = points, .scalars = scalars };
-    const name = bench.Benchmark.init("bls12381::msm")
-        .with_param("group", if (P == G1) "g1" else "g2")
-        .with_param("n", n).with_param("conc", 1);
     try runner.run(name, &workload);
 }
 
@@ -290,6 +291,9 @@ fn bench_evaluate_point(runner: *bench.Runner) !void {
     const gpa = runner.allocator;
     for (cases(runner, u32, &.{ 5, 10, 20, 50, 100, 250, 500 })) |n| {
         const t = utils.N3f1.quorum(n);
+        const name = bench.Benchmark.init("bls12381::evaluate_point")
+            .with_param("n", n).with_param("t", t).with_param("conc", 1);
+        if (try skip(runner, name)) continue;
         var rng = utils.test_rng();
         var secret = try math.poly.Poly(Scalar).random(gpa, &rng, t - 1);
         defer secret.deinit(gpa);
@@ -299,8 +303,6 @@ fn bench_evaluate_point(runner: *bench.Runner) !void {
             .scalar = Scalar.random(&rng),
         };
         defer workload.polynomial.deinit(gpa);
-        const name = bench.Benchmark.init("bls12381::evaluate_point")
-            .with_param("n", n).with_param("t", t).with_param("conc", 1);
         try runner.run(name, &workload);
     }
 }
