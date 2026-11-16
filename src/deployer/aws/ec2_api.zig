@@ -541,6 +541,34 @@ pub fn find_instances_by_tag(ec2: *Ec2, tag: []const u8) Error![]const []const u
     });
 }
 
+/// A running instance's `name` tag and public IP.
+pub const NamedInstance = struct { name: []const u8, public_ip: []const u8 };
+
+/// The deployment's instances other than monitoring that have a `name` tag and a public IP
+/// (commonware `update`'s lookup).
+pub fn find_named_instances(ec2: *Ec2, tag: []const u8) Error![]const NamedInstance {
+    var params = params_of(ec2);
+    try params.filter(1, "tag:deployer", &.{tag});
+    const instances = try instance_items(ec2, try ec2.run("DescribeInstances", params.list.items));
+    var named: std.ArrayList(NamedInstance) = .empty;
+    for (instances) |instance| {
+        const name = try tag_value(ec2, instance, "name") orelse continue;
+        if (std.mem.eql(u8, name, aws.monitoring_name)) continue;
+        const ip = try query.decoded_text(ec2.arena, instance, &.{"ipAddress"}) orelse continue;
+        try named.append(ec2.arena, .{ .name = name, .public_ip = ip });
+    }
+    return named.items;
+}
+
+/// The value of tag `key` in an item's `tagSet`.
+fn tag_value(ec2: *Ec2, item: []const u8, key: []const u8) Error!?[]const u8 {
+    for (try query.elements(ec2.arena, item, &.{ "tagSet", "item" })) |pair| {
+        const name = try query.decoded_text(ec2.arena, pair, &.{"key"}) orelse continue;
+        if (std.mem.eql(u8, name, key)) return try query.decoded_text(ec2.arena, pair, &.{"value"});
+    }
+    return null;
+}
+
 /// Terminates instances; none is a no-op (commonware `terminate_instances`).
 pub fn terminate_instances(ec2: *Ec2, instance_ids: []const []const u8) Error!void {
     if (instance_ids.len == 0) return;

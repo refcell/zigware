@@ -30,6 +30,7 @@ pub const credentials = @import("credentials.zig");
 pub const session = @import("session.zig");
 pub const commands = @import("commands.zig");
 pub const destroy = @import("destroy.zig");
+pub const update = @import("update.zig");
 pub const Failure = @import("failure.zig").Failure;
 
 pub const Error = yaml.Error;

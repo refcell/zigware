@@ -16,6 +16,8 @@ const ec2 = @import("ec2.zig");
 const query = @import("query.zig");
 const sigv4 = @import("sigv4.zig");
 const Failure = @import("failure.zig").Failure;
+const aws = @import("mod.zig");
+const services = @import("services.zig");
 
 const log = std.log.scoped(.deployer);
 
@@ -513,6 +515,77 @@ pub fn is_no_such_bucket_error(failure: Failure) bool {
     };
     const code = s3.err.service_code() orelse return false;
     return std.mem.eql(u8, code, "NoSuchBucket");
+}
+
+/// An instance's presigned download URLs.
+pub const InstanceUrls = struct {
+    name: []const u8,
+    binary_url: []const u8,
+    config_url: []const u8,
+};
+
+pub const InstanceFiles = union(enum) { ok: []const InstanceUrls, failure: Failure };
+
+/// Uploads each distinct binary and config once, deduplicated by SHA-256 digest, and presigns
+/// them per instance (commonware `upload_instance_files`). Files are hashed and uploaded one at
+/// a time; commonware overlaps them.
+pub fn upload_instance_files(
+    client: *const Client,
+    arena: Allocator,
+    bucket: []const u8,
+    tag: []const u8,
+    instances: []const aws.InstanceConfig,
+) !InstanceFiles {
+    assert(tag.len > 0);
+    var digests: std.ArrayList(Digest) = .empty;
+    for (instances) |instance| {
+        for ([_][]const u8{ instance.binary, instance.config }) |path| {
+            if (find_digest(digests.items, path) == null) {
+                try digests.append(arena, .{ .path = path, .hex = try hash_file(client.io, path) });
+            }
+        }
+    }
+    log.info("computed file digests: count={d}", .{digests.items.len});
+    var urls: std.ArrayList(Presign) = .empty;
+    const out = try arena.alloc(InstanceUrls, instances.len);
+    for (instances, out) |instance, *slot| {
+        var pair: [2][]const u8 = undefined;
+        const kinds = [_]services.DeploymentFile{ .binaries, .configs };
+        for ([_][]const u8{ instance.binary, instance.config }, kinds, &pair) |path, kind, *found| {
+            const hex = &find_digest(digests.items, path).?.hex;
+            found.* = for (urls.items) |known| {
+                if (known.kind == kind and std.mem.eql(u8, &known.hex, hex)) break known.url;
+            } else blk: {
+                var key: Io.Writer.Allocating = .init(arena);
+                try services.write_deployment_s3_key(&key.writer, tag, kind, hex);
+                const source: UploadSource = .{ .file = path };
+                const presigned = try cache_and_presign(
+                    client,
+                    arena,
+                    bucket,
+                    key.written(),
+                    source,
+                    presign_duration_s,
+                );
+                const url = switch (presigned) {
+                    .ok => |url| url,
+                    .failure => |failure| return .{ .failure = failure },
+                };
+                try urls.append(arena, .{ .kind = kind, .hex = hex.*, .url = url });
+                break :blk url;
+            };
+        }
+        slot.* = .{ .name = instance.name, .binary_url = pair[0], .config_url = pair[1] };
+    }
+    return .{ .ok = out };
+}
+
+const Digest = struct { path: []const u8, hex: [64]u8 };
+const Presign = struct { kind: services.DeploymentFile, hex: [64]u8, url: []const u8 };
+
+fn find_digest(digests: []Digest, path: []const u8) ?*Digest {
+    for (digests) |*digest| if (std.mem.eql(u8, digest.path, path)) return digest;
+    return null;
 }
 
 test {

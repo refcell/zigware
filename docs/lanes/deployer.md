@@ -85,6 +85,8 @@ test vectors. Tests never call AWS and never hold credentials.
   `aws_ec2` failures print the code, status, and message rather than the SDK's error text.
   As in commonware, `launch_instances` retries capacity failures until capacity returns;
   canceling its task ends it.
+- `update` logs an instance missing from the config at warn level (commonware: error), since
+  the test runner fails tests that log errors.
 - Concurrent region jobs (`destroy`) run in an `Io.Group` and share the session arena (thread
   safe in 0.17 over a thread-safe child); the first failure wins. Unlike `try_join_all`, a
   failed region does not cancel the others; they finish their own steps.
@@ -127,7 +129,10 @@ test vectors. Tests never call AWS and never hold credentials.
   `clean` and `authorize` commands with tests over a temporary home and scripted responses.
 - [x] `destroy` (`deployer.aws.destroy`), regions torn down concurrently, with tests over
   per-endpoint scripted responses (`client.RoutedReplay`).
-- [ ] The create, update, profile, and attach flows and the `deployer` binary.
+- [x] `update` (`deployer.aws.update`) and `s3.upload_instance_files`, with remote commands
+  behind `session.Remote` (`Ssh` in production, recorded in tests); the download command is
+  checked byte for byte against commonware's.
+- [ ] The create, profile, and attach flows and the `deployer` binary.
 - [ ] Fuzz: YAML parse/write round trips, config validation, SigV4 canonicalization.
 
 ## Log

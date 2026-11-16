@@ -11,6 +11,7 @@ const aws = @import("mod.zig");
 const client_module = @import("client.zig");
 const deployments = @import("deployments.zig");
 const ec2_api = @import("ec2_api.zig");
+const aws_utils = @import("utils.zig");
 const sigv4 = @import("sigv4.zig");
 const Failure = @import("failure.zig").Failure;
 
@@ -22,6 +23,140 @@ pub const public_ip_host = "ipv4.icanhazip.com";
 /// Largest configuration, metadata, or hosts file read.
 pub const file_size_max = deployments.file_size_max;
 
+/// Commands on the instances, over SSH in production (`Ssh`) and recorded in tests.
+pub const Remote = struct {
+    context: *anyopaque,
+    vtable: *const VTable,
+
+    pub const VTable = struct {
+        execute: *const fn (*anyopaque, []const u8, []const u8, []const u8) anyerror!void,
+        poll: *const fn (
+            *anyopaque,
+            []const u8,
+            []const u8,
+            []const u8,
+            aws_utils.ServiceState,
+        ) anyerror!void,
+        download: *const fn (
+            *anyopaque,
+            []const u8,
+            []const u8,
+            []const u8,
+            []const u8,
+        ) anyerror!void,
+    };
+
+    /// For commands that run nothing on instances: every call fails as SSH would.
+    pub const none: Remote = .{ .context = undefined, .vtable = &.{
+        .execute = struct {
+            fn f(_: *anyopaque, _: []const u8, _: []const u8, _: []const u8) anyerror!void {
+                return error.SshFailed;
+            }
+        }.f,
+        .poll = struct {
+            fn f(
+                _: *anyopaque,
+                _: []const u8,
+                _: []const u8,
+                _: []const u8,
+                _: aws_utils.ServiceState,
+            ) anyerror!void {
+                return error.SshFailed;
+            }
+        }.f,
+        .download = struct {
+            fn f(
+                _: *anyopaque,
+                _: []const u8,
+                _: []const u8,
+                _: []const u8,
+                _: []const u8,
+            ) anyerror!void {
+                return error.SshFailed;
+            }
+        }.f,
+    } };
+
+    /// Runs `command` on `ip` with the key at `key_file` (commonware `ssh_execute`).
+    pub fn execute(
+        remote: Remote,
+        key_file: []const u8,
+        ip: []const u8,
+        command: []const u8,
+    ) !void {
+        assert(command.len > 0);
+        return remote.vtable.execute(remote.context, key_file, ip, command);
+    }
+
+    /// Waits for `service` on `ip` to reach `wanted` (commonware `poll_service_*`).
+    pub fn poll(
+        remote: Remote,
+        key_file: []const u8,
+        ip: []const u8,
+        service: []const u8,
+        wanted: aws_utils.ServiceState,
+    ) !void {
+        return remote.vtable.poll(remote.context, key_file, ip, service, wanted);
+    }
+
+    /// Copies `remote_path` on `ip` to `local_path` (commonware `scp_download`).
+    pub fn download(
+        remote: Remote,
+        key_file: []const u8,
+        ip: []const u8,
+        remote_path: []const u8,
+        local_path: []const u8,
+    ) !void {
+        return remote.vtable.download(remote.context, key_file, ip, remote_path, local_path);
+    }
+};
+
+/// The production `Remote`: `ssh` and `scp` processes, with commonware's retries.
+pub const Ssh = struct {
+    gpa: Allocator,
+    io: Io,
+
+    pub fn remote(ssh: *Ssh) Remote {
+        return .{ .context = ssh, .vtable = &.{
+            .execute = execute,
+            .poll = poll,
+            .download = download,
+        } };
+    }
+
+    fn execute(
+        context: *anyopaque,
+        key_file: []const u8,
+        ip: []const u8,
+        command: []const u8,
+    ) anyerror!void {
+        const ssh: *Ssh = @ptrCast(@alignCast(context));
+        return aws_utils.ssh_execute(ssh.gpa, ssh.io, key_file, ip, command);
+    }
+
+    fn poll(
+        context: *anyopaque,
+        key_file: []const u8,
+        ip: []const u8,
+        service: []const u8,
+        wanted: aws_utils.ServiceState,
+    ) anyerror!void {
+        const ssh: *Ssh = @ptrCast(@alignCast(context));
+        return aws_utils.poll_service(ssh.gpa, ssh.io, key_file, ip, service, wanted);
+    }
+
+    fn download(
+        context: *anyopaque,
+        key_file: []const u8,
+        ip: []const u8,
+        remote_path: []const u8,
+        local_path: []const u8,
+    ) anyerror!void {
+        const ssh: *Ssh = @ptrCast(@alignCast(context));
+        return aws_utils.scp_download(ssh.gpa, ssh.io, key_file, ip, remote_path, local_path);
+    }
+};
+
 pub const Session = struct {
     io: Io,
     /// Scratch for retried requests.
@@ -31,6 +166,7 @@ pub const Session = struct {
     home: []const u8,
     credentials: sigv4.Credentials,
     transport: client_module.Transport,
+    remote: Remote = .none,
     /// Why the command failed; the first failure wins when region jobs run concurrently.
     failure: ?Failure = null,
     failed: std.atomic.Value(bool) = .init(false),
@@ -64,6 +200,23 @@ pub const Session = struct {
     /// The S3 client: the shared bucket lives in the monitoring region.
     pub fn s3(session: *Session) !*const Client {
         return session.client(aws.monitoring_region);
+    }
+
+    /// Turns a remote command's `SshFailed` or `ServiceTimeout` into `error.Failed`.
+    pub fn remote_failed(
+        session: *Session,
+        err: anyerror,
+        ip: []const u8,
+        service: []const u8,
+    ) anyerror {
+        return switch (err) {
+            error.SshFailed => session.fail(.ssh_failed),
+            error.ServiceTimeout => session.fail(.{ .service_timeout = .{
+                .ip = ip,
+                .service = service,
+            } }),
+            else => err,
+        };
     }
 
     /// Turns `error.AwsEc2` from `ec2` into `error.Failed` with its failure.

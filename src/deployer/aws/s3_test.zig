@@ -305,3 +305,39 @@ test "s3: list pages read keys, truncation, and tokens" {
     try testing.expect(!empty.truncated);
     try testing.expectError(error.MalformedXml, s3.parse_list_page(arena_state.allocator(), "<a>"));
 }
+
+test "s3: instance files upload once per distinct content" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const io = testing.io;
+    try tmp.dir.writeFile(io, .{ .sub_path = "bin-a", .data = "same" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "bin-b", .data = "same" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "conf-a", .data = "a" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "conf-b", .data = "b" });
+    var harness: Harness = undefined;
+    // HEAD (missing) and PUT for the shared binary and each config.
+    harness.init("us-east-1", &.{
+        respond(404, ""), respond(200, ""), respond(404, ""), respond(200, ""),
+        respond(404, ""), respond(200, ""),
+    });
+    defer harness.deinit();
+    const arena = harness.arena();
+    const base = try std.fmt.allocPrint(arena, ".zig-cache/tmp/{s}/", .{tmp.sub_path});
+    var instances: [2]@import("mod.zig").InstanceConfig = undefined;
+    for (&instances, [_][]const u8{ "a", "b" }) |*instance, name| {
+        instance.* = std.mem.zeroInit(@import("mod.zig").InstanceConfig, .{
+            .name = name,
+            .binary = try std.mem.concat(arena, u8, &.{ base, "bin-", name }),
+            .config = try std.mem.concat(arena, u8, &.{ base, "conf-", name }),
+        });
+    }
+    const urls = (try s3.upload_instance_files(&harness.client, arena, "b", "t", &instances)).ok;
+    try testing.expectEqual(@as(usize, 6), harness.replay.count);
+    try testing.expectEqualStrings(urls[0].binary_url, urls[1].binary_url);
+    try testing.expect(!std.mem.eql(u8, urls[0].config_url, urls[1].config_url));
+    // The key names the deployment, the kind, and the content digest.
+    const same = "0967115f2813a3541eaef77de9d9d5773f1c0c04314b0bbfe4ff3b3b1c55b5d5";
+    try testing.expectEqualStrings("/deployments/t/binaries/" ++ same, harness.sent()[1].path);
+    try testing.expectEqualStrings("same", harness.sent()[1].body);
+    try testing.expectEqualStrings("PUT", harness.sent()[3].method);
+}

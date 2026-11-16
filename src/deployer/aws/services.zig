@@ -49,7 +49,7 @@ pub const tracer_image = "ghcr.io/clabby/tracer-web:0.2.1";
 // --- Templates ---------------------------------------------------------------------------------
 
 /// `text` with every `<home>` replaced by `home_directory`.
-inline fn expand(comptime text: []const u8) []const u8 {
+pub inline fn expand(comptime text: []const u8) []const u8 {
     comptime {
         @setEvalBranchQuota(200_000);
         const size = std.mem.replacementSize(u8, text, "<home>", home_directory);

@@ -58,6 +58,8 @@ pub const Failure = union(enum) {
     yaml: []const u8,
     /// Neither the environment nor the shared credentials file had credentials.
     no_credentials,
+    ssh_failed,
+    service_timeout: struct { ip: []const u8, service: []const u8 },
     aws_ec2: LaunchError,
     aws_s3: struct { bucket: []const u8, operation: s3.Operation, err: LaunchError },
     s3_bucket_forbidden: struct { bucket: []const u8, reason: BucketForbiddenReason },
@@ -143,6 +145,8 @@ fn format_operation(failure: Failure, writer: *Io.Writer) Io.Writer.Error!void {
             try write_debug_list(writer, regions);
         },
         .creation_attempted => try writer.writeAll("creation already attempted"),
+        .ssh_failed => try writer.writeAll("SSH failed"),
+        .service_timeout => |f| try writer.print("service timeout({s}): {s}", .{ f.ip, f.service }),
         .io => |f| try writer.print("IO error: {s}: {t}", .{ f.path, f.err }),
         .yaml => |path| try writer.print("YAML error: {s}", .{path}),
         .no_credentials => try writer.writeAll(
