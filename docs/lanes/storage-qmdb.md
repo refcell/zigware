@@ -40,7 +40,11 @@ that don't need them and keep a small interface where you must.
   scenario plus randomized chain tests against a model and the reopened rebuild.
 - [ ] any: evicting floor policies, the `stage`/`expand`/`resolve_updates` (`Slot`,
   `StagedLoc`) API, owned (variable) keys and values, batched `get_many`.
-- [ ] immutable.
+- [x] immutable (fixed, MMR and MMB): `Db`, chained batches, floor-filtered batch reads,
+  prune, recovery, `ImmutableMmr/MmbFixedConf` root conformance (matches), mod.rs's core
+  scenarios, and a randomized chain check against the reopened rebuild.
+- [ ] immutable: variable values (`Immutable*VariableConf`), the remaining mod.rs/fixed.rs
+  scenarios (bounded initialization, failed-sync recovery), compact.
 - [ ] any (ordered and unordered, fixed and variable).
 - [ ] Fuzz targets under storage/fuzz for these databases; benches under `benches.zig`.
 
@@ -67,6 +71,17 @@ that don't need them and keep a small interface where you must.
   live ancestors' items), `apply_batch`, `historical_proof`/`proof`, `speculative_proof`,
   `speculative_pinned_nodes`.
 - `storage.qmdb.init_journal(J, gpa, storage, merkle_cfg, journal_cfg, InitOptions)`.
+- `storage.qmdb.immutable.Db(F, K, E, C, H, T)` (`T` the translator of its
+  `index.immutable.Index`), with public fields `journal`, `snapshot`, `inactivity_floor_loc`,
+  `root_digest`, `metrics`: `init(gpa, storage, scope, Cfg{merkle, log, translator}, ?max_size)`,
+  `deinit`, `get`, `get_from(key, floor)`, `get_many`, `get_many_from`, `get_metadata`, `root`,
+  `commitment`, `bounds`, `inactivity_floor`, `sync_boundary`, `proof`, `historical_proof`,
+  `pinned_nodes_at`, `prune`, `commit`, `sync`, `start_sync`, `destroy`, `new_batch`,
+  `to_batch`, `validate_batch`, `apply_batch`. `UnmerkleizedBatch`: `set(key, value)`,
+  `with_metadata`, `with_inactivity_floor`, `get`, `get_many`, `merkleize(&db)`, `deinit`.
+  `MerkleizedBatch` (refcounted): `root`, `commitment`, `operations`, `proof`, `pinned_nodes`,
+  `get`, `get_many`, `new_batch`, and the fields `diff` (key-sorted `BatchDiff`),
+  `ancestor_diffs`, `bounds`. `immutable.initial_root(F, K, E, H)`.
 - `storage.qmdb.any.Db(F, U, C, I, H, N)` (`U` an `any.operation.update` type, `C` the backing
   contiguous journal, `I` the snapshot index, `H` the hash, `N` the activity bitmap's chunk
   bytes, commonware's `const N`), with public fields `log`, `snapshot`, `bitmap`
@@ -155,6 +170,8 @@ that don't need them and keep a small interface where you must.
   a dropped ancestor wrote, so a tip applies exactly whether its ancestors were applied,
   pending, or dropped. Merkleizing a child after an unapplied ancestor was dropped is
   `StaleBatch`, as in commonware.
+- immutable: the index rebuild reads the log from the floor one position at a time (no replay
+  stream). `get_many` loops over `get` (commonware batches the reads by position).
 
 ## Log
 - 2026-11-13: shared codecs (value, operation, floor, chain, Error, initialization checks),
@@ -168,3 +185,5 @@ that don't need them and keep a small interface where you must.
 - 2026-11-16: any (unordered, fixed): Db, chained batches, floor walk, root conformance
   hashes (MMR and MMB) match commonware.
 - 2026-11-16: any takes the bitmap chunk size `N` as a parameter (current needs 32).
+- 2026-11-16: immutable (fixed): Db, chained batches, root conformance hashes (MMR and MMB)
+  match commonware.
