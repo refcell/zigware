@@ -1,5 +1,5 @@
 //! Tests of the lookup network over the deterministic runtime (commonware `lookup/mod.rs`
-//! tests).
+//! tests), and the harness the other lookup network tests share.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -13,20 +13,21 @@ const metrics = runtime.telemetry.metrics;
 const p2p = @import("../../root.zig");
 const types = @import("../../types.zig");
 const data = @import("../data.zig");
+const rate_limit = @import("../../rate_limit.zig");
 const network_mod = @import("network.zig");
 
-const PrivateKey = cryptography.ed25519.PrivateKey;
-const PublicKey = cryptography.ed25519.PublicKey;
-const Upgrader = stream.SakeCups(PrivateKey, cryptography.ChaCha20Poly1305);
-const Transport = runtime.network.deterministic.Network;
-const Net = network_mod.Network(Upgrader, Transport);
-const Entry = Net.Tracker.PeerMap.Entry;
+pub const PrivateKey = cryptography.ed25519.PrivateKey;
+pub const PublicKey = cryptography.ed25519.PublicKey;
+pub const Upgrader = stream.SakeCups(PrivateKey, cryptography.ChaCha20Poly1305);
+pub const Transport = runtime.network.deterministic.Network;
+pub const Net = network_mod.Network(Upgrader, Transport);
+pub const Entry = Net.Tracker.PeerMap.Entry;
 const gpa = testing.allocator;
 
-const base_port: u16 = 3000;
-const peers_max = 25;
+pub const base_port: u16 = 3000;
+pub const peers_max = 25;
 
-fn upgrader(signer: PrivateKey) Upgrader {
+pub fn upgrader(signer: PrivateKey) Upgrader {
     return .init(.{
         .signer = signer,
         .synchrony_bound_ms = 5_000,
@@ -35,12 +36,12 @@ fn upgrader(signer: PrivateKey) Upgrader {
     }, .v1);
 }
 
-fn local_socket(port: u16) codec.SocketAddr {
+pub fn local_socket(port: u16) codec.SocketAddr {
     return .{ .ip = .{ .v4 = codec.Ipv4.init(127, 0, 0, 1) }, .port = port };
 }
 
 /// commonware's `Config::test`: `local` with faster dialing and pings.
-fn test_config(signer: PrivateKey, port: u16, max_message_size: u32) Net.Config {
+pub fn test_config(signer: PrivateKey, port: u16, max_message_size: u32) Net.Config {
     var config = Net.Config.local(.{
         .upgrader = upgrader(signer),
         .namespace = "test_namespace",
@@ -58,14 +59,14 @@ fn test_config(signer: PrivateKey, port: u16, max_message_size: u32) Net.Config 
     return config;
 }
 
-const Node = struct {
+pub const Node = struct {
     network: *Net,
     registered: Net.Registered,
     task: Io.Future(anyerror!void),
 };
 
 /// Every node's key and address, sorted by key, as `track` takes them.
-fn peer_entries(keys: []const PublicKey, entries: []Entry) void {
+pub fn peer_entries(keys: []const PublicKey, entries: []Entry) void {
     assert(keys.len == entries.len);
     for (keys, entries, 0..) |key, *entry, index| {
         const port = base_port + @as(u16, @intCast(index));
@@ -78,7 +79,7 @@ fn peer_entries(keys: []const PublicKey, entries: []Entry) void {
     }.less);
 }
 
-fn start_nodes(
+pub fn start_nodes(
     io: Io,
     transport: *Transport,
     scope: metrics.Scope,
@@ -95,7 +96,7 @@ fn start_nodes(
 }
 
 /// Starts the node with key seed `index` listening on `port`, tracking `tracked` at `set`.
-fn start_node(
+pub fn start_node(
     io: Io,
     transport: *Transport,
     scope: metrics.Scope,
@@ -105,31 +106,54 @@ fn start_node(
     tracked: Net.Tracker.Tracked,
 ) !Node {
     const config = test_config(PrivateKey.from_seed(index), port, 1024 * 1024);
+    return start_network(io, transport, scope, config, set, tracked, .per_second(100));
+}
+
+/// Starts a network with `config`, tracking `tracked` at `set`, with channel 0 at `quota`.
+pub fn start_network(
+    io: Io,
+    transport: *Transport,
+    scope: metrics.Scope,
+    config: Net.Config,
+    set: u64,
+    tracked: Net.Tracker.Tracked,
+    quota: rate_limit.Quota,
+) !Node {
     const network = try Net.create(gpa, io, transport, scope, config);
     errdefer network.destroy();
     try testing.expectEqual(p2p.Feedback.ok, network.oracle().track(set, tracked));
     var node: Node = .{
         .network = network,
-        .registered = try network.register(0, .per_second(100)),
+        .registered = try network.register(0, quota),
         .task = undefined,
     };
     node.task = try io.concurrent(run_network, .{network});
     return node;
 }
 
-/// Each node's metrics, under `peer_<index>` like commonware's per-peer contexts.
-fn node_scope(scope: metrics.Scope, index: usize) metrics.Scope {
-    var label_buffer: [32]u8 = undefined;
-    // Proof: "peer_" plus a usize fits in 32 bytes.
-    const label = std.fmt.bufPrint(&label_buffer, "peer_{d}", .{index}) catch unreachable;
-    return scope.child(label);
+/// Each node's metrics scope: `peer` with an `index` attribute, then `network`, as
+/// commonware's `context.child("peer").with_attribute("index", i).child("network")`.
+pub fn node_scope(scope: metrics.Scope, index: usize) metrics.Scope {
+    return scope.child("peer").with_attribute("index", index).child("network");
+}
+
+/// commonware `assert_no_rate_limiting`: rate-limited counters exist, all at zero.
+pub fn expect_no_rate_limiting(scope: metrics.Scope) !void {
+    const text = try scope.encode(gpa);
+    defer gpa.free(text);
+    var samples = metrics.metric_samples(text, "messages_rate_limited_total");
+    var count: usize = 0;
+    while (samples.next()) |sample| : (count += 1) {
+        try testing.expectEqualStrings("0", sample.value);
+    }
+    try testing.expect(count > 0);
 }
 
 fn run_network(network: *Net) anyerror!void {
     return network.run();
 }
 
-fn stop_nodes(io: Io, nodes: []Node) void {
+pub fn stop_nodes(io: Io, nodes: []Node) void {
     for (nodes) |*node| {
         node.task.cancel(io) catch {};
         node.registered.sender.deinit();
@@ -138,13 +162,13 @@ fn stop_nodes(io: Io, nodes: []Node) void {
 }
 
 /// Stops one node (commonware aborts its handle) and frees it.
-fn stop_node(io: Io, node: *Node) void {
+pub fn stop_node(io: Io, node: *Node) void {
     node.task.cancel(io) catch {};
     node.registered.sender.deinit();
     release_node(node);
 }
 
-fn release_node(node: *Node) void {
+pub fn release_node(node: *Node) void {
     // Receivers drain, then report the closed network.
     while (node.registered.receiver.try_recv()) |message| {
         var owned = message;
@@ -184,6 +208,7 @@ fn connectivity(io: Io, transport: *Transport, scope: metrics.Scope, n: usize) !
         }
         try io.sleep(.fromMilliseconds(100), .real);
     }
+    try expect_no_rate_limiting(scope);
 }
 
 fn all_heard(heard: *const [peers_max][peers_max]bool, n: usize) bool {
@@ -196,7 +221,13 @@ fn all_heard(heard: *const [peers_max][peers_max]bool, n: usize) bool {
 }
 
 /// Sends our identity to `recipients` until it reaches `count` peers.
-fn send_until(io: Io, node: *Node, key: PublicKey, recipients: Recipients, count: usize) !void {
+pub fn send_until(
+    io: Io,
+    node: *Node,
+    key: PublicKey,
+    recipients: Recipients,
+    count: usize,
+) !void {
     var attempts: u32 = 0;
     while (true) : (attempts += 1) {
         try testing.expect(attempts < 600);
@@ -208,7 +239,7 @@ fn send_until(io: Io, node: *Node, key: PublicKey, recipients: Recipients, count
 }
 
 /// Receives until every key in `from` but `skip` has sent its identity.
-fn receive_all(node: *Node, keys: []const PublicKey, skip: usize) !void {
+pub fn receive_all(node: *Node, keys: []const PublicKey, skip: usize) !void {
     var heard: [peers_max]bool = @splat(false);
     var count: usize = 0;
     while (count < keys.len - 1) {
@@ -223,10 +254,10 @@ fn receive_all(node: *Node, keys: []const PublicKey, skip: usize) !void {
     }
 }
 
-const Recipients = p2p.Recipients(PublicKey);
+pub const Recipients = p2p.Recipients(PublicKey);
 
 /// Every running node but `skip` tracks the nodes' addresses at `ports` as set `set`.
-fn retrack(
+pub fn retrack(
     nodes: []Node,
     keys: []const PublicKey,
     ports: []const u16,
@@ -242,7 +273,7 @@ fn retrack(
     }
 }
 
-fn tracked_at(keys: []const PublicKey, ports: []const u16, entries: []Entry) void {
+pub fn tracked_at(keys: []const PublicKey, ports: []const u16, entries: []Entry) void {
     for (keys, ports, entries) |key, port, *entry| {
         entry.* = .{ .key = key, .value = .{ .symmetric = local_socket(port) } };
     }
@@ -277,13 +308,9 @@ fn restart_with_new_address(io: Io, transport: *Transport, scope: metrics.Scope)
             var entries: [n]Entry = undefined;
             tracked_at(&keys, &ports, &entries);
             const tracked: Net.Tracker.Tracked = .init_primary(.init(&entries));
-            var label_buffer: [32]u8 = undefined;
-            const label_args = .{ restarted, round };
-            // Proof: "peer_" and two small integers fit in 32 bytes.
-            const label = std.fmt.bufPrint(&label_buffer, "peer_{d}_{d}", label_args) catch
-                unreachable;
             const node_port = ports[restarted];
-            const child = scope.child(label);
+            const child = scope.child("peer_restarted").with_attribute("index", restarted)
+                .with_attribute("round", round).child("network");
             nodes[restarted] =
                 try start_node(io, transport, child, restarted, node_port, set, tracked);
             try send_until(io, &nodes[restarted], keys[restarted], .all, n - 1);
@@ -300,7 +327,7 @@ test "peers that restart at new addresses reconnect" {
     try run_deterministic(0, restart_with_new_address, .{});
 }
 
-fn run_deterministic(seed: u64, comptime function: anytype, args: anytype) !void {
+pub fn run_deterministic(seed: u64, comptime function: anytype, args: anytype) !void {
     const timeout_ns = 600 * std.time.ns_per_s;
     const config: runtime.deterministic.Config = .{ .seed = seed, .timeout_ns = timeout_ns };
     var runner = try runtime.deterministic.Runner.init(gpa, config);
