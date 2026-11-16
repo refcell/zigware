@@ -158,6 +158,82 @@ pub const SmallRng = struct {
     }
 };
 
+/// tracing's level names.
+pub const Level = enum { trace, debug, info, warn, @"error" };
+
+/// Writes one event as tracing-subscriber 0.3's JSON formatter does (commonware's flood logs
+/// with `json: true`): `timestamp`, `level`, `fields` (the message, then `fields` in order),
+/// then `target`. Integers and booleans are JSON values; strings are JSON strings, so pass a
+/// `?debug` field already formatted.
+pub fn write_json_event(
+    writer: *Io.Writer,
+    timestamp_ns: u64,
+    level: Level,
+    target: []const u8,
+    message: []const u8,
+    fields: anytype,
+) Io.Writer.Error!void {
+    try writer.writeAll("{\"timestamp\":\"");
+    try write_timestamp(writer, timestamp_ns);
+    const level_name = switch (level) {
+        .trace => "TRACE",
+        .debug => "DEBUG",
+        .info => "INFO",
+        .warn => "WARN",
+        .@"error" => "ERROR",
+    };
+    try writer.print("\",\"level\":\"{s}\",\"fields\":{{\"message\":", .{level_name});
+    try write_json_string(writer, message);
+    inline for (@typeInfo(@TypeOf(fields)).@"struct".field_names) |name| {
+        try writer.print(",\"{s}\":", .{name});
+        const value = @field(fields, name);
+        switch (@typeInfo(@TypeOf(value))) {
+            .int, .comptime_int => try writer.print("{d}", .{value}),
+            .bool => try writer.writeAll(if (value) "true" else "false"),
+            else => try write_json_string(writer, value),
+        }
+    }
+    try writer.writeAll("},\"target\":");
+    try write_json_string(writer, target);
+    try writer.writeAll("}\n");
+}
+
+/// RFC 3339 in UTC with microseconds, as tracing-subscriber prints it.
+fn write_timestamp(writer: *Io.Writer, timestamp_ns: u64) Io.Writer.Error!void {
+    const seconds: std.time.epoch.EpochSeconds = .{ .secs = timestamp_ns / std.time.ns_per_s };
+    const year_day = seconds.getEpochDay().calculateYearDay();
+    const month_day = year_day.calculateMonthDay();
+    const day_seconds = seconds.getDaySeconds();
+    const micros = timestamp_ns % std.time.ns_per_s / std.time.ns_per_us;
+    assert(micros < std.time.us_per_s);
+    try writer.print("{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}.{d:0>6}Z", .{
+        year_day.year,
+        month_day.month.numeric(),
+        month_day.day_index + 1,
+        day_seconds.getHoursIntoDay(),
+        day_seconds.getMinutesIntoHour(),
+        day_seconds.getSecondsIntoMinute(),
+        micros,
+    });
+}
+
+/// A JSON string as serde_json writes it.
+pub fn write_json_string(writer: *Io.Writer, value: []const u8) Io.Writer.Error!void {
+    try writer.writeByte('"');
+    for (value) |byte| switch (byte) {
+        '"' => try writer.writeAll("\\\""),
+        '\\' => try writer.writeAll("\\\\"),
+        0x08 => try writer.writeAll("\\b"),
+        0x0c => try writer.writeAll("\\f"),
+        '\n' => try writer.writeAll("\\n"),
+        '\r' => try writer.writeAll("\\r"),
+        '\t' => try writer.writeAll("\\t"),
+        0x00...0x07, 0x0b, 0x0e...0x1f => try writer.print("\\u{x:0>4}", .{byte}),
+        else => try writer.writeByte(byte),
+    };
+    try writer.writeByte('"');
+}
+
 /// Fills `message` with its send time and random bytes (commonware's flood sender loop body).
 pub fn fill_message(message: []u8, sent_at_ns: u64, rng: *SmallRng) void {
     assert(message.len >= message_size_min);

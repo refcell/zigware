@@ -30,8 +30,15 @@ statistics, output, CLI) and run against a minimal in-lane stand-in, then switch
   any simulation; it is the estimator's only real network access.
 - flood reads YAML with an in-lane subset parser (`examples/flood/yaml.zig`) because no
   serde_yaml exists in zigware; it rejects anything outside what serde_yaml writes for flood's
-  config and the deployer's hosts file. Until p2p's authenticated network lands, the flood
-  binary loads its configuration and exits 1 with a message.
+  config and the deployer's hosts file.
+- flood binds `0.0.0.0` for p2p and metrics as commonware does, except that a peer whose host
+  IP is loopback binds that IP. Peers on one machine then share flood's fixed ports on
+  127.0.0.1, 127.0.0.2, ... (`examples/flood/local.sh` writes such a deployment and
+  `demo.sh` runs it). Logs are tracing-subscriber's JSON lines on stdout, written by
+  `lib.write_json_event`.
+- flood's `messages` counter also counts sends made before any peer connects, as
+  commonware's does (an empty `Recipients::All` send is accepted); the demo shows received
+  messages instead.
 - chat's TUI reimplements the slice of ratatui 0.30.2 and crossterm 0.29 it draws with
   (`tui.zig`, `keys.zig`): percentage layouts, bordered titled blocks, scrolled truncated
   paragraphs, the buffer diff, and crossterm's key parser. Frames are checked cell by cell
@@ -63,8 +70,9 @@ statistics, output, CLI) and run against a minimal in-lane stand-in, then switch
 - [x] Config and deployer hosts files (`yaml.zig`: the subset serde_yaml 0.9 writes, with its
   quoting rules), `SmallRng` (rand 0.10 xoshiro256++, checked against Rust), and the sender and
   receiver tasks over p2p's sender/receiver interfaces, tested flooding on p2p.simulated.
-- [ ] Binary on `runtime.production.Runner` and p2p `authenticated::discovery` once it lands;
-  metrics endpoint; demo recipe.
+- [x] Binary on `runtime.production.Runner` and p2p `authenticated::discovery`, with the
+  metrics endpoint; 4 local peers flood each other over TCP.
+- [ ] Demo recording (`etc/scripts/record-demo.sh flood`).
 - [ ] `setup` (config generation); needs deployer's aws config types.
 
 ### chat (commonware `examples/chat`)
@@ -80,3 +88,5 @@ statistics, output, CLI) and run against a minimal in-lane stand-in, then switch
 - 2026-11-13: flood config/hosts YAML, SmallRng, sender/receiver tasks on p2p.simulated.
 - 2026-11-13: chat logger, ratatui-identical TUI, crossterm key parser, clap-identical CLI,
   and the handler tested on p2p.simulated.
+
+- 2026-11-16: flood runs on the production runner over discovery, with local.sh and demo.sh.

@@ -30,12 +30,24 @@ if [ "${DEMO_SESSION:-}" = "1" ]; then
       type_cmd 'zig build run-estimator -Doptimize=ReleaseFast -- examples/estimator/simplex.lazy \
 --distribution us-east-1:3,eu-west-1:2,ap-northeast-1:2' 6
       ;;
+    flood)
+      zig build -Doptimize=ReleaseFast >/dev/null
+      rm -rf /tmp/zigware-flood
+      printf '\033[H\033[2J'
+      type_cmd 'examples/flood/local.sh 4 /tmp/zigware-flood' 1
+      printf '\n'
+      type_cmd 'examples/flood/demo.sh /tmp/zigware-flood 10' 1
+      ;;
     *) echo "unknown demo: $name" >&2; exit 1 ;;
   esac
   exit 0
 fi
 
-DEMO_SESSION=1 TERM=xterm-256color asciinema rec --overwrite --quiet --output-format asciicast-v2 --window-size 104x40 \
+case $name in
+  flood) size=150x40 ;;
+  *) size=104x40 ;;
+esac
+DEMO_SESSION=1 TERM=xterm-256color asciinema rec --overwrite --quiet --output-format asciicast-v2 --window-size "$size" \
   --command "$0 $name" "$out.cast"
 agg --theme monokai --font-size 16 --idle-time-limit 3 --last-frame-duration 6 \
   "$out.cast" "$out.gif"
