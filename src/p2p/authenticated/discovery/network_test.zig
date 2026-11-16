@@ -11,6 +11,7 @@ const runtime = @import("runtime");
 const stream = @import("stream");
 const utils = @import("utils");
 const build_options = @import("build_options");
+const builtin = @import("builtin");
 const metrics = runtime.telemetry.metrics;
 const traces = runtime.telemetry.traces;
 const p2p = @import("../../root.zig");
@@ -29,6 +30,10 @@ const gpa = testing.allocator;
 
 const base_port: u16 = 3000;
 const peers_max = 25;
+/// commonware's 25-peer runs at full size outside Debug (or with `-Dslow-tests`); Debug builds
+/// run them with fewer peers to keep the suite fast.
+const peers_full = builtin.mode != .debug or build_options.slow_tests;
+const peers_large: usize = if (peers_full) peers_max else 10;
 const max_message_size_default: u32 = 1024 * 1024;
 
 /// How each node addresses its identity (commonware's `Mode`).
@@ -329,7 +334,7 @@ test "connectivity is deterministic for each recipient mode" {
     // fewer seeds here, more under fuzz soak.
     const seeds: u64 = 1 * build_options.fuzz_soak;
     for (0..seeds) |seed| {
-        for ([_]Mode{ .one, .some, .all }) |mode| try expect_deterministic(seed, peers_max, mode);
+        for ([_]Mode{ .one, .some, .all }) |mode| try expect_deterministic(seed, peers_large, mode);
     }
 }
 
@@ -337,7 +342,7 @@ test "discovery converges with a payload limit below the gossip bound" {
     // commonware `test_discovery_below_max_gossip_size`: the payload limit fits only the keys
     // the peers send each other, so discovery converges only because frames fit gossip.
     const limit: u32 = PublicKey.fixed_size;
-    _ = try run_deterministic(0, connectivity, .{ limit, @as(usize, 25), Mode.one });
+    _ = try run_deterministic(0, connectivity, .{ limit, peers_large, Mode.one });
 }
 
 test "the payload limit stays configured while the frame grows to carry gossip" {

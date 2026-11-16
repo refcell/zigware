@@ -959,14 +959,16 @@ test "followers launched at finish complete together" {
 test "a long queue drains at unlimited rate in one call (issue_5229_regression)" {
     var h = Harness.init();
     defer h.deinit();
-    const queued = 2_000;
+    // commonware's 2,000 outside Debug (or with `-Dslow-tests`); Debug drains 200.
+    const full = @import("builtin").mode != .debug or @import("build_options").slow_tests;
+    const queued: usize = if (full) 2_000 else 200;
     const zeros: [100]u8 = @splat(0);
     _ = try h.limit(epoch, key(100), 1_000, null);
     for (0..queued + 1) |_| {
         try h.send_quiet(epoch, key(100), key(101), &zeros, .zero);
     }
     const done = try h.limit(epoch, key(100), null, null);
-    try testing.expectEqual(@as(usize, queued + 1), done.len);
+    try testing.expectEqual(queued + 1, done.len);
     for (done) |completion| try expect_time(epoch, completion.deliver_at);
     try testing.expect(h.state.next() == null);
 }

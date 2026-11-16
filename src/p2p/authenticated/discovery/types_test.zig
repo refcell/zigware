@@ -1,6 +1,8 @@
 //! Tests of the discovery wire types (commonware `discovery/types.rs` tests).
 
 const std = @import("std");
+const builtin = @import("builtin");
+const build_options = @import("build_options");
 const assert = std.debug.assert;
 const testing = std.testing;
 const Allocator = std.mem.Allocator;
@@ -433,10 +435,16 @@ test "conformance: discovery BitVec encoding matches commonware" {
     try verify(BitVec, codec.arbitrary.default_generator(BitVec), "BitVec");
 }
 
+/// Info and Payload conformance sign and verify a record per case, so Debug builds skip them
+/// (ReleaseSafe, and Debug with `-Dslow-tests`, run them).
+const conformance_full = builtin.mode != .debug or build_options.slow_tests;
+
 test "conformance: discovery Info encoding matches commonware" {
+    if (!conformance_full) return error.SkipZigTest;
     try verify(Info, gen_info, "Info<PublicKey>");
 }
 
 test "conformance: discovery Payload encoding matches commonware" {
+    if (!conformance_full) return error.SkipZigTest;
     try verify(Payload, gen_payload, "Payload<PublicKey>");
 }
