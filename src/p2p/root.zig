@@ -13,7 +13,7 @@
 //!   blanket `Sender` is `send` in this file.
 //! - `Receiver`: `R.PublicKey`, `r.recv() !Message(PublicKey)`, `r.capacity() usize`.
 //! - `Provider`/`Manager`: `peer_set(id)`, `subscribe()`, `track(id, TrackedPeers) Feedback`.
-//! - `Blocker`: `B.PublicKey`, `b.block(peer) Feedback`, `b.blocked()`.
+//! - `Blocker`: `B.PublicKey`, `b.block(peer) Feedback`, `b.blocked() !Subscription`.
 //!
 //! Public keys are any type with `order(a, b) std.math.Order` that encodes through codec
 //! (`cryptography.signer.assert_public_key`).

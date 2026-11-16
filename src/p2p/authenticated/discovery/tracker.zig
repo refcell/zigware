@@ -384,7 +384,9 @@ pub fn Tracker(comptime P: type) type {
                 return oracle.tracker.block(peer);
             }
 
-            pub fn blocked(oracle: Oracle) BlockedSubscription {
+            /// Never fails here; the error union matches every `Blocker` (simulated's
+            /// allocates), so callers `try` it alike.
+            pub fn blocked(oracle: Oracle) Allocator.Error!BlockedSubscription {
                 return oracle.tracker.blocked_subscription();
             }
         };

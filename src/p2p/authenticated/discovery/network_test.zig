@@ -600,3 +600,162 @@ test "the sender's rate limit keeps the receiver from limiting" {
     // commonware `test_rate_limiting`.
     _ = try run_deterministic(0, rate_limiting, .{});
 }
+
+/// `keys`, sorted, in `buffer`.
+fn sorted_keys(buffer: []PublicKey, keys: []const PublicKey) []PublicKey {
+    assert(buffer.len >= keys.len);
+    const out = buffer[0..keys.len];
+    @memcpy(out, keys);
+    std.sort.pdq(PublicKey, out, {}, PublicKey.less_than);
+    return out;
+}
+
+fn expect_keys(expected: []const PublicKey, actual: []const PublicKey) !void {
+    try testing.expectEqual(expected.len, actual.len);
+    for (expected, actual) |want, have| try testing.expect(want.eql(have));
+}
+
+/// The next update is `index`, with `latest` and `all` as primaries and no secondaries.
+fn expect_update(
+    subscription: *Net.Tracker.PeerSetSubscription,
+    index: u64,
+    latest: []const PublicKey,
+    all: []const PublicKey,
+) !void {
+    var update = (try subscription.recv()) orelse return error.TestUnexpectedResult;
+    defer update.deinit();
+    try testing.expectEqual(index, update.index);
+    try expect_keys(latest, update.latest.primary);
+    try testing.expectEqual(@as(usize, 0), update.latest.secondary.len);
+    try expect_keys(all, update.all.primary);
+    try testing.expectEqual(@as(usize, 0), update.all.secondary.len);
+}
+
+fn track_primary(network: *Net, index: u64, sorted: []const PublicKey) !void {
+    const tracked: p2p.TrackedPeers(PublicKey) = .init_primary(.init(sorted));
+    try testing.expectEqual(p2p.Feedback.ok, network.oracle().track(index, tracked));
+}
+
+/// A running network for peer 0 on `base_port`, bootstrapping from `bootstrappers`.
+fn start_lone(
+    io: Io,
+    transport: *Transport,
+    scope: metrics.Scope,
+    bootstrappers: []const Bootstrapper,
+) !struct { *Net, Io.Future(anyerror!void) } {
+    const signer = PrivateKey.from_seed(0);
+    const config = test_config(signer, base_port, bootstrappers, max_message_size_default);
+    const network = try Net.create(gpa, io, transport, scope.child("network"), config);
+    errdefer network.destroy();
+    return .{ network, try io.concurrent(run_node, .{network}) };
+}
+
+fn unordered_peer_sets(io: Io, transport: *Transport, scope: metrics.Scope) !void {
+    var keys: [10]PublicKey = undefined;
+    for (&keys, 0..) |*key, index| key.* = PrivateKey.from_seed(index).public_key();
+    // Peer 0 lists itself as a bootstrapper, as in commonware's test.
+    const myself = [_]Bootstrapper{.{
+        .peer = keys[0],
+        .ingress = .{ .socket = local_socket(base_port) },
+    }};
+    const network, var task = try start_lone(io, transport, scope, &myself);
+    defer network.destroy();
+    defer task.cancel(io) catch {};
+    var subscription = try network.oracle().subscribe();
+    defer subscription.deinit();
+
+    var buffer_10: [10]PublicKey = undefined;
+    const set_10 = sorted_keys(&buffer_10, keys[0..2]);
+    try track_primary(network, 10, set_10);
+    try expect_update(&subscription, 10, set_10, set_10);
+    // An older index is ignored and sends no update.
+    var buffer_9: [10]PublicKey = undefined;
+    try track_primary(network, 9, sorted_keys(&buffer_9, keys[2..]));
+    var buffer_11: [10]PublicKey = undefined;
+    const set_11 = sorted_keys(&buffer_11, keys[4..]);
+    try track_primary(network, 11, set_11);
+    var union_keys: [8]PublicKey = undefined;
+    @memcpy(union_keys[0..2], keys[0..2]);
+    @memcpy(union_keys[2..], keys[4..]);
+    var buffer_all: [10]PublicKey = undefined;
+    try expect_update(&subscription, 11, set_11, sorted_keys(&buffer_all, &union_keys));
+}
+
+test "peer sets tracked out of order are ignored" {
+    // commonware `test_unordered_peer_sets`.
+    _ = try run_deterministic(0, unordered_peer_sets, .{});
+}
+
+fn subscription_includes_self(io: Io, transport: *Transport, scope: metrics.Scope) !void {
+    const me = PrivateKey.from_seed(0).public_key();
+    const other = PrivateKey.from_seed(1).public_key();
+    const network, var task = try start_lone(io, transport, scope, &.{});
+    defer network.destroy();
+    defer task.cancel(io) catch {};
+    var subscription = try network.oracle().subscribe();
+    defer subscription.deinit();
+    // A set without us: neither the latest set nor all peers list us.
+    try track_primary(network, 1, &.{other});
+    try expect_update(&subscription, 1, &.{other}, &.{other});
+    // A set with us: both list us.
+    var buffer: [2]PublicKey = undefined;
+    const both = sorted_keys(&buffer, &.{ me, other });
+    try track_primary(network, 2, both);
+    try expect_update(&subscription, 2, both, both);
+}
+
+test "subscriptions list ourselves only when tracked" {
+    // commonware `test_subscription_includes_self_when_registered`.
+    _ = try run_deterministic(0, subscription_includes_self, .{});
+}
+
+/// Every node sends until it reaches its expected peers: peer 0 all others, the rest at
+/// least one (commonware `test_graceful_shutdown`'s agents).
+fn wait_connected(io: Io, keys: []const PublicKey, nodes: []Node) !void {
+    var connected: [peers_max]bool = @splat(false);
+    var rounds: u32 = 0;
+    while (std.mem.indexOfScalar(bool, connected[0..nodes.len], false) != null) : (rounds += 1) {
+        try testing.expect(rounds < 600);
+        for (nodes, 0..) |*node, index| {
+            if (connected[index]) continue;
+            const expected: usize = if (index == 0) nodes.len - 1 else 1;
+            const payload: []const []const u8 = &.{&keys[index].key.bytes};
+            const sent = try node.registered.sender.send(.all, payload, true);
+            defer gpa.free(sent);
+            connected[index] = sent.len >= expected;
+        }
+        try io.sleep(.fromMilliseconds(100), .real);
+    }
+}
+
+fn graceful_shutdown(io: Io, transport: *Transport, scope: metrics.Scope) !void {
+    const n = 5;
+    var keys: [n]PublicKey = undefined;
+    for (&keys, 0..) |*key, index| key.* = PrivateKey.from_seed(index).public_key();
+    var nodes: [n]Node = undefined;
+    try start_nodes(io, transport, scope, max_message_size_default, &keys, &nodes);
+    wait_connected(io, &keys, &nodes) catch |err| {
+        stop_nodes(io, &nodes);
+        return err;
+    };
+    // Canceling each `run` returns once all of that network's tasks have stopped.
+    for (&nodes) |*node| {
+        node.task.cancel(io) catch |err| if (err != error.Canceled) return err;
+        try testing.expectEqual(@as(u32, 0), node.network.handshakes.load(.monotonic));
+        node.registered.sender.deinit();
+    }
+    for (&nodes) |*node| {
+        while (node.registered.receiver.try_recv()) |message| {
+            var owned = message;
+            owned.deinit();
+        } else |_| {}
+        try testing.expectError(error.NetworkClosed, node.registered.receiver.recv());
+        node.registered.receiver.deinit();
+        node.network.destroy();
+    }
+}
+
+test "connected networks shut down cleanly" {
+    // commonware `test_graceful_shutdown`.
+    _ = try run_deterministic(0, graceful_shutdown, .{});
+}

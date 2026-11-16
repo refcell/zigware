@@ -174,9 +174,10 @@ handshake and the runtime's network, which the actor-stream and runtime lanes ar
 - [x] discovery mod.rs tests: run_network over modes One/Some/All with determinism, payload
   limit below the gossip bound, pre-start send, operations after shutdown, clean shutdown,
   stream boundary, too-large payload not delivered, rate limiting, slow peer (router).
-- [ ] discovery mod.rs tests: multi-index oracle, unordered peer sets, graceful shutdown,
-  subscription includes self, restarts (many, simultaneous, new address), duplicate
-  addresses, DNS (after a resolver exists).
+- [x] discovery mod.rs tests: unordered peer sets, subscription includes self, graceful
+  shutdown.
+- [ ] discovery mod.rs tests: multi-index oracle, restarts (many, simultaneous, new address),
+  duplicate addresses, DNS (after a resolver exists).
 - [ ] lookup (parallel lane): tracker, peer, dialer, listener, Network with Config and Oracle
   (done, with connectivity); the rest of commonware's lookup mod.rs tests and the directory's
   metrics.
@@ -214,3 +215,6 @@ handshake and the runtime's network, which the actor-stream and runtime lanes ar
   `Network.create` takes a metrics scope; simulated links sample through `utils.Probability`.
 - 2026-11-16: discovery mod.rs tests (connectivity modes and determinism, limits, shutdown,
   rate limiting) and the router slow-peer test.
+
+- 2026-11-16: discovery unordered-set, subscription, and graceful-shutdown tests;
+  `Oracle.blocked()` returns an error union like every `Blocker`.

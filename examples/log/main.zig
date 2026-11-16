@@ -70,7 +70,7 @@ const Engine = simplex.Engine(Params);
 /// subscription with `try`, as on `p2p.simulated`, while discovery's cannot fail.
 pub const Blocker = struct {
     pub const PublicKey = ed25519.PublicKey;
-    const Subscription = @typeInfo(@TypeOf(Net.Oracle.blocked)).@"fn".return_type.?;
+    const Subscription = Net.Tracker.BlockedSubscription;
 
     oracle: Net.Oracle,
 
@@ -78,7 +78,7 @@ pub const Blocker = struct {
         return blocker.oracle.block(peer);
     }
 
-    pub fn blocked(blocker: Blocker) error{}!Subscription {
+    pub fn blocked(blocker: Blocker) !Subscription {
         return blocker.oracle.blocked();
     }
 
