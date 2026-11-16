@@ -133,7 +133,55 @@ then the core and standard actors as those packages land.
 - `consensus.marshal.Update(B, A)`: `tip{round, height, digest}` and `block{block:
   broadcast.Digested(B), ack: A}`; the application owns both and must acknowledge.
 
+- `consensus.marshal.standard.Buffer(B, P)`: the core `Buffer` over a
+  `broadcast.buffered.Mailbox(P, B)` (owned; `init(mailbox)`, `deinit`); passes
+  `core.variant.assert_buffer`.
+- `consensus.marshal.mocks.harness` (commonware `mocks/harness.rs`, shared parts): constants
+  (`num_validators`, `quorum`, `blocks_per_epoch`, `link`), `S` (ed25519 under
+  `fast_schemes`, threshold VRF MinPk otherwise), `fixture`, `Provider`, `make_raw_block`,
+  `genesis_parent`, `TestNetwork` (`start`, `link_all`, `stop`), `max_message_size(V)`,
+  `make_finalization`, `make_notarization`, `Archives(StoredBlock)` (both immutable archives,
+  owning their partition names), and `StandardHarness`: `Validator(App)` with
+  `setup(ctx, network, me, provider, max_pending_acks, app) !*Self` (resolver, broadcast,
+  archives, actor) and `crash()`, plus `make_test_block`, `propose`, `verify`, `digest`,
+  `commitment`, `certify`, `genesis_block`, `height`. `App` needs `Activity`, `clone`, `deinit`, and `report`
+  (`mocks.Application(B)` fits).
+
+## standard/mod.rs test split
+commonware `standard/mod.rs` (14.9k lines) is split by line range of that file. Each owner
+ports its range's tests and the helpers defined in it, into
+`src/consensus/marshal/standard/tests/<file>.zig`, wired with one
+`test { _ = @import("tests/<file>.zig"); }` line in `standard/root.zig`.
+- Shared helpers, `tests/common.zig`, owned by the deployer thread (T-01a1d5b9) and landed
+  first, on its own: `RecordingBuffer`, `RecordingResolver`, `NoopConsumer`,
+  `StaticProducer`, `wait_until`, `HoldingBlockReporter`, `ApplicationReporter`,
+  `start_standard_actor` (lines 6221-6739), and `PacedStore`, `prunable_finalized_stores`,
+  `test_config` (10362-10611).
+- consensus-marshal (this lane), `tests/scenarios.zig` and `tests/restart.zig`: lines
+  169-2591 (provider/digest-once tests, every harness scenario wrapper: finalize, hailstorm,
+  ack pipeline, genesis, recoverable/certify family, sync floor, prune, subscribe, get_info,
+  get_block, hint_finalized, ancestry stream, broadcast caches; restart repair; cache
+  epochs), the seed helpers in `tests/seed.zig` (lines 638-797), and harness.rs's scenario
+  functions in `mocks/harness.zig` so coding reuses them.
+- lookup thread (T-01a1d59c), `tests/wrappers.zig` and `tests/dispatch.zig`: lines
+  2592-6220 (buffered floor anchors, inline/deferred wrapper tests, certify/verify fetch
+  paths, propose/prepare paths, reproposal and ancestry validation, sync failure panics,
+  certified-covered) and 10612-12604 (cache writes, notarized decode, finalization sync,
+  staged dispatch, relay sends, forward, hint_finalized).
+- deployer thread (T-01a1d5b9), `tests/floor.zig`: lines 6740-10611 (redelivery,
+  start/set floor, floor anchors and acks, delivery verification across scopes, processed
+  and round floors, unverifiable delivery, sync dispatch).
+- runtime thread (T-01a1d57b-1bfd), `tests/coverage.zig`: lines 12605-14905 (prune,
+  pipelined handoff, reproposal coverage across restarts, closed-epoch floors, cache
+  retention).
+- coding/mod.rs's tests belong to broadcast-collector (T-01a1d58d), on
+  `mocks/harness.zig` plus its own `coding/harness.zig`.
+- commonware runs each scenario on `InlineHarness` and `DeferredHarness`, which only
+  delegate to `StandardHarness`; in Zig each runs once on `StandardHarness`.
+
 ## Decisions
+- `storage.archive.immutable` borrows its config's partition names (its ordinal opens
+  section blobs lazily), so `harness.Archives` owns them for the archives' lifetime.
 - Marshal blocks keep commonware's trait method names (`height()`, `parent()`, `digest()`,
   `context()`), so mock block fields are `height_value`, `parent_value`, and so on.
 - `Item(D)` is the certificate subject itself (passed by value); commonware uses `&Item<D>`.
@@ -228,9 +276,11 @@ then the core and standard actors as those packages land.
 - [x] marshal: application build (prepare and propose tasks).
 - [x] marshal: core actor, delivery, `Update` (smoke tests: in-order dispatch, two-node
   produce/deliver backfill with walkback repair and a forged certificate).
-- [ ] marshal: mocks/harness.rs, then standard/mod.rs's tests (shared with the lookup
-  thread, which owns standard/{validation,inline,deferred} and mocks/{application,
-  resolver,store,strategy,verifying}).
+- [x] marshal: mocks/harness.rs shared parts and `StandardHarness`, `standard.Buffer`
+  (smoke test: 4 validators finalize 24 blocks over p2p.simulated).
+- [ ] marshal: harness.rs scenario functions, then this lane's slice of standard/mod.rs's
+  tests (see "standard/mod.rs test split"; the lookup thread owns standard/{validation,
+  inline,deferred} and mocks/{application,resolver,store,strategy,verifying}).
 - [x] aggregation: the full `distinct states` comparison on the new runtime auditor.
 - (marshal/coding/ belongs to the broadcast-collector lane: types, shards, variant,
   validation, marshaled, and coding/mod.rs tests, on top of core.)
@@ -260,3 +310,5 @@ then the core and standard actors as those packages land.
 - 2026-11-16 (parallel lane): the deferred standard wrapper (`standard.Deferred`) with
   commonware's deferred.rs tests on a stand-in marshal actor. The restart halves of the two
   restart tests wait for the harness.
+- 2026-11-16: marshal harness (shared parts, StandardHarness) and `standard.Buffer`; posted
+  the standard/mod.rs test split.

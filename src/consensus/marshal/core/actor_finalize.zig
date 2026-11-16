@@ -351,7 +351,11 @@ fn repair_trailing(self: anytype) !bool {
     var finalization = try get_finalization_by_height(self, last_finalized) orelse
         @panic("finalization missing");
     const commitment = finalization.proposal.payload;
-    if (try find_block_by_commitment(self, commitment)) |found| {
+    const found_or_null = find_block_by_commitment(self, commitment) catch |err| {
+        finalization.deinit(self.gpa);
+        return err;
+    };
+    if (found_or_null) |found| {
         var block = found;
         defer @TypeOf(self.*).V.deinit_block(self.gpa, &block);
         return store_finalization(self, last_finalized, &block, @as(

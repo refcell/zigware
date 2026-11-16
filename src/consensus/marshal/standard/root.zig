@@ -10,6 +10,8 @@ pub const inline_wrapper = @import("inline.zig");
 pub const Inline = inline_wrapper.Inline;
 pub const deferred = @import("deferred.zig");
 pub const Deferred = deferred.Deferred;
+pub const buffer = @import("buffer.zig");
+pub const Buffer = buffer.Buffer;
 
 test {
     std.testing.refAllDecls(@This());

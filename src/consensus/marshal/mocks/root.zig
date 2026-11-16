@@ -11,6 +11,7 @@ pub const store = @import("store.zig");
 pub const resolver = @import("resolver.zig");
 pub const application = @import("application.zig");
 pub const Application = application.Application;
+pub const harness = @import("harness.zig");
 
 test {
     std.testing.refAllDecls(@This());
