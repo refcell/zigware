@@ -47,7 +47,9 @@ resize, sync), `runtime.storage`, with the in-memory backend `runtime.storage.me
 - [x] metadata (two-blob atomic key-value store).
 - [ ] metadata: `start_sync` (pipelined syncs), conformance hash (`MetadataWorkload`), and
   the fault-injection tests (torn writes, failed syncs), once runtime storage lands.
-- [ ] queue (persistent queue with cursor).
+- [x] queue (durable at-least-once queue over the contiguous variable journal, with its
+  cursor) with storage.rs's tests and the `QueueWorkload` round trip.
+- [ ] queue: conformance hash for `QueueWorkload` (needs a storage conformance harness).
 - [ ] Conformance hashes for every on-disk format, fuzz targets (storage/fuzz).
 - [ ] Metrics: record through `runtime.telemetry.metrics` where commonware has metrics
   (journal and manager counters, metadata `sync_rewrites`/`sync_overwrites`), replacing
@@ -130,6 +132,11 @@ resize, sync), `runtime.storage`, with the in-memory backend `runtime.storage.me
   `clear(gpa, storage, cfg, size)`, `span(gpa, storage, cfg) Bounds`; its recovery declares
   `Item`, `get_bounds`, `read`, `reset`, `finish(size) J` (consumes, also on error), `deinit`.
   `contiguous.fixed.Journal(A)` implements it.
+- `storage.queue`: `Queue(V)` with `init(gpa, storage, Config(V))`, `deinit`, `destroy`,
+  `append`, `enqueue`, `enqueue_bulk(items) Range`, `commit`, `sync` (prunes below the ack
+  floor), `size`, and the reader side `try_recv() ?Received{position, item}`, `ack`,
+  `ack_up_to`, `is_acked`, `floor`, `read_position`, `is_empty`, `reset`, `pending`;
+  `Config(V)` is `journal.contiguous.variable.Config(V)`; `cursor.Cursor`.
 - `storage.metadata`: `Metadata(K, V)` with `init`, `deinit`, `get`, `get_mut`,
   `put`, `put_sync`, `upsert`, `remove`, `clear`, `retain`, `items`, `count`, `sync`,
   `destroy`; `Config(V)`.
@@ -200,6 +207,11 @@ resize, sync), `runtime.storage`, with the in-memory backend `runtime.storage.me
   unsynced replacement by writing its bytes into the durable raw blob before reopening, since
   the memory backend drops every unsynced write at `crash()`.
 
+- queue: commonware's separate `Reader` (watch-channel snapshots, `recv` waiting across
+  tasks) becomes the reader side of one `Queue` value reading the live journal up to the
+  published size, since nothing runs concurrently with the journal. Metrics `tip`, `next`, and
+  the floor are plain fields until the metrics backlog item.
+
 - contiguous variable: commonware's clear callbacks (`init_cleared`, `open_cleared`,
   `clear_to_size_cleared`) only ever remove the data partition, so the fixed recovery takes
   the dependent partition name instead of a closure; `destroy_cleared` takes a value with a
@@ -243,3 +255,4 @@ resize, sync), `runtime.storage`, with the in-memory backend `runtime.storage.me
 - 2026-11-13: segmented oversized journal with its core tests.
 - 2026-11-13: authenticated backing contract (`init_sync`, `Stored`, `last_matching`).
 - 2026-11-16: contiguous variable journal with the shared suite and core recovery tests.
+- 2026-11-16: variable recovery tests (torn interior page, watermark beyond data); queue.

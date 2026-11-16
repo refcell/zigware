@@ -761,3 +761,114 @@ test "variable: init_sync over a variable backing" {
     try testing.expectEqual(40, try journal.append(4000));
     try journal.destroy();
 }
+
+/// Open a harness whose data pages are `page` bytes, for tests that tear specific pages.
+fn harness_paged(partition: []const u8, items_per_section: u64, page: u16) !Harness {
+    var h = try Harness.init(partition, items_per_section);
+    h.cache_ref.deinit();
+    h.cache_ref = try CacheRef.init(gpa, page, 10);
+    return h;
+}
+
+/// Truncate data blob `blob` to `bytes` and remove every newer data blob, leaving stale offsets.
+fn truncate_data(h: *Harness, blob: u64, bytes: u64) !void {
+    const name = try std.mem.concat(gpa, u8, &.{ h.partition, variable.data_suffix });
+    defer gpa.free(name);
+    const storage = h.storage.interface();
+    var partition = try contiguous.blobs.Partition.init(gpa, storage, name, &h.cache_ref, 1024);
+    defer partition.deinit();
+    const indices = try contiguous.blobs.indices(gpa, storage, name);
+    defer gpa.free(indices);
+    for (indices) |index| {
+        if (index > blob) try partition.remove(index);
+    }
+    var writer = try partition.open_recovery(blob);
+    defer writer.deinit();
+    try writer.truncate(bytes);
+    try writer.sync();
+}
+
+test "variable: recovery truncates a torn interior page" {
+    var h = try harness_paged("variable-torn-interior", 30, 64);
+    defer h.deinit();
+    var journal = try h.open();
+    try append_scaled(&journal, 33, 100);
+    try journal.commit();
+    journal.deinit();
+    const zero_name: [8]u8 = @splat(0);
+    // Data blob 0 holds 30 nine-byte frames (270 bytes) across five pages; tear page 2.
+    try paged.corrupt_page(h.storage.interface(), "variable-torn-interior_data", &zero_name, 2, 64);
+    // Pages 0 and 1 hold 128 bytes, 14 whole frames; the gap makes blob 1 unreachable.
+    journal = try h.open();
+    try testing.expectEqual(Bounds{ .start = 0, .end = 14 }, journal.get_bounds());
+    try expect_items(&journal, 0, 14, 100);
+    try testing.expectEqual(14, try journal.append(4242));
+    try testing.expectEqual(4242, try journal.read(14));
+    try journal.destroy();
+}
+
+test "variable: recovery rejects a watermark beyond the retained data" {
+    var h = try Harness.init("recovery-anchor-too-far", 10);
+    defer h.deinit();
+    var journal = try h.open();
+    try append_scaled(&journal, 20, 100);
+    try journal.sync();
+    // The watermark vouches for acknowledged data that no longer exists.
+    try journal.test_set_offsets_recovery_watermark(15);
+    journal.deinit();
+    try truncate_data(&h, 1, 2 * 9);
+    // Missing acknowledged data stays an error on every attempt.
+    try testing.expectError(error.Corruption, h.open());
+    try testing.expectError(error.Corruption, h.open());
+}
+
+test "variable: recovery rejects missing data below the watermark and keeps evidence" {
+    var h = try Harness.init("recovery-short-middle", 10);
+    defer h.deinit();
+    var journal = try h.open();
+    try append_scaled(&journal, 30, 100);
+    try journal.sync();
+    try journal.test_set_offsets_recovery_watermark(15);
+    journal.deinit();
+    try truncate_data(&h, 1, 2 * 9);
+    // An orphaned blob 2 after the short blob 1.
+    const storage = h.storage.interface();
+    const name = "recovery-short-middle_data";
+    var partition = try contiguous.blobs.Partition.init(gpa, storage, name, &h.cache_ref, 1024);
+    defer partition.deinit();
+    var orphan = try partition.open_recovery(2);
+    _ = try orphan.append(&.{ 8, 0, 0, 0, 0, 0, 0, 0x27, 0x0f });
+    try orphan.sync();
+    orphan.deinit();
+    try testing.expectError(error.Corruption, h.open());
+    try testing.expectError(error.Corruption, h.open());
+    const indices = try contiguous.blobs.indices(gpa, storage, name);
+    defer gpa.free(indices);
+    try testing.expectEqualSlices(u64, &.{ 0, 1, 2 }, indices);
+}
+
+test "variable: recovery rejects an over-capacity blob" {
+    var h = try Harness.init("recovery-overlong", 10);
+    defer h.deinit();
+    var journal = try h.open();
+    try append_scaled(&journal, 5, 100);
+    try journal.sync();
+    // Eleven frames in a ten-item blob: a complete frame beyond a full blob.
+    for (5..11) |position| _ = try journal.test_append_data(position * 100);
+    try journal.blobs.sync();
+    journal.deinit();
+    try testing.expectError(error.Corruption, h.open());
+}
+
+test "variable: recovery fails on a complete undecodable frame" {
+    var h = try Harness.init("recovery-undecodable", 10);
+    defer h.deinit();
+    var journal = try h.open();
+    try append_scaled(&journal, 5, 100);
+    try journal.sync();
+    // A complete frame whose one-byte payload cannot decode as a u64 is not a torn write.
+    _ = try journal.blobs.tail.append(&.{ 1, 0xFF });
+    try journal.blobs.sync();
+    journal.deinit();
+    try testing.expectError(error.EndOfBuffer, h.open());
+}
