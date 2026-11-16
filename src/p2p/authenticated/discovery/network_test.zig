@@ -854,3 +854,343 @@ test "peers tracked across several indices all connect" {
     // commonware `test_multi_index_oracle`.
     _ = try run_deterministic(0, multi_index_oracle, .{});
 }
+
+const restart_peers = 5;
+/// An address no deterministic listener uses, so dialing it fails.
+const unreachable_ip = codec.Ipv4.init(10, 255, 255, 1);
+
+/// Peer 0 at `base_port`, which every other peer bootstraps from.
+fn first_bootstrapper(keys: []const PublicKey) [1]Bootstrapper {
+    return .{.{ .peer = keys[0], .ingress = .{ .socket = local_socket(base_port) } }};
+}
+
+/// Peer `index` on `port`, bootstrapping from `bootstrap` (unless it is peer 0), advertising
+/// `unreachable_ip` instead of loopback when `hidden`. The config borrows `bootstrap`.
+fn restart_config(
+    bootstrap: *const [1]Bootstrapper,
+    index: usize,
+    port: u16,
+    hidden: bool,
+) Net.Config {
+    const bootstrappers: []const Bootstrapper = if (index == 0) &.{} else bootstrap;
+    const signer = PrivateKey.from_seed(index);
+    var config = test_config(signer, port, bootstrappers, max_message_size_default);
+    if (hidden) config.dialable = .{ .socket = .{ .ip = .{ .v4 = unreachable_ip }, .port = port } };
+    return config;
+}
+
+fn stop_node(io: Io, node: *Node) void {
+    stop_nodes(io, node[0..1]);
+    node.* = undefined;
+}
+
+/// Sends `index`'s identity to all until every other peer is a recipient.
+fn send_until_all(io: Io, node: *Node, keys: []const PublicKey, index: usize) !void {
+    const payload: []const []const u8 = &.{&keys[index].key.bytes};
+    for (0..600) |_| {
+        const sent = try node.registered.sender.send(.all, payload, true);
+        defer gpa.free(sent);
+        if (sent.len == keys.len - 1) return;
+        try io.sleep(.fromMilliseconds(100), .real);
+    }
+    return error.TestUnexpectedResult;
+}
+
+/// Sends `from`'s identity to `to` until it is a recipient.
+fn send_until_one(io: Io, node: *Node, keys: []const PublicKey, from: usize, to: usize) !void {
+    const payload: []const []const u8 = &.{&keys[from].key.bytes};
+    for (0..600) |_| {
+        const sent = try node.registered.sender.send(.{ .one = keys[to] }, payload, true);
+        defer gpa.free(sent);
+        if (sent.len == 1) return;
+        try io.sleep(.fromMilliseconds(100), .real);
+    }
+    return error.TestUnexpectedResult;
+}
+
+/// Receives until every other peer's identity arrived at `node`.
+fn receive_from_all(io: Io, node: *Node, keys: []const PublicKey) !void {
+    var heard: [peers_max]bool = @splat(false);
+    var count: usize = 0;
+    var rounds: u32 = 0;
+    while (count < keys.len - 1) : (rounds += 1) {
+        try testing.expect(rounds < 6_000);
+        var message = node.registered.receiver.try_recv() catch {
+            try io.sleep(.fromMilliseconds(10), .real);
+            continue;
+        };
+        defer message.deinit();
+        try testing.expectEqualSlices(u8, &message.peer.key.bytes, message.payload);
+        for (keys, 0..) |key, from| {
+            if (!key.eql(message.peer) or heard[from]) continue;
+            heard[from] = true;
+            count += 1;
+        }
+    }
+}
+
+/// Every peer reaches all others, and each hears from all others.
+fn expect_full_connectivity(io: Io, keys: []const PublicKey, nodes: []Node) !void {
+    for (nodes, 0..) |*node, index| try send_until_all(io, node, keys, index);
+    for (nodes) |*node| try receive_from_all(io, node, keys);
+}
+
+/// Stops peer `index` and starts it again on `port` with a fresh registration; afterwards it
+/// reaches every peer, every peer reaches it, and it hears from all.
+fn restart_and_reconnect(
+    io: Io,
+    transport: *Transport,
+    scope: metrics.Scope,
+    keys: []const PublicKey,
+    sorted: []const PublicKey,
+    nodes: []Node,
+    index: usize,
+    port: u16,
+) !void {
+    stop_node(io, &nodes[index]);
+    const bootstrap = first_bootstrapper(keys);
+    const config = restart_config(&bootstrap, index, port, false);
+    const node_scope_ = scope.child("peer_restarted").with_attribute("index", index)
+        .with_attribute("port", port).child("network");
+    nodes[index] = try start_node(io, transport, node_scope_, config, sorted, .per_second(100));
+    try send_until_all(io, &nodes[index], keys, index);
+    for (nodes, 0..) |*node, from| {
+        if (from != index) try send_until_one(io, node, keys, from, index);
+    }
+    try receive_from_all(io, &nodes[index], keys);
+}
+
+/// Starts `restart_peers` peers (peer `hidden` advertising an unreachable address) and waits
+/// for full connectivity.
+fn start_restart_cluster(
+    io: Io,
+    transport: *Transport,
+    scope: metrics.Scope,
+    keys: []PublicKey,
+    sorted: []PublicKey,
+    nodes: []Node,
+    hidden: ?usize,
+) !void {
+    for (keys, 0..) |*key, index| key.* = PrivateKey.from_seed(index).public_key();
+    @memcpy(sorted, keys);
+    std.sort.pdq(PublicKey, sorted, {}, PublicKey.less_than);
+    const bootstrap = first_bootstrapper(keys);
+    var started: usize = 0;
+    errdefer stop_nodes(io, nodes[0..started]);
+    for (nodes, 0..) |*node, index| {
+        const port = base_port + @as(u16, @intCast(index));
+        const config = restart_config(&bootstrap, index, port, hidden == index);
+        const quota: rate_limit.Quota = .per_second(100);
+        node.* = try start_node(io, transport, node_scope(scope, index), config, sorted, quota);
+        started += 1;
+    }
+    try expect_full_connectivity(io, keys, nodes);
+}
+
+fn many_peer_restart(io: Io, transport: *Transport, scope: metrics.Scope) !void {
+    var keys: [restart_peers]PublicKey = undefined;
+    var sorted: [restart_peers]PublicKey = undefined;
+    var nodes: [restart_peers]Node = undefined;
+    try start_restart_cluster(io, transport, scope, &keys, &sorted, &nodes, null);
+    defer stop_nodes(io, &nodes);
+    var port: u16 = base_port + 100;
+    for (0..3) |_| {
+        for (1..restart_peers) |index| {
+            port += 1;
+            try restart_and_reconnect(io, transport, scope, &keys, &sorted, &nodes, index, port);
+        }
+    }
+    const text = try scope.encode(gpa);
+    defer gpa.free(text);
+    try expect_no_rate_limiting(text);
+}
+
+test "peers restarting on new addresses reconnect" {
+    // commonware `test_many_peer_restart_with_new_address`.
+    _ = try run_deterministic(0, many_peer_restart, .{});
+}
+
+fn restart_must_dial(io: Io, transport: *Transport, scope: metrics.Scope) !void {
+    var keys: [restart_peers]PublicKey = undefined;
+    var sorted: [restart_peers]PublicKey = undefined;
+    var nodes: [restart_peers]Node = undefined;
+    // Peer 2 advertises an unreachable address: after peer 1 restarts, only peer 2 can dial
+    // the connection between them, once gossip brings it peer 1's new address.
+    try start_restart_cluster(io, transport, scope, &keys, &sorted, &nodes, 2);
+    defer stop_nodes(io, &nodes);
+    try restart_and_reconnect(io, transport, scope, &keys, &sorted, &nodes, 1, base_port + 100);
+    const text = try scope.encode(gpa);
+    defer gpa.free(text);
+    try expect_no_rate_limiting(text);
+}
+
+test "a restarted peer reconnects to a peer it cannot dial" {
+    // commonware `test_peer_restart_with_new_address_must_dial`.
+    _ = try run_deterministic(0, restart_must_dial, .{});
+}
+
+fn simultaneous_restart(io: Io, transport: *Transport, scope: metrics.Scope) !void {
+    var keys: [restart_peers]PublicKey = undefined;
+    var sorted: [restart_peers]PublicKey = undefined;
+    var nodes: [restart_peers]Node = undefined;
+    try start_restart_cluster(io, transport, scope, &keys, &sorted, &nodes, null);
+    // Every peer but the bootstrapper stops, then all restart on new ports together.
+    var running: usize = restart_peers;
+    defer stop_nodes(io, nodes[0..running]);
+    // Peer 0 keeps running.
+    stop_nodes(io, nodes[1..]);
+    running = 1;
+    try io.sleep(.fromSeconds(2), .real);
+    const bootstrap = first_bootstrapper(&keys);
+    for (1..restart_peers) |index| {
+        const port = base_port + 100 + @as(u16, @intCast(index));
+        const config = restart_config(&bootstrap, index, port, false);
+        const node_scope_ = scope.child("peer_restarted").with_attribute("index", index)
+            .child("network");
+        const quota: rate_limit.Quota = .per_second(100);
+        nodes[index] = try start_node(io, transport, node_scope_, config, &sorted, quota);
+        running = index + 1;
+    }
+    try expect_full_connectivity(io, &keys, &nodes);
+    const text = try scope.encode(gpa);
+    defer gpa.free(text);
+    try expect_no_rate_limiting(text);
+}
+
+test "peers restarting together reconnect" {
+    // commonware `test_simultaneous_peer_restart`.
+    _ = try run_deterministic(0, simultaneous_restart, .{});
+}
+
+fn peer_config(seed: u64, port: u16, bootstrappers: []const Bootstrapper) Net.Config {
+    return test_config(PrivateKey.from_seed(seed), port, bootstrappers, max_message_size_default);
+}
+
+fn socket_ingress(port: u16) p2p.Ingress {
+    return .{ .socket = local_socket(port) };
+}
+
+/// Sends from `node` to all until exactly `expected` are recipients.
+fn send_until_exactly(
+    io: Io,
+    node: *Node,
+    payload: []const u8,
+    expected: []const PublicKey,
+) !void {
+    for (0..1_200) |_| {
+        const sent = try node.registered.sender.send(.all, &.{payload}, true);
+        defer gpa.free(sent);
+        if (sent.len == expected.len) {
+            for (expected) |want| try testing.expect(contains(sent, want));
+            return;
+        }
+        try io.sleep(.fromMilliseconds(100), .real);
+    }
+    return error.TestUnexpectedResult;
+}
+
+fn contains(keys: []const PublicKey, key: PublicKey) bool {
+    for (keys) |each| if (each.eql(key)) return true;
+    return false;
+}
+
+/// The next message on `node` from `from`, skipping others.
+fn expect_from(node: *Node, from: PublicKey) !void {
+    for (0..1_000) |_| {
+        var message = try node.registered.receiver.recv();
+        defer message.deinit();
+        if (message.peer.eql(from)) return;
+    }
+    return error.TestUnexpectedResult;
+}
+
+fn duplicate_addresses_disconnected(io: Io, transport: *Transport, scope: metrics.Scope) !void {
+    const port_0 = base_port;
+    const port_1 = base_port + 1;
+    var keys: [3]PublicKey = undefined;
+    for (&keys, 0..) |*key, index| key.* = PrivateKey.from_seed(index).public_key();
+    var sorted = keys;
+    std.sort.pdq(PublicKey, &sorted, {}, PublicKey.less_than);
+    // Peer 0 knows peers 1 and 2 at the same address.
+    const bootstrap_0 = [_]Bootstrapper{
+        .{ .peer = keys[1], .ingress = socket_ingress(port_1) },
+        .{ .peer = keys[2], .ingress = socket_ingress(port_1) },
+    };
+    const config_0 = peer_config(0, port_0, &bootstrap_0);
+    const quota: rate_limit.Quota = .per_second(100);
+    var nodes: [2]Node = undefined;
+    nodes[0] = try start_node(io, transport, node_scope(scope, 0), config_0, &sorted, quota);
+    var started: usize = 1;
+    defer stop_nodes(io, nodes[0..started]);
+    try io.sleep(.fromSeconds(30), .real);
+    {
+        const checked = switch (try nodes[0].registered.sender.check(.all)) {
+            .checked => |checked| checked,
+            .limited => return error.TestUnexpectedResult,
+        };
+        defer checked.deinit();
+        try testing.expectEqual(@as(usize, 0), checked.recipients().len);
+    }
+    // Peer 1 knows peer 0 only at a wrong address, so peer 0 must dial it.
+    const bootstrap_1 = [_]Bootstrapper{.{
+        .peer = keys[0],
+        .ingress = socket_ingress(port_0 + 100),
+    }};
+    const config_1 = peer_config(1, port_1, &bootstrap_1);
+    nodes[1] = try start_node(io, transport, node_scope(scope, 1), config_1, &sorted, quota);
+    started = 2;
+    try io.sleep(.fromSeconds(30), .real);
+    try send_until_exactly(io, &nodes[0], &keys[0].key.bytes, keys[1..2]);
+    try expect_from(&nodes[1], keys[0]);
+}
+
+test "a peer sharing an address with an absent peer still connects" {
+    // commonware `test_duplicate_addresses_disconnected` (25 seeds).
+    for (0..25) |seed| _ = try run_deterministic(seed, duplicate_addresses_disconnected, .{});
+}
+
+fn duplicate_addresses_connected(io: Io, transport: *Transport, scope: metrics.Scope) !void {
+    const port_0 = base_port;
+    const port_1 = base_port + 1;
+    const port_2 = base_port + 2;
+    var keys: [3]PublicKey = undefined;
+    for (&keys, 0..) |*key, index| key.* = PrivateKey.from_seed(index).public_key();
+    var sorted = keys;
+    std.sort.pdq(PublicKey, &sorted, {}, PublicKey.less_than);
+    const quota: rate_limit.Quota = .per_second(100);
+    const bootstrap_0 = [_]Bootstrapper{
+        .{ .peer = keys[1], .ingress = socket_ingress(port_1) },
+        .{ .peer = keys[2], .ingress = socket_ingress(port_1) },
+    };
+    const config_0 = peer_config(0, port_0, &bootstrap_0);
+    // Peer 2 listens on its own port but advertises peer 1's address.
+    const bootstrap_2 = [_]Bootstrapper{.{ .peer = keys[0], .ingress = socket_ingress(port_0) }};
+    var config_2 = peer_config(2, port_2, &bootstrap_2);
+    config_2.dialable = socket_ingress(port_1);
+    var nodes: [3]Node = undefined;
+    nodes[0] = try start_node(io, transport, node_scope(scope, 0), config_0, &sorted, quota);
+    var started: usize = 1;
+    defer stop_nodes(io, nodes[0..started]);
+    nodes[1] = try start_node(io, transport, node_scope(scope, 2), config_2, &sorted, quota);
+    started = 2;
+    try io.sleep(.fromSeconds(30), .real);
+    try send_until_exactly(io, &nodes[0], &keys[2].key.bytes, keys[2..3]);
+    try expect_from(&nodes[1], keys[0]);
+    // Peer 1 knows peer 0 only at a wrong address; it still reaches both.
+    const bootstrap_1 = [_]Bootstrapper{.{
+        .peer = keys[0],
+        .ingress = socket_ingress(port_0 + 100),
+    }};
+    const config_1 = peer_config(1, port_1, &bootstrap_1);
+    nodes[2] = try start_node(io, transport, node_scope(scope, 1), config_1, &sorted, quota);
+    started = 3;
+    try io.sleep(.fromSeconds(30), .real);
+    try send_until_exactly(io, &nodes[2], &keys[1].key.bytes, &.{ keys[0], keys[2] });
+    try expect_from(&nodes[0], keys[1]);
+    try expect_from(&nodes[1], keys[1]);
+}
+
+test "a peer advertising another's address does not block it" {
+    // commonware `test_duplicate_addresses_connected`.
+    _ = try run_deterministic(0, duplicate_addresses_connected, .{});
+}

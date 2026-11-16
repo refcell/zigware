@@ -189,8 +189,11 @@ handshake and the runtime's network, which the actor-stream and runtime lanes ar
   shutdown.
 - [x] discovery mod.rs test: multi-index oracle (20 peers by default, commonware's 100 under
   fuzz soak: 100 peers hold about 10,000 connections and 3 GB in one process).
-- [ ] discovery mod.rs tests: restarts (many, simultaneous, new address), duplicate
-  addresses, DNS (after a resolver exists).
+- [x] discovery mod.rs tests: restarts (many, simultaneous, new address that must be dialed
+  by the other side), duplicate addresses (disconnected over 25 seeds, connected).
+- [ ] discovery mod.rs tests: DNS bootstrappers and resolution (after the runtime has a
+  resolver).
+- [ ] discovery: tracing events at commonware's sites (runtime.telemetry.traces).
 - [ ] lookup (parallel lane): tracker, peer, dialer, listener, Network with Config and Oracle
   (done, with connectivity); the rest of commonware's lookup mod.rs tests and the directory's
   metrics.
@@ -233,3 +236,4 @@ handshake and the runtime's network, which the actor-stream and runtime lanes ar
   `Oracle.blocked()` returns an error union like every `Blocker`.
 - 2026-11-16: discovery multi-index oracle test.
 - 2026-11-16: simulated split senders and receivers for twins, with the split tests.
+- 2026-11-16: discovery restart and duplicate-address tests.
