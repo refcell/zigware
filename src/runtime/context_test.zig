@@ -189,6 +189,10 @@ test "abort after completion keeps output (abort_after_completion_keeps_output)"
     try run_handles("abort after completion keeps output");
 }
 
+test "tasks_running drops after blocking completion (tasks_running_decreased_*_blocking_*)" {
+    try run_handles("tasks_running drops after blocking completion");
+}
+
 test "a canceled select still aborts and reaps its tasks" {
     try run_handles("a canceled select still aborts and reaps its tasks");
 }
@@ -245,6 +249,21 @@ fn Handles(comptime Context: type) type {
                 try done.wait(ctx.io());
                 try ctx.sleep(.fromMilliseconds(1));
                 try testing.expectEqual(@as(u64, 7), try (try handle.abort()));
+            }
+        }.body;
+
+        pub const @"tasks_running drops after blocking completion" = struct {
+            fn answer(ctx: Context) anyerror!u64 {
+                _ = ctx;
+                return 42;
+            }
+
+            fn body(ctx: Context) !void {
+                const label = "tasks_running_after_blocking_completion";
+                const handle = try ctx.child(label).shared(true).spawn(answer, .{});
+                try testing.expectEqual(@as(u64, 1), try running(ctx, label));
+                try testing.expectEqual(@as(u64, 42), try (try handle.join()));
+                try testing.expectEqual(@as(u64, 0), try running(ctx, label));
             }
         }.body;
 

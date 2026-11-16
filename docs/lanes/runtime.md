@@ -87,8 +87,10 @@ time, files, and network: build on it rather than around it where it fits.
   encode inline: the bytes match, but the payloads are copied. The nested-container, map,
   lazy, and allocation-count `encode_iobufs` tests need that codec support and are not ported.
 - [x] utils: `context.select` (commonware `Handle::select`, at most `select_max` handles)
-  with handle.rs's select and abort tests; supervision.rs's cascade, sibling, deep-chain
-  (50,000 levels), and wide-fanout tests on `supervision.Tree`. No counterpart: buffer pools
+  with handle.rs's select, abort, and tasks_running tests (no counterpart: `AbortOnDrop`,
+  `Aborter`, panic interrupts, and self-borrow tests, which are Rust drop and borrow
+  rules); supervision.rs's cascade, sibling, deep-chain (50,000 levels), and wide-fanout
+  tests on `supervision.Tree`. No counterpart: buffer pools
   (only io_uring's `pool.rs`, which belongs to the production runtime), `abort.rs` (waker
   registration), `cell.rs` (a spawn macro), `thread.rs` (`RUST_MIN_STACK`), and
   supervision.rs's drop and weak-link compaction tests (nodes retire explicitly here).
@@ -105,6 +107,9 @@ time, files, and network: build on it rather than around it where it fits.
   runner seeded with the case seed and commits `storage_audit()`, in `conformance.verify`'s
   `commit(gpa, seed)` shape; its three audit tests.
 - [x] memory/mod.rs: crash-write merging and subset writes keeping v0/v1 headers.
+- No counterpart elsewhere in the crate: utils/mod.rs `Blocker` (a waker-driven thread
+  parker), macros.rs (`select!`; `std.Io.Select`), and process/metered.rs (process metrics of
+  the production runtime, runtime-telemetry's).
 - Moved to the runtime-telemetry lane: telemetry (`src/runtime/telemetry/`) and the
   production runtime (`src/runtime/production/`, io_uring/kqueue storage and network).
   `src/runtime/buffer/` belongs to storage-journal.
