@@ -87,6 +87,8 @@ pub fn Application(comptime H: type, comptime P: type) type {
         should_certify: Certifier(D),
         fail_verification: bool = false,
         drop_proposals: bool = false,
+        /// Holds `propose` (and `prepare` unless the decision is `wait`) open until canceled.
+        stall_proposals: bool = false,
         drop_verifications: bool = false,
         /// The decision attached to a handoff candidate; `wait` builds nothing.
         handoff: std.meta.Tag(Handoff) = .wait,
@@ -173,9 +175,17 @@ pub fn Application(comptime H: type, comptime P: type) type {
         pub fn propose(self: *Self, io: Io, request: Context) Io.Cancelable!?D {
             _ = io; // The same runtime as `self.io`.
             if (self.drop_proposals) return null;
+            if (self.stall_proposals) try self.stall();
             try self.busy.lock(self.io);
             defer self.busy.unlock(self.io);
             return try self.build(request);
+        }
+
+        /// Never returns normally: waits until canceled (commonware parks the response).
+        fn stall(self: *Self) Io.Cancelable!void {
+            assert(self.stall_proposals);
+            // Each sleep ends early only on cancelation.
+            while (true) try self.io.sleep(.fromSeconds(3600), .awake);
         }
 
         /// Builds a handoff candidate unless the decision is `wait`.
@@ -183,6 +193,7 @@ pub fn Application(comptime H: type, comptime P: type) type {
             _ = io; // The same runtime as `self.io`.
             if (self.handoff == .wait) return .wait;
             if (self.drop_proposals) return null;
+            if (self.stall_proposals) try self.stall();
             try self.busy.lock(self.io);
             defer self.busy.unlock(self.io);
             const digest = try self.build(request);

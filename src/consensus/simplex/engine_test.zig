@@ -5,6 +5,7 @@ const std = @import("std");
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const testing = std.testing;
+const codec = @import("codec");
 const cryptography = @import("cryptography");
 const p2p = @import("p2p");
 const parallel = @import("parallel");
@@ -25,7 +26,9 @@ const gpa = testing.allocator;
 const Sha256 = cryptography.Sha256;
 const Digest = Sha256.Digest;
 const Key = cryptography.ed25519.PublicKey;
-const Scheme = ed25519.Scheme(Digest);
+const wrapped = @import("mocks/wrapped.zig");
+/// Every engine signs through the wrapper; only `Role.invalid` makes validator 0 misbehave.
+const Scheme = wrapped.Scheme(ed25519.Scheme(Digest));
 const Net = p2p.simulated.Network(Key);
 const Context = runtime.deterministic.Context;
 const Application = application_mod.Application(Sha256, Key);
@@ -45,13 +48,16 @@ const Epoch = consensus_types.Epoch;
 
 const Params = struct {
     pub const Context = runtime.deterministic.Context;
-    pub const Scheme = ed25519.Scheme(Sha256.Digest);
+    pub const Scheme = wrapped.Scheme(ed25519.Scheme(Sha256.Digest));
     pub const Elector = elector_mod.RoundRobinElector;
     pub const Blocker = Net.Control;
     pub const Digest = Sha256.Digest;
     pub const Automaton = *Application;
     pub const Relay = *Application;
-    pub const Reporter = *reporter_mod.Reporter(ed25519.Scheme(Sha256.Digest), Sha256.Digest);
+    pub const Reporter = *reporter_mod.Reporter(
+        wrapped.Scheme(ed25519.Scheme(Sha256.Digest)),
+        Sha256.Digest,
+    );
     pub const Strategy = parallel.Sequential;
     pub const Sender = Net.Sender;
     pub const Receiver = Net.Receiver;
@@ -66,11 +72,13 @@ const page_cache_size = 10;
 
 /// What validator 0 runs: the engine, or one of the Byzantine mocks.
 /// `absent` leaves validator 0 offline until the test starts it; `slow` runs the engine with
-/// an application that takes 10 s to propose, verify, and certify.
+/// an application that takes 10 s to propose, verify, and certify; `invalid` runs the engine
+/// with every signature corrupted.
 const Role = enum {
     honest,
     absent,
     slow,
+    invalid,
     conflicter,
     nuller,
     impersonator,
@@ -80,7 +88,7 @@ const Role = enum {
     /// Whether validator 0 runs a Byzantine mock instead of the engine.
     fn is_byzantine(role: Role) bool {
         return switch (role) {
-            .honest, .absent, .slow => false,
+            .honest, .absent, .slow, .invalid => false,
             .conflicter, .nuller, .impersonator, .outdated, .equivocator => true,
         };
     }
@@ -103,7 +111,7 @@ const Byzantine = struct {
         const votes = &byzantine.channels[0];
         switch (byzantine.role) {
             // Proof: only Byzantine roles start this task.
-            .honest, .absent, .slow => unreachable,
+            .honest, .absent, .slow, .invalid => unreachable,
             .conflicter => byzantine.conflicter.run(&votes.sender, &votes.receiver),
             .nuller => byzantine.nuller.run(&votes.sender, &votes.receiver),
             .impersonator => byzantine.impersonator.run(&votes.sender, &votes.receiver),
@@ -144,6 +152,10 @@ const Validator = struct {
 const Harness = struct {
     ctx: Context,
     fixture: Fixture,
+    /// The fixture's signing schemes, wrapped (validator 0's per `role`).
+    schemes: []Scheme,
+    /// The fixture's verifier, wrapped honestly.
+    verifier: Scheme,
     network: *Net,
     network_task: std.Io.Future((std.Io.Cancelable || Allocator.Error)!void),
     relay: Relay,
@@ -153,6 +165,10 @@ const Harness = struct {
     track_historical_votes: bool = false,
     timeouts: Timeouts,
     role: Role,
+    /// Engine mailbox size and whether applications stall proposals, for engines started
+    /// from now on.
+    mailbox_size: u32 = 1024,
+    stall_proposals: bool = false,
 
     const Timeouts = struct {
         leader_ms: u64 = 1000,
@@ -160,7 +176,7 @@ const Harness = struct {
         retry_ms: u64 = 10_000,
     };
 
-    const Fixture = cryptography.certificate.mocks.Fixture(Scheme);
+    const Fixture = cryptography.certificate.mocks.Fixture(ed25519.Scheme(Digest));
 
     fn keys(harness: *const Harness) []const Key {
         return harness.fixture.participants;
@@ -185,6 +201,26 @@ const Harness = struct {
         role: Role,
         timeouts: Timeouts,
     ) !void {
+        try harness.start_network(ctx, n, link, role, timeouts);
+        for (harness.validators, harness.keys(), 0..) |*validator, key, index| {
+            if (index == 0 and role == .absent) continue;
+            if (index == 0 and role.is_byzantine()) {
+                try harness.start_byzantine(validator, key, role);
+            } else {
+                try harness.start_validator(index);
+            }
+        }
+    }
+
+    /// Everything `start_timed` does except starting validators: all start absent.
+    fn start_network(
+        harness: *Harness,
+        ctx: Context,
+        n: u32,
+        link: ?Link,
+        role: Role,
+        timeouts: Timeouts,
+    ) !void {
         assert(timeouts.leader_ms <= timeouts.certification_ms);
         const io = ctx.io();
         var rng = utils.rng.test_rng();
@@ -194,6 +230,13 @@ const Harness = struct {
         harness.role = role;
         harness.fixture = try ed25519.fixture(Digest, gpa, &rng, "consensus", n);
         errdefer harness.fixture.deinit(gpa);
+        harness.schemes = try gpa.alloc(Scheme, n);
+        errdefer gpa.free(harness.schemes);
+        for (harness.schemes, harness.fixture.schemes, 0..) |*scheme, inner, index| {
+            const corrupt = index == 0 and role == .invalid;
+            scheme.* = .init(inner, if (corrupt) .corrupt_signature else .honest);
+        }
+        harness.verifier = .init(harness.fixture.verifier, .honest);
         harness.network = try Net.init(gpa, io, .{
             .max_size = 1024 * 1024,
             .max_peers_per_set = n + 1,
@@ -209,21 +252,15 @@ const Harness = struct {
         if (link) |value| try harness.link_all(value, null);
         // commonware's equivocator test keeps the default; its other Byzantine tests set it.
         harness.track_historical_votes = role.is_byzantine() and role != .equivocator;
-        for (harness.validators, peers, 0..) |*validator, key, index| {
-            if (index == 0 and role == .absent) continue;
-            if (index == 0 and role.is_byzantine()) {
-                try harness.start_byzantine(validator, key, role);
-            } else {
-                try harness.start_validator(index);
-            }
-        }
+        harness.mailbox_size = 1024;
+        harness.stall_proposals = false;
     }
 
     fn start_byzantine(harness: *Harness, validator: *Validator, key: Key, role: Role) !void {
         const io = harness.ctx.io();
         const byzantine = try gpa.create(Byzantine);
         errdefer gpa.destroy(byzantine);
-        const scheme = &harness.fixture.schemes[0];
+        const scheme = &harness.schemes[0];
         const n: u32 = @intCast(harness.validators.len);
         var elector = try elector_mod.RoundRobin(Sha256).default().build(gpa, n);
         errdefer elector.deinit(gpa);
@@ -265,6 +302,7 @@ const Harness = struct {
         harness.network.close();
         harness.network_task.await(harness.ctx.io()) catch {};
         harness.network.deinit();
+        gpa.free(harness.schemes);
         harness.fixture.deinit(gpa);
         harness.* = undefined;
     }
@@ -320,6 +358,12 @@ const Harness = struct {
 
     /// Starts the engine of validator `index`.
     fn start_validator(harness: *Harness, index: usize) !void {
+        const channels = try register(harness.oracle(), harness.keys()[index]);
+        try harness.start_validator_on(index, channels);
+    }
+
+    /// Starts validator `index`'s engine on `channels`, registered for it beforehand.
+    fn start_validator_on(harness: *Harness, index: usize, channels: [3]Channel) !void {
         const io = harness.ctx.io();
         const validator = &harness.validators[index];
         const key = harness.keys()[index];
@@ -335,21 +379,22 @@ const Harness = struct {
             .verify_latency = if (slow) .{ .mean = 10_000, .std_dev = 5 } else normal,
             .certify_latency = if (slow) .{ .mean = 10_000, .std_dev = 5 } else normal,
         });
+        validator.application.stall_proposals = harness.stall_proposals;
         try validator.application.register();
-        validator.reporter = .init(gpa, io, &harness.fixture.verifier);
+        validator.reporter = .init(gpa, io, &harness.verifier);
         validator.page_cache = try .init(gpa, page_size, page_cache_size);
         const n: u32 = @intCast(harness.validators.len);
         validator.elector = try elector_mod.RoundRobin(Sha256).default().build(gpa, n);
         validator.partition = @splat(0);
         _ = try std.fmt.bufPrint(&validator.partition, "validator-{d}", .{index});
         const control = harness.oracle().control(key);
-        var cfg = engine_config(validator, harness.fixture.schemes[index], control);
+        var cfg = engine_config(validator, harness.schemes[index], control);
         cfg.track_historical_votes = harness.track_historical_votes;
+        cfg.mailbox_size = harness.mailbox_size;
         cfg.leader_timeout = .from_millis(harness.timeouts.leader_ms);
         cfg.certification_timeout = .from_millis(harness.timeouts.certification_ms);
         cfg.timeout_retry = .from_millis(harness.timeouts.retry_ms);
         try validator.engine.init(harness.ctx, cfg);
-        const channels = try register(harness.oracle(), key);
         validator.handle = try harness.ctx.child("engine").spawn(Engine.run, .{
             &validator.engine, channels[0], channels[1], channels[2],
         });
@@ -862,6 +907,144 @@ test "equivocator is blocked for at least one seed" {
         if (try (try runner.start_context(equivocator_run, .{}))) break true;
     } else false;
     try testing.expect(detected);
+}
+
+/// commonware `invalid`: validator 0 signs every vote with a corrupted signature. The honest
+/// three finalize and block it without faults. Every reporter sees invalid votes, but only
+/// validator 0's sees invalid certificates (assembled from its own votes); honest engines
+/// reject those before reporting.
+fn invalid_scenario(ctx: Context) !void {
+    var harness: Harness = undefined;
+    try harness.start(ctx, 4, link_ms(10, 1, 1.0), .invalid);
+    defer harness.deinit();
+    const required = 50;
+    // Validator 0 never finalizes: its certificates carry its own invalid signature.
+    for (1..harness.validators.len) |index| {
+        try harness.validators[index].reporter.wait_for_finalized(.new(required));
+    }
+    for (harness.validators, 0..) |*validator, index| {
+        validator.reporter.assert_no_faults();
+        const invalid = validator.reporter.invalid();
+        try testing.expect(invalid.votes > 0);
+        try testing.expectEqual(index == 0, invalid.certificates > 0);
+    }
+    const byzantine = harness.keys()[0];
+    const blocked = try harness.oracle().blocked(gpa);
+    defer gpa.free(blocked);
+    // Validator 0 may block itself too.
+    try testing.expect(blocked.len >= harness.validators.len - 1);
+    for (blocked) |pair| try testing.expect(pair.recipient.order(byzantine) == .eq);
+}
+
+test "invalid signatures are reported and blocked" {
+    for (0..2) |seed| _ = try run_seeded(seed, invalid_scenario, .{});
+}
+
+fn zero_only_to_one(_: usize, a: usize, b: usize) bool {
+    if (a == 0 or b == 0) return a == 1 or b == 1;
+    return true;
+}
+
+/// commonware `received_certificates_are_reported`: validator 0 links only to validator 1, so
+/// it cannot form certificates itself, yet reports nearly all those relayed to it.
+fn received_certificates_scenario(ctx: Context) !void {
+    var harness: Harness = undefined;
+    try harness.start(ctx, 4, null, .honest);
+    defer harness.deinit();
+    try harness.link_all(link_ms(100, 1, 1.0), &zero_only_to_one);
+    const required = 10;
+    const honest = &harness.validators[1].reporter;
+    try honest.wait_for_finalized(.new(required));
+    // Let certificates in flight reach validator 0.
+    try ctx.sleep(.fromSeconds(1));
+    const excluded = &harness.validators[0].reporter;
+    var notarized: [2]u32 = @splat(0);
+    var finalized: [2]u32 = @splat(0);
+    for (1..required + 1) |value| {
+        const view: View = .new(value);
+        for ([_]*Reporter{ honest, excluded }, 0..) |reporter, index| {
+            if (reporter.notarized(view)) notarized[index] += 1;
+            if (reporter.finalized(view) != null) finalized[index] += 1;
+        }
+    }
+    // Early views may pass before validator 0 is connected.
+    try testing.expect(notarized[1] >= notarized[0] -| 2);
+    try testing.expect(finalized[1] >= finalized[0] -| 2);
+    try testing.expect(finalized[0] > 0);
+}
+
+test "received certificates are reported" {
+    _ = try run_seeded(0, received_certificates_scenario, .{});
+}
+
+const Notarize = @import("types.zig").Notarize(Scheme, Digest);
+const Finalize = @import("types.zig").Finalize(Scheme, Digest);
+const Certificate = @import("types.zig").Certificate(Scheme, Digest);
+
+/// A certificate of `kind` (`.notarization` or `.finalization`) from a quorum of the
+/// harness's signers, over `payload`'s hash at `view` on `parent`.
+fn quorum_certificate(
+    harness: *Harness,
+    comptime kind: std.meta.Tag(Certificate),
+    view: u64,
+    parent: u64,
+    payload: []const u8,
+) !Certificate {
+    const Vote = if (kind == .notarization) Notarize else Finalize;
+    const proposal: @import("types.zig").Proposal(Digest) =
+        .init(.new(epoch, .new(view)), .new(parent), Sha256.hash(&.{payload}));
+    var votes: [4]Vote = undefined;
+    const quorum = utils.N3f1.quorum(@as(u32, @intCast(harness.schemes.len)));
+    assert(quorum <= votes.len);
+    for (votes[0..quorum], harness.schemes[0..quorum]) |*vote, *scheme| {
+        vote.* = (try Vote.sign(gpa, scheme, proposal)).?;
+    }
+    const Signed = @FieldType(Certificate, @tagName(kind));
+    const scheme = &harness.schemes[0];
+    const signed = try Signed.from_votes(gpa, scheme, votes[0..quorum], parallel.sequential);
+    return @unionInit(Certificate, @tagName(kind), signed);
+}
+
+/// commonware `survives_burst`: before validator 0's engine (mailbox size 1, proposals
+/// stalled) starts, an outside peer queues notarizations of views 1 to 3 and a finalization
+/// of view 3; the engine works through the burst and reports view 3 finalized.
+fn survives_burst_scenario(ctx: Context) !void {
+    var harness: Harness = undefined;
+    try harness.start_network(ctx, 4, null, .absent, .{});
+    defer harness.deinit();
+    const me = harness.keys()[0];
+    const channels = try register(harness.oracle(), me);
+    const injector = cryptography.ed25519.PrivateKey.from_seed(9_000_000).public_key();
+    var injected = try harness.oracle().control(injector).register(1, test_quota);
+    defer injected.sender.deinit();
+    defer injected.receiver.deinit();
+    try harness.oracle().add_link(injector, me, link_ms(0, 0, 1.0));
+    const tracked: p2p.TrackedPeers(Key) = .{
+        .primary = .init(&.{me}),
+        .secondary = .init(&.{injector}),
+    };
+    _ = harness.oracle().manager().track(1, tracked);
+    try ctx.sleep(.fromMilliseconds(1));
+    const certificates = [_]Certificate{
+        try quorum_certificate(&harness, .notarization, 1, 0, "payload-1"),
+        try quorum_certificate(&harness, .notarization, 2, 1, "payload-2"),
+        try quorum_certificate(&harness, .notarization, 3, 2, "payload-3"),
+        try quorum_certificate(&harness, .finalization, 3, 2, "payload-3"),
+    };
+    defer for (certificates) |certificate| codec.free(Certificate, gpa, certificate);
+    for (certificates) |certificate| {
+        const bytes = try codec.encode(Certificate, gpa, certificate);
+        defer gpa.free(bytes);
+        gpa.free(try injected.sender.send(.{ .one = me }, &.{bytes}, true));
+    }
+    harness.mailbox_size = 1;
+    harness.stall_proposals = true;
+    try harness.start_validator_on(0, channels);
+    try harness.validators[0].reporter.wait_for_finalized(.new(3));
+}
+
+test "survives burst: a mailbox of one drains a certificate burst" {
+    _ = try run_seeded(0, survives_burst_scenario, .{});
 }
 
 /// One run of commonware `unclean_shutdown`: start every validator from its journal, stop

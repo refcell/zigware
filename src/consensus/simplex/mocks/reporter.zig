@@ -233,6 +233,15 @@ pub fn Reporter(comptime S: type, comptime D: type) type {
             return self.faults.items;
         }
 
+        /// How many invalid votes and certificates were reported.
+        pub const Invalid = struct { votes: u64, certificates: u64 };
+
+        pub fn invalid(self: *Self) Invalid {
+            self.mutex.lockUncancelable(self.io);
+            defer self.mutex.unlock(self.io);
+            return .{ .votes = self.invalid_votes, .certificates = self.invalid_certificates };
+        }
+
         pub fn assert_no_invalid(self: *Self) void {
             assert(self.invalid_votes == 0); // Invalid votes detected.
             assert(self.invalid_certificates == 0); // Invalid certificates detected.

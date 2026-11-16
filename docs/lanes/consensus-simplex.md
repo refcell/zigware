@@ -106,8 +106,9 @@ resolver; those lanes are running, so do the types first and the actors as they 
   `notarized`, `nullified`, `max_nullify_view`, `fault_list`, `assert_no_faults`,
   `assert_no_invalid`); Byzantine `conflicter.Conflicter(S, H)`, `nuller.Nuller(S, H)`,
   `impersonator.Impersonator(S, H)`, and `outdated.Outdated(S, H)` (`run(sender, receiver)`
-  on the vote channel), and `equivocator.Equivocator(S, H, P, E)` (`run(votes,
-  certificates)`).
+  on the vote channel), `equivocator.Equivocator(S, H, P, E)` (`run(votes,
+  certificates)`), and `wrapped.Scheme(Inner)` with `Behavior` (`honest`,
+  `corrupt_signature`, `recovery_failure`), a by-value wrapper of a certificate scheme.
 
 ## Decisions
 - `Epoch`/`Height`/`View`/deltas are non-exhaustive `enum(u64)` so they compare with `==`,
@@ -184,13 +185,14 @@ resolver; those lanes are running, so do the types first and the actors as they 
   simulated network and the deterministic runtime: 4 honest nodes finalize.
 - [ ] Port the rest of state.rs's tests (13 of 141), the resolver actor.rs tests, and the
   voter/resolver ingress tests; add actor metrics. (Resolver state.rs: all 23 done.)
-- [ ] simplex mod.rs tests: all_online, partition, slow_and_lossy_links, and determinism
-  done (ed25519, round robin; Debug runs 50 views where commonware runs 100); conflicter,
-  nuller, impersonator (2 seeds each), outdated, backfill, and unclean_shutdown (100 views
-  across journal-recovering restarts), and one_offline (its leader-labelled metrics wait on
-  the actor metrics), slow_validator, all_recovery, and all_crash_after_nullify, and equivocator done;
-  next invalid, survives_burst, engine_shutdown, twins, hailstorm, and the rest of
-  the multi-node DST suite, seeded.
+- [ ] simplex mod.rs tests (ed25519, round robin). Done: all_online (Debug runs 50 views
+  where commonware runs 100), partition, slow_and_lossy_links, determinism, conflicter,
+  nuller, impersonator, invalid (2 seeds each; commonware runs 5 for invalid), outdated,
+  backfill, unclean_shutdown (100 views across journal-recovering restarts), one_offline
+  (its leader-labelled metrics wait on the actor metrics), slow_validator, all_recovery,
+  all_crash_after_nullify, equivocator, received_certificates_are_reported, and
+  survives_burst. Next: engine_shutdown, attributable_reporter_filtering, reconfigurer,
+  nullify_only, split views, certified splits, twins, hailstorm, and the rest, seeded.
 - [ ] Fuzz targets (commonware consensus/fuzz).
 
 ## Log
@@ -225,3 +227,7 @@ resolver; those lanes are running, so do the types first and the actors as they 
 - 2026-11-16: all_recovery and all_crash_after_nullify DSTs.
 - 2026-11-16: Byzantine equivocator mock with its DST; the relay mock deregisters one
   validator (waiting out in-flight deliveries) so one engine can crash and restart.
+- 2026-11-16: invalid DST on the wrapped (signature-corrupting) scheme mock; every DST
+  engine now signs through the wrapper.
+- 2026-11-16: received_certificates_are_reported and survives_burst DSTs; the application
+  mock can stall proposals.
