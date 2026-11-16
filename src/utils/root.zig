@@ -19,6 +19,8 @@ pub const TestRng = rng.TestRng;
 pub const ScriptedRng = rng.ScriptedRng;
 pub const FuzzRng = rng.FuzzRng;
 pub const test_rng = rng.test_rng;
+/// The seeded fuzz driver over `FuzzRng` (used by other packages' fuzz tests).
+pub const fuzz = @import("fuzz.zig");
 
 pub const range = @import("range.zig");
 
