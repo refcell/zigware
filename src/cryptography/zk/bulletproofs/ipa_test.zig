@@ -31,7 +31,7 @@ const namespace = "_COMMONWARE_CRYPTOGRAPHY_ZK_BULLETPROOFS_IPA";
 const bad_namespace = "_COMMONWARE_CRYPTOGRAPHY_ZK_BULLETPROOFS_IPA_BUT_DIFFERENT";
 
 /// commonware's `test_setup`: generator multiples 1..=129, the first as `Q`.
-fn test_setup() !Setup {
+pub fn test_setup() !Setup {
     var generators: [generator_count]G = undefined;
     for (&generators, 1..) |*generator, i| generator.* = G.generator.mul(F.from_u64(i));
     var pairs: [setup_vector_len_max][2]G = undefined;
@@ -176,7 +176,7 @@ const Plan = struct {
     }
 };
 
-fn plan_body(setup: *const Setup, u: *Unstructured) anyerror!void {
+pub fn plan_body(setup: *const Setup, u: *Unstructured) anyerror!void {
     const plan = try Plan.arbitrary(u);
     try plan.run(setup, u);
 }

@@ -11,4 +11,5 @@ test {
     _ = bulletproofs;
     _ = pedersen_to_plain;
     _ = @import("zk/pedersen_to_plain_test.zig");
+    _ = @import("zk/fuzz_test.zig");
 }

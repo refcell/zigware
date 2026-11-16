@@ -93,7 +93,7 @@ const Prover = struct {
 };
 
 /// commonware's `fuzz::Plan`: a value and blinding, then maybe one malicious tweak.
-fn plan_body(_: void, u: *Unstructured) anyerror!void {
+pub fn plan_body(_: void, u: *Unstructured) anyerror!void {
     const value = try u.arbitrary(F);
     const blinding = try u.arbitrary(F);
     var prover = Prover.init(test_setup(), value, blinding);

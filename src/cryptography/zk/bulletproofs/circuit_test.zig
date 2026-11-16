@@ -39,7 +39,7 @@ fn f(value: u64) F {
 
 /// commonware's `test_setup`: multiples 1..=131 of the generator; the first 128 are the
 /// `(G_i, H_i)` pairs, then `Q`, `B`, and `B~`.
-fn test_setup() !Setup {
+pub fn test_setup() !Setup {
     var generators: [2 * setup_pairs + 3]G = undefined;
     for (&generators, 1..) |*generator, i| generator.* = G.generator.mul(f(i));
     var pairs: [setup_pairs][2]G = undefined;
@@ -220,7 +220,7 @@ fn zkc_conversion_preserves_satisfaction(
 }
 
 /// commonware's `fuzz::Plan`: a quadratic case, or a `zk.circuit` conversion.
-fn plan_body(setup: *const Setup, u: *Unstructured) anyerror!void {
+pub fn plan_body(setup: *const Setup, u: *Unstructured) anyerror!void {
     switch (u.int_in_range(u8, 0, 1)) {
         0 => {
             var case = try Case.arbitrary(u);

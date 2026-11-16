@@ -130,7 +130,7 @@ pub const Plan = struct {
     }
 };
 
-fn circuit_plan(_: void, u: *minifuzz.Unstructured) !void {
+pub fn circuit_plan(_: void, u: *minifuzz.Unstructured) !void {
     const plan = Plan.arbitrary(u);
     var ctx = try prover();
     plan.build(&ctx);
