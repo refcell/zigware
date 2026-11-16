@@ -34,6 +34,10 @@
 //! zigware differences: a call site is the caller's return address (Zig has no
 //! `#[track_caller]`), and the entry tables are bounded (`run_entries_max`,
 //! `spawn_entries_max`): a key that finds its table full runs parallel or offloaded, untimed.
+//! A return address is a machine call site, not a source one: in optimized builds a caller that
+//! is inlined, or a loop that is unrolled, splits one source call into several entries, each
+//! learning (and taking table space) on its own, so learning takes longer than in Debug.
+//! Keying by source location would need an `@src()` argument on every operation.
 
 const std = @import("std");
 const assert = std.debug.assert;

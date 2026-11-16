@@ -8,7 +8,8 @@
 //!
 //! Commonware keys a seeded choice by the call's source location; Zig has no caller location,
 //! so a call site here is the call's return address relative to this file's code, which is
-//! fixed for one build of the test binary. A seed therefore repeats its choices within a build.
+//! fixed for one build of the test binary. A seed therefore repeats its choices within a build,
+//! not across optimize modes: an unrolled or inlined caller has one site per machine call.
 
 const std = @import("std");
 const assert = std.debug.assert;
