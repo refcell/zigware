@@ -101,6 +101,12 @@ storage-journal (thread T-01a1d58d-a981-75c2-966d-93dcd484f46b).
   first two). The interrupted-destroy test runs every removal budget up to a full destroy
   instead of sampling removal faults by seed. Its recovery fuzz models faults with the storage
   mock's mutation budget and a crash, including a faulted recovery attempt.
+- Recovery fuzz fault model (accepted by the coordinator, 2026-11-16): the
+  `archive_prunable_recovery` and `archive_immutable_recovery` targets inject faults with
+  `runtime.buffer.mocks.Storage`'s mutation budget followed by `crash()`, where commonware's
+  deterministic runtime also tears partial writes (prefix and subset modes) and delays syncs.
+  Runtime has been asked for torn-write and delayed-sync faults; switch the targets over when
+  its faulty storage provides them.
 - Tests that commonware runs at 100,000 and 5,000 items (`slow` group) run at 2,000 and 600.
 
 ## Log
