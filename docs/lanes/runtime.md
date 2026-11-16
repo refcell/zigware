@@ -28,7 +28,14 @@ time, files, and network: build on it rather than around it where it fits.
 - [x] mock channel (`mocks.zig`), deterministic network (`network/deterministic.zig`),
   network suite (`network/tests.zig`), `Runner.network()`.
 - [ ] audited and metered network wrappers.
-- [ ] Port remaining deterministic.rs tests.
+- [x] Port remaining deterministic.rs tests: auditor history and field separation, clock
+  start time, dropped sleepers, duplicate attributes, removed-blob reopen, recover tests
+  (fault config, seeded crash writes), storage faults. No counterpart: panic tests
+  (`bad_timeout`, `bad_cycle`, `bad_start_time`, label validation, `recover_panic_handling`;
+  Zig cannot catch a panic, and these are asserts), waker/poll tests (`alarm_min_heap`,
+  `sleep_refreshes_one_alarm`, futures moved between tasks), `external_*`, DNS
+  (`resolver`, `recover_dns_mappings_persist`), strategies and pools, IoBufs chunking, and
+  the logical-open owner tests (Rust `Arc` drop order).
 - [x] signal (`signal.zig`: `Signaler`, `Signal`, `Stopper`), commonware's shutdown tests.
 - [x] Context (`context.zig`, `supervision.zig`): io, storage, network, `metrics.Scope`
   (runtime-telemetry's), labeled `child`/`with_attribute`, `spawn` with mandatory
@@ -101,6 +108,9 @@ time, files, and network: build on it rather than around it where it fits.
   includes the crash replay.
 - `Context.sleep_until` clamps deadlines past `context.deadline_max` (2262):
   `std.Io.Threaded` cannot represent later ones.
+- An aborted task's alarms are freed with it, so a run whose only alarm belonged to an
+  aborted sleeper reports `error.Stalled`; commonware keeps a dropped sleep's alarm and
+  reports a timeout (`test_dropped_sleeper_beyond_timeout`).
 - The memory backend guards its state with one spin lock that never blocks inside, so it
   is safe across threads and never yields a fiber while held.
 
@@ -113,3 +123,4 @@ time, files, and network: build on it rather than around it where it fits.
 - 2026-11-13: fiber unwind fix for aarch64 (stack traces on fibers), signal/Stopper.
 - 2026-11-16: Context with supervision, clock, stop, and metrics on `deterministic.Runner`.
 - 2026-11-16: Context suite on production; faulty storage wired into the runner.
+- 2026-11-16: remaining deterministic.rs tests.

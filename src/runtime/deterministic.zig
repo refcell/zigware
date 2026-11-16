@@ -1418,6 +1418,210 @@ test "storage faults and task order replay together (test_storage_fault_determin
     try testing.expect(!std.mem.eql(u32, &first, &try storage_fault_tasks(99999)));
 }
 
+test "reading the auditor state keeps its history (test_auditor_state_preserves_history)" {
+    var observed: Auditor = .{};
+    var uninterrupted: Auditor = .{};
+    try testing.expectEqualStrings("00000000", &observed.state());
+    observed.event("a", &.{"x"});
+    const before = observed.state();
+    try testing.expectEqual(before, observed.state());
+    observed.event("b", &.{"y"});
+    uninterrupted.event("a", &.{"x"});
+    uninterrupted.event("b", &.{"y"});
+    try testing.expect(!std.mem.eql(u8, &before, &observed.state()));
+    try testing.expectEqual(observed.state(), uninterrupted.state());
+}
+
+fn audit_with_metric(name: []const u8, help: []const u8) ![8]u8 {
+    var runner = try test_runner(.{});
+    defer runner.deinit();
+    const Root = struct {
+        fn body(ctx: Context, metric_name: []const u8, metric_help: []const u8) !void {
+            const counter: telemetry.metrics.raw.Counter = .{};
+            var registered = try ctx.register(metric_name, metric_help, counter);
+            registered.deinit();
+        }
+    };
+    try (try runner.start_context(Root.body, .{ name, help }));
+    return runner.auditor.state();
+}
+
+test "the auditor separates metric fields (test_auditor_separates_metric_fields)" {
+    const a = try audit_with_metric("a", "bc");
+    try testing.expect(!std.mem.eql(u8, &a, &try audit_with_metric("ab", "c")));
+}
+
+test "the clock starts at the configured time (test_default_time_zero, test_start_time)" {
+    for ([_]u64{ 0, 100 * std.time.ns_per_s }) |start_ns| {
+        var runner = try test_runner(.{ .start_time_ns = start_ns });
+        defer runner.deinit();
+        const Root = struct {
+            fn body(ctx: Context, expected_ns: u64) !void {
+                try testing.expectEqual(@as(i96, expected_ns), ctx.current().nanoseconds);
+            }
+        };
+        try (try runner.start_context(Root.body, .{start_ns}));
+    }
+}
+
+test "an aborted sleeper does not block a later alarm (test_dropped_sleeper_before_live_deadline)" {
+    var runner = try test_runner(.{});
+    defer runner.deinit();
+    const Root = struct {
+        fn sleeper(ctx: Context, started: *Io.Event) anyerror!void {
+            started.set(ctx.io());
+            try ctx.sleep(.fromMilliseconds(1000));
+        }
+
+        fn body(ctx: Context) !void {
+            var started: Io.Event = .unset;
+            const handle = try ctx.child("sleeper").spawn(sleeper, .{&started});
+            try started.wait(ctx.io());
+            try testing.expectError(error.Closed, handle.abort());
+            const start = ctx.current();
+            try ctx.sleep(.fromMilliseconds(2000));
+            try testing.expect(start.durationTo(ctx.current()).toMilliseconds() >= 2000);
+        }
+    };
+    try (try runner.start_context(Root.body, .{}));
+}
+
+// commonware test_dropped_sleeper_beyond_timeout. commonware reports a timeout because a
+// dropped Rust sleep leaves its alarm in the heap; zigware frees an aborted task's alarms with
+// it, so nothing remains to wait for and the run stalls instead.
+test "an aborted sleeper's alarm beyond the timeout is dropped" {
+    var runner = try test_runner(.{ .timeout_ns = 10 * std.time.ns_per_s });
+    defer runner.deinit();
+    const Root = struct {
+        fn sleeper(ctx: Context, started: *Io.Event) anyerror!void {
+            started.set(ctx.io());
+            try ctx.sleep(.fromMilliseconds(20_000));
+        }
+
+        fn body(ctx: Context) !void {
+            var started: Io.Event = .unset;
+            const handle = try ctx.child("sleeper").spawn(sleeper, .{&started});
+            try started.wait(ctx.io());
+            try testing.expectError(error.Closed, handle.abort());
+            var never: Io.Event = .unset;
+            try never.wait(ctx.io());
+        }
+    };
+    try testing.expectError(error.Stalled, runner.start_context(Root.body, .{}));
+    try testing.expect(runner.now_ns() < 10 * std.time.ns_per_s);
+}
+
+test "a repeated attribute key keeps the last value (test_metrics_duplicate_attribute_overwrites)" {
+    var runner = try test_runner(.{});
+    defer runner.deinit();
+    const Root = struct {
+        fn body(ctx: Context) !void {
+            const scoped = ctx.child("test")
+                .with_attribute("epoch", "old")
+                .with_attribute("epoch", "new");
+            try testing.expectEqual(@as(u8, 1), scoped.scope.attribute_count);
+            const attribute = scoped.scope.attribute(0);
+            try testing.expectEqualStrings("epoch", attribute.key);
+            try testing.expectEqualStrings("new", attribute.value);
+        }
+    };
+    try (try runner.start_context(Root.body, .{}));
+}
+
+// commonware test_removed_blob_reopens_while_handle_alive.
+test "a removed blob reopens while its old handle is alive" {
+    var runner = try test_runner(.{});
+    defer runner.deinit();
+    const Root = struct {
+        fn body(store: storage_mod.Storage) !void {
+            const old = (try store.open("partition", "blob")).blob;
+            try old.write_at(0, "old", .{});
+            try store.remove("partition", null);
+            const current = try store.open("partition", "blob");
+            defer current.blob.close();
+            try testing.expectEqual(@as(u64, 0), current.len);
+            // Closing the removed handle must not affect its replacement.
+            old.close();
+            try current.blob.write_at(0, "new", .{});
+            try current.blob.sync();
+            var buffer: [3]u8 = undefined;
+            try current.blob.read_at(0, &buffer);
+            try testing.expectEqualStrings("new", &buffer);
+        }
+    };
+    try (try runner.start(Root.body, .{runner.storage()}));
+}
+
+test "the fault configuration carries over a restart (test_recover_snapshots_fault_configuration)" {
+    var runner = try test_runner(.{});
+    defer runner.deinit();
+    const Root = struct {
+        fn set(owner: *Runner) void {
+            owner.storage_fault_config().open_rate = .one;
+        }
+
+        fn open(store: storage_mod.Storage) !void {
+            try testing.expectError(error.Io, store.open("fault_config", "blob"));
+        }
+    };
+    try runner.start(Root.set, .{&runner});
+    try (try runner.start(Root.open, .{runner.storage()}));
+}
+
+const crash_epoch_stable_len = 32;
+const crash_epoch_pending_len = 256;
+const CrashEpoch = struct {
+    bytes: [crash_epoch_stable_len + crash_epoch_pending_len]u8,
+    audit: [4]u8,
+};
+
+/// Syncs a stable prefix, leaves a random subset of a pending suffix to survive the restart,
+/// and returns what the next run reads.
+fn crash_epoch(seed: u64) !CrashEpoch {
+    const faults: storage_mod.faulty.Config = .{ .write_rate = .{
+        .failure_rate = .zero,
+        .retention_rate = .literal(0.5),
+        .mode = .subset,
+    } };
+    var runner = try test_runner(.{ .seed = seed, .storage_faults = faults });
+    defer runner.deinit();
+    const Root = struct {
+        fn write(store: storage_mod.Storage) !void {
+            const blob = (try store.open("crash_epoch", "blob")).blob;
+            defer blob.close();
+            const stable: [crash_epoch_stable_len]u8 = @splat(0xA5);
+            const pending: [crash_epoch_pending_len]u8 = @splat(0x5A);
+            try blob.write_at(0, &stable, .{});
+            try blob.sync();
+            try blob.write_at(stable.len, &pending, .{});
+        }
+
+        fn read(store: storage_mod.Storage, bytes: []u8) !void {
+            const opened = try store.open("crash_epoch", "blob");
+            defer opened.blob.close();
+            @memset(bytes, 0);
+            try opened.blob.read_at(0, bytes[0..@intCast(opened.len)]);
+        }
+    };
+    var result: CrashEpoch = undefined;
+    try (try runner.start(Root.write, .{runner.storage()}));
+    try (try runner.start(Root.read, .{ runner.storage(), &result.bytes }));
+    result.audit = runner.storage_audit();
+    return result;
+}
+
+// commonware test_recover_random_crash_writes_is_seeded_and_epoch_scoped.
+test "crash writes are seeded and scoped to their run" {
+    const first = try crash_epoch(12345);
+    try testing.expectEqual(first, try crash_epoch(12345));
+    const different = try crash_epoch(54321);
+    try testing.expect(!std.mem.eql(u8, &first.bytes, &different.bytes));
+    for (first.bytes[0..crash_epoch_stable_len]) |byte| try testing.expectEqual(0xA5, byte);
+    const pending = first.bytes[crash_epoch_stable_len..];
+    try testing.expect(std.mem.indexOfScalar(u8, pending, 0) != null);
+    try testing.expect(std.mem.indexOfScalar(u8, pending, 0x5A) != null);
+}
+
 test "the runner's network connects tasks" {
     var runner = try test_runner(.{});
     defer runner.deinit();
