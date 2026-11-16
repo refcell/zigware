@@ -104,7 +104,10 @@ the registry API first and report it.
   thread after it has picked up another task's connect. `Threaded` retries an interrupted
   connect, and on Darwin the retry fails with EALREADY while the first attempt connects
   (`error.ConnectionPending`). The nonblocking connect above has no sleep task and no retried
-  connect. Whether it fixes the macOS failure is checked by repeated ReleaseSafe runs.
+  connect. Six manual ReleaseSafe runs after the fix all passed, where one in three had failed
+  before. Audit: no other call that `Threaded` retries after EINTR is unsafe (reads, writes,
+  polls, accepts, sleeps, futex waits, close), and library code no longer uses its connect
+  (AGENTS.md pitfalls).
 - io_uring (`production/ring.zig`) is a driver, not an executor: tasks stay on `std.Io`, and
   blob read/write/fsync and socket recv/sendmsg go through io_uring workers. Each commonware
   worker thread owns a ring; tasks on `std.Io.Threaded` are threads, so each thread that
