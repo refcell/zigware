@@ -3,6 +3,7 @@
 const std = @import("std");
 
 pub const acks = @import("acks.zig");
+pub const cache = @import("cache.zig");
 pub const certified = @import("certified.zig");
 pub const durability = @import("durability.zig");
 pub const floor = @import("floor.zig");
