@@ -77,7 +77,13 @@ resolver; those lanes are running, so do the types first and the actors as they 
   `verified{gpa, certificate}`, `discard`), `Pending`, `Mailbox` (`proposal`, `timeout`,
   `recovered`); `slot.Slot(D)` (proposal status and equivocation); `round.Round(S, D)` (the
   per-round state machine: leader, proposal, nullify/finalize decision and deadlines in
-  runtime nanoseconds, certificates, certification, replay).
+  runtime nanoseconds, certificates, certification, replay); `state.State(S, E, D)` (the
+  per-epoch state machine: `set_genesis`/`set_floor`, `try_propose`/`proposed`,
+  `try_verify`/`verified`, `add_notarization`/`add_nullification`/`add_finalization`,
+  `construct_notarize`/`construct_finalize`/`construct_nullify`, `certify_candidates`/
+  `certified`, `next_timeout`/`trigger_timeout`, `get_best_certificate`, `replay`, `prune`);
+  `views.ViewSet`/`ViewMap(T)`.
+- `consensus.simplex.actors.ask`: `Ask`, `Kind`, `Until`.
 
 ## Decisions
 - `Epoch`/`Height`/`View`/deltas are non-exhaustive `enum(u64)` so they compare with `==`,
@@ -156,3 +162,4 @@ resolver; those lanes are running, so do the types first and the actors as they 
 - 2026-11-13: batcher VoteTracker, Verifier, Round, and the batcher/voter mailboxes.
 - 2026-11-13: batcher actor on an Io.Queue inbox, tested on the deterministic runtime.
 - 2026-11-16: voter Slot and Round with their commonware tests.
+- 2026-11-16: voter State with the core state.rs tests (13 of 141 so far).

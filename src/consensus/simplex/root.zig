@@ -23,10 +23,13 @@ pub const actors = struct {
         pub const ingress = @import("actors/batcher/ingress.zig");
         pub const actor = @import("actors/batcher/actor.zig");
     };
+    pub const ask = @import("actors/ask.zig");
     pub const voter = struct {
         pub const ingress = @import("actors/voter/ingress.zig");
         pub const slot = @import("actors/voter/slot.zig");
         pub const round = @import("actors/voter/round.zig");
+        pub const views = @import("actors/voter/views.zig");
+        pub const state = @import("actors/voter/state.zig");
     };
 };
 
@@ -57,6 +60,9 @@ test {
     _ = @import("actors/batcher/actor_test.zig");
     _ = actors.voter.slot;
     _ = actors.voter.round;
+    _ = actors.voter.views;
+    _ = actors.voter.state;
+    _ = actors.ask;
     _ = scheme.bls12381_threshold.vrf;
     _ = scheme.bls12381_threshold.standard;
     _ = scheme.namespace;
