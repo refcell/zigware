@@ -777,3 +777,7 @@ test "deinit cancels pending verdict waits" {
         }
     }.body);
 }
+
+test {
+    _ = @import("delivery_fuzz_test.zig");
+}
