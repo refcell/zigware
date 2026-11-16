@@ -1350,3 +1350,32 @@ test "retain drops all" {
         }
     }.body);
 }
+
+test "shutdown aborts pending delivery" {
+    try base.run(10, struct {
+        fn body(io: Io) !void {
+            const setup = try BlockingSetup.init(io, &.{ 1, 2 }, .{});
+            defer setup.deinit();
+            try setup.add_link(base.link, 0, 1);
+            const consumer = try setup.make_consumer();
+            const pending_gate = try consumer.gate(complete);
+            const mailbox = try setup.spawn(0, consumer, try setup.make_producer(&.{}));
+            const prod2 = try setup.make_producer(&.{.{ 1, "data for key 1" }});
+            _ = try setup.spawn(1, try setup.make_consumer(), prod2);
+
+            try base.fetch(mailbox, 1);
+            var started = try consumer.next_started();
+            defer started.deinit();
+            try started.expect(1, &.{{}});
+            setup.stop(0);
+            setup.stop(1);
+            try setup.sleep(Duration.from_millis(100));
+            // Aborting the engine dropped the pending verdict wait. Commonware also counts
+            // the actor's running tasks; here the abort awaits every engine task, and
+            // testing.allocator reports anything the engine left behind.
+            try consumer.closed(pending_gate);
+            try setup.sleep(Duration.from_millis(100));
+            try testing.expect(consumer.try_event() == null);
+        }
+    }.body);
+}
