@@ -53,6 +53,7 @@ pub const mocks = struct {
     pub const equivocator = @import("mocks/equivocator.zig");
     pub const reconfigurer = @import("mocks/reconfigurer.zig");
     pub const nullify_only = @import("mocks/nullify_only.zig");
+    pub const twins = @import("mocks/twins.zig");
     pub const wrapped = @import("mocks/wrapped.zig");
 };
 
@@ -94,6 +95,7 @@ test {
     _ = scheme.bls12381_threshold.standard;
     _ = scheme.namespace;
     _ = scheme.reporter;
+    _ = mocks.twins;
     _ = scheme.ed25519;
     _ = scheme.bls12381_multisig;
     _ = scheme.secp256r1;

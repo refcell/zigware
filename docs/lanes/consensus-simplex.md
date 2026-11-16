@@ -103,6 +103,12 @@ resolver; those lanes are running, so do the types first and the actors as they 
   `init(gpa, io, rng, scheme, reporter, strategy, verify)` wraps reporter pointer `R`,
   verifying peer votes and faults when `verify` is set and dropping them for
   non-attributable schemes; certificates always pass. Activities stay borrowed.
+- `consensus.simplex.mocks.twins` (commonware `mocks/twins.rs`): `cases(gpa, rng,
+  Framework{participants, faults, rounds, mode, max_cases})` returns owned `Case`s
+  (`compromised` indices and a `Scenario`; `free_cases`). `Scenario.masks/route(view,
+  term_length, ...)`, `view_masks`/`view_route`, `partition`, `index_of`, and
+  `Elector(E)` (scripted leaders per term, then fallback `E`). `SplitTarget` is a local
+  stand-in until p2p's split senders land. Drawing matches rand 0.10 for the same RNG.
 - `consensus.simplex.mocks`: `relay.Relay(D, P)` (`deregister(key)` and `deregister_all`
   return once no delivery can reach the removed listeners), `application.Application(H, P)`
   (the automaton and relay, with simulated latency from p2p's `Normal`),
@@ -117,6 +123,11 @@ resolver; those lanes are running, so do the types first and the actors as they 
   `corrupt_signature`, `recovery_failure`), a by-value wrapper of a certificate scheme.
 
 ## Decisions
+- Twins: commonware's recursive generator helpers (compositions, the transition DFS, fault
+  allocation) are lexicographic successor steps and an odometer here (TigerStyle: no
+  recursion), emitting in the same order. The brute-force reference enumerator test is not
+  ported; the single-round space is checked against its closed form, and enumerated
+  multi-round scenarios are checked distinct.
 - `Epoch`/`Height`/`View`/deltas are non-exhaustive `enum(u64)` so they compare with `==`,
   hash, and never mix with each other or raw integers (commonware's newtypes).
 - `Round` is a `packed struct(u128)` so `==` works; its fields are public (`round.epoch`).
@@ -200,7 +211,8 @@ resolver; those lanes are running, so do the types first and the actors as they 
   received_certificates_are_reported, survives_burst, engine_shutdown (abort and graceful;
   commonware's running-task count waits on the runtime's task metrics), and
   attributable_reporter_filtering, and split_views_no_lockup (with the nullify-only mock).
-  Next: the twins mock, certified splits, twins, hailstorm, and the rest, seeded.
+  Next: certified splits, hailstorm, and the rest, seeded; the twins campaigns once p2p's
+  split senders and receivers land.
 - [ ] Fuzz targets (commonware consensus/fuzz).
 
 ## Log
@@ -245,3 +257,4 @@ resolver; those lanes are running, so do the types first and the actors as they 
   attributable_reporter_filtering DST; every DST engine reports through the wrapper.
 - 2026-11-16: Byzantine reconfigurer mock with its DST.
 - 2026-11-16: nullify-only mock and the split_views_no_lockup DST.
+- 2026-11-16: twins scenario generator (mocks/twins.rs), iterative, with its core tests.
