@@ -112,7 +112,10 @@ that harness. It builds on `coding` (ReedSolomon), `consensus.types.coding.Commi
   job; the tests that drive jobs by hand (`finished`, unstarted engines) check the same
   outcomes through the mailbox. The engine's event loop follows the buffered broadcast
   engine: forwarder tasks feed one signal in commonware's biased order (peer sets, mailbox,
-  network).
+  network). Tests that drive commonware's unstarted engine call its public handlers
+  (`handle_gather`, `handle_network_shard`, `disperse_shards`, `cache_block`, `trim`,
+  `subscribe_assigned`, `subscribe_commitment`) after `attach_sender` and
+  `update_primary_peers`, and inspect `records` and `buffered`.
 
 ## Backlog
 - [x] broadcast lib.rs traits.
@@ -127,7 +130,11 @@ that harness. It builds on `coding` (ReedSolomon), `consensus.types.coding.Commi
 - [ ] Once ancestry and application land: move validation's copies of `has_contiguous_height`
   and `is_block_in_expected_epoch` to `marshal.ancestry` and `marshal.application.validation`.
 - [x] marshal coding `shards`: mailbox, metrics, reconstruction state, engine, e2e test.
-- [ ] marshal coding `shards`: the rest of engine.rs's tests.
+- [ ] marshal coding `shards`: the rest of engine.rs's tests (25 of about 70 ported: the
+  window, subscription, epoch, assigned-shard, leader duplicate and equivocation, and
+  failed-reconstruction tests).
+- [ ] marshal coding `variant` (Coding) against core's `assert_variant` (with `clone_block`,
+  `deinit_block`) and `assert_buffer` on the shards Mailbox.
 - [x] marshal coding `validation` (proposal, block, reconstruction) with its 17 tests.
 - [ ] marshal coding `variant` (Coding), `marshaled` (Marshaled, MarshaledConfig), once
   consensus-marshal's core lands.
@@ -146,3 +153,5 @@ that harness. It builds on `coding` (ReedSolomon), `consensus.types.coding.Commi
 - 2026-11-16: marshal coding validation with its 17 tests.
 - 2026-11-16: marshal coding shards engine (mailbox, metrics, state, engine) with the e2e
   dispersal test; coding moved onto `marshal.mocks.block` and marshal/root.zig.
+- 2026-11-16: 24 more shards engine tests: fixture tests on p2p.simulated and handler tests
+  on an unstarted engine (`engine_harness.zig`).

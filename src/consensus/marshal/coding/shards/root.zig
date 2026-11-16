@@ -25,4 +25,5 @@ test {
     _ = @import("metrics.zig");
     _ = @import("state.zig");
     _ = @import("engine_test.zig");
+    _ = @import("engine_handlers_test.zig");
 }

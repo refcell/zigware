@@ -111,7 +111,7 @@ pub fn Engine(comptime T: type) type {
 
         /// The lifecycle of one observed commitment. Its round orders eviction and names
         /// the epoch whose participants classify its shards.
-        const Record = struct {
+        pub const Record = struct {
             round: Round,
             /// Null while reconstructing.
             block: ?Coded = null,
@@ -164,6 +164,8 @@ pub fn Engine(comptime T: type) type {
         receiver: R = undefined,
         subscription: Subscription = undefined,
         started: bool = false,
+        /// Whether `sender` is set (by `start` or `attach_sender`).
+        sender_attached: bool = false,
 
         /// Guards the slots below; every task signals `condition` when it changes them.
         mutex: Io.Mutex = .init,
@@ -224,6 +226,7 @@ pub fn Engine(comptime T: type) type {
             engine.subscription = subscription;
             engine.decoded_capacity = receiver.capacity();
             engine.started = true;
+            engine.sender_attached = true;
             assert(engine.decoded_capacity > 0);
             return engine.io.concurrent(run, .{engine}) catch |err| {
                 engine.destroy();
@@ -258,7 +261,9 @@ pub fn Engine(comptime T: type) type {
                         // A consensus signal may have admitted a record beyond the window.
                         engine.trim();
                     },
-                    .network => |decoded| try engine.handle_network_shard(decoded),
+                    .network => |decoded| {
+                        try engine.handle_network_shard(decoded.peer, decoded.shard);
+                    },
                     .stopped => return,
                 }
             }
@@ -376,8 +381,8 @@ pub fn Engine(comptime T: type) type {
                 shard.deinit(gpa);
             }
             engine.decoded.deinit(gpa);
+            if (engine.sender_attached) engine.sender.deinit();
             if (engine.started) {
-                engine.sender.deinit();
                 engine.receiver.deinit();
                 engine.subscription.deinit();
             }
@@ -466,6 +471,11 @@ pub fn Engine(comptime T: type) type {
             engine.aggregate_peers = aggregate;
             gpa.free(engine.primary_peers);
             engine.primary_peers = primary;
+            engine.drop_unbuffered_peers();
+        }
+
+        fn drop_unbuffered_peers(engine: *Self) void {
+            const gpa = engine.gpa;
             var index: usize = 0;
             while (index < engine.peer_buffers.entries.items.len) {
                 const entry = &engine.peer_buffers.entries.items[index];
@@ -476,6 +486,56 @@ pub fn Engine(comptime T: type) type {
                 free_queue(gpa, &entry.value);
                 _ = engine.peer_buffers.entries.orderedRemove(index);
             }
+        }
+
+        ////////////////////////////////////////
+        // Direct handlers: commonware's tests drive an unstarted engine through its handlers
+        // (`handle_gather`, `handle_network_shard`, `disperse_shards`, `cache_block`, `trim`,
+        // `subscribe_assigned`, and these) and inspect its records and peer buffers.
+        ////////////////////////////////////////
+
+        /// Gives an unstarted engine the sender (owned) its handlers send through.
+        pub fn attach_sender(engine: *Self, sender: S) void {
+            assert(!engine.started and !engine.sender_attached);
+            engine.sender = sender;
+            engine.sender_attached = true;
+        }
+
+        /// Replaces the primary peers allowed to buffer shards (commonware
+        /// `update_primary_peers`), dropping the buffers of the others.
+        pub fn update_primary_peers(engine: *Self, peers: []const P) Allocator.Error!void {
+            const primary = try engine.gpa.dupe(P, peers);
+            std.sort.pdq(P, primary, {}, less_than);
+            engine.gpa.free(engine.primary_peers);
+            engine.primary_peers = primary;
+            engine.drop_unbuffered_peers();
+            assert(engine.peer_buffers.count() <= engine.primary_peers.len);
+        }
+
+        fn less_than(_: void, a: P, b: P) bool {
+            return P.order(a, b) == .lt;
+        }
+
+        /// Subscribes `responder` to the block with `commitment`.
+        pub fn subscribe_commitment(
+            engine: *Self,
+            commitment: Commitment,
+            responder: oneshot.Sender(Coded),
+        ) Allocator.Error!void {
+            const block = engine.block_by_commitment(commitment);
+            const map = &engine.commitment_subscriptions;
+            try engine.subscribe_block(map, commitment, block, responder);
+        }
+
+        /// The shards for `commitment` buffered from `peer`.
+        pub fn buffered(engine: *const Self, peer: P, commitment: Commitment) usize {
+            const queue = engine.peer_buffers.get(peer) orelse return 0;
+            var count: usize = 0;
+            for (0..queue.len) |index| {
+                if (queue.at(index).commitment().eql(commitment)) count += 1;
+            }
+            assert(count <= queue.len);
+            return count;
         }
 
         fn contains(peers: []const P, peer: P) bool {
@@ -541,7 +601,7 @@ pub fn Engine(comptime T: type) type {
 
         /// Answers at once if the local assigned shard is verified or this node proposed the
         /// block; otherwise waits.
-        fn subscribe_assigned(
+        pub fn subscribe_assigned(
             engine: *Self,
             commitment: Commitment,
             responder: oneshot.Sender(void),
@@ -606,7 +666,7 @@ pub fn Engine(comptime T: type) type {
         }
 
         /// Evicts the lowest-round records (ties in commitment order) while over capacity.
-        fn trim(engine: *Self) void {
+        pub fn trim(engine: *Self) void {
             while (engine.records.count() > engine.config.records) {
                 const entries = engine.records.items();
                 var lowest: usize = 0;
@@ -637,7 +697,7 @@ pub fn Engine(comptime T: type) type {
         /// Caches `block` (owned) at `round` and notifies its subscribers. With a record, the
         /// record must be of `round`'s epoch and keeps a block it already cached; without one,
         /// the block is retained only if the window admits `round`.
-        fn cache_block(engine: *Self, round: Round, block: Coded) Allocator.Error!void {
+        pub fn cache_block(engine: *Self, round: Round, block: Coded) Allocator.Error!void {
             var owned = block;
             const gpa = engine.gpa;
             if (engine.records.get(owned.commitment())) |record| {
@@ -670,7 +730,7 @@ pub fn Engine(comptime T: type) type {
 
         /// Sends each participant its shard and the tracked non-participants this node's
         /// shard, then caches the block (owned).
-        fn disperse_shards(engine: *Self, round: Round, block: Coded) Error!void {
+        pub fn disperse_shards(engine: *Self, round: Round, block: Coded) Error!void {
             var owned = block;
             const gpa = engine.gpa;
             const commitment = owned.commitment();
@@ -751,7 +811,7 @@ pub fn Engine(comptime T: type) type {
 
         /// Starts reconstructing a commitment consensus observed at `round`, ingesting the
         /// shards buffered for it. An existing record only records the observation.
-        fn handle_gather(engine: *Self, commitment: Commitment, round: Round) Error!void {
+        pub fn handle_gather(engine: *Self, commitment: Commitment, round: Round) Error!void {
             if (engine.records.get(commitment)) |record| {
                 // A conflicting epoch is ignored; the round never moves backward.
                 const same_epoch = record.round.epoch.get() == round.epoch.get();
@@ -778,10 +838,10 @@ pub fn Engine(comptime T: type) type {
             scheme: anytype,
         ) Allocator.Error!bool {
             const gpa = engine.gpa;
-            var buffered: std.ArrayList(Decoded) = .empty;
+            var taken: std.ArrayList(Decoded) = .empty;
             defer {
-                for (buffered.items) |*decoded| decoded.shard.deinit(gpa);
-                buffered.deinit(gpa);
+                for (taken.items) |*decoded| decoded.shard.deinit(gpa);
+                taken.deinit(gpa);
             }
             for (engine.peer_buffers.items()) |*entry| {
                 const queue = &entry.value;
@@ -791,17 +851,17 @@ pub fn Engine(comptime T: type) type {
                         index += 1;
                         continue;
                     }
-                    try buffered.ensureUnusedCapacity(gpa, 1);
+                    try taken.ensureUnusedCapacity(gpa, 1);
                     // `swap_remove_back`: the last shard takes the removed one's place.
                     const shard = queue.at(index);
                     queue.atPtr(index).* = queue.at(queue.len - 1);
                     _ = queue.popBack();
-                    buffered.appendAssumeCapacity(.{ .peer = entry.key, .shard = shard });
+                    taken.appendAssumeCapacity(.{ .peer = entry.key, .shard = shard });
                 }
             }
             var progressed = false;
-            while (buffered.items.len > 0) {
-                const decoded = buffered.orderedRemove(0);
+            while (taken.items.len > 0) {
+                const decoded = taken.orderedRemove(0);
                 const state = &engine.records.get(commitment).?.reconstruction.?;
                 const strategy = engine.config.strategy;
                 const blocker = &engine.config.blocker;
@@ -846,23 +906,24 @@ pub fn Engine(comptime T: type) type {
             return scheme.me() != null;
         }
 
-        fn handle_network_shard(engine: *Self, decoded: Decoded) Error!void {
-            var shard = decoded.shard;
+        /// Handles a decoded shard (owned) from `peer`.
+        pub fn handle_network_shard(engine: *Self, peer: P, shard_value: ShardType) Error!void {
+            var shard = shard_value;
             const gpa = engine.gpa;
-            engine.shard_metrics.shard_received(decoded.peer);
+            engine.shard_metrics.shard_received(peer);
             const commitment = shard.commitment();
             if (!engine.should_handle_network_shard(commitment)) return shard.deinit(gpa);
             const record = engine.records.get(commitment) orelse
-                return engine.buffer_peer_shard(decoded.peer, shard);
+                return engine.buffer_peer_shard(peer, shard);
             const state = if (record.reconstruction) |*value|
                 value
             else
-                return engine.buffer_peer_shard(decoded.peer, shard);
+                return engine.buffer_peer_shard(peer, shard);
             const scheme = engine.config.scheme_provider.scheme(record.round.epoch) orelse
                 return shard.deinit(gpa);
             const blocker = &engine.config.blocker;
             const strategy = engine.config.strategy;
-            if (try state.on_network_shard(gpa, decoded.peer, shard, scheme, blocker, strategy)) {
+            if (try state.on_network_shard(gpa, peer, shard, scheme, blocker, strategy)) {
                 try engine.try_advance(commitment);
             }
         }
