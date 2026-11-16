@@ -88,6 +88,10 @@ placeholder until this lands, so land `Strategy` first and tell the coordinator 
   bounded by `cpus_max` (1024), `domains_max` (256), and `list_len_max` (256). zigware's pool
   is one group, so group leases, homing, and affinity writes (`sched_setaffinity`) are not
   ported; a grouped pool will build on this model.
+- Adaptive spawn: every spawner counts as `outside` (pool workers are `std.Io` tasks with no
+  identity to record), and a measured offloaded job reports its job and round-trip times when
+  `block_on` takes its result, since every Zig task is awaited. Descendant placement is not
+  chosen: the pool is one group.
 - Fallible ops return the first error in chunk order (commonware allows any).
 - `run_tiles` plans at most 64 workers (one pool job each); `Tiles.fill_collect` returns an
   allocated slice and `OutOfMemory` if a worker's result list cannot grow.
@@ -102,7 +106,7 @@ placeholder until this lands, so land `Strategy` first and tell the coordinator 
 - [x] parallel mocks.rs (Explorer, explore, pooled, inlined, pending) with its tests.
 - [x] parallel policy.rs and topology.rs: the adaptive policy and the topology model.
 - [x] parallel: let `Rayon` consult a `Policy` (opt-in `with_policy`), timing runs.
-- [ ] parallel: adaptive spawn (inline vs offload) through the policy's spawn decisions.
+- [x] parallel: adaptive spawn (inline vs offload) through the policy's spawn decisions.
 - [x] allocator: an allocator wrapper with commonware's metrics and purge/reserve
   configuration; no mimalloc (zero deps).
 - [x] bench: the benchmark workload abstraction (lib.rs) and `zig build bench`.
@@ -111,6 +115,7 @@ placeholder until this lands, so land `Strategy` first and tell the coordinator 
 - [ ] Fuzz targets and benches.
 
 ## Log
+- 2026-11-16: adaptive spawn: `Rayon.with_policy` inlines or offloads per call site.
 - 2026-11-13: `Rayon.with_policy`: operations adapt once at their outermost call (keyed by
   return address, length bucket, work bucket), meter pool-job busy time, record only successes.
 - 2026-11-13: parallel topology model (LLC detection, group width, partition, reservations).

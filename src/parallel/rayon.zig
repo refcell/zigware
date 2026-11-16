@@ -198,16 +198,40 @@ pub const Rayon = struct {
     }
 
     /// Hands `task`'s job to the pool, or runs it inline when the pool has no workers (like
-    /// commonware's single-worker pool), whatever the planning parallelism. `len` sizes the job
-    /// for adaptive strategies.
+    /// commonware's single-worker pool), whatever the planning parallelism. With a policy, the
+    /// call site learns whether a job of about `len` items runs faster inline than the
+    /// hand-off costs. Every caller counts as outside the pool (`Spawner.outside`): pool
+    /// workers are `std.Io` tasks, which carry no identity a thread-local could hold.
     pub fn spawn(rayon: Rayon, len: usize, task: anytype) void {
-        _ = len;
-        if (rayon.pool.threads == 0) {
+        const threads: usize = rayon.pool.threads;
+        if (threads == 0) {
             task.run_inline();
             assert(task.is_done());
             return;
         }
-        task.offload(rayon.pool);
+        const policy = rayon.policy orelse return task.offload(rayon.pool);
+        const site = @returnAddress();
+        const plan = policy.choose_spawn(site, len, threads, .outside);
+        switch (plan.execution) {
+            .inlined => {
+                const start = if (plan.measure) now_ns(rayon.pool.io) else 0;
+                task.run_inline();
+                assert(task.is_done());
+                if (!plan.measure) return;
+                const job_ns = now_ns(rayon.pool.io) -| start;
+                policy.record_spawn_inline(site, len, threads, job_ns);
+            },
+            .offload => {
+                if (!plan.measure) return task.offload(rayon.pool);
+                task.offload_measured(rayon.pool, .{
+                    .policy = policy,
+                    .site = site,
+                    .len = len,
+                    .threads = threads,
+                    .plan = plan,
+                });
+            },
+        }
     }
 
     pub const block_on = task_module.block_on;

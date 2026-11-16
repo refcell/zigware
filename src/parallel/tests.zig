@@ -829,6 +829,36 @@ const Failing = struct {
     }
 };
 
+test "an adaptive Rayon times spawned jobs and their hand-off" {
+    const pool = try create_pool(3);
+    defer pool.destroy();
+    var policy = parallel.Policy.init(testing.io);
+    const strategy = Rayon.init(pool).with_policy(&policy);
+    // The first spawn from a call site offloads, measured.
+    var first: parallel.Task(ExerciseOps) = .init(.{});
+    strategy.spawn(64, &first);
+    try testing.expect(first.is_offloaded());
+    try testing.expectEqual(@as(u64, 42), strategy.block_on(&first));
+    const entry = policy.spawn_entries.entries[0];
+    try testing.expect(entry.job_ns.get() != null);
+    try testing.expect(entry.overhead_ns.get() != null);
+    // Later spawns from one call site, inline or offloaded, return the same result.
+    for (0..50) |_| {
+        var task: parallel.Task(ExerciseOps) = .init(.{});
+        strategy.spawn(64, &task);
+        try testing.expectEqual(@as(u64, 42), strategy.block_on(&task));
+    }
+    try testing.expectEqual(@as(usize, 2), policy.spawn_len());
+
+    // A pool without workers runs spawned jobs inline and never consults the policy.
+    const empty = try create_pool(0);
+    defer empty.destroy();
+    var inline_task: parallel.Task(ExerciseOps) = .init(.{});
+    Rayon.init(empty).with_policy(&policy).spawn(64, &inline_task);
+    try testing.expect(!inline_task.is_offloaded());
+    try testing.expectEqual(@as(usize, 2), policy.spawn_len());
+}
+
 test "an adaptive Rayon learns each call site's paths and records only successes" {
     const pool = try create_pool(3);
     defer pool.destroy();
