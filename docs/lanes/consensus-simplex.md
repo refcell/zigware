@@ -221,8 +221,18 @@ resolver; those lanes are running, so do the types first and the actors as they 
 - [x] config.rs (Config, Floor, skip and forward policies) with its validation rules.
 - [x] simplex metrics, and the actors (voter, batcher, resolver) and engine, on p2p's
   simulated network and the deterministic runtime: 4 honest nodes finalize.
-- [ ] Port the rest of state.rs's tests (13 of 141), the resolver actor.rs tests, and the
+- [ ] Port the rest of state.rs's tests (37 of 141), the resolver actor.rs tests, and the
   voter/resolver ingress tests; add actor metrics. (Resolver state.rs: all 23 done.)
+  Handed to the runtime lane on 2026-11-16. Ported in voter/state_test.zig, in
+  commonware's order: everything from `certificate_candidates_respect_force_flag` through
+  `parent_payload_reports_missing_term_anchor` (including the timeout, stall, inactivity,
+  and skip-budget tests, without their timeout-metric counters, and except
+  `decided_views_close_their_view_span`, which waits on view spans), plus
+  `certification_lifecycle`, `entry_certificate_prioritizes_...`, `only_notarize_before_
+  nullify`, `nullification_skips_to_next_term_start`, `term_safety_blocks_finalize_after_
+  nullify`, `try_verify_waits_for_missing_parent_certification`, and the
+  `parent_payload_rejects_intra_term_view_skip` case. Everything from
+  `optimistic_views_zero_disables_intra_term_lookahead` on is still to do.
 - [ ] simplex mod.rs tests (ed25519, round robin). Done: all_online (Debug runs 50 views
   where commonware runs 100), partition, slow_and_lossy_links, determinism, the Byzantine
   conflicter, nuller, impersonator, reconfigurer, invalid (2 seeds each, 20 or 50 views;
@@ -316,3 +326,4 @@ resolver; those lanes are running, so do the types first and the actors as they 
   a floor finalization and a certifier; the mock reporter keeps finalizations.
 - 2026-11-16: voter state.rs timeout, stall, and inactivity tests (26 of 141); timeout-metric
   assertions wait on the voter's metrics.
+- 2026-11-16: voter state.rs skip-budget, timeout-reset, and term-anchor tests (37 of 141).

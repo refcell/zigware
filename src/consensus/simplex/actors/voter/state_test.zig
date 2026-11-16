@@ -3,6 +3,7 @@
 
 const std = @import("std");
 const testing = std.testing;
+const assert = std.debug.assert;
 const Io = std.Io;
 const cryptography = @import("cryptography");
 const parallel = @import("parallel");
@@ -45,20 +46,32 @@ fn proposal(epoch: u64, view: u64, parent: u64, payload: u8) Proposal {
 
 fn build_notarization(f: *const Fixture, value: Proposal) !Notarization {
     var votes: [4]Notarize = undefined;
-    for (&votes, 0..) |*vote, i| vote.* = (try Notarize.sign(gpa, &f.schemes[i], value)).?;
-    return Notarization.from_votes(gpa, &f.verifier, &votes, sequential);
+    const n = f.schemes.len;
+    assert(n <= votes.len);
+    for (votes[0..n], f.schemes) |*vote, *scheme| {
+        vote.* = (try Notarize.sign(gpa, scheme, value)).?;
+    }
+    return Notarization.from_votes(gpa, &f.verifier, votes[0..n], sequential);
 }
 
 fn build_finalization(f: *const Fixture, value: Proposal) !Finalization {
     var votes: [4]Finalize = undefined;
-    for (&votes, 0..) |*vote, i| vote.* = (try Finalize.sign(gpa, &f.schemes[i], value)).?;
-    return Finalization.from_votes(gpa, &f.verifier, &votes, sequential);
+    const n = f.schemes.len;
+    assert(n <= votes.len);
+    for (votes[0..n], f.schemes) |*vote, *scheme| {
+        vote.* = (try Finalize.sign(gpa, scheme, value)).?;
+    }
+    return Finalization.from_votes(gpa, &f.verifier, votes[0..n], sequential);
 }
 
 fn build_nullification(f: *const Fixture, round: Rnd) !Nullification {
     var votes: [4]Nullify = undefined;
-    for (&votes, 0..) |*vote, i| vote.* = (try Nullify.sign(gpa, &f.schemes[i], round)).?;
-    return Nullification.from_votes(gpa, &f.verifier, &votes, sequential);
+    const n = f.schemes.len;
+    assert(n <= votes.len);
+    for (votes[0..n], f.schemes) |*vote, *scheme| {
+        vote.* = (try Nullify.sign(gpa, scheme, round)).?;
+    }
+    return Nullification.from_votes(gpa, &f.verifier, votes[0..n], sequential);
 }
 
 const Options = struct {
@@ -72,9 +85,13 @@ const Options = struct {
     leader_timeout_ms: u64 = 1000,
     certification_timeout_ms: u64 = 2000,
     timeout_retry_ms: u64 = 3000,
+    validators: u32 = 4,
+    /// Terms that may be skipped past the last finalization (0 disables skipping).
+    skip_budget: u64 = 4,
 };
 
-/// A 4-participant fixture and a state that entered view 1. Must not move once started.
+/// A fixture of `validators` participants and a state that entered view 1. Must not move
+/// once started.
 const Env = struct {
     fixture: Fixture,
     elector: Elector,
@@ -82,7 +99,7 @@ const Env = struct {
 
     fn start(self: *Env, io: Io, options: Options) !void {
         var rng = utils.rng.test_rng();
-        self.fixture = try ed25519.fixture(Digest, gpa, &rng, "ns", 4);
+        self.fixture = try ed25519.fixture(Digest, gpa, &rng, "ns", options.validators);
         errdefer self.fixture.deinit(gpa);
         var builder = elector.RoundRobin(cryptography.Sha256).default();
         if (options.term_length > 1) builder = builder.with_term(
@@ -90,7 +107,7 @@ const Env = struct {
             .from_millis(options.stall_timeout_ms),
             .new(options.optimistic_views),
         );
-        self.elector = try builder.build(gpa, 4);
+        self.elector = try builder.build(gpa, options.validators);
         const scheme = if (options.signer) |i| &self.fixture.schemes[i] else &self.fixture.verifier;
         self.state = State.init(gpa, io, .{
             .scheme = scheme,
@@ -100,7 +117,7 @@ const Env = struct {
             .leader_timeout = .from_millis(options.leader_timeout_ms),
             .certification_timeout = .from_millis(options.certification_timeout_ms),
             .timeout_retry = .from_millis(options.timeout_retry_ms),
-            .skip_budget = 4,
+            .skip_budget = options.skip_budget,
         });
         try self.state.set_genesis(genesis());
     }
@@ -841,6 +858,250 @@ test "voter state inactivity timeout latches on an equivocated proposal" {
             const latched = state.next_timeout();
             try testing.expectEqual(.inactivity, latched.reason);
             try testing.expectEqual(now, latched.deadline);
+        }
+    }.body);
+}
+
+test "voter state entering the next view resets expired timeout state" {
+    try run(struct {
+        fn body(io: Io) !void {
+            var env: Env = undefined;
+            try env.start(io, .{ .signer = 0, .epoch = 13, .view_retention = 3 });
+            defer env.stop();
+            const state = &env.state;
+            state.trigger_timeout(.new(1), .leader_timeout);
+            try testing.expect(state.next_timeout().deadline <= context.now_ns(io));
+            try testing.expect(!(try state.construct_nullify(.new(1), .leader_timeout)).?.retry);
+            const retry = state.next_timeout();
+            try testing.expectEqual(context.now_ns(io) + 3 * second_ns, retry.deadline);
+            try testing.expectEqual(.retry, retry.reason);
+            // The next view starts with a fresh leader timeout, not the old retry.
+            const nullified = try build_nullification(&env.fixture, .new(.new(13), .new(1)));
+            try testing.expect(try state.add_nullification(nullified));
+            try testing.expectEqual(2, state.current_view().get());
+            const fresh = state.next_timeout();
+            try testing.expectEqual(context.now_ns(io) + second_ns, fresh.deadline);
+            try testing.expectEqual(.leader_timeout, fresh.reason);
+            try testing.expect(fresh.deadline != retry.deadline);
+        }
+    }.body);
+}
+
+/// Skips each of `views` on an inactivity hint (an immediate timeout, a first nullify, and
+/// a nullification).
+fn skip_views(env: *Env, io: Io, views: []const u64) !void {
+    const state = &env.state;
+    for (views) |value| {
+        const view: View = .new(value);
+        try testing.expectEqual(view, state.current_view());
+        const now = context.now_ns(io);
+        state.trigger_timeout(view, .inactivity);
+        const timeout = state.next_timeout();
+        try testing.expectEqual(now, timeout.deadline);
+        try testing.expectEqual(.inactivity, timeout.reason);
+        try testing.expect(!(try state.construct_nullify(view, .inactivity)).?.retry);
+        const epoch = state.epoch.get();
+        const nullified = try build_nullification(&env.fixture, .new(.new(epoch), view));
+        try testing.expect(try state.add_nullification(nullified));
+    }
+}
+
+/// An inactivity hint at `view` is deferred to the leader deadline (no skip budget left).
+fn expect_deferred(env: *Env, io: Io, view: u64) !void {
+    const now = context.now_ns(io);
+    env.state.trigger_timeout(.new(view), .inactivity);
+    const timeout = env.state.next_timeout();
+    try testing.expectEqual(now + second_ns, timeout.deadline);
+    try testing.expectEqual(.leader_timeout, timeout.reason);
+}
+
+test "voter state skip budget allows repeated leaders" {
+    try run(struct {
+        fn body(io: Io) !void {
+            var env: Env = undefined;
+            try env.start(io, .{ .signer = 0, .epoch = 7, .validators = 2, .skip_budget = 3 });
+            defer env.stop();
+            const first_leader = env.state.leader_index(.new(1)).?;
+            try skip_views(&env, io, &.{ 1, 2, 3 });
+            try testing.expectEqual(first_leader, env.state.leader_index(.new(3)).?);
+            try expect_deferred(&env, io, 4);
+        }
+    }.body);
+}
+
+test "voter state skip budget counts terms" {
+    try run(struct {
+        fn body(io: Io) !void {
+            var env: Env = undefined;
+            try env.start(io, .{ .signer = 0, .epoch = 7, .term_length = 5, .skip_budget = 2 });
+            defer env.stop();
+            try skip_views(&env, io, &.{ 1, 6 });
+            try expect_deferred(&env, io, 11);
+        }
+    }.body);
+}
+
+test "voter state finalization restores a pending skip" {
+    try run(struct {
+        fn body(io: Io) !void {
+            var env: Env = undefined;
+            try env.start(io, .{ .epoch = 9, .skip_budget = 1 });
+            defer env.stop();
+            const state = &env.state;
+            const value = proposal(9, 1, 0, 123);
+            const added = try state.add_notarization(try build_notarization(&env.fixture, value));
+            try testing.expect(added.added);
+            var ready: std.ArrayList(Proposal) = .empty;
+            defer ready.deinit(gpa);
+            try candidate_views(state, &ready);
+            try testing.expectEqual(1, ready.items.len);
+            try testing.expect(ready.items[0].eql(value));
+            try testing.expect(try state.certified(.new(1), true) != null);
+            try testing.expectEqual(2, state.current_view().get());
+            const now = context.now_ns(io);
+            // Certified but unfinalized view 1 spends the budget, so the hint waits.
+            try expect_deferred(&env, io, 2);
+            _ = try state.add_finalization(try build_finalization(&env.fixture, value));
+            try testing.expectEqual(2, state.current_view().get());
+            const restored = state.next_timeout();
+            try testing.expectEqual(now, restored.deadline);
+            try testing.expectEqual(.inactivity, restored.reason);
+        }
+    }.body);
+}
+
+test "voter state with skipping disabled defers inactivity to the leader deadline" {
+    try run(struct {
+        fn body(io: Io) !void {
+            var env: Env = undefined;
+            try env.start(io, .{ .epoch = 7, .skip_budget = 0 });
+            defer env.stop();
+            try expect_deferred(&env, io, 1);
+        }
+    }.body);
+}
+
+test "voter state with skipping disabled defers a leader nullify" {
+    try run(struct {
+        fn body(io: Io) !void {
+            var env: Env = undefined;
+            try env.start(io, .{ .epoch = 7, .skip_budget = 0 });
+            defer env.stop();
+            const state = &env.state;
+            const now = context.now_ns(io);
+            try testing.expect(try state.set_proposal(.new(1), &proposal(7, 1, 0, 124)));
+            state.trigger_timeout(.new(1), .leader_nullify);
+            const timeout = state.next_timeout();
+            try testing.expectEqual(now + 2 * second_ns, timeout.deadline);
+            try testing.expectEqual(.certification_timeout, timeout.reason);
+        }
+    }.body);
+}
+
+test "voter state repeated timeout hints keep the first expired deadline" {
+    try run(struct {
+        fn body(io: Io) !void {
+            var env: Env = undefined;
+            try env.start(io, .{ .signer = 0, .epoch = 12, .view_retention = 3 });
+            defer env.stop();
+            const state = &env.state;
+            const view = state.current_view();
+            state.trigger_timeout(view, .leader_nullify);
+            const expired = state.next_timeout();
+            try io.sleep(.fromSeconds(1), .awake);
+            state.trigger_timeout(view, .leader_timeout);
+            try testing.expectEqual(expired, state.next_timeout());
+            try testing.expect(!(try state.construct_nullify(view, .leader_nullify)).?.retry);
+            state.trigger_timeout(view, .leader_timeout);
+            try testing.expect((try state.construct_nullify(view, .retry)).?.retry);
+        }
+    }.body);
+}
+
+/// With terms of 5 views: certifies a view-3 parent (payload `payload`), adds a
+/// nullification for each of `nullified`, and returns view `child`'s parent payload.
+fn anchored_parent_payload(
+    io: Io,
+    payload: u8,
+    nullified: []const u64,
+    child: u64,
+) !State.PayloadResult {
+    var env: Env = undefined;
+    try env.start(io, .{ .view_retention = 20, .term_length = 5 });
+    defer env.stop();
+    const state = &env.state;
+    const parent = proposal(1, 3, 0, payload);
+    const added = try state.add_notarization(try build_notarization(&env.fixture, parent));
+    try testing.expect(added.added);
+    try testing.expect(try state.certified(.new(3), true) != null);
+    for (nullified) |view| {
+        const nullification = try build_nullification(&env.fixture, .new(.new(1), .new(view)));
+        try testing.expect(try state.add_nullification(nullification));
+    }
+    return state.parent_payload(&proposal(1, child, 3, 7));
+}
+
+fn expect_payload(result: State.PayloadResult, payload: u8) !void {
+    try testing.expect(result == .payload);
+    try testing.expect(result.payload.eql(Digest.fill(payload)));
+}
+
+test "voter state parent payload uses term-skip nullification anchors" {
+    try run(struct {
+        fn body(io: Io) !void {
+            // View 11 starts term 3, so the intra-term skip check does not apply.
+            try expect_payload(try anchored_parent_payload(io, 42, &.{ 4, 6 }, 11), 42);
+            // View 16 starts term 4: the rest of term 1 and terms 2 and 3 are anchored.
+            try expect_payload(try anchored_parent_payload(io, 42, &.{ 4, 6, 11 }, 16), 42);
+        }
+    }.body);
+}
+
+test "voter state parent payload accepts a certified parent covered by a nullification" {
+    try run(struct {
+        fn body(io: Io) !void {
+            // The parent view's own nullification covers the rest of term 1.
+            try expect_payload(try anchored_parent_payload(io, 42, &.{ 3, 6 }, 11), 42);
+        }
+    }.body);
+}
+
+test "voter state parent payload reports a missing term anchor" {
+    try run(struct {
+        fn body(io: Io) !void {
+            // Term 2's nullification (view 6) is missing.
+            try expect_err(try anchored_parent_payload(io, 9, &.{4}, 11), .{
+                .missing_nullification = .{
+                    .proposal_view = .new(11),
+                    .parent_view = .new(3),
+                    .missing_view = .new(6),
+                },
+            });
+        }
+    }.body);
+}
+
+test "voter state broadcasts each certificate once" {
+    try run(struct {
+        fn body(io: Io) !void {
+            var env: Env = undefined;
+            try env.start(io, .{ .epoch = 11, .view_retention = 6 });
+            defer env.stop();
+            const state = &env.state;
+            const f = &env.fixture;
+            _ = try state.add_notarization(try build_notarization(f, proposal(11, 3, 0, 50)));
+            try testing.expect(state.broadcast_notarization(.new(3)) != null);
+            try testing.expect(state.broadcast_notarization(.new(3)) == null);
+            try testing.expect(state.notarization(.new(3)) != null);
+            const nullified = try build_nullification(f, .new(.new(11), .new(4)));
+            _ = try state.add_nullification(nullified);
+            try testing.expect(state.broadcast_nullification(.new(4)) != null);
+            try testing.expect(state.broadcast_nullification(.new(4)) == null);
+            try testing.expect(state.nullification(.new(4)) != null);
+            _ = try state.add_finalization(try build_finalization(f, proposal(11, 5, 0, 51)));
+            try testing.expect(state.broadcast_finalization(.new(5)) != null);
+            try testing.expect(state.broadcast_finalization(.new(5)) == null);
+            try testing.expect(state.finalization(.new(5)) != null);
         }
     }.body);
 }
