@@ -9,4 +9,5 @@ test {
     _ = @import("bounds.zig");
     _ = @import("types.zig");
     _ = @import("invariants.zig");
+    _ = @import("strategy.zig");
 }

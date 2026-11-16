@@ -5,9 +5,13 @@ const std = @import("std");
 const assert = std.debug.assert;
 const testing = std.testing;
 const cryptography = @import("cryptography");
+const consensus_types = @import("../types.zig");
 const bounds = @import("bounds.zig");
 
 pub const Digest = cryptography.Sha256.Digest;
+
+/// The epoch every fuzzed engine runs in (commonware `EPOCH`).
+pub const epoch: consensus_types.Epoch = .new(333);
 
 /// The network's size and how many of its nodes are Byzantine.
 pub const Configuration = struct {
