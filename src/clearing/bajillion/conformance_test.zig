@@ -117,3 +117,19 @@ test "conformance: close" {
         mod.Close(PublicKey, PublicKey, u64),
     );
 }
+
+test "conformance: summary" {
+    const tests = "summary::tests::conformance::";
+    try verify(tests ++ "CodecConformance<Processed<Digest>>", mod.Processed(Digest));
+    try verify(tests ++ "CodecConformance<Summary<Sha256>>", mod.Summary(t.Sha256));
+}
+
+test "conformance: validator" {
+    try skip_slow();
+    const tests = "validator::tests::conformance::";
+    try verify(tests ++ "CodecConformance<Payout<PublicKey,u64>>", mod.Payout(PublicKey, u64));
+    try verify(
+        tests ++ "CodecConformance<PayoutProof<PublicKey,Digest,u64>>",
+        mod.PayoutProof(PublicKey, Digest, u64),
+    );
+}

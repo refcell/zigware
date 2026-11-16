@@ -59,6 +59,9 @@ formatting, and the deterministic runtime for tests. qmdb is only mentioned in c
   ed25519 keys skip in Debug unless `-Dslow-tests` (CI's ReleaseSafe run checks them).
 - `Flows` collects one part per payment, deposit, and withdrawal, stable-sorts by account, and
   merges, instead of commonware's `HashMap` then sort; sums are exact, so the flows match.
+- `Close::check` is `Checked(P, H, A).check(O, ...)`: Zig cannot add the method from
+  validator.zig, and the check borrows the close instead of consuming it (it clones the
+  payment maps into the matrix).
 - build.zig: clearing also imports `conformance` and `invariants` (commonware dev-deps).
 
 ## Backlog
@@ -69,10 +72,14 @@ formatting, and the deterministic runtime for tests. qmdb is only mentioned in c
   with every test and its five conformance hashes.
 - [x] settlement (Total, Flow, Settled, Flows), close (Withdrawal, Deposit, ForcedWithdrawal,
   Queue, Row, Limits, Close, assembly) with their tests and six conformance hashes.
-- [ ] summary (Processed, Summary, genesis, verify with the ed25519 certificate scheme).
-- [ ] validator (Payout, BalanceProof, PayoutProof codecs and verify; Checkpoint, check).
-  `settle`/`apply` need qmdb `current` (balances) and keyless `Db` (payout log), not yet on
-  main; build behind a minimal interface until they land.
+- [x] summary (Processed, Summary, genesis, verify) with its tests and two conformance hashes;
+  the ledger vector's genesis digest, initial payout-log root, and first running hash match.
+- [x] validator: Payout, PayoutProof (codec, verify), Checkpoint, `Checked.check` with the
+  check tests; Payout and PayoutProof conformance hashes match.
+- [ ] validator: `Payout.stage` and the payout-proof tests on the keyless `Db` (on main).
+- [ ] validator: BalanceProof, `settle`, `apply`, and the database tests need qmdb `current`
+  (after `any` unordered fixed in storage-qmdb). The check tests build parents without
+  settling until then.
 - [ ] tests.rs ledger vector, and the integration tests (clearing/tests/bajillion).
 - [ ] Fuzz targets (clearing/fuzz: decode, verify) and benches (`src/clearing/benches.zig`).
 
@@ -84,3 +91,5 @@ formatting, and the deterministic runtime for tests. qmdb is only mentioned in c
   its five conformance hashes match.
 - 2026-11-16: settlement and close with their tests; the Flow, Deposit, ForcedWithdrawal,
   Withdrawal, Row, and Close conformance hashes match.
+- 2026-11-16: summary and the database-free validator (payouts, payout proofs, checkpoints,
+  close checks); 18 of the 19 conformance hashes match (BalanceProof waits on qmdb `current`).

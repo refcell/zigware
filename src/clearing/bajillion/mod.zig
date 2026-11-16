@@ -23,6 +23,8 @@ pub const matrix = @import("matrix.zig");
 pub const payment = @import("payment.zig");
 pub const settlement = @import("settlement.zig");
 pub const close = @import("close.zig");
+pub const summary = @import("summary.zig");
+pub const validator = @import("validator.zig");
 
 pub const Namespace = namespace.Namespace;
 pub const Amounts = amounts.Amounts;
@@ -52,6 +54,15 @@ pub const ForcedWithdrawal = close.ForcedWithdrawal;
 pub const Queue = close.Queue;
 pub const Limits = close.Limits;
 pub const AssemblyError = close.AssemblyError;
+pub const Processed = summary.Processed;
+pub const Summary = summary.Summary;
+pub const SummaryError = summary.SummaryError;
+pub const CountRange = summary.CountRange;
+pub const Payout = validator.Payout;
+pub const PayoutProof = validator.PayoutProof;
+pub const Checkpoint = validator.Checkpoint;
+pub const Checked = validator.Checked;
+pub const CheckError = validator.CheckError;
 
 /// An epoch number. Epochs start at one, and epoch zero names the state before the first close.
 pub const Epoch = u64;
@@ -81,5 +92,7 @@ test {
     _ = @import("payment_test.zig");
     _ = @import("settlement_test.zig");
     _ = @import("close_test.zig");
+    _ = @import("summary_test.zig");
+    _ = @import("validator_test.zig");
     _ = @import("conformance_test.zig");
 }
