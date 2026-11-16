@@ -332,3 +332,257 @@ test "any randomized chains match a model and the rebuilt snapshot" {
         try check_random_chains(support.UnorderedFixedChunks(F, 1), 0x5eed_a12);
     }
 }
+
+/// Seeds `count` keys `key(i)` with `val(i, 0)`.
+fn seed_keys(comptime Db: type, db: *Db, comptime count: usize) !void {
+    var writes: [count]Write = undefined;
+    for (&writes, 0..) |*w, i| w.* = .{ .key = key(i), .value = val(i, 0) };
+    try support.apply_writes(Db, db, &writes);
+}
+
+/// Merkleizes `writes` on `parent`, or on `db` if null.
+fn merkleize_writes(
+    comptime Db: type,
+    db: *Db,
+    parent: ?*Db.MerkleizedBatch,
+    writes: []const Write,
+) !*Db.MerkleizedBatch {
+    var batch = if (parent) |p| p.new_batch() else try db.new_batch();
+    errdefer batch.deinit();
+    for (writes) |w| try batch.write(w.key, w.value);
+    return batch.merkleize(db);
+}
+
+/// The resolution a staged read of `k` must report over the unapplied `chain` (oldest first)
+/// on `db`, derived from the chain's operations: the last operation on the key, else the
+/// database's location of it.
+fn expected_resolution(
+    comptime Db: type,
+    db: *Db,
+    chain: []const *Db.MerkleizedBatch,
+    k: Digest,
+) !?Db.StagedLoc {
+    const base = try db.get_with_loc(&k);
+    const base_loc: ?u64 = if (base) |b| b.location else null;
+    var touched = false;
+    var found: ?Db.StagedLoc = null;
+    for (chain) |batch| {
+        const start, const ops = batch.operations();
+        for (ops, 0..) |op, i| switch (op) {
+            .update => |u| if (u.key.eql(k)) {
+                touched = true;
+                found = .{ .ancestor = .{ .loc = start + i, .base_old_loc = base_loc } };
+            },
+            .delete => |deleted| if (deleted.eql(k)) {
+                touched = true;
+                found = null;
+            },
+            .commit => {},
+        };
+    }
+    if (touched) return found;
+    return if (base_loc) |loc| .{ .committed = loc } else null;
+}
+
+fn expect_optional(actual: ?Digest, expected: ?Digest) !void {
+    if (expected) |e| {
+        try testing.expect(actual != null and actual.?.eql(e));
+    } else {
+        try testing.expect(actual == null);
+    }
+}
+
+test "any staged reads report where each key resolved" {
+    inline for (families) |F| {
+        const Db = support.UnorderedFixed(F);
+        var harness = try support.Harness.init(gpa);
+        defer harness.deinit();
+        var db = try harness.open(Db, null);
+        defer db.deinit();
+        try seed_keys(Db, &db, 12);
+        const grandparent = try merkleize_writes(Db, &db, null, &.{
+            .{ .key = key(0), .value = val(0, 1) },
+            .{ .key = key(100), .value = val(100, 1) },
+            .{ .key = key(2), .value = null },
+        });
+        defer grandparent.release();
+        const parent = try merkleize_writes(Db, &db, grandparent, &.{
+            .{ .key = key(1), .value = val(1, 2) },
+        });
+        defer parent.release();
+        var batch = parent.new_batch();
+        try batch.write(key(3), val(3, 3));
+        const keys = [_]Digest{ key(0), key(100), key(1), key(3), key(2), key(9000) };
+        var values: [keys.len]?Digest = undefined;
+        var staged = staged: {
+            errdefer batch.deinit();
+            break :staged try batch.stage(&keys, &db, &values);
+        };
+        defer staged.deinit();
+        const expected = [_]?Digest{ val(0, 1), val(100, 1), val(1, 2), val(3, 3), null, null };
+        for (values, expected) |actual, e| try expect_optional(actual, e);
+        // Expansion appends slots; the untouched seed keys resolve in the database unless an
+        // ancestor's floor walk moved them.
+        var more: [8]?Digest = undefined;
+        var more_keys: [8]Digest = undefined;
+        for (&more_keys, 4..) |*k, i| k.* = key(i);
+        const range = try staged.expand(&more_keys, &db, &more);
+        try testing.expectEqual(@as(usize, keys.len), range.start);
+        try testing.expectEqual(@as(usize, keys.len + more_keys.len), staged.len());
+        for (more, 4..) |actual, i| try expect_optional(actual, val(i, 0));
+        const chain = [_]*Db.MerkleizedBatch{ grandparent, parent };
+        var committed: usize = 0;
+        for (staged.keys.items, staged.resolutions.items, 0..) |k, actual, slot| {
+            // This batch's own write answers its slot, so it resolves nowhere.
+            const want = if (slot == 3) null else try expected_resolution(Db, &db, &chain, k);
+            try testing.expectEqual(want, actual);
+            if (actual != null and actual.? == .committed) committed += 1;
+        }
+        try testing.expect(staged.resolutions.items[0].? == .ancestor);
+        try testing.expect(staged.resolutions.items[1].?.ancestor.base_old_loc == null);
+        try testing.expect(committed > 0);
+    }
+}
+
+test "any staged merkleize matches explicit writes" {
+    inline for (families) |F| {
+        const Db = support.UnorderedFixed(F);
+        const Mutation = Db.UnmerkleizedBatch.Mutation;
+        var harness = try support.Harness.init(gpa);
+        defer harness.deinit();
+        var db = try harness.open(Db, null);
+        defer db.deinit();
+        try seed_keys(Db, &db, 40);
+        // key(5) in slots 0 and 3, read-only key(6), missing key(9000), key(20) deleted in a
+        // slot but recreated by an unstaged write (unstaged writes win).
+        const keys = [_]Digest{ key(5), key(6), key(9000), key(5), key(20) };
+        const slots = [_]Db.Slot{
+            .{ .put = val(5, 5000) }, .keep,   .{ .put = val(9000, 5001) },
+            .{ .put = val(5, 5002) }, .delete,
+        };
+        const unstaged = [_]Mutation{
+            .{ .key = key(7000), .value = val(7000, 6000) },
+            .{ .key = key(30), .value = val(30, 6001) },
+            .{ .key = key(31), .value = null },
+            .{ .key = key(20), .value = val(20, 6002) },
+        };
+        const metadata = val(1, 99);
+        const explicit = explicit: {
+            var batch = try db.new_batch();
+            errdefer batch.deinit();
+            for (keys, slots) |k, slot| switch (slot) {
+                .keep => {},
+                .put => |v| try batch.write(k, v),
+                .delete => try batch.write(k, null),
+            };
+            for (unstaged) |w| try batch.write(w.key, w.value);
+            batch.with_metadata(metadata);
+            break :explicit try batch.merkleize(&db);
+        };
+        defer explicit.release();
+        var batch = try db.new_batch();
+        var values: [keys.len]?Digest = undefined;
+        var staged = staged: {
+            errdefer batch.deinit();
+            break :staged try batch.stage(&keys, &db, &values);
+        };
+        const expected = [_]?Digest{ val(5, 0), val(6, 0), null, val(5, 0), val(20, 0) };
+        for (values, expected) |actual, e| try expect_optional(actual, e);
+        staged.with_metadata(metadata);
+        const merkleized = staged.merkleize(&slots, &unstaged, &db) catch |err| {
+            staged.deinit();
+            return err;
+        };
+        defer merkleized.release();
+        try testing.expect(merkleized.root().eql(explicit.root()));
+        try db.apply_batch(merkleized);
+        try expect_value(&db, key(5), val(5, 5002));
+        try expect_value(&db, key(6), val(6, 0));
+        try expect_value(&db, key(9000), val(9000, 5001));
+        try expect_value(&db, key(20), val(20, 6002));
+        try expect_value(&db, key(31), null);
+        try testing.expect((try db.get_metadata()).?.eql(metadata));
+    }
+}
+
+/// Commonware's staged-ancestor scenarios: reads resolved in a grandparent's and a parent's
+/// diffs, then the grandparent applied before merkleize (`shape` 0), or the ancestors applied
+/// separately (1) or with the staged batch (2) after it.
+fn check_staged_ancestors(comptime Db: type, shape: u8) !void {
+    var harness = try support.Harness.init(gpa);
+    defer harness.deinit();
+    var db = try harness.open(Db, null);
+    defer db.deinit();
+    try seed_keys(Db, &db, 8);
+    const grandparent = try merkleize_writes(Db, &db, null, &.{
+        .{ .key = key(0), .value = val(0, 1000) },
+        .{ .key = key(100), .value = val(100, 1001) },
+    });
+    defer grandparent.release();
+    const parent = try merkleize_writes(Db, &db, grandparent, &.{
+        .{ .key = key(1), .value = val(1, 1002) },
+    });
+    defer parent.release();
+    const keys = [_]Digest{ key(0), key(100), key(1), key(3) };
+    var values: [keys.len]?Digest = undefined;
+    var batch = parent.new_batch();
+    var staged = staged: {
+        errdefer batch.deinit();
+        break :staged try batch.stage(&keys, &db, &values);
+    };
+    const expected = [_]?Digest{ val(0, 1000), val(100, 1001), val(1, 1002), val(3, 0) };
+    for (values, expected) |actual, e| try expect_optional(actual, e);
+    if (shape == 0) try db.apply_batch(grandparent);
+    const slots = [_]Db.Slot{
+        .{ .put = val(0, 2000) }, .{ .put = val(100, 2001) }, .delete, .{ .put = val(3, 2002) },
+    };
+    const merkleized = staged.merkleize(&slots, &.{}, &db) catch |err| {
+        staged.deinit();
+        return err;
+    };
+    defer merkleized.release();
+    const explicit = try merkleize_writes(Db, &db, parent, &.{
+        .{ .key = key(0), .value = val(0, 2000) },
+        .{ .key = key(100), .value = val(100, 2001) },
+        .{ .key = key(1), .value = null },
+        .{ .key = key(3), .value = val(3, 2002) },
+    });
+    defer explicit.release();
+    try testing.expect(merkleized.root().eql(explicit.root()));
+    if (shape == 1) try db.apply_batch(grandparent);
+    if (shape != 2) try db.apply_batch(parent);
+    try db.apply_batch(merkleized);
+    try db.commit();
+    try expect_value(&db, key(0), val(0, 2000));
+    try expect_value(&db, key(100), val(100, 2001));
+    try expect_value(&db, key(1), null);
+    try expect_value(&db, key(3), val(3, 2002));
+}
+
+test "any staged reads through ancestors survive every apply order" {
+    inline for (families) |F| {
+        for ([_]u8{ 0, 1, 2 }) |shape| try check_staged_ancestors(support.UnorderedFixed(F), shape);
+    }
+}
+
+test "any staged batches refuse stale forks" {
+    inline for (families) |F| {
+        const Db = support.UnorderedFixed(F);
+        var harness = try support.Harness.init(gpa);
+        defer harness.deinit();
+        var db = try harness.open(Db, null);
+        defer db.deinit();
+        var batch = try db.new_batch();
+        var values: [1]?Digest = undefined;
+        var staged = staged: {
+            errdefer batch.deinit();
+            break :staged try batch.stage(&.{key(1)}, &db, &values);
+        };
+        defer staged.deinit();
+        try support.apply_writes(Db, &db, &.{.{ .key = key(2), .value = val(2, 0) }});
+        try testing.expectError(error.StaleRead, staged.expand(&.{key(2)}, &db, &values));
+        try testing.expectEqual(@as(usize, 1), staged.len());
+        const slots = [_]Db.Slot{.{ .put = val(1, 1) }};
+        try testing.expectError(error.StaleBatch, staged.merkleize(&slots, &.{}, &db));
+    }
+}

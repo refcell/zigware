@@ -9,6 +9,12 @@
 //! A merkleized batch is reference counted (`retain`/`release`); a child holds a weak link to
 //! its parent and the diffs of its live ancestors, so reads and applies stay exact after the
 //! ancestors are released. Only policies that never evict are supported so far.
+//!
+//! Staging (`stage` → `expand` → `Staged.merkleize(slots, unstaged)`) reads keys through the
+//! batch and records where each resolved (`StagedLoc`); a staged merkleize then takes one
+//! `Slot` per staged read. Commonware reuses the resolved locations to skip re-reads; here the
+//! slots become ordinary writes (last put or delete per key, unstaged writes last), which
+//! merkleize to the same root.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -63,17 +69,59 @@ pub fn Unmerkleized(comptime D: type) type {
             return parent.bounds.compatible(db.commitment());
         }
 
-        /// The key's value after this batch, its chain, and `db`.
-        pub fn get(self: *const Self, key: *const K, db: *D) !?V {
-            try self.compatible(db);
+        /// This batch's latest write of `key`, if any.
+        fn find_mutation(self: *const Self, key: *const K) ?Mutation {
             var index = self.mutations.items.len;
             while (index > 0) {
                 index -= 1;
                 const mutation = self.mutations.items[index];
-                if (value_mod.eql(K, mutation.key, key.*)) return mutation.value;
+                if (value_mod.eql(K, mutation.key, key.*)) return mutation;
             }
+            return null;
+        }
+
+        /// The key's value after this batch, its chain, and `db`.
+        pub fn get(self: *const Self, key: *const K, db: *D) !?V {
+            try self.compatible(db);
+            if (self.find_mutation(key)) |mutation| return mutation.value;
             const parent = self.parent orelse return db.get(key);
             return parent.read_through(key, db);
+        }
+
+        const StagedRead = struct { value: ?V, loc: ?StagedLoc };
+
+        /// The key's value through this batch and where it resolved: null when this batch's
+        /// own writes answer, the key is missing, or an ancestor deleted it.
+        fn stage_read(self: *const Self, key: *const K, db: *D) !StagedRead {
+            if (self.find_mutation(key)) |mutation| {
+                return .{ .value = mutation.value, .loc = null };
+            }
+            if (self.parent) |parent| {
+                if (try parent.resolve_entry(key, db.log.size())) |entry| return switch (entry) {
+                    .active => |a| .{ .value = a.value, .loc = .{ .ancestor = .{
+                        .loc = a.loc,
+                        .base_old_loc = a.base_old_loc,
+                    } } },
+                    .deleted => .{ .value = null, .loc = null },
+                };
+            }
+            const found = try db.get_with_loc(key) orelse return .{ .value = null, .loc = null };
+            assert(found.location < db.log.size());
+            return .{ .value = found.update.value, .loc = .{ .committed = found.location } };
+        }
+
+        /// Reads `keys` into `out` and stages the reads, so a staged merkleize takes one `Slot`
+        /// per read. Consumes the batch on success; on error the batch is unchanged.
+        pub fn stage(self: *Self, keys: []const K, db: *D, out: []?V) !D.StagedBatch {
+            assert(keys.len == out.len);
+            var staged: D.StagedBatch = .{ .batch = self.* };
+            _ = staged.expand(keys, db, out) catch |err| {
+                staged.keys.deinit(self.gpa);
+                staged.resolutions.deinit(self.gpa);
+                return err;
+            };
+            self.* = undefined;
+            return staged;
         }
 
         /// Hashes the batch with the `Proportional` floor policy. Consumes the batch on
@@ -131,9 +179,149 @@ pub fn Unmerkleized(comptime D: type) type {
     };
 }
 
-/// Where a write resolved: in the database, or in an ancestor's diff.
-const StagedLoc = union(enum) {
+/// What a staged merkleize does with the key of one staged read slot.
+pub fn Slot(comptime V: type) type {
+    return union(enum) {
+        /// Leaves the key unchanged unless another slot or an unstaged write changes it.
+        keep,
+        /// Sets the key to this value.
+        put: V,
+        /// Deletes the key.
+        delete,
+    };
+}
+
+/// A batch whose reads are staged (commonware's `Staged`): the batch, the staged keys, and
+/// where each read resolved.
+pub fn Staged(comptime D: type) type {
+    return struct {
+        const Self = @This();
+        const K = D.Key;
+        const V = D.Value;
+        const Mutation = Unmerkleized(D).Mutation;
+        pub const Range = struct { start: usize, end: usize };
+
+        batch: D.UnmerkleizedBatch,
+        /// The key of each staged read slot.
+        keys: std.ArrayList(K) = .empty,
+        /// Where each staged read resolved (commonware's `resolved_locs`), parallel to `keys`.
+        resolutions: std.ArrayList(?StagedLoc) = .empty,
+
+        /// Discards the staged batch.
+        pub fn deinit(self: *Self) void {
+            const gpa = self.batch.gpa;
+            self.keys.deinit(gpa);
+            self.resolutions.deinit(gpa);
+            self.batch.deinit();
+            self.* = undefined;
+        }
+
+        /// The number of staged read slots.
+        pub fn len(self: *const Self) usize {
+            assert(self.keys.items.len == self.resolutions.items.len);
+            return self.keys.items.len;
+        }
+
+        pub fn is_empty(self: *const Self) bool {
+            return self.len() == 0;
+        }
+
+        /// Sets the metadata recorded in the commit, replacing any set before staging.
+        pub fn with_metadata(self: *Self, metadata: ?V) void {
+            self.batch.with_metadata(metadata);
+        }
+
+        /// Reads more `keys` into `out`, appending them as the returned range of slots. Keys
+        /// are not deduplicated against earlier slots. On error the staged set is unchanged.
+        pub fn expand(self: *Self, keys: []const K, db: *D, out: []?V) !Range {
+            assert(keys.len == out.len);
+            const gpa = self.batch.gpa;
+            try self.batch.compatible(db);
+            const start = self.len();
+            try self.keys.ensureUnusedCapacity(gpa, keys.len);
+            try self.resolutions.ensureUnusedCapacity(gpa, keys.len);
+            errdefer {
+                self.keys.shrinkRetainingCapacity(start);
+                self.resolutions.shrinkRetainingCapacity(start);
+            }
+            for (keys, out) |*key, *value| {
+                const read = try self.batch.stage_read(key, db);
+                value.* = read.value;
+                self.keys.appendAssumeCapacity(key.*);
+                self.resolutions.appendAssumeCapacity(read.loc);
+            }
+            assert(self.len() == start + keys.len);
+            return .{ .start = start, .end = self.len() };
+        }
+
+        /// Records `slots` (one per staged read, in slot order) and then `unstaged` as writes,
+        /// so each key takes its last put or delete and unstaged writes win.
+        fn record(self: *Self, slots: []const Slot(V), unstaged: []const Mutation) !void {
+            assert(slots.len == self.len()); // One slot per staged read.
+            const gpa = self.batch.gpa;
+            const mutations = &self.batch.mutations;
+            try mutations.ensureUnusedCapacity(gpa, slots.len + unstaged.len);
+            for (slots, self.keys.items) |slot, key| switch (slot) {
+                .keep => {},
+                .put => |value| mutations.appendAssumeCapacity(.{ .key = key, .value = value }),
+                .delete => mutations.appendAssumeCapacity(.{ .key = key, .value = null }),
+            };
+            mutations.appendSliceAssumeCapacity(unstaged);
+        }
+
+        /// The batch with `slots` and `unstaged` recorded as its writes. Consumes the staged
+        /// batch on success; on error only `deinit` may follow.
+        pub fn resolve_updates(
+            self: *Self,
+            slots: []const Slot(V),
+            unstaged: []const Mutation,
+        ) !D.UnmerkleizedBatch {
+            try self.record(slots, unstaged);
+            const batch = self.batch;
+            self.keys.deinit(batch.gpa);
+            self.resolutions.deinit(batch.gpa);
+            self.* = undefined;
+            return batch;
+        }
+
+        /// Applies the slots and unstaged writes and merkleizes with `Proportional`.
+        pub fn merkleize(
+            self: *Self,
+            slots: []const Slot(V),
+            unstaged: []const Mutation,
+            db: *D,
+        ) !*D.MerkleizedBatch {
+            var policy: floor_mod.Proportional = .{};
+            return self.merkleize_with(slots, unstaged, db, &policy);
+        }
+
+        /// Applies the slots and unstaged writes and merkleizes with `policy`. Consumes the
+        /// staged batch on success; on error only `deinit` may follow.
+        pub fn merkleize_with(
+            self: *Self,
+            slots: []const Slot(V),
+            unstaged: []const Mutation,
+            db: *D,
+            policy: anytype,
+        ) !*D.MerkleizedBatch {
+            try self.record(slots, unstaged);
+            const gpa = self.batch.gpa;
+            const merkleized = try self.batch.merkleize_with(db, policy);
+            self.keys.deinit(gpa);
+            self.resolutions.deinit(gpa);
+            self.* = undefined;
+            return merkleized;
+        }
+    };
+}
+
+/// Where a staged read resolved: in the database, or in an ancestor's diff (commonware's
+/// `StagedLoc`).
+pub const StagedLoc = union(enum) {
+    /// Resolved in the database at this location.
     committed: u64,
+    /// Resolved in an ancestor's diff at `loc`, superseding the key's database location
+    /// `base_old_loc` (null when an ancestor created the key).
     ancestor: struct { loc: u64, base_old_loc: ?u64 },
 
     /// The database location a write at this resolution supersedes, given the boundary.
@@ -766,12 +954,20 @@ pub fn Merkleized(comptime D: type) type {
             }
         }
 
-        /// The key's value through this batch's chain, falling back to `db`.
-        fn read_through(self: *const Self, key: *const K, db: *D) !?V {
+        /// The nearest entry for `key` in this batch's chain, as read against a database of
+        /// `db_size` operations.
+        fn resolve_entry(self: *const Self, key: *const K, db_size: u64) !?diff_mod.Entry(V) {
             var diffs: std.ArrayList([]const Pair) = .empty;
             defer diffs.deinit(self.gpa);
-            try self.read_diffs(db.log.size(), &diffs);
-            if (diff_mod.resolve(K, V, diffs.items, key)) |entry| return entry.value();
+            try self.read_diffs(db_size, &diffs);
+            assert(diffs.items.len >= 1);
+            const entry = diff_mod.resolve(K, V, diffs.items, key) orelse return null;
+            return entry.*;
+        }
+
+        /// The key's value through this batch's chain, falling back to `db`.
+        fn read_through(self: *const Self, key: *const K, db: *D) !?V {
+            if (try self.resolve_entry(key, db.log.size())) |entry| return entry.value();
             return db.get(key);
         }
 

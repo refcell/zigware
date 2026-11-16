@@ -74,6 +74,9 @@ pub fn Db(F: type, U: type, C: type, I: type, H: type, comptime N: usize) type {
         pub const Cfg = Config(I.Translator, C.BackingConfig);
         pub const UnmerkleizedBatch = batch_mod.Unmerkleized(Self);
         pub const MerkleizedBatch = batch_mod.Merkleized(Self);
+        pub const StagedBatch = batch_mod.Staged(Self);
+        pub const Slot = batch_mod.Slot(Value);
+        pub const StagedLoc = batch_mod.StagedLoc;
 
         gpa: Allocator,
         log: Log,
