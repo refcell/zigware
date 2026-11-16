@@ -29,6 +29,7 @@ const sake = @import("handshake/sake.zig");
 const certificate = @import("certificate.zig");
 const Bloom = @import("bloomfilter.zig").Default;
 const ipa = @import("zk/bulletproofs/ipa.zig");
+const p2p = @import("zk/pedersen_to_plain.zig");
 const TestF = @import("math").testing.F;
 const TestG = @import("math").testing.G;
 
@@ -383,5 +384,36 @@ test "conformance: zk bulletproofs ipa" {
         prefix_ipa ++ "CodecConformance<Proof<TestF,TestG>>",
         ipa.Proof(TestF, TestG),
         gen_ipa_proof,
+    );
+}
+
+fn gen_p2p_setup(gpa: Allocator, u: *Unstructured) Error!p2p.Setup(TestG) {
+    const value_generator = try gen_test_g(gpa, u);
+    return .{ .value_generator = value_generator, .blinding_generator = try gen_test_g(gpa, u) };
+}
+
+fn gen_p2p_claim(gpa: Allocator, u: *Unstructured) Error!p2p.Claim(TestG) {
+    const plain = try gen_test_g(gpa, u);
+    return .{ .plain = plain, .pedersen = try gen_test_g(gpa, u) };
+}
+
+fn gen_p2p_proof(gpa: Allocator, u: *Unstructured) Error!p2p.Proof(TestF, TestG) {
+    var proof: p2p.Proof(TestF, TestG) = undefined;
+    proof.plain_mask = try gen_test_g(gpa, u);
+    proof.pedersen_mask = try gen_test_g(gpa, u);
+    proof.value_response = try gen_test_f(gpa, u);
+    proof.blinding_response = try gen_test_f(gpa, u);
+    return proof;
+}
+
+test "conformance: zk pedersen_to_plain" {
+    try slow.skip_slow();
+    const prefix_p2p = "zk::pedersen_to_plain::conformance::";
+    try verify(prefix_p2p ++ "CodecConformance<Setup<TestG>>", p2p.Setup(TestG), gen_p2p_setup);
+    try verify(prefix_p2p ++ "CodecConformance<Claim<TestG>>", p2p.Claim(TestG), gen_p2p_claim);
+    try verify(
+        prefix_p2p ++ "CodecConformance<Proof<TestF,TestG>>",
+        p2p.Proof(TestF, TestG),
+        gen_p2p_proof,
     );
 }

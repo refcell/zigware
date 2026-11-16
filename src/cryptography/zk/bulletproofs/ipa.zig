@@ -592,7 +592,7 @@ fn fold_weights(comptime F: type, gpa: Allocator, us: []const [2]F) ![]F {
 }
 
 /// `out += point * weight` (or `-=`) for a synthetic `point`.
-fn add_scaled(
+pub fn add_scaled(
     comptime S: type,
     gpa: Allocator,
     out: *S,
@@ -610,7 +610,7 @@ fn add_scaled(
 }
 
 /// `sum_i points[i] * weights[i]` over synthetic points (`Synthetic::msm`).
-fn synthetic_msm(comptime S: type, gpa: Allocator, points: []const S, weights: anytype) !S {
+pub fn synthetic_msm(comptime S: type, gpa: Allocator, points: []const S, weights: anytype) !S {
     assert(points.len == weights.len);
     var out: S = .zero;
     errdefer out.deinit(gpa);

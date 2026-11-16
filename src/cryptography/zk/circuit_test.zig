@@ -47,7 +47,7 @@ const Op = union(enum) {
 
 /// commonware's `fuzz::Plan`: random operations, and whether the circuit they build should
 /// be satisfied. Values come from a small range so assertions often hold.
-const Plan = struct {
+pub const Plan = struct {
     ops: [ops_max]Op = undefined,
     op_count: usize = 0,
     satisfied: bool = true,
@@ -58,7 +58,7 @@ const Plan = struct {
         plan.op_count += 1;
     }
 
-    fn arbitrary(u: *minifuzz.Unstructured) Plan {
+    pub fn arbitrary(u: *minifuzz.Unstructured) Plan {
         var plan: Plan = .{};
         var values: [ops_max]F = undefined;
         var native: [ops_max]bool = undefined;
@@ -106,7 +106,7 @@ const Plan = struct {
         return plan;
     }
 
-    fn build(plan: *const Plan, ctx: *Ctx) void {
+    pub fn build(plan: *const Plan, ctx: *Ctx) void {
         var vars: [ops_max]V = undefined;
         var count: usize = 0;
         for (plan.ops[0..plan.op_count]) |op| {
