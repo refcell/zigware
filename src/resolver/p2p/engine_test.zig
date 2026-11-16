@@ -92,6 +92,8 @@ pub fn SetupFull(comptime C: type, comptime Pro: type, comptime B: type) type {
         engines: [peers_max]?EngineT.Spawned = @splat(null),
         /// Engines aborted with `stop`; their mailboxes stay usable (sends report closed).
         stopped: [peers_max]bool = @splat(false),
+        /// The retry delay of engines spawned from now on.
+        retry_delay: Duration = fetch_retry_delay,
         consumers: std.ArrayList(C) = .empty,
         producers: std.ArrayList(Pro) = .empty,
 
@@ -246,7 +248,7 @@ pub fn SetupFull(comptime C: type, comptime Pro: type, comptime B: type) type {
                 .mailbox_size = mailbox_size,
                 .me = me,
                 .fetch_timeout = timeout,
-                .fetch_retry_delay = fetch_retry_delay,
+                .fetch_retry_delay = setup.retry_delay,
                 .priority_requests = false,
                 .priority_responses = false,
             }, connection.sender, connection.receiver);

@@ -1083,3 +1083,155 @@ test "unblocked peer becomes eligible again" {
         }
     }.body);
 }
+
+const HoldingSequenced = base.SetupOf(Holding(u16), Sequenced);
+
+fn validation_case(io: Io, outcome: Outcome) !void {
+    const first_response = "data for key 5";
+    const second_response = "refetched data for key 5";
+    const setup = try HoldingSequenced.init(io, &.{ 1, 2 }, .{});
+    defer setup.deinit();
+    try setup.add_link(base.link, 0, 1);
+    const consumer = try setup.make_consumer();
+    const mailbox = try setup.spawn(0, consumer, try setup.make_producer(&.{}));
+    const producer = try setup.make_producer(&.{ .{ 5, first_response }, .{ 5, second_response } });
+    _ = try setup.spawn(1, try setup.make_consumer(), producer);
+
+    // Late subscribers join while the first delivery is still being judged.
+    try fetch_as(mailbox, 5, 49);
+    var first = try expect_held(consumer, 5, &.{49}, first_response);
+    defer first.deinit();
+    try fetch_all_as(mailbox, 5, &.{ 50, 51 });
+    try setup.sleep(Duration.from_millis(100));
+    try producer.expect_remaining(key(5), &.{second_response});
+    try first.send_open(complete);
+    // The same response serves the late snapshot without another network fetch.
+    var late = try expect_held(consumer, 5, &.{ 50, 51 }, first_response);
+    defer late.deinit();
+    try testing.expectEqual(1, try resolves(setup));
+    try testing.expectEqual(1, try status(setup, "Success"));
+
+    // Local redelivery must not add another outcome for the accepted response, whether it
+    // satisfies all, some, or none of the late subscribers.
+    if (outcome.eql(partial)) try retain_except_subscriber(mailbox, 50);
+    try late.send_open(outcome);
+    var expected_successes: u64 = 1;
+    if (outcome.eql(complete)) {
+        try setup.sleep(Duration.from_millis(100));
+        try producer.expect_remaining(key(5), &.{second_response});
+    } else {
+        // A new response proves the unresolved redelivery was processed. Only accepting these
+        // new bytes may add a second success and peer reward.
+        const remaining: []const u16 = if (outcome.eql(partial)) &.{51} else &.{ 50, 51 };
+        var refetched = try expect_held(consumer, 5, remaining, second_response);
+        defer refetched.deinit();
+        try producer.expect_remaining(key(5), &.{});
+        try testing.expectEqual(1, try resolves(setup));
+        try testing.expectEqual(1, try status(setup, "Success"));
+        try testing.expectEqual(0, try status(setup, "Ambiguous"));
+        try refetched.send_open(complete);
+        expected_successes = 2;
+    }
+    try wait_resolves(setup, expected_successes);
+    try testing.expectEqual(expected_successes, try status(setup, "Success"));
+    try testing.expectEqual(0, try status(setup, "Ambiguous"));
+}
+
+test "fetch during validation reuses response after success" {
+    for ([_]Outcome{ complete, partial, .unresolved }) |outcome| {
+        var runner = try runtime.deterministic.Runner.init(gpa, .{
+            .timeout_ns = 10 * std.time.ns_per_s,
+        });
+        defer runner.deinit();
+        try try runner.start(validation_case, .{ runner.io(), outcome });
+    }
+}
+
+fn late_targeted_joins_retry(io: Io) !void {
+    const unresolved_response = "unresolved data for key 5";
+    const unexpected_refetch = "unexpected refetch for key 5";
+    const valid_response = "valid data for key 5";
+    const setup = try BlockingTagged.init(io, &.{ 1, 2, 3 }, .{});
+    defer setup.deinit();
+    try setup.add_link(base.link, 0, 1);
+    const consumer = try setup.make_consumer();
+    const first_gate = try consumer.gate(.unresolved);
+    const second_gate = try consumer.gate(complete);
+    const mailbox = try setup.spawn(0, consumer, try setup.make_producer(&.{}));
+    const prod2 = try setup.make_producer(&.{
+        .{ 5, unresolved_response },
+        .{ 5, unexpected_refetch },
+    });
+    _ = try setup.spawn(1, try setup.make_consumer(), prod2);
+    const prod3 = try setup.make_producer(&.{.{ 5, valid_response }});
+    _ = try setup.spawn(2, try setup.make_consumer(), prod3);
+
+    // Start unrestricted repair and park its first response in validation.
+    try fetch_as(mailbox, 5, 49);
+    var started = try consumer.next_started();
+    try started.expect(5, &.{49});
+    started.deinit();
+    // A targeted objection for the same key attaches to the parked fetch without issuing
+    // another network request.
+    try setup.add_link(base.link, 0, 2);
+    var target = [_]base.PublicKey{setup.peers[2]};
+    _ = try mailbox.fetch_targeted(.{ .key = key(5), .subscriber = 50 }, &target);
+    try setup.sleep(Duration.from_millis(100));
+    try prod2.expect_remaining(key(5), &.{unexpected_refetch});
+    try prod3.expect_remaining(key(5), &.{valid_response});
+    try setup.oracle().remove_link(setup.peers[0], setup.peers[1]);
+    try setup.oracle().remove_link(setup.peers[1], setup.peers[0]);
+
+    // An unresolved response retries unrestricted repair with both subscribers and does not
+    // penalize the serving peer.
+    consumer.open(first_gate);
+    try setup.track_roles(1, &.{ 0, 2 }, &.{});
+    started = try consumer.next_started();
+    defer started.deinit();
+    try started.expect(5, &.{ 49, 50 });
+    consumer.open(second_gate);
+    var event = try consumer.next_event();
+    defer event.deinit();
+    try event.seen.expect(5, &.{ 49, 50 });
+    try testing.expectEqualStrings(valid_response, event.value);
+    try prod2.expect_remaining(key(5), &.{unexpected_refetch});
+    try prod3.expect_remaining(key(5), &.{});
+    try testing.expectEqual(0, try blocked_count(setup));
+}
+
+test "late targeted subscriber joins retry after unresolved delivery" {
+    try base.run(10, late_targeted_joins_retry);
+}
+
+test "due retry precedes queued fresh request" {
+    try base.run(10, struct {
+        fn body(io: Io) !void {
+            const quota = @import("p2p").Quota.per_second(2);
+            const setup = try HoldingSetup.init(io, &.{ 1, 2 }, .{ .quota = quota });
+            defer setup.deinit();
+            try setup.add_link(base.link, 0, 1);
+            const consumer = try setup.make_consumer();
+            const producer = try setup.make_producer(&.{ .{ 60, "retry" }, .{ 61, "fresh" } });
+            _ = try setup.spawn(1, try setup.make_consumer(), producer);
+            setup.retry_delay = Duration.from_millis(0);
+            const mailbox = try setup.spawn(0, consumer, try setup.make_producer(&.{}));
+
+            try base.fetch(mailbox, 60);
+            var first = try consumer.next();
+            defer first.deinit();
+            try first.seen.expect(60, &.{{}});
+            // Resolving the delivery makes its retry due before the queued mailbox request is
+            // admitted. The two-token quota admits the retry and holds the fresh request.
+            try base.fetch(mailbox, 61);
+            first.send(.unresolved);
+            var retry = try consumer.next();
+            defer retry.deinit();
+            try retry.seen.expect(60, &.{{}});
+            retry.send(complete);
+            var fresh = try consumer.next();
+            defer fresh.deinit();
+            try fresh.seen.expect(61, &.{{}});
+            fresh.send(complete);
+        }
+    }.body);
+}
