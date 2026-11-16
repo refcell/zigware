@@ -93,7 +93,7 @@ test "the production runner does the same over io_uring" {
     var probe: @import("ring.zig").Ring = undefined;
     try @import("ring_test.zig").init_or_skip(&probe, .{ .entries = 64 });
     probe.deinit();
-    try run_twice(.{ .entries = 64 });
+    try run_twice(.{});
 }
 
 const Context = production.Context;

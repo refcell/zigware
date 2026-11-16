@@ -172,7 +172,7 @@ fn new_ring_network(io: Io) Network {
 }
 
 fn init_test_ring() !void {
-    return @import("ring_test.zig").init_or_skip(&test_ring, .{ .entries = 512 });
+    return @import("ring_test.zig").init_or_skip(&test_ring, .{});
 }
 
 test "io_uring tcp network passes the network suite (run_network_tests)" {

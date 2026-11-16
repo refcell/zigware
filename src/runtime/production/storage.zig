@@ -331,7 +331,6 @@ fn hex_digit(char: u8) ?u8 {
     };
 }
 
-/// Reads up to `buffer.len` bytes at `offset`, fewer only at the end of the file.
 /// `failure`, unless the task was canceled during the call: then `error.Canceled`, so a
 /// task stopped mid-write ends quietly instead of reporting a failed device.
 fn or_canceled(err: anyerror, failure: Error) Error {
@@ -339,13 +338,14 @@ fn or_canceled(err: anyerror, failure: Error) Error {
     return if (err == error.Canceled) error.Canceled else failure;
 }
 
+/// Reads up to `buffer.len` bytes at `offset`, fewer only at the end of the file.
 fn file_read(storage: *const Storage, file: File, buffer: []u8, offset: u64) Error!usize {
-    const ring = storage.config.ring orelse
+    const worker = ring_worker(storage) orelse
         return file.readPositionalAll(storage.io, buffer, offset) catch |err|
             or_canceled(err, error.ReadFailed);
     var done: usize = 0;
     while (done < buffer.len) {
-        const result = try ring_perform(ring, .{ .read = .{
+        const result = try ring_perform(worker, .{ .read = .{
             .fd = file.handle,
             .buffer = buffer[done..],
             .offset = offset + done,
@@ -359,12 +359,12 @@ fn file_read(storage: *const Storage, file: File, buffer: []u8, offset: u64) Err
 }
 
 fn file_write(storage: *const Storage, file: File, bytes: []const u8, offset: u64) Error!void {
-    const ring = storage.config.ring orelse
+    const worker = ring_worker(storage) orelse
         return file.writePositionalAll(storage.io, bytes, offset) catch |err|
             or_canceled(err, error.WriteFailed);
     var done: usize = 0;
     while (done < bytes.len) {
-        const result = try ring_perform(ring, .{ .write = .{
+        const result = try ring_perform(worker, .{ .write = .{
             .fd = file.handle,
             .bytes = bytes[done..],
             .offset = offset + done,
@@ -376,10 +376,10 @@ fn file_write(storage: *const Storage, file: File, bytes: []const u8, offset: u6
 }
 
 fn file_sync(storage: *const Storage, file: File) Error!void {
-    const ring = storage.config.ring orelse
+    const worker = ring_worker(storage) orelse
         return file.sync(storage.io) catch |err| or_canceled(err, error.BlobSyncFailed);
     while (true) {
-        const result = try ring_perform(ring, .{ .fsync = .{ .fd = file.handle } }) orelse
+        const result = try ring_perform(worker, .{ .fsync = .{ .fd = file.handle } }) orelse
             continue;
         if (result.failed) return error.BlobSyncFailed;
         assert(result.count == 0);
@@ -387,11 +387,17 @@ fn file_sync(storage: *const Storage, file: File) Error!void {
     }
 }
 
+/// The calling thread's io_uring worker, or null to use `std.Io`.
+fn ring_worker(storage: *const Storage) ?*ring_mod.Worker {
+    const ring = storage.config.ring orelse return null;
+    return ring.worker();
+}
+
 const RingResult = struct { count: usize, failed: bool };
 
 /// One ring operation: its count, a failure, or null for an interrupted call to retry.
-fn ring_perform(ring: *ring_mod.Ring, operation: ring_mod.Operation) Error!?RingResult {
-    const result = ring.perform(operation, .none) catch |err| switch (err) {
+fn ring_perform(worker: *ring_mod.Worker, operation: ring_mod.Operation) Error!?RingResult {
+    const result = worker.perform(operation, .none) catch |err| switch (err) {
         error.Canceled => return error.Canceled,
         error.Timeout => unreachable, // No timeout was given.
     };

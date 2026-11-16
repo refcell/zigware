@@ -1,16 +1,18 @@
-//! An io_uring driver for production storage and network (commonware `runtime::iouring`,
+//! io_uring workers for production storage and network (commonware `runtime::iouring`,
 //! reduced to the I/O those need; tasks stay on `std.Io`).
 //!
-//! One ring thread owns the ring, as each commonware worker owns its ring
-//! (`SINGLE_ISSUER | DEFER_TASKRUN`): it alone enters the kernel, submitting in batches and
-//! running completion work, so blocked submitters are never interrupted. A task queues its
-//! operation under the ring's mutex, wakes the ring thread through an eventfd if it sleeps
-//! (a read of the eventfd is always pending on the ring), and waits on an `Io.Event`.
-//! A waiter that is canceled or times out queues `IORING_OP_ASYNC_CANCEL` and waits for the
-//! operation's completion before returning, so its buffers stay valid for as long as the
-//! kernel uses them. Operations are bounded so that each has room for its cancellation, and
-//! the completion queue (twice the submission queue) never overflows.
+//! Each commonware worker thread owns a ring and submits its tasks' I/O to it. Tasks on
+//! `std.Io.Threaded` are threads, so each thread that performs I/O owns a worker ring here:
+//! created on its first operation and used by it alone (`SINGLE_ISSUER | DEFER_TASKRUN`), it
+//! submits an operation and waits for its completion in one `io_uring_enter`, with no
+//! hand-off between threads. A thread waits in slices (`slice_ns`) and checks for
+//! cancellation between them, since `std.Io.Threaded` interrupts only its own system calls.
+//! A canceled or timed-out operation is canceled with `IORING_OP_ASYNC_CANCEL`, and its
+//! thread waits for both completions, so buffers stay valid for as long as the kernel uses
+//! them.
 //!
+//! A ring has room for `workers_max` workers. A thread without one (the ring is full, or the
+//! kernel refused it a ring) gets null from `worker` and does its I/O through `std.Io`.
 //! io_uring exists only on Linux: elsewhere `Ring.init` fails with `error.Unsupported`.
 
 const std = @import("std");
@@ -23,10 +25,15 @@ const posix = std.posix;
 pub const supported = builtin.os.tag == .linux;
 
 pub const Config = struct {
-    /// Submission queue entries (a power of two, at least 4): one is the wake read, and
-    /// the operations in flight (`entries / 2 - 1`) and their cancellations share the rest.
-    entries: u16 = 256,
+    /// Submission queue entries of each worker's ring (a power of two, at least 2): an
+    /// operation and its cancellation.
+    entries: u16 = 4,
 };
+
+/// Threads with their own ring, per `Ring`.
+pub const workers_max = 256;
+/// Longest wait in the kernel before a thread checks whether it was canceled.
+pub const slice_ns: u64 = 20 * std.time.ns_per_ms;
 
 pub const InitError = error{ Unsupported, SystemResources };
 pub const PerformError = Io.Cancelable || Io.Timeout.Error;
@@ -40,277 +47,253 @@ pub const Operation = union(enum) {
     sendmsg: struct { fd: posix.fd_t, msg: *const posix.msghdr_const },
 };
 
-/// `user_data` of the pending eventfd read that wakes the ring thread. Every other
-/// `user_data` is a request's address, with the low bit set on its cancellation.
-const user_data_wake: u64 = 1;
-const cancel_tag: u64 = 1;
-/// Completions the ring thread takes per batch.
-const reap_batch = 64;
-
-const Request = struct {
-    done: Io.Event = .unset,
-    result: i32 = 0,
-    /// Completions still to reap: the operation's, and its cancellation's if submitted. The
-    /// request holds its operation slot until both are reaped (ring mutex).
-    pending: u8 = 1,
-
-    comptime {
-        assert(@alignOf(Request) > cancel_tag);
-    }
-};
+const user_data_operation: u64 = 1;
+const user_data_cancel: u64 = 2;
 
 pub const Ring = if (supported) LinuxRing else UnsupportedRing;
+pub const Worker = if (supported) LinuxWorker else UnsupportedWorker;
+
+/// Distinguishes rings in the per-thread cache, so a thread never reuses a worker of a ring
+/// that was deinitialized.
+var ring_ids: std.atomic.Value(u64) = .init(1);
+
+/// The workers this thread owns, by ring id (a thread can use a few rings at once).
+const thread_cache_size = 4;
+threadlocal var thread_cache: [thread_cache_size]CacheEntry = @splat(.{});
+threadlocal var thread_cache_next: u8 = 0;
+
+const CacheEntry = struct {
+    ring_id: u64 = 0,
+    /// Null when the thread got no worker from this ring.
+    worker: ?*Worker = null,
+};
 
 const LinuxRing = struct {
     io: Io,
-    uring: linux.IoUring,
-    /// Written to wake the ring thread from `enter`; a read of it is always pending.
-    wake_fd: posix.fd_t,
-    wake_value: u64 = 0,
-    /// The ring was created disabled and the ring thread enables it, becoming its only issuer.
-    enable: bool,
-    mutex: Io.Mutex = .init,
-    /// Signaled when an operation completes.
-    slot_free: Io.Condition = .init,
-    /// Operations whose completions have not all been reaped.
-    operations: u32 = 0,
-    operations_max: u32,
-    /// Queued or submitted entries whose completion has not been reaped: operations, their
-    /// cancellations, and the wake read. At most the submission queue size.
-    in_flight: u32 = 0,
-    in_flight_max: u32,
-    /// The ring thread is in (or about to enter) `io_uring_enter` and needs a wake.
-    sleeping: bool = false,
-    stopping: bool = false,
-    wake_armed: bool = false,
-    thread: std.Thread,
+    config: Config,
+    id: u64,
+    workers: [workers_max]LinuxWorker,
+    /// Worker slots handed out; slots never return, since a worker belongs to its thread.
+    claimed: std.atomic.Value(u32) = .init(0),
 
-    /// Initializes in place: the ring thread holds the ring's address.
     pub fn init(ring: *LinuxRing, io: Io, config: Config) InitError!void {
-        assert(std.math.isPowerOfTwo(config.entries) and config.entries >= 4);
-        const preferred = linux.IORING_SETUP_SINGLE_ISSUER | linux.IORING_SETUP_DEFER_TASKRUN |
-            linux.IORING_SETUP_R_DISABLED;
-        var enable = true;
-        const uring = linux.IoUring.init(config.entries, preferred) catch |err| switch (err) {
-            // Kernels before 6.1 lack these flags; the ring thread is the only issuer anyway.
-            error.ArgumentsInvalid => fallback: {
-                enable = false;
-                break :fallback linux.IoUring.init(config.entries, 0) catch |e| return map_init(e);
-            },
-            else => return map_init(err),
-        };
-        const wake_rc = linux.eventfd(0, linux.EFD.CLOEXEC);
-        if (linux.errno(wake_rc) != .SUCCESS) {
-            var owned = uring;
-            owned.deinit();
-            return error.SystemResources;
-        }
+        assert(std.math.isPowerOfTwo(config.entries) and config.entries >= 2);
         ring.* = .{
             .io = io,
-            .uring = uring,
-            .wake_fd = @intCast(wake_rc),
-            .enable = enable,
-            // Each operation and its cancellation, plus the wake read, fit the queue.
-            .operations_max = config.entries / 2 - 1,
-            .in_flight_max = config.entries,
-            .thread = undefined,
+            .config = config,
+            .id = ring_ids.fetchAdd(1, .monotonic),
+            .workers = undefined,
         };
-        ring.thread = std.Thread.spawn(.{}, run, .{ring}) catch {
-            _ = linux.close(ring.wake_fd);
-            ring.uring.deinit();
-            return error.SystemResources;
-        };
-        assert(ring.operations == 0);
-    }
-
-    fn map_init(err: anyerror) InitError {
-        return switch (err) {
-            error.SystemResources,
-            error.ProcessFdQuotaExceeded,
-            error.SystemFdQuotaExceeded,
-            => error.SystemResources,
-            else => error.Unsupported,
-        };
+        // Probe once so that a kernel without io_uring fails here, not on every operation.
+        var probe = try ring_create(config.entries);
+        probe.deinit();
+        assert(ring.claimed.load(.monotonic) == 0);
     }
 
     /// Every `perform` must have returned.
     pub fn deinit(ring: *LinuxRing) void {
-        {
-            ring.mutex.lockUncancelable(ring.io);
-            defer ring.mutex.unlock(ring.io);
-            assert(ring.operations == 0);
-            ring.stopping = true;
+        const claimed = @min(ring.claimed.load(.acquire), workers_max);
+        for (ring.workers[0..claimed]) |*owned| {
+            assert(!owned.busy);
+            if (owned.ready) owned.uring.deinit();
         }
-        ring.wake();
-        ring.thread.join();
-        assert(ring.in_flight == 0);
-        _ = linux.close(ring.wake_fd);
-        ring.uring.deinit();
         ring.* = undefined;
     }
 
+    /// The calling thread's worker, created on first use, or null when it cannot have one:
+    /// use `std.Io` then.
+    pub fn worker(ring: *LinuxRing) ?*LinuxWorker {
+        for (&thread_cache) |*entry| {
+            if (entry.ring_id == ring.id) return entry.worker;
+        }
+        const created = ring.claim();
+        const slot = &thread_cache[thread_cache_next % thread_cache_size];
+        thread_cache_next +%= 1;
+        slot.* = .{ .ring_id = ring.id, .worker = created };
+        assert(created == null or created.?.ready);
+        return created;
+    }
+
+    /// A new worker for the calling thread, which becomes its only issuer.
+    fn claim(ring: *LinuxRing) ?*LinuxWorker {
+        const index = ring.claimed.fetchAdd(1, .acq_rel);
+        if (index >= workers_max) {
+            ring.claimed.store(workers_max, .release);
+            return null;
+        }
+        const created = &ring.workers[index];
+        created.* = .{ .io = ring.io, .uring = undefined, .ready = false };
+        created.uring = ring_create(ring.config.entries) catch |err| {
+            std.log.warn("io_uring worker unavailable ({t}); using std.Io", .{err});
+            return null;
+        };
+        created.ready = true;
+        created.register();
+        return created;
+    }
+};
+
+/// A ring for one thread: kernels before 6.1 lack `DEFER_TASKRUN`, and before 5.11 the
+/// timed waits this needs (`IORING_FEAT_EXT_ARG`).
+fn ring_create(entries: u16) InitError!linux.IoUring {
+    const preferred = linux.IORING_SETUP_SINGLE_ISSUER | linux.IORING_SETUP_DEFER_TASKRUN;
+    var uring = linux.IoUring.init(entries, preferred) catch |err| switch (err) {
+        error.ArgumentsInvalid => linux.IoUring.init(entries, 0) catch |e| return map_init(e),
+        else => return map_init(err),
+    };
+    if (uring.features & linux.IORING_FEAT_EXT_ARG == 0) {
+        uring.deinit();
+        return error.Unsupported;
+    }
+    assert(uring.fd >= 0);
+    return uring;
+}
+
+fn map_init(err: anyerror) InitError {
+    return switch (err) {
+        error.SystemResources,
+        error.ProcessFdQuotaExceeded,
+        error.SystemFdQuotaExceeded,
+        => error.SystemResources,
+        else => error.Unsupported,
+    };
+}
+
+const LinuxWorker = struct {
+    io: Io,
+    uring: linux.IoUring,
+    ready: bool,
+    /// What `io_uring_enter` takes: the ring's registered index, or its descriptor.
+    enter_fd: i32 = -1,
+    enter_flags: u32 = 0,
+    /// An operation is in flight (the owning thread performs one at a time).
+    busy: bool = false,
+    result: i32 = 0,
+    operation_done: bool = false,
+    cancel_done: bool = false,
+
+    /// Registers the ring with its thread (kernel 5.18), so each enter skips the descriptor
+    /// lookup. The registration holds the ring until the thread exits, as it is the thread's;
+    /// a thread holds at most 16, and later rings enter by descriptor.
+    fn register(worker: *LinuxWorker) void {
+        assert(worker.ready and worker.enter_flags == 0);
+        worker.enter_fd = worker.uring.fd;
+        var update: linux.io_uring_rsrc_update = .{
+            .offset = std.math.maxInt(u32), // Any free index.
+            .resv = 0,
+            .data = @intCast(worker.uring.fd),
+        };
+        const rc = linux.io_uring_register(worker.uring.fd, .REGISTER_RING_FDS, &update, 1);
+        if (linux.errno(rc) != .SUCCESS) return;
+        worker.enter_fd = @intCast(update.offset);
+        worker.enter_flags = linux.IORING_ENTER_REGISTERED_RING;
+        assert(worker.enter_fd >= 0);
+    }
+
     /// Runs `operation` and returns its result: a count, or a negated errno.
-    pub fn perform(ring: *LinuxRing, operation: Operation, timeout: Io.Timeout) PerformError!i32 {
-        var request: Request = .{};
-        const user_data: u64 = @intFromPtr(&request);
-        assert(user_data & cancel_tag == 0 and user_data > user_data_wake);
-        const wake_queued = wake: {
-            try ring.mutex.lock(ring.io);
-            defer ring.mutex.unlock(ring.io);
-            while (ring.operations == ring.operations_max) {
-                try ring.slot_free.wait(ring.io, &ring.mutex);
-            }
-            ring.operations += 1;
-            break :wake ring.queue_locked(user_data, .{ .operation = operation });
-        };
-        if (wake_queued) ring.wake();
-        request.done.waitTimeout(ring.io, timeout) catch |err| {
-            ring.cancel(&request);
-            return err;
-        };
-        assert(request.done.isSet());
-        return request.result;
-    }
-
-    /// Cancels a request whose waiter gave up, and waits until the kernel is done with it.
-    fn cancel(ring: *LinuxRing, request: *Request) void {
-        const user_data: u64 = @intFromPtr(request);
-        var wake_queued = false;
-        {
-            ring.mutex.lockUncancelable(ring.io);
-            defer ring.mutex.unlock(ring.io);
-            // A request in flight holds one operation slot and at most two entries, so its
-            // cancellation always fits.
-            if (!request.done.isSet()) {
-                assert(request.pending == 1);
-                request.pending = 2;
-                wake_queued = ring.queue_locked(user_data | cancel_tag, .{ .cancel = user_data });
-            }
-        }
-        if (wake_queued) ring.wake();
-        request.done.waitUncancelable(ring.io);
-        assert(request.pending == 0);
-    }
-
-    const Entry = union(enum) { operation: Operation, cancel: u64, wake_read };
-
-    /// Queues one entry for the ring thread to submit (mutex held, a slot free). Returns
-    /// whether the caller must wake the ring thread, after releasing the mutex.
-    fn queue_locked(ring: *LinuxRing, user_data: u64, entry: Entry) bool {
-        assert(ring.in_flight < ring.in_flight_max);
-        assert(ring.operations <= ring.operations_max);
-        const uring = &ring.uring;
-        // Queued entries count as in flight until reaped, so a free slot is a free entry.
-        const sqe = uring.get_sqe() catch unreachable;
-        switch (entry) {
-            .wake_read => sqe.prep_read(ring.wake_fd, std.mem.asBytes(&ring.wake_value), 0),
-            .cancel => |target| sqe.prep_cancel(target, 0),
-            .operation => |operation| switch (operation) {
-                .read => |o| sqe.prep_read(o.fd, o.buffer, o.offset),
-                .write => |o| sqe.prep_write(o.fd, o.bytes, o.offset),
-                .fsync => |o| sqe.prep_fsync(o.fd, 0),
-                .recv => |o| sqe.prep_recv(o.fd, o.buffer, 0),
-                .sendmsg => |o| sqe.prep_sendmsg(o.fd, o.msg, linux.MSG.NOSIGNAL),
-            },
-        }
-        sqe.user_data = user_data;
-        ring.in_flight += 1;
-        _ = uring.flush_sq();
-        assert(uring.sq.sqe_head == uring.sq.sqe_tail);
-        const sleeping = ring.sleeping;
-        ring.sleeping = false; // One wake is enough until the thread sleeps again.
-        return sleeping;
-    }
-
-    /// Wakes the ring thread out of `io_uring_enter`.
-    fn wake(ring: *LinuxRing) void {
-        const one: u64 = 1;
-        const rc = linux.write(ring.wake_fd, std.mem.asBytes(&one), @sizeOf(u64));
-        // An eventfd write fails only if its counter would overflow, which a read prevents.
-        assert(linux.errno(rc) == .SUCCESS);
-    }
-
-    /// The ring thread: the only one to enter the ring. Submits what was queued, waits for
-    /// completions, and wakes their waiters, until `deinit` stops it.
-    fn run(ring: *LinuxRing) void {
-        if (ring.enable) {
-            const rc = linux.io_uring_register(ring.uring.fd, .REGISTER_ENABLE_RINGS, null, 0);
-            if (linux.errno(rc) != .SUCCESS) std.debug.panic("io_uring enable failed", .{});
-        }
-        {
-            ring.mutex.lockUncancelable(ring.io);
-            defer ring.mutex.unlock(ring.io);
-            _ = ring.queue_locked(user_data_wake, .wake_read);
-            ring.wake_armed = true;
-        }
+    pub fn perform(
+        worker: *LinuxWorker,
+        operation: Operation,
+        timeout: Io.Timeout,
+    ) PerformError!i32 {
+        assert(worker.ready);
+        assert(!worker.busy);
+        worker.busy = true;
+        defer worker.busy = false;
+        const deadline = timeout.toDeadline(worker.io);
+        worker.operation_done = false;
+        worker.queue(operation);
         while (true) {
-            const to_submit = submit: {
-                ring.mutex.lockUncancelable(ring.io);
-                defer ring.mutex.unlock(ring.io);
-                if (ring.stopping and !ring.wake_armed and ring.in_flight == 0) return;
-                ring.sleeping = true;
-                break :submit ring.uring.sq_ready();
-            };
-            ring.enter(to_submit);
-            ring.reap();
-        }
-    }
-
-    /// Submits `to_submit` entries and waits for at least one completion.
-    fn enter(ring: *LinuxRing, to_submit: u32) void {
-        var attempts: u32 = 0;
-        while (true) : (attempts += 1) {
-            assert(attempts < 1024); // Interrupts do not repeat without end.
-            _ = ring.uring.enter(to_submit, 1, linux.IORING_ENTER_GETEVENTS) catch |err|
-                switch (err) {
-                    error.SignalInterrupt => continue,
-                    // Waiters would never wake; there is no recovery.
-                    else => std.debug.panic("io_uring enter failed: {t}", .{err}),
-                };
-            return;
-        }
-    }
-
-    /// Takes every ready completion and wakes its waiter.
-    fn reap(ring: *LinuxRing) void {
-        var cqes: [reap_batch]linux.io_uring_cqe = undefined;
-        ring.mutex.lockUncancelable(ring.io);
-        defer ring.mutex.unlock(ring.io);
-        ring.sleeping = false;
-        var batches: u32 = 0;
-        while (batches <= ring.in_flight_max) : (batches += 1) {
-            const count = ring.uring.copy_cqes(&cqes, 0) catch |err|
-                std.debug.panic("io_uring reap failed: {t}", .{err});
-            if (count == 0) return;
-            assert(ring.in_flight >= count);
-            ring.in_flight -= count;
-            for (cqes[0..count]) |cqe| {
-                if (cqe.user_data == user_data_wake) {
-                    ring.wake_armed = false;
-                    if (!ring.stopping) {
-                        _ = ring.queue_locked(user_data_wake, .wake_read);
-                        ring.wake_armed = true;
-                    }
-                } else {
-                    ring.complete(cqe);
-                }
+            worker.io.checkCancel() catch |err| return worker.abort(err);
+            var wait_ns = slice_ns;
+            if (deadline == .deadline) {
+                const left = deadline.deadline.durationFromNow(worker.io).raw.nanoseconds;
+                if (left <= 0) return worker.abort(error.Timeout);
+                wait_ns = @min(wait_ns, @as(u64, @intCast(left)));
             }
+            worker.enter(wait_ns);
+            worker.reap();
+            if (worker.operation_done) return worker.result;
         }
-        unreachable; // At most `in_flight_max` completions are outstanding.
     }
 
-    /// Records one completion of a request; the last one wakes its waiter (mutex held).
-    fn complete(ring: *LinuxRing, cqe: linux.io_uring_cqe) void {
-        const request: *Request = @ptrFromInt(cqe.user_data & ~cancel_tag);
-        if (cqe.user_data & cancel_tag == 0) request.result = cqe.res;
-        assert(request.pending > 0);
-        request.pending -= 1;
-        if (request.pending > 0) return;
-        assert(ring.operations > 0);
-        ring.operations -= 1;
-        ring.slot_free.broadcast(ring.io); // A canceled slot waiter may swallow a signal.
-        // The waiter may return as soon as this is set: nothing touches the request after it.
-        request.done.set(ring.io);
+    fn queue(worker: *LinuxWorker, operation: Operation) void {
+        // The owner has one operation and at most its cancellation in flight.
+        const sqe = worker.uring.get_sqe() catch unreachable;
+        switch (operation) {
+            .read => |o| sqe.prep_read(o.fd, o.buffer, o.offset),
+            .write => |o| sqe.prep_write(o.fd, o.bytes, o.offset),
+            .fsync => |o| sqe.prep_fsync(o.fd, 0),
+            .recv => |o| sqe.prep_recv(o.fd, o.buffer, 0),
+            .sendmsg => |o| sqe.prep_sendmsg(o.fd, o.msg, linux.MSG.NOSIGNAL),
+        }
+        sqe.user_data = user_data_operation;
+        assert(worker.uring.sq.sqe_tail -% worker.uring.sq.sqe_head == 1);
+    }
+
+    /// Cancels the operation in flight, waits until the kernel is done with it, and returns
+    /// `err`.
+    fn abort(worker: *LinuxWorker, err: PerformError) PerformError {
+        assert(!worker.operation_done);
+        const sqe = worker.uring.get_sqe() catch unreachable;
+        sqe.prep_cancel(user_data_operation, 0);
+        sqe.user_data = user_data_cancel;
+        worker.cancel_done = false;
+        while (!(worker.operation_done and worker.cancel_done)) {
+            worker.enter(slice_ns);
+            worker.reap();
+        }
+        return err;
+    }
+
+    /// Submits what is queued and waits up to `wait_ns` for a completion.
+    fn enter(worker: *LinuxWorker, wait_ns: u64) void {
+        assert(wait_ns > 0);
+        const to_submit = worker.uring.flush_sq();
+        var ts: linux.kernel_timespec = .{
+            .sec = @intCast(wait_ns / std.time.ns_per_s),
+            .nsec = @intCast(wait_ns % std.time.ns_per_s),
+        };
+        var arg: linux.io_uring_getevents_arg = .{
+            .sigmask = 0,
+            .sigmask_sz = 0,
+            .pad = 0,
+            .ts = @intFromPtr(&ts),
+        };
+        const flags = linux.IORING_ENTER_GETEVENTS | linux.IORING_ENTER_EXT_ARG |
+            worker.enter_flags;
+        const rc = linux.syscall6(
+            .io_uring_enter,
+            @as(u32, @bitCast(worker.enter_fd)),
+            to_submit,
+            1,
+            flags,
+            @intFromPtr(&arg),
+            @sizeOf(linux.io_uring_getevents_arg),
+        );
+        switch (linux.errno(rc)) {
+            // A timeout or interrupt ends the slice; unsubmitted entries go with the next.
+            .SUCCESS, .TIME, .INTR, .AGAIN, .BUSY => {},
+            // The waiter would never wake; there is no recovery.
+            else => |e| std.debug.panic("io_uring enter failed: {t}", .{e}),
+        }
+    }
+
+    /// Records every ready completion.
+    fn reap(worker: *LinuxWorker) void {
+        var cqes: [4]linux.io_uring_cqe = undefined;
+        const count = worker.uring.copy_cqes(&cqes, 0) catch |err|
+            std.debug.panic("io_uring reap failed: {t}", .{err});
+        assert(count <= 2);
+        for (cqes[0..count]) |cqe| switch (cqe.user_data) {
+            user_data_operation => {
+                assert(!worker.operation_done);
+                worker.operation_done = true;
+                worker.result = cqe.res;
+            },
+            user_data_cancel => worker.cancel_done = true,
+            else => unreachable,
+        };
     }
 };
 
@@ -323,8 +306,14 @@ const UnsupportedRing = struct {
         unreachable; // `init` never succeeds.
     }
 
-    pub fn perform(_: *UnsupportedRing, _: Operation, _: Io.Timeout) PerformError!i32 {
+    pub fn worker(_: *UnsupportedRing) ?*UnsupportedWorker {
         unreachable; // `init` never succeeds.
+    }
+};
+
+const UnsupportedWorker = struct {
+    pub fn perform(_: *UnsupportedWorker, _: Operation, _: Io.Timeout) PerformError!i32 {
+        unreachable; // No ring gives one.
     }
 };
 

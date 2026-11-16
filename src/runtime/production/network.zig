@@ -137,7 +137,9 @@ pub const Sink = struct {
         assert(first.len > 0);
         const shared = sink.shared;
         const fd = shared.stream.socket.handle;
-        if (shared.ring) |ring| return ring_send(ring, fd, first, rest, timeout);
+        if (shared.ring) |ring| if (ring.worker()) |worker| {
+            return ring_send(worker, fd, first, rest, timeout);
+        };
         const result = operate_until(shared.io, .{ .net_write = .{
             .socket_handle = fd,
             .header = first,
@@ -207,7 +209,9 @@ pub const Stream = struct {
     fn read_some(stream: *Stream, into: []u8, timeout: Io.Timeout) Error!usize {
         assert(into.len > 0);
         const shared = stream.shared;
-        if (shared.ring) |ring| return ring_recv(ring, shared.stream.socket.handle, into, timeout);
+        if (shared.ring) |ring| if (ring.worker()) |worker| {
+            return ring_recv(worker, shared.stream.socket.handle, into, timeout);
+        };
         const io = shared.io;
         var data: [1][]u8 = .{into};
         const result = operate_until(io, .{ .net_read = .{
@@ -244,7 +248,7 @@ const send_iovecs_max = 8;
 
 /// One `sendmsg` of `first` and up to 7 buffers of `rest` through the ring.
 fn ring_send(
-    ring: *ring_mod.Ring,
+    worker: *ring_mod.Worker,
     fd: posix.fd_t,
     first: []const u8,
     rest: []const []const u8,
@@ -265,16 +269,21 @@ fn ring_send(
         .controllen = 0,
         .flags = 0,
     };
-    const sent = try ring_perform(ring, .{ .sendmsg = .{ .fd = fd, .msg = &msg } }, timeout) orelse
-        return error.SendFailed;
+    const operation: ring_mod.Operation = .{ .sendmsg = .{ .fd = fd, .msg = &msg } };
+    const sent = try ring_perform(worker, operation, timeout) orelse return error.SendFailed;
     if (sent == 0) return error.SendFailed;
     return sent;
 }
 
 /// One `recv` into `into` through the ring; the end of the stream fails.
-fn ring_recv(ring: *ring_mod.Ring, fd: posix.fd_t, into: []u8, timeout: Io.Timeout) Error!usize {
-    const read = try ring_perform(ring, .{ .recv = .{ .fd = fd, .buffer = into } }, timeout) orelse
-        return error.RecvFailed;
+fn ring_recv(
+    worker: *ring_mod.Worker,
+    fd: posix.fd_t,
+    into: []u8,
+    timeout: Io.Timeout,
+) Error!usize {
+    const operation: ring_mod.Operation = .{ .recv = .{ .fd = fd, .buffer = into } };
+    const read = try ring_perform(worker, operation, timeout) orelse return error.RecvFailed;
     if (read == 0) return error.RecvFailed;
     assert(read <= into.len);
     return read;
@@ -282,14 +291,14 @@ fn ring_recv(ring: *ring_mod.Ring, fd: posix.fd_t, into: []u8, timeout: Io.Timeo
 
 /// Runs a ring operation, retrying interrupted ones: its count, or null if it failed.
 fn ring_perform(
-    ring: *ring_mod.Ring,
+    worker: *ring_mod.Worker,
     operation: ring_mod.Operation,
     timeout: Io.Timeout,
 ) Error!?usize {
     var attempts: u32 = 0;
     while (true) : (attempts += 1) {
         assert(attempts < 1024); // Interrupts do not repeat without end.
-        const result = ring.perform(operation, timeout) catch |err| return switch (err) {
+        const result = worker.perform(operation, timeout) catch |err| return switch (err) {
             error.Canceled => error.Canceled,
             error.Timeout => error.Timeout,
         };

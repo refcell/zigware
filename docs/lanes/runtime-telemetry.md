@@ -96,21 +96,30 @@ the registry API first and report it.
   known yet. The stress cases now log the failing step and error, and `macos-slow.yml` runs
   `-Dslow-tests` on macOS in Debug by hand.
 - io_uring (`production/ring.zig`) is a driver, not an executor: tasks stay on `std.Io`, and
-  blob read/write/fsync and socket recv/sendmsg go through one ring. As each commonware worker
-  owns its ring (`SINGLE_ISSUER | DEFER_TASKRUN`), one ring thread is the only one to enter
-  it: submitters queue entries under a mutex, wake it through an eventfd with a read always
-  pending on the ring, and wait on an `Io.Event`. A canceled or timed-out waiter queues
-  `ASYNC_CANCEL` and waits for both completions, so its buffers outlive the kernel's use.
-  Operations are capped at `entries / 2 - 1`, so each cancellation and the wake read fit and
-  the completion queue never overflows. Kernels before 6.1 fall back to a plain ring.
+  blob read/write/fsync and socket recv/sendmsg go through io_uring workers. Each commonware
+  worker thread owns a ring; tasks on `std.Io.Threaded` are threads, so each thread that
+  performs I/O owns a worker ring (`SINGLE_ISSUER | DEFER_TASKRUN`, registered with
+  `REGISTER_RING_FDS`), created on its first operation and found through a 4-entry
+  thread-local cache keyed by ring id. The thread submits and waits in one `io_uring_enter`
+  (`EXT_ARG` timed waits of at most 20 ms), checking `io.checkCancel()` between slices, since
+  `Threaded` interrupts only its own system calls. A canceled or timed-out operation is
+  canceled with `ASYNC_CANCEL`, and the thread waits for both completions. A ring has room for
+  256 workers; a thread without one (ring full, or the kernel refused it a ring) does its I/O
+  through `std.Io`. Kernels before 6.1 get plain rings; before 5.11 (no `EXT_ARG`), none.
   Commonware's iouring executor (tasks scheduled on the ring thread) is not ported.
-  `Config.io_uring` (off by default, like commonware's `iouring-*` features) turns it on.
-- io_uring throughput, 16 loopback connections echoing 4000 × 4 KiB messages (ReleaseSafe, a
-  loaded 32-core desktop): `std.Io.Threaded` about 60-90 ms; the first ring (every submitter
-  entering the ring under its mutex) 1.7-2.1 s; entering outside the mutex 1.0-1.7 s; with
-  SQPOLL about 0.5 s; one issuing ring thread about 0.54 s, without SQPOLL's spinning kernel
-  thread. The remaining gap is a futex wake per completion and one ring thread; one ring per
-  worker (commonware's layout) or an executor on the ring would close it.
+- io_uring stays off by default (`Config.io_uring`), like commonware's `iouring-network` and
+  `iouring-storage` features over its tokio default. Per-thread workers reach parity with
+  `std.Io.Threaded` but do not clearly beat it, so the default does not change.
+  `zig build bench -Dbench-filter=runtime::` tracks both backends (ReleaseSafe, medians,
+  loaded 32-core desktop):
+  - `runtime::network::echo`, 16 connections × 1000 × 4 KiB: Threaded 24.9 ms, io_uring 23.6 ms
+    (15 runs). With 64 × 4000 (`COMMONWARE_BENCH_FULL=1`): 205 ms and 197 ms.
+  - `runtime::storage`, 8 blobs × 256 × 4 KiB written, synced, and read back: 30 ms each,
+    within noise, since btrfs fsync dominates.
+  Ping-pong echo is bound by wakeups, which both backends pay. io_uring saves Threaded's poll
+  before each timed read, and little else, because a thread-per-task runtime cannot batch
+  submissions. Earlier designs were far slower: one issuing ring thread 0.54 s and SQPOLL
+  0.5 s, against Threaded's 60-90 ms on 16 × 4000.
 - io_uring tests skip when the kernel cannot give a ring: unsupported, or `io_uring_setup`
   fails with ENOMEM because the user's locked-memory limit (shared by all of the user's
   processes, 8 MiB by default) is used up by other rings on the machine.
@@ -130,7 +139,11 @@ the registry API first and report it.
 - [x] Our own io_uring backend (`std.os.linux.IoUring`) behind the same storage and network,
   since `std.Io.Uring` does not compile, passing `run_storage_tests` and `run_network_tests`.
 - [x] io_uring throughput: one issuing ring thread with batched submission (about 3× faster).
-- [ ] io_uring: one ring per worker thread, or an executor on the ring (commonware's design).
+- [x] io_uring: one ring per worker thread (commonware's layout), at parity with Threaded;
+  `runtime::network::echo` and `runtime::storage` benches; io_uring stays opt-in.
+- [ ] Tracing events: level, target, message, and fields, delivered to a subscriber the
+  runtime or Context carries, free when nobody subscribes; examples/ui's logger subscribes
+  with its JSON and text formats. Then tell p2p and consensus-simplex.
 - [x] Executor-side `runtime_tasks_*` metrics (handed over by the runtime lane).
 - [x] metrics registry: counters, gauges, histograms (bucket layout as commonware), label
   sets, families, registration/scoping by component label, and Prometheus text exposition
@@ -168,3 +181,4 @@ the registry API first and report it.
 - 2026-11-16: `runtime_iterations`, `runtime_tasks_spawned`, `runtime_tasks_running`. The
   manual macOS slow run (Debug) passed the TCP stress test in 57 s; the ReleaseSafe failure
   has not recurred.
+- 2026-11-16: io_uring: one worker ring per thread; runtime benches; io_uring stays opt-in.
