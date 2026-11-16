@@ -75,7 +75,9 @@ handshake and the runtime's network, which the actor-stream and runtime lanes ar
   `Network`. `Net.Config.local(base)` / `.recommended(base)` take `.{ upgrader, namespace,
   listen (Io.net.IpAddress), dialable (Ingress), bootstrappers ([]const Bootstrapper{peer,
   ingress}), max_peers_per_set, max_message_size, mailbox_size }`; adjust fields after.
-  `Net.create(gpa, io, *transport, config) !*Net`, `register(channel, Quota) !Registered{sender,
+  `Net.create(gpa, io, *transport, scope, config) !*Net` (metrics under `scope`, commonware's
+  network context: `tracker_directory_*`, `listener_handshake*`, `dialer_attempts`,
+  `spawner_messages_{sent,received,rate_limited}`), `register(channel, Quota) !Registered{sender,
   receiver}` (before `run`), `oracle()` (`track(index, TrackedPeers)`, `peer_set`, `subscribe`,
   `block`, `blocked`), `run() !void` (spawn with `io.concurrent`; cancel to stop, after which
   receivers report `NetworkClosed`), and `destroy()` after deinitializing senders. Shared
@@ -126,6 +128,11 @@ handshake and the runtime's network, which the actor-stream and runtime lanes ar
   does. DNS ingress is never dialed until the runtime has a resolver, and the transport dial
   relies on the handshake timeout and the transport's own connect timeout instead of a
   separate `dial_timeout` race.
+- Metric names, help texts, and labels follow commonware. Commonware has no `p2p_connections`
+  gauge any more (removed in #3324); count `tracker_directory_connected` samples instead.
+  Recording a per-peer series never fails an operation: when its label cannot be allocated,
+  the sample is skipped. Simulated link success rates sample through `utils.Probability`
+  and must be exactly representable (as `probability!` requires).
 - p2p carries its own seeded fuzz driver (`p2p.fuzz.run`, same as codec's) until
   `invariants.minifuzz` lands.
 
@@ -150,8 +157,9 @@ handshake and the runtime's network, which the actor-stream and runtime lanes ar
 - [x] discovery: types (conformance), tracker record/bit set/directory, tracker, peer
   connections, dialer, listener, Network/Config/Oracle, connectivity over the deterministic
   network.
+- [x] discovery: metrics (directory, listener, dialer, per-connection messages).
 - [ ] discovery: remaining mod.rs tests (rate limiting, message size, graceful shutdown,
-  restarts, duplicate addresses, slow peers) and metrics.
+  restarts, duplicate addresses, slow peers).
 - [ ] lookup: tracker actor, peer actor, network, `StaticProvider`.
 - [ ] utils codec: `WrappedBackgroundReceiver` (decode on a parallel Strategy); then tell
   broadcast-collector so buffered's config can take the Strategy (low priority, after
@@ -178,3 +186,5 @@ handshake and the runtime's network, which the actor-stream and runtime lanes ar
 - 2026-11-16: discovery tracker record, bit set, and directory with their tests.
 - 2026-11-16: discovery tracker, peer connections, dialer, listener, and Network; five peers
   connect through one bootstrapper on the deterministic network.
+- 2026-11-16: discovery metrics (directory, listener, dialer, spawner message counters);
+  `Network.create` takes a metrics scope; simulated links sample through `utils.Probability`.

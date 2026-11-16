@@ -74,11 +74,13 @@ pub const Link = struct {
 const IoRng = @import("../utils/io_rng.zig").IoRng;
 
 /// Whether a message on a link with `success_rate` is delivered (commonware
-/// `Probability::sample`): certain outcomes draw nothing from the RNG.
+/// `Probability::sample`): certain outcomes draw nothing from the RNG. Panics when the rate
+/// is not exactly a 64-bit threshold, as commonware's `probability!` fails to compile.
 fn sample_success(rng: IoRng, success_rate: f64) bool {
     assert(success_rate >= 0 and success_rate <= 1);
-    if (success_rate == 0) return false;
-    return utils_pkg.rng.bernoulli(rng, success_rate);
+    const probability = utils_pkg.Probability.from_f64(success_rate) orelse
+        @panic("success rate is not representable as a probability");
+    return probability.sample(rng);
 }
 
 /// Milliseconds as a `Duration`, saturating like Rust's `f64 as u64` (negative is zero).

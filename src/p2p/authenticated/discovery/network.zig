@@ -27,6 +27,7 @@ const Outbox = @import("../outbox.zig").Outbox;
 const config_mod = @import("config.zig");
 const tracker_mod = @import("tracker.zig");
 const peer_mod = @import("peer.zig");
+const labels = @import("metrics.zig");
 
 const Ingress = p2p_types.Ingress;
 const Duration = utils.Duration;
@@ -46,6 +47,74 @@ const subnet_ipv6_bits = 48;
 const cleanup_interval: u32 = 16_384;
 /// Consecutive accept failures after which the listener stops.
 const accept_failures_max: u32 = 1024;
+
+/// The listener's and dialer's counters (commonware `discovery/actors/{listener,dialer}.rs`),
+/// under the network scope's `listener` and `dialer` children.
+pub fn Counters(comptime P: type) type {
+    return struct {
+        const Self = @This();
+        const PeerFamily = metrics.raw.Family(labels.Peer(P), metrics.raw.Counter);
+
+        handshakes_blocked: metrics.Counter,
+        handshakes_concurrent_rate_limited: metrics.Counter,
+        handshakes_ip_rate_limited: metrics.Counter,
+        handshakes_subnet_rate_limited: metrics.Counter,
+        /// Dial attempts made to each peer.
+        attempts: metrics.Registered(PeerFamily),
+
+        pub fn init(scope: metrics.Scope) Allocator.Error!Self {
+            const listener = scope.child("listener");
+            var blocked = try listener.counter(
+                "handshakes_blocked",
+                "number of handshake attempts blocked because the IP was private",
+            );
+            errdefer blocked.deinit();
+            var concurrent = try listener.counter(
+                "handshake_concurrent_rate_limited",
+                "number of handshake attempts dropped because maximum concurrent handshakes " ++
+                    "was reached",
+            );
+            errdefer concurrent.deinit();
+            var ip = try listener.counter(
+                "handshake_ip_rate_limited",
+                "number of handshake attempts dropped because an IP exceeded its rate limit",
+            );
+            errdefer ip.deinit();
+            var subnet = try listener.counter(
+                "handshake_subnet_rate_limited",
+                "number of handshake attempts dropped because a subnet exceeded its rate limit",
+            );
+            errdefer subnet.deinit();
+            const dialer = scope.child("dialer");
+            const attempts_help = "The number of dial attempts made to each peer";
+            const attempts =
+                try dialer.family(labels.Peer(P), metrics.raw.Counter, "attempts", attempts_help);
+            return .{
+                .handshakes_blocked = blocked,
+                .handshakes_concurrent_rate_limited = concurrent,
+                .handshakes_ip_rate_limited = ip,
+                .handshakes_subnet_rate_limited = subnet,
+                .attempts = attempts,
+            };
+        }
+
+        pub fn deinit(counters: *Self) void {
+            counters.handshakes_blocked.deinit();
+            counters.handshakes_concurrent_rate_limited.deinit();
+            counters.handshakes_ip_rate_limited.deinit();
+            counters.handshakes_subnet_rate_limited.deinit();
+            counters.attempts.deinit();
+            counters.* = undefined;
+        }
+
+        /// Counts a dial attempt; an attempt whose label cannot be allocated goes unrecorded.
+        pub fn attempt(counters: *Self, peer: P) void {
+            const counter = counters.attempts.metric().get_or_create(.{ .peer = peer }) catch
+                return;
+            counter.inc();
+        }
+    };
+}
 
 pub fn Network(comptime U: type, comptime Transport: type) type {
     return struct {
@@ -83,6 +152,8 @@ pub fn Network(comptime U: type, comptime Transport: type) type {
         channels: Channels,
         tracker: Tracker,
         peer_config: Peer.Config,
+        counters: Counters(P),
+        families: Peer.Families,
         /// The dialer, listener, unblock timer, handshakes, and connections.
         tasks: Io.Group = .init,
         /// Inbound handshakes in flight.
@@ -128,7 +199,12 @@ pub fn Network(comptime U: type, comptime Transport: type) type {
                 .channels = undefined,
                 .tracker = undefined,
                 .peer_config = make_peer_config(&config, ip_namespace),
+                .counters = try .init(scope),
+                .families = undefined,
             };
+            errdefer network.counters.deinit();
+            network.families = try .init(scope);
+            errdefer network.families.deinit();
             network.router = try Router.init(gpa, io);
             errdefer network.router.deinit();
             const tracker_scope = scope.child("tracker");
@@ -146,6 +222,8 @@ pub fn Network(comptime U: type, comptime Transport: type) type {
             network.channels.deinit();
             network.router.deinit();
             network.tracker.deinit();
+            network.counters.deinit();
+            network.families.deinit();
             gpa.free(network.stream_namespace);
             gpa.free(network.ip_namespace);
             gpa.destroy(network);
@@ -277,19 +355,26 @@ pub fn Network(comptime U: type, comptime Transport: type) type {
                     continue;
                 };
                 failures = 0;
+                const ip = to_ip(accepted.address);
+                if (!config.allow_private_ips and !utils.net.is_global(ip)) {
+                    network.counters.handshakes_blocked.metric().inc();
+                    accepted.deinit();
+                    continue;
+                }
                 if (accepted_count > cleanup_interval) {
                     per_ip.retain_recent();
                     per_subnet.retain_recent();
                     accepted_count = 0;
                 }
                 accepted_count += 1;
-                if (!network.admit(&per_ip, &per_subnet, accepted.address)) {
+                if (!network.admit(&per_ip, &per_subnet, ip)) {
                     accepted.deinit();
                     continue;
                 }
                 const in_flight = network.handshakes.fetchAdd(1, .monotonic);
                 if (in_flight >= config.max_concurrent_handshakes) {
                     _ = network.handshakes.fetchSub(1, .monotonic);
+                    network.counters.handshakes_concurrent_rate_limited.metric().inc();
                     accepted.deinit();
                     continue;
                 }
@@ -300,20 +385,20 @@ pub fn Network(comptime U: type, comptime Transport: type) type {
             }
         }
 
-        /// Whether an inbound connection from `address` passes the IP policy and both rate
-        /// limits (each limit is charged even when the other rejects).
+        /// Whether an inbound connection from `ip` passes both rate limits (each limit is
+        /// charged even when the other rejects).
         fn admit(
             network: *Self,
             per_ip: *IpLimiter,
             per_subnet: *IpLimiter,
-            address: IpAddress,
+            ip: codec.IpAddr,
         ) bool {
-            const ip = to_ip(address);
-            if (!network.config.allow_private_ips and !utils.net.is_global(ip)) return false;
             const ip_limited = (per_ip.check_key(ip) catch return false) != null;
+            if (ip_limited) network.counters.handshakes_ip_rate_limited.metric().inc();
             const mask = utils.net.SubnetMask.init(subnet_ipv4_bits, subnet_ipv6_bits);
             const subnet = utils.net.subnet(ip, mask).addr;
             const subnet_limited = (per_subnet.check_key(subnet) catch return false) != null;
+            if (subnet_limited) network.counters.handshakes_subnet_rate_limited.metric().inc();
             return !ip_limited and !subnet_limited;
         }
 
@@ -365,6 +450,7 @@ pub fn Network(comptime U: type, comptime Transport: type) type {
                         gpa,
                         network.io,
                         &network.peer_config,
+                        &network.families,
                         peer,
                         greeting,
                         &connection.sender,
@@ -410,6 +496,7 @@ pub fn Network(comptime U: type, comptime Transport: type) type {
                 deadline = next_deadline(&network.config, now, empty, next_query_at);
                 while (queue.pop()) |peer| {
                     const metadata = network.tracker.dial(peer) orelse continue;
+                    network.counters.attempt(peer);
                     network.tasks.concurrent(io, dial_peer, .{ network, metadata }) catch
                         network.tracker.release(metadata);
                     break;

@@ -11,6 +11,7 @@ pub const max_gossip_size = types.max_gossip_size;
 pub const record = @import("record.zig");
 pub const bit_set = @import("bit_set.zig");
 pub const directory = @import("directory.zig");
+pub const metrics = @import("metrics.zig");
 pub const tracker = @import("tracker.zig");
 pub const peer = @import("peer.zig");
 pub const config = @import("config.zig");

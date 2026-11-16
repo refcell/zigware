@@ -158,6 +158,42 @@ fn connectivity(io: Io, transport: *Transport, scope: metrics.Scope, n: usize) !
         }
         try io.sleep(.fromMilliseconds(100), .real);
     }
+    try expect_connected_metrics(scope, n);
+}
+
+/// Once every node heard every other: node 0 records a connection to each peer, and its
+/// greeting and data counters moved without any invalid message.
+fn expect_connected_metrics(scope: metrics.Scope, n: usize) !void {
+    const text = try scope.encode(gpa);
+    defer gpa.free(text);
+    var connected = metrics.metric_samples(text, "peer_0_tracker_directory_connected");
+    var count: usize = 0;
+    while (connected.next()) |_| count += 1;
+    try testing.expectEqual(n - 1, count);
+    var expected: usize = 0;
+    const names = [_][]const u8{
+        "peer_0_spawner_messages_sent_total",
+        "peer_0_spawner_messages_received_total",
+    };
+    for (names) |name| {
+        var samples = metrics.metric_samples(text, name);
+        while (samples.next()) |sample| {
+            const value = try std.fmt.parseInt(u64, sample.value, 10);
+            if (std.mem.endsWith(u8, sample.labels, "message=\"invalid\"")) {
+                try testing.expectEqual(@as(u64, 0), value);
+                continue;
+            }
+            const greeting = std.mem.endsWith(u8, sample.labels, "message=\"greeting\"");
+            const data_0 = std.mem.endsWith(u8, sample.labels, "message=\"data_0\"");
+            if (!greeting and !data_0) continue;
+            try testing.expect(value > 0);
+            expected += 1;
+        }
+    }
+    // Greeting and data, sent and received, for at least every connected peer.
+    try testing.expect(expected >= 4 * (n - 1));
+    var attempts = metrics.metric_samples(text, "peer_1_dialer_attempts_total");
+    try testing.expect(attempts.next() != null);
 }
 
 fn all_heard(heard: [peers_max][peers_max]bool, n: usize) bool {

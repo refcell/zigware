@@ -7,6 +7,7 @@ const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const rate_limit = @import("../rate_limit.zig");
+const Counter = @import("runtime").telemetry.metrics.raw.Counter;
 
 /// The single key of a direct (unkeyed) limiter.
 const Unit = struct {
@@ -18,13 +19,26 @@ const Unit = struct {
 pub const Throttle = struct {
     io: Io,
     limiter: rate_limit.KeyedRateLimiter(Unit),
-    /// Messages received.
-    received: u64 = 0,
-    /// Messages that had to wait for the limiter.
-    limited: u64 = 0,
+    /// Messages received; a series of the caller's `received` family.
+    received: *Counter,
+    /// Messages that had to wait for the limiter; a series of the `rate_limited` family.
+    limited: *Counter,
 
-    pub fn init(gpa: Allocator, io: Io, quota: rate_limit.Quota) Throttle {
-        return .{ .io = io, .limiter = .init(gpa, io, quota) };
+    /// The counters must outlive the throttle.
+    pub fn init(
+        gpa: Allocator,
+        io: Io,
+        quota: rate_limit.Quota,
+        received: *Counter,
+        limited: *Counter,
+    ) Throttle {
+        assert(received != limited);
+        return .{
+            .io = io,
+            .limiter = .init(gpa, io, quota),
+            .received = received,
+            .limited = limited,
+        };
     }
 
     pub fn deinit(throttle: *Throttle) void {
@@ -34,10 +48,10 @@ pub const Throttle = struct {
 
     /// Records a received message and, if `limit`, waits until the limiter admits it.
     pub fn receive(throttle: *Throttle, limit: bool) (Io.Cancelable || Allocator.Error)!void {
-        throttle.received += 1;
+        throttle.received.inc();
         if (!limit) return;
         var retry = try throttle.limiter.check_key(.{}) orelse return;
-        throttle.limited += 1;
+        throttle.limited.inc();
         // A rejected check does not consume a cell, so wait until one is taken.
         var attempts: u32 = 0;
         while (true) : (attempts += 1) {
@@ -61,18 +75,21 @@ test "receive waits for the limiter only when limited" {
     defer runner.deinit();
     try (try runner.start(struct {
         fn run(io: Io) !void {
-            var throttle = Throttle.init(testing.allocator, io, .per_second(1));
+            var received: Counter = .{};
+            var limited: Counter = .{};
+            const gpa = testing.allocator;
+            var throttle = Throttle.init(gpa, io, .per_second(1), &received, &limited);
             defer throttle.deinit();
             const start = Io.Clock.real.now(io);
             try throttle.receive(true);
             try testing.expectEqual(@as(i96, 0), elapsed_ms(io, start));
             try throttle.receive(false);
             try testing.expectEqual(@as(i96, 0), elapsed_ms(io, start));
-            try testing.expectEqual(@as(u64, 0), throttle.limited);
+            try testing.expectEqual(@as(u64, 0), limited.get());
             try throttle.receive(true);
             try testing.expectEqual(@as(i96, 1000), elapsed_ms(io, start));
-            try testing.expectEqual(@as(u64, 3), throttle.received);
-            try testing.expectEqual(@as(u64, 1), throttle.limited);
+            try testing.expectEqual(@as(u64, 3), received.get());
+            try testing.expectEqual(@as(u64, 1), limited.get());
         }
     }.run, .{runner.io()}));
 }
@@ -82,15 +99,18 @@ test "a flood is admitted one per period" {
     defer runner.deinit();
     try (try runner.start(struct {
         fn run(io: Io) !void {
-            var throttle = Throttle.init(testing.allocator, io, .per_second(1));
+            var received: Counter = .{};
+            var limited: Counter = .{};
+            const gpa = testing.allocator;
+            var throttle = Throttle.init(gpa, io, .per_second(1), &received, &limited);
             defer throttle.deinit();
             const start = Io.Clock.real.now(io);
             for (0..5) |i| {
                 try throttle.receive(true);
                 try testing.expectEqual(@as(i96, @intCast(i * 1000)), elapsed_ms(io, start));
             }
-            try testing.expectEqual(@as(u64, 5), throttle.received);
-            try testing.expectEqual(@as(u64, 4), throttle.limited);
+            try testing.expectEqual(@as(u64, 5), received.get());
+            try testing.expectEqual(@as(u64, 4), limited.get());
         }
     }.run, .{runner.io()}));
 }
