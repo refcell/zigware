@@ -1,13 +1,15 @@
-//! Tests for the golden eVRF over Banderwagon (commonware `evrf/banderwagon.rs` tests). The
-//! tests that need bulletproofs (`prove_and_verify_roundtrip`, and the converted circuit
-//! encoding) check the `zk.circuit` the conversion starts from instead.
+//! Tests for the golden eVRF over Banderwagon (commonware `evrf/banderwagon.rs` tests).
 
 const std = @import("std");
 const testing = std.testing;
 const codec = @import("codec");
 const utils = @import("utils");
 const hex = @import("formatting").hex_literal;
+const parallel = @import("parallel");
 const circuit = @import("../../../../zk/circuit.zig");
+const bp = @import("../../../../zk/bulletproofs.zig").circuit;
+const Transcript = @import("../../../../transcript.zig").Transcript;
+const G1 = @import("../../../primitives/group.zig").G1;
 const banderwagon = @import("../../../../banderwagon.zig");
 const evrf = @import("banderwagon.zig");
 const shared = @import("../../../conformance_test.zig");
@@ -118,12 +120,14 @@ test "evrf banderwagon: the prover circuit commits the outputs" {
     const sender = G.generator.mul(x);
     var receivers: [3]G = undefined;
     random_receivers(&rng, &receivers);
-    var built = try build(sender, &receivers, x);
-    defer built.deinit();
-    const valued = built.valued.?;
-    try testing.expect(valued.is_satisfied());
-    for (receivers, built.outputs) |receiver, index| {
-        try testing.expect(valued.get(index).eql(evrf.vrf_send("msg", sender, receiver, x)));
+    var bp_circuit, var witness = try evrf.vrf_batch_checked(gpa, "msg", x, &receivers);
+    defer bp_circuit.deinit(gpa);
+    defer witness.deinit(gpa);
+    try testing.expect(witness.is_satisfied(&bp_circuit));
+    // The committed values are the receivers' outputs, in order.
+    try testing.expectEqual(receivers.len, witness.values.len);
+    for (receivers, witness.values) |receiver, value| {
+        try testing.expect(value.eql(evrf.vrf_send("msg", sender, receiver, x)));
     }
 }
 
@@ -135,17 +139,19 @@ test "evrf banderwagon: prover and verifier build the same circuit" {
     const sender = G.generator.mul(x);
     var receivers: [2]G = undefined;
     random_receivers(&rng, &receivers);
-    var prover = try build(sender, &receivers, x);
-    defer prover.deinit();
-    var verifier = try build(sender, &receivers, null);
-    defer verifier.deinit();
-    const a = prover.structure;
-    const b = verifier.structure;
-    try testing.expectEqual(a.witnesses, b.witnesses);
-    try testing.expectEqual(a.constants.len, b.constants.len);
-    for (a.constants, b.constants) |left, right| try testing.expect(left.eql(right));
-    try testing.expectEqualSlices(circuit.CircuitNode, a.nodes, b.nodes);
-    try testing.expectEqualSlices([2]circuit.CircuitIdx, a.assertions, b.assertions);
+    var prover, var witness = try evrf.vrf_batch_checked(gpa, "msg", x, &receivers);
+    defer prover.deinit(gpa);
+    defer witness.deinit(gpa);
+    var verifier = try evrf.vrf_batch_checked_circuit(gpa, "msg", sender, &receivers);
+    defer verifier.deinit(gpa);
+    const prover_bytes = try bp.encode_write_only(gpa, prover);
+    defer gpa.free(prover_bytes);
+    const verifier_bytes = try bp.encode_write_only(gpa, verifier);
+    defer gpa.free(verifier_bytes);
+    try testing.expectEqualSlices(u8, prover_bytes, verifier_bytes);
+    // The verifier's capacity is exact too.
+    var built = try build(sender, &receivers, null);
+    built.deinit();
 }
 
 test "evrf banderwagon: binding rejects the negated public key" {
@@ -158,4 +164,73 @@ test "evrf banderwagon: binding rejects the negated public key" {
     var built = try build(negated_sender, &receivers, x);
     defer built.deinit();
     try testing.expect(!built.valued.?.is_satisfied());
+}
+
+const Verification = struct {
+    rng: *utils.rng.TestRng,
+    transcript: *Transcript,
+    circuit: *const evrf.Circuit,
+    claim: bp.Claim(G1),
+    proof: bp.Proof(Base, G1),
+
+    fn equation(
+        self: Verification,
+        allocator: std.mem.Allocator,
+        virtual: *const bp.Setup(Synthetic),
+    ) !?Synthetic {
+        return bp.verify(
+            G1,
+            allocator,
+            self.rng,
+            self.transcript,
+            virtual,
+            self.circuit,
+            self.claim,
+            self.proof,
+        );
+    }
+};
+
+const Synthetic = @import("math").synthetic.Synthetic(Base, G1);
+const test_dst = "_COMMONWARE_CRYPTOGRAPHY_GOLDEN_BANDERWAGON_TEST";
+
+test "evrf banderwagon: prove and verify roundtrip" {
+    try shared.skip_slow();
+    var rng = utils.test_rng();
+    const x = F.random(&rng);
+    var receivers: [1]G = undefined;
+    random_receivers(&rng, &receivers);
+    var bp_circuit, var witness = try evrf.vrf_batch_checked(gpa, "msg", x, &receivers);
+    defer bp_circuit.deinit(gpa);
+    defer witness.deinit(gpa);
+    // Size the setup to the circuit.
+    const padded = try std.math.ceilPowerOfTwo(usize, @max(bp_circuit.internal_vars, 1));
+    const lg_len: u8 = @intCast(@ctz(padded));
+    var setup = try bp.Setup(G1).hashed(gpa, test_dst, lg_len, G1.generator);
+    defer setup.deinit(gpa);
+    var claim = try witness.claim(G1, gpa, &setup);
+    defer claim.deinit(gpa);
+    var prover_transcript = Transcript.init(test_dst, .v1);
+    var proof = (try bp.prove(
+        G1,
+        gpa,
+        &rng,
+        &prover_transcript,
+        &setup,
+        &bp_circuit,
+        claim,
+        &witness,
+        parallel.sequential,
+    )).?;
+    defer proof.deinit(gpa);
+    var verifier_transcript = Transcript.init(test_dst, .v1);
+    const verification: Verification = .{
+        .rng = &rng,
+        .transcript = &verifier_transcript,
+        .circuit = &bp_circuit,
+        .claim = claim,
+        .proof = proof,
+    };
+    const residue = try setup.eval(gpa, Base, verification, Verification.equation);
+    try testing.expect(residue.?.eql(G1.zero));
 }

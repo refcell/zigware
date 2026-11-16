@@ -9,9 +9,9 @@
 //! point holds.
 //!
 //! `build_circuit` records the gadget that proves the outputs for a batch of receivers on a
-//! `zk.circuit` context, in commonware's operation order; the bulletproofs conversion
-//! (`vrf_batch_checked`, `vrf_batch_checked_circuit`) wraps it once crypto's bulletproofs
-//! lands.
+//! `zk.circuit` context, in commonware's operation order; `vrf_batch_checked` (prover) and
+//! `vrf_batch_checked_circuit` (verifier) convert it into a bulletproofs circuit committing
+//! the outputs.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -19,6 +19,7 @@ const Allocator = std.mem.Allocator;
 const codec = @import("codec");
 const banderwagon = @import("../../../../banderwagon.zig");
 const circuit = @import("../../../../zk/circuit.zig");
+const bulletproofs = @import("../../../../zk/bulletproofs.zig");
 
 pub const F = banderwagon.F;
 pub const G = banderwagon.G;
@@ -140,6 +141,67 @@ pub fn build_circuit(
         const t1k = t_points[1].x_squared();
         beta_var.mul(t0k).add(t1k).assert_eq(output_var);
     }
+}
+
+/// A bulletproofs circuit over the BLS12-381 scalar field (Banderwagon's base field).
+pub const Circuit = bulletproofs.circuit.Circuit(Base);
+pub const Witness = bulletproofs.circuit.Witness(Base);
+
+/// Each receiver's VRF output, with a circuit and witness committing to them in receiver
+/// order (prover side); `Witness.values` are the outputs. Caller deinits both.
+pub fn vrf_batch_checked(
+    gpa: Allocator,
+    msg: []const u8,
+    x: F,
+    receivers: []const G,
+) !struct { Circuit, Witness } {
+    assert(receivers.len > 0);
+    const sender = G.generator.mul(x);
+    const outputs = try gpa.alloc(Base, receivers.len);
+    defer gpa.free(outputs);
+    for (outputs, receivers) |*output, receiver| output.* = vrf_send(msg, sender, receiver, x);
+    const output_vars = try gpa.alloc(Var, receivers.len);
+    defer gpa.free(output_vars);
+    var ctx: Context = try .init(gpa, capacity(@intCast(receivers.len)), .prover);
+    build_circuit(gpa, &ctx, sender, receivers, msg, x, outputs, output_vars) catch |err| {
+        ctx.deinit(gpa);
+        return err;
+    };
+    var valued, const indices = try ctx.finish_valued(gpa, output_vars);
+    defer valued.deinit(gpa);
+    defer gpa.free(indices);
+    const result = try bulletproofs.zkc.zkc_to_circuit_and_witness(
+        Base,
+        gpa,
+        null,
+        &valued,
+        indices,
+    );
+    assert(result[1].values.len == receivers.len);
+    return result;
+}
+
+/// The verifier's circuit matching `vrf_batch_checked`. Caller deinits it.
+pub fn vrf_batch_checked_circuit(
+    gpa: Allocator,
+    msg: []const u8,
+    sender: G,
+    receivers: []const G,
+) !Circuit {
+    assert(receivers.len > 0);
+    const output_vars = try gpa.alloc(Var, receivers.len);
+    defer gpa.free(output_vars);
+    var ctx: Context = try .init(gpa, capacity(@intCast(receivers.len)), .verifier);
+    build_circuit(gpa, &ctx, sender, receivers, msg, null, null, output_vars) catch |err| {
+        ctx.deinit(gpa);
+        return err;
+    };
+    var structure, const indices = try ctx.finish(gpa, output_vars);
+    defer structure.deinit(gpa);
+    defer gpa.free(indices);
+    const result = try bulletproofs.zkc.zkc_to_circuit(Base, gpa, &structure, indices);
+    assert(result.committed_vars == receivers.len);
+    return result;
 }
 
 test {
