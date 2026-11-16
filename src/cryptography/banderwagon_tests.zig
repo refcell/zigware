@@ -194,6 +194,32 @@ test "banderwagon: hash_to_group is deterministic and in the subgroup" {
     try expect_round_trip(p);
 }
 
+// Vectors from commonware (a Rust run): hash_to_group outputs, and the first two
+// `F::random(test_rng())` draws with the sender key `[x_send] G`.
+test "banderwagon: hash_to_group and random match commonware" {
+    @setEvalBranchQuota(20_000);
+    const cases = [_]struct { []const u8, [32]u8 }{
+        .{ "hello", hex("296f61c4ac671ee68eda33fd61420c4ff2fc89a972e30fb9bb97b66df649e095") },
+        .{ "", hex("03d733379aecb1baa7d414eb61ebe3cd7c1b1630d98f8552afe9a1e41dddedee") },
+        .{ "message-a", hex("712a9fe3720b8a68db018e00376202eeb411afb0dd2440bc500ea892c27e1e78") },
+    };
+    for (cases) |case| {
+        try testing.expectEqualSlices(u8, &case[1], &encode(G.hash_to_group(test_dst, case[0])));
+    }
+    const parts = G.hash_to_group_parts(test_dst, &.{ "mess", "", "age-a" });
+    try testing.expectEqualSlices(u8, &cases[2][1], &encode(parts));
+
+    var rng = utils.test_rng();
+    const x_send = F.random(&rng);
+    const x_recv = F.random(&rng);
+    const want_send = hex("7f6f2ccdb23f2abb7b69278e947c01c6160a31cf02c19d06d0f6e5ab1d768b15");
+    const want_recv = hex("117be1de549d1d4322c4711f11efa0c5137903124f85fc37c761ffc91ace300b");
+    try testing.expectEqualSlices(u8, &want_send, &codec.encode_fixed(F, x_send));
+    try testing.expectEqualSlices(u8, &want_recv, &codec.encode_fixed(F, x_recv));
+    const sender = hex("6bfb93450486a31bdb7ca55a2da315523894f55dea49210377d93610b216479b");
+    try testing.expectEqualSlices(u8, &sender, &encode(G.generator.mul(x_send)));
+}
+
 test "banderwagon: hash_to_group separates messages" {
     const p = G.hash_to_group(test_dst, "message-a");
     const q = G.hash_to_group(test_dst, "message-b");

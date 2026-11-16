@@ -355,12 +355,21 @@ pub const G = struct {
     /// `Base.map(dst, message || counter_be64)` is a valid abscissa. Not constant time; the
     /// inputs are public in every intended use.
     pub fn hash_to_group(dst: []const u8, message: []const u8) G {
+        return hash_to_group_parts(dst, &.{message});
+    }
+
+    /// `hash_to_group` of the concatenation of `parts`, without materializing it.
+    pub fn hash_to_group_parts(dst: []const u8, parts: []const []const u8) G {
+        assert(parts.len < hash_parts_max);
+        var all: [hash_parts_max][]const u8 = undefined;
+        @memcpy(all[0..parts.len], parts);
+        var counter_bytes: [8]u8 = undefined;
+        all[parts.len] = &counter_bytes;
         var counter: u64 = 0;
         // Each attempt succeeds with probability about 1/4.
         while (counter < hash_attempts_max) : (counter += 1) {
-            var counter_bytes: [8]u8 = undefined;
             std.mem.writeInt(u64, &counter_bytes, counter, .big);
-            const x = Base.map_parts(dst, &.{ message, &counter_bytes });
+            const x = Base.map_parts(dst, all[0 .. parts.len + 1]);
             if (from_x(x)) |point| return point;
         }
         @panic("banderwagon hash_to_group failed repeatedly");
@@ -368,6 +377,7 @@ pub const G = struct {
 
     /// `(3/4)^1024` is below `2^-400`.
     const hash_attempts_max: u64 = 1024;
+    const hash_parts_max = 8;
 
     /// In-circuit `[scalar] self` for a public point; the scalar is decomposed into
     /// canonical bits (`scalar_bits_le`).
