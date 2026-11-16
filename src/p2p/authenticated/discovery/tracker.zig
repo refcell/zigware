@@ -13,6 +13,7 @@ const Io = std.Io;
 const codec = @import("codec");
 const utils = @import("utils");
 const metrics = @import("runtime").telemetry.metrics;
+const traces = @import("runtime").telemetry.traces;
 const p2p = @import("../../root.zig");
 const sizing = @import("../../sizing.zig");
 const SortedMap = @import("../../simulated/sorted_map.zig").SortedMap;
@@ -55,6 +56,8 @@ pub fn Tracker(comptime P: type) type {
             peer_gossip_max_count: usize,
             dial_fail_limit: usize,
             block_duration: Duration,
+            /// The directory's tracer.
+            tracer: traces.Tracer = .none,
         };
 
         gpa: Allocator,
@@ -88,6 +91,7 @@ pub fn Tracker(comptime P: type) type {
                 .dial_fail_limit = config.dial_fail_limit,
                 .peer_connection_cooldown = config.peer_connection_cooldown,
                 .block_duration = config.block_duration,
+                .tracer = config.tracer,
             }, &directory_scope);
             return .{
                 .gpa = gpa,

@@ -18,6 +18,7 @@ const types = @import("types.zig");
 const tracker_mod = @import("tracker.zig");
 const labels = @import("metrics.zig");
 const metrics = @import("runtime").telemetry.metrics;
+const traces = @import("runtime").telemetry.traces;
 
 const Channel = p2p.Channel;
 const Duration = utils.Duration;
@@ -56,6 +57,8 @@ pub fn Peer(comptime P: type) type {
             /// Most entries in a received peer list.
             max_peers: usize,
             verifier: types.InfoVerifier(P),
+            /// Under commonware's `actors::peer::actor` target.
+            tracer: traces.Tracer = .none,
         };
 
         /// The message counters of every connection (commonware's spawner metrics), under the
@@ -276,25 +279,28 @@ pub fn Peer(comptime P: type) type {
                     var first_peers = true;
                     while (true) {
                         const message = try receiver.recv();
+                        const tracer = config.tracer;
                         var payload = codec.decode_cfg(Payload, gpa, message, cfg) catch |err| {
                             meters.invalid.inc();
+                            const fields = .{ .err = err, .peer = peer };
+                            tracer.event(.debug, "failed to decode message", fields);
                             return err;
                         };
                         defer payload.deinit(gpa);
                         if (payload == .greeting) {
                             meters.received_greeting.inc();
-                            if (greeted) return error.DuplicateGreeting;
+                            try greet(io, config, peer, tracker, greeted, &payload.greeting);
                             greeted = true;
-                            const info = &payload.greeting;
-                            if (!info.public_key.eql(peer)) return error.GreetingMismatch;
-                            try config.verifier.validate_info(now_time(io), info);
-                            tracker.peers(&.{info.*});
                             continue;
                         }
-                        if (!greeted) return error.MissingGreeting;
+                        if (!greeted) {
+                            const message_missing = "expected greeting as first message";
+                            tracer.event(.debug, message_missing, .{ .peer = peer });
+                            return error.MissingGreeting;
+                        }
                         switch (payload) {
                             .greeting => unreachable, // Proof: handled above.
-                            .data => |data| try deliver(gpa, meters, routes, peer, data),
+                            .data => |data| try deliver(gpa, config, meters, routes, peer, data),
                             .bit_vec => |*bit_vec| {
                                 // The first bit vector and peer list follow the greeting at once.
                                 try bit_vec_throttle.receive(!first_bit_vec);
@@ -354,8 +360,35 @@ pub fn Peer(comptime P: type) type {
         /// Paces `data` by its channel's quota, then queues an owned copy for the receiver
         /// (dropped when the queue is full). An unregistered channel counts as invalid and
         /// ends the connection.
+        /// Checks the peer's greeting, which must come once and carry its own key, and adopts
+        /// its info.
+        fn greet(
+            io: Io,
+            config: *const Config,
+            peer: P,
+            tracker: *Tracker,
+            greeted: bool,
+            info: *const Info,
+        ) !void {
+            const tracer = config.tracer;
+            if (greeted) {
+                tracer.event(.debug, "received duplicate greeting", .{ .peer = peer });
+                return error.DuplicateGreeting;
+            }
+            if (!info.public_key.eql(peer)) {
+                tracer.event(.debug, "greeting public key mismatch", .{
+                    .peer = peer,
+                    .greeting_pk = info.public_key,
+                });
+                return error.GreetingMismatch;
+            }
+            try config.verifier.validate_info(now_time(io), info);
+            tracker.peers(&.{info.*});
+        }
+
         fn deliver(
             gpa: Allocator,
+            config: *const Config,
             meters: *const Meters,
             routes: []Route,
             peer: P,
@@ -369,6 +402,8 @@ pub fn Peer(comptime P: type) type {
                 return;
             }
             meters.invalid.inc();
+            const fields = .{ .peer = peer, .channel = data.channel };
+            config.tracer.event(.debug, "invalid channel", fields);
             return error.InvalidChannel;
         }
     };

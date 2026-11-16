@@ -10,6 +10,7 @@ const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const utils = @import("utils");
 const metrics = @import("runtime").telemetry.metrics;
+const traces = @import("runtime").telemetry.traces;
 const p2p = @import("../../root.zig");
 const p2p_types = @import("../../types.zig");
 const dialing = @import("../dialing.zig");
@@ -33,6 +34,8 @@ pub const Config = struct {
     /// Minimum time between reservations of one peer.
     peer_connection_cooldown: Duration,
     block_duration: Duration,
+    /// Under commonware's `actors::tracker::directory` target.
+    tracer: traces.Tracer = .none,
 };
 
 /// Who holds a reservation: the dialer (with the ingress it dials) or the listener.
@@ -222,6 +225,8 @@ pub fn Directory(comptime P: type) type {
                 const record = directory.peers.get(update.public_key) orelse continue;
                 if (!record.update(update)) continue;
                 Metrics(P).count(&directory.metrics.updates, update.public_key);
+                const peer = update.public_key;
+                directory.config.tracer.event(.debug, "updated peer record", .{ .peer = peer });
                 directory.refresh_knowledge(update.public_key, record);
             }
         }
@@ -231,8 +236,17 @@ pub fn Directory(comptime P: type) type {
         /// when ignored.
         pub fn track(directory: *Self, index: u64, peers: Tracked) Allocator.Error!?[]P {
             const gpa = directory.gpa;
+            const tracer = directory.config.tracer;
+            if (directory.peer_sets.get(index) != null) {
+                tracer.event(.warn, "peer set already exists", .{ .index = index });
+                return null;
+            }
             if (directory.latest_set_index()) |last| {
-                if (index <= last) return null;
+                if (index <= last) {
+                    const message = "index must monotonically increase";
+                    tracer.event(.warn, message, .{ .index = index, .last = last });
+                    return null;
+                }
             }
             const primary = try gpa.dupe(P, peers.primary.items);
             var bit_set = BitSet(P).init(gpa, primary) catch |err| {
@@ -288,6 +302,8 @@ pub fn Directory(comptime P: type) type {
         fn evict_oldest(directory: *Self, kill: *std.ArrayList(P)) Allocator.Error!void {
             var oldest = directory.peer_sets.items()[0];
             _ = directory.peer_sets.remove(oldest.key);
+            const message = "removed oldest tracked peer sets";
+            directory.config.tracer.event(.debug, message, .{ .index = oldest.key });
             defer directory.free_sets(&oldest.value);
             for (oldest.value.primary.ordered) |peer| {
                 directory.peers.get(peer).?.decrement_primary();
@@ -437,10 +453,22 @@ pub fn Directory(comptime P: type) type {
             now: SystemTime,
             bit_vec: *const types.BitVec,
         ) Allocator.Error!?[]Info {
-            const sets = directory.peer_sets.get(bit_vec.index) orelse
+            const tracer = directory.config.tracer;
+            const index = bit_vec.index;
+            const sets = directory.peer_sets.get(index) orelse {
+                // Unknown indices are not errors; they are ignored.
+                tracer.event(.debug, "requested peer set not found", .{ .index = index });
                 return try gpa.alloc(Info, 0);
+            };
             const primary = sets.primary.ordered;
-            if (bit_vec.bits.len() != primary.len) return null;
+            if (bit_vec.bits.len() != primary.len) {
+                tracer.event(.debug, "bit vector length mismatch", .{
+                    .index = index,
+                    .expected = primary.len,
+                    .actual = bit_vec.bits.len(),
+                });
+                return null;
+            }
             const now_millis = now.epoch_millis();
             var result: std.ArrayList(Info) = .empty;
             errdefer result.deinit(gpa);
@@ -520,6 +548,7 @@ pub fn Directory(comptime P: type) type {
                     continue;
                 }
                 _ = directory.blocked.remove(entry.key);
+                directory.config.tracer.event(.debug, "unblocked peer", .{ .peer = entry.key });
                 _ = directory.metrics.blocked.metric().remove(.{ .peer = entry.key });
                 any = true;
             }

@@ -6,6 +6,7 @@ const codec = @import("codec");
 const cryptography = @import("cryptography");
 const utils = @import("utils");
 const metrics = @import("runtime").telemetry.metrics;
+const traces = @import("runtime").telemetry.traces;
 const p2p_types = @import("../../types.zig");
 const directory_mod = @import("directory.zig");
 const types = @import("types.zig");
@@ -179,12 +180,26 @@ test "tracking needs increasing indices" {
     var registry = metrics.Registry.init(gpa);
     defer registry.deinit();
     const scope = metrics.Scope.init(&registry).child("directory");
-    var dir = try Dir.init(gpa, &.{}, my_info(), config(3, false), &scope);
+    var collector = traces.Collector.init(gpa, .{});
+    defer collector.deinit();
+    var dir_config = config(3, false);
+    dir_config.tracer = collector.tracer("directory");
+    var dir = try Dir.init(gpa, &.{}, my_info(), dir_config, &scope);
     defer dir.deinit();
     try expect_tracked(try track(&dir, 5, &.{key(1)}, &.{}), &.{});
+    try testing.expect(collector.get_by_level(.warn).is_empty());
     try testing.expect((try track(&dir, 5, &.{key(2)}, &.{})) == null);
     try testing.expect((try track(&dir, 4, &.{key(2)}, &.{})) == null);
     try testing.expectEqual(@as(?u64, 5), dir.latest_set_index());
+    const warnings = collector.get_by_level(.warn);
+    try testing.expectEqual(@as(usize, 2), warnings.len());
+    const exists = warnings.get(0).?.metadata;
+    try exists.expect_content_exact("peer set already exists");
+    try exists.expect_field_exact("index", "5");
+    const decreasing = warnings.get(1).?.metadata;
+    try decreasing.expect_content_exact("index must monotonically increase");
+    try decreasing.expect_field_exact("index", "4");
+    try decreasing.expect_field_exact("last", "5");
 }
 
 test "a peer blocked before joining a set stays blocked" {

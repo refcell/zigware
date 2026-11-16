@@ -71,6 +71,24 @@ pub const Ingress = union(enum) {
         return a.order(b) == .eq;
     }
 
+    /// Rust's derived `Debug` (what commonware's `?ingress` trace fields print):
+    /// `Socket(127.0.0.1:3000)` or `Dns { host: Hostname("example.com"), port: 80 }`.
+    pub fn format(ingress: Ingress, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+        switch (ingress) {
+            .socket => |addr| {
+                const address: std.Io.net.IpAddress = switch (addr.ip) {
+                    .v4 => |ip4| .{ .ip4 = .{ .bytes = ip4.octets, .port = addr.port } },
+                    .v6 => |ip6| .{ .ip6 = .{ .bytes = ip6.octets, .port = addr.port } },
+                };
+                try writer.print("Socket({f})", .{address});
+            },
+            .dns => |dns| try writer.print(
+                "Dns {{ host: Hostname(\"{f}\"), port: {d} }}",
+                .{ dns.host, dns.port },
+            ),
+        }
+    }
+
     /// Rust's derived `Ord`: variant first, then fields in order.
     pub fn order(a: Ingress, b: Ingress) std.math.Order {
         const tags = std.math.order(@backingInt(a), @backingInt(b));
@@ -321,6 +339,21 @@ test "ingress port and ip" {
     try testing.expectEqual(@as(u16, 443), dns.port());
     try testing.expect(socket.ip().?.order(.{ .v4 = Ipv4.localhost }) == .eq);
     try testing.expect(dns.ip() == null);
+}
+
+test "ingress formats like Rust's Debug" {
+    var buffer: [128]u8 = undefined;
+    const cases = [_]struct { Ingress, []const u8 }{
+        .{ .{ .socket = v4(127, 0, 0, 1, 8080) }, "Socket(127.0.0.1:8080)" },
+        .{ .{ .socket = .{ .ip = .{ .v6 = Ipv6.localhost }, .port = 443 } }, "Socket([::1]:443)" },
+        .{
+            .{ .dns = .{ .host = Hostname.literal("example.com"), .port = 443 } },
+            "Dns { host: Hostname(\"example.com\"), port: 443 }",
+        },
+    };
+    for (cases) |case| {
+        try testing.expectEqualStrings(case[1], try std.fmt.bufPrint(&buffer, "{f}", .{case[0]}));
+    }
 }
 
 test "address roundtrips and helpers" {

@@ -12,6 +12,7 @@ const stream = @import("stream");
 const utils = @import("utils");
 const build_options = @import("build_options");
 const metrics = runtime.telemetry.metrics;
+const traces = runtime.telemetry.traces;
 const p2p = @import("../../root.zig");
 const data = @import("../data.zig");
 const rate_limit = @import("../../rate_limit.zig");
@@ -1193,4 +1194,56 @@ fn duplicate_addresses_connected(io: Io, transport: *Transport, scope: metrics.S
 test "a peer advertising another's address does not block it" {
     // commonware `test_duplicate_addresses_connected`.
     _ = try run_deterministic(0, duplicate_addresses_connected, .{});
+}
+
+fn traced_pair(
+    io: Io,
+    transport: *Transport,
+    scope: metrics.Scope,
+    collector: *traces.Collector,
+) !void {
+    const keys = sorted_pair();
+    const bootstrap_1 = pair_bootstrapper(1);
+    var config_0 = pair_config(0, &.{}, max_message_size_default);
+    var config_1 = pair_config(1, &bootstrap_1, max_message_size_default);
+    config_0.tracer = collector.tracer("");
+    config_1.tracer = collector.tracer("");
+    const quota: rate_limit.Quota = .per_second(100);
+    var nodes = [_]Node{
+        try start_node(io, transport, node_scope(scope, 0), config_0, &keys, quota),
+        try start_node(io, transport, node_scope(scope, 1), config_1, &keys, quota),
+    };
+    defer stop_nodes(io, &nodes);
+    const identities = [_]PublicKey{
+        PrivateKey.from_seed(0).public_key(),
+        PrivateKey.from_seed(1).public_key(),
+    };
+    try wait_connected(io, &identities, &nodes);
+}
+
+fn is_listener_handshake(_: void, event: traces.collector.RecordedEvent) bool {
+    const target = "commonware_p2p::authenticated::discovery::actors::listener";
+    if (!std.mem.eql(u8, event.target, target)) return false;
+    if (!std.mem.eql(u8, event.metadata.content, "completed handshake")) return false;
+    event.metadata.expect_field_contains("address", "127.0.0.1:") catch return false;
+    return event.metadata.fields.len == 2;
+}
+
+test "the network emits commonware's tracing events" {
+    var collector = traces.Collector.init(gpa, .{});
+    defer collector.deinit();
+    _ = try run_deterministic(0, traced_pair, .{&collector});
+    try collector.get_by_level(.info).expect_message_exact("network started");
+    const debug = collector.get_by_level(.debug);
+    // Peer 1 dials its bootstrapper, peer 0; peer 0 accepts and reserves the connection.
+    for ([_][]const u8{
+        "dialed peer",
+        "upgraded connection",
+        "accepted incoming connection",
+        "completed handshake",
+        "reserved connection",
+        "peer started",
+    }) |message| try debug.expect_message_exact(message);
+    try debug.expect_event({}, is_listener_handshake);
+    try testing.expectEqual(@as(u64, 0), collector.dropped);
 }

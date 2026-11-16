@@ -8,6 +8,7 @@
 const std = @import("std");
 const assert = std.debug.assert;
 const utils = @import("utils");
+const traces = @import("runtime").telemetry.traces;
 const p2p_types = @import("../../types.zig");
 const rate_limit = @import("../../rate_limit.zig");
 const types = @import("types.zig");
@@ -77,6 +78,9 @@ pub fn Config(comptime U: type) type {
         peer_gossip_max_count: usize,
         /// How long a blocked peer stays blocked.
         block_duration: Duration,
+        /// Where the network's tracing events go (commonware's `tracing` subscriber); each part
+        /// emits under its commonware module path. Set it from the runtime context's tracer.
+        tracer: traces.Tracer = .none,
 
         /// The fields every constructor sets the same way.
         pub const Base = struct {

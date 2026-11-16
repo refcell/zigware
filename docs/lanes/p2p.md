@@ -85,7 +85,12 @@ handshake and the runtime's network, which the actor-stream and runtime lanes ar
   `block`, `blocked`), `run() !void` (spawn with `io.concurrent`; cancel to stop, after which
   receivers report `NetworkClosed`), and `destroy()` after deinitializing senders. Shared
   pieces: `discovery.tracker.Tracker(P)`, `discovery.peer.Peer(P)`, `utils.IoRng`, and
-  `utils.shuffle` (rand 0.10 `shuffle`/`partial_shuffle`).
+  `utils.shuffle` (rand 0.10 `shuffle`/`partial_shuffle`). `Net.Config.tracer`
+  (`traces.Tracer`, default `.none`; set it from `ctx.tracer("")`) receives commonware's
+  tracing events, each under its commonware module path (`commonware_p2p::authenticated::
+  discovery::{network, actors::listener, actors::dialer, actors::spawner::actor,
+  actors::peer::actor, actors::tracker::directory}`). `p2p.Ingress` formats like Rust's
+  `Debug` (`Socket(1.2.3.4:5)`, `Dns { host: Hostname("x"), port: 5 }`).
 - `authenticated.lookup.Network(U, Transport)` (parallel lane): like discovery's, with
   `Net.Config.local/recommended(.{ upgrader, namespace, listen, max_peers_per_set,
   max_message_size, mailbox_size })`, `create(gpa, io, *transport, scope, config)`,
@@ -163,8 +168,6 @@ handshake and the runtime's network, which the actor-stream and runtime lanes ar
   `Recipients`, channels) as comptime interfaces; Ingress/Address conformance; decode fuzz.
 - [x] Rate limiter: `Quota` and governor's keyed GCRA (`rate_limit.zig`).
 - [x] utils: limited (`LimitedSender`, `CheckedSender`) with its tests.
-- [ ] utils: codec (wrapped sender/receiver), mux (channel multiplexing), mocks,
-  `StaticProvider`.
 - [x] simulated: bandwidth planner and transmitter with their tests.
 - [x] simulated: unbounded channel and peer-set tracker.
 - [x] simulated: network core (Oracle, Control, Manager, links with latency/jitter/success
@@ -193,13 +196,13 @@ handshake and the runtime's network, which the actor-stream and runtime lanes ar
   by the other side), duplicate addresses (disconnected over 25 seeds, connected).
 - [ ] discovery mod.rs tests: DNS bootstrappers and resolution (after the runtime has a
   resolver).
-- [ ] discovery: tracing events at commonware's sites (runtime.telemetry.traces).
+- [x] discovery: tracing events at commonware's sites (runtime.telemetry.traces).
 - [ ] lookup (parallel lane): tracker, peer, dialer, listener, Network with Config and Oracle
   (done, with connectivity); the rest of commonware's lookup mod.rs tests and the directory's
   metrics.
-- [ ] utils codec: `WrappedBackgroundReceiver` (decode on a parallel Strategy); then tell
-  broadcast-collector so buffered's config can take the Strategy (low priority, after
-  discovery).
+- [ ] utils codec, mux, mocks, and `WrappedBackgroundReceiver` (bls-math lane, under
+  src/p2p/utils/ beside limited, watch, io_rng, and shuffle): it tells broadcast-collector
+  when buffered's config can take the Strategy.
 - [ ] Fuzz targets (commonware p2p/fuzz).
 
 ## Log
@@ -237,3 +240,4 @@ handshake and the runtime's network, which the actor-stream and runtime lanes ar
 - 2026-11-16: discovery multi-index oracle test.
 - 2026-11-16: simulated split senders and receivers for twins, with the split tests.
 - 2026-11-16: discovery restart and duplicate-address tests.
+- 2026-11-16: discovery tracing events at commonware's sites, with Collector tests.

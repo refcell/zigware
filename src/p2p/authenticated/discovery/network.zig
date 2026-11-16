@@ -13,6 +13,7 @@ const Io = std.Io;
 const codec = @import("codec");
 const utils = @import("utils");
 const metrics = @import("runtime").telemetry.metrics;
+const traces = @import("runtime").telemetry.traces;
 const stream = @import("stream");
 const p2p = @import("../../root.zig");
 const p2p_types = @import("../../types.zig");
@@ -116,6 +117,29 @@ pub fn Counters(comptime P: type) type {
     };
 }
 
+/// The tracers of the network's parts, under commonware's module paths (its tracing targets).
+pub const Tracers = struct {
+    network: traces.Tracer,
+    listener: traces.Tracer,
+    dialer: traces.Tracer,
+    spawner: traces.Tracer,
+    peer: traces.Tracer,
+    directory: traces.Tracer,
+
+    const prefix = "commonware_p2p::authenticated::discovery::";
+
+    pub fn init(tracer: traces.Tracer) Tracers {
+        return .{
+            .network = tracer.with_target(prefix ++ "network"),
+            .listener = tracer.with_target(prefix ++ "actors::listener"),
+            .dialer = tracer.with_target(prefix ++ "actors::dialer"),
+            .spawner = tracer.with_target(prefix ++ "actors::spawner::actor"),
+            .peer = tracer.with_target(prefix ++ "actors::peer::actor"),
+            .directory = tracer.with_target(prefix ++ "actors::tracker::directory"),
+        };
+    }
+};
+
 pub fn Network(comptime U: type, comptime Transport: type) type {
     return struct {
         const Self = @This();
@@ -154,6 +178,7 @@ pub fn Network(comptime U: type, comptime Transport: type) type {
         peer_config: Peer.Config,
         counters: Counters(P),
         families: Peer.Families,
+        tracers: Tracers,
         /// The dialer, listener, unblock timer, handshakes, and connections.
         tasks: Io.Group = .init,
         /// Inbound handshakes in flight.
@@ -201,6 +226,7 @@ pub fn Network(comptime U: type, comptime Transport: type) type {
                 .peer_config = make_peer_config(&config, ip_namespace),
                 .counters = try .init(scope),
                 .families = undefined,
+                .tracers = .init(config.tracer),
             };
             errdefer network.counters.deinit();
             network.families = try .init(scope);
@@ -236,6 +262,7 @@ pub fn Network(comptime U: type, comptime Transport: type) type {
                 .max_message_size = config.max_message_size,
                 .max_bit_vec = config.max_peers_per_set,
                 .max_peers = config.peer_gossip_max_count,
+                .tracer = Tracers.init(config.tracer).peer,
                 .verifier = .{
                     .me = config.upgrader.public_key(),
                     .peer_gossip_max_count = config.peer_gossip_max_count,
@@ -268,6 +295,7 @@ pub fn Network(comptime U: type, comptime Transport: type) type {
                 .peer_gossip_max_count = config.peer_gossip_max_count,
                 .dial_fail_limit = config.dial_fail_limit,
                 .block_duration = config.block_duration,
+                .tracer = network.tracers.directory,
             };
         }
 
@@ -319,7 +347,11 @@ pub fn Network(comptime U: type, comptime Transport: type) type {
             try network.tasks.concurrent(io, Tracker.run_unblock, .{&network.tracker});
             try network.tasks.concurrent(io, listen_loop, .{ network, listener });
             try network.tasks.concurrent(io, dial_loop, .{network});
-            try network.tasks.await(io);
+            network.tracers.network.event(.info, "network started", .{});
+            network.tasks.await(io) catch |err| {
+                network.tracers.network.event(.debug, "context shutdown, stopping network", .{});
+                return err;
+            };
         }
 
         fn shutdown(network: *Self) void {
@@ -349,15 +381,20 @@ pub fn Network(comptime U: type, comptime Transport: type) type {
             var accepted_count: u32 = 0;
             var failures: u32 = 0;
             while (failures < accept_failures_max) {
+                const tracer = network.tracers.listener;
                 var accepted = listener.accept() catch |err| {
                     if (err == error.Canceled) return error.Canceled;
+                    tracer.event(.debug, "failed to accept connection", .{ .@"error" = err });
                     failures += 1;
                     continue;
                 };
                 failures = 0;
-                const ip = to_ip(accepted.address);
+                const address = accepted.address;
+                tracer.event(.debug, "accepted incoming connection", .{ .address = address });
+                const ip = to_ip(address);
                 if (!config.allow_private_ips and !utils.net.is_global(ip)) {
                     network.counters.handshakes_blocked.metric().inc();
+                    tracer.event(.debug, "rejecting private address", .{ .address = address });
                     accepted.deinit();
                     continue;
                 }
@@ -367,7 +404,7 @@ pub fn Network(comptime U: type, comptime Transport: type) type {
                     accepted_count = 0;
                 }
                 accepted_count += 1;
-                if (!network.admit(&per_ip, &per_subnet, ip)) {
+                if (!network.admit(&per_ip, &per_subnet, address)) {
                     accepted.deinit();
                     continue;
                 }
@@ -375,6 +412,8 @@ pub fn Network(comptime U: type, comptime Transport: type) type {
                 if (in_flight >= config.max_concurrent_handshakes) {
                     _ = network.handshakes.fetchSub(1, .monotonic);
                     network.counters.handshakes_concurrent_rate_limited.metric().inc();
+                    const message = "maximum concurrent handshakes reached";
+                    tracer.event(.debug, message, .{ .address = address });
                     accepted.deinit();
                     continue;
                 }
@@ -391,14 +430,24 @@ pub fn Network(comptime U: type, comptime Transport: type) type {
             network: *Self,
             per_ip: *IpLimiter,
             per_subnet: *IpLimiter,
-            ip: codec.IpAddr,
+            address: IpAddress,
         ) bool {
+            const tracer = network.tracers.listener;
+            const ip = to_ip(address);
             const ip_limited = (per_ip.check_key(ip) catch return false) != null;
-            if (ip_limited) network.counters.handshakes_ip_rate_limited.metric().inc();
+            if (ip_limited) {
+                network.counters.handshakes_ip_rate_limited.metric().inc();
+                const message = "ip exceeded handshake rate limit";
+                tracer.event(.debug, message, .{ .address = address });
+            }
             const mask = utils.net.SubnetMask.init(subnet_ipv4_bits, subnet_ipv6_bits);
             const subnet = utils.net.subnet(ip, mask).addr;
             const subnet_limited = (per_subnet.check_key(subnet) catch return false) != null;
-            if (subnet_limited) network.counters.handshakes_subnet_rate_limited.metric().inc();
+            if (subnet_limited) {
+                network.counters.handshakes_subnet_rate_limited.metric().inc();
+                const message = "subnet exceeded handshake rate limit";
+                tracer.event(.debug, message, .{ .address = address });
+            }
             return !ip_limited and !subnet_limited;
         }
 
@@ -413,6 +462,8 @@ pub fn Network(comptime U: type, comptime Transport: type) type {
 
         fn handshake(network: *Self, accepted: Transport.Accepted) Io.Cancelable!void {
             defer _ = network.handshakes.fetchSub(1, .monotonic);
+            const tracer = network.tracers.listener;
+            const address = accepted.address;
             const bouncer: Bouncer = .{ .tracker = &network.tracker };
             var upgraded = network.upgrader.listen(
                 network.gpa,
@@ -424,12 +475,18 @@ pub fn Network(comptime U: type, comptime Transport: type) type {
                 accepted.sink,
             ) catch |err| {
                 if (err == error.Canceled) return error.Canceled;
+                tracer.event(.debug, "failed to complete handshake", .{ .err = err });
                 return;
             };
-            const metadata = network.tracker.listen(upgraded.peer) orelse {
+            const peer = upgraded.peer;
+            tracer.event(.debug, "completed handshake", .{ .peer = peer, .address = address });
+            const metadata = network.tracker.listen(peer) orelse {
+                const message = "unable to reserve connection to peer";
+                tracer.event(.debug, message, .{ .peer = peer, .address = address });
                 upgraded.deinit(network.gpa);
                 return;
             };
+            tracer.event(.debug, "reserved connection", .{ .peer = peer, .address = address });
             return network.serve(upgraded.peer, &upgraded.connection, metadata);
         }
 
@@ -444,23 +501,36 @@ pub fn Network(comptime U: type, comptime Transport: type) type {
             const gpa = network.gpa;
             var outbox = Outbox.init(gpa, network.io, @intCast(network.config.mailbox_size));
             var result: Io.Cancelable!void = {};
-            if (network.tracker.connect(peer, &outbox, metadata == .dialer)) |greeting| {
-                if (network.router.ready(peer, &outbox) catch false) {
-                    Peer.run(
+            const tracer = network.tracers.spawner;
+            const greeting = network.tracker.connect(peer, &outbox, metadata == .dialer);
+            if (greeting == null) tracer.event(.debug, "peer not eligible", .{ .peer = peer });
+            if (greeting) |info| {
+                const ready = network.router.ready(peer, &outbox) catch false;
+                if (!ready) {
+                    const message = "router shut down during peer setup";
+                    tracer.event(.debug, message, .{ .peer = peer });
+                }
+                if (ready) {
+                    tracer.event(.debug, "peer started", .{ .peer = peer });
+                    const outcome = Peer.run(
                         gpa,
                         network.io,
                         &network.peer_config,
                         &network.families,
                         peer,
-                        greeting,
+                        info,
                         &connection.sender,
                         &connection.receiver,
                         &outbox,
                         &network.tracker,
                         &network.channels,
-                    ) catch |err| {
+                    );
+                    if (outcome) |_| {
+                        tracer.event(.debug, "peer shutdown gracefully", .{ .peer = peer });
+                    } else |err| {
                         if (err == error.Canceled) result = error.Canceled;
-                    };
+                        tracer.event(.debug, "peer shutdown", .{ .@"error" = err, .peer = peer });
+                    }
                     network.router.release(peer, &outbox);
                 }
             }
@@ -525,15 +595,21 @@ pub fn Network(comptime U: type, comptime Transport: type) type {
 
         fn dial_peer(network: *Self, metadata: Metadata) Io.Cancelable!void {
             const target = metadata.dialer;
+            const tracer = network.tracers.dialer;
+            const fields = .{ .peer = target.peer, .ingress = target.ingress };
             const address = resolve(target.ingress, network.config.allow_private_ips) orelse {
+                const message = "failed to resolve or no valid addresses";
+                tracer.event(.debug, message, .{ .ingress = target.ingress });
                 network.tracker.release(metadata);
                 return;
             };
             const dialed = network.transport.dial(address) catch |err| {
                 network.tracker.release(metadata);
                 if (err == error.Canceled) return error.Canceled;
+                tracer.event(.debug, "failed to dial peer", .{ .err = err });
                 return;
             };
+            tracer.event(.debug, "dialed peer", fields);
             var upgraded = network.upgrader.dial(
                 network.gpa,
                 network.io,
@@ -545,8 +621,10 @@ pub fn Network(comptime U: type, comptime Transport: type) type {
             ) catch |err| {
                 network.tracker.release(metadata);
                 if (err == error.Canceled) return error.Canceled;
+                tracer.event(.debug, "failed to upgrade connection", .{ .err = err });
                 return;
             };
+            tracer.event(.debug, "upgraded connection", fields);
             return network.serve(target.peer, &upgraded, metadata);
         }
     };
