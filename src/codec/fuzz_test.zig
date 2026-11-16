@@ -260,7 +260,8 @@ fn expect_lazy_matches_direct(comptime T: type, input: []const u8) !void {
         try testing.expect(direct == null);
         return;
     };
-    try testing.expectEqual(direct, lazy.get(gpa));
+    const value = lazy.get(gpa);
+    try testing.expectEqual(direct, if (value) |v| v.* else null);
     const encoded = try codec.encode(Lazy(T), gpa, lazy);
     defer gpa.free(encoded);
     try testing.expectEqualSlices(u8, input, encoded);

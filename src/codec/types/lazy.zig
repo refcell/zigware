@@ -39,18 +39,22 @@ pub fn Lazy(comptime T: type) type {
             return .{ .pending = bytes, .pending_cfg = cfg, .state = .undecoded };
         }
 
-        /// Decodes on first call and caches the result; null when decoding fails.
-        pub fn get(self: *Self, gpa: Allocator) ?T {
+        /// Decodes on first call and caches the result; null when decoding fails. The value
+        /// lives in `self` (commonware returns `Option<&T>` too), so `get` never copies it.
+        pub fn get(self: *Self, gpa: Allocator) ?*const T {
             if (self.state == .undecoded) {
                 const bytes = self.pending.?;
-                self.state = if (codec.decode_cfg(T, gpa, bytes, self.pending_cfg)) |value|
-                    .{ .decoded = value }
-                else |_|
-                    .invalid;
+                // Decode straight into the cache, so a large `T` is not copied through a
+                // temporary union.
+                self.state = .{ .decoded = undefined };
+                self.state.decoded = codec.decode_cfg(T, gpa, bytes, self.pending_cfg) catch {
+                    self.state = .invalid;
+                    return null;
+                };
             }
             assert(self.state != .undecoded);
             return switch (self.state) {
-                .decoded => |value| value,
+                .decoded => |*value| value,
                 .invalid => null,
                 .undecoded => unreachable, // Proof: decoded just above.
             };
@@ -142,7 +146,9 @@ test "lazy matches direct encoding and decoding for every byte" {
         const direct: ?Small = codec.decode(Small, test_gpa, &encoded) catch null;
         var via_lazy = try codec.decode(Lazy(Small), test_gpa, &encoded);
         const lazy_value = via_lazy.get(test_gpa);
-        try testing.expectEqual(direct, lazy_value);
+        try testing.expectEqual(direct, if (lazy_value) |value| value.* else null);
+        // A second `get` returns the cached value in place.
+        try testing.expectEqual(lazy_value, via_lazy.get(test_gpa));
         if (direct) |small| {
             const from_new = Lazy(Small).init(small);
             try testing.expect(from_new.eql(Lazy(Small).deferred(&encoded, {})));
@@ -206,7 +212,7 @@ test "lazy get shares retained bytes" {
     const fields = try codec.encode(Fields, test_gpa, .{ .init("hello"), 7, .init("world") });
     defer test_gpa.free(fields);
     var lazy_fields = Lazy(Fields).deferred(fields, .{ .full(), {}, .full() });
-    const first, const scalar, const second = lazy_fields.get(test_gpa).?;
+    const first, const scalar, const second = lazy_fields.get(test_gpa).?.*;
     try testing.expectEqualStrings("hello", first.data);
     try testing.expectEqual(@as(u32, 7), scalar);
     try testing.expectEqual(@intFromPtr(fields.ptr) + 11, @intFromPtr(second.data.ptr));
@@ -215,5 +221,5 @@ test "lazy get shares retained bytes" {
     const extra = try std.mem.concat(test_gpa, u8, &.{ encoded, &.{0} });
     defer test_gpa.free(extra);
     var failing = Lazy(Bytes).deferred(extra, .full());
-    try testing.expectEqual(@as(?Bytes, null), failing.get(test_gpa));
+    try testing.expectEqual(@as(?*const Bytes, null), failing.get(test_gpa));
 }

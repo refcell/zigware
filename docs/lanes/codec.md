@@ -40,7 +40,7 @@ Every value goes through comptime dispatch on its type (`src/codec/codec.zig` ha
 | `codec.Ipv4`, `Ipv6`, `SocketAddrV4`, `SocketAddrV6` | std::net types | octets (+ u16 port) |
 | `codec.IpAddr` (union v4/v6), `codec.SocketAddr` | `IpAddr`, `SocketAddr` | version byte 4/6 + addr (+ port) |
 | `codec.NonZero(u16/u32/u64)` | `NonZeroU16/32/64` | the integer; zero is `Invalid` |
-| `codec.Lazy(T)` | `Lazy<T>` | `T`'s bytes; read defers fixed-size `T`, `get(gpa)` decodes once |
+| `codec.Lazy(T)` | `Lazy<T>` | `T`'s bytes; read defers fixed-size `T`, `get(gpa)` decodes once, returns `?*const T` |
 | `codec.Modes(N)` from `[N]u7` (`codec.mode(u8) ?u7`) | `Modes<N>`, `Mode` | continuation-bit packet |
 
 Operations (`T` is always the first, comptime argument):
