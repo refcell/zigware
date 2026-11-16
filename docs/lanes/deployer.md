@@ -41,7 +41,8 @@ test vectors. Tests never call AWS and never hold credentials.
   XML scanner (`scan`, `first_text`, `decode_text`, `service_error`).
 - `deployer.aws.ec2.launch_instances(client, gpa, arena, request, subnets, az_support,
   start_index)` returns `.ok` (`Launched{ instance_ids, az }`) or `.failure`;
-  `run_instances_body`, `new_client_token`.
+  `run_instances_body`, `new_client_token`. `deployer.aws.create.run_launches(Launcher, io,
+  gpa, launcher, monitoring_region, regions)` runs regional launch queues concurrently.
 - `utils.fuzz` is now exported (the seeded fuzz driver over `FuzzRng`).
 
 ## Decisions
@@ -91,7 +92,8 @@ test vectors. Tests never call AWS and never hold credentials.
 - [x] `attach.rs` host lookup (4 tests), `list.rs` loading and ordering, and the deployment
   directory (`deployer.aws.deployments`).
 - [x] `ec2.rs`'s launch retry loop (`launch_instances` and its 11 tests, over `Replay`).
-- [ ] `create.rs`'s `run_launches` ordering (2 async tests).
+- [x] `create.rs`'s `run_launches` (`deployer.aws.create.run_launches`) and its 2 ordering
+  tests, plus a failure test.
 - [x] SigV4 signer with the AWS documentation's test vectors; S3 presigned URLs
   (`deployer.aws.sigv4`).
 - [x] CLI argument parsing (`deployer.cli`) with tests and a seeded fuzz. The `deployer`

@@ -309,3 +309,114 @@ test "group name can be reused across regions" {
         .{ .az = "us-west-2a", .id = "subnet-a" },
     }), west);
 }
+
+/// Counts how many launches run at once, per region and overall, like commonware's tests.
+const Tracker = struct {
+    pub const Error = error{LaunchFailed};
+    const Counter = struct {
+        active: std.atomic.Value(usize) = .init(0),
+        max: std.atomic.Value(usize) = .init(0),
+
+        fn enter(counter: *Counter) void {
+            const count = counter.active.fetchAdd(1, .seq_cst) + 1;
+            _ = counter.max.fetchMax(count, .seq_cst);
+        }
+
+        fn exit(counter: *Counter) void {
+            _ = counter.active.fetchSub(1, .seq_cst);
+        }
+    };
+
+    io: std.Io,
+    regions: []const []const u8,
+    ids: []const usize,
+    completed: []?usize,
+    east: Counter = .{},
+    west: Counter = .{},
+    other: Counter = .{},
+    global: Counter = .{},
+    monitoring_region: []const u8,
+    monitoring_done: bool = false,
+    fail_index: ?usize = null,
+
+    fn counter_of(tracker: *Tracker, region: []const u8) *Counter {
+        if (std.mem.eql(u8, region, "us-east-1")) return &tracker.east;
+        if (std.mem.eql(u8, region, "us-west-2")) return &tracker.west;
+        return &tracker.other;
+    }
+
+    fn occupy(tracker: *Tracker, regional: *Counter) void {
+        regional.enter();
+        tracker.global.enter();
+        tracker.io.sleep(.fromMilliseconds(10), .awake) catch {};
+        tracker.global.exit();
+        regional.exit();
+    }
+
+    pub fn monitoring(tracker: *Tracker) Error!void {
+        tracker.occupy(tracker.counter_of(tracker.monitoring_region));
+        tracker.monitoring_done = true;
+    }
+
+    pub fn launch(tracker: *Tracker, index: usize) Error!void {
+        tracker.occupy(tracker.counter_of(tracker.regions[index]));
+        if (tracker.fail_index == index) return error.LaunchFailed;
+        tracker.completed[index] = tracker.ids[index];
+    }
+};
+
+test "create: launches are serial within each region" {
+    const regions = [_][]const u8{ "us-west-2", "us-east-1", "us-west-2", "us-east-1" };
+    var completed: [regions.len]?usize = @splat(null);
+    var tracker: Tracker = .{
+        .io = testing.io,
+        .regions = &regions,
+        .ids = &.{ 0, 1, 2, 3 },
+        .completed = &completed,
+        // A region with no launches.
+        .monitoring_region = "monitoring",
+    };
+    const gpa = testing.allocator;
+    try create.run_launches(Tracker, testing.io, gpa, &tracker, "monitoring", &regions);
+    for (completed, 0..) |id, index| try testing.expectEqual(@as(?usize, index), id);
+    try testing.expectEqual(@as(usize, 1), tracker.east.max.load(.seq_cst));
+    try testing.expectEqual(@as(usize, 1), tracker.west.max.load(.seq_cst));
+    try testing.expect(tracker.global.max.load(.seq_cst) > 1);
+}
+
+test "create: monitoring shares the binary region launch queue" {
+    const regions = [_][]const u8{"us-east-1"};
+    var completed: [regions.len]?usize = @splat(null);
+    var tracker: Tracker = .{
+        .io = testing.io,
+        .regions = &regions,
+        .ids = &.{0},
+        .completed = &completed,
+        .monitoring_region = "us-east-1",
+    };
+    const gpa = testing.allocator;
+    try create.run_launches(Tracker, testing.io, gpa, &tracker, "us-east-1", &regions);
+    try testing.expect(tracker.monitoring_done);
+    try testing.expectEqual(@as(?usize, 0), completed[0]);
+    try testing.expectEqual(@as(usize, 1), tracker.east.max.load(.seq_cst));
+}
+
+test "create: a failed launch stops its region's queue and is returned" {
+    const regions = [_][]const u8{ "us-east-1", "us-east-1", "us-east-1" };
+    var completed: [regions.len]?usize = @splat(null);
+    var tracker: Tracker = .{
+        .io = testing.io,
+        .regions = &regions,
+        .ids = &.{ 0, 1, 2 },
+        .completed = &completed,
+        .monitoring_region = "us-west-2",
+        .fail_index = 1,
+    };
+    const gpa = testing.allocator;
+    try testing.expectError(
+        error.LaunchFailed,
+        create.run_launches(Tracker, testing.io, gpa, &tracker, "us-west-2", &regions),
+    );
+    try testing.expectEqual(@as(?usize, 0), completed[0]);
+    try testing.expectEqual(@as(?usize, null), completed[2]);
+}

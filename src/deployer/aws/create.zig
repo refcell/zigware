@@ -4,6 +4,7 @@
 const std = @import("std");
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
+const Io = std.Io;
 const aws = @import("mod.zig");
 const ec2 = @import("ec2.zig");
 const Failure = @import("failure.zig").Failure;
@@ -202,6 +203,80 @@ pub fn grouped_subnets(
     }
     assert(subnets.items.len > 0);
     return subnets.items;
+}
+
+/// Runs regional launch queues in parallel, with monitoring first in its region (commonware
+/// `run_launches`). Launches in one region run one at a time in input order; regions run
+/// concurrently. `Launcher` provides `Error`, `monitoring(*Launcher) Error!void`, and
+/// `launch(*Launcher, index) Error!void`, and keeps each launch's result by its index. After a
+/// failure, launches not yet started are skipped (commonware drops them with `try_join!`) and
+/// the first error is returned.
+pub fn run_launches(
+    comptime Launcher: type,
+    io: Io,
+    gpa: Allocator,
+    launcher: *Launcher,
+    monitoring_region: []const u8,
+    regions: []const []const u8,
+) (Launcher.Error || Allocator.Error || Io.Cancelable)!void {
+    assert(monitoring_region.len > 0);
+    const order = try gpa.alloc(usize, regions.len);
+    defer gpa.free(order);
+    for (order, 0..) |*slot, index| slot.* = index;
+    // Stable, so each region's queue keeps input order.
+    std.sort.insertion(usize, order, regions, struct {
+        fn less(names: []const []const u8, a: usize, b: usize) bool {
+            return std.mem.order(u8, names[a], names[b]) == .lt;
+        }
+    }.less);
+    var queues: Queues(Launcher) = .{ .launcher = launcher };
+    var group: Io.Group = .init;
+    defer group.cancel(io);
+    var colocated: []const usize = &.{};
+    var start: usize = 0;
+    while (start < order.len) {
+        const region = regions[order[start]];
+        var end = start + 1;
+        while (end < order.len and std.mem.eql(u8, regions[order[end]], region)) end += 1;
+        const queue = order[start..end];
+        if (std.mem.eql(u8, region, monitoring_region)) {
+            colocated = queue;
+        } else {
+            group.async(io, Queues(Launcher).run, .{ &queues, queue });
+        }
+        start = end;
+    }
+    // Monitoring and its region's launches run here while the other regions run.
+    if (launcher.monitoring()) {
+        queues.run(colocated);
+    } else |err| queues.fail(err);
+    try group.await(io);
+    if (queues.first_error) |err| return err;
+    assert(!queues.failed.load(.acquire));
+}
+
+fn Queues(comptime Launcher: type) type {
+    return struct {
+        const Self = @This();
+        launcher: *Launcher,
+        failed: std.atomic.Value(bool) = .init(false),
+        /// Written once, by the task that set `failed`; read after every task is done.
+        first_error: ?Launcher.Error = null,
+
+        fn run(self: *Self, queue: []const usize) void {
+            for (queue) |index| {
+                if (self.failed.load(.acquire)) return;
+                self.launcher.launch(index) catch |err| return self.fail(err);
+            }
+        }
+
+        fn fail(self: *Self, err: Launcher.Error) void {
+            if (self.failed.cmpxchgStrong(false, true, .acq_rel, .acquire) == null) {
+                self.first_error = err;
+            }
+            assert(self.failed.load(.acquire));
+        }
+    };
 }
 
 test {
