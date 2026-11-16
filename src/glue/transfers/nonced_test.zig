@@ -4,6 +4,8 @@
 
 const std = @import("std");
 const testing = std.testing;
+const Allocator = std.mem.Allocator;
+const codec = @import("codec");
 const parallel = @import("parallel");
 const transfers = @import("mod.zig");
 const support = @import("transfers_test.zig");
@@ -71,6 +73,24 @@ pub const Nonced = struct {
         }
     }
 
+    /// Stored as its balance, base, and bitmap (commonware's `FixedSize`, `Write`, and `Read`
+    /// impls).
+    pub const fixed_size: usize = 24;
+
+    pub fn write(self: Nonced, writer: *codec.Writer) void {
+        codec.write(u64, self.value, writer);
+        codec.write(u64, self.base, writer);
+        codec.write(u64, self.bitmap, writer);
+    }
+
+    pub fn read(allocator: Allocator, reader: *codec.Reader, _: void) codec.Error!Nonced {
+        return .{
+            .value = try codec.read(u64, allocator, reader),
+            .base = try codec.read(u64, allocator, reader),
+            .bitmap = try codec.read(u64, allocator, reader),
+        };
+    }
+
     /// Consumes `nonce`, returning whether it was unused.
     fn consume(self: *Nonced, nonce: u64) bool {
         // A nonce below the base is already consumed, and the base cannot move past the max.
@@ -104,7 +124,7 @@ pub const NoncedMulti = support.MultiOf(Nonced);
 pub const Ledger = support.Ledger(Nonced);
 
 /// A payment that consumes one of its sender's nonces.
-const Signed = struct {
+pub const Signed = struct {
     pub const Key = Address;
     pub const Account = Nonced;
     const Entry = transfers.Entry(Address, Nonced);
@@ -146,7 +166,7 @@ const Signed = struct {
     };
 };
 
-fn signed(from: u64, to: u64, amount: u64, nonce: u64) Signed {
+pub fn signed(from: u64, to: u64, amount: u64, nonce: u64) Signed {
     return .{ .from = key(from), .to = key(to), .amount = amount, .nonce = nonce };
 }
 

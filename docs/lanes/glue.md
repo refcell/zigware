@@ -69,11 +69,31 @@ a test harness), `transfers` (4.4k with tests and benches), `stateful` (about 33
 - [x] transfers: the nonced-account (effect) tests.
 - [x] transfers: the remaining database-free tests (edge cases, seeded key orders, bucketing,
   random batches against their flat entries, `u256` amounts).
-- [ ] transfers (owner: thread T-01a1d58d-7682-700c-a399-735d897bbd46): the benches (`plan`,
-  `select`, `settle`) and the database-backed tests (execute and select over qmdb `any` and
-  `current`, and stateful).
+- [ ] transfers (owner: thread T-01a1d58d-7682-700c-a399-735d897bbd46): see the transfers
+  section below.
 - [ ] stateful: see the stateful section below (curve25519/utils thread).
 - [ ] dkg (coding thread).
+
+## transfers (owner: thread T-01a1d58d-7682-700c-a399-735d897bbd46)
+
+Owns the benches and database-backed tests of `src/glue/transfers/` (clearing ported `Plan`,
+`settle`, `Selection`, and the database-free tests).
+
+- [x] benches (`src/glue/transfers/benches.zig`, run through `src/glue/benches.zig`):
+  `transfers::{plan,settle,select}` with commonware's parameters (`transfers`, `accounts`,
+  `effects=none|nonce`, `conc=1|8`).
+- [x] database tests on qmdb `any` (unordered, fixed values) in `db_test.zig`: execute settles
+  batches, roots do not depend on order, select merkleizes the accepted candidates, selection
+  reads later rounds through expand, execute carries nonces across batches, select merkleizes
+  the accepted signed candidates. `Balance` and `Nonced` gained codec methods to be qmdb
+  values.
+- [x] the execute tests (settles batches, order-independent roots) over `any` ordered and
+  `current` unordered and ordered (32-byte bitmap chunks, as commonware's `current_config`).
+- [x] `stateful_current_batches_select_and_execute_signed_candidates` on `stateful.db.current`
+  (stage, expand, staged merkleize), with `select_merkleizes_the_accepted_signed_candidates`
+  on `NoncedCurrent` (ordered fixed `current`) as in commonware.
+- [ ] `stateful_any_batches_select_and_execute_as_qmdb`, once `stateful.db.Any` stages (the
+  stateful lane is adding it).
 
 ## stateful (owner: thread T-01a1d57b-0146-77aa-87b0-e622089ce218)
 
@@ -207,6 +227,8 @@ marshal's actors (consensus-marshal) for the actor; until then it ports what is 
   p2p payload bound.
 - 2026-11-16 (stateful): the db/p2p resolver handler.
 - 2026-11-18 (stateful): staged `stage`/`expand`/`merkleize` on the `any` adapter.
+- 2026-11-16: transfers benches (plan, settle, select) and 13 database tests on qmdb `any`
+  and `current`, one through `stateful.db.current`.
 
 ## dkg (owner: coding lane, thread T-01a1d58d-bff1-75a1-8ccb-4b8dd7bc9755)
 

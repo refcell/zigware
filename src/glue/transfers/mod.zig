@@ -393,4 +393,5 @@ test {
     _ = @import("transfers_test.zig");
     _ = @import("nonced_test.zig");
     _ = @import("edges_test.zig");
+    _ = @import("db_test.zig");
 }

@@ -6,6 +6,7 @@ const std = @import("std");
 const assert = std.debug.assert;
 const testing = std.testing;
 const Allocator = std.mem.Allocator;
+const codec = @import("codec");
 const parallel = @import("parallel");
 const utils = @import("utils");
 const transfers = @import("mod.zig");
@@ -59,6 +60,17 @@ pub const Balance = struct {
 
     pub fn apply(_: *Balance, effect: Effect) bool {
         switch (effect) {}
+    }
+
+    /// Stored as its balance (commonware's `FixedSize`, `Write`, and `Read` impls).
+    pub const fixed_size: usize = 8;
+
+    pub fn write(self: Balance, writer: *codec.Writer) void {
+        codec.write(u64, self.value, writer);
+    }
+
+    pub fn read(allocator: Allocator, reader: *codec.Reader, _: void) codec.Error!Balance {
+        return .{ .value = try codec.read(u64, allocator, reader) };
     }
 };
 
