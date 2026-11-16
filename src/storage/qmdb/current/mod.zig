@@ -1,0 +1,18 @@
+//! `current` databases (commonware's `qmdb/current`): an `any` database whose root also
+//! commits to an activity bitmap grafted onto the ops tree, so proofs can show that an
+//! operation is the current value of its key. So far: the proof types and their codecs.
+
+pub const proof = @import("proof.zig");
+pub const OpsRootWitness = proof.OpsRootWitness;
+pub const RangeProof = proof.RangeProof;
+pub const OperationProof = proof.OperationProof;
+pub const ordered = struct {
+    pub const proof = @import("ordered/proof.zig");
+};
+pub const unordered = struct {
+    pub const proof = @import("unordered/proof.zig");
+};
+
+test {
+    _ = @import("proof_test.zig");
+}

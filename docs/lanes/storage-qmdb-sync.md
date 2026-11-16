@@ -17,8 +17,12 @@ it comes first once `any` lands.
 - [x] sync's wire types (`Target`, `CompactTarget`, `Request`, `Response`,
   `max_response_size`), errors, gaps, and metrics, with their 8 codec conformance hashes and
   commonware's tests. (`requests` tracks in-flight futures, so it lands with the engine.)
-- [ ] current's grafting and proof types (`OpsRootWitness`, `RangeProof`, `OperationProof`,
-  `KeyValueProof`, `ExclusionProof`) with their conformance hashes and tests.
+- [x] current's proof codecs (`OpsRootWitness`, `RangeProof`, constant and dynamic
+  `OperationProof`, ordered and unordered `KeyValueProof`, ordered `ExclusionProof`) with
+  their 20 codec conformance hashes and commonware's codec tests.
+- [ ] current's grafting (`height`, grafted leaves, `required_chunks`) and proof
+  verification (`RangeProof` reconstruction, `OperationProof`/`KeyValueProof`/
+  `ExclusionProof` verify) with commonware's verification tests.
 - [ ] current (ordered and unordered, db, batch, sync) once `any` lands.
 - [ ] sync engine (with `requests`), database, journal, source, harness; per-variant sync glue
   (`keyless/sync.zig`, `immutable/sync.zig`, `any/sync/`), which this lane owns.
@@ -52,7 +56,20 @@ it comes first once `any` lands.
   `max_response_size(F, D, max_ops, op_size)`, `source.arbitrary_proof`, `gaps.find_next`,
   `Metrics`, error sets `ServeError`, `EngineError`, `Error(SourceError)`.
 
+- `storage.qmdb.current.proof`: `OpsRootWitness(F, D)` (`root(H, ops_root)`, `verify`,
+  codec), `RangeProof(F, D)` (codec `Cfg = max_digests`, owns its Merkle proof),
+  `OperationProof(F, D, chunk_size)` with `constant.Operation(F, D, N)` (`[N]u8` chunk,
+  `Cfg = max_digests`) and `dynamic.Operation(F, D)` (owned `[]const u8` chunk,
+  `Cfg{chunk_size, max_digests}`), `combine_roots(H, ...)`, `chunk_bits`, `Pending(F, D)`.
+  `current.ordered.proof`: `KeyValueProof(F, K, D, chunk)`, `ExclusionProof(F, K, E, D,
+  chunk)` (`key_value`/`commit`). `current.unordered.proof`: `KeyValueProof(F, D, chunk)`.
+
 ## Decisions
+- commonware's `Graftable::PendingChunk<D>` (`Option<D>` for MMB, `Unused` for MMR) is
+  `current.proof.Pending(F, D)`: `?D` for MMB and `void` (encoded as nothing) for MMR, so
+  merkle needs no family hook. `pending_from` is the `TryFrom<Option<D>>` conversion.
+- `constant` and `dynamic` proofs are one `OperationProof(F, D, chunk_size: ?usize)`; both
+  encode the chunk without a length prefix, so their bytes are identical.
 - `Target` keeps its range as `start`/`end` fields (`u64` locations, `start < end`) instead of
   a `NonEmptyRange` of locations; it encodes and decodes exactly as commonware's
   `NonEmptyRange<Location<F>>` (varints, out-of-domain locations refused first, then
@@ -65,3 +82,4 @@ it comes first once `any` lands.
 
 ## Log
 - 2026-11-16: sync wire types, errors, gaps, and metrics with their conformance hashes.
+- 2026-11-16: current's proof codecs with their 20 conformance hashes.
