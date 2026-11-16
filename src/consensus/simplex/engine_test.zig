@@ -18,6 +18,8 @@ const ed25519 = @import("scheme/ed25519.zig");
 const application_mod = @import("mocks/application.zig");
 const relay_mod = @import("mocks/relay.zig");
 const reporter_mod = @import("mocks/reporter.zig");
+const conflicter_mod = @import("mocks/conflicter.zig");
+const nuller_mod = @import("mocks/nuller.zig");
 
 const gpa = testing.allocator;
 const Sha256 = cryptography.Sha256;
@@ -29,6 +31,8 @@ const Context = runtime.deterministic.Context;
 const Application = application_mod.Application(Sha256, Key);
 const Relay = relay_mod.Relay(Digest, Key);
 const Reporter = reporter_mod.Reporter(Scheme, Digest);
+const Conflicter = conflicter_mod.Conflicter(Scheme, Sha256);
+const Nuller = nuller_mod.Nuller(Scheme, Sha256);
 const Elector = elector_mod.RoundRobinElector;
 const Duration = utils.Duration;
 const Link = p2p.simulated.Link;
@@ -56,8 +60,39 @@ const epoch: Epoch = .new(333);
 const page_size = 1024;
 const page_cache_size = 10;
 
+/// What validator 0 runs: the engine, or one of the Byzantine mocks.
+const Role = enum { honest, conflicter, nuller };
+
+/// A Byzantine mock on the vote channel; the other channels stay registered and unused.
+const Byzantine = struct {
+    role: Role,
+    conflicter: Conflicter,
+    nuller: Nuller,
+    channels: [3]Channel,
+    handle: runtime.context.Handle(void),
+
+    fn run(ctx: Context, byzantine: *Byzantine) void {
+        _ = ctx;
+        const votes = &byzantine.channels[0];
+        switch (byzantine.role) {
+            .honest => unreachable, // Proof: only Byzantine roles start this task.
+            .conflicter => byzantine.conflicter.run(&votes.sender, &votes.receiver),
+            .nuller => byzantine.nuller.run(&votes.sender, &votes.receiver),
+        }
+    }
+
+    fn stop(byzantine: *Byzantine) void {
+        byzantine.handle.abort() catch {};
+        for (&byzantine.channels) |*channel| {
+            channel.sender.deinit();
+            channel.receiver.deinit();
+        }
+    }
+};
+
 /// One validator's engine and mocks. Must not move once started.
 const Validator = struct {
+    byzantine: ?*Byzantine = null,
     application: Application,
     reporter: Reporter,
     page_cache: runtime.buffer.paged.CacheRef,
@@ -76,6 +111,9 @@ const Harness = struct {
     relay: Relay,
     validators: []Validator,
     started: usize = 0,
+    /// Whether honest validators keep votes of finalized views (commonware's Byzantine
+    /// tests set it).
+    track_historical_votes: bool = false,
 
     const Fixture = cryptography.certificate.mocks.Fixture(Scheme);
 
@@ -87,8 +125,8 @@ const Harness = struct {
         return harness.network.oracle();
     }
 
-    /// Starts `n` validators, every pair linked by `link`.
-    fn start(harness: *Harness, ctx: Context, n: u32, link: Link) !void {
+    /// Starts `n` validators, every pair linked by `link`; validator 0 plays `role`.
+    fn start(harness: *Harness, ctx: Context, n: u32, link: Link, role: Role) !void {
         const io = ctx.io();
         var rng = utils.rng.test_rng();
         harness.* = undefined;
@@ -108,18 +146,50 @@ const Harness = struct {
         const peers = harness.keys();
         _ = harness.oracle().manager().track(0, .init_primary(.init(peers)));
         try harness.link_all(link, null);
+        harness.track_historical_votes = role != .honest;
         for (harness.validators, peers, 0..) |*validator, key, index| {
-            try harness.start_validator(validator, key, index);
+            if (index == 0 and role != .honest) {
+                try harness.start_byzantine(validator, key, role);
+            } else {
+                try harness.start_validator(validator, key, index);
+            }
             harness.started += 1;
         }
+    }
+
+    fn start_byzantine(harness: *Harness, validator: *Validator, key: Key, role: Role) !void {
+        const io = harness.ctx.io();
+        const byzantine = try gpa.create(Byzantine);
+        errdefer gpa.destroy(byzantine);
+        const scheme = &harness.fixture.schemes[0];
+        byzantine.* = .{
+            .role = role,
+            .conflicter = .init(gpa, io, scheme),
+            .nuller = .init(gpa, scheme),
+            .channels = try register(harness.oracle(), key),
+            .handle = undefined,
+        };
+        byzantine.handle = try harness.ctx.child("byzantine").spawn(Byzantine.run, .{byzantine});
+        validator.* = undefined;
+        validator.byzantine = byzantine;
+    }
+
+    /// The validators running the engine.
+    fn honest(harness: *Harness, index: usize) ?*Validator {
+        const validator = &harness.validators[index];
+        return if (validator.byzantine == null) validator else null;
     }
 
     fn deinit(harness: *Harness) void {
         // Abort every engine before freeing any mock: live voters relay to all applications.
         const validators = harness.validators[0..harness.started];
-        for (validators) |*validator| abort(validator);
+        for (validators) |*validator| {
+            if (validator.byzantine) |byzantine| byzantine.stop() else abort(validator);
+        }
         harness.relay.deregister_all();
-        for (validators) |*validator| stop_actors(validator);
+        for (validators) |*validator| {
+            if (validator.byzantine) |byzantine| gpa.destroy(byzantine) else stop_actors(validator);
+        }
         gpa.free(harness.validators);
         harness.relay.deinit();
         harness.network.close();
@@ -146,6 +216,7 @@ const Harness = struct {
     fn start_validator(harness: *Harness, validator: *Validator, key: Key, index: usize) !void {
         const io = harness.ctx.io();
         validator.* = undefined;
+        validator.byzantine = null;
         validator.handle = null;
         validator.application = try .init(gpa, io, .{
             .relay = &harness.relay,
@@ -162,7 +233,8 @@ const Harness = struct {
         validator.partition = @splat(0);
         _ = try std.fmt.bufPrint(&validator.partition, "validator-{d}", .{index});
         const control = harness.oracle().control(key);
-        const cfg = engine_config(validator, harness.fixture.schemes[index], control);
+        var cfg = engine_config(validator, harness.fixture.schemes[index], control);
+        cfg.track_historical_votes = harness.track_historical_votes;
         try validator.engine.init(harness.ctx, cfg);
         const channels = try register(harness.oracle(), key);
         validator.handle = try harness.ctx.child("engine").spawn(Engine.run, .{
@@ -172,7 +244,8 @@ const Harness = struct {
 
     /// Waits until every validator finalized `view`.
     fn wait_all(harness: *Harness, view: u64) !void {
-        for (harness.validators) |*validator| {
+        for (0..harness.validators.len) |index| {
+            const validator = harness.honest(index) orelse continue;
             try validator.reporter.wait_for_finalized(.new(view));
         }
     }
@@ -180,7 +253,8 @@ const Harness = struct {
     /// The highest finalized view across validators.
     fn max_finalized(harness: *Harness) u64 {
         var highest: u64 = 0;
-        for (harness.validators) |*validator| {
+        for (0..harness.validators.len) |index| {
+            const validator = harness.honest(index) orelse continue;
             highest = @max(highest, validator.reporter.latest_finalized().get());
         }
         return highest;
@@ -190,19 +264,53 @@ const Harness = struct {
     fn check(harness: *Harness, through: u64) !void {
         for (harness.validators) |*validator| {
             validator.reporter.assert_no_faults();
+        }
+        try harness.check_agreement(through);
+        const blocked = try harness.oracle().blocked(gpa);
+        defer gpa.free(blocked);
+        try testing.expectEqual(0, blocked.len);
+    }
+
+    /// No invalid activity, and every honest validator finalized the same payload at each
+    /// view at or below `through`.
+    fn check_agreement(harness: *Harness, through: u64) !void {
+        for (0..harness.validators.len) |index| {
+            const validator = harness.honest(index) orelse continue;
             validator.reporter.assert_no_invalid();
         }
         for (1..through + 1) |view| {
             var expected: ?Digest = null;
-            for (harness.validators) |*validator| {
+            for (0..harness.validators.len) |index| {
+                const validator = harness.honest(index) orelse continue;
                 const payload = validator.reporter.finalized(.new(view)) orelse continue;
                 if (expected) |digest| try testing.expect(digest.order(payload) == .eq);
                 expected = payload;
             }
         }
+    }
+
+    /// Only validator 0 committed faults, of the `allowed` kinds, at least once; only
+    /// honest validators blocked, and only validator 0.
+    fn check_byzantine(harness: *Harness, allowed: []const std.meta.Tag(Reporter.Activity)) !void {
+        var count: usize = 0;
+        for (0..harness.validators.len) |index| {
+            const validator = harness.honest(index) orelse continue;
+            for (validator.reporter.fault_list()) |fault| {
+                try testing.expectEqual(0, fault.signer.get());
+                const Kind = @TypeOf(fault.kind);
+                try testing.expect(std.mem.indexOfScalar(Kind, allowed, fault.kind) != null);
+                count += 1;
+            }
+        }
+        try testing.expect(count > 0);
+        const byzantine = harness.keys()[0];
         const blocked = try harness.oracle().blocked(gpa);
         defer gpa.free(blocked);
-        try testing.expectEqual(0, blocked.len);
+        try testing.expect(blocked.len > 0);
+        for (blocked) |pair| {
+            try testing.expect(pair.origin.order(byzantine) != .eq);
+            try testing.expect(pair.recipient.order(byzantine) == .eq);
+        }
     }
 };
 
@@ -280,7 +388,7 @@ fn run_seeded(seed: u64, comptime scenario: anytype, args: anytype) ![8]u8 {
 /// commonware `all_online` (ed25519, round robin; 50 views rather than 100 in Debug).
 fn all_online(ctx: Context, n: u32, required: u64) !void {
     var harness: Harness = undefined;
-    try harness.start(ctx, n, link_ms(200, 1, 1.0));
+    try harness.start(ctx, n, link_ms(200, 1, 1.0), .honest);
     defer harness.deinit();
     try harness.wait_all(required);
     try harness.check(required);
@@ -297,7 +405,7 @@ test "all online" {
 /// commonware `slow_and_lossy_links_seeded`: half the messages drop.
 fn slow_and_lossy_links(ctx: Context) !void {
     var harness: Harness = undefined;
-    try harness.start(ctx, 5, link_ms(200, 150, 0.5));
+    try harness.start(ctx, 5, link_ms(200, 150, 0.5), .honest);
     defer harness.deinit();
     const required = 20;
     try harness.wait_all(required);
@@ -328,7 +436,7 @@ fn separated(n: usize, a: usize, b: usize) bool {
 fn partition(ctx: Context) !void {
     var harness: Harness = undefined;
     const link = link_ms(10, 1, 1.0);
-    try harness.start(ctx, 10, link);
+    try harness.start(ctx, 10, link, .honest);
     defer harness.deinit();
     const required = 20;
     try harness.wait_all(required);
@@ -345,4 +453,33 @@ fn partition(ctx: Context) !void {
 
 test "partition heals" {
     _ = try run_seeded(0, partition, .{});
+}
+
+/// commonware `conflicter`/`nuller`: validator 0 is Byzantine; the honest three still
+/// finalize, report its faults, and block it.
+fn byzantine_scenario(
+    ctx: Context,
+    role: Role,
+    allowed: []const std.meta.Tag(Reporter.Activity),
+) !void {
+    var harness: Harness = undefined;
+    try harness.start(ctx, 4, link_ms(10, 1, 1.0), role);
+    defer harness.deinit();
+    const required = 20;
+    try harness.wait_all(required);
+    try harness.check_agreement(required);
+    try harness.check_byzantine(allowed);
+}
+
+test "conflicter is reported and blocked" {
+    for (0..2) |seed| {
+        const allowed = &.{ .conflicting_notarize, .conflicting_finalize };
+        _ = try run_seeded(seed, byzantine_scenario, .{ Role.conflicter, allowed });
+    }
+}
+
+test "nuller is reported and blocked" {
+    for (0..2) |seed| {
+        _ = try run_seeded(seed, byzantine_scenario, .{ Role.nuller, &.{.nullify_finalize} });
+    }
 }

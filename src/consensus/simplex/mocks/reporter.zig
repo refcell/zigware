@@ -17,6 +17,7 @@ const types = @import("../types.zig");
 const context = @import("../actors/context.zig");
 
 const View = consensus_types.View;
+const Participant = consensus_types.Participant;
 const Rnd = consensus_types.Round;
 
 pub fn Reporter(comptime S: type, comptime D: type) type {
@@ -26,6 +27,8 @@ pub fn Reporter(comptime S: type, comptime D: type) type {
         const ViewSet = std.AutoHashMapUnmanaged(View, void);
         /// A finalized payload and how many times its finalization was reported.
         pub const Finalized = struct { payload: D, count: u32 };
+        /// A verified fault: who committed it and which kind.
+        pub const Fault = struct { signer: Participant, kind: std.meta.Tag(Activity) };
 
         gpa: Allocator,
         io: Io,
@@ -39,7 +42,7 @@ pub fn Reporter(comptime S: type, comptime D: type) type {
         certifications: ViewSet = .empty,
         nullifications: ViewSet = .empty,
         finalizations: std.AutoHashMapUnmanaged(View, Finalized) = .empty,
-        faults: u64 = 0,
+        faults: std.ArrayList(Fault) = .empty,
         invalid_votes: u64 = 0,
         invalid_certificates: u64 = 0,
         latest: View = .zero(),
@@ -54,6 +57,7 @@ pub fn Reporter(comptime S: type, comptime D: type) type {
             self.certifications.deinit(self.gpa);
             self.nullifications.deinit(self.gpa);
             self.finalizations.deinit(self.gpa);
+            self.faults.deinit(self.gpa);
             self.* = undefined;
         }
 
@@ -99,7 +103,9 @@ pub fn Reporter(comptime S: type, comptime D: type) type {
                         self.invalid_votes += 1;
                         return .ok;
                     }
-                    self.faults += 1;
+                    const kind = std.meta.activeTag(activity);
+                    const record: Fault = .{ .signer = fault.signer(), .kind = kind };
+                    self.faults.append(self.gpa, record) catch @panic("out of memory");
                 },
             }
             return .ok;
@@ -168,7 +174,12 @@ pub fn Reporter(comptime S: type, comptime D: type) type {
         }
 
         pub fn assert_no_faults(self: *Self) void {
-            assert(self.faults == 0); // Faults detected.
+            assert(self.faults.items.len == 0); // Faults detected.
+        }
+
+        /// The faults reported so far (borrowed; read once the engines stopped).
+        pub fn fault_list(self: *Self) []const Fault {
+            return self.faults.items;
         }
 
         pub fn assert_no_invalid(self: *Self) void {
