@@ -81,8 +81,9 @@ the registry API first and report it.
   The listener does not set SO_REUSEADDR (std's `reuse_address` also sets SO_REUSEPORT, which
   would let a second bind of a live port succeed); zero linger already avoids TIME_WAIT.
 - Two `std.Io.Threaded` 0.17.1 limits are worked around in `production/network.zig`: connect
-  with a timeout panics (TODO), so a dial races the connect against a sleep with `Io.Select`;
-  poll timeouts round down to whole milliseconds and can fire up to 1 ms early, so after an
+  with a timeout panics (TODO), so a dial makes its own nonblocking connect and polls for it in
+  20 ms slices, checking for cancellation between them, then hands `Threaded` the blocking
+  socket; poll timeouts round down to whole milliseconds and can fire up to 1 ms early, so after an
   early timeout the operation waits out the deadline and retries once.
 - `std.Io.Threaded` 0.17.1 `Future.create` does not reserve room for the result's
   misalignment: a future whose result is 16-byte aligned (anything holding an `i96`, such as
@@ -94,9 +95,16 @@ the registry API first and report it.
   `deterministic.Runner.start_context`; tasks it spawns are aborted when it returns.
 - macOS CI (ReleaseSafe) once failed the TCP stress test with 552 leaks: one stress client
   returned an error mid-stream (96 accepted plus 95 dialed connections leaked; no data
-  mismatch was reported), and the suite's early return leaked the rest. The cause is not
-  known yet. The stress cases now log the failing step and error, and `macos-slow.yml` runs
-  `-Dslow-tests` on macOS in Debug by hand.
+  mismatch was reported), and the suite's early return leaked the rest. With the failing step
+  logged, one of three manual ReleaseSafe runs (`macos-slow.yml`, run 43821271906) failed the
+  same way: `stress client: dial failed: ConnectionFailed`, then `stress server: recv 0
+  failed`, so the server had accepted the connection the client reported failed. A dial used
+  to race `Threaded`'s blocking connect against a sleep, and cancel the sleep once the connect
+  won. `Threaded` cancels a blocked syscall with `SIG.IO`, and a late signal can land on the
+  thread after it has picked up another task's connect. `Threaded` retries an interrupted
+  connect, and on Darwin the retry fails with EALREADY while the first attempt connects
+  (`error.ConnectionPending`). The nonblocking connect above has no sleep task and no retried
+  connect. Whether it fixes the macOS failure is checked by repeated ReleaseSafe runs.
 - io_uring (`production/ring.zig`) is a driver, not an executor: tasks stay on `std.Io`, and
   blob read/write/fsync and socket recv/sendmsg go through io_uring workers. Each commonware
   worker thread owns a ring; tasks on `std.Io.Threaded` are threads, so each thread that

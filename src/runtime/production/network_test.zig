@@ -162,6 +162,29 @@ test "a dial to a full accept queue times out (test_connect_timeout)" {
     try testing.expect(elapsed_ms >= 100 and elapsed_ms < 200);
 }
 
+fn dial_pending(tcp: *Network, address: Address) anyerror!void {
+    var connection = try tcp.dial(address);
+    connection.deinit();
+    return error.TestUnexpectedResult; // The accept queue is full: the dial never connects.
+}
+
+test "canceling a pending dial returns promptly" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    const io = testing.io;
+    // A backlog of zero queues one connection; the next stays pending.
+    var server = try any_port.listen(io, .{ .kernel_backlog = 0 });
+    defer server.deinit(io);
+    const queued = try server.socket.address.connect(io, .{ .mode = .stream });
+    defer queued.close(io);
+    var tcp: Network = .init(testing.allocator, io, .{ .connect_timeout = .fromSeconds(30) });
+    defer tcp.deinit();
+    var dial = try io.concurrent(dial_pending, .{ &tcp, server.socket.address });
+    try io.sleep(.fromMilliseconds(50), .awake);
+    const start = now(io);
+    try testing.expectError(error.Canceled, dial.cancel(io));
+    try testing.expect(start.durationTo(now(io)).raw.toMilliseconds() < 1000);
+}
+
 const Ring = @import("ring.zig").Ring;
 
 /// The ring every io_uring network test shares, or null where io_uring is unavailable.

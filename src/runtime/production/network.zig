@@ -444,74 +444,121 @@ pub const Network = struct {
     }
 };
 
-const ConnectResult = net.IpAddress.ConnectError!net.Stream;
-const ConnectOutcome = union(enum) { connected: ConnectResult, elapsed: Io.Cancelable!void };
+/// How long a connect waits in `poll` before checking whether its task was canceled.
+const connect_slice_ms = 20;
 
-fn connect(io: Io, address: Address) ConnectResult {
-    return address.connect(io, .{ .mode = .stream });
-}
-
-fn sleep(io: Io, duration: Io.Duration) Io.Cancelable!void {
-    return io.sleep(duration, .awake);
-}
-
-/// Connects, racing a sleep: `std.Io.Threaded` cannot bound a connect itself. A connect that
-/// lands while the timer wins still counts.
+/// Connects within `duration` with a nonblocking connect, waiting in `poll` slices that check
+/// for cancellation between them. `std.Io.Threaded` cannot bound a connect, and it retries a
+/// blocking connect that a stray cancellation signal interrupted: on Darwin the retry fails
+/// with EALREADY while the first attempt completes, so the peer accepts a connection the dialer
+/// reports failed (the macOS stress failure, docs/lanes/runtime-telemetry.md).
 fn connect_within(io: Io, address: Address, duration: Io.Duration) Error!net.Stream {
-    assert(duration.nanoseconds > 0);
-    var buffer: [2]ConnectOutcome = undefined;
-    var select: Io.Select(ConnectOutcome) = .init(io, &buffer);
-    select.concurrent(.connected, connect, .{ io, address }) catch
-        return map_connect(connect(io, address));
-    select.concurrent(.elapsed, sleep, .{ io, duration }) catch {
-        const result = cancel_connect(&select) orelse return error.ConnectionFailed;
-        return map_connect(result);
-    };
-    const first = select.await() catch |err| {
-        if (cancel_connect(&select)) |late| close_connected(io, late);
-        return err;
-    };
-    const late = cancel_connect(&select);
-    switch (first) {
-        .connected => |result| {
-            assert(late == null);
-            return map_connect(result);
-        },
-        .elapsed => |slept| {
-            const result = late orelse return error.Timeout;
-            slept catch |err| {
-                close_connected(io, result);
-                return err;
+    const timeout = deadline_after(io, nanoseconds(duration));
+    var storage: SocketAddress = undefined;
+    const length = socket_address(address, &storage);
+    const fd = try socket_open(storage.any.family);
+    errdefer _ = posix.system.close(fd);
+    switch (posix.errno(posix.system.connect(fd, &storage.any, length))) {
+        .SUCCESS => {},
+        .INPROGRESS, .INTR, .AGAIN => try connect_wait(io, fd, timeout),
+        else => return error.ConnectionFailed,
+    }
+    try set_nonblocking(fd, false); // `std.Io.Threaded` works on blocking sockets.
+    var local: SocketAddress = undefined;
+    var local_length: posix.socklen_t = @sizeOf(SocketAddress);
+    const named = posix.errno(posix.system.getsockname(fd, &local.any, &local_length));
+    if (named != .SUCCESS) return error.ConnectionFailed;
+    assert(fd >= 0);
+    return .{ .socket = .{ .handle = fd, .address = address_from(&local) } };
+}
+
+const SocketAddress = extern union {
+    any: posix.sockaddr,
+    in: posix.sockaddr.in,
+    in6: posix.sockaddr.in6,
+};
+
+fn socket_address(address: Address, storage: *SocketAddress) posix.socklen_t {
+    switch (address) {
+        .ip4 => |ip4| {
+            // The address bytes are already in network order.
+            storage.in = .{
+                .port = std.mem.nativeToBig(u16, ip4.port),
+                .addr = @bitCast(ip4.bytes),
             };
-            return map_connect(result) catch |err|
-                if (err == error.Canceled) error.Timeout else err;
+            return @sizeOf(posix.sockaddr.in);
+        },
+        .ip6 => |ip6| {
+            storage.in6 = .{
+                .port = std.mem.nativeToBig(u16, ip6.port),
+                .flowinfo = ip6.flow,
+                .addr = ip6.bytes,
+                .scope_id = ip6.interface.index,
+            };
+            return @sizeOf(posix.sockaddr.in6);
         },
     }
 }
 
-/// Cancels whichever task is still running and returns a connect result it produced.
-fn cancel_connect(select: *Io.Select(ConnectOutcome)) ?ConnectResult {
-    var result: ?ConnectResult = null;
-    var remaining: u32 = 0;
-    while (select.cancel()) |late| : (remaining += 1) {
-        assert(remaining < 2);
-        switch (late) {
-            .connected => |outcome| result = outcome,
-            .elapsed => {},
-        }
-    }
-    return result;
-}
-
-fn close_connected(io: Io, result: ConnectResult) void {
-    const stream = result catch return;
-    stream.close(io);
-}
-
-fn map_connect(result: ConnectResult) Error!net.Stream {
-    return result catch |err| switch (err) {
-        error.Canceled => error.Canceled,
-        error.Timeout => error.Timeout,
-        else => error.ConnectionFailed,
+fn address_from(storage: *const SocketAddress) Address {
+    return switch (storage.any.family) {
+        posix.AF.INET6 => .{ .ip6 = .{
+            .port = std.mem.bigToNative(u16, storage.in6.port),
+            .bytes = storage.in6.addr,
+            .flow = storage.in6.flowinfo,
+            .interface = .{ .index = storage.in6.scope_id },
+        } },
+        else => .{ .ip4 = .{
+            .bytes = @bitCast(storage.in.addr),
+            .port = std.mem.bigToNative(u16, storage.in.port),
+        } },
     };
+}
+
+/// A nonblocking, close-on-exec TCP socket.
+fn socket_open(family: posix.sa_family_t) Error!posix.socket_t {
+    assert(family == posix.AF.INET or family == posix.AF.INET6);
+    const rc = posix.system.socket(family, posix.SOCK.STREAM, posix.IPPROTO.TCP);
+    if (posix.errno(rc) != .SUCCESS) return error.ConnectionFailed;
+    const fd: posix.socket_t = @intCast(rc);
+    errdefer _ = posix.system.close(fd);
+    const cloexec = posix.system.fcntl(fd, posix.F.SETFD, @as(usize, posix.FD_CLOEXEC));
+    if (posix.errno(cloexec) != .SUCCESS) return error.ConnectionFailed;
+    try set_nonblocking(fd, true);
+    return fd;
+}
+
+fn set_nonblocking(fd: posix.socket_t, nonblocking: bool) Error!void {
+    const rc = posix.system.fcntl(fd, posix.F.GETFL, @as(usize, 0));
+    if (posix.errno(rc) != .SUCCESS) return error.ConnectionFailed;
+    const flag = @as(usize, 1) << @bitOffsetOf(posix.O, "NONBLOCK");
+    const flags: usize = @intCast(rc);
+    const updated = if (nonblocking) flags | flag else flags & ~flag;
+    const set = posix.system.fcntl(fd, posix.F.SETFL, updated);
+    if (posix.errno(set) != .SUCCESS) return error.ConnectionFailed;
+}
+
+/// Waits for a connect in progress to finish, by the deadline, and returns its outcome.
+fn connect_wait(io: Io, fd: posix.socket_t, timeout: Io.Timeout) Error!void {
+    assert(timeout == .deadline);
+    while (true) {
+        try io.checkCancel();
+        const left_ns = timeout.deadline.durationFromNow(io).raw.nanoseconds;
+        if (left_ns <= 0) return error.Timeout;
+        const left_ms = @divFloor(left_ns + std.time.ns_per_ms - 1, std.time.ns_per_ms);
+        const wait_ms: i32 = @intCast(@min(left_ms, connect_slice_ms));
+        var fds = [_]posix.pollfd{.{ .fd = fd, .events = posix.POLL.OUT, .revents = 0 }};
+        const ready = posix.poll(&fds, wait_ms) catch return error.ConnectionFailed;
+        if (ready > 0) break;
+    }
+    var failure: i32 = 0;
+    var failure_length: posix.socklen_t = @sizeOf(i32);
+    const rc = posix.system.getsockopt(
+        fd,
+        posix.SOL.SOCKET,
+        posix.SO.ERROR,
+        @ptrCast(&failure),
+        &failure_length,
+    );
+    if (posix.errno(rc) != .SUCCESS or failure != 0) return error.ConnectionFailed;
 }
