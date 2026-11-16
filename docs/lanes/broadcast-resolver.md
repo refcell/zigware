@@ -119,7 +119,12 @@ on p2p's simulated network and the deterministic runtime.
 - Metrics go to `runtime.telemetry.metrics` through a `Scope` the caller passes (it stands in
   for commonware's context). The status label enum lives in the resolver until runtime ports
   `status::Status`; it prints commonware's variant names.
-- Seeded fuzz uses `p2p.fuzz.run` (the same driver as codec's).
+- Seeded fuzz uses `p2p.fuzz.run` (the same driver as codec's). Fuzz bodies draw their
+  operations from `smith.bytes` rather than `smith.value`/`eos`: on random seeded input,
+  `value` of a small type returns its minimum and `eos` ends the input almost at once. Models
+  derive expectations independently of the code under test (the fetcher model has its own
+  pending order), and the delivery model polls several scheduling rounds because a verdict
+  task can take more than one round to queue its completion.
 - The p2p fetcher keeps peers, blocked peers, and per-key targets and retry counts in sorted
   arrays ordered by `codec.order` instead of hash maps; selection draws from `std.Io`'s
   randomness and time from `Io.Clock.real`, so it is deterministic under the deterministic
@@ -143,7 +148,10 @@ on p2p's simulated network and the deterministic runtime.
   simulated.
 - [ ] resolver p2p: `test_stale_response_after_requester_restart_is_ignored` once p2p's
   authenticated lookup network lands.
-- [ ] Resolver fuzz targets.
+- [x] Resolver fuzz targets (commonware has no resolver fuzz crate): wire decode is canonical;
+  model checks of the subscriber tracker, ingress coalescing, the p2p fetcher state machine,
+  and the delivery tracker lifecycle. Each model check was mutation-tested (a planted bug in
+  the code under test fails within a few iterations).
 - Moved to the broadcast-collector lane: broadcast and collector.
 
 ## Log
@@ -158,3 +166,4 @@ on p2p's simulated network and the deterministic runtime.
 - 2026-11-13: resolver p2p fetcher with its commonware tests (exact score vectors match).
 - 2026-11-16: resolver p2p engine, inflight, config, metrics, ingress, mock producer; 49 of 50
   commonware engine tests on p2p.simulated (held/gated verdicts, cancellation, shutdown).
+- 2026-11-16: resolver fuzz targets: ingress, fetcher, and delivery tracker model checks.
