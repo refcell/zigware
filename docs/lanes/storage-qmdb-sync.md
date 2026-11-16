@@ -30,7 +30,8 @@ it comes first once `any` lands.
   commit, destroy, apply), batches with activity layers and regrafting, `KeyValueProof.verify`,
   `CurrentMmr/MmbUnorderedFixedConf`, and commonware's small-db, proof, prune-boundary, and
   commit-after-sync tests plus randomized chains checked against the reopened rebuild.
-- [ ] current staged batches (`stage`/`expand`), ordered (exclusion proofs), variable.
+- [x] current staged batches (`stage`/`expand`, `Slot`), with the staged-parity tests.
+- [ ] current ordered (exclusion proofs) and variable.
 - [ ] current sync glue.
 - [ ] sync engine (with `requests`), database, journal, source, harness; per-variant sync glue
   (`keyless/sync.zig`, `immutable/sync.zig`, `any/sync/`), which this lane owns.
@@ -95,7 +96,10 @@ it comes first once `any` lands.
   b.with_metadata(m); const mb = try b.merkleize(&db)` (or `merkleize_with(&db, &policy)`);
   `MerkleizedBatch` is refcounted (`retain`/`release`) with `root`, `ops_root`, `bounds`,
   `operations`, `sync_boundary`, `get(&k, &db)`, and `new_batch()` (child). The public
-  field `any` is the underlying `any.Db`.
+  field `any` is the underlying `any.Db`. Staged: `var s = try b.stage(keys, &db, out)`,
+  `s.expand(keys, &db, out)`, `s.with_metadata`, `s.merkleize(slots, unstaged, &db)` with
+  `Db.Slot` (`.keep`, `.put = v`, `.delete`) and `Db.StagedBatch.Mutation`; it consumes the
+  staged batch, also on error.
 
 ## Decisions
 - current's per-batch activity chunks are a refcounted `Layer` chain ending at the

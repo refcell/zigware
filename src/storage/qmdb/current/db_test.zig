@@ -405,3 +405,84 @@ test "current randomized chains match the rebuilt canonical root" {
         try check_random_chains(support.UnorderedFixed(F), 0xc0ffee);
     }
 }
+
+/// Merkleizes on `parent` (or `db`) the staged reads of keys 0..8 with slots keep, put, and
+/// delete in turn, plus one unstaged write; returns the batch and checks the staged reads.
+fn merkleize_staged(
+    comptime Db: type,
+    db: *Db,
+    parent: ?*Db.MerkleizedBatch,
+) !*Db.MerkleizedBatch {
+    var batch = if (parent) |p| p.new_batch() else try db.new_batch();
+    var keys: [8]Digest = undefined;
+    var values: [8]?Digest = undefined;
+    for (&keys, 0..) |*k, i| k.* = key(i);
+    var staged = staged: {
+        errdefer batch.deinit();
+        break :staged try batch.stage(&keys, db, &values);
+    };
+    for (keys, values) |k, v| {
+        const expected = if (parent) |p| try p.get(&k, db) else try db.get(&k);
+        try testing.expectEqual(expected == null, v == null);
+        if (v) |value| try testing.expect(value.eql(expected.?));
+    }
+    staged.with_metadata(val(9, 9));
+    var slots: [8]Db.Slot = undefined;
+    for (&slots, 0..) |*slot, i| slot.* = switch (i % 3) {
+        0 => .keep,
+        1 => .{ .put = val(i, 7) },
+        else => .delete,
+    };
+    const unstaged = [_]Db.StagedBatch.Mutation{.{ .key = key(20), .value = val(20, 7) }};
+    return staged.merkleize(&slots, &unstaged, db);
+}
+
+/// The same writes as `merkleize_staged`, recorded explicitly.
+fn merkleize_explicit(
+    comptime Db: type,
+    db: *Db,
+    parent: ?*Db.MerkleizedBatch,
+) !*Db.MerkleizedBatch {
+    var batch = if (parent) |p| p.new_batch() else try db.new_batch();
+    errdefer batch.deinit();
+    batch.with_metadata(val(9, 9));
+    for (0..8) |i| switch (i % 3) {
+        0 => {},
+        1 => try batch.write(key(i), val(i, 7)),
+        else => try batch.write(key(i), null),
+    };
+    try batch.write(key(20), val(20, 7));
+    return batch.merkleize(db);
+}
+
+// Commonware's staged parity tests (`test_current_unordered_fixed_read_merkleize_parity` and
+// `..._staged_ancestor_applied_before_merkleize`): staged reads and slots give the explicit
+// writes' canonical root, on the database and on an unapplied or applied parent.
+test "current staged merkleize matches explicit writes" {
+    inline for (families) |F| {
+        const Db = support.UnorderedFixed(F);
+        var harness = try support.Harness.init(gpa);
+        defer harness.deinit();
+        var db = try harness.open(Db, null);
+        defer db.deinit();
+        try apply_random_ops(Db, &db, 40, 0x57a6);
+        const staged = try merkleize_staged(Db, &db, null);
+        defer staged.release();
+        const explicit = try merkleize_explicit(Db, &db, null);
+        defer explicit.release();
+        try testing.expect(staged.root().eql(explicit.root()));
+        const child_staged = try merkleize_staged(Db, &db, staged);
+        defer child_staged.release();
+        const child_explicit = try merkleize_explicit(Db, &db, explicit);
+        defer child_explicit.release();
+        try testing.expect(child_staged.root().eql(child_explicit.root()));
+        try db.apply_batch(staged);
+        try testing.expect(db.root().eql(staged.root()));
+        const after = try merkleize_staged(Db, &db, staged);
+        defer after.release();
+        try testing.expect(after.root().eql(child_explicit.root()));
+        try db.apply_batch(after);
+        try testing.expect(db.root().eql(child_explicit.root()));
+        try testing.expect((try db.get_metadata()).?.eql(val(9, 9)));
+    }
+}

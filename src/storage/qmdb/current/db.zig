@@ -77,6 +77,8 @@ pub fn Db(F: type, U: type, C: type, I: type, H: type, comptime N: usize) type {
         pub const Cfg = Config(I.Translator, C.BackingConfig);
         pub const UnmerkleizedBatch = batch_mod.Unmerkleized(Self);
         pub const MerkleizedBatch = batch_mod.Merkleized(Self);
+        pub const StagedBatch = batch_mod.Staged(Self);
+        pub const Slot = Any.Slot;
         const Metadata = metadata_mod.Metadata(MetadataKey, []const u8);
         const GraftedStorage = grafted_mod.Storage(F, H, *const Mem, *Any.Log.Merkle);
         const chunk_bits: u64 = N * 8;

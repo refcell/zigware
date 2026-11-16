@@ -15,6 +15,7 @@ const diff_mod = @import("../any/diff.zig");
 const grafting = @import("grafting.zig");
 const grafted_mod = @import("grafted.zig");
 const canonical = @import("canonical.zig");
+const floor_mod = @import("../floor.zig");
 
 /// One merkleized batch's activity chunks over the layers below it: every chunk the batch
 /// changed or completed, by index (commonware's `ChunkOverlay` in a `BitmapBatchLayer`).
@@ -285,9 +286,24 @@ pub fn Unmerkleized(comptime D: type) type {
             return self.inner.?.get(key, &db.any);
         }
 
+        /// Reads `keys` into `out` and stages the reads (commonware's `stage`). Consumes the
+        /// batch on success; on error the batch is unchanged.
+        pub fn stage(self: *Self, keys: []const K, db: *D, out: []?V) !D.StagedBatch {
+            assert(self.inner != null);
+            assert(keys.len == out.len);
+            const inner = try self.inner.?.stage(keys, &db.any, out);
+            const staged: D.StagedBatch = .{
+                .inner = inner,
+                .grafted_parent = self.grafted_parent,
+                .bitmap_parent = self.bitmap_parent,
+            };
+            self.* = undefined;
+            return staged;
+        }
+
         /// Merkleizes with commonware's default `Proportional` floor policy.
         pub fn merkleize(self: *Self, db: *D) !*D.MerkleizedBatch {
-            var policy: @import("../floor.zig").Proportional = .{};
+            var policy: floor_mod.Proportional = .{};
             return self.merkleize_with(db, &policy);
         }
 
@@ -304,6 +320,94 @@ pub fn Unmerkleized(comptime D: type) type {
             if (self.bitmap_parent) |layer| layer.release(self.gpa);
             self.* = undefined;
             return result;
+        }
+    };
+}
+
+/// A batch whose reads are staged (commonware's `current::batch::Staged`): `any`'s staged batch
+/// plus the grafted tree and activity layers it builds on. `deinit` it if dropped.
+pub fn Staged(comptime D: type) type {
+    return struct {
+        const Self = @This();
+        const V = D.Value;
+        pub const Range = D.Any.StagedBatch.Range;
+        pub const Slot = D.Any.Slot;
+        pub const Mutation = D.Any.UnmerkleizedBatch.Mutation;
+
+        inner: D.Any.StagedBatch,
+        /// A strong reference.
+        grafted_parent: *D.GraftedBatch,
+        /// A strong reference, null for the database's bitmap.
+        bitmap_parent: ?*D.Layer,
+
+        pub fn deinit(self: *Self) void {
+            const gpa = self.inner.batch.gpa;
+            self.inner.deinit();
+            self.grafted_parent.release(gpa);
+            if (self.bitmap_parent) |layer| layer.release(gpa);
+            self.* = undefined;
+        }
+
+        /// The number of staged read slots.
+        pub fn len(self: *const Self) usize {
+            return self.inner.len();
+        }
+
+        pub fn is_empty(self: *const Self) bool {
+            return self.inner.is_empty();
+        }
+
+        pub fn with_metadata(self: *Self, metadata: ?V) void {
+            self.inner.with_metadata(metadata);
+        }
+
+        /// The staged keys, one per slot.
+        pub fn keys(self: *const Self) []const D.Key {
+            return self.inner.keys.items;
+        }
+
+        /// Reads more `keys` into `out`, appending them as the returned range of slots. On
+        /// error the staged set is unchanged.
+        pub fn expand(self: *Self, more: []const D.Key, db: *D, out: []?V) !Range {
+            assert(more.len == out.len);
+            return self.inner.expand(more, &db.any, out);
+        }
+
+        /// Applies the slots and unstaged writes and merkleizes with `Proportional`.
+        pub fn merkleize(
+            self: *Self,
+            slots: []const Slot,
+            unstaged: []const Mutation,
+            db: *D,
+        ) !*D.MerkleizedBatch {
+            var policy: floor_mod.Proportional = .{};
+            return self.merkleize_with(slots, unstaged, db, &policy);
+        }
+
+        /// Applies `slots` (one per staged read) and then `unstaged`, and merkleizes with
+        /// `policy`. Consumes the staged batch, also on error.
+        pub fn merkleize_with(
+            self: *Self,
+            slots: []const Slot,
+            unstaged: []const Mutation,
+            db: *D,
+            policy: anytype,
+        ) !*D.MerkleizedBatch {
+            assert(slots.len == self.len());
+            const gpa = self.inner.batch.gpa;
+            const inner = self.inner.resolve_updates(slots, unstaged) catch |err| {
+                self.deinit();
+                return err;
+            };
+            var batch: D.UnmerkleizedBatch = .{
+                .gpa = gpa,
+                .inner = inner,
+                .grafted_parent = self.grafted_parent,
+                .bitmap_parent = self.bitmap_parent,
+            };
+            self.* = undefined;
+            errdefer batch.deinit();
+            return batch.merkleize_with(db, policy);
         }
     };
 }
