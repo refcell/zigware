@@ -15,6 +15,7 @@ pub const hasher = @import("hasher.zig");
 pub const mem = @import("mem.zig");
 pub const batch = @import("batch.zig");
 pub const full = @import("persisted/full.zig");
+pub const compact = @import("persisted/compact.zig");
 pub const mmb = @import("mmb/mod.zig");
 pub const mmr = @import("mmr/mod.zig");
 pub const conformance = @import("conformance.zig");

@@ -31,7 +31,9 @@ variants need `runtime` storage; do them after its interface lands.
 - [ ] merkle/persisted/full: `init_sync` (over `journal.authenticated.Stored`), the historical
   proof, destroy-interruption, and init_sync tests, and the merkle_full_operations and
   merkle_full_recovery fuzz targets.
-- [ ] merkle/persisted/compact (storage-qmdb's preferred order: compact, then init_sync).
+- [x] merkle/persisted/compact: `storage.merkle.compact.Merkle(F, Digest)` (init,
+  from_compact_state, prune_to_frontier, append_leaf, root, leaves, snapshot, new_batch,
+  to_batch, apply_batch) with compact.rs's tests.
 - [x] index/immutable on `utils.handles.Table`, with all of immutable.rs's tests.
 - [ ] Fuzz targets (storage/fuzz entries for these modules). Done: rmap, bitmap, index
   (unordered, ordered, immutable), merkle_family_operations, merkle_range_proof,
@@ -100,6 +102,9 @@ variants need `runtime` storage; do them after its interface lands.
   Positions live in `utils.handles.Table(u64)` as in commonware: `get` returns an iterator that
   confirms each candidate against its ring slot, and growth rehashes through the ring. Seeded and
   `std.testing.fuzz` targets check it against a model of live (position, key) pairs.
+- merkle/persisted/compact: commonware's `Arc<Mem>` with copy-on-write mutators becomes an
+  owned `Mem`; `snapshot` returns an owned clone, so it still never observes later mutations.
+  Merkleizing is sequential, so there is no strategy parameter.
 - merkle/storage + verification: commonware's async `Storage` trait is a comptime interface:
   `size()` and `get_node(position)` returning `?Digest` or `!?Digest`, with an optional
   batched `get_nodes`; `merkle.storage.get_nodes` falls back to one read per position. Proof
