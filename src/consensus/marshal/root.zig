@@ -8,6 +8,7 @@
 
 const std = @import("std");
 
+pub const ancestry = @import("ancestry.zig");
 pub const coding = @import("coding/root.zig");
 pub const config = @import("config.zig");
 pub const Config = config.Config;
