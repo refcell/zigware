@@ -75,6 +75,12 @@ marshal's actors (consensus-marshal) for the actor; until then it ports what is 
   `judge.judgeable(*const Finalization)`, `get_floor`, `reset`, `deinit`), `Message(S, V)`
   (`request`, `response: Finalization`; codec, `max_encode_size`), `Tag`,
   `max_payload_size(V, S, participants)`. The DKG probe can reuse `Sample` as commonware's does.
+- `glue.stateful.SyncPlan(S, V)` (`actor.SyncPlan`): `init(env, partition_prefix)` (env has
+  `gpa`, `storage`), `deinit`, `may_sync`, `completed`, `floor`, `set_floor(*const
+  Finalization)` (stores a copy; ignores floors not at a later round), `set_completed(height)`,
+  `marshal_start(B, genesis)` (a marshal `Start`; the floor is a copy the caller frees),
+  `should_sync(requested)`. `SyncState(S, C)` is its persisted record (tag 0 in progress with
+  a finalization, tag 1 complete with a height), byte-identical to commonware's.
 
 ### Decisions
 - ManagedDb and DatabaseSet are comptime contracts. Mutations take `*Self` and return errors
@@ -90,6 +96,8 @@ marshal's actors (consensus-marshal) for the actor; until then it ports what is 
   `Barrier` holds each member's outcome instead of runtime handles.
 - `probe.Sample` keeps replies in a peer-sorted list (commonware's `BTreeMap`), so ties
   between equal rounds resolve as commonware's do, and owns recorded finalizations.
+- `SyncPlan` mutates in place (commonware consumes and returns it) and returns storage errors
+  (commonware panics); a backward completion height is an assertion.
 - `Any` takes the hasher as a parameter (the storage `Db` does not expose it) and uses
   commonware's 64-byte bitmap chunks in tests. `stage`/`expand` wait on storage-qmdb's
   `any` staging API.
@@ -104,6 +112,7 @@ marshal's actors (consensus-marshal) for the actor; until then it ports what is 
 - [x] probe: `Sample`, wire `Message`, `max_payload_size` with limits.rs's widest-encodings
   test and sample selection tests.
 - [ ] probe: the actor (solicit, collect, retry, serve), after marshal's mailbox.
+- [x] actor: `SyncPlan` and `SyncState` with plan.rs's tests.
 - [ ] actor: processor state, syncer plan, core (after marshal); tests (single and
   multi db apps, floor, properties).
 
@@ -113,8 +122,9 @@ marshal's actors (consensus-marshal) for the actor; until then it ports what is 
   with commonware's 9 plan tests and a duplicate-strategy test (20 glue tests).
 - 2026-11-16 (stateful): db core (`Shared`, sets, `Barrier`) and the `any` adapter with their
   commonware tests.
-
 - 2026-11-16 (stateful): probe sample, wire messages, and payload bound.
+- 2026-11-16 (stateful): `SyncPlan` with its persisted `SyncState`.
+
 ## dkg (owner: coding lane, thread T-01a1d58d-bff1-75a1-8ccb-4b8dd7bc9755)
 
 Owns `src/glue/dkg`. Reference: `glue/src/dkg` (about 24k Rust lines).
