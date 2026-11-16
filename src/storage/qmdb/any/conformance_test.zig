@@ -1,6 +1,7 @@
 //! Root conformance of the `any` database (commonware's `qmdb/conformance.rs`
-//! `Any{Mmr,Mmb}UnorderedFixedConf`): the root after a four-batch keyed workload exercising
-//! creates, updates, deletes, recreates, and translator collisions, over 200 seeds.
+//! `Any{Mmr,Mmb}{Unordered,Ordered}{Fixed,Variable}Conf`): the root after a four-batch keyed
+//! workload exercising creates, updates, deletes, recreates, and translator collisions, over
+//! 200 seeds.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -99,5 +100,33 @@ test "any root conformance (MMB ordered fixed)" {
     const gpa = std.heap.smp_allocator;
     const C = AnyConformance(support.OrderedFixed(merkle.mmb.Family));
     const name = name_prefix ++ "AnyMmbOrderedFixedConf";
+    try conformance.verify(C, gpa, name, 200, test_support.conformance_file);
+}
+
+test "any root conformance (MMR unordered variable)" {
+    const gpa = std.heap.smp_allocator;
+    const C = AnyConformance(support.UnorderedVariable(merkle.mmr.Family));
+    const name = name_prefix ++ "AnyMmrUnorderedVariableConf";
+    try conformance.verify(C, gpa, name, 200, test_support.conformance_file);
+}
+
+test "any root conformance (MMR ordered variable)" {
+    const gpa = std.heap.smp_allocator;
+    const C = AnyConformance(support.OrderedVariable(merkle.mmr.Family));
+    const name = name_prefix ++ "AnyMmrOrderedVariableConf";
+    try conformance.verify(C, gpa, name, 200, test_support.conformance_file);
+}
+
+test "any root conformance (MMB unordered variable)" {
+    const gpa = std.heap.smp_allocator;
+    const C = AnyConformance(support.UnorderedVariable(merkle.mmb.Family));
+    const name = name_prefix ++ "AnyMmbUnorderedVariableConf";
+    try conformance.verify(C, gpa, name, 200, test_support.conformance_file);
+}
+
+test "any root conformance (MMB ordered variable)" {
+    const gpa = std.heap.smp_allocator;
+    const C = AnyConformance(support.OrderedVariable(merkle.mmb.Family));
+    const name = name_prefix ++ "AnyMmbOrderedVariableConf";
     try conformance.verify(C, gpa, name, 200, test_support.conformance_file);
 }

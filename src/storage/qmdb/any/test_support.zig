@@ -7,6 +7,8 @@ const Allocator = std.mem.Allocator;
 const cryptography = @import("cryptography");
 const runtime = @import("runtime");
 const fixed = @import("../../journal/contiguous/fixed.zig");
+const variable = @import("../../journal/contiguous/variable.zig");
+const test_support = @import("../test_support.zig");
 const index = @import("../../index/mod.zig");
 const translator = @import("../../translator.zig");
 const value = @import("../value.zig");
@@ -34,6 +36,22 @@ pub fn UnorderedFixedChunks(comptime F: type, comptime N: usize) type {
 pub fn OrderedFixed(comptime F: type) type {
     const Journal = fixed.Journal(any.operation.Ordered(F, Digest, Encoding));
     const U = any.operation.update.Ordered(Digest, Encoding);
+    return any.Db(F, U, Journal, OrderedIndex, Sha256, 32);
+}
+
+/// The unordered variable-encoded database of commonware's conformance types.
+pub fn UnorderedVariable(comptime F: type) type {
+    const E = value.Variable(Digest);
+    const Journal = variable.Journal(any.operation.Unordered(F, Digest, E));
+    const U = any.operation.update.Unordered(Digest, E);
+    return any.Db(F, U, Journal, Index, Sha256, 32);
+}
+
+/// The ordered variable-encoded database of commonware's conformance types.
+pub fn OrderedVariable(comptime F: type) type {
+    const E = value.Variable(Digest);
+    const Journal = variable.Journal(any.operation.Ordered(F, Digest, E));
+    const U = any.operation.update.Ordered(Digest, E);
     return any.Db(F, U, Journal, OrderedIndex, Sha256, 32);
 }
 
@@ -93,13 +111,7 @@ pub const Harness = struct {
                 .replay_buffer = 1024,
                 .cache_ref = &self.cache_ref,
             },
-            .log = .{
-                .partition = "cf-log",
-                .items_per_blob = 7,
-                .cache_ref = &self.cache_ref,
-                .write_buffer = 1024,
-                .replay_buffer = 1024,
-            },
+            .log = test_support.log_config(@FieldType(D.Cfg, "log"), &self.cache_ref),
             .translator = .{},
             .init_cache = 1024,
         };

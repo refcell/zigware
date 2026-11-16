@@ -47,12 +47,16 @@ which every database here is built on.
   `get_span`, `get_next_key`, `get_prev_key`, `get_with_next_key`, and
   `AnyMmr/MmbOrderedFixedConf` root conformance (matches); randomized chains check every link
   against a model.
+- [x] any: `AnyMmr/Mmb{Unordered,Ordered}VariableConf` root conformance over the variable
+  journal (matches).
 - [ ] any: owned (variable) keys and values, evicting floor policies (and ordered link repair
   after evictions), ordered staging and `stream_range`/`keys`, batched `get_many`.
 - [x] immutable (fixed, MMR and MMB): `Db`, chained batches, floor-filtered batch reads,
   prune, recovery, `ImmutableMmr/MmbFixedConf` root conformance (matches), mod.rs's core
   scenarios, and a randomized chain check against the reopened rebuild.
-- [ ] immutable: variable values (`Immutable*VariableConf`), the remaining mod.rs/fixed.rs
+- [x] immutable: `ImmutableMmr/MmbVariableConf` root conformance over the variable journal
+  (matches).
+- [ ] immutable: owned (variable) values, the remaining mod.rs/fixed.rs
   scenarios (bounded initialization, failed-sync recovery), compact.
 - [ ] Fuzz targets under storage/fuzz for these databases; benches under `benches.zig`.
 
@@ -213,3 +217,5 @@ which every database here is built on.
   conformance hashes (MMR and MMB) match commonware.
 - 2026-11-16: keyless variable values; variable root conformance hashes (MMR and MMB) match
   commonware.
+- 2026-11-16: immutable and any variable root conformance hashes (MMR and MMB, ordered and
+  unordered) match commonware.

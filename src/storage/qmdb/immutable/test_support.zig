@@ -1,11 +1,13 @@
-//! Shared fixtures of the immutable tests: fixed databases over `Digest` keys and values with a
-//! `TwoCap` translator (commonware's test and conformance types).
+//! Shared fixtures of the immutable tests: fixed and variable databases over `Digest` keys and
+//! values with a `TwoCap` translator (commonware's test and conformance types).
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const cryptography = @import("cryptography");
 const runtime = @import("runtime");
 const fixed = @import("../../journal/contiguous/fixed.zig");
+const variable = @import("../../journal/contiguous/variable.zig");
+const test_support = @import("../test_support.zig");
 const translator = @import("../../translator.zig");
 const value = @import("../value.zig");
 const any_support = @import("../any/test_support.zig");
@@ -23,6 +25,13 @@ pub const colliding_digest = any_support.colliding_digest;
 pub fn Fixed(comptime F: type) type {
     const Journal = fixed.Journal(immutable.Operation(F, Digest, Encoding));
     return immutable.Db(F, Digest, Encoding, Journal, Sha256, translator.TwoCap);
+}
+
+/// The variable-encoded database of commonware's conformance types (`Digest` values).
+pub fn Variable(comptime F: type) type {
+    const E = value.Variable(Digest);
+    const Journal = variable.Journal(immutable.Operation(F, Digest, E));
+    return immutable.Db(F, Digest, E, Journal, Sha256, translator.TwoCap);
 }
 
 /// Commonware's `Sha256::fill(byte)`: a digest of 32 copies of `byte`.
@@ -52,7 +61,7 @@ pub const Harness = struct {
         self.storage.deinit();
     }
 
-    pub fn cfg(self: *Harness, comptime F: type) Fixed(F).Cfg {
+    pub fn cfg(self: *Harness, comptime D: type) D.Cfg {
         return .{
             .merkle = .{
                 .journal_partition = "cf-mj",
@@ -62,22 +71,21 @@ pub const Harness = struct {
                 .replay_buffer = 1024,
                 .cache_ref = &self.cache_ref,
             },
-            .log = .{
-                .partition = "cf-log",
-                .items_per_blob = 7,
-                .cache_ref = &self.cache_ref,
-                .write_buffer = 1024,
-                .replay_buffer = 1024,
-            },
+            .log = test_support.log_config(@FieldType(D.Cfg, "log"), &self.cache_ref),
             .translator = .{},
         };
     }
 
-    /// Opens the database, registering its metrics afresh.
+    /// Opens the fixed database, registering its metrics afresh.
     pub fn open(self: *Harness, comptime F: type, max_size: ?u64) !Fixed(F) {
+        return self.open_db(Fixed(F), max_size);
+    }
+
+    /// Opens `D`, registering its metrics afresh.
+    pub fn open_db(self: *Harness, comptime D: type, max_size: ?u64) !D {
         self.registry.deinit();
         self.registry = metrics.Registry.init(self.gpa);
         const scope = metrics.Scope.init(&self.registry).child("db");
-        return Fixed(F).init(self.gpa, self.storage.interface(), scope, self.cfg(F), max_size);
+        return D.init(self.gpa, self.storage.interface(), scope, self.cfg(D), max_size);
     }
 };

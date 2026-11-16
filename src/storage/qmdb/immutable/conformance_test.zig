@@ -1,5 +1,6 @@
 //! Root conformance of the immutable database (commonware's `qmdb/conformance.rs`
-//! `Immutable{Mmr,Mmb}FixedConf`): the root after a three-batch set workload, over 200 seeds.
+//! `Immutable{Mmr,Mmb}{Fixed,Variable}Conf`): the root after a three-batch set workload, over
+//! 200 seeds.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -24,13 +25,13 @@ fn apply_sets(db: anytype, keys: []const support.Digest, values: []const support
     try db.apply_batch(merkleized);
 }
 
-fn ImmutableConformance(comptime F: type) type {
+fn ImmutableConformance(comptime Db: type) type {
     return struct {
         /// The root after commonware's `immutable_root!` workload for `seed`.
         pub fn commit(gpa: Allocator, seed: u64) ![]u8 {
             var harness = try support.Harness.init(gpa);
             defer harness.deinit();
-            var db = try harness.open(F, null);
+            var db = try harness.open_db(Db, null);
             errdefer db.deinit();
             const n = seed % 30 + 5;
             const prefix: u8 = @intCast(seed % 256);
@@ -64,14 +65,28 @@ const name_prefix = "commonware_storage::qmdb::conformance::tests::";
 
 test "immutable root conformance (MMR fixed)" {
     const gpa = std.heap.smp_allocator;
-    const C = ImmutableConformance(merkle.mmr.Family);
+    const C = ImmutableConformance(support.Fixed(merkle.mmr.Family));
     const name = name_prefix ++ "ImmutableMmrFixedConf";
     try conformance.verify(C, gpa, name, 200, test_support.conformance_file);
 }
 
 test "immutable root conformance (MMB fixed)" {
     const gpa = std.heap.smp_allocator;
-    const C = ImmutableConformance(merkle.mmb.Family);
+    const C = ImmutableConformance(support.Fixed(merkle.mmb.Family));
     const name = name_prefix ++ "ImmutableMmbFixedConf";
+    try conformance.verify(C, gpa, name, 200, test_support.conformance_file);
+}
+
+test "immutable root conformance (MMR variable)" {
+    const gpa = std.heap.smp_allocator;
+    const C = ImmutableConformance(support.Variable(merkle.mmr.Family));
+    const name = name_prefix ++ "ImmutableMmrVariableConf";
+    try conformance.verify(C, gpa, name, 200, test_support.conformance_file);
+}
+
+test "immutable root conformance (MMB variable)" {
+    const gpa = std.heap.smp_allocator;
+    const C = ImmutableConformance(support.Variable(merkle.mmb.Family));
+    const name = name_prefix ++ "ImmutableMmbVariableConf";
     try conformance.verify(C, gpa, name, 200, test_support.conformance_file);
 }
