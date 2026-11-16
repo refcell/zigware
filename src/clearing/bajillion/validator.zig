@@ -57,6 +57,25 @@ pub fn Payout(comptime P: type, comptime A: type) type {
             return a.account.eql(b.account) and a.amount == b.amount;
         }
 
+        /// Stages the payout log's batch for one posted close. It appends `payouts` in account
+        /// order, then a commit with no metadata that keeps the inactivity floor at zero, so no
+        /// payout is ever pruned. It fails with `error.FloorRegressed` on a log whose floor a
+        /// commit has raised. The caller releases the batch.
+        pub fn stage(
+            log: anytype,
+            payouts: *const amounts_module.Amounts(P, A),
+        ) !*@TypeOf(log.*).MerkleizedBatch {
+            comptime assert(@TypeOf(log.*).Value == Self);
+            var batch = try log.new_batch();
+            errdefer batch.deinit();
+            batch.with_inactivity_floor(0);
+            for (payouts.entries) |entry| {
+                try batch.append(.{ .account = entry[0], .amount = entry[1] });
+            }
+            assert(batch.size() == log.bounds().end + payouts.entries.len);
+            return batch.merkleize(log);
+        }
+
         pub fn write(self: Self, writer: *codec.Writer) void {
             self.account.write(writer);
             codec.write(A, self.amount, writer);
@@ -77,6 +96,13 @@ pub fn Payout(comptime P: type, comptime A: type) type {
 /// The payout log's operation over payouts of `P` and `A`.
 pub fn PayoutOperation(comptime P: type, comptime A: type) type {
     return qmdb.keyless.Operation(Mmr, qmdb.value.Fixed(Payout(P, A)));
+}
+
+/// The validators' payout log (commonware `Payouts<E, P, H, S, A>`): a keyless database over
+/// the MMR whose operations are payouts and commits, on a fixed journal.
+pub fn Payouts(comptime P: type, comptime H: type, comptime A: type) type {
+    const Journal = storage.journal.contiguous.fixed.Journal(PayoutOperation(P, A));
+    return qmdb.keyless.Db(Mmr, qmdb.value.Fixed(Payout(P, A)), Journal, H);
 }
 
 /// Proof that the payout log holds a payout at an index (commonware `PayoutProof<P, D, A>`).

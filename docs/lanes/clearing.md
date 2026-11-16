@@ -76,7 +76,7 @@ formatting, and the deterministic runtime for tests. qmdb is only mentioned in c
   the ledger vector's genesis digest, initial payout-log root, and first running hash match.
 - [x] validator: Payout, PayoutProof (codec, verify), Checkpoint, `Checked.check` with the
   check tests; Payout and PayoutProof conformance hashes match.
-- [ ] validator: `Payout.stage` and the payout-proof tests on the keyless `Db` (on main).
+- [x] validator: `Payouts` (keyless `Db` over the MMR), `Payout.stage`, and the payout-log tests.
 - [ ] validator: BalanceProof, `settle`, `apply`, and the database tests need qmdb `current`
   (after `any` unordered fixed in storage-qmdb). The check tests build parents without
   settling until then.
@@ -93,3 +93,5 @@ formatting, and the deterministic runtime for tests. qmdb is only mentioned in c
   Withdrawal, Row, and Close conformance hashes match.
 - 2026-11-16: summary and the database-free validator (payouts, payout proofs, checkpoints,
   close checks); 18 of the 19 conformance hashes match (BalanceProof waits on qmdb `current`).
+- 2026-11-16: the payout log on storage's keyless `Db`: `Payouts`, `Payout.stage`, and the
+  stage and payout-proof tests.
