@@ -55,8 +55,7 @@ pub fn keyed_batches(gpa: Allocator, seed: u64) ![4][]Write {
     return out;
 }
 
-fn AnyConformance(comptime F: type) type {
-    const Db = support.UnorderedFixed(F);
+fn AnyConformance(comptime Db: type) type {
     return struct {
         pub fn commit(gpa: Allocator, seed: u64) ![]u8 {
             var harness = try support.Harness.init(gpa);
@@ -77,14 +76,28 @@ const name_prefix = "commonware_storage::qmdb::conformance::tests::";
 
 test "any root conformance (MMR unordered fixed)" {
     const gpa = std.heap.smp_allocator;
-    const C = AnyConformance(merkle.mmr.Family);
+    const C = AnyConformance(support.UnorderedFixed(merkle.mmr.Family));
     const name = name_prefix ++ "AnyMmrUnorderedFixedConf";
     try conformance.verify(C, gpa, name, 200, test_support.conformance_file);
 }
 
 test "any root conformance (MMB unordered fixed)" {
     const gpa = std.heap.smp_allocator;
-    const C = AnyConformance(merkle.mmb.Family);
+    const C = AnyConformance(support.UnorderedFixed(merkle.mmb.Family));
     const name = name_prefix ++ "AnyMmbUnorderedFixedConf";
+    try conformance.verify(C, gpa, name, 200, test_support.conformance_file);
+}
+
+test "any root conformance (MMR ordered fixed)" {
+    const gpa = std.heap.smp_allocator;
+    const C = AnyConformance(support.OrderedFixed(merkle.mmr.Family));
+    const name = name_prefix ++ "AnyMmrOrderedFixedConf";
+    try conformance.verify(C, gpa, name, 200, test_support.conformance_file);
+}
+
+test "any root conformance (MMB ordered fixed)" {
+    const gpa = std.heap.smp_allocator;
+    const C = AnyConformance(support.OrderedFixed(merkle.mmb.Family));
+    const name = name_prefix ++ "AnyMmbOrderedFixedConf";
     try conformance.verify(C, gpa, name, 200, test_support.conformance_file);
 }

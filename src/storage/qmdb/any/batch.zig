@@ -25,6 +25,7 @@ const value_mod = @import("../value.zig");
 const floor_mod = @import("../floor.zig");
 const bitmap_mod = @import("../bitmap.zig");
 const diff_mod = @import("diff.zig");
+const ordered_mod = @import("ordered.zig");
 
 /// The unmerkleized batch of database type `D`.
 pub fn Unmerkleized(comptime D: type) type {
@@ -140,7 +141,10 @@ pub fn Unmerkleized(comptime D: type) type {
             defer m.deinit();
             const writes = try sorted_writes(gpa, self.mutations.items);
             defer gpa.free(writes);
-            var walked = try m.emit_writes(writes);
+            var walked = if (comptime D.Update.siblings)
+                try m.emit_ordered(writes)
+            else
+                try m.emit_writes(writes);
             defer walked.deinit(gpa);
             const floor = try m.walk(&walked, policy);
             const merkleized = try m.finish(&walked, floor, self.metadata, &self.journal_batch);
@@ -370,7 +374,7 @@ fn Walked(comptime D: type) type {
             return self.base + self.ops.items.len;
         }
 
-        fn push_delete(self: *Self, gpa: Allocator, key: D.Key, base_old_loc: ?u64) !void {
+        pub fn push_delete(self: *Self, gpa: Allocator, key: D.Key, base_old_loc: ?u64) !void {
             try self.ops.append(gpa, .{ .delete = key });
             try self.diff.append(gpa, .{ .key = key, .entry = .{ .deleted = .{
                 .base_old_loc = base_old_loc,
@@ -378,7 +382,12 @@ fn Walked(comptime D: type) type {
             self.active_keys_delta -= 1;
         }
 
-        fn push_update(self: *Self, gpa: Allocator, update: D.Update, base_old_loc: ?u64) !void {
+        pub fn push_update(
+            self: *Self,
+            gpa: Allocator,
+            update: D.Update,
+            base_old_loc: ?u64,
+        ) !void {
             try self.diff.append(gpa, .{ .key = update.key, .entry = .{ .active = .{
                 .value = update.value,
                 .loc = self.next_loc(),
@@ -495,25 +504,34 @@ fn Merkleizer(comptime D: type) type {
         }
 
         /// The operation at `loc` below this batch's base.
-        fn read_op(self: *Self, loc: u64) !D.Operation {
+        pub fn read_op(self: *Self, loc: u64) !D.Operation {
             if (loc < self.db_state.size) return self.db.log.read(loc);
             return self.peek_uncommitted(loc, &.{});
         }
 
         /// The previous locations of the written keys: ancestor diff locations of keys the
         /// ancestors keep active, snapshot candidates of keys they do not touch. Sorted.
-        fn gather_existing_locations(self: *Self, writes: []const Mutation) ![]u64 {
+        /// Ordered databases also gather the snapshot collision siblings of keys the ancestors
+        /// keep active (commonware's `SIBLINGS`), so their links are rewritten when a sibling
+        /// leaves.
+        pub fn gather_existing_locations(self: *Self, writes: []const Mutation) ![]u64 {
             var locations: std.ArrayList(u64) = .empty;
             errdefer locations.deinit(self.gpa);
             var cursors = try diff_mod.Cursors(K, V).init(self.gpa, self.ancestor_entries);
             defer cursors.deinit(self.gpa);
             for (writes) |*write| {
+                var skip: ?u64 = null;
                 if (cursors.resolve(&write.key)) |entry| {
-                    if (entry.loc()) |loc| try locations.append(self.gpa, loc);
-                    continue;
+                    const loc = entry.loc() orelse continue; // Deleted: nothing is active.
+                    try locations.append(self.gpa, loc);
+                    if (comptime !D.Update.siblings) continue;
+                    skip = entry.base_old_loc();
                 }
                 var values = self.db.snapshot.get(value_mod.bytes(K, &write.key));
-                while (values.next()) |loc| try locations.append(self.gpa, loc.*);
+                while (values.next()) |loc| {
+                    if (skip != null and loc.* == skip.?) continue;
+                    try locations.append(self.gpa, loc.*);
+                }
             }
             std.mem.sort(u64, locations.items, {}, std.sort.asc(u64));
             var count: usize = 0;
@@ -565,6 +583,15 @@ fn Merkleizer(comptime D: type) type {
             return walked;
         }
 
+        /// `emit_writes` for ordered updates (`ordered.zig`).
+        fn emit_ordered(self: *Self, writes: []const Mutation) !Walked(D) {
+            var walked: Walked(D) = .{ .base = self.base_state.size };
+            errdefer walked.deinit(self.gpa);
+            try ordered_mod.Emitter(D).emit(self, &walked, writes);
+            assert(walked.next_loc() >= self.base_state.size);
+            return walked;
+        }
+
         fn emit(walked: *Walked(D), gpa: Allocator, write: Mutation, base_old_loc: ?u64) !void {
             if (base_old_loc) |loc| try walked.superseded.append(gpa, loc);
             if (write.value) |value| {
@@ -602,7 +629,7 @@ fn Merkleizer(comptime D: type) type {
 
         /// Where the update of `key` at `loc` resolves among the ancestors, or null if the
         /// nearest ancestor entry for `key` is not an update at `loc`.
-        fn locate(self: *const Self, loc: u64, key: *const K) ?StagedLoc {
+        pub fn locate(self: *const Self, loc: u64, key: *const K) ?StagedLoc {
             const entry = diff_mod.resolve(K, V, self.ancestor_entries, key) orelse
                 return .{ .committed = loc };
             if (entry.loc() != loc) return null;
@@ -679,7 +706,8 @@ fn Merkleizer(comptime D: type) type {
                 const decision = policy.decide(K, V, entry);
                 switch (decision.action) {
                     .write => |value| {
-                        const moved: D.Update = .{ .key = update.key, .value = value };
+                        var moved = update; // Ordered updates keep their next key.
+                        moved.value = value;
                         try walked.relocate(self.gpa, moved, mv);
                     },
                     .stop => return false,

@@ -17,6 +17,7 @@ pub const Digest = Sha256.Digest;
 const metrics = runtime.telemetry.metrics;
 pub const Encoding = value.Fixed(Digest);
 pub const Index = index.unordered.Index(translator.OneCap, u64);
+pub const OrderedIndex = index.ordered.Index(translator.OneCap, u64);
 
 /// The unordered fixed database of commonware's conformance types (32-byte bitmap chunks).
 pub fn UnorderedFixed(comptime F: type) type {
@@ -27,6 +28,13 @@ pub fn UnorderedFixedChunks(comptime F: type, comptime N: usize) type {
     const Journal = fixed.Journal(any.operation.Unordered(F, Digest, Encoding));
     const U = any.operation.update.Unordered(Digest, Encoding);
     return any.Db(F, U, Journal, Index, Sha256, N);
+}
+
+/// The ordered fixed database of commonware's conformance types (32-byte bitmap chunks).
+pub fn OrderedFixed(comptime F: type) type {
+    const Journal = fixed.Journal(any.operation.Ordered(F, Digest, Encoding));
+    const U = any.operation.update.Ordered(Digest, Encoding);
+    return any.Db(F, U, Journal, OrderedIndex, Sha256, 32);
 }
 
 /// Commonware's `to_digest(i)`: the hash of `i` as 8 big-endian bytes.

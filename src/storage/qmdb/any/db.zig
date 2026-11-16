@@ -28,6 +28,8 @@ const snapshot_mod = @import("../snapshot.zig");
 const bitmap_mod = @import("../bitmap.zig");
 const operation = @import("operation.zig");
 const batch_mod = @import("batch.zig");
+const diff_mod = @import("diff.zig");
+const ordered_mod = @import("ordered.zig");
 
 const Storage = runtime.storage.Storage;
 const Scope = runtime.telemetry.metrics.Scope;
@@ -227,6 +229,69 @@ pub fn Db(F: type, U: type, C: type, I: type, H: type, comptime N: usize) type {
                 }
             }
             return null;
+        }
+
+        /// The update whose span `[key, next_key)` (cyclic) holds `key`, and its location; null
+        /// when the database is empty. Ordered databases only.
+        pub fn get_span(self: *Self, key: *const Key) !?Located {
+            comptime assert(U.siblings);
+            if (self.is_empty()) return null;
+            var values = self.snapshot.get(value_mod.bytes(Key, key));
+            if (try self.find_span(&values, key)) |span| return span;
+            const neighbor = self.snapshot.prev_translated_key(value_mod.bytes(Key, key)) orelse
+                return error.DataCorrupted; // A non-empty database indexes some key.
+            var before = neighbor.values;
+            return try self.find_span(&before, key) orelse error.DataCorrupted;
+        }
+
+        fn find_span(self: *Self, values: anytype, key: *const Key) !?Located {
+            while (values.next()) |location| {
+                const update = try self.read_update(location.*);
+                if (ordered_mod.in_span(Key, &update.key, &update.next_key, key)) {
+                    return .{ .update = update, .location = location.* };
+                }
+            }
+            return null;
+        }
+
+        /// The smallest active key above `key` (not wrapping), which need not be active.
+        pub fn get_next_key(self: *Self, key: *const Key) !?Key {
+            const span = try self.get_span(key) orelse return null;
+            const next = span.update.next_key;
+            return if (diff_mod.order(Key, &next, key) == .gt) next else null;
+        }
+
+        /// The largest active key below `key` (not wrapping), which need not be active.
+        pub fn get_prev_key(self: *Self, key: *const Key) !?Key {
+            comptime assert(U.siblings);
+            var values = self.snapshot.get(value_mod.bytes(Key, key));
+            if (try self.find_strict_prev(&values, key)) |prev| return prev;
+            const neighbor = self.snapshot.prev_translated_key(value_mod.bytes(Key, key)) orelse
+                return null;
+            if (neighbor.cycled) return null;
+            var before = neighbor.values;
+            return self.find_strict_prev(&before, key);
+        }
+
+        /// The active key below `key` whose link passes `key`: `key` in `(k, next_key]`.
+        fn find_strict_prev(self: *Self, values: anytype, key: *const Key) !?Key {
+            while (values.next()) |location| {
+                const update = try self.read_update(location.*);
+                if (diff_mod.order(Key, &update.key, key) != .lt) continue;
+                const next = &update.next_key;
+                const at_next = diff_mod.order(Key, key, next) == .eq;
+                if (at_next or ordered_mod.in_span(Key, &update.key, next, key)) return update.key;
+            }
+            return null;
+        }
+
+        pub const ValueAndNext = struct { value: Value, next_key: Key };
+
+        /// The key's value and the next active key (wrapping), if the key is active.
+        pub fn get_with_next_key(self: *Self, key: *const Key) !?ValueAndNext {
+            comptime assert(U.siblings);
+            const found = try self.get_with_loc(key) orelse return null;
+            return .{ .value = found.update.value, .next_key = found.update.next_key };
         }
 
         /// The key's value, if it is active.

@@ -322,7 +322,52 @@ fn check_random_chains(comptime Db: type, seed: u64) !void {
         try apply_random_chain(Db, &db, &model, random, &salt);
         if (random.uintLessThan(u8, 4) == 0) try db.prune(db.inactivity_floor());
         try check_and_reopen(Db, &harness, &db, &model);
+        if (comptime Db.Update.siblings) try check_links(Db, &db, &model);
     }
+}
+
+fn digest_less(_: void, a: Digest, b: Digest) bool {
+    return std.mem.order(u8, &a.bytes, &b.bytes) == .lt;
+}
+
+/// Checks the ordered links against `model`: each active key links to its successor in key
+/// order (wrapping), and the next/previous key lookups agree for active and absent keys.
+fn check_links(comptime Db: type, db: *Db, model: *Model) !void {
+    var keys: std.ArrayList(Digest) = .empty;
+    defer keys.deinit(gpa);
+    var it = model.keyIterator();
+    while (it.next()) |k| try keys.append(gpa, .{ .bytes = k.* });
+    std.mem.sort(Digest, keys.items, {}, digest_less);
+    const n = keys.items.len;
+    for (keys.items, 0..) |k, i| {
+        const found = (try db.get_with_next_key(&k)).?;
+        try testing.expect(found.next_key.eql(keys.items[(i + 1) % n]));
+        const next = try db.get_next_key(&k);
+        try expect_optional(next, if (i + 1 < n) keys.items[i + 1] else null);
+        const prev = try db.get_prev_key(&k);
+        try expect_optional(prev, if (i > 0) keys.items[i - 1] else null);
+    }
+    // Absent keys: the nearest active keys around them.
+    for (0..24) |k| {
+        const probe = if (k >= 16) support.colliding_digest(7, k) else key(k);
+        if (model.contains(probe.bytes)) continue;
+        try testing.expect(try db.get_with_next_key(&probe) == null);
+        var above: ?Digest = null;
+        var below: ?Digest = null;
+        for (keys.items) |active| {
+            if (digest_less({}, probe, active)) {
+                if (above == null) above = active;
+            } else {
+                below = active;
+            }
+        }
+        try expect_optional(try db.get_next_key(&probe), above);
+        try expect_optional(try db.get_prev_key(&probe), below);
+    }
+}
+
+test "any ordered randomized chains keep links and match the rebuild" {
+    inline for (families) |F| try check_random_chains(support.OrderedFixed(F), 0x0dde_ed11);
 }
 
 test "any randomized chains match a model and the rebuilt snapshot" {
@@ -584,5 +629,43 @@ test "any staged batches refuse stale forks" {
         try testing.expectEqual(@as(usize, 1), staged.len());
         const slots = [_]Db.Slot{.{ .put = val(1, 1) }};
         try testing.expectError(error.StaleBatch, staged.merkleize(&slots, &.{}, &db));
+    }
+}
+
+test "any ordered predecessor rewrites take the nearest ancestor's update" {
+    inline for (families) |F| {
+        const Db = support.OrderedFixed(F);
+        var harness = try support.Harness.init(gpa);
+        defer harness.deinit();
+        var db = try harness.open(Db, null);
+        defer db.deinit();
+        const seed = support.colliding_digest(0x10, 0);
+        const a = support.colliding_digest(0x50, 1);
+        const c = support.colliding_digest(0x50, 2);
+        const b = support.colliding_digest(0x50, 3);
+        try support.apply_writes(Db, &db, &.{.{ .key = seed, .value = val(0, 0) }});
+        const grandparent = try merkleize_writes(Db, &db, null, &.{
+            .{ .key = a, .value = val(1, 1) },
+            .{ .key = b, .value = val(3, 1) },
+        });
+        defer grandparent.release();
+        const parent = try merkleize_writes(Db, &db, grandparent, &.{
+            .{ .key = a, .value = val(1, 2) },
+            .{ .key = b, .value = null },
+        });
+        defer parent.release();
+        const child = try merkleize_writes(Db, &db, parent, &.{.{ .key = c, .value = val(2, 3) }});
+        defer child.release();
+        try db.apply_batch(child);
+        var model: Model = .empty;
+        defer model.deinit(gpa);
+        try model_apply(&model, &.{
+            .{ .key = seed, .value = val(0, 0) },
+            .{ .key = a, .value = val(1, 2) },
+            .{ .key = c, .value = val(2, 3) },
+        });
+        try expect_value(&db, a, val(1, 2));
+        try expect_value(&db, b, null);
+        try check_links(Db, &db, &model);
     }
 }

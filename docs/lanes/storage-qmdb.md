@@ -38,14 +38,20 @@ which every database here is built on.
 - [x] any, unordered fixed (MMR and MMB): `Db`, batches with chaining, the floor walk under
   non-evicting policies, `AnyMmr/MmbUnorderedFixedConf` root conformance (matches), and
   scenario plus randomized chain tests against a model and the reopened rebuild.
-- [ ] any: evicting floor policies, the `stage`/`expand`/`resolve_updates` (`Slot`,
-  `StagedLoc`) API, owned (variable) keys and values, batched `get_many`.
+- [x] any: `stage`/`expand`/`Staged.merkleize`/`resolve_updates` with `Slot` and `StagedLoc`
+  (resolutions model-checked; commonware's staged-ancestor and explicit-equivalence scenarios).
+- [x] any, ordered fixed (MMR and MMB): `next_key` link maintenance (successor and
+  predecessor candidates from reads, translated-key neighbors, and ancestor updates),
+  `get_span`, `get_next_key`, `get_prev_key`, `get_with_next_key`, and
+  `AnyMmr/MmbOrderedFixedConf` root conformance (matches); randomized chains check every link
+  against a model.
+- [ ] any: owned (variable) keys and values, evicting floor policies (and ordered link repair
+  after evictions), ordered staging and `stream_range`/`keys`, batched `get_many`.
 - [x] immutable (fixed, MMR and MMB): `Db`, chained batches, floor-filtered batch reads,
   prune, recovery, `ImmutableMmr/MmbFixedConf` root conformance (matches), mod.rs's core
   scenarios, and a randomized chain check against the reopened rebuild.
 - [ ] immutable: variable values (`Immutable*VariableConf`), the remaining mod.rs/fixed.rs
   scenarios (bounded initialization, failed-sync recovery), compact.
-- [ ] any (ordered and unordered, fixed and variable).
 - [ ] Fuzz targets under storage/fuzz for these databases; benches under `benches.zig`.
 
 ## Public API (on main)
@@ -91,7 +97,14 @@ which every database here is built on.
   `merkleize_with(&db, &policy)`, `deinit`. `MerkleizedBatch` (refcounted `retain`/`release`):
   `root`, `commitment`, `bounds`, `operations`, `proof`, `pinned_nodes`, `get`, `new_batch`,
   `apply_to_index`. `any.diff`: the sorted per-batch `Diff` with `Cursors` and `Merge`.
-  `any.initial_root(F, U, H)`.
+  `any.initial_root(F, U, H)`. Staging: `UnmerkleizedBatch.stage(keys, &db, out)
+  StagedBatch`; `StagedBatch` has `len`, `is_empty`, `with_metadata`, `expand(keys, &db, out)
+  Range`, `merkleize(slots, unstaged, &db)`, `merkleize_with(..., &policy)`,
+  `resolve_updates(slots, unstaged) UnmerkleizedBatch`, `deinit`, and the fields `keys` and
+  `resolutions` (`?StagedLoc` per slot: `committed: loc` or `ancestor: {loc, base_old_loc}`).
+  `Db.Slot` is `keep`, `put: V`, or `delete`. Ordered databases (`U` an `update.Ordered`, `I`
+  an `index.ordered.Index`) add `get_span`, `get_next_key`, `get_prev_key`, and
+  `get_with_next_key`.
 - `storage.qmdb.immutable.Operation(F, K, E)`: `set: {key, value}`, `commit: Commit`.
 - `storage.qmdb.any.Operation(F, S)`, `any.Ordered(F, K, E)`, `any.Unordered(F, K, E)`:
   `delete: K`, `update: S`, `commit: Commit`; `any.operation.update.{Ordered,Unordered}(K, E)`
@@ -164,6 +177,14 @@ which every database here is built on.
   a dropped ancestor wrote, so a tip applies exactly whether its ancestors were applied,
   pending, or dropped. Merkleizing a child after an unapplied ancestor was dropped is
   `StaleBatch`, as in commonware.
+- any staging: resolutions are recorded as commonware does, but a staged merkleize records
+  its slots and unstaged writes as ordinary writes (last put or delete per key, unstaged
+  last) instead of reusing the resolved locations, so it re-reads the keys' locations. The
+  root is the same (commonware asserts staged and explicit roots agree). `resolve_updates`
+  returns only the batch, since no staged updates are carried.
+- any ordered: emission lives in `any/ordered.zig`; predecessor candidates keep the nearest
+  ancestor's update of a key (commonware's `Shadow`), and the floor walk's moves keep each
+  update's `next_key`.
 - immutable: the index rebuild reads the log from the floor one position at a time (no replay
   stream). `get_many` loops over `get` (commonware batches the reads by position).
 
@@ -183,3 +204,6 @@ which every database here is built on.
   match commonware.
 - 2026-11-16: keyless, any, and immutable moved onto `journal.authenticated.Journal`; the
   interim `qmdb.authenticated` is gone.
+- 2026-11-16: any staging (`stage`, `expand`, `Slot`, `StagedLoc`, `resolve_updates`).
+- 2026-11-16: any (ordered, fixed): link maintenance, span and neighbor lookups, root
+  conformance hashes (MMR and MMB) match commonware.
