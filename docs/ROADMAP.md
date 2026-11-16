@@ -21,7 +21,7 @@ and start when what they build on has landed (or can be stubbed behind an interf
 | 3 | broadcast-collector | broadcast, collector | p2p simulated (started) |
 | 3 | runtime-telemetry | runtime telemetry (metrics registry, traces) | now (started) |
 | 3 | examples-estimator | the estimator example, the first README demo | DSL now (started); simulation after p2p simulated |
-| 3 | clearing | clearing | qmdb |
+| 3 | clearing | clearing | bmt, merkle (started) |
 | 3 | storage-qmdb | storage: qmdb shared modules, keyless, immutable, any (started) | journal, merkle |
 | 3 | storage-qmdb-sync | storage: qmdb current, sync, compact | qmdb any |
 | 3 | consensus-simplex | consensus: types, simplex | types now (started); actors after p2p, broadcast, resolver |

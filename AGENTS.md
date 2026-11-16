@@ -16,8 +16,14 @@ Read this whole file before you change anything. These rules are not optional.
    zig build test && just tidy        # must pass
    git push origin HEAD:main
    ```
-   If the push is rejected, fetch, rebase, re-test, push again. Push small commits often:
-   every coherent, green step (at least every hour of work). Never force-push `main`.
+   If the push is rejected, fetch and rebase, then run only `zig build check` and your own
+   packages' tests (`zig build test-<package>`) before pushing again: the full suite already
+   passed on a nearly identical base, and CI runs it on every push. Run the full suite again
+   only if the rebase brought in changes to a package yours depends on, or one that depends on
+   yours. Push small commits often: every coherent, green step (at least every hour of work).
+   Never force-push `main`.
+   Stop processes only through your own tool's PIDs (`shell_command_kill`). Never `kill` a
+   parent PID, a reparented process, or anything you did not start: lanes share one desktop.
 2. **Public content only.** Only port what is in the public commonware monorepo (reference
    clone: `~/.cache/zigware/commonware-ref`, refresh with
    `git -C ~/.cache/zigware/commonware-ref pull`), public papers and RFCs, and public test

@@ -13,6 +13,7 @@ appends a short dated log line after each push. Other lanes read it to find inte
 | crypto | crypto.md | `src/cryptography` except `bls12381/`, `reed_solomon/` | 1 |
 | bls-math | bls-math.md | `src/{math,simd}`, `src/cryptography/bls12381` | 1 |
 | runtime | runtime.md | `src/runtime` except `buffer/`, `telemetry/`, `production/` | 1 |
+| clearing | clearing.md | `src/clearing` | 3 |
 | storage-qmdb | storage-qmdb.md | `src/storage/qmdb` | 3 |
 | storage-merkle | storage-merkle.md | `src/storage/{merkle,bitmap,index,rmap}`, `src/storage/translator.zig`, `src/storage/root.zig` | 1 |
 | actor-stream | actor-stream.md | `src/{actor,stream}` (done) | 2 |
