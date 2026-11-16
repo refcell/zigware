@@ -27,10 +27,15 @@ pub const Consumer = MockConsumer(MockKey, void);
 pub const Producer = MockProducer(MockKey);
 /// The engine over consumer `C` and producer `Pro` on the simulated network.
 pub fn EngineOf(comptime C: type, comptime Pro: type) type {
+    return EngineFull(C, Pro, Net.Control);
+}
+
+/// `EngineOf` with blocker `B`.
+pub fn EngineFull(comptime C: type, comptime Pro: type, comptime B: type) type {
     return engine_mod.Engine(engine_mod.Params(
         PublicKey,
         Net.Manager,
-        Net.Control,
+        B,
         C,
         Pro,
         Net.Sender,
@@ -67,9 +72,14 @@ pub fn SetupWith(comptime C: type) type {
 
 /// `SetupWith` over producer `Pro` (`init(gpa, io)`, `insert(key, value)`, `deinit`).
 pub fn SetupOf(comptime C: type, comptime Pro: type) type {
+    return SetupFull(C, Pro, Net.Control);
+}
+
+/// `SetupOf` with blocker `B`: the peer's `Net.Control`, or a stateless blocker built as `.{}`.
+pub fn SetupFull(comptime C: type, comptime Pro: type, comptime B: type) type {
     return struct {
         const Self = @This();
-        pub const EngineT = EngineOf(C, Pro);
+        pub const EngineT = EngineFull(C, Pro, B);
         pub const MailboxT = EngineT.Mailbox;
 
         io: Io,
@@ -230,7 +240,7 @@ pub fn SetupOf(comptime C: type, comptime Pro: type) type {
             const control = setup.oracle().control(me);
             setup.engines[index] = try EngineT.spawn(gpa, setup.io, scope, .{
                 .peer_provider = setup.oracle().manager(),
-                .blocker = control,
+                .blocker = if (B == Net.Control) control else B{},
                 .consumer = consumer_value,
                 .producer = producer_value,
                 .mailbox_size = mailbox_size,

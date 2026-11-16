@@ -1004,3 +1004,82 @@ test "retain pending invalid delivery race" {
         }
     }.body);
 }
+
+/// A blocker whose blocked-set subscription is already closed (commonware `ClosedBlocker`).
+const ClosedBlocker = struct {
+    const Subscription = struct {
+        pub fn recv(_: *Subscription, _: Allocator) Allocator.Error!?[]base.PublicKey {
+            return null;
+        }
+    };
+
+    pub fn block(_: ClosedBlocker, _: base.PublicKey) resolver.Feedback {
+        return .ok;
+    }
+
+    pub fn blocked(_: ClosedBlocker) Allocator.Error!Subscription {
+        return .{};
+    }
+};
+
+test "closed blocked subscription keeps fetching" {
+    try base.run(10, struct {
+        fn body(io: Io) !void {
+            const ClosedSetup = base.SetupFull(base.Consumer, base.Producer, ClosedBlocker);
+            const setup = try ClosedSetup.init(io, &.{ 1, 2 }, .{});
+            defer setup.deinit();
+            try setup.add_link(base.link, 0, 1);
+            const consumer = try setup.make_consumer();
+            // The engine keeps serving fetches when the blocked-set stream ends.
+            const mailbox = try setup.spawn(0, consumer, try setup.make_producer(&.{}));
+            // The serving peer's engine uses the closed blocker as well; it never blocks.
+            const prod2 = try setup.make_producer(&.{.{ 1, "data for key 1" }});
+            _ = try setup.spawn(1, try setup.make_consumer(), prod2);
+            try base.fetch(mailbox, 1);
+            try base.expect_event(consumer, 1, "data for key 1");
+        }
+    }.body);
+}
+
+test "unblocked peer becomes eligible again" {
+    try base.run(10, struct {
+        fn body(io: Io) !void {
+            const setup = try BlockingSetup.init(io, &.{ 1, 2 }, .{});
+            defer setup.deinit();
+            try setup.add_link(base.link, 0, 1);
+            // The first response is judged invalid, the second one is accepted.
+            const consumer = try setup.make_consumer();
+            const first_gate = try consumer.gate(.invalid);
+            const second_gate = try consumer.gate(complete);
+            const mailbox = try setup.spawn(0, consumer, try setup.make_producer(&.{}));
+            const prod2 = try setup.make_producer(&.{.{ 1, "data for key 1" }});
+            _ = try setup.spawn(1, try setup.make_consumer(), prod2);
+
+            var target = [_]base.PublicKey{setup.peers[1]};
+            _ = try mailbox.fetch_targeted(.{ .key = key(1), .subscriber = {} }, &target);
+            var started = try consumer.next_started();
+            try started.expect(1, &.{{}});
+            started.deinit();
+            consumer.open(first_gate);
+            try setup.wait_for_blocked(0, 1);
+            // The only target is blocked, so the fetch waits.
+            try setup.sleep(Duration.from_secs(1));
+            {
+                const shared = consumer.shared;
+                shared.mutex.lockUncancelable(io);
+                defer shared.mutex.unlock(io);
+                try testing.expectEqual(0, shared.started.items.len);
+            }
+            // Once the network lifts the block, the same target is tried again.
+            try setup.oracle().unblock(setup.peers[0], setup.peers[1]);
+            started = try consumer.next_started();
+            defer started.deinit();
+            try started.expect(1, &.{{}});
+            consumer.open(second_gate);
+            var event = try consumer.next_event();
+            defer event.deinit();
+            try event.seen.expect(1, &.{{}});
+            try testing.expectEqualStrings("data for key 1", event.value);
+        }
+    }.body);
+}
