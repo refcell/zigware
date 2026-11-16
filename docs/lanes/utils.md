@@ -57,6 +57,13 @@ encoding parts as soon as `codec` has its core API (see docs/lanes/codec.md).
   `get_or_insert_with(key, factory)`, `try_get_or_insert_with`, `get_or_insert_mut` ->
   `{ slot, value }`, `remove`, `retain(predicate)`, `clear`, `prefill(factory)`). Factories
   declare `make()`, predicates `keep(key, *const V)`; dropped keys/values go to `discard`.
+- `utils.BigRational` (`utils.rational`): exact rationals over `std.math.big.int.Managed`,
+  canonical like `num_rational` (`from_u64`, `from_frac_u64`, `from_u128`, `from_frac_u128`,
+  `from_usize`, `from_frac_usize`, `from_frac`, `from_integer`, `from_ints`, `zero`, `one`,
+  `deinit`, `clone`; `add`, `sub`, `mul`, `div`, `neg`, `pow(i32)`, `order`, `eql`,
+  `to_integer`, `is_integer`/`is_zero`/`is_negative`/`is_positive`; `ceil_to_u128`,
+  `log2_floor(digits)`, `log2_ceil(digits)` bit-identical to commonware). Results allocate with
+  the first operand's allocator; the caller `deinit`s them.
 - `utils.Hostname` (`utils.hostname`): validated RFC 1035/1123 hostname stored inline
   (`init`, `literal`, `as_str`, `eql`, `order`, `{f}`, `len_max`, `label_len_max`,
   `max_encode_size` = 258), codec as a `RangeCfg(..=253)` byte string; `hostname.Error`.
@@ -127,3 +134,5 @@ encoding parts as soon as `codec` has its core API (see docs/lanes/codec.md).
   with all handles.rs tests; Rust closures are `rehash_context`/`matcher` parameters.
 - 2026-11-13: acknowledgement Exact with its tests, a concurrent waiter test, and the ack fuzz.
 - 2026-11-13: Clock2Q+ Cache over handles.Table, with the cache.rs unit tests and invariants.
+- 2026-11-16: rational BigRational (BigRationalExt plus the arithmetic bloomfilter uses), all
+  mod.rs tests and a fuzz that checks log2 against its defining bounds.
