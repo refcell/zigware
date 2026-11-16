@@ -55,6 +55,21 @@ pub fn OrderedVariable(comptime F: type) type {
     return any.Db(F, U, Journal, OrderedIndex, Sha256, 32);
 }
 
+/// Unordered and ordered databases of owned byte values (`Vec<u8>`), for the ownership tests.
+pub fn UnorderedBytes(comptime F: type) type {
+    const E = value.Variable([]const u8);
+    const Journal = variable.Journal(any.operation.Unordered(F, Digest, E));
+    const U = any.operation.update.Unordered(Digest, E);
+    return any.Db(F, U, Journal, Index, Sha256, 32);
+}
+
+pub fn OrderedBytes(comptime F: type) type {
+    const E = value.Variable([]const u8);
+    const Journal = variable.Journal(any.operation.Ordered(F, Digest, E));
+    const U = any.operation.update.Ordered(Digest, E);
+    return any.Db(F, U, Journal, OrderedIndex, Sha256, 32);
+}
+
 /// Commonware's `to_digest(i)`: the hash of `i` as 8 big-endian bytes.
 pub fn to_digest(i: u64) Digest {
     var bytes: [8]u8 = undefined;

@@ -56,7 +56,7 @@ pub fn Db(F: type, U: type, C: type, I: type, H: type, comptime N: usize) type {
         const Self = @This();
         comptime {
             assert(N > 0);
-            assert(!codec.owns_memory(U.Key) and !codec.owns_memory(U.Value));
+            assert(!codec.owns_memory(U.Key)); // Values may own memory; keys may not.
         }
         pub const Family = F;
         pub const Update = U;
@@ -214,36 +214,45 @@ pub fn Db(F: type, U: type, C: type, I: type, H: type, comptime N: usize) type {
             return .{ .start = span.start, .end = span.end };
         }
 
-        /// The metadata of the last commit.
+        /// The metadata of the last commit. The caller owns it.
         pub fn get_metadata(self: *Self) !?Value {
-            const op = try self.log.read(self.log.size() - 1);
-            if (op != .commit) return error.DataCorrupted; // The log always ends with a commit.
+            var op = try self.log.read(self.log.size() - 1);
+            if (op != .commit) {
+                op.deinit(self.gpa);
+                return error.DataCorrupted; // The log always ends with a commit.
+            }
             return op.commit.metadata;
         }
 
-        /// The update at `location`, which must hold one.
+        /// The update at `location`, which must hold one. The caller owns it (`deinit`).
         pub fn read_update(self: *Self, location: u64) !U {
-            const op = try self.log.read(location);
-            if (op != .update) return error.DataCorrupted; // Snapshots point at updates.
+            var op = try self.log.read(location);
+            if (op != .update) {
+                op.deinit(self.gpa);
+                return error.DataCorrupted; // Snapshots point at updates.
+            }
             return op.update;
         }
 
+        /// An update (owned by the holder) and its location.
         pub const Located = struct { update: U, location: u64 };
 
-        /// The key's latest update and its location, if the key is active.
+        /// The key's latest update and its location, if the key is active. The caller owns
+        /// the update.
         pub fn get_with_loc(self: *Self, key: *const Key) !?Located {
             var values = self.snapshot.get(value_mod.bytes(Key, key));
             while (values.next()) |location| {
-                const update = try self.read_update(location.*);
+                var update = try self.read_update(location.*);
                 if (value_mod.eql(Key, update.key, key.*)) {
                     return .{ .update = update, .location = location.* };
                 }
+                update.deinit(self.gpa);
             }
             return null;
         }
 
         /// The update whose span `[key, next_key)` (cyclic) holds `key`, and its location; null
-        /// when the database is empty. Ordered databases only.
+        /// when the database is empty. Ordered databases only. The caller owns the update.
         pub fn get_span(self: *Self, key: *const Key) !?Located {
             comptime assert(U.siblings);
             if (self.is_empty()) return null;
@@ -257,17 +266,19 @@ pub fn Db(F: type, U: type, C: type, I: type, H: type, comptime N: usize) type {
 
         fn find_span(self: *Self, values: anytype, key: *const Key) !?Located {
             while (values.next()) |location| {
-                const update = try self.read_update(location.*);
+                var update = try self.read_update(location.*);
                 if (ordered_mod.in_span(Key, &update.key, &update.next_key, key)) {
                     return .{ .update = update, .location = location.* };
                 }
+                update.deinit(self.gpa);
             }
             return null;
         }
 
         /// The smallest active key above `key` (not wrapping), which need not be active.
         pub fn get_next_key(self: *Self, key: *const Key) !?Key {
-            const span = try self.get_span(key) orelse return null;
+            var span = try self.get_span(key) orelse return null;
+            defer span.update.deinit(self.gpa);
             const next = span.update.next_key;
             return if (diff_mod.order(Key, &next, key) == .gt) next else null;
         }
@@ -287,7 +298,8 @@ pub fn Db(F: type, U: type, C: type, I: type, H: type, comptime N: usize) type {
         /// The active key below `key` whose link passes `key`: `key` in `(k, next_key]`.
         fn find_strict_prev(self: *Self, values: anytype, key: *const Key) !?Key {
             while (values.next()) |location| {
-                const update = try self.read_update(location.*);
+                var update = try self.read_update(location.*);
+                defer update.deinit(self.gpa);
                 if (diff_mod.order(Key, &update.key, key) != .lt) continue;
                 const next = &update.next_key;
                 const at_next = diff_mod.order(Key, key, next) == .eq;
@@ -298,14 +310,15 @@ pub fn Db(F: type, U: type, C: type, I: type, H: type, comptime N: usize) type {
 
         pub const ValueAndNext = struct { value: Value, next_key: Key };
 
-        /// The key's value and the next active key (wrapping), if the key is active.
+        /// The key's value (owned by the caller) and the next active key (wrapping), if the key
+        /// is active.
         pub fn get_with_next_key(self: *Self, key: *const Key) !?ValueAndNext {
             comptime assert(U.siblings);
             const found = try self.get_with_loc(key) orelse return null;
             return .{ .value = found.update.value, .next_key = found.update.next_key };
         }
 
-        /// The key's value, if it is active.
+        /// The key's value, if it is active. The caller owns it.
         pub fn get(self: *Self, key: *const Key) !?Value {
             self.metrics.get_calls.metric().inc();
             self.metrics.lookups_requested.metric().inc();
@@ -313,15 +326,18 @@ pub fn Db(F: type, U: type, C: type, I: type, H: type, comptime N: usize) type {
             return found.update.value;
         }
 
-        /// The values of `keys` into `out`.
+        /// The values of `keys` into `out`. The caller owns them.
         pub fn get_many(self: *Self, keys: []const Key, out: []?Value) !void {
             assert(keys.len == out.len);
             if (keys.len == 0) return;
             self.metrics.get_many_calls.metric().inc();
             self.metrics.lookups_requested.metric().inc_by(keys.len);
+            var filled: usize = 0;
+            errdefer for (out[0..filled]) |value| codec.free(?Value, self.gpa, value);
             for (keys, out) |*key, *slot| {
                 const found = try self.get_with_loc(key);
                 slot.* = if (found) |f| f.update.value else null;
+                filled += 1;
             }
         }
 

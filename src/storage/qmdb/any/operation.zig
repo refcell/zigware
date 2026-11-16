@@ -69,6 +69,19 @@ fn Update(comptime K: type, comptime E: type, comptime ordered: bool) type {
             self.* = undefined;
         }
 
+        /// A copy that owns its memory.
+        pub fn clone(self: Self, gpa: Allocator) Allocator.Error!Self {
+            var copy = self;
+            copy.key = try value_mod.clone(K, gpa, self.key);
+            errdefer codec.free(K, gpa, copy.key);
+            copy.value = try value_mod.clone(Value, gpa, self.value);
+            if (comptime ordered) {
+                errdefer codec.free(Value, gpa, copy.value);
+                copy.next_key = try value_mod.clone(K, gpa, self.next_key);
+            }
+            return copy;
+        }
+
         pub fn encode_size(self: Self) usize {
             if (comptime E.fixed) return fixed_size.?;
             var size = codec.encode_size(K, self.key) + codec.encode_size(Value, self.value);
@@ -183,6 +196,18 @@ pub fn Operation(comptime F: type, comptime S: type) type {
                 .update => |u| u.eql(b.update),
                 .commit => |c| c.floor == b.commit.floor and
                     value_mod.eql(?Value, c.metadata, b.commit.metadata),
+            };
+        }
+
+        /// A copy that owns its memory.
+        pub fn clone(self: Self, gpa: Allocator) Allocator.Error!Self {
+            return switch (self) {
+                .delete => |k| .{ .delete = try value_mod.clone(Key, gpa, k) },
+                .update => |u| .{ .update = try u.clone(gpa) },
+                .commit => |c| .{ .commit = .{
+                    .metadata = try value_mod.clone(?Value, gpa, c.metadata),
+                    .floor = c.floor,
+                } },
             };
         }
 

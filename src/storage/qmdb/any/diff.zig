@@ -8,6 +8,7 @@
 const std = @import("std");
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
+const codec = @import("codec");
 const value_mod = @import("../value.zig");
 
 /// The order of two keys: their encoded bytes, lexicographically.
@@ -73,7 +74,8 @@ pub fn Diff(comptime K: type, comptime V: type) type {
         references: u32,
         entries: []Item,
 
-        /// Takes ownership of `entries`, which must be sorted by key without duplicates.
+        /// Takes ownership of `entries` and their values; they must be sorted by key without
+        /// duplicates.
         pub fn create(gpa: Allocator, entries: []Item) Allocator.Error!*Self {
             assert(is_sorted(K, V, entries));
             const self = try gpa.create(Self);
@@ -91,7 +93,7 @@ pub fn Diff(comptime K: type, comptime V: type) type {
             assert(self.references > 0);
             self.references -= 1;
             if (self.references > 0) return;
-            gpa.free(self.entries);
+            free_entries(K, V, gpa, self.entries);
             gpa.destroy(self);
         }
 
@@ -100,6 +102,19 @@ pub fn Diff(comptime K: type, comptime V: type) type {
             return lookup_sorted(K, V, self.entries, key);
         }
     };
+}
+
+/// Frees `entries` and their values.
+pub fn free_entries(
+    comptime K: type,
+    comptime V: type,
+    gpa: Allocator,
+    entries: []Pair(K, V),
+) void {
+    for (entries) |*pair| {
+        if (pair.entry == .active) codec.free(V, gpa, pair.entry.active.value);
+    }
+    gpa.free(entries);
 }
 
 pub fn is_sorted(comptime K: type, comptime V: type, entries: []const Pair(K, V)) bool {

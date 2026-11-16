@@ -6,6 +6,11 @@
 //! location order and creates in key order, walks the inactivity floor forward under a floor
 //! policy (moving active updates it reaches to the tip), and appends the commit.
 //!
+//! Values may own memory (keys may not). A batch owns the values given to `write`,
+//! `with_metadata`, and a staged merkleize's `put` slots and unstaged writes; reads return copies
+//! the caller owns. Merkleizing borrows values from the batch, the log reads it makes, and the
+//! ancestors, and hands the journal batch and the new diff their own copies.
+//!
 //! A merkleized batch is reference counted (`retain`/`release`); a child holds a weak link to
 //! its parent and the diffs of its live ancestors, so reads and applies stay exact after the
 //! ancestors are released. Only policies that never evict are supported so far.
@@ -19,6 +24,7 @@
 const std = @import("std");
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
+const codec = @import("codec");
 const merkle = @import("../../merkle/mod.zig");
 const chain = @import("../chain.zig");
 const value_mod = @import("../value.zig");
@@ -47,20 +53,30 @@ pub fn Unmerkleized(comptime D: type) type {
         base_floor: u64,
         base_active_keys: usize,
 
-        /// Discards the batch.
+        /// Discards the batch and the values it owns.
         pub fn deinit(self: *Self) void {
             self.journal_batch.deinit(self.gpa);
+            self.free_values();
             self.mutations.deinit(self.gpa);
             if (self.parent) |parent| parent.release();
             self.* = undefined;
         }
 
-        /// Sets the metadata of this batch's commit (not inherited by children).
+        fn free_values(self: *Self) void {
+            for (self.mutations.items) |mutation| codec.free(?V, self.gpa, mutation.value);
+            codec.free(?V, self.gpa, self.metadata);
+            self.metadata = null;
+        }
+
+        /// Sets the metadata of this batch's commit (not inherited by children). The batch owns
+        /// `metadata` and frees any it held before.
         pub fn with_metadata(self: *Self, metadata: ?V) void {
+            codec.free(?V, self.gpa, self.metadata);
             self.metadata = metadata;
         }
 
-        /// Sets `key` to `value`, or deletes it if `value` is null.
+        /// Sets `key` to `value`, or deletes it if `value` is null. The batch owns `value` on
+        /// success (the caller keeps it on error).
         pub fn write(self: *Self, key: K, value: ?V) !void {
             try self.mutations.append(self.gpa, .{ .key = key, .value = value });
         }
@@ -81,28 +97,30 @@ pub fn Unmerkleized(comptime D: type) type {
             return null;
         }
 
-        /// The key's value after this batch, its chain, and `db`.
+        /// The key's value after this batch, its chain, and `db`. The caller owns it.
         pub fn get(self: *const Self, key: *const K, db: *D) !?V {
             try self.compatible(db);
-            if (self.find_mutation(key)) |mutation| return mutation.value;
+            if (self.find_mutation(key)) |mutation| {
+                return value_mod.clone(?V, self.gpa, mutation.value);
+            }
             const parent = self.parent orelse return db.get(key);
             return parent.read_through(key, db);
         }
 
         const StagedRead = struct { value: ?V, loc: ?StagedLoc };
 
-        /// The key's value through this batch and where it resolved: null when this batch's
-        /// own writes answer, the key is missing, or an ancestor deleted it.
+        /// The key's value (owned by the caller) through this batch and where it resolved:
+        /// null when this batch's own writes answer, the key is missing, or an ancestor deleted
+        /// it.
         fn stage_read(self: *const Self, key: *const K, db: *D) !StagedRead {
             if (self.find_mutation(key)) |mutation| {
-                return .{ .value = mutation.value, .loc = null };
+                return .{ .value = try value_mod.clone(?V, self.gpa, mutation.value), .loc = null };
             }
             if (self.parent) |parent| {
                 if (try parent.resolve_entry(key, db.log.size())) |entry| return switch (entry) {
-                    .active => |a| .{ .value = a.value, .loc = .{ .ancestor = .{
-                        .loc = a.loc,
-                        .base_old_loc = a.base_old_loc,
-                    } } },
+                    .active => |a| .{ .value = try value_mod.clone(V, self.gpa, a.value), .loc = .{
+                        .ancestor = .{ .loc = a.loc, .base_old_loc = a.base_old_loc },
+                    } },
                     .deleted => .{ .value = null, .loc = null },
                 };
             }
@@ -148,6 +166,7 @@ pub fn Unmerkleized(comptime D: type) type {
             defer walked.deinit(gpa);
             const floor = try m.walk(&walked, policy);
             const merkleized = try m.finish(&walked, floor, self.metadata, &self.journal_batch);
+            self.free_values();
             self.mutations.deinit(gpa);
             if (self.parent) |parent| parent.release();
             self.* = undefined;
@@ -235,8 +254,9 @@ pub fn Staged(comptime D: type) type {
             self.batch.with_metadata(metadata);
         }
 
-        /// Reads more `keys` into `out`, appending them as the returned range of slots. Keys
-        /// are not deduplicated against earlier slots. On error the staged set is unchanged.
+        /// Reads more `keys` into `out` (owned by the caller), appending them as the returned
+        /// range of slots. Keys are not deduplicated against earlier slots. On error the staged
+        /// set is unchanged.
         pub fn expand(self: *Self, keys: []const K, db: *D, out: []?V) !Range {
             assert(keys.len == out.len);
             const gpa = self.batch.gpa;
@@ -248,9 +268,12 @@ pub fn Staged(comptime D: type) type {
                 self.keys.shrinkRetainingCapacity(start);
                 self.resolutions.shrinkRetainingCapacity(start);
             }
+            var filled: usize = 0;
+            errdefer for (out[0..filled]) |value| codec.free(?V, gpa, value);
             for (keys, out) |*key, *value| {
                 const read = try self.batch.stage_read(key, db);
                 value.* = read.value;
+                filled += 1;
                 self.keys.appendAssumeCapacity(key.*);
                 self.resolutions.appendAssumeCapacity(read.loc);
             }
@@ -259,7 +282,9 @@ pub fn Staged(comptime D: type) type {
         }
 
         /// Records `slots` (one per staged read, in slot order) and then `unstaged` as writes,
-        /// so each key takes its last put or delete and unstaged writes win.
+        /// so each key takes its last put or delete and unstaged writes win. The batch owns the
+        /// values of the puts and unstaged writes once recorded (a failed reservation leaves
+        /// them with the caller; a later merkleize error frees them with the staged batch).
         fn record(self: *Self, slots: []const Slot(V), unstaged: []const Mutation) !void {
             assert(slots.len == self.len()); // One slot per staged read.
             const gpa = self.batch.gpa;
@@ -430,6 +455,10 @@ fn Merkleizer(comptime D: type) type {
 
         gpa: Allocator,
         db: *D,
+        /// Operations read from the log, which own the values the walk borrows from them.
+        reads: std.ArrayList(D.Operation) = .empty,
+        /// Values floor policies wrote in place of an update's own, owned here.
+        written: std.ArrayList(V) = .empty,
         parent: ?*D.MerkleizedBatch,
         /// The live ancestors, parent first, each retained.
         ancestors: []*D.MerkleizedBatch,
@@ -482,6 +511,10 @@ fn Merkleizer(comptime D: type) type {
         }
 
         fn deinit(self: *Self) void {
+            for (self.reads.items) |*op| op.deinit(self.gpa);
+            self.reads.deinit(self.gpa);
+            codec.free_items(V, self.gpa, self.written.items);
+            self.written.deinit(self.gpa);
             for (self.ancestors) |ancestor| ancestor.release();
             self.gpa.free(self.ancestors);
             self.gpa.free(self.ancestor_entries);
@@ -503,10 +536,14 @@ fn Merkleizer(comptime D: type) type {
             unreachable; // The ancestors cover [boundary, base) contiguously.
         }
 
-        /// The operation at `loc` below this batch's base.
+        /// The operation at `loc` below this batch's base, borrowed until `deinit`.
         pub fn read_op(self: *Self, loc: u64) !D.Operation {
-            if (loc < self.db_state.size) return self.db.log.read(loc);
-            return self.peek_uncommitted(loc, &.{});
+            if (loc >= self.db_state.size) return self.peek_uncommitted(loc, &.{});
+            if (comptime !D.Operation.owns_memory) return self.db.log.read(loc);
+            try self.reads.ensureUnusedCapacity(self.gpa, 1);
+            const op = try self.db.log.read(loc);
+            self.reads.appendAssumeCapacity(op);
+            return op;
         }
 
         /// The previous locations of the written keys: ancestor diff locations of keys the
@@ -690,7 +727,7 @@ fn Merkleizer(comptime D: type) type {
         ) !bool {
             for (candidates) |loc| {
                 const op = if (loc < self.db_state.size)
-                    try self.db.log.read(loc)
+                    try self.read_op(loc)
                 else
                     self.peek_uncommitted(loc, walked.ops.items);
                 const key = op.key() orelse continue; // A commit is inactive.
@@ -706,6 +743,8 @@ fn Merkleizer(comptime D: type) type {
                 const decision = policy.decide(K, V, entry);
                 switch (decision.action) {
                     .write => |value| {
+                        // A replaced value belongs to the walk; the released one to its read.
+                        if (decision.released != null) try self.written.append(self.gpa, value);
                         var moved = update; // Ordered updates keep their next key.
                         moved.value = value;
                         try walked.relocate(self.gpa, moved, mv);
@@ -778,7 +817,10 @@ fn Merkleizer(comptime D: type) type {
             try walked.ops.append(gpa, .{ .commit = .{ .metadata = metadata, .floor = floor } });
             const entries = try self.merged_diff(walked);
             var diff_owned: ?*diff_mod.Diff(K, V) = null;
-            errdefer if (diff_owned) |d| d.release(gpa) else gpa.free(entries);
+            errdefer if (diff_owned) |d|
+                d.release(gpa)
+            else
+                diff_mod.free_entries(K, V, gpa, entries);
             diff_owned = try diff_mod.Diff(K, V).create(gpa, entries);
             const base_locs = try self.ancestor_base_locs();
             errdefer gpa.free(base_locs);
@@ -789,7 +831,7 @@ fn Merkleizer(comptime D: type) type {
             errdefer gpa.free(diffs);
             const merkleized = try gpa.create(D.MerkleizedBatch);
             errdefer gpa.destroy(merkleized);
-            try journal_batch.add_many(gpa, walked.ops.items);
+            try add_owned(gpa, journal_batch, walked.ops.items);
             const journal = try journal_batch.merkleize(gpa, &self.db.log);
             errdefer journal.release(gpa);
             const tip_size = commit_loc + 1;
@@ -818,15 +860,49 @@ fn Merkleizer(comptime D: type) type {
             return merkleized;
         }
 
-        /// The walk's new entries merged into the key-sorted diff (the inputs are disjoint).
+        /// Adds copies of `ops` (which borrow their values) to the journal batch, which owns
+        /// them after.
+        fn add_owned(
+            gpa: Allocator,
+            journal_batch: *D.Log.UnmerkleizedBatch,
+            ops: []const D.Operation,
+        ) !void {
+            if (comptime !D.Operation.owns_memory) return journal_batch.add_many(gpa, ops);
+            const owned = try gpa.alloc(D.Operation, ops.len);
+            defer gpa.free(owned);
+            var cloned: usize = 0;
+            errdefer for (owned[0..cloned]) |*op| op.deinit(gpa);
+            for (ops, owned) |op, *copy| {
+                copy.* = try op.clone(gpa);
+                cloned += 1;
+            }
+            try journal_batch.add_many(gpa, owned);
+            assert(cloned == ops.len);
+        }
+
+        /// The walk's new entries merged into the key-sorted diff (the inputs are disjoint),
+        /// with copies of their values.
         fn merged_diff(self: *Self, walked: *Walked(D)) ![]Pair {
             const gpa = self.gpa;
             const total = walked.diff.items.len + walked.floor_diff.items.len;
             const merged = try gpa.alloc(Pair, total);
+            errdefer gpa.free(merged);
             @memcpy(merged[0..walked.diff.items.len], walked.diff.items);
             @memcpy(merged[walked.diff.items.len..], walked.floor_diff.items);
             std.mem.sort(Pair, merged, {}, pair_less);
             assert(diff_mod.is_sorted(K, V, merged));
+            if (comptime !codec.owns_memory(V)) return merged;
+            var cloned: usize = 0;
+            errdefer for (merged[0..cloned]) |*pair| {
+                if (pair.entry == .active) codec.free(V, gpa, pair.entry.active.value);
+            };
+            for (merged) |*pair| {
+                if (pair.entry == .active) {
+                    const value = &pair.entry.active.value;
+                    value.* = try value_mod.clone(V, gpa, value.*);
+                }
+                cloned += 1;
+            }
             return merged;
         }
 
@@ -993,13 +1069,16 @@ pub fn Merkleized(comptime D: type) type {
             return entry.*;
         }
 
-        /// The key's value through this batch's chain, falling back to `db`.
+        /// The key's value through this batch's chain, falling back to `db`. The caller owns
+        /// it.
         fn read_through(self: *const Self, key: *const K, db: *D) !?V {
-            if (try self.resolve_entry(key, db.log.size())) |entry| return entry.value();
+            if (try self.resolve_entry(key, db.log.size())) |entry| {
+                return value_mod.clone(?V, self.gpa, entry.value());
+            }
             return db.get(key);
         }
 
-        /// The key's value after this batch.
+        /// The key's value after this batch. The caller owns it.
         pub fn get(self: *const Self, key: *const K, db: *D) !?V {
             try self.bounds.compatible(db.commitment());
             return self.read_through(key, db);

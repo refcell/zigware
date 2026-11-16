@@ -49,7 +49,10 @@ which every database here is built on.
   against a model.
 - [x] any: `AnyMmr/Mmb{Unordered,Ordered}VariableConf` root conformance over the variable
   journal (matches).
-- [ ] any: owned (variable) keys and values, evicting floor policies (and ordered link repair
+- [x] any: owned (variable) values, unordered and ordered: batches own their writes,
+  metadata, and staged puts; diffs own their values; reads return owned copies; the floor
+  walk borrows log reads and hands the journal batch copies (replacing policies included).
+- [ ] any: evicting floor policies (and ordered link repair
   after evictions), ordered staging and `stream_range`/`keys`, batched `get_many`.
 - [x] immutable (fixed, MMR and MMB): `Db`, chained batches, floor-filtered batch reads,
   prune, recovery, `ImmutableMmr/MmbFixedConf` root conformance (matches), mod.rs's core
@@ -181,7 +184,10 @@ which every database here is built on.
   Mutators take `*Self` (commonware threads the database by value); `start_sync` returns no
   handle; there is no `strategy`.
 
-- any: keys and values must not own memory (a comptime check) until variable values land.
+- any: values may own memory, keys may not (a comptime check). A merkleize borrows values from
+  the batch, its log reads (kept until the merkleize ends), and its ancestors, then gives the
+  journal batch and the new diff their own copies; a diff frees its values with its last
+  holder. A staged merkleize's puts and unstaged writes belong to the batch once recorded.
   Batches merkleize with the floor policy passed by pointer; evicting policies assert. A
   batch keeps sorted diffs of itself and its live ancestors, plus `ancestor_base_locs` for keys
   a dropped ancestor wrote, so a tip applies exactly whether its ancestors were applied,
@@ -225,3 +231,4 @@ which every database here is built on.
 - 2026-11-16: immutable and any variable root conformance hashes (MMR and MMB, ordered and
   unordered) match commonware.
 - 2026-11-16: immutable owned (variable) values.
+- 2026-11-16: any owned (variable) values, unordered and ordered.

@@ -15,4 +15,5 @@ test {
     std.testing.refAllDecls(@This());
     _ = @import("conformance_test.zig");
     _ = @import("db_test.zig");
+    _ = @import("variable_test.zig");
 }
