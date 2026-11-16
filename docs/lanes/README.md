@@ -28,6 +28,7 @@ appends a short dated log line after each push. Other lanes read it to find inte
 | examples-estimator | examples-estimator.md | `examples/estimator` | 3 |
 | consensus-marshal | consensus-marshal.md | `src/consensus/{aggregation,marshal}` | 3 |
 | consensus-simplex | consensus-simplex.md | `src/consensus` except `marshal/`, `aggregation/` | 3 |
+| deployer | deployer.md | `src/deployer` | 3 |
 
 Later waves start as their dependencies land; [../ROADMAP.md](../ROADMAP.md) lists them.
 

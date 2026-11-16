@@ -26,6 +26,7 @@ and start when what they build on has landed (or can be stubbed behind an interf
 | 3 | storage-qmdb-sync | storage: qmdb current, sync, compact | pure parts now (started); rest after qmdb any |
 | 3 | consensus-simplex | consensus: types, simplex | types now (started); actors after p2p, broadcast, resolver |
 | 3 | consensus-marshal | consensus: aggregation, marshal | aggregation now (started); marshal actors after broadcast, resolver, archive |
-| 4 | glue-examples | glue, deployer, examples (log, chat, dkg, bridge, estimator, flood) | consensus |
+| 3 | deployer | deployer (config types, CLI, non-cloud logic, SigV4 signer) | now (started) |
+| 4 | glue-examples | glue, examples (log, chat, dkg, bridge, estimator, flood) | consensus |
 
 Demo recordings for the README come from the examples as they become runnable.
