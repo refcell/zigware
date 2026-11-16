@@ -185,7 +185,7 @@ resolver; those lanes are running, so do the types first and the actors as they 
   done (ed25519, round robin; Debug runs 50 views where commonware runs 100); conflicter,
   nuller, impersonator (2 seeds each), outdated, backfill, and unclean_shutdown (100 views
   across journal-recovering restarts), and one_offline (its leader-labelled metrics wait on
-  the actor metrics) done; next slow_validator, the crash and
+  the actor metrics), and slow_validator done; next the crash and
   recovery tests, equivocator, twins, and the rest of the multi-node DST suite, seeded.
 - [ ] Fuzz targets (commonware consensus/fuzz).
 
@@ -217,3 +217,4 @@ resolver; those lanes are running, so do the types first and the actors as they 
 - 2026-11-16: resolver state.rs tests (all 23).
 - 2026-11-16: unclean_shutdown DST (random crashes, journal recovery, 100 views).
 - 2026-11-16: one_offline DST; the reporter mock records vote signers per view.
+- 2026-11-16: slow_validator DST.

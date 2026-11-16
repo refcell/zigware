@@ -63,8 +63,9 @@ const page_size = 1024;
 const page_cache_size = 10;
 
 /// What validator 0 runs: the engine, or one of the Byzantine mocks.
-/// `absent` leaves validator 0 offline until the test starts it.
-const Role = enum { honest, absent, conflicter, nuller, impersonator, outdated };
+/// `absent` leaves validator 0 offline until the test starts it; `slow` runs the engine with
+/// an application that takes 10 s to propose, verify, and certify.
+const Role = enum { honest, absent, slow, conflicter, nuller, impersonator, outdated };
 
 /// A Byzantine mock on the vote channel; the other channels stay registered and unused.
 const Byzantine = struct {
@@ -80,7 +81,8 @@ const Byzantine = struct {
         _ = ctx;
         const votes = &byzantine.channels[0];
         switch (byzantine.role) {
-            .honest, .absent => unreachable, // Proof: only Byzantine roles start this task.
+            // Proof: only Byzantine roles start this task.
+            .honest, .absent, .slow => unreachable,
             .conflicter => byzantine.conflicter.run(&votes.sender, &votes.receiver),
             .nuller => byzantine.nuller.run(&votes.sender, &votes.receiver),
             .impersonator => byzantine.impersonator.run(&votes.sender, &votes.receiver),
@@ -123,6 +125,7 @@ const Harness = struct {
     /// tests set it).
     track_historical_votes: bool = false,
     timeouts: Timeouts,
+    role: Role,
 
     const Timeouts = struct {
         leader_ms: u64 = 1000,
@@ -161,6 +164,7 @@ const Harness = struct {
         harness.* = undefined;
         harness.ctx = ctx;
         harness.timeouts = timeouts;
+        harness.role = role;
         harness.fixture = try ed25519.fixture(Digest, gpa, &rng, "consensus", n);
         errdefer harness.fixture.deinit(gpa);
         harness.network = try Net.init(gpa, io, .{
@@ -176,10 +180,14 @@ const Harness = struct {
         const peers = harness.keys();
         _ = harness.oracle().manager().track(0, .init_primary(.init(peers)));
         if (link) |value| try harness.link_all(value, null);
-        harness.track_historical_votes = role != .honest and role != .absent;
+        harness.track_historical_votes = switch (role) {
+            .honest, .absent, .slow => false,
+            .conflicter, .nuller, .impersonator, .outdated => true,
+        };
         for (harness.validators, peers, 0..) |*validator, key, index| {
             if (index == 0 and role == .absent) continue;
-            if (index == 0 and role != .honest) {
+            // Only the Byzantine roles keep historical votes.
+            if (index == 0 and harness.track_historical_votes) {
                 try harness.start_byzantine(validator, key, role);
             } else {
                 try harness.start_validator(index);
@@ -265,12 +273,14 @@ const Harness = struct {
         assert(validator.state == .absent);
         validator.* = undefined;
         validator.handle = null;
+        const slow = index == 0 and harness.role == .slow;
+        const normal: application_mod.Latency = .{ .mean = 10, .std_dev = 5 };
         validator.application = try .init(gpa, io, .{
             .relay = &harness.relay,
             .me = key,
-            .propose_latency = .{ .mean = 10, .std_dev = 5 },
-            .verify_latency = .{ .mean = 10, .std_dev = 5 },
-            .certify_latency = .{ .mean = 10, .std_dev = 5 },
+            .propose_latency = if (slow) .{ .mean = 10_000, .std_dev = 0 } else normal,
+            .verify_latency = if (slow) .{ .mean = 10_000, .std_dev = 5 } else normal,
+            .certify_latency = if (slow) .{ .mean = 10_000, .std_dev = 5 } else normal,
         });
         try validator.application.register();
         validator.reporter = .init(gpa, io, &harness.fixture.verifier);
@@ -670,6 +680,31 @@ fn offline_exceptions(validator: *Validator, through: u64) !u32 {
 
 test "one offline: the others finalize and nullify its views" {
     _ = try run_seeded(0, one_offline_scenario, .{});
+}
+
+/// commonware `slow_validator`: validator 0 proposes, verifies, and certifies 10 s late, so
+/// it never notarizes or finalizes; everyone still finalizes 50 views.
+fn slow_validator_scenario(ctx: Context) !void {
+    var harness: Harness = undefined;
+    try harness.start(ctx, 5, link_ms(10, 1, 1.0), .slow);
+    defer harness.deinit();
+    const required = 50;
+    try harness.wait_all(required); // The slow validator learns finalizations from the rest.
+    for (harness.validators) |*validator| {
+        validator.reporter.assert_no_faults();
+        validator.reporter.assert_no_invalid();
+        for (1..validator.reporter.latest_finalized().get() + 1) |value| {
+            const votes = validator.reporter.votes(.new(value));
+            try testing.expectEqual(0, (votes.notarize | votes.finalize) & 1);
+        }
+    }
+    const blocked = try harness.oracle().blocked(gpa);
+    defer gpa.free(blocked);
+    try testing.expectEqual(0, blocked.len);
+}
+
+test "slow validator: the others finalize without its votes" {
+    _ = try run_seeded(0, slow_validator_scenario, .{});
 }
 
 /// One run of commonware `unclean_shutdown`: start every validator from its journal, stop
