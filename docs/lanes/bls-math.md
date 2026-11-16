@@ -48,9 +48,9 @@ variants (MinPk, MinSig) must match exactly.
   conformance entries or fuzz target; a decode fuzz target is added.
 - [x] p2p utils codec: `wrap`, `WrappedSender`, `WrappedReceiver`, and
   `WrappedBackgroundReceiver` (decodes through a `parallel` strategy) with codec.rs's tests.
-- [ ] p2p utils mux: `Muxer`, `MuxHandle`, `SubSender`, `SubReceiver`, `GlobalSender`,
-  backup channel, `parse`, `prefixed`, with mux.rs's tests.
-- [ ] p2p utils mocks: inert sender and receiver with their tests.
+- [x] p2p utils mux: `Muxer`, `MuxHandle`, `SubSender`, `SubReceiver`, `GlobalSender`,
+  backup channel, `parse`, `prefixed`, with mux.rs's tests (not the `should_panic` one).
+- [x] p2p utils mocks: inert sender and receiver with their tests.
 - [ ] Check marshal's and aggregation's threshold paths against the simplex VRF scheme.
 
 ## Decisions
@@ -60,6 +60,11 @@ variants (MinPk, MinSig) must match exactly.
   decodes in arrival order (commonware forwards in completion order). A canceled background
   receiver still awaits and forwards the decodes it submitted, since a Zig task must be
   awaited.
+- p2p utils mux: the routing table is shared under a mutex instead of commonware's control
+  channel, so `register` and a released `SubReceiver` update it directly; the muxer stops
+  once every handle and subchannel receiver is released, or when the wrapped receiver fails.
+  The builder typestates are `Muxer.build`'s `Options`. Commonware's mocks `Metrics` has no
+  counterpart: a metrics `Scope` over a scratch `Registry` serves.
 - golden: commonware ignores `fake_mask_filtered` because a comment says `check_batch`
   rejects the whole batch; its batched check (and ours) falls back to each dealer, so the
   test runs here and passes. Plans hold up to 16 dealers or players, as bit masks.
