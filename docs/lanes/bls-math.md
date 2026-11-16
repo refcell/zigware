@@ -27,7 +27,7 @@ variants (MinPk, MinSig) must match exactly.
   their `Certificate<MinSig>` conformance hashes and mocks fixtures.
 - [x] bls12381 dkg feldman_desmedt: Info, Dealer, Player, Logs, observe, deal, reshare,
   the test plan and its tests, and the message and FeldmanTranscript conformance hashes.
-- [ ] bls12381 scheme.rs (PrivateKey, PublicKey, Signature) with its conformance hashes.
+- [x] bls12381 scheme.rs (PrivateKey, PublicKey, Signature) with its conformance hashes.
 - [ ] bls12381 dkg golden (commonware `dkg::golden`) with its tests and conformance hashes.
 - [ ] Fuzz targets (commonware math/fuzz, simd/fuzz, bls parts of cryptography/fuzz).
 
@@ -73,6 +73,11 @@ variants (MinPk, MinSig) must match exactly.
   `{ dealer, log }` pairs. The test plan's 3+ round cases run only in release builds or with
   `-Dslow-tests`.
 
+- scheme: `PublicKey.verify_batch` takes a `strategy` but runs sequentially (one random linear
+  combination per 64 entries, drawing scalars in commonware's order); the
+  `projected_batch_indexes_zero_sized_items` test runs on `parallel.sequential` only, not
+  commonware's `mocks::explore` shapes.
+
 - simd: one `@Vector` implementation per profile (scalar 64-bit, x86_v3 256, x86_v4c 512,
   neon/arm_v9 128) stands in for both commonware's emulated and native tokens; `dispatch`
   picks the compile target's best profile at comptime. Profile-only instructions are `void`
@@ -92,3 +97,4 @@ variants (MinPk, MinSig) must match exactly.
 - 2026-11-13: feldman_desmedt messages and their 8 conformance hashes; round info, dealer,
   and the FeldmanTranscript conformance hashes.
 - 2026-11-13: feldman_desmedt Logs, observe, Player, deal, the test plan, and 48 tests.
+- 2026-11-13: bls12381 scheme keys and signatures with their 3 conformance hashes.
