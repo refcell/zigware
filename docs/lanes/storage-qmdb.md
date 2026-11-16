@@ -30,8 +30,9 @@ that don't need them and keep a small interface where you must.
 - [ ] store (`store/db.rs`, the unauthenticated keyed store) and the `any` traits.
 - [x] keyless: `Db` and its batches over the interim authenticated journal, with mod.rs's
   core scenarios under MMR and MMB (fixed values).
+- [x] keyless: `KeylessMmrFixedConf`/`KeylessMmbFixedConf` root conformance (matches).
 - [ ] keyless: the remaining mod.rs/fixed.rs scenarios, variable values over the contiguous
-  variable journal, and the `Keyless*Conf` storage conformance hashes.
+  variable journal (`Keyless*VariableConf`).
 - [ ] Switch `qmdb.authenticated` to storage-journal's `journal.authenticated.Journal` when it
   lands (same method names).
 - [ ] any, unordered fixed over MMB first (storage-qmdb-sync needs it for current), ahead of
@@ -137,3 +138,4 @@ that don't need them and keep a small interface where you must.
 - 2026-11-16: snapshot rebuild (serial) with model-checked tests.
 - 2026-11-16: floor-walk candidates (`bitmap.fill_from`) and the shared metric set.
 - 2026-11-16: keyless `Db` and batches over the interim authenticated journal.
+- 2026-11-16: keyless fixed root conformance hashes (MMR and MMB) match commonware.
