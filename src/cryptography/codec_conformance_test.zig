@@ -28,6 +28,9 @@ const Summary = @import("transcript.zig").Summary;
 const sake = @import("handshake/sake.zig");
 const certificate = @import("certificate.zig");
 const Bloom = @import("bloomfilter.zig").Default;
+const ipa = @import("zk/bulletproofs/ipa.zig");
+const TestF = @import("math").testing.F;
+const TestG = @import("math").testing.G;
 
 const conformance_file = @embedFile("conformance.toml");
 const prefix = "commonware_cryptography::";
@@ -321,4 +324,64 @@ test "conformance: secp256r1 keys and signatures" {
 
 test "conformance: lthash" {
     try verify("lthash::tests::conformance::CodecConformance<LtHash>", LtHash, gen_lthash);
+}
+
+/// commonware's test field `F`: `u64::arbitrary % P`.
+fn gen_test_f(_: Allocator, u: *Unstructured) Error!TestF {
+    return TestF.from_u64(u.int(u64));
+}
+
+/// commonware's test group `G`: the generator times an arbitrary `F`.
+fn gen_test_g(gpa: Allocator, u: *Unstructured) Error!TestG {
+    return TestG.generator.mul(try gen_test_f(gpa, u));
+}
+
+fn gen_test_pair(gpa: Allocator, u: *Unstructured) Error![2]TestG {
+    const first = try gen_test_g(gpa, u);
+    return .{ first, try gen_test_g(gpa, u) };
+}
+
+/// `Setup::new(u.arbitrary()?, u.arbitrary::<Vec<(G, G)>>()?)`, evaluated pairs first.
+fn gen_ipa_setup(gpa: Allocator, u: *Unstructured) Error!ipa.Setup(TestG) {
+    var pairs: std.ArrayList([2]TestG) = .empty;
+    while (u.keep_going()) try pairs.append(gpa, try gen_test_pair(gpa, u));
+    return ipa.Setup(TestG).init(gpa, try gen_test_g(gpa, u), pairs.items);
+}
+
+fn gen_ipa_claim(gpa: Allocator, u: *Unstructured) Error!ipa.Claim(TestF, TestG) {
+    return .{
+        .commitment = try gen_test_g(gpa, u),
+        .product = try gen_test_f(gpa, u),
+        .y = try gen_test_f(gpa, u),
+        .log_len = u.int(u8),
+    };
+}
+
+/// `int_in_range(0..=63)` rounds of `(G, G)`, the summary, then `a_final` and `b_final`.
+fn gen_ipa_proof(gpa: Allocator, u: *Unstructured) Error!ipa.Proof(TestF, TestG) {
+    const rounds = u.int_in_range(u64, 0, 63);
+    const l_r_coms = try gpa.alloc([2]TestG, rounds);
+    for (l_r_coms) |*pair| pair.* = try gen_test_pair(gpa, u);
+    return .{
+        .l_r_coms = l_r_coms,
+        .transcript_summary = try gen_summary(gpa, u),
+        .a_final = try gen_test_f(gpa, u),
+        .b_final = try gen_test_f(gpa, u),
+    };
+}
+
+test "conformance: zk bulletproofs ipa" {
+    try slow.skip_slow();
+    const prefix_ipa = "zk::bulletproofs::ipa::conformance::";
+    try verify(prefix_ipa ++ "CodecConformance<Setup<TestG>>", ipa.Setup(TestG), gen_ipa_setup);
+    try verify(
+        prefix_ipa ++ "CodecConformance<Claim<TestF,TestG>>",
+        ipa.Claim(TestF, TestG),
+        gen_ipa_claim,
+    );
+    try verify(
+        prefix_ipa ++ "CodecConformance<Proof<TestF,TestG>>",
+        ipa.Proof(TestF, TestG),
+        gen_ipa_proof,
+    );
 }

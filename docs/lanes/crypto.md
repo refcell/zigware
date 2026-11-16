@@ -8,7 +8,7 @@ it lands, write fixed-size `encode`/`decode` methods and switch when codec's API
 
 ## Backlog
 Order (coordinator): ed25519, then what `stream` needs (chacha20_poly1305, transcript,
-handshake), then certificate, secp256r1, the rest, zk and banderwagon last.
+handshake), then certificate, secp256r1, the rest, zk last. banderwagon moved to bls-math.
 `reed_solomon/` belongs to the coding lane.
 - [x] Core signing traits as comptime interfaces (`signer.zig`): `Signer`/`PrivateKey`,
   `Verifier`/`PublicKey`, `Signature`, `BatchVerifier` + `BatchEntry`, `Recoverable`.
@@ -45,8 +45,10 @@ handshake), then certificate, secp256r1, the rest, zk and banderwagon last.
   for `utils.rational`'s `BigRational` and `log2_floor`).
 - [x] zk circuit (`zk/circuit.zig`): `Context`, `Var`, `BoolVar`, `Selector`, and the
   minifuzz satisfaction plan.
-- [ ] zk bulletproofs (ipa, circuit) and `pedersen_to_plain`, then banderwagon (needs the
-  bls12381 `Scalar` from the bls-math lane).
+- [x] zk bulletproofs ipa (`zk/bulletproofs/ipa.zig`): `Setup`, `Claim`, `Witness`, `Proof`,
+  `prove`, `verify`, `Setup.eval`, the prover fuzz plan, and its 3 conformance hashes.
+- [ ] zk bulletproofs circuit and `pedersen_to_plain` (bls-math's dkg golden waits on them;
+  banderwagon moved to bls-math).
 - [ ] Fuzz targets (commonware cryptography/fuzz) and conformance hashes.
 
 ## Log
@@ -121,3 +123,10 @@ handshake), then certificate, secp256r1, the rest, zk and banderwagon last.
   (`add`, `sub`, `mul`, `neg`, `div`, `inv`); allocation order matches commonware's, so the
   circuits match node for node. Witness initializers are `init.call(values)` structs, or
   `witness_value` for a known value.
+- zk bulletproofs ipa: `prove(G, gpa, &transcript, &setup, claim, &witness, strategy)` and
+  `verify(G, gpa, &transcript, &virtual_setup, claim, proof)` take the group and read the
+  field from `G.Scalar`; both borrow their witness or proof (Rust moves them).
+  `Setup.eval(gpa, F, context, f)` calls `f(context, gpa, &virtual)` in place of Rust's
+  closure. The prover folds generators with `strategy.join` of two `map_into`s, like
+  commonware; MSMs use `math.algebra.msm`, which takes no strategy. `verify` returns null
+  for a setup shorter than the claimed length, where commonware panics on the slice.
