@@ -81,6 +81,11 @@ marshal's actors (consensus-marshal) for the actor; until then it ports what is 
   `marshal_start(B, genesis)` (a marshal `Start`; the floor is a copy the caller frees),
   `should_sync(requested)`. `SyncState(S, C)` is its persisted record (tag 0 in progress with
   a finalization, tag 1 complete with a height), byte-identical to commonware's.
+- `glue.stateful.actor.pruning`: `PruneConfig` (`maintenance_interval`,
+  `retained_marshal_blocks`, `retained_qmdb_blocks`; `validate`), `Pruning(T)` (`init(gpa,
+  config, max_pending_acks, offset)`, `random(gpa, config, max_pending_acks, std.Random)`,
+  `observe(height, targets)` → `?Prune(T)`, `deinit`), `ExecutionStep(D)`, `Disposition`, and
+  `FinalizationBoundary(D)` (`disposition`, `completed`).
 
 ### Decisions
 - ManagedDb and DatabaseSet are comptime contracts. Mutations take `*Self` and return errors
@@ -98,6 +103,9 @@ marshal's actors (consensus-marshal) for the actor; until then it ports what is 
   between equal rounds resolve as commonware's do, and owns recorded finalizations.
 - `SyncPlan` mutates in place (commonware consumes and returns it) and returns storage errors
   (commonware panics); a backward completion height is an assertion.
+- `Pruning` keeps its retention window in a ring allocated at init (commonware grows a
+  `VecDeque`); an invalid config or phase returns `error.InvalidPruneConfig` where commonware
+  panics.
 - `Any` takes the hasher as a parameter (the storage `Db` does not expose it) and uses
   commonware's 64-byte bitmap chunks in tests. `stage`/`expand` wait on storage-qmdb's
   `any` staging API.
@@ -113,6 +121,7 @@ marshal's actors (consensus-marshal) for the actor; until then it ports what is 
   test and sample selection tests.
 - [ ] probe: the actor (solicit, collect, retry, serve), after marshal's mailbox.
 - [x] actor: `SyncPlan` and `SyncState` with plan.rs's tests.
+- [x] actor: the processor's prune schedule and finalization boundary with their tests.
 - [ ] actor: processor state, syncer plan, core (after marshal); tests (single and
   multi db apps, floor, properties).
 
@@ -124,6 +133,7 @@ marshal's actors (consensus-marshal) for the actor; until then it ports what is 
   commonware tests.
 - 2026-11-16 (stateful): probe sample, wire messages, and payload bound.
 - 2026-11-16 (stateful): `SyncPlan` with its persisted `SyncState`.
+- 2026-11-16 (stateful): the processor's prune schedule and finalization boundary.
 
 ## dkg (owner: coding lane, thread T-01a1d58d-bff1-75a1-8ccb-4b8dd7bc9755)
 
