@@ -20,4 +20,5 @@ test {
     @import("std").testing.refAllDecls(@This());
     _ = @import("vectors_test.zig");
     _ = @import("conformance_test.zig");
+    _ = @import("signing_test.zig");
 }
