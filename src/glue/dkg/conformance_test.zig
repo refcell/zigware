@@ -367,3 +367,25 @@ test "conformance: dkg state sync" {
     const addressed_name = name ++ ",Addresses<mocks::TestPublicKey>>>";
     try verify(addressed_name, StateSync(Addresses), gen_state_sync(Addresses), 8192);
 }
+
+const Event = @import("reshare/event.zig").Event(MinSig, P);
+
+/// `Event::arbitrary`: `int_in_range(0..=2)`, then the key and its message.
+fn gen_event(gpa: Allocator, u: *Unstructured) Error!Event {
+    const choice = u.int_in_range(u32, 0, 2);
+    const key = try gen_public_key(gpa, u);
+    return switch (choice) {
+        0 => .{ .dealing = .{ .dealer = key, .public = try Sig.gen_pub_msg(gpa, u) } },
+        1 => .{ .ack = .{ .player = key, .ack = .{ .sig = try gen_signature(gpa, u) } } },
+        else => .{ .log = .{ .dealer = key, .log = .{
+            .pub_msg = try Sig.gen_pub_msg(gpa, u),
+            .results = try Sig.gen_result(gpa, u),
+        } } },
+    };
+}
+
+test "conformance: dkg reshare journal event" {
+    try skip_slow();
+    const name = "reshare::store::conformance::CodecConformance<Event<MinSig,ed25519::PublicKey>>";
+    try verify(name, Event, gen_event, conformance.default_cases);
+}

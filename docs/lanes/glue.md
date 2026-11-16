@@ -189,6 +189,12 @@ Owns `src/glue/dkg`. Reference: `glue/src/dkg` (about 24k Rust lines).
   `{ info, certificate }`), `Plan(S, D, V, Dir)` (`init(gpa, io, storage, config, provided)`
   persists provided material, `disabled`, `resolve(storage, recovered_epoch)` returns a copy),
   `Config`, `recovered_epoch(processed, epocher)`.
+- `dkg.reshare`: `Event(V, P)` (the recovery journal's codec), `Store(V, P, D, SS)` (`init`
+  replays the journal, `commit_epoch`, `current_info`, `share`, `seed`, `seed_or_random`,
+  `prune`, `logs`/`has_log`/`dealings`/`acks`, `append_dealing`/`append_ack`/`append_log`,
+  `create_dealer`, `create_player`, `create_player_with_logs`), `Dealer(V, S)` (`handle`,
+  `finalize`, `finalized`, `clear_finalized`, `shares_to_distribute`,
+  `has_acknowledgement_quorum`), `Player(V, S)` (`handle`), `AckOutcome`.
 
 ### Decisions
 - Rust's async trait methods block on the runtime's `std.Io` (as in `consensus.traits`).
@@ -197,12 +203,15 @@ Owns `src/glue/dkg`. Reference: `glue/src/dkg` (about 24k Rust lines).
 - `state_sync.Plan` is one shared object (Rust clones an `Arc`); both actors take a pointer.
   Its `init` returns `EpochMismatch`/`InvalidMaterial` and storage errors where commonware
   panics, so the `should_panic` tests port as error checks.
+- The reshare `Store` takes the secret store by pointer; its methods may fail (`!void`,
+  `!?T`), and storage failures are errors where commonware panics. Dealers and players
+  borrow the round's `Info`.
 
 ### Backlog
 - [x] types (with conformance hashes), limits, fence, network.
 - [x] state_sync (`Plan`, `StateSync` codec and conformance).
-- [ ] reshare: store (journal `Event` codec and conformance), mailbox, actor (setup, dealing,
-  inclusion, follower, dkg), application, metrics.
+- [x] reshare: store (journal `Event` codec and conformance) with its 6 tests.
+- [ ] reshare: mailbox, actor (setup, dealing, inclusion, follower, dkg), application, metrics.
 - [ ] bootstrap, probe (wire with conformance, discovery, service), orchestrator.
 - [ ] tests: the dkg and reshare harnesses, properties, and mocks; lookup's peer-activation
   test.
@@ -212,3 +221,4 @@ Owns `src/glue/dkg`. Reference: `glue/src/dkg` (about 24k Rust lines).
   conformance hashes match commonware's.
 - 2026-11-16: state_sync's `StateSync` and `Plan` with commonware's 8 tests; both `StateSync`
   conformance hashes match.
+- 2026-11-16: reshare's recovery store with commonware's 6 tests; the `Event` hash matches.
