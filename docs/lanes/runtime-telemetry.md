@@ -99,6 +99,11 @@ the registry API first and report it.
 - io_uring tests skip when the kernel cannot give a ring: unsupported, or `io_uring_setup`
   fails with ENOMEM because the user's locked-memory limit (shared by all of the user's
   processes, 8 MiB by default) is used up by other rings on the machine.
+- `production.telemetry.serve(io, gpa, &scope, &server)` serves `GET /metrics` (commonware
+  `tokio::telemetry::init`'s axum route, same `text/plain; version=0.0.4` content type) on its
+  own `std.Io.net.Server`, outside the runtime network like commonware. It answers one request
+  per connection, one connection at a time, until canceled; run it with `io.concurrent`.
+  Log and OTLP setup are not ported (no global subscriber; see traces above).
 - The production network stress tests run only with `-Dslow-tests` (commonware's
   `test_group("slow")`). Over the ring the stress test is about 20 times slower than over
   `std.Io.Threaded` (a submit syscall under the mutex plus a cross-thread wakeup per
@@ -137,3 +142,4 @@ the registry API first and report it.
 - 2026-11-13: production TCP passes `run_network_tests`, the stress suite, and tokio's network
   tests; `production.Runner` ties io, file storage, TCP, and metrics together.
 - 2026-11-13: io_uring driver; storage and TCP pass their suites over it; `Config.io_uring`.
+- 2026-11-13: `production.telemetry`: the `/metrics` HTTP endpoint.

@@ -7,6 +7,7 @@ const std = @import("std");
 pub const storage = @import("storage.zig");
 pub const network = @import("network.zig");
 pub const ring = @import("ring.zig");
+pub const telemetry = @import("telemetry.zig");
 pub const runner = @import("runner.zig");
 pub const Runner = runner.Runner;
 pub const Config = runner.Config;
