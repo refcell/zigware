@@ -53,8 +53,32 @@ on p2p's simulated network and the deterministic runtime.
   `clear_targets`, `clear`, `has_targets`, `targets_of`, `len_pending`, `len_active`.
   Metrics: `peer_performance{peer}`, `requests_created{status}`, `requests_sent{status}`,
   `resolves` (network buckets).
+- `resolver.p2p.Engine(resolver.p2p.engine.Params(P, Provider, Blocker, Consumer, Producer,
+  NetSender, NetReceiver))` (commonware `p2p::Engine`): `spawn(gpa, io, scope, Config, sender,
+  receiver)` returns `{ mailbox, future, engine }` (new + start); stop with `mailbox.deinit()`
+  then `future.await(io)`, or abort with `future.cancel(io)`; the engine frees itself either
+  way. `create`/`run`/`destroy` drive it by hand. Metrics under `scope`: `fetch_pending`,
+  `fetch_active`, `serve_processing`, `fetch_total{status}`, `cancel_total{status}`,
+  `serve_total{status}`, `serve_duration`, `fetch_duration`; the fetcher's under
+  `scope.child("fetcher")`.
+- `resolver.p2p.Config(P, D, B, C, Pro)`: `peer_provider`, `blocker`, `consumer`, `producer`,
+  `mailbox_size`, `me: ?P`, `fetch_timeout`, `fetch_retry_delay`, `priority_requests`,
+  `priority_responses`.
+- `resolver.p2p.Mailbox(K, P, S)` (a TargetedResolver): `fetch`, `fetch_all`,
+  `fetch_targeted`, `fetch_all_targeted`, `retain`, `clone`, `deinit`; each returns
+  `Allocator.Error!Feedback` and reports closed after shutdown.
+- Producer contract (`resolver.p2p.assert_producer`): `Key` and
+  `produce(self, key) !oneshot.Receiver(resolver.p2p.Produced)`; `Produced{ bytes, gpa }` is
+  freed by the engine; closing the receiver without a value means "no data". Blocker:
+  `block(peer) Feedback` and `blocked()` returning a subscription with `recv(gpa) !?[]P`
+  (null once closed). Provider: `subscribe()` (p2p `Manager`).
+- `resolver.p2p.inflight.Inflight(C, P)` (delivery tracker with `Source{peer, elapsed,
+  bytes}` context and a fetch-duration timer per key).
 - `resolver.p2p.mocks.Key` (one-byte test key), `resolver.p2p.mocks.Consumer(K, S)` (byte
-  values, expected values, `next_event`/`try_event`).
+  values, expected values, `next_event`/`try_event`, events carry their subscribers),
+  `resolver.p2p.mocks.Producer(K)` (`init(gpa, io)`, `insert`, `produce`, `deinit`).
+- Small addition in p2p's directory: `p2p.utils.watch` `Subscription.recv(gpa)` (blocks until
+  a value, null once closed).
 - Shared, in the utils directory (needed by the resolver fetcher): `utils.sampling.WeightedIndex`
   (`init(gpa, weights)`, `set`, `weight`, `total`, `sample(rng)`, `sample_uniform(rng)`,
   `without_replacement(gpa)`, `into_without_replacement(gpa)`) and `WithoutReplacement`
@@ -101,11 +125,24 @@ on p2p's simulated network and the deterministic runtime.
   randomness and time from `Io.Clock.real`, so it is deterministic under the deterministic
   runtime (sampling matches commonware's for the same random stream). Its tests reach into
   fields as commonware's do; `test_add_retry_duplicate_panics` is an assertion here.
+- The p2p engine is generic over `Params(...)` (one type parameter) and uses forwarder tasks
+  for peer sets, blocked sets, the mailbox, and the network that fill one-slot inboxes under
+  the shared `delivery.Signal`; each turn handles one event in commonware's select order, then
+  sends at most one due fetch. Serves run as tasks that wait on the producer's receiver.
+- Engine tests run on `p2p.simulated` and the deterministic runtime (`engine_test.zig`,
+  `engine_delivery_test.zig`). Commonware's `count_running_tasks` checks have no runtime
+  counterpart: aborts await every engine task and `testing.allocator` reports leaks. The
+  Blocking consumer mocks resolve gates on the test's task instead of a per-delivery task.
+  `test_stale_response_after_requester_restart_is_ignored` waits for p2p's authenticated
+  lookup network.
 
 ## Backlog
 - [x] resolver: lib.rs, subscribers, ingress, delivery, opaque (with metrics).
-- [ ] resolver p2p: wire.rs (done, conformance hashes match), score (done), fetcher (done, 60
-  tests), inflight, config, engine, ingress, mocks; port mod.rs tests on p2p simulated.
+- [x] resolver p2p: wire.rs (conformance hashes match), score, fetcher (60 tests), inflight,
+  config, metrics, engine, ingress, mocks; 49 of commonware's 50 mod.rs tests on p2p
+  simulated.
+- [ ] resolver p2p: `test_stale_response_after_requester_restart_is_ignored` once p2p's
+  authenticated lookup network lands.
 - [ ] Resolver fuzz targets.
 - Moved to the broadcast-collector lane: broadcast and collector.
 
@@ -119,3 +156,5 @@ on p2p's simulated network and the deterministic runtime.
 - 2026-11-13: resolver opaque actor (all 13 commonware tests) with the fetch metrics family.
 - 2026-11-13: utils sampling (WeightedIndex, commonware vectors), PrioritySet, u128 ranges.
 - 2026-11-13: resolver p2p fetcher with its commonware tests (exact score vectors match).
+- 2026-11-16: resolver p2p engine, inflight, config, metrics, ingress, mock producer; 49 of 50
+  commonware engine tests on p2p.simulated (held/gated verdicts, cancellation, shutdown).
