@@ -163,7 +163,7 @@ fn blocked_subscription(io: Io) !void {
     const pk = key(1);
     try track(tracker, 0, &.{.{ .key = pk, .value = address(v4(127, 0, 0, 1), 1001) }});
     // A new subscription starts with the current, empty set.
-    var blocked = tracker.as_oracle().blocked();
+    var blocked = try tracker.as_oracle().blocked();
     try expect_blocked(&blocked, &.{});
     _ = tracker.as_oracle().block(pk);
     try expect_blocked(&blocked, &.{pk});
@@ -171,7 +171,7 @@ fn blocked_subscription(io: Io) !void {
     _ = tracker.as_oracle().block(pk);
     try sleep_ms(io, 10);
     try testing.expectEqual(null, try blocked.try_recv(gpa));
-    var late = tracker.as_oracle().blocked();
+    var late = try tracker.as_oracle().blocked();
     try expect_blocked(&late, &.{pk});
     // Expiry clears the set for every subscriber.
     try sleep_ms(io, @intCast(config.block_duration.as_millis() + 10));

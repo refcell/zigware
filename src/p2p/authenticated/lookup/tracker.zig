@@ -410,7 +410,9 @@ pub fn Tracker(comptime P: type) type {
                 return oracle.tracker.block(peer);
             }
 
-            pub fn blocked(oracle: Oracle) BlockedSubscription {
+            /// Fallible like simulated's `Control.blocked`, as the `Blocker` contract
+            /// requires; subscribing to the watch itself cannot fail.
+            pub fn blocked(oracle: Oracle) Allocator.Error!BlockedSubscription {
                 return oracle.tracker.blocked_subscription();
             }
         };
