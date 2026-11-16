@@ -4,7 +4,20 @@
 
 const std = @import("std");
 const Io = std.Io;
-const LaunchError = @import("ec2.zig").LaunchError;
+const LaunchError = @import("client.zig").ApiError;
+const s3 = @import("s3.zig");
+
+/// Why accessing a bucket was refused.
+pub const BucketForbiddenReason = enum {
+    /// Missing `s3:ListBucket` permission, or another account owns the bucket.
+    access_denied,
+
+    pub fn text(reason: BucketForbiddenReason) []const u8 {
+        return switch (reason) {
+            .access_denied => "access denied (check IAM permissions or bucket ownership)",
+        };
+    }
+};
 
 pub const Failure = union(enum) {
     invalid_tag: []const u8,
@@ -28,6 +41,8 @@ pub const Failure = union(enum) {
     unsupported_instance_type: []const u8,
     no_subnets_available,
     aws_ec2: LaunchError,
+    aws_s3: struct { bucket: []const u8, operation: s3.Operation, err: LaunchError },
+    s3_bucket_forbidden: struct { bucket: []const u8, reason: BucketForbiddenReason },
 
     pub fn format(failure: Failure, writer: *Io.Writer) Io.Writer.Error!void {
         switch (failure) {
@@ -69,6 +84,14 @@ pub const Failure = union(enum) {
             ),
             .no_subnets_available => try writer.writeAll("no subnets available"),
             .aws_ec2 => |err| try writer.print("AWS EC2 error: {f}", .{err}),
+            .aws_s3 => |f| try writer.print(
+                "S3 operation failed: {f} on bucket '{s}'",
+                .{ f.operation, f.bucket },
+            ),
+            .s3_bucket_forbidden => |f| try writer.print(
+                "S3 bucket '{s}' forbidden: {s}",
+                .{ f.bucket, f.reason.text() },
+            ),
             .availability_zone_group_unsupported => |f| {
                 try writer.print(
                     "availability zone group '{s}' in region '{s}' has no mutually-supported " ++

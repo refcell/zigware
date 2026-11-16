@@ -50,6 +50,7 @@ fn replay_response(status: u16, body: []const u8) Outcome {
 /// One scripted launch: the replay, the arena results live in, and the outcome.
 const Harness = struct {
     arena_state: std.heap.ArenaAllocator,
+    requests: [32]client_module.Request = undefined,
     bodies: [32][]const u8 = undefined,
     replay: client_module.Replay,
 
@@ -58,7 +59,7 @@ const Harness = struct {
         harness.arena_state = .init(testing.allocator);
         harness.replay = .{
             .outcomes = outcomes,
-            .bodies = &harness.bodies,
+            .requests = &harness.requests,
             .allocator = harness.arena_state.allocator(),
         };
     }
@@ -109,8 +110,10 @@ const Harness = struct {
         );
     }
 
-    fn request_bodies(harness: *const Harness) []const []const u8 {
-        return harness.replay.recorded();
+    fn request_bodies(harness: *Harness) []const []const u8 {
+        const requests = harness.replay.recorded();
+        for (requests, 0..) |request, index| harness.bodies[index] = request.body;
+        return harness.bodies[0..requests.len];
     }
 };
 

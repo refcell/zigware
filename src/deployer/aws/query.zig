@@ -188,6 +188,28 @@ pub fn service_error(arena: Allocator, xml: []const u8) !ServiceError {
     };
 }
 
+/// Writes `text` with `&`, `<`, `>`, `"`, and `'` as entities.
+pub fn write_escaped(writer: *Io.Writer, text: []const u8) Io.Writer.Error!void {
+    for (text) |byte| switch (byte) {
+        '&' => try writer.writeAll("&amp;"),
+        '<' => try writer.writeAll("&lt;"),
+        '>' => try writer.writeAll("&gt;"),
+        '"' => try writer.writeAll("&quot;"),
+        '\'' => try writer.writeAll("&apos;"),
+        else => try writer.writeByte(byte),
+    };
+}
+
+/// The code and message of a REST-XML (S3) error response (`<Error>`).
+pub fn rest_error(arena: Allocator, xml: []const u8) !ServiceError {
+    const code = try first_text(xml, &.{ "Error", "Code" });
+    const message = try first_text(xml, &.{ "Error", "Message" });
+    return .{
+        .code = if (code) |text| try decode_text(arena, text) else null,
+        .message = if (message) |text| try decode_text(arena, text) else null,
+    };
+}
+
 test {
     _ = @import("query_test.zig");
 }

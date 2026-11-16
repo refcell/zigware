@@ -34,8 +34,10 @@ test vectors. Tests never call AWS and never hold credentials.
 - `deployer.cli`: `parse(args)` returns `.ok` (`Parsed{ verbose, command }`, where `command`
   is `.help`, `.version`, `.none`, or `.aws` with each subcommand's options) or `.failure`
   (`Failure{ kind, argument }`); `usage` and `version`.
-- `deployer.aws.client`: `Client{ io, transport, credentials, region }` with `ec2_query`
-  (SigV4-signed EC2 Query POST); `Transport` (`send` returns an `Outcome`: a response,
+- `deployer.aws.client`: `Client{ io, transport, credentials, region }` with `send` (any
+  SigV4-signed `Call`), `call` (with the SDK's standard retries and commonware's 256-attempt
+  backoff settings, classified into `Result`), and `ec2_query`; `ApiError`, `is_transient`,
+  `classify`; `Transport` (`send` returns an `Outcome`: a response,
   `io_failure`, `timeout`, or `other{ transient }`), `HttpTransport` over `std.http.Client`, and
   `Replay` (scripted outcomes for tests). `deployer.aws.query`: Query bodies (`Body`) and the
   XML scanner (`scan`, `first_text`, `decode_text`, `service_error`).
@@ -100,8 +102,14 @@ test vectors. Tests never call AWS and never hold credentials.
   binary itself waits for the AWS client.
 - [x] AWS client interface: SigV4-signed EC2 Query requests over `std.http`, never exercised
   against AWS in tests.
+- [x] `s3.rs`: the bucket config file, `hash_file`, and the S3 calls (`ensure_bucket_exists`,
+  `object_exists`, `put_object` with commonware's unlimited upload retry, `presign_url`,
+  `cache_and_presign`, `delete_prefix`, `delete_bucket`, `is_no_such_bucket_error`) over the
+  client, tested against scripted responses. `HttpTransport` was checked by hand against a
+  public HTTPS server (GET, HEAD, POST, DNS failure), never against AWS.
+- [ ] `upload_instance_files` and `hash_files`.
 - [ ] The remaining EC2 calls (VPC, subnets, security groups, key pairs, describe/terminate,
-  peering) and S3 (bucket, upload, presign) over the client, then the create, update,
+  peering) over the client, then the create, update,
   authorize, destroy, clean, profile, and attach flows and the `deployer` binary.
 - [ ] Fuzz: YAML parse/write round trips, config validation, SigV4 canonicalization.
 

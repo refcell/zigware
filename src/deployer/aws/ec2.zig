@@ -12,7 +12,8 @@ const aws = @import("mod.zig");
 const aws_utils = @import("utils.zig");
 const create = @import("create.zig");
 const query = @import("query.zig");
-const Client = @import("client.zig").Client;
+const client_module = @import("client.zig");
+const Client = client_module.Client;
 
 const log = std.log.scoped(.deployer);
 
@@ -109,45 +110,8 @@ const fatal_launch_error_code_prefixes = [_][]const u8{
     "InvalidGroup",          "InvalidKeyPair",
 };
 
-/// The SDK's standard transient error codes, kept because RunInstances disables SDK retries.
-const retryable_launch_error_codes = [_][]const u8{
-    "Throttling",                     "ThrottlingException",
-    "ThrottledException",             "RequestThrottledException",
-    "TooManyRequestsException",       "ProvisionedThroughputExceededException",
-    "TransactionInProgressException", "RequestLimitExceeded",
-    "BandwidthLimitExceeded",         "LimitExceededException",
-    "RequestThrottled",               "SlowDown",
-    "PriorRequestNotComplete",        "EC2ThrottledException",
-    "RequestTimeout",                 "RequestTimeoutException",
-};
-
-const retryable_launch_status_codes = [_]u16{ 500, 502, 503, 504 };
-
-/// How a RunInstances call failed: a service error with its code and HTTP status, or a
-/// transport failure (timeout, I/O, or an unparseable response), which may resolve on retry.
-pub const LaunchError = union(enum) {
-    service: struct { code: ?[]const u8, status: u16, message: ?[]const u8 = null },
-    transport,
-    /// Request construction failed; retrying the same request cannot help.
-    construction,
-    /// A dispatch failure the transport did not classify as transient (such as failing to
-    /// resolve credentials); retrying cannot help.
-    dispatch,
-
-    /// The SDK's error text differs; this names the same facts.
-    pub fn format(err: LaunchError, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        switch (err) {
-            .service => |service| {
-                try writer.print("service error (status {d})", .{service.status});
-                if (service.code) |code| try writer.print(": {s}", .{code});
-                if (service.message) |message| try writer.print(": {s}", .{message});
-            },
-            .transport => try writer.writeAll("transport failure"),
-            .construction => try writer.writeAll("request construction failure"),
-            .dispatch => try writer.writeAll("dispatch failure"),
-        }
-    }
-};
+/// How a RunInstances call failed (the client's `ApiError`).
+pub const LaunchError = client_module.ApiError;
 
 /// Whether the region may have capacity for the instance type later.
 pub fn is_capacity_error(err: LaunchError) bool {
@@ -177,19 +141,16 @@ pub fn is_fatal_launch_error_code(code: []const u8) bool {
 }
 
 /// Whether retrying the same idempotent RunInstances request may resolve the failure.
+/// RunInstances disables SDK retries, so its owner applies the SDK's standard transient
+/// classification itself, except for the fatal code families.
 pub fn is_retryable_launch_error(err: LaunchError) bool {
-    const service = switch (err) {
-        .transport => return true,
-        .construction, .dispatch => return false,
-        .service => |service| service,
-    };
-    if (service.code) |code| {
-        if (is_fatal_launch_error_code(code)) return false;
-        for (retryable_launch_error_codes) |retryable| {
-            if (std.mem.eql(u8, code, retryable)) return true;
-        }
+    switch (err) {
+        .service => |service| if (service.code) |code| {
+            if (is_fatal_launch_error_code(code)) return false;
+        },
+        else => {},
     }
-    return std.mem.indexOfScalar(u16, &retryable_launch_status_codes, service.status) != null;
+    return client_module.is_transient(err);
 }
 
 // --- RunInstances ------------------------------------------------------------------------------
@@ -281,21 +242,10 @@ const Attempt = union(enum) { instances: []const []const u8, failed: LaunchError
 fn try_launch_instances(client: *const Client, arena: Allocator, body: []const u8) !Attempt {
     assert(body.len > 0);
     const outcome = try client.ec2_query(arena, body);
-    const response = switch (outcome) {
-        .io_failure, .timeout => return .{ .failed = .transport },
-        .other => |other| return .{ .failed = if (other.transient) .transport else .dispatch },
-        .response => |response| response,
+    const response = switch (try client_module.classify(arena, outcome, .ec2_query)) {
+        .failed => |err| return .{ .failed = err },
+        .ok => |response| response,
     };
-    if (response.status < 200 or response.status >= 300) {
-        // An unreadable error body is still a service error, classified by its status.
-        const parsed = query.service_error(arena, response.body) catch
-            query.ServiceError{ .code = null, .message = null };
-        return .{ .failed = .{ .service = .{
-            .code = parsed.code,
-            .status = response.status,
-            .message = parsed.message,
-        } } };
-    }
     var ids: std.ArrayList([]const u8) = .empty;
     const path = [_][]const u8{ "RunInstancesResponse", "instancesSet", "item", "instanceId" };
     const Collector = struct { list: *std.ArrayList([]const u8), arena: Allocator, failed: bool };
@@ -425,23 +375,11 @@ fn probe(
         };
         const moves_on = is_capacity_error(err) or is_subnet_unavailable_error(err);
         if (moves_on or !is_retryable_launch_error(err)) {
-            return .{ .failed = try dupe_launch_error(arena, err) };
+            return .{ .failed = try err.dupe(arena) };
         }
         log.debug("launch_instances failed, retrying: name={s} error={f}", .{ request.name, err });
         try client.io.sleep(.fromMilliseconds(launch_retry_interval_ms), .awake);
     }
-}
-
-fn dupe_launch_error(arena: Allocator, err: LaunchError) !LaunchError {
-    const service = switch (err) {
-        .service => |service| service,
-        else => return err,
-    };
-    return .{ .service = .{
-        .code = if (service.code) |code| try arena.dupe(u8, code) else null,
-        .status = service.status,
-        .message = if (service.message) |message| try arena.dupe(u8, message) else null,
-    } };
 }
 
 const testing = std.testing;

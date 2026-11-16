@@ -124,7 +124,7 @@ fn pair_less(_: void, a: Pair, b: Pair) bool {
 }
 
 /// Query parameters sorted by encoded name, then value, joined as `a=1&b=2`.
-fn write_canonical_query(arena: Allocator, writer: *Io.Writer, query: []const Pair) !void {
+pub fn write_canonical_query(arena: Allocator, writer: *Io.Writer, query: []const Pair) !void {
     // Sorting encoded strings: encoding preserves the order of unreserved bytes but not of
     // others, so encode first.
     const encoded = try arena.alloc(Pair, query.len);
