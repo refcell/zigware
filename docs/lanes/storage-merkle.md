@@ -65,7 +65,7 @@ variants need `runtime` storage; do them after its interface lands.
   `src/storage/journal/zstd.zig` (LZ match finding, FSE-coded sequences, Huffman literals) whose
   frames `std.compress.zstd` reads, with a std-decoder roundtrip fuzz and a ratio/throughput
   bench against the raw-block path. Byte identity with libzstd is not required.
-- [ ] Storage fuzz targets `journal_fixed_operations` and `queue_operations` (handed over from
+- [x] Storage fuzz targets `journal_fixed_operations` and `queue_operations` (handed over from
   storage-journal).
 - [ ] Partitioned index `new_range`/`install_range`, if storage-qmdb asks for it.
 
@@ -181,3 +181,11 @@ variants need `runtime` storage; do them after its interface lands.
   `std.compress.zstd` (round-trip fuzz) and were checked once against libzstd 1.5's `zstd -d`
   on 60 inputs up to 400 KB. Planted bugs (a wrong repeat-offset code, swapped initial FSE
   states) fail the seeded fuzz at iterations 3 and 0.
+- journal_fixed_operations / queue_operations fuzz
+  (`journal/contiguous/fixed_operations_fuzz_test.zig`, `queue/operations_fuzz_test.zig`): drawn with `codec.fuzz.Draws`, seeded in `zig build test`
+  and coverage-guided under `--fuzz` (`codec.fuzz.run` does both). The journal target also keeps
+  the digest last appended at each position and checks every read, batch read, synchronous read,
+  and replayed batch against it (commonware checks only sizes and read agreement); positions are
+  drawn inside the bounds half the time, and `ReopenMatching` draws values that were appended.
+  Writing an `append_many` batch reversed fails it at iteration 1; skipping the queue's cursor
+  reset fails the queue target at iteration 0. The queue target draws at most 128 operations.

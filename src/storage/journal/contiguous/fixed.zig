@@ -1248,4 +1248,5 @@ fn ReplayType(comptime A: type) type {
 test {
     _ = @import("fixed_test.zig");
     _ = @import("fixed_recovery_test.zig");
+    _ = @import("fixed_operations_fuzz_test.zig");
 }

@@ -106,10 +106,7 @@ fn fuzz_round_trip(_: void, smith: *std.testing.Smith) anyerror!void {
     try testing.expect(try round_trip(data.items, .compress) <= stored);
 }
 
+// Seeded inputs in `zig build test`, then `std.testing.fuzz` under `--fuzz`.
 test "fuzz zstd round trip (seeded)" {
     try codec.fuzz.run({}, fuzz_round_trip, 0x7a737464_726f756e, 200);
-}
-
-test "fuzz zstd round trip" {
-    try std.testing.fuzz({}, fuzz_round_trip, .{});
 }
