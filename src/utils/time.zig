@@ -277,6 +277,10 @@ pub const NonZeroDuration = struct {
         assert(!self.duration.is_zero());
         return self.duration;
     }
+
+    pub fn order(a: NonZeroDuration, b: NonZeroDuration) std.math.Order {
+        return a.duration.order(b.duration);
+    }
 };
 
 /// A uniform duration in `[low, high]`, matching `rand` 0.10's `UniformDuration`.
@@ -312,6 +316,17 @@ pub fn sample_duration(rng: anytype, low: Duration, high: Duration) Duration {
 }
 
 const testing = std.testing;
+
+test "time: NonZeroDuration" {
+    try testing.expectEqual(null, NonZeroDuration.init(Duration.zero));
+    const duration = Duration.from_millis(100);
+    try testing.expectEqual(duration, NonZeroDuration.init(duration).?.get());
+    try testing.expectEqual(duration, NonZeroDuration.init_panic(duration).get());
+    const longer = NonZeroDuration.init(Duration.from_millis(200)).?;
+    try testing.expectEqual(.lt, NonZeroDuration.init(duration).?.order(longer));
+    // Sub-millisecond durations are non-zero too.
+    try testing.expect(NonZeroDuration.init(Duration.from_nanos(1)) != null);
+}
 
 test "time: as_millis_u64" {
     const cases = [_]struct { Duration, u64 }{

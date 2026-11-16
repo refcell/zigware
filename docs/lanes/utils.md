@@ -146,11 +146,11 @@ encoding parts as soon as `codec` has its core API (see docs/lanes/codec.md).
   `zig build test` and under `std.testing.fuzz`.
 
 ## Backlog
-- [ ] utils basics (done: faults, modulo, union/union_unique, NZ, Participant, rng, range
-  without codec; time; iter, vec, rational, probability, sampling done; hostname and net done): `Span`/`Array` traits as comptime interfaces, `union_unique`, `hex`
-  re-exports, `modulo`, `NZ*` non-zero helpers, quorum math (`quorum`, `max_faults`),
-  `time.rs`, `range.rs`, `iter.rs`, `vec.rs` (NonEmptyVec), `rational`, `probability`,
-  `sampling`, `rng.rs` (deterministic test RNG matching commonware's where tests depend on it).
+- [x] utils basics: faults, modulo, union/union_unique, NZ/NonZeroDuration, Participant, rng,
+  range, time, iter, vec, rational, probability, sampling (resolver lane), hostname, net,
+  amount, concurrency, prefetch, thread_local, sync, futures (Pool/AbortablePool/try_join_all);
+  `Span`/`Array` as comptime checks. Not ported by design: `sys_rng` (library code takes
+  randomness from the runtime), `Exclusive`, traced locks, `OptionFuture`, `rebind`, `Shared`.
 - [x] utils sequence: fixed_bytes, u32, u64, prefixed_u64, vec_u64, unit — with codec.
 - [x] utils bitmap: BitMap, prunable, historical, roaring (containers, Bitmap, Prunable, ops,
   fuzz Plan); codec encodings identical, all bitmap conformance hashes match.
