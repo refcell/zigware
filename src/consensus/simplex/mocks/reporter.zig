@@ -307,6 +307,27 @@ pub fn Reporter(comptime S: type, comptime D: type) type {
             return self.notarizations.contains(view);
         }
 
+        /// Whether a certification of `view` was reported.
+        pub fn certified(self: *Self, view: View) bool {
+            self.mutex.lockUncancelable(self.io);
+            defer self.mutex.unlock(self.io);
+            return self.certifications.contains(view);
+        }
+
+        /// The lowest finalized view above `floor`, if any.
+        pub fn first_finalized_above(self: *Self, floor: View) ?View {
+            self.mutex.lockUncancelable(self.io);
+            defer self.mutex.unlock(self.io);
+            var lowest: ?View = null;
+            var views = self.finalizations.keyIterator();
+            while (views.next()) |view| {
+                if (view.get() <= floor.get()) continue;
+                if (lowest == null or view.get() < lowest.?.get()) lowest = view.*;
+            }
+            assert(lowest == null or lowest.?.get() > floor.get());
+            return lowest;
+        }
+
         /// Whether a nullification of `view` was reported.
         pub fn nullified(self: *Self, view: View) bool {
             self.mutex.lockUncancelable(self.io);

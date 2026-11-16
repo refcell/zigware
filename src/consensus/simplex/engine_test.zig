@@ -200,6 +200,7 @@ const Harness = struct {
     /// certify latencies (the defaults when null), for validators started from now on.
     round_robin: RoundRobin = .default(),
     handoff: HandoffKind = .wait,
+    propose_latency: ?application_mod.Latency = null,
     verify_latency: ?application_mod.Latency = null,
     certify_latency: ?*const fn (index: usize) application_mod.Latency = null,
 
@@ -293,6 +294,7 @@ const Harness = struct {
         harness.verify_reports = false;
         harness.round_robin = .default();
         harness.handoff = .wait;
+        harness.propose_latency = null;
         harness.verify_latency = null;
         harness.certify_latency = null;
     }
@@ -420,12 +422,13 @@ const Harness = struct {
         validator.handle = null;
         const slow = index == 0 and harness.role == .slow;
         const normal: application_mod.Latency = .{ .mean = 10, .std_dev = 5 };
+        const propose_time = harness.propose_latency orelse normal;
         const verify_time = harness.verify_latency orelse normal;
         const certify_time = if (harness.certify_latency) |latency| latency(index) else normal;
         validator.application = try .init(gpa, io, .{
             .relay = &harness.relay,
             .me = key,
-            .propose_latency = if (slow) .{ .mean = 10_000, .std_dev = 0 } else normal,
+            .propose_latency = if (slow) .{ .mean = 10_000, .std_dev = 0 } else propose_time,
             .verify_latency = if (slow) .{ .mean = 10_000, .std_dev = 5 } else verify_time,
             .certify_latency = if (slow) .{ .mean = 10_000, .std_dev = 5 } else certify_time,
         });
@@ -1426,4 +1429,165 @@ test "rotating handoff vote tolerates slow certifiers" {
 
 test "short term handoff vote tolerates slow certifiers" {
     _ = try run_seeded(0, slow_certifiers_scenario, .{ stable_terms(3, 2), .vote });
+}
+
+/// Which honest validator leads first after the silent one in a certified-split DST.
+const SplitLeader = enum { group, lone };
+
+/// The certified-split roles: the silent validator leads view 10; with `.group` first the
+/// group leads views 11 and 12 and the lone holder view 13, with `.lone` first the lone
+/// holder leads view 11 and the group views 12 and 13.
+const SplitRoles = struct { silent: usize, lone: usize, group: [2]usize };
+
+fn split_roles(first: SplitLeader) !SplitRoles {
+    var schedule = try RoundRobin.default().build(gpa, 4);
+    defer schedule.deinit(gpa);
+    const Leader = struct {
+        fn of(elector: Elector, view: u64) usize {
+            return elector.elect(.new(epoch, .new(view)), {}).get();
+        }
+    };
+    const roles: SplitRoles = switch (first) {
+        .group => .{
+            .silent = Leader.of(schedule, 10),
+            .group = .{ Leader.of(schedule, 11), Leader.of(schedule, 12) },
+            .lone = Leader.of(schedule, 13),
+        },
+        .lone => .{
+            .silent = Leader.of(schedule, 10),
+            .lone = Leader.of(schedule, 11),
+            .group = .{ Leader.of(schedule, 12), Leader.of(schedule, 13) },
+        },
+    };
+    for (roles.group) |member| {
+        assert(member != roles.silent and member != roles.lone);
+    }
+    assert(roles.silent != roles.lone);
+    return roles;
+}
+
+/// A certified-split DST: who leads first after the silent validator, and the view the lone
+/// holder certified (its parent is view 2; the group holds nullifications of views 3 through
+/// it).
+const SplitCase = struct { first: SplitLeader, certified: u64 };
+
+/// Shares view 2's notarization and finalization with every validator, the certified view's
+/// notarization with the lone holder only, the nullifications of views 3 through the
+/// certified view with the group only, and those of the views after it up to 9 with all.
+fn inject_certified_split(
+    harness: *Harness,
+    sender: *Net.Sender,
+    roles: SplitRoles,
+    case: SplitCase,
+) !void {
+    const keys = harness.keys();
+    var payload: [8]u8 = undefined;
+    const name = try std.fmt.bufPrint(&payload, "B_{d}", .{case.certified});
+    const shared: [3]Certificate = .{
+        try split_certificate(harness, .notarization, 2, 1, "B_2"),
+        try split_certificate(harness, .finalization, 2, 1, "B_2"),
+        try split_certificate(harness, .notarization, case.certified, 2, name),
+    };
+    defer for (shared) |certificate| codec.free(Certificate, gpa, certificate);
+    try inject(sender, null, shared[0]);
+    try inject(sender, null, shared[1]);
+    try inject(sender, keys[roles.lone], shared[2]);
+    for (3..10) |view| {
+        const nullification = try split_certificate(harness, .nullification, view, 0, "");
+        defer codec.free(Certificate, gpa, nullification);
+        if (view > case.certified) {
+            try inject(sender, null, nullification);
+        } else for (roles.group) |member| try inject(sender, keys[member], nullification);
+    }
+}
+
+/// Before the partition ends, the lone holder certified its view and nullified none of
+/// views 3 through it, and the group nullified all of them.
+fn check_certified_split(harness: *Harness, roles: SplitRoles, case: SplitCase) !void {
+    for (0..4) |index| {
+        const validator = harness.honest(index) orelse continue;
+        const reporter = &validator.reporter;
+        try testing.expect(reporter.finalized(.new(2)) != null);
+        const lone = index == roles.lone;
+        try testing.expectEqual(lone, reporter.notarized(.new(case.certified)));
+        if (lone) try testing.expect(reporter.certified(.new(case.certified)));
+        for (3..case.certified + 1) |view| {
+            try testing.expectEqual(!lone, reporter.nullified(.new(view)));
+        }
+    }
+}
+
+/// After healing: with the group leading first, the lone holder fetched the group's
+/// nullifications; with the lone holder first, the group fetched and certified its
+/// notarization. Background repair considers those views complete, so this proves targeted
+/// delivery.
+fn check_targeted_repair(harness: *Harness, roles: SplitRoles, case: SplitCase) !void {
+    switch (case.first) {
+        .group => {
+            const lone = &harness.validators[roles.lone].reporter;
+            for (3..case.certified + 1) |view| try testing.expect(lone.nullified(.new(view)));
+        },
+        .lone => for (roles.group) |member| {
+            const reporter = &harness.validators[member].reporter;
+            try testing.expect(reporter.notarized(.new(case.certified)));
+            try testing.expect(reporter.certified(.new(case.certified)));
+        },
+    }
+}
+
+/// commonware's certified-split DSTs (`certified_split_heals_in_group_led_view`,
+/// `_when_lone_holder_leads_first`, and `_with_displaced_certified_view`): one of four
+/// validators certified a notarization the two others nullified, and the fourth stays
+/// silent. Once linked, targeted repair heals the split: with the group leading first,
+/// view 11 is the first new finalization; with the lone holder first, the certified view.
+fn certified_split_scenario(ctx: Context, case: SplitCase) !void {
+    const roles = try split_roles(case.first);
+    var harness: Harness = undefined;
+    try harness.start_network(ctx, 4, null, .absent, .{
+        .leader_ms = 10_000,
+        .certification_ms = 11_000,
+        .retry_ms = 10_000,
+        .skip_ms = 12_000,
+    });
+    defer harness.deinit();
+    // Proposals wait so the engines process the preloaded certificates first.
+    harness.propose_latency = .{ .mean = 250, .std_dev = 50 };
+    const link = link_ms(10, 0, 1.0);
+    var injector = try start_injector(&harness, link);
+    defer injector.deinit();
+    try inject_certified_split(&harness, &injector.sender, roles, case);
+    // Engines start before the partition ends, so their preload rebroadcasts are lost.
+    for (0..4) |index| {
+        if (index != roles.silent) try harness.start_validator(index);
+    }
+    try ctx.sleep(.fromSeconds(2));
+    try check_certified_split(&harness, roles, case);
+    try harness.link_all(link, null);
+    try harness.wait_all(3);
+    const expected: u64 = if (case.first == .group) 11 else case.certified;
+    for (0..4) |index| {
+        const reporter = &(harness.honest(index) orelse continue).reporter;
+        try testing.expectEqual(expected, reporter.first_finalized_above(.new(2)).?.get());
+        reporter.assert_no_faults();
+        reporter.assert_no_invalid();
+    }
+    try check_targeted_repair(&harness, roles, case);
+    const blocked = try harness.oracle().blocked(gpa);
+    defer gpa.free(blocked);
+    try testing.expectEqual(0, blocked.len);
+}
+
+test "certified split heals in a group-led view" {
+    const case: SplitCase = .{ .first = .group, .certified = 3 };
+    _ = try run_seeded(0, certified_split_scenario, .{case});
+}
+
+test "certified split heals when the lone holder leads first" {
+    const case: SplitCase = .{ .first = .lone, .certified = 3 };
+    _ = try run_seeded(0, certified_split_scenario, .{case});
+}
+
+test "certified split heals with a displaced certified view" {
+    const case: SplitCase = .{ .first = .group, .certified = 5 };
+    _ = try run_seeded(0, certified_split_scenario, .{case});
 }

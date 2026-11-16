@@ -237,8 +237,10 @@ resolver; those lanes are running, so do the types first and the actors as they 
   tle (threshold VRF, Random elector, MinPk and MinSig; slow builds) decrypts at the target
   round's seed. The four slow-certifier DSTs (stable leader optimistic, stable leader,
   rotating, and short-term handoff votes; slow builds) finalize 200 views with no
-  nullification. Next: twins pipelined handoff and per-scheme twins,
-  certified splits, hailstorm, and the rest, seeded.
+  nullification. The three certified-split DSTs (group-led view, lone holder leads
+  first, displaced certified view) heal through targeted repair. Next: the cross-term
+  certified split, twins pipelined handoff and per-scheme twins, hailstorm, and the rest,
+  seeded.
 - [ ] Tracing: actor events are done (voter, batcher, resolver, engine); spans and the
   voter state machine's events follow.
 - [x] Fuzz targets (commonware consensus/fuzz): owned by the crypto lane in
@@ -297,3 +299,4 @@ resolver; those lanes are running, so do the types first and the actors as they 
 - 2026-11-16: the tle DST on the threshold VRF scheme; the mock reporter keeps notarizations.
 - 2026-11-16: the slow-certifier DSTs; the Harness takes the round-robin terms, the handoff
   decision, and verify/certify latencies.
+- 2026-11-16: the certified-split DSTs; the mock reporter answers `certified(view)`.
