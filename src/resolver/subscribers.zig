@@ -250,12 +250,16 @@ fn tracker_model(_: void, smith: *std.testing.Smith) anyerror!void {
     var model: [8]u16 = @splat(0); // key -> subscriber bitset (subscribers 0..15)
     var removed: std.ArrayList(u8) = .empty;
     defer removed.deinit(gpa);
-    var step: u32 = 0;
-    while (step < 64 and !smith.eos()) : (step += 1) {
-        const key = smith.value(u8) % 8;
-        const subscriber = smith.value(u8) % 16;
+    // Operations come from raw bytes: `Smith.value` maps a random 8-byte word outside the
+    // type's range to its minimum and `Smith.eos` ends random input almost at once, so the
+    // seeded driver would otherwise replay one operation.
+    var raw: [3 * 64]u8 = undefined;
+    smith.bytes(&raw);
+    for (0..raw.len / 3) |step| {
+        const key = raw[3 * step] % 8;
+        const subscriber = raw[3 * step + 1] % 16;
         const bit = @as(u16, 1) << @intCast(subscriber);
-        switch (smith.value(u8) % 4) {
+        switch (raw[3 * step + 2] % 4) {
             0 => {
                 const created = try tracker.insert(gpa, key, &.{subscriber});
                 try testing.expectEqual(model[key] == 0, created);

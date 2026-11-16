@@ -621,3 +621,132 @@ test "mailbox discards queued fetches on close" {
     };
     try try runner.start(Root.run, .{runner.io()});
 }
+
+/// A naive model of the overflow: queued retains and fetches in first-push order, each with
+/// its distinct subscribers in insertion order.
+const ModelFetch = struct { key: u8, subscribers: std.ArrayList(u16) = .empty };
+
+const IngressModel = struct {
+    retains: usize = 0,
+    fetches: std.ArrayList(ModelFetch) = .empty,
+
+    fn deinit(model: *IngressModel) void {
+        for (model.fetches.items) |*fetch| fetch.subscribers.deinit(testing.allocator);
+        model.fetches.deinit(testing.allocator);
+    }
+
+    fn push(model: *IngressModel, key: u8, subscriber: u16) !void {
+        const gpa = testing.allocator;
+        for (model.fetches.items) |*fetch| {
+            if (fetch.key != key) continue;
+            if (std.mem.indexOfScalar(u16, fetch.subscribers.items, subscriber) == null) {
+                try fetch.subscribers.append(gpa, subscriber);
+            }
+            return;
+        }
+        var fetch: ModelFetch = .{ .key = key };
+        try fetch.subscribers.append(gpa, subscriber);
+        try model.fetches.append(gpa, fetch);
+    }
+
+    /// Keeps subscribers at or above `floor`; drops emptied fetches.
+    fn retain(model: *IngressModel, floor: u16) void {
+        model.retains += 1;
+        var kept: usize = 0;
+        for (model.fetches.items) |*fetch| {
+            var subscribers_kept: usize = 0;
+            for (fetch.subscribers.items) |subscriber| {
+                if (subscriber < floor) continue;
+                fetch.subscribers.items[subscribers_kept] = subscriber;
+                subscribers_kept += 1;
+            }
+            fetch.subscribers.shrinkRetainingCapacity(subscribers_kept);
+            if (subscribers_kept == 0) {
+                fetch.subscribers.deinit(testing.allocator);
+                continue;
+            }
+            model.fetches.items[kept] = fetch.*;
+            kept += 1;
+        }
+        model.fetches.shrinkRetainingCapacity(kept);
+    }
+};
+
+fn keep_at_least(floor: u16, _: u8, subscriber: u16) bool {
+    return subscriber >= floor;
+}
+
+/// Drains `pending` into a collector that rejects `reject`, and checks the drained messages
+/// and the model's state after the drain.
+fn drain_against_model(
+    pending: *TestPending,
+    model: *IngressModel,
+    reject: ?std.meta.Tag(TestMessage),
+) !void {
+    var collect: Collect = .{ .reject = reject };
+    defer collect.deinit();
+    pending.drain(&collect);
+    const messages = collect.messages.items;
+    if (reject == .retain and model.retains > 0) {
+        // The first retain is given back; nothing drains past it.
+        try testing.expectEqual(0, messages.len);
+        return;
+    }
+    const fetched = reject != .fetch and model.fetches.items.len > 0;
+    try testing.expectEqual(model.retains + @intFromBool(fetched), messages.len);
+    for (messages[0..model.retains]) |message| try testing.expect(message == .retain);
+    model.retains = 0;
+    if (!fetched) {
+        try testing.expectEqual(model.fetches.items.len == 0, pending.is_empty());
+        return;
+    }
+    const fetches = messages[messages.len - 1].fetch.fetches.items;
+    try testing.expectEqual(model.fetches.items.len, fetches.len);
+    for (model.fetches.items, fetches) |expected, actual| {
+        try testing.expectEqual(expected.key, actual.key);
+        try testing.expectEqualSlices(u16, expected.subscribers.items, actual.subscribers.items);
+    }
+    for (model.fetches.items) |*fetch| fetch.subscribers.deinit(testing.allocator);
+    model.fetches.clearRetainingCapacity();
+    try testing.expect(pending.is_empty());
+}
+
+/// Model check of the coalescing policy over random fetch, retain, and drain sequences,
+/// including drains the mailbox rejects.
+fn ingress_model(_: void, smith: *std.testing.Smith) anyerror!void {
+    var pending: TestPending = .empty;
+    defer pending.deinit(testing.allocator);
+    var model: IngressModel = .{};
+    defer model.deinit();
+    // Operations come from raw bytes: `Smith.value` maps a random 8-byte word outside the
+    // type's range to its minimum and `Smith.eos` ends random input almost at once, so the
+    // seeded driver would otherwise replay one operation.
+    var raw: [3 * 64]u8 = undefined;
+    smith.bytes(&raw);
+    for (0..raw.len / 3) |step| {
+        const key = raw[3 * step] % 8;
+        const subscriber: u16 = raw[3 * step + 1] % 16;
+        switch (raw[3 * step + 2] % 6) {
+            0, 1, 2 => {
+                const message = try TestMessage.fetch_one(testing.allocator, key, subscriber, {});
+                try handle(&pending, message);
+                try model.push(key, subscriber);
+            },
+            3 => {
+                try handle(&pending, .{ .retain = .init(subscriber, keep_at_least) });
+                model.retain(subscriber);
+            },
+            4 => try drain_against_model(&pending, &model, null),
+            else => {
+                const reject: std.meta.Tag(TestMessage) = if (key % 2 == 0) .retain else .fetch;
+                try drain_against_model(&pending, &model, reject);
+            },
+        }
+    }
+    try drain_against_model(&pending, &model, null);
+}
+
+test "fuzz: ingress coalescing matches a model" {
+    const p2p = @import("p2p");
+    try p2p.fuzz.run({}, ingress_model, 0x696e677265737321, 500);
+}
