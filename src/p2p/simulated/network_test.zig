@@ -100,7 +100,7 @@ pub fn expect_message(receiver: *Net.Receiver, from: Key, payload: []const u8) !
     try testing.expectEqualSlices(u8, payload, message.payload);
 }
 
-pub fn send_one(sender: *Net.Sender, to: Key, payload: []const u8, priority: bool) !usize {
+pub fn send_one(sender: anytype, to: Key, payload: []const u8, priority: bool) !usize {
     const sent = try sender.send(.{ .one = to }, &.{payload}, priority);
     defer testing.allocator.free(sent);
     return sent.len;

@@ -27,6 +27,7 @@ const utils_pkg = @import("utils");
 const p2p = @import("../root.zig");
 const sizing = @import("../sizing.zig");
 const limited = @import("../utils/limited.zig");
+const split_mod = @import("split.zig");
 const Watch = @import("../utils/watch.zig").Watch;
 const Quota = @import("../rate_limit.zig").Quota;
 const SortedMap = @import("sorted_map.zig").SortedMap;
@@ -107,7 +108,7 @@ pub fn Network(comptime P: type) type {
         const Mailbox = Unbounded(Message);
 
         pub const PublicKey = P;
-        pub const Sender = limited.LimitedSender(UnlimitedSender, Connected);
+        pub const Limited = limited.LimitedSender(UnlimitedSender, Connected);
         pub const PeerSetSubscription = Tracker.Subscription;
         pub const PeerSetUpdate = Tracker.Update;
         pub const OwnedPeers = Tracker.Owned;
@@ -529,7 +530,9 @@ pub fn Network(comptime P: type) type {
                 .generation = generation,
             };
             const connected: Connected = .{ .network = network, .me = public_key };
-            const sender = try Sender.init(network.gpa, network.io, unlimited, quota, connected);
+            const sender: Sender = .{
+                .limited = try .init(network.gpa, network.io, unlimited, quota, connected),
+            };
             const receiver: Receiver = .{ .mailbox = mailbox, .capacity_value = capacity };
             return .{ .sender = sender, .receiver = receiver };
         }
@@ -543,6 +546,50 @@ pub fn Network(comptime P: type) type {
                 registered.receiver.deinit();
             }
         };
+
+        /// The rate-limited sender of one registered channel (commonware `Sender`).
+        pub const Sender = struct {
+            pub const PublicKey = P;
+            pub const Checked = Limited.Checked;
+
+            limited: Limited,
+
+            pub fn check(sender: *Sender, recipients: p2p.Recipients(P)) !p2p.Check(Checked) {
+                return sender.limited.check(recipients);
+            }
+
+            /// The recipients attempted (caller-owned), as `LimitedSender.send`.
+            pub fn send(
+                sender: *Sender,
+                recipients: p2p.Recipients(P),
+                parts: []const []const u8,
+                priority: bool,
+            ) ![]P {
+                return sender.limited.send(recipients, parts, priority);
+            }
+
+            pub fn clone(sender: *const Sender) Sender {
+                return .{ .limited = sender.limited.clone() };
+            }
+
+            pub fn deinit(sender: *Sender) void {
+                sender.limited.deinit();
+                sender.* = undefined;
+            }
+
+            /// Splits this sender (consumed) into a primary and a secondary half; each half's
+            /// sends go wherever `forwarder` redirects them (see `split.zig`).
+            pub fn split_with(
+                sender: Sender,
+                forwarder: anytype,
+            ) split_mod.Halves(SplitSender(@TypeOf(forwarder))) {
+                return SplitSender(@TypeOf(forwarder)).split(sender.limited, forwarder);
+            }
+        };
+
+        pub fn SplitSender(comptime F: type) type {
+            return split_mod.SplitSender(Limited, F);
+        }
 
         /// The network's unlimited sender for one registered channel.
         pub const UnlimitedSender = struct {
@@ -609,6 +656,8 @@ pub fn Network(comptime P: type) type {
 
             mailbox: Mailbox.Receiver,
             capacity_value: usize,
+            /// The routing task of the split this receiver is a half of, if any.
+            splitter: ?*Splitter = null,
 
             /// The next message (free it with `deinit`), or `NetworkClosed` once the network
             /// or a newer registration of the channel closed this one.
@@ -630,9 +679,118 @@ pub fn Network(comptime P: type) type {
 
             pub fn deinit(receiver: *Receiver) void {
                 receiver.mailbox.deinit();
+                if (receiver.splitter) |splitter| splitter.release();
                 receiver.* = undefined;
             }
+
+            /// Splits this receiver (consumed) into a primary and a secondary half: a task
+            /// routes each message by `router.route(*const Message) SplitTarget`, and ends once
+            /// the network closes this channel or both halves are released (commonware
+            /// `Receiver::split_with`). Both halves keep this receiver's capacity.
+            pub fn split_with(
+                receiver: Receiver,
+                gpa: Allocator,
+                io: Io,
+                router: anytype,
+            ) !split_mod.Halves(Receiver) {
+                var primary = try Mailbox.init(gpa, io);
+                errdefer primary.sender.deinit();
+                errdefer primary.receiver.deinit();
+                var secondary = try Mailbox.init(gpa, io);
+                errdefer secondary.sender.deinit();
+                errdefer secondary.receiver.deinit();
+                const splitter = try gpa.create(Splitter);
+                errdefer gpa.destroy(splitter);
+                splitter.* = .{ .gpa = gpa, .io = io, .task = undefined };
+                const Route = Routing(@TypeOf(router));
+                splitter.task = try io.concurrent(Route.run, .{
+                    gpa, receiver, primary.sender, secondary.sender, router,
+                });
+                const capacity_value = receiver.capacity_value;
+                return .{
+                    .primary = .{
+                        .mailbox = primary.receiver,
+                        .capacity_value = capacity_value,
+                        .splitter = splitter,
+                    },
+                    .secondary = .{
+                        .mailbox = secondary.receiver,
+                        .capacity_value = capacity_value,
+                        .splitter = splitter,
+                    },
+                };
+            }
         };
+
+        /// The routing task shared by the two halves of a split receiver; the last half
+        /// released stops it.
+        pub const Splitter = struct {
+            gpa: Allocator,
+            io: Io,
+            /// Halves still alive.
+            halves: std.atomic.Value(u32) = .init(2),
+            task: Io.Future(void),
+
+            fn release(splitter: *Splitter) void {
+                const before = splitter.halves.fetchSub(1, .acq_rel);
+                assert(before == 1 or before == 2);
+                if (before != 1) return;
+                splitter.task.cancel(splitter.io);
+                splitter.gpa.destroy(splitter);
+            }
+        };
+
+        fn Routing(comptime R: type) type {
+            return struct {
+                fn run(
+                    gpa: Allocator,
+                    source: Receiver,
+                    primary: Mailbox.Sender,
+                    secondary: Mailbox.Sender,
+                    router: R,
+                ) void {
+                    var source_owned = source;
+                    var primary_owned = primary;
+                    var secondary_owned = secondary;
+                    defer {
+                        primary_owned.deinit();
+                        secondary_owned.deinit();
+                        source_owned.deinit();
+                    }
+                    while (true) {
+                        const message = (source_owned.mailbox.recv() catch return) orelse return;
+                        switch (router.route(&message)) {
+                            .none => release_message(message),
+                            .primary => hand_off(primary_owned, message),
+                            .secondary => hand_off(secondary_owned, message),
+                            .both => {
+                                if (copy_message(gpa, message)) |copy| {
+                                    hand_off(primary_owned, copy);
+                                } else |_| {}
+                                hand_off(secondary_owned, message);
+                            },
+                        }
+                        if (primary_owned.is_closed() and secondary_owned.is_closed()) return;
+                    }
+                }
+            };
+        }
+
+        fn release_message(message: Message) void {
+            var owned = message;
+            owned.deinit();
+        }
+
+        /// Hands `message` to a split half; a closed half releases it.
+        fn hand_off(half: Mailbox.Sender, message: Message) void {
+            // Unbounded sends only fail to allocate, and then leave the message with us.
+            _ = half.send(message) catch release_message(message);
+        }
+
+        fn copy_message(gpa: Allocator, message: Message) Allocator.Error!Message {
+            const payload = try gpa.dupe(u8, message.payload);
+            return .{ .peer = message.peer, .payload = payload, .gpa = gpa };
+        }
 
         /// Modifies the network: links, bandwidth, blocks, controls, and managers.
         pub const Oracle = struct {

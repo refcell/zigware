@@ -17,6 +17,9 @@ pub const Network = network.Network;
 pub const Config = network.Config;
 pub const Link = network.Link;
 pub const Error = network.Error;
+pub const split = @import("split.zig");
+pub const SplitTarget = split.SplitTarget;
+pub const SplitOrigin = split.SplitOrigin;
 pub const Rational = rational.Rational;
 
 test {
@@ -24,4 +27,5 @@ test {
     _ = @import("network_test.zig");
     _ = @import("network_peers_test.zig");
     _ = @import("network_bandwidth_test.zig");
+    _ = @import("split_test.zig");
 }

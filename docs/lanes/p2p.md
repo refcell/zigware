@@ -92,6 +92,15 @@ handshake and the runtime's network, which the actor-stream and runtime lanes ar
   `register`, `run`, `destroy`. `oracle()` is an `AddressableManager`: `track(index,
   AddressableTrackedPeers)`, `overwrite(PeerMap)`, `peer_set`, `subscribe`, `block`,
   `blocked`. `lookup.Tracker(P)` is the locked tracker it uses.
+- `simulated` twins (commonware split senders and receivers): `Net.Sender` is now a struct
+  wrapping the `LimitedSender` (`check`, `send`, `clone`, `deinit` unchanged) with
+  `sender.split_with(forwarder) .{ primary, secondary }` of `Net.SplitSender(F)`; a forwarder
+  has `forward(f, origin: SplitOrigin, recipients, message: []const u8) ?Recipients` (null
+  drops the send; rate limits check the original recipients). `receiver.split_with(gpa, io,
+  router) !.{ primary, secondary }` (both `Net.Receiver`, same capacity); a router has
+  `route(r, *const p2p.Message(P)) SplitTarget` (`none`, `primary`, `secondary`, `both`). A
+  routing task runs until the network closes the channel or both halves are deinitialized.
+  `simulated.SplitTarget`, `simulated.SplitOrigin`, `simulated.split`.
 - `p2p.Message(P)` owns its payload when `gpa` is set; release it with `deinit`.
 - Senders take a message as parts (`[]const []const u8`, concatenated), like stream frames.
 
@@ -164,8 +173,10 @@ handshake and the runtime's network, which the actor-stream and runtime lanes ar
   bandwidth test (contention, sharing, staggered, pipe reservation, zero limits).
 - [x] simulated: ziggurat `Normal` for byte-identical latency samples.
 - [x] simulated: blocked subscriptions, disconnect_on_block, operations after shutdown.
+- [x] simulated: split senders and receivers (`SplitTarget`, `SplitOrigin`, forwarders,
+  routers) with commonware's split tests.
 - [ ] simulated: remaining mod.rs tests (peer-set subscriptions, socket manager, clean
-  shutdown, duplicate channel), split senders and receivers, metrics (runtime.telemetry).
+  shutdown, duplicate channel), metrics (runtime.telemetry).
 - [x] authenticated: router, relay, throttle, dialing, channels.
 - [x] discovery: types (conformance), tracker record/bit set/directory, tracker, peer
   connections, dialer, listener, Network/Config/Oracle, connectivity over the deterministic
@@ -221,3 +232,4 @@ handshake and the runtime's network, which the actor-stream and runtime lanes ar
 - 2026-11-16: discovery unordered-set, subscription, and graceful-shutdown tests;
   `Oracle.blocked()` returns an error union like every `Blocker`.
 - 2026-11-16: discovery multi-index oracle test.
+- 2026-11-16: simulated split senders and receivers for twins, with the split tests.
