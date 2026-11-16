@@ -4,6 +4,10 @@ Owns `src/math`, `src/simd`, `src/cryptography/bls12381/`. Add
 `pub const bls12381 = @import("bls12381/root.zig");` to `src/cryptography/root.zig` (owned by
 lane crypto; additive edit).
 
+Also owns, by agreement with p2p, commonware `p2p/src/utils` codec, mux, and mocks:
+`src/p2p/utils/{codec,codec_test,mux,mux_test}.zig` and `src/p2p/utils/mocks/`, re-exported
+from `src/p2p/utils/mod.zig`. p2p keeps limited, watch, io_rng, and shuffle.
+
 Reference: `~/.cache/zigware/commonware-ref/{math,simd,cryptography/src/bls12381}`.
 A from-scratch zero-dependency BLS12-381 (fields, G1/G2, pairing, hash-to-curve, MSM) already
 exists in `~/needlefish/src/common/crypto/bls12_381` and `montgomery.zig` (same author, MIT);
@@ -42,8 +46,20 @@ variants (MinPk, MinSig) must match exactly.
   `cryptography.banderwagon`: F, G (codec, hash_to_group), GVar and the circuit gadgets,
   with every commonware test and the go-ipa fixed vectors. commonware has no banderwagon
   conformance entries or fuzz target; a decode fuzz target is added.
+- [x] p2p utils codec: `wrap`, `WrappedSender`, `WrappedReceiver`, and
+  `WrappedBackgroundReceiver` (decodes through a `parallel` strategy) with codec.rs's tests.
+- [ ] p2p utils mux: `Muxer`, `MuxHandle`, `SubSender`, `SubReceiver`, `GlobalSender`,
+  backup channel, `parse`, `prefixed`, with mux.rs's tests.
+- [ ] p2p utils mocks: inert sender and receiver with their tests.
+- [ ] Check marshal's and aggregation's threshold paths against the simplex VRF scheme.
 
 ## Decisions
+- p2p utils codec: payloads are byte slices, so decoded values are copies, not views of the
+  frame; a background receiver's `V` must own its memory. Its decode loop is a receive task
+  that submits each decode to the strategy as it arrives and a completion task that awaits
+  decodes in arrival order (commonware forwards in completion order). A canceled background
+  receiver still awaits and forwards the decodes it submitted, since a Zig task must be
+  awaited.
 - golden: commonware ignores `fake_mask_filtered` because a comment says `check_batch`
   rejects the whole batch; its batched check (and ours) falls back to each dealer, so the
   test runs here and passes. Plans hold up to 16 dealers or players, as bit masks.
