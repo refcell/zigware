@@ -101,6 +101,12 @@ that harness. It builds on `coding` (ReedSolomon), `consensus.types.coding.Commi
   messages. Strategy jobs run inline. The two `should_panic` tests and the iobufs test have
   no counterpart.
 
+- marshal coding validation: `validate_proposal(H, gpa, commitment, config, ?context)`,
+  `validate_block(H, gpa, epocher, *block, *parent, context, commitment, parent_commitment)`,
+  `validate_reconstruction(H, gpa, *block, config, commitment, strategy)`; errors carry no
+  payload (commonware's `ContextDigest(expected, actual)` is plain `ContextDigest`). A
+  context's epoch is its `epoch()` method or, for `Round`, its field.
+
 ## Backlog
 - [x] broadcast lib.rs traits.
 - [x] broadcast buffered: config, ingress, metrics, engine, mocks, with every mod.rs test on
@@ -110,11 +116,14 @@ that harness. It builds on `coding` (ReedSolomon), `consensus.types.coding.Commi
 - [x] Fuzz targets (broadcast/fuzz, collector/fuzz).
 - [x] marshal coding `types`: Shard, CodedBlock, StoredCodedBlock, `hash_context`,
   `coding_config_for_participants`, with their tests and the Shard conformance hash.
-- [ ] Move the coding tests' `EmptyBlock` copy to `marshal.mocks.block` and the consensus
-  root's test import of `marshal/coding/root.zig` to marshal/root.zig once those land.
+- [ ] Once consensus-marshal's modules land: move the coding tests' `EmptyBlock` copy to
+  `marshal.mocks.block`, validation's copies of `has_contiguous_height` and
+  `is_block_in_expected_epoch` to `marshal.ancestry` and `marshal.application.validation`, and
+  the consensus root's test import of `marshal/coding/root.zig` to marshal/root.zig.
 - [ ] marshal coding `shards`: mailbox and engine, with their tests.
-- [ ] marshal coding `variant` (Coding), `validation`, `marshaled` (Marshaled,
-  MarshaledConfig), once consensus-marshal's core lands.
+- [x] marshal coding `validation` (proposal, block, reconstruction) with its 17 tests.
+- [ ] marshal coding `variant` (Coding), `marshaled` (Marshaled, MarshaledConfig), once
+  consensus-marshal's core lands.
 - [ ] marshal coding: `coding/harness.zig` and the `coding/mod.rs` tests, once the shared
   harness lands; the coding fuzz entries in `consensus/fuzz`.
 
@@ -127,3 +136,4 @@ that harness. It builds on `coding` (ReedSolomon), `consensus.types.coding.Commi
   random inputs).
 - 2026-11-16: marshal coding types (Shard, CodedBlock, StoredCodedBlock); the Shard
   conformance hash matches.
+- 2026-11-16: marshal coding validation with its 17 tests.
