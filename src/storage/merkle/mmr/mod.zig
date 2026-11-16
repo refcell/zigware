@@ -281,6 +281,30 @@ test "position and location checked and saturating add" {
     try testing.expectEqual(test_max_leaves, leaves_saturated);
 }
 
+/// Encodes `value` as a raw varint and reads it back as a position.
+fn read_position_varint(value: u64) !u64 {
+    const codec = @import("codec");
+    var buffer: [codec.varint.max_size(u64)]u8 = undefined;
+    var writer: codec.Writer = .init(&buffer);
+    codec.varint.write(u64, value, &writer);
+    var reader: codec.Reader = .init(writer.written());
+    const position = try merkle.read_position(Family, &reader);
+    try testing.expectEqual(@as(usize, 0), reader.remaining());
+    return position;
+}
+
+test "position read cfg valid values" {
+    for ([_]u64{ 0, 12345, test_max_nodes, test_max_nodes - 1 }) |position| {
+        try testing.expectEqual(position, try read_position_varint(position));
+    }
+}
+
+test "position read cfg invalid values" {
+    for ([_]u64{ test_max_nodes + 1, std.math.maxInt(u64) }) |value| {
+        try testing.expectError(error.Invalid, read_position_varint(value));
+    }
+}
+
 fn expect_round_trip(location: u64) !void {
     const position = Family.location_to_position(location);
     try testing.expectEqual(@as(?u64, location), Family.position_to_location(position));

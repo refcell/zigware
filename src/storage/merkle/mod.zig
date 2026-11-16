@@ -10,6 +10,7 @@
 
 const std = @import("std");
 const assert = std.debug.assert;
+const codec = @import("codec");
 
 pub const hasher = @import("hasher.zig");
 pub const mem = @import("mem.zig");
@@ -183,6 +184,18 @@ pub fn check_family(comptime F: type) void {
 /// Whether `position` is a valid node count or size (`<= max_nodes`).
 pub fn position_is_valid(comptime F: type, position: u64) bool {
     return position <= F.max_nodes;
+}
+
+/// Reads a varint position and refuses one above `F.max_nodes` (commonware's
+/// `Position::read`). A position encodes as a plain `codec.varint` u64.
+pub fn read_position(comptime F: type, reader: *codec.Reader) codec.Error!u64 {
+    check_family(F);
+    const position = try codec.varint.read(u64, reader);
+    if (!position_is_valid(F, position)) {
+        return reader.invalid("Position", "value exceeds MAX_NODES");
+    }
+    assert(position <= F.max_nodes);
+    return position;
 }
 
 /// Whether `location` is a valid leaf count (`<= max_leaves`).

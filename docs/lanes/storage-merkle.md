@@ -11,7 +11,9 @@ variants need `runtime` storage; do them after its interface lands.
 ## Backlog
 - [x] translator.rs (key translators) and rmap (range map).
 - [x] merkle/mmr: in-memory MMR (append, root, proofs, range proofs, verification), node
-  positions and peaks math identical to commonware, proof codec. Port its tests and vectors.
+  positions and peaks math identical to commonware, proof codec, and the position codec
+  (`merkle.read_position`; qmdb's `operation.read_location` decodes locations). Port its tests
+  and vectors.
   (The Proof `CodecConformance` hash still waits on the conformance lane's `arbitrary`
   emulation.)
 - [x] merkle/batch: stacked speculative batches (`Mem.new_batch`, `merkleize`,
