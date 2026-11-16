@@ -61,7 +61,13 @@ time, files, and network: build on it rather than around it where it fits.
   advance, try_into_mut), `IoBufMut` (fixed capacity, aligned, freeze), `IoBufs` (chunk
   sequence: append, prepend, advance, split_to, coalesce, slices), the IoBuf codec with
   zero-copy `take_encoded`, and `CodecConformance<IoBuf>`.
-- [ ] iobuf `IoBufsMut`, `Builder`, and `encode_iobufs` (vectored codec writes).
+- [x] iobuf `IoBufsMut` (scatter targets: put_slice, set_len, copy_from_slice, advance,
+  freeze, coalesce), `Builder` (inline bytes plus pushed chunks), and `encode_iobufs`.
+  `encode_iobufs` pushes payloads without copying for types that declare `write_bufs` and
+  `encode_inline_size` (`IoBuf` does); every other type is encoded inline into one buffer.
+  zigware's codec has no `write_bufs`, so containers of `IoBuf` (`Vec<IoBuf>`, maps, `Lazy`)
+  encode inline: the bytes match, but the payloads are copied. The nested-container, map,
+  lazy, and allocation-count `encode_iobufs` tests need that codec support and are not ported.
 - [ ] utils: buffer pools, handle and abort leftovers (Context covers spawn, join, abort).
 - Moved to the runtime-telemetry lane: telemetry (`src/runtime/telemetry/`) and the
   production runtime (`src/runtime/production/`, io_uring/kqueue storage and network).
@@ -142,8 +148,8 @@ time, files, and network: build on it rather than around it where it fits.
   allocation with a refcounted header, so building one allocates once and clones, slices, and
   splits allocate nothing (commonware avoids even the header record until the first share).
   `IoBuf.deinit` takes a `gpa` it ignores, to fit the codec's `deinit(gpa)` contract.
-  `IoBufs` keeps up to three chunks inline and moves them to a list on the fourth; it stays a
-  list afterwards (commonware shrinks back to Single/Pair/Triple). The network `Sink.send`
+  `IoBufs` and `IoBufsMut` share `ChunkList`: up to three chunks inline, a list from the
+  fourth on, which it keeps (commonware shrinks back to Single/Pair/Triple). The network `Sink.send`
   contract still takes `[]const []const u8`; `IoBufs.slices` adapts a chunk sequence to it.
 - The runner registers its storage and network metrics on first `storage()`/`network()`
   (the runner must not move by then) and panics if that registration runs out of memory.

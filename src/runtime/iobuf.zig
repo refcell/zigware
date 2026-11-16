@@ -214,6 +214,22 @@ pub const IoBuf = struct {
         return codec.encode_size(usize, buf.len) + buf.len;
     }
 
+    /// The bytes `write_bufs` writes inline: the length prefix.
+    pub fn encode_inline_size(buf: IoBuf) usize {
+        return codec.encode_size(usize, buf.len);
+    }
+
+    /// Writes the length inline and pushes the payload as a shared chunk (commonware
+    /// `Write::write_bufs` for `IoBuf`), so `encode_iobufs` never copies it.
+    pub fn write_bufs(buf: IoBuf, gpa: Allocator, builder: *Builder) Allocator.Error!void {
+        builder.put(usize, buf.len);
+        var shared = buf.clone();
+        builder.push(gpa, shared) catch |err| {
+            shared.release();
+            return err;
+        };
+    }
+
     /// Decodes a copy of the payload into a new buffer.
     pub fn read(gpa: Allocator, reader: *codec.Reader, range: Cfg) codec.Error!IoBuf {
         const len = try codec.read_usize(reader, range);
@@ -366,46 +382,144 @@ pub const IoBufMut = struct {
     }
 };
 
-/// A sequence of immutable buffers read as one byte string (commonware `IoBufs`). Up to three
-/// chunks are stored inline, so building one from one to three buffers allocates nothing; a
-/// fourth moves every chunk into a list allocated from the `gpa` passed to `append`/`prepend`.
-/// Empty buffers are never stored. Release with `deinit`, passing the same `gpa`.
-pub const IoBufs = struct {
-    small: [small_max]IoBuf = undefined,
-    small_len: u8 = 0,
-    /// Every chunk once more than `small_max` were held; chunks before `large_front` are gone.
-    large: std.ArrayList(IoBuf) = .empty,
-    large_front: usize = 0,
-    spilled: bool = false,
+/// Chunk storage shared by `IoBufs` and `IoBufsMut`: up to `inline_max` chunks inline, so one
+/// to three chunks allocate nothing; a fourth moves every chunk into a list allocated from the
+/// `gpa` passed in, which it then keeps. The owner releases the chunks themselves.
+fn ChunkList(comptime T: type) type {
+    return struct {
+        const Self = @This();
 
-    pub const small_max = 3;
+        small: [inline_max]T = undefined,
+        small_len: u8 = 0,
+        /// Every chunk once spilled; chunks before `large_front` are gone.
+        large: std.ArrayList(T) = .empty,
+        large_front: usize = 0,
+        spilled: bool = false,
+
+        pub const inline_max = 3;
+
+        fn one(item: T) Self {
+            var result: Self = .{};
+            result.small[0] = item;
+            result.small_len = 1;
+            return result;
+        }
+
+        /// Frees the list; the chunks must already be released or moved.
+        fn deinit(list: *Self, gpa: Allocator) void {
+            list.large.deinit(gpa);
+            list.* = undefined;
+        }
+
+        fn items(list: *Self) []T {
+            if (list.spilled) return list.large.items[list.large_front..];
+            return list.small[0..list.small_len];
+        }
+
+        fn items_const(list: *const Self) []const T {
+            if (list.spilled) return list.large.items[list.large_front..];
+            return list.small[0..list.small_len];
+        }
+
+        /// Adds `item` at the back. On error `list` is unchanged.
+        fn append(list: *Self, gpa: Allocator, item: T) Allocator.Error!void {
+            if (!list.spilled and list.small_len < inline_max) {
+                list.small[list.small_len] = item;
+                list.small_len += 1;
+                return;
+            }
+            try list.reserve(gpa, 1);
+            list.large.appendAssumeCapacity(item);
+        }
+
+        /// Adds `item` at the front. On error `list` is unchanged.
+        fn prepend(list: *Self, gpa: Allocator, item: T) Allocator.Error!void {
+            if (!list.spilled and list.small_len < inline_max) {
+                const count = list.small_len;
+                std.mem.copyBackwards(T, list.small[1 .. count + 1], list.small[0..count]);
+                list.small[0] = item;
+                list.small_len += 1;
+                return;
+            }
+            if (list.spilled and list.large_front > 0) {
+                list.large_front -= 1;
+                list.large.items[list.large_front] = item;
+                return;
+            }
+            try list.reserve(gpa, 1);
+            list.large.insertAssumeCapacity(list.large_front, item);
+        }
+
+        /// Ensures room for `extra` more chunks, so that many appends cannot fail.
+        fn reserve(list: *Self, gpa: Allocator, extra: usize) Allocator.Error!void {
+            const count = list.items_const().len;
+            if (!list.spilled and count + extra <= inline_max) return;
+            try list.large.ensureTotalCapacity(gpa, list.large_front + count + extra);
+            if (list.spilled) return;
+            assert(list.large.items.len == 0 and list.large_front == 0);
+            list.large.appendSliceAssumeCapacity(list.small[0..list.small_len]);
+            list.small_len = 0;
+            list.spilled = true;
+        }
+
+        /// Drops the first `count` chunks, which the caller has released or moved.
+        fn drop_front(list: *Self, count: usize) void {
+            assert(count <= list.items_const().len);
+            if (list.spilled) {
+                list.large_front += count;
+                if (list.large_front == list.large.items.len) {
+                    list.large.clearRetainingCapacity();
+                    list.large_front = 0;
+                }
+                return;
+            }
+            const left = list.small_len - count;
+            std.mem.copyForwards(T, list.small[0..left], list.small[count..list.small_len]);
+            list.small_len = @intCast(left);
+        }
+
+        /// Drops the chunk at `index`, which the caller has released or moved.
+        fn remove(list: *Self, index: usize) void {
+            const all = list.items();
+            assert(index < all.len);
+            std.mem.copyForwards(T, all[index .. all.len - 1], all[index + 1 ..]);
+            if (list.spilled) {
+                list.large.items.len -= 1;
+            } else {
+                list.small_len -= 1;
+            }
+        }
+    };
+}
+
+/// A sequence of immutable buffers read as one byte string (commonware `IoBufs`). Building one
+/// from one to three buffers allocates nothing; a fourth moves the chunks into a list
+/// allocated from the `gpa` passed to `append`/`prepend`. Empty buffers are never stored.
+/// Release with `deinit`, passing the same `gpa`.
+pub const IoBufs = struct {
+    list: ChunkList(IoBuf) = .{},
 
     pub const empty: IoBufs = .{};
 
     /// The sequence of one buffer, which it takes; allocates nothing.
     pub fn from(buf: IoBuf) IoBufs {
-        var result: IoBufs = .{};
-        if (buf.is_empty()) return result;
-        result.small[0] = buf;
-        result.small_len = 1;
-        return result;
+        if (buf.is_empty()) return .{};
+        return .{ .list = .one(buf) };
     }
 
     pub fn deinit(bufs: *IoBufs, gpa: Allocator) void {
-        for (bufs.chunks()) |*chunk| chunk.deinit(gpa);
-        bufs.large.deinit(gpa);
+        for (bufs.chunks()) |*chunk| chunk.release();
+        bufs.list.deinit(gpa);
         bufs.* = undefined;
     }
 
     /// The chunks, in order, all non-empty.
     pub fn chunks(bufs: *IoBufs) []IoBuf {
-        if (bufs.spilled) return bufs.large.items[bufs.large_front..];
-        return bufs.small[0..bufs.small_len];
+        return bufs.list.items();
     }
 
     fn chunks_const(bufs: *const IoBufs) []const IoBuf {
-        if (bufs.spilled) return bufs.large.items[bufs.large_front..];
-        return bufs.small[0..bufs.small_len];
+        return bufs.list.items_const();
     }
 
     /// Total readable bytes.
@@ -449,60 +563,14 @@ pub const IoBufs = struct {
     /// caller's and `bufs` is unchanged.
     pub fn append(bufs: *IoBufs, gpa: Allocator, buf: IoBuf) Allocator.Error!void {
         if (buf.is_empty()) return;
-        if (!bufs.spilled and bufs.small_len < small_max) {
-            bufs.small[bufs.small_len] = buf;
-            bufs.small_len += 1;
-            return;
-        }
-        try bufs.reserve(gpa, 1);
-        bufs.large.appendAssumeCapacity(buf);
+        try bufs.list.append(gpa, buf);
     }
 
     /// Adds `buf` at the front, taking it; an empty `buf` is dropped. On error `buf` stays the
     /// caller's and `bufs` is unchanged.
     pub fn prepend(bufs: *IoBufs, gpa: Allocator, buf: IoBuf) Allocator.Error!void {
         if (buf.is_empty()) return;
-        if (!bufs.spilled and bufs.small_len < small_max) {
-            const count = bufs.small_len;
-            std.mem.copyBackwards(IoBuf, bufs.small[1 .. count + 1], bufs.small[0..count]);
-            bufs.small[0] = buf;
-            bufs.small_len += 1;
-            return;
-        }
-        if (bufs.spilled and bufs.large_front > 0) {
-            bufs.large_front -= 1;
-            bufs.large.items[bufs.large_front] = buf;
-            return;
-        }
-        try bufs.reserve(gpa, 1);
-        bufs.large.insertAssumeCapacity(bufs.large_front, buf);
-    }
-
-    /// Ensures room for `extra` more chunks in the list, moving the inline chunks into it.
-    fn reserve(bufs: *IoBufs, gpa: Allocator, extra: usize) Allocator.Error!void {
-        const count = bufs.chunk_count();
-        try bufs.large.ensureTotalCapacity(gpa, bufs.large_front + count + extra);
-        if (bufs.spilled) return;
-        assert(bufs.large.items.len == 0 and bufs.large_front == 0);
-        bufs.large.appendSliceAssumeCapacity(bufs.small[0..bufs.small_len]);
-        bufs.small_len = 0;
-        bufs.spilled = true;
-    }
-
-    /// Drops the first `count` chunks, which the caller has released or moved.
-    fn drop_front(bufs: *IoBufs, count: usize) void {
-        assert(count <= bufs.chunk_count());
-        if (bufs.spilled) {
-            bufs.large_front += count;
-            if (bufs.large_front == bufs.large.items.len) {
-                bufs.large.clearRetainingCapacity();
-                bufs.large_front = 0;
-            }
-            return;
-        }
-        const left = bufs.small_len - count;
-        std.mem.copyForwards(IoBuf, bufs.small[0..left], bufs.small[count..bufs.small_len]);
-        bufs.small_len = @intCast(left);
+        try bufs.list.prepend(gpa, buf);
     }
 
     /// Consumes the first `count` bytes (commonware `Buf::advance`).
@@ -522,7 +590,7 @@ pub const IoBufs = struct {
             whole += 1;
         }
         assert(left == 0);
-        bufs.drop_front(whole);
+        bufs.list.drop_front(whole);
     }
 
     /// Splits off and returns bytes `[0, at)`; `bufs` keeps `[at, len)` (commonware
@@ -538,15 +606,14 @@ pub const IoBufs = struct {
             whole += 1;
         }
         var prefix: IoBufs = .{};
-        const prefix_count = whole + @intFromBool(left > 0);
-        if (prefix_count > small_max) try prefix.reserve(gpa, prefix_count);
+        try prefix.list.reserve(gpa, whole + @intFromBool(left > 0));
         const all = bufs.chunks();
-        for (all[0..whole]) |chunk| prefix.append(gpa, chunk) catch unreachable; // Reserved.
+        for (all[0..whole]) |chunk| prefix.list.append(gpa, chunk) catch unreachable; // Reserved.
         if (left > 0) {
             const head = all[whole].split_to(left);
-            prefix.append(gpa, head) catch unreachable; // Reserved above.
+            prefix.list.append(gpa, head) catch unreachable; // Reserved above.
         }
-        bufs.drop_front(whole);
+        bufs.list.drop_front(whole);
         assert(prefix.len() == at);
         return prefix;
     }
@@ -556,7 +623,7 @@ pub const IoBufs = struct {
     /// unchanged.
     pub fn coalesce(bufs: *IoBufs, gpa: Allocator) Allocator.Error!IoBuf {
         if (bufs.as_single()) |single| {
-            bufs.large.deinit(gpa);
+            bufs.list.deinit(gpa);
             bufs.* = undefined;
             return single;
         }
@@ -579,6 +646,254 @@ pub const IoBufs = struct {
         assert(written == out.len);
     }
 };
+
+/// A sequence of mutable buffers filled and read as one byte string (commonware `IoBufsMut`),
+/// for example the targets of a scatter read. Chunks with spare capacity are kept even while
+/// empty; a chunk with no capacity left is dropped. Release with `deinit`, passing the `gpa`
+/// given to `append`.
+pub const IoBufsMut = struct {
+    list: ChunkList(IoBufMut) = .{},
+
+    pub const empty: IoBufsMut = .{};
+
+    /// The sequence of one buffer, which it takes; allocates nothing.
+    pub fn from(buf: IoBufMut) IoBufsMut {
+        if (buf.capacity == 0) return .{};
+        return .{ .list = .one(buf) };
+    }
+
+    pub fn deinit(bufs: *IoBufsMut, gpa: Allocator) void {
+        for (bufs.chunks()) |*chunk| chunk.deinit();
+        bufs.list.deinit(gpa);
+        bufs.* = undefined;
+    }
+
+    pub fn chunks(bufs: *IoBufsMut) []IoBufMut {
+        return bufs.list.items();
+    }
+
+    fn chunks_const(bufs: *const IoBufsMut) []const IoBufMut {
+        return bufs.list.items_const();
+    }
+
+    /// Adds `buf` at the back, taking it; a buffer with no capacity is dropped. On error `buf`
+    /// stays the caller's and `bufs` is unchanged.
+    pub fn append(bufs: *IoBufsMut, gpa: Allocator, buf: IoBufMut) Allocator.Error!void {
+        if (buf.capacity == 0) return;
+        try bufs.list.append(gpa, buf);
+    }
+
+    /// Readable bytes across every chunk.
+    pub fn len(bufs: *const IoBufsMut) usize {
+        var total: usize = 0;
+        for (bufs.chunks_const()) |chunk| total += chunk.len;
+        return total;
+    }
+
+    /// Capacity across every chunk (commonware `IoBufsMut::capacity`).
+    pub fn capacity(bufs: *const IoBufsMut) usize {
+        var total: usize = 0;
+        for (bufs.chunks_const()) |chunk| total += chunk.capacity;
+        return total;
+    }
+
+    /// Bytes `put_slice` can still write.
+    pub fn remaining_mut(bufs: *const IoBufsMut) usize {
+        return bufs.capacity() - bufs.len();
+    }
+
+    pub fn is_empty(bufs: *const IoBufsMut) bool {
+        return bufs.len() == 0;
+    }
+
+    pub fn chunk_count(bufs: *const IoBufsMut) usize {
+        return bufs.chunks_const().len;
+    }
+
+    /// The only chunk, if there is exactly one.
+    pub fn as_single(bufs: *IoBufsMut) ?*IoBufMut {
+        const all = bufs.chunks();
+        return if (all.len == 1) &all[0] else null;
+    }
+
+    /// Writes `source` into the first chunks with spare capacity, in order (commonware
+    /// `BufMut::put_slice`); panics past `remaining_mut()`.
+    pub fn put_slice(bufs: *IoBufsMut, source: []const u8) void {
+        assert(source.len <= bufs.remaining_mut());
+        var written: usize = 0;
+        for (bufs.chunks()) |*chunk| {
+            if (written == source.len) break;
+            const count = @min(chunk.capacity - chunk.len, source.len - written);
+            chunk.put_slice(source[written..][0..count]);
+            written += count;
+        }
+        assert(written == source.len);
+    }
+
+    /// Makes the first `length` bytes of capacity readable, filling chunks in order
+    /// (commonware `IoBufsMut::set_len`), after a scatter read wrote them through `chunks()`.
+    pub fn set_len(bufs: *IoBufsMut, length: usize) void {
+        assert(length <= bufs.capacity());
+        var left = length;
+        for (bufs.chunks()) |*chunk| {
+            const count = @min(chunk.capacity, left);
+            chunk.len = count;
+            left -= count;
+        }
+        assert(left == 0);
+    }
+
+    /// Overwrites the readable bytes with `source`, which must be exactly `len()` long
+    /// (commonware `IoBufsMut::copy_from_slice`).
+    pub fn copy_from_slice(bufs: *IoBufsMut, source: []const u8) void {
+        assert(source.len == bufs.len());
+        var offset: usize = 0;
+        for (bufs.chunks()) |chunk| {
+            @memcpy(chunk.bytes(), source[offset..][0..chunk.len]);
+            offset += chunk.len;
+        }
+    }
+
+    /// Consumes the first `count` readable bytes (commonware `Buf::advance`); chunks left with
+    /// no capacity are released.
+    pub fn advance(bufs: *IoBufsMut, count: usize) void {
+        assert(count <= bufs.len());
+        var left = count;
+        var index: usize = 0;
+        while (left > 0) {
+            const chunk = &bufs.chunks()[index];
+            const step = @min(chunk.len, left);
+            chunk.advance(step);
+            left -= step;
+            if (chunk.capacity == 0) {
+                chunk.deinit();
+                bufs.list.remove(index);
+            } else {
+                index += 1;
+            }
+        }
+    }
+
+    /// The readable bytes as immutable chunks, taking the buffers (commonware
+    /// `IoBufsMut::freeze`). On error `bufs` is unchanged.
+    pub fn freeze(bufs: *IoBufsMut, gpa: Allocator) Allocator.Error!IoBufs {
+        var result: IoBufs = .{};
+        try result.list.reserve(gpa, bufs.chunk_count());
+        for (bufs.chunks()) |*chunk| {
+            result.append(gpa, chunk.freeze()) catch unreachable; // Reserved above.
+        }
+        bufs.list.deinit(gpa);
+        bufs.* = undefined;
+        return result;
+    }
+
+    /// One mutable buffer of the readable bytes, taking the buffers (commonware
+    /// `IoBufsMut::coalesce`): the chunk itself when there is one, else a copy. On error `bufs`
+    /// is unchanged.
+    pub fn coalesce(bufs: *IoBufsMut, gpa: Allocator) Allocator.Error!IoBufMut {
+        if (bufs.as_single()) |single| {
+            const result = single.*;
+            bufs.list.deinit(gpa);
+            bufs.* = undefined;
+            return result;
+        }
+        var out: IoBufMut = try .with_capacity(gpa, bufs.len());
+        for (bufs.chunks()) |chunk| out.put_slice(chunk.bytes());
+        bufs.deinit(gpa);
+        return out;
+    }
+};
+
+/// Assembles `IoBufs` from inline writes and zero-copy pieces (commonware `Builder`): inline
+/// bytes go into one buffer of fixed capacity, and a pushed `IoBuf` becomes its own chunk at
+/// the point it was pushed. Writing past the inline capacity panics.
+pub const Builder = struct {
+    buf: IoBufMut,
+    /// Where each push interrupts the inline bytes.
+    pushes: std.ArrayList(Push) = .empty,
+
+    const Push = struct { offset: usize, chunk: IoBuf };
+
+    /// A builder whose inline buffer holds exactly `capacity` bytes; zero allocates nothing.
+    pub fn init(gpa: Allocator, capacity: usize) Allocator.Error!Builder {
+        return .{ .buf = try .with_capacity(gpa, capacity) };
+    }
+
+    /// Releases an unfinished builder.
+    pub fn deinit(builder: *Builder, gpa: Allocator) void {
+        for (builder.pushes.items) |*push_item| push_item.chunk.release();
+        builder.pushes.deinit(gpa);
+        builder.buf.deinit();
+        builder.* = undefined;
+    }
+
+    pub fn put_slice(builder: *Builder, bytes: []const u8) void {
+        builder.buf.put_slice(bytes);
+    }
+
+    /// Writes the codec encoding of `value` inline.
+    pub fn put(builder: *Builder, comptime T: type, value: T) void {
+        const written = codec.encode_to(T, value, builder.buf.spare());
+        builder.buf.advance_mut(written.len);
+    }
+
+    /// Appends `chunk` as its own chunk, taking it; an empty chunk is dropped (commonware
+    /// `BufsMut::push`). On error `chunk` stays the caller's.
+    pub fn push(builder: *Builder, gpa: Allocator, chunk: IoBuf) Allocator.Error!void {
+        if (chunk.is_empty()) return;
+        try builder.pushes.append(gpa, .{ .offset = builder.buf.len, .chunk = chunk });
+    }
+
+    /// The inline bytes split at the push points, with each pushed chunk in its place
+    /// (commonware `Builder::finish`). On error the builder is unchanged.
+    pub fn finish(builder: *Builder, gpa: Allocator) Allocator.Error!IoBufs {
+        var result: IoBufs = .{};
+        try result.list.reserve(gpa, 2 * builder.pushes.items.len + 1);
+        var frozen = builder.buf.freeze();
+        var position: usize = 0;
+        for (builder.pushes.items) |push_item| {
+            assert(push_item.offset >= position);
+            const segment = frozen.split_to(push_item.offset - position);
+            result.append(gpa, segment) catch unreachable; // Reserved above.
+            result.append(gpa, push_item.chunk) catch unreachable; // Reserved above.
+            position = push_item.offset;
+        }
+        result.append(gpa, frozen) catch unreachable; // Reserved above.
+        builder.pushes.deinit(gpa);
+        builder.* = undefined;
+        return result;
+    }
+};
+
+/// Whether `T` writes some fields as pushed chunks (it declares `write_bufs` and
+/// `encode_inline_size`, commonware's `Write::write_bufs` and `EncodeSize::encode_inline_size`).
+fn writes_bufs(comptime T: type) bool {
+    return switch (@typeInfo(T)) {
+        .@"struct", .@"union", .@"enum" => @hasDecl(T, "write_bufs"),
+        else => false,
+    };
+}
+
+/// Encodes `value` into `IoBufs` through a `Builder` (commonware `EncodeExt::encode_iobufs`).
+/// A type that declares `write_bufs(value, gpa, *Builder)` and `encode_inline_size` (as
+/// `IoBuf` does) pushes its large fields without copying; any other type is encoded inline
+/// into one buffer. The result is exactly the bytes `codec.encode` writes.
+pub fn encode_iobufs(comptime T: type, gpa: Allocator, value: T) Allocator.Error!IoBufs {
+    const total = codec.encode_size(T, value);
+    const inline_size = if (comptime writes_bufs(T)) value.encode_inline_size() else total;
+    assert(inline_size <= total);
+    var builder: Builder = try .init(gpa, inline_size);
+    errdefer builder.deinit(gpa);
+    if (comptime writes_bufs(T)) {
+        try value.write_bufs(gpa, &builder);
+    } else {
+        builder.put(T, value);
+    }
+    assert(builder.buf.len == inline_size);
+    const bufs = try builder.finish(gpa);
+    assert(bufs.len() == total);
+    return bufs;
+}
 
 test {
     _ = @import("iobuf_test.zig");

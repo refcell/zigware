@@ -495,3 +495,172 @@ test "iobufs match a flat byte string (fuzz)" {
     }
     try std.testing.fuzz({}, fuzz_iobufs, .{});
 }
+
+// IoBufsMut, Builder, and encode_iobufs (commonware `iobuf::bufs::tests`).
+
+const IoBufsMut = iobuf.IoBufsMut;
+const Builder = iobuf.Builder;
+
+/// An `IoBufsMut` of the given buffers (a copy of each `parts` entry, or an empty buffer of
+/// capacity `capacities[i]` when the part is empty).
+fn bufs_mut_of(parts: []const []const u8, capacities: []const usize) !IoBufsMut {
+    var bufs: IoBufsMut = .empty;
+    errdefer bufs.deinit(gpa);
+    for (parts, capacities) |part, capacity| {
+        var buf: IoBufMut = try .with_capacity(gpa, @max(part.len, capacity));
+        buf.put_slice(part);
+        bufs.append(gpa, buf) catch |err| {
+            buf.deinit();
+            return err;
+        };
+    }
+    return bufs;
+}
+
+fn expect_frozen(bufs: *IoBufsMut, expected: []const u8, chunk_count: usize) !void {
+    var frozen_bufs = try bufs.freeze(gpa);
+    try testing.expectEqual(chunk_count, frozen_bufs.chunk_count());
+    try expect_coalesced(&frozen_bufs, expected);
+}
+
+test "iobufsmut freeze drops empty buffers (test_iobufsmut_freeze_chunked)" {
+    var two = try bufs_mut_of(&.{ "hello", " world" }, &.{ 0, 0 });
+    try expect_frozen(&two, "hello world", 2);
+    var with_empty = try bufs_mut_of(&.{ "hello", "", " world" }, &.{ 0, 0, 0 });
+    try testing.expectEqual(@as(usize, 2), with_empty.chunk_count());
+    try expect_frozen(&with_empty, "hello world", 2);
+    var one = try bufs_mut_of(&.{ "", "only one", "" }, &.{ 0, 0, 0 });
+    try expect_frozen(&one, "only one", 1);
+    var none = try bufs_mut_of(&.{ "", "" }, &.{ 0, 0 });
+    try expect_frozen(&none, "", 0);
+    // Spare capacity of an empty chunk does not survive a freeze.
+    var reserved = try bufs_mut_of(&.{ "ab", "" }, &.{ 0, 8 });
+    try testing.expectEqual(@as(usize, 2), reserved.chunk_count());
+    try expect_frozen(&reserved, "ab", 1);
+}
+
+test "iobufsmut writes across chunks (test_iobufsmut_bufmut_put_slice)" {
+    var bufs = try bufs_mut_of(&.{ "", "" }, &.{ 5, 6 });
+    try testing.expect(bufs.is_empty());
+    try testing.expectEqual(@as(usize, 11), bufs.remaining_mut());
+    bufs.put_slice("hello");
+    bufs.put_slice(" world");
+    try testing.expectEqual(@as(usize, 0), bufs.remaining_mut());
+    var whole = try bufs.coalesce(gpa);
+    defer whole.deinit();
+    try testing.expectEqualStrings("hello world", whole.bytes());
+}
+
+test "iobufsmut advance skips and drops spent chunks (test_iobufsmut_with_empty_buffers)" {
+    var bufs = try bufs_mut_of(&.{ "hello", "", " world" }, &.{ 0, 0, 0 });
+    defer bufs.deinit(gpa);
+    try testing.expectEqual(@as(usize, 11), bufs.len());
+    bufs.advance(5);
+    try testing.expectEqual(@as(usize, 1), bufs.chunk_count());
+    try testing.expectEqualStrings(" world", bufs.chunks()[0].bytes());
+    // An empty chunk with capacity left is skipped, not dropped.
+    var leading = try bufs_mut_of(&.{ "", "ab" }, &.{ 4, 0 });
+    defer leading.deinit(gpa);
+    leading.advance(1);
+    try testing.expectEqual(@as(usize, 2), leading.chunk_count());
+    try testing.expectEqualStrings("b", leading.chunks()[1].bytes());
+}
+
+test "iobufsmut freeze after advance (test_iobufsmut_freeze_after_advance)" {
+    var partial = try bufs_mut_of(&.{ "hello", " world" }, &.{ 0, 0 });
+    partial.advance(3);
+    try testing.expectEqual(@as(usize, 8), partial.len());
+    try expect_frozen(&partial, "lo world", 2);
+    var boundary = try bufs_mut_of(&.{ "hello", " world" }, &.{ 0, 0 });
+    boundary.advance(5);
+    try expect_frozen(&boundary, " world", 1);
+}
+
+test "iobufsmut copy_from_slice and set_len (test_iobufsmut_copy_from_slice_*, set_len)" {
+    var zeroed = try bufs_mut_of(&.{ "\x00\x00\x00\x00\x00", "\x00\x00\x00\x00\x00\x00" }, &.{
+        0, 0,
+    });
+    zeroed.copy_from_slice("hello world");
+    try testing.expectEqualStrings("hello", zeroed.chunks()[0].bytes());
+    try expect_frozen(&zeroed, "hello world", 2);
+    // [3, 20, 2] set to 18 fills [3, 15, 0].
+    var uneven = try bufs_mut_of(&.{ "", "", "" }, &.{ 3, 20, 2 });
+    defer uneven.deinit(gpa);
+    uneven.set_len(18);
+    try testing.expectEqual(@as(usize, 18), uneven.len());
+    const expected_lens = [_]usize{ 3, 15, 0 };
+    for (uneven.chunks(), expected_lens) |chunk, expected| {
+        try testing.expectEqual(expected, chunk.len);
+    }
+}
+
+test "iobufsmut coalesce shapes (test_iobufsmut_coalesce_shapes)" {
+    var single = try bufs_mut_of(&.{"abc"}, &.{8});
+    const single_ptr = single.chunks()[0].ptr;
+    var coalesced = try single.coalesce(gpa);
+    try testing.expectEqual(single_ptr, coalesced.ptr);
+    try testing.expectEqual(@as(usize, 8), coalesced.capacity);
+    coalesced.deinit();
+    var four = try bufs_mut_of(&.{ "ab", "cd", "ef", "gh" }, &.{ 0, 0, 0, 0 });
+    var merged = try four.coalesce(gpa);
+    defer merged.deinit();
+    try testing.expectEqualStrings("abcdefgh", merged.bytes());
+}
+
+test "builder places pushed chunks between inline bytes" {
+    var builder: Builder = try .init(gpa, 6);
+    builder.put(u16, 99);
+    try builder.push(gpa, .from_static("payload"));
+    try builder.push(gpa, .empty);
+    builder.put(u32, 0xdeadbeef);
+    var bufs = try builder.finish(gpa);
+    try testing.expectEqual(@as(usize, 3), bufs.chunk_count());
+    try testing.expectEqualStrings("payload", bufs.chunk_at(1).?);
+    try expect_coalesced(&bufs, "\x00\x63payload\xde\xad\xbe\xef");
+    // Only pushes, nothing inline.
+    var pushed_only: Builder = try .init(gpa, 0);
+    try pushed_only.push(gpa, .from_static("a"));
+    try pushed_only.push(gpa, .from_static("b"));
+    var pieces = try pushed_only.finish(gpa);
+    try testing.expectEqual(@as(usize, 2), pieces.chunk_count());
+    try expect_coalesced(&pieces, "ab");
+    // An unfinished builder releases what it holds.
+    var abandoned: Builder = try .init(gpa, 4);
+    try abandoned.push(gpa, try frozen("held"));
+    abandoned.deinit(gpa);
+}
+
+fn expect_encode_iobufs_matches(comptime T: type, value: T) !void {
+    const expected = try codec.encode(T, gpa, value);
+    defer gpa.free(expected);
+    var bufs = try iobuf.encode_iobufs(T, gpa, value);
+    try expect_coalesced(&bufs, expected);
+}
+
+test "encode_iobufs matches encode (test_encode_iobufs_matches_encode)" {
+    try expect_encode_iobufs_matches(u64, 0x0102030405060708);
+    try expect_encode_iobufs_matches([]const u8, "inline bytes");
+    try expect_encode_iobufs_matches(struct { u8, bool }, .{ 7, true });
+    try expect_encode_iobufs_matches(IoBuf, .from_static("hello"));
+    try expect_encode_iobufs_matches(IoBuf, .empty);
+    var large: [300]u8 = @splat(9);
+    try expect_encode_iobufs_matches(IoBuf, .from_static(&large));
+}
+
+test "encode_iobufs keeps the pushed iobuf (test_encode_iobufs_keeps_pushed_iobuf)" {
+    var payload: IoBufMut = try .with_capacity(gpa, 512);
+    @memset(payload.spare(), 0xab);
+    payload.advance_mut(512);
+    const ptr = payload.ptr;
+    var value = payload.freeze();
+    var encoded = try iobuf.encode_iobufs(IoBuf, gpa, value);
+    value.deinit(gpa);
+    const prefix_len = codec.encode_size(usize, 512);
+    var prefix = try encoded.split_to(gpa, prefix_len);
+    prefix.deinit(gpa);
+    var chunk = try encoded.coalesce(gpa);
+    // The one remaining chunk is the original buffer, now its only handle.
+    var recovered = chunk.try_into_mut().?;
+    defer recovered.deinit();
+    try testing.expectEqual(ptr, recovered.ptr);
+}
