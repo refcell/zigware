@@ -1079,18 +1079,41 @@ fn quorum_certificate(
     parent: u64,
     payload: []const u8,
 ) !Certificate {
-    const Vote = if (kind == .notarization) Notarize else Finalize;
-    const proposal: @import("types.zig").Proposal(Digest) =
-        .init(.new(epoch, .new(view)), .new(parent), Sha256.hash(&.{payload}));
-    var votes: [16]Vote = undefined;
+    const all = [_]usize{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 };
     const quorum = utils.N3f1.quorum(@as(u32, @intCast(harness.schemes.len)));
-    assert(quorum <= votes.len);
-    for (votes[0..quorum], harness.schemes[0..quorum]) |*vote, *scheme| {
-        vote.* = (try Vote.sign(gpa, scheme, proposal)).?;
+    assert(quorum <= all.len);
+    return signed_certificate(harness, kind, view, parent, payload, all[0..quorum]);
+}
+
+/// A certificate of `kind` for `view` signed by the validators at `signers`; notarizations
+/// and finalizations name `parent` and the hash of `payload`, nullifications ignore both.
+fn signed_certificate(
+    harness: *Harness,
+    comptime kind: std.meta.Tag(Certificate),
+    view: u64,
+    parent: u64,
+    payload: []const u8,
+    signers: []const usize,
+) !Certificate {
+    const Vote = switch (kind) {
+        .notarization => Notarize,
+        .finalization => Finalize,
+        .nullification => @import("types.zig").Nullify(Scheme),
+    };
+    const round: consensus_types.Round = .new(epoch, .new(view));
+    const proposal: @import("types.zig").Proposal(Digest) =
+        .init(round, .new(parent), Sha256.hash(&.{payload}));
+    var votes: [16]Vote = undefined;
+    assert(signers.len <= votes.len);
+    assert(signers.len >= utils.N3f1.quorum(@as(u32, @intCast(harness.schemes.len))));
+    for (votes[0..signers.len], signers) |*vote, signer| {
+        const scheme = &harness.schemes[signer];
+        const subject = if (kind == .nullification) round else proposal;
+        vote.* = (try Vote.sign(gpa, scheme, subject)).?;
     }
     const Signed = @FieldType(Certificate, @tagName(kind));
     const scheme = &harness.schemes[0];
-    const signed = try Signed.from_votes(gpa, scheme, votes[0..quorum], parallel.sequential);
+    const signed = try Signed.from_votes(gpa, scheme, votes[0..signers.len], parallel.sequential);
     return @unionInit(Certificate, @tagName(kind), signed);
 }
 
@@ -1280,12 +1303,12 @@ fn split_views_scenario(ctx: Context) !void {
 /// and 3.
 fn inject_split(harness: *Harness, sender: *Net.Sender) !void {
     var certificates: [7]Certificate = .{
-        try split_certificate(harness, .notarization, 1, 0, "B_F"),
-        try split_certificate(harness, .finalization, 1, 0, "B_F"),
-        try split_certificate(harness, .notarization, 2, 1, "B_G1"),
-        try split_certificate(harness, .nullification, 2, 0, ""),
-        try split_certificate(harness, .notarization, 3, 1, "B_G2"),
-        try split_certificate(harness, .nullification, 3, 0, ""),
+        try quorum_certificate(harness, .notarization, 1, 0, "B_F"),
+        try quorum_certificate(harness, .finalization, 1, 0, "B_F"),
+        try quorum_certificate(harness, .notarization, 2, 1, "B_G1"),
+        try quorum_certificate(harness, .nullification, 2, 0, ""),
+        try quorum_certificate(harness, .notarization, 3, 1, "B_G2"),
+        try quorum_certificate(harness, .nullification, 3, 0, ""),
         undefined,
     };
     defer for (certificates[0..6]) |certificate| codec.free(Certificate, gpa, certificate);
@@ -1301,27 +1324,6 @@ fn inject_split(harness: *Harness, sender: *Net.Sender) !void {
 
 /// A certificate from the first quorum of validators (commonware signs with one more,
 /// `0..=quorum`; any quorum certifies the same).
-fn split_certificate(
-    harness: *Harness,
-    comptime kind: std.meta.Tag(Certificate),
-    view: u64,
-    parent: u64,
-    payload: []const u8,
-) !Certificate {
-    if (kind != .nullification) return quorum_certificate(harness, kind, view, parent, payload);
-    const Nullify = @import("types.zig").Nullify(Scheme);
-    var votes: [16]Nullify = undefined;
-    const quorum = utils.N3f1.quorum(@as(u32, @intCast(harness.schemes.len)));
-    assert(quorum <= votes.len);
-    for (votes[0..quorum], harness.schemes[0..quorum]) |*vote, *scheme| {
-        vote.* = (try Nullify.sign(gpa, scheme, .new(epoch, .new(view)))).?;
-    }
-    const Nullification = @import("types.zig").Nullification(Scheme);
-    const scheme = &harness.schemes[0];
-    const signed = try Nullification.from_votes(gpa, scheme, votes[0..quorum], parallel.sequential);
-    return .{ .nullification = signed };
-}
-
 /// Each honest validator holds exactly its group's certificates of views 2 and 3, and none
 /// voted to nullify view 4 yet.
 fn check_split(harness: *Harness) !void {
@@ -1431,6 +1433,10 @@ test "short term handoff vote tolerates slow certifiers" {
     _ = try run_seeded(0, slow_certifiers_scenario, .{ stable_terms(3, 2), .vote });
 }
 
+fn leader_of(schedule: Elector, view: u64) usize {
+    return schedule.elect(.new(epoch, .new(view)), {}).get();
+}
+
 /// Which honest validator leads first after the silent one in a certified-split DST.
 const SplitLeader = enum { group, lone };
 
@@ -1442,21 +1448,16 @@ const SplitRoles = struct { silent: usize, lone: usize, group: [2]usize };
 fn split_roles(first: SplitLeader) !SplitRoles {
     var schedule = try RoundRobin.default().build(gpa, 4);
     defer schedule.deinit(gpa);
-    const Leader = struct {
-        fn of(elector: Elector, view: u64) usize {
-            return elector.elect(.new(epoch, .new(view)), {}).get();
-        }
-    };
     const roles: SplitRoles = switch (first) {
         .group => .{
-            .silent = Leader.of(schedule, 10),
-            .group = .{ Leader.of(schedule, 11), Leader.of(schedule, 12) },
-            .lone = Leader.of(schedule, 13),
+            .silent = leader_of(schedule, 10),
+            .group = .{ leader_of(schedule, 11), leader_of(schedule, 12) },
+            .lone = leader_of(schedule, 13),
         },
         .lone => .{
-            .silent = Leader.of(schedule, 10),
-            .lone = Leader.of(schedule, 11),
-            .group = .{ Leader.of(schedule, 12), Leader.of(schedule, 13) },
+            .silent = leader_of(schedule, 10),
+            .lone = leader_of(schedule, 11),
+            .group = .{ leader_of(schedule, 12), leader_of(schedule, 13) },
         },
     };
     for (roles.group) |member| {
@@ -1484,16 +1485,16 @@ fn inject_certified_split(
     var payload: [8]u8 = undefined;
     const name = try std.fmt.bufPrint(&payload, "B_{d}", .{case.certified});
     const shared: [3]Certificate = .{
-        try split_certificate(harness, .notarization, 2, 1, "B_2"),
-        try split_certificate(harness, .finalization, 2, 1, "B_2"),
-        try split_certificate(harness, .notarization, case.certified, 2, name),
+        try quorum_certificate(harness, .notarization, 2, 1, "B_2"),
+        try quorum_certificate(harness, .finalization, 2, 1, "B_2"),
+        try quorum_certificate(harness, .notarization, case.certified, 2, name),
     };
     defer for (shared) |certificate| codec.free(Certificate, gpa, certificate);
     try inject(sender, null, shared[0]);
     try inject(sender, null, shared[1]);
     try inject(sender, keys[roles.lone], shared[2]);
     for (3..10) |view| {
-        const nullification = try split_certificate(harness, .nullification, view, 0, "");
+        const nullification = try quorum_certificate(harness, .nullification, view, 0, "");
         defer codec.free(Certificate, gpa, nullification);
         if (view > case.certified) {
             try inject(sender, null, nullification);
@@ -1590,4 +1591,204 @@ test "certified split heals when the lone holder leads first" {
 test "certified split heals with a displaced certified view" {
     const case: SplitCase = .{ .first = .group, .certified = 5 };
     _ = try run_seeded(0, certified_split_scenario, .{case});
+}
+
+/// The cross-term certified-split roles (terms of 5 views): `offline` leads terms 1, 5, and
+/// 9; `a`, `b`, and `c` lead terms 2, 3, and 4, then 6, 7, and 8.
+const CrossTermRoles = struct { offline: usize, a: usize, b: usize, c: usize };
+
+fn cross_term_schedule() RoundRobin {
+    const term: consensus_types.TermLength = .new(utils.NonZero(u32).init(5).?);
+    return RoundRobin.default().with_term(term, .from_secs(12), .new(0));
+}
+
+/// commonware picks epoch 2 so that its sorted honest indices lead terms 2, 3, and 4. This
+/// harness runs epoch 333, so naming each honest validator by the term it leads keeps
+/// commonware's schedule.
+fn cross_term_roles() !CrossTermRoles {
+    var schedule = try cross_term_schedule().build(gpa, 4);
+    defer schedule.deinit(gpa);
+    const roles: CrossTermRoles = .{
+        .offline = leader_of(schedule, 1),
+        .a = leader_of(schedule, 6),
+        .b = leader_of(schedule, 11),
+        .c = leader_of(schedule, 16),
+    };
+    // The offline validator leads terms 1 and 5, and every other term start is honest.
+    try testing.expectEqual(roles.offline, leader_of(schedule, 21));
+    for ([_]u64{ 6, 11, 16, 26, 31, 36 }) |view| {
+        try testing.expect(leader_of(schedule, view) != roles.offline);
+    }
+    // The view-26 leader must hold view 22's certification.
+    try testing.expect(leader_of(schedule, 26) != roles.c);
+    // The halt detector ends when term 9 returns to the offline validator.
+    try testing.expectEqual(roles.offline, leader_of(schedule, 41));
+    assert(roles.a != roles.b and roles.b != roles.c and roles.a != roles.c);
+    return roles;
+}
+
+/// Sends `certificate` to each validator in `targets`, then frees it.
+fn inject_to(
+    harness: *Harness,
+    sender: *Net.Sender,
+    certificate: Certificate,
+    targets: []const usize,
+) !void {
+    defer codec.free(Certificate, gpa, certificate);
+    assert(targets.len > 0);
+    for (targets) |target| try inject(sender, harness.keys()[target], certificate);
+}
+
+/// Term 1's chain (views 1 and 2) reaches `b` and `c`; `a` only learns the term was abandoned
+/// (at view 1 when backfill is suppressed, else at view 3). Everyone nullifies terms 2 to 4
+/// at their starts.
+fn inject_term_one(
+    harness: *Harness,
+    sender: *Net.Sender,
+    roles: CrossTermRoles,
+    suppress_backfill: bool,
+) !void {
+    const r = roles;
+    const followers = [_]usize{ r.b, r.c };
+    const signers = [_]usize{ r.b, r.c, r.offline };
+    const a_skip: u64 = if (suppress_backfill) 1 else 3;
+    const v1 = try signed_certificate(harness, .notarization, 1, 0, "V1", &signers);
+    try inject_to(harness, sender, v1, &followers);
+    const v2 = try signed_certificate(harness, .notarization, 2, 1, "V2", &signers);
+    try inject_to(harness, sender, v2, &followers);
+    const v3 = try signed_certificate(harness, .nullification, 3, 0, "", &signers);
+    try inject_to(harness, sender, v3, &followers);
+    const a_signers = [_]usize{ r.a, r.c, r.offline };
+    const skip = try signed_certificate(harness, .nullification, a_skip, 0, "", &a_signers);
+    try inject_to(harness, sender, skip, &.{ r.a, r.b });
+    const honest = [_]usize{ r.a, r.b, r.c };
+    for ([_]u64{ 6, 11, 16 }) |view| {
+        const abandoned = try signed_certificate(harness, .nullification, view, 0, "", &honest);
+        try inject_to(harness, sender, abandoned, &honest);
+    }
+}
+
+/// Term 5's chain (views 21 and 22; view 21 names genesis, so `a` can vote without term 1)
+/// reaches `a` and `b`; `c` only learns the term was abandoned (at view 21 when backfill is
+/// suppressed, else at view 23).
+fn inject_term_five(
+    harness: *Harness,
+    sender: *Net.Sender,
+    roles: CrossTermRoles,
+    suppress_backfill: bool,
+) !void {
+    const r = roles;
+    const followers = [_]usize{ r.a, r.b };
+    const signers = [_]usize{ r.a, r.b, r.offline };
+    const c_skip: u64 = if (suppress_backfill) 21 else 23;
+    const v21 = try signed_certificate(harness, .notarization, 21, 0, "V21", &signers);
+    try inject_to(harness, sender, v21, &followers);
+    const v22 = try signed_certificate(harness, .notarization, 22, 21, "V22", &signers);
+    try inject_to(harness, sender, v22, &followers);
+    const c_signers = [_]usize{ r.a, r.c, r.offline };
+    const skip = try signed_certificate(harness, .nullification, c_skip, 0, "", &c_signers);
+    try inject_to(harness, sender, skip, &.{r.c});
+    const v23 = try signed_certificate(harness, .nullification, 23, 0, "", &signers);
+    try inject_to(harness, sender, v23, &followers);
+}
+
+/// Before the partition ends: `a` certified only view 22, `c` only view 2, `b` both, and
+/// nobody finalized.
+fn check_cross_term_split(harness: *Harness, roles: CrossTermRoles) !void {
+    for (0..4) |index| {
+        const reporter = &(harness.honest(index) orelse continue).reporter;
+        try testing.expectEqual(index != roles.a, reporter.certified(.new(2)));
+        try testing.expectEqual(index != roles.c, reporter.certified(.new(22)));
+        try testing.expectEqual(0, reporter.latest_finalized().get());
+    }
+}
+
+/// Polls each second until every honest validator finalizes view 26 (true) or nullifies a
+/// view of term 9, which proves each led a full term without finalizing (false).
+fn wait_cross_term(harness: *Harness) !bool {
+    // commonware's timed runner allows 300 s.
+    for (0..300) |_| {
+        var finalized = true;
+        var halted = true;
+        for (0..4) |index| {
+            const reporter = &(harness.honest(index) orelse continue).reporter;
+            finalized = finalized and reporter.latest_finalized().get() >= 26;
+            halted = halted and reporter.latest_nullified().get() >= 41;
+        }
+        if (finalized) return true;
+        if (halted) return false;
+        try harness.ctx.sleep(.fromSeconds(1));
+    }
+    return error.Timeout;
+}
+
+/// On a halt, each deprived validator fetched its proposal parent from an honest proposer
+/// but lacks the notarization before it, so it cannot certify the parent.
+fn check_cross_term_halt(harness: *Harness, roles: CrossTermRoles) !void {
+    const a = &harness.validators[roles.a].reporter;
+    try testing.expect(a.notarized(.new(2)));
+    try testing.expect(!a.notarized(.new(1)));
+    try testing.expect(!a.certified(.new(2)));
+    const c = &harness.validators[roles.c].reporter;
+    try testing.expect(c.notarized(.new(22)));
+    try testing.expect(!c.notarized(.new(21)));
+    try testing.expect(!c.certified(.new(22)));
+}
+
+/// commonware `stable_leader_cross_term_certified_split`: with terms of 5 views, the offline
+/// validator leads terms 1 and 5, and each honest validator misses one of the two certified
+/// chains. Once linked, recursive parent repair must let every honest validator finalize
+/// view 26 before term 9 returns to the offline leader.
+fn cross_term_split_scenario(ctx: Context, suppress_backfill: bool) !void {
+    const roles = try cross_term_roles();
+    var harness: Harness = undefined;
+    try harness.start_network(ctx, 4, null, .absent, .{
+        .leader_ms = 10_000,
+        .certification_ms = 11_000,
+        .retry_ms = 10_000,
+        .skip_ms = 12_000,
+    });
+    defer harness.deinit();
+    harness.round_robin = cross_term_schedule();
+    // Proposals wait so the engines process the preloaded certificates first.
+    harness.propose_latency = .{ .mean = 250, .std_dev = 50 };
+    const link = link_ms(10, 0, 1.0);
+    var injector = try start_injector(&harness, link);
+    defer injector.deinit();
+    try inject_term_one(&harness, &injector.sender, roles, suppress_backfill);
+    try inject_term_five(&harness, &injector.sender, roles, suppress_backfill);
+    // Engines start before the partition ends, so their preload rebroadcasts are lost.
+    for (0..4) |index| {
+        if (index != roles.offline) try harness.start_validator(index);
+    }
+    try ctx.sleep(.fromSeconds(2));
+    try check_cross_term_split(&harness, roles);
+    try harness.link_all(link, null);
+    const finalized = try wait_cross_term(&harness);
+    for (0..4) |index| {
+        const reporter = &(harness.honest(index) orelse continue).reporter;
+        reporter.assert_no_faults();
+        reporter.assert_no_invalid();
+    }
+    const blocked = try harness.oracle().blocked(gpa);
+    defer gpa.free(blocked);
+    try testing.expectEqual(0, blocked.len);
+    if (!finalized) {
+        try check_cross_term_halt(&harness, roles);
+        return error.TestUnexpectedResult; // Every honest leader exhausted a term.
+    }
+    for (0..4) |index| {
+        const reporter = &(harness.honest(index) orelse continue).reporter;
+        try testing.expect(reporter.latest_finalized().get() >= 26);
+    }
+    const c = &harness.validators[roles.c].reporter;
+    try testing.expect(c.certified(.new(21)) and c.certified(.new(22)));
+}
+
+test "stable leader cross-term certified split recovers" {
+    _ = try run_seeded(0, cross_term_split_scenario, .{true});
+}
+
+test "stable leader cross-term certified split is backfillable" {
+    _ = try run_seeded(0, cross_term_split_scenario, .{false});
 }

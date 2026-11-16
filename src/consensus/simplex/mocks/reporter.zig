@@ -335,6 +335,19 @@ pub fn Reporter(comptime S: type, comptime D: type) type {
             return self.nullifications.contains(view);
         }
 
+        /// The highest view with a reported nullification (zero when none).
+        pub fn latest_nullified(self: *Self) View {
+            self.mutex.lockUncancelable(self.io);
+            defer self.mutex.unlock(self.io);
+            var highest: View = .zero();
+            var views = self.nullifications.keyIterator();
+            while (views.next()) |view| {
+                if (view.get() > highest.get()) highest = view.*;
+            }
+            assert(highest.get() == 0 or self.nullifications.contains(highest));
+            return highest;
+        }
+
         pub fn assert_no_faults(self: *Self) void {
             assert(self.faults.items.len == 0); // Faults detected.
         }

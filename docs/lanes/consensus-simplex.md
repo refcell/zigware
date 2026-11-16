@@ -238,9 +238,10 @@ resolver; those lanes are running, so do the types first and the actors as they 
   round's seed. The four slow-certifier DSTs (stable leader optimistic, stable leader,
   rotating, and short-term handoff votes; slow builds) finalize 200 views with no
   nullification. The three certified-split DSTs (group-led view, lone holder leads
-  first, displaced certified view) heal through targeted repair. Next: the cross-term
-  certified split, twins pipelined handoff and per-scheme twins, hailstorm, and the rest,
-  seeded.
+  first, displaced certified view) heal through targeted repair, and both cross-term
+  certified splits (terms of 5 views; backfill suppressed or allowed) finalize view 26
+  through recursive parent repair. Next: twins pipelined handoff and per-scheme twins,
+  hailstorm, observer, and the rest, seeded.
 - [ ] Tracing: actor events are done (voter, batcher, resolver, engine); spans and the
   voter state machine's events follow.
 - [x] Fuzz targets (commonware consensus/fuzz): owned by the crypto lane in
@@ -300,3 +301,5 @@ resolver; those lanes are running, so do the types first and the actors as they 
 - 2026-11-16: the slow-certifier DSTs; the Harness takes the round-robin terms, the handoff
   decision, and verify/certify latencies.
 - 2026-11-16: the certified-split DSTs; the mock reporter answers `certified(view)`.
+- 2026-11-16: the cross-term certified-split DSTs (commonware's epoch 2 schedule is kept by
+  naming each honest validator by the term it leads).
