@@ -11,7 +11,58 @@ const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const codec = @import("codec");
 const utils = @import("utils");
+const runtime = @import("runtime");
 const freezer = @import("../../freezer/mod.zig");
+const storage = @import("storage.zig");
+
+pub const Archive = storage.Archive;
+
+/// Configuration for an immutable `Archive(K, V)`.
+pub fn Config(comptime V: type) type {
+    return struct {
+        /// Partition of the commit record (freezer checkpoint and ordinal section bitmaps).
+        metadata_partition: []const u8,
+        /// Partition of the freezer table.
+        freezer_table_partition: []const u8,
+        /// Initial number of freezer table entries (a power of two).
+        freezer_table_initial_size: u32,
+        /// Items added to half the table entries since the last resize before the next.
+        freezer_table_resize_frequency: u8,
+        /// Table entries split per sync during a resize.
+        freezer_table_resize_chunk_size: u32,
+        /// Partition of the freezer key journal.
+        freezer_key_partition: []const u8,
+        /// Page cache of the freezer key journal.
+        freezer_key_cache_ref: *runtime.buffer.paged.CacheRef,
+        /// Partition of the freezer value journal.
+        freezer_value_partition: []const u8,
+        /// Target size of each freezer value section.
+        freezer_value_target_size: u64,
+        /// Optional zstd compression level for values. Keep the choice between none and some
+        /// fixed for the life of the archive.
+        freezer_value_compression: ?u8 = null,
+        /// Partition of the ordinal (index to freezer cursor).
+        ordinal_partition: []const u8,
+        /// Items per ordinal section, fixed for the life of the data.
+        items_per_section: u64,
+        /// Write buffer of the freezer key journal.
+        freezer_key_write_buffer: usize,
+        /// Write buffer of the freezer value journal.
+        freezer_value_write_buffer: usize,
+        /// Write buffer of each ordinal blob.
+        ordinal_write_buffer: usize,
+        /// Read buffer for replaying the freezer table and the ordinal.
+        replay_buffer: usize,
+        /// Codec configuration of values.
+        codec_config: codec.Cfg(V),
+
+        pub fn validate(config: @This()) void {
+            assert(config.items_per_section > 0);
+            assert(config.replay_buffer > 0 and config.ordinal_write_buffer > 0);
+            assert(std.math.isPowerOfTwo(config.freezer_table_initial_size));
+        }
+    };
+}
 
 /// The ordinal's committed-record bitmap (commonware's default `BitMap`).
 pub const BitMap = utils.bitmap.DefaultBitMap;
@@ -81,6 +132,8 @@ pub const Record = union(enum) {
 test {
     std.testing.refAllDecls(@This());
     _ = @import("conformance_test.zig");
+    _ = @import("tests.zig");
+    _ = @import("fuzz_test.zig");
 }
 
 test "immutable archive record round trip" {

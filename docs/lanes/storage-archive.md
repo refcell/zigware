@@ -28,10 +28,13 @@ storage-journal (thread T-01a1d58d-a981-75c2-966d-93dcd484f46b).
   key table (`utils.handles.Table`), put_multi; `StorageConformance<ArchivePrunableWorkload>`
   (128 cases) matches; ported tests (shared archive tests included) with crash recovery;
   `archive_prunable_operations` and `archive_prunable_recovery` fuzz targets.
-- [ ] immutable archive (freezer + ordinal + metadata);
-  `StorageConformance<ArchiveImmutableWorkload>`, its tests, `archive_immutable_recovery`
-  fuzz.
-- [ ] Fuzz targets (storage/fuzz entries for these modules) and metrics through
+- [x] immutable archive (freezer + ordinal + metadata commit record);
+  `StorageConformance<ArchiveImmutableWorkload>` (128 cases) matches; ported tests (shared
+  archive tests included) with crash recovery and interrupted destroy;
+  `archive_immutable_recovery` fuzz.
+- [x] Fuzz targets (storage/fuzz entries for these modules: `cache_operations`,
+  `ordinal_operations`, `freezer_operations`, `archive_prunable_operations`,
+  `archive_prunable_recovery`, `archive_immutable_recovery`) and metrics through
   `runtime.telemetry.metrics`.
 
 ## Public API (on main)
@@ -57,6 +60,12 @@ storage-journal (thread T-01a1d58d-a981-75c2-966d-93dcd484f46b).
   `missing_items(start, out)`, `ranges`, `ranges_from` (`[]const rmap.Range`),
   `first_index`, `last_index`, `deinit`, `destroy`. Metrics `items_tracked`, `keys_tracked`,
   `indices_pruned`, `unnecessary_reads`, `gets`, `has`, `syncs`.
+- `storage.archive.immutable`: `Archive(K, V)` with `init(gpa, storage, scope, Config(V))`,
+  `put` (a no-op on a stored index), `put_sync`, `get(.{ .index = i } | .{ .key = &k })`,
+  `has`, `sync`, `start_sync`, `next_gap`, `missing_items(start, out)`, `ranges`,
+  `ranges_from`, `first_index`, `last_index`, `deinit`, `destroy`. Freezer and ordinal
+  metrics register under the scope's `freezer` and `ordinal` children; the archive's own
+  `gets`, `has`, `syncs` under the scope.
 
 ## Decisions
 - Storage conformance: `StorageConformance<W>` commits seeds directly on
@@ -86,6 +95,12 @@ storage-journal (thread T-01a1d58d-a981-75c2-966d-93dcd484f46b).
   recovery fuzz injects faults with the storage mock's mutation budget and a crash (no torn
   writes or delayed syncs) and checks retained entries against synced ones, per-section
   prefixes, the range helpers, and a second reopen.
+- immutable archive: the metadata commit record is opened first and drives both stores
+  (no committed checkpoint means an empty freezer; omitted ordinal sections are removed).
+  `sync` syncs the freezer, then the ordinal, then commits the metadata (commonware joins the
+  first two). The interrupted-destroy test runs every removal budget up to a full destroy
+  instead of sampling removal faults by seed. Its recovery fuzz models faults with the storage
+  mock's mutation budget and a crash, including a faulted recovery attempt.
 - Tests that commonware runs at 100,000 and 5,000 items (`slow` group) run at 2,000 and 600.
 
 ## Log
@@ -99,3 +114,5 @@ storage-journal (thread T-01a1d58d-a981-75c2-966d-93dcd484f46b).
   hash, and the `freezer_operations` fuzz target.
 - 2026-11-16: prunable archive with its ported tests, storage conformance hash, and the
   `archive_prunable_operations` and `archive_prunable_recovery` fuzz targets.
+- 2026-11-16: immutable archive with its ported tests, storage conformance hash, and the
+  `archive_immutable_recovery` fuzz target. Backlog complete.
