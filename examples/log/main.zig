@@ -54,7 +54,7 @@ pub const Params = struct {
     pub const Context = production.runner.Context;
     pub const Scheme = application.Scheme(Sha256.Digest);
     pub const Elector = simplex.elector.RoundRobinElector;
-    pub const Blocker = log.Blocker;
+    pub const Blocker = Net.Oracle;
     pub const Digest = Sha256.Digest;
     pub const Automaton = *Application;
     pub const Relay = *Application;
@@ -63,29 +63,7 @@ pub const Params = struct {
     pub const Sender = Net.Sender;
     pub const Receiver = Net.Receiver;
 };
-const log = @This();
 const Engine = simplex.Engine(Params);
-
-/// Discovery's oracle as the blocker simplex takes. The resolver opens the blocked-peer
-/// subscription with `try`, as on `p2p.simulated`, while discovery's cannot fail.
-pub const Blocker = struct {
-    pub const PublicKey = ed25519.PublicKey;
-    const Subscription = Net.Tracker.BlockedSubscription;
-
-    oracle: Net.Oracle,
-
-    pub fn block(blocker: Blocker, peer: ed25519.PublicKey) zigware.actor.Feedback {
-        return blocker.oracle.block(peer);
-    }
-
-    pub fn blocked(blocker: Blocker) !Subscription {
-        return blocker.oracle.blocked();
-    }
-
-    comptime {
-        zigware.p2p.assert_blocker(Blocker);
-    }
-};
 const Channel = simplex.engine.Channel(Params);
 
 /// The configuration commonware's `main` builds before starting the runtime.
@@ -236,7 +214,7 @@ fn run(
     defer elector.deinit(gpa);
     const engine_ctx = ctx.child("engine");
     var engine: Engine = undefined;
-    try engine.init(engine_ctx, engine_config(scheme, elector, .{ .oracle = network.oracle() }, .{
+    try engine.init(engine_ctx, engine_config(scheme, elector, network.oracle(), .{
         .app = &app,
         .reporter = &reporter,
         .page_cache = &page_cache,
@@ -261,7 +239,7 @@ const Borrowed = struct {
 fn engine_config(
     scheme: Scheme,
     elector: simplex.elector.RoundRobinElector,
-    blocker: Blocker,
+    blocker: Net.Oracle,
     borrowed: Borrowed,
 ) Engine.Config {
     return .{

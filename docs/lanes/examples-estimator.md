@@ -56,9 +56,6 @@ statistics, output, CLI) and run against a minimal in-lane stand-in, then switch
   (#3324); the Metrics pane shows `network_tracker_directory_connected` samples, one per
   connected friend, instead.
 
-- log's simplex `Blocker` wraps discovery's `Oracle`: simplex's resolver opens the
-  blocked-peer subscription with `try` (as `p2p.simulated` returns it), while discovery's
-  `Oracle.blocked()` cannot fail. Drop the wrapper once the two agree.
 - log's Logs pane is empty: zigware's p2p and consensus record no tracing events yet, and,
   as in commonware, `main`'s own events come before the GUI installs its writer.
 - log's application events are strings in tracing (`%view`, `?payload`, `hex(..)`), so its
@@ -101,7 +98,7 @@ statistics, output, CLI) and run against a minimal in-lane stand-in, then switch
   application finalize on simplex over p2p.simulated.
 - [x] Binary on the production runner over discovery with `--storage-dir`; 4 local
   validators finalize over TCP, and a restarted one resumes from its journal.
-- [ ] Demo recipe and recording (4 validators showing finalizations).
+- [x] Demo recipe and recording: docs/assets/log-demo.{gif,mp4} (4 validators in tmux).
 
 ### bridge (commonware `examples/bridge`)
 - [ ] Port after log's demo.
@@ -118,3 +115,4 @@ statistics, output, CLI) and run against a minimal in-lane stand-in, then switch
 - 2026-11-16: flood runs on the production runner over discovery, with local.sh and demo.sh.
 - 2026-11-16: chat demo recorded; shared `examples/ui` (tui, keys, clock, logger, clap).
 - 2026-11-16: log ported and running on 4 local validators over discovery.
+- 2026-11-16: log demo recorded; production storage now reports a canceled write as Canceled.

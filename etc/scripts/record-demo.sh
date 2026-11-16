@@ -77,6 +77,38 @@ if [ "${DEMO_SESSION:-}" = "1" ]; then
       t attach -t chat || true
       wait
       ;;
+    log)
+      if [ -n "$(find src examples/log examples/ui build.zig -newer zig-out/bin/log -print \
+        -quit 2>/dev/null || echo stale)" ] || [ ! -x zig-out/bin/log ]; then
+        zig build -Doptimize=ReleaseFast >/dev/null
+      fi
+      # Four validators in a 2x2 tmux grid (its own server, no user config), from empty storage.
+      log=$(realpath zig-out/bin/log)
+      rm -rf /tmp/zigware-log-demo
+      t() { tmux -L zigware-demo -f /dev/null "$@"; }
+      validator() {
+        local id=$1 flags=${2:-}
+        echo "$log $flags --me $id@300$id --participants 0,1,2,3 \
+          --storage-dir /tmp/zigware-log-demo/$id"
+      }
+      boot='--bootstrappers 0@127.0.0.1:3000'
+      t kill-server 2>/dev/null || true
+      t new-session -d -s log -x 250 -y 50 "$(validator 0)"
+      t set-option -g status off
+      t split-window -h -t log "$(validator 1 "$boot")"
+      t split-window -v -t log "$(validator 3 "$boot")"
+      t select-pane -t log -L
+      t split-window -v -t log "$(validator 2 "$boot")"
+      (
+        sleep 11
+        # Detach first, so the recording ends on the validators' frames: killing the server
+        # closes the panes one by one and tmux redraws before it leaves the screen.
+        t detach-client -s log
+      ) &
+      t attach -t log || true
+      wait
+      t kill-server
+      ;;
     *) echo "unknown demo: $name" >&2; exit 1 ;;
   esac
   exit 0
@@ -85,17 +117,21 @@ fi
 case $name in
   flood) size=150x40 ;;
   chat) size=200x50 ;;
+  log) size=250x50 ;;
   *) size=104x40 ;;
 esac
 DEMO_SESSION=1 TERM=xterm-256color asciinema rec --overwrite --quiet --output-format asciicast-v2 --window-size "$size" \
   --command "$0 $name" "$out.cast"
-if [ "$name" = chat ]; then
-  # End on the chat, not tmux's exit screen: cut where tmux leaves the alternate screen.
+if [ "$name" = chat ] || [ "$name" = log ]; then
+  # End on the panes, not tmux's exit screen: cut where tmux leaves the alternate screen.
   awk 'index($0, "\\u001b[?1049l") { exit } { print }' "$out.cast" >"$out.cast.cut"
   mv "$out.cast.cut" "$out.cast"
 fi
-agg --theme monokai --font-size 16 --idle-time-limit 3 --last-frame-duration 6 \
-  "$out.cast" "$out.gif"
+# log redraws four wide, busy panes: a smaller font and frame rate keep its gif near 1 MB.
+font=16 fps=30
+[ "$name" = log ] && font=12 fps=6
+agg --theme monokai --font-size "$font" --idle-time-limit 3 --last-frame-duration 6 \
+  --fps-cap "$fps" "$out.cast" "$out.gif"
 ffmpeg -y -loglevel error -i "$out.gif" -movflags faststart -pix_fmt yuv420p \
   -vf 'fps=30,scale=trunc(iw/2)*2:trunc(ih/2)*2' "$out.mp4"
 rm "$out.cast"
