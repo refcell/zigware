@@ -16,6 +16,8 @@ const Io = std.Io;
 const yaml = @import("../yaml.zig");
 const IpAddr = @import("../ip.zig").IpAddr;
 
+pub const utils = @import("utils.zig");
+
 pub const Error = yaml.Error;
 pub const WriteError = yaml.Emitter.WriteError;
 
@@ -414,5 +416,6 @@ fn write_storage(e: *yaml.Emitter, size: i32, class: []const u8, iops: ?i32) Wri
 }
 
 test {
+    std.testing.refAllDecls(@This());
     _ = @import("mod_test.zig");
 }

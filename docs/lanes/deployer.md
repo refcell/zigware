@@ -41,7 +41,7 @@ test vectors. Tests never call AWS and never hold credentials.
 - [x] Config types and YAML: `Config`, `InstanceConfig`, `MonitoringConfig`, `PortConfig`,
   `BandwidthWeighting`, `Host`, `Hosts`, `Ips`, `Metadata`, `Architecture`, constants
   (`mod.rs` test). Unblocks flood's `setup`.
-- [ ] `utils.rs` pure helpers (SSH/SCP targets, attach exit codes, CIDR) with their tests.
+- [x] `utils.rs` pure helpers (SSH/SCP targets, attach exit codes, CIDR) with their tests.
 - [ ] `services.rs`: generated service files, install scripts, and S3 keys (10 tests).
 - [ ] `attach.rs` host lookup (4 tests); `create.rs` validation and AZ-group planning (24
   tests); `ec2.rs` pure logic (12 tests).
