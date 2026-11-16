@@ -51,6 +51,7 @@ pub const mocks = struct {
     pub const impersonator = @import("mocks/impersonator.zig");
     pub const outdated = @import("mocks/outdated.zig");
     pub const equivocator = @import("mocks/equivocator.zig");
+    pub const reconfigurer = @import("mocks/reconfigurer.zig");
     pub const wrapped = @import("mocks/wrapped.zig");
 };
 

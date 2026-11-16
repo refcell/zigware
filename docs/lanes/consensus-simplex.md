@@ -59,7 +59,8 @@ resolver; those lanes are running, so do the types first and the actors as they 
 - `consensus.simplex.limits.max_payload_size(S, D, participants)`.
 - `consensus.simplex.config`: `Config(P)` (P declares `Scheme`, `Elector`, `Blocker`,
   `Digest`, `Automaton`, `Relay`, `Reporter`, `Strategy`;
-  `check(gpa, rng) !?[]const u8`, `assert_valid(gpa, rng)`), `Floor(S, D)`, `SkipPolicy`, `SkipBudget`, `ForwardPolicy`.
+  `check(gpa, rng) !?[]const u8`, `assert_valid(gpa, rng)`), `Floor(S, D)`, `SkipPolicy`,
+  `SkipBudget`, `ForwardPolicy`.
 - `consensus.simplex.metrics`: label sets `Peer(P)`, `Leader(P)`, `Timeout(P)` with
   `TimeoutReason`, `Outbound`, `Inbound(P)` with `MessageType`, `HandoffEvent`,
   `HandoffAbandoned`; enum labels print commonware's variant names.
@@ -109,7 +110,8 @@ resolver; those lanes are running, so do the types first and the actors as they 
   `wait_for_finalized`, `finalized`, `latest_finalized`, `votes(view)` signer bitmaps,
   `notarized`, `nullified`, `max_nullify_view`, `fault_list`, `assert_no_faults`,
   `assert_no_invalid`); Byzantine `conflicter.Conflicter(S, H)`, `nuller.Nuller(S, H)`,
-  `impersonator.Impersonator(S, H)`, and `outdated.Outdated(S, H)` (`run(sender, receiver)`
+  `impersonator.Impersonator(S, H)`, `outdated.Outdated(S, H)`, and
+  `reconfigurer.Reconfigurer(S, H)` (`run(sender, receiver)`
   on the vote channel), `equivocator.Equivocator(S, H, P, E)` (`run(votes,
   certificates)`), and `wrapped.Scheme(Inner)` with `Behavior` (`honest`,
   `corrupt_signature`, `recovery_failure`), a by-value wrapper of a certificate scheme.
@@ -190,14 +192,15 @@ resolver; those lanes are running, so do the types first and the actors as they 
 - [ ] Port the rest of state.rs's tests (13 of 141), the resolver actor.rs tests, and the
   voter/resolver ingress tests; add actor metrics. (Resolver state.rs: all 23 done.)
 - [ ] simplex mod.rs tests (ed25519, round robin). Done: all_online (Debug runs 50 views
-  where commonware runs 100), partition, slow_and_lossy_links, determinism, conflicter,
-  nuller, impersonator, invalid (2 seeds each; commonware runs 5 for invalid), outdated,
-  backfill, unclean_shutdown (100 views across journal-recovering restarts), one_offline
-  (its leader-labelled metrics wait on the actor metrics), slow_validator, all_recovery,
-  all_crash_after_nullify, equivocator, received_certificates_are_reported, and
-  survives_burst, and engine_shutdown (abort and graceful; commonware's running-task count
-  waits on the runtime's task metrics), and attributable_reporter_filtering. Next: reconfigurer,
-  nullify_only, split views, certified splits, twins, hailstorm, and the rest, seeded.
+  where commonware runs 100), partition, slow_and_lossy_links, determinism, the Byzantine
+  conflicter, nuller, impersonator, reconfigurer, invalid (2 seeds each, 20 or 50 views;
+  commonware runs 5 seeds of 50), outdated, equivocator, backfill, unclean_shutdown (100
+  views across journal-recovering restarts), one_offline (its leader-labelled metrics wait
+  on the actor metrics), slow_validator, all_recovery, all_crash_after_nullify,
+  received_certificates_are_reported, survives_burst, engine_shutdown (abort and graceful;
+  commonware's running-task count waits on the runtime's task metrics), and
+  attributable_reporter_filtering. Next: nullify_only with split views, certified splits,
+  twins, hailstorm, and the rest, seeded.
 - [ ] Fuzz targets (commonware consensus/fuzz).
 
 ## Log
@@ -240,3 +243,4 @@ resolver; those lanes are running, so do the types first and the actors as they 
   DSTs (abort and graceful stop).
 - 2026-11-16: scheme/reporter.rs (AttributableReporter, all 6 tests) and the
   attributable_reporter_filtering DST; every DST engine reports through the wrapper.
+- 2026-11-16: Byzantine reconfigurer mock with its DST.

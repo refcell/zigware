@@ -48,6 +48,7 @@ const Outdated = @import("mocks/outdated.zig").Outdated(Scheme, Sha256);
 const Elector = elector_mod.RoundRobinElector;
 const Equivocator = @import("mocks/equivocator.zig").Equivocator(Scheme, Sha256, Key, Elector);
 const IoRng = @import("actors/context.zig").IoRng;
+const Reconfigurer = @import("mocks/reconfigurer.zig").Reconfigurer(Scheme, Sha256);
 const Duration = utils.Duration;
 const Link = p2p.simulated.Link;
 const View = consensus_types.View;
@@ -88,12 +89,19 @@ const Role = enum {
     impersonator,
     outdated,
     equivocator,
+    reconfigurer,
 
     /// Whether validator 0 runs a Byzantine mock instead of the engine.
     fn is_byzantine(role: Role) bool {
         return switch (role) {
             .honest, .absent, .slow, .invalid => false,
-            .conflicter, .nuller, .impersonator, .outdated, .equivocator => true,
+            .conflicter,
+            .nuller,
+            .impersonator,
+            .outdated,
+            .equivocator,
+            .reconfigurer,
+            => true,
         };
     }
 };
@@ -107,6 +115,7 @@ const Byzantine = struct {
     outdated: Outdated,
     elector: Elector,
     equivocator: Equivocator,
+    reconfigurer: Reconfigurer,
     channels: [3]Channel,
     handle: runtime.context.Handle(void),
 
@@ -120,6 +129,7 @@ const Byzantine = struct {
             .nuller => byzantine.nuller.run(&votes.sender, &votes.receiver),
             .impersonator => byzantine.impersonator.run(&votes.sender, &votes.receiver),
             .outdated => byzantine.outdated.run(&votes.sender, &votes.receiver),
+            .reconfigurer => byzantine.reconfigurer.run(&votes.sender, &votes.receiver),
             .equivocator => {
                 const certificates = &byzantine.channels[1].receiver;
                 byzantine.equivocator.run(&votes.sender, certificates);
@@ -258,8 +268,10 @@ const Harness = struct {
         const peers = harness.keys();
         _ = harness.oracle().manager().track(0, .init_primary(.init(peers)));
         if (link) |value| try harness.link_all(value, null);
-        // commonware's equivocator test keeps the default; its other Byzantine tests set it.
-        harness.track_historical_votes = role.is_byzantine() and role != .equivocator;
+        // commonware's equivocator and reconfigurer tests keep the default; its other
+        // Byzantine tests set it.
+        harness.track_historical_votes = role.is_byzantine() and
+            role != .equivocator and role != .reconfigurer;
         harness.mailbox_size = 1024;
         harness.stall_proposals = false;
         harness.verify_reports = false;
@@ -282,6 +294,7 @@ const Harness = struct {
             .outdated = .init(gpa, scheme, .new(40)),
             .elector = elector,
             .equivocator = .init(gpa, io, scheme, elector, epoch, &harness.relay),
+            .reconfigurer = .init(gpa, scheme),
             .channels = try register(harness.oracle(), key),
             .handle = undefined,
         };
@@ -670,6 +683,11 @@ test "nuller is reported and blocked" {
     for (0..2) |seed| {
         _ = try run_seeded(seed, byzantine_scenario, .{ Role.nuller, &.{.nullify_finalize} });
     }
+}
+
+test "reconfigurer is blocked without faults" {
+    // Votes for the next epoch are not faults; validator 0 is blocked for the mismatch.
+    for (0..2) |seed| _ = try run_seeded(seed, byzantine_scenario, .{ Role.reconfigurer, &.{} });
 }
 
 test "impersonator is blocked without faults" {
