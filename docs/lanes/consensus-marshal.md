@@ -110,9 +110,8 @@ then the core and standard actors as those packages land.
   tens of seconds per run); `-Dslow-tests` or a release build runs every scheme. Scenario
   fixtures draw their keys from the runtime RNG as commonware's do; the restart and
   admission tests use a fixed RNG, as commonware's `test_rng`.
-- `distinct states` compares neighbors from different scheme families only: the Zig
-  auditor hashes the task schedule alone (commonware's also hashes RNG draws and other
-  runtime events), and MinPk and MinSig runs of one BLS scheme schedule identically.
+- `distinct states` compares every neighboring scheme, as commonware does, now that the
+  runtime auditor records rand, storage, and network events (220473e).
 - The engine owns `config.reporter` and releases it in `destroy`. Broadcasts that the network
   refuses are dropped (rebroadcasts retry), as in commonware.
 - The deterministic runtime freed tasks with stale timeout alarms still queued, which crashed
@@ -147,8 +146,7 @@ then the core and standard actors as those packages land.
 - [x] marshal core: floor, staged, certified, acks, durability, stream, subscriptions,
   cache.
 - [ ] marshal: ancestry, application traits (validation, gates, build, relay), core mailbox.
-- [ ] aggregation: restore the full `distinct states` comparison now that the runtime
-  auditor records rand, storage, and network events (220473e).
+- [x] aggregation: the full `distinct states` comparison on the new runtime auditor.
 - (marshal/coding/ belongs to the broadcast-collector lane: types, shards, variant,
   validation, marshaled, and coding/mod.rs tests, on top of core.)
 - [ ] marshal resolver, core, standard (and coding) actors with their mocks and tests.

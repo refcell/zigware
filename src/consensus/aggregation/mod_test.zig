@@ -551,13 +551,7 @@ test "distinct states" {
     inline for (fixtures, 0..) |entry, index| {
         states[index] = try Run(entry[0], entry[1], lossy(7)).run();
     }
-    // The Zig auditor hashes the task schedule only (commonware's also hashes RNG draws and
-    // other runtime events), and the MinPk and MinSig variants of one BLS scheme draw the
-    // same randomness and schedule the same tasks, so only neighbors from different scheme
-    // families are compared: ed25519, secp256r1, multisig, threshold.
-    const family = [fixtures.len]u8{ 0, 1, 2, 2, 3, 3 };
     for (0..states.len - 1) |index| {
-        if (family[index] == family[index + 1]) continue;
         try testing.expect(!std.mem.eql(u8, &states[index], &states[index + 1]));
     }
 }
