@@ -198,13 +198,18 @@ pub const Span = struct {
     }
 };
 
-/// Formats a field value as tracing records it: strings verbatim, errors by name, and other
-/// values like a metric label value (integers in decimal, floats through `dtoa`, enums by
-/// name, `{f}` for formattable types).
+/// Formats a field value as tracing records it: strings verbatim, errors by name, types with
+/// `format` through it (`Display`, as `%value` records), and other values like a metric label
+/// value (integers in decimal, floats through `dtoa`, enums by name).
 pub fn write_field_value(writer: *Writer, value: anytype) Writer.Error!void {
     const T = @TypeOf(value);
     switch (@typeInfo(T)) {
         .error_set => try writer.writeAll(@errorName(value)),
+        .@"enum" => if (comptime @hasDecl(T, "format")) {
+            try writer.print("{f}", .{value});
+        } else {
+            try encoding.write_label_value(writer, value);
+        },
         .float => {
             var buffer: [dtoa.buffer_size]u8 = undefined;
             try writer.writeAll(dtoa.format(&buffer, @floatCast(value)));
@@ -233,4 +238,28 @@ test "traced saturates" {
     try std.testing.expectEqual(@as(i64, min), traced(@as(i128, std.math.minInt(i128))));
     try std.testing.expectEqual(@as(i64, -5), traced(@as(i32, -5)));
     try std.testing.expectEqual(@as(i64, max), traced(@as(usize, std.math.maxInt(usize))));
+}
+
+/// consensus's `View`: a non-exhaustive enum that formats itself.
+const View = enum(u64) {
+    _,
+
+    pub fn format(view: View, writer: *Writer) Writer.Error!void {
+        try writer.print("view {d}", .{@backingInt(view)});
+    }
+};
+
+const Kind = enum(u8) { genesis, _ };
+
+test "field values of non-exhaustive enums" {
+    var buffer: [32]u8 = undefined;
+    var writer: Writer = .fixed(&buffer);
+    try write_field_value(&writer, @as(View, @fromBackingInt(@intCast(42))));
+    try std.testing.expectEqualStrings("view 42", writer.buffered());
+    writer = .fixed(&buffer);
+    try write_field_value(&writer, Kind.genesis);
+    try std.testing.expectEqualStrings("genesis", writer.buffered());
+    writer = .fixed(&buffer);
+    try write_field_value(&writer, @as(Kind, @fromBackingInt(@intCast(7))));
+    try std.testing.expectEqualStrings("7", writer.buffered());
 }

@@ -51,11 +51,16 @@ fn write_plain_value(writer: *Writer, value: anytype) Writer.Error!void {
             try writer.writeAll(dtoa.format(&buffer, value));
         },
         .bool => try writer.writeAll(if (value) "true" else "false"),
-        .@"enum" => {
+        .@"enum" => |info| {
             if (comptime @hasDecl(T, "label_value")) {
                 try writer.writeAll(value.label_value());
-            } else {
+            } else if (info.mode == .exhaustive) {
                 try writer.writeAll(@tagName(value));
+            } else if (std.enums.tagName(T, value)) |name| {
+                try writer.writeAll(name);
+            } else {
+                // A non-exhaustive enum's unnamed value (`enum(u64) { _ }`) has no tag name.
+                try writer.print("{d}", .{@backingInt(value)});
             }
         },
         .pointer => {
