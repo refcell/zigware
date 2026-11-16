@@ -71,24 +71,7 @@ pub const Link = struct {
     success_rate: f64,
 };
 
-/// Draws from the runtime RNG through `std.Io`.
-const IoRng = struct {
-    io: Io,
-
-    pub fn next_u64(rng: IoRng) u64 {
-        var bytes: [8]u8 = undefined;
-        rng.io.random(&bytes);
-        return std.mem.readInt(u64, &bytes, .little);
-    }
-
-    pub fn next_u32(rng: IoRng) u32 {
-        return @truncate(rng.next_u64());
-    }
-
-    pub fn fill_bytes(rng: IoRng, dest: []u8) void {
-        rng.io.random(dest);
-    }
-};
+const IoRng = @import("../utils/io_rng.zig").IoRng;
 
 /// Whether a message on a link with `success_rate` is delivered (commonware
 /// `Probability::sample`): certain outcomes draw nothing from the RNG.

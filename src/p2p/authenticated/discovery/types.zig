@@ -10,7 +10,7 @@ const utils = @import("utils");
 const data_mod = @import("../data.zig");
 const p2p_types = @import("../../types.zig");
 
-const Data = data_mod.Data;
+pub const Data = data_mod.Data;
 const Ingress = p2p_types.Ingress;
 const Duration = utils.Duration;
 const SystemTime = utils.SystemTime;

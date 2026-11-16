@@ -69,6 +69,18 @@ handshake and the runtime's network, which the actor-stream and runtime lanes ar
   sets, update_peers, dial/listen reservations with `Metadata`, connect/release, blocks,
   `infos(bit_vec)`, `random_bit_vec`, dialable/acceptable), with `record.Record(P)` and
   `bit_set.BitSet(P)`; callers pass `now` and an RNG.
+- `authenticated.discovery.Network(U, Transport)`: `U` is a stream upgrader such as
+  `stream.SakeCups(ed25519.PrivateKey, ChaCha20Poly1305)` (its `handshake.signer` signs
+  discovery records); `Transport` is `runtime.network.deterministic.Network` or the production
+  `Network`. `Net.Config.local(base)` / `.recommended(base)` take `.{ upgrader, namespace,
+  listen (Io.net.IpAddress), dialable (Ingress), bootstrappers ([]const Bootstrapper{peer,
+  ingress}), max_peers_per_set, max_message_size, mailbox_size }`; adjust fields after.
+  `Net.create(gpa, io, *transport, config) !*Net`, `register(channel, Quota) !Registered{sender,
+  receiver}` (before `run`), `oracle()` (`track(index, TrackedPeers)`, `peer_set`, `subscribe`,
+  `block`, `blocked`), `run() !void` (spawn with `io.concurrent`; cancel to stop, after which
+  receivers report `NetworkClosed`), and `destroy()` after deinitializing senders. Shared
+  pieces: `discovery.tracker.Tracker(P)`, `discovery.peer.Peer(P)`, `utils.IoRng`, and
+  `utils.shuffle` (rand 0.10 `shuffle`/`partial_shuffle`).
 - `p2p.Message(P)` owns its payload when `gpa` is set; release it with `deinit`.
 - Senders take a message as parts (`[]const []const u8`, concatenated), like stream frames.
 
@@ -106,6 +118,14 @@ handshake and the runtime's network, which the actor-stream and runtime lanes ar
   connection's control, high, and low mailboxes are one locked outbox read in the same
   priority order, with a timed wait for pings. Channel inbound queues grow on demand rather
   than preallocating `max_peers * burst` slots.
+- Discovery runs its dialer, listener, unblock timer, handshakes, and connections as tasks in
+  one `Io.Group` owned by `Network.run`, with the tracker as locked state instead of an actor;
+  the tracker's mailbox messages are methods with the same effects in the same order. Gossip
+  goes on each connection's outbox control queue (kill > control > high > low). A finished
+  listener or dialer does not stop the network as commonware's `select!` does; cancelation
+  does. DNS ingress is never dialed until the runtime has a resolver, and the transport dial
+  relies on the handshake timeout and the transport's own connect timeout instead of a
+  separate `dial_timeout` race.
 - p2p carries its own seeded fuzz driver (`p2p.fuzz.run`, same as codec's) until
   `invariants.minifuzz` lands.
 
@@ -126,8 +146,16 @@ handshake and the runtime's network, which the actor-stream and runtime lanes ar
 - [x] simulated: blocked subscriptions, disconnect_on_block, operations after shutdown.
 - [ ] simulated: remaining mod.rs tests (peer-set subscriptions, socket manager, clean
   shutdown, duplicate channel), split senders and receivers, metrics (runtime.telemetry).
-- [ ] authenticated: router, relay, throttle, dialing, connection over stream's
-  handshake, then discovery and lookup (actors, types, codec identical to commonware).
+- [x] authenticated: router, relay, throttle, dialing, channels.
+- [x] discovery: types (conformance), tracker record/bit set/directory, tracker, peer
+  connections, dialer, listener, Network/Config/Oracle, connectivity over the deterministic
+  network.
+- [ ] discovery: remaining mod.rs tests (rate limiting, message size, graceful shutdown,
+  restarts, duplicate addresses, slow peers) and metrics.
+- [ ] lookup: tracker actor, peer actor, network, `StaticProvider`.
+- [ ] utils codec: `WrappedBackgroundReceiver` (decode on a parallel Strategy); then tell
+  broadcast-collector so buffered's config can take the Strategy (low priority, after
+  discovery).
 - [ ] Fuzz targets (commonware p2p/fuzz).
 
 ## Log
@@ -148,3 +176,5 @@ handshake and the runtime's network, which the actor-stream and runtime lanes ar
 - 2026-11-13: authenticated throttle, outbox, router, and channels.
 - 2026-11-13: discovery wire types (Payload, BitVec, Info, InfoVerifier) with conformance.
 - 2026-11-16: discovery tracker record, bit set, and directory with their tests.
+- 2026-11-16: discovery tracker, peer connections, dialer, listener, and Network; five peers
+  connect through one bootstrapper on the deterministic network.

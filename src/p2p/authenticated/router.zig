@@ -166,7 +166,7 @@ test "content reaches connected recipients only" {
     try testing.expect(accepted.accepted());
     try testing.expect(one.try_next() == null);
     const routed = two.try_next().?.frame;
-    try testing.expectEqual(@as(Channel, 7), routed.channel);
+    try testing.expectEqual(@as(?Channel, 7), routed.channel);
     routed.release();
 
     _ = router.content(.all, 8, &.{"all"}, true);

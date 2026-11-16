@@ -1,6 +1,7 @@
 //! Outbound queues of one connection (commonware `p2p/src/authenticated/relay.rs` and the
-//! `Outbox` in `connection.rs`): a kill signal and bounded high- and low-priority data queues
-//! behind one lock, read in priority order (kill, high, low) with a deadline for pings.
+//! `Outbox` in `connection.rs`): a kill signal and bounded control (gossip), high-, and
+//! low-priority queues behind one lock, read in priority order (kill, control, high, low) with a
+//! deadline for pings.
 //!
 //! commonware selects over three mailboxes; one locked queue gives the same priority order
 //! and the same `Rejected` on a full queue, and a timed wait replaces the ping timer branch.
@@ -21,7 +22,8 @@ const Unreliable = p2p.Unreliable;
 pub const Frame = struct {
     gpa: Allocator,
     refs: std.atomic.Value(u32),
-    channel: Channel,
+    /// The data channel, or null for a control frame.
+    channel: ?Channel,
     bytes: []u8,
 
     /// Encodes `parts` (concatenated) as a data frame on `channel`, with one reference.
@@ -44,6 +46,14 @@ pub const Frame = struct {
         assert(offset == bytes.len);
         const frame = try gpa.create(Frame);
         frame.* = .{ .gpa = gpa, .refs = .init(1), .channel = channel, .bytes = bytes };
+        return frame;
+    }
+
+    /// Wraps `bytes` (owned, already encoded) as a control frame with one reference.
+    pub fn adopt(gpa: Allocator, bytes: []u8) Allocator.Error!*Frame {
+        errdefer gpa.free(bytes);
+        const frame = try gpa.create(Frame);
+        frame.* = .{ .gpa = gpa, .refs = .init(1), .channel = null, .bytes = bytes };
         return frame;
     }
 
@@ -78,6 +88,7 @@ pub const Outbox = struct {
     /// Frames each queue holds before sends are rejected.
     capacity: u32,
     killed: bool = false,
+    control: std.Deque(*Frame) = .empty,
     high: std.Deque(*Frame) = .empty,
     low: std.Deque(*Frame) = .empty,
 
@@ -89,12 +100,14 @@ pub const Outbox = struct {
     /// Releases queued frames; `kill` must have run, or no one else may hold the outbox.
     pub fn deinit(outbox: *Outbox) void {
         outbox.drain();
+        outbox.control.deinit(outbox.gpa);
         outbox.high.deinit(outbox.gpa);
         outbox.low.deinit(outbox.gpa);
         outbox.* = undefined;
     }
 
     fn drain(outbox: *Outbox) void {
+        while (outbox.control.popFront()) |frame| frame.release();
         while (outbox.high.popFront()) |frame| frame.release();
         while (outbox.low.popFront()) |frame| frame.release();
     }
@@ -113,6 +126,21 @@ pub const Outbox = struct {
         };
         outbox.condition.signal(outbox.io);
         return .new(.ok);
+    }
+
+    /// Queues a control `frame` (taking a reference) ahead of data. Returns false, dropping
+    /// it, when the control queue is full or the connection is killed (commonware's
+    /// unreliable control mailbox; a kill is never dropped).
+    pub fn send_control(outbox: *Outbox, frame: *Frame) bool {
+        outbox.mutex.lockUncancelable(outbox.io);
+        defer outbox.mutex.unlock(outbox.io);
+        if (outbox.killed or outbox.control.len >= outbox.capacity) return false;
+        outbox.control.pushBack(outbox.gpa, frame.retain()) catch {
+            frame.release();
+            return false;
+        };
+        outbox.condition.signal(outbox.io);
+        return true;
     }
 
     /// Ends the connection: the sender sees `killed` and later sends report `closed`.
@@ -150,6 +178,7 @@ pub const Outbox = struct {
 
     fn take(outbox: *Outbox) ?Next {
         if (outbox.killed) return .killed;
+        if (outbox.control.popFront()) |frame| return .{ .frame = frame };
         if (outbox.high.popFront()) |frame| return .{ .frame = frame };
         if (outbox.low.popFront()) |frame| return .{ .frame = frame };
         return null;
@@ -170,10 +199,10 @@ test "relay content priority and overflow" {
     try testing.expectEqual(Unreliable(Feedback).new(.ok), outbox.send(high, true));
     const first = outbox.try_next().?.frame;
     defer first.release();
-    try testing.expectEqual(@as(Channel, 1), first.channel);
+    try testing.expectEqual(@as(?Channel, 1), first.channel);
     const second = outbox.try_next().?.frame;
     defer second.release();
-    try testing.expectEqual(@as(Channel, 2), second.channel);
+    try testing.expectEqual(@as(?Channel, 2), second.channel);
     try testing.expect(outbox.try_next() == null);
 }
 
@@ -186,6 +215,26 @@ test "kill comes first and closes later sends" {
     outbox.kill();
     try testing.expect(outbox.try_next().? == .killed);
     try testing.expectEqual(Unreliable(Feedback).new(.closed), outbox.send(frame, false));
+}
+
+test "control frames go ahead of data and drop when full" {
+    var outbox = Outbox.init(testing.allocator, Io.failing, 1);
+    defer outbox.deinit();
+    const high = try Frame.create(testing.allocator, 1, &.{"high"});
+    defer high.release();
+    const control = try Frame.adopt(testing.allocator, try testing.allocator.dupe(u8, "ping"));
+    defer control.release();
+    try testing.expectEqual(Unreliable(Feedback).new(.ok), outbox.send(high, true));
+    try testing.expect(outbox.send_control(control));
+    try testing.expect(!outbox.send_control(control));
+    const first = outbox.try_next().?.frame;
+    defer first.release();
+    try testing.expect(first == control and first.channel == null);
+    const second = outbox.try_next().?.frame;
+    defer second.release();
+    try testing.expect(second == high);
+    outbox.kill();
+    try testing.expect(!outbox.send_control(control));
 }
 
 test "frame bytes encode a data message" {
