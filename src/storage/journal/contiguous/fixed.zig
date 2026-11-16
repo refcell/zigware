@@ -1185,7 +1185,7 @@ fn ReplayType(comptime A: type) type {
             const first = try first_in_blob(journal.bounds.start, blob, per_blob);
             const offset = (self.position - first) * chunk;
             const writer = journal.blobs.get(blob).?;
-            var reader = try writer.replay(self.buffer_bytes);
+            var reader = try writer.view_replay(self.buffer_bytes);
             errdefer reader.deinit();
             try reader.seek_to(offset);
             self.reader = reader;

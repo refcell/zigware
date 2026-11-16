@@ -1377,7 +1377,7 @@ fn ReplayType(comptime V: type) type {
             const per = journal.items_per_blob;
             const blob = position_to_blob(self.position, per);
             const writer = journal.blobs.get(blob).?;
-            var reader = try writer.replay(journal.replay_buffer);
+            var reader = try writer.view_replay(journal.replay_buffer);
             errdefer reader.deinit();
             try reader.seek_to(self.offset);
             self.reader = reader;

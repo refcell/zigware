@@ -578,6 +578,23 @@ pub const Writer = struct {
         );
     }
 
+    /// A `Replay` of the current logical bytes that writes nothing, as commonware's replay
+    /// through a reader view: the flushed full pages are read from the blob and the buffered
+    /// tail is a frozen copy. The replay borrows the blob: it must not outlive this writer.
+    pub fn view_replay(self: *Self, buffer_size: usize) Allocator.Error!Replay {
+        assert(!self.failed);
+        assert(self.current_page * self.page_size() == self.buffer.offset);
+        const batch_pages = @max(1, buffer_size / self.physical_page_size());
+        return Replay.init(
+            self.gpa,
+            self.blob,
+            self.page_size(),
+            self.current_page,
+            self.buffer.data[0..self.buffer.len],
+            batch_pages,
+        );
+    }
+
     /// Length of the longest contiguous prefix of well-formed pages on the blob, at most
     /// `max_size`. Pages wholly below `proven` (a logical offset known valid) are accepted
     /// without reading. All appended bytes must have reached the blob.
@@ -677,8 +694,9 @@ pub fn read_tail(
 
 /// Replays the logical bytes of a paged blob, validating every page.
 ///
-/// Full pages are read from the blob in batches; the final partial page is a frozen copy taken
-/// when the replay was created. `ensure(n)` fills until `n` bytes are available, `bytes()`
+/// Full pages are read from the blob in batches; the bytes after them (the final partial page,
+/// or every buffered byte of a view replay) are a frozen copy taken when the replay was
+/// created. `ensure(n)` fills until `n` bytes are available, `bytes()`
 /// exposes them contiguously, and `advance` consumes them.
 pub const Replay = struct {
     const Self = @This();
@@ -688,7 +706,7 @@ pub const Replay = struct {
     page_size: usize,
     /// Full pages stored on the blob.
     full_pages: u64,
-    /// The frozen final partial page.
+    /// The frozen bytes after the full pages.
     partial: []u8,
     /// Physical pages per blob read.
     batch_pages: usize,
@@ -711,7 +729,7 @@ pub const Replay = struct {
         partial: []const u8,
         batch_pages: usize,
     ) Allocator.Error!Self {
-        assert(partial.len < page_size);
+        assert(page_size > 0);
         assert(batch_pages > 0);
         const partial_copy = try gpa.dupe(u8, partial);
         errdefer gpa.free(partial_copy);
@@ -811,10 +829,11 @@ pub const Replay = struct {
         self.data.clearRetainingCapacity();
         self.start = 0;
         self.exhausted = false;
-        self.next_page = offset / self.page_size;
-        self.skip = @intCast(offset % self.page_size);
+        self.next_page = @min(offset / self.page_size, self.full_pages);
+        self.skip = @intCast(offset - self.next_page * self.page_size);
         self.partial_done = false;
         assert(self.next_page <= self.full_pages);
+        assert(self.next_page == self.full_pages or self.skip < self.page_size);
     }
 };
 
