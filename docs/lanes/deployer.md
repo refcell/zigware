@@ -85,6 +85,9 @@ test vectors. Tests never call AWS and never hold credentials.
   `aws_ec2` failures print the code, status, and message rather than the SDK's error text.
   As in commonware, `launch_instances` retries capacity failures until capacity returns;
   canceling its task ends it.
+- Concurrent region jobs (`destroy`) run in an `Io.Group` and share the session arena (thread
+  safe in 0.17 over a thread-safe child); the first failure wins. Unlike `try_join_all`, a
+  failed region does not cancel the others; they finish their own steps.
 - Credentials come from the environment or the shared credentials file only (the SDK's
   first two providers); instance metadata, SSO, and credential processes are not ported.
 - `IpAddr` is the deployer's own: Rust's `IpAddr` parsing and display (RFC 5952 compression,
@@ -122,8 +125,9 @@ test vectors. Tests never call AWS and never hold credentials.
 - [x] Credentials (environment, then the shared credentials file's profile), the command
   `Session` (per-region clients, failure diagnostics, config loading, public IP), and the
   `clean` and `authorize` commands with tests over a temporary home and scripted responses.
-- [ ] The create, update,
-  destroy, profile, and attach flows and the `deployer` binary.
+- [x] `destroy` (`deployer.aws.destroy`), regions torn down concurrently, with tests over
+  per-endpoint scripted responses (`client.RoutedReplay`).
+- [ ] The create, update, profile, and attach flows and the `deployer` binary.
 - [ ] Fuzz: YAML parse/write round trips, config validation, SigV4 canonicalization.
 
 ## Log

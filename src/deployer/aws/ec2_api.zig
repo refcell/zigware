@@ -398,6 +398,23 @@ pub fn authorize_deployer_ingress(ec2: *Ec2, sg_id: []const u8, cidr: []const u8
     _ = try ec2.run("AuthorizeSecurityGroupIngress", params.list.items);
 }
 
+/// Revokes `group_id`'s TCP `port` rule for traffic from `source_group_id` (commonware
+/// `destroy`'s logs, profiles, and traces rules).
+pub fn revoke_group_ingress(
+    ec2: *Ec2,
+    group_id: []const u8,
+    port: u16,
+    source_group_id: []const u8,
+) Error!void {
+    var params = params_of(ec2);
+    try params.add("GroupId", group_id);
+    try params.add("IpPermissions.1.IpProtocol", "tcp");
+    try params.add_int("IpPermissions.1.FromPort", port);
+    try params.add_int("IpPermissions.1.ToPort", port);
+    try params.add("IpPermissions.1.Groups.1.GroupId", source_group_id);
+    _ = try ec2.run("RevokeSecurityGroupIngress", params.list.items);
+}
+
 /// Opens the metrics and system ports to the monitoring instance (commonware
 /// `add_monitoring_ingress`).
 pub fn add_monitoring_ingress(ec2: *Ec2, sg_id: []const u8, monitoring_ip: []const u8) Error!void {

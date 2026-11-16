@@ -73,6 +73,9 @@ pub const Harness = struct {
         var writer: std.Io.Writer = .fixed(&buffer);
         try writer.print("{f}", .{harness.session.failure.?});
         try testing.expectEqualStrings(expected, writer.buffered());
+        // Ready for the next command.
+        harness.session.failure = null;
+        harness.session.failed = .init(false);
     }
 };
 

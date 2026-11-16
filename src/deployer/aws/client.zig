@@ -467,6 +467,44 @@ pub const Replay = struct {
     }
 };
 
+/// A transport that replays a separate script per host, for commands whose regions run
+/// concurrently. Each route records its own requests; a request to an unknown host, or past
+/// its route's script, fails as an unclassified dispatch failure. Safe across threads when
+/// `allocator` is.
+pub const RoutedReplay = struct {
+    routes: []Route,
+    allocator: Allocator,
+
+    pub const Route = struct {
+        host: []const u8,
+        outcomes: []const Outcome,
+        requests: []Request,
+        count: std.atomic.Value(usize) = .init(0),
+
+        pub fn recorded(self: *const Route) []const Request {
+            const count = self.count.load(.acquire);
+            return self.requests[0..@min(count, self.outcomes.len)];
+        }
+    };
+
+    pub fn transport(replay: *RoutedReplay) Transport {
+        return .{ .context = replay, .send_fn = send };
+    }
+
+    fn send(context: *anyopaque, _: Allocator, request: *const Request) Io.Cancelable!Outcome {
+        const replay: *RoutedReplay = @ptrCast(@alignCast(context));
+        const found = for (replay.routes) |*candidate| {
+            if (std.mem.eql(u8, candidate.host, request.host)) break candidate;
+        } else return .{ .other = .{ .transient = false } };
+        assert(found.requests.len >= found.outcomes.len);
+        const index = found.count.fetchAdd(1, .acq_rel);
+        if (index >= found.outcomes.len) return .{ .other = .{ .transient = false } };
+        var copier: Replay = .{ .outcomes = &.{}, .requests = &.{}, .allocator = replay.allocator };
+        found.requests[index] = copier.copy(request) catch return .io_failure;
+        return found.outcomes[index];
+    }
+};
+
 const testing = std.testing;
 
 /// Records the signed request instead of sending it.

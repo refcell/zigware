@@ -31,11 +31,16 @@ pub const Session = struct {
     home: []const u8,
     credentials: sigv4.Credentials,
     transport: client_module.Transport,
+    /// Why the command failed; the first failure wins when region jobs run concurrently.
     failure: ?Failure = null,
+    failed: std.atomic.Value(bool) = .init(false),
 
-    /// Records `failure` as the reason the command failed.
+    /// Records `failure` as the reason the command failed, unless one is already recorded.
     pub fn fail(session: *Session, failure: Failure) error{Failed} {
-        session.failure = failure;
+        if (session.failed.cmpxchgStrong(false, true, .acq_rel, .acquire) == null) {
+            session.failure = failure;
+        }
+        assert(session.failed.load(.acquire));
         return error.Failed;
     }
 
