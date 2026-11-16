@@ -49,6 +49,11 @@ pub const BigRational = rational.BigRational;
 pub const probability = @import("probability.zig");
 pub const Probability = probability.Probability;
 
+pub const vec = @import("vec.zig");
+pub const NonEmptyVec = vec.NonEmptyVec;
+
+pub const iter = @import("iter.zig");
+
 pub const channel = @import("channel/mod.zig");
 
 pub const sampling = @import("sampling.zig");

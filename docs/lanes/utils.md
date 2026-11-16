@@ -80,6 +80,14 @@ encoding parts as soon as `codec` has its core API (see docs/lanes/codec.md).
   `request_or_default` with a maker declaring `make(responder)`); `tracked.bounded(T, B, ...)`
   (sequences from 1, `Guard` clone/deinit, `watermark`, `pending(batch)`); `oneshot`
   (broadcast-resolver lane).
+- `utils.vec`: `Bounded(T)` (`init(gpa, capacity)` allocates once; `push` returns the evicted
+  oldest, `pop_front`, `at`, `iterator`, `into_inner`) and `NonEmptyVec(T)` (`init`,
+  `from_unchecked`, `from_list`/`from_slice` -> `error.Empty`, `repeat`; `items`, `first`,
+  `last`, `map`, `map_into`, `push`, `insert`, `extend`, `resize`, `resize_with`, `pop`/`remove`
+  keep one item, `mutate`, `into_list`, `order`). Encodes as `Vec<T>`; decode rejects empty
+  as `Invalid`. Owns its items. Also `utils.NonEmptyVec`.
+- `utils.iter`: `NonEmpty(I)` (`init`, `try_init`, `into_parts`, `next`), `zip_eq(a, b)`
+  (panics on unequal lengths), `slice(T, items)`; iterators are types with `next() ?Item`.
 - `utils.Hostname` (`utils.hostname`): validated RFC 1035/1123 hostname stored inline
   (`init`, `literal`, `as_str`, `eql`, `order`, `{f}`, `len_max`, `label_len_max`,
   `max_encode_size` = 258), codec as a `RangeCfg(..=253)` byte string; `hostname.Error`.
@@ -115,7 +123,7 @@ encoding parts as soon as `codec` has its core API (see docs/lanes/codec.md).
 
 ## Backlog
 - [ ] utils basics (done: faults, modulo, union/union_unique, NZ, Participant, rng, range
-  without codec; time; remaining: iter, vec; rational, probability, sampling done; hostname and net done): `Span`/`Array` traits as comptime interfaces, `union_unique`, `hex`
+  without codec; time; iter, vec, rational, probability, sampling done; hostname and net done): `Span`/`Array` traits as comptime interfaces, `union_unique`, `hex`
   re-exports, `modulo`, `NZ*` non-zero helpers, quorum math (`quorum`, `max_faults`),
   `time.rs`, `range.rs`, `iter.rs`, `vec.rs` (NonEmptyVec), `rational`, `probability`,
   `sampling`, `rng.rs` (deterministic test RNG matching commonware's where tests depend on it).
@@ -159,3 +167,4 @@ encoding parts as soon as `codec` has its core API (see docs/lanes/codec.md).
 - 2026-11-16: channel mpsc, ring, reservation, fallible, tracked with their tests, an mpsc model
   fuzz, and a tracked model fuzz (watermark and per-batch pending against a model).
 - 2026-11-16: cache model fuzz, Ghost collision churn and ownership, colliding resident keys.
+- 2026-11-16: vec (Bounded, NonEmptyVec with codec and arbitrary) and iter (NonEmpty, zip_eq).
