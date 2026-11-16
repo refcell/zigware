@@ -49,6 +49,7 @@ const Elector = elector_mod.RoundRobinElector;
 const Equivocator = @import("mocks/equivocator.zig").Equivocator(Scheme, Sha256, Key, Elector);
 const IoRng = @import("actors/context.zig").IoRng;
 const Reconfigurer = @import("mocks/reconfigurer.zig").Reconfigurer(Scheme, Sha256);
+const NullifyOnly = @import("mocks/nullify_only.zig").NullifyOnly(Scheme, Sha256);
 const Duration = utils.Duration;
 const Link = p2p.simulated.Link;
 const View = consensus_types.View;
@@ -90,6 +91,7 @@ const Role = enum {
     outdated,
     equivocator,
     reconfigurer,
+    nullify_only,
 
     /// Whether validator 0 runs a Byzantine mock instead of the engine.
     fn is_byzantine(role: Role) bool {
@@ -101,6 +103,7 @@ const Role = enum {
             .outdated,
             .equivocator,
             .reconfigurer,
+            .nullify_only,
             => true,
         };
     }
@@ -116,6 +119,7 @@ const Byzantine = struct {
     elector: Elector,
     equivocator: Equivocator,
     reconfigurer: Reconfigurer,
+    nullify_only: NullifyOnly,
     channels: [3]Channel,
     handle: runtime.context.Handle(void),
 
@@ -130,6 +134,7 @@ const Byzantine = struct {
             .impersonator => byzantine.impersonator.run(&votes.sender, &votes.receiver),
             .outdated => byzantine.outdated.run(&votes.sender, &votes.receiver),
             .reconfigurer => byzantine.reconfigurer.run(&votes.sender, &votes.receiver),
+            .nullify_only => byzantine.nullify_only.run(&votes.sender, &votes.receiver),
             .equivocator => {
                 const certificates = &byzantine.channels[1].receiver;
                 byzantine.equivocator.run(&votes.sender, certificates);
@@ -192,6 +197,7 @@ const Harness = struct {
         leader_ms: u64 = 1000,
         certification_ms: u64 = 2000,
         retry_ms: u64 = 10_000,
+        skip_ms: u64 = 11_000,
     };
 
     const Fixture = cryptography.certificate.mocks.Fixture(ed25519.Scheme(Digest));
@@ -220,10 +226,10 @@ const Harness = struct {
         timeouts: Timeouts,
     ) !void {
         try harness.start_network(ctx, n, link, role, timeouts);
-        for (harness.validators, harness.keys(), 0..) |*validator, key, index| {
+        for (0..harness.validators.len) |index| {
             if (index == 0 and role == .absent) continue;
             if (index == 0 and role.is_byzantine()) {
-                try harness.start_byzantine(validator, key, role);
+                try harness.start_byzantine(index, role);
             } else {
                 try harness.start_validator(index);
             }
@@ -277,11 +283,16 @@ const Harness = struct {
         harness.verify_reports = false;
     }
 
-    fn start_byzantine(harness: *Harness, validator: *Validator, key: Key, role: Role) !void {
+    /// Starts validator `index` as the Byzantine mock `role`.
+    fn start_byzantine(harness: *Harness, index: usize, role: Role) !void {
+        assert(role.is_byzantine());
         const io = harness.ctx.io();
+        const validator = &harness.validators[index];
+        const key = harness.keys()[index];
+        assert(validator.state == .absent);
         const byzantine = try gpa.create(Byzantine);
         errdefer gpa.destroy(byzantine);
-        const scheme = &harness.schemes[0];
+        const scheme = &harness.schemes[index];
         const n: u32 = @intCast(harness.validators.len);
         var elector = try elector_mod.RoundRobin(Sha256).default().build(gpa, n);
         errdefer elector.deinit(gpa);
@@ -295,6 +306,7 @@ const Harness = struct {
             .elector = elector,
             .equivocator = .init(gpa, io, scheme, elector, epoch, &harness.relay),
             .reconfigurer = .init(gpa, scheme),
+            .nullify_only = .init(gpa, scheme),
             .channels = try register(harness.oracle(), key),
             .handle = undefined,
         };
@@ -421,6 +433,7 @@ const Harness = struct {
         cfg.leader_timeout = .from_millis(harness.timeouts.leader_ms);
         cfg.certification_timeout = .from_millis(harness.timeouts.certification_ms);
         cfg.timeout_retry = .from_millis(harness.timeouts.retry_ms);
+        cfg.skip = .{ .enabled = .{ .timeout = .from_millis(harness.timeouts.skip_ms) } };
         try validator.engine.init(harness.ctx, cfg);
         validator.handle = try harness.ctx.child("engine").spawn(Engine.run, .{
             &validator.engine, channels[0], channels[1], channels[2],
@@ -1025,7 +1038,7 @@ fn quorum_certificate(
     const Vote = if (kind == .notarization) Notarize else Finalize;
     const proposal: @import("types.zig").Proposal(Digest) =
         .init(.new(epoch, .new(view)), .new(parent), Sha256.hash(&.{payload}));
-    var votes: [4]Vote = undefined;
+    var votes: [16]Vote = undefined;
     const quorum = utils.N3f1.quorum(@as(u32, @intCast(harness.schemes.len)));
     assert(quorum <= votes.len);
     for (votes[0..quorum], harness.schemes[0..quorum]) |*vote, *scheme| {
@@ -1143,6 +1156,146 @@ fn attributable_reporter_scenario(ctx: Context) !void {
 
 test "attributable reporter: peer votes reach the reporter verified" {
     _ = try run_seeded(0, attributable_reporter_scenario, .{});
+}
+
+/// A peer outside the committee with a one-way `link` to every validator (commonware
+/// `start_certificate_injector`); it sends on the certificate channel. Release both halves.
+fn start_injector(harness: *Harness, link: Link) !Net.Registered {
+    const injector = cryptography.ed25519.PrivateKey.from_seed(1_000_000).public_key();
+    const registered = try harness.oracle().control(injector).register(1, test_quota);
+    for (harness.keys()) |key| try harness.oracle().add_link(injector, key, link);
+    const tracked: p2p.TrackedPeers(Key) = .{
+        .primary = .init(harness.keys()),
+        .secondary = .init(&.{injector}),
+    };
+    _ = harness.oracle().manager().track(1, tracked);
+    try harness.ctx.sleep(.fromMilliseconds(10));
+    return registered;
+}
+
+fn inject(sender: *Net.Sender, recipient: ?Key, certificate: Certificate) !void {
+    const bytes = try codec.encode(Certificate, gpa, certificate);
+    defer gpa.free(bytes);
+    const recipients: p2p.Recipients(Key) = if (recipient) |key| .{ .one = key } else .all;
+    gpa.free(try sender.send(recipients, &.{bytes}, true));
+}
+
+/// The split-views groups: who saw a notarization of view 2 (`group1`) or view 3
+/// (`group2`); everyone else saw nullifications.
+const SplitGroup = enum { group1, group2, ignorant, byzantine };
+
+fn split_group(index: usize) SplitGroup {
+    return switch (index) {
+        0...2 => .group1,
+        3...5 => .group2,
+        6 => .ignorant,
+        else => .byzantine,
+    };
+}
+
+/// commonware `split_views_no_lockup`: before any engine starts, every validator learns that
+/// view 1 finalized, then sees either a notarization or a nullification of view 2 and of
+/// view 3, so the honest seven split. Validators 7 to 9 only nullify. Once linked, the
+/// honest validators must still finalize past view 3.
+fn split_views_scenario(ctx: Context) !void {
+    var harness: Harness = undefined;
+    const timeouts: Harness.Timeouts = .{
+        .leader_ms = 10_000,
+        .certification_ms = 11_000,
+        .retry_ms = 10_000,
+        .skip_ms = 12_000,
+    };
+    try harness.start_network(ctx, 10, null, .absent, timeouts);
+    defer harness.deinit();
+    const link = link_ms(10, 0, 1.0);
+    var injector = try start_injector(&harness, link);
+    defer injector.deinit();
+    try inject_split(&harness, &injector.sender);
+    for (0..harness.validators.len) |index| {
+        if (split_group(index) == .byzantine) {
+            try harness.start_byzantine(index, .nullify_only);
+        } else {
+            try harness.start_validator(index);
+        }
+    }
+    // Let the engines consume the preloaded certificates.
+    try ctx.sleep(.fromSeconds(2));
+    try check_split(&harness);
+    try harness.link_all(link, null);
+    for (0..7) |index| try harness.validators[index].reporter.wait_for_finalized(.new(4));
+    for (0..7) |index| {
+        harness.validators[index].reporter.assert_no_faults();
+        harness.validators[index].reporter.assert_no_invalid();
+    }
+    const blocked = try harness.oracle().blocked(gpa);
+    defer gpa.free(blocked);
+    try testing.expectEqual(0, blocked.len);
+}
+
+/// Sends view 1's notarization and finalization to all, then each group's view of views 2
+/// and 3.
+fn inject_split(harness: *Harness, sender: *Net.Sender) !void {
+    var certificates: [7]Certificate = .{
+        try split_certificate(harness, .notarization, 1, 0, "B_F"),
+        try split_certificate(harness, .finalization, 1, 0, "B_F"),
+        try split_certificate(harness, .notarization, 2, 1, "B_G1"),
+        try split_certificate(harness, .nullification, 2, 0, ""),
+        try split_certificate(harness, .notarization, 3, 1, "B_G2"),
+        try split_certificate(harness, .nullification, 3, 0, ""),
+        undefined,
+    };
+    defer for (certificates[0..6]) |certificate| codec.free(Certificate, gpa, certificate);
+    try inject(sender, null, certificates[0]);
+    try inject(sender, null, certificates[1]);
+    for ([_]SplitGroup{ .group1, .group2 }, 0..) |notarized, offset| {
+        for (harness.keys(), 0..) |key, index| {
+            const seen = if (split_group(index) == notarized) 2 + 2 * offset else 3 + 2 * offset;
+            try inject(sender, key, certificates[seen]);
+        }
+    }
+}
+
+/// A certificate from the first quorum of validators (commonware signs with one more,
+/// `0..=quorum`; any quorum certifies the same).
+fn split_certificate(
+    harness: *Harness,
+    comptime kind: std.meta.Tag(Certificate),
+    view: u64,
+    parent: u64,
+    payload: []const u8,
+) !Certificate {
+    if (kind != .nullification) return quorum_certificate(harness, kind, view, parent, payload);
+    const Nullify = @import("types.zig").Nullify(Scheme);
+    var votes: [16]Nullify = undefined;
+    const quorum = utils.N3f1.quorum(@as(u32, @intCast(harness.schemes.len)));
+    assert(quorum <= votes.len);
+    for (votes[0..quorum], harness.schemes[0..quorum]) |*vote, *scheme| {
+        vote.* = (try Nullify.sign(gpa, scheme, .new(epoch, .new(view)))).?;
+    }
+    const Nullification = @import("types.zig").Nullification(Scheme);
+    const scheme = &harness.schemes[0];
+    const signed = try Nullification.from_votes(gpa, scheme, votes[0..quorum], parallel.sequential);
+    return .{ .nullification = signed };
+}
+
+/// Each honest validator holds exactly its group's certificates of views 2 and 3, and none
+/// voted to nullify view 4 yet.
+fn check_split(harness: *Harness) !void {
+    for (0..7) |index| {
+        const reporter = &harness.validators[index].reporter;
+        try testing.expect(reporter.finalized(.new(1)) != null);
+        for ([_]SplitGroup{ .group1, .group2 }, 2..) |notarized, view| {
+            const holds = split_group(index) == notarized;
+            try testing.expect(reporter.finalized(.new(view)) == null);
+            try testing.expectEqual(holds, reporter.notarized(.new(view)));
+            try testing.expectEqual(!holds, reporter.nullified(.new(view)));
+        }
+        try testing.expectEqual(0, reporter.votes(.new(4)).nullify);
+    }
+}
+
+test "split views: honest validators split across views 2 and 3 do not lock up" {
+    _ = try run_seeded(0, split_views_scenario, .{});
 }
 
 /// One run of commonware `unclean_shutdown`: start every validator from its journal, stop

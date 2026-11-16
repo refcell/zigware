@@ -111,7 +111,7 @@ resolver; those lanes are running, so do the types first and the actors as they 
   `notarized`, `nullified`, `max_nullify_view`, `fault_list`, `assert_no_faults`,
   `assert_no_invalid`); Byzantine `conflicter.Conflicter(S, H)`, `nuller.Nuller(S, H)`,
   `impersonator.Impersonator(S, H)`, `outdated.Outdated(S, H)`, and
-  `reconfigurer.Reconfigurer(S, H)` (`run(sender, receiver)`
+  `reconfigurer.Reconfigurer(S, H)`, `nullify_only.NullifyOnly(S, H)` (`run(sender, receiver)`
   on the vote channel), `equivocator.Equivocator(S, H, P, E)` (`run(votes,
   certificates)`), and `wrapped.Scheme(Inner)` with `Behavior` (`honest`,
   `corrupt_signature`, `recovery_failure`), a by-value wrapper of a certificate scheme.
@@ -199,8 +199,8 @@ resolver; those lanes are running, so do the types first and the actors as they 
   on the actor metrics), slow_validator, all_recovery, all_crash_after_nullify,
   received_certificates_are_reported, survives_burst, engine_shutdown (abort and graceful;
   commonware's running-task count waits on the runtime's task metrics), and
-  attributable_reporter_filtering. Next: nullify_only with split views, certified splits,
-  twins, hailstorm, and the rest, seeded.
+  attributable_reporter_filtering, and split_views_no_lockup (with the nullify-only mock).
+  Next: the twins mock, certified splits, twins, hailstorm, and the rest, seeded.
 - [ ] Fuzz targets (commonware consensus/fuzz).
 
 ## Log
@@ -244,3 +244,4 @@ resolver; those lanes are running, so do the types first and the actors as they 
 - 2026-11-16: scheme/reporter.rs (AttributableReporter, all 6 tests) and the
   attributable_reporter_filtering DST; every DST engine reports through the wrapper.
 - 2026-11-16: Byzantine reconfigurer mock with its DST.
+- 2026-11-16: nullify-only mock and the split_views_no_lockup DST.
