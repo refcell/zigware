@@ -41,6 +41,9 @@ placeholder until this lands, so land `Strategy` first and tell the coordinator 
   workload of `iter(*W)` and optional `setup`/`before_iter`/`teardown`/`metrics`,
   `runner.allocator`, `runner.io`; `bench.criterion(io, &workload, iters)` (iter_custom),
   `Benchmark.metrics_json`, `bench.Inputs`, `bench.test_mode`.
+- `bench.tracker`: `load_config`, `parse_lines`/`custom_metrics` (Gungraun summaries and
+  `metrics_json` lines), `compare`, `load_baseline(dir, path)`, `write_outputs(dir, ...)`
+  (`current.toml`, `comparison.toml`, `comment.md`, `summary.toml`), `render_report`.
 
 - `allocator`: `var heap = allocator.Heap.init(io, config); heap.allocator()` gives a
   `std.mem.Allocator`; `heap.read_stats()` (`allocator.Stats`, commonware's fields),
@@ -113,11 +116,15 @@ placeholder until this lands, so land `Strategy` first and tell the coordinator 
 - [x] allocator: an allocator wrapper with commonware's metrics and purge/reserve
   configuration; no mimalloc (zero deps).
 - [x] bench: the benchmark workload abstraction (lib.rs) and `zig build bench`.
-- [ ] bench: the tracker binary's config, results comparison, and report rendering
-  (bench/src/bin) over `zig build bench` output.
+- [x] bench: the tracker's config, output-line parsing, results comparison, output files, and
+  report rendering (bench/src/bin), with commonware's tracker tests and fixtures.
+- [ ] bench: a `zig build bench-tracker` command that runs `zig build bench` per tracked
+  variant and gates its custom metrics (commonware's runner drives Gungraun under valgrind).
 - [ ] Fuzz targets and benches.
 
 ## Log
+- 2026-11-16: bench tracker results, comparison, output files, and report, with the ported
+  tracker tests, Gungraun fixtures, and seeded and std fuzz of its parsers.
 - 2026-11-16: bench tracker config (`bench.tracker.load_config`) over a TOML subset, with
   commonware's config tests and its tracking config as a fixture.
 - 2026-11-16: adaptive spawn: `Rayon.with_policy` inlines or offloads per call site.

@@ -228,3 +228,66 @@ test "rejects unknown config fields while deserializing" {
     };
     for (inputs) |input| try expect_invalid(input, "unknown field");
 }
+
+/// Feeds `input` to every tracker parser: each must succeed or fail with `error.Invalid` and
+/// a message, never crash. A string written with `write_string` must read back unchanged.
+fn fuzz_parsers(input: []const u8) !void {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    const output = @import("output.zig");
+    var diagnostic: Diagnostic = .{};
+    if (toml.parse(gpa, input, &diagnostic)) |_| {} else |err| {
+        try testing.expectEqual(error.Invalid, err);
+        try testing.expect(diagnostic.message().len > 0);
+    }
+    if (config.load_config(gpa, input, &diagnostic)) |_| {} else |err| {
+        try testing.expectEqual(error.Invalid, err);
+    }
+    if (output.parse_lines(gpa, &diagnostic, input, "fuzz")) |lines| {
+        if (output.custom_metrics(gpa, &diagnostic, lines, "x")) |_| {} else |err| {
+            try testing.expectEqual(error.Invalid, err);
+        }
+    } else |err| try testing.expectEqual(error.Invalid, err);
+    const half = input.len / 2;
+    _ = output.glob(input[0..half], input[half..]);
+
+    var buffer: std.Io.Writer.Allocating = .init(gpa);
+    try buffer.writer.writeAll("s = ");
+    try toml.write_string(&buffer.writer, input);
+    const root = try toml.parse(gpa, buffer.written(), &diagnostic);
+    try testing.expectEqualStrings(input, root.get("s").?.string);
+}
+
+/// Mutates commonware's config fixture with `random` so most inputs reach deep parser states.
+fn fuzz_mutated(random: std.Random, scratch: []u8) ![]const u8 {
+    const len = @min(scratch.len, config_fixture.len);
+    @memcpy(scratch[0..len], config_fixture[0..len]);
+    const edits = random.uintAtMost(usize, 8);
+    const alphabet = "[]{}=,.\"'#\n -_0123456789abcxyz\\";
+    for (0..edits) |_| {
+        const at = random.uintLessThan(usize, len);
+        scratch[at] = alphabet[random.uintLessThan(usize, alphabet.len)];
+    }
+    return scratch[0..random.uintAtMost(usize, len)];
+}
+
+test "fuzz tracker parsers seeded" {
+    const build_options = @import("build_options");
+    const iterations: u64 = 256 * @as(u64, build_options.fuzz_soak);
+    var prng: std.Random.DefaultPrng = .init(0x7472_6163 ^ build_options.fuzz_seed);
+    const random = prng.random();
+    var scratch: [config_fixture.len]u8 = undefined;
+    for (0..iterations) |_| try fuzz_parsers(try fuzz_mutated(random, &scratch));
+}
+
+test "fuzz tracker parsers" {
+    try testing.fuzz({}, struct {
+        fn run(_: void, smith: *testing.Smith) anyerror!void {
+            var bytes: [512]u8 = undefined;
+            smith.bytes(&bytes);
+            const len = std.mem.readInt(u16, bytes[0..2], .little) % (bytes.len - 2);
+            try fuzz_parsers(bytes[2..][0..len]);
+        }
+    }.run, .{});
+}

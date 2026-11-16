@@ -18,8 +18,21 @@ pub const Direction = config.Direction;
 pub const load_config = config.load_config;
 pub const tracked_labels = config.tracked_labels;
 pub const callgrind_metrics = config.callgrind_metrics;
+pub const output = @import("output.zig");
+pub const Metrics = output.Metrics;
+pub const parse_lines = output.parse_lines;
+pub const custom_metrics = output.custom_metrics;
+pub const results = @import("results.zig");
+pub const BenchResult = results.BenchResult;
+pub const Comparison = results.Comparison;
+pub const compare = results.compare;
+pub const load_baseline = results.load_baseline;
+pub const write_outputs = results.write_outputs;
+pub const render = @import("render.zig");
+pub const render_report = render.render_report;
 
 test {
     std.testing.refAllDecls(@This());
     _ = @import("tests.zig");
+    _ = @import("results_tests.zig");
 }
