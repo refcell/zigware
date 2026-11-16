@@ -17,6 +17,8 @@
 //!   `restore(gpa, StoredBlock, Block.Digest) !Block`, and
 //!   `restore_across(gpa, StoredBlock, strategy) !Block` (takes ownership of the stored
 //!   block; on error the caller keeps it).
+//! - `clone_block(*const Block) Block` (another reference to a shared block) and
+//!   `deinit_block(gpa, *Block) void` (drops one), so core owns blocks of either variant.
 //! - `into_shared(Block) broadcast.Digested(ApplicationBlock)` and
 //!   `from_application_block(broadcast.Digested(ApplicationBlock), Commitment) Block`.
 //! - `max_backfill_block_size(application: usize) usize` and
@@ -51,7 +53,8 @@ const variant_decls = [_][]const u8{
     "parent_commitment",       "stored_parent_commitment", "check_payload",
     "decode_block",            "into_stored",              "restore",
     "restore_across",          "into_shared",              "from_application_block",
-    "max_backfill_block_size", "max_buffer_payload_size",
+    "max_backfill_block_size", "max_buffer_payload_size",  "clone_block",
+    "deinit_block",
 };
 
 pub fn assert_variant(comptime V: type) void {

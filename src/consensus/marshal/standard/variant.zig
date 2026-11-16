@@ -95,6 +95,16 @@ pub fn Standard(comptime B: type) type {
             return Block.compute(gpa, stored);
         }
 
+        /// Another handle to `block`.
+        pub fn clone_block(block: *const Block) Block {
+            return block.clone();
+        }
+
+        /// Drops a handle to a block.
+        pub fn deinit_block(_: Allocator, block: *Block) void {
+            block.deinit();
+        }
+
         pub fn into_shared(block: Block) broadcast.Digested(B) {
             return block;
         }
