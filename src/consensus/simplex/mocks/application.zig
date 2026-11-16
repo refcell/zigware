@@ -23,6 +23,7 @@ const relay_mod = @import("relay.zig");
 
 const Epoch = consensus_types.Epoch;
 const Rnd = consensus_types.Round;
+const View = consensus_types.View;
 const Normal = p2p.simulated.Normal;
 
 const genesis_bytes = "genesis";
@@ -95,6 +96,11 @@ pub fn Application(comptime H: type, comptime P: type) type {
         reject_mismatches: bool = false,
         /// The decision attached to a handoff candidate; `wait` builds nothing.
         handoff: std.meta.Tag(Handoff) = .wait,
+        /// When set, only candidates at or below this view carry `handoff`; later ones wait
+        /// (commonware's twins handoff controller).
+        handoff_until: ?View = null,
+        /// Candidates returned at or below `handoff_until`.
+        handoffs_returned: std.atomic.Value(u32) = .init(0),
         /// Guards the maps below and wakes verifications waiting for a payload.
         mutex: Io.Mutex = .init,
         condition: Io.Condition = .init,
@@ -195,11 +201,14 @@ pub fn Application(comptime H: type, comptime P: type) type {
         pub fn prepare(self: *Self, io: Io, request: Context) Io.Cancelable!?Handoff {
             _ = io; // The same runtime as `self.io`.
             if (self.handoff == .wait) return .wait;
+            const limited = self.handoff_until != null;
+            if (limited and request.round.view.get() > self.handoff_until.?.get()) return .wait;
             if (self.drop_proposals) return null;
             if (self.stall_proposals) try self.stall();
             try self.busy.lock(self.io);
             defer self.busy.unlock(self.io);
             const digest = try self.build(request);
+            if (limited) _ = self.handoffs_returned.fetchAdd(1, .monotonic);
             return switch (self.handoff) {
                 .wait => unreachable, // Proof: handled above.
                 .vote => .{ .vote = digest },

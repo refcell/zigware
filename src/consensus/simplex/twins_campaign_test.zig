@@ -82,7 +82,13 @@ const Campaign = struct {
     /// Term length and optimistic views of the round-robin elector.
     term_length: u32 = 1,
     optimistic_views: u64 = 0,
+    /// Applications vote handoff candidates during the adversarial prefix and wait for
+    /// parent certification afterward (commonware `configure_twins_handoff`).
+    handoffs: bool = false,
 };
+
+/// Handoff candidates honest and twin applications returned across a campaign's cases.
+const HandoffCounts = struct { honest: u64 = 0, twin: u64 = 0 };
 
 /// commonware `TWINS_CAMPAIGN`. Debug builds without `-Dslow-tests` run 1 of its 20 cases.
 const twins_campaign: Campaign = .{
@@ -225,6 +231,7 @@ const Case = struct {
     nodes: []Node,
     started: usize,
     twin_mask: u64,
+    handoffs: bool,
 
     fn keys(case: *const Case) []const Key {
         return case.fixture.participants;
@@ -290,6 +297,12 @@ fn start_node(case: *Case, index: usize, name: []const u8, channels: [3]Channel)
         .certify_latency = normal,
     });
     errdefer node.application.deinit();
+    if (case.handoffs) {
+        // Each scripted round drives one full leader term.
+        const rounds: u64 = case.plan.scenario.rounds.len;
+        node.application.handoff = .vote;
+        node.application.handoff_until = .new(rounds * case.plan.term_length.get());
+    }
     // commonware's tests build with the `mocks` feature, so a twin's payload that names
     // another round or parent fails verification instead of panicking.
     node.application.reject_mismatches = true;
@@ -352,6 +365,7 @@ fn init_case(
     case.* = undefined;
     case.ctx = ctx;
     case.started = 0;
+    case.handoffs = campaign.handoffs;
     case.fixture = try mock_scheme.fixture(Sha256.Digest, gpa, &rng, "consensus", campaign.n);
     errdefer case.fixture.deinit(gpa);
     case.twin_mask = 0;
@@ -445,7 +459,13 @@ fn check_faults(honest: []Node, twin_mask: u64) !void {
 
 /// Runs one case: twins first, then honest validators, until every honest validator
 /// finalized `trailing_finalizations` views past the adversarial prefix.
-fn run_case(ctx: Context, campaign: Campaign, generated: *const twins.Case, link: Link) !void {
+fn run_case(
+    ctx: Context,
+    campaign: Campaign,
+    generated: *const twins.Case,
+    link: Link,
+    counts: *HandoffCounts,
+) !void {
     var case: Case = undefined;
     try init_case(&case, ctx, campaign, generated, link);
     defer deinit_case(&case);
@@ -462,6 +482,11 @@ fn run_case(ctx: Context, campaign: Campaign, generated: *const twins.Case, link
         try node.reporter.wait_for_finalizations_above(prefix_end, campaign.trailing_finalizations);
     }
     try check_case(&case);
+    const twin_halves = 2 * generated.compromised.len;
+    for (case.nodes, 0..) |*node, index| {
+        const returned = node.application.handoffs_returned.load(.monotonic);
+        if (index < twin_halves) counts.twin += returned else counts.honest += returned;
+    }
     const honest = case.honest_nodes();
     const twin_mask = case.twin_mask;
     // Faults are read once nothing reports any more.
@@ -483,12 +508,16 @@ fn run_campaign(campaign: Campaign, link: Link) !void {
     });
     defer twins.free_cases(gpa, cases);
     try testing.expect(cases.len > 0);
+    var counts: HandoffCounts = .{};
     for (cases) |*generated| {
         try testing.expectEqual(faults, generated.compromised.len);
         var runner = try runtime.deterministic.Runner.init(gpa, .{ .seed = rng.next_u64() });
         defer runner.deinit();
-        try (try runner.start_context(run_case, .{ campaign, generated, link }));
+        try (try runner.start_context(run_case, .{ campaign, generated, link, &counts }));
     }
+    // commonware also counts votes cast before certification through the voter's handoff
+    // metrics, which follow with the actor metrics.
+    if (campaign.handoffs) try testing.expect(counts.honest > 0 and counts.twin > 0);
 }
 
 /// commonware `twins_campaign_all_links`: the fast link, then `twins_link`.
@@ -499,6 +528,12 @@ fn run_all_links(campaign: Campaign) !void {
 
 test "twins sampled" {
     try run_all_links(twins_campaign);
+}
+
+test "twins pipelined handoff" {
+    var campaign = twins_campaign;
+    campaign.handoffs = true;
+    try run_all_links(campaign);
 }
 
 test "twins sustained" {

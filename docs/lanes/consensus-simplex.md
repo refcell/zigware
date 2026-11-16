@@ -258,8 +258,11 @@ resolver; those lanes are running, so do the types first and the actors as they 
   test-consensus stays near 2 minutes. observer (a linked peer outside the committee),
   non_genesis_floor_joiner (rotating and stable leader; the joiner starts from a mid-term
   finalization), and dishonest_leader_certification_rejected (ed25519) pass. Twins nodes
-  reject mismatched payloads, as commonware's `mocks` build does. Next: twins pipelined
-  handoff and per-scheme twins, the per-scheme fixture variants, and the rest, seeded.
+  reject mismatched payloads, as commonware's `mocks` build does. The twins pipelined
+  handoff campaign (applications vote handoffs through the prefix, then wait) checks that
+  honest and twin applications returned handoffs; its early-vote count waits on the
+  voter's handoff metrics. Next: per-scheme twins, the per-scheme fixture variants, and
+  the rest, seeded.
 - [ ] Tracing: actor events are done (voter, batcher, resolver, engine); spans and the
   voter state machine's events follow.
 - [x] Fuzz targets (commonware consensus/fuzz): owned by the crypto lane in
@@ -327,3 +330,4 @@ resolver; those lanes are running, so do the types first and the actors as they 
 - 2026-11-16: voter state.rs timeout, stall, and inactivity tests (26 of 141); timeout-metric
   assertions wait on the voter's metrics.
 - 2026-11-16: voter state.rs skip-budget, timeout-reset, and term-anchor tests (37 of 141).
+- 2026-11-16: twins pipelined handoff campaign; the mock application takes `handoff_until`.
