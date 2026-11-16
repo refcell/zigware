@@ -522,4 +522,5 @@ test {
     _ = @import("network_oracle_test.zig");
     _ = @import("network_lifecycle_test.zig");
     _ = @import("network_address_test.zig");
+    _ = @import("network_handshake_test.zig");
 }
