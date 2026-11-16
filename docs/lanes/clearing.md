@@ -20,6 +20,12 @@ formatting, and the deterministic runtime for tests. qmdb is only mentioned in c
   `amounts.RootBuilder(H)`; errors `ZeroAmount`, `Duplicate`, `TooManyEntries`, `Overflow`.
 - `Lookup(K, V, D)`: union `member`/`non_member`, `init(gpa, entries, tree, key)`,
   `verify(H, root, key, leaf) error{InvalidOpening}!?V`, codec, `clone`, `eql`, `deinit`.
+- `Matrix(P, H, A)`: `empty(gpa)`, `from_sorted(gpa, rows)` (takes the payment maps),
+  reference-counted `clone`/`deinit`, `root`, `len`, `is_empty`, `rows`, `payment_maps`,
+  `payments(sender)`, `payments_root(sender)`, `open(gpa, sender, receiver)`;
+  `matrix.root(H, P, senders, roots)` (allocation-free), `matrix.leaf`.
+- `Opening(P, D, A)`: `row`, `entry`, `verify_row(H, root, sender)`,
+  `verify(H, root, sender, receiver)`, codec, `clone`, `eql`, `deinit`.
 
 ## Decisions
 - Errors carry no payload (`WrongEpoch`'s expected/found are dropped), as in other lanes.
@@ -29,6 +35,8 @@ formatting, and the deterministic runtime for tests. qmdb is only mentioned in c
   computing a payment map's root never allocates; a test checks it against `storage.bmt` for
   0..69 leaves. Openings still build the real tree.
 - Lookup's non-member verification runs the bmt multi-proof on a stack `FixedBufferAllocator`.
+- `Matrix` shares its rows like commonware's `Arc` (atomic reference count); the per-row
+  payment trees are built on first `open` under a spin lock (commonware's `OnceLock`).
 - `arbitrary.zig` ports the crate's `Arbitrary` impls (ed25519 keys/signatures, SHA-256
   digests, and every protocol type) on top of `codec.arbitrary`; conformance types that draw
   ed25519 keys skip in Debug unless `-Dslow-tests` (CI's ReleaseSafe run checks them).
@@ -37,7 +45,7 @@ formatting, and the deterministic runtime for tests. qmdb is only mentioned in c
 ## Backlog
 - [x] lib.rs types and traits (`Epoch`, `Amount`), namespace.
 - [x] amounts and lookup, with their tests and conformance hashes.
-- [ ] matrix (Matrix, Opening) with tests and conformance hash.
+- [x] matrix (Matrix, Opening) with tests and conformance hash.
 - [ ] payment (State, Signatures, Request, States, Verified, Admission, Receipt, Challenge).
 - [ ] settlement (Total, Flow, Settled, Flows), close (Withdrawal, Deposit, ForcedWithdrawal,
   Queue, Row, Limits, Close, assembly).
@@ -51,3 +59,4 @@ formatting, and the deterministic runtime for tests. qmdb is only mentioned in c
 ## Log
 - 2026-11-16: namespace, amounts, lookup with their tests; Amounts and Lookup conformance
   hashes match commonware.
+- 2026-11-16: matrix (Matrix, Opening) with its tests; the Opening conformance hash matches.

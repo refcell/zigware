@@ -67,3 +67,11 @@ test "conformance: amounts" {
         mod.Amounts(PublicKey, u64),
     );
 }
+
+test "conformance: matrix opening" {
+    try skip_slow();
+    try verify(
+        "matrix::tests::conformance::CodecConformance<Opening<PublicKey,Digest,u64>>",
+        mod.Opening(PublicKey, Digest, u64),
+    );
+}
