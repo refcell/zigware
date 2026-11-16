@@ -24,6 +24,10 @@ release:
     fi
     zig build -Doptimize=ReleaseFast -Dgit-rev=$(git rev-parse --short HEAD)
 
+# Publish to main: test, then a locked rebase, check, and push (see AGENTS.md rule 1)
+push *args:
+    etc/scripts/push.sh {{ args }}
+
 # Run unit tests, optionally filtered: just test varint
 test filter='':
     #!/usr/bin/env bash

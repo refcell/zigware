@@ -10,19 +10,15 @@ Read this whole file before you change anything. These rules are not optional.
 
 ## Hard rules
 
-1. **Push straight to `main`.** No branches on the remote, no pull requests. Publish with:
-   ```sh
-   set -o pipefail                    # so `zig build test | tail` stops on failure
-   git fetch origin main && git rebase origin/main
-   zig build test && just tidy        # must pass
-   git push origin HEAD:main
-   ```
-   If the push is rejected, fetch and rebase, then run only `zig build check` and your own
-   packages' tests (`zig build test-<package>`) before pushing again: the full suite already
-   passed on a nearly identical base, and CI runs it on every push. Run the full suite again
-   only if the rebase brought in changes to a package yours depends on, or one that depends on
-   yours. Push small commits often: every coherent, green step (at least every hour of work).
-   Never force-push `main`.
+1. **Push straight to `main`.** No branches on the remote, no pull requests. Publish with
+   `just push` (etc/scripts/push.sh): it rebases and runs `zig build test` and `just tidy`,
+   then takes a machine-wide lock, rebases again, runs `zig build check`, and pushes. Lanes
+   on one machine never race each other inside the lock, so a push no longer needs retries;
+   CI runs the full suite on every push. If the full suite already passed on this commit,
+   `just push --no-test` skips it. Without the script, the equivalent is
+   `set -o pipefail; git fetch origin main && git rebase origin/main && zig build test &&
+   just tidy && git push origin HEAD:main`. Push small commits often: every coherent, green
+   step (at least every hour of work). Never force-push `main`.
    Stop processes through your own tool's PIDs (`shell_command_kill`). A leftover process
    that is provably yours (check its cwd is your clone and its args are your binary) may be
    stopped with `kill <that pid>`. Never `kill` a parent PID or anything you did not start:
