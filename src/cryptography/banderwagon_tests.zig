@@ -11,6 +11,7 @@ const math = @import("math");
 const minifuzz = @import("invariants").minifuzz;
 const hex = @import("formatting").hex_literal;
 const banderwagon = @import("banderwagon.zig");
+const circuit = @import("zk/circuit.zig");
 const shared = @import("bls12381/conformance_test.zig");
 
 const F = banderwagon.F;
@@ -415,4 +416,73 @@ test "banderwagon fuzz: decode" {
 
 test "banderwagon fuzz: decode (coverage-guided)" {
     try testing.fuzz({}, math.testing.smith_body(void, decode_body), .{});
+}
+
+fn index_of(v: Var) circuit.CircuitIdx {
+    return v.inner.circuit.idx;
+}
+
+/// Probes the circuit's sizes: a fresh witness and a fresh constant report how many of each
+/// were allocated before them.
+fn expect_shape(ctx: *Context, outputs: []const Var, expected: []const circuit.CircuitIdx) !void {
+    var indices: [8]circuit.CircuitIdx = undefined;
+    for (outputs, 0..) |output, position| indices[position] = index_of(output);
+    indices[outputs.len] = index_of(Var.witness_value(ctx, Base.one));
+    indices[outputs.len + 1] = index_of(Var.constant(ctx, Base.from_u64(2)));
+    const count = outputs.len + 2;
+    try testing.expectEqual(expected.len, count);
+    for (expected, indices[0..count]) |want, got| try testing.expect(want.eql(got));
+}
+
+fn finish_satisfied(ctx: *Context) !bool {
+    var valued, const indices = try ctx.finish_valued(gpa, &.{});
+    defer valued.deinit(gpa);
+    defer gpa.free(indices);
+    return valued.is_satisfied();
+}
+
+// The output indices commonware's `build_with_values` returns for the same gadget calls
+// (from a Rust run), so the circuits match node for node.
+test "banderwagon: scalar_mul_x_squared builds commonware's circuit" {
+    var ctx: Context = try .init(gpa, .uniform(1 << 14), .prover);
+    errdefer ctx.deinit(gpa);
+    const s = Var.witness_value(&ctx, Base.from_u64(12345));
+    const out = G.generator.scalar_mul_x_squared(&ctx, s);
+    try expect_shape(&ctx, &.{out}, &.{
+        .{ .node = 7628 }, .{ .witness = 764 }, .{ .constant = 3685 },
+    });
+    try testing.expect(try finish_satisfied(&ctx));
+}
+
+test "banderwagon: scalar_mul_many_in_circuit builds commonware's circuit" {
+    var ctx: Context = try .init(gpa, .uniform(1 << 12), .prover);
+    errdefer ctx.deinit(gpa);
+    const k: u64 = 0b10_1101_0110;
+    var bits: [10]BoolVar = undefined;
+    for (&bits, 0..) |*bit, index| {
+        bit.* = BoolVar.witness_value(&ctx, (k >> @intCast(index)) & 1 == 1);
+    }
+    const bases = [_]G{ G.generator, G.hash_to_group(test_dst, "second") };
+    var out: [bases.len]GVar = undefined;
+    try banderwagon.scalar_mul_many_in_circuit(gpa, 4, &bases, &bits, &out);
+    const outputs = [_]Var{ out[0].x_squared(), out[1].x_squared() };
+    try expect_shape(&ctx, &outputs, &.{
+        .{ .node = 409 }, .{ .node = 410 }, .{ .witness = 22 }, .{ .constant = 198 },
+    });
+    try testing.expect(try finish_satisfied(&ctx));
+}
+
+test "banderwagon: scalar_mul_bits and scalar_bits_le build commonware's circuit" {
+    var ctx: Context = try .init(gpa, .uniform(1 << 12), .prover);
+    errdefer ctx.deinit(gpa);
+    var bits: [6]BoolVar = undefined;
+    for (&bits, 0..) |*bit, index| bit.* = BoolVar.witness_value(&ctx, index % 2 == 0);
+    const out = G.hash_to_group(test_dst, "third").scalar_mul_bits(&bits).x_squared();
+    const s = Var.witness_value(&ctx, Base.from_u64(3).neg());
+    const decomposed = banderwagon.scalar_bits_le(&ctx, s);
+    const last = decomposed[254].var_value().mul(decomposed[0].var_value());
+    try expect_shape(&ctx, &.{ out, last }, &.{
+        .{ .node = 140 }, .{ .node = 1161 }, .{ .witness = 272 }, .{ .constant = 448 },
+    });
+    try testing.expect(try finish_satisfied(&ctx));
 }
