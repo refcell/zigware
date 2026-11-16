@@ -156,7 +156,12 @@ test vectors. Tests never call AWS and never hold credentials.
 - [x] The `deployer` binary (`src/deployer/main.zig`, `zig build run-deployer -- aws list`):
   `deployer.cli.parse`, then `deployer.aws.commands.run` over `HttpTransport`, `Ssh`, and
   `Processes`, with commonware's failure messages. `list` and `attach` need no credentials.
-- [ ] Fuzz: YAML parse/write round trips, config validation, SigV4 canonicalization.
+- [x] Fuzz: YAML parse/write round trips and arbitrary lines (`yaml_test`), CLI parsing
+  (`cli_test`), XML scanning (`query_test`), and `aws/fuzz_test.zig`: SigV4 URI encoding (decodes
+  back, unreserved bytes never escaped), canonical queries (sorted, complete,
+  order-independent), signatures (header and query order ignored, values signed), and
+  configurations (YAML round trip, name validation against the rules). Each target was checked
+  by planting a bug it catches.
 
 ## Log
 - 2026-11-16: lane started.
