@@ -479,7 +479,8 @@ pub fn Network(comptime P: type) type {
             if (!owner_tracker.accepts(id)) return false;
             const primary = peers.primary.items;
             const count = sizing.peer_set_size(P, primary, peers.secondary.items, owner);
-            if (count > network.config.max_peers_per_set) @panic("peer set too large");
+            const max = network.config.max_peers_per_set;
+            if (count > max) std.debug.panic("peer set too large: {d} > {d}", .{ count, max });
             for (peers.primary.items) |peer| _ = try network.ensure_peer(peer);
             for (peers.secondary.items) |peer| _ = try network.ensure_peer(peer);
             const limit = network.config.tracked_peer_sets;
@@ -888,6 +889,11 @@ pub fn Network(comptime P: type) type {
                 return .{ .network = oracle_value.network, .owner = null };
             }
 
+            /// The network-wide peer sets as an `AddressableManager` that ignores addresses.
+            pub fn socket_manager(oracle_value: Oracle) SocketManager {
+                return .{ .manager = oracle_value.manager() };
+            }
+
             /// Adds a directed link. Fails for a self link or an existing link.
             pub fn add_link(oracle_value: Oracle, sender: P, receiver: P, link: Link) !void {
                 assert(link.success_rate >= 0 and link.success_rate <= 1);
@@ -977,6 +983,11 @@ pub fn Network(comptime P: type) type {
                 return .{ .network = control.network, .owner = control.me };
             }
 
+            /// This peer's own peer sets as an `AddressableManager` that ignores addresses.
+            pub fn socket_manager(control: Control) SocketManager {
+                return .{ .manager = control.manager() };
+            }
+
             /// Forgets every peer set this peer tracks, as a restart does.
             pub fn reset_peer_sets(control: Control) !void {
                 const network = control.network;
@@ -1015,6 +1026,52 @@ pub fn Network(comptime P: type) type {
         };
 
         /// Tracks peer sets for one peer, or network-wide (`owner == null`).
+        /// A `Manager` taking peers with addresses (commonware `SocketManager`): the simulated
+        /// network does not use addresses, so `track` drops them and `overwrite` does nothing.
+        pub const SocketManager = struct {
+            pub const PublicKey = P;
+            pub const Tracked = p2p.AddressableTrackedPeers(P);
+            pub const PeerMap = Tracked.PeerMap;
+
+            manager: Manager,
+
+            /// Tracks the keys of `peers` at `id`, as `Manager.track`.
+            pub fn track(socket_manager: SocketManager, id: u64, peers: Tracked) Feedback {
+                const gpa = socket_manager.manager.network.gpa;
+                const primary = keys_of(gpa, peers.primary) catch return .closed;
+                defer gpa.free(primary);
+                const secondary = keys_of(gpa, peers.secondary) catch return .closed;
+                defer gpa.free(secondary);
+                const tracked: p2p.TrackedPeers(P) = .{
+                    .primary = .init(primary),
+                    .secondary = .init(secondary),
+                };
+                return socket_manager.manager.track(id, tracked);
+            }
+
+            /// Every address is valid here, so there is nothing to overwrite.
+            pub fn overwrite(socket_manager: SocketManager, peers: PeerMap) Feedback {
+                _ = socket_manager;
+                _ = peers;
+                return .ok;
+            }
+
+            pub fn peer_set(socket_manager: SocketManager, gpa: Allocator, id: u64) !?OwnedPeers {
+                return socket_manager.manager.peer_set(gpa, id);
+            }
+
+            pub fn subscribe(socket_manager: SocketManager) !PeerSetSubscription {
+                return socket_manager.manager.subscribe();
+            }
+
+            /// The keys of `map`, ascending as the map's.
+            fn keys_of(gpa: Allocator, map: PeerMap) Allocator.Error![]P {
+                const keys = try gpa.alloc(P, map.entries.len);
+                for (map.entries, keys) |entry, *peer| peer.* = entry.key;
+                return keys;
+            }
+        };
+
         pub const Manager = struct {
             pub const PublicKey = P;
 

@@ -125,3 +125,188 @@ test "peer-set sizing deduplicates roles within a set and counts across sets" {
     // commonware `test_peer_set_size_deduplicates_roles_and_sets`.
     _ = try t.run_deterministic(0, deduplicates_roles_and_sets);
 }
+
+const codec = @import("codec");
+const SocketManager = Net.SocketManager;
+const PeerMap = SocketManager.PeerMap;
+
+fn socket_address(a: u8, b: u8, c: u8, d: u8, port: u16) p2p.Address {
+    return .{ .symmetric = .{ .ip = .{ .v4 = codec.Ipv4.init(a, b, c, d) }, .port = port } };
+}
+
+/// A map of `entries`, sorted in place.
+fn peer_map(entries: []PeerMap.Entry) PeerMap {
+    PeerMap.sort(entries);
+    return .init(entries);
+}
+
+/// Asserts the owned set at `id` has `primary` and `secondary` (each compared as a set).
+fn expect_owned(manager: anytype, id: u64, primary: []const Key, secondary: []const Key) !void {
+    const owned = (try manager.peer_set(testing.allocator, id)).?;
+    defer owned.free(testing.allocator);
+    try expect_keys(primary, owned.primary);
+    try expect_keys(secondary, owned.secondary);
+}
+
+fn expect_keys(expected: []const Key, actual: []const Key) !void {
+    var sorted: [4]Key = undefined;
+    @memcpy(sorted[0..expected.len], expected);
+    t.Tracked.PeerSet.sort(sorted[0..expected.len]);
+    try testing.expectEqualSlices(Key, sorted[0..expected.len], actual);
+}
+
+fn socket_manager_tracks(io: Io) !void {
+    var harness = try t.Harness.start(io, t.config(2, 3));
+    defer harness.deinit();
+    const manager = harness.oracle().socket_manager();
+    const pk1 = key(1);
+    const pk2 = key(2);
+    var both = [_]PeerMap.Entry{
+        .{ .key = pk1, .value = socket_address(127, 0, 0, 1, 4000) },
+        .{ .key = pk2, .value = socket_address(127, 0, 0, 1, 4001) },
+    };
+    try testing.expectEqual(p2p.Feedback.ok, manager.track(1, .init_primary(peer_map(&both))));
+    try expect_owned(manager, 1, &.{ pk1, pk2 }, &.{});
+    var updates = try manager.subscribe();
+    defer updates.deinit();
+    {
+        var update = (try updates.recv()).?;
+        defer update.deinit();
+        try testing.expectEqual(1, update.index);
+        try expect_keys(&.{ pk1, pk2 }, update.latest.primary);
+        try expect_keys(&.{ pk1, pk2 }, update.all.primary);
+        try testing.expectEqual(0, update.all.secondary.len);
+    }
+    var second = [_]PeerMap.Entry{.{ .key = pk2, .value = socket_address(127, 0, 0, 1, 4001) }};
+    try testing.expectEqual(p2p.Feedback.ok, manager.track(2, .init_primary(peer_map(&second))));
+    var update = (try updates.recv()).?;
+    defer update.deinit();
+    try testing.expectEqual(2, update.index);
+    try expect_keys(&.{pk2}, update.latest.primary);
+    try expect_keys(&.{ pk1, pk2 }, update.all.primary);
+    // The simulated network ignores addresses, so overwriting one does nothing.
+    var moved = [_]PeerMap.Entry{.{ .key = pk1, .value = socket_address(127, 0, 0, 1, 8000) }};
+    try testing.expectEqual(p2p.Feedback.ok, manager.overwrite(peer_map(&moved)));
+    try expect_owned(manager, 2, &.{pk2}, &.{});
+}
+
+test "the socket manager tracks peer sets by key and ignores addresses" {
+    // commonware `test_socket_manager` and `test_socket_manager_overwrite`.
+    _ = try t.run_deterministic(0, socket_manager_tracks);
+}
+
+fn socket_manager_roles(io: Io) !void {
+    var harness = try t.Harness.start(io, t.config(2, 3));
+    defer harness.deinit();
+    const manager = harness.oracle().socket_manager();
+    const pk1 = key(1);
+    const pk2 = key(2);
+    var primary = [_]PeerMap.Entry{.{ .key = pk1, .value = socket_address(127, 0, 0, 1, 4000) }};
+    var secondary = [_]PeerMap.Entry{.{ .key = pk2, .value = socket_address(127, 0, 0, 1, 4001) }};
+    const peers: SocketManager.Tracked = .{
+        .primary = peer_map(&primary),
+        .secondary = peer_map(&secondary),
+    };
+    try testing.expectEqual(p2p.Feedback.ok, manager.track(7, peers));
+    try expect_owned(manager, 7, &.{pk1}, &.{pk2});
+}
+
+test "the socket manager keeps primary and secondary roles" {
+    // commonware `test_socket_manager_track_accepts_addressable_tracked_peers`.
+    _ = try t.run_deterministic(0, socket_manager_roles);
+}
+
+fn socket_manager_overlap(io: Io) !void {
+    var harness = try t.Harness.start(io, t.config(1, 3));
+    defer harness.deinit();
+    const manager = harness.oracle().socket_manager();
+    var updates = try manager.subscribe();
+    defer updates.deinit();
+    const pk = key(1);
+    var primary = [_]PeerMap.Entry{.{ .key = pk, .value = socket_address(127, 0, 0, 1, 4000) }};
+    var secondary = [_]PeerMap.Entry{.{ .key = pk, .value = socket_address(127, 0, 0, 1, 5000) }};
+    const peers: SocketManager.Tracked = .{
+        .primary = peer_map(&primary),
+        .secondary = peer_map(&secondary),
+    };
+    try testing.expectEqual(p2p.Feedback.ok, manager.track(11, peers));
+    var update = (try updates.recv()).?;
+    defer update.deinit();
+    try testing.expectEqual(11, update.index);
+    try expect_keys(&.{pk}, update.latest.primary);
+    try testing.expectEqual(0, update.latest.secondary.len);
+    try testing.expectEqual(0, update.all.secondary.len);
+}
+
+test "a key in both addressable maps is tracked as primary only" {
+    // commonware `test_socket_manager_track_addressable_overlap_primary_wins`.
+    _ = try t.run_deterministic(0, socket_manager_overlap);
+}
+
+fn socket_manager_asymmetric(io: Io) !void {
+    var harness = try t.Harness.start(io, t.config(2, 3));
+    defer harness.deinit();
+    const manager = harness.oracle().socket_manager();
+    const pk1 = key(1);
+    const pk2 = key(2);
+    const egress_1 = socket_address(192, 168, 1, 1, 9090).symmetric;
+    const egress_2 = socket_address(192, 168, 1, 2, 9090).symmetric;
+    const host = @import("utils").Hostname.literal("node2.example.com");
+    var both = [_]PeerMap.Entry{
+        .{ .key = pk1, .value = .{ .asymmetric = .{
+            .ingress = .{ .socket = socket_address(10, 0, 0, 1, 8080).symmetric },
+            .egress = egress_1,
+        } } },
+        .{ .key = pk2, .value = .{ .asymmetric = .{
+            .ingress = .{ .dns = .{ .host = host, .port = 8080 } },
+            .egress = egress_2,
+        } } },
+    };
+    try testing.expectEqual(p2p.Feedback.ok, manager.track(1, .init_primary(peer_map(&both))));
+    try expect_owned(manager, 1, &.{ pk1, pk2 }, &.{});
+    var updates = try manager.subscribe();
+    defer updates.deinit();
+    var update = (try updates.recv()).?;
+    defer update.deinit();
+    try testing.expectEqual(1, update.index);
+    try expect_keys(&.{ pk1, pk2 }, update.latest.primary);
+    try testing.expectEqual(0, update.latest.secondary.len);
+}
+
+test "the socket manager accepts asymmetric and DNS addresses" {
+    // commonware `test_socket_manager_with_asymmetric_addresses`.
+    _ = try t.run_deterministic(0, socket_manager_asymmetric);
+}
+
+fn manager_roles(io: Io) !void {
+    var harness = try t.Harness.start(io, t.config(3, 3));
+    defer harness.deinit();
+    const manager = harness.oracle().manager();
+    const pk1 = key(1);
+    const pk2 = key(2);
+    const pk3 = key(3);
+    var primary_7 = [_]Key{pk1};
+    var secondary_7 = [_]Key{pk2};
+    try testing.expectEqual(p2p.Feedback.ok, manager.track(7, tracked(&primary_7, &secondary_7)));
+    try expect_owned(manager, 7, &.{pk1}, &.{pk2});
+    // A key in both roles is primary only.
+    var primary_9 = [_]Key{ pk1, pk2 };
+    var secondary_9 = [_]Key{ pk2, pk3 };
+    try testing.expectEqual(p2p.Feedback.ok, manager.track(9, tracked(&primary_9, &secondary_9)));
+    try expect_owned(manager, 9, &.{ pk1, pk2 }, &.{pk3});
+    var updates = try manager.subscribe();
+    defer updates.deinit();
+    var update = (try updates.recv()).?;
+    defer update.deinit();
+    try testing.expectEqual(9, update.index);
+    try expect_keys(&.{ pk1, pk2 }, update.latest.primary);
+    try expect_keys(&.{pk3}, update.latest.secondary);
+    try expect_keys(&.{ pk1, pk2 }, update.all.primary);
+    try expect_keys(&.{pk3}, update.all.secondary);
+}
+
+test "the manager keeps roles, and a key in both is primary only" {
+    // commonware `test_manager_track_accepts_tracked_peers` and
+    // `test_manager_track_tracked_peers_overlap_primary_wins` (one network, two sets).
+    _ = try t.run_deterministic(0, manager_roles);
+}

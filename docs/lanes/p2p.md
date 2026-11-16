@@ -198,9 +198,10 @@ handshake and the runtime's network, which the actor-stream and runtime lanes ar
 - [x] simulated: metrics (`messages_sent`, `messages_received`) and tracing events.
 - [x] simulated: duplicate channel, link before registration, register and link, max_size
   on the payload, FIFO burst, peer-set subscriptions (four tests), clean shutdown (25 seeds).
-- [ ] simulated: remaining mod.rs tests (socket manager, dynamic peers, message ordering,
-  overlapping primary/secondary, broadcast transmit latency, max_peers_per_set counting,
-  split-peer seeding).
+- [x] simulated: `SocketManager` (`oracle.socket_manager()`, `control.socket_manager()`)
+  with the socket-manager tests; max_peers_per_set counting and split-peer seeding tests.
+- [ ] simulated: remaining mod.rs tests (dynamic peers, overlapping primary/secondary,
+  broadcast transmit latency, cross-index primary wins, unordered sets, get_next_socket).
 - [x] authenticated: router, relay, throttle, dialing, channels.
 - [x] discovery: types (conformance), tracker record/bit set/directory, tracker, peer
   connections, dialer, listener, Network/Config/Oracle, connectivity over the deterministic
@@ -221,10 +222,8 @@ handshake and the runtime's network, which the actor-stream and runtime lanes ar
 - [x] lookup (parallel lane): tracker, peer, dialer, listener, Network with Config and Oracle,
   commonware's mod.rs tests (but DNS, see decisions), and the directory's metrics.
 - [ ] lookup DNS tests, once the deterministic runtime has a resolver.
-- [ ] utils codec, mux, mocks, and `WrappedBackgroundReceiver` (bls-math lane, under
-  src/p2p/utils/ beside limited, watch, io_rng, and shuffle): it tells broadcast-collector
-  when buffered's config can take the Strategy.
-- [ ] Fuzz targets (commonware p2p/fuzz).
+- [x] utils codec, mux, mocks, and `WrappedBackgroundReceiver` (bls-math lane, 6f151f7).
+- [ ] Fuzz targets (commonware p2p/fuzz): moved to the bls-math lane, under src/p2p/fuzz/.
 
 ## Log
 - 2026-11-16: (parallel lane) lookup: graceful and clean shutdown, rate limiting, restarts,
