@@ -51,7 +51,10 @@ pub const Header = struct {
     node: NodeRef = .aborted,
     /// Some party consumes the future.
     claimed: bool = false,
-    /// The task's function returned.
+    /// The task's function returned, and it is about to abort its subtree. A canceled task
+    /// that already returned keeps its result: cancel then waits for that result.
+    returned: bool = false,
+    /// The task returned and finished aborting its subtree.
     ended: bool = false,
     /// The handle was released without joining.
     detached: bool = false,
@@ -172,7 +175,7 @@ pub const Tree = struct {
         _ = tree;
         if (header.claimed) return false;
         header.claimed = true;
-        header.closed = cancel and !header.ended;
+        header.closed = cancel and !header.returned;
         return true;
     }
 
@@ -199,6 +202,10 @@ pub const Tree = struct {
     pub fn abort(tree: *Tree, node: NodeRef, self: ?*Header) void {
         var claimed: ?*Header = null;
         tree.lock();
+        if (self) |task| {
+            assert(!task.returned);
+            task.returned = true;
+        }
         if (tree.live(node)) {
             tree.unlink(node.index);
             var pending = node.index;
@@ -278,6 +285,7 @@ pub const Tree = struct {
         tree.lock();
         defer tree.unlock();
         assert(!header.ended);
+        assert(header.returned);
         assert(tree.running > 0);
         header.ended = true;
         tree.running -= 1;
@@ -332,3 +340,36 @@ pub const Tree = struct {
         }
     }
 };
+
+const testing = std.testing;
+
+fn finish_nothing(header: *Header, io: Io, cancel: bool) void {
+    _ = header;
+    _ = io;
+    _ = cancel;
+}
+
+fn destroy_nothing(header: *Header) void {
+    _ = header;
+}
+
+test "a task canceled after it returned keeps its result" {
+    var tree: Tree = try .init(testing.allocator, testing.io, 8);
+    defer tree.deinit(testing.allocator);
+    const vtable: Header.VTable = .{ .finish = finish_nothing, .destroy = destroy_nothing };
+    const root_node = tree.root();
+    var header: Header = .{ .vtable = &vtable, .node = tree.child(root_node) };
+    tree.starting();
+    // The task returns and aborts its context's subtree before the spawner registers it, so
+    // the spawner cancels it, but it has not reported `ended` yet.
+    tree.abort(header.node, &header);
+    try testing.expect(!tree.attach(&header));
+    try testing.expect(tree.claim(&header, true));
+    try testing.expect(!header.closed);
+    tree.ended(&header);
+    // A task canceled before it returned is closed.
+    var pending: Header = .{ .vtable = &vtable, .node = tree.child(root_node) };
+    try testing.expect(tree.attach(&pending));
+    tree.abort(root_node, null);
+    try testing.expect(pending.claimed and pending.closed);
+}
