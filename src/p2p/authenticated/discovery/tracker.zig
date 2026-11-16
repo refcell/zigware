@@ -12,6 +12,7 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const codec = @import("codec");
 const utils = @import("utils");
+const metrics = @import("runtime").telemetry.metrics;
 const p2p = @import("../../root.zig");
 const sizing = @import("../../sizing.zig");
 const SortedMap = @import("../../simulated/sorted_map.zig").SortedMap;
@@ -71,8 +72,15 @@ pub fn Tracker(comptime P: type) type {
         subscribers: std.ArrayList(Unbounded(Update).Sender) = .empty,
         blocked: Watch(P),
 
-        pub fn init(gpa: Allocator, io: Io, config: Config) Allocator.Error!Self {
+        /// Registers the directory's metrics under `scope.child("directory")`.
+        pub fn init(
+            gpa: Allocator,
+            io: Io,
+            scope: *const metrics.Scope,
+            config: Config,
+        ) Allocator.Error!Self {
             assert(config.max_peers_per_set > 0);
+            const directory_scope = scope.child("directory");
             const directory = try Directory.init(gpa, config.bootstrappers, config.myself, .{
                 .allow_private_ips = config.allow_private_ips,
                 .allow_dns = config.allow_dns,
@@ -80,7 +88,7 @@ pub fn Tracker(comptime P: type) type {
                 .dial_fail_limit = config.dial_fail_limit,
                 .peer_connection_cooldown = config.peer_connection_cooldown,
                 .block_duration = config.block_duration,
-            });
+            }, &directory_scope);
             return .{
                 .gpa = gpa,
                 .io = io,
@@ -138,7 +146,7 @@ pub fn Tracker(comptime P: type) type {
             tracker.lock();
             defer tracker.unlock();
             if (tracker.closed or !tracker.directory.eligible(tracker.now(), peer)) return null;
-            tracker.directory.connect(peer, dialer);
+            tracker.directory.connect(tracker.now(), peer, dialer);
             _ = tracker.mailboxes.put(tracker.gpa, peer, outbox) catch return null;
             return tracker.directory.info(tracker.me).?;
         }

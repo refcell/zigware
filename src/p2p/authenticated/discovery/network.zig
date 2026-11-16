@@ -12,6 +12,7 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const codec = @import("codec");
 const utils = @import("utils");
+const metrics = @import("runtime").telemetry.metrics;
 const stream = @import("stream");
 const p2p = @import("../../root.zig");
 const p2p_types = @import("../../types.zig");
@@ -87,9 +88,16 @@ pub fn Network(comptime U: type, comptime Transport: type) type {
         /// Inbound handshakes in flight.
         handshakes: std.atomic.Value(u32) = .init(0),
 
-        /// Creates a network; register channels, then `run` it. Panics when the payload limit
-        /// or the gossip bound exceeds the stream limit.
-        pub fn create(gpa: Allocator, io: Io, transport: *Transport, config: Config) !*Self {
+        /// Creates a network; register channels, then `run` it. Metrics register under `scope`
+        /// (commonware's network context, such as `context.child("network")`). Panics when the
+        /// payload limit or the gossip bound exceeds the stream limit.
+        pub fn create(
+            gpa: Allocator,
+            io: Io,
+            transport: *Transport,
+            scope: metrics.Scope,
+            config: Config,
+        ) !*Self {
             if (config.max_message_size > data.max_size(U.max_size)) {
                 @panic("maximum message size exceeds stream limit");
             }
@@ -123,7 +131,8 @@ pub fn Network(comptime U: type, comptime Transport: type) type {
             };
             network.router = try Router.init(gpa, io);
             errdefer network.router.deinit();
-            network.tracker = try Tracker.init(gpa, io, network.tracker_config());
+            const tracker_scope = scope.child("tracker");
+            network.tracker = try Tracker.init(gpa, io, &tracker_scope, network.tracker_config());
             errdefer network.tracker.deinit();
             const max_peers = try retained_peers(gpa, &network.config);
             network.channels = .init(gpa, io, &network.router, config.max_message_size, max_peers);

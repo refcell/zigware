@@ -5,6 +5,7 @@ const testing = std.testing;
 const codec = @import("codec");
 const cryptography = @import("cryptography");
 const utils = @import("utils");
+const metrics = @import("runtime").telemetry.metrics;
 const p2p_types = @import("../../types.zig");
 const directory_mod = @import("directory.zig");
 const types = @import("types.zig");
@@ -83,11 +84,14 @@ fn contains(keys: []const Key, peer: Key) bool {
 
 test "track kills a connected peer removed from every set" {
     var rng = utils.rng.test_rng();
-    var dir = try Dir.init(gpa, &.{}, my_info(), config(1, true));
+    var registry = metrics.Registry.init(gpa);
+    defer registry.deinit();
+    const scope = metrics.Scope.init(&registry).child("directory");
+    var dir = try Dir.init(gpa, &.{}, my_info(), config(1, true), &scope);
     defer dir.deinit();
     try expect_tracked(try track(&dir, 0, &.{key(1)}, &.{}), &.{});
     const reservation = dir.listen(&rng, epoch, key(1)).?;
-    dir.connect(key(1), false);
+    dir.connect(epoch, key(1), false);
     try expect_tracked(try track(&dir, 1, &.{key(2)}, &.{}), &.{key(1)});
     try testing.expect(!dir.peers.get(key(1)).?.deletable());
     dir.release(reservation);
@@ -96,7 +100,10 @@ test "track kills a connected peer removed from every set" {
 }
 
 test "blocking ourselves is ignored" {
-    var dir = try Dir.init(gpa, &.{}, my_info(), config(3, false));
+    var registry = metrics.Registry.init(gpa);
+    defer registry.deinit();
+    const scope = metrics.Scope.init(&registry).child("directory");
+    var dir = try Dir.init(gpa, &.{}, my_info(), config(3, false), &scope);
     defer dir.deinit();
     try testing.expect(!try dir.block(epoch, key(0)));
     try testing.expectEqual(@as(usize, 0), dir.blocked.count());
@@ -104,7 +111,10 @@ test "blocking ourselves is ignored" {
 }
 
 test "secondary sets remain until eviction" {
-    var dir = try Dir.init(gpa, &.{}, my_info(), config(2, false));
+    var registry = metrics.Registry.init(gpa);
+    defer registry.deinit();
+    const scope = metrics.Scope.init(&registry).child("directory");
+    var dir = try Dir.init(gpa, &.{}, my_info(), config(2, false), &scope);
     defer dir.deinit();
     try expect_tracked(try track(&dir, 0, &.{key(1)}, &.{key(4)}), &.{});
     try testing.expect(dir.eligible(epoch, key(4)));
@@ -116,7 +126,10 @@ test "secondary sets remain until eviction" {
 }
 
 test "a peer in both roles is tracked as primary only" {
-    var dir = try Dir.init(gpa, &.{}, my_info(), config(3, false));
+    var registry = metrics.Registry.init(gpa);
+    defer registry.deinit();
+    const scope = metrics.Scope.init(&registry).child("directory");
+    var dir = try Dir.init(gpa, &.{}, my_info(), config(3, false), &scope);
     defer dir.deinit();
     try expect_tracked(try track(&dir, 0, &.{ key(1), key(2) }, &.{ key(2), key(3) }), &.{});
     const set = (try dir.peer_set(gpa, 0)).?;
@@ -135,7 +148,10 @@ test "a peer in both roles is tracked as primary only" {
 }
 
 test "demotion from primary to secondary" {
-    var dir = try Dir.init(gpa, &.{}, my_info(), config(2, false));
+    var registry = metrics.Registry.init(gpa);
+    defer registry.deinit();
+    const scope = metrics.Scope.init(&registry).child("directory");
+    var dir = try Dir.init(gpa, &.{}, my_info(), config(2, false), &scope);
     defer dir.deinit();
     const x = key(1);
     const y = key(2);
@@ -160,7 +176,10 @@ test "demotion from primary to secondary" {
 }
 
 test "tracking needs increasing indices" {
-    var dir = try Dir.init(gpa, &.{}, my_info(), config(3, false));
+    var registry = metrics.Registry.init(gpa);
+    defer registry.deinit();
+    const scope = metrics.Scope.init(&registry).child("directory");
+    var dir = try Dir.init(gpa, &.{}, my_info(), config(3, false), &scope);
     defer dir.deinit();
     try expect_tracked(try track(&dir, 5, &.{key(1)}, &.{}), &.{});
     try testing.expect((try track(&dir, 5, &.{key(2)}, &.{})) == null);
@@ -170,7 +189,10 @@ test "tracking needs increasing indices" {
 
 test "a peer blocked before joining a set stays blocked" {
     var rng = utils.rng.test_rng();
-    var dir = try Dir.init(gpa, &.{}, my_info(), config(3, true));
+    var registry = metrics.Registry.init(gpa);
+    defer registry.deinit();
+    const scope = metrics.Scope.init(&registry).child("directory");
+    var dir = try Dir.init(gpa, &.{}, my_info(), config(3, true), &scope);
     defer dir.deinit();
     const unknown = key(99);
     try testing.expect(try dir.block(epoch, unknown));
@@ -194,7 +216,10 @@ test "a peer blocked before joining a set stays blocked" {
 
 test "blocked peers are neither dialable nor shared" {
     var rng = utils.rng.test_rng();
-    var dir = try Dir.init(gpa, &.{}, my_info(), config(3, true));
+    var registry = metrics.Registry.init(gpa);
+    defer registry.deinit();
+    const scope = metrics.Scope.init(&registry).child("directory");
+    var dir = try Dir.init(gpa, &.{}, my_info(), config(3, true), &scope);
     defer dir.deinit();
     const peer = key(1);
     const other = key(2);
@@ -210,7 +235,7 @@ test "blocked peers are neither dialable nor shared" {
     // Connect both so their info is sharable, then block one.
     for ([_]Key{ peer, other }) |each| {
         _ = dir.listen(&rng, epoch, each).?;
-        dir.connect(each, false);
+        dir.connect(epoch, each, false);
     }
     try testing.expect(try dir.block(epoch, peer));
     const bits = try types.BitMap.zeroes(gpa, 2);
@@ -228,14 +253,17 @@ test "blocked peers are neither dialable nor shared" {
 
 test "infos rejects a malformed bit vector and skips future timestamps" {
     var rng = utils.rng.test_rng();
-    var dir = try Dir.init(gpa, &.{}, my_info(), config(3, true));
+    var registry = metrics.Registry.init(gpa);
+    defer registry.deinit();
+    const scope = metrics.Scope.init(&registry).child("directory");
+    var dir = try Dir.init(gpa, &.{}, my_info(), config(3, true), &scope);
     defer dir.deinit();
     try expect_tracked(try track(&dir, 0, &.{ key(0), key(1), key(2) }, &.{}), &.{});
     dir.update_peers(&.{info_at(1, socket(127, 0, 0, 1, 9001), 50)});
     dir.update_peers(&.{info_at(2, socket(127, 0, 0, 1, 9002), 5_000)});
     for ([_]Key{ key(1), key(2) }) |each| {
         _ = dir.listen(&rng, epoch, each).?;
-        dir.connect(each, false);
+        dir.connect(epoch, each, false);
     }
     var short: types.BitVec = .{ .index = 0, .bits = try types.BitMap.zeroes(gpa, 2) };
     defer short.deinit(gpa);
@@ -258,7 +286,10 @@ test "infos rejects a malformed bit vector and skips future timestamps" {
 
 test "knowledge bits follow connections and gossip" {
     var rng = utils.rng.test_rng();
-    var dir = try Dir.init(gpa, &.{}, my_info(), config(3, true));
+    var registry = metrics.Registry.init(gpa);
+    defer registry.deinit();
+    const scope = metrics.Scope.init(&registry).child("directory");
+    var dir = try Dir.init(gpa, &.{}, my_info(), config(3, true), &scope);
     defer dir.deinit();
     try expect_tracked(try track(&dir, 0, &.{ key(0), key(1) }, &.{}), &.{});
     const self_slot: usize = if (Key.order(key(0), key(1)) == .lt) 0 else 1;
@@ -278,7 +309,7 @@ test "knowledge bits follow connections and gossip" {
     try testing.expect(!failed.bits.get(1 - self_slot));
     // A successful dial clears the failures.
     _ = dir.dial(&rng, at_ms(1_000), key(1)).?;
-    dir.connect(key(1), true);
+    dir.connect(epoch, key(1), true);
     var connected = (try dir.random_bit_vec(gpa, &rng)).?;
     defer connected.deinit(gpa);
     try testing.expect(connected.bits.get(1 - self_slot));
@@ -289,7 +320,10 @@ test "the reservation cooldown rate limits redials" {
     const bootstrappers = [_]Dir.Bootstrapper{
         .{ .peer = key(1), .ingress = socket(127, 0, 0, 1, 9001) },
     };
-    var dir = try Dir.init(gpa, &bootstrappers, my_info(), config(3, true));
+    var registry = metrics.Registry.init(gpa);
+    defer registry.deinit();
+    const scope = metrics.Scope.init(&registry).child("directory");
+    var dir = try Dir.init(gpa, &bootstrappers, my_info(), config(3, true), &scope);
     defer dir.deinit();
     const reservation = dir.dial(&rng, epoch, key(1)).?;
     try testing.expect(reservation.dialer.ingress.eql(socket(127, 0, 0, 1, 9001)));
@@ -305,7 +339,10 @@ test "the reservation cooldown rate limits redials" {
 
 test "dial rejects a peer demoted to secondary" {
     var rng = utils.rng.test_rng();
-    var dir = try Dir.init(gpa, &.{}, my_info(), config(1, true));
+    var registry = metrics.Registry.init(gpa);
+    defer registry.deinit();
+    const scope = metrics.Scope.init(&registry).child("directory");
+    var dir = try Dir.init(gpa, &.{}, my_info(), config(1, true), &scope);
     defer dir.deinit();
     try expect_tracked(try track(&dir, 0, &.{key(1)}, &.{}), &.{});
     dir.update_peers(&.{info_at(1, socket(127, 0, 0, 1, 9001), 50)});
@@ -317,7 +354,10 @@ test "dial rejects a peer demoted to secondary" {
 
 test "dial rejects an ingress disallowed after an update" {
     var rng = utils.rng.test_rng();
-    var dir = try Dir.init(gpa, &.{}, my_info(), config(1, false));
+    var registry = metrics.Registry.init(gpa);
+    defer registry.deinit();
+    const scope = metrics.Scope.init(&registry).child("directory");
+    var dir = try Dir.init(gpa, &.{}, my_info(), config(1, false), &scope);
     defer dir.deinit();
     try expect_tracked(try track(&dir, 0, &.{key(1)}, &.{}), &.{});
     dir.update_peers(&.{info_at(1, socket(8, 8, 4, 4, 9001), 50)});
@@ -333,7 +373,10 @@ test "a bootstrapper stays after blocking and set eviction" {
     const bootstrappers = [_]Dir.Bootstrapper{
         .{ .peer = key(1), .ingress = socket(8, 8, 8, 8, 1) },
     };
-    var dir = try Dir.init(gpa, &bootstrappers, my_info(), config(1, false));
+    var registry = metrics.Registry.init(gpa);
+    defer registry.deinit();
+    const scope = metrics.Scope.init(&registry).child("directory");
+    var dir = try Dir.init(gpa, &bootstrappers, my_info(), config(1, false), &scope);
     defer dir.deinit();
     try testing.expect(try dir.block(epoch, key(1)));
     try expect_tracked(try track(&dir, 0, &.{key(1)}, &.{}), &.{});
@@ -341,4 +384,63 @@ test "a bootstrapper stays after blocking and set eviction" {
     try testing.expect(dir.peers.contains(key(1)));
     try testing.expect(!dir.eligible(epoch, key(1)));
     try testing.expect(dir.eligible(at_ms(100_000), key(1)));
+}
+
+/// The value of `name`'s sample for `peer`, if any (commonware's `metric_value`).
+fn metric_value(text: []const u8, name: []const u8, peer: Key) !?i64 {
+    var prefix_buffer: [256]u8 = undefined;
+    const prefix = try std.fmt.bufPrint(&prefix_buffer, "{s}{{peer=\"{f}\"}} ", .{ name, peer });
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |line| {
+        if (!std.mem.startsWith(u8, line, prefix)) continue;
+        return try std.fmt.parseInt(i64, line[prefix.len..], 10);
+    }
+    return null;
+}
+
+test "the connected metric tracks active peers" {
+    // commonware `test_connected_metric_tracks_active_peers`, plus the tracked and reserved
+    // gauges along the way.
+    var rng = utils.rng.test_rng();
+    var registry = metrics.Registry.init(gpa);
+    defer registry.deinit();
+    const scope = metrics.Scope.init(&registry).child("directory");
+    var dir = try Dir.init(gpa, &.{}, my_info(), config(3, false), &scope);
+    defer dir.deinit();
+    try expect_tracked(try track(&dir, 0, &.{key(1)}, &.{}), &.{});
+    const reservation = dir.listen(&rng, at_ms(1_000), key(1)).?;
+    dir.connect(at_ms(1_234), key(1), false);
+    {
+        const text = try registry.encode(gpa);
+        defer gpa.free(text);
+        const connected = try metric_value(text, "directory_connected", key(1));
+        try testing.expectEqual(@as(?i64, 1_234), connected);
+        try testing.expect(metrics.has_metric_value(text, "directory_tracked", 1));
+        try testing.expect(metrics.has_metric_value(text, "directory_reserved", 1));
+    }
+    dir.release(reservation);
+    const text = try registry.encode(gpa);
+    defer gpa.free(text);
+    try testing.expectEqual(@as(?i64, null), try metric_value(text, "directory_connected", key(1)));
+    try testing.expect(metrics.has_metric_value(text, "directory_reserved", 0));
+}
+
+test "blocking records the expiry until it passes" {
+    var registry = metrics.Registry.init(gpa);
+    defer registry.deinit();
+    const scope = metrics.Scope.init(&registry).child("directory");
+    var dir = try Dir.init(gpa, &.{}, my_info(), config(3, false), &scope);
+    defer dir.deinit();
+    try testing.expect(try dir.block(at_ms(500), key(7)));
+    {
+        const text = try registry.encode(gpa);
+        defer gpa.free(text);
+        // block_duration is 100 s.
+        const blocked = try metric_value(text, "directory_blocked", key(7));
+        try testing.expectEqual(@as(?i64, 100_500), blocked);
+    }
+    try testing.expect(dir.unblock_expired(at_ms(100_500)));
+    const text = try registry.encode(gpa);
+    defer gpa.free(text);
+    try testing.expectEqual(@as(?i64, null), try metric_value(text, "directory_blocked", key(7)));
 }

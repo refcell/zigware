@@ -10,6 +10,7 @@ const cryptography = @import("cryptography");
 const runtime = @import("runtime");
 const stream = @import("stream");
 const utils = @import("utils");
+const metrics = runtime.telemetry.metrics;
 const p2p = @import("../../root.zig");
 const data = @import("../data.zig");
 const network_mod = @import("network.zig");
@@ -72,7 +73,13 @@ const Node = struct {
     task: Io.Future(anyerror!void),
 };
 
-fn start_nodes(io: Io, transport: *Transport, keys: []const PublicKey, nodes: []Node) !void {
+fn start_nodes(
+    io: Io,
+    transport: *Transport,
+    scope: metrics.Scope,
+    keys: []const PublicKey,
+    nodes: []Node,
+) !void {
     const first: p2p.Ingress = .{ .socket = local_socket(base_port) };
     const bootstrap = [_]Bootstrapper{.{ .peer = keys[0], .ingress = first }};
     const sorted = try gpa.dupe(PublicKey, keys);
@@ -83,7 +90,7 @@ fn start_nodes(io: Io, transport: *Transport, keys: []const PublicKey, nodes: []
         const bootstrappers: []const Bootstrapper = if (index == 0) &.{} else &bootstrap;
         const signer = PrivateKey.from_seed(index);
         const config = test_config(signer, port, bootstrappers, 1024 * 1024);
-        const network = try Net.create(gpa, io, transport, config);
+        const network = try Net.create(gpa, io, transport, node_scope(scope, index), config);
         const tracked: p2p.TrackedPeers(PublicKey) = .init_primary(.init(sorted));
         try testing.expectEqual(p2p.Feedback.ok, network.oracle().track(0, tracked));
         node.* = .{
@@ -93,6 +100,14 @@ fn start_nodes(io: Io, transport: *Transport, keys: []const PublicKey, nodes: []
         };
         node.task = try io.concurrent(run_network, .{network});
     }
+}
+
+/// Each node's metrics, under `peer_<index>` like commonware's per-peer contexts.
+fn node_scope(scope: metrics.Scope, index: usize) metrics.Scope {
+    var label_buffer: [32]u8 = undefined;
+    // Proof: "peer_" plus a usize fits in 32 bytes.
+    const label = std.fmt.bufPrint(&label_buffer, "peer_{d}", .{index}) catch unreachable;
+    return scope.child(label);
 }
 
 fn run_network(network: *Net) anyerror!void {
@@ -116,12 +131,12 @@ fn stop_nodes(io: Io, nodes: []Node) void {
 }
 
 /// Every node sends its identity to all peers until each has heard from every other.
-fn connectivity(io: Io, transport: *Transport, n: usize) !void {
+fn connectivity(io: Io, transport: *Transport, scope: metrics.Scope, n: usize) !void {
     assert(n <= peers_max);
     var keys: [peers_max]PublicKey = undefined;
     for (keys[0..n], 0..) |*key, index| key.* = PrivateKey.from_seed(index).public_key();
     var nodes: [peers_max]Node = undefined;
-    try start_nodes(io, transport, keys[0..n], nodes[0..n]);
+    try start_nodes(io, transport, scope, keys[0..n], nodes[0..n]);
     defer stop_nodes(io, nodes[0..n]);
     var heard: [peers_max][peers_max]bool = @splat(@splat(false));
     var rounds: u32 = 0;
@@ -159,7 +174,8 @@ fn run_deterministic(seed: u64, comptime function: anytype, args: anytype) !void
     const config: runtime.deterministic.Config = .{ .seed = seed, .timeout_ns = timeout_ns };
     var runner = try runtime.deterministic.Runner.init(gpa, config);
     defer runner.deinit();
-    try (try runner.start(function, .{ runner.io(), runner.network() } ++ args));
+    const args_all = .{ runner.io(), runner.network(), runner.metrics() } ++ args;
+    try (try runner.start(function, args_all));
 }
 
 test "peers discover each other through a bootstrapper and exchange messages" {
@@ -179,10 +195,12 @@ test "the payload limit stays configured while the frame grows to carry gossip" 
     try testing.expect(data_frame < sizes[0] and sizes[0] < sizes[1]);
     var transport = Transport.init(gpa, Io.failing);
     defer transport.deinit();
+    var registry = metrics.Registry.init(gpa);
+    defer registry.deinit();
     for ([_]usize{ 2, 200_000 }, sizes) |capacity, size| {
         var config = test_config(signer, 0, &.{}, 0);
         config.max_peers_per_set = capacity;
-        const network = try Net.create(gpa, Io.failing, &transport, config);
+        const network = try Net.create(gpa, Io.failing, &transport, .init(&registry), config);
         defer network.destroy();
         try testing.expectEqual(@as(u32, 0), network.config.max_message_size);
         try testing.expectEqual(@as(u32, @intCast(size)), network.max_frame_size);
@@ -192,12 +210,14 @@ test "the payload limit stays configured while the frame grows to carry gossip" 
 test "greeting and verifier use the upgrader identity and gossip namespace" {
     var transport = Transport.init(gpa, Io.failing);
     defer transport.deinit();
+    var registry = metrics.Registry.init(gpa);
+    defer registry.deinit();
     const signer = PrivateKey.from_seed(0);
     const peer_signer = PrivateKey.from_seed(1);
     var config = test_config(signer, 7000, &.{}, 64 * 1024);
     config.namespace = "discovery-test";
     config.max_peers_per_set = 2;
-    const network = try Net.create(gpa, Io.failing, &transport, config);
+    const network = try Net.create(gpa, Io.failing, &transport, .init(&registry), config);
     defer network.destroy();
     try testing.expectEqualStrings("discovery-test_TRACKER_IP", network.ip_namespace);
     const Info = Net.Tracker.Info;

@@ -9,6 +9,7 @@ const std = @import("std");
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const utils = @import("utils");
+const metrics = @import("runtime").telemetry.metrics;
 const p2p = @import("../../root.zig");
 const p2p_types = @import("../../types.zig");
 const dialing = @import("../dialing.zig");
@@ -54,6 +55,81 @@ pub fn Dialable(comptime P: type) type {
     return struct { peers: []P, next_query_at: ?SystemTime };
 }
 
+/// The directory's metrics (commonware `discovery/actors/tracker/metrics.rs`). Recording never
+/// fails an operation: a per-peer series whose label cannot be allocated goes unrecorded.
+pub fn Metrics(comptime P: type) type {
+    return struct {
+        const Self = @This();
+        /// Per-peer label.
+        pub const Peer = struct { peer: P };
+        const GaugeFamily = metrics.raw.Family(Peer, metrics.raw.Gauge);
+        const CounterFamily = metrics.raw.Family(Peer, metrics.raw.Counter);
+
+        /// Unique peers in all tracked sets, with bootstrappers and without ourselves.
+        tracked: metrics.Gauge,
+        /// Blocked peers (value = expiry time as epoch millis).
+        blocked: metrics.Registered(GaugeFamily),
+        /// Outstanding reservations.
+        reserved: metrics.Gauge,
+        /// Epoch millis when each connected peer became active.
+        connected: metrics.Registered(GaugeFamily),
+        /// Rate-limited reservations of each peer.
+        limits: metrics.Registered(CounterFamily),
+        /// Info updates of each peer.
+        updates: metrics.Registered(CounterFamily),
+
+        pub fn init(scope: *const metrics.Scope) Allocator.Error!Self {
+            const tracked_help = "Total number of unique peers in all peer sets being tracked";
+            var tracked = try scope.gauge("tracked", tracked_help);
+            errdefer tracked.deinit();
+            const blocked_help = "Blocked peers (value = expiry time as epoch millis)";
+            var blocked = try scope.family(Peer, metrics.raw.Gauge, "blocked", blocked_help);
+            errdefer blocked.deinit();
+            var reserved = try scope.gauge("reserved", "Total number of outstanding reservations");
+            errdefer reserved.deinit();
+            const connected_help =
+                "Unix timestamp in milliseconds when each connected peer became active";
+            var connected = try scope.family(Peer, metrics.raw.Gauge, "connected", connected_help);
+            errdefer connected.deinit();
+            const limits_help =
+                "Count of the number of rate-limited reservation events for each peer";
+            var limits = try scope.family(Peer, metrics.raw.Counter, "limits", limits_help);
+            errdefer limits.deinit();
+            const updates_help = "Count of the number of updates for each peer";
+            const updates = try scope.family(Peer, metrics.raw.Counter, "updates", updates_help);
+            return .{
+                .tracked = tracked,
+                .blocked = blocked,
+                .reserved = reserved,
+                .connected = connected,
+                .limits = limits,
+                .updates = updates,
+            };
+        }
+
+        pub fn deinit(self: *Self) void {
+            self.tracked.deinit();
+            self.blocked.deinit();
+            self.reserved.deinit();
+            self.connected.deinit();
+            self.limits.deinit();
+            self.updates.deinit();
+            self.* = undefined;
+        }
+
+        /// Sets `peer`'s series in `family` to `millis`.
+        fn set(family: *metrics.Registered(GaugeFamily), peer: P, millis: u64) void {
+            const gauge = family.metric().get_or_create(.{ .peer = peer }) catch return;
+            _ = gauge.try_set(millis) catch {};
+        }
+
+        fn count(family: *metrics.Registered(CounterFamily), peer: P) void {
+            const counter = family.metric().get_or_create(.{ .peer = peer }) catch return;
+            counter.inc();
+        }
+    };
+}
+
 pub fn Directory(comptime P: type) type {
     return struct {
         const Self = @This();
@@ -71,6 +147,7 @@ pub fn Directory(comptime P: type) type {
         peer_sets: SortedMap(u64, Sets) = .empty,
         /// Blocked peers and when each block ends; kept even when a record is deleted.
         blocked: SortedMap(P, SystemTime) = .empty,
+        metrics: Metrics(P),
 
         /// Records the bootstrappers and ourselves (overwriting a bootstrapper entry for us).
         pub fn init(
@@ -78,14 +155,17 @@ pub fn Directory(comptime P: type) type {
             bootstrappers: []const Bootstrapper,
             myself: Info,
             config: Config,
+            scope: *const metrics.Scope,
         ) Allocator.Error!Self {
             assert(config.max_sets > 0);
-            var directory: Self = .{ .gpa = gpa, .config = config };
+            var directory: Self = .{ .gpa = gpa, .config = config, .metrics = try .init(scope) };
             errdefer directory.deinit();
             for (bootstrappers) |entry| {
                 _ = try directory.peers.put(gpa, entry.peer, .bootstrapper(entry.ingress));
             }
             _ = try directory.peers.put(gpa, myself.public_key, .myself(myself));
+            // Excludes ourselves.
+            _ = directory.metrics.tracked.metric().try_set(directory.peers.count() - 1) catch {};
             return directory;
         }
 
@@ -94,6 +174,7 @@ pub fn Directory(comptime P: type) type {
             directory.peer_sets.deinit(directory.gpa);
             directory.peers.deinit(directory.gpa);
             directory.blocked.deinit(directory.gpa);
+            directory.metrics.deinit();
             directory.* = undefined;
         }
 
@@ -113,6 +194,8 @@ pub fn Directory(comptime P: type) type {
             const peer = metadata.public_key();
             const record = directory.peers.get(peer) orelse return;
             record.release();
+            _ = directory.metrics.connected.metric().remove(.{ .peer = peer });
+            directory.metrics.reserved.metric().dec();
             switch (metadata) {
                 .dialer => |dialer| record.dial_failure(dialer.ingress),
                 .listener => {},
@@ -123,10 +206,11 @@ pub fn Directory(comptime P: type) type {
 
         /// Promotes a reservation of `peer` to a connection. Panics without a record or
         /// reservation.
-        pub fn connect(directory: *Self, peer: P, dialer: bool) void {
+        pub fn connect(directory: *Self, now: SystemTime, peer: P, dialer: bool) void {
             const record = directory.peers.get(peer).?;
             if (dialer) record.dial_success();
             record.connect();
+            Metrics(P).set(&directory.metrics.connected, peer, now.epoch_millis());
             directory.refresh_knowledge(peer, record);
         }
 
@@ -137,6 +221,7 @@ pub fn Directory(comptime P: type) type {
                 // one from propagating.
                 const record = directory.peers.get(update.public_key) orelse continue;
                 if (!record.update(update)) continue;
+                Metrics(P).count(&directory.metrics.updates, update.public_key);
                 directory.refresh_knowledge(update.public_key, record);
             }
         }
@@ -162,8 +247,8 @@ pub fn Directory(comptime P: type) type {
                 if (bit_set.position(peer) == null) try secondary.append(gpa, peer);
             }
             // Create every record before counting, so a failed allocation changes no count.
-            for (bit_set.ordered) |peer| _ = try directory.peers.get_or_put(gpa, peer, .unknown());
-            for (secondary.items) |peer| _ = try directory.peers.get_or_put(gpa, peer, .unknown());
+            for (bit_set.ordered) |peer| try directory.add_unknown(peer);
+            for (secondary.items) |peer| try directory.add_unknown(peer);
             try directory.peer_sets.ensure_unused_capacity(gpa, 1);
             const secondary_owned = try secondary.toOwnedSlice(gpa);
             for (bit_set.ordered, 0..) |peer, slot| {
@@ -193,6 +278,13 @@ pub fn Directory(comptime P: type) type {
             return try gpa.dupe(P, kill.items[0..unique]);
         }
 
+        /// Creates an unknown record for `peer` unless it has one.
+        fn add_unknown(directory: *Self, peer: P) Allocator.Error!void {
+            if (directory.peers.get(peer) != null) return;
+            _ = try directory.peers.put(directory.gpa, peer, .unknown());
+            directory.metrics.tracked.metric().inc();
+        }
+
         fn evict_oldest(directory: *Self, kill: *std.ArrayList(P)) Allocator.Error!void {
             var oldest = directory.peer_sets.items()[0];
             _ = directory.peer_sets.remove(oldest.key);
@@ -215,7 +307,10 @@ pub fn Directory(comptime P: type) type {
 
         fn delete_if_needed(directory: *Self, peer: P) void {
             const record = directory.peers.get(peer) orelse return;
-            if (record.deletable()) _ = directory.peers.remove(peer);
+            if (!record.deletable()) return;
+            // The blocked series stays: the block outlives the record until it expires.
+            _ = directory.peers.remove(peer);
+            directory.metrics.tracked.metric().dec();
         }
 
         /// A copy of the sets at `index`.
@@ -288,8 +383,15 @@ pub fn Directory(comptime P: type) type {
             const record = directory.peers.get(peer).?;
             const cooldown = directory.config.peer_connection_cooldown;
             return switch (record.reserve(rng, now, cooldown)) {
-                .reserved => metadata,
-                .rate_limited, .unavailable => null,
+                .reserved => reserved: {
+                    directory.metrics.reserved.metric().inc();
+                    break :reserved metadata;
+                },
+                .rate_limited => limited: {
+                    Metrics(P).count(&directory.metrics.limits, peer);
+                    break :limited null;
+                },
+                .unavailable => null,
             };
         }
 
@@ -317,6 +419,7 @@ pub fn Directory(comptime P: type) type {
             }
             const until = now.saturating_add(directory.config.block_duration);
             _ = try directory.blocked.put(directory.gpa, peer, until);
+            Metrics(P).set(&directory.metrics.blocked, peer, until.epoch_millis());
             return true;
         }
 
@@ -417,6 +520,7 @@ pub fn Directory(comptime P: type) type {
                     continue;
                 }
                 _ = directory.blocked.remove(entry.key);
+                _ = directory.metrics.blocked.metric().remove(.{ .peer = entry.key });
                 any = true;
             }
             return any;
