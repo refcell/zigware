@@ -294,13 +294,3 @@ test "validate reconstruction context digest error" {
         validate_reconstruction(&fixture.block, fixture.config, wrong),
     );
 }
-
-test "contiguous heights and expected epochs" {
-    try testing.expect(validation.has_contiguous_height(.new(6), .new(7)));
-    try testing.expect(!validation.has_contiguous_height(.new(6), .new(8)));
-    try testing.expect(!validation.has_contiguous_height(.new(0), .new(0)));
-    const epocher = FixedEpocher.new(utils.NonZero(u64).init(10).?);
-    try testing.expect(validation.is_block_in_expected_epoch(epocher, .new(9), .new(0)));
-    try testing.expect(!validation.is_block_in_expected_epoch(epocher, .new(10), .new(0)));
-    try testing.expect(validation.is_block_in_expected_epoch(epocher, .new(10), .new(1)));
-}

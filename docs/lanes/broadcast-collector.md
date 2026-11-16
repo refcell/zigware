@@ -127,19 +127,23 @@ that harness. It builds on `coding` (ReedSolomon), `consensus.types.coding.Commi
 - [x] marshal coding `types`: Shard, CodedBlock, StoredCodedBlock, `hash_context`,
   `coding_config_for_participants`, with their tests and the Shard conformance hash.
 - [x] Coding tests on `marshal.mocks.block.EmptyBlock`; `pub const coding` in marshal/root.zig.
-- [ ] Once ancestry and application land: move validation's copies of `has_contiguous_height`
-  and `is_block_in_expected_epoch` to `marshal.ancestry` and `marshal.application.validation`.
+- [x] Validation uses `marshal.ancestry.has_contiguous_height` and
+  `marshal.application.validation.is_block_in_expected_epoch` (its copies are gone).
 - [x] marshal coding `shards`: mailbox, metrics, reconstruction state, engine, e2e test.
 - [x] marshal coding `shards`: engine.rs's tests (66 ported). commonware's `Gated` and
   `Recording` schemes back only its job tests (`reconstruction_job_does_not_stall_engine`,
   `reconstruction_result_discarded_with_its_record`,
   `mid_job_shards_merge_with_insufficient_result`, `job_len_counts_taken_shards`), which have
   no counterpart while reconstruction runs inline.
-- [ ] marshal coding `variant` (Coding) against core's `assert_variant` (with `clone_block`,
-  `deinit_block`) and `assert_buffer` on the shards Mailbox.
+- [x] marshal coding `variant`: `Coding(B, C, H, P)` passes core's `assert_variant`, and
+  `Buffer(B, C, H, P)` adapts the shards Mailbox to `assert_buffer` (an adapter, since the
+  Mailbox's own `subscribe_by_digest` returns a receiver, not an optional one); variant.rs's
+  4 tests plus `check_payload`.
+- [ ] commonware's `BlockProvider` for the core `Mailbox(S, Coding)` (`subscribe_parent` by
+  the parent's commitment), once core's mailbox lands.
 - [x] marshal coding `validation` (proposal, block, reconstruction) with its 17 tests.
-- [ ] marshal coding `variant` (Coding), `marshaled` (Marshaled, MarshaledConfig), once
-  consensus-marshal's core lands.
+- [ ] marshal coding `marshaled` (Marshaled, MarshaledConfig), once consensus-marshal's core
+  lands.
 - [ ] marshal coding: `coding/harness.zig` and the `coding/mod.rs` tests, once the shared
   harness lands; the coding fuzz entries in `consensus/fuzz`.
 
@@ -162,3 +166,5 @@ that harness. It builds on `coding` (ReedSolomon), `consensus.types.coding.Commi
 - 2026-11-16: the last shards engine tests (peer-set buffer lifetime, issue 5223, old-epoch
   cutover, evicted node, late leader shard, BatchChecking at quorum); the harness's
   `UnstartedOf`/`TypesOf` take any coding scheme.
+- 2026-11-16: marshal coding `Coding` variant and shards `Buffer` adapter with variant.rs's
+  tests; validation moved onto marshal's ancestry and application helpers.

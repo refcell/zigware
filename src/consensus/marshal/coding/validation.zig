@@ -1,9 +1,5 @@
 //! Validation of coded proposals, blocks, and reconstructions (commonware
 //! `marshal/coding/validation.rs`).
-//!
-//! `has_contiguous_height` (marshal `ancestry`) and `is_block_in_expected_epoch` (marshal
-//! `application::validation`) are one-line helpers of consensus-marshal's lane, copied here
-//! until those modules land (docs/lanes/broadcast-collector.md).
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -12,10 +8,11 @@ const coding = @import("coding");
 const cryptography = @import("cryptography");
 
 const types = @import("types.zig");
+const ancestry = @import("../ancestry.zig");
+const in_expected_epoch = @import("../application/validation.zig").is_block_in_expected_epoch;
 const consensus_types = @import("../../types.zig");
 
 const CodingConfig = coding.Config;
-const Height = consensus_types.Height;
 const Epoch = consensus_types.Epoch;
 
 /// Why a proposal's commitment is invalid.
@@ -68,9 +65,9 @@ pub fn validate_block(
     if (!block.commitment().eql(commitment)) return error.Commitment;
     if (!parent.commitment().eql(parent_commitment)) return error.ParentCommitment;
     const epoch = context_epoch(context);
-    if (!is_block_in_expected_epoch(epocher, block.height(), epoch)) return error.Epoch;
+    if (!in_expected_epoch(epocher, block.height(), epoch)) return error.Epoch;
     if (!block.parent().eql(parent.digest())) return error.ParentDigest;
-    if (!has_contiguous_height(parent.height(), block.height())) return error.Height;
+    if (!ancestry.has_contiguous_height(parent.height(), block.height())) return error.Height;
     const block_context = block.context();
     const digest = try types.hash_context(H, gpa, block_context);
     if (!commitment.context().eql(digest)) return error.ContextDigest;
@@ -92,18 +89,6 @@ pub fn validate_reconstruction(
     if (!config.eql(commitment.config())) return error.CodingConfig;
     const context_digest = try types.hash_context(H, gpa, block.context());
     if (!commitment.context().eql(context_digest)) return error.ContextDigest;
-}
-
-/// Whether `child_height` directly follows `parent_height` (marshal `ancestry`).
-pub fn has_contiguous_height(parent_height: Height, child_height: Height) bool {
-    const previous = child_height.previous() orelse return false;
-    return previous.get() == parent_height.get();
-}
-
-/// Whether `block_height` falls in `expected_epoch` (marshal `application::validation`).
-pub fn is_block_in_expected_epoch(epocher: anytype, block_height: Height, expected: Epoch) bool {
-    const bounds = epocher.containing(block_height) orelse return false;
-    return bounds.epoch.get() == expected.get();
 }
 
 /// A context's epoch (commonware `Epochable`): a method, or a field such as `Round`'s.
