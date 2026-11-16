@@ -46,6 +46,7 @@ const Io = std.Io;
 const runtime = @import("runtime");
 
 pub const any = @import("any.zig");
+pub const current = @import("current.zig");
 
 /// What a QMDB database needs to open: memory, storage, and a metrics scope (commonware's
 /// runtime context `E`). Sets pass each member `env.child("db_<index>")`.

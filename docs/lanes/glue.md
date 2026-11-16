@@ -96,6 +96,12 @@ marshal's actors (consensus-marshal) for the actor; until then it ports what is 
   `Unmerkleized` (`write`, `with_metadata`, `get`, `get_many`, `merkleize`) and `Merkleized`
   (`root`, `new_batch`, `get`, `get_many`, `clone`, `deinit`); `SyncTarget` is
   `qmdb.sync.Target`.
+- `glue.stateful.db.current.Current(Db)`: the ManagedDb of a `storage.qmdb.current.Db`, with
+  `Unmerkleized` (`write`, `with_metadata`, `get`, `get_many`, `stage(keys, out)` → `Staged`,
+  `merkleize`), `Staged` (`with_metadata`, `len`, `is_empty`, `expand(keys, out)` → `Range`,
+  `merkleize(slots, unstaged)`, `deinit`), and `Merkleized` (`root`, `ops_root`, `new_batch`,
+  `get`, `get_many`, `clone`, `deinit`). Its `SyncTarget` is the ops root over
+  `[sync_boundary, size)`.
 - `glue.stateful.probe`: `Sample(S, D)` (`init(gpa, minimum_epoch)`, `awaits(peer)`,
   `record(peer, finalization)` taking ownership, `select(committee_size, judge)` with
   `judge.judgeable(*const Finalization)`, `get_floor`, `reset`, `deinit`), `Message(S, V)`
@@ -129,6 +135,9 @@ marshal's actors (consensus-marshal) for the actor; until then it ports what is 
   between equal rounds resolve as commonware's do, and owns recorded finalizations.
 - `SyncPlan` mutates in place (commonware consumes and returns it) and returns storage errors
   (commonware panics); a backward completion height is an assertion.
+- `Current` covers unordered fixed `current` databases, the only ones on main; ordered and
+  variable follow storage-qmdb-sync. Its crash-recovery test (deterministic storage faults)
+  waits on a storage fault harness; the bounded-init test covers its durable-discard checks.
 - `Pruning` keeps its retention window in a ring allocated at init (commonware grows a
   `VecDeque`); an invalid config or phase returns `error.InvalidPruneConfig` where commonware
   panics.
@@ -140,7 +149,9 @@ marshal's actors (consensus-marshal) for the actor; until then it ports what is 
 - [x] db: `Shared`, `Reader`, `Barrier`, single and tuple sets, with mod.rs's set tests.
 - [x] db/any: the ManagedDb adapter with any.rs's stale-read and apply-does-not-finalize tests.
 - [ ] db/any: `stage`/`expand` (needs storage's staging API), variable values, ordered.
-- [ ] db: keyless, immutable, compact; current (after qmdb `current`).
+- [x] db/current: the unordered fixed ManagedDb with staging and current.rs's tests.
+- [ ] db/current: ordered and variable (after storage-qmdb-sync), the crash-recovery test.
+- [ ] db: keyless, immutable, compact.
 - [ ] db: state sync (`StateSyncDb`, `StateSyncSet`, `Anchor`, `TipUpdate`, the generation
   coordinator) and its tests; db/p2p (handler, actor, mailbox, limits).
 - [x] probe: `Sample`, wire `Message`, `max_payload_size` with limits.rs's widest-encodings
@@ -164,6 +175,7 @@ marshal's actors (consensus-marshal) for the actor; until then it ports what is 
   commonware's 39 database-free tests under every execution shape (75 glue tests);
   `transfers.Slot` is qmdb's `any.batch.Slot`. The transfers lane
   (T-01a1d58d-7682-700c-a399-735d897bbd46) takes over the benches and database tests.
+- 2026-11-16 (stateful): the `current` ManagedDb adapter with staging.
 
 ## dkg (owner: coding lane, thread T-01a1d58d-bff1-75a1-8ccb-4b8dd7bc9755)
 
