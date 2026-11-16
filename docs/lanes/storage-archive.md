@@ -92,21 +92,25 @@ storage-journal (thread T-01a1d58d-a981-75c2-966d-93dcd484f46b).
   returning, so `start_sync` is `sync` and the requested-section set is always the pending
   one; commonware's pipelined start_sync tests have no counterpart. Sections are a sorted
   list of `(start, slot)`; extra multi-put positions are a hash map pruned by scan. The
-  recovery fuzz injects faults with the storage mock's mutation budget and a crash (no torn
-  writes or delayed syncs) and checks retained entries against synced ones, per-section
-  prefixes, the range helpers, and a second reopen.
+  recovery fuzz runs on faulty storage (see the fault model below) and checks retained
+  entries against synced ones, per-section prefixes, the range helpers, and a second reopen.
 - immutable archive: the metadata commit record is opened first and drives both stores
   (no committed checkpoint means an empty freezer; omitted ordinal sections are removed).
   `sync` syncs the freezer, then the ordinal, then commits the metadata (commonware joins the
   first two). The interrupted-destroy test runs every removal budget up to a full destroy
-  instead of sampling removal faults by seed. Its recovery fuzz models faults with the storage
-  mock's mutation budget and a crash, including a faulted recovery attempt.
-- Recovery fuzz fault model (accepted by the coordinator, 2026-11-16): the
-  `archive_prunable_recovery` and `archive_immutable_recovery` targets inject faults with
-  `runtime.buffer.mocks.Storage`'s mutation budget followed by `crash()`, where commonware's
-  deterministic runtime also tears partial writes (prefix and subset modes) and delays syncs.
-  Runtime has been asked for torn-write and delayed-sync faults; switch the targets over when
-  its faulty storage provides them.
+  instead of sampling removal faults by seed. Its recovery fuzz runs on faulty storage, followed
+  by commonware's faulted recovery chain.
+- Recovery fuzz fault model (2026-11-16, replacing the interim mutation-budget model the
+  coordinator accepted): `archive_prunable_recovery`, `archive_immutable_recovery`, and
+  `freezer_recovery` run on `runtime.storage.faulty` over the memory backend
+  (`archive/faults.zig`), with the fault RNG seeded by the input: failed and torn writes
+  (prefix and subset retention), failed syncs, removes, and partial resizes, and a crash that
+  replays unsynced writes with their retention. `Faults.faulted_recovery` ports commonware's
+  chain of one to four reopens, each under one drawn mutation fault and crashing into the
+  next. Rates and the chain are drawn by a ChaCha test RNG instead of commonware's
+  `Entropy`-driven rng, so inputs do not replay commonware's corpus byte for byte. Delayed
+  and out-of-order syncs (`PendingSyncs`, abandoned `start_sync`) have no counterpart:
+  zigware's `sync` is synchronous, so there are no pending syncs to reorder.
 - Tests that commonware runs at 100,000 and 5,000 items (`slow` group) run at 2,000 and 600.
 
 ## Log
@@ -122,3 +126,5 @@ storage-journal (thread T-01a1d58d-a981-75c2-966d-93dcd484f46b).
   `archive_prunable_operations` and `archive_prunable_recovery` fuzz targets.
 - 2026-11-16: immutable archive with its ported tests, storage conformance hash, and the
   `archive_immutable_recovery` fuzz target. Backlog complete.
+- 2026-11-16: recovery fuzzers moved to faulty storage (torn writes and failed syncs) with
+  commonware's faulted recovery chain; added the `freezer_recovery` fuzz target.

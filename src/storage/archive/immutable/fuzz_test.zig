@@ -1,11 +1,11 @@
 //! The immutable archive's `archive_immutable_recovery` fuzz target (commonware
-//! `storage/fuzz`): commit a baseline (unless the archive is virgin), arm a storage fault after
-//! a fuzzed number of mutations, put more entries and sync, then crash. A second, also faulted,
-//! recovery attempt models commonware's `faulted_recovery`. The clean recovery must hold the
-//! baseline if init or a put failed, the baseline or every entry (never a mix) if the sync
-//! failed, and every entry if it succeeded; its ranges and stored ordinal sections must match,
-//! and a post-recovery put must survive a reopen. Commonware's torn partial writes and sync
-//! faults become the storage mock's mutation budget.
+//! `storage/fuzz`): commit a baseline (unless the archive is virgin), arm fuzzed storage
+//! faults (failed and torn writes, failed syncs, removes, and resizes), put more entries and
+//! sync, then crash, tearing unsynced writes. Commonware's `faulted_recovery` chain of one to
+//! four faulted reopens follows. The clean recovery must hold the baseline if init or a put
+//! failed, the baseline or every entry (never a mix) if the sync failed, and every entry if it
+//! succeeded; its ranges and stored ordinal sections must match, and a post-recovery put must
+//! survive a reopen.
 
 const std = @import("std");
 const testing = std.testing;
@@ -14,8 +14,8 @@ const metrics = runtime.telemetry.metrics;
 const rmap = @import("../../rmap/mod.zig");
 const fuzz_bytes = @import("../../fuzz_bytes.zig");
 const immutable = @import("mod.zig");
+const Faults = @import("../faults.zig").Faults;
 
-const MockStorage = runtime.buffer.mocks.Storage;
 const gpa = testing.allocator;
 const Key = [16]u8;
 const Value = [32]u8;
@@ -25,24 +25,24 @@ const items_per_section: u64 = 4;
 
 const Entry = struct { index: u64, key: Key, value: Value };
 
+/// Pinned: `faults` must stay at one address.
 const Harness = struct {
-    storage: MockStorage,
+    faults: Faults,
     cache_ref: runtime.buffer.paged.CacheRef,
     registry: metrics.Registry,
     opens: u32 = 0,
 
-    fn init() !Harness {
-        return .{
-            .storage = MockStorage.init(gpa),
-            .cache_ref = try runtime.buffer.paged.CacheRef.init(gpa, 72, 4),
-            .registry = metrics.Registry.init(gpa),
-        };
+    fn init(self: *Harness, seed: u64) !void {
+        self.cache_ref = try runtime.buffer.paged.CacheRef.init(gpa, 72, 4);
+        self.registry = metrics.Registry.init(gpa);
+        self.opens = 0;
+        self.faults.init(gpa, seed);
     }
 
     fn deinit(self: *Harness) void {
         self.registry.deinit();
         self.cache_ref.deinit();
-        self.storage.deinit();
+        self.faults.deinit();
     }
 
     fn open(self: *Harness) !A {
@@ -50,7 +50,7 @@ const Harness = struct {
         const scope_name = try std.fmt.bufPrint(&name, "open{d}", .{self.opens});
         self.opens += 1;
         const scope = metrics.Scope.init(&self.registry).child(scope_name);
-        return A.init(gpa, self.storage.interface(), scope, .{
+        return A.init(gpa, self.faults.interface(), scope, .{
             .metadata_partition = "immutable-recovery-metadata",
             .freezer_table_partition = "immutable-recovery-table",
             .freezer_table_initial_size = 4,
@@ -95,17 +95,23 @@ fn additions(payload: Value) [3]Entry {
 
 const Outcome = enum { init_failed, put_failed, sync_failed, synced };
 
-/// Writes the candidate state under a fault budget and reports how far it got.
-fn write_phase(harness: *Harness, payload: Value, virgin: bool, budget: ?u64) !Outcome {
+/// Writes the candidate state under fuzzed faults and reports how far it got.
+fn write_phase(
+    harness: *Harness,
+    reader: *fuzz_bytes.Reader,
+    payload: Value,
+    virgin: bool,
+    faulted: bool,
+) !Outcome {
     var archive = if (virgin) virgin: {
-        if (budget) |operations| harness.storage.allow_mutations(operations);
+        if (faulted) harness.faults.arm(reader);
         break :virgin harness.open() catch return .init_failed;
     } else seeded: {
         var archive = try harness.open();
         errdefer archive.deinit();
         for (baseline(payload)) |item| try archive.put(item.index, item.key, item.value);
         try archive.sync();
-        if (budget) |operations| harness.storage.allow_mutations(operations);
+        if (faulted) harness.faults.arm(reader);
         break :seeded archive;
     };
     defer archive.deinit();
@@ -158,7 +164,7 @@ fn check_layout(harness: *Harness, archive: *A, indices: []const u64) !void {
     // section is stored.
     var sections: [8]bool = @splat(false);
     for (indices) |index| sections[index / items_per_section] = true;
-    const storage = harness.storage.interface();
+    const storage = harness.faults.interface();
     const names = storage.scan(gpa, ordinal_partition) catch |err| switch (err) {
         error.PartitionMissing => runtime.storage.Names{ .items = &.{} },
         else => return err,
@@ -186,25 +192,25 @@ fn sorted_candidate(payload: Value) [5]Entry {
 fn recovery_run(input: []const u8) anyerror!void {
     var reader = fuzz_bytes.Reader.init(input);
     const virgin = reader.boolean();
-    const budget: ?u64 = if (reader.below(8) == 0) null else reader.below(64);
-    const recovery_budget: ?u64 = if (reader.boolean()) reader.below(32) else null;
+    const faulted = reader.below(8) != 0;
+    const faulted_recovery = reader.boolean();
     var payload: Value = undefined;
     for (&payload) |*byte| byte.* = reader.int(u8);
-    var harness = try Harness.init();
+    var harness: Harness = undefined;
+    try harness.init(reader.int(u64));
     defer harness.deinit();
-    const outcome = try write_phase(&harness, payload, virgin, budget);
-    harness.storage.crash();
-    // A recovery attempt that may itself fault (commonware's `faulted_recovery`).
-    if (recovery_budget) |operations| {
-        harness.storage.allow_mutations(operations);
-        if (harness.open()) |opened| {
-            var archive = opened;
-            archive.deinit();
-        } else |_| {}
-        harness.storage.crash();
-    }
-    harness.storage.mutations_allowed = null;
+    const outcome = try write_phase(&harness, &reader, payload, virgin, faulted);
+    // Retention binds when a write is issued, so the crash still tears unsynced writes.
+    harness.faults.disarm();
+    try harness.faults.crash();
+    // A chain of recovery attempts that themselves fault (commonware's `faulted_recovery`).
+    if (faulted_recovery) try harness.faults.faulted_recovery(&harness, recover);
     try check_recovered(&harness, payload, virgin, outcome);
+}
+
+fn recover(harness: *Harness) anyerror!void {
+    var archive = try harness.open();
+    archive.deinit();
 }
 
 fn check_recovered(harness: *Harness, payload: Value, virgin: bool, outcome: Outcome) !void {

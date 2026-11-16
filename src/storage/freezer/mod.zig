@@ -85,4 +85,5 @@ test {
     _ = records;
     _ = @import("conformance_test.zig");
     _ = @import("tests.zig");
+    _ = @import("recovery_fuzz_test.zig");
 }

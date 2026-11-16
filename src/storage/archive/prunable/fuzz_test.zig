@@ -2,11 +2,13 @@
 //!
 //! - `archive_prunable_operations`: puts, multi puts, gets, prunes, syncs, and gap queries
 //!   against a model of the stored items, then a restart that must keep every item.
-//! - `archive_prunable_recovery`: puts and multi puts with syncs and prunes, a storage fault
-//!   after a fuzzed number of mutations, then a crash. Recovery must keep every synced entry,
-//!   keep each section's journal as a prefix of what was appended, report ranges that match
-//!   the retained entries, and keep the same view across a second reopen. Commonware's target
-//!   also tears partial writes and delays syncs, which the mock storage does not model.
+//! - `archive_prunable_recovery`: puts and multi puts with syncs and prunes under fuzzed
+//!   storage faults (failed and torn writes, failed syncs, removes, and resizes), then a crash
+//!   that tears unsynced writes, then commonware's chain of one to four faulted reopens.
+//!   Recovery on reliable storage must keep every synced entry, keep each section's journal
+//!   as a prefix of what was appended, report ranges that match the retained entries, and
+//!   keep the same view across a second reopen. Commonware's target also abandons pipelined
+//!   `start_sync` requests, which zigware's synchronous `sync` has no counterpart for.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -18,6 +20,7 @@ const rmap = @import("../../rmap/mod.zig");
 const fuzz_bytes = @import("../../fuzz_bytes.zig");
 const prunable = @import("mod.zig");
 const tests = @import("tests.zig");
+const Faults = @import("../faults.zig").Faults;
 
 const gpa = testing.allocator;
 const Key = [16]u8;
@@ -26,9 +29,17 @@ const FuzzArchive = prunable.Archive(translator.EightCap, Key, Value);
 const operations_max = 64;
 
 fn open(harness: *tests.Harness, items_per_section: u64) !FuzzArchive {
+    return open_on(harness, harness.storage.interface(), items_per_section);
+}
+
+fn open_on(
+    harness: *tests.Harness,
+    storage: runtime.storage.Storage,
+    items_per_section: u64,
+) !FuzzArchive {
     harness.reset_metrics();
     const scope = metrics.Scope.init(&harness.registry).child("storage");
-    return FuzzArchive.init(gpa, harness.storage.interface(), scope, .{
+    return FuzzArchive.init(gpa, storage, scope, .{
         .translator = .{},
         .metadata_partition = "test-metadata",
         .key_partition = "test-key",
@@ -327,40 +338,56 @@ fn recovery_run(input: []const u8) anyerror!void {
     var reader = fuzz_bytes.Reader.init(input);
     var harness = try tests.Harness.init();
     defer harness.deinit();
+    var faults: Faults = undefined;
+    faults.init(gpa, reader.int(u64));
+    defer faults.deinit();
+    const storage = faults.interface();
     var model: Recovery = .{ .items_per_section = 1 + reader.below(4) };
     defer model.deinit();
-    const fault: ?u64 = if (reader.boolean()) reader.below(48) else null;
+    const faulted = reader.boolean();
     {
-        var archive = try open(&harness, model.items_per_section);
+        var archive = try open_on(&harness, storage, model.items_per_section);
         defer archive.deinit();
-        if (fault) |operations| harness.storage.allow_mutations(operations);
+        if (faulted) faults.arm(&reader);
         var operations: u32 = 0;
         while (!reader.done() and operations < operations_max) : (operations += 1) {
             recovery_step(&reader, &archive, &model) catch |err| {
                 // Only an injected storage fault may fail an operation.
-                try testing.expect(harness.storage.mutation_refused);
+                try testing.expect(faulted);
                 try testing.expect(err != error.OutOfMemory);
                 break;
             };
         }
-        harness.storage.crash();
+        try faults.crash();
     }
-    harness.storage.mutations_allowed = null;
+    const context: Recover = .{
+        .harness = &harness,
+        .storage = storage,
+        .items = model.items_per_section,
+    };
+    try faults.faulted_recovery(context, recover);
     const flags = try gpa.alloc(bool, model.appended.items.len);
     defer gpa.free(flags);
     const again = try gpa.alloc(bool, model.appended.items.len);
     defer gpa.free(again);
     {
-        var archive = try open(&harness, model.items_per_section);
+        var archive = try open_on(&harness, storage, model.items_per_section);
         defer archive.deinit();
         try recovery_check(&archive, &model, flags);
     }
     // Recovery was durable: a second reopen sees the same entries.
-    harness.storage.crash();
-    var archive = try open(&harness, model.items_per_section);
+    try faults.crash();
+    var archive = try open_on(&harness, storage, model.items_per_section);
     defer archive.deinit();
     try recovery_check(&archive, &model, again);
     try testing.expectEqualSlices(bool, flags, again);
+}
+
+const Recover = struct { harness: *tests.Harness, storage: runtime.storage.Storage, items: u64 };
+
+fn recover(context: Recover) anyerror!void {
+    var archive = try open_on(context.harness, context.storage, context.items);
+    archive.deinit();
 }
 
 test "fuzz archive_prunable_recovery (seeded)" {
