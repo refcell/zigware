@@ -26,13 +26,15 @@ time, files, and network: build on it rather than around it where it fits.
   `deterministic.Config.storage_faults`, `Runner.storage_fault_config()`.
 - [x] audited storage (`storage/audited.zig`, audited.rs events and field order), wrapped
   around faulty storage in `Runner.storage()`.
-- [ ] metered storage wrapper (storage/metered.rs).
+- [x] metered storage (`storage/metered.zig`): `open_blobs` and the `storage_*` counters;
+  `Runner.storage()` is `Metered(Audited(Faulty(Memory)))` under `runtime`.
 - [x] mock channel (`mocks.zig`), deterministic network (`network/deterministic.zig`),
   network suite (`network/tests.zig`), `Runner.network()`.
 - [x] audited network: the deterministic network and its sinks/streams record
   network/audited.rs events when `Network.auditor` is set; `Runner.network()` sets it.
   Auditor also records `rand` draws.
-- [ ] metered network wrapper (network/metered.rs).
+- [x] metered network (`network/metered.zig` `Metrics`): connections and bandwidth, counted
+  by the deterministic network when `Network.metrics` is set; `Runner.network()` sets it.
 - [x] Port remaining deterministic.rs tests: auditor history and field separation, clock
   start time, dropped sleepers, duplicate attributes, removed-blob reopen, recover tests
   (fault config, seeded crash writes), storage faults. No counterpart: panic tests
@@ -126,6 +128,11 @@ time, files, and network: build on it rather than around it where it fits.
   `Network`, `mocks.Audit` on each half) rather than a wrapper type, so the runner's
   network type is unchanged for lanes that name it. Sent buffers hash as one length-prefixed
   payload, so chunking never changes the audit (test_auditor_ignores_buffer_chunking).
+  Metered network works the same way; the production network can count into the same
+  `network.metered.Metrics`. Not ported: metered `start_sync` and shared-owner tests (no
+  `start_sync`; a Zig blob handle has one owner).
+- The runner registers its storage and network metrics on first `storage()`/`network()`
+  (the runner must not move by then) and panics if that registration runs out of memory.
 
 ## Log
 - 2026-11-13: fibers, rand-compatible shuffle, deterministic executor implementing `std.Io`.
@@ -138,4 +145,4 @@ time, files, and network: build on it rather than around it where it fits.
 - 2026-11-16: Context suite on production; faulty storage wired into the runner.
 - 2026-11-16: remaining deterministic.rs tests.
 - 2026-11-16: detached-task drain race and canceled-after-return race fixed; auditor records
-  rand, storage, and network events.
+  rand, storage, and network events; metered storage and network.

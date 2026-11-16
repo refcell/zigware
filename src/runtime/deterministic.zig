@@ -265,6 +265,10 @@ pub const Runner = struct {
     faulty_storage: ?storage_mod.faulty.Storage(Rng) = null,
     /// Audits every storage operation, over `faulty_storage`; created on first use.
     audited_storage: ?storage_mod.audited.Storage = null,
+    /// Counts storage operations in the `runtime` metrics, over `audited_storage`.
+    metered_storage: ?storage_mod.metered.Storage = null,
+    /// Counts `simulated_network`'s connections and bytes in the `runtime` metrics.
+    network_metrics: ?network_mod.metered.Metrics = null,
     /// The simulated network, created on first use; it carries over between starts.
     simulated_network: ?network_mod.deterministic.Network = null,
     /// What every `Context` shares, created by the first `start_context`.
@@ -311,11 +315,13 @@ pub const Runner = struct {
         runner.ready.deinit(runner.allocator);
         runner.batch.deinit(runner.allocator);
         runner.alarms.deinit(runner.allocator);
+        if (runner.metered_storage) |*metered| metered.deinit();
         if (runner.audited_storage) |*audited| audited.deinit();
         if (runner.faulty_storage) |*faults| faults.deinit();
         runner.memory_storage.deinit();
         if (runner.context_runtime) |*runtime| runtime.deinit();
         if (runner.simulated_network) |*net| net.deinit();
+        if (runner.network_metrics) |*counts| counts.deinit();
         if (runner.iterations_counter) |*counter| counter.deinit();
         if (runner.task_polls) |*polls| polls.deinit();
         runner.metrics_registry.deinit();
@@ -327,15 +333,24 @@ pub const Runner = struct {
         return .{ .userdata = runner, .vtable = &vtable };
     }
 
-    /// The runtime's in-memory storage, with `Config.storage_faults` injected and every
-    /// operation audited (commonware's `Audited(Faulty(Memory))`). The runner must not move once
-    /// it is used.
+    /// The runtime's in-memory storage, with `Config.storage_faults` injected, every operation
+    /// audited, and counted in the `runtime_storage_*` and `runtime_open_blobs` metrics
+    /// (commonware's `Metered(Audited(Faulty(Memory)))`). The runner must not move once it is
+    /// used. Panics if registering the metrics runs out of memory.
     pub fn storage(runner: *Runner) storage_mod.Storage {
-        if (runner.audited_storage == null) {
+        if (runner.metered_storage == null) {
+            assert(runner.audited_storage == null);
             const inner = runner.storage_faulty().storage();
             runner.audited_storage = .init(runner.allocator, inner, &runner.auditor);
+            const audited = runner.audited_storage.?.storage();
+            const scope = runner.metrics().sub_registry(telemetry.metrics.metrics_prefix);
+            runner.metered_storage = storage_mod.metered.Storage.init(
+                runner.allocator,
+                audited,
+                &scope,
+            ) catch @panic("deterministic: registering storage metrics: out of memory");
         }
-        return runner.audited_storage.?.storage();
+        return runner.metered_storage.?.storage();
     }
 
     /// The live fault configuration (commonware `storage_fault_config`): changes take effect
@@ -364,11 +379,19 @@ pub const Runner = struct {
         runner.memory_storage.crash();
     }
 
-    /// The runtime's deterministic network, audited. The runner must not move once it is used.
+    /// The runtime's deterministic network, audited and counted in the `runtime_*_connections`
+    /// and `runtime_*_bandwidth` metrics (commonware's `Metered(Audited(Deterministic))`). The
+    /// runner must not move once it is used. Panics if registering the metrics runs out of
+    /// memory.
     pub fn network(runner: *Runner) *network_mod.deterministic.Network {
         if (runner.simulated_network == null) {
+            assert(runner.network_metrics == null);
+            const scope = runner.metrics().sub_registry(telemetry.metrics.metrics_prefix);
+            runner.network_metrics = network_mod.metered.Metrics.init(&scope) catch
+                @panic("deterministic: registering network metrics: out of memory");
             runner.simulated_network = .init(runner.allocator, runner.io());
             runner.simulated_network.?.auditor = &runner.auditor;
+            runner.simulated_network.?.metrics = &runner.network_metrics.?;
         }
         return &runner.simulated_network.?;
     }

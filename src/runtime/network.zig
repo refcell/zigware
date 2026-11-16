@@ -35,8 +35,10 @@ pub const Error = error{
 } || std.Io.Cancelable;
 
 pub const deterministic = @import("network/deterministic.zig");
+pub const metered = @import("network/metered.zig");
 pub const tests = @import("network/tests.zig");
 
 test {
     _ = deterministic;
+    _ = metered;
 }

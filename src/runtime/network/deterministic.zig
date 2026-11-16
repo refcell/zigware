@@ -8,7 +8,8 @@
 //!
 //! With an `auditor` (the deterministic runner sets its own), binds, dials, accepts, sends, and
 //! receives are recorded as commonware's `network/audited.rs` records them: an attempt, then a
-//! success or a failure.
+//! success or a failure. With `metrics`, connections and bytes are counted as commonware's
+//! `network/metered.rs` counts them (`network/metered.zig`).
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -17,6 +18,7 @@ const Io = std.Io;
 const mocks = @import("../mocks.zig");
 const network = @import("../network.zig");
 const Auditor = @import("../deterministic.zig").Auditor;
+const Metrics = @import("metered.zig").Metrics;
 
 const Address = network.Address;
 const Error = network.Error;
@@ -62,6 +64,16 @@ pub const Network = struct {
 
         /// Waits for the next dialed connection.
         pub fn accept(listener: *Listener) Error!Accepted {
+            var accepted = try listener.accept_audited();
+            if (listener.network.metrics) |metrics| {
+                metrics.inbound_connections.metric().inc();
+                accepted.sink.metrics = metrics;
+                accepted.stream.metrics = metrics;
+            }
+            return accepted;
+        }
+
+        fn accept_audited(listener: *Listener) Error!Accepted {
             const auditor = listener.network.auditor orelse return listener.next();
             const local: mocks.Audit = .init(auditor, listener.address);
             auditor.event("accept_attempt", &.{local.address()});
@@ -120,6 +132,8 @@ pub const Network = struct {
     listeners: std.ArrayList(*Listener) = .empty,
     /// Records network operations when set.
     auditor: ?*Auditor = null,
+    /// Counts connections and bytes when set.
+    metrics: ?*const Metrics = null,
 
     pub fn init(gpa: Allocator, io: Io) Network {
         return .{ .gpa = gpa, .io = io };
@@ -181,6 +195,16 @@ pub const Network = struct {
 
     /// Connects to the listener bound to `address`.
     pub fn dial(net: *Network, address: Address) Error!Connection {
+        var connection = try net.dial_audited(address);
+        if (net.metrics) |metrics| {
+            metrics.outbound_connections.metric().inc();
+            connection.sink.metrics = metrics;
+            connection.stream.metrics = metrics;
+        }
+        return connection;
+    }
+
+    fn dial_audited(net: *Network, address: Address) Error!Connection {
         const auditor = net.auditor orelse return net.connect(address);
         const remote: mocks.Audit = .init(auditor, address);
         auditor.event("dial_attempt", &.{remote.address()});

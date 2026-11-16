@@ -31,6 +31,7 @@ pub const header = @import("storage/header.zig");
 pub const memory = @import("storage/memory.zig");
 pub const faulty = @import("storage/faulty.zig");
 pub const audited = @import("storage/audited.zig");
+pub const metered = @import("storage/metered.zig");
 pub const tests = @import("storage/tests.zig");
 
 pub const Error = error{
@@ -292,5 +293,6 @@ test {
     _ = memory;
     _ = faulty;
     _ = audited;
+    _ = metered;
     _ = @import("storage/memory_test.zig");
 }

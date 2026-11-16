@@ -23,6 +23,7 @@ const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const Auditor = @import("deterministic.zig").Auditor;
+const NetworkMetrics = @import("network/metered.zig").Metrics;
 
 /// Records a connection half's operations in the deterministic runtime's auditor (commonware
 /// `network/audited.rs`), with the peer's address. The deterministic network sets it.
@@ -125,8 +126,15 @@ pub const Sink = struct {
     shared: *Shared,
     closed: bool = false,
     audit: ?Audit = null,
+    /// Counts sent bytes when set; the deterministic network sets it.
+    metrics: ?*const NetworkMetrics = null,
 
     pub fn send(sink: *Sink, bufs: []const []const u8) Error!void {
+        try sink.send_audited(bufs);
+        if (sink.metrics) |metrics| metrics.sent(bufs);
+    }
+
+    fn send_audited(sink: *Sink, bufs: []const []const u8) Error!void {
         if (sink.audit == null) return sink.transmit(bufs);
         const audit = &sink.audit.?;
         audit.auditor.event_chunked("send_attempt", &.{audit.address()}, bufs, &.{});
@@ -194,8 +202,15 @@ pub const Stream = struct {
     shared: *Shared,
     poisoned: bool = false,
     audit: ?Audit = null,
+    /// Counts received bytes when set; the deterministic network sets it.
+    metrics: ?*const NetworkMetrics = null,
 
     pub fn recv(stream: *Stream, out: []u8) Error!void {
+        try stream.recv_audited(out);
+        if (stream.metrics) |metrics| metrics.received(out.len);
+    }
+
+    fn recv_audited(stream: *Stream, out: []u8) Error!void {
         if (stream.audit == null) return stream.receive(out);
         const audit = &stream.audit.?;
         var length: [8]u8 = undefined;

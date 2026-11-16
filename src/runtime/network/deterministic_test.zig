@@ -182,3 +182,77 @@ test "the runner's network is audited" {
     defer runner.deinit();
     try (try runner.start(Root.run, .{&runner}));
 }
+
+fn echo_server(listener: *Network.Listener, size: usize) !void {
+    var accepted = try listener.accept();
+    defer accepted.deinit();
+    var buffer: [128]u8 = undefined;
+    try accepted.stream.recv(buffer[0..size]);
+    try accepted.sink.send(&.{buffer[0..size]});
+}
+
+test "the runner's network counts connections and bandwidth (test_metrics)" {
+    const Root = struct {
+        const message_size = 100;
+
+        fn run(runner: *runtime_deterministic.Runner) !void {
+            const io = runner.io();
+            const address: network.Address = .{ .ip4 = .loopback(1234) };
+            const listener = try runner.network().bind(address);
+            defer listener.deinit();
+            var server = try io.concurrent(echo_server, .{ listener, message_size });
+            defer server.cancel(io) catch {};
+            var client = try runner.network().dial(address);
+            defer client.deinit();
+            const message: [message_size]u8 = @splat(42);
+            try client.sink.send(&.{ message[0..40], message[40..] });
+            var response: [message_size]u8 = undefined;
+            try client.stream.recv(&response);
+            try testing.expectEqualSlices(u8, &message, &response);
+            try server.await(io);
+            const metrics = &runner.network_metrics.?;
+            try testing.expectEqual(@as(u64, 1), metrics.inbound_connections.metric().get());
+            try testing.expectEqual(@as(u64, 1), metrics.outbound_connections.metric().get());
+            // Client and server each sent and received one message.
+            try testing.expectEqual(@as(u64, 200), metrics.inbound_bandwidth.metric().get());
+            try testing.expectEqual(@as(u64, 200), metrics.outbound_bandwidth.metric().get());
+            const text = try runner.metrics().encode(testing.allocator);
+            defer testing.allocator.free(text);
+            const line = "runtime_outbound_bandwidth_total 200\n";
+            try testing.expect(std.mem.indexOf(u8, text, line) != null);
+        }
+    };
+    var runner = try runtime_deterministic.Runner.init(testing.allocator, .{});
+    defer runner.deinit();
+    try (try runner.start(Root.run, .{&runner}));
+}
+
+/// The metrics `new_metered_network` counts into; set by the test that uses it.
+var suite_metrics: network.metered.Metrics = undefined;
+
+fn new_metered_network(io: Io) Network {
+    var net = new_network(io);
+    net.metrics = &suite_metrics;
+    return net;
+}
+
+fn metered_suite(io: Io) !void {
+    try network.tests.run_network_tests(io, Network, new_metered_network);
+}
+
+test "metered network passes the network suite (test_trait)" {
+    const metrics = @import("../telemetry/metrics/mod.zig");
+    var registry: metrics.Registry = .init(testing.allocator);
+    defer registry.deinit();
+    const scope: metrics.Scope = .init(&registry);
+    suite_metrics = try .init(&scope);
+    defer suite_metrics.deinit();
+    var runner = try runtime_deterministic.Runner.init(testing.allocator, .{});
+    defer runner.deinit();
+    try (try runner.start(metered_suite, .{runner.io()}));
+    // Some cases send bytes that are never received, so only bounds hold.
+    const sent = suite_metrics.outbound_bandwidth.metric().get();
+    const received = suite_metrics.inbound_bandwidth.metric().get();
+    try testing.expect(received > 0 and received <= sent);
+    try testing.expect(suite_metrics.outbound_connections.metric().get() > 0);
+}
