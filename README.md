@@ -48,6 +48,18 @@ authenticated p2p discovery, and trade messages; each terminal shows the convers
 peer's live metrics, and its logs ([video](docs/assets/chat-demo.mp4)).
 `etc/scripts/record-demo.sh chat` records it again.
 
+<p align="center">
+  <img src="docs/assets/log-demo.gif" width="800"
+    alt="Four validators run Simplex consensus and finalize blocks over real TCP">
+</p>
+
+[log](examples/log) runs [Simplex](src/consensus/simplex) BFT consensus across four
+validators, each a separate process on the production runtime connected through authenticated
+p2p discovery. Every validator proposes random payloads in turn and shows when each view is
+proposed (blue), notarized, and finalized (green), keeping its consensus journal on disk so a
+restarted validator resumes where it left off ([video](docs/assets/log-demo.mp4)).
+`etc/scripts/record-demo.sh log` records it again.
+
 > [!WARNING]
 > zigware is pre-alpha and being ported now. Do not use it in production.
 
@@ -60,19 +72,19 @@ peer's live metrics, and its logs ([video](docs/assets/chat-demo.mp4)).
 | [math](src/math) | Fields, polynomials, NTT | porting |
 | [runtime](src/runtime) | Async tasks with a deterministic scheduler or io_uring | porting |
 | [storage](src/storage) | Journals, archives, MMRs, authenticated databases | porting |
-| [utils](src/utils) | Shared functionality across primitives | porting |
-| [parallel](src/parallel) | Parallel folds with pluggable strategies | porting |
+| [utils](src/utils) | Shared functionality across primitives | ported |
+| [parallel](src/parallel) | Parallel folds with pluggable strategies | ported |
 | [actor](src/actor) | Coordinate concurrent components | ported |
 | [stream](src/stream) | Encrypted messages over any transport | ported |
 | [p2p](src/p2p) | Communicate with authenticated peers | porting |
-| [broadcast](src/broadcast) | Disseminate data over a wide-area network | planned |
-| [resolver](src/resolver) | Resolve data by a fixed-length key | porting |
-| [collector](src/collector) | Collect responses to committable requests | planned |
+| [broadcast](src/broadcast) | Disseminate data over a wide-area network | ported |
+| [resolver](src/resolver) | Resolve data by a fixed-length key | ported |
+| [collector](src/collector) | Collect responses to committable requests | ported |
 | [coding](src/coding) | Erasure-code data for recovery from fragments | ported |
-| [clearing](src/clearing) | Settle actions at scale | planned |
+| [clearing](src/clearing) | Settle actions at scale | porting |
 | [consensus](src/consensus) | Order messages in a Byzantine environment (simplex, aggregation, marshal) | porting |
-| [glue](src/glue) | Default constructions spanning several primitives | planned |
-| [deployer](src/deployer) | Deploy infrastructure across cloud providers | planned |
+| [glue](src/glue) | Default constructions spanning several primitives | porting |
+| [deployer](src/deployer) | Deploy infrastructure across cloud providers | porting |
 
 Support packages: [formatting](src/formatting), [conformance](src/conformance),
 [invariants](src/invariants), [simd](src/simd), [allocator](src/allocator),
