@@ -105,6 +105,13 @@ Read this whole file before you change anything. These rules are not optional.
   `Threaded` panics on connect with a timeout and its poll timeouts can fire up to 1 ms
   early; `runtime.production.network` works around both (docs/lanes/runtime-telemetry.md).
 
+- `std.Io.Condition` counts signals, not waiters: a waiter whose timeout fired can consume a
+  signal meant for another waiter. Give each waiter its own condition (or a queue) instead of
+  sharing one across waiters with timeouts (found in aggregation's engine, d35ed1a).
+- On the deterministic runtime every hand-off between tasks costs a scheduler cycle (1 ms of
+  simulated time), so a one-item inbox caps a pipeline near 500 items/s. Hand off through a
+  bounded ring or queue, not one slot.
+
 ## Layout (mirrors commonware, Zig conventions)
 
 ```
