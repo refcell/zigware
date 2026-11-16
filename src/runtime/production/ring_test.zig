@@ -5,6 +5,7 @@ const std = @import("std");
 const Io = std.Io;
 const testing = std.testing;
 const ring_mod = @import("ring.zig");
+const tcp = @import("network.zig");
 
 const Ring = ring_mod.Ring;
 const Worker = ring_mod.Worker;
@@ -68,7 +69,7 @@ fn socket_pair() ![2]Io.net.Socket {
     const any_port: Io.net.IpAddress = .{ .ip4 = .loopback(0) };
     var server = try any_port.listen(io, .{});
     defer server.deinit(io);
-    const dialed = try server.socket.address.connect(io, .{ .mode = .stream });
+    const dialed = try tcp.connect(io, server.socket.address, .fromSeconds(10));
     errdefer dialed.close(io);
     const accepted = try server.accept(io);
     return .{ accepted.socket, dialed.socket };

@@ -108,6 +108,16 @@ Read this whole file before you change anything. These rules are not optional.
 - `std.Io.Uring` does not compile; `runtime.production.Runner` runs on `std.Io.Threaded`.
   `Threaded` panics on connect with a timeout and its poll timeouts can fire up to 1 ms
   early; `runtime.production.network` works around both (docs/lanes/runtime-telemetry.md).
+- `std.Io.Threaded` cancels a task blocked in a system call by sending `SIG.IO` to its
+  thread, and resends it until the task notices. A late signal can land after the thread has
+  moved on to another task, and `Threaded` retries the interrupted call. Retrying is safe for
+  reads, writes, polls, accepts, sleeps, futex waits, and close, but not for connect: on
+  Darwin the retry fails with EALREADY while the first attempt connects (the macOS stress
+  failure, a1622ed). Never call `std.Io.net.IpAddress.connect`; dial through
+  `runtime.production.network` or call `production.network.connect(io, address, timeout)`,
+  which connects nonblocking and polls. `std.http.Client` connects through `Threaded` too
+  (estimator's download, the deployer): retry its `error.ConnectionPending`. A system call you
+  issue yourself must also tolerate EINTR at any time.
 - `std.Io.Condition` counts signals, not waiters: a waiter whose timeout fired can consume a
   signal meant for another waiter. Give each waiter its own condition (or a queue) instead of
   sharing one across waiters with timeouts (found in aggregation's engine, d35ed1a).

@@ -438,7 +438,7 @@ pub const Network = struct {
     /// Connects to `address` within the connect timeout.
     pub fn dial(network_: *const Network, address: Address) Error!Connection {
         const io = network_.io;
-        const stream = try connect_within(io, address, network_.config.connect_timeout);
+        const stream = try connect(io, address, network_.config.connect_timeout);
         const halves = try split(network_.gpa, io, &network_.config, stream);
         assert(!halves.sink.closed and !halves.stream.poisoned);
         return .{ .sink = halves.sink, .stream = halves.stream };
@@ -452,11 +452,12 @@ const listen_backlog = 1024;
 const connect_slice_ms = 20;
 
 /// Connects within `duration` with a nonblocking connect, waiting in `poll` slices that check
-/// for cancellation between them. `std.Io.Threaded` cannot bound a connect, and it retries a
+/// for cancellation between them. Use it instead of `std.Io.net.IpAddress.connect` (AGENTS.md
+/// pitfalls). `std.Io.Threaded` cannot bound a connect, and it retries a
 /// blocking connect that a stray cancellation signal interrupted: on Darwin the retry fails
 /// with EALREADY while the first attempt completes, so the peer accepts a connection the dialer
 /// reports failed (the macOS stress failure, docs/lanes/runtime-telemetry.md).
-fn connect_within(io: Io, address: Address, duration: Io.Duration) Error!net.Stream {
+pub fn connect(io: Io, address: Address, duration: Io.Duration) Error!net.Stream {
     const timeout = deadline_after(io, nanoseconds(duration));
     var storage: SocketAddress = undefined;
     const length = socket_address(address, &storage);

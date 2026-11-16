@@ -152,7 +152,7 @@ test "a dial to a full accept queue times out (test_connect_timeout)" {
     // A backlog of zero queues one connection; the next stays pending.
     var server = try any_port.listen(io, .{ .kernel_backlog = 0 });
     defer server.deinit(io);
-    const queued = try server.socket.address.connect(io, .{ .mode = .stream });
+    const queued = try production.connect(io, server.socket.address, .fromSeconds(10));
     defer queued.close(io);
     var tcp: Network = .init(testing.allocator, io, .{ .connect_timeout = .fromMilliseconds(100) });
     defer tcp.deinit();
@@ -174,7 +174,7 @@ test "canceling a pending dial returns promptly" {
     // A backlog of zero queues one connection; the next stays pending.
     var server = try any_port.listen(io, .{ .kernel_backlog = 0 });
     defer server.deinit(io);
-    const queued = try server.socket.address.connect(io, .{ .mode = .stream });
+    const queued = try production.connect(io, server.socket.address, .fromSeconds(10));
     defer queued.close(io);
     var tcp: Network = .init(testing.allocator, io, .{ .connect_timeout = .fromSeconds(30) });
     defer tcp.deinit();

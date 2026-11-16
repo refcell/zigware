@@ -7,12 +7,13 @@ const testing = std.testing;
 const telemetry = @import("../telemetry/mod.zig");
 const server_mod = @import("telemetry.zig");
 
+const tcp = @import("network.zig");
 const io = testing.io;
 const gpa = testing.allocator;
 
 /// Sends `request` and returns the whole response (the server closes the connection).
 fn fetch(address: net.IpAddress, request: []const u8) ![]u8 {
-    const stream = try address.connect(io, .{ .mode = .stream });
+    const stream = try tcp.connect(io, address, .fromSeconds(10));
     defer stream.close(io);
     var out_buffer: [256]u8 = undefined;
     var writer = stream.writer(io, &out_buffer);
