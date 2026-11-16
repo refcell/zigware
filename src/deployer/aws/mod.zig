@@ -26,6 +26,9 @@ pub const sigv4 = @import("sigv4.zig");
 pub const query = @import("query.zig");
 pub const client = @import("client.zig");
 pub const ec2_api = @import("ec2_api.zig");
+pub const credentials = @import("credentials.zig");
+pub const session = @import("session.zig");
+pub const commands = @import("commands.zig");
 pub const Failure = @import("failure.zig").Failure;
 
 pub const Error = yaml.Error;

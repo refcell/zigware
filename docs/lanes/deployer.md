@@ -49,6 +49,8 @@ test vectors. Tests never call AWS and never hold credentials.
   the `ApiError` in `failure`) and one function per commonware EC2 call (`create_vpc`,
   `wait_for_instances_running`, `find_az_instance_support`, ...). `deployer.aws.query`
   also has `elements`, `texts`, and `decoded_text` for nested responses.
+- `deployer.aws.credentials` (`load`, `from_environ`, `parse_profile`), `deployer.aws.session`
+  (`Session`), and `deployer.aws.commands` (`clean`, `authorize`, `require_created`).
 - `utils.fuzz` is now exported (the seeded fuzz driver over `FuzzRng`).
 
 ## Decisions
@@ -83,6 +85,8 @@ test vectors. Tests never call AWS and never hold credentials.
   `aws_ec2` failures print the code, status, and message rather than the SDK's error text.
   As in commonware, `launch_instances` retries capacity failures until capacity returns;
   canceling its task ends it.
+- Credentials come from the environment or the shared credentials file only (the SDK's
+  first two providers); instance metadata, SSO, and credential processes are not ported.
 - `IpAddr` is the deployer's own: Rust's `IpAddr` parsing and display (RFC 5952 compression,
   `::ffff:a.b.c.d` for IPv4-mapped addresses), since `std.Io.net.IpAddress` formats ports.
 
@@ -115,8 +119,11 @@ test vectors. Tests never call AWS and never hold credentials.
 - [x] The remaining EC2 calls (`deployer.aws.ec2_api`: key pairs, instance types, AMIs, VPCs,
   gateways, route tables, subnets, security groups, instances and their waits, peering, tag
   lookups, teardown, AZ offerings, enabled regions), tested against scripted responses.
+- [x] Credentials (environment, then the shared credentials file's profile), the command
+  `Session` (per-region clients, failure diagnostics, config loading, public IP), and the
+  `clean` and `authorize` commands with tests over a temporary home and scripted responses.
 - [ ] The create, update,
-  authorize, destroy, clean, profile, and attach flows and the `deployer` binary.
+  destroy, profile, and attach flows and the `deployer` binary.
 - [ ] Fuzz: YAML parse/write round trips, config validation, SigV4 canonicalization.
 
 ## Log

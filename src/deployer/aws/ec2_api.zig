@@ -384,6 +384,20 @@ pub fn create_security_group_binary(
     return group_id;
 }
 
+/// Opens every TCP port to `cidr` (commonware `authorize`'s ingress rule).
+pub fn authorize_deployer_ingress(ec2: *Ec2, sg_id: []const u8, cidr: []const u8) Error!void {
+    var params = params_of(ec2);
+    try params.add("GroupId", sg_id);
+    try params.ip_permission(
+        1,
+        aws_utils.deployer_protocol,
+        aws_utils.deployer_min_port,
+        aws_utils.deployer_max_port,
+        cidr,
+    );
+    _ = try ec2.run("AuthorizeSecurityGroupIngress", params.list.items);
+}
+
 /// Opens the metrics and system ports to the monitoring instance (commonware
 /// `add_monitoring_ingress`).
 pub fn add_monitoring_ingress(ec2: *Ec2, sg_id: []const u8, monitoring_ip: []const u8) Error!void {
