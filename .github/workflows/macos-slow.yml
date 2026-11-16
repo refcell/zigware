@@ -1,6 +1,7 @@
 name: macos-slow
 
-# The slow tests (-Dslow-tests) on macOS, run by hand: Debug, so failures keep stack traces.
+# The slow tests (-Dslow-tests) on macOS, run by hand: Debug by default, so failures keep
+# stack traces; ReleaseSafe reproduces the CI step whose TCP stress test once leaked.
 on:
   workflow_dispatch:
     inputs:
@@ -8,6 +9,12 @@ on:
         description: "Test filter (-Dtest-filter), such as production.network; empty runs all"
         required: false
         default: ""
+      optimize:
+        description: "Build mode (-Doptimize)"
+        required: false
+        default: Debug
+        type: choice
+        options: [Debug, ReleaseSafe, ReleaseFast]
 
 jobs:
   slow:
@@ -26,9 +33,10 @@ jobs:
       - name: slow tests
         env:
           FILTER: ${{ inputs.filter }}
+          OPTIMIZE: ${{ inputs.optimize }}
         run: |
           if [ -n "$FILTER" ]; then
-            zig build test -Dslow-tests -Dtest-filter="$FILTER" --summary all
+            zig build test -Dslow-tests -Doptimize="$OPTIMIZE" -Dtest-filter="$FILTER" --summary all
           else
-            zig build test -Dslow-tests --summary all
+            zig build test -Dslow-tests -Doptimize="$OPTIMIZE" --summary all
           fi
