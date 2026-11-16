@@ -22,6 +22,7 @@ pub const services = @import("services.zig");
 pub const ec2 = @import("ec2.zig");
 pub const create = @import("create.zig");
 pub const deployments = @import("deployments.zig");
+pub const sigv4 = @import("sigv4.zig");
 pub const Failure = @import("failure.zig").Failure;
 
 pub const Error = yaml.Error;

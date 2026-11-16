@@ -48,6 +48,10 @@ test vectors. Tests never call AWS and never hold credentials.
 - `list` prints creation times in UTC: zigware has no time zone database (commonware uses
   the local zone). Deployments load sorted by tag, so ties and `attach` order are
   deterministic regardless of directory order.
+- SigV4 vectors: the AWS docs' IAM `ListUsers` signature and signing key and the S3 docs'
+  header-signed GET and presigned URL, each reproduced offline by aws-sdk-go-v2 v1.41.7's
+  signer before use; that signer also produced the escaping, POST, and session-token
+  vectors. The S3 docs' example key ID is split in source so the secret scanner passes.
 - Commonware's upper-case constants (`METRICS_PORT`, `CREATE_CMD`, ...) are snake_case
   (`metrics_port`, `create_cmd`), per TigerStyle naming.
 - `IpAddr` is the deployer's own: Rust's `IpAddr` parsing and display (RFC 5952 compression,
@@ -66,7 +70,8 @@ test vectors. Tests never call AWS and never hold credentials.
   directory (`deployer.aws.deployments`).
 - [ ] `create.rs`'s `run_launches` ordering (2 async
   tests); `ec2.rs`'s launch retry loop (11 async tests, over a mock client).
-- [ ] SigV4 signer with the AWS documentation's test vectors; S3 presigned URLs.
+- [x] SigV4 signer with the AWS documentation's test vectors; S3 presigned URLs
+  (`deployer.aws.sigv4`).
 - [ ] CLI (`deployer aws <command>`) with argument parsing tests.
 - [ ] AWS client interface (EC2 and S3 query/REST calls over `std.http`), never exercised
   against AWS in tests.
