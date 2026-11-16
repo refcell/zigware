@@ -27,6 +27,15 @@ formatting, and the deterministic runtime for tests. qmdb is only mentioned in c
 - `Opening(P, D, A)`: `row`, `entry`, `verify_row(H, root, sender)`,
   `verify(H, root, sender, receiver)`, codec, `clone`, `eql`, `deinit`.
 
+- `payment`: `State(P, D)` (`message`, `sign`, `verify`, `acknowledge`,
+  `verify_acknowledgement`), `Signatures(P)`, `Latest(P, D, A)` (`state`, `payments` pointers),
+  `Request(P, D, A)` (`states(H, gpa, epoch, account, batch, latest, previous)` takes the
+  batch, `verify(H, ns, epoch)`; codec cfg = max receivers), `States` (`request`, `sign`),
+  `Verified.admit(H, gpa, latest, previous)`, `Admission` (`retry`/`new`),
+  `Receipt(P, O, D, A)` (`issue(H, gpa, ...) ?[]Receipt`, `verify(H, ns, operator)`),
+  `Challenge(P, O, D, A)` (`verify(H, ns, operator, epoch, matrix_root)`), `RequestError`,
+  `ChallengeError`. Signers and operators are passed by pointer (`anytype`).
+
 ## Decisions
 - Errors carry no payload (`WrongEpoch`'s expected/found are dropped), as in other lanes.
 - `Amounts` owns its entry slice (Rust `Vec`); `Lookup` owns its proof. Values are freed with
@@ -46,7 +55,8 @@ formatting, and the deterministic runtime for tests. qmdb is only mentioned in c
 - [x] lib.rs types and traits (`Epoch`, `Amount`), namespace.
 - [x] amounts and lookup, with their tests and conformance hashes.
 - [x] matrix (Matrix, Opening) with tests and conformance hash.
-- [ ] payment (State, Signatures, Request, States, Verified, Admission, Receipt, Challenge).
+- [x] payment (State, Signatures, Request, States, Verified, Admission, Receipt, Challenge)
+  with every test and its five conformance hashes.
 - [ ] settlement (Total, Flow, Settled, Flows), close (Withdrawal, Deposit, ForcedWithdrawal,
   Queue, Row, Limits, Close, assembly).
 - [ ] summary (Processed, Summary, genesis, verify with the ed25519 certificate scheme).
@@ -60,3 +70,5 @@ formatting, and the deterministic runtime for tests. qmdb is only mentioned in c
 - 2026-11-16: namespace, amounts, lookup with their tests; Amounts and Lookup conformance
   hashes match commonware.
 - 2026-11-16: matrix (Matrix, Opening) with its tests; the Opening conformance hash matches.
+- 2026-11-16: payment (states, requests, admission, receipts, challenges) with every test;
+  its five conformance hashes match.

@@ -75,3 +75,22 @@ test "conformance: matrix opening" {
         mod.Opening(PublicKey, Digest, u64),
     );
 }
+
+test "conformance: payment" {
+    try skip_slow();
+    const tests = "payment::tests::conformance::";
+    try verify(tests ++ "CodecConformance<State<PublicKey,Digest>>", mod.State(PublicKey, Digest));
+    try verify(tests ++ "CodecConformance<Signatures<PublicKey>>", mod.Signatures(PublicKey));
+    try verify(
+        tests ++ "CodecConformance<Request<PublicKey,Digest,u64>>",
+        mod.Request(PublicKey, Digest, u64),
+    );
+    try verify(
+        tests ++ "CodecConformance<Receipt<PublicKey,PublicKey,Digest,u64>>",
+        mod.Receipt(PublicKey, PublicKey, Digest, u64),
+    );
+    try verify(
+        tests ++ "CodecConformance<Challenge<PublicKey,PublicKey,Digest,u64>>",
+        mod.Challenge(PublicKey, PublicKey, Digest, u64),
+    );
+}
