@@ -44,9 +44,8 @@ resize, sync), `runtime.storage`, with the in-memory backend `runtime.storage.me
   `Stored`, `init_sync`, with the fixed journal as a backing; init_sync and last_matching tests.
 - [x] journal/authenticated.rs `Journal` (items plus persisted Merkle, recovery, batches,
   proofs) with its ported tests under both families, including the interrupted-destroy
-  regression (issue 5668) over both backings.
-- [ ] journal/authenticated.rs: the equal-length-branch crash test on
-  `runtime.storage.faulty` (torn writes, lost resizes).
+  regression (issue 5668) over both backings and the equal-length-branch crash on
+  `runtime.storage.faulty` (unsynced writes kept, unsynced resizes lost).
 - [x] metadata (two-blob atomic key-value store).
 - [ ] metadata: `start_sync` (pipelined syncs), conformance hash (`MetadataWorkload`), and
   the fault-injection tests (torn writes, failed syncs), once runtime storage lands.
@@ -288,3 +287,4 @@ resize, sync), `runtime.storage`, with the in-memory backend `runtime.storage.me
 - 2026-11-16: contiguous variable journal with the shared suite and core recovery tests.
 - 2026-11-16: variable recovery tests (torn interior page, watermark beyond data); queue.
 - 2026-11-16: authenticated `Journal` (recovery, batches, proofs) with its ported tests.
+- 2026-11-16: authenticated equal-length-branch crash test on faulty storage.

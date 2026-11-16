@@ -13,6 +13,7 @@ const testing = std.testing;
 const codec = @import("codec");
 const cryptography = @import("cryptography");
 const runtime = @import("runtime");
+const utils = @import("utils");
 const merkle = @import("../merkle/mod.zig");
 const fixed = @import("contiguous/fixed.zig");
 const variable = @import("contiguous/variable.zig");
@@ -24,6 +25,8 @@ const Digest = Sha256.Digest;
 const Hasher = merkle.hasher.Standard(Sha256);
 const CacheRef = runtime.buffer.paged.CacheRef;
 const families = .{ merkle.mmr.Family, merkle.mmb.Family };
+const op_size: u16 = codec.fixed_size(Op).?;
+const digest_size: u16 = codec.fixed_size(Digest).?;
 
 /// The test operation: tag 0 is an update of key to value, tag 1 a commit.
 const Op = struct { u8, [32]u8, [32]u8 };
@@ -1426,4 +1429,132 @@ test "an interrupted destroy over a variable journal reopens at its last commit 
         "journal-interrupted-destroy_offsets-metadata",
     };
     inline for (families) |F| try interrupted_destroy_reopens(F, true, &partitions);
+}
+
+/// A journal over fault-injecting storage, for crash tests that keep or drop unsynced writes
+/// and resizes.
+const FaultyHarness = struct {
+    const Faulty = runtime.storage.faulty.Storage(utils.rng.TestRng);
+
+    inner: runtime.storage.memory.Storage,
+    rng: utils.rng.TestRng,
+    storage: Faulty,
+    journal_cache: CacheRef,
+    merkle_cache: CacheRef,
+
+    /// One operation (and one node) per page makes reopen bounds page aligned.
+    fn init(self: *FaultyHarness) !void {
+        self.inner = .init(gpa);
+        self.rng = .init(0);
+        self.storage = .init(gpa, &self.inner, &self.rng, .{});
+        self.journal_cache = try CacheRef.init(gpa, op_size, 11);
+        self.merkle_cache = try CacheRef.init(gpa, digest_size, 11);
+    }
+
+    fn deinit(self: *FaultyHarness) void {
+        self.merkle_cache.deinit();
+        self.journal_cache.deinit();
+        self.storage.deinit();
+        self.inner.deinit();
+    }
+
+    /// Replays retained unsynced mutations, then crashes the backend.
+    fn crash(self: *FaultyHarness) !void {
+        try self.storage.crash();
+        self.inner.crash();
+    }
+
+    fn open(self: *FaultyHarness, comptime F: type, max_size: ?u64) !TestJournal(F) {
+        const merkle_cfg: merkle.full.Config = .{
+            .journal_partition = "mmr-journal-equal-length-branch",
+            .metadata_partition = "mmr-metadata-equal-length-branch",
+            .items_per_blob = 1000,
+            .write_buffer = 1024,
+            .replay_buffer = 1024,
+            .cache_ref = &self.merkle_cache,
+        };
+        // The two-page write buffer floor flushes a branch in whole-buffer bursts.
+        const journal_cfg: fixed.Config = .{
+            .partition = "journal-equal-length-branch",
+            .items_per_blob = 1000,
+            .write_buffer = 1,
+            .replay_buffer = 1024,
+            .cache_ref = &self.journal_cache,
+        };
+        var recovery = try TestJournal(F).prepare(
+            gpa,
+            self.storage.storage(),
+            merkle_cfg,
+            journal_cfg,
+            max_size,
+            is_commit,
+            .forward_fold,
+        );
+        return recovery.finish();
+    }
+};
+
+/// A branch of `len` operations from `first`, ending at a commit.
+fn branch(first: u8, len: u64, out: []Op) []Op {
+    for (out[0 .. len - 1], 0..) |*op, i| op.* = create_operation(first + @as(u8, @intCast(i)));
+    out[len - 1] = commit_op;
+    return out[0..len];
+}
+
+/// Commits A then B, reopens at A, appends an equal-length branch without syncing, and crashes
+/// with the appends retained and unsynced resizes lost. Recovery yields A or a prefix of the
+/// new branch, never B's operations or Merkle nodes.
+fn init_at_most_equal_length_branch_crash(comptime F: type) !void {
+    const a: u64 = 4;
+    // A three-operation branch flushes whole and a five-operation one only in part.
+    for ([_]u64{ 3, 5 }) |len| {
+        var harness: FaultyHarness = undefined;
+        try harness.init();
+        defer harness.deinit();
+        var buffer: [8]Op = undefined;
+        var journal = try harness.open(F, null);
+        for (branch(0, a, &buffer)) |op| _ = try journal.append(op);
+        try journal.sync();
+        const root_a = try journal.root(0);
+        for (branch(50, len, &buffer)) |op| _ = try journal.append(op);
+        try journal.sync();
+        try testing.expectEqual(a + len, journal.size());
+        journal.deinit();
+        // Keep unsynced writes and drop unsynced resizes at the crash.
+        harness.storage.config = .{
+            .write_rate = .{ .failure_rate = .zero, .retention_rate = .one, .mode = .prefix },
+            .resize_rate = .{ .failure_rate = .zero, .partial_rate = .zero },
+        };
+        journal = try harness.open(F, a);
+        try testing.expectEqual(a, journal.size());
+        try testing.expect((try journal.root(0)).eql(root_a));
+        var roots: [8]Digest = undefined;
+        roots[0] = root_a;
+        for (branch(100, len, &buffer), 1..) |op, i| {
+            _ = try journal.append(op);
+            roots[i] = try journal.root(0);
+        }
+        journal.deinit();
+        try harness.crash();
+        harness.storage.config = .{};
+        // Recover the base commit or a prefix of its replacement, nothing of the discarded
+        // branch.
+        journal = try harness.open(F, null);
+        const size = journal.size();
+        try testing.expect(size >= a and size <= a + len);
+        const expected = branch(100, len, &buffer);
+        for (a..size) |position| try expect_op(expected[position - a], try journal.read(position));
+        // The root and proof authenticate that same history.
+        const root = try journal.root(0);
+        try testing.expect(root.eql(roots[size - a]));
+        var proved = try journal.proof(0, size, 0);
+        defer proved.deinit(gpa);
+        try testing.expectEqual(size, proved.items.len);
+        try testing.expect(try verify_proof(&proved.proof, 0, proved.items, &root));
+        try journal.destroy();
+    }
+}
+
+test "init_at_most then an equal-length branch crash never recovers the discarded branch" {
+    try run(init_at_most_equal_length_branch_crash);
 }
