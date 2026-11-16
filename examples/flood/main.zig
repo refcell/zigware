@@ -323,8 +323,14 @@ fn supervise(
     assert(buffer.len == 4);
 }
 
-fn run_network(network: *Net) anyerror!void {
-    return network.run();
+/// Runs the network until canceled. Like commonware (whose listener panics with "failed to
+/// bind listener"), a network failure ends the process instead of silently closing every
+/// channel.
+fn run_network(network: *Net) Io.Cancelable!void {
+    network.run() catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        else => std.debug.panic("network failed: {t}", .{err}),
+    };
 }
 
 fn run_sender(

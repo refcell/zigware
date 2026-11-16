@@ -93,14 +93,14 @@ if [ "${DEMO_SESSION:-}" = "1" ]; then
       }
       boot='--bootstrappers 0@127.0.0.1:3000'
       t kill-server 2>/dev/null || true
-      t new-session -d -s log -x 250 -y 50 "$(validator 0)"
+      t new-session -d -s log -x 200 -y 44 "$(validator 0)"
       t set-option -g status off
       t split-window -h -t log "$(validator 1 "$boot")"
       t split-window -v -t log "$(validator 3 "$boot")"
       t select-pane -t log -L
       t split-window -v -t log "$(validator 2 "$boot")"
       (
-        sleep 11
+        sleep 7
         # Detach first, so the recording ends on the validators' frames: killing the server
         # closes the panes one by one and tmux redraws before it leaves the screen.
         t detach-client -s log
@@ -117,7 +117,7 @@ fi
 case $name in
   flood) size=150x40 ;;
   chat) size=200x50 ;;
-  log) size=250x50 ;;
+  log) size=200x44 ;;
   *) size=104x40 ;;
 esac
 DEMO_SESSION=1 TERM=xterm-256color asciinema rec --overwrite --quiet --output-format asciicast-v2 --window-size "$size" \

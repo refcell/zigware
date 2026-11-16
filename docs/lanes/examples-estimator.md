@@ -56,8 +56,8 @@ statistics, output, CLI) and run against a minimal in-lane stand-in, then switch
   (#3324); the Metrics pane shows `network_tracker_directory_connected` samples, one per
   connected friend, instead.
 
-- log's Logs pane is empty: zigware's p2p and consensus record no tracing events yet, and,
-  as in commonware, `main`'s own events come before the GUI installs its writer.
+- log's Logs pane shows p2p's and simplex's events at debug and above (gui.rs's
+  `with_max_level(DEBUG)`), through the runner's subscriber.
 - log's application events are strings in tracing (`%view`, `?payload`, `hex(..)`), so its
   Activity lines quote every value (`view="7"`), as gui.rs prints them.
 

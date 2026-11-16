@@ -13,8 +13,8 @@
 //!
 //! Peers find each other through p2p's authenticated discovery network on 127.0.0.1, on the
 //! production runtime, and the UI (`gui.zig`) runs in the terminal with plain ANSI escapes.
-//! As in commonware, `main`'s own events come before the GUI installs its log writer, so they
-//! are not shown.
+//! p2p and simplex events (debug and above) fill the Logs pane; as in commonware, `main`'s own
+//! events come before the GUI installs its log writer, so they are not shown.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -146,7 +146,13 @@ pub fn main(init: std.process.Init) !u8 {
     var zone = ui.clock.Zone.load(init.gpa, io, init.environ_map.get("TZ"));
     defer zone.deinit();
     var runner: production.Runner = undefined;
-    try runner.init(init.gpa, .{ .storage_directory = arguments.storage_directory });
+    // gui.rs installs its writer with `with_max_level(DEBUG)`.
+    var subscriber = collector.subscriber();
+    subscriber.level = .debug;
+    try runner.init(init.gpa, .{
+        .storage_directory = arguments.storage_directory,
+        .subscriber = subscriber,
+    });
     defer runner.deinit();
     try (try runner.start_context(run, .{ &collector, &zone, configured }));
     return 0;
@@ -186,7 +192,9 @@ fn run(
     const gpa = ctx.gpa();
     const io = ctx.io();
     const scope = ctx.scope.child("network");
-    const network = try Net.create(gpa, io, ctx.network, scope, network_config(configured));
+    var config = network_config(configured);
+    config.tracer = ctx.tracer("commonware_p2p");
+    const network = try Net.create(gpa, io, ctx.network, scope, config);
     defer network.destroy();
     // In a real-world scenario, this would be updated as new peer sets are created (like when
     // the composition of a validator set changes).
@@ -293,8 +301,14 @@ fn run_gui(
     });
 }
 
-fn run_network(network: *Net) anyerror!void {
-    return network.run();
+/// Runs the network until canceled. Like commonware (whose listener panics with "failed to
+/// bind listener"), a network failure ends the process instead of silently closing every
+/// channel.
+fn run_network(network: *Net) Io.Cancelable!void {
+    network.run() catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        else => std.debug.panic("network failed: {t}", .{err}),
+    };
 }
 
 test {

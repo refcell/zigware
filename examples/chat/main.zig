@@ -183,7 +183,11 @@ fn run(
     var arena_state: std.heap.ArenaAllocator = .init(gpa);
     defer arena_state.deinit();
     const scope = runner.metrics();
-    const config = try network_config(arena_state.allocator(), configured);
+    var config = try network_config(arena_state.allocator(), configured);
+    // commonware's chat installs its log writer with `with_max_level(DEBUG)`.
+    var subscriber = collector.subscriber();
+    subscriber.level = .debug;
+    config.tracer = .init(subscriber, "commonware_p2p");
     const network = try Net.create(gpa, io, runner.network(), scope.child("network"), config);
     defer network.destroy();
     // In a real-world scenario, this would be updated as new peer sets are created (like when
@@ -222,8 +226,14 @@ fn run(
     }, &registered.sender, &registered.receiver);
 }
 
-fn run_network(network: *Net) anyerror!void {
-    return network.run();
+/// Runs the network until canceled. Like commonware (whose listener panics with "failed to
+/// bind listener"), a network failure ends the process instead of silently closing every
+/// channel.
+fn run_network(network: *Net) Io.Cancelable!void {
+    network.run() catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        else => std.debug.panic("network failed: {t}", .{err}),
+    };
 }
 
 test {
