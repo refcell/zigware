@@ -17,18 +17,22 @@ const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const actor = @import("actor");
+const broadcast = @import("broadcast");
 const p2p = @import("p2p");
+const runtime = @import("runtime");
 const utils = @import("utils");
 const types = @import("../../types.zig");
 const simplex_types = @import("../../simplex/types.zig");
 const variant = @import("variant.zig");
 const floor = @import("floor.zig");
+const ancestry = @import("../ancestry.zig");
 
 const oneshot = utils.channel.oneshot;
 const Feedback = actor.Feedback;
 const Height = types.Height;
 const Round = types.Round;
 const Processed = floor.Processed;
+const Timed = runtime.telemetry.metrics.histogram.Timed;
 
 /// A block by height, by digest, or the latest finalized one (commonware
 /// `marshal::Identifier`).
@@ -431,7 +435,7 @@ pub fn Mailbox(comptime S: type, comptime V: type) type {
         const Self = @This();
         pub const M = Message(S, V);
         pub const Error = Allocator.Error || Io.Cancelable;
-        const Block = M.Block;
+        const MarshalBlock = M.Block;
         const Activity = simplex_types.Activity(S, V.Commitment);
 
         gpa: Allocator,
@@ -497,8 +501,8 @@ pub fn Mailbox(comptime S: type, comptime V: type) type {
 
         /// A best-effort read of a block from local storage; it never fetches. The caller owns
         /// the block.
-        pub fn get_block(self: Self, identifier: Identifier(M.Digest)) Error!?Block {
-            return self.request(Block, .get_block, .{ .identifier = identifier });
+        pub fn get_block(self: Self, identifier: Identifier(M.Digest)) Error!?MarshalBlock {
+            return self.request(MarshalBlock, .get_block, .{ .identifier = identifier });
         }
 
         /// A best-effort read of a finalization from local storage; it never fetches.
@@ -518,8 +522,8 @@ pub fn Mailbox(comptime S: type, comptime V: type) type {
 
         /// The verified block first persisted for `round`, if any. Several candidates can
         /// exist for one round; look up by digest for a particular one.
-        pub fn get_verified(self: Self, round: Round) Error!?Block {
-            return self.request(Block, .get_verified, .{ .round = round });
+        pub fn get_verified(self: Self, round: Round) Error!?MarshalBlock {
+            return self.request(MarshalBlock, .get_verified, .{ .round = round });
         }
 
         /// Hints that peers `targets` (borrowed, non-empty) hold the finalization at `height`.
@@ -540,8 +544,8 @@ pub fn Mailbox(comptime S: type, comptime V: type) type {
             self: Self,
             digest: M.Digest,
             fallback: DigestFallback,
-        ) Allocator.Error!oneshot.Receiver(Block) {
-            var pair = try oneshot.channel(Block, self.gpa, self.io);
+        ) Allocator.Error!oneshot.Receiver(MarshalBlock) {
+            var pair = try oneshot.channel(MarshalBlock, self.gpa, self.io);
             errdefer pair.receiver.deinit();
             _ = try self.enqueue(.{ .subscribe_by_digest = .{
                 .digest = digest,
@@ -557,8 +561,8 @@ pub fn Mailbox(comptime S: type, comptime V: type) type {
             self: Self,
             commitment: V.Commitment,
             fallback: CommitmentFallback,
-        ) Allocator.Error!oneshot.Receiver(Block) {
-            var pair = try oneshot.channel(Block, self.gpa, self.io);
+        ) Allocator.Error!oneshot.Receiver(MarshalBlock) {
+            var pair = try oneshot.channel(MarshalBlock, self.gpa, self.io);
             errdefer pair.receiver.deinit();
             _ = try self.enqueue(.{ .subscribe_by_commitment = .{
                 .commitment = commitment,
@@ -586,7 +590,7 @@ pub fn Mailbox(comptime S: type, comptime V: type) type {
         pub fn proposed(
             self: Self,
             round: Round,
-            block: Block,
+            block: MarshalBlock,
             recipients: M.Recipients,
             ack: oneshot.Sender(void),
         ) Allocator.Error!Feedback {
@@ -602,7 +606,7 @@ pub fn Mailbox(comptime S: type, comptime V: type) type {
         pub fn prepared(
             self: Self,
             round: Round,
-            block: Block,
+            block: MarshalBlock,
             recipients: M.Recipients,
         ) Allocator.Error!Feedback {
             return self.enqueue(.{ .prepared = .{
@@ -616,7 +620,7 @@ pub fn Mailbox(comptime S: type, comptime V: type) type {
         pub fn verified_deferred(
             self: Self,
             round: Round,
-            block: Block,
+            block: MarshalBlock,
             ack: oneshot.Sender(void),
         ) Allocator.Error!void {
             _ = try self.enqueue(.{ .verified = .{ .round = round, .block = block, .ack = ack } });
@@ -624,7 +628,7 @@ pub fn Mailbox(comptime S: type, comptime V: type) type {
 
         /// Notifies the actor that a block reached the verify stage; returns once it is
         /// durable, or false if the actor is gone.
-        pub fn verified(self: Self, round: Round, block: Block) Error!bool {
+        pub fn verified(self: Self, round: Round, block: MarshalBlock) Error!bool {
             var pair = oneshot.channel(void, self.gpa, self.io) catch |err| {
                 var owned = block;
                 V.deinit_block(self.gpa, &owned);
@@ -637,7 +641,7 @@ pub fn Mailbox(comptime S: type, comptime V: type) type {
 
         /// Notifies the actor that a block reached the certify stage; returns once it is
         /// durable, or false if the actor is gone.
-        pub fn certified(self: Self, round: Round, block: Block) Error!bool {
+        pub fn certified(self: Self, round: Round, block: MarshalBlock) Error!bool {
             var pair = oneshot.channel(void, self.gpa, self.io) catch |err| {
                 var owned = block;
                 V.deinit_block(self.gpa, &owned);
@@ -684,6 +688,52 @@ pub fn Mailbox(comptime S: type, comptime V: type) type {
                 .commitment = commitment,
                 .recipients = recipients,
             } });
+        }
+
+        /// The application's blocks this mailbox provides ancestry for (`BlockProvider`).
+        pub const Block = V.ApplicationBlock;
+        pub const Shared = broadcast.Digested(V.ApplicationBlock);
+
+        /// The parent of `child` (commonware `BlockProvider::subscribe_parent`), through the
+        /// variant's `subscribe_parent(mailbox, child)`: the receiver closes without a value
+        /// once marshal can no longer obtain it, or at once for genesis.
+        pub fn subscribe_parent(
+            self: *const Self,
+            child: *const Shared,
+        ) Allocator.Error!oneshot.Receiver(Shared) {
+            return V.subscribe_parent(self.*, child);
+        }
+
+        /// A fetching ancestor stream from `initial` (owned, any order, contiguous), with its
+        /// own clone of the mailbox. Callers must already hold a block that is safe to verify,
+        /// certify, build on, or repair from; this is not a candidate fetch path.
+        pub fn ancestor_stream(
+            self: Self,
+            initial: []const Shared,
+            fetch_duration: ?*const Timed,
+        ) Allocator.Error!ancestry.AncestorStream(Self) {
+            var provider = self.clone();
+            errdefer provider.deinit();
+            return .init(self.gpa, self.io, provider, initial, fetch_duration);
+        }
+
+        /// The ancestry of the block `start`, leading to genesis, or null when the block
+        /// never arrives (commonware `ancestry`).
+        pub fn ancestry_from(
+            self: Self,
+            fallback: DigestFallback,
+            start: M.Digest,
+            fetch_duration: ?*const Timed,
+        ) Error!?ancestry.AncestorStream(Self) {
+            var receiver = try self.subscribe_by_digest(start, fallback);
+            defer receiver.deinit();
+            const block = receiver.recv() catch |err| switch (err) {
+                error.Closed => return null,
+                error.Canceled => return error.Canceled,
+            };
+            var shared = V.into_shared(block);
+            errdefer shared.deinit();
+            return try self.ancestor_stream(&.{shared}, fetch_duration);
         }
 
         /// The consensus `Reporter`: forwards notarizations, certifications, and finalizations

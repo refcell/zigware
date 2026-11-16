@@ -688,3 +688,40 @@ test "report forwards copies of certificates and ignores votes" {
     }
     try testing.expectError(error.Empty, pair.receiver.try_recv());
 }
+
+test "subscribe parent fetches the parent by commitment, bounded by its height" {
+    var pair = try actor.mailbox.new(TestMessage, gpa, io, 4);
+    defer pair.receiver.deinit();
+    var provider: TestMailbox = .init(gpa, io, pair.sender, 1);
+    defer provider.deinit();
+    const parent = raw_block(1);
+    var child = try mocks.ready(B, gpa, B.init(parent.digest(), .new(2), 2));
+    defer child.deinit();
+
+    var receiver = try provider.subscribe_parent(&child);
+    defer receiver.deinit();
+    const request = try pair.receiver.try_recv();
+    defer TestMessage.discard(request);
+    const body = request.body.subscribe_by_commitment;
+    try testing.expect(body.commitment.eql(parent.digest()));
+    try testing.expectEqual(1, body.fallback.fetch_by_commitment.get());
+
+    // Genesis has no parent: its receiver is closed and nothing is sent.
+    var genesis = try mocks.ready(B, gpa, B.init(D.empty, .zero(), 0));
+    defer genesis.deinit();
+    var none = try provider.subscribe_parent(&genesis);
+    defer none.deinit();
+    try testing.expectError(error.Closed, none.try_recv());
+    try testing.expectError(error.Empty, pair.receiver.try_recv());
+}
+
+test "ancestry from a closed mailbox is missing" {
+    var pair = try actor.mailbox.new(TestMessage, gpa, io, 1);
+    var closed: TestMailbox = .init(gpa, io, pair.sender, 1);
+    defer closed.deinit();
+    pair.receiver.deinit();
+    try testing.expectEqual(null, try closed.ancestry_from(.wait, commitment(1), null));
+    var stream = try closed.ancestor_stream(&.{try block(3)}, null);
+    defer stream.deinit();
+    try testing.expectEqual(3, stream.peek().?.inner().height().get());
+}

@@ -11,6 +11,7 @@ const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const broadcast = @import("broadcast");
 const codec = @import("codec");
+const oneshot = @import("utils").channel.oneshot;
 const traits = @import("../../traits.zig");
 const variant = @import("../core/variant.zig");
 
@@ -107,6 +108,21 @@ pub fn Standard(comptime B: type) type {
 
         pub fn into_shared(block: Block) broadcast.Digested(B) {
             return block;
+        }
+
+        /// The parent of `child` through marshal's `mailbox` (commonware's `BlockProvider` for
+        /// `Mailbox<S, Standard<B>>`): fetched by commitment, retained up to the parent's
+        /// height. Genesis has no parent, so its receiver is already closed.
+        pub fn subscribe_parent(mailbox: anytype, child: *const Block) !oneshot.Receiver(Block) {
+            const block = child.inner();
+            const parent_height = block.height().previous() orelse {
+                var pair = try oneshot.channel(Block, mailbox.gpa, mailbox.io);
+                pair.sender.deinit();
+                return pair.receiver;
+            };
+            return mailbox.subscribe_by_commitment(block.parent(), .{
+                .fetch_by_commitment = parent_height,
+            });
         }
 
         /// The application's block, which must commit to `payload`.

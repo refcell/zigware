@@ -98,7 +98,11 @@ then the core and standard actors as those packages land.
   `get_info`, `get_block`, `get_finalization`, `get_processed`, `get_anchor`,
   `get_verified`, `hint_finalized`, `subscribe_by_digest`, `subscribe_by_commitment`,
   `hint_notarized`, `proposed`, `prepared`, `verified_deferred`, `verified`, `certified`,
-  `set_floor`, `prune`, `forward`, and the consensus `Reporter` `report`).
+  `set_floor`, `prune`, `forward`, and the consensus `Reporter` `report`). As the ancestry
+  `BlockProvider`: `Block` (the application block), `subscribe_parent(child)` (through the
+  variant's `subscribe_parent(mailbox, child)`; `Standard` fetches by commitment bounded by
+  the parent height), `ancestor_stream(initial, fetch_duration)`, and
+  `ancestry_from(fallback, digest, fetch_duration)` (commonware `ancestry`).
 - `consensus.marshal.resolver.handler`: `Message(D)` (`deliver`/`produce`, with its overflow
   policy), `Handler(D)` (the resolver `Consumer` and `Producer`; copies borrowed deliveries),
   `init(D, gpa, io, scope, capacity)` returning `{ receiver, handler }`; `Annotation.order`
