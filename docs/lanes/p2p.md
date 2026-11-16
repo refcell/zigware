@@ -176,8 +176,10 @@ handshake and the runtime's network, which the actor-stream and runtime lanes ar
   stream boundary, too-large payload not delivered, rate limiting, slow peer (router).
 - [x] discovery mod.rs tests: unordered peer sets, subscription includes self, graceful
   shutdown.
-- [ ] discovery mod.rs tests: multi-index oracle, restarts (many, simultaneous, new address),
-  duplicate addresses, DNS (after a resolver exists).
+- [x] discovery mod.rs test: multi-index oracle (20 peers by default, commonware's 100 under
+  fuzz soak: 100 peers hold about 10,000 connections and 3 GB in one process).
+- [ ] discovery mod.rs tests: restarts (many, simultaneous, new address), duplicate
+  addresses, DNS (after a resolver exists).
 - [ ] lookup (parallel lane): tracker, peer, dialer, listener, Network with Config and Oracle
   (done, with connectivity); the rest of commonware's lookup mod.rs tests and the directory's
   metrics.
@@ -218,3 +220,4 @@ handshake and the runtime's network, which the actor-stream and runtime lanes ar
 
 - 2026-11-16: discovery unordered-set, subscription, and graceful-shutdown tests;
   `Oracle.blocked()` returns an error union like every `Blocker`.
+- 2026-11-16: discovery multi-index oracle test.

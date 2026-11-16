@@ -759,3 +759,98 @@ test "connected networks shut down cleanly" {
     // commonware `test_graceful_shutdown`.
     _ = try run_deterministic(0, graceful_shutdown, .{});
 }
+
+/// commonware runs 100 peers (about 10,000 connections); the default suite runs 20, and the
+/// full 100 runs under fuzz soak.
+const multi_index_peers = 100;
+
+fn multi_index_count() usize {
+    return if (build_options.fuzz_soak > 1) multi_index_peers else 20;
+}
+
+/// Starts peer `index` of `keys`, tracking `keys[0]`, `keys[1..3]`, and `keys[2..]` at indices
+/// 0, 1, and 2, with channel 0 at 10 per second.
+fn start_multi_index(
+    io: Io,
+    transport: *Transport,
+    scope: metrics.Scope,
+    keys: []const PublicKey,
+    index: usize,
+) !Node {
+    const bootstrap = [_]Bootstrapper{.{
+        .peer = keys[0],
+        .ingress = .{ .socket = local_socket(base_port) },
+    }};
+    const bootstrappers: []const Bootstrapper = if (index == 0) &.{} else &bootstrap;
+    const port = base_port + @as(u16, @intCast(index));
+    var config = test_config(
+        PrivateKey.from_seed(index),
+        port,
+        bootstrappers,
+        max_message_size_default,
+    );
+    config.max_peers_per_set = @max(keys.len - 1, 2);
+    const network = try Net.create(gpa, io, transport, node_scope(scope, index), config);
+    errdefer network.destroy();
+    var buffer: [multi_index_peers]PublicKey = undefined;
+    try track_primary(network, 0, keys[0..1]);
+    try track_primary(network, 1, sorted_keys(&buffer, keys[1..3]));
+    try track_primary(network, 2, sorted_keys(&buffer, keys[2..]));
+    var node: Node = .{
+        .network = network,
+        .registered = try network.register(0, .per_second(10)),
+        .task = undefined,
+    };
+    node.task = try io.concurrent(run_node, .{network});
+    return node;
+}
+
+/// Peer 0 sends its identity to all until every other peer has it; each other peer
+/// receives it once.
+fn await_multi_index(io: Io, keys: []const PublicKey, nodes: []Node) !void {
+    const n = nodes.len;
+    var received: [multi_index_peers]bool = @splat(false);
+    received[0] = true;
+    var sent_all = false;
+    var rounds: u32 = 0;
+    while (!sent_all or std.mem.indexOfScalar(bool, received[0..n], false) != null) {
+        try testing.expect(rounds < 3_000);
+        rounds += 1;
+        if (!sent_all) {
+            const payload: []const []const u8 = &.{&keys[0].key.bytes};
+            const sent = try nodes[0].registered.sender.send(.all, payload, true);
+            defer gpa.free(sent);
+            sent_all = sent.len == n - 1;
+        }
+        for (nodes[1..], 1..) |*node, index| {
+            if (received[index]) continue;
+            var message = node.registered.receiver.try_recv() catch continue;
+            defer message.deinit();
+            try testing.expectEqualSlices(u8, &message.peer.key.bytes, message.payload);
+            received[index] = true;
+        }
+        try io.sleep(.fromMilliseconds(100), .real);
+    }
+}
+
+fn multi_index_oracle(io: Io, transport: *Transport, scope: metrics.Scope) !void {
+    const n = multi_index_count();
+    var keys: [multi_index_peers]PublicKey = undefined;
+    for (keys[0..n], 0..) |*key, index| key.* = PrivateKey.from_seed(index).public_key();
+    var nodes: [multi_index_peers]Node = undefined;
+    var started: usize = 0;
+    defer stop_nodes(io, nodes[0..started]);
+    for (nodes[0..n], 0..) |*node, index| {
+        node.* = try start_multi_index(io, transport, scope, keys[0..n], index);
+        started += 1;
+    }
+    try await_multi_index(io, keys[0..n], nodes[0..n]);
+    const text = try scope.encode(gpa);
+    defer gpa.free(text);
+    try expect_no_rate_limiting(text);
+}
+
+test "peers tracked across several indices all connect" {
+    // commonware `test_multi_index_oracle`.
+    _ = try run_deterministic(0, multi_index_oracle, .{});
+}
