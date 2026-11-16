@@ -64,6 +64,12 @@ encoding parts as soon as `codec` has its core API (see docs/lanes/codec.md).
   `to_integer`, `is_integer`/`is_zero`/`is_negative`/`is_positive`; `ceil_to_u128`,
   `log2_floor(digits)`, `log2_ceil(digits)` bit-identical to commonware). Results allocate with
   the first operand's allocator; the caller `deinit`s them.
+- `utils.Probability` (`utils.probability`): platform-independent probability, a `u64`
+  `threshold` (extern struct; `maxInt(u64)` = one). `zero`, `one`, `init(n, d) ?Probability`
+  (Rust `new`), `from_f64`, `try_from_f64` (`error.InvalidProbability`), comptime `ratio(n, d)`
+  and `literal(f)` (the `probability!` macro), `is_zero`, `is_one`, `as_f64`, `sample(rng)`
+  (draws one `next_u64` strictly between zero and one, nothing at the endpoints), `eql`,
+  `order`, `{f}`, `arbitrary`. Bit-identical thresholds to commonware.
 - `utils.Hostname` (`utils.hostname`): validated RFC 1035/1123 hostname stored inline
   (`init`, `literal`, `as_str`, `eql`, `order`, `{f}`, `len_max`, `label_len_max`,
   `max_encode_size` = 258), codec as a `RangeCfg(..=253)` byte string; `hostname.Error`.
@@ -95,7 +101,7 @@ encoding parts as soon as `codec` has its core API (see docs/lanes/codec.md).
 
 ## Backlog
 - [ ] utils basics (done: faults, modulo, union/union_unique, NZ, Participant, rng, range
-  without codec; time; remaining: iter, vec, rational, probability, sampling; hostname and net done): `Span`/`Array` traits as comptime interfaces, `union_unique`, `hex`
+  without codec; time; remaining: iter, vec; rational, probability, sampling done; hostname and net done): `Span`/`Array` traits as comptime interfaces, `union_unique`, `hex`
   re-exports, `modulo`, `NZ*` non-zero helpers, quorum math (`quorum`, `max_faults`),
   `time.rs`, `range.rs`, `iter.rs`, `vec.rs` (NonEmptyVec), `rational`, `probability`,
   `sampling`, `rng.rs` (deterministic test RNG matching commonware's where tests depend on it).
@@ -136,3 +142,4 @@ encoding parts as soon as `codec` has its core API (see docs/lanes/codec.md).
 - 2026-11-13: Clock2Q+ Cache over handles.Table, with the cache.rs unit tests and invariants.
 - 2026-11-16: rational BigRational (BigRationalExt plus the arithmetic bloomfilter uses), all
   mod.rs tests and a fuzz that checks log2 against its defining bounds.
+- 2026-11-16: Probability with the probability.rs tests (thresholds, sampling, round trips).

@@ -46,6 +46,9 @@ pub const Cache = cache.Cache;
 pub const rational = @import("rational.zig");
 pub const BigRational = rational.BigRational;
 
+pub const probability = @import("probability.zig");
+pub const Probability = probability.Probability;
+
 pub const channel = @import("channel/mod.zig");
 
 pub const sampling = @import("sampling.zig");
