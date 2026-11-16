@@ -21,6 +21,8 @@ pub const amounts = @import("amounts.zig");
 pub const lookup = @import("lookup.zig");
 pub const matrix = @import("matrix.zig");
 pub const payment = @import("payment.zig");
+pub const settlement = @import("settlement.zig");
+pub const close = @import("close.zig");
 
 pub const Namespace = namespace.Namespace;
 pub const Amounts = amounts.Amounts;
@@ -39,6 +41,17 @@ pub const Receipt = payment.Receipt;
 pub const Challenge = payment.Challenge;
 pub const RequestError = payment.RequestError;
 pub const ChallengeError = payment.ChallengeError;
+pub const Flow = settlement.Flow;
+pub const FlowError = settlement.FlowError;
+pub const Settled = settlement.Settled;
+pub const Close = close.Close;
+pub const Row = close.Row;
+pub const Withdrawal = close.Withdrawal;
+pub const Deposit = close.Deposit;
+pub const ForcedWithdrawal = close.ForcedWithdrawal;
+pub const Queue = close.Queue;
+pub const Limits = close.Limits;
+pub const AssemblyError = close.AssemblyError;
 
 /// An epoch number. Epochs start at one, and epoch zero names the state before the first close.
 pub const Epoch = u64;
@@ -66,5 +79,7 @@ test {
     _ = @import("lookup_test.zig");
     _ = @import("matrix_test.zig");
     _ = @import("payment_test.zig");
+    _ = @import("settlement_test.zig");
+    _ = @import("close_test.zig");
     _ = @import("conformance_test.zig");
 }

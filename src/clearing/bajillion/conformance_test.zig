@@ -94,3 +94,26 @@ test "conformance: payment" {
         mod.Challenge(PublicKey, PublicKey, Digest, u64),
     );
 }
+
+test "conformance: settlement flow" {
+    try verify("settlement::tests::conformance::CodecConformance<Flow<u64>>", mod.Flow(u64));
+}
+
+test "conformance: close" {
+    try skip_slow();
+    const tests = "close::tests::conformance::";
+    try verify(tests ++ "CodecConformance<Deposit<PublicKey,u64>>", mod.Deposit(PublicKey, u64));
+    try verify(
+        tests ++ "CodecConformance<ForcedWithdrawal<PublicKey,u64>>",
+        mod.ForcedWithdrawal(PublicKey, u64),
+    );
+    try verify(
+        tests ++ "CodecConformance<Withdrawal<PublicKey,u64>>",
+        mod.Withdrawal(PublicKey, u64),
+    );
+    try verify(tests ++ "CodecConformance<Row<PublicKey,u64>>", mod.Row(PublicKey, u64));
+    try verify(
+        tests ++ "CodecConformance<Close<PublicKey,PublicKey,u64>>",
+        mod.Close(PublicKey, PublicKey, u64),
+    );
+}
