@@ -25,19 +25,19 @@ const Net = p2p.simulated.Network(PublicKey);
 const Tracked = p2p.TrackedPeers(PublicKey);
 pub const Consumer = MockConsumer(MockKey, void);
 pub const Producer = MockProducer(MockKey);
-/// The engine over consumer `C` on the simulated network.
-pub fn EngineOf(comptime C: type) type {
+/// The engine over consumer `C` and producer `Pro` on the simulated network.
+pub fn EngineOf(comptime C: type, comptime Pro: type) type {
     return engine_mod.Engine(engine_mod.Params(
         PublicKey,
         Net.Manager,
         Net.Control,
         C,
-        Producer,
+        Pro,
         Net.Sender,
         Net.Receiver,
     ));
 }
-pub const Engine = EngineOf(Consumer);
+pub const Engine = EngineOf(Consumer, Producer);
 pub const Mailbox = Engine.Mailbox;
 const Fetch = resolver.Fetch(MockKey, void);
 const Predicate = resolver.Predicate(MockKey, void);
@@ -62,9 +62,14 @@ pub const peers_max = 8;
 /// A simulated network with registered peers, the engines spawned on it, and the consumers
 /// and producers they use. `deinit` stops the engines, then the network.
 pub fn SetupWith(comptime C: type) type {
+    return SetupOf(C, Producer);
+}
+
+/// `SetupWith` over producer `Pro` (`init(gpa, io)`, `insert(key, value)`, `deinit`).
+pub fn SetupOf(comptime C: type, comptime Pro: type) type {
     return struct {
         const Self = @This();
-        pub const EngineT = EngineOf(C);
+        pub const EngineT = EngineOf(C, Pro);
         pub const MailboxT = EngineT.Mailbox;
 
         io: Io,
@@ -78,7 +83,7 @@ pub fn SetupWith(comptime C: type) type {
         /// Engines aborted with `stop`; their mailboxes stay usable (sends report closed).
         stopped: [peers_max]bool = @splat(false),
         consumers: std.ArrayList(C) = .empty,
-        producers: std.ArrayList(Producer) = .empty,
+        producers: std.ArrayList(Pro) = .empty,
 
         pub const Options = struct {
             quota: p2p.Quota = p2p.Quota.per_second(rate_limit),
@@ -202,8 +207,8 @@ pub fn SetupWith(comptime C: type) type {
         }
 
         /// A producer owned by the setup, serving `entries`.
-        pub fn make_producer(setup: *Self, entries: []const struct { u8, []const u8 }) !Producer {
-            const value = try Producer.init(gpa, setup.io);
+        pub fn make_producer(setup: *Self, entries: []const struct { u8, []const u8 }) !Pro {
+            const value = try Pro.init(gpa, setup.io);
             errdefer value.deinit();
             try setup.producers.append(gpa, value);
             for (entries) |entry| try value.insert(.init(entry[0]), entry[1]);
@@ -215,7 +220,7 @@ pub fn SetupWith(comptime C: type) type {
             setup: *Self,
             index: usize,
             consumer_value: C,
-            producer_value: Producer,
+            producer_value: Pro,
         ) !*MailboxT {
             const me = setup.peers[index];
             const connection = setup.connections[index].?;
@@ -1080,6 +1085,10 @@ test "secondary peer requests are served" {
             try expect_event(consumer, 9, "served to secondary");
         }
     }.body);
+}
+
+test {
+    _ = @import("engine_delivery_test.zig");
 }
 
 test "operations after shutdown do not panic" {
