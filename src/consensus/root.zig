@@ -24,6 +24,4 @@ pub const marshal = @import("marshal/root.zig");
 
 test {
     std.testing.refAllDecls(@This());
-    // Until marshal/root.zig lands; then its `pub const coding` line runs these.
-    _ = @import("marshal/coding/root.zig");
 }

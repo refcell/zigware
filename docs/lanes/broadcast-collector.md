@@ -107,6 +107,13 @@ that harness. It builds on `coding` (ReedSolomon), `consensus.types.coding.Commi
   payload (commonware's `ContextDigest(expected, actual)` is plain `ContextDigest`). A
   context's epoch is its `epoch()` method or, for `Round`, its field.
 
+- marshal coding shards: reconstruction runs inline when enough shards are held (commonware
+  runs a strategy job and completes it as an event), so a record never holds an in-flight
+  job; the tests that drive jobs by hand (`finished`, unstarted engines) check the same
+  outcomes through the mailbox. The engine's event loop follows the buffered broadcast
+  engine: forwarder tasks feed one signal in commonware's biased order (peer sets, mailbox,
+  network).
+
 ## Backlog
 - [x] broadcast lib.rs traits.
 - [x] broadcast buffered: config, ingress, metrics, engine, mocks, with every mod.rs test on
@@ -116,11 +123,11 @@ that harness. It builds on `coding` (ReedSolomon), `consensus.types.coding.Commi
 - [x] Fuzz targets (broadcast/fuzz, collector/fuzz).
 - [x] marshal coding `types`: Shard, CodedBlock, StoredCodedBlock, `hash_context`,
   `coding_config_for_participants`, with their tests and the Shard conformance hash.
-- [ ] Once consensus-marshal's modules land: move the coding tests' `EmptyBlock` copy to
-  `marshal.mocks.block`, validation's copies of `has_contiguous_height` and
-  `is_block_in_expected_epoch` to `marshal.ancestry` and `marshal.application.validation`, and
-  the consensus root's test import of `marshal/coding/root.zig` to marshal/root.zig.
-- [ ] marshal coding `shards`: mailbox and engine, with their tests.
+- [x] Coding tests on `marshal.mocks.block.EmptyBlock`; `pub const coding` in marshal/root.zig.
+- [ ] Once ancestry and application land: move validation's copies of `has_contiguous_height`
+  and `is_block_in_expected_epoch` to `marshal.ancestry` and `marshal.application.validation`.
+- [x] marshal coding `shards`: mailbox, metrics, reconstruction state, engine, e2e test.
+- [ ] marshal coding `shards`: the rest of engine.rs's tests.
 - [x] marshal coding `validation` (proposal, block, reconstruction) with its 17 tests.
 - [ ] marshal coding `variant` (Coding), `marshaled` (Marshaled, MarshaledConfig), once
   consensus-marshal's core lands.
@@ -137,3 +144,5 @@ that harness. It builds on `coding` (ReedSolomon), `consensus.types.coding.Commi
 - 2026-11-16: marshal coding types (Shard, CodedBlock, StoredCodedBlock); the Shard
   conformance hash matches.
 - 2026-11-16: marshal coding validation with its 17 tests.
+- 2026-11-16: marshal coding shards engine (mailbox, metrics, state, engine) with the e2e
+  dispersal test; coding moved onto `marshal.mocks.block` and marshal/root.zig.

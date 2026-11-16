@@ -284,7 +284,7 @@ fn test_round() Round {
 
 test "policy drains fifo" {
     const gpa = testing.allocator;
-    const inner = test_block.EmptyBlock.init(.empty, 1, 1);
+    const inner = test_block.EmptyBlock.init(.empty, .new(1), 1);
     var block = try test_block.encode_block(gpa, inner, types.coding_config_for_participants(4));
     defer block.deinit(gpa);
     const commitment = block.commitment();

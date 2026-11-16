@@ -409,7 +409,11 @@ pub fn CodedBlock(comptime B: type, comptime C: type, comptime H: type) type {
 
 fn block_eql(a: anytype, b: @TypeOf(a)) bool {
     const B = @typeInfo(@TypeOf(a)).pointer.child;
-    if (comptime @hasDecl(B, "eql")) return a.eql(b);
+    if (comptime @hasDecl(B, "eql")) {
+        // Blocks compare by value or by pointer.
+        const Other = @typeInfo(@TypeOf(B.eql)).@"fn".param_types[1].?;
+        return if (comptime Other == B) a.eql(b.*) else a.eql(b);
+    }
     return codec.order(B, a.*, b.*) == .eq;
 }
 

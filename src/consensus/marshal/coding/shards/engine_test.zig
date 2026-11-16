@@ -122,7 +122,7 @@ fn network_config(participants: usize, max_peers_per_set: usize) p2p.simulated.C
         C,
         H,
         @intCast(participants),
-        B.max_encode_size({}),
+        B.max_encode_size,
     );
     return .{
         .max_size = p2p.max_message_size(&.{payload}),
@@ -289,7 +289,7 @@ fn round(epoch: u64, view: u64) Round {
 }
 
 fn encode(fixture: *const Fixture, height: u64, timestamp: u64) !Coded {
-    const inner = B.init(.empty, height, timestamp);
+    const inner = B.init(.empty, .new(height), timestamp);
     return test_block.encode_block(gpa, inner, fixture.coding_config);
 }
 

@@ -12,9 +12,9 @@
 //! are evicted first.
 //!
 //! Peers are blocked for: undecodable shards (including ones wider than the coding scheme
-//! produces for a block at `B.max_encode_size(block_codec_config)` under the claimed config),
-//! shards from non-participants, shards at an index that is neither the local participant's
-//! nor the sender's, equivocation while awaiting quorum, and shards that fail verification.
+//! produces under the claimed config for a block at `limits.max_block_size`), shards from
+//! non-participants, shards at an index that is neither the local participant's nor the
+//! sender's, equivocation while awaiting quorum, and shards that fail verification.
 //!
 //! Event loop: like the buffered broadcast engine, tasks feed one signal: a forwarder moves
 //! peer-set updates into a slot, another moves mailbox messages into a slot, and an ingress
@@ -38,6 +38,7 @@ const metrics = @import("runtime").telemetry.metrics;
 
 const types = @import("../types.zig");
 const validation = @import("../validation.zig");
+const limits = @import("../../limits.zig");
 const mailbox_module = @import("mailbox.zig");
 const metrics_module = @import("metrics.zig");
 const state_module = @import("state.zig");
@@ -81,7 +82,7 @@ pub fn Config(comptime T: type) type {
     };
 }
 
-/// The shard engine. `T` declares `Block` (certifiable, codec, `max_encode_size(cfg)`),
+/// The shard engine. `T` declares `Block` (certifiable, codec, bounded as `limits.max_block_size`),
 /// `Coding` (a coding scheme), `Hasher`, `Provider`, `Blocker`, `PeerProvider` (a p2p
 /// `Manager`), `Network` (`Network.Sender`, `Network.Receiver`), and `Strategy`.
 pub fn Engine(comptime T: type) type {
@@ -330,7 +331,7 @@ pub fn Engine(comptime T: type) type {
         /// Receives and decodes shards (commonware's `WrappedBackgroundReceiver`), blocking
         /// peers whose shards fail to decode and dropping arrivals while the queue is full.
         fn receive_network(engine: *Self) void {
-            const max_block_size = B.max_encode_size(engine.config.block_codec_config);
+            const max_block_size = limits.max_block_size(B, engine.config.block_codec_config);
             while (true) {
                 var raw = engine.receiver.recv() catch |err| switch (err) {
                     error.Canceled => return,

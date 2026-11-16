@@ -178,75 +178,9 @@ test "shard conformance hash matches commonware" {
     );
 }
 
-// Coded and stored coded blocks, over a copy of commonware's `mocks::block::EmptyBlock<Sha256>`
-// (docs/lanes/broadcast-collector.md: switch to `marshal.mocks.block` once it lands).
+// Coded and stored coded blocks, over marshal's `mocks.block.EmptyBlock(Sha256)`.
 
-const Height = @import("../../types.zig").Height;
-
-/// A block with no explicit consensus context; its parent digest is its context.
-const EmptyBlock = struct {
-    parent_value: Sha256.Digest,
-    height_value: Height,
-    timestamp: u64,
-
-    pub const Digest = Sha256.Digest;
-    pub const Context = Sha256.Digest;
-
-    fn init(parent_digest: Sha256.Digest, height_value: u64, timestamp: u64) EmptyBlock {
-        return .{
-            .parent_value = parent_digest,
-            .height_value = .new(height_value),
-            .timestamp = timestamp,
-        };
-    }
-
-    pub fn digest(block: *const EmptyBlock) Sha256.Digest {
-        var height_bytes: [8]u8 = undefined;
-        std.mem.writeInt(u64, &height_bytes, block.height_value.get(), .big);
-        var timestamp_bytes: [8]u8 = undefined;
-        std.mem.writeInt(u64, &timestamp_bytes, block.timestamp, .big);
-        return Sha256.hash(&.{ &block.parent_value.bytes, &height_bytes, &timestamp_bytes });
-    }
-
-    pub fn parent(block: *const EmptyBlock) Sha256.Digest {
-        return block.parent_value;
-    }
-
-    pub fn height(block: *const EmptyBlock) Height {
-        return block.height_value;
-    }
-
-    pub fn context(block: *const EmptyBlock) Context {
-        return block.parent_value;
-    }
-
-    pub fn eql(a: *const EmptyBlock, b: *const EmptyBlock) bool {
-        const same_height = a.height_value.get() == b.height_value.get();
-        return a.parent_value.eql(b.parent_value) and same_height and a.timestamp == b.timestamp;
-    }
-
-    pub fn write(block: EmptyBlock, writer: *codec.Writer) void {
-        block.parent_value.write(writer);
-        block.height_value.write(writer);
-        codec.write(codec.UInt(u64), .{ .value = block.timestamp }, writer);
-    }
-
-    pub fn encode_size(block: EmptyBlock) usize {
-        return Sha256.Digest.fixed_size + codec.encode_size(Height, block.height_value) +
-            codec.encode_size(codec.UInt(u64), .{ .value = block.timestamp });
-    }
-
-    pub fn read(allocator: Allocator, reader: *codec.Reader, _: void) codec.Error!EmptyBlock {
-        const parent_value = try codec.read(Sha256.Digest, allocator, reader);
-        const height_value = try codec.read(Height, allocator, reader);
-        const timestamp = try codec.read(codec.UInt(u64), allocator, reader);
-        return .{
-            .parent_value = parent_value,
-            .height_value = height_value,
-            .timestamp = timestamp.value,
-        };
-    }
-};
+const EmptyBlock = @import("test_block.zig").EmptyBlock;
 
 const Coded = types.CodedBlock(EmptyBlock, RS, Sha256);
 const Stored = types.StoredCodedBlock(EmptyBlock, RS, Sha256);
@@ -255,12 +189,11 @@ const Expected = union(enum) { trusted: BlockCommitment, untrusted: BlockCommitm
 const one_two: CodingConfig = .{ .minimum_shards = 1, .extra_shards = 2 };
 
 fn test_block(height_value: u64) EmptyBlock {
-    return .init(Sha256.hash(&.{"parent"}), height_value, 1_234_567);
+    return .init(Sha256.hash(&.{"parent"}), .new(height_value), 1_234_567);
 }
 
-/// commonware `encode_block`: codes `block` with `config` sequentially.
 fn encode_block(block: EmptyBlock, config: CodingConfig) !Coded {
-    return Coded.encode(gpa, try .compute(gpa, block), config, sequential);
+    return @import("test_block.zig").encode_block(gpa, block, config);
 }
 
 fn encode_pair(block: EmptyBlock, config: CodingConfig) ![]u8 {
