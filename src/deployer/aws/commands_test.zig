@@ -1,10 +1,12 @@
-//! commonware's `clean` and `authorize` commands against a temporary home directory and
-//! scripted AWS responses (never AWS).
+//! commonware's `clean`, `authorize`, `list`, and `attach` commands against a temporary home
+//! directory and scripted AWS responses (never AWS).
 
 const std = @import("std");
 const testing = std.testing;
 const client_module = @import("client.zig");
+const aws = @import("mod.zig");
 const commands = @import("commands.zig");
+const Recorder = @import("update_test.zig").Recorder;
 const Session = @import("session.zig").Session;
 
 const Outcome = client_module.Outcome;
@@ -213,4 +215,89 @@ test "authorize: refuses missing, incomplete, and destroyed deployments and bad 
     try testing.expectError(error.Failed, commands.authorize(session, "missing.yaml", null));
     try harness.expect_failure("IO error: missing.yaml: FileNotFound");
     try testing.expectEqual(@as(usize, 0), harness.replay.count);
+}
+
+fn metadata_yaml(harness: *Harness, tag: []const u8, created_at: u64) !void {
+    var buffer: [256]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    const metadata: aws.Metadata = .{
+        .tag = tag,
+        .created_at = created_at,
+        .regions = &.{ "us-east-1", "eu-west-1" },
+        .instance_count = 2,
+    };
+    try metadata.write(&writer);
+    const path = try std.fmt.allocPrint(harness.arena_state.allocator(), deployer ++ "{s}/{s}", .{
+        tag, aws.metadata_file_name,
+    });
+    try harness.write(path, writer.buffered());
+}
+
+const deployer = ".commonware_deployer/";
+
+test "list: no directory, no deployments, and newest first without destroyed ones" {
+    var harness: Harness = undefined;
+    try harness.init(&.{});
+    defer harness.deinit();
+    try testing.expectEqual(@as(usize, 0), (try commands.list(&harness.session)).len);
+    try harness.write(deployer ++ "stray", "");
+    try testing.expectEqual(@as(usize, 0), (try commands.list(&harness.session)).len);
+    try metadata_yaml(&harness, "old", 10);
+    try metadata_yaml(&harness, "new", 30);
+    try metadata_yaml(&harness, "gone", 40);
+    try harness.write(deployer ++ "gone/" ++ aws.destroyed_file_name, "");
+    // A deployment still being created is listed too (only `attach` needs `created`).
+    try metadata_yaml(&harness, "mid", 20);
+    const listed = try commands.list(&harness.session);
+    try testing.expectEqual(@as(usize, 3), listed.len);
+    try testing.expectEqualStrings("new", listed[0].tag);
+    try testing.expectEqualStrings("mid", listed[1].tag);
+    try testing.expectEqualStrings("old", listed[2].tag);
+}
+
+fn hosts_yaml(harness: *Harness, tag: []const u8, host_ip: []const u8) !void {
+    var buffer: [512]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    const host: aws.Host = .{ .name = "node", .region = "eu-west-1", .ip = try .parse(host_ip) };
+    const hosts: aws.Hosts = .{
+        .monitoring = .{ .public = try .parse("2.2.2.2"), .private = try .parse("10.0.0.1") },
+        .hosts = &.{host},
+    };
+    try hosts.write(&writer);
+    const path = try std.fmt.allocPrint(harness.arena_state.allocator(), deployer ++ "{s}/{s}", .{
+        tag, "hosts.yaml",
+    });
+    try harness.write(path, writer.buffered());
+}
+
+test "attach: finds the instance's deployment and attaches with its key" {
+    var harness: Harness = undefined;
+    try harness.init(&.{});
+    defer harness.deinit();
+    var recorder: Recorder = .{ .allocator = harness.arena_state.allocator() };
+    harness.session.remote = recorder.remote();
+    const session = &harness.session;
+    try testing.expectError(error.Failed, commands.attach(session, "1.2.3"));
+    try harness.expect_failure("invalid IP address: invalid IP address syntax");
+    try testing.expectError(error.Failed, commands.attach(session, "1.1.1.1"));
+    try harness.expect_failure("instance not found: 1.1.1.1");
+    // `a` is destroyed and `b` is not created, so only `t` matches.
+    for ([_][]const u8{ "a", "b", "t" }) |tag| {
+        try metadata_yaml(&harness, tag, 1);
+        try hosts_yaml(&harness, tag, "2001:db8::1");
+    }
+    try harness.write(deployer ++ "a/" ++ aws.created_file_name, "");
+    try harness.write(deployer ++ "a/" ++ aws.destroyed_file_name, "");
+    try harness.write(deployer ++ "t/" ++ aws.created_file_name, "");
+    try testing.expectError(error.Failed, commands.attach(session, "2001:db8:0::1"));
+    try harness.expect_failure("private key not found");
+    try harness.write(deployer ++ "t/id_rsa_t", "key");
+    try commands.attach(session, "2001:db8:0::1");
+    try commands.attach(session, "2.2.2.2"); // The monitoring instance.
+    try testing.expectError(error.Failed, commands.attach(session, "10.0.0.1"));
+    try harness.expect_failure("instance not found: 10.0.0.1");
+    const lines = recorder.recorded();
+    try testing.expectEqual(@as(usize, 2), lines.len);
+    try testing.expectEqualStrings("2001:db8::1 attach id_rsa_t", lines[0]);
+    try testing.expectEqualStrings("2.2.2.2 attach id_rsa_t", lines[1]);
 }

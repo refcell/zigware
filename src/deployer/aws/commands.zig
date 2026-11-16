@@ -1,4 +1,5 @@
-//! The deployer's small commands (commonware `clean.rs` and `authorize.rs`).
+//! The deployer's small commands (commonware `clean.rs`, `authorize.rs`, `list.rs`, and
+//! `attach.rs`).
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -6,6 +7,7 @@ const aws = @import("mod.zig");
 const aws_utils = @import("utils.zig");
 const ec2_api = @import("ec2_api.zig");
 const s3 = @import("s3.zig");
+const deployments = @import("deployments.zig");
 const IpAddr = @import("../ip.zig").IpAddr;
 const Session = @import("session.zig").Session;
 
@@ -99,6 +101,90 @@ pub fn allows(group: ec2_api.SecurityGroup, cidr: []const u8) bool {
         for (permission.cidrs) |allowed| if (std.mem.eql(u8, allowed, cidr)) return true;
     }
     return false;
+}
+
+/// The deployments not destroyed, newest first, each logged (commonware `list`). A missing
+/// deployer directory or one with no deployments logs that and returns none.
+pub fn list(session: *Session) ![]const aws.Metadata {
+    var directory = try open_deployer_directory(session) orelse {
+        log.info("no deployments found", .{});
+        return &.{};
+    };
+    defer directory.close(session.io);
+    const active = try deployments.load_deployments(
+        session.arena,
+        session.io,
+        directory,
+        .not_destroyed,
+    );
+    if (active.len == 0) log.info("no active deployments", .{});
+    deployments.sort_newest_first(active);
+    for (active) |metadata| {
+        var buffer: [32]u8 = undefined;
+        var writer: std.Io.Writer = .fixed(&buffer);
+        try deployments.write_timestamp(&writer, metadata.created_at);
+        log.info("tag={s} created_at={s} regions={f} instances={d}", .{
+            metadata.tag,
+            writer.buffered(),
+            RegionList{ .regions = metadata.regions },
+            metadata.instance_count,
+        });
+    }
+    return active;
+}
+
+/// Prints regions as Rust's `Debug` prints a `Vec<String>`.
+const RegionList = struct {
+    regions: []const []const u8,
+
+    pub fn format(list_value: RegionList, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+        try writer.writeByte('[');
+        for (list_value.regions, 0..) |region, index| {
+            if (index > 0) try writer.writeAll(", ");
+            try writer.print("\"{s}\"", .{region});
+        }
+        try writer.writeByte(']');
+    }
+};
+
+/// Opens an interactive SSH session to the instance at `ip` in any created, not destroyed
+/// deployment (commonware `attach`).
+pub fn attach(session: *Session, ip: []const u8) !void {
+    const address = deployments.normalize_ip(ip) catch return session.fail(.ip_addr_parse);
+    const display = try std.fmt.allocPrint(session.arena, "{f}", .{address});
+    var directory = try open_deployer_directory(session) orelse {
+        return session.fail(.{ .instance_not_found = display });
+    };
+    defer directory.close(session.io);
+    const found = try deployments.find_instance(session.arena, session.io, directory, address);
+    const instance = found orelse return session.fail(.{ .instance_not_found = display });
+    const tag_directory = try session.tag_directory(instance.tag);
+    const key_name = try std.fmt.allocPrint(session.arena, "id_rsa_{s}", .{instance.tag});
+    const key = try std.fs.path.join(session.arena, &.{ tag_directory, key_name });
+    if (!session.exists(key)) return session.fail(.private_key_not_found);
+    log.info("attaching to instance: tag={s} region={s} ip={s}", .{
+        instance.tag, instance.region, display,
+    });
+    session.remote.attach(key, display) catch |err| {
+        return session.remote_failed(err, display, "ssh");
+    };
+}
+
+/// `{home}/.commonware_deployer`, or null when it does not exist.
+fn open_deployer_directory(session: *Session) !?std.Io.Dir {
+    var buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const path = try deployments.deployer_directory(&buffer, session.home, null);
+    assert(path.len > session.home.len);
+    return std.Io.Dir.cwd().openDir(session.io, path, .{ .iterate = true }) catch |err| {
+        return switch (err) {
+            error.FileNotFound => null,
+            error.Canceled => error.Canceled,
+            else => session.fail(.{ .io = .{
+                .path = try session.arena.dupe(u8, path),
+                .err = err,
+            } }),
+        };
+    };
 }
 
 test {

@@ -48,6 +48,8 @@ pub const Failure = union(enum) {
     ip_addr_not_v4: []const u8,
     private_key_not_found,
     instance_not_found: []const u8,
+    download_failed: []const u8,
+    symbolication: []const u8,
     metadata_not_found: []const u8,
     missing_tag_or_config,
     regions_not_enabled: []const []const u8,
@@ -135,6 +137,8 @@ fn format_operation(failure: Failure, writer: *Io.Writer) Io.Writer.Error!void {
         .ip_addr_not_v4 => |ip| try writer.print("IP address is not IPv4: {s}", .{ip}),
         .private_key_not_found => try writer.writeAll("private key not found"),
         .instance_not_found => |ip| try writer.print("instance not found: {s}", .{ip}),
+        .download_failed => |url| try writer.print("download failed: {s}", .{url}),
+        .symbolication => |why| try writer.print("symbolication failed: {s}", .{why}),
         .metadata_not_found => |tag| try writer.print(
             "metadata not found for deployment: {s}",
             .{tag},

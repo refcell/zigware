@@ -16,6 +16,14 @@ const sigv4 = @import("sigv4.zig");
 const Failure = @import("failure.zig").Failure;
 
 const Client = client_module.Client;
+const builtin = @import("builtin");
+
+const log = std.log.scoped(.deployer);
+
+/// Redirects `download` follows (reqwest's default limit).
+pub const redirects_max: u32 = 10;
+/// Wait between download attempts (commonware `RETRY_INTERVAL`; none in tests).
+pub const download_retry_interval_ms: u64 = if (builtin.is_test) 0 else aws_utils.retry_interval_ms;
 
 /// Where `public_ip` asks for the deployer's public IPv4 address (maintained by Cloudflare).
 pub const public_ip_host = "ipv4.icanhazip.com";
@@ -44,6 +52,7 @@ pub const Remote = struct {
             []const u8,
             []const u8,
         ) anyerror!void,
+        attach: *const fn (*anyopaque, []const u8, []const u8) anyerror!void,
     };
 
     /// For commands that run nothing on instances: every call fails as SSH would.
@@ -72,6 +81,11 @@ pub const Remote = struct {
                 _: []const u8,
                 _: []const u8,
             ) anyerror!void {
+                return error.SshFailed;
+            }
+        }.f,
+        .attach = struct {
+            fn f(_: *anyopaque, _: []const u8, _: []const u8) anyerror!void {
                 return error.SshFailed;
             }
         }.f,
@@ -109,6 +123,13 @@ pub const Remote = struct {
     ) !void {
         return remote.vtable.download(remote.context, key_file, ip, remote_path, local_path);
     }
+
+    /// Opens an interactive shell on `ip` (commonware `ssh_attach`).
+    pub fn attach(remote: Remote, key_file: []const u8, ip: []const u8) !void {
+        assert(key_file.len > 0);
+        assert(ip.len > 0);
+        return remote.vtable.attach(remote.context, key_file, ip);
+    }
 };
 
 /// The production `Remote`: `ssh` and `scp` processes, with commonware's retries.
@@ -121,7 +142,13 @@ pub const Ssh = struct {
             .execute = execute,
             .poll = poll,
             .download = download,
+            .attach = attach,
         } };
+    }
+
+    fn attach(context: *anyopaque, key_file: []const u8, ip: []const u8) anyerror!void {
+        const ssh: *Ssh = @ptrCast(@alignCast(context));
+        return aws_utils.ssh_attach(ssh.io, key_file, ip);
     }
 
     fn execute(
@@ -167,6 +194,8 @@ pub const Session = struct {
     credentials: sigv4.Credentials,
     transport: client_module.Transport,
     remote: Remote = .none,
+    /// Where commands put local scratch files (commonware uses `/tmp`).
+    temp: []const u8 = "/tmp",
     /// Why the command failed; the first failure wins when region jobs run concurrently.
     failure: ?Failure = null,
     failed: std.atomic.Value(bool) = .init(false),
@@ -292,6 +321,58 @@ pub const Session = struct {
         return ip;
     }
 
+    /// Downloads `url` (HTTPS), following redirects, with commonware's `download_file`
+    /// retries; fails the command with `download_failed` after the last attempt.
+    pub fn download(session: *Session, url: []const u8) ![]const u8 {
+        assert(std.mem.startsWith(u8, url, "https://"));
+        for (0..aws_utils.max_download_attempts) |attempt| {
+            if (try session.download_once(url)) |body| {
+                log.info("downloaded file: url={s} size={d}", .{ url, body.len });
+                return body;
+            }
+            log.warn("download attempt failed: url={s} attempt={d}", .{ url, attempt + 1 });
+            if (attempt + 1 < aws_utils.max_download_attempts) {
+                try session.io.sleep(.fromMilliseconds(download_retry_interval_ms), .awake);
+            }
+        }
+        return session.fail(.{ .download_failed = url });
+    }
+
+    /// One download attempt: the body of the first 2xx response, or null on failure.
+    fn download_once(session: *Session, url: []const u8) !?[]const u8 {
+        var location = url;
+        for (0..redirects_max + 1) |_| {
+            const target = split_url(location) orelse return null;
+            const request: client_module.Request = .{
+                .method = "GET",
+                .host = target.host,
+                .path = target.path,
+                .headers = &.{},
+                .body = "",
+            };
+            const outcome = try session.transport.send(session.arena, &request);
+            const response = switch (outcome) {
+                .response => |response| response,
+                else => return null,
+            };
+            if (response.status / 100 == 2) return response.body;
+            const redirect = switch (response.status) {
+                301, 302, 303, 307, 308 => response.header("location"),
+                else => null,
+            };
+            const next = redirect orelse {
+                log.warn("download failed: HTTP {d}: {s}", .{ response.status, location });
+                return null;
+            };
+            location = if (std.mem.startsWith(u8, next, "/"))
+                try std.fmt.allocPrint(session.arena, "https://{s}{s}", .{ target.host, next })
+            else
+                next;
+        }
+        log.warn("download failed: too many redirects: {s}", .{url});
+        return null;
+    }
+
     /// The regions a configuration touches: the monitoring region and each instance's,
     /// sorted and distinct.
     pub fn regions_of(session: *Session, config: *const aws.Config) ![]const []const u8 {
@@ -312,3 +393,14 @@ pub const Session = struct {
         return regions.items;
     }
 };
+
+/// An HTTPS URL's host and path (with any query); null for other schemes.
+fn split_url(url: []const u8) ?struct { host: []const u8, path: []const u8 } {
+    const scheme = "https://";
+    const rest = if (std.mem.startsWith(u8, url, scheme)) url[scheme.len..] else return null;
+    const slash = std.mem.indexOfScalar(u8, rest, '/') orelse rest.len;
+    if (slash == 0) return null;
+    const path = if (slash == rest.len) "/" else rest[slash..];
+    assert(path[0] == '/');
+    return .{ .host = rest[0..slash], .path = path };
+}

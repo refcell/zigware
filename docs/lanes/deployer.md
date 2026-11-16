@@ -94,6 +94,9 @@ test vectors. Tests never call AWS and never hold credentials.
   first two providers); instance metadata, SSO, and credential processes are not ported.
 - `IpAddr` is the deployer's own: Rust's `IpAddr` parsing and display (RFC 5952 compression,
   `::ffff:a.b.c.d` for IPv4-mapped addresses), since `std.Io.net.IpAddress` formats ports.
+- `profile` holds samply's release archive in memory before caching it in S3 instead of
+  staging it in the deployment directory, and writes its scratch files under `Session.temp`
+  (`/tmp`, as commonware). `list` prints creation times in UTC (no time zone database).
 
 ## Backlog
 - [x] Config types and YAML: `Config`, `InstanceConfig`, `MonitoringConfig`, `PortConfig`,
@@ -120,7 +123,7 @@ test vectors. Tests never call AWS and never hold credentials.
   `cache_and_presign`, `delete_prefix`, `delete_bucket`, `is_no_such_bucket_error`) over the
   client, tested against scripted responses. `HttpTransport` was checked by hand against a
   public HTTPS server (GET, HEAD, POST, DNS failure), never against AWS.
-- [ ] `upload_instance_files` and `hash_files`.
+- [x] `upload_instance_files` and `hash_files` (landed with `update`).
 - [x] The remaining EC2 calls (`deployer.aws.ec2_api`: key pairs, instance types, AMIs, VPCs,
   gateways, route tables, subnets, security groups, instances and their waits, peering, tag
   lookups, teardown, AZ offerings, enabled regions), tested against scripted responses.
@@ -132,7 +135,13 @@ test vectors. Tests never call AWS and never hold credentials.
 - [x] `update` (`deployer.aws.update`) and `s3.upload_instance_files`, with remote commands
   behind `session.Remote` (`Ssh` in production, recorded in tests); the download command is
   checked byte for byte against commonware's.
-- [ ] The create, profile, and attach flows and the `deployer` binary.
+- [x] `list` and `attach` commands (`deployer.aws.commands`), with `Remote.attach` (an
+  interactive `ssh` in production).
+- [x] `profile` (`deployer.aws.profile`): running-instance lookup, architecture, samply cached
+  in S3 (downloaded from GitHub through redirects with commonware's 10 attempts via
+  `Session.download`), the remote script byte for byte, scp of the profile, and the symbol
+  directory. `capture` is tested over scripted responses; `profile` adds `samply load`.
+- [ ] The create flow and the `deployer` binary.
 - [ ] Fuzz: YAML parse/write round trips, config validation, SigV4 canonicalization.
 
 ## Log

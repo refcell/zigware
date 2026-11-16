@@ -28,6 +28,7 @@ pub const Recorder = struct {
             .execute = execute,
             .poll = poll,
             .download = download,
+            .attach = attach,
         } };
     }
 
@@ -70,6 +71,11 @@ pub const Recorder = struct {
     ) anyerror!void {
         const recorder: *Recorder = @ptrCast(@alignCast(context));
         try recorder.record("{s} scp {s} {s}", .{ ip, remote_path, local_path });
+    }
+
+    fn attach(context: *anyopaque, key: []const u8, ip: []const u8) anyerror!void {
+        const recorder: *Recorder = @ptrCast(@alignCast(context));
+        try recorder.record("{s} attach {s}", .{ ip, std.fs.path.basename(key) });
     }
 
     pub fn recorded(recorder: *const Recorder) []const []const u8 {

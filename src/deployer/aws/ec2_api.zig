@@ -560,6 +560,22 @@ pub fn find_named_instances(ec2: *Ec2, tag: []const u8) Error![]const NamedInsta
     return named.items;
 }
 
+/// The public IP of the first running instance tagged `deployer={tag}` and `name={name}`
+/// (commonware `profile`'s lookup), or null when none has one.
+pub fn find_running_instance_ip(ec2: *Ec2, tag: []const u8, name: []const u8) Error!?[]const u8 {
+    assert(tag.len > 0);
+    assert(name.len > 0);
+    var params = params_of(ec2);
+    try params.filter(1, "tag:deployer", &.{tag});
+    try params.filter(2, "tag:name", &.{name});
+    try params.filter(3, "instance-state-name", &.{"running"});
+    const instances = try instance_items(ec2, try ec2.run("DescribeInstances", params.list.items));
+    for (instances) |instance| {
+        if (try query.decoded_text(ec2.arena, instance, &.{"ipAddress"})) |ip| return ip;
+    }
+    return null;
+}
+
 /// The value of tag `key` in an item's `tagSet`.
 fn tag_value(ec2: *Ec2, item: []const u8, key: []const u8) Error!?[]const u8 {
     for (try query.elements(ec2.arena, item, &.{ "tagSet", "item" })) |pair| {
