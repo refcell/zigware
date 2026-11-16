@@ -45,7 +45,8 @@ peer at around 1 ms mean latency. `etc/scripts/record-demo.sh flood` runs it loc
 [chat](examples/chat) is an encrypted group chat between friends who know each other's public
 keys. Here three peers run as separate processes on the production runtime, connect through
 authenticated p2p discovery, and trade messages; each terminal shows the conversation, the
-peer's live metrics, and its logs ([video](docs/assets/chat-demo.mp4)).
+peer's live metrics, and its logs, where p2p discovery reports its handshakes and peer
+updates under commonware's event names ([video](docs/assets/chat-demo.mp4)).
 `etc/scripts/record-demo.sh chat` records it again.
 
 <p align="center">
@@ -57,7 +58,9 @@ peer's live metrics, and its logs ([video](docs/assets/chat-demo.mp4)).
 validators, each a separate process on the production runtime connected through authenticated
 p2p discovery. Every validator proposes random payloads in turn and shows when each view is
 proposed (blue), notarized, and finalized (green), keeping its consensus journal on disk so a
-restarted validator resumes where it left off ([video](docs/assets/log-demo.mp4)).
+restarted validator resumes where it left off. The Logs panes stream the voter's tracing
+events as it broadcasts votes, recovers certificates, and prunes old views
+([video](docs/assets/log-demo.mp4)).
 `etc/scripts/record-demo.sh log` records it again.
 
 > [!WARNING]
