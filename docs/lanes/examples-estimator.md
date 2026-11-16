@@ -32,6 +32,17 @@ statistics, output, CLI) and run against a minimal in-lane stand-in, then switch
   serde_yaml exists in zigware; it rejects anything outside what serde_yaml writes for flood's
   config and the deployer's hosts file. Until p2p's authenticated network lands, the flood
   binary loads its configuration and exits 1 with a message.
+- chat's TUI reimplements the slice of ratatui 0.30.2 and crossterm 0.29 it draws with
+  (`tui.zig`, `keys.zig`): percentage layouts, bordered titled blocks, scrolled truncated
+  paragraphs, the buffer diff, and crossterm's key parser. Frames are checked cell by cell
+  against ratatui's TestBackend (`testdata/ratatui_screens.txt`). Graphemes are a base plus
+  extending characters, from tables generated out of unicode-width 0.2.2 and
+  unicode-segmentation 1.13.3; Hangul jamo and Prepend clusters split differently.
+- chat logs through a `traces.Collector` instead of a tracing subscriber; `logger.zig` prints
+  each event as commonware's logger.rs prints tracing's JSON. Field values are text in the
+  collector, so a value prints bare when it reads as a JSON number or boolean. Message stamps
+  use the local zone from `$TZ` or `/etc/localtime` (TZif plus its POSIX footer), as chrono's
+  `Local` does.
 
 ## Backlog
 - [x] `.lazy` DSL parser and task model, with lib.rs's parser tests. Copy the `.lazy` files and
@@ -57,7 +68,8 @@ statistics, output, CLI) and run against a minimal in-lane stand-in, then switch
 - [ ] `setup` (config generation); needs deployer's aws config types.
 
 ### chat (commonware `examples/chat`)
-- [ ] Logger and handler (TUI with plain ANSI, no deps), CLI, `peer_set_limit` test.
+- [x] Logger and handler (TUI with plain ANSI, no deps), CLI, `peer_set_limit` test. The
+  handler is tested chatting over p2p.simulated; the CLI matches clap's output for 23 cases.
 - [ ] Wire to `authenticated::discovery`; demo recipe.
 
 ## Log
@@ -66,3 +78,5 @@ statistics, output, CLI) and run against a minimal in-lane stand-in, then switch
 - 2026-11-13: end-to-end test of every completing .lazy file, uncapped and bandwidth-capped.
 - 2026-11-13: `--reload` downloads cloudping.co P50/P90 matrices.
 - 2026-11-13: flood config/hosts YAML, SmallRng, sender/receiver tasks on p2p.simulated.
+- 2026-11-13: chat logger, ratatui-identical TUI, crossterm key parser, clap-identical CLI,
+  and the handler tested on p2p.simulated.

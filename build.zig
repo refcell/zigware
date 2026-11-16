@@ -86,7 +86,7 @@ const packages = [_]Package{
 
 /// Example binaries at `examples/<name>/main.zig`; each may import any package.
 /// Add an example here once its main.zig exists.
-const examples = [_][]const u8{ "estimator", "flood" };
+const examples = [_][]const u8{ "estimator", "flood", "chat" };
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
