@@ -10,8 +10,52 @@ const std = @import("std");
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const codec = @import("codec");
+const runtime = @import("runtime");
 const oversized = @import("../../journal/segmented/oversized.zig");
 const freezer_records = @import("../../freezer/records.zig");
+const storage = @import("storage.zig");
+
+pub const Archive = storage.Archive;
+pub const Positions = @import("sections.zig").Positions;
+
+/// Configuration for a prunable `Archive(T, K, V)`.
+pub fn Config(comptime T: type, comptime V: type) type {
+    return struct {
+        /// Transforms keys into their in-memory representation. The archive assumes
+        /// translated keys spread uniformly; otherwise lookups degrade toward O(n).
+        translator: T,
+        /// Partition of the per-section validation markers. Recovery adopts entries below a
+        /// section's marker without re-validating their values.
+        metadata_partition: []const u8,
+        /// Partition of the key journal (index + key records).
+        key_partition: []const u8,
+        /// Page cache of the key journal.
+        key_cache_ref: *runtime.buffer.paged.CacheRef,
+        /// Partition of the value journal.
+        value_partition: []const u8,
+        /// Optional zstd compression level for values. Keep the choice between none and some
+        /// fixed while values are retained.
+        compression: ?u8 = null,
+        /// Codec configuration of values.
+        codec_config: codec.Cfg(V),
+        /// Items per section (the granularity of pruning), fixed for the life of the data:
+        /// `init` fails with `RecordCorrupted` when a stored record's section no longer
+        /// matches its index.
+        items_per_section: u64,
+        /// Bytes buffered for the key journal before a blob write.
+        key_write_buffer: usize,
+        /// Bytes buffered for the value journal before a blob write.
+        value_write_buffer: usize,
+        /// Buffer size for replaying the key journal.
+        replay_buffer: usize,
+
+        pub fn validate(config: @This()) void {
+            assert(config.items_per_section > 0);
+            assert(config.key_write_buffer > 0 and config.value_write_buffer > 0);
+            assert(config.replay_buffer > 0);
+        }
+    };
+}
 
 /// A key index record of the prunable archive.
 pub fn Record(comptime K: type) type {
@@ -74,4 +118,7 @@ test {
     std.testing.refAllDecls(@This());
     comptime assert(codec.fixed_size(Record([8]u8)).? == 28);
     _ = @import("conformance_test.zig");
+    _ = @import("sections.zig");
+    _ = @import("tests.zig");
+    _ = @import("fuzz_test.zig");
 }

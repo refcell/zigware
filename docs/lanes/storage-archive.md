@@ -24,8 +24,13 @@ storage-journal (thread T-01a1d58d-a981-75c2-966d-93dcd484f46b).
 - [x] freezer: the hash table over the oversized journal, checkpoints, incremental resize,
   recovery after crash; `StorageConformance<FreezerWorkload>` (512 cases) matches; ported
   tests and a `freezer_operations` fuzz target.
-- [ ] archive: the `Archive` interface, prunable (index + journal) and immutable (freezer +
-  ordinal + metadata) archives; port their test suites including crash recovery.
+- [x] prunable archive over the oversized journal with validation markers, the translated
+  key table (`utils.handles.Table`), put_multi; `StorageConformance<ArchivePrunableWorkload>`
+  (128 cases) matches; ported tests (shared archive tests included) with crash recovery;
+  `archive_prunable_operations` and `archive_prunable_recovery` fuzz targets.
+- [ ] immutable archive (freezer + ordinal + metadata);
+  `StorageConformance<ArchiveImmutableWorkload>`, its tests, `archive_immutable_recovery`
+  fuzz.
 - [ ] Fuzz targets (storage/fuzz entries for these modules) and metrics through
   `runtime.telemetry.metrics`.
 
@@ -45,6 +50,13 @@ storage-journal (thread T-01a1d58d-a981-75c2-966d-93dcd484f46b).
   `put -> Cursor`, `get(.{ .key = &k } | .{ .cursor = c })`, `has`, `sync -> Checkpoint`,
   `close -> Checkpoint`, `deinit`, `destroy`, `resizing`, `resizable_entries`; records
   `Cursor`, `Checkpoint`, `Entry`, `Record(K)`.
+- `storage.archive.prunable`: `Archive(T, K, V)` (translator `T`, fixed-size key `K`) with
+  `init(gpa, storage, scope, Config(T, V))`, `put`, `put_sync`, `put_multi`,
+  `put_multi_sync`, `get(.{ .index = i } | .{ .key = &k }) -> ?V`, `has`, `get_all(gpa, i)
+  -> ?[]V`, `has_at(i, &k)`, `sync`, `start_sync`, `prune(min)`, `next_gap` (`rmap.Gap`),
+  `missing_items(start, out)`, `ranges`, `ranges_from` (`[]const rmap.Range`),
+  `first_index`, `last_index`, `deinit`, `destroy`. Metrics `items_tracked`, `keys_tracked`,
+  `indices_pruned`, `unnecessary_reads`, `gets`, `has`, `syncs`.
 
 ## Decisions
 - Storage conformance: `StorageConformance<W>` commits seeds directly on
@@ -66,6 +78,14 @@ storage-journal (thread T-01a1d58d-a981-75c2-966d-93dcd484f46b).
 - freezer: `get` takes a tagged `Identifier` union; `close` frees the freezer on success.
   The freezer_operations fuzz uses a small key pool so chains collide and keys shadow, and
   checks every key after crash restores against the model at the last checkpoint.
+- prunable archive: methods take `*Self`; an error from `put`, `put_multi`, `sync`, or
+  `prune` leaves the archive failed (only `deinit` may follow). Syncs complete before
+  returning, so `start_sync` is `sync` and the requested-section set is always the pending
+  one; commonware's pipelined start_sync tests have no counterpart. Sections are a sorted
+  list of `(start, slot)`; extra multi-put positions are a hash map pruned by scan. The
+  recovery fuzz injects faults with the storage mock's mutation budget and a crash (no torn
+  writes or delayed syncs) and checks retained entries against synced ones, per-section
+  prefixes, the range helpers, and a second reopen.
 - Tests that commonware runs at 100,000 and 5,000 items (`slow` group) run at 2,000 and 600.
 
 ## Log
@@ -77,3 +97,5 @@ storage-journal (thread T-01a1d58d-a981-75c2-966d-93dcd484f46b).
   six codec conformance hashes.
 - 2026-11-13: freezer over the oversized journal with its ported tests, storage conformance
   hash, and the `freezer_operations` fuzz target.
+- 2026-11-16: prunable archive with its ported tests, storage conformance hash, and the
+  `archive_prunable_operations` and `archive_prunable_recovery` fuzz targets.

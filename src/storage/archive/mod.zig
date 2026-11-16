@@ -4,7 +4,7 @@
 //! addressed by both an `index` and a `key`. Commonware's `Archive` and `MultiArchive` traits
 //! become a comptime interface over the prunable (index + oversized journal) and immutable
 //! (freezer + ordinal + metadata) implementations. The on-disk records of both are ported here
-//! with their conformance hashes; the archives themselves land with the oversized journal.
+//! with their conformance hashes.
 
 const std = @import("std");
 
