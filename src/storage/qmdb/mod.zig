@@ -19,6 +19,7 @@ pub const operation = @import("operation.zig");
 pub const floor = @import("floor.zig");
 pub const chain = @import("chain.zig");
 pub const verify = @import("verify.zig");
+pub const cache = @import("cache.zig");
 pub const keyless = @import("keyless/mod.zig");
 pub const immutable = @import("immutable/mod.zig");
 pub const any = @import("any/mod.zig");

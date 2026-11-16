@@ -22,7 +22,9 @@ that don't need them and keep a small interface where you must.
   all 21 codec conformance hashes; decoder fuzz over every operation type.
 - [x] verify (`ProofExt`: operation range, pinned-node, extract, proof-store, and multi
   proofs) with its tests under both families.
-- [ ] Shared rest: snapshot, cache, bitmap, metrics, and the store traits.
+- [x] cache (set-associative `location -> key` cache for snapshot rebuilds) with its tests.
+- [ ] Shared rest: snapshot (needs index cursors over a contiguous reader), bitmap, metrics,
+  and the store traits.
 - [ ] keyless (with its tests and conformance hashes).
 - [ ] immutable.
 - [ ] any (ordered and unordered, fixed and variable).
@@ -49,6 +51,8 @@ that don't need them and keep a small interface where you must.
 - `storage.qmdb.verify`: `Proof(F, H)`, `ProofStore(F, H)`, `verify`,
   `verify_with_pinned_nodes`, `verify_and_extract_digests`, `to_proof_store`, `verify_multi`
   (each `(F, H, O, gpa, proof, ...)` over operations of codec type `O`), `encode_all`.
+- `storage.qmdb.cache.Cache(K)`: `init(gpa, capacity)`, `get`, `put(gpa, location, key)`
+  (takes ownership), `remove`, `deinit`.
 - `storage.qmdb`: `Error`, `root_bagging`, `hasher(H)`, `single_operation_root(F, H, bytes)`,
   `validate_initialization_bound`, `validate_initialization_commit`,
   `find_inactivity_floor_at`, `inactive_peaks_at`.
@@ -81,3 +85,4 @@ that don't need them and keep a small interface where you must.
 - 2026-11-13: shared codecs (value, operation, floor, chain, Error, initialization checks),
   keyless/immutable/any operations with all 21 codec conformance hashes, decoder fuzz.
 - 2026-11-13: verify (operation proofs) with its tests under MMR and MMB.
+- 2026-11-13: snapshot-rebuild key cache.
