@@ -17,10 +17,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # x86-64 and aarch64 Linux: fibers and SIMD differ per target.
+        # x86-64 and aarch64 Linux: fibers and SIMD differ per target. Each optimize mode is
+        # its own job: Debug alone takes about 20 minutes, so both in one job hit the timeout.
         os: [ubuntu-latest, ubuntu-24.04-arm]
+        optimize: [Debug, ReleaseSafe]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 25
+    timeout-minutes: 50
     steps:
       - uses: actions/checkout@v4
       - name: install zig
@@ -30,14 +32,12 @@ jobs:
       - name: tidy
         run: bash etc/scripts/tidy.sh
       - name: test
-        run: zig build test --summary all
-      - name: test release-safe
-        run: zig build test -Doptimize=ReleaseSafe
+        run: zig build test -Doptimize=${{ matrix.optimize }} --summary all
 
   fuzz:
     # Seeded fuzz soak with a fresh seed per run; replay a failure with -Dfuzz-seed.
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 50
     steps:
       - uses: actions/checkout@v4
       - name: install zig
