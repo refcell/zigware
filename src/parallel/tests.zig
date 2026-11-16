@@ -859,15 +859,24 @@ test "an adaptive Rayon times spawned jobs and their hand-off" {
     try testing.expectEqual(@as(usize, 2), policy.spawn_len());
 }
 
+fn fold_tiny_sum(strategy: Rayon) u64 {
+    return strategy.fold(Range.upto(100), TinySum{});
+}
+
 test "an adaptive Rayon learns each call site's paths and records only successes" {
     const pool = try create_pool(3);
     defer pool.destroy();
     var policy = parallel.Policy.init(testing.io);
     const strategy = Rayon.init(pool).with_policy(&policy);
     // One call site: the first call seeds parallel, the second (busy time far under budget)
-    // seeds serial, and every call returns the same sum.
-    for (0..3) |_| {
-        try testing.expectEqual(@as(u64, 4950), strategy.fold(Range.upto(100), TinySum{}));
+    // seeds serial, and every call returns the same sum. A call site is a return address, so
+    // the calls go through one non-inlined call instruction in a loop the optimizer cannot
+    // unroll (a runtime trip count).
+    var calls: usize = 3;
+    std.mem.doNotOptimizeAway(&calls);
+    for (0..calls) |_| {
+        const sum = @call(.never_inline, fold_tiny_sum, .{strategy});
+        try testing.expectEqual(@as(u64, 4950), sum);
     }
     try testing.expectEqual(@as(usize, 1), policy.len());
     const entry = policy.run_entries.entries[0];
