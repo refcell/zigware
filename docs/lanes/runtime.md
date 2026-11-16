@@ -24,10 +24,15 @@ time, files, and network: build on it rather than around it where it fits.
   open/read/write/sync/resize/remove/scan fault rates, torn writes (prefix or subset
   retention), partial resizes, a crash journal replayed in issue order;
   `deterministic.Config.storage_faults`, `Runner.storage_fault_config()`.
-- [ ] audited and metered storage wrappers.
+- [x] audited storage (`storage/audited.zig`, audited.rs events and field order), wrapped
+  around faulty storage in `Runner.storage()`.
+- [ ] metered storage wrapper (storage/metered.rs).
 - [x] mock channel (`mocks.zig`), deterministic network (`network/deterministic.zig`),
   network suite (`network/tests.zig`), `Runner.network()`.
-- [ ] audited and metered network wrappers.
+- [x] audited network: the deterministic network and its sinks/streams record
+  network/audited.rs events when `Network.auditor` is set; `Runner.network()` sets it.
+  Auditor also records `rand` draws.
+- [ ] metered network wrapper (network/metered.rs).
 - [x] Port remaining deterministic.rs tests: auditor history and field separation, clock
   start time, dropped sleepers, duplicate attributes, removed-blob reopen, recover tests
   (fault config, seeded crash writes), storage faults. No counterpart: panic tests
@@ -45,8 +50,9 @@ time, files, and network: build on it rather than around it where it fits.
   (`context_test.zig`).
 - [x] Context on `production.Runner` (runtime-telemetry's `start_context`); the Context
   suite runs on both runners.
-- [ ] Runtime task metrics (`runtime_tasks_*`, `runtime_iterations`): runtime-telemetry is
-  writing them in `context.zig`.
+- [x] Runtime task metrics (`runtime_tasks_spawned`/`running`, `runtime_iterations`), written
+  by runtime-telemetry (515cd03, 6929fea). Not yet: `runtime_task_polls` and the root's
+  `kind="Root"` series.
 - [ ] iobuf (IoBuf/IoBufs pooled buffers) and utils (buffer pools, handle, supervision).
 - Moved to the runtime-telemetry lane: telemetry (`src/runtime/telemetry/`) and the
   production runtime (`src/runtime/production/`, io_uring/kqueue storage and network).
@@ -113,6 +119,13 @@ time, files, and network: build on it rather than around it where it fits.
   reports a timeout (`test_dropped_sleeper_beyond_timeout`).
 - The memory backend guards its state with one spin lock that never blocks inside, so it
   is safe across threads and never yields a fiber while held.
+- A task that was canceled after its function returned (while it aborts its own subtree)
+  keeps its result: `Header.returned` is set under the tree lock before that abort, and only
+  tasks that had not returned are closed.
+- The audited network is built into the deterministic network (an optional `*Auditor` on
+  `Network`, `mocks.Audit` on each half) rather than a wrapper type, so the runner's
+  network type is unchanged for lanes that name it. Sent buffers hash as one length-prefixed
+  payload, so chunking never changes the audit (test_auditor_ignores_buffer_chunking).
 
 ## Log
 - 2026-11-13: fibers, rand-compatible shuffle, deterministic executor implementing `std.Io`.
@@ -124,3 +137,5 @@ time, files, and network: build on it rather than around it where it fits.
 - 2026-11-16: Context with supervision, clock, stop, and metrics on `deterministic.Runner`.
 - 2026-11-16: Context suite on production; faulty storage wired into the runner.
 - 2026-11-16: remaining deterministic.rs tests.
+- 2026-11-16: detached-task drain race and canceled-after-return race fixed; auditor records
+  rand, storage, and network events.
