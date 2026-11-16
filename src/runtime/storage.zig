@@ -30,6 +30,7 @@ const assert = std.debug.assert;
 pub const header = @import("storage/header.zig");
 pub const memory = @import("storage/memory.zig");
 pub const faulty = @import("storage/faulty.zig");
+pub const audited = @import("storage/audited.zig");
 pub const tests = @import("storage/tests.zig");
 
 pub const Error = error{
@@ -290,5 +291,6 @@ test {
     _ = header;
     _ = memory;
     _ = faulty;
+    _ = audited;
     _ = @import("storage/memory_test.zig");
 }

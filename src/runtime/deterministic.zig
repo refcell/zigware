@@ -93,6 +93,17 @@ pub const AuditHasher = struct {
         hasher.update(&bytes);
     }
 
+    /// Adds `chunks` as one length-prefixed field: their boundaries are not hashed
+    /// (commonware `AuditHasher::update_bufs`).
+    pub fn update_chunks(hasher: *AuditHasher, chunks: []const []const u8) void {
+        var total: u64 = 0;
+        for (chunks) |chunk| total += chunk.len;
+        var length: [8]u8 = undefined;
+        std.mem.writeInt(u64, &length, total, .big);
+        hasher.crc.update(&length);
+        for (chunks) |chunk| hasher.crc.update(chunk);
+    }
+
     pub fn finalize(hasher: *AuditHasher) [4]u8 {
         return hasher.crc.finalize().bytes;
     }
@@ -108,6 +119,23 @@ pub const Auditor = struct {
         hasher.update(&auditor.digest);
         hasher.update(label);
         for (fields) |field| hasher.update(field);
+        auditor.digest = hasher.finalize();
+    }
+
+    /// Like `event`, with `chunks` hashed as one field between `before` and `after`.
+    pub fn event_chunked(
+        auditor: *Auditor,
+        label: []const u8,
+        before: []const []const u8,
+        chunks: []const []const u8,
+        after: []const []const u8,
+    ) void {
+        var hasher: AuditHasher = .{};
+        hasher.update(&auditor.digest);
+        hasher.update(label);
+        for (before) |field| hasher.update(field);
+        hasher.update_chunks(chunks);
+        for (after) |field| hasher.update(field);
         auditor.digest = hasher.finalize();
     }
 
@@ -215,6 +243,8 @@ pub const Runner = struct {
     /// Fault injection over `memory_storage`, drawing from the runtime RNG; created on first
     /// use.
     faulty_storage: ?storage_mod.faulty.Storage(Rng) = null,
+    /// Audits every storage operation, over `faulty_storage`; created on first use.
+    audited_storage: ?storage_mod.audited.Storage = null,
     /// The simulated network, created on first use; it carries over between starts.
     simulated_network: ?network_mod.deterministic.Network = null,
     /// What every `Context` shares, created by the first `start_context`.
@@ -257,6 +287,7 @@ pub const Runner = struct {
         runner.ready.deinit(runner.allocator);
         runner.batch.deinit(runner.allocator);
         runner.alarms.deinit(runner.allocator);
+        if (runner.audited_storage) |*audited| audited.deinit();
         if (runner.faulty_storage) |*faults| faults.deinit();
         runner.memory_storage.deinit();
         if (runner.context_runtime) |*runtime| runtime.deinit();
@@ -271,10 +302,15 @@ pub const Runner = struct {
         return .{ .userdata = runner, .vtable = &vtable };
     }
 
-    /// The runtime's in-memory storage, with `Config.storage_faults` injected. The runner must
-    /// not move once it is used.
+    /// The runtime's in-memory storage, with `Config.storage_faults` injected and every
+    /// operation audited (commonware's `Audited(Faulty(Memory))`). The runner must not move once
+    /// it is used.
     pub fn storage(runner: *Runner) storage_mod.Storage {
-        return runner.storage_faulty().storage();
+        if (runner.audited_storage == null) {
+            const inner = runner.storage_faulty().storage();
+            runner.audited_storage = .init(runner.allocator, inner, &runner.auditor);
+        }
+        return runner.audited_storage.?.storage();
     }
 
     /// The live fault configuration (commonware `storage_fault_config`): changes take effect
@@ -303,10 +339,11 @@ pub const Runner = struct {
         runner.memory_storage.crash();
     }
 
-    /// The runtime's deterministic network. The runner must not move once it is used.
+    /// The runtime's deterministic network, audited. The runner must not move once it is used.
     pub fn network(runner: *Runner) *network_mod.deterministic.Network {
         if (runner.simulated_network == null) {
             runner.simulated_network = .init(runner.allocator, runner.io());
+            runner.simulated_network.?.auditor = &runner.auditor;
         }
         return &runner.simulated_network.?;
     }
@@ -1014,12 +1051,15 @@ pub const Runner = struct {
         return .fromNanoseconds(1);
     }
 
+    /// Randomness from the runtime RNG, audited as commonware's `Context::fill_bytes`.
     fn io_random(userdata: ?*anyopaque, buffer: []u8) void {
-        from(userdata).rng.fill_bytes(buffer);
+        const runner = from(userdata);
+        runner.auditor.event("rand", &.{"fill_bytes"});
+        runner.rng.fill_bytes(buffer);
     }
 
     fn io_random_secure(userdata: ?*anyopaque, buffer: []u8) Io.RandomSecureError!void {
-        from(userdata).rng.fill_bytes(buffer);
+        io_random(userdata, buffer);
     }
 };
 
@@ -1430,6 +1470,42 @@ test "reading the auditor state keeps its history (test_auditor_state_preserves_
     uninterrupted.event("b", &.{"y"});
     try testing.expect(!std.mem.eql(u8, &before, &observed.state()));
     try testing.expectEqual(observed.state(), uninterrupted.state());
+}
+
+test "the auditor ignores buffer chunking (test_auditor_ignores_buffer_chunking)" {
+    var contiguous: Auditor = .{};
+    contiguous.event("send", &.{"abcd"});
+    var chunked: Auditor = .{};
+    chunked.event_chunked("send", &.{}, &.{ "a", "bc", "d" }, &.{});
+    try testing.expectEqual(contiguous.state(), chunked.state());
+    var different: Auditor = .{};
+    different.event_chunked("send", &.{}, &.{ "a", "bc", "e" }, &.{});
+    try testing.expect(!std.mem.eql(u8, &contiguous.state(), &different.state()));
+}
+
+/// Draws `draws` random bytes, then writes and syncs `data` to a blob; returns the audit state.
+fn audit_with_effects(draws: u8, data: []const u8) ![8]u8 {
+    var runner = try test_runner(.{ .seed = 7 });
+    defer runner.deinit();
+    const Root = struct {
+        fn body(r: *Runner, count: u8, payload: []const u8) !void {
+            var buffer: [8]u8 = undefined;
+            for (0..count) |_| r.io().random(&buffer);
+            const opened = try r.storage().open("partition", "blob");
+            defer opened.blob.close();
+            try opened.blob.write_at(0, payload, .{});
+            try opened.blob.sync();
+        }
+    };
+    try (try runner.start(Root.body, .{ &runner, draws, data }));
+    return runner.auditor.state();
+}
+
+test "random draws and storage operations are audited" {
+    const base = try audit_with_effects(1, "data");
+    try testing.expectEqual(base, try audit_with_effects(1, "data"));
+    try testing.expect(!std.mem.eql(u8, &base, &try audit_with_effects(2, "data")));
+    try testing.expect(!std.mem.eql(u8, &base, &try audit_with_effects(1, "date")));
 }
 
 fn audit_with_metric(name: []const u8, help: []const u8) ![8]u8 {

@@ -22,6 +22,30 @@ const std = @import("std");
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
+const Auditor = @import("deterministic.zig").Auditor;
+
+/// Records a connection half's operations in the deterministic runtime's auditor (commonware
+/// `network/audited.rs`), with the peer's address. The deterministic network sets it.
+pub const Audit = struct {
+    auditor: *Auditor,
+    address_buffer: [address_text_max]u8,
+    address_len: u8,
+
+    const address_text_max = 64;
+
+    pub fn init(auditor: *Auditor, ip: std.Io.net.IpAddress) Audit {
+        var result: Audit = .{ .auditor = auditor, .address_buffer = undefined, .address_len = 0 };
+        const text = std.fmt.bufPrint(&result.address_buffer, "{f}", .{ip}) catch
+            unreachable; // An IPv6 address with a port fits in 64 bytes.
+        result.address_len = @intCast(text.len);
+        assert(result.address_len > 0);
+        return result;
+    }
+
+    pub fn address(audit: *const Audit) []const u8 {
+        return audit.address_buffer[0..audit.address_len];
+    }
+};
 
 /// Default buffer size (64 KiB): how much the stream pulls per recv and the backpressure
 /// threshold for send.
@@ -100,8 +124,20 @@ pub fn channel_with_buffer_size(gpa: Allocator, io: Io, buffer_size: usize) Allo
 pub const Sink = struct {
     shared: *Shared,
     closed: bool = false,
+    audit: ?Audit = null,
 
     pub fn send(sink: *Sink, bufs: []const []const u8) Error!void {
+        if (sink.audit == null) return sink.transmit(bufs);
+        const audit = &sink.audit.?;
+        audit.auditor.event_chunked("send_attempt", &.{audit.address()}, bufs, &.{});
+        sink.transmit(bufs) catch |err| {
+            audit.auditor.event("send_failure", &.{ audit.address(), @errorName(err) });
+            return err;
+        };
+        audit.auditor.event("send_success", &.{audit.address()});
+    }
+
+    fn transmit(sink: *Sink, bufs: []const []const u8) Error!void {
         if (sink.closed) return error.Closed;
         const shared = sink.shared;
         shared.lock();
@@ -157,8 +193,22 @@ pub const Sink = struct {
 pub const Stream = struct {
     shared: *Shared,
     poisoned: bool = false,
+    audit: ?Audit = null,
 
     pub fn recv(stream: *Stream, out: []u8) Error!void {
+        if (stream.audit == null) return stream.receive(out);
+        const audit = &stream.audit.?;
+        var length: [8]u8 = undefined;
+        std.mem.writeInt(u64, &length, out.len, .big);
+        audit.auditor.event("recv_attempt", &.{ audit.address(), &length });
+        stream.receive(out) catch |err| {
+            audit.auditor.event("recv_failure", &.{ audit.address(), @errorName(err) });
+            return err;
+        };
+        audit.auditor.event("recv_success", &.{ audit.address(), out });
+    }
+
+    fn receive(stream: *Stream, out: []u8) Error!void {
         if (stream.poisoned) return error.Closed;
         const shared = stream.shared;
         shared.lock();

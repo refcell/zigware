@@ -5,6 +5,10 @@
 //! To keep this simple, binding `127.0.0.1` to a port in the ephemeral range fails, and
 //! running out of ports (past 65535) panics. As in commonware, a bound address stays bound
 //! after its listener closes: dialing it fails and binding it again fails.
+//!
+//! With an `auditor` (the deterministic runner sets its own), binds, dials, accepts, sends, and
+//! receives are recorded as commonware's `network/audited.rs` records them: an attempt, then a
+//! success or a failure.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -12,6 +16,7 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const mocks = @import("../mocks.zig");
 const network = @import("../network.zig");
+const Auditor = @import("../deterministic.zig").Auditor;
 
 const Address = network.Address;
 const Error = network.Error;
@@ -57,6 +62,21 @@ pub const Network = struct {
 
         /// Waits for the next dialed connection.
         pub fn accept(listener: *Listener) Error!Accepted {
+            const auditor = listener.network.auditor orelse return listener.next();
+            const local: mocks.Audit = .init(auditor, listener.address);
+            auditor.event("accept_attempt", &.{local.address()});
+            var accepted = listener.next() catch |err| {
+                auditor.event("accept_failure", &.{ local.address(), @errorName(err) });
+                return err;
+            };
+            const remote: mocks.Audit = .init(auditor, accepted.address);
+            auditor.event("accept_success", &.{ local.address(), remote.address() });
+            accepted.sink.audit = remote;
+            accepted.stream.audit = remote;
+            return accepted;
+        }
+
+        fn next(listener: *Listener) Error!Accepted {
             const net = listener.network;
             net.lock();
             defer net.unlock();
@@ -98,6 +118,8 @@ pub const Network = struct {
     ephemeral: u16 = ephemeral_port_min,
     /// Every listener ever bound, open or closed (their addresses stay bound).
     listeners: std.ArrayList(*Listener) = .empty,
+    /// Records network operations when set.
+    auditor: ?*Auditor = null,
 
     pub fn init(gpa: Allocator, io: Io) Network {
         return .{ .gpa = gpa, .io = io };
@@ -129,6 +151,18 @@ pub const Network = struct {
 
     /// Binds a listener to `address`.
     pub fn bind(net: *Network, address: Address) Error!*Listener {
+        const auditor = net.auditor orelse return net.bind_listener(address);
+        const local: mocks.Audit = .init(auditor, address);
+        auditor.event("bind_attempt", &.{local.address()});
+        const listener = net.bind_listener(address) catch |err| {
+            auditor.event("bind_failure", &.{ local.address(), @errorName(err) });
+            return err;
+        };
+        auditor.event("bind_success", &.{local.address()});
+        return listener;
+    }
+
+    fn bind_listener(net: *Network, address: Address) Error!*Listener {
         if (address == .ip4 and std.mem.eql(u8, &address.ip4.bytes, &.{ 127, 0, 0, 1 }) and
             address.ip4.port >= ephemeral_port_min and address.ip4.port < ephemeral_port_end)
         {
@@ -147,6 +181,20 @@ pub const Network = struct {
 
     /// Connects to the listener bound to `address`.
     pub fn dial(net: *Network, address: Address) Error!Connection {
+        const auditor = net.auditor orelse return net.connect(address);
+        const remote: mocks.Audit = .init(auditor, address);
+        auditor.event("dial_attempt", &.{remote.address()});
+        var connection = net.connect(address) catch |err| {
+            auditor.event("dial_failure", &.{ remote.address(), @errorName(err) });
+            return err;
+        };
+        auditor.event("dial_success", &.{remote.address()});
+        connection.sink.audit = remote;
+        connection.stream.audit = remote;
+        return connection;
+    }
+
+    fn connect(net: *Network, address: Address) Error!Connection {
         net.lock();
         defer net.unlock();
         // The dialer's port is assigned (and used up) before the listener is looked up.
