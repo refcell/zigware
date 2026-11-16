@@ -72,7 +72,7 @@ statistics, output, CLI) and run against a minimal in-lane stand-in, then switch
   receiver tasks over p2p's sender/receiver interfaces, tested flooding on p2p.simulated.
 - [x] Binary on `runtime.production.Runner` and p2p `authenticated::discovery`, with the
   metrics endpoint; 4 local peers flood each other over TCP.
-- [ ] Demo recording (`etc/scripts/record-demo.sh flood`).
+- [x] Demo recording (`etc/scripts/record-demo.sh flood`): docs/assets/flood-demo.{gif,mp4}.
 - [ ] `setup` (config generation); needs deployer's aws config types.
 
 ### chat (commonware `examples/chat`)

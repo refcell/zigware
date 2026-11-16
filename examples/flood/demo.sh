@@ -21,8 +21,9 @@ for key in $(awk '$1 == "-" && $2 == "name:" { print $3 }' "$dir/hosts.yaml"); d
   config=$dir/$key.yaml
   color=${colors[index % ${#colors[@]}]}
   label=$(printf '\033[%sm[peer %d]\033[0m' "$color" $((index + 1)))
-  (cd "$dir" && exec "$flood" --hosts hosts.yaml --config "$(basename "$config")") 2>&1 |
-    sed -u "s/^/$label /" &
+  # Process substitution keeps $! the peer itself, so `stop` reaches it.
+  (cd "$dir" && exec "$flood" --hosts hosts.yaml --config "$(basename "$config")") \
+    > >(sed -u "s/^/$label /") 2>&1 &
   pids+=($!)
   index=$((index + 1))
 done

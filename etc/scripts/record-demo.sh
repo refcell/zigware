@@ -31,12 +31,16 @@ if [ "${DEMO_SESSION:-}" = "1" ]; then
 --distribution us-east-1:3,eu-west-1:2,ap-northeast-1:2' 6
       ;;
     flood)
-      zig build -Doptimize=ReleaseFast >/dev/null
+      # Build outside the recording when possible: skip it while the binary is fresh.
+      if [ -n "$(find src examples/flood build.zig -newer zig-out/bin/flood -print -quit \
+        2>/dev/null || echo stale)" ] || [ ! -x zig-out/bin/flood ]; then
+        zig build -Doptimize=ReleaseFast >/dev/null
+      fi
       rm -rf /tmp/zigware-flood
       printf '\033[H\033[2J'
       type_cmd 'examples/flood/local.sh 4 /tmp/zigware-flood' 1
       printf '\n'
-      type_cmd 'examples/flood/demo.sh /tmp/zigware-flood 10' 1
+      type_cmd 'examples/flood/demo.sh /tmp/zigware-flood 6' 1
       ;;
     *) echo "unknown demo: $name" >&2; exit 1 ;;
   esac
