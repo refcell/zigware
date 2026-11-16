@@ -159,16 +159,6 @@ pub fn retained_from(epocher: anytype, witnessed: Round, retention: ViewDelta) R
     return .new(epoch, view);
 }
 
-/// Aborts a waiter when the pending floor holding it is dropped (commonware `Aborter`).
-pub const Aborter = struct {
-    context: *anyopaque,
-    abort_fn: *const fn (context: *anyopaque) void,
-
-    pub fn abort(self: Aborter) void {
-        self.abort_fn(self.context);
-    }
-};
-
 /// Whether floor admission issued at least one resolver fetch.
 pub const FetchAdmission = enum { issued, denied };
 
@@ -178,7 +168,11 @@ pub const FetchAdmission = enum { issued, denied };
 /// The processed position and the round floor mirror the stream metadata. The arm that raises
 /// one syncs the stream before the actor handles its next event, so the value here is durable
 /// whenever another arm or a mailbox caller reads it.
-pub fn State(comptime S: type, comptime C: type) type {
+///
+/// `Aborter` cancels the buffer waiter of a pending floor: `abort(*Aborter) void` (commonware
+/// `Aborter`, which aborts on drop).
+pub fn State(comptime S: type, comptime C: type, comptime Aborter: type) type {
+    comptime assert(@hasDecl(Aborter, "abort"));
     return struct {
         const Self = @This();
         pub const Finalization = simplex_types.Finalization(S, C);
@@ -280,7 +274,7 @@ pub fn State(comptime S: type, comptime C: type) type {
         pub fn clear_pending(self: *Self, gpa: Allocator) void {
             var pending = self.pending orelse return;
             self.pending = null;
-            if (pending.aborter) |aborter| aborter.abort();
+            if (pending.aborter) |*aborter| aborter.abort();
             pending.finalization.deinit(gpa);
         }
 
@@ -299,10 +293,10 @@ pub fn State(comptime S: type, comptime C: type) type {
         /// Takes the pending floor if `commitment` is its payload; the caller owns it. Taking
         /// the pending floor aborts its buffer waiter.
         pub fn take_matching(self: *Self, commitment: C) ?Finalization {
-            const pending = self.pending orelse return null;
+            var pending = self.pending orelse return null;
             if (!pending.finalization.proposal.payload.eql(commitment)) return null;
             self.pending = null;
-            if (pending.aborter) |aborter| aborter.abort();
+            if (pending.aborter) |*aborter| aborter.abort();
             return pending.finalization;
         }
 
@@ -371,7 +365,15 @@ const simplex_scheme = @import("../../simplex/root.zig").scheme;
 
 const TestDigest = cryptography.Sha256.Digest;
 const TestScheme = simplex_scheme.ed25519.Scheme(TestDigest);
-const TestState = State(TestScheme, TestDigest);
+/// Counts aborts.
+const TestAborter = struct {
+    aborts: *u32,
+
+    pub fn abort(self: *TestAborter) void {
+        self.aborts.* += 1;
+    }
+};
+const TestState = State(TestScheme, TestDigest, TestAborter);
 const TestFetch = TestState.Fetch;
 
 /// Records what it is asked to fetch.
@@ -754,4 +756,44 @@ test "witness records only newer rounds" {
     try testing.expect(state.snapshot().eql(.init(.{ .block = .new(5) }, .{
         .round = round_at(5),
     })));
+}
+
+/// A scheme whose certificates are plain integers, enough to hold pending floors.
+const PlainScheme = struct {
+    pub const Certificate = u64;
+};
+const PendingState = State(PlainScheme, TestDigest, TestAborter);
+
+fn plain_finalization(view: u64, payload: TestDigest) PendingState.Finalization {
+    return .{ .proposal = .init(round_at(view), .new(view - 1), payload), .certificate = view };
+}
+
+test "pending floor aborts its waiter when replaced, taken, or cleared" {
+    const gpa = testing.allocator;
+    const restored: Floor = .init(.{ .block = .new(5) }, .{ .round = round_at(5) });
+    var state: PendingState = .init(null, restored, round_at(5));
+    defer state.deinit(gpa);
+    var aborts: u32 = 0;
+    const first = TestDigest.fill(1);
+    const second = TestDigest.fill(2);
+
+    state.set_pending(gpa, plain_finalization(6, first), .{ .aborts = &aborts });
+    try testing.expect(state.blocks_progress());
+    try testing.expect(state.pending_finalization().?.proposal.payload.eql(first));
+    try testing.expectEqual(null, state.take_matching(second));
+    try testing.expectEqual(0, aborts);
+
+    // Replacing the pending floor aborts the old waiter.
+    state.set_pending(gpa, plain_finalization(7, second), .{ .aborts = &aborts });
+    try testing.expectEqual(1, aborts);
+    var taken = state.take_matching(second).?;
+    defer taken.deinit(gpa);
+    try testing.expectEqual(2, aborts);
+    try testing.expect(!state.blocks_progress());
+
+    // A pending floor without a waiter clears without aborting.
+    state.set_pending(gpa, plain_finalization(8, first), null);
+    state.clear_pending(gpa);
+    try testing.expectEqual(2, aborts);
+    try testing.expectEqual(null, state.pending_finalization());
 }
