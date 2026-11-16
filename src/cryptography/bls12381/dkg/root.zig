@@ -3,9 +3,9 @@
 const std = @import("std");
 
 pub const feldman_desmedt = @import("feldman_desmedt.zig");
+pub const golden = @import("golden.zig");
 
 test {
     std.testing.refAllDecls(@This());
     _ = @import("conformance_test.zig");
-    _ = @import("golden/evrf.zig");
 }
