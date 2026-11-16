@@ -30,7 +30,22 @@ pub const actors = struct {
         pub const round = @import("actors/voter/round.zig");
         pub const views = @import("actors/voter/views.zig");
         pub const state = @import("actors/voter/state.zig");
+        pub const actor = @import("actors/voter/actor.zig");
     };
+    pub const resolver = struct {
+        pub const ingress = @import("actors/resolver/ingress.zig");
+        pub const state = @import("actors/resolver/state.zig");
+        pub const actor = @import("actors/resolver/actor.zig");
+    };
+};
+
+pub const engine = @import("engine.zig");
+pub const Engine = engine.Engine;
+
+pub const mocks = struct {
+    pub const relay = @import("mocks/relay.zig");
+    pub const application = @import("mocks/application.zig");
+    pub const reporter = @import("mocks/reporter.zig");
 };
 
 pub const scheme = struct {
@@ -63,6 +78,8 @@ test {
     _ = actors.voter.views;
     _ = actors.voter.state;
     _ = actors.ask;
+    _ = actors.resolver.state;
+    _ = @import("engine_test.zig");
     _ = scheme.bls12381_threshold.vrf;
     _ = scheme.bls12381_threshold.standard;
     _ = scheme.namespace;

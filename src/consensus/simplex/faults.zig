@@ -44,6 +44,18 @@ fn Conflicting(comptime V: type, comptime context: []const u8) type {
             return self.first.signer();
         }
 
+        /// Whether both conflicting signatures are valid, proving Byzantine behavior.
+        pub fn verify(
+            self: *const Self,
+            gpa: Allocator,
+            rng: anytype,
+            scheme: anytype,
+            strategy: anytype,
+        ) Allocator.Error!bool {
+            if (!try self.first.verify(gpa, rng, scheme, strategy)) return false;
+            return self.second.verify(gpa, rng, scheme, strategy);
+        }
+
         pub fn epoch(self: Self) Epoch {
             return self.first.epoch();
         }
@@ -112,6 +124,18 @@ pub fn NullifyFinalize(comptime S: type, comptime D: type) type {
 
         pub fn signer(self: Self) Participant {
             return self.nullify.signer();
+        }
+
+        /// Whether both signatures are valid, proving Byzantine behavior.
+        pub fn verify(
+            self: *const Self,
+            gpa: Allocator,
+            rng: anytype,
+            scheme: anytype,
+            strategy: anytype,
+        ) Allocator.Error!bool {
+            if (!try self.nullify.verify(gpa, rng, scheme, strategy)) return false;
+            return self.finalize.verify(gpa, rng, scheme, strategy);
         }
 
         pub fn epoch(self: Self) Epoch {

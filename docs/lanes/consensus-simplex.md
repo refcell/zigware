@@ -84,6 +84,24 @@ resolver; those lanes are running, so do the types first and the actors as they 
   `certified`, `next_timeout`/`trigger_timeout`, `get_best_certificate`, `replay`, `prune`);
   `views.ViewSet`/`ViewMap(T)`.
 - `consensus.simplex.actors.ask`: `Ask`, `Kind`, `Until`.
+- `consensus.simplex.actors.voter.actor.Actor(P)`: `init(gpa, io, Config(P))` returns the
+  actor and its `Mailbox`; `run(batcher, resolver, *vote_sender, *certificate_sender)`
+  recovers from its journal, then drives proposal, verification, certification, voting,
+  and timeouts until the mailbox closes or the task is canceled.
+- `consensus.simplex.actors.resolver`: `ingress` (`Message`, `Pending`, `Mailbox` with
+  `updated`/`certified`/`replayed`/`resolve`; `HandlerMessage`, `HandlerPending`, and
+  `Handler`, the p2p engine's consumer and producer), `state.State(S, D)` (held and served
+  certificates, `Effect`s, `settled`/`key_settled`/`produce`), and `actor.Actor(P)` (runs
+  `resolver.p2p.Engine` over a `StaticProvider` and hands recovered certificates to the
+  voter).
+- `consensus.simplex.Engine(P)`: `init(ctx, Config)` builds the three actors; spawn
+  `Engine.run(ctx, *engine, votes, certificates, backfill)` (each a `Channel(P)` of sender
+  and receiver) as a task, abort its handle to stop, then `deinit`. `P` adds `Context`,
+  `Sender`, and `Receiver` to `Config`'s parameters; `P.Automaton` is a pointer.
+- `consensus.simplex.mocks`: `relay.Relay(D, P)`, `application.Application(H, P)` (the
+  automaton and relay, with simulated latency from p2p's `Normal`), `application.genesis`,
+  and `reporter.Reporter(S, D)` (verifies and records activity; `wait_for_finalized`,
+  `finalized`, `assert_no_faults`, `assert_no_invalid`).
 
 ## Decisions
 - `Epoch`/`Height`/`View`/deltas are non-exhaustive `enum(u64)` so they compare with `==`,
@@ -117,6 +135,25 @@ resolver; those lanes are running, so do the types first and the actors as they 
   randomness come from `std.Io` (`actors/context.zig`), so the deterministic runtime replays
   a run. Batcher rounds live in a view-sorted list rather than a `BTreeMap`. Certificate
   construction runs inline (no offload). Metrics and tracing spans in the actors follow.
+- The voter runs each automaton request as an `io.concurrent` task that pushes its answer
+  into the inbox; ids discard answers that raced a cancelation. Senders are held by pointer
+  (p2p's limited sender is stateful) and the peers each send returns are freed.
+- The engine takes a built elector (`P.Elector`, which the caller owns) instead of an
+  elector config, since the electors' builders differ in what they allocate. It copies the
+  scheme and borrows its owned data from the caller. Any actor stopping ends the engine,
+  which aborts the rest (commonware's `select!` over the handles); actors run as
+  `runtime.Context` children `batcher`, `voter`, and `resolver`.
+- The resolver's `Handler` borrows the actor's handler-mailbox sender, because the p2p
+  engine never releases its consumer or producer. `StaticProvider` (commonware's
+  `p2p::utils`) lives in the resolver actor until p2p ports it. `Ask` declares a two-byte
+  codec only so the resolver can order subscribers through codec; it never travels.
+- The resolver stops when its mailbox closes or its task is canceled; it does not watch the
+  p2p engine's task (commonware breaks when that task ends).
+- The mock application is the automaton itself (blocking calls from the voter's request
+  tasks) rather than an actor answering oneshot requests; one mutex serializes its
+  simulated work as commonware's actor loop does. The mock reporter keeps per-view sets and
+  counts, not commonware's per-signer maps; the per-signer checks follow with the full
+  `all_online` port.
 
 ## Backlog
 - [x] types.rs: Epoch, Height, View, deltas, ranges, TermLength, Round, FixedEpocher, with
@@ -137,8 +174,10 @@ resolver; those lanes are running, so do the types first and the actors as they 
 - [x] limits.rs (`max_payload_size`), checked against the widest VRF encodings; the
   per-scheme widest-encoding tests follow with the schemes.
 - [x] config.rs (Config, Floor, skip and forward policies) with its validation rules.
-- [ ] simplex metrics, and the actors (voter, batcher, resolver) and engine,
-  on p2p's simulated network and the deterministic runtime.
+- [x] simplex metrics, and the actors (voter, batcher, resolver) and engine, on p2p's
+  simulated network and the deterministic runtime: 4 honest nodes finalize.
+- [ ] Port the rest of state.rs's tests (13 of 141), the resolver state.rs and actor.rs
+  tests, and the voter/resolver ingress tests; add actor metrics.
 - [ ] simplex mod.rs tests: the full multi-node DST suite with the Byzantine mocks
   (conflicter, equivocator, impersonator, nuller, outdated, twins, ...), seeded.
 - [ ] Fuzz targets (commonware consensus/fuzz).
@@ -163,3 +202,4 @@ resolver; those lanes are running, so do the types first and the actors as they 
 - 2026-11-13: batcher actor on an Io.Queue inbox, tested on the deterministic runtime.
 - 2026-11-16: voter Slot and Round with their commonware tests.
 - 2026-11-16: voter State with the core state.rs tests (13 of 141 so far).
+- 2026-11-16: voter and resolver actors, engine, mocks; 4 honest nodes finalize (DST).
