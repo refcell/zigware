@@ -25,6 +25,10 @@ pub fn Reporter(comptime S: type, comptime D: type) type {
         const Self = @This();
         pub const Activity = types.Activity(S, D);
         const ViewSet = std.AutoHashMapUnmanaged(View, void);
+        /// The signers of a view's votes, one bit per participant index (commonware keeps a
+        /// set of public keys per view; test committees stay below 64 validators).
+        pub const Signers = u64;
+        const ViewSigners = std.AutoHashMapUnmanaged(View, Signers);
         /// A finalized payload and how many times its finalization was reported.
         pub const Finalized = struct { payload: D, count: u32 };
         /// A verified fault: who committed it and which kind.
@@ -35,9 +39,9 @@ pub fn Reporter(comptime S: type, comptime D: type) type {
         scheme: *const S,
         mutex: Io.Mutex = .init,
         condition: Io.Condition = .init,
-        notarizes: u64 = 0,
-        nullifies: u64 = 0,
-        finalizes: u64 = 0,
+        notarizes: ViewSigners = .empty,
+        nullifies: ViewSigners = .empty,
+        finalizes: ViewSigners = .empty,
         notarizations: ViewSet = .empty,
         certifications: ViewSet = .empty,
         nullifications: ViewSet = .empty,
@@ -53,6 +57,9 @@ pub fn Reporter(comptime S: type, comptime D: type) type {
         }
 
         pub fn deinit(self: *Self) void {
+            self.notarizes.deinit(self.gpa);
+            self.nullifies.deinit(self.gpa);
+            self.finalizes.deinit(self.gpa);
             self.notarizations.deinit(self.gpa);
             self.certifications.deinit(self.gpa);
             self.nullifications.deinit(self.gpa);
@@ -115,13 +122,17 @@ pub fn Reporter(comptime S: type, comptime D: type) type {
             set.put(gpa, view, {}) catch @panic("out of memory");
         }
 
-        fn record_vote(self: *Self, vote: anytype, counter: *u64) void {
+        fn record_vote(self: *Self, vote: anytype, signers: *ViewSigners) void {
             if (!self.verified(&vote)) {
                 self.invalid_votes += 1;
                 return;
             }
             self.round_trips(@TypeOf(vote), vote, {});
-            counter.* += 1;
+            const signer = vote.attestation.signer.get();
+            assert(signer < @bitSizeOf(Signers));
+            const entry = signers.getOrPut(self.gpa, vote.view()) catch @panic("out of memory");
+            if (!entry.found_existing) entry.value_ptr.* = 0;
+            entry.value_ptr.* |= @as(Signers, 1) << @intCast(signer);
         }
 
         fn record_certificate(self: *Self, certificate: anytype) bool {
@@ -171,6 +182,34 @@ pub fn Reporter(comptime S: type, comptime D: type) type {
             defer self.mutex.unlock(self.io);
             const entry = self.finalizations.get(view) orelse return null;
             return entry.payload;
+        }
+
+        /// Which votes of a view were reported, by signer.
+        pub const Votes = struct { notarize: Signers, nullify: Signers, finalize: Signers };
+
+        /// The signers of each kind of vote reported at `view`.
+        pub fn votes(self: *Self, view: View) Votes {
+            self.mutex.lockUncancelable(self.io);
+            defer self.mutex.unlock(self.io);
+            return .{
+                .notarize = self.notarizes.get(view) orelse 0,
+                .nullify = self.nullifies.get(view) orelse 0,
+                .finalize = self.finalizes.get(view) orelse 0,
+            };
+        }
+
+        /// Whether a notarization (or certification) of `view` was reported.
+        pub fn notarized(self: *Self, view: View) bool {
+            self.mutex.lockUncancelable(self.io);
+            defer self.mutex.unlock(self.io);
+            return self.notarizations.contains(view);
+        }
+
+        /// Whether a nullification of `view` was reported.
+        pub fn nullified(self: *Self, view: View) bool {
+            self.mutex.lockUncancelable(self.io);
+            defer self.mutex.unlock(self.io);
+            return self.nullifications.contains(view);
         }
 
         pub fn assert_no_faults(self: *Self) void {

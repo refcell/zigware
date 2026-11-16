@@ -620,6 +620,58 @@ test "backfill: a late validator catches up through the resolver" {
     _ = try run_seeded(0, backfill_scenario, .{});
 }
 
+/// commonware `one_offline`: validator 0 never starts; the other four finalize, it never
+/// appears in their activity, and the views it leads are nullified (up to 10 exceptions).
+/// (Its leader-labelled timeout metrics follow with the actor metrics.)
+fn one_offline_scenario(ctx: Context) !void {
+    var harness: Harness = undefined;
+    const n = 5;
+    try harness.start(ctx, n, null, .absent);
+    defer harness.deinit();
+    try harness.link_all(link_ms(10, 1, 1.0), &not_zero);
+    const required = 100;
+    try harness.wait_all(required);
+    for (0..n) |index| {
+        const validator = harness.honest(index) orelse continue;
+        validator.reporter.assert_no_faults();
+        validator.reporter.assert_no_invalid();
+        try testing.expect(try offline_exceptions(validator, required) <= 10);
+    }
+    const blocked = try harness.oracle().blocked(gpa);
+    defer gpa.free(blocked);
+    try testing.expectEqual(0, blocked.len);
+}
+
+/// Checks validator 0 never voted in `validator`'s view, and counts the views it led (after
+/// a certified view, as commonware's reporter elects them) without a quorum of nullifies or
+/// a nullification.
+fn offline_exceptions(validator: *Validator, through: u64) !u32 {
+    const quorum = utils.N3f1.quorum(@as(u32, 5));
+    const offline: Reporter.Signers = 1;
+    var offline_views: u32 = 0;
+    var exceptions: u32 = 0;
+    for (1..through + 1) |value| {
+        const view: View = .new(value);
+        const votes = validator.reporter.votes(view);
+        try testing.expectEqual(0, (votes.notarize | votes.nullify | votes.finalize) & offline);
+        const previous: View = .new(value - 1);
+        const certified = validator.reporter.notarized(previous) or
+            validator.reporter.nullified(previous);
+        if (!certified) continue;
+        const leader = validator.elector.elect(.new(epoch, view), {});
+        if (leader.get() != 0) continue;
+        offline_views += 1;
+        if (@popCount(votes.nullify) < quorum) exceptions += 1;
+        if (!validator.reporter.nullified(view)) exceptions += 1;
+    }
+    try testing.expect(offline_views > 0);
+    return exceptions;
+}
+
+test "one offline: the others finalize and nullify its views" {
+    _ = try run_seeded(0, one_offline_scenario, .{});
+}
+
 /// One run of commonware `unclean_shutdown`: start every validator from its journal, stop
 /// them all at a random point within 2 s, and report whether all reached `required`. Short
 /// timeouts let a restarted cluster time out of views it cannot finish, as in commonware.
