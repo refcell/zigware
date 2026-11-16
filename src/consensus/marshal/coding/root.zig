@@ -15,9 +15,13 @@ pub const StoredCodedBlock = types.StoredCodedBlock;
 pub const hash_context = types.hash_context;
 pub const coding_config_for_participants = types.coding_config_for_participants;
 pub const validation = @import("validation.zig");
+pub const shards = @import("shards/root.zig");
+pub const max_buffer_payload_size = types.max_buffer_payload_size;
 
 test {
     @import("std").testing.refAllDecls(@This());
     _ = @import("types_test.zig");
     _ = @import("validation_test.zig");
+    _ = @import("test_block.zig");
+    _ = @import("shards/root.zig");
 }

@@ -308,6 +308,12 @@ pub fn CodedBlock(comptime B: type, comptime C: type, comptime H: type) type {
             self.* = undefined;
         }
 
+        /// Drops a handle with the allocator it was created with (Rust `Drop`).
+        pub fn discard(self: Self) void {
+            var owned = self;
+            owned.deinit(self.inner_value.shared.gpa);
+        }
+
         /// The coding configuration of the data committed.
         pub fn config(self: *const Self) CodingConfig {
             return self.commitment_value.config();
@@ -536,4 +542,32 @@ pub fn coding_config_for_participants(participants: u16) CodingConfig {
     const minimum_shards: u16 = @intCast(max_faults + 1);
     assert(minimum_shards < participants);
     return .{ .minimum_shards = minimum_shards, .extra_shards = participants - minimum_shards };
+}
+
+/// An upper bound on the encoded size of any shard a committee of 4 to `participants` members
+/// codes from a block of at most `application` bytes (commonware `Coding`'s
+/// `max_buffer_payload_size`). A larger committee can split a block into more data shards or
+/// prove each shard with a deeper tree, so this takes the widest over every size. Panics if
+/// `participants` is below 4 or above `maxInt(u16)`.
+pub fn max_buffer_payload_size(
+    comptime B: type,
+    comptime C: type,
+    comptime H: type,
+    participants: u32,
+    application: usize,
+) usize {
+    if (participants < 4) std.debug.panic("committee must have at least 4 members", .{});
+    if (participants > std.math.maxInt(u16)) {
+        std.debug.panic("committee must have at most u16::MAX members", .{});
+    }
+    const block = CodedBlock(B, C, H).max_encode_size(application);
+    var widest: usize = 0;
+    var size: u16 = 4;
+    while (size <= participants) : (size += 1) {
+        const config = coding_config_for_participants(size);
+        widest = @max(widest, C.max_shard_size(config, block));
+        if (size == std.math.maxInt(u16)) break;
+    }
+    assert(widest > 0);
+    return Shard(B, C, H).max_encode_size(widest);
 }
