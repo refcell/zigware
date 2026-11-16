@@ -401,14 +401,25 @@ fn Cases(comptime N: type) type {
 
         fn stress_echo(accepted: *Accepted) anyerror!void {
             var message: [stress_message_size]u8 = undefined;
-            for (0..stress_messages) |_| {
-                try accepted.stream.recv(&message);
-                try accepted.sink.send(&.{&message});
+            for (0..stress_messages) |index| {
+                accepted.stream.recv(&message) catch |err| {
+                    std.log.err("stress server: recv {d} failed: {t}", .{ index, err });
+                    return err;
+                };
+                accepted.sink.send(&.{&message}) catch |err| {
+                    std.log.err("stress server: send {d} failed: {t}", .{ index, err });
+                    return err;
+                };
             }
         }
 
         fn stress_server(io: Io, listener: *Listener, out: *[stress_clients]Accepted) !void {
-            for (out) |*accepted| accepted.* = try listener.accept();
+            for (out, 0..) |*accepted, index| {
+                accepted.* = listener.accept() catch |err| {
+                    std.log.err("stress server: accept {d} failed: {t}", .{ index, err });
+                    return err;
+                };
+            }
             var futures: [stress_clients]Io.Future(anyerror!void) = undefined;
             for (&futures, out) |*future, *accepted| {
                 future.* = try io.concurrent(stress_echo, .{accepted});
@@ -417,13 +428,23 @@ fn Cases(comptime N: type) type {
         }
 
         fn stress_client(net: *N, address: Address) anyerror!Connection {
-            var connection = try net.dial(address);
+            var connection = net.dial(address) catch |err| {
+                std.log.err("stress client: dial failed: {t}", .{err});
+                return err;
+            };
             errdefer connection.deinit();
             const payload: [stress_message_size]u8 = @splat(42);
             var received: [stress_message_size]u8 = undefined;
-            for (0..stress_messages) |_| {
-                try connection.sink.send(&.{&payload});
-                try connection.stream.recv(&received);
+            for (0..stress_messages) |message| {
+                // Name the failing step: ReleaseSafe failures carry no stack trace.
+                connection.sink.send(&.{&payload}) catch |err| {
+                    std.log.err("stress client: send {d} failed: {t}", .{ message, err });
+                    return err;
+                };
+                connection.stream.recv(&received) catch |err| {
+                    std.log.err("stress client: recv {d} failed: {t}", .{ message, err });
+                    return err;
+                };
                 try testing.expectEqualSlices(u8, &payload, &received);
             }
             return connection;

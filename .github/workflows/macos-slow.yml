@@ -1,0 +1,34 @@
+name: macos-slow
+
+# The slow tests (-Dslow-tests) on macOS, run by hand: Debug, so failures keep stack traces.
+on:
+  workflow_dispatch:
+    inputs:
+      filter:
+        description: "Test filter (-Dtest-filter), such as production.network; empty runs all"
+        required: false
+        default: ""
+
+jobs:
+  slow:
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: install zig
+        run: |
+          sh etc/scripts/install-zig.sh "$HOME/zig"
+          echo "$HOME/zig" >> "$GITHUB_PATH"
+      - name: limits
+        run: |
+          ulimit -a
+          sysctl kern.ipc.somaxconn kern.maxfilesperproc kern.num_taskthreads
+      - name: slow tests
+        env:
+          FILTER: ${{ inputs.filter }}
+        run: |
+          if [ -n "$FILTER" ]; then
+            zig build test -Dslow-tests -Dtest-filter="$FILTER" --summary all
+          else
+            zig build test -Dslow-tests --summary all
+          fi
