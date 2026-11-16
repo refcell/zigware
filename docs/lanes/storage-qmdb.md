@@ -35,8 +35,11 @@ that don't need them and keep a small interface where you must.
   variable journal (`Keyless*VariableConf`).
 - [ ] Switch `qmdb.authenticated` to storage-journal's `journal.authenticated.Journal` when it
   lands (same method names).
-- [ ] any, unordered fixed over MMB first (storage-qmdb-sync needs it for current), ahead of
-  immutable.
+- [x] any, unordered fixed (MMR and MMB): `Db`, batches with chaining, the floor walk under
+  non-evicting policies, `AnyMmr/MmbUnorderedFixedConf` root conformance (matches), and
+  scenario plus randomized chain tests against a model and the reopened rebuild.
+- [ ] any: evicting floor policies, the `stage`/`expand`/`resolve_updates` (`Slot`,
+  `StagedLoc`) API, owned (variable) keys and values, batched `get_many`.
 - [ ] immutable.
 - [ ] any (ordered and unordered, fixed and variable).
 - [ ] Fuzz targets under storage/fuzz for these databases; benches under `benches.zig`.
@@ -64,6 +67,21 @@ that don't need them and keep a small interface where you must.
   live ancestors' items), `apply_batch`, `historical_proof`/`proof`, `speculative_proof`,
   `speculative_pinned_nodes`.
 - `storage.qmdb.init_journal(J, gpa, storage, merkle_cfg, journal_cfg, InitOptions)`.
+- `storage.qmdb.any.Db(F, U, C, I, H)` (`U` an `any.operation.update` type, `C` the backing
+  contiguous journal, `I` the snapshot index, `H` the hash), with public fields `log`,
+  `snapshot`, `bitmap` (`bitmap.Shared(any.db.bitmap_chunk_bytes)`), `inactivity_floor_loc`,
+  `active_keys`, `root_digest`, `metrics`. `init(gpa, storage, scope, Cfg, ?max_size)`,
+  `deinit`, `get`, `get_many`, `get_with_loc`, `read_update`, `get_metadata`, `root`,
+  `commitment`, `bounds`, `inactivity_floor`, `sync_boundary`, `is_empty`, `proof`,
+  `historical_proof`, `pinned_nodes_at`, `prune` (`prune_log`, `prune_bitmap`), `commit`,
+  `sync`, `start_sync`, `destroy`, `update_metrics`, `new_batch`, `to_batch`,
+  `validate_batch`, `apply_batch`, `update_known_loc`, `delete_known_loc`.
+  `any.Config(Translator, JournalConfig)`: `merkle`, `log`, `translator`, `init_cache`.
+  `UnmerkleizedBatch`: `write(key, ?value)`, `with_metadata`, `get`, `merkleize(&db)`,
+  `merkleize_with(&db, &policy)`, `deinit`. `MerkleizedBatch` (refcounted `retain`/`release`):
+  `root`, `commitment`, `bounds`, `operations`, `proof`, `pinned_nodes`, `get`, `new_batch`,
+  `apply_to_index`. `any.diff`: the sorted per-batch `Diff` with `Cursors` and `Merge`.
+  `any.initial_root(F, U, H)`.
 - `storage.qmdb.immutable.Operation(F, K, E)`: `set: {key, value}`, `commit: Commit`.
 - `storage.qmdb.any.Operation(F, S)`, `any.Ordered(F, K, E)`, `any.Unordered(F, K, E)`:
   `delete: K`, `update: S`, `commit: Commit`; `any.operation.update.{Ordered,Unordered}(K, E)`
@@ -130,6 +148,13 @@ that don't need them and keep a small interface where you must.
   Mutators take `*Self` (commonware threads the database by value); `start_sync` returns no
   handle; there is no `strategy`.
 
+- any: keys and values must not own memory (a comptime check) until variable values land.
+  Batches merkleize with the floor policy passed by pointer; evicting policies assert. A
+  batch keeps sorted diffs of itself and its live ancestors, plus `ancestor_base_locs` for keys
+  a dropped ancestor wrote, so a tip applies exactly whether its ancestors were applied,
+  pending, or dropped. Merkleizing a child after an unapplied ancestor was dropped is
+  `StaleBatch`, as in commonware.
+
 ## Log
 - 2026-11-13: shared codecs (value, operation, floor, chain, Error, initialization checks),
   keyless/immutable/any operations with all 21 codec conformance hashes, decoder fuzz.
@@ -139,3 +164,5 @@ that don't need them and keep a small interface where you must.
 - 2026-11-16: floor-walk candidates (`bitmap.fill_from`) and the shared metric set.
 - 2026-11-16: keyless `Db` and batches over the interim authenticated journal.
 - 2026-11-16: keyless fixed root conformance hashes (MMR and MMB) match commonware.
+- 2026-11-16: any (unordered, fixed): Db, chained batches, floor walk, root conformance
+  hashes (MMR and MMB) match commonware.

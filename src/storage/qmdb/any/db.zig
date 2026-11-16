@@ -1,0 +1,403 @@
+//! The `any` database (qmdb/any/{db,mod}.rs): an authenticated key-value store whose log of
+//! updates, deletes, and commits is authenticated by a Merkle structure. A snapshot index maps
+//! each active key to the location of its latest update, and an activity bitmap marks the
+//! locations holding active operations, which the floor walk reads.
+//!
+//! `Db(F, U, C, I, H)`: family `F`, update type `U` (`any.operation.update.Unordered` or
+//! `Ordered` over a value encoding), backing contiguous journal `C`, snapshot index `I` (a
+//! `storage.index` index over `u64` locations), and hash `H`. Fields keep commonware's names
+//! and are public, so `current` reaches them as commonware's `pub(crate)` allows.
+//!
+//! Keys and values must be fixed-size (own no memory) for now: batches and diffs hold them by
+//! value. Reads return values by copy. Mutators take `*Self`; after a storage error only
+//! `deinit` may follow.
+
+const std = @import("std");
+const assert = std.debug.assert;
+const Allocator = std.mem.Allocator;
+const codec = @import("codec");
+const runtime = @import("runtime");
+const utils = @import("utils");
+const merkle = @import("../../merkle/mod.zig");
+const qmdb = @import("../mod.zig");
+const chain = @import("../chain.zig");
+const value_mod = @import("../value.zig");
+const authenticated = @import("../authenticated.zig");
+const metrics_mod = @import("../metrics.zig");
+const snapshot_mod = @import("../snapshot.zig");
+const bitmap_mod = @import("../bitmap.zig");
+const operation = @import("operation.zig");
+const batch_mod = @import("batch.zig");
+
+const Storage = runtime.storage.Storage;
+const Scope = runtime.telemetry.metrics.Scope;
+
+/// Bytes per activity bitmap chunk (commonware's `BITMAP_CHUNK_BYTES`).
+pub const bitmap_chunk_bytes = 64;
+
+/// Configuration of an `any` database.
+pub fn Config(comptime T: type, comptime JournalConfig: type) type {
+    return struct {
+        /// The Merkle structure backing the authenticated journal.
+        merkle: merkle.full.Config,
+        /// The operation log.
+        log: JournalConfig,
+        /// The translator of the snapshot index.
+        translator: T,
+        /// Entries in the `location -> key` cache that resolves snapshot collisions during
+        /// init; null disables it.
+        init_cache: ?usize = null,
+    };
+}
+
+/// An authenticated database of keys over family `F`, update `U`, backing journal `C`, index
+/// `I`, and hash `H`.
+pub fn Db(F: type, U: type, C: type, I: type, H: type) type {
+    return struct {
+        const Self = @This();
+        comptime {
+            assert(!codec.owns_memory(U.Key) and !codec.owns_memory(U.Value));
+        }
+        pub const Family = F;
+        pub const Update = U;
+        pub const Key = U.Key;
+        pub const Value = U.Value;
+        pub const Operation = operation.Operation(F, U);
+        pub const Log = authenticated.Journal(F, C, H);
+        pub const Digest = H.Digest;
+        pub const Commitment = chain.Commitment(F, Digest);
+        pub const Bounds = chain.Bounds(F, Digest);
+        pub const Bitmap = bitmap_mod.Shared(bitmap_chunk_bytes);
+        pub const Proof = Log.Proof;
+        /// A proof and the operations it covers (`deinit` frees both).
+        pub const ProofOps = Log.ProofItems;
+        pub const Cfg = Config(I.Translator, C.BackingConfig);
+        pub const UnmerkleizedBatch = batch_mod.Unmerkleized(Self);
+        pub const MerkleizedBatch = batch_mod.Merkleized(Self);
+
+        gpa: Allocator,
+        log: Log,
+        /// The root at the last commit.
+        root_digest: Digest,
+        inactivity_floor_loc: u64,
+        snapshot: I,
+        active_keys: usize,
+        bitmap: Bitmap,
+        metrics: metrics_mod.Metrics,
+
+        /// Opens the database: selects the last commit (within `max_size` operations), creates
+        /// the initial commit if the log is empty, and rebuilds the snapshot and bitmap from
+        /// the commit's floor.
+        pub fn init(
+            gpa: Allocator,
+            storage: Storage,
+            scope: Scope,
+            cfg: Cfg,
+            max_size: ?u64,
+        ) !Self {
+            var log = try qmdb.init_journal(Log, gpa, storage, cfg.merkle, cfg.log, .{
+                .max_size = max_size,
+                .replay_from_floor = true,
+            });
+            errdefer log.deinit();
+            if (log.size() == 0) {
+                _ = try log.append(.{ .commit = .{ .metadata = null, .floor = 0 } });
+                try log.sync();
+            }
+            var snapshot = I.init(gpa, cfg.translator);
+            errdefer snapshot.deinit();
+            var reader: LogReader = .{ .log = &log };
+            const floor = try qmdb.find_inactivity_floor_at(gpa, &reader, log.size());
+            var built =
+                try snapshot_mod.build(Operation, gpa, floor, &log, &snapshot, cfg.init_cache);
+            defer built.deinit(gpa);
+            var bitmap = try init_bitmap(gpa, log.get_bounds().start, floor, &built.activity);
+            errdefer bitmap.deinit(gpa);
+            if (bitmap.len() != log.size()) return error.DataCorrupted;
+            const root_digest = try log.root(merkle.inactive_peaks(F, log.size(), floor));
+            var self: Self = .{
+                .gpa = gpa,
+                .log = log,
+                .root_digest = root_digest,
+                .inactivity_floor_loc = floor,
+                .snapshot = snapshot,
+                .active_keys = built.active_keys,
+                .bitmap = bitmap,
+                .metrics = try metrics_mod.Metrics.init(scope),
+            };
+            self.update_metrics();
+            return self;
+        }
+
+        /// The bitmap of a log retained from `start`: pruned below `start`'s chunk, clear up
+        /// to `floor`, then `activity`.
+        fn init_bitmap(
+            gpa: Allocator,
+            start: u64,
+            floor: u64,
+            activity: *const snapshot_mod.ActivityBitMap,
+        ) !Bitmap {
+            var bitmap = try Bitmap.init_pruned(@intCast(start / Bitmap.CHUNK_SIZE_BITS));
+            errdefer bitmap.deinit(gpa);
+            assert(bitmap.pruned_bits() <= floor);
+            try bitmap.extend_to(gpa, floor);
+            const M = utils.bitmap.DEFAULT_CHUNK_SIZE;
+            try bitmap.extend_from_bitmap(gpa, M, activity);
+            assert(bitmap.len() >= floor);
+            return bitmap;
+        }
+
+        /// Closes the database without syncing.
+        pub fn deinit(self: *Self) void {
+            self.log.deinit();
+            self.snapshot.deinit();
+            self.bitmap.deinit(self.gpa);
+            self.metrics.deinit();
+            self.* = undefined;
+        }
+
+        /// Reads the log for `qmdb.find_inactivity_floor_at`.
+        pub const LogReader = struct {
+            log: *Log,
+
+            pub fn bounds(reader: *const LogReader) merkle.Range {
+                const span = reader.log.get_bounds();
+                return .{ .start = span.start, .end = span.end };
+            }
+
+            pub fn read(reader: *LogReader, _: Allocator, location: u64) !Operation {
+                return reader.log.read(location);
+            }
+        };
+
+        pub fn inactivity_floor(self: *const Self) u64 {
+            return self.inactivity_floor_loc;
+        }
+
+        /// The location below which state sync need not fetch operations.
+        pub fn sync_boundary(self: *const Self) u64 {
+            return self.inactivity_floor_loc;
+        }
+
+        /// Whether no key is active.
+        pub fn is_empty(self: *const Self) bool {
+            return self.active_keys == 0;
+        }
+
+        pub fn root(self: *const Self) Digest {
+            return self.root_digest;
+        }
+
+        pub fn commitment(self: *const Self) Commitment {
+            return .{ .size = self.log.size(), .root = self.root_digest };
+        }
+
+        /// `[oldest retained location, size)`.
+        pub fn bounds(self: *const Self) merkle.Range {
+            const span = self.log.get_bounds();
+            return .{ .start = span.start, .end = span.end };
+        }
+
+        /// The metadata of the last commit.
+        pub fn get_metadata(self: *Self) !?Value {
+            const op = try self.log.read(self.log.size() - 1);
+            if (op != .commit) return error.DataCorrupted; // The log always ends with a commit.
+            return op.commit.metadata;
+        }
+
+        /// The update at `location`, which must hold one.
+        pub fn read_update(self: *Self, location: u64) !U {
+            const op = try self.log.read(location);
+            if (op != .update) return error.DataCorrupted; // Snapshots point at updates.
+            return op.update;
+        }
+
+        pub const Located = struct { update: U, location: u64 };
+
+        /// The key's latest update and its location, if the key is active.
+        pub fn get_with_loc(self: *Self, key: *const Key) !?Located {
+            var values = self.snapshot.get(value_mod.bytes(Key, key));
+            while (values.next()) |location| {
+                const update = try self.read_update(location.*);
+                if (value_mod.eql(Key, update.key, key.*)) {
+                    return .{ .update = update, .location = location.* };
+                }
+            }
+            return null;
+        }
+
+        /// The key's value, if it is active.
+        pub fn get(self: *Self, key: *const Key) !?Value {
+            self.metrics.get_calls.metric().inc();
+            self.metrics.lookups_requested.metric().inc();
+            const found = try self.get_with_loc(key) orelse return null;
+            return found.update.value;
+        }
+
+        /// The values of `keys` into `out`.
+        pub fn get_many(self: *Self, keys: []const Key, out: []?Value) !void {
+            assert(keys.len == out.len);
+            if (keys.len == 0) return;
+            self.metrics.get_many_calls.metric().inc();
+            self.metrics.lookups_requested.metric().inc_by(keys.len);
+            for (keys, out) |*key, *slot| {
+                const found = try self.get_with_loc(key);
+                slot.* = if (found) |f| f.update.value else null;
+            }
+        }
+
+        pub fn update_metrics(self: *Self) void {
+            const span = self.log.get_bounds();
+            assert(span.end > 0);
+            self.metrics.update(span.end, span.start, self.inactivity_floor_loc, span.end - 1);
+        }
+
+        /// The pins that authenticate a lower boundary at `location`.
+        pub fn pinned_nodes_at(
+            self: *Self,
+            location: u64,
+            out: *[merkle.max_pinned_nodes]Digest,
+        ) ![]Digest {
+            return self.log.merkle.pinned_nodes_at(location, out);
+        }
+
+        /// A proof of up to `max_ops` operations from `start` against the root at the commit
+        /// ending at `historical_size`.
+        pub fn historical_proof(
+            self: *Self,
+            historical_size: u64,
+            start: u64,
+            max_ops: u64,
+        ) !ProofOps {
+            assert(max_ops > 0);
+            if (historical_size > self.log.size()) return error.RangeOutOfBounds;
+            var reader: LogReader = .{ .log = &self.log };
+            const floor = try qmdb.find_inactivity_floor_at(self.gpa, &reader, historical_size);
+            const peaks = merkle.inactive_peaks(F, historical_size, floor);
+            return self.log.historical_proof(historical_size, start, max_ops, peaks);
+        }
+
+        /// A proof of up to `max_ops` operations from `start` against the current root.
+        pub fn proof(self: *Self, start: u64, max_ops: u64) !ProofOps {
+            return self.historical_proof(self.log.size(), start, max_ops);
+        }
+
+        /// Prunes the log below `location` (at most the inactivity floor). For `current`.
+        pub fn prune_log(self: *Self, location: u64) !void {
+            if (location > self.inactivity_floor_loc) return error.PruneBeyondMinRequired;
+            _ = try self.log.prune(location);
+        }
+
+        /// Prunes the activity bitmap below `location`'s chunk. For `current`.
+        pub fn prune_bitmap(self: *Self, location: u64) void {
+            assert(location <= self.bitmap.len());
+            self.bitmap.prune_to_bit(location);
+        }
+
+        /// Prunes operations below `location`, which may not exceed the inactivity floor.
+        pub fn prune(self: *Self, location: u64) !void {
+            self.metrics.prune_calls.metric().inc();
+            try self.prune_log(location);
+            self.prune_bitmap(location);
+            self.update_metrics();
+        }
+
+        /// Makes every applied operation durable, with no recovery needed on reopen.
+        pub fn sync(self: *Self) !void {
+            self.metrics.sync_calls.metric().inc();
+            try self.log.sync();
+        }
+
+        /// Starts a sync (it completes at once here).
+        pub fn start_sync(self: *Self) !void {
+            self.metrics.start_sync_calls.metric().inc();
+            try self.log.start_sync();
+        }
+
+        /// Makes every applied operation durable; reopening may replay the log.
+        pub fn commit(self: *Self) !void {
+            self.metrics.commit_calls.metric().inc();
+            try self.log.commit();
+        }
+
+        /// Removes the database's storage and frees it, also on error.
+        pub fn destroy(self: *Self) !void {
+            self.snapshot.deinit();
+            self.bitmap.deinit(self.gpa);
+            self.metrics.deinit();
+            defer self.* = undefined;
+            try self.log.destroy();
+        }
+
+        pub fn validate_batch(self: *const Self, batch: *const MerkleizedBatch) !void {
+            try batch.bounds.validate_apply_to(self.commitment());
+        }
+
+        /// Applies `batch` and its unapplied ancestors; the caller keeps its reference. A
+        /// storage or allocation failure leaves only `deinit` valid.
+        pub fn apply_batch(self: *Self, batch: *const MerkleizedBatch) !void {
+            self.metrics.apply_batch_calls.metric().inc();
+            try self.validate_batch(batch);
+            const db_size = self.log.size();
+            try self.log.apply_batch(batch.journal_batch);
+            try batch.apply_to_index(self, db_size);
+            self.active_keys = batch.total_active_keys;
+            self.inactivity_floor_loc = batch.bounds.inactivity_floor;
+            self.root_digest = batch.root();
+            assert(self.log.size() == batch.bounds.tip.size);
+            assert(self.bitmap.len() == self.log.size());
+            self.update_metrics();
+            self.metrics.operations_applied.metric().inc_by(self.log.size() - db_size);
+        }
+
+        /// A batch on the database's current state.
+        pub fn new_batch(self: *const Self) !UnmerkleizedBatch {
+            return .{
+                .gpa = self.gpa,
+                .journal_batch = try self.log.new_batch(),
+                .parent = null,
+                .base = self.commitment(),
+                .base_floor = self.inactivity_floor_loc,
+                .base_active_keys = self.active_keys,
+            };
+        }
+
+        /// A merkleized batch representing the current state.
+        pub fn to_batch(self: *const Self) !*MerkleizedBatch {
+            return MerkleizedBatch.from_db(self);
+        }
+
+        /// Points the known `key` at `new` instead of `old`.
+        pub fn update_known_loc(self: *Self, key: *const Key, old: u64, new: u64) void {
+            var cursor = self.snapshot.get_mut(value_mod.bytes(Key, key)).?; // Known to exist.
+            defer cursor.finish();
+            const found = cursor.find(old, matches);
+            assert(found); // The known key's location is in the snapshot.
+            cursor.update(new);
+        }
+
+        /// Removes the known `key`'s location `old`.
+        pub fn delete_known_loc(self: *Self, key: *const Key, old: u64) void {
+            var cursor = self.snapshot.get_mut(value_mod.bytes(Key, key)).?; // Known to exist.
+            defer cursor.finish();
+            const found = cursor.find(old, matches);
+            assert(found); // The known key's location is in the snapshot.
+            cursor.delete();
+        }
+
+        fn matches(target: u64, location: *const u64) bool {
+            return location.* == target;
+        }
+    };
+}
+
+/// The root of a freshly initialized database (`Commit(None, 0)` alone).
+pub fn initial_root(comptime F: type, comptime U: type, comptime H: type) H.Digest {
+    const Op = operation.Operation(F, U);
+    const op: Op = .{ .commit = .{ .metadata = null, .floor = 0 } };
+    var buffer: [1024]u8 = undefined;
+    const size = codec.encode_size(Op, op);
+    assert(size <= buffer.len); // A metadata-free commit is a tag, padding, and a varint.
+    const encoded = codec.encode_to(Op, op, buffer[0..size]);
+    return qmdb.single_operation_root(F, H, encoded);
+}
