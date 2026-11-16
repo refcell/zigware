@@ -7,10 +7,12 @@
 //!
 //! - `db`: the database batch lifecycle (`Shared`, the ManagedDb contract, database sets,
 //!   `Barrier`) and its QMDB implementations (`db.any`).
+//! - `probe`: the floor sample and wire messages of peer-sampled floor discovery.
 
 const std = @import("std");
 
 pub const db = @import("db/mod.zig");
+pub const probe = @import("probe/mod.zig");
 
 /// Whether `Application.process` may rely on the block's finalization.
 pub const Finality = enum {

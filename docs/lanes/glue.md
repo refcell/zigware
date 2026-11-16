@@ -70,6 +70,11 @@ marshal's actors (consensus-marshal) for the actor; until then it ports what is 
   `Unmerkleized` (`write`, `with_metadata`, `get`, `get_many`, `merkleize`) and `Merkleized`
   (`root`, `new_batch`, `get`, `get_many`, `clone`, `deinit`); `SyncTarget` is
   `qmdb.sync.Target`.
+- `glue.stateful.probe`: `Sample(S, D)` (`init(gpa, minimum_epoch)`, `awaits(peer)`,
+  `record(peer, finalization)` taking ownership, `select(committee_size, judge)` with
+  `judge.judgeable(*const Finalization)`, `get_floor`, `reset`, `deinit`), `Message(S, V)`
+  (`request`, `response: Finalization`; codec, `max_encode_size`), `Tag`,
+  `max_payload_size(V, S, participants)`. The DKG probe can reuse `Sample` as commonware's does.
 
 ### Decisions
 - ManagedDb and DatabaseSet are comptime contracts. Mutations take `*Self` and return errors
@@ -83,6 +88,8 @@ marshal's actors (consensus-marshal) for the actor; until then it ports what is 
   tuple applies have no counterpart until members run concurrently.
 - zigware databases persist synchronously in `finalize` (`start_sync` completes at once), so a
   `Barrier` holds each member's outcome instead of runtime handles.
+- `probe.Sample` keeps replies in a peer-sorted list (commonware's `BTreeMap`), so ties
+  between equal rounds resolve as commonware's do, and owns recorded finalizations.
 - `Any` takes the hasher as a parameter (the storage `Db` does not expose it) and uses
   commonware's 64-byte bitmap chunks in tests. `stage`/`expand` wait on storage-qmdb's
   `any` staging API.
@@ -94,7 +101,10 @@ marshal's actors (consensus-marshal) for the actor; until then it ports what is 
 - [ ] db: keyless, immutable, compact; current (after qmdb `current`).
 - [ ] db: state sync (`StateSyncDb`, `StateSyncSet`, `Anchor`, `TipUpdate`, the generation
   coordinator) and its tests; db/p2p (handler, actor, mailbox, limits).
-- [ ] probe; actor: processor state, syncer plan, core (after marshal); tests (single and
+- [x] probe: `Sample`, wire `Message`, `max_payload_size` with limits.rs's widest-encodings
+  test and sample selection tests.
+- [ ] probe: the actor (solicit, collect, retry, serve), after marshal's mailbox.
+- [ ] actor: processor state, syncer plan, core (after marshal); tests (single and
   multi db apps, floor, properties).
 
 ## Log
@@ -103,3 +113,5 @@ marshal's actors (consensus-marshal) for the actor; until then it ports what is 
   with commonware's 9 plan tests and a duplicate-strategy test (20 glue tests).
 - 2026-11-16 (stateful): db core (`Shared`, sets, `Barrier`) and the `any` adapter with their
   commonware tests.
+
+- 2026-11-16 (stateful): probe sample, wire messages, and payload bound.
