@@ -43,7 +43,24 @@ then the core and standard actors as those packages land.
   `Monitor`, `Provider(S)`, `Reporter(S, D)` and `ReporterMailbox(S, D)` (`get_tip`,
   `get_contiguous_tip`, `get`), `scheme.Scheme(D)` (ledger-backed mock) and `scheme.fixture`.
 
+- `consensus.marshal.core.variant`: `ExpectedCommitment(C)` (`trusted`/`untrusted`,
+  `commitment()`), `assert_variant(V)` (the contract in the file header: `Block`,
+  `ApplicationBlock`, `StoredBlock`, `Commitment`, commitment accessors, `check_payload`,
+  `decode_block`, `into_stored`, `restore`, `restore_across`, `into_shared`,
+  `from_application_block`, size bounds), `assert_buffer(B)`.
+- `consensus.marshal.standard.Standard(B)`: the standard variant (`Block` is
+  `broadcast.Digested(B)`, `StoredBlock` is `B`, the commitment is the block digest).
+- `consensus.marshal.resolver.handler`: `Key(D)` (`block`/`finalized`/`notarized`, codec,
+  `order`, `arbitrary`; conformance hash matches), `Annotation`, `Finalized`, `Request(D)`
+  (`split()` into key and annotation, `above_height_floor`), `above_height_floor(D, ...)`.
+- `consensus.marshal.limits`: `max_payload_size(V, S, participants, block_config)`,
+  `max_backfill_size`, `max_block_size`.
+- `consensus.marshal.mocks.block`: `EmptyBlock(H)`, `Block(H, C)` (context, precomputed
+  digest), `ready(B, gpa, block)`.
+
 ## Decisions
+- Marshal blocks keep commonware's trait method names (`height()`, `parent()`, `digest()`,
+  `context()`), so mock block fields are `height_value`, `parent_value`, and so on.
 - `Item(D)` is the certificate subject itself (passed by value); commonware uses `&Item<D>`.
 - `Error` variants carry no payload. `Certificate.from_acks` returns `InsufficientAttestations`
   without commonware's expected/found counts.
@@ -89,7 +106,11 @@ then the core and standard actors as those packages land.
   determinism, distinct states, one offline, partition, insufficient validators, admitted
   signer, 1k on the mock scheme) with every scheme, and the engine.rs unit tests except the
   `should_panic` one.
-- [ ] marshal: ancestry, store, limits, config, conformance types, application traits.
+- [x] marshal: core variant contract, standard variant, resolver `Key` (conformance hash),
+  limits, mocks/block.
+- [ ] marshal: ancestry, store, config, application traits, core floor/cache/mailbox.
+- (marshal/coding/ belongs to the broadcast-collector lane: types, shards, variant,
+  validation, marshaled, and coding/mod.rs tests, on top of core.)
 - [ ] marshal resolver, core, standard (and coding) actors with their mocks and tests.
 - [ ] Fuzz targets (consensus/fuzz entries for aggregation and marshal).
 

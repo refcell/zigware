@@ -1,0 +1,369 @@
+//! Backfill keys and requests (commonware `marshal/resolver/handler.rs`).
+//!
+//! `Key(D)` is what marshal asks its resolver for, on the wire as a subject byte followed by
+//! a commitment, a height, or a round. `Annotation` is the local metadata a request carries:
+//! two subscribers of one key can update different stores and trust the commitment
+//! differently. `Request(D)` pairs a key with the only annotation that matches it.
+
+const std = @import("std");
+const assert = std.debug.assert;
+const Allocator = std.mem.Allocator;
+const codec = @import("codec");
+const types = @import("../../types.zig");
+
+const Height = types.Height;
+const Round = types.Round;
+
+/// The subject byte of each key.
+const Subject = enum(u8) {
+    block = 0,
+    finalized = 1,
+    notarized = 2,
+};
+
+/// A raw resolver key for backfilling data.
+pub fn Key(comptime D: type) type {
+    return union(Subject) {
+        const Self = @This();
+
+        /// A block by consensus commitment.
+        block: D,
+        /// The finalization (and block) at a height.
+        finalized: Height,
+        /// The notarization (and block) of a round.
+        notarized: Round,
+
+        /// A subject and the widest of a commitment, a height, and a round.
+        pub const max_encode_size: usize = 1 +
+            @max(D.fixed_size, Height.max_encode_size, Round.max_encode_size);
+
+        pub fn subject(self: Self) u8 {
+            return @backingInt(std.meta.activeTag(self));
+        }
+
+        /// Orders by subject, then by the value within a subject.
+        pub fn order(a: Self, b: Self) std.math.Order {
+            const by_subject = std.math.order(a.subject(), b.subject());
+            if (by_subject != .eq) return by_subject;
+            return switch (a) {
+                .block => |commitment| commitment.order(b.block),
+                .finalized => |height| height.order(b.finalized),
+                .notarized => |round| round.order(b.notarized),
+            };
+        }
+
+        pub fn eql(a: Self, b: Self) bool {
+            return a.order(b) == .eq;
+        }
+
+        pub fn write(self: Self, writer: *codec.Writer) void {
+            writer.write_byte(self.subject());
+            switch (self) {
+                .block => |commitment| commitment.write(writer),
+                .finalized => |height| height.write(writer),
+                .notarized => |round| round.write(writer),
+            }
+        }
+
+        pub fn encode_size(self: Self) usize {
+            const size: usize = 1 + switch (self) {
+                .block => D.fixed_size,
+                .finalized => |height| height.encode_size(),
+                .notarized => |round| round.encode_size(),
+            };
+            assert(size <= max_encode_size);
+            return size;
+        }
+
+        pub fn read(gpa: Allocator, reader: *codec.Reader, _: void) codec.Error!Self {
+            const tag = try reader.read_byte();
+            const kind = std.enums.fromInt(Subject, tag) orelse
+                return reader.fail(error.InvalidEnum, tag);
+            return switch (kind) {
+                .block => .{ .block = try D.read(gpa, reader, {}) },
+                .finalized => .{ .finalized = try Height.read(gpa, reader, {}) },
+                .notarized => .{ .notarized = try Round.read(gpa, reader, {}) },
+            };
+        }
+
+        pub fn arbitrary(
+            gpa: Allocator,
+            u: *codec.arbitrary.Unstructured,
+        ) codec.arbitrary.Error!Self {
+            return switch (u.int_in_range(u8, 0, 2)) {
+                0 => .{ .block = try D.arbitrary(gpa, u) },
+                1 => .{ .finalized = try Height.arbitrary(gpa, u) },
+                2 => .{ .notarized = try Round.arbitrary(gpa, u) },
+                else => unreachable, // Proof: drawn from 0 through 2.
+            };
+        }
+
+        pub fn format(self: Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+            switch (self) {
+                .block => |commitment| try writer.print("Block({x})", .{commitment.as_slice()}),
+                .finalized => |height| try writer.print("Finalized({f})", .{height}),
+                .notarized => |round| try writer.print("Notarized({f})", .{round}),
+            }
+        }
+    };
+}
+
+/// Metadata for a finalized block requested by commitment.
+pub const Finalized = union(enum) {
+    /// The finalized height is known before the request.
+    by_height: Height,
+    /// Only the finalization round is known (a finalization names the commitment, not the
+    /// height).
+    by_round: Round,
+};
+
+/// The local processing metadata of a request.
+pub const Annotation = union(enum) {
+    /// A notarization requested by round.
+    notarization: Round,
+    /// A block requested by commitment without certification evidence. The height is local
+    /// pruning metadata: a matching block above it is delivered but not cached. Commitment
+    /// material is recomputed unless another subscriber supplies certification evidence.
+    untrusted: Height,
+    /// A block this node certified, or an ancestor of one: deliveries reuse commitment
+    /// material. The height bounds it as for `untrusted`.
+    certified: Height,
+    /// A block requested by commitment for the finalized chain.
+    finalized: Finalized,
+
+    pub fn eql(a: Annotation, b: Annotation) bool {
+        return std.meta.eql(a, b);
+    }
+};
+
+/// A marshal backfill fetch: a key and the annotation that matches it.
+pub fn Request(comptime D: type) type {
+    return union(enum) {
+        const Self = @This();
+
+        /// A notarized proposal for a round.
+        notarized: Round,
+        /// A finalization for a height.
+        finalized: Height,
+        /// A block by commitment without certification evidence.
+        untrusted: Committed(Height),
+        /// A block this node certified, or an ancestor of one, by commitment.
+        certified: Committed(Height),
+        /// A finalized-chain block by commitment when its height is known. The commitment
+        /// is a verified finalization's payload or an archived finalized block's parent.
+        finalized_by_height: Committed(Height),
+        /// A finalized-chain block by commitment when only its finalization round is known.
+        finalized_by_round: Committed(Round),
+
+        fn Committed(comptime Bound: type) type {
+            return struct { commitment: D, bound: Bound };
+        }
+
+        /// Whether the request stays above a processed height `floor` (requests without a
+        /// height stay).
+        pub fn above_height_floor(self: Self, floor: Height) bool {
+            return switch (self) {
+                .untrusted, .certified, .finalized_by_height => |value| value.bound.get() >
+                    floor.get(),
+                .finalized => |height| height.get() > floor.get(),
+                .notarized, .finalized_by_round => true,
+            };
+        }
+
+        /// The resolver key and the subscriber annotation.
+        pub fn split(self: Self) struct { Key(D), Annotation } {
+            return switch (self) {
+                .notarized => |round| .{ .{ .notarized = round }, .{ .notarization = round } },
+                .finalized => |height| .{
+                    .{ .finalized = height },
+                    .{ .finalized = .{ .by_height = height } },
+                },
+                .untrusted => |value| .{
+                    .{ .block = value.commitment },
+                    .{ .untrusted = value.bound },
+                },
+                .certified => |value| .{
+                    .{ .block = value.commitment },
+                    .{ .certified = value.bound },
+                },
+                .finalized_by_height => |value| .{
+                    .{ .block = value.commitment },
+                    .{ .finalized = .{ .by_height = value.bound } },
+                },
+                .finalized_by_round => |value| .{
+                    .{ .block = value.commitment },
+                    .{ .finalized = .{ .by_round = value.bound } },
+                },
+            };
+        }
+    };
+}
+
+/// Whether a pending fetch stays above the processed height `floor` (commonware
+/// `above_height_floor`): height-bound requests are pruned once the floor reaches them;
+/// others stay.
+pub fn above_height_floor(
+    comptime D: type,
+    floor: Height,
+    key: Key(D),
+    annotation: Annotation,
+) bool {
+    return switch (key) {
+        .finalized => |height| height.get() > floor.get(),
+        .block => switch (annotation) {
+            .untrusted, .certified => |height| height.get() > floor.get(),
+            .finalized => |finalized| switch (finalized) {
+                .by_height => |height| height.get() > floor.get(),
+                .by_round => true,
+            },
+            .notarization => true,
+        },
+        .notarized => true,
+    };
+}
+
+const testing = std.testing;
+const cryptography = @import("cryptography");
+const conformance = @import("conformance");
+const Sha256 = cryptography.Sha256;
+const TestKey = Key(Sha256.Digest);
+
+test "block key encoding" {
+    const commitment = Sha256.hash(&.{"test"});
+    const key: TestKey = .{ .block = commitment };
+    const encoded = try codec.encode(TestKey, testing.allocator, key);
+    defer testing.allocator.free(encoded);
+    // The subject byte and the 32-byte commitment.
+    try testing.expectEqual(33, encoded.len);
+    try testing.expectEqual(0, encoded[0]);
+    try testing.expectEqualSlices(u8, &commitment.bytes, encoded[1..]);
+    try testing.expect((try codec.decode(TestKey, testing.allocator, encoded)).eql(key));
+}
+
+test "finalized and notarized key encodings" {
+    const gpa = testing.allocator;
+    const finalized: TestKey = .{ .finalized = .new(12345) };
+    const encoded_finalized = try codec.encode(TestKey, gpa, finalized);
+    defer gpa.free(encoded_finalized);
+    // Subject 1, then 12345 as a varint (0xb9 0x60).
+    try testing.expectEqualSlices(u8, &.{ 1, 0xb9, 0x60 }, encoded_finalized);
+    try testing.expect((try codec.decode(TestKey, gpa, encoded_finalized)).eql(finalized));
+
+    const notarized: TestKey = .{ .notarized = .new(.new(67890), .new(12345)) };
+    const encoded_notarized = try codec.encode(TestKey, gpa, notarized);
+    defer gpa.free(encoded_notarized);
+    // Subject 2, epoch 67890 (0xb2 0x92 0x04), view 12345 (0xb9 0x60).
+    try testing.expectEqualSlices(u8, &.{ 2, 0xb2, 0x92, 0x04, 0xb9, 0x60 }, encoded_notarized);
+    try testing.expect((try codec.decode(TestKey, gpa, encoded_notarized)).eql(notarized));
+
+    try testing.expectError(error.InvalidEnum, codec.decode(TestKey, gpa, &.{ 3, 0 }));
+}
+
+test "key max encode size is the widest key" {
+    // A block key (1 + 32 bytes) is wider than a notarized key at the maximum round
+    // (1 + 10 + 10 bytes).
+    try testing.expectEqual(33, TestKey.max_encode_size);
+    const max = std.math.maxInt(u64);
+    const widest = [_]TestKey{
+        .{ .block = Sha256.hash(&.{"test"}) },
+        .{ .finalized = .new(max) },
+        .{ .notarized = .new(.new(max), .new(max)) },
+    };
+    var largest: usize = 0;
+    for (widest) |key| largest = @max(largest, key.encode_size());
+    try testing.expectEqual(TestKey.max_encode_size, largest);
+}
+
+test "keys order by subject before value" {
+    const block_low: TestKey = .{ .block = Sha256.Digest.fill(0) };
+    const block_high: TestKey = .{ .block = Sha256.Digest.fill(0xff) };
+    const min_finalized: TestKey = .{ .finalized = .zero() };
+    const max_finalized: TestKey = .{ .finalized = .new(std.math.maxInt(u64)) };
+    const min_notarized: TestKey = .{ .notarized = .zero() };
+    const max_notarized: TestKey = .{ .notarized = .new(.new(9), .new(9)) };
+    try testing.expectEqual(.lt, block_low.order(block_high));
+    try testing.expectEqual(.lt, block_high.order(min_finalized));
+    try testing.expectEqual(.lt, min_finalized.order(max_finalized));
+    try testing.expectEqual(.lt, max_finalized.order(min_notarized));
+    try testing.expectEqual(.lt, min_notarized.order(max_notarized));
+    try testing.expectEqual(.eq, max_notarized.order(max_notarized));
+    try testing.expect(!min_finalized.eql(min_notarized));
+}
+
+test "requests split into matching keys and annotations" {
+    const D = Sha256.Digest;
+    const commitment = D.fill(4);
+    const round: Round = .new(.new(1), .new(2));
+    const by_round: Request(D) = .{
+        .finalized_by_round = .{ .commitment = commitment, .bound = round },
+    };
+    const key, const annotation = by_round.split();
+    try testing.expect(key.eql(.{ .block = commitment }));
+    try testing.expect(annotation.eql(.{ .finalized = .{ .by_round = round } }));
+    try testing.expect(by_round.above_height_floor(.new(1_000)));
+
+    const certified = Request(D){ .certified = .{ .commitment = commitment, .bound = .new(5) } };
+    try testing.expect(certified.above_height_floor(.new(4)));
+    try testing.expect(!certified.above_height_floor(.new(5)));
+    const certified_key, const certified_annotation = certified.split();
+    try testing.expect(above_height_floor(D, .new(4), certified_key, certified_annotation));
+    try testing.expect(!above_height_floor(D, .new(5), certified_key, certified_annotation));
+    // Round-bound and notarized requests are kept at any height floor.
+    try testing.expect(above_height_floor(D, .new(9), key, annotation));
+    const finalized_key, const finalized_annotation = (Request(D){ .finalized = .new(3) }).split();
+    try testing.expect(!above_height_floor(D, .new(3), finalized_key, finalized_annotation));
+}
+
+/// A SHA-256 digest drawn as commonware's `Arbitrary`: the hash of arbitrary bytes.
+const ArbitraryDigest = struct {
+    inner: Sha256.Digest,
+
+    pub const fixed_size: usize = Sha256.Digest.fixed_size;
+
+    pub fn order(a: ArbitraryDigest, b: ArbitraryDigest) std.math.Order {
+        return a.inner.order(b.inner);
+    }
+
+    pub fn as_slice(self: *const ArbitraryDigest) []const u8 {
+        return self.inner.as_slice();
+    }
+
+    pub fn write(self: ArbitraryDigest, writer: *codec.Writer) void {
+        self.inner.write(writer);
+    }
+
+    pub fn read(gpa: Allocator, reader: *codec.Reader, _: void) codec.Error!ArbitraryDigest {
+        return .{ .inner = try Sha256.Digest.read(gpa, reader, {}) };
+    }
+
+    pub fn arbitrary(
+        gpa: Allocator,
+        u: *codec.arbitrary.Unstructured,
+    ) codec.arbitrary.Error!ArbitraryDigest {
+        const len = u.int_in_range(u64, 0, 256);
+        const data = try gpa.alloc(u8, len);
+        try u.bytes(data);
+        return .{ .inner = Sha256.hash(&.{data}) };
+    }
+};
+
+test "key conformance hash matches commonware" {
+    const T = Key(ArbitraryDigest);
+    const Commit = struct {
+        pub fn commit(gpa: Allocator, seed: u64) ![]u8 {
+            var arena = std.heap.ArenaAllocator.init(gpa);
+            defer arena.deinit();
+            const generator = codec.arbitrary.default_generator(T);
+            const value = try codec.arbitrary.generate(T, generator, arena.allocator(), seed);
+            return codec.encode(T, gpa, value);
+        }
+    };
+    try conformance.verify(
+        Commit,
+        std.heap.smp_allocator,
+        "commonware_consensus::marshal::resolver::handler::tests::conformance::" ++
+            "CodecConformance<Key<D>>",
+        conformance.default_cases,
+        @embedFile("../../conformance.toml"),
+    );
+}
