@@ -45,6 +45,9 @@ test vectors. Tests never call AWS and never hold credentials.
   cache. The home directory is spliced in at comptime so no source line spells it out.
 - Zig errors carry no payload, so validation returns `?Failure` (commonware's error variant
   and fields) instead of an error; `VolumeType` lists the EC2 API's documented values.
+- `list` prints creation times in UTC: zigware has no time zone database (commonware uses
+  the local zone). Deployments load sorted by tag, so ties and `attach` order are
+  deterministic regardless of directory order.
 - Commonware's upper-case constants (`METRICS_PORT`, `CREATE_CMD`, ...) are snake_case
   (`metrics_port`, `create_cmd`), per TigerStyle naming.
 - `IpAddr` is the deployer's own: Rust's `IpAddr` parsing and display (RFC 5952 compression,
@@ -59,10 +62,11 @@ test vectors. Tests never call AWS and never hold credentials.
   SHA-256 conformance hashes of every generated file).
 - [x] `create.rs` validation and AZ-group planning (22 sync tests); `ec2.rs` storage
   limits and RunInstances error classification.
-- [ ] `attach.rs` host lookup (4 tests); `create.rs`'s `run_launches` ordering (2 async
+- [x] `attach.rs` host lookup (4 tests), `list.rs` loading and ordering, and the deployment
+  directory (`deployer.aws.deployments`).
+- [ ] `create.rs`'s `run_launches` ordering (2 async
   tests); `ec2.rs`'s launch retry loop (11 async tests, over a mock client).
 - [ ] SigV4 signer with the AWS documentation's test vectors; S3 presigned URLs.
-- [ ] Deployment directory, metadata, and status files; `list`.
 - [ ] CLI (`deployer aws <command>`) with argument parsing tests.
 - [ ] AWS client interface (EC2 and S3 query/REST calls over `std.http`), never exercised
   against AWS in tests.
