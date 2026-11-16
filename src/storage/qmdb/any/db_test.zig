@@ -259,58 +259,76 @@ fn check_and_reopen(comptime Db: type, harness: *support.Harness, db: *Db, model
     }
 }
 
+/// Merkleizes a random chain of up to three batches on `db` and applies it. Each batch may be
+/// applied as soon as it is merkleized, and the batch below it released, so the tip applies
+/// with applied, pending, and dropped ancestors in every mix.
+fn apply_random_chain(
+    comptime Db: type,
+    db: *Db,
+    model: *Model,
+    random: std.Random,
+    salt: *u64,
+) !void {
+    const depth = random.uintLessThan(usize, 3) + 1;
+    var chain: [3]?*Db.MerkleizedBatch = .{ null, null, null };
+    defer for (chain) |batch| if (batch) |b| b.release();
+    var applied: usize = 0;
+    for (0..depth) |level| {
+        const merkleized = merkleized: {
+            const parent = if (level > 0) chain[level - 1] else null;
+            var batch = if (parent) |p| p.new_batch() else try db.new_batch();
+            errdefer batch.deinit();
+            var writes: [6]Write = undefined;
+            const count = random.uintLessThan(usize, writes.len + 1);
+            for (writes[0..count]) |*w| {
+                salt.* += 1;
+                w.* = random_write(random, salt.*);
+                try batch.write(w.key, w.value);
+            }
+            try model_apply(model, writes[0..count]);
+            break :merkleized try batch.merkleize(db);
+        };
+        chain[level] = merkleized;
+        if (random.boolean()) {
+            try db.apply_batch(merkleized);
+            applied = level + 1;
+        }
+        // Merkleizing past a dropped, unapplied ancestor is stale (as in commonware), so an
+        // ancestor is released early only once applied or after the last batch.
+        const releasable = applied >= level or level + 1 == depth;
+        if (level > 0 and releasable and random.boolean()) {
+            chain[level - 1].?.release();
+            chain[level - 1] = null;
+        }
+    }
+    const tip = chain[depth - 1].?;
+    if (applied < depth) try db.apply_batch(tip);
+    try testing.expect(db.root().eql(tip.root()));
+}
+
+/// Random chains against a model, sometimes pruning to the floor, with every round checked
+/// against the reopened rebuild.
+fn check_random_chains(comptime Db: type, seed: u64) !void {
+    var harness = try support.Harness.init(gpa);
+    defer harness.deinit();
+    var db = try harness.open(Db, null);
+    defer db.deinit();
+    var model: Model = .empty;
+    defer model.deinit(gpa);
+    var prng = std.Random.DefaultPrng.init(seed);
+    const random = prng.random();
+    var salt: u64 = 0;
+    for (0..40) |_| {
+        try apply_random_chain(Db, &db, &model, random, &salt);
+        if (random.uintLessThan(u8, 4) == 0) try db.prune(db.inactivity_floor());
+        try check_and_reopen(Db, &harness, &db, &model);
+    }
+}
+
 test "any randomized chains match a model and the rebuilt snapshot" {
     inline for (families) |F| {
-        const Db = support.UnorderedFixed(F);
-        var harness = try support.Harness.init(gpa);
-        defer harness.deinit();
-        var db = try harness.open(Db, null);
-        defer db.deinit();
-        var model: Model = .empty;
-        defer model.deinit(gpa);
-        var prng = std.Random.DefaultPrng.init(0x5eed_a11);
-        const random = prng.random();
-        var salt: u64 = 0;
-        for (0..60) |_| {
-            // A chain of up to three batches. Each batch may be applied as soon as it is
-            // merkleized, and the batch below it released, so the tip applies with applied,
-            // pending, and dropped ancestors in every mix.
-            const depth = random.uintLessThan(usize, 3) + 1;
-            var chain: [3]?*Db.MerkleizedBatch = .{ null, null, null };
-            defer for (chain) |batch| if (batch) |b| b.release();
-            var applied: usize = 0;
-            for (0..depth) |level| {
-                const merkleized = merkleized: {
-                    const parent = if (level > 0) chain[level - 1] else null;
-                    var batch = if (parent) |p| p.new_batch() else try db.new_batch();
-                    errdefer batch.deinit();
-                    var writes: [6]Write = undefined;
-                    const count = random.uintLessThan(usize, writes.len + 1);
-                    for (writes[0..count]) |*w| {
-                        salt += 1;
-                        w.* = random_write(random, salt);
-                        try batch.write(w.key, w.value);
-                    }
-                    try model_apply(&model, writes[0..count]);
-                    break :merkleized try batch.merkleize(&db);
-                };
-                chain[level] = merkleized;
-                if (random.boolean()) {
-                    try db.apply_batch(merkleized);
-                    applied = level + 1;
-                }
-                // Merkleizing past a dropped, unapplied ancestor is stale (as in commonware),
-                // so an ancestor is released early only once applied or after the last batch.
-                const releasable = applied >= level or level + 1 == depth;
-                if (level > 0 and releasable and random.boolean()) {
-                    chain[level - 1].?.release();
-                    chain[level - 1] = null;
-                }
-            }
-            const tip = chain[depth - 1].?;
-            if (applied < depth) try db.apply_batch(tip);
-            try testing.expect(db.root().eql(tip.root()));
-            try check_and_reopen(Db, &harness, &db, &model);
-        }
+        try check_random_chains(support.UnorderedFixed(F), 0x5eed_a11);
+        // One-byte chunks put many chunk boundaries and bitmap prunes under the walk.
+        try check_random_chains(support.UnorderedFixedChunks(F, 1), 0x5eed_a12);
     }
 }

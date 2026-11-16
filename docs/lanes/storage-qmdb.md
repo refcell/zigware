@@ -67,9 +67,10 @@ that don't need them and keep a small interface where you must.
   live ancestors' items), `apply_batch`, `historical_proof`/`proof`, `speculative_proof`,
   `speculative_pinned_nodes`.
 - `storage.qmdb.init_journal(J, gpa, storage, merkle_cfg, journal_cfg, InitOptions)`.
-- `storage.qmdb.any.Db(F, U, C, I, H)` (`U` an `any.operation.update` type, `C` the backing
-  contiguous journal, `I` the snapshot index, `H` the hash), with public fields `log`,
-  `snapshot`, `bitmap` (`bitmap.Shared(any.db.bitmap_chunk_bytes)`), `inactivity_floor_loc`,
+- `storage.qmdb.any.Db(F, U, C, I, H, N)` (`U` an `any.operation.update` type, `C` the backing
+  contiguous journal, `I` the snapshot index, `H` the hash, `N` the activity bitmap's chunk
+  bytes, commonware's `const N`), with public fields `log`, `snapshot`, `bitmap`
+  (`bitmap.Shared(N)`), `inactivity_floor_loc`,
   `active_keys`, `root_digest`, `metrics`. `init(gpa, storage, scope, Cfg, ?max_size)`,
   `deinit`, `get`, `get_many`, `get_with_loc`, `read_update`, `get_metadata`, `root`,
   `commitment`, `bounds`, `inactivity_floor`, `sync_boundary`, `is_empty`, `proof`,
@@ -166,3 +167,4 @@ that don't need them and keep a small interface where you must.
 - 2026-11-16: keyless fixed root conformance hashes (MMR and MMB) match commonware.
 - 2026-11-16: any (unordered, fixed): Db, chained batches, floor walk, root conformance
   hashes (MMR and MMB) match commonware.
+- 2026-11-16: any takes the bitmap chunk size `N` as a parameter (current needs 32).

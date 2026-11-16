@@ -32,9 +32,6 @@ const batch_mod = @import("batch.zig");
 const Storage = runtime.storage.Storage;
 const Scope = runtime.telemetry.metrics.Scope;
 
-/// Bytes per activity bitmap chunk (commonware's `BITMAP_CHUNK_BYTES`).
-pub const bitmap_chunk_bytes = 64;
-
 /// Configuration of an `any` database.
 pub fn Config(comptime T: type, comptime JournalConfig: type) type {
     return struct {
@@ -51,11 +48,12 @@ pub fn Config(comptime T: type, comptime JournalConfig: type) type {
 }
 
 /// An authenticated database of keys over family `F`, update `U`, backing journal `C`, index
-/// `I`, and hash `H`.
-pub fn Db(F: type, U: type, C: type, I: type, H: type) type {
+/// `I`, and hash `H`, with an activity bitmap of `N`-byte chunks (commonware's `const N`).
+pub fn Db(F: type, U: type, C: type, I: type, H: type, comptime N: usize) type {
     return struct {
         const Self = @This();
         comptime {
+            assert(N > 0);
             assert(!codec.owns_memory(U.Key) and !codec.owns_memory(U.Value));
         }
         pub const Family = F;
@@ -67,7 +65,9 @@ pub fn Db(F: type, U: type, C: type, I: type, H: type) type {
         pub const Digest = H.Digest;
         pub const Commitment = chain.Commitment(F, Digest);
         pub const Bounds = chain.Bounds(F, Digest);
-        pub const Bitmap = bitmap_mod.Shared(bitmap_chunk_bytes);
+        /// Bytes per activity bitmap chunk.
+        pub const chunk_bytes = N;
+        pub const Bitmap = bitmap_mod.Shared(N);
         pub const Proof = Log.Proof;
         /// A proof and the operations it covers (`deinit` frees both).
         pub const ProofOps = Log.ProofItems;
