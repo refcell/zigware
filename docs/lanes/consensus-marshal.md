@@ -55,6 +55,8 @@ then the core and standard actors as those packages land.
   (`split()` into key and annotation, `above_height_floor`), `above_height_floor(D, ...)`.
 - `consensus.marshal.limits`: `max_payload_size(V, S, participants, block_config)`,
   `max_backfill_size`, `max_block_size`.
+- `consensus.marshal.Config(P)` and `Start(S, C, B)` (`genesis` or `floor`); `P` declares
+  `Scheme`, `Provider`, `Epocher`, `Strategy`, `ApplicationBlock`, `Block`, `Commitment`.
 - `consensus.marshal.store`: `Certificates(A, S, B, C)` and `Blocks(A, Block)` over an
   immutable or prunable archive `A` (borrowed), `Identifier(D)` (`index` or `key`).
 - `consensus.marshal.mocks.block`: `EmptyBlock(H)`, `Block(H, C)` (context, precomputed
@@ -111,7 +113,8 @@ then the core and standard actors as those packages land.
 - [x] marshal: core variant contract, standard variant, resolver `Key` (conformance hash),
   limits, mocks/block.
 - [x] marshal: store adapters over both archives.
-- [ ] marshal: ancestry, config, application traits, core floor/cache/mailbox.
+- [x] marshal: config.
+- [ ] marshal: ancestry, application traits, core floor/cache/mailbox.
 - (marshal/coding/ belongs to the broadcast-collector lane: types, shards, variant,
   validation, marshaled, and coding/mod.rs tests, on top of core.)
 - [ ] marshal resolver, core, standard (and coding) actors with their mocks and tests.

@@ -8,6 +8,9 @@
 
 const std = @import("std");
 
+pub const config = @import("config.zig");
+pub const Config = config.Config;
+pub const Start = config.Start;
 pub const core = @import("core/root.zig");
 pub const limits = @import("limits.zig");
 pub const max_payload_size = limits.max_payload_size;
