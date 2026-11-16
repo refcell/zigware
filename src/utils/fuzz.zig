@@ -11,6 +11,10 @@ const build_options = @import("build_options");
 const rng = @import("rng.zig");
 const assert = std.debug.assert;
 
+/// Uniform draws from a `std.testing.Smith` for seeded fuzz bodies (`codec.fuzz.Draws`):
+/// Smith's own typed draws and `eos` are nearly inert on seeded random input.
+pub const Draws = @import("codec").fuzz.Draws;
+
 /// Largest input handed to one iteration.
 pub const input_size_max = 1024;
 

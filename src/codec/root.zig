@@ -55,6 +55,7 @@ pub const Modes = mode_mod.Modes;
 pub const Lazy = @import("types/lazy.zig").Lazy;
 pub const NonZero = @import("types/nonzero.zig").NonZero;
 pub const arbitrary = @import("arbitrary.zig");
+pub const fuzz = @import("fuzz.zig");
 
 pub const Cfg = codec_mod.Cfg;
 pub const SliceCfg = codec_mod.SliceCfg;

@@ -128,6 +128,16 @@ floats, arrays, optionals, structs/tuples, enums (`derive` scaling), or `T.arbit
 `bytes(n)`, `fill(out)`, `byte_size()`, `arbitrary_len(T)`, `peek_bytes`, `take_rest`,
 `len`, `is_empty`. Collections: `for (0..u.arbitrary_len(T))` and append.
 
+### codec.fuzz.Draws (Smith bodies on seeded input)
+
+Smith's typed draws are nearly inert on seeded random input (see AGENTS.md, "Fuzz bodies").
+A `fn (ctx, *std.testing.Smith) !void` body draws through
+`const draws: codec.fuzz.Draws = .init(smith);` (`utils.fuzz.Draws` re-exports it):
+`value(T)` for ints, floats, bool, exhaustive enums, and arrays of them; `range_at_most(T, lo,
+hi)`, `range_less_than`, `index(len)`, `bytes(out)`, and `slice(buffer)` (the rest of a seeded
+input or corpus entry, as written). Draws past the end of the input read zeros. Bound loops
+with a drawn count (`for (0..draws.range_at_most(u32, 0, max))`), never `smith.eos()`.
+
 ## Decisions
 
 - Zig errors carry no payload; payloads live in `Reader.diagnostic`.
