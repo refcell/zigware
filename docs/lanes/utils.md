@@ -70,6 +70,16 @@ encoding parts as soon as `codec` has its core API (see docs/lanes/codec.md).
   and `literal(f)` (the `probability!` macro), `is_zero`, `is_one`, `as_f64`, `sample(rng)`
   (draws one `next_u64` strictly between zero and one, nothing at the endpoints), `eql`,
   `order`, `{f}`, `arbitrary`. Bit-identical thresholds to commonware.
+- `utils.channel` (`channel/`): over `std.Io` primitives, values dropped by a channel go to
+  `T.discard` if declared. `mpsc.channel(T, gpa, io, cap)`/`mpsc.unbounded(T, gpa, io)` (tokio
+  semantics: Sender `clone`/`send`/`try_send`/`reserve`/`try_reserve` -> `Permit`/`is_closed`/
+  `closed`/`capacity`/`same_channel`; Receiver `recv` -> `?T`/`try_recv`/`close`/`len`);
+  `ring.channel` (drop-oldest: `send_lossy`, `send`, `recv`, `try_recv`); `reservation.
+  send_or_reserve` -> `sent`/`reserved: Reservation`/`closed: T`; `fallible` (`send_lossy`,
+  `try_send_lossy`, `send_or_reserve_lossy`, `oneshot_send_lossy`, `request`/`request_or`/
+  `request_or_default` with a maker declaring `make(responder)`); `tracked.bounded(T, B, ...)`
+  (sequences from 1, `Guard` clone/deinit, `watermark`, `pending(batch)`); `oneshot`
+  (broadcast-resolver lane).
 - `utils.Hostname` (`utils.hostname`): validated RFC 1035/1123 hostname stored inline
   (`init`, `literal`, `as_str`, `eql`, `order`, `{f}`, `len_max`, `label_len_max`,
   `max_encode_size` = 258), codec as a `RangeCfg(..=253)` byte string; `hostname.Error`.
@@ -96,6 +106,10 @@ encoding parts as soon as `codec` has its core API (see docs/lanes/codec.md).
 - Conformance: `src/utils/conformance_test.zig` checks every utils/conformance.toml entry
   (copied unchanged next to it) through the shared `conformance.verify` harness with
   `codec.arbitrary` generators; each type's Rust `Arbitrary` derive is a small generator there.
+- `channel.tracked` batch IDs are plain hashable values copied into the tracker (Rust allows any
+  `Eq + Hash + Clone`, including `Arc`s with destructors), so commonware's
+  `batch_destructor_can_read_watermark` has no counterpart; guards are (tracker, sequence)
+  pairs with per-sequence reference counts instead of per-message `Arc`s.
 - `src/utils/fuzz.zig` is the utils fuzz driver: a body over `*FuzzRng`, run seeded in
   `zig build test` and under `std.testing.fuzz`.
 
@@ -110,8 +124,7 @@ encoding parts as soon as `codec` has its core API (see docs/lanes/codec.md).
   fuzz Plan); codec encodings identical, all bitmap conformance hashes match.
 - [x] utils ordered (Set/Map/BiMap/Quorum) with conformance hashes.
 - [ ] utils cache model fuzz + colliding-key tests (done: priority_set (resolver lane, audited),
-  acknowledgement, cache with its unit tests),
-  channel (bounded mpsc, ring, reservation, tracked; keep broadcast-resolver's oneshot.zig) — channels over `std.Io` primitives.
+  acknowledgement, cache with its unit tests, channel mpsc/ring/reservation/fallible/tracked).
 - [x] utils handles (`Table`, `partition`), requested by storage-merkle.
 - [ ] Fuzz targets for every decoder (commonware utils/fuzz).
 
@@ -143,3 +156,5 @@ encoding parts as soon as `codec` has its core API (see docs/lanes/codec.md).
 - 2026-11-16: rational BigRational (BigRationalExt plus the arithmetic bloomfilter uses), all
   mod.rs tests and a fuzz that checks log2 against its defining bounds.
 - 2026-11-16: Probability with the probability.rs tests (thresholds, sampling, round trips).
+- 2026-11-16: channel mpsc, ring, reservation, fallible, tracked with their tests, an mpsc model
+  fuzz, and a tracked model fuzz (watermark and per-batch pending against a model).
