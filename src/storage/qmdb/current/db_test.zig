@@ -374,6 +374,61 @@ test "current prune and sync persist the bitmap pruning boundary" {
     }
 }
 
+fn apply_and_prune(comptime Db: type, db: *Db, writes: []const Write) !void {
+    try support.apply_writes(Db, db, writes);
+    try db.prune(db.sync_boundary());
+    try db.sync();
+}
+
+/// Reopens `db` within `max_size` operations. A refused bound leaves `db` closed.
+fn open_bounded(comptime Db: type, harness: *support.Harness, db: *Db, max_size: u64) !bool {
+    db.deinit();
+    db.* = harness.open(Db, max_size) catch |err| switch (err) {
+        error.HistoricalFloorPruned => return false,
+        else => return err,
+    };
+    return true;
+}
+
+// Clearing's `test_bounded_reopen_fails_once_the_floor_is_pruned` at the storage level: pruned
+// to its sync boundary, the database reopens at the previous commit while that commit's floor
+// is retained, and otherwise refuses without discarding the commits after the bound.
+test "current bounded reopen rewinds or refuses without losing history" {
+    const Db = support.UnorderedFixed(merkle.mmb.Family);
+    var harness = try support.Harness.init(gpa);
+    defer harness.deinit();
+    var db = try harness.open(Db, null);
+    defer db.deinit();
+    var rng = utils.rng.TestRng.init(0x7265);
+    var writes: [24]Write = undefined;
+    var rewound: u32 = 0;
+    var refused: u32 = 0;
+    for (0..40) |round| {
+        const previous_size = db.bounds().end;
+        const previous_root = db.root();
+        for (&writes, 0..) |*w, i| {
+            w.* = .{ .key = key(rng.next_u64() % 48), .value = val(round, i) };
+        }
+        try apply_and_prune(Db, &db, &writes);
+        if (round == 0) continue;
+        const root = db.root();
+        const size = db.bounds().end;
+        if (try open_bounded(Db, &harness, &db, previous_size)) {
+            rewound += 1;
+            try testing.expect(db.root().eql(previous_root));
+            try testing.expectEqual(previous_size, db.bounds().end);
+            // Writing the same batch again returns to the latest commit.
+            try apply_and_prune(Db, &db, &writes);
+        } else {
+            refused += 1;
+            db = try harness.open(Db, null);
+        }
+        try testing.expect(db.root().eql(root));
+        try testing.expectEqual(size, db.bounds().end);
+    }
+    try testing.expect(rewound > 0 and refused > 0);
+}
+
 // Commonware's `test_commit_after_sync_recovery`.
 test "current reopens a commit made after the last sync" {
     inline for (families) |F| {

@@ -38,11 +38,17 @@ it comes first once `any` lands.
 - [x] current variable (`Variable(Digest)` values): `CurrentMmr/Mmb{Unordered,Ordered}
   VariableConf`; the db tests run over one database per variant. Values that own memory wait
   on `any`.
-- [ ] current sync glue.
+- [ ] current sync glue (moved to the crypto lane, T-01a1d57b-08a0-72a4-a12b-10ff47f6049d).
 - [x] sync journal (`journal.init`/`resize`/`append` over contiguous journals, `Memory(Op)`)
   and the request tracker (`requests.Requests(F)`), with their commonware tests.
 - [ ] sync engine, database, source, harness; per-variant sync glue
-  (`keyless/sync.zig`, `immutable/sync.zig`, `any/sync/`), which this lane owns.
+  (`keyless/sync.zig`, `immutable/sync.zig`, `any/sync/`, `current/sync.zig`): handed to the
+  crypto lane (T-01a1d57b-08a0-72a4-a12b-10ff47f6049d), which now owns `qmdb/sync/` and the
+  glue files. This lane keeps current and compact (including `compact/sync.zig`, on its
+  `Database` interface).
+- [x] current bounded reopen refuses a pruned floor without discarding later commits
+  (clearing's d287952; regression test after clearing's
+  `test_bounded_reopen_fails_once_the_floor_is_pruned`).
 - [ ] compact (db, batch, operation, witness, sync) once persisted merkle compact lands.
 - [ ] Fuzz targets and benches for these modules.
 
