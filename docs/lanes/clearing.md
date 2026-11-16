@@ -62,6 +62,10 @@ formatting, and the deterministic runtime for tests. qmdb is only mentioned in c
 - `Close::check` is `Checked(P, H, A).check(O, ...)`: Zig cannot add the method from
   validator.zig, and the check borrows the close instead of consuming it (it clones the
   payment maps into the matrix).
+- The fuzz targets read their choices from bytes (as storage's do) and draw values from
+  `codec.arbitrary` seeds. The decode target also decodes each drawn value's encoding with two
+  bytes flipped, which commonware's does not. The verify target runs 8 seeded cases in Debug
+  (signatures dominate) and 256 otherwise; each input runs in an arena.
 - build.zig: clearing also imports `conformance` and `invariants` (commonware dev-deps).
 
 ## Backlog
@@ -81,7 +85,9 @@ formatting, and the deterministic runtime for tests. qmdb is only mentioned in c
   (after `any` unordered fixed in storage-qmdb). The check tests build parents without
   settling until then.
 - [ ] tests.rs ledger vector, and the integration tests (clearing/tests/bajillion).
-- [ ] Fuzz targets (clearing/fuzz: decode, verify) and benches (`src/clearing/benches.zig`).
+- [x] Fuzz targets `src/clearing/fuzz/{decode,verify}.zig` (commonware clearing/fuzz), seeded
+  in `zig build test` and under `std.testing.fuzz`; BalanceProof joins them with qmdb `current`.
+- [ ] Benches (`src/clearing/benches.zig`).
 
 ## Log
 - 2026-11-16: namespace, amounts, lookup with their tests; Amounts and Lookup conformance
@@ -95,3 +101,5 @@ formatting, and the deterministic runtime for tests. qmdb is only mentioned in c
   close checks); 18 of the 19 conformance hashes match (BalanceProof waits on qmdb `current`).
 - 2026-11-16: the payout log on storage's keyless `Db`: `Payouts`, `Payout.stage`, and the
   stage and payout-proof tests.
+- 2026-11-16: the decode and verify fuzz targets; 25,600 decode and 5,120 verify cases clean
+  in ReleaseSafe soaks.

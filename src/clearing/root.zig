@@ -13,4 +13,6 @@ pub const bajillion = @import("bajillion/mod.zig");
 
 test {
     std.testing.refAllDecls(@This());
+    _ = @import("fuzz/decode.zig");
+    _ = @import("fuzz/verify.zig");
 }
