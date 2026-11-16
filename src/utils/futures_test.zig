@@ -20,21 +20,6 @@ fn wait_then(receiver: *oneshot.Receiver(void), value: i32) i32 {
     return value;
 }
 
-fn relay(
-    receiver: *oneshot.Receiver(void),
-    sender: *oneshot.Sender(void),
-    value: i32,
-) i32 {
-    receiver.recv() catch {};
-    sender.send({}) catch {};
-    return value;
-}
-
-fn signal(sender: *oneshot.Sender(void), value: i32) i32 {
-    sender.send({}) catch {};
-    return value;
-}
-
 test "futures: pool initialization and adding tasks" {
     var pool = try futures.Pool(i32).init(gpa, io, 4);
     defer pool.deinit(gpa);
@@ -45,19 +30,22 @@ test "futures: pool initialization and adding tasks" {
 }
 
 test "futures: pool results arrive in completion order" {
+    var gates: [3]oneshot.Pair(void) = undefined;
+    for (&gates) |*gate| gate.* = try oneshot.channel(void, gpa, io);
+    defer for (&gates) |*gate| gate.receiver.deinit();
+    // Declared after the gates, so its tasks are canceled before their receivers go.
     var pool = try futures.Pool(i32).init(gpa, io, 3);
     defer pool.deinit(gpa);
-    var first = try oneshot.channel(void, gpa, io);
-    defer first.receiver.deinit();
-    var third = try oneshot.channel(void, gpa, io);
-    defer third.receiver.deinit();
-    // Task 1 waits for task 2, and task 3 waits for task 1.
-    pool.push(relay, .{ &first.receiver, &third.sender, 1 });
-    pool.push(wait_then, .{ &third.receiver, 3 });
-    pool.push(signal, .{ &first.sender, 2 });
-    try testing.expectEqual(2, try pool.next_completed());
-    try testing.expectEqual(1, try pool.next_completed());
-    try testing.expectEqual(3, try pool.next_completed());
+    // Task `i` returns `i + 1` once its gate opens. The test opens one gate at a time and takes
+    // that result before opening the next, so completion order is enforced, not timed, and it
+    // differs from push order.
+    for (&gates, 1..) |*gate, value| {
+        pool.push(wait_then, .{ &gate.receiver, @as(i32, @intCast(value)) });
+    }
+    for ([_]usize{ 2, 1, 3 }) |value| {
+        try gates[value - 1].sender.send({});
+        try testing.expectEqual(@as(i32, @intCast(value)), try pool.next_completed());
+    }
     try testing.expect(pool.is_empty());
 }
 
