@@ -1,0 +1,65 @@
+### 
+exit=2
+error: the following required arguments were not provided:
+  --me <me>
+  --participants <participants>
+  --networks <networks>
+
+Usage: indexer --me <me> --participants <participants> --networks <networks>
+
+For more information, try '--help'.
+### --help
+exit=0
+collect blocks and finality certificates
+
+Usage: indexer --me <me> --participants <participants> --networks <networks>
+
+Options:
+      --me <me>                      
+      --participants <participants>  All participants
+      --networks <networks>          All networks
+  -h, --help                         Print help
+### -h
+exit=0
+collect blocks and finality certificates
+
+Usage: indexer --me <me> --participants <participants> --networks <networks>
+
+Options:
+      --me <me>                      
+      --participants <participants>  All participants
+      --networks <networks>          All networks
+  -h, --help                         Print help
+### --me 0@3000
+exit=2
+error: the following required arguments were not provided:
+  --participants <participants>
+  --networks <networks>
+
+Usage: indexer --me <me> --participants <participants> --networks <networks>
+
+For more information, try '--help'.
+### --me 0@3000 --participants 1,x --networks ab
+exit=2
+error: invalid value 'x' for '--participants <participants>': invalid digit found in string
+
+For more information, try '--help'.
+### --me 0@3000 --participants 1 --networks ab --bogus 1
+exit=2
+error: unexpected argument '--bogus' found
+
+Usage: indexer --me <me> --participants <participants> --networks <networks>
+
+For more information, try '--help'.
+### --me
+exit=2
+error: a value is required for '--me <me>' but none was supplied
+
+For more information, try '--help'.
+### --version
+exit=2
+error: unexpected argument '--version' found
+
+Usage: indexer --me <me> --participants <participants> --networks <networks>
+
+For more information, try '--help'.

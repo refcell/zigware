@@ -22,12 +22,25 @@ test "the dealer prints commonware's dealing for the same seed" {
     try expect_dealing(7, &.{ 3, 3, 1 }, repeated);
 }
 
+fn run_dealer(gpa: std.mem.Allocator, args: []const []const u8, out: *Io.Writer) !u8 {
+    return dealer.run(gpa, args, "dealer", out, out);
+}
+
 test "the dealer's CLI prints clap's help and errors" {
-    const cases = @embedFile("testdata/dealer_clap_cases.txt");
+    try expect_clap_cases(@embedFile("testdata/dealer_clap_cases.txt"), 13, run_dealer);
+}
+
+/// Runs each `### <args>` record of `cases` (exit status, then stdout and stderr together,
+/// as a commonware binary printed them) through `run`, and checks there are `count`.
+pub fn expect_clap_cases(
+    cases: []const u8,
+    count: usize,
+    run: fn (std.mem.Allocator, []const []const u8, *Io.Writer) anyerror!u8,
+) !void {
     const gpa = testing.allocator;
     var records = std.mem.splitSequence(u8, cases[4..], "\n### ");
-    var count: usize = 0;
-    while (records.next()) |record| : (count += 1) {
+    var seen: usize = 0;
+    while (records.next()) |record| : (seen += 1) {
         const args_end = std.mem.indexOfScalar(u8, record, '\n').?;
         var args: std.ArrayList([]const u8) = .empty;
         defer args.deinit(gpa);
@@ -40,9 +53,8 @@ test "the dealer's CLI prints clap's help and errors" {
         var out: Io.Writer.Allocating = .init(gpa);
         defer out.deinit();
         errdefer std.debug.print("case: {s}\n", .{record[0..args_end]});
-        const exit = try dealer.run(gpa, args.items, "dealer", &out.writer, &out.writer);
-        try testing.expectEqual(expected_exit, exit);
+        try testing.expectEqual(expected_exit, try run(gpa, args.items, &out.writer));
         try testing.expectEqualStrings(expected, std.mem.trimEnd(u8, out.written(), "\n"));
     }
-    try testing.expectEqual(@as(usize, 13), count);
+    try testing.expectEqual(count, seen);
 }

@@ -9,3 +9,4 @@ pub const logger = @import("logger.zig");
 pub const terminal = @import("terminal.zig");
 pub const clap = @import("clap.zig");
 pub const rust = @import("rust.zig");
+pub const fmt = @import("fmt.zig");

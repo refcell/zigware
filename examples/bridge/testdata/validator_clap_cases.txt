@@ -1,0 +1,55 @@
+### 
+exit=2
+error: the following required arguments were not provided:
+  --me <me>
+  --participants <participants>
+  --storage-dir <storage-dir>
+  --indexer <indexer>
+  --identity <identity>
+  --share <share>
+  --other-public <other-public>
+
+Usage: validator --me <me> --participants <participants> --storage-dir <storage-dir> --indexer <indexer> --identity <identity> --share <share> --other-public <other-public>
+
+For more information, try '--help'.
+### --help
+exit=0
+produce finality certificates and verify external finality certificates
+
+Usage: validator [OPTIONS] --me <me> --participants <participants> --storage-dir <storage-dir> --indexer <indexer> --identity <identity> --share <share> --other-public <other-public>
+
+Options:
+      --bootstrappers <bootstrappers>  
+      --me <me>                        
+      --participants <participants>    All participants
+      --storage-dir <storage-dir>      
+      --indexer <indexer>              
+      --identity <identity>            
+      --share <share>                  
+      --other-public <other-public>    
+  -h, --help                           Print help
+### --me 1@3001
+exit=2
+error: the following required arguments were not provided:
+  --participants <participants>
+  --storage-dir <storage-dir>
+  --indexer <indexer>
+  --identity <identity>
+  --share <share>
+  --other-public <other-public>
+
+Usage: validator --me <me> --participants <participants> --storage-dir <storage-dir> --indexer <indexer> --identity <identity> --share <share> --other-public <other-public>
+
+For more information, try '--help'.
+### --me 1@3001 --participants 1,y --storage-dir d --indexer i --identity a --share s --other-public o
+exit=2
+error: invalid value 'y' for '--participants <participants>': invalid digit found in string
+
+For more information, try '--help'.
+### --bogus
+exit=2
+error: unexpected argument '--bogus' found
+
+Usage: validator [OPTIONS] --me <me> --participants <participants> --storage-dir <storage-dir> --indexer <indexer> --identity <identity> --share <share> --other-public <other-public>
+
+For more information, try '--help'.

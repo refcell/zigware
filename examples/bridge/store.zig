@@ -152,7 +152,7 @@ pub fn block_digest(block: types.BlockFormat) lib.Digest {
 }
 
 /// The largest block encoding: a tag and a finalization.
-pub const block_size_max = 1 + types.Finalization.max_encode_size_for(0);
+pub const block_size_max = types.outbound_size_max - 1;
 
 /// Formats a codec value as lowercase hex of its encoding (commonware's `Hex` Debug).
 pub fn Hex(comptime T: type) type {

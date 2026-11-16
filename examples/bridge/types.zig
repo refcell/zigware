@@ -94,6 +94,9 @@ pub const Outbound = union(enum(u8)) {
     pub const read = Tagged(Outbound).read;
 };
 
+/// The largest `Outbound` encoding: a tag, a block's tag, and a finalization.
+pub const outbound_size_max = 2 + Finalization.max_encode_size_for(0);
+
 /// codec for an enum: the variant's index as a `u8`, then the variant.
 fn Tagged(comptime U: type) type {
     const info = @typeInfo(U).@"union";

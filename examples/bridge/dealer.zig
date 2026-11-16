@@ -122,4 +122,5 @@ pub fn main(init: std.process.Init) !u8 {
 test {
     _ = @import("bridge_test.zig");
     _ = @import("lib.zig");
+    _ = @import("fmt_test.zig");
 }

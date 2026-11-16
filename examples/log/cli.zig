@@ -131,18 +131,4 @@ fn parse_bootstrappers(
 const out_of_bounds = "index out of bounds: the len is 1 but the index is 1";
 
 /// A failure commonware reports with a panic; the message is commonware's.
-pub const Panic = struct {
-    buffer: [256]u8 = undefined,
-    len: usize = 0,
-
-    pub fn message(panic: *const Panic) []const u8 {
-        return panic.buffer[0..panic.len];
-    }
-
-    pub fn fail(panic: *Panic, comptime format: []const u8, args: anytype) error{Panic} {
-        var writer: Io.Writer = .fixed(&panic.buffer);
-        writer.print(format, args) catch {}; // Truncated: the buffer is full.
-        panic.len = writer.end;
-        return error.Panic;
-    }
-};
+pub const Panic = rust.Panic;

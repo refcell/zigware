@@ -114,7 +114,13 @@ statistics, output, CLI) and run against a minimal in-lane stand-in, then switch
   finalizations, tested against the store as an in-process indexer. Propose and verify run on
   the voter's tasks and share the indexer connection under a mutex instead of commonware's
   single actor; finalizations to post go through a mailbox to `run`.
-- [ ] `indexer` and `validator` binaries on discovery and simplex (bls12381 threshold).
+- [x] `indexer` (`zig build run-bridge-indexer`): clap output matches commonware's binary
+  (`testdata/indexer_clap_cases.txt`), its panics match, and it logs through `ui.fmt`
+  (tracing_subscriber's default `fmt()` format, checked against the binary's colored output).
+  Interop: commonware's Rust validators on two networks of 4 finalize through it and bridge
+  each other's finalizations. Field values over 128 bytes are cut by runtime's traces
+  (`field_value_size_max`), so `network=` (192 hex digits) prints shortened.
+- [ ] `validator` binary on discovery and simplex (bls12381 threshold).
 - [ ] Demo: two networks of 4 validators and an indexer.
 
 ### Follow-ups
@@ -139,3 +145,4 @@ statistics, output, CLI) and run against a minimal in-lane stand-in, then switch
 - 2026-11-16: bridge's dealer; build.zig builds `<name>/<binary>` entries as `<name>-<binary>`.
 - 2026-11-16: log and chat Logs panes show p2p and simplex events; bridge wire types.
 - 2026-11-16: bridge's indexer store and application.
+- 2026-11-16: bridge's indexer binary; `ui.fmt` (tracing's default log format).
