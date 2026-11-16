@@ -798,4 +798,62 @@ test "every operation runs on every strategy, including multi-threaded pools" {
     try exercise_all(Rayon.init(empty).with_parallelism(4));
     try exercise_all(parallel.mocks.Explorer.parallel(Rayon.init(threaded)));
     for (0..8) |seed| try exercise_all(parallel.mocks.Explorer.seeded(Rayon.init(threaded), seed));
+    // An adaptive strategy runs each call site serial or parallel as it learns; both agree.
+    var policy = parallel.Policy.init(testing.io);
+    for (0..24) |_| try exercise_all(Rayon.init(threaded).with_policy(&policy));
+    try testing.expect(policy.len() > 0);
+}
+
+const TinySum = struct {
+    pub fn identity(_: TinySum) u64 {
+        return 0;
+    }
+    pub fn fold(_: TinySum, acc: u64, item: usize) u64 {
+        return acc + item;
+    }
+    pub fn reduce(_: TinySum, a: u64, b: u64) u64 {
+        return a + b;
+    }
+};
+
+const Failing = struct {
+    pub fn identity(_: Failing) u64 {
+        return 0;
+    }
+    pub fn fold(_: Failing, _: u64, item: usize) error{Odd}!u64 {
+        if (item == 3) return error.Odd;
+        return 0;
+    }
+    pub fn reduce(_: Failing, a: u64, b: u64) u64 {
+        return a + b;
+    }
+};
+
+test "an adaptive Rayon learns each call site's paths and records only successes" {
+    const pool = try create_pool(3);
+    defer pool.destroy();
+    var policy = parallel.Policy.init(testing.io);
+    const strategy = Rayon.init(pool).with_policy(&policy);
+    // One call site: the first call seeds parallel, the second (busy time far under budget)
+    // seeds serial, and every call returns the same sum.
+    for (0..3) |_| {
+        try testing.expectEqual(@as(u64, 4950), strategy.fold(Range.upto(100), TinySum{}));
+    }
+    try testing.expectEqual(@as(usize, 1), policy.len());
+    const entry = policy.run_entries.entries[0];
+    try testing.expect(entry.serial_ns.get() != null);
+    try testing.expect(entry.placement.estimate(.wide) != null);
+    try testing.expect(entry.busy_ns[@backingInt(parallel.policy.Placement.wide)].get() != null);
+
+    // A failed call creates its entry but records no sample.
+    try testing.expectError(error.Odd, strategy.try_fold(Range.upto(100), Failing{}));
+    try testing.expectEqual(@as(usize, 2), policy.len());
+    const failed = policy.run_entries.entries[1];
+    try testing.expectEqual(@as(?u64, null), failed.placement.estimate(.wide));
+    try testing.expectEqual(@as(?u64, null), failed.serial_ns.get());
+
+    // A strategy planning with parallelism 1 never consults its policy.
+    const single = Rayon.init(pool).with_parallelism(1).with_policy(&policy);
+    try testing.expectEqual(@as(u64, 4950), single.fold(Range.upto(100), TinySum{}));
+    try testing.expectEqual(@as(usize, 2), policy.len());
 }

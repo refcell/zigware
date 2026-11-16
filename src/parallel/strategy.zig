@@ -20,7 +20,7 @@ const max_chunks = ops.max_chunks;
 
 /// Runs `op.serial()` or `op.parallel()`, which must return the same type. A strategy without
 /// parallelism always runs the serial body.
-pub fn run(strategy: anytype, len: usize, op: anytype) Return(@TypeOf(op), "serial") {
+fn run_on(strategy: anytype, len: usize, op: anytype) Return(@TypeOf(op), "serial") {
     const Op = @TypeOf(op);
     comptime assert(Return(Op, "serial") == Return(Op, "parallel"));
     assert(strategy.parallelism() >= 1);
@@ -29,9 +29,240 @@ pub fn run(strategy: anytype, len: usize, op: anytype) Return(@TypeOf(op), "seri
     return op.serial();
 }
 
-/// Like `run`, for bodies that return error unions. An adaptive strategy records elapsed time
-/// only on success.
+/// What a call's work runs on, for an adaptive strategy's timing: the caller's own thread
+/// (`run`'s bodies, whose busy time is their wall time), or jobs the strategy places on its
+/// pool, whose busy time is metered.
+pub const Body = enum { caller, placed };
+
+/// The strategy one call runs on. A strategy declaring `adapt` (a `Rayon` with a policy)
+/// chooses serial or parallel for the call site and times the call; others run unchanged.
+pub fn Adapted(comptime S: type) type {
+    const B = ops.Base(S);
+    if (@hasDecl(B, "adapt")) return B.Adaptation;
+    return struct {
+        strategy: S,
+
+        pub fn get(adapted: *@This()) S {
+            return adapted.strategy;
+        }
+
+        pub fn finish(_: *@This(), result: anytype) @TypeOf(result) {
+            return result;
+        }
+    };
+}
+
+/// Adapts `strategy` for a call from `site` over `len` items and `work` estimated units.
+pub fn adapt(
+    strategy: anytype,
+    site: usize,
+    len: usize,
+    work: usize,
+    body: Body,
+) Adapted(@TypeOf(strategy)) {
+    // `run`'s bodies run on the caller, and their work is their length.
+    assert(body == .placed or work == len);
+    if (comptime @hasDecl(ops.Base(@TypeOf(strategy)), "adapt")) {
+        return strategy.adapt(site, len, work, body);
+    }
+    return .{ .strategy = strategy };
+}
+
+// The operations. Each adapts once, at its outermost call, keyed by its caller's address, and
+// runs the matching `*_on` body on the adapted strategy.
+
+/// Runs `op.serial()` or `op.parallel()`, which must return the same type. A strategy without
+/// parallelism always runs the serial body; an adaptive one picks per call site. `try_run` is
+/// the same for bodies that return error unions: an adaptive strategy records only successes.
+pub fn run(strategy: anytype, len: usize, op: anytype) Return(@TypeOf(op), "serial") {
+    var call = adapt(strategy, @returnAddress(), len, len, .caller);
+    return call.finish(run_on(call.get(), len, op));
+}
+
 pub const try_run = run;
+
+/// Reduces `items` to one value: each chunk folds its items into `op.identity()` with
+/// `op.fold(acc, item)`, and the chunk results combine in order with `op.reduce(a, b)`.
+pub fn fold(strategy: anytype, items: anytype, op: anytype) Return(@TypeOf(op), "identity") {
+    const len = ops.count(items);
+    var call = adapt(strategy, @returnAddress(), len, len, .placed);
+    return call.finish(fold_on(call.get(), items, op));
+}
+
+/// Like `fold`, with one `op.init()` state per chunk passed to `op.fold(acc, &state, item)`.
+pub fn fold_init(strategy: anytype, items: anytype, op: anytype) Return(@TypeOf(op), "identity") {
+    const len = ops.count(items);
+    var call = adapt(strategy, @returnAddress(), len, len, .placed);
+    return call.finish(fold_init_on(call.get(), items, op));
+}
+
+/// Like `fold`, but `op.fold(acc, item)` returns an error union; see `try_fold_on`.
+pub fn try_fold(strategy: anytype, items: anytype, op: anytype) Return(@TypeOf(op), "fold") {
+    const len = ops.count(items);
+    var call = adapt(strategy, @returnAddress(), len, len, .placed);
+    return call.finish(try_fold_on(call.get(), items, op));
+}
+
+/// Writes `op.map(item)` for every item into `out`, in input order.
+pub fn map_into(strategy: anytype, items: anytype, out: anytype, op: anytype) void {
+    const len = ops.count(items);
+    var call = adapt(strategy, @returnAddress(), len, len, .placed);
+    return call.finish(map_into_on(call.get(), items, out, op));
+}
+
+/// Like `map_into`, with one `op.init()` state per chunk passed to `op.map(&state, item)`.
+pub fn map_init_into(strategy: anytype, items: anytype, out: anytype, op: anytype) void {
+    const len = ops.count(items);
+    var call = adapt(strategy, @returnAddress(), len, len, .placed);
+    return call.finish(map_init_into_on(call.get(), items, out, op));
+}
+
+/// Like `map_into` for a fallible `op.map(item)`; see `try_map_into_on`.
+pub fn try_map_into(
+    strategy: anytype,
+    items: anytype,
+    out: anytype,
+    op: anytype,
+) ops.ErrorOf(Return(@TypeOf(op), "map"))!void {
+    const len = ops.count(items);
+    var call = adapt(strategy, @returnAddress(), len, len, .placed);
+    return call.finish(try_map_into_on(call.get(), items, out, op));
+}
+
+/// Maps every item with `op.map(item)` into a new slice owned by the caller.
+pub fn map_collect(
+    strategy: anytype,
+    allocator: std.mem.Allocator,
+    items: anytype,
+    op: anytype,
+) std.mem.Allocator.Error![]Return(@TypeOf(op), "map") {
+    const len = ops.count(items);
+    var call = adapt(strategy, @returnAddress(), len, len, .placed);
+    return call.finish(map_collect_on(call.get(), allocator, items, op));
+}
+
+/// Like `map_collect`, with one `op.init()` state per chunk.
+pub fn map_init_collect(
+    strategy: anytype,
+    allocator: std.mem.Allocator,
+    items: anytype,
+    op: anytype,
+) std.mem.Allocator.Error![]Return(@TypeOf(op), "map") {
+    const len = ops.count(items);
+    var call = adapt(strategy, @returnAddress(), len, len, .placed);
+    return call.finish(map_init_collect_on(call.get(), allocator, items, op));
+}
+
+/// `map_collect` with an estimate of the work per item, which an adaptive strategy keys its
+/// serial-or-parallel decision by.
+pub fn map_collect_with_multiplier(
+    strategy: anytype,
+    allocator: std.mem.Allocator,
+    items: anytype,
+    multiplier: usize,
+    op: anytype,
+) std.mem.Allocator.Error![]Return(@TypeOf(op), "map") {
+    const len = ops.count(items);
+    var call = adapt(strategy, @returnAddress(), len, len *| multiplier, .placed);
+    return call.finish(map_collect_on(call.get(), allocator, items, op));
+}
+
+/// `map_init_collect` with an estimate of the work per item.
+pub fn map_init_collect_with_multiplier(
+    strategy: anytype,
+    allocator: std.mem.Allocator,
+    items: anytype,
+    multiplier: usize,
+    op: anytype,
+) std.mem.Allocator.Error![]Return(@TypeOf(op), "map") {
+    const len = ops.count(items);
+    var call = adapt(strategy, @returnAddress(), len, len *| multiplier, .placed);
+    return call.finish(map_init_collect_on(call.get(), allocator, items, op));
+}
+
+/// Like `map_collect`, for a fallible `op.map(item)`; see `try_map_into_on`.
+pub fn try_map_collect(
+    strategy: anytype,
+    allocator: std.mem.Allocator,
+    items: anytype,
+    op: anytype,
+) (std.mem.Allocator.Error || ops.ErrorOf(Return(@TypeOf(op), "map")))![]ops.Payload(
+    Return(@TypeOf(op), "map"),
+) {
+    const len = ops.count(items);
+    var call = adapt(strategy, @returnAddress(), len, len, .placed);
+    return call.finish(try_map_collect_on(call.get(), allocator, items, op));
+}
+
+/// Maps every item with `op.map(item)`, which returns `struct { K, ?U }`; see
+/// `map_partition_collect_on`.
+pub fn map_partition_collect(
+    strategy: anytype,
+    allocator: std.mem.Allocator,
+    items: anytype,
+    op: anytype,
+) std.mem.Allocator.Error!ops.Partitioned(ops.PartitionKey(@TypeOf(op)), ops.PartitionValue(
+    @TypeOf(op),
+)) {
+    const len = ops.count(items);
+    var call = adapt(strategy, @returnAddress(), len, len, .placed);
+    return call.finish(map_partition_collect_on(call.get(), allocator, items, op));
+}
+
+/// Runs `a.call()` and `b.call()`, potentially in parallel, and returns both results.
+pub fn join(
+    strategy: anytype,
+    a: anytype,
+    b: anytype,
+) ops.Pair(Return(@TypeOf(a), "call"), Return(@TypeOf(b), "call")) {
+    var call = adapt(strategy, @returnAddress(), 1, 1, .placed);
+    return call.finish(join_on(call.get(), a, b));
+}
+
+/// Sorts `items` by `lessThan`, preserving the order of equal elements.
+pub fn sort_by(
+    strategy: anytype,
+    comptime T: type,
+    items: []T,
+    context: anytype,
+    comptime lessThan: fn (@TypeOf(context), T, T) bool,
+) void {
+    var call = adapt(strategy, @returnAddress(), items.len, items.len, .placed);
+    return call.finish(sort_by_on(call.get(), T, items, context, lessThan));
+}
+
+/// Sorts `items` by `lessThan`, leaving the order of equal elements unspecified.
+pub fn sort_unstable_by(
+    strategy: anytype,
+    comptime T: type,
+    items: []T,
+    context: anytype,
+    comptime lessThan: fn (@TypeOf(context), T, T) bool,
+) void {
+    var call = adapt(strategy, @returnAddress(), items.len, items.len, .placed);
+    return call.finish(sort_unstable_by_on(call.get(), T, items, context, lessThan));
+}
+
+/// Runs `op.run(batches)` once with batches covering `0..len` (see `Batches`). `multiplier`
+/// estimates the work per item for adaptive strategies; input too small for two batches runs
+/// as one without consulting them. `try_run_batches` is the same for an `op.run` that returns
+/// an error union.
+pub fn run_batches(
+    strategy: anytype,
+    len: usize,
+    minimum_batch_len: usize,
+    multiplier: usize,
+    op: anytype,
+) Return(@TypeOf(op), "run") {
+    assert(minimum_batch_len > 0);
+    if (@min(strategy.parallelism(), len / minimum_batch_len) < 2) {
+        return run_batches_on(strategy, len, minimum_batch_len, multiplier, op);
+    }
+    var call = adapt(strategy, @returnAddress(), len, len *| multiplier, .placed);
+    return call.finish(run_batches_on(call.get(), len, minimum_batch_len, multiplier, op));
+}
+
+pub const try_run_batches = run_batches;
 
 /// Runs `part.chunk(start, end)` over the chunks of `0..len` the strategy splits it into,
 /// storing chunk `i`'s result in `partials[i]`. Returns the chunk count.
@@ -69,7 +300,7 @@ fn discard(op: anytype, value: anytype) void {
 
 /// Reduces `items` to one value: each chunk folds its items into `op.identity()` with
 /// `op.fold(acc, item)`, and the chunk results combine in order with `op.reduce(a, b)`.
-pub fn fold(strategy: anytype, items: anytype, op: anytype) Return(@TypeOf(op), "identity") {
+fn fold_on(strategy: anytype, items: anytype, op: anytype) Return(@TypeOf(op), "identity") {
     const Op = @TypeOf(op);
     const Items = @TypeOf(items);
     const R = Return(Op, "identity");
@@ -92,7 +323,7 @@ pub fn fold(strategy: anytype, items: anytype, op: anytype) Return(@TypeOf(op), 
 
 /// Like `fold`, with one `op.init()` state per chunk passed to `op.fold(acc, &state, item)`.
 /// When the operation declares `deinit_state(&state)`, each chunk's state is released after it.
-pub fn fold_init(strategy: anytype, items: anytype, op: anytype) Return(@TypeOf(op), "identity") {
+fn fold_init_on(strategy: anytype, items: anytype, op: anytype) Return(@TypeOf(op), "identity") {
     const Op = @TypeOf(op);
     const Items = @TypeOf(items);
     const R = Return(Op, "identity");
@@ -123,7 +354,7 @@ pub fn fold_init(strategy: anytype, items: anytype, op: anytype) Return(@TypeOf(
 /// Like `fold`, but `op.fold(acc, item)` returns an error union. After an error, chunks stop
 /// folding, the first error in chunk order is returned, and the other chunks' accumulators are
 /// passed to `op.discard` if the operation declares it.
-pub fn try_fold(strategy: anytype, items: anytype, op: anytype) Return(@TypeOf(op), "fold") {
+fn try_fold_on(strategy: anytype, items: anytype, op: anytype) Return(@TypeOf(op), "fold") {
     const Op = @TypeOf(op);
     const Items = @TypeOf(items);
     const Result = Return(Op, "fold");
@@ -166,7 +397,7 @@ pub fn try_fold(strategy: anytype, items: anytype, op: anytype) Return(@TypeOf(o
 
 /// Writes `op.map(item)` for every item into `out`, which must have one slot per item. Output
 /// order matches input order.
-pub fn map_into(strategy: anytype, items: anytype, out: anytype, op: anytype) void {
+fn map_into_on(strategy: anytype, items: anytype, out: anytype, op: anytype) void {
     const Part = struct {
         items: @TypeOf(items),
         out: @TypeOf(out),
@@ -184,7 +415,7 @@ pub fn map_into(strategy: anytype, items: anytype, out: anytype, op: anytype) vo
 }
 
 /// Like `map_into`, with one `op.init()` state per chunk passed to `op.map(&state, item)`.
-pub fn map_init_into(strategy: anytype, items: anytype, out: anytype, op: anytype) void {
+fn map_init_into_on(strategy: anytype, items: anytype, out: anytype, op: anytype) void {
     const Part = struct {
         items: @TypeOf(items),
         out: @TypeOf(out),
@@ -202,34 +433,34 @@ pub fn map_init_into(strategy: anytype, items: anytype, out: anytype, op: anytyp
 }
 
 /// Maps every item with `op.map(item)` into a new slice owned by the caller.
-pub fn map_collect(
+fn map_collect_on(
     strategy: anytype,
     allocator: std.mem.Allocator,
     items: anytype,
     op: anytype,
 ) std.mem.Allocator.Error![]Return(@TypeOf(op), "map") {
     const out = try allocator.alloc(Return(@TypeOf(op), "map"), ops.count(items));
-    map_into(strategy, items, out, op);
+    map_into_on(strategy, items, out, op);
     assert(out.len == ops.count(items));
     return out;
 }
 
 /// Like `map_collect`, with one `op.init()` state per chunk passed to `op.map(&state, item)`.
-pub fn map_init_collect(
+fn map_init_collect_on(
     strategy: anytype,
     allocator: std.mem.Allocator,
     items: anytype,
     op: anytype,
 ) std.mem.Allocator.Error![]Return(@TypeOf(op), "map") {
     const out = try allocator.alloc(Return(@TypeOf(op), "map"), ops.count(items));
-    map_init_into(strategy, items, out, op);
+    map_init_into_on(strategy, items, out, op);
     assert(out.len == ops.count(items));
     return out;
 }
 
 /// `map_collect` with an estimate of the work per item, which adaptive strategies use to decide
 /// between serial and parallel execution.
-pub fn map_collect_with_multiplier(
+fn map_collect_with_multiplier_on(
     strategy: anytype,
     allocator: std.mem.Allocator,
     items: anytype,
@@ -237,11 +468,11 @@ pub fn map_collect_with_multiplier(
     op: anytype,
 ) std.mem.Allocator.Error![]Return(@TypeOf(op), "map") {
     _ = multiplier;
-    return map_collect(strategy, allocator, items, op);
+    return map_collect_on(strategy, allocator, items, op);
 }
 
 /// `map_init_collect` with an estimate of the work per item.
-pub fn map_init_collect_with_multiplier(
+fn map_init_collect_with_multiplier_on(
     strategy: anytype,
     allocator: std.mem.Allocator,
     items: anytype,
@@ -249,7 +480,7 @@ pub fn map_init_collect_with_multiplier(
     op: anytype,
 ) std.mem.Allocator.Error![]Return(@TypeOf(op), "map") {
     _ = multiplier;
-    return map_init_collect(strategy, allocator, items, op);
+    return map_init_collect_on(strategy, allocator, items, op);
 }
 
 /// How far a chunk of a fallible map got: outputs `start..end` were written, and `failure` is
@@ -261,7 +492,7 @@ fn Progress(comptime E: type) type {
 /// Like `map_into`, but `op.map(item)` returns an error union. After an error, chunks stop
 /// mapping and the first error in chunk order is returned; outputs already written are passed
 /// to `op.discard` if the operation declares it, and the contents of `out` are unspecified.
-pub fn try_map_into(
+fn try_map_into_on(
     strategy: anytype,
     items: anytype,
     out: anytype,
@@ -303,7 +534,7 @@ pub fn try_map_into(
 }
 
 /// Like `map_collect`, for a fallible `op.map(item)`; see `try_map_into`.
-pub fn try_map_collect(
+fn try_map_collect_on(
     strategy: anytype,
     allocator: std.mem.Allocator,
     items: anytype,
@@ -314,14 +545,14 @@ pub fn try_map_collect(
     const T = ops.Payload(Return(@TypeOf(op), "map"));
     const out = try allocator.alloc(T, ops.count(items));
     errdefer allocator.free(out);
-    try try_map_into(strategy, items, out, op);
+    try try_map_into_on(strategy, items, out, op);
     assert(out.len == ops.count(items));
     return out;
 }
 
 /// Maps every item with `op.map(item)`, which returns `struct { K, ?U }`. Values go to
 /// `results` and keys of items that mapped to null go to `filtered`, both in input order.
-pub fn map_partition_collect(
+fn map_partition_collect_on(
     strategy: anytype,
     allocator: std.mem.Allocator,
     items: anytype,
@@ -331,7 +562,7 @@ pub fn map_partition_collect(
 )) {
     const K = ops.PartitionKey(@TypeOf(op));
     const U = ops.PartitionValue(@TypeOf(op));
-    const pairs = try map_collect(strategy, allocator, items, op);
+    const pairs = try map_collect_on(strategy, allocator, items, op);
     defer allocator.free(pairs);
     var values: usize = 0;
     for (pairs) |pair| values += @intFromBool(pair[1] != null);
@@ -355,7 +586,7 @@ pub fn map_partition_collect(
 }
 
 /// Runs `a.call()` and `b.call()`, potentially in parallel, and returns both results.
-pub fn join(
+fn join_on(
     strategy: anytype,
     a: anytype,
     b: anytype,
@@ -386,7 +617,7 @@ pub fn join(
 pub const sort_run_len_min: usize = 256;
 
 /// Sorts `items` by `lessThan`, preserving the order of equal elements.
-pub fn sort_by(
+fn sort_by_on(
     strategy: anytype,
     comptime T: type,
     items: []T,
@@ -397,7 +628,7 @@ pub fn sort_by(
 }
 
 /// Sorts `items` by `lessThan`, leaving the order of equal elements unspecified.
-pub fn sort_unstable_by(
+fn sort_unstable_by_on(
     strategy: anytype,
     comptime T: type,
     items: []T,
@@ -638,7 +869,7 @@ pub fn Batches(comptime Strategy: type) type {
 /// Runs `op.run(batches)` once with batches covering `0..len` (see `Batches`). `multiplier`
 /// estimates the work per item for adaptive strategies. Both shapes must produce equivalent
 /// results.
-pub fn run_batches(
+fn run_batches_on(
     strategy: anytype,
     len: usize,
     minimum_batch_len: usize,
@@ -656,6 +887,3 @@ pub fn run_batches(
         .batches = batches,
     });
 }
-
-/// Like `run_batches`, for an `op.run` that returns an error union.
-pub const try_run_batches = run_batches;

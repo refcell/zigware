@@ -24,6 +24,9 @@ placeholder until this lands, so land `Strategy` first and tell the coordinator 
   and `tiles.fill_collect(gpa, op{init, fill(*state, row, columns), finish(*state, row)})`,
   `spawn(len, &task)` / `block_on(&task)` with `parallel.Task(Op)` (`op.call()`),
   `parallelism()`. Optional op hooks: `discard(value)`, `deinit_state(*state)`.
+  `Rayon.with_policy(&policy)` (with `var policy = parallel.Policy.init(io)`, shareable across
+  strategies) makes every operation choose serial or parallel per call site, as commonware's
+  default `Rayon` does; without it `Rayon` always runs the parallel shape.
 
 - `parallel.mocks`: `pooled(gpa, io, workers, parallelism)`, `inlined(gpa, io, parallelism)`,
   `pending(gpa, io, workers)`, `Explorer.parallel(rayon)` / `Explorer.seeded(rayon, seed)`,
@@ -98,7 +101,8 @@ placeholder until this lands, so land `Strategy` first and tell the coordinator 
 - [x] parallel: `spawn`/`block_on` over the pool.
 - [x] parallel mocks.rs (Explorer, explore, pooled, inlined, pending) with its tests.
 - [x] parallel policy.rs and topology.rs: the adaptive policy and the topology model.
-- [ ] parallel: let `Rayon` consult a `Policy` (opt-in `with_policy`), timing runs and spawns.
+- [x] parallel: let `Rayon` consult a `Policy` (opt-in `with_policy`), timing runs.
+- [ ] parallel: adaptive spawn (inline vs offload) through the policy's spawn decisions.
 - [x] allocator: an allocator wrapper with commonware's metrics and purge/reserve
   configuration; no mimalloc (zero deps).
 - [x] bench: the benchmark workload abstraction (lib.rs) and `zig build bench`.
@@ -107,6 +111,8 @@ placeholder until this lands, so land `Strategy` first and tell the coordinator 
 - [ ] Fuzz targets and benches.
 
 ## Log
+- 2026-11-13: `Rayon.with_policy`: operations adapt once at their outermost call (keyed by
+  return address, length bucket, work bucket), meter pool-job busy time, record only successes.
 - 2026-11-13: parallel topology model (LLC detection, group width, partition, reservations).
 - 2026-11-13: parallel policy (adaptive serial/parallel and inline/offload decisions) with
   ported policy.rs tests.

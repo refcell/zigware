@@ -6,8 +6,12 @@
 //! lawful operation (an identity and an associative reduce) it also equals the `Sequential`
 //! result. Without parallelism (`parallelism() == 1`) every operation runs serially.
 //!
-//! This strategy has no adaptive policy yet: like commonware's `Rayon::without_policy`, it runs
-//! the parallel shape whenever its parallelism exceeds one.
+//! By default the strategy runs the parallel shape whenever its parallelism exceeds one, like
+//! commonware's `Rayon::without_policy`, so results never depend on timing. `with_policy`
+//! makes it adaptive like commonware's default `Rayon`: each operation asks a shared `Policy`
+//! whether this call site runs serial or parallel, and timed calls report their wall time and
+//! busy time (the summed time of the pool jobs a parallel run placed, or the wall time of a
+//! serial run or of `run`'s bodies, which run on the caller).
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -16,8 +20,10 @@ const shared = @import("strategy.zig");
 const tiles = @import("tiles.zig");
 const task_module = @import("task.zig");
 const pool_module = @import("pool.zig");
+const policy_module = @import("policy.zig");
 
 const ThreadPool = pool_module.ThreadPool;
+const Policy = policy_module.Policy;
 
 comptime {
     assert(pool_module.max_jobs == ops.max_chunks);
@@ -27,6 +33,10 @@ pub const Rayon = struct {
     pool: *ThreadPool,
     /// The parallelism assumed for planning batches and choosing serial or parallel shapes.
     parallelism_planned: usize,
+    /// The adaptive policy, or null to always run the parallel shape.
+    policy: ?*Policy = null,
+    /// Where `execute` adds each job's busy time during a measured parallel run.
+    meter: ?*std.atomic.Value(u64) = null,
 
     /// A strategy over `pool`, planning with the pool's workers plus the calling thread, which
     /// also runs jobs while it waits.
@@ -44,6 +54,100 @@ pub const Rayon = struct {
         copy.parallelism_planned = parallelism_planned;
         assert(copy.pool == rayon.pool);
         return copy;
+    }
+
+    /// The strategy with an adaptive `policy`, which may be shared with other strategies.
+    pub fn with_policy(rayon: Rayon, policy: *Policy) Rayon {
+        var copy = rayon;
+        copy.policy = policy;
+        assert(copy.pool == rayon.pool);
+        return copy;
+    }
+
+    /// One call's plan and timing (see `strategy.adapt`).
+    pub const Adaptation = struct {
+        /// The strategy the call runs on, without a policy so nothing in it adapts again.
+        chosen: Rayon,
+        policy: ?*Policy,
+        site: usize,
+        len: usize,
+        work: usize,
+        body: shared.Body,
+        /// The parallelism the plan was made with, before a serial choice lowered it to 1.
+        parallelism_planned: usize,
+        plan: policy_module.RunPlan,
+        start_ns: u64,
+        busy_ns: std.atomic.Value(u64) = .init(0),
+
+        fn metered(adaptation: *const Adaptation) bool {
+            return adaptation.plan.measure and adaptation.plan.execution == .parallel and
+                adaptation.body == .placed;
+        }
+
+        /// The strategy to run the call on. `adaptation` must not move until `finish`.
+        pub fn get(adaptation: *Adaptation) Rayon {
+            var chosen = adaptation.chosen;
+            if (adaptation.metered()) chosen.meter = &adaptation.busy_ns;
+            assert(chosen.policy == null);
+            return chosen;
+        }
+
+        /// Records a measured call that succeeded, and returns its `result`.
+        pub fn finish(adaptation: *Adaptation, result: anytype) @TypeOf(result) {
+            const policy = adaptation.policy orelse return result;
+            if (!adaptation.plan.measure) return result;
+            if (@typeInfo(@TypeOf(result)) == .error_union) {
+                // An error can skip work and bias the estimates down.
+                _ = result catch return result;
+            }
+            const wall_ns = now_ns(adaptation.chosen.pool.io) -| adaptation.start_ns;
+            const metered_ns = adaptation.busy_ns.load(.acquire);
+            const busy_ns = if (adaptation.metered()) metered_ns else wall_ns;
+            policy.record_run(
+                adaptation.site,
+                adaptation.len,
+                adaptation.work,
+                adaptation.parallelism_planned,
+                adaptation.plan,
+                .{ .wall_ns = wall_ns, .busy_ns = busy_ns },
+            );
+            return result;
+        }
+    };
+
+    /// Plans one call from `site` (see `strategy.adapt`). Without a policy the call runs as is.
+    pub fn adapt(
+        rayon: Rayon,
+        site: usize,
+        len: usize,
+        work: usize,
+        body: shared.Body,
+    ) Adaptation {
+        var chosen = rayon;
+        chosen.policy = null;
+        chosen.meter = null;
+        var plan: policy_module.RunPlan = .{
+            .execution = if (rayon.parallelism_planned > 1) .parallel else .serial,
+            .placement = .wide,
+            .measure = false,
+        };
+        if (rayon.policy) |policy| {
+            const pools: policy_module.Pools = .{ .fixed = .wide };
+            plan = policy.choose_run(site, len, work, rayon.parallelism_planned, pools);
+        }
+        if (plan.execution == .serial) chosen.parallelism_planned = 1;
+        assert(chosen.parallelism_planned >= 1);
+        return .{
+            .chosen = chosen,
+            .policy = rayon.policy,
+            .site = site,
+            .len = len,
+            .work = work,
+            .body = body,
+            .parallelism_planned = rayon.parallelism_planned,
+            .plan = plan,
+            .start_ns = if (plan.measure) now_ns(rayon.pool.io) else 0,
+        };
     }
 
     pub fn parallelism(rayon: Rayon) usize {
@@ -72,7 +176,20 @@ pub const Rayon = struct {
             for (0..count) |index| body(context, index);
             return;
         }
-        rayon.pool.run(count, context, body);
+        const meter = rayon.meter orelse return rayon.pool.run(count, context, body);
+        const Metered = struct {
+            inner: @TypeOf(context),
+            meter: *std.atomic.Value(u64),
+            io: std.Io,
+
+            fn call(metered: *const @This(), index: usize) void {
+                const start = now_ns(metered.io);
+                body(metered.inner, index);
+                _ = metered.meter.fetchAdd(now_ns(metered.io) -| start, .release);
+            }
+        };
+        const metered: Metered = .{ .inner = context, .meter = meter, .io = rayon.pool.io };
+        rayon.pool.run(count, &metered, Metered.call);
     }
 
     /// The pool's allocator, which parallel sorts borrow for their merge buffer.
@@ -115,3 +232,10 @@ pub const Rayon = struct {
     pub const sort_by = shared.sort_by;
     pub const sort_unstable_by = shared.sort_unstable_by;
 };
+
+/// Nanoseconds on `io`'s monotonic clock.
+fn now_ns(io: std.Io) u64 {
+    const now = std.Io.Clock.awake.now(io).nanoseconds;
+    assert(now >= 0);
+    return @intCast(now);
+}

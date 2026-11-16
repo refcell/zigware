@@ -15,6 +15,7 @@
 const std = @import("std");
 const assert = std.debug.assert;
 const ops = @import("ops.zig");
+const strategy_module = @import("strategy.zig");
 
 const Range = ops.Range;
 const max_chunks = ops.max_chunks;
@@ -414,7 +415,20 @@ pub fn run_tiles(
     op: anytype,
 ) ops.Return(@TypeOf(op), "run") {
     assert(grids.len > 0);
-    _ = multiplier;
+    // Like commonware, the work is the cheapest serial grid's cells times the multiplier.
+    var cells: usize = std.math.maxInt(usize);
+    for (grids) |grid| cells = @min(cells, grid.critical_path(len, 1).cells);
+    const work = @max(len, cells *| multiplier);
+    var call = strategy_module.adapt(strategy, @returnAddress(), len, work, .placed);
+    return call.finish(run_tiles_on(call.get(), len, grids, op));
+}
+
+fn run_tiles_on(
+    strategy: anytype,
+    len: usize,
+    grids: []const Grid,
+    op: anytype,
+) ops.Return(@TypeOf(op), "run") {
     const T = Tiles(@TypeOf(strategy));
     const workers = @min(strategy.parallelism(), max_chunks);
     if (workers <= 1) return op.run(T.serial(strategy, grids, len));
