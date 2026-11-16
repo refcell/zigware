@@ -83,7 +83,7 @@ statistics, output, CLI) and run against a minimal in-lane stand-in, then switch
 - [x] Binary on `runtime.production.Runner` and p2p `authenticated::discovery`, with the
   metrics endpoint; 4 local peers flood each other over TCP.
 - [x] Demo recording (`etc/scripts/record-demo.sh flood`): docs/assets/flood-demo.{gif,mp4}.
-- [ ] `setup` (config generation); needs deployer's aws config types.
+- [ ] `setup` (config generation) on `deployer.aws`; see Follow-ups.
 
 ### chat (commonware `examples/chat`)
 - [x] Logger and handler (TUI with plain ANSI, no deps), CLI, `peer_set_limit` test. The
@@ -101,7 +101,18 @@ statistics, output, CLI) and run against a minimal in-lane stand-in, then switch
 - [x] Demo recipe and recording: docs/assets/log-demo.{gif,mp4} (4 validators in tmux).
 
 ### bridge (commonware `examples/bridge`)
-- [ ] Port after log's demo.
+- [x] `dealer` (`zig build run-bridge-dealer`): matches commonware's binary byte for byte for
+  three dealings and 13 clap cases. Its README shows an older polynomial encoding (without the
+  6-byte header the binary writes); the tests follow the binary.
+- [ ] Types (block, inbound, outbound) with their codec tests, and the application.
+- [ ] `indexer` and `validator` binaries on discovery and simplex (bls12381 threshold).
+- [ ] Demo: two networks of 4 validators and an indexer.
+
+### Follow-ups
+- [ ] Pass `.subscriber = collector.subscriber()` to the runner (runtime 1ead8cc) once p2p and
+  simplex emit commonware's events; re-record the log demo (and chat's, if its logs gain
+  events) so the Logs panes show them.
+- [ ] flood `setup` on `deployer.aws` (b126fe1).
 
 ## Log
 - 2026-11-13: DSL parser, latency data, statistics, clap-identical CLI, colored output, and
@@ -116,3 +127,4 @@ statistics, output, CLI) and run against a minimal in-lane stand-in, then switch
 - 2026-11-16: chat demo recorded; shared `examples/ui` (tui, keys, clock, logger, clap).
 - 2026-11-16: log ported and running on 4 local validators over discovery.
 - 2026-11-16: log demo recorded; production storage now reports a canceled write as Canceled.
+- 2026-11-16: bridge's dealer; build.zig builds `<name>/<binary>` entries as `<name>-<binary>`.

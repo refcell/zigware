@@ -283,7 +283,12 @@ pub fn Parser(comptime command: Command) type {
         }
 
         fn write_full_usage(writer: *Writer, bin_name: []const u8) Writer.Error!void {
-            try writer.print("Usage: {s} [OPTIONS]", .{bin_name});
+            // clap shows `[OPTIONS]` only when some option is optional (help aside).
+            const has_optional = comptime for (command.args) |arg| {
+                if (!arg.required) break true;
+            } else false;
+            try writer.print("Usage: {s}", .{bin_name});
+            if (has_optional) try writer.writeAll(" [OPTIONS]");
             try write_required(writer);
             try writer.writeAll("\n\n");
         }

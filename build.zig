@@ -96,9 +96,11 @@ const packages = [_]Package{
 };
 
 /// Example binaries at `examples/<name>/main.zig`; each may import any package and `ui`
-/// (`examples/ui/root.zig`, the terminal UI the examples share).
+/// (`examples/ui/root.zig`, the terminal UI the examples share). An example with several
+/// binaries lists each as `<name>/<binary>`, built from `examples/<name>/<binary>.zig` as
+/// `<name>-<binary>`.
 /// Add an example here once its main.zig exists.
-const examples = [_][]const u8{ "estimator", "flood", "chat", "log" };
+const examples = [_][]const u8{ "estimator", "flood", "chat", "log", "bridge/dealer" };
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
@@ -271,9 +273,15 @@ fn add_examples(
         .optimize = optimize,
         .imports = &.{.{ .name = "zigware", .module = zigware }},
     });
-    for (examples) |name| {
+    for (examples) |entry| {
+        const is_binary = std.mem.indexOfScalar(u8, entry, '/') != null;
+        const source = if (is_binary)
+            b.fmt("examples/{s}.zig", .{entry})
+        else
+            b.fmt("examples/{s}/main.zig", .{entry});
+        const name = std.mem.replaceOwned(u8, b.allocator, entry, "/", "-") catch @panic("OOM");
         const root = b.createModule(.{
-            .root_source_file = b.path(b.fmt("examples/{s}/main.zig", .{name})),
+            .root_source_file = b.path(source),
             .target = target,
             .optimize = optimize,
             .imports = &.{

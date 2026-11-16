@@ -1,0 +1,94 @@
+### 
+exit=2
+error: the following required arguments were not provided:
+  --seed <seed>
+  --participants <participants>
+
+Usage: dealer --seed <seed> --participants <participants>
+
+For more information, try '--help'.
+### --help
+exit=0
+generate threshold secret
+
+Usage: dealer --seed <seed> --participants <participants>
+
+Options:
+      --seed <seed>                  
+      --participants <participants>  All participants (arbiter and contributors)
+  -h, --help                         Print help
+### -h
+exit=0
+generate threshold secret
+
+Usage: dealer --seed <seed> --participants <participants>
+
+Options:
+      --seed <seed>                  
+      --participants <participants>  All participants (arbiter and contributors)
+  -h, --help                         Print help
+### --seed x
+exit=2
+error: invalid value 'x' for '--seed <seed>': invalid digit found in string
+
+For more information, try '--help'.
+### --seed 1
+exit=2
+error: the following required arguments were not provided:
+  --participants <participants>
+
+Usage: dealer --seed <seed> --participants <participants>
+
+For more information, try '--help'.
+### --seed 1 --participants
+exit=2
+error: a value is required for '--participants <participants>' but none was supplied
+
+For more information, try '--help'.
+### --participants 1,x --seed 1
+exit=2
+error: invalid value 'x' for '--participants <participants>': invalid digit found in string
+
+For more information, try '--help'.
+### --seed 1 --seed 2
+exit=2
+error: the argument '--seed <seed>' cannot be used multiple times
+
+Usage: dealer --seed <seed> --participants <participants>
+
+For more information, try '--help'.
+### --sed 1
+exit=2
+error: unexpected argument '--sed' found
+
+  tip: a similar argument exists: '--seed'
+
+Usage: dealer --seed <seed> --participants <participants>
+
+For more information, try '--help'.
+### --seed 1 --participant 2
+exit=2
+error: unexpected argument '--participant' found
+
+  tip: a similar argument exists: '--participants'
+
+Usage: dealer --seed <seed> --participants <participants>
+
+For more information, try '--help'.
+### --participants 1 foo
+exit=2
+error: unexpected argument 'foo' found
+
+Usage: dealer --seed <seed> --participants <participants>
+
+For more information, try '--help'.
+### --seed 99999999999999999999 --participants 1
+exit=2
+error: invalid value '99999999999999999999' for '--seed <seed>': number too large to fit in target type
+
+For more information, try '--help'.
+### --participants= --seed 1
+exit=2
+error: invalid value '' for '--participants <participants>': cannot parse integer from empty string
+
+For more information, try '--help'.
