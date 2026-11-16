@@ -145,15 +145,22 @@ Owns `src/glue/dkg`. Reference: `glue/src/dkg` (about 24k Rust lines).
   `KeyOnlyManager(M)`, `AddressableManager(M)` (`track` fails with `MissingAddress` before
   activating anyone; `missing_address` names the peer).
 - `dkg.fence`: `Fence` (`init(io)`, `mark`, `close`, `gate`), `Gate` (`wait`, `poll`).
+- `dkg.state_sync`: `StateSync(S, D, V, Dir)` (epoch info and finalized floor, codec cfg
+  `{ info, certificate }`), `Plan(S, D, V, Dir)` (`init(gpa, io, storage, config, provided)`
+  persists provided material, `disabled`, `resolve(storage, recovered_epoch)` returns a copy),
+  `Config`, `recovered_epoch(processed, epocher)`.
 
 ### Decisions
 - Rust's async trait methods block on the runtime's `std.Io` (as in `consensus.traits`).
 - `Fence` is one shared object: the owner calls `close` where Rust drops the `Fence`.
 - `MissingAddress(P)` is an error code; `network.missing_address` returns the peer.
+- `state_sync.Plan` is one shared object (Rust clones an `Arc`); both actors take a pointer.
+  Its `init` returns `EpochMismatch`/`InvalidMaterial` and storage errors where commonware
+  panics, so the `should_panic` tests port as error checks.
 
 ### Backlog
 - [x] types (with conformance hashes), limits, fence, network.
-- [ ] state_sync (`Plan`, `StateSync` codec and conformance).
+- [x] state_sync (`Plan`, `StateSync` codec and conformance).
 - [ ] reshare: store (journal `Event` codec and conformance), mailbox, actor (setup, dealing,
   inclusion, follower, dkg), application, metrics.
 - [ ] bootstrap, probe (wire with conformance, discovery, service), orchestrator.
@@ -161,5 +168,7 @@ Owns `src/glue/dkg`. Reference: `glue/src/dkg` (about 24k Rust lines).
   test.
 
 ### Log
-- 2026-11-16: types, network, limits, and fence with their tests; 7 types and network
+- 2026-11-16: types, network, limits, and fence with their tests; 8 types and network
   conformance hashes match commonware's.
+- 2026-11-16: state_sync's `StateSync` and `Plan` with commonware's 8 tests; both `StateSync`
+  conformance hashes match.

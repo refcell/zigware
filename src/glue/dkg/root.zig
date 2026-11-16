@@ -30,6 +30,7 @@ pub const fence = @import("fence.zig");
 pub const limits = @import("limits.zig");
 pub const max_payload_size = limits.max_payload_size;
 pub const network = @import("network.zig");
+pub const state_sync = @import("state_sync.zig");
 pub const types = @import("types.zig");
 
 fn assert_decls(
