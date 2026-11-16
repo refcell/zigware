@@ -83,7 +83,7 @@ statistics, output, CLI) and run against a minimal in-lane stand-in, then switch
   handler is tested chatting over p2p.simulated; the CLI matches clap's output for 23 cases.
 - [x] Wire to `authenticated::discovery` on the production runner; 3 friends chat over TCP
   in tmux and quit cleanly on ESC.
-- [ ] Demo recipe and recording.
+- [x] Demo recipe and recording: docs/assets/chat-demo.{gif,mp4} (3 friends in tmux).
 
 ## Log
 - 2026-11-13: DSL parser, latency data, statistics, clap-identical CLI, colored output, and
