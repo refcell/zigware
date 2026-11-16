@@ -61,6 +61,25 @@ then the core and standard actors as those packages land.
   immutable or prunable archive `A` (borrowed), `Identifier(D)` (`index` or `key`).
 - `consensus.marshal.mocks.block`: `EmptyBlock(H)`, `Block(H, C)` (context, precomputed
   digest), `ready(B, gpa, block)`.
+- Variant contract additions: `clone_block(*const Block) Block` and
+  `deinit_block(gpa, *Block)`, so core owns blocks of either variant. `assert_buffer`
+  documents the Zig `Buffer` signatures: `find_by_digest`/`find_by_commitment` (`!?Block`),
+  `subscribe_by_digest`/`subscribe_by_commitment` (`!?oneshot.Receiver(Block)`), and
+  `send(round, block, recipients) !void`.
+- `consensus.marshal.core.floor`: `Processed` (`block`/`absent`, `height`, `anchor`),
+  `Cutoff` (`round`/`epoch`, `covers`, `order`, `max`), `Floor`, `closed_epoch(epocher,
+  anchor)`, `retained_from(epocher, witnessed, retention)`, `State(S, C, Aborter)` (durable
+  floors, the configured and pending floor finalizations, `witness`, `take_matching`,
+  `permits`, `fetch_if_permitted`, `fetch_targeted_if_permitted`,
+  `fetch_finalizations_if_permitted` over any resolver), `FetchAdmission`. The resolver
+  handler adds `Request.above_round_floor` and `above_round_floor(D, ...)`.
+- `consensus.marshal.core`: `staged.Staged(V)`, `certified.Certified(C)`,
+  `acks.PendingAcks(A)` (an `utils.acknowledgement` ring), `durability.DispatchGate` and
+  `durable(result, round, name)`, `stream.Stream` (processed height and round floor in one
+  metadata store), `subscriptions.Subscriptions(V, Aborter)` with `Key`/`KeyFor(V)`, and
+  `cache.Manager(V, S)` (per-epoch prunable archives: `put_verified`, `put_certified`,
+  `put_notarized`, `put_notarization`, `put_finalization`, getters, `find_block_matching`,
+  `prune_by_view`, `prune_by_height`, `load_persisted_epochs`).
 
 ## Decisions
 - Marshal blocks keep commonware's trait method names (`height()`, `parent()`, `digest()`,
@@ -103,6 +122,17 @@ then the core and standard actors as those packages land.
   `bls12381_threshold::Scheme<_, MinSig>` (a MinSig point with commonware's `G1::arbitrary`),
   as simplex does; the BLS conformance and codec tests skip in Debug without `-Dslow-tests`.
 
+- Marshal's core types port commonware's `Arc`-shared blocks as variant handles:
+  `clone_block` adds a reference, `deinit_block` drops one; staging, subscriptions, and
+  caches own what they hold.
+- The Zig archives' `start_sync` finishes the sync before returning, so the cache's
+  `put_*`/`start_sync_*` calls are durable on return instead of returning sync handles.
+  `durable(result, round, name)` keeps commonware's policy: shutdown (`Canceled`/`Closed`)
+  reports not durable, any other sync failure panics (no `should_panic` test in Zig).
+- Buffer waiters and the pending floor's waiter are aborted through an `Aborter` type
+  parameter (`abort(*Aborter)`), which the actor supplies from its waiter tasks (one inbox
+  fed by tasks, as simplex's voter does).
+
 ## Backlog
 - [x] aggregation: types (all 5 conformance hashes match), scheme, limits, safe_tip.
 - [x] aggregation: config, metrics, engine, mocks; mod.rs `all_online` with ed25519.
@@ -114,7 +144,11 @@ then the core and standard actors as those packages land.
   limits, mocks/block.
 - [x] marshal: store adapters over both archives.
 - [x] marshal: config.
-- [ ] marshal: ancestry, application traits, core floor/cache/mailbox.
+- [x] marshal core: floor, staged, certified, acks, durability, stream, subscriptions,
+  cache.
+- [ ] marshal: ancestry, application traits (validation, gates, build, relay), core mailbox.
+- [ ] aggregation: restore the full `distinct states` comparison now that the runtime
+  auditor records rand, storage, and network events (220473e).
 - (marshal/coding/ belongs to the broadcast-collector lane: types, shards, variant,
   validation, marshaled, and coding/mod.rs tests, on top of core.)
 - [ ] marshal resolver, core, standard (and coding) actors with their mocks and tests.
@@ -126,3 +160,6 @@ then the core and standard actors as those packages land.
 - 2026-11-16: aggregation fault tests (byzantine, unclean shutdowns, lossy, determinism,
   partition, offline, insufficient, admitted signer) pass with every scheme in ReleaseSafe;
   fixed two engine liveness bugs (lost receiver wakeup, one-message inbox).
+- 2026-11-16: marshal variant contract, standard variant, resolver key, limits, block mocks,
+  store adapters, config; core floor, staged, certified, acks, durability, stream,
+  subscriptions, and cache with their commonware tests.
