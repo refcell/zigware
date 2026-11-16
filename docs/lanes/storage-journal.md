@@ -52,8 +52,8 @@ resize, sync), `runtime.storage`, with the in-memory backend `runtime.storage.me
 - [ ] metadata: `start_sync` (pipelined syncs) and the conformance hash (`MetadataWorkload`).
 - [x] `queue_recovery` fuzz target on faulty storage.
 - [x] `journal_segmented_variable_recovery` fuzz target on faulty storage (raw-image oracle).
-- [ ] Recovery fuzz targets on faulty storage: `journal_contiguous_recovery`,
-  `journal_oversized_recovery`.
+- [x] `journal_oversized_recovery` fuzz target on faulty storage (marker-floor oracle).
+- [ ] `journal_contiguous_recovery` fuzz target on faulty storage.
 - [x] queue (durable at-least-once queue over the contiguous variable journal, with its
   cursor) with storage.rs's tests and the `QueueWorkload` round trip.
 - [ ] queue: conformance hash for `QueueWorkload` (needs a storage conformance harness).
@@ -272,6 +272,12 @@ resize, sync), `runtime.storage`, with the in-memory backend `runtime.storage.me
   once. Tests use a fixed stand-in `Op` (tag, key, value) for qmdb's operation, since they
   compare roots between journals only.
 
+- `journal_oversized_recovery` interrupts syncs by reaching into the section buffers: a
+  parked barrier is a section buffer whose blob sync fails after its flush is written, and
+  abandoned `start_sync` handles are every buffer failing that way. An input bit picks whether
+  each section's index or value blob arrives first, since commonware's barriers race; without
+  it an index could never outlive its values and value verification went untested.
+
 ## Log
 - 2026-11-13: journal Error, frame encoding/decoding with zstd frames, durability Barrier,
   frame fuzz target.
@@ -300,3 +306,4 @@ resize, sync), `runtime.storage`, with the in-memory backend `runtime.storage.me
 - 2026-11-16: metadata_recovery fuzz target and overwrite-crash test on faulty storage.
 - 2026-11-16: queue_recovery fuzz target on faulty storage.
 - 2026-11-16: journal_segmented_variable_recovery fuzz target on faulty storage.
+- 2026-11-16: journal_oversized_recovery fuzz target on faulty storage.
