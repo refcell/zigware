@@ -10,14 +10,14 @@ const testing = std.testing;
 const codec = @import("codec");
 const coding = @import("coding");
 const cryptography = @import("cryptography");
-const p2p = @import("p2p");
+pub const p2p = @import("p2p");
 const parallel = @import("parallel");
 const runtime = @import("runtime");
 const utils = @import("utils");
 
 const engine_module = @import("engine.zig");
 const test_block = @import("../test_block.zig");
-const types = @import("../types.zig");
+pub const types = @import("../types.zig");
 const consensus_types = @import("../../../types.zig");
 
 pub const metrics = runtime.telemetry.metrics;
@@ -82,11 +82,17 @@ pub const MultiEpochProvider = struct {
     }
 };
 
-/// The provider handle an engine holds (borrowed).
+/// The provider handle an engine holds (borrowed). With `remaining`, it churns to null after
+/// that many successful lookups of epoch 0 (commonware `ChurningProvider`).
 pub const ProviderRef = struct {
     provider: *const MultiEpochProvider,
+    remaining: ?*i64 = null,
 
     pub fn scheme(ref: ProviderRef, epoch: Epoch) ?*const Scheme {
+        const counter = ref.remaining orelse return ref.provider.scheme(epoch);
+        if (epoch.get() != 0) return null;
+        counter.* -= 1;
+        if (counter.* < 0) return null;
         return ref.provider.scheme(epoch);
     }
 };
@@ -462,6 +468,8 @@ pub const Unstarted = struct {
         records: usize = 16,
         /// Run a member scheme (knows its index, cannot sign) instead of a signer.
         member: bool = false,
+        /// Run outside the committee (seed `count`, a verifier scheme); `index` is unused.
+        outsider: bool = false,
     };
 
     io: Io,
@@ -470,6 +478,7 @@ pub const Unstarted = struct {
     registry: *metrics.Registry,
     count: usize,
     index: usize,
+    outsider: bool,
     keys: [peers_max]PrivateKey = undefined,
     peers: [peers_max]Key = undefined,
     provider: MultiEpochProvider = .{},
@@ -485,7 +494,8 @@ pub const Unstarted = struct {
         errdefer gpa.destroy(self);
         const registry = try gpa.create(metrics.Registry);
         registry.* = .init(gpa);
-        const network = try Net.init(gpa, io, network_config(options.count, options.count));
+        const size = options.count + @intFromBool(options.outsider);
+        const network = try Net.init(gpa, io, network_config(size, size));
         self.* = .{
             .io = io,
             .network = network,
@@ -493,11 +503,14 @@ pub const Unstarted = struct {
             .registry = registry,
             .count = options.count,
             .index = options.index,
+            .outsider = options.outsider,
             .coding_config = types.coding_config_for_participants(@intCast(options.count)),
         };
         sorted_keys(self.keys[0..self.count], self.peers[0..self.count], 0);
         const set = try Scheme.Participants.init(gpa, self.peers[0..self.count]);
-        const scheme = if (options.member)
+        const scheme = if (options.outsider)
+            try Scheme.verifier(gpa, scheme_namespace, set)
+        else if (options.member)
             (try Scheme.member(gpa, scheme_namespace, set, self.me())).?
         else
             (try Scheme.signer(gpa, scheme_namespace, set, self.keys[options.index])).?;
@@ -528,13 +541,15 @@ pub const Unstarted = struct {
     }
 
     pub fn me(self: *const Unstarted) Key {
+        if (self.outsider) return PrivateKey.from_seed(self.count).public_key();
         return self.peers[self.index];
     }
 
     /// Registers peer `index` to observe the engine's gossip, links the engine to it, and
     /// tracks every participant (commonware's observer setup).
     pub fn observe(self: *Unstarted, index: usize) !*Net.Receiver {
-        assert(index != self.index and self.observers[index] == null);
+        assert(self.outsider or index != self.index);
+        assert(self.observers[index] == null);
         const oracle = self.network.oracle();
         self.observers[index] = try oracle.control(self.peers[index]).register(0, test_quota);
         try oracle.add_link(self.me(), self.peers[index], default_link);
@@ -542,8 +557,10 @@ pub const Unstarted = struct {
         return &self.observers[index].?.receiver;
     }
 
+    /// Tracks every participant as primary (and an outsider engine as secondary).
     pub fn track_all(self: *Unstarted) !void {
-        try track(self.network, 0, self.peers[0..self.count], &.{});
+        const secondary: []const Key = if (self.outsider) &.{self.me()} else &.{};
+        try track(self.network, 0, self.peers[0..self.count], secondary);
         try sleep_ms(self.io, 10);
     }
 

@@ -26,4 +26,10 @@ test {
     _ = @import("state.zig");
     _ = @import("engine_test.zig");
     _ = @import("engine_handlers_test.zig");
+    _ = @import("engine_peers_test.zig");
+    _ = @import("engine_buffer_test.zig");
+    _ = @import("engine_invalid_test.zig");
+    _ = @import("engine_epoch_test.zig");
+    _ = @import("engine_recovery_test.zig");
+    _ = @import("engine_members_test.zig");
 }

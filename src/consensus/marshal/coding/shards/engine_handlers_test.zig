@@ -424,3 +424,91 @@ test "failed reconstruction closes subscriptions" {
         }
     }.run);
 }
+
+test "local proposal evicts older reconstruction state" {
+    try harness.run_deterministic(struct {
+        fn run(io: Io) !void {
+            const engine = try Unstarted.init(io, .{ .index = 2, .records = 1 });
+            defer engine.deinit();
+            const config = engine.coding_config;
+            var block_a = try harness.encode(config, 1, 100);
+            defer block_a.deinit(gpa);
+            const commitment_a = block_a.commitment();
+            const block_b = try harness.encode(config, 2, 200);
+            const commitment_b = block_b.commitment();
+            // The engine tracks A at view 1, and peer 1 contributes its shard.
+            try engine.gather(commitment_a, at(1));
+            engine.engine.trim();
+            try engine.shard(1, try shard_of(&block_a, 1));
+            // The one-record window evicts A for the local proposal of B at view 2.
+            try engine.engine.disperse_shards(at(2), block_b);
+            engine.engine.trim();
+            try testing.expect((try record_of(engine, commitment_b)).block != null);
+            try testing.expect(!engine.has_record(commitment_a));
+            // A shard conflicting with peer 1's contribution to A is buffered unblocked.
+            var other = try harness.encode(config, 1, 300);
+            defer other.deinit(gpa);
+            try engine.shard(1, try harness.shard_for(&other, 1, commitment_a));
+            try testing.expectEqual(@as(usize, 1), engine.buffered(1, commitment_a));
+            try expect_no_blocks(engine);
+        }
+    }.run);
+}
+
+test "non participant holds proposer shard as gossip" {
+    try harness.run_deterministic(struct {
+        fn run(io: Io) !void {
+            const engine = try Unstarted.init(io, .{ .outsider = true });
+            defer engine.deinit();
+            try testing.expect(engine.provider.scheme(.zero()).?.me() == null);
+            const observer = try engine.observe(1);
+            var block = try harness.encode(engine.coding_config, 1, 100);
+            defer block.deinit(gpa);
+            const commitment = block.commitment();
+            var verified = try engine.subscribe_assigned(commitment);
+            defer verified.deinit();
+            // The proposer's own shard is held: one shard is below the minimum of two.
+            try engine.gather(commitment, at(1));
+            try engine.shard(0, try shard_of(&block, 0));
+            const state = (try record_of(engine, commitment)).reconstruction.?;
+            try testing.expect(!state.assigned_verified);
+            try testing.expectEqual(@as(usize, 0), state.quorum.?.checked.items.len);
+            try testing.expectEqual(@as(usize, 1), state.quorum.?.pending.count());
+            // Peer 2's gossip shard and the proposer's shard decode the block.
+            try engine.shard(2, try shard_of(&block, 2));
+            const record = try record_of(engine, commitment);
+            try testing.expect(record.block.?.commitment().eql(commitment));
+            // Readiness stays pending, for an earlier and a later subscription alike.
+            var late = try engine.subscribe_assigned(commitment);
+            defer late.deinit();
+            try harness.expect_pending(&verified);
+            try harness.expect_pending(&late);
+            // The cached record ignores peer 1's delivery of peer 3's shard.
+            try engine.shard(1, try shard_of(&block, 3));
+            try testing.expectEqual(@as(usize, 0), engine.buffered(1, commitment));
+            try expect_relays_nothing(engine, observer, &block);
+        }
+
+        /// Nothing was relayed, although the engine's sender reaches the observer.
+        fn expect_relays_nothing(
+            engine: *Unstarted,
+            observer: *harness.Net.Receiver,
+            block: *const Coded,
+        ) !void {
+            if (try harness.recv_within(engine.io, observer, 100)) |message| {
+                harness.free_value(message);
+                return error.Relayed;
+            }
+            var probe = try shard_of(block, 3);
+            defer probe.deinit(gpa);
+            const bytes = try harness.encode_shard(&probe);
+            defer gpa.free(bytes);
+            const attempted = try engine.engine.sender.send(.all, &.{bytes}, true);
+            gpa.free(attempted);
+            const received = (try harness.recv_within(engine.io, observer, 1_000)) orelse
+                return error.NoProbe;
+            try harness.expect_gossip(received, engine.me(), &probe);
+            try expect_no_blocks(engine);
+        }
+    }.run);
+}
