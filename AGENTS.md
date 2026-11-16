@@ -85,6 +85,14 @@ Read this whole file before you change anything. These rules are not optional.
   deterministic seeded fuzz that runs in the normal `zig build test` (iterations scale with
   `build_options.fuzz_soak`, seed mixes in `build_options.fuzz_seed`).
   Long fuzz: `zig build test --fuzz -Doptimize=ReleaseSafe`.
+- **Fuzz bodies**: on seeded random input, `std.testing.Smith`'s typed draws are nearly
+  inert: `value`/`valueRangeAtMost`/`index` return the minimum for types under 64 bits,
+  `eos()` ends a loop after about one step, and `slice` returns nothing when the input
+  outlives its buffer (and reads a corpus entry's first four bytes as a length; corpus
+  entries run on seeded input too). A body that runs on seeded input draws through
+  `codec.fuzz.Draws` (`utils.fuzz.Draws` above utils) or derives values from `smith.bytes`,
+  and bounds loops by a drawn step count. Check a new fuzz body by planting a bug it should
+  catch.
 - **DST**: protocols (p2p, broadcast, resolver, consensus) are tested the way commonware
   tests them: many nodes in one deterministic runtime with a simulated network, fault
   injection (latency, drops, partitions, crashes, Byzantine actors), and a seed that replays
