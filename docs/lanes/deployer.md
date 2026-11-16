@@ -22,6 +22,10 @@ test vectors. Tests never call AWS and never hold credentials.
   `std.Io.net.IpAddress`.
 - `deployer.yaml`: `Document.parse`, `Node`/`Map` accessors with serde_yaml's typed-scalar
   rules, `write_string`/`style_of`, and `Emitter` for serde_yaml's block layout.
+- `deployer.aws.services`: every install script, systemd unit, and config commonware writes
+  (`write_install_*_cmd`, `write_promtail_config`, `write_prometheus_config`,
+  `write_pyroscope_script`, static files), S3 keys, and download URLs; `deployer.aws.s3` holds
+  the key prefixes and `wget`; `deployer.aws.utils` the SSH/SCP helpers.
 - `utils.fuzz` is now exported (the seeded fuzz driver over `FuzzRng`).
 
 ## Decisions
@@ -32,6 +36,9 @@ test vectors. Tests never call AWS and never hold credentials.
   and serde_yaml's style inference (strings that would read back as null, bool, int, or float
   are single-quoted), so written files are byte-identical. Multi-line strings (serde_yaml's
   literal blocks) are rejected.
+- `services` templates are commonware's raw strings verbatim, rendered at comptime-parsed
+  `format!` syntax; `deployer_version` is commonware's (`2026.10.0`) so both share an S3 config
+  cache. The home directory is spliced in at comptime so no source line spells it out.
 - Commonware's upper-case constants (`METRICS_PORT`, `CREATE_CMD`, ...) are snake_case
   (`metrics_port`, `create_cmd`), per TigerStyle naming.
 - `IpAddr` is the deployer's own: Rust's `IpAddr` parsing and display (RFC 5952 compression,
@@ -42,7 +49,8 @@ test vectors. Tests never call AWS and never hold credentials.
   `BandwidthWeighting`, `Host`, `Hosts`, `Ips`, `Metadata`, `Architecture`, constants
   (`mod.rs` test). Unblocks flood's `setup`.
 - [x] `utils.rs` pure helpers (SSH/SCP targets, attach exit codes, CIDR) with their tests.
-- [ ] `services.rs`: generated service files, install scripts, and S3 keys (10 tests).
+- [x] `services.rs`: generated service files, install scripts, and S3 keys (10 tests, plus
+  SHA-256 conformance hashes of every generated file).
 - [ ] `attach.rs` host lookup (4 tests); `create.rs` validation and AZ-group planning (24
   tests); `ec2.rs` pure logic (12 tests).
 - [ ] SigV4 signer with the AWS documentation's test vectors; S3 presigned URLs.
