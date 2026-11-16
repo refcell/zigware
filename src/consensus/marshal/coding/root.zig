@@ -27,6 +27,7 @@ test {
     _ = @import("types_test.zig");
     _ = @import("validation_test.zig");
     _ = @import("variant_test.zig");
+    _ = @import("fuzz.zig");
     _ = @import("test_block.zig");
     _ = @import("shards/root.zig");
 }

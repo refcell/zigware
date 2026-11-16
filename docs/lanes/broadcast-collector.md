@@ -144,8 +144,11 @@ that harness. It builds on `coding` (ReedSolomon), `consensus.types.coding.Commi
 - [x] marshal coding `validation` (proposal, block, reconstruction) with its 17 tests.
 - [ ] marshal coding `marshaled` (Marshaled, MarshaledConfig), once consensus-marshal's core
   lands.
+- [x] marshal coding fuzz: commonware's consensus/fuzz has no coding target, so
+  `coding/fuzz.zig` fuzzes the decoders (`Coding.decode_block`, `StoredCodedBlock`, `Shard`)
+  on mutated encodings (minifuzz and coverage-guided).
 - [ ] marshal coding: `coding/harness.zig` and the `coding/mod.rs` tests, once the shared
-  harness lands; the coding fuzz entries in `consensus/fuzz`.
+  harness lands.
 
 ## Log
 - 2026-11-13: broadcast lib.rs and buffered (engine, mailbox, overflow policy, metrics,
@@ -168,3 +171,4 @@ that harness. It builds on `coding` (ReedSolomon), `consensus.types.coding.Commi
   `UnstartedOf`/`TypesOf` take any coding scheme.
 - 2026-11-16: marshal coding `Coding` variant and shards `Buffer` adapter with variant.rs's
   tests; validation moved onto marshal's ancestry and application helpers.
+- 2026-11-16: marshal coding decoder fuzz target.
