@@ -33,6 +33,8 @@ const Relay = relay_mod.Relay(Digest, Key);
 const Reporter = reporter_mod.Reporter(Scheme, Digest);
 const Conflicter = conflicter_mod.Conflicter(Scheme, Sha256);
 const Nuller = nuller_mod.Nuller(Scheme, Sha256);
+const Impersonator = @import("mocks/impersonator.zig").Impersonator(Scheme, Sha256);
+const Outdated = @import("mocks/outdated.zig").Outdated(Scheme, Sha256);
 const Elector = elector_mod.RoundRobinElector;
 const Duration = utils.Duration;
 const Link = p2p.simulated.Link;
@@ -61,13 +63,15 @@ const page_size = 1024;
 const page_cache_size = 10;
 
 /// What validator 0 runs: the engine, or one of the Byzantine mocks.
-const Role = enum { honest, conflicter, nuller };
+const Role = enum { honest, conflicter, nuller, impersonator, outdated };
 
 /// A Byzantine mock on the vote channel; the other channels stay registered and unused.
 const Byzantine = struct {
     role: Role,
     conflicter: Conflicter,
     nuller: Nuller,
+    impersonator: Impersonator,
+    outdated: Outdated,
     channels: [3]Channel,
     handle: runtime.context.Handle(void),
 
@@ -78,11 +82,14 @@ const Byzantine = struct {
             .honest => unreachable, // Proof: only Byzantine roles start this task.
             .conflicter => byzantine.conflicter.run(&votes.sender, &votes.receiver),
             .nuller => byzantine.nuller.run(&votes.sender, &votes.receiver),
+            .impersonator => byzantine.impersonator.run(&votes.sender, &votes.receiver),
+            .outdated => byzantine.outdated.run(&votes.sender, &votes.receiver),
         }
     }
 
     fn stop(byzantine: *Byzantine) void {
         byzantine.handle.abort() catch {};
+        byzantine.outdated.deinit();
         for (&byzantine.channels) |*channel| {
             channel.sender.deinit();
             channel.receiver.deinit();
@@ -166,6 +173,9 @@ const Harness = struct {
             .role = role,
             .conflicter = .init(gpa, io, scheme),
             .nuller = .init(gpa, scheme),
+            .impersonator = .init(gpa, scheme),
+            // Four times the view retention, as in commonware's `outdated` test.
+            .outdated = .init(gpa, scheme, .new(40)),
             .channels = try register(harness.oracle(), key),
             .handle = undefined,
         };
@@ -289,8 +299,8 @@ const Harness = struct {
         }
     }
 
-    /// Only validator 0 committed faults, of the `allowed` kinds, at least once; only
-    /// honest validators blocked, and only validator 0.
+    /// Only validator 0 committed faults, of the `allowed` kinds, at least once (none when
+    /// `allowed` is empty); only honest validators blocked, and only validator 0.
     fn check_byzantine(harness: *Harness, allowed: []const std.meta.Tag(Reporter.Activity)) !void {
         var count: usize = 0;
         for (0..harness.validators.len) |index| {
@@ -302,7 +312,11 @@ const Harness = struct {
                 count += 1;
             }
         }
-        try testing.expect(count > 0);
+        try testing.expectEqual(allowed.len > 0, count > 0);
+        try harness.check_blocked_only_byzantine();
+    }
+
+    fn check_blocked_only_byzantine(harness: *Harness) !void {
         const byzantine = harness.keys()[0];
         const blocked = try harness.oracle().blocked(gpa);
         defer gpa.free(blocked);
@@ -482,4 +496,30 @@ test "nuller is reported and blocked" {
     for (0..2) |seed| {
         _ = try run_seeded(seed, byzantine_scenario, .{ Role.nuller, &.{.nullify_finalize} });
     }
+}
+
+test "impersonator is blocked without faults" {
+    for (0..2) |seed| _ = try run_seeded(seed, byzantine_scenario, .{ Role.impersonator, &.{} });
+}
+
+/// commonware `outdated`: re-votes for proposals 40 views old are ignored, without faults
+/// or blocks.
+fn outdated_scenario(ctx: Context) !void {
+    var harness: Harness = undefined;
+    try harness.start(ctx, 4, link_ms(10, 1, 1.0), .outdated);
+    defer harness.deinit();
+    const required = 60;
+    try harness.wait_all(required);
+    try harness.check_agreement(required);
+    for (0..harness.validators.len) |index| {
+        const validator = harness.honest(index) orelse continue;
+        validator.reporter.assert_no_faults();
+    }
+    const blocked = try harness.oracle().blocked(gpa);
+    defer gpa.free(blocked);
+    try testing.expectEqual(0, blocked.len);
+}
+
+test "outdated votes are ignored" {
+    _ = try run_seeded(0, outdated_scenario, .{});
 }

@@ -102,7 +102,8 @@ resolver; those lanes are running, so do the types first and the actors as they 
   automaton and relay, with simulated latency from p2p's `Normal`), `application.genesis`,
   and `reporter.Reporter(S, D)` (verifies and records activity; `wait_for_finalized`,
   `finalized`, `latest_finalized`, `fault_list`, `assert_no_faults`, `assert_no_invalid`);
-  Byzantine `conflicter.Conflicter(S, H)` and `nuller.Nuller(S, H)` (`run(sender, receiver)`
+  Byzantine `conflicter.Conflicter(S, H)`, `nuller.Nuller(S, H)`,
+  `impersonator.Impersonator(S, H)`, and `outdated.Outdated(S, H)` (`run(sender, receiver)`
   on the vote channel).
 
 ## Decisions
@@ -181,9 +182,9 @@ resolver; those lanes are running, so do the types first and the actors as they 
 - [ ] Port the rest of state.rs's tests (13 of 141), the resolver state.rs and actor.rs
   tests, and the voter/resolver ingress tests; add actor metrics.
 - [ ] simplex mod.rs tests: all_online, partition, slow_and_lossy_links, and determinism
-  done (ed25519, round robin; Debug runs 50 views where commonware runs 100); conflicter
-  and nuller done (2 seeds each); next the rest of the multi-node DST suite with the
-  Byzantine mocks
+  done (ed25519, round robin; Debug runs 50 views where commonware runs 100); conflicter,
+  nuller, impersonator (2 seeds each), and outdated done; next the rest of the multi-node
+  DST suite with the Byzantine mocks
   (conflicter, equivocator, impersonator, nuller, outdated, twins, ...), seeded.
 - [ ] Fuzz targets (commonware consensus/fuzz).
 
@@ -210,3 +211,4 @@ resolver; those lanes are running, so do the types first and the actors as they 
 - 2026-11-16: voter and resolver actors, engine, mocks; 4 honest nodes finalize (DST).
 - 2026-11-16: DST: all_online, partition heals, slow and lossy links, seed determinism.
 - 2026-11-16: Byzantine conflicter and nuller mocks with their DSTs (reported and blocked).
+- 2026-11-16: Byzantine impersonator and outdated mocks with their DSTs.

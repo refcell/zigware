@@ -48,6 +48,8 @@ pub const mocks = struct {
     pub const reporter = @import("mocks/reporter.zig");
     pub const conflicter = @import("mocks/conflicter.zig");
     pub const nuller = @import("mocks/nuller.zig");
+    pub const impersonator = @import("mocks/impersonator.zig");
+    pub const outdated = @import("mocks/outdated.zig");
 };
 
 pub const scheme = struct {
