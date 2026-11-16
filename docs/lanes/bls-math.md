@@ -29,11 +29,13 @@ variants (MinPk, MinSig) must match exactly.
   the test plan and its tests, and the message and FeldmanTranscript conformance hashes.
 - [x] bls12381 scheme.rs (PrivateKey, PublicKey, Signature) with its conformance hashes.
 - [ ] bls12381 dkg golden (commonware `dkg::golden`) with its tests and conformance hashes.
-  Blocked: its eVRF needs crypto's zk bulletproofs (crypto lane) and banderwagon (below).
+  Blocked: its eVRF needs crypto's zk bulletproofs (crypto lane).
 - [x] Fuzz targets: math (the crate plan), simd (differential), and the bls12381 decode,
   primitive, threshold, aggregate, batch, tle, and dkg_feldman_desmedt targets.
-- [ ] banderwagon (`bls12381/dkg/golden/evrf/banderwagon.rs`, moved from the crypto lane) with
-  its tests, conformance hashes, and fuzz.
+- [x] banderwagon (commonware `cryptography/src/banderwagon.rs`, moved from the crypto lane) as
+  `cryptography.banderwagon`: F, G (codec, hash_to_group), GVar and the circuit gadgets,
+  with every commonware test and the go-ipa fixed vectors. commonware has no banderwagon
+  conformance entries or fuzz target; a decode fuzz target is added.
 
 ## Decisions
 - Algebraic types are value types with `zero`/`one` decls and `add`/`sub`/`neg`/`mul`/`inv`/
@@ -42,6 +44,10 @@ variants (MinPk, MinSig) must match exactly.
   with `K.mul(K, R)`, so groups and fields share one `Space` interface.
 - Property tests run on `invariants.minifuzz` with commonware's draw order;
   `math.testing.smith_body` adapts a minifuzz body to `std.testing.fuzz`.
+- banderwagon `F` stores a canonical `u256` and multiplies with a `u512` product reduced
+  modulo `r` (commonware uses double-and-add; the results are equal). The circuit gadgets
+  issue their `Var` operations in commonware's order so circuits match node for node, and
+  `scalar_mul_many_in_circuit` writes into a caller slice instead of returning a `Vec`.
 - Encodings use the `codec` package interface (`fixed_size`/`encode_size`, `write`, `read`,
   `Cfg`); `Poly(K).Cfg` is `codec.SliceCfg` (zero coefficients always rejected) and
   `Poly(K).max_encode_size_with(n)` is commonware's `Poly::max_encode_size(n)`.

@@ -52,6 +52,7 @@ pub const certificate = @import("certificate.zig");
 pub const bloomfilter = @import("bloomfilter.zig");
 pub const digestible = @import("digestible.zig");
 pub const zk = @import("zk.zig");
+pub const banderwagon = @import("banderwagon.zig");
 pub const Digested = digestible.Digested;
 pub const assert_digestible = digestible.assert_digestible;
 pub const assert_committable = digestible.assert_committable;

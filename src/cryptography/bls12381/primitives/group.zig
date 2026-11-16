@@ -145,12 +145,22 @@ pub const Scalar = struct {
     /// Maps bytes to a scalar with RFC 9380 hash-to-field: expand_message_xmd to 48 bytes,
     /// then reduction modulo r. `dst` is at most 255 bytes.
     pub fn map(dst: []const u8, message: []const u8) Scalar {
+        return map_parts(dst, &.{message});
+    }
+
+    /// `map` over the concatenation of `parts`, without materializing it.
+    pub fn map_parts(dst: []const u8, parts: []const []const u8) Scalar {
         assert(dst.len <= arithmetic.map.dst_length_max);
         var uniform: [48]u8 = undefined;
         defer std.crypto.secureZero(u8, &uniform);
         // The output length (48) and dst length (checked above) are in range.
-        arithmetic.map.expand_message_xmd(message, dst, &uniform) catch unreachable;
+        arithmetic.map.expand_message_xmd_parts(parts, dst, &uniform) catch unreachable;
         return from_bytes_wide(&uniform);
+    }
+
+    /// The canonical integer value in [0, r) (blst's `as_blst_scalar`).
+    pub fn to_int(self: Scalar) u256 {
+        return self.fr.to_int();
     }
 
     /// A random non-zero scalar: 64 bytes of key material through KeyGen (`Random`).
