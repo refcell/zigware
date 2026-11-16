@@ -293,6 +293,88 @@ test "tasks_running drops on abort (tasks_running_decreased_immediately_on_abort
     try run("tasks_running drops on abort");
 }
 
+const IpAddr = @import("resolver.zig").IpAddr;
+const ip1: IpAddr = .{ .v4 = .init(192, 168, 1, 1) };
+const ip2: IpAddr = .{ .v4 = .init(192, 168, 1, 2) };
+
+fn expect_resolves(ctx: deterministic.Context, host: []const u8, expected: []const IpAddr) !void {
+    const addresses = try ctx.resolve(host);
+    defer ctx.gpa().free(addresses);
+    try testing.expectEqualSlices(IpAddr, expected, addresses);
+}
+
+fn resolver_body(ctx: deterministic.Context) !void {
+    try ctx.resolver_register("example.com", &.{ ip1, ip2 });
+    try expect_resolves(ctx, "example.com", &.{ ip1, ip2 });
+    try testing.expectError(error.ResolveFailed, ctx.resolve("unknown.com"));
+    try ctx.resolver_register("example.com", null);
+    try testing.expectError(error.ResolveFailed, ctx.resolve("example.com"));
+}
+
+test "resolver (test_resolver)" {
+    var runner = try deterministic.Runner.init(testing.allocator, .{});
+    defer runner.deinit();
+    try (try runner.start_context(resolver_body, .{}));
+}
+
+fn register_body(ctx: deterministic.Context) !void {
+    try ctx.resolver_register("example.com", &.{ ip1, ip2 });
+}
+
+fn persisted_body(ctx: deterministic.Context) !void {
+    try expect_resolves(ctx, "example.com", &.{ ip1, ip2 });
+}
+
+test "dns mappings persist across a restart (test_recover_dns_mappings_persist)" {
+    var runner = try deterministic.Runner.init(testing.allocator, .{});
+    defer runner.deinit();
+    try (try runner.start_context(register_body, .{}));
+    const state = runner.auditor.state();
+    try (try runner.start_context(persisted_body, .{}));
+    // The lookup is audited too.
+    try testing.expect(!std.mem.eql(u8, &state, &runner.auditor.state()));
+}
+
+fn registrations_audited(addresses: ?[]const IpAddr) ![8]u8 {
+    var runner = try deterministic.Runner.init(testing.allocator, .{});
+    defer runner.deinit();
+    const Body = struct {
+        fn run(ctx: deterministic.Context, list: ?[]const IpAddr) !void {
+            try ctx.resolver_register("example.com", list);
+        }
+    };
+    try (try runner.start_context(Body.run, .{addresses}));
+    return runner.auditor.state();
+}
+
+test "dns registrations reach the auditor" {
+    const both = try registrations_audited(&.{ ip1, ip2 });
+    const one = try registrations_audited(&.{ip1});
+    const removed = try registrations_audited(null);
+    try testing.expect(!std.mem.eql(u8, &both, &one));
+    try testing.expect(!std.mem.eql(u8, &one, &removed));
+    try testing.expectEqualSlices(u8, &both, &(try registrations_audited(&.{ ip1, ip2 })));
+}
+
+fn resolve_localhost(ctx: production.Context) !void {
+    const addresses = try ctx.resolve("localhost");
+    defer ctx.gpa().free(addresses);
+    try testing.expect(addresses.len > 0);
+    try testing.expectError(error.ResolveFailed, ctx.resolve("invalid host name"));
+}
+
+test "the production runner resolves through the system" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var buffer: [128]u8 = undefined;
+    const directory = std.fmt.bufPrint(&buffer, ".zig-cache/tmp/{s}/runner", .{tmp.sub_path}) catch
+        unreachable; // The buffer fits the fixed-length temporary path.
+    var runner: production.Runner = undefined;
+    try runner.init(testing.allocator, .{ .storage_directory = directory });
+    defer runner.deinit();
+    try (try runner.start_context(resolve_localhost, .{}));
+}
+
 fn Traced(comptime Context: type) type {
     return struct {
         fn worker(ctx: Context) anyerror!void {

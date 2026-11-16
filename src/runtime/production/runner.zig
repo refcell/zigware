@@ -16,6 +16,7 @@ const telemetry = @import("../telemetry/mod.zig");
 const file_storage = @import("storage.zig");
 const tcp_network = @import("network.zig");
 const ring_mod = @import("ring.zig");
+const system_resolver_mod = @import("resolver.zig");
 const context_mod = @import("../context.zig");
 
 pub const Error = iface.Error;
@@ -62,6 +63,8 @@ pub const Runner = struct {
     context_runtime: ?context_mod.Runtime,
     max_contexts: u32,
     subscriber: ?telemetry.traces.Subscriber,
+    /// The system resolver behind `Context.resolve`.
+    system_resolver: system_resolver_mod.Resolver,
     gpa: Allocator,
 
     /// Initializes in place: the storage and network hold the runner's `Io`, so the runner
@@ -92,6 +95,7 @@ pub const Runner = struct {
         runner.context_runtime = null;
         runner.max_contexts = config.max_contexts;
         runner.subscriber = config.subscriber;
+        runner.system_resolver = .{ .io = runner_io };
         runner.gpa = gpa;
         assert(runner.tcp.io.userdata == runner.file_storage.io.userdata);
     }
@@ -153,6 +157,7 @@ pub const Runner = struct {
             const max = runner.max_contexts;
             runner.context_runtime = try .init(runner.gpa, io_, max, null, runner.metrics());
             runner.context_runtime.?.subscriber = runner.subscriber;
+            runner.context_runtime.?.resolver = runner.system_resolver.resolver();
         }
         const runtime = &runner.context_runtime.?;
         const ctx: Context = .root(runtime, runner.storage(), runner.network(), runner.metrics());

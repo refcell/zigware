@@ -9,6 +9,7 @@ pub const storage = @import("storage.zig");
 pub const mocks = @import("mocks.zig");
 pub const iobuf = @import("iobuf.zig");
 pub const network = @import("network.zig");
+pub const resolver = @import("resolver.zig");
 pub const signal = @import("signal.zig");
 pub const supervision = @import("supervision.zig");
 pub const context = @import("context.zig");

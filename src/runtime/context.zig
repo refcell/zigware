@@ -38,6 +38,8 @@ pub const Execution = telemetry.metrics.task.Execution;
 const parallel = @import("parallel");
 const Registered = telemetry.metrics.Registered;
 const traces = telemetry.traces;
+const resolver_mod = @import("resolver.zig");
+const IpAddr = resolver_mod.IpAddr;
 
 /// Default capacity of the supervision tree: live contexts at once.
 pub const default_max_contexts = 16 * 1024;
@@ -63,6 +65,11 @@ pub const Runtime = struct {
     label_hook: ?LabelHook = null,
     /// Where events from `Context.tracer` go (the runner's `Config.subscriber`), if anywhere.
     subscriber: ?traces.Subscriber = null,
+    /// What `Context.resolve` asks (the runner's resolver).
+    resolver: ?resolver_mod.Resolver = null,
+    /// The deterministic runner's DNS records, which `Context.resolver_register` edits; null on
+    /// production.
+    dns: ?*resolver_mod.Dns = null,
     /// Whether `Context.strategy` runs parallel work inline on the calling task (the
     /// deterministic runner: one OS thread, so results never depend on thread timing).
     strategy_inline: bool = false,
@@ -368,6 +375,24 @@ pub fn Context(comptime Network: type) type {
             const rayon = parallel.Rayon.init(pool).with_parallelism(parallelism);
             assert(rayon.parallelism() == parallelism);
             return .{ .rayon = rayon };
+        }
+
+        /// The addresses `host` resolves to (commonware `Resolver::resolve`); free them with
+        /// `ctx.gpa()`. `error.ResolveFailed` if it resolves to none.
+        pub fn resolve(ctx: *const Self, host: []const u8) resolver_mod.Error![]IpAddr {
+            const resolver = ctx.runtime.resolver orelse return error.ResolveFailed;
+            return resolver.resolve(ctx.gpa(), host);
+        }
+
+        /// Maps `host` to `addresses`, or removes its mapping when null (commonware
+        /// `deterministic::Context::resolver_register`). Deterministic runner only.
+        pub fn resolver_register(
+            ctx: *const Self,
+            host: []const u8,
+            addresses: ?[]const IpAddr,
+        ) Allocator.Error!void {
+            const dns = ctx.runtime.dns orelse @panic("resolver_register is deterministic only");
+            try dns.register(host, addresses);
         }
 
         /// A tracer emitting under `target` (a module path, as tracing's `target:`) to the

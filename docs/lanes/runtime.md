@@ -40,8 +40,8 @@ time, files, and network: build on it rather than around it where it fits.
   (fault config, seeded crash writes), storage faults. No counterpart: panic tests
   (`bad_timeout`, `bad_cycle`, `bad_start_time`, label validation, `recover_panic_handling`;
   Zig cannot catch a panic, and these are asserts), waker/poll tests (`alarm_min_heap`,
-  `sleep_refreshes_one_alarm`, futures moved between tasks), `external_*`, DNS
-  (`resolver`, `recover_dns_mappings_persist`), strategies and pools, IoBufs chunking, and
+  `sleep_refreshes_one_alarm`, futures moved between tasks), `external_*`, strategies and
+  pools, IoBufs chunking, and
   the logical-open owner tests (Rust `Arc` drop order).
 - [x] signal (`signal.zig`: `Signaler`, `Signal`, `Stopper`), commonware's shutdown tests.
 - [x] Context (`context.zig`, `supervision.zig`): io, storage, network, `metrics.Scope`

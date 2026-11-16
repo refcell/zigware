@@ -34,6 +34,7 @@ const storage_mod = @import("storage.zig");
 const network_mod = @import("network.zig");
 const context_mod = @import("context.zig");
 const telemetry = @import("telemetry/mod.zig");
+const resolver_mod = @import("resolver.zig");
 const rng_helpers = @import("rng.zig");
 
 const Rng = utils.rng.TestRng;
@@ -286,6 +287,8 @@ pub const Runner = struct {
     task_polls: ?telemetry.metrics.Registered(PollFamily) = null,
     /// The name `Context.spawn` gave the fiber it is about to start (`label_next`).
     next_label: ?[]const u8 = null,
+    /// DNS records (`Context.resolver_register`); they carry over between starts.
+    dns: resolver_mod.Dns,
 
     pub fn init(allocator: std.mem.Allocator, config: Config) Error!Runner {
         config.validate();
@@ -307,6 +310,7 @@ pub const Runner = struct {
             .stack_pool = stack_pool,
             .memory_storage = .init(allocator),
             .metrics_registry = .init(allocator),
+            .dns = .init(allocator),
         };
     }
 
@@ -327,6 +331,7 @@ pub const Runner = struct {
         if (runner.network_metrics) |*counts| counts.deinit();
         if (runner.iterations_counter) |*counter| counter.deinit();
         if (runner.task_polls) |*polls| polls.deinit();
+        runner.dns.deinit();
         runner.metrics_registry.deinit();
         runner.* = undefined;
     }
@@ -435,6 +440,10 @@ pub const Runner = struct {
             runner.context_runtime.?.strategy_inline = true;
         }
         const runtime = &runner.context_runtime.?;
+        // The runner may have moved since the last start: point at it again.
+        runner.dns.auditor = &runner.auditor;
+        runtime.dns = &runner.dns;
+        runtime.resolver = runner.dns.resolver();
         const ctx: Context = .root(runtime, runner.storage(), runner.network(), runner.metrics());
         const Root = struct {
             fn call(root_ctx: *const Context, root_args: *const Args) Result {

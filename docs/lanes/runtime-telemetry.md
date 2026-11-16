@@ -33,6 +33,13 @@ the registry API first and report it.
   `has_metric_value(text, name, value)` (commonware test utils); `is_valid_label`,
   `validate_label`, `metrics_prefix`; `dtoa.format` (Rust `dtoa` float formatting).
 
+`runtime.resolver` (`src/runtime/resolver.zig`), commonware's `Resolver`:
+- `Context.resolve(host) ![]codec.IpAddr` (free with `ctx.gpa()`; `error.ResolveFailed` when
+  nothing resolves) and, on the deterministic runner, `Context.resolver_register(host,
+  ?addresses)`. The deterministic `Dns` table belongs to the runner, so it survives restarts,
+  and audits `resolver_register` and `resolve` with commonware's encoding. Production asks
+  the system through `std.Io` (`production/resolver.zig`; port 0, the hosts file, then DNS).
+
 ## Decisions
 - Handles are values (`clone`/`deinit` replace `Clone`/`Drop`). Each clone counts as a claim,
   so commonware's claims-versus-clones distinction is internal only; the observable rule (the
@@ -155,6 +162,8 @@ the registry API first and report it.
 - [x] io_uring throughput: one issuing ring thread with batched submission (about 3× faster).
 - [x] io_uring: one ring per worker thread (commonware's layout), at parity with Threaded;
   `runtime::network::echo` and `runtime::storage` benches; io_uring stays opt-in.
+- [x] Runtime DNS `Resolver`: the deterministic table and the production system resolver,
+  with `test_resolver` and `test_recover_dns_mappings_persist`.
 - [x] Tracing events: level, target, message, and fields, delivered to a subscriber the
   runner carries (`Config.subscriber`, `Context.tracer`), free when nobody subscribes; a
   `Collector` subscribes for examples/ui's logger. Told p2p and consensus-simplex.
@@ -197,3 +206,4 @@ the registry API first and report it.
   has not recurred.
 - 2026-11-16: io_uring: one worker ring per thread; runtime benches; io_uring stays opt-in.
 - 2026-11-16: traces: `Subscriber`, `Event`, and `Context.tracer` over the runner's subscriber.
+- 2026-11-16: `runtime.resolver`: `Context.resolve` on both runners, deterministic DNS table.
