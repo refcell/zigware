@@ -30,6 +30,10 @@ pub const large_object_limit: usize = word_size * arena_slice_size;
 /// chunks, or 224 MiB on 64-bit targets.
 pub const arena_max_object_size: usize = (word_size - 1) * arena_chunk_size;
 
+/// Size of an arena's metadata group: eight chunks, or 256 MiB on 64-bit targets. Allocations
+/// aligned to a whole group or more are refused.
+pub const metadata_group_size: usize = word_size * arena_chunk_size;
+
 /// Longest purge delay `Purge.after_ns` applies (about 24 days): milliseconds in an `i32`.
 pub const max_purge_delay_ns: u64 = std.math.maxInt(i32) * ns_per_ms;
 
@@ -266,6 +270,12 @@ test "unpinned and default configs are constructible" {
     try testing.expectEqual(@as(i64, 2), effective.arena_eager_commit);
     try testing.expectEqual(arena_max_object_size, effective.arena_max_object_size);
     try testing.expectEqual(Config.default.arena_reserve, effective.arena_reserve);
+    // The rest of commonware's `allocator/tests/default_config.rs`.
+    try testing.expect(Config.default.reserve == null);
+    try testing.expect(!effective.allow_large_os_pages);
+    try testing.expect(effective.transparent_huge_pages == Config.default.transparent_huge_pages);
+    const merge = Config.default.stats_merge_threshold;
+    try testing.expectEqual(merge, effective.stats_merge_threshold);
 }
 
 test "constants match mimalloc's 64-bit geometry" {

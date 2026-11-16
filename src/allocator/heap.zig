@@ -2,7 +2,8 @@
 //! commonware's `MiMalloc`.
 //!
 //! Requests up to `large_object_limit` get a block of their mimalloc size class from a shared
-//! page; larger ones, and alignments beyond a slice, get a page of their own. Pages come from
+//! page; larger ones, and alignments beyond a slice, get a page of their own, and alignments of
+//! a whole `metadata_group_size` or more are refused, as in mimalloc. Pages come from
 //! arenas: a reservation first, then arenas reserved on demand; a page above
 //! `arena_max_object_size` (or any page, when on-demand arenas are disabled) is mapped on its
 //! own and unmapped on release. A freed page's slices are purged after the configured delay at
@@ -211,7 +212,9 @@ pub const Heap = struct {
         }
         heap.by_address[index] = arena;
         heap.arenas_len += 1;
-        heap.stats.arenas = heap.arenas_len;
+        // As in mimalloc, a page mapped on its own is not an arena.
+        if (arena.kind != .transient) heap.stats.arenas += 1;
+        assert(heap.stats.arenas <= heap.arenas_len);
     }
 
     fn unregister(heap: *Heap, arena: *Arena) void {
@@ -222,7 +225,7 @@ pub const Heap = struct {
         const tail = heap.by_address[sorted + 1 .. len];
         std.mem.copyForwards(*Arena, heap.by_address[sorted .. len - 1], tail);
         heap.arenas_len -= 1;
-        heap.stats.arenas = heap.arenas_len;
+        assert(heap.stats.arenas <= heap.arenas_len);
         // Only arenas holding one page of their own are released, and those commit eagerly.
         assert(arena.kind == .transient);
         heap.stats.reserved_bytes -= arena.region.len;
@@ -387,6 +390,7 @@ pub const Heap = struct {
         heap.allocations += 1;
         if (heap.allocations % collect_interval == 0) heap.collect_locked(heap.now_ns());
         const align_bytes = alignment.toByteUnits();
+        if (align_bytes >= config_module.metadata_group_size) return null;
         const block = if (class_for(len, align_bytes)) |bin|
             heap.alloc_small(bin)
         else

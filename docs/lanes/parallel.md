@@ -50,7 +50,7 @@ placeholder until this lands, so land `Strategy` first and tell the coordinator 
   `heap.contains(ptr)`, `heap.collect()`, `heap.effective`, `heap.status`. `Config` (and
   `Config.default`), `Purge` (`.never`, `.after_ns`), `Reserve.init_pinned/init_unpinned`,
   `EagerCommit`, `good_size(len)`, the constants (`arena_slice_size`, `arena_chunk_size`,
-  `large_object_limit`, `arena_max_object_size`), and `allocator.metrics.metrics` (name, help,
+  `large_object_limit`, `arena_max_object_size`, `metadata_group_size`), and `allocator.metrics.metrics` (name, help,
   kind, `read(stats)`) for runtime exporters.
 
 ## Decisions
@@ -63,8 +63,11 @@ placeholder until this lands, so land `Strategy` first and tell the coordinator 
   every operation runs serially, like commonware's deterministic runtime pool.
 - bench: no Criterion or Gungraun; `Runner` warms up by doubling, then takes 20 samples over
   ~1 s and prints min/median/max per iteration. Harnesses are discovered by file, so lanes add
-  benches without editing build.zig. The Gungraun tracker binary (bench/src/bin) is not
-  ported yet: it drives valgrind; its compare/report logic is next.
+  benches without editing build.zig. The tracker binary's logic (config, output parsing,
+  comparison, output files, report) is `bench.tracker`; its runner is not ported: it runs
+  `cargo bench` under Gungraun and valgrind, requires one callgrind summary per benchmark,
+  and its default gates read callgrind metrics, so a zigware runner could gate only custom
+  metrics and would have no tracking config to run.
 - `parallel.policy` ports policy.rs (entries, cadence, placement choice, spawn decisions) with
   its tests and numbers. A call site is a return address instead of `Location::caller()`, and
   the entry tables are bounded (256 run keys, 64 spawn keys); a key that finds its table full
@@ -82,7 +85,10 @@ placeholder until this lands, so land `Strategy` first and tell the coordinator 
   layout: its size classes, shared pages up to `large_object_limit`, single-block pages above,
   arenas of 64 KiB slices with metadata in front, pinned and unpinned reservations, on-demand
   arenas, delayed purges (madvise) at collections, and pages above `arena_max_object_size`
-  (or with alignment beyond a slice) mapped on their own. One lock guards a heap, so `Stats`
+  (or with alignment beyond a slice) mapped on their own; alignments of a whole
+  `metadata_group_size` (256 MiB) are refused, and `Stats.arenas` excludes pages mapped on
+  their own, as in mimalloc. Commonware's allocator integration tests are ported except the
+  huge-page-advice ones, which read Linux smaps for mimalloc's THP advice. One lock guards a heap, so `Stats`
   are exact; the mimalloc-only knobs (large OS pages, THP, stats merge threshold) are recorded
   in `effective` but change nothing. A heap is a value, not the process allocator, so
   configuration is per heap rather than once per process.
@@ -118,11 +124,17 @@ placeholder until this lands, so land `Strategy` first and tell the coordinator 
 - [x] bench: the benchmark workload abstraction (lib.rs) and `zig build bench`.
 - [x] bench: the tracker's config, output-line parsing, results comparison, output files, and
   report rendering (bench/src/bin), with commonware's tracker tests and fixtures.
-- [ ] bench: a `zig build bench-tracker` command that runs `zig build bench` per tracked
-  variant and gates its custom metrics (commonware's runner drives Gungraun under valgrind).
-- [ ] Fuzz targets and benches.
+- [x] bench: the tracker's runner: not ported (see Decisions; it drives cargo, Gungraun, and
+  valgrind).
+- [x] allocator: commonware's integration tests (allocator/tests), except huge-page advice.
+- [x] Fuzz targets and benches: commonware has no fuzz targets or benches for parallel,
+  allocator, or bench; zigware adds seeded and std fuzz (heap, tracker parsers) and parallel
+  benches.
 
 ## Log
+- 2026-11-16: allocator integration tests (arena object limit, configured options, default
+  config, cross-thread stats); refuse metadata-group alignments; `Stats.arenas` excludes
+  pages mapped on their own. Backlog done.
 - 2026-11-16: bench tracker results, comparison, output files, and report, with the ported
   tracker tests, Gungraun fixtures, and seeded and std fuzz of its parsers.
 - 2026-11-16: bench tracker config (`bench.tracker.load_config`) over a TOML subset, with

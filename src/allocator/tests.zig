@@ -227,10 +227,11 @@ test "pages above the arena limit and without on-demand arenas get their own map
     defer heap.deinit();
     const gpa = heap.allocator();
     const big = try gpa.alloc(u8, allocator.large_object_limit + 1);
-    try testing.expectEqual(@as(u64, 1), heap.read_stats().arenas);
+    // A page mapped on its own is reserved and committed, but it is not an arena.
+    try testing.expectEqual(@as(u64, 0), heap.read_stats().arenas);
+    try testing.expect(heap.read_stats().reserved_bytes > allocator.large_object_limit);
     try testing.expect(heap.read_stats().committed_bytes > allocator.large_object_limit);
     gpa.free(big);
-    try testing.expectEqual(@as(u64, 0), heap.read_stats().arenas);
     try testing.expectEqual(@as(u64, 0), heap.read_stats().reserved_bytes);
     try testing.expectEqual(@as(u64, 0), heap.read_stats().committed_bytes);
 
@@ -239,9 +240,139 @@ test "pages above the arena limit and without on-demand arenas get their own map
     var direct = Heap.init(testing.io, config);
     defer direct.deinit();
     const small = try direct.allocator().alloc(u8, 32);
-    try testing.expectEqual(@as(u64, 1), direct.read_stats().arenas);
-    direct.allocator().free(small);
     try testing.expectEqual(@as(u64, 0), direct.read_stats().arenas);
+    try testing.expectEqual(@as(u64, 1), direct.read_stats().mmap_calls);
+    try testing.expect(direct.read_stats().reserved_bytes >= slice);
+    direct.allocator().free(small);
+    try testing.expectEqual(@as(u64, 0), direct.read_stats().reserved_bytes);
+}
+
+// Ported from commonware's `allocator/tests/arena_object_limit_floor.rs`.
+test "arena object limit is at least a slice" {
+    var config = small_config();
+    config.arena_max_object_size = 0;
+    var heap = Heap.init(testing.io, config);
+    defer heap.deinit();
+    try testing.expectEqual(slice, heap.effective.arena_max_object_size);
+}
+
+// Ported from commonware's `allocator/tests/arena_object_limit.rs`. The pages are mapped but
+// never touched, so the test commits little physical memory.
+test "huge objects are placed as documented" {
+    var heap = Heap.init(testing.io, .default);
+    defer heap.deinit();
+    const gpa = heap.allocator();
+    try testing.expectEqual(allocator.arena_max_object_size, heap.effective.arena_max_object_size);
+
+    // The largest page an arena can hold comes from an arena and stays reserved after free.
+    var before = heap.read_stats();
+    const largest = try alloc_raw(gpa, allocator.arena_max_object_size, 1);
+    var held = heap.read_stats();
+    gpa.rawFree(largest[0..allocator.arena_max_object_size], .@"1", @returnAddress());
+    var after = heap.read_stats();
+    try testing.expectEqual(before.huge_allocations + 1, held.huge_allocations);
+    try testing.expectEqual(held.reserved_bytes, after.reserved_bytes);
+
+    // One slice more is mapped from the operating system without reserving an arena, and is
+    // unmapped on free.
+    const size = allocator.arena_max_object_size + slice;
+    before = heap.read_stats();
+    const page = try alloc_raw(gpa, size, 1);
+    held = heap.read_stats();
+    gpa.rawFree(page[0..size], .@"1", @returnAddress());
+    after = heap.read_stats();
+    try testing.expectEqual(before.huge_allocations + 1, held.huge_allocations);
+    try testing.expectEqual(before.arenas, held.arenas);
+    try testing.expect(held.mmap_calls > before.mmap_calls);
+    try testing.expect(held.reserved_bytes >= before.reserved_bytes + size);
+    try testing.expect(held.reserved_bytes >= after.reserved_bytes + size);
+
+    // An alignment beyond a slice is also served by a fresh mapping. An alignment of a whole
+    // metadata group is refused.
+    before = heap.read_stats();
+    const block = try alloc_raw(gpa, 64, 2 * slice);
+    try testing.expectEqual(@as(usize, 0), @intFromPtr(block) % (2 * slice));
+    held = heap.read_stats();
+    gpa.rawFree(block[0..64], .fromByteUnits(2 * slice), @returnAddress());
+    after = heap.read_stats();
+    try testing.expect(held.mmap_calls > before.mmap_calls);
+    try testing.expect(held.reserved_bytes >= after.reserved_bytes + slice);
+    const group: Alignment = .fromByteUnits(allocator.metadata_group_size);
+    try testing.expectEqual(null, gpa.rawAlloc(64, group, @returnAddress()));
+}
+
+// Ported from commonware's `allocator/tests/config_options.rs`.
+test "configured options are effective" {
+    var config = allocator.Config.default;
+    config.purge = .never;
+    config.reserve = .init_unpinned(chunk + 1);
+    config.allow_large_os_pages = true;
+    config.arena_eager_commit = .never;
+    config.arena_reserve = chunk + 1;
+    var heap = Heap.init(testing.io, config);
+    defer heap.deinit();
+    try testing.expect(heap.status.configured);
+    try testing.expectEqual(allocator.ReserveOutcome.reserved, heap.status.reserve);
+    try testing.expect(heap.read_stats().reserved_bytes >= chunk);
+    const effective = heap.effective;
+    try testing.expectEqual(@as(?u64, null), effective.purge_ns);
+    try testing.expectEqual(@as(i64, 0), effective.arena_eager_commit);
+    try testing.expect(effective.allow_large_os_pages);
+    try testing.expectEqual(chunk + 1024, effective.arena_reserve);
+}
+
+/// One thread allocates huge blocks and hands them to another, which frees them.
+const CrossThread = struct {
+    /// Twice the largest object a shared page serves, so every block is huge.
+    const block_bytes = 2 * allocator.large_object_limit;
+    const blocks = 64;
+    const Queue = std.Io.Queue([]u8);
+
+    fn produce(heap: *Heap, queue: *Queue) void {
+        for (0..blocks) |_| {
+            const block = heap.allocator().alloc(u8, block_bytes) catch @panic("out of memory");
+            @memset(block, 1);
+            queue.putOneUncancelable(heap.io, block) catch unreachable; // Closed only below.
+        }
+        queue.close(heap.io);
+    }
+
+    fn consume(heap: *Heap, queue: *Queue) void {
+        // A thread that has allocated, as every runtime thread has.
+        heap.allocator().destroy(heap.allocator().create(u8) catch @panic("out of memory"));
+        var freed: usize = 0;
+        while (queue.getOneUncancelable(heap.io)) |block| : (freed += 1) {
+            assert(block.len == block_bytes and block[block_bytes - 1] == 1);
+            heap.allocator().free(block);
+        } else |err| assert(err == error.Closed);
+        assert(freed == blocks);
+    }
+};
+
+// Ported from commonware's `allocator/tests/cross_thread_stats.rs`, the regression test for
+// commonwarexyz/monorepo#5483. mimalloc's per-thread counters drift there by up to a merge
+// threshold; a zigware heap counts under its lock, so the statistics are exact.
+test "stats stay exact while one thread frees what another allocates" {
+    var heap = Heap.init(testing.io, small_config());
+    defer heap.deinit();
+    const gpa = heap.allocator();
+    var held: [8][]u8 = undefined;
+    for (&held) |*block| block.* = try gpa.alloc(u8, CrossThread.block_bytes);
+    defer for (held) |block| gpa.free(block);
+    const before = heap.read_stats();
+
+    var buffer: [8][]u8 = undefined;
+    var queue: CrossThread.Queue = .init(&buffer);
+    var group: std.Io.Group = .init;
+    try group.concurrent(testing.io, CrossThread.consume, .{ &heap, &queue });
+    try group.concurrent(testing.io, CrossThread.produce, .{ &heap, &queue });
+    try group.await(testing.io);
+
+    const after = heap.read_stats();
+    try testing.expect(after.pages >= held.len);
+    try testing.expectEqual(before.pages, after.pages);
+    try testing.expectEqual(before.allocated_bytes, after.allocated_bytes);
+    try testing.expectEqual(before.huge_allocations + CrossThread.blocks, after.huge_allocations);
 }
 
 const Stress = struct {

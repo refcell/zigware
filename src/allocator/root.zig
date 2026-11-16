@@ -40,6 +40,7 @@ pub const arena_slice_size = config.arena_slice_size;
 pub const arena_chunk_size = config.arena_chunk_size;
 pub const large_object_limit = config.large_object_limit;
 pub const arena_max_object_size = config.arena_max_object_size;
+pub const metadata_group_size = config.metadata_group_size;
 pub const max_purge_delay_ns = config.max_purge_delay_ns;
 
 const size_class = @import("size_class.zig");

@@ -31,7 +31,7 @@ pub const Stats = struct {
     pages: u64 = 0,
     /// Distinct threads that have taken a page, up to the heap's thread bound.
     threads: u64 = 0,
-    /// Arenas currently managed, including those holding one page mapped on its own.
+    /// Arenas currently managed, excluding pages mapped on their own.
     arenas: u64 = 0,
     /// Cumulative allocations larger than the largest size class.
     huge_allocations: u64 = 0,
