@@ -98,6 +98,10 @@ resolver; those lanes are running, so do the types first and the actors as they 
   `Engine.run(ctx, *engine, votes, certificates, backfill)` (each a `Channel(P)` of sender
   and receiver) as a task, abort its handle to stop, then `deinit`. `P` adds `Context`,
   `Sender`, and `Receiver` to `Config`'s parameters; `P.Automaton` is a pointer.
+- `consensus.simplex.scheme.reporter.AttributableReporter(S, D, Rng, Strategy, R)`:
+  `init(gpa, io, rng, scheme, reporter, strategy, verify)` wraps reporter pointer `R`,
+  verifying peer votes and faults when `verify` is set and dropping them for
+  non-attributable schemes; certificates always pass. Activities stay borrowed.
 - `consensus.simplex.mocks`: `relay.Relay(D, P)` (`deregister(key)` and `deregister_all`
   return once no delivery can reach the removed listeners), `application.Application(H, P)`
   (the automaton and relay, with simulated latency from p2p's `Normal`),
@@ -192,7 +196,7 @@ resolver; those lanes are running, so do the types first and the actors as they 
   (its leader-labelled metrics wait on the actor metrics), slow_validator, all_recovery,
   all_crash_after_nullify, equivocator, received_certificates_are_reported, and
   survives_burst, and engine_shutdown (abort and graceful; commonware's running-task count
-  waits on the runtime's task metrics). Next: attributable_reporter_filtering, reconfigurer,
+  waits on the runtime's task metrics), and attributable_reporter_filtering. Next: reconfigurer,
   nullify_only, split views, certified splits, twins, hailstorm, and the rest, seeded.
 - [ ] Fuzz targets (commonware consensus/fuzz).
 
@@ -234,3 +238,5 @@ resolver; those lanes are running, so do the types first and the actors as they 
   mock can stall proposals.
 - 2026-11-16: the engine ends on `context.stopped()`, as commonware's does; engine_shutdown
   DSTs (abort and graceful stop).
+- 2026-11-16: scheme/reporter.rs (AttributableReporter, all 6 tests) and the
+  attributable_reporter_filtering DST; every DST engine reports through the wrapper.

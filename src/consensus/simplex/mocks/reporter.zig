@@ -198,12 +198,17 @@ pub fn Reporter(comptime S: type, comptime D: type) type {
             };
         }
 
-        /// The highest view with a reported nullify vote (zero when there is none).
-        pub fn max_nullify_view(self: *Self) View {
+        /// The highest view with a reported vote of `kind` (zero when there is none).
+        pub fn max_vote_view(self: *Self, comptime kind: std.meta.FieldEnum(Votes)) View {
             self.mutex.lockUncancelable(self.io);
             defer self.mutex.unlock(self.io);
+            const signers = switch (kind) {
+                .notarize => &self.notarizes,
+                .nullify => &self.nullifies,
+                .finalize => &self.finalizes,
+            };
             var highest: View = .zero();
-            var views = self.nullifies.keyIterator();
+            var views = signers.keyIterator();
             while (views.next()) |view| {
                 if (view.get() > highest.get()) highest = view.*;
             }

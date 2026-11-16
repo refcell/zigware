@@ -34,6 +34,13 @@ const Context = runtime.deterministic.Context;
 const Application = application_mod.Application(Sha256, Key);
 const Relay = relay_mod.Relay(Digest, Key);
 const Reporter = reporter_mod.Reporter(Scheme, Digest);
+const Attributable = @import("scheme/reporter.zig").AttributableReporter(
+    Scheme,
+    Digest,
+    IoRng,
+    parallel.Sequential,
+    *Reporter,
+);
 const Conflicter = conflicter_mod.Conflicter(Scheme, Sha256);
 const Nuller = nuller_mod.Nuller(Scheme, Sha256);
 const Impersonator = @import("mocks/impersonator.zig").Impersonator(Scheme, Sha256);
@@ -54,10 +61,7 @@ const Params = struct {
     pub const Digest = Sha256.Digest;
     pub const Automaton = *Application;
     pub const Relay = *Application;
-    pub const Reporter = *reporter_mod.Reporter(
-        wrapped.Scheme(ed25519.Scheme(Sha256.Digest)),
-        Sha256.Digest,
-    );
+    pub const Reporter = *Attributable;
     pub const Strategy = parallel.Sequential;
     pub const Sender = Net.Sender;
     pub const Receiver = Net.Receiver;
@@ -141,6 +145,9 @@ const Validator = struct {
     byzantine: *Byzantine,
     application: Application,
     reporter: Reporter,
+    /// Wraps `reporter` for the engine; it verifies peer activity only when the harness's
+    /// `verify_reports` is set (otherwise ed25519 activity passes through unchanged).
+    attributable: Attributable,
     page_cache: runtime.buffer.paged.CacheRef,
     elector: Elector,
     engine: Engine,
@@ -169,6 +176,7 @@ const Harness = struct {
     /// from now on.
     mailbox_size: u32 = 1024,
     stall_proposals: bool = false,
+    verify_reports: bool = false,
 
     const Timeouts = struct {
         leader_ms: u64 = 1000,
@@ -254,6 +262,7 @@ const Harness = struct {
         harness.track_historical_votes = role.is_byzantine() and role != .equivocator;
         harness.mailbox_size = 1024;
         harness.stall_proposals = false;
+        harness.verify_reports = false;
     }
 
     fn start_byzantine(harness: *Harness, validator: *Validator, key: Key, role: Role) !void {
@@ -382,6 +391,11 @@ const Harness = struct {
         validator.application.stall_proposals = harness.stall_proposals;
         try validator.application.register();
         validator.reporter = .init(gpa, io, &harness.verifier);
+        const rng: IoRng = .{ .io = io };
+        const verify = harness.verify_reports;
+        const scheme = harness.schemes[index];
+        validator.attributable =
+            .init(gpa, io, rng, scheme, &validator.reporter, parallel.sequential, verify);
         validator.page_cache = try .init(gpa, page_size, page_cache_size);
         const n: u32 = @intCast(harness.validators.len);
         validator.elector = try elector_mod.RoundRobin(Sha256).default().build(gpa, n);
@@ -514,7 +528,7 @@ fn engine_config(validator: *Validator, scheme: Scheme, blocker: Net.Control) En
         .blocker = blocker,
         .automaton = &validator.application,
         .relay = &validator.application,
-        .reporter = &validator.reporter,
+        .reporter = &validator.attributable,
         .track_historical_votes = false,
         .strategy = parallel.sequential,
         .partition = std.mem.sliceTo(&validator.partition, 0),
@@ -819,7 +833,7 @@ fn all_recovery_scenario(ctx: Context) !void {
     try ctx.sleep(.fromSeconds(60));
     var latest: u64 = 0;
     for (harness.validators) |*validator| {
-        latest = @max(latest, validator.reporter.max_nullify_view().get());
+        latest = @max(latest, validator.reporter.max_vote_view(.nullify).get());
     }
     try testing.expect(latest > 0);
     try harness.link_all(link_ms(10, 1, 1.0), null);
@@ -1079,6 +1093,38 @@ test "engine shutdown: an aborted engine stops its actors" {
 
 test "engine shutdown: a graceful stop ends the engine" {
     for (0..3) |seed| _ = try run_seeded(seed, engine_shutdown_scenario, .{true});
+}
+
+/// commonware `attributable_reporter_filtering`: every engine reports through the
+/// attributable wrapper with verification on. ed25519 is attributable, so each validator
+/// still sees its peers' notarize (except at the last view) and finalize votes.
+fn attributable_reporter_scenario(ctx: Context) !void {
+    var harness: Harness = undefined;
+    try harness.start_network(ctx, 3, link_ms(10, 1, 1.0), .honest, .{});
+    defer harness.deinit();
+    harness.verify_reports = true;
+    for (0..harness.validators.len) |index| try harness.start_validator(index);
+    const required = 10;
+    try harness.wait_all(required);
+    try harness.check(required);
+    for (harness.validators) |*validator| {
+        const reporter = &validator.reporter;
+        try testing.expect(reporter.notarized(.new(1)) or reporter.finalized(.new(1)) != null);
+        const last = reporter.max_vote_view(.notarize).get();
+        try testing.expect(last > 1); // Peer votes were reported at all.
+        const through = @max(last, reporter.max_vote_view(.finalize).get());
+        for (1..through + 1) |view| {
+            const votes = reporter.votes(.new(view));
+            if (votes.notarize != 0 and view != last) {
+                try testing.expect(@popCount(votes.notarize) > 1);
+            }
+            if (votes.finalize != 0) try testing.expect(@popCount(votes.finalize) > 1);
+        }
+    }
+}
+
+test "attributable reporter: peer votes reach the reporter verified" {
+    _ = try run_seeded(0, attributable_reporter_scenario, .{});
 }
 
 /// One run of commonware `unclean_shutdown`: start every validator from its journal, stop
