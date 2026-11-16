@@ -104,12 +104,16 @@ statistics, output, CLI) and run against a minimal in-lane stand-in, then switch
 - [x] `dealer` (`zig build run-bridge-dealer`): matches commonware's binary byte for byte for
   three dealings and 13 clap cases. Its README shows an older polynomial encoding (without the
   6-byte header the binary writes); the tests follow the binary.
-- [ ] Types (block, inbound, outbound) with their codec tests, and the application.
+- [x] Types (block, inbound, outbound) in `types.zig`, shared constants in `lib.zig`: every
+  variant's encoding matches commonware's (`testdata/types_vectors.txt`, printed by commonware
+  for the values its own codec tests build), plus invalid tags and a seeded fuzz of the
+  decoders on mutated vectors.
+- [ ] The application (proposes random data or the other network's finalization).
 - [ ] `indexer` and `validator` binaries on discovery and simplex (bls12381 threshold).
 - [ ] Demo: two networks of 4 validators and an indexer.
 
 ### Follow-ups
-- [ ] Pass `.subscriber = collector.subscriber()` to the runner (runtime 1ead8cc) once p2p and
+- [x] Pass `.subscriber = collector.subscriber()` to the runner (runtime 1ead8cc) once p2p and
   simplex emit commonware's events; re-record the log demo (and chat's, if its logs gain
   events) so the Logs panes show them.
 - [ ] flood `setup` on `deployer.aws` (b126fe1).
@@ -128,3 +132,4 @@ statistics, output, CLI) and run against a minimal in-lane stand-in, then switch
 - 2026-11-16: log ported and running on 4 local validators over discovery.
 - 2026-11-16: log demo recorded; production storage now reports a canceled write as Canceled.
 - 2026-11-16: bridge's dealer; build.zig builds `<name>/<binary>` entries as `<name>-<binary>`.
+- 2026-11-16: log and chat Logs panes show p2p and simplex events; bridge wire types.
