@@ -188,6 +188,8 @@ fn bench_case(
 ) !void {
     const gpa = runner.allocator;
     if (!runner.matches(name.name())) return;
+    // The smoke run covers the fast path (`valid`) and the bisection (`split`).
+    if (runner.inputs == .smoke and (case == .bad or case == .spare)) return;
     var fixture = try Fixture(S).init(gpa, attestations, quorum, case);
     defer fixture.deinit(gpa);
     const expected_pending: usize = if (case == .spare) quorum + 1 else quorum;
@@ -225,9 +227,9 @@ fn any_selected(runner: *bench.Runner, names: *const [cases.len]bench.Benchmark)
 }
 const committees = [_][2]u32{ .{ 100, 67 }, .{ 298, 199 } };
 
-/// commonware's committees, and a smaller one for the (Debug) smoke run.
+/// commonware's committees, and the smallest one for the (Debug) smoke run.
 fn committee_cases(runner: *const bench.Runner) []const [2]u32 {
-    const smoke = [_][2]u32{.{ 10, 7 }};
+    const smoke = [_][2]u32{.{ 4, 3 }};
     return runner.inputs.pick([]const [2]u32, &smoke, &committees, &committees);
 }
 
@@ -341,7 +343,10 @@ fn bench_threshold_case(runner: *bench.Runner, comptime V: type, mode: Mode, n: 
 
 fn bench_threshold_variant(runner: *bench.Runner, comptime V: type) !void {
     const counts = committee_cases(runner);
-    for ([_]Mode{ .non_zero_counter, .roots_of_unity }) |mode| {
+    // The smoke run checks one mode: the modes differ only in the dealt interpolation points.
+    const all_modes = [_]Mode{ .non_zero_counter, .roots_of_unity };
+    const modes = runner.inputs.pick([]const Mode, all_modes[0..1], &all_modes, &all_modes);
+    for (modes) |mode| {
         for (counts) |committee| try bench_threshold_case(runner, V, mode, committee[0]);
     }
 }
@@ -383,7 +388,9 @@ fn bench_attestation_eq(runner: *bench.Runner) !void {
 pub fn run(runner: *bench.Runner) !void {
     try bench_attestation_eq(runner);
     try bench_multisig_variant(runner, MinPk);
-    try bench_multisig_variant(runner, MinSig);
     try bench_threshold_variant(runner, MinPk);
+    // Each smoke case costs seconds of Debug pairings; the smoke run checks one variant.
+    if (runner.inputs == .smoke) return;
+    try bench_multisig_variant(runner, MinSig);
     try bench_threshold_variant(runner, MinSig);
 }

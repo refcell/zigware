@@ -185,7 +185,8 @@ fn bench_same_signer(runner: *bench.Runner) !void {
     const gpa = runner.allocator;
     for (modes) |mode| {
         for (cases(runner, &.{ 5, 10, 20, 50, 100, 250, 500 })) |n| {
-            for ([_]u32{ 10, 100 }) |count| {
+            const counts = [_]u32{ 10, 100 };
+            for (runner.inputs.pick([]const u32, counts[0..1], &counts, &counts)) |count| {
                 const name = bench.Benchmark.init("bls12381::threshold_batch_verify_same_signer")
                     .with_param("n", n).with_param("t", N3f1.quorum(n))
                     .with_param("msgs", count).with_param("conc", 1)
