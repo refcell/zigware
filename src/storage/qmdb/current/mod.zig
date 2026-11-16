@@ -2,6 +2,7 @@
 //! commits to an activity bitmap grafted onto the ops tree, so proofs can show that an
 //! operation is the current value of its key. So far: grafting and the proof codecs.
 
+pub const canonical = @import("canonical.zig");
 pub const grafting = @import("grafting.zig");
 pub const proof = @import("proof.zig");
 pub const OpsRootWitness = proof.OpsRootWitness;
@@ -15,6 +16,7 @@ pub const unordered = struct {
 };
 
 test {
+    _ = @import("canonical_test.zig");
     _ = @import("grafting_test.zig");
     _ = @import("proof_test.zig");
 }
