@@ -63,10 +63,10 @@ const packages = [_]Package{
         "conformance",
     } },
     .{ .name = "broadcast", .deps = &.{
-        "actor", "codec", "cryptography", "p2p", "parallel", "runtime", "utils",
+        "actor", "codec", "cryptography", "p2p", "parallel", "runtime", "utils", "invariants",
     } },
     .{ .name = "collector", .deps = &.{
-        "actor", "codec", "cryptography", "p2p", "runtime", "utils",
+        "actor", "codec", "cryptography", "p2p", "runtime", "utils", "invariants",
     } },
     .{ .name = "resolver", .deps = &.{
         "actor", "codec", "cryptography", "p2p", "runtime", "stream", "utils", "conformance",

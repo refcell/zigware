@@ -64,4 +64,5 @@ pub fn assert_monitor(comptime M: type) void {
 test {
     std.testing.refAllDecls(@This());
     _ = p2p;
+    _ = @import("fuzz.zig");
 }

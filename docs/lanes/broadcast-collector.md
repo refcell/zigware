@@ -64,6 +64,12 @@ needs it.
   (its wire is the request and response encodings, which the mocks check byte for byte).
 - `count_running_tasks` has no counterpart; the shutdown tests check that aborted engines free
   everything (testing allocator) and close their mailboxes.
+- Fuzz: `broadcast/fuzz.zig` (`broadcast_engine_operations`) and `collector/fuzz.zig`
+  (`collector`) draw their inputs like commonware's `arbitrary` impls, and the `Recipients::Some`
+  shuffle is rand 0.10's `SliceRandom::shuffle` (checked against rand 0.10.3 vectors). Each has
+  a minifuzz test, a coverage-guided `testing.fuzz` test, and a seeded random-input test: the
+  generators never run out of data, so minifuzz keeps its 8-byte start and only reaches the
+  first action, while random inputs reach gets, subscriptions, engine restarts, and replies.
 
 ## Backlog
 - [x] broadcast lib.rs traits.
@@ -71,10 +77,12 @@ needs it.
   p2p.simulated (commonware has no broadcast conformance hashes).
 - [x] collector lib.rs, p2p ingress (overflow policy), engine, mocks, with every ingress.rs
   and mod.rs test (commonware has no collector conformance hashes).
-- [ ] Fuzz targets (broadcast/fuzz, collector/fuzz).
+- [x] Fuzz targets (broadcast/fuzz, collector/fuzz).
 
 ## Log
 - 2026-11-13: broadcast lib.rs and buffered (engine, mailbox, overflow policy, metrics,
   mocks) with all 27 mod.rs tests; `broadcast.Digested`.
 - 2026-11-13: collector lib.rs traits and p2p engine, mailbox, mocks, with 5 policy and 13
   engine tests.
+- 2026-11-16: broadcast and collector fuzz targets (minifuzz, coverage-guided, and seeded
+  random inputs).

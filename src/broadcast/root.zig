@@ -32,6 +32,7 @@ test {
     std.testing.refAllDecls(@This());
     _ = digested;
     _ = buffered;
+    _ = @import("fuzz.zig");
 }
 
 test "buffered mailbox is a broadcaster" {
