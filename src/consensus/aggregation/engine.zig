@@ -35,7 +35,7 @@ const Participant = consensus_types.Participant;
 const journal = @import("storage").journal.segmented.variable;
 
 /// Draws from the runtime RNG through `std.Io` (commonware's context as `CryptoRng`).
-const IoRng = struct {
+pub const IoRng = struct {
     io: Io,
 
     pub fn next_u64(rng: IoRng) u64 {
@@ -84,11 +84,14 @@ pub fn Engine(comptime P: type) type {
             timer: runtime.telemetry.metrics.histogram.Timer,
         };
 
-        /// What the tasks hand the engine, guarded by `mutex`; `condition` wakes the engine
-        /// and a receiver task waiting for the message slot.
+        /// What the tasks hand the engine, guarded by `mutex`. `condition` wakes the engine
+        /// and `slot_free` the receiver task. Each condition has exactly one waiter: a
+        /// `std.Io.Condition` counts signals, not waiters, so a timed-out waiter can consume a
+        /// signal meant for another one and leave it asleep.
         const Inbox = struct {
             mutex: Io.Mutex = .init,
             condition: Io.Condition = .init,
+            slot_free: Io.Condition = .init,
             /// The newest epoch not yet handled.
             epoch: ?Epoch = null,
             epoch_closed: bool = false,
@@ -96,10 +99,35 @@ pub fn Engine(comptime P: type) type {
             digests: std.ArrayList(DigestResult) = .empty,
             /// Digest requests still running, each with a reserved slot in `digests`.
             digests_outstanding: usize = 0,
-            /// One network message; the receiver task waits while it is full.
-            message: ?p2p.Message(PublicKey) = null,
+            /// Network messages in arrival order (a ring of `messages_count` from
+            /// `messages_head`); the receiver task waits while it is full. Each hand-off between
+            /// tasks costs a scheduler cycle, so the receiver moves every message already
+            /// available at once instead of one per cycle.
+            messages: [message_capacity]p2p.Message(PublicKey) = undefined,
+            messages_head: u32 = 0,
+            messages_count: u32 = 0,
             network_closed: bool = false,
+
+            fn push_message(inbox: *Inbox, message: p2p.Message(PublicKey)) void {
+                assert(inbox.messages_count < message_capacity);
+                assert(inbox.messages_head < message_capacity);
+                const tail = (inbox.messages_head + inbox.messages_count) % message_capacity;
+                inbox.messages[tail] = message;
+                inbox.messages_count += 1;
+            }
+
+            fn pop_message(inbox: *Inbox) ?p2p.Message(PublicKey) {
+                assert(inbox.messages_count <= message_capacity);
+                if (inbox.messages_count == 0) return null;
+                const message = inbox.messages[inbox.messages_head];
+                inbox.messages_head = (inbox.messages_head + 1) % message_capacity;
+                inbox.messages_count -= 1;
+                return message;
+            }
         };
+
+        /// Network messages buffered between the receiver task and the engine.
+        const message_capacity = 256;
 
         const Event = union(enum) {
             epoch: Epoch,
@@ -159,7 +187,10 @@ pub fn Engine(comptime P: type) type {
             self.confirmed.deinit(gpa);
             self.rebroadcast_deadlines.deinit(gpa);
             self.inbox.digests.deinit(gpa);
-            if (self.inbox.message) |*message| message.deinit();
+            while (self.inbox.pop_message()) |message| {
+                var owned = message;
+                owned.deinit();
+            }
             self.metrics.deinit();
             // The engine owns its reporter, as in commonware (dropped with the engine).
             if (comptime @hasDecl(P.Reporter, "deinit")) self.config.reporter.deinit();
@@ -209,7 +240,10 @@ pub fn Engine(comptime P: type) type {
                 };
                 self.journal = try recovery.finish();
             }
-            defer self.close_journal();
+            // A canceled run is an unclean shutdown (commonware drops the future): only what
+            // was already synced survives. A run that stops on its own syncs everything.
+            var stopped = false;
+            defer self.close_journal(stopped);
             defer self.tasks.cancel(self.io);
             for (self.pending.items()) |entry| {
                 if (entry.value.digest == null) try self.get_digest(entry.height);
@@ -235,7 +269,10 @@ pub fn Engine(comptime P: type) type {
                     continue;
                 }
                 switch (try self.wait()) {
-                    .stopped => return,
+                    .stopped => {
+                        stopped = true;
+                        return;
+                    },
                     .epoch => |epoch| try self.handle_epoch(epoch),
                     .digest => |result| try self.handle_digest_result(result, sender),
                     .message => |message| {
@@ -248,10 +285,11 @@ pub fn Engine(comptime P: type) type {
             }
         }
 
-        fn close_journal(self: *Self) void {
+        fn close_journal(self: *Self, flush: bool) void {
             var owned = self.journal.?;
             self.journal = null;
-            owned.sync_all() catch {}; // Shutdown: an unsynced tail is replayed or repaired.
+            // On failure the unsynced tail is lost; replay repairs a torn section.
+            if (flush) owned.sync_all() catch {};
             owned.deinit();
         }
 
@@ -284,9 +322,8 @@ pub fn Engine(comptime P: type) type {
                 if (inbox.digests.items.len > 0) {
                     return .{ .digest = inbox.digests.orderedRemove(0) };
                 }
-                if (inbox.message) |message| {
-                    inbox.message = null;
-                    inbox.condition.broadcast(self.io);
+                if (inbox.pop_message()) |message| {
+                    inbox.slot_free.signal(self.io);
                     return .{ .message = message };
                 }
                 if (inbox.network_closed) return .stopped;
@@ -321,14 +358,14 @@ pub fn Engine(comptime P: type) type {
                             return;
                         };
                         defer inbox.mutex.unlock(self.io);
-                        while (inbox.message != null) {
-                            inbox.condition.wait(self.io, &inbox.mutex) catch {
+                        while (inbox.messages_count == message_capacity) {
+                            inbox.slot_free.wait(self.io, &inbox.mutex) catch {
                                 message.deinit();
                                 return;
                             };
                         }
-                        inbox.message = message;
-                        inbox.condition.broadcast(self.io);
+                        inbox.push_message(message);
+                        inbox.condition.signal(self.io);
                     }
                 }
             }.receive;
@@ -764,4 +801,214 @@ pub fn Engine(comptime P: type) type {
             if (digest != null) try self.rebroadcast_deadlines.put(self.gpa, height, self.now());
         }
     };
+}
+
+// Tests of the engine's handlers (commonware `aggregation/engine.rs` tests). The
+// `assembly_failure_panics` test (`should_panic`) has no counterpart: Zig tests cannot catch a
+// panic.
+
+const testing = std.testing;
+
+const TestHarness = struct {
+    const cryptography = @import("cryptography");
+    const parallel = @import("parallel");
+    const mocks = @import("mocks/root.zig");
+    const scheme_mod = @import("scheme.zig");
+    const TestDigest = cryptography.Sha256.Digest;
+    const TestScheme = scheme_mod.ed25519.Scheme(TestDigest);
+
+    /// Counts certificates reported by the engine.
+    const CertificateCounter = struct {
+        pub const Activity = types.Activity(TestScheme, TestDigest);
+        certified: u32 = 0,
+
+        pub fn report(self: *CertificateCounter, activity: Activity) @import("actor").Feedback {
+            if (activity == .certified) self.certified += 1;
+            return .ok;
+        }
+    };
+
+    const NoopBlocker = struct {
+        pub fn block(_: NoopBlocker, _: TestScheme.PublicKey) @import("actor").Feedback {
+            return .ok;
+        }
+    };
+
+    /// Accepts every broadcast and sends nothing.
+    const InertSender = struct {
+        gpa: Allocator,
+        sent: u32 = 0,
+
+        pub fn send(
+            self: *InertSender,
+            _: p2p.Recipients(TestScheme.PublicKey),
+            parts: []const []const u8,
+            _: bool,
+        ) Allocator.Error![]TestScheme.PublicKey {
+            assert(parts.len == 1 and parts[0].len > 0);
+            self.sent += 1;
+            return self.gpa.alloc(TestScheme.PublicKey, 0);
+        }
+    };
+
+    const Parameters = struct {
+        pub const Scheme = TestScheme;
+        pub const Provider = *mocks.Provider(TestScheme);
+        pub const Digest = TestDigest;
+        pub const Automaton = mocks.Application;
+        pub const Reporter = CertificateCounter;
+        pub const Monitor = *mocks.Monitor;
+        pub const Blocker = NoopBlocker;
+        pub const Strategy = parallel.Sequential;
+    };
+    const TestEngine = Engine(Parameters);
+
+    gpa: Allocator,
+    fixture: cryptography.certificate.mocks.Fixture(TestScheme),
+    provider: mocks.Provider(TestScheme),
+    monitor: *mocks.Monitor,
+    cache: runtime.buffer.paged.CacheRef,
+    engine: *TestEngine,
+    epoch: Epoch,
+
+    /// An engine at `epoch` with an empty journal open, so handlers that journal can be
+    /// driven directly. Nothing is replayed and the safe tip is left uninitialized.
+    fn init(
+        self: *TestHarness,
+        io: Io,
+        storage: runtime.storage.Storage,
+        scope: runtime.telemetry.metrics.Scope,
+        partition: []const u8,
+    ) !void {
+        const gpa = testing.allocator;
+        var rng = utils.rng.TestRng.init(0);
+        self.gpa = gpa;
+        self.epoch = .new(111);
+        self.fixture = try scheme_mod.ed25519.fixture(TestScheme, gpa, &rng, partition, 4);
+        self.provider = .init(gpa);
+        _ = try self.provider.register(self.epoch, try self.fixture.schemes[0].clone(gpa));
+        self.monitor = try mocks.Monitor.create(gpa, io, self.epoch);
+        self.cache = try .init(gpa, 1024, 10);
+        self.engine = try TestEngine.create(gpa, io, storage, &scope, .{
+            .monitor = self.monitor,
+            .provider = &self.provider,
+            .automaton = .init(.correct),
+            .reporter = .{},
+            .blocker = .{},
+            .priority_acks = false,
+            .rebroadcast_timeout = utils.Duration.from_secs(1),
+            .epoch_bounds = .{ .new(1), .new(1) },
+            .window = 1,
+            .activity_timeout = .new(10),
+            .journal_partition = partition,
+            .journal_write_buffer = 4096,
+            .journal_replay_buffer = 4096,
+            .journal_heights_per_section = 6,
+            .journal_compression = null,
+            .journal_page_cache = &self.cache,
+            .strategy = parallel.sequential,
+        });
+        self.engine.epoch = self.epoch;
+        var recovery = try self.engine.open_journal();
+        try testing.expectEqual(null, try recovery.next());
+        self.engine.journal = try recovery.finish();
+    }
+
+    fn deinit(self: *TestHarness) void {
+        self.engine.close_journal(true);
+        self.engine.destroy();
+        self.cache.deinit();
+        self.monitor.destroy();
+        self.provider.deinit();
+        self.fixture.deinit(self.gpa);
+    }
+
+    fn ack(self: *TestHarness, signer: usize, height: Height, digest: TestDigest) !TestEngine.Ack {
+        const item: types.Item(TestDigest) = .{ .height = height, .digest = digest };
+        const scheme = &self.fixture.schemes[signer];
+        return (try TestEngine.Ack.sign(self.gpa, scheme, self.epoch, item)).?;
+    }
+
+    const Body = fn (Io, runtime.storage.Storage, runtime.telemetry.metrics.Scope) anyerror!void;
+
+    fn run(comptime body: Body) !void {
+        var runner = try runtime.deterministic.Runner.init(testing.allocator, .{
+            .timeout_ns = 10 * std.time.ns_per_s,
+        });
+        defer runner.deinit();
+        try (try runner.start(body, .{ runner.io(), runner.storage(), runner.metrics() }));
+    }
+};
+
+test "a digest for a height that is not pending is dropped" {
+    try TestHarness.run(struct {
+        fn body(
+            io: Io,
+            storage: runtime.storage.Storage,
+            scope: runtime.telemetry.metrics.Scope,
+        ) anyerror!void {
+            var harness: TestHarness = undefined;
+            try harness.init(io, storage, scope, "aggregation-digest-not-pending");
+            defer harness.deinit();
+            const engine = harness.engine;
+            var sender: TestHarness.InertSender = .{ .gpa = testing.allocator };
+            const Sha256 = TestHarness.cryptography.Sha256;
+            // Verifying a pending height keeps the ack a peer sent before the digest was known
+            // and adds this node's own.
+            const height: Height = .zero();
+            const digest = Sha256.hash(&.{"payload"});
+            const early = try harness.ack(1, height, digest);
+            try engine.pending.put_new(engine.gpa, height, .{ .digest = null });
+            try engine.pending.get(height).?.acks.append(engine.gpa, early);
+            try engine.handle_digest(height, digest, &sender);
+            const verified = engine.pending.get(height).?;
+            try testing.expect(verified.digest.?.order(digest) == .eq);
+            try testing.expectEqual(2, verified.acks.items.len);
+            try testing.expect(engine.rebroadcast_deadlines.contains(height));
+            try testing.expectEqual(1, sender.sent);
+            // A digest for a height pruned since it was requested is dropped.
+            const pruned: Height = .new(1);
+            try engine.handle_digest(pruned, Sha256.hash(&.{"pruned"}), &sender);
+            try testing.expect(!engine.pending.contains(pruned));
+            try testing.expect(!engine.rebroadcast_deadlines.contains(pruned));
+            // A digest for a height already verified keeps the verified digest and its acks.
+            try engine.handle_digest(height, Sha256.hash(&.{"replacement"}), &sender);
+            const kept = engine.pending.get(height).?;
+            try testing.expect(kept.digest.?.order(digest) == .eq);
+            try testing.expectEqual(2, kept.acks.items.len);
+            try testing.expectEqual(1, sender.sent);
+        }
+    }.body);
+}
+
+test "a certificate for a confirmed height is dropped" {
+    try TestHarness.run(struct {
+        fn body(
+            io: Io,
+            storage: runtime.storage.Storage,
+            scope: runtime.telemetry.metrics.Scope,
+        ) anyerror!void {
+            var harness: TestHarness = undefined;
+            try harness.init(io, storage, scope, "aggregation-certificate-confirmed");
+            defer harness.deinit();
+            const engine = harness.engine;
+            const height: Height = .zero();
+            const digest = TestHarness.cryptography.Sha256.hash(&.{"payload"});
+            try engine.pending.put_new(engine.gpa, height, .{ .digest = digest });
+            var acks: [4]TestHarness.TestEngine.Ack = undefined;
+            for (&acks, 0..) |*slot, signer| slot.* = try harness.ack(signer, height, digest);
+            // Three of the four acks form a certificate: it advances the tip and is reported
+            // once.
+            for (acks[0..3]) |*ack| try testing.expect(try engine.handle_ack(ack));
+            try testing.expectEqual(1, engine.confirmed.len());
+            try testing.expectEqual(Height.new(1), engine.tip);
+            try testing.expectEqual(1, engine.config.reporter.certified);
+            // The fourth ack assembles the certificate again; the confirmed height drops it
+            // without a second report.
+            try testing.expect(try engine.handle_ack(&acks[3]));
+            try testing.expectEqual(1, engine.confirmed.len());
+            try testing.expectEqual(Height.new(1), engine.tip);
+            try testing.expectEqual(1, engine.config.reporter.certified);
+        }
+    }.body);
 }

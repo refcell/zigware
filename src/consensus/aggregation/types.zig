@@ -311,12 +311,15 @@ pub fn Certificate(comptime S: type, comptime D: type) type {
             return scheme.verify_certificate(gpa, rng, self.item, &self.certificate, strategy);
         }
 
+        /// A copy owning its own certificate (a plain-value certificate, such as the mock
+        /// scheme's, is copied as is).
         pub fn clone(self: *const Self, gpa: Allocator) Allocator.Error!Self {
+            if (comptime !@hasDecl(S.Certificate, "clone")) return self.*;
             return .{ .item = self.item, .certificate = try self.certificate.clone(gpa) };
         }
 
         pub fn deinit(self: *Self, gpa: Allocator) void {
-            self.certificate.deinit(gpa);
+            if (comptime @hasDecl(S.Certificate, "deinit")) self.certificate.deinit(gpa);
             self.* = undefined;
         }
 

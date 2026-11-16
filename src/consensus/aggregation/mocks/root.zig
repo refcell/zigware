@@ -12,6 +12,7 @@ pub const Provider = provider.Provider;
 pub const reporter = @import("reporter.zig");
 pub const Reporter = reporter.Reporter;
 pub const ReporterMailbox = reporter.Mailbox;
+pub const scheme = @import("scheme.zig");
 
 test {
     std.testing.refAllDecls(@This());

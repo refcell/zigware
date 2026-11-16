@@ -41,7 +41,7 @@ then the core and standard actors as those packages land.
   checked by `assert_valid`). `aggregation.metrics.Metrics`.
 - `consensus.aggregation.mocks`: `Application` (`Strategy`: correct, incorrect, skip),
   `Monitor`, `Provider(S)`, `Reporter(S, D)` and `ReporterMailbox(S, D)` (`get_tip`,
-  `get_contiguous_tip`, `get`).
+  `get_contiguous_tip`, `get`), `scheme.Scheme(D)` (ledger-backed mock) and `scheme.fixture`.
 
 ## Decisions
 - `Item(D)` is the certificate subject itself (passed by value); commonware uses `&Item<D>`.
@@ -53,9 +53,26 @@ then the core and standard actors as those packages land.
   against a sorting reference covers the heaps instead.
 - The engine waits on one `Io.Condition`: the network receiver, the epoch subscription, and
   each digest request run as `std.Io` tasks that hand results to an inbox; due rebroadcasts
-  bound the wait. Each turn handles one event in commonware's `select_loop!` order. Acks per
+  bound the wait. Each turn handles one event in commonware's `select_loop!` order.
+  The receiver task waits on a second condition: `std.Io.Condition` counts signals, not
+  waiters, so a timed-out engine wait could take the receiver's signal and leave it asleep
+  (a lost wakeup that stalled the engine once rebroadcasts were short). Messages queue in a
+  bounded ring (256): every hand-off between tasks costs a deterministic-runtime cycle
+  (1 ms), so a one-message slot capped each engine near 500 messages/s and the backlog
+  starved acks under commonware's short-rebroadcast tests. Acks per
   height sit in one array sorted by (epoch, signer) instead of nested `BTreeMap`s; pending and
   confirmed heights are sorted arrays (`height_map.zig`).
+- A canceled engine run is an unclean shutdown (commonware drops the future): the journal
+  closes without a final sync, so only what was already synced survives the restart.
+- Like commonware, certified heights stay in `pending` (pruned only below
+  `tip - activity_timeout`) and keep being rebroadcast; ported as is.
+- Debug builds run the multi-node tests with ed25519 only (unoptimized P-256 and BLS take
+  tens of seconds per run); `-Dslow-tests` or a release build runs every scheme. Scenario
+  fixtures draw their keys from the runtime RNG as commonware's do; the restart and
+  admission tests use a fixed RNG, as commonware's `test_rng`.
+- `distinct states` compares neighbors from different scheme families only: the Zig
+  auditor hashes the task schedule alone (commonware's also hashes RNG draws and other
+  runtime events), and MinPk and MinSig runs of one BLS scheme schedule identically.
 - The engine owns `config.reporter` and releases it in `destroy`. Broadcasts that the network
   refuses are dropped (rebroadcasts retry), as in commonware.
 - The deterministic runtime freed tasks with stale timeout alarms still queued, which crashed
@@ -68,9 +85,10 @@ then the core and standard actors as those packages land.
 ## Backlog
 - [x] aggregation: types (all 5 conformance hashes match), scheme, limits, safe_tip.
 - [x] aggregation: config, metrics, engine, mocks; mod.rs `all_online` with ed25519.
-- [ ] aggregation: the rest of mod.rs (byzantine proposer, unclean shutdowns, lossy links,
-  determinism, one offline, partition, insufficient validators, 1k) with every scheme, and
-  the three engine.rs unit tests.
+- [x] aggregation: the rest of mod.rs (byzantine proposer, unclean shutdowns, lossy links,
+  determinism, distinct states, one offline, partition, insufficient validators, admitted
+  signer, 1k on the mock scheme) with every scheme, and the engine.rs unit tests except the
+  `should_panic` one.
 - [ ] marshal: ancestry, store, limits, config, conformance types, application traits.
 - [ ] marshal resolver, core, standard (and coding) actors with their mocks and tests.
 - [ ] Fuzz targets (consensus/fuzz entries for aggregation and marshal).
@@ -78,3 +96,6 @@ then the core and standard actors as those packages land.
 ## Log
 - 2026-11-13: aggregation types, schemes, limits, safe_tip; 5 conformance hashes match.
 - 2026-11-13: aggregation config, metrics, mocks, engine; all_online passes (ed25519).
+- 2026-11-16: aggregation fault tests (byzantine, unclean shutdowns, lossy, determinism,
+  partition, offline, insufficient, admitted signer) pass with every scheme in ReleaseSafe;
+  fixed two engine liveness bugs (lost receiver wakeup, one-message inbox).
