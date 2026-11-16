@@ -65,7 +65,11 @@ resolver; those lanes are running, so do the types first and the actors as they 
   `TimeoutReason`, `Outbound`, `Inbound(P)` with `MessageType`, `HandoffEvent`,
   `HandoffAbandoned`; enum labels print commonware's variant names.
 - `consensus.simplex.scheme.bls12381_threshold.vrf`: `Signature(V)`, `Certificate(V)`,
-  `Seed(V)` wire types.
+  `Seed(V)` (`verify(scheme)`, `decrypt(ciphertext)`), `seed(V, *notarization_or_finalization)`
+  (`Seedable`), `encrypt(V, gpa, rng, identity, namespace, target, message)`, `decrypt_with`,
+  `Scheme(D, P, V)` (commonware `vrf::Scheme<P, V>`: `signer`, `verifier`, `member`,
+  `certificate_verifier`, `identity`, `share`, `polynomial`, `encrypt`, plus the certificate-scheme
+  surface; not attributable, batchable), and `fixture(S, gpa, rng, namespace, n)`.
 - `consensus.simplex.actors.batcher`: `votes.VoteTracker(S, D)`, `verifier.Verifier(S, D)`
   and `Batch(C)` (optimistic assembly with per-vote fallback), `round.Round(S, B, D, R)`
   (`add_network`, `accept_vote`, `record_certificate`, `try_construct`, `missing_voters`),
@@ -145,9 +149,9 @@ resolver; those lanes are running, so do the types first and the actors as they 
   `-Dslow-tests`, like the crypto lane; ReleaseSafe CI runs them.
 - Elector `build` takes the participant count, not the set (commonware reads only its
   length). `mode`/`Input` replace the sealed `Mode` trait.
-- Random V0/V1 conformance hashes and the threshold-certificate elector tests wait for the
-  bls-math lane's threshold signatures; `select_leader` is checked against independently
-  computed values instead.
+- The VRF scheme seeds its two same-message batches (vote, then seed) with ChaCha20 keys
+  drawn from `rng`, where commonware uses `StdRng`; the draws only pick verification weights,
+  so results match. Its sharing parameters are named `sharing` (`polynomial` is the accessor).
 - `Config(P)` takes one parameter type declaring commonware's eight type parameters.
   `check` returns the violated rule's message so tests can see it, and `assert_valid` panics
   with it. The floor check uses the certificate scheme surface
@@ -192,9 +196,10 @@ resolver; those lanes are running, so do the types first and the actors as they 
 - [x] types.rs `coding::Commitment` (`types.coding.Commitment(BlockDigest, Root, Context)`)
   with its tests and the `TestCommitment` conformance hash.
 - [x] elector.rs: RoundRobin (shuffled, stable terms) and Random (V0/V1) with their tests;
-  RoundRobinShuffleConformance matches. (Random V0/V1 hashes: after threshold signing.)
-- [ ] simplex scheme: ed25519, bls12381_multisig, secp256r1, bls12381_threshold standard
-  done (on crypto's certificate schemes); bls12381_threshold vrf (signing, seeds) next.
+  RoundRobinShuffleConformance and RandomV0/V1SelectLeaderConformance match.
+- [x] simplex scheme: ed25519, bls12381_multisig, secp256r1, bls12381_threshold standard
+  (on crypto's certificate schemes) and bls12381_threshold vrf (signing, seeds) with its
+  tests, including timelock encrypt/decrypt to a round's seed.
 - [x] limits.rs (`max_payload_size`), checked against the widest VRF encodings; the
   per-scheme widest-encoding tests follow with the schemes.
 - [x] config.rs (Config, Floor, skip and forward policies) with its validation rules.
@@ -258,3 +263,5 @@ resolver; those lanes are running, so do the types first and the actors as they 
 - 2026-11-16: Byzantine reconfigurer mock with its DST.
 - 2026-11-16: nullify-only mock and the split_views_no_lockup DST.
 - 2026-11-16: twins scenario generator (mocks/twins.rs), iterative, with its core tests.
+- 2026-11-16: bls12381_threshold vrf Scheme (signing, seeds, Seedable) with vrf.rs's tests;
+  Random V0/V1 select-leader conformance hashes match.

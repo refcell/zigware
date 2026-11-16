@@ -1,8 +1,9 @@
-//! Tests of `elector.zig`, ported from commonware's `simplex/elector.rs`, and the
-//! `RoundRobinShuffleConformance` hash. The Random V0/V1 conformance hashes and the tests that
-//! assemble threshold certificates wait for the bls-math lane's threshold signatures.
+//! Tests of `elector.zig`, ported from commonware's `simplex/elector.rs`, and its
+//! `RoundRobinShuffleConformance` and `RandomV0/V1SelectLeaderConformance` hashes.
 
 const std = @import("std");
+const builtin = @import("builtin");
+const build_options = @import("build_options");
 const testing = std.testing;
 const Allocator = std.mem.Allocator;
 const codec = @import("codec");
@@ -11,6 +12,7 @@ const cryptography = @import("cryptography");
 const utils = @import("utils");
 const consensus_types = @import("../types.zig");
 const elector = @import("elector.zig");
+const parallel = @import("parallel");
 const vrf = @import("scheme/bls12381_threshold/vrf.zig");
 
 const Participant = consensus_types.Participant;
@@ -232,6 +234,85 @@ test "round robin shuffle conformance hash matches commonware" {
         RoundRobinShuffleConformance,
         std.heap.smp_allocator,
         "commonware_consensus::simplex::elector::tests::conformance::RoundRobinShuffleConformance",
+        512,
+        @embedFile("../conformance.toml"),
+    );
+}
+
+/// The threshold VRF scheme of commonware's elector tests (`MinPk`, Sha256 digests).
+const ThresholdScheme = vrf.Scheme(Sha256.Digest, cryptography.ed25519.PublicKey, MinPk);
+
+/// A recovered nullify certificate for `at` from the first quorum of `schemes`.
+fn nullify_certificate(
+    allocator: Allocator,
+    schemes: []const ThresholdScheme,
+    at: Round,
+) !ThresholdScheme.Certificate {
+    const quorum = utils.N3f1.quorum(schemes.len);
+    var votes: [16]ThresholdScheme.Attestation = undefined;
+    std.debug.assert(quorum <= votes.len);
+    for (schemes[0..quorum], votes[0..quorum]) |*scheme, *vote| {
+        vote.* = (try scheme.sign(allocator, .{ .nullify = at })).?;
+    }
+    return schemes[0].assemble(allocator, votes[0..quorum], parallel.sequential);
+}
+
+test "random elects from the certificate's seed" {
+    var rng = utils.rng.test_rng();
+    var fixture = try vrf.fixture(ThresholdScheme, gpa, &rng, "test", 5);
+    defer fixture.deinit(gpa);
+    const built = Random.init(.v1).build(MinPk, 5);
+    const first = try nullify_certificate(gpa, fixture.schemes, round(1, 2));
+    const second = try nullify_certificate(gpa, fixture.schemes, round(1, 3));
+    const leader = built.elect(round(1, 2), &first);
+    try testing.expectEqual(leader, built.elect(round(1, 2), &first));
+    // commonware checks that these two seeds pick different leaders for its fixture.
+    try testing.expect(leader.get() != built.elect(round(1, 2), &second).get());
+}
+
+/// commonware's `random_select_leader_commit`: a `MinPk` threshold VRF fixture of
+/// `random_range(4..=10)` participants, a random round, a nullify certificate from the first
+/// quorum, then the encoded leader for that round followed by the view-1 leader.
+fn RandomSelectLeaderConformance(comptime version: elector.RandomVersion) type {
+    return struct {
+        pub fn commit(allocator: Allocator, seed: u64) ![]u8 {
+            var rng = utils.rng.ChaCha8Rng.init(seed);
+            const n = utils.rng.range_at_most(&rng, u32, 4, 10);
+            var fixture = try vrf.fixture(ThresholdScheme, allocator, &rng, "test", n);
+            defer fixture.deinit(allocator);
+            const built = Random.init(version).build(MinPk, n);
+            const epoch = utils.rng.range_less_than(&rng, u64, 0, 1000);
+            const view = utils.rng.range_at_most(&rng, u64, 2, 101);
+            const at = round(epoch, view);
+            const certificate = try nullify_certificate(allocator, fixture.schemes, at);
+            const leaders = [_]Participant{
+                built.elect(at, &certificate),
+                built.elect(round(epoch, 1), null),
+            };
+            return codec.encode([2]Participant, allocator, leaders);
+        }
+    };
+}
+
+test "random v0 select leader conformance hash matches commonware" {
+    if (builtin.mode == .debug and !build_options.slow_tests) return error.SkipZigTest;
+    try conformance.verify(
+        RandomSelectLeaderConformance(.v0),
+        std.heap.smp_allocator,
+        "commonware_consensus::simplex::elector::tests::conformance::" ++
+            "RandomV0SelectLeaderConformance",
+        512,
+        @embedFile("../conformance.toml"),
+    );
+}
+
+test "random v1 select leader conformance hash matches commonware" {
+    if (builtin.mode == .debug and !build_options.slow_tests) return error.SkipZigTest;
+    try conformance.verify(
+        RandomSelectLeaderConformance(.v1),
+        std.heap.smp_allocator,
+        "commonware_consensus::simplex::elector::tests::conformance::" ++
+            "RandomV1SelectLeaderConformance",
         512,
         @embedFile("../conformance.toml"),
     );
