@@ -28,24 +28,25 @@ variants (MinPk, MinSig) must match exactly.
 - [x] bls12381 dkg feldman_desmedt: Info, Dealer, Player, Logs, observe, deal, reshare,
   the test plan and its tests, and the message and FeldmanTranscript conformance hashes.
 - [x] bls12381 scheme.rs (PrivateKey, PublicKey, Signature) with its conformance hashes.
-- [ ] bls12381 dkg golden (commonware `dkg::golden`) with its tests and conformance hashes.
-  Done so far: the eVRF over banderwagon (vrf_send/recv, point_hash, the zk.circuit
-  gadget with its exact capacity) and the eVRF keys (PrivateKey, PublicKey, Schnorr
-  Signature, checked against commonware signatures), and golden `Info` (summary checked
-  against commonware) and `Output`. Blocked on crypto's zk bulletproofs for the rest:
-  Setup, vrf_batch_checked and its conversion, VrfCommitments, Dealing, the dealer logs,
-  deal/observe/play, the test plan with its tests, and the dkg_golden fuzz target.
+- [x] bls12381 dkg golden (commonware `dkg::golden`): the eVRF over banderwagon with its
+  bulletproofs conversion, the eVRF keys, `Setup`, `vrf_batch_checked`, `VrfCommitments`
+  and `check_batch`, `Info`, `Output`, `Dealing`, the (signed) dealer logs,
+  deal/observe/play, the test plan with every commonware test, and the dkg_golden fuzz
+  target. commonware has no golden conformance entries.
 - [x] Fuzz targets: math (the crate plan), simd (differential), and the bls12381 decode,
   primitive, threshold, aggregate, batch, tle, and dkg_feldman_desmedt targets.
-- [ ] Benchmarks: math (`interpolation`) and bls12381 (`benches/*.rs`) in
-  `src/<package>/benches.zig`, with commonware's names and its `conc=1` cases. All done
-  except `dkg/golden.rs`, which waits on golden deal/play (crypto's zk bulletproofs).
+- [x] Benchmarks: math (`interpolation`) and bls12381 (`benches/*.rs`) in
+  `src/<package>/benches.zig`, with commonware's names and its `conc=1` cases. The golden
+  benchmarks skip the Debug smoke run: building their eVRF setup takes minutes there.
 - [x] banderwagon (commonware `cryptography/src/banderwagon.rs`, moved from the crypto lane) as
   `cryptography.banderwagon`: F, G (codec, hash_to_group), GVar and the circuit gadgets,
   with every commonware test and the go-ipa fixed vectors. commonware has no banderwagon
   conformance entries or fuzz target; a decode fuzz target is added.
 
 ## Decisions
+- golden: commonware ignores `fake_mask_filtered` because a comment says `check_batch`
+  rejects the whole batch; its batched check (and ours) falls back to each dealer, so the
+  test runs here and passes. Plans hold up to 16 dealers or players, as bit masks.
 - Algebraic types are value types with `zero`/`one` decls and `add`/`sub`/`neg`/`mul`/`inv`/
   `eql` methods; `math.algebra` documents the interfaces and supplies trait defaults
   (`exp`, `scale`, `double`, `msm`, `div_2`). A module element `K` over scalars `R` multiplies
