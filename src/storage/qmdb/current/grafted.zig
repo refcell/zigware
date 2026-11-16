@@ -10,15 +10,16 @@ const std = @import("std");
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const merkle = @import("../../merkle/mod.zig");
-const merkle_proof = @import("../../merkle/proof.zig");
+const merkle_verification = @import("../../merkle/verification.zig");
 const merkle_storage = @import("../../merkle/storage.zig");
 const qmdb = @import("../mod.zig");
 const grafting = @import("grafting.zig");
 const canonical = @import("canonical.zig");
 const proof_mod = @import("proof.zig");
 
-/// A combined view over `grafted` (anything with `get_node(position) ?Digest`) and `ops` (an
-/// in-memory source with `size()` and `get_node(position) ?Digest`). Borrows both.
+/// A combined view over `grafted` (anything with `get_node(position) ?Digest`) and `ops` (a
+/// source with `size()` and `get_node(position)` returning `?Digest` or `!?Digest`, such as a
+/// persisted Merkle). Borrows both; reads fail only as `ops` reads do.
 pub fn Storage(
     comptime F: type,
     comptime H: type,
@@ -29,6 +30,7 @@ pub fn Storage(
     return struct {
         const Self = @This();
         pub const Digest = H.Digest;
+        pub const ReadError = SourceError(Ops);
 
         grafted: Grafted,
         ops: Ops,
@@ -38,9 +40,9 @@ pub fn Storage(
             return self.ops.size();
         }
 
-        pub fn get_node(self: *const Self, position: u64) ?Digest {
+        pub fn get_node(self: *const Self, position: u64) ReadError!?Digest {
             if (F.pos_to_height(position) < self.grafting_height) {
-                return self.ops.get_node(position);
+                return merkle_storage.get_node(self.ops, position);
             }
             const grafted_pos = grafting.ops_to_grafted_pos(F, position, self.grafting_height);
             return self.reconstruct(grafted_pos);
@@ -81,6 +83,20 @@ pub fn Storage(
     };
 }
 
+/// The error set of `Source.get_node` (empty for an in-memory source); `Source` may be a
+/// pointer.
+fn SourceError(comptime Source: type) type {
+    const Child = switch (@typeInfo(Source)) {
+        .pointer => |pointer| pointer.child,
+        else => Source,
+    };
+    const Return = @typeInfo(@TypeOf(Child.get_node)).@"fn".return_type.?;
+    return switch (@typeInfo(Return)) {
+        .error_union => |error_union| error_union.error_set,
+        else => error{},
+    };
+}
+
 /// The range proof of operations `range` over the grafted `storage`, whose bitmap `bitmap` (of
 /// `chunk_size`-byte chunks) and `ops_root` describe the same snapshot (commonware's
 /// `RangeProof::new`). Owns its digests.
@@ -100,8 +116,8 @@ pub fn build_range_proof(
     const inactive =
         try grafting.chunk_aligned_inactive_peaks(F, leaves, inactivity_floor, height);
     const hasher = qmdb.hasher(H);
-    const plan = try merkle_proof.RangePlan(F).init(leaves, range);
-    var merkle_proof_value = try plan.build(gpa, &hasher, inactive, storage);
+    const build = merkle_verification.historical_range_proof;
+    var merkle_proof_value = try build(F, gpa, &hasher, storage, leaves, range, inactive);
     errdefer merkle_proof_value.deinit(gpa);
     var partial: ?H.Digest = null;
     if (canonical.partial_chunk(chunk_size, bitmap)) |chunk| partial = H.hash(&.{&chunk[0]});

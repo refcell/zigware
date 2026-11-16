@@ -1,0 +1,407 @@
+//! Tests of the unordered fixed `current` database, ported from commonware's
+//! `qmdb/current/{mod,unordered/mod,unordered/fixed}.rs` and `qmdb/conformance.rs`
+//! (`Current{Mmr,Mmb}UnorderedFixedConf`), plus randomized batch chains whose speculative
+//! canonical roots must match the roots rebuilt on reopen.
+
+const std = @import("std");
+const assert = std.debug.assert;
+const testing = std.testing;
+const Allocator = std.mem.Allocator;
+const codec = @import("codec");
+const conformance = @import("conformance");
+const utils = @import("utils");
+const merkle = @import("../../merkle/mod.zig");
+const qmdb_support = @import("../test_support.zig");
+const any_conformance = @import("../any/conformance_test.zig");
+const unordered_proof = @import("unordered/proof.zig");
+const verification = @import("verification.zig");
+const support = @import("test_support.zig");
+
+const gpa = testing.allocator;
+const families = .{ merkle.mmr.Family, merkle.mmb.Family };
+const Digest = support.Digest;
+const Sha256 = support.Sha256;
+const Write = support.Write;
+const key = support.to_digest;
+const val = support.to_val;
+
+fn CurrentConformance(comptime F: type) type {
+    const Db = support.UnorderedFixed(F);
+    return struct {
+        pub fn commit(allocator: Allocator, seed: u64) ![]u8 {
+            var harness = try support.Harness.init(allocator);
+            defer harness.deinit();
+            var db = try harness.open(Db, null);
+            errdefer db.deinit();
+            const batches = try any_conformance.keyed_batches(allocator, seed);
+            defer for (batches) |list| allocator.free(list);
+            for (batches) |writes| try support.apply_writes(Db, &db, writes);
+            const root = db.root();
+            try db.destroy();
+            return allocator.dupe(u8, &root.bytes);
+        }
+    };
+}
+
+const name_prefix = "commonware_storage::qmdb::conformance::tests::";
+
+test "current root conformance (MMR unordered fixed)" {
+    const allocator = std.heap.smp_allocator;
+    const C = CurrentConformance(merkle.mmr.Family);
+    const name = name_prefix ++ "CurrentMmrUnorderedFixedConf";
+    try conformance.verify(C, allocator, name, 200, qmdb_support.conformance_file);
+}
+
+test "current root conformance (MMB unordered fixed)" {
+    const allocator = std.heap.smp_allocator;
+    const C = CurrentConformance(merkle.mmb.Family);
+    const name = name_prefix ++ "CurrentMmbUnorderedFixedConf";
+    try conformance.verify(C, allocator, name, 200, qmdb_support.conformance_file);
+}
+
+fn expect_value(db: anytype, k: Digest, expected: ?Digest) !void {
+    const actual = try db.get(&k);
+    if (expected) |e| {
+        try testing.expect(actual != null and actual.?.eql(e));
+    } else {
+        try testing.expect(actual == null);
+    }
+}
+
+/// Reopens `db` (dropped without syncing) on `harness`.
+fn reopen(comptime Db: type, harness: *support.Harness, db: *Db) !void {
+    db.deinit();
+    db.* = try harness.open(Db, null);
+}
+
+// Commonware's `test_build_small_close_reopen`.
+test "current build small, close, and reopen" {
+    inline for (families) |F| {
+        const Db = support.UnorderedFixed(F);
+        var harness = try support.Harness.init(gpa);
+        defer harness.deinit();
+        var db = try harness.open(Db, null);
+        errdefer db.deinit();
+        try testing.expectEqual(@as(u64, 0), db.inactivity_floor());
+        const root0 = db.root();
+        try reopen(Db, &harness, &db);
+        try testing.expect(db.root().eql(root0));
+        try support.apply_writes(Db, &db, &.{.{ .key = key(0), .value = val(10, 0) }});
+        try db.commit();
+        const root1 = db.root();
+        try testing.expect(!root1.eql(root0));
+        try reopen(Db, &harness, &db);
+        try testing.expect(db.root().eql(root1));
+        try expect_value(&db, key(0), val(10, 0));
+        var batch = try db.new_batch();
+        try batch.write(key(0), null);
+        batch.with_metadata(val(1, 1));
+        const merkleized = try batch.merkleize(&db);
+        try db.apply_batch(merkleized);
+        merkleized.release();
+        try db.commit();
+        try testing.expect((try db.get_metadata()).?.eql(val(1, 1)));
+        const root2 = db.root();
+        try support.apply_writes(Db, &db, &.{});
+        try db.sync();
+        const root3 = db.root();
+        try testing.expect(!root3.eql(root2));
+        try reopen(Db, &harness, &db);
+        try testing.expect(try db.get_metadata() == null);
+        try testing.expect(db.root().eql(root3));
+        const end = db.bounds().end;
+        for (0..end - 1) |bit| try testing.expect(!db.any.bitmap.get_bit(bit));
+        try testing.expect(db.any.bitmap.get_bit(end - 1));
+        try support.apply_writes(Db, &db, &.{.{ .key = key(0), .value = val(10, 0) }});
+        try testing.expect(!db.root().eql(root3));
+        try db.destroy();
+    }
+}
+
+/// Commonware's `apply_random_ops`: `elements` keys written, then ten times as many random
+/// updates and deletes (one in seven), committed in batches of about twenty.
+fn apply_random_ops(comptime Db: type, db: *Db, elements: u64, seed: u64) !void {
+    var rng = utils.rng.TestRng.init(seed);
+    var writes: std.ArrayList(Write) = .empty;
+    defer writes.deinit(gpa);
+    for (0..elements) |i| {
+        try writes.append(gpa, .{ .key = key(i), .value = val(rng.next_u64(), 0) });
+    }
+    try support.apply_writes(Db, db, writes.items);
+    writes.clearRetainingCapacity();
+    for (0..elements * 10) |_| {
+        const k = key(rng.next_u64() % elements);
+        if (rng.next_u32() % 7 == 0) {
+            try writes.append(gpa, .{ .key = k, .value = null });
+            continue;
+        }
+        try writes.append(gpa, .{ .key = k, .value = val(rng.next_u64(), 0) });
+        if (rng.next_u32() % 20 == 0) {
+            try support.apply_writes(Db, db, writes.items);
+            writes.clearRetainingCapacity();
+        }
+    }
+    try support.apply_writes(Db, db, writes.items);
+    assert(db.bounds().end > elements);
+}
+
+fn expect_key_value_proof(
+    comptime Db: type,
+    proof: anytype,
+    k: Digest,
+    value: Digest,
+    root: *const Digest,
+) !void {
+    const verify = @TypeOf(proof.*).verify;
+    try testing.expect(verify(proof, Sha256, Db.Any.Update, k, value, root));
+    const wrong_value = Sha256.hash(&.{&[_]u8{0xFF}});
+    const wrong_key = Sha256.hash(&.{&[_]u8{0xEE}});
+    const wrong_root = Sha256.hash(&.{&[_]u8{0xDD}});
+    try testing.expect(!verify(proof, Sha256, Db.Any.Update, k, wrong_value, root));
+    try testing.expect(!verify(proof, Sha256, Db.Any.Update, wrong_key, value, root));
+    try testing.expect(!verify(proof, Sha256, Db.Any.Update, k, value, &wrong_root));
+}
+
+/// Checks the key-value proof of every active update from the floor, in both the constant
+/// and the dynamic codec forms.
+fn check_key_value_proofs(comptime F: type, comptime Db: type, db: *Db) !void {
+    const root = db.root();
+    const bad_key = Digest{ .bytes = @splat(0xAA) };
+    try testing.expectError(error.KeyNotFound, db.key_value_proof(&bad_key));
+    var checked: usize = 0;
+    var location = db.inactivity_floor();
+    while (location < db.any.bitmap.len()) : (location += 1) {
+        if (!db.any.bitmap.get_bit(location)) continue;
+        const op = try db.any.log.read(location);
+        if (op != .update) continue;
+        var proved = try db.key_value_proof(&op.update.key);
+        defer proved.deinit(gpa);
+        try testing.expect(proved.value.eql(op.update.value));
+        try expect_key_value_proof(Db, &proved.proof, op.update.key, proved.value, &root);
+        const verify = Db.verify_key_value_proof;
+        try testing.expect(verify(&proved.proof, op.update.key, proved.value, &root));
+        const Dynamic = unordered_proof.KeyValueProof(F, Digest, null);
+        const encoded = try codec.encode(Db.KeyValueProof, gpa, proved.proof);
+        defer gpa.free(encoded);
+        const max_digests = proved.proof.proof.range_proof.proof.digests.len;
+        const cfg: Dynamic.Cfg = .{ .chunk_size = Db.chunk_bytes, .max_digests = max_digests };
+        var dynamic = try codec.decode_cfg(Dynamic, gpa, encoded, cfg);
+        defer dynamic.deinit(gpa);
+        try expect_key_value_proof(Db, &dynamic, op.update.key, proved.value, &root);
+        checked += 1;
+    }
+    try testing.expectEqual(@as(usize, db.any.active_keys), checked);
+}
+
+// Commonware's `test_current_db_key_value_proof`.
+test "current key-value proofs of every active key" {
+    inline for (families) |F| {
+        const Db = support.UnorderedFixed(F);
+        var harness = try support.Harness.init(gpa);
+        defer harness.deinit();
+        var db = try harness.open(Db, null);
+        defer db.deinit();
+        try apply_random_ops(Db, &db, 300, 0x6b76);
+        try support.apply_writes(Db, &db, &.{});
+        try testing.expect(db.any.bitmap.complete_chunks() > 1);
+        try check_key_value_proofs(F, Db, &db);
+    }
+}
+
+// Commonware's `test_current_db_proving_repeated_updates`.
+test "current proofs track a repeatedly updated key" {
+    inline for (families) |F| {
+        const Db = support.UnorderedFixed(F);
+        var harness = try support.Harness.init(gpa);
+        defer harness.deinit();
+        var db = try harness.open(Db, null);
+        defer db.deinit();
+        const k = Digest{ .bytes = @splat(0) };
+        var old: Digest = .{ .bytes = @splat(0) };
+        for (1..256) |i| {
+            const v = Digest{ .bytes = @splat(@intCast(i)) };
+            try support.apply_writes(Db, &db, &.{.{ .key = k, .value = v }});
+            try expect_value(&db, k, v);
+            const root = db.root();
+            var proved = try db.key_value_proof(&k);
+            defer proved.deinit(gpa);
+            try testing.expect(proved.value.eql(v));
+            try testing.expect(proved.proof.verify(Sha256, Db.Any.Update, k, v, &root));
+            try testing.expect(!proved.proof.verify(Sha256, Db.Any.Update, k, old, &root));
+            old = v;
+        }
+    }
+}
+
+// Commonware's `test_current_db_range_proofs`.
+test "current range proofs verify from the floor to the tip" {
+    inline for (families) |F| {
+        const Db = support.UnorderedFixed(F);
+        var harness = try support.Harness.init(gpa);
+        defer harness.deinit();
+        var db = try harness.open(Db, null);
+        defer db.deinit();
+        try apply_random_ops(Db, &db, 120, 0x7261);
+        try support.apply_writes(Db, &db, &.{});
+        const root = db.root();
+        var location = db.inactivity_floor();
+        while (location < db.bounds().end) : (location += 1) {
+            var ranged = try db.range_proof(location, 4);
+            defer ranged.deinit(gpa);
+            try testing.expect(try verify_ranged(Db, &ranged, location, &root, false));
+            try testing.expect(!try verify_ranged(Db, &ranged, location, &root, true));
+        }
+    }
+}
+
+/// Verifies `ranged` from `start`, with its last chunk repeated when `extra_chunk`.
+fn verify_ranged(
+    comptime Db: type,
+    ranged: *const Db.Ranged,
+    start: u64,
+    root: *const Digest,
+    extra_chunk: bool,
+) !bool {
+    const size = comptime codec.fixed_size(Db.Operation).?;
+    var buffers: [4][size]u8 = undefined;
+    var encoded: [4][]const u8 = undefined;
+    assert(ranged.operations.len <= encoded.len);
+    for (ranged.operations, 0..) |op, i| {
+        encoded[i] = codec.encode_to(Db.Operation, op, &buffers[i]);
+    }
+    var chunks: [4][]const u8 = undefined;
+    assert(ranged.chunks.len < chunks.len);
+    for (ranged.chunks, 0..) |*chunk, i| chunks[i] = chunk;
+    var count = ranged.chunks.len;
+    if (extra_chunk) {
+        chunks[count] = &ranged.chunks[count - 1];
+        count += 1;
+    }
+    const ops = encoded[0..ranged.operations.len];
+    const N = Db.chunk_bytes;
+    const Family = Db.Family;
+    const used = chunks[0..count];
+    return verification.verify_range(Family, Sha256, &ranged.proof, start, ops, used, N, root);
+}
+
+// Commonware's `test_sync_persists_bitmap_pruning_boundary`, then more writes on the pruned
+// database and another reopen.
+test "current prune and sync persist the bitmap pruning boundary" {
+    inline for (families) |F| {
+        const Db = support.UnorderedFixed(F);
+        var harness = try support.Harness.init(gpa);
+        defer harness.deinit();
+        var db = try harness.open(Db, null);
+        defer db.deinit();
+        try apply_random_ops(Db, &db, 300, 0x7072);
+        try support.apply_writes(Db, &db, &.{});
+        try testing.expectError(error.PruneBeyondMinRequired, db.prune(db.sync_boundary() + 1));
+        try db.prune(db.sync_boundary());
+        const pruned = db.any.bitmap.pruned_bits();
+        try testing.expect(pruned > 0);
+        try db.sync();
+        const root = db.root();
+        try reopen(Db, &harness, &db);
+        try testing.expectEqual(pruned, db.any.bitmap.pruned_bits());
+        try testing.expect(db.root().eql(root));
+        try apply_random_ops(Db, &db, 300, 0x7073);
+        try db.prune(db.sync_boundary());
+        const root_after = db.root();
+        try reopen(Db, &harness, &db);
+        try testing.expect(db.root().eql(root_after));
+        try check_key_value_proofs(F, Db, &db);
+    }
+}
+
+// Commonware's `test_commit_after_sync_recovery`.
+test "current reopens a commit made after the last sync" {
+    inline for (families) |F| {
+        const Db = support.UnorderedFixed(F);
+        var harness = try support.Harness.init(gpa);
+        defer harness.deinit();
+        var db = try harness.open(Db, null);
+        defer db.deinit();
+        try support.apply_writes(Db, &db, &.{.{ .key = key(0), .value = val(100, 0) }});
+        try db.sync();
+        try support.apply_writes(Db, &db, &.{.{ .key = key(1), .value = val(200, 0) }});
+        try db.commit();
+        const root = db.root();
+        const size = db.bounds().end;
+        try reopen(Db, &harness, &db);
+        try testing.expect(db.root().eql(root));
+        try testing.expectEqual(size, db.bounds().end);
+        try expect_value(&db, key(0), val(100, 0));
+        try expect_value(&db, key(1), val(200, 0));
+    }
+}
+
+fn random_write(random: std.Random, salt: u64) Write {
+    const k = random.uintLessThan(u64, 400);
+    const value: ?Digest = if (random.uintLessThan(u8, 5) == 0) null else val(k, salt);
+    return .{ .key = key(k), .value = value };
+}
+
+/// Merkleizes a chain of up to three batches and applies them, some as soon as they are
+/// merkleized; the tip's canonical root must become the database's.
+fn apply_random_chain(comptime Db: type, db: *Db, random: std.Random, salt: *u64) !void {
+    const depth = random.uintLessThan(usize, 3) + 1;
+    var chain: [3]?*Db.MerkleizedBatch = .{ null, null, null };
+    defer for (chain) |batch| if (batch) |b| b.release();
+    var applied: usize = 0;
+    for (0..depth) |level| {
+        const merkleized = merkleized: {
+            const parent = if (level > 0) chain[level - 1] else null;
+            var batch = if (parent) |p| p.new_batch() else try db.new_batch();
+            errdefer batch.deinit();
+            const count = random.uintLessThan(usize, 60);
+            for (0..count) |_| {
+                salt.* += 1;
+                const w = random_write(random, salt.*);
+                try batch.write(w.key, w.value);
+            }
+            break :merkleized try batch.merkleize(db);
+        };
+        chain[level] = merkleized;
+        if (random.boolean()) {
+            try db.apply_batch(merkleized);
+            try testing.expect(db.root().eql(merkleized.root()));
+            applied = level + 1;
+        }
+        const releasable = applied >= level or level + 1 == depth;
+        if (level > 0 and releasable and random.boolean()) {
+            chain[level - 1].?.release();
+            chain[level - 1] = null;
+        }
+    }
+    const tip = chain[depth - 1].?;
+    if (applied < depth) try db.apply_batch(tip);
+    try testing.expect(db.root().eql(tip.root()));
+}
+
+/// Random chains, sometimes pruning to the sync boundary, with the canonical root checked
+/// against the reopened rebuild every few rounds.
+fn check_random_chains(comptime Db: type, seed: u64) !void {
+    var harness = try support.Harness.init(gpa);
+    defer harness.deinit();
+    var db = try harness.open(Db, null);
+    defer db.deinit();
+    var prng = std.Random.DefaultPrng.init(seed);
+    const random = prng.random();
+    var salt: u64 = 0;
+    for (0..60) |round| {
+        try apply_random_chain(Db, &db, random, &salt);
+        if (random.uintLessThan(u8, 4) == 0) try db.prune(db.sync_boundary());
+        if (round % 6 != 5) continue;
+        const root = db.root();
+        if (random.boolean()) try db.sync() else try db.commit();
+        try reopen(Db, &harness, &db);
+        try testing.expect(db.root().eql(root));
+    }
+    try testing.expect(db.any.bitmap.complete_chunks() > 2);
+}
+
+test "current randomized chains match the rebuilt canonical root" {
+    inline for (families) |F| {
+        try check_random_chains(support.UnorderedFixed(F), 0xc0ffee);
+    }
+}

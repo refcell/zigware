@@ -1,12 +1,13 @@
 //! Unordered current proofs (commonware's `qmdb/current/unordered/proof.rs`): a key-value
-//! proof is an operation proof of the key's active update. Verification lands with current's
-//! database.
+//! proof is an operation proof of the key's active update.
 
 const std = @import("std");
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const codec = @import("codec");
 const proof = @import("../proof.zig");
+const verification = @import("../verification.zig");
+const operation = @import("../../any/operation.zig");
 
 /// A proof that a key has a value in the database. Chunk sizes are as in
 /// `proof.OperationProof`.
@@ -22,6 +23,26 @@ pub fn KeyValueProof(comptime F: type, comptime D: type, comptime chunk_size: ?u
         pub fn deinit(self: *Self, gpa: Allocator) void {
             self.proof.deinit(gpa);
             self.* = undefined;
+        }
+
+        /// Whether this proves that `key` holds `value` in a database with canonical `root`:
+        /// that `Update(key, value)` (of update type `U`, fixed-size) is active there.
+        pub fn verify(
+            self: *const Self,
+            comptime H: type,
+            comptime U: type,
+            key: U.Key,
+            value: U.Value,
+            root: *const D,
+        ) bool {
+            const Op = operation.Operation(F, U);
+            const size = comptime codec.fixed_size(Op) orelse
+                @compileError("verify needs a fixed-size operation");
+            const op: Op = .{ .update = .{ .key = key, .value = value } };
+            var buffer: [size]u8 = undefined;
+            const encoded = codec.encode_to(Op, op, &buffer);
+            assert(encoded.len == size);
+            return verification.verify_operation(F, H, &self.proof, encoded, root);
         }
 
         pub fn eql(a: Self, b: Self) bool {

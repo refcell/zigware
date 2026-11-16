@@ -26,7 +26,12 @@ it comes first once `any` lands.
   storage view with `build_range_proof`, and range and operation proof verification, with
   commonware's grafting, partial-chunk, and combine-roots golden tests plus build-then-verify
   and tamper tests over MMR and MMB at N = 1 and 32.
-- [ ] current (ordered and unordered, db, batch, sync) once `any` lands.
+- [x] current unordered fixed: `Db` (init with grafted metadata, proofs, prune, sync,
+  commit, destroy, apply), batches with activity layers and regrafting, `KeyValueProof.verify`,
+  `CurrentMmr/MmbUnorderedFixedConf`, and commonware's small-db, proof, prune-boundary, and
+  commit-after-sync tests plus randomized chains checked against the reopened rebuild.
+- [ ] current staged batches (`stage`/`expand`), ordered (exclusion proofs), variable.
+- [ ] current sync glue.
 - [ ] sync engine (with `requests`), database, journal, source, harness; per-variant sync glue
   (`keyless/sync.zig`, `immutable/sync.zig`, `any/sync/`), which this lane owns.
 - [ ] compact (db, batch, operation, witness, sync) once persisted merkle compact lands.
@@ -75,7 +80,31 @@ it comes first once `any` lands.
   `verify_range(F, H, proof, start, encoded_ops, chunks, chunk_size, root)`,
   `verify_operation(F, H, operation_proof, encoded_op, root)`).
 
+- `storage.qmdb.current.Db(F, U, C, I, H, N)` (`current.unordered` fixed instantiation:
+  see `current/test_support.zig` `UnorderedFixed(F)`): `init(gpa, storage, scope,
+  Cfg{merkle, log, grafted_metadata_partition, translator, init_cache}, ?max_size)`,
+  `deinit`, `root` (canonical), `ops_root`, `ops_root_witness` (field), `get`/`get_many`/
+  `get_metadata`, `bounds`, `inactivity_floor`, `sync_boundary`, `is_empty`,
+  `key_value_proof(&key) -> ProvedValue{proof, value}`, `verify_key_value_proof(proof, key,
+  value, &root)` (also `KeyValueProof.verify(H, U, key, value, &root)`),
+  `operation_proof(loc)`, `range_proof(start, max_ops) -> Ranged{proof, operations,
+  chunks}`, `ops_historical_proof`, `ops_pinned_nodes_at`, `grafted_storage`, `prune(loc)`
+  (≤ `sync_boundary`), `commit`, `start_sync`, `sync` (also persists pruning metadata),
+  `destroy`, `new_batch`, `to_batch`, `validate_batch`, `apply_batch(*const
+  MerkleizedBatch)`. Batches: `var b = try db.new_batch(); try b.write(k, ?v);
+  b.with_metadata(m); const mb = try b.merkleize(&db)` (or `merkleize_with(&db, &policy)`);
+  `MerkleizedBatch` is refcounted (`retain`/`release`) with `root`, `ops_root`, `bounds`,
+  `operations`, `sync_boundary`, `get(&k, &db)`, and `new_batch()` (child). The public
+  field `any` is the underlying `any.Db`.
+
 ## Decisions
+- current's per-batch activity chunks are a refcounted `Layer` chain ending at the
+  database's bitmap (commonware's `BitmapBatch`); merkleize and apply cut layers the database
+  already holds (`trim_committed`). Staleness is left to `any`'s chain validation instead of
+  `ensure_based_on`'s pointer check, since the zigware bitmap is owned, not shared.
+- current's init opens `any` normally, then prunes its bitmap to the persisted chunk count,
+  checking the floor and pair-absorption constraints that commonware's `init_with_bitmap`
+  checks before publishing the journal; it fails the same way (`HistoricalFloorPruned`).
 - Proof verification takes operations already encoded (`[]const []const u8`) instead of
   commonware's `impl Encode` iterator, so it needs no codec for the operation type; callers
   encode with `codec.encode`. `verify_range` is commonware's `verify_with_chunk_size` (chunks
@@ -101,3 +130,5 @@ it comes first once `any` lands.
 
 - 2026-11-16: current's grafting and canonical-root helpers; grafted range proofs and their
   verification.
+- 2026-11-16: current unordered fixed `Db` and batches (clearing's Balances DB) with
+  `CurrentMmr/MmbUnorderedFixedConf`.
