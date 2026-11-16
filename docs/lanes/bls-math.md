@@ -37,6 +37,8 @@ variants (MinPk, MinSig) must match exactly.
   deal/observe/play, the test plan with its tests, and the dkg_golden fuzz target.
 - [x] Fuzz targets: math (the crate plan), simd (differential), and the bls12381 decode,
   primitive, threshold, aggregate, batch, tle, and dkg_feldman_desmedt targets.
+- [ ] Benchmarks: math (`interpolation`, done) and bls12381 (`benches/*.rs`, 24 groups)
+  in `src/<package>/benches.zig`, with commonware's names and cases.
 - [x] banderwagon (commonware `cryptography/src/banderwagon.rs`, moved from the crypto lane) as
   `cryptography.banderwagon`: F, G (codec, hash_to_group), GVar and the circuit gadgets,
   with every commonware test and the go-ipa fixed vectors. commonware has no banderwagon
