@@ -96,6 +96,50 @@ test "memory removal retires only matching opens" {
     bx.close();
 }
 
+/// The blob's durable contents as a reopen sees them.
+fn expect_reopened(storage: *Storage, name: []const u8, expected: []const u8) !void {
+    const reopened = try storage.open("partition", name);
+    defer reopened.blob.close();
+    try testing.expectEqual(@as(u64, expected.len), reopened.len);
+    try expect_read(reopened.blob, 0, expected);
+}
+
+// A crash write merges only its retained bytes into the durable contents, zero-fills a gap
+// past the end, and is dropped once its incarnation is removed (commonware
+// `test_crash_write_merges_durable_bytes_only`; Rust reopens with the writer still open).
+test "memory crash write merges durable bytes only" {
+    var storage: Storage = .init(testing.allocator);
+    defer storage.deinit();
+    const odd = [_]bool{ false, true, false, true, false, true, false, true };
+    const opened = (try storage.open("partition", "blob")).blob;
+    const blob: *memory.Blob = @ptrCast(@alignCast(opened.ptr));
+    try opened.write_at(0, "abcdefgh", .{});
+    try opened.sync();
+    try opened.write_at(0, "ABCDEFGH", .{});
+    try storage.retain_crash_write(blob.generation, blob.data_offset, "12345678", &odd);
+    try expect_read(opened, 0, "ABCDEFGH");
+    opened.close();
+    try expect_reopened(&storage, "blob", "a2c4e6g8");
+
+    const sparse_opened = (try storage.open("partition", "sparse")).blob;
+    const sparse: *memory.Blob = @ptrCast(@alignCast(sparse_opened.ptr));
+    const middle = [_]bool{ false, true, false };
+    try storage.retain_crash_write(sparse.generation, sparse.data_offset + 4, "xyz", &middle);
+    sparse_opened.close();
+    try expect_reopened(&storage, "sparse", "\x00\x00\x00\x00\x00y");
+
+    const removed_opened = (try storage.open("partition", "removed")).blob;
+    const removed: *memory.Blob = @ptrCast(@alignCast(removed_opened.ptr));
+    try storage.remove("partition", "removed");
+    const replacement = (try storage.open("partition", "removed")).blob;
+    try replacement.write_at(0, "new!", .{ .sync = true });
+    const all: [4]bool = @splat(true);
+    try storage.retain_crash_write(removed.generation, removed.data_offset, "lost", &all);
+    replacement.close();
+    removed_opened.close();
+    try expect_reopened(&storage, "removed", "new!");
+}
+
 test "memory empty write semantics" {
     var storage: Storage = .init(testing.allocator);
     defer storage.deinit();

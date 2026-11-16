@@ -7,6 +7,7 @@ const testing = std.testing;
 const utils = @import("utils");
 const iface = @import("../storage.zig");
 const memory = @import("memory.zig");
+const header = @import("header.zig");
 const faulty = @import("faulty.zig");
 const suite = @import("tests.zig");
 const deterministic = @import("../deterministic.zig");
@@ -614,6 +615,55 @@ test "partial write subset with the same seed is deterministic" {
     try testing.expectEqualSlices(u8, first, second);
     try testing.expect(std.mem.indexOfScalar(u8, first, 0x11) != null);
     try testing.expect(std.mem.indexOfScalar(u8, first, 0xAA) != null);
+}
+
+/// The blob's raw durable contents are `prefix` followed by `payload`.
+fn expect_raw(inner: *memory.Storage, prefix: []const u8, payload: []const u8) !void {
+    const raw = (try inner.raw_blob(gpa, "partition", "blob")).?;
+    defer gpa.free(raw);
+    try testing.expectEqual(prefix.len + payload.len, raw.len);
+    try testing.expectEqualSlices(u8, prefix, raw[0..prefix.len]);
+    try testing.expectEqualSlices(u8, payload, raw[prefix.len..]);
+}
+
+// A subset kept by a failed write or by a crash addresses only payload bytes, under both
+// layouts (commonware `memory::tests::test_subset_write_preserves_v0_and_v1_headers`).
+test "subset write preserves v0 and v1 headers" {
+    // Alternating case tells a retained subset from a contiguous prefix.
+    const original = "abcdefghijklmnop";
+    const replacement = "ABCDEFGHIJKLMNOP";
+    const retained = "AbCdEfGhIjKlMnOp";
+    var script: [replacement.len]u64 = undefined;
+    for (&script, 0..) |*sample, index| {
+        sample.* = if (index % 2 == 0) 0 else std.math.maxInt(u64);
+    }
+    for ([_]iface.BlobLayout{ .v0, .v1 }) |layout| {
+        for ([_]bool{ true, false }) |failed_write| {
+            const raw = try header.blob_bytes(gpa, layout, 0, original);
+            defer gpa.free(raw);
+            const prefix = raw[0 .. raw.len - original.len];
+            var h: Scripted = undefined;
+            h.init(.init(&script), writes(if (failed_write) one else zero, half, .subset));
+            defer h.deinit();
+            try h.inner.set_raw_blob("partition", "blob", raw);
+            const opened = try h.storage.open_versioned("partition", "blob", .only(0));
+            try testing.expectEqual(@as(u64, original.len), opened.len);
+            try testing.expectEqual(@as(iface.BlobVersion, 0), opened.version);
+            const result = opened.blob.write_at(0, replacement, .{});
+            if (failed_write) try testing.expectError(error.Io, result) else try result;
+            opened.blob.close();
+            // A failed write keeps its subset at once; an unsynced one is still volatile.
+            try expect_raw(&h.inner, prefix, if (failed_write) retained else original);
+            try h.storage.crash();
+            h.inner.crash();
+            try expect_raw(&h.inner, prefix, retained);
+            const recovered = try h.inner.open_versioned("partition", "blob", .only(0));
+            defer recovered.blob.close();
+            try testing.expectEqual(@as(u64, original.len), recovered.len);
+            try suite.expect_read(recovered.blob, 0, retained);
+            try testing.expectEqual(script.len, h.rng.position);
+        }
+    }
 }
 
 test "write retention rate endpoints" {

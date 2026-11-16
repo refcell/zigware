@@ -1,7 +1,10 @@
 //! Tests of `IoBuf` and `IoBufMut` (commonware `iobuf::buf::tests`). No counterpart: the
-//! owner-word and descriptor-promotion tests (zigware's owner is one allocation header), the
-//! `Bytes`, `BytesMut`, and `Vec` conversions, auto traits, and the should_panic tests (Zig
-//! asserts and cannot catch a panic).
+//! owner-word and descriptor-promotion tests and `iobuf/owner.rs` (zigware's owner is one
+//! allocation header), the `Bytes`, `BytesMut`, and `Vec` conversions, the `Buf`/`BufMut`
+//! trait methods zigware does not have (`copy_to_slice`, `copy_to_bytes`, `put_bytes`, `put`
+//! from another `Buf`), the oversized and impossible-alignment requests (they are
+//! `error.OutOfMemory` here), auto traits, and the should_panic tests (Zig asserts and cannot
+//! catch a panic).
 
 const std = @import("std");
 const testing = std.testing;
@@ -245,6 +248,27 @@ test "aligned buffers (test_iobuf_aligned_public_paths)" {
     nothing.deinit();
 }
 
+test "aligned capacity survives recovery (test_iobufmut_aligned_capacity_stable_*)" {
+    const page: std.mem.Alignment = .fromByteUnits(4096);
+    var buf: IoBufMut = try .with_alignment(gpa, 100, page);
+    try testing.expectEqual(@as(usize, 100), buf.capacity);
+    try testing.expect(page.check(@intFromPtr(buf.ptr)));
+    buf.put_slice("data");
+    var frozen_buf = buf.freeze();
+    var recovered = frozen_buf.try_into_mut().?;
+    defer recovered.deinit();
+    try testing.expectEqual(@as(usize, 100), recovered.capacity);
+    try testing.expectEqualStrings("data", recovered.bytes());
+    var zeroed: IoBufMut = try .zeroed_with_alignment(gpa, 100, page);
+    defer zeroed.deinit();
+    try testing.expectEqual(@as(usize, 100), zeroed.len);
+    try testing.expectEqual(@as(usize, 100), zeroed.capacity);
+    // Zero-length buffers allocate nothing, so their alignment is never checked.
+    var empty: IoBufMut = try .with_alignment(gpa, 0, .@"64");
+    try testing.expect(empty.is_empty() and empty.capacity == 0);
+    empty.deinit();
+}
+
 test "views move between threads" {
     var buf = try frozen("shared across threads");
     defer buf.deinit(gpa);
@@ -296,9 +320,13 @@ test "iobuf conformance: CodecConformance<IoBuf>" {
     );
 }
 
-// IoBufs (commonware `iobuf::bufs::tests`). No counterpart: the representation tests (zigware
-// keeps up to three chunks inline and spills to a list, which it then keeps), `IoBufsMut`,
-// `Builder`, and `encode_iobufs` (the codec writes one buffer).
+// IoBufs (commonware `iobuf::bufs::tests`). No counterpart: the representation and
+// canonicalization tests (zigware keeps up to three chunks inline and spills to a list, which
+// it then keeps), owner-record allocation counts, the `Buf`/`BufMut` trait methods zigware
+// has no counterpart for (`copy_to_bytes`, `chunks_vectored`, `chunk_mut`; reads go through
+// `chunk_at`, `slices`, `copy_to`, and `advance`), `Vec`/array/iterator conversions, the
+// past-end and overflow `should_panic` tests (Zig asserts), and the nested-container, map,
+// lazy, and range `encode_iobufs` tests (zigware's codec has no `write_bufs`).
 
 const IoBufs = iobuf.IoBufs;
 
@@ -359,6 +387,48 @@ test "iobufs drop empty buffers and advance across chunks (test_iobufs_advance_*
     try testing.expect(bufs.as_single() != null);
     bufs.advance(2);
     try testing.expect(bufs.is_empty());
+}
+
+/// `bufs` holds exactly `expected`, by length, emptiness, and contents.
+fn expect_state(bufs: *const IoBufs, expected: []const u8) !void {
+    try testing.expectEqual(expected.len, bufs.len());
+    try testing.expectEqual(expected.len == 0, bufs.is_empty());
+    var out: [16]u8 = undefined;
+    bufs.copy_to(out[0..expected.len]);
+    try testing.expectEqualStrings(expected, out[0..expected.len]);
+}
+
+test "iobufs emptiness after consumption (test_iobufs_emptiness_after_consumption)" {
+    const data = "abcdefgh";
+    for (0..data.len + 1) |end| {
+        var suffix = try bufs_of(&.{ "", "ab", "", "cd", "ef", "", "gh", "" });
+        defer suffix.deinit(gpa);
+        var prefix = try suffix.split_to(gpa, end);
+        defer prefix.deinit(gpa);
+        try expect_state(&prefix, data[0..end]);
+        try expect_state(&suffix, data[end..]);
+        for ([_]usize{ 1, 2, 3, data.len }) |step| {
+            var advanced = try bufs_of(&.{data[0..end]});
+            defer advanced.deinit(gpa);
+            try advanced.append(gpa, try frozen(""));
+            var offset: usize = 0;
+            while (offset < end) {
+                const count = @min(step, end - offset);
+                advanced.advance(count);
+                offset += count;
+                try expect_state(&advanced, data[offset..end]);
+            }
+        }
+    }
+}
+
+test "iobufs as_single (test_iobufs_try_into_single)" {
+    var single = try bufs_of(&.{"hello"});
+    defer single.deinit(gpa);
+    try testing.expectEqualStrings("hello", single.as_single().?.bytes());
+    var multi = try bufs_of(&.{ "ab", "cd" });
+    try testing.expect(multi.as_single() == null);
+    try expect_coalesced(&multi, "abcd");
 }
 
 test "iobufs coalesce shapes (test_iobufs_coalesce_shapes)" {
@@ -566,6 +636,20 @@ test "iobufsmut advance skips and drops spent chunks (test_iobufsmut_with_empty_
     try testing.expectEqualStrings("b", leading.chunks()[1].bytes());
 }
 
+test "iobufsmut reads keep writable capacity (test_iobufsmut_read_ops_preserve_*)" {
+    // Draining the filled first chunk keeps the never-filled second chunk's capacity.
+    const ones: [8]u8 = @splat(1);
+    var bufs = try bufs_mut_of(&.{ &ones, "" }, &.{ 8, 8 });
+    try testing.expectEqual(@as(usize, 8), bufs.len());
+    try testing.expectEqual(@as(usize, 8), bufs.remaining_mut());
+    bufs.advance(8);
+    try testing.expectEqual(@as(usize, 0), bufs.len());
+    try testing.expectEqual(@as(usize, 8), bufs.remaining_mut());
+    const twos: [8]u8 = @splat(2);
+    bufs.put_slice(&twos);
+    try expect_frozen(&bufs, &twos, 1);
+}
+
 test "iobufsmut freeze after advance (test_iobufsmut_freeze_after_advance)" {
     var partial = try bufs_mut_of(&.{ "hello", " world" }, &.{ 0, 0 });
     partial.advance(3);
@@ -628,6 +712,38 @@ test "builder places pushed chunks between inline bytes" {
     var abandoned: Builder = try .init(gpa, 4);
     try abandoned.push(gpa, try frozen("held"));
     abandoned.deinit(gpa);
+}
+
+test "builder pushes without copying (test_push_is_zero_copy, test_push_at_start_*)" {
+    const payload: [32]u8 = @splat(0xcc);
+    var builder: Builder = try .init(gpa, 8);
+    try builder.push(gpa, .from_static(&payload));
+    builder.put(u8, 1);
+    var bufs = try builder.finish(gpa);
+    // No empty inline segment precedes a push at the start.
+    try testing.expectEqual(@as(usize, 2), bufs.chunk_count());
+    try testing.expectEqual(@as([*]const u8, &payload), bufs.chunk_at(0).?.ptr);
+    const expected = payload ++ [_]u8{1};
+    try expect_coalesced(&bufs, &expected);
+}
+
+test "a zero-capacity builder allocates nothing (test_zero_capacity_push_only, test_empty)" {
+    var failing: std.testing.FailingAllocator = .init(gpa, .{ .fail_index = 0 });
+    var empty: Builder = try .init(failing.allocator(), 0);
+    var nothing = try empty.finish(failing.allocator());
+    try testing.expect(nothing.is_empty());
+    nothing.deinit(failing.allocator());
+    try testing.expectEqual(@as(usize, 0), failing.allocations);
+    const first: [100]u8 = @splat('a');
+    const second: [200]u8 = @splat('c');
+    var builder: Builder = try .init(gpa, 0);
+    try builder.push(gpa, .from_static(&first));
+    try builder.push(gpa, .empty);
+    try builder.push(gpa, .from_static(&second));
+    var bufs = try builder.finish(gpa);
+    defer bufs.deinit(gpa);
+    try testing.expectEqual(@as(usize, 2), bufs.chunk_count());
+    try testing.expectEqual(@as(usize, 300), bufs.len());
 }
 
 fn expect_encode_iobufs_matches(comptime T: type, value: T) !void {
