@@ -690,3 +690,317 @@ test "retain drops pending delivery" {
         }
     }.body);
 }
+
+test "larger responses earn more throughput credit" {
+    try base.run(10, struct {
+        fn body(io: Io) !void {
+            const setup = try base.Setup.init(io, &.{ 1, 2 }, .{});
+            defer setup.deinit();
+            // Fix network latency to isolate the effect of payload size on the peer's weight.
+            var steady = base.link;
+            steady.jitter = Duration.from_millis(0);
+            try setup.add_link(steady, 0, 1);
+            const small = [_]u8{1};
+            const large: [1024]u8 = @splat(2);
+            const consumer = try setup.make_consumer();
+            try consumer.add_expected(key(1), &small);
+            try consumer.add_expected(key(2), &large);
+            const mailbox = try setup.spawn(0, consumer, try setup.make_producer(&.{}));
+            const producer = try setup.make_producer(&.{ .{ 1, &small }, .{ 2, &large } });
+            _ = try setup.spawn(1, try setup.make_consumer(), producer);
+
+            // Fetch in size order so the first weight is the small-response baseline.
+            var weights: [2]u64 = undefined;
+            const values = [_][]const u8{ &small, &large };
+            for (values, 0..) |value, index| {
+                try base.fetch(mailbox, @intCast(index + 1));
+                try base.expect_event(consumer, @intCast(index + 1), value);
+                // Delivery starts before its verdict is processed. Read the weight only
+                // after the engine has credited the accepted network response.
+                try wait_resolves(setup, index + 1);
+                weights[index] = try weight(setup);
+            }
+            // Averaging with the small response reduces the gain, but the larger payload
+            // must still produce a much higher weight at the same latency.
+            try testing.expect(weights[1] > weights[0] * 100);
+        }
+    }.body);
+}
+
+test "invalid delivery retries and rearms slot" {
+    try base.run(10, struct {
+        fn body(io: Io) !void {
+            const setup = try BlockingSetup.init(io, &.{ 1, 2, 3 }, .{});
+            defer setup.deinit();
+            try setup.add_link(base.link, 0, 1);
+            const consumer = try setup.make_consumer();
+            const first_gate = try consumer.gate(.invalid);
+            const second_gate = try consumer.gate(complete);
+            const mailbox = try setup.spawn(0, consumer, try setup.make_producer(&.{}));
+            const data = "data for key 1";
+            _ = try setup.spawn(1, try setup.make_consumer(), try setup.make_producer(&.{
+                .{ 1, data },
+            }));
+            _ = try setup.spawn(2, try setup.make_consumer(), try setup.make_producer(&.{
+                .{ 1, data },
+            }));
+
+            var targets = [_]base.PublicKey{ setup.peers[1], setup.peers[2] };
+            _ = try mailbox.fetch_targeted(.{ .key = key(1), .subscriber = {} }, &targets);
+            var started = try consumer.next_started();
+            started.deinit();
+            consumer.open(first_gate);
+            try setup.wait_for_blocked(0, 1);
+            try testing.expectEqual(0, try resolves(setup));
+
+            // The invalid response blocks its source and rearms the fetch for the other target.
+            try setup.add_link(base.link, 0, 2);
+            try setup.track_roles(1, &.{ 0, 2 }, &.{});
+            started = try consumer.next_started();
+            defer started.deinit();
+            try started.expect(1, &.{{}});
+            consumer.open(second_gate);
+            var event = try consumer.next_event();
+            defer event.deinit();
+            try event.seen.expect(1, &.{{}});
+            try testing.expectEqualStrings(data, event.value);
+        }
+    }.body);
+}
+
+fn retain_except_subscriber(mailbox: anytype, dropped: u16) !void {
+    const predicate = resolver.Predicate(MockKey, u16).init(dropped, struct {
+        fn keep(excluded: u16, _: MockKey, subscriber: u16) bool {
+            return subscriber != excluded;
+        }
+    }.keep);
+    _ = try mailbox.retain(predicate);
+}
+
+/// Checks the next held delivery's key, subscribers, and value; the caller owns the result.
+fn expect_held(
+    consumer: Holding(u16),
+    value: u8,
+    subscribers: []const u16,
+    data: []const u8,
+) !Holding(u16).Held {
+    var held = try consumer.next();
+    errdefer held.deinit();
+    try held.seen.expect(value, subscribers);
+    try testing.expectEqualStrings(data, held.value);
+    return held;
+}
+
+fn credits_only_useful(io: Io) !void {
+    const setup = try HoldingTagged.init(io, &.{ 1, 2 }, .{});
+    defer setup.deinit();
+    var steady = base.link;
+    steady.jitter = Duration.from_millis(0);
+    try setup.add_link(steady, 0, 1);
+    const data: [1024]u8 = @splat(1);
+    const consumer = try setup.make_consumer();
+    const mailbox = try setup.spawn(0, consumer, try setup.make_producer(&.{}));
+    const producer = try setup.make_producer(&.{ .{ 0, &.{0} }, .{ 1, &data } });
+    _ = try setup.spawn(1, try setup.make_consumer(), producer);
+
+    // Establish a weight above the minimum so both rewards and penalties are visible.
+    try fetch_as(mailbox, 0, 0);
+    var warmup = try expect_held(consumer, 0, &.{0}, &.{0});
+    defer warmup.deinit();
+    try warmup.send_open(complete);
+    try wait_resolves(setup, 1);
+    const original_weight = try weight(setup);
+    try testing.expect(original_weight > 1);
+
+    try fetch_all_as(mailbox, 1, &.{ 1, 2 });
+    var first = try expect_held(consumer, 1, &.{ 1, 2 }, &data);
+    defer first.deinit();
+    try first.send_open(.unresolved);
+    // A new network delivery proves the neutral verdict was processed and retried.
+    var second = try expect_held(consumer, 1, &.{ 1, 2 }, &data);
+    defer second.deinit();
+    try testing.expectEqual(1, try resolves(setup));
+    try testing.expectEqual(original_weight, try weight(setup));
+    try testing.expectEqual(1, try status(setup, "Success"));
+    try testing.expectEqual(1, try status(setup, "Ambiguous"));
+
+    // Only one subscriber is satisfied. The other still needs another response.
+    try retain_except_subscriber(mailbox, 1);
+    try second.send_open(partial);
+    var third = try expect_held(consumer, 1, &.{2}, &data);
+    defer third.deinit();
+    try testing.expectEqual(2, try resolves(setup));
+    try testing.expect(try weight(setup) > original_weight);
+    try testing.expectEqual(2, try status(setup, "Success"));
+    try testing.expectEqual(1, try status(setup, "Ambiguous"));
+
+    try third.send_open(complete);
+    try wait_resolves(setup, 3);
+    try testing.expectEqual(0, try blocked_count(setup));
+    try testing.expectEqual(3, try status(setup, "Success"));
+    try testing.expectEqual(1, try status(setup, "Ambiguous"));
+}
+
+test "delivery credits only useful responses" {
+    try base.run(10, credits_only_useful);
+}
+
+test "dropped verdict retires fetch without blocking peer" {
+    try base.run(10, struct {
+        fn body(io: Io) !void {
+            const setup = try HoldingSetup.init(io, &.{ 1, 2 }, .{});
+            defer setup.deinit();
+            try setup.add_link(base.link, 0, 1);
+            const consumer = try setup.make_consumer();
+            const mailbox = try setup.spawn(0, consumer, try setup.make_producer(&.{}));
+            const prod2 = try setup.make_producer(&.{.{ 1, "data for key 1" }});
+            _ = try setup.spawn(1, try setup.make_consumer(), prod2);
+
+            try base.fetch(mailbox, 1);
+            var held = try consumer.next();
+            defer held.deinit();
+            try held.seen.expect(1, &.{{}});
+            // Drop the verdict, as a consumer does when it stops with the delivery still
+            // queued. No one is waiting on the key, so the fetch is retired rather than
+            // retried, and the peer stays unblocked because nothing is known about what it
+            // served.
+            held.drop();
+            try setup.sleep(Duration.from_secs(1));
+            try testing.expect(consumer.try_next() == null);
+            try testing.expectEqual(0, try blocked_count(setup));
+            try testing.expectEqual(0, try resolves(setup));
+
+            // The retired key is not deduplicated against, so a fresh fetch runs.
+            try base.fetch(mailbox, 1);
+            var fresh = try consumer.next();
+            defer fresh.deinit();
+            try fresh.seen.expect(1, &.{{}});
+            fresh.send(complete);
+            try testing.expectEqual(1, try status(setup, "Dropped"));
+        }
+    }.body);
+}
+
+test "dropped verdict hands response to late subscriber" {
+    try base.run(10, struct {
+        fn body(io: Io) !void {
+            const setup = try HoldingTagged.init(io, &.{ 1, 2 }, .{});
+            defer setup.deinit();
+            try setup.add_link(base.link, 0, 1);
+            const data = "data for key 1";
+            const consumer = try setup.make_consumer();
+            const mailbox = try setup.spawn(0, consumer, try setup.make_producer(&.{}));
+            _ = try setup.spawn(1, try setup.make_consumer(), try setup.make_producer(&.{
+                .{ 1, data },
+            }));
+
+            try fetch_as(mailbox, 1, 1);
+            var first = try expect_held(consumer, 1, &.{1}, data);
+            defer first.deinit();
+            // A late subscriber joins while the first delivery is unjudged, then that
+            // delivery's verdict is dropped. The late subscriber is handed the same response
+            // to judge instead of the key being retired.
+            try fetch_as(mailbox, 1, 2);
+            try setup.sleep(Duration.from_millis(100));
+            first.drop();
+            var late = try expect_held(consumer, 1, &.{2}, data);
+            defer late.deinit();
+            try testing.expectEqual(0, try resolves(setup));
+            late.send(complete);
+            try setup.sleep(Duration.from_millis(100));
+            try testing.expectEqual(0, try blocked_count(setup));
+            try testing.expectEqual(1, try resolves(setup));
+            try testing.expectEqual(1, try status(setup, "Success"));
+            try testing.expectEqual(0, try status(setup, "Dropped"));
+        }
+    }.body);
+}
+
+fn ignored_retires_late(io: Io) !void {
+    const setup = try BlockingTagged.init(io, &.{ 1, 2 }, .{});
+    defer setup.deinit();
+    try setup.add_link(base.link, 0, 1);
+    const consumer = try setup.make_consumer();
+    const ignored_gate = try consumer.gate(.ignored);
+    const mailbox = try setup.spawn(0, consumer, try setup.make_producer(&.{}));
+    const producer = try setup.make_producer(&.{
+        .{ 1, "obsolete response" },
+        .{ 1, "fresh response" },
+    });
+    _ = try setup.spawn(1, try setup.make_consumer(), producer);
+
+    try fetch_as(mailbox, 1, 1);
+    var started = try consumer.next_started();
+    try started.expect(1, &.{1});
+    started.deinit();
+    // A subscriber attached after the delivery snapshot is still retired by the key-global
+    // ignored outcome.
+    try fetch_as(mailbox, 1, 2);
+    try setup.sleep(Duration.from_millis(100));
+    try producer.expect_remaining(key(1), &.{"fresh response"});
+    consumer.open(ignored_gate);
+    try setup.sleep(base.fetch_retry_delay.saturating_add(Duration.from_millis(100)));
+    try producer.expect_remaining(key(1), &.{"fresh response"});
+    try testing.expectEqual(0, try blocked_count(setup));
+    try testing.expectEqual(1, try status(setup, "Dropped"));
+    try testing.expectEqual(0, try resolves(setup));
+
+    // A new request for the same key starts cleanly after the ignored fetch is retired.
+    try fetch_as(mailbox, 1, 3);
+    started = try consumer.next_started();
+    defer started.deinit();
+    try started.expect(1, &.{3});
+    var event = try consumer.next_event();
+    defer event.deinit();
+    try event.seen.expect(1, &.{3});
+    try testing.expectEqualStrings("fresh response", event.value);
+    try producer.expect_remaining(key(1), &.{});
+}
+
+test "ignored delivery retires late subscribers without rating or retry" {
+    try base.run(10, ignored_retires_late);
+}
+
+fn pending_invalid_race(io: Io, validation_first: bool) !void {
+    const setup = try BlockingSetup.init(io, &.{ 1, 2 }, .{});
+    defer setup.deinit();
+    try setup.add_link(base.link, 0, 1);
+    const consumer = try setup.make_consumer();
+    const invalid_gate = try consumer.gate(.invalid);
+    const mailbox = try setup.spawn(0, consumer, try setup.make_producer(&.{}));
+    const prod2 = try setup.make_producer(&.{.{ 1, "data for key 1" }});
+    _ = try setup.spawn(1, try setup.make_consumer(), prod2);
+
+    try base.fetch(mailbox, 1);
+    var started = try consumer.next_started();
+    defer started.deinit();
+    try started.expect(1, &.{{}});
+    if (validation_first) {
+        // A verdict judged before the retain still blocks its source.
+        consumer.open(invalid_gate);
+        try setup.wait_for_blocked(0, 1);
+        try retain_none(mailbox, void);
+        const pairs = try setup.oracle().blocked(gpa);
+        defer gpa.free(pairs);
+        try testing.expectEqual(1, pairs.len);
+        try testing.expect(pairs[0].origin.order(setup.peers[0]) == .eq);
+        try testing.expect(pairs[0].recipient.order(setup.peers[1]) == .eq);
+    } else {
+        // A retain before the verdict drops it: nothing is known about the source.
+        try retain_none(mailbox, void);
+        try consumer.closed(invalid_gate);
+        try testing.expectEqual(0, try blocked_count(setup));
+    }
+    try setup.sleep(Duration.from_millis(100));
+    try testing.expect(consumer.try_event() == null);
+    try testing.expectEqual(0, try resolves(setup));
+}
+
+test "retain pending invalid delivery race" {
+    try base.run(10, struct {
+        fn body(io: Io) !void {
+            try pending_invalid_race(io, false);
+            try pending_invalid_race(io, true);
+        }
+    }.body);
+}

@@ -20,7 +20,7 @@ const metrics = runtime.telemetry.metrics;
 
 const gpa = testing.allocator;
 const Duration = utils.Duration;
-const PublicKey = cryptography.ed25519.PublicKey;
+pub const PublicKey = cryptography.ed25519.PublicKey;
 const Net = p2p.simulated.Network(PublicKey);
 const Tracked = p2p.TrackedPeers(PublicKey);
 pub const Consumer = MockConsumer(MockKey, void);
