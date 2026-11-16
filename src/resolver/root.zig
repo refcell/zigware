@@ -35,6 +35,12 @@ pub const Feedback = actor.Feedback;
 /// Rust `Ord` for keys and subscribers: codec's order, with `void` (Rust `()`) always equal.
 pub fn order(comptime T: type, a: T, b: T) std.math.Order {
     if (T == void) return .eq;
+    // A container's own `order` (what `codec.order` calls) also serves local-only subscribers
+    // that have no codec, such as marshal's annotations.
+    switch (@typeInfo(T)) {
+        .@"struct", .@"union", .@"enum" => if (@hasDecl(T, "order")) return T.order(a, b),
+        else => {},
+    }
     return codec.order(T, a, b);
 }
 
