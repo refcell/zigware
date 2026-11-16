@@ -20,7 +20,9 @@ that don't need them and keep a small interface where you must.
   chain (`Commitment`, `Bounds`, staleness checks), the `qmdb.Error` set, initialization
   validation; keyless, immutable, and any (ordered/unordered, fixed/variable) operations with
   all 21 codec conformance hashes; decoder fuzz over every operation type.
-- [ ] Shared rest: snapshot, cache, bitmap, metrics, verify, and the store traits.
+- [x] verify (`ProofExt`: operation range, pinned-node, extract, proof-store, and multi
+  proofs) with its tests under both families.
+- [ ] Shared rest: snapshot, cache, bitmap, metrics, and the store traits.
 - [ ] keyless (with its tests and conformance hashes).
 - [ ] immutable.
 - [ ] any (ordered and unordered, fixed and variable).
@@ -44,6 +46,9 @@ that don't need them and keep a small interface where you must.
 - `storage.qmdb.chain`: `Commitment(F, D)` (codec, `compatible`), `Bounds(F, D)` (`from_db`,
   `compatible`, `validate_apply_to`), `effective_boundary`, `validate_batch_applicable`,
   `validate_merkleize_floor`.
+- `storage.qmdb.verify`: `Proof(F, H)`, `ProofStore(F, H)`, `verify`,
+  `verify_with_pinned_nodes`, `verify_and_extract_digests`, `to_proof_store`, `verify_multi`
+  (each `(F, H, O, gpa, proof, ...)` over operations of codec type `O`), `encode_all`.
 - `storage.qmdb`: `Error`, `root_bagging`, `hasher(H)`, `single_operation_root(F, H, bytes)`,
   `validate_initialization_bound`, `validate_initialization_commit`,
   `find_inactivity_floor_at`, `inactive_peaks_at`.
@@ -66,9 +71,13 @@ that don't need them and keep a small interface where you must.
   operations over non-allocating values are usable with `decode_fixed`.
 - conformance: the TOML reader now accepts `\n`/`\t`/`\"`/`\\` escapes in section names
   (commonware wraps long type names with `\n`); names are compared unescaped.
+- verify: commonware's `ProofExt` trait methods are free functions; `verify_multi` takes
+  locations and operations as two parallel slices (mismatched lengths fail), like
+  `merkle.Proof.verify_multi_inclusion`. Operations are encoded into scratch from `gpa`.
 - Display formats an encoding of up to 4096 bytes as hex and prints `<N bytes>` beyond that
   (formatting does not allocate).
 
 ## Log
 - 2026-11-13: shared codecs (value, operation, floor, chain, Error, initialization checks),
   keyless/immutable/any operations with all 21 codec conformance hashes, decoder fuzz.
+- 2026-11-13: verify (operation proofs) with its tests under MMR and MMB.
