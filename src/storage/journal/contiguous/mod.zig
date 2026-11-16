@@ -15,6 +15,7 @@ const assert = std.debug.assert;
 pub const checkpoint = @import("checkpoint.zig");
 pub const blobs = @import("blobs.zig");
 pub const fixed = @import("fixed.zig");
+pub const variable = @import("variable.zig");
 
 /// The readable positions `[start, end)` of a journal.
 pub const Bounds = struct {

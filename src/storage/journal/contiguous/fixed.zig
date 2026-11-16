@@ -180,10 +180,23 @@ pub fn Recovery(comptime A: type) type {
         /// Open the journal's storage for recovery, completing any interrupted clear. With
         /// `max_size`, blobs that hold only positions at or above it are discarded.
         pub fn open(gpa: Allocator, storage: Storage, cfg: Config, max_size: ?u64) Error!Self {
+            return open_dependent(gpa, storage, cfg, max_size, null);
+        }
+
+        /// `open`, removing the `dependent` partition before completing a staged clear
+        /// (commonware's `init_cleared`), so state cleared under the intent never outlives it.
+        pub fn open_dependent(
+            gpa: Allocator,
+            storage: Storage,
+            cfg: Config,
+            max_size: ?u64,
+            dependent: ?[]const u8,
+        ) Error!Self {
             var self = try init_empty(gpa, storage, cfg);
             errdefer self.deinit();
             const ceiling = max_size orelse std.math.maxInt(u64);
             if (self.checkpoint.clear_target()) |target| {
+                if (dependent) |name| try blobs_mod.remove_all(storage, name);
                 // A persisted clear is authoritative even when the open requests another cap.
                 try self.complete_clear(target);
                 if (ceiling < target) return error.ItemPruned;
@@ -372,11 +385,24 @@ pub fn Recovery(comptime A: type) type {
 
         /// Stage a clear to `size`, then complete it without opening any stored blob.
         pub fn open_cleared(gpa: Allocator, storage: Storage, cfg: Config, target: u64) Error!Self {
+            return open_cleared_dependent(gpa, storage, cfg, target, null);
+        }
+
+        /// `open_cleared`, removing the `dependent` partition under the staged intent before
+        /// completing the clear. A crash after staging leaves an intent the next open completes.
+        pub fn open_cleared_dependent(
+            gpa: Allocator,
+            storage: Storage,
+            cfg: Config,
+            target: u64,
+            dependent: ?[]const u8,
+        ) Error!Self {
             // A journal at `u64::MAX` can never accept an append.
             if (target == std.math.maxInt(u64)) return error.SizeOverflow;
             var self = try init_empty(gpa, storage, cfg);
             errdefer self.deinit();
             try self.checkpoint.stage_clear(target);
+            if (dependent) |name| try blobs_mod.remove_all(storage, name);
             try self.complete_clear(target);
             return self;
         }
@@ -582,10 +608,21 @@ pub fn Recovery(comptime A: type) type {
 
         /// Replace every blob with an empty journal at `size_new`.
         pub fn clear_to_size(self: *Self, size_new: u64) Error!void {
+            return self.clear_to_size_dependent(size_new, null);
+        }
+
+        /// `clear_to_size`, removing the `dependent` partition under the staged intent
+        /// (commonware's `clear_to_size_cleared`).
+        pub fn clear_to_size_dependent(
+            self: *Self,
+            size_new: u64,
+            dependent: ?[]const u8,
+        ) Error!void {
             if (size_new == std.math.maxInt(u64)) return error.SizeOverflow;
             self.close_blobs();
             // The durable intent makes `size_new` authoritative across every later crash.
             try self.checkpoint.stage_clear(size_new);
+            if (dependent) |name| try blobs_mod.remove_all(self.storage, name);
             try self.complete_clear(size_new);
         }
 
@@ -914,11 +951,24 @@ pub fn Journal(comptime A: type) type {
         /// Remove every blob and the checkpoint, freeing the journal. An interrupted destroy
         /// reopens either recovered or empty at position zero.
         pub fn destroy(self: *Self) Error!void {
+            return self.destroy_cleared(struct {
+                fn clear(_: @This()) Error!void {}
+            }{});
+        }
+
+        /// `destroy`, calling `dependents.clear()` under the staged clear before removing
+        /// this journal's blobs, so an interrupted destroy also finishes clearing them.
+        pub fn destroy_cleared(self: *Self, dependents: anytype) Error!void {
             assert(!self.failed);
             defer self.* = undefined;
             defer self.gpa.free(self.prefix);
             defer self.scratch.deinit(self.gpa);
             self.checkpoint.stage_clear(0) catch |err| {
+                self.blobs.deinit();
+                self.checkpoint.deinit();
+                return err;
+            };
+            dependents.clear() catch |err| {
                 self.blobs.deinit();
                 self.checkpoint.deinit();
                 return err;

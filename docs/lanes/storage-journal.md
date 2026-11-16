@@ -34,7 +34,12 @@ resize, sync), `runtime.storage`, with the in-memory backend `runtime.storage.me
   `init_at_size`/`destroy`, repair, stale-hint, legacy-watermark, and commit tests.
 - [ ] journal/contiguous: the rest of fixed.rs's tests (torn interior pages, bounded-open
   faults, `init_at_most` crashes, clear crash scenarios, read_many accounting).
-- [ ] journal/contiguous: variable journal.
+- [x] journal/contiguous: variable journal (data blobs plus a fixed offsets journal,
+  offset rebuild from the watermark, torn-tail and torn-page repair, prune/append crash
+  alignment, `init_at_size`/`clear_to_size` under a staged offsets intent, compression,
+  prepared appends, replay batches, `Backing`) with the shared suite and core recovery tests.
+- [ ] journal/contiguous: the rest of variable.rs's ~150 tests (bounded inspection, fault
+  injection, read_many accounting, interrupted clears at each crash point).
 - [x] journal/authenticated.rs backing contract: `assert_backing`, `last_matching`, `covers`,
   `Stored`, `init_sync`, with the fixed journal as a backing; init_sync and last_matching tests.
 - [ ] journal/authenticated.rs `Journal` (items plus persisted Merkle, batches, proofs): needs
@@ -103,6 +108,14 @@ resize, sync), `runtime.storage`, with the in-memory backend `runtime.storage.me
   `stage_clear_intent`, `destroy`; the `Backing` entry points `recover`, `clear`, `span`
   returning `Recovery(A)` (`size`, `pruning_boundary`, `recovery_watermark`, `item`,
   `append`, `truncate`, `sync`, `prune`, `clear_to_size`, `publish`, `deinit`); `Config`.
+- `storage.journal.contiguous.variable`: `Journal(V)` with the fixed journal's API (items are
+  decoded and owned by the caller; replay batches are owned by the replay), `Config(V)`
+  (`partition`, `items_per_section`, `compression`, `codec_config`, `cache_ref`,
+  `write_buffer`, `replay_buffer`), `PreparedAppend`, and the `Backing` entry points
+  `recover`, `clear`, `span` returning `Recovery(V)`. Partitions are `{partition}_data` and
+  `{partition}_offsets`. The fixed `Recovery` gained `open_dependent`,
+  `open_cleared_dependent`, `clear_to_size_dependent` (remove a dependent partition under a
+  staged clear), and the fixed journal `destroy_cleared(dependents)`.
 - `storage.journal.segmented.oversized`: `Oversized(I, V)` where `I` is a fixed-size codec
   entry with `value_location() Location` and `with_location(offset, size) I`; `Config(V)`,
   `Checkpoint{section, size}`, `Appended{position, offset, size}`. `init_with_checkpoint`,
@@ -187,6 +200,12 @@ resize, sync), `runtime.storage`, with the in-memory backend `runtime.storage.me
   unsynced replacement by writing its bytes into the durable raw blob before reopening, since
   the memory backend drops every unsynced write at `crash()`.
 
+- contiguous variable: commonware's clear callbacks (`init_cleared`, `open_cleared`,
+  `clear_to_size_cleared`) only ever remove the data partition, so the fixed recovery takes
+  the dependent partition name instead of a closure; `destroy_cleared` takes a value with a
+  `clear()` method. `read_many` reads item by item (no batched sync pass), and `start_sync`
+  advances the joint watermark to the current size since syncs complete synchronously.
+
 - contiguous fixed: syncs complete synchronously, so `start_sync` advances the watermark to
   the current size (commonware advances it to the last observed sync), sealed blobs are
   fully synced paged writers (no `Sealed` views or snapshots; `snapshot` readers are not
@@ -223,3 +242,4 @@ resize, sync), `runtime.storage`, with the in-memory backend `runtime.storage.me
 - 2026-11-13: first batch of the fixed contiguous journal's own recovery tests.
 - 2026-11-13: segmented oversized journal with its core tests.
 - 2026-11-13: authenticated backing contract (`init_sync`, `Stored`, `last_matching`).
+- 2026-11-16: contiguous variable journal with the shared suite and core recovery tests.
