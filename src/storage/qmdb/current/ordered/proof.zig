@@ -181,7 +181,7 @@ fn verify_update(
     comptime assert(U.siblings);
     const Op = any.Operation(F, U);
     const op: Op = .{ .update = update };
-    return verification.verify_fixed_operation(F, H, Op, operation_proof, op, root);
+    return verification.verify_typed_operation(F, H, Op, operation_proof, op, root);
 }
 
 /// `ExclusionProof.verify`: the proven update's cyclic span `[key, next_key)` covers `key` and
@@ -206,7 +206,7 @@ fn verify_exclusion(
             const Op = any.Operation(F, Self.Update);
             const floor = commit.proof.loc;
             const op: Op = .{ .commit = .{ .metadata = commit.value, .floor = floor } };
-            return verification.verify_fixed_operation(F, H, Op, &commit.proof, op, root);
+            return verification.verify_typed_operation(F, H, Op, &commit.proof, op, root);
         },
     }
 }

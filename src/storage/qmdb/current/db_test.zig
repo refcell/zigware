@@ -48,10 +48,24 @@ fn CurrentConformance(comptime Db: type) type {
 
 const name_prefix = "commonware_storage::qmdb::conformance::tests::";
 
+test "current root conformance (MMR unordered variable)" {
+    const allocator = std.heap.smp_allocator;
+    const C = CurrentConformance(support.UnorderedVariable(merkle.mmr.Family));
+    const name = name_prefix ++ "CurrentMmrUnorderedVariableConf";
+    try conformance.verify(C, allocator, name, 200, qmdb_support.conformance_file);
+}
+
 test "current root conformance (MMR unordered fixed)" {
     const allocator = std.heap.smp_allocator;
     const C = CurrentConformance(support.UnorderedFixed(merkle.mmr.Family));
     const name = name_prefix ++ "CurrentMmrUnorderedFixedConf";
+    try conformance.verify(C, allocator, name, 200, qmdb_support.conformance_file);
+}
+
+test "current root conformance (MMB unordered variable)" {
+    const allocator = std.heap.smp_allocator;
+    const C = CurrentConformance(support.UnorderedVariable(merkle.mmb.Family));
+    const name = name_prefix ++ "CurrentMmbUnorderedVariableConf";
     try conformance.verify(C, allocator, name, 200, qmdb_support.conformance_file);
 }
 
@@ -62,10 +76,24 @@ test "current root conformance (MMB unordered fixed)" {
     try conformance.verify(C, allocator, name, 200, qmdb_support.conformance_file);
 }
 
+test "current root conformance (MMR ordered variable)" {
+    const allocator = std.heap.smp_allocator;
+    const C = CurrentConformance(support.OrderedVariable(merkle.mmr.Family));
+    const name = name_prefix ++ "CurrentMmrOrderedVariableConf";
+    try conformance.verify(C, allocator, name, 200, qmdb_support.conformance_file);
+}
+
 test "current root conformance (MMR ordered fixed)" {
     const allocator = std.heap.smp_allocator;
     const C = CurrentConformance(support.OrderedFixed(merkle.mmr.Family));
     const name = name_prefix ++ "CurrentMmrOrderedFixedConf";
+    try conformance.verify(C, allocator, name, 200, qmdb_support.conformance_file);
+}
+
+test "current root conformance (MMB ordered variable)" {
+    const allocator = std.heap.smp_allocator;
+    const C = CurrentConformance(support.OrderedVariable(merkle.mmb.Family));
+    const name = name_prefix ++ "CurrentMmbOrderedVariableConf";
     try conformance.verify(C, allocator, name, 200, qmdb_support.conformance_file);
 }
 
@@ -76,12 +104,12 @@ test "current root conformance (MMB ordered fixed)" {
     try conformance.verify(C, allocator, name, 200, qmdb_support.conformance_file);
 }
 
-/// The unordered and ordered fixed databases of each family.
+/// One database per variant, alternating families (conformance covers every combination).
 const all_dbs = .{
-    support.UnorderedFixed(merkle.mmr.Family),
     support.UnorderedFixed(merkle.mmb.Family),
     support.OrderedFixed(merkle.mmr.Family),
-    support.OrderedFixed(merkle.mmb.Family),
+    support.UnorderedVariable(merkle.mmr.Family),
+    support.OrderedVariable(merkle.mmb.Family),
 };
 
 fn expect_value(db: anytype, k: Digest, expected: ?Digest) !void {
@@ -293,12 +321,13 @@ fn verify_ranged(
     root: *const Digest,
     extra_chunk: bool,
 ) !bool {
-    const size = comptime codec.fixed_size(Db.Operation).?;
-    var buffers: [4][size]u8 = undefined;
     var encoded: [4][]const u8 = undefined;
     assert(ranged.operations.len <= encoded.len);
+    var done: usize = 0;
+    defer for (encoded[0..done]) |bytes| gpa.free(bytes);
     for (ranged.operations, 0..) |op, i| {
-        encoded[i] = codec.encode_to(Db.Operation, op, &buffers[i]);
+        encoded[i] = try codec.encode(Db.Operation, gpa, op);
+        done += 1;
     }
     var chunks: [4][]const u8 = undefined;
     assert(ranged.chunks.len < chunks.len);

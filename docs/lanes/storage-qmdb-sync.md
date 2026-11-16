@@ -35,7 +35,9 @@ it comes first once `any` lands.
   `KeyValueProof.verify`/`ExclusionProof.verify`, `get_span`/`get_next_key`/`get_prev_key`,
   `CurrentMmr/MmbOrderedFixedConf`, and commonware's exclusion-proof test; the unordered
   proof, prune, staged, and random-chain tests also run over ordered.
-- [ ] current variable (once `any` variable lands).
+- [x] current variable (`Variable(Digest)` values): `CurrentMmr/Mmb{Unordered,Ordered}
+  VariableConf`; the db tests run over one database per variant. Values that own memory wait
+  on `any`.
 - [ ] current sync glue.
 - [x] sync journal (`journal.init`/`resize`/`append` over contiguous journals, `Memory(Op)`)
   and the request tracker (`requests.Requests(F)`), with their commonware tests.
@@ -136,6 +138,10 @@ it comes first once `any` lands.
 - `Request` and `Response` are tagged unions; `Response` owns its proof, operations, and
   pinned nodes (`deinit`). `merkle.Proof` has no `arbitrary`, so `source.arbitrary_proof`
   ports its derive for the conformance generators.
+
+- Proof verification encodes the claimed operation on the stack: in place for fixed-size
+  operations, else in a `max_inline_operation_bytes` (4 KiB) buffer, which bounded keys and
+  values fit. Owned values will need an allocating `verify` when `any` supports them.
 
 ## Log
 - 2026-11-16: sync wire types, errors, gaps, and metrics with their conformance hashes.

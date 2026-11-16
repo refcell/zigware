@@ -4,6 +4,8 @@
 const std = @import("std");
 const assert = std.debug.assert;
 const fixed = @import("../../journal/contiguous/fixed.zig");
+const variable = @import("../../journal/contiguous/variable.zig");
+const value = @import("../value.zig");
 const any = @import("../any/mod.zig");
 const any_support = @import("../any/test_support.zig");
 const current = @import("mod.zig");
@@ -32,6 +34,22 @@ pub fn UnorderedFixedChunks(comptime F: type, comptime N: usize) type {
 pub fn OrderedFixed(comptime F: type) type {
     const E = any_support.Encoding;
     const Journal = fixed.Journal(any.operation.Ordered(F, Digest, E));
+    const U = any.operation.update.Ordered(Digest, E);
+    return current.Db(F, U, Journal, any_support.OrderedIndex, Sha256, 32);
+}
+
+/// The unordered variable-encoded `current` database of commonware's conformance types.
+pub fn UnorderedVariable(comptime F: type) type {
+    const E = value.Variable(Digest);
+    const Journal = variable.Journal(any.operation.Unordered(F, Digest, E));
+    const U = any.operation.update.Unordered(Digest, E);
+    return current.Db(F, U, Journal, any_support.Index, Sha256, 32);
+}
+
+/// The ordered variable-encoded `current` database of commonware's conformance types.
+pub fn OrderedVariable(comptime F: type) type {
+    const E = value.Variable(Digest);
+    const Journal = variable.Journal(any.operation.Ordered(F, Digest, E));
     const U = any.operation.update.Ordered(Digest, E);
     return current.Db(F, U, Journal, any_support.OrderedIndex, Sha256, 32);
 }

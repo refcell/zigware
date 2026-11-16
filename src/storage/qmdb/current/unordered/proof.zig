@@ -38,7 +38,7 @@ pub fn KeyValueProof(comptime F: type, comptime D: type, comptime chunk_size: ?u
             const Op = operation.Operation(F, U);
             comptime assert(!U.siblings);
             const op: Op = .{ .update = .{ .key = key, .value = value } };
-            return verification.verify_fixed_operation(F, H, Op, &self.proof, op, root);
+            return verification.verify_typed_operation(F, H, Op, &self.proof, op, root);
         }
 
         pub fn eql(a: Self, b: Self) bool {

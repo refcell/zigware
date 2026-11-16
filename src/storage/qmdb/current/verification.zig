@@ -149,8 +149,13 @@ pub fn verify_operation(
     );
 }
 
-/// `verify_operation` of the fixed-size operation `op` of type `Op`, encoded here.
-pub fn verify_fixed_operation(
+/// The largest variable-sized operation `verify_typed_operation` encodes on the stack.
+pub const max_inline_operation_bytes: usize = 4096;
+
+/// `verify_operation` of the operation `op` of type `Op`, encoded here: in place for a
+/// fixed-size type, else into a stack buffer. A variable-sized `Op` must hold keys and values
+/// of bounded size (no owned memory), so its encoding fits `max_inline_operation_bytes`.
+pub fn verify_typed_operation(
     comptime F: type,
     comptime H: type,
     comptime Op: type,
@@ -158,10 +163,12 @@ pub fn verify_fixed_operation(
     op: Op,
     root: *const H.Digest,
 ) bool {
-    const size = comptime codec.fixed_size(Op) orelse
-        @compileError("verify_fixed_operation needs a fixed-size operation");
+    comptime assert(!codec.owns_memory(Op)); // Owned values need an allocating encoder.
+    const size = comptime codec.fixed_size(Op) orelse max_inline_operation_bytes;
     var buffer: [size]u8 = undefined;
-    const encoded = codec.encode_to(Op, op, &buffer);
-    assert(encoded.len == size);
+    const encoded_size = codec.encode_size(Op, op);
+    assert(encoded_size <= size); // Bounded keys and values encode inline.
+    const encoded = codec.encode_to(Op, op, buffer[0..encoded_size]);
+    assert(encoded.len == encoded_size);
     return verify_operation(F, H, operation_proof, encoded, root);
 }
