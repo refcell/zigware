@@ -23,6 +23,13 @@ a test harness), `transfers` (4.4k with tests and benches), `stateful` (about 33
   optionally `deinit_state`. Engines report through `Monitor(P).send(update)`.
 - `ExitCondition(P, S).from(&value)` with `MinimumFinalizations` and `ProcessedHeightAtLeast`;
   `FinalizationProperty(S).from(&value)` and `Property(P, S).from(&value)`; `Team(D)`.
+- `glue.transfers`: `Plan(K, A)` (`init(gpa, transfers, seed, strategy, &rejection)`,
+  `init_with_hasher`, `keys`, `len`, `settle(gpa, reads, strategy, &rejection) []Slot(A)`,
+  `deinit`), `Selection(K, A)` (`init(seed)`, `touch`, `keys`, `register`,
+  `apply(gpa, transfers, accepted)`, `settle`, `deinit`), `Change(A)` (`debiting`,
+  `crediting`, `applying`, `with_effect`), `Entry(K, A)`, `Slot(V)` (`keep`, `put`,
+  `delete`), `Rejection(K)` (`reason`, `key`), `Reason`, `Error` (`Rejected` or
+  out-of-memory), `SeededHasher`. Account and transfer contracts are in `transfers/mod.zig`.
 
 ## Decisions
 - Rust traits with async methods (`EngineDefinition`, `ExitCondition`, `Property`) become
@@ -36,6 +43,16 @@ a test harness), `transfers` (4.4k with tests and benches), `stateful` (about 33
 - `select_loop!` becomes one event queue (`events.zig`): reports, scheduled crashes and
   restarts, restart delays, and the random-crash ticker all push into it; the plan pops one
   event at a time and wakes at least every 25 ms for polling exit conditions.
+- `transfers`: a rejection carries a key, so plans and settles return `error.Rejected` and
+  fill a caller's `Rejection`; under a parallel strategy each batch records its own and the
+  first in batch order is reported (commonware reports any offender).
+- `transfers`: `Plan.init` and `Selection.init` take the hash seed (commonware's `new` draws it
+  from `ahash`'s random state), since library code takes randomness from its caller. Keys are
+  hashed with Wyhash over their bytes; the hash never leaves the process.
+- `transfers`: an account without effects declares `Effect = enum {}` (commonware's
+  `Infallible`); plans store `void` for it, since Zig cannot allocate an empty enum.
+- `transfers.Slot` is qmdb's `storage.qmdb.any.batch.Slot`, so settled slots feed a staged
+  merkleize directly.
 - Commonware's panics for unexercised faults (random crashes, schedules, delays, processed
   height windows) and duplicate strategies are `PlanError`s, so their tests port.
 
@@ -44,8 +61,14 @@ a test harness), `transfers` (4.4k with tests and benches), `stateful` (about 33
 - [x] simulate: processed, property, exit conditions, engine definition, team, plan (the
   driver) with the plan tests and their stub engines.
 - [ ] simulate: `MonitorReporter` waits on marshal's `Update`/`Tip` (consensus-marshal).
-- [ ] transfers: the parts that need no qmdb (`select`, planning), their tests and benches.
-- [ ] transfers: the rest (needs qmdb).
+- [x] transfers: `Plan`, `settle`, and `Selection`, with the plan, settle, and selection tests
+  that need no database.
+- [x] transfers: the nonced-account (effect) tests.
+- [x] transfers: the remaining database-free tests (edge cases, seeded key orders, bucketing,
+  random batches against their flat entries, `u256` amounts).
+- [ ] transfers (owner: thread T-01a1d58d-7682-700c-a399-735d897bbd46): the benches (`plan`,
+  `select`, `settle`) and the database-backed tests (execute and select over qmdb `any` and
+  `current`, and stateful).
 - [ ] stateful: see the stateful section below (curve25519/utils thread).
 - [ ] dkg (coding thread).
 
@@ -134,6 +157,10 @@ marshal's actors (consensus-marshal) for the actor; until then it ports what is 
 - 2026-11-16 (stateful): probe sample, wire messages, and payload bound.
 - 2026-11-16 (stateful): `SyncPlan` with its persisted `SyncState`.
 - 2026-11-16 (stateful): the processor's prune schedule and finalization boundary.
+- 2026-11-16: transfers `Plan` (partitioned parallel build), `settle`, and `Selection` with
+  commonware's 39 database-free tests under every execution shape (75 glue tests);
+  `transfers.Slot` is qmdb's `any.batch.Slot`. The transfers lane
+  (T-01a1d58d-7682-700c-a399-735d897bbd46) takes over the benches and database tests.
 
 ## dkg (owner: coding lane, thread T-01a1d58d-bff1-75a1-8ccb-4b8dd7bc9755)
 
