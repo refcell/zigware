@@ -87,7 +87,8 @@ formatting, and the deterministic runtime for tests. qmdb is only mentioned in c
 - [ ] tests.rs ledger vector, and the integration tests (clearing/tests/bajillion).
 - [x] Fuzz targets `src/clearing/fuzz/{decode,verify}.zig` (commonware clearing/fuzz), seeded
   in `zig build test` and under `std.testing.fuzz`; BalanceProof joins them with qmdb `current`.
-- [ ] Benches (`src/clearing/benches.zig`).
+- [x] Benches `src/clearing/benches.zig` (zigware's own; commonware's clearing has none):
+  `clearing::amounts_root`, `clearing::matrix_open`, `clearing::close_check`.
 
 ## Log
 - 2026-11-16: namespace, amounts, lookup with their tests; Amounts and Lookup conformance
@@ -103,3 +104,5 @@ formatting, and the deterministic runtime for tests. qmdb is only mentioned in c
   stage and payout-proof tests.
 - 2026-11-16: the decode and verify fuzz targets; 25,600 decode and 5,120 verify cases clean
   in ReleaseSafe soaks.
+- 2026-11-16: benches. ReleaseFast, 256 rows: payment-map root 47 µs, matrix opening and
+  verify 1.4 µs, close check 17 ms (about 66 µs per row, mostly the row signature).
