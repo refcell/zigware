@@ -7,6 +7,7 @@ const std = @import("std");
 const testing = std.testing;
 const merkle = @import("../mod.zig");
 const full = @import("full.zig");
+const fixed = @import("../../journal/contiguous/fixed.zig");
 const support = @import("full_test.zig");
 
 const D = support.D;
@@ -17,6 +18,7 @@ const add_digests = support.add_digests;
 const gpa = support.gpa;
 const hasher = &support.hasher;
 const max_pins = merkle.max_pinned_nodes;
+const write_boundary = support.write_boundary;
 
 fn init_sync(
     comptime F: type,
@@ -157,27 +159,6 @@ fn recovered_pins_reopen(comptime F: type, leaves: u64, start: u64, end: u64) !v
     defer structure.destroy() catch unreachable; // The in-memory storage cannot fail here.
     try testing.expectEqual(leaves + 1, structure.leaves());
     try expect_root(&structure, appended_root);
-}
-
-/// Persists the pruning boundary `location` and `pins` in the harness's metadata.
-fn write_boundary(comptime F: type, harness: *Harness, location: u64, pins: []const D) !void {
-    var store = try Merkle(F).Store.init(gpa, harness.storage.interface(), .{
-        .partition = "metadata-partition",
-        .codec_config = .{ .range = .full(), .item = {} },
-    });
-    defer store.deinit();
-    var bytes: [8]u8 = undefined;
-    std.mem.writeInt(u64, &bytes, location, .big);
-    if (try store.put(Key.init(full.pruned_to_prefix, 0), try gpa.dupe(u8, &bytes))) |old| {
-        gpa.free(old);
-    }
-    var positions_buffer: [max_pins]u64 = undefined;
-    const positions = merkle.nodes_to_pin(F, location, &positions_buffer);
-    for (positions, pins) |position, pin| {
-        const key = Key.init(full.node_prefix, position);
-        if (try store.put(key, try gpa.dupe(u8, &pin.bytes))) |old| gpa.free(old);
-    }
-    try store.sync();
 }
 
 /// An interrupted sync left metadata (boundary 16 and its pins) ahead of a 4-leaf journal.
@@ -414,5 +395,90 @@ test "persisted merkle init_sync truncates or discards local state outside the r
         try discards_state_pruned_past_range(F);
         try discards_stale_pinned_metadata(F);
         try computes_pinned_nodes_before_pruning(F);
+    }
+}
+
+/// A journal at an invalid size (a crash wrote a leaf but not its parents) is truncated to
+/// the last complete tree.
+fn recovers_from_invalid_journal_size(comptime F: type) !void {
+    var harness = try Harness.init();
+    defer harness.deinit();
+    var structure = try seed_tree(F, &harness, harness.cfg(), 3);
+    const valid_size = structure.size();
+    const valid_root = try structure.root(hasher, 0);
+    structure.deinit();
+    {
+        const journal_cfg = harness.cfg().journal();
+        var journal = try fixed.Journal(D).init(gpa, harness.storage.interface(), journal_cfg);
+        defer journal.deinit();
+        try testing.expectEqual(valid_size, journal.size());
+        _ = try journal.append(support.test_digest(999));
+        try journal.sync();
+        try testing.expectEqual(valid_size + 1, journal.size());
+    }
+    structure = try init_sync(F, &harness, 0, 100, null);
+    defer structure.destroy() catch unreachable; // The in-memory storage cannot fail here.
+    try testing.expectEqual(valid_size, structure.size());
+    try expect_root(&structure, valid_root);
+}
+
+/// Appends `test_digest(from..16)`, syncs, and checks that a reopen recovers the root.
+fn rebuild_and_reopen(comptime F: type, harness: *Harness, structure: *Merkle(F), from: u64) !void {
+    try add_digests(F, structure, from, 16);
+    const root = try structure.root(hasher, 0);
+    try structure.sync();
+    structure.deinit();
+    structure.* = try harness.open(F);
+    defer structure.destroy() catch unreachable; // The in-memory storage cannot fail here.
+    try expect_root(structure, root);
+}
+
+/// A genesis sync after an interrupted sync persisted pins of another history drops them.
+fn genesis_drops_stale_pins(comptime F: type) !void {
+    var harness = try Harness.init();
+    defer harness.deinit();
+    var positions_buffer: [max_pins]u64 = undefined;
+    var pins: [max_pins]D = undefined;
+    const positions = merkle.nodes_to_pin(F, 16, &positions_buffer);
+    for (pins[0..positions.len], 0..) |*pin, i| pin.* = support.test_digest(1_000 + i);
+    try write_boundary(F, &harness, 16, pins[0..positions.len]);
+    var structure = try init_sync(F, &harness, 0, 16, null);
+    try expect_bounds(&structure, 0, 0);
+    try rebuild_and_reopen(F, &harness, &structure, 0);
+}
+
+/// A sync to a lower range drops the pins an interrupted sync to a higher one persisted.
+fn lower_range_drops_future_pins(comptime F: type) !void {
+    var harness = try Harness.init();
+    defer harness.deinit();
+    var structure = try seed_tree(F, &harness, harness.cfg(), 8);
+    structure.deinit();
+    const source_cfg = harness.cfg_in("journal-source", "metadata-source");
+    var source = try seed_tree(F, &harness, source_cfg, 16);
+    var pins_buffer: [max_pins]D = undefined;
+    const pins = try source.pinned_nodes_at(16, &pins_buffer);
+    try source.destroy();
+    try write_boundary(F, &harness, 16, pins);
+
+    structure = try init_sync(F, &harness, 2, 8, null);
+    try expect_bounds(&structure, 2, 8);
+    // A replacement suffix through the abandoned boundary.
+    try add_digests(F, &structure, 1_008, 1_016);
+    const root = try structure.root(hasher, 0);
+    try structure.sync();
+    structure.deinit();
+    structure = try harness.open(F);
+    defer structure.destroy() catch unreachable; // The in-memory storage cannot fail here.
+    try expect_root(&structure, root);
+}
+
+test "persisted merkle init_sync recovers from an invalid journal size" {
+    inline for (support.families) |F| try recovers_from_invalid_journal_size(F);
+}
+
+test "persisted merkle init_sync drops stale and future pins" {
+    inline for (support.families) |F| {
+        try genesis_drops_stale_pins(F);
+        try lower_range_drops_future_pins(F);
     }
 }

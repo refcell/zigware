@@ -68,6 +68,27 @@ pub const Harness = struct {
     }
 };
 
+/// Persists the pruning boundary `location` and `pins` in the harness's metadata.
+pub fn write_boundary(comptime F: type, harness: *Harness, location: u64, pins: []const D) !void {
+    var store = try Merkle(F).Store.init(gpa, harness.storage.interface(), .{
+        .partition = "metadata-partition",
+        .codec_config = .{ .range = .full(), .item = {} },
+    });
+    defer store.deinit();
+    var bytes: [8]u8 = undefined;
+    std.mem.writeInt(u64, &bytes, location, .big);
+    if (try store.put(Key.init(full.pruned_to_prefix, 0), try gpa.dupe(u8, &bytes))) |old| {
+        gpa.free(old);
+    }
+    var positions_buffer: [merkle.max_pinned_nodes]u64 = undefined;
+    const positions = merkle.nodes_to_pin(F, location, &positions_buffer);
+    for (positions, pins) |position, pin| {
+        const key = Key.init(full.node_prefix, position);
+        if (try store.put(key, try gpa.dupe(u8, &pin.bytes))) |old| gpa.free(old);
+    }
+    try store.sync();
+}
+
 /// Appends `test_digest(from..to)` through one batch.
 pub fn add_digests(comptime F: type, structure: *Merkle(F), from: u64, to: u64) !void {
     var batch = try structure.new_batch();
@@ -484,5 +505,45 @@ test "persisted merkle interrupted destroy reopens" {
     inline for (families) |F| {
         try interrupted_destroy_reopens(F);
         try interrupted_destroy_reopens_bounded(F);
+    }
+}
+
+/// Of two batches merkleized on the same state, the second to apply is stale.
+fn stale_batch(comptime F: type) !void {
+    var harness = try Harness.init();
+    defer harness.deinit();
+    var structure = try harness.open(F);
+    defer structure.deinit();
+    var merkleized: [2]*Merkle(F).MerkleizedBatch = undefined;
+    for (&merkleized, [_][]const u8{ "leaf-a", "leaf-b" }) |*slot, leaf| {
+        var batch = try structure.new_batch();
+        try batch.add(gpa, &hasher, leaf);
+        slot.* = try batch.merkleize(&structure, &hasher);
+    }
+    defer for (merkleized) |batch| batch.release(gpa);
+    try structure.apply_batch(merkleized[0]);
+    try testing.expectError(error.StaleBatch, structure.apply_batch(merkleized[1]));
+}
+
+/// Updating a leaf synced out of memory fails with `ElementPruned` (the append-only wrapper
+/// hides `update_leaf`, so this goes through the inner batch).
+fn update_leaf_after_sync_returns_pruned(comptime F: type) !void {
+    var harness = try Harness.init();
+    defer harness.deinit();
+    var structure = try harness.open(F);
+    defer structure.destroy() catch unreachable; // The in-memory storage cannot fail here.
+    try add_digests(F, &structure, 0, 50);
+    try structure.sync();
+    const committed = try structure.to_batch();
+    defer committed.release(gpa);
+    var batch = committed.new_batch();
+    defer batch.deinit(gpa);
+    try testing.expectError(error.ElementPruned, batch.update_leaf(gpa, &hasher, 0, "updated"));
+}
+
+test "persisted merkle stale batch and pruned leaf update" {
+    inline for (families) |F| {
+        try stale_batch(F);
+        try update_leaf_after_sync_returns_pruned(F);
     }
 }

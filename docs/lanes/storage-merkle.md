@@ -33,11 +33,16 @@ variants need `runtime` storage; do them after its interface lands.
   journal, exact match, partial overlap, recovered pins reopen and crash, metadata ahead of
   journal, malformed/missing/extra pins, truncation past the range, pruned past the range,
   stale pinned metadata, and pins read before pruning.
+- [x] merkle/persisted/full init recovery tests (stale metadata, prune boundary past a reset
+  journal, metadata ahead, initialization bounds, recovery prune crash), init_sync over an
+  invalid journal size, genesis and lower-range syncs dropping stale pins, stale batch, and
+  update_leaf after sync.
 - [ ] merkle/persisted/full: the blob-level init_sync tests (interrupted bounded publication,
   interrupted clear, ahead skips discarded blobs, reset or stale-below-start leave blobs
-  unopened, torn tail repair; these also pin the journal probe at the highest missing pin),
-  init's stale/ahead-metadata and prune-boundary tests, recovery prune crash, initialization
-  bounds, start_sync failure observation, and destroy observing a failed sync.
+  unopened, ahead within the end blob, torn tail repair; these also pin the journal probe at
+  the highest missing pin), and the watermark test. Commonware's start_sync-handle tests
+  (clean start_sync failure, destroy observing a failed sync) need delayed sync completion,
+  which this synchronous port does not have.
 - [x] merkle/persisted/full historical proof tests (basic, with pruning, large, singleton,
   pruned elements, appends while available, after sync, after pruning, edge cases, range
   validation, non-size prune) and interrupted destroy (swept budget, and bounded reopen).
