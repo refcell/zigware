@@ -22,6 +22,9 @@ pub fn Mem(comptime F: type, comptime Digest: type) type {
     return struct {
         const Self = @This();
         pub const Proof = proof_module.Proof(F, Digest);
+        /// The pins of this structure's own boundary plus, through `add_pinned_nodes`, those of
+        /// one other boundary (a journaled structure's pruning boundary).
+        pub const max_pins = 2 * merkle.max_pinned_nodes;
         pub const Batch = batch_module.Unmerkleized(F, Digest);
         pub const MerkleizedBatch = batch_module.Merkleized(F, Digest);
 
@@ -30,9 +33,9 @@ pub fn Mem(comptime F: type, comptime Digest: type) type {
         /// Node count pruned from the front; nodes below it are gone except pinned ones.
         pruned_size: u64 = 0,
         /// Positions of the pinned nodes below `pruned_size`, ascending.
-        pinned_positions: merkle.BoundedList(u64, merkle.max_pinned_nodes) = .{},
+        pinned_positions: merkle.BoundedList(u64, max_pins) = .{},
         /// Digests of the pinned nodes, parallel to `pinned_positions`.
-        pinned_digests: merkle.BoundedList(Digest, merkle.max_pinned_nodes) = .{},
+        pinned_digests: merkle.BoundedList(Digest, max_pins) = .{},
 
         pub const empty: Self = .{};
 
@@ -254,7 +257,7 @@ pub fn Mem(comptime F: type, comptime Digest: type) type {
             assert(position > self.pruned_size and position <= self.size());
             var positions_buffer: [merkle.max_pinned_nodes]u64 = undefined;
             const positions = merkle.nodes_to_pin(F, location, &positions_buffer);
-            var digests: merkle.BoundedList(Digest, merkle.max_pinned_nodes) = .{};
+            var digests: merkle.BoundedList(Digest, max_pins) = .{};
             for (positions) |pinned| digests.append(self.node(pinned));
             self.pinned_positions = .from_slice(positions);
             self.pinned_digests = digests;
@@ -290,6 +293,33 @@ pub fn Mem(comptime F: type, comptime Digest: type) type {
         ) (merkle.Error || Allocator.Error)!Proof {
             const plan = try proof_module.RangePlan(F).init(self.leaves(), range);
             return plan.build(gpa, hasher, inactive_peaks, self);
+        }
+
+        /// The retained nodes from `position` (at or above the pruned size) to the end.
+        pub fn nodes_from(self: *const Self, position: u64) []const Digest {
+            assert(position >= self.pruned_size and position <= self.size());
+            return self.nodes.items[@intCast(position - self.pruned_size)..];
+        }
+
+        /// Pins extra nodes below the pruned size (commonware's `add_pinned_nodes`); a position
+        /// already pinned takes the new digest. The caller ensures the set is valid.
+        pub fn add_pinned_nodes(
+            self: *Self,
+            positions: []const u64,
+            digests: []const Digest,
+        ) void {
+            assert(positions.len == digests.len);
+            for (positions, digests) |position, digest| {
+                assert(position < self.pruned_size);
+                const pinned = self.pinned_positions.slice();
+                if (std.mem.indexOfScalar(u64, pinned, position)) |slot| {
+                    self.pinned_digests.slice_mut()[slot] = digest;
+                } else {
+                    self.pinned_positions.append(position);
+                    self.pinned_digests.append(digest);
+                }
+            }
+            assert(self.pinned_positions.len == self.pinned_digests.len);
         }
 
         /// A speculative batch on top of the committed state.

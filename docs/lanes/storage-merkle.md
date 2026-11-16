@@ -23,8 +23,16 @@ variants need `runtime` storage; do them after its interface lands.
   `new_range`/`install_range` (crate-private, for qmdb) come with qmdb.
 - [x] merkle/verification (`ProofStore`, `range_proof`/`historical_range_proof`/`multi_proof`
   over any source) and merkle/storage (the source interface, `get_nodes`).
-- [ ] merkle/persisted (journaled MMR): waits on storage-journal's `contiguous/fixed` and
-  `authenticated` (Backing, BackingRecovery).
+- [x] merkle/persisted/full core: `storage.merkle.full.Merkle(F, Digest)` over
+  `journal.contiguous.fixed.Journal(Digest)` and `storage.metadata` (init, init_at_most,
+  Recovery prepare/finish, flush/sync/start_sync, prune/prune_all, get_node(s), proofs,
+  historical proofs, append-only batches, destroy) with commonware's empty, basic, get_nodes,
+  flush, crash, orphan-leaf recovery, pruning, and recovery-with-pruning tests.
+- [ ] merkle/persisted/full: `init_sync` (over `journal.authenticated.Stored`), the historical
+  proof, destroy-interruption, and init_sync tests, and the merkle_full_operations and
+  merkle_full_recovery fuzz targets.
+- [ ] merkle/persisted/compact.
+- [ ] index/immutable: switch to `utils.handles.Table` (now on main).
 - [ ] Fuzz targets (storage/fuzz entries for these modules). Done: rmap, bitmap, index
   (unordered, ordered, immutable), merkle_family_operations, merkle_range_proof,
   merkle_proof_store, and the Merkle half of proofs_malleability (its BMT half goes with bmt).
@@ -112,3 +120,10 @@ variants need `runtime` storage; do them after its interface lands.
   parallel-shape tests (`level_batches_keep_pairs`, worker counts) have no counterpart. The
   `hash_plan` exactness tests live in batch.zig (they call the private plan). The
   `merkle_batch_operations` fuzz catches a skipped add_many update record at iteration 0.
+- merkle/persisted/full: mutators take `*Self` instead of consuming the structure; after an
+  error only `deinit` may follow. Syncs are synchronous, so `start_sync` returns no handle.
+  `Mem` gained `add_pinned_nodes` (room for two boundaries' pins), `nodes_from`, and `clone`.
+  Metadata keys match commonware (`PrefixedU64` prefix 0 = pins by position, prefix 1 key 0 =
+  pruning boundary as a big-endian leaf location). Mutation checks: dropping the pruning-boundary
+  pins after a flush, skipping orphan-leaf replay, and skipping the journal prune on reopen each
+  fail a ported test.
