@@ -58,9 +58,10 @@ handshake), then certificate, secp256r1, the rest, zk last. banderwagon moved to
   agreement with consensus-simplex): simplex_messages, simplex_elector, attributable_map.
 - [x] Consensus fuzz `bounds`, `types`, and `invariants` (the safety checker, `find`/`check`,
   with commonware's ten invariant tests; a violation is a `Kind` and a view, not a panic).
-- [ ] Consensus engine fuzzers (`consensus/fuzz/src`: disrupter, strategy, the run harness)
-  per scheme: ed25519, secp256r1, bls12381 multisig and threshold (MinPk, MinSig);
-  then the `_twin` variants once simplex's twins mock and threshold-VRF Scheme land.
+- [x] Consensus engine fuzzers (`fuzz/strategy.zig`, `disrupter.zig`, `recorder.zig`,
+  `harness.zig`, `simplex.zig`): simplex_ed25519, simplex_secp256r1, and simplex_bls12381
+  multisig and threshold (MinPk, MinSig), with commonware's connected tests.
+- [ ] The `_twin` engine fuzzers (twins mock and p2p split channels are on main).
 - [ ] Benches (`benches.zig`): blake3, bloomfilter, chacha20_poly1305, ed25519, sake, lthash,
   secp256r1, sha256, sha512, and zk bulletproofs, with commonware's names and cases.
 
@@ -168,3 +169,17 @@ handshake), then certificate, secp256r1, the rest, zk last. banderwagon moved to
   signatures by the drawn seed. A planted bug in each target fails its default seeded run:
   BitMap accepting set trailing bits, round-robin indices off by one, and an AttributableMap
   insert that overwrites a duplicate signer.
+- Engine fuzzers (`src/consensus/fuzz/harness.zig`): the runtime is seeded by a drawn `u64`
+  (commonware feeds raw bytes to a `FuzzRng`), the disrupter polls its three receivers in
+  order instead of selecting, and a run still going after 600 s of simulated time fails
+  with `error.Timeout` (commonware hangs until the fuzzer times out). Honest reporters keep
+  verified certificates (`recorder.zig`), and `invariants.find` checks them after the run.
+  Honest applications set simplex's `reject_mismatches` (commonware's `mocks` feature):
+  replayed payloads at another round or parent fail verification instead of panicking. In
+  Debug only ed25519 runs its seeded fuzz by default (2 cases); the other schemes run a
+  seeded connected test (BLS12-381 to view 3), and their seeded fuzz needs `-Dslow-tests` or
+  `-Dfuzz-soak`. Planted bug: `N3f1.quorum` off by one makes honest engines assemble
+  2-of-4 certificates, which the connected test and the first fuzz case report as
+  `insufficient_signatures`. A planted missing-nullification check and finalize-after-
+  nullify went undetected in 32 cases: the disrupter cannot get a skipping proposal past
+  the mock application, and 10 ms links leave no time-out-then-notarize window.

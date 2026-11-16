@@ -10,4 +10,5 @@ test {
     _ = @import("types.zig");
     _ = @import("invariants.zig");
     _ = @import("strategy.zig");
+    _ = @import("simplex.zig");
 }

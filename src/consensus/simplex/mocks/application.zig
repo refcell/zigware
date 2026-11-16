@@ -90,6 +90,9 @@ pub fn Application(comptime H: type, comptime P: type) type {
         /// Holds `propose` (and `prepare` unless the decision is `wait`) open until canceled.
         stall_proposals: bool = false,
         drop_verifications: bool = false,
+        /// Rejects a payload whose contents name another round or parent instead of
+        /// panicking (commonware's `mocks` feature, which the consensus fuzzers enable).
+        reject_mismatches: bool = false,
         /// The decision attached to a handoff candidate; `wait` builds nothing.
         handoff: std.meta.Tag(Handoff) = .wait,
         /// Guards the maps below and wakes verifications waiting for a payload.
@@ -217,6 +220,9 @@ pub fn Application(comptime H: type, comptime P: type) type {
             var reader: codec.Reader = .init(contents[0..len]);
             const round = Rnd.read(self.gpa, &reader, {}) catch @panic("invalid payload");
             const parent = codec.read(D, self.gpa, &reader) catch @panic("invalid payload");
+            const matches = round == request.round and
+                codec.order(D, parent, request.parent[1]) == .eq;
+            if (!matches and self.reject_mismatches) return false;
             if (round != request.round) @panic("invalid round (in payload)");
             if (codec.order(D, parent, request.parent[1]) != .eq) {
                 @panic("invalid parent (in payload)");
