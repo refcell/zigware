@@ -153,7 +153,9 @@ test vectors. Tests never call AWS and never hold credentials.
   alongside monitoring), and monitoring's log/profile/trace ports. Local commands go through
   `session.Local` (`Processes` in production). Tested end to end over scripted responses, plus
   refusals and a cold image cache.
-- [ ] The `deployer` binary.
+- [x] The `deployer` binary (`src/deployer/main.zig`, `zig build run-deployer -- aws list`):
+  `deployer.cli.parse`, then `deployer.aws.commands.run` over `HttpTransport`, `Ssh`, and
+  `Processes`, with commonware's failure messages. `list` and `attach` need no credentials.
 - [ ] Fuzz: YAML parse/write round trips, config validation, SigV4 canonicalization.
 
 ## Log

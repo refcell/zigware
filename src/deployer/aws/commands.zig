@@ -8,10 +8,65 @@ const aws_utils = @import("utils.zig");
 const ec2_api = @import("ec2_api.zig");
 const s3 = @import("s3.zig");
 const deployments = @import("deployments.zig");
+const cli = @import("../cli.zig");
+const create_flow = @import("create_flow.zig");
+const destroy_module = @import("destroy.zig");
+const profile_module = @import("profile.zig");
+const update_module = @import("update.zig");
 const IpAddr = @import("../ip.zig").IpAddr;
 const Session = @import("session.zig").Session;
 
 const log = std.log.scoped(.deployer);
+
+/// Runs a parsed `deployer aws` command (commonware `main`'s dispatch).
+pub fn run(session: *Session, command: cli.Aws) !void {
+    switch (command) {
+        .create => |rollout| {
+            try create_flow.create_deployment(session, rollout.config, rollout.concurrency);
+        },
+        .update => |rollout| {
+            try update_module.update(session, rollout.config, rollout.concurrency);
+        },
+        .authorize => |arguments| _ = try authorize(session, arguments.config, arguments.ip),
+        .destroy => |target| try destroy_module.destroy(session, switch (target) {
+            .config => |path| .{ .config = path },
+            .tag => |tag| .{ .tag = tag },
+        }),
+        .list => _ = try list(session),
+        .clean => try clean(session),
+        .profile => |arguments| try profile_module.profile(
+            session,
+            arguments.config,
+            arguments.instance,
+            arguments.duration_s,
+            arguments.binary,
+        ),
+        .attach => |arguments| try attach(session, arguments.ip),
+    }
+}
+
+/// Whether `command` calls AWS, and so needs credentials (`list` and `attach` read only the
+/// local deployment directory).
+pub fn needs_credentials(command: cli.Aws) bool {
+    return switch (command) {
+        .list, .attach => false,
+        else => true,
+    };
+}
+
+/// What commonware logs when `command` fails.
+pub fn failure_message(command: cli.Aws) []const u8 {
+    return switch (command) {
+        .create => "failed to create EC2 deployment",
+        .update => "failed to update EC2 deployment",
+        .authorize => "failed to authorize EC2 deployment",
+        .destroy => "failed to destroy EC2 deployment",
+        .list => "failed to list deployments",
+        .clean => "failed to clean S3 bucket",
+        .profile => "failed to profile instance",
+        .attach => "failed to attach to instance",
+    };
+}
 
 /// Deletes the shared bucket and its contents, then the bucket config (commonware `clean`).
 /// Only a persisted bucket name is used: minting one here would orphan the real bucket.

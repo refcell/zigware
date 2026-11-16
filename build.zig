@@ -161,6 +161,30 @@ pub fn build(b: *std.Build) void {
 
     add_examples(b, zigware, options_module, target, optimize, test_step, check_step, filters);
     add_benches(b, &modules, options_module, target, optimize, test_step, check_step);
+
+    add_deployer(b, modules[package_index("deployer")], target, optimize, check_step);
+}
+
+/// `deployer`: commonware's deployer CLI (`zig build run-deployer -- aws list`).
+fn add_deployer(
+    b: *std.Build,
+    deployer: *std.Build.Module,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    check_step: *std.Build.Step,
+) void {
+    const root = b.createModule(.{
+        .root_source_file = b.path("src/deployer/main.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "deployer", .module = deployer }},
+    });
+    const exe = b.addExecutable(.{ .name = "deployer", .root_module = root });
+    b.installArtifact(exe);
+    check_step.dependOn(&exe.step);
+    const run = b.addRunArtifact(exe);
+    run.addPassthruArgs();
+    b.step("run-deployer", "Run the deployer CLI").dependOn(&run.step);
 }
 
 fn package_index(name: []const u8) usize {

@@ -301,3 +301,23 @@ test "attach: finds the instance's deployment and attaches with its key" {
     try testing.expectEqualStrings("2001:db8::1 attach id_rsa_t", lines[0]);
     try testing.expectEqualStrings("2.2.2.2 attach id_rsa_t", lines[1]);
 }
+
+test "run: dispatches parsed commands" {
+    var harness: Harness = undefined;
+    try harness.init(&.{});
+    defer harness.deinit();
+    const cli = @import("../cli.zig");
+    const parsed = cli.parse(&.{ "aws", "list" }).ok.command.aws;
+    try testing.expect(!commands.needs_credentials(parsed));
+    try commands.run(&harness.session, parsed);
+    const attach = cli.parse(&.{ "aws", "attach", "1.1.1.1" }).ok.command.aws;
+    try testing.expectError(error.Failed, commands.run(&harness.session, attach));
+    try harness.expect_failure("instance not found: 1.1.1.1");
+    const message = commands.failure_message(attach);
+    try testing.expectEqualStrings("failed to attach to instance", message);
+    // `clean` without a bucket config calls nothing, but needs credentials in general.
+    const clean = cli.parse(&.{ "aws", "clean" }).ok.command.aws;
+    try testing.expect(commands.needs_credentials(clean));
+    try commands.run(&harness.session, clean);
+    try testing.expectEqual(@as(usize, 0), harness.sent().len);
+}
