@@ -1,15 +1,14 @@
 //! Tests of commonware's `glue::dkg::reshare::store` (`mod tests`), with the in-memory secret
-//! store of glue's DKG test mocks (`MemorySecretStore`).
+//! store of glue's DKG test mocks (`tests/mocks.zig`).
 
 const std = @import("std");
 const testing = std.testing;
-const Allocator = std.mem.Allocator;
 const utils = @import("utils");
-const runtime = @import("runtime");
 const consensus = @import("consensus");
 const cryptography = @import("cryptography");
 const types = @import("../types.zig");
 const store_mod = @import("store.zig");
+const mocks = @import("../tests/mocks.zig");
 
 const ed25519 = cryptography.ed25519;
 const PrivateKey = ed25519.PrivateKey;
@@ -22,126 +21,30 @@ const MinPk = cryptography.bls12381.primitives.MinPk;
 const fd = cryptography.bls12381.dkg.feldman_desmedt;
 const Share = cryptography.bls12381.primitives.group.Share;
 const Summary = cryptography.transcript.Summary;
-const MemoryStorage = runtime.buffer.mocks.Storage;
-const CacheRef = runtime.buffer.paged.CacheRef;
 const gpa = testing.allocator;
 const namespace = "_COMMONWARE_GLUE_DKG_RESHARE_STORE_TEST";
 
-/// Secret material kept in memory (commonware's `MemorySecretStore`), recording every prune.
-pub const MemorySecretStore = struct {
-    gpa: Allocator,
-    shares: std.ArrayList(struct { u64, Share }) = .empty,
-    seeds: std.ArrayList(struct { u64, Summary }) = .empty,
-    dealings: std.ArrayList(struct { u64, P, fd.DealerPrivMsg }) = .empty,
-    prunes: std.ArrayList(u64) = .empty,
+const MemorySecretStore = mocks.MemorySecretStore;
 
-    pub fn init(allocator: Allocator) MemorySecretStore {
-        return .{ .gpa = allocator };
-    }
-
-    pub fn deinit(self: *MemorySecretStore) void {
-        self.shares.deinit(self.gpa);
-        self.seeds.deinit(self.gpa);
-        self.dealings.deinit(self.gpa);
-        self.prunes.deinit(self.gpa);
-    }
-
-    pub fn has_share(self: *const MemorySecretStore, epoch: Epoch) bool {
-        for (self.shares.items) |entry| if (entry[0] == epoch.get()) return true;
-        return false;
-    }
-
-    pub fn put_share(self: *MemorySecretStore, epoch: Epoch, share: Share) !void {
-        for (self.shares.items) |*entry| if (entry[0] == epoch.get()) {
-            entry[1] = share;
-            return;
-        };
-        try self.shares.append(self.gpa, .{ epoch.get(), share });
-    }
-
-    pub fn get_share(self: *MemorySecretStore, epoch: Epoch) !?Share {
-        for (self.shares.items) |entry| if (entry[0] == epoch.get()) return entry[1];
-        return null;
-    }
-
-    pub fn put_seed(self: *MemorySecretStore, epoch: Epoch, seed: Summary) !void {
-        for (self.seeds.items) |*entry| if (entry[0] == epoch.get()) {
-            entry[1] = seed;
-            return;
-        };
-        try self.seeds.append(self.gpa, .{ epoch.get(), seed });
-    }
-
-    pub fn get_seed(self: *MemorySecretStore, epoch: Epoch) !?Summary {
-        for (self.seeds.items) |entry| if (entry[0] == epoch.get()) return entry[1];
-        return null;
-    }
-
-    pub fn put_dealing(
-        self: *MemorySecretStore,
-        epoch: Epoch,
-        dealer: P,
-        private: fd.DealerPrivMsg,
-    ) !void {
-        for (self.dealings.items) |*entry| if (entry[0] == epoch.get() and entry[1].eql(dealer)) {
-            entry[2] = private;
-            return;
-        };
-        try self.dealings.append(self.gpa, .{ epoch.get(), dealer, private });
-    }
-
-    pub fn get_dealing(self: *MemorySecretStore, epoch: Epoch, dealer: P) !?fd.DealerPrivMsg {
-        for (self.dealings.items) |entry| {
-            if (entry[0] == epoch.get() and entry[1].eql(dealer)) return entry[2];
-        }
-        return null;
-    }
-
-    pub fn prune(self: *MemorySecretStore, min: Epoch) !void {
-        try self.prunes.append(self.gpa, min.get());
-        retain(@TypeOf(self.shares.items[0]), &self.shares, min.get());
-        retain(@TypeOf(self.seeds.items[0]), &self.seeds, min.get());
-        retain(@TypeOf(self.dealings.items[0]), &self.dealings, min.get());
-    }
-
-    fn retain(comptime T: type, list: *std.ArrayList(T), min: u64) void {
-        var kept: usize = 0;
-        for (list.items) |entry| {
-            if (entry[0] < min) continue;
-            list.items[kept] = entry;
-            kept += 1;
-        }
-        list.shrinkRetainingCapacity(kept);
-    }
-};
-
-const TestStore = store_mod.Store(MinPk, P, Unit, MemorySecretStore);
+const TestStore = mocks.TestStore;
 const Dealer = store_mod.Dealer(MinPk, PrivateKey);
 const Player = store_mod.Player(MinPk, PrivateKey);
 const Info = fd.Info(MinPk, P);
 
-/// The storage, page cache, and secret store a store reopens over after a restart.
+/// Opens stores over one in-memory storage, as a restarted node would.
 const Harness = struct {
-    storage: MemoryStorage,
-    cache_ref: CacheRef,
+    inner: mocks.StoreHarness,
 
     fn init() !Harness {
-        return .{ .storage = .init(gpa), .cache_ref = try .init(gpa, 1024, 10) };
+        return .{ .inner = try .init(gpa) };
     }
 
     fn deinit(self: *Harness) void {
-        self.cache_ref.deinit();
-        self.storage.deinit();
+        self.inner.deinit();
     }
 
     fn open(self: *Harness, partition: []const u8, secrets: *MemorySecretStore) !TestStore {
-        return TestStore.init(gpa, self.storage.interface(), .{
-            .partition_prefix = partition,
-            .max_participants = 16,
-            .cache_ref = &self.cache_ref,
-            .write_buffer = 1024,
-            .replay_buffer = 1024,
-        }, secrets);
+        return self.inner.open(gpa, partition, secrets);
     }
 };
 

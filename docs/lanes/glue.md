@@ -225,6 +225,18 @@ Owns `src/glue/dkg`. Reference: `glue/src/dkg` (about 24k Rust lines).
   `create_dealer`, `create_player`, `create_player_with_logs`), `Dealer(V, S)` (`handle`,
   `finalize`, `finalized`, `clear_finalized`, `shares_to_distribute`,
   `has_acknowledgement_quorum`), `Player(V, S)` (`handle`), `AckOutcome`.
+- `dkg.reshare.Mailbox(T)` (`T` declares `Block`, `Ack`, `Ancestry`; `init(gpa, io, sender)`,
+  `next_log(height) !?LogReservation`, `epoch_info(ancestry) !EpochInfoResponse`,
+  `report(Update)`), `Message(T)`, `LogReservation(T)` (`take_payload`, `included`, `deinit`
+  releases the log), `EpochInfoResponse(Payload)` (`available`/`unavailable`), `Update(B, A)`
+  (marshal's `tip`/`block` report, until marshal exports one). `dkg.reshare.Metrics(P)`
+  (`init(gpa, scope)`, `reconcile`, `set_epoch`, `set_phase`, `record_share`, `record_ack`,
+  `record_success`), `Phase`.
+- `dkg.reshare.actor.setup`: `FinalizedTip(D)`, `startup(B, processed, floor)`,
+  `state_sync_skips_inclusion_prefix`, `recovered_share(V, store, key, info)`,
+  `register_and_mark(registrar, io, fence, epoch, info)`, `dealer_for_phase`.
+- `dkg/tests/mocks.zig` (test fixtures): `StoreHarness`, `TestStore`, `MockBlock(Dir)`/`TestBlock`, `EncodedPayload`,
+  `genesis_block`, `child`, `MemorySecretStore`, `StaticParticipants`, `MockConsumer`.
 
 ### Decisions
 - Rust's async trait methods block on the runtime's `std.Io` (as in `consensus.traits`).
@@ -236,12 +248,20 @@ Owns `src/glue/dkg`. Reference: `glue/src/dkg` (about 24k Rust lines).
 - The reshare `Store` takes the secret store by pointer; its methods may fail (`!void`,
   `!?T`), and storage failures are errors where commonware panics. Dealers and players
   borrow the round's `Info`.
+- A reshare `next_log` message carries no sender of the actor's mailbox: the actor answers
+  with the payload and `Mailbox.next_log` wraps it in a `LogReservation` with its own sender.
+  The overflow policy runs under the mailbox lock and could not drop a message owning a
+  sender. A canceled `next_log` closes its responder and releases a log that already arrived.
+- Reshare metrics: the telemetry family has no `clear`, so `Metrics` tracks the peers each
+  family exports and `reconcile` removes those that left their role.
 
 ### Backlog
 - [x] types (with conformance hashes), limits, fence, network.
 - [x] state_sync (`Plan`, `StateSync` codec and conformance).
 - [x] reshare: store (journal `Event` codec and conformance) with its 6 tests.
-- [ ] reshare: mailbox, actor (setup, dealing, inclusion, follower, dkg), application, metrics.
+- [x] reshare: mailbox and metrics with their tests; the shared test mocks.
+- [x] reshare actor: setup's helpers with commonware's 5 setup tests.
+- [ ] reshare: actor (setup, dealing, inclusion, follower, dkg), application.
 - [ ] bootstrap, probe (wire with conformance, discovery, service), orchestrator.
 - [ ] tests: the dkg and reshare harnesses, properties, and mocks; lookup's peer-activation
   test.
@@ -252,3 +272,5 @@ Owns `src/glue/dkg`. Reference: `glue/src/dkg` (about 24k Rust lines).
 - 2026-11-16: state_sync's `StateSync` and `Plan` with commonware's 8 tests; both `StateSync`
   conformance hashes match.
 - 2026-11-16: reshare's recovery store with commonware's 6 tests; the `Event` hash matches.
+- 2026-11-16: reshare mailbox and metrics with commonware's tests; shared DKG test mocks;
+  setup's helpers with its 5 tests.

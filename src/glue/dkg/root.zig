@@ -95,4 +95,5 @@ pub fn assert_participants_provider(comptime P: type) void {
 test {
     std.testing.refAllDecls(@This());
     _ = @import("conformance_test.zig");
+    _ = @import("tests/mocks.zig");
 }
