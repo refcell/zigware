@@ -12,6 +12,7 @@ Read this whole file before you change anything. These rules are not optional.
 
 1. **Push straight to `main`.** No branches on the remote, no pull requests. Publish with:
    ```sh
+   set -o pipefail                    # so `zig build test | tail` stops on failure
    git fetch origin main && git rebase origin/main
    zig build test && just tidy        # must pass
    git push origin HEAD:main
