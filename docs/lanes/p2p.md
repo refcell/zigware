@@ -193,8 +193,11 @@ handshake and the runtime's network, which the actor-stream and runtime lanes ar
 - [x] simulated: split senders and receivers (`SplitTarget`, `SplitOrigin`, forwarders,
   routers) with commonware's split tests.
 - [x] simulated: metrics (`messages_sent`, `messages_received`) and tracing events.
-- [ ] simulated: remaining mod.rs tests (peer-set subscriptions, socket manager, clean
-  shutdown, duplicate channel).
+- [x] simulated: duplicate channel, link before registration, register and link, max_size
+  on the payload, FIFO burst, peer-set subscriptions (four tests), clean shutdown (25 seeds).
+- [ ] simulated: remaining mod.rs tests (socket manager, dynamic peers, message ordering,
+  overlapping primary/secondary, broadcast transmit latency, max_peers_per_set counting,
+  split-peer seeding).
 - [x] authenticated: router, relay, throttle, dialing, channels.
 - [x] discovery: types (conformance), tracker record/bit set/directory, tracker, peer
   connections, dialer, listener, Network/Config/Oracle, connectivity over the deterministic
@@ -261,3 +264,5 @@ handshake and the runtime's network, which the actor-stream and runtime lanes ar
 - 2026-11-16: discovery tracing events at commonware's sites, with Collector tests.
 - 2026-11-16: simulated metrics (messages sent and received per link and channel) and
   tracing events.
+- 2026-11-16: simulated channel, link, payload-limit, burst-order, subscription, and
+  clean-shutdown tests.
