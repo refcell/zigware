@@ -4,14 +4,19 @@
 //! per item that declares its decompressed size. zigware has no C dependencies, so:
 //!
 //! - decompression uses `std.compress.zstd` and reads any frame libzstd writes;
-//! - compression writes valid frames of raw and RLE blocks with the same header fields
-//!   libzstd writes (content size, no checksum, no dictionary). commonware reads them, but the
-//!   bytes differ from libzstd's and the level is ignored, so compressed journals hold the
-//!   same items in more bytes. Uncompressed journals are byte-identical.
+//! - compression writes frames with the same header fields libzstd writes (content size, no
+//!   checksum, no dictionary). Each block is compressed (LZ77 sequences coded with FSE, Huffman
+//!   literals; see `zstd/`) when that is smaller, else stored raw or RLE. The bytes differ
+//!   from libzstd's and the level is ignored; commonware never hashes compressed output, and
+//!   any zstd decoder reads the frames. Uncompressed journals are byte-identical.
 
 const std = @import("std");
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
+const block = @import("zstd/block.zig");
+
+/// Sample inputs for tests and benchmarks.
+pub const corpus = @import("zstd/corpus.zig");
 
 /// Zstandard frame magic number, little-endian on disk.
 pub const magic: u32 = 0xFD2FB528;
@@ -24,6 +29,10 @@ const window_descriptor_128k: u8 = 7 << 3;
 
 const block_type_raw: u24 = 0;
 const block_type_rle: u24 = 1;
+const block_type_compressed: u24 = 2;
+
+/// Inputs shorter than this are stored raw: a compressed block would not pay for itself.
+const compress_len_min = 16;
 
 comptime {
     assert(block_size_max == std.compress.zstd.block_size_max);
@@ -51,22 +60,45 @@ pub fn compress_bound(len: usize) usize {
     return header_size(len) + blocks * 3 + len;
 }
 
-/// Append one zstd frame holding `data` to `out`; returns the frame length.
+/// Append one zstd frame holding `data` to `out`; returns the frame.
 pub fn compress_into(
     gpa: Allocator,
     data: []const u8,
     out: *std.ArrayList(u8),
 ) Allocator.Error![]u8 {
+    return encode_into(gpa, data, out, .compress);
+}
+
+/// How `encode_into` writes blocks.
+pub const Mode = enum {
+    /// Raw and RLE blocks only (the encoder before match finding; kept for comparison).
+    store,
+    /// Compressed blocks wherever they are smaller.
+    compress,
+};
+
+/// Append one zstd frame holding `data` to `out` in `mode`; returns the frame.
+pub fn encode_into(
+    gpa: Allocator,
+    data: []const u8,
+    out: *std.ArrayList(u8),
+    mode: Mode,
+) Allocator.Error![]u8 {
     const start = out.items.len;
     try out.ensureUnusedCapacity(gpa, compress_bound(data.len));
+    const context: ?*block.Context = if (mode == .compress and data.len >= compress_len_min)
+        try block.Context.create(gpa, data.len)
+    else
+        null;
+    defer if (context) |c| c.destroy(gpa);
     write_header(data.len, out);
 
     var offset: usize = 0;
     var first = true;
     while (first or offset < data.len) : (first = false) {
-        const block = data[offset..@min(data.len, offset + block_size_max)];
-        offset += block.len;
-        write_block(block, offset == data.len, out);
+        const end = @min(data.len, offset + block_size_max);
+        write_block(context, data, offset, end, out);
+        offset = end;
     }
     assert(offset == data.len);
     assert(out.items.len - start <= compress_bound(data.len));
@@ -98,16 +130,42 @@ fn write_header(len: usize, out: *std.ArrayList(u8)) void {
     out.appendSliceAssumeCapacity(header[0..size]);
 }
 
-fn write_block(block: []const u8, last: bool, out: *std.ArrayList(u8)) void {
-    assert(block.len <= block_size_max);
-    const rle = block.len > 1 and std.mem.allEqual(u8, block, block[0]);
-    const block_type = if (rle) block_type_rle else block_type_raw;
+/// Writes block `data[start..end]` as RLE, compressed, or raw, whichever is smallest.
+fn write_block(
+    context: ?*block.Context,
+    data: []const u8,
+    start: usize,
+    end: usize,
+    out: *std.ArrayList(u8),
+) void {
+    const content = data[start..end];
+    assert(content.len <= block_size_max);
+    const last = end == data.len;
+    if (content.len > 1 and std.mem.allEqual(u8, content, content[0])) {
+        write_block_header(last, block_type_rle, content.len, out);
+        out.appendAssumeCapacity(content[0]);
+        return;
+    }
+    if (context) |c| {
+        if (c.compress(data, start, end)) |compressed| {
+            assert(compressed.len < content.len);
+            write_block_header(last, block_type_compressed, compressed.len, out);
+            out.appendSliceAssumeCapacity(compressed);
+            return;
+        }
+    }
+    write_block_header(last, block_type_raw, content.len, out);
+    out.appendSliceAssumeCapacity(content);
+}
+
+fn write_block_header(last: bool, block_type: u24, size: usize, out: *std.ArrayList(u8)) void {
+    assert(block_type <= block_type_compressed);
+    assert(size <= block_size_max);
     const header: u24 = @as(u24, @intFromBool(last)) | (block_type << 1) |
-        (@as(u24, @intCast(block.len)) << 3);
+        (@as(u24, @intCast(size)) << 3);
     var bytes: [3]u8 = undefined;
     std.mem.writeInt(u24, &bytes, header, .little);
     out.appendSliceAssumeCapacity(&bytes);
-    if (rle) out.appendAssumeCapacity(block[0]) else out.appendSliceAssumeCapacity(block);
 }
 
 /// The decompressed size a frame declares, or null if the header is malformed or omits it
@@ -163,6 +221,15 @@ pub fn decompress(gpa: Allocator, compressed: []const u8) DecompressError![]u8 {
 }
 
 const testing = std.testing;
+
+test {
+    _ = @import("zstd/bits.zig");
+    _ = @import("zstd/fse.zig");
+    _ = @import("zstd/huffman.zig");
+    _ = @import("zstd/match.zig");
+    _ = @import("zstd_test.zig");
+    _ = block;
+}
 
 test "compress round trips through the std decoder" {
     const gpa = testing.allocator;

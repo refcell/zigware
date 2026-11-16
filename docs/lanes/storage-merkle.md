@@ -61,6 +61,14 @@ variants need `runtime` storage; do them after its interface lands.
   ordered, immutable), merkle_family_operations, merkle_range_proof, merkle_proof_store,
   merkle_batch_operations, merkle_full_operations, merkle_full_recovery, and the Merkle half of
   proofs_malleability (its BMT half goes with bmt, now in the coding lane).
+- [x] journal/zstd (handed over from storage-journal): a real compressor for
+  `src/storage/journal/zstd.zig` (LZ match finding, FSE-coded sequences, Huffman literals) whose
+  frames `std.compress.zstd` reads, with a std-decoder roundtrip fuzz and a ratio/throughput
+  bench against the raw-block path. Byte identity with libzstd is not required.
+- [ ] Storage fuzz targets `journal_fixed_operations` and `queue_operations` (handed over from
+  storage-journal).
+- [ ] Partitioned index `new_range`/`install_range`, if storage-qmdb asks for it.
+
 ## Log
 - translator: Rust's `Translator`/`BuildHasher` traits become a comptime interface
   (`Key`, `ordered`, `transform`, `hash`, `order`, `eql`; `translator.check`). `Hashed`
@@ -162,3 +170,14 @@ variants need `runtime` storage; do them after its interface lands.
   pruning boundary as a big-endian leaf location). Mutation checks: dropping the pruning-boundary
   pins after a flush, skipping orphan-leaf replay, and skipping the journal prune on reopen each
   fail a ported test.
+- journal/zstd: `compress_into` now writes compressed blocks (`zstd/match.zig`: hash chain four
+  deep, repeat offsets, lazy step below 32 bytes; `zstd/block.zig`: predefined, RLE, or fresh
+  FSE tables per code by estimated bits; `zstd/huffman.zig`: package-merge codes of at most 11
+  bits, direct or FSE weights, one or four streams), falling back to raw or RLE when that is
+  smaller. `encode_into(.., .store)` keeps the old raw-block path for the bench. On
+  `zstd.corpus` text and records it writes 29.2% and 12.8% where `zstd -1` writes 30.0% and 13.0%
+  (`zstd -3`: 28.1%), at about 80 and 190 MB/s on the loaded desktop (libzstd -1: 320 and 900).
+  Deeper chains bought under 1% ratio for twice the time. The frames are checked against
+  `std.compress.zstd` (round-trip fuzz) and were checked once against libzstd 1.5's `zstd -d`
+  on 60 inputs up to 400 KB. Planted bugs (a wrong repeat-offset code, swapped initial FSE
+  states) fail the seeded fuzz at iterations 3 and 0.
