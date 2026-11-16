@@ -6,6 +6,8 @@ const std = @import("std");
 pub const variant = @import("variant.zig");
 pub const Standard = variant.Standard;
 pub const validation = @import("validation.zig");
+pub const inline_wrapper = @import("inline.zig");
+pub const Inline = inline_wrapper.Inline;
 
 test {
     std.testing.refAllDecls(@This());

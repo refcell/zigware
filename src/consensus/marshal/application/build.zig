@@ -69,7 +69,15 @@ fn unless_closed(
     select.concurrent(.closed, oneshot.Sender(T).closed, .{output.*}) catch {
         return error.Canceled;
     };
-    select.concurrent(.done, function, args) catch {
+    // A runtime context and an ancestor stream outgrow a task closure (1 KiB on the
+    // deterministic runtime), so the task reads `args` through one pointer; every path below
+    // drains the select before this frame returns.
+    const Call = struct {
+        fn run(call_args: *const @TypeOf(args)) Return(function) {
+            return @call(.auto, function, call_args.*);
+        }
+    };
+    select.concurrent(.done, Call.run, .{&args}) catch {
         select.cancelDiscard();
         return error.Canceled;
     };

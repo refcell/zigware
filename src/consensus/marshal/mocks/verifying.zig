@@ -3,7 +3,10 @@
 //!
 //! Each follows `application.build`'s contract: `propose(*A, ctx, consensus_context,
 //! ancestry) !?Digested(Block)`, optionally `prepare(...)`, and `verify(*A, ctx,
-//! consensus_context, ancestry) !bool`. They own the ancestry they are given and free it. Like
+//! consensus_context, ancestry) !bool`. The build tasks run these methods as `std.Io` tasks,
+//! which need concrete parameter types, so each mock takes the runtime context `Ctx`, the
+//! consensus context `Context`, and the `Ancestry` type it is handed (commonware's methods are
+//! generic over the ancestry instead). They own the ancestry they are given and free it. Like
 //! commonware's `Clone` apps, copies share one state: the gates and the observation log live
 //! behind pointers the test owns.
 
@@ -26,6 +29,44 @@ fn pending(io: Io) Io.Cancelable!noreturn {
 fn free_ancestry(ancestry: anytype) void {
     var owned = ancestry;
     owned.deinit();
+}
+
+/// A `MockVerifyingApp` proposal: hold at its gate, then its configured block, if any.
+fn propose_mock(
+    app: anytype,
+    io: Io,
+    ancestry: anytype,
+) !?broadcast.Digested(@TypeOf(app.*).Block) {
+    const Block = @TypeOf(app.*).Block;
+    free_ancestry(ancestry);
+    if (app.proposal_gate) |gate| try gate.hold(io);
+    const block = app.propose_result orelse return null;
+    return try broadcast.Digested(Block).compute(app.gpa, block);
+}
+
+/// A `MockVerifyingApp` verdict: its result, unless `reject` rejects the first block.
+fn verify_mock(app: anytype, ancestry: anytype) bool {
+    var stream = ancestry;
+    defer stream.deinit();
+    const reject = app.reject orelse return app.verify_result;
+    const block = stream.peek() orelse return app.verify_result;
+    return !reject(block.inner()) and app.verify_result;
+}
+
+/// `block` handed off under `decision` (vote or stage).
+fn handoff_of(decision: Handoff(void), block: anytype) Handoff(@TypeOf(block)) {
+    return switch (decision) {
+        .vote => .{ .vote = block },
+        .stage => .{ .stage = block },
+        .wait => unreachable,
+    };
+}
+
+/// `app` with field `name` set to `value`.
+fn with(app: anytype, comptime name: []const u8, value: anytype) @TypeOf(app) {
+    var result = app;
+    @field(result, name) = value;
+    return result;
 }
 
 /// Signals that the next proposal started (`started`), then holds it until it is dropped
@@ -53,6 +94,19 @@ pub const ProposalGate = struct {
         };
     }
 
+    /// Holds the first proposal that reaches the gate until it is canceled; later ones pass.
+    fn hold(gate: *ProposalGate, io: Io) Io.Cancelable!void {
+        const started = gate.started orelse return;
+        var dropped = gate.dropped.?;
+        gate.started = null;
+        gate.dropped = null;
+        // Closes when this proposal is dropped (canceled).
+        defer dropped.deinit();
+        var sender = started;
+        sender.send({}) catch {};
+        try pending(io);
+    }
+
     /// Releases senders the application never took.
     pub fn deinit(gate: *ProposalGate) void {
         if (gate.started) |*sender| sender.deinit();
@@ -64,7 +118,20 @@ pub const ProposalGate = struct {
 /// Proposes `propose_result` (when set), answers `prepare` with `handoff`, and verifies with
 /// `verify_result` unless `reject` rejects the block under verification (commonware
 /// `MockVerifyingApp`).
-pub fn MockVerifyingApp(comptime B: type) type {
+pub fn MockVerifyingApp(
+    comptime B: type,
+    comptime Ctx: type,
+    comptime Context: type,
+    comptime Ancestry: type,
+) type {
+    return MockVerifyingAppOver(.{ B, Ctx, Context, Ancestry });
+}
+
+fn MockVerifyingAppOver(comptime T: [4]type) type {
+    const B = T[0];
+    const Ctx = T[1];
+    const Context = T[2];
+    const Ancestry = T[3];
     return struct {
         const Self = @This();
         pub const Block = B;
@@ -82,84 +149,55 @@ pub fn MockVerifyingApp(comptime B: type) type {
         }
 
         pub fn with_verify_result(gpa: Allocator, verify_result: bool) Self {
-            return .{ .gpa = gpa, .verify_result = verify_result };
+            return with(init(gpa), "verify_result", verify_result);
         }
 
         pub fn with_propose_result(self: Self, block: B) Self {
-            var app = self;
-            app.propose_result = block;
-            return app;
+            return with(self, "propose_result", block);
         }
 
         pub fn with_reject(self: Self, reject: *const fn (*const B) bool) Self {
-            var app = self;
-            app.reject = reject;
-            return app;
+            return with(self, "reject", reject);
         }
 
         pub fn with_handoff(self: Self, handoff: Handoff(void)) Self {
-            var app = self;
-            app.handoff = handoff;
-            return app;
+            return with(self, "handoff", handoff);
         }
 
         pub fn with_proposal_gate(self: Self, gate: *ProposalGate) Self {
-            var app = self;
-            app.proposal_gate = gate;
-            return app;
+            return with(self, "proposal_gate", gate);
         }
 
         pub fn prepare(
             self: *Self,
-            ctx: anytype,
-            context: anytype,
-            ancestry: anytype,
-        ) !Handoff(broadcast.Digested(B)) {
+            ctx: Ctx,
+            context: Context,
+            ancestry: Ancestry,
+        ) anyerror!Handoff(broadcast.Digested(B)) {
             if (self.handoff.is_wait()) {
                 free_ancestry(ancestry);
                 return .wait;
             }
             const block = try self.propose(ctx, context, ancestry) orelse return .wait;
-            return switch (self.handoff) {
-                .vote => .{ .vote = block },
-                .stage => .{ .stage = block },
-                .wait => unreachable,
-            };
+            return handoff_of(self.handoff, block);
         }
 
         pub fn propose(
             self: *Self,
-            ctx: anytype,
-            _: anytype,
-            ancestry: anytype,
-        ) !?broadcast.Digested(B) {
-            free_ancestry(ancestry);
-            if (self.proposal_gate) |gate| {
-                // Take the gate once: later proposals pass.
-                if (gate.started) |started| {
-                    var dropped = gate.dropped.?;
-                    gate.started = null;
-                    gate.dropped = null;
-                    // Closes when this proposal is dropped (canceled).
-                    defer dropped.deinit();
-                    var sender = started;
-                    sender.send({}) catch {};
-                    try pending(ctx.io());
-                }
-            }
-            const block = self.propose_result orelse return null;
-            return try broadcast.Digested(B).compute(self.gpa, block);
+            ctx: Ctx,
+            _: Context,
+            ancestry: Ancestry,
+        ) anyerror!?broadcast.Digested(B) {
+            return propose_mock(self, ctx.io(), ancestry);
         }
 
-        pub fn verify(self: *Self, _: anytype, _: anytype, ancestry: anytype) !bool {
-            var stream = ancestry;
-            defer stream.deinit();
-            if (self.reject) |reject| {
-                if (stream.peek()) |block| {
-                    if (reject(block.inner())) return false;
-                }
-            }
-            return self.verify_result;
+        pub fn verify(
+            self: *Self,
+            _: Ctx,
+            _: Context,
+            ancestry: Ancestry,
+        ) anyerror!bool {
+            return verify_mock(self, ancestry);
         }
     };
 }
@@ -198,7 +236,20 @@ pub const Gated = struct {
 
 /// Proposes nothing; its first verification signals `started` and waits for `release`, then
 /// verifies (commonware `GatedVerifyingApp`).
-pub fn GatedVerifyingApp(comptime B: type) type {
+pub fn GatedVerifyingApp(
+    comptime B: type,
+    comptime Ctx: type,
+    comptime Context: type,
+    comptime Ancestry: type,
+) type {
+    return GatedVerifyingAppOver(.{ B, Ctx, Context, Ancestry });
+}
+
+fn GatedVerifyingAppOver(comptime T: [4]type) type {
+    const B = T[0];
+    const Ctx = T[1];
+    const Context = T[2];
+    const Ancestry = T[3];
     return struct {
         const Self = @This();
         pub const Block = B;
@@ -207,15 +258,20 @@ pub fn GatedVerifyingApp(comptime B: type) type {
 
         pub fn propose(
             _: *Self,
-            _: anytype,
-            _: anytype,
-            ancestry: anytype,
-        ) !?broadcast.Digested(B) {
+            _: Ctx,
+            _: Context,
+            ancestry: Ancestry,
+        ) anyerror!?broadcast.Digested(B) {
             free_ancestry(ancestry);
             return null;
         }
 
-        pub fn verify(self: *Self, _: anytype, _: anytype, ancestry: anytype) !bool {
+        pub fn verify(
+            self: *Self,
+            _: Ctx,
+            _: Context,
+            ancestry: Ancestry,
+        ) anyerror!bool {
             free_ancestry(ancestry);
             if (self.state.started) |started| {
                 self.state.started = null;
@@ -270,7 +326,20 @@ pub fn Observed(comptime D: type) type {
 
 /// Proposes nothing; each verification records that it started, then waits until it is
 /// canceled and records that (commonware `RecordingVerifyingApp`).
-pub fn RecordingVerifyingApp(comptime B: type) type {
+pub fn RecordingVerifyingApp(
+    comptime B: type,
+    comptime Ctx: type,
+    comptime Context: type,
+    comptime Ancestry: type,
+) type {
+    return RecordingVerifyingAppOver(.{ B, Ctx, Context, Ancestry });
+}
+
+fn RecordingVerifyingAppOver(comptime T: [4]type) type {
+    const B = T[0];
+    const Ctx = T[1];
+    const Context = T[2];
+    const Ancestry = T[3];
     return struct {
         const Self = @This();
         pub const Block = B;
@@ -279,15 +348,20 @@ pub fn RecordingVerifyingApp(comptime B: type) type {
 
         pub fn propose(
             _: *Self,
-            _: anytype,
-            _: anytype,
-            ancestry: anytype,
-        ) !?broadcast.Digested(B) {
+            _: Ctx,
+            _: Context,
+            ancestry: Ancestry,
+        ) anyerror!?broadcast.Digested(B) {
             free_ancestry(ancestry);
             return null;
         }
 
-        pub fn verify(self: *Self, ctx: anytype, _: anytype, ancestry: anytype) !bool {
+        pub fn verify(
+            self: *Self,
+            ctx: Ctx,
+            _: Context,
+            ancestry: Ancestry,
+        ) anyerror!bool {
             var stream = ancestry;
             const digest = stream.peek().?.digest();
             stream.deinit();

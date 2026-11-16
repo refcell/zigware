@@ -12,6 +12,8 @@ const Sha256 = cryptography.Sha256;
 const B = block_mod.EmptyBlock(Sha256);
 const Ctx = runtime.deterministic.Context;
 const Digested = @import("broadcast").Digested(B);
+const Ancestry = ancestry.Bounded(B);
+const Mock = verifying.MockVerifyingApp(B, Ctx, void, Ancestry);
 const gpa = testing.allocator;
 
 fn block_at(height: u64) B {
@@ -35,10 +37,10 @@ fn rejects_odd(block: *const B) bool {
 }
 
 fn mock_verify(ctx: Ctx) !void {
-    var app = verifying.MockVerifyingApp(B).init(gpa).with_reject(&rejects_odd);
+    var app = Mock.init(gpa).with_reject(&rejects_odd);
     try testing.expect(try app.verify(ctx, {}, try ancestry_at(2)));
     try testing.expect(!try app.verify(ctx, {}, try ancestry_at(3)));
-    var failing = verifying.MockVerifyingApp(B).with_verify_result(gpa, false);
+    var failing = Mock.with_verify_result(gpa, false);
     try testing.expect(!try failing.verify(ctx, {}, try ancestry_at(2)));
 }
 
@@ -47,11 +49,11 @@ test "the mock app verifies with its result unless it rejects the block" {
 }
 
 fn mock_propose(ctx: Ctx) !void {
-    var empty = verifying.MockVerifyingApp(B).init(gpa);
+    var empty = Mock.init(gpa);
     try testing.expectEqual(null, try empty.propose(ctx, {}, try ancestry_at(1)));
     try testing.expect((try empty.prepare(ctx, {}, try ancestry_at(1))).is_wait());
     const built = block_at(5);
-    var app = verifying.MockVerifyingApp(B).init(gpa).with_propose_result(built);
+    var app = Mock.init(gpa).with_propose_result(built);
     var proposed = (try app.propose(ctx, {}, try ancestry_at(4))).?;
     defer proposed.deinit();
     try testing.expect(proposed.digest().eql(built.digest()));
@@ -68,7 +70,7 @@ test "the mock app proposes its block and hands it off as configured" {
     try run(mock_propose);
 }
 
-const Proposer = verifying.MockVerifyingApp(B);
+const Proposer = Mock;
 
 fn propose_task(app: *Proposer, ctx: Ctx) anyerror!?Digested {
     return app.propose(ctx, {}, try ancestry_at(1));
@@ -94,7 +96,7 @@ test "a proposal gate signals the start and the drop of one proposal" {
     try run(gated_proposal);
 }
 
-const GatedApp = verifying.GatedVerifyingApp(B);
+const GatedApp = verifying.GatedVerifyingApp(B, Ctx, void, Ancestry);
 
 fn verify_task(app: *GatedApp, ctx: Ctx) anyerror!bool {
     return app.verify(ctx, {}, try ancestry_at(1));
@@ -117,7 +119,7 @@ test "the gated app holds its first verification until released" {
     try run(gated_verify);
 }
 
-const Recorder = verifying.RecordingVerifyingApp(B);
+const Recorder = verifying.RecordingVerifyingApp(B, Ctx, void, Ancestry);
 
 fn record_task(app: *Recorder, ctx: Ctx, height: u64) anyerror!bool {
     return app.verify(ctx, {}, try ancestry_at(height));
