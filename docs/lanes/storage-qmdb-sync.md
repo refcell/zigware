@@ -20,9 +20,12 @@ it comes first once `any` lands.
 - [x] current's proof codecs (`OpsRootWitness`, `RangeProof`, constant and dynamic
   `OperationProof`, ordered and unordered `KeyValueProof`, ordered `ExclusionProof`) with
   their 20 codec conformance hashes and commonware's codec tests.
-- [ ] current's grafting (`height`, grafted leaves, `required_chunks`) and proof
-  verification (`RangeProof` reconstruction, `OperationProof`/`KeyValueProof`/
-  `ExclusionProof` verify) with commonware's verification tests.
+- [x] current's grafting (`height`, `graftable_chunks`, grafted leaves, position conversions,
+  `GraftedHasher`, `Verifier`), canonical-root helpers (graft roots, pending and partial
+  chunks, sync boundary, grafted root, ops root witness, grafted tree rebuild), the grafted
+  storage view with `build_range_proof`, and range and operation proof verification, with
+  commonware's grafting, partial-chunk, and combine-roots golden tests plus build-then-verify
+  and tamper tests over MMR and MMB at N = 1 and 32.
 - [ ] current (ordered and unordered, db, batch, sync) once `any` lands.
 - [ ] sync engine (with `requests`), database, journal, source, harness; per-variant sync glue
   (`keyless/sync.zig`, `immutable/sync.zig`, `any/sync/`), which this lane owns.
@@ -64,7 +67,19 @@ it comes first once `any` lands.
   `current.ordered.proof`: `KeyValueProof(F, K, D, chunk)`, `ExclusionProof(F, K, E, D,
   chunk)` (`key_value`/`commit`). `current.unordered.proof`: `KeyValueProof(F, D, chunk)`.
 
+- `storage.qmdb.current`: `grafting` (`height(N)`, `graftable_chunks`, `grafted_leaf_digest`,
+  `ops_to_grafted_pos`/`grafted_to_ops_pos`, `GraftedHasher(F, H)`, `Verifier(F, H)`),
+  `canonical` (`GraftRoots(D)`, `pending_chunk`, `partial_chunk`, `sync_boundary`,
+  `compute_grafted_root`, `compute_ops_root_witness`, `build_grafted_tree`), `grafted`
+  (`Storage(F, H, Grafted, Ops)`, `build_range_proof`), `verification` (`reconstruct_root`,
+  `verify_range(F, H, proof, start, encoded_ops, chunks, chunk_size, root)`,
+  `verify_operation(F, H, operation_proof, encoded_op, root)`).
+
 ## Decisions
+- Proof verification takes operations already encoded (`[]const []const u8`) instead of
+  commonware's `impl Encode` iterator, so it needs no codec for the operation type; callers
+  encode with `codec.encode`. `verify_range` is commonware's `verify_with_chunk_size` (chunks
+  as slices); the const-`N` `verify` is the same call with `N`.
 - commonware's `Graftable::PendingChunk<D>` (`Option<D>` for MMB, `Unused` for MMR) is
   `current.proof.Pending(F, D)`: `?D` for MMB and `void` (encoded as nothing) for MMR, so
   merkle needs no family hook. `pending_from` is the `TryFrom<Option<D>>` conversion.
@@ -83,3 +98,6 @@ it comes first once `any` lands.
 ## Log
 - 2026-11-16: sync wire types, errors, gaps, and metrics with their conformance hashes.
 - 2026-11-16: current's proof codecs with their 20 conformance hashes.
+
+- 2026-11-16: current's grafting and canonical-root helpers; grafted range proofs and their
+  verification.

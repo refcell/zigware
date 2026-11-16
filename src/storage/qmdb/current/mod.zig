@@ -3,8 +3,10 @@
 //! operation is the current value of its key. So far: grafting and the proof codecs.
 
 pub const canonical = @import("canonical.zig");
+pub const grafted = @import("grafted.zig");
 pub const grafting = @import("grafting.zig");
 pub const proof = @import("proof.zig");
+pub const verification = @import("verification.zig");
 pub const OpsRootWitness = proof.OpsRootWitness;
 pub const RangeProof = proof.RangeProof;
 pub const OperationProof = proof.OperationProof;
@@ -19,4 +21,5 @@ test {
     _ = @import("canonical_test.zig");
     _ = @import("grafting_test.zig");
     _ = @import("proof_test.zig");
+    _ = @import("verification_test.zig");
 }
