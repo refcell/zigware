@@ -334,3 +334,232 @@ test "bls12381 fuzz: tle" {
 test "bls12381 fuzz: tle (coverage-guided)" {
     try testing.fuzz({}, math.testing.smith_body(void, tle_body), .{});
 }
+
+const threshold = primitives.ops.threshold;
+const sharing_mod = primitives.sharing;
+const Share = primitives.group.Share;
+const Participant = utils.Participant;
+
+/// commonware `Sharing::arbitrary`: a total in `1..=100`, a mode, and a seed for a random
+/// polynomial of degree `quorum(total) - 1`.
+fn arbitrary_sharing(comptime V: type, gpa: Allocator, u: *Unstructured) !sharing_mod.Sharing(V) {
+    const total = u.int_in_range(u32, 1, 100);
+    const mode = try u.arbitrary(sharing_mod.Mode);
+    var rng = utils.rng.TestRng.init(try u.arbitrary(u64));
+    var private = try sharing_mod.Poly(primitives.group.Scalar).random(
+        gpa,
+        &rng,
+        utils.N3f1.quorum(total) - 1,
+    );
+    defer private.deinit(gpa);
+    var committed = try math.poly.commit(gpa, V.Public, private);
+    errdefer committed.deinit(gpa);
+    return sharing_mod.Sharing(V).init(gpa, mode, total, committed);
+}
+
+/// commonware `common::arbitrary_share`: an index in `1..=100` and an arbitrary key.
+fn arbitrary_share(u: *Unstructured) !Share {
+    const index = Participant.init(u.int_in_range(u32, 1, 100));
+    return Share.init(index, try u.arbitrary(Private));
+}
+
+fn arbitrary_partials(
+    comptime V: type,
+    gpa: Allocator,
+    u: *Unstructured,
+    max: usize,
+    random_index: bool,
+) ![]primitives.variant.PartialSignature(V) {
+    const count = u.int_in_range(usize, 0, max);
+    const partials = try gpa.alloc(primitives.variant.PartialSignature(V), count);
+    errdefer gpa.free(partials);
+    for (partials) |*partial| {
+        const index = if (random_index)
+            Participant.init(u.int_in_range(u32, 1, 100))
+        else
+            try u.arbitrary(Participant);
+        partial.* = .{ .index = index, .value = try arbitrary_point(V.Signature, u) };
+    }
+    return partials;
+}
+
+const ThresholdKind = enum {
+    sign_pop,
+    verify_pop,
+    same_signer,
+    same_message,
+    recover,
+    recover_multiple,
+    recover_pair,
+    sign_message,
+};
+
+/// One `bls12381_threshold_operations` operation in variant `V`; like commonware's target,
+/// it checks only that the operations run.
+fn threshold_operation(comptime V: type, kind: ThresholdKind, u: *Unstructured) !void {
+    const gpa = testing.allocator;
+    switch (kind) {
+        .sign_pop, .verify_pop => {
+            var public = try arbitrary_sharing(V, gpa, u);
+            defer public.deinit(gpa);
+            if (kind == .sign_pop) {
+                const share = try arbitrary_share(u);
+                const namespace = try arbitrary_bytes(u, 0, 50);
+                if (share.index.get() > public.required()) return;
+                _ = threshold.sign_proof_of_possession(V, public, share, namespace);
+            } else {
+                const namespace = try arbitrary_bytes(u, 0, 50);
+                const partial: primitives.variant.PartialSignature(V) = .{
+                    .index = try u.arbitrary(Participant),
+                    .value = try arbitrary_point(V.Signature, u),
+                };
+                if (partial.index.get() > public.required()) return;
+                threshold.verify_proof_of_possession(V, public, namespace, partial) catch {};
+            }
+        },
+        .same_signer => try threshold_same_signer(V, gpa, u),
+        .same_message => try threshold_same_message(V, gpa, u),
+        .recover, .recover_multiple, .recover_pair => try threshold_recover(V, kind, gpa, u),
+        .sign_message => {
+            const share = try arbitrary_share(u);
+            const namespace = try arbitrary_bytes(u, 0, 50);
+            _ = threshold.sign_message(V, share, namespace, try arbitrary_bytes(u, 0, 100));
+        },
+    }
+}
+
+fn threshold_same_signer(comptime V: type, gpa: Allocator, u: *Unstructured) !void {
+    const messages = try arbitrary_messages(gpa, u, 0, 10);
+    defer gpa.free(messages);
+    const entries = try gpa.alloc(threshold.SignerEntry(V), messages.len);
+    defer gpa.free(entries);
+    for (entries, messages) |*entry, item| {
+        entry.* = .{
+            .namespace = item.namespace,
+            .message = item.message,
+            .partial = .{ .index = undefined, .value = try arbitrary_point(V.Signature, u) },
+        };
+    }
+    var public = try arbitrary_sharing(V, gpa, u);
+    defer public.deinit(gpa);
+    const index = Participant.init(u.int_in_range(u32, 1, 100));
+    if (index.get() > public.required() or entries.len == 0) return;
+    // As in commonware, entry `i` claims index `index + i`.
+    for (entries, 0..) |*entry, i| entry.partial.index = .from_usize(index.get() + i);
+    var rng = utils.test_rng();
+    threshold.batch_verify_same_signer(V, gpa, &rng, public, index, entries) catch |err|
+        switch (err) {
+            error.OutOfMemory => return err,
+            else => {},
+        };
+}
+
+fn threshold_same_message(comptime V: type, gpa: Allocator, u: *Unstructured) !void {
+    var public = try arbitrary_sharing(V, gpa, u);
+    defer public.deinit(gpa);
+    const namespace = try arbitrary_bytes(u, 0, 50);
+    const message = try arbitrary_bytes(u, 0, 100);
+    const partials = try arbitrary_partials(V, gpa, u, 10, true);
+    defer gpa.free(partials);
+    if (public.required() != partials.len) return;
+    var rng = utils.test_rng();
+    const invalid = try threshold.batch_verify_same_message(
+        V,
+        gpa,
+        &rng,
+        public,
+        namespace,
+        message,
+        partials,
+    );
+    defer gpa.free(invalid);
+    try testing.expect(invalid.len <= partials.len);
+}
+
+fn threshold_recover(
+    comptime V: type,
+    kind: ThresholdKind,
+    gpa: Allocator,
+    u: *Unstructured,
+) !void {
+    var sharing = try arbitrary_sharing(V, gpa, u);
+    defer sharing.deinit(gpa);
+    switch (kind) {
+        .recover => {
+            const partials = try arbitrary_partials(V, gpa, u, 20, false);
+            defer gpa.free(partials);
+            _ = threshold.recover(V, gpa, sharing, partials) catch |err| switch (err) {
+                error.OutOfMemory => return err,
+                else => {},
+            };
+        },
+        .recover_multiple => {
+            const Group = []const primitives.variant.PartialSignature(V);
+            const groups = try gpa.alloc(Group, u.int_in_range(usize, 0, 5));
+            defer gpa.free(groups);
+            var built: usize = 0;
+            defer for (groups[0..built]) |group| gpa.free(group);
+            while (built < groups.len) : (built += 1) {
+                groups[built] = try arbitrary_partials(V, gpa, u, 10, false);
+            }
+            _ = u.int_in_range(usize, 1, 4); // The concurrency; results do not depend on it.
+            const out = try gpa.alloc(V.Signature, groups.len);
+            defer gpa.free(out);
+            threshold.recover_multiple(V, gpa, sharing, groups, out) catch |err| switch (err) {
+                error.OutOfMemory => return err,
+                else => {},
+            };
+        },
+        else => {
+            const first = try arbitrary_partials(V, gpa, u, 10, false);
+            defer gpa.free(first);
+            const second = try arbitrary_partials(V, gpa, u, 10, false);
+            defer gpa.free(second);
+            _ = threshold.recover_pair(V, gpa, sharing, first, second) catch |err| switch (err) {
+                error.OutOfMemory => return err,
+                else => {},
+            };
+        },
+    }
+}
+
+/// A share survives an encode and decode unchanged.
+fn serialize_share(u: *Unstructured) !void {
+    const share = try arbitrary_share(u);
+    var buffer: [64]u8 = undefined;
+    var writer = codec.Writer.init(&buffer);
+    share.write(&writer);
+    const decoded = codec.decode(Share, testing.allocator, writer.written()) catch return;
+    try testing.expect(decoded.eql(share));
+}
+
+fn threshold_body(_: void, u: *Unstructured) !void {
+    const num_ops = u.int_in_range(u32, 1, 100);
+    for (0..num_ops) |_| {
+        const choice = u.int_in_range(u32, 0, 16);
+        const result = switch (choice) {
+            16 => serialize_share(u),
+            // commonware lists Recover as MinSig first, then MinPk.
+            8 => threshold_operation(MinSig, .recover, u),
+            9 => threshold_operation(MinPk, .recover, u),
+            else => if (choice % 2 == 0)
+                threshold_operation(MinPk, @fromBackingInt(@intCast(choice / 2)), u)
+            else
+                threshold_operation(MinSig, @fromBackingInt(@intCast(choice / 2)), u),
+        };
+        // A failed draw ends the input, as commonware breaks out of its loop.
+        result catch |err| switch (err) {
+            error.NotEnoughData, error.IncorrectFormat, error.EmptyChoose => break,
+            else => return err,
+        };
+    }
+}
+
+test "bls12381 fuzz: threshold operations" {
+    try (minifuzz.Builder{}).with_search_limit(search_limit(2, 32))
+        .run(testing.allocator, {}, threshold_body);
+}
+
+test "bls12381 fuzz: threshold operations (coverage-guided)" {
+    try testing.fuzz({}, math.testing.smith_body(void, threshold_body), .{});
+}

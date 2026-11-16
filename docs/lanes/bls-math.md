@@ -31,7 +31,7 @@ variants (MinPk, MinSig) must match exactly.
 - [ ] bls12381 dkg golden (commonware `dkg::golden`) with its tests and conformance hashes.
   Blocked: its eVRF needs crypto's zk bulletproofs and banderwagon (crypto lane backlog).
 - [ ] Fuzz targets (commonware math/fuzz, simd/fuzz, bls parts of cryptography/fuzz): done
-  for decode, dkg_feldman_desmedt, aggregate, batch, and tle; primitive and threshold remain.
+  for decode, dkg_feldman_desmedt, aggregate, batch, tle, and threshold; primitive remains.
 
 ## Decisions
 - Algebraic types are value types with `zero`/`one` decls and `add`/`sub`/`neg`/`mul`/`inv`/
