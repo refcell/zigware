@@ -332,9 +332,17 @@ fn hex_digit(char: u8) ?u8 {
 }
 
 /// Reads up to `buffer.len` bytes at `offset`, fewer only at the end of the file.
+/// `failure`, unless the task was canceled during the call: then `error.Canceled`, so a
+/// task stopped mid-write ends quietly instead of reporting a failed device.
+fn or_canceled(err: anyerror, failure: Error) Error {
+    assert(failure != error.Canceled);
+    return if (err == error.Canceled) error.Canceled else failure;
+}
+
 fn file_read(storage: *const Storage, file: File, buffer: []u8, offset: u64) Error!usize {
     const ring = storage.config.ring orelse
-        return file.readPositionalAll(storage.io, buffer, offset) catch error.ReadFailed;
+        return file.readPositionalAll(storage.io, buffer, offset) catch |err|
+            or_canceled(err, error.ReadFailed);
     var done: usize = 0;
     while (done < buffer.len) {
         const result = try ring_perform(ring, .{ .read = .{
@@ -352,7 +360,8 @@ fn file_read(storage: *const Storage, file: File, buffer: []u8, offset: u64) Err
 
 fn file_write(storage: *const Storage, file: File, bytes: []const u8, offset: u64) Error!void {
     const ring = storage.config.ring orelse
-        return file.writePositionalAll(storage.io, bytes, offset) catch error.WriteFailed;
+        return file.writePositionalAll(storage.io, bytes, offset) catch |err|
+            or_canceled(err, error.WriteFailed);
     var done: usize = 0;
     while (done < bytes.len) {
         const result = try ring_perform(ring, .{ .write = .{
@@ -368,7 +377,7 @@ fn file_write(storage: *const Storage, file: File, bytes: []const u8, offset: u6
 
 fn file_sync(storage: *const Storage, file: File) Error!void {
     const ring = storage.config.ring orelse
-        return file.sync(storage.io) catch error.BlobSyncFailed;
+        return file.sync(storage.io) catch |err| or_canceled(err, error.BlobSyncFailed);
     while (true) {
         const result = try ring_perform(ring, .{ .fsync = .{ .fd = file.handle } }) orelse
             continue;
@@ -504,7 +513,8 @@ pub const Blob = struct {
 
     pub fn resize(self: *Blob, length: u64) Error!void {
         const raw_length = try self.raw_offset(length, 0);
-        self.file.setLength(self.storage.io, raw_length) catch return error.BlobResizeFailed;
+        self.file.setLength(self.storage.io, raw_length) catch |err|
+            return or_canceled(err, error.BlobResizeFailed);
     }
 
     pub fn sync(self: *Blob) Error!void {

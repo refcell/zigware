@@ -264,3 +264,23 @@ test "files persist across storage instances" {
     try iface.tests.expect_read(opened.blob, 0, "durable");
     try testing.expectError(error.BlobAlreadyOpen, storage.open("partition", "blob"));
 }
+
+fn write_until_canceled(blob: *iface.Blob) iface.Error!void {
+    // Each pass ends in a syscall, where a cancel request takes effect.
+    while (true) {
+        try blob.write_at(0, "canceled", .{});
+        try blob.sync();
+    }
+}
+
+test "a write interrupted by cancellation fails with Canceled, not an I/O error" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try open_storage(&tmp, "root");
+    defer storage.deinit();
+    var opened = try storage.open_versioned("partition", "canceled", .only(0));
+    defer opened.blob.close();
+    var task = try io.concurrent(write_until_canceled, .{&opened.blob});
+    try io.sleep(.fromMilliseconds(5), .awake);
+    try testing.expectError(error.Canceled, task.cancel(io));
+}
