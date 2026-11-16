@@ -54,6 +54,19 @@ that harness. It builds on `coding` (ReedSolomon), `consensus.types.coding.Commi
   `cancel(commitment) !Feedback`, `clone`, `deinit`.
 - `collector.p2p.mocks`: `types.Request`/`types.Response`, `Handler`, `Monitor`, `Failing`.
 
+- `consensus` marshal coding types (`src/consensus/marshal/coding/types.zig`; `B` the
+  application block, `C` a coding scheme, `H` the context hasher):
+  `Shard(B, C, H)` (`init(commitment, index, inner)`, owns its inner shard and bytes;
+  `commitment()`, `clone(gpa)`, `deinit(gpa)`, `eql`, codec with cfg = largest block size,
+  `max_encode_size`), `CodedBlock(B, C, H)` (`encode(gpa, Digested(B), config, strategy)`,
+  `precomputed(Digested(B), commitment)`, `from_decoded(gpa, B, config, expected, strategy)
+  DecodeError!` with `expected` a `.trusted`/`.untrusted` commitment, `shards(gpa, strategy)`
+  (coded on demand), `shard(gpa, index) !?Shard`, `inner`, `inner_digested`, `commitment`,
+  `digest`, `parent`, `height`, `context`, `clone`, `deinit(gpa)`, `eql`, write-only codec),
+  `StoredCodedBlock(B, C, H)` (`init(CodedBlock)`, `from_shared`, `into_coded_block`, codec
+  with `B`'s cfg), `DecodeError`, `CommitmentOf(B, C, H)`, `hash_context(H, gpa, context)`,
+  `coding_config_for_participants(n)`.
+
 ## Decisions
 - `broadcast.Digested` owns its value (reference counted) because the cache, waiters, and
   responders share values decoded from the network; `cryptography.Digested` borrows. It
@@ -81,6 +94,13 @@ that harness. It builds on `coding` (ReedSolomon), `consensus.types.coding.Commi
   generators never run out of data, so minifuzz keeps its 8-byte start and only reaches the
   first action, while random inputs reach gets, subscriptions, engine restarts, and replies.
 
+- marshal coding types: a `Shard` owns its inner shard's bytes (decoding copies them out of
+  the message; `CodedBlock.shard` copies them out of the shared encoding), where commonware
+  shares `Bytes`. `CodedBlock.from_decoded` returns `ConfigMismatch`, `BlockDigestMismatch`,
+  `RecommitFailed`, or `CommitmentMismatch` for commonware's `Invalid("CodedBlock", ...)`
+  messages. Strategy jobs run inline. The two `should_panic` tests and the iobufs test have
+  no counterpart.
+
 ## Backlog
 - [x] broadcast lib.rs traits.
 - [x] broadcast buffered: config, ingress, metrics, engine, mocks, with every mod.rs test on
@@ -88,8 +108,10 @@ that harness. It builds on `coding` (ReedSolomon), `consensus.types.coding.Commi
 - [x] collector lib.rs, p2p ingress (overflow policy), engine, mocks, with every ingress.rs
   and mod.rs test (commonware has no collector conformance hashes).
 - [x] Fuzz targets (broadcast/fuzz, collector/fuzz).
-- [ ] marshal coding `types`: Shard, CodedBlock, StoredCodedBlock, `hash_context`,
+- [x] marshal coding `types`: Shard, CodedBlock, StoredCodedBlock, `hash_context`,
   `coding_config_for_participants`, with their tests and the Shard conformance hash.
+- [ ] Move the coding tests' `EmptyBlock` copy to `marshal.mocks.block` and the consensus
+  root's test import of `marshal/coding/root.zig` to marshal/root.zig once those land.
 - [ ] marshal coding `shards`: mailbox and engine, with their tests.
 - [ ] marshal coding `variant` (Coding), `validation`, `marshaled` (Marshaled,
   MarshaledConfig), once consensus-marshal's core lands.
@@ -103,3 +125,5 @@ that harness. It builds on `coding` (ReedSolomon), `consensus.types.coding.Commi
   engine tests.
 - 2026-11-16: broadcast and collector fuzz targets (minifuzz, coverage-guided, and seeded
   random inputs).
+- 2026-11-16: marshal coding types (Shard, CodedBlock, StoredCodedBlock); the Shard
+  conformance hash matches.
