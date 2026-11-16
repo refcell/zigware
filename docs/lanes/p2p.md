@@ -1,6 +1,9 @@
 # Lane: p2p
 
-Owns `src/p2p`.
+Owns `src/p2p`, except `src/p2p/authenticated/lookup/`, which the parallel lane owns (split
+agreed 2026-11-16 to shorten this backlog). The shared authenticated core (data, dialing,
+throttle, outbox, router, channels) and discovery stay here; lookup builds on them and keeps
+its own peer, dialer, and listener rather than refactoring discovery's.
 
 Reference: `~/.cache/zigware/commonware-ref/p2p/src`. Start with the parts that run on the
 deterministic runtime alone: `simulated` only needs task spawning and time from
@@ -160,13 +163,17 @@ handshake and the runtime's network, which the actor-stream and runtime lanes ar
 - [x] discovery: metrics (directory, listener, dialer, per-connection messages).
 - [ ] discovery: remaining mod.rs tests (rate limiting, message size, graceful shutdown,
   restarts, duplicate addresses, slow peers).
-- [ ] lookup: tracker actor, peer actor, network, `StaticProvider`.
+- [ ] lookup (parallel lane): tracker (done), peer, dialer, listener, Network with Config and
+  Oracle, and commonware's lookup mod.rs tests.
 - [ ] utils codec: `WrappedBackgroundReceiver` (decode on a parallel Strategy); then tell
   broadcast-collector so buffered's config can take the Strategy (low priority, after
   discovery).
 - [ ] Fuzz targets (commonware p2p/fuzz).
 
 ## Log
+- 2026-11-16: (parallel lane) lookup Config and tracker (locked state: track with addresses,
+  overwrite, registered IPs for the listener, blocks, subscriptions) with the tracker actor
+  tests.
 - 2026-11-13: lib.rs types and interface checks, types.rs (Ingress, Address, Hostname,
   is_global) with commonware conformance hashes, sizing.rs, decode-canonical fuzz.
 - 2026-11-13: Quota and KeyedRateLimiter (governor GCRA port).

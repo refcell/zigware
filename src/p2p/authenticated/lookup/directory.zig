@@ -14,6 +14,7 @@ const p2p = @import("../../root.zig");
 const types = @import("../../types.zig");
 const dialing = @import("../dialing.zig");
 const SortedMap = @import("../../simulated/sorted_map.zig").SortedMap;
+const sim_tracker = @import("../../simulated/tracker.zig");
 const record_mod = @import("record.zig");
 
 const Duration = utils.Duration;
@@ -46,20 +47,7 @@ pub fn Metadata(comptime P: type) type {
 
 /// Sorted primary and secondary keys owned by the caller.
 pub fn Owned(comptime P: type) type {
-    return struct {
-        primary: []P,
-        secondary: []P,
-
-        pub fn view(owned: @This()) p2p.TrackedPeers(P) {
-            const primary: p2p.TrackedPeers(P).PeerSet = .{ .items = owned.primary };
-            return .{ .primary = primary, .secondary = .{ .items = owned.secondary } };
-        }
-
-        pub fn free(owned: @This(), gpa: Allocator) void {
-            gpa.free(owned.primary);
-            gpa.free(owned.secondary);
-        }
-    };
+    return sim_tracker.Tracker(P).Owned;
 }
 
 /// Peers to dial now, and when another may become dialable.
@@ -72,6 +60,8 @@ pub fn Directory(comptime P: type) type {
         const Self = @This();
         pub const Tracked = p2p.AddressableTrackedPeers(P);
         pub const Peers = Owned(P);
+        /// A peer-set change, as subscribers receive it.
+        pub const Update = sim_tracker.Tracker(P).Update;
         const Sets = struct { primary: []P, secondary: []P };
 
         gpa: Allocator,
@@ -224,6 +214,15 @@ pub fn Directory(comptime P: type) type {
             const sets = directory.peer_sets.items();
             if (sets.len == 0) return null;
             return sets[sets.len - 1].key;
+        }
+
+        /// The latest tracked set and every tracked peer, or null before the first set.
+        pub fn latest_update(directory: *const Self, gpa: Allocator) Allocator.Error!?Update {
+            const index = directory.latest_set_index() orelse return null;
+            const latest = (try directory.peer_set(gpa, index)).?;
+            errdefer latest.free(gpa);
+            const every = try directory.all(gpa);
+            return .{ .gpa = gpa, .index = index, .latest = latest, .all = every };
         }
 
         /// Every peer in a tracked set: primary when any set lists it as primary.
