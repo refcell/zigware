@@ -11,6 +11,16 @@ Both are actors over p2p. They build on `actor.mailbox`, `p2p` (lib types and
 broadcast `buffered` comes first: consensus marshal (T-01a1d5ef-5571-7424-8220-609c9811da57)
 needs it.
 
+Also owns `src/consensus/marshal/coding/`, marshal's erasure-coded variant
+(`consensus/src/marshal/coding`, about 18k Rust lines), and its `pub const coding` line in
+`marshal/root.zig`. consensus-marshal keeps everything else in marshal: core (the `Variant`
+and buffer contracts in `core/variant.zig`, Actor, Mailbox), standard, ancestry, store,
+limits, config, application, resolver, conformance, and mocks, including the shared test
+harness. The coding parts of commonware's `mocks/harness.rs` (`CodingHarness`, `CodingB`,
+`CodingCtx`, `make_coding_block`, `genesis_commitment`) go in `coding/harness.zig` on top of
+that harness. It builds on `coding` (ReedSolomon), `consensus.types.coding.Commitment`,
+`broadcast.buffered`, `resolver.p2p`, and `storage.archive`.
+
 ## Public API (on main)
 - `broadcast.assert_broadcaster(B)`: `B.Recipients`, `B.Message`, `b.broadcast(recipients,
   message)` returning `Feedback` (in an `Allocator.Error!` union when it may allocate).
@@ -78,6 +88,13 @@ needs it.
 - [x] collector lib.rs, p2p ingress (overflow policy), engine, mocks, with every ingress.rs
   and mod.rs test (commonware has no collector conformance hashes).
 - [x] Fuzz targets (broadcast/fuzz, collector/fuzz).
+- [ ] marshal coding `types`: Shard, CodedBlock, StoredCodedBlock, `hash_context`,
+  `coding_config_for_participants`, with their tests and the Shard conformance hash.
+- [ ] marshal coding `shards`: mailbox and engine, with their tests.
+- [ ] marshal coding `variant` (Coding), `validation`, `marshaled` (Marshaled,
+  MarshaledConfig), once consensus-marshal's core lands.
+- [ ] marshal coding: `coding/harness.zig` and the `coding/mod.rs` tests, once the shared
+  harness lands; the coding fuzz entries in `consensus/fuzz`.
 
 ## Log
 - 2026-11-13: broadcast lib.rs and buffered (engine, mailbox, overflow policy, metrics,

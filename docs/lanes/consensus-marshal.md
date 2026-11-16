@@ -1,7 +1,12 @@
 # Lane: consensus-marshal
 
-Owns `src/consensus/aggregation/` and `src/consensus/marshal/`. Add the `pub const` lines to
-`src/consensus/root.zig` (owned by consensus-simplex; additive edits).
+Owns `src/consensus/aggregation/` and `src/consensus/marshal/`, except
+`src/consensus/marshal/coding/` (the erasure-coded variant), which the broadcast-collector
+lane owns along with its `pub const coding` line in `marshal/root.zig`. That lane builds on
+this lane's `core.variant` contracts (`assert_variant`, `assert_buffer`, `ExpectedCommitment`),
+core Actor and Mailbox, application, ancestry, config, and mocks (block, application,
+verifying, store, and the shared harness, which `coding/harness.zig` extends). Add the
+`pub const` lines to `src/consensus/root.zig` (owned by consensus-simplex; additive edits).
 
 Reference: `~/.cache/zigware/commonware-ref/consensus/src/{aggregation,marshal}`.
 
