@@ -2,8 +2,8 @@
 //! `metadata_operations` fuzz target (storage/fuzz) checked against a reference model.
 //!
 //! Keys are `u64`, whose codec encoding (8 bytes, big-endian) is commonware's `U64`.
-//! Values are `[]const u8` (`Vec<u8>`). Metric names map to fields: `sync_rewrites`,
-//! `sync_overwrites`, `count()` for `keys`, and the storage mock's `write_bytes` for
+//! Values are `[]const u8` (`Vec<u8>`). Metrics are read through their handles
+//! (`sync_rewrites`, `sync_overwrites`, `keys`), and the storage mock's `write_bytes` stands for
 //! `runtime_storage_write_bytes_total`.
 
 const std = @import("std");
@@ -55,9 +55,10 @@ fn expect_value(store: *const Store, key: u64, expected: ?[]const u8) !void {
 }
 
 fn expect_metrics(store: *const Store, rewrites: u64, overwrites: u64, keys: usize) !void {
-    try testing.expectEqual(rewrites, store.sync_rewrites);
-    try testing.expectEqual(overwrites, store.sync_overwrites);
+    try testing.expectEqual(rewrites, store.sync_rewrites.metric().get());
+    try testing.expectEqual(overwrites, store.sync_overwrites.metric().get());
     try testing.expectEqual(keys, store.count());
+    try testing.expectEqual(@as(i64, @intCast(keys)), store.keys.metric().get());
 }
 
 /// Overwrite the start of blob `name` with junk, durably.
@@ -74,6 +75,29 @@ fn truncate(storage: *Storage, name: []const u8, len: ?u64, shrink: u64) !void {
     defer opened.blob.close();
     try opened.blob.resize(len orelse opened.len - shrink);
     try opened.blob.sync();
+}
+
+test "metrics register under the scope" {
+    const metrics = @import("runtime").telemetry.metrics;
+    var registry = metrics.Registry.init(gpa);
+    defer registry.deinit();
+    var storage = Storage.init(gpa);
+    defer storage.deinit();
+    var scoped = config;
+    scoped.metrics = metrics.Scope.init(&registry).child("metadata");
+    var store = try Store.init(gpa, storage.interface(), scoped);
+    defer store.deinit();
+    try put(&store, 1, "hello");
+    try put(&store, 2, "world");
+    try store.sync();
+    try put(&store, 1, "HELLO");
+    try store.sync();
+    try store.sync();
+    const text = try registry.encode(gpa);
+    defer gpa.free(text);
+    try testing.expect(metrics.has_metric_value(text, "metadata_keys", "2"));
+    try testing.expect(metrics.has_metric_value(text, "metadata_sync_rewrites_total", "2"));
+    try testing.expect(metrics.has_metric_value(text, "metadata_sync_overwrites_total", "1"));
 }
 
 test "put get clear" {
@@ -252,8 +276,8 @@ test "delta writes" {
         if (index == 4) gpa.free(store.remove(51).?);
         if (index == 6) try put_fill(&store, 50, 0xff, 100);
         try store.sync();
-        try testing.expectEqual(step.rewrites, store.sync_rewrites);
-        try testing.expectEqual(step.overwrites, store.sync_overwrites);
+        try testing.expectEqual(step.rewrites, store.sync_rewrites.metric().get());
+        try testing.expectEqual(step.overwrites, store.sync_overwrites.metric().get());
         try testing.expectEqual(step.bytes, storage.write_bytes);
     }
 }
@@ -265,7 +289,7 @@ test "multi key overwrites" {
     for (0..100) |i| try put_fill(&store, i, @intCast(i), 100);
     try store.sync();
     try store.sync();
-    try testing.expectEqual(@as(u64, 2), store.sync_rewrites);
+    try testing.expectEqual(@as(u64, 2), store.sync_rewrites.metric().get());
     try testing.expectEqual(@as(u64, 21824), storage.write_bytes);
 
     // Six equal-size updates overwrite in place: 6 * 101 + 12 bytes, once per blob.
@@ -380,8 +404,8 @@ test "overwrite vs rewrite" {
     for (steps) |step| {
         if (step.key) |key| try put_fill(&store, key, step.byte, step.len);
         try store.sync();
-        try testing.expectEqual(step.rewrites, store.sync_rewrites);
-        try testing.expectEqual(step.overwrites, store.sync_overwrites);
+        try testing.expectEqual(step.rewrites, store.sync_rewrites.metric().get());
+        try testing.expectEqual(step.overwrites, store.sync_overwrites.metric().get());
     }
 }
 

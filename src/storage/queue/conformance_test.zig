@@ -42,7 +42,7 @@ const QueueWorkload = struct {
             rng.fill_bytes(data[drawn]);
         }
         {
-            var queue = try Queue.init(gpa, storage, config);
+            var queue = try Queue.init(gpa, storage, config, null);
             defer queue.deinit();
             for (data) |item| _ = try queue.enqueue(item);
             for (0..count / 2) |_| {
@@ -52,7 +52,7 @@ const QueueWorkload = struct {
             }
             try queue.sync();
         }
-        var queue = try Queue.init(gpa, storage, config);
+        var queue = try Queue.init(gpa, storage, config, null);
         defer queue.deinit();
         while (try queue.try_recv()) |received| {
             defer codec.free(Bytes, gpa, received.item);

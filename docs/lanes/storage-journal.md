@@ -61,9 +61,10 @@ resize, sync), `runtime.storage`, with the in-memory backend `runtime.storage.me
   variable, and oversized, and authenticated over MMR and MMB, all matching commonware's.
 - [ ] Journal conformance hashes of the compressed (`<true>`) workloads: they need zstd
   output byte-identical to libzstd level 3 (with storage-merkle's compressor).
-- [ ] Metrics: record through `runtime.telemetry.metrics` where commonware has metrics
-  (journal and manager counters, metadata `sync_rewrites`/`sync_overwrites`), replacing
-  the plain fields.
+- [x] Metrics: metadata (`sync_rewrites`, `sync_overwrites`, `keys`) and queue (`tip`, `floor`,
+  `next`) through `runtime.telemetry.metrics`.
+- [ ] Metrics: contiguous journals (`size`, `pruning_boundary`, `retained`, `tail_items`, call
+  and read counters) and the blob/section managers (`tracked`, `synced`, `pruned`).
 - Handed to storage-merkle (2026-11-16): `src/storage/journal/zstd.zig`'s real compressor and
   the `journal_fixed_operations` and `queue_operations` fuzz targets.
 
@@ -163,14 +164,16 @@ resize, sync), `runtime.storage`, with the in-memory backend `runtime.storage.me
   Proofs: `proof(start, max_ops, inactive)` and `historical_proof(leaves, start, max_ops,
   inactive)` return `Proved{proof, items}` (`deinit(gpa)`); `speculative_proof(batch,
   inactive)`, `speculative_pinned_nodes(batch, *[max_pinned_nodes]Digest) []Digest`.
-- `storage.queue`: `Queue(V)` with `init(gpa, storage, Config(V))`, `deinit`, `destroy`,
+- `storage.queue`: `Queue(V)` with `init(gpa, storage, Config(V), ?metrics.Scope)`, `deinit`,
+  `destroy`,
   `append`, `enqueue`, `enqueue_bulk(items) Range`, `commit`, `sync` (prunes below the ack
   floor), `size`, and the reader side `try_recv() ?Received{position, item}`, `ack`,
   `ack_up_to`, `is_acked`, `floor`, `read_position`, `is_empty`, `reset`, `pending`;
   `Config(V)` is `journal.contiguous.variable.Config(V)`; `cursor.Cursor`.
 - `storage.metadata`: `Metadata(K, V)` with `init`, `deinit`, `get`, `get_mut`,
   `put`, `put_sync`, `upsert`, `remove`, `clear`, `retain`, `items`, `count`, `sync`, `start_sync`,
-  `destroy`; `Config(V)`.
+  `destroy`; `Config(V)` (its optional `metrics` scope registers `sync_rewrites`,
+  `sync_overwrites`, and `keys`).
 
 ## Decisions
 - Errors: `journal.Error` is an error set without payloads (section, offset, sizes);
@@ -298,6 +301,10 @@ resize, sync), `runtime.storage`, with the in-memory backend `runtime.storage.me
 - metadata `start_sync` is `sync`: a failed started sync fails at the call and consumes the
   store, instead of failing the next sync (commonware's dropped-handle and failure tests map
   onto that, on faulty storage).
+
+- Metrics record through `runtime.telemetry.metrics` handles; without a scope, handles are
+  `detached` (recorded, not registered), so tests read them without a registry. Metadata takes
+  its scope in `Config`, the queue as an `init` argument (its `Config` is the journal's).
 
 ## Log
 - 2026-11-13: journal Error, frame encoding/decoding with zstd frames, durability Barrier,

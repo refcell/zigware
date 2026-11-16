@@ -28,6 +28,7 @@ const std = @import("std");
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const runtime = @import("runtime");
+const metrics = runtime.telemetry.metrics;
 const Storage = runtime.storage.Storage;
 const variable = @import("../journal/contiguous/variable.zig");
 const cursor_mod = @import("cursor.zig");
@@ -60,30 +61,72 @@ pub fn Queue(comptime V: type) type {
         /// Items visible to the reader: the size at the last commit or sync.
         published: u64,
         failed: bool = false,
-        /// Metrics: total appended items (`tip`), the next item to dequeue (`next`), and the
-        /// ack floor (`floor`, read from the cursor).
-        tip: u64,
-        next: u64,
+        /// Total enqueued items.
+        tip: metrics.Gauge,
+        /// The next item to dequeue.
+        next: metrics.Gauge,
+        /// Acknowledged items (the ack floor).
+        ack_floor: metrics.Gauge,
 
         /// Open the queue. On restart the reader begins at the journal's pruning boundary.
-        pub fn init(gpa: Allocator, storage: Storage, cfg: Config(V)) Error!Self {
+        /// Its gauges register under `scope` (commonware's context metrics); null records them
+        /// unregistered.
+        pub fn init(
+            gpa: Allocator,
+            storage: Storage,
+            cfg: Config(V),
+            scope: ?metrics.Scope,
+        ) Error!Self {
+            var tip = try gauge(gpa, scope, "tip", "Total enqueued items");
+            errdefer tip.deinit();
+            var ack_floor = try gauge(gpa, scope, "floor", "Acknowledged items");
+            errdefer ack_floor.deinit();
+            var next = try gauge(gpa, scope, "next", "Next item to dequeue");
+            errdefer next.deinit();
             const journal = try Journal.init(gpa, storage, cfg);
             const bounds = journal.get_bounds();
             assert(bounds.start <= bounds.end);
-            return .{
+            _ = tip.metric().set(@intCast(bounds.end));
+            var queue: Self = .{
                 .gpa = gpa,
                 .journal = journal,
                 .cursor = .init(bounds.start),
                 .published = bounds.end,
-                .tip = bounds.end,
-                .next = bounds.start,
+                .tip = tip,
+                .next = next,
+                .ack_floor = ack_floor,
             };
+            queue.record_cursor();
+            return queue;
+        }
+
+        fn gauge(
+            gpa: Allocator,
+            scope: ?metrics.Scope,
+            name: []const u8,
+            help: []const u8,
+        ) Allocator.Error!metrics.Gauge {
+            if (scope) |registered| return registered.gauge(name, help);
+            return metrics.Gauge.detached(gpa, .{});
+        }
+
+        /// Publish the cursor's read position and ack floor.
+        fn record_cursor(self: *Self) void {
+            _ = self.next.metric().set(@intCast(self.cursor.read_pos));
+            _ = self.ack_floor.metric().set(@intCast(self.cursor.ack_floor));
+        }
+
+        fn deinit_metrics(self: *Self) void {
+            self.tip.deinit();
+            self.next.deinit();
+            self.ack_floor.deinit();
         }
 
         /// Close the queue, dropping uncommitted items and acknowledgements.
         pub fn deinit(self: *Self) void {
             self.cursor.deinit(self.gpa);
             self.journal.deinit();
+            self.deinit_metrics();
             self.* = undefined;
         }
 
@@ -91,6 +134,7 @@ pub fn Queue(comptime V: type) type {
         pub fn destroy(self: *Self) Error!void {
             assert(!self.failed);
             self.cursor.deinit(self.gpa);
+            self.deinit_metrics();
             defer self.* = undefined;
             try self.journal.destroy();
         }
@@ -111,8 +155,8 @@ pub fn Queue(comptime V: type) type {
             assert(!self.failed);
             errdefer self.failed = true;
             const position = try self.journal.append(item);
-            self.tip = position + 1;
-            assert(self.tip == self.journal.size());
+            _ = self.tip.metric().set(@intCast(position + 1));
+            assert(position + 1 == self.journal.size());
             return position;
         }
 
@@ -158,12 +202,12 @@ pub fn Queue(comptime V: type) type {
         /// The next unacknowledged published item, or null when none is waiting.
         pub fn try_recv(self: *Self) Error!?Received {
             const position = self.cursor.next_position(self.published);
-            self.next = self.cursor.read_pos;
+            self.record_cursor();
             const next_position = position orelse return null;
             // Advance delivery only after the item has been read successfully.
             const item = try self.journal.read(next_position);
             self.cursor.delivered(next_position);
-            self.next = self.cursor.read_pos;
+            self.record_cursor();
             return .{ .position = next_position, .item = item };
         }
 
@@ -176,12 +220,14 @@ pub fn Queue(comptime V: type) type {
         /// `PositionOutOfRange` if it has not been published.
         pub fn ack(self: *Self, position: u64) Error!void {
             try self.cursor.ack(self.gpa, position, self.published);
+            self.record_cursor();
         }
 
         /// Acknowledge every item in `[ack_floor, up_to)`. Fails with `PositionOutOfRange` if
         /// `up_to` exceeds the published items.
         pub fn ack_up_to(self: *Self, up_to: u64) Error!void {
             try self.cursor.ack_up_to(self.gpa, up_to, self.published);
+            self.record_cursor();
         }
 
         /// The position of the next item `try_recv` checks.
@@ -198,7 +244,7 @@ pub fn Queue(comptime V: type) type {
         /// re-delivered.
         pub fn reset(self: *Self) void {
             self.cursor.reset();
-            self.next = self.cursor.read_pos;
+            self.record_cursor();
         }
 
         /// Published items not yet read.

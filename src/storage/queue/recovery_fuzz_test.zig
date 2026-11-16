@@ -216,7 +216,7 @@ const Harness = struct {
             .cache_ref = &self.cache_ref,
             .write_buffer = self.input.write_buffer,
             .replay_buffer = self.input.replay_buffer,
-        });
+        }, null);
     }
 
     fn op_faults(self: *const Harness) faulty.Config {

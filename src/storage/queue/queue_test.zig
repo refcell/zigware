@@ -36,15 +36,19 @@ const Harness = struct {
         self.storage.deinit();
     }
 
-    fn open(self: *Harness) !Queue {
-        return Queue.init(gpa, self.storage.interface(), .{
+    fn cfg(self: *Harness) queue_mod.Config(Bytes) {
+        return .{
             .partition = self.partition,
             .items_per_section = 10,
             .codec_config = bytes_cfg,
             .cache_ref = &self.cache_ref,
             .write_buffer = 4096,
             .replay_buffer = 4096,
-        });
+        };
+    }
+
+    fn open(self: *Harness) !Queue {
+        return Queue.init(gpa, self.storage.interface(), self.cfg(), null);
     }
 };
 
@@ -466,18 +470,18 @@ test "queue: metrics" {
     defer h.deinit();
     var queue = try h.open();
     defer queue.deinit();
-    try testing.expectEqual(0, queue.tip);
+    try testing.expectEqual(0, queue.tip.metric().get());
     try testing.expectEqual(0, queue.floor());
-    try testing.expectEqual(0, queue.next);
+    try testing.expectEqual(0, queue.next.metric().get());
     // Append updates the tip without a commit.
     _ = try queue.append(&.{0});
-    try testing.expectEqual(1, queue.tip);
+    try testing.expectEqual(1, queue.tip.metric().get());
     try queue.commit();
     try enqueue_range(&queue, 1, 10);
-    try testing.expectEqual(10, queue.tip);
+    try testing.expectEqual(10, queue.tip.metric().get());
     _ = try recv_position(&queue);
     _ = try recv_position(&queue);
-    try testing.expectEqual(2, queue.next);
+    try testing.expectEqual(2, queue.next.metric().get());
     try queue.ack(0);
     try queue.ack(1);
     try testing.expectEqual(2, queue.floor());
@@ -493,8 +497,27 @@ test "queue: metrics" {
     try queue.ack(8);
     try queue.ack(9);
     try testing.expectEqual(10, queue.floor());
+    try testing.expectEqual(10, queue.ack_floor.metric().get());
     queue.reset();
-    try testing.expectEqual(10, queue.next);
+    try testing.expectEqual(10, queue.next.metric().get());
+}
+
+test "queue: metrics register under the scope" {
+    const metrics = runtime.telemetry.metrics;
+    var registry = metrics.Registry.init(gpa);
+    defer registry.deinit();
+    var h = try Harness.init("test-metrics-scope");
+    defer h.deinit();
+    const scope = metrics.Scope.init(&registry).child("queue");
+    var queue = try Queue.init(gpa, h.storage.interface(), h.cfg(), scope);
+    defer queue.deinit();
+    try enqueue_range(&queue, 0, 3);
+    try queue.ack(try recv_position(&queue));
+    const text = try registry.encode(gpa);
+    defer gpa.free(text);
+    try testing.expect(metrics.has_metric_value(text, "queue_tip", "3"));
+    try testing.expect(metrics.has_metric_value(text, "queue_floor", "1"));
+    try testing.expect(metrics.has_metric_value(text, "queue_next", "1"));
 }
 
 test "queue: next metric updates on fast-forward" {
@@ -504,14 +527,14 @@ test "queue: next metric updates on fast-forward" {
     defer queue.deinit();
     try enqueue_range(&queue, 0, 3);
     try queue.ack(try recv_position(&queue));
-    try testing.expectEqual(1, queue.next);
+    try testing.expectEqual(1, queue.next.metric().get());
     try queue.ack(2);
     try queue.ack(1);
     try testing.expectEqual(3, queue.floor());
-    try testing.expectEqual(1, queue.next);
+    try testing.expectEqual(1, queue.next.metric().get());
     // A dequeue that finds nothing still fast-forwards to the floor.
     try testing.expectEqual(null, try queue.try_recv());
-    try testing.expectEqual(3, queue.next);
+    try testing.expectEqual(3, queue.next.metric().get());
 }
 
 test "queue: sync publishes appended items" {

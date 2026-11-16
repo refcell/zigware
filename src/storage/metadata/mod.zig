@@ -33,6 +33,7 @@ const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const codec = @import("codec");
 const runtime_storage = @import("runtime").storage;
+const metrics = @import("runtime").telemetry.metrics;
 const Storage = runtime_storage.Storage;
 const Blob = runtime_storage.Blob;
 const Crc32 = @import("cryptography").crc32.Crc32;
@@ -51,6 +52,9 @@ pub fn Config(comptime V: type) type {
         partition: []const u8,
         /// The codec configuration for values.
         codec_config: codec.Cfg(V),
+        /// Where to register `sync_rewrites`, `sync_overwrites`, and `keys` (commonware's
+        /// context metrics). Without a scope they are recorded unregistered.
+        metrics: ?metrics.Scope = null,
     };
 }
 
@@ -113,10 +117,12 @@ pub fn Metadata(comptime K: type, comptime V: type) type {
         /// Set when a storage operation failed; the store may then only be dropped.
         failed: bool = false,
 
-        /// Syncs that rewrote all data (`sync_rewrites`).
-        sync_rewrites: u64 = 0,
-        /// Syncs that modified existing data in place (`sync_overwrites`).
-        sync_overwrites: u64 = 0,
+        /// Syncs that rewrote all data.
+        sync_rewrites: metrics.Counter,
+        /// Syncs that modified existing data in place.
+        sync_overwrites: metrics.Counter,
+        /// Tracked keys.
+        keys: metrics.Gauge,
 
         /// Open the store in `cfg.partition`, recovering the latest valid copy.
         pub fn init(gpa: Allocator, storage: Storage, cfg: Config(V)) Error!Self {
@@ -145,6 +151,9 @@ pub fn Metadata(comptime K: type, comptime V: type) type {
             const cursor: u1 = if (copies[1].wrapper.version > copies[0].wrapper.version) 1 else 0;
             const version = copies[cursor].wrapper.version;
             const next_version = std.math.add(u64, version, 1) catch @panic("version overflow");
+            var handles = try Handles.init(gpa, cfg.metrics);
+            errdefer handles.deinit();
+            _ = handles.keys.metric().set(@intCast(copies[cursor].entries.items.len));
             free_entries(gpa, &copies[1 - cursor].entries);
             return .{
                 .gpa = gpa,
@@ -157,7 +166,63 @@ pub fn Metadata(comptime K: type, comptime V: type) type {
                 // Rewrite on startup: there is no record of which values differ.
                 .key_order_changed = next_version,
                 .blobs = .{ copies[0].wrapper, copies[1].wrapper },
+                .sync_rewrites = handles.sync_rewrites,
+                .sync_overwrites = handles.sync_overwrites,
+                .keys = handles.keys,
             };
+        }
+
+        const Handles = struct {
+            sync_rewrites: metrics.Counter,
+            sync_overwrites: metrics.Counter,
+            keys: metrics.Gauge,
+
+            fn init(gpa: Allocator, scope: ?metrics.Scope) Allocator.Error!Handles {
+                var sync_rewrites = try counter(
+                    gpa,
+                    scope,
+                    "sync_rewrites",
+                    "number of syncs that rewrote all data",
+                );
+                errdefer sync_rewrites.deinit();
+                var sync_overwrites = try counter(
+                    gpa,
+                    scope,
+                    "sync_overwrites",
+                    "number of syncs that modified existing data",
+                );
+                errdefer sync_overwrites.deinit();
+                const keys = if (scope) |registered|
+                    try registered.gauge("keys", "number of tracked keys")
+                else
+                    try metrics.Gauge.detached(gpa, .{});
+                return .{
+                    .sync_rewrites = sync_rewrites,
+                    .sync_overwrites = sync_overwrites,
+                    .keys = keys,
+                };
+            }
+
+            fn counter(
+                gpa: Allocator,
+                scope: ?metrics.Scope,
+                name: []const u8,
+                help: []const u8,
+            ) Allocator.Error!metrics.Counter {
+                if (scope) |registered| return registered.counter(name, help);
+                return metrics.Counter.detached(gpa, .{});
+            }
+
+            fn deinit(self: *Handles) void {
+                self.sync_rewrites.deinit();
+                self.sync_overwrites.deinit();
+                self.keys.deinit();
+                self.* = undefined;
+            }
+        };
+
+        fn set_keys(self: *Self) void {
+            _ = self.keys.metric().set(@intCast(self.entries.items.len));
         }
 
         /// Close both blobs and free all memory, dropping uncommitted changes.
@@ -170,6 +235,9 @@ pub fn Metadata(comptime K: type, comptime V: type) type {
             free_entries(self.gpa, &self.entries);
             for (&self.blobs) |*wrapper| wrapper.deinit_memory(self.gpa);
             self.gpa.free(self.partition);
+            self.sync_rewrites.deinit();
+            self.sync_overwrites.deinit();
+            self.keys.deinit();
             self.* = undefined;
         }
 
@@ -334,6 +402,7 @@ pub fn Metadata(comptime K: type, comptime V: type) type {
             for (self.entries.items) |entry| codec.free(V, self.gpa, entry.value);
             self.entries.clearRetainingCapacity();
             self.key_order_changed = self.next_version;
+            self.set_keys();
         }
 
         /// Put a value, returning the previous one (owned by the caller). The store takes
@@ -354,6 +423,7 @@ pub fn Metadata(comptime K: type, comptime V: type) type {
                 .value = value,
             });
             self.key_order_changed = self.next_version;
+            self.set_keys();
             return null;
         }
 
@@ -387,6 +457,7 @@ pub fn Metadata(comptime K: type, comptime V: type) type {
             if (!position.found) return null;
             const removed = self.entries.orderedRemove(position.index);
             self.key_order_changed = self.next_version;
+            self.set_keys();
             assert(std.mem.eql(u8, &removed.key_bytes, &key_bytes));
             return removed.value;
         }
@@ -409,7 +480,10 @@ pub fn Metadata(comptime K: type, comptime V: type) type {
                 }
             }
             self.entries.shrinkRetainingCapacity(kept);
-            if (kept != old_len) self.key_order_changed = self.next_version;
+            if (kept != old_len) {
+                self.key_order_changed = self.next_version;
+                self.set_keys();
+            }
             assert(kept <= old_len);
         }
 
@@ -493,7 +567,7 @@ pub fn Metadata(comptime K: type, comptime V: type) type {
             try target.blob.sync();
             target.modified.clearRetainingCapacity();
             target.version = version;
-            self.sync_overwrites += 1;
+            self.sync_overwrites.metric().inc();
         }
 
         /// Persist a full rewrite of the target blob.
@@ -530,7 +604,7 @@ pub fn Metadata(comptime K: type, comptime V: type) type {
             if (data_len < old_len) try target.blob.resize(data_len);
             try target.blob.sync();
             target.version = version;
-            self.sync_rewrites += 1;
+            self.sync_rewrites.metric().inc();
         }
 
         /// Remove both blobs and the partition, then free the store.
