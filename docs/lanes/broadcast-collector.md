@@ -139,8 +139,11 @@ that harness. It builds on `coding` (ReedSolomon), `consensus.types.coding.Commi
   `Buffer(B, C, H, P)` adapts the shards Mailbox to `assert_buffer` (an adapter, since the
   Mailbox's own `subscribe_by_digest` returns a receiver, not an optional one); variant.rs's
   4 tests plus `check_payload`.
-- [ ] commonware's `BlockProvider` for the core `Mailbox(S, Coding)` (`subscribe_parent` by
-  the parent's commitment), once core's mailbox lands.
+- [x] commonware's `BlockProvider` for the core `Mailbox(S, Coding)`: `Coding.subscribe_parent`
+  fetches the parent by the coding commitment in the child's context and yields its
+  application block through `Coding.ParentReceiver`. Marshal's ancestry takes the receiver
+  type from the variant (`ancestry.ParentReceiver`, `Mailbox.ParentReceiver`) instead of
+  requiring `oneshot.Receiver`, so no forwarding task is needed.
 - [x] marshal coding `validation` (proposal, block, reconstruction) with its 17 tests.
 - [ ] marshal coding `marshaled` (Marshaled, MarshaledConfig), once consensus-marshal's core
   lands.
@@ -172,3 +175,5 @@ that harness. It builds on `coding` (ReedSolomon), `consensus.types.coding.Commi
 - 2026-11-16: marshal coding `Coding` variant and shards `Buffer` adapter with variant.rs's
   tests; validation moved onto marshal's ancestry and application helpers.
 - 2026-11-16: marshal coding decoder fuzz target.
+
+- 2026-11-16: Coding's `subscribe_parent` (BlockProvider for core's mailbox).

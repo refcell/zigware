@@ -3,8 +3,8 @@
 //!
 //! The actor handles `CodedBlock`s (shared handles to the application block and its
 //! shards), consensus orders the coding `Commitment`, and the archives keep
-//! `StoredCodedBlock`s. The buffer is the shards engine's mailbox, adapted by `Buffer`.
-//! commonware's `BlockProvider` for the core mailbox comes with core's mailbox.
+//! `StoredCodedBlock`s. The buffer is the shards engine's mailbox, adapted by `Buffer`, and
+//! `subscribe_parent` provides ancestry through core's mailbox.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -133,6 +133,45 @@ pub fn Coding(comptime B: type, comptime C: type, comptime H: type, comptime P: 
             block.discard();
             return shared;
         }
+
+        /// The parent of `child` through marshal's `mailbox` (commonware's `BlockProvider` for
+        /// `Mailbox<S, Coding<..>>`): fetched by the parent commitment in the child's context,
+        /// retained up to the parent's height, and delivered as its application block.
+        /// Genesis has no parent, so its receiver is already closed.
+        pub fn subscribe_parent(
+            mailbox: anytype,
+            child: *const broadcast.Digested(B),
+        ) Allocator.Error!ParentReceiver {
+            const block = child.inner();
+            const parent_height = block.height().previous() orelse {
+                var pair = try oneshot.channel(Block, mailbox.gpa, mailbox.io);
+                pair.sender.deinit();
+                return .{ .inner = pair.receiver };
+            };
+            assert(parent_height.get() + 1 == block.height().get());
+            const receiver = try mailbox.subscribe_by_commitment(block.context().parent[1], .{
+                .fetch_by_commitment = parent_height,
+            });
+            return .{ .inner = receiver };
+        }
+
+        /// A receiver of a coded parent that yields its application block.
+        pub const ParentReceiver = struct {
+            inner: oneshot.Receiver(Block),
+
+            pub fn recv(self: *ParentReceiver) oneshot.RecvError!broadcast.Digested(B) {
+                return into_shared(try self.inner.recv());
+            }
+
+            pub fn try_recv(self: *ParentReceiver) oneshot.TryRecvError!broadcast.Digested(B) {
+                return into_shared(try self.inner.try_recv());
+            }
+
+            pub fn deinit(self: *ParentReceiver) void {
+                self.inner.deinit();
+                self.* = undefined;
+            }
+        };
 
         /// The application's block under `payload`, which must commit to it; its shards are
         /// coded on demand.

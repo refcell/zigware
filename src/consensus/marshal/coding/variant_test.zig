@@ -3,6 +3,7 @@
 //! Zig block is shared by handle, so the tests check that the handles share instead.
 
 const std = @import("std");
+const actor = @import("actor");
 const testing = std.testing;
 const codec = @import("codec");
 const coding = @import("coding");
@@ -12,6 +13,8 @@ const utils = @import("utils");
 
 const variant = @import("variant.zig");
 const core_variant = @import("../core/variant.zig");
+const core_mailbox = @import("../core/mailbox.zig");
+const ancestry = @import("../ancestry.zig");
 const commitment_module = @import("../../commitment.zig");
 const mocks_block = @import("../mocks/block.zig");
 const simplex_types = @import("../../simplex/types.zig");
@@ -177,4 +180,56 @@ test "check payload requires the committee's coding config" {
     try testing.expect(!V.check_payload(Scheme{ .count = 5 }, four));
     const one: TestCommitment = .init(.empty, .empty, .empty, config);
     try testing.expect(!V.check_payload(Scheme{ .count = 4 }, one));
+}
+
+/// A scheme whose certificates are plain integers: the mailbox never inspects them.
+const PlainScheme = struct {
+    pub const Certificate = u64;
+    pub const PublicKey = cryptography.ed25519.PublicKey;
+};
+
+test "subscribe parent fetches the parent by its coding commitment" {
+    const Message = core_mailbox.Message(PlainScheme, V);
+    const Mailbox = core_mailbox.Mailbox(PlainScheme, V);
+    comptime ancestry.assert_block_provider(Mailbox);
+    var pair = try actor.mailbox.new(Message, gpa, testing.io, 4);
+    defer pair.receiver.deinit();
+    var provider: Mailbox = .init(gpa, testing.io, pair.sender, 1);
+    defer provider.deinit();
+
+    // The child's context names its parent's coding commitment, which the request carries.
+    var parent = try encode_block(try test_block());
+    defer parent.deinit(gpa);
+    var rng = utils.test_rng();
+    const context: TestContext = .{
+        .round = .new(.new(1), .new(3)),
+        .leader = PrivateKey.random(&rng).public_key(),
+        .parent = .{ .new(2), parent.commitment() },
+    };
+    const inner = try InnerBlock.init(gpa, context, parent.digest(), .new(8), 1_234_568);
+    var child = try mocks_block.ready(InnerBlock, gpa, inner);
+    defer child.deinit();
+    var receiver = try provider.subscribe_parent(&child);
+    defer receiver.deinit();
+    const request = try pair.receiver.try_recv();
+    var body = request.body.subscribe_by_commitment;
+    try testing.expect(body.commitment.eql(parent.commitment()));
+    try testing.expectEqual(7, body.fallback.fetch_by_commitment.get());
+    try testing.expectError(error.Empty, receiver.try_recv());
+
+    // The coded parent arrives as its application block.
+    try body.response.send(parent.clone());
+    var delivered = try receiver.try_recv();
+    defer delivered.deinit();
+    try testing.expect(delivered.digest().eql(parent.digest()));
+    try testing.expectEqual(parent.inner(), delivered.inner());
+
+    // Genesis has no parent: its receiver is closed and nothing is sent.
+    const genesis_inner = try InnerBlock.init(gpa, context, Sha256.Digest.empty, .zero(), 0);
+    var genesis = try mocks_block.ready(InnerBlock, gpa, genesis_inner);
+    defer genesis.deinit();
+    var none = try provider.subscribe_parent(&genesis);
+    defer none.deinit();
+    try testing.expectError(error.Closed, none.try_recv());
+    try testing.expectError(error.Empty, pair.receiver.try_recv());
 }

@@ -700,9 +700,16 @@ pub fn Mailbox(comptime S: type, comptime V: type) type {
         pub fn subscribe_parent(
             self: *const Self,
             child: *const Shared,
-        ) Allocator.Error!oneshot.Receiver(Shared) {
+        ) Allocator.Error!ParentReceiver {
             return V.subscribe_parent(self.*, child);
         }
+
+        /// The receiver `V.subscribe_parent` returns: `oneshot.Receiver(Shared)`, or a
+        /// variant's receiver of `Shared` with the same `recv`, `try_recv`, and `deinit`.
+        pub const ParentReceiver = @typeInfo(@TypeOf(V.subscribe_parent(
+            @as(Self, undefined),
+            @as(*const Shared, undefined),
+        ))).error_union.payload;
 
         /// A fetching ancestor stream from `initial` (owned, any order, contiguous), with its
         /// own clone of the mailbox. Callers must already hold a block that is safe to verify,

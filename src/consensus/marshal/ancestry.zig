@@ -37,9 +37,10 @@ pub fn assert_ancestry(comptime A: type) void {
 }
 
 /// Asserts `M` implements `BlockProvider`: `M.Block` and
-/// `subscribe_parent(*M, *const Digested(Block)) !oneshot.Receiver(Digested(Block))`, whose
-/// receiver closes without a value once the provider can no longer obtain the parent. A
-/// provider that declares `clone() M` and `deinit(*M)` is cloned with each stream.
+/// `subscribe_parent(*M, *const Digested(Block)) !oneshot.Receiver(Digested(Block))` (or another
+/// receiver of `Digested(Block)` with `recv`, `try_recv`, and `deinit`), whose receiver closes
+/// without a value once the provider can no longer obtain the parent. A provider that
+/// declares `clone() M` and `deinit(*M)` is cloned with each stream.
 pub fn assert_block_provider(comptime M: type) void {
     comptime {
         for (.{ "Block", "subscribe_parent" }) |decl| {
@@ -232,6 +233,13 @@ pub fn with_prefix(
     return .{ .gpa = gpa, .prefix = prefix, .tail = tail, .boundary_child = boundary_child };
 }
 
+/// The receiver `M.subscribe_parent` returns.
+pub fn ParentReceiver(comptime M: type) type {
+    const D = broadcast.Digested(M.Block);
+    const Return = @TypeOf(M.subscribe_parent(@as(*M, undefined), @as(*const D, undefined)));
+    return @typeInfo(Return).error_union.payload;
+}
+
 /// Yields the ancestors of its initial blocks, including the height-zero genesis block when
 /// the provider has it, subscribing to each parent through the provider `M`
 /// (commonware `AncestorStream`). The stream ends when the provider cannot obtain a parent or
@@ -251,7 +259,9 @@ pub fn AncestorStream(comptime M: type) type {
         buffered: std.ArrayList(D),
         /// The block whose parent is being fetched, and the fetch.
         pending_child: ?D = null,
-        pending: ?oneshot.Receiver(D) = null,
+        /// The provider's parent receiver: `oneshot.Receiver(D)`, or any receiver with the same
+        /// `recv`, `try_recv`, and `deinit`.
+        pending: ?ParentReceiver(M) = null,
         timer: ?Timer = null,
 
         /// A stream from `initial` (any order, taking ownership), which must form a contiguous
