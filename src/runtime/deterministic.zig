@@ -219,6 +219,9 @@ pub const Runner = struct {
     /// The metrics registry; it carries over between starts. Release every handle before
     /// `deinit`.
     metrics_registry: telemetry.metrics.Registry,
+    /// `runtime_iterations` (commonware's executor metric): scheduler cycles run. Registered
+    /// by the first `start`, once the runner no longer moves (a handle points at its registry).
+    iterations_counter: ?telemetry.metrics.Registered(telemetry.metrics.raw.Counter) = null,
 
     pub fn init(allocator: std.mem.Allocator, config: Config) Error!Runner {
         config.validate();
@@ -254,6 +257,7 @@ pub const Runner = struct {
         runner.memory_storage.deinit();
         if (runner.context_runtime) |*runtime| runtime.deinit();
         if (runner.simulated_network) |*net| net.deinit();
+        if (runner.iterations_counter) |*counter| counter.deinit();
         runner.metrics_registry.deinit();
         runner.* = undefined;
     }
@@ -339,6 +343,11 @@ pub const Runner = struct {
         // handles from the previous run can no longer publish.
         if (runner.starts > 0) runner.memory_storage.crash();
         runner.starts += 1;
+        if (runner.iterations_counter == null) {
+            const scope = runner.metrics().sub_registry("runtime");
+            const help = "Total number of iterations";
+            runner.iterations_counter = try scope.counter("iterations", help);
+        }
         const root = try runner.spawn_task(
             std.mem.asBytes(&args),
             .of(Args),
@@ -565,6 +574,7 @@ pub const Runner = struct {
                 @panic("deterministic: executor time overflowed");
             try runner.wake_until_progress();
             runner.iterations += 1;
+            runner.iterations_counter.?.metric().inc();
         }
     }
 
@@ -1036,6 +1046,15 @@ test "idle time is skipped, not cycled through (test_simulated_skip)" {
     try (try runner.start(Root.run, .{runner.io()}));
     try testing.expect(runner.now_ns() >= 3600 * std.time.ns_per_s);
     try testing.expect(runner.iterations < 5);
+    // commonware reads the count from the exposition.
+    const encoded = try runner.metrics().encode(testing.allocator);
+    defer testing.allocator.free(encoded);
+    const prefix = "runtime_iterations_total ";
+    const at = std.mem.indexOf(u8, encoded, prefix).?;
+    const rest = encoded[at + prefix.len ..];
+    const value = try std.fmt.parseInt(u64, rest[0..std.mem.indexOfScalar(u8, rest, '\n').?], 10);
+    try testing.expectEqual(runner.iterations, value);
+    try testing.expect(value < 10);
 }
 
 test "timeout fires (test_timeout)" {

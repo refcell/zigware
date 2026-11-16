@@ -32,8 +32,18 @@ test "runner metrics (test_metrics on the deterministic runtime)" {
     const scope = runner.metrics();
     try std.testing.expectEqualStrings("", scope.prefix());
     try (try runner.start(Root.run, .{ runner.io(), &scope }));
-    // Metrics released by the root are gone; the registry carries over to the next start.
+    // Metrics released by the root are gone and the runtime's own remain; the registry carries
+    // over to the next start.
     const text = try scope.encode(std.testing.allocator);
     defer std.testing.allocator.free(text);
-    try std.testing.expectEqualStrings("# EOF\n", text);
+    const expected = try std.fmt.allocPrint(std.testing.allocator,
+        \\# HELP runtime_iterations Total number of iterations.
+        \\# TYPE runtime_iterations counter
+        \\runtime_iterations_total {d}
+        \\# EOF
+        \\
+    , .{runner.iterations});
+    defer std.testing.allocator.free(expected);
+    try std.testing.expect(runner.iterations > 0);
+    try std.testing.expectEqualStrings(expected, text);
 }
