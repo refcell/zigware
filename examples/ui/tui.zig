@@ -1,4 +1,4 @@
-//! The slice of ratatui 0.30 (with its crossterm backend) that chat's handler draws with:
+//! The slice of ratatui 0.30 (with its crossterm backend) the examples' UIs draw with:
 //! percentage layouts, bordered blocks with a title, and scrolled, truncated paragraphs,
 //! rendered into a cell buffer and written to the terminal as ratatui's buffer diff.
 //!
@@ -13,19 +13,23 @@ const Allocator = std.mem.Allocator;
 const Writer = std.Io.Writer;
 const tables = @import("unicode_tables.zig");
 
-/// The foreground colors chat uses; ratatui's `Color::Red` and friends map to crossterm's
-/// dark variants, written as 256-color indexes.
+/// The foreground colors the examples use; ratatui's `Color::Red` and friends map to
+/// crossterm's dark variants, written as 256-color indexes.
 pub const Color = enum(u8) {
     reset,
     red,
+    green,
     yellow,
+    blue,
     cyan,
 
     fn sgr(color: Color) []const u8 {
         return switch (color) {
             .reset => "39",
             .red => "38;5;1",
+            .green => "38;5;2",
             .yellow => "38;5;3",
+            .blue => "38;5;4",
             .cyan => "38;5;6",
         };
     }

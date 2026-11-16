@@ -1,5 +1,6 @@
-//! The real terminal for chat: crossterm's raw mode (`cfmakeraw`), the alternate screen, the
-//! window size, and keyboard input read from stdin with a `tick_ms` poll.
+//! The terminal: crossterm's raw mode (`cfmakeraw`), the alternate screen, the window size,
+//! and keyboard input read from stdin with a `tick_ms` poll, behind the `Device` interface
+//! the examples' UIs draw to (tests substitute their own).
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -7,7 +8,24 @@ const assert = std.debug.assert;
 const posix = std.posix;
 const Io = std.Io;
 const tui = @import("tui.zig");
-const handler = @import("handler.zig");
+
+/// How often a keyboard read gives up without input (commonware's 500 ms `event::poll`).
+pub const tick_ms = 500;
+
+/// Where keys come from: `read` fills `buffer` with input bytes, returning null when none
+/// arrived within `tick_ms` and an error once input is gone.
+pub const Keyboard = struct {
+    context: *anyopaque,
+    read: *const fn (context: *anyopaque, io: Io, buffer: []u8) anyerror!?usize,
+};
+
+/// A terminal: its size, where frames go, and its keyboard.
+pub const Device = struct {
+    out: *Io.Writer,
+    context: *anyopaque,
+    size: *const fn (context: *anyopaque) tui.Rect,
+    keyboard: Keyboard,
+};
 
 pub const Terminal = struct {
     io: Io,
@@ -69,8 +87,13 @@ pub const Terminal = struct {
         return .{ .width = winsize.col, .height = winsize.row };
     }
 
-    pub fn keyboard(terminal: *Terminal) handler.Keyboard {
+    pub fn keyboard(terminal: *Terminal) Keyboard {
         return .{ .context = terminal, .read = read };
+    }
+
+    /// This terminal as a `Device` drawing to `out`.
+    pub fn device(terminal: *Terminal, out: *Io.Writer) Device {
+        return .{ .out = out, .context = terminal, .size = size, .keyboard = terminal.keyboard() };
     }
 
     /// Waits up to `tick_ms` for stdin, then reads what is there; EOF ends input.
@@ -79,7 +102,7 @@ pub const Terminal = struct {
         assert(buffer.len > 0);
         const stdin = Io.File.stdin().handle;
         var fds = [1]posix.pollfd{.{ .fd = stdin, .events = posix.POLL.IN, .revents = 0 }};
-        const ready = try posix.poll(&fds, handler.tick_ms);
+        const ready = try posix.poll(&fds, tick_ms);
         try io.checkCancel();
         if (ready == 0) return null;
         const count = try Io.File.stdin().readStreaming(io, &.{buffer});

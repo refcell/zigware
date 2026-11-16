@@ -1,6 +1,8 @@
 # Lane: examples-estimator
 
-Owns `examples/estimator/`, `examples/flood/`, `examples/chat/`, their entries in
+Owns `examples/estimator/`, `examples/flood/`, `examples/chat/`, `examples/log/`,
+`examples/bridge/`, `examples/ui/` (the terminal UI, clap, and Rust-parsing support the
+examples share, the `ui` module in `build.zig`), their entries in
 `build.zig`'s `examples` list, and their recipes in `etc/scripts/record-demo.sh`. The estimator is
 zigware's first runnable example and the first README demo.
 
@@ -54,6 +56,14 @@ statistics, output, CLI) and run against a minimal in-lane stand-in, then switch
   (#3324); the Metrics pane shows `network_tracker_directory_connected` samples, one per
   connected friend, instead.
 
+- log's simplex `Blocker` wraps discovery's `Oracle`: simplex's resolver opens the
+  blocked-peer subscription with `try` (as `p2p.simulated` returns it), while discovery's
+  `Oracle.blocked()` cannot fail. Drop the wrapper once the two agree.
+- log's Logs pane is empty: zigware's p2p and consensus record no tracing events yet, and,
+  as in commonware, `main`'s own events come before the GUI installs its writer.
+- log's application events are strings in tracing (`%view`, `?payload`, `hex(..)`), so its
+  Activity lines quote every value (`view="7"`), as gui.rs prints them.
+
 ## Backlog
 - [x] `.lazy` DSL parser and task model, with lib.rs's parser tests. Copy the `.lazy` files and
   p50/p90 latency data into `examples/estimator/` (they are public data in the repo).
@@ -85,6 +95,17 @@ statistics, output, CLI) and run against a minimal in-lane stand-in, then switch
   in tmux and quit cleanly on ESC.
 - [x] Demo recipe and recording: docs/assets/chat-demo.{gif,mp4} (3 friends in tmux).
 
+### log (commonware `examples/log`)
+- [x] CLI (clap's text for 52 cases from `commonware-log`, and main's panics), application,
+  reporter, and GUI (Activity and Logs, gui.rs's Writer lines). 4 validators running log's
+  application finalize on simplex over p2p.simulated.
+- [x] Binary on the production runner over discovery with `--storage-dir`; 4 local
+  validators finalize over TCP, and a restarted one resumes from its journal.
+- [ ] Demo recipe and recording (4 validators showing finalizations).
+
+### bridge (commonware `examples/bridge`)
+- [ ] Port after log's demo.
+
 ## Log
 - 2026-11-13: DSL parser, latency data, statistics, clap-identical CLI, colored output, and
   the simulation on runtime.deterministic + p2p.simulated. `zig build run-estimator` works.
@@ -95,3 +116,5 @@ statistics, output, CLI) and run against a minimal in-lane stand-in, then switch
   and the handler tested on p2p.simulated.
 
 - 2026-11-16: flood runs on the production runner over discovery, with local.sh and demo.sh.
+- 2026-11-16: chat demo recorded; shared `examples/ui` (tui, keys, clock, logger, clap).
+- 2026-11-16: log ported and running on 4 local validators over discovery.

@@ -85,9 +85,10 @@ const packages = [_]Package{
     .{ .name = "deployer", .deps = &.{ "cryptography", "utils" } },
 };
 
-/// Example binaries at `examples/<name>/main.zig`; each may import any package.
+/// Example binaries at `examples/<name>/main.zig`; each may import any package and `ui`
+/// (`examples/ui/root.zig`, the terminal UI the examples share).
 /// Add an example here once its main.zig exists.
-const examples = [_][]const u8{ "estimator", "flood", "chat" };
+const examples = [_][]const u8{ "estimator", "flood", "chat", "log" };
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
@@ -254,6 +255,12 @@ fn add_examples(
     check_step: *std.Build.Step,
     filters: []const []const u8,
 ) void {
+    const ui = b.createModule(.{
+        .root_source_file = b.path("examples/ui/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "zigware", .module = zigware }},
+    });
     for (examples) |name| {
         const root = b.createModule(.{
             .root_source_file = b.path(b.fmt("examples/{s}/main.zig", .{name})),
@@ -262,6 +269,7 @@ fn add_examples(
             .imports = &.{
                 .{ .name = "zigware", .module = zigware },
                 .{ .name = "build_options", .module = options_module },
+                .{ .name = "ui", .module = ui },
             },
         });
         const exe = b.addExecutable(.{ .name = name, .root_module = root });

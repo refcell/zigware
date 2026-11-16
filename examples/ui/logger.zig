@@ -1,18 +1,19 @@
-//! Log lines for chat's Logs pane (commonware `examples/chat/src/logger.rs`).
+//! Log lines from tracing's JSON events, as the tracing-subscriber writers of commonware's
+//! examples print them (`examples/chat/src/logger.rs`, `examples/log/src/gui.rs`).
 //!
-//! Commonware prints tracing's JSON events as `[MM/DD HH:MM:SS|LEVEL] target => message (k=v
-//! ...)`: the event's fields sorted by name (serde_json's map order), then the innermost
-//! span's name and fields, then `spans=` with every span as compact JSON, outermost first. A
-//! line without fields drops its `()`. zigware records events through a `traces.Collector`,
-//! which keeps field values as text, so a value prints bare when it reads as a JSON number,
-//! `true`, or `false` (as tracing's numeric and boolean fields do) and quoted otherwise.
+//! Each writer starts a line with its own header (chat: `[MM/DD HH:MM:SS|LEVEL] target => `)
+//! and the message, then adds ` (k=v ...)`: the event's fields sorted by name (serde_json's
+//! map order), then the innermost span's name and fields, then `spans=` with every span as
+//! compact JSON, outermost first. A line without fields drops its `()`. zigware records
+//! events through a `traces.Collector`, which keeps field values as text, so a value prints
+//! bare when it reads as a JSON number, `true`, or `false` (as tracing's numeric and boolean
+//! fields do) and quoted otherwise.
 
 const std = @import("std");
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const Writer = std.Io.Writer;
 const zigware = @import("zigware");
-const clock = @import("clock.zig");
 
 const traces = zigware.runtime.telemetry.traces;
 const Field = traces.collector.Field;
@@ -21,11 +22,24 @@ pub const RecordedEvent = traces.collector.RecordedEvent;
 /// Most fields printed from one event or span.
 const field_count_max = 64;
 
-/// Formats `event`, recorded at `utc_seconds`, as one log line owned by the caller.
-pub fn format(gpa: Allocator, utc_seconds: i64, event: RecordedEvent) Allocator.Error![]u8 {
+/// How field values print.
+pub const Values = enum {
+    /// Bare when the text reads as a JSON number or boolean, quoted otherwise.
+    inferred,
+    /// Always quoted: every field was recorded as a string (`%value`, `?value`, `String`).
+    strings,
+};
+
+/// Formats `event` as one log line owned by the caller: `header`, the message, and its fields.
+pub fn format(
+    gpa: Allocator,
+    header: []const u8,
+    event: RecordedEvent,
+    values: Values,
+) Allocator.Error![]u8 {
     var out: Writer.Allocating = .init(gpa);
     defer out.deinit();
-    write_raw(&out.writer, utc_seconds, event) catch return error.OutOfMemory;
+    write_raw(&out.writer, header, event, values) catch return error.OutOfMemory;
     // `format!("{})", log_message.trim_end())`, then `.replace("()", "")`, then `trim_end`.
     const raw = trim_end(out.written());
     const closed = try std.mem.concat(gpa, u8, &.{ raw, ")" });
@@ -37,19 +51,18 @@ pub fn format(gpa: Allocator, utc_seconds: i64, event: RecordedEvent) Allocator.
     return gpa.dupe(u8, line);
 }
 
-fn write_raw(writer: *Writer, utc_seconds: i64, event: RecordedEvent) Writer.Error!void {
-    const stamp = clock.stamp(utc_seconds);
-    try writer.print("[{s}|{s}] {s} => {s} (", .{
-        &stamp,
-        level_name(event.level),
-        event.target,
-        event.metadata.content,
-    });
+fn write_raw(
+    writer: *Writer,
+    header: []const u8,
+    event: RecordedEvent,
+    values: Values,
+) Writer.Error!void {
+    try writer.print("{s}{s} (", .{ header, event.metadata.content });
     // Top-level keys in serde_json order: fields, level, span, spans, target, timestamp.
-    try write_pairs(writer, null, event.metadata.fields);
+    try write_pairs(writer, null, event.metadata.fields, values);
     if (event.spans.len == 0) return;
     const innermost = event.spans[0];
-    try write_pairs(writer, innermost.content, innermost.fields);
+    try write_pairs(writer, innermost.content, innermost.fields, values);
     try writer.writeAll("spans=[");
     var index = event.spans.len;
     while (index > 0) {
@@ -61,7 +74,8 @@ fn write_raw(writer: *Writer, utc_seconds: i64, event: RecordedEvent) Writer.Err
     try writer.writeAll("] ");
 }
 
-fn level_name(level: traces.Level) []const u8 {
+/// tracing's level names.
+pub fn level_name(level: traces.Level) []const u8 {
     return switch (level) {
         .trace => "TRACE",
         .debug => "DEBUG",
@@ -73,13 +87,20 @@ fn level_name(level: traces.Level) []const u8 {
 
 /// `key=value ` for each field in name order, with a span's `name` among them, skipping the
 /// keys logger.rs skips.
-fn write_pairs(writer: *Writer, span_name: ?[]const u8, fields: []const Field) Writer.Error!void {
+fn write_pairs(
+    writer: *Writer,
+    span_name: ?[]const u8,
+    fields: []const Field,
+    values: Values,
+) Writer.Error!void {
     var sorted: [field_count_max + 1]Field = undefined;
     const pairs = sort_fields(&sorted, span_name, fields);
     for (pairs) |pair| {
         if (is_skipped(pair.name)) continue;
         try writer.print("{s}=", .{pair.name});
-        try write_value(writer, pair.value);
+        if (values == .strings) try write_string(writer, pair.value) else {
+            try write_value(writer, pair.value);
+        }
         try writer.writeByte(' ');
     }
 }

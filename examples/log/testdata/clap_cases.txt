@@ -1,0 +1,394 @@
+### 
+exit=2
+error: the following required arguments were not provided:
+  --me <me>
+  --participants <participants>
+  --storage-dir <storage-dir>
+
+Usage: commonware-log --me <me> --participants <participants> --storage-dir <storage-dir>
+
+For more information, try '--help'.
+### --help
+exit=0
+generate secret logs and agree on their hash
+
+Usage: commonware-log [OPTIONS] --me <me> --participants <participants> --storage-dir <storage-dir>
+
+Options:
+      --bootstrappers <bootstrappers>  
+      --me <me>                        
+      --participants <participants>    All participant keys (arbiter and contributors), including your own
+      --storage-dir <storage-dir>      
+  -h, --help                           Print help
+### -h
+exit=0
+generate secret logs and agree on their hash
+
+Usage: commonware-log [OPTIONS] --me <me> --participants <participants> --storage-dir <storage-dir>
+
+Options:
+      --bootstrappers <bootstrappers>  
+      --me <me>                        
+      --participants <participants>    All participant keys (arbiter and contributors), including your own
+      --storage-dir <storage-dir>      
+  -h, --help                           Print help
+### --me 1 --me
+exit=2
+error: a value is required for '--me <me>' but none was supplied
+
+For more information, try '--help'.
+### --participants x --participants
+exit=2
+error: invalid value 'x' for '--participants <participants>': invalid digit found in string
+
+For more information, try '--help'.
+### --participants x --help
+exit=2
+error: invalid value 'x' for '--participants <participants>': invalid digit found in string
+
+For more information, try '--help'.
+### --participants x foo
+exit=2
+error: unexpected argument 'foo' found
+
+Usage: commonware-log [OPTIONS] --me <me> --participants <participants> --storage-dir <storage-dir>
+
+For more information, try '--help'.
+### --participants x --mee
+exit=2
+error: unexpected argument '--mee' found
+
+  tip: a similar argument exists: '--me'
+
+Usage: commonware-log --me <me> --participants <participants> --storage-dir <storage-dir>
+
+For more information, try '--help'.
+### --participants x -h
+exit=2
+error: invalid value 'x' for '--participants <participants>': invalid digit found in string
+
+For more information, try '--help'.
+### --participants=x --me 1
+exit=2
+error: invalid value 'x' for '--participants <participants>': invalid digit found in string
+
+For more information, try '--help'.
+### --me --participants 1
+exit=2
+error: a value is required for '--me <me>' but none was supplied
+
+For more information, try '--help'.
+### --participants 1 -- x
+exit=2
+error: unexpected argument 'x' found
+
+Usage: commonware-log [OPTIONS] --me <me> --participants <participants> --storage-dir <storage-dir>
+
+For more information, try '--help'.
+### --participants 1 --participants 2
+exit=2
+error: the argument '--participants <participants>' cannot be used multiple times
+
+Usage: commonware-log [OPTIONS] --me <me> --participants <participants> --storage-dir <storage-dir>
+
+For more information, try '--help'.
+### --me -1
+exit=2
+error: unexpected argument '-1' found
+
+Usage: commonware-log [OPTIONS] --me <me> --participants <participants> --storage-dir <storage-dir>
+
+For more information, try '--help'.
+### --me=
+exit=2
+error: the following required arguments were not provided:
+  --participants <participants>
+  --storage-dir <storage-dir>
+
+Usage: commonware-log --me <me> --participants <participants> --storage-dir <storage-dir>
+
+For more information, try '--help'.
+### --participants x --me=1
+exit=2
+error: invalid value 'x' for '--participants <participants>': invalid digit found in string
+
+For more information, try '--help'.
+### --help --participants x
+exit=0
+generate secret logs and agree on their hash
+
+Usage: commonware-log [OPTIONS] --me <me> --participants <participants> --storage-dir <storage-dir>
+
+Options:
+      --bootstrappers <bootstrappers>  
+      --me <me>                        
+      --participants <participants>    All participant keys (arbiter and contributors), including your own
+      --storage-dir <storage-dir>      
+  -h, --help                           Print help
+### --participants x --help=2
+exit=2
+error: unexpected value '2' for '--help' found; no more were expected
+
+Usage: commonware-log --me <me> --participants <participants> --storage-dir <storage-dir> --help
+
+For more information, try '--help'.
+### --participants 1 --participants=x
+exit=2
+error: the argument '--participants <participants>' cannot be used multiple times
+
+Usage: commonware-log [OPTIONS] --me <me> --participants <participants> --storage-dir <storage-dir>
+
+For more information, try '--help'.
+### -h --foo
+exit=0
+generate secret logs and agree on their hash
+
+Usage: commonware-log [OPTIONS] --me <me> --participants <participants> --storage-dir <storage-dir>
+
+Options:
+      --bootstrappers <bootstrappers>  
+      --me <me>                        
+      --participants <participants>    All participant keys (arbiter and contributors), including your own
+      --storage-dir <storage-dir>      
+  -h, --help                           Print help
+### --foo -h
+exit=2
+error: unexpected argument '--foo' found
+
+Usage: commonware-log [OPTIONS] --me <me> --participants <participants> --storage-dir <storage-dir>
+
+For more information, try '--help'.
+### --me 1 --help
+exit=0
+generate secret logs and agree on their hash
+
+Usage: commonware-log [OPTIONS] --me <me> --participants <participants> --storage-dir <storage-dir>
+
+Options:
+      --bootstrappers <bootstrappers>  
+      --me <me>                        
+      --participants <participants>    All participant keys (arbiter and contributors), including your own
+      --storage-dir <storage-dir>      
+  -h, --help                           Print help
+### -hx
+exit=0
+generate secret logs and agree on their hash
+
+Usage: commonware-log [OPTIONS] --me <me> --participants <participants> --storage-dir <storage-dir>
+
+Options:
+      --bootstrappers <bootstrappers>  
+      --me <me>                        
+      --participants <participants>    All participant keys (arbiter and contributors), including your own
+      --storage-dir <storage-dir>      
+  -h, --help                           Print help
+### --participants x -x
+exit=2
+error: unexpected argument '-x' found
+
+Usage: commonware-log [OPTIONS] --me <me> --participants <participants> --storage-dir <storage-dir>
+
+For more information, try '--help'.
+### --me=1 --me=2
+exit=2
+error: the argument '--me <me>' cannot be used multiple times
+
+Usage: commonware-log [OPTIONS] --me <me> --participants <participants> --storage-dir <storage-dir>
+
+For more information, try '--help'.
+### --storage-dir a --storage-dir
+exit=2
+error: a value is required for '--storage-dir <storage-dir>' but none was supplied
+
+For more information, try '--help'.
+### --me 1 --mee 2
+exit=2
+error: unexpected argument '--mee' found
+
+  tip: a similar argument exists: '--me'
+
+Usage: commonware-log --me <me> --participants <participants> --storage-dir <storage-dir>
+
+For more information, try '--help'.
+### --participants 1 --bootstrappers a --me 1 --foo
+exit=2
+error: unexpected argument '--foo' found
+
+Usage: commonware-log --me <me> --participants <participants> --storage-dir <storage-dir> --bootstrappers <bootstrappers>
+
+For more information, try '--help'.
+### --
+exit=2
+error: the following required arguments were not provided:
+  --me <me>
+  --participants <participants>
+  --storage-dir <storage-dir>
+
+Usage: commonware-log --me <me> --participants <participants> --storage-dir <storage-dir>
+
+For more information, try '--help'.
+### --participants x --
+exit=2
+error: invalid value 'x' for '--participants <participants>': invalid digit found in string
+
+For more information, try '--help'.
+### -
+exit=2
+error: unexpected argument '-' found
+
+Usage: commonware-log [OPTIONS] --me <me> --participants <participants> --storage-dir <storage-dir>
+
+For more information, try '--help'.
+### --participants x -
+exit=2
+error: unexpected argument '-' found
+
+Usage: commonware-log [OPTIONS] --me <me> --participants <participants> --storage-dir <storage-dir>
+
+For more information, try '--help'.
+### --participants 1,,2 --me 1@1 --storage-dir a
+exit=2
+error: invalid value '' for '--participants <participants>': cannot parse integer from empty string
+
+For more information, try '--help'.
+### --participants 99999999999999999999
+exit=2
+error: invalid value '99999999999999999999' for '--participants <participants>': number too large to fit in target type
+
+For more information, try '--help'.
+### --storage 1
+exit=2
+error: unexpected argument '--storage' found
+
+  tip: a similar argument exists: '--storage-dir'
+
+Usage: commonware-log --me <me> --participants <participants> --storage-dir <storage-dir>
+
+For more information, try '--help'.
+### --participant 1
+exit=2
+error: unexpected argument '--participant' found
+
+  tip: a similar argument exists: '--participants'
+
+Usage: commonware-log --me <me> --participants <participants> --storage-dir <storage-dir>
+
+For more information, try '--help'.
+### --bootstrapper 1
+exit=2
+error: unexpected argument '--bootstrapper' found
+
+  tip: a similar argument exists: '--bootstrappers'
+
+Usage: commonware-log --me <me> --participants <participants> --storage-dir <storage-dir> --bootstrappers <bootstrappers>
+
+For more information, try '--help'.
+### --storage-dir a --me 1 --participants 1 --bootstrappers 1 --x
+exit=2
+error: unexpected argument '--x' found
+
+Usage: commonware-log --me <me> --participants <participants> --storage-dir <storage-dir> --bootstrappers <bootstrappers>
+
+For more information, try '--help'.
+### --hel
+exit=2
+error: unexpected argument '--hel' found
+
+  tip: a similar argument exists: '--help'
+
+Usage: commonware-log --me <me> --participants <participants> --storage-dir <storage-dir> --help
+
+For more information, try '--help'.
+### --bootstrappers a --help=x
+exit=2
+error: unexpected value 'x' for '--help' found; no more were expected
+
+Usage: commonware-log --me <me> --participants <participants> --storage-dir <storage-dir> --help
+
+For more information, try '--help'.
+### --bootstrappers a --foo
+exit=2
+error: unexpected argument '--foo' found
+
+Usage: commonware-log --me <me> --participants <participants> --storage-dir <storage-dir> --bootstrappers <bootstrappers>
+
+For more information, try '--help'.
+### --bootstrappers a --mee
+exit=2
+error: unexpected argument '--mee' found
+
+  tip: a similar argument exists: '--me'
+
+Usage: commonware-log --me <me> --participants <participants> --storage-dir <storage-dir> --bootstrappers <bootstrappers>
+
+For more information, try '--help'.
+### --bootstrappers a foo
+exit=2
+error: unexpected argument 'foo' found
+
+Usage: commonware-log [OPTIONS] --me <me> --participants <participants> --storage-dir <storage-dir>
+
+For more information, try '--help'.
+### --bootstrappers=a --foo
+exit=2
+error: unexpected argument '--foo' found
+
+Usage: commonware-log --me <me> --participants <participants> --storage-dir <storage-dir> --bootstrappers <bootstrappers>
+
+For more information, try '--help'.
+### --bootstrappers a --me 1 --help=x
+exit=2
+error: unexpected value 'x' for '--help' found; no more were expected
+
+Usage: commonware-log --me <me> --participants <participants> --storage-dir <storage-dir> --bootstrappers <bootstrappers> --help
+
+For more information, try '--help'.
+### --bootstrappers a --me
+exit=2
+error: a value is required for '--me <me>' but none was supplied
+
+For more information, try '--help'.
+### --me 1 --bootstrappers a --help=x
+exit=2
+error: unexpected value 'x' for '--help' found; no more were expected
+
+Usage: commonware-log --me <me> --participants <participants> --storage-dir <storage-dir> --help
+
+For more information, try '--help'.
+### --me --foo
+exit=2
+error: unexpected argument '--foo' found
+
+Usage: commonware-log [OPTIONS] --me <me> --participants <participants> --storage-dir <storage-dir>
+
+For more information, try '--help'.
+### --bootstrappers --help=x
+exit=2
+error: unexpected value 'x' for '--help' found; no more were expected
+
+Usage: commonware-log --me <me> --participants <participants> --storage-dir <storage-dir> --help
+
+For more information, try '--help'.
+### --bootstrappers --mee
+exit=2
+error: unexpected argument '--mee' found
+
+  tip: a similar argument exists: '--me'
+
+Usage: commonware-log --me <me> --participants <participants> --storage-dir <storage-dir>
+
+For more information, try '--help'.
+### --participants x --help=y
+exit=2
+error: unexpected value 'y' for '--help' found; no more were expected
+
+Usage: commonware-log --me <me> --participants <participants> --storage-dir <storage-dir> --help
+
+For more information, try '--help'.
+### --bootstrappers a -x
+exit=2
+error: unexpected argument '-x' found
+
+Usage: commonware-log [OPTIONS] --me <me> --participants <participants> --storage-dir <storage-dir>
+
+For more information, try '--help'.

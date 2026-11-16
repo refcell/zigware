@@ -8,10 +8,12 @@ const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const zigware = @import("zigware");
-const tui = @import("tui.zig");
-const keys = @import("keys.zig");
-const clock = @import("clock.zig");
-const logger = @import("logger.zig");
+const ui = @import("ui");
+const tui = ui.tui;
+const keys = ui.keys;
+const clock = ui.clock;
+const logger = ui.logger;
+const terminal = ui.terminal;
 
 const traces = zigware.runtime.telemetry.traces;
 const metrics = zigware.runtime.telemetry.metrics;
@@ -20,8 +22,6 @@ const metrics = zigware.runtime.telemetry.metrics;
 pub const channel: u64 = 0;
 /// Rows a pane's borders take.
 const height_offset: u16 = 2;
-/// How often the keyboard task ticks (the cursor blink) without input.
-pub const tick_ms = 500;
 /// Capacity of the event queue between the input tasks and the UI.
 const event_queue_size = 100;
 /// The log target of the handler's events.
@@ -83,7 +83,7 @@ pub const State = struct {
         const events = collector.events.items;
         assert(state.logs_seen <= events.len);
         while (state.logs_seen < events.len) : (state.logs_seen += 1) {
-            const line = try logger.format(state.gpa, utc_seconds, events[state.logs_seen]);
+            const line = try log_line(state.gpa, utc_seconds, events[state.logs_seen]);
             defer state.gpa.free(line);
             try state.push_log(line);
         }
@@ -245,21 +245,6 @@ pub fn short_name(hex: []const u8) [10]u8 {
     return name;
 }
 
-/// Where keys come from: `read` fills `buffer` with input bytes, returning null when none
-/// arrived within `tick_ms` and an error once input is gone.
-pub const Keyboard = struct {
-    context: *anyopaque,
-    read: *const fn (context: *anyopaque, io: Io, buffer: []u8) anyerror!?usize,
-};
-
-/// The terminal: its size and where frames go.
-pub const Terminal = struct {
-    out: *Io.Writer,
-    context: *anyopaque,
-    size: *const fn (context: *anyopaque) tui.Rect,
-    keyboard: Keyboard,
-};
-
 pub const Context = struct {
     gpa: Allocator,
     io: Io,
@@ -269,7 +254,7 @@ pub const Context = struct {
     collector: *traces.Collector,
     scope: *const metrics.Scope,
     zone: *const clock.Zone,
-    terminal: Terminal,
+    terminal: terminal.Device,
 };
 
 const Event = union(enum) {
@@ -390,12 +375,35 @@ fn send_input(context: Context, sender: anytype) !void {
     state.input.clearRetainingCapacity();
 }
 
+/// One Logs line as chat's logger.rs writes it: `[MM/DD HH:MM:SS|LEVEL] target => message`,
+/// stamped in UTC, then the fields.
+pub fn log_line(
+    gpa: Allocator,
+    utc_seconds: i64,
+    event: logger.RecordedEvent,
+) Allocator.Error![]u8 {
+    const stamp = clock.stamp(utc_seconds);
+    const level = logger.level_name(event.level);
+    const header = try std.fmt.allocPrint(gpa, "[{s}|{s}] {s} => ", .{
+        &stamp,
+        level,
+        event.target,
+    });
+    defer gpa.free(header);
+    assert(header.len > stamp.len + level.len);
+    return logger.format(gpa, header, event, .inferred);
+}
+
 fn free_event(gpa: Allocator, event: Event) void {
     if (event == .message) gpa.free(event.message.payload);
 }
 
 /// commonware's keyboard task: keys as they arrive, a tick after `tick_ms` without input.
-fn read_keyboard(io: Io, queue: *Io.Queue(Event), keyboard: Keyboard) Io.Cancelable!void {
+fn read_keyboard(
+    io: Io,
+    queue: *Io.Queue(Event),
+    keyboard: terminal.Keyboard,
+) Io.Cancelable!void {
     var parser: keys.Parser = .{};
     var bytes: [1024]u8 = undefined;
     var parsed: [bytes.len]keys.Key = undefined;

@@ -17,9 +17,11 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const zigware = @import("zigware");
 const cli = @import("cli.zig");
-const clock = @import("clock.zig");
+const ui = @import("ui");
 const handler = @import("handler.zig");
-const terminal_mod = @import("terminal.zig");
+
+const clock = ui.clock;
+const terminal_mod = ui.terminal;
 
 const ed25519 = zigware.cryptography.ed25519;
 const traces = zigware.runtime.telemetry.traces;
@@ -216,12 +218,7 @@ fn run(
         .collector = collector,
         .scope = &scope,
         .zone = zone,
-        .terminal = .{
-            .out = out,
-            .context = &terminal,
-            .size = terminal_mod.Terminal.size,
-            .keyboard = terminal.keyboard(),
-        },
+        .terminal = terminal.device(out),
     }, &registered.sender, &registered.receiver);
 }
 

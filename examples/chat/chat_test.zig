@@ -9,14 +9,16 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const zigware = @import("zigware");
 const build_options = @import("build_options");
-const keys = @import("keys.zig");
-const clock = @import("clock.zig");
-const logger = @import("logger.zig");
-const tui = @import("tui.zig");
+const ui = @import("ui");
 const handler = @import("handler.zig");
 const cli = @import("cli.zig");
-const terminal = @import("terminal.zig");
 const chat = @import("main.zig");
+
+const keys = ui.keys;
+const clock = ui.clock;
+const logger = ui.logger;
+const tui = ui.tui;
+const terminal = ui.terminal;
 
 const p2p = zigware.p2p;
 const traces = zigware.runtime.telemetry.traces;
@@ -194,7 +196,7 @@ test "log lines match commonware's logger over tracing's JSON" {
     };
     try testing.expectEqual(expected.len, collector.events.items.len);
     for (expected, collector.events.items) |line, event| {
-        const formatted = try logger.format(gpa, 1794591821, event);
+        const formatted = try handler.log_line(gpa, 1794591821, event);
         defer gpa.free(formatted);
         try testing.expectEqualStrings(line, formatted);
     }
@@ -273,6 +275,14 @@ test "the CLI prints clap's help and errors" {
     try expect_usage(&.{"--bogus"}, unexpected ++ "'--bogus' found\n\n" ++ full ++ more);
     try expect_usage(&.{ "--me=1@1", "-x" }, unexpected ++ "'-x' found\n\n" ++ full ++ more);
     try expect_usage(&.{"pos"}, "error: unexpected argument 'pos' found\n\n" ++ full ++ more);
+    // An unknown long option shows smart usage once any option was used.
+    try expect_usage(&.{ "--me", "1", "--foo" }, unexpected ++ "'--foo' found\n\n" ++ smart ++
+        "\n\n" ++ more);
+    // The next option checks the value before it, before its own value is missing.
+    try expect_usage(&.{ "--friends", "x", "--me" }, "error: invalid value 'x' for " ++
+        "'--friends <friends>': invalid digit found in string\n\n" ++ more);
+    try expect_usage(&.{ "--friends", "1", "pos" }, unexpected ++ "'pos' found\n\n" ++ full ++
+        more);
     try expect_usage(&.{ "--me=1@1", "--friend=1" }, "error: unexpected argument '--friend' " ++
         "found\n\n  tip: a similar argument exists: '--friends'\n\n" ++ smart ++ "\n\n" ++ more);
     try expect_usage(&.{ "--me=1@1", "--friends=1", "--bootstrapers=1" }, "error: unexpected " ++
@@ -573,11 +583,13 @@ fn replay(arena: Allocator, output: []const u8, area: tui.Rect) ![]tui.Cell {
 }
 
 fn parse_color(sgr: []const u8) !tui.Color {
-    for ([_]tui.Color{ .reset, .red, .yellow, .cyan }) |color| {
+    for ([_]tui.Color{ .reset, .red, .green, .yellow, .blue, .cyan }) |color| {
         const expected = switch (color) {
             .reset => "39",
             .red => "38;5;1",
+            .green => "38;5;2",
             .yellow => "38;5;3",
+            .blue => "38;5;4",
             .cyan => "38;5;6",
         };
         if (std.mem.eql(u8, sgr, expected)) return color;
@@ -624,7 +636,9 @@ fn expect_screen(case: ScreenCase, expected_file: []const u8) !void {
             try colors.append(arena, switch (cell.fg) {
                 .reset => '.',
                 .red => 'r',
+                .green => 'g',
                 .yellow => 'y',
+                .blue => 'b',
                 .cyan => 'c',
             });
         }

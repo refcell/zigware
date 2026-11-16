@@ -1,6 +1,7 @@
-//! Wall-clock stamps for chat, chrono's `%m/%d %H:%M:%S`: in UTC for log lines (tracing's JSON
-//! timestamp is UTC) and in local time for messages (chrono's `Local`), with the local zone
-//! read from a TZif file and its POSIX TZ footer rule for times past the last transition.
+//! Wall-clock stamps, as chrono formats them: chat's `%m/%d %H:%M:%S` (in UTC for log lines,
+//! since tracing's JSON timestamp is UTC, and in local time for messages) and log's
+//! `%Y-%m-%dT%H:%M:%S` in local time (chrono's `Local`), with the local zone read from a TZif
+//! file and its POSIX TZ footer rule for times past the last transition.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -28,6 +29,31 @@ pub fn stamp(seconds: i64) Stamp {
     }) catch unreachable; // Every field has exactly two digits.
     assert(written.len == stamp_size);
     assert(second_of_day < seconds_per_day);
+    return result;
+}
+
+/// `YYYY-MM-DDTHH:MM:SS`.
+pub const iso_stamp_size = 19;
+pub const IsoStamp = [iso_stamp_size]u8;
+
+/// Formats `seconds` since the Unix epoch, already shifted to the wanted zone, as chrono's
+/// `%Y-%m-%dT%H:%M:%S` for years 0 through 9999.
+pub fn iso_stamp(seconds: i64) IsoStamp {
+    const days = @divFloor(seconds, seconds_per_day);
+    const second_of_day: u32 = @intCast(@mod(seconds, seconds_per_day));
+    const date = civil_from_days(days);
+    assert(date.year >= 0 and date.year <= 9999);
+    var result: IsoStamp = undefined;
+    const format = "{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}";
+    const written = std.fmt.bufPrint(&result, format, .{
+        @as(u64, @intCast(date.year)),
+        date.month,
+        date.day,
+        second_of_day / 3600,
+        second_of_day / 60 % 60,
+        second_of_day % 60,
+    }) catch unreachable; // Proof: the year has four digits and every other field two.
+    assert(written.len == iso_stamp_size);
     return result;
 }
 
@@ -325,6 +351,11 @@ pub const Zone = struct {
     /// The local stamp for `utc_seconds`.
     pub fn local_stamp(zone: *const Zone, utc_seconds: i64) Stamp {
         return stamp(utc_seconds + zone.offset_at(utc_seconds));
+    }
+
+    /// The local `%Y-%m-%dT%H:%M:%S` stamp for `utc_seconds`.
+    pub fn local_iso_stamp(zone: *const Zone, utc_seconds: i64) IsoStamp {
+        return iso_stamp(utc_seconds + zone.offset_at(utc_seconds));
     }
 };
 
