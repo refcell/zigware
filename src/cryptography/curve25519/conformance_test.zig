@@ -5,6 +5,8 @@
 //! `conformance.toml` (copied here unchanged).
 
 const std = @import("std");
+const builtin = @import("builtin");
+const build_options = @import("build_options");
 const Allocator = std.mem.Allocator;
 const codec = @import("codec");
 const conformance = @import("conformance");
@@ -41,6 +43,8 @@ const entries = .{
 };
 
 test "curve25519 conformance hashes match commonware" {
+    // About 13 s in Debug (65536 point decodings); CI runs ReleaseSafe, as cryptography does.
+    if (builtin.mode == .debug and !build_options.slow_tests) return error.SkipZigTest;
     inline for (entries) |entry| {
         try conformance.verify(
             entry.Conformance,

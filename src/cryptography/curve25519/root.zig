@@ -21,4 +21,5 @@ test {
     _ = @import("vectors_test.zig");
     _ = @import("conformance_test.zig");
     _ = @import("signing_test.zig");
+    _ = @import("fuzz_test.zig");
 }
