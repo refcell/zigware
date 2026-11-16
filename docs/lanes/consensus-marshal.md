@@ -91,6 +91,14 @@ then the core and standard actors as those packages land.
 - `consensus.marshal.application.gates`: `Gates(D, V)` (shared handle: `insert`, `take`,
   `take_staged`, `send_staged`, `claim`, `retain_after`, `stage`), `GateOutcome`, `Gate`,
   `Ack`, `Staged(B)`, `resolve`, `forward`, `drive`.
+- `consensus.marshal.core.mailbox`: `Message(S, V)` (`{ gpa, body }`, 20 request kinds,
+  `name`, `stale`, `response_closed`, `discard`, `handle`), `Pending(S, V)` (the overflow
+  policy), `Identifier(D)` (`height`/`digest`/`latest`), `DigestFallback`,
+  `CommitmentFallback`, and `Mailbox(S, V)` (`init(gpa, io, sender, max_pending_acks)`,
+  `get_info`, `get_block`, `get_finalization`, `get_processed`, `get_anchor`,
+  `get_verified`, `hint_finalized`, `subscribe_by_digest`, `subscribe_by_commitment`,
+  `hint_notarized`, `proposed`, `prepared`, `verified_deferred`, `verified`, `certified`,
+  `set_floor`, `prune`, `forward`, and the consensus `Reporter` `report`).
 
 ## Decisions
 - Marshal blocks keep commonware's trait method names (`height()`, `parent()`, `digest()`,
@@ -149,6 +157,12 @@ then the core and standard actors as those packages land.
   `is_contiguous_chain` (Zig cannot catch panics).
 - The gates' staged ack is `oneshot.Sender(void)`, sent once the block is persisted (the
   Zig caches are durable on return), instead of a sync handle.
+- Mailbox messages are `{ gpa, body }`: the body owns its blocks, certificates, `some`
+  recipients, hint targets, and responders, and `discard` frees them when the mailbox drops
+  the message. `proposed`/`verified`/`certified` acks are `oneshot.Sender(void)` for the
+  same reason as the gates. Tracing spans are not carried. `report` borrows the activity
+  (as simplex's voter expects), sends a copy, and panics on allocation failure as Rust
+  aborts, since the `Reporter` contract cannot return an error.
 
 ## Backlog
 - [x] aggregation: types (all 5 conformance hashes match), scheme, limits, safe_tip.
@@ -164,8 +178,9 @@ then the core and standard actors as those packages land.
 - [x] marshal core: floor, staged, certified, acks, durability, stream, subscriptions,
   cache.
 - [x] marshal: ancestry, application validation and gates.
-- [ ] marshal: core mailbox, application build and relay (they need the mailbox and an
-  `Application` contract), core actor.
+- [x] marshal: core mailbox with its overflow policy and tests.
+- [ ] marshal: application build and relay (they need an `Application` contract), core
+  actor.
 - [x] aggregation: the full `distinct states` comparison on the new runtime auditor.
 - (marshal/coding/ belongs to the broadcast-collector lane: types, shards, variant,
   validation, marshaled, and coding/mod.rs tests, on top of core.)
@@ -182,3 +197,4 @@ then the core and standard actors as those packages land.
   store adapters, config; core floor, staged, certified, acks, durability, stream,
   subscriptions, and cache with their commonware tests.
 - 2026-11-16: marshal ancestry streams, application validation, and certification gates.
+- 2026-11-16: marshal core mailbox, overflow policy, and its commonware tests.
