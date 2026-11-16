@@ -193,7 +193,7 @@ pub fn Plan(comptime D: type) type {
             assert(feedback == .ok);
         }
 
-        /// The state of one sim; heap-allocated, since its spawned helpers point into it.
+        /// The state of one run; heap-allocated, since its spawned helpers point into it.
         const Run = struct {
             plan: *const Self,
             ctx: Context,
@@ -253,7 +253,7 @@ pub fn Plan(comptime D: type) type {
                 return sim;
             }
 
-            /// Stops every helper and validator, then frees the sim.
+            /// Stops every helper and validator, then frees the run.
             fn destroy(sim: *Run) void {
                 const gpa = sim.gpa;
                 sim.events.close();
@@ -359,7 +359,7 @@ pub fn Plan(comptime D: type) type {
                 const states = sim.team.active_states(sim.states);
                 const condition = sim.exit_condition();
                 return condition.reached(&sim.tracker, states, target) catch |err| {
-                    log.warn("exit condition {s} failed: {t}", .{ condition.name, err });
+                    log.info("exit condition {s} failed: {t}", .{ condition.name, err });
                     return error.ExitConditionFailed;
                 };
             }
@@ -368,13 +368,13 @@ pub fn Plan(comptime D: type) type {
                 const states = sim.team.active_states(sim.states);
                 for (sim.plan.finalization_properties) |check| {
                     check.check(states) catch |err| {
-                        log.warn("finalization property {s} failed: {t}", .{ check.name, err });
+                        log.info("finalization property {s} failed: {t}", .{ check.name, err });
                         return error.FinalizationPropertyViolation;
                     };
                 }
             }
 
-            /// Stops accepting reports, checks those already queued, then the post-sim
+            /// Stops accepting reports, checks those already queued, then the post-run
             /// properties and that every configured fault was exercised.
             fn complete(sim: *Run) !Result {
                 sim.events.close();
@@ -390,7 +390,7 @@ pub fn Plan(comptime D: type) type {
                 const states = sim.team.active_states(sim.states);
                 for (sim.plan.properties) |check| {
                     check.check(&sim.tracker, states) catch |err| {
-                        log.warn("post-sim property {s} failed: {t}", .{ check.name, err });
+                        log.info("post-run property {s} failed: {t}", .{ check.name, err });
                         return error.PropertyViolation;
                     };
                 }

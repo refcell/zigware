@@ -53,6 +53,9 @@ a test harness), `transfers` (4.4k with tests and benches), `stateful` (about 33
   `Infallible`); plans store `void` for it, since Zig cannot allocate an empty enum.
 - `transfers.Slot` is qmdb's `storage.qmdb.any.batch.Slot`, so settled slots feed a staged
   merkleize directly.
+- A failed check (exit condition, property) is logged at info, not commonware's error level:
+  the returned `PlanError` reports it, and a warning on stderr makes the build runner print
+  test-glue under "failed command" even when every test passes.
 - Commonware's panics for unexercised faults (random crashes, schedules, delays, processed
   height windows) and duplicate strategies are `PlanError`s, so their tests port.
 
