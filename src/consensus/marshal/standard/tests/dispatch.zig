@@ -11,6 +11,9 @@ const types = @import("../../../types.zig");
 const harness = @import("../../mocks/harness.zig");
 const mocks_block = @import("../../mocks/block.zig");
 const common = @import("common.zig");
+const simplex = @import("../../../simplex/root.zig");
+const gates_api = @import("../../application/gates.zig");
+const relay_api = @import("../../application/relay.zig");
 
 const gpa = testing.allocator;
 const H = harness.StandardHarness;
@@ -229,4 +232,295 @@ fn hint_targeted_fetch_body(ctx: Ctx) anyerror!void {
 
 test "standard hint finalized emits a targeted fetch" {
     try run(hint_targeted_fetch_body);
+}
+
+fn send_count_two(buffer: common.RecordingBuffer) bool {
+    return buffer.send_count() >= 2;
+}
+
+fn forward_unknown_body(ctx: Ctx) anyerror!void {
+    var env: Env = undefined;
+    try env.init(ctx, "forward-unknown");
+    defer env.deinit();
+    const unknown = cryptography.Sha256.hash(&.{"unknown-block"});
+    const peers = try gpa.dupe(harness.K, env.fixture.participants[1..2]);
+    _ = try env.started.mailbox.forward(round_at(1), unknown, .{ .some = peers });
+    try ctx.sleep(.fromMilliseconds(50));
+    // A forward for an unknown block must not dispatch.
+    try testing.expectEqual(0, env.buffer().send_count());
+}
+
+test "standard forward unknown block is a no-op" {
+    try run(forward_unknown_body);
+}
+
+fn proposed_persists_body(ctx: Ctx) anyerror!void {
+    var env: Env = undefined;
+    try env.init(ctx, "proposed-cache");
+    defer env.deinit();
+    const round = round_at(1);
+    const block = try block_one(100);
+    const digest = block.digest();
+    const mailbox = &env.started.mailbox;
+    const targets = env.fixture.participants[1..2];
+    var persist = try oneshot.channel(void, gpa, ctx.io());
+    defer persist.receiver.deinit();
+    const recipients: common.Recipients = .{ .some = try gpa.dupe(harness.K, targets) };
+    _ = try mailbox.proposed(round, try ready(block), recipients, persist.sender);
+    try common.wait_until(ctx, 5000, "proposed send", env.buffer(), send_count_nonzero);
+    {
+        const sends = try env.buffer().sends(gpa);
+        defer common.RecordingBuffer.free_sends(gpa, sends);
+        // The proposal dispatches exactly once.
+        try testing.expectEqual(1, sends.len);
+        try testing.expect(std.meta.eql(sends[0].round, round));
+        try testing.expect(sends[0].block.digest().eql(digest));
+    }
+    // The block persists after the broadcast, so the ack resolves durable.
+    try persist.receiver.recv();
+    // A forward for the same commitment serves the persisted block from storage.
+    _ = try mailbox.forward(round, digest, .{ .some = try gpa.dupe(harness.K, targets) });
+    try common.wait_until(ctx, 5000, "forward send", env.buffer(), send_count_two);
+    const sends = try env.buffer().sends(gpa);
+    defer common.RecordingBuffer.free_sends(gpa, sends);
+    try testing.expectEqual(2, sends.len);
+    try testing.expect(sends[1].block.digest().eql(digest));
+}
+
+test "standard proposed broadcasts then persists" {
+    try run(proposed_persists_body);
+}
+
+const TestGates = gates_api.Gates(common.D, common.V);
+const Plan = simplex.Plan(harness.K);
+const StageFuture = std.Io.Future(anyerror!void);
+
+/// Publishes the staged digest once.
+const Publisher = struct {
+    sender: ?oneshot.Sender(common.D),
+
+    pub fn call(self: *Publisher, digest: common.D) void {
+        if (self.sender) |*sender| sender.send(digest) catch {};
+        self.sender = null;
+    }
+};
+
+fn stage_task(
+    registry: TestGates,
+    round: Round,
+    block: common.Block,
+    published: oneshot.Sender(common.D),
+) anyerror!void {
+    var owned = registry;
+    defer owned.deinit();
+    var publisher: Publisher = .{ .sender = published };
+    defer if (publisher.sender) |*sender| sender.deinit();
+    try owned.stage(round, block.digest(), block, &publisher, "test");
+}
+
+/// A staging task (commonware `stage_block`'s handle): it ends once the block is durable or
+/// its staged ack is dropped.
+const Stager = struct {
+    io: std.Io,
+    future: StageFuture,
+    joined: bool = false,
+
+    /// Stages `block` for `round` in `registry` as a prepare or propose build does, and
+    /// returns once the block's digest is published.
+    fn start(ctx: Ctx, registry: TestGates, round: Round, block: B) !Stager {
+        const io = ctx.io();
+        const digest = block.digest();
+        var published = try oneshot.channel(common.D, gpa, io);
+        defer published.receiver.deinit();
+        const args = .{ registry.clone(), round, try ready(block), published.sender };
+        var future = try io.concurrent(stage_task, args);
+        errdefer future.cancel(io) catch {};
+        // Staging must publish the block digest.
+        try testing.expect((try published.receiver.recv()).eql(digest));
+        return .{ .io = io, .future = future };
+    }
+
+    fn join(self: *Stager) !void {
+        self.joined = true;
+        try self.future.await(self.io);
+    }
+
+    fn deinit(self: *Stager) void {
+        if (!self.joined) self.future.cancel(self.io) catch {};
+    }
+};
+
+fn relay(env: *Env, registry: TestGates, digest: common.D, plan: Plan) !void {
+    const mailbox = env.started.mailbox;
+    const feedback = try relay_api.broadcast(harness.S, common.V, registry, mailbox, digest, plan);
+    try testing.expectEqual(.ok, feedback);
+}
+
+fn has_verified(env: *Env, round: Round) !bool {
+    var block = (try env.started.mailbox.get_verified(round)) orelse return false;
+    common.V.deinit_block(gpa, &block);
+    return true;
+}
+
+fn expect_ready(gate: *gates_api.Gate) !void {
+    const outcome = try gate.recv();
+    try testing.expect(outcome == .ready and outcome.ready);
+}
+
+/// Hands a claimed proposal to marshal as certification does.
+const Persist = struct {
+    mailbox: *Started.A.Mailbox,
+    round: Round,
+
+    pub fn call(self: Persist, block: common.Block, ack: gates_api.Ack) void {
+        self.mailbox.verified_deferred(self.round, block, ack) catch @panic("OOM");
+    }
+};
+
+fn relay_after_claim_body(ctx: Ctx) anyerror!void {
+    var env: Env = undefined;
+    try env.init(ctx, "relay-claim");
+    defer env.deinit();
+    const round = round_at(1);
+    const block = try block_one(100);
+    const digest = block.digest();
+    var registry: TestGates = try .init(gpa, ctx.io());
+    defer registry.deinit();
+    var stager = try Stager.start(ctx, registry, round, block);
+    defer stager.deinit();
+    // The early relay sends the candidate. Each lookup below goes through the same marshal
+    // mailbox as the relays, so it observes every send they requested.
+    try relay(&env, registry, digest, .{ .prepare = .{ .round = round } });
+    // An early relay must not store the candidate.
+    try testing.expect(!try has_verified(&env, round));
+    try testing.expectEqual(1, env.buffer().send_count());
+    // Certification claims the candidate and persists it.
+    const persist: Persist = .{ .mailbox = &env.started.mailbox, .round = round };
+    var gate = registry.claim(round, digest, persist) orelse return error.GateMissing;
+    defer gate.deinit();
+    try expect_ready(&gate);
+    // The lock-in finds nothing staged and must not send the candidate again.
+    try relay(&env, registry, digest, .{ .propose = .{ .round = round } });
+    try testing.expect(try has_verified(&env, round));
+    try testing.expectEqual(1, env.buffer().send_count());
+    try stager.join();
+}
+
+test "standard propose relay after claim sends once" {
+    try run(relay_after_claim_body);
+}
+
+fn restage_after_prune_body(ctx: Ctx) anyerror!void {
+    var env: Env = undefined;
+    try env.init(ctx, "relay-restage");
+    defer env.deinit();
+    const round = round_at(1);
+    const block = try block_one(100);
+    const digest = block.digest();
+    var registry: TestGates = try .init(gpa, ctx.io());
+    defer registry.deinit();
+    var first = try Stager.start(ctx, registry, round, block);
+    defer first.deinit();
+    try relay(&env, registry, digest, .{ .prepare = .{ .round = round } });
+    try testing.expect(!try has_verified(&env, round));
+    try testing.expectEqual(1, env.buffer().send_count());
+    // A finalization past the round prunes the candidate, which ends its staging.
+    registry.retain_after(round_at(2));
+    try first.join();
+    // The candidate is staged again for the decided round. Neither relay sends it, and the
+    // lock-in persists it through the staged ack.
+    var second = try Stager.start(ctx, registry, round, block);
+    defer second.deinit();
+    var gate = registry.take(round, digest) orelse return error.GateMissing;
+    defer gate.deinit();
+    try relay(&env, registry, digest, .{ .prepare = .{ .round = round } });
+    try relay(&env, registry, digest, .{ .propose = .{ .round = round } });
+    try expect_ready(&gate);
+    try testing.expect(try has_verified(&env, round));
+    // A candidate staged again for a decided round must not be sent again.
+    try testing.expectEqual(1, env.buffer().send_count());
+    try second.join();
+}
+
+test "standard restage after prune sends once" {
+    try run(restage_after_prune_body);
+}
+
+fn expect_single_send_to_all(env: *Env, round: Round, digest: common.D) !void {
+    const sends = try env.buffer().sends(gpa);
+    defer common.RecordingBuffer.free_sends(gpa, sends);
+    try testing.expectEqual(1, sends.len);
+    try testing.expect(std.meta.eql(sends[0].round, round));
+    try testing.expect(sends[0].block.digest().eql(digest));
+    try testing.expect(sends[0].recipients == .all);
+}
+
+fn expect_nothing_staged(registry: TestGates, round: Round, digest: common.D) !void {
+    const taken = try registry.take_staged(round, digest);
+    try testing.expect(taken == null);
+}
+
+fn relay_sends_staged_body(ctx: Ctx) anyerror!void {
+    var env: Env = undefined;
+    try env.init(ctx, "relay-hit");
+    defer env.deinit();
+    const round = round_at(1);
+    const block = try block_one(100);
+    const digest = block.digest();
+    var registry: TestGates = try .init(gpa, ctx.io());
+    defer registry.deinit();
+    // Stage the proposal as propose would.
+    var stager = try Stager.start(ctx, registry, round, block);
+    defer stager.deinit();
+    var gate = registry.take(round, digest) orelse return error.GateMissing;
+    defer gate.deinit();
+    // The relay takes the staged proposal and dispatches it exactly once.
+    try relay(&env, registry, digest, .{ .propose = .{ .round = round } });
+    try common.wait_until(ctx, 5000, "staged send", env.buffer(), send_count_nonzero);
+    try expect_single_send_to_all(&env, round, digest);
+    try expect_nothing_staged(registry, round, digest);
+    // The relayed proposal persists through the staged ack, so the gate resolves durably.
+    try expect_ready(&gate);
+    try stager.join();
+}
+
+test "standard propose relay sends staged block" {
+    try run(relay_sends_staged_body);
+}
+
+fn prepare_relay_once_body(ctx: Ctx) anyerror!void {
+    var env: Env = undefined;
+    try env.init(ctx, "relay-prepare");
+    defer env.deinit();
+    const round = round_at(1);
+    const block = try block_one(100);
+    const digest = block.digest();
+    var registry: TestGates = try .init(gpa, ctx.io());
+    defer registry.deinit();
+    // Stage the candidate as prepare would.
+    var stager = try Stager.start(ctx, registry, round, block);
+    defer stager.deinit();
+    var gate = registry.take(round, digest) orelse return error.GateMissing;
+    defer gate.deinit();
+    // The early relay sends the candidate and keeps it staged, unstored.
+    try relay(&env, registry, digest, .{ .prepare = .{ .round = round } });
+    while (env.buffer().send_count() == 0) try ctx.sleep(.fromMilliseconds(1));
+    try testing.expectEqual(1, env.buffer().send_count());
+    try testing.expect(!try has_verified(&env, round));
+    // An early relay must not resolve the certification gate.
+    try testing.expect(!gate.is_ready());
+    // A repeated prepare relay must not send the candidate again. The lock-in below goes
+    // through the same marshal mailbox, so its handshake orders this relay first.
+    try relay(&env, registry, digest, .{ .prepare = .{ .round = round } });
+    // The lock-in stores the candidate without sending it again.
+    try relay(&env, registry, digest, .{ .propose = .{ .round = round } });
+    try expect_nothing_staged(registry, round, digest);
+    try expect_ready(&gate);
+    try testing.expect(try has_verified(&env, round));
+    try expect_single_send_to_all(&env, round, digest);
+    try stager.join();
+}
+
+test "standard prepare relay sends once and propose stores" {
+    try run(prepare_relay_once_body);
 }
