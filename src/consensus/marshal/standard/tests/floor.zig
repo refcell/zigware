@@ -394,14 +394,15 @@ fn pending_is(state: Pending) bool {
     return heights.len == 1 and heights[0].get() == state.height;
 }
 
-/// Finalizes block 1 (on parent `block1-parent`) and waits until it awaits acknowledgement.
+/// Finalizes block 1 on `parent` and waits until it awaits acknowledgement.
 fn dispatch_block_one(
     ctx: Ctx,
     started: *Manual,
     fixture: *const harness.Fixture,
     application: App,
+    parent: D,
 ) !void {
-    var block = try block_at(hash("block1-parent"), 1, 100);
+    var block = try block_at(parent, 1, 100);
     defer block.deinit();
     try testing.expect(try started.mailbox.verified(round_at(1), block.clone()));
     report(&started.mailbox, try finalize(fixture, 1, 0, &block));
@@ -442,7 +443,7 @@ test "standard floor jump ignores stale application ack" {
             );
             defer started.crash();
             try testing.expectEqual(0, (try application.acknowledged()).get());
-            try dispatch_block_one(ctx, &started, &fixture, application);
+            try dispatch_block_one(ctx, &started, &fixture, application, hash("block1-parent"));
 
             // The anchor is not local yet, so the floor stays pending until it arrives.
             var floor: Floor = try .init(&fixture, "floor-parent");
@@ -479,7 +480,7 @@ test "standard local floor jump ignores stale application ack" {
             );
             defer started.crash();
             try testing.expectEqual(0, (try application.acknowledged()).get());
-            try dispatch_block_one(ctx, &started, &fixture, application);
+            try dispatch_block_one(ctx, &started, &fixture, application, hash("block1-parent"));
 
             // The anchor is already local, so the floor installs at once without a fetch.
             var floor: Floor = try .init(&fixture, "local-floor-parent");
@@ -507,7 +508,7 @@ fn floor_at(fixture: *const harness.Fixture, label: []const u8, height: u64) !Fl
 
 /// Verifies and finalizes a child of `parent` at `height`, then checks it is stored.
 fn finalize_child(
-    started: *Holding,
+    started: anytype,
     fixture: *const harness.Fixture,
     parent: D,
     height: u64,
@@ -678,6 +679,197 @@ test "standard pending floor releases buffer waiter" {
             try started.mailbox.set_floor(try local.clone_finalization());
             try wait_closed(ctx, buffer, 2);
             try testing.expectEqual(3, buffer.commitment_subscription_count());
+        }
+    }.body);
+}
+
+/// The digest of `block_at(parent, height, timestamp)`.
+fn block_digest(parent: D, height: u64, timestamp: u64) !D {
+    var block = try block_at(parent, height, timestamp);
+    defer block.deinit();
+    return block.digest();
+}
+
+/// Verifies and finalizes block 2 on `parent`, then checks its finalization is stored.
+fn finalize_block_two(started: *Manual, fixture: *const harness.Fixture, parent: D) !void {
+    var block = try block_at(parent, 2, 200);
+    defer block.deinit();
+    try testing.expect(try started.mailbox.verified(round_at(2), block.clone()));
+    report(&started.mailbox, try finalize(fixture, 2, 1, &block));
+    var stored = (try started.mailbox.get_finalization(.new(2))).?;
+    stored.deinit(gpa);
+}
+
+fn expect_pending(application: App, height: u64) !void {
+    try testing.expect(pending_is(.{ .application = application, .height = height }));
+}
+
+/// The quorum finalization of `digest` at view 5 over view 4.
+fn floor_over(fixture: *const harness.Fixture, digest: D) !harness.Finalization {
+    const proposal = harness.Proposal.init(round_at(5), .new(4), digest);
+    return harness.make_finalization(gpa, fixture, proposal, harness.quorum);
+}
+
+fn genesis_digest() !D {
+    var genesis = try H.genesis_block(gpa, harness.num_validators);
+    defer genesis.deinit();
+    return genesis.digest();
+}
+
+/// Releases the ack at `height` and waits until the actor processes it.
+fn acknowledge_processed(ctx: Ctx, started: *Manual, application: App, height: u64) !void {
+    const state: Retains = .{
+        .resolver = started.resolver,
+        .at_least = started.resolver.retain_count() + 1,
+    };
+    try testing.expectEqual(height, application.acknowledge_next().?.get());
+    try common.wait_until(ctx, 5000, "ack processed", state, retained);
+}
+
+test "standard pending floor drops in-flight ack before anchor" {
+    try run(struct {
+        fn body(ctx: Ctx) anyerror!void {
+            var rng = utils.rng.test_rng();
+            var fixture = try harness.fixture(gpa, &rng);
+            defer fixture.deinit(gpa);
+            var application = try App.manual_ack(gpa, ctx.io());
+            defer application.deinit();
+            var started = try start_manual(
+                ctx.child("validator"),
+                "pending-floor-drops-in-flight-ack",
+                &fixture,
+                application.clone(),
+                try common.RecordingBuffer.init(gpa, ctx.io()),
+            );
+            defer started.crash();
+            try testing.expectEqual(0, (try application.acknowledged()).get());
+            const parent = hash("block1-parent");
+            try dispatch_block_one(ctx, &started, &fixture, application, parent);
+
+            // Keep the anchor missing so the floor waits on a fetch while the height 1 ack
+            // is in flight.
+            var floor_block = try block_at(hash("stale-floor"), 0, 500);
+            defer floor_block.deinit();
+            try started.mailbox.set_floor(try finalize(&fixture, 5, 4, &floor_block));
+            try wait_block_fetch(ctx, started.resolver, floor_block.digest());
+
+            // The successor finalizes but does not dispatch until the anchor is installed.
+            try finalize_block_two(&started, &fixture, try block_digest(parent, 1, 100));
+            try ctx.sleep(.fromMilliseconds(100));
+            try expect_pending(application, 1);
+
+            // The pending floor removed this ack from the active waiters.
+            try testing.expectEqual(1, application.acknowledge_next().?.get());
+            try ctx.sleep(.fromMilliseconds(100));
+
+            // Once the anchor arrives, dispatch restarts at the floor successor instead of
+            // treating the stale ack as progress.
+            try testing.expect(try started.mailbox.verified(round_at(5), floor_block.clone()));
+            try testing.expectEqual(1, (try application.acknowledged()).get());
+            try testing.expectEqual(2, (try application.acknowledged()).get());
+        }
+    }.body);
+}
+
+test "standard local floor below in-flight keeps pending ack" {
+    try run(struct {
+        fn body(ctx: Ctx) anyerror!void {
+            var rng = utils.rng.test_rng();
+            var fixture = try harness.fixture(gpa, &rng);
+            defer fixture.deinit(gpa);
+            var application = try App.manual_ack(gpa, ctx.io());
+            defer application.deinit();
+            var started = try start_manual(
+                ctx.child("validator"),
+                "local-floor-below-in-flight-keeps-pending-ack",
+                &fixture,
+                application.clone(),
+                try common.RecordingBuffer.init(gpa, ctx.io()),
+            );
+            defer started.crash();
+            try testing.expectEqual(0, (try application.acknowledged()).get());
+            const genesis = try genesis_digest();
+            try dispatch_block_one(ctx, &started, &fixture, application, genesis);
+
+            // The genesis anchor is local and below the in-flight height 1 ack, so applying
+            // it must not clear or duplicate the pending ack.
+            try started.mailbox.set_floor(try floor_over(&fixture, genesis));
+            var stored = (try started.mailbox.get_block(.{ .height = .zero() })).?;
+            stored.deinit();
+            try expect_pending(application, 1);
+
+            try acknowledge_processed(ctx, &started, application, 1);
+            const heights = try application.pending_ack_heights(gpa);
+            defer gpa.free(heights);
+            try testing.expectEqual(0, heights.len);
+        }
+    }.body);
+}
+
+const RoundFetch = struct { resolver: common.RecordingResolver, round: Round, active: bool };
+
+/// Whether a notarized fetch for `round` is active (`active`) or none is (`!active`).
+fn round_fetch_is(state: RoundFetch) bool {
+    const fetches = state.resolver.active_fetches(gpa) catch return false;
+    defer gpa.free(fetches);
+    const key: common.Key = .{ .notarized = state.round };
+    const found = for (fetches) |fetch| {
+        if (fetch.key.eql(key)) break true;
+    } else false;
+    return found == state.active;
+}
+
+fn wait_round_fetch(
+    ctx: Ctx,
+    resolver: common.RecordingResolver,
+    round: Round,
+    active: bool,
+) !void {
+    const state: RoundFetch = .{ .resolver = resolver, .round = round, .active = active };
+    try common.wait_until(ctx, 5000, "round-bound fetch", state, round_fetch_is);
+}
+
+test "standard set floor below processed height preserves in-flight ack" {
+    try run(struct {
+        fn body(ctx: Ctx) anyerror!void {
+            var rng = utils.rng.test_rng();
+            var fixture = try harness.fixture(gpa, &rng);
+            defer fixture.deinit(gpa);
+            var application = try App.manual_ack(gpa, ctx.io());
+            defer application.deinit();
+            var started = try start_manual(
+                ctx.child("validator"),
+                "set-floor-below-processed-height-preserves-in-flight-ack",
+                &fixture,
+                application.clone(),
+                try common.RecordingBuffer.init(gpa, ctx.io()),
+            );
+            defer started.crash();
+            try testing.expectEqual(0, (try application.acknowledged()).get());
+            const genesis = try genesis_digest();
+            try dispatch_block_one(ctx, &started, &fixture, application, genesis);
+            try acknowledge_processed(ctx, &started, application, 1);
+            try finalize_block_two(&started, &fixture, try block_digest(genesis, 1, 100));
+            const state: Pending = .{ .application = application, .height = 2 };
+            try common.wait_until(ctx, 5000, "second block dispatch", state, pending_is);
+
+            // Keep a round-bound request live so the stale floor's round-floor side effect is
+            // covered separately from ack handling.
+            const stale_round = round_at(5);
+            var subscription = try started.mailbox.subscribe_by_commitment(
+                hash("missing-before-stale-lower-floor"),
+                .{ .fetch_by_round = stale_round },
+            );
+            defer subscription.deinit();
+            try wait_round_fetch(ctx, started.resolver, stale_round, true);
+
+            // This lower local anchor is behind the processed height. It may advance the
+            // round floor, but must leave height 2 in flight.
+            try started.mailbox.set_floor(try floor_over(&fixture, genesis));
+            var stored = (try started.mailbox.get_block(.{ .height = .zero() })).?;
+            stored.deinit();
+            try expect_pending(application, 2);
+            try wait_round_fetch(ctx, started.resolver, stale_round, false);
         }
     }.body);
 }
