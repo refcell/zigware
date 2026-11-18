@@ -92,8 +92,13 @@ qmdb `current` (balances, over the MMB) and `keyless` (payout log, over the MMR)
   `InvalidCheckpoint`, a `FlowError`, or the databases' own errors.
 - The integration roles keep each role's persisted state as plain owned values with
   `clone`/`eql`, and maps as sorted arrays (`roles/map.zig`) in place of `BTreeMap`. Validators
-  share one in-memory `Env` (mock storage and page cache) per test, each in its own
-  partitions, instead of the deterministic runtime's storage.
+  share one `Env` per test, each in its own partitions: `runtime.storage.faulty` over
+  `runtime.storage.memory` with a seeded RNG, which maps onto commonware's `FaultConfig`
+  (`env.faults.config.sync_rate` and the other rates) more exactly than the buffer mock's
+  `crash()` and `allow_mutations`. `start_and_recover` is `env.crash()` (replay the retention
+  journal, retire open handles, reset the fault config) and then `deinit` of the dropped
+  validator; a seed varies only the fault draws, not the whole runtime. Commonware's tests
+  that open the payout log's partitions directly use `Validator.reopen_log(size)` instead.
 - `testing.zig` holds commonware's `tests.rs` helpers: `Harness` (in-memory storage; each
   database registers its metrics afresh on open) and `Store(I)` with `settle`, `apply`,
   `commit`, `roots`, `post`. The database tests are in `validator_db_test.zig`, the ledger
@@ -120,7 +125,8 @@ qmdb `current` (balances, over the MMB) and `keyless` (payout log, over the MMR)
 - [x] Integration test reference roles in `src/clearing/tests/bajillion/roles` (sender,
   receiver, operator, ledger, validator, with a sorted-array `map`), the `Deployment`
   harness, and operator.rs's three tests.
-- [ ] Integration tests: validator.rs (1 of 14 so far), payments, ledger, lifecycle, and
+- [x] Integration tests: validator.rs (all 12 tests).
+- [ ] Integration tests: payments, ledger, lifecycle, and
   model.rs (needs a small BFS model checker in place of Stateright).
 - [x] Fuzz targets `src/clearing/fuzz/{decode,verify}.zig` (commonware clearing/fuzz), seeded
   in `zig build test` and under `std.testing.fuzz`; the verify target includes BalanceProof.
@@ -152,3 +158,6 @@ qmdb `current` (balances, over the MMB) and `keyless` (payout log, over the MMR)
   discards history, and `key_value_proof` compares keys by value.
 - 2026-11-18: integration roles (sender, receiver, operator, ledger, validator), the
   deployment harness, operator.rs's tests, and validator.rs's agreement test.
+- 2026-11-18: the rest of validator.rs (withdrawals, overdraft, gross flows, settling once,
+  resuming, the empty close, interrupted apply over 8 fault seeds, durability, re-attesting,
+  and the payout log behind or ahead of the balances), on `runtime.storage.faulty`.

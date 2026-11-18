@@ -342,6 +342,14 @@ pub fn Validator(P: type, O: type, H: type, T: type, A: type) type {
 
         /// Opens the payout log at `summary`'s payouts size and checks its root.
         fn open_log(self: *Self, at: *const Summary) !Log {
+            var log = try self.open_log_at(at.payouts.size);
+            errdefer log.deinit();
+            if (!log.root().eql(at.payouts.root)) return error.InvalidCheckpoint;
+            return log;
+        }
+
+        /// Opens the payout log rewound to `size` operations, or whole if null.
+        fn open_log_at(self: *Self, size: ?u64) !Log {
             const p = &self.partitions;
             const cfg: Log.Cfg = .{
                 .merkle = self.merkle_config(p.payouts_journal, p.payouts_metadata),
@@ -350,11 +358,17 @@ pub fn Validator(P: type, O: type, H: type, T: type, A: type) type {
             self.log_registry.deinit();
             self.log_registry.* = metrics.Registry.init(self.gpa);
             const scope = metrics.Scope.init(self.log_registry).child("payouts");
-            const size = at.payouts.size;
-            var log = try Log.init(self.gpa, self.env.storage(), scope, cfg, size);
-            errdefer log.deinit();
-            if (!log.root().eql(at.payouts.root)) return error.InvalidCheckpoint;
-            return log;
+            return Log.init(self.gpa, self.env.storage(), scope, cfg, size);
+        }
+
+        /// Closes the payout log and reopens it rewound to `size` operations (whole if null)
+        /// without checking its root, as a crash or a lost write would leave it: commonware's
+        /// tests open the log's partitions directly. The validator must restart afterwards.
+        pub fn reopen_log(self: *Self, size: ?u64) !*Log {
+            if (self.log) |*log| log.deinit();
+            self.log = null;
+            self.log = try self.open_log_at(size);
+            return &self.log.?;
         }
 
         fn resume_parent(self: *Self, posted: ?*const D) !Checkpoint {
