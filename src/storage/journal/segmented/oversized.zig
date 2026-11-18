@@ -745,5 +745,6 @@ fn RecoveryType(comptime I: type, comptime V: type) type {
 
 test {
     _ = @import("oversized_test.zig");
+    _ = @import("oversized_recovery_test.zig");
     _ = @import("oversized_recovery_fuzz_test.zig");
 }

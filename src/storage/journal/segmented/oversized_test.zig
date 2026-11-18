@@ -12,7 +12,7 @@ const gpa = testing.allocator;
 const Storage = mocks.Storage;
 
 /// Index entry storing an id and the location of its value.
-const TestEntry = struct {
+pub const TestEntry = struct {
     id: u64,
     value_offset: u64,
     value_size: u32,
@@ -46,23 +46,29 @@ const TestEntry = struct {
     }
 };
 
-const TestValue = [16]u8;
-const Journal = oversized.Oversized(TestEntry, TestValue);
+pub const TestValue = [16]u8;
+pub const Journal = oversized.Oversized(TestEntry, TestValue);
 
-const Harness = struct {
+pub const Harness = struct {
     storage: Storage,
     cache_ref: paged.CacheRef,
 
-    fn init() !Harness {
-        return .{ .storage = Storage.init(gpa), .cache_ref = try paged.CacheRef.init(gpa, 64, 8) };
+    pub fn init() !Harness {
+        return init_page(64);
     }
 
-    fn deinit(self: *Harness) void {
+    /// commonware's `entry_cfg` passes the entry size, so each index page holds one entry.
+    pub fn init_page(page_size: u16) !Harness {
+        const cache_ref = try paged.CacheRef.init(gpa, page_size, 8);
+        return .{ .storage = Storage.init(gpa), .cache_ref = cache_ref };
+    }
+
+    pub fn deinit(self: *Harness) void {
         self.cache_ref.deinit();
         self.storage.deinit();
     }
 
-    fn cfg(self: *Harness) Journal.Cfg {
+    pub fn cfg(self: *Harness) Journal.Cfg {
         return .{
             .index_partition = "test-index",
             .value_partition = "test-values",
@@ -74,11 +80,11 @@ const Harness = struct {
         };
     }
 
-    fn open_checkpoint(self: *Harness, checkpoint: oversized.Checkpoint) !Journal {
+    pub fn open_checkpoint(self: *Harness, checkpoint: oversized.Checkpoint) !Journal {
         return Journal.init_with_checkpoint(gpa, self.storage.interface(), self.cfg(), checkpoint);
     }
 
-    fn open_tracked(self: *Harness) !Journal {
+    pub fn open_tracked(self: *Harness) !Journal {
         const iface = self.storage.interface();
         var recovery = try Journal.init_with_markers(gpa, iface, self.cfg(), "test-markers");
         try recovery.drain();
@@ -86,11 +92,11 @@ const Harness = struct {
     }
 };
 
-fn entry(id: u64) TestEntry {
+pub fn entry(id: u64) TestEntry {
     return .{ .id = id, .value_offset = 0, .value_size = 0 };
 }
 
-fn value_of(id: u64) TestValue {
+pub fn value_of(id: u64) TestValue {
     return @splat(@truncate(id));
 }
 
