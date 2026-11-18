@@ -165,7 +165,7 @@ pub fn pending_logs(
     // Ancestry guarantees parent links between the blocks it yields, but not that they
     // extend the finalized chain.
     if (anchor) |digest| if (!digest.eql(attachment)) {
-        log.warn("epoch info ancestry is detached from finalized prefix", .{});
+        log.info("epoch info ancestry is detached from finalized prefix", .{});
         return null;
     };
     return try authenticate(B, gpa, scan, blocks.items);
@@ -202,7 +202,7 @@ fn collect(
 
 /// Logs a scan whose ancestry ended early.
 fn truncated(epoch: Epoch, cursor: Height) void {
-    log.warn("epoch {d} ancestry ended before covering pending dealer logs at {d}", .{
+    log.info("epoch {d} ancestry ended before covering pending dealer logs at {d}", .{
         epoch.get(),
         cursor.get(),
     });
@@ -228,7 +228,7 @@ fn authenticate(
         }
         var signed = payload.dealer_log;
         if (!try fd.check_log(B.Variant, B.PublicKey, gpa, scan.info, &signed)) {
-            log.warn("ignoring invalid pending dealer log", .{});
+            log.info("ignoring invalid pending dealer log", .{});
             signed.deinit(gpa);
             continue;
         }

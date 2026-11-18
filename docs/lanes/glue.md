@@ -307,6 +307,9 @@ Owns `src/glue/dkg`. Reference: `glue/src/dkg` (about 24k Rust lines).
 - Inclusion's pending-log scan runs on the caller's task; canceling it ends a stalled read
   with `error.Canceled` (commonware's shutdown signal). `validate_future_participants`
   returns errors where commonware panics.
+- dkg logs rejections of peer-supplied input (detached or truncated ancestry, invalid
+  pending logs) at info, not commonware's warn: tests hit them on purpose, and a warning on
+  stderr makes test-glue print a failed-command block in every push (as simulate, 3244236).
 
 ### Backlog
 - [x] types (with conformance hashes), limits, fence, network.
