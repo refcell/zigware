@@ -28,6 +28,8 @@ const Key = ingress.Handler.Key;
 const Fetch = resolver.Fetch(Key, Ask);
 const Feedback = actor.Feedback;
 const Certificate = types.Certificate(Scheme, Digest);
+const Notarization = types.Notarization(Scheme, Digest);
+const Effect = @import("state.zig").Effect;
 const Fixture = cryptography.certificate.mocks.Fixture(Scheme);
 const gpa = testing.allocator;
 const sequential = parallel.sequential;
@@ -58,6 +60,10 @@ const Actor = actor_mod.Actor(Params);
 const Message = Actor.Message;
 
 const Entry = struct { view: u64, subscriber: Ask };
+
+fn ask_less(_: void, a: Ask, b: Ask) bool {
+    return a.order(b) == .lt;
+}
 
 /// Tracks the pending requests the way the resolver engine would (commonware
 /// `RecordingResolver`).
@@ -146,9 +152,16 @@ const RecordingResolver = struct {
             out[count] = entry.subscriber;
             count += 1;
         }
+        // Commonware's set iterates in `Ask` order.
+        std.mem.sort(Ask, out[0..count], {}, ask_less);
         return out[0..count];
     }
 };
+
+/// commonware `build_notarization`/`build_finalization`'s proposal for `view`.
+fn build_proposal(view: u64) types.Proposal(Digest) {
+    return .init(.new(epoch, .new(view)), .new(view -| 1), .fill(@intCast(view)));
+}
 
 /// A fixture and an actor that finished replay (commonware `build_actor`).
 const Env = struct {
@@ -172,7 +185,7 @@ const Env = struct {
             .term_length = term_length,
         });
         self.recorder = .{};
-        var effects: std.ArrayList(@import("state.zig").Effect) = .empty;
+        var effects: std.ArrayList(Effect) = .empty;
         defer effects.deinit(gpa);
         try self.actor.state.replayed(&effects);
         try testing.expectEqual(0, effects.items.len);
@@ -199,18 +212,36 @@ const Env = struct {
 
     fn finalization(self: *const Env, view: u64) !Certificate {
         const Finalize = types.Finalize(Scheme, Digest);
-        const proposal: types.Proposal(Digest) = .init(
-            .new(epoch, .new(view)),
-            .new(view -| 1),
-            .fill(@intCast(view)),
-        );
         var votes: [4]Finalize = undefined;
         for (&votes, self.fixture.schemes) |*vote, *scheme| {
-            vote.* = (try Finalize.sign(gpa, scheme, proposal)).?;
+            vote.* = (try Finalize.sign(gpa, scheme, build_proposal(view))).?;
         }
         const Finalization = types.Finalization(Scheme, Digest);
         const value = try Finalization.from_votes(gpa, &self.fixture.verifier, &votes, sequential);
         return .{ .finalization = value };
+    }
+
+    fn notarization(self: *const Env, view: u64) !Notarization {
+        const Notarize = types.Notarize(Scheme, Digest);
+        var votes: [4]Notarize = undefined;
+        for (&votes, self.fixture.schemes) |*vote, *scheme| {
+            vote.* = (try Notarize.sign(gpa, scheme, build_proposal(view))).?;
+        }
+        return Notarization.from_votes(gpa, &self.fixture.verifier, &votes, sequential);
+    }
+
+    fn certified(self: *Env, notarization_value: Notarization, success: bool) !void {
+        const message: Message = .{ .certified = .{
+            .gpa = gpa,
+            .notarization = notarization_value,
+            .success = success,
+        } };
+        try self.actor.handle_mailbox(&self.recorder, message);
+    }
+
+    /// Opens a background repair fetch at `view` directly on the resolver.
+    fn backfill(self: *Env, view: u64) !void {
+        _ = try self.recorder.fetch(.{ .key = .init(view), .subscriber = Ask.backfill() });
     }
 
     fn updated(self: *Env, certificate: Certificate) !void {
@@ -280,4 +311,71 @@ test "resolver actor resolve without target falls back to an untargeted fetch" {
     const asks = env.recorder.subscriptions(9, &out);
     try testing.expectEqual(1, asks.len);
     try testing.expectEqual(Ask.ancestry(.notarization), asks[0]);
+}
+
+fn expect_targeted(env: *const Env, index: usize, view: u64, item: Ask, target: usize) !void {
+    const entry = env.recorder.targeted.items[index];
+    try testing.expectEqual(view, entry.view);
+    try testing.expectEqual(item, entry.subscriber);
+    try testing.expectEqual(env.fixture.participants[target], entry.target);
+}
+
+fn expect_subscriptions(env: *const Env, view: u64, expected: []const Ask) !void {
+    var out: [8]Ask = undefined;
+    try testing.expectEqualSlices(Ask, expected, env.recorder.subscriptions(view, &out));
+}
+
+// A covering nullification completes background repair and the targeted nullification ask,
+// but keeps the targeted parent ask that the opposite evidence makes necessary.
+fn targeted_first_key(env: *Env) !void {
+    const peers = env.fixture.participants;
+    try env.resolve(10, 3, .nullification, peers[0]);
+    try env.resolve(11, 3, .notarization, peers[1]);
+    try env.backfill(3);
+    try testing.expectEqual(2, env.recorder.targeted.items.len);
+    try expect_targeted(env, 0, 3, .ancestry(.nullification), 0);
+    try expect_targeted(env, 1, 3, .ancestry(.notarization), 1);
+    try expect_subscriptions(env, 3, &.{
+        .backfill(), .ancestry(.nullification), .ancestry(.notarization),
+    });
+    try env.updated(try env.nullification(3));
+    try expect_subscriptions(env, 3, &.{.ancestry(.notarization)});
+    try env.resolve(14, 3, .nullification, peers[2]);
+    try env.resolve(14, 4, .nullification, peers[2]);
+    try testing.expectEqual(2, env.recorder.targeted.items.len);
+}
+
+// The mirror case: the exact certified parent completes only the targeted parent ask, not
+// the nullification needed to skip that view.
+fn targeted_second_key(env: *Env) !void {
+    const peers = env.fixture.participants;
+    const second = consensus_types.View.new(3).next_term_start(env.actor.state.term()).get();
+    try testing.expectEqual(6, second);
+    try env.resolve(12, second, .nullification, peers[2]);
+    try env.resolve(13, second, .notarization, peers[3]);
+    try env.backfill(second);
+    try env.updated(.{ .notarization = try env.notarization(second) });
+    try env.certified(try env.notarization(second), true);
+    // The certified floor satisfies background repair; the nullification ask survives.
+    try expect_subscriptions(env, second, &.{.ancestry(.nullification)});
+    try env.resolve(14, second, .notarization, peers[0]);
+    try testing.expectEqual(4, env.recorder.targeted.items.len);
+}
+
+test "resolver actor targeted fetches drop only when their ask is satisfied" {
+    var env: Env = undefined;
+    try env.start();
+    defer env.stop();
+    try targeted_first_key(&env);
+    try targeted_second_key(&env);
+    // A numeric floor raise alone identifies no ancestry requirement: both targeted asks
+    // survive until matching evidence or finalization arrives.
+    try env.actor.apply_effects(&env.recorder, &.{.{ .raised = .new(6) }});
+    try env.recorder.expect_outstanding(&.{ 3, 6 });
+    // Finalization retires every key at or below it, and a delayed request stays retired.
+    try env.updated(try env.finalization(6));
+    try env.recorder.expect_outstanding(&.{});
+    try env.resolve(7, 3, .notarization, env.fixture.participants[0]);
+    try env.recorder.expect_outstanding(&.{});
+    try testing.expectEqual(4, env.recorder.targeted.items.len);
 }

@@ -283,7 +283,7 @@ pub fn Actor(comptime P: type) type {
         /// Applies the state's effects to the resolver: retires first, then one fetch batch.
         /// Every retire predicate is monotonic, so issuing the batch last leaves the same asks
         /// open.
-        fn apply_effects(self: *Self, engine: anytype, effects: []const Effect) !void {
+        pub fn apply_effects(self: *Self, engine: anytype, effects: []const Effect) !void {
             var fetches: std.ArrayList(Fetch) = .empty;
             defer fetches.deinit(self.gpa);
             for (effects) |effect| switch (effect) {
