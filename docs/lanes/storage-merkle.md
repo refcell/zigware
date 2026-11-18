@@ -237,5 +237,25 @@ variants need `runtime` storage; do them after its interface lands.
     in another blob, offsets ending before the oldest data, bounded and not, mid-blob
     offsets start, stale offsets watermark, offsets rebuilt across blobs, overlong and
     over-capacity data blobs). Planted bug (skip the offsets-end check) fails one test.
-  - [ ] variable.rs: torn pages and watermark adoption, init_at_size and clears, init_sync,
-    bounded inspection and initialization, read_many, and the rest.
+  - [x] variable.rs batch 2 (`variable_torn_test.zig`): rollovers without commit, torn
+    interior pages in the tail, torn rewrites under a bounded open (data and offsets),
+    damage below the offsets watermark (torn or shortened blobs adopted, a torn page below a
+    mid-blob watermark rejected), gaps, orphaned newer blobs, and unsynced tails. The lagged
+    `start_sync` of the torn-rewrite seed becomes a commit of each journal. Planted bug (skip
+    data page validation) fails four tests.
+  - [x] variable.rs batch 3 (`variable_size_test.zig`): `init_at_size` and `clear_to_size`
+    resets (conflicting offsets partitions, staged-reset crash points, pending targets,
+    stale same-blob data, mid-blob starts across blobs, data-only crashes, near
+    `u64::MAX`), and resets failing on sync or remove faults on `runtime.storage.faulty`.
+    Planted bug (leave the data behind a staged reset) fails two tests.
+  - [ ] variable.rs: init_sync, bounded inspection and initialization, read_many, and the
+    rest.
+- [ ] journal/zstd: byte-exact libzstd level 3 (coordinator, correcting the earlier "byte
+  identity not required"). commonware's storage conformance hashes four `<true>` journal
+  workloads written with `compression: Some(3)`, so compressed journals must emit exactly
+  what `zstd::bulk::compress(.., 3)` writes: the dfast strategy with level 3's parameters,
+  block splitting, Huffman literal tables and their repeat/raw choices, FSE normalization and
+  table modes, and the frame header. Pin: the libzstd that commonware's Cargo.lock selects
+  through zstd-sys (to record here). Check against the local `zstd -3` and the four hashes,
+  which storage-journal enables through StorageConformance (fe7bafa). The current fast
+  compressor stays only if level 3 turns out slower.
