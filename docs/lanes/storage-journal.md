@@ -26,9 +26,9 @@ resize, sync), `runtime.storage`, with the in-memory backend `runtime.storage.me
   `Recovery` and ported tests.
 - [x] journal/segmented: oversized journal (fixed index plus glob values, checkpoint restore
   and marker-tracked recovery) with its core tests.
-- [ ] journal/segmented: the rest of oversized.rs's ~40 recovery tests (20 ported in
+- [ ] journal/segmented: the rest of oversized.rs's ~33 recovery tests (27 ported in
   oversized_recovery_test.zig: persistence, sync, value and index loss, torn and partial
-  pages, truncation crashes, short value reads).
+  pages, truncation crashes, short value reads, orphan value sections).
 - [x] journal/contiguous: fixed journal (checkpoint, blob partition, recovery with watermark
   and clear intent, bounded open, `init_at_size`, `clear_to_size`, replay batches) with the
   shared contiguous suite and the checkpoint tests.

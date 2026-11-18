@@ -438,3 +438,136 @@ test "oversized recovery: reading a value with a short size fails" {
     }
     try expect_value(&journal, 1, located, fill(42));
 }
+
+const glob_mod = @import("glob.zig");
+
+/// Durably write one orphan value into each of `sections`, without any index entry.
+fn write_orphans(h: *Harness, sections: []const u64) !void {
+    const cfg: glob_mod.Config(TestValue) = .{
+        .partition = "test-values",
+        .codec_config = {},
+        .write_buffer = 1024,
+    };
+    var recovery = try glob_mod.Recovery(TestValue).init(gpa, h.storage.interface(), cfg);
+    var glob = recovery.finish();
+    defer glob.deinit();
+    for (sections) |section| {
+        _ = try glob.append(section, fill(section));
+        try glob.sync(&.{section});
+    }
+}
+
+/// Append one entry to each of `sections` of a tracked journal, syncing each.
+fn seed_sections(h: *Harness, sections: []const u64) !void {
+    var journal = try h.open_tracked();
+    defer journal.deinit();
+    for (sections) |section| {
+        _ = try append(&journal, section, section, fill(section));
+        try journal.sync(&.{section});
+    }
+}
+
+test "oversized recovery: an orphan value section is removed" {
+    var h = try Harness.init();
+    defer h.deinit();
+    try seed_sections(&h, &.{ 1, 2 });
+    try write_orphans(&h, &.{3});
+    var journal = try h.open_tracked();
+    _ = try journal.get(1, 0);
+    _ = try journal.get(2, 0);
+    try testing.expectEqual(2, journal.newest_section());
+    try testing.expectEqual(2, journal.values.newest_section());
+    try journal.destroy();
+}
+
+test "oversized recovery: multiple orphan value sections are removed" {
+    var h = try Harness.init();
+    defer h.deinit();
+    try seed_sections(&h, &.{1});
+    try write_orphans(&h, &.{ 2, 3, 4 });
+    var journal = try h.open_tracked();
+    _ = try journal.get(1, 0);
+    try testing.expectEqual(1, journal.newest_section());
+    try testing.expectEqual(1, journal.values.newest_section());
+    try journal.destroy();
+}
+
+test "oversized recovery: values without any index are removed" {
+    var h = try Harness.init();
+    defer h.deinit();
+    try write_orphans(&h, &.{ 1, 2, 3 });
+    var journal = try h.open_tracked();
+    try testing.expectEqual(null, journal.newest_section());
+    try testing.expectEqual(null, journal.oldest_section());
+    try testing.expectEqual(null, journal.values.newest_section());
+    try journal.destroy();
+}
+
+test "oversized recovery: a section freed of orphan values accepts appends from zero" {
+    var h = try Harness.init();
+    defer h.deinit();
+    var journal = try h.open_tracked();
+    const first = try append(&journal, 1, 1, fill(1));
+    try journal.sync(&.{1});
+    journal.deinit();
+    try write_orphans(&h, &.{ 2, 3 });
+    journal = try h.open_tracked();
+    try testing.expectEqual(1, (try journal.get(1, 0)).id);
+    try expect_value(&journal, 1, first, fill(1));
+    const located = try append(&journal, 2, 42, fill(42));
+    try testing.expectEqual(0, located.position);
+    try testing.expectEqual(42, (try journal.get(2, 0)).id);
+    try expect_value(&journal, 2, located, fill(42));
+    try journal.sync(&.{2});
+    journal.deinit();
+    journal = try h.open_tracked();
+    _ = try journal.get(1, 0);
+    _ = try journal.get(2, 0);
+    try testing.expectEqual(2, journal.newest_section());
+    try journal.destroy();
+}
+
+test "oversized recovery: checkpoint restore keeps every synced section" {
+    var h = try Harness.init();
+    defer h.deinit();
+    var journal = try h.open_checkpoint(.{ .section = 0, .size = 0 });
+    for (1..4) |section| {
+        _ = try append(&journal, section, section, fill(section));
+        try journal.sync(&.{section});
+    }
+    journal.deinit();
+    journal = try h.open_checkpoint(.{ .section = 3, .size = chunk });
+    for (1..4) |section| try testing.expectEqual(section, (try journal.get(section, 0)).id);
+    try testing.expectEqual(3, journal.newest_section());
+    try journal.destroy();
+}
+
+test "oversized recovery: an empty index section is kept and its orphan removed" {
+    var h = try Harness.init();
+    defer h.deinit();
+    try seed_sections(&h, &.{1});
+    try write_orphans(&h, &.{2});
+    try resize_index(&h, 1, 0);
+    var journal = try h.open_tracked();
+    try testing.expectError(error.ItemOutOfRange, journal.get(1, 0));
+    try testing.expectEqual(1, journal.newest_section());
+    try testing.expectEqual(1, journal.values.newest_section());
+    try journal.destroy();
+}
+
+test "oversized recovery: orphan value sections in gaps are removed" {
+    var h = try Harness.init();
+    defer h.deinit();
+    try seed_sections(&h, &.{ 1, 3, 5 });
+    try write_orphans(&h, &.{ 2, 4, 6 });
+    var journal = try h.open_tracked();
+    for ([_]u64{ 1, 3, 5 }) |section| {
+        try testing.expectEqual(section, (try journal.get(section, 0)).id);
+    }
+    try testing.expectEqual(1, journal.oldest_section());
+    try testing.expectEqual(5, journal.newest_section());
+    var retained = journal.values.sections();
+    for ([_]u64{ 1, 3, 5 }) |section| try testing.expectEqual(section, retained.next().?);
+    try testing.expectEqual(null, retained.next());
+    try journal.destroy();
+}
