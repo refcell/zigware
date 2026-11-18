@@ -64,8 +64,11 @@ which every database here is built on.
 - [x] any: ordered staging (the staged-ancestor scenarios run on ordered databases too).
   Batched `get_many` stays a loop over `get` by decision (coordinator, 2026-11-18): commonware's
   batching only groups reads by position for speed, and the results are identical.
-- [ ] fuzz targets: `qmdb_any_{unordered,ordered}_operations`,
-  `qmdb_store_operations` (with the store), `qmdb_verify_proof`. keyless and immutable are done.
+- [x] fuzz targets: keyless, immutable, and any unordered/ordered operations, with the floor
+  oracle `qmdb/fuzz_floor.zig` (commonware `storage/fuzz/src/floor.rs`).
+- [ ] any: ordered `MerkleizedBatch.get_prev_key`/`get_next_key` (current's batch-root fuzz).
+- [ ] fuzz targets: `qmdb_store_operations` (with the store), `qmdb_verify_proof`, and the any
+  batch_root and batching targets.
 - [ ] benches (commonware `qmdb/benches`).
 - [x] immutable (fixed, MMR and MMB): `Db`, chained batches, floor-filtered batch reads,
   prune, recovery, `ImmutableMmr/MmbFixedConf` root conformance (matches), mod.rs's core
@@ -260,3 +263,4 @@ which every database here is built on.
 - 2026-11-18: any ordered range scans (`stream_range`/`keys`).
 - 2026-11-18: ordered staging covered by the staged-ancestor scenarios; keyless operations fuzz target.
 - 2026-11-18: immutable operations fuzz target (value model, crash reopens, proof checks).
+- 2026-11-18: floor oracle (`fuzz_floor.zig`) and the any unordered/ordered operations fuzz targets.

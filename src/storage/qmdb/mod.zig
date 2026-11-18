@@ -217,5 +217,6 @@ pub fn inactive_peaks_at(
 test {
     std.testing.refAllDecls(@This());
     _ = @import("mod_test.zig");
+    _ = @import("fuzz_floor.zig");
     _ = @import("operation_fuzz_test.zig");
 }
