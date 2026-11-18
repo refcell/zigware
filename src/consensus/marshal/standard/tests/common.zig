@@ -109,6 +109,10 @@ pub const RecordingBuffer = struct {
         /// dropped it (commonware's `Weak`).
         last_handed: ?Block = null,
         evict_on_next_hit: bool = false,
+        /// Whether each hit hands out a new object, as commonware's buffer hands a new `Arc`
+        /// per hit, kept in `handed` (each a `Weak` once only that handle remains).
+        fresh: bool = false,
+        handed: std.ArrayList(Block) = .empty,
         digest_subscriptions: std.ArrayList(Subscription) = .empty,
         commitment_subscriptions: std.ArrayList(Subscription) = .empty,
         sends: std.ArrayList(BufferSend) = .empty,
@@ -133,6 +137,8 @@ pub const RecordingBuffer = struct {
         const state = &shared.state;
         for (state.blocks.items) |*block| block.deinit();
         if (state.last_handed) |*block| block.deinit();
+        for (state.handed.items) |*block| block.deinit();
+        state.handed.deinit(gpa);
         for ([_]*std.ArrayList(Subscription){
             &state.digest_subscriptions,
             &state.commitment_subscriptions,
@@ -183,6 +189,7 @@ pub const RecordingBuffer = struct {
         const state = self.shared.lock();
         defer self.shared.unlock();
         const index = position(state, digest) orelse return null;
+        if (state.fresh) return hand_fresh(self.shared.gpa, state, index);
         const block = if (state.evict_on_next_hit) blk: {
             state.evict_on_next_hit = false;
             break :blk state.blocks.orderedRemove(index);
@@ -191,6 +198,47 @@ pub const RecordingBuffer = struct {
         state.last_handed = block.clone();
         assert(block.digest().eql(digest));
         return block;
+    }
+
+    /// Hands a new object for the block at `index`, recording a handle in `handed`. A test
+    /// mock: allocation failure panics, since `find` cannot fail.
+    fn hand_fresh(gpa: Allocator, state: *State, index: usize) Block {
+        const source = state.blocks.items[index];
+        state.handed.ensureUnusedCapacity(gpa, 1) catch @panic("OOM");
+        const block = Block.precomputed(gpa, source.inner().*, source.digest()) catch
+            @panic("OOM");
+        state.handed.appendAssumeCapacity(block.clone());
+        return block;
+    }
+
+    /// From now on, each hit hands out a new object, tracked by `handed_released` and
+    /// `handed_same`.
+    pub fn hand_fresh_copies(self: RecordingBuffer) void {
+        const state = self.shared.lock();
+        defer self.shared.unlock();
+        state.fresh = true;
+    }
+
+    /// How many objects hits handed out since `hand_fresh_copies`.
+    pub fn handed_count(self: RecordingBuffer) usize {
+        const state = self.shared.lock();
+        defer self.shared.unlock();
+        return state.handed.items.len;
+    }
+
+    /// Whether marshal released the `index`th handed object (commonware
+    /// `handed.upgrade().is_none()`).
+    pub fn handed_released(self: RecordingBuffer, index: usize) bool {
+        const state = self.shared.lock();
+        defer self.shared.unlock();
+        return state.handed.items[index].shared.references.load(.acquire) == 1;
+    }
+
+    /// Whether `block` is the `index`th handed object (commonware `Arc::ptr_eq`).
+    pub fn handed_same(self: RecordingBuffer, index: usize, block: Block) bool {
+        const state = self.shared.lock();
+        defer self.shared.unlock();
+        return state.handed.items[index].shared == block.shared;
     }
 
     /// Whether marshal released the last block `find` handed it (commonware's

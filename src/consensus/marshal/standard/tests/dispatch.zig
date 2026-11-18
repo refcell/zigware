@@ -10,6 +10,7 @@ const cryptography = @import("cryptography");
 const types = @import("../../../types.zig");
 const harness = @import("../../mocks/harness.zig");
 const mocks_block = @import("../../mocks/block.zig");
+const mocks_store = @import("../../mocks/store.zig");
 const common = @import("common.zig");
 const simplex = @import("../../../simplex/root.zig");
 const gates_api = @import("../../application/gates.zig");
@@ -523,4 +524,325 @@ fn prepare_relay_once_body(ctx: Ctx) anyerror!void {
 
 test "standard prepare relay sends once and propose stores" {
     try run(prepare_relay_once_body);
+}
+
+const Prunable = common.PrunableStores(B);
+const RecordedBlocks = mocks_store.Recording(Prunable.Blocks, B);
+const StagingActor = common.Actor(
+    harness.Provider,
+    App,
+    common.RecordingBuffer,
+    Prunable.Certificates,
+    RecordedBlocks,
+);
+
+/// A block's identity in the recorded puts. commonware records the stored `Arc`'s address;
+/// standard storage keeps a value copy here, so the put carries the block's timestamp.
+fn timestamp_address(block: *const B) usize {
+    return @intCast(block.timestamp);
+}
+
+/// An actor over prunable stores whose finalized blocks record their puts and gets, with a
+/// buffer handing out a new object per hit (commonware's `Recording` over
+/// `prunable_finalized_stores`, `NZUsize!(1)` pending acks, and a holding resolver).
+const Staging = struct {
+    fixture: harness.Fixture,
+    stores: *Prunable,
+    log: *mocks_store.Log,
+    mailbox: StagingActor.Mailbox,
+    resolver: common.RecordingResolver,
+    application: App,
+    buffer: common.RecordingBuffer,
+    handle: runtime.context.Handle(anyerror!void),
+
+    fn init(self: *Staging, ctx: Ctx, comptime prefix: []const u8, application: App) !void {
+        try self.open(ctx, prefix, application, null);
+    }
+
+    /// Like `init`, with `preexisting` already in the finalized-block archive.
+    fn open(
+        self: *Staging,
+        ctx: Ctx,
+        comptime prefix: []const u8,
+        application: App,
+        preexisting: ?B,
+    ) !void {
+        var app = application;
+        errdefer app.deinit();
+        var rng = utils.rng.test_rng();
+        self.fixture = try harness.fixture(gpa, &rng);
+        errdefer self.fixture.deinit(gpa);
+        self.stores = try gpa.create(Prunable);
+        errdefer gpa.destroy(self.stores);
+        try self.stores.open(ctx, prefix);
+        errdefer self.stores.deinit();
+        if (preexisting) |block| {
+            try self.stores.blocks_store().put(block.digest(), &block);
+            try self.stores.blocks_store().sync();
+        }
+        self.log = try gpa.create(mocks_store.Log);
+        errdefer gpa.destroy(self.log);
+        self.log.* = .init(gpa);
+        errdefer self.log.deinit();
+        const blocks: RecordedBlocks = .init(
+            self.stores.blocks_store(),
+            self.log,
+            &timestamp_address,
+        );
+        const provider: harness.Provider = .init(&self.fixture.schemes[0]);
+        const page_cache = &self.stores.cache_ref;
+        const config = try common.test_config(StagingActor, gpa, prefix, provider, 1, page_cache);
+        const initialized =
+            try StagingActor.init(ctx.child("actor"), self.stores.certificates(), blocks, config);
+        self.mailbox = initialized.mailbox;
+        var holding =
+            try common.RecordingResolver.holding(gpa, ctx.io(), &ctx.scope.child("resolver"));
+        self.resolver = holding.resolver;
+        self.buffer = try common.RecordingBuffer.init(gpa, ctx.io());
+        self.buffer.hand_fresh_copies();
+        self.application = app;
+        self.handle = try initialized.actor.start(
+            app.clone(),
+            self.buffer.clone(),
+            holding.receiver,
+            holding.resolver.clone(),
+        );
+    }
+
+    fn deinit(self: *Staging) void {
+        const ended = self.handle.abort() catch {};
+        ended catch {};
+        self.mailbox.deinit();
+        self.application.deinit();
+        self.buffer.deinit();
+        self.resolver.deinit();
+        self.stores.deinit();
+        gpa.destroy(self.stores);
+        self.log.deinit();
+        gpa.destroy(self.log);
+        self.fixture.deinit(gpa);
+    }
+
+    fn finalize(self: *const Staging, view: u64, block: B) !harness.Finalization {
+        const proposal = harness.Proposal.init(round_at(view), .new(view - 1), block.digest());
+        return harness.make_finalization(gpa, &self.fixture, proposal, harness.quorum);
+    }
+
+    /// Reports the finalization of `block` at `view`, then reads the block back: mailbox
+    /// messages are FIFO, so a served read proves the finalization arm has run.
+    fn finalize_and_read(self: *Staging, view: u64, block: B) !void {
+        var finalization = try self.finalize(view, block);
+        defer finalization.deinit(gpa);
+        _ = self.mailbox.report(.{ .finalization = finalization });
+        var archived = (try self.mailbox.get_block(.{ .height = block.height() })) orelse
+            return error.BlockMissing;
+        defer archived.deinit();
+        try testing.expect(archived.digest().eql(block.digest()));
+    }
+
+    fn wait_for_height(self: *Staging, ctx: Ctx, height: u64) !void {
+        while (!self.application.contains(.new(height))) try ctx.sleep(.fromMilliseconds(1));
+    }
+
+    fn pending_is(self: *Staging, expected: []const u64) !bool {
+        const heights = try self.application.pending_ack_heights(gpa);
+        defer gpa.free(heights);
+        if (heights.len != expected.len) return false;
+        for (heights, expected) |height, want| if (height.get() != want) return false;
+        return true;
+    }
+
+    fn wait_pending(self: *Staging, ctx: Ctx, expected: []const u64) !void {
+        while (!try self.pending_is(expected)) try ctx.sleep(.fromMilliseconds(1));
+    }
+
+    /// The number of archive reads of the block at `height` recorded so far.
+    fn reads_at(self: *const Staging, height: u64) usize {
+        var count: usize = 0;
+        for (self.log.ops.items) |op| {
+            if (op.eql(.{ .get = .new(height) })) count += 1;
+        }
+        return count;
+    }
+};
+
+fn genesis_digest() !common.D {
+    var genesis = try H.genesis_block(gpa, harness.num_validators);
+    defer genesis.deinit();
+    return genesis.digest();
+}
+
+fn staged_without_read_body(ctx: Ctx) anyerror!void {
+    var env: Staging = undefined;
+    try env.init(ctx, "staged-dispatch", try App.init(gpa, ctx.io()));
+    defer env.deinit();
+    // Genesis is dispatched from the archive and acknowledged on delivery, so the pipeline
+    // is idle before the finalization arrives.
+    try env.wait_for_height(ctx, 0);
+    // Finalize a block the buffer serves.
+    const block = try harness.make_raw_block(gpa, try genesis_digest(), .new(1), 100);
+    try env.buffer.insert(try ready(block));
+    var finalization = try env.finalize(1, block);
+    defer finalization.deinit(gpa);
+    _ = env.mailbox.report(.{ .finalization = finalization });
+    try env.wait_for_height(ctx, 1);
+    var delivered = env.application.block(.new(1)) orelse return error.BlockMissing;
+    defer delivered.deinit();
+    try testing.expect(delivered.digest().eql(block.digest()));
+    // Dispatch delivers the block object the buffer handed to marshal.
+    const handed = env.buffer.handed_count();
+    try testing.expect(handed > 0);
+    try testing.expect(env.buffer.handed_same(handed - 1, delivered));
+    const ops = env.log.ops.items;
+    const written = for (ops, 0..) |op, index| {
+        if (op == .put and op.put.height.get() == 1) break index;
+    } else return error.BlockNotWritten;
+    // Storage holds the block dispatched to the application.
+    try testing.expectEqual(timestamp_address(delivered.inner()), ops[written].put.payload_address);
+    // Dispatch must not read the finalized block back from the archive.
+    for (ops[written..]) |op| try testing.expect(!op.eql(.{ .get = .new(1) }));
+}
+
+test "standard dispatch delivers staged block without archive read" {
+    try run(staged_without_read_body);
+}
+
+fn staged_dedup(ctx: Ctx, comptime preexisting: bool) anyerror!void {
+    const block = try harness.make_raw_block(gpa, try genesis_digest(), .new(1), 100);
+    var env: Staging = undefined;
+    const app = try App.manual_ack(gpa, ctx.io());
+    try env.open(ctx, "staged-dedup", app, if (preexisting) block else null);
+    defer env.deinit();
+    // Hold genesis so both finalizations precede dispatch at height one.
+    try env.wait_pending(ctx, &.{0});
+    // Repeated finalizations retain the first staged object.
+    try env.buffer.insert(try ready(block));
+    for (0..2) |round| {
+        try env.finalize_and_read(1, block);
+        // The buffer served the finalized block.
+        try testing.expectEqual(round + 1, env.buffer.handed_count());
+    }
+    // The first buffered object stays staged even if already archived.
+    try testing.expect(!env.buffer.handed_released(0));
+    // A duplicate finalization must not replace the staged object.
+    try testing.expect(env.buffer.handed_released(1));
+    try testing.expectEqual(Height.new(0), try env.application.acknowledged());
+    try env.wait_for_height(ctx, 1);
+    var delivered = env.application.block(.new(1)) orelse return error.BlockMissing;
+    defer delivered.deinit();
+    // Dispatch reuses the first staged object.
+    try testing.expect(env.buffer.handed_same(0, delivered));
+    var archived = (try env.mailbox.get_block(.{ .height = .new(1) })) orelse
+        return error.BlockMissing;
+    defer archived.deinit();
+    // Dispatch delivers the block retained by the archive.
+    try testing.expect(delivered.digest().eql(archived.digest()));
+}
+
+fn staged_dedup_body(ctx: Ctx) anyerror!void {
+    try staged_dedup(ctx, false);
+}
+
+fn staged_dedup_preexisting_body(ctx: Ctx) anyerror!void {
+    try staged_dedup(ctx, true);
+}
+
+test "standard staged dispatch deduplicates finalizations" {
+    try run(staged_dedup_body);
+}
+
+test "standard staged dispatch deduplicates preexisting block" {
+    try run(staged_dedup_preexisting_body);
+}
+
+const anchor_height = 5;
+
+/// Staging retains at most twice the ack capacity until dispatch or a floor skips the
+/// blocks.
+fn staged_bounded(ctx: Ctx, comptime skip_to_floor: bool) anyerror!void {
+    var env: Staging = undefined;
+    try env.init(ctx, "staged-bounded", try App.manual_ack(gpa, ctx.io()));
+    defer env.deinit();
+    // Hold the genesis acknowledgement so nothing else can dispatch.
+    try env.wait_pending(ctx, &.{0});
+    // Build a chain whose tip is the floor anchor.
+    var chain: [anchor_height]B = undefined;
+    var parent = try genesis_digest();
+    for (&chain, 1..) |*block, height| {
+        block.* = try harness.make_raw_block(gpa, parent, .new(height), height);
+        parent = block.digest();
+    }
+    // Two blocks fit in staging. A third must not displace either.
+    for (chain[0..3], 1..) |block, height| {
+        try env.buffer.insert(try ready(block));
+        try env.finalize_and_read(height, block);
+        try testing.expectEqual(height, env.buffer.handed_count());
+    }
+    // Staging retains two blocks without evicting either on overflow.
+    try testing.expect(!env.buffer.handed_released(0));
+    try testing.expect(!env.buffer.handed_released(1));
+    // Staging stops at twice the pending-ack capacity.
+    try testing.expect(env.buffer.handed_released(2));
+    try testing.expect(try env.pending_is(&.{0}));
+    if (skip_to_floor) {
+        // A floor anchor releases the blocks it skips.
+        const anchor = chain[anchor_height - 1];
+        try env.buffer.insert(try ready(anchor));
+        try env.mailbox.set_floor(try env.finalize(anchor_height, anchor));
+        try env.wait_for_height(ctx, anchor_height);
+        for (0..3) |index| try testing.expect(env.buffer.handed_released(index));
+        for (chain[0..3]) |block| try testing.expect(!env.application.contains(block.height()));
+    } else {
+        // Drain the backlog: only the overflow block needs an archive read.
+        env.log.ops.clearRetainingCapacity();
+        for (0..4) |height| {
+            try testing.expectEqual(Height.new(height), try env.application.acknowledged());
+        }
+        for (1..4) |height| {
+            try testing.expectEqual(@intFromBool(height == 3), env.reads_at(height));
+        }
+    }
+}
+
+fn staged_bounded_drain_body(ctx: Ctx) anyerror!void {
+    try staged_bounded(ctx, false);
+}
+
+fn staged_bounded_floor_body(ctx: Ctx) anyerror!void {
+    try staged_bounded(ctx, true);
+}
+
+test "standard staged blocks bounded drain" {
+    try run(staged_bounded_drain_body);
+}
+
+test "standard staged blocks bounded floor" {
+    try run(staged_bounded_floor_body);
+}
+
+/// Repeated finalization of an in-flight block must not consume staging capacity.
+fn no_restage_body(ctx: Ctx) anyerror!void {
+    var env: Staging = undefined;
+    try env.init(ctx, "restaged-ack", try App.manual_ack(gpa, ctx.io()));
+    defer env.deinit();
+    try testing.expectEqual(Height.new(0), try env.application.acknowledged());
+    // Finalize block 1 and hold its acknowledgement once dispatched.
+    const block = try harness.make_raw_block(gpa, try genesis_digest(), .new(1), 100);
+    try env.buffer.insert(try ready(block));
+    var finalization = try env.finalize(1, block);
+    defer finalization.deinit(gpa);
+    _ = env.mailbox.report(.{ .finalization = finalization });
+    try env.wait_pending(ctx, &.{1});
+    // The block is already in flight, so another finalization needs no retained copy.
+    try env.finalize_and_read(1, block);
+    const handed = env.buffer.handed_count();
+    // The buffer served the finalized block again.
+    try testing.expect(handed >= 2);
+    try testing.expect(try env.pending_is(&.{1}));
+    // An already-dispatched block must not consume staging capacity.
+    try testing.expect(env.buffer.handed_released(handed - 1));
+}
+
+test "standard does not restage dispatched block" {
+    try run(no_restage_body);
 }
