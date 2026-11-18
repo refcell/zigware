@@ -248,8 +248,14 @@ variants need `runtime` storage; do them after its interface lands.
     stale same-blob data, mid-blob starts across blobs, data-only crashes, near
     `u64::MAX`), and resets failing on sync or remove faults on `runtime.storage.faulty`.
     Planted bug (leave the data behind a staged reset) fails two tests.
-  - [ ] variable.rs: init_sync, bounded inspection and initialization, read_many, and the
-    rest.
+  - [x] variable.rs batch 4 (`variable_sync_test.zig`): `init_sync` over fresh storage,
+    overlapping, matching, exceeding, and stale local data, blob-boundary and same-blob
+    ranges, empty journals at a stale position, a stale `clear_to_size`, and the first open
+    after a staged clear (starts 7, 50, 60, data kept or removed). Planted bug (a sync clear
+    leaves the data partition) fails the interrupted-clear test. An open-ended span for a
+    staged clear is not caught by design: `init_sync` resets a recovered prefix short of its
+    start. The reversed-range should-panic test is an assertion here and is not ported.
+  - [ ] variable.rs: bounded inspection and initialization, read_many, and the rest.
 - [ ] journal/zstd: byte-exact libzstd level 3 (coordinator, correcting the earlier "byte
   identity not required"). commonware's storage conformance hashes four `<true>` journal
   workloads written with `compression: Some(3)`, so compressed journals must emit exactly
