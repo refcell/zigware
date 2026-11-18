@@ -87,18 +87,19 @@ pub const Metrics = struct {
         self.* = undefined;
     }
 
-    /// Updates the state gauges from the current bounds.
+    /// Updates the state gauges from the current bounds. Like commonware's `try_set`, a value
+    /// past `i64::MAX` (a journal reset near `u64::MAX`) leaves its gauge unchanged.
     pub fn update(self: *Metrics, size: u64, boundary: u64, items_per_blob: u64) void {
         assert(boundary <= size);
         assert(items_per_blob > 0);
-        _ = self.size.metric().set(@intCast(size));
-        _ = self.pruning_boundary.metric().set(@intCast(boundary));
-        _ = self.retained.metric().set(@intCast(size - boundary));
+        _ = self.size.metric().try_set(size) catch {};
+        _ = self.pruning_boundary.metric().try_set(boundary) catch {};
+        _ = self.retained.metric().try_set(size - boundary) catch {};
         const tail_items = if (size == boundary) 0 else blk: {
             const tail_start = (size - 1) / items_per_blob * items_per_blob;
             break :blk size - @max(boundary, tail_start);
         };
-        _ = self.tail_items.metric().set(@intCast(tail_items));
+        _ = self.tail_items.metric().try_set(tail_items) catch {};
     }
 };
 
