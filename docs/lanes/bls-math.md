@@ -51,6 +51,11 @@ variants (MinPk, MinSig) must match exactly.
 - [x] p2p utils mux: `Muxer`, `MuxHandle`, `SubSender`, `SubReceiver`, `GlobalSender`,
   backup channel, `parse`, `prefixed`, with mux.rs's tests (not the `should_panic` one).
 - [x] p2p utils mocks: inert sender and receiver with their tests.
+- [x] Cryptography benches (taken over from the crypto lane) in
+  `src/cryptography/benches/{hashes,signatures,primitives}.zig`: blake3, sha256, sha512,
+  ed25519, secp256r1, bloomfilter, chacha20_poly1305, lthash, sake, and bulletproofs ipa, with
+  commonware's names and cases.
+- [ ] p2p fuzz targets (commonware p2p/fuzz: discovery, lookup, simulated), taken over from p2p.
 - [x] Check marshal's and aggregation's threshold paths against the simplex VRF scheme:
   aggregation's matched; marshal limits gained commonware's two VRF fixture cases.
 
@@ -61,6 +66,10 @@ variants (MinPk, MinSig) must match exactly.
   decodes in arrival order (commonware forwards in completion order). A canceled background
   receiver still awaits and forwards the decodes it submitted, since a Zig task must be
   awaited.
+- Cryptography benches: `blake3::hash_message` keeps only `conc=1` (zigware's `hash_across`
+  does not split a message); `bulletproofs::ipa::verify`'s `conc=8` rows time the same
+  sequential `eval`. Inputs commonware rebuilds per iteration are reset in `before_iter` or
+  built once when no iteration changes them. Smoke runs use the first case of each list.
 - p2p utils mux: the routing table is shared under a mutex instead of commonware's control
   channel, so `register` and a released `SubReceiver` update it directly; the muxer stops
   once every handle and subchannel receiver is released, or when the wrapped receiver fails.
