@@ -124,6 +124,10 @@ Read this whole file before you change anything. These rules are not optional.
 - On the deterministic runtime every hand-off between tasks costs a scheduler cycle (1 ms of
   simulated time), so a one-item inbox caps a pipeline near 500 items/s. Hand off through a
   bounded ring or queue, not one slot.
+- The build runner prints `run test test-X stderr` and a `failed command: ...` line for any
+  test step that wrote to stderr, even when every test in it passed. That alone is not a
+  failure: look for a step line with `fail`, `crash`, `timeout`, or `leaks`, an `error:`
+  line, or a failed-step count in the Build Summary.
 
 ## Layout (mirrors commonware, Zig conventions)
 
