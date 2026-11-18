@@ -270,6 +270,10 @@ Owns `src/glue/dkg`. Reference: `glue/src/dkg` (about 24k Rust lines).
 - `dkg.reshare.actor.setup`: `FinalizedTip(D)`, `startup(B, processed, floor)`,
   `state_sync_skips_inclusion_prefix`, `recovered_share(V, store, key, info)`,
   `register_and_mark(registrar, io, fence, epoch, info)`, `dealer_for_phase`.
+- `dkg.reshare.actor.inclusion`: `PendingLogs(V, P)` (sorted, `put_first` keeps the
+  earliest), `PendingLogScan`, `pending_logs(B, gpa, scan, *ancestry) !?PendingLogs`,
+  `validate_future_participants`, `ArtifactRequests(A, R)`, `Ceremony`, `VerifiedLogs`,
+  `Verification(V, P)` (`retain`, `ready`).
 - `dkg/tests/mocks.zig` (test fixtures): `StoreHarness`, `TestStore`, `MockBlock(Dir)`/`TestBlock`, `EncodedPayload`,
   `genesis_block`, `child`, `MemorySecretStore`, `StaticParticipants`, `MockConsumer`.
 
@@ -289,6 +293,9 @@ Owns `src/glue/dkg`. Reference: `glue/src/dkg` (about 24k Rust lines).
   sender. A canceled `next_log` closes its responder and releases a log that already arrived.
 - Reshare metrics: the telemetry family has no `clear`, so `Metrics` tracks the peers each
   family exports and `reconcile` removes those that left their role.
+- Inclusion's pending-log scan runs on the caller's task; canceling it ends a stalled read
+  with `error.Canceled` (commonware's shutdown signal). `validate_future_participants`
+  returns errors where commonware panics.
 
 ### Backlog
 - [x] types (with conformance hashes), limits, fence, network.
@@ -296,6 +303,8 @@ Owns `src/glue/dkg`. Reference: `glue/src/dkg` (about 24k Rust lines).
 - [x] reshare: store (journal `Event` codec and conformance) with its 6 tests.
 - [x] reshare: mailbox and metrics with their tests; the shared test mocks.
 - [x] reshare actor: setup's helpers with commonware's 5 setup tests.
+- [x] reshare actor: inclusion's scan, request queue, and verification retention with
+  commonware's 9 helper tests (the whole-window tests land with the actor).
 - [ ] reshare: actor (setup, dealing, inclusion, follower, dkg), application.
 - [ ] bootstrap, probe (wire with conformance, discovery, service), orchestrator.
 - [ ] tests: the dkg and reshare harnesses, properties, and mocks; lookup's peer-activation
@@ -309,3 +318,4 @@ Owns `src/glue/dkg`. Reference: `glue/src/dkg` (about 24k Rust lines).
 - 2026-11-16: reshare's recovery store with commonware's 6 tests; the `Event` hash matches.
 - 2026-11-16: reshare mailbox and metrics with commonware's tests; shared DKG test mocks;
   setup's helpers with its 5 tests.
+- 2026-11-18: inclusion's pending-log scan, request queue, and verification retention.
