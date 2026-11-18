@@ -49,7 +49,11 @@ it comes first once `any` lands.
 - [x] current bounded reopen refuses a pruned floor without discarding later commits
   (clearing's d287952; regression test after clearing's
   `test_bounded_reopen_fails_once_the_floor_is_pruned`).
-- [ ] compact (db, batch, operation, witness, sync) once persisted merkle compact lands.
+- [x] compact db (witness journal over `merkle.compact`, batches, bounded init, prune,
+  `init_from_sync` import, `serve`): `{Keyless,Immutable}{Mmr,Mmb}Compact{Fixed,Variable}Conf`
+  and `CodecConformance<StoredWitness>`.
+- [ ] compact `sync.zig` (`Database` impl), once the crypto lane's `Database` interface lands.
+- [ ] compact crash-point and tampered-witness tests; current and compact fuzz targets.
 - [ ] Fuzz targets and benches for these modules.
 
 ## Agreement with storage-qmdb (2026-11-16)
@@ -119,6 +123,12 @@ it comes first once `any` lands.
   `verify_exclusion_proof(proof, key, &root)`, `get_span`, `get_next_key`, `get_prev_key`.
 
 ## Decisions
+- compact: `Db(F, O, H)` is generic over the keyless or immutable operation (detected by its
+  `append`/`set` variant) instead of commonware's sealed trait; `compact.Keyless` and
+  `compact.Immutable` are the aliases, kept under `compact/` so keyless/immutable stay
+  storage-qmdb's. `Config` carries `codec_config` beside the witness journal config
+  (commonware splits it out of the journal config). `start_sync` completes at once, so there
+  is no pending-sync state to resurface.
 - current's per-batch activity chunks are a refcounted `Layer` chain ending at the
   database's bitmap (commonware's `BitmapBatch`); merkleize and apply cut layers the database
   already holds (`trim_committed`). Staleness is left to `any`'s chain validation instead of
@@ -158,3 +168,4 @@ it comes first once `any` lands.
 - 2026-11-16: current unordered fixed `Db` and batches (clearing's Balances DB) with
   `CurrentMmr/MmbUnorderedFixedConf`; staged batches; ordered fixed current with exclusion
   proofs and `CurrentMmr/MmbOrderedFixedConf`.
+- 2026-11-18: compact qmdb (keyless and immutable) with its 10 conformance hashes.
