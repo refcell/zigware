@@ -382,3 +382,8 @@ resolver; those lanes are running, so do the types first and the actors as they 
   certify, batcher process/verify_certificate, and resolver process/deliver/validate spans.
 - 2026-11-18: pr_5097_regression: resolver deliveries run under their fetch's span.
 - 2026-11-18: the 7 networked resolver actor.rs cases (actor_network_test.zig).
+- 2026-11-18: fixtures_test.zig runs one_offline (with its metric checks), partition,
+  slow_and_lossy_links, backfill, and commonware's per-fixture `twins` on all 8 fixtures.
+  twins_campaign_test.zig is a generic `Suite(F)`. Slow builds (nightly) run full sizes;
+  ReleaseSafe runs a quick slice (fewer views, shorter waits, one twins case per fixture:
+  3 min for every fixture DST together); Debug skips them.

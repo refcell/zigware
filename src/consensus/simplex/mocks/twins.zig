@@ -166,7 +166,7 @@ pub fn Elector(comptime E: type) type {
 
         pub fn deinit(self: *Self, gpa: Allocator) void {
             gpa.free(self.round_leaders);
-            self.fallback.deinit(gpa);
+            if (@hasDecl(E, "deinit")) self.fallback.deinit(gpa);
             self.* = undefined;
         }
 

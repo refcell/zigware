@@ -1,9 +1,9 @@
 //! commonware's `test_for_all_fixtures` DSTs (`simplex/mod.rs`): the honest-path scenarios
 //! run on every canonical (scheme, elector) fixture: threshold VRF with the Random elector
 //! (MinPk, MinSig), threshold standard, multisig (MinPk, MinSig), ed25519, and secp256r1
-//! with round robin. commonware puts these in its slow group; here they run in ReleaseSafe
-//! and with `-Dslow-tests` (BLS signing takes minutes in Debug). engine_test.zig runs the
-//! ed25519 variants in every build.
+//! with round robin. commonware puts these in its slow group; here slow builds run them at
+//! full size and ReleaseSafe runs a quick slice (BLS signing takes minutes in Debug).
+//! engine_test.zig runs the ed25519 variants in every build.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -18,6 +18,8 @@ const runtime = @import("runtime");
 const consensus_types = @import("../types.zig");
 const elector_mod = @import("elector.zig");
 const engine_mod = @import("engine.zig");
+const engine_test = @import("engine_test.zig");
+const twins_campaign_test = @import("twins_campaign_test.zig");
 const application_mod = @import("mocks/application.zig");
 const relay_mod = @import("mocks/relay.zig");
 const reporter_mod = @import("mocks/reporter.zig");
@@ -41,6 +43,10 @@ const Epoch = consensus_types.Epoch;
 const primitives = cryptography.bls12381.primitives;
 
 const epoch: Epoch = .new(333);
+/// ReleaseSafe without `-Dslow-tests` runs a quick slice (fewer views, shorter waits, one
+/// twins case per fixture) so per-push CI still catches regressions; slow builds (nightly)
+/// run commonware's sizes.
+const full = build_options.slow_tests;
 const test_quota = p2p.Quota.per_second(1024);
 
 /// One canonical fixture: the scheme, its elector, and how to build both.
@@ -238,70 +244,254 @@ fn Validator(comptime F: type) type {
     };
 }
 
+/// A network of `F` validators, each started on demand. Must not move once started.
+fn Cluster(comptime F: type, comptime n: u32) type {
+    return struct {
+        const Self = @This();
+        const Restrict = fn (count: usize, a: usize, b: usize) bool;
+
+        ctx: Context,
+        fixture: cryptography.certificate.mocks.Fixture(F.Scheme),
+        network: *Net,
+        network_task: std.Io.Future(@typeInfo(@TypeOf(Net.run)).@"fn".return_type.?),
+        relay: Relay,
+        validators: [n]Validator(F),
+        running: [n]bool,
+
+        fn start(self: *Self, ctx: Context) !void {
+            const io = ctx.io();
+            var rng: IoRng = .{ .io = io };
+            self.ctx = ctx;
+            self.fixture = try F.fixture(&rng, n);
+            errdefer self.fixture.deinit(gpa);
+            self.network = try Net.init(gpa, io, .{
+                .max_size = 1024 * 1024,
+                .max_peers_per_set = n + 1,
+                .disconnect_on_block = true,
+                .tracked_peer_sets = 1,
+            });
+            self.network_task = try io.concurrent(Net.run, .{self.network});
+            _ = self.oracle().manager().track(0, .init_primary(.init(self.fixture.participants)));
+            self.relay = .init(gpa, io);
+            self.running = @splat(false);
+        }
+
+        fn deinit(self: *Self) void {
+            const io = self.ctx.io();
+            // Abort every engine before freeing any mock: live voters relay to all of them.
+            for (&self.validators, self.running) |*validator, running| {
+                if (running) validator.abort();
+            }
+            self.relay.deregister_all();
+            for (&self.validators, self.running) |*validator, running| {
+                if (running) validator.deinit();
+            }
+            self.relay.deinit();
+            self.network.close();
+            self.network_task.await(io) catch {};
+            self.network.deinit();
+            self.fixture.deinit(gpa);
+            self.* = undefined;
+        }
+
+        fn oracle(self: *const Self) Net.Oracle {
+            return self.network.oracle();
+        }
+
+        fn start_validator(self: *Self, index: usize) !void {
+            assert(!self.running[index]);
+            // Per-validator metrics, as commonware's `child("validator").with_attribute(..)`.
+            var validator_ctx = self.ctx;
+            const scope = self.ctx.scope.child("validator");
+            const key = self.fixture.participants[index];
+            validator_ctx.scope = scope.with_attribute("public_key", key);
+            const validator = &self.validators[index];
+            try validator.start(validator_ctx, &self.relay, &self.fixture, index, self.oracle());
+            self.running[index] = true;
+        }
+
+        fn start_all_but(self: *Self, skipped: ?usize) !void {
+            for (0..n) |index| {
+                if (skipped == index) continue;
+                try self.start_validator(index);
+            }
+        }
+
+        /// Links (or, with `link == null`, unlinks) every ordered pair `restrict` admits.
+        fn link_all(self: *Self, link: ?Link, restrict: ?*const Restrict) !void {
+            const peers = self.fixture.participants;
+            for (peers, 0..) |from, a| for (peers, 0..) |to, b| {
+                if (a == b) continue;
+                if (restrict) |admits| if (!admits(peers.len, a, b)) continue;
+                if (link) |value| {
+                    try self.oracle().add_link(from, to, value);
+                } else {
+                    try self.oracle().remove_link(from, to);
+                }
+            };
+        }
+
+        /// Replaces the link of every ordered pair `restrict` admits.
+        fn relink_all(self: *Self, link: Link, restrict: ?*const Restrict) !void {
+            try self.link_all(null, restrict);
+            try self.link_all(link, restrict);
+        }
+
+        fn wait_all(self: *Self, view: u64) !void {
+            for (&self.validators, self.running) |*validator, running| {
+                if (running) try validator.reporter.wait_for_finalized(.new(view));
+            }
+        }
+
+        fn max_finalized(self: *Self) u64 {
+            var highest: u64 = 0;
+            for (&self.validators, self.running) |*validator, running| {
+                if (!running) continue;
+                highest = @max(highest, validator.reporter.latest_finalized().get());
+            }
+            return highest;
+        }
+
+        /// No faults, invalid activity, disagreement among running validators, or blocks.
+        fn check(self: *Self, through: u64) !void {
+            for (&self.validators, self.running) |*validator, running| {
+                if (!running) continue;
+                validator.reporter.assert_no_faults();
+                validator.reporter.assert_no_invalid();
+            }
+            for (1..through + 1) |view| {
+                var expected: ?Digest = null;
+                for (&self.validators, self.running) |*validator, running| {
+                    if (!running) continue;
+                    const payload = validator.reporter.finalized(.new(view)) orelse continue;
+                    if (expected) |digest| try testing.expect(digest.order(payload) == .eq);
+                    expected = payload;
+                }
+            }
+            const blocked = try self.oracle().blocked(gpa);
+            defer gpa.free(blocked);
+            try testing.expectEqual(0, blocked.len);
+        }
+    };
+}
+
+fn link_ms(latency_ms: u64, jitter_ms: u64, success_rate: f64) Link {
+    return .{
+        .latency = .from_millis(latency_ms),
+        .jitter = .from_millis(jitter_ms),
+        .success_rate = success_rate,
+    };
+}
+
 /// commonware `all_online`: five validators over 200 ms links finalize `required` views,
 /// with no faults, invalid activity, disagreement, or blocks.
 fn all_online(comptime F: type, ctx: Context, required: u64) !void {
-    const n = 5;
-    const io = ctx.io();
-    var rng: IoRng = .{ .io = io };
-    var fixture = try F.fixture(&rng, n);
-    defer fixture.deinit(gpa);
-    const network = try Net.init(gpa, io, .{
-        .max_size = 1024 * 1024,
-        .max_peers_per_set = n + 1,
-        .disconnect_on_block = true,
-        .tracked_peer_sets = 1,
-    });
-    defer network.deinit();
-    var network_task = try io.concurrent(Net.run, .{network});
-    defer network_task.await(io) catch {};
-    defer network.close();
-    const oracle = network.oracle();
-    _ = oracle.manager().track(0, .init_primary(.init(fixture.participants)));
-    const link: Link = .{
-        .latency = .from_millis(200),
-        .jitter = .from_millis(1),
-        .success_rate = 1.0,
-    };
-    for (fixture.participants, 0..) |from, a| for (fixture.participants, 0..) |to, b| {
-        if (a != b) try oracle.add_link(from, to, link);
-    };
-    var relay: Relay = .init(gpa, io);
-    defer relay.deinit();
-    var validators: [n]Validator(F) = undefined;
-    var started: usize = 0;
-    defer {
-        // Abort every engine before freeing any mock: live voters relay to all applications.
-        for (validators[0..started]) |*validator| validator.abort();
-        relay.deregister_all();
-        for (validators[0..started]) |*validator| validator.deinit();
-    }
-    for (&validators, 0..) |*validator, index| {
-        try validator.start(ctx, &relay, &fixture, index, oracle);
-        started += 1;
-    }
-    for (&validators) |*validator| try validator.reporter.wait_for_finalized(.new(required));
-    try check_agreement(F, &validators, required);
-    const blocked = try oracle.blocked(gpa);
-    defer gpa.free(blocked);
-    try testing.expectEqual(0, blocked.len);
+    var cluster: Cluster(F, 5) = undefined;
+    try cluster.start(ctx);
+    defer cluster.deinit();
+    try cluster.link_all(link_ms(200, 1, 1.0), null);
+    try cluster.start_all_but(null);
+    try cluster.wait_all(required);
+    try cluster.check(required);
 }
 
-/// No faults or invalid activity, and every validator finalized the same payload at each
-/// view at or below `through`.
-fn check_agreement(comptime F: type, validators: []Validator(F), through: u64) !void {
-    for (validators) |*validator| {
-        validator.reporter.assert_no_faults();
-        validator.reporter.assert_no_invalid();
-    }
-    for (1..through + 1) |view| {
-        var expected: ?Digest = null;
-        for (validators) |*validator| {
-            const payload = validator.reporter.finalized(.new(view)) orelse continue;
-            if (expected) |digest| try testing.expect(digest.order(payload) == .eq);
-            expected = payload;
-        }
-    }
+fn not_zero(_: usize, a: usize, b: usize) bool {
+    return a != 0 and b != 0;
+}
+
+fn one_not_zero(_: usize, a: usize, b: usize) bool {
+    return (a == 1 or b == 1) and a != 0 and b != 0;
+}
+
+fn zero_not_one(_: usize, a: usize, b: usize) bool {
+    return (a == 0 or b == 0) and a != 1 and b != 1;
+}
+
+fn not_one(_: usize, a: usize, b: usize) bool {
+    return a != 1 and b != 1;
+}
+
+fn separated(count: usize, a: usize, b: usize) bool {
+    const half = count / 2;
+    return (a < half and b >= half) or (a >= half and b < half);
+}
+
+/// commonware `one_offline`: validator 0 never starts; the rest finalize 100 views, and
+/// every online validator records timeouts and nullifications for the offline leader.
+fn one_offline(comptime F: type, ctx: Context) !void {
+    const n = 5;
+    var cluster: Cluster(F, n) = undefined;
+    try cluster.start(ctx);
+    defer cluster.deinit();
+    try cluster.link_all(link_ms(10, 1, 1.0), &not_zero);
+    try cluster.start_all_but(0);
+    const required: u64 = if (full) 100 else 30;
+    try cluster.wait_all(required);
+    try cluster.check(required);
+    const encoded = try ctx.scope.encode(gpa);
+    defer gpa.free(encoded);
+    var buffer: [128]u8 = undefined;
+    const offline = cluster.fixture.participants[0];
+    const label = try std.fmt.bufPrint(&buffer, "leader=\"{f}\"", .{offline});
+    const count = engine_test.count_nonzero_metric_lines;
+    try testing.expect(count(encoded, &.{ "_timeouts", label }) >= n - 1);
+    try testing.expectEqual(n - 1, count(encoded, &.{ "_nullifications", label }));
+}
+
+/// commonware `partition`: ten validators split in half finalize nothing, then heal.
+fn partition(comptime F: type, ctx: Context) !void {
+    var cluster: Cluster(F, 10) = undefined;
+    try cluster.start(ctx);
+    defer cluster.deinit();
+    const link = link_ms(10, 1, 1.0);
+    try cluster.link_all(link, null);
+    try cluster.start_all_but(null);
+    const required: u64 = if (full) 20 else 10;
+    try cluster.wait_all(required);
+    try cluster.link_all(null, &separated);
+    // Let in-progress notarizations and finalizations finish.
+    try ctx.sleep(.fromSeconds(10));
+    const before = cluster.max_finalized();
+    try ctx.sleep(.fromSeconds(if (full) 60 else 20));
+    try testing.expectEqual(before, cluster.max_finalized()); // Nothing finalizes while split.
+    try cluster.link_all(link, &separated);
+    try cluster.wait_all(before + required);
+    try cluster.check(before + required);
+}
+
+/// commonware `slow_and_lossy_links`: half the messages drop over 200 ms links.
+fn slow_and_lossy_links(comptime F: type, ctx: Context) !void {
+    var cluster: Cluster(F, 5) = undefined;
+    try cluster.start(ctx);
+    defer cluster.deinit();
+    try cluster.link_all(link_ms(200, 150, 0.5), null);
+    try cluster.start_all_but(null);
+    const required: u64 = if (full) 20 else 10;
+    try cluster.wait_all(required);
+    try cluster.check(required);
+}
+
+/// commonware `backfill`: validator 0 joins late, cut off from validator 1, and catches up
+/// through the others' certificates over degraded links.
+fn backfill(comptime F: type, ctx: Context) !void {
+    var cluster: Cluster(F, 4) = undefined;
+    try cluster.start(ctx);
+    defer cluster.deinit();
+    try cluster.link_all(link_ms(10, 1, 1.0), &not_zero);
+    try cluster.start_all_but(0);
+    const required: u64 = if (full) 100 else 30;
+    try cluster.wait_all(required);
+    // Degrade the online links and let nullifications accrue.
+    const slow = link_ms(3000, 0, 1.0);
+    try cluster.relink_all(slow, &not_zero);
+    try ctx.sleep(.fromSeconds(60));
+    // Cut validator 1 off, and link validator 0 to the rest.
+    try cluster.link_all(null, &one_not_zero);
+    try cluster.link_all(slow, &zero_not_one);
+    try cluster.relink_all(link_ms(10, 3, 1.0), &not_one);
+    try cluster.start_validator(0);
+    try cluster.validators[0].reporter.wait_for_finalized(.new(required));
+    try cluster.check(required);
 }
 
 fn run_all(comptime scenario: anytype, args: anytype) !void {
@@ -319,5 +509,34 @@ fn run_all(comptime scenario: anytype, args: anytype) !void {
 }
 
 test "all fixtures: all online" {
-    try run_all(all_online, .{@as(u64, 100)});
+    try run_all(all_online, .{@as(u64, if (full) 100 else 30)});
+}
+
+test "all fixtures: one offline" {
+    try run_all(one_offline, .{});
+}
+
+test "all fixtures: partition heals" {
+    try run_all(partition, .{});
+}
+
+test "all fixtures: slow and lossy links" {
+    try run_all(slow_and_lossy_links, .{});
+}
+
+test "all fixtures: backfill" {
+    try run_all(backfill, .{});
+}
+
+// commonware `twins`: `twins_campaign` on `TWINS_CAMPAIGN` over `TWINS_LINK`, with each
+// fixture's scheme and elector. Slow builds run all 20 cases per fixture; ReleaseSafe runs
+// one case per fixture.
+test "all fixtures: twins" {
+    if (builtin.mode == .debug and !full) return error.SkipZigTest;
+    const campaigns = twins_campaign_test;
+    var campaign = campaigns.twins_campaign;
+    if (!full) campaign.max_cases = 1;
+    inline for (fixtures) |F| {
+        try campaigns.Suite(F).run_campaign(campaign, campaigns.twins_link);
+    }
 }
