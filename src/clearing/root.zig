@@ -15,4 +15,5 @@ test {
     std.testing.refAllDecls(@This());
     _ = @import("fuzz/decode.zig");
     _ = @import("fuzz/verify.zig");
+    _ = @import("tests/bajillion/main.zig");
 }

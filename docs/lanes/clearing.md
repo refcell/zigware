@@ -90,6 +90,10 @@ qmdb `current` (balances, over the MMB) and `keyless` (payout log, over the MMR)
   a proposal whether or not it applied. After a database error the caller reopens both
   databases, as commonware's dropped handles require. Settle and apply errors are inferred:
   `InvalidCheckpoint`, a `FlowError`, or the databases' own errors.
+- The integration roles keep each role's persisted state as plain owned values with
+  `clone`/`eql`, and maps as sorted arrays (`roles/map.zig`) in place of `BTreeMap`. Validators
+  share one in-memory `Env` (mock storage and page cache) per test, each in its own
+  partitions, instead of the deterministic runtime's storage.
 - `testing.zig` holds commonware's `tests.rs` helpers: `Harness` (in-memory storage; each
   database registers its metrics afresh on open) and `Store(I)` with `settle`, `apply`,
   `commit`, `roots`, `post`. The database tests are in `validator_db_test.zig`, the ledger
@@ -113,8 +117,11 @@ qmdb `current` (balances, over the MMB) and `keyless` (payout log, over the MMR)
 - [x] validator: `BalanceProof.verify`, `Balances`, `settle`, `apply`, `Proposal`, and all 15
   validator tests on the databases.
 - [x] tests.rs ledger vector in full: every pinned root, digest, and encoding matches.
-- [ ] Integration tests (clearing/tests/bajillion: ledger, lifecycle, model, operator,
-  payments, validator, and the reference roles; about 5.6k lines).
+- [x] Integration test reference roles in `src/clearing/tests/bajillion/roles` (sender,
+  receiver, operator, ledger, validator, with a sorted-array `map`), the `Deployment`
+  harness, and operator.rs's three tests.
+- [ ] Integration tests: validator.rs (1 of 14 so far), payments, ledger, lifecycle, and
+  model.rs (needs a small BFS model checker in place of Stateright).
 - [x] Fuzz targets `src/clearing/fuzz/{decode,verify}.zig` (commonware clearing/fuzz), seeded
   in `zig build test` and under `std.testing.fuzz`; the verify target includes BalanceProof.
 - [x] Benches `src/clearing/benches.zig` (zigware's own; commonware's clearing has none):
@@ -143,3 +150,5 @@ qmdb `current` (balances, over the MMB) and `keyless` (payout log, over the MMR)
   full ledger vector (balances, summary, balance-proof, and payout-proof encodings match).
   Storage fixes: `current`'s bounded reopen now checks its bitmap floor before the journal
   discards history, and `key_value_proof` compares keys by value.
+- 2026-11-18: integration roles (sender, receiver, operator, ledger, validator), the
+  deployment harness, operator.rs's tests, and validator.rs's agreement test.
