@@ -124,7 +124,9 @@ statistics, output, CLI) and run against a minimal in-lane stand-in, then switch
   match commonware's binary (`testdata/validator_clap_cases.txt`). Two networks of 4
   zigware validators and zigware's indexer finalize and bridge each other's finalizations
   at commonware's rate.
-- [ ] Demo: two networks of 4 validators and an indexer.
+- [x] Demo: `examples/bridge/local.sh` runs an indexer and two networks of 4;
+  `record-demo.sh bridge` records docs/assets/bridge-demo.{gif,mp4} (indexer and one
+  validator per network in tmux, once both networks finalize).
 
 ### Follow-ups
 - [x] Pass `.subscriber = collector.subscriber()` to the runner (runtime 1ead8cc) once p2p and
@@ -150,3 +152,4 @@ statistics, output, CLI) and run against a minimal in-lane stand-in, then switch
 - 2026-11-16: bridge's indexer store and application.
 - 2026-11-16: bridge's indexer binary; `ui.fmt` (tracing's default log format).
 - 2026-11-18: bridge's validator binary; bootstrapper parsing moves to `ui.rust`.
+- 2026-11-18: bridge demo recorded.

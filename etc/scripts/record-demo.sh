@@ -109,6 +109,53 @@ if [ "${DEMO_SESSION:-}" = "1" ]; then
       wait
       t kill-server
       ;;
+    bridge)
+      if [ -n "$(find src examples/bridge examples/ui build.zig -newer \
+        zig-out/bin/bridge-validator -print -quit 2>/dev/null || echo stale)" ] ||
+        [ ! -x zig-out/bin/bridge-validator ]; then
+        zig build -Doptimize=ReleaseFast >/dev/null
+      fi
+      # An indexer and two networks of 4 (examples/bridge/local.sh) in the background. Once
+      # both networks finalize, tmux shows the indexer's stores and each network's first
+      # validator: time, message, and fields, with long hex cut short.
+      dir=/tmp/zigware-bridge-demo
+      rm -rf "$dir"
+      NO_COLOR=1 examples/bridge/local.sh "$dir" &
+      network=$!
+      printf '\033[H\033[2J\033[1mstarting an indexer and two networks of 4 validators\033[0m\n'
+      for _ in $(seq 120); do
+        grep -qs ' finalized' "$dir/validator-1.log" &&
+          grep -qs ' finalized' "$dir/validator-5.log" && break
+        sleep 0.5
+      done
+      line='s/^[0-9-]+T([0-9:]+)\.[0-9]+Z +[A-Z]+ [a-z_:]+: /\1 /'
+      line+='; s/([0-9a-f]{8})[0-9a-f]{16,}/\1../g; s/signature=.*//; s/Finalization \{.*/../'
+      green='s/(finalized|stored finalization)/\x1b[32m&\x1b[0m/'
+      yellow='s/(proposed|stored block)/\x1b[33m&\x1b[0m/'
+      follow() {
+        local title=$1 file=$2 pattern=$3 width=$4
+        printf '%s' "printf '\\033[1m%s\\033[0m\\n' '$title'; tail -n0 -F $dir/$file 2>/dev/null | \
+grep --line-buffered -E '$pattern' | sed -u -E '$line; s/^(.{$width}).*/\\1/; $green; $yellow'"
+      }
+      t() { tmux -L zigware-demo -f /dev/null "$@"; }
+      t kill-server 2>/dev/null || true
+      t new-session -d -s bridge -x 160 -y 40 \
+        "$(follow 'indexer (both networks)' indexer.log 'stored' 156)"
+      t set-option -g status off
+      t split-window -v -t bridge \
+        "$(follow 'network 1: validator 1' validator-1.log 'actor: (proposed|finalized)' 77)"
+      t split-window -h -t bridge \
+        "$(follow 'network 2: validator 5' validator-5.log 'actor: (proposed|finalized)' 77)"
+      (
+        sleep 10
+        t detach-client -s bridge
+      ) &
+      t attach -t bridge || true
+      wait %2 2>/dev/null || true
+      t kill-server
+      kill "$network" 2>/dev/null || true
+      wait "$network" 2>/dev/null || true
+      ;;
     *) echo "unknown demo: $name" >&2; exit 1 ;;
   esac
   exit 0
@@ -118,11 +165,12 @@ case $name in
   flood) size=150x40 ;;
   chat) size=200x50 ;;
   log) size=200x44 ;;
+  bridge) size=160x40 ;;
   *) size=104x40 ;;
 esac
 DEMO_SESSION=1 TERM=xterm-256color asciinema rec --overwrite --quiet --output-format asciicast-v2 --window-size "$size" \
   --command "$0 $name" "$out.cast"
-if [ "$name" = chat ] || [ "$name" = log ]; then
+if [ "$name" = chat ] || [ "$name" = log ] || [ "$name" = bridge ]; then
   # End on the panes, not tmux's exit screen: cut where tmux leaves the alternate screen.
   awk 'index($0, "\\u001b[?1049l") { exit } { print }' "$out.cast" >"$out.cast.cut"
   mv "$out.cast.cut" "$out.cast"
@@ -130,6 +178,7 @@ fi
 # log redraws four wide, busy panes: a smaller font and frame rate keep its gif near 1 MB.
 font=16 fps=30
 [ "$name" = log ] && font=12 fps=6
+[ "$name" = bridge ] && font=14 fps=8
 agg --theme monokai --font-size "$font" --idle-time-limit 3 --last-frame-duration 6 \
   --fps-cap "$fps" "$out.cast" "$out.gif"
 ffmpeg -y -loglevel error -i "$out.gif" -movflags faststart -pix_fmt yuv420p \
