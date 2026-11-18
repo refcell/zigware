@@ -239,8 +239,21 @@ resolver; those lanes are running, so do the types first and the actors as they 
   `certification_lifecycle`, `entry_certificate_prioritizes_...`, `only_notarize_before_
   nullify`, `nullification_skips_to_next_term_start`, `term_safety_blocks_finalize_after_
   nullify`, `try_verify_waits_for_missing_parent_certification`, and the
-  `parent_payload_rejects_intra_term_view_skip` case. Everything from
-  `optimistic_views_zero_disables_intra_term_lookahead` on is still to do.
+  `parent_payload_rejects_intra_term_view_skip` case, `optimistic_views_zero_disables_
+  intra_term_lookahead`, and `try_verify_requests_uncertified_cross_term_parent`. The rest,
+  from `try_verify_only_resolves_ancestry_once_certification_requested` on, belongs to p2p
+  (T-01a1d59c), in voter/state_late_test.zig. Ingress: done (resolver/ingress_test.zig,
+  voter/ingress_test.zig). Actor metrics: simplex owns them again.
+  Resolver actor.rs (resolver/actor_test.zig): every handler-level case is ported, from
+  `scan_fetches_issue_as_one_batch` through `validate_rejects_finalization_from_different_
+  epoch`, plus a zigware-only below-view notarization rejection (a servable-view plant
+  survived every ported case). Not yet ported: the cases that run the whole actor on p2p's
+  simulated network (`targeted_fetch_does_not_restrict_existing_backfill`, its
+  self-targeted twin, `retry_delay_is_independent_of_request_timeout` (needs the resolver
+  engine's `requests_sent_total`), `member_without_share_does_not_fetch_from_itself`,
+  `untargeted_parent_fetch_uses_available_holder`, `served_requests_hold_channel_capacity`,
+  `unresolved_delivery_does_not_block_nullification_fetch`), and `pr_5097_regression`
+  (needs span parents in the tracer). The runtime lane left these on 2026-11-18 for marshal.
 - [ ] simplex mod.rs tests (ed25519, round robin). Done: all_online (Debug runs 50 views
   where commonware runs 100), partition, slow_and_lossy_links, determinism, the Byzantine
   conflicter, nuller, impersonator, reconfigurer, invalid (2 seeds each, 20 or 50 views;
