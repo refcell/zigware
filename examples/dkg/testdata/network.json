@@ -1,0 +1,17 @@
+{
+  "participants": [
+    "478b8e507e0bb2b18c0f9e0824769e8562d10df9abe2e774896f82b4b4405266",
+    "5925ba86e2189444a6c3b437b25d2ef35daecd1abf82c5fb36060f9fc0af428c"
+  ],
+  "committee_size": 1,
+  "peers": [
+    {
+      "public_key": "478b8e507e0bb2b18c0f9e0824769e8562d10df9abe2e774896f82b4b4405266",
+      "dial": "10.0.0.1:4000"
+    },
+    {
+      "public_key": "5925ba86e2189444a6c3b437b25d2ef35daecd1abf82c5fb36060f9fc0af428c",
+      "dial": "[::1]:4001"
+    }
+  ]
+}
