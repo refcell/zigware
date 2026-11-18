@@ -1489,3 +1489,161 @@ test "oversized recovery: a tracked open repairs a torn index tail above the mar
     try testing.expectEqual(byte_end(first), value_len.?);
     try journal.destroy();
 }
+
+/// `partition` holds exactly the blobs of `expected` (ascending).
+fn expect_stored(h: *Harness, partition: []const u8, expected: []const u64) !void {
+    var names = try h.storage.scan(gpa, partition);
+    defer names.deinit(gpa);
+    try testing.expectEqual(expected.len, names.items.len);
+    for (expected, names.items) |section, name| {
+        try testing.expectEqualSlices(u8, &manager_mod.section_name(section), name);
+    }
+}
+
+test "oversized recovery: a tracked open recovers an interrupted section removal" {
+    const sections = 4;
+    const entries = 3;
+    // commonware's cases: lose only the newest index section, or every one above section 1.
+    for ([_]u64{ 3, 1 }) |kept| {
+        var h = try Harness.init_page(@intCast(base.TestEntry.fixed_size));
+        defer h.deinit();
+        var journal = try h.open_tracked();
+        for (1..sections + 1) |section| {
+            for (0..entries) |position| {
+                const id = section * entries + position;
+                _ = try append(&journal, section, id, fill(id));
+            }
+        }
+        try journal.sync_all();
+        journal.deinit();
+        var section: u64 = sections;
+        while (section > kept) : (section -= 1) {
+            try h.storage.remove("test-index", &manager_mod.section_name(section));
+        }
+        journal = try h.open_tracked();
+        errdefer journal.deinit();
+        try testing.expectEqual(kept, journal.newest_section());
+        for (1..kept + 1) |retained| {
+            try testing.expectEqual(entries * chunk, try journal.size(retained));
+            for (0..entries) |position| {
+                const stored = try journal.get(retained, position);
+                try testing.expectEqual(retained * entries + position, stored.id);
+                const value =
+                    try journal.get_value(retained, stored.value_offset, stored.value_size);
+                try testing.expectEqual(fill(stored.id), value);
+            }
+        }
+        for (kept + 1..sections + 1) |removed| {
+            try testing.expectError(error.SectionOutOfRange, journal.get(removed, 0));
+        }
+        const survivors = [_]u64{ 1, 2, 3 };
+        try expect_stored(&h, "test-index", survivors[0..kept]);
+        try expect_stored(&h, "test-values", survivors[0..kept]);
+        // The newest survivor continues after its last entry and value.
+        const end = try journal.value_size(kept);
+        const next = try append(&journal, kept, 100, fill(100));
+        try testing.expectEqual(entries, next.position);
+        try testing.expectEqual(end, next.offset);
+        // The first removed section restarts both journals from zero.
+        const first = try append(&journal, kept + 1, 101, fill(101));
+        try testing.expectEqual(0, first.position);
+        try testing.expectEqual(0, first.offset);
+        try journal.sync_all();
+        journal.deinit();
+        journal = try h.open_tracked();
+        try testing.expectEqual(kept + 1, journal.newest_section());
+        for (1..kept) |retained| {
+            try testing.expectEqual(entries * chunk, try journal.size(retained));
+        }
+        try testing.expectEqual((entries + 1) * chunk, try journal.size(kept));
+        try testing.expectEqual(100, (try journal.get(kept, entries)).id);
+        try expect_value(&journal, kept, next, fill(100));
+        try testing.expectEqual(101, (try journal.get(kept + 1, 0)).id);
+        try expect_value(&journal, kept + 1, first, fill(101));
+        try journal.destroy();
+    }
+}
+
+test "oversized recovery: a restore adopts interior index corruption in place" {
+    // commonware's cases: the checkpoint names the damaged section, or a later one.
+    const checkpoints = [_]@import("oversized.zig").Checkpoint{
+        .{ .section = 1, .size = 3 * chunk },
+        .{ .section = 2, .size = chunk },
+    };
+    for (checkpoints) |checkpoint| {
+        var h = try Harness.init_page(@intCast(base.TestEntry.fixed_size));
+        defer h.deinit();
+        var journal = try h.open_checkpoint(.{ .section = 0, .size = 0 });
+        for (0..3) |id| _ = try append(&journal, 1, id, fill(id));
+        _ = try append(&journal, 2, 3, fill(3));
+        try journal.sync_all();
+        journal.deinit();
+        // One entry per page makes the damaged page strictly interior.
+        const page_size: u64 = base.TestEntry.fixed_size;
+        const section1 = manager_mod.section_name(1);
+        try paged.corrupt_page(h.storage.interface(), "test-index", &section1, 1, page_size);
+        const expected = try read_raw(&h, "test-index", 1);
+        defer gpa.free(expected);
+        // The restore trusts the durability boundary; the rot stays a lazy read error.
+        journal = try h.open_checkpoint(checkpoint);
+        try testing.expectError(error.InvalidChecksum, journal.get(1, 1));
+        journal.deinit();
+        const actual = try read_raw(&h, "test-index", 1);
+        defer gpa.free(actual);
+        try testing.expectEqualSlices(u8, expected, actual);
+    }
+}
+
+test "oversized recovery: a restore adopts a rotted committed value lazily" {
+    var h = try Harness.init();
+    defer h.deinit();
+    var journal = try h.open_checkpoint(.{ .section = 0, .size = 0 });
+    const rotted = try append(&journal, 1, 1, fill(1));
+    const intact = try append(&journal, 2, 2, fill(2));
+    try journal.sync_all();
+    // Corrupt entry 1's committed value in place, sizes unchanged.
+    const garbage = try gpa.alloc(u8, rotted.size);
+    defer gpa.free(garbage);
+    @memset(garbage, 0xFF);
+    try journal.values.inject(1, rotted.offset, garbage);
+    try journal.values.sync(&.{1});
+    journal.deinit();
+    // The restore reads no values: only the affected entry's read fails.
+    journal = try h.open_checkpoint(.{ .section = 2, .size = chunk });
+    const read = journal.get_value(1, rotted.offset, rotted.size);
+    try testing.expectError(error.ChecksumMismatch, read);
+    try expect_value(&journal, 2, intact, fill(2));
+    try journal.destroy();
+}
+
+test "oversized recovery: a tracked journal reopens after a destroy stopped in its markers" {
+    // commonware searches seeds for a random removal failure; here the destroy stops after
+    // each count of mutations, and every stop that leaves one marker copy must reopen.
+    var found: u64 = 0;
+    var interrupted: u64 = 0;
+    while (true) : (interrupted += 1) {
+        var h = try Harness.init();
+        defer h.deinit();
+        var journal = try h.open_tracked();
+        for (0..2) |section| _ = try append(&journal, section, section, fill(section));
+        // Publish both markers, then prune section 0, which durably removes its marker as a
+        // newer generation before deleting its blobs.
+        try journal.sync_all();
+        try journal.sync(&.{});
+        try testing.expect(try journal.prune(1));
+        h.storage.allow_mutations(interrupted);
+        const destroyed = if (journal.destroy()) |_| true else |_| false;
+        h.storage.mutations_allowed = null;
+        h.storage.crash();
+        if (destroyed) break;
+        var markers = h.storage.scan(gpa, "test-markers") catch continue;
+        defer markers.deinit(gpa);
+        if (markers.items.len != 1) continue;
+        found += 1;
+        // The surviving generation never names the pruned section.
+        journal = try h.open_tracked();
+        defer journal.deinit();
+        try testing.expectEqual(1, (try journal.get(1, 0)).id);
+    }
+    try testing.expect(found > 0);
+}
