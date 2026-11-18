@@ -128,7 +128,9 @@ qmdb `current` (balances, over the MMB) and `keyless` (payout log, over the MMR)
 - [x] Integration tests: validator.rs (all 12 tests).
 - [x] Integration tests: payments.rs (all 21 tests).
 - [x] Integration tests: ledger.rs (all 13 tests, with the reorg module).
-- [ ] Integration tests: lifecycle, and
+- [x] Integration tests: lifecycle.rs (all 6 tests; `schemes` runs secp256r1 users, a
+  BLS12-381 operator, secp256r1 certificates, and `u256` amounts on its own small harness).
+- [ ] Integration tests:
   model.rs (needs a small BFS model checker in place of Stateright).
 - [x] Fuzz targets `src/clearing/fuzz/{decode,verify}.zig` (commonware clearing/fuzz), seeded
   in `zig build test` and under `std.testing.fuzz`; the verify target includes BalanceProof.
@@ -167,3 +169,4 @@ qmdb `current` (balances, over the MMB) and `keyless` (payout log, over the MMR)
   resolving requests, replays, limits, restarts).
 - 2026-11-18: ledger.rs, all 13 tests (queues, posting, halts, challenges, claims, custody,
   payout withdrawals under every posted root, compact ranges, and the reorg case).
+- 2026-11-18: lifecycle.rs, all 6 tests, including the mixed-schemes `u256` deployment.
