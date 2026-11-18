@@ -480,10 +480,6 @@ fn prune_until_parked(
     if (completed) {
         try try handle.join();
     } else {
-        // zigware's oversized journal keeps destroying its other journals after one fails,
-        // and a cancellation reaches only the first parked mutation; commonware's dropped
-        // future stops there. Later mutations go through, so the abort can finish.
-        faults.disarm();
         if (handle.abort()) |_| {} else |_| {}
     }
     try testing.expectEqual(completed, !faults.parked());
