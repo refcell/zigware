@@ -53,7 +53,7 @@ pub const B = mocks_block.Block(Sha256, Ctx);
 pub const S = if (fast_schemes)
     simplex.scheme.ed25519.Scheme(D)
 else
-    simplex.scheme.bls12381_threshold.vrf.Scheme(D, K, cryptography.bls12381.MinPk);
+    simplex.scheme.bls12381_threshold.vrf.Scheme(D, K, cryptography.bls12381.primitives.MinPk);
 pub const Provider = cryptography.certificate.ConstantProvider(S);
 pub const Fixture = cryptography.certificate.mocks.Fixture(S);
 pub const Network = p2p.simulated.Network(K);
@@ -233,9 +233,14 @@ pub fn Archives(comptime StoredBlock: type) type {
 /// The two immutable archives a validator's actor borrows, and the page cache behind them.
 /// Finalizations commit to `C`.
 pub fn ArchivesOf(comptime C: type, comptime StoredBlock: type) type {
+    return ArchivesWith(S, C, StoredBlock);
+}
+
+/// `ArchivesOf` under signing scheme `Scheme` (the coding variant signs over its commitment).
+pub fn ArchivesWith(comptime Scheme: type, comptime C: type, comptime StoredBlock: type) type {
     return struct {
         const Self = @This();
-        pub const Certificate = simplex_types.Finalization(S, C);
+        pub const Certificate = simplex_types.Finalization(Scheme, C);
         pub const FinalizationArchive = storage.archive.immutable.Archive([32]u8, Certificate);
         pub const BlockArchive = storage.archive.immutable.Archive([32]u8, StoredBlock);
 
@@ -252,7 +257,7 @@ pub fn ArchivesOf(comptime C: type, comptime StoredBlock: type) type {
             self.gpa = gpa;
             self.cache_ref = try .init(gpa, page_size, page_cache_size);
             errdefer self.cache_ref.deinit();
-            const certificate_config = S.certificate_codec_config_unbounded();
+            const certificate_config = Scheme.certificate_codec_config_unbounded();
             self.names[0] = try .init(gpa, prefix, "finalizations-by-height");
             errdefer self.names[0].deinit(gpa);
             self.names[1] = try .init(gpa, prefix, "finalized_blocks");

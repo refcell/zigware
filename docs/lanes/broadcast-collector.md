@@ -160,9 +160,12 @@ that harness. It builds on `coding` (ReedSolomon), `consensus.types.coding.Commi
 - [ ] marshal coding: `coding/harness.zig` and the `coding/mod.rs` tests (`mod_test.zig`).
   Done: `CodingB`, `CodingCtx`, `genesis_commitment`, `make_coding_block`, and
   `CodingHarness`'s blocks (`TestCommitment` is spelled over the digests, since `CodingB`'s
-  context refers to it), with `mailbox_provides_application_blocks`. Next: the validator
-  setup (shards engine in place of broadcast), waiting on `mocks/harness.zig` archives and
-  certificates over a non-D commitment, then the scenario tests.
+  context refers to it), with `mailbox_provides_application_blocks`; the coding `Validator`
+  (shards engine in place of broadcast, archives via `mocks/harness.ArchivesWith`) with an
+  end-to-end finalize smoke test. The coding variant signs with its own scheme over the
+  coding commitment (`CodingHarness.Scheme`/`Provider`/`Fixture`/`fixture`), since marshal's
+  shared `S` is bound to digest subjects. Next: the mod.rs tests, and the scenario wrappers
+  once marshal's generic scenarios land.
 
 ## Log
 - 2026-11-13: broadcast lib.rs and buffered (engine, mailbox, overflow policy, metrics,
@@ -190,3 +193,4 @@ that harness. It builds on `coding` (ReedSolomon), `consensus.types.coding.Commi
 - 2026-11-16: Coding's `subscribe_parent` (BlockProvider for core's mailbox).
 - 2026-11-16: marshal coding `Marshaled` with 8 tests.
 - 2026-11-18: coding harness blocks and the first mod.rs test.
+- 2026-11-18: coding harness validator with an end-to-end finalize smoke test.
