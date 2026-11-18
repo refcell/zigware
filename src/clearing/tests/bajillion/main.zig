@@ -268,4 +268,5 @@ test {
     _ = @import("operator.zig");
     _ = @import("deployment.zig");
     _ = @import("validator.zig");
+    _ = @import("payments.zig");
 }
