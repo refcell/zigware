@@ -96,6 +96,7 @@ test {
     _ = @import("engine_test.zig");
     _ = @import("twins_campaign_test.zig");
     _ = @import("tle_test.zig");
+    _ = @import("fixtures_test.zig");
     _ = scheme.bls12381_threshold.vrf;
     _ = scheme.bls12381_threshold.standard;
     _ = scheme.namespace;

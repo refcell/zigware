@@ -263,8 +263,11 @@ resolver; those lanes are running, so do the types first and the actors as they 
   honest and twin applications returned handoffs; its early-vote count waits on the
   voter's handoff metrics. Next: per-scheme twins, the per-scheme fixture variants, and
   the rest, seeded.
-- [ ] Tracing: actor events are done (voter, batcher, resolver, engine); spans and the
-  voter state machine's events follow.
+- [ ] Tracing: actor events are done (voter, batcher, resolver, engine). The voter opens
+  commonware's `simplex.voter.start`, `.timeout`, `.process`, and `.notify` spans, and
+  events inside them carry them. Still to do: the per-view spans (`view_span`), the
+  propose/verify/certify/journal spans, the batcher and resolver spans, and the voter
+  state machine's events.
 - [x] Fuzz targets (commonware consensus/fuzz): owned by the crypto lane in
   `src/consensus/fuzz/`.
 
@@ -331,3 +334,5 @@ resolver; those lanes are running, so do the types first and the actors as they 
   assertions wait on the voter's metrics.
 - 2026-11-16: voter state.rs skip-budget, timeout-reset, and term-anchor tests (37 of 141).
 - 2026-11-16: twins pipelined handoff campaign; the mock application takes `handoff_until`.
+- 2026-11-18: voter tracing spans (start, timeout, process, notify); fixtures_test.zig runs
+  all_online on all 8 canonical fixtures (ReleaseSafe and slow builds).

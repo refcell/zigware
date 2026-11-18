@@ -38,6 +38,7 @@ const Duration = utils.Duration;
 const TimeoutReason = metrics.TimeoutReason;
 const variable = storage.journal.segmented.variable;
 const Tracer = runtime.telemetry.traces.Tracer;
+const Span = runtime.telemetry.traces.Span;
 
 /// The tracing target of the voter's events (commonware's module path).
 pub const trace_target = "commonware_consensus::simplex::actors::voter";
@@ -177,6 +178,9 @@ pub fn Actor(comptime P: type) type {
         next_id: u64 = 0,
         /// Receives the voter's events; the engine sets it from its context.
         tracer: Tracer = .none,
+        /// The span events are emitted in (commonware's `simplex.voter.*` spans), set only
+        /// while one is open on the stack.
+        span: ?*const Span = null,
 
         pub fn init(gpa: Allocator, io: Io, cfg: Config(P)) !struct { Self, Mailbox } {
             const pair = try @import("actor").mailbox.new(Message, gpa, io, cfg.mailbox_size);
@@ -255,7 +259,7 @@ pub fn Actor(comptime P: type) type {
             if (removed.items.len == 0) return;
             const last_finalized = self.state.last_finalized();
             for (removed.items) |view| {
-                self.tracer.event(.debug, "pruned view", .{
+                self.trace(.debug, "pruned view", .{
                     .view = view.get(),
                     .last_finalized = last_finalized.get(),
                 });
@@ -335,7 +339,7 @@ pub fn Actor(comptime P: type) type {
         fn try_propose(self: *Self, inbox: *Inbox) !void {
             assert(self.pending_propose == null);
             const request = self.state.try_propose() orelse return;
-            self.tracer.event(.debug, "requested proposal from automaton", .{
+            self.trace(.debug, "requested proposal from automaton", .{
                 .round = request.context().round,
                 .handoff = request.is_handoff(),
             });
@@ -364,7 +368,7 @@ pub fn Actor(comptime P: type) type {
                 },
                 .wait => return,
             };
-            self.tracer.event(.debug, "requested proposal verification", .{
+            self.trace(.debug, "requested proposal verification", .{
                 .round = ready.proposal.round,
             });
             const id = self.take_id();
@@ -444,7 +448,7 @@ pub fn Actor(comptime P: type) type {
             try self.certify_tasks.ensureUnusedCapacity(self.gpa, ready.items.len);
             for (ready.items) |candidate| {
                 const view = candidate.view();
-                self.tracer.event(.debug, "attempting certification", .{ .view = view.get() });
+                self.trace(.debug, "attempting certification", .{ .view = view.get() });
                 const id = self.take_id();
                 const args = .{ self, links.inbox, candidate.round, candidate.payload, id };
                 const future = try self.io.concurrent(certify_task, args);
@@ -590,20 +594,20 @@ pub fn Actor(comptime P: type) type {
             const view = request_context.view();
             const round = request_context.round;
             const value = payload orelse {
-                self.tracer.event(.debug, "failed to propose container", .{ .round = round });
+                self.trace(.debug, "failed to propose container", .{ .round = round });
                 self.state.trigger_timeout(view, .missing_proposal);
                 return null;
             };
             const current = self.state.current_view();
             if (view.get() < current.get()) {
-                self.tracer.event(.debug, "dropping requested proposal", .{
+                self.trace(.debug, "dropping requested proposal", .{
                     .round = round,
                     .current = current.get(),
                 });
                 return null;
             }
             if (!self.state.proposed(&request_context, value)) {
-                self.tracer.event(.warn, "dropped our proposal", .{ .round = round });
+                self.trace(.warn, "dropped our proposal", .{ .round = round });
                 return null;
             }
             // Relay before the notarize vote's journal sync: extra payload bytes are harmless.
@@ -673,11 +677,11 @@ pub fn Actor(comptime P: type) type {
                 if (valid) {
                     _ = self.state.verified(view);
                 } else {
-                    self.tracer.event(.warn, "proposal failed verification", .{ .round = round });
+                    self.trace(.warn, "proposal failed verification", .{ .round = round });
                     self.state.verification_failed(view, .invalid_proposal);
                 }
             } else {
-                self.tracer.event(.debug, "failed to verify proposal", .{ .round = round });
+                self.trace(.debug, "failed to verify proposal", .{ .round = round });
                 self.state.verification_failed(view, .ignored_proposal);
             }
             return .{ .notify = .{ .view = view, .staged = .{} } };
@@ -691,11 +695,11 @@ pub fn Actor(comptime P: type) type {
             task.future.await(self.io);
             // A missing verdict is re-requested on restart; failing it could halt the view.
             const certified = result orelse {
-                self.tracer.event(.debug, "failed to certify proposal", .{ .round = round });
+                self.trace(.debug, "failed to certify proposal", .{ .round = round });
                 return .skip;
             };
             if (!certified) {
-                self.tracer.event(.warn, "proposal failed certification", .{ .round = round });
+                self.trace(.warn, "proposal failed certification", .{ .round = round });
             }
             const notarization = try self.handle_certification(round.view, certified) orelse
                 return .skip;
@@ -712,10 +716,10 @@ pub fn Actor(comptime P: type) type {
                     const view = proposal.view();
                     if (!self.state.admits_vote(view)) {
                         const outside = "proposal outside viewport";
-                        self.tracer.event(.trace, outside, .{ .view = view.get() });
+                        self.trace(.trace, outside, .{ .view = view.get() });
                         return .skip;
                     }
-                    self.tracer.event(.trace, "received proposal", .{ .view = view.get() });
+                    self.trace(.trace, "received proposal", .{ .view = view.get() });
                     if (!try self.state.set_proposal(view, &proposal)) return .skip;
                     return .{ .notify = .{ .view = view, .staged = .{} } };
                 },
@@ -725,7 +729,7 @@ pub fn Actor(comptime P: type) type {
                     const view = certificate.view();
                     if (!self.state.admits_certificate(view)) {
                         const outside = "certificate outside viewport";
-                        self.tracer.event(.trace, outside, .{ .view = view.get() });
+                        self.trace(.trace, outside, .{ .view = view.get() });
                         Message.discard(message);
                         return .skip;
                     }
@@ -735,7 +739,7 @@ pub fn Actor(comptime P: type) type {
                         .nullification => "received nullification",
                         .finalization => "received finalization",
                     };
-                    self.tracer.event(.trace, received, .{ .view = view.get() });
+                    self.trace(.trace, received, .{ .view = view.get() });
                     if (try self.handle_certificate(certificate)) {
                         const clone = try self.clone_certificate(kind, view);
                         try links.resolver.updated(self.gpa, clone);
@@ -746,7 +750,7 @@ pub fn Actor(comptime P: type) type {
                     const view = timeout_message.round.view;
                     const reason = timeout_message.reason;
                     const fields = .{ .view = view.get(), .reason = reason };
-                    self.tracer.event(.debug, "timing out view", fields);
+                    self.trace(.debug, "timing out view", fields);
                     self.state.trigger_timeout(view, reason);
                     return .{ .notify = .{ .view = view, .staged = .{} } };
                 },
@@ -766,7 +770,7 @@ pub fn Actor(comptime P: type) type {
                 }
             }
             if (staged.nullify) |*nullify| {
-                self.tracer.event(.debug, "broadcasting nullify", .{ .round = nullify.vote.round });
+                self.trace(.debug, "broadcasting nullify", .{ .round = nullify.vote.round });
                 try self.publish_vote(links, .{ .nullify = nullify.vote });
                 if (nullify.entry) |*entry| {
                     defer entry.deinit(self.gpa);
@@ -784,7 +788,7 @@ pub fn Actor(comptime P: type) type {
                 _ = self.reporter.report(.{ .notarization = notarization.* });
             }
             if (staged.nullification) |nullification| {
-                self.tracer.event(.debug, "broadcasting nullification", .{
+                self.trace(.debug, "broadcasting nullification", .{
                     .round = nullification.round,
                 });
                 try self.broadcast_certificate(links, .{ .nullification = nullification.* });
@@ -803,7 +807,7 @@ pub fn Actor(comptime P: type) type {
 
         /// A debug event naming a proposal by its round and parent.
         fn trace_proposal(self: *Self, message: []const u8, proposal: Proposal) void {
-            self.tracer.event(.debug, message, .{
+            self.trace(.debug, message, .{
                 .round = proposal.round,
                 .parent = proposal.parent.get(),
             });
@@ -899,13 +903,21 @@ pub fn Actor(comptime P: type) type {
             defer self.cancel_all();
             try inbox.forward(.mailbox, &self.mailbox_receiver);
             const start_ns = context_mod.now_ns(self.io);
-            if (try self.recover(&links)) |view| {
-                try self.append_journal(.{ .finalization = self.state.finalization(view).?.* });
-                try self.sync_journal();
+            {
+                var span = self.tracer.span("simplex.voter.start", .{
+                    .epoch = self.state.epoch.get(),
+                });
+                self.span = &span;
+                defer self.span = null;
+                if (try self.recover(&links)) |view| {
+                    const finalization = self.state.finalization(view).?.*;
+                    try self.append_journal(.{ .finalization = finalization });
+                    try self.sync_journal();
+                }
             }
             const current = self.state.current_view();
             const elapsed_ns: u64 = @intCast(context_mod.now_ns(self.io) - start_ns);
-            self.tracer.event(.info, "consensus initialized", .{
+            self.trace(.info, "consensus initialized", .{
                 .observed_view = current.get(),
                 .elapsed_ms = elapsed_ns / std.time.ns_per_ms,
             });
@@ -913,8 +925,19 @@ pub fn Actor(comptime P: type) type {
             try links.batcher.update(current, leader, self.state.last_finalized(), null);
             // Runs for the actor's lifetime; each turn handles one event.
             while (try self.iteration(&links)) {}
-            self.tracer.event(.debug, "mailbox closed, stopping voter", .{});
+            self.trace(.debug, "mailbox closed, stopping voter", .{});
             if (self.journal) |*journal| try journal.sync_all();
+        }
+
+        /// Emits an event inside the open span, if any.
+        fn trace(
+            self: *const Self,
+            level: runtime.telemetry.traces.Level,
+            message: []const u8,
+            fields: anytype,
+        ) void {
+            if (self.span) |span| return span.event(level, message, fields);
+            self.tracer.event(level, message, fields);
         }
 
         /// One `select_loop!` turn. Returns false once the mailbox closed.
@@ -930,6 +953,13 @@ pub fn Actor(comptime P: type) type {
                 .skip => return true,
                 .notify => |notified| notified,
             };
+            var span = self.tracer.span("simplex.voter.notify", .{
+                .epoch = self.state.epoch.get(),
+                .view = notified.view.get(),
+            });
+            assert(self.span == null);
+            self.span = &span;
+            defer self.span = null;
             try self.construct(notified.view, &notified.staged);
             try self.reconcile(links);
             try self.sync_journal();
@@ -949,12 +979,31 @@ pub fn Actor(comptime P: type) type {
             if (self.release_held()) |view| return .{ .notify = .{ .view = view, .staged = .{} } };
             const deadline = self.state.next_timeout();
             const event = try links.inbox.next_until(deadline.deadline) orelse {
+                const current = self.state.current_view();
+                var span = self.tracer.span("simplex.voter.timeout", .{
+                    .epoch = self.state.epoch.get(),
+                    .view = current.get(),
+                    .reason = deadline.reason.as_str(),
+                });
+                assert(self.span == null);
+                self.span = &span;
+                defer self.span = null;
                 const staged = try self.timeout(deadline.reason);
                 return .{ .notify = .{ .view = self.state.current_view(), .staged = staged } };
             };
             return switch (event) {
                 .closed => .stop,
-                .mailbox => |message| self.handle_message(links, message),
+                .mailbox => |message| {
+                    var span = self.tracer.span("simplex.voter.process", .{
+                        .operation = @tagName(message),
+                        .epoch = self.state.epoch.get(),
+                        .view = message.view().get(),
+                    });
+                    assert(self.span == null);
+                    self.span = &span;
+                    defer self.span = null;
+                    return self.handle_message(links, message);
+                },
                 .proposed => |proposed| self.handle_proposed(proposed.id, proposed.response),
                 .verified => |done| self.handle_verified(done.id, done.round, done.result),
                 .certified => |done| self.handle_certified(done.id, done.round, done.result),

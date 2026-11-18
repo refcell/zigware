@@ -696,6 +696,22 @@ test "the voter traces startup and finalization at commonware's target" {
         }
     }.check;
     try collector.get_all().expect_event({}, at_voter);
+    // Votes broadcast inside the notify span.
+    const in_span = struct {
+        fn notify(_: void, event: traces.collector.RecordedEvent) bool {
+            return spanned(event, "broadcasting notarize", "simplex.voter.notify");
+        }
+        fn spanned(
+            event: traces.collector.RecordedEvent,
+            message: []const u8,
+            span: []const u8,
+        ) bool {
+            if (!std.mem.eql(u8, event.metadata.content, message)) return false;
+            if (event.spans.len == 0) return false;
+            return std.mem.eql(u8, event.spans[0].content, span);
+        }
+    };
+    try collector.get_all().expect_event({}, in_span.notify);
     try testing.expect(collector.get_by_level(.warn).is_empty());
 }
 
