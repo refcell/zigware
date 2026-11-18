@@ -345,6 +345,18 @@ fn open_archive(
     });
 }
 
+/// The shared signing decls, under names a harness re-exports.
+const harness_fixture = struct {
+    const Fixture = root_decls.Fixture;
+    const Provider = root_decls.Provider;
+    const Finalization = root_decls.Finalization;
+    const Notarization = root_decls.Notarization;
+    const fixture = root_decls.fixture;
+    const make_finalization = root_decls.make_finalization;
+    const make_notarization = root_decls.make_notarization;
+};
+const root_decls = @This();
+
 /// The standard variant's harness (commonware `StandardHarness`): blocks travel whole
 /// through `broadcast.buffered`, and the commitment is the block digest.
 pub const StandardHarness = struct {
@@ -390,8 +402,24 @@ pub const StandardHarness = struct {
         return block.inner().height();
     }
 
-    /// A standard proposal needs no work before verification.
-    pub fn propose(_: anytype, _: Round, _: *const TestBlock) !void {}
+    /// Seconds of simulated time the finalize scenario may take.
+    pub const finalize_timeout_s: u64 = 600;
+
+    /// Persists a proposed block (borrowed) as verified without broadcasting it (commonware's
+    /// default `propose`): scenarios drive dissemination explicitly.
+    pub fn propose(validator: anytype, round: Round, block: *const TestBlock) !void {
+        if (!try validator.mailbox.verified(round, block.clone())) return error.ActorStopped;
+    }
+
+    // The signing setup and certificates scenarios read from a harness.
+    pub const Scheme = S;
+    pub const Fixture = harness_fixture.Fixture;
+    pub const Provider = harness_fixture.Provider;
+    pub const Finalization = harness_fixture.Finalization;
+    pub const Notarization = harness_fixture.Notarization;
+    pub const fixture = harness_fixture.fixture;
+    pub const make_finalization = harness_fixture.make_finalization;
+    pub const make_notarization = harness_fixture.make_notarization;
 
     /// Persists `block` (borrowed) as verified at `validator`.
     pub fn verify(validator: anytype, round: Round, block: *const TestBlock) !void {

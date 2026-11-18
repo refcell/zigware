@@ -12,6 +12,7 @@ pub const resolver = @import("resolver.zig");
 pub const application = @import("application.zig");
 pub const Application = application.Application;
 pub const harness = @import("harness.zig");
+pub const scenarios = @import("scenarios.zig");
 
 test {
     std.testing.refAllDecls(@This());

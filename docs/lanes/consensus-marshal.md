@@ -321,3 +321,6 @@ ports its range's tests and the helpers defined in it, into
 - 2026-11-18: core cache: a failed epoch destroy closes only the archives it did not destroy
   (found by bls-math's interrupted-destroy test); harness hooks for coding (`ArchivesOf`,
   `make_*_of`).
+- 2026-11-18: `mocks.scenarios` (`Cluster(H)`, generic `Finalize(H)`; harnesses export their
+  signing setup). The finalize test is skipped until resolver.p2p keeps up with network
+  responses (resolver lane, T-01a1d5b9).
