@@ -260,8 +260,9 @@ pub fn Actor(comptime P: type) type {
             }
         }
 
-        /// Applies one mailbox message (taking ownership).
-        fn handle_mailbox(self: *Self, engine: EngineMailbox, message: Message) !void {
+        /// Applies one mailbox message (taking ownership). `engine` is the p2p engine's mailbox,
+        /// or any resolver with the same `fetch`/`fetch_all`/`fetch_targeted`/`retain` (tests).
+        pub fn handle_mailbox(self: *Self, engine: anytype, message: Message) !void {
             defer Message.discard(message);
             var effects: std.ArrayList(Effect) = .empty;
             defer effects.deinit(self.gpa);
@@ -282,7 +283,7 @@ pub fn Actor(comptime P: type) type {
         /// Applies the state's effects to the resolver: retires first, then one fetch batch.
         /// Every retire predicate is monotonic, so issuing the batch last leaves the same asks
         /// open.
-        fn apply_effects(self: *Self, engine: EngineMailbox, effects: []const Effect) !void {
+        fn apply_effects(self: *Self, engine: anytype, effects: []const Effect) !void {
             var fetches: std.ArrayList(Fetch) = .empty;
             defer fetches.deinit(self.gpa);
             for (effects) |effect| switch (effect) {
@@ -331,7 +332,7 @@ pub fn Actor(comptime P: type) type {
         /// Fetches missing proposal ancestry, from `target` alone when given.
         fn resolve(
             self: *Self,
-            engine: EngineMailbox,
+            engine: anytype,
             proposal: View,
             view: View,
             kind: ask.Kind,
@@ -405,11 +406,11 @@ pub fn Actor(comptime P: type) type {
         }
 
         /// Handles a message from the p2p engine (taking ownership).
-        fn handle_resolver(
+        pub fn handle_resolver(
             self: *Self,
             message: HandlerMessage,
-            voter: VoterMailbox,
-            engine: EngineMailbox,
+            voter: anytype,
+            engine: anytype,
         ) !void {
             switch (message) {
                 .deliver => |deliver| try self.handle_deliver(deliver, voter, engine),
@@ -428,8 +429,8 @@ pub fn Actor(comptime P: type) type {
         fn handle_deliver(
             self: *Self,
             deliver: @FieldType(HandlerMessage, "deliver"),
-            voter: VoterMailbox,
-            engine: EngineMailbox,
+            voter: anytype,
+            engine: anytype,
         ) !void {
             defer self.gpa.free(deliver.data);
             defer self.gpa.free(deliver.asks);

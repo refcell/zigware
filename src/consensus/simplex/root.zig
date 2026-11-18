@@ -91,6 +91,7 @@ test {
     _ = actors.ask;
     _ = actors.resolver.state;
     _ = @import("actors/resolver/state_test.zig");
+    _ = @import("actors/resolver/actor_test.zig");
     _ = @import("actors/resolver/ingress_test.zig");
     _ = @import("actors/voter/ingress_test.zig");
     _ = @import("engine_test.zig");
