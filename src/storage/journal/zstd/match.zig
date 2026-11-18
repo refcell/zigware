@@ -1,7 +1,8 @@
-//! LZ77 match finding for zstd blocks: a hash chain over every position of the frame (four
-//! candidates deep), the three repeat offsets tried first, one step of lazy matching below 32
-//! bytes, and backward extension into the pending literals. On text this lands between
-//! libzstd's levels 1 and 3 in ratio; deeper chains gain little ratio for much more time.
+//! LZ77 match finding for zstd blocks, after libzstd's "double fast" strategy (levels 2-3):
+//! the three repeat offsets, then one candidate from a table hashed on 8 bytes and one from a
+//! table hashed on 5 bytes, a 4-byte prefix check before extending, a few positions inside
+//! each match indexed, and backward extension into the pending literals. A hash chain four
+//! deep with a lazy step (the first version) compressed text slightly worse at twice the time.
 //!
 //! The matcher also keeps the frame's repeat offsets (RFC 8878 §3.1.2.5) and turns each
 //! match offset into the sequence's offset value, so the two never disagree.
@@ -13,12 +14,10 @@ const Allocator = std.mem.Allocator;
 pub const match_length_min = 4;
 /// Matches reach back less than the 128 KiB window the frame header declares.
 pub const offset_max = (1 << 17) - 1;
-/// Chain candidates tried per position.
-const search_depth = 4;
-/// A match this long ends the chain walk.
-const target_length = 32;
-/// Matches shorter than this are checked against the match one byte later.
-const lazy_length_max = 32;
+/// A repeat or long-table match this long skips the remaining candidates.
+const good_length = 8;
+/// Matches shorter than this are compared with the best match one byte later.
+const lazy_length_max = 6;
 const hash_log_min = 8;
 const hash_log_max = 16;
 
@@ -32,55 +31,50 @@ pub const Sequence = struct {
 const Match = struct { length: u32 = 0, offset: u32 = 0 };
 
 pub const Matcher = struct {
-    /// Last position + 1 with each hash; 0 is empty.
-    head: []u32,
-    /// Previous position + 1 with the same hash, indexed by position modulo the chain size.
-    chain: []u32,
-    hash_log: u5,
-    /// Positions below this are in the chain.
-    next_insert: usize = 0,
+    /// Last position + 1 whose 8 bytes hash to each bucket; 0 is empty.
+    long: []u32,
+    /// Last position + 1 whose 5 bytes hash to each bucket; 0 is empty.
+    short: []u32,
+    long_log: u6,
+    short_log: u6,
     repeats: [3]u32 = .{ 1, 4, 8 },
 
     /// A matcher for one frame of `len` bytes.
     pub fn init(gpa: Allocator, len: usize) Allocator.Error!Matcher {
-        const span: usize = @max(1, @min(len, offset_max + 1));
-        const hash_log: u5 = @intCast(std.math.clamp(
+        const log: u6 = @intCast(std.math.clamp(
             std.math.log2_int_ceil(usize, @max(len, 2)),
             hash_log_min,
             hash_log_max,
         ));
-        const head = try gpa.alloc(u32, @as(usize, 1) << hash_log);
-        errdefer gpa.free(head);
-        const chain = try gpa.alloc(u32, std.math.ceilPowerOfTwoAssert(usize, span));
-        @memset(head, 0);
-        assert(chain.len >= span and std.math.isPowerOfTwo(chain.len));
-        return .{ .head = head, .chain = chain, .hash_log = hash_log };
+        const long = try gpa.alloc(u32, @as(usize, 1) << (log + 1));
+        errdefer gpa.free(long);
+        const short = try gpa.alloc(u32, @as(usize, 1) << log);
+        @memset(long, 0);
+        @memset(short, 0);
+        return .{ .long = long, .short = short, .long_log = log + 1, .short_log = log };
     }
 
     pub fn deinit(self: *Matcher, gpa: Allocator) void {
-        gpa.free(self.head);
-        gpa.free(self.chain);
+        gpa.free(self.long);
+        gpa.free(self.short);
         self.* = undefined;
     }
 
-    fn hash(self: *const Matcher, src: []const u8, position: usize) usize {
-        assert(position + 4 <= src.len);
-        const value = std.mem.readInt(u32, src[position..][0..4], .little);
-        const product = value *% 2654435761;
-        return product >> @intCast(@as(u6, 32) - self.hash_log);
+    fn hash_long(self: *const Matcher, src: []const u8, position: usize) usize {
+        const value = std.mem.readInt(u64, src[position..][0..8], .little);
+        return @intCast((value *% 0xCF1BBCDCB7A56463) >> @intCast(64 - @as(u7, self.long_log)));
     }
 
-    /// Adds every position below `end` to the chain.
-    fn insert_up_to(self: *Matcher, src: []const u8, end: usize) void {
-        assert(end <= src.len);
-        while (self.next_insert < end) : (self.next_insert += 1) {
-            const position = self.next_insert;
-            if (position + 4 > src.len) continue;
-            const bucket = self.hash(src, position);
-            self.chain[position & (self.chain.len - 1)] = self.head[bucket];
-            self.head[bucket] = @intCast(position + 1);
-        }
-        assert(self.next_insert >= end);
+    fn hash_short(self: *const Matcher, src: []const u8, position: usize) usize {
+        const value = std.mem.readInt(u64, src[position..][0..8], .little) << 24;
+        return @intCast((value *% 0xCF1BBCDCB7A56463) >> @intCast(64 - @as(u7, self.short_log)));
+    }
+
+    /// Records `position` in both tables, when 8 bytes remain to hash.
+    fn insert(self: *Matcher, src: []const u8, position: usize) void {
+        if (position + 8 > src.len) return;
+        self.long[self.hash_long(src, position)] = @intCast(position + 1);
+        self.short[self.hash_short(src, position)] = @intCast(position + 1);
     }
 
     /// Splits `src[start..end]` into sequences and literals, matching anywhere earlier in
@@ -129,9 +123,12 @@ pub const Matcher = struct {
                 .offset_value = self.offset_value(best.offset, literal_length),
             };
             count += 1;
+            // Index a few positions inside the match, as libzstd's double-fast does.
+            self.insert(src, position + 2);
             position += best.length;
             anchor = position;
-            self.insert_up_to(src, @min(position, src.len));
+            if (position >= 2) self.insert(src, position - 2);
+            if (position >= 1) self.insert(src, position - 1);
         }
         @memcpy(literals[literal_count..][0 .. end - anchor], src[anchor..end]);
         literals_len.* = literal_count + end - anchor;
@@ -139,37 +136,37 @@ pub const Matcher = struct {
         return count;
     }
 
-    /// The longest match at `position` among the repeat offsets and the chain, which then
-    /// takes `position`.
+    /// The longest match at `position` among the repeat offsets and both tables, which then
+    /// record `position`.
     fn search(self: *Matcher, src: []const u8, position: usize, end: usize) Match {
         assert(position < end);
-        self.insert_up_to(src, position);
         var best: Match = .{};
+        const quad = position + 4 <= end;
+        const head4 = if (quad) read32(src, position) else 0;
         for (self.repeats) |offset| {
             if (offset > position or offset > offset_max) continue;
+            if (quad and read32(src, position - offset) != head4) continue;
             const length = match_length(src, position - offset, position, end);
             if (length > best.length) best = .{ .length = length, .offset = offset };
         }
-        if (position + 4 <= src.len) {
-            var candidate = self.head[self.hash(src, position)];
-            var depth: usize = 0;
-            while (candidate != 0 and depth < search_depth) : (depth += 1) {
+        if (position + 8 <= src.len) {
+            const candidates = [2]u32{
+                self.long[self.hash_long(src, position)],
+                self.short[self.hash_short(src, position)],
+            };
+            for (candidates) |candidate| {
+                if (best.length >= good_length) break;
+                if (candidate == 0) continue;
                 const earlier = candidate - 1;
                 assert(earlier < position);
                 const offset = position - earlier;
-                if (offset > offset_max) break;
-                const probe = position + best.length;
-                if (probe >= end or src[earlier + best.length] == src[probe]) {
-                    const length = match_length(src, earlier, position, end);
-                    if (length > best.length) {
-                        best = .{ .length = length, .offset = @intCast(offset) };
-                    }
-                    if (position + length == end or length >= target_length) break;
-                }
-                candidate = self.chain[earlier & (self.chain.len - 1)];
+                if (offset > offset_max) continue;
+                if (quad and read32(src, earlier) != head4) continue;
+                const length = match_length(src, earlier, position, end);
+                if (length > best.length) best = .{ .length = length, .offset = @intCast(offset) };
             }
         }
-        self.insert_up_to(src, position + 1);
+        self.insert(src, position);
         assert(best.length <= end - position);
         return best;
     }
@@ -198,6 +195,10 @@ pub const Matcher = struct {
         return value;
     }
 };
+
+fn read32(src: []const u8, position: usize) u32 {
+    return std.mem.readInt(u32, src[position..][0..4], .little);
+}
 
 /// Bytes `src[earlier..]` and `src[position..end]` share, compared eight at a time.
 fn match_length(src: []const u8, earlier: usize, position: usize, end: usize) u32 {

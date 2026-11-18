@@ -189,3 +189,11 @@ variants need `runtime` storage; do them after its interface lands.
   drawn inside the bounds half the time, and `ReopenMatching` draws values that were appended.
   Writing an `append_many` batch reversed fails it at iteration 1; skipping the queue's cursor
   reset fails the queue target at iteration 0. The queue target draws at most 128 operations.
+- journal/zstd speed: `zstd/match.zig` is now libzstd's double-fast strategy (repeat offsets, one
+  candidate each from 8-byte and 5-byte hash tables, a 4-byte prefix check, a lazy step below 6
+  bytes, positions inside matches indexed), replacing the four-deep hash chain; `zstd/bits.zig`
+  flushes its 64-bit container only when full (eight bytes at a time), which halved sequence
+  encoding. On 4 MB of `zstd.corpus` text plus records, CPU time fell from about 0.23 s to
+  0.12-0.14 s (1.7-1.9x) while ratios improved: text 28.2% (was 29.2%), records 12.4% (12.8%);
+  the 1 KB text case is 50.4% (libzstd -1: 50.5%). libzstd 1.5's `zstd -d` still decodes all 60
+  sample frames byte-exactly.

@@ -6,8 +6,10 @@
 //! padding (`finish_marked`): a value added with `add(value, n)` reads back as the same
 //! `n`-bit number, and the value added last reads back first.
 //!
-//! The writer never writes past its buffer: once the output does not fit it sets `overflow`
-//! and drops the rest, so callers size the buffer by their budget and fall back on overflow.
+//! Bits collect in a 64-bit container that is written out only when it fills (eight bytes at
+//! a time while they fit). The writer never writes past its buffer: once the output does not
+//! fit it sets `overflow` and drops the rest, which `finish_*` reports as null, so callers size
+//! the buffer by their budget and fall back on overflow.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -16,30 +18,39 @@ pub const Writer = struct {
     out: []u8,
     len: usize = 0,
     container: u64 = 0,
-    /// Pending bits in `container`, always below 8 between calls.
-    count: u6 = 0,
+    /// Pending bits in `container`, at most 63.
+    count: u7 = 0,
     overflow: bool = false,
 
     pub fn init(out: []u8) Writer {
         return .{ .out = out };
     }
 
-    /// Appends the low `bits` bits of `value`, which must have no higher bits set.
-    pub fn add(self: *Writer, value: u64, bits: u6) void {
+    /// Appends the low `bits` bits of `value`, which must have no higher bits set. Whole
+    /// bytes move to the output only when the container would overflow.
+    pub inline fn add(self: *Writer, value: u64, bits: u6) void {
         assert(bits <= 56);
         assert(value >> bits == 0);
-        assert(self.count < 8);
-        self.container |= value << self.count;
+        if (self.count + bits > 63) self.flush_bytes();
+        assert(self.count + bits <= 63);
+        self.container |= value << @intCast(self.count);
         self.count += bits;
-        self.flush_bytes();
     }
 
+    /// Moves the container's whole bytes to the output: eight at once when they fit.
     fn flush_bytes(self: *Writer) void {
-        assert(self.count <= 63);
-        while (self.count >= 8) {
-            self.put(@truncate(self.container));
-            self.container >>= 8;
-            self.count -= 8;
+        const whole: usize = self.count >> 3;
+        if (self.len + 8 <= self.out.len) {
+            std.mem.writeInt(u64, self.out[self.len..][0..8], self.container, .little);
+            self.len += whole;
+            self.container = if (whole == 8) 0 else self.container >> @intCast(whole * 8);
+            self.count -= @intCast(whole * 8);
+        } else {
+            while (self.count >= 8) {
+                self.put(@truncate(self.container));
+                self.container >>= 8;
+                self.count -= 8;
+            }
         }
         assert(self.count < 8);
     }
@@ -56,6 +67,7 @@ pub const Writer = struct {
 
     /// Pads to a byte boundary with zeros and returns the bytes written, or null on overflow.
     pub fn finish_aligned(self: *Writer) ?[]u8 {
+        self.flush_bytes();
         assert(self.count < 8);
         if (self.count > 0) {
             self.put(@truncate(self.container));
@@ -90,6 +102,6 @@ test "bits accumulate least significant first and overflow is sticky" {
     var small: [1]u8 = undefined;
     var full: Writer = .init(&small);
     full.add(0xFFFF, 16);
-    try testing.expect(full.overflow);
     try testing.expectEqual(@as(?[]u8, null), full.finish_aligned());
+    try testing.expect(full.overflow);
 }
