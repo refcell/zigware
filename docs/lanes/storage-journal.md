@@ -65,8 +65,11 @@ resize, sync), `runtime.storage`, with the in-memory backend `runtime.storage.me
 - [x] queue: the `QueueWorkload` conformance hash.
 - [x] Journal conformance hashes: contiguous fixed and variable, segmented fixed, glob,
   variable, and oversized, and authenticated over MMR and MMB, all matching commonware's.
+- [x] Conformance workloads run through `runtime.conformance.StorageConformance` (the
+  deterministic runner's storage audit), like commonware's; all hashes unchanged.
 - [ ] Journal conformance hashes of the compressed (`<true>`) workloads: they need zstd
-  output byte-identical to libzstd level 3 (with storage-merkle's compressor).
+  output byte-identical to libzstd level 3. Blocked on storage-merkle's compressor
+  (`journal/zstd.zig`, theirs since 2026-11-16).
 - [x] Metrics: metadata (`sync_rewrites`, `sync_overwrites`, `keys`) and queue (`tip`, `floor`,
   `next`) through `runtime.telemetry.metrics`.
 - [x] Metrics: contiguous fixed and variable journals (`size`, `pruning_boundary`, `retained`,

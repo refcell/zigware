@@ -1,6 +1,7 @@
 //! Journal conformance (commonware's `journal/conformance.rs`). See
 //! `cache/conformance_test.zig` for how storage workloads are committed: each runs on
-//! in-memory storage with the RNG seeded by the case seed and commits the storage audit, so a
+//! the deterministic runner of `runtime.conformance.StorageConformance`, with the RNG seeded by
+//! the case seed, and commits its storage audit, so a
 //! match means the journal writes byte-identical blobs.
 //!
 //! The contiguous and segmented workloads write up to 16k items per case (about a minute each
@@ -40,17 +41,18 @@ const page_cache_size = 10;
 const bytes_config: codec.Cfg(Bytes) = .{ .range = .range(0, 256), .item = {} };
 
 /// Commits a workload's storage audit for one seed.
-fn Workload(comptime run: fn (Allocator, runtime.storage.Storage, *Rng, u64) anyerror!void) type {
-    return struct {
-        pub fn commit(gpa: Allocator, seed: u64) ![]u8 {
-            var memory = runtime.storage.memory.Storage.init(gpa);
-            defer memory.deinit();
+/// Runs `write` on `runtime.conformance.StorageConformance`'s deterministic runner, which
+/// commits its storage audit.
+fn Workload(
+    comptime write: fn (Allocator, runtime.storage.Storage, *Rng, u64) anyerror!void,
+) type {
+    const W = struct {
+        pub fn run(ctx: runtime.deterministic.Context, seed: u64) !void {
             var rng = Rng.init(seed);
-            try run(gpa, memory.storage(), &rng, seed);
-            const audit = memory.audit();
-            return gpa.dupe(u8, &audit);
+            try write(ctx.gpa(), ctx.storage, &rng, seed);
         }
     };
+    return runtime.conformance.StorageConformance(W);
 }
 
 /// A random-length byte item of up to 255 bytes (the uncompressed `fill_variable_item`).

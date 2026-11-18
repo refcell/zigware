@@ -17,7 +17,7 @@ const Rng = utils.rng.TestRng;
 const items_per_section = 64;
 
 const QueueWorkload = struct {
-    fn run(gpa: Allocator, storage: runtime.storage.Storage, seed: u64) !void {
+    fn write(gpa: Allocator, storage: runtime.storage.Storage, seed: u64) !void {
         var rng = Rng.init(seed);
         var cache_ref = try runtime.buffer.paged.CacheRef.init(gpa, 1024, 10);
         defer cache_ref.deinit();
@@ -63,18 +63,16 @@ const QueueWorkload = struct {
         assert(queue.is_empty());
     }
 
-    pub fn commit(gpa: Allocator, seed: u64) ![]u8 {
-        var memory = runtime.storage.memory.Storage.init(gpa);
-        defer memory.deinit();
-        try run(gpa, memory.storage(), seed);
-        const audit = memory.audit();
-        return gpa.dupe(u8, &audit);
+    /// Runs on `runtime.conformance.StorageConformance`'s deterministic runner, which commits
+    /// its storage audit.
+    pub fn run(ctx: runtime.deterministic.Context, seed: u64) !void {
+        return write(ctx.gpa(), ctx.storage, seed);
     }
 };
 
 test "conformance StorageConformance<QueueWorkload>" {
     try conformance.verify(
-        QueueWorkload,
+        runtime.conformance.StorageConformance(QueueWorkload),
         std.testing.allocator,
         "commonware_storage::queue::conformance::StorageConformance<QueueWorkload>",
         512,

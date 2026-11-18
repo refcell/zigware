@@ -28,7 +28,7 @@ const MetadataWorkload = struct {
         assert(metadata.get(key) != null);
     }
 
-    fn run(gpa: Allocator, storage: runtime.storage.Storage, seed: u64) !void {
+    fn write(gpa: Allocator, storage: runtime.storage.Storage, seed: u64) !void {
         var rng = Rng.init(seed);
         var buffer: [64]u8 = undefined;
         const partition = try std.fmt.bufPrint(&buffer, "metadata-conformance-{d}", .{seed});
@@ -45,18 +45,16 @@ const MetadataWorkload = struct {
         try metadata.sync();
     }
 
-    pub fn commit(gpa: Allocator, seed: u64) ![]u8 {
-        var memory = runtime.storage.memory.Storage.init(gpa);
-        defer memory.deinit();
-        try run(gpa, memory.storage(), seed);
-        const audit = memory.audit();
-        return gpa.dupe(u8, &audit);
+    /// Runs on `runtime.conformance.StorageConformance`'s deterministic runner, which commits
+    /// its storage audit.
+    pub fn run(ctx: runtime.deterministic.Context, seed: u64) !void {
+        return write(ctx.gpa(), ctx.storage, seed);
     }
 };
 
 test "conformance StorageConformance<MetadataWorkload>" {
     try conformance.verify(
-        MetadataWorkload,
+        runtime.conformance.StorageConformance(MetadataWorkload),
         std.testing.allocator,
         "commonware_storage::metadata::conformance::StorageConformance<MetadataWorkload>",
         256,
