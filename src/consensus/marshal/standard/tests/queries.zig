@@ -29,3 +29,39 @@ test "standard get block by commitment from sources and missing" {
 test "standard get finalization by height" {
     try queries.GetFinalizationByHeight(H).run(gpa);
 }
+
+test "standard subscribe basic block delivery" {
+    try queries.SubscribeBasic(H).run(gpa);
+}
+
+test "standard subscribe multiple subscriptions" {
+    try queries.SubscribeMultiple(H).run(gpa);
+}
+
+test "standard subscribe canceled subscriptions" {
+    try queries.SubscribeCanceled(H).run(gpa);
+}
+
+test "standard subscribe blocks from different sources" {
+    try queries.SubscribeDifferentSources(H).run(gpa);
+}
+
+test "standard ancestry stream" {
+    try queries.AncestryStream(H).run(gpa);
+}
+
+test "standard init processed height" {
+    try queries.InitProcessedHeight(H).run(gpa);
+}
+
+test "standard broadcast caches block" {
+    try queries.BroadcastCachesBlock(H).run(gpa);
+}
+
+test "standard finalize same height different views" {
+    try queries.FinalizeSameHeightDifferentViews(H).run(gpa);
+}
+
+test "standard hint finalized triggers fetch" {
+    try queries.HintFinalizedTriggersFetch(H).run(gpa);
+}

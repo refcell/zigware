@@ -5,7 +5,9 @@
 //! scenario that drives an actor over prunable finalized archives also needs
 //! `setup_prunable_validator(ctx, network, me, validators, prefix, app)` and
 //! `verify_for_prune(validator, round, block)`. Marshal blocks provide `digest()` and either
-//! `height()` or `inner().height()`.
+//! `height()` or `inner().height()`. `Single` starts validators unlinked on a network tracking
+//! every participant over three peer sets (commonware uses one for most single-validator
+//! scenarios; the count does not affect them).
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -59,7 +61,8 @@ fn round_at(view: u64) Round {
     return .new(.zero(), .new(view));
 }
 
-/// One validator on a simulated network of every participant, with application `app`.
+/// Validators on a simulated network of every participant, started one at a time (validator
+/// 0 first) and unlinked unless a scenario links them.
 pub fn Single(comptime H: type) type {
     return struct {
         const Self = @This();
@@ -69,8 +72,10 @@ pub fn Single(comptime H: type) type {
 
         validators: H.Fixture,
         network: harness.TestNetwork,
-        node: *Validator,
+        nodes: [num_validators]*Validator,
+        started: usize,
 
+        /// Starts the network and validator 0 with application `app` (owned).
         pub fn start(self: *Self, ctx: Ctx, app: App) !void {
             const gpa = ctx.gpa();
             var owned = app;
@@ -80,35 +85,72 @@ pub fn Single(comptime H: type) type {
             errdefer self.validators.deinit(gpa);
             const participants = self.validators.participants;
             const max_size = harness.max_message_size(H.Variant);
-            self.network = try .start(gpa, ctx.io(), 1, participants, max_size);
+            self.network = try .start(gpa, ctx.io(), 3, participants, max_size);
             errdefer self.network.stop();
-            const provider: H.Provider = .init(&self.validators.schemes[0]);
-            const node_ctx = ctx.child("validator").with_attribute("index", 0);
-            self.node = try Validator.setup(
-                node_ctx,
-                self.network.network,
-                participants[0],
-                provider,
-                1,
-                owned,
-            );
+            self.started = 0;
+            self.nodes[0] = try self.setup(ctx, "validator", 0, owned);
+            self.started = 1;
+        }
+
+        /// Starts the next validator with application `app` (owned).
+        pub fn add(self: *Self, ctx: Ctx, app: App) !void {
+            assert(self.started > 0 and self.started < num_validators);
+            const index = self.started;
+            self.nodes[index] = try self.setup(ctx, "validator", index, app);
+            self.started += 1;
+        }
+
+        /// Crashes validator 0 and starts it again over the same storage.
+        pub fn restart(self: *Self, ctx: Ctx, app: App) !void {
+            assert(self.started > 0);
+            self.nodes[0].crash();
+            self.nodes[0] = self.setup(ctx, "validator_restart", 0, app) catch |err| {
+                // Validator 0 is gone; stop must not crash it again.
+                for (self.nodes[1..self.started]) |node| node.crash();
+                self.started = 0;
+                return err;
+            };
+        }
+
+        fn setup(self: *Self, ctx: Ctx, label: []const u8, index: usize, app: App) !*Validator {
+            const provider: H.Provider = .init(&self.validators.schemes[index]);
+            const node_ctx = ctx.child(label).with_attribute("index", index);
+            const me = self.validators.participants[index];
+            return Validator.setup(node_ctx, self.network.network, me, provider, 1, app);
         }
 
         pub fn stop(self: *Self, gpa: Allocator) void {
-            self.node.crash();
+            for (self.nodes[0..self.started]) |node| node.crash();
             self.network.stop();
             self.validators.deinit(gpa);
             self.* = undefined;
         }
 
-        /// Reports the quorum finalization of `block` at view = height to the validator.
-        pub fn finalize(self: *Self, gpa: Allocator, block: *const H.TestBlock) !void {
-            const view = H.height(block).get();
+        /// The proposal of `block` at `view`, over the previous view.
+        pub fn proposal_of(block: *const H.TestBlock, view: u64) Proposal {
             assert(view > 0);
-            const proposal = Proposal.init(round_at(view), .new(view - 1), H.commitment(block));
+            return Proposal.init(round_at(view), .new(view - 1), H.commitment(block));
+        }
+
+        /// Reports the quorum finalization of `block` at view = height to validator 0.
+        pub fn finalize(self: *Self, gpa: Allocator, block: *const H.TestBlock) !void {
+            try self.finalize_at(gpa, 0, proposal_of(block, H.height(block).get()));
+        }
+
+        /// Reports the quorum finalization of `proposal` to validator `index`.
+        pub fn finalize_at(self: *Self, gpa: Allocator, index: usize, proposal: Proposal) !void {
+            assert(index < self.started);
             var finalization = try H.make_finalization(gpa, &self.validators, proposal, quorum);
             defer finalization.deinit(gpa);
-            _ = self.node.mailbox.report(.{ .finalization = finalization });
+            _ = self.nodes[index].mailbox.report(.{ .finalization = finalization });
+        }
+
+        /// Reports the quorum notarization of `proposal` to validator `index`.
+        pub fn notarize(self: *Self, gpa: Allocator, index: usize, proposal: Proposal) !void {
+            assert(index < self.started);
+            var notarization = try H.make_notarization(gpa, &self.validators, proposal, quorum);
+            defer notarization.deinit(gpa);
+            _ = self.nodes[index].mailbox.report(.{ .notarization = notarization });
         }
     };
 }
@@ -141,7 +183,7 @@ fn propose_and_finalize(
     blocks: []H.TestBlock,
 ) !void {
     for (blocks) |*block| {
-        try H.propose(single.node, round_at(H.height(block).get()), block);
+        try H.propose(single.nodes[0], round_at(H.height(block).get()), block);
         try ctx.sleep(.fromMilliseconds(link_latency_ms));
         try single.finalize(ctx.gpa(), block);
     }
@@ -165,7 +207,7 @@ pub fn GetInfoBasic(comptime H: type) type {
             var single: Single(H) = undefined;
             try single.start(ctx, try .init(gpa, ctx.io()));
             defer single.stop(gpa);
-            const mailbox = single.node.mailbox;
+            const mailbox = single.nodes[0].mailbox;
             // Initially, no latest.
             try testing.expectEqual(null, try mailbox.get_info(.latest));
             // The genesis anchor is stored as a finalized block without a finalization row.
@@ -211,11 +253,11 @@ pub fn GetInfoLatestProgression(comptime H: type) type {
             for (&blocks, 1..) |*block, height| {
                 try propose_and_finalize(H, ctx, &single, block[0..1]);
                 // Latest always points to the most recently finalized block.
-                const latest = try single.node.mailbox.get_info(.latest);
+                const latest = try single.nodes[0].mailbox.get_info(.latest);
                 try expect_info(latest, .new(height), H.digest(block));
             }
             for (&blocks, 1..) |*block, height| {
-                const info = try single.node.mailbox.get_info(.{ .height = .new(height) });
+                const info = try single.nodes[0].mailbox.get_info(.{ .height = .new(height) });
                 try expect_info(info, .new(height), H.digest(block));
             }
         }
@@ -248,7 +290,7 @@ pub fn GetBlockByHeightAndLatest(comptime H: type) type {
             var single: Single(H) = undefined;
             try single.start(ctx, try .init(gpa, ctx.io()));
             defer single.stop(gpa);
-            const mailbox = single.node.mailbox;
+            const mailbox = single.nodes[0].mailbox;
             try testing.expectEqual(null, try mailbox.get_block(.{ .height = .new(1) }));
             try testing.expectEqual(null, try mailbox.get_block(.latest));
             var blocks: [3]H.TestBlock = undefined;
@@ -283,10 +325,10 @@ pub fn GetBlockByCommitment(comptime H: type) type {
             defer free_chain(&blocks);
             try propose_and_finalize(H, ctx, &single, &blocks);
             const digest = H.digest(&blocks[0]);
-            const found = try single.node.mailbox.get_block(.{ .digest = digest });
+            const found = try single.nodes[0].mailbox.get_block(.{ .digest = digest });
             try expect_block(H, gpa, found, .new(1), digest);
             const missing = harness.Sha256.hash(&.{"missing"});
-            const absent = try single.node.mailbox.get_block(.{ .digest = missing });
+            const absent = try single.nodes[0].mailbox.get_block(.{ .digest = missing });
             try testing.expectEqual(null, absent);
         }
     };
@@ -304,7 +346,7 @@ pub fn GetFinalizationByHeight(comptime H: type) type {
             var single: Single(H) = undefined;
             try single.start(ctx, try .init(gpa, ctx.io()));
             defer single.stop(gpa);
-            const mailbox = single.node.mailbox;
+            const mailbox = single.nodes[0].mailbox;
             try testing.expectEqual(null, try mailbox.get_finalization(.new(1)));
             var blocks: [3]H.TestBlock = undefined;
             try make_chain(H, gpa, &blocks);
@@ -318,6 +360,414 @@ pub fn GetFinalizationByHeight(comptime H: type) type {
                 try testing.expectEqual(height, found.proposal.round.view.get());
             }
             try testing.expectEqual(null, try mailbox.get_finalization(.new(10)));
+        }
+    };
+}
+
+/// Every validator on links `harness.link`, driven at validator 0.
+fn ClusterAt(comptime H: type) type {
+    return struct {
+        const Self = @This();
+        const C = scenarios.Cluster(H);
+        const Proposal = simplex_types.Proposal(H.Commitment);
+
+        cluster: C,
+
+        fn start(self: *Self, ctx: Ctx) !void {
+            try self.cluster.start(ctx, harness.link);
+        }
+
+        fn stop(self: *Self, gpa: Allocator) void {
+            self.cluster.stop(gpa);
+        }
+
+        fn mailbox(self: *Self) *@FieldType(C.Validator, "mailbox") {
+            return &self.cluster.nodes[0].mailbox;
+        }
+
+        fn proposal(block: *const H.TestBlock) Proposal {
+            const view = H.height(block).get();
+            assert(view > 0);
+            return Proposal.init(round_at(view), .new(view - 1), H.commitment(block));
+        }
+
+        fn propose(self: *Self, block: *const H.TestBlock) !void {
+            try H.propose(self.cluster.nodes[0], round_at(H.height(block).get()), block);
+        }
+
+        fn verify(self: *Self, block: *const H.TestBlock) !void {
+            const node = self.cluster.nodes[0];
+            try self.cluster.verify(node, round_at(H.height(block).get()), block);
+        }
+
+        fn notarize(self: *Self, gpa: Allocator, block: *const H.TestBlock) !void {
+            const validators = &self.cluster.validators;
+            var notarization = try H.make_notarization(gpa, validators, proposal(block), quorum);
+            defer notarization.deinit(gpa);
+            _ = self.mailbox().report(.{ .notarization = notarization });
+        }
+
+        fn finalize(self: *Self, gpa: Allocator, block: *const H.TestBlock) !void {
+            const validators = &self.cluster.validators;
+            var finalization = try H.make_finalization(gpa, validators, proposal(block), quorum);
+            defer finalization.deinit(gpa);
+            _ = self.mailbox().report(.{ .finalization = finalization });
+        }
+
+        /// Proposes, verifies, notarizes, and finalizes `block` at validator 0.
+        fn drive(self: *Self, gpa: Allocator, block: *const H.TestBlock) !void {
+            try self.propose(block);
+            try self.verify(block);
+            try self.notarize(gpa, block);
+            try self.finalize(gpa, block);
+        }
+    };
+}
+
+/// The receiver `subscribe_by_digest` returns on a `*Mailbox`.
+fn Subscription(comptime MailboxPointer: type) type {
+    const Mailbox = @typeInfo(MailboxPointer).pointer.child;
+    const Return = @typeInfo(@TypeOf(Mailbox.subscribe_by_digest)).@"fn".return_type.?;
+    return @typeInfo(Return).error_union.payload;
+}
+
+fn subscribe_at_round(
+    mailbox: anytype,
+    block: anytype,
+    comptime H: type,
+) !Subscription(@TypeOf(mailbox)) {
+    const round = round_at(H.height(block).get());
+    return mailbox.subscribe_by_digest(H.digest(block), .{ .fetch_by_round = round });
+}
+
+/// Receives the subscribed block and expects `block`'s digest and height.
+fn expect_received(
+    comptime H: type,
+    gpa: Allocator,
+    receiver: anytype,
+    block: *const H.TestBlock,
+) !void {
+    var received = try receiver.recv();
+    defer H.Variant.deinit_block(gpa, &received);
+    try testing.expect(received.digest().eql(H.digest(block)));
+    try testing.expectEqual(H.height(block), block_height(&received));
+}
+
+/// commonware `subscribe_basic_block_delivery`.
+pub fn SubscribeBasic(comptime H: type) type {
+    return struct {
+        pub fn run(gpa: Allocator) !void {
+            try run_timed(gpa, 0, timeout_default_s, body, .{});
+        }
+
+        fn body(ctx: Ctx) anyerror!void {
+            const gpa = ctx.gpa();
+            var at: ClusterAt(H) = undefined;
+            try at.start(ctx);
+            defer at.stop(gpa);
+            var blocks: [1]H.TestBlock = undefined;
+            try make_chain(H, gpa, &blocks);
+            defer free_chain(&blocks);
+            var receiver = try subscribe_at_round(at.mailbox(), &blocks[0], H);
+            defer receiver.deinit();
+            try at.drive(gpa, &blocks[0]);
+            try expect_received(H, gpa, &receiver, &blocks[0]);
+        }
+    };
+}
+
+/// commonware `subscribe_multiple_subscriptions`: two subscriptions to one block and one to
+/// another all deliver.
+pub fn SubscribeMultiple(comptime H: type) type {
+    return struct {
+        pub fn run(gpa: Allocator) !void {
+            try run_timed(gpa, 0, timeout_default_s, body, .{});
+        }
+
+        fn body(ctx: Ctx) anyerror!void {
+            const gpa = ctx.gpa();
+            var at: ClusterAt(H) = undefined;
+            try at.start(ctx);
+            defer at.stop(gpa);
+            var blocks: [2]H.TestBlock = undefined;
+            try make_chain(H, gpa, &blocks);
+            defer free_chain(&blocks);
+            var first = try subscribe_at_round(at.mailbox(), &blocks[0], H);
+            defer first.deinit();
+            var second = try subscribe_at_round(at.mailbox(), &blocks[1], H);
+            defer second.deinit();
+            var third = try subscribe_at_round(at.mailbox(), &blocks[0], H);
+            defer third.deinit();
+            for (&blocks) |*block| try at.drive(gpa, block);
+            try expect_received(H, gpa, &first, &blocks[0]);
+            try expect_received(H, gpa, &second, &blocks[1]);
+            try expect_received(H, gpa, &third, &blocks[0]);
+        }
+    };
+}
+
+/// commonware `subscribe_canceled_subscriptions`: dropping one subscription leaves the other.
+pub fn SubscribeCanceled(comptime H: type) type {
+    return struct {
+        pub fn run(gpa: Allocator) !void {
+            try run_timed(gpa, 0, timeout_default_s, body, .{});
+        }
+
+        fn body(ctx: Ctx) anyerror!void {
+            const gpa = ctx.gpa();
+            var at: ClusterAt(H) = undefined;
+            try at.start(ctx);
+            defer at.stop(gpa);
+            var blocks: [2]H.TestBlock = undefined;
+            try make_chain(H, gpa, &blocks);
+            defer free_chain(&blocks);
+            var first = try subscribe_at_round(at.mailbox(), &blocks[0], H);
+            var second = try subscribe_at_round(at.mailbox(), &blocks[1], H);
+            defer second.deinit();
+            first.deinit();
+            for (&blocks) |*block| try at.drive(gpa, block);
+            try expect_received(H, gpa, &second, &blocks[1]);
+        }
+    };
+}
+
+/// commonware `subscribe_blocks_from_different_sources`: blocks reach waiting subscriptions
+/// whether proposed, verified, notarized first, finalized first, or both.
+pub fn SubscribeDifferentSources(comptime H: type) type {
+    return struct {
+        pub fn run(gpa: Allocator) !void {
+            try run_timed(gpa, 0, timeout_default_s, body, .{});
+        }
+
+        fn body(ctx: Ctx) anyerror!void {
+            const gpa = ctx.gpa();
+            var at: ClusterAt(H) = undefined;
+            try at.start(ctx);
+            defer at.stop(gpa);
+            var blocks: [5]H.TestBlock = undefined;
+            try make_chain(H, gpa, &blocks);
+            defer free_chain(&blocks);
+            var receivers: [5]Subscription(@TypeOf(at.mailbox())) = undefined;
+            var made: usize = 0;
+            defer for (receivers[0..made]) |*receiver| receiver.deinit();
+            for (&receivers, &blocks) |*receiver, *block| {
+                receiver.* = try at.mailbox().subscribe_by_digest(H.digest(block), .wait);
+                made += 1;
+            }
+            // Block 1: proposed by the actor.
+            try at.propose(&blocks[0]);
+            try ctx.sleep(.fromMilliseconds(20));
+            try expect_received(H, gpa, &receivers[0], &blocks[0]);
+            // Block 2: verified by the actor.
+            try at.propose(&blocks[1]);
+            try at.verify(&blocks[1]);
+            try expect_received(H, gpa, &receivers[1], &blocks[1]);
+            // Block 3: notarized, then proposed and verified.
+            try at.notarize(gpa, &blocks[2]);
+            try at.propose(&blocks[2]);
+            try at.verify(&blocks[2]);
+            try expect_received(H, gpa, &receivers[2], &blocks[2]);
+            // Block 4: finalized, then proposed and verified.
+            try at.finalize(gpa, &blocks[3]);
+            try at.propose(&blocks[3]);
+            try at.verify(&blocks[3]);
+            try expect_received(H, gpa, &receivers[3], &blocks[3]);
+            // Block 5: notarized and finalized, then proposed and verified.
+            try at.notarize(gpa, &blocks[4]);
+            try at.finalize(gpa, &blocks[4]);
+            try at.propose(&blocks[4]);
+            try at.verify(&blocks[4]);
+            try expect_received(H, gpa, &receivers[4], &blocks[4]);
+        }
+    };
+}
+
+/// commonware `ancestry_stream`: the stream from the latest finalized block yields heights 5
+/// down to 1.
+pub fn AncestryStream(comptime H: type) type {
+    return struct {
+        pub fn run(gpa: Allocator) !void {
+            try run_timed(gpa, 0, timeout_default_s, body, .{});
+        }
+
+        fn body(ctx: Ctx) anyerror!void {
+            const gpa = ctx.gpa();
+            var single: Single(H) = undefined;
+            try single.start(ctx, try .init(gpa, ctx.io()));
+            defer single.stop(gpa);
+            var blocks: [5]H.TestBlock = undefined;
+            try make_chain(H, gpa, &blocks);
+            defer free_chain(&blocks);
+            try propose_and_finalize(H, ctx, &single, &blocks);
+            const mailbox = single.nodes[0].mailbox;
+            const latest = (try mailbox.get_info(.latest)) orelse return error.TestNoInfo;
+            var stream = (try mailbox.ancestry_from(.wait, latest.digest, null)) orelse
+                return error.TestNoAncestry;
+            defer stream.deinit();
+            for (0..5) |index| {
+                var block = (try stream.next()) orelse return error.TestStreamEnded;
+                defer block.deinit();
+                try testing.expectEqual(5 - index, block_height(&block).get());
+            }
+        }
+    };
+}
+
+/// commonware `init_processed_height`: a restart restores the processed height.
+pub fn InitProcessedHeight(comptime H: type) type {
+    return struct {
+        pub fn run(gpa: Allocator) !void {
+            try run_timed(gpa, 0, timeout_default_s, body, .{});
+        }
+
+        fn body(ctx: Ctx) anyerror!void {
+            const gpa = ctx.gpa();
+            var single: Single(H) = undefined;
+            try single.start(ctx, try .init(gpa, ctx.io()));
+            defer single.stop(gpa);
+            try testing.expectEqual(null, single.nodes[0].height);
+            var blocks: [5]H.TestBlock = undefined;
+            try make_chain(H, gpa, &blocks);
+            defer free_chain(&blocks);
+            try propose_and_finalize(H, ctx, &single, &blocks);
+            try wait_for_tip(ctx, single.nodes[0].application, .new(5));
+            try single.restart(ctx, try .init(gpa, ctx.io()));
+            try testing.expectEqual(Height.new(5), single.nodes[0].height);
+        }
+    };
+}
+
+/// Sleeps 10 ms at a time until `app`'s tip reaches `height`.
+fn wait_for_tip(ctx: Ctx, app: anytype, height: Height) !void {
+    while (true) {
+        if (app.tip()) |tip| if (tip.height.get() == height.get()) return;
+        try ctx.sleep(.fromMilliseconds(10));
+    }
+}
+
+/// commonware `broadcast_caches_block`: a proposed block is readable by digest, and still is
+/// after a restart once its notarization arrives.
+pub fn BroadcastCachesBlock(comptime H: type) type {
+    return struct {
+        pub fn run(gpa: Allocator) !void {
+            try run_timed(gpa, 0, timeout_default_s, body, .{});
+        }
+
+        fn body(ctx: Ctx) anyerror!void {
+            const gpa = ctx.gpa();
+            var single: Single(H) = undefined;
+            try single.start(ctx, try .init(gpa, ctx.io()));
+            defer single.stop(gpa);
+            var blocks: [1]H.TestBlock = undefined;
+            try make_chain(H, gpa, &blocks);
+            defer free_chain(&blocks);
+            const block = &blocks[0];
+            const digest = H.digest(block);
+            try H.propose(single.nodes[0], round_at(1), block);
+            const cached = try single.nodes[0].mailbox.get_block(.{ .digest = digest });
+            try expect_block(H, gpa, cached, .new(1), digest);
+            try single.restart(ctx, try .init(gpa, ctx.io()));
+            try single.notarize(gpa, 0, Single(H).proposal_of(block, 1));
+            const restored = try single.nodes[0].mailbox.get_block(.{ .digest = digest });
+            try expect_block(H, gpa, restored, .new(1), digest);
+        }
+    };
+}
+
+/// commonware `finalize_same_height_different_views`: each validator keeps the first
+/// finalization it saw for a height, even when another view finalizes the same block.
+pub fn FinalizeSameHeightDifferentViews(comptime H: type) type {
+    return struct {
+        const S = Single(H);
+
+        pub fn run(gpa: Allocator) !void {
+            try run_timed(gpa, 0, timeout_default_s, body, .{});
+        }
+
+        fn body(ctx: Ctx) anyerror!void {
+            const gpa = ctx.gpa();
+            var single: S = undefined;
+            try single.start(ctx, try .init(gpa, ctx.io()));
+            defer single.stop(gpa);
+            try single.add(ctx, try .init(gpa, ctx.io()));
+            var blocks: [1]H.TestBlock = undefined;
+            try make_chain(H, gpa, &blocks);
+            defer free_chain(&blocks);
+            const block = &blocks[0];
+            for (single.nodes[0..2]) |node| try H.propose(node, round_at(1), block);
+            try ctx.sleep(.fromMilliseconds(link_latency_ms));
+            const first = S.Proposal.init(round_at(1), .zero(), H.commitment(block));
+            // A different view finalizing the same block.
+            const second = S.Proposal.init(round_at(2), .zero(), H.commitment(block));
+            try single.notarize(gpa, 0, first);
+            try single.finalize_at(gpa, 0, first);
+            try single.notarize(gpa, 1, second);
+            try single.finalize_at(gpa, 1, second);
+            try ctx.sleep(.fromMilliseconds(100));
+            try expect_finalized(&single, gpa, block, .{ 1, 2 });
+            // Swapped finalizations do not replace the stored ones.
+            try single.finalize_at(gpa, 0, second);
+            try single.finalize_at(gpa, 1, first);
+            try ctx.sleep(.fromMilliseconds(100));
+            try expect_finalized(&single, gpa, block, .{ 1, 2 });
+        }
+
+        /// Both validators hold `block` at height 1, finalized at `views`.
+        fn expect_finalized(
+            single: *S,
+            gpa: Allocator,
+            block: *const H.TestBlock,
+            views: [2]u64,
+        ) !void {
+            const digest = H.digest(block);
+            for (single.nodes[0..2], views) |node, view| {
+                const found = try node.mailbox.get_block(.{ .height = .new(1) });
+                try expect_block(H, gpa, found, .new(1), digest);
+                var finalization = (try node.mailbox.get_finalization(.new(1))) orelse
+                    return error.TestNoFinalization;
+                defer finalization.deinit(gpa);
+                try testing.expect(finalization.proposal.payload.eql(H.commitment(block)));
+                try testing.expectEqual(view, finalization.proposal.round.view.get());
+                const info = try node.mailbox.get_info(.{ .height = .new(1) });
+                try expect_info(info, .new(1), digest);
+            }
+        }
+    };
+}
+
+/// commonware `hint_finalized_triggers_fetch`: a hint makes validator 1 fetch the
+/// finalization at height 5 from validator 0.
+pub fn HintFinalizedTriggersFetch(comptime H: type) type {
+    return struct {
+        pub fn run(gpa: Allocator) !void {
+            try run_timed(gpa, 42, timeout_default_s, body, .{});
+        }
+
+        fn body(ctx: Ctx) anyerror!void {
+            const gpa = ctx.gpa();
+            var single: Single(H) = undefined;
+            try single.start(ctx, try .init(gpa, ctx.io()));
+            defer single.stop(gpa);
+            try single.add(ctx, try .init(gpa, ctx.io()));
+            const participants = single.validators.participants;
+            try single.network.link_all(participants[0..2], harness.link);
+            var blocks: [5]H.TestBlock = undefined;
+            try make_chain(H, gpa, &blocks);
+            defer free_chain(&blocks);
+            try propose_and_finalize(H, ctx, &single, &blocks);
+            try wait_for_tip(ctx, single.nodes[0].application, .new(5));
+            const mailbox = single.nodes[1].mailbox;
+            try testing.expectEqual(null, try mailbox.get_finalization(.new(5)));
+            try mailbox.hint_finalized(.new(5), participants[0..1]);
+            while (true) {
+                var found = (try mailbox.get_finalization(.new(5))) orelse {
+                    try ctx.sleep(.fromMilliseconds(10));
+                    continue;
+                };
+                defer found.deinit(gpa);
+                try testing.expectEqual(5, found.proposal.round.view.get());
+                return;
+            }
         }
     };
 }
