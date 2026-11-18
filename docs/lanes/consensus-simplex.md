@@ -286,9 +286,17 @@ resolver; those lanes are running, so do the types first and the actors as they 
   the rest, seeded.
 - [ ] Tracing: actor events are done (voter, batcher, resolver, engine). The voter opens
   commonware's `simplex.voter.start`, `.timeout`, `.process`, and `.notify` spans, and
-  events inside them carry them. Still to do: the per-view spans (`view_span`), the
-  propose/verify/certify/journal spans, the batcher and resolver spans, and the voter
-  state machine's events.
+  events inside them carry them. Each view's root `simplex.voter.view` span opens on entry
+  and closes once decided; `.propose`, `.verify`, `.certify`, `.notify`, and `.timeout`
+  nest under it while open. Our spans are plain values with no identity, so a round keeps
+  only its span state and the root is rebuilt as the parent (the same output as
+  commonware's stored span). The batcher adopts the voter's view span on `update`
+  (`simplex.batcher.process`, `.verify_certificate`, and certificate construction nest
+  under it). The resolver opens `simplex.resolver.process`, `.deliver`, and `.validate`;
+  `process` and `deliver` are roots because mailbox and fetch spans are not carried across
+  tasks. Not ported: spans no event of ours is emitted in (journal sync/prune, replay,
+  produce, resolved, fetch, batcher construct). Still to do: the voter state machine's
+  events.
 - [x] Fuzz targets (commonware consensus/fuzz): owned by the crypto lane in
   `src/consensus/fuzz/`.
 
@@ -362,3 +370,5 @@ resolver; those lanes are running, so do the types first and the actors as they 
   scopes. DST validators get per-node scopes (`validator{public_key}`, twins
   `<role>{index}`); one_offline checks the offline leader's timeouts and nullifications;
   twins handoff counts early votes. Histograms now hold up to 40 buckets (`LATENCY` has 36).
+- 2026-11-18: simplex view spans (voter roots, batcher adoption) with propose, verify,
+  certify, batcher process/verify_certificate, and resolver process/deliver/validate spans.

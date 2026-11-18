@@ -679,7 +679,7 @@ test "all online" {
     _ = try run_seeded(0, all_online, .{ 5, if (quick) 20 else 50 });
 }
 
-test "the voter traces startup and finalization at commonware's target" {
+test "the voter and batcher trace at commonware's targets and spans" {
     const traces = runtime.telemetry.traces;
     var collector = traces.Collector.init(gpa, .{});
     defer collector.deinit();
@@ -700,10 +700,24 @@ test "the voter traces startup and finalization at commonware's target" {
         }
     }.check;
     try collector.get_all().expect_event({}, at_voter);
-    // Votes broadcast inside the notify span.
+    // Votes broadcast inside the notify span, and automaton requests inside the propose and
+    // verify spans, each under its view's root span.
     const in_span = struct {
         fn notify(_: void, event: traces.collector.RecordedEvent) bool {
             return spanned(event, "broadcasting notarize", "simplex.voter.notify");
+        }
+        fn propose(_: void, event: traces.collector.RecordedEvent) bool {
+            return spanned(event, "requested proposal from automaton", "simplex.voter.propose");
+        }
+        fn verify(_: void, event: traces.collector.RecordedEvent) bool {
+            return spanned(event, "requested proposal verification", "simplex.voter.verify");
+        }
+        /// The batcher builds certificates in the voter's view span it adopted.
+        fn recovered(_: void, event: traces.collector.RecordedEvent) bool {
+            const message = "recovered certificate, forwarding to voter";
+            if (!std.mem.eql(u8, event.metadata.content, message)) return false;
+            if (event.spans.len != 1) return false;
+            return std.mem.eql(u8, event.spans[0].content, "simplex.voter.view");
         }
         fn spanned(
             event: traces.collector.RecordedEvent,
@@ -711,11 +725,15 @@ test "the voter traces startup and finalization at commonware's target" {
             span: []const u8,
         ) bool {
             if (!std.mem.eql(u8, event.metadata.content, message)) return false;
-            if (event.spans.len == 0) return false;
+            if (event.spans.len != 2) return false;
+            if (!std.mem.eql(u8, event.spans[1].content, "simplex.voter.view")) return false;
             return std.mem.eql(u8, event.spans[0].content, span);
         }
     };
     try collector.get_all().expect_event({}, in_span.notify);
+    try collector.get_all().expect_event({}, in_span.propose);
+    try collector.get_all().expect_event({}, in_span.verify);
+    try collector.get_all().expect_event({}, in_span.recovered);
     try testing.expect(collector.get_by_level(.warn).is_empty());
 }
 

@@ -3,8 +3,9 @@
 //! verifies, and hands certificates to the voter.
 //!
 //! `P` declares `Scheme`, `Blocker`, `Digest`, `Reporter`, `Relay`, `Strategy`, and
-//! `Receiver` (a p2p receiver). Events go to `tracer` under commonware's target, metrics to
-//! `Config.scope`; its spans are not ported yet.
+//! `Receiver` (a p2p receiver). Events go to `tracer` under commonware's target, inside its
+//! `simplex.batcher.*` spans (rooted at the voter's `simplex.voter.view` span of views it
+//! adopted), and metrics to `Config.scope`.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -23,7 +24,9 @@ const inbox_mod = @import("../inbox.zig");
 const ingress = @import("ingress.zig");
 const round_mod = @import("round.zig");
 const voter_ingress = @import("../voter/ingress.zig");
-const Tracer = @import("runtime").telemetry.traces.Tracer;
+const traces = @import("runtime").telemetry.traces;
+const Tracer = traces.Tracer;
+const Span = traces.Span;
 
 /// The tracing target of the batcher's events (commonware's module path).
 pub const trace_target = "commonware_consensus::simplex::actors::batcher";
@@ -102,6 +105,8 @@ pub fn Actor(comptime P: type) type {
         dirty_views: std.ArrayList(View) = .empty,
         /// Receives the batcher's events; the engine sets it from its context.
         tracer: Tracer = .none,
+        /// The span events are emitted in, set only while one is open on the stack.
+        span: ?*const Span = null,
         metrics: ?Metrics,
 
         const Metrics = metrics.BatcherMetrics(S.PublicKey);
@@ -175,10 +180,24 @@ pub fn Actor(comptime P: type) type {
                 const event = try inbox.next();
                 switch (event) {
                     .closed => {
-                        self.tracer.event(.debug, "source closed, stopping batcher", .{});
+                        self.trace(.debug, "source closed, stopping batcher", .{});
                         return;
                     },
-                    .mailbox => |message| try self.handle_mailbox(voter_mailbox, message),
+                    .mailbox => |message| {
+                        const view = message.view();
+                        // An update carries the voter's view span; a vote joins its round's.
+                        const adopted = message == .update or self.span_open(view);
+                        var root: Span = undefined;
+                        const name = "simplex.batcher.process";
+                        var span = self.view_span(&root, adopted, view, name, .{
+                            .operation = @tagName(message),
+                            .epoch = self.cfg.epoch.get(),
+                            .view = view.get(),
+                        });
+                        self.span = &span;
+                        defer self.span = null;
+                        try self.handle_mailbox(voter_mailbox, message);
+                    },
                     .certificate => |message| {
                         var owned = message;
                         defer owned.deinit();
@@ -217,7 +236,12 @@ pub fn Actor(comptime P: type) type {
                 .leader_nullify_hinted = false,
             };
             self.finalized = update.finalized;
-            _ = try self.round_for_view(update.current);
+            for (self.work.items) |entry| {
+                if (entry.view.get() <= update.finalized.get()) entry.round.close_span();
+            }
+            // Adopt the voter's view span so all of the view's work shares one trace.
+            const current = try self.round_for_view(update.current);
+            current.adopt_span();
             try self.dirty_views.append(self.gpa, update.current);
             const limit = self.cfg.lookahead.admission_limit(update.current);
             for (self.work.items) |entry| {
@@ -282,12 +306,22 @@ pub fn Actor(comptime P: type) type {
             if (!self.viewport().admits_certificate(view)) return;
             const kind = std.meta.activeTag(message);
             if (self.find(view)) |existing| if (existing.has_certificate(kind)) {
-                self.tracer.event(.trace, "skipping duplicate certificate", .{
+                self.trace(.trace, "skipping duplicate certificate", .{
                     .view = view.get(),
                     .kind = kind,
                 });
                 return;
             };
+            // Under the view's span only if the view is already tracked: a certificate that
+            // fails verification creates no per-view state.
+            var root: Span = undefined;
+            var span = self.view_span(&root, self.span_open(view), view, verify_name, .{
+                .kind = kind,
+                .epoch = self.cfg.epoch.get(),
+                .view = view.get(),
+            });
+            self.span = &span;
+            defer self.span = null;
             var rng: context.IoRng = .{ .io = self.io };
             const scheme = self.cfg.scheme;
             if (!try message.verify(self.gpa, &rng, scheme, self.cfg.strategy)) {
@@ -352,12 +386,17 @@ pub fn Actor(comptime P: type) type {
                     try voter.proposal(proposal);
                 };
                 if (!self.cfg.lookahead.admits(self.current.view, view)) {
-                    self.tracer.event(.trace, "skipping out-of-window round processing", .{
+                    self.trace(.trace, "skipping out-of-window round processing", .{
                         .current = self.current.view.get(),
                         .view = view.get(),
                     });
                     continue;
                 }
+                // Construction runs in the view's own span.
+                var root: Span = undefined;
+                if (round.span_open()) root = self.root_span(view);
+                self.span = if (round.span_open()) &root else null;
+                defer self.span = null;
                 try self.process_view(voter, view, round);
             }
             self.dirty_views.clearRetainingCapacity();
@@ -383,7 +422,7 @@ pub fn Actor(comptime P: type) type {
                 else
                     null;
                 var batch = try round.try_construct(self.gpa, &rng, self.cfg.strategy) orelse {
-                    self.tracer.event(.trace, "no verifier ready", .{ .view = view.get() });
+                    self.trace(.trace, "no verifier ready", .{ .view = view.get() });
                     return;
                 };
                 defer batch.deinit(self.gpa);
@@ -396,14 +435,14 @@ pub fn Actor(comptime P: type) type {
                 }
                 if (batch.certificate) |certificate| {
                     batch.certificate = null;
-                    self.tracer.event(.debug, "recovered certificate, forwarding to voter", .{
+                    self.trace(.debug, "recovered certificate, forwarding to voter", .{
                         .view = view.get(),
                         .kind = std.meta.activeTag(certificate),
                     });
                     try voter.recovered(self.gpa, certificate);
                 }
                 if (batch.processed != 0) {
-                    self.tracer.event(.trace, "processed votes", .{
+                    self.trace(.trace, "processed votes", .{
                         .view = view.get(),
                         .batch = batch.processed,
                     });
@@ -423,6 +462,48 @@ pub fn Actor(comptime P: type) type {
         fn record_inbound(self: *Self, peer: S.PublicKey, message: metrics.MessageType) !void {
             const registered = self.metrics orelse return;
             try metrics.inc(registered.inbound_messages, .{ .peer = peer, .message = message });
+        }
+
+        const verify_name = "simplex.batcher.verify_certificate";
+
+        /// Emits an event inside the open span, if any.
+        fn trace(
+            self: *const Self,
+            level: traces.Level,
+            message: []const u8,
+            fields: anytype,
+        ) void {
+            if (self.span) |span| return span.event(level, message, fields);
+            self.tracer.event(level, message, fields);
+        }
+
+        /// Whether the batcher adopted `view`'s span and has not closed it.
+        fn span_open(self: *const Self, view: View) bool {
+            const round = self.find(view) orelse return false;
+            return round.span_open();
+        }
+
+        /// The voter's root span of `view` (spans are values, so it is rebuilt).
+        fn root_span(self: *const Self, view: View) Span {
+            return self.tracer.span("simplex.voter.view", .{
+                .epoch = self.cfg.epoch.get(),
+                .view = view.get(),
+            });
+        }
+
+        /// A span named `name` under `view`'s root span (written to `root`) when `adopted`,
+        /// else a root span (commonware's `MISSING_SPAN` parent).
+        fn view_span(
+            self: *const Self,
+            root: *Span,
+            adopted: bool,
+            view: View,
+            comptime name: []const u8,
+            fields: anytype,
+        ) Span {
+            if (!adopted) return self.tracer.span(name, fields);
+            root.* = self.root_span(view);
+            return root.child(name, fields);
         }
 
         fn viewport(self: *const Self) lookahead_mod.Viewport {

@@ -5,7 +5,9 @@
 //! `P` declares `Scheme`, `Digest`, `Blocker` (a p2p blocker that also reports its blocked
 //! set), `Strategy`, `NetSender`, and `NetReceiver` (the resolver channel). Commonware's
 //! `select_loop!` over the mailbox and the handler becomes one `Inbox`. Events go to `tracer`
-//! under commonware's target (spans are not ported); the engine's metrics go to the scope
+//! under commonware's target, inside its `simplex.resolver.process`, `.deliver`, and
+//! `.validate` spans (the mailbox and fetch spans that would parent them are not carried
+//! across tasks, so `process` and `deliver` are roots); the engine's metrics go to the scope
 //! `run` receives.
 
 const std = @import("std");
@@ -38,6 +40,7 @@ const Effect = state_mod.Effect;
 const oneshot = utils.channel.oneshot;
 const Scope = runtime.telemetry.metrics.Scope;
 const Tracer = runtime.telemetry.traces.Tracer;
+const Span = runtime.telemetry.traces.Span;
 
 /// The tracing target of the resolver's events (commonware's module path).
 pub const trace_target = "commonware_consensus::simplex::actors::resolver";
@@ -161,6 +164,8 @@ pub fn Actor(comptime P: type) type {
         mailbox_receiver: actor.mailbox.Receiver(Message),
         /// Receives the resolver's events; the engine sets it from its context.
         tracer: Tracer = .none,
+        /// The span events are emitted in, set only while one is open on the stack.
+        span: ?*const Span = null,
 
         pub fn init(gpa: Allocator, io: Io, cfg: Config(P)) !struct { Self, Mailbox } {
             assert(cfg.mailbox_size > 0);
@@ -264,6 +269,14 @@ pub fn Actor(comptime P: type) type {
         /// or any resolver with the same `fetch`/`fetch_all`/`fetch_targeted`/`retain` (tests).
         pub fn handle_mailbox(self: *Self, engine: anytype, message: Message) !void {
             defer Message.discard(message);
+            var span = self.tracer.span("simplex.resolver.process", .{
+                .operation = @tagName(message),
+                .epoch = self.epoch.get(),
+                .view = message.view().get(),
+            });
+            const outer = self.span;
+            self.span = &span;
+            defer self.span = outer;
             var effects: std.ArrayList(Effect) = .empty;
             defer effects.deinit(self.gpa);
             switch (message) {
@@ -350,6 +363,14 @@ pub fn Actor(comptime P: type) type {
         /// Decodes and verifies a response for `view`: any certificate an honest peer could
         /// serve for the view is valid, even one answering the other kind.
         pub fn validate(self: *Self, view: View, data: []const u8) !?Certificate {
+            const fields = .{ .epoch = self.epoch.get(), .view = view.get() };
+            var span = if (self.span) |parent|
+                parent.child("simplex.resolver.validate", fields)
+            else
+                self.tracer.span("simplex.resolver.validate", fields);
+            const outer = self.span;
+            self.span = &span;
+            defer self.span = outer;
             const cfg = self.scheme.certificate_codec_config();
             var incoming = codec.decode_cfg(Certificate, self.gpa, data, cfg) catch |err|
                 switch (err) {
@@ -366,7 +387,7 @@ pub fn Actor(comptime P: type) type {
             };
             const received = incoming.view();
             if (!servable) {
-                self.tracer.event(.debug, "certificate below requested view", .{
+                self.trace(.debug, "certificate below requested view", .{
                     .view = view.get(),
                     .received = received.get(),
                 });
@@ -374,7 +395,7 @@ pub fn Actor(comptime P: type) type {
                 return null;
             }
             if (incoming.epoch() != self.epoch) {
-                self.tracer.event(.debug, "rejecting certificate from different epoch", .{
+                self.trace(.debug, "rejecting certificate from different epoch", .{
                     .view = view.get(),
                     .epoch = incoming.epoch().get(),
                     .expected = self.epoch.get(),
@@ -385,15 +406,26 @@ pub fn Actor(comptime P: type) type {
             var rng: context.IoRng = .{ .io = self.io };
             if (!try incoming.verify(self.gpa, &rng, self.scheme, self.strategy)) {
                 const failed = "certificate failed verification";
-                self.tracer.event(.debug, failed, .{ .view = view.get() });
+                self.trace(.debug, failed, .{ .view = view.get() });
                 incoming.deinit(self.gpa);
                 return null;
             }
-            self.tracer.event(.debug, "received certificate for request", .{
+            self.trace(.debug, "received certificate for request", .{
                 .view = view.get(),
                 .received = received.get(),
             });
             return incoming;
+        }
+
+        /// Emits an event inside the open span, if any.
+        fn trace(
+            self: *const Self,
+            level: runtime.telemetry.traces.Level,
+            message: []const u8,
+            fields: anytype,
+        ) void {
+            if (self.span) |span| return span.event(level, message, fields);
+            self.tracer.event(level, message, fields);
         }
 
         fn settled_count(self: *const Self, view: View, asks: []const Ask) usize {
@@ -436,6 +468,13 @@ pub fn Actor(comptime P: type) type {
             defer self.gpa.free(deliver.asks);
             var response = deliver.response;
             const view = deliver.view;
+            var span = self.tracer.span("simplex.resolver.deliver", .{
+                .epoch = self.epoch.get(),
+                .view = view.get(),
+            });
+            const outer = self.span;
+            self.span = &span;
+            defer self.span = outer;
             // Ignoring is key-wide: only skip validation once every kind at the view settled.
             if (self.state.key_settled(view)) return response.send(.ignored) catch {};
             var parsed = try self.validate(view, deliver.data) orelse

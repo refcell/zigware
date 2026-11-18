@@ -322,6 +322,7 @@ pub fn State(comptime S: type, comptime E: type, comptime D: type) type {
                 null;
             const round = try self.create_round(view);
             round.mark_entered(at);
+            round.open_span();
             round.set_deadlines(
                 at + self.leader_timeout_ns,
                 at + self.certification_timeout_ns,
@@ -936,6 +937,20 @@ pub fn State(comptime S: type, comptime E: type, comptime D: type) type {
                 self.trigger_timeout(view, .failed_certification);
             }
             return notarized;
+        }
+
+        /// Whether `view`'s root span is open (commonware `view_span` is not `MISSING_SPAN`).
+        pub fn view_span_open(self: *const Self, view: View) bool {
+            const round = self.round_at(view) orelse return false;
+            return round.span_open();
+        }
+
+        /// Closes the root span of every decided view (at or below the finalized view), so
+        /// each view's trace ends when the chain commits it.
+        pub fn close_decided_spans(self: *Self) void {
+            const decided = self.rounds.range(genesis_view, self.last_finalized_);
+            for (decided) |entry| self.rounds.get(entry.view).?.close_span();
+            assert(!self.view_span_open(self.last_finalized_));
         }
 
         /// Drops rounds below the activity horizon and stale safety indexes; appends the

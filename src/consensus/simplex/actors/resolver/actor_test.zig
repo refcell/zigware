@@ -830,3 +830,29 @@ test "resolver actor validate rejects a notarization below the requested view" {
     const exact: Certificate = .{ .notarization = try env.notarization(6) };
     try testing.expectEqual(6, (try env.validate(6, exact)).?);
 }
+
+test "resolver actor validates a delivery inside its deliver span" {
+    const traces = @import("runtime").telemetry.traces;
+    var collector = traces.Collector.init(gpa, .{});
+    defer collector.deinit();
+    var subscriber = collector.subscriber();
+    subscriber.level = .debug;
+    var env: Env = undefined;
+    try env.start();
+    defer env.stop();
+    env.actor.tracer = .init(subscriber, "commonware_consensus::simplex::actors::resolver");
+    const outcome = try env.deliver(3, .{ .notarization = try env.notarization(3) }, &.{
+        .ancestry(.notarization),
+    });
+    try testing.expectEqual(complete, outcome.?);
+    const spans = struct {
+        fn nested(_: void, event: traces.collector.RecordedEvent) bool {
+            const message = "received certificate for request";
+            if (!std.mem.eql(u8, event.metadata.content, message)) return false;
+            if (event.spans.len != 2) return false;
+            return std.mem.eql(u8, event.spans[0].content, "simplex.resolver.validate") and
+                std.mem.eql(u8, event.spans[1].content, "simplex.resolver.deliver");
+        }
+    };
+    try collector.get_all().expect_event({}, spans.nested);
+}

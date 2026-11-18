@@ -30,6 +30,9 @@ pub fn Round(comptime S: type, comptime B: type, comptime D: type, comptime R: t
         verifier: Verifier,
         votes: Tracker,
         proposal_sent: bool = false,
+        /// The voter's root span of this view (commonware `ViewSpan`), adopted when the view
+        /// becomes current and closed once decided.
+        span: enum { pending, open, closed } = .pending,
 
         pub fn init(
             round: consensus_types.Round,
@@ -41,6 +44,22 @@ pub fn Round(comptime S: type, comptime B: type, comptime D: type, comptime R: t
             const participants: u32 = @intCast(scheme.participants().len());
             const votes = Tracker.init(participants, track_historical_votes);
             return with_votes(round, scheme, blocker, reporter, votes);
+        }
+
+        /// Adopts the voter's root span of the view; no-op once open.
+        pub fn adopt_span(self: *Self) void {
+            assert(self.span != .closed); // A decided view is never adopted again.
+            if (self.span == .pending) self.span = .open;
+            assert(self.span == .open);
+        }
+
+        /// Closes the view's root span once the view is decided.
+        pub fn close_span(self: *Self) void {
+            self.span = .closed;
+        }
+
+        pub fn span_open(self: *const Self) bool {
+            return self.span == .open;
         }
 
         /// A round below the current view: votes are only remembered, never kept.

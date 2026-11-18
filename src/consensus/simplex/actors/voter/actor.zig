@@ -7,8 +7,9 @@
 //! Commonware's `select_loop!` becomes one `Inbox`: the mailbox is pumped into it, and each
 //! automaton request runs as a task that pushes its response. A task is canceled to abort its
 //! request; ids discard responses that raced the cancelation. Reported activities and relayed
-//! payloads are borrowed for the call. Events go to `tracer` under commonware's target; its
-//! per-view spans and metrics are not ported yet.
+//! payloads are borrowed for the call. Events go to `tracer` under commonware's target, inside
+//! its `simplex.voter.*` spans (rooted at each view's `simplex.voter.view` while it is open),
+//! and metrics to `Config.scope`.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -401,6 +402,15 @@ pub fn Actor(comptime P: type) type {
         fn try_propose(self: *Self, inbox: *Inbox) !void {
             assert(self.pending_propose == null);
             const request = self.state.try_propose() orelse return;
+            const view = request.view();
+            var root: Span = undefined;
+            var span = self.view_span(&root, view, "simplex.voter.propose", .{
+                .epoch = self.state.epoch.get(),
+                .view = view.get(),
+            });
+            const outer = self.span;
+            self.span = &span;
+            defer self.span = outer;
             self.trace(.debug, "requested proposal from automaton", .{
                 .round = request.context().round,
                 .handoff = request.is_handoff(),
@@ -431,6 +441,15 @@ pub fn Actor(comptime P: type) type {
                 },
                 .wait => return,
             };
+            const view = ready.context.view();
+            var root: Span = undefined;
+            var span = self.view_span(&root, view, "simplex.voter.verify", .{
+                .epoch = self.state.epoch.get(),
+                .view = view.get(),
+            });
+            const outer = self.span;
+            self.span = &span;
+            defer self.span = outer;
             self.trace(.debug, "requested proposal verification", .{
                 .round = ready.proposal.round,
             });
@@ -670,6 +689,14 @@ pub fn Actor(comptime P: type) type {
         ) !?View {
             const request_context = request.context();
             const view = request_context.view();
+            var root: Span = undefined;
+            var span = self.view_span(&root, view, "simplex.voter.propose", .{
+                .epoch = self.state.epoch.get(),
+                .view = view.get(),
+            });
+            const outer = self.span;
+            self.span = &span;
+            defer self.span = outer;
             const round = request_context.round;
             const value = payload orelse {
                 self.trace(.debug, "failed to propose container", .{ .round = round });
@@ -774,6 +801,14 @@ pub fn Actor(comptime P: type) type {
             pending.future.await(self.io);
             self.pending_verify = null;
             const view = round.view;
+            var root: Span = undefined;
+            var span = self.view_span(&root, view, "simplex.voter.verify", .{
+                .epoch = self.state.epoch.get(),
+                .view = view.get(),
+            });
+            const outer = self.span;
+            self.span = &span;
+            defer self.span = outer;
             if (result) |valid| {
                 if (valid) {
                     _ = self.state.verified(view);
@@ -794,6 +829,15 @@ pub fn Actor(comptime P: type) type {
             } else return .skip; // Canceled.
             var task = self.certify_tasks.swapRemove(index);
             task.future.await(self.io);
+            const view = round.view;
+            var root: Span = undefined;
+            var span = self.view_span(&root, view, "simplex.voter.certify", .{
+                .epoch = self.state.epoch.get(),
+                .view = view.get(),
+            });
+            const outer = self.span;
+            self.span = &span;
+            defer self.span = outer;
             // A missing verdict is re-requested on restart; failing it could halt the view.
             const certified = result orelse {
                 self.trace(.debug, "failed to certify proposal", .{ .round = round });
@@ -1030,6 +1074,24 @@ pub fn Actor(comptime P: type) type {
             if (self.journal) |*journal| try journal.sync_all();
         }
 
+        /// A span named `name` under `view`'s root span (`simplex.voter.view`, written to
+        /// `root`) while that is open, else a root span (commonware's `MISSING_SPAN` parent).
+        /// Spans are values here, so the root is rebuilt rather than stored per round.
+        fn view_span(
+            self: *const Self,
+            root: *Span,
+            view: View,
+            comptime name: []const u8,
+            fields: anytype,
+        ) Span {
+            if (!self.state.view_span_open(view)) return self.tracer.span(name, fields);
+            root.* = self.tracer.span("simplex.voter.view", .{
+                .epoch = self.state.epoch.get(),
+                .view = view.get(),
+            });
+            return root.child(name, fields);
+        }
+
         /// Emits an event inside the open span, if any.
         fn trace(
             self: *const Self,
@@ -1054,17 +1116,22 @@ pub fn Actor(comptime P: type) type {
                 .skip => return true,
                 .notify => |notified| notified,
             };
-            var span = self.tracer.span("simplex.voter.notify", .{
-                .epoch = self.state.epoch.get(),
-                .view = notified.view.get(),
-            });
             assert(self.span == null);
+            const view = notified.view;
+            var root: Span = undefined;
+            var span = self.view_span(&root, view, "simplex.voter.notify", .{
+                .epoch = self.state.epoch.get(),
+                .view = view.get(),
+            });
+            const outer = self.span;
             self.span = &span;
-            defer self.span = null;
+            defer self.span = outer;
             try self.construct(notified.view, &notified.staged);
             try self.reconcile(links);
             try self.sync_journal();
             try self.notify(links, &notified.staged);
+            // After notify, so the finalization broadcast still nests under the view span.
+            self.state.close_decided_spans();
             const current = self.state.current_view();
             if (current.get() > start.get()) {
                 const leader = self.state.leader_index(current) orelse @panic("leader not set");
@@ -1083,12 +1150,13 @@ pub fn Actor(comptime P: type) type {
             const deadline = self.state.next_timeout();
             const event = try links.inbox.next_until(deadline.deadline) orelse {
                 const current = self.state.current_view();
-                var span = self.tracer.span("simplex.voter.timeout", .{
+                assert(self.span == null);
+                var root: Span = undefined;
+                var span = self.view_span(&root, current, "simplex.voter.timeout", .{
                     .epoch = self.state.epoch.get(),
                     .view = current.get(),
                     .reason = deadline.reason.as_str(),
                 });
-                assert(self.span == null);
                 self.span = &span;
                 defer self.span = null;
                 const staged = try self.timeout(deadline.reason);

@@ -73,6 +73,9 @@ pub fn Round(comptime S: type, comptime D: type) type {
         pub const Verifying = struct { proposal: Proposal, parent_payload: D };
 
         entered_at: ?Instant = null,
+        /// Lifecycle of the view's root span (commonware `ViewSpan`): open once the view is
+        /// active, closed once decided, never reopened.
+        span: enum { pending, open, closed } = .pending,
         proposed_at: ?Instant = null,
         scheme: *const S,
         round: consensus_types.Round,
@@ -286,6 +289,23 @@ pub fn Round(comptime S: type, comptime D: type) type {
 
         pub fn broadcast_notarize(self: *const Self) bool {
             return self.broadcast_notarize_;
+        }
+
+        /// Opens the view's root span when the round becomes the active view.
+        pub fn open_span(self: *Self) void {
+            assert(self.span != .closed); // A decided view is never reactivated.
+            if (self.span == .pending) self.span = .open;
+            assert(self.span == .open);
+        }
+
+        /// Closes the view's root span once the view is decided.
+        pub fn close_span(self: *Self) void {
+            self.span = .closed;
+        }
+
+        /// Whether the view's root span anchors work.
+        pub fn span_open(self: *const Self) bool {
+            return self.span == .open;
         }
 
         /// Records when we entered this view; the first entry wins.
