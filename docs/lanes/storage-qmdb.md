@@ -56,7 +56,10 @@ which every database here is built on.
   `init` over an opened authenticated log (state sync's `from_sync_result`).
 - [x] any, unordered: evicting floor policies (an evicted key is deleted at the tip; the policy
   owns the evicted value), with commonware's created-then-evicted scenario.
-- [ ] any: ordered evictions (link repair of evicted keys' predecessors), evicting floor policies (and ordered link repair
+- [x] any, ordered: evicting floor policies with link repair of evicted keys' predecessors;
+  `Any{Mmr,Mmb}{Unordered,Ordered}{Fixed,Variable}FloorConf` (commonware's `floor_batches`
+  workload under Proportional, Hold, Bounded, and a seeded keep/evict/replace/stop rule) match.
+- [ ] any: evicting floor policies (and ordered link repair
   after evictions), ordered staging and `stream_range`/`keys`, batched `get_many`.
 - [x] immutable (fixed, MMR and MMB): `Db`, chained batches, floor-filtered batch reads,
   prune, recovery, `ImmutableMmr/MmbFixedConf` root conformance (matches), mod.rs's core
@@ -193,8 +196,9 @@ which every database here is built on.
   journal batch and the new diff their own copies; a diff frees its values with its last
   holder. A staged merkleize's puts and unstaged writes belong to the batch once recorded.
   Batches merkleize with the floor policy passed by pointer. A policy's `Entry` carries a
-  value it owns (a copy, as commonware's walk clones it); evicting policies work on unordered
-  batches and assert on ordered ones until link repair lands. Unordered decisions apply as the
+  value it owns (a copy, as commonware's walk clones it); an ordered evicting walk collects its
+  decisions, rewrites each evicted key's predecessor (`ordered.repair_links`), then emits them
+  as commonware does. Unordered decisions apply as the
   walk makes them (commonware collects them and emits them after the walk, in the same
   location order, so the operations and root agree). A
   batch keeps sorted diffs of itself and its live ancestors, plus `ancestor_base_locs` for keys
@@ -242,3 +246,4 @@ which every database here is built on.
 - 2026-11-16: any owned (variable) values, unordered and ordered.
 - 2026-11-18: `init_from_log` hooks on any, immutable, and keyless for state sync.
 - 2026-11-18: any (unordered) evicting floor policies.
+- 2026-11-18: any ordered evictions with link repair; all eight floor conformance hashes match.

@@ -328,6 +328,214 @@ pub fn Emitter(comptime D: type) type {
             }
             return if (low > 0) &prev[low - 1] else &prev[prev.len - 1];
         }
+
+        // Link repair after an evicting walk (commonware's ordered `repair_links`).
+
+        const RepairSource = union(enum) { read: Source, decided: usize };
+        const RepairPrev = struct { key: K, source: ?RepairSource };
+
+        fn key_order_less(_: void, a: K, b: K) bool {
+            return diff_mod.order(K, &a, &b) == .lt;
+        }
+
+        fn contains_key(sorted: []const K, key: *const K) bool {
+            var low: usize = 0;
+            var high: usize = sorted.len;
+            while (low < high) {
+                const mid = low + (high - low) / 2;
+                switch (diff_mod.order(K, &sorted[mid], key)) {
+                    .lt => low = mid + 1,
+                    .gt => high = mid,
+                    .eq => return true,
+                }
+            }
+            return false;
+        }
+
+        /// Rewrites the predecessor of each key the walk evicted so its link passes the key:
+        /// a kept or replaced predecessor's decision takes the new link, and any other is
+        /// decided once more as a kept update, after the walk's decisions in key order.
+        pub fn repair_links(m: anytype, walked: anytype) !void {
+            const gpa = m.gpa;
+            var evicted: std.ArrayList(K) = .empty;
+            defer evicted.deinit(gpa);
+            var next: std.ArrayList(K) = .empty;
+            defer next.deinit(gpa);
+            for (walked.decided.items) |decided| {
+                if (!decided.evicted) continue;
+                try evicted.append(gpa, decided.update.key);
+                try next.append(gpa, decided.update.next_key);
+            }
+            std.mem.sort(K, evicted.items, {}, key_order_less);
+            finish_keys(&next, evicted.items);
+            // Nothing remains to link when the walk evicted nothing or every key.
+            if (next.items.len == 0) return;
+            var prev: std.ArrayList(RepairPrev) = .empty;
+            defer prev.deinit(gpa);
+            try add_bucket_neighbors(m, walked, evicted.items, &prev);
+            try add_memory_neighbors(m, walked, &prev);
+            // The walk's kept and replaced updates come last, so they win the deduplication.
+            for (walked.decided.items, 0..) |decided, at| {
+                if (decided.evicted) continue;
+                const source: RepairSource = .{ .decided = at };
+                try prev.append(gpa, .{ .key = decided.update.key, .source = source });
+            }
+            finish_repair_prev(&prev, evicted.items);
+            assert(prev.items.len > 0); // Some key remains, so it has a predecessor.
+            try rewrite_evicted(m, walked, evicted.items, next.items, prev.items);
+        }
+
+        /// Sorts and deduplicates `keys`, dropping the `removed` (sorted) ones.
+        fn finish_keys(keys: *std.ArrayList(K), removed: []const K) void {
+            std.mem.sort(K, keys.items, {}, key_order_less);
+            var count: usize = 0;
+            for (keys.items) |key| {
+                if (count > 0 and diff_mod.order(K, &keys.items[count - 1], &key) == .eq) continue;
+                if (contains_key(removed, &key)) continue;
+                keys.items[count] = key;
+                count += 1;
+            }
+            keys.shrinkRetainingCapacity(count);
+            assert(count <= keys.capacity);
+        }
+
+        /// Sorts the candidates by key, keeping the last push per key and dropping `removed`.
+        fn finish_repair_prev(prev: *std.ArrayList(RepairPrev), removed: []const K) void {
+            // Stable: a key's later pushes carry fresher state, so the last one wins.
+            std.mem.sort(RepairPrev, prev.items, {}, key_less(RepairPrev));
+            var count: usize = 0;
+            for (prev.items, 0..) |candidate, at| {
+                const last = at + 1 == prev.items.len or
+                    diff_mod.order(K, &candidate.key, &prev.items[at + 1].key) != .eq;
+                if (!last) continue;
+                if (contains_key(removed, &candidate.key)) continue;
+                prev.items[count] = candidate;
+                count += 1;
+            }
+            prev.shrinkRetainingCapacity(count);
+            assert(count <= prev.capacity);
+        }
+
+        /// The committed updates in each evicted key's translated-key bucket and the bucket
+        /// before it, for keys this batch leaves alone (stale ones excluded).
+        fn add_bucket_neighbors(
+            m: anytype,
+            walked: anytype,
+            evicted: []const K,
+            prev: *std.ArrayList(RepairPrev),
+        ) !void {
+            const gpa = m.gpa;
+            var locations: std.ArrayList(u64) = .empty;
+            defer locations.deinit(gpa);
+            for (evicted) |*key| {
+                const bytes = value_mod.bytes(K, key);
+                var own = m.db.snapshot.get(bytes);
+                while (own.next()) |loc| try locations.append(gpa, loc.*);
+                const neighbor = m.db.snapshot.prev_translated_key(bytes) orelse continue;
+                var values = neighbor.values;
+                while (values.next()) |loc| try locations.append(gpa, loc.*);
+            }
+            std.mem.sort(u64, locations.items, {}, std.sort.asc(u64));
+            var previous: ?u64 = null;
+            for (locations.items) |loc| {
+                if (previous == loc) continue;
+                previous = loc;
+                const update = try live_update(m, loc) orelse continue;
+                if (diff_mod.lookup_sorted(K, V, walked.diff.items, &update.key) != null) continue;
+                const source: RepairSource = .{ .read = .{ .value = update.value, .loc = loc } };
+                try prev.append(gpa, .{ .key = update.key, .source = source });
+            }
+        }
+
+        /// This batch's active writes and the reachable ancestors' active updates of keys this
+        /// batch leaves alone (the nearest ancestor's entry of each key).
+        fn add_memory_neighbors(
+            m: anytype,
+            walked: anytype,
+            prev: *std.ArrayList(RepairPrev),
+        ) !void {
+            const gpa = m.gpa;
+            for (walked.diff.items) |*pair| {
+                const loc = pair.entry.loc() orelse continue;
+                const read: Source = .{ .value = pair.entry.active.value, .loc = loc };
+                try prev.append(gpa, .{ .key = pair.key, .source = .{ .read = read } });
+            }
+            for (m.ancestor_entries) |entries| {
+                for (entries) |*pair| {
+                    const loc = pair.entry.loc() orelse continue;
+                    const nearest = diff_mod.resolve(K, V, m.ancestor_entries, &pair.key).?;
+                    if (nearest != &pair.entry) continue;
+                    const diff = walked.diff.items;
+                    if (diff_mod.lookup_sorted(K, V, diff, &pair.key) != null) continue;
+                    const read: Source = .{ .value = pair.entry.active.value, .loc = loc };
+                    try prev.append(gpa, .{ .key = pair.key, .source = .{ .read = read } });
+                }
+            }
+        }
+
+        /// Claims each evicted key's predecessor once and gives it its new successor.
+        fn rewrite_evicted(
+            m: anytype,
+            walked: anytype,
+            evicted: []const K,
+            next: []const K,
+            prev: []RepairPrev,
+        ) !void {
+            const Decided = @typeInfo(@TypeOf(walked)).pointer.child.Decided;
+            const gpa = m.gpa;
+            const walked_count = walked.decided.items.len;
+            for (evicted) |*key| {
+                const claimed = claim_repair(prev, key);
+                const source = claimed.source orelse continue;
+                claimed.source = null;
+                const successor = find_next(next, &claimed.key);
+                switch (source) {
+                    .decided => |at| walked.decided.items[at].update.next_key = successor,
+                    .read => |read| {
+                        const mv = m.classify(walked.diff.items, read.loc, &claimed.key) orelse
+                            return error.DataCorrupted; // A rewritten predecessor is active.
+                        const update: D.Update = .{
+                            .key = claimed.key,
+                            .value = read.value,
+                            .next_key = successor,
+                        };
+                        const decided: Decided = .{ .update = update, .mv = mv, .evicted = false };
+                        try walked.decided.append(gpa, decided);
+                    },
+                }
+            }
+            const rewrites = walked.decided.items[walked_count..];
+            std.mem.sort(Decided, rewrites, {}, struct {
+                fn less(_: void, a: Decided, b: Decided) bool {
+                    return diff_mod.order(K, &a.update.key, &b.update.key) == .lt;
+                }
+            }.less);
+            assert(walked.decided.items.len >= walked_count);
+        }
+
+        /// The smallest of the sorted `next` above `key`, wrapping to the smallest.
+        fn find_next(next: []const K, key: *const K) K {
+            assert(next.len > 0);
+            var low: usize = 0;
+            var high: usize = next.len;
+            while (low < high) {
+                const mid = low + (high - low) / 2;
+                if (diff_mod.order(K, &next[mid], key) == .gt) high = mid else low = mid + 1;
+            }
+            return if (low < next.len) next[low] else next[0];
+        }
+
+        /// The predecessor candidate of `key`: the largest below it, wrapping to the largest.
+        fn claim_repair(prev: []RepairPrev, key: *const K) *RepairPrev {
+            assert(prev.len > 0);
+            var low: usize = 0;
+            var high: usize = prev.len;
+            while (low < high) {
+                const mid = low + (high - low) / 2;
+                if (diff_mod.order(K, &prev[mid].key, key) == .lt) low = mid + 1 else high = mid;
+            }
+            return if (low > 0) &prev[low - 1] else &prev[prev.len - 1];
+        }
     };
 }
 

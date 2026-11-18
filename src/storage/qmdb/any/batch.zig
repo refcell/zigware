@@ -13,8 +13,8 @@
 //!
 //! A merkleized batch is reference counted (`retain`/`release`); a child holds a weak link to
 //! its parent and the diffs of its live ancestors, so reads and applies stay exact after the
-//! ancestors are released. Unordered batches support evicting floor policies (an evicted
-//! key is deleted at the tip); ordered ones do not yet (their links need repair).
+//! ancestors are released. A walk under an evicting floor policy deletes each evicted key at
+//! the tip; an ordered one first rewrites the evicted keys' predecessors to link past them.
 //!
 //! Staging (`stage` → `expand` → `Staged.merkleize(slots, unstaged)`) reads keys through the
 //! batch and records where each resolved (`StagedLoc`); a staged merkleize then takes one
@@ -154,8 +154,6 @@ pub fn Unmerkleized(comptime D: type) type {
         /// Hashes the batch, advancing the floor with `policy` (which must not evict).
         pub fn merkleize_with(self: *Self, db: *D, policy: anytype) !*D.MerkleizedBatch {
             floor_mod.check(@TypeOf(policy.*));
-            // Ordered evictions need their predecessors' links repaired (not yet supported).
-            assert(!D.Update.siblings or !policy.evicts());
             const gpa = self.gpa;
             var m = try Merkleizer(D).init(self, db);
             defer m.deinit();
@@ -167,6 +165,10 @@ pub fn Unmerkleized(comptime D: type) type {
                 try m.emit_writes(writes);
             defer walked.deinit(gpa);
             const floor = try m.walk(&walked, policy);
+            if (comptime D.Update.siblings) {
+                if (policy.evicts()) try ordered_mod.Emitter(D).repair_links(&m, &walked);
+                try walked.emit_decided(gpa);
+            }
             const merkleized = try m.finish(&walked, floor, self.metadata, &self.journal_batch);
             self.free_values();
             self.mutations.deinit(gpa);
@@ -365,7 +367,7 @@ pub const StagedLoc = union(enum) {
 };
 
 /// How an active floor candidate records its move to the tip.
-const Move = union(enum) {
+pub const Move = union(enum) {
     /// The key has a diff entry at this index.
     existing: struct { index: usize, base_old_loc: ?u64 },
     /// The key has no diff entry.
@@ -388,8 +390,15 @@ fn Walked(comptime D: type) type {
         active_keys_delta: i64 = 0,
         /// Database locations the batch's writes supersede.
         superseded: std.ArrayList(u64) = .empty,
+        /// An ordered evicting walk's decisions, emitted after the link repair (commonware's
+        /// `Decided`): the walk's in location order, then the repaired predecessors.
+        decided: std.ArrayList(Decided) = .empty,
+
+        /// A decided update (its value borrowed) and whether the walk evicted its key.
+        pub const Decided = struct { update: D.Update, mv: Move, evicted: bool };
 
         fn deinit(self: *Self, gpa: Allocator) void {
+            self.decided.deinit(gpa);
             self.ops.deinit(gpa);
             self.diff.deinit(gpa);
             self.floor_diff.deinit(gpa);
@@ -439,6 +448,19 @@ fn Walked(comptime D: type) type {
             try self.ops.append(gpa, .{ .delete = key });
             self.active_keys_delta -= 1;
             assert(self.ops.items.len == ops_before + 1);
+        }
+
+        /// Emits the collected decisions in order.
+        fn emit_decided(self: *Self, gpa: Allocator) !void {
+            const ops_before = self.ops.items.len;
+            for (self.decided.items) |decided| {
+                if (decided.evicted) {
+                    try self.evict(gpa, decided.update.key, decided.mv);
+                } else {
+                    try self.relocate(gpa, decided.update, decided.mv);
+                }
+            }
+            assert(self.ops.items.len == ops_before + self.decided.items.len);
         }
 
         /// Appends `update` at the tip, recording its move as `mv` directs.
@@ -674,7 +696,7 @@ fn Merkleizer(comptime D: type) type {
 
         /// How the update of `key` at `loc` moves, or null if it is not its key's active
         /// update.
-        fn classify(self: *const Self, diff: []const Pair, loc: u64, key: *const K) ?Move {
+        pub fn classify(self: *const Self, diff: []const Pair, loc: u64, key: *const K) ?Move {
             if (lookup_index(diff, key)) |index| {
                 const entry = &diff[index].entry;
                 if (entry.loc() != loc) return null;
@@ -781,6 +803,23 @@ fn Merkleizer(comptime D: type) type {
             };
             const decision = policy.decide(K, V, entry);
             if (decision.released) |released| codec.free(V, gpa, released);
+            // An ordered evicting walk defers its decisions to the link repair.
+            if (comptime D.Update.siblings) {
+                if (policy.evicts()) {
+                    const Decided = Walked(D).Decided;
+                    var decided: Decided = .{ .update = update, .mv = mv, .evicted = false };
+                    switch (decision.action) {
+                        .write => |value| {
+                            self.written.appendAssumeCapacity(value);
+                            decided.update.value = value;
+                        },
+                        .evict => decided.evicted = true,
+                        .stop => return false,
+                    }
+                    try walked.decided.append(gpa, decided);
+                    return true;
+                }
+            }
             switch (decision.action) {
                 .write => |value| {
                     // The walk owns the written value until the journal batch takes a copy.
