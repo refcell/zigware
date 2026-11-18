@@ -3,6 +3,8 @@
 //! 12605-14905).
 
 const std = @import("std");
+const builtin = @import("builtin");
+const build_options = @import("build_options");
 const testing = std.testing;
 const runtime = @import("runtime");
 const utils = @import("utils");
@@ -27,11 +29,14 @@ const B = harness.B;
 const Finalization = harness.Finalization;
 const Processed = @import("../../core/floor.zig").Processed;
 
-/// commonware's `Runner::timed(30s)`.
-const timed: runtime.deterministic.Config = .{ .timeout_ns = 30 * std.time.ns_per_s };
-
 fn run(comptime body: fn (Ctx) anyerror!void) !void {
-    var runner = try runtime.deterministic.Runner.init(gpa, timed);
+    try run_timed(body, 30);
+}
+
+/// commonware's `Runner::timed(seconds)`.
+fn run_timed(comptime body: fn (Ctx) anyerror!void, seconds: u64) !void {
+    const config: runtime.deterministic.Config = .{ .timeout_ns = seconds * std.time.ns_per_s };
+    var runner = try runtime.deterministic.Runner.init(gpa, config);
     defer runner.deinit();
     try try runner.start_context(body, .{});
 }
@@ -141,9 +146,13 @@ fn finalized_value(finalization: Finalization, block: B) ![]u8 {
 /// A marshal actor over prunable finalized stores, started from a configured floor
 /// (commonware's `Actor::init` with `configured_floor_config` or `reproposal_floor_config`).
 fn Running(comptime Prov: type, comptime Buf: type) type {
+    return RunningActor(common.Actor(Prov, App, Buf, Prunable.Certificates, Prunable.Blocks));
+}
+
+fn RunningActor(comptime Actor: type) type {
     return struct {
         const Self = @This();
-        pub const A = common.Actor(Prov, App, Buf, Prunable.Certificates, Prunable.Blocks);
+        pub const A = Actor;
 
         stores: *Prunable,
         prefix: []u8,
@@ -234,6 +243,19 @@ fn expect_acks(application: App, first: u64, last: u64) !void {
     }
 }
 
+/// Waits until marshal has processed through `height` after the application acknowledged it.
+/// commonware's biased `select_loop!` handles a ready ack before a queued `get_processed`;
+/// the Zig actor's inbox is FIFO, so the ack can land one scheduler cycle after the query.
+fn wait_processed(ctx: Ctx, mailbox: anytype, height: u64) !void {
+    const expected: Processed = .{ .block = .new(height) };
+    for (0..1000) |_| {
+        const current = try mailbox.get_processed();
+        if (current != null and std.meta.eql(current.?, expected)) return;
+        try ctx.sleep(.fromMilliseconds(1));
+    }
+    return expect_processed(mailbox, height);
+}
+
 fn expect_processed(mailbox: anytype, height: u64) !void {
     try testing.expectEqual(Processed{ .block = .new(height) }, (try mailbox.get_processed()).?);
 }
@@ -271,7 +293,7 @@ fn configured_floor_restart_body(ctx: Ctx) anyerror!void {
     defer tip.deinit(gpa);
     report(&first.mailbox, tip);
     try expect_acks(first.application, 11, 20);
-    try expect_processed(&first.mailbox, 20);
+    try wait_processed(ctx, &first.mailbox, 20);
     try first.mailbox.prune(.new(20));
     try testing.expect(!try has_block(&first.mailbox, .new(10)));
     first.crash();
@@ -363,7 +385,7 @@ fn start_reproposal_processed_through_20(self: *Reproposal, ctx: Ctx, prefix: []
     defer tip.deinit(gpa);
     report(&self.run.mailbox, tip);
     try expect_acks(self.run.application, 11, 20);
-    try expect_processed(&self.run.mailbox, 20);
+    try wait_processed(ctx, &self.run.mailbox, 20);
 }
 
 /// Restarts marshal under `prefix` with `floor` (owned) configured and a provider holding no
@@ -766,11 +788,11 @@ const RetiredThrough = struct {
     }
 };
 
-/// The marshal actor over prunable stores with epocher `E` and no provider epochs.
-fn RetiredActor(comptime E: type) type {
+/// The marshal actor over prunable stores with provider `Prov` and epocher `E`, unbuffered.
+fn EpocherActor(comptime Prov: type, comptime E: type) type {
     const Params = struct {
         pub const Scheme = harness.S;
-        pub const Provider = EmptyProvider;
+        pub const Provider = Prov;
         pub const Epocher = E;
         pub const Strategy = parallel.Sequential;
         pub const ApplicationBlock = B;
@@ -787,6 +809,20 @@ fn RetiredActor(comptime E: type) type {
     return core.Actor(Params);
 }
 
+/// `from` (taken) rebuilt with `epocher` in place of its fixed-length epocher (commonware
+/// `with_epocher`).
+fn with_epocher(comptime To: type, from: anytype, epocher: anytype) To {
+    var config: To = undefined;
+    inline for (@typeInfo(To).@"struct".field_names) |name| {
+        if (comptime std.mem.eql(u8, name, "epocher")) {
+            config.epocher = epocher;
+        } else {
+            @field(config, name) = @field(from, name);
+        }
+    }
+    return config;
+}
+
 fn reproposal_epocher() types.FixedEpocher {
     return .new(utils.NonZero(u64).init(reproposal_epoch_length).?);
 }
@@ -801,7 +837,7 @@ fn restored_floor(
     epocher: E,
     floor: Finalization,
 ) !core.Floor {
-    const A = RetiredActor(E);
+    const A = EpocherActor(EmptyProvider, E);
     const Fixed = Running(EmptyProvider, common.Unbuffered).A;
     var start: Finalization = floor;
     errdefer start.deinit(gpa);
@@ -811,14 +847,7 @@ fn restored_floor(
     var fixed = try common.test_config(Fixed, gpa, prefix, EmptyProvider{}, 1, &stores.cache_ref);
     fixed.start.genesis.deinit();
     fixed.start = .{ .floor = start };
-    var config: A.Config = undefined;
-    inline for (@typeInfo(A.Config).@"struct".field_names) |name| {
-        if (comptime std.mem.eql(u8, name, "epocher")) {
-            config.epocher = epocher;
-        } else {
-            @field(config, name) = @field(fixed, name);
-        }
-    }
+    const config = with_epocher(A.Config, fixed, epocher);
     const initialized = try A.init(ctx, stores.certificates(), stores.blocks_store(), config);
     var mailbox = initialized.mailbox;
     mailbox.deinit();
@@ -1046,7 +1075,7 @@ fn restored_witnessed_round_body(ctx: Ctx) anyerror!void {
         report(&state.run.mailbox, finalization);
     }
     try testing.expectEqual(Height.new(21), state.run.application.acknowledge_next().?);
-    try expect_processed(&state.run.mailbox, 21);
+    try wait_processed(ctx, &state.run.mailbox, 21);
     state.run.crash();
 
     // The archives restore (1, 50) as the newest witnessed round, so the first finalization
@@ -1063,4 +1092,200 @@ fn restored_witnessed_round_body(ctx: Ctx) anyerror!void {
 
 test "standard restored witnessed round prunes cache after restart" {
     try run(restored_witnessed_round_body);
+}
+
+/// The round a height finalizes in, under `epoch_length` epochs: epoch zero at the view of the
+/// same number, later epochs counting views from one.
+fn layout_round(epoch_length: u64, height: Height) Round {
+    const layout: types.FixedEpocher = .new(utils.NonZero(u64).init(epoch_length).?);
+    const info = layout.containing(height).?;
+    const offset = height.get() - info.first.get();
+    const view = if (info.epoch.is_zero()) offset else offset + 1;
+    return .new(info.epoch, .new(view));
+}
+
+/// What `epoch_retention` tracks of the watched epoch's last block.
+const Watch = struct {
+    round: Round,
+    last_kept: ?Round = null,
+    gone: bool = false,
+
+    /// Records whether the watched block is still cached after `round` was processed; once
+    /// gone it must never return.
+    fn observe(self: *Watch, mailbox: anytype, round: Round) !void {
+        var verified = (try mailbox.get_verified(self.round)) orelse {
+            self.gone = true;
+            return;
+        };
+        verified.deinit();
+        try testing.expect(!self.gone);
+        self.last_kept = round;
+    }
+};
+
+/// Verifies `block` (borrowed) at its layout round, finalizes it, and waits until marshal
+/// processes it. Processing a finalization prunes the cache behind the previous one.
+fn retention_step(
+    ctx: Ctx,
+    fixture: *const harness.Fixture,
+    run_state: anytype,
+    round: Round,
+    block: B,
+) !void {
+    const height = block.height();
+    try testing.expect(try run_state.mailbox.verified(round, try ready(block)));
+    const parent_view = round.view.previous().?;
+    const proposal = harness.Proposal.init(round, parent_view, block.digest());
+    var finalization = try harness.make_finalization(gpa, fixture, proposal, harness.quorum);
+    defer finalization.deinit(gpa);
+    report(&run_state.mailbox, finalization);
+    try testing.expectEqual(height, try run_state.application.acknowledged());
+    try wait_processed(ctx, &run_state.mailbox, height.get());
+}
+
+const RetentionParams = struct {
+    epoch_length: u64,
+    view_retention: u64,
+    watched: u64,
+    blocks: u64,
+};
+
+/// Drives a fresh marshal under `epocher` and `params.view_retention` through
+/// `params.blocks` finalized heights laid out in `params.epoch_length` epochs, verifying each
+/// block at its finalization round so the cache holds it. Returns the last processed round
+/// after which the watched epoch's last block was still cached (commonware `epoch_retention`).
+fn epoch_retention(
+    ctx: Ctx,
+    prefix: []const u8,
+    epocher: anytype,
+    params: RetentionParams,
+) !?Round {
+    const A = EpocherActor(harness.Provider, @TypeOf(epocher));
+    const Fixed = Running(harness.Provider, common.Unbuffered).A;
+    var rng = utils.rng.test_rng();
+    var fixture = try harness.fixture(gpa, &rng);
+    defer fixture.deinit(gpa);
+    const provider: harness.Provider = .init(&fixture.schemes[0]);
+    const owned_prefix = try gpa.dupe(u8, prefix);
+    errdefer gpa.free(owned_prefix);
+    const stores = try gpa.create(Prunable);
+    errdefer gpa.destroy(stores);
+    try stores.open(ctx, owned_prefix);
+    errdefer stores.deinit();
+    const fixed = try common.test_config(Fixed, gpa, owned_prefix, provider, 1, &stores.cache_ref);
+    var config = with_epocher(A.Config, fixed, epocher);
+    config.view_retention = .new(params.view_retention);
+    const initialized = try A.init(
+        ctx.child("actor"),
+        stores.certificates(),
+        stores.blocks_store(),
+        config,
+    );
+    const application = try App.manual_ack(gpa, ctx.io());
+    var holding = try common.RecordingResolver.holding(gpa, ctx.io(), &ctx.scope.child("mailbox"));
+    const handle = try initialized.actor.start(
+        application.clone(),
+        .{ .gpa = gpa },
+        holding.receiver,
+        holding.resolver.clone(),
+    );
+    var state: RunningActor(A) = .{
+        .stores = stores,
+        .prefix = owned_prefix,
+        .mailbox = initialized.mailbox,
+        .resolver = holding.resolver,
+        .application = application,
+        .restored = initialized.floor,
+        .handle = handle,
+    };
+    defer state.crash();
+    try testing.expectEqual(Height.zero(), try state.application.acknowledged());
+    return retention_chain(ctx, &fixture, &state, params);
+}
+
+fn retention_chain(
+    ctx: Ctx,
+    fixture: *const harness.Fixture,
+    state: anytype,
+    params: RetentionParams,
+) !?Round {
+    const layout: types.FixedEpocher = .new(utils.NonZero(u64).init(params.epoch_length).?);
+    const boundary = layout.last(.new(params.watched)).?;
+    var watch: Watch = .{ .round = layout_round(params.epoch_length, boundary) };
+    var genesis = try H.genesis_block(gpa, harness.num_validators);
+    defer genesis.deinit();
+    var parent = genesis.digest();
+    for (1..params.blocks + 1) |index| {
+        const height: Height = .new(index);
+        const block = try harness.make_raw_block(gpa, parent, height, index * 100);
+        parent = block.digest();
+        const round = layout_round(params.epoch_length, height);
+        try retention_step(ctx, fixture, state, round, block);
+        if (height.get() < boundary.get()) continue;
+        try watch.observe(&state.mailbox, round);
+    }
+    return watch.last_kept;
+}
+
+fn fixed_epocher(length: u64) types.FixedEpocher {
+    return .new(utils.NonZero(u64).init(length).?);
+}
+
+fn keeps_previous_epoch_body(ctx: Ctx) anyerror!void {
+    // Epoch one spans views 1..=20, so the window of ten views is measurable from its tenth
+    // finalization on, and the next one destroys epoch zero.
+    const epocher = fixed_epocher(harness.blocks_per_epoch);
+    const kept = try epoch_retention(ctx, "cache-keeps-previous-epoch", epocher, .{
+        .epoch_length = harness.blocks_per_epoch,
+        .view_retention = 10,
+        .watched = 0,
+        .blocks = 31,
+    });
+    try testing.expectEqual(Round.new(.new(1), .new(10)), kept.?);
+}
+
+test "standard cache keeps previous epoch through retention window" {
+    try run_timed(keeps_previous_epoch_body, 60);
+}
+
+/// Regression test for https://github.com/commonwarexyz/monorepo/pull/5646: when epochs span
+/// fewer views than the retention window, the window reaches through several of them, one
+/// view per height, and every epoch below the lowest one it reaches is destroyed.
+fn pr_5646_body(ctx: Ctx) anyerror!void {
+    for ([_][2]u64{ .{ 0, 10 }, .{ 1, 11 } }) |case| {
+        var name: [64]u8 = undefined;
+        const prefix = try std.fmt.bufPrint(&name, "cache-retention-short-epochs-{d}", .{case[0]});
+        var label: [16]u8 = undefined;
+        const child = ctx.child(try std.fmt.bufPrint(&label, "watched_{d}", .{case[0]}));
+        const kept = try epoch_retention(child, prefix, fixed_epocher(10), .{
+            .epoch_length = 10,
+            .view_retention = 100,
+            .watched = case[0],
+            .blocks = 125,
+        });
+        try testing.expectEqual(Round.new(.new(case[1]), .new(10)), kept.?);
+    }
+}
+
+test "standard cache retention reaches through short epochs (pr_5646_regression)" {
+    if (builtin.mode == .debug and !build_options.slow_tests) return error.SkipZigTest;
+    try run_timed(pr_5646_body, 60);
+}
+
+fn retired_epochs_once_body(ctx: Ctx) anyerror!void {
+    // The epocher places none of the processed heights. After (8, 3), seven views of the
+    // window remain, covered by epochs seven through one, so the next finalization destroys
+    // epoch zero.
+    const epocher: RetiredThrough = .{ .epocher = fixed_epocher(3), .retired = .new(30) };
+    const kept = try epoch_retention(ctx, "cache-retention-retired-heights", epocher, .{
+        .epoch_length = 3,
+        .view_retention = 10,
+        .watched = 0,
+        .blocks = 30,
+    });
+    try testing.expectEqual(Round.new(.new(8), .new(3)), kept.?);
+}
+
+test "standard cache retention counts retired epochs once" {
+    try run_timed(retired_epochs_once_body, 60);
 }
