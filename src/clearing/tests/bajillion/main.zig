@@ -271,4 +271,5 @@ test {
     _ = @import("payments.zig");
     _ = @import("ledger.zig");
     _ = @import("lifecycle.zig");
+    _ = @import("checker.zig");
 }
