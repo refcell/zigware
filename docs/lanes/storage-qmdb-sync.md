@@ -62,7 +62,9 @@ it comes first once `any` lands.
 - [x] `qmdb_current_{unordered,ordered}_operations` (current/operations_fuzz_test.zig) and
   `qmdb_current_mmb_prune_grow` (current/prune_grow_fuzz_test.zig). Keys come from a
   128-key space or the seeded keys so proofs and deletes hit live keys.
-- [ ] compact/sync.zig against the crypto lane's sync `Database` interface (87cf833).
+- [x] compact/sync.zig: the sync `Database` interface (plus the engine's `open_journal`
+  hook) over `sync.journal.Memory`. `Db.Journal` is now the sync journal; the witness journal
+  is `Db.WitnessJournal`.
 - [ ] Fuzz targets and benches for these modules.
 
 ## Agreement with storage-qmdb (2026-11-16)
@@ -181,3 +183,4 @@ it comes first once `any` lands.
 - 2026-11-18: compact crash-point and tampered-witness tests.
 - 2026-11-18: current batch-root and recovery fuzz targets (planted bugs caught).
 - 2026-11-18: current operations and MMB prune-grow fuzz targets; ordered batch neighbors.
+- 2026-11-18: compact sync `Database` interface.

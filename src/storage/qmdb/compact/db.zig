@@ -19,6 +19,7 @@ const target_mod = @import("../sync/target.zig");
 const diff_mod = @import("../any/diff.zig");
 const witness = @import("witness.zig");
 const op_mod = @import("operation.zig");
+const sync_mod = @import("sync.zig");
 
 const Storage = runtime.storage.Storage;
 
@@ -32,6 +33,9 @@ pub fn Config(comptime F: type, comptime D: type, comptime O: type) type {
     };
 }
 
+/// `Db` declares its own `Config` (the sync interface's name for `Cfg`).
+const ConfigOf = Config;
+
 pub fn Db(comptime F: type, comptime O: type, comptime H: type) type {
     merkle.check_family(F);
     return struct {
@@ -44,8 +48,8 @@ pub fn Db(comptime F: type, comptime O: type, comptime H: type) type {
         pub const Commitment = chain.Commitment(F, Digest);
         pub const Bounds = chain.Bounds(F, Digest);
         pub const Proof = merkle.Proof(F, Digest);
-        pub const Cfg = Config(F, Digest, O);
-        pub const Journal = witness.Journal(F, Digest);
+        pub const Cfg = ConfigOf(F, Digest, O);
+        pub const WitnessJournal = witness.Journal(F, Digest);
         pub const Stored = witness.Stored(F, Digest);
         pub const Witness = witness.Witness(F, Digest, O);
         pub const Verified = witness.Verified(F, Digest, O);
@@ -56,8 +60,23 @@ pub fn Db(comptime F: type, comptime O: type, comptime H: type) type {
         pub const keyed = op_mod.is_keyed(O);
         const Rebuilt = witness.Rebuilt(F, Digest, O);
 
+        // The sync `Database` interface (sync.zig).
+        const SyncImpl = sync_mod.Sync(Self);
+        pub const Op = O;
+        pub const Hasher = H;
+        pub const Config = Cfg;
+        pub const Journal = SyncImpl.Journal;
+        pub const Target = SyncImpl.Target;
+        pub const journal_config = SyncImpl.journal_config;
+        pub const open_journal = SyncImpl.open_journal;
+        pub const from_sync_result = SyncImpl.from_sync_result;
+        pub const persist_sync_result = SyncImpl.persist_sync_result;
+        pub const discard_local_state = SyncImpl.discard_local_state;
+        pub const local_pinned_nodes = SyncImpl.local_pinned_nodes;
+        pub const ops_root = SyncImpl.ops_root;
+
         const Open = struct {
-            journal: Journal,
+            journal: WitnessJournal,
             /// Whether a durability operation covers the tip.
             committed: bool,
         };
@@ -115,7 +134,7 @@ pub fn Db(comptime F: type, comptime O: type, comptime H: type) type {
         /// Selects and rebuilds the witness to open, before any history is discarded.
         fn select(
             gpa: Allocator,
-            recovery: *Journal.RecoveryType,
+            recovery: *WitnessJournal.RecoveryType,
             codec_config: codec.Cfg(O),
             max_size: ?u64,
         ) !Selected {
@@ -232,12 +251,13 @@ pub fn Db(comptime F: type, comptime O: type, comptime H: type) type {
 
         /// The open journal, first replacing the partition's contents with the tip if an
         /// import is pending: a durable reset to position 1, then the tip witness.
-        fn open_journal(self: *Self) !*Open {
+        fn open_witnesses(self: *Self) !*Open {
             switch (self.state) {
                 .open => |*open| return open,
                 .replacing => {},
             }
-            var journal = try Journal.init_at_size(self.gpa, self.storage, self.cfg.witness, 1);
+            const witness_cfg = self.cfg.witness;
+            var journal = try WitnessJournal.init_at_size(self.gpa, self.storage, witness_cfg, 1);
             errdefer journal.deinit();
             try append_witness(self.gpa, &journal, &self.tip.witness);
             self.state = .{ .open = .{ .journal = journal, .committed = false } };
@@ -245,7 +265,7 @@ pub fn Db(comptime F: type, comptime O: type, comptime H: type) type {
             return &self.state.open;
         }
 
-        fn append_witness(gpa: Allocator, journal: *Journal, tip: *const Witness) !void {
+        fn append_witness(gpa: Allocator, journal: *WitnessJournal, tip: *const Witness) !void {
             const stored = try tip.stored(gpa);
             defer gpa.free(stored.commit);
             const before = journal.size();
@@ -285,7 +305,7 @@ pub fn Db(comptime F: type, comptime O: type, comptime H: type) type {
         pub fn apply_batch(self: *Self, batch: *const MerkleizedBatch) !void {
             try self.validate_batch(batch);
             assert(self.tip.size() == self.merkle.leaves());
-            const open = try self.open_journal();
+            const open = try self.open_witnesses();
             try self.merkle.apply_batch(batch.merkle_batch);
             const ops = batch.ops;
             // Only a `to_batch` snapshot has no operations; any other batch ends with a commit.
@@ -306,21 +326,21 @@ pub fn Db(comptime F: type, comptime O: type, comptime H: type) type {
 
         /// Makes the current state durable (journaling a pending import first).
         pub fn commit(self: *Self) !void {
-            const open = try self.open_journal();
+            const open = try self.open_witnesses();
             if (!open.committed) try open.journal.commit();
             open.committed = true;
         }
 
         /// Starts persisting the current state; zigware syncs complete at once.
         pub fn start_sync(self: *Self) !void {
-            const open = try self.open_journal();
+            const open = try self.open_witnesses();
             try open.journal.start_sync();
             open.committed = true;
         }
 
         /// Makes the current state durable, journal metadata included.
         pub fn sync(self: *Self) !void {
-            const open = try self.open_journal();
+            const open = try self.open_witnesses();
             try open.journal.sync();
             open.committed = true;
         }
@@ -328,7 +348,7 @@ pub fn Db(comptime F: type, comptime O: type, comptime H: type) type {
         /// Drops witnesses of commits with fewer than `location` operations (some below it may
         /// survive). The tip's witness always survives. Durable when this returns.
         pub fn prune(self: *Self, location: u64) !void {
-            const open = try self.open_journal();
+            const open = try self.open_witnesses();
             const bounds = open.journal.get_bounds();
             assert(bounds.start < bounds.end); // An open journal holds the tip.
             var found = try first_at_or_above(self.gpa, &open.journal, location);
@@ -351,7 +371,9 @@ pub fn Db(comptime F: type, comptime O: type, comptime H: type) type {
                 .open => |*open| try open.journal.destroy(),
                 // Reset rather than open, so the previous witnesses are never decoded.
                 .replacing => {
-                    var journal = try Journal.init_at_size(gpa, self.storage, self.cfg.witness, 0);
+                    const storage = self.storage;
+                    const witness_cfg = self.cfg.witness;
+                    var journal = try WitnessJournal.init_at_size(gpa, storage, witness_cfg, 0);
                     try journal.destroy();
                 },
             }
@@ -361,7 +383,7 @@ pub fn Db(comptime F: type, comptime O: type, comptime H: type) type {
 
         /// The first retained position whose witness commits at least `size` operations (the
         /// journal end if none does), with that witness, owned by the caller.
-        fn first_at_or_above(gpa: Allocator, journal: *Journal, size_min: u64) !Found {
+        fn first_at_or_above(gpa: Allocator, journal: *WitnessJournal, size_min: u64) !Found {
             const bounds = journal.get_bounds();
             var low = bounds.start;
             var high = bounds.end;

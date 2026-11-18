@@ -202,7 +202,7 @@ fn rewrite_entry(
     position: u64,
     edit: anytype,
 ) !void {
-    var recovery = try Db.Journal.recover(gpa, storage, cfg.witness, null);
+    var recovery = try Db.WitnessJournal.recover(gpa, storage, cfg.witness, null);
     const end = recovery.get_bounds().end;
     var entries: std.ArrayList(Db.Stored) = .empty;
     defer {
