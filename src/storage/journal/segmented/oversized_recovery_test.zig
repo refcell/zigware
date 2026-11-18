@@ -348,3 +348,93 @@ test "oversized recovery: values ahead of the index are released and reused" {
     try testing.expectError(error.ItemOutOfRange, journal.get(1, 5));
     try journal.destroy();
 }
+
+/// Durably resize the index blob of `section` to `length` bytes.
+fn resize_index(h: *Harness, section: u64, length: u64) !void {
+    const opened = try h.storage.open("test-index", &manager_mod.section_name(section));
+    defer opened.blob.close();
+    try opened.blob.resize(length);
+    try opened.blob.sync();
+}
+
+/// One physical index page of a one-entry-per-page harness.
+const entry_page: u64 = base.TestEntry.fixed_size + 12;
+
+test "oversized recovery: partial index entry" {
+    var h = try Harness.init();
+    defer h.deinit();
+    var journal = try h.open_tracked();
+    for (0..3) |i| _ = try append(&journal, 1, i, fill(i));
+    try journal.sync(&.{1});
+    journal.deinit();
+    // commonware's sizes: three 24-byte entries plus 10 bytes of a partial one.
+    try resize_index(&h, 1, 3 * 24 + 10);
+    journal = try h.open_tracked();
+    for (0..3) |i| try testing.expectEqual(i, (try journal.get(1, i)).id);
+    try testing.expectError(error.ItemOutOfRange, journal.get(1, 3));
+    try expect_append_at(&journal, 1, 3);
+    try journal.destroy();
+}
+
+test "oversized recovery: only a partial index entry" {
+    var h = try Harness.init();
+    defer h.deinit();
+    var journal = try h.open_tracked();
+    _ = try append(&journal, 1, 1, fill(42));
+    try journal.sync(&.{1});
+    journal.deinit();
+    // Less than one entry remains.
+    try resize_index(&h, 1, 10);
+    journal = try h.open_tracked();
+    try testing.expectError(error.ItemOutOfRange, journal.get(1, 0));
+    try expect_append_at(&journal, 1, 0);
+    try journal.destroy();
+}
+
+test "oversized recovery: crash with the index truncated ahead of the values" {
+    var h = try Harness.init_page(@intCast(base.TestEntry.fixed_size));
+    defer h.deinit();
+    var journal = try h.open_tracked();
+    for (0..5) |i| _ = try append(&journal, 1, i, fill(i));
+    try journal.sync(&.{1});
+    journal.deinit();
+    // Keep two index entries and leave the values intact.
+    try resize_index(&h, 1, 2 * entry_page);
+    journal = try h.open_tracked();
+    for (0..2) |i| try testing.expectEqual(i, (try journal.get(1, i)).id);
+    try testing.expectError(error.ItemOutOfRange, journal.get(1, 2));
+    try expect_append_at(&journal, 1, 2);
+    try journal.destroy();
+}
+
+test "oversized recovery: crash with the values truncated ahead of the index" {
+    var h = try Harness.init();
+    defer h.deinit();
+    var journal = try h.open_tracked();
+    var located: [5]Located = undefined;
+    for (&located, 0..) |*slot, i| slot.* = try append(&journal, 1, i, fill(i));
+    try journal.sync(&.{1});
+    journal.deinit();
+    // Keep two values and leave the index intact.
+    try resize_values(&h, 1, byte_end(located[1]));
+    journal = try h.open_tracked();
+    for (0..2) |i| try testing.expectEqual(i, (try journal.get(1, i)).id);
+    try testing.expectError(error.ItemOutOfRange, journal.get(1, 2));
+    try expect_append_at(&journal, 1, 2);
+    try journal.destroy();
+}
+
+test "oversized recovery: reading a value with a short size fails" {
+    var h = try Harness.init();
+    defer h.deinit();
+    var journal = try h.open_checkpoint(.{ .section = 0, .size = 0 });
+    defer journal.deinit();
+    const located = try append(&journal, 1, 1, fill(42));
+    // Sizes 0 through 3 cannot even hold the checksum; one byte short fails to verify.
+    for ([_]u32{ 0, 1, 2, 3, located.size - 1 }) |size| {
+        if (journal.get_value(1, located.offset, size)) |_| {
+            return error.TestUnexpectedResult;
+        } else |_| {}
+    }
+    try expect_value(&journal, 1, located, fill(42));
+}
