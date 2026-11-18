@@ -67,3 +67,7 @@ fn decode_canonical(_: void, smith: *Smith) anyerror!void {
 test "fuzz p2p types decode canonical" {
     try run({}, decode_canonical, 0x7032707479706573, 4000);
 }
+
+test {
+    _ = @import("fuzz/simulated.zig");
+}

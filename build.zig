@@ -70,8 +70,8 @@ const packages = [_]Package{
         "runtime", "conformance",  "invariants",
     } },
     .{ .name = "p2p", .deps = &.{
-        "actor",       "codec", "cryptography", "math", "parallel", "runtime", "stream", "utils",
-        "conformance",
+        "actor",   "codec",  "cryptography", "math",        "parallel",
+        "runtime", "stream", "utils",        "conformance", "invariants",
     } },
     .{ .name = "broadcast", .deps = &.{
         "actor", "codec", "cryptography", "p2p", "parallel", "runtime", "utils", "invariants",

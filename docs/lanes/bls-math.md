@@ -55,7 +55,8 @@ variants (MinPk, MinSig) must match exactly.
   `src/cryptography/benches/{hashes,signatures,primitives}.zig`: blake3, sha256, sha512,
   ed25519, secp256r1, bloomfilter, chacha20_poly1305, lthash, sake, and bulletproofs ipa, with
   commonware's names and cases.
-- [ ] p2p fuzz targets (commonware p2p/fuzz: discovery, lookup, simulated), taken over from p2p.
+- [ ] p2p fuzz targets (commonware p2p/fuzz), taken over from p2p: simulated done
+  (`src/p2p/fuzz/simulated.zig`); discovery and lookup next.
 - [x] Check marshal's and aggregation's threshold paths against the simplex VRF scheme:
   aggregation's matched; marshal limits gained commonware's two VRF fixture cases.
 
@@ -70,6 +71,11 @@ variants (MinPk, MinSig) must match exactly.
   does not split a message); `bulletproofs::ipa::verify`'s `conc=8` rows time the same
   sequential `eval`. Inputs commonware rebuilds per iteration are reset in `before_iter` or
   built once when no iteration changes them. Smoke runs use the first case of each list.
+- p2p fuzz: inputs decode from `Unstructured` as commonware's `Arbitrary` derive does, and
+  the coverage-guided target runs commonware's decoder unchanged. The seeded minifuzz run
+  first `densify`s the input (at most four peers, two channels, every channel registered,
+  every pair linked reliably, short messages), since uniform draws almost never line up a
+  send and a receive; a planted payload corruption fails it at a replayable branch.
 - p2p utils mux: the routing table is shared under a mutex instead of commonware's control
   channel, so `register` and a released `SubReceiver` update it directly; the muxer stops
   once every handle and subchannel receiver is released, or when the wrapped receiver fails.
