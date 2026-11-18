@@ -16,3 +16,7 @@ pub const Buffer = buffer.Buffer;
 test {
     std.testing.refAllDecls(@This());
 }
+
+test {
+    _ = @import("tests/restart.zig");
+}

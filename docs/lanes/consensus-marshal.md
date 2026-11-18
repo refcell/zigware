@@ -312,3 +312,6 @@ ports its range's tests and the helpers defined in it, into
   restart tests wait for the harness.
 - 2026-11-16: marshal harness (shared parts, StandardHarness) and `standard.Buffer`; posted
   the standard/mod.rs test split.
+- 2026-11-18: standard/mod.rs restart tests (trailing, internal, multiple trailing, large
+  pending tip, surfaces unfinalized block, stores late finalization, consistent no-op, local
+  cache repair) with the seed helpers; fixed a finalization leak in `repair_trailing`.
