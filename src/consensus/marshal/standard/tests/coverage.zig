@@ -6,6 +6,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const build_options = @import("build_options");
 const testing = std.testing;
+const Io = std.Io;
 const runtime = @import("runtime");
 const utils = @import("utils");
 const parallel = @import("parallel");
@@ -1463,4 +1464,609 @@ fn floor_below_processed_open_epoch_body(ctx: Ctx) anyerror!void {
 
 test "standard floor applied below processed in open epoch survives restart before ack" {
     try run(floor_below_processed_open_epoch_body);
+}
+
+// Pipelined handoff (commonware `pipeline_handoff`): only the victim runs marshal and
+// consensus; the peer supplies votes and certificates.
+
+const simplex = @import("../../../simplex/root.zig");
+const simplex_types = @import("../../../simplex/types.zig");
+const traits = @import("../../../traits.zig");
+const broadcast = @import("broadcast");
+const actor_api = @import("actor");
+const oneshot = utils.channel.oneshot;
+const ConsensusContext = harness.Ctx;
+const Net = harness.Network;
+const Vote = simplex_types.Vote(harness.S, harness.D);
+const Certificate = simplex_types.Certificate(harness.S, harness.D);
+
+/// The outcome of the concurrent handoff build and parent certification.
+const Pipeline = enum {
+    /// The parent certifies while the handoff build is still running.
+    certification,
+    /// The handoff build completes while the parent is still uncertified.
+    build,
+    /// The completed handoff is abandoned and a replacement finalizes.
+    abandon,
+};
+
+/// The victim application's test-controlled gates: its first verification (the parent's)
+/// and its single handoff build each wait on one.
+const PipelineGates = struct {
+    verify_started: ?oneshot.Sender(void),
+    verify_release: ?oneshot.Receiver(void),
+    build_started: ?oneshot.Sender(ConsensusContext),
+    build_release: ?oneshot.Receiver(void),
+    build_completed: ?oneshot.Sender(void),
+    /// How often a prepare request reached the application.
+    prepares: u64 = 0,
+    block: B,
+};
+
+/// A second build request panics: the retained handoff must never be rebuilt.
+const PipelineApp = struct {
+    gates: *PipelineGates,
+
+    pub fn clone(self: PipelineApp) PipelineApp {
+        return self;
+    }
+
+    pub fn deinit(_: *PipelineApp) void {}
+
+    pub fn prepare(
+        self: *PipelineApp,
+        ctx: Ctx,
+        context: ConsensusContext,
+        ancestry: anytype,
+    ) anyerror!traits.Handoff(broadcast.Digested(B)) {
+        self.gates.prepares += 1;
+        const built = try self.propose(ctx, context, ancestry) orelse return .wait;
+        return .{ .stage = built };
+    }
+
+    pub fn propose(
+        self: *PipelineApp,
+        _: Ctx,
+        context: ConsensusContext,
+        ancestry: anytype,
+    ) anyerror!?broadcast.Digested(B) {
+        var owned = ancestry;
+        owned.deinit();
+        var started = self.gates.build_started orelse
+            @panic("the retained handoff must not be replaced by an ordinary build");
+        self.gates.build_started = null;
+        started.send(context) catch {};
+        var release = self.gates.build_release.?;
+        self.gates.build_release = null;
+        defer release.deinit();
+        try release.recv();
+        var completed = self.gates.build_completed.?;
+        self.gates.build_completed = null;
+        completed.send({}) catch {};
+        return try ready(self.gates.block);
+    }
+
+    pub fn verify(
+        self: *PipelineApp,
+        _: Ctx,
+        _: ConsensusContext,
+        ancestry: anytype,
+    ) anyerror!bool {
+        var owned = ancestry;
+        owned.deinit();
+        var started = self.gates.verify_started orelse return true;
+        self.gates.verify_started = null;
+        var release = self.gates.verify_release.?;
+        self.gates.verify_release = null;
+        defer release.deinit();
+        started.send({}) catch {};
+        try release.recv();
+        return true;
+    }
+};
+
+const Wrapper = @import("../deferred.zig").Deferred(
+    Ctx,
+    harness.S,
+    PipelineApp,
+    B,
+    types.FixedEpocher,
+);
+
+/// The wrapper as the engine's automaton, relay, and reporter. Its calls can fail with
+/// allocation or spawn errors that consensus's traits do not carry; commonware aborts on
+/// those, so the adapter panics.
+const Adapter = struct {
+    pub const Context = Wrapper.Context;
+    pub const Digest = Wrapper.Digest;
+    pub const PublicKey = Wrapper.PublicKey;
+    pub const Plan = Wrapper.Plan;
+    pub const Activity = Wrapper.Activity;
+
+    wrapper: *Wrapper,
+
+    fn abort(err: anyerror) Io.Cancelable {
+        if (err == error.Canceled) return error.Canceled;
+        std.debug.panic("wrapper failed: {t}", .{err});
+    }
+
+    pub fn propose(self: *Adapter, io: Io, context: Context) Io.Cancelable!?Digest {
+        return self.wrapper.propose(io, context) catch |err| return abort(err);
+    }
+
+    pub fn verify(self: *Adapter, io: Io, context: Context, digest: Digest) Io.Cancelable!?bool {
+        return self.wrapper.verify(io, context, digest) catch |err| return abort(err);
+    }
+
+    pub fn prepare(self: *Adapter, io: Io, context: Context) Io.Cancelable!?traits.Handoff(Digest) {
+        return self.wrapper.prepare(io, context) catch |err| return abort(err);
+    }
+
+    pub fn certify(self: *Adapter, io: Io, round: Round, digest: Digest) Io.Cancelable!?bool {
+        return self.wrapper.certify(io, round, digest) catch |err| return abort(err);
+    }
+
+    pub fn broadcast(self: *Adapter, commitment: Digest, plan: Plan) actor_api.Feedback {
+        return self.wrapper.broadcast(commitment, plan);
+    }
+
+    pub fn report(self: *Adapter, activity: Activity) actor_api.Feedback {
+        return self.wrapper.report(activity);
+    }
+};
+
+const EngineParams = struct {
+    pub const Context = Ctx;
+    pub const Scheme = harness.S;
+    pub const Elector = simplex.elector.RoundRobinElector;
+    pub const Blocker = Net.Control;
+    pub const Digest = harness.D;
+    pub const Automaton = *Adapter;
+    pub const Relay = *Adapter;
+    pub const Reporter = *Adapter;
+    pub const Strategy = parallel.Sequential;
+    pub const Sender = Net.Sender;
+    pub const Receiver = Net.Receiver;
+};
+const Engine = simplex.engine.Engine(EngineParams);
+const Channel = simplex.engine.Channel(EngineParams);
+const PipelineValidator = H.Validator(App);
+
+/// The test's halves of a gate: the receiver it waits on, or the sender it releases with.
+const Gates = struct {
+    verify_started: oneshot.Receiver(void),
+    verify_release: oneshot.Sender(void),
+    build_started: oneshot.Receiver(ConsensusContext),
+    build_release: oneshot.Sender(void),
+    build_completed: oneshot.Receiver(void),
+};
+
+fn context_at(view: u64, leader: harness.K, parent_view: u64, parent: harness.D) ConsensusContext {
+    return .{
+        .round = .new(.zero(), .new(view)),
+        .leader = leader,
+        .parent = .{ .new(parent_view), parent },
+    };
+}
+
+/// A raw block for `context` over `parent`, built and digested.
+fn block_for(context: ConsensusContext, parent: harness.D, height: u64, timestamp: u64) !B {
+    return B.init(gpa, context, parent, .new(height), timestamp);
+}
+
+/// The victim's marshal, engine, and gated application, and the peer's channels. Must not
+/// move once initialized.
+const PipelineRun = struct {
+    fixture: harness.Fixture,
+    network: harness.TestNetwork,
+    /// The test's handle on the victim's reporter (the validator holds a clone).
+    reporter: App,
+    validator: *PipelineValidator,
+    floor: Finalization,
+    parent: harness.Proposal,
+    round: Round,
+    expected: ConsensusContext,
+    app_gates: PipelineGates,
+    gates: Gates,
+    wrapper: *Wrapper,
+    adapter: Adapter,
+    elector: simplex.elector.RoundRobinElector,
+    page_cache: runtime.buffer.paged.CacheRef,
+    engine: Engine,
+    handle: ?runtime.context.Handle(Engine.RunResult),
+    vote: Channel,
+    certificate: Channel,
+    resolver_channel: Channel,
+
+    fn victim(self: *const PipelineRun) harness.K {
+        return self.fixture.participants[3];
+    }
+
+    /// Verifies and finalizes view 1 in marshal so the engine starts from it as its floor,
+    /// and caches the peer's view 2 block in the victim's buffer without sending it.
+    fn init_marshal(self: *PipelineRun, ctx: Ctx) !void {
+        var rng = utils.rng.test_rng();
+        self.fixture = try harness.fixture(gpa, &rng);
+        const participants = self.fixture.participants;
+        self.network = try .start(gpa, ctx.io(), 1, participants, 1024 * 1024);
+        self.reporter = try App.init(gpa, ctx.io());
+        const provider: harness.Provider = .init(&self.fixture.schemes[3]);
+        self.validator = try PipelineValidator.setup(
+            ctx.child("marshal"),
+            self.network.network,
+            self.victim(),
+            provider,
+            1,
+            self.reporter.clone(),
+        );
+        var genesis = try H.genesis_block(gpa, harness.num_validators);
+        defer genesis.deinit();
+        const floor_round: Round = .new(.zero(), .new(1));
+        const floor_block = try block_for(
+            context_at(1, participants[1], 0, genesis.digest()),
+            genesis.digest(),
+            1,
+            100,
+        );
+        try testing.expect(
+            try self.validator.mailbox.verified(floor_round, try ready(floor_block)),
+        );
+        const floor_proposal = harness.Proposal.init(floor_round, .zero(), floor_block.digest());
+        self.floor = try harness.make_finalization(
+            gpa,
+            &self.fixture,
+            floor_proposal,
+            harness.quorum,
+        );
+        report(&self.validator.mailbox, self.floor);
+        const parent_context = context_at(2, participants[2], 1, floor_block.digest());
+        const parent_block = try block_for(parent_context, floor_block.digest(), 2, 200);
+        _ = try self.validator.extra.mailbox.broadcast(.{ .some = &.{} }, try ready(parent_block));
+        self.parent = .init(.new(.zero(), .new(2)), .new(1), parent_block.digest());
+        // The victim leads view 3, and its handoff candidate builds on the parent.
+        self.round = .new(.zero(), .new(3));
+        self.expected = context_at(3, self.victim(), 2, parent_block.digest());
+        const block = try block_for(self.expected, parent_block.digest(), 3, 300);
+        self.app_gates = .{
+            .verify_started = null,
+            .verify_release = null,
+            .build_started = null,
+            .build_release = null,
+            .build_completed = null,
+            .block = block,
+        };
+    }
+
+    fn init_gates(self: *PipelineRun, ctx: Ctx) !void {
+        const io = ctx.io();
+        const verify_started = try oneshot.channel(void, gpa, io);
+        const verify_release = try oneshot.channel(void, gpa, io);
+        const build_started = try oneshot.channel(ConsensusContext, gpa, io);
+        const build_release = try oneshot.channel(void, gpa, io);
+        const build_completed = try oneshot.channel(void, gpa, io);
+        self.app_gates.verify_started = verify_started.sender;
+        self.app_gates.verify_release = verify_release.receiver;
+        self.app_gates.build_started = build_started.sender;
+        self.app_gates.build_release = build_release.receiver;
+        self.app_gates.build_completed = build_completed.sender;
+        self.gates = .{
+            .verify_started = verify_started.receiver,
+            .verify_release = verify_release.sender,
+            .build_started = build_started.receiver,
+            .build_release = build_release.sender,
+            .build_completed = build_completed.receiver,
+        };
+    }
+
+    fn register(control: Net.Control, channel: u64) !Channel {
+        const registered = try control.register(channel, harness.test_quota);
+        return .{ .sender = registered.sender, .receiver = registered.receiver };
+    }
+
+    /// Registers the victim's engine channels and the peer's, links every participant, and
+    /// runs the engine from the finalized floor with the gated application behind Deferred.
+    fn init_engine(self: *PipelineRun, ctx: Ctx, partition: []const u8) !void {
+        const oracle = self.network.network.oracle();
+        const victim_control = oracle.control(self.victim());
+        const votes = try register(victim_control, 3);
+        const certificates = try register(victim_control, 4);
+        const backfill = try register(victim_control, 5);
+        const peer_control = oracle.control(self.fixture.participants[2]);
+        self.vote = try register(peer_control, 3);
+        self.certificate = try register(peer_control, 4);
+        self.resolver_channel = try register(peer_control, 5);
+        try self.network.link_all(self.fixture.participants, harness.link);
+        const app: PipelineApp = .{ .gates = &self.app_gates };
+        const epocher: types.FixedEpocher = .new(
+            utils.NonZero(u64).init(harness.blocks_per_epoch).?,
+        );
+        self.wrapper = try Wrapper.create(
+            ctx.child("wrapper"),
+            app,
+            self.validator.mailbox.clone(),
+            epocher,
+        );
+        self.adapter = .{ .wrapper = self.wrapper };
+        self.elector = try simplex.elector.RoundRobin(cryptography.Sha256).default().build(
+            gpa,
+            harness.num_validators,
+        );
+        self.page_cache = try .init(gpa, harness.page_size, harness.page_cache_size);
+        try self.engine.init(ctx.child("simplex"), .{
+            .scheme = self.fixture.schemes[3],
+            .elector = self.elector,
+            .blocker = victim_control,
+            .automaton = &self.adapter,
+            .relay = &self.adapter,
+            .reporter = &self.adapter,
+            .track_historical_votes = false,
+            .strategy = parallel.sequential,
+            .partition = partition,
+            .mailbox_size = 128,
+            .epoch = .zero(),
+            .floor = .{ .finalized = try self.floor.clone(gpa) },
+            .replay_buffer = 1024,
+            .write_buffer = 1024,
+            .page_cache = &self.page_cache,
+            .leader_timeout = .from_secs(10),
+            .certification_timeout = .from_secs(15),
+            .timeout_retry = .from_secs(3),
+            .view_retention = .new(10),
+            .skip = .{ .enabled = .{ .timeout = .from_secs(20) } },
+            .fetch_timeout = .from_secs(1),
+            .fetch_retry_delay = .from_millis(100),
+            .forward = .disabled,
+        });
+        self.handle = try ctx.child("engine").spawn(
+            Engine.run,
+            .{ &self.engine, votes, certificates, backfill },
+        );
+    }
+
+    fn abort_engine(self: *PipelineRun) void {
+        const handle = self.handle orelse return;
+        self.handle = null;
+        const result = handle.abort() catch return;
+        result catch |err| std.debug.panic("engine failed: {t}", .{err});
+    }
+
+    fn deinit(self: *PipelineRun) void {
+        self.abort_engine();
+        self.engine.deinit();
+        self.wrapper.destroy();
+        // `send` released the test's senders; receivers and untaken app halves remain.
+        self.gates.verify_started.deinit();
+        self.gates.build_started.deinit();
+        self.gates.build_completed.deinit();
+        const app = &self.app_gates;
+        if (app.verify_started) |*sender| sender.deinit();
+        if (app.verify_release) |*receiver| receiver.deinit();
+        if (app.build_started) |*sender| sender.deinit();
+        if (app.build_release) |*receiver| receiver.deinit();
+        if (app.build_completed) |*sender| sender.deinit();
+        for ([_]*Channel{ &self.vote, &self.certificate, &self.resolver_channel }) |channel| {
+            channel.sender.deinit();
+            channel.receiver.deinit();
+        }
+        self.elector.deinit(gpa);
+        self.page_cache.deinit();
+        self.validator.crash();
+        self.reporter.deinit();
+        self.floor.deinit(gpa);
+        self.network.stop();
+        self.fixture.deinit(gpa);
+    }
+
+    /// Sends `value` (borrowed) to the victim on the peer's `channel`.
+    fn send(self: *PipelineRun, channel: *Channel, comptime T: type, value: T) !void {
+        const bytes = try codec.encode(T, gpa, value);
+        defer gpa.free(bytes);
+        const reached = try channel.sender.send(.{ .one = self.victim() }, &.{bytes}, true);
+        gpa.free(reached);
+    }
+
+    /// The next vote the victim sends the peer.
+    fn next_vote(self: *PipelineRun) !Vote {
+        var message = try self.vote.receiver.recv();
+        defer message.deinit();
+        try testing.expect(message.peer.eql(self.victim()));
+        return codec.decode(Vote, gpa, message.payload);
+    }
+
+    /// Waits for the victim's next vote of `kind` at `round`, discarding others.
+    fn vote_at(self: *PipelineRun, comptime kind: std.meta.Tag(Vote), round: Round) !@FieldType(
+        Vote,
+        @tagName(kind),
+    ) {
+        while (true) {
+            const vote = try self.next_vote();
+            if (vote != kind) continue;
+            const value = @field(vote, @tagName(kind));
+            if (std.meta.eql(value.proposal.round, round)) return value;
+        }
+    }
+};
+
+/// Starts parent verification before delivering its notarization, then waits for the handoff
+/// build to start under the expected context.
+fn pipeline_start(r: *PipelineRun) !void {
+    const Notarize = simplex_types.Notarize(harness.S, harness.D);
+    const notarize = (try Notarize.sign(gpa, &r.fixture.schemes[2], r.parent)).?;
+    try r.send(&r.vote, Vote, .{ .notarize = notarize });
+    try r.gates.verify_started.recv();
+    var notarization = try harness.make_notarization(gpa, &r.fixture, r.parent, harness.quorum);
+    defer notarization.deinit(gpa);
+    try r.send(&r.certificate, Certificate, .{ .notarization = notarization });
+    const built = try r.gates.build_started.recv();
+    try testing.expect(std.meta.eql(built, r.expected));
+}
+
+fn release_build(r: *PipelineRun) !void {
+    r.gates.build_release.send({}) catch {};
+    try r.gates.build_completed.recv();
+}
+
+fn pipeline_certification(r: *PipelineRun) !void {
+    r.gates.verify_release.send({}) catch {};
+    const finalize = try r.vote_at(.finalize, r.parent.round);
+    try testing.expect(std.meta.eql(finalize.proposal, r.parent));
+    try release_build(r);
+}
+
+fn pipeline_build(ctx: Ctx, r: *PipelineRun) !void {
+    try release_build(r);
+    // Keep the parent uncertified for three link delays so the peer receives any vote cast
+    // when the build completes.
+    const latency_ms = harness.link.latency.as_millis_u64();
+    const start = ctx.current();
+    while (start.durationTo(ctx.current()).toMilliseconds() < 3 * latency_ms) {
+        if (r.vote.receiver.try_recv()) |received| {
+            var message = received;
+            defer message.deinit();
+            const vote = try codec.decode(Vote, gpa, message.payload);
+            // A staged handoff must not vote before parent certification.
+            try testing.expect(vote.view().get() != r.round.view.get());
+        } else |_| try ctx.sleep(.fromMilliseconds(1));
+    }
+    // The completed candidate stays staged until its parent certifies.
+    try testing.expect(!try has_verified(&r.validator.mailbox, r.round));
+    r.gates.verify_release.send({}) catch {};
+}
+
+fn has_verified(mailbox: anytype, round: Round) !bool {
+    var block = (try mailbox.get_verified(round)) orelse return false;
+    block.deinit();
+    return true;
+}
+
+/// The handoff votes only after its parent certifies, and finalizes.
+fn pipeline_votes(r: *PipelineRun) !void {
+    // One handoff request reaches the application once.
+    try testing.expectEqual(1, r.app_gates.prepares);
+    const notarize = try r.vote_at(.notarize, r.round);
+    const expected = harness.Proposal.init(r.round, .new(2), r.app_gates.block.digest());
+    try testing.expect(std.meta.eql(notarize.proposal, expected));
+    try testing.expect(try has_verified(&r.validator.mailbox, r.round));
+    var notarization = try harness.make_notarization(gpa, &r.fixture, expected, harness.quorum);
+    defer notarization.deinit(gpa);
+    try r.send(&r.certificate, Certificate, .{ .notarization = notarization });
+    const finalize = try r.vote_at(.finalize, r.round);
+    try testing.expect(std.meta.eql(finalize.proposal, expected));
+}
+
+fn running_prepares(ctx: Ctx) !u64 {
+    const text = try ctx.encode(gpa);
+    defer gpa.free(text);
+    return runtime.telemetry.metrics.task.count_running_tasks(text, "wrapper_prepare");
+}
+
+fn abandoned_on_view_exit(ctx: Ctx) !bool {
+    const text = try ctx.encode(gpa);
+    defer gpa.free(text);
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |line| {
+        if (std.mem.indexOf(u8, line, "handoff_abandoned_total{") == null) continue;
+        if (std.mem.indexOf(u8, line, "reason=\"ViewExit\"") == null) continue;
+        const space = std.mem.lastIndexOfScalar(u8, line, ' ') orelse continue;
+        const count = std.fmt.parseInt(u64, line[space + 1 ..], 10) catch continue;
+        if (count > 0) return true;
+    }
+    return false;
+}
+
+/// The other three validators time out view 3 while this node still verifies view 2; none
+/// voted for the held candidate.
+fn nullify_round(r: *PipelineRun) !void {
+    const Nullify = simplex_types.Nullify(harness.S);
+    const Nullification = simplex_types.Nullification(harness.S);
+    var votes: [harness.quorum]Nullify = undefined;
+    for (&votes, r.fixture.schemes[0..harness.quorum]) |*vote, *scheme| {
+        vote.* = (try Nullify.sign(gpa, scheme, r.round)).?;
+    }
+    const scheme = &r.fixture.schemes[0];
+    var nullification = try Nullification.from_votes(gpa, scheme, &votes, parallel.sequential);
+    defer nullification.deinit(gpa);
+    try r.send(&r.certificate, Certificate, .{ .nullification = nullification });
+}
+
+fn pipeline_abandon(ctx: Ctx, r: *PipelineRun) !void {
+    try release_build(r);
+    // The block exists in the buffer only after the real early relay ran.
+    const digest = r.app_gates.block.digest();
+    var buffer = r.validator.extra;
+    var relayed = (try buffer.subscribe_by_digest(digest)).?;
+    var block = try relayed.recv();
+    relayed.deinit();
+    try testing.expect(block.digest().eql(digest));
+    block.deinit();
+    try testing.expect(!try has_verified(&r.validator.mailbox, r.round));
+    try testing.expectEqual(1, try running_prepares(ctx));
+    try nullify_round(r);
+    while (!try abandoned_on_view_exit(ctx)) try ctx.sleep(.fromMilliseconds(1));
+    try finalize_replacement(ctx, r);
+    try testing.expect(!try has_verified(&r.validator.mailbox, r.round));
+    try testing.expectEqual(1, r.app_gates.prepares);
+    // Retire the engine as the orchestrator would, while its wrapper stays alive.
+    r.gates.verify_release.send({}) catch {};
+    r.abort_engine();
+    while (try running_prepares(ctx) != 0) try ctx.sleep(.fromMilliseconds(1));
+}
+
+/// The replacement extends the same parent at view 4. Its quorum excludes this node, whose
+/// application verification is still pending.
+fn finalize_replacement(ctx: Ctx, r: *PipelineRun) !void {
+    const leader = r.fixture.participants[0];
+    const parent = r.parent.payload;
+    const replacement = try block_for(context_at(4, leader, 2, parent), parent, 3, 400);
+    const digest = replacement.digest();
+    _ = try r.validator.extra.mailbox.broadcast(.{ .some = &.{} }, try ready(replacement));
+    const proposal = harness.Proposal.init(.new(.zero(), .new(4)), .new(2), digest);
+    var finalization = try harness.make_finalization(gpa, &r.fixture, proposal, harness.quorum);
+    defer finalization.deinit(gpa);
+    try r.send(&r.certificate, Certificate, .{ .finalization = finalization });
+    while (true) {
+        const tip = r.reporter.tip();
+        if (tip != null and tip.?.height.get() == 3 and tip.?.digest.eql(digest)) break;
+        try ctx.sleep(.fromMilliseconds(1));
+    }
+}
+
+fn pipeline_handoff(ctx: Ctx, comptime outcome: Pipeline) !void {
+    var r: PipelineRun = undefined;
+    r.handle = null;
+    try r.init_marshal(ctx);
+    try r.init_gates(ctx);
+    try r.init_engine(ctx, "pipeline-" ++ @tagName(outcome));
+    defer r.deinit();
+    try pipeline_start(&r);
+    switch (outcome) {
+        .abandon => return pipeline_abandon(ctx, &r),
+        .certification => try pipeline_certification(&r),
+        .build => try pipeline_build(ctx, &r),
+    }
+    try pipeline_votes(&r);
+}
+
+fn pipeline_build_body(ctx: Ctx) anyerror!void {
+    try pipeline_handoff(ctx, .build);
+}
+
+fn pipeline_certification_body(ctx: Ctx) anyerror!void {
+    try pipeline_handoff(ctx, .certification);
+}
+
+fn pipeline_abandon_body(ctx: Ctx) anyerror!void {
+    try pipeline_handoff(ctx, .abandon);
+}
+
+test "pipelined handoff retains completed build until parent certification" {
+    try run(pipeline_build_body);
+}
+
+test "pipelined handoff retains build across parent certification" {
+    try run(pipeline_certification_body);
+}
+
+test "pipelined handoff releases abandoned build after finalization" {
+    try run(pipeline_abandon_body);
 }
