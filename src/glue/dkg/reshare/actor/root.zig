@@ -11,10 +11,12 @@ pub const assert_types = actor.assert_types;
 pub const artifact = @import("artifact.zig");
 pub const dealing = @import("dealing.zig");
 pub const inclusion = @import("inclusion.zig");
+pub const inclusion_window = @import("inclusion_window.zig");
 pub const setup = @import("setup.zig");
 
 test {
     @import("std").testing.refAllDecls(@This());
     _ = @import("dealing_test.zig");
     _ = @import("artifact_test.zig");
+    _ = @import("inclusion_window_test.zig");
 }

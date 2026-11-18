@@ -360,6 +360,9 @@ Owns `src/glue/dkg`. Reference: `glue/src/dkg` (about 24k Rust lines).
 - Inclusion's dealer-log verification (commonware's spawned `VerificationTask`) runs on the
   caller's task in `artifact.Artifacts(T).verify`; the window decides when to call it.
   Invalid local state, mismatched directories, and a missing final payload are errors.
+- The inclusion window races the mailbox, a scan of a fresh copy of the scanned request's
+  ancestry, and that requester leaving (`Sender.closed`) with `Io.Select`, mailbox first.
+  A scan that loses the race restarts next iteration; a finalized block marks it stale.
 
 ### Backlog
 - [x] types (with conformance hashes), limits, fence, network.
@@ -374,8 +377,11 @@ Owns `src/glue/dkg`. Reference: `glue/src/dkg` (about 24k Rust lines).
 - [x] reshare actor: the dealing window with dealing.rs's 2 tests.
 - [x] reshare actor: inclusion's artifact derivation (verify, derive, commit_final,
   observe_dealer_log) with 3 of its artifact tests.
-- [ ] reshare actor: `finalization_error_panics` (InvalidLocalState); the inclusion window
-  loop and its tests; the dkg window; the run loop; application.
+- [x] reshare actor: the inclusion window loop with `redelivered_receipts_survive_phase_
+  changes` and `pr_5263_regression`.
+- [ ] reshare actor: inclusion's remaining window tests (gated and stalled ancestry, scan
+  yielding to finalization, closed verification) and `finalization_error_panics`; the dkg
+  window; the run loop; application.
 - [ ] bootstrap, probe (wire with conformance, discovery, service), orchestrator.
 - [ ] tests: the dkg and reshare harnesses, properties, and mocks; lookup's peer-activation
   test.
@@ -394,3 +400,5 @@ Owns `src/glue/dkg`. Reference: `glue/src/dkg` (about 24k Rust lines).
 - 2026-11-18: the dealing window; both of dealing.rs's tests catch a planted bug.
 - 2026-11-18: inclusion's artifact derivation; its 3 tests catch planted outcome and share
   bugs.
+- 2026-11-18: the inclusion window loop; its 2 tests catch a late scan start and a lost
+  redelivery acknowledgement.
