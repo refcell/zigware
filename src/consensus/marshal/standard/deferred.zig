@@ -674,4 +674,5 @@ fn DeferredOver(comptime T: [5]type) type {
 
 test {
     _ = @import("deferred_test.zig");
+    _ = @import("deferred_harness_test.zig");
 }
