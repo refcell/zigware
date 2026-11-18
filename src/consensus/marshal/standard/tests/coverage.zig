@@ -244,19 +244,6 @@ fn expect_acks(application: App, first: u64, last: u64) !void {
     }
 }
 
-/// Waits until marshal has processed through `height` after the application acknowledged it.
-/// commonware's biased `select_loop!` handles a ready ack before a queued `get_processed`;
-/// the Zig actor's inbox is FIFO, so the ack can land one scheduler cycle after the query.
-fn wait_processed(ctx: Ctx, mailbox: anytype, height: u64) !void {
-    const expected: Processed = .{ .block = .new(height) };
-    for (0..1000) |_| {
-        const current = try mailbox.get_processed();
-        if (current != null and std.meta.eql(current.?, expected)) return;
-        try ctx.sleep(.fromMilliseconds(1));
-    }
-    return expect_processed(mailbox, height);
-}
-
 fn expect_processed(mailbox: anytype, height: u64) !void {
     try testing.expectEqual(Processed{ .block = .new(height) }, (try mailbox.get_processed()).?);
 }
@@ -294,7 +281,7 @@ fn configured_floor_restart_body(ctx: Ctx) anyerror!void {
     defer tip.deinit(gpa);
     report(&first.mailbox, tip);
     try expect_acks(first.application, 11, 20);
-    try wait_processed(ctx, &first.mailbox, 20);
+    try expect_processed(&first.mailbox, 20);
     try first.mailbox.prune(.new(20));
     try testing.expect(!try has_block(&first.mailbox, .new(10)));
     first.crash();
@@ -386,7 +373,7 @@ fn start_reproposal_processed_through_20(self: *Reproposal, ctx: Ctx, prefix: []
     defer tip.deinit(gpa);
     report(&self.run.mailbox, tip);
     try expect_acks(self.run.application, 11, 20);
-    try wait_processed(ctx, &self.run.mailbox, 20);
+    try expect_processed(&self.run.mailbox, 20);
 }
 
 /// Restarts marshal under `prefix` with `floor` (owned) configured and a provider holding no
@@ -1076,7 +1063,7 @@ fn restored_witnessed_round_body(ctx: Ctx) anyerror!void {
         report(&state.run.mailbox, finalization);
     }
     try testing.expectEqual(Height.new(21), state.run.application.acknowledge_next().?);
-    try wait_processed(ctx, &state.run.mailbox, 21);
+    try expect_processed(&state.run.mailbox, 21);
     state.run.crash();
 
     // The archives restore (1, 50) as the newest witnessed round, so the first finalization
@@ -1127,7 +1114,6 @@ const Watch = struct {
 /// Verifies `block` (borrowed) at its layout round, finalizes it, and waits until marshal
 /// processes it. Processing a finalization prunes the cache behind the previous one.
 fn retention_step(
-    ctx: Ctx,
     fixture: *const harness.Fixture,
     run_state: anytype,
     round: Round,
@@ -1141,7 +1127,7 @@ fn retention_step(
     defer finalization.deinit(gpa);
     report(&run_state.mailbox, finalization);
     try testing.expectEqual(height, try run_state.application.acknowledged());
-    try wait_processed(ctx, &run_state.mailbox, height.get());
+    try expect_processed(&run_state.mailbox, height.get());
 }
 
 const RetentionParams = struct {
@@ -1201,11 +1187,10 @@ fn epoch_retention(
     };
     defer state.crash();
     try testing.expectEqual(Height.zero(), try state.application.acknowledged());
-    return retention_chain(ctx, &fixture, &state, params);
+    return retention_chain(&fixture, &state, params);
 }
 
 fn retention_chain(
-    ctx: Ctx,
     fixture: *const harness.Fixture,
     state: anytype,
     params: RetentionParams,
@@ -1221,7 +1206,7 @@ fn retention_chain(
         const block = try harness.make_raw_block(gpa, parent, height, index * 100);
         parent = block.digest();
         const round = layout_round(params.epoch_length, height);
-        try retention_step(ctx, fixture, state, round, block);
+        try retention_step(fixture, state, round, block);
         if (height.get() < boundary.get()) continue;
         try watch.observe(&state.mailbox, round);
     }
@@ -1320,7 +1305,7 @@ fn reproposal_above_processed_body(ctx: Ctx) anyerror!void {
     try expect_pending_ack(state.run.application, 21);
     // Acknowledging block 21 closes epoch one: a hint for a later view of it fetches nothing.
     try testing.expectEqual(Height.new(21), state.run.application.acknowledge_next().?);
-    try wait_processed(ctx, &state.run.mailbox, 21);
+    try expect_processed(&state.run.mailbox, 21);
     try expect_covered_hint(&state.run, .new(.new(1), .new(60)), .{ .block = .new(21) });
     state.run.crash();
     try restart_with_retired_floor_resumes_at(ctx, prefix, reproposal, 22);
@@ -1366,7 +1351,7 @@ fn installed_anchor_before_ack_body(ctx: Ctx) anyerror!void {
     const absent: Processed = .{ .absent = .new(9) };
     try testing.expectEqual(absent, (try first.mailbox.get_processed()).?);
     try testing.expectEqual(Height.new(10), first.application.acknowledge_next().?);
-    try wait_processed(ctx, &first.mailbox, 10);
+    try expect_processed(&first.mailbox, 10);
     try expect_covered_hint(&first, .new(.zero(), .new(60)), .{ .block = .new(10) });
     first.crash();
 
@@ -1436,7 +1421,7 @@ fn certificate_less_boundary_ack_body(ctx: Ctx) anyerror!void {
     defer state.run.crash();
     // Block 21 was stored by walkback without a finalization. Acknowledge it as is.
     try testing.expectEqual(Height.new(21), state.run.application.acknowledge_next().?);
-    try wait_processed(ctx, &state.run.mailbox, 21);
+    try expect_processed(&state.run.mailbox, 21);
     try testing.expect(!try has_finalization(&state.run.mailbox, .new(21)));
     // Epoch one ended at block 21, so a hint for a later view of it fetches nothing.
     try expect_covered_hint(&state.run, .new(.new(1), .new(60)), .{ .block = .new(21) });
