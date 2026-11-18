@@ -61,8 +61,12 @@ which every database here is built on.
   workload under Proportional, Hold, Bounded, and a seeded keep/evict/replace/stop rule) match.
 - [x] any, ordered: `range(start, end)` (commonware's `stream_range`; `Range.next_key` is
   `keys`), a pull iterator over buckets, checked against a sorted model under every bound pair.
-- [ ] any: evicting floor policies (and ordered link repair
-  after evictions), ordered staging and `stream_range`/`keys`, batched `get_many`.
+- [x] any: ordered staging (the staged-ancestor scenarios run on ordered databases too).
+  Batched `get_many` stays a loop over `get` by decision (coordinator, 2026-11-18): commonware's
+  batching only groups reads by position for speed, and the results are identical.
+- [ ] fuzz targets: `qmdb_any_{unordered,ordered}_operations`,
+  `qmdb_store_operations` (with the store), `qmdb_verify_proof`. keyless and immutable are done.
+- [ ] benches (commonware `qmdb/benches`).
 - [x] immutable (fixed, MMR and MMB): `Db`, chained batches, floor-filtered batch reads,
   prune, recovery, `ImmutableMmr/MmbFixedConf` root conformance (matches), mod.rs's core
   scenarios, and a randomized chain check against the reopened rebuild.
@@ -255,3 +259,4 @@ which every database here is built on.
 - 2026-11-18: any ordered evictions with link repair; all eight floor conformance hashes match.
 - 2026-11-18: any ordered range scans (`stream_range`/`keys`).
 - 2026-11-18: ordered staging covered by the staged-ancestor scenarios; keyless operations fuzz target.
+- 2026-11-18: immutable operations fuzz target (value model, crash reopens, proof checks).
