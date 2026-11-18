@@ -79,6 +79,17 @@ pub fn deinit_application(application: anytype) void {
     if (comptime @typeInfo(A) == .@"struct" and @hasDecl(A, "deinit")) application.deinit();
 }
 
+/// `result` with every error but cancelation turned into a panic: consensus's automaton calls
+/// return only `Io.Cancelable`, and commonware aborts on allocation failure and a runtime
+/// that cannot spawn the task.
+pub fn cancelable(comptime T: type, result: anytype) Io.Cancelable!T {
+    return result catch |err| {
+        const any: anyerror = err;
+        if (any == error.Canceled) return error.Canceled;
+        std.debug.panic("marshal wrapper: {s}", .{@errorName(err)});
+    };
+}
+
 /// Spawns `task(task_ctx, job, sender)` detached from `ctx`, returning the receiver. When the
 /// context was aborted the task never runs: the job is released and the receiver reads closed.
 pub fn spawn_detached(
@@ -268,7 +279,11 @@ fn InlineOver(comptime T: [5]type) type {
 
         /// Builds a block on `context`'s parent; null when the parent never arrives or the
         /// application declines.
-        pub fn propose(self: *Self, io: Io, context: Context) !?Digest {
+        pub fn propose(self: *Self, io: Io, context: Context) Io.Cancelable!?Digest {
+            return cancelable(?Digest, self.propose_call(io, context));
+        }
+
+        fn propose_call(self: *Self, io: Io, context: Context) !?Digest {
             _ = io;
             const checks: Checks = .{ .wrapper = self, .context = context };
             const receiver = try build.propose(
@@ -285,13 +300,21 @@ fn InlineOver(comptime T: [5]type) type {
         }
 
         /// Verifies the block `digest` under `context`; null when verification stopped.
-        pub fn verify(self: *Self, io: Io, context: Context, digest: Digest) !?bool {
+        pub fn verify(self: *Self, io: Io, context: Context, digest: Digest) Io.Cancelable!?bool {
+            return cancelable(?bool, self.verify_call(io, context, digest));
+        }
+
+        fn verify_call(self: *Self, io: Io, context: Context, digest: Digest) !?bool {
             _ = io;
             const round = context.round;
+            // spawn_detached releases the job on failure, so only earlier failures free here.
             var block_request = try self.marshal.subscribe_by_digest(digest, .wait);
-            errdefer block_request.deinit();
-            var durable = try oneshot.channel(GateOutcome, self.gpa, self.ctx.io());
+            var durable = oneshot.channel(GateOutcome, self.gpa, self.ctx.io()) catch |err| {
+                block_request.deinit();
+                return err;
+            };
             self.registry.insert(round, digest, durable.receiver) catch |err| {
+                block_request.deinit();
                 durable.receiver.deinit();
                 durable.sender.deinit();
                 return err;
@@ -311,7 +334,11 @@ fn InlineOver(comptime T: [5]type) type {
         // CertifiableAutomaton.
 
         /// Builds a handoff candidate on an uncertified parent; `wait` declines.
-        pub fn prepare(self: *Self, io: Io, context: Context) !?Handoff(Digest) {
+        pub fn prepare(self: *Self, io: Io, context: Context) Io.Cancelable!?Handoff(Digest) {
+            return cancelable(?Handoff(Digest), self.prepare_call(io, context));
+        }
+
+        fn prepare_call(self: *Self, io: Io, context: Context) !?Handoff(Digest) {
             _ = io;
             const checks: Checks = .{ .wrapper = self, .context = context };
             const receiver = try build.prepare(
@@ -329,12 +356,19 @@ fn InlineOver(comptime T: [5]type) type {
 
         /// Certifies the notarized block `digest` at `round`: the verify task's verdict once
         /// its store is durable, or else the block fetched and persisted as certified.
-        pub fn certify(self: *Self, io: Io, round: Round, digest: Digest) !?bool {
+        pub fn certify(self: *Self, io: Io, round: Round, digest: Digest) Io.Cancelable!?bool {
+            return cancelable(?bool, self.certify_call(io, round, digest));
+        }
+
+        fn certify_call(self: *Self, io: Io, round: Round, digest: Digest) !?bool {
             _ = io;
             const persist: Persist = .{ .marshal = self.marshal, .round = round };
             var gate = self.registry.claim(round, digest, persist);
-            errdefer if (gate) |*claimed| claimed.deinit();
-            if (gate != null) try self.marshal.hint_notarized(round, digest);
+            // spawn_detached releases the job (and its gate) on failure.
+            if (gate != null) self.marshal.hint_notarized(round, digest) catch |err| {
+                gate.?.deinit();
+                return err;
+            };
             const job: CertifyJob = .{
                 .wrapper = self,
                 .round = round,

@@ -38,6 +38,11 @@ comptime {
     traits.assert_certifiable_automaton(Wrapper);
     traits.assert_relay(Wrapper);
     traits.assert_reporter(Wrapper);
+    // The simplex engine's automaton calls fail only by cancelation.
+    for (.{ Wrapper.propose, Wrapper.verify, Wrapper.prepare, Wrapper.certify }) |call| {
+        const Return = @typeInfo(@TypeOf(call)).@"fn".return_type.?;
+        std.debug.assert(@typeInfo(Return).error_union.error_set == Io.Cancelable);
+    }
 }
 
 /// Epochs of 10 heights: height 9 is the last of epoch 0.

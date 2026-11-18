@@ -48,6 +48,7 @@ const send_lossy = inline_mod.send_lossy;
 const drop_sender = inline_mod.drop_sender;
 const answer = inline_mod.answer;
 const spawn_detached = inline_mod.spawn_detached;
+const cancelable = inline_mod.cancelable;
 
 /// Passes a gate outcome through unchanged.
 const Identity = struct {
@@ -235,7 +236,11 @@ fn DeferredOver(comptime T: [5]type) type {
 
         /// Builds a block on `context`'s parent; null when the parent never arrives, does not
         /// link, or the application declines.
-        pub fn propose(self: *Self, io: Io, context: Context) !?Digest {
+        pub fn propose(self: *Self, io: Io, context: Context) Io.Cancelable!?Digest {
+            return cancelable(?Digest, self.propose_call(io, context));
+        }
+
+        fn propose_call(self: *Self, io: Io, context: Context) !?Digest {
             _ = io;
             const checks: Checks = .{ .wrapper = self, .context = context };
             const receiver = try build.propose(
@@ -254,7 +259,11 @@ fn DeferredOver(comptime T: [5]type) type {
         /// Votes on the block `digest` under `context` once it is available and embeds
         /// `context`, leaving the application's verdict to `certify`; null when verification
         /// stopped (consensus or the gate dropped it, or the block never arrives).
-        pub fn verify(self: *Self, io: Io, context: Context, digest: Digest) !?bool {
+        pub fn verify(self: *Self, io: Io, context: Context, digest: Digest) Io.Cancelable!?bool {
+            return cancelable(?bool, self.verify_call(io, context, digest));
+        }
+
+        fn verify_call(self: *Self, io: Io, context: Context, digest: Digest) !?bool {
             _ = io;
             const round = context.round;
             // Register the wait before the gate, so a buffered block cannot slip past both.
@@ -284,7 +293,11 @@ fn DeferredOver(comptime T: [5]type) type {
         // CertifiableAutomaton.
 
         /// Builds a handoff candidate on an uncertified parent; `wait` declines.
-        pub fn prepare(self: *Self, io: Io, context: Context) !?Handoff(Digest) {
+        pub fn prepare(self: *Self, io: Io, context: Context) Io.Cancelable!?Handoff(Digest) {
+            return cancelable(?Handoff(Digest), self.prepare_call(io, context));
+        }
+
+        fn prepare_call(self: *Self, io: Io, context: Context) !?Handoff(Digest) {
             _ = io;
             const checks: Checks = .{ .wrapper = self, .context = context };
             const receiver = try build.prepare(
@@ -303,7 +316,11 @@ fn DeferredOver(comptime T: [5]type) type {
         /// Certifies the notarized block `digest` at `round`: the gate's verdict once the
         /// block is valid and durable, or else a verification under the block's embedded
         /// context.
-        pub fn certify(self: *Self, io: Io, round: Round, digest: Digest) !?bool {
+        pub fn certify(self: *Self, io: Io, round: Round, digest: Digest) Io.Cancelable!?bool {
+            return cancelable(?bool, self.certify_call(io, round, digest));
+        }
+
+        fn certify_call(self: *Self, io: Io, round: Round, digest: Digest) !?bool {
             _ = io;
             const persist: Persist = .{ .marshal = self.marshal, .round = round };
             const receiver = if (self.registry.claim(round, digest, persist)) |gate|
