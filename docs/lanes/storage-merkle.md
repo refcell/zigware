@@ -201,3 +201,13 @@ variants need `runtime` storage; do them after its interface lands.
   its insert, and the lazy step probes only the long table one byte later, as libzstd does.
   Median user CPU over 12 runs on the same 4 MB corpus: 0.113 s against 0.232 s for the
   1c5ddb7 compressor (2.05x); ratios unchanged (text 27.9%, records 12.4%; 1 KB text 50.4%).
+- Handed over from storage-journal (agreed with it): the rest of commonware's
+  `journal/contiguous/fixed.rs` and `variable.rs` tests, in new sibling files
+  (`contiguous/fixed_bounded_test.zig`, ...), so its test files stay untouched.
+  - [x] fixed.rs batch 1: overlong blob, zero-extended pages, `init_at_most` (with commit,
+    lowered watermark, truncate-append-reopen), and the init-at-most and repair truncation
+    crashes on `runtime.storage.faulty`. Planted bug (skip the tail truncate in `repair_to`)
+    fails four of them.
+  - [ ] fixed.rs: torn interior pages and the remaining recovery, clear-crash, and
+    `read_many` tests.
+  - [ ] variable.rs: the remaining ~120 tests.
