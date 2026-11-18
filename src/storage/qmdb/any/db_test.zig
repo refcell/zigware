@@ -856,3 +856,77 @@ test "any evicting the batch's own update of a committed key deletes the committ
         try expect_value(&db, key(1), null);
     }
 }
+
+test "any ordered range scans match a sorted model under every bound" {
+    inline for (families) |F| {
+        const Db = support.OrderedFixed(F);
+        var harness = try support.Harness.init(gpa);
+        defer harness.deinit();
+        var db = try harness.open(Db, null);
+        defer db.deinit();
+        // Keys in several translated buckets plus a colliding bucket, some deleted.
+        var keys: [24]Digest = undefined;
+        var writes: [24]Write = undefined;
+        for (&keys, &writes, 0..) |*k, *w, i| {
+            k.* = if (i < 16) key(i) else support.colliding_digest(0x80, i);
+            w.* = .{ .key = k.*, .value = val(i, 1) };
+        }
+        try support.apply_writes(Db, &db, &writes);
+        try support.apply_writes(Db, &db, &.{
+            .{ .key = keys[3], .value = null },
+            .{ .key = keys[17], .value = null },
+        });
+        var model: [22]Digest = undefined;
+        var count: usize = 0;
+        for (keys, 0..) |k, i| {
+            if (i == 3 or i == 17) continue;
+            model[count] = k;
+            count += 1;
+        }
+        std.mem.sort(Digest, model[0..count], {}, struct {
+            fn less(_: void, a: Digest, b: Digest) bool {
+                return std.mem.order(u8, &a.bytes, &b.bytes) == .lt;
+            }
+        }.less);
+        const sorted = model[0..count];
+        // Bounds at model keys, deleted keys, and the extremes.
+        const probes = [_]Digest{ sorted[0], sorted[5], keys[3], sorted[count - 1], keys[17] };
+        const Bound = Db.Bound;
+        var bounds: std.ArrayList(Bound) = .empty;
+        defer bounds.deinit(gpa);
+        try bounds.append(gpa, .unbounded);
+        for (probes) |p| {
+            try bounds.append(gpa, .{ .included = p });
+            try bounds.append(gpa, .{ .excluded = p });
+        }
+        for (bounds.items) |start| for (bounds.items) |end| {
+            var it = db.range(start, end);
+            defer it.deinit();
+            for (sorted, 0..) |k, i| {
+                const above = switch (start) {
+                    .unbounded => true,
+                    .included => |s| std.mem.order(u8, &k.bytes, &s.bytes) != .lt,
+                    .excluded => |s| std.mem.order(u8, &k.bytes, &s.bytes) == .gt,
+                };
+                const below = switch (end) {
+                    .unbounded => true,
+                    .included => |e| std.mem.order(u8, &k.bytes, &e.bytes) != .gt,
+                    .excluded => |e| std.mem.order(u8, &k.bytes, &e.bytes) == .lt,
+                };
+                if (!above or !below) continue;
+                const pair = (try it.next()) orelse return error.TestUnexpectedResult;
+                try testing.expect(pair.key.eql(k));
+                const index = for (keys, 0..) |orig, j| {
+                    if (orig.eql(k)) break j;
+                } else unreachable;
+                _ = i;
+                try testing.expect(pair.value.eql(val(index, 1)));
+            }
+            try testing.expect(try it.next() == null);
+        };
+        var all = db.range(.unbounded, .unbounded);
+        defer all.deinit();
+        for (sorted) |k| try testing.expect((try all.next_key()).?.eql(k));
+        try testing.expect(try all.next_key() == null);
+    }
+}

@@ -59,6 +59,8 @@ which every database here is built on.
 - [x] any, ordered: evicting floor policies with link repair of evicted keys' predecessors;
   `Any{Mmr,Mmb}{Unordered,Ordered}{Fixed,Variable}FloorConf` (commonware's `floor_batches`
   workload under Proportional, Hold, Bounded, and a seeded keep/evict/replace/stop rule) match.
+- [x] any, ordered: `range(start, end)` (commonware's `stream_range`; `Range.next_key` is
+  `keys`), a pull iterator over buckets, checked against a sorted model under every bound pair.
 - [ ] any: evicting floor policies (and ordered link repair
   after evictions), ordered staging and `stream_range`/`keys`, batched `get_many`.
 - [x] immutable (fixed, MMR and MMB): `Db`, chained batches, floor-filtered batch reads,
@@ -216,6 +218,9 @@ which every database here is built on.
 - immutable: values may own memory (keys may not). Merkleize keeps each key's last set (the
   superseded values are freed then), moves the values into the batch's diff, and hands the
   journal batch copies; the diff frees its values when its last holder releases it.
+- any ordered `range`: Zig has no async streams, so commonware's `stream_range` is a pull
+  iterator (`next` returns an owned pair, null at the end; a read error leaves the cursor in
+  place).
 - immutable: the index rebuild reads the log from the floor one position at a time (no replay
   stream). `get_many` loops over `get` (commonware batches the reads by position).
 
@@ -247,3 +252,4 @@ which every database here is built on.
 - 2026-11-18: `init_from_log` hooks on any, immutable, and keyless for state sync.
 - 2026-11-18: any (unordered) evicting floor policies.
 - 2026-11-18: any ordered evictions with link repair; all eight floor conformance hashes match.
+- 2026-11-18: any ordered range scans (`stream_range`/`keys`).

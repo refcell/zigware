@@ -16,5 +16,6 @@ test {
     _ = @import("conformance_test.zig");
     _ = @import("floor_conformance_test.zig");
     _ = @import("db_test.zig");
+    _ = @import("range.zig");
     _ = @import("variable_test.zig");
 }

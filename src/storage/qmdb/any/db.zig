@@ -30,6 +30,7 @@ const operation = @import("operation.zig");
 const batch_mod = @import("batch.zig");
 const diff_mod = @import("diff.zig");
 const ordered_mod = @import("ordered.zig");
+const range_mod = @import("range.zig");
 
 const Storage = runtime.storage.Storage;
 const Scope = runtime.telemetry.metrics.Scope;
@@ -324,6 +325,16 @@ pub fn Db(F: type, U: type, C: type, I: type, H: type, comptime N: usize) type {
                 if (at_next or ordered_mod.in_span(Key, &update.key, next, key)) return update.key;
             }
             return null;
+        }
+
+        pub const Range = range_mod.Range(Self);
+        pub const Bound = range_mod.Bound(Key);
+
+        /// The active pairs in `[start, end]` (per the bounds) in ascending key order, as a pull
+        /// iterator (commonware's `stream_range`; `Range.next_key` is its `keys`). Ordered
+        /// databases only; the iterator must not outlive a mutation of the database.
+        pub fn range(self: *Self, start: Bound, end: Bound) Range {
+            return Range.init(self, start, end);
         }
 
         pub const ValueAndNext = struct { value: Value, next_key: Key };
