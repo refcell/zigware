@@ -36,4 +36,5 @@ test {
     std.testing.refAllDecls(@This());
     _ = @import("tests.zig");
     _ = @import("source_test.zig");
+    _ = @import("../keyless/sync.zig");
 }
