@@ -2065,3 +2065,109 @@ test "standard round floor advance releases superseded pending floor" {
         }
     }.body);
 }
+
+/// A provider with no scope for any epoch (commonware `EmptyProvider`).
+const EmptyProvider = struct {
+    pub fn scoped(_: EmptyProvider, scope: anytype) ?certificate.Scoped(harness.S) {
+        _ = scope;
+        return null;
+    }
+
+    pub fn scheme(_: EmptyProvider, scope: anytype) ?*const harness.S {
+        _ = scope;
+        return null;
+    }
+};
+
+// Without a verifier for an epoch, in-flight deliveries for it cannot be validated. They
+// retire their keys without being attributed to the serving peer, which is neither credited
+// for bytes marshal could not check nor blamed for them. commonware wires this actor to
+// prunable archives and a buffered engine on a one-peer network; neither reaches the
+// delivery path checked here, so it runs on `start_standard_actor`'s stores and buffer.
+test "standard unverifiable delivery is ignored" {
+    try run(struct {
+        fn body(ctx: Ctx) anyerror!void {
+            var application = try App.init(gpa, ctx.io());
+            defer application.deinit();
+            var started = try common.start_standard_actor(
+                EmptyProvider,
+                App,
+                common.RecordingBuffer,
+                ctx.child("validator"),
+                "stale-finalized-test",
+                .{},
+                application.clone(),
+                try common.RecordingBuffer.init(gpa, ctx.io()),
+                try genesis_start(),
+            );
+            defer started.crash();
+            // A finalized delivery with a garbage payload is ignored, not blamed.
+            const finalized = try deliver(
+                started.resolver,
+                .{ .finalized = .new(5) },
+                .{ .finalized = .{ .by_height = .new(5) } },
+                "unverifiable",
+            );
+            try testing.expectEqual(common.Outcome.ignored, finalized);
+            // Same for a notarized delivery.
+            const round = round_at(1);
+            const notarized = try deliver(
+                started.resolver,
+                .{ .notarized = round },
+                .{ .notarization = round },
+                "unverifiable",
+            );
+            try testing.expectEqual(common.Outcome.ignored, notarized);
+        }
+    }.body);
+}
+
+// Regression: application delivery of a finalized block happens only after the finalized
+// archives are durably synced. Otherwise a crash after the application observes the block,
+// but before it acknowledges it, could expose derived state ahead of marshal's
+// height-indexed finalization.
+test "standard dispatches finalized blocks after sync" {
+    try run(struct {
+        fn body(ctx: Ctx) anyerror!void {
+            var rng = utils.rng.test_rng();
+            var fixture = try harness.fixture(gpa, &rng);
+            defer fixture.deinit(gpa);
+            var name: [192]u8 = undefined;
+            const prefix = try std.fmt.bufPrint(&name, "validator-{f}", .{fixture.participants[0]});
+            var block = try block_at(hash(""), 1, 100);
+            defer block.deinit();
+            var created = try common.HoldingBlockReporter.init_after(gpa, ctx.io(), .zero());
+            defer created.started.deinit();
+            var started = try start_holding(
+                ctx.child("validator"),
+                prefix,
+                &fixture,
+                created.reporter,
+                try common.RecordingBuffer.init(gpa, ctx.io()),
+                try genesis_start(),
+            );
+            try testing.expect(try started.mailbox.verified(round_at(1), block.clone()));
+            report(&started.mailbox, try finalize(&fixture, 1, 0, &block));
+            try testing.expectEqual(1, (try created.started.recv()).get());
+            started.crash();
+
+            var application = try App.manual_ack(gpa, ctx.io());
+            defer application.deinit();
+            var restarted = try start_manual(
+                ctx.child("validator_restart"),
+                prefix,
+                &fixture,
+                application.clone(),
+                try common.RecordingBuffer.init(gpa, ctx.io()),
+            );
+            defer restarted.crash();
+            // The restart recovers the delivered block and its finalization by height.
+            var recovered = (try restarted.mailbox.get_block(.{ .height = .new(1) })).?;
+            defer recovered.deinit();
+            try testing.expect(recovered.digest().eql(block.digest()));
+            var finalization = (try restarted.mailbox.get_finalization(.new(1))).?;
+            defer finalization.deinit(gpa);
+            try testing.expectEqual(round_at(1), finalization.round());
+        }
+    }.body);
+}
