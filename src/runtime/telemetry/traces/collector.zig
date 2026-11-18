@@ -329,6 +329,26 @@ test "collects events with fields and spans" {
     try testing.expect(collector.get_by_level(.@"error").is_empty());
 }
 
+test "keeps a hex-encoded BLS identity whole and truncates past the cap" {
+    var collector: Collector = .init(testing.allocator, .{});
+    defer collector.deinit();
+    const tracer = collector.tracer("bridge::indexer");
+    var identity: [96]u8 = undefined;
+    for (&identity, 0..) |*byte, index| byte.* = @truncate(index * 7 + 1);
+    const network = std.fmt.bytesToHex(identity, .lower);
+    comptime assert(network.len == 192);
+    const span = tracer.span("indexer", .{ .network = @as([]const u8, &network) });
+    span.event(.info, "started", .{ .network = @as([]const u8, &network) });
+    const long: [traces.field_value_size_max + 10]u8 = @splat('x');
+    tracer.event(.info, "long", .{ .value = @as([]const u8, &long) });
+
+    const started = collector.get_by_level(.info).get(0).?;
+    try started.metadata.expect_field_exact("network", &network);
+    try started.spans[0].expect_field_exact("network", &network);
+    const truncated = collector.get_by_level(.info).get(1).?;
+    try truncated.metadata.expect_field_exact("value", long[0..traces.field_value_size_max]);
+}
+
 test "collector bounds its events" {
     var collector: Collector = .init(testing.allocator, .{ .event_count_max = 2 });
     defer collector.deinit();

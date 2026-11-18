@@ -39,8 +39,9 @@ pub const Level = enum {
 pub const span_field_count_max = 8;
 /// Most fields one event carries.
 pub const event_field_count_max = 32;
-/// Longest formatted field value kept by a span or an event.
-pub const field_value_size_max = 128;
+/// Longest formatted field value kept by a span or an event: room for a hex-encoded BLS12-381
+/// G2 point (96 bytes, 192 digits), such as a threshold identity, with margin.
+pub const field_value_size_max = 256;
 /// Deepest span nesting an event records.
 pub const span_depth_max = 32;
 
@@ -150,10 +151,15 @@ pub const Span = struct {
     name: []const u8,
     field_names: [span_field_count_max][]const u8 = undefined,
     field_values: [span_field_count_max][field_value_size_max]u8 = undefined,
-    field_lens: [span_field_count_max]u8 = undefined,
+    field_lens: [span_field_count_max]u16 = undefined,
     field_count: u8 = 0,
     /// The OTLP status set through `status.ok` / `status.error`.
     otel_status: status.Status = .unset,
+
+    comptime {
+        assert(field_value_size_max <= std.math.maxInt(u16));
+        assert(@sizeOf(Span) <= 4096);
+    }
 
     fn init(tracer: Tracer, parent: ?*const Span, name: []const u8, fields: anytype) Span {
         assert(name.len > 0);
