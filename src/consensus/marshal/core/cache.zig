@@ -104,11 +104,25 @@ pub fn Manager(comptime V: type, comptime S: type) type {
                 cache.finalizations.deinit();
             }
 
+            /// Destroys every archive. On failure the archives not yet destroyed are closed
+            /// (a destroyed archive has released itself), so the cache needs no `deinit`.
             fn destroy(cache: *Cache) !void {
+                var destroyed: u8 = 0;
+                errdefer {
+                    assert(destroyed < 5);
+                    if (destroyed < 1) cache.notarized_blocks.deinit();
+                    if (destroyed < 2) cache.certified_blocks.deinit();
+                    if (destroyed < 3) cache.notarizations.deinit();
+                    if (destroyed < 4) cache.finalizations.deinit();
+                }
                 try cache.verified_blocks.destroy();
+                destroyed = 1;
                 try cache.notarized_blocks.destroy();
+                destroyed = 2;
                 try cache.certified_blocks.destroy();
+                destroyed = 3;
                 try cache.notarizations.destroy();
+                destroyed = 4;
                 try cache.finalizations.destroy();
             }
         };
@@ -458,10 +472,7 @@ pub fn Manager(comptime V: type, comptime S: type) type {
                 if (entry.epoch.get() >= new_floor.get()) break;
                 _ = self.caches.orderedRemove(0);
                 defer self.gpa.destroy(entry.cache);
-                entry.cache.destroy() catch |err| {
-                    entry.cache.deinit();
-                    return err;
-                };
+                try entry.cache.destroy();
             }
             const floor, const ceiling = self.get_metadata();
             if (new_floor.get() > floor.get()) {

@@ -161,9 +161,11 @@ ports its range's tests and the helpers defined in it, into
 - consensus-marshal (this lane), `tests/scenarios.zig` and `tests/restart.zig`: lines
   169-2591 (provider/digest-once tests, every harness scenario wrapper: finalize, hailstorm,
   ack pipeline, genesis, recoverable/certify family, sync floor, prune, subscribe, get_info,
-  get_block, hint_finalized, ancestry stream, broadcast caches; restart repair; cache
-  epochs), the seed helpers in `tests/seed.zig` (lines 638-797), and harness.rs's scenario
+  get_block, hint_finalized, ancestry stream, broadcast caches; restart repair), except
+  1987-2543, the seed helpers in `tests/seed.zig` (lines 638-797), and harness.rs's scenario
   functions in `mocks/harness.zig` so coding reuses them.
+- bls-math thread (T-01a1d57b-1003), `tests/cache_epoch.zig`: lines 1987-2543 (cache epoch
+  reopen, far-epoch writes, interrupted destroy, start_sync covers prior writes).
 - lookup thread (T-01a1d59c), `tests/wrappers.zig` and `tests/dispatch.zig`: lines
   2592-6220 (buffered floor anchors, inline/deferred wrapper tests, certify/verify fetch
   paths, propose/prepare paths, reproposal and ancestry validation, sync failure panics,
@@ -316,3 +318,6 @@ ports its range's tests and the helpers defined in it, into
 - 2026-11-18: standard/mod.rs restart tests (trailing, internal, multiple trailing, large
   pending tip, surfaces unfinalized block, stores late finalization, consistent no-op, local
   cache repair) with the seed helpers; fixed a finalization leak in `repair_trailing`.
+- 2026-11-18: core cache: a failed epoch destroy closes only the archives it did not destroy
+  (found by bls-math's interrupted-destroy test); harness hooks for coding (`ArchivesOf`,
+  `make_*_of`).
