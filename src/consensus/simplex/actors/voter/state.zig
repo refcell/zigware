@@ -322,7 +322,7 @@ pub fn State(comptime S: type, comptime E: type, comptime D: type) type {
             return true;
         }
 
-        fn leader_is_set(self: *const Self, view: View) bool {
+        pub fn leader_is_set(self: *const Self, view: View) bool {
             const round = self.round_at(view) orelse return false;
             return round.leader() != null;
         }
@@ -333,7 +333,7 @@ pub fn State(comptime S: type, comptime E: type, comptime D: type) type {
         }
 
         /// Sets the leader of `view` unless already set.
-        fn set_leader(
+        pub fn set_leader(
             self: *Self,
             view: View,
             certificate: ?*const S.Certificate,

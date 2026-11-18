@@ -19,7 +19,7 @@ const state_mod = @import("state.zig");
 const Digest = cryptography.Sha256.Digest;
 const Scheme = ed25519.Scheme(Digest);
 const Elector = elector.RoundRobinElector;
-const State = state_mod.State(Scheme, Elector, Digest);
+pub const State = state_mod.State(Scheme, Elector, Digest);
 const Proposal = types.Proposal(Digest);
 const Notarize = types.Notarize(Scheme, Digest);
 const Finalize = types.Finalize(Scheme, Digest);
@@ -135,7 +135,7 @@ pub fn run(comptime function: fn (Io) anyerror!void) !void {
     try (try runner.start(function, .{runner.io()}));
 }
 
-fn expect_err(result: anytype, expected: state_mod.ParentPayloadError) !void {
+pub fn expect_err(result: anytype, expected: state_mod.ParentPayloadError) !void {
     try testing.expect(result == .err);
     try testing.expectEqualDeep(expected, result.err);
 }
@@ -268,7 +268,7 @@ test "voter state parent payload needs nullifications and no intra-term skips" {
     }.body);
 }
 
-fn candidate_views(state: *State, out: *std.ArrayList(Proposal)) !void {
+pub fn candidate_views(state: *State, out: *std.ArrayList(Proposal)) !void {
     out.clearRetainingCapacity();
     var fetches: std.ArrayList(state_mod.CertificateFetch) = .empty;
     defer fetches.deinit(gpa);
@@ -701,7 +701,7 @@ test "voter state local nullify preserves the stall timeout" {
 
 /// Builds and records `payload` as our view-1 proposal on genesis, then casts our notarize
 /// vote for it (commonware `propose_and_notarize_view1`).
-fn propose_and_notarize_view1(env: *Env, payload: u8) !Proposal {
+pub fn propose_and_notarize_view1(env: *Env, payload: u8) !Proposal {
     const state = &env.state;
     _ = try state.create_round(.new(1));
     const request: State.Context = .{
@@ -1041,7 +1041,7 @@ fn anchored_parent_payload(
     return state.parent_payload(&proposal(1, child, 3, 7));
 }
 
-fn expect_payload(result: State.PayloadResult, payload: u8) !void {
+pub fn expect_payload(result: State.PayloadResult, payload: u8) !void {
     try testing.expect(result == .payload);
     try testing.expect(result.payload.eql(Digest.fill(payload)));
 }
@@ -1107,17 +1107,17 @@ test "voter state broadcasts each certificate once" {
 }
 
 /// Adds a full-quorum notarization of `value`, which must be new.
-fn add_notarized(state: *State, f: *const Fixture, value: Proposal) !void {
+pub fn add_notarized(state: *State, f: *const Fixture, value: Proposal) !void {
     const added = try state.add_notarization(try build_notarization(f, value));
     try testing.expect(added.added);
 }
 
-fn round_at(epoch: u64, view: u64) Rnd {
+pub fn round_at(epoch: u64, view: u64) Rnd {
     return .new(.new(epoch), .new(view));
 }
 
 /// commonware `setup_state_with(4, signer 1, epoch 9, retention 10, terms of 5, ...)`.
-fn terms_of_five_epoch_nine(optimistic_views: u64) Options {
+pub fn terms_of_five_epoch_nine(optimistic_views: u64) Options {
     return .{
         .signer = 1,
         .epoch = 9,
