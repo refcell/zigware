@@ -237,7 +237,7 @@ fn DeferredOver(comptime T: [5]type) type {
         /// Builds a block on `context`'s parent; null when the parent never arrives, does not
         /// link, or the application declines.
         pub fn propose(self: *Self, io: Io, context: Context) Io.Cancelable!?Digest {
-            return cancelable(?Digest, self.propose_call(io, context));
+            return cancelable(Digest, self.propose_call(io, context));
         }
 
         fn propose_call(self: *Self, io: Io, context: Context) !?Digest {
@@ -260,7 +260,7 @@ fn DeferredOver(comptime T: [5]type) type {
         /// `context`, leaving the application's verdict to `certify`; null when verification
         /// stopped (consensus or the gate dropped it, or the block never arrives).
         pub fn verify(self: *Self, io: Io, context: Context, digest: Digest) Io.Cancelable!?bool {
-            return cancelable(?bool, self.verify_call(io, context, digest));
+            return cancelable(bool, self.verify_call(io, context, digest));
         }
 
         fn verify_call(self: *Self, io: Io, context: Context, digest: Digest) !?bool {
@@ -294,7 +294,7 @@ fn DeferredOver(comptime T: [5]type) type {
 
         /// Builds a handoff candidate on an uncertified parent; `wait` declines.
         pub fn prepare(self: *Self, io: Io, context: Context) Io.Cancelable!?Handoff(Digest) {
-            return cancelable(?Handoff(Digest), self.prepare_call(io, context));
+            return cancelable(Handoff(Digest), self.prepare_call(io, context));
         }
 
         fn prepare_call(self: *Self, io: Io, context: Context) !?Handoff(Digest) {
@@ -317,7 +317,7 @@ fn DeferredOver(comptime T: [5]type) type {
         /// block is valid and durable, or else a verification under the block's embedded
         /// context.
         pub fn certify(self: *Self, io: Io, round: Round, digest: Digest) Io.Cancelable!?bool {
-            return cancelable(?bool, self.certify_call(io, round, digest));
+            return cancelable(bool, self.certify_call(io, round, digest));
         }
 
         fn certify_call(self: *Self, io: Io, round: Round, digest: Digest) !?bool {

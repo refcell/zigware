@@ -79,15 +79,29 @@ pub fn deinit_application(application: anytype) void {
     if (comptime @typeInfo(A) == .@"struct" and @hasDecl(A, "deinit")) application.deinit();
 }
 
-/// `result` with every error but cancelation turned into a panic: consensus's automaton calls
-/// return only `Io.Cancelable`, and commonware aborts on allocation failure and a runtime
-/// that cannot spawn the task.
-pub fn cancelable(comptime T: type, result: anytype) Io.Cancelable!T {
-    return result catch |err| {
+/// `result` with every error but cancelation read as no answer (null): consensus's automaton
+/// calls return only `Io.Cancelable`, and commonware answers a task it could not start (no
+/// memory, no runtime to spawn on) by dropping the oneshot, which consensus reads as no
+/// verdict.
+pub fn cancelable(comptime T: type, result: anytype) Io.Cancelable!?T {
+    const value = result catch |err| {
         const any: anyerror = err;
         if (any == error.Canceled) return error.Canceled;
-        std.debug.panic("marshal wrapper: {s}", .{@errorName(err)});
+        return null;
     };
+    return value;
+}
+
+test "a wrapper call answers null on any error but cancelation" {
+    const Result = error{ OutOfMemory, ConcurrencyUnavailable, Canceled }!?u8;
+    const failed: Result = error.OutOfMemory;
+    try std.testing.expectEqual(@as(?u8, null), try cancelable(u8, failed));
+    const unspawned: Result = error.ConcurrencyUnavailable;
+    try std.testing.expectEqual(@as(?u8, null), try cancelable(u8, unspawned));
+    const canceled: Result = error.Canceled;
+    try std.testing.expectError(error.Canceled, cancelable(u8, canceled));
+    const answered: Result = 7;
+    try std.testing.expectEqual(@as(?u8, 7), try cancelable(u8, answered));
 }
 
 /// Spawns `task(task_ctx, job, sender)` detached from `ctx`, returning the receiver. When the
@@ -280,7 +294,7 @@ fn InlineOver(comptime T: [5]type) type {
         /// Builds a block on `context`'s parent; null when the parent never arrives or the
         /// application declines.
         pub fn propose(self: *Self, io: Io, context: Context) Io.Cancelable!?Digest {
-            return cancelable(?Digest, self.propose_call(io, context));
+            return cancelable(Digest, self.propose_call(io, context));
         }
 
         fn propose_call(self: *Self, io: Io, context: Context) !?Digest {
@@ -301,7 +315,7 @@ fn InlineOver(comptime T: [5]type) type {
 
         /// Verifies the block `digest` under `context`; null when verification stopped.
         pub fn verify(self: *Self, io: Io, context: Context, digest: Digest) Io.Cancelable!?bool {
-            return cancelable(?bool, self.verify_call(io, context, digest));
+            return cancelable(bool, self.verify_call(io, context, digest));
         }
 
         fn verify_call(self: *Self, io: Io, context: Context, digest: Digest) !?bool {
@@ -335,7 +349,7 @@ fn InlineOver(comptime T: [5]type) type {
 
         /// Builds a handoff candidate on an uncertified parent; `wait` declines.
         pub fn prepare(self: *Self, io: Io, context: Context) Io.Cancelable!?Handoff(Digest) {
-            return cancelable(?Handoff(Digest), self.prepare_call(io, context));
+            return cancelable(Handoff(Digest), self.prepare_call(io, context));
         }
 
         fn prepare_call(self: *Self, io: Io, context: Context) !?Handoff(Digest) {
@@ -357,7 +371,7 @@ fn InlineOver(comptime T: [5]type) type {
         /// Certifies the notarized block `digest` at `round`: the verify task's verdict once
         /// its store is durable, or else the block fetched and persisted as certified.
         pub fn certify(self: *Self, io: Io, round: Round, digest: Digest) Io.Cancelable!?bool {
-            return cancelable(?bool, self.certify_call(io, round, digest));
+            return cancelable(bool, self.certify_call(io, round, digest));
         }
 
         fn certify_call(self: *Self, io: Io, round: Round, digest: Digest) !?bool {
