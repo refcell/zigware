@@ -29,7 +29,6 @@ const types = @import("../types.zig");
 
 const Feedback = actor.Feedback;
 const Height = consensus.Height;
-const Round = consensus.Round;
 const oneshot = utils.channel.oneshot;
 
 /// Asserts `T` carries the reshare actor's type parameters (see the file header).
@@ -49,18 +48,8 @@ pub fn PayloadOf(comptime T: type) type {
     return types.Payload(T.Block.Variant, T.Block.PublicKey, T.Block.Directory);
 }
 
-/// What marshal reports to the application (commonware `marshal::Update`): a new finalized
-/// tip, or a finalized block with the acknowledgement marshal waits on. Marshal's own
-/// `Update` is not on main yet; this one has its shape.
-pub fn Update(comptime B: type, comptime A: type) type {
-    return union(enum) {
-        /// A new finalized tip and the finalization round. It may arrive before the block is
-        /// durable.
-        tip: struct { round: Round, height: Height, digest: B.Digest },
-        /// A finalized block; marshal treats it as delivered once `ack` is acknowledged.
-        block: struct { block: broadcast.Digested(B), ack: A },
-    };
-}
+/// What marshal reports to the application (`consensus.marshal.Update`).
+pub const Update = consensus.marshal.Update;
 
 /// Response to `Mailbox.epoch_info`.
 pub fn EpochInfoResponse(comptime Pl: type) type {

@@ -264,8 +264,8 @@ Owns `src/glue/dkg`. Reference: `glue/src/dkg` (about 24k Rust lines).
 - `dkg.reshare.Mailbox(T)` (`T` declares `Block`, `Ack`, `Ancestry`; `init(gpa, io, sender)`,
   `next_log(height) !?LogReservation`, `epoch_info(ancestry) !EpochInfoResponse`,
   `report(Update)`), `Message(T)`, `LogReservation(T)` (`take_payload`, `included`, `deinit`
-  releases the log), `EpochInfoResponse(Payload)` (`available`/`unavailable`), `Update(B, A)`
-  (marshal's `tip`/`block` report, until marshal exports one). `dkg.reshare.Metrics(P)`
+  releases the log), `EpochInfoResponse(Payload)` (`available`/`unavailable`); `report` takes
+  `consensus.marshal.Update(B, A)`. `dkg.reshare.Metrics(P)`
   (`init(gpa, scope)`, `reconcile`, `set_epoch`, `set_phase`, `record_share`, `record_ack`,
   `record_success`), `Phase`.
 - `dkg.reshare.actor.setup`: `FinalizedTip(D)`, `startup(B, processed, floor)`,
