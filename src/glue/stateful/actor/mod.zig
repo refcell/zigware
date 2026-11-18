@@ -17,9 +17,15 @@ pub const FinalizationBoundary = pruning.FinalizationBoundary;
 pub const pending = @import("processor/pending.zig");
 pub const Pending = pending.Pending;
 
+pub const execution = @import("processor/execution.zig");
+pub const Execution = execution.Execution;
+pub const Finality = execution.Finality;
+pub const PrepareBatchesError = execution.PrepareBatchesError;
+
 test {
     std.testing.refAllDecls(@This());
     _ = @import("syncer/plan_test.zig");
     _ = @import("processor/pruning_test.zig");
     _ = @import("processor/pending_test.zig");
+    _ = @import("processor/execution_test.zig");
 }

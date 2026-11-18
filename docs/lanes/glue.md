@@ -171,7 +171,14 @@ marshal's actors (consensus-marshal) for the actor; until then it ports what is 
   (`clone`, `deinit`). `init(gpa, anchor)`, `cache(digest, Entry)` (only blocks at later rounds
   linked to the branch; takes the batch either way), `get`, `contains`, `speculative_len`,
   `descendants(digest, round, *Set)`, `boundary(digest, round)` → `FinalizationBoundary`,
-  `retain_branch(anchor, parent, *const B)` → forks pruned, `clear`, `deinit`.
+  `retain_branch(anchor, parent, *const B)` → forks pruned, `remove`, `clear`, `deinit`.
+- `glue.stateful.actor.Execution(P)` (`P` declares `App`, `Databases`, `Provider`; see
+  execution.zig for the `App.process` contract): the processor's shared execution layer.
+  `init(gpa, io, databases, anchor)`, `fork_batches(parent)`, `cache_pending`, `retain_branch`,
+  `process_candidate(app, *Ancestry)`, the flight registry (`join_flight(app, ancestry)` →
+  `?*Flight` with `wait`, then `release`; `process_shared`; `flights_idle`), and replay
+  (`prepare_replay`, `next_replay`, `rebuild_pending(app, *Provider, target)`). `Finality`,
+  `PrepareBatchesError` (`Invalid`, `Incomplete`).
 
 ### Decisions
 - ManagedDb and DatabaseSet are comptime contracts. Mutations take `*Self` and return errors
@@ -185,6 +192,12 @@ marshal's actors (consensus-marshal) for the actor; until then it ports what is 
   tuple applies have no counterpart until members run concurrently.
 - zigware databases persist synchronously in `finalize` (`start_sync` completes at once), so a
   `Barrier` holds each member's outcome instead of runtime handles.
+- A processor flight is a task started with `io.concurrent` that stores its result and sets
+  an `Io.Event` (commonware's `Shared` future). The last request to `release` it unregisters,
+  cancels, and frees it. A request admitted while a cancelled flight unwinds starts a fresh
+  one; commonware's synchronous drop prevents that overlap, and here the pending cache makes
+  the duplicate processing idempotent. The application is a handle copied per call (Rust
+  `Clone`), and every ancestry is marshal's `AncestorStream` (commonware boxes any ancestry).
 - `probe.Sample` keeps replies in a peer-sorted list (commonware's `BTreeMap`), so ties
   between equal rounds resolve as commonware's do, and owns recorded finalizations.
 - `SyncPlan` mutates in place (commonware consumes and returns it) and returns storage errors
@@ -231,7 +244,9 @@ marshal's actors (consensus-marshal) for the actor; until then it ports what is 
 - [x] actor: `SyncPlan` and `SyncState` with plan.rs's tests.
 - [x] actor: the processor's prune schedule and finalization boundary with their tests.
 - [x] actor: the processor's speculative `Pending` state (cache, descendants, retain_branch).
-- [ ] actor: processor flights/replay/verifier, core (after marshal); tests (single and
+- [x] actor: the processor's execution layer (flights, forking, candidate processing, replay)
+  with commonware's flight and replay tests.
+- [ ] actor: processor propose/finalize, verifier, core (after marshal); tests (single and
   multi db apps, floor, properties).
 
 ## Log
@@ -258,6 +273,7 @@ marshal's actors (consensus-marshal) for the actor; until then it ports what is 
 - 2026-11-18 (stateful): the probe's discovery state.
 - 2026-11-18 (stateful): the probe actor driver; `consensus.simplex.actors.inbox` exported.
 - 2026-11-18 (stateful): the processor's speculative `Pending` state.
+- 2026-11-18 (stateful): the processor's execution layer and flight registry.
 
 ## dkg (owner: coding lane, thread T-01a1d58d-bff1-75a1-8ccb-4b8dd7bc9755)
 

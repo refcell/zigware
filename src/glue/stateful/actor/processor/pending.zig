@@ -151,6 +151,15 @@ pub fn Pending(comptime D: type, comptime B: type) type {
             return pruned;
         }
 
+        /// Drops `digest`'s entry and returns whether it was cached (a finalized root leaves the
+        /// cache once its hook completes).
+        pub fn remove(self: *Self, digest: D) bool {
+            var removed = self.entries.fetchSwapRemove(digest) orelse return false;
+            removed.value.merkleized.deinit();
+            assert(!self.entries.contains(digest));
+            return true;
+        }
+
         /// Discards every pending entry (a restart of speculative state).
         pub fn clear(self: *Self) void {
             for (self.entries.values()) |*entry| entry.merkleized.deinit();
