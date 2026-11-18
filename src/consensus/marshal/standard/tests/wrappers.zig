@@ -525,3 +525,161 @@ test "standard below-floor anchor delivery wakes subscriber" {
     // commonware `test_standard_below_floor_anchor_delivery_wakes_subscriber`.
     try run_for(60, below_floor_body);
 }
+
+// Inline and deferred wrappers over the harness mailbox (commonware's `WrapperKind`).
+
+const mocks = @import("../../mocks/root.zig");
+const oneshot = utils.channel.oneshot;
+const Marshal = @FieldType(Validator, "mailbox");
+const Stream = @import("../../ancestry.zig").AncestorStream(Marshal);
+const Mock = mocks.verifying.MockVerifyingApp(harness.B, Ctx, harness.Ctx, Stream);
+const InlineWrapper = @import("../inline.zig").Inline(
+    Ctx,
+    harness.S,
+    Mock,
+    harness.B,
+    types.FixedEpocher,
+);
+const DeferredWrapper = @import("../deferred.zig").Deferred(
+    Ctx,
+    harness.S,
+    Mock,
+    harness.B,
+    types.FixedEpocher,
+);
+
+fn epocher() types.FixedEpocher {
+    return .new(utils.NonZero(u64).init(harness.blocks_per_epoch).?);
+}
+
+/// Publishes a staged digest once, so the test knows staging registered its entries.
+const Publish = struct {
+    sender: ?oneshot.Sender(D),
+
+    pub fn call(self: *Publish, digest: D) void {
+        if (self.sender) |*sender| sender.send(digest) catch {};
+        self.sender = null;
+    }
+};
+
+fn StageTask(comptime W: type) type {
+    return struct {
+        fn run(
+            registry: W.Registry,
+            round: Round,
+            digest: D,
+            block: Block,
+            publish: *Publish,
+        ) void {
+            registry.stage(round, digest, block, publish, "test") catch {};
+        }
+    };
+}
+
+/// commonware `stage_block`: stages `block` (taken) at `round` in a task that waits for its
+/// durability ack, returning once staging published its digest.
+fn stage_block(
+    comptime W: type,
+    io: Io,
+    wrapper: *W,
+    publish: *Publish,
+    round: Round,
+    block: Block,
+) !Io.Future(void) {
+    const digest = block.digest();
+    var pair = try oneshot.channel(D, gpa, io);
+    defer pair.receiver.deinit();
+    publish.* = .{ .sender = pair.sender };
+    const args = .{ wrapper.registry, round, digest, block, publish };
+    var task = try io.concurrent(StageTask(W).run, args);
+    errdefer task.cancel(io);
+    const published = try pair.receiver.recv();
+    try testing.expect(published.eql(digest));
+    return task;
+}
+
+/// Takes and releases the gate at `(round, digest)`; whether there was one.
+fn take_gate(wrapper: anytype, round: Round, digest: D) bool {
+    var gate = wrapper.registry.take(round, digest) orelse return false;
+    gate.deinit();
+    return true;
+}
+
+/// Takes and releases the staged proposal at `(round, digest)`; whether there was one.
+fn take_staged(wrapper: anytype, round: Round, digest: D) !bool {
+    const taken = try wrapper.registry.take_staged(round, digest) orelse return false;
+    var staged = taken[0];
+    staged.block.deinit();
+    staged.ack.deinit();
+    return true;
+}
+
+/// commonware `epoch_zero_entries_remain`: stages proposals (with their gates) at epoch 0
+/// view 5 and at `notarized`, reports a notarization at `notarized`, and returns whether the
+/// epoch-0 entries remain.
+fn epoch_zero_entries_remain(comptime W: type, ctx: Ctx, notarized: Round) !bool {
+    const io = ctx.io();
+    const net = try Net.start(ctx, harness.num_validators);
+    defer net.stop();
+    const validator = try net.validator(ctx, "validator", 0);
+    defer validator.crash();
+    const marshal = validator.mailbox.clone();
+    const wrapper = try W.create(ctx.child("wrapper"), Mock.init(gpa), marshal, epocher());
+    defer wrapper.destroy();
+    var publishes: [2]Publish = undefined;
+    const earlier_round = round_at(5);
+    const earlier = try block_at(hash(""), 1, 100);
+    const earlier_digest = earlier.digest();
+    var first = try stage_block(W, io, wrapper, &publishes[0], earlier_round, earlier);
+    defer first.cancel(io);
+    const block = try block_at(hash(""), 2, 200);
+    const digest = block.digest();
+    var second = try stage_block(W, io, wrapper, &publishes[1], notarized, block);
+    defer second.cancel(io);
+    const proposal = harness.Proposal.init(notarized, .zero(), digest);
+    var notarization = try harness.make_notarization(gpa, &net.fixture, proposal, harness.quorum);
+    defer notarization.deinit(gpa);
+    _ = wrapper.report(.{ .notarization = notarization });
+    // Certification of the notarized round follows its notarization, so both entries stay.
+    try testing.expect(take_gate(wrapper, notarized, digest));
+    try testing.expect(try take_staged(wrapper, notarized, digest));
+    const gate = take_gate(wrapper, earlier_round, earlier_digest);
+    const staged = try take_staged(wrapper, earlier_round, earlier_digest);
+    // A report keeps or releases a round's gate and proposal together.
+    try testing.expectEqual(gate, staged);
+    return gate;
+}
+
+fn EpochCase(
+    comptime W: type,
+    comptime epoch: u64,
+    comptime view: u64,
+    comptime keeps: bool,
+) type {
+    return struct {
+        fn body(ctx: Ctx) anyerror!void {
+            const notarized: Round = .new(.new(epoch), .new(view));
+            try testing.expectEqual(keeps, try epoch_zero_entries_remain(W, ctx, notarized));
+        }
+    };
+}
+
+test "inline later epoch activity releases earlier epoch" {
+    // commonware `test_inline_later_epoch_activity_releases_earlier_epoch`.
+    try run_for(30, EpochCase(InlineWrapper, 1, 1, false).body);
+}
+
+test "deferred later epoch activity releases earlier epoch" {
+    // commonware `test_deferred_later_epoch_activity_releases_earlier_epoch`.
+    try run_for(30, EpochCase(DeferredWrapper, 1, 1, false).body);
+}
+
+test "inline same epoch activity keeps gates" {
+    // commonware `test_inline_same_epoch_activity_keeps_gates`.
+    try run_for(30, EpochCase(InlineWrapper, 0, 7, true).body);
+}
+
+test "deferred same epoch activity keeps gates" {
+    // commonware `test_deferred_same_epoch_activity_keeps_gates`.
+    try run_for(30, EpochCase(DeferredWrapper, 0, 7, true).body);
+}
