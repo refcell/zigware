@@ -184,6 +184,11 @@ marshal's actors (consensus-marshal) for the actor; until then it ports what is 
   `redelivered(block)`, `finalize(*const Provider, block, start_barrier)` → `Applied{barrier,
   prune}`, `branch_anchor`, `flights_idle`, `deinit`. `actor.Boxed(B)` is the type-erased
   ancestry (commonware `BoxedAncestry`).
+- `glue.stateful.db.p2p.Mailbox(DB, F, Op, D)`: the `qmdb.sync` Source over the resolver
+  actor's mailbox. `init(io, actor.mailbox.Sender(Message))`, `clone`, `deinit`,
+  `attach_database(db.Shared(DB))`, `serve(gpa, request)` → `Served` (first candidate and its
+  `Feedback`; `error.ResponseDropped` when the actor drops the fetch). `Message(DB, F, Op, D)`
+  keeps only the latest attachment and live fetches while the mailbox is full.
 
 ### Decisions
 - ManagedDb and DatabaseSet are comptime contracts. Mutations take `*Self` and return errors
@@ -253,6 +258,8 @@ marshal's actors (consensus-marshal) for the actor; until then it ports what is 
   with commonware's flight and replay tests.
 - [x] actor: the processor's finalization (`Processor.finalize`, boundary, redelivery) with
   commonware's finalization tests.
+- [x] db/p2p: the `Mailbox` sync source and its overflow policy.
+- [ ] db/p2p: the resolver actor (serving peers, response checks) on `qmdb.sync.sync`.
 - [ ] actor: processor propose (with the core mailbox), verifier, core (after marshal); tests (single and
   multi db apps, floor, properties).
 
@@ -282,6 +289,7 @@ marshal's actors (consensus-marshal) for the actor; until then it ports what is 
 - 2026-11-18 (stateful): the processor's speculative `Pending` state.
 - 2026-11-18 (stateful): the processor's execution layer and flight registry.
 - 2026-11-18 (stateful): the processor's finalization path and boxed ancestry.
+- 2026-11-18 (stateful): the db/p2p `Mailbox` sync source with commonware's mailbox tests.
 
 ## dkg (owner: coding lane, thread T-01a1d58d-bff1-75a1-8ccb-4b8dd7bc9755)
 
