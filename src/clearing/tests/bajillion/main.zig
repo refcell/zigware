@@ -272,4 +272,5 @@ test {
     _ = @import("ledger.zig");
     _ = @import("lifecycle.zig");
     _ = @import("checker.zig");
+    _ = @import("model/smoke_test.zig");
 }

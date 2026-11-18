@@ -103,6 +103,11 @@ qmdb `current` (balances, over the MMB) and `keyless` (payout log, over the MMR)
   database registers its metrics afresh on open) and `Store(I)` with `settle`, `apply`,
   `commit`, `roots`, `post`. The database tests are in `validator_db_test.zig`, the ledger
   vector in `ledger_test.zig`.
+- model.rs's checker (`tests/bajillion/checker.zig`) is depth first, as commonware's `check`
+  (`spawn_dfs`, `finish_when(HasDiscoveries::Any)`, no target state count or depth). Every
+  property is an invariant, so the search order changes neither the verdict nor the unique
+  state count, and depth first keeps only the stack in memory. No BFS mode. It runs on one
+  thread where Stateright uses all cores.
 
 ## Backlog
 - [x] lib.rs types and traits (`Epoch`, `Amount`), namespace.
@@ -130,8 +135,14 @@ qmdb `current` (balances, over the MMB) and `keyless` (payout log, over the MMR)
 - [x] Integration tests: ledger.rs (all 13 tests, with the reorg module).
 - [x] Integration tests: lifecycle.rs (all 6 tests; `schemes` runs secp256r1 users, a
   BLS12-381 operator, secp256r1 certificates, and `u256` amounts on its own small harness).
-- [ ] Integration tests:
-  model.rs (needs a small BFS model checker in place of Stateright).
+- [x] `tests/bajillion/checker.zig`: an explicit-state model checker in place of Stateright
+  (depth first on an explicit stack, a 64-bit fingerprint visited set as Stateright's, the
+  first failing property with its action path, bounded by `max_states`), tested on a planted
+  bug.
+- [x] model.rs groundwork: `model/world.zig` (World with a deep `clone` and a structural
+  fingerprint, and the roles' `clone`) and `model/replay.zig` (the committee replay, memoized
+  by the last post and the candidate).
+- [ ] Integration tests: model.rs's workload, properties, and six workloads on the checker.
 - [x] Fuzz targets `src/clearing/fuzz/{decode,verify}.zig` (commonware clearing/fuzz), seeded
   in `zig build test` and under `std.testing.fuzz`; the verify target includes BalanceProof.
 - [x] Benches `src/clearing/benches.zig` (zigware's own; commonware's clearing has none):
@@ -170,3 +181,5 @@ qmdb `current` (balances, over the MMB) and `keyless` (payout log, over the MMR)
 - 2026-11-18: ledger.rs, all 13 tests (queues, posting, halts, challenges, claims, custody,
   payout withdrawals under every posted root, compact ranges, and the reorg case).
 - 2026-11-18: lifecycle.rs, all 6 tests, including the mixed-schemes `u256` deployment.
+- 2026-11-18: the model checker for model.rs (`tests/bajillion/checker.zig`).
+- 2026-11-18: model.rs groundwork: World, its fingerprint, and the memoized committee replay.

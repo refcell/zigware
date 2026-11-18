@@ -204,6 +204,15 @@ pub fn Ledger(P: type, O: type, V: type, H: type, A: type) type {
             self.* = undefined;
         }
 
+        /// A copy holding copies of the namespace and of what the role persisted.
+        pub fn clone(self: *const Self) Allocator.Error!Self {
+            var copy = self.*;
+            copy.namespace = try self.namespace.clone(self.gpa);
+            errdefer copy.namespace.deinit(self.gpa);
+            copy.persisted = try self.persisted.clone(self.gpa);
+            return copy;
+        }
+
         /// Two ledgers are equal when they persisted the same records.
         pub fn eql(a: *const Self, b: *const Self) bool {
             return a.persisted.eql(&b.persisted);
