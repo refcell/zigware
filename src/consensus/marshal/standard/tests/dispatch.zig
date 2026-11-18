@@ -846,3 +846,132 @@ fn no_restage_body(ctx: Ctx) anyerror!void {
 test "standard does not restage dispatched block" {
     try run(no_restage_body);
 }
+
+/// The `processed_height` gauge in a Prometheus exposition: the first non-comment line of the
+/// form `<prefix>processed_height <value>` or `<prefix>processed_height{labels} <value>`.
+fn parse_processed_height(metrics: []const u8) ?u64 {
+    const name = "processed_height";
+    var lines = std.mem.splitScalar(u8, metrics, '\n');
+    while (lines.next()) |raw| {
+        const line = std.mem.trim(u8, raw, " \t\r");
+        if (std.mem.startsWith(u8, line, "#")) continue;
+        const index = std.mem.indexOf(u8, line, name) orelse continue;
+        var rest = line[index + name.len ..];
+        if (std.mem.startsWith(u8, rest, "{")) {
+            const end = std.mem.indexOfScalar(u8, rest, '}') orelse continue;
+            rest = rest[end + 1 ..];
+        }
+        if (rest.len == 0 or !std.ascii.isWhitespace(rest[0])) continue;
+        var values = std.mem.tokenizeAny(u8, rest, " \t");
+        const value = values.next() orelse return null;
+        return std.fmt.parseInt(u64, value, 10) catch null;
+    }
+    return null;
+}
+
+test "parse processed height reads plain and labelled gauges" {
+    const exposition =
+        \\# HELP marshal_processed_height The processed height.
+        \\marshal_processed_height_total 9
+        \\marshal_processed_height{epoch="0"} 7
+    ;
+    try testing.expectEqual(@as(?u64, 7), parse_processed_height(exposition));
+    try testing.expectEqual(@as(?u64, 3), parse_processed_height("a_processed_height 3\n"));
+    try testing.expectEqual(@as(?u64, null), parse_processed_height("# processed_height 3\n"));
+}
+
+const Validator = H.Validator(App);
+const max_pending_acks = 4;
+const invariant_blocks = 12;
+
+/// The bound marshal's `processed_height` keeps on every block the application received:
+/// the highest is at most `max_pending_acks` above it.
+fn check_invariant(ctx: Ctx, application: App) !void {
+    const blocks = try application.blocks(gpa);
+    defer App.free_blocks(gpa, blocks);
+    var highest: ?u64 = null;
+    for (blocks) |entry| highest = @max(highest orelse 0, entry.height.get());
+    const top = highest orelse return;
+    const text = try ctx.encode(gpa);
+    defer gpa.free(text);
+    const processed = parse_processed_height(text) orelse return error.GaugeMissing;
+    const gap = top -| processed;
+    if (gap > max_pending_acks) {
+        std.log.err("highest={d} processed={d} gap={d}", .{ top, processed, gap });
+        return error.InvariantViolated;
+    }
+}
+
+/// Submits `invariant_blocks` verified blocks and their finalizations to `validator`.
+fn submit_chain(validator: *Validator, fixture: *const harness.Fixture) !void {
+    const epocher = types.FixedEpocher.new(utils.NonZero(u64).init(harness.blocks_per_epoch).?);
+    var parent = cryptography.Sha256.hash(&.{""});
+    var parent_commitment = H.genesis_parent_commitment(harness.num_validators);
+    for (1..invariant_blocks + 1) |i| {
+        var block = try H.make_test_block(
+            gpa,
+            parent,
+            parent_commitment,
+            .new(i),
+            i,
+            harness.num_validators,
+        );
+        defer block.deinit();
+        const commitment = H.commitment(&block);
+        parent = H.digest(&block);
+        parent_commitment = commitment;
+        const epoch = epocher.containing(H.height(&block)).?.epoch;
+        const round: Round = .new(epoch, .new(i));
+        try H.verify(validator, round, &block);
+        const proposal = harness.Proposal.init(round, .new(i -| 1), commitment);
+        var finalization = try harness.make_finalization(gpa, fixture, proposal, harness.quorum);
+        defer finalization.deinit(gpa);
+        _ = validator.mailbox.report(.{ .finalization = finalization });
+    }
+}
+
+/// Regression test for the `Update.block` pruning contract: for every block at height `h`
+/// the application received, `processed_height` is at least `h - max_pending_acks`. The gauge
+/// is monotonic, so the test drives the pipeline (fill, drain) and checks after each step.
+fn processed_invariant_body(ctx: Ctx) anyerror!void {
+    var rng = utils.rng.test_rng();
+    var fixture = try harness.fixture(gpa, &rng);
+    defer fixture.deinit(gpa);
+    const participants = fixture.participants;
+    var network: harness.TestNetwork = try .start(gpa, ctx.io(), 1, participants, 1024 * 1024);
+    defer network.stop();
+    const provider: harness.Provider = .init(&fixture.schemes[0]);
+    const child = ctx.child("validator").with_attribute("index", 0);
+    const app = try App.manual_ack(gpa, ctx.io());
+    const validator =
+        try Validator.setup(
+            child,
+            network.network,
+            participants[0],
+            provider,
+            max_pending_acks,
+            app,
+        );
+    defer validator.crash();
+    const application = validator.application;
+    try testing.expectEqual(Height.new(0), try application.acknowledged());
+    // Marshal dispatches up to max_pending_acks blocks at a time and stalls until acked.
+    try submit_chain(validator, &fixture);
+    // More finalizations than max_pending_acks were submitted, so the pipeline stalls at
+    // max_pending_acks unacknowledged blocks: the peak-gap observation point.
+    while (application.block_count() < max_pending_acks) try ctx.sleep(.fromMilliseconds(10));
+    try check_invariant(ctx, application);
+    // Drain: acknowledge blocks as they arrive and recheck after each dispatch cycle.
+    while (true) {
+        const acked = try application.acknowledged();
+        try check_invariant(ctx, application);
+        if (acked.get() == invariant_blocks) break;
+    }
+}
+
+test "standard update block processed height invariant" {
+    const config: runtime.deterministic.Config = .{ .timeout_ns = 60 * std.time.ns_per_s };
+    var runner = try runtime.deterministic.Runner.init(gpa, config);
+    defer runner.deinit();
+    try try runner.start_context(processed_invariant_body, .{});
+}
