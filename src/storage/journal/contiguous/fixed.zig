@@ -1252,5 +1252,6 @@ test {
     _ = @import("fixed_bounded_test.zig");
     _ = @import("fixed_torn_test.zig");
     _ = @import("fixed_size_test.zig");
+    _ = @import("fixed_bounded_recovery_test.zig");
     _ = @import("fixed_operations_fuzz_test.zig");
 }

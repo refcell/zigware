@@ -217,6 +217,12 @@ variants need `runtime` storage; do them after its interface lands.
     durability, interrupted clears, watermark past an empty tail, `read_many`. The two
     should-panic `read_many` tests are assertions here and are not ported. Planted bug
     (ignore a staged clear intent) fails seven tests.
-  - [ ] fixed.rs: the bounded-recovery, start-sync, and cache-accounting tests (lines
-    2365-3400 and 8233-8895 of fixed.rs).
+  - [x] fixed.rs batch 4 (`fixed_bounded_recovery_test.zig`): hole after full capacity,
+    bounded recovery read counts (zigware's `Recovery.open` opens the checkpoint itself, so
+    the test subtracts its two metadata reads; the remaining counts match commonware's),
+    huge capacities, append fallbacks, cached reads at the 128-byte stack boundary, empty
+    prefixes, rebuilt gaps and tails, `init_at_most` restart sweeps, and retries after sync,
+    remove, and resize faults on `runtime.storage.faulty`. Planted bug (unbounded scan on a
+    bounded open) fails the read-count test.
+  - [ ] fixed.rs: the start-sync and cache-accounting tests (lines 2915-3400 and 8233-8895).
   - [ ] variable.rs: the remaining ~120 tests.
