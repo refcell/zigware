@@ -82,6 +82,12 @@ pub fn Requests(comptime F: type) type {
             assert(self.len() == write);
         }
 
+        /// Whether `id` is still tracked (not superseded, retained out, or removed).
+        pub fn tracks(self: *const Self, id: Id) bool {
+            for (self.tracked.items) |entry| if (entry.id == id) return true;
+            return false;
+        }
+
         pub fn contains(self: *const Self, start: u64) bool {
             return self.search(start).found;
         }
