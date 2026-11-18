@@ -183,7 +183,11 @@ const RecordingVoter = struct {
 
 /// commonware `build_notarization`/`build_finalization`'s proposal for `view`.
 fn build_proposal(view: u64) types.Proposal(Digest) {
-    return .init(.new(epoch, .new(view)), .new(view -| 1), .fill(@intCast(view)));
+    return build_proposal_in(epoch, view);
+}
+
+fn build_proposal_in(in_epoch: Epoch, view: u64) types.Proposal(Digest) {
+    return .init(.new(in_epoch, .new(view)), .new(view -| 1), .fill(@intCast(view)));
 }
 
 /// A fixture and an actor that finished replay (commonware `build_actor`).
@@ -241,10 +245,14 @@ const Env = struct {
     }
 
     fn finalization(self: *const Env, view: u64) !Certificate {
+        return self.finalization_in(epoch, view);
+    }
+
+    fn finalization_in(self: *const Env, in_epoch: Epoch, view: u64) !Certificate {
         const Finalize = types.Finalize(Scheme, Digest);
         var votes: [4]Finalize = undefined;
         for (&votes, self.fixture.schemes) |*vote, *scheme| {
-            vote.* = (try Finalize.sign(gpa, scheme, build_proposal(view))).?;
+            vote.* = (try Finalize.sign(gpa, scheme, build_proposal_in(in_epoch, view))).?;
         }
         const Finalization = types.Finalization(Scheme, Digest);
         const value = try Finalization.from_votes(gpa, &self.fixture.verifier, &votes, sequential);
@@ -302,6 +310,16 @@ const Env = struct {
             error.Closed => null,
             error.Empty => unreachable,
         };
+    }
+
+    /// Whether the actor accepts `certificate` (taken) as a response for `view`; returns
+    /// the parsed certificate's view.
+    fn validate(self: *Env, view: u64, certificate: Certificate) !?u64 {
+        const data = try encoded(certificate);
+        defer gpa.free(data);
+        var parsed = try self.actor.validate(.new(view), data) orelse return null;
+        defer parsed.deinit(gpa);
+        return parsed.view().get();
     }
 
     fn settled(self: *const Env, view: u64, kind: Kind) bool {
@@ -628,4 +646,187 @@ test "resolver actor higher notarization does not complete a backfill delivery" 
         .backfill(),
     });
     try testing.expectEqual(resolver.Outcome.unresolved, outcome.?);
+}
+
+test "resolver actor already certified notarization delivery retires the snapshot" {
+    var env: Env = undefined;
+    try env.start();
+    defer env.stop();
+    try certify(&env, 6, true);
+    // A second valid aggregate for the same proposal from a different signer subset.
+    // Certification belongs to the proposal, not to one encoding of its certificate.
+    const Notarize = types.Notarize(Scheme, Digest);
+    var votes: [3]Notarize = undefined;
+    for (&votes, env.fixture.schemes[0..3]) |*vote, *scheme| {
+        vote.* = (try Notarize.sign(gpa, scheme, build_proposal(6))).?;
+    }
+    const verifier = &env.fixture.verifier;
+    const alternate = try Notarization.from_votes(gpa, verifier, &votes, sequential);
+    const outcome = try env.deliver(6, .{ .notarization = alternate }, &.{
+        .ancestry(.notarization),
+    });
+    try testing.expectEqual(null, outcome);
+    try testing.expect(!env.settled(6, .nullification));
+}
+
+test "resolver actor finalization completes every delivery ask" {
+    var env: Env = undefined;
+    try env.start();
+    defer env.stop();
+    const outcome = try env.deliver(4, try env.finalization(6), &.{
+        .backfill(), .ancestry(.nullification), .ancestry(.notarization),
+    });
+    try testing.expectEqual(complete, outcome.?);
+}
+
+test "resolver actor mixed delivery credits only newly settled asks" {
+    inline for (.{ Kind.nullification, Kind.notarization }) |kind| {
+        var env: Env = undefined;
+        try env.start();
+        defer env.stop();
+        // Coalesce backfill and both ancestry kinds under one key.
+        const asks: []const Ask = &.{
+            .backfill(), .ancestry(.nullification), .ancestry(.notarization),
+        };
+        for (asks) |item| _ = try env.recorder.fetch(.{ .key = .init(4), .subscriber = item });
+        // The first response earns credit; replaying the snapshot settles nothing new.
+        for ([_]resolver.Outcome{ partial, .unresolved }) |expected| {
+            const certificate: Certificate = switch (kind) {
+                .nullification => try env.nullification(4),
+                .notarization => .{ .notarization = try env.notarization(4) },
+            };
+            try testing.expectEqual(expected, (try env.deliver(4, certificate, asks)).?);
+        }
+        try testing.expect(env.settled(4, kind));
+        // Nullification satisfies backfill and nullification ancestry; notarization only
+        // notarization ancestry.
+        try expect_subscriptions(&env, 4, switch (kind) {
+            .nullification => &.{.ancestry(.notarization)},
+            .notarization => &.{ .backfill(), .ancestry(.nullification) },
+        });
+    }
+}
+
+test "resolver actor stale delivery records new evidence without credit" {
+    var env: Env = undefined;
+    try env.start();
+    defer env.stop();
+    // Settle the notarization ask at 4, keeping a nullification ask outstanding there.
+    try env.updated(.{ .notarization = try env.notarization(4) });
+    const higher = consensus_types.View.new(4).next_term_start(term_length).get();
+    try env.resolve(higher, 4, .nullification, null);
+    // The stale snapshot's later certificate is still useful evidence.
+    const expected = try encoded(.{ .notarization = try env.notarization(higher) });
+    defer gpa.free(expected);
+    const outcome = try env.deliver(4, .{ .notarization = try env.notarization(higher) }, &.{
+        .ancestry(.notarization),
+    });
+    // No scoring verdict, and the nullification subscriber stays attached to the key.
+    try testing.expectEqual(null, outcome);
+    try testing.expect(!env.settled(4, .nullification));
+    try expect_subscriptions(&env, 4, &.{.ancestry(.nullification)});
+    // The evidence reaches both the resolver state and the voter.
+    try testing.expect(env.settled(higher, .notarization));
+    try testing.expectEqual(1, env.voter.recovered_certificates.items.len);
+    try testing.expectEqualSlices(u8, expected, env.voter.recovered_certificates.items[0]);
+}
+
+test "resolver actor settled key ignores a delivery without validation" {
+    var env: Env = undefined;
+    try env.start();
+    defer env.stop();
+    const expected = try encoded(try env.finalization(6));
+    defer gpa.free(expected);
+    try env.updated(try env.finalization(6));
+    try testing.expect(env.settled(4, .nullification));
+    try testing.expect(env.settled(4, .notarization));
+    // Garbage queued before local settlement is ignored without decoding or penalty.
+    const outcome = try env.deliver_bytes(4, try gpa.dupe(u8, "unverifiable"), &.{
+        .backfill(), .ancestry(.nullification), .ancestry(.notarization),
+    });
+    try testing.expectEqual(resolver.Outcome.ignored, outcome.?);
+    try testing.expect(!env.settled(7, .nullification));
+    try testing.expectEqualSlices(u8, expected, env.produce(6).?);
+    try testing.expectEqual(0, env.voter.recovered_certificates.items.len);
+}
+
+test "resolver actor nullification-only settled key still validates a delivery" {
+    var env: Env = undefined;
+    try env.start();
+    defer env.stop();
+    try env.updated(try env.nullification(4));
+    try testing.expect(env.settled(4, .nullification));
+    try testing.expect(!env.settled(4, .notarization));
+    const data = try gpa.dupe(u8, "unverifiable");
+    const outcome = try env.deliver_bytes(4, data, &.{.ancestry(.nullification)});
+    try testing.expectEqual(resolver.Outcome.invalid, outcome.?);
+}
+
+test "resolver actor notarization-only settled key still validates a delivery" {
+    var env: Env = undefined;
+    try env.start();
+    defer env.stop();
+    try env.updated(.{ .notarization = try env.notarization(4) });
+    try testing.expect(!env.settled(4, .nullification));
+    try testing.expect(env.settled(4, .notarization));
+    const data = try gpa.dupe(u8, "unverifiable");
+    const outcome = try env.deliver_bytes(4, data, &.{.ancestry(.notarization)});
+    try testing.expectEqual(resolver.Outcome.invalid, outcome.?);
+}
+
+test "resolver actor validate accepts a nullification covering the view in its term" {
+    var env: Env = undefined;
+    try env.start();
+    defer env.stop();
+    try testing.expect(consensus_types.View.new(6).same_term(.new(10), term_length));
+    try testing.expectEqual(6, (try env.validate(10, try env.nullification(6))).?);
+}
+
+test "resolver actor validate rejects a nullification from a different term" {
+    var env: Env = undefined;
+    try env.start();
+    defer env.stop();
+    try testing.expectEqual(null, try env.validate(11, try env.nullification(10)));
+}
+
+test "resolver actor validate rejects a nullification above the requested view" {
+    var env: Env = undefined;
+    try env.start();
+    defer env.stop();
+    try testing.expectEqual(null, try env.validate(8, try env.nullification(9)));
+}
+
+test "resolver actor failed verdict survives a higher certified floor" {
+    var env: Env = undefined;
+    try env.start();
+    defer env.stop();
+    try certify(&env, 7, false);
+    try certify(&env, 9, true);
+    // The tombstone survives the higher floor, which is served in place of view 7.
+    try testing.expect(env.actor.state.uncertifiable(.new(7)));
+    const floor = try encoded(.{ .notarization = try env.notarization(9) });
+    defer gpa.free(floor);
+    try testing.expectEqualSlices(u8, floor, env.produce(7).?);
+    // Failed certification does not make signed protocol evidence invalid.
+    const evidence: Certificate = .{ .notarization = try env.notarization(7) };
+    try testing.expectEqual(7, (try env.validate(7, evidence)).?);
+}
+
+test "resolver actor validate rejects a finalization from a different epoch" {
+    var env: Env = undefined;
+    try env.start();
+    defer env.stop();
+    try testing.expectEqual(null, try env.validate(7, try env.finalization_in(.new(10), 7)));
+}
+
+// zigware-only: commonware has no case for this rejection, and a plant that lets lower
+// notarizations through survived every ported test.
+test "resolver actor validate rejects a notarization below the requested view" {
+    var env: Env = undefined;
+    try env.start();
+    defer env.stop();
+    const below: Certificate = .{ .notarization = try env.notarization(5) };
+    try testing.expectEqual(null, try env.validate(6, below));
+    const exact: Certificate = .{ .notarization = try env.notarization(6) };
+    try testing.expectEqual(6, (try env.validate(6, exact)).?);
 }

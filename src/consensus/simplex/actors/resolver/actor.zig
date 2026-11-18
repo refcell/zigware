@@ -349,7 +349,7 @@ pub fn Actor(comptime P: type) type {
 
         /// Decodes and verifies a response for `view`: any certificate an honest peer could
         /// serve for the view is valid, even one answering the other kind.
-        fn validate(self: *Self, view: View, data: []const u8) !?Certificate {
+        pub fn validate(self: *Self, view: View, data: []const u8) !?Certificate {
             const cfg = self.scheme.certificate_codec_config();
             var incoming = codec.decode_cfg(Certificate, self.gpa, data, cfg) catch |err|
                 switch (err) {
