@@ -1472,4 +1472,5 @@ fn ReplayType(comptime V: type) type {
 
 test {
     _ = @import("variable_test.zig");
+    _ = @import("variable_offsets_test.zig");
 }

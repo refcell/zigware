@@ -232,4 +232,10 @@ variants need `runtime` storage; do them after its interface lands.
     (`DelayedSyncContext`, `PendingSyncs`), which synchronous syncs cannot produce, and the
     snapshot and cache-hit accounting tests (no snapshot readers, no per-read hit metrics
     on the fixed journal's reads here).
-  - [ ] variable.rs: the remaining ~120 tests.
+  - [x] variable.rs batch 1 (`variable_offsets_test.zig`): offsets and data disagreeing
+    (prune crash leaving the offsets end behind, several data prunes ahead, empty offsets
+    in another blob, offsets ending before the oldest data, bounded and not, mid-blob
+    offsets start, stale offsets watermark, offsets rebuilt across blobs, overlong and
+    over-capacity data blobs). Planted bug (skip the offsets-end check) fails one test.
+  - [ ] variable.rs: torn pages and watermark adoption, init_at_size and clears, init_sync,
+    bounded inspection and initialization, read_many, and the rest.
