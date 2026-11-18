@@ -17,7 +17,8 @@ const storage = @import("storage.zig");
 
 pub const Archive = storage.Archive;
 
-/// Configuration for an immutable `Archive(K, V)`.
+/// Configuration for an immutable `Archive(K, V)`. The archive borrows the partition name
+/// slices (its freezer and ordinal keep them), so they must outlive the archive.
 pub fn Config(comptime V: type) type {
     return struct {
         /// Partition of the commit record (freezer checkpoint and ordinal section bitmaps).

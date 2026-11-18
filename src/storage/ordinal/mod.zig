@@ -52,7 +52,7 @@ pub const SectionBits = struct {
     bits: ?*const BitMap,
 };
 
-/// Configuration for an `Ordinal`.
+/// Configuration for an `Ordinal`. The ordinal borrows `partition`, which must outlive it.
 pub const Config = struct {
     /// The partition holding the index blobs.
     partition: []const u8,

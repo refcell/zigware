@@ -39,7 +39,8 @@ pub const Record = records.Record;
 pub const Freezer = storage.Freezer;
 pub const table_blob_name = storage.table_blob_name;
 
-/// Configuration for a `Freezer(K, V)`.
+/// Configuration for a `Freezer(K, V)`. The freezer borrows `table_partition`, so the
+/// partition name slices must outlive it.
 pub fn Config(comptime V: type) type {
     return struct {
         /// Partition of the key index journal.

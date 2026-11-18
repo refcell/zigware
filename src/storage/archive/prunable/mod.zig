@@ -18,7 +18,8 @@ const storage = @import("storage.zig");
 pub const Archive = storage.Archive;
 pub const Positions = @import("sections.zig").Positions;
 
-/// Configuration for a prunable `Archive(T, K, V)`.
+/// Configuration for a prunable `Archive(T, K, V)`. The partition name slices must outlive
+/// the archive.
 pub fn Config(comptime T: type, comptime V: type) type {
     return struct {
         /// Transforms keys into their in-memory representation. The archive assumes
