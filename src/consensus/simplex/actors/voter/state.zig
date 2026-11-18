@@ -725,6 +725,13 @@ pub fn State(comptime S: type, comptime E: type, comptime D: type) type {
             return true;
         }
 
+        /// Records `value` as our proposal without checking its parent (commonware
+        /// `record_proposed`, which `proposed` runs after its parent check).
+        pub fn record_proposed(self: *Self, value: Proposal) bool {
+            const round = self.round_at(value.view()) orelse return false;
+            return round.proposed(self.now(), value);
+        }
+
         /// Releases the build latch when the captured parent is no longer valid and a
         /// replacement is selectable. Returns whether to drop the pending request.
         pub fn supersede_proposal_request(self: *Self, request: *const Context) bool {
@@ -1029,7 +1036,7 @@ pub fn State(comptime S: type, comptime E: type, comptime D: type) type {
         /// The payload of a parent usable as optimistic ancestry: a certificate-backed
         /// payload, or our own verified, unequivocated, notarize-broadcast proposal whose
         /// whole uncertified chain is usable and matches each recorded parent binding.
-        fn optimistic_ancestry_payload(self: *const Self, start: View) ?D {
+        pub fn optimistic_ancestry_payload(self: *const Self, start: View) ?D {
             var view = start;
             var top: ?D = null;
             var expected: ?D = null;

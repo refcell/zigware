@@ -223,7 +223,7 @@ handshake and the runtime's network, which the actor-stream and runtime lanes ar
   commonware's mod.rs tests (but DNS, see decisions), and the directory's metrics.
 - [x] lookup DNS tests on the runtime resolver (`Config.resolver`, as discovery has it).
 - [x] utils codec, mux, mocks, and `WrappedBackgroundReceiver` (bls-math lane, 6f151f7).
-- [-] Fuzz targets (commonware p2p/fuzz): owned by the bls-math lane, under src/p2p/fuzz/.
+- [x] Fuzz targets (commonware p2p/fuzz): bls-math lane, src/p2p/fuzz/ (5bd7641, a847216).
 
 ## Log
 - 2026-11-16: (parallel lane) lookup: graceful and clean shutdown, rate limiting, restarts,
