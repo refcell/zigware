@@ -26,11 +26,10 @@ resize, sync), `runtime.storage`, with the in-memory backend `runtime.storage.me
   `Recovery` and ported tests.
 - [x] journal/segmented: oversized journal (fixed index plus glob values, checkpoint restore
   and marker-tracked recovery) with its core tests.
-- [ ] journal/segmented: the rest of oversized.rs's ~13 recovery tests (48 ported in
-  oversized_recovery_test.zig: persistence, sync, value and index loss, torn and partial
-  pages, truncation crashes, short value reads, orphan sections, nested crashes, torn
-  rewrites, interrupted prunes, restores, marker preservation, lazy adoption; left:
-  sync-failure, interrupted destroy and section removal, and read-option/read-gate tests).
+- [ ] journal/segmented: the rest of oversized.rs's recovery tests (56 ported in
+  oversized_recovery_test.zig; left: interrupted destroy, interrupted section removal,
+  restore of interior corruption and rotted values, value-alignment sync concurrency, and
+  the read-option and read-gate tests).
 - [x] journal/contiguous: fixed journal (checkpoint, blob partition, recovery with watermark
   and clear intent, bounded open, `init_at_size`, `clear_to_size`, replay batches) with the
   shared contiguous suite and the checkpoint tests.
@@ -303,6 +302,8 @@ resize, sync), `runtime.storage`, with the in-memory backend `runtime.storage.me
   in-memory storage, `TestRng` seeded with the case seed, and the storage audit committed. The
   six large journal workloads (up to 16k items per case) run in Debug only with
   `-Dslow-tests`, like other lanes' large conformance tests.
+- Oversized `start_sync` is `sync`, so commonware's dropped-`start_sync`-handle test has no
+  counterpart; its sync-failure tests use a test-local partition sync fault (`SyncFault`).
 - metadata `start_sync` is `sync`: a failed started sync fails at the call and consumes the
   store, instead of failing the next sync (commonware's dropped-handle and failure tests map
   onto that, on faulty storage).

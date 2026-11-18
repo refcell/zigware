@@ -7,6 +7,7 @@ const std = @import("std");
 const testing = std.testing;
 const manager_mod = @import("manager.zig");
 const base = @import("oversized_test.zig");
+const paged = @import("runtime").buffer.paged;
 
 const gpa = testing.allocator;
 const Harness = base.Harness;
@@ -1173,5 +1174,318 @@ test "oversized recovery: an entry whose value was lost is never adopted again" 
     // Boot 3: a non-durable truncation would leave entry 1 range-valid over entry 2's bytes.
     journal = try h.open_tracked();
     try expect_adopted_consistent(&journal);
+    try journal.destroy();
+}
+
+const iface = @import("runtime").storage;
+
+/// commonware's `SyncFaultContext`: every blob of `fail_partition` fails its syncs; everything
+/// else passes through to `inner`.
+const SyncFault = struct {
+    inner: iface.Storage,
+    fail_partition: []const u8,
+
+    const FaultBlob = struct { inner: iface.Blob };
+
+    const storage_vtable: iface.Storage.VTable = .{
+        .open_versioned = open_versioned,
+        .remove = remove,
+        .scan = scan,
+    };
+
+    const blob_vtable: iface.Blob.VTable = .{
+        .read_at = read_at,
+        .write_at = write_at,
+        .resize = resize,
+        .sync = sync,
+        .close = close,
+    };
+
+    fn interface(self: *SyncFault) iface.Storage {
+        return .{ .ptr = self, .vtable = &storage_vtable };
+    }
+
+    fn from(ptr: *anyopaque) *SyncFault {
+        return @ptrCast(@alignCast(ptr));
+    }
+
+    fn open_versioned(
+        ptr: *anyopaque,
+        partition: []const u8,
+        name: []const u8,
+        versions: iface.VersionRange,
+    ) iface.Error!iface.Opened {
+        const self = from(ptr);
+        var opened = try self.inner.open_versioned(partition, name, versions);
+        if (!std.mem.eql(u8, partition, self.fail_partition)) return opened;
+        const wrapper = gpa.create(FaultBlob) catch {
+            opened.blob.close();
+            return error.Io;
+        };
+        wrapper.* = .{ .inner = opened.blob };
+        opened.blob = .{ .ptr = wrapper, .vtable = &blob_vtable };
+        return opened;
+    }
+
+    fn remove(ptr: *anyopaque, partition: []const u8, name: ?[]const u8) iface.Error!void {
+        return from(ptr).inner.remove(partition, name);
+    }
+
+    fn scan(
+        ptr: *anyopaque,
+        allocator: std.mem.Allocator,
+        partition: []const u8,
+    ) iface.Error!iface.Names {
+        return from(ptr).inner.scan(allocator, partition);
+    }
+
+    fn blob(ptr: *anyopaque) *FaultBlob {
+        return @ptrCast(@alignCast(ptr));
+    }
+
+    fn read_at(
+        ptr: *anyopaque,
+        offset: u64,
+        buffer: []u8,
+        options: iface.ReadOptions,
+    ) iface.Error!void {
+        return blob(ptr).inner.read_at_options(offset, buffer, options);
+    }
+
+    fn write_at(
+        ptr: *anyopaque,
+        offset: u64,
+        chunks: []const []const u8,
+        options: iface.WriteOptions,
+    ) iface.Error!void {
+        return blob(ptr).inner.write_at_vectored(offset, chunks, options);
+    }
+
+    fn resize(ptr: *anyopaque, length: u64) iface.Error!void {
+        return blob(ptr).inner.resize(length);
+    }
+
+    fn sync(_: *anyopaque) iface.Error!void {
+        return error.Io;
+    }
+
+    fn close(ptr: *anyopaque) void {
+        const wrapper = blob(ptr);
+        wrapper.inner.close();
+        gpa.destroy(wrapper);
+    }
+};
+
+test "oversized recovery: recovery fails when its value truncation cannot be durable" {
+    var h = try Harness.init();
+    defer h.deinit();
+    var journal = try h.open_tracked();
+    _ = try append(&journal, 1, 1, fill(1));
+    const damaged = try append(&journal, 1, 2, fill(2));
+    // One sync of every section publishes no marker.
+    try journal.sync_all();
+    journal.deinit();
+    // Damage entry 2's value, so recovery drops it and must release the bytes past entry 1.
+    const garbage = try gpa.alloc(u8, damaged.size);
+    defer gpa.free(garbage);
+    @memset(garbage, 0xFF);
+    const opened = try h.storage.open("test-values", &manager_mod.section_name(1));
+    try opened.blob.write_at(damaged.offset, garbage, .{});
+    try opened.blob.sync();
+    opened.blob.close();
+    // Boot 2: the values cannot sync, so initialization fails rather than return with a
+    // value truncation that is not durable.
+    var faulty: SyncFault = .{ .inner = h.storage.interface(), .fail_partition = "test-values" };
+    const storage = faulty.interface();
+    var recovery = try Journal.init_with_markers(gpa, storage, h.cfg(), "test-markers");
+    try recovery.drain();
+    if (recovery.finish()) |opened_journal| {
+        var unexpected = opened_journal;
+        unexpected.deinit();
+        return error.TestUnexpectedResult;
+    } else |_| {}
+    h.storage.crash();
+    // The index truncation was durable before the failure, so entry 2 is not adopted.
+    journal = try h.open_tracked();
+    try testing.expectEqual(chunk, try journal.size(1));
+    try expect_adopted_consistent(&journal);
+    try journal.destroy();
+}
+
+/// Two durable entries in section 1, then a recovery interrupted after durably shortening the
+/// index to one entry but before releasing entry 2's value (commonware's
+/// `test_reopen_at_most`).
+fn seed_interrupted_truncation(h: *Harness) !void {
+    var journal = try h.open_tracked();
+    defer journal.deinit();
+    _ = try append(&journal, 1, 1, fill(1));
+    _ = try append(&journal, 1, 2, fill(2));
+    try journal.sync_all();
+    try journal.index.truncate_pending_section(1, chunk);
+}
+
+test "oversized recovery: a value truncation is durable before its offset is reused" {
+    var h = try Harness.init();
+    defer h.deinit();
+    try seed_interrupted_truncation(&h);
+    h.storage.crash();
+    // Boot 2: recovery truncates the values to entry 1's end. Entry 3 reuses entry 2's freed
+    // range, and crash 2 lands after the index sync and before the values sync.
+    var journal = try h.open_tracked();
+    _ = try append(&journal, 1, 3, fill(3));
+    try journal.index.sync(&.{1});
+    journal.deinit();
+    h.storage.crash();
+    // Boot 3: without a durable truncation, entry 3 would adopt entry 2's frame.
+    journal = try h.open_tracked();
+    try expect_adopted_consistent(&journal);
+    try journal.destroy();
+}
+
+test "oversized recovery: a crash between truncations releases the orphaned values" {
+    var h = try Harness.init();
+    defer h.deinit();
+    try seed_interrupted_truncation(&h);
+    h.storage.crash();
+    var journal = try h.open_tracked();
+    try testing.expectEqual(chunk, try journal.size(1));
+    const stored = try journal.get(1, 0);
+    try testing.expectEqual(stored.value_offset + stored.value_size, try journal.values.size(1));
+    try expect_adopted_consistent(&journal);
+    try journal.destroy();
+}
+
+test "oversized recovery: a completed start_sync is recoverable" {
+    var h = try Harness.init();
+    defer h.deinit();
+    var journal = try h.open_checkpoint(.{ .section = 0, .size = 0 });
+    _ = try append(&journal, 1, 1, fill(1));
+    try journal.start_sync(&.{1});
+    journal.deinit();
+    h.storage.crash();
+    journal = try h.open_checkpoint(.{ .section = 1, .size = chunk });
+    try testing.expectEqual(chunk, try journal.size(1));
+    try expect_adopted_consistent(&journal);
+    try journal.destroy();
+}
+
+test "oversized recovery: a failed value sync recovers clean" {
+    // commonware's sync and start_sync variants: start_sync is sync here.
+    for ([_]bool{ false, true }) |started| {
+        var h = try Harness.init();
+        defer h.deinit();
+        var faulty: SyncFault = .{
+            .inner = h.storage.interface(),
+            .fail_partition = "test-values",
+        };
+        const cfg = h.cfg();
+        var journal = try Journal.init_with_checkpoint(gpa, faulty.interface(), cfg, .{
+            .section = 0,
+            .size = 0,
+        });
+        _ = try append(&journal, 1, 1, fill(1));
+        // The caller is never acknowledged; the index sync may still land.
+        const result = if (started) journal.start_sync(&.{1}) else journal.sync(&.{1});
+        try testing.expectError(error.Io, result);
+        journal.deinit();
+        h.storage.crash();
+        journal = try h.open_tracked();
+        try testing.expectEqual(0, try journal.size(1));
+        try journal.destroy();
+    }
+}
+
+/// Truncate the last byte of the raw index blob of `section` (commonware's
+/// `tear_index_tail`).
+fn tear_index_tail(h: *Harness, section: u64) !void {
+    const opened = try h.storage.open("test-index", &manager_mod.section_name(section));
+    defer opened.blob.close();
+    try opened.blob.resize(opened.len - 1);
+    try opened.blob.sync();
+}
+
+test "oversized recovery: a torn interior index page truncates its section" {
+    var h = try Harness.init_page(@intCast(base.TestEntry.fixed_size));
+    defer h.deinit();
+    var journal = try h.open_tracked();
+    for (1..6) |i| _ = try append(&journal, 1, i, fill(i));
+    try journal.sync_all();
+    journal.deinit();
+    // Corrupt the third page's checksum record; the valid last page hides it from tail
+    // discovery.
+    const opened = try h.storage.open("test-index", &manager_mod.section_name(1));
+    try testing.expectEqual(5 * entry_page, opened.len);
+    const record = 2 * entry_page + base.TestEntry.fixed_size;
+    try opened.blob.write_at(record, &@as([12]u8, @splat(0xFF)), .{});
+    try opened.blob.sync();
+    opened.blob.close();
+    journal = try h.open_tracked();
+    try testing.expectEqual(2 * chunk, try journal.size(1));
+    try expect_adopted_consistent(&journal);
+    // The values of the dropped entries are released.
+    const last = (try journal.last(1)).?;
+    try testing.expectEqual(last.value_offset + last.value_size, try journal.values.size(1));
+    try journal.destroy();
+}
+
+test "oversized recovery: a restore removes discarded sections without opening them" {
+    var h = try Harness.init_page(@intCast(base.TestEntry.fixed_size));
+    defer h.deinit();
+    var journal = try h.open_checkpoint(.{ .section = 0, .size = 0 });
+    // Section 1 holds the only checkpointed entry; sections 2 and 3 lie past it.
+    _ = try append(&journal, 1, 0, fill(0));
+    for (1..4) |id| _ = try append(&journal, 2, id, fill(id));
+    _ = try append(&journal, 3, 4, fill(4));
+    try journal.sync_all();
+    journal.deinit();
+    // A hidden interior hole in section 2 and a torn tail in section 3, which recovery would
+    // repair if it opened them.
+    const page_size: u64 = base.TestEntry.fixed_size;
+    const storage = h.storage.interface();
+    const section2 = manager_mod.section_name(2);
+    try paged.corrupt_page(storage, "test-index", &section2, 1, page_size);
+    try tear_index_tail(&h, 3);
+    journal = try h.open_checkpoint(.{ .section = 1, .size = chunk });
+    var index = try h.storage.scan(gpa, "test-index");
+    defer index.deinit(gpa);
+    var values = try h.storage.scan(gpa, "test-values");
+    defer values.deinit(gpa);
+    const retained = manager_mod.section_name(1);
+    for ([_][]const []u8{ index.items, values.items }) |names| {
+        try testing.expectEqual(1, names.len);
+        try testing.expectEqualSlices(u8, &retained, names[0]);
+    }
+    try journal.destroy();
+}
+
+test "oversized recovery: a tracked open repairs a torn index tail above the marker" {
+    var h = try Harness.init_page(@intCast(base.TestEntry.fixed_size));
+    defer h.deinit();
+    var journal = try h.open_checkpoint(.{ .section = 0, .size = 0 });
+    const first = try append(&journal, 1, 0, fill(0));
+    _ = try append(&journal, 1, 1, fill(1));
+    try journal.sync_all();
+    journal.deinit();
+    // Publish a marker covering only the first entry.
+    var markers = try Markers.init(gpa, h.storage.interface(), .{
+        .partition = "test-markers",
+        .codec_config = {},
+    });
+    _ = try markers.put(1, 1);
+    try markers.sync();
+    markers.deinit();
+    // Tearing the tail cuts entry 1's page, above the marker.
+    try tear_index_tail(&h, 1);
+    const writes_before = h.storage.writes;
+    journal = try h.open_tracked();
+    try testing.expectEqual(chunk, try journal.size(1));
+    try testing.expectEqual(0, (try journal.last(1)).?.id);
+    // The trim and the release of entry 1's value are durable; the matching marker is not
+    // rewritten.
+    try testing.expectEqual(writes_before, h.storage.writes);
+    const index_len = try h.storage.durable_len("test-index", &manager_mod.section_name(1));
+    try testing.expectEqual(entry_page, index_len.?);
+    const value_len = try h.storage.durable_len("test-values", &manager_mod.section_name(1));
+    try testing.expectEqual(byte_end(first), value_len.?);
     try journal.destroy();
 }
