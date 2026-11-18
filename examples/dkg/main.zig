@@ -13,49 +13,47 @@
 
 const std = @import("std");
 const Io = std.Io;
+const cli = @import("cli.zig");
 const setup = @import("setup.zig");
 
 const log = std.log.scoped(.dkg);
-
-const usage =
-    \\usage: dkg <command> [options]
-    \\
-    \\commands:
-    \\  setup      generate validator directories and network config
-    \\             [--node-dir ./data] [--peers 6] [--committee-size 4] [--base-port 3000]
-    \\             [--host 127.0.0.1]
-    \\
-;
 
 pub fn main(init: std.process.Init) !u8 {
     const io = init.io;
     const arena = init.arena.allocator();
     const args = try init.minimal.args.toSlice(arena);
-    var err_buffer: [1024]u8 = undefined;
+    var out_buffer: [4096]u8 = undefined;
+    var stdout = Io.File.stdout().writer(io, &out_buffer);
+    var err_buffer: [4096]u8 = undefined;
     var stderr = Io.File.stderr().writer(io, &err_buffer);
-    if (args.len < 2) return fail_usage(&stderr.interface);
-    if (std.mem.eql(u8, args[1], "setup")) {
-        const options = setup.parse_options(args[2..]) orelse
-            return fail_usage(&stderr.interface);
-        var out_buffer: [4096]u8 = undefined;
-        var stdout = Io.File.stdout().writer(io, &out_buffer);
-        setup.run(io, arena, &options, &stdout.interface) catch |err| {
-            log.err("setup failed: {t}", .{err});
+    const bin = if (args.len > 0) std.fs.path.basename(args[0]) else "dkg";
+    const rest = args[@min(args.len, 1)..];
+    const outcome = try cli.parse(rest, bin, &stdout.interface, &stderr.interface);
+    try stdout.interface.flush();
+    try stderr.interface.flush();
+    const parsed = switch (outcome) {
+        .exit => |status| return status,
+        .run => |parsed| parsed,
+    };
+    switch (parsed.command) {
+        .setup => |options| {
+            setup.run(io, arena, &options, &stdout.interface) catch |err| {
+                log.err("setup failed: {t}", .{err});
+                return 1;
+            };
+            try stdout.interface.flush();
+            return 0;
+        },
+        .bootstrap, .validator => {
+            log.err("bootstrap and validator wait on glue.dkg's reshare actor " ++
+                "(docs/lanes/examples-dkg.md)", .{});
             return 1;
-        };
-        try stdout.interface.flush();
-        return 0;
+        },
     }
-    return fail_usage(&stderr.interface);
-}
-
-fn fail_usage(stderr: *Io.Writer) !u8 {
-    try stderr.writeAll(usage);
-    try stderr.flush();
-    return 2;
 }
 
 test {
+    _ = @import("cli_test.zig");
     _ = @import("config_test.zig");
     _ = @import("setup_test.zig");
     _ = @import("types_test.zig");

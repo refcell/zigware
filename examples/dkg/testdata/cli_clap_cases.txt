@@ -1,0 +1,1452 @@
+### 
+exit=2
+Usage: dkg [OPTIONS] <COMMAND>
+
+Commands:
+  bootstrap  Run the one-shot DKG, write the resulting genesis, and keep serving until stopped
+  setup      Generate every validator directory with node and network config
+  validator  Start a validator node
+  help       Print this message or the help of the given subcommand(s)
+
+Options:
+      --log-level <LOG_LEVEL>            Minimum trace level emitted by the node [default: INFO]
+      --worker-threads <WORKER_THREADS>  Number of Tokio worker threads [default: 3]
+  -h, --help                             Print help
+### --help
+exit=0
+Usage: dkg [OPTIONS] <COMMAND>
+
+Commands:
+  bootstrap  Run the one-shot DKG, write the resulting genesis, and keep serving until stopped
+  setup      Generate every validator directory with node and network config
+  validator  Start a validator node
+  help       Print this message or the help of the given subcommand(s)
+
+Options:
+      --log-level <LOG_LEVEL>            Minimum trace level emitted by the node [default: INFO]
+      --worker-threads <WORKER_THREADS>  Number of Tokio worker threads [default: 3]
+  -h, --help                             Print help
+### -h
+exit=0
+Usage: dkg [OPTIONS] <COMMAND>
+
+Commands:
+  bootstrap  Run the one-shot DKG, write the resulting genesis, and keep serving until stopped
+  setup      Generate every validator directory with node and network config
+  validator  Start a validator node
+  help       Print this message or the help of the given subcommand(s)
+
+Options:
+      --log-level <LOG_LEVEL>            Minimum trace level emitted by the node [default: INFO]
+      --worker-threads <WORKER_THREADS>  Number of Tokio worker threads [default: 3]
+  -h, --help                             Print help
+### help
+exit=0
+Usage: dkg [OPTIONS] <COMMAND>
+
+Commands:
+  bootstrap  Run the one-shot DKG, write the resulting genesis, and keep serving until stopped
+  setup      Generate every validator directory with node and network config
+  validator  Start a validator node
+  help       Print this message or the help of the given subcommand(s)
+
+Options:
+      --log-level <LOG_LEVEL>            Minimum trace level emitted by the node [default: INFO]
+      --worker-threads <WORKER_THREADS>  Number of Tokio worker threads [default: 3]
+  -h, --help                             Print help
+### help setup
+exit=0
+Generate every validator directory with node and network config
+
+Usage: dkg setup [OPTIONS]
+
+Options:
+      --node-dir <NODE_DIR>
+          Directory where validator subdirectories will be generated [default: ./data]
+      --peers <PEERS>
+          Total number of validators to generate [default: 6]
+      --committee-size <COMMITTEE_SIZE>
+          Number of validators in each epoch committee [default: 4]
+      --base-port <BASE_PORT>
+          First local P2P port assigned to validator-0 [default: 3000]
+      --host <HOST>
+          IP address used for generated listen and dial addresses [default: 127.0.0.1]
+  -h, --help
+          Print help
+### help bootstrap
+exit=0
+Run the one-shot DKG, write the resulting genesis, and keep serving until stopped
+
+Usage: dkg bootstrap [OPTIONS]
+
+Options:
+      --node-dir <NODE_DIR>  Validator node directory containing config and runtime storage [default: ./data/validator-0]
+  -h, --help                 Print help
+### help validator
+exit=0
+Start a validator node
+
+Usage: dkg validator [OPTIONS]
+
+Options:
+      --node-dir <NODE_DIR>  Validator node directory containing config, genesis, and runtime storage [default: ./data/validator-0]
+      --state-sync           Run one-time peer state sync for a new late joiner
+  -h, --help                 Print help
+### help help
+exit=0
+Print this message or the help of the given subcommand(s)
+
+Usage: dkg help [COMMAND]...
+
+Arguments:
+  [COMMAND]...  Print help for the subcommand(s)
+### help bogus
+exit=2
+error: unrecognized subcommand 'bogus'
+
+Usage: dkg [OPTIONS] <COMMAND>
+
+For more information, try '--help'.
+### help setup extra
+exit=2
+error: unrecognized subcommand 'extra'
+
+Usage: dkg setup [OPTIONS]
+
+For more information, try '--help'.
+### setup --help
+exit=0
+Generate every validator directory with node and network config
+
+Usage: dkg setup [OPTIONS]
+
+Options:
+      --node-dir <NODE_DIR>
+          Directory where validator subdirectories will be generated [default: ./data]
+      --peers <PEERS>
+          Total number of validators to generate [default: 6]
+      --committee-size <COMMITTEE_SIZE>
+          Number of validators in each epoch committee [default: 4]
+      --base-port <BASE_PORT>
+          First local P2P port assigned to validator-0 [default: 3000]
+      --host <HOST>
+          IP address used for generated listen and dial addresses [default: 127.0.0.1]
+  -h, --help
+          Print help
+### setup -h
+exit=0
+Generate every validator directory with node and network config
+
+Usage: dkg setup [OPTIONS]
+
+Options:
+      --node-dir <NODE_DIR>
+          Directory where validator subdirectories will be generated [default: ./data]
+      --peers <PEERS>
+          Total number of validators to generate [default: 6]
+      --committee-size <COMMITTEE_SIZE>
+          Number of validators in each epoch committee [default: 4]
+      --base-port <BASE_PORT>
+          First local P2P port assigned to validator-0 [default: 3000]
+      --host <HOST>
+          IP address used for generated listen and dial addresses [default: 127.0.0.1]
+  -h, --help
+          Print help
+### bootstrap --help
+exit=0
+Run the one-shot DKG, write the resulting genesis, and keep serving until stopped
+
+Usage: dkg bootstrap [OPTIONS]
+
+Options:
+      --node-dir <NODE_DIR>  Validator node directory containing config and runtime storage [default: ./data/validator-0]
+  -h, --help                 Print help
+### validator --help
+exit=0
+Start a validator node
+
+Usage: dkg validator [OPTIONS]
+
+Options:
+      --node-dir <NODE_DIR>  Validator node directory containing config, genesis, and runtime storage [default: ./data/validator-0]
+      --state-sync           Run one-time peer state sync for a new late joiner
+  -h, --help                 Print help
+### validator -h
+exit=0
+Start a validator node
+
+Usage: dkg validator [OPTIONS]
+
+Options:
+      --node-dir <NODE_DIR>  Validator node directory containing config, genesis, and runtime storage [default: ./data/validator-0]
+      --state-sync           Run one-time peer state sync for a new late joiner
+  -h, --help                 Print help
+### bogus
+exit=2
+error: unrecognized subcommand 'bogus'
+
+Usage: dkg [OPTIONS] <COMMAND>
+
+For more information, try '--help'.
+### sett
+exit=2
+error: unrecognized subcommand 'sett'
+
+  tip: a similar subcommand exists: 'setup'
+
+Usage: dkg [OPTIONS] <COMMAND>
+
+For more information, try '--help'.
+### -x
+exit=2
+error: unexpected argument '-x' found
+
+Usage: dkg [OPTIONS] <COMMAND>
+
+For more information, try '--help'.
+### --version
+exit=2
+error: unexpected argument '--version' found
+
+Usage: dkg [OPTIONS] <COMMAND>
+
+For more information, try '--help'.
+### --bogus
+exit=2
+error: unexpected argument '--bogus' found
+
+Usage: dkg [OPTIONS] <COMMAND>
+
+For more information, try '--help'.
+### --log-level
+exit=2
+error: a value is required for '--log-level <LOG_LEVEL>' but none was supplied
+
+For more information, try '--help'.
+### --log-level nope setup
+exit=2
+error: invalid value 'nope' for '--log-level <LOG_LEVEL>': error parsing level: expected one of "error", "warn", "info", "debug", "trace", or a number 1-5
+
+For more information, try '--help'.
+### --log-level info
+exit=2
+error: 'dkg' requires a subcommand but one was not provided
+  [subcommands: bootstrap, setup, validator, help]
+
+Usage: dkg [OPTIONS] <COMMAND>
+
+For more information, try '--help'.
+### --worker-threads x setup
+exit=2
+error: invalid value 'x' for '--worker-threads <WORKER_THREADS>': invalid digit found in string
+
+For more information, try '--help'.
+### --worker-threads -1 setup
+exit=2
+error: unexpected argument '-1' found
+
+Usage: dkg [OPTIONS] <COMMAND>
+
+For more information, try '--help'.
+### --worker-threads 99999999999999999999999 setup
+exit=2
+error: invalid value '99999999999999999999999' for '--worker-threads <WORKER_THREADS>': number too large to fit in target type
+
+For more information, try '--help'.
+### --worker-threads
+exit=2
+error: a value is required for '--worker-threads <WORKER_THREADS>' but none was supplied
+
+For more information, try '--help'.
+### --log-level=bogus setup
+exit=2
+error: invalid value 'bogus' for '--log-level <LOG_LEVEL>': error parsing level: expected one of "error", "warn", "info", "debug", "trace", or a number 1-5
+
+For more information, try '--help'.
+### --log-level info --log-level warn setup
+exit=2
+error: the argument '--log-level <LOG_LEVEL>' cannot be used multiple times
+
+Usage: dkg [OPTIONS] <COMMAND>
+
+For more information, try '--help'.
+### setup --peers x
+exit=2
+error: invalid value 'x' for '--peers <PEERS>': invalid digit found in string
+
+For more information, try '--help'.
+### setup --peers
+exit=2
+error: a value is required for '--peers <PEERS>' but none was supplied
+
+For more information, try '--help'.
+### setup --base-port 70000
+exit=2
+error: invalid value '70000' for '--base-port <BASE_PORT>': 70000 is not in 0..=65535
+
+For more information, try '--help'.
+### setup --base-port -1
+exit=2
+error: unexpected argument '-1' found
+
+Usage: dkg setup [OPTIONS]
+
+For more information, try '--help'.
+### setup --host nope
+exit=2
+error: invalid value 'nope' for '--host <HOST>': invalid IP address syntax
+
+For more information, try '--help'.
+### setup --host
+exit=2
+error: a value is required for '--host <HOST>' but none was supplied
+
+For more information, try '--help'.
+### setup --peers 3 --peers 4
+exit=2
+error: the argument '--peers <PEERS>' cannot be used multiple times
+
+Usage: dkg setup [OPTIONS]
+
+For more information, try '--help'.
+### setup --bogus
+exit=2
+error: unexpected argument '--bogus' found
+
+Usage: dkg setup [OPTIONS]
+
+For more information, try '--help'.
+### setup --nod-dir x
+exit=2
+error: unexpected argument '--nod-dir' found
+
+  tip: a similar argument exists: '--node-dir'
+
+Usage: dkg setup --node-dir <NODE_DIR>
+
+For more information, try '--help'.
+### setup extra
+exit=2
+error: unexpected argument 'extra' found
+
+Usage: dkg setup [OPTIONS]
+
+For more information, try '--help'.
+### setup -x
+exit=2
+error: unexpected argument '-x' found
+
+Usage: dkg setup [OPTIONS]
+
+For more information, try '--help'.
+### setup --peers 3 --bogus
+exit=2
+error: unexpected argument '--bogus' found
+
+Usage: dkg setup --peers <PEERS>
+
+For more information, try '--help'.
+### validator --state-sync=maybe
+exit=2
+error: unexpected value 'maybe' for '--state-sync' found; no more were expected
+
+Usage: dkg validator --state-sync
+
+For more information, try '--help'.
+### validator --state-sync --state-sync
+exit=2
+error: the argument '--state-sync' cannot be used multiple times
+
+Usage: dkg validator [OPTIONS]
+
+For more information, try '--help'.
+### validator --state-sync=true --node-dir
+exit=2
+error: unexpected value 'true' for '--state-sync' found; no more were expected
+
+Usage: dkg validator --state-sync
+
+For more information, try '--help'.
+### validator --node-dir
+exit=2
+error: a value is required for '--node-dir <NODE_DIR>' but none was supplied
+
+For more information, try '--help'.
+### validator --node-dir a --node-dir b
+exit=2
+error: the argument '--node-dir <NODE_DIR>' cannot be used multiple times
+
+Usage: dkg validator [OPTIONS]
+
+For more information, try '--help'.
+### validator --bogus
+exit=2
+error: unexpected argument '--bogus' found
+
+Usage: dkg validator [OPTIONS]
+
+For more information, try '--help'.
+### validator --state
+exit=2
+error: unexpected argument '--state' found
+
+  tip: a similar argument exists: '--state-sync'
+
+Usage: dkg validator --state-sync
+
+For more information, try '--help'.
+### bootstrap --bogus
+exit=2
+error: unexpected argument '--bogus' found
+
+Usage: dkg bootstrap [OPTIONS]
+
+For more information, try '--help'.
+### bootstrap --node-dir
+exit=2
+error: a value is required for '--node-dir <NODE_DIR>' but none was supplied
+
+For more information, try '--help'.
+### bootstrap --state-sync
+exit=2
+error: unexpected argument '--state-sync' found
+
+Usage: dkg bootstrap [OPTIONS]
+
+For more information, try '--help'.
+### bootstrap extra
+exit=2
+error: unexpected argument 'extra' found
+
+Usage: dkg bootstrap [OPTIONS]
+
+For more information, try '--help'.
+### setup --log-level info
+exit=2
+error: unexpected argument '--log-level' found
+
+Usage: dkg setup [OPTIONS]
+
+For more information, try '--help'.
+### --peers 3 setup
+exit=2
+error: unexpected argument '--peers' found
+
+  tip: 'setup --peers' exists
+
+Usage: dkg [OPTIONS] <COMMAND>
+
+For more information, try '--help'.
+### help help x
+exit=2
+error: unrecognized subcommand 'x'
+
+Usage: dkg help [COMMAND]...
+### help -- setup
+exit=2
+error: unrecognized subcommand '--'
+
+Usage: dkg [OPTIONS] <COMMAND>
+
+For more information, try '--help'.
+### help setup --peers
+exit=2
+error: unrecognized subcommand '--peers'
+
+Usage: dkg setup [OPTIONS]
+
+For more information, try '--help'.
+### help setup -h
+exit=2
+error: unrecognized subcommand '-h'
+
+Usage: dkg setup [OPTIONS]
+
+For more information, try '--help'.
+### setup --help=x
+exit=2
+error: unexpected value 'x' for '--help' found; no more were expected
+
+Usage: dkg setup --help
+
+For more information, try '--help'.
+### --help=x
+exit=2
+error: unexpected value 'x' for '--help' found; no more were expected
+
+Usage: dkg --help <COMMAND>
+
+For more information, try '--help'.
+### validator --state-sync --bogus
+exit=2
+error: unexpected argument '--bogus' found
+
+Usage: dkg validator --state-sync
+
+For more information, try '--help'.
+### validator --state-sync extra
+exit=2
+error: unexpected argument 'extra' found
+
+Usage: dkg validator [OPTIONS]
+
+For more information, try '--help'.
+### validator --state-sync -h
+exit=0
+Start a validator node
+
+Usage: dkg validator [OPTIONS]
+
+Options:
+      --node-dir <NODE_DIR>  Validator node directory containing config, genesis, and runtime storage [default: ./data/validator-0]
+      --state-sync           Run one-time peer state sync for a new late joiner
+  -h, --help                 Print help
+### setup --peers 3 --committee-size 2 --nod x
+exit=2
+error: unexpected argument '--nod' found
+
+  tip: a similar argument exists: '--node-dir'
+
+Usage: dkg setup --peers <PEERS> --committee-size <COMMITTEE_SIZE> --node-dir <NODE_DIR>
+
+For more information, try '--help'.
+### --log-level info --bogus
+exit=2
+error: unexpected argument '--bogus' found
+
+Usage: dkg --log-level <LOG_LEVEL> <COMMAND>
+
+For more information, try '--help'.
+### --log-level info --worker
+exit=2
+error: unexpected argument '--worker' found
+
+  tip: a similar argument exists: '--worker-threads'
+
+Usage: dkg --log-level <LOG_LEVEL> --worker-threads <WORKER_THREADS> <COMMAND>
+
+For more information, try '--help'.
+### --worker 3
+exit=2
+error: unexpected argument '--worker' found
+
+  tip: a similar argument exists: '--worker-threads'
+
+Usage: dkg --worker-threads <WORKER_THREADS> <COMMAND>
+
+For more information, try '--help'.
+### --log-level info --peers 3
+exit=2
+error: unexpected argument '--peers' found
+
+Usage: dkg --log-level <LOG_LEVEL> <COMMAND>
+
+For more information, try '--help'.
+### --peer 3 setup
+exit=2
+error: unexpected argument '--peer' found
+
+  tip: 'setup --peers' exists
+
+Usage: dkg [OPTIONS] <COMMAND>
+
+For more information, try '--help'.
+### --peers 3 --log-level info validator
+exit=2
+error: unexpected argument '--peers' found
+
+Usage: dkg [OPTIONS] <COMMAND>
+
+For more information, try '--help'.
+### --log-level info setup --peers 3 --peers 4 --peers 5
+exit=2
+error: the argument '--peers <PEERS>' cannot be used multiple times
+
+Usage: dkg setup [OPTIONS]
+
+For more information, try '--help'.
+### setup --peers -x
+exit=2
+error: unexpected argument '-x' found
+
+Usage: dkg setup [OPTIONS]
+
+For more information, try '--help'.
+### -- --bogus
+exit=2
+error: unrecognized subcommand '--bogus'
+
+Usage: dkg [OPTIONS] <COMMAND>
+
+For more information, try '--help'.
+### -- setup
+exit=2
+error: unexpected argument 'setup' found
+
+  tip: subcommand 'setup' exists; to use it, remove the '--' before it
+
+Usage: dkg [OPTIONS] <COMMAND>
+
+For more information, try '--help'.
+### setup -- x
+exit=2
+error: unexpected argument 'x' found
+
+Usage: dkg setup [OPTIONS]
+
+For more information, try '--help'.
+### setup --peers=3 --peers=4 --help
+exit=2
+error: the argument '--peers <PEERS>' cannot be used multiple times
+
+Usage: dkg setup [OPTIONS]
+
+For more information, try '--help'.
+### validator --node-dir=a --state-sync --node-dir b --help
+exit=2
+error: the argument '--node-dir <NODE_DIR>' cannot be used multiple times
+
+Usage: dkg validator [OPTIONS]
+
+For more information, try '--help'.
+### bootstrap --nod
+exit=2
+error: unexpected argument '--nod' found
+
+  tip: a similar argument exists: '--node-dir'
+
+Usage: dkg bootstrap --node-dir <NODE_DIR>
+
+For more information, try '--help'.
+### setup -hx
+exit=0
+Generate every validator directory with node and network config
+
+Usage: dkg setup [OPTIONS]
+
+Options:
+      --node-dir <NODE_DIR>
+          Directory where validator subdirectories will be generated [default: ./data]
+      --peers <PEERS>
+          Total number of validators to generate [default: 6]
+      --committee-size <COMMITTEE_SIZE>
+          Number of validators in each epoch committee [default: 4]
+      --base-port <BASE_PORT>
+          First local P2P port assigned to validator-0 [default: 3000]
+      --host <HOST>
+          IP address used for generated listen and dial addresses [default: 127.0.0.1]
+  -h, --help
+          Print help
+### -hx
+exit=0
+Usage: dkg [OPTIONS] <COMMAND>
+
+Commands:
+  bootstrap  Run the one-shot DKG, write the resulting genesis, and keep serving until stopped
+  setup      Generate every validator directory with node and network config
+  validator  Start a validator node
+  help       Print this message or the help of the given subcommand(s)
+
+Options:
+      --log-level <LOG_LEVEL>            Minimum trace level emitted by the node [default: INFO]
+      --worker-threads <WORKER_THREADS>  Number of Tokio worker threads [default: 3]
+  -h, --help                             Print help
+### setup --node-dir=
+exit=2
+error: a value is required for '--node-dir <NODE_DIR>' but none was supplied
+
+For more information, try '--help'.
+### setup --peers=
+exit=2
+error: invalid value '' for '--peers <PEERS>': cannot parse integer from empty string
+
+For more information, try '--help'.
+### setup --peers= 3
+exit=2
+error: invalid value '' for '--peers <PEERS>': cannot parse integer from empty string
+
+For more information, try '--help'.
+### setup --host=
+exit=2
+error: invalid value '' for '--host <HOST>': invalid IP address syntax
+
+For more information, try '--help'.
+### --log-level= setup
+exit=2
+error: invalid value '' for '--log-level <LOG_LEVEL>': error parsing level: expected one of "error", "warn", "info", "debug", "trace", or a number 1-5
+
+For more information, try '--help'.
+### setup --peers 3 extra
+exit=2
+error: unexpected argument 'extra' found
+
+Usage: dkg setup [OPTIONS]
+
+For more information, try '--help'.
+### --log-level 0 setup
+exit=2
+error: invalid value '0' for '--log-level <LOG_LEVEL>': error parsing level: expected one of "error", "warn", "info", "debug", "trace", or a number 1-5
+
+For more information, try '--help'.
+### --log-level 6 setup
+exit=2
+error: invalid value '6' for '--log-level <LOG_LEVEL>': error parsing level: expected one of "error", "warn", "info", "debug", "trace", or a number 1-5
+
+For more information, try '--help'.
+### --log-level ERROR setup --help
+exit=0
+Generate every validator directory with node and network config
+
+Usage: dkg setup [OPTIONS]
+
+Options:
+      --node-dir <NODE_DIR>
+          Directory where validator subdirectories will be generated [default: ./data]
+      --peers <PEERS>
+          Total number of validators to generate [default: 6]
+      --committee-size <COMMITTEE_SIZE>
+          Number of validators in each epoch committee [default: 4]
+      --base-port <BASE_PORT>
+          First local P2P port assigned to validator-0 [default: 3000]
+      --host <HOST>
+          IP address used for generated listen and dial addresses [default: 127.0.0.1]
+  -h, --help
+          Print help
+### --log-level 5 bootstrap --help
+exit=0
+Run the one-shot DKG, write the resulting genesis, and keep serving until stopped
+
+Usage: dkg bootstrap [OPTIONS]
+
+Options:
+      --node-dir <NODE_DIR>  Validator node directory containing config and runtime storage [default: ./data/validator-0]
+  -h, --help                 Print help
+### --log-level +1 validator --help
+exit=0
+Start a validator node
+
+Usage: dkg validator [OPTIONS]
+
+Options:
+      --node-dir <NODE_DIR>  Validator node directory containing config, genesis, and runtime storage [default: ./data/validator-0]
+      --state-sync           Run one-time peer state sync for a new late joiner
+  -h, --help                 Print help
+### --log-level nope setup --help
+exit=0
+Generate every validator directory with node and network config
+
+Usage: dkg setup [OPTIONS]
+
+Options:
+      --node-dir <NODE_DIR>
+          Directory where validator subdirectories will be generated [default: ./data]
+      --peers <PEERS>
+          Total number of validators to generate [default: 6]
+      --committee-size <COMMITTEE_SIZE>
+          Number of validators in each epoch committee [default: 4]
+      --base-port <BASE_PORT>
+          First local P2P port assigned to validator-0 [default: 3000]
+      --host <HOST>
+          IP address used for generated listen and dial addresses [default: 127.0.0.1]
+  -h, --help
+          Print help
+### --log-level nope setup --bogus
+exit=2
+error: unexpected argument '--bogus' found
+
+Usage: dkg setup [OPTIONS]
+
+For more information, try '--help'.
+### --worker-threads x validator --help
+exit=0
+Start a validator node
+
+Usage: dkg validator [OPTIONS]
+
+Options:
+      --node-dir <NODE_DIR>  Validator node directory containing config, genesis, and runtime storage [default: ./data/validator-0]
+      --state-sync           Run one-time peer state sync for a new late joiner
+  -h, --help                 Print help
+### --worker-threads x help
+exit=0
+Usage: dkg [OPTIONS] <COMMAND>
+
+Commands:
+  bootstrap  Run the one-shot DKG, write the resulting genesis, and keep serving until stopped
+  setup      Generate every validator directory with node and network config
+  validator  Start a validator node
+  help       Print this message or the help of the given subcommand(s)
+
+Options:
+      --log-level <LOG_LEVEL>            Minimum trace level emitted by the node [default: INFO]
+      --worker-threads <WORKER_THREADS>  Number of Tokio worker threads [default: 3]
+  -h, --help                             Print help
+### --worker-threads +3 help
+exit=0
+Usage: dkg [OPTIONS] <COMMAND>
+
+Commands:
+  bootstrap  Run the one-shot DKG, write the resulting genesis, and keep serving until stopped
+  setup      Generate every validator directory with node and network config
+  validator  Start a validator node
+  help       Print this message or the help of the given subcommand(s)
+
+Options:
+      --log-level <LOG_LEVEL>            Minimum trace level emitted by the node [default: INFO]
+      --worker-threads <WORKER_THREADS>  Number of Tokio worker threads [default: 3]
+  -h, --help                             Print help
+### --log-level nope help setup
+exit=0
+Generate every validator directory with node and network config
+
+Usage: dkg setup [OPTIONS]
+
+Options:
+      --node-dir <NODE_DIR>
+          Directory where validator subdirectories will be generated [default: ./data]
+      --peers <PEERS>
+          Total number of validators to generate [default: 6]
+      --committee-size <COMMITTEE_SIZE>
+          Number of validators in each epoch committee [default: 4]
+      --base-port <BASE_PORT>
+          First local P2P port assigned to validator-0 [default: 3000]
+      --host <HOST>
+          IP address used for generated listen and dial addresses [default: 127.0.0.1]
+  -h, --help
+          Print help
+### --log-level info --log-level x setup --help
+exit=0
+Generate every validator directory with node and network config
+
+Usage: dkg setup [OPTIONS]
+
+Options:
+      --node-dir <NODE_DIR>
+          Directory where validator subdirectories will be generated [default: ./data]
+      --peers <PEERS>
+          Total number of validators to generate [default: 6]
+      --committee-size <COMMITTEE_SIZE>
+          Number of validators in each epoch committee [default: 4]
+      --base-port <BASE_PORT>
+          First local P2P port assigned to validator-0 [default: 3000]
+      --host <HOST>
+          IP address used for generated listen and dial addresses [default: 127.0.0.1]
+  -h, --help
+          Print help
+### --log-level nope bogus
+exit=2
+error: unrecognized subcommand 'bogus'
+
+Usage: dkg [OPTIONS] <COMMAND>
+
+For more information, try '--help'.
+### --log-level nope
+exit=2
+error: invalid value 'nope' for '--log-level <LOG_LEVEL>': error parsing level: expected one of "error", "warn", "info", "debug", "trace", or a number 1-5
+
+For more information, try '--help'.
+### --worker-threads x --log-level info
+exit=2
+error: invalid value 'x' for '--worker-threads <WORKER_THREADS>': invalid digit found in string
+
+For more information, try '--help'.
+### --log-level=info
+exit=2
+error: 'dkg' requires a subcommand but one was not provided
+  [subcommands: bootstrap, setup, validator, help]
+
+Usage: dkg [OPTIONS] <COMMAND>
+
+For more information, try '--help'.
+### --log-level=bogus setup --help
+exit=2
+error: invalid value 'bogus' for '--log-level <LOG_LEVEL>': error parsing level: expected one of "error", "warn", "info", "debug", "trace", or a number 1-5
+
+For more information, try '--help'.
+### --log-level=info --log-level=warn setup --help
+exit=2
+error: the argument '--log-level <LOG_LEVEL>' cannot be used multiple times
+
+Usage: dkg [OPTIONS] <COMMAND>
+
+For more information, try '--help'.
+### --log-level=info --log-level warn setup --help
+exit=0
+Generate every validator directory with node and network config
+
+Usage: dkg setup [OPTIONS]
+
+Options:
+      --node-dir <NODE_DIR>
+          Directory where validator subdirectories will be generated [default: ./data]
+      --peers <PEERS>
+          Total number of validators to generate [default: 6]
+      --committee-size <COMMITTEE_SIZE>
+          Number of validators in each epoch committee [default: 4]
+      --base-port <BASE_PORT>
+          First local P2P port assigned to validator-0 [default: 3000]
+      --host <HOST>
+          IP address used for generated listen and dial addresses [default: 127.0.0.1]
+  -h, --help
+          Print help
+### --worker-threads x --log-level nope setup --help
+exit=2
+error: invalid value 'x' for '--worker-threads <WORKER_THREADS>': invalid digit found in string
+
+For more information, try '--help'.
+### --log-level x --log-level y setup --help
+exit=2
+error: invalid value 'x' for '--log-level <LOG_LEVEL>': error parsing level: expected one of "error", "warn", "info", "debug", "trace", or a number 1-5
+
+For more information, try '--help'.
+### --log-level info --log-level y
+exit=2
+error: the argument '--log-level <LOG_LEVEL>' cannot be used multiple times
+
+Usage: dkg [OPTIONS] <COMMAND>
+
+For more information, try '--help'.
+### --log-level nope --worker-threads x
+exit=2
+error: invalid value 'nope' for '--log-level <LOG_LEVEL>': error parsing level: expected one of "error", "warn", "info", "debug", "trace", or a number 1-5
+
+For more information, try '--help'.
+### --log-level info --log-level warn --worker-threads x
+exit=2
+error: the argument '--log-level <LOG_LEVEL>' cannot be used multiple times
+
+Usage: dkg [OPTIONS] <COMMAND>
+
+For more information, try '--help'.
+### --log-level info --log-level
+exit=2
+error: a value is required for '--log-level <LOG_LEVEL>' but none was supplied
+
+For more information, try '--help'.
+### --worker-threads 1 --worker-threads 2 setup --help
+exit=0
+Generate every validator directory with node and network config
+
+Usage: dkg setup [OPTIONS]
+
+Options:
+      --node-dir <NODE_DIR>
+          Directory where validator subdirectories will be generated [default: ./data]
+      --peers <PEERS>
+          Total number of validators to generate [default: 6]
+      --committee-size <COMMITTEE_SIZE>
+          Number of validators in each epoch committee [default: 4]
+      --base-port <BASE_PORT>
+          First local P2P port assigned to validator-0 [default: 3000]
+      --host <HOST>
+          IP address used for generated listen and dial addresses [default: 127.0.0.1]
+  -h, --help
+          Print help
+### -h setup
+exit=0
+Usage: dkg [OPTIONS] <COMMAND>
+
+Commands:
+  bootstrap  Run the one-shot DKG, write the resulting genesis, and keep serving until stopped
+  setup      Generate every validator directory with node and network config
+  validator  Start a validator node
+  help       Print this message or the help of the given subcommand(s)
+
+Options:
+      --log-level <LOG_LEVEL>            Minimum trace level emitted by the node [default: INFO]
+      --worker-threads <WORKER_THREADS>  Number of Tokio worker threads [default: 3]
+  -h, --help                             Print help
+### --help bogus
+exit=0
+Usage: dkg [OPTIONS] <COMMAND>
+
+Commands:
+  bootstrap  Run the one-shot DKG, write the resulting genesis, and keep serving until stopped
+  setup      Generate every validator directory with node and network config
+  validator  Start a validator node
+  help       Print this message or the help of the given subcommand(s)
+
+Options:
+      --log-level <LOG_LEVEL>            Minimum trace level emitted by the node [default: INFO]
+      --worker-threads <WORKER_THREADS>  Number of Tokio worker threads [default: 3]
+  -h, --help                             Print help
+### setup -h --bogus
+exit=0
+Generate every validator directory with node and network config
+
+Usage: dkg setup [OPTIONS]
+
+Options:
+      --node-dir <NODE_DIR>
+          Directory where validator subdirectories will be generated [default: ./data]
+      --peers <PEERS>
+          Total number of validators to generate [default: 6]
+      --committee-size <COMMITTEE_SIZE>
+          Number of validators in each epoch committee [default: 4]
+      --base-port <BASE_PORT>
+          First local P2P port assigned to validator-0 [default: 3000]
+      --host <HOST>
+          IP address used for generated listen and dial addresses [default: 127.0.0.1]
+  -h, --help
+          Print help
+### setup --bogus -h
+exit=2
+error: unexpected argument '--bogus' found
+
+Usage: dkg setup [OPTIONS]
+
+For more information, try '--help'.
+### setup --help --peers x
+exit=0
+Generate every validator directory with node and network config
+
+Usage: dkg setup [OPTIONS]
+
+Options:
+      --node-dir <NODE_DIR>
+          Directory where validator subdirectories will be generated [default: ./data]
+      --peers <PEERS>
+          Total number of validators to generate [default: 6]
+      --committee-size <COMMITTEE_SIZE>
+          Number of validators in each epoch committee [default: 4]
+      --base-port <BASE_PORT>
+          First local P2P port assigned to validator-0 [default: 3000]
+      --host <HOST>
+          IP address used for generated listen and dial addresses [default: 127.0.0.1]
+  -h, --help
+          Print help
+### setup --peers x --help
+exit=2
+error: invalid value 'x' for '--peers <PEERS>': invalid digit found in string
+
+For more information, try '--help'.
+### setup --peers -h
+exit=2
+error: a value is required for '--peers <PEERS>' but none was supplied
+
+For more information, try '--help'.
+### setup --committee-size 99999999999999999999999
+exit=2
+error: invalid value '99999999999999999999999' for '--committee-size <COMMITTEE_SIZE>': number too large to fit in target type
+
+For more information, try '--help'.
+### setup --base-port 65536
+exit=2
+error: invalid value '65536' for '--base-port <BASE_PORT>': 65536 is not in 0..=65535
+
+For more information, try '--help'.
+### setup --base-port 99999999999999999999999
+exit=2
+error: invalid value '99999999999999999999999' for '--base-port <BASE_PORT>': number too large to fit in target type
+
+For more information, try '--help'.
+### setup --base-port=-5
+exit=2
+error: invalid value '-5' for '--base-port <BASE_PORT>': -5 is not in 0..=65535
+
+For more information, try '--help'.
+### setup --base-port=+5 --help
+exit=0
+Generate every validator directory with node and network config
+
+Usage: dkg setup [OPTIONS]
+
+Options:
+      --node-dir <NODE_DIR>
+          Directory where validator subdirectories will be generated [default: ./data]
+      --peers <PEERS>
+          Total number of validators to generate [default: 6]
+      --committee-size <COMMITTEE_SIZE>
+          Number of validators in each epoch committee [default: 4]
+      --base-port <BASE_PORT>
+          First local P2P port assigned to validator-0 [default: 3000]
+      --host <HOST>
+          IP address used for generated listen and dial addresses [default: 127.0.0.1]
+  -h, --help
+          Print help
+### setup --host ::1 --help
+exit=0
+Generate every validator directory with node and network config
+
+Usage: dkg setup [OPTIONS]
+
+Options:
+      --node-dir <NODE_DIR>
+          Directory where validator subdirectories will be generated [default: ./data]
+      --peers <PEERS>
+          Total number of validators to generate [default: 6]
+      --committee-size <COMMITTEE_SIZE>
+          Number of validators in each epoch committee [default: 4]
+      --base-port <BASE_PORT>
+          First local P2P port assigned to validator-0 [default: 3000]
+      --host <HOST>
+          IP address used for generated listen and dial addresses [default: 127.0.0.1]
+  -h, --help
+          Print help
+### setup --host 1.2.3 --help
+exit=2
+error: invalid value '1.2.3' for '--host <HOST>': invalid IP address syntax
+
+For more information, try '--help'.
+### setup --host 01.2.3.4
+exit=2
+error: invalid value '01.2.3.4' for '--host <HOST>': invalid IP address syntax
+
+For more information, try '--help'.
+### setup --peers=x --bogus
+exit=2
+error: invalid value 'x' for '--peers <PEERS>': invalid digit found in string
+
+For more information, try '--help'.
+### setup --peer 3
+exit=2
+error: unexpected argument '--peer' found
+
+  tip: a similar argument exists: '--peers'
+
+Usage: dkg setup --peers <PEERS>
+
+For more information, try '--help'.
+### setup --committee 3
+exit=2
+error: unexpected argument '--committee' found
+
+  tip: a similar argument exists: '--committee-size'
+
+Usage: dkg setup --committee-size <COMMITTEE_SIZE>
+
+For more information, try '--help'.
+### help -h
+exit=2
+error: unrecognized subcommand '-h'
+
+Usage: dkg [OPTIONS] <COMMAND>
+
+For more information, try '--help'.
+### help --help
+exit=2
+error: unrecognized subcommand '--help'
+
+Usage: dkg [OPTIONS] <COMMAND>
+
+For more information, try '--help'.
+### vali
+exit=2
+error: unrecognized subcommand 'vali'
+
+  tip: a similar subcommand exists: 'validator'
+
+Usage: dkg [OPTIONS] <COMMAND>
+
+For more information, try '--help'.
+### boot
+exit=2
+error: unrecognized subcommand 'boot'
+
+  tip: a similar subcommand exists: 'bootstrap'
+
+Usage: dkg [OPTIONS] <COMMAND>
+
+For more information, try '--help'.
+### he
+exit=2
+error: unrecognized subcommand 'he'
+
+  tip: a similar subcommand exists: 'help'
+
+Usage: dkg [OPTIONS] <COMMAND>
+
+For more information, try '--help'.
+### setup --peers x --bogus
+exit=2
+error: unexpected argument '--bogus' found
+
+Usage: dkg setup --peers <PEERS>
+
+For more information, try '--help'.
+### setup --peers --bogus
+exit=2
+error: unexpected argument '--bogus' found
+
+Usage: dkg setup [OPTIONS]
+
+For more information, try '--help'.
+### setup --peers --nod
+exit=2
+error: unexpected argument '--nod' found
+
+  tip: a similar argument exists: '--node-dir'
+
+Usage: dkg setup --node-dir <NODE_DIR>
+
+For more information, try '--help'.
+### -- foo
+exit=2
+error: unrecognized subcommand 'foo'
+
+Usage: dkg [OPTIONS] <COMMAND>
+
+For more information, try '--help'.
+### setup -- --bogus
+exit=2
+error: unexpected argument '--bogus' found
+
+Usage: dkg setup [OPTIONS]
+
+For more information, try '--help'.
+### help sett
+exit=2
+error: unrecognized subcommand 'sett'
+
+Usage: dkg [OPTIONS] <COMMAND>
+
+For more information, try '--help'.
+### --log-level --bogus
+exit=2
+error: unexpected argument '--bogus' found
+
+Usage: dkg [OPTIONS] <COMMAND>
+
+For more information, try '--help'.
+### --log-level info --log-level nope --bogus
+exit=2
+error: unexpected argument '--bogus' found
+
+Usage: dkg [OPTIONS] <COMMAND>
+
+For more information, try '--help'.
+### setup --peers 3 -x
+exit=2
+error: unexpected argument '-x' found
+
+Usage: dkg setup [OPTIONS]
+
+For more information, try '--help'.
+### setup --peers 3 --peers x --bogus
+exit=2
+error: unexpected argument '--bogus' found
+
+Usage: dkg setup [OPTIONS]
+
+For more information, try '--help'.
+### --log-level info --help=x
+exit=2
+error: unexpected value 'x' for '--help' found; no more were expected
+
+Usage: dkg --help <COMMAND>
+
+For more information, try '--help'.
+### setup --peers 3 --help=x
+exit=2
+error: unexpected value 'x' for '--help' found; no more were expected
+
+Usage: dkg setup --help
+
+For more information, try '--help'.
+### validator --state-sync --state-sync=x
+exit=2
+error: unexpected value 'x' for '--state-sync' found; no more were expected
+
+Usage: dkg validator <--node-dir <NODE_DIR>|--state-sync>
+
+For more information, try '--help'.
+### validator --state-sync --node-dir a --state-sync=x
+exit=2
+error: unexpected value 'x' for '--state-sync' found; no more were expected
+
+Usage: dkg validator <--node-dir <NODE_DIR>|--state-sync>
+
+For more information, try '--help'.
+### --peers 3 --log-level info setup
+exit=2
+error: unexpected argument '--peers' found
+
+  tip: 'setup --peers' exists
+
+Usage: dkg [OPTIONS] <COMMAND>
+
+For more information, try '--help'.
+### --hel setup
+exit=2
+error: unexpected argument '--hel' found
+
+  tip: a similar argument exists: '--help'
+
+Usage: dkg --help <COMMAND>
+
+For more information, try '--help'.
+### --state setup validator
+exit=2
+error: unexpected argument '--state' found
+
+  tip: 'validator --state-sync' exists
+
+Usage: dkg [OPTIONS] <COMMAND>
+
+For more information, try '--help'.
+### setup --node-dir=a --node-dir
+exit=2
+error: a value is required for '--node-dir <NODE_DIR>' but none was supplied
+
+For more information, try '--help'.
+### -
+exit=2
+error: unrecognized subcommand '-'
+
+Usage: dkg [OPTIONS] <COMMAND>
+
+For more information, try '--help'.
+### setup -
+exit=2
+error: unexpected argument '-' found
+
+Usage: dkg setup [OPTIONS]
+
+For more information, try '--help'.
+### --log-level info -- setup
+exit=2
+error: unexpected argument 'setup' found
+
+  tip: subcommand 'setup' exists; to use it, remove the '--' before it
+
+Usage: dkg [OPTIONS] <COMMAND>
+
+For more information, try '--help'.
+### validator --state-sync=
+exit=2
+error: unexpected value '' for '--state-sync' found; no more were expected
+
+Usage: dkg validator --state-sync
+
+For more information, try '--help'.
+### setup --peers=-1
+exit=2
+error: invalid value '-1' for '--peers <PEERS>': invalid digit found in string
+
+For more information, try '--help'.
+### setup --base-port=-99999999999999999999
+exit=2
+error: invalid value '-99999999999999999999' for '--base-port <BASE_PORT>': number too small to fit in target type
+
+For more information, try '--help'.
+### setup --base-port=+
+exit=2
+error: invalid value '+' for '--base-port <BASE_PORT>': invalid digit found in string
+
+For more information, try '--help'.
+### --worker-threads=-1 setup
+exit=2
+error: invalid value '-1' for '--worker-threads <WORKER_THREADS>': invalid digit found in string
+
+For more information, try '--help'.
+### validator --node-dir a --nod
+exit=2
+error: unexpected argument '--nod' found
+
+  tip: a similar argument exists: '--node-dir'
+
+Usage: dkg validator --node-dir <NODE_DIR>
+
+For more information, try '--help'.
+### validator --state-sync --nod
+exit=2
+error: unexpected argument '--nod' found
+
+  tip: a similar argument exists: '--node-dir'
+
+Usage: dkg validator --state-sync --node-dir <NODE_DIR>
+
+For more information, try '--help'.
+### validator --node-dir a --state-sync=x
+exit=2
+error: unexpected value 'x' for '--state-sync' found; no more were expected
+
+Usage: dkg validator --state-sync
+
+For more information, try '--help'.
+### validator --node-dir=a --state-sync=x
+exit=2
+error: unexpected value 'x' for '--state-sync' found; no more were expected
+
+Usage: dkg validator <--node-dir <NODE_DIR>|--state-sync>
+
+For more information, try '--help'.
+### setup --peers=3 --help=x
+exit=2
+error: unexpected value 'x' for '--help' found; no more were expected
+
+Usage: dkg setup --help <--node-dir <NODE_DIR>|--peers <PEERS>|--committee-size <COMMITTEE_SIZE>|--base-port <BASE_PORT>|--host <HOST>>
+
+For more information, try '--help'.
+### setup --peers 3 --peers 4 --help=x
+exit=2
+error: unexpected value 'x' for '--help' found; no more were expected
+
+Usage: dkg setup --help <--node-dir <NODE_DIR>|--peers <PEERS>|--committee-size <COMMITTEE_SIZE>|--base-port <BASE_PORT>|--host <HOST>>
+
+For more information, try '--help'.
+### --log-level nope -h
+exit=2
+error: invalid value 'nope' for '--log-level <LOG_LEVEL>': error parsing level: expected one of "error", "warn", "info", "debug", "trace", or a number 1-5
+
+For more information, try '--help'.
+### -- sett
+exit=2
+error: unrecognized subcommand 'sett'
+
+  tip: a similar subcommand exists: 'setup'
+
+Usage: dkg [OPTIONS] <COMMAND>
+
+For more information, try '--help'.
+### -- help
+exit=2
+error: unexpected argument 'help' found
+
+  tip: subcommand 'help' exists; to use it, remove the '--' before it
+
+Usage: dkg [OPTIONS] <COMMAND>
+
+For more information, try '--help'.
+### setup --peers 3 --peers=4 --bogus
+exit=2
+error: the argument '--peers <PEERS>' cannot be used multiple times
+
+Usage: dkg setup [OPTIONS]
+
+For more information, try '--help'.
+### setup --peers=3 --peers 4 --bogus
+exit=2
+error: unexpected argument '--bogus' found
+
+Usage: dkg setup [OPTIONS]
+
+For more information, try '--help'.
+### validator --state-sync --state-sync --bogus
+exit=2
+error: the argument '--state-sync' cannot be used multiple times
+
+Usage: dkg validator [OPTIONS]
+
+For more information, try '--help'.
+### --log-level=info --help=x
+exit=2
+error: unexpected value 'x' for '--help' found; no more were expected
+
+Usage: dkg --help <--log-level <LOG_LEVEL>|--worker-threads <WORKER_THREADS>> <COMMAND>
+
+For more information, try '--help'.
+### --log-level info --worker-threads 2 --help=x
+exit=2
+error: unexpected value 'x' for '--help' found; no more were expected
+
+Usage: dkg --help <--log-level <LOG_LEVEL>|--worker-threads <WORKER_THREADS>> <COMMAND>
+
+For more information, try '--help'.
+### bootstrap --node-dir=a --help=x
+exit=2
+error: unexpected value 'x' for '--help' found; no more were expected
+
+Usage: dkg bootstrap --help <--node-dir <NODE_DIR>>
+
+For more information, try '--help'.

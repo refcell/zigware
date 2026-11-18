@@ -1,6 +1,8 @@
 # Lane: examples-dkg
 
-Owner: the broadcast-resolver thread. Owns `examples/dkg` (commonware `examples/dkg`).
+Owner: the examples lane (thread T-01a1d5b9-c891-7699-81af-37a9c87adafc) for the application,
+bootstrap, validator, CLI, and demo; the broadcast-resolver thread ported config, types, and
+setup. Owns `examples/dkg` (commonware `examples/dkg`).
 
 ## Backlog
 
@@ -10,6 +12,8 @@ Owner: the broadcast-resolver thread. Owns `examples/dkg` (commonware `examples/
       (`Participants`, a glue `ParticipantsProvider`), `Secrets` (a glue `SecretStore` over
       `storage.metadata`), and `genesis.json`.
 - [x] `setup.zig` and the `setup` subcommand.
+- [x] `cli.zig`: the clap `Cli` (`--log-level`, `--worker-threads`, `bootstrap`, `setup`,
+      `validator`, `help`), byte-identical to `commonware-dkg` over 176 recorded cases.
 - [ ] `application.zig`, `bootstrap.zig`, `validator.zig` on glue.dkg's actor, bootstrap,
       probe, and orchestrator (coding lane, in progress).
 - [ ] Demo recording (`just` recipe `dkg`, etc/scripts/record-demo.sh).
@@ -24,6 +28,12 @@ Owner: the broadcast-resolver thread. Owns `examples/dkg` (commonware `examples/
 - `Secrets` is shared by pointer (commonware clones an `Arc`); a failed write drops the store
   and later calls fail with `error.SecretsFailed` (commonware panics on next use).
 
+- The CLI's help screens are fixed text from `commonware-dkg`; the parser models clap 4.6's
+  order of checks (see `cli.zig`). `--worker-threads` is parsed and ignored: the production
+  runner runs on `std.Io.Threaded`, not Tokio.
+- Until glue.dkg's actor `run` lands, `bootstrap` and `validator` parse and exit 1.
+
 ## Log
 
 - 2026-11-18: config, types, and setup with commonware's tests and vectors.
+- 2026-11-18: the clap CLI with commonware-dkg's recorded cases (examples lane).

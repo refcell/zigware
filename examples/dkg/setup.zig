@@ -43,38 +43,6 @@ pub const Error = error{
     NonEmptyDirectory,
 };
 
-/// The options from `--node-dir`, `--peers`, `--committee-size`, `--base-port`, and `--host`
-/// (each `--name value` or `--name=value`, at most once), or null when they do not parse.
-pub fn parse_options(args: []const []const u8) ?Options {
-    const names = [_][]const u8{ "node-dir", "peers", "committee-size", "base-port", "host" };
-    var values: [names.len]?[]const u8 = @splat(null);
-    var index: usize = 0;
-    while (index < args.len) : (index += 1) {
-        const arg = args[index];
-        if (!std.mem.startsWith(u8, arg, "--")) return null;
-        const equals = std.mem.indexOfScalar(u8, arg, '=');
-        const name = arg[2 .. equals orelse arg.len];
-        const slot = for (names, 0..) |candidate, position| {
-            if (std.mem.eql(u8, candidate, name)) break position;
-        } else return null;
-        if (values[slot] != null) return null;
-        values[slot] = if (equals) |at| arg[at + 1 ..] else blk: {
-            index += 1;
-            if (index == args.len) return null;
-            break :blk args[index];
-        };
-    }
-    var options: Options = .{};
-    if (values[0]) |text| options.node_dir = text;
-    if (values[1]) |text| options.peers = std.fmt.parseInt(u64, text, 10) catch return null;
-    if (values[2]) |text| {
-        options.committee_size = std.fmt.parseInt(u64, text, 10) catch return null;
-    }
-    if (values[3]) |text| options.base_port = std.fmt.parseInt(u16, text, 10) catch return null;
-    if (values[4]) |text| options.host = IpAddr.parse(text) catch return null;
-    return options;
-}
-
 /// Checks the peer count, the committee size, the dealer log slots, and the port range.
 pub fn validate(options: *const Options) Error!void {
     if (options.peers == 0) return error.ZeroPeers;

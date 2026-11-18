@@ -383,3 +383,32 @@ fn value_names(comptime command: Command) [command.args.len][]const u8 {
     for (&names, command.args) |*name, arg| name.* = "--" ++ arg.long ++ " <" ++ arg.long ++ ">";
     return names;
 }
+
+/// Runs each `### <args>` record of `cases` (exit status, then stdout and stderr together,
+/// as a commonware binary printed them) through `run`, and checks there are `count`.
+pub fn expect_cases(
+    cases: []const u8,
+    count: usize,
+    run: fn (std.mem.Allocator, []const []const u8, *Writer) anyerror!u8,
+) !void {
+    const gpa = std.testing.allocator;
+    var records = std.mem.splitSequence(u8, cases[4..], "\n### ");
+    var seen: usize = 0;
+    while (records.next()) |record| : (seen += 1) {
+        const args_end = std.mem.indexOfScalar(u8, record, '\n').?;
+        var args: std.ArrayList([]const u8) = .empty;
+        defer args.deinit(gpa);
+        var words = std.mem.tokenizeScalar(u8, record[0..args_end], ' ');
+        while (words.next()) |word| try args.append(gpa, word);
+        const rest = record[args_end + 1 ..];
+        const exit_end = std.mem.indexOfScalar(u8, rest, '\n').?;
+        const expected_exit = try std.fmt.parseInt(u8, rest["exit=".len..exit_end], 10);
+        const expected = std.mem.trimEnd(u8, rest[exit_end + 1 ..], "\n");
+        var out: Writer.Allocating = .init(gpa);
+        defer out.deinit();
+        errdefer std.debug.print("case: {s}\n", .{record[0..args_end]});
+        try std.testing.expectEqual(expected_exit, try run(gpa, args.items, &out.writer));
+        try std.testing.expectEqualStrings(expected, std.mem.trimEnd(u8, out.written(), "\n"));
+    }
+    try std.testing.expectEqual(count, seen);
+}

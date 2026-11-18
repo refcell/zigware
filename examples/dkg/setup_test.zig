@@ -147,32 +147,3 @@ test "dkg: setup rejects non-empty directory" {
     try tmp.dir.access(io, "nodes/sentinel", .{});
     try testing.expectError(error.FileNotFound, tmp.dir.access(io, "nodes/validator-0", .{}));
 }
-
-test "dkg: parse options takes clap's forms and defaults" {
-    const defaults = setup.parse_options(&.{}).?;
-    try testing.expectEqualStrings("./data", defaults.node_dir);
-    try testing.expectEqual(6, defaults.peers);
-    try testing.expectEqual(4, defaults.committee_size);
-    try testing.expectEqual(3000, defaults.base_port);
-
-    const parsed = setup.parse_options(&.{
-        "--node-dir", "out", "--peers=5", "--committee-size", "3", "--base-port=4000",
-        "--host",     "::1",
-    }).?;
-    try testing.expectEqualStrings("out", parsed.node_dir);
-    try testing.expectEqual(5, parsed.peers);
-    try testing.expectEqual(3, parsed.committee_size);
-    try testing.expectEqual(4000, parsed.base_port);
-    try testing.expect(parsed.host == .v6);
-
-    const refused = [_][]const []const u8{
-        &.{"--peers"},
-        &.{ "--peers", "x" },
-        &.{ "--peers", "1", "--peers", "2" },
-        &.{ "--base-port", "70000" },
-        &.{ "--host", "localhost" },
-        &.{"positional"},
-        &.{ "--unknown", "1" },
-    };
-    for (refused) |args| try testing.expect(setup.parse_options(args) == null);
-}
