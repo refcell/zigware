@@ -771,3 +771,103 @@ pub fn HintFinalizedTriggersFetch(comptime H: type) type {
         }
     };
 }
+
+/// commonware `genesis_emitted_once`: genesis is delivered and acknowledged once, and a
+/// restart after its acknowledgement does not deliver it again.
+pub fn GenesisEmittedOnce(comptime H: type) type {
+    return struct {
+        pub fn run(gpa: Allocator) !void {
+            try run_timed(gpa, 0, timeout_default_s, body, .{});
+        }
+
+        fn body(ctx: Ctx) anyerror!void {
+            const gpa = ctx.gpa();
+            var single: Single(H) = undefined;
+            try single.start(ctx, try .manual_ack(gpa, ctx.io()));
+            defer single.stop(gpa);
+            const node = single.nodes[0];
+            try testing.expectEqual(null, node.height);
+            try testing.expectEqual(null, try node.mailbox.get_processed());
+            try testing.expectEqual(null, try node.mailbox.get_anchor());
+            try testing.expectEqual(Height.zero(), try node.application.acknowledged());
+            try ctx.sleep(.fromMilliseconds(10));
+            const processed = try node.mailbox.get_processed();
+            try testing.expectEqual(core.Processed{ .block = .zero() }, processed);
+            try testing.expect(node.application.contains(.zero()));
+
+            // Let marshal persist the height-zero acknowledgement before restart.
+            try ctx.sleep(.fromMilliseconds(10));
+            try single.restart(ctx, try .manual_ack(gpa, ctx.io()));
+            const restarted = single.nodes[0];
+            try testing.expectEqual(Height.zero(), restarted.height);
+            try ctx.sleep(.fromMilliseconds(100));
+            // Genesis is not emitted again after height zero is acknowledged.
+            try testing.expectEqual(0, restarted.application.block_count());
+            const pending = try restarted.application.pending_ack_heights(gpa);
+            defer gpa.free(pending);
+            try testing.expectEqual(0, pending.len);
+        }
+    };
+}
+
+/// commonware `commitment_fetch_height_hint_mismatch_wakes_subscriber`: a commitment fetch
+/// whose height hint is wrong still wakes the subscriber; the block is cached only when its
+/// decoded height is within the hint.
+pub fn CommitmentFetchHeightHintMismatch(comptime H: type) type {
+    return struct {
+        pub fn run(gpa: Allocator) !void {
+            try run_timed(gpa, 0, timeout_default_s, body, .{});
+        }
+
+        fn body(ctx: Ctx) anyerror!void {
+            const gpa = ctx.gpa();
+            var single: Single(H) = undefined;
+            try single.start(ctx, try .init(gpa, ctx.io()));
+            defer single.stop(gpa);
+            try single.add(ctx, try .init(gpa, ctx.io()));
+            // Below its hint: woken and cached by the decoded height.
+            const seed_below = "commitment-fetch-height-hint-mismatch";
+            try fetch(ctx, &single, seed_below, .{ 7, 7 }, 1_000_000, true, true);
+            // Above its hint: woken, not cached.
+            const seed_above = "commitment-fetch-height-above-hint";
+            try fetch(ctx, &single, seed_above, .{ 1_000_000, 8 }, 7, false, false);
+        }
+
+        /// Validator 1 holds a block at `at[0]` (view `at[1]`); validator 0 subscribes to it by
+        /// commitment with a height `hint` (linking the pair after subscribing when `link`),
+        /// receives it, and caches it only when `cached`.
+        fn fetch(
+            ctx: Ctx,
+            single: *Single(H),
+            seed: []const u8,
+            at: [2]u64,
+            hint: u64,
+            cached: bool,
+            link: bool,
+        ) !void {
+            const gpa = ctx.gpa();
+            const parent = harness.Sha256.hash(&.{seed});
+            const parent_commitment = H.genesis_parent_commitment(num_validators);
+            const height: Height = .new(at[0]);
+            var block = try H.make_test_block(gpa, parent, parent_commitment, height, at[1], 4);
+            defer block.deinit();
+            try H.propose(single.nodes[1], round_at(at[1]), &block);
+            const fallback: core.CommitmentFallback = .{ .fetch_by_commitment = .new(hint) };
+            const mailbox = single.nodes[0].mailbox;
+            var receiver = try mailbox.subscribe_by_commitment(H.commitment(&block), fallback);
+            defer receiver.deinit();
+            const pair = single.validators.participants[0..2];
+            if (link) try single.network.link_all(pair, harness.link);
+            var received = try receiver.recv();
+            defer H.Variant.deinit_block(gpa, &received);
+            try testing.expect(H.Variant.commitment(&received).eql(H.commitment(&block)));
+            try testing.expectEqual(Height.new(at[0]), block_height(&received));
+            const found = try mailbox.get_block(.{ .digest = received.digest() });
+            if (cached) {
+                try expect_block(H, gpa, found, .new(at[0]), received.digest());
+            } else {
+                try testing.expectEqual(null, found);
+            }
+        }
+    };
+}

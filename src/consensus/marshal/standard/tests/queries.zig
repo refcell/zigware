@@ -65,3 +65,11 @@ test "standard finalize same height different views" {
 test "standard hint finalized triggers fetch" {
     try queries.HintFinalizedTriggersFetch(H).run(gpa);
 }
+
+test "standard genesis emitted once" {
+    try queries.GenesisEmittedOnce(H).run(gpa);
+}
+
+test "standard commitment fetch height hint mismatch wakes subscriber" {
+    try queries.CommitmentFetchHeightHintMismatch(H).run(gpa);
+}
