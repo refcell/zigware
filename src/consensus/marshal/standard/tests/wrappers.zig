@@ -683,3 +683,182 @@ test "deferred same epoch activity keeps gates" {
     // commonware `test_deferred_same_epoch_activity_keeps_gates`.
     try run_for(30, EpochCase(DeferredWrapper, 0, 7, true).body);
 }
+
+/// Each wrapper call as an `Io` task, so a test can hold several in flight.
+fn Calls(comptime W: type) type {
+    return struct {
+        fn verify(wrapper: *W, context: harness.Ctx, digest: D) Io.Cancelable!?bool {
+            return wrapper.verify(undefined, context, digest);
+        }
+
+        fn certify(wrapper: *W, round: Round, digest: D) Io.Cancelable!?bool {
+            return wrapper.certify(undefined, round, digest);
+        }
+    };
+}
+
+/// A block proposed by `leader` at `round` over `(parent_view, parent)`.
+fn proposed_block(
+    round: Round,
+    leader: harness.K,
+    parent_view: u64,
+    parent: D,
+    height: u64,
+    timestamp: u64,
+) !Block {
+    const context: harness.Ctx = .{ .round = round, .leader = leader, .parent = .{
+        .new(parent_view),
+        parent,
+    } };
+    const raw = try harness.B.init(gpa, context, parent, .new(height), timestamp);
+    return mocks_block.ready(harness.B, gpa, raw);
+}
+
+/// commonware `pending_conflicting_verify_does_not_poison_certification`.
+fn pending_conflicting_verify(comptime W: type, ctx: Ctx) !void {
+    const io = ctx.io();
+    const net = try Net.start(ctx, harness.num_validators);
+    defer net.stop();
+    const validator = try net.validator(ctx, "validator", 0);
+    defer validator.crash();
+    const participants = net.fixture.participants;
+    var genesis = try H.genesis_block(gpa, harness.num_validators);
+    defer genesis.deinit();
+    var certified = try proposed_block(round_at(1), participants[0], 0, genesis.digest(), 1, 100);
+    defer certified.deinit();
+    try H.verify(validator, round_at(1), &certified);
+    const skipped_parent = certified.digest();
+    var skipped = try proposed_block(round_at(2), participants[1], 1, skipped_parent, 2, 200);
+    defer skipped.deinit();
+    try H.verify(validator, round_at(2), &skipped);
+    const round = round_at(3);
+    var block = try proposed_block(round, participants[1], 2, skipped.digest(), 3, 300);
+    defer block.deinit();
+    const digest = block.digest();
+    const conflicting: harness.Ctx = .{
+        .round = round,
+        .leader = participants[1],
+        .parent = .{ .new(1), certified.digest() },
+    };
+    const marshal = validator.mailbox.clone();
+    const wrapper = try W.create(ctx.child("wrapper"), Mock.init(gpa), marshal, epocher());
+    defer wrapper.destroy();
+    defer io.sleep(.fromMilliseconds(100), .awake) catch {};
+    // `verify` registers the gate but cannot resolve it until the block arrives; a
+    // notarization in this window makes consensus's sole `certify` await that pending gate.
+    var verify = try io.concurrent(Calls(W).verify, .{ wrapper, conflicting, digest });
+    defer _ = verify.cancel(io) catch {};
+    try io.sleep(.fromMilliseconds(10), .awake);
+    var certify = try io.concurrent(Calls(W).certify, .{ wrapper, round, digest });
+    defer _ = certify.cancel(io) catch {};
+    try io.sleep(.fromMilliseconds(10), .awake);
+    try buffer_deliver(validator, &block);
+    // The conflicting proposal is rejected; certification does not adopt that verdict.
+    try testing.expectEqual(@as(?bool, false), try verify.await(io));
+    try testing.expectEqual(@as(?bool, true), try certify.await(io));
+}
+
+fn ConflictingCase(comptime W: type) type {
+    return struct {
+        fn body(ctx: Ctx) anyerror!void {
+            try pending_conflicting_verify(W, ctx);
+        }
+    };
+}
+
+test "inline pending conflicting verify does not poison certification" {
+    // commonware `test_inline_pending_conflicting_verify_does_not_poison_certification`.
+    try run_for(30, ConflictingCase(InlineWrapper).body);
+}
+
+test "deferred pending conflicting verify does not poison certification" {
+    // commonware `test_deferred_pending_conflicting_verify_does_not_poison_certification`.
+    try run_for(30, ConflictingCase(DeferredWrapper).body);
+}
+
+const Tip = struct { app: App, height: u64, digest: D };
+
+fn at_tip(state: Tip) bool {
+    const tip = state.app.tip() orelse return false;
+    return tip.height.get() == state.height and tip.digest.eql(state.digest);
+}
+
+/// commonware `certify_below_finalized_round`: verifies a block, has consensus finalize a
+/// later round through the wrapper (pruning the block's gate), and returns the wrapper's
+/// certification of the block. The block is an ancestor of the finalized one, or with
+/// `fork` a sibling at a later view.
+fn certify_below_finalized_round(comptime W: type, ctx: Ctx, fork: bool) !?bool {
+    const io = ctx.io();
+    const net = try Net.start(ctx, harness.num_validators);
+    defer net.stop();
+    const validator = try net.validator(ctx, "validator", 0);
+    defer validator.crash();
+    const me = net.fixture.participants[0];
+    const marshal = validator.mailbox.clone();
+    const wrapper = try W.create(ctx.child("wrapper"), Mock.init(gpa), marshal, epocher());
+    defer wrapper.destroy();
+    defer io.sleep(.fromMilliseconds(100), .awake) catch {};
+    const genesis = try harness.make_raw_block(gpa, hash(""), .zero(), 0);
+    const leader = harness.default_leader();
+    var parent = try proposed_block(round_at(1), leader, 0, genesis.digest(), 1, 100);
+    defer parent.deinit();
+    try H.verify(validator, round_at(1), &parent);
+    // genesis <- parent(v1) <- a(v5) <- c(v10); the target is a, or a sibling at view 6.
+    const target_view: u64 = if (fork) 6 else 5;
+    const target_round = round_at(target_view);
+    const timestamp: u64 = if (fork) 350 else 200;
+    var target = try proposed_block(target_round, me, 1, parent.digest(), 2, timestamp);
+    defer target.deinit();
+    try H.verify(validator, target_round, &target);
+    var a = if (fork)
+        try proposed_block(round_at(5), me, 1, parent.digest(), 2, 200)
+    else
+        target.clone();
+    defer a.deinit();
+    try H.verify(validator, round_at(5), &a);
+    var c = try proposed_block(round_at(10), me, 5, a.digest(), 3, 300);
+    defer c.deinit();
+    try H.verify(validator, round_at(10), &c);
+    // Verification stages the certification gate for the target.
+    const target_context = target.inner().context();
+    const verified = try wrapper.verify(undefined, target_context, target.digest());
+    try testing.expectEqual(@as(?bool, true), verified);
+    // Consensus reports c's finalization through the wrapper, which prunes the gate.
+    var finalization = try finalize(&net.fixture, 10, 5, &c);
+    defer finalization.deinit(gpa);
+    _ = wrapper.report(.{ .finalization = finalization });
+    try testing.expect(!take_gate(wrapper, target_round, target.digest()));
+    // Certification after the prune finds no gate, once marshal has finalized c.
+    const state: Tip = .{ .app = validator.application, .height = 3, .digest = c.digest() };
+    try common.wait_until(ctx, 20_000, "finalized tip", state, at_tip);
+    return wrapper.certify(undefined, target_round, target.digest());
+}
+
+fn BelowFinalized(comptime W: type, comptime fork: bool) type {
+    return struct {
+        fn body(ctx: Ctx) anyerror!void {
+            const certified = try certify_below_finalized_round(W, ctx, fork);
+            try testing.expectEqual(@as(?bool, true), certified);
+        }
+    };
+}
+
+test "inline certify ancestor below finalized round after prune" {
+    // commonware `test_inline_certify_ancestor_below_finalized_round_after_prune`.
+    try run_for(60, BelowFinalized(InlineWrapper, false).body);
+}
+
+test "deferred certify ancestor below finalized round after prune" {
+    // commonware `test_deferred_certify_ancestor_below_finalized_round_after_prune`.
+    try run_for(60, BelowFinalized(DeferredWrapper, false).body);
+}
+
+test "inline certify fork below finalized round after prune" {
+    // commonware `test_inline_certify_fork_below_finalized_round_after_prune`.
+    try run_for(60, BelowFinalized(InlineWrapper, true).body);
+}
+
+test "deferred certify fork below finalized round after prune" {
+    // commonware `test_deferred_certify_fork_below_finalized_round_after_prune`.
+    try run_for(60, BelowFinalized(DeferredWrapper, true).body);
+}
