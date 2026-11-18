@@ -1956,3 +1956,112 @@ test "standard set floor prunes round-bound fetches" {
         }
     }.body);
 }
+
+const AnchorFetch = struct { resolver: common.RecordingResolver, digest: D, round: Round };
+
+/// The active block fetch of `digest` for the finalized-by-round subscriber at `round`.
+fn active_anchor_fetch(state: AnchorFetch) ?common.Fetch {
+    const fetches = state.resolver.active_fetches(gpa) catch return null;
+    defer gpa.free(fetches);
+    const key: common.Key = .{ .block = state.digest };
+    const subscriber: common.Annotation = .{ .finalized = .{ .by_round = state.round } };
+    for (fetches) |fetch| {
+        if (fetch.key.eql(key) and fetch.subscriber.eql(subscriber)) return fetch;
+    }
+    return null;
+}
+
+fn anchor_fetch_active(state: AnchorFetch) bool {
+    return active_anchor_fetch(state) != null;
+}
+
+const RetainsAbove = struct { resolver: common.RecordingResolver, before: u64 };
+
+fn retained_above(state: RetainsAbove) bool {
+    return state.resolver.retain_count() > state.before;
+}
+
+/// Serves `anchor` (borrowed) for its active fetch, if marshal still wants it.
+fn serve_anchor_if_wanted(fetch: AnchorFetch, anchor: *const Block) !void {
+    const item = active_anchor_fetch(fetch) orelse return;
+    const encoded = try @import("codec").encode(harness.B, gpa, anchor.inner().*);
+    defer gpa.free(encoded);
+    const outcome = try deliver(fetch.resolver, item.key, item.subscriber, encoded);
+    try testing.expectEqual(common.Outcome{ .resolved = .complete }, outcome);
+}
+
+// A round-floor advance that supersedes the pending floor anchor releases the floor
+// transition and its buffer waiter rather than stranding it once its anchor fetch is pruned.
+test "standard round floor advance releases superseded pending floor" {
+    try run(struct {
+        fn body(ctx: Ctx) anyerror!void {
+            const prefix = "round-floor-releases-pending-floor";
+            var rng = utils.rng.test_rng();
+            var fixture = try harness.fixture(gpa, &rng);
+            defer fixture.deinit(gpa);
+            // A prunable deployment after section pruning: the application processed through
+            // height 3, the section holding earlier heights was pruned, and height 3 was
+            // repaired by walkback without a direct finalization, so the recovered round floor
+            // lags every finalization on the chain.
+            var anchor = try block_at(hash("anchor-parent"), 2, 200);
+            defer anchor.deinit();
+            var processed = try block_at(anchor.digest(), 3, 300);
+            defer processed.deinit();
+            var next = try block_at(processed.digest(), 4, 400);
+            defer next.deinit();
+            try seed.processed_height(ctx.child("metadata"), prefix, .new(3), null);
+            const stored = [_]Block{ processed, next };
+            try seed.inconsistent_restart_state(ctx.child("storage"), prefix, &stored, &.{});
+
+            // A configured floor for the pruned height 2 block is above the recovered round
+            // floor, so marshal fetches it as a pending anchor.
+            var application = try App.manual_ack(gpa, ctx.io());
+            defer application.deinit();
+            var buffer = try common.RecordingBuffer.init(gpa, ctx.io());
+            defer buffer.deinit();
+            const provider: harness.Provider = .init(&fixture.schemes[0]);
+            var started = try common.start_standard_actor(
+                harness.Provider,
+                App,
+                common.RecordingBuffer,
+                ctx.child("validator"),
+                prefix,
+                provider,
+                application.clone(),
+                buffer.clone(),
+                .{ .floor = try finalize(&fixture, 2, 1, &anchor) },
+            );
+            defer started.crash();
+            const fetch: AnchorFetch = .{
+                .resolver = started.resolver,
+                .digest = anchor.digest(),
+                .round = round_at(2),
+            };
+            try common.wait_until(ctx, 5000, "floor anchor fetch", fetch, anchor_fetch_active);
+            try ctx.sleep(.fromMilliseconds(100));
+            // The pending floor holds dispatch, and still waits on the buffer for its anchor.
+            const heights = try application.pending_ack_heights(gpa);
+            gpa.free(heights);
+            try testing.expectEqual(0, heights.len);
+            try testing.expect(!buffer.commitment_subscription_closed(0));
+
+            // A finalization of the retained height 3 block (re-reported by consensus on
+            // restart, say) advances the round floor past the pending anchor round.
+            const advance: RetainsAbove = .{
+                .resolver = started.resolver,
+                .before = started.resolver.retain_count(),
+            };
+            report(&started.mailbox, try finalize(&fixture, 3, 2, &processed));
+            try common.wait_until(ctx, 5000, "round floor advance", advance, retained_above);
+
+            // The superseded anchor releases its buffer waiter.
+            try testing.expectEqual(1, buffer.commitment_subscription_count());
+            try wait_closed(ctx, buffer, 0);
+
+            // The anchor is now at or below the processed height. If marshal still wants it,
+            // serve it. Either way the superseded floor must release dispatch.
+            try serve_anchor_if_wanted(fetch, &anchor);
+            try testing.expectEqual(4, (try application.acknowledged()).get());
+        }
+    }.body);
+}
