@@ -14,6 +14,11 @@ const ed25519 = @import("../../scheme/ed25519.zig");
 const ask = @import("../ask.zig");
 const ingress = @import("ingress.zig");
 const actor_mod = @import("actor.zig");
+const codec = @import("codec");
+const oneshot = utils.channel.oneshot;
+const HandlerMessage = ingress.HandlerMessage;
+const complete: resolver.Outcome = .{ .resolved = .complete };
+const partial: resolver.Outcome = .{ .resolved = .partial };
 
 const TestDigest = cryptography.Sha256.Digest;
 const TestScheme = ed25519.Scheme(TestDigest);
@@ -158,6 +163,24 @@ const RecordingResolver = struct {
     }
 };
 
+/// Records what the actor forwards to the voter, encoded (commonware's voter mailbox).
+const RecordingVoter = struct {
+    recovered_certificates: std.ArrayList([]u8) = .empty,
+
+    fn deinit(self: *RecordingVoter) void {
+        for (self.recovered_certificates.items) |bytes| gpa.free(bytes);
+        self.recovered_certificates.deinit(gpa);
+    }
+
+    pub fn recovered(self: *RecordingVoter, _: std.mem.Allocator, certificate: Certificate) !void {
+        var owned = certificate;
+        defer owned.deinit(gpa);
+        const bytes = try codec.encode(Certificate, gpa, owned);
+        errdefer gpa.free(bytes);
+        try self.recovered_certificates.append(gpa, bytes);
+    }
+};
+
 /// commonware `build_notarization`/`build_finalization`'s proposal for `view`.
 fn build_proposal(view: u64) types.Proposal(Digest) {
     return .init(.new(epoch, .new(view)), .new(view -| 1), .fill(@intCast(view)));
@@ -169,8 +192,13 @@ const Env = struct {
     actor: Actor,
     mailbox: Actor.Mailbox,
     recorder: RecordingResolver = .{},
+    voter: RecordingVoter = .{},
 
     fn start(self: *Env) !void {
+        return self.start_with(term_length);
+    }
+
+    fn start_with(self: *Env, term: consensus_types.TermLength) !void {
         var rng = utils.rng.test_rng();
         self.fixture = try ed25519.fixture(Digest, gpa, &rng, namespace, 4);
         errdefer self.fixture.deinit(gpa);
@@ -182,9 +210,10 @@ const Env = struct {
             .mailbox_size = 8,
             .fetch_timeout = .from_secs(1),
             .fetch_retry_delay = .from_millis(100),
-            .term_length = term_length,
+            .term_length = term,
         });
         self.recorder = .{};
+        self.voter = .{};
         var effects: std.ArrayList(Effect) = .empty;
         defer effects.deinit(gpa);
         try self.actor.state.replayed(&effects);
@@ -192,6 +221,7 @@ const Env = struct {
     }
 
     fn stop(self: *Env) void {
+        self.voter.deinit();
         self.recorder.deinit();
         self.mailbox.deinit();
         self.actor.deinit();
@@ -237,6 +267,49 @@ const Env = struct {
             .success = success,
         } };
         try self.actor.handle_mailbox(&self.recorder, message);
+    }
+
+    /// Delivers `certificate` (taken) as a peer's response for `view`. Returns the verdict,
+    /// or null when the actor dropped the response without one.
+    fn deliver(
+        self: *Env,
+        view: u64,
+        certificate: Certificate,
+        asks: []const Ask,
+    ) !?resolver.Outcome {
+        var owned = certificate;
+        defer owned.deinit(gpa);
+        const data = try codec.encode(Certificate, gpa, owned);
+        return self.deliver_bytes(view, data, asks);
+    }
+
+    /// Delivers `data` (taken) as a peer's response for `view`.
+    fn deliver_bytes(self: *Env, view: u64, data: []u8, asks: []const Ask) !?resolver.Outcome {
+        errdefer gpa.free(data);
+        const pair = try oneshot.channel(resolver.Outcome, gpa, testing.io);
+        var receiver = pair.receiver;
+        defer receiver.deinit();
+        const owned_asks = try gpa.dupe(Ask, asks);
+        const message: HandlerMessage = .{ .deliver = .{
+            .gpa = gpa,
+            .view = .new(view),
+            .data = data,
+            .asks = owned_asks,
+            .response = pair.sender,
+        } };
+        try self.actor.handle_resolver(message, &self.voter, &self.recorder);
+        return receiver.try_recv() catch |err| switch (err) {
+            error.Closed => null,
+            error.Empty => unreachable,
+        };
+    }
+
+    fn settled(self: *const Env, view: u64, kind: Kind) bool {
+        return self.actor.state.settled(.new(view), kind);
+    }
+
+    fn produce(self: *const Env, view: u64) ?[]const u8 {
+        return self.actor.state.produce(.new(view));
     }
 
     /// Opens a background repair fetch at `view` directly on the resolver.
@@ -378,4 +451,181 @@ test "resolver actor targeted fetches drop only when their ask is satisfied" {
     try env.resolve(7, 3, .notarization, env.fixture.participants[0]);
     try env.recorder.expect_outstanding(&.{});
     try testing.expectEqual(4, env.recorder.targeted.items.len);
+}
+
+/// The encoding of `certificate` (taken), as a peer would serve it.
+fn encoded(certificate: Certificate) ![]u8 {
+    var owned = certificate;
+    defer owned.deinit(gpa);
+    return codec.encode(Certificate, gpa, owned);
+}
+
+/// Records and certifies the notarization at `view` (commonware `updated` then `certified`).
+fn certify(env: *Env, view: u64, success: bool) !void {
+    try env.updated(.{ .notarization = try env.notarization(view) });
+    try env.certified(try env.notarization(view), success);
+}
+
+test "resolver actor prefers the exact certified notarization over nullification and floor" {
+    var env: Env = undefined;
+    try env.start();
+    defer env.stop();
+    try env.updated(try env.nullification(3));
+    try certify(&env, 3, true);
+    try certify(&env, 4, true);
+    // Both a covering nullification and the exact certified parent are held for view 3.
+    try testing.expect(env.settled(3, .nullification));
+    try testing.expect(env.settled(3, .notarization));
+    const expected = try encoded(.{ .notarization = try env.notarization(3) });
+    defer gpa.free(expected);
+    try testing.expectEqualSlices(u8, expected, env.produce(3).?);
+}
+
+test "resolver actor higher certified floor does not hide an older finalization" {
+    var responder: Env = undefined;
+    try responder.start();
+    defer responder.stop();
+    try responder.updated(try responder.finalization(3));
+    try certify(&responder, 6, true);
+    // The retained finalization, not the floor's notarization, settles the ask at view 3.
+    const data = try gpa.dupe(u8, responder.produce(3).?);
+    var requester: Env = undefined;
+    try requester.start();
+    defer requester.stop();
+    const outcome = try requester.deliver_bytes(3, data, &.{.ancestry(.notarization)});
+    try testing.expectEqual(complete, outcome.?);
+}
+
+test "resolver actor serves a notarization only after certification" {
+    var env: Env = undefined;
+    try env.start();
+    defer env.stop();
+    const outcome = try env.deliver(3, .{ .notarization = try env.notarization(3) }, &.{
+        .ancestry(.notarization),
+    });
+    try testing.expectEqual(complete, outcome.?);
+    try testing.expectEqual(null, env.produce(3));
+    try env.certified(try env.notarization(3), true);
+    const expected = try encoded(.{ .notarization = try env.notarization(3) });
+    defer gpa.free(expected);
+    try testing.expectEqualSlices(u8, expected, env.produce(3).?);
+}
+
+test "resolver actor nullification satisfies a target at the certified floor" {
+    var env: Env = undefined;
+    try env.start_with(.one);
+    defer env.stop();
+    const peers = env.fixture.participants;
+    // Certify view 3, then request its coexisting nullification for a proposal skipping it.
+    try certify(&env, 3, true);
+    try certify(&env, 8, true);
+    try env.resolve(10, 3, .nullification, peers[0]);
+    try expect_subscriptions(&env, 3, &.{.ancestry(.nullification)});
+    // Observing the nullification retires the exact targeted ask; the floor stays.
+    try env.updated(try env.nullification(3));
+    try env.recorder.expect_outstanding(&.{});
+    const floor = try encoded(.{ .notarization = try env.notarization(8) });
+    defer gpa.free(floor);
+    try testing.expectEqualSlices(u8, floor, env.produce(6).?);
+    try env.resolve(11, 3, .nullification, peers[1]);
+    try testing.expectEqual(1, env.recorder.targeted.items.len);
+}
+
+test "resolver actor higher certified floor does not suppress an exact parent fetch" {
+    var env: Env = undefined;
+    try env.start();
+    defer env.stop();
+    try certify(&env, 6, true);
+    try env.resolve(8, 4, .notarization, env.fixture.participants[0]);
+    try testing.expectEqual(1, env.recorder.targeted.items.len);
+    try expect_targeted(&env, 0, 4, .ancestry(.notarization), 0);
+}
+
+test "resolver actor certification failure retires the parent target" {
+    var env: Env = undefined;
+    try env.start();
+    defer env.stop();
+    const peers = env.fixture.participants;
+    try env.resolve(10, 5, .notarization, peers[0]);
+    try certify(&env, 5, false);
+    // A false verdict is permanent: parent repair retires, and background repair asks for
+    // the nullification that can now cover the failed view.
+    try expect_subscriptions(&env, 5, &.{.backfill()});
+    try env.resolve(11, 5, .notarization, peers[1]);
+    try testing.expectEqual(1, env.recorder.targeted.items.len);
+}
+
+test "resolver actor parent delivery completes on possession, not certification" {
+    var env: Env = undefined;
+    try env.start();
+    defer env.stop();
+    const outcome = try env.deliver(6, .{ .notarization = try env.notarization(6) }, &.{
+        .ancestry(.notarization),
+    });
+    try testing.expectEqual(complete, outcome.?);
+    // Possession settles the ask; the notarization is not served until it certifies.
+    try testing.expect(env.settled(6, .notarization));
+    try testing.expectEqual(null, env.produce(6));
+}
+
+test "resolver actor failed certification retires the parent ask until finalization" {
+    var env: Env = undefined;
+    try env.start();
+    defer env.stop();
+    try certify(&env, 6, false);
+    try testing.expect(env.actor.state.uncertifiable(.new(6)));
+    try testing.expectEqual(null, env.produce(6));
+    // A floor raise above the view does not resurrect the ask.
+    try certify(&env, 9, true);
+    const targeted = env.recorder.targeted.items.len;
+    try env.resolve(11, 6, .notarization, env.fixture.participants[0]);
+    try testing.expectEqual(targeted, env.recorder.targeted.items.len);
+}
+
+test "resolver actor tombstoned notarization delivery retires without recording" {
+    var env: Env = undefined;
+    try env.start();
+    defer env.stop();
+    try certify(&env, 6, false);
+    // The failed verdict settled this snapshot's ask: no verdict, no voter notification.
+    const outcome = try env.deliver(6, .{ .notarization = try env.notarization(6) }, &.{
+        .ancestry(.notarization),
+    });
+    try testing.expectEqual(null, outcome);
+    try testing.expect(env.actor.state.uncertifiable(.new(6)));
+    try testing.expectEqual(null, env.produce(6));
+    try testing.expectEqual(0, env.voter.recovered_certificates.items.len);
+    // Finalization is the tombstone's retirement boundary.
+    try env.updated(try env.finalization(7));
+    try testing.expect(!env.actor.state.uncertifiable(.new(6)));
+}
+
+test "resolver actor valid nullification does not complete a parent delivery" {
+    var env: Env = undefined;
+    try env.start();
+    defer env.stop();
+    const outcome = try env.deliver(4, try env.nullification(3), &.{.ancestry(.notarization)});
+    try testing.expectEqual(resolver.Outcome.unresolved, outcome.?);
+}
+
+test "resolver actor unrelated higher certified notarization does not complete a parent" {
+    var env: Env = undefined;
+    try env.start();
+    defer env.stop();
+    try certify(&env, 6, true);
+    const outcome = try env.deliver(4, .{ .notarization = try env.notarization(6) }, &.{
+        .ancestry(.notarization),
+    });
+    try testing.expectEqual(resolver.Outcome.unresolved, outcome.?);
+}
+
+test "resolver actor higher notarization does not complete a backfill delivery" {
+    var env: Env = undefined;
+    try env.start();
+    defer env.stop();
+    // A peer's higher floor covers nothing at the requested view.
+    const outcome = try env.deliver(4, .{ .notarization = try env.notarization(6) }, &.{
+        .backfill(),
+    });
+    try testing.expectEqual(resolver.Outcome.unresolved, outcome.?);
 }
