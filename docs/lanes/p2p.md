@@ -223,7 +223,7 @@ handshake and the runtime's network, which the actor-stream and runtime lanes ar
   commonware's mod.rs tests (but DNS, see decisions), and the directory's metrics.
 - [x] lookup DNS tests on the runtime resolver (`Config.resolver`, as discovery has it).
 - [x] utils codec, mux, mocks, and `WrappedBackgroundReceiver` (bls-math lane, 6f151f7).
-- [ ] Fuzz targets (commonware p2p/fuzz): moved to the bls-math lane, under src/p2p/fuzz/.
+- [-] Fuzz targets (commonware p2p/fuzz): owned by the bls-math lane, under src/p2p/fuzz/.
 
 ## Log
 - 2026-11-16: (parallel lane) lookup: graceful and clean shutdown, rate limiting, restarts,
@@ -274,3 +274,9 @@ handshake and the runtime's network, which the actor-stream and runtime lanes ar
   network.rs tests are all ported.
 - 2026-11-18 (parallel lane): lookup dials DNS ingress through `Config.resolver`; the four
   lookup DNS tests.
+- 2026-11-18: discovery mod.rs recheck: every test is ported or has a reason. The slow-peer
+  test lives in router.zig; `test_tokio_connectivity` runs on the production runtime, which
+  `run_network` already covers on the deterministic one; the `should_panic` tests
+  (`max_message_size_exceeds_stream_limit`, `above_stream_boundary`, `message_too_large`)
+  panic at the same sites with commonware's messages. The p2p lane's own backlog is done;
+  `[-]` items belong to other lanes.
