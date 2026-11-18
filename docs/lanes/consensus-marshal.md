@@ -332,3 +332,6 @@ ports its range's tests and the helpers defined in it, into
   responses (resolver lane, T-01a1d5b9).
 - 2026-11-18: actor drains resolved acks before mailbox/resolver events; bls-math takes
   harness.rs 3442-end (`mocks/scenarios_queries.zig`, `standard/tests/queries.zig`).
+- 2026-11-18: standard late-finalization tests (kept once for a repaired block, dropped
+  below a floor) in `tests/late_finalization.zig`; finalize scenario unskipped by the
+  resolver fix (fd079c5).

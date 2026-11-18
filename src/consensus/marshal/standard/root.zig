@@ -19,6 +19,7 @@ test {
 
 test {
     _ = @import("tests/restart.zig");
+    _ = @import("tests/late_finalization.zig");
     _ = @import("tests/common.zig");
     _ = @import("tests/floor.zig");
     _ = @import("tests/coverage.zig");
