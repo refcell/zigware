@@ -379,7 +379,10 @@ Owns `src/glue/dkg`. Reference: `glue/src/dkg` (about 24k Rust lines).
   observe_dealer_log) with 3 of its artifact tests.
 - [x] reshare actor: the inclusion window loop with `redelivered_receipts_survive_phase_
   changes` and `pr_5263_regression`.
-- [ ] reshare actor: inclusion's remaining window tests (gated and stalled ancestry, scan
+- [x] reshare actor: the reshare-mode epoch loop (`run.Runner(T).run_epochs` and
+  `participate`) over a `p2p.utils.mux` handle.
+- [ ] reshare actor: the dkg window (run_dkg, terminal); `start` (store init, mux, state-sync
+  resolution, startup tip); inclusion's remaining window tests (gated and stalled ancestry, scan
   yielding to finalization, closed verification) and `finalization_error_panics`; the dkg
   window; the run loop; application.
 - [ ] bootstrap, probe (wire with conformance, discovery, service), orchestrator.
@@ -402,3 +405,4 @@ Owns `src/glue/dkg`. Reference: `glue/src/dkg` (about 24k Rust lines).
   bugs.
 - 2026-11-18: the inclusion window loop; its 2 tests catch a late scan start and a lost
   redelivery acknowledgement.
+- 2026-11-18: the reshare epoch loop; its test catches a skipped dealing window.
