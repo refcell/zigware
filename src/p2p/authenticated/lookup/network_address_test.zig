@@ -1,9 +1,5 @@
 //! Address tests of the lookup network (commonware `lookup/mod.rs` tests): peers tracked at
-//! another peer's address, or at a wrong one.
-//!
-//! commonware's DNS tests (`test_dns_peer_addresses`, `test_mixed_socket_and_dns_addresses`,
-//! `test_dns_resolving_to_private_ip_not_dialed`, `test_dns_mixed_ips_connectivity`) wait
-//! for a resolver in the deterministic runtime; the dialer skips DNS addresses until then.
+//! another peer's address, or at a wrong one. The DNS tests are in `network_dns_test.zig`.
 
 const std = @import("std");
 const testing = std.testing;

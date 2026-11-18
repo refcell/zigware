@@ -9,6 +9,7 @@ const std = @import("std");
 const assert = std.debug.assert;
 const utils = @import("utils");
 const rate_limit = @import("../../rate_limit.zig");
+const Resolver = @import("runtime").resolver.Resolver;
 
 const Duration = utils.Duration;
 const Quota = rate_limit.Quota;
@@ -60,6 +61,10 @@ pub fn Config(comptime U: type) type {
         tracked_peer_sets: usize,
         /// How long a blocked peer stays blocked.
         block_duration: Duration,
+        /// Resolves DNS ingress before dialing (commonware's runtime `Resolver`): the
+        /// deterministic runner's `dns.resolver()` or the production runner's resolver. Without
+        /// one, DNS ingress is never dialed.
+        resolver: ?Resolver = null,
 
         /// The fields every constructor sets the same way.
         pub const Base = struct {

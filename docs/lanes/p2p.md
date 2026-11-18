@@ -167,8 +167,7 @@ handshake and the runtime's network, which the actor-stream and runtime lanes ar
   listener. The listener's registered-IP set is tracker state refreshed exactly where
   commonware's tracker sends `listener.set`, and read under the tracker's lock. Pings are
   sent alone or ahead of a batch of queued frames.
-- Lookup tests not ported, and why: the four DNS tests wait for a resolver in the runtime
-  (the dialer skips DNS ingress until then); `test_broadcast_slow_peer_no_blocking` exercises
+- Lookup tests not ported, and why: `test_broadcast_slow_peer_no_blocking` exercises
   only the shared router and is router.zig's "a full slow peer does not block broadcasts";
   `test_message_too_large` and the panicking halves of
   `test_construction_enforces_handshake_message_limit` /
@@ -222,7 +221,7 @@ handshake and the runtime's network, which the actor-stream and runtime lanes ar
 - [x] discovery: tracing events at commonware's sites (runtime.telemetry.traces).
 - [x] lookup (parallel lane): tracker, peer, dialer, listener, Network with Config and Oracle,
   commonware's mod.rs tests (but DNS, see decisions), and the directory's metrics.
-- [ ] lookup DNS tests, once the deterministic runtime has a resolver.
+- [x] lookup DNS tests on the runtime resolver (`Config.resolver`, as discovery has it).
 - [x] utils codec, mux, mocks, and `WrappedBackgroundReceiver` (bls-math lane, 6f151f7).
 - [ ] Fuzz targets (commonware p2p/fuzz): moved to the bls-math lane, under src/p2p/fuzz/.
 
@@ -273,3 +272,5 @@ handshake and the runtime's network, which the actor-stream and runtime lanes ar
   discovery and transmitter tests shrink in Debug.
 - 2026-11-18: simulated ordering, role, and broadcast-bandwidth tests; simulated mod.rs and
   network.rs tests are all ported.
+- 2026-11-18 (parallel lane): lookup dials DNS ingress through `Config.resolver`; the four
+  lookup DNS tests.
