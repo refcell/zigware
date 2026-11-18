@@ -79,6 +79,9 @@ pub fn Params(
     };
 }
 
+/// The received network messages the forwarder may queue ahead of the engine.
+const network_inbox_size = 64;
+
 /// The engine over `T = Params(...)`.
 pub fn Engine(comptime T: type) type {
     const P = T.PublicKey;
@@ -161,14 +164,25 @@ pub fn Engine(comptime T: type) type {
         forwarders: [4]?Io.Future(void) = @splat(null),
         removed: std.ArrayList(K) = .empty,
 
-        // Guarded by `signal`.
+        // Guarded by `signal`. Each inbox slot has its own `*_freed` condition, broadcast when
+        // the engine empties it; only that slot's forwarder waits on it. The engine is the
+        // only waiter on `signal.condition`, so its timed waits cannot consume a wake meant
+        // for a forwarder (AGENTS.md: `Io.Condition` counts signals, not waiters).
         inbox: ?Message = null,
+        inbox_freed: Io.Condition = .init,
         mailbox_closed: bool = false,
-        network_inbox: ?NetworkMessage = null,
+        /// Received network messages, oldest first: a ring, so a burst crosses from the
+        /// forwarder in one hand-off rather than one per message.
+        network_inbox: [network_inbox_size]NetworkMessage = undefined,
+        network_head: usize = 0,
+        network_len: usize = 0,
+        network_inbox_freed: Io.Condition = .init,
         network_closed: bool = false,
         peer_set_inbox: ?PeerSetUpdate = null,
+        peer_set_inbox_freed: Io.Condition = .init,
         peer_sets_closed: bool = false,
         blocked_inbox: ?[]P = null,
+        blocked_inbox_freed: Io.Condition = .init,
         /// Finished serves, oldest first. Capacity covers `serves`.
         serve_done: std.ArrayList(*Serve) = .empty,
 
@@ -284,8 +298,8 @@ pub fn Engine(comptime T: type) type {
 
         fn discard_inboxes(self: *Self) void {
             if (self.inbox) |message| Message.discard(message);
-            if (self.network_inbox) |message| {
-                var owned = message;
+            while (self.network_len > 0) {
+                var owned = self.pop_network_locked();
                 owned.deinit();
             }
             if (self.peer_set_inbox) |update| {
@@ -384,20 +398,20 @@ pub fn Engine(comptime T: type) type {
             const io = self.io;
             if (self.peer_set_inbox) |update| {
                 self.peer_set_inbox = null;
-                self.signal.condition.broadcast(io);
+                self.peer_set_inbox_freed.broadcast(io);
                 return .{ .peer_set = update };
             }
             if (self.peer_sets_closed) return .stopped;
             if (self.blocked_inbox) |blocked| {
                 self.blocked_inbox = null;
-                self.signal.condition.broadcast(io);
+                self.blocked_inbox_freed.broadcast(io);
                 return .{ .blocked = blocked };
             }
             if (self.active_due()) return .active_deadline;
             if (self.inflight.deliveries.has_completion_locked()) return .delivered;
             if (self.inbox) |message| {
                 self.inbox = null;
-                self.signal.condition.broadcast(io);
+                self.inbox_freed.broadcast(io);
                 return .{ .message = message };
             }
             if (self.mailbox_closed) return .stopped;
@@ -405,20 +419,33 @@ pub fn Engine(comptime T: type) type {
             if (self.serve_done.items.len > 0) {
                 return .{ .served = self.serve_done.orderedRemove(0) };
             }
-            if (self.network_inbox) |message| {
-                self.network_inbox = null;
-                self.signal.condition.broadcast(io);
+            if (self.network_len > 0) {
+                const message = self.pop_network_locked();
+                self.network_inbox_freed.broadcast(io);
                 return .{ .network = message };
             }
             if (self.network_closed) return .stopped;
             return null;
         }
 
-        /// Waits until the caller's inbox slot is free; false when canceled.
+        /// Removes the oldest received network message (caller holds `signal`).
+        fn pop_network_locked(self: *Self) NetworkMessage {
+            assert(self.network_len > 0);
+            const message = self.network_inbox[self.network_head];
+            self.network_head = (self.network_head + 1) % network_inbox_size;
+            self.network_len -= 1;
+            assert(self.network_len < network_inbox_size);
+            return message;
+        }
+
+        /// Waits until the caller's inbox slot is free, on that slot's own condition; false
+        /// when canceled.
         fn wait_slot(self: *Self, comptime field: []const u8) bool {
+            const freed = &@field(self, field ++ "_freed");
             while (@field(self, field) != null) {
-                self.signal.condition.wait(self.io, &self.signal.mutex) catch return false;
+                freed.wait(self.io, &self.signal.mutex) catch return false;
             }
+            assert(@field(self, field) == null);
             return true;
         }
 
@@ -453,8 +480,14 @@ pub fn Engine(comptime T: type) type {
                         return;
                     },
                 };
-                if (!self.wait_slot("network_inbox")) return message.deinit();
-                self.network_inbox = message;
+                while (self.network_len == network_inbox_size) {
+                    self.network_inbox_freed.wait(self.io, &signal.mutex) catch {
+                        return message.deinit();
+                    };
+                }
+                const tail = (self.network_head + self.network_len) % network_inbox_size;
+                self.network_inbox[tail] = message;
+                self.network_len += 1;
                 signal.condition.broadcast(self.io);
             }
         }

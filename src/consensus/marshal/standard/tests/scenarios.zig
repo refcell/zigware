@@ -25,9 +25,9 @@ fn expect_finalize_deterministic(
     try testing.expectEqual(first, second);
 }
 
-/// Delivery stalls at about height 50 of 160: resolver.p2p's engine falls behind on network
-/// responses (being fixed in the resolver lane). Flip this once that lands.
-const resolver_keeps_up = false;
+/// Delivery once stalled at about height 50 of 160 while resolver.p2p's engine fell behind on
+/// network responses; fixed in the resolver engine.
+const resolver_keeps_up = true;
 
 test "standard finalize good links" {
     if (!resolver_keeps_up) return error.SkipZigTest;

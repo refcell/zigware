@@ -1245,3 +1245,47 @@ test "dst: lossy links deliver every retained fetch exactly once" {
         };
     }
 }
+
+// Regression: four peers each fetch every key the other three serve, at commonware's
+// `TEST_QUOTA` (1024 messages/s). The engine's forwarders once waited on the condition its
+// timed event wait shares, so a timed-out engine wait consumed the wake meant for the network
+// forwarder, and responses piled up unread while requests kept retrying: this load did not
+// finish in 600 s. It now finishes in about 2 s.
+test "high response rate drains every response" {
+    try run(30, struct {
+        fn body(io: Io) !void {
+            const quota = p2p.Quota.per_second(1024);
+            const setup = try Setup.init(io, &.{ 1, 2, 3, 4 }, .{ .quota = quota });
+            defer setup.deinit();
+            for (0..4) |a| for (a + 1..4) |b| try setup.add_link(link, a, b);
+            const keys_per_peer = 60;
+            var consumers: [4]Consumer = undefined;
+            var mailboxes: [4]*Setup.MailboxT = undefined;
+            for (0..4) |peer| {
+                var entries: [keys_per_peer]struct { u8, []const u8 } = undefined;
+                for (&entries, 0..) |*entry, i| {
+                    entry.* = .{ @intCast(peer * keys_per_peer + i), "v" };
+                }
+                consumers[peer] = try setup.make_consumer();
+                const producer = try setup.make_producer(&entries);
+                mailboxes[peer] = try setup.spawn(peer, consumers[peer], producer);
+            }
+            for (0..4) |peer| {
+                for (0..4 * keys_per_peer) |i| {
+                    if (i / keys_per_peer != peer) try fetch(mailboxes[peer], @intCast(i));
+                }
+            }
+            for (consumers, 0..) |consumer, peer| {
+                var seen: std.StaticBitSet(4 * keys_per_peer) = .empty;
+                for (0..3 * keys_per_peer) |_| {
+                    var event = try consumer.next_event();
+                    defer event.deinit(gpa);
+                    try testing.expect(event.key.value / keys_per_peer != peer);
+                    try testing.expectEqualStrings("v", event.value);
+                    seen.set(event.key.value);
+                }
+                try testing.expectEqual(3 * keys_per_peer, seen.count());
+            }
+        }
+    }.body);
+}
