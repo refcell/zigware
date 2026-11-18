@@ -341,6 +341,9 @@ Owns `src/glue/dkg`. Reference: `glue/src/dkg` (about 24k Rust lines).
   with `try_recv` first, then racing the mailbox against the channel with `Io.Select`; when
   both finish in one race, both are handled, mailbox first. A window's epoch, store, dealer,
   and player travel together as `dealing.Window(T).Session`.
+- Inclusion's dealer-log verification (commonware's spawned `VerificationTask`) runs on the
+  caller's task in `artifact.Artifacts(T).verify`; the window decides when to call it.
+  Invalid local state, mismatched directories, and a missing final payload are errors.
 
 ### Backlog
 - [x] types (with conformance hashes), limits, fence, network.
@@ -353,7 +356,10 @@ Owns `src/glue/dkg`. Reference: `glue/src/dkg` (about 24k Rust lines).
 - [x] reshare actor: core, setup, and follower mode, with the follower tests and the
   applied-tip contract checks.
 - [x] reshare actor: the dealing window with dealing.rs's 2 tests.
-- [ ] reshare actor: inclusion and dkg windows; the run loop; application.
+- [x] reshare actor: inclusion's artifact derivation (verify, derive, commit_final,
+  observe_dealer_log) with 3 of its artifact tests.
+- [ ] reshare actor: `finalization_error_panics` (InvalidLocalState); the inclusion window
+  loop and its tests; the dkg window; the run loop; application.
 - [ ] bootstrap, probe (wire with conformance, discovery, service), orchestrator.
 - [ ] tests: the dkg and reshare harnesses, properties, and mocks; lookup's peer-activation
   test.
@@ -370,3 +376,5 @@ Owns `src/glue/dkg`. Reference: `glue/src/dkg` (about 24k Rust lines).
 - 2026-11-18: the reshare actor's core, setup, and follower mode.
 - 2026-11-18: simulate's `MonitorReporter` (examples lane), with its tests.
 - 2026-11-18: the dealing window; both of dealing.rs's tests catch a planted bug.
+- 2026-11-18: inclusion's artifact derivation; its 3 tests catch planted outcome and share
+  bugs.

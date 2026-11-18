@@ -110,7 +110,7 @@ fn signed_log(index: usize, seed: u8) !fd.SignedDealerLog(V, P) {
     return dealer.finalized.?.clone(gpa);
 }
 
-fn dealer_logs(index: usize) !Logs {
+pub fn dealer_logs(index: usize) !Logs {
     var signed = try signed_log(index, 2);
     defer signed.deinit(gpa);
     var logs: Logs = .empty;

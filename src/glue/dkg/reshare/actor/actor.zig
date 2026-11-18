@@ -27,6 +27,7 @@ const utils = @import("utils");
 const metrics_pkg = @import("runtime").telemetry.metrics;
 const dkg = @import("../../root.zig");
 const types = @import("../../types.zig");
+const network = @import("../../network.zig");
 const Fence = @import("../../fence.zig").Fence;
 const store_mod = @import("../store.zig");
 const mailbox_mod = @import("../mailbox.zig");
@@ -151,6 +152,13 @@ pub fn Actor(comptime T: type) type {
 
         pub const Setup = union(enum) { follow, participate: PreparedEpoch };
 
+        /// Continuous reshare, or a one-shot DKG over configured participants and their
+        /// directory (owned).
+        pub const Mode = union(enum) {
+            reshare,
+            dkg: struct { participants: utils.ordered.Set(P), directory: D },
+        };
+
         /// State-sync epoch material paired with the height of its certified floor.
         pub const StateSyncStart = struct { info: Info, floor: Height };
 
@@ -169,6 +177,7 @@ pub fn Actor(comptime T: type) type {
         config: Config(T),
         epocher: FixedEpocher,
         metrics: Metrics,
+        mode: Mode = .reshare,
         /// Latest finalized block the actor has applied.
         tip: ?Tip = null,
 
@@ -201,6 +210,10 @@ pub fn Actor(comptime T: type) type {
         }
 
         pub fn deinit(self: *Self) void {
+            if (self.mode == .dkg) {
+                self.mode.dkg.participants.deinit(self.gpa);
+                network.DirectoryOps(P, D).deinit(&self.mode.dkg.directory, self.gpa);
+            }
             self.mailbox.deinit();
             self.metrics.deinit();
             self.* = undefined;
@@ -229,7 +242,13 @@ pub fn Actor(comptime T: type) type {
         }
 
         /// The runtime's RNG as a `std.Random` (commonware draws from the context).
-        fn random(self: *Self, state: *IoRandom) std.Random {
+        /// The runtime's RNG for cryptographic draws (`fill_bytes`).
+        pub fn rng(self: *const Self) IoRandom {
+            assert(self.config.max_participants > 0);
+            return .{ .io = self.io };
+        }
+
+        pub fn random(self: *Self, state: *IoRandom) std.Random {
             state.* = .{ .io = self.io };
             return std.Random.init(state, IoRandom.fill);
         }
@@ -478,10 +497,15 @@ pub fn answer(sender: anytype, value: anytype) void {
     responder.send(value) catch {};
 }
 
-const IoRandom = struct {
+/// The runtime's randomness as a `std.Random` source and a `fill_bytes` RNG.
+pub const IoRandom = struct {
     io: Io,
 
     fn fill(self: *IoRandom, buffer: []u8) void {
+        self.io.random(buffer);
+    }
+
+    pub fn fill_bytes(self: *IoRandom, buffer: []u8) void {
         self.io.random(buffer);
     }
 };
