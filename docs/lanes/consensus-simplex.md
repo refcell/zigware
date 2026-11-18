@@ -63,7 +63,10 @@ resolver; those lanes are running, so do the types first and the actors as they 
   `SkipBudget`, `ForwardPolicy`.
 - `consensus.simplex.metrics`: label sets `Peer(P)`, `Leader(P)`, `Timeout(P)` with
   `TimeoutReason`, `Outbound`, `Inbound(P)` with `MessageType`, `HandoffEvent`,
-  `HandoffAbandoned`; enum labels print commonware's variant names.
+  `HandoffAbandoned`; enum labels print commonware's variant names. The actors' registered
+  sets: `StateMetrics(P)` (voter `state`), `VoterMetrics`, `BatcherMetrics(P)`, each with
+  `register(scope)` and `deinit`; `consensus.traits.latency_buckets` is commonware's
+  `LATENCY`.
 - `consensus.simplex.scheme.bls12381_threshold.vrf`: `Signature(V)`, `Certificate(V)`,
   `Seed(V)` (`verify(scheme)`, `decrypt(ciphertext)`), `seed(V, *notarization_or_finalization)`
   (`Seedable`), `encrypt(V, gpa, rng, identity, namespace, target, message)`, `decrypt_with`,
@@ -222,7 +225,12 @@ resolver; those lanes are running, so do the types first and the actors as they 
 - [x] simplex metrics, and the actors (voter, batcher, resolver) and engine, on p2p's
   simulated network and the deterministic runtime: 4 honest nodes finalize.
 - [ ] Port the rest of state.rs's tests (37 of 141), the resolver actor.rs tests, and the
-  voter/resolver ingress tests; add actor metrics. (Resolver state.rs: all 23 done.)
+  voter/resolver ingress tests. (Resolver state.rs: all 23 done.) The actor metrics are
+  done (2026-11-18, back in this lane): voter (outbound, handoff events and abandonments,
+  four latency histograms), its state (current and tracked views, issuance probes,
+  timeouts and nullifications by leader), and batcher (added, processed, inbound by peer,
+  latest vote per peer, batch size, construct latency and fallback). commonware's
+  resolver actor registers none of its own.
   Handed to the runtime lane on 2026-11-16. Ported in voter/state_test.zig, in
   commonware's order: everything from `certificate_candidates_respect_force_flag` through
   `parent_payload_reports_missing_term_anchor` (including the timeout, stall, inactivity,
@@ -237,8 +245,8 @@ resolver; those lanes are running, so do the types first and the actors as they 
   where commonware runs 100), partition, slow_and_lossy_links, determinism, the Byzantine
   conflicter, nuller, impersonator, reconfigurer, invalid (2 seeds each, 20 or 50 views;
   commonware runs 5 seeds of 50), outdated, equivocator, backfill, unclean_shutdown (100
-  views across journal-recovering restarts), one_offline (its leader-labelled metrics wait
-  on the actor metrics), slow_validator, all_recovery, all_crash_after_nullify,
+  views across journal-recovering restarts), one_offline (with its leader-labelled timeout
+  and nullification metric checks), slow_validator, all_recovery, all_crash_after_nullify,
   received_certificates_are_reported, survives_burst, engine_shutdown (abort and graceful;
   commonware's running-task count waits on the runtime's task metrics), and
   attributable_reporter_filtering, and split_views_no_lockup (with the nullify-only mock).
@@ -260,8 +268,8 @@ resolver; those lanes are running, so do the types first and the actors as they 
   finalization), and dishonest_leader_certification_rejected (ed25519) pass. Twins nodes
   reject mismatched payloads, as commonware's `mocks` build does. The twins pipelined
   handoff campaign (applications vote handoffs through the prefix, then wait) checks that
-  honest and twin applications returned handoffs; its early-vote count waits on the
-  voter's handoff metrics. Next: per-scheme twins, the per-scheme fixture variants, and
+  honest and twin applications returned handoffs, and counts the nonzero
+  `VotedBeforeCertification` handoff-event series. Next: per-scheme twins, the per-scheme fixture variants, and
   the rest, seeded.
 - [ ] Tracing: actor events are done (voter, batcher, resolver, engine). The voter opens
   commonware's `simplex.voter.start`, `.timeout`, `.process`, and `.notify` spans, and
@@ -336,3 +344,8 @@ resolver; those lanes are running, so do the types first and the actors as they 
 - 2026-11-16: twins pipelined handoff campaign; the mock application takes `handoff_until`.
 - 2026-11-18: voter tracing spans (start, timeout, process, notify); fixtures_test.zig runs
   all_online on all 8 canonical fixtures (ReleaseSafe and slow builds).
+- 2026-11-18: simplex actor metrics (voter, voter state, batcher) with commonware's names,
+  help, and labels, registered under the engine's `voter`, `voter_state`, and `batcher`
+  scopes. DST validators get per-node scopes (`validator{public_key}`, twins
+  `<role>{index}`); one_offline checks the offline leader's timeouts and nullifications;
+  twins handoff counts early votes. Histograms now hold up to 40 buckets (`LATENCY` has 36).

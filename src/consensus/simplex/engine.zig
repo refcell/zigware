@@ -93,10 +93,8 @@ pub fn Engine(comptime P: type) type {
                 .enabled => |skip| skip.budget.resolve(participants),
             };
             const terms = cfg.elector.terms();
-            if (terms.stall_timeout) |stall_timeout| {
-                // Stall timeout must be greater than certification timeout.
-                assert(stall_timeout.order(cfg.certification_timeout) == .gt);
-            }
+            // Stall timeout must be greater than certification timeout.
+            if (terms.stall_timeout) |stall| assert(stall.order(cfg.certification_timeout) == .gt);
             self.* = undefined;
             self.gpa = gpa;
             self.io = io;
@@ -118,6 +116,7 @@ pub fn Engine(comptime P: type) type {
                 .lookahead = .init(terms),
                 .forward = cfg.forward,
                 .floor = cfg.floor.view(),
+                .scope = ctx.scope.child("batcher"),
             });
             self.voter, self.voter_mailbox = try Voter.init(gpa, io, .{
                 .scheme = &self.scheme,
@@ -139,6 +138,7 @@ pub fn Engine(comptime P: type) type {
                 .write_buffer = cfg.write_buffer,
                 .cache_ref = cfg.page_cache,
                 .storage = ctx.storage,
+                .scope = ctx.scope.child("voter"),
             });
             self.resolver, self.resolver_mailbox = try Resolver.init(gpa, io, .{
                 .scheme = &self.scheme,

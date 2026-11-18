@@ -494,8 +494,12 @@ const Harness = struct {
         cfg.skip = .{ .enabled = .{ .timeout = .from_millis(harness.timeouts.skip_ms) } };
         if (harness.floor) |floor| cfg.floor = .{ .finalized = floor };
         harness.floor = null;
-        try validator.engine.init(harness.ctx, cfg);
-        validator.handle = try harness.ctx.child("engine").spawn(Engine.run, .{
+        // Per-validator metrics, as commonware's `child("validator").with_attribute(..)`.
+        var validator_ctx = harness.ctx;
+        const validator_scope = harness.ctx.scope.child("validator");
+        validator_ctx.scope = validator_scope.with_attribute("public_key", key);
+        try validator.engine.init(validator_ctx, cfg);
+        validator.handle = try validator_ctx.child("engine").spawn(Engine.run, .{
             &validator.engine, channels[0], channels[1], channels[2],
         });
         validator.state = .honest;
@@ -892,6 +896,34 @@ fn one_offline_scenario(ctx: Context) !void {
     const blocked = try harness.oracle().blocked(gpa);
     defer gpa.free(blocked);
     try testing.expectEqual(0, blocked.len);
+    // The online validators record timeouts and nullifications for the offline leader.
+    const encoded = try ctx.scope.encode(gpa);
+    defer gpa.free(encoded);
+    var label_buffer: [128]u8 = undefined;
+    const label = try std.fmt.bufPrint(&label_buffer, "leader=\"{f}\"", .{harness.keys()[0]});
+    try testing.expect(count_nonzero_metric_lines(encoded, &.{ "_timeouts", label }) >= n - 1);
+    try testing.expectEqual(n - 1, count_nonzero_metric_lines(encoded, &.{
+        "_nullifications",
+        label,
+    }));
+}
+
+/// Counts lines of `encoded` containing every pattern whose trailing value is nonzero.
+pub fn count_nonzero_metric_lines(encoded: []const u8, patterns: []const []const u8) u32 {
+    assert(patterns.len > 0);
+    var count: u32 = 0;
+    var lines = std.mem.splitScalar(u8, encoded, '\n');
+    while (lines.next()) |line| {
+        const matched = for (patterns) |pattern| {
+            if (std.mem.indexOf(u8, line, pattern) == null) break false;
+        } else true;
+        if (!matched) continue;
+        const space = std.mem.lastIndexOfScalar(u8, line, ' ') orelse continue;
+        const value = std.fmt.parseInt(u64, line[space + 1 ..], 10) catch continue;
+        if (value > 0) count += 1;
+    }
+    assert(count <= encoded.len);
+    return count;
 }
 
 /// Checks validator 0 never voted in `validator`'s view, and counts the views it led (after

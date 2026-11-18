@@ -169,6 +169,10 @@ pub fn State(comptime S: type, comptime E: type, comptime D: type) type {
         failed_certifications: ViewSet = .empty,
         certification_candidates: ViewSet = .empty,
         outstanding_certifications: ViewSet = .empty,
+        /// Registered by the voter on its `state` scope; null in unit tests without one.
+        metrics: ?Metrics = null,
+
+        pub const Metrics = metrics.StateMetrics(S.PublicKey);
 
         pub fn init(gpa: Allocator, io: Io, cfg: Config(S, E)) Self {
             const terms = cfg.elector.terms();
@@ -198,6 +202,7 @@ pub fn State(comptime S: type, comptime E: type, comptime D: type) type {
             self.failed_certifications.deinit(self.gpa);
             self.certification_candidates.deinit(self.gpa);
             self.outstanding_certifications.deinit(self.gpa);
+            if (self.metrics) |*registered| registered.deinit();
             self.* = undefined;
         }
 
@@ -219,7 +224,12 @@ pub fn State(comptime S: type, comptime E: type, comptime D: type) type {
             const floor = self.lookahead.issuance_floor(view) orelse return false;
             if (floor == genesis_view) return true;
             if (view.get() <= floor.get()) return false;
+            var probes: u64 = 0;
+            defer if (self.metrics) |registered| {
+                registered.issuance_window_probes.metric().inc_by(probes);
+            };
             for (self.rounds.range(floor, view.previous().?)) |entry| {
+                probes += 1;
                 if (entry.value.is_directly_notarized()) return true;
             }
             return false;
@@ -319,6 +329,10 @@ pub fn State(comptime S: type, comptime E: type, comptime D: type) type {
             );
             self.view = view;
             assert(self.view == view);
+            if (self.metrics) |registered| {
+                // A view beyond the gauge's range leaves it unchanged, as commonware's try_set.
+                _ = registered.current_view.metric().try_set(view.get()) catch {};
+            }
             return true;
         }
 
@@ -401,15 +415,19 @@ pub fn State(comptime S: type, comptime E: type, comptime D: type) type {
 
         pub const NullifyVote = struct { retry: bool, nullify: Nullify };
 
-        /// A nullify vote for the current view, if eligible. `reason` only labels metrics.
+        /// A nullify vote for the current view, if eligible. `reason` labels the timeout
+        /// metric, which counts timed-out views, not retries.
         pub fn construct_nullify(self: *Self, view: View, reason: TimeoutReason) !?NullifyVote {
-            _ = reason;
             if (view != self.view) return null;
             const round = try self.create_round(view);
             const retry = round.construct_nullify() orelse return null;
+            const leader = round.leader();
             const nullify = try Nullify.sign(self.gpa, self.scheme, .new(self.epoch, view)) orelse
                 return null;
             try self.nullify_views.insert(self.gpa, view);
+            if (self.metrics) |registered| if (!retry) if (leader) |info| {
+                try metrics.inc(registered.timeouts, .{ .leader = info.key, .reason = reason });
+            };
             return .{ .retry = retry, .nullify = nullify };
         }
 
@@ -470,6 +488,9 @@ pub fn State(comptime S: type, comptime E: type, comptime D: type) type {
             const added = round.add_nullification(owned);
             if (!added) owned.deinit(self.gpa);
             try self.nullification_views.insert(self.gpa, view);
+            if (self.metrics) |registered| if (added) if (round.leader()) |info| {
+                try metrics.inc(registered.nullifications, .{ .leader = info.key });
+            };
             return added;
         }
 
@@ -918,6 +939,9 @@ pub fn State(comptime S: type, comptime E: type, comptime D: type) type {
             self.nullification_views.retain_from(min);
             self.nullify_views.retain_from(min);
             assert(self.rounds.len() == 0 or self.rounds.entries.items[0].view.get() >= min.get());
+            if (self.metrics) |registered| {
+                _ = registered.tracked_views.metric().try_set(self.rounds.len()) catch {};
+            }
         }
 
         fn genesis_payload(self: *const Self) D {

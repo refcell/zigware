@@ -24,6 +24,7 @@ const utils = @import("utils");
 const consensus_types = @import("../types.zig");
 const elector_mod = @import("elector.zig");
 const engine_mod = @import("engine.zig");
+const engine_test = @import("engine_test.zig");
 const application_mod = @import("mocks/application.zig");
 const relay_mod = @import("mocks/relay.zig");
 const reporter_mod = @import("mocks/reporter.zig");
@@ -88,7 +89,7 @@ const Campaign = struct {
 };
 
 /// Handoff candidates honest and twin applications returned across a campaign's cases.
-const HandoffCounts = struct { honest: u64 = 0, twin: u64 = 0 };
+const HandoffCounts = struct { honest: u64 = 0, twin: u64 = 0, early_votes: u64 = 0 };
 
 /// commonware `TWINS_CAMPAIGN`. Debug builds without `-Dslow-tests` run 1 of its 20 cases.
 const twins_campaign: Campaign = .{
@@ -313,8 +314,11 @@ fn start_node(case: *Case, index: usize, name: []const u8, channels: [3]Channel)
     errdefer node.page_cache.deinit();
     node.partition = @splat(0);
     _ = try std.fmt.bufPrint(&node.partition, "{s}_{d}", .{ name, index });
-    try node.engine.init(case.ctx, engine_config(case, node, index));
-    node.handle = try case.ctx.child("engine").spawn(Engine.run, .{
+    // Per-node metrics, as commonware's `child(..).with_attribute("index", ..)`.
+    var node_ctx = case.ctx;
+    node_ctx.scope = case.ctx.scope.child(name).with_attribute("index", index);
+    try node.engine.init(node_ctx, engine_config(case, node, index));
+    node.handle = try node_ctx.child("engine").spawn(Engine.run, .{
         &node.engine, channels[0], channels[1], channels[2],
     });
     case.started += 1;
@@ -482,6 +486,14 @@ fn run_case(
         try node.reporter.wait_for_finalizations_above(prefix_end, campaign.trailing_finalizations);
     }
     try check_case(&case);
+    if (case.handoffs) {
+        const encoded = try ctx.scope.encode(gpa);
+        defer gpa.free(encoded);
+        counts.early_votes += engine_test.count_nonzero_metric_lines(encoded, &.{
+            "_handoff_events_total{",
+            "event=\"VotedBeforeCertification\"",
+        });
+    }
     const twin_halves = 2 * generated.compromised.len;
     for (case.nodes, 0..) |*node, index| {
         const returned = node.application.handoffs_returned.load(.monotonic);
@@ -515,9 +527,11 @@ fn run_campaign(campaign: Campaign, link: Link) !void {
         defer runner.deinit();
         try (try runner.start_context(run_case, .{ campaign, generated, link, &counts }));
     }
-    // commonware also counts votes cast before certification through the voter's handoff
-    // metrics, which follow with the actor metrics.
-    if (campaign.handoffs) try testing.expect(counts.honest > 0 and counts.twin > 0);
+    if (campaign.handoffs) {
+        try testing.expect(counts.honest > 0 and counts.twin > 0);
+        // Some leader voted its handoff candidate before the parent certified.
+        try testing.expect(counts.early_votes > 0);
+    }
 }
 
 /// commonware `twins_campaign_all_links`: the fast link, then `twins_link`.

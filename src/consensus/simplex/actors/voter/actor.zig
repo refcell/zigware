@@ -65,6 +65,9 @@ pub fn Config(comptime P: type) type {
         write_buffer: usize,
         cache_ref: *runtime.buffer.paged.CacheRef,
         storage: runtime.storage.Storage,
+        /// The voter's metrics scope; the state registers under its `state` child. Null
+        /// registers nothing.
+        scope: ?runtime.telemetry.metrics.Scope = null,
     };
 }
 
@@ -181,10 +184,11 @@ pub fn Actor(comptime P: type) type {
         /// The span events are emitted in (commonware's `simplex.voter.*` spans), set only
         /// while one is open on the stack.
         span: ?*const Span = null,
+        metrics: ?metrics.VoterMetrics = null,
 
         pub fn init(gpa: Allocator, io: Io, cfg: Config(P)) !struct { Self, Mailbox } {
             const pair = try @import("actor").mailbox.new(Message, gpa, io, cfg.mailbox_size);
-            const state = State.init(gpa, io, .{
+            var state = State.init(gpa, io, .{
                 .scheme = cfg.scheme,
                 .elector = cfg.elector,
                 .epoch = cfg.epoch,
@@ -194,6 +198,11 @@ pub fn Actor(comptime P: type) type {
                 .timeout_retry = cfg.timeout_retry,
                 .skip_budget = cfg.skip_budget,
             });
+            var voter_metrics: ?metrics.VoterMetrics = null;
+            if (cfg.scope) |scope| {
+                state.metrics = try .register(&scope.child("state"));
+                voter_metrics = try .register(&scope);
+            }
             const self: Self = .{
                 .gpa = gpa,
                 .io = io,
@@ -212,6 +221,7 @@ pub fn Actor(comptime P: type) type {
                     .replay_buffer = cfg.replay_buffer,
                 },
                 .mailbox_receiver = pair.receiver,
+                .metrics = voter_metrics,
             };
             assert(self.journal == null);
             return .{ self, .{ .sender = pair.sender } };
@@ -228,6 +238,7 @@ pub fn Actor(comptime P: type) type {
             self.certify_tasks.deinit(self.gpa);
             self.mailbox_receiver.deinit();
             self.state.deinit();
+            if (self.metrics) |*registered| registered.deinit();
             self.* = undefined;
         }
 
@@ -280,12 +291,63 @@ pub fn Actor(comptime P: type) type {
         fn publish_vote(self: *Self, links: *const Links, vote: Vote) !void {
             assert(self.dirty_section == null); // Votes are durable before they leave.
             try links.batcher.constructed(vote);
+            try self.record_outbound(switch (vote) {
+                .notarize => .notarize,
+                .nullify => .nullify,
+                .finalize => .finalize,
+            });
             try self.send_encoded(links.vote_sender, Vote, vote);
         }
 
         fn broadcast_certificate(self: *Self, links: *const Links, certificate: Certificate) !void {
             assert(self.dirty_section == null);
+            try self.record_outbound(switch (certificate) {
+                .notarization => .notarization,
+                .nullification => .nullification,
+                .finalization => .finalization,
+            });
             try self.send_encoded(links.certificate_sender, Certificate, certificate);
+        }
+
+        // Metrics.
+
+        fn record_outbound(self: *Self, message: metrics.MessageType) !void {
+            const registered = self.metrics orelse return;
+            try metrics.inc(registered.outbound_messages, .{ .message = message });
+        }
+
+        /// Counts a handoff lifecycle event.
+        fn record_handoff_event(self: *Self, event: metrics.HandoffEventKind) !void {
+            const registered = self.metrics orelse return;
+            try metrics.inc(registered.handoff_events, .{ .event = event });
+        }
+
+        /// Counts a handoff request, candidate, or build abandoned before the proposer votes.
+        fn record_handoff_abandoned(self: *Self, reason: metrics.HandoffAbandonedReason) !void {
+            const registered = self.metrics orelse return;
+            try metrics.inc(registered.handoff_abandoned, .{ .reason = reason });
+        }
+
+        /// Records leader-local latency once `view`'s certificate of `kind` is ready: seconds
+        /// since we proposed (or entered, leading without a proposal), and since entry.
+        fn record_latency(self: *Self, view: View, kind: enum { notarization, finalization }) void {
+            const registered = self.metrics orelse return;
+            const elapsed = self.state.elapsed_since_start(view) orelse return;
+            const leader = self.state.leader_index(view) orelse return;
+            if (!self.state.is_me(leader)) return;
+            const latency, const from_entry = switch (kind) {
+                .notarization => .{
+                    registered.notarization_latency,
+                    registered.notarization_latency_from_view_entry,
+                },
+                .finalization => .{
+                    registered.finalization_latency,
+                    registered.finalization_latency_from_view_entry,
+                },
+            };
+            latency.metric().observe(metrics.seconds(elapsed));
+            const since_entry = self.state.elapsed_since_entry(view) orelse return;
+            from_entry.metric().observe(metrics.seconds(since_entry));
         }
 
         fn block_equivocator(self: *Self, equivocator: ?S.PublicKey) void {
@@ -343,6 +405,7 @@ pub fn Actor(comptime P: type) type {
                 .round = request.context().round,
                 .handoff = request.is_handoff(),
             });
+            if (request.is_handoff()) try self.record_handoff_event(.requested);
             const id = self.take_id();
             const future = try self.io.concurrent(propose_task, .{ self, inbox, request, id });
             self.pending_propose = .{
@@ -394,9 +457,15 @@ pub fn Actor(comptime P: type) type {
             const current = self.state.current_view();
             if (self.pending_propose) |pending| {
                 const request_context = pending.request.context();
-                if (pending.request.view().get() < current.get() or
-                    self.state.supersede_proposal_request(&request_context))
-                {
+                const reason: ?metrics.HandoffAbandonedReason =
+                    if (pending.request.view().get() < current.get())
+                        .view_exit
+                    else if (self.state.supersede_proposal_request(&request_context))
+                        .ancestry_superseded
+                    else
+                        null;
+                if (reason) |dropped| {
+                    if (pending.request.is_handoff()) try self.record_handoff_abandoned(dropped);
                     self.drop_proposal_request();
                 }
             }
@@ -406,18 +475,19 @@ pub fn Actor(comptime P: type) type {
                     self.drop_verify_request();
                 }
             }
-            self.reconcile_handoff();
+            try self.reconcile_handoff();
             if (self.pending_propose == null) try self.try_propose(links.inbox);
             if (self.pending_verify == null) try self.try_verify(links);
         }
 
         /// Cancels an abandoned handoff build, and resolves a waiting or closed handoff once
         /// its exact parent certifies.
-        fn reconcile_handoff(self: *Self) void {
+        fn reconcile_handoff(self: *Self) !void {
             const pending = &(self.pending_propose orelse return);
             const request_context = pending.request.context();
             if (pending.request == .prepare and pending.state == .preparing) {
-                if (self.state.pending_handoff_abandonment(&request_context) != null) {
+                if (self.state.pending_handoff_abandonment(&request_context)) |reason| {
+                    try self.record_handoff_abandoned(reason);
                     if (pending.future) |*future| future.cancel(self.io);
                     pending.future = null;
                     pending.state = .waiting;
@@ -428,8 +498,12 @@ pub fn Actor(comptime P: type) type {
             if (!self.state.parent_certified(.{ parent[0], parent[1] })) return;
             const view = pending.request.view();
             if (pending.state == .closed) {
+                try self.record_handoff_abandoned(.response_closed);
                 self.state.trigger_timeout(view, .missing_proposal);
             } else {
+                if (self.state.voted_nullify(view)) {
+                    try self.record_handoff_abandoned(.view_nullify);
+                }
                 self.state.release_proposal_request(view);
             }
             self.pending_propose = null;
@@ -577,19 +651,23 @@ pub fn Actor(comptime P: type) type {
         fn construct(self: *Self, view: View, staged: *Staged) !void {
             staged.notarize = try self.prepare_notarize(view);
             staged.notarization = self.state.broadcast_notarization(view);
+            if (staged.notarization != null) self.record_latency(view, .notarization);
             staged.nullification = self.state.broadcast_nullification(view);
             staged.finalize = try self.prepare_finalize(view);
             staged.finalization = self.state.broadcast_finalization(view);
+            if (staged.finalization != null) self.record_latency(view, .finalization);
         }
 
         // Responses.
 
         /// Records the automaton's proposal. Returns the view to notify when recorded.
+        /// `released` marks a held handoff candidate, already relayed under `Plan.prepare`.
         fn process_proposed(
             self: *Self,
             request: State.ProposalRequest,
             payload: ?D,
-        ) ?View {
+            released: bool,
+        ) !?View {
             const request_context = request.context();
             const view = request_context.view();
             const round = request_context.round;
@@ -607,11 +685,26 @@ pub fn Actor(comptime P: type) type {
                 return null;
             }
             if (!self.state.proposed(&request_context, value)) {
+                if (request.is_handoff()) {
+                    try self.record_handoff_abandoned(.ineligible_at_recording);
+                }
                 self.trace(.warn, "dropped our proposal", .{ .round = round });
                 return null;
             }
             // Relay before the notarize vote's journal sync: extra payload bytes are harmless.
             _ = self.relay.broadcast(value, .{ .propose = .{ .round = request_context.round } });
+            if (request.is_handoff()) {
+                const parent = request_context.parent;
+                const certified = self.state.parent_certified(.{ parent[0], parent[1] });
+                if (!released) try self.record_handoff_event(if (certified)
+                    .relayed_after_certification
+                else
+                    .relayed_before_certification);
+                try self.record_handoff_event(if (certified)
+                    .voted_after_certification
+                else
+                    .voted_before_certification);
+            }
             return view;
         }
 
@@ -625,23 +718,31 @@ pub fn Actor(comptime P: type) type {
             const payload: ?D = if (response) |value| switch (value) {
                 .proposed => |payload| payload,
                 .prepared => |handoff| switch (handoff) {
-                    .wait => return self.retain_handoff(pending, .waiting),
+                    .wait => {
+                        try self.record_handoff_event(.wait_returned);
+                        return self.retain_handoff(pending, .waiting);
+                    },
                     .stage => |payload| staged: {
+                        try self.record_handoff_event(.candidate_returned);
                         const parent = request.context().parent;
                         const ready = self.state.parent_certified(.{ parent[0], parent[1] });
                         if (ready) break :staged payload;
                         // Relay now so distribution overlaps parent certification.
                         const plan: Plan = .{ .prepare = .{ .round = request.context().round } };
                         _ = self.relay.broadcast(payload, plan);
+                        try self.record_handoff_event(.relayed_before_certification);
                         return self.retain_handoff(pending, .{ .held = payload });
                     },
-                    .vote => |payload| payload,
+                    .vote => |payload| voted: {
+                        try self.record_handoff_event(.candidate_returned);
+                        break :voted payload;
+                    },
                 },
             } else null;
             if (payload == null and request.is_handoff()) {
                 return self.retain_handoff(pending, .closed);
             }
-            const view = self.process_proposed(request, payload) orelse return .skip;
+            const view = try self.process_proposed(request, payload, false) orelse return .skip;
             return .{ .notify = .{ .view = view, .staged = .{} } };
         }
 
@@ -655,7 +756,7 @@ pub fn Actor(comptime P: type) type {
         }
 
         /// A held candidate whose parent certified: only its broadcast and vote remain.
-        fn release_held(self: *Self) ?View {
+        fn release_held(self: *Self) !?View {
             const pending = self.pending_propose orelse return null;
             const payload = switch (pending.state) {
                 .held => |payload| payload,
@@ -664,7 +765,7 @@ pub fn Actor(comptime P: type) type {
             const parent = pending.request.context().parent;
             if (!self.state.parent_certified(.{ parent[0], parent[1] })) return null;
             self.pending_propose = null;
-            return self.process_proposed(pending.request, payload);
+            return self.process_proposed(pending.request, payload, true);
         }
 
         fn handle_verified(self: *Self, id: u64, round: Rnd, result: ?bool) Outcome {
@@ -976,7 +1077,9 @@ pub fn Actor(comptime P: type) type {
 
         /// Waits for the next event or the timeout and handles it.
         fn next_outcome(self: *Self, links: *const Links) !Outcome {
-            if (self.release_held()) |view| return .{ .notify = .{ .view = view, .staged = .{} } };
+            if (try self.release_held()) |view| {
+                return .{ .notify = .{ .view = view, .staged = .{} } };
+            }
             const deadline = self.state.next_timeout();
             const event = try links.inbox.next_until(deadline.deadline) orelse {
                 const current = self.state.current_view();

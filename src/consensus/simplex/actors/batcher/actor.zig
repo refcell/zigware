@@ -3,8 +3,8 @@
 //! verifies, and hands certificates to the voter.
 //!
 //! `P` declares `Scheme`, `Blocker`, `Digest`, `Reporter`, `Relay`, `Strategy`, and
-//! `Receiver` (a p2p receiver). Events go to `tracer` under commonware's target; its spans
-//! and metrics are not ported yet.
+//! `Receiver` (a p2p receiver). Events go to `tracer` under commonware's target, metrics to
+//! `Config.scope`; its spans are not ported yet.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -48,6 +48,8 @@ pub fn Config(comptime P: type) type {
         lookahead: lookahead_mod.Lookahead,
         forward: config_mod.ForwardPolicy,
         floor: View,
+        /// The batcher's metrics scope; null registers nothing.
+        scope: ?@import("runtime").telemetry.metrics.Scope = null,
     };
 }
 
@@ -100,6 +102,9 @@ pub fn Actor(comptime P: type) type {
         dirty_views: std.ArrayList(View) = .empty,
         /// Receives the batcher's events; the engine sets it from its context.
         tracer: Tracer = .none,
+        metrics: ?Metrics,
+
+        const Metrics = metrics.BatcherMetrics(S.PublicKey);
 
         pub fn init(gpa: Allocator, io: Io, cfg: Config(P)) !struct { Self, Mailbox } {
             const participants = cfg.scheme.participants();
@@ -114,8 +119,13 @@ pub fn Actor(comptime P: type) type {
             }
             const last_activity = try gpa.alloc(?i96, count);
             @memset(last_activity, null);
+            errdefer gpa.free(last_activity);
             var required_active = participants.quorum(S.Faults);
             if (signer_of(cfg.scheme) != null) required_active -= 1;
+            const registered: ?Metrics = if (cfg.scope) |scope|
+                try .register(&scope, participants.as_slice())
+            else
+                null;
             const self: Self = .{
                 .gpa = gpa,
                 .io = io,
@@ -124,6 +134,7 @@ pub fn Actor(comptime P: type) type {
                 .last_activity = last_activity,
                 .required_active = required_active,
                 .finalized = cfg.floor,
+                .metrics = registered,
             };
             return .{ self, .{ .sender = pair.sender } };
         }
@@ -134,6 +145,7 @@ pub fn Actor(comptime P: type) type {
             self.dirty_views.deinit(self.gpa);
             self.gpa.free(self.last_activity);
             self.mailbox_receiver.deinit();
+            if (self.metrics) |*registered| registered.deinit();
             self.* = undefined;
         }
 
@@ -190,6 +202,7 @@ pub fn Actor(comptime P: type) type {
                     if (!self.viewport().retains(view)) return;
                     const round = try self.round_for_view(view);
                     _ = try round.accept_vote(self.gpa, vote, true);
+                    if (self.metrics) |registered| registered.added.metric().inc();
                     try self.dirty_views.append(self.gpa, view);
                 },
             }
@@ -255,6 +268,11 @@ pub fn Actor(comptime P: type) type {
             };
             var owned = true;
             defer if (owned) message.deinit(self.gpa);
+            try self.record_inbound(sender, switch (message) {
+                .notarization => .notarization,
+                .nullification => .nullification,
+                .finalization => .finalization,
+            });
             if (message.epoch() != self.cfg.epoch) {
                 _ = self.cfg.blocker.block(sender); // Epoch mismatch.
                 return;
@@ -296,6 +314,11 @@ pub fn Actor(comptime P: type) type {
                 _ = self.cfg.blocker.block(sender); // Decoding error.
                 return;
             };
+            try self.record_inbound(sender, switch (message) {
+                .notarize => .notarize,
+                .nullify => .nullify,
+                .finalize => .finalize,
+            });
             if (message.epoch() != self.cfg.epoch) {
                 _ = self.cfg.blocker.block(sender); // Epoch mismatch.
                 return;
@@ -305,6 +328,13 @@ pub fn Actor(comptime P: type) type {
             if (!self.viewport().admits_vote(view)) return;
             const round = try self.round_for_view(view);
             if (!try round.add_network(self.gpa, sender, message)) return;
+            if (self.metrics) |registered| {
+                registered.added.metric().inc();
+                // Only a higher view moves the gauge; one beyond its range leaves it.
+                const latest_vote = registered.latest_vote.metric();
+                const latest = try latest_vote.get_or_create(.{ .peer = sender });
+                _ = latest.try_set_max(view.get()) catch {};
+            }
             if (self.cfg.skip == .enabled and self.leader_nullified()) {
                 self.current.leader_nullify_hinted = true;
                 try voter.timeout(.new(self.cfg.epoch, self.current.view), .leader_nullify);
@@ -348,11 +378,18 @@ pub fn Actor(comptime P: type) type {
             const attempts_max = 3 * (participants.len() + 1);
             assert(attempts_max > 3);
             for (0..attempts_max) |_| {
+                const timer = if (self.metrics) |*registered|
+                    registered.construct_latency.timer(self.io)
+                else
+                    null;
                 var batch = try round.try_construct(self.gpa, &rng, self.cfg.strategy) orelse {
                     self.tracer.event(.trace, "no verifier ready", .{ .view = view.get() });
                     return;
                 };
                 defer batch.deinit(self.gpa);
+                // Record completed work even when no certificate was produced.
+                if (timer) |started| started.observe(self.io);
+                self.record_batch(&batch);
                 for (batch.invalid) |participant| {
                     const key = participants.key(participant) orelse continue;
                     _ = self.cfg.blocker.block(key.*); // Invalid signature.
@@ -373,6 +410,19 @@ pub fn Actor(comptime P: type) type {
                 }
             }
             unreachable; // Proof: the verifier runs out of work within `attempts_max` batches.
+        }
+
+        fn record_batch(self: *Self, batch: *const Round.Batch) void {
+            const registered = self.metrics orelse return;
+            if (batch.fallback) registered.construct_fallback.metric().inc();
+            if (batch.processed == 0) return;
+            registered.processed.metric().inc_by(batch.processed);
+            registered.batch_size.metric().observe(@floatFromInt(batch.processed));
+        }
+
+        fn record_inbound(self: *Self, peer: S.PublicKey, message: metrics.MessageType) !void {
+            const registered = self.metrics orelse return;
+            try metrics.inc(registered.inbound_messages, .{ .peer = peer, .message = message });
         }
 
         fn viewport(self: *const Self) lookahead_mod.Viewport {

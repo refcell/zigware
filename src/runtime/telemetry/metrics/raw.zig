@@ -103,8 +103,8 @@ pub const Gauge = struct {
 };
 
 /// Most buckets a histogram holds, including the implicit `+Inf` bucket. Commonware's largest
-/// layout (`Buckets.CRYPTOGRAPHY`) has 16.
-pub const bucket_count_max = 32;
+/// layout (consensus's `LATENCY`) has 36.
+pub const bucket_count_max = 40;
 
 /// A classic Prometheus histogram with fixed bucket bounds, stored inline.
 pub const Histogram = struct {
