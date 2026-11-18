@@ -24,4 +24,5 @@ test {
     _ = @import("tests/coverage.zig");
     _ = @import("tests/cache_epoch.zig");
     _ = @import("tests/scenarios.zig");
+    _ = @import("tests/wrappers.zig");
 }
