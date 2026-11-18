@@ -9,7 +9,7 @@
 //!   `App.Block` (a block with `Digest`, `digest`, `parent`, `height`, and `context()` whose
 //!   `round` field is its consensus round), `App.sync_targets(*const Block) SyncTargets`, and
 //!   `process(*App, io, Block.Context, *Ancestry, Unmerkleized, Finality) !?Merkleized`, which
-//!   takes the batches.
+//!   takes the batches. `Ancestry` is the type-erased `Boxed(Block)`.
 //! - `Databases`: a database set (`db.Shared(T)` or `db.Tuple`).
 //! - `Provider`: marshal's `BlockProvider` for `App.Block`.
 //!
@@ -26,6 +26,7 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const broadcast = @import("broadcast");
 const consensus = @import("consensus");
+const boxed = @import("boxed.zig");
 const pending_mod = @import("pending.zig");
 
 const Height = consensus.types.Height;
@@ -57,7 +58,8 @@ pub fn Execution(comptime P: type) type {
         pub const Block = App.Block;
         pub const Digest = Block.Digest;
         pub const Digested = broadcast.Digested(Block);
-        pub const Ancestry = ancestry_mod.AncestorStream(Provider);
+        pub const Ancestry = boxed.Boxed(Block);
+        pub const Stream = ancestry_mod.AncestorStream(Provider);
         pub const State = pending_mod.Pending(Digest, Databases.Merkleized);
         pub const Anchor = State.Anchor;
         pub const Entry = State.Entry;
@@ -349,26 +351,32 @@ pub fn Execution(comptime P: type) type {
             };
         }
 
+        /// A boxed stream over `initial` (taken; newest first) that fetches earlier ancestors
+        /// from a copy of `provider`.
+        pub fn stream(self: *Self, provider: *const Provider, initial: []const Digested) !Ancestry {
+            const stream_provider = if (comptime @hasDecl(Provider, "clone"))
+                provider.clone()
+            else
+                provider.*;
+            const ancestry = Stream.init(self.gpa, self.io, stream_provider, initial, null);
+            const owned = ancestry catch |err| {
+                for (initial) |handle| handle.discard();
+                return err;
+            };
+            return Ancestry.init(self.gpa, owned);
+        }
+
         /// The ancestry of the next block on `path` (the block, then its parent), or null once
         /// the path is exhausted. Each block forks from the state of the one before it, so the
         /// caller processes a block before asking for the next.
         pub fn next_replay(self: *Self, provider: *const Provider, path: *ReplayPath) !?Ancestry {
             if (path.blocks.items.len == 0) return null;
             const block = path.blocks.getLast();
-            const initial = [_]Digested{ block.clone(), path.parent.clone() };
-            const stream_provider = if (comptime @hasDecl(Provider, "clone"))
-                provider.clone()
-            else
-                provider.*;
-            const ancestry = Ancestry.init(self.gpa, self.io, stream_provider, &initial, null);
-            const stream = ancestry catch |err| {
-                for (initial) |handle| handle.discard();
-                return err;
-            };
+            const ancestry = try self.stream(provider, &.{ block.clone(), path.parent.clone() });
             _ = path.blocks.pop();
             path.parent.deinit();
             path.parent = block;
-            return stream;
+            return ancestry;
         }
 
         /// Restores the speculative state of `target` (taken) and its missing ancestors.

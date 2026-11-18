@@ -21,6 +21,10 @@ pub const execution = @import("processor/execution.zig");
 pub const Execution = execution.Execution;
 pub const Finality = execution.Finality;
 pub const PrepareBatchesError = execution.PrepareBatchesError;
+pub const Boxed = @import("processor/boxed.zig").Boxed;
+
+pub const processor = @import("processor/processor.zig");
+pub const Processor = processor.Processor;
 
 test {
     std.testing.refAllDecls(@This());
@@ -28,4 +32,5 @@ test {
     _ = @import("processor/pruning_test.zig");
     _ = @import("processor/pending_test.zig");
     _ = @import("processor/execution_test.zig");
+    _ = @import("processor/processor_test.zig");
 }

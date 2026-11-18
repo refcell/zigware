@@ -179,6 +179,11 @@ marshal's actors (consensus-marshal) for the actor; until then it ports what is 
   `?*Flight` with `wait`, then `release`; `process_shared`; `flights_idle`), and replay
   (`prepare_replay`, `next_replay`, `rebuild_pending(app, *Provider, target)`). `Finality`,
   `PrepareBatchesError` (`Invalid`, `Incomplete`).
+- `glue.stateful.actor.Processor(P)` (`P` as for `Execution`; `App` adds `Captured`, `capture`,
+  and `finalized`): `init(gpa, io, app, databases, anchor, ?Pruning)`, `boundary(block)`,
+  `redelivered(block)`, `finalize(*const Provider, block, start_barrier)` → `Applied{barrier,
+  prune}`, `branch_anchor`, `flights_idle`, `deinit`. `actor.Boxed(B)` is the type-erased
+  ancestry (commonware `BoxedAncestry`).
 
 ### Decisions
 - ManagedDb and DatabaseSet are comptime contracts. Mutations take `*Self` and return errors
@@ -246,7 +251,9 @@ marshal's actors (consensus-marshal) for the actor; until then it ports what is 
 - [x] actor: the processor's speculative `Pending` state (cache, descendants, retain_branch).
 - [x] actor: the processor's execution layer (flights, forking, candidate processing, replay)
   with commonware's flight and replay tests.
-- [ ] actor: processor propose/finalize, verifier, core (after marshal); tests (single and
+- [x] actor: the processor's finalization (`Processor.finalize`, boundary, redelivery) with
+  commonware's finalization tests.
+- [ ] actor: processor propose (with the core mailbox), verifier, core (after marshal); tests (single and
   multi db apps, floor, properties).
 
 ## Log
@@ -274,6 +281,7 @@ marshal's actors (consensus-marshal) for the actor; until then it ports what is 
 - 2026-11-18 (stateful): the probe actor driver; `consensus.simplex.actors.inbox` exported.
 - 2026-11-18 (stateful): the processor's speculative `Pending` state.
 - 2026-11-18 (stateful): the processor's execution layer and flight registry.
+- 2026-11-18 (stateful): the processor's finalization path and boxed ancestry.
 
 ## dkg (owner: coding lane, thread T-01a1d58d-bff1-75a1-8ccb-4b8dd7bc9755)
 
