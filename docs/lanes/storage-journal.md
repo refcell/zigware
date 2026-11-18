@@ -26,10 +26,11 @@ resize, sync), `runtime.storage`, with the in-memory backend `runtime.storage.me
   `Recovery` and ported tests.
 - [x] journal/segmented: oversized journal (fixed index plus glob values, checkpoint restore
   and marker-tracked recovery) with its core tests.
-- [ ] journal/segmented: the rest of oversized.rs's ~24 recovery tests (36 ported in
+- [ ] journal/segmented: the rest of oversized.rs's ~16 recovery tests (44 ported in
   oversized_recovery_test.zig: persistence, sync, value and index loss, torn and partial
   pages, truncation crashes, short value reads, orphan sections, nested crashes, torn
-  rewrites; left: marker, interrupted prune/destroy, sync-failure, and read-gate tests).
+  rewrites, interrupted prunes, restores; left: marker preservation, lazy adoption,
+  sync-failure, interrupted destroy and section removal, and read-option/read-gate tests).
 - [x] journal/contiguous: fixed journal (checkpoint, blob partition, recovery with watermark
   and clear intent, bounded open, `init_at_size`, `clear_to_size`, replay batches) with the
   shared contiguous suite and the checkpoint tests.
@@ -350,3 +351,5 @@ resize, sync), `runtime.storage`, with the in-memory backend `runtime.storage.me
 - 2026-11-16: contiguous replay no longer flushes the write buffer (found by the
   journal_contiguous_recovery port, which landed with it).
 - 2026-11-16: blob and section manager metrics (contiguous and segmented journals).
+- 2026-11-18: queue_recovery fuzz decode overflow at a 0xFF page-size byte (CI soak seed 456);
+  44 oversized recovery tests.

@@ -810,3 +810,249 @@ test "oversized recovery: a tracked open keeps synced entries below a torn rewri
     try testing.expectEqual(fill(3), value);
     try journal.destroy();
 }
+
+/// Retained index entries of `section`, or 0 when the section is gone.
+fn retained_entries(journal: *Journal, section: u64) !u64 {
+    const bytes = journal.size(section) catch |err| switch (err) {
+        error.SectionOutOfRange => return 0,
+        else => return err,
+    };
+    return bytes / chunk;
+}
+
+/// Whether every name in `subset` is in `set` (both from `scan`).
+fn names_within(subset: []const []u8, set: []const []u8) bool {
+    for (subset) |name| {
+        for (set) |other| {
+            if (std.mem.eql(u8, name, other)) break;
+        } else return false;
+    }
+    return true;
+}
+
+test "oversized recovery: an interrupted prune reopens to a consistent prefix" {
+    const sections = 3;
+    const entries = 2;
+    const floor = 2;
+    var interrupted: u64 = 0;
+    while (true) : (interrupted += 1) {
+        var h = try Harness.init();
+        defer h.deinit();
+        var journal = try h.open_tracked();
+        for (0..sections) |section| {
+            for (0..entries) |position| {
+                const id = section * entries + position;
+                _ = try append(&journal, section, id, fill(id));
+            }
+        }
+        try journal.sync_all();
+        try journal.sync(&.{});
+        // Stop the prune after `interrupted` mutations, then crash.
+        h.storage.allow_mutations(interrupted);
+        const pruned = if (journal.prune(floor)) |_| true else |_| false;
+        const stopped = h.storage.mutation_refused;
+        h.storage.mutations_allowed = null;
+        journal.deinit();
+        h.storage.crash();
+        try testing.expectEqual(!stopped, pruned);
+        journal = try h.open_tracked();
+        defer journal.deinit();
+        for (0..sections) |section| {
+            const retained = try retained_entries(&journal, section);
+            // Sections at or above the floor are whole; earlier ones are whole or gone.
+            try testing.expect(retained == entries or (section < floor and retained == 0));
+            if (interrupted == 0) try testing.expectEqual(entries, retained);
+            if (pruned and section < floor) try testing.expectEqual(0, retained);
+            for (0..retained) |position| {
+                const stored = try journal.get(section, position);
+                try testing.expectEqual(section * entries + position, stored.id);
+                const value =
+                    try journal.get_value(section, stored.value_offset, stored.value_size);
+                try testing.expectEqual(fill(stored.id), value);
+            }
+        }
+        if (!stopped) break;
+    }
+    // The prune rewrites the markers, then removes an index and a value section per section.
+    try testing.expect(interrupted > 2 * floor);
+}
+
+test "oversized recovery: a checkpoint restore after an interrupted prune" {
+    const sections = 4;
+    const floor = 3;
+    var orphaned: u64 = 0;
+    var interrupted: u64 = 0;
+    while (true) : (interrupted += 1) {
+        var h = try Harness.init();
+        defer h.deinit();
+        var journal = try h.open_checkpoint(.{ .section = 0, .size = 0 });
+        for (0..sections) |section| _ = try append(&journal, section, section, fill(section));
+        try journal.sync_all();
+        h.storage.allow_mutations(interrupted);
+        const pruned = if (journal.prune(floor)) |_| true else |_| false;
+        const stopped = h.storage.mutation_refused;
+        h.storage.mutations_allowed = null;
+        journal.deinit();
+        h.storage.crash();
+        try testing.expectEqual(!stopped, pruned);
+        // The index is pruned before the values: an index section never loses its values.
+        var index = try h.storage.scan(gpa, "test-index");
+        defer index.deinit(gpa);
+        var values = try h.storage.scan(gpa, "test-values");
+        defer values.deinit(gpa);
+        try testing.expect(names_within(index.items, values.items));
+        if (!names_within(values.items, index.items)) orphaned += 1;
+        journal = try h.open_checkpoint(.{ .section = sections - 1, .size = chunk });
+        const oldest = journal.oldest_section().?;
+        try testing.expect(oldest <= floor);
+        for (oldest..sections) |section| {
+            const stored = try journal.get(section, 0);
+            try testing.expectEqual(section, stored.id);
+            const value = try journal.get_value(section, stored.value_offset, stored.value_size);
+            try testing.expectEqual(fill(section), value);
+        }
+        if (interrupted == 0) try testing.expectEqual(0, oldest);
+        if (pruned) try testing.expectEqual(floor, oldest);
+        // The restore removed the value sections that lost their index section.
+        var index_after = try h.storage.scan(gpa, "test-index");
+        defer index_after.deinit(gpa);
+        var values_after = try h.storage.scan(gpa, "test-values");
+        defer values_after.deinit(gpa);
+        try testing.expectEqual(index_after.items.len, values_after.items.len);
+        try testing.expect(names_within(values_after.items, index_after.items));
+        try journal.destroy();
+        if (!stopped) break;
+    }
+    try testing.expect(interrupted >= 2 * floor);
+    try testing.expect(orphaned >= floor);
+}
+
+test "oversized recovery: a checkpoint restore rejects a value-only gap" {
+    var h = try Harness.init();
+    defer h.deinit();
+    var journal = try h.open_checkpoint(.{ .section = 0, .size = 0 });
+    for (0..3) |section| _ = try append(&journal, section, section, fill(section));
+    try journal.sync_all();
+    const checkpoint: @import("oversized.zig").Checkpoint = .{
+        .section = 2,
+        .size = try journal.size(2),
+    };
+    journal.deinit();
+    // Lose index section 1 above the oldest retained index section, which no prune produces.
+    try h.storage.remove("test-index", &manager_mod.section_name(1));
+    try testing.expectError(error.Corruption, h.open_checkpoint(checkpoint));
+    var values = try h.storage.scan(gpa, "test-values");
+    defer values.deinit(gpa);
+    try testing.expectEqual(3, values.items.len);
+}
+
+test "oversized recovery: an empty checkpoint restore touches nothing" {
+    var h = try Harness.init();
+    defer h.deinit();
+    var journal = try h.open_checkpoint(.{ .section = 0, .size = 0 });
+    try testing.expectEqual(null, journal.oldest_section());
+    try testing.expectEqual(0, h.storage.reads);
+    try testing.expectEqual(0, h.storage.writes);
+    // Neither partition exists, so the restore opened no blob.
+    try testing.expectError(error.PartitionMissing, h.storage.scan(gpa, "test-index"));
+    try testing.expectError(error.PartitionMissing, h.storage.scan(gpa, "test-values"));
+    const located = try append(&journal, 1, 7, fill(7));
+    try testing.expectEqual(0, located.position);
+    try journal.sync(&.{1});
+    journal.deinit();
+    journal = try h.open_checkpoint(.{ .section = 1, .size = chunk });
+    try testing.expectEqual(7, (try journal.get(1, 0)).id);
+    try expect_value(&journal, 1, located, fill(7));
+    try journal.destroy();
+}
+
+/// Every entry recovery adopted in section 1 reads back the value appended with it
+/// (commonware's `assert_adopted_entries_consistent`; ids are their value bytes).
+fn expect_adopted_consistent(journal: *Journal) !void {
+    const entries = try journal.size(1) / chunk;
+    for (0..entries) |position| {
+        const stored = try journal.get(1, position);
+        const value = try journal.get_value(1, stored.value_offset, stored.value_size);
+        try testing.expectEqual(fill(stored.id), value);
+    }
+}
+
+test "oversized recovery: an entry with torn value bytes is rejected" {
+    var h = try Harness.init();
+    defer h.deinit();
+    var journal = try h.open_tracked();
+    _ = try append(&journal, 1, 1, fill(1));
+    try journal.sync(&.{1});
+    // Entry 2's index is durable and the values' length covers its range, but its bytes
+    // are garbage (writeback-mode metadata journaling).
+    const torn = try append(&journal, 1, 2, fill(2));
+    const garbage = try gpa.alloc(u8, torn.size);
+    defer gpa.free(garbage);
+    @memset(garbage, 0xFF);
+    try journal.values.inject(1, torn.offset, garbage);
+    try journal.values.sync(&.{1});
+    try journal.index.sync(&.{1});
+    journal.deinit();
+    h.storage.crash();
+    // The range fits within the values, so only the checksum check can reject it.
+    journal = try h.open_tracked();
+    try testing.expectEqual(chunk, try journal.size(1));
+    try expect_adopted_consistent(&journal);
+    try journal.destroy();
+}
+
+test "oversized recovery: a restore discards state beyond its checkpoint" {
+    var h = try Harness.init();
+    defer h.deinit();
+    var journal = try h.open_checkpoint(.{ .section = 0, .size = 0 });
+    _ = try append(&journal, 1, 1, fill(1));
+    try journal.sync_all();
+    // Torn state beyond the checkpoint: indexes durable ahead of their values.
+    _ = try append(&journal, 1, 2, fill(2));
+    _ = try append(&journal, 2, 3, fill(3));
+    try journal.index.sync(&.{ 1, 2 });
+    journal.deinit();
+    h.storage.crash();
+    journal = try h.open_checkpoint(.{ .section = 1, .size = chunk });
+    try testing.expectEqual(chunk, try journal.size(1));
+    try testing.expectEqual(1, journal.newest_section());
+    try expect_adopted_consistent(&journal);
+    try journal.destroy();
+}
+
+test "oversized recovery: a restore over lost committed values fails without repair" {
+    var h = try Harness.init();
+    defer h.deinit();
+    var journal = try h.open_checkpoint(.{ .section = 0, .size = 0 });
+    _ = try append(&journal, 1, 1, fill(1));
+    _ = try append(&journal, 2, 2, fill(2));
+    try journal.sync_all();
+    journal.deinit();
+    // Lose value bytes of section 1, below the checkpoint.
+    const opened = try h.storage.open("test-values", &manager_mod.section_name(1));
+    try opened.blob.resize(opened.len - 1);
+    try opened.blob.sync();
+    opened.blob.close();
+    // Nothing is repaired, so the failure persists across restarts.
+    for (0..2) |_| {
+        try testing.expectError(
+            error.Corruption,
+            h.open_checkpoint(.{ .section = 2, .size = chunk }),
+        );
+    }
+}
+
+test "oversized recovery: finishing a tracked replay before draining fails" {
+    var h = try Harness.init();
+    defer h.deinit();
+    var journal = try h.open_checkpoint(.{ .section = 0, .size = 0 });
+    _ = try append(&journal, 1, 1, fill(1));
+    try journal.sync_all();
+    journal.deinit();
+    const storage = h.storage.interface();
+    var recovery = try Journal.init_with_markers(gpa, storage, h.cfg(), "test-markers");
+    try testing.expectError(error.ReplayFailed, recovery.finish());
+    // The synced entry reopens through its checkpoint, so the store can be destroyed.
+    journal = try h.open_checkpoint(.{ .section = 1, .size = chunk });
+    try journal.destroy();
+}
