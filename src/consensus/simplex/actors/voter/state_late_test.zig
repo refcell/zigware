@@ -2339,6 +2339,729 @@ test "voter state a pipelined handoff child replay prevents a rebuild" {
     }.body);
 }
 
+/// Votes for a view-6 handoff child on the tip, then certifies a conflicting view-5
+/// notarization; returns the conflicting proposal.
+fn handoff_then_conflict(state: anytype, f: *const base.Fixture, tip: Proposal) !Proposal {
+    const request = state.try_propose().?.context();
+    try testing.expectEqual(5, request.parent[0].get());
+    try testing.expect(request.parent[1].eql(tip.payload));
+    try testing.expect(state.proposed(&request, proposal(9, 6, 5, 66).payload));
+    try testing.expect(try state.construct_notarize(.new(6)) != null);
+    const conflict = proposal(9, 5, 4, 75);
+    const added = try state.add_notarization(try notarization_from(f, &.{ 0, 1, 2 }, conflict));
+    try testing.expect(added.added);
+    try testing.expect(try state.certified(.new(5), true) != null);
+    try testing.expectEqual(6, state.current_view().get());
+    // Proposing now would build on a dead chain.
+    try testing.expect(state.try_propose() == null);
+    try testing.expectEqual(null, state.optimistic_ancestry_payload(.new(6)));
+    return conflict;
+}
+
+test "voter state a pipelined handoff's conflicting parent blocks a same-term successor" {
+    // commonware `pipelined_handoff_conflicting_parent_blocks_same_term_successor`.
+    try run(struct {
+        fn body(io: Io) !void {
+            var env: Env = undefined;
+            try env.start(io, handoff_options(4, 3));
+            defer env.stop();
+            const tip = try prepare_term_boundary(&env);
+            _ = try handoff_then_conflict(&env.state, &env.fixture, tip);
+        }
+    }.body);
+}
+
+/// A scheduled elector with rotating terms where participant 3 leads views 6 and 7
+/// (commonware's `RepeatLeaderElector`).
+const RepeatLeaderElector = struct {
+    pub const mode: elector.Mode = .scheduled;
+    pub const Input = void;
+
+    pub fn terms(_: RepeatLeaderElector) elector.Terms {
+        return .rotating();
+    }
+
+    pub fn elect(_: RepeatLeaderElector, round: Rnd, _: void) Participant {
+        const view = round.view.get();
+        if (view == 6 or view == 7) return .init(3);
+        return .init(@intCast(view % 3));
+    }
+};
+
+test "voter state a pipelined handoff's conflicting parent blocks a consecutive handoff" {
+    // commonware `pipelined_handoff_conflicting_parent_blocks_consecutive_handoff`.
+    try run(struct {
+        fn body(io: Io) !void {
+            var rng = utils.rng.test_rng();
+            var fixture = try ed25519.fixture(Digest, gpa, &rng, "ns", 4);
+            defer fixture.deinit(gpa);
+            const Repeat = state_mod.State(Scheme, RepeatLeaderElector, Digest);
+            var state = Repeat.init(gpa, io, .{
+                .scheme = &fixture.schemes[3],
+                .elector = .{},
+                .epoch = .new(9),
+                .view_retention = .new(10),
+                .leader_timeout = .from_millis(1000),
+                .certification_timeout = .from_millis(2000),
+                .timeout_retry = .from_millis(3000),
+                .skip_budget = 4,
+            });
+            defer state.deinit();
+            try state.set_genesis(base.genesis());
+            const added = try state.add_notarization(
+                try build_notarization(&fixture, proposal(9, 4, 3, 64)),
+            );
+            try testing.expect(added.added);
+            try testing.expect(try state.certified(.new(4), true) != null);
+            try testing.expectEqual(5, state.current_view().get());
+            const tip = proposal(9, 5, 4, 65);
+            try testing.expect(try state.set_proposal(.new(5), &tip));
+            try testing.expect(state.try_verify() == .ready);
+            try testing.expect(state.verified(.new(5)));
+            try testing.expect(try state.construct_notarize(.new(5)) != null);
+            const conflict = try handoff_then_conflict(&state, &fixture, tip);
+            var nullify_votes: [3]Nullify = undefined;
+            for (&nullify_votes, 0..) |*vote, signer| {
+                vote.* = (try Nullify.sign(gpa, &fixture.schemes[signer], round_at(9, 6))).?;
+            }
+            try testing.expect(try state.add_nullification(try types.Nullification(Scheme)
+                .from_votes(gpa, &fixture.verifier, &nullify_votes, parallel.sequential)));
+            const request = state.try_propose().?.context();
+            try testing.expectEqual(7, request.view().get());
+            try testing.expectEqual(5, request.parent[0].get());
+            try testing.expect(request.parent[1].eql(conflict.payload));
+        }
+    }.body);
+}
+
+test "voter state a pipelined handoff does not require the recovered parent's leader" {
+    // commonware `pipelined_handoff_does_not_require_recovered_parent_leader`.
+    try run(struct {
+        fn body(io: Io) !void {
+            var env: Env = undefined;
+            try env.start(io, handoff_options(4, 0));
+            defer env.stop();
+            const state = &env.state;
+            try testing.expect(try state.add_nullification(
+                try build_nullification(&env.fixture, round_at(9, 5)),
+            ));
+            try testing.expectEqual(6, state.current_view().get());
+            const tip = proposal(9, 10, 9, 110);
+            try add_notarized(state, &env.fixture, tip);
+            try testing.expectEqual(null, state.leader_index(.new(10)));
+            try testing.expectEqual(0, state.leader_index(.new(11)).?.get());
+            const request = state.try_propose().?;
+            try testing.expect(request.is_handoff());
+            const handoff = request.context();
+            try testing.expectEqual(11, handoff.view().get());
+            try testing.expectEqual(10, handoff.parent[0].get());
+            try testing.expect(handoff.parent[1].eql(tip.payload));
+        }
+    }.body);
+}
+
+test "voter state a pipelined handoff keeps a valid fallback after a late certification" {
+    // commonware `pipelined_handoff_keeps_valid_fallback_after_late_certification`.
+    try run(struct {
+        fn body(io: Io) !void {
+            var env: Env = undefined;
+            try env.start(io, handoff_options(4, 3));
+            defer env.stop();
+            const state = &env.state;
+            const tip = try prepare_term_boundary(&env);
+            try add_notarized(state, &env.fixture, tip);
+            try testing.expect(try state.add_nullification(
+                try build_nullification(&env.fixture, round_at(9, 5)),
+            ));
+            try testing.expectEqual(6, state.current_view().get());
+            const request = state.try_propose().?;
+            try testing.expect(request == .propose);
+            const fallback = request.context();
+            try testing.expectEqual(4, fallback.parent[0].get());
+            try testing.expect(fallback.parent[1].eql(.fill(64)));
+            try testing.expect(try state.certified(.new(5), true) != null);
+            const ours = proposal(9, 6, 4, 66);
+            try testing.expect(!state.supersede_proposal_request(&fallback));
+            try testing.expect(state.proposed(&fallback, ours.payload));
+            const vote = (try state.construct_notarize(.new(6))).?;
+            try testing.expectEqualDeep(ours, vote.proposal);
+        }
+    }.body);
+}
+
+test "voter state a pipelined handoff retries after its parent is invalidated" {
+    // commonware `pipelined_handoff_retries_after_parent_invalidation`.
+    try run(struct {
+        fn body(io: Io) !void {
+            var env: Env = undefined;
+            try env.start(io, handoff_options(4, 3));
+            defer env.stop();
+            const state = &env.state;
+            _ = try prepare_term_boundary(&env);
+            const initial = state.try_propose().?.context();
+            try testing.expectEqual(5, initial.parent[0].get());
+            try testing.expect(state.try_propose() == null);
+            try testing.expect(try state.add_nullification(
+                try build_nullification(&env.fixture, round_at(9, 5)),
+            ));
+            try testing.expect(state.supersede_proposal_request(&initial));
+            const request = state.try_propose().?;
+            try testing.expect(request == .propose);
+            const retry = request.context();
+            try testing.expectEqual(6, retry.view().get());
+            try testing.expectEqual(4, retry.parent[0].get());
+            try testing.expect(retry.parent[1].eql(.fill(64)));
+            try testing.expect(state.try_propose() == null);
+            const rebuilt = proposal(9, 6, 4, 67);
+            try testing.expect(state.proposed(&retry, rebuilt.payload));
+            const vote = (try state.construct_notarize(.new(6))).?;
+            try testing.expectEqualDeep(rebuilt, vote.proposal);
+        }
+    }.body);
+}
+
+test "voter state a rejected build keeps a single propose per view" {
+    // commonware `rejected_build_keeps_single_propose_per_view`.
+    try run(struct {
+        fn body(io: Io) !void {
+            var env: Env = undefined;
+            try env.start(io, handoff_options(4, 3));
+            defer env.stop();
+            const state = &env.state;
+            const f = &env.fixture;
+            _ = try certify_view_4(&env);
+            try testing.expect(try state.add_nullification(
+                try build_nullification(f, round_at(9, 5)),
+            ));
+            try testing.expectEqual(6, state.current_view().get());
+            const start = state.try_propose().?.context();
+            try testing.expectEqual(4, start.parent[0].get());
+            const term_start = proposal(9, 6, 4, 66);
+            try testing.expect(state.proposed(&start, term_start.payload));
+            try testing.expect(try state.construct_notarize(.new(6)) != null);
+            const added = try state.add_notarization(
+                try notarization_from(f, &.{ 0, 1, 2 }, term_start),
+            );
+            try testing.expect(added.added);
+            const request = state.try_propose().?;
+            try testing.expect(request == .propose);
+            const next = request.context();
+            try testing.expectEqual(7, next.view().get());
+            try testing.expectEqual(6, next.parent[0].get());
+            try testing.expect(next.parent[1].eql(term_start.payload));
+            try testing.expect(try state.certified(.new(6), false) != null);
+            try testing.expect(!state.supersede_proposal_request(&next));
+            try testing.expect(!state.proposed(&next, .fill(67)));
+            try finalize_with(&env, term_start);
+            try testing.expect(state.try_propose() == null);
+        }
+    }.body);
+}
+
+test "voter state a pipelined handoff withholds notarize after a failed certification" {
+    // commonware `pipelined_handoff_withholds_notarize_after_failed_certification`.
+    try run(struct {
+        fn body(io: Io) !void {
+            var env: Env = undefined;
+            try env.start(io, handoff_options(4, 3));
+            defer env.stop();
+            const state = &env.state;
+            const tip = try prepare_term_boundary(&env);
+            const request = state.try_propose().?.context();
+            try add_notarized(state, &env.fixture, tip);
+            try testing.expect(try state.certified(.new(5), false) != null);
+            try testing.expect(!state.proposed(&request, .fill(66)));
+            try testing.expectEqual(null, try state.construct_notarize(.new(6)));
+        }
+    }.body);
+}
+
+test "voter state a pipelined handoff withholds notarize after an equivocation" {
+    // commonware `pipelined_handoff_withholds_notarize_after_equivocation`.
+    try run(struct {
+        fn body(io: Io) !void {
+            var env: Env = undefined;
+            try env.start(io, handoff_options(4, 3));
+            defer env.stop();
+            const state = &env.state;
+            _ = try prepare_term_boundary(&env);
+            const request = state.try_propose().?.context();
+            try testing.expect(!try state.set_proposal(.new(5), &proposal(9, 5, 4, 99)));
+            try testing.expect(!state.proposed(&request, .fill(66)));
+            try testing.expectEqual(null, try state.construct_notarize(.new(6)));
+        }
+    }.body);
+}
+
+test "voter state a pipelined handoff withholds notarize after a conflicting parent" {
+    // commonware `pipelined_handoff_withholds_notarize_after_conflicting_parent_certificate`.
+    try run(struct {
+        fn body(io: Io) !void {
+            var env: Env = undefined;
+            try env.start(io, handoff_options(4, 3));
+            defer env.stop();
+            const state = &env.state;
+            const tip = try prepare_term_boundary(&env);
+            const request = state.try_propose().?.context();
+            try testing.expectEqual(5, request.parent[0].get());
+            try testing.expect(request.parent[1].eql(tip.payload));
+            const conflicting = proposal(9, 5, 4, 99);
+            const added = try state.add_notarization(
+                try notarization_from(&env.fixture, &.{ 0, 1, 2 }, conflicting),
+            );
+            try testing.expect(added.added);
+            try testing.expect(added.equivocator != null);
+            try testing.expectEqual(5, state.current_view().get());
+            try testing.expect(!state.proposed(&request, .fill(66)));
+            try testing.expectEqual(null, try state.construct_notarize(.new(6)));
+        }
+    }.body);
+}
+
+/// A peer's handoff child keeps explicit verification whether its proposal arrives before
+/// the tip's notarization or after (commonware `peer_verification_stays_explicit`).
+fn peer_verification_stays_explicit(io: Io, proposal_first: bool) !void {
+    var env: Env = undefined;
+    try env.start(io, handoff_options(4, 1));
+    defer env.stop();
+    const state = &env.state;
+    const f = &env.fixture;
+    const tip = try prepare_term_boundary(&env);
+    try testing.expectEqual(null, state.leader_index(.new(6)));
+    try testing.expect(state.try_propose() == null);
+    const child = proposal(9, 6, 5, 66);
+    if (proposal_first) {
+        try testing.expect(try state.set_proposal(.new(6), &child));
+        try testing.expect(state.try_verify() == .wait);
+        try add_notarized(state, f, tip);
+    } else {
+        try add_notarized(state, f, tip);
+        try testing.expect(try state.set_proposal(.new(6), &child));
+    }
+    const leader = f.participants[state.leader_index(.new(6)).?.get()];
+    try expect_resolve(state.try_verify(), 6, 5, leader);
+    try testing.expect(try state.certified(.new(5), true) != null);
+    try expect_ready(state.try_verify(), child, 5, tip.payload);
+}
+
+test "voter state a pipelined handoff keeps peer verification explicit" {
+    // commonware `pipelined_handoff_keeps_peer_verification_explicit`.
+    try run(struct {
+        fn body(io: Io) !void {
+            try peer_verification_stays_explicit(io, false);
+        }
+    }.body);
+}
+
+test "voter state a pipelined handoff keeps an early peer proposal explicit" {
+    // commonware `pipelined_handoff_keeps_early_peer_proposal_explicit`.
+    try run(struct {
+        fn body(io: Io) !void {
+            try peer_verification_stays_explicit(io, true);
+        }
+    }.body);
+}
+
+test "voter state a pipelined handoff pipelines rotating terms" {
+    // commonware `pipelined_handoff_pipelines_rotating_terms`.
+    try run(struct {
+        fn body(io: Io) !void {
+            var env: Env = undefined;
+            try env.start(io, .{ .signer = 3, .epoch = 9 });
+            defer env.stop();
+            const state = &env.state;
+            const first = proposal(9, 1, 0, 67);
+            try testing.expect(try state.set_proposal(.new(1), &first));
+            try testing.expect(state.try_verify() == .ready);
+            try testing.expect(state.verified(.new(1)));
+            try testing.expect(try state.construct_notarize(.new(1)) != null);
+            const request = state.try_propose().?.context();
+            try testing.expectEqual(2, request.view().get());
+            try testing.expectEqual(1, request.parent[0].get());
+            try testing.expect(request.parent[1].eql(first.payload));
+            try testing.expectEqual(1, state.current_view().get());
+        }
+    }.body);
+}
+
+/// Expects `verify` to request `kind` for `view` on behalf of `proposal_view`.
+fn expect_resolve_of(
+    verify: base.State.Verify,
+    proposal_view: u64,
+    view: u64,
+    kind: @TypeOf(verify.resolve.kind),
+) !void {
+    try testing.expect(verify == .resolve);
+    try testing.expectEqual(proposal_view, verify.resolve.proposal.get());
+    try testing.expectEqual(view, verify.resolve.view.get());
+    try testing.expectEqual(kind, verify.resolve.kind);
+}
+
+test "voter state a late parent certificate unblocks a notarized chain after a term skip" {
+    // commonware `late_parent_certificate_unblocks_notarized_chain_after_term_skip`.
+    try run(struct {
+        fn body(io: Io) !void {
+            var env: Env = undefined;
+            var options = epoch_nine(5, 20, 3);
+            options.signer = 3;
+            options.epoch = 1;
+            try env.start(io, options);
+            defer env.stop();
+            const state = &env.state;
+            const f = &env.fixture;
+            const others = [_]usize{ 0, 1, 2 };
+            var candidates: Candidates = .{};
+            defer candidates.deinit();
+            const added = try state.add_notarization(
+                try notarization_from(f, &others, proposal(1, 1, 0, 1)),
+            );
+            try testing.expect(added.added);
+            try testing.expect(try state.certified(.new(1), true) != null);
+            for ([_]u64{ 3, 4 }) |view| {
+                const value = proposal(1, view, view - 1, @intCast(view));
+                try testing.expect((try state.add_notarization(
+                    try notarization_from(f, &others, value),
+                )).added);
+            }
+            try candidates.take(state);
+            try testing.expectEqual(0, candidates.ready.items.len);
+            var nullify_votes: [3]Nullify = undefined;
+            for (&nullify_votes, others) |*vote, signer| {
+                vote.* = (try Nullify.sign(gpa, &f.schemes[signer], round_at(1, 2))).?;
+            }
+            try testing.expect(try state.add_nullification(try types.Nullification(Scheme)
+                .from_votes(gpa, &f.verifier, &nullify_votes, parallel.sequential)));
+            try testing.expectEqual(6, state.current_view().get());
+            try testing.expectEqual(3, state.leader_index(.new(6)).?.get());
+            // The term-start proposal skips the blocked chain.
+            const request = state.try_propose().?.context();
+            try testing.expectEqual(1, request.parent[0].get());
+            try testing.expect(request.parent[1].eql(.fill(1)));
+            try testing.expect((try state.add_notarization(
+                try notarization_from(f, &others, proposal(1, 2, 1, 2)),
+            )).added);
+            for ([_]u64{ 2, 3 }) |view| {
+                try candidates.take(state);
+                try candidates.expect_ready(view);
+                try testing.expect(try state.certified(.new(view), true) != null);
+            }
+            const finalized = try finalization_from(f, &others, proposal(1, 4, 3, 4));
+            try testing.expect((try state.add_finalization(finalized)).added);
+            try candidates.take(state);
+            try testing.expectEqual(0, candidates.ready.items.len);
+            try testing.expectEqual(6, state.current_view().get());
+        }
+    }.body);
+}
+
+/// commonware `setup_follower_state`: signer 1, rotating leaders, slow timeouts.
+const follower: Options = .{
+    .signer = 1,
+    .leader_timeout_ms = 10_000,
+    .certification_timeout_ms = 10_000,
+    .timeout_retry_ms = 30_000,
+};
+
+test "voter state a late nullification unblocks follower verify" {
+    // commonware `late_nullification_unblocks_follower_verify`.
+    try run(struct {
+        fn body(io: Io) !void {
+            var env: Env = undefined;
+            try env.start(io, follower);
+            defer env.stop();
+            const state = &env.state;
+            try add_notarized(state, &env.fixture, proposal(1, 1, 0, 88));
+            try testing.expect(try state.certified(.new(1), true) != null);
+            try testing.expect(try state.enter_view(.new(3)));
+            try state.set_leader(.new(3), null);
+            try testing.expectEqual(3, state.current_view().get());
+            try testing.expectEqual(0, state.leader_index(.new(3)).?.get());
+            const child = proposal(1, 3, 1, 89);
+            try testing.expect(try state.set_proposal(.new(3), &child));
+            const initial = state.next_timeout();
+            try testing.expect(initial.deadline > context.now_ns(io));
+            try testing.expect(state.try_verify() != .ready);
+            try testing.expectEqual(initial, state.next_timeout());
+            try testing.expect(try state.add_nullification(
+                try build_nullification(&env.fixture, round_at(1, 2)),
+            ));
+            const verify = state.try_verify();
+            try expect_ready(verify, child, 1, .fill(88));
+            try testing.expectEqual(3, verify.ready.context.round.view.get());
+        }
+    }.body);
+}
+
+test "voter state resolution requests the first missing view" {
+    // commonware `resolution_requests_first_missing_view`.
+    try run(struct {
+        fn body(io: Io) !void {
+            var env: Env = undefined;
+            try env.start(io, follower);
+            defer env.stop();
+            const state = &env.state;
+            var notarized = try build_notarization(&env.fixture, proposal(1, 2, 0, 88));
+            defer notarized.deinit(gpa);
+            try testing.expect((try state.add_notarization(try notarized.clone(gpa))).added);
+            try testing.expect(try state.certified(.new(2), true) != null);
+            try state.set_leader(.new(3), null);
+            try testing.expectEqual(3, state.current_view().get());
+            try testing.expect(try state.set_proposal(.new(3), &proposal(1, 3, 1, 89)));
+            const verify = state.try_verify();
+            try expect_resolve_of(verify, 3, 2, .nullification);
+            try testing.expectEqualDeep(env.fixture.participants[0], verify.resolve.target);
+            // A repeated notarization is dropped (and freed) by the state.
+            try testing.expect(!(try state.add_notarization(try notarized.clone(gpa))).added);
+            try testing.expect(state.try_verify() == .wait);
+        }
+    }.body);
+}
+
+test "voter state resolution requests an uncertified parent" {
+    // commonware `resolution_requests_uncertified_parent`.
+    try run(struct {
+        fn body(io: Io) !void {
+            var env: Env = undefined;
+            try env.start(io, follower);
+            defer env.stop();
+            const state = &env.state;
+            const f = &env.fixture;
+            try testing.expect(try state.add_nullification(
+                try build_nullification(f, round_at(1, 1)),
+            ));
+            try testing.expect(try state.add_nullification(
+                try build_nullification(f, round_at(1, 2)),
+            ));
+            try testing.expectEqual(3, state.current_view().get());
+            try testing.expect(try state.set_proposal(.new(3), &proposal(1, 3, 1, 90)));
+            try expect_resolve_of(state.try_verify(), 3, 1, .notarization);
+            try testing.expect(!try state.add_nullification(
+                try build_nullification(f, round_at(1, 1)),
+            ));
+            try testing.expect(state.try_verify() == .wait);
+        }
+    }.body);
+}
+
+test "voter state resolution is silent for a parent below the floor" {
+    // commonware `resolution_silent_for_parent_below_floor`.
+    try run(struct {
+        fn body(io: Io) !void {
+            var env: Env = undefined;
+            try env.start(io, follower);
+            defer env.stop();
+            const state = &env.state;
+            try testing.expect((try state.add_finalization(
+                try build_finalization(&env.fixture, proposal(1, 2, 0, 91)),
+            )).added);
+            try testing.expectEqual(3, state.current_view().get());
+            try testing.expect(try state.set_proposal(.new(3), &proposal(1, 3, 1, 92)));
+            try testing.expect(state.try_verify() == .wait);
+        }
+    }.body);
+}
+
+test "voter state resolution starts at the first gap before a displaced certificate" {
+    // commonware `resolution_starts_at_first_gap_before_displaced_certificate`.
+    try run(struct {
+        fn body(io: Io) !void {
+            var env: Env = undefined;
+            try env.start(io, follower);
+            defer env.stop();
+            const state = &env.state;
+            try add_notarized(state, &env.fixture, proposal(1, 3, 1, 95));
+            try testing.expect(try state.certified(.new(3), true) != null);
+            try testing.expect(try state.add_nullification(
+                try build_nullification(&env.fixture, round_at(1, 4)),
+            ));
+            try testing.expectEqual(5, state.current_view().get());
+            try testing.expect(try state.set_proposal(.new(5), &proposal(1, 5, 1, 96)));
+            try expect_resolve_of(state.try_verify(), 5, 2, .nullification);
+        }
+    }.body);
+}
+
+test "voter state resolution rearms in the next round" {
+    // commonware `resolution_rearms_in_next_round`.
+    try run(struct {
+        fn body(io: Io) !void {
+            var env: Env = undefined;
+            try env.start(io, follower);
+            defer env.stop();
+            const state = &env.state;
+            try add_notarized(state, &env.fixture, proposal(1, 2, 0, 97));
+            try testing.expect(try state.certified(.new(2), true) != null);
+            try state.set_leader(.new(3), null);
+            try testing.expect(try state.set_proposal(.new(3), &proposal(1, 3, 1, 98)));
+            try expect_resolve_of(state.try_verify(), 3, 2, .nullification);
+            for ([_]u64{ 3, 4 }) |view| {
+                try testing.expect(try state.add_nullification(
+                    try build_nullification(&env.fixture, round_at(1, view)),
+                ));
+            }
+            try testing.expectEqual(5, state.current_view().get());
+            try testing.expect(try state.set_proposal(.new(5), &proposal(1, 5, 1, 99)));
+            try expect_resolve_of(state.try_verify(), 5, 2, .nullification);
+        }
+    }.body);
+}
+
+test "voter state resolution does not wait for a local conflict" {
+    // commonware `resolution_does_not_wait_for_local_conflict`.
+    try run(struct {
+        fn body(io: Io) !void {
+            var env: Env = undefined;
+            try env.start(io, follower);
+            defer env.stop();
+            const state = &env.state;
+            try add_notarized(state, &env.fixture, proposal(1, 2, 0, 100));
+            try testing.expect(try state.enter_view(.new(3)));
+            try state.set_leader(.new(3), null);
+            try testing.expect(try state.set_proposal(.new(3), &proposal(1, 3, 1, 101)));
+            try expect_resolve_of(state.try_verify(), 3, 2, .nullification);
+            try testing.expect(try state.certified(.new(2), true) != null);
+            try testing.expect(state.try_verify() == .wait);
+        }
+    }.body);
+}
+
+test "voter state resolution requests a named parent with a term cover" {
+    // commonware `resolution_requests_named_parent_with_term_cover`.
+    try run(struct {
+        fn body(io: Io) !void {
+            var env: Env = undefined;
+            try env.start(io, .{ .term_length = 3 });
+            defer env.stop();
+            const state = &env.state;
+            try testing.expect(try state.add_nullification(
+                try build_nullification(&env.fixture, round_at(1, 1)),
+            ));
+            try testing.expectEqual(4, state.current_view().get());
+            try testing.expect(try state.set_proposal(.new(4), &proposal(1, 4, 2, 102)));
+            try expect_resolve_of(state.try_verify(), 4, 2, .notarization);
+        }
+    }.body);
+}
+
+test "voter state resolution requests an absent certificate" {
+    // commonware `resolution_requests_absent_certificate`.
+    try run(struct {
+        fn body(io: Io) !void {
+            var env: Env = undefined;
+            try env.start(io, follower);
+            defer env.stop();
+            const state = &env.state;
+            try add_notarized(state, &env.fixture, proposal(1, 1, 0, 93));
+            try testing.expect(try state.certified(.new(1), true) != null);
+            try testing.expect(try state.enter_view(.new(3)));
+            try state.set_leader(.new(3), null);
+            try testing.expect(try state.set_proposal(.new(3), &proposal(1, 3, 1, 94)));
+            try expect_resolve_of(state.try_verify(), 3, 2, .nullification);
+        }
+    }.body);
+}
+
+const Artifact = types.Artifact(Scheme, Digest);
+
+/// A journal of artifacts the test owns.
+const Journal = struct {
+    items: std.ArrayList(Artifact) = .empty,
+
+    fn push(self: *Journal, artifact: Artifact) !void {
+        try self.items.append(gpa, artifact);
+    }
+
+    fn deinit(self: *Journal) void {
+        for (self.items.items) |*artifact| artifact.deinit(gpa);
+        self.items.deinit(gpa);
+    }
+};
+
+/// Sets, verifies, and votes for `value`; returns the vote as a journal artifact
+/// (commonware `journaled_vote`).
+fn journaled_vote(state: *base.State, value: Proposal) !Artifact {
+    try testing.expect(try state.set_proposal(value.round.view, &value));
+    try testing.expect(state.try_verify() == .ready);
+    try testing.expect(state.verified(value.round.view));
+    return .{ .notarize = (try state.construct_notarize(value.round.view)).? };
+}
+
+/// Votes for, notarizes, and certifies views 1 to `tip`, journaling each step
+/// (commonware `certified_chain`).
+fn certified_chain(env: *Env, journal: *Journal, tip: u64) !void {
+    const state = &env.state;
+    for (1..tip + 1) |view| {
+        const value = proposal(9, view, view - 1, @intCast(view));
+        try journal.push(try journaled_vote(state, value));
+        const notarized = try build_notarization(&env.fixture, value);
+        try journal.push(.{ .notarization = notarized });
+        try testing.expect((try state.add_notarization(try notarized.clone(gpa))).added);
+        try testing.expect(try state.certified(value.round.view, true) != null);
+        try journal.push(.{ .certification = .{ .round = value.round, .certified = true } });
+    }
+}
+
+/// Starts signer `signer`'s state and replays `journal` into it, adding each notarization
+/// and certification as recovery does (commonware `replayed_state`).
+fn replayed_state(env: *Env, io: Io, signer: usize, journal: *const Journal) !void {
+    try env.start(io, handoff_options(4, signer));
+    errdefer env.stop();
+    const state = &env.state;
+    for (journal.items.items) |*artifact| {
+        try state.replay(artifact);
+        switch (artifact.*) {
+            .notarization => |*notarized| {
+                const added = try state.add_notarization(try notarized.clone(gpa));
+                try testing.expect(added.added);
+            },
+            .certification => |certification| {
+                const view = certification.round.view;
+                try testing.expect(try state.certified(view, certification.certified) != null);
+            },
+            else => {},
+        }
+    }
+}
+
+test "voter state a same-view replacement cannot prepare the displaced tip" {
+    // commonware `same_view_replacement_cannot_prepare_displaced_tip`.
+    try run(struct {
+        fn body(io: Io) !void {
+            var live: Env = undefined;
+            try live.start(io, handoff_options(4, 3));
+            defer live.stop();
+            var journal: Journal = .{};
+            defer journal.deinit();
+            try certified_chain(&live, &journal, 4);
+            const tip = proposal(9, 5, 4, 15);
+            try journal.push(try journaled_vote(&live.state, tip));
+            const stale = live.state.try_propose().?.context();
+            try testing.expectEqual(5, stale.parent[0].get());
+            try testing.expect(stale.parent[1].eql(tip.payload));
+            const replacement = proposal(9, 5, 4, 25);
+            try journal.push(.{
+                .notarization = try notarization_from(&live.fixture, &.{ 0, 1, 2 }, replacement),
+            });
+
+            var restarted: Env = undefined;
+            try replayed_state(&restarted, io, 3, &journal);
+            defer restarted.stop();
+            const state = &restarted.state;
+            const found = state.find_parent(.new(6));
+            try testing.expect(found == .found);
+            try testing.expectEqual(5, found.found[0].get());
+            try testing.expect(found.found[1].eql(replacement.payload));
+            try testing.expect(!state.proposed(&stale, .fill(66)));
+            try testing.expectEqual(null, try state.construct_notarize(.new(6)));
+            try testing.expect(try state.certified(.new(5), true) != null);
+            const request = state.try_propose().?;
+            try testing.expect(!request.is_handoff());
+            try testing.expectEqual(5, request.context().parent[0].get());
+            try testing.expect(request.context().parent[1].eql(replacement.payload));
+        }
+    }.body);
+}
+
 test {
     _ = base;
 }
