@@ -72,6 +72,7 @@ which every database here is built on.
   their values, reads return owned copies.
 - [ ] immutable: the remaining mod.rs/fixed.rs
   scenarios (bounded initialization, failed-sync recovery), compact.
+- [x] Fuzz: `qmdb_keyless_operations` (seeded and `std.testing.fuzz`), with a value model.
 - [ ] Fuzz targets under storage/fuzz for these databases; benches under `benches.zig`.
 
 ## Public API (on main)
@@ -253,3 +254,4 @@ which every database here is built on.
 - 2026-11-18: any (unordered) evicting floor policies.
 - 2026-11-18: any ordered evictions with link repair; all eight floor conformance hashes match.
 - 2026-11-18: any ordered range scans (`stream_range`/`keys`).
+- 2026-11-18: ordered staging covered by the staged-ancestor scenarios; keyless operations fuzz target.
