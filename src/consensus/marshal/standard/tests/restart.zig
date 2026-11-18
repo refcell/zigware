@@ -394,3 +394,32 @@ test "standard restart repairs trailing block from local cache" {
     defer runner.deinit();
     try try runner.start_context(repairs_from_cache_body, .{});
 }
+
+/// A resolved acknowledgement is handled before a later mailbox message (commonware's biased
+/// `select_loop!`): `get_processed` right after an ack already reports that height.
+fn ack_precedes_mailbox_body(ctx: Ctx) anyerror!void {
+    var setup: Setup = undefined;
+    try setup.init(ctx);
+    defer setup.deinit();
+    var blocks: [4]H.TestBlock = undefined;
+    try make_chain(&blocks);
+    defer free_chain(&blocks);
+    var finalized: [3]seed.FinalizationAt = undefined;
+    try finalize_all(&setup.validators, blocks[1..], &finalized);
+    defer free_finalizations(&finalized);
+    const recovering = try seed_and_restart(ctx, &setup, blocks[1..], &finalized);
+    defer recovering.crash();
+    for (0..blocks.len) |expected| {
+        const height = try recovering.application.acknowledged();
+        try testing.expectEqual(Height.new(expected), height);
+        const processed: core.Processed = .{ .block = height };
+        const current = try recovering.mailbox.get_processed() orelse return error.TestNoProcessed;
+        try testing.expectEqual(processed, current);
+    }
+}
+
+test "standard acknowledgement is processed before a later mailbox message" {
+    var runner = try runtime.deterministic.Runner.init(gpa, timed);
+    defer runner.deinit();
+    try try runner.start_context(ack_precedes_mailbox_body, .{});
+}

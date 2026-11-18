@@ -4,9 +4,10 @@
 //!
 //! One task runs the actor. Pump tasks feed its mailbox and the resolver handler into one
 //! bounded inbox; buffer waiters and a watcher on the application's current acknowledgement
-//! push their completions into the same inbox. The actor handles events in arrival order
-//! (commonware's `select_loop!` prefers waiters, then acknowledgements, then the mailbox, then
-//! the resolver). Zigware's archives are durable when a write or sync returns, so
+//! push their completions into the same inbox. The actor handles events in arrival order,
+//! except that a resolved acknowledgement is handled before any mailbox or resolver event
+//! (commonware's biased `select_loop!` prefers waiters, then acknowledgements, then the
+//! mailbox, then the resolver). Zigware's archives are durable when a write or sync returns, so
 //! commonware's pooled syncs complete inside the event that starts them, and the durability
 //! acks of `proposed`, `verified`, and `certified` fire once the write returns. A storage or
 //! allocation error stops the actor with that error (commonware panics).
@@ -384,10 +385,34 @@ pub fn Actor(comptime P: type) type {
                 .closed => return false,
                 .waiter => |done| try self.handle_waiter(done),
                 .ack => |generation| return self.handle_ack(generation),
-                .mailbox => |message| try ingress.handle(self, message),
-                .resolver => |message| try backfill.handle(self, message),
+                .mailbox => |message| {
+                    if (!try self.drain_ready_acks()) {
+                        release_event(event);
+                        return false;
+                    }
+                    try ingress.handle(self, message);
+                },
+                .resolver => |message| {
+                    if (!try self.drain_ready_acks()) {
+                        release_event(event);
+                        return false;
+                    }
+                    try backfill.handle(self, message);
+                },
             }
             return true;
+        }
+
+        /// Handles a resolved acknowledgement before a mailbox or resolver event, as
+        /// commonware's biased `select_loop!` does, even when its watcher has not yet queued
+        /// it. False stops the actor (a dropped acknowledgement).
+        fn drain_ready_acks(self: *Self) !bool {
+            const current = self.pending_acks.current() orelse return true;
+            if (current.waiter.poll() == null) return true;
+            // The watcher's `ack` event, if already queued, finds no watch and is ignored.
+            if (self.ack_watch) |*watch| watch.cancel(self.io);
+            self.ack_watch = null;
+            return self.process_ready_acks();
         }
 
         fn handle_waiter(self: *Self, done: Completion) !void {
@@ -411,6 +436,13 @@ pub fn Actor(comptime P: type) type {
             var watch = self.ack_watch orelse return true;
             self.ack_watch = null;
             watch.await(self.io);
+            return self.process_ready_acks();
+        }
+
+        /// Advances the processed height over every resolved acknowledgement (at least one),
+        /// syncs it, and dispatches more blocks.
+        fn process_ready_acks(self: *Self) !bool {
+            assert(self.ack_watch == null);
             var handled: u32 = 0;
             while (self.pending_acks.pop_ready()) |ready| {
                 const height, const result = ready;

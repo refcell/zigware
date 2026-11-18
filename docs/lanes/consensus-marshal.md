@@ -166,6 +166,8 @@ ports its range's tests and the helpers defined in it, into
   functions in `mocks/harness.zig` so coding reuses them.
 - bls-math thread (T-01a1d57b-1003), `tests/cache_epoch.zig`: lines 1987-2543 (cache epoch
   reopen, far-epoch writes, interrupted destroy, start_sync covers prior writes).
+- bls-math also: harness.rs 3442-end scenarios in `mocks/scenarios_queries.zig`, with
+  their standard wrappers (standard/mod.rs 563-631, 2544-2591) in `tests/queries.zig`.
 - lookup thread (T-01a1d59c), `tests/wrappers.zig` and `tests/dispatch.zig`: lines
   2592-6220 (buffered floor anchors, inline/deferred wrapper tests, certify/verify fetch
   paths, propose/prepare paths, reproposal and ancestry validation, sync failure panics,
@@ -183,6 +185,10 @@ ports its range's tests and the helpers defined in it, into
   delegate to `StandardHarness`; in Zig each runs once on `StandardHarness`.
 
 ## Decisions
+- The actor handles a resolved acknowledgement before any mailbox or resolver event
+  (commonware's biased `select_loop!`), so ack-then-`get_processed` sees the new height.
+  Buffer-waiter completions still arrive in inbox order (lookup thread's anchor-floor note);
+  tests wait briefly there.
 - `storage.archive.immutable` borrows its config's partition names (its ordinal opens
   section blobs lazily), so `harness.Archives` owns them for the archives' lifetime.
 - Marshal blocks keep commonware's trait method names (`height()`, `parent()`, `digest()`,
@@ -324,3 +330,5 @@ ports its range's tests and the helpers defined in it, into
 - 2026-11-18: `mocks.scenarios` (`Cluster(H)`, generic `Finalize(H)`; harnesses export their
   signing setup). The finalize test is skipped until resolver.p2p keeps up with network
   responses (resolver lane, T-01a1d5b9).
+- 2026-11-18: actor drains resolved acks before mailbox/resolver events; bls-math takes
+  harness.rs 3442-end (`mocks/scenarios_queries.zig`, `standard/tests/queries.zig`).
