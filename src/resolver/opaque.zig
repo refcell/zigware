@@ -75,7 +75,9 @@ pub fn Resolver(comptime K: type, comptime S: type, comptime P: type) type {
                 fetches.deinit(self.gpa);
             }
             for (items) |item| {
-                const key = try Message.Fetch.init(self.gpa, item.key, item.subscriber, {});
+                const span = try resolver.own_span(self.gpa, item.span);
+                const key =
+                    try Message.Fetch.init_spanned(self.gpa, item.key, item.subscriber, span, {});
                 fetches.appendAssumeCapacity(key);
             }
             assert(fetches.items.len == items.len);
@@ -368,7 +370,8 @@ pub fn Actor(comptime F: type, comptime C: type) type {
                     var owned = batch;
                     defer owned.deinit();
                     for (owned.fetches.items) |item| {
-                        try self.add_fetch(item.key, item.subscribers.items);
+                        const spans = item.spans.items;
+                        try self.add_fetch_spanned(item.key, item.subscribers.items, spans);
                     }
                 },
                 .retain => |predicate| try self.retain(predicate),
@@ -377,8 +380,19 @@ pub fn Actor(comptime F: type, comptime C: type) type {
 
         /// Add subscribers for a key and start the first fetch if the key is new.
         pub fn add_fetch(self: *Self, key: K, added: []const S) Error!void {
+            return self.add_fetch_spanned(key, added, null);
+        }
+
+        /// `add_fetch`, taking new subscribers' spans from `spans` (one per subscriber; the
+        /// caller frees what is left).
+        fn add_fetch_spanned(
+            self: *Self,
+            key: K,
+            added: []const S,
+            spans: ?[]?*resolver.Span,
+        ) Error!void {
             assert(added.len > 0);
-            const is_new = try self.subscribers.insert(self.gpa, key, added);
+            const is_new = try self.subscribers.insert_spanned(self.gpa, key, added, spans);
             if (!is_new) return;
             const attempt = try self.start_fetch(key);
             const inserted = try self.deliveries.insert_with_state(key, attempt);
@@ -454,8 +468,7 @@ pub fn Actor(comptime F: type, comptime C: type) type {
             self.gpa.destroy(task);
             const fetched = value orelse return self.schedule_retry(key);
             if (self.subscribers.pending(key)) |pending| {
-                const shown: resolver.Delivery(K, S) = .{ .key = key, .subscribers = pending };
-                return self.deliveries.deliver(shown, {}, fetched);
+                return self.deliveries.deliver(self.pending_delivery(key, pending), {}, fetched);
             }
             self.drop_value(fetched);
             self.drop_key(key);
@@ -483,7 +496,7 @@ pub fn Actor(comptime F: type, comptime C: type) type {
                     completed.subscribers,
                 );
                 if (remaining) |pending| {
-                    return self.deliveries.redeliver(.{ .key = key, .subscribers = pending });
+                    return self.deliveries.redeliver(self.pending_delivery(key, pending));
                 }
                 if (!accepted) try self.count(.dropped);
                 self.drop_key(key);
@@ -517,7 +530,14 @@ pub fn Actor(comptime F: type, comptime C: type) type {
             // validation, avoiding a duplicate source fetch for the same key.
             const pending = remaining orelse return self.drop_key(key);
             if (!accepted) self.deliveries.accept_response(key);
-            try self.deliveries.redeliver(.{ .key = key, .subscribers = pending });
+            try self.deliveries.redeliver(self.pending_delivery(key, pending));
+        }
+
+        /// The delivery of `key` to its `pending` subscribers, with their spans.
+        fn pending_delivery(self: *const Self, key: K, pending: []const S) resolver.Delivery(K, S) {
+            const spans = self.subscribers.pending_spans(key).?;
+            assert(spans.len == pending.len);
+            return .{ .key = key, .subscribers = pending, .spans = spans };
         }
 
         /// Discard the response and retry, without recounting it.

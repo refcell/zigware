@@ -856,6 +856,49 @@ fn deliver_subscribers(io: Io, first: u16, second: u16) !void {
     try testing.expectEqualStrings("data for key 5", event.value);
 }
 
+/// Fetches key 5 for `subscriber` under a span named `name`, opened as a child of `outer`.
+fn fetch_spanned(
+    mailbox: anytype,
+    outer: *const resolver.Span,
+    name: []const u8,
+    subscriber: u16,
+) !void {
+    // The span dies with this call: the engine keeps its own root copy.
+    const span = outer.child(name, .{});
+    _ = try mailbox.fetch(.{ .key = key(5), .subscriber = subscriber, .span = &span });
+}
+
+// Each delivered subscriber carries the span of the fetch that first asked for it (commonware
+// pairs them), as a root that outlives the fetch's span chain.
+test "deliver pairs each subscriber with its fetch span" {
+    try run(10, struct {
+        fn body(io: Io) !void {
+            const setup = try TaggedSetup.init(io, &.{ 1, 2 }, .{});
+            defer setup.deinit();
+            const consumer = try setup.make_consumer();
+            const mailbox1 = try setup.spawn(0, consumer, try setup.make_producer(&.{}));
+            const prod2 = try setup.make_producer(&.{.{ 5, "data for key 5" }});
+            _ = try setup.spawn(1, try setup.make_consumer(), prod2);
+
+            const outer = runtime.telemetry.traces.Tracer.none.span("test.outer", .{});
+            try fetch_spanned(mailbox1, &outer, "test.late_subscriber", 51);
+            try fetch_spanned(mailbox1, &outer, "test.early_subscriber", 50);
+            // A repeated subscriber keeps its first fetch's span.
+            try fetch_spanned(mailbox1, &outer, "test.repeat", 51);
+            // A fetch without a span delivers none for its subscriber.
+            try fetch_tagged(mailbox1, 5, 52);
+            try setup.add_link(link, 0, 1);
+            var event = try consumer.next_event();
+            defer event.deinit(gpa);
+            try testing.expectEqualSlices(u16, &.{ 50, 51, 52 }, event.subscribers);
+            try testing.expectEqual(3, event.span_names.len);
+            try testing.expectEqualStrings("test.early_subscriber", event.span_names[0].?);
+            try testing.expectEqualStrings("test.late_subscriber", event.span_names[1].?);
+            try testing.expect(event.span_names[2] == null);
+        }
+    }.body);
+}
+
 test "deliver receives subscribers" {
     try run(10, struct {
         fn body(io: Io) !void {

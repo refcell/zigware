@@ -92,8 +92,10 @@ on p2p's simulated network and the deterministic runtime.
   own resources declare `discard`). tokio oneshot semantics over `std.Io` mutex/condition.
 
 ## Decisions
-- No tracing in zigware, so `Fetch`, `Delivery`, and the subscriber tracker carry no spans;
-  ordering and equality ignore spans in commonware too.
+- Spans: `Fetch.span` is borrowed; ingress, the subscriber tracker, and the engines keep an
+  owned root copy per subscriber (`resolver.own_span`: our spans point at their parents, so a
+  copy drops them), first fetch wins. `Delivery.spans` pairs them with `subscribers`, borrowed
+  for the consumer's `deliver` call. Ordering and equality ignore spans, as in commonware.
 - `Delivery.subscribers` is a slice (never empty, asserted) instead of `NonEmptyVec`.
 - Retain predicates are `Predicate(K, S)` values with inline captured state (at most 64 bytes)
   so they queue in a mailbox without allocation; generic code takes any `predicate` with
@@ -169,3 +171,8 @@ on p2p's simulated network and the deterministic runtime.
 - 2026-11-16: resolver p2p engine, inflight, config, metrics, ingress, mock producer; 49 of 50
   commonware engine tests on p2p.simulated (held/gated verdicts, cancellation, shutdown).
 - 2026-11-16: resolver fuzz targets: ingress, fetcher, and delivery tracker model checks.
+- 2026-11-18: resolver.p2p engine stall under load fixed: forwarders wait on their own
+  conditions (a timed engine wait consumed their wakes), network messages queue in a ring.
+  Delivery completions and the opaque actor's waiters got their own conditions too.
+- 2026-11-18: fetch spans carried per subscriber from `Fetch` to `Delivery` (p2p and opaque),
+  with commonware's `each_subscriber_keeps_its_own_fetch_span`.

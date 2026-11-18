@@ -86,18 +86,45 @@ pub fn FetchKey(comptime K: type, comptime S: type, comptime M: type) type {
         /// Subscribers used to decide whether the fetch is retained: distinct, insertion
         /// order, never empty.
         subscribers: std.ArrayList(S),
+        /// One per subscriber, in the same order: the span of its first fetch (owned, from
+        /// `resolver.own_span`), or null.
+        spans: std.ArrayList(?*resolver.Span),
         /// Fetch metadata merged when duplicate fetches are coalesced.
         metadata: M,
 
         /// A fetch with one subscriber (Rust `From<Fetch>`); takes ownership of `metadata`.
         pub fn init(gpa: Allocator, key: K, subscriber: S, metadata: M) Allocator.Error!Self {
+            return init_spanned(gpa, key, subscriber, null, metadata);
+        }
+
+        /// `init` with the subscriber's span; takes ownership of `span` and `metadata`, also
+        /// on error.
+        pub fn init_spanned(
+            gpa: Allocator,
+            key: K,
+            subscriber: S,
+            span: ?*resolver.Span,
+            metadata: M,
+        ) Allocator.Error!Self {
+            errdefer resolver.free_span(gpa, span);
             var subscribers: std.ArrayList(S) = try .initCapacity(gpa, 1);
+            errdefer subscribers.deinit(gpa);
+            var spans: std.ArrayList(?*resolver.Span) = try .initCapacity(gpa, 1);
             subscribers.appendAssumeCapacity(subscriber);
-            assert(subscribers.items.len == 1);
-            return .{ .key = key, .subscribers = subscribers, .metadata = metadata };
+            spans.appendAssumeCapacity(span);
+            assert(subscribers.items.len == 1 and spans.items.len == 1);
+            const self: Self = .{
+                .key = key,
+                .subscribers = subscribers,
+                .spans = spans,
+                .metadata = metadata,
+            };
+            return self;
         }
 
         pub fn deinit(self: *Self, gpa: Allocator) void {
+            resolver.free_spans(gpa, self.spans.items);
+            self.spans.deinit(gpa);
             self.subscribers.deinit(gpa);
             if (M != void) self.metadata.deinit(gpa);
             self.* = undefined;
@@ -107,27 +134,52 @@ pub fn FetchKey(comptime K: type, comptime S: type, comptime M: type) type {
         /// ownership of `incoming`.
         fn merge(self: *Self, gpa: Allocator, incoming: Self) Allocator.Error!void {
             var incoming_owned = incoming;
-            defer incoming_owned.subscribers.deinit(gpa);
+            defer {
+                // Duplicates keep their first span; spans not taken below are freed here.
+                resolver.free_spans(gpa, incoming_owned.spans.items);
+                incoming_owned.spans.deinit(gpa);
+                incoming_owned.subscribers.deinit(gpa);
+            }
             assert(resolver.eql(K, self.key, incoming.key));
-            for (incoming_owned.subscribers.items) |subscriber| {
+            const incoming_spans = incoming_owned.spans.items;
+            for (incoming_owned.subscribers.items, incoming_spans) |subscriber, *span| {
                 if (has_subscriber(self.subscribers.items, subscriber)) continue;
-                self.subscribers.append(gpa, subscriber) catch |err| {
+                self.append_subscriber(gpa, subscriber, span.*) catch |err| {
                     if (M != void) incoming_owned.metadata.deinit(gpa);
                     return err;
                 };
+                span.* = null;
             }
+            assert(self.spans.items.len == self.subscribers.items.len);
             if (M != void) try self.metadata.merge(gpa, incoming_owned.metadata);
         }
 
-        /// Keeps the subscribers `predicate` accepts. Returns false if none remain.
-        fn retain(self: *Self, predicate: *const resolver.Predicate(K, S)) bool {
+        fn append_subscriber(
+            self: *Self,
+            gpa: Allocator,
+            subscriber: S,
+            span: ?*resolver.Span,
+        ) Allocator.Error!void {
+            try self.spans.ensureUnusedCapacity(gpa, 1);
+            try self.subscribers.append(gpa, subscriber);
+            self.spans.appendAssumeCapacity(span);
+        }
+
+        /// Keeps the subscribers `predicate` accepts, freeing the spans of the others.
+        /// Returns false if none remain.
+        fn retain(self: *Self, gpa: Allocator, predicate: *const resolver.Predicate(K, S)) bool {
             var kept: usize = 0;
-            for (self.subscribers.items) |subscriber| {
-                if (!predicate.call(self.key, subscriber)) continue;
+            for (self.subscribers.items, self.spans.items) |subscriber, span| {
+                if (!predicate.call(self.key, subscriber)) {
+                    resolver.free_span(gpa, span);
+                    continue;
+                }
                 self.subscribers.items[kept] = subscriber;
+                self.spans.items[kept] = span;
                 kept += 1;
             }
             self.subscribers.shrinkRetainingCapacity(kept);
+            self.spans.shrinkRetainingCapacity(kept);
             return kept > 0;
         }
 
@@ -315,7 +367,7 @@ pub fn Pending(comptime K: type, comptime S: type, comptime M: type) type {
             // Retain applies immediately to queued fetch subscribers.
             var kept: usize = 0;
             for (self.fetches.items) |*fetch| {
-                if (!fetch.retain(&predicate)) {
+                if (!fetch.retain(gpa, &predicate)) {
                     fetch.deinit(gpa);
                     continue;
                 }
@@ -366,8 +418,9 @@ fn handle(pending: *TestPending, message: TestMessage) !void {
 
 fn queued(key: u8, subscribers: []const u16) !TestMessage {
     var message = try TestMessage.fetch_one(testing.allocator, key, subscribers[0], {});
-    const list = &message.fetch.fetches.items[0].subscribers;
-    try list.appendSlice(testing.allocator, subscribers[1..]);
+    const fetch = &message.fetch.fetches.items[0];
+    try fetch.subscribers.appendSlice(testing.allocator, subscribers[1..]);
+    try fetch.spans.appendNTimes(testing.allocator, null, subscribers.len - 1);
     return message;
 }
 

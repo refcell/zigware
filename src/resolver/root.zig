@@ -15,13 +15,17 @@
 //!   `r.fetch_all_targeted([]const Targeted) Feedback`.
 //!
 //! Keys and subscribers compare with `order` below (codec's `Ord`, plus `void` for the unit
-//! subscriber). commonware attaches a `tracing::Span` to every subscriber; zigware has no
-//! tracing, so spans are not carried.
+//! subscriber). As in commonware, a fetch carries a trace span and each delivered subscriber
+//! the span of the fetch that first asked for it. Our spans are values that point at their
+//! parents, so resolvers keep an owned root copy (`own_span`) from fetch to delivery.
 
 const std = @import("std");
 const assert = std.debug.assert;
 const codec = @import("codec");
 const actor = @import("actor");
+const Allocator = std.mem.Allocator;
+/// A trace span (`runtime.telemetry.traces.Span`).
+pub const Span = @import("runtime").telemetry.traces.Span;
 
 pub const subscribers = @import("subscribers.zig");
 pub const ingress = @import("ingress.zig");
@@ -58,6 +62,9 @@ pub fn Fetch(comptime K: type, comptime S: type) type {
         key: K,
         /// Subscriber attached to the key.
         subscriber: S,
+        /// Trace span carried from issuance to delivery (commonware `Fetch::span`), borrowed:
+        /// the resolver keeps a root copy when it accepts the fetch. Not compared.
+        span: ?*const Span = null,
 
         /// A fetch with the default (unit) subscriber (Rust `From<K>`).
         pub fn from_key(key: K) Self {
@@ -80,6 +87,31 @@ pub fn Fetch(comptime K: type, comptime S: type) type {
 
 const root = @This();
 
+/// An owned root copy of `span` (allocated with `gpa`; free with `free_span`): its name and
+/// fields without its parents, so it outlives the span chain it was opened in. Null for null.
+pub fn own_span(gpa: Allocator, span: ?*const Span) Allocator.Error!?*Span {
+    const source = span orelse return null;
+    const copy = try gpa.create(Span);
+    copy.* = source.*;
+    copy.parent = null;
+    assert(copy.parent == null);
+    assert(std.mem.eql(u8, copy.name, source.name));
+    return copy;
+}
+
+/// Frees a span from `own_span`.
+pub fn free_span(gpa: Allocator, span: ?*Span) void {
+    if (span) |owned| gpa.destroy(owned);
+}
+
+/// Frees every span in `spans` and nulls it.
+pub fn free_spans(gpa: Allocator, spans: []?*Span) void {
+    for (spans) |*span| {
+        free_span(gpa, span.*);
+        span.* = null;
+    }
+}
+
 /// Data delivered for a resolved fetch.
 pub fn Delivery(comptime K: type, comptime S: type) type {
     return struct {
@@ -89,6 +121,11 @@ pub fn Delivery(comptime K: type, comptime S: type) type {
         key: K,
         /// Subscribers still retained when the response arrived (never empty).
         subscribers: []const S,
+        /// Empty, or one per subscriber in the same order: the span of the fetch that first
+        /// asked for that subscriber (commonware pairs them), null where it had none. Roots,
+        /// borrowed for the consumer's `deliver` call: copy (`own_span`) what outlives it.
+        /// Not compared.
+        spans: []const ?*Span = &.{},
 
         pub fn eql(a: Self, b: Self) bool {
             return a.order(b) == .eq;

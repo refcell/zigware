@@ -349,9 +349,11 @@ pub fn Tracker(comptime C: type, comptime Context: type, comptime State: type) t
                 const needed = self.live.items.len + 1;
                 try self.shared.done.ensureTotalCapacity(self.gpa, needed);
             }
+            // Spans are borrowed for the consumer's call only, so they are not kept.
             const shown: resolver.Delivery(K, S) = .{
                 .key = delivery.key,
                 .subscribers = subscribers,
+                .spans = delivery.spans,
             };
             var receiver = try self.consumer.deliver(shown, value);
             errdefer receiver.deinit();

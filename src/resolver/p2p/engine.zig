@@ -549,17 +549,27 @@ pub fn Engine(comptime T: type) type {
                     defer owned.deinit();
                     for (owned.fetches.items) |*item| {
                         const targets = if (item.metadata.peers) |peers| peers.items else null;
-                        try self.add_fetch(item.key, item.subscribers.items, targets);
+                        const spans = item.spans.items;
+                        try self.add_fetch(item.key, item.subscribers.items, spans, targets);
                     }
                 },
                 .retain => |predicate| try self.retain(predicate),
             }
         }
 
-        fn add_fetch(self: *Self, key: K, added: []const S, targets: ?[]const P) Error!void {
+        /// Tracks `added` for `key`, taking the spans of new subscribers from `spans` (one per
+        /// subscriber; the caller frees what is left).
+        fn add_fetch(
+            self: *Self,
+            key: K,
+            added: []const S,
+            spans: []?*resolver.Span,
+            targets: ?[]const P,
+        ) Error!void {
             assert(added.len > 0);
+            assert(spans.len == added.len);
             const is_new = !self.inflight.contains(key);
-            _ = try self.subscribers.insert(self.gpa, key, added);
+            _ = try self.subscribers.insert_spanned(self.gpa, key, added, spans);
             if (targets) |peers| {
                 // Restrict a new fetch or add to existing targets; an unrestricted fetch in
                 // progress stays unrestricted.
@@ -689,6 +699,7 @@ pub fn Engine(comptime T: type) type {
             const delivery: resolver.Delivery(K, S) = .{
                 .key = popped.key,
                 .subscribers = pending,
+                .spans = self.subscribers.pending_spans(popped.key).?,
             };
             self.inflight.deliver(delivery, peer, popped.elapsed, value) catch |err| {
                 self.gpa.free(value);
@@ -738,7 +749,7 @@ pub fn Engine(comptime T: type) type {
         fn handle_dropped(self: *Self, key: K, accepted: bool, delivered: []const S) Error!void {
             const remaining = self.subscribers.remove_delivered(self.gpa, key, delivered);
             if (remaining) |pending| {
-                return self.inflight.redeliver(.{ .key = key, .subscribers = pending });
+                return self.inflight.redeliver(self.pending_delivery(key, pending));
             }
             if (!accepted) try self.metrics.fetch.inc(.dropped);
             _ = self.inflight.cancel(key);
@@ -787,11 +798,18 @@ pub fn Engine(comptime T: type) type {
             const remaining = self.subscribers.remove_delivered(self.gpa, key, delivered);
             if (remaining) |pending| {
                 if (!accepted) self.inflight.accept_response(self.io, key);
-                return self.inflight.redeliver(.{ .key = key, .subscribers = pending });
+                return self.inflight.redeliver(self.pending_delivery(key, pending));
             }
             // Every subscriber observed a valid response: drop the key's targets and history.
             self.inflight.complete(self.io, key);
             self.fetcher.clear(key);
+        }
+
+        /// The delivery of `key` to its `pending` subscribers, with their spans.
+        fn pending_delivery(self: *const Self, key: K, pending: []const S) resolver.Delivery(K, S) {
+            const spans = self.subscribers.pending_spans(key).?;
+            assert(spans.len == pending.len);
+            return .{ .key = key, .subscribers = pending, .spans = spans };
         }
 
         fn retry_response(self: *Self, key: K) Error!void {

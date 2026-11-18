@@ -96,7 +96,12 @@ pub fn Mailbox(comptime K: type, comptime P: type, comptime S: type) type {
                     item = targeted.?[index].fetch;
                     targets = try Targets.init(self.gpa, targeted.?[index].targets);
                 }
-                const created = Msg.Fetch.init(self.gpa, item.key, item.subscriber, targets);
+                const span = resolver.own_span(self.gpa, item.span) catch |err| {
+                    targets.deinit(self.gpa);
+                    return err;
+                };
+                const created =
+                    Msg.Fetch.init_spanned(self.gpa, item.key, item.subscriber, span, targets);
                 const fetch_key = created catch |err| {
                     targets.deinit(self.gpa);
                     return err;

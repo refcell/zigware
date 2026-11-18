@@ -6,13 +6,14 @@
 //! are fetched, retried, and delivered.
 //!
 //! Keys and each key's subscribers are kept in ascending order (commonware's nested
-//! `BTreeMap`), as sorted arrays searched by bisection. commonware pairs each subscriber with
-//! the tracing span of its first fetch; zigware has no tracing, so only subscribers are kept.
+//! `BTreeMap`), as sorted arrays searched by bisection. Each subscriber keeps the span of its
+//! first fetch (an owned root copy, `resolver.own_span`), as commonware's `or_insert` does.
 
 const std = @import("std");
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const resolver = @import("root.zig");
+const Span = resolver.Span;
 
 /// Tracks retained subscribers by resolver key.
 pub fn Tracker(comptime K: type, comptime S: type) type {
@@ -23,6 +24,14 @@ pub fn Tracker(comptime K: type, comptime S: type) type {
             key: K,
             /// Strictly ascending, never empty.
             subscribers: std.ArrayList(S),
+            /// One per subscriber, in the same order: its first fetch's span (owned).
+            spans: std.ArrayList(?*Span),
+
+            fn deinit(entry: *Entry, gpa: Allocator) void {
+                resolver.free_spans(gpa, entry.spans.items);
+                entry.spans.deinit(gpa);
+                entry.subscribers.deinit(gpa);
+            }
         };
 
         /// Strictly ascending by key.
@@ -49,24 +58,50 @@ pub fn Tracker(comptime K: type, comptime S: type) type {
         /// Add subscribers for a key (duplicates merge). Returns true if this created a new
         /// key entry.
         pub fn insert(self: *Self, gpa: Allocator, key: K, added: []const S) Allocator.Error!bool {
+            return self.insert_spanned(gpa, key, added, null);
+        }
+
+        /// `insert` with each added subscriber's span (`spans`, owned, one per subscriber, or
+        /// null for none). A new subscriber takes its span, leaving null in `spans`; an
+        /// existing one keeps its first span, and the caller still owns the duplicate's.
+        pub fn insert_spanned(
+            self: *Self,
+            gpa: Allocator,
+            key: K,
+            added: []const S,
+            spans: ?[]?*Span,
+        ) Allocator.Error!bool {
             assert(added.len > 0);
+            if (spans) |items| assert(items.len == added.len);
             const position = self.find(key);
             if (!position.found) {
-                const entry: Entry = .{ .key = key, .subscribers = .empty };
+                const entry: Entry = .{ .key = key, .subscribers = .empty, .spans = .empty };
                 try self.entries.insert(gpa, position.index, entry);
             }
             const entry = &self.entries.items[position.index];
-            for (added) |subscriber| {
+            for (added, 0..) |subscriber, index| {
                 const slot = find_subscriber(entry.subscribers.items, subscriber);
                 if (slot.found) continue;
-                entry.subscribers.insert(gpa, slot.index, subscriber) catch |err| {
+                insert_subscriber(gpa, entry, slot.index, subscriber) catch |err| {
                     // Never leave an empty entry behind.
                     if (entry.subscribers.items.len == 0) self.remove_at(gpa, position.index);
                     return err;
                 };
+                if (spans) |items| {
+                    entry.spans.items[slot.index] = items[index];
+                    items[index] = null;
+                }
             }
             assert(entry.subscribers.items.len > 0);
+            assert(entry.spans.items.len == entry.subscribers.items.len);
             return !position.found;
+        }
+
+        fn insert_subscriber(gpa: Allocator, entry: *Entry, index: usize, subscriber: S) !void {
+            try entry.spans.ensureUnusedCapacity(gpa, 1);
+            try entry.subscribers.insert(gpa, index, subscriber);
+            entry.spans.insertAssumeCapacity(index, null);
+            assert(entry.spans.items.len == entry.subscribers.items.len);
         }
 
         /// Remove all subscribers for a key. Returns true if the key was present.
@@ -80,7 +115,7 @@ pub fn Tracker(comptime K: type, comptime S: type) type {
 
         /// Remove every tracked key.
         pub fn clear(self: *Self, gpa: Allocator) void {
-            for (self.entries.items) |*entry| entry.subscribers.deinit(gpa);
+            for (self.entries.items) |*entry| entry.deinit(gpa);
             self.entries.clearRetainingCapacity();
             assert(self.entries.items.len == 0);
         }
@@ -98,15 +133,20 @@ pub fn Tracker(comptime K: type, comptime S: type) type {
             var kept: usize = 0;
             for (self.entries.items) |*entry| {
                 var kept_subscribers: usize = 0;
-                for (entry.subscribers.items) |subscriber| {
-                    if (!predicate.call(entry.key, subscriber)) continue;
+                for (entry.subscribers.items, entry.spans.items) |subscriber, span| {
+                    if (!predicate.call(entry.key, subscriber)) {
+                        resolver.free_span(gpa, span);
+                        continue;
+                    }
                     entry.subscribers.items[kept_subscribers] = subscriber;
+                    entry.spans.items[kept_subscribers] = span;
                     kept_subscribers += 1;
                 }
                 entry.subscribers.shrinkRetainingCapacity(kept_subscribers);
+                entry.spans.shrinkRetainingCapacity(kept_subscribers);
                 if (kept_subscribers == 0) {
                     removed.appendAssumeCapacity(entry.key);
-                    entry.subscribers.deinit(gpa);
+                    entry.deinit(gpa);
                     continue;
                 }
                 self.entries.items[kept] = entry.*;
@@ -126,6 +166,16 @@ pub fn Tracker(comptime K: type, comptime S: type) type {
             return result;
         }
 
+        /// The spans of `pending(key)`'s subscribers, in the same order (borrowed, as
+        /// `pending`), or null if the key is not tracked.
+        pub fn pending_spans(self: *const Self, key: K) ?[]const ?*Span {
+            const position = self.find(key);
+            if (!position.found) return null;
+            const entry = &self.entries.items[position.index];
+            assert(entry.spans.items.len == entry.subscribers.items.len);
+            return entry.spans.items;
+        }
+
         /// Remove subscribers whose delivery has completed. Returns the remaining subscribers
         /// for the key (borrowed, as `pending`), or null if the key is now complete or was not
         /// tracked.
@@ -141,7 +191,9 @@ pub fn Tracker(comptime K: type, comptime S: type) type {
             const entry = &self.entries.items[position.index];
             for (delivered) |subscriber| {
                 const slot = find_subscriber(entry.subscribers.items, subscriber);
-                if (slot.found) _ = entry.subscribers.orderedRemove(slot.index);
+                if (!slot.found) continue;
+                _ = entry.subscribers.orderedRemove(slot.index);
+                resolver.free_span(gpa, entry.spans.orderedRemove(slot.index));
             }
             if (entry.subscribers.items.len == 0) {
                 self.remove_at(gpa, position.index);
@@ -153,7 +205,7 @@ pub fn Tracker(comptime K: type, comptime S: type) type {
         fn remove_at(self: *Self, gpa: Allocator, index: usize) void {
             assert(index < self.entries.items.len);
             var entry = self.entries.orderedRemove(index);
-            entry.subscribers.deinit(gpa);
+            entry.deinit(gpa);
         }
 
         const Position = struct { index: usize, found: bool };
@@ -318,4 +370,33 @@ fn expect_matches(tracker: *const Tracker(u8, u8), model: *const [8]u16) !void {
 test "fuzz: subscriber tracker matches a model" {
     const p2p = @import("p2p");
     try p2p.fuzz.run({}, tracker_model, 0x7375627363726962, 500);
+}
+
+test "each subscriber keeps its own fetch span" {
+    const gpa = testing.allocator;
+    const traces = @import("runtime").telemetry.traces;
+    const tracer = traces.Tracer.none;
+    var first = tracer.span("test.first_fetch", .{});
+    var second = tracer.span("test.second_fetch", .{});
+    var tracker: Tracker(i32, i32) = .empty;
+    defer tracker.deinit(gpa);
+    var first_spans = [_]?*Span{try resolver.own_span(gpa, &first)};
+    defer resolver.free_spans(gpa, &first_spans);
+    try testing.expect(try tracker.insert_spanned(gpa, 1, &.{10}, &first_spans));
+    // The second fetch joins subscriber 11 under its own span and re-requests 10, which
+    // keeps its original span.
+    var second_spans = [_]?*Span{
+        try resolver.own_span(gpa, &second),
+        try resolver.own_span(gpa, &second),
+    };
+    defer resolver.free_spans(gpa, &second_spans);
+    try testing.expect(!try tracker.insert_spanned(gpa, 1, &.{ 10, 11 }, &second_spans));
+    // The duplicate's span stays with the caller; the new subscriber's moved.
+    try testing.expect(second_spans[0] != null and second_spans[1] == null);
+
+    try testing.expectEqualSlices(i32, &.{ 10, 11 }, tracker.pending(1).?);
+    const spans = tracker.pending_spans(1).?;
+    try testing.expectEqualStrings("test.first_fetch", spans[0].?.name);
+    try testing.expectEqualStrings("test.second_fetch", spans[1].?.name);
+    try testing.expect(tracker.pending_spans(2) == null);
 }

@@ -28,9 +28,13 @@ pub fn Consumer(comptime K: type, comptime S: type) type {
             key: K,
             /// The delivered subscribers, in delivery order.
             subscribers: []S,
+            /// The delivered spans' names, one per subscriber (null where it had no span), or
+            /// empty when the delivery carried no spans. Names are borrowed from the spans.
+            span_names: []?[]const u8,
             value: []u8,
 
             pub fn deinit(self: *Event, gpa: Allocator) void {
+                gpa.free(self.span_names);
                 gpa.free(self.subscribers);
                 gpa.free(self.value);
                 self.* = undefined;
@@ -118,6 +122,13 @@ pub fn Consumer(comptime K: type, comptime S: type) type {
             errdefer shared.gpa.free(copy);
             const subscribers = try shared.gpa.dupe(S, delivery.subscribers);
             errdefer shared.gpa.free(subscribers);
+            // A delivered span is a root copy: its parents do not survive the fetch.
+            const span_names = try shared.gpa.alloc(?[]const u8, delivery.spans.len);
+            errdefer shared.gpa.free(span_names);
+            for (span_names, delivery.spans) |*name, span| {
+                name.* = if (span) |delivered| delivered.name else null;
+                if (span) |delivered| assert(delivered.parent == null);
+            }
             shared.mutex.lockUncancelable(shared.io);
             defer shared.mutex.unlock(shared.io);
             const valid = if (find(shared.expected.items, key)) |index|
@@ -127,9 +138,15 @@ pub fn Consumer(comptime K: type, comptime S: type) type {
             if (!valid) {
                 shared.gpa.free(copy);
                 shared.gpa.free(subscribers);
+                shared.gpa.free(span_names);
                 return false;
             }
-            const event: Event = .{ .key = key, .subscribers = subscribers, .value = copy };
+            const event: Event = .{
+                .key = key,
+                .subscribers = subscribers,
+                .span_names = span_names,
+                .value = copy,
+            };
             try shared.events.append(shared.gpa, event);
             shared.condition.broadcast(shared.io);
             return true;
