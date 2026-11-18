@@ -128,7 +128,7 @@ fn make_chain(comptime H: type, gpa: Allocator) ![]H.TestBlock {
     const blocks = try gpa.alloc(H.TestBlock, harness.num_blocks);
     errdefer gpa.free(blocks);
     var made: usize = 0;
-    errdefer for (blocks[0..made]) |*block| block.deinit();
+    errdefer for (blocks[0..made]) |*block| H.Variant.deinit_block(gpa, block);
     var parent = harness.genesis_parent();
     var parent_commitment = H.genesis_parent_commitment(num_validators);
     for (blocks, 1..) |*block, value| {
@@ -143,7 +143,7 @@ fn make_chain(comptime H: type, gpa: Allocator) ![]H.TestBlock {
 }
 
 fn free_chain(comptime H: type, gpa: Allocator, blocks: []H.TestBlock) void {
-    for (blocks) |*block| block.deinit();
+    for (blocks) |*block| H.Variant.deinit_block(gpa, block);
     gpa.free(blocks);
 }
 

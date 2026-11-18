@@ -529,6 +529,151 @@ test "certify lower view after higher view" {
     }.body);
 }
 
+/// Waits up to `limit_ms` for `receiver` (a `oneshot.Receiver(void)`) to resolve, polling
+/// every 10 ms.
+fn recv_within(ctx: Ctx, receiver: *utils.channel.oneshot.Receiver(void), limit_ms: u64) !void {
+    var waited: u64 = 0;
+    while (waited < limit_ms) : (waited += 10) {
+        receiver.try_recv() catch |err| switch (err) {
+            error.Empty => {
+                try ctx.sleep(.fromMilliseconds(10));
+                continue;
+            },
+            error.Closed => return error.Closed,
+        };
+        return;
+    }
+    return error.TestTimedOut;
+}
+
+/// The chain the re-proposal tests build: heights 1 through 18 dispersed at the views of
+/// their heights, the height-10 block's view and commitment, and the epoch boundary block
+/// (height 19, the last of epoch 0).
+const BoundaryChain = struct {
+    non_boundary_view: u64,
+    non_boundary: common.Commitment,
+    boundary_round: common.Round,
+    boundary: common.Block,
+
+    fn build(gpa_: std.mem.Allocator, me: common.K, shards: anytype) !BoundaryChain {
+        const genesis = try common.genesis_block(gpa_);
+        var parent = genesis.digest();
+        var last_view: u64 = 0;
+        var last_commitment = harness.genesis_commitment();
+        var result: BoundaryChain = undefined;
+        for (1..shared.blocks_per_epoch - 1) |height| {
+            const round = common.round_at(0, height);
+            const context: common.CodingCtx = .{
+                .round = round,
+                .leader = me,
+                .parent = .{ .new(last_view), last_commitment },
+            };
+            const block = try common.coded(gpa_, context, parent, height, height * 100);
+            last_commitment = block.commitment();
+            if (height == 10) {
+                result.non_boundary_view = height;
+                result.non_boundary = last_commitment;
+            }
+            parent = block.digest();
+            last_view = height;
+            try shards.disperse(round, block);
+        }
+        const boundary_height = shared.blocks_per_epoch - 1;
+        result.boundary_round = common.round_at(0, boundary_height);
+        const context: common.CodingCtx = .{
+            .round = result.boundary_round,
+            .leader = me,
+            .parent = .{ .new(last_view), last_commitment },
+        };
+        const timestamp = boundary_height * 100;
+        result.boundary = try common.coded(gpa_, context, parent, boundary_height, timestamp);
+        return result;
+    }
+};
+
+/// The context of a re-proposal of `payload` (proposed at `parent_view`) at `round`.
+fn reproposal(
+    round: common.Round,
+    leader: common.K,
+    parent_view: u64,
+    payload: common.Commitment,
+) common.CodingCtx {
+    return .{ .round = round, .leader = leader, .parent = .{ .new(parent_view), payload } };
+}
+
+/// Sends participant 0's shard of `block` from `from` over the shard channel.
+fn send_assigned_shard(
+    stack: *common.ValidatorStack,
+    from: common.K,
+    block: *const common.Block,
+) !void {
+    const codec = @import("codec");
+    const control = stack.network.network.oracle().control(from);
+    var registered = try control.register(2, shared.test_quota);
+    defer registered.deinit();
+    var shard = (try block.shard(gpa, 0)) orelse return error.MissingShard;
+    defer shard.deinit(gpa);
+    const bytes = try codec.encode(common.Shard, gpa, shard);
+    defer gpa.free(bytes);
+    const me = stack.validator_key;
+    const sent = try registered.sender.send(.{ .one = me }, &.{bytes}, true);
+    gpa.free(sent);
+}
+
+test "marshaled reproposal validation" {
+    try common.run(struct {
+        fn body(ctx: Ctx) anyerror!void {
+            var validators = try fixture();
+            defer validators.deinit(gpa);
+            var stack: common.ValidatorStack = undefined;
+            try stack.start(ctx, &validators);
+            defer stack.stop();
+            const participants = validators.participants;
+            const me = participants[0];
+            try stack.network.link_all(participants[0..2], shared.link);
+            const shards = stack.shards();
+            var chain = try BoundaryChain.build(gpa, me, shards);
+            defer chain.boundary.deinit(gpa);
+            const boundary = chain.boundary.commitment();
+            const boundary_view = chain.boundary_round.view.get();
+            try shards.gather(boundary, chain.boundary_round);
+            try shards.disperse(chain.boundary_round, chain.boundary.clone());
+            try ctx.sleep(.fromMilliseconds(10));
+
+            // A re-proposal of the boundary block in its epoch has valid shards; once the
+            // assigned shard arrives from the re-proposer, it certifies.
+            const round = common.round_at(0, 20);
+            const context = reproposal(round, participants[1], boundary_view, boundary);
+            try testing.expect(try verify_now(&stack, context, boundary));
+            var assigned = try shards.subscribe_assigned_shard_verified(boundary);
+            defer assigned.deinit();
+            try send_assigned_shard(&stack, participants[1], &chain.boundary);
+            try recv_within(ctx, &assigned, 5_000);
+            try testing.expect(try certify_now(&stack, round, boundary));
+
+            // Re-proposing it again as the parent view advances gives the same verdict.
+            const repeated = common.round_at(0, boundary_view + 2);
+            const repeated_context = reproposal(repeated, me, round.view.get(), boundary);
+            try testing.expect(try verify_now(&stack, repeated_context, boundary));
+            try testing.expect(try certify_now(&stack, repeated, boundary));
+
+            // A re-proposal of a block that is not an epoch's last is rejected by the boundary
+            // gate (the block itself validates under its own context).
+            const invalid = common.round_at(0, 15);
+            const non_boundary = chain.non_boundary;
+            const invalid_context = reproposal(invalid, me, chain.non_boundary_view, non_boundary);
+            try testing.expect(!try verify_now(&stack, invalid_context, non_boundary));
+            try testing.expect(!try certify_now(&stack, invalid, non_boundary));
+
+            // A re-proposal in another epoch is rejected.
+            const cross = common.round_at(1, 20);
+            const cross_context = reproposal(cross, me, boundary_view, boundary);
+            try testing.expect(!try verify_now(&stack, cross_context, boundary));
+            try testing.expect(!try certify_now(&stack, cross, boundary));
+        }
+    }.body);
+}
+
 test {
     _ = common;
 }

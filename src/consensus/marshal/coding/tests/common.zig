@@ -839,6 +839,8 @@ pub const ValidatorStack = struct {
 
     network: shared_harness.TestNetwork,
     validator: *Validator,
+    /// The validator's identity (participant 0).
+    validator_key: K,
     marshaled: M,
 
     /// Starts participant 0 of `validators` with the default application.
@@ -852,6 +854,7 @@ pub const ValidatorStack = struct {
         errdefer app.deinit();
         const node_ctx = ctx.child("validator").with_attribute("index", 0);
         const network = self.network.network;
+        self.validator_key = participants[0];
         self.validator = try Validator.setup(node_ctx, network, participants[0], provider, 1, app);
         errdefer self.validator.crash();
         const marshal = self.validator.mailbox.clone();
