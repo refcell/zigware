@@ -277,6 +277,7 @@ fn sum_buckets(comptime C: type, buckets: []const C) C {
 }
 
 const testing = std.testing;
+const Draws = @import("codec").fuzz.Draws;
 const Prng = @import("prng.zig").Prng;
 const g1 = @import("g1.zig");
 const g2 = @import("g2.zig");
@@ -386,12 +387,13 @@ fn fuzz_precomputed(_: void, smith: *testing.Smith) anyerror!void {
     var points: [6]C.Affine = undefined;
     var scalars: [6]u256 = undefined;
     var shifted: [6 * windows]C.Affine = undefined;
-    const count: usize = smith.value(u8) % 7;
+    const draws: Draws = .init(smith);
+    const count: usize = draws.range_at_most(usize, 0, 6);
     const base = g1.generator.to_jacobian();
     for (0..count) |index| {
-        const multiplier = smith.value(u16);
+        const multiplier = draws.value(u16);
         points[index] = base.mul(multiplier).to_affine(); // 0 gives the identity.
-        scalars[index] = smith.value(u256) >> 1;
+        scalars[index] = draws.value(u256) >> 1;
         precompute_shifts(C, bits, points[index], shifted[index * windows ..][0..windows]);
     }
     const expected = msm(C, points[0..count], scalars[0..count]);

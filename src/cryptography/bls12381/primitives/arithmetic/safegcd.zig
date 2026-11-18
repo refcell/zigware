@@ -252,6 +252,7 @@ fn divsteps_var(delta: *i64, f_low: u64, g_low: u64) Matrix {
 }
 
 const testing = std.testing;
+const Draws = @import("codec").fuzz.Draws;
 const Prng = @import("prng.zig").Prng;
 
 fn check_modulus(comptime Int: type, comptime modulus: Int, seed: u64) !void {
@@ -290,11 +291,12 @@ const secp256k1_modulus: u256 =
     0xfffffffffffffffffffffffffffffffffffffffffffffffffffffffefffffc2f;
 
 fn fuzz_one(_: void, smith: *testing.Smith) anyerror!void {
-    const x = smith.value(u384) % bls_modulus;
+    const draws: Draws = .init(smith);
+    const x = draws.value(u384) % bls_modulus;
     const inverse = Modulus(u384, bls_modulus).invert(x);
     const expected: u768 = if (x == 0) 0 else 1;
     try testing.expectEqual(expected, @as(u768, inverse) * x % bls_modulus);
-    const y = smith.value(u256) % secp256k1_modulus;
+    const y = draws.value(u256) % secp256k1_modulus;
     const inverse_y = Modulus(u256, secp256k1_modulus).invert(y);
     const expected_y: u512 = if (y == 0) 0 else 1;
     try testing.expectEqual(expected_y, @as(u512, inverse_y) * y % secp256k1_modulus);
@@ -332,8 +334,9 @@ test "safegcd: divsteps_var matches the branch-free divsteps (seeded)" {
 }
 
 fn fuzz_divsteps(_: void, smith: *testing.Smith) anyerror!void {
-    const delta: i64 = @as(i64, smith.value(i16));
-    try expect_divsteps_match(delta, smith.value(u64), smith.value(u64));
+    const draws: Draws = .init(smith);
+    const delta: i64 = @as(i64, draws.value(i16));
+    try expect_divsteps_match(delta, draws.value(u64), draws.value(u64));
 }
 
 test "safegcd: coverage-guided fuzz of divsteps_var vs branch-free divsteps" {
