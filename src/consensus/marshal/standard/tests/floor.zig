@@ -1401,3 +1401,226 @@ test "standard finalized delivery rejects different block bytes" {
         }
     }.body);
 }
+
+/// A signing provider whose scopes each survive a fixed number of lookups and then retire,
+/// modeling an application that prunes an epoch between a delivery's admission and its
+/// batched verification (commonware `RetiringProvider`). Copies share `scopes`.
+const RetiringProvider = struct {
+    const Scope = struct {
+        epoch: u64,
+        scheme: *const harness.S,
+        remaining: std.atomic.Value(usize),
+    };
+
+    scopes: []Scope,
+
+    pub fn scoped(self: RetiringProvider, epoch: types.Epoch) ?certificate.Scoped(harness.S) {
+        const scope = for (self.scopes) |*item| {
+            if (item.epoch == epoch.get()) break item;
+        } else return null;
+        const counter = &scope.remaining;
+        var remaining = counter.load(.acquire);
+        while (remaining > 0) {
+            remaining = counter.cmpxchgWeak(remaining, remaining - 1, .acq_rel, .acquire) orelse
+                return certificate.Scoped(harness.S).scheme(scope.scheme);
+        }
+        return null;
+    }
+
+    pub fn scheme(self: RetiringProvider, epoch: types.Epoch) ?*const harness.S {
+        const handle = self.scoped(epoch) orelse return null;
+        return handle.into_scheme();
+    }
+
+    /// Whether `epoch` was looked up as many times as allowed, which confirms the admission
+    /// path consulted the provider.
+    fn retired(self: RetiringProvider, epoch: u64) bool {
+        for (self.scopes) |*item| {
+            if (item.epoch == epoch) return item.remaining.load(.acquire) == 0;
+        }
+        unreachable;
+    }
+};
+
+const Retiring = common.Started(RetiringProvider, App, common.RecordingBuffer);
+
+fn start_retiring(
+    ctx: Ctx,
+    prefix: []const u8,
+    provider: RetiringProvider,
+    application: App,
+) !Retiring {
+    return common.start_standard_actor(
+        RetiringProvider,
+        App,
+        common.RecordingBuffer,
+        ctx,
+        prefix,
+        provider,
+        application,
+        try common.RecordingBuffer.init(gpa, ctx.io()),
+        try genesis_start(),
+    );
+}
+
+/// A finalized delivery at height 1 of a block over `hash("")`, finalized by `signers` at
+/// `round`, with the block it carries.
+const FinalizedDelivery = struct {
+    block: harness.B,
+    finalization: harness.Finalization,
+
+    fn init(signers: *const harness.Fixture, round: Round) !FinalizedDelivery {
+        const block = try harness.make_raw_block(gpa, hash(""), .new(1), 100);
+        const proposal = harness.Proposal.init(round, .zero(), block.digest());
+        const quorum = harness.quorum;
+        const finalization = try harness.make_finalization(gpa, signers, proposal, quorum);
+        return .{ .block = block, .finalization = finalization };
+    }
+
+    fn deinit(self: *FinalizedDelivery) void {
+        self.finalization.deinit(gpa);
+    }
+
+    fn send(self: *const FinalizedDelivery, resolver: common.RecordingResolver) !common.Outcome {
+        const value = try encode_pair(self.finalization, self.block);
+        defer gpa.free(value);
+        return deliver_finalized(resolver, value);
+    }
+};
+
+test "standard finalized delivery rejects epoch mismatch" {
+    try run(struct {
+        fn body(ctx: Ctx) anyerror!void {
+            var rng = utils.rng.test_rng();
+            var fixture = try harness.fixture(gpa, &rng);
+            defer fixture.deinit(gpa);
+            // Height 1 lives in epoch 0, but the finalization claims epoch 1. It decodes
+            // against epoch 0's config, so the epoch guard rejects it and blames the peer
+            // before any verification.
+            var delivery: FinalizedDelivery = try .init(&fixture, .new(.new(1), .new(1)));
+            defer delivery.deinit();
+            var application = try App.manual_ack(gpa, ctx.io());
+            defer application.deinit();
+            var started = try start_verifying(
+                ctx.child("validator"),
+                "finalized-delivery-epoch-mismatch",
+                &fixture,
+                application.clone(),
+            );
+            defer started.crash();
+            try testing.expectEqual(common.Outcome.invalid, try delivery.send(started.resolver));
+        }
+    }.body);
+}
+
+fn one_scope(scheme: *const harness.S, remaining: usize) [1]RetiringProvider.Scope {
+    return .{.{ .epoch = 0, .scheme = scheme, .remaining = .init(remaining) }};
+}
+
+test "standard finalized delivery verifies after scope retires" {
+    try run(struct {
+        fn body(ctx: Ctx) anyerror!void {
+            var rng = utils.rng.test_rng();
+            var fixture = try harness.fixture(gpa, &rng);
+            defer fixture.deinit(gpa);
+            var delivery: FinalizedDelivery = try .init(&fixture, round_at(1));
+            defer delivery.deinit();
+            var application = try App.manual_ack(gpa, ctx.io());
+            defer application.deinit();
+            // The scope survives exactly the admission lookup, so it is gone by the time the
+            // batched verification runs.
+            var scopes = one_scope(&fixture.schemes[0], 1);
+            const provider: RetiringProvider = .{ .scopes = &scopes };
+            var started = try start_retiring(
+                ctx.child("validator"),
+                "finalized-delivery-scope-retires",
+                provider,
+                application.clone(),
+            );
+            defer started.crash();
+            try testing.expect(!provider.retired(0));
+            const outcome = try delivery.send(started.resolver);
+            try testing.expectEqual(common.Outcome{ .resolved = .complete }, outcome);
+            try testing.expect(provider.retired(0));
+            try testing.expectEqual(0, (try application.acknowledged()).get());
+            try testing.expectEqual(1, (try application.acknowledged()).get());
+            const entries = try application.blocks(gpa);
+            defer App.free_blocks(gpa, entries);
+            const last = entries[entries.len - 1];
+            try testing.expectEqual(1, last.height.get());
+            try testing.expect(last.block.digest().eql(delivery.block.digest()));
+        }
+    }.body);
+}
+
+test "standard notarized delivery verifies after scope retires" {
+    try run(struct {
+        fn body(ctx: Ctx) anyerror!void {
+            var rng = utils.rng.test_rng();
+            var fixture = try harness.fixture(gpa, &rng);
+            defer fixture.deinit(gpa);
+            const round = round_at(1);
+            const block = try harness.make_raw_block(gpa, hash(""), .new(1), 100);
+            var notarization = try notarization_of(&fixture, round, &block);
+            defer notarization.deinit(gpa);
+            var application = try App.manual_ack(gpa, ctx.io());
+            defer application.deinit();
+            var scopes = one_scope(&fixture.schemes[0], 1);
+            const provider: RetiringProvider = .{ .scopes = &scopes };
+            var started = try start_retiring(
+                ctx.child("validator"),
+                "notarized-delivery-scope-retires",
+                provider,
+                application.clone(),
+            );
+            defer started.crash();
+            try testing.expect(!provider.retired(0));
+            const value = try encode_pair(notarization, block);
+            defer gpa.free(value);
+            const outcome = try deliver(
+                started.resolver,
+                .{ .notarized = round },
+                .{ .notarization = round },
+                value,
+            );
+            try testing.expectEqual(common.Outcome{ .resolved = .complete }, outcome);
+            try testing.expect(provider.retired(0));
+            // The notarized block verified under the admission scope is cached.
+            var cached = (try started.mailbox.get_block(.{ .digest = block.digest() })).?;
+            defer cached.deinit();
+            try testing.expect(cached.digest().eql(block.digest()));
+        }
+    }.body);
+}
+
+test "standard finalized delivery rejects foreign certificate after scope retires" {
+    try run(struct {
+        fn body(ctx: Ctx) anyerror!void {
+            var rng = utils.rng.test_rng();
+            var fixture = try harness.fixture(gpa, &rng);
+            defer fixture.deinit(gpa);
+            var foreign = try harness.fixture(gpa, &rng);
+            defer foreign.deinit(gpa);
+            // The certificate decodes under epoch 0's scope but was signed by a committee
+            // marshal does not know.
+            var delivery: FinalizedDelivery = try .init(&foreign, round_at(1));
+            defer delivery.deinit();
+            var application = try App.manual_ack(gpa, ctx.io());
+            defer application.deinit();
+            // Retiring the scope after admission must not turn the rejection into an
+            // acceptance: the retained scope still verifies the certificate.
+            var scopes = one_scope(&fixture.schemes[0], 1);
+            const provider: RetiringProvider = .{ .scopes = &scopes };
+            var started = try start_retiring(
+                ctx.child("validator"),
+                "finalized-delivery-foreign-certificate-scope-retires",
+                provider,
+                application.clone(),
+            );
+            defer started.crash();
+            try testing.expect(!provider.retired(0));
+            try testing.expectEqual(common.Outcome.invalid, try delivery.send(started.resolver));
+            try testing.expect(provider.retired(0));
+        }
+    }.body);
+}
