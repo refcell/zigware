@@ -9,6 +9,7 @@ const types = @import("../../../types.zig");
 const harness = @import("../../mocks/harness.zig");
 const core = @import("../../core/root.zig");
 const seed = @import("seed.zig");
+const common = @import("common.zig");
 
 const gpa = testing.allocator;
 const H = harness.StandardHarness;
@@ -422,4 +423,55 @@ test "standard acknowledgement is processed before a later mailbox message" {
     var runner = try runtime.deterministic.Runner.init(gpa, timed);
     defer runner.deinit();
     try try runner.start_context(ack_precedes_mailbox_body, .{});
+}
+
+fn subscribed_once(buffer: common.RecordingBuffer) bool {
+    return buffer.commitment_subscription_count() == 1;
+}
+
+/// A start floor waits on the buffer for its anchor. Once the buffer hands the anchor over, a
+/// later `get_anchor` sees the installed floor: the actor takes a ready buffer waiter before
+/// any mailbox message, as commonware's biased `select_loop!` does, even when the waiter's own
+/// notice has not reached the inbox yet.
+fn waiter_precedes_mailbox_body(ctx: Ctx) anyerror!void {
+    var rng = utils.rng.test_rng();
+    var validators = try harness.fixture(gpa, &rng);
+    defer validators.deinit(gpa);
+    var blocks: [6]H.TestBlock = undefined;
+    try make_chain(&blocks);
+    defer free_chain(&blocks);
+    const anchor = &blocks[5];
+    var application = try App.manual_ack(gpa, ctx.io());
+    defer application.deinit();
+    var buffer = try common.RecordingBuffer.init(gpa, ctx.io());
+    defer buffer.deinit();
+    const provider: harness.Provider = .init(&validators.schemes[0]);
+    var started = try common.start_standard_actor(
+        harness.Provider,
+        App,
+        common.RecordingBuffer,
+        ctx.child("validator"),
+        "waiter-precedes-mailbox",
+        provider,
+        application.clone(),
+        buffer.clone(),
+        .{ .floor = try finalize(&validators, anchor) },
+    );
+    defer started.crash();
+    try common.wait_until(ctx, 5000, "floor anchor subscription", buffer, subscribed_once);
+    try testing.expect(buffer.deliver_commitment_subscription(0, anchor.clone()));
+    const installed = try started.mailbox.get_anchor() orelse return error.TestFloorPending;
+    var installed_block = installed.block;
+    defer installed_block.deinit();
+    try testing.expect(H.digest(&installed_block).eql(H.digest(anchor)));
+}
+
+test "standard ready buffer waiter is handled before a later mailbox message" {
+    for (0..8) |run_seed| {
+        var config = timed;
+        config.seed = run_seed;
+        var runner = try runtime.deterministic.Runner.init(gpa, config);
+        defer runner.deinit();
+        try try runner.start_context(waiter_precedes_mailbox_body, .{});
+    }
 }

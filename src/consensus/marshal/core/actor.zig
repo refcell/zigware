@@ -5,12 +5,13 @@
 //! One task runs the actor. Pump tasks feed its mailbox and the resolver handler into one
 //! bounded inbox; buffer waiters and a watcher on the application's current acknowledgement
 //! push their completions into the same inbox. The actor handles events in arrival order,
-//! except that a resolved acknowledgement is handled before any mailbox or resolver event
-//! (commonware's biased `select_loop!` prefers waiters, then acknowledgements, then the
-//! mailbox, then the resolver). Zigware's archives are durable when a write or sync returns, so
-//! commonware's pooled syncs complete inside the event that starts them, and the durability
-//! acks of `proposed`, `verified`, and `certified` fire once the write returns. A storage or
-//! allocation error stops the actor with that error (commonware panics).
+//! except that it first takes every ready buffer waiter and then every resolved
+//! acknowledgement, even before their notices arrive, as commonware's biased `select_loop!`
+//! prefers waiters, then acknowledgements, then the mailbox, then the resolver (its first
+//! arm, sync completions, has no counterpart: zigware's archives are durable when a write or
+//! sync returns, so commonware's pooled syncs complete inside the event that starts them).
+//! The durability acks of `proposed`, `verified`, and `certified` fire once the write
+//! returns. A storage or allocation error stops the actor with that error (commonware panics).
 //!
 //! The handlers live in `actor_ingress.zig` (mailbox), `actor_backfill.zig` (resolver), and
 //! `actor_finalize.zig` (storage, floors, repair, and dispatch).
@@ -103,7 +104,8 @@ pub fn Actor(comptime P: type) type {
         pub const Event = union(enum) {
             mailbox: Message,
             resolver: HandlerMessage,
-            waiter: Completion,
+            /// Buffer waiter `id` recorded its outcome.
+            waiter: u64,
             /// The armed application acknowledgement of this generation resolved.
             ack: u64,
             closed,
@@ -111,11 +113,7 @@ pub fn Actor(comptime P: type) type {
 
         /// A finished buffer waiter: the block, or the key of a subscription whose buffer
         /// subscription closed.
-        pub const Completion = struct {
-            id: u64,
-            gpa: Allocator,
-            result: union(enum) { block: Block, closed: SubscriptionKey },
-        };
+        pub const Completion = union(enum) { block: Block, closed: SubscriptionKey };
 
         ctx: Context,
         gpa: Allocator,
@@ -383,9 +381,19 @@ pub fn Actor(comptime P: type) type {
         fn handle(self: *Self, event: Event) !bool {
             switch (event) {
                 .closed => return false,
-                .waiter => |done| try self.handle_waiter(done),
-                .ack => |generation| return self.handle_ack(generation),
+                .waiter => |id| {
+                    const done = self.waiters.take_notified(id) orelse return true;
+                    try self.handle_waiter(done);
+                },
+                .ack => |generation| {
+                    try self.drain_ready_waiters();
+                    return self.handle_ack(generation);
+                },
                 .mailbox => |message| {
+                    self.drain_ready_waiters() catch |err| {
+                        release_event(event);
+                        return err;
+                    };
                     if (!try self.drain_ready_acks()) {
                         release_event(event);
                         return false;
@@ -393,6 +401,10 @@ pub fn Actor(comptime P: type) type {
                     try ingress.handle(self, message);
                 },
                 .resolver => |message| {
+                    self.drain_ready_waiters() catch |err| {
+                        release_event(event);
+                        return err;
+                    };
                     if (!try self.drain_ready_acks()) {
                         release_event(event);
                         return false;
@@ -415,11 +427,20 @@ pub fn Actor(comptime P: type) type {
             return self.process_ready_acks();
         }
 
+        /// Handles every buffer waiter that is already ready, as commonware's biased
+        /// `select_loop!` polls waiters before acknowledgements, the mailbox, and the resolver.
+        /// Waiters that become ready while these are handled wait for the next event.
+        fn drain_ready_waiters(self: *Self) !void {
+            const ready_max = self.waiters.tasks.count();
+            for (0..ready_max) |_| {
+                const done = self.waiters.take_ready() orelse return;
+                try self.handle_waiter(done);
+            }
+        }
+
         fn handle_waiter(self: *Self, done: Completion) !void {
             var completion = done;
-            // An aborted waiter's result is no longer wanted.
-            if (!self.waiters.finish(completion.id)) return release_completion(completion);
-            switch (completion.result) {
+            switch (completion) {
                 .block => |*block| {
                     defer V.deinit_block(self.gpa, block);
                     _ = try finalize.ingest(self, block);
@@ -525,11 +546,11 @@ pub fn Actor(comptime P: type) type {
             if (comptime std.meta.hasMethod(T, "deinit")) value.deinit();
         }
 
-        fn release_completion(done: Completion) void {
-            switch (done.result) {
+        fn release_completion(gpa: Allocator, done: Completion) void {
+            switch (done) {
                 .block => |block| {
                     var owned = block;
-                    V.deinit_block(done.gpa, &owned);
+                    V.deinit_block(gpa, &owned);
                 },
                 .closed => {},
             }
@@ -539,18 +560,20 @@ pub fn Actor(comptime P: type) type {
             switch (event) {
                 .mailbox => |message| Message.discard(message),
                 .resolver => |message| HandlerMessage.discard(message),
-                .waiter => |done| release_completion(done),
-                .ack, .closed => {},
+                .waiter, .ack, .closed => {},
             }
         }
 
-        /// Buffer waiters: each waits on a buffer subscription in its own task and reports
-        /// the block (or the closed subscription) through the inbox.
+        /// Buffer waiters: each waits on a buffer subscription in its own task, records the
+        /// block (or the closed subscription) in its slot, and posts a `waiter` notice to the
+        /// inbox. The actor also takes ready slots directly before every acknowledgement,
+        /// mailbox, and resolver event (`take_ready`), as commonware's biased `select_loop!`
+        /// polls its waiters first, so a completion never waits behind a queued message.
         pub const Waiters = struct {
             gpa: Allocator,
             io: Io,
             inbox: *Inbox,
-            tasks: std.AutoArrayHashMapUnmanaged(u64, Io.Future(void)) = .empty,
+            tasks: std.AutoArrayHashMapUnmanaged(u64, Entry) = .empty,
             next_id: u64 = 0,
 
             const Kind = union(enum) {
@@ -558,6 +581,19 @@ pub fn Actor(comptime P: type) type {
                 /// A floor anchor waiter: a closed subscription keeps it pending until the
                 /// floor is replaced, applied, or superseded.
                 floor,
+            };
+
+            const Entry = struct { slot: *Slot, future: Io.Future(void) };
+
+            /// Shared by a waiter task and the actor; `mutex` guards `result` and `taken`.
+            const Slot = struct {
+                mutex: Io.Mutex = .init,
+                receiver: oneshot.Receiver(Block),
+                kind: Kind,
+                /// The task's outcome, until the actor takes it.
+                result: ?Completion = null,
+                /// The actor took the outcome; the task drops a later one.
+                taken: bool = false,
             };
 
             /// Waits on `receiver` (taking ownership) for the subscription `key`.
@@ -578,60 +614,90 @@ pub fn Actor(comptime P: type) type {
                 var owned = receiver;
                 errdefer owned.deinit();
                 try self.tasks.ensureUnusedCapacity(self.gpa, 1);
+                const slot = try self.gpa.create(Slot);
+                errdefer self.gpa.destroy(slot);
+                slot.* = .{ .receiver = owned, .kind = kind };
                 const id = self.next_id;
                 self.next_id += 1;
-                const args = .{ self.inbox, self.gpa, id, kind, owned };
+                const args = .{ self.inbox, self.io, id, slot };
                 const future = try self.io.concurrent(wait, args);
-                self.tasks.putAssumeCapacityNoClobber(id, future);
+                self.tasks.putAssumeCapacityNoClobber(id, .{ .slot = slot, .future = future });
                 return .{ .waiters = self, .id = id };
             }
 
-            fn wait(
-                inbox: *Inbox,
-                gpa: Allocator,
-                id: u64,
-                kind: Kind,
-                receiver: oneshot.Receiver(Block),
-            ) void {
-                var owned = receiver;
-                defer owned.deinit();
-                const block = owned.recv() catch |err| switch (err) {
+            fn wait(inbox: *Inbox, io: Io, id: u64, slot: *Slot) void {
+                const outcome: Completion = if (slot.receiver.recv()) |block|
+                    .{ .block = block }
+                else |err| switch (err) {
                     error.Canceled => return,
-                    error.Closed => switch (kind) {
-                        .subscription => |key| {
-                            const closed: Event = .{ .waiter = .{
-                                .id = id,
-                                .gpa = gpa,
-                                .result = .{ .closed = key },
-                            } };
-                            _ = inbox.push(closed);
-                            return;
-                        },
+                    error.Closed => switch (slot.kind) {
+                        .subscription => |key| .{ .closed = key },
                         .floor => return,
                     },
                 };
-                const event: Event = .{ .waiter = .{
-                    .id = id,
-                    .gpa = gpa,
-                    .result = .{ .block = block },
-                } };
-                if (!inbox.push(event)) release_event(event);
+                slot.mutex.lockUncancelable(io);
+                // The actor takes a value only while it is still in the channel, so a value
+                // received here was never taken; a close after a take is dropped.
+                const taken = slot.taken;
+                if (!taken) slot.result = outcome;
+                slot.mutex.unlock(io);
+                assert(!taken or outcome == .closed);
+                if (!taken) _ = inbox.push(.{ .waiter = id });
+            }
+
+            /// Takes the outcome of the first ready waiter, if any, and reaps it.
+            pub fn take_ready(self: *Waiters) ?Completion {
+                for (self.tasks.keys(), self.tasks.values()) |id, entry| {
+                    const outcome = self.take(entry.slot) orelse continue;
+                    self.reap(id);
+                    return outcome;
+                }
+                return null;
+            }
+
+            /// Takes the outcome of waiter `id` after its notice; null when it was already
+            /// taken or aborted.
+            pub fn take_notified(self: *Waiters, id: u64) ?Completion {
+                const entry = self.tasks.get(id) orelse return null;
+                const outcome = self.take(entry.slot) orelse return null;
+                self.reap(id);
+                return outcome;
+            }
+
+            /// The slot's outcome, or a block still in its channel. A close the task has not
+            /// recorded yet stays for its notice.
+            fn take(self: *Waiters, slot: *Slot) ?Completion {
+                slot.mutex.lockUncancelable(self.io);
+                defer slot.mutex.unlock(self.io);
+                assert(!slot.taken);
+                if (slot.result) |outcome| {
+                    slot.result = null;
+                    slot.taken = true;
+                    return outcome;
+                }
+                const block = slot.receiver.try_recv() catch return null;
+                slot.taken = true;
+                return .{ .block = block };
+            }
+
+            /// Removes waiter `id`, stopping its task, and frees its slot (and any outcome
+            /// still in it).
+            fn reap(self: *Waiters, id: u64) void {
+                var entry = (self.tasks.fetchOrderedRemove(id) orelse return).value;
+                entry.future.cancel(self.io);
+                const slot = entry.slot;
+                if (slot.result) |outcome| release_completion(self.gpa, outcome);
+                slot.receiver.deinit();
+                self.gpa.destroy(slot);
             }
 
             fn cancel(self: *Waiters, id: u64) void {
-                var entry = self.tasks.fetchSwapRemove(id) orelse return;
-                entry.value.cancel(self.io);
-            }
-
-            /// Reaps a finished waiter; false when it was aborted first.
-            fn finish(self: *Waiters, id: u64) bool {
-                var entry = self.tasks.fetchSwapRemove(id) orelse return false;
-                entry.value.await(self.io);
-                return true;
+                self.reap(id);
+                assert(!self.tasks.contains(id));
             }
 
             fn deinit(self: *Waiters) void {
-                for (self.tasks.values()) |*future| future.cancel(self.io);
+                while (self.tasks.count() > 0) self.reap(self.tasks.keys()[0]);
                 self.tasks.deinit(self.gpa);
                 self.* = undefined;
             }

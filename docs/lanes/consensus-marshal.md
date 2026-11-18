@@ -186,10 +186,12 @@ ports its range's tests and the helpers defined in it, into
   delegate to `StandardHarness`; in Zig each runs once on `StandardHarness`.
 
 ## Decisions
-- The actor handles a resolved acknowledgement before any mailbox or resolver event
-  (commonware's biased `select_loop!`), so ack-then-`get_processed` sees the new height.
-  Buffer-waiter completions still arrive in inbox order (lookup thread's anchor-floor note);
-  tests wait briefly there.
+- The actor follows commonware's biased `select_loop!` order: before an acknowledgement,
+  mailbox, or resolver event it takes every ready buffer waiter (its slot, or a block already
+  in its channel), then every resolved acknowledgement, even when their inbox notices have
+  not arrived. So ack-then-`get_processed` sees the new height, and a query after the buffer
+  hands a floor anchor over sees the installed floor. Commonware's first arm (pooled sync
+  completions) has no counterpart, since zigware's syncs complete inside their event.
 - `storage.archive.immutable` borrows its config's partition names (its ordinal opens
   section blobs lazily), so `harness.Archives` owns them for the archives' lifetime.
 - Marshal blocks keep commonware's trait method names (`height()`, `parent()`, `digest()`,
@@ -336,3 +338,6 @@ ports its range's tests and the helpers defined in it, into
 - 2026-11-18: standard late-finalization tests (kept once for a repaired block, dropped
   below a floor) in `tests/late_finalization.zig`; finalize scenario unskipped by the
   resolver fix (fd079c5).
+- 2026-11-18: kept-finalization prune restart and late-finalization batch dispatch tests
+  (1219-1599 done); actor takes ready buffer waiters before acks, mailbox, and resolver
+  events (commonware's biased order), with a regression test in `tests/restart.zig`.
