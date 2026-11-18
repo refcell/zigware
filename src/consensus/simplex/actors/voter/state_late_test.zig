@@ -6,6 +6,8 @@ const std = @import("std");
 const testing = std.testing;
 const Io = std.Io;
 const base = @import("state_test.zig");
+const parallel = @import("parallel");
+const context = @import("../context.zig");
 const elector = @import("../../elector.zig");
 const utils = @import("utils");
 const cryptography = @import("cryptography");
@@ -1146,6 +1148,401 @@ test "voter state an indirect notarization requires verified unequivocated ances
             try testing.expect(state.verified(.new(3)));
             try add_notarized(state, &env.fixture, third);
             try testing.expectEqual(null, state.optimistic_ancestry_payload(.new(2)));
+        }
+    }.body);
+}
+
+/// Signer 0, epoch 11, terms of 5 views (commonware `setup_state_with(4, 0, 11, ...)`).
+fn epoch_eleven(view_retention: u64, optimistic_views: u64) Options {
+    var options = epoch_nine(5, view_retention, optimistic_views);
+    options.signer = 0;
+    options.epoch = 11;
+    return options;
+}
+
+/// A notarization of `value` from every signer but signer 0 (commonware's `schemes[1..]`).
+fn notarization_without_signer0(f: *const base.Fixture, value: Proposal) !base.Notarization {
+    var votes: [3]Notarize = undefined;
+    for (&votes, f.schemes[1..4]) |*vote, *scheme| {
+        vote.* = (try Notarize.sign(gpa, scheme, value)).?;
+    }
+    return base.Notarization.from_votes(gpa, &f.verifier, &votes, parallel.sequential);
+}
+
+test "voter state an optimistic notarize requires parent participation within the term" {
+    // commonware `optimistic_notarize_requires_parent_participation_within_term`.
+    try run(struct {
+        fn body(io: Io) !void {
+            var env: Env = undefined;
+            try env.start(io, epoch_eleven(10, 2));
+            defer env.stop();
+            const state = &env.state;
+            try testing.expect(try state.enter_view(.new(2)));
+            _ = try state.create_round(.new(2));
+            try testing.expect(state.record_proposed(proposal(11, 2, 1, 118)));
+            try testing.expectEqual(null, try state.construct_notarize(.new(2)));
+            _ = try state.create_round(.new(1));
+            try testing.expect(state.record_proposed(proposal(11, 1, 0, 119)));
+            try testing.expect(try state.construct_notarize(.new(1)) != null);
+            try testing.expect(try state.construct_notarize(.new(2)) != null);
+        }
+    }.body);
+}
+
+test "voter state an optimistic notarize accepts a directly notarized parent" {
+    // commonware `optimistic_notarize_accepts_directly_notarized_parent`.
+    try run(struct {
+        fn body(io: Io) !void {
+            var env: Env = undefined;
+            try env.start(io, epoch_eleven(10, 2));
+            defer env.stop();
+            const state = &env.state;
+            const parent = try notarization_without_signer0(&env.fixture, proposal(11, 1, 0, 120));
+            try testing.expect((try state.add_notarization(parent)).added);
+            try testing.expect(try state.set_proposal(.new(2), &proposal(11, 2, 1, 121)));
+            try testing.expect(state.verified(.new(2)));
+            try testing.expect(try state.construct_notarize(.new(2)) != null);
+        }
+    }.body);
+}
+
+test "voter state an optimistic notarize blocks on a parent's failed certification" {
+    // commonware `optimistic_notarize_blocks_on_parent_failed_certification`.
+    try run(struct {
+        fn body(io: Io) !void {
+            var env: Env = undefined;
+            try env.start(io, epoch_eleven(10, 2));
+            defer env.stop();
+            const state = &env.state;
+            const parent = try notarization_without_signer0(&env.fixture, proposal(11, 1, 0, 122));
+            try testing.expect((try state.add_notarization(parent)).added);
+            try testing.expect(try state.certified(.new(1), false) != null);
+            try testing.expect(try state.set_proposal(.new(2), &proposal(11, 2, 1, 123)));
+            try testing.expect(state.verified(.new(2)));
+            try testing.expectEqual(null, try state.construct_notarize(.new(2)));
+        }
+    }.body);
+}
+
+test "voter state a finalization anchors the optimistic issuance window" {
+    // commonware `finalization_anchors_optimistic_issuance_window`.
+    try run(struct {
+        fn body(io: Io) !void {
+            var env: Env = undefined;
+            try env.start(io, epoch_eleven(10, 1));
+            defer env.stop();
+            const state = &env.state;
+            try testing.expect((try state.add_finalization(
+                try build_finalization(&env.fixture, proposal(11, 1, 0, 130)),
+            )).added);
+            try testing.expect(state.notarization(.new(1)) == null);
+            for ([_]u64{ 2, 3 }, [_]u8{ 131, 132 }) |view, payload| {
+                const value = proposal(11, view, view - 1, payload);
+                try testing.expect(try state.set_proposal(.new(view), &value));
+                try testing.expect(state.verified(.new(view)));
+                // The finalized view 1 anchors the window for both views.
+                try testing.expect(try state.construct_notarize(.new(view)) != null);
+            }
+        }
+    }.body);
+}
+
+test "voter state prune drops stale optimistic anchors" {
+    // commonware `prune_drops_stale_optimistic_anchors`.
+    try run(struct {
+        fn body(io: Io) !void {
+            var env: Env = undefined;
+            try env.start(io, epoch_eleven(1, 2));
+            defer env.stop();
+            const state = &env.state;
+            try add_notarized(state, &env.fixture, proposal(11, 1, 0, 140));
+            try add_notarized(state, &env.fixture, proposal(11, 2, 1, 141));
+            try testing.expect(state.in_issuance_window(.new(4)));
+            try testing.expect((try state.add_finalization(
+                try build_finalization(&env.fixture, proposal(11, 4, 3, 142)),
+            )).added);
+            var removed: std.ArrayList(View) = .empty;
+            defer removed.deinit(gpa);
+            try state.prune(&removed);
+            try testing.expectEqualSlices(View, &.{ .new(1), .new(2) }, removed.items);
+            // Pruned views must not anchor the issuance window.
+            try testing.expect(!state.in_issuance_window(.new(4)));
+        }
+    }.body);
+}
+
+test "voter state an optimistic finalize blocks on an uncertified parent" {
+    // commonware `optimistic_finalize_blocks_on_uncertified_parent`.
+    try run(struct {
+        fn body(io: Io) !void {
+            var env: Env = undefined;
+            try env.start(io, epoch_eleven(10, 2));
+            defer env.stop();
+            const state = &env.state;
+            const parent = try notarization_without_signer0(&env.fixture, proposal(11, 1, 0, 124));
+            try testing.expect((try state.add_notarization(parent)).added);
+            const child = proposal(11, 2, 1, 125);
+            try testing.expect(try state.set_proposal(.new(2), &child));
+            try testing.expect(state.verified(.new(2)));
+            try testing.expect(try state.construct_notarize(.new(2)) != null);
+            try add_notarized(state, &env.fixture, child);
+            try testing.expect(try state.certified(.new(2), true) != null);
+            // Finalize waits for the parent's explicit certification.
+            try testing.expectEqual(null, try state.construct_finalize(.new(2)));
+            try testing.expect(try state.certified(.new(1), true) != null);
+            try testing.expect(try state.construct_finalize(.new(2)) != null);
+        }
+    }.body);
+}
+
+test "voter state a failed certification still nullifies the current view" {
+    // commonware `failed_certification_still_nullifies_current_view`.
+    try run(struct {
+        fn body(io: Io) !void {
+            var env: Env = undefined;
+            var options = epoch_eleven(10, 1);
+            options.epoch = 13;
+            try env.start(io, options);
+            defer env.stop();
+            const state = &env.state;
+            try add_notarized(state, &env.fixture, proposal(13, 1, 0, 115));
+            try testing.expectEqual(1, state.current_view().get());
+            try testing.expect(try state.certified(.new(1), false) != null);
+            const first = (try state.construct_nullify(.new(1), .failed_certification)).?;
+            try testing.expect(!first.retry);
+            try testing.expectEqual(1, first.nullify.round.view.get());
+            const retry = (try state.construct_nullify(.new(1), .retry)).?;
+            try testing.expect(retry.retry);
+            try testing.expectEqual(1, retry.nullify.round.view.get());
+        }
+    }.body);
+}
+
+test "voter state a nullification sets the entry certificate" {
+    // commonware `nullification_sets_entry_certificate`.
+    try run(struct {
+        fn body(io: Io) !void {
+            var env: Env = undefined;
+            try env.start(io, .{ .view_retention = 20, .term_length = 5 });
+            defer env.stop();
+            const state = &env.state;
+            const nullified = try build_nullification(&env.fixture, round_at(1, 1));
+            try testing.expect(try state.add_nullification(nullified));
+            try testing.expectEqual(6, state.current_view().get());
+            var best = (try state.get_best_certificate()).?;
+            defer best.deinit(gpa);
+            try testing.expect(best == .nullification);
+            try testing.expectEqual(1, best.nullification.round.view.get());
+        }
+    }.body);
+}
+
+test "voter state parent payload returns the genesis payload" {
+    // commonware `parent_payload_returns_genesis_payload`.
+    try run(struct {
+        fn body(io: Io) !void {
+            var env: Env = undefined;
+            try env.start(io, .{ .view_retention = 5 });
+            defer env.stop();
+            const state = &env.state;
+            const nullified = try build_nullification(&env.fixture, round_at(1, 1));
+            try testing.expect(try state.add_nullification(nullified));
+            try base.expect_payload(state.parent_payload(&proposal(1, 2, 0, 8)), 0);
+        }
+    }.body);
+}
+
+test "voter state parent payload rejects a parent before the last finalization" {
+    // commonware `parent_payload_rejects_parent_before_finalized`.
+    try run(struct {
+        fn body(io: Io) !void {
+            var env: Env = undefined;
+            try env.start(io, .{ .view_retention = 5 });
+            defer env.stop();
+            const state = &env.state;
+            try finalize_with(&env, proposal(1, 3, 0, 1));
+            try base.expect_err(state.parent_payload(&proposal(1, 4, 2, 6)), .{
+                .parent_before_finalized = .{
+                    .proposal_view = .new(4),
+                    .parent_view = .new(2),
+                    .last_finalized = .new(3),
+                },
+            });
+        }
+    }.body);
+}
+
+/// The verifier's state with slow timeouts (commonware's fast-path test configuration).
+fn slow_timeouts(term_length: u32, view_retention: u64) Options {
+    return .{
+        .view_retention = view_retention,
+        .term_length = term_length,
+        .stall_timeout_ms = 4000,
+        .optimistic_views = if (term_length > 1) 2 else 0,
+        .leader_timeout_ms = 10_000,
+        .certification_timeout_ms = 10_000,
+        .timeout_retry_ms = 30_000,
+    };
+}
+
+test "voter state try verify fast-paths an intra-term view skip" {
+    // commonware `try_verify_fast_paths_intra_term_view_skip`.
+    try run(struct {
+        fn body(io: Io) !void {
+            var env: Env = undefined;
+            try env.start(io, slow_timeouts(5, 20));
+            defer env.stop();
+            const state = &env.state;
+            try add_notarized(state, &env.fixture, proposal(1, 2, 0, 1));
+            try testing.expect(state.leader_index(.new(3)) != null);
+            try testing.expect(try state.set_proposal(.new(3), &proposal(1, 3, 1, 2)));
+            const initial = state.next_timeout();
+            try testing.expect(initial.deadline > context.now_ns(io));
+            try testing.expect(state.try_verify() == .wait);
+            try testing.expectEqual(null, try state.construct_nullify(.new(3), .leader_timeout));
+            try testing.expectEqual(initial, state.next_timeout());
+        }
+    }.body);
+}
+
+test "voter state try verify fast-paths a parent before the last finalization" {
+    // commonware `try_verify_fast_paths_parent_before_finalized`.
+    try run(struct {
+        fn body(io: Io) !void {
+            var env: Env = undefined;
+            try env.start(io, slow_timeouts(1, 5));
+            defer env.stop();
+            const state = &env.state;
+            try finalize_with(&env, proposal(1, 3, 0, 1));
+            try testing.expectEqual(4, state.current_view().get());
+            try testing.expect(try state.set_proposal(.new(4), &proposal(1, 4, 2, 6)));
+            try testing.expect(state.next_timeout().deadline > context.now_ns(io));
+            try testing.expect(state.try_verify() != .ready);
+            // The invalid proposal expires the view's timeout at once.
+            try testing.expect(state.next_timeout().deadline <= context.now_ns(io));
+        }
+    }.body);
+}
+
+/// Signer 0 in epoch `epoch` with rotating leaders and a retention of `view_retention`.
+fn signer0(epoch: u64, view_retention: u64) Options {
+    return .{ .signer = 0, .epoch = epoch, .view_retention = view_retention };
+}
+
+test "voter state a replayed local notarize restores the verified leader proposal" {
+    // commonware `replayed_local_notarize_restores_verified_leader_proposal`.
+    try run(struct {
+        fn body(io: Io) !void {
+            var env: Env = undefined;
+            try env.start(io, signer0(2, 5));
+            defer env.stop();
+            const state = &env.state;
+            var candidates: Candidates = .{};
+            defer candidates.deinit();
+            const value = proposal(2, 2, 1, 42);
+            const local_vote = (try Notarize.sign(gpa, &env.fixture.schemes[0], value)).?;
+            const parent = proposal(2, 1, 0, 41);
+            try add_notarized(state, &env.fixture, parent);
+            try testing.expect(try state.certified(.new(1), true) != null);
+            try candidates.take(state);
+            try testing.expectEqual(0, state.leader_index(.new(2)).?.get());
+            try state.replay(&.{ .notarize = local_vote });
+            try testing.expectEqualDeep(value, state.rounds.get(.new(2)).?.proposal().?.*);
+            // Replay restores that we already cast our notarize vote.
+            try testing.expectEqual(null, try state.construct_notarize(.new(2)));
+            try testing.expect(state.try_verify() != .ready);
+            try add_notarized(state, &env.fixture, value);
+            try candidates.take(state);
+            try candidates.expect_ready(2);
+        }
+    }.body);
+}
+
+test "voter state a replayed local notarize restores an optimistic child verification" {
+    // commonware `replayed_local_notarize_restores_optimistic_child_verification`.
+    try run(struct {
+        fn body(io: Io) !void {
+            var options = epoch_nine(5, 10, 2);
+            options.epoch = 12;
+            var probe: Env = undefined;
+            try probe.start(io, options);
+            const leader = probe.state.leader_index(.new(1)).?.get();
+            probe.stop();
+            options.signer = (leader + 1) % 4;
+            var live: Env = undefined;
+            try live.start(io, options);
+            defer live.stop();
+            const parent = proposal(12, 1, 0, 123);
+            try testing.expect(try live.state.set_proposal(.new(1), &parent));
+            try testing.expect(live.state.try_verify() == .ready);
+            try testing.expect(live.state.verified(.new(1)));
+            const local_vote = (try live.state.construct_notarize(.new(1))).?;
+            const child = proposal(12, 2, 1, 124);
+            try testing.expect(try live.state.set_proposal(.new(2), &child));
+            try testing.expect(live.state.try_verify() == .ready);
+            var restarted: Env = undefined;
+            try restarted.start(io, options);
+            defer restarted.stop();
+            try restarted.state.replay(&.{ .notarize = local_vote });
+            try testing.expect(try restarted.state.set_proposal(.new(2), &child));
+            // The replayed vote preserves the optimistic child's verification.
+            try testing.expect(restarted.state.try_verify() == .ready);
+        }
+    }.body);
+}
+
+test "voter state certifies external candidates for leader-controlled views" {
+    // commonware `certify_external_candidates_for_leader_controlled_views`.
+    try run(struct {
+        fn body(io: Io) !void {
+            var env: Env = undefined;
+            try env.start(io, signer0(2, 5));
+            defer env.stop();
+            const state = &env.state;
+            var candidates: Candidates = .{};
+            defer candidates.deinit();
+            const value = proposal(2, 2, 1, 43);
+            try testing.expect(try state.enter_view(.new(2)));
+            try state.set_leader(.new(2), null);
+            try testing.expectEqual(0, state.leader_index(.new(2)).?.get());
+            const added = try state.add_notarization(try build_notarization(&env.fixture, value));
+            try testing.expect(added.added);
+            try testing.expect(added.equivocator == null);
+            try candidates.take(state);
+            try candidates.expect_ready(2);
+            try testing.expectEqualDeep(value, candidates.ready.items[0]);
+        }
+    }.body);
+}
+
+/// Replays our notarize vote for `vote`, then adds and replays the conflicting
+/// `conflicting` notarization; finalize must stay blocked.
+fn replay_conflict(env: *Env, vote: Notarize, conflicting: *const base.Notarization) !void {
+    const state = &env.state;
+    try state.replay(&.{ .notarize = vote });
+    _ = try state.add_notarization(try conflicting.clone(gpa));
+    try state.replay(&.{ .notarization = conflicting.* });
+    try testing.expectEqual(null, try state.construct_finalize(.new(4)));
+}
+
+test "voter state replay restores conflict state" {
+    // commonware `replay_restores_conflict_state`.
+    try run(struct {
+        fn body(io: Io) !void {
+            var env: Env = undefined;
+            try env.start(io, signer0(1, 5));
+            defer env.stop();
+            // commonware signs these in epoch 3 while the state runs epoch 1.
+            const proposal_a = proposal(3, 4, 0, 21);
+            const proposal_b = proposal(3, 4, 0, 22);
+            const local_vote = (try Notarize.sign(gpa, &env.fixture.schemes[0], proposal_a)).?;
+            var conflicting = try notarization_without_signer0(&env.fixture, proposal_b);
+            defer conflicting.deinit(gpa);
+            try replay_conflict(&env, local_vote, &conflicting);
+            var restarted: Env = undefined;
+            try restarted.start(io, signer0(1, 5));
+            defer restarted.stop();
+            try replay_conflict(&restarted, local_vote, &conflicting);
         }
     }.body);
 }

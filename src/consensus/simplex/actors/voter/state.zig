@@ -220,7 +220,7 @@ pub fn State(comptime S: type, comptime E: type, comptime D: type) type {
 
         /// Whether `view` is within the optimistic issuance window: a directly notarized
         /// anchor exists at most `optimistic_views` hops below it (genesis counts).
-        fn in_issuance_window(self: *const Self, view: View) bool {
+        pub fn in_issuance_window(self: *const Self, view: View) bool {
             const floor = self.lookahead.issuance_floor(view) orelse return false;
             if (floor == genesis_view) return true;
             if (view.get() <= floor.get()) return false;
