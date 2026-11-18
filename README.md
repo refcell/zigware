@@ -63,6 +63,20 @@ events as it broadcasts votes, recovers certificates, and prunes old views
 ([video](docs/assets/log-demo.mp4)).
 `etc/scripts/record-demo.sh log` records it again.
 
+<p align="center">
+  <img src="docs/assets/bridge-demo.gif" width="800"
+    alt="Two consensus networks finalize each other's certificates through a shared indexer">
+</p>
+
+[bridge](examples/bridge) runs two independent networks of four validators, each with a
+threshold BLS12-381 key dealt by `bridge-dealer`, plus an indexer they share. Each network
+runs Simplex and proposes either random data or the other network's latest finalization,
+which its validators verify against the other network's public identity before voting. The
+top pane is the indexer storing blocks and finalizations from both networks; the bottom panes
+are one validator from each network, where `block=Bridge(..)` marks a proposal carrying the
+other network's finalization ([video](docs/assets/bridge-demo.mp4)).
+`etc/scripts/record-demo.sh bridge` records it again.
+
 > [!WARNING]
 > zigware is pre-alpha and being ported now. Do not use it in production.
 
