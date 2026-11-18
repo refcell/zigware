@@ -167,6 +167,11 @@ marshal's actors (consensus-marshal) for the actor; until then it ports what is 
   config, max_pending_acks, offset)`, `random(gpa, config, max_pending_acks, std.Random)`,
   `observe(height, targets)` → `?Prune(T)`, `deinit`), `ExecutionStep(D)`, `Disposition`, and
   `FinalizationBoundary(D)` (`disposition`, `completed`).
+- `glue.stateful.actor.Pending(D, B)`: the processor's speculative state over batches `B`
+  (`clone`, `deinit`). `init(gpa, anchor)`, `cache(digest, Entry)` (only blocks at later rounds
+  linked to the branch; takes the batch either way), `get`, `contains`, `speculative_len`,
+  `descendants(digest, round, *Set)`, `boundary(digest, round)` → `FinalizationBoundary`,
+  `retain_branch(anchor, parent, *const B)` → forks pruned, `clear`, `deinit`.
 
 ### Decisions
 - ManagedDb and DatabaseSet are comptime contracts. Mutations take `*Self` and return errors
@@ -225,7 +230,8 @@ marshal's actors (consensus-marshal) for the actor; until then it ports what is 
 - [ ] probe: a DST over marshal's harness and p2p.simulated.
 - [x] actor: `SyncPlan` and `SyncState` with plan.rs's tests.
 - [x] actor: the processor's prune schedule and finalization boundary with their tests.
-- [ ] actor: processor state, syncer plan, core (after marshal); tests (single and
+- [x] actor: the processor's speculative `Pending` state (cache, descendants, retain_branch).
+- [ ] actor: processor flights/replay/verifier, core (after marshal); tests (single and
   multi db apps, floor, properties).
 
 ## Log
@@ -251,6 +257,7 @@ marshal's actors (consensus-marshal) for the actor; until then it ports what is 
 - 2026-11-18: the stateful `any` transfers test; transfers is fully ported.
 - 2026-11-18 (stateful): the probe's discovery state.
 - 2026-11-18 (stateful): the probe actor driver; `consensus.simplex.actors.inbox` exported.
+- 2026-11-18 (stateful): the processor's speculative `Pending` state.
 
 ## dkg (owner: coding lane, thread T-01a1d58d-bff1-75a1-8ccb-4b8dd7bc9755)
 
