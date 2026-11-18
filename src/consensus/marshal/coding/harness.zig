@@ -236,10 +236,10 @@ pub const CodingHarness = struct {
 
 /// A validator's archives: finalizations under the coding scheme over coding commitments.
 /// The shared `ArchivesOf` fixes the shared scheme, so the coding archives are opened here.
-const Archives = shared.ArchivesWith(CodingScheme, TestCommitment, CodingVariant.StoredBlock);
+pub const Archives = shared.ArchivesWith(CodingScheme, TestCommitment, CodingVariant.StoredBlock);
 
 /// The shards engine's types in a validator.
-const ShardTypes = struct {
+pub const ShardTypes = struct {
     pub const Block = CodingB;
     pub const Coding = RS;
     pub const Hasher = Sha256;
