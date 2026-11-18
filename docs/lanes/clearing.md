@@ -126,8 +126,9 @@ qmdb `current` (balances, over the MMB) and `keyless` (payout log, over the MMR)
   receiver, operator, ledger, validator, with a sorted-array `map`), the `Deployment`
   harness, and operator.rs's three tests.
 - [x] Integration tests: validator.rs (all 12 tests).
-- [x] Integration tests: payments.rs (all 22 tests).
-- [ ] Integration tests: ledger, lifecycle, and
+- [x] Integration tests: payments.rs (all 21 tests).
+- [x] Integration tests: ledger.rs (all 13 tests, with the reorg module).
+- [ ] Integration tests: lifecycle, and
   model.rs (needs a small BFS model checker in place of Stateright).
 - [x] Fuzz targets `src/clearing/fuzz/{decode,verify}.zig` (commonware clearing/fuzz), seeded
   in `zig build test` and under `std.testing.fuzz`; the verify target includes BalanceProof.
@@ -162,5 +163,7 @@ qmdb `current` (balances, over the MMB) and `keyless` (payout log, over the MMR)
 - 2026-11-18: the rest of validator.rs (withdrawals, overdraft, gross flows, settling once,
   resuming, the empty close, interrupted apply over 8 fault seeds, durability, re-attesting,
   and the payout log behind or ahead of the balances), on `runtime.storage.faulty`.
-- 2026-11-18: payments.rs, all 22 tests (operator admission, sender and receiver rules, posts
+- 2026-11-18: payments.rs, all 21 tests (operator admission, sender and receiver rules, posts
   resolving requests, replays, limits, restarts).
+- 2026-11-18: ledger.rs, all 13 tests (queues, posting, halts, challenges, claims, custody,
+  payout withdrawals under every posted root, compact ranges, and the reorg case).
