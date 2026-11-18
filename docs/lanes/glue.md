@@ -143,6 +143,11 @@ marshal's actors (consensus-marshal) for the actor; until then it ports what is 
   `judge.judgeable(*const Finalization)`, `get_floor`, `reset`, `deinit`), `Message(S, V)`
   (`request`, `response: Finalization`; codec, `max_encode_size`), `Tag`,
   `max_payload_size(V, S, participants)`. The DKG probe can reuse `Sample` as commonware's does.
+- `glue.stateful.probe.Discovery(S, D, Provider)`: the probe actor's I/O-free state.
+  `init(gpa, provider, minimum_epoch)`, `subscribe(oneshot.Sender(Floor))` → whether to start a
+  round, `request_round()` → committee to solicit (or null), `receive(peer, payload, rng,
+  strategy)` → `Verdict` (`ignore`, `block`, `recorded`), `attach`, `finished`, `retrying`,
+  `selected_floor`, `deinit`. `Floor(S, D)` is the owned finalization a subscriber receives.
 - `glue.stateful.SyncPlan(S, V)` (`actor.SyncPlan`): `init(env, partition_prefix)` (env has
   `gpa`, `storage`), `deinit`, `may_sync`, `completed`, `floor`, `set_floor(*const
   Finalization)` (stores a copy; ignores floors not at a later round), `set_completed(height)`,
@@ -179,6 +184,8 @@ marshal's actors (consensus-marshal) for the actor; until then it ports what is 
   `max_payload_size` returns `error.TooManyOperations` above `u32` where commonware panics.
 - `EngineMessage.deliver` owns copies of the delivery's subscribers and value (the engine
   lends them); the overflow policy drops peer requests and deliveries whose requester left.
+- The probe actor splits into `Discovery` (pure, tested without a network) and a driver that
+  performs its sends and blocks; probe/mod.rs's protocol tests run against `Discovery`.
 - `Pruning` keeps its retention window in a ring allocated at init (commonware grows a
   `VecDeque`); an invalid config or phase returns `error.InvalidPruneConfig` where commonware
   panics.
@@ -203,7 +210,9 @@ marshal's actors (consensus-marshal) for the actor; until then it ports what is 
   `Source` and engine).
 - [x] probe: `Sample`, wire `Message`, `max_payload_size` with limits.rs's widest-encodings
   test and sample selection tests.
-- [ ] probe: the actor (solicit, collect, retry, serve), after marshal's mailbox.
+- [x] probe: `Discovery` with probe/mod.rs's protocol tests (selection, late subscribers,
+  pausing, blocking, epoch filtering).
+- [ ] probe: the actor driver (network, retry deadline, service from marshal) and its DST.
 - [x] actor: `SyncPlan` and `SyncState` with plan.rs's tests.
 - [x] actor: the processor's prune schedule and finalization boundary with their tests.
 - [ ] actor: processor state, syncer plan, core (after marshal); tests (single and
@@ -230,6 +239,7 @@ marshal's actors (consensus-marshal) for the actor; until then it ports what is 
 - 2026-11-16: transfers benches (plan, settle, select) and 13 database tests on qmdb `any`
   and `current`, one through `stateful.db.current`.
 - 2026-11-18: the stateful `any` transfers test; transfers is fully ported.
+- 2026-11-18 (stateful): the probe's discovery state.
 
 ## dkg (owner: coding lane, thread T-01a1d58d-bff1-75a1-8ccb-4b8dd7bc9755)
 
