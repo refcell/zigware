@@ -27,7 +27,8 @@ which every database here is built on.
   model-checked tests (colliding and collision-free translators, with and without the cache).
 - [x] bitmap (`fill_from` floor-walk candidates over the activity bitmap, oracle-checked) and
   metrics (the shared metric set over `runtime.telemetry.metrics`).
-- [ ] store (`store/db.rs`, the unauthenticated keyed store) and the `any` traits.
+- [x] store (`store/db.rs`, the unauthenticated keyed store). The `any` traits stay unported:
+  Zig dispatches on concrete types, so callers use each database directly.
 - [x] keyless: `Db` and its batches over the authenticated journal, with mod.rs's
   core scenarios under MMR and MMB (fixed values).
 - [x] keyless: `KeylessMmrFixedConf`/`KeylessMmbFixedConf` root conformance (matches).
@@ -70,7 +71,10 @@ which every database here is built on.
   chain's diffs, then the committed snapshot), checked on every level of the random chains.
 - [x] fuzz target `qmdb_verify_proof`, plus a positive control (genuine multi-proofs of a real tree
   verify; tampered operations and roots fail).
-- [ ] store (`qmdb/store`) and its `qmdb_store_operations` fuzz target.
+- [x] store (`qmdb/store`): the unauthenticated variable-value KV over `any` unordered operations
+  (MMR family, 64-byte bitmap chunks), with floor policies, bounded init, and db.rs's core tests
+  (exact sizes, floors, and pruning boundaries match commonware's).
+- [ ] store: the `qmdb_store_operations` fuzz target.
 - [ ] fuzz targets: the any batch_root and batching targets.
 - [ ] benches (commonware `qmdb/benches`).
 - [x] immutable (fixed, MMR and MMB): `Db`, chained batches, floor-filtered batch reads,
@@ -269,3 +273,4 @@ which every database here is built on.
 - 2026-11-18: floor oracle (`fuzz_floor.zig`) and the any unordered/ordered operations fuzz targets.
 - 2026-11-18: ordered merkleized-batch neighbor lookups (`get_prev_key`/`get_next_key`).
 - 2026-11-18: `qmdb_verify_proof` fuzz target.
+- 2026-11-18: the store (`qmdb/store`).

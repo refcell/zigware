@@ -64,7 +64,7 @@ pub fn log_config(comptime LogCfg: type, cache_ref: *runtime.buffer.paged.CacheR
 
 /// The codec configuration of a test operation: units stay units, and slices (a field
 /// `range`) are bounded to 10000 items. Operation configurations nest at most one tuple deep.
-fn codec_config(comptime C: type) C {
+pub fn codec_config(comptime C: type) C {
     if (comptime is_slice_cfg(C) or C == void) return leaf_config(C);
     var result: C = undefined;
     inline for (@typeInfo(C).@"struct".field_types, 0..) |field_type, index| {

@@ -26,6 +26,7 @@ pub const metrics = @import("metrics.zig");
 pub const keyless = @import("keyless/mod.zig");
 pub const immutable = @import("immutable/mod.zig");
 pub const any = @import("any/mod.zig");
+pub const store = @import("store/mod.zig");
 pub const sync = @import("sync/mod.zig");
 pub const current = @import("current/mod.zig");
 pub const compact = @import("compact/mod.zig");

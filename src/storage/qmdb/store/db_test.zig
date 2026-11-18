@@ -1,0 +1,751 @@
+//! Tests of the store (qmdb/store/db.rs's tests) over Blake3 digest keys and owned byte
+//! values, with commonware's journal configuration (7 items per section), so sizes, floors, and
+//! pruning boundaries match commonware's.
+
+const std = @import("std");
+const testing = std.testing;
+const codec = @import("codec");
+const cryptography = @import("cryptography");
+const runtime = @import("runtime");
+const translator = @import("../../translator.zig");
+const value = @import("../value.zig");
+const floor_mod = @import("../floor.zig");
+const test_support = @import("../test_support.zig");
+const store = @import("mod.zig");
+
+const gpa = testing.allocator;
+const Digest = cryptography.Blake3.Digest;
+const Bytes = []const u8;
+const Db = store.Db(Digest, value.Variable(Bytes), translator.TwoCap);
+const Write = Db.Write;
+
+/// Commonware's `Blake3::hash(&[&i.to_be_bytes()])`.
+const CodecCfg = @FieldType(Db.Journal.Cfg, "codec_config");
+
+fn key(i: u64) Digest {
+    var be: [8]u8 = undefined;
+    std.mem.writeInt(u64, &be, i, .big);
+    return cryptography.Blake3.hash(&.{&be});
+}
+
+/// Storage and a page cache for opening test stores (commonware's `test_config`).
+const Harness = struct {
+    storage: runtime.buffer.mocks.Storage,
+    cache_ref: runtime.buffer.paged.CacheRef,
+
+    fn init(self: *Harness) !void {
+        self.storage = .init(gpa);
+        errdefer self.storage.deinit();
+        self.cache_ref = try .init(gpa, 77, 9);
+    }
+
+    fn deinit(self: *Harness) void {
+        self.cache_ref.deinit();
+        self.storage.deinit();
+    }
+
+    fn open(self: *Harness, max_size: ?u64) !Db {
+        const cfg: Db.Cfg = .{
+            .log = .{
+                .partition = "journal",
+                .items_per_section = 7,
+                .codec_config = test_support.codec_config(CodecCfg),
+                .cache_ref = &self.cache_ref,
+                .write_buffer = 64 * 1024,
+                .replay_buffer = 64 * 1024,
+            },
+            .translator = .{},
+            .init_cache = 1024,
+        };
+        return Db.init(gpa, self.storage.interface(), cfg, max_size);
+    }
+};
+
+/// Applies `writes` (copied) as one batch with `metadata`; returns the applied range's end.
+fn apply(db: *Db, writes: []const Write, metadata: ?Bytes) !u64 {
+    var changeset = try Db.Changeset.init(gpa, writes);
+    if (metadata) |m| {
+        changeset.metadata = gpa.dupe(u8, m) catch |err| {
+            changeset.deinit();
+            return err;
+        };
+    }
+    try db.apply_batch(&changeset);
+    return db.bounds().end;
+}
+
+fn expect_value(db: *Db, k: Digest, want: ?Bytes) !void {
+    const got = try db.get(&k);
+    defer codec.free(?Bytes, gpa, got);
+    try testing.expectEqual(want == null, got == null);
+    if (want) |w| try testing.expectEqualSlices(u8, w, got.?);
+}
+
+fn expect_metadata(db: *Db, want: ?Bytes) !void {
+    const got = try db.get_metadata();
+    defer codec.free(?Bytes, gpa, got);
+    try testing.expectEqual(want == null, got == null);
+    if (want) |w| try testing.expectEqualSlices(u8, w, got.?);
+}
+
+/// The bitmap marks exactly the snapshot's locations and the last commit.
+fn expect_bitmap_consistent(db: *Db) !void {
+    const span = db.bounds();
+    var active: u64 = 0;
+    var loc = @max(span.start, db.bitmap.pruned_bits());
+    while (loc < span.end) : (loc += 1) {
+        if (!db.bitmap.get_bit(loc)) continue;
+        active += 1;
+        var op = try db.log.read(loc);
+        defer op.deinit(gpa);
+        switch (op) {
+            .update => |u| {
+                const got = try db.get(&u.key);
+                defer codec.free(?Bytes, gpa, got);
+                try testing.expectEqualSlices(u8, u.value, got.?);
+            },
+            .commit => try testing.expectEqual(span.end - 1, loc),
+            .delete => return error.TestUnexpectedResult,
+        }
+    }
+    try testing.expectEqual(@as(u64, db.active_keys) + 1, active);
+    try testing.expectEqual(span.end, db.bitmap.len());
+}
+
+test "store construct empty" {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    var db = try h.open(null);
+    try testing.expectEqual(@as(u64, 1), db.bounds().end);
+    try testing.expectEqual(@as(u64, 0), db.inactivity_floor());
+    try expect_metadata(&db, null);
+    try db.prune(db.inactivity_floor());
+    try testing.expectError(error.PruneBeyondMinRequired, db.prune(1));
+    // An uncommitted batch does not survive a reopen.
+    _ = try apply(&db, &.{.{ .key = key(1), .value = &.{ 1, 2, 3 } }}, null);
+    db.deinit();
+    db = try h.open(null);
+    try testing.expectEqual(@as(u64, 1), db.bounds().end);
+    // An empty batch with metadata makes the store durably non-empty.
+    try testing.expectEqual(@as(u64, 2), try apply(&db, &.{}, &.{ 1, 2, 3 }));
+    try db.commit();
+    try db.prune(db.inactivity_floor());
+    try expect_metadata(&db, &.{ 1, 2, 3 });
+    db.deinit();
+    db = try h.open(null);
+    try expect_metadata(&db, &.{ 1, 2, 3 });
+    // The floor keeps up with repeated empty commits.
+    _ = try apply(&db, &.{.{ .key = key(2), .value = &.{ 1, 2, 3 } }}, null);
+    try db.commit();
+    for (1..100) |_| {
+        _ = try apply(&db, &.{}, null);
+        try db.commit();
+        try testing.expect(db.bounds().end - db.inactivity_floor() <= 3);
+        try expect_metadata(&db, null);
+    }
+    try expect_bitmap_consistent(&db);
+    try db.destroy();
+}
+
+test "store construct basic" {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    var db = try h.open(null);
+    const k = key(0);
+    const v: Bytes = &.{ 2, 3, 4, 5 };
+    try expect_value(&db, k, null);
+    // The update, the floor walk's move of it, and the commit.
+    try testing.expectEqual(@as(u64, 4), try apply(&db, &.{.{ .key = k, .value = v }}, null));
+    try testing.expectEqual(@as(u64, 2), db.inactivity_floor());
+    try expect_value(&db, k, v);
+    db.deinit(); // A crash before commit.
+    db = try h.open(null);
+    try testing.expectEqual(@as(u64, 1), db.bounds().end);
+    try testing.expectEqual(@as(u64, 0), db.inactivity_floor());
+    try expect_metadata(&db, null);
+    const with_metadata = try apply(&db, &.{.{ .key = k, .value = v }}, &.{ 99, 100 });
+    try testing.expectEqual(@as(u64, 4), with_metadata);
+    try db.commit();
+    try expect_metadata(&db, &.{ 99, 100 });
+    db.deinit();
+    db = try h.open(null);
+    try testing.expectEqual(@as(u64, 4), db.bounds().end);
+    try testing.expectEqual(@as(u64, 2), db.inactivity_floor());
+    try expect_value(&db, k, v);
+    const v1: Bytes = &.{ 2, 3, 4, 5, 6 };
+    const v2: Bytes = &.{ 6, 7, 8 };
+    _ = try apply(&db, &.{.{ .key = key(1), .value = v1 }}, null);
+    const end = try apply(&db, &.{.{ .key = key(2), .value = v2 }}, null);
+    try testing.expectEqual(@as(u64, 10), end);
+    try testing.expectEqual(@as(u64, 5), db.inactivity_floor());
+    try expect_metadata(&db, null);
+    try db.commit();
+    try expect_value(&db, k, v);
+    try expect_value(&db, key(1), v1);
+    try expect_value(&db, key(2), v2);
+    _ = try apply(&db, &.{.{ .key = key(1), .value = &.{ 2, 3, 4, 5, 6, 7 } }}, null);
+    try db.commit();
+    try expect_value(&db, key(1), &.{ 2, 3, 4, 5, 6, 7 });
+    try expect_bitmap_consistent(&db);
+    try db.destroy();
+}
+
+test "store log replay" {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    var db = try h.open(null);
+    const k = key(7);
+    for (0..100) |_| _ = try apply(&db, &.{.{ .key = k, .value = &.{ 1, 2, 3, 4, 5 } }}, null);
+    try testing.expectEqual(@as(usize, 1), db.snapshot.get(&k.bytes).count());
+    try db.commit();
+    try db.sync();
+    db.deinit();
+    db = try h.open(null);
+    try db.prune(db.inactivity_floor());
+    try testing.expectEqual(@as(usize, 1), db.snapshot.get(&k.bytes).count());
+    // 1 (init) + 100 * (update, its move, commit).
+    try testing.expectEqual(@as(u64, 301), db.bounds().end);
+    try testing.expectEqual(@as(u64, 299), db.inactivity_floor());
+    const floor = db.inactivity_floor();
+    try testing.expectEqual(floor - floor % 7, db.bounds().start);
+    try expect_bitmap_consistent(&db);
+    try db.destroy();
+}
+
+test "store get many" {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    var db = try h.open(null);
+    defer db.deinit();
+    const k1 = key(1);
+    var k2 = key(2);
+    @memcpy(k2.bytes[0..2], k1.bytes[0..2]); // Collides with `k1` under TwoCap.
+    const k3 = key(3);
+    const k4 = key(4);
+    _ = try apply(&db, &.{
+        .{ .key = k1, .value = &.{1} },
+        .{ .key = k2, .value = &.{2} },
+        .{ .key = k3, .value = &.{3} },
+    }, null);
+    _ = try apply(&db, &.{.{ .key = k3, .value = null }}, null);
+    const keys = [_]Digest{ k2, k4, k1, k3, k2 };
+    var out: [keys.len]?Bytes = undefined;
+    try db.get_many(&keys, &out);
+    defer for (out) |o| codec.free(?Bytes, gpa, o);
+    const want = [_]?Bytes{ &.{2}, null, &.{1}, null, &.{2} };
+    for (out, want) |got, w| {
+        try testing.expectEqual(w == null, got == null);
+        if (w) |x| try testing.expectEqualSlices(u8, x, got.?);
+    }
+    var batch = db.new_batch();
+    defer batch.deinit();
+    try batch.write(k1, null);
+    try batch.write(k4, try gpa.dupe(u8, &.{4}));
+    var batch_out: [3]?Bytes = undefined;
+    try batch.get_many(&.{ k1, k2, k4 }, &db, &batch_out);
+    defer for (batch_out) |o| codec.free(?Bytes, gpa, o);
+    try testing.expect(batch_out[0] == null);
+    try testing.expectEqualSlices(u8, &.{2}, batch_out[1].?);
+    try testing.expectEqualSlices(u8, &.{4}, batch_out[2].?);
+}
+
+test "store delete" {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    var db = try h.open(null);
+    const k = key(11);
+    const v: Bytes = &.{ 1, 2, 3, 4, 5 };
+    _ = try apply(&db, &.{.{ .key = k, .value = v }}, null);
+    try db.commit();
+    try expect_value(&db, k, v);
+    _ = try apply(&db, &.{.{ .key = k, .value = null }}, null);
+    try expect_value(&db, k, null);
+    try db.commit();
+    db.deinit();
+    db = try h.open(null);
+    try expect_value(&db, k, null);
+    _ = try apply(&db, &.{.{ .key = k, .value = v }}, null);
+    try expect_value(&db, k, v);
+    try db.commit();
+    db.deinit();
+    db = try h.open(null);
+    try expect_value(&db, k, v);
+    // Deleting an absent key appends only the walk's move and the commit.
+    const start = db.bounds().end;
+    try testing.expectEqual(@as(u64, 9), start);
+    const end = try apply(&db, &.{.{ .key = key(12), .value = null }}, null);
+    try testing.expectEqual(@as(u64, 11), end);
+    try db.commit();
+    try expect_value(&db, key(12), null);
+    try expect_value(&db, k, v);
+    try expect_bitmap_consistent(&db);
+    try db.destroy();
+}
+
+test "store pruning example" {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    var db = try h.open(null);
+    defer db.deinit();
+    const a = key(21);
+    const b = key(22);
+    _ = try apply(&db, &.{.{ .key = a, .value = &.{1} }}, null);
+    _ = try apply(&db, &.{.{ .key = b, .value = &.{} }}, null);
+    try db.commit();
+    try testing.expectEqual(@as(u64, 7), db.bounds().end);
+    try testing.expectEqual(@as(u64, 3), db.inactivity_floor());
+    try expect_value(&db, a, &.{1});
+    _ = try apply(&db, &.{.{ .key = b, .value = &.{1} }}, null);
+    _ = try apply(&db, &.{.{ .key = a, .value = &.{ 4, 5, 6 } }}, null);
+    try db.commit();
+    try testing.expectEqual(@as(u64, 15), db.bounds().end);
+    try testing.expectEqual(@as(u64, 12), db.inactivity_floor());
+    try expect_value(&db, a, &.{ 4, 5, 6 });
+    try expect_value(&db, b, &.{1});
+}
+
+/// Commonware's value for key `i` in the recovery test: `i % 255` repeated `i % 13 + 7` times.
+fn recovery_value(buffer: []u8, i: u64, bump: u64) Bytes {
+    const len: usize = @intCast(i % 13 + 7 + bump);
+    @memset(buffer[0..len], @intCast((i + bump) % 255));
+    return buffer[0..len];
+}
+
+test "store recovery" {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    var db = try h.open(null);
+    // A batch dropped before apply leaves nothing behind.
+    var dropped = db.new_batch();
+    for (0..1000) |i| try dropped.write(key(i), try gpa.dupe(u8, &.{@intCast(i % 255)}));
+    dropped.deinit();
+    db.deinit();
+    db = try h.open(null);
+    try testing.expectEqual(@as(u64, 1), db.bounds().end);
+    var buffer: [32]u8 = undefined;
+    for (0..1000) |i| {
+        _ = try apply(&db, &.{.{ .key = key(i), .value = recovery_value(&buffer, i, 0) }}, null);
+    }
+    try db.commit();
+    var i: u64 = 0;
+    while (i < 1000) : (i += 3) {
+        _ = try apply(&db, &.{.{ .key = key(i), .value = recovery_value(&buffer, i, 1) }}, null);
+    }
+    try db.commit();
+    try testing.expectEqual(@as(u64, 1000), db.snapshot.items());
+    i = 1;
+    while (i < 1000) : (i += 7) _ = try apply(&db, &.{.{ .key = key(i), .value = null }}, null);
+    try db.commit();
+    const end = db.bounds().end;
+    const floor = db.inactivity_floor();
+    try db.sync();
+    db.deinit();
+    db = try h.open(null);
+    try testing.expectEqual(end, db.bounds().end);
+    try testing.expectEqual(floor, db.inactivity_floor());
+    try db.prune(floor);
+    try testing.expectEqual(floor - floor % 7, db.bounds().start);
+    try testing.expectEqual(@as(u64, 857), db.snapshot.items());
+    for (0..1000) |n| {
+        const bump: u64 = @intFromBool(n % 3 == 0);
+        const want: ?Bytes = if (n % 7 == 1) null else recovery_value(&buffer, n, bump);
+        try expect_value(&db, key(n), want);
+    }
+    try expect_bitmap_consistent(&db);
+    try db.destroy();
+}
+
+test "store bounded initialization selects commits" {
+    for (0..4) |cap_case| {
+        var h: Harness = undefined;
+        try h.init();
+        defer h.deinit();
+        var db = try h.open(null);
+        const a = key(100);
+        const b = key(101);
+        const c = key(102);
+        const first = try apply(&db, &.{
+            .{ .key = a, .value = &.{1} },
+            .{ .key = b, .value = &.{2} },
+        }, &.{10});
+        const latest = try apply(&db, &.{
+            .{ .key = a, .value = &.{3} },
+            .{ .key = b, .value = null },
+            .{ .key = c, .value = &.{4} },
+        }, &.{20});
+        try db.sync();
+        db.deinit();
+        try testing.expect(first + 1 < latest);
+        const cap = switch (cap_case) {
+            0 => first,
+            1 => first + 1,
+            2 => latest,
+            else => std.math.maxInt(u64),
+        };
+        const old = cap_case < 2;
+        db = try h.open(cap);
+        try testing.expectEqual(if (old) first else latest, db.bounds().end);
+        try expect_bitmap_consistent(&db);
+        try expect_metadata(&db, &.{if (old) 10 else 20});
+        try expect_value(&db, a, &.{if (old) 1 else 3});
+        try expect_value(&db, b, if (old) &.{2} else null);
+        try expect_value(&db, c, if (old) null else &.{4});
+        // The selection is durable, and appends continue from it.
+        db.deinit();
+        db = try h.open(null);
+        try testing.expectEqual(if (old) first else latest, db.bounds().end);
+        const appended = try apply(&db, &.{
+            .{ .key = a, .value = &.{5} },
+            .{ .key = c, .value = &.{6} },
+        }, null);
+        try db.commit();
+        db.deinit();
+        db = try h.open(null);
+        try testing.expectEqual(appended, db.bounds().end);
+        try expect_bitmap_consistent(&db);
+        try expect_value(&db, a, &.{5});
+        try expect_value(&db, b, if (old) &.{2} else null);
+        try expect_value(&db, c, &.{6});
+        db.deinit();
+    }
+}
+
+test "store bounded initialization rejects zero and a pruned floor" {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    var db = try h.open(null);
+    const keys = 64;
+    for ([_]u8{ 1, 2 }) |v| {
+        for (0..keys) |i| _ = try apply(&db, &.{.{ .key = key(i), .value = &.{v} }}, null);
+    }
+    try db.sync();
+    try testing.expectError(error.InvalidInitializationBound, h.open(0));
+    const target = db.bounds().end;
+    const prune_loc = db.inactivity_floor() + keys / 2;
+    try testing.expect(prune_loc < target);
+    var v: u8 = 2;
+    while (db.inactivity_floor() < prune_loc) {
+        v += 1;
+        try testing.expect(v <= 60);
+        for (0..keys) |i| _ = try apply(&db, &.{.{ .key = key(i), .value = &.{v} }}, null);
+    }
+    try db.prune(prune_loc);
+    const span = db.bounds();
+    try testing.expect(span.start < target);
+    try db.sync();
+    db.deinit();
+    try testing.expectError(error.HistoricalFloorPruned, h.open(target));
+    db = try h.open(null);
+    defer db.deinit();
+    try testing.expectEqual(span, db.bounds());
+    for (0..keys) |i| try expect_value(&db, key(i), &.{v});
+}
+
+test "store batch reads its writes and applies them" {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    var db = try h.open(null);
+    const k = key(31);
+    const v: Bytes = &.{ 2, 3, 4, 5 };
+    var batch = db.new_batch();
+    const missing = try batch.get(&k, &db);
+    try testing.expect(missing == null);
+    try batch.write(k, try gpa.dupe(u8, v));
+    // A later write of a key replaces the earlier one.
+    try batch.write(k, try gpa.dupe(u8, &.{9}));
+    try batch.write(k, try gpa.dupe(u8, v));
+    batch.with_metadata(try gpa.dupe(u8, &.{ 99, 100 }));
+    try testing.expectEqual(@as(u64, 1), db.bounds().end); // Not applied yet.
+    const got = try batch.get(&k, &db);
+    defer codec.free(?Bytes, gpa, got);
+    try testing.expectEqualSlices(u8, v, got.?);
+    var changeset = try batch.finalize();
+    try testing.expectEqual(@as(usize, 1), changeset.entries.len);
+    try db.apply_batch(&changeset);
+    try testing.expectEqual(@as(u64, 4), db.bounds().end);
+    try db.commit();
+    db.deinit();
+    db = try h.open(null);
+    try testing.expectEqual(@as(u64, 4), db.bounds().end);
+    try testing.expectEqual(@as(u64, 2), db.inactivity_floor());
+    try expect_value(&db, k, v);
+    try expect_metadata(&db, &.{ 99, 100 });
+    try db.destroy();
+}
+
+/// A policy that decides each update with a fixed action and records the locations it saw.
+const Script = struct {
+    entries: usize,
+    skips: u64,
+    action: enum { keep, stop, replace, evict },
+    visited: [16]u64 = undefined,
+    count: usize = 0,
+
+    pub fn evicts(self: *const Script) bool {
+        return self.action == .evict;
+    }
+
+    pub fn limits(self: *const Script, _: usize) floor_mod.Limits {
+        return .{ .entries = self.entries, .skips = self.skips };
+    }
+
+    pub fn decide(
+        self: *Script,
+        comptime K: type,
+        comptime V: type,
+        entry: floor_mod.Entry(K, V),
+    ) floor_mod.Decision(V) {
+        self.visited[self.count] = entry.location;
+        self.count += 1;
+        return switch (self.action) {
+            .keep => entry.keep(),
+            .stop => entry.stop(),
+            .replace => entry.replace(gpa.dupe(u8, &.{0xee}) catch @panic("test allocation")),
+            .evict => evict: {
+                const decision, const evicted = entry.evict();
+                codec.free(V, gpa, evicted); // The policy owns the evicted value.
+                break :evict decision;
+            },
+        };
+    }
+};
+
+fn apply_with(db: *Db, writes: []const Write, policy: anytype) !u64 {
+    var changeset = try Db.Changeset.init(gpa, writes);
+    try db.apply_batch_with(&changeset, policy);
+    return db.bounds().end;
+}
+
+/// The seeded keys' values: key `i` holds the byte `i`.
+const seed_values = [4][1]u8{ .{0}, .{1}, .{2}, .{3} };
+
+/// Four keys, in key order at locations 1..5, under a held floor.
+fn seed_four(db: *Db) ![4]Digest {
+    var keys = [_]Digest{ key(40), key(41), key(42), key(43) };
+    std.mem.sort(Digest, &keys, {}, struct {
+        fn less(_: void, x: Digest, y: Digest) bool {
+            return std.mem.order(u8, &x.bytes, &y.bytes) == .lt;
+        }
+    }.less);
+    var hold: floor_mod.Hold = .{};
+    var writes: [4]Write = undefined;
+    for (&writes, keys, &seed_values) |*w, k, *v| w.* = .{ .key = k, .value = v };
+    try testing.expectEqual(@as(u64, 6), try apply_with(db, &writes, &hold));
+    try testing.expectEqual(@as(u64, 0), db.inactivity_floor());
+    return keys;
+}
+
+test "store hold policy keeps the floor until the store empties" {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    var db = try h.open(null);
+    defer db.deinit();
+    const keys = try seed_four(&db);
+    var hold: floor_mod.Hold = .{};
+    const created = key(44);
+    _ = try apply_with(&db, &.{
+        .{ .key = keys[0], .value = &.{200} },
+        .{ .key = keys[1], .value = null },
+        .{ .key = created, .value = &.{104} },
+    }, &hold);
+    try testing.expectEqual(@as(u64, 0), db.inactivity_floor());
+    try expect_value(&db, keys[0], &.{200});
+    try expect_value(&db, keys[1], null);
+    try expect_value(&db, keys[2], &.{2});
+    try expect_value(&db, created, &.{104});
+    try expect_bitmap_consistent(&db);
+    // Deleting every key moves the floor to the new commit.
+    _ = try apply_with(&db, &.{
+        .{ .key = keys[0], .value = null },
+        .{ .key = keys[2], .value = null },
+        .{ .key = keys[3], .value = null },
+        .{ .key = created, .value = null },
+    }, &hold);
+    try testing.expect(db.is_empty());
+    try testing.expectEqual(db.bounds().end - 1, db.inactivity_floor());
+    try expect_bitmap_consistent(&db);
+}
+
+test "store stop policy leaves the floor at the stopped update" {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    var db = try h.open(null);
+    defer db.deinit();
+    const keys = try seed_four(&db);
+    const unlimited = std.math.maxInt(usize);
+    var stop: Script = .{ .entries = unlimited, .skips = std.math.maxInt(u64), .action = .stop };
+    // Only the commit is appended; the walk passes the initial commit and stops at 1.
+    try testing.expectEqual(@as(u64, 7), try apply_with(&db, &.{}, &stop));
+    try testing.expectEqualSlices(u64, &.{1}, stop.visited[0..stop.count]);
+    try testing.expectEqual(@as(u64, 1), db.inactivity_floor());
+    // The next batch decides the stopped update without spending a skip.
+    var keep: Script = .{ .entries = 1, .skips = 0, .action = .keep };
+    _ = try apply_with(&db, &.{}, &keep);
+    try testing.expectEqualSlices(u64, &.{1}, keep.visited[0..keep.count]);
+    try testing.expectEqual(@as(u64, 2), db.inactivity_floor());
+    for (keys, &seed_values) |k, *v| try expect_value(&db, k, v);
+    try expect_bitmap_consistent(&db);
+}
+
+test "store replace and evict policies rewrite and delete reached updates" {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    var db = try h.open(null);
+    const keys = try seed_four(&db);
+    var replace: Script = .{ .entries = 2, .skips = std.math.maxInt(u64), .action = .replace };
+    _ = try apply_with(&db, &.{}, &replace);
+    try testing.expectEqualSlices(u64, &.{ 1, 2 }, replace.visited[0..replace.count]);
+    try expect_value(&db, keys[0], &.{0xee});
+    try expect_value(&db, keys[1], &.{0xee});
+    try expect_value(&db, keys[2], &.{2});
+    var evict: Script = .{ .entries = 2, .skips = std.math.maxInt(u64), .action = .evict };
+    _ = try apply_with(&db, &.{}, &evict);
+    try testing.expectEqualSlices(u64, &.{ 3, 4 }, evict.visited[0..evict.count]);
+    try expect_value(&db, keys[2], null);
+    try expect_value(&db, keys[3], null);
+    try testing.expectEqual(@as(usize, 2), db.active_keys);
+    try expect_bitmap_consistent(&db);
+    // The decisions replay on reopen.
+    try db.commit();
+    db.deinit();
+    db = try h.open(null);
+    try expect_value(&db, keys[0], &.{0xee});
+    try expect_value(&db, keys[3], null);
+    try expect_bitmap_consistent(&db);
+    try db.destroy();
+}
+
+/// A seed index and a new value byte, or null to delete.
+const Pair = struct { usize, ?u8 };
+
+/// `n` keys in key order, each holding its index as one byte.
+fn seed_keys(comptime n: usize) [n]Digest {
+    var keys: [n]Digest = undefined;
+    for (&keys, 0..) |*k, i| k.* = key(1000 + i);
+    std.mem.sort(Digest, &keys, {}, digest_less);
+    return keys;
+}
+
+fn digest_less(_: void, x: Digest, y: Digest) bool {
+    return std.mem.order(u8, &x.bytes, &y.bytes) == .lt;
+}
+
+const byte_values = blk: {
+    var values: [256][1]u8 = undefined;
+    for (&values, 0..) |*v, i| v.* = .{i};
+    break :blk values;
+};
+
+/// Commonware's `test_store_proportional_entries` case: seeds `n` keys (under a held or
+/// proportional floor), writes `writes` (a seed index and a new value byte, or null to delete),
+/// and expects the batch's range, floor, and the seed indices its walk moves, in order.
+fn check_proportional(
+    comptime n: usize,
+    held: bool,
+    writes: []const Pair,
+    range: [2]u64,
+    floor: u64,
+    moved: []const usize,
+) !void {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    var db = try h.open(null);
+    defer db.deinit();
+    const keys = seed_keys(n);
+    var seed: [n]Write = undefined;
+    for (&seed, keys, 0..) |*w, k, i| w.* = .{ .key = k, .value = &byte_values[i] };
+    if (held) {
+        var hold: floor_mod.Hold = .{};
+        _ = try apply_with(&db, &seed, &hold);
+    } else {
+        _ = try apply(&db, &seed, null);
+        // The previous commit's entry moves the first update to 21; the commit lies at 22.
+        try testing.expectEqual(@as(u64, 2), db.inactivity_floor());
+        try testing.expectEqual(@as(u64, 23), db.bounds().end);
+    }
+    var batch: [n]Write = undefined;
+    for (writes, 0..) |w, i| {
+        const v: ?Bytes = if (w[1]) |b| &byte_values[b] else null;
+        batch[i] = .{ .key = keys[w[0]], .value = v };
+    }
+    const start = db.bounds().end;
+    try testing.expectEqual(range[1], try apply(&db, batch[0..writes.len], null));
+    try testing.expectEqual(range[0], start);
+    try testing.expectEqual(floor, db.inactivity_floor());
+    // The writes in key order, the updates the walk moved with their latest values, the commit.
+    var loc = start;
+    for (batch[0..writes.len]) |w| {
+        var op = try db.log.read(loc);
+        defer op.deinit(gpa);
+        if (w.value) |v| {
+            try testing.expect(op == .update and op.update.key.eql(w.key));
+            try testing.expectEqualSlices(u8, v, op.update.value);
+        } else {
+            try testing.expect(op == .delete and op.delete.eql(w.key));
+        }
+        loc += 1;
+    }
+    for (moved) |i| {
+        var op = try db.log.read(loc);
+        defer op.deinit(gpa);
+        try testing.expect(op == .update and op.update.key.eql(keys[i]));
+        loc += 1;
+    }
+    var commit = try db.log.read(loc);
+    defer commit.deinit(gpa);
+    try testing.expectEqual(@as(?u64, floor), commit.inactivity_floor());
+    try testing.expectEqual(range[1], loc + 1);
+    try expect_bitmap_consistent(&db);
+}
+
+test "store proportional entries" {
+    // The deletes lie at 23..28; their 2 * 5 entries and the previous commit's move the updates
+    // at 2..13 to 28..39, so the commit at 39 records the floor 13.
+    var moved: [11]usize = undefined;
+    for (&moved, 1..) |*m, i| m.* = i;
+    const first_and_last_four = [_]Pair{
+        .{ 0, null }, .{ 16, null }, .{ 17, null }, .{ 18, null }, .{ 19, null },
+    };
+    try check_proportional(20, false, &first_and_last_four, .{ 23, 40 }, 13, &moved);
+    // The 19 deletes lie at 23..42; the walk moves the survivor to 42 and passes every delete.
+    var all_but_first: [19]Pair = undefined;
+    for (&all_but_first, 1..) |*w, i| w.* = .{ i, null };
+    try check_proportional(20, false, &all_but_first, .{ 23, 44 }, 42, &.{0});
+    // Over six held updates, two updates and a delete make four operations inactive, so with the
+    // previous commit the walk moves five updates: three seeds and the two written updates.
+    const update_delete_update = [_]Pair{ .{ 0, 200 }, .{ 1, null }, .{ 2, 202 } };
+    try check_proportional(6, true, &update_delete_update, .{ 8, 17 }, 11, &.{ 3, 4, 5, 0, 2 });
+    // One update supersedes one operation, so with the previous commit the walk moves exactly
+    // the two updates at the floor (seeds 1 and 2 at 2 and 3) and stops at 4.
+    try check_proportional(20, false, &.{.{ 5, 99 }}, .{ 23, 27 }, 4, &.{ 1, 2 });
+}
+
+test "store walk with entries left passes the inactive tail" {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    var db = try h.open(null);
+    defer db.deinit();
+    var hold: floor_mod.Hold = .{};
+    _ = try apply_with(&db, &.{.{ .key = key(50), .value = &.{1} }}, &hold);
+    // The update at 1 moves to 3; the remaining entry passes the inactive tail to 3.
+    var keep: Script = .{ .entries = 2, .skips = std.math.maxInt(u64), .action = .keep };
+    try testing.expectEqual(@as(u64, 5), try apply_with(&db, &.{}, &keep));
+    try testing.expectEqualSlices(u64, &.{1}, keep.visited[0..keep.count]);
+    try testing.expectEqual(@as(u64, 3), db.inactivity_floor());
+    try expect_value(&db, key(50), &.{1});
+    try expect_bitmap_consistent(&db);
+}
