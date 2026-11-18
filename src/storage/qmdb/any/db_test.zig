@@ -608,7 +608,11 @@ fn check_staged_ancestors(comptime Db: type, shape: u8) !void {
 
 test "any staged reads through ancestors survive every apply order" {
     inline for (families) |F| {
-        for ([_]u8{ 0, 1, 2 }) |shape| try check_staged_ancestors(support.UnorderedFixed(F), shape);
+        for ([_]u8{ 0, 1, 2 }) |shape| {
+            try check_staged_ancestors(support.UnorderedFixed(F), shape);
+            // Ordered staging resolves the same way; its merkleize also rewrites links.
+            try check_staged_ancestors(support.OrderedFixed(F), shape);
+        }
     }
 }
 
