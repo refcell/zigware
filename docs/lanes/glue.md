@@ -69,7 +69,7 @@ a test harness), `transfers` (4.4k with tests and benches), `stateful` (about 33
 - [x] transfers: the nonced-account (effect) tests.
 - [x] transfers: the remaining database-free tests (edge cases, seeded key orders, bucketing,
   random batches against their flat entries, `u256` amounts).
-- [ ] transfers (owner: thread T-01a1d58d-7682-700c-a399-735d897bbd46): see the transfers
+- [x] transfers (owner: thread T-01a1d58d-7682-700c-a399-735d897bbd46): see the transfers
   section below.
 - [ ] stateful: see the stateful section below (curve25519/utils thread).
 - [ ] dkg (coding thread).
@@ -92,8 +92,8 @@ Owns the benches and database-backed tests of `src/glue/transfers/` (clearing po
 - [x] `stateful_current_batches_select_and_execute_signed_candidates` on `stateful.db.current`
   (stage, expand, staged merkleize), with `select_merkleizes_the_accepted_signed_candidates`
   on `NoncedCurrent` (ordered fixed `current`) as in commonware.
-- [ ] `stateful_any_batches_select_and_execute_as_qmdb`, once `stateful.db.Any` stages (the
-  stateful lane is adding it).
+- [x] `stateful_any_batches_select_and_execute_as_qmdb` on `stateful.db.any` staging. Every
+  commonware transfers test now has a counterpart.
 
 ## stateful (owner: thread T-01a1d57b-0146-77aa-87b0-e622089ce218)
 
@@ -229,6 +229,7 @@ marshal's actors (consensus-marshal) for the actor; until then it ports what is 
 - 2026-11-18 (stateful): staged `stage`/`expand`/`merkleize` on the `any` adapter.
 - 2026-11-16: transfers benches (plan, settle, select) and 13 database tests on qmdb `any`
   and `current`, one through `stateful.db.current`.
+- 2026-11-18: the stateful `any` transfers test; transfers is fully ported.
 
 ## dkg (owner: coding lane, thread T-01a1d58d-bff1-75a1-8ccb-4b8dd7bc9755)
 

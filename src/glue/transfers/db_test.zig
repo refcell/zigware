@@ -664,7 +664,11 @@ fn stateful_select_matches_execute(
     keys: u64,
 ) !void {
     const A = D.Value;
-    const Wrapped = stateful_db.current.Current(D).Shared;
+    // A `current` database (it declares its `Any`) gets the current wrapper.
+    const Wrapped = if (@hasDecl(D, "Any"))
+        stateful_db.current.Current(D).Shared
+    else
+        stateful_db.any.Any(D, Sha256).Shared;
     var harness: Harness = undefined;
     try harness.init();
     defer harness.deinit();
@@ -719,6 +723,36 @@ fn stateful_select_matches_execute(
     var verified_accounts = try shared_accounts(A, verifier, keys);
     defer verified_accounts.deinit();
     try verified_accounts.expect_equal(try want.ledger());
+}
+
+/// 200 payments among keys `0..count` (commonware's `candidates` closure).
+fn payment_candidates(rng: *rng_mod.TestRng, out: []Payment, count: u64) void {
+    for (out) |*candidate| {
+        const from = rng_mod.range_less_than(rng, u64, 0, count);
+        const to = rng_mod.range_less_than(rng, u64, 0, count);
+        candidate.* = pay(from, to, rng_mod.range_less_than(rng, u64, 0, 10));
+    }
+}
+
+test "transfers: stateful any batches select and execute as qmdb" {
+    // Each key is minted a small balance, so some candidates do not fit. The last round also
+    // pays from ten unminted keys that no earlier round touches.
+    var rng = rng_mod.TestRng.init(37);
+    const keys = 50;
+    var items: [keys]Multi.Item = undefined;
+    var mint: [keys]Multi = undefined;
+    for (&items, &mint, 0..) |*item, *transfer, n| {
+        item.* = mint_item(n, rng_mod.range_less_than(&rng, u64, 1, 30));
+        transfer.* = .{ .items = item[0..1] };
+    }
+    var first: [200]Payment = undefined;
+    payment_candidates(&rng, &first, keys);
+    var last: [200]Payment = undefined;
+    payment_candidates(&rng, &last, keys + 10);
+    const setup: []const Multi = &mint;
+    const count = keys + 10;
+    const Db = AnyUnordered(Balance);
+    try stateful_select_matches_execute(Db, setup, Payment, &first, &last, count);
 }
 
 /// 200 signed candidates among keys `0..count` (commonware's `candidates` closure).
