@@ -32,6 +32,8 @@ test {
     _ = @import("validation_test.zig");
     _ = @import("variant_test.zig");
     _ = @import("marshaled.zig");
+    _ = @import("harness.zig");
+    _ = @import("mod_test.zig");
     _ = @import("fuzz.zig");
     _ = @import("test_block.zig");
     _ = @import("shards/root.zig");

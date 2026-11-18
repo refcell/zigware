@@ -157,8 +157,12 @@ that harness. It builds on `coding` (ReedSolomon), `consensus.types.coding.Commi
 - [x] marshal coding fuzz: commonware's consensus/fuzz has no coding target, so
   `coding/fuzz.zig` fuzzes the decoders (`Coding.decode_block`, `StoredCodedBlock`, `Shard`)
   on mutated encodings (minifuzz and coverage-guided).
-- [ ] marshal coding: `coding/harness.zig` and the `coding/mod.rs` tests, once the shared
-  harness lands.
+- [ ] marshal coding: `coding/harness.zig` and the `coding/mod.rs` tests (`mod_test.zig`).
+  Done: `CodingB`, `CodingCtx`, `genesis_commitment`, `make_coding_block`, and
+  `CodingHarness`'s blocks (`TestCommitment` is spelled over the digests, since `CodingB`'s
+  context refers to it), with `mailbox_provides_application_blocks`. Next: the validator
+  setup (shards engine in place of broadcast), waiting on `mocks/harness.zig` archives and
+  certificates over a non-D commitment, then the scenario tests.
 
 ## Log
 - 2026-11-13: broadcast lib.rs and buffered (engine, mailbox, overflow policy, metrics,
@@ -185,3 +189,4 @@ that harness. It builds on `coding` (ReedSolomon), `consensus.types.coding.Commi
 
 - 2026-11-16: Coding's `subscribe_parent` (BlockProvider for core's mailbox).
 - 2026-11-16: marshal coding `Marshaled` with 8 tests.
+- 2026-11-18: coding harness blocks and the first mod.rs test.
