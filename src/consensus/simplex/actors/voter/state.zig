@@ -971,7 +971,7 @@ pub fn State(comptime S: type, comptime E: type, comptime D: type) type {
         }
 
         /// The payload of `view`'s explicitly certified (or finalized) proposal.
-        fn explicit_ancestry_payload(self: *const Self, view: View) ?D {
+        pub fn explicit_ancestry_payload(self: *const Self, view: View) ?D {
             if (view == genesis_view) return self.genesis_payload();
             const round = self.round_at(view) orelse return null;
             return round.certified_payload();
