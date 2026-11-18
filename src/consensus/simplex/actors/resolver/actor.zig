@@ -466,12 +466,15 @@ pub fn Actor(comptime P: type) type {
         ) !void {
             defer self.gpa.free(deliver.data);
             defer self.gpa.free(deliver.asks);
+            defer if (deliver.span) |requested| self.gpa.destroy(requested);
             var response = deliver.response;
             const view = deliver.view;
-            var span = self.tracer.span("simplex.resolver.deliver", .{
-                .epoch = self.epoch.get(),
-                .view = view.get(),
-            });
+            // Processing runs under the fetch's span even once the engine released it.
+            const fields = .{ .epoch = self.epoch.get(), .view = view.get() };
+            var span = if (deliver.span) |requested|
+                requested.child("simplex.resolver.deliver", fields)
+            else
+                self.tracer.span("simplex.resolver.deliver", fields);
             const outer = self.span;
             self.span = &span;
             defer self.span = outer;

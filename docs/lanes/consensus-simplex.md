@@ -252,8 +252,12 @@ resolver; those lanes are running, so do the types first and the actors as they 
   self-targeted twin, `retry_delay_is_independent_of_request_timeout` (needs the resolver
   engine's `requests_sent_total`), `member_without_share_does_not_fetch_from_itself`,
   `untargeted_parent_fetch_uses_available_holder`, `served_requests_hold_channel_capacity`,
-  `unresolved_delivery_does_not_block_nullification_fetch`), and `pr_5097_regression`
-  (needs span parents in the tracer). The runtime lane left these on 2026-11-18 for marshal.
+  `unresolved_delivery_does_not_block_nullification_fetch`). The runtime lane left these
+  on 2026-11-18 for marshal. `pr_5097_regression` is ported: `HandlerMessage.deliver`
+  carries an owned root copy of the fetch's span (`span: ?*Span`), and processing runs
+  under `simplex.resolver.deliver` as its child. The p2p resolver's `Delivery` and fetches
+  carry no spans yet (commonware pairs each subscriber with its fetch span), so the test
+  builds the message directly and engine deliveries have no fetch parent.
 - [ ] simplex mod.rs tests (ed25519, round robin). Done: all_online (Debug runs 50 views
   where commonware runs 100), partition, slow_and_lossy_links, determinism, the Byzantine
   conflicter, nuller, impersonator, reconfigurer, invalid (2 seeds each, 20 or 50 views;
@@ -372,3 +376,4 @@ resolver; those lanes are running, so do the types first and the actors as they 
   twins handoff counts early votes. Histograms now hold up to 40 buckets (`LATENCY` has 36).
 - 2026-11-18: simplex view spans (voter roots, batcher adoption) with propose, verify,
   certify, batcher process/verify_certificate, and resolver process/deliver/validate spans.
+- 2026-11-18: pr_5097_regression: resolver deliveries run under their fetch's span.

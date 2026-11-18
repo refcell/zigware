@@ -293,6 +293,17 @@ const Env = struct {
 
     /// Delivers `data` (taken) as a peer's response for `view`.
     fn deliver_bytes(self: *Env, view: u64, data: []u8, asks: []const Ask) !?resolver.Outcome {
+        return self.deliver_spanned(view, data, asks, null);
+    }
+
+    /// Delivers `data` (taken) for `view` from the fetch whose span is `span` (taken).
+    fn deliver_spanned(
+        self: *Env,
+        view: u64,
+        data: []u8,
+        asks: []const Ask,
+        span: ?*Span,
+    ) !?resolver.Outcome {
         errdefer gpa.free(data);
         const pair = try oneshot.channel(resolver.Outcome, gpa, testing.io);
         var receiver = pair.receiver;
@@ -304,6 +315,7 @@ const Env = struct {
             .data = data,
             .asks = owned_asks,
             .response = pair.sender,
+            .span = span,
         } };
         try self.actor.handle_resolver(message, &self.voter, &self.recorder);
         return receiver.try_recv() catch |err| switch (err) {
@@ -855,4 +867,41 @@ test "resolver actor validates a delivery inside its deliver span" {
         }
     };
     try collector.get_all().expect_event({}, spans.nested);
+}
+
+const Span = @import("runtime").telemetry.traces.Span;
+
+// commonware `pr_5097_regression`: the resolver engine can release its handles to a fetch
+// span after the actor checked the delivery is still wanted; the delivery then holds the
+// only handle, and processing must still run under that span.
+test "resolver actor processes a delivery under its fetch span (pr_5097_regression)" {
+    const traces = @import("runtime").telemetry.traces;
+    var collector = traces.Collector.init(gpa, .{});
+    defer collector.deinit();
+    var subscriber = collector.subscriber();
+    subscriber.level = .debug;
+    var env: Env = undefined;
+    try env.start();
+    defer env.stop();
+    env.actor.tracer = .init(subscriber, "commonware_consensus::simplex::actors::resolver");
+    const fetch = try gpa.create(Span);
+    {
+        // The fetch's tracer goes out of scope with its request; the span outlives it.
+        const tracer: traces.Tracer = .init(subscriber, "test");
+        fetch.* = tracer.span("test.fetch", .{});
+    }
+    const data = try encoded(.{ .notarization = try env.notarization(3) });
+    _ = try env.deliver_spanned(3, data, &.{.ancestry(.notarization)}, fetch);
+    const parented = struct {
+        fn check(_: void, event: traces.collector.RecordedEvent) bool {
+            for (0..event.spans.len -| 1) |index| {
+                const inner = event.spans[index].content;
+                const outer = event.spans[index + 1].content;
+                if (std.mem.eql(u8, inner, "simplex.resolver.deliver") and
+                    std.mem.eql(u8, outer, "test.fetch")) return true;
+            }
+            return false;
+        }
+    };
+    try collector.get_all().expect_event({}, parented.check);
 }

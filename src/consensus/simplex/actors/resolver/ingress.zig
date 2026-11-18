@@ -19,6 +19,7 @@ const ask = @import("../ask.zig");
 const View = consensus_types.View;
 const oneshot = utils.channel.oneshot;
 const Produced = resolver.p2p.Produced;
+const Span = @import("runtime").telemetry.traces.Span;
 
 pub fn Message(comptime S: type, comptime D: type) type {
     return union(enum) {
@@ -245,6 +246,10 @@ pub const HandlerMessage = union(enum) {
         data: []u8,
         asks: []ask.Ask,
         response: oneshot.Sender(resolver.Outcome),
+        /// The span of the fetch that asked for `view` (commonware's first subscriber's
+        /// span), owned (allocated with `gpa`) and a root, so it outlives the fetch. The p2p
+        /// resolver's `Delivery` carries no spans yet, so deliveries from it have none.
+        span: ?*Span = null,
     },
     /// A peer asks for the certificate this node serves for `view`.
     produce: struct { view: View, response: oneshot.Sender(Produced) },
@@ -266,6 +271,7 @@ pub const HandlerMessage = union(enum) {
                 response.deinit();
                 deliver.gpa.free(deliver.data);
                 deliver.gpa.free(deliver.asks);
+                if (deliver.span) |span| deliver.gpa.destroy(span);
             },
             .produce => |produce| {
                 var response = produce.response;
