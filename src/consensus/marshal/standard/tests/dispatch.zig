@@ -12,6 +12,8 @@ const harness = @import("../../mocks/harness.zig");
 const mocks_block = @import("../../mocks/block.zig");
 const mocks_store = @import("../../mocks/store.zig");
 const common = @import("common.zig");
+const inline_mod = @import("../inline.zig");
+const deferred_mod = @import("../deferred.zig");
 const simplex = @import("../../../simplex/root.zig");
 const gates_api = @import("../../application/gates.zig");
 const relay_api = @import("../../application/relay.zig");
@@ -40,19 +42,24 @@ const Env = struct {
     started: Started,
 
     fn init(self: *Env, ctx: Ctx, comptime label: []const u8) !void {
+        try self.init_at(ctx, label, 0);
+    }
+
+    /// Like `init`, as validator `index`.
+    fn init_at(self: *Env, ctx: Ctx, comptime label: []const u8, index: usize) !void {
         var rng = utils.rng.test_rng();
         self.fixture = try harness.fixture(gpa, &rng);
         errdefer self.fixture.deinit(gpa);
         var name: [128]u8 = undefined;
-        const me = self.fixture.participants[0];
+        const me = self.fixture.participants[index];
         const prefix = try std.fmt.bufPrint(&name, label ++ "-{f}", .{me});
         self.started = try common.start_standard_actor(
             harness.Provider,
             App,
             common.RecordingBuffer,
-            ctx.child("validator").with_attribute("index", 0),
+            ctx.child("validator").with_attribute("index", index),
             prefix,
-            .init(&self.fixture.schemes[0]),
+            .init(&self.fixture.schemes[index]),
             try App.manual_ack(gpa, ctx.io()),
             try common.RecordingBuffer.init(gpa, ctx.io()),
             .{ .genesis = try H.genesis_block(gpa, harness.num_validators) },
@@ -904,7 +911,6 @@ fn check_invariant(ctx: Ctx, application: App) !void {
 
 /// Submits `invariant_blocks` verified blocks and their finalizations to `validator`.
 fn submit_chain(validator: *Validator, fixture: *const harness.Fixture) !void {
-    const epocher = types.FixedEpocher.new(utils.NonZero(u64).init(harness.blocks_per_epoch).?);
     var parent = cryptography.Sha256.hash(&.{""});
     var parent_commitment = H.genesis_parent_commitment(harness.num_validators);
     for (1..invariant_blocks + 1) |i| {
@@ -920,7 +926,7 @@ fn submit_chain(validator: *Validator, fixture: *const harness.Fixture) !void {
         const commitment = H.commitment(&block);
         parent = H.digest(&block);
         parent_commitment = commitment;
-        const epoch = epocher.containing(H.height(&block)).?.epoch;
+        const epoch = epocher().containing(H.height(&block)).?.epoch;
         const round: Round = .new(epoch, .new(i));
         try H.verify(validator, round, &block);
         const proposal = harness.Proposal.init(round, .new(i -| 1), commitment);
@@ -974,4 +980,134 @@ test "standard update block processed height invariant" {
     var runner = try runtime.deterministic.Runner.init(gpa, config);
     defer runner.deinit();
     try try runner.start_context(processed_invariant_body, .{});
+}
+
+const Marshal = Started.A.Mailbox;
+const Stream = @import("../../ancestry.zig").AncestorStream(Marshal);
+const Mock = @import("../../mocks/verifying.zig").MockVerifyingApp(B, Ctx, harness.Ctx, Stream);
+const InlineWrapper = inline_mod.Inline(Ctx, harness.S, Mock, B, types.FixedEpocher);
+const DeferredWrapper = deferred_mod.Deferred(Ctx, harness.S, Mock, B, types.FixedEpocher);
+const boundary_height = harness.blocks_per_epoch - 1;
+
+/// Verifies the chain from genesis to the epoch's last block, each led by `leader`, and
+/// returns that boundary block.
+fn verify_to_boundary(env: *Env, leader: harness.K) !B {
+    var genesis = try H.genesis_block(gpa, harness.num_validators);
+    defer genesis.deinit();
+    var boundary = genesis.inner().*;
+    for (1..boundary_height + 1) |height| {
+        const parent = boundary.digest();
+        const context: harness.Ctx = .{
+            .round = round_at(height),
+            .leader = leader,
+            .parent = .{ .new(height - 1), parent },
+        };
+        boundary = try B.init(gpa, context, parent, .new(height), height * 100);
+        try testing.expect(try env.started.mailbox.verified(round_at(height), try ready(boundary)));
+    }
+    return boundary;
+}
+
+/// Reports the quorum notarization of `digest` at `view` over `parent_view`.
+fn notarize(env: *Env, view: u64, parent_view: u64, digest: common.D) !void {
+    const proposal = harness.Proposal.init(round_at(view), .new(parent_view), digest);
+    var notarization = try harness.make_notarization(gpa, &env.fixture, proposal, harness.quorum);
+    defer notarization.deinit(gpa);
+    _ = env.started.mailbox.report(.{ .notarization = notarization });
+}
+
+/// Certifies the boundary block, then verifies its re-proposal by the outgoing leader.
+fn certify_boundary(env: *Env, wrapper: anytype, io: std.Io, outgoing: harness.K) !common.D {
+    const boundary = try verify_to_boundary(env, outgoing);
+    const digest = boundary.digest();
+    try notarize(env, boundary_height, boundary_height - 1, digest);
+    // The boundary must certify.
+    try testing.expectEqual(
+        @as(?bool, true),
+        try wrapper.certify(io, round_at(boundary_height), digest),
+    );
+    // The boundary is not finalized.
+    try testing.expect(
+        try env.started.mailbox.get_info(.{ .height = .new(boundary_height) }) == null,
+    );
+    const outgoing_context: harness.Ctx = .{
+        .round = round_at(boundary_height + 1),
+        .leader = outgoing,
+        .parent = .{ .new(boundary_height), digest },
+    };
+    // The outgoing boundary re-proposal must verify.
+    try testing.expectEqual(@as(?bool, true), try wrapper.verify(io, outgoing_context, digest));
+    return digest;
+}
+
+/// A boundary payload relayed before parent replacement is not sent again at lock-in.
+fn boundary_restage(comptime Wrapper: type) fn (Ctx) anyerror!void {
+    return struct {
+        fn body(ctx: Ctx) anyerror!void {
+            const io = ctx.io();
+            var env: Env = undefined;
+            try env.init_at(ctx, "boundary-restage", 1);
+            defer env.deinit();
+            const outgoing = env.fixture.participants[0];
+            const incoming = env.fixture.participants[1];
+            const app = Mock.init(gpa).with_handoff(.{ .stage = {} });
+            const marshal = env.started.mailbox.clone();
+            const wrapper = try Wrapper.create(ctx.child("wrapper"), app, marshal, epocher());
+            defer wrapper.destroy();
+            // Let detached tasks (a store behind a sent verdict) finish before the wrapper goes.
+            defer io.sleep(.fromMilliseconds(100), .awake) catch {};
+            const digest = try certify_boundary(&env, wrapper, io, outgoing);
+            const view = boundary_height + 2;
+            const round = round_at(view);
+            const held: harness.Ctx = .{
+                .round = round,
+                .leader = incoming,
+                .parent = .{ .new(boundary_height + 1), digest },
+            };
+            // Prepare must reuse the boundary payload.
+            const handoff = (try wrapper.prepare(io, held)) orelse return error.NoHandoff;
+            try testing.expect(handoff == .stage and handoff.stage.eql(digest));
+            try testing.expectEqual(
+                .ok,
+                wrapper.broadcast(digest, .{ .prepare = .{ .round = round } }),
+            );
+            while (env.buffer().send_count() == 0) try ctx.sleep(.fromMilliseconds(1));
+            try testing.expectEqual(1, env.buffer().send_count());
+            // The held candidate must not be stored.
+            try testing.expect(!try has_verified(&env, round));
+            // After the outgoing view is nullified, the incoming leader proposes on the
+            // certified predecessor. Both parent contexts name the boundary block.
+            var replacement = held;
+            replacement.parent = .{ .new(boundary_height), digest };
+            try testing.expect(!std.meta.eql(held.parent, replacement.parent));
+            // The replacement must reuse the same payload.
+            const proposed = (try wrapper.propose(io, replacement)) orelse return error.NoProposal;
+            try testing.expect(proposed.eql(digest));
+            // Restaging must not store the replacement before lock-in.
+            try testing.expect(!try has_verified(&env, round));
+            try testing.expectEqual(
+                .ok,
+                wrapper.broadcast(digest, .{ .propose = .{ .round = round } }),
+            );
+            try notarize(&env, view, boundary_height, digest);
+            // Certification must await the replacement stage's durability acknowledgement.
+            try testing.expectEqual(@as(?bool, true), try wrapper.certify(io, round, digest));
+            var stored = (try env.started.mailbox.get_verified(round)) orelse
+                return error.ReplacementMissing;
+            defer stored.deinit();
+            // The replacement is stored at the incoming round.
+            try testing.expect(stored.digest().eql(digest));
+            // Replacing the parent must not resend the same boundary payload.
+            try expect_single_send_to_all(&env, round, digest);
+        }
+    }.body;
+}
+
+fn epocher() types.FixedEpocher {
+    return .new(utils.NonZero(u64).init(harness.blocks_per_epoch).?);
+}
+
+test "standard boundary restage sends once" {
+    try run(boundary_restage(InlineWrapper));
+    try run(boundary_restage(DeferredWrapper));
 }
