@@ -13,6 +13,7 @@ pub const application = @import("application.zig");
 pub const Application = application.Application;
 pub const harness = @import("harness.zig");
 pub const scenarios = @import("scenarios.zig");
+pub const scenarios_queries = @import("scenarios_queries.zig");
 
 test {
     std.testing.refAllDecls(@This());
