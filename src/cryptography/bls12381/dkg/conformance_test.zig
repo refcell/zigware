@@ -154,7 +154,7 @@ test "conformance: feldman-desmedt small messages" {
 }
 
 test "conformance: feldman-desmedt dealer messages and logs" {
-    try shared.skip_slow();
+    try shared.skip_heavy();
     try shared.verify(
         module ++ "CodecConformance<DealerPubMsg<MinPk>>",
         fd.DealerPubMsg(MinPk),
@@ -178,7 +178,7 @@ test "conformance: feldman-desmedt dealer messages and logs" {
 }
 
 test "conformance: feldman-desmedt output" {
-    try shared.skip_slow();
+    try shared.skip_heavy();
     try shared.verify(
         module ++ "CodecConformance<Output<MinPk,ed25519::PublicKey>>",
         fd.Output(MinPk, P),

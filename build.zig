@@ -120,6 +120,12 @@ pub fn build(b: *std.Build) void {
     options.addOption(bool, "slow_tests", slow_tests);
     const fuzz_soak = b.option(u32, "fuzz-soak", "Multiply seeded fuzz iterations") orelse 1;
     options.addOption(u32, "fuzz_soak", fuzz_soak);
+    const fuzz_soak_budget_s = b.option(
+        u32,
+        "fuzz-soak-budget-s",
+        "Seconds a soaked minifuzz target may run past its unsoaked cases (0: no limit)",
+    ) orelse 0;
+    options.addOption(u32, "fuzz_soak_budget_s", fuzz_soak_budget_s);
     const fuzz_seed = b.option(u64, "fuzz-seed", "Mixed into every seeded fuzz seed") orelse 0;
     options.addOption(u64, "fuzz_seed", fuzz_seed);
     const minifuzz_branch = b.option([]const u8, "minifuzz-branch", "Replay a minifuzz failure");

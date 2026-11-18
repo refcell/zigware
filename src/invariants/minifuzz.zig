@@ -35,7 +35,9 @@
 //! This phase is zigware's addition; the search before it is byte-for-byte commonware's.
 //!
 //! Deviations from commonware, all forced by Zig: the default search bound is a case count
-//! (`default_search_limit` times `-Dfuzz-soak`) rather than ten seconds, since time needs an
+//! (`default_search_limit` times `-Dfuzz-soak`; a soaked test build with
+//! `-Dfuzz-soak-budget-s` stops a target after its unsoaked cases once that many seconds
+//! passed) rather than ten seconds, since time needs an
 //! `std.Io` (`with_search_time` takes one); the default seed is `-Dfuzz-seed` rather than
 //! an OS random seed; and `run` stays silent when it finds nothing (`search` returns the
 //! final branch).
@@ -45,6 +47,7 @@ const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const ChaCha8 = std.crypto.stream.chacha.ChaCha8With64BitNonce;
+const builtin = @import("builtin");
 const build_options = @import("build_options");
 const formatting = @import("formatting");
 const unstructured = @import("unstructured.zig");
@@ -499,9 +502,12 @@ const Search = struct {
     deadline_ns: i96 = 0,
     /// The longest case so far: the search stops before a case unlikely to finish in time.
     longest_case_ns: i96 = 0,
+    /// When the search started, on the test clock, if a soak budget applies.
+    soak_started_ns: i96 = 0,
 
     fn init(builder: Builder) Search {
         var search: Search = .{ .builder = builder, .branch = builder.start() };
+        if (soak_budgeted) search.soak_started_ns = soak_now();
         switch (builder.search_bound) {
             .limit => {},
             .time => |time| {
@@ -529,11 +535,33 @@ const Search = struct {
     fn done(self: *const Search) bool {
         if (self.tries < self.builder.min_iterations) return false;
         return switch (self.builder.search_bound) {
-            .limit => |limit| self.tries >= limit,
+            .limit => |limit| self.tries >= limit or self.soak_spent(limit),
             .time => self.now() + self.longest_case_ns >= self.deadline_ns,
         };
     }
+
+    /// Whether a soaked search ran its unsoaked share of `limit` cases and then used up
+    /// `-Dfuzz-soak-budget-s`, so one slow target cannot take the whole soak job.
+    fn soak_spent(self: *const Search, limit: u64) bool {
+        if (!soak_budgeted) return false;
+        assert(limit > 0);
+        if (self.tries < limit / build_options.fuzz_soak) return false;
+        const budget_ns: i96 = @as(i96, build_options.fuzz_soak_budget_s) * std.time.ns_per_s;
+        const spent_ns = soak_now() - self.soak_started_ns;
+        assert(spent_ns >= 0);
+        return spent_ns >= budget_ns;
+    }
 };
+
+/// A soak budget applies to tests of a soaked build with `-Dfuzz-soak-budget-s`.
+const soak_budgeted = builtin.is_test and build_options.fuzz_soak > 1 and
+    build_options.fuzz_soak_budget_s > 0;
+
+/// The test clock: only soaked test builds read it, to bound a search's wall time.
+fn soak_now() i96 {
+    comptime assert(soak_budgeted);
+    return Io.Clock.awake.now(std.testing.io).nanoseconds;
+}
 
 /// Runs a fuzz test with the default `Builder`.
 pub fn run(gpa: Allocator, context: anytype, body: anytype) anyerror!void {

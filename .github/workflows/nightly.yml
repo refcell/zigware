@@ -1,0 +1,37 @@
+name: nightly
+
+# The heaviest tests (-Dslow-tests) in ReleaseSafe: golden DKG rounds and the largest
+# conformance hashes, which take minutes each and stay out of the per-push ci.yml jobs.
+on:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+    inputs:
+      filter:
+        description: "Test filter (-Dtest-filter); empty runs all"
+        required: false
+        default: ""
+
+jobs:
+  slow:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+      - name: install zig
+        run: |
+          sh etc/scripts/install-zig.sh "$HOME/zig"
+          echo "$HOME/zig" >> "$GITHUB_PATH"
+      - name: slow tests
+        env:
+          FILTER: ${{ inputs.filter }}
+        run: |
+          if [ -n "$FILTER" ]; then
+            zig build test -Doptimize=ReleaseSafe -Dslow-tests -Dtest-filter="$FILTER" --summary all
+          else
+            zig build test -Doptimize=ReleaseSafe -Dslow-tests --summary all
+          fi

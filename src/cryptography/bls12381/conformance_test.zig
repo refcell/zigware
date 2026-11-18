@@ -33,6 +33,13 @@ pub fn skip_slow() error{SkipZigTest}!void {
     if (builtin.mode == .debug and !build_options.slow_tests) return error.SkipZigTest;
 }
 
+/// Tests that take minutes even in ReleaseSafe (golden DKG rounds proving eVRF outputs, the
+/// largest Feldman-Desmedt conformance hashes) run only with `-Dslow-tests`, which the nightly
+/// workflow passes, so the per-push ReleaseSafe job stays within its time limit.
+pub fn skip_heavy() error{SkipZigTest}!void {
+    if (!build_options.slow_tests) return error.SkipZigTest;
+}
+
 fn CodecConformance(comptime T: type, comptime gen: arbitrary.Generator(T)) type {
     return struct {
         pub fn commit(gpa: Allocator, seed: u64) ![]u8 {

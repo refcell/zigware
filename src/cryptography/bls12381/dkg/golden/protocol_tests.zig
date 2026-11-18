@@ -1,6 +1,7 @@
 //! Golden DKG protocol tests (commonware `dkg/golden/mod.rs` tests that deal): the test
 //! plan's happy, perturbed, and reshare cases, the error paths, codec round trips, and the
-//! fuzz plan. Every case proves eVRF outputs with bulletproofs, so they are slow tests.
+//! fuzz plan. Every case proves eVRF outputs with bulletproofs, so they run only with
+//! `-Dslow-tests` (the nightly workflow): each takes one to two minutes in ReleaseSafe.
 
 const std = @import("std");
 const testing = std.testing;
@@ -43,7 +44,7 @@ fn test_setup() !*const Setup {
 }
 
 fn run_plan(plan: Plan) !void {
-    try shared.skip_slow();
+    try shared.skip_heavy();
     try plan.run(gpa, try test_setup(), 42);
 }
 
@@ -119,7 +120,7 @@ fn round_info(round: u64, dealers: []const PrivateKey, players: []const PrivateK
 }
 
 test "golden: output dealers exclude filtered dealers" {
-    try shared.skip_slow();
+    try shared.skip_heavy();
     const setup = try test_setup();
     var rng = utils.test_rng();
     var dealers: [4]PrivateKey = undefined;
@@ -147,7 +148,7 @@ test "golden: output dealers exclude filtered dealers" {
 }
 
 test "golden: unknown dealer" {
-    try shared.skip_slow();
+    try shared.skip_heavy();
     const setup = try test_setup();
     var rng = utils.test_rng();
     var keys: [8]PrivateKey = undefined;
@@ -160,7 +161,7 @@ test "golden: unknown dealer" {
 }
 
 test "golden: unknown player" {
-    try shared.skip_slow();
+    try shared.skip_heavy();
     const setup = try test_setup();
     var rng = utils.test_rng();
     var keys: [8]PrivateKey = undefined;
@@ -175,7 +176,7 @@ test "golden: unknown player" {
 }
 
 test "golden: a reshare dealer needs its previous share" {
-    try shared.skip_slow();
+    try shared.skip_heavy();
     const setup = try test_setup();
     var rng = utils.test_rng();
     var keys: [8]PrivateKey = undefined;
@@ -195,7 +196,7 @@ const max_players_cfg: golden.dealing.ReadCfg = .{
 };
 
 test "golden: signed dealer log round trip" {
-    try shared.skip_slow();
+    try shared.skip_heavy();
     const setup = try test_setup();
     var rng = utils.test_rng();
     var keys: [11]PrivateKey = undefined;
@@ -231,7 +232,7 @@ test "golden: signed dealer log round trip" {
 }
 
 test "golden: output round trip" {
-    try shared.skip_slow();
+    try shared.skip_heavy();
     const setup = try test_setup();
     var rng = utils.test_rng();
     var keys: [11]PrivateKey = undefined;
@@ -249,7 +250,7 @@ test "golden: output round trip" {
 }
 
 test "golden: an unsupported player count is reported" {
-    try shared.skip_slow();
+    try shared.skip_heavy();
     var small = try Setup.init(gpa, 3);
     defer small.deinit(gpa);
     var rng = utils.test_rng();
@@ -271,7 +272,7 @@ test "golden: an unsupported player count is reported" {
 }
 
 test "golden: a missing self share in an overlap round is rejected" {
-    try shared.skip_slow();
+    try shared.skip_heavy();
     const setup = try test_setup();
     var rng = utils.test_rng();
     const me = PrivateKey.random(&rng);
@@ -304,7 +305,7 @@ fn expect_identifies_first(signed: SignedDealerLog, rounds: []const *const Info)
 }
 
 test "golden: identify is bound to the round number" {
-    try shared.skip_slow();
+    try shared.skip_heavy();
     const setup = try test_setup();
     var rng = utils.test_rng();
     var keys: [2]PrivateKey = undefined;
@@ -319,7 +320,7 @@ test "golden: identify is bound to the round number" {
 }
 
 test "golden: identify is bound to the round summary" {
-    try shared.skip_slow();
+    try shared.skip_heavy();
     const setup = try test_setup();
     var rng = utils.test_rng();
     var keys: [6]PrivateKey = undefined;
@@ -361,12 +362,12 @@ fn fuzz_plan_body(_: void, u: *minifuzz.Unstructured) !void {
 }
 
 test "golden: fuzz plan" {
-    try shared.skip_slow();
+    try shared.skip_heavy();
     try (minifuzz.Builder{}).with_search_limit(2 * build_options.fuzz_soak)
         .run(gpa, {}, fuzz_plan_body);
 }
 
 test "golden: fuzz plan (coverage-guided)" {
-    try shared.skip_slow();
+    try shared.skip_heavy();
     try testing.fuzz({}, math.testing.smith_body(void, fuzz_plan_body), .{});
 }
