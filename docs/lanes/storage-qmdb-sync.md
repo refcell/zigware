@@ -55,7 +55,11 @@ it comes first once `any` lands.
 - [ ] compact `sync.zig` (`Database` impl), once the crypto lane's `Database` interface lands.
 - [x] compact crash-point tests (import replacement under torn writes and failed syncs from
   the faulty storage) and tampered-witness tests.
-- [ ] current and compact fuzz targets (`qmdb_current_*`).
+- [x] `qmdb_current_{unordered,ordered}_batch_root` (current/batch_root_fuzz_test.zig) and
+  `qmdb_current_recovery` (current/recovery_fuzz_test.zig), on storage-qmdb's
+  `qmdb/fuzz_floor.zig` oracle. Ordered neighbors are checked at the Db until ordered
+  batches expose `get_prev_key`/`get_next_key`.
+- [ ] `qmdb_current_{unordered,ordered}_operations` and `qmdb_current_mmb_prune_grow`.
 - [ ] Fuzz targets and benches for these modules.
 
 ## Agreement with storage-qmdb (2026-11-16)
@@ -172,3 +176,4 @@ it comes first once `any` lands.
   proofs and `CurrentMmr/MmbOrderedFixedConf`.
 - 2026-11-18: compact qmdb (keyless and immutable) with its 10 conformance hashes.
 - 2026-11-18: compact crash-point and tampered-witness tests.
+- 2026-11-18: current batch-root and recovery fuzz targets (planted bugs caught).
