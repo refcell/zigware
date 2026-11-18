@@ -200,8 +200,9 @@ handshake and the runtime's network, which the actor-stream and runtime lanes ar
   on the payload, FIFO burst, peer-set subscriptions (four tests), clean shutdown (25 seeds).
 - [x] simulated: `SocketManager` (`oracle.socket_manager()`, `control.socket_manager()`)
   with the socket-manager tests; max_peers_per_set counting and split-peer seeding tests.
-- [ ] simulated: remaining mod.rs tests (dynamic peers, overlapping primary/secondary,
-  broadcast transmit latency, cross-index primary wins, unordered sets, get_next_socket).
+- [x] simulated: dynamic peers, overlapping primary/secondary, broadcast transmit latency,
+  cross-index primary wins, unordered sets. `test_get_next_socket` has no counterpart (links
+  deliver into channels, with no sockets), nor do the `should_panic` tests (same messages).
 - [x] authenticated: router, relay, throttle, dialing, channels.
 - [x] discovery: types (conformance), tracker record/bit set/directory, tracker, peer
   connections, dialer, listener, Network/Config/Oracle, connectivity over the deterministic
@@ -270,3 +271,5 @@ handshake and the runtime's network, which the actor-stream and runtime lanes ar
   clean-shutdown tests.
 - 2026-11-16: discovery dials DNS ingress through the runtime resolver; DNS tests; slow
   discovery and transmitter tests shrink in Debug.
+- 2026-11-18: simulated ordering, role, and broadcast-bandwidth tests; simulated mod.rs and
+  network.rs tests are all ported.

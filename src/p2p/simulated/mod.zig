@@ -32,4 +32,5 @@ test {
     _ = @import("network_channels_test.zig");
     _ = @import("network_subscriptions_test.zig");
     _ = @import("network_sets_test.zig");
+    _ = @import("network_roles_test.zig");
 }
