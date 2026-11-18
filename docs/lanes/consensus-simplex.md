@@ -247,13 +247,12 @@ resolver; those lanes are running, so do the types first and the actors as they 
   Resolver actor.rs (resolver/actor_test.zig): every handler-level case is ported, from
   `scan_fetches_issue_as_one_batch` through `validate_rejects_finalization_from_different_
   epoch`, plus a zigware-only below-view notarization rejection (a servable-view plant
-  survived every ported case). Not yet ported: the cases that run the whole actor on p2p's
-  simulated network (`targeted_fetch_does_not_restrict_existing_backfill`, its
-  self-targeted twin, `retry_delay_is_independent_of_request_timeout` (needs the resolver
-  engine's `requests_sent_total`), `member_without_share_does_not_fetch_from_itself`,
-  `untargeted_parent_fetch_uses_available_holder`, `served_requests_hold_channel_capacity`,
-  `unresolved_delivery_does_not_block_nullification_fetch`). The runtime lane left these
-  on 2026-11-18 for marshal. `pr_5097_regression` is ported: `HandlerMessage.deliver`
+  survived every ported case). The 7 cases that run the whole actor on p2p's simulated
+  network are in resolver/actor_network_test.zig (2026-11-18): both targeted-backfill
+  cases, retry delay vs request timeout (on `requests_sent_total`), member without a
+  share, untargeted parent fetch, served requests holding channel capacity, and unresolved
+  delivery not blocking a nullification fetch. The inert and rate-limited senders are
+  test-local `TestSender`/`SilentReceiver` types. `pr_5097_regression` is ported: `HandlerMessage.deliver`
   carries an owned root copy of the fetch's span (`span: ?*Span`), and processing runs
   under `simplex.resolver.deliver` as its child. The p2p resolver's `Delivery` and fetches
   carry no spans yet (commonware pairs each subscriber with its fetch span), so the test
@@ -377,3 +376,4 @@ resolver; those lanes are running, so do the types first and the actors as they 
 - 2026-11-18: simplex view spans (voter roots, batcher adoption) with propose, verify,
   certify, batcher process/verify_certificate, and resolver process/deliver/validate spans.
 - 2026-11-18: pr_5097_regression: resolver deliveries run under their fetch's span.
+- 2026-11-18: the 7 networked resolver actor.rs cases (actor_network_test.zig).
