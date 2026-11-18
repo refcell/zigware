@@ -66,7 +66,8 @@ which every database here is built on.
   batching only groups reads by position for speed, and the results are identical.
 - [x] fuzz targets: keyless, immutable, and any unordered/ordered operations, with the floor
   oracle `qmdb/fuzz_floor.zig` (commonware `storage/fuzz/src/floor.rs`).
-- [ ] any: ordered `MerkleizedBatch.get_prev_key`/`get_next_key` (current's batch-root fuzz).
+- [x] any: ordered `MerkleizedBatch.get_prev_key`/`get_next_key` (strict, non-wrapping, through the
+  chain's diffs, then the committed snapshot), checked on every level of the random chains.
 - [ ] fuzz targets: `qmdb_store_operations` (with the store), `qmdb_verify_proof`, and the any
   batch_root and batching targets.
 - [ ] benches (commonware `qmdb/benches`).
@@ -264,3 +265,4 @@ which every database here is built on.
 - 2026-11-18: ordered staging covered by the staged-ancestor scenarios; keyless operations fuzz target.
 - 2026-11-18: immutable operations fuzz target (value model, crash reopens, proof checks).
 - 2026-11-18: floor oracle (`fuzz_floor.zig`) and the any unordered/ordered operations fuzz targets.
+- 2026-11-18: ordered merkleized-batch neighbor lookups (`get_prev_key`/`get_next_key`).

@@ -302,6 +302,7 @@ fn apply_random_chain(
             chain[level - 1].?.release();
             chain[level - 1] = null;
         }
+        if (comptime Db.Update.siblings) try check_batch_neighbors(Db, db, chain[level].?, model);
     }
     const tip = chain[depth - 1].?;
     if (applied < depth) try db.apply_batch(tip);
@@ -365,6 +366,40 @@ fn check_links(comptime Db: type, db: *Db, model: *Model) !void {
         }
         try expect_optional(try db.get_next_key(&probe), above);
         try expect_optional(try db.get_prev_key(&probe), below);
+    }
+}
+
+/// Checks a merkleized batch's next and previous key lookups against `model`, its view, for
+/// active keys and absent probes.
+fn check_batch_neighbors(
+    comptime Db: type,
+    db: *Db,
+    batch: *Db.MerkleizedBatch,
+    model: *Model,
+) !void {
+    var keys: std.ArrayList(Digest) = .empty;
+    defer keys.deinit(gpa);
+    var it = model.keyIterator();
+    while (it.next()) |k| try keys.append(gpa, .{ .bytes = k.* });
+    std.mem.sort(Digest, keys.items, {}, digest_less);
+    var probes: std.ArrayList(Digest) = .empty;
+    defer probes.deinit(gpa);
+    try probes.appendSlice(gpa, keys.items);
+    for (0..24) |k| try probes.append(gpa, if (k >= 16) support.colliding_digest(7, k) else key(k));
+    try probes.append(gpa, .{ .bytes = @splat(0) });
+    try probes.append(gpa, .{ .bytes = @splat(0xff) });
+    for (probes.items) |probe| {
+        var above: ?Digest = null;
+        var below: ?Digest = null;
+        for (keys.items) |active| {
+            if (digest_less({}, probe, active)) {
+                if (above == null) above = active;
+            } else if (digest_less({}, active, probe)) {
+                below = active;
+            }
+        }
+        try expect_optional(try batch.get_next_key(&probe, db), above);
+        try expect_optional(try batch.get_prev_key(&probe, db), below);
     }
 }
 

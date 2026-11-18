@@ -1161,6 +1161,106 @@ pub fn Merkleized(comptime D: type) type {
             return self.read_through(key, db);
         }
 
+        /// The smallest active key strictly above `key` after this batch and its chain, null if
+        /// none (not wrapping); `key` need not be active. Ordered databases only.
+        pub fn get_next_key(self: *const Self, key: *const K, db: *D) !?K {
+            comptime assert(D.Update.siblings);
+            try self.bounds.compatible(db.commitment());
+            if (self.total_active_keys == 0) return null;
+            if (try self.find_cyclic_neighbor(true, key, db.log.size())) |next| {
+                return if (diff_mod.order(K, &next, key) == .gt) next else null;
+            }
+            return db.get_next_key(key);
+        }
+
+        /// The largest active key strictly below `key` after this batch and its chain, null if
+        /// none (not wrapping); `key` need not be active. Ordered databases only.
+        pub fn get_prev_key(self: *const Self, key: *const K, db: *D) !?K {
+            comptime assert(D.Update.siblings);
+            try self.bounds.compatible(db.commitment());
+            if (self.total_active_keys == 0) return null;
+            if (try self.find_cyclic_neighbor(false, key, db.log.size())) |prev| {
+                return if (diff_mod.order(K, &prev, key) == .lt) prev else null;
+            }
+            return db.get_prev_key(key);
+        }
+
+        /// The cyclic successor (`next`) or predecessor of `key` from the newest diff whose
+        /// span owner holds `key`. Membership changes emit affected predecessors and created
+        /// keys, so that layer owns the query's span in this batch's view; null defers to the
+        /// committed snapshot.
+        fn find_cyclic_neighbor(
+            self: *const Self,
+            comptime next: bool,
+            key: *const K,
+            db_size: u64,
+        ) !?K {
+            var diffs: std.ArrayList([]const Pair) = .empty;
+            defer diffs.deinit(self.gpa);
+            try self.read_diffs(db_size, &diffs);
+            assert(diffs.items.len >= 1);
+            for (diffs.items) |diff| {
+                const loc = span_owner(next, diff, key) orelse continue;
+                const update = self.update_at(loc);
+                // Successors use the span [key, next_key); predecessors use (key, next_key].
+                const inside = if (next)
+                    ordered_mod.in_span(K, &update.key, &update.next_key, key)
+                else
+                    in_span_after(&update.key, &update.next_key, key);
+                if (inside) return if (next) update.next_key else update.key;
+            }
+            return null;
+        }
+
+        /// Whether `key` is in the cyclic span `(start, end]`; equal ends span everything.
+        fn in_span_after(start: *const K, end: *const K, key: *const K) bool {
+            const after_start = diff_mod.order(K, key, start) == .gt;
+            const to_end = diff_mod.order(K, key, end) != .gt;
+            if (diff_mod.order(K, start, end) == .lt) return after_start and to_end;
+            return after_start or to_end;
+        }
+
+        /// The location of the active entry of `diff` that could own `key`'s span: the last at
+        /// or below it (strictly below for predecessors), else the last overall (wrapping).
+        fn span_owner(comptime next: bool, diff: []const Pair, key: *const K) ?u64 {
+            const end = std.sort.partitionPoint(Pair, diff, key, struct {
+                fn below(query: *const K, pair: Pair) bool {
+                    const order = diff_mod.order(K, &pair.key, query);
+                    return if (next) order != .gt else order == .lt;
+                }
+            }.below);
+            assert(end <= diff.len);
+            var at = end;
+            while (at > 0) {
+                at -= 1;
+                if (diff[at].entry.loc()) |loc| return loc;
+            }
+            at = diff.len;
+            while (at > end) {
+                at -= 1;
+                if (diff[at].entry.loc()) |loc| return loc;
+            }
+            return null;
+        }
+
+        /// The update at `loc`, an active entry's location in a diff `read_diffs` yields. The
+        /// batch retains the operations of every ancestor whose diff it retains.
+        fn update_at(self: *const Self, loc: u64) *const D.Update {
+            assert(loc < self.bounds.tip.size);
+            const own = self.journal_batch.batch_items();
+            var base = self.bounds.tip.size - own.len;
+            if (loc >= base) return &own[@intCast(loc - base)].update;
+            const chunks = self.journal_batch.ancestor_items;
+            var at = chunks.len;
+            while (at > 0) {
+                at -= 1;
+                const items = chunks[at].items;
+                base -= items.len;
+                if (loc >= base) return &items[@intCast(loc - base)].update;
+            }
+            unreachable; // Proof: a retained diff's operations are in a retained chunk.
+        }
+
         /// A child batch on top of this one.
         pub fn new_batch(self: *Self) D.UnmerkleizedBatch {
             return .{
