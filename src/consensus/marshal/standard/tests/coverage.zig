@@ -974,3 +974,93 @@ fn installed_anchor_body(ctx: Ctx) anyerror!void {
 test "standard closed epoch floor restores from an installed anchor" {
     try run(installed_anchor_body);
 }
+
+/// The finalization indices pruned from the cache of `epoch`, summed over every actor
+/// (commonware's `pruned` closure over `context.encode()`).
+fn cache_pruned(ctx: Ctx, epoch: u64) !u64 {
+    const text = try ctx.encode(gpa);
+    defer gpa.free(text);
+    var label: [32]u8 = undefined;
+    const epoch_label = try std.fmt.bufPrint(&label, "epoch=\"{d}\"", .{epoch});
+    var total: u64 = 0;
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |line| {
+        if (std.mem.indexOf(u8, line, "cache_finalizations_indices_pruned_total") == null) continue;
+        if (std.mem.indexOf(u8, line, epoch_label) == null) continue;
+        const space = std.mem.lastIndexOfScalar(u8, line, ' ') orelse continue;
+        total += std.fmt.parseInt(u64, line[space + 1 ..], 10) catch continue;
+    }
+    return total;
+}
+
+/// Restarts unbuffered from block 10's first finalization (the round floor covers epoch zero
+/// and the witnessed round comes back from the archives).
+fn restart_from_first(state: *Reproposal, ctx: Ctx, prefix: []const u8) !ConstantUnbuffered {
+    return start_floor(
+        harness.Provider,
+        common.Unbuffered,
+        ctx.child("restarted"),
+        prefix,
+        state.provider(),
+        reproposal_epoch_length,
+        try state.finalize(10, 10),
+        null,
+    );
+}
+
+fn cache_prunes_behind_reproposals_body(ctx: Ctx) anyerror!void {
+    const prefix = "cache-prunes-behind-covered-reproposals";
+    var state: Reproposal = undefined;
+    try start_reproposal_processed_through_20(&state, ctx, prefix);
+    defer state.deinit();
+    state.run.crash();
+    var restarted = try restart_from_first(&state, ctx, prefix);
+    defer restarted.crash();
+    // Each re-proposal is cached in epoch zero and becomes the newest witnessed round. The
+    // cache prunes behind the previously witnessed round while the round floor stays put:
+    // (0, 10) goes at the second report and (0, 40) at the third.
+    const before = try cache_pruned(ctx, 0);
+    for ([_]u64{ 40, 60, 80 }) |view| {
+        var reproposal = try state.finalize(10, view);
+        defer reproposal.deinit(gpa);
+        report(&restarted.mailbox, reproposal);
+    }
+    try expect_processed(&restarted.mailbox, 20);
+    try testing.expectEqual(before + 2, try cache_pruned(ctx, 0));
+}
+
+test "standard cache prunes behind covered reproposals" {
+    try run(cache_prunes_behind_reproposals_body);
+}
+
+fn restored_witnessed_round_body(ctx: Ctx) anyerror!void {
+    const prefix = "restored-witnessed-round-prunes-cache";
+    var state: Reproposal = undefined;
+    try start_reproposal_processed_through_20(&state, ctx, prefix);
+    defer state.deinit();
+    // Archive block 11's finalization at (1, 11) and block 21's at (1, 50), then acknowledge
+    // block 21: the newest processed round sits a retention window above (1, 11).
+    for ([_][2]u64{ .{ 11, 11 }, .{ 21, 50 } }) |at| {
+        var finalization = try state.finalize(at[0], at[1]);
+        defer finalization.deinit(gpa);
+        report(&state.run.mailbox, finalization);
+    }
+    try testing.expectEqual(Height.new(21), state.run.application.acknowledge_next().?);
+    try expect_processed(&state.run.mailbox, 21);
+    state.run.crash();
+
+    // The archives restore (1, 50) as the newest witnessed round, so the first finalization
+    // witnessed after the restart, (1, 70), prunes the cached (1, 11) finalization.
+    var restarted = try restart_from_first(&state, ctx, prefix);
+    defer restarted.crash();
+    const before = try cache_pruned(ctx, 1);
+    var reproposal = try state.finalize(21, 70);
+    defer reproposal.deinit(gpa);
+    report(&restarted.mailbox, reproposal);
+    try expect_processed(&restarted.mailbox, 21);
+    try testing.expectEqual(before + 1, try cache_pruned(ctx, 1));
+}
+
+test "standard restored witnessed round prunes cache after restart" {
+    try run(restored_witnessed_round_body);
+}
