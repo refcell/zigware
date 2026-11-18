@@ -180,11 +180,17 @@ pub fn Actor(comptime F: type, comptime C: type) type {
         forwarder: ?Io.Future(void) = null,
         /// Guarded by `signal`: the next mailbox message, and whether the mailbox closed.
         inbox: ?Message = null,
+        /// Broadcast when the actor empties `inbox`; only the forwarder waits on it, so the
+        /// actor's timed waits on `signal.condition` cannot consume its wake (AGENTS.md:
+        /// `Io.Condition` counts signals, not waiters).
+        inbox_freed: Io.Condition = .init,
         mailbox_closed: bool = false,
         /// Every fetch task not yet handled (owner only).
         fetches: std.ArrayList(*FetchTask) = .empty,
         /// Guarded by `signal`: finished fetches, oldest first. Capacity covers `fetches`.
         fetch_done: std.ArrayList(*FetchTask) = .empty,
+        /// Broadcast with `signal` when a fetch finishes; only `next_fetched` waits on it.
+        fetched: Io.Condition = .init,
         deliveries: delivery.Tracker(C, void, Attempt),
         subscribers: subscribers.Tracker(K, S) = .empty,
         /// Ascending by (deadline, key).
@@ -316,7 +322,7 @@ pub fn Actor(comptime F: type, comptime C: type) type {
                 if (deadline) |due| if (self.now() >= due) return .retry;
                 if (self.inbox) |message| {
                     self.inbox = null;
-                    signal.condition.broadcast(self.io);
+                    self.inbox_freed.broadcast(self.io);
                     return .{ .message = message };
                 }
                 if (self.mailbox_closed) return .stopped;
@@ -345,7 +351,7 @@ pub fn Actor(comptime F: type, comptime C: type) type {
                     return;
                 };
                 while (self.inbox != null) {
-                    signal.condition.wait(self.io, &signal.mutex) catch {
+                    self.inbox_freed.wait(self.io, &signal.mutex) catch {
                         Message.discard(message);
                         return;
                     };
@@ -414,6 +420,7 @@ pub fn Actor(comptime F: type, comptime C: type) type {
             assert(self.fetch_done.items.len < self.fetch_done.capacity);
             self.fetch_done.appendAssumeCapacity(task);
             self.signal.condition.broadcast(self.io);
+            self.fetched.broadcast(self.io);
         }
 
         /// Wait for the next finished fetch.
@@ -421,7 +428,7 @@ pub fn Actor(comptime F: type, comptime C: type) type {
             self.signal.mutex.lockUncancelable(self.io);
             defer self.signal.mutex.unlock(self.io);
             while (self.fetch_done.items.len == 0) {
-                try self.signal.condition.wait(self.io, &self.signal.mutex);
+                try self.fetched.wait(self.io, &self.signal.mutex);
             }
             return self.fetch_done.orderedRemove(0);
         }

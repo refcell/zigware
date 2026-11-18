@@ -100,6 +100,10 @@ pub fn Tracker(comptime C: type, comptime Context: type, comptime State: type) t
             /// `own_signal`, or the actor's signal given to `init_with_signal`.
             signal: *Signal,
             own_signal: Signal = .{},
+            /// Broadcast with `signal` on every verdict; only `next_completion` waits on it. An
+            /// actor sharing `signal` waits on its condition with timeouts, which could consume
+            /// a wake meant for another waiter (AGENTS.md: `Io.Condition` counts signals).
+            completed: Io.Condition = .init,
             /// Slots whose verdict wait finished, oldest first. Capacity is reserved for
             /// every live slot, so tasks never allocate.
             done: std.ArrayList(*Slot) = .empty,
@@ -305,7 +309,7 @@ pub fn Tracker(comptime C: type, comptime Context: type, comptime State: type) t
                 defer self.shared.signal.mutex.unlock(self.io);
                 while (self.shared.done.items.len == 0) {
                     const signal = self.shared.signal;
-                    try signal.condition.wait(self.io, &signal.mutex);
+                    try self.shared.completed.wait(self.io, &signal.mutex);
                 }
                 break :blk self.shared.done.orderedRemove(0);
             };
@@ -379,6 +383,7 @@ pub fn Tracker(comptime C: type, comptime Context: type, comptime State: type) t
             assert(shared.done.items.len < shared.done.capacity);
             shared.done.appendAssumeCapacity(slot);
             shared.signal.condition.broadcast(io);
+            shared.completed.broadcast(io);
         }
 
         fn finish(self: *Self, slot: *Slot) error{Aborted}!Done {
