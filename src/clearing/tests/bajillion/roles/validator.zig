@@ -9,6 +9,7 @@ const codec = @import("codec");
 const parallel = @import("parallel");
 const runtime = @import("runtime");
 const storage = @import("storage");
+const utils = @import("utils");
 const bajillion = @import("../../../bajillion/mod.zig");
 const map = @import("map.zig");
 
@@ -23,26 +24,45 @@ pub const Refusal = error{
     InvalidCheckpoint,
 };
 
-/// In-memory storage the validators of a test share, as the deterministic runtime's storage.
-/// Each validator keeps its databases in partitions named after it. Must not move while a
-/// validator uses it.
+/// Storage the validators of a test share, as the deterministic runtime's: the in-memory
+/// backend under `runtime.storage.faulty` (commonware's `FaultConfig`), drawing faults from a
+/// seeded RNG. Each validator keeps its databases in partitions named after it. Lives in place:
+/// the fault wrapper points into it.
 pub const Env = struct {
+    pub const Faulty = runtime.storage.faulty.Storage(utils.rng.TestRng);
+
     gpa: Allocator,
-    storage: runtime.buffer.mocks.Storage,
+    memory: runtime.storage.memory.Storage,
+    rng: utils.rng.TestRng,
+    faults: Faulty,
     cache_ref: runtime.buffer.paged.CacheRef,
 
-    pub fn init(gpa: Allocator) !Env {
-        return .{
-            .gpa = gpa,
-            .storage = .init(gpa),
-            .cache_ref = try .init(gpa, 1024, 8),
-        };
+    pub fn init(self: *Env, gpa: Allocator, seed: u64) !void {
+        self.gpa = gpa;
+        self.memory = .init(gpa);
+        errdefer self.memory.deinit();
+        self.rng = utils.rng.TestRng.init(seed);
+        self.faults = .init(gpa, &self.memory, &self.rng, .{});
+        self.cache_ref = try .init(gpa, 1024, 8);
     }
 
     pub fn deinit(self: *Env) void {
         self.cache_ref.deinit();
-        self.storage.deinit();
+        self.faults.deinit();
+        self.memory.deinit();
         self.* = undefined;
+    }
+
+    pub fn storage(self: *Env) runtime.storage.Storage {
+        return self.faults.storage();
+    }
+
+    /// Crashes: unsynced writes keep what their retention selects, and open handles can no
+    /// longer publish (commonware's `start_and_recover`). Faults stop after the crash.
+    pub fn crash(self: *Env) !void {
+        try self.faults.crash();
+        self.memory.crash();
+        self.faults.config = .{};
     }
 };
 
@@ -317,7 +337,7 @@ pub fn Validator(P: type, O: type, H: type, T: type, A: type) type {
             self.balances_registry.deinit();
             self.balances_registry.* = metrics.Registry.init(self.gpa);
             const scope = metrics.Scope.init(self.balances_registry).child("balances");
-            return Balances.init(self.gpa, self.env.storage.interface(), scope, cfg, null);
+            return Balances.init(self.gpa, self.env.storage(), scope, cfg, null);
         }
 
         /// Opens the payout log at `summary`'s payouts size and checks its root.
@@ -331,7 +351,7 @@ pub fn Validator(P: type, O: type, H: type, T: type, A: type) type {
             self.log_registry.* = metrics.Registry.init(self.gpa);
             const scope = metrics.Scope.init(self.log_registry).child("payouts");
             const size = at.payouts.size;
-            var log = try Log.init(self.gpa, self.env.storage.interface(), scope, cfg, size);
+            var log = try Log.init(self.gpa, self.env.storage(), scope, cfg, size);
             errdefer log.deinit();
             if (!log.root().eql(at.payouts.root)) return error.InvalidCheckpoint;
             return log;
