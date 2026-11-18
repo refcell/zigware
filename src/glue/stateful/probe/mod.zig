@@ -23,9 +23,15 @@ pub const discovery = @import("discovery.zig");
 pub const Discovery = discovery.Discovery;
 pub const Floor = discovery.Floor;
 pub const Verdict = discovery.Verdict;
+pub const actor = @import("actor.zig");
+pub const Probe = actor.Probe;
+pub const Mailbox = actor.Mailbox;
+pub const Config = actor.Config;
+pub const MarshalSource = actor.MarshalSource;
 
 test {
     std.testing.refAllDecls(@This());
     _ = @import("probe_test.zig");
     _ = @import("discovery_test.zig");
+    _ = @import("actor_test.zig");
 }

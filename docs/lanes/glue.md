@@ -148,6 +148,12 @@ marshal's actors (consensus-marshal) for the actor; until then it ports what is 
   round, `request_round()` → committee to solicit (or null), `receive(peer, payload, rng,
   strategy)` → `Verdict` (`ignore`, `block`, `recorded`), `attach`, `finished`, `retrying`,
   `selected_floor`, `deinit`. `Floor(S, D)` is the owned finalization a subscriber receives.
+- `glue.stateful.probe.Probe(P)` (`P` declares `Scheme`, `Digest`, `Provider`, `Source`,
+  `Blocker`, `NetSender`, `NetReceiver`):
+  `init(gpa, io, Config, net_sender, net_receiver)` → `{ probe, mailbox }`, `run(rng,
+  strategy)`, `deinit`. `Mailbox` has `subscribe()` → `oneshot.Receiver(Floor)` and
+  `attach(source)`. `MarshalSource(marshal.core.Mailbox(S, V))` serves marshal's latest
+  finalization (`get_info(.latest)` then `get_finalization`).
 - `glue.stateful.SyncPlan(S, V)` (`actor.SyncPlan`): `init(env, partition_prefix)` (env has
   `gpa`, `storage`), `deinit`, `may_sync`, `completed`, `floor`, `set_floor(*const
   Finalization)` (stores a copy; ignores floors not at a later round), `set_completed(height)`,
@@ -212,7 +218,9 @@ marshal's actors (consensus-marshal) for the actor; until then it ports what is 
   test and sample selection tests.
 - [x] probe: `Discovery` with probe/mod.rs's protocol tests (selection, late subscribers,
   pausing, blocking, epoch filtering).
-- [ ] probe: the actor driver (network, retry deadline, service from marshal) and its DST.
+- [x] probe: the actor driver (simplex `Inbox` over mailbox and network, retry deadline,
+  service from a source) with an in-memory actor test.
+- [ ] probe: a DST over marshal's harness and p2p.simulated.
 - [x] actor: `SyncPlan` and `SyncState` with plan.rs's tests.
 - [x] actor: the processor's prune schedule and finalization boundary with their tests.
 - [ ] actor: processor state, syncer plan, core (after marshal); tests (single and
@@ -240,6 +248,7 @@ marshal's actors (consensus-marshal) for the actor; until then it ports what is 
   and `current`, one through `stateful.db.current`.
 - 2026-11-18: the stateful `any` transfers test; transfers is fully ported.
 - 2026-11-18 (stateful): the probe's discovery state.
+- 2026-11-18 (stateful): the probe actor driver; `consensus.simplex.actors.inbox` exported.
 
 ## dkg (owner: coding lane, thread T-01a1d58d-bff1-75a1-8ccb-4b8dd7bc9755)
 

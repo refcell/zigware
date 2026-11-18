@@ -24,6 +24,7 @@ pub const actors = struct {
         pub const actor = @import("actors/batcher/actor.zig");
     };
     pub const ask = @import("actors/ask.zig");
+    pub const inbox = @import("actors/inbox.zig");
     pub const voter = struct {
         pub const ingress = @import("actors/voter/ingress.zig");
         pub const slot = @import("actors/voter/slot.zig");
