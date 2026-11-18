@@ -1076,3 +1076,328 @@ test "standard floor anchor uses parent digest as commitment" {
         }
     }.body);
 }
+
+const certificate = @import("cryptography").certificate;
+
+/// A provider whose scopes verify but cannot sign (commonware `VerifierProvider`).
+const VerifierProvider = struct {
+    inner: *const harness.S,
+
+    pub fn scoped(self: VerifierProvider, scope: anytype) ?certificate.Scoped(harness.S) {
+        _ = scope;
+        return certificate.Scoped(harness.S).verifier(self.inner);
+    }
+
+    pub fn scheme(self: VerifierProvider, scope: anytype) ?*const harness.S {
+        const handle = self.scoped(scope) orelse return null;
+        return handle.into_scheme();
+    }
+};
+
+/// The concatenated encodings of `first` and `second` (a Rust tuple's encoding).
+fn encode_pair(first: anytype, second: anytype) ![]u8 {
+    const codec = @import("codec");
+    const a = try codec.encode(@TypeOf(first), gpa, first);
+    defer gpa.free(a);
+    const b = try codec.encode(@TypeOf(second), gpa, second);
+    defer gpa.free(b);
+    return std.mem.concat(gpa, u8, &.{ a, b });
+}
+
+/// Delivers `value` (borrowed) for `key` to one `subscriber` and returns marshal's outcome.
+fn deliver(
+    resolver: common.RecordingResolver,
+    key: common.Key,
+    subscriber: common.Annotation,
+    value: []const u8,
+) !common.Outcome {
+    var handler = resolver.handler_clone();
+    defer handler.deinit();
+    const subscribers = [_]common.Annotation{subscriber};
+    var response = try handler.deliver(.{ .key = key, .subscribers = &subscribers }, value);
+    defer response.deinit();
+    return response.recv();
+}
+
+/// The quorum notarization of `block` at `round` over view 0.
+fn notarization_of(
+    fixture: *const harness.Fixture,
+    round: Round,
+    block: *const harness.B,
+) !harness.Notarization {
+    const proposal = harness.Proposal.init(round, .zero(), block.digest());
+    return harness.make_notarization(gpa, fixture, proposal, harness.quorum);
+}
+
+const RoundRequest = struct { resolver: common.RecordingResolver, round: Round };
+
+/// Whether a notarized fetch for `round` with a notarization subscriber was recorded.
+fn round_requested(state: RoundRequest) bool {
+    const fetches = state.resolver.fetches(gpa) catch return false;
+    defer gpa.free(fetches);
+    const key: common.Key = .{ .notarized = state.round };
+    const subscriber: common.Annotation = .{ .notarization = state.round };
+    for (fetches) |fetch| {
+        if (fetch.key.eql(key) and fetch.subscriber.eql(subscriber)) return true;
+    }
+    return false;
+}
+
+test "standard notarized delivery wakes fetch-by-round subscriber" {
+    try run(struct {
+        fn body(ctx: Ctx) anyerror!void {
+            var rng = utils.rng.test_rng();
+            var fixture = try harness.fixture(gpa, &rng);
+            defer fixture.deinit(gpa);
+            const round = round_at(1);
+            var block = try harness.make_raw_block(gpa, hash(""), .new(1), 100);
+            var notarization = try notarization_of(&fixture, round, &block);
+            defer notarization.deinit(gpa);
+            var application = try App.manual_ack(gpa, ctx.io());
+            defer application.deinit();
+            var started = try start_manual(
+                ctx.child("validator"),
+                "notarized-delivery-wakes-subscriber",
+                &fixture,
+                application.clone(),
+                try common.RecordingBuffer.init(gpa, ctx.io()),
+            );
+            defer started.crash();
+            var subscription = try started.mailbox.subscribe_by_commitment(
+                notarization.proposal.payload,
+                .{ .fetch_by_round = round },
+            );
+            defer subscription.deinit();
+            const state: RoundRequest = .{ .resolver = started.resolver, .round = round };
+            try common.wait_until(ctx, 5000, "fetch-by-round request", state, round_requested);
+
+            const value = try encode_pair(notarization, block);
+            defer gpa.free(value);
+            const outcome = try deliver(
+                started.resolver,
+                .{ .notarized = round },
+                .{ .notarization = round },
+                value,
+            );
+            try testing.expectEqual(common.Outcome{ .resolved = .complete }, outcome);
+            var delivered = try subscription.recv();
+            defer delivered.deinit();
+            try testing.expect(delivered.digest().eql(block.digest()));
+        }
+    }.body);
+}
+
+test "standard notarized delivery rejects wrong round" {
+    try run(struct {
+        fn body(ctx: Ctx) anyerror!void {
+            var rng = utils.rng.test_rng();
+            var fixture = try harness.fixture(gpa, &rng);
+            defer fixture.deinit(gpa);
+            const requested: Round = .new(.new(1), .new(1));
+            const block = try harness.make_raw_block(gpa, hash(""), .new(1), 100);
+            var notarization = try notarization_of(&fixture, round_at(1), &block);
+            defer notarization.deinit(gpa);
+            var application = try App.manual_ack(gpa, ctx.io());
+            defer application.deinit();
+            var started = try start_manual(
+                ctx.child("validator"),
+                "notarized-delivery-wrong-round",
+                &fixture,
+                application.clone(),
+                try common.RecordingBuffer.init(gpa, ctx.io()),
+            );
+            defer started.crash();
+            const value = try encode_pair(notarization, block);
+            defer gpa.free(value);
+            const outcome = try deliver(
+                started.resolver,
+                .{ .notarized = requested },
+                .{ .notarization = requested },
+                value,
+            );
+            try testing.expectEqual(common.Outcome.invalid, outcome);
+        }
+    }.body);
+}
+
+const Verifying = common.Started(VerifierProvider, App, common.RecordingBuffer);
+
+fn start_verifying(
+    ctx: Ctx,
+    prefix: []const u8,
+    fixture: *const harness.Fixture,
+    application: App,
+) !Verifying {
+    return common.start_standard_actor(
+        VerifierProvider,
+        App,
+        common.RecordingBuffer,
+        ctx,
+        prefix,
+        .{ .inner = &fixture.schemes[0] },
+        application,
+        try common.RecordingBuffer.init(gpa, ctx.io()),
+        try genesis_start(),
+    );
+}
+
+// Without the epoch's full scheme a notarized delivery cannot be validated, so marshal
+// retires the key without decoding and without crediting or blaming the peer.
+test "standard notarized delivery ignored without full scheme" {
+    try run(struct {
+        fn body(ctx: Ctx) anyerror!void {
+            var rng = utils.rng.test_rng();
+            var fixture = try harness.fixture(gpa, &rng);
+            defer fixture.deinit(gpa);
+            var application = try App.manual_ack(gpa, ctx.io());
+            defer application.deinit();
+            var started = try start_verifying(
+                ctx.child("validator"),
+                "notarized-delivery-stale-certificate-only",
+                &fixture,
+                application.clone(),
+            );
+            defer started.crash();
+            // Undecodable bytes are not attributed to the peer either: nothing can be checked.
+            const round = round_at(1);
+            const outcome = try deliver(
+                started.resolver,
+                .{ .notarized = round },
+                .{ .notarization = round },
+                "unverifiable",
+            );
+            try testing.expectEqual(common.Outcome.ignored, outcome);
+        }
+    }.body);
+}
+
+/// Delivers `value` (borrowed) for the finalized height 1 to a by-height subscriber.
+fn deliver_finalized(resolver: common.RecordingResolver, value: []const u8) !common.Outcome {
+    const subscriber: common.Annotation = .{ .finalized = .{ .by_height = .new(1) } };
+    return deliver(resolver, .{ .finalized = .new(1) }, subscriber, value);
+}
+
+const VerifyOnly = struct {
+    const prefix = "finalized-delivery-verify-only";
+    fixture: harness.Fixture,
+    block: harness.B,
+    finalization: harness.Finalization,
+
+    fn deliver_and_stop(ctx: Ctx, self: *const VerifyOnly) anyerror!void {
+        var application = try App.manual_ack(gpa, ctx.io());
+        defer application.deinit();
+        var started = try start_verifying(
+            ctx.child("validator"),
+            prefix,
+            &self.fixture,
+            application.clone(),
+        );
+        defer started.crash();
+        const value = try encode_pair(self.finalization, self.block);
+        defer gpa.free(value);
+        const outcome = try deliver_finalized(started.resolver, value);
+        try testing.expectEqual(common.Outcome{ .resolved = .complete }, outcome);
+        try testing.expectEqual(0, (try application.acknowledged()).get());
+        try testing.expectEqual(1, (try application.acknowledged()).get());
+        const entries = try application.blocks(gpa);
+        defer App.free_blocks(gpa, entries);
+        const last = entries[entries.len - 1];
+        try testing.expectEqual(1, last.height.get());
+        try testing.expect(last.block.digest().eql(self.block.digest()));
+    }
+
+    fn recover(ctx: Ctx, self: *const VerifyOnly) anyerror!void {
+        var application = try App.init(gpa, ctx.io());
+        defer application.deinit();
+        var started = try start_verifying(
+            ctx.child("recovered"),
+            prefix,
+            &self.fixture,
+            application.clone(),
+        );
+        defer started.crash();
+        var block = (try started.mailbox.get_block(.{ .height = .new(1) })).?;
+        defer block.deinit();
+        try testing.expect(block.digest().eql(self.block.digest()));
+        var finalization = (try started.mailbox.get_finalization(.new(1))).?;
+        defer finalization.deinit(gpa);
+        try testing.expect(std.meta.eql(finalization.proposal, self.finalization.proposal));
+    }
+};
+
+// A finalization verified through a verify-only scope is accepted and durable.
+test "standard finalized delivery verifies with verify-only scope" {
+    var rng = utils.rng.test_rng();
+    var state: VerifyOnly = undefined;
+    state.fixture = try harness.fixture(gpa, &rng);
+    defer state.fixture.deinit(gpa);
+    state.block = try harness.make_raw_block(gpa, hash(""), .new(1), 100);
+    const proposal = harness.Proposal.init(round_at(1), .zero(), state.block.digest());
+    const quorum = harness.quorum;
+    state.finalization = try harness.make_finalization(gpa, &state.fixture, proposal, quorum);
+    defer state.finalization.deinit(gpa);
+
+    var runner = try runtime.deterministic.Runner.init(gpa, timed);
+    defer runner.deinit();
+    try try runner.start_context(VerifyOnly.deliver_and_stop, .{&state});
+    // A second start on the same runner recovers its storage (commonware's `Checkpoint`).
+    try try runner.start_context(VerifyOnly.recover, .{&state});
+}
+
+// A valid certificate only authorizes the bytes whose digest it commits to.
+test "standard finalized delivery rejects different block bytes" {
+    try run(struct {
+        fn body(ctx: Ctx) anyerror!void {
+            var rng = utils.rng.test_rng();
+            var fixture = try harness.fixture(gpa, &rng);
+            defer fixture.deinit(gpa);
+            const genesis = try genesis_digest();
+            const block = try harness.make_raw_block(gpa, genesis, .new(1), 100);
+            const other = try harness.make_raw_block(gpa, genesis, .new(1), 200);
+            try testing.expect(!block.digest().eql(other.digest()));
+            const proposal = harness.Proposal.init(round_at(1), .zero(), block.digest());
+            const quorum = harness.quorum;
+            var finalization = try harness.make_finalization(gpa, &fixture, proposal, quorum);
+            defer finalization.deinit(gpa);
+            var application = try App.manual_ack(gpa, ctx.io());
+            defer application.deinit();
+            var started = try start_manual(
+                ctx.child("validator"),
+                "finalized-delivery-different-bytes",
+                &fixture,
+                application.clone(),
+                try common.RecordingBuffer.init(gpa, ctx.io()),
+            );
+            defer started.crash();
+            try testing.expectEqual(0, (try application.acknowledged()).get());
+            var subscriber = try started.mailbox.subscribe_by_digest(block.digest(), .wait);
+            defer subscriber.deinit();
+            var other_subscriber = try started.mailbox.subscribe_by_digest(other.digest(), .wait);
+            defer other_subscriber.deinit();
+
+            const wrong = try encode_pair(finalization, other);
+            defer gpa.free(wrong);
+            const rejected = try deliver_finalized(started.resolver, wrong);
+            try testing.expectEqual(common.Outcome.invalid, rejected);
+            const mailbox = &started.mailbox;
+            try testing.expect(try mailbox.get_block(.{ .height = .new(1) }) == null);
+            try testing.expect(try mailbox.get_block(.{ .digest = block.digest() }) == null);
+            try testing.expect(try mailbox.get_block(.{ .digest = other.digest() }) == null);
+            try testing.expect(try mailbox.get_finalization(.new(1)) == null);
+            try testing.expect(application.tip() == null);
+            try testing.expectError(error.Empty, subscriber.try_recv());
+            try testing.expectError(error.Empty, other_subscriber.try_recv());
+
+            // The same certificate accepts its own block, isolating the rejected byte binding.
+            const right = try encode_pair(finalization, block);
+            defer gpa.free(right);
+            const accepted = try deliver_finalized(started.resolver, right);
+            try testing.expectEqual(common.Outcome{ .resolved = .complete }, accepted);
+            var delivered = try subscriber.recv();
+            defer delivered.deinit();
+            try testing.expect(delivered.digest().eql(block.digest()));
+            try testing.expectEqual(1, (try application.acknowledged()).get());
+            try testing.expectError(error.Empty, other_subscriber.try_recv());
+        }
+    }.body);
+}
