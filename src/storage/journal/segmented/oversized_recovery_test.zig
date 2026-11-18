@@ -1179,13 +1179,16 @@ test "oversized recovery: an entry whose value was lost is never adopted again" 
 
 const iface = @import("runtime").storage;
 
-/// commonware's `SyncFaultContext`: every blob of `fail_partition` fails its syncs; everything
-/// else passes through to `inner`.
+/// commonware's `SyncFaultContext` (and, with `cancel_reads`, a fired `ReadGateContext`): every
+/// blob of `fail_partition` fails its syncs, or its reads with `Canceled`; everything else
+/// passes through to `inner`.
 const SyncFault = struct {
     inner: iface.Storage,
     fail_partition: []const u8,
+    /// Fail reads with `Canceled` instead of failing syncs.
+    cancel_reads: bool = false,
 
-    const FaultBlob = struct { inner: iface.Blob };
+    const FaultBlob = struct { inner: iface.Blob, storage: *SyncFault };
 
     const storage_vtable: iface.Storage.VTable = .{
         .open_versioned = open_versioned,
@@ -1222,7 +1225,7 @@ const SyncFault = struct {
             opened.blob.close();
             return error.Io;
         };
-        wrapper.* = .{ .inner = opened.blob };
+        wrapper.* = .{ .inner = opened.blob, .storage = self };
         opened.blob = .{ .ptr = wrapper, .vtable = &blob_vtable };
         return opened;
     }
@@ -1249,7 +1252,9 @@ const SyncFault = struct {
         buffer: []u8,
         options: iface.ReadOptions,
     ) iface.Error!void {
-        return blob(ptr).inner.read_at_options(offset, buffer, options);
+        const wrapper = blob(ptr);
+        if (wrapper.storage.cancel_reads) return error.Canceled;
+        return wrapper.inner.read_at_options(offset, buffer, options);
     }
 
     fn write_at(
@@ -1265,7 +1270,9 @@ const SyncFault = struct {
         return blob(ptr).inner.resize(length);
     }
 
-    fn sync(_: *anyopaque) iface.Error!void {
+    fn sync(ptr: *anyopaque) iface.Error!void {
+        const wrapper = blob(ptr);
+        if (wrapper.storage.cancel_reads) return wrapper.inner.sync();
         return error.Io;
     }
 
@@ -1646,4 +1653,67 @@ test "oversized recovery: a tracked journal reopens after a destroy stopped in i
         try testing.expectEqual(1, (try journal.get(1, 0)).id);
     }
     try testing.expect(found > 0);
+}
+
+test "oversized recovery: a value read cancelled during replay fails the replay" {
+    // commonware drops `next` while a gated value read is pending, with and without a
+    // resumed `next`, over a valid or a corrupt second value. Reads here are synchronous, so
+    // the cancellation surfaces as the value read's `Canceled` error.
+    for ([_]bool{ false, true }) |corrupt| {
+        var h = try Harness.init();
+        defer h.deinit();
+        var journal = try h.open_checkpoint(.{ .section = 0, .size = 0 });
+        var located: [3]Located = undefined;
+        for (&located, 0..) |*slot, id| slot.* = try append(&journal, 1, id, fill(id));
+        try journal.sync_all();
+        journal.deinit();
+        // Only the first entry is committed; the others need verification.
+        var markers = try Markers.init(gpa, h.storage.interface(), .{
+            .partition = "test-markers",
+            .codec_config = {},
+        });
+        _ = try markers.put(1, 1);
+        try markers.sync();
+        markers.deinit();
+        if (corrupt) {
+            const opened = try h.storage.open("test-values", &manager_mod.section_name(1));
+            try opened.blob.write_at(located[1].offset, &.{0xFF}, .{});
+            try opened.blob.sync();
+            opened.blob.close();
+        }
+        var gate: SyncFault = .{
+            .inner = h.storage.interface(),
+            .fail_partition = "test-values",
+        };
+        const storage = gate.interface();
+        var recovery = try Journal.init_with_markers(gpa, storage, h.cfg(), "test-markers");
+        // The committed entry needs no value read.
+        try testing.expectEqual(0, (try recovery.next()).?.item.id);
+        gate.cancel_reads = true;
+        try testing.expectError(error.Canceled, recovery.next());
+        gate.cancel_reads = false;
+        try testing.expectError(error.ReplayFailed, recovery.finish());
+        // The marker was not advanced past the interrupted entry.
+        markers = try Markers.init(gpa, h.storage.interface(), .{
+            .partition = "test-markers",
+            .codec_config = {},
+        });
+        try testing.expectEqual(1, markers.get(1).?.*);
+        markers.deinit();
+        // Recovery rechecks the interrupted entry and retains only the valid prefix.
+        const retained: u64 = if (corrupt) 1 else 3;
+        journal = try h.open_tracked();
+        try testing.expectEqual(retained * chunk, try journal.size(1));
+        for (located[0..@intCast(retained)], 0..) |slot, id| {
+            try testing.expectEqual(id, (try journal.get(1, id)).id);
+            try expect_value(&journal, 1, slot, fill(id));
+        }
+        journal.deinit();
+        markers = try Markers.init(gpa, h.storage.interface(), .{
+            .partition = "test-markers",
+            .codec_config = {},
+        });
+        defer markers.deinit();
+        try testing.expectEqual(retained, markers.get(1).?.*);
+    }
 }

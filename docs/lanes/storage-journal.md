@@ -26,9 +26,13 @@ resize, sync), `runtime.storage`, with the in-memory backend `runtime.storage.me
   `Recovery` and ported tests.
 - [x] journal/segmented: oversized journal (fixed index plus glob values, checkpoint restore
   and marker-tracked recovery) with its core tests.
-- [ ] journal/segmented: the rest of oversized.rs's recovery tests (60 ported in
-  oversized_recovery_test.zig; left: the read-option and read-gate replay tests. The
-  value-alignment sync-concurrency test has no counterpart: syncs complete serially).
+- [x] journal/segmented: the rest of oversized.rs's recovery tests (61 ported in
+  oversized_recovery_test.zig). No counterpart: the value-alignment sync-concurrency test
+  and the dropped-`start_sync`-handle test (syncs complete serially and synchronously), and
+  the read-options test (journals take no `ReadOptions` yet; see the item below). The
+  dropped-replay read-gate test is ported as a `Canceled` value read.
+- [ ] Thread commonware's `ReadOptions` (the `dont_cache` hint) through journal replay and
+  `init_with_markers`, with oversized.rs's read-options propagation test.
 - [x] journal/contiguous: fixed journal (checkpoint, blob partition, recovery with watermark
   and clear intent, bounded open, `init_at_size`, `clear_to_size`, replay batches) with the
   shared contiguous suite and the checkpoint tests.
