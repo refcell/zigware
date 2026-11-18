@@ -494,3 +494,135 @@ test "fuzz paged writer crashes (seeded)" {
         };
     }
 }
+
+test "read_many_into: empty" {
+    var h = try Harness.init();
+    defer h.deinit();
+    var w = try h.writer("rmany");
+    defer w.deinit();
+    _ = try w.append(&@as([8]u8, @splat(0)));
+    try testing.expectEqual(0, try w.read_many_into(&.{}, &.{}, 4));
+    try testing.expectEqual(0, try w.read_ranges_into(&.{}, &.{}));
+}
+
+/// Items of 4 bytes at `offsets` read back the matching bytes of `data`, and `served` of them
+/// came from the write buffer or page cache.
+fn expect_many(w: *W, data: []const u8, offsets: []const u64, served: usize) !void {
+    const buf = try gpa.alloc(u8, offsets.len * 4);
+    defer gpa.free(buf);
+    @memset(buf, 0xEE);
+    try testing.expectEqual(served, try w.read_many_into(buf, offsets, 4));
+    for (offsets, 0..) |offset, index| {
+        const at: usize = @intCast(offset);
+        try testing.expectEqualSlices(u8, data[at..][0..4], buf[index * 4 ..][0..4]);
+    }
+}
+
+test "read_many_into: items in the tip, the cache, and both" {
+    var h = try Harness.init();
+    defer h.deinit();
+    const data = sequence(0, 31);
+    // All in the unflushed tip.
+    var w = try h.writer("tip");
+    _ = try w.append(data[0..20]);
+    try expect_many(&w, &data, &.{ 0, 4, 8, 12, 16 }, 5);
+    w.deinit();
+    // Synced bytes stay readable from the retained partial tip.
+    w = try h.writer("cache");
+    _ = try w.append(data[0..20]);
+    try w.sync();
+    try expect_many(&w, &data, &.{ 0, 8, 16 }, 3);
+    w.deinit();
+    // Offsets spanning synced and unsynced bytes of one partial tip.
+    w = try h.writer("mixed");
+    defer w.deinit();
+    _ = try w.append(data[0..16]);
+    try w.sync();
+    _ = try w.append(data[16..]);
+    try expect_many(&w, &data, &.{ 0, 4, 16, 24 }, 4);
+}
+
+test "read_many_into: out of bounds and offset overflow" {
+    var h = try Harness.init();
+    defer h.deinit();
+    var w = try h.writer("rmany");
+    defer w.deinit();
+    _ = try w.append(&sequence(0, 19));
+    var buf: [8]u8 = undefined;
+    try testing.expectError(error.BlobInsufficientLength, w.read_many_into(&buf, &.{ 0, 17 }, 4));
+    const max = std.math.maxInt(u64);
+    try testing.expectError(error.OffsetOverflow, w.read_many_into(buf[0..4], &.{max - 1}, 4));
+    const ranges = [_]W.Range{.{ .offset = 18, .len = 4 }};
+    try testing.expectError(error.BlobInsufficientLength, w.read_ranges_into(buf[0..4], &ranges));
+}
+
+test "read_many_into: matches read_into after an evicted cache" {
+    var h = try Harness.init();
+    defer h.deinit();
+    var w = try h.writer("rmany");
+    defer w.deinit();
+    var data: [page_size * 4 + 17]u8 = undefined;
+    for (&data, 0..) |*byte, index| byte.* = @truncate(index * 7);
+    _ = try w.append(&data);
+    try w.sync();
+    h.cache_ref.clear();
+    // Items within pages, straddling pages, and in the tip.
+    const offsets = [_]u64{ 0, page_size - 2, page_size * 2 + 5, page_size * 4 + 10 };
+    const reads = h.storage.reads;
+    try expect_many(&w, &data, &offsets, 1);
+    try testing.expect(h.storage.reads > reads);
+    // The pages are cached now, so every item is served without a blob read.
+    const cached = h.storage.reads;
+    try expect_many(&w, &data, &offsets, offsets.len);
+    try testing.expectEqual(cached, h.storage.reads);
+}
+
+test "read_ranges_into: mixed lengths and the tail" {
+    var h = try Harness.init();
+    defer h.deinit();
+    var w = try h.writer("ranges");
+    defer w.deinit();
+    var data: [3 * page_size + 37]u8 = undefined;
+    for (&data, 0..) |*byte, index| byte.* = @intCast(index % 251);
+    _ = try w.append(data[0 .. 3 * page_size]);
+    try w.sync();
+    _ = try w.append(data[3 * page_size ..]);
+    // Empty, inside a page, crossing pages, crossing into the tip, inside the tip, empty.
+    const ranges = [_]W.Range{
+        .{ .offset = 0, .len = 0 },
+        .{ .offset = 1, .len = 3 },
+        .{ .offset = page_size + 2, .len = 5 },
+        .{ .offset = 2 * page_size - 2, .len = 4 },
+        .{ .offset = 3 * page_size - 3, .len = 8 },
+        .{ .offset = 3 * page_size + 9, .len = 9 },
+        .{ .offset = data.len, .len = 0 },
+    };
+    var expected: [29]u8 = undefined;
+    var start: usize = 0;
+    for (ranges) |range| {
+        const at: usize = @intCast(range.offset);
+        @memcpy(expected[start..][0..range.len], data[at..][0..range.len]);
+        start += range.len;
+    }
+    try testing.expectEqual(expected.len, start);
+    // With a cold cache only the empty ranges and the one inside the tip are served; caching
+    // page 1 adds the range inside it.
+    var out: [29]u8 = @splat(0xEE);
+    h.cache_ref.clear();
+    try testing.expectEqual(3, try w.read_ranges_into(&out, &ranges));
+    try testing.expectEqualSlices(u8, &expected, &out);
+    h.cache_ref.clear();
+    var one: [1]u8 = undefined;
+    try w.read_into(&one, page_size + 1);
+    out = @splat(0xEE);
+    try testing.expectEqual(4, try w.read_ranges_into(&out, &ranges));
+    try testing.expectEqualSlices(u8, &expected, &out);
+    // The cache-only variant names the ranges that still need a blob read.
+    h.cache_ref.clear();
+    var misses: [ranges.len]usize = undefined;
+    const count = w.try_read_ranges_sync_into(&out, &ranges, &misses);
+    try testing.expectEqualSlices(usize, &.{ 1, 2, 3, 4 }, misses[0..count]);
+    // Ranges past the writer miss entirely.
+    const past = [_]W.Range{.{ .offset = data.len, .len = 1 }};
+    try testing.expectEqual(1, w.try_read_ranges_sync_into(out[0..1], &past, &misses));
+}

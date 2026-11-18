@@ -16,8 +16,9 @@ resize, sync), `runtime.storage`, with the in-memory backend `runtime.storage.me
 - [x] runtime buffer `Write` and its tip (write.rs, tip.rs) with their tests.
 - [x] runtime buffer `Read` (read.rs) with mod.rs's read tests; `read` copies into the caller's
   buffer (one refill buffer allocated at `init`) and rewinds on failure.
-- [ ] runtime buffer rest: `Sealed`/`seal`/`snapshot`, `read_many_into`/`read_ranges_into`,
-  and the remaining writer tests.
+- [x] paged `Writer.read_many_into`/`read_ranges_into`/`try_read_ranges_sync_into` with
+  writer.rs's and view.rs's batch-read tests (cache tried for every range before any blob read).
+- [ ] runtime buffer rest: `Sealed`/`seal`/`snapshot` and the remaining writer tests.
 - [x] journal frame format and durability (frame.rs, durability.rs), byte-identical.
 - [x] journal/segmented: section manager and fixed segmented journal (append, read, replay,
   prune, bounded init, floors and checkpoint restore), torn-page repair; tests incl.

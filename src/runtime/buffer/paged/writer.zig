@@ -525,6 +525,105 @@ pub const Writer = struct {
         return self.cache_ref.read_cached(self.id, buf[0..prefix_len], offset) == prefix_len;
     }
 
+    /// A read range: `len` bytes at `offset`.
+    pub const Range = struct { offset: u64, len: usize };
+
+    /// Check `ranges` are sorted, non-overlapping, within the writer, and fill `buf` exactly
+    /// (commonware's `validate_read_ranges`; unsorted ranges or a wrong `buf` are a bug).
+    fn validate_ranges(self: *const Self, buf_len: usize, ranges: []const Range) Error!void {
+        var expected: usize = 0;
+        var previous_end: u64 = 0;
+        for (ranges, 0..) |range, index| {
+            expected += range.len;
+            const end = std.math.add(u64, range.offset, range.len) catch
+                return error.OffsetOverflow;
+            if (index > 0) assert(range.offset >= previous_end);
+            if (end > self.size()) return error.BlobInsufficientLength;
+            previous_end = end;
+        }
+        assert(expected == buf_len);
+    }
+
+    /// Read `ranges` into consecutive slots of `buf`. Returns how many were served from the
+    /// write buffer and page cache without a blob read (empty ranges count as served).
+    pub fn read_ranges_into(self: *Self, buf: []u8, ranges: []const Range) Error!usize {
+        try self.validate_ranges(buf.len, ranges);
+        // Like commonware, every range tries the cache before any blob read, so the count
+        // does not depend on pages an earlier miss brought in.
+        var served: usize = 0;
+        var start: usize = 0;
+        for (ranges) |range| {
+            if (self.try_read_sync_into(buf[start..][0..range.len], range.offset)) served += 1;
+            start += range.len;
+        }
+        if (served == ranges.len) return served;
+        start = 0;
+        for (ranges) |range| {
+            const slot = buf[start..][0..range.len];
+            start += range.len;
+            if (self.try_read_sync_into(slot, range.offset)) continue;
+            try self.read_into(slot, range.offset);
+        }
+        assert(start == buf.len and served <= ranges.len);
+        return served;
+    }
+
+    /// Read `item_size`-byte items at sorted `offsets` into consecutive slots of `buf`.
+    /// Returns how many were served without a blob read.
+    pub fn read_many_into(
+        self: *Self,
+        buf: []u8,
+        offsets: []const u64,
+        item_size: usize,
+    ) Error!usize {
+        assert(item_size > 0);
+        assert(buf.len == offsets.len * item_size);
+        var served: usize = 0;
+        for (offsets, 0..) |offset, index| {
+            if (index > 0) assert(offset >= offsets[index - 1] + item_size);
+            const end = std.math.add(u64, offset, item_size) catch return error.OffsetOverflow;
+            if (end > self.size()) return error.BlobInsufficientLength;
+        }
+        for (offsets, 0..) |offset, index| {
+            const slot = buf[index * item_size ..][0..item_size];
+            if (self.try_read_sync_into(slot, offset)) served += 1;
+        }
+        if (served == offsets.len) return served;
+        for (offsets, 0..) |offset, index| {
+            const slot = buf[index * item_size ..][0..item_size];
+            if (!self.try_read_sync_into(slot, offset)) try self.read_into(slot, offset);
+        }
+        assert(served <= offsets.len);
+        return served;
+    }
+
+    /// Cache-only `read_ranges_into`: writes the indices of ranges that need a blob read into
+    /// `misses` (one slot per range) and returns how many there are. Every index misses when
+    /// the ranges extend past the writer; missed slots in `buf` hold unspecified bytes.
+    pub fn try_read_ranges_sync_into(
+        self: *Self,
+        buf: []u8,
+        ranges: []const Range,
+        misses: []usize,
+    ) usize {
+        assert(misses.len >= ranges.len);
+        var count: usize = 0;
+        self.validate_ranges(buf.len, ranges) catch {
+            for (misses[0..ranges.len], 0..) |*miss, index| miss.* = index;
+            return ranges.len;
+        };
+        var start: usize = 0;
+        for (ranges, 0..) |range, index| {
+            const slot = buf[start..][0..range.len];
+            start += range.len;
+            if (self.try_read_sync_into(slot, range.offset)) continue;
+            misses[count] = index;
+            count += 1;
+        }
+        assert(count <= ranges.len);
+        return count;
+    }
+
     /// Copy the part of `[offset, offset + buf.len)` held in the write buffer; returns the
     /// length of the prefix below it.
     fn copy_tail_overlap(self: *const Self, buf: []u8, offset: u64) usize {
