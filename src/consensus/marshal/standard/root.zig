@@ -23,6 +23,7 @@ test {
     _ = @import("tests/common.zig");
     _ = @import("tests/floor.zig");
     _ = @import("tests/coverage.zig");
+    _ = @import("tests/dispatch.zig");
     _ = @import("tests/cache_epoch.zig");
     _ = @import("tests/scenarios.zig");
     _ = @import("tests/wrappers.zig");

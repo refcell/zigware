@@ -507,6 +507,13 @@ pub const RecordingResolver = struct {
         return out;
     }
 
+    /// The targets of the targeted fetch at `index` (borrowed until `deinit`).
+    pub fn targeted_targets(self: RecordingResolver, index: usize) []const K {
+        const state = self.shared.lock();
+        defer self.shared.unlock();
+        return state.targeted.items[index].targets;
+    }
+
     pub fn targeted_is_empty(self: RecordingResolver) bool {
         const state = self.shared.lock();
         defer self.shared.unlock();
