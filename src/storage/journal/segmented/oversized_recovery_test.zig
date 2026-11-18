@@ -430,8 +430,9 @@ test "oversized recovery: reading a value with a short size fails" {
     var journal = try h.open_checkpoint(.{ .section = 0, .size = 0 });
     defer journal.deinit();
     const located = try append(&journal, 1, 1, fill(42));
-    // Sizes 0 through 3 cannot even hold the checksum; one byte short fails to verify.
-    for ([_]u32{ 0, 1, 2, 3, located.size - 1 }) |size| {
+    // Sizes 0 through 3 cannot hold the checksum, 4 holds no data, 5 too little; one byte
+    // short fails to verify.
+    for ([_]u32{ 0, 1, 2, 3, 4, 5, located.size - 1 }) |size| {
         if (journal.get_value(1, located.offset, size)) |_| {
             return error.TestUnexpectedResult;
         } else |_| {}
@@ -569,5 +570,243 @@ test "oversized recovery: orphan value sections in gaps are removed" {
     var retained = journal.values.sections();
     for ([_]u64{ 1, 3, 5 }) |section| try testing.expectEqual(section, retained.next().?);
     try testing.expectEqual(null, retained.next());
+    try journal.destroy();
+}
+
+const Crc32 = @import("cryptography").crc32.Crc32;
+
+test "oversized recovery: an index extension after prefix loss is discarded" {
+    var h = try Harness.init();
+    defer h.deinit();
+    try seed_three_sections(&h);
+    // Erase section 1's index by truncation and section 2's by removal, then write two pages
+    // of bytes with no valid checksum slots in each place.
+    for ([_]u64{ 1, 2 }) |section| {
+        const name = manager_mod.section_name(section);
+        var opened = try h.storage.open("test-index", &name);
+        const original = opened.len;
+        if (section == 1) {
+            try opened.blob.resize(0);
+            try opened.blob.sync();
+            opened.blob.close();
+        } else {
+            opened.blob.close();
+            try h.storage.remove("test-index", &name);
+        }
+        opened = try h.storage.open("test-index", &name);
+        defer opened.blob.close();
+        const zeros = try gpa.alloc(u8, @intCast(original * 2));
+        defer gpa.free(zeros);
+        @memset(zeros, 0);
+        try opened.blob.write_at(0, zeros, .{});
+        try opened.blob.sync();
+    }
+    var journal = try h.open_tracked();
+    for ([_]u64{ 1, 2 }) |section| {
+        try testing.expectError(error.ItemOutOfRange, journal.get(section, 0));
+        const name = manager_mod.section_name(section);
+        try testing.expectEqual(0, (try h.storage.durable_len("test-index", &name)).?);
+        const located = try append(&journal, section, section, fill(section));
+        try testing.expectEqual(0, located.position);
+    }
+    try journal.sync(&.{ 1, 2 });
+    journal.deinit();
+    // The sentinel entries written after recovery survive a reopen.
+    journal = try h.open_tracked();
+    for ([_]u64{ 1, 2 }) |section| {
+        const stored = try journal.get(section, 0);
+        try testing.expectEqual(section, stored.id);
+        const value = try journal.get_value(section, stored.value_offset, stored.value_size);
+        try testing.expectEqual(fill(section), value);
+    }
+    try journal.destroy();
+}
+
+test "oversized recovery: trailing value garbage is truncated" {
+    var h = try Harness.init();
+    defer h.deinit();
+    var journal = try h.open_tracked();
+    var located: [2]Located = undefined;
+    for (&located, 0..) |*slot, i| slot.* = try append(&journal, 1, i, fill(i));
+    try journal.sync(&.{1});
+    journal.deinit();
+    const expected_next = byte_end(located[1]);
+    // A value write that crashed before its index entry leaves 100 garbage bytes.
+    const opened = try h.storage.open("test-values", &manager_mod.section_name(1));
+    try testing.expectEqual(expected_next, opened.len);
+    try opened.blob.write_at(opened.len, &@as([100]u8, @splat(0xDE)), .{});
+    try opened.blob.sync();
+    opened.blob.close();
+    journal = try h.open_tracked();
+    for (0..2) |i| try testing.expectEqual(i, (try journal.get(1, i)).id);
+    const appended = try append(&journal, 1, 99, fill(99));
+    try testing.expectEqual(2, appended.position);
+    try testing.expectEqual(expected_next, appended.offset);
+    try testing.expectEqual(99, (try journal.get(1, 2)).id);
+    try journal.destroy();
+}
+
+test "oversized recovery: an entry whose value range overflows is dropped" {
+    var h = try Harness.init_page(@intCast(base.TestEntry.fixed_size));
+    defer h.deinit();
+    var journal = try h.open_tracked();
+    _ = try append(&journal, 1, 1, fill(1));
+    try journal.sync(&.{1});
+    journal.deinit();
+    // A page with a valid checksum holding an entry whose offset plus size overflows.
+    var page: [base.TestEntry.fixed_size + 12]u8 = @splat(0);
+    std.mem.writeInt(u64, page[0..8], 1, .big);
+    std.mem.writeInt(u64, page[8..16], std.math.maxInt(u64) - 10, .big);
+    std.mem.writeInt(u32, page[16..20], 100, .big);
+    std.mem.writeInt(u16, page[20..22], base.TestEntry.fixed_size, .big);
+    std.mem.writeInt(u32, page[22..26], Crc32.checksum(page[0..20]), .big);
+    const opened = try h.storage.open("test-index", &manager_mod.section_name(1));
+    try opened.blob.write_at(0, &page, .{});
+    try opened.blob.sync();
+    opened.blob.close();
+    journal = try h.open_tracked();
+    try testing.expectError(error.ItemOutOfRange, journal.get(1, 0));
+    const appended = try append(&journal, 1, 99, fill(99));
+    try testing.expectEqual(0, appended.position);
+    // The values were truncated to zero with the entry.
+    try testing.expectEqual(0, appended.offset);
+    try journal.destroy();
+}
+
+test "oversized recovery: an emptied section stays open and reuses offsets from zero" {
+    var h = try Harness.init();
+    defer h.deinit();
+    var journal = try h.open_tracked();
+    for (0..3) |i| _ = try append(&journal, 1, i, fill(i));
+    _ = try append(&journal, 2, 10, fill(10));
+    // One sync of every section publishes no marker, so the damage lies above every floor.
+    try journal.sync_all();
+    journal.deinit();
+    try resize_index(&h, 1, 0);
+    journal = try h.open_tracked();
+    try testing.expectError(error.ItemOutOfRange, journal.get(1, 0));
+    try testing.expectEqual(10, (try journal.get(2, 0)).id);
+    try testing.expectEqual(1, journal.oldest_section());
+    // Recovery removed the orphaned value bytes before the section is reused.
+    const located = try append(&journal, 1, 99, fill(99));
+    try testing.expectEqual(0, located.position);
+    try testing.expectEqual(0, located.offset);
+    try testing.expectEqual(99, (try journal.get(1, 0)).id);
+    try expect_value(&journal, 1, located, fill(99));
+    try journal.sync_all();
+    journal.deinit();
+    journal = try h.open_tracked();
+    try testing.expectEqual(99, (try journal.get(1, 0)).id);
+    try testing.expectEqual(10, (try journal.get(2, 0)).id);
+    try journal.destroy();
+}
+
+test "oversized recovery: section numbers near the maximum" {
+    var h = try Harness.init();
+    defer h.deinit();
+    const max = std.math.maxInt(u64);
+    const sections = [_]u64{ max - 3, max - 2, max - 1 };
+    var journal = try h.open_tracked();
+    var located: [3]Located = undefined;
+    for (&located, sections) |*slot, section| {
+        slot.* = try append(&journal, section, section, fill(section & 0xFF));
+    }
+    try journal.sync_all();
+    journal.deinit();
+    // Lose the middle section's value.
+    try resize_values(&h, sections[1], byte_end(located[1]) - 1);
+    journal = try h.open_tracked();
+    try testing.expectEqual(sections[0], (try journal.get(sections[0], 0)).id);
+    try testing.expectEqual(sections[2], (try journal.get(sections[2], 0)).id);
+    try testing.expectError(error.ItemOutOfRange, journal.get(sections[1], 0));
+    const appended = try append(&journal, sections[1], 999, fill(0xAB));
+    try testing.expectEqual(0, appended.position);
+    try journal.destroy();
+}
+
+test "oversized recovery: a crash during recovery's index truncation" {
+    var h = try Harness.init();
+    defer h.deinit();
+    var journal = try h.open_tracked();
+    var located: [5]Located = undefined;
+    for (&located, 0..) |*slot, i| slot.* = try append(&journal, 1, i, fill(i));
+    try journal.sync(&.{1});
+    journal.deinit();
+    // The first crash loses the last two values.
+    try resize_values(&h, 1, byte_end(located[2]));
+    // Recovery was interrupted truncating the index from five entries to three: commonware
+    // keeps four chunks of the raw blob as the intermediate state.
+    try resize_index(&h, 1, 4 * chunk);
+    journal = try h.open_tracked();
+    for (located[0..3], 0..) |slot, i| {
+        try testing.expectEqual(i, (try journal.get(1, i)).id);
+        try expect_value(&journal, 1, slot, fill(i));
+    }
+    try testing.expectError(error.ItemOutOfRange, journal.get(1, 3));
+    const appended = try append(&journal, 1, 100, fill(0xFF));
+    try testing.expectEqual(3, appended.position);
+    // No gap: the new value starts where entry 2's ended.
+    try testing.expectEqual(byte_end(located[2]), appended.offset);
+    try journal.destroy();
+}
+
+test "oversized recovery: a crash during orphan cleanup" {
+    var h = try Harness.init();
+    defer h.deinit();
+    var journal = try h.open_tracked();
+    const first = try append(&journal, 1, 1, fill(1));
+    try journal.sync(&.{1});
+    journal.deinit();
+    try write_orphans(&h, &.{ 2, 3, 4 });
+    // The interrupted cleanup removed section 2 only.
+    try h.storage.remove("test-values", &manager_mod.section_name(2));
+    journal = try h.open_tracked();
+    try testing.expectEqual(1, (try journal.get(1, 0)).id);
+    try expect_value(&journal, 1, first, fill(1));
+    try testing.expectEqual(1, journal.oldest_section());
+    try testing.expectEqual(1, journal.newest_section());
+    try testing.expectEqual(1, journal.values.newest_section());
+    try testing.expectEqual(0, (try append(&journal, 2, 42, fill(42))).position);
+    try journal.destroy();
+}
+
+test "oversized recovery: last of a pruned section reports the prune" {
+    var h = try Harness.init();
+    defer h.deinit();
+    var journal = try h.open_checkpoint(.{ .section = 0, .size = 0 });
+    _ = try append(&journal, 0, 1, fill(1));
+    _ = try append(&journal, 1, 2, fill(1));
+    try journal.sync_all();
+    try testing.expect(try journal.prune(1));
+    try testing.expectError(error.AlreadyPrunedToSection, journal.last(0));
+    try testing.expect((try journal.last(1)) != null);
+    try journal.destroy();
+}
+
+test "oversized recovery: a tracked open keeps synced entries below a torn rewrite" {
+    var h = try Harness.init();
+    defer h.deinit();
+    // Four synced entries fill index page 0 and leave a 16-byte partial page 1.
+    var journal = try h.open_tracked();
+    for (0..4) |id| _ = try append(&journal, 1, id, fill(id));
+    try journal.sync(&.{1});
+    // An empty flush publishes the section's marker.
+    try journal.sync(&.{});
+    // Five more entries rewrite page 1 in full and write a partial page 2; the values are lost.
+    for (4..9) |id| _ = try append(&journal, 1, id, fill(id));
+    try journal.index.sync(&.{1});
+    journal.deinit();
+    h.storage.crash();
+    // Lose one byte of the page-1 rewrite beyond its durable 16 bytes, so page 1's short
+    // checksum slot still validates while page 2 looks like the tail.
+    const opened = try h.storage.open("test-index", &manager_mod.section_name(1));
+    try opened.blob.write_at(64 + 12 + 16 + 7, &.{0}, .{});
+    try opened.blob.sync();
+    opened.blob.close();
+    journal = try h.open_tracked();
+    try testing.expectEqual(4 * chunk, try journal.size(1));
+    const stored = try journal.get(1, 3);
+    const value = try journal.get_value(1, stored.value_offset, stored.value_size);
+    try testing.expectEqual(fill(3), value);
     try journal.destroy();
 }
