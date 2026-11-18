@@ -26,7 +26,7 @@ const Clap = ui.clap.Parser(.{ .about = about, .args = &.{
 } });
 
 /// A bootstrapper: its key seed and socket address.
-pub const Bootstrapper = struct { key: u64, address: Io.net.IpAddress };
+pub const Bootstrapper = rust.Bootstrapper;
 
 /// Parsed arguments; slices are owned by the allocator given to `parse`.
 pub const Arguments = struct {
@@ -77,7 +77,7 @@ pub fn parse(
             }
         }
     }
-    const bootstrappers = try parse_bootstrappers(gpa, values[0], panic);
+    const bootstrappers = try rust.parse_bootstrappers(gpa, values[0], panic);
     assert(participants.len > 0);
     return .{ .run = .{
         .key = key,
@@ -101,34 +101,6 @@ fn parse_participants(gpa: Allocator, text: []const u8) Allocator.Error![]const 
     assert(participants.items.len > 0);
     return participants.toOwnedSlice(gpa);
 }
-
-/// Each bootstrapper as `<key>@<ip>:<port>` (text after a second `@` is ignored).
-fn parse_bootstrappers(
-    gpa: Allocator,
-    text: ?[]const u8,
-    panic: *Panic,
-) (Allocator.Error || error{Panic})![]const Bootstrapper {
-    var bootstrappers: std.ArrayList(Bootstrapper) = .empty;
-    errdefer bootstrappers.deinit(gpa);
-    var entries = std.mem.splitScalar(u8, text orelse return &.{}, ',');
-    while (entries.next()) |entry| {
-        var fields = std.mem.splitScalar(u8, entry, '@');
-        const key = rust.parse_unsigned(u64, fields.first()) catch |failure| {
-            const debug = rust.int_error_debug(failure);
-            return panic.fail("Bootstrapper key not well-formed: {s}", .{debug});
-        };
-        const address_text = fields.next() orelse return panic.fail(out_of_bounds, .{});
-        const address = rust.parse_socket_address(address_text) orelse return panic.fail(
-            "Bootstrapper address not well-formed: AddrParseError(Socket)",
-            .{},
-        );
-        try bootstrappers.append(gpa, .{ .key = key, .address = address });
-    }
-    assert(bootstrappers.items.len > 0);
-    return bootstrappers.toOwnedSlice(gpa);
-}
-
-const out_of_bounds = "index out of bounds: the len is 1 but the index is 1";
 
 /// A failure commonware reports with a panic; the message is commonware's.
 pub const Panic = rust.Panic;

@@ -120,7 +120,10 @@ statistics, output, CLI) and run against a minimal in-lane stand-in, then switch
   Interop: commonware's Rust validators on two networks of 4 finalize through it and bridge
   each other's finalizations. Field values over 128 bytes are cut by runtime's traces
   (`field_value_size_max`), so `network=` (192 hex digits) prints shortened.
-- [ ] `validator` binary on discovery and simplex (bls12381 threshold).
+- [x] `validator` (`zig build run-bridge-validator`): clap output and every argument panic
+  match commonware's binary (`testdata/validator_clap_cases.txt`). Two networks of 4
+  zigware validators and zigware's indexer finalize and bridge each other's finalizations
+  at commonware's rate.
 - [ ] Demo: two networks of 4 validators and an indexer.
 
 ### Follow-ups
@@ -146,3 +149,4 @@ statistics, output, CLI) and run against a minimal in-lane stand-in, then switch
 - 2026-11-16: log and chat Logs panes show p2p and simplex events; bridge wire types.
 - 2026-11-16: bridge's indexer store and application.
 - 2026-11-16: bridge's indexer binary; `ui.fmt` (tracing's default log format).
+- 2026-11-18: bridge's validator binary; bootstrapper parsing moves to `ui.rust`.

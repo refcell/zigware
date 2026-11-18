@@ -101,7 +101,8 @@ const packages = [_]Package{
 /// `<name>-<binary>`.
 /// Add an example here once its main.zig exists.
 const examples = [_][]const u8{
-    "estimator", "flood", "chat", "log", "bridge/dealer", "flood/setup", "bridge/indexer",
+    "estimator",     "flood",       "chat",           "log",
+    "bridge/dealer", "flood/setup", "bridge/indexer", "bridge/validator",
     "dkg",
 };
 
