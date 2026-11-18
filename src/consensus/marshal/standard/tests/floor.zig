@@ -873,3 +873,206 @@ test "standard set floor below processed height preserves in-flight ack" {
         }
     }.body);
 }
+
+const Processed = @import("../../core/floor.zig").Processed;
+
+/// Polls until the processed position is the stored block at `height`.
+fn wait_processed_block(ctx: Ctx, mailbox: anytype, height: u64) !void {
+    var waited_ms: u64 = 0;
+    while (true) : (waited_ms += 10) {
+        const processed = try mailbox.get_processed();
+        if (processed != null and std.meta.eql(processed.?, Processed{ .block = .new(height) })) {
+            return;
+        }
+        if (waited_ms > 5000) return error.WaitTimedOut;
+        try ctx.sleep(.fromMilliseconds(10));
+    }
+}
+
+test "standard floor with stored predecessor reports block" {
+    try run(struct {
+        fn body(ctx: Ctx) anyerror!void {
+            var rng = utils.rng.test_rng();
+            var fixture = try harness.fixture(gpa, &rng);
+            defer fixture.deinit(gpa);
+            var application = try App.manual_ack(gpa, ctx.io());
+            defer application.deinit();
+            var started = try start_manual(
+                ctx.child("validator"),
+                "floor-stored-predecessor",
+                &fixture,
+                application.clone(),
+                try common.RecordingBuffer.init(gpa, ctx.io()),
+            );
+            defer started.crash();
+            try testing.expectEqual(0, (try application.acknowledged()).get());
+
+            // Finalize and acknowledge block 1.
+            var block1 = try block_at(hash("block1-parent"), 1, 100);
+            defer block1.deinit();
+            try testing.expect(try started.mailbox.verified(round_at(1), block1.clone()));
+            report(&started.mailbox, try finalize(&fixture, 1, 0, &block1));
+            try testing.expectEqual(1, (try application.acknowledged()).get());
+            try wait_processed_block(ctx, &started.mailbox, 1);
+
+            // Install a floor at block 2. Block 1 stays stored, so marshal reports it as the
+            // processed block while block 2 awaits acknowledgement.
+            var block2 = try block_at(block1.digest(), 2, 200);
+            defer block2.deinit();
+            try testing.expect(try started.mailbox.verified(round_at(2), block2.clone()));
+            try started.mailbox.set_floor(try finalize(&fixture, 2, 1, &block2));
+            const state: Pending = .{ .application = application, .height = 2 };
+            try common.wait_until(ctx, 5000, "floor block dispatch", state, pending_is);
+            const processed = (try started.mailbox.get_processed()).?;
+            try testing.expectEqual(Processed{ .block = .new(1) }, processed);
+            var anchor = (try started.mailbox.get_anchor()).?;
+            defer anchor.block.deinit();
+            try testing.expectEqual(Processed{ .block = .new(1) }, anchor.processed);
+            try testing.expect(anchor.block.digest().eql(block1.digest()));
+        }
+    }.body);
+}
+
+test "standard same-height floor anchor keeps pending ack" {
+    try run(struct {
+        fn body(ctx: Ctx) anyerror!void {
+            var rng = utils.rng.test_rng();
+            var fixture = try harness.fixture(gpa, &rng);
+            defer fixture.deinit(gpa);
+            var application = try App.manual_ack(gpa, ctx.io());
+            defer application.deinit();
+            var started = try start_manual(
+                ctx.child("validator"),
+                "same-height-floor-keeps-pending-ack",
+                &fixture,
+                application.clone(),
+                try common.RecordingBuffer.init(gpa, ctx.io()),
+            );
+            defer started.crash();
+            try testing.expectEqual(0, (try application.acknowledged()).get());
+            const parent = hash("block1-parent");
+            try dispatch_block_one(ctx, &started, &fixture, application, parent);
+            try acknowledge_processed(ctx, &started, application, 1);
+            const block1 = try block_digest(parent, 1, 100);
+            try finalize_block_two(&started, &fixture, block1);
+            const state: Pending = .{ .application = application, .height = 2 };
+            try common.wait_until(ctx, 5000, "second block dispatch", state, pending_is);
+
+            // A floor anchored at the processed height 1 must not clear or duplicate the
+            // in-flight height 2 ack.
+            const proposal = harness.Proposal.init(round_at(5), .zero(), block1);
+            const floor = try harness.make_finalization(gpa, &fixture, proposal, harness.quorum);
+            try started.mailbox.set_floor(floor);
+            var stored = (try started.mailbox.get_block(.{ .height = .new(1) })).?;
+            stored.deinit();
+            try expect_pending(application, 2);
+        }
+    }.body);
+}
+
+test "standard stale floor anchor advances round floor" {
+    try run(struct {
+        fn body(ctx: Ctx) anyerror!void {
+            var rng = utils.rng.test_rng();
+            var fixture = try harness.fixture(gpa, &rng);
+            defer fixture.deinit(gpa);
+            var application = try App.manual_ack(gpa, ctx.io());
+            defer application.deinit();
+            var started = try start_manual(
+                ctx.child("validator"),
+                "stale-floor-anchor-round-floor",
+                &fixture,
+                application.clone(),
+                try common.RecordingBuffer.init(gpa, ctx.io()),
+            );
+            defer started.crash();
+            try testing.expectEqual(0, (try application.acknowledged()).get());
+            var block = try block_at(hash("processed-parent"), 1, 100);
+            defer block.deinit();
+            try testing.expect(try started.mailbox.verified(round_at(1), block.clone()));
+            report(&started.mailbox, try finalize(&fixture, 1, 0, &block));
+            try testing.expectEqual(1, (try application.acknowledged()).get());
+
+            const floor_round = round_at(5);
+            var subscription = try started.mailbox.subscribe_by_commitment(
+                hash("missing-before-stale-floor"),
+                .{ .fetch_by_round = floor_round },
+            );
+            defer subscription.deinit();
+            try wait_round_fetch(ctx, started.resolver, floor_round, true);
+
+            const proposal = harness.Proposal.init(floor_round, .zero(), block.digest());
+            const stale = try harness.make_finalization(gpa, &fixture, proposal, harness.quorum);
+            try started.mailbox.set_floor(stale);
+            try wait_round_fetch(ctx, started.resolver, floor_round, false);
+
+            // The stale anchor's round floor applies to later fetches: a hint at the floor
+            // round fetches nothing, which the barrier request orders after the hint.
+            const fetches_before = started.resolver.fetch_count();
+            try started.mailbox.hint_notarized(floor_round, hash("missing-after-stale-floor"));
+            var barrier = try block_at(block.digest(), 2, 200);
+            defer barrier.deinit();
+            try testing.expect(try started.mailbox.verified(round_at(2), barrier.clone()));
+            try testing.expectEqual(fetches_before, started.resolver.fetch_count());
+        }
+    }.body);
+}
+
+const FetchCount = struct { resolver: common.RecordingResolver };
+
+fn any_fetch(state: FetchCount) bool {
+    return state.resolver.fetch_count() > 0;
+}
+
+test "standard floor anchor uses parent digest as commitment" {
+    try run(struct {
+        fn body(ctx: Ctx) anyerror!void {
+            var rng = utils.rng.test_rng();
+            var fixture = try harness.fixture(gpa, &rng);
+            defer fixture.deinit(gpa);
+            var application = try App.manual_ack(gpa, ctx.io());
+            defer application.deinit();
+            var started = try start_manual(
+                ctx.child("validator"),
+                "standard-floor-parent-digest-commitment",
+                &fixture,
+                application.clone(),
+                try common.RecordingBuffer.init(gpa, ctx.io()),
+            );
+            defer started.crash();
+            const me = fixture.participants[0];
+            const genesis_parent = H.genesis_parent_commitment(harness.num_validators);
+            const parent_context: harness.Ctx = .{
+                .round = round_at(1),
+                .leader = me,
+                .parent = .{ .zero(), genesis_parent },
+            };
+            const parent = try harness.B.init(gpa, parent_context, hash(""), .new(1), 100);
+            const bad_context: harness.Ctx = .{
+                .round = round_at(2),
+                .leader = me,
+                .parent = .{ .new(1), genesis_parent },
+            };
+            const floor_block = try harness.B.init(gpa, bad_context, parent.digest(), .new(2), 200);
+            try testing.expect(!floor_block.parent().eql(floor_block.context_value.parent[1]));
+
+            // Standard commitments are digests, so the floor-anchor parent check uses the
+            // block's parent digest. The standard verification wrappers reject context-parent
+            // mismatches.
+            const proposal = harness.Proposal.init(round_at(2), .new(1), floor_block.digest());
+            const floor = try harness.make_finalization(gpa, &fixture, proposal, harness.quorum);
+            const encoded = try @import("codec").encode(harness.B, gpa, floor_block);
+            defer gpa.free(encoded);
+            try started.resolver.respond_to_next_fetch(encoded);
+            try started.mailbox.set_floor(floor);
+            const state: FetchCount = .{ .resolver = started.resolver };
+            try common.wait_until(ctx, 5000, "floor block fetch", state, any_fetch);
+            try testing.expect(try started.resolver.wait_for_delivery_response());
+
+            var stored = (try started.mailbox.get_block(.{ .height = .new(2) })).?;
+            stored.deinit();
+            var finalization = (try started.mailbox.get_finalization(.new(2))).?;
+            finalization.deinit(gpa);
+        }
+    }.body);
+}
