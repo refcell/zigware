@@ -20,4 +20,5 @@ test {
 test {
     _ = @import("tests/restart.zig");
     _ = @import("tests/common.zig");
+    _ = @import("tests/floor.zig");
 }

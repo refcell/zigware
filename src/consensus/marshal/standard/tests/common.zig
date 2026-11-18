@@ -914,13 +914,20 @@ pub fn Started(comptime Prov: type, comptime App: type, comptime Buf: type) type
             try try result;
         }
 
+        /// Waits for the actor to end on its own (its inputs stay open), then releases it.
+        pub fn join(self: *Self) !void {
+            const result = self.handle.join();
+            self.release();
+            try try result;
+        }
+
         fn release(self: *Self) void {
             self.mailbox.deinit();
             self.release_after_mailbox();
         }
 
         fn release_after_mailbox(self: *Self) void {
-            if (self.buffer) |*buffer| buffer.deinit();
+            if (self.buffer) |*buffer| deinit_value(buffer);
             self.resolver.deinit();
             self.stores.deinit();
             self.gpa.destroy(self.stores);
