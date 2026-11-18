@@ -61,7 +61,8 @@ const Input = struct {
     fn decode(bytes: []const u8) Input {
         var reader = fuzz_bytes.Reader.init(bytes);
         var input: Input = .{
-            .page_size = @intCast(1 + reader.int(u8)),
+            // commonware's `bounded_page_size`: 1..=256, so widen before adding.
+            .page_size = 1 + @as(u16, reader.int(u8)),
             .page_cache_size = 1 + reader.int(u8) % 16,
             .items_per_section = 1 + reader.int(u8) % 64,
             .write_buffer = 1 + reader.int(u16) % 2048,
@@ -434,6 +435,15 @@ fn recovery_run(bytes: []const u8) anyerror!void {
 
 test "fuzz queue_recovery (seeded)" {
     try fuzz_bytes.seeded(320, 0x71756575, 64, recovery_run);
+}
+
+test "queue_recovery: a 256-byte page size decodes and runs" {
+    // CI soak seed 456 drew a first byte of 0xFF, which overflowed `1 + u8` in decode.
+    var bytes: [64]u8 = @splat(0x07);
+    bytes[0] = 0xFF;
+    const input = Input.decode(&bytes);
+    try testing.expectEqual(@as(u16, 256), input.page_size);
+    try recovery_run(&bytes);
 }
 
 test "fuzz queue_recovery" {
