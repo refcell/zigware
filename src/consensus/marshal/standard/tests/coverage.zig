@@ -494,3 +494,80 @@ fn reproposal_delivered_below_processed_body(ctx: Ctx) anyerror!void {
 test "standard reproposal delivered below processed survives restart before ack" {
     try run(reproposal_delivered_below_processed_body);
 }
+
+/// Whether `resolver` recorded a fetch of the block `digest` for the finalization at `round`.
+fn fetched_block_for_round(
+    resolver: common.RecordingResolver,
+    digest: harness.D,
+    round: Round,
+) !bool {
+    const fetches = try resolver.fetches(gpa);
+    defer gpa.free(fetches);
+    const subscriber: handler.Annotation = .{ .finalized = .{ .by_round = round } };
+    for (fetches) |fetch| {
+        if (fetch.key != .block or !fetch.key.block.eql(digest)) continue;
+        if (fetch.subscriber.eql(subscriber)) return true;
+    }
+    return false;
+}
+
+/// Restarts without a buffer from block 10's first finalization, which the restored round
+/// floor already supersedes, and prunes below 20: block 11 goes, and block 10's finalization
+/// stays as the newest at or below the processed height.
+fn restart_pruned(state: *Reproposal, ctx: Ctx, prefix: []const u8) !ConstantUnbuffered {
+    var pruned = try start_floor(
+        harness.Provider,
+        common.Unbuffered,
+        ctx.child("pruned"),
+        prefix,
+        state.provider(),
+        reproposal_epoch_length,
+        try state.finalize(10, 10),
+        null,
+    );
+    errdefer pruned.crash();
+    try testing.expect(pruned.restored.cutoff.covers(.new(.zero(), .new(10))));
+    try pruned.mailbox.prune(.new(20));
+    try expect_processed(&pruned.mailbox, 20);
+    try testing.expect(!try has_block(&pruned.mailbox, .new(11)));
+    try testing.expect(!try has_finalization(&pruned.mailbox, .new(11)));
+    try testing.expect(try has_finalization(&pruned.mailbox, .new(10)));
+    try expect_pending_ack(pruned.application, 21);
+    return pruned;
+}
+
+fn late_finalization_block_delivered_body(ctx: Ctx) anyerror!void {
+    const prefix = "late-finalization-block-delivered-restart-before-ack";
+    var state: Reproposal = undefined;
+    try start_reproposal_processed_through_20(&state, ctx, prefix);
+    defer state.deinit();
+    state.run.crash();
+    var pruned = try restart_pruned(&state, ctx, prefix);
+    var late = try state.finalize(11, 11);
+    errdefer late.deinit(gpa);
+
+    // Block 11 is not local, so marshal caches the late finalization and fetches the block by
+    // its commitment.
+    report(&pruned.mailbox, late);
+    try expect_processed(&pruned.mailbox, 20);
+    const repaired = state.block(11);
+    const round = late.round();
+    try testing.expect(try fetched_block_for_round(pruned.resolver, repaired.digest(), round));
+
+    // Delivering the block alone pairs it with the cached finalization and raises the round
+    // floor; the pruned block is not stored. The test stops before height 21 is acknowledged.
+    const value = try codec.encode(B, gpa, repaired);
+    defer gpa.free(value);
+    const subscriber: handler.Annotation = .{ .finalized = .{ .by_round = round } };
+    const key: common.Key = .{ .block = repaired.digest() };
+    try testing.expectEqual(complete, try deliver(pruned.resolver, key, subscriber, value));
+    try expect_processed(&pruned.mailbox, 20);
+    try testing.expect(!try has_finalization(&pruned.mailbox, .new(11)));
+    try expect_pending_ack(pruned.application, 21);
+    pruned.crash();
+    try restart_with_retired_floor_resumes_at(ctx, prefix, late, 21);
+}
+
+test "standard late finalization block delivered below processed survives restart before ack" {
+    try run(late_finalization_block_delivered_body);
+}
