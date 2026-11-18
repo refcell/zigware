@@ -1733,3 +1733,226 @@ test "standard finalization rejects processed round block fetch" {
         }
     }.body);
 }
+
+const seed = @import("seed.zig");
+
+/// Subscribes to `missing` by round 1, verifies the barrier on `parent`, and checks no fetch
+/// was enqueued, then delivers `missing` through the buffer and checks the subscription
+/// resolves: restored progress controls network acquisition, while local ingress stays a
+/// valid source.
+fn expect_round_floor_restored(
+    started: *Manual,
+    buffer: common.RecordingBuffer,
+    parent: D,
+    missing: *const Block,
+) !void {
+    const fetches_before = started.resolver.fetch_count();
+    var subscription = try started.mailbox.subscribe_by_commitment(
+        missing.digest(),
+        .{ .fetch_by_round = round_at(1) },
+    );
+    defer subscription.deinit();
+    try verify_barrier(started, parent);
+    try testing.expectEqual(fetches_before, started.resolver.fetch_count());
+    try testing.expectError(error.Empty, subscription.try_recv());
+    const last = buffer.commitment_subscription_count() - 1;
+    try testing.expect(buffer.deliver_commitment_subscription(last, missing.clone()));
+    var delivered = try subscription.recv();
+    defer delivered.deinit();
+    try testing.expect(delivered.digest().eql(missing.digest()));
+}
+
+test "standard processed round restored after restart" {
+    try run(struct {
+        fn body(ctx: Ctx) anyerror!void {
+            const prefix = "processed-round-restart";
+            var rng = utils.rng.test_rng();
+            var fixture = try harness.fixture(gpa, &rng);
+            defer fixture.deinit(gpa);
+            var application = try App.manual_ack(gpa, ctx.io());
+            defer application.deinit();
+            var started = try start_manual(
+                ctx.child("validator"),
+                prefix,
+                &fixture,
+                application.clone(),
+                try common.RecordingBuffer.init(gpa, ctx.io()),
+            );
+            try testing.expectEqual(0, (try application.acknowledged()).get());
+            var block = try process_block_one(ctx, &started, &fixture, application);
+            defer block.deinit();
+            const info = (try started.mailbox.get_info(.latest)).?;
+            try testing.expectEqual(1, info.height.get());
+            try testing.expect(info.digest.eql(block.digest()));
+            started.crash();
+
+            var restarted_app = try App.manual_ack(gpa, ctx.io());
+            defer restarted_app.deinit();
+            var buffer = try common.RecordingBuffer.init(gpa, ctx.io());
+            defer buffer.deinit();
+            var restarted = try start_manual(
+                ctx.child("validator_restart"),
+                prefix,
+                &fixture,
+                restarted_app.clone(),
+                buffer.clone(),
+            );
+            defer restarted.crash();
+            try restarted.mailbox.hint_notarized(round_at(1), hash("missing-after-restart"));
+            var missing = try block_at(hash(""), 1, 101);
+            defer missing.deinit();
+            try expect_round_floor_restored(&restarted, buffer, block.digest(), &missing);
+        }
+    }.body);
+}
+
+test "standard round floor does not restore missing next block" {
+    try run(struct {
+        fn body(ctx: Ctx) anyerror!void {
+            const prefix = "round-floor-missing-next-block";
+            var rng = utils.rng.test_rng();
+            var fixture = try harness.fixture(gpa, &rng);
+            defer fixture.deinit(gpa);
+            const round = round_at(1);
+            const block = try harness.make_raw_block(gpa, hash(""), .new(1), 100);
+            var notarization = try notarization_of(&fixture, round, &block);
+            defer notarization.deinit(gpa);
+            const proposal = harness.Proposal.init(round, .zero(), block.digest());
+            const quorum = harness.quorum;
+            var finalization = try harness.make_finalization(gpa, &fixture, proposal, quorum);
+            defer finalization.deinit(gpa);
+            try seed.processed_height(ctx.child("metadata"), prefix, .zero(), null);
+            const finalized = [_]seed.FinalizationAt{
+                .{ .height = .new(1), .finalization = finalization },
+            };
+            try seed.inconsistent_restart_state(ctx.child("storage"), prefix, &.{}, &finalized);
+
+            var application = try App.manual_ack(gpa, ctx.io());
+            defer application.deinit();
+            var started = try start_manual(
+                ctx.child("validator"),
+                prefix,
+                &fixture,
+                application.clone(),
+                try common.RecordingBuffer.init(gpa, ctx.io()),
+            );
+            defer started.crash();
+            var subscription = try started.mailbox.subscribe_by_commitment(
+                block.digest(),
+                .{ .fetch_by_round = round },
+            );
+            defer subscription.deinit();
+            try ctx.sleep(.fromMilliseconds(100));
+            // The missing next block must not advance the restored round floor.
+            try testing.expectError(error.Empty, subscription.try_recv());
+            const state: RoundRequest = .{ .resolver = started.resolver, .round = round };
+            const label = "fetch-by-round after restart";
+            try common.wait_until(ctx, 5000, label, state, round_requested);
+
+            const value = try encode_pair(notarization, block);
+            defer gpa.free(value);
+            const outcome = try deliver(
+                started.resolver,
+                .{ .notarized = round },
+                .{ .notarization = round },
+                value,
+            );
+            try testing.expectEqual(common.Outcome{ .resolved = .complete }, outcome);
+            var delivered = try subscription.recv();
+            defer delivered.deinit();
+            try testing.expect(delivered.digest().eql(block.digest()));
+        }
+    }.body);
+}
+
+test "standard round floor restores unacknowledged anchor" {
+    try run(struct {
+        fn body(ctx: Ctx) anyerror!void {
+            const prefix = "round-floor-before-anchor-ack";
+            var rng = utils.rng.test_rng();
+            var fixture = try harness.fixture(gpa, &rng);
+            defer fixture.deinit(gpa);
+            var floor: Floor = try .init(&fixture, "floor-parent");
+            defer floor.deinit();
+            var created = try common.HoldingBlockReporter.init_after(gpa, ctx.io(), .zero());
+            defer created.started.deinit();
+            var started = try start_holding(
+                ctx.child("validator"),
+                prefix,
+                &fixture,
+                created.reporter,
+                try common.RecordingBuffer.init(gpa, ctx.io()),
+                try genesis_start(),
+            );
+            try testing.expect(try started.mailbox.verified(round_at(5), floor.block.clone()));
+            try started.mailbox.set_floor(try floor.clone_finalization());
+            // The floor anchor is delivered before the simulated crash.
+            try testing.expectEqual(5, (try created.started.recv()).get());
+            started.crash();
+
+            var application = try App.manual_ack(gpa, ctx.io());
+            defer application.deinit();
+            var restarted = try start_manual(
+                ctx.child("validator_restart"),
+                prefix,
+                &fixture,
+                application.clone(),
+                try common.RecordingBuffer.init(gpa, ctx.io()),
+            );
+            defer restarted.crash();
+            const fetches_before = restarted.resolver.fetch_count();
+            var subscription = try restarted.mailbox.subscribe_by_commitment(
+                hash("missing-before-anchor-ack"),
+                .{ .fetch_by_round = round_at(5) },
+            );
+            defer subscription.deinit();
+            var next = try block_at(floor.block.digest(), 6, 600);
+            defer next.deinit();
+            try testing.expect(try restarted.mailbox.verified(round_at(6), next.clone()));
+            // The durable floor round suppresses round-bound fetches after restart and
+            // preserves local subscriptions.
+            try testing.expectEqual(fetches_before, restarted.resolver.fetch_count());
+            try testing.expectError(error.Empty, subscription.try_recv());
+        }
+    }.body);
+}
+
+test "standard set floor prunes round-bound fetches" {
+    try run(struct {
+        fn body(ctx: Ctx) anyerror!void {
+            var rng = utils.rng.test_rng();
+            var fixture = try harness.fixture(gpa, &rng);
+            defer fixture.deinit(gpa);
+            var application = try App.manual_ack(gpa, ctx.io());
+            defer application.deinit();
+            var started = try start_manual(
+                ctx.child("validator"),
+                "set-floor-round-prune",
+                &fixture,
+                application.clone(),
+                try common.RecordingBuffer.init(gpa, ctx.io()),
+            );
+            defer started.crash();
+            const round = round_at(1);
+            var block = try block_at(hash(""), 1, 100);
+            defer block.deinit();
+            var subscription = try started.mailbox.subscribe_by_commitment(
+                hash("missing-before-set-floor"),
+                .{ .fetch_by_round = round },
+            );
+            defer subscription.deinit();
+            try wait_round_fetch(ctx, started.resolver, round, true);
+
+            // The processed finalization after `set_floor` prunes the round-bound fetch.
+            try started.mailbox.set_floor(try finalize(&fixture, 1, 0, &block));
+            try testing.expect(try started.mailbox.verified(round, block.clone()));
+            try wait_round_fetch(ctx, started.resolver, round, false);
+
+            // The round floor applies to future fetches too.
+            const fetches_before = started.resolver.fetch_count();
+            try started.mailbox.hint_notarized(round, hash("missing-after-set-floor"));
+            try verify_barrier(&started, block.digest());
+            try testing.expectEqual(fetches_before, started.resolver.fetch_count());
+        }
+    }.body);
+}
