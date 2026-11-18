@@ -1289,3 +1289,178 @@ fn retired_epochs_once_body(ctx: Ctx) anyerror!void {
 test "standard cache retention counts retired epochs once" {
     try run_timed(retired_epochs_once_body, 60);
 }
+
+/// Hints a notarization at `round`, then expects marshal to stay at `processed` without
+/// fetching that round: the round floor already covers it.
+fn expect_covered_hint(running: anytype, round: Round, processed: Processed) !void {
+    try running.mailbox.hint_notarized(round, cryptography.Sha256.hash(&.{"covered"}));
+    try testing.expectEqual(processed, (try running.mailbox.get_processed()).?);
+    const fetches = try running.resolver.fetches(gpa);
+    defer gpa.free(fetches);
+    for (fetches) |fetch| {
+        if (fetch.key == .notarized) try testing.expect(!std.meta.eql(fetch.key.notarized, round));
+    }
+}
+
+fn reproposal_above_processed_body(ctx: Ctx) anyerror!void {
+    const prefix = "reproposal-reported-above-processed-before-ack";
+    var state: Reproposal = undefined;
+    try start_reproposal_processed_through_20(&state, ctx, prefix);
+    defer state.deinit();
+    var late = try state.finalize(21, 25);
+    defer late.deinit(gpa);
+    var reproposal = try state.finalize(21, 50);
+    errdefer reproposal.deinit(gpa);
+    // Block 21 was stored by walkback without a finalization and is dispatched. The archive
+    // keeps the first finalization, and neither raises the round floor before the ack.
+    report(&state.run.mailbox, late);
+    report(&state.run.mailbox, reproposal);
+    try expect_processed(&state.run.mailbox, 20);
+    try expect_pending_ack(state.run.application, 21);
+    // Acknowledging block 21 closes epoch one: a hint for a later view of it fetches nothing.
+    try testing.expectEqual(Height.new(21), state.run.application.acknowledge_next().?);
+    try wait_processed(ctx, &state.run.mailbox, 21);
+    try expect_covered_hint(&state.run, .new(.new(1), .new(60)), .{ .block = .new(21) });
+    state.run.crash();
+    try restart_with_retired_floor_resumes_at(ctx, prefix, reproposal, 22);
+}
+
+test "standard reproposal reported above processed before ack survives restart" {
+    try run(reproposal_above_processed_body);
+}
+
+/// Installs block 10's (0, 10) finalization as the floor from a buffer holding the block, and
+/// waits until block 10 is dispatched but not acknowledged.
+fn install_boundary(ctx: Ctx, boundary: *const Boundary, prefix: []const u8) !Constant {
+    var buffer = try common.RecordingBuffer.init(gpa, ctx.io());
+    errdefer buffer.deinit();
+    try buffer.insert(try ready(boundary.block));
+    var first = try start_floor(
+        harness.Provider,
+        common.RecordingBuffer,
+        ctx.child("first"),
+        prefix,
+        boundary.provider(),
+        reproposal_epoch_length,
+        try boundary.finalize(10),
+        buffer,
+    );
+    errdefer first.crash();
+    try common.wait_until(ctx, 5000, "floor dispatch", first.application, pending_ack_is_ten);
+    const absent: Processed = .{ .absent = .new(9) };
+    try testing.expectEqual(absent, (try first.mailbox.get_processed()).?);
+    return first;
+}
+
+fn installed_anchor_before_ack_body(ctx: Ctx) anyerror!void {
+    const prefix = "reproposal-reported-installed-anchor-before-ack";
+    var boundary: Boundary = undefined;
+    try boundary.init();
+    defer boundary.deinit();
+    var reproposal = try boundary.finalize(40);
+    defer reproposal.deinit(gpa);
+    var first = try install_boundary(ctx, &boundary, prefix);
+    // Report the later finalization before the acknowledgement, then acknowledge block 10.
+    report(&first.mailbox, reproposal);
+    const absent: Processed = .{ .absent = .new(9) };
+    try testing.expectEqual(absent, (try first.mailbox.get_processed()).?);
+    try testing.expectEqual(Height.new(10), first.application.acknowledge_next().?);
+    try wait_processed(ctx, &first.mailbox, 10);
+    try expect_covered_hint(&first, .new(.zero(), .new(60)), .{ .block = .new(10) });
+    first.crash();
+
+    // Marshal skips the floor without verifying it and serves requests from block 10.
+    const child = ctx.child("restarted");
+    const floor = try reproposal.clone(gpa);
+    var restarted = try start_floor(
+        EmptyProvider,
+        common.Unbuffered,
+        child,
+        prefix,
+        .{},
+        reproposal_epoch_length,
+        floor,
+        null,
+    );
+    defer restarted.crash();
+    try testing.expect(restarted.restored.cutoff.covers(reproposal.round()));
+    try expect_processed(&restarted.mailbox, 10);
+}
+
+test "standard reproposal reported for installed anchor before ack survives restart" {
+    try run(installed_anchor_before_ack_body);
+}
+
+fn floor_above_processed_body(ctx: Ctx) anyerror!void {
+    const prefix = "reproposal-floor-above-processed-restart";
+    var boundary: Boundary = undefined;
+    try boundary.init();
+    defer boundary.deinit();
+    var reproposal = try boundary.finalize(40);
+    errdefer reproposal.deinit(gpa);
+    var first = try install_boundary(ctx, &boundary, prefix);
+    first.crash();
+
+    // The installed anchor closed epoch zero, so the round floor covers the later floor and
+    // marshal skips it, dispatching block 10 from the archive.
+    var again = try start_floor(
+        harness.Provider,
+        common.Unbuffered,
+        ctx.child("reproposal"),
+        prefix,
+        boundary.provider(),
+        reproposal_epoch_length,
+        try reproposal.clone(gpa),
+        null,
+    );
+    try testing.expect(again.restored.cutoff.covers(reproposal.round()));
+    try common.wait_until(ctx, 5000, "floor redispatch", again.application, pending_ack_is_ten);
+    const absent: Processed = .{ .absent = .new(9) };
+    try testing.expectEqual(absent, (try again.mailbox.get_processed()).?);
+    again.crash();
+
+    // The durable round floor supersedes the floor under a provider holding no epochs.
+    try restart_with_retired_floor_resumes_at(ctx, prefix, reproposal, 10);
+}
+
+test "standard reproposal floor above processed is covered on restart" {
+    try run(floor_above_processed_body);
+}
+
+fn certificate_less_boundary_ack_body(ctx: Ctx) anyerror!void {
+    const prefix = "ack-certificate-less-boundary-block";
+    var state: Reproposal = undefined;
+    try start_reproposal_processed_through_20(&state, ctx, prefix);
+    defer state.deinit();
+    defer state.run.crash();
+    // Block 21 was stored by walkback without a finalization. Acknowledge it as is.
+    try testing.expectEqual(Height.new(21), state.run.application.acknowledge_next().?);
+    try wait_processed(ctx, &state.run.mailbox, 21);
+    try testing.expect(!try has_finalization(&state.run.mailbox, .new(21)));
+    // Epoch one ended at block 21, so a hint for a later view of it fetches nothing.
+    try expect_covered_hint(&state.run, .new(.new(1), .new(60)), .{ .block = .new(21) });
+}
+
+test "standard ack of certificate-less boundary block closes its epoch" {
+    try run(certificate_less_boundary_ack_body);
+}
+
+fn floor_below_processed_open_epoch_body(ctx: Ctx) anyerror!void {
+    const prefix = "floor-below-processed-open-epoch";
+    var state: Reproposal = undefined;
+    try start_reproposal_processed_through_20(&state, ctx, prefix);
+    defer state.deinit();
+    var floor = try state.finalize(15, 15);
+    errdefer floor.deinit(gpa);
+    // Epoch one is open, so the floor is not covered: marshal verifies it, applies it below
+    // the processed height, and raises the round floor to (1, 15).
+    try state.run.mailbox.set_floor(try floor.clone(gpa));
+    try expect_processed(&state.run.mailbox, 20);
+    try expect_pending_ack(state.run.application, 21);
+    state.run.crash();
+    try restart_with_retired_floor_resumes_at(ctx, prefix, floor, 21);
+}
+
+test "standard floor applied below processed in open epoch survives restart before ack" {
+    try run(floor_below_processed_open_epoch_body);
+}
