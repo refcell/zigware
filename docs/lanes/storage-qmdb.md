@@ -68,8 +68,10 @@ which every database here is built on.
   oracle `qmdb/fuzz_floor.zig` (commonware `storage/fuzz/src/floor.rs`).
 - [x] any: ordered `MerkleizedBatch.get_prev_key`/`get_next_key` (strict, non-wrapping, through the
   chain's diffs, then the committed snapshot), checked on every level of the random chains.
-- [ ] fuzz targets: `qmdb_store_operations` (with the store), `qmdb_verify_proof`, and the any
-  batch_root and batching targets.
+- [x] fuzz target `qmdb_verify_proof`, plus a positive control (genuine multi-proofs of a real tree
+  verify; tampered operations and roots fail).
+- [ ] store (`qmdb/store`) and its `qmdb_store_operations` fuzz target.
+- [ ] fuzz targets: the any batch_root and batching targets.
 - [ ] benches (commonware `qmdb/benches`).
 - [x] immutable (fixed, MMR and MMB): `Db`, chained batches, floor-filtered batch reads,
   prune, recovery, `ImmutableMmr/MmbFixedConf` root conformance (matches), mod.rs's core
@@ -266,3 +268,4 @@ which every database here is built on.
 - 2026-11-18: immutable operations fuzz target (value model, crash reopens, proof checks).
 - 2026-11-18: floor oracle (`fuzz_floor.zig`) and the any unordered/ordered operations fuzz targets.
 - 2026-11-18: ordered merkleized-batch neighbor lookups (`get_prev_key`/`get_next_key`).
+- 2026-11-18: `qmdb_verify_proof` fuzz target.

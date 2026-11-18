@@ -154,5 +154,6 @@ pub fn verify_multi(
 }
 
 test {
+    _ = @import("verify_fuzz_test.zig");
     _ = @import("verify_test.zig");
 }
