@@ -16,7 +16,8 @@ pub const match_length_min = 4;
 pub const offset_max = (1 << 17) - 1;
 /// A repeat or long-table match this long skips the remaining candidates.
 const good_length = 8;
-/// Matches shorter than this are compared with the best match one byte later.
+/// Matches shorter than this are compared with the long-table match one byte later, as
+/// libzstd's double-fast does.
 const lazy_length_max = 6;
 const hash_log_min = 8;
 const hash_log_max = 16;
@@ -102,7 +103,7 @@ pub const Matcher = struct {
                 continue;
             }
             if (best.length < lazy_length_max and position + 1 + match_length_min <= end) {
-                const next = self.search(src, position + 1, end);
+                const next = self.search_long(src, position + 1, end);
                 if (next.length > best.length) {
                     best = next;
                     position += 1;
@@ -150,10 +151,11 @@ pub const Matcher = struct {
             if (length > best.length) best = .{ .length = length, .offset = offset };
         }
         if (position + 8 <= src.len) {
-            const candidates = [2]u32{
-                self.long[self.hash_long(src, position)],
-                self.short[self.hash_short(src, position)],
-            };
+            const long_index = self.hash_long(src, position);
+            const short_index = self.hash_short(src, position);
+            const candidates = [2]u32{ self.long[long_index], self.short[short_index] };
+            self.long[long_index] = @intCast(position + 1);
+            self.short[short_index] = @intCast(position + 1);
             for (candidates) |candidate| {
                 if (best.length >= good_length) break;
                 if (candidate == 0) continue;
@@ -166,9 +168,24 @@ pub const Matcher = struct {
                 if (length > best.length) best = .{ .length = length, .offset = @intCast(offset) };
             }
         }
-        self.insert(src, position);
         assert(best.length <= end - position);
         return best;
+    }
+
+    /// The long-table match at `position`, which the long table then records.
+    fn search_long(self: *Matcher, src: []const u8, position: usize, end: usize) Match {
+        assert(position < end);
+        if (position + 8 > src.len) return .{};
+        const index = self.hash_long(src, position);
+        const candidate = self.long[index];
+        self.long[index] = @intCast(position + 1);
+        if (candidate == 0) return .{};
+        const earlier = candidate - 1;
+        const offset = position - earlier;
+        if (offset > offset_max or read32(src, earlier) != read32(src, position)) return .{};
+        const length = match_length(src, earlier, position, end);
+        assert(length <= end - position);
+        return .{ .length = length, .offset = @intCast(offset) };
     }
 
     /// The offset value for a match at `offset` after `literal_length` literals, updating the
