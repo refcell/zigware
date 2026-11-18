@@ -346,26 +346,44 @@ test "standard set floor holds dispatch until anchor arrives" {
             try testing.expectError(error.Empty, created.started.try_recv());
 
             // Deliver the floor block through the resolver for the recorded fetch.
-            const fetches = try started.resolver.fetches(gpa);
-            defer gpa.free(fetches);
-            const floor_fetch = for (fetches) |item| {
-                if (item.key.eql(.{ .block = floor.block.digest() })) break item;
-            } else return error.FloorFetchMissing;
-            var handler = started.resolver.handler_clone();
-            defer handler.deinit();
-            const encoded = try @import("codec").encode(harness.B, gpa, floor.block.inner().*);
-            defer gpa.free(encoded);
-            const subscribers = [_]common.Annotation{floor_fetch.subscriber};
-            var response = try handler.deliver(
-                .{ .key = floor_fetch.key, .subscribers = &subscribers },
-                encoded,
-            );
-            defer response.deinit();
-            const outcome = try response.recv();
-            try testing.expect(std.meta.eql(outcome, common.Outcome{ .resolved = .complete }));
+            try testing.expect(try deliver_fetched_block(started.resolver, &floor.block));
             try testing.expectEqual(5, (try created.started.recv()).get());
         }
     }.body);
+}
+
+/// Delivers `block` (borrowed) through the resolver for its recorded block fetch and reports
+/// whether marshal resolved it completely.
+fn deliver_fetched_block(resolver: common.RecordingResolver, block: *const Block) !bool {
+    const fetches = try resolver.fetches(gpa);
+    defer gpa.free(fetches);
+    const key: common.Key = .{ .block = block.digest() };
+    const fetch = for (fetches) |item| {
+        if (item.key.eql(key)) break item;
+    } else return error.BlockFetchMissing;
+    var handler = resolver.handler_clone();
+    defer handler.deinit();
+    const encoded = try @import("codec").encode(harness.B, gpa, block.inner().*);
+    defer gpa.free(encoded);
+    const subscribers = [_]common.Annotation{fetch.subscriber};
+    var response = try handler.deliver(.{ .key = fetch.key, .subscribers = &subscribers }, encoded);
+    defer response.deinit();
+    const outcome = try response.recv();
+    return std.meta.eql(outcome, common.Outcome{ .resolved = .complete });
+}
+
+/// Reports the quorum notarization of `block` at `view` over `parent_view`.
+fn notarize(
+    mailbox: anytype,
+    fixture: *const harness.Fixture,
+    view: u64,
+    parent_view: u64,
+    digest: D,
+) !void {
+    const proposal = harness.Proposal.init(round_at(view), .new(parent_view), digest);
+    var value = try harness.make_notarization(gpa, fixture, proposal, harness.quorum);
+    defer value.deinit(gpa);
+    _ = mailbox.report(.{ .notarization = value });
 }
 
 const Pending = struct { application: App, height: u64 };
@@ -475,6 +493,191 @@ test "standard local floor jump ignores stale application ack" {
 
             const label = "below-local-floor-after-stale-ack";
             try expect_stale_ack_ignored(ctx, &started, application, label);
+        }
+    }.body);
+}
+
+/// A floor at `height` (view `height` over `height - 1`) on parent `label`, stamped
+/// `100 * height`.
+fn floor_at(fixture: *const harness.Fixture, label: []const u8, height: u64) !Floor {
+    var block = try block_at(hash(label), height, 100 * height);
+    errdefer block.deinit();
+    return .{ .block = block, .finalization = try finalize(fixture, height, height - 1, &block) };
+}
+
+/// Verifies and finalizes a child of `parent` at `height`, then checks it is stored.
+fn finalize_child(
+    started: *Holding,
+    fixture: *const harness.Fixture,
+    parent: D,
+    height: u64,
+) !void {
+    var next = try block_at(parent, height, 100 * height);
+    defer next.deinit();
+    try testing.expect(try started.mailbox.verified(round_at(height), next.clone()));
+    report(&started.mailbox, try finalize(fixture, height, height - 1, &next));
+    var stored = (try started.mailbox.get_finalization(.new(height))).?;
+    stored.deinit(gpa);
+}
+
+test "standard newer pending floor supersedes older anchor" {
+    try run(struct {
+        fn body(ctx: Ctx) anyerror!void {
+            var rng = utils.rng.test_rng();
+            var fixture = try harness.fixture(gpa, &rng);
+            defer fixture.deinit(gpa);
+            var created = try common.HoldingBlockReporter.init_after(gpa, ctx.io(), .zero());
+            defer created.started.deinit();
+            var started = try start_holding(
+                ctx.child("validator"),
+                "set-floor-supersedes-pending",
+                &fixture,
+                created.reporter,
+                try common.RecordingBuffer.init(gpa, ctx.io()),
+                try genesis_start(),
+            );
+            defer started.crash();
+            var old: Floor = try floor_at(&fixture, "old-floor-parent", 5);
+            defer old.deinit();
+            try started.mailbox.set_floor(try old.clone_finalization());
+            try wait_block_fetch(ctx, started.resolver, old.block.digest());
+            var new: Floor = try floor_at(&fixture, "new-floor-parent", 7);
+            defer new.deinit();
+            try started.mailbox.set_floor(try new.clone_finalization());
+            try wait_block_fetch(ctx, started.resolver, new.block.digest());
+
+            try finalize_child(&started, &fixture, old.block.digest(), 6);
+            try finalize_child(&started, &fixture, new.block.digest(), 8);
+
+            // The superseded anchor validates but installs nothing.
+            try testing.expect(try deliver_fetched_block(started.resolver, &old.block));
+            try ctx.sleep(.fromMilliseconds(100));
+            try testing.expectError(error.Empty, created.started.try_recv());
+
+            try testing.expect(try deliver_fetched_block(started.resolver, &new.block));
+            try testing.expectEqual(7, (try created.started.recv()).get());
+        }
+    }.body);
+}
+
+test "standard set floor applies buffered anchor on notarization" {
+    try run(struct {
+        fn body(ctx: Ctx) anyerror!void {
+            var rng = utils.rng.test_rng();
+            var fixture = try harness.fixture(gpa, &rng);
+            defer fixture.deinit(gpa);
+            var floor: Floor = try .init(&fixture, "floor-parent");
+            defer floor.deinit();
+            var created = try common.HoldingBlockReporter.init_after(gpa, ctx.io(), .zero());
+            defer created.started.deinit();
+            var buffer = try common.RecordingBuffer.init(gpa, ctx.io());
+            defer buffer.deinit();
+            var started = try start_holding(
+                ctx.child("validator"),
+                "set-floor-buffered-anchor-notarization",
+                &fixture,
+                created.reporter,
+                buffer.clone(),
+                try genesis_start(),
+            );
+            defer started.crash();
+            try started.mailbox.set_floor(try floor.clone_finalization());
+            try wait_block_fetch(ctx, started.resolver, floor.block.digest());
+
+            var next = try block_at(floor.block.digest(), 6, 600);
+            defer next.deinit();
+            try testing.expect(try started.mailbox.verified(round_at(6), next.clone()));
+            report(&started.mailbox, try finalize(&fixture, 6, 5, &next));
+            try ctx.sleep(.fromMilliseconds(100));
+            try testing.expectError(error.Empty, created.started.try_recv());
+
+            // The notarization finds the anchor in the buffer and installs the floor.
+            try buffer.insert(floor.block.clone());
+            try notarize(&started.mailbox, &fixture, 5, 4, floor.block.digest());
+            try testing.expectEqual(5, (try created.started.recv()).get());
+        }
+    }.body);
+}
+
+const Subscriptions = struct { buffer: common.RecordingBuffer, count: usize };
+
+fn subscription_count_is(state: Subscriptions) bool {
+    return state.buffer.commitment_subscription_count() == state.count;
+}
+
+const Closed = struct { buffer: common.RecordingBuffer, index: usize };
+
+fn subscription_closed(state: Closed) bool {
+    return state.buffer.commitment_subscription_closed(state.index);
+}
+
+fn wait_subscriptions(ctx: Ctx, buffer: common.RecordingBuffer, count: usize) !void {
+    const state: Subscriptions = .{ .buffer = buffer, .count = count };
+    try common.wait_until(ctx, 5000, "buffer subscription", state, subscription_count_is);
+}
+
+fn wait_closed(ctx: Ctx, buffer: common.RecordingBuffer, index: usize) !void {
+    const state: Closed = .{ .buffer = buffer, .index = index };
+    try common.wait_until(ctx, 5000, "buffer subscription closed", state, subscription_closed);
+}
+
+// A pending floor releases its buffer waiter when a newer floor replaces it, whether or not
+// the newer anchor is local, and when its anchor installs through another path.
+test "standard pending floor releases buffer waiter" {
+    try run(struct {
+        fn body(ctx: Ctx) anyerror!void {
+            var rng = utils.rng.test_rng();
+            var fixture = try harness.fixture(gpa, &rng);
+            defer fixture.deinit(gpa);
+            var created = try common.HoldingBlockReporter.init_after(gpa, ctx.io(), .zero());
+            defer created.started.deinit();
+            var buffer = try common.RecordingBuffer.init(gpa, ctx.io());
+            defer buffer.deinit();
+            var started = try start_holding(
+                ctx.child("validator"),
+                "pending-floor-releases-waiter",
+                &fixture,
+                created.reporter,
+                buffer.clone(),
+                try genesis_start(),
+            );
+            defer started.crash();
+
+            // The first floor waits on the buffer for its anchor.
+            var old: Floor = try floor_at(&fixture, "old-parent", 5);
+            defer old.deinit();
+            try started.mailbox.set_floor(try old.clone_finalization());
+            try wait_subscriptions(ctx, buffer, 1);
+
+            // A newer floor replaces it and releases the first waiter.
+            var new: Floor = try floor_at(&fixture, "new-parent", 6);
+            defer new.deinit();
+            try started.mailbox.set_floor(try new.clone_finalization());
+            try wait_closed(ctx, buffer, 0);
+            try testing.expectEqual(2, buffer.commitment_subscription_count());
+            try testing.expect(!buffer.commitment_subscription_closed(1));
+
+            // A notarization that finds the newer anchor installs the floor and releases the
+            // second waiter.
+            try buffer.insert(new.block.clone());
+            try notarize(&started.mailbox, &fixture, 6, 5, new.block.digest());
+            try testing.expectEqual(6, (try created.started.recv()).get());
+            try wait_closed(ctx, buffer, 1);
+
+            // A third floor waits on the buffer for its anchor.
+            var missing: Floor = try floor_at(&fixture, "missing-parent", 7);
+            defer missing.deinit();
+            try started.mailbox.set_floor(try missing.clone_finalization());
+            try wait_subscriptions(ctx, buffer, 3);
+
+            // A newer floor whose anchor is local replaces it without subscribing and
+            // releases the third waiter.
+            var local: Floor = try floor_at(&fixture, "local-parent", 8);
+            defer local.deinit();
+            try buffer.insert(local.block.clone());
+            try started.mailbox.set_floor(try local.clone_finalization());
+            try wait_closed(ctx, buffer, 2);
+            try testing.expectEqual(3, buffer.commitment_subscription_count());
         }
     }.body);
 }
