@@ -1056,3 +1056,122 @@ test "oversized recovery: finishing a tracked replay before draining fails" {
     journal = try h.open_checkpoint(.{ .section = 1, .size = chunk });
     try journal.destroy();
 }
+
+test "oversized recovery: a reopen with matching markers rewrites nothing" {
+    var h = try Harness.init();
+    defer h.deinit();
+    var journal = try h.open_tracked();
+    for (0..2) |id| _ = try append(&journal, 0, id, fill(id));
+    try journal.sync(&.{0});
+    // An empty flush publishes the marker that covers both entries.
+    try journal.sync(&.{});
+    journal.deinit();
+    const writes_before = h.storage.writes;
+    const storage = h.storage.interface();
+    var recovery = try Journal.init_with_markers(gpa, storage, h.cfg(), "test-markers");
+    var ids: [2]u64 = undefined;
+    var count: usize = 0;
+    while (recovery.next() catch |err| {
+        recovery.deinit();
+        return err;
+    }) |item| : (count += 1) {
+        try testing.expect(count < ids.len);
+        ids[count] = item.item.id;
+    }
+    try testing.expectEqual(2, count);
+    try testing.expectEqualSlices(u64, &.{ 0, 1 }, &ids);
+    journal = try recovery.finish();
+    // Unchanged markers are not rewritten.
+    try testing.expectEqual(writes_before, h.storage.writes);
+    try journal.destroy();
+}
+
+test "oversized recovery: a lost value tail truncates the index" {
+    var h = try Harness.init();
+    defer h.deinit();
+    var journal = try h.open_tracked();
+    var located: [5]Located = undefined;
+    for (&located, 0..) |*slot, i| slot.* = try append(&journal, 1, i, fill(i));
+    try journal.sync(&.{1});
+    journal.deinit();
+    // Lose the last two values.
+    try resize_values(&h, 1, byte_end(located[2]));
+    journal = try h.open_tracked();
+    for (located[0..3], 0..) |slot, i| {
+        try testing.expectEqual(i, (try journal.get(1, slot.position)).id);
+        try expect_value(&journal, 1, slot, fill(i));
+    }
+    try testing.expectError(error.ItemOutOfRange, journal.get(1, 3));
+    try journal.destroy();
+}
+
+const Markers = @import("../../metadata/mod.zig").Metadata(u64, u64);
+
+/// Read the whole raw blob `name` of `partition`. Free with `gpa`.
+fn read_raw(h: *Harness, partition: []const u8, section: u64) ![]u8 {
+    const opened = try h.storage.open(partition, &manager_mod.section_name(section));
+    defer opened.blob.close();
+    const bytes = try gpa.alloc(u8, @intCast(opened.len));
+    errdefer gpa.free(bytes);
+    try opened.blob.read_at(0, bytes);
+    return bytes;
+}
+
+test "oversized recovery: a tracked open adopts a damaged committed value lazily" {
+    var h = try Harness.init();
+    defer h.deinit();
+    var journal = try h.open_checkpoint(.{ .section = 0, .size = 0 });
+    _ = try append(&journal, 1, 1, fill(1));
+    const damaged = try append(&journal, 1, 2, fill(2));
+    try journal.sync_all();
+    journal.deinit();
+    // Publish a marker covering both entries.
+    var markers = try Markers.init(gpa, h.storage.interface(), .{
+        .partition = "test-markers",
+        .codec_config = {},
+    });
+    _ = try markers.put(1, 2);
+    try markers.sync();
+    markers.deinit();
+    // Damage the second committed value in place and record the index bytes.
+    const opened = try h.storage.open("test-values", &manager_mod.section_name(1));
+    try opened.blob.write_at(damaged.offset, &.{0xFF}, .{});
+    try opened.blob.sync();
+    opened.blob.close();
+    const before = try read_raw(&h, "test-index", 1);
+    defer gpa.free(before);
+    // The open adopts both marker-covered entries; only the damaged value's read fails.
+    journal = try h.open_tracked();
+    try testing.expectEqual(2 * chunk, try journal.size(1));
+    const stored = try journal.get(1, 1);
+    const read = journal.get_value(1, stored.value_offset, stored.value_size);
+    if (read) |_| return error.TestUnexpectedResult else |_| {}
+    journal.deinit();
+    // The index bytes are unchanged.
+    const after = try read_raw(&h, "test-index", 1);
+    defer gpa.free(after);
+    try testing.expectEqualSlices(u8, before, after);
+}
+
+test "oversized recovery: an entry whose value was lost is never adopted again" {
+    var h = try Harness.init();
+    defer h.deinit();
+    // Crash 1: entry 1's index is durable but its value is not.
+    var journal = try h.open_tracked();
+    _ = try append(&journal, 1, 1, fill(1));
+    try journal.index.sync(&.{1});
+    journal.deinit();
+    h.storage.crash();
+    // Boot 2: recovery durably truncates entry 1. A new append reuses its offset, and
+    // crash 2 lands after the value sync and before the index sync.
+    journal = try h.open_tracked();
+    try testing.expectEqual(0, try journal.size(1));
+    _ = try append(&journal, 1, 2, fill(2));
+    try journal.values.sync(&.{1});
+    journal.deinit();
+    h.storage.crash();
+    // Boot 3: a non-durable truncation would leave entry 1 range-valid over entry 2's bytes.
+    journal = try h.open_tracked();
+    try expect_adopted_consistent(&journal);
+    try journal.destroy();
+}

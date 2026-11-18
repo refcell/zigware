@@ -26,24 +26,24 @@ resize, sync), `runtime.storage`, with the in-memory backend `runtime.storage.me
   `Recovery` and ported tests.
 - [x] journal/segmented: oversized journal (fixed index plus glob values, checkpoint restore
   and marker-tracked recovery) with its core tests.
-- [ ] journal/segmented: the rest of oversized.rs's ~16 recovery tests (44 ported in
+- [ ] journal/segmented: the rest of oversized.rs's ~13 recovery tests (48 ported in
   oversized_recovery_test.zig: persistence, sync, value and index loss, torn and partial
   pages, truncation crashes, short value reads, orphan sections, nested crashes, torn
-  rewrites, interrupted prunes, restores; left: marker preservation, lazy adoption,
+  rewrites, interrupted prunes, restores, marker preservation, lazy adoption; left:
   sync-failure, interrupted destroy and section removal, and read-option/read-gate tests).
 - [x] journal/contiguous: fixed journal (checkpoint, blob partition, recovery with watermark
   and clear intent, bounded open, `init_at_size`, `clear_to_size`, replay batches) with the
   shared contiguous suite and the checkpoint tests.
 - [x] journal/contiguous: fixed.rs's partition, replay, codec-error, interrupted
   `init_at_size`/`destroy`, repair, stale-hint, legacy-watermark, and commit tests.
-- [ ] journal/contiguous: the rest of fixed.rs's tests (torn interior pages, bounded-open
-  faults, `init_at_most` crashes, clear crash scenarios, read_many accounting).
+- [x] journal/contiguous: the rest of fixed.rs's tests: handed to storage-merkle (2026-11-18),
+  which ports them in new sibling test files.
 - [x] journal/contiguous: variable journal (data blobs plus a fixed offsets journal,
   offset rebuild from the watermark, torn-tail and torn-page repair, prune/append crash
   alignment, `init_at_size`/`clear_to_size` under a staged offsets intent, compression,
   prepared appends, replay batches, `Backing`) with the shared suite and core recovery tests.
-- [ ] journal/contiguous: the rest of variable.rs's ~150 tests (bounded inspection, fault
-  injection, read_many accounting, interrupted clears at each crash point).
+- [x] journal/contiguous: the rest of variable.rs's ~150 tests: handed to storage-merkle
+  (2026-11-18), which ports them in new sibling test files.
 - [x] journal/authenticated.rs backing contract: `assert_backing`, `last_matching`, `covers`,
   `Stored`, `init_sync`, with the fixed journal as a backing; init_sync and last_matching tests.
 - [x] journal/authenticated.rs `Journal` (items plus persisted Merkle, recovery, batches,
