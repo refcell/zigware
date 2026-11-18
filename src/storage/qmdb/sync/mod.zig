@@ -21,6 +21,9 @@ pub const source = @import("source.zig");
 pub const Request = source.Request;
 pub const Response = source.Response;
 pub const max_response_size = source.max_response_size;
+pub const Feedback = source.Feedback;
+pub const Served = source.Served;
+pub const JournalSource = source.JournalSource;
 pub const target = @import("target.zig");
 pub const Target = target.Target;
 pub const CompactTarget = target.CompactTarget;
@@ -28,4 +31,5 @@ pub const CompactTarget = target.CompactTarget;
 test {
     std.testing.refAllDecls(@This());
     _ = @import("tests.zig");
+    _ = @import("source_test.zig");
 }

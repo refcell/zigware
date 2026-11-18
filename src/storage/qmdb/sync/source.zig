@@ -1,6 +1,6 @@
 //! Sync wire types (commonware's `qmdb/sync/source.rs`): the `Request` a client sends a source
-//! and the `Response` it answers with, plus `max_response_size`. The `Source` interface and
-//! `Feedback` come with the engine.
+//! and the `Response` it answers with, plus `max_response_size`, and `Feedback`, through which
+//! the engine reports whether a served response verified.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -9,6 +9,10 @@ const codec = @import("codec");
 const merkle = @import("../../merkle/mod.zig");
 const operation = @import("../operation.zig");
 const value = @import("../value.zig");
+const qmdb = @import("../mod.zig");
+const channel = @import("utils").channel;
+const oneshot = channel.oneshot;
+const mpsc = channel.mpsc;
 
 /// A request for operations from a source's log.
 pub fn Request(comptime F: type) type {
@@ -300,4 +304,247 @@ pub fn max_response_size(comptime F: type, comptime D: type, max_ops: usize, op_
     const result = @max(operations, boundary) + 1;
     assert(result > op_size);
     return result;
+}
+
+/// A later candidate response for a request, with the sender of its verdict.
+pub fn Candidate(comptime R: type) type {
+    return struct {
+        const Self = @This();
+
+        /// Releases `response` (when it owns memory) on discard.
+        gpa: Allocator,
+        response: R,
+        verdict: oneshot.Sender(bool),
+
+        /// Releases a candidate nobody judged (an `mpsc` discard hook).
+        pub fn discard(self: Self) void {
+            var owned = self;
+            release(R, owned.gpa, &owned.response);
+            owned.verdict.deinit();
+        }
+    };
+}
+
+fn release(comptime R: type, gpa: Allocator, response: *R) void {
+    switch (@typeInfo(R)) {
+        .@"struct", .@"union" => if (@hasDecl(R, "deinit")) response.deinit(gpa),
+        else => {},
+    }
+}
+
+/// A served response and, when the source can offer more candidates, its feedback.
+pub fn Served(comptime R: type) type {
+    return struct { response: R, feedback: ?Feedback(R) };
+}
+
+/// Reports whether a response's proof is valid, keeping the request open for another
+/// candidate (commonware's `Feedback`). Feedback says nothing about whether the response was
+/// applied or persisted. Releasing it with `deinit` leaves the response unjudged and cancels
+/// the request.
+pub fn Feedback(comptime R: type) type {
+    return struct {
+        const Self = @This();
+
+        verdict: oneshot.Sender(bool),
+        candidates: mpsc.Receiver(Candidate(R)),
+
+        /// Feedback for one response and its request's later candidates.
+        pub fn init(verdict: oneshot.Sender(bool), candidates: mpsc.Receiver(Candidate(R))) Self {
+            return .{ .verdict = verdict, .candidates = candidates };
+        }
+
+        /// Reports the response valid and closes the request.
+        pub fn accept(self: *Self) void {
+            self.verdict.send(true) catch {}; // A source that stopped listening needs nothing.
+            self.candidates.deinit();
+            self.* = undefined;
+        }
+
+        /// Reports the response invalid and waits for the next candidate: null once the
+        /// source stops listening or has no more. Consumes the feedback.
+        pub fn reject(self: *Self) Io.Cancelable!?Served(R) {
+            var candidates = self.candidates;
+            var verdict = self.verdict;
+            self.* = undefined;
+            verdict.send(false) catch {
+                candidates.deinit();
+                return null;
+            };
+            errdefer candidates.deinit();
+            const next = try candidates.recv() orelse {
+                candidates.deinit();
+                return null;
+            };
+            return .{ .response = next.response, .feedback = .init(next.verdict, candidates) };
+        }
+
+        /// Drops the feedback without a verdict, canceling the request.
+        pub fn deinit(self: *Self) void {
+            self.verdict.deinit();
+            self.candidates.deinit();
+            self.* = undefined;
+        }
+    };
+}
+
+/// Fails compilation unless `S` is a sync source: it declares `Family`, `Op`, `Digest`, and
+/// `Error`, and `serve(*S, gpa, Request(Family)) (Error || Io.Cancelable)!Served(Response)`
+/// (commonware's `Source`). The engine calls `serve` on one source from one task at a time.
+pub fn assert_source(comptime S: type) void {
+    comptime {
+        for (.{ "Family", "Op", "Digest", "Error", "serve" }) |name| {
+            if (!@hasDecl(S, name)) @compileError(@typeName(S) ++ " lacks " ++ name);
+        }
+        merkle.check_family(S.Family);
+        if (@typeInfo(S.Error) != .error_set) @compileError("Source.Error must be an error set");
+    }
+}
+
+/// The response type of source `S`.
+pub fn ResponseOf(comptime S: type) type {
+    return Response(S.Family, S.Op, S.Digest);
+}
+
+/// Serves requests from an authenticated journal `J` of family `F` (commonware's `Source for
+/// authenticated::Journal`, which every QMDB variant's source delegates to). Responses carry
+/// no feedback.
+pub fn JournalSource(comptime F: type, comptime J: type) type {
+    return struct {
+        const Self = @This();
+        pub const Family = F;
+        pub const Op = J.Item;
+        pub const Digest = J.Digest;
+        pub const Error = qmdb.Error || J.Error || Allocator.Error;
+        const R = Response(F, Op, Digest);
+
+        journal: *J,
+
+        /// Answers `request` against the root the journal had at `request.size()`. The
+        /// response is allocated with the journal's allocator, which must be `gpa`.
+        pub fn serve(self: *Self, gpa: Allocator, request: Request(F)) Error!Served(R) {
+            assert(gpa.ptr == self.journal.gpa.ptr);
+            // Rejected before the floor lookup, which must not read out-of-range locations.
+            if (request.size() > self.journal.size()) return error.RangeOutOfBounds;
+            var reader: LogReader(J) = .{ .journal = self.journal };
+            const peaks = try qmdb.inactive_peaks_at(F, gpa, &reader, request.size());
+            const max_ops = request.max_ops();
+            var proved = try self.journal.historical_proof(
+                request.size(),
+                request.start(),
+                max_ops,
+                peaks,
+            );
+            if (request == .operations) {
+                const response: R = .{ .operations = .{
+                    .proof = proved.proof,
+                    .operations = proved.items,
+                } };
+                return .{ .response = response, .feedback = null };
+            }
+            errdefer proved.deinit(gpa);
+            assert(proved.items.len == 1);
+            var buffer: [merkle.max_pinned_nodes]Digest = undefined;
+            const pins = try self.journal.merkle.pinned_nodes_at(request.start(), &buffer);
+            const pinned_nodes = try gpa.dupe(Digest, pins);
+            const op = proved.items[0];
+            gpa.free(proved.items);
+            const response: R = .{ .boundary = .{
+                .proof = proved.proof,
+                .op = op,
+                .pinned_nodes = pinned_nodes,
+            } };
+            return .{ .response = response, .feedback = null };
+        }
+    };
+}
+
+/// Reads an authenticated journal for `qmdb.inactive_peaks_at`.
+fn LogReader(comptime J: type) type {
+    return struct {
+        const Self = @This();
+        journal: *J,
+
+        pub fn bounds(self: *const Self) merkle.Range {
+            const span = self.journal.get_bounds();
+            return .{ .start = span.start, .end = span.end };
+        }
+
+        pub fn read(self: *Self, _: Allocator, location: u64) !J.Item {
+            return self.journal.read(location);
+        }
+    };
+}
+
+const Io = std.Io;
+const testing = std.testing;
+
+fn feedback_channels(comptime R: type) !struct {
+    feedback: Feedback(R),
+    verdict: oneshot.Receiver(bool),
+    candidates: mpsc.Sender(Candidate(R)),
+} {
+    const candidates = try mpsc.channel(Candidate(R), testing.allocator, testing.io, 1);
+    const verdict = try oneshot.channel(bool, testing.allocator, testing.io);
+    return .{
+        .feedback = .init(verdict.sender, candidates.receiver),
+        .verdict = verdict.receiver,
+        .candidates = candidates.sender,
+    };
+}
+
+fn candidate(response: u8) !struct { Candidate(u8), oneshot.Receiver(bool) } {
+    const verdict = try oneshot.channel(bool, testing.allocator, testing.io);
+    const next: Candidate(u8) =
+        .{ .gpa = testing.allocator, .response = response, .verdict = verdict.sender };
+    return .{ next, verdict.receiver };
+}
+
+// commonware's `feedback_accepts_and_closes_request`.
+test "sync feedback accepts and closes the request" {
+    var parts = try feedback_channels(u8);
+    defer parts.verdict.deinit();
+    defer parts.candidates.deinit();
+    parts.feedback.accept();
+    try testing.expect(try parts.verdict.recv());
+    const next, var next_verdict = try candidate(2);
+    defer next_verdict.deinit();
+    try testing.expectError(error.Closed, parts.candidates.try_send(next));
+    next.discard();
+}
+
+// commonware's `feedback_rejects_and_returns_next_candidate`.
+test "sync feedback rejects and returns the next candidate" {
+    var parts = try feedback_channels(u8);
+    defer parts.verdict.deinit();
+    defer parts.candidates.deinit();
+    const next, var next_verdict = try candidate(2);
+    defer next_verdict.deinit();
+    try parts.candidates.try_send(next);
+    var served = (try parts.feedback.reject()).?;
+    try testing.expect(!try parts.verdict.recv());
+    try testing.expectEqual(@as(u8, 2), served.response);
+    served.feedback.?.accept();
+    try testing.expect(try next_verdict.recv());
+}
+
+// commonware's `dropping_feedback_cancels_request`.
+test "sync dropping feedback cancels the request" {
+    var parts = try feedback_channels(u8);
+    defer parts.verdict.deinit();
+    defer parts.candidates.deinit();
+    parts.feedback.deinit();
+    try testing.expectError(error.Closed, parts.verdict.recv());
+    const next, var next_verdict = try candidate(2);
+    defer next_verdict.deinit();
+    try testing.expectError(error.Closed, parts.candidates.try_send(next));
+    next.discard();
+}
+
+// A source with no further candidate ends the request: reject yields null.
+test "sync feedback reject without candidates yields null" {
+    var parts = try feedback_channels(u8);
+    defer parts.verdict.deinit();
+    parts.candidates.deinit();
+    try testing.expect(try parts.feedback.reject() == null);
+    try testing.expect(!try parts.verdict.recv());
 }
