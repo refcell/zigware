@@ -136,8 +136,16 @@ fn run_deterministic(comptime function: fn (Io) anyerror!void) !void {
 }
 
 fn notarize_bytes(fixture: anytype, signer: usize, view: u64) ![]u8 {
+    return notarize_proposal_bytes(fixture, signer, proposal(view));
+}
+
+fn notarize_proposal_bytes(
+    fixture: anytype,
+    signer: usize,
+    value: types.Proposal(Digest),
+) ![]u8 {
     const Notarize = types.Notarize(Scheme, Digest);
-    const vote = (try Notarize.sign(gpa, &fixture.schemes[signer], proposal(view))).?;
+    const vote = (try Notarize.sign(gpa, &fixture.schemes[signer], value)).?;
     const Vote = types.Vote(Scheme, Digest);
     return codec.encode(Vote, gpa, .{ .notarize = vote });
 }
@@ -167,10 +175,16 @@ const Harness = struct {
     const RunResult = @typeInfo(@TypeOf(Batcher.run)).@"fn".return_type.?;
 
     fn start(self: *Harness, io: Io) !void {
+        return self.start_scoped(io, null);
+    }
+
+    /// Starts with the batcher's metrics registered under `scope`, if any.
+    fn start_scoped(self: *Harness, io: Io, scope: ?runtime.telemetry.metrics.Scope) !void {
         var rng = utils.rng.test_rng();
         const fixture = try ed25519.fixture(Digest, gpa, &rng, "batcher", 4);
         self.* = .{ .io = io, .fixture = fixture };
-        const cfg = config(&fixture.schemes[0], &self.log);
+        var cfg = config(&fixture.schemes[0], &self.log);
+        cfg.scope = scope;
         self.batcher, self.mailbox = try Batcher.init(gpa, io, cfg);
         const voter = try actor.mailbox.new(VoterMessage, gpa, io, 16);
         self.voter = voter.receiver;
@@ -262,6 +276,64 @@ test "batcher forwards verified certificates and blocks foreign epochs" {
             try testing.expectEqual(2, certificate.view().get());
             try testing.expectEqual(1, harness.log.blocked.items.len);
             try testing.expect(harness.log.blocked.items[0].eql(fixture.participants[1]));
+        }
+    };
+    try run_deterministic(Root.run);
+}
+
+/// Whether `registry`'s exposition has `latest_vote{peer="<participant>"} <view>`.
+fn has_latest_vote(registry: *runtime.telemetry.metrics.Registry, peer: Key, view: u64) !bool {
+    const text = try registry.encode(gpa);
+    defer gpa.free(text);
+    var buffer: [256]u8 = undefined;
+    const line = try std.fmt.bufPrint(&buffer, "latest_vote{{peer=\"{f}\"}} {d}", .{ peer, view });
+    return std.mem.indexOf(u8, text, line) != null;
+}
+
+// commonware `latest_vote_metric_tracking`: every participant's latest vote starts at 0,
+// rises to the view of each accepted vote (also after the certificate formed), and never
+// falls back on a vote for a lower view.
+test "batcher tracks each peer's latest vote view" {
+    const Root = struct {
+        fn run(io: Io) !void {
+            const metrics = runtime.telemetry.metrics;
+            var registry = metrics.Registry.init(gpa);
+            defer registry.deinit();
+            var harness: Harness = undefined;
+            try harness.start_scoped(io, metrics.Scope.init(&registry).child("batcher"));
+            defer harness.stop();
+            const fixture = &harness.fixture;
+            for (fixture.participants) |participant| {
+                try testing.expect(try has_latest_vote(&registry, participant, 0));
+            }
+            try harness.mailbox.update(.new(5), .init(1), .zero(), null);
+            // The update lands before the votes, which view 0 would not admit.
+            try io.sleep(.fromMilliseconds(50), .awake);
+            const value: types.Proposal(Digest) = .init(.new(.new(0), .new(5)), .zero(), .fill(5));
+            for (1..3) |signer| {
+                const bytes = try notarize_proposal_bytes(fixture, signer, value);
+                try harness.votes.deliver(fixture.participants[signer], bytes);
+            }
+            const Notarize = types.Notarize(Scheme, Digest);
+            const own = (try Notarize.sign(gpa, &fixture.schemes[0], value)).?;
+            try harness.mailbox.constructed(.{ .notarize = own });
+            const message = try harness.next_certificate();
+            VoterMessage.discard(message);
+            try testing.expect(try has_latest_vote(&registry, fixture.participants[1], 5));
+            try testing.expect(try has_latest_vote(&registry, fixture.participants[2], 5));
+            try testing.expect(try has_latest_vote(&registry, fixture.participants[3], 0));
+            // A vote after the quorum is still tracked.
+            const late = try notarize_proposal_bytes(fixture, 3, value);
+            try harness.votes.deliver(fixture.participants[3], late);
+            try io.sleep(.fromMilliseconds(100), .awake);
+            try testing.expect(try has_latest_vote(&registry, fixture.participants[3], 5));
+            // A lower view does not lower the gauge.
+            const lower: types.Proposal(Digest) = .init(.new(.new(0), .new(3)), .zero(), .fill(3));
+            const stale = try notarize_proposal_bytes(fixture, 1, lower);
+            try harness.votes.deliver(fixture.participants[1], stale);
+            try io.sleep(.fromMilliseconds(100), .awake);
+            try testing.expect(try has_latest_vote(&registry, fixture.participants[1], 5));
+            try testing.expectEqual(0, harness.log.blocked.items.len);
         }
     };
     try run_deterministic(Root.run);
