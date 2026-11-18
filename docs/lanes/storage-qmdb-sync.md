@@ -53,7 +53,9 @@ it comes first once `any` lands.
   `init_from_sync` import, `serve`): `{Keyless,Immutable}{Mmr,Mmb}Compact{Fixed,Variable}Conf`
   and `CodecConformance<StoredWitness>`.
 - [ ] compact `sync.zig` (`Database` impl), once the crypto lane's `Database` interface lands.
-- [ ] compact crash-point and tampered-witness tests; current and compact fuzz targets.
+- [x] compact crash-point tests (import replacement under torn writes and failed syncs from
+  the faulty storage) and tampered-witness tests.
+- [ ] current and compact fuzz targets (`qmdb_current_*`).
 - [ ] Fuzz targets and benches for these modules.
 
 ## Agreement with storage-qmdb (2026-11-16)
@@ -169,3 +171,4 @@ it comes first once `any` lands.
   `CurrentMmr/MmbUnorderedFixedConf`; staged batches; ordered fixed current with exclusion
   proofs and `CurrentMmr/MmbOrderedFixedConf`.
 - 2026-11-18: compact qmdb (keyless and immutable) with its 10 conformance hashes.
+- 2026-11-18: compact crash-point and tampered-witness tests.

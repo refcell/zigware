@@ -46,6 +46,34 @@ pub fn make_value(comptime Db: type, gpa: Allocator, x: u64) !Db.Value {
     return gpa.dupe(u8, &bytes);
 }
 
+/// commonware's `Sha256::hash(seed.to_be_bytes())`.
+pub fn digest(seed: u64) Digest {
+    var bytes: [8]u8 = undefined;
+    std.mem.writeInt(u64, &bytes, seed, .big);
+    return Sha256.hash(&.{&bytes});
+}
+
+/// Adds the mutation made from `seed` (commonware's `TestOperation::mutate`) to a fixed db's
+/// batch.
+pub fn mutate(comptime Db: type, batch: *Db.UnmerkleizedBatch, seed: u64) !void {
+    if (Db.keyed) {
+        try batch.set(digest(seed), digest(seed +% 1000));
+    } else {
+        try batch.append(U64.init(seed));
+    }
+}
+
+/// The operation `mutate` records for `seed` (commonware's `TestOperation::op`).
+pub fn mutation_op(comptime Db: type, seed: u64) Db.Operation {
+    if (Db.keyed) return .{ .set = .{ .key = digest(seed), .value = digest(seed +% 1000) } };
+    return .{ .append = U64.init(seed) };
+}
+
+/// A fixed db's value made from `seed` (commonware's `TestOperation::value`).
+pub fn metadata_value(comptime Db: type, seed: u64) Db.Value {
+    return if (Db.keyed) digest(seed) else U64.init(seed);
+}
+
 /// Storage and a page cache for opening compact dbs.
 pub const Harness = struct {
     gpa: Allocator,

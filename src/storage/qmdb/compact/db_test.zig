@@ -12,27 +12,15 @@ const compact = @import("mod.zig");
 const gpa = testing.allocator;
 const Mmr = merkle.mmr.Family;
 const Mmb = merkle.mmb.Family;
+const digest = support.digest;
+const mutate = support.mutate;
+const metadata_value = support.metadata_value;
 const all_dbs = .{
     support.KeylessFixed(Mmr),
     support.KeylessFixed(Mmb),
     support.ImmutableFixed(Mmr),
     support.ImmutableFixed(Mmb),
 };
-
-fn digest(seed: u64) support.Digest {
-    var bytes: [8]u8 = undefined;
-    std.mem.writeInt(u64, &bytes, seed, .big);
-    return support.Sha256.hash(&.{&bytes});
-}
-
-/// Adds the mutation made from `seed` (commonware's `TestOperation::mutate`).
-fn mutate(comptime Db: type, batch: *Db.UnmerkleizedBatch, seed: u64) !void {
-    if (Db.keyed) {
-        try batch.set(digest(seed), digest(seed +% 1000));
-    } else {
-        try batch.append(support.U64.init(seed));
-    }
-}
 
 /// Merkleizes a batch of `count` mutations from `seed` with `metadata` on `db`.
 fn merkleize(comptime Db: type, db: *Db, seed: u64, count: u64) !*Db.MerkleizedBatch {
@@ -46,10 +34,6 @@ fn apply(comptime Db: type, db: *Db, seed: u64, count: u64) !void {
     const batch = try merkleize(Db, db, seed, count);
     defer batch.release();
     try db.apply_batch(batch);
-}
-
-fn metadata_value(comptime Db: type, seed: u64) Db.Value {
-    return if (Db.keyed) digest(seed) else support.U64.init(seed);
 }
 
 test "compact fresh db has the initial root and survives reopen" {
