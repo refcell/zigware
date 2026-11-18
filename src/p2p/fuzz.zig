@@ -70,4 +70,5 @@ test "fuzz p2p types decode canonical" {
 
 test {
     _ = @import("fuzz/simulated.zig");
+    _ = @import("fuzz/authenticated.zig");
 }

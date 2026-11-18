@@ -55,8 +55,8 @@ variants (MinPk, MinSig) must match exactly.
   `src/cryptography/benches/{hashes,signatures,primitives}.zig`: blake3, sha256, sha512,
   ed25519, secp256r1, bloomfilter, chacha20_poly1305, lthash, sake, and bulletproofs ipa, with
   commonware's names and cases.
-- [ ] p2p fuzz targets (commonware p2p/fuzz), taken over from p2p: simulated done
-  (`src/p2p/fuzz/simulated.zig`); discovery and lookup next.
+- [x] p2p fuzz targets (commonware p2p/fuzz), taken over from p2p: simulated
+  (`src/p2p/fuzz/simulated.zig`), discovery and lookup (`src/p2p/fuzz/authenticated.zig`).
 - [x] Check marshal's and aggregation's threshold paths against the simplex VRF scheme:
   aggregation's matched; marshal limits gained commonware's two VRF fixture cases.
 
@@ -76,6 +76,9 @@ variants (MinPk, MinSig) must match exactly.
   first `densify`s the input (at most four peers, two channels, every channel registered,
   every pair linked reliably, short messages), since uniform draws almost never line up a
   send and a receive; a planted payload corruption fails it at a replayable branch.
+  The discovery and lookup targets share one harness (commonware's `NetworkScheme`); their
+  seeded run lets the cluster connect for a simulated minute first (`settle_ms`), since
+  commonware's draws otherwise send before any connection exists.
 - p2p utils mux: the routing table is shared under a mutex instead of commonware's control
   channel, so `register` and a released `SubReceiver` update it directly; the muxer stops
   once every handle and subchannel receiver is released, or when the wrapped receiver fails.

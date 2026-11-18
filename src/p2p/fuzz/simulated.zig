@@ -284,15 +284,17 @@ const State = struct {
     }
 };
 
-/// The next message, or null after `sleep_duration_max_ms` of (simulated) time.
-fn recv_timeout(io: Io, receiver: *Net.Receiver) !?Message {
+/// The next message on `receiver` (any p2p receiver), or null after
+/// `sleep_duration_max_ms` of (simulated) time.
+pub fn recv_timeout(io: Io, receiver: anytype) !?Message {
+    const Receiver = @typeInfo(@TypeOf(receiver)).pointer.child;
     const Outcome = union(enum) {
-        received: (Io.Cancelable || error{NetworkClosed})!Message,
+        received: @typeInfo(@TypeOf(Receiver.recv)).@"fn".return_type.?,
         timeout: Io.Cancelable!void,
     };
     var buffer: [2]Outcome = undefined;
     var select: Io.Select(Outcome) = .init(io, &buffer);
-    try select.concurrent(.received, Net.Receiver.recv, .{receiver});
+    try select.concurrent(.received, Receiver.recv, .{receiver});
     const duration: Io.Duration = .fromMilliseconds(sleep_duration_max_ms);
     select.concurrent(.timeout, Io.sleep, .{ io, duration, .awake }) catch |err| {
         select.cancelDiscard();
