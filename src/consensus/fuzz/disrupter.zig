@@ -31,7 +31,13 @@ const Strategy = strategy_mod.Strategy;
 const Views = strategy_mod.Views;
 const Proposal = simplex.types.Proposal(Digest);
 const sampling = utils.rng;
-const Recipients = p2p.Recipients(cryptography.ed25519.PublicKey);
+const Key = cryptography.ed25519.PublicKey;
+const Recipients = p2p.Recipients(Key);
+const Sha256 = cryptography.Sha256;
+/// The mock applications' relay, through which a skipping proposal's contents travel.
+pub const Relay = simplex.mocks.relay.Relay(Digest, Key);
+/// The mock application's contents: `(Round, parent payload, u64)` encoded.
+const contents_max = consensus_types.Round.max_encode_size + codec.fixed_size(Digest).? + 8;
 
 const timeout: Io.Duration = .fromMilliseconds(100);
 const latest_proposals_min = 10;
@@ -56,6 +62,12 @@ pub fn Disrupter(comptime S: type) type {
         proposals: [latest_proposals_max]Proposal = undefined,
         proposals_head: usize = 0,
         proposals_len: usize = 0,
+        /// Beyond commonware: the two highest-view proposals the relay delivered, highest
+        /// first (`observe`), and the view of the last skipping proposal sent.
+        observed: [2]?Observed = .{ null, null },
+        observed_mutex: Io.Mutex = .init,
+        skipped_view: u64 = 0,
+        relay: ?*Relay = null,
 
         pub fn init(gpa: Allocator, io: Io, scheme: *const S, strategy: Strategy) Self {
             const source: IoRng = .{ .io = io };
@@ -83,6 +95,7 @@ pub fn Disrupter(comptime S: type) type {
                     self.send_random_message(&certificates.sender);
                     self.send_random_message(&resolver.sender);
                 }
+                self.send_skip_proposal(&votes.sender);
                 self.io.sleep(timeout, .awake) catch return;
             }
         }
@@ -320,6 +333,68 @@ pub fn Disrupter(comptime S: type) type {
             }
         }
 
+        /// A relay listener: notes each proposal's view and payload. The disrupter handles
+        /// one network message per 100 ms, so its views lag the network; the relay is
+        /// immediate.
+        pub fn observe(context: *anyopaque, payload: Digest, contents: []const u8) void {
+            const self: *Self = @ptrCast(@alignCast(context));
+            var reader: codec.Reader = .init(contents);
+            const round = consensus_types.Round.read(self.gpa, &reader, {}) catch return;
+            const view = round.view.get();
+            self.observed_mutex.lockUncancelable(self.io);
+            defer self.observed_mutex.unlock(self.io);
+            const seen: Observed = .{ .view = view, .payload = payload };
+            const highest = self.observed[0] orelse {
+                self.observed[0] = seen;
+                return;
+            };
+            if (view > highest.view) {
+                self.observed = .{ seen, highest };
+            } else if (view < highest.view) {
+                const second = self.observed[1];
+                if (second == null or second.?.view < view) self.observed[1] = seen;
+            }
+            assert(self.observed[1] == null or self.observed[1].?.view < self.observed[0].?.view);
+        }
+
+        fn latest_observed(self: *Self) [2]?Observed {
+            self.observed_mutex.lockUncancelable(self.io);
+            defer self.observed_mutex.unlock(self.io);
+            return self.observed;
+        }
+
+        /// Beyond commonware: once per proposed view `h`, proposes view `h + 1` over the
+        /// proposal below `h`, skipping view `h` (usually notarized, not nullified), with
+        /// contents the mock applications accept. Honest validators must refuse it (a missing
+        /// nullification); one that notarizes it trips `invalid_notarize_parent`. Without
+        /// the relay (or its contents) the proposal would never get past verification.
+        fn send_skip_proposal(self: *Self, sender: anytype) void {
+            const relay = self.relay orelse return;
+            const observed = self.latest_observed();
+            const highest = observed[0] orelse return;
+            const parent = observed[1] orelse return;
+            const target = highest.view + 1;
+            if (target <= self.skipped_view) return;
+            if (!self.is_faulty_view(target)) return;
+            self.skipped_view = target;
+            assert(parent.view + 1 < target);
+            const round: consensus_types.Round = .new(fuzz_types.epoch, .new(target));
+            var nonce: [8]u8 = undefined;
+            self.io.random(&nonce);
+            var buffer: [contents_max]u8 = undefined;
+            var writer: codec.Writer = .init(&buffer);
+            round.write(&writer);
+            codec.write(Digest, parent.payload, &writer);
+            codec.write(u64, std.mem.readInt(u64, &nonce, .little), &writer);
+            const contents = writer.written();
+            const payload = Sha256.hash(&.{contents});
+            const me = self.scheme.me() orelse return;
+            const key = self.scheme.participants().as_slice()[me.index().get()];
+            relay.broadcast(key, .all, payload, contents);
+            const proposal: Proposal = .init(round, .new(parent.view), payload);
+            self.send_vote(sender, .all, self.sign_notarize(proposal));
+        }
+
         fn send_proposal(self: *Self, sender: anytype) void {
             if (!self.is_faulty_view(self.current_view())) return;
             const proposal = self.mutated_proposal(self.get_proposal());
@@ -351,6 +426,9 @@ pub fn Disrupter(comptime S: type) type {
         }
     };
 }
+
+/// A proposal the relay delivered.
+const Observed = struct { view: u64, payload: Digest };
 
 /// The message type a receiver's `try_recv` yields.
 fn Received(comptime Pointer: type) type {

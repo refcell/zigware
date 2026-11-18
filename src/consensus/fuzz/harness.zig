@@ -465,6 +465,12 @@ pub fn Run(comptime T: type, comptime mode: Mode) type {
                 const scheme = &self.fixture.schemes[index];
                 const strategy = self.input.strategy;
                 node.disrupter = .init(self.gpa, self.ctx.io(), scheme, strategy);
+                node.disrupter.relay = &self.relay;
+                try self.relay.register(.{
+                    .key = self.keys()[index],
+                    .context = &node.disrupter,
+                    .deliver = Disrupter.observe,
+                });
                 node.handle = null;
                 node.started = true;
                 const child = self.ctx.child("disrupter");
@@ -527,7 +533,7 @@ pub fn Run(comptime T: type, comptime mode: Mode) type {
             node.application.handoff = self.input.handoff;
             node.application.reject_mismatches = true;
             try node.application.register();
-            node.recorder = .init(gpa, io, &self.fixture.verifier, n);
+            node.recorder = .init(gpa, io, &self.fixture.verifier, n, @intCast(index));
             node.page_cache = try .init(gpa, page_size, page_cache_size);
             node.elector = try self.elector_config(index).build(gpa, n);
             node.partition = @splat(0);

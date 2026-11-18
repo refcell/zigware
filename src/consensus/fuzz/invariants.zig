@@ -50,6 +50,12 @@ pub const Kind = enum {
     insufficient_signatures,
     /// "non-attributable scheme should not expose signature count"
     unexpected_signature_count,
+    // Beyond commonware: rules on each honest replica's own votes (its reporter sees them).
+    /// An honest replica voted both nullify and finalize in view {view}.
+    nullify_and_finalize_vote,
+    /// An honest replica notarized view {view} over a parent the protocol does not allow:
+    /// not below it, not the view before inside a term, or over an unnullified view.
+    invalid_notarize_parent,
 };
 
 pub const Violation = struct {
@@ -93,7 +99,10 @@ pub fn find(
         if (check_ancestry(&merged, term_length)) |violation| return violation;
         if (check_exclusion(&merged, replicas, term_length)) |violation| return violation;
     }
-    return check_signature_counts(replicas, attributable, threshold);
+    if (check_signature_counts(replicas, attributable, threshold)) |violation| {
+        return violation;
+    }
+    return check_votes(gpa, replicas, term_length);
 }
 
 fn same_proposal(a: anytype, b: anytype) bool {
@@ -300,18 +309,28 @@ fn check_ancestry(merged: *const Merged, term_length: TermLength) ?Violation {
             if (parent + 1 != view) return .{ .kind = .non_immediate_parent, .view = view };
             continue;
         }
-        // Each step needs a nullification in the cursor's term, so the loop runs at most
-        // once per nullified view, plus one.
-        var cursor = parent + 1;
-        while (cursor < view) {
-            const term = term_of(cursor, term_length);
-            const nullified = last_nullified_at_most(merged.nullified, cursor);
-            const covered = if (nullified) |n| term_of(n, term_length) == term else false;
-            if (!covered) return .{ .kind = .unnullified_skip, .view = cursor };
-            const next = term * term_length.get() + 1;
-            assert(next > cursor);
-            cursor = next;
+        if (first_uncovered(merged.nullified, parent, view, term_length)) |cursor| {
+            return .{ .kind = .unnullified_skip, .view = cursor };
         }
+    }
+    return null;
+}
+
+/// The first view strictly between `parent` and `view` whose term has no nullification at or
+/// below it (a nullification abandons its own view and the rest of that view's term).
+fn first_uncovered(nullified: []const u64, parent: u64, view: u64, term_length: TermLength) ?u64 {
+    assert(parent < view);
+    // Each step needs a nullification in the cursor's term, so the loop runs at most once
+    // per nullified view, plus one.
+    var cursor = parent + 1;
+    while (cursor < view) {
+        const term = term_of(cursor, term_length);
+        const last = last_nullified_at_most(nullified, cursor);
+        const covered = if (last) |n| term_of(n, term_length) == term else false;
+        if (!covered) return cursor;
+        const next = term * term_length.get() + 1;
+        assert(next > cursor);
+        cursor = next;
     }
     return null;
 }
@@ -386,6 +405,47 @@ fn check_signature_counts(
         }
     }
     return null;
+}
+
+/// Beyond commonware, whose invariants see only certificates: an honest replica never votes
+/// both nullify and finalize in one view, and notarizes a proposal only over a parent the
+/// protocol allows (the parent rules `check_ancestry` applies to finalizations). Nullified
+/// views are every replica's union, as in `check_ancestry`, which can only weaken the check.
+/// These rules bind every honest replica, so they hold whatever the fault count.
+fn check_votes(
+    gpa: Allocator,
+    replicas: []const Replica,
+    term_length: TermLength,
+) Allocator.Error!?Violation {
+    for (replicas) |replica| {
+        for (replica.nullify_votes) |nullify| {
+            const index = lower_bound(replica.finalize_votes, nullify.view);
+            if (index < replica.finalize_votes.len and
+                replica.finalize_votes[index].view == nullify.view)
+            {
+                return .{ .kind = .nullify_and_finalize_vote, .view = nullify.view };
+            }
+        }
+    }
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    var nullified: std.ArrayList(u64) = .empty;
+    for (replicas) |replica| for (replica.nullifications) |nullification| {
+        try nullified.append(arena.allocator(), nullification.view);
+    };
+    const views = Merged.dedup_views(nullified.items);
+    for (replicas) |replica| for (replica.notarize_votes) |notarize| {
+        if (!allowed_parent(views, notarize.parent, notarize.view, term_length)) {
+            return .{ .kind = .invalid_notarize_parent, .view = notarize.view };
+        }
+    };
+    return null;
+}
+
+fn allowed_parent(nullified: []const u64, parent: u64, view: u64, term_length: TermLength) bool {
+    if (parent >= view) return false;
+    if (!is_term_start(view, term_length)) return parent + 1 == view;
+    return first_uncovered(nullified, parent, view, term_length) == null;
 }
 
 // commonware's `invariants::tests`, all with ed25519 (attributable) and three signers.
@@ -535,4 +595,36 @@ test "signature counts" {
     const hidden: Replica = .{ .notarizations = &.{short} };
     const none = try find(testing.allocator, false, n4f1c3, term_five, &.{hidden});
     try testing.expectEqual(null, none);
+}
+
+test "an honest replica never votes nullify and finalize in one view" {
+    const both: Replica = .{
+        .nullify_votes = &.{ .{ .view = 2 }, .{ .view = 4 } },
+        .finalize_votes = &.{ .{ .view = 3 }, .{ .view = 4 } },
+    };
+    const violation = try find(testing.allocator, true, n4f3c1, term_five, &.{both});
+    const expected: Violation = .{ .kind = .nullify_and_finalize_vote, .view = 4 };
+    try testing.expectEqual(expected, violation.?);
+    const apart: Replica = .{
+        .nullify_votes = &.{.{ .view = 2 }},
+        .finalize_votes = &.{.{ .view = 3 }},
+    };
+    try expect_none(n4f1c3, term_five, &.{apart});
+}
+
+test "an honest replica notarizes only over an allowed parent" {
+    const fire = expect_violation;
+    // Inside a term the parent is the view before.
+    const intra: Replica = .{ .notarize_votes = &.{.{ .view = 4, .parent = 2 }} };
+    try fire(.invalid_notarize_parent, n4f3c1, term_five, &.{intra});
+    const next: Replica = .{ .notarize_votes = &.{.{ .view = 4, .parent = 3 }} };
+    try expect_none(n4f1c3, term_five, &.{next});
+    // With one-view terms, skipping view 2 needs its nullification, seen by any replica.
+    const skip: Replica = .{ .notarize_votes = &.{.{ .view = 3, .parent = 1 }} };
+    try fire(.invalid_notarize_parent, n4f1c3, .one, &.{skip});
+    const seen: Replica = .{ .nullifications = &.{nullified_at(2)} };
+    try expect_none(n4f1c3, .one, &.{ skip, seen });
+    // A nullification of view 1 does not cover view 2.
+    const early: Replica = .{ .nullifications = &.{nullified_at(1)} };
+    try fire(.invalid_notarize_parent, n4f1c3, .one, &.{ skip, early });
 }

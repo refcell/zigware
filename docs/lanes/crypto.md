@@ -181,8 +181,19 @@ handshake), then certificate, secp256r1, the rest, zk last. banderwagon moved to
   schemes run a seeded connected test (BLS12-381 to view 3), and their seeded fuzz,
   single-input `std.testing.fuzz` runs, and twin runs (5 to 30 s each in Debug, because the
   disrupter signs every 100 ms) need ReleaseSafe, `-Dslow-tests`, `-Dfuzz-soak`, or `--fuzz`.
-  Twin runs use 500 ms links and a 1.5 s certification timeout, as commonware's do. Planted bug: `N3f1.quorum` off by one makes honest engines assemble
+  Twin runs use 500 ms links and a 1.5 s certification timeout, as commonware's do.
+  Planted bug: `N3f1.quorum` off by one makes honest engines assemble
   2-of-4 certificates, which the connected test and the first fuzz case report as
-  `insufficient_signatures`. A planted missing-nullification check and finalize-after-
-  nullify went undetected in 32 cases: the disrupter cannot get a skipping proposal past
-  the mock application, and 10 ms links leave no time-out-then-notarize window.
+  `insufficient_signatures`. Beyond commonware (its disrupter never gets a
+  skipping proposal past the mock application, and its invariants see only certificates,
+  so a faithful port missed both bugs below): each honest recorder also keeps its own
+  notarize, nullify, and finalize votes, and `invariants.check_votes` fails on a replica
+  that voted nullify and finalize in one view (`nullify_and_finalize_vote`) or notarized
+  over a parent the protocol forbids (`invalid_notarize_parent`, the same parent rules as
+  finalized ancestry). The disrupter also listens on the mock relay and, once per proposed
+  view `h`, proposes `h + 1` over the proposal below `h` with contents the mock
+  application accepts (`send_skip_proposal`), so a skipping proposal reaches verification.
+  Planted missing-nullification check (parent span): all five default ed25519 runs fail
+  (`invalid_notarize_parent`, `finalized_between_parent_and_child`). Planted
+  finalize-after-nullify (`construct_finalize` ignoring a nullify decision): the three
+  default ed25519 twin runs fail with `nullify_and_finalize_vote`.

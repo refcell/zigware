@@ -22,6 +22,7 @@ const fuzz_types = @import("types.zig");
 const Digest = fuzz_types.Digest;
 const Certified = fuzz_types.Certified;
 const Nullification = fuzz_types.Nullification;
+const Voted = fuzz_types.Voted;
 
 pub fn Recorder(comptime S: type) type {
     return struct {
@@ -33,22 +34,37 @@ pub fn Recorder(comptime S: type) type {
         /// Verifies reported certificates.
         scheme: *const S,
         participants: u32,
+        /// This replica's participant index: its own votes are recorded too.
+        me: u32,
         mutex: Io.Mutex = .init,
         condition: Io.Condition = .init,
         notarizations: std.AutoHashMapUnmanaged(u64, Certified) = .empty,
         nullifications: std.AutoHashMapUnmanaged(u64, Nullification) = .empty,
         finalizations: std.AutoHashMapUnmanaged(u64, Certified) = .empty,
+        notarize_votes: std.AutoHashMapUnmanaged(u64, Voted) = .empty,
+        nullify_votes: std.AutoHashMapUnmanaged(u64, Voted) = .empty,
+        finalize_votes: std.AutoHashMapUnmanaged(u64, Voted) = .empty,
         latest: u64 = 0,
 
-        pub fn init(gpa: Allocator, io: Io, scheme: *const S, participants: u32) Self {
+        pub fn init(gpa: Allocator, io: Io, scheme: *const S, participants: u32, me: u32) Self {
             assert(participants > 0);
-            return .{ .gpa = gpa, .io = io, .scheme = scheme, .participants = participants };
+            assert(me < participants);
+            return .{
+                .gpa = gpa,
+                .io = io,
+                .scheme = scheme,
+                .participants = participants,
+                .me = me,
+            };
         }
 
         pub fn deinit(self: *Self) void {
             self.notarizations.deinit(self.gpa);
             self.nullifications.deinit(self.gpa);
             self.finalizations.deinit(self.gpa);
+            self.notarize_votes.deinit(self.gpa);
+            self.nullify_votes.deinit(self.gpa);
+            self.finalize_votes.deinit(self.gpa);
             self.* = undefined;
         }
 
@@ -74,6 +90,20 @@ pub fn Recorder(comptime S: type) type {
                     if (!entry.found_existing) entry.value_ptr.* = record;
                     self.latest = @max(self.latest, record.view);
                     self.condition.broadcast(self.io);
+                },
+                .notarize => |*vote| if (vote.attestation.signer.get() == self.me) {
+                    const proposal = vote.proposal;
+                    const voted: Voted =
+                        .{ .view = proposal.view().get(), .parent = proposal.parent.get() };
+                    self.notarize_votes.put(self.gpa, voted.view, voted) catch oom();
+                },
+                .nullify => |*vote| if (vote.attestation.signer.get() == self.me) {
+                    const voted: Voted = .{ .view = vote.round.view.get() };
+                    self.nullify_votes.put(self.gpa, voted.view, voted) catch oom();
+                },
+                .finalize => |*vote| if (vote.attestation.signer.get() == self.me) {
+                    const voted: Voted = .{ .view = vote.proposal.view().get() };
+                    self.finalize_votes.put(self.gpa, voted.view, voted) catch oom();
                 },
                 else => {},
             }
@@ -132,6 +162,9 @@ pub fn Recorder(comptime S: type) type {
                 .notarizations = try sorted(Certified, arena, &self.notarizations),
                 .nullifications = try sorted(Nullification, arena, &self.nullifications),
                 .finalizations = try sorted(Certified, arena, &self.finalizations),
+                .notarize_votes = try sorted(Voted, arena, &self.notarize_votes),
+                .nullify_votes = try sorted(Voted, arena, &self.nullify_votes),
+                .finalize_votes = try sorted(Voted, arena, &self.finalize_votes),
             };
         }
 

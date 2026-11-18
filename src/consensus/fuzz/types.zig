@@ -56,11 +56,21 @@ pub const Nullification = struct {
     signature_count: ?u32,
 };
 
-/// One replica's certificates, each sorted by view with at most one per view.
+/// A vote a replica signed itself: its view and, for a notarize, its proposal's parent view.
+pub const Voted = struct {
+    view: u64,
+    parent: u64 = 0,
+};
+
+/// One replica's certificates and own votes, each sorted by view with at most one per view.
+/// The own votes go beyond commonware, whose `ReplicaState` holds certificates only.
 pub const Replica = struct {
     notarizations: []const Certified = &.{},
     nullifications: []const Nullification = &.{},
     finalizations: []const Certified = &.{},
+    notarize_votes: []const Voted = &.{},
+    nullify_votes: []const Voted = &.{},
+    finalize_votes: []const Voted = &.{},
 };
 
 test "can finalize" {
