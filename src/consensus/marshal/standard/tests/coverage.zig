@@ -571,3 +571,176 @@ fn late_finalization_block_delivered_body(ctx: Ctx) anyerror!void {
 test "standard late finalization block delivered below processed survives restart before ack" {
     try run(late_finalization_block_delivered_body);
 }
+
+/// The last block of epoch zero under `reproposal_epoch_length`, built without its chain,
+/// and the validators that certify it (commonware `BoundaryBlock`).
+const Boundary = struct {
+    fixture: harness.Fixture,
+    block: B,
+
+    fn init(self: *Boundary) !void {
+        var rng = utils.rng.test_rng();
+        self.fixture = try harness.fixture(gpa, &rng);
+        errdefer self.fixture.deinit(gpa);
+        const parent = cryptography.Sha256.hash(&.{"parent"});
+        self.block = try harness.make_raw_block(gpa, parent, .new(10), 1_000);
+    }
+
+    fn deinit(self: *Boundary) void {
+        self.fixture.deinit(gpa);
+    }
+
+    fn provider(self: *const Boundary) harness.Provider {
+        return .init(&self.fixture.schemes[0]);
+    }
+
+    /// Finalizes the block at `view` of epoch zero.
+    fn finalize(self: *const Boundary, view: u64) !Finalization {
+        return finalize_at(&self.fixture, 0, view, self.block);
+    }
+};
+
+fn expect_no_pending_ack(application: App) !void {
+    const heights = try application.pending_ack_heights(gpa);
+    defer gpa.free(heights);
+    try testing.expectEqual(0, heights.len);
+}
+
+fn reproposal_pending_anchor_body(ctx: Ctx) anyerror!void {
+    const prefix = "reproposal-delivered-pending-anchor-restart-before-ack";
+    var boundary: Boundary = undefined;
+    try boundary.init();
+    defer boundary.deinit();
+    var pending = try boundary.finalize(30);
+    defer pending.deinit(gpa);
+    var reproposal = try boundary.finalize(40);
+    errdefer reproposal.deinit(gpa);
+
+    // Start from the (0, 30) finalization with no block available. The floor verifies and
+    // stays pending with a fetch for its block, and dispatch waits for the anchor.
+    var first = try start_floor(
+        harness.Provider,
+        common.Unbuffered,
+        ctx.child("pending"),
+        prefix,
+        boundary.provider(),
+        reproposal_epoch_length,
+        try pending.clone(gpa),
+        null,
+    );
+    try testing.expectEqual(null, try first.mailbox.get_processed());
+    const digest = boundary.block.digest();
+    try testing.expect(try fetched_block_for_round(first.resolver, digest, pending.round()));
+    try expect_no_pending_ack(first.application);
+
+    // Deliver block 10 with its (0, 40) finalization as a finalized-by-height response. The
+    // block anchors the pending floor; the test stops before the application acknowledges it.
+    const value = try finalized_value(reproposal, boundary.block);
+    defer gpa.free(value);
+    const height: Height = .new(10);
+    const subscriber: handler.Annotation = .{ .finalized = .{ .by_height = height } };
+    const outcome = try deliver(first.resolver, .{ .finalized = height }, subscriber, value);
+    try testing.expectEqual(complete, outcome);
+    const absent: Processed = .{ .absent = .new(9) };
+    try testing.expectEqual(absent, (try first.mailbox.get_processed()).?);
+    try expect_pending_ack(first.application, 10);
+    first.crash();
+
+    // Marshal skips the later floor and dispatches block 10 from the archive.
+    try restart_with_retired_floor_resumes_at(ctx, prefix, reproposal, 10);
+}
+
+test "standard reproposal delivered as pending floor anchor survives restart before ack" {
+    try run(reproposal_pending_anchor_body);
+}
+
+/// Whether `resolver` recorded any fetch keyed by the block `digest`.
+fn fetched_block(resolver: common.RecordingResolver, digest: harness.D) !bool {
+    const fetches = try resolver.fetches(gpa);
+    defer gpa.free(fetches);
+    for (fetches) |fetch| {
+        if (fetch.key == .block and fetch.key.block.eql(digest)) return true;
+    }
+    return false;
+}
+
+fn reproposal_pruned_block_body(ctx: Ctx) anyerror!void {
+    const prefix = "reproposal-reported-pruned-covered";
+    var state: Reproposal = undefined;
+    try start_reproposal_processed_through_20(&state, ctx, prefix);
+    defer state.deinit();
+    state.run.crash();
+    var reproposal = try state.finalize(10, 40);
+    errdefer reproposal.deinit(gpa);
+
+    // Restart without a buffer from block 10's first finalization, and prune below 20 so
+    // block 10 is no longer local.
+    var pruned = try start_floor(
+        harness.Provider,
+        common.Unbuffered,
+        ctx.child("pruned"),
+        prefix,
+        state.provider(),
+        reproposal_epoch_length,
+        try state.finalize(10, 10),
+        null,
+    );
+    try testing.expect(pruned.restored.cutoff.covers(reproposal.round()));
+    try pruned.mailbox.prune(.new(20));
+    try expect_processed(&pruned.mailbox, 20);
+    try testing.expect(!try has_block(&pruned.mailbox, .new(10)));
+
+    // The later finalization's round is covered: no fetch by commitment, and dispatch stays
+    // at height 21.
+    report(&pruned.mailbox, reproposal);
+    try expect_processed(&pruned.mailbox, 20);
+    try testing.expect(!try fetched_block(pruned.resolver, state.block(10).digest()));
+    try expect_pending_ack(pruned.application, 21);
+    pruned.crash();
+    try restart_with_retired_floor_resumes_at(ctx, prefix, reproposal, 21);
+}
+
+test "standard reproposal reported for pruned block is covered without fetch" {
+    try run(reproposal_pruned_block_body);
+}
+
+fn pending_ack_is_ten(application: App) bool {
+    const heights = application.pending_ack_heights(gpa) catch return false;
+    defer gpa.free(heights);
+    return heights.len == 1 and heights[0].get() == 10;
+}
+
+fn set_floor_installed_anchor_body(ctx: Ctx) anyerror!void {
+    const prefix = "set-floor-installed-anchor-covered";
+    var boundary: Boundary = undefined;
+    try boundary.init();
+    defer boundary.deinit();
+    var buffer = try common.RecordingBuffer.init(gpa, ctx.io());
+    errdefer buffer.deinit();
+    try buffer.insert(try ready(boundary.block));
+
+    // Install the (0, 10) finalization as the floor; block 10 is dispatched, not acknowledged.
+    var first = try start_floor(
+        harness.Provider,
+        common.RecordingBuffer,
+        ctx.child("first"),
+        prefix,
+        boundary.provider(),
+        reproposal_epoch_length,
+        try boundary.finalize(10),
+        buffer,
+    );
+    defer first.crash();
+    try common.wait_until(ctx, 5000, "floor dispatch", first.application, pending_ack_is_ten);
+
+    // The later finalization is covered: the pending acknowledgement survives and block 10
+    // is not dispatched again.
+    try first.mailbox.set_floor(try boundary.finalize(40));
+    const absent: Processed = .{ .absent = .new(9) };
+    try testing.expectEqual(absent, (try first.mailbox.get_processed()).?);
+    try expect_pending_ack(first.application, 10);
+}
+
+test "standard set floor for installed anchor is covered" {
+    try run(set_floor_installed_anchor_body);
+}
