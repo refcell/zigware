@@ -142,18 +142,27 @@ pub fn Db(F: type, K: type, E: type, C: type, H: type, T: type) type {
                 .max_size = max_size,
                 .replay_from_floor = true,
             });
-            errdefer journal.deinit();
             if (journal.size() == 0) {
+                errdefer journal.deinit();
                 _ = try journal.append(.{ .commit = .{ .metadata = null, .floor = 0 } });
                 try journal.sync();
             }
-            const last_commit = journal.size() - 1;
-            var op = try journal.read(last_commit);
-            defer op.deinit(gpa);
-            const floor = op.inactivity_floor().?; // Recovery selected a commit.
-            var snapshot = try build_snapshot(gpa, cfg.translator, floor, &journal);
+            return init_from_log(gpa, scope, journal, cfg.translator);
+        }
+
+        /// Builds the database over an opened `log` whose last operation is a commit (the
+        /// build half of commonware's `from_sync_result`, which state sync uses on the journal
+        /// it filled): rebuilds the index from the commit's floor. Takes ownership of `log`,
+        /// also on error. An empty log is `HistoricalFloorPruned`. Does not sync.
+        pub fn init_from_log(gpa: Allocator, scope: Scope, log: Journal, translator: T) !Self {
+            var journal = log;
+            errdefer journal.deinit();
+            if (journal.size() == 0) return error.HistoricalFloorPruned;
+            var reader: LogReader = .{ .journal = &journal };
+            const floor = try qmdb.find_inactivity_floor_at(gpa, &reader, journal.size());
+            var snapshot = try build_snapshot(gpa, translator, floor, &journal);
             errdefer snapshot.deinit();
-            const inactive_peaks = merkle.inactive_peaks(F, last_commit + 1, floor);
+            const inactive_peaks = merkle.inactive_peaks(F, journal.size(), floor);
             const root_digest = try journal.root(inactive_peaks);
             var self: Self = .{
                 .gpa = gpa,

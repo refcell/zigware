@@ -9,6 +9,8 @@ const merkle = @import("../../merkle/mod.zig");
 const verify = @import("../verify.zig");
 const immutable = @import("mod.zig");
 const support = @import("test_support.zig");
+const qmdb = @import("../mod.zig");
+const metrics = @import("runtime").telemetry.metrics;
 
 const gpa = testing.allocator;
 const families = .{ merkle.mmr.Family, merkle.mmb.Family };
@@ -381,4 +383,37 @@ fn check_and_reopen(comptime F: type, harness: *support.Harness, db: anytype, ke
 
 test "immutable randomized chains match the reopened rebuild" {
     inline for (families) |F| try check_random_chains(F, 0x1aaa_7e5d);
+}
+
+test "immutable init_from_log rebuilds an opened log and refuses an empty one" {
+    inline for (families) |F| {
+        const Db = support.Fixed(F);
+        var harness = try support.Harness.init(gpa);
+        defer harness.deinit();
+        const cfg = harness.cfg(Db);
+        const storage = harness.storage.interface();
+        const scope = metrics.Scope.init(&harness.registry).child("db");
+        const options: qmdb.InitOptions = .{ .replay_from_floor = true };
+        const empty = try qmdb.init_journal(Db.Journal, gpa, storage, cfg.merkle, cfg.log, options);
+        const refused = Db.init_from_log(gpa, scope, empty, cfg.translator);
+        try testing.expectError(error.HistoricalFloorPruned, refused);
+        var db = try harness.open(F, null);
+        errdefer db.deinit();
+        try commit_sets(&db, &.{ 1, 2 }, null);
+        try commit_sets(&db, &.{3}, 3);
+        try db.sync();
+        const root = db.root();
+        db.deinit();
+        const log = try qmdb.init_journal(Db.Journal, gpa, storage, cfg.merkle, cfg.log, options);
+        harness.registry.deinit();
+        harness.registry = metrics.Registry.init(gpa);
+        const reopened = metrics.Scope.init(&harness.registry).child("db");
+        db = try Db.init_from_log(gpa, reopened, log, cfg.translator);
+        try testing.expect(db.root().eql(root));
+        try testing.expectEqual(@as(u64, 3), db.inactivity_floor());
+        // The index starts at the floor: sets below it are not served.
+        try expect_value(try db.get(&fill(1)), null);
+        try expect_value(try db.get(&fill(3)), fill(103));
+        try db.destroy();
+    }
 }

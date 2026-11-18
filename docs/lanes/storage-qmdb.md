@@ -52,6 +52,8 @@ which every database here is built on.
 - [x] any: owned (variable) values, unordered and ordered: batches own their writes,
   metadata, and staged puts; diffs own their values; reads return owned copies; the floor
   walk borrows log reads and hands the journal batch copies (replacing policies included).
+- [x] `init_from_log(gpa, scope, log, ...)` on any, immutable, and keyless: the build half of
+  `init` over an opened authenticated log (state sync's `from_sync_result`).
 - [ ] any: evicting floor policies (and ordered link repair
   after evictions), ordered staging and `stream_range`/`keys`, batched `get_many`.
 - [x] immutable (fixed, MMR and MMB): `Db`, chained batches, floor-filtered batch reads,
@@ -232,3 +234,4 @@ which every database here is built on.
   unordered) match commonware.
 - 2026-11-16: immutable owned (variable) values.
 - 2026-11-16: any owned (variable) values, unordered and ordered.
+- 2026-11-18: `init_from_log` hooks on any, immutable, and keyless for state sync.

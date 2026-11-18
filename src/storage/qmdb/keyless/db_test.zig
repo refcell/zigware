@@ -13,6 +13,7 @@ const fixed = @import("../../journal/contiguous/fixed.zig");
 const value = @import("../value.zig");
 const verify = @import("../verify.zig");
 const keyless = @import("mod.zig");
+const qmdb = @import("../mod.zig");
 
 const Sha256 = cryptography.Sha256;
 const U64 = utils.sequence.U64;
@@ -511,5 +512,34 @@ test "keyless chained floor regression and beyond-commit floors are rejected" {
         try db.apply_batch(child);
         try testing.expectEqual(@as(u64, 4), db.inactivity_floor());
         try testing.expect(db.root().eql(child.root()));
+    }
+}
+
+test "keyless init_from_log builds over an opened log and refuses an empty one" {
+    inline for (families) |F| {
+        const Db = TestDb(F);
+        var harness = try Harness.init();
+        defer harness.deinit();
+        const cfg = harness.cfg(F);
+        const storage = harness.storage.interface();
+        const scope = metrics.Scope.init(&harness.registry).child("db");
+        const empty = try qmdb.init_journal(Db.Journal, gpa, storage, cfg.merkle, cfg.log, .{});
+        const refused = Db.init_from_log(gpa, scope, empty);
+        try testing.expectError(error.HistoricalFloorPruned, refused);
+        var db = try harness.open(F);
+        errdefer db.deinit();
+        try append_batch(F, &db, &.{ make(1), make(2) }, 2);
+        try db.sync();
+        const root = db.root();
+        db.deinit();
+        const log = try qmdb.init_journal(Db.Journal, gpa, storage, cfg.merkle, cfg.log, .{});
+        harness.registry.deinit();
+        harness.registry = metrics.Registry.init(gpa);
+        const reopened = metrics.Scope.init(&harness.registry).child("db");
+        db = try Db.init_from_log(gpa, reopened, log);
+        try testing.expect(db.root().eql(root));
+        try testing.expectEqual(@as(u64, 2), db.inactivity_floor());
+        try testing.expectEqual(@as(?U64, make(2)), try db.get(2));
+        try db.destroy();
     }
 }

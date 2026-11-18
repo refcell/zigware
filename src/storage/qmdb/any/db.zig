@@ -115,17 +115,34 @@ pub fn Db(F: type, U: type, C: type, I: type, H: type, comptime N: usize) type {
         ) !Self {
             assert(options.replay_from_floor);
             var log = try qmdb.init_journal(Log, gpa, storage, cfg.merkle, cfg.log, options);
-            errdefer log.deinit();
             if (log.size() == 0) {
+                errdefer log.deinit();
                 _ = try log.append(.{ .commit = .{ .metadata = null, .floor = 0 } });
                 try log.sync();
             }
-            var snapshot = I.init(gpa, cfg.translator);
+            return init_from_log(gpa, scope, log, cfg.translator, cfg.init_cache);
+        }
+
+        /// Builds the database over an opened `log` whose last operation is a commit
+        /// (commonware's `init_from_log`, which state sync uses on the journal it filled):
+        /// rebuilds the snapshot and bitmap from the commit's floor. Takes ownership of `log`,
+        /// also on error. An empty log is `HistoricalFloorPruned`. Does not sync.
+        pub fn init_from_log(
+            gpa: Allocator,
+            scope: Scope,
+            log_owned: Log,
+            translator: I.Translator,
+            init_cache: ?usize,
+        ) !Self {
+            var log = log_owned;
+            errdefer log.deinit();
+            if (log.size() == 0) return error.HistoricalFloorPruned;
+            var snapshot = I.init(gpa, translator);
             errdefer snapshot.deinit();
             var reader: LogReader = .{ .log = &log };
             const floor = try qmdb.find_inactivity_floor_at(gpa, &reader, log.size());
             var built =
-                try snapshot_mod.build(Operation, gpa, floor, &log, &snapshot, cfg.init_cache);
+                try snapshot_mod.build(Operation, gpa, floor, &log, &snapshot, init_cache);
             defer built.deinit(gpa);
             var bitmap = try init_bitmap(gpa, log.get_bounds().start, floor, &built.activity);
             errdefer bitmap.deinit(gpa);
@@ -142,6 +159,7 @@ pub fn Db(F: type, U: type, C: type, I: type, H: type, comptime N: usize) type {
                 .metrics = try metrics_mod.Metrics.init(scope),
             };
             self.update_metrics();
+            assert(self.inactivity_floor_loc < self.log.size());
             return self;
         }
 

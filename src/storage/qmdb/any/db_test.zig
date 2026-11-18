@@ -9,6 +9,8 @@ const merkle = @import("../../merkle/mod.zig");
 const verify = @import("../verify.zig");
 const floor_mod = @import("../floor.zig");
 const support = @import("test_support.zig");
+const qmdb = @import("../mod.zig");
+const metrics = @import("runtime").telemetry.metrics;
 
 const gpa = testing.allocator;
 const families = .{ merkle.mmr.Family, merkle.mmb.Family };
@@ -667,5 +669,41 @@ test "any ordered predecessor rewrites take the nearest ancestor's update" {
         try expect_value(&db, a, val(1, 2));
         try expect_value(&db, b, null);
         try check_links(Db, &db, &model);
+    }
+}
+
+test "any init_from_log rebuilds an opened log and refuses an empty one" {
+    inline for (families) |F| {
+        const Db = support.UnorderedFixed(F);
+        var harness = try support.Harness.init(gpa);
+        defer harness.deinit();
+        const cfg = harness.cfg(Db);
+        const storage = harness.storage.interface();
+        const scope = metrics.Scope.init(&harness.registry).child("db");
+        const options: qmdb.InitOptions = .{ .replay_from_floor = true };
+        const empty = try qmdb.init_journal(Db.Log, gpa, storage, cfg.merkle, cfg.log, options);
+        const refused = Db.init_from_log(gpa, scope, empty, cfg.translator, cfg.init_cache);
+        try testing.expectError(error.HistoricalFloorPruned, refused);
+        var db = try harness.open(Db, null);
+        errdefer db.deinit();
+        try support.apply_writes(Db, &db, &.{
+            .{ .key = key(1), .value = val(1, 1) },
+            .{ .key = key(2), .value = val(2, 1) },
+        });
+        try support.apply_writes(Db, &db, &.{.{ .key = key(1), .value = null }});
+        try db.sync();
+        const root = db.root();
+        const floor = db.inactivity_floor();
+        db.deinit();
+        const log = try qmdb.init_journal(Db.Log, gpa, storage, cfg.merkle, cfg.log, options);
+        harness.registry.deinit();
+        harness.registry = metrics.Registry.init(gpa);
+        const reopened = metrics.Scope.init(&harness.registry).child("db");
+        db = try Db.init_from_log(gpa, reopened, log, cfg.translator, cfg.init_cache);
+        try testing.expect(db.root().eql(root));
+        try testing.expectEqual(floor, db.inactivity_floor());
+        try expect_value(&db, key(1), null);
+        try expect_value(&db, key(2), val(2, 1));
+        try db.destroy();
     }
 }
