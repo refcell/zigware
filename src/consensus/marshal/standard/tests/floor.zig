@@ -2171,3 +2171,81 @@ test "standard dispatches finalized blocks after sync" {
         }
     }.body);
 }
+
+/// Enqueues `value` (borrowed) for the finalized `height` to a by-height subscriber and
+/// returns the pending outcome, so several deliveries can share one batch.
+fn deliver_finalized_async(
+    handler: anytype,
+    height: u64,
+    value: []const u8,
+) !utils.channel.oneshot.Receiver(common.Outcome) {
+    const subscribers = [_]common.Annotation{.{ .finalized = .{ .by_height = .new(height) } }};
+    const key: common.Key = .{ .finalized = .new(height) };
+    return handler.deliver(.{ .key = key, .subscribers = &subscribers }, value);
+}
+
+// Distinct committees per epoch, so a certificate verifies only under its own epoch's scope.
+// Epoch 0 retires right after its admission lookup while epoch 1 stays live. Both deliveries
+// land in one batch, so each epoch group must verify under the scope its items were admitted
+// with.
+test "standard finalized batch verifies each epoch under admission scope" {
+    try run(struct {
+        fn body(ctx: Ctx) anyerror!void {
+            var rng = utils.rng.test_rng();
+            var first = try harness.fixture(gpa, &rng);
+            defer first.deinit(gpa);
+            var second = try harness.fixture(gpa, &rng);
+            defer second.deinit(gpa);
+            var early: FinalizedDelivery = try .init(&first, round_at(1));
+            defer early.deinit();
+            const late_height = harness.blocks_per_epoch + 1;
+            const late_block =
+                try harness.make_raw_block(gpa, hash("late"), .new(late_height), 2100);
+            const late_round: Round = .new(.new(1), .new(late_height));
+            const proposal = harness.Proposal.init(late_round, .zero(), late_block.digest());
+            const quorum = harness.quorum;
+            var late_finalization = try harness.make_finalization(gpa, &second, proposal, quorum);
+            defer late_finalization.deinit(gpa);
+
+            var application = try App.manual_ack(gpa, ctx.io());
+            defer application.deinit();
+            var scopes = [_]RetiringProvider.Scope{
+                .{ .epoch = 0, .scheme = &first.schemes[0], .remaining = .init(1) },
+                .{
+                    .epoch = 1,
+                    .scheme = &second.schemes[0],
+                    .remaining = .init(std.math.maxInt(usize)),
+                },
+            };
+            const provider: RetiringProvider = .{ .scopes = &scopes };
+            var started = try start_retiring(
+                ctx.child("validator"),
+                "finalized-batch-mixed-scopes",
+                provider,
+                application.clone(),
+            );
+            defer started.crash();
+            try testing.expect(!provider.retired(0));
+
+            const early_value = try encode_pair(early.finalization, early.block);
+            defer gpa.free(early_value);
+            const late_value = try encode_pair(late_finalization, late_block);
+            defer gpa.free(late_value);
+            var handler = started.resolver.handler_clone();
+            defer handler.deinit();
+            var early_response = try deliver_finalized_async(handler, 1, early_value);
+            defer early_response.deinit();
+            var late_response = try deliver_finalized_async(handler, late_height, late_value);
+            defer late_response.deinit();
+            const complete: common.Outcome = .{ .resolved = .complete };
+            try testing.expectEqual(complete, try early_response.recv());
+            try testing.expectEqual(complete, try late_response.recv());
+            try testing.expect(provider.retired(0));
+            try testing.expectEqual(0, (try application.acknowledged()).get());
+            try testing.expectEqual(1, (try application.acknowledged()).get());
+            var stored = (try started.mailbox.get_finalization(.new(late_height))).?;
+            defer stored.deinit(gpa);
+            try testing.expect(stored.proposal.payload.eql(late_block.digest()));
+        }
+    }.body);
+}
