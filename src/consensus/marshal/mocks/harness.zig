@@ -163,14 +163,15 @@ pub fn max_message_size(comptime V: type) u32 {
 
 /// A certificate of `kind` (`Finalize` or `Notarize` votes) over `proposal` from the first
 /// `signers` validators.
-fn certify_votes(
+pub fn certify_votes(
     comptime Vote: type,
     comptime Certificate: type,
     gpa: Allocator,
     validators: *const Fixture,
-    proposal: Proposal,
+    proposal: anytype,
     signers: u32,
 ) !Certificate {
+    assert(signers > 0);
     assert(signers <= num_validators);
     var votes: [num_validators]Vote = undefined;
     for (votes[0..signers], validators.schemes[0..signers]) |*vote, *scheme| {
@@ -180,14 +181,39 @@ fn certify_votes(
     return Certificate.from_votes(gpa, &validators.schemes[0], votes[0..signers], strategy);
 }
 
+/// A finalization over a proposal committing to `C` (the coding variant's commitment).
+pub fn make_finalization_of(
+    comptime C: type,
+    gpa: Allocator,
+    validators: *const Fixture,
+    proposal: simplex_types.Proposal(C),
+    signers: u32,
+) !simplex_types.Finalization(S, C) {
+    const Vote = simplex_types.Finalize(S, C);
+    const Certificate = simplex_types.Finalization(S, C);
+    return certify_votes(Vote, Certificate, gpa, validators, proposal, signers);
+}
+
+/// A notarization over a proposal committing to `C`.
+pub fn make_notarization_of(
+    comptime C: type,
+    gpa: Allocator,
+    validators: *const Fixture,
+    proposal: simplex_types.Proposal(C),
+    signers: u32,
+) !simplex_types.Notarization(S, C) {
+    const Vote = simplex_types.Notarize(S, C);
+    const Certificate = simplex_types.Notarization(S, C);
+    return certify_votes(Vote, Certificate, gpa, validators, proposal, signers);
+}
+
 pub fn make_finalization(
     gpa: Allocator,
     validators: *const Fixture,
     proposal: Proposal,
     signers: u32,
 ) !Finalization {
-    const Vote = simplex_types.Finalize(S, D);
-    return certify_votes(Vote, Finalization, gpa, validators, proposal, signers);
+    return make_finalization_of(D, gpa, validators, proposal, signers);
 }
 
 pub fn make_notarization(
@@ -196,15 +222,21 @@ pub fn make_notarization(
     proposal: Proposal,
     signers: u32,
 ) !Notarization {
-    const Vote = simplex_types.Notarize(S, D);
-    return certify_votes(Vote, Notarization, gpa, validators, proposal, signers);
+    return make_notarization_of(D, gpa, validators, proposal, signers);
+}
+
+/// The standard variant's archives: finalizations commit to the block digest.
+pub fn Archives(comptime StoredBlock: type) type {
+    return ArchivesOf(D, StoredBlock);
 }
 
 /// The two immutable archives a validator's actor borrows, and the page cache behind them.
-pub fn Archives(comptime StoredBlock: type) type {
+/// Finalizations commit to `C`.
+pub fn ArchivesOf(comptime C: type, comptime StoredBlock: type) type {
     return struct {
         const Self = @This();
-        pub const FinalizationArchive = storage.archive.immutable.Archive([32]u8, Finalization);
+        pub const Certificate = simplex_types.Finalization(S, C);
+        pub const FinalizationArchive = storage.archive.immutable.Archive([32]u8, Certificate);
         pub const BlockArchive = storage.archive.immutable.Archive([32]u8, StoredBlock);
 
         gpa: Allocator,
@@ -229,7 +261,7 @@ pub fn Archives(comptime StoredBlock: type) type {
             const label = "finalizations_by_height";
             const names = &self.names;
             self.finalizations = try open_archive(
-                Finalization,
+                Certificate,
                 ctx,
                 cache_ref,
                 &names[0],

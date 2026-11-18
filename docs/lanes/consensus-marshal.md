@@ -140,7 +140,8 @@ then the core and standard actors as those packages land.
   (`num_validators`, `quorum`, `blocks_per_epoch`, `link`), `S` (ed25519 under
   `fast_schemes`, threshold VRF MinPk otherwise), `fixture`, `Provider`, `make_raw_block`,
   `genesis_parent`, `TestNetwork` (`start`, `link_all`, `stop`), `max_message_size(V)`,
-  `make_finalization`, `make_notarization`, `Archives(StoredBlock)` (both immutable archives,
+  `make_finalization`, `make_notarization` (and `_of(C, ...)` for any commitment, over pub
+  `certify_votes`), `Archives(StoredBlock)` (= `ArchivesOf(D, StoredBlock)`) (both immutable archives,
   owning their partition names), and `StandardHarness`: `Validator(App)` with
   `setup(ctx, network, me, provider, max_pending_acks, app) !*Self` (resolver, broadcast,
   archives, actor) and `crash()`, plus `make_test_block`, `propose`, `verify`, `digest`,
