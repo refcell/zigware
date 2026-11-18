@@ -212,6 +212,11 @@ variants need `runtime` storage; do them after its interface lands.
     tails, torn interior, rewrite, and boundary pages, tears below the watermark (adopted),
     gaps between blobs, and the prune crash. commonware's `test_sync_blob` is emulated by
     rollover plus `commit`. Planted bug (skip forward page validation) fails six tests.
-  - [ ] fixed.rs: single-item blobs, `init_at_size`/`clear_to_size` and their crash
-    scenarios, `read_many`, and metrics tests.
+  - [x] fixed.rs batch 3 (`fixed_size_test.zig`): single-item blobs, `init_at_size` (zero,
+    mid-blob, boundaries, large, near `u64::MAX`), `clear_to_size`, mid-blob hints, prune
+    durability, interrupted clears, watermark past an empty tail, `read_many`. The two
+    should-panic `read_many` tests are assertions here and are not ported. Planted bug
+    (ignore a staged clear intent) fails seven tests.
+  - [ ] fixed.rs: the bounded-recovery, start-sync, and cache-accounting tests (lines
+    2365-3400 and 8233-8895 of fixed.rs).
   - [ ] variable.rs: the remaining ~120 tests.
