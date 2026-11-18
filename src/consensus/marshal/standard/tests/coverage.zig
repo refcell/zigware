@@ -6,6 +6,7 @@ const std = @import("std");
 const testing = std.testing;
 const runtime = @import("runtime");
 const utils = @import("utils");
+const parallel = @import("parallel");
 const types = @import("../../../types.zig");
 const harness = @import("../../mocks/harness.zig");
 const mocks_block = @import("../../mocks/block.zig");
@@ -743,4 +744,233 @@ fn set_floor_installed_anchor_body(ctx: Ctx) anyerror!void {
 
 test "standard set floor for installed anchor is covered" {
     try run(set_floor_installed_anchor_body);
+}
+
+/// An epocher that has retired every height at or below `retired`, as an application may do
+/// for processed heights (commonware `RetiredThrough`).
+const RetiredThrough = struct {
+    epocher: types.FixedEpocher,
+    retired: Height,
+
+    pub fn containing(self: RetiredThrough, height: Height) ?types.EpochInfo {
+        if (height.get() <= self.retired.get()) return null;
+        return self.epocher.containing(height);
+    }
+
+    pub fn first(self: RetiredThrough, epoch: types.Epoch) ?Height {
+        return self.epocher.first(epoch);
+    }
+
+    pub fn last(self: RetiredThrough, epoch: types.Epoch) ?Height {
+        return self.epocher.last(epoch);
+    }
+};
+
+/// The marshal actor over prunable stores with epocher `E` and no provider epochs.
+fn RetiredActor(comptime E: type) type {
+    const Params = struct {
+        pub const Scheme = harness.S;
+        pub const Provider = EmptyProvider;
+        pub const Epocher = E;
+        pub const Strategy = parallel.Sequential;
+        pub const ApplicationBlock = B;
+        pub const Block = common.V.Block;
+        pub const Commitment = harness.D;
+        pub const Variant = common.V;
+        pub const Acknowledgement = harness.Exact;
+        pub const Certificates = Prunable.Certificates;
+        pub const Blocks = Prunable.Blocks;
+        pub const Application = App;
+        pub const Buffer = common.Unbuffered;
+        pub const Resolver = common.RecordingResolver;
+    };
+    return core.Actor(Params);
+}
+
+fn reproposal_epocher() types.FixedEpocher {
+    return .new(utils.NonZero(u64).init(reproposal_epoch_length).?);
+}
+
+/// Opens marshal under `prefix` with `epocher` and `floor` (owned) configured and a provider
+/// holding no epochs, without starting it, and returns the floor it restored (commonware's
+/// `Actor::init` then a drop, with `with_epocher`).
+fn restored_floor(
+    comptime E: type,
+    ctx: Ctx,
+    prefix: []const u8,
+    epocher: E,
+    floor: Finalization,
+) !core.Floor {
+    const A = RetiredActor(E);
+    const Fixed = Running(EmptyProvider, common.Unbuffered).A;
+    var start: Finalization = floor;
+    errdefer start.deinit(gpa);
+    var stores: Prunable = undefined;
+    try stores.open(ctx, prefix);
+    defer stores.deinit();
+    var fixed = try common.test_config(Fixed, gpa, prefix, EmptyProvider{}, 1, &stores.cache_ref);
+    fixed.start.genesis.deinit();
+    fixed.start = .{ .floor = start };
+    var config: A.Config = undefined;
+    inline for (@typeInfo(A.Config).@"struct".field_names) |name| {
+        if (comptime std.mem.eql(u8, name, "epocher")) {
+            config.epocher = epocher;
+        } else {
+            @field(config, name) = @field(fixed, name);
+        }
+    }
+    const initialized = try A.init(ctx, stores.certificates(), stores.blocks_store(), config);
+    var mailbox = initialized.mailbox;
+    mailbox.deinit();
+    initialized.actor.deinit();
+    return initialized.floor;
+}
+
+/// Acknowledges through height 20, then restarts from metadata holding that processed height
+/// and `round` as the round floor, with no epoch cutoff. The start derives the cutoff for the
+/// epoch height 20 closes and writes it back for a start whose epocher retired that height.
+fn closed_epoch_floor_written_back(ctx: Ctx, prefix: []const u8, round: ?Round) !void {
+    var state: Reproposal = undefined;
+    try start_reproposal_processed_through_20(&state, ctx, prefix);
+    defer state.deinit();
+    state.run.crash();
+    var reproposal = try state.finalize(10, 40);
+    defer reproposal.deinit(gpa);
+    try seed.processed_height(ctx.child("metadata"), prefix, .new(20), round);
+    const derived_ctx = ctx.child("derived");
+    const derived = try restored_floor(
+        types.FixedEpocher,
+        derived_ctx,
+        prefix,
+        reproposal_epocher(),
+        try reproposal.clone(gpa),
+    );
+    try testing.expect(derived.cutoff.covers(reproposal.round()));
+    // Only the written-back metadata can supply the floor to an epocher that retired every
+    // processed height.
+    const retired: RetiredThrough = .{ .epocher = reproposal_epocher(), .retired = .new(20) };
+    const persisted_ctx = ctx.child("persisted");
+    const persisted = try restored_floor(
+        RetiredThrough,
+        persisted_ctx,
+        prefix,
+        retired,
+        try reproposal.clone(gpa),
+    );
+    try testing.expect(persisted.cutoff.covers(reproposal.round()));
+}
+
+fn written_back_body(ctx: Ctx) anyerror!void {
+    try closed_epoch_floor_written_back(ctx, "closed-epoch-floor-written-back", null);
+}
+
+test "standard restored closed epoch floor is written back" {
+    try run(written_back_body);
+}
+
+fn written_back_over_round_body(ctx: Ctx) anyerror!void {
+    const prefix = "closed-epoch-floor-written-back-over-round-floor";
+    try closed_epoch_floor_written_back(ctx, prefix, .new(.zero(), .new(10)));
+}
+
+test "standard restored closed epoch floor is written back over a round floor" {
+    try run(written_back_over_round_body);
+}
+
+fn unacknowledged_successor_body(ctx: Ctx) anyerror!void {
+    const prefix = "closed-epoch-floor-unacknowledged-successor";
+    var state: Reproposal = undefined;
+    try start_reproposal_processed_through_20(&state, ctx, prefix);
+    defer state.deinit();
+    var late = try state.finalize(21, 25);
+    defer late.deinit(gpa);
+    var reproposal = try state.finalize(21, 50);
+    errdefer reproposal.deinit(gpa);
+    // Archive block 21's first finalization, then stop before it is acknowledged.
+    report(&state.run.mailbox, late);
+    try expect_processed(&state.run.mailbox, 20);
+    try expect_pending_ack(state.run.application, 21);
+    state.run.crash();
+    try seed.processed_height(ctx.child("metadata"), prefix, .new(20), null);
+    try restart_with_retired_floor_resumes_at(ctx, prefix, reproposal, 21);
+}
+
+test "standard closed epoch floor restores from an unacknowledged successor" {
+    try run(unacknowledged_successor_body);
+}
+
+fn certificate_only_successor_body(ctx: Ctx) anyerror!void {
+    const prefix = "certificate-only-successor-closes-no-epoch";
+    var boundary: Boundary = undefined;
+    try boundary.init();
+    defer boundary.deinit();
+    var first = try boundary.finalize(10);
+    defer first.deinit(gpa);
+    const digest = boundary.block.digest();
+    // Seed processed height 9 and archive only block 10's finalization above it.
+    try seed.processed_height(ctx.child("metadata"), prefix, .new(9), null);
+    {
+        var stores: Prunable = undefined;
+        try stores.open(ctx.child("seed"), prefix);
+        defer stores.deinit();
+        try stores.certificates().put(.new(10), digest, &first);
+        try stores.certificates().sync();
+    }
+    var restarted = try start_floor(
+        harness.Provider,
+        common.Unbuffered,
+        ctx.child("restarted"),
+        prefix,
+        boundary.provider(),
+        reproposal_epoch_length,
+        try first.clone(gpa),
+        null,
+    );
+    defer restarted.crash();
+    try testing.expect(!restarted.restored.cutoff.covers(first.round()));
+    // The floor is above the restored round floor, so it verifies and fetches its block.
+    const absent: Processed = .{ .absent = .new(9) };
+    try testing.expectEqual(absent, (try restarted.mailbox.get_processed()).?);
+    try testing.expect(try has_finalization(&restarted.mailbox, .new(10)));
+    try testing.expect(!try has_block(&restarted.mailbox, .new(10)));
+    try testing.expect(try fetched_block_for_round(restarted.resolver, digest, first.round()));
+}
+
+test "standard certificate-only successor closes no epoch" {
+    try run(certificate_only_successor_body);
+}
+
+fn installed_anchor_body(ctx: Ctx) anyerror!void {
+    const prefix = "closed-epoch-floor-installed-anchor";
+    var boundary: Boundary = undefined;
+    try boundary.init();
+    defer boundary.deinit();
+    var reproposal = try boundary.finalize(40);
+    errdefer reproposal.deinit(gpa);
+    var buffer = try common.RecordingBuffer.init(gpa, ctx.io());
+    errdefer buffer.deinit();
+    try buffer.insert(try ready(boundary.block));
+    // Install the first finalization as the floor and stop before block 10 is acknowledged.
+    var first = try start_floor(
+        harness.Provider,
+        common.RecordingBuffer,
+        ctx.child("first"),
+        prefix,
+        boundary.provider(),
+        reproposal_epoch_length,
+        try boundary.finalize(10),
+        buffer,
+    );
+    try common.wait_until(ctx, 5000, "floor dispatch", first.application, pending_ack_is_ten);
+    const absent: Processed = .{ .absent = .new(9) };
+    try testing.expectEqual(absent, (try first.mailbox.get_processed()).?);
+    first.crash();
+    // Restart from metadata holding only the processed height: block 10 is dispatched from
+    // the archive.
+    try seed.processed_height(ctx.child("metadata"), prefix, .new(9), null);
+    try restart_with_retired_floor_resumes_at(ctx, prefix, reproposal, 10);
+}
+
+test "standard closed epoch floor restores from an installed anchor" {
+    try run(installed_anchor_body);
 }
