@@ -143,7 +143,7 @@ fn expect_acknowledged(waiters: []Exact.Waiter) !void {
     }
 }
 
-fn run(comptime body: fn (Io) anyerror!void) !void {
+pub fn run(comptime body: fn (Io) anyerror!void) !void {
     var runner = try runtime.deterministic.Runner.init(gpa, .{
         .timeout_ns = 10 * std.time.ns_per_s,
     });

@@ -337,6 +337,10 @@ Owns `src/glue/dkg`. Reference: `glue/src/dkg` (about 24k Rust lines).
 - dkg logs rejections of peer-supplied input (detached or truncated ancestry, invalid
   pending logs) at info, not commonware's warn: tests hit them on purpose, and a warning on
   stderr makes test-glue print a failed-command block in every push (as simulate, 3244236).
+- The dealing window keeps commonware's mailbox-biased `select_loop!` by draining the mailbox
+  with `try_recv` first, then racing the mailbox against the channel with `Io.Select`; when
+  both finish in one race, both are handled, mailbox first. A window's epoch, store, dealer,
+  and player travel together as `dealing.Window(T).Session`.
 
 ### Backlog
 - [x] types (with conformance hashes), limits, fence, network.
@@ -348,7 +352,8 @@ Owns `src/glue/dkg`. Reference: `glue/src/dkg` (about 24k Rust lines).
   commonware's 9 helper tests (the whole-window tests land with the actor).
 - [x] reshare actor: core, setup, and follower mode, with the follower tests and the
   applied-tip contract checks.
-- [ ] reshare actor: dealing, inclusion, and dkg windows; the run loop; application.
+- [x] reshare actor: the dealing window with dealing.rs's 2 tests.
+- [ ] reshare actor: inclusion and dkg windows; the run loop; application.
 - [ ] bootstrap, probe (wire with conformance, discovery, service), orchestrator.
 - [ ] tests: the dkg and reshare harnesses, properties, and mocks; lookup's peer-activation
   test.
@@ -364,3 +369,4 @@ Owns `src/glue/dkg`. Reference: `glue/src/dkg` (about 24k Rust lines).
 - 2026-11-18: inclusion's pending-log scan, request queue, and verification retention.
 - 2026-11-18: the reshare actor's core, setup, and follower mode.
 - 2026-11-18: simulate's `MonitorReporter` (examples lane), with its tests.
+- 2026-11-18: the dealing window; both of dealing.rs's tests catch a planted bug.

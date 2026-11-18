@@ -58,6 +58,9 @@ pub const ContractError = error{
     WrongEpochInfo,
     BoundaryEpochMismatch,
     InvalidParticipants,
+    /// A finalized block outside the window that is running (the dealing window takes only
+    /// its epoch's early phase).
+    OutOfPhaseBlock,
 };
 
 /// Asserts `T` carries the actor's type parameters (see the file header).
