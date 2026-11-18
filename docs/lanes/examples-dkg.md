@@ -14,7 +14,9 @@ setup. Owns `examples/dkg` (commonware `examples/dkg`).
 - [x] `setup.zig` and the `setup` subcommand.
 - [x] `cli.zig`: the clap `Cli` (`--log-level`, `--worker-threads`, `bootstrap`, `setup`,
       `validator`, `help`), byte-identical to `commonware-dkg` over 176 recorded cases.
-- [ ] `application.zig`, `bootstrap.zig`, `validator.zig` on glue.dkg's actor, bootstrap,
+- [x] `application.zig`: the height-writing QMDB application over `glue.stateful.db.any`,
+      checked against commonware's state roots and ranges.
+- [ ] `bootstrap.zig`, `validator.zig` on glue.dkg's actor, bootstrap,
       probe, and orchestrator (coding lane, in progress).
 - [ ] Demo recording (`just` recipe `dkg`, etc/scripts/record-demo.sh).
 
@@ -33,7 +35,13 @@ setup. Owns `examples/dkg` (commonware `examples/dkg`).
   runner runs on `std.Io.Threaded`, not Tokio.
 - Until glue.dkg's actor `run` lands, `bootstrap` and `validator` parse and exit 1.
 
+- `application.zig`'s hooks take the parent block (propose) or the block height (process)
+  directly until glue's stateful `Application` contract lands; its root vectors come from a
+  scratch Rust test over commonware's `Database` and `db_config` (heights 1-4, forked batches,
+  height 2 applied and finalized).
+
 ## Log
 
 - 2026-11-18: config, types, and setup with commonware's tests and vectors.
 - 2026-11-18: the clap CLI with commonware-dkg's recorded cases (examples lane).
+- 2026-11-18: the application with commonware's state-root vectors (examples lane).
