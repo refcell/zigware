@@ -12,6 +12,8 @@ pub const mocks = @import("mocks.zig");
 pub const tip = @import("tip.zig");
 pub const write = @import("write.zig");
 pub const Write = write.Write;
+pub const read = @import("read.zig");
+pub const Read = read.Read;
 pub const paged = @import("paged/mod.zig");
 
 /// Tracks whether blob mutations still need a sync (commonware's `SyncState`).
