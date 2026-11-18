@@ -208,6 +208,10 @@ variants need `runtime` storage; do them after its interface lands.
     lowered watermark, truncate-append-reopen), and the init-at-most and repair truncation
     crashes on `runtime.storage.faulty`. Planted bug (skip the tail truncate in `repair_to`)
     fails four of them.
-  - [ ] fixed.rs: torn interior pages and the remaining recovery, clear-crash, and
-    `read_many` tests.
+  - [x] fixed.rs batch 2 (`fixed_torn_test.zig`): rollovers without commit, partial item
+    tails, torn interior, rewrite, and boundary pages, tears below the watermark (adopted),
+    gaps between blobs, and the prune crash. commonware's `test_sync_blob` is emulated by
+    rollover plus `commit`. Planted bug (skip forward page validation) fails six tests.
+  - [ ] fixed.rs: single-item blobs, `init_at_size`/`clear_to_size` and their crash
+    scenarios, `read_many`, and metrics tests.
   - [ ] variable.rs: the remaining ~120 tests.
