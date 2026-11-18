@@ -224,7 +224,7 @@ resolver; those lanes are running, so do the types first and the actors as they 
 - [x] config.rs (Config, Floor, skip and forward policies) with its validation rules.
 - [x] simplex metrics, and the actors (voter, batcher, resolver) and engine, on p2p's
   simulated network and the deterministic runtime: 4 honest nodes finalize.
-- [ ] Port the rest of state.rs's tests (done but view spans), the resolver actor.rs tests, and the
+- [x] Port the rest of state.rs's tests, the resolver actor.rs tests, and the
   voter/resolver ingress tests. (Resolver state.rs: all 23 done.) The actor metrics are
   done (2026-11-18, back in this lane): voter (outbound, handoff events and abandonments,
   four latency histograms), its state (current and tracked views, issuance probes,
@@ -234,8 +234,8 @@ resolver; those lanes are running, so do the types first and the actors as they 
   Handed to the runtime lane on 2026-11-16. Ported in voter/state_test.zig, in
   commonware's order: everything from `certificate_candidates_respect_force_flag` through
   `parent_payload_reports_missing_term_anchor` (including the timeout, stall, inactivity,
-  and skip-budget tests, without their timeout-metric counters, and except
-  `decided_views_close_their_view_span`, which waits on view spans), plus
+  and skip-budget tests; the p2p lane added their timeout-metric counters on 2026-11-18),
+  plus
   `certification_lifecycle`, `entry_certificate_prioritizes_...`, `only_notarize_before_
   nullify`, `nullification_skips_to_next_term_start`, `term_safety_blocks_finalize_after_
   nullify`, `try_verify_waits_for_missing_parent_certification`, and the
@@ -245,9 +245,9 @@ resolver; those lanes are running, so do the types first and the actors as they 
   done (p2p lane, 2026-11-18) in voter/state_late_test.zig, with planted bugs per group,
   plus a zigware-only replay-binding test (no state.rs case fails when replay drops a
   vote's parent binding). Covered by state_test.zig's own cases instead:
-  `term_length_one_nullification_advances_by_one`. So every state.rs test is ported but
-  `decided_views_close_their_view_span` and the timeout-metric counter asserts (and
-  `optimistic_frontier_walk_does_not_scan_rounds` checks leaders, not its probe counter). Ingress: done (resolver/ingress_test.zig,
+  `term_length_one_nullification_advances_by_one`. With view spans and the state metrics
+  on main, `decided_views_close_their_view_span` and the `issuance_window_probes` check
+  are ported too: every state.rs test has a counterpart. Ingress: done (resolver/ingress_test.zig,
   voter/ingress_test.zig). Actor metrics: simplex owns them again.
   Resolver actor.rs (resolver/actor_test.zig): every handler-level case is ported, from
   `scan_fetches_issue_as_one_batch` through `validate_rejects_finalization_from_different_

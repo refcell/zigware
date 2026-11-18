@@ -11,6 +11,7 @@ const codec = @import("codec");
 const mocks_application = @import("../../mocks/application.zig");
 const mocks_relay = @import("../../mocks/relay.zig");
 const parallel = @import("parallel");
+const runtime = @import("runtime");
 const context = @import("../context.zig");
 const elector = @import("../../elector.zig");
 const utils = @import("utils");
@@ -31,6 +32,7 @@ const Rnd = consensus_types.Round;
 const Participant = consensus_types.Participant;
 
 const Env = base.Env;
+const metrics = runtime.telemetry.metrics;
 const Options = base.Options;
 const proposal = base.proposal;
 const run = base.run;
@@ -1060,14 +1062,16 @@ test "voter state the optimistic frontier slides with a direct notarization" {
     }.body);
 }
 
-test "voter state the optimistic frontier walk spans a whole term" {
-    // commonware `optimistic_frontier_walk_does_not_scan_rounds`, without its
-    // `issuance_window_probes` counter, which comes with the actor metrics.
+test "voter state the optimistic frontier walk does not scan rounds" {
+    // commonware `optimistic_frontier_walk_does_not_scan_rounds`.
     try run(struct {
         fn body(io: Io) !void {
+            var registry = metrics.Registry.init(gpa);
+            defer registry.deinit();
             var env: Env = undefined;
             var options = epoch_nine(131, 10, 64);
             options.epoch = 10;
+            options.registry = &registry;
             try env.start(io, options);
             defer env.stop();
             const state = &env.state;
@@ -1076,9 +1080,13 @@ test "voter state the optimistic frontier walk spans a whole term" {
                 try testing.expect(try state.set_proposal(.new(view), &value));
             }
             const held = state.rounds.get(.new(65)).?.proposal().?.*;
+            const probes = state.metrics.?.issuance_window_probes.metric();
+            const before = probes.get();
             try add_notarized(state, &env.fixture, held);
             for (66..131) |view| try testing.expect(state.leader_index(.new(view)) != null);
             try testing.expect(state.leader_index(.new(131)) == null);
+            // Sliding the frontier inspects no tracked rounds.
+            try testing.expectEqual(before, probes.get());
         }
     }.body);
 }
@@ -3241,6 +3249,27 @@ test "voter state a replayed child vote stays bound to its replaced parent" {
             // A conflicting view-1 certificate kills the chain our view-2 vote built on.
             try add_notarized(state, &env.fixture, proposal(9, 1, 0, 41));
             try testing.expectEqual(null, state.optimistic_ancestry_payload(.new(2)));
+        }
+    }.body);
+}
+
+test "voter state decided views close their view span" {
+    // commonware `decided_views_close_their_view_span`.
+    try run(struct {
+        fn body(io: Io) !void {
+            var env: Env = undefined;
+            try env.start(io, .{ .epoch = 7 });
+            defer env.stop();
+            const state = &env.state;
+            try finalize_with(&env, proposal(7, 2, 0, 7));
+            try testing.expectEqual(2, state.last_finalized().get());
+            try testing.expect(state.view_span_open(.new(1)));
+            try testing.expect(!state.view_span_open(.new(2)));
+            try testing.expect(state.view_span_open(.new(3)));
+            state.close_decided_spans();
+            try testing.expect(!state.view_span_open(.new(1)));
+            try testing.expect(!state.view_span_open(.new(2)));
+            try testing.expect(state.view_span_open(.new(3)));
         }
     }.body);
 }

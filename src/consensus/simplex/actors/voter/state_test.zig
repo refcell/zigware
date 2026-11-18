@@ -35,6 +35,8 @@ const gpa = testing.allocator;
 const sequential = parallel.sequential;
 const genesis_view = state_mod.genesis_view;
 const second_ns: i96 = std.time.ns_per_s;
+const metrics = runtime.telemetry.metrics;
+const TimeoutReason = @import("../../metrics.zig").TimeoutReason;
 
 pub fn genesis() Digest {
     return .fill(0);
@@ -88,6 +90,8 @@ pub const Options = struct {
     validators: u32 = 4,
     /// Terms that may be skipped past the last finalization (0 disables skipping).
     skip_budget: u64 = 4,
+    /// Registers the state's metrics here when set (commonware's `context.child("state")`).
+    registry: ?*metrics.Registry = null,
 };
 
 /// A fixture of `validators` participants and a state that entered view 1. Must not move
@@ -119,6 +123,9 @@ pub const Env = struct {
             .timeout_retry = .from_millis(options.timeout_retry_ms),
             .skip_budget = options.skip_budget,
         });
+        if (options.registry) |registry| {
+            self.state.metrics = try .register(&metrics.Scope.init(registry).child("state"));
+        }
         try self.state.set_genesis(genesis());
     }
 
@@ -128,6 +135,14 @@ pub const Env = struct {
         self.fixture.deinit(gpa);
     }
 };
+
+/// The `timeouts` counter for `view`'s leader and `reason` (0 when never incremented).
+pub fn timeout_count(state: *State, view: View, reason: TimeoutReason) u64 {
+    const leader = state.leader_key(view).?;
+    const family = state.metrics.?.timeouts.metric();
+    const counter = family.get(.{ .leader = leader, .reason = reason }) orelse return 0;
+    return counter.get();
+}
 
 pub fn run(comptime function: fn (Io) anyerror!void) !void {
     var runner = try runtime.deterministic.Runner.init(gpa, .{});
@@ -510,11 +525,20 @@ test "voter state nullify preserves retry backoff after the first timeout vote" 
     try run(struct {
         fn body(io: Io) !void {
             var env: Env = undefined;
-            try env.start(io, .{ .signer = 0, .epoch = 30, .view_retention = 2 });
+            var registry = metrics.Registry.init(gpa);
+            defer registry.deinit();
+            try env.start(io, .{
+                .signer = 0,
+                .epoch = 30,
+                .view_retention = 2,
+                .registry = &registry,
+            });
             defer env.stop();
             const state = &env.state;
             const view = state.current_view();
             try testing.expect(!(try state.construct_nullify(view, .leader_timeout)).?.retry);
+            // The first nullify records a leader-timeout metric.
+            try testing.expectEqual(1, timeout_count(state, view, .leader_timeout));
             try io.sleep(.fromSeconds(2), .awake);
             const retry_deadline = state.next_timeout();
             try testing.expectEqual(context.now_ns(io) + 3 * second_ns, retry_deadline.deadline);
@@ -530,7 +554,14 @@ test "voter state nullify takes its reason from next timeout" {
     try run(struct {
         fn body(io: Io) !void {
             var env: Env = undefined;
-            try env.start(io, .{ .signer = 0, .epoch = 31, .view_retention = 2 });
+            var registry = metrics.Registry.init(gpa);
+            defer registry.deinit();
+            try env.start(io, .{
+                .signer = 0,
+                .epoch = 31,
+                .view_retention = 2,
+                .registry = &registry,
+            });
             defer env.stop();
             const state = &env.state;
             const view = state.current_view();
@@ -538,10 +569,14 @@ test "voter state nullify takes its reason from next timeout" {
             const latched = state.next_timeout();
             try testing.expectEqual(.missing_proposal, latched.reason);
             try testing.expect(!(try state.construct_nullify(view, latched.reason)).?.retry);
+            // The nullify metric records the latched reason.
+            try testing.expectEqual(1, timeout_count(state, view, .missing_proposal));
+            try testing.expectEqual(0, timeout_count(state, view, .leader_timeout));
             // Retries follow the retry cadence whatever reason is passed.
             const retried = state.next_timeout();
             try testing.expectEqual(.retry, retried.reason);
             try testing.expect((try state.construct_nullify(view, retried.reason)).?.retry);
+            try testing.expectEqual(1, timeout_count(state, view, .missing_proposal));
         }
     }.body);
 }
@@ -1001,8 +1036,15 @@ test "voter state with skipping disabled defers a leader nullify" {
 test "voter state repeated timeout hints keep the first expired deadline" {
     try run(struct {
         fn body(io: Io) !void {
+            var registry = metrics.Registry.init(gpa);
+            defer registry.deinit();
             var env: Env = undefined;
-            try env.start(io, .{ .signer = 0, .epoch = 12, .view_retention = 3 });
+            try env.start(io, .{
+                .signer = 0,
+                .epoch = 12,
+                .view_retention = 3,
+                .registry = &registry,
+            });
             defer env.stop();
             const state = &env.state;
             const view = state.current_view();
@@ -1011,9 +1053,15 @@ test "voter state repeated timeout hints keep the first expired deadline" {
             try io.sleep(.fromSeconds(1), .awake);
             state.trigger_timeout(view, .leader_timeout);
             try testing.expectEqual(expired, state.next_timeout());
+            // The fast-path trigger records nothing until we emit nullify.
+            try testing.expectEqual(0, timeout_count(state, view, .leader_nullify));
             try testing.expect(!(try state.construct_nullify(view, .leader_nullify)).?.retry);
+            try testing.expectEqual(1, timeout_count(state, view, .leader_nullify));
+            // Retries are not counted as more timed-out views.
             state.trigger_timeout(view, .leader_timeout);
             try testing.expect((try state.construct_nullify(view, .retry)).?.retry);
+            try testing.expectEqual(1, timeout_count(state, view, .leader_nullify));
+            try testing.expectEqual(0, timeout_count(state, view, .retry));
         }
     }.body);
 }
