@@ -21,6 +21,9 @@ pub fn Any(comptime D: type, comptime H: type) type {
         pub const Value = D.Value;
         pub const Digest = D.Digest;
         pub const Config = D.Cfg;
+        pub const Slot = D.Slot;
+        pub const Mutation = D.UnmerkleizedBatch.Mutation;
+        pub const Range = D.StagedBatch.Range;
         /// The database's root and the operation range `[sync_boundary, size)` needed to reach
         /// it.
         pub const SyncTarget = qmdb.sync.Target(D.Family, D.Digest);
@@ -85,7 +88,8 @@ pub fn Any(comptime D: type, comptime H: type) type {
                 self.* = undefined;
             }
 
-            /// Sets the metadata committed by `merkleize`; null clears it.
+            /// Sets the metadata committed by `merkleize`; null clears it. It carries over to
+            /// a batch returned by `stage`.
             pub fn with_metadata(self: *Unmerkleized, metadata: ?Value) void {
                 self.batch.with_metadata(metadata);
             }
@@ -112,12 +116,82 @@ pub fn Any(comptime D: type, comptime H: type) type {
                 }
             }
 
+            /// Reads `keys` into `out` and stages them, one slot each. Consumes the batch on
+            /// success; on error the batch is unchanged.
+            pub fn stage(self: *Unmerkleized, keys: []const Key, out: []?Value) !Staged {
+                assert(keys.len == out.len);
+                var guard = try self.db.read();
+                defer guard.deinit();
+                const shared = self.db;
+                const staged = try self.batch.stage(keys, &guard.get().inner, out);
+                self.* = undefined;
+                return .{ .staged = staged, .db = shared };
+            }
+
             /// Seals the batch. Consumes it on success; on error only `deinit` may follow.
             pub fn merkleize(self: *Unmerkleized) !Merkleized {
                 var guard = try self.db.read();
                 defer guard.deinit();
                 const inner = try self.batch.merkleize(&guard.get().inner);
                 return .{ .inner = inner, .db = self.db };
+            }
+        };
+
+        /// A batch whose reads are staged, returned by `Unmerkleized.stage`. Like any
+        /// speculative batch it reads the database only while the database is at a state of
+        /// its chain. `deinit` it if dropped.
+        pub const Staged = struct {
+            staged: D.StagedBatch,
+            db: Shared,
+
+            pub fn deinit(self: *Staged) void {
+                self.staged.deinit();
+                self.* = undefined;
+            }
+
+            /// Sets the metadata committed by `merkleize`, replacing any set before staging.
+            pub fn with_metadata(self: *Staged, metadata: ?Value) void {
+                self.staged.with_metadata(metadata);
+            }
+
+            /// The staged read slots: the keys passed to `stage` and every `expand` range.
+            pub fn len(self: *const Staged) usize {
+                return self.staged.len();
+            }
+
+            pub fn is_empty(self: *const Staged) bool {
+                return self.staged.is_empty();
+            }
+
+            /// Reads more `keys` into `out`, appending them as the returned range of slots.
+            /// Existing slots keep their positions; keys are not deduplicated against earlier
+            /// slots. On error the staged set is unchanged.
+            pub fn expand(self: *Staged, keys: []const Key, out: []?Value) !Range {
+                assert(keys.len == out.len);
+                var guard = try self.db.read();
+                defer guard.deinit();
+                const before = self.len();
+                const range = try self.staged.expand(keys, &guard.get().inner, out);
+                assert(self.len() == before + keys.len);
+                return range;
+            }
+
+            /// Applies `slots` (one per staged read, in slot order) and then `unstaged` writes,
+            /// and merkleizes. A key staged in several slots takes its last put or delete, and
+            /// an unstaged write to a staged key wins. Consumes the staged batch, also on error.
+            pub fn merkleize(
+                self: *Staged,
+                slots: []const Slot,
+                unstaged: []const Mutation,
+            ) !Merkleized {
+                assert(slots.len == self.len());
+                const shared = self.db;
+                errdefer self.deinit();
+                var guard = try shared.read();
+                defer guard.deinit();
+                const inner = try self.staged.merkleize(slots, unstaged, &guard.get().inner);
+                self.* = undefined; // Storage consumed the staged batch.
+                return .{ .inner = inner, .db = shared };
             }
         };
 

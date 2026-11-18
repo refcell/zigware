@@ -212,3 +212,92 @@ test "stateful any: a child batch reads its parent's pending writes" {
     defer fresh.deinit();
     try testing.expectEqual(null, try fresh.get(&key));
 }
+
+fn hash_u64(value: u64) Digest {
+    var bytes: [8]u8 = undefined;
+    std.mem.writeInt(u64, &bytes, value, .big);
+    return Sha256.hash(&.{&bytes});
+}
+
+test "stateful any: staged merkleize matches explicit writes" {
+    var harness: Harness = undefined;
+    try harness.init();
+    defer harness.deinit();
+    const shared = try harness.open(null);
+    defer shared.deinit();
+    const metadata = hash("metadata");
+
+    // Seed keys 0..50 and persist them.
+    {
+        var seed = try shared.new_batches();
+        errdefer seed.deinit();
+        for (0..50) |i| try seed.write(hash_u64(i), hash_u64(i + 10_000));
+        var merkleized = try seed.merkleize();
+        defer merkleized.deinit();
+        try shared.apply(&merkleized);
+        try (try shared.finalize()).durable();
+    }
+
+    // Read set: key 1 updated, key 2 deleted, key 999 missing and created.
+    const keys = [_]Digest{ hash_u64(1), hash_u64(2), hash_u64(999) };
+    const slots = [_]Any.Slot{
+        .{ .put = hash_u64(11_000) }, .delete, .{ .put = hash_u64(11_001) },
+    };
+    const unstaged = [_]Any.Mutation{.{ .key = hash_u64(3), .value = hash_u64(11_002) }};
+
+    // Explicit path.
+    var explicit_values: [keys.len]?Digest = undefined;
+    const explicit_root = explicit: {
+        var batch = try shared.new_batches();
+        errdefer batch.deinit();
+        try batch.get_many(&keys, &explicit_values);
+        for (keys, slots) |key, slot| try batch.write(key, switch (slot) {
+            .put => |value| value,
+            .delete => null,
+            .keep => unreachable, // Every staged read is written.
+        });
+        for (unstaged) |m| try batch.write(m.key, m.value);
+        batch.with_metadata(metadata);
+        var merkleized = try batch.merkleize();
+        defer merkleized.deinit();
+        break :explicit merkleized.root();
+    };
+    try testing.expectEqual(hash_u64(10_001), explicit_values[0].?);
+    try testing.expectEqual(null, explicit_values[2]);
+
+    // Staged path in two reads, with metadata set on the staged handle.
+    var staged_values: [keys.len]?Digest = undefined;
+    {
+        var batch = try shared.new_batches();
+        var staged = batch.stage(keys[0..2], staged_values[0..2]) catch |err| {
+            batch.deinit();
+            return err;
+        };
+        var merkleized = merkleized: {
+            errdefer staged.deinit();
+            const range = try staged.expand(keys[2..], staged_values[2..]);
+            try testing.expectEqual(2, range.start);
+            try testing.expectEqual(keys.len, range.end);
+            try testing.expectEqual(keys.len, staged.len());
+            try testing.expect(!staged.is_empty());
+            staged.with_metadata(metadata);
+            break :merkleized try staged.merkleize(&slots, &unstaged);
+        };
+        defer merkleized.deinit();
+        try testing.expectEqualSlices(?Digest, &explicit_values, &staged_values);
+        try testing.expect(explicit_root.eql(merkleized.root()));
+    }
+
+    // Metadata set before staging carries through to the staged merkleize.
+    var carried_values: [keys.len]?Digest = undefined;
+    var batch = try shared.new_batches();
+    batch.with_metadata(metadata);
+    var staged = batch.stage(&keys, &carried_values) catch |err| {
+        batch.deinit();
+        return err;
+    };
+    var carried = try staged.merkleize(&slots, &unstaged);
+    defer carried.deinit();
+    try testing.expectEqualSlices(?Digest, &explicit_values, &carried_values);
+    try testing.expect(explicit_root.eql(carried.root()));
+}

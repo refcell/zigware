@@ -93,7 +93,9 @@ marshal's actors (consensus-marshal) for the actor; until then it ports what is 
   `apply`, `finalize`, `prune`, `committed_targets`) and `Tuple(.{ DB1, ..., DB8 })` with the
   same methods over tuples.
 - `glue.stateful.db.any.Any(Db, Hasher)`: the ManagedDb of a `storage.qmdb.any.Db`, with
-  `Unmerkleized` (`write`, `with_metadata`, `get`, `get_many`, `merkleize`) and `Merkleized`
+  `Unmerkleized` (`write`, `with_metadata`, `get`, `get_many`, `stage(keys, out)` → `Staged`,
+  `merkleize`), `Staged` (as `Current`'s: `with_metadata`, `len`, `is_empty`, `expand`,
+  `merkleize(slots, unstaged)`, `deinit`), and `Merkleized`
   (`root`, `new_batch`, `get`, `get_many`, `clone`, `deinit`); `SyncTarget` is
   `qmdb.sync.Target`.
 - `glue.stateful.db.current.Current(Db)`: the ManagedDb of a `storage.qmdb.current.Db`, with
@@ -161,13 +163,14 @@ marshal's actors (consensus-marshal) for the actor; until then it ports what is 
   `VecDeque`); an invalid config or phase returns `error.InvalidPruneConfig` where commonware
   panics.
 - `Any` takes the hasher as a parameter (the storage `Db` does not expose it) and uses
-  commonware's 64-byte bitmap chunks in tests. `stage`/`expand` wait on storage-qmdb's
-  `any` staging API.
+  commonware's 64-byte bitmap chunks in tests. Staged `merkleize` consumes the staged batch
+  also on error.
 
 ### Backlog
 - [x] db: `Shared`, `Reader`, `Barrier`, single and tuple sets, with mod.rs's set tests.
 - [x] db/any: the ManagedDb adapter with any.rs's stale-read and apply-does-not-finalize tests.
-- [ ] db/any: `stage`/`expand` (needs storage's staging API), variable values, ordered.
+- [x] db/any: `stage`/`expand`/staged `merkleize` with any.rs's staged test.
+- [ ] db/any: variable values, ordered.
 - [x] db/current: the unordered fixed ManagedDb with staging and current.rs's tests.
 - [ ] db/current: ordered and variable (after storage-qmdb-sync), the crash-recovery test.
 - [ ] db: keyless, immutable, compact.
@@ -203,6 +206,7 @@ marshal's actors (consensus-marshal) for the actor; until then it ports what is 
 - 2026-11-16 (stateful): state sync anchors, tip updates, the generation coordinator, and the
   p2p payload bound.
 - 2026-11-16 (stateful): the db/p2p resolver handler.
+- 2026-11-18 (stateful): staged `stage`/`expand`/`merkleize` on the `any` adapter.
 
 ## dkg (owner: coding lane, thread T-01a1d58d-bff1-75a1-8ccb-4b8dd7bc9755)
 
