@@ -2372,3 +2372,87 @@ test "standard local floor anchor resumes gap repair" {
         }
     }.body);
 }
+
+/// The next block update from `reporter` (owned by the caller), skipping tips.
+fn next_block_update(reporter: common.ApplicationReporter) !common.Update {
+    while (true) {
+        var update = try reporter.next();
+        if (update == .block) return update;
+        update.deinit();
+    }
+}
+
+const Shutdown = struct {
+    const prefix = "application-shutdown-with-pending-ack";
+    fixture: harness.Fixture,
+    block: Block,
+
+    // Models an application that handles genesis normally, then owns the first non-genesis
+    // acknowledgement while its work is in flight, and shuts down before acknowledging.
+    fn shut_down_pending(ctx: Ctx, self: *const Shutdown) anyerror!void {
+        var reporter = try common.ApplicationReporter.init(gpa, ctx.io());
+        defer reporter.deinit();
+        const provider: harness.Provider = .init(&self.fixture.schemes[0]);
+        var started = try common.start_standard_actor(
+            harness.Provider,
+            common.ApplicationReporter,
+            common.RecordingBuffer,
+            ctx.child("validator"),
+            prefix,
+            provider,
+            reporter.clone(),
+            try common.RecordingBuffer.init(gpa, ctx.io()),
+            try genesis_start(),
+        );
+        var genesis = try next_block_update(reporter);
+        try testing.expectEqual(0, genesis.block.block.inner().height().get());
+        // Acknowledging consumes the handle, so only the block is left to release.
+        genesis.block.ack.acknowledge();
+        genesis.block.block.deinit();
+
+        try testing.expect(try started.mailbox.verified(round_at(1), self.block.clone()));
+        report(&started.mailbox, try finalize(&self.fixture, 1, 0, &self.block));
+        var delivered = try next_block_update(reporter);
+        try testing.expectEqual(1, delivered.block.block.inner().height().get());
+        // Dropping the application cancels the pending acknowledgement, which stops marshal
+        // cleanly while its other inputs stay open.
+        reporter.close();
+        delivered.deinit();
+        try started.join();
+    }
+
+    // The canceled acknowledgement leaves the processed floor behind the block, so the
+    // recovered application receives the same finalized block again.
+    fn redeliver(ctx: Ctx, self: *const Shutdown) anyerror!void {
+        var application = try App.manual_ack(gpa, ctx.io());
+        defer application.deinit();
+        var started = try start_manual(
+            ctx.child("validator_restart"),
+            prefix,
+            &self.fixture,
+            application.clone(),
+            try common.RecordingBuffer.init(gpa, ctx.io()),
+        );
+        defer started.crash();
+        try testing.expectEqual(1, (try application.acknowledged()).get());
+        const entries = try application.blocks(gpa);
+        defer App.free_blocks(gpa, entries);
+        const last = entries[entries.len - 1];
+        try testing.expectEqual(1, last.height.get());
+        try testing.expect(last.block.digest().eql(self.block.digest()));
+    }
+};
+
+test "standard application shutdown redelivers pending ack after restart" {
+    var rng = utils.rng.test_rng();
+    var state: Shutdown = undefined;
+    state.fixture = try harness.fixture(gpa, &rng);
+    defer state.fixture.deinit(gpa);
+    state.block = try block_at(try genesis_digest(), 1, 100);
+    defer state.block.deinit();
+    var runner = try runtime.deterministic.Runner.init(gpa, timed);
+    defer runner.deinit();
+    try try runner.start_context(Shutdown.shut_down_pending, .{&state});
+    // A second start on the same runner recovers its storage (commonware's `Checkpoint`).
+    try try runner.start_context(Shutdown.redeliver, .{&state});
+}
