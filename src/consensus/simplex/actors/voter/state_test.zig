@@ -1105,3 +1105,90 @@ test "voter state broadcasts each certificate once" {
         }
     }.body);
 }
+
+/// Adds a full-quorum notarization of `value`, which must be new.
+fn add_notarized(state: *State, f: *const Fixture, value: Proposal) !void {
+    const added = try state.add_notarization(try build_notarization(f, value));
+    try testing.expect(added.added);
+}
+
+fn round_at(epoch: u64, view: u64) Rnd {
+    return .new(.new(epoch), .new(view));
+}
+
+/// commonware `setup_state_with(4, signer 1, epoch 9, retention 10, terms of 5, ...)`.
+fn terms_of_five_epoch_nine(optimistic_views: u64) Options {
+    return .{
+        .signer = 1,
+        .epoch = 9,
+        .term_length = 5,
+        .optimistic_views = optimistic_views,
+    };
+}
+
+test "voter state optimistic views zero disables intra-term lookahead" {
+    try run(struct {
+        fn body(io: Io) !void {
+            var env: Env = undefined;
+            try env.start(io, terms_of_five_epoch_nine(0));
+            defer env.stop();
+            const state = &env.state;
+            const f = &env.fixture;
+            const parent = try propose_and_notarize_view1(&env, 93);
+            try add_notarized(state, f, parent);
+            const child = proposal(9, 2, 1, 94);
+            try testing.expect(try state.set_proposal(.new(2), &child));
+            // With the lookahead disabled no view is inside the issuance window, so
+            // verification requests the uncertified parent's notarization.
+            const verify = state.try_verify();
+            try testing.expect(verify == .resolve);
+            try testing.expectEqual(1, verify.resolve.view.get());
+            try testing.expectEqual(.notarization, verify.resolve.kind);
+            try add_notarized(state, f, child);
+            var candidates: std.ArrayList(Proposal) = .empty;
+            defer candidates.deinit(gpa);
+            try candidate_views(state, &candidates);
+            try testing.expectEqual(1, candidates.items.len);
+            try testing.expectEqual(1, candidates.items[0].round.view.get());
+            try testing.expect(try state.certified(.new(1), true) != null);
+            try testing.expect(state.try_verify() == .ready);
+        }
+    }.body);
+}
+
+test "voter state try verify requests an uncertified cross-term parent" {
+    try run(struct {
+        fn body(io: Io) !void {
+            var env: Env = undefined;
+            try env.start(io, terms_of_five_epoch_nine(2));
+            defer env.stop();
+            const state = &env.state;
+            const f = &env.fixture;
+            // One nullification covers the rest of term 1 and enters term 2 at view 6.
+            const nullification = try build_nullification(f, round_at(9, 3));
+            try testing.expect(try state.add_nullification(nullification));
+            try testing.expectEqual(6, state.current_view().get());
+            // An older term-start parent needs a certificate, requested from the leader.
+            const child = proposal(9, 6, 2, 44);
+            try testing.expect(try state.set_proposal(.new(6), &child));
+            const leader = f.participants[state.leader_index(.new(6)).?.get()];
+            const verify = state.try_verify();
+            try testing.expect(verify == .resolve);
+            try testing.expectEqual(6, verify.resolve.proposal.get());
+            try testing.expectEqual(2, verify.resolve.view.get());
+            try testing.expectEqual(.notarization, verify.resolve.kind);
+            try testing.expectEqualDeep(leader, verify.resolve.target);
+            // The round deduplicates the request while it is outstanding.
+            try testing.expect(state.try_verify() == .wait);
+            // Certifying the fetched parent makes the proposal verifiable.
+            const parent = proposal(9, 2, 1, 43);
+            try add_notarized(state, f, parent);
+            try testing.expect(try state.certified(.new(2), true) != null);
+            const ready = state.try_verify();
+            try testing.expect(ready == .ready);
+            try testing.expectEqual(2, ready.ready.context.parent[0].get());
+            try testing.expectEqualDeep(parent.payload, ready.ready.context.parent[1]);
+            try testing.expectEqualDeep(child, ready.ready.proposal);
+        }
+    }.body);
+}
