@@ -438,8 +438,6 @@ test "cache restart reopens epoch left by interrupted destroy" {
     }
 }
 
-/// Whether `core/cache.zig` releases each archive once when an epoch destroy fails.
-const cache_destroy_releases_once = false;
 const interrupted_prefix = "test-cache-interrupted-prune";
 const pruned_round: Round = .new(.new(65), .zero());
 
@@ -516,9 +514,6 @@ fn prune_after_restart(ctx: Ctx, interrupted: u64) anyerror!void {
 // persisted floor. A prune that stops inside those destroys leaves an epoch that is still at or
 // above the floor, so a restart reopens it and the next prune finishes retiring it.
 test "cache prune stopped inside epoch destroy finishes after restart" {
-    // Pending consensus-marshal's fix to `core/cache.zig`: `prune_by_view` deinitializes an
-    // epoch's archives after a failed destroy already released some of them, which panics.
-    if (!cache_destroy_releases_once) return error.SkipZigTest;
     var fixture = try test_fixture();
     defer fixture.deinit(gpa);
     var block = try make_block("far", 1290, 100);
