@@ -1,10 +1,12 @@
 //! The standard actor's floors, floor anchors, and acknowledgements (commonware
 //! `marshal/standard/mod.rs`, lines 6740-10611), on the direct actor from `common.zig`.
 //!
-//! commonware's `#[should_panic(expected = "floor finalization must verify")]` tests
-//! (`test_standard_start_floor_rejects_invalid_finalization` and
-//! `test_standard_set_floor_rejects_invalid_finalization`) have no counterpart: Zig cannot
-//! catch a panic, and the actor panics with the same message (`core/actor_ingress.zig`).
+//! commonware's `#[should_panic]` tests have no counterpart, since Zig cannot catch a panic:
+//! `test_standard_start_floor_rejects_invalid_finalization` and
+//! `test_standard_set_floor_rejects_invalid_finalization` ("floor finalization must verify",
+//! `core/actor_ingress.zig`), and `test_standard_restart_rejects_mismatched_genesis_anchor`
+//! ("stored genesis block does not match configured anchor"). The actor panics with the same
+//! messages.
 
 const std = @import("std");
 const testing = std.testing;
@@ -1621,6 +1623,113 @@ test "standard finalized delivery rejects foreign certificate after scope retire
             try testing.expect(!provider.retired(0));
             try testing.expectEqual(common.Outcome.invalid, try delivery.send(started.resolver));
             try testing.expect(provider.retired(0));
+        }
+    }.body);
+}
+
+/// Finalizes block 1 over `hash("")` at view 1, waits for its ack and the processed-round
+/// prune, and returns the block (owned).
+fn process_block_one(
+    ctx: Ctx,
+    started: *Manual,
+    fixture: *const harness.Fixture,
+    application: App,
+) !Block {
+    var block = try block_at(hash(""), 1, 100);
+    errdefer block.deinit();
+    try testing.expect(try started.mailbox.verified(round_at(1), block.clone()));
+    report(&started.mailbox, try finalize(fixture, 1, 0, &block));
+    const state: Retains = .{
+        .resolver = started.resolver,
+        .at_least = started.resolver.retain_count() + 2,
+    };
+    try testing.expectEqual(1, (try application.acknowledged()).get());
+    try common.wait_until(ctx, 5000, "processed-round pruning", state, retained);
+    return block;
+}
+
+/// Verifies block 2 on `parent`, which orders the actor's handling of earlier messages.
+fn verify_barrier(started: *Manual, parent: D) !void {
+    var block = try block_at(parent, 2, 200);
+    defer block.deinit();
+    try testing.expect(try started.mailbox.verified(round_at(2), block.clone()));
+}
+
+test "standard processed round skips fetch and preserves subscription" {
+    try run(struct {
+        fn body(ctx: Ctx) anyerror!void {
+            var rng = utils.rng.test_rng();
+            var fixture = try harness.fixture(gpa, &rng);
+            defer fixture.deinit(gpa);
+            var application = try App.manual_ack(gpa, ctx.io());
+            defer application.deinit();
+            var buffer = try common.RecordingBuffer.init(gpa, ctx.io());
+            defer buffer.deinit();
+            var started = try start_manual(
+                ctx.child("validator"),
+                "fetch-notarized-processed-round",
+                &fixture,
+                application.clone(),
+                buffer.clone(),
+            );
+            defer started.crash();
+            try testing.expectEqual(0, (try application.acknowledged()).get());
+            var block = try process_block_one(ctx, &started, &fixture, application);
+            defer block.deinit();
+
+            const fetches_before = started.resolver.fetch_count();
+            const round = round_at(1);
+            try started.mailbox.hint_notarized(round, hash("missing-at-processed-round"));
+            var missing = try block_at(hash(""), 1, 101);
+            defer missing.deinit();
+            var subscription = try started.mailbox.subscribe_by_commitment(
+                missing.digest(),
+                .{ .fetch_by_round = round },
+            );
+            defer subscription.deinit();
+            try verify_barrier(&started, block.digest());
+            // The hint must not enqueue the already-pruned processed round.
+            try testing.expectEqual(fetches_before, started.resolver.fetch_count());
+            try testing.expectError(error.Empty, subscription.try_recv());
+
+            const last = buffer.commitment_subscription_count() - 1;
+            try testing.expect(buffer.deliver_commitment_subscription(last, missing.clone()));
+            var delivered = try subscription.recv();
+            defer delivered.deinit();
+            try testing.expect(delivered.digest().eql(missing.digest()));
+        }
+    }.body);
+}
+
+test "standard finalization rejects processed round block fetch" {
+    try run(struct {
+        fn body(ctx: Ctx) anyerror!void {
+            var rng = utils.rng.test_rng();
+            var fixture = try harness.fixture(gpa, &rng);
+            defer fixture.deinit(gpa);
+            var application = try App.manual_ack(gpa, ctx.io());
+            defer application.deinit();
+            var started = try start_manual(
+                ctx.child("validator"),
+                "finalization-processed-round-fetch",
+                &fixture,
+                application.clone(),
+                try common.RecordingBuffer.init(gpa, ctx.io()),
+            );
+            defer started.crash();
+            try testing.expectEqual(0, (try application.acknowledged()).get());
+            var block = try process_block_one(ctx, &started, &fixture, application);
+            defer block.deinit();
+
+            const fetches_before = started.resolver.fetch_count();
+            const digest = hash("missing-finalized-at-processed-round");
+            const proposal = harness.Proposal.init(round_at(1), .zero(), digest);
+            const quorum = harness.quorum;
+            const stale = try harness.make_finalization(gpa, &fixture, proposal, quorum);
+            report(&started.mailbox, stale);
+            try verify_barrier(&started, block.digest());
+            // The stale finalization must not enqueue a round-bound block fetch.
+            try testing.expectEqual(fetches_before, started.resolver.fetch_count());
         }
     }.body);
 }
