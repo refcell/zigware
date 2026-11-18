@@ -494,9 +494,14 @@ fn backfill(comptime F: type, ctx: Context) !void {
     try cluster.check(required);
 }
 
+/// The quick slice's fixtures: one per scheme family (VRF MinPk, standard MinSig, multisig
+/// MinPk, secp256r1); engine_test.zig covers ed25519 in every build.
+const quick_fixtures = [fixtures.len]bool{ true, false, false, true, true, false, false, true };
+
 fn run_all(comptime scenario: anytype, args: anytype) !void {
-    if (builtin.mode == .debug and !build_options.slow_tests) return error.SkipZigTest;
-    inline for (fixtures) |F| {
+    if (builtin.mode == .debug and !full) return error.SkipZigTest;
+    inline for (fixtures, quick_fixtures) |F, quick| {
+        if (!full and !quick) continue;
         const Bound = struct {
             fn call(ctx: Context, inner: @TypeOf(args)) !void {
                 return @call(.auto, scenario, .{ F, ctx } ++ inner);
@@ -509,7 +514,9 @@ fn run_all(comptime scenario: anytype, args: anytype) !void {
 }
 
 test "all fixtures: all online" {
-    try run_all(all_online, .{@as(u64, if (full) 100 else 30)});
+    // The other fixture DSTs cover the honest path per push; this one runs nightly.
+    if (!full) return error.SkipZigTest;
+    try run_all(all_online, .{@as(u64, 100)});
 }
 
 test "all fixtures: one offline" {
@@ -536,7 +543,8 @@ test "all fixtures: twins" {
     const campaigns = twins_campaign_test;
     var campaign = campaigns.twins_campaign;
     if (!full) campaign.max_cases = 1;
-    inline for (fixtures) |F| {
+    inline for (fixtures, quick_fixtures) |F, quick| {
+        if (!full and !quick) continue;
         try campaigns.Suite(F).run_campaign(campaign, campaigns.twins_link);
     }
 }

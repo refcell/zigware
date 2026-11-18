@@ -308,8 +308,10 @@ test "simplex context conformance hash matches commonware" {
     try verify(path, Context, gen_context);
 }
 
+// commonware records one hash over all `default_cases` vectors, so no smaller per-push count
+// can be checked; slow builds (nightly) run it, and the roundtrip tests above run per push.
 test "simplex message conformance hashes match commonware" {
-    try skip_slow();
+    if (!build_options.slow_tests) return error.SkipZigTest;
     const t = "types::tests::conformance::CodecConformance<";
     const entries = .{
         .{ "Vote<Scheme,Sha256Digest>>", Vote },

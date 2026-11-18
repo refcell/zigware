@@ -602,7 +602,8 @@ test "twins stable leader optimistic" {
 
 /// commonware's large campaigns: 10 participants and 5 adversarial rounds on `twins_link`.
 fn run_large(mode: twins.Mode) !void {
-    if (builtin.mode == .debug and !build_options.slow_tests) return error.SkipZigTest;
+    // Nearly 3 min each in ReleaseSafe: slow builds (nightly) only.
+    if (!build_options.slow_tests) return error.SkipZigTest;
     var campaign = twins_campaign;
     campaign.n = 10;
     campaign.rounds = 5;
