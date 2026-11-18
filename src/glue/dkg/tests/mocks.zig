@@ -451,6 +451,68 @@ pub const MockConsumer = struct {
     }
 };
 
+/// A marshal reader with no running actor: every read is unavailable (commonware
+/// `closed_marshal_mailbox`).
+pub const ClosedMarshal = struct {
+    const Digested = @import("broadcast").Digested(TestBlock);
+
+    pub fn get_block(self: ClosedMarshal, identifier: anytype) !?Digested {
+        _ = .{ self, identifier };
+        return null;
+    }
+};
+
+/// A key-only DKG manager that records nothing and never fails.
+pub const InertManager = struct {
+    pub const PublicKey = TestPublicKey;
+    pub const Directory = Unit;
+
+    tracked: u32 = 0,
+
+    pub fn track(self: *InertManager, epoch: Epoch, peers: anytype, directory: *const Unit) !void {
+        _ = .{ epoch, peers, directory };
+        self.tracked += 1;
+        assert(self.tracked > 0);
+    }
+};
+
+/// A blocker that records the peers it blocks.
+pub const MockBlocker = struct {
+    pub const PublicKey = TestPublicKey;
+
+    gpa: Allocator,
+    blocked: std.ArrayList(TestPublicKey) = .empty,
+
+    pub fn init(gpa: Allocator) MockBlocker {
+        return .{ .gpa = gpa };
+    }
+
+    pub fn deinit(self: *MockBlocker) void {
+        self.blocked.deinit(self.gpa);
+        self.* = undefined;
+    }
+
+    pub fn block(self: *MockBlocker, peer: TestPublicKey) void {
+        self.blocked.append(self.gpa, peer) catch @panic("mock blocker out of memory");
+        assert(self.blocked.items.len > 0);
+    }
+};
+
+/// The reshare actor's type parameters over these mocks.
+pub const ActorTypes = struct {
+    pub const Block = TestBlock;
+    pub const Ack = utils.acknowledgement.Exact;
+    pub const Ancestry = consensus.marshal.ancestry.Bounded(TestBlock);
+    pub const Signer = TestSigner;
+    pub const Manager = InertManager;
+    pub const Blocker = MockBlocker;
+    pub const Provider = StaticParticipants;
+    pub const SecretStore = MemorySecretStore;
+    pub const Registrar = MockConsumer;
+    pub const Marshal = ClosedMarshal;
+    pub const Strategy = @import("parallel").Sequential;
+};
+
 comptime {
     @import("../root.zig").assert_reshare_block(TestBlock);
     @import("../root.zig").assert_secret_store(MemorySecretStore);

@@ -278,6 +278,12 @@ Owns `src/glue/dkg`. Reference: `glue/src/dkg` (about 24k Rust lines).
   `consensus.marshal.Update(B, A)`. `dkg.reshare.Metrics(P)`
   (`init(gpa, scope)`, `reconcile`, `set_epoch`, `set_phase`, `record_share`, `record_ack`,
   `record_success`), `Phase`.
+- `dkg.reshare.actor.Actor(T)` (`T` adds `Signer`, `Manager`, `Blocker`, `Provider`,
+  `SecretStore`, `Registrar`, `Marshal` (`get_block(.{ .height })`), and `Strategy` to the
+  mailbox's parameters; `assert_types`): `init(gpa, io, scope, Config(T))` returns the actor
+  and its `Mailbox`; `setup_epoch(store, state_sync) !Setup` (`follow` or `participate:
+  PreparedEpoch`), `prepare_epoch`, `follow(store) !Flow`, `covered`, `advance`,
+  `register_epoch`, `recovered_share`. `ContractError`, `Flow` (`proceed`/`stop`).
 - `dkg.reshare.actor.setup`: `FinalizedTip(D)`, `startup(B, processed, floor)`,
   `state_sync_skips_inclusion_prefix`, `recovered_share(V, store, key, info)`,
   `register_and_mark(registrar, io, fence, epoch, info)`, `dealer_for_phase`.
@@ -307,6 +313,9 @@ Owns `src/glue/dkg`. Reference: `glue/src/dkg` (about 24k Rust lines).
 - Inclusion's pending-log scan runs on the caller's task; canceling it ends a stalled read
   with `error.Canceled` (commonware's shutdown signal). `validate_future_participants`
   returns errors where commonware panics.
+- The reshare actor returns `ContractError`s where commonware panics on marshal or provider
+  contract violations, so its `should_panic` tests check errors; the run loop stops on them.
+  Collaborators the caller owns (manager, blocker, provider, registrar, fence) are pointers.
 - dkg logs rejections of peer-supplied input (detached or truncated ancestry, invalid
   pending logs) at info, not commonware's warn: tests hit them on purpose, and a warning on
   stderr makes test-glue print a failed-command block in every push (as simulate, 3244236).
@@ -319,7 +328,9 @@ Owns `src/glue/dkg`. Reference: `glue/src/dkg` (about 24k Rust lines).
 - [x] reshare actor: setup's helpers with commonware's 5 setup tests.
 - [x] reshare actor: inclusion's scan, request queue, and verification retention with
   commonware's 9 helper tests (the whole-window tests land with the actor).
-- [ ] reshare: actor (setup, dealing, inclusion, follower, dkg), application.
+- [x] reshare actor: core, setup, and follower mode, with the follower tests and the
+  applied-tip contract checks.
+- [ ] reshare actor: dealing, inclusion, and dkg windows; the run loop; application.
 - [ ] bootstrap, probe (wire with conformance, discovery, service), orchestrator.
 - [ ] tests: the dkg and reshare harnesses, properties, and mocks; lookup's peer-activation
   test.
@@ -333,3 +344,4 @@ Owns `src/glue/dkg`. Reference: `glue/src/dkg` (about 24k Rust lines).
 - 2026-11-16: reshare mailbox and metrics with commonware's tests; shared DKG test mocks;
   setup's helpers with its 5 tests.
 - 2026-11-18: inclusion's pending-log scan, request queue, and verification retention.
+- 2026-11-18: the reshare actor's core, setup, and follower mode.
