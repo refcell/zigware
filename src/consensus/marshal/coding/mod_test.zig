@@ -383,6 +383,152 @@ test "coding certify retains transient buffer hit through eviction" {
     }.body);
 }
 
+/// The validator's verdict on `payload` under `context`.
+fn verify_now(stack: *common.ValidatorStack, context: common.CodingCtx, payload: anytype) !bool {
+    var receiver = try stack.marshaled.start_verify(context, payload);
+    defer receiver.deinit();
+    return receiver.recv();
+}
+
+/// The validator's certification of `payload` at `round`.
+fn certify_now(stack: *common.ValidatorStack, round: common.Round, payload: anytype) !bool {
+    var receiver = try stack.marshaled.start_certify(round, payload);
+    defer receiver.deinit();
+    return receiver.recv();
+}
+
+test "coding certify first block fetches genesis parent" {
+    try common.run(struct {
+        fn body(ctx: Ctx) anyerror!void {
+            var validators = try fixture();
+            defer validators.deinit(gpa);
+            var stack: common.ValidatorStack = undefined;
+            try stack.start(ctx, &validators);
+            defer stack.stop();
+
+            const genesis = try common.genesis_block(gpa);
+            const round = common.round_at(0, 1);
+            const context: common.CodingCtx = .{
+                .round = round,
+                .leader = validators.participants[0],
+                .parent = .{ .zero(), try common.genesis_coding_commitment(gpa, &genesis) },
+            };
+            const block = try common.coded(gpa, context, genesis.digest(), 1, 100);
+            const commitment = block.commitment();
+            try stack.shards().disperse(round, block);
+            try ctx.sleep(.fromMilliseconds(10));
+
+            // Shard validity passes, and the height-1 block certifies on genesis.
+            try testing.expect(try verify_now(&stack, context, commitment));
+            try testing.expect(try certify_now(&stack, round, commitment));
+        }
+    }.body);
+}
+
+test "coding repair reads buffer only ancestor" {
+    try common.run(struct {
+        fn body(ctx: Ctx) anyerror!void {
+            var validators = try fixture();
+            defer validators.deinit(gpa);
+            var stack: common.ValidatorStack = undefined;
+            try stack.start(ctx, &validators);
+            defer stack.stop();
+            const n = shared.num_validators;
+
+            // A 2-block chain cached only in the shard engine.
+            const genesis_parent = H.genesis_parent_commitment(n);
+            const root = shared.genesis_parent();
+            const parent = try H.make_test_block(gpa, root, genesis_parent, .new(1), 1, n);
+            const parent_commitment = H.commitment(&parent);
+            const descendant =
+                try H.make_test_block(gpa, H.digest(&parent), parent_commitment, .new(2), 2, n);
+            const descendant_commitment = H.commitment(&descendant);
+            const shards = stack.shards();
+            try shards.disperse(common.round_at(0, 1), parent);
+            try shards.disperse(common.round_at(0, 2), descendant);
+            inline for (.{ parent_commitment, descendant_commitment }) |commitment| {
+                var found = (try shards.get(commitment)) orelse return error.NotCached;
+                found.deinit(gpa);
+            }
+
+            // Only the descendant is finalized: repair walks its parent link and reads the
+            // parent from the shard engine.
+            const round = common.round_at(0, 2);
+            const proposal = common.Proposal.init(round, .new(1), descendant_commitment);
+            var finalization = try H.make_finalization(gpa, &validators, proposal, quorum);
+            defer finalization.deinit(gpa);
+            const mailbox = &stack.validator.mailbox;
+            _ = mailbox.report(.{ .finalization = finalization });
+
+            var waited: u32 = 0;
+            while (true) : (waited += 1) {
+                if (waited > 10_000) return error.TestTimedOut;
+                var archived = (try mailbox.get_block(.{ .height = .new(2) })) orelse {
+                    try ctx.sleep(.fromMilliseconds(1));
+                    continue;
+                };
+                archived.deinit(gpa);
+                break;
+            }
+            // Repair archived the parent from the shard engine.
+            var repaired = (try mailbox.get_block(.{ .height = .new(1) })) orelse
+                return error.ParentNotArchived;
+            defer repaired.deinit(gpa);
+            try testing.expect(repaired.commitment().eql(parent_commitment));
+        }
+    }.body);
+}
+
+test "certify lower view after higher view" {
+    try common.run(struct {
+        fn body(ctx: Ctx) anyerror!void {
+            var validators = try fixture();
+            defer validators.deinit(gpa);
+            var stack: common.ValidatorStack = undefined;
+            try stack.start(ctx, &validators);
+            defer stack.stop();
+            const me = validators.participants[0];
+            const shards = stack.shards();
+
+            const genesis = try common.genesis_block(gpa);
+            const parent_context: common.CodingCtx = .{
+                .round = common.round_at(0, 1),
+                .leader = shared.default_leader(),
+                .parent = .{ .zero(), harness.genesis_commitment() },
+            };
+            const parent = try common.coded(gpa, parent_context, genesis.digest(), 1, 100);
+            const parent_digest = parent.digest();
+            const parent_commitment = parent.commitment();
+            try shards.disperse(common.round_at(0, 1), parent);
+
+            // Blocks A (view 5) and B (view 10) at height 2 over the same parent.
+            var contexts: [2]common.CodingCtx = undefined;
+            var commitments: [2]common.Commitment = undefined;
+            for ([_]u64{ 5, 10 }, [_]u64{ 200, 300 }, 0..) |view, timestamp, index| {
+                contexts[index] = .{
+                    .round = common.round_at(0, view),
+                    .leader = me,
+                    .parent = .{ .new(1), parent_commitment },
+                };
+                const block = try common.coded(gpa, contexts[index], parent_digest, 2, timestamp);
+                commitments[index] = block.commitment();
+                try shards.disperse(contexts[index].round, block);
+            }
+            try ctx.sleep(.fromMilliseconds(10));
+
+            // Verify A, then B; certify B first, then A (which must still resolve).
+            for (contexts, commitments) |context, commitment| {
+                _ = try verify_now(&stack, context, commitment);
+            }
+            try testing.expect(try certify_now(&stack, contexts[1].round, commitments[1]));
+            var certify_a = try stack.marshaled.start_certify(contexts[0].round, commitments[0]);
+            defer certify_a.deinit();
+            try ctx.sleep(.fromSeconds(5));
+            try testing.expectEqual(true, try certify_a.try_recv());
+        }
+    }.body);
+}
+
 test {
     _ = common;
 }

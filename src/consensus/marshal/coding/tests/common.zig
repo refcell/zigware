@@ -830,3 +830,52 @@ pub fn encode_notarized(
     assert(writer.written().len == size);
     return bytes;
 }
+
+/// One validator from `CodingHarness::setup_validator` on its own simulated network, wrapped
+/// by `Marshaled` over its marshal and shard mailboxes. Must not move.
+pub const ValidatorStack = struct {
+    pub const Validator = H.Validator(App);
+    pub const M = MarshaledOf(MockVerifyingApp);
+
+    network: shared_harness.TestNetwork,
+    validator: *Validator,
+    marshaled: M,
+
+    /// Starts participant 0 of `validators` with the default application.
+    pub fn start(self: *ValidatorStack, ctx: Ctx, validators: *const Fixture) !void {
+        const gpa = ctx.gpa();
+        const participants = validators.participants;
+        self.network = try .start(gpa, ctx.io(), 1, participants, 1024 * 1024);
+        errdefer self.network.stop();
+        const provider: Provider = .init(&validators.schemes[0]);
+        var app = try App.init(gpa, ctx.io());
+        errdefer app.deinit();
+        const node_ctx = ctx.child("validator").with_attribute("index", 0);
+        const network = self.network.network;
+        self.validator = try Validator.setup(node_ctx, network, participants[0], provider, 1, app);
+        errdefer self.validator.crash();
+        const marshal = self.validator.mailbox.clone();
+        const shard_mailbox = self.validator.extra.clone();
+        const application = MockVerifyingApp.init(gpa);
+        const config = marshaled_config(M, application, marshal, shard_mailbox, provider);
+        self.marshaled = try .init(ctx.child("marshaled"), config);
+    }
+
+    /// The validator's shards engine mailbox (borrowed).
+    pub fn shards(self: *const ValidatorStack) *const ShardMailbox {
+        return &self.validator.extra;
+    }
+
+    pub fn stop(self: *ValidatorStack) void {
+        self.marshaled.deinit();
+        self.validator.crash();
+        self.network.stop();
+        self.* = undefined;
+    }
+};
+
+/// The block `context` names over `parent` at `height`, coded for the committee.
+pub fn coded(gpa: Allocator, context: CodingCtx, parent: D, height: u64, timestamp: u64) !Block {
+    const raw = try harness.make_coding_block(gpa, context, parent, .new(height), timestamp);
+    return encode_block(gpa, raw, committee_config());
+}
