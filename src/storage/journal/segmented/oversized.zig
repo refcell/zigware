@@ -461,17 +461,25 @@ pub fn Oversized(comptime I: type, comptime V: type) type {
         /// Remove all storage and free the journal. Tracked floors go first, so an interrupted
         /// destroy only forces conservative recovery of pair data left behind.
         pub fn destroy(self: *Self) Error!void {
+            // commonware stops at the first failure (`?`, then `try_join` drops the other
+            // future), so a failed or cancelled step issues no later mutation. Each step frees
+            // what it owns; on error the journals not yet destroyed are only closed.
             defer self.* = undefined;
-            var markers_result: Markers.Error!void = {};
             if (self.tracking) |*tracking| {
-                markers_result = tracking.metadata.destroy(); // Frees the markers.
                 tracking.barriers.deinit(self.index.manager.gpa);
+                // Remove the floors first, so an interrupted destroy only forces conservative
+                // recovery of the pair data left behind.
+                tracking.metadata.destroy() catch |err| { // Frees the markers.
+                    self.index.deinit();
+                    self.values.deinit();
+                    return err;
+                };
             }
-            const index_result = self.index.destroy();
-            const values_result = self.values.destroy();
-            try markers_result;
-            try index_result;
-            try values_result;
+            self.index.destroy() catch |err| { // Frees the index.
+                self.values.deinit();
+                return err;
+            };
+            try self.values.destroy();
         }
     };
 }

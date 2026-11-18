@@ -354,3 +354,6 @@ resize, sync), `runtime.storage`, with the in-memory backend `runtime.storage.me
 - 2026-11-16: blob and section manager metrics (contiguous and segmented journals).
 - 2026-11-18: queue_recovery fuzz decode overflow at a 0xFF page-size byte (CI soak seed 456);
   44 oversized recovery tests.
+- 2026-11-18: oversized `destroy` stops at its first failed or cancelled step, as commonware
+  does (reported through marshal: it kept destroying the other journals, which re-parked
+  after a cancellation).

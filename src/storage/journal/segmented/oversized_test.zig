@@ -206,3 +206,88 @@ test "oversized: metrics register under index, values, and metadata" {
     try testing.expect(metrics.has_metric_value(text, "oversized_index_synced_total", "5"));
     try testing.expect(std.mem.indexOf(u8, text, "oversized_metadata_keys") != null);
 }
+
+/// Fails the removal numbered `fail_at` (from zero) with `failure` and counts every removal
+/// attempted, so a test sees whether `destroy` mutated anything after a failed step.
+const RemoveFault = struct {
+    inner: runtime.storage.Storage,
+    fail_at: u64,
+    failure: runtime.storage.Error,
+    attempts: u64 = 0,
+
+    const vtable: runtime.storage.Storage.VTable = .{
+        .open_versioned = open_versioned,
+        .remove = remove,
+        .scan = scan,
+    };
+
+    fn interface(self: *RemoveFault) runtime.storage.Storage {
+        return .{ .ptr = self, .vtable = &vtable };
+    }
+
+    fn from(ptr: *anyopaque) *RemoveFault {
+        return @ptrCast(@alignCast(ptr));
+    }
+
+    fn open_versioned(
+        ptr: *anyopaque,
+        partition: []const u8,
+        name: []const u8,
+        versions: runtime.storage.VersionRange,
+    ) runtime.storage.Error!runtime.storage.Opened {
+        return from(ptr).inner.open_versioned(partition, name, versions);
+    }
+
+    fn remove(
+        ptr: *anyopaque,
+        partition: []const u8,
+        name: ?[]const u8,
+    ) runtime.storage.Error!void {
+        const self = from(ptr);
+        defer self.attempts += 1;
+        if (self.attempts == self.fail_at) return self.failure;
+        return self.inner.remove(partition, name);
+    }
+
+    fn scan(
+        ptr: *anyopaque,
+        allocator: std.mem.Allocator,
+        partition: []const u8,
+    ) runtime.storage.Error!runtime.storage.Names {
+        return from(ptr).inner.scan(allocator, partition);
+    }
+};
+
+test "oversized: destroy stops at its first failed or cancelled removal" {
+    // A failed step must issue no later mutation (commonware returns at the first error), and
+    // a cancelled one must not go on to park the next journal's removals.
+    for ([_]runtime.storage.Error{ error.Io, error.Canceled }) |failure| {
+        var fail_at: u64 = 0;
+        while (true) : (fail_at += 1) {
+            var h = try Harness.init();
+            defer h.deinit();
+            var faulty: RemoveFault = .{
+                .inner = h.storage.interface(),
+                .fail_at = fail_at,
+                .failure = failure,
+            };
+            const storage = faulty.interface();
+            var recovery = try Journal.init_with_markers(gpa, storage, h.cfg(), "test-markers");
+            try recovery.drain();
+            var journal = try recovery.finish();
+            for (1..3) |section| {
+                _ = try journal.append(section, entry(section), value_of(section));
+            }
+            try journal.sync_all();
+            try journal.sync(&.{});
+            faulty.attempts = 0;
+            if (journal.destroy()) |_| {
+                try testing.expect(fail_at > 0);
+                break;
+            } else |err| {
+                try testing.expectEqual(failure, err);
+                try testing.expectEqual(fail_at + 1, faulty.attempts);
+            }
+        }
+    }
+}
