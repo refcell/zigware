@@ -36,15 +36,15 @@ const sequential = parallel.sequential;
 const genesis_view = state_mod.genesis_view;
 const second_ns: i96 = std.time.ns_per_s;
 
-fn genesis() Digest {
+pub fn genesis() Digest {
     return .fill(0);
 }
 
-fn proposal(epoch: u64, view: u64, parent: u64, payload: u8) Proposal {
+pub fn proposal(epoch: u64, view: u64, parent: u64, payload: u8) Proposal {
     return .init(.new(.new(epoch), .new(view)), .new(parent), .fill(payload));
 }
 
-fn build_notarization(f: *const Fixture, value: Proposal) !Notarization {
+pub fn build_notarization(f: *const Fixture, value: Proposal) !Notarization {
     var votes: [4]Notarize = undefined;
     const n = f.schemes.len;
     assert(n <= votes.len);
@@ -54,7 +54,7 @@ fn build_notarization(f: *const Fixture, value: Proposal) !Notarization {
     return Notarization.from_votes(gpa, &f.verifier, votes[0..n], sequential);
 }
 
-fn build_finalization(f: *const Fixture, value: Proposal) !Finalization {
+pub fn build_finalization(f: *const Fixture, value: Proposal) !Finalization {
     var votes: [4]Finalize = undefined;
     const n = f.schemes.len;
     assert(n <= votes.len);
@@ -64,7 +64,7 @@ fn build_finalization(f: *const Fixture, value: Proposal) !Finalization {
     return Finalization.from_votes(gpa, &f.verifier, votes[0..n], sequential);
 }
 
-fn build_nullification(f: *const Fixture, round: Rnd) !Nullification {
+pub fn build_nullification(f: *const Fixture, round: Rnd) !Nullification {
     var votes: [4]Nullify = undefined;
     const n = f.schemes.len;
     assert(n <= votes.len);
@@ -74,7 +74,7 @@ fn build_nullification(f: *const Fixture, round: Rnd) !Nullification {
     return Nullification.from_votes(gpa, &f.verifier, votes[0..n], sequential);
 }
 
-const Options = struct {
+pub const Options = struct {
     /// Index of the signing scheme, or null for the verifier.
     signer: ?usize = null,
     epoch: u64 = 1,
@@ -92,12 +92,12 @@ const Options = struct {
 
 /// A fixture of `validators` participants and a state that entered view 1. Must not move
 /// once started.
-const Env = struct {
+pub const Env = struct {
     fixture: Fixture,
     elector: Elector,
     state: State,
 
-    fn start(self: *Env, io: Io, options: Options) !void {
+    pub fn start(self: *Env, io: Io, options: Options) !void {
         var rng = utils.rng.test_rng();
         self.fixture = try ed25519.fixture(Digest, gpa, &rng, "ns", options.validators);
         errdefer self.fixture.deinit(gpa);
@@ -122,14 +122,14 @@ const Env = struct {
         try self.state.set_genesis(genesis());
     }
 
-    fn stop(self: *Env) void {
+    pub fn stop(self: *Env) void {
         self.state.deinit();
         self.elector.deinit(gpa);
         self.fixture.deinit(gpa);
     }
 };
 
-fn run(comptime function: fn (Io) anyerror!void) !void {
+pub fn run(comptime function: fn (Io) anyerror!void) !void {
     var runner = try runtime.deterministic.Runner.init(gpa, .{});
     defer runner.deinit();
     try (try runner.start(function, .{runner.io()}));

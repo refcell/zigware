@@ -1208,4 +1208,5 @@ pub fn State(comptime S: type, comptime E: type, comptime D: type) type {
 
 test {
     _ = @import("state_test.zig");
+    _ = @import("state_late_test.zig");
 }
