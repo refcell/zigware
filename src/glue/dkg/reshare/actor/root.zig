@@ -14,6 +14,7 @@ pub const inclusion = @import("inclusion.zig");
 pub const inclusion_window = @import("inclusion_window.zig");
 pub const setup = @import("setup.zig");
 pub const run = @import("run.zig");
+pub const dkg = @import("dkg.zig");
 
 test {
     @import("std").testing.refAllDecls(@This());
@@ -21,4 +22,5 @@ test {
     _ = @import("artifact_test.zig");
     _ = @import("inclusion_window_test.zig");
     _ = @import("run_test.zig");
+    _ = @import("dkg_test.zig");
 }

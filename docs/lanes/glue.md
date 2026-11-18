@@ -371,6 +371,9 @@ Owns `src/glue/dkg`. Reference: `glue/src/dkg` (about 24k Rust lines).
 - The inclusion window races the mailbox, a scan of a fresh copy of the scanned request's
   ancestry, and that requester leaving (`Sender.closed`) with `Io.Select`, mailbox first.
   A scan that loses the race restarts next iteration; a finalized block marks it stale.
+- One-shot DKG reports its outcome on a `oneshot.Sender(Actor(T).DkgOutcome)` in
+  `Mode.dkg.completion` (commonware's `DkgCompletion` callback); a failed manager `track`
+  is logged at info and completes the ceremony without an output, as commonware does.
 
 ### Backlog
 - [x] types (with conformance hashes), limits, fence, network.
@@ -389,7 +392,9 @@ Owns `src/glue/dkg`. Reference: `glue/src/dkg` (about 24k Rust lines).
   changes` and `pr_5263_regression`.
 - [x] reshare actor: the reshare-mode epoch loop (`run.Runner(T).run_epochs` and
   `participate`) over a `p2p.utils.mux` handle.
-- [ ] reshare actor: the dkg window (run_dkg, terminal); `start` (store init, mux, state-sync
+- [x] reshare actor: one-shot DKG mode (`dkg.Dkg(T).run_dkg`, terminal, restart from the
+  stored final block), with a singleton ceremony test driven through the mailbox.
+- [ ] reshare actor: `start` (store init, mux, state-sync
   resolution, startup tip); inclusion's remaining window tests (gated and stalled ancestry, scan
   yielding to finalization, closed verification) and `finalization_error_panics`; the dkg
   window; the run loop; application.
@@ -414,3 +419,5 @@ Owns `src/glue/dkg`. Reference: `glue/src/dkg` (about 24k Rust lines).
 - 2026-11-18: the inclusion window loop; its 2 tests catch a late scan start and a lost
   redelivery acknowledgement.
 - 2026-11-18: the reshare epoch loop; its test catches a skipped dealing window.
+- 2026-11-18: one-shot DKG mode; a singleton ceremony completes through the mailbox
+  (dealing, next_log, inclusion, epoch_info), and the test catches a lost outcome.

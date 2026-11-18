@@ -43,6 +43,7 @@ const Share = cryptography.bls12381.primitives.group.Share;
 const SharingMode = cryptography.bls12381.primitives.Mode;
 const Summary = cryptography.transcript.Summary;
 const N3f1 = utils.N3f1;
+const oneshot = utils.channel.oneshot;
 const log = std.log.scoped(.dkg_reshare);
 
 /// Whether a window ran to its end (`proceed`) or the actor must stop (`stop`): Rust's
@@ -156,7 +157,29 @@ pub fn Actor(comptime T: type) type {
         /// directory (owned).
         pub const Mode = union(enum) {
             reshare,
-            dkg: struct { participants: utils.ordered.Set(P), directory: D },
+            dkg: struct {
+                participants: utils.ordered.Set(P),
+                directory: D,
+                /// Receives the ceremony's outcome once (commonware `DkgCompletion`).
+                completion: ?oneshot.Sender(DkgOutcome) = null,
+            },
+        };
+
+        /// A one-shot DKG's outcome: epoch zero's `EpochInfo`, or null when the ceremony
+        /// failed (owned).
+        pub const DkgOutcome = struct {
+            gpa: Allocator,
+            info: ?Info,
+
+            pub fn deinit(self: *DkgOutcome) void {
+                if (self.info) |*info| info.deinit(self.gpa);
+                self.* = undefined;
+            }
+
+            pub fn discard(self: DkgOutcome) void {
+                var dropped = self;
+                dropped.deinit();
+            }
         };
 
         /// State-sync epoch material paired with the height of its certified floor.
@@ -213,6 +236,7 @@ pub fn Actor(comptime T: type) type {
             if (self.mode == .dkg) {
                 self.mode.dkg.participants.deinit(self.gpa);
                 network.DirectoryOps(P, D).deinit(&self.mode.dkg.directory, self.gpa);
+                if (self.mode.dkg.completion) |*completion| completion.deinit();
             }
             self.mailbox.deinit();
             self.metrics.deinit();
