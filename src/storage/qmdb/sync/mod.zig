@@ -11,6 +11,7 @@ pub const errors = @import("error.zig");
 pub const ServeError = errors.ServeError;
 pub const EngineError = errors.EngineError;
 pub const Error = errors.Error;
+pub const database = @import("database.zig");
 pub const gaps = @import("gaps.zig");
 pub const journal = @import("journal.zig");
 pub const requests = @import("requests.zig");
