@@ -7,6 +7,11 @@
 //! `core/actor_ingress.zig`), and `test_standard_restart_rejects_mismatched_genesis_anchor`
 //! ("stored genesis block does not match configured anchor"). The actor panics with the same
 //! messages.
+//!
+//! `test_standard_resolver_delivery_waits_for_identity_job` has no counterpart either: it gates
+//! the strategy job that computes a delivered block's digest, but the standard variant's
+//! `decode_block` computes it inline in the actor's turn, so there is no job to gate and no
+//! delivery can publish a block before its digest.
 
 const std = @import("std");
 const testing = std.testing;

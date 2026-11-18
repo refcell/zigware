@@ -176,3 +176,5 @@ on p2p's simulated network and the deterministic runtime.
   Delivery completions and the opaque actor's waiters got their own conditions too.
 - 2026-11-18: fetch spans carried per subscriber from `Fetch` to `Delivery` (p2p and opaque),
   with commonware's `each_subscriber_keeps_its_own_fetch_span`.
+- 2026-11-18: marshal standard/mod.rs slice: `tests/common.zig` and `tests/floor.zig` (39 of
+  43 tests; the 3 should_panic tests and the identity-job gate have no Zig counterpart).

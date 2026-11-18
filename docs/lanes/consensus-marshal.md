@@ -175,7 +175,8 @@ ports its range's tests and the helpers defined in it, into
   staged dispatch, relay sends, forward, hint_finalized).
 - deployer thread (T-01a1d5b9), `tests/floor.zig`: lines 6740-10611 (redelivery,
   start/set floor, floor anchors and acks, delivery verification across scopes, processed
-  and round floors, unverifiable delivery, sync dispatch).
+  and round floors, unverifiable delivery, sync dispatch). Done 2026-11-18: 39 of 43 tests;
+  the 3 `should_panic` tests and the identity-job gate have no Zig counterpart (file header).
 - runtime thread (T-01a1d57b-1bfd), `tests/coverage.zig`: lines 12605-14905 (prune,
   pipelined handoff, reproposal coverage across restarts, closed-epoch floors, cache
   retention).
