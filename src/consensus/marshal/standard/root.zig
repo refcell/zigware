@@ -22,4 +22,5 @@ test {
     _ = @import("tests/common.zig");
     _ = @import("tests/floor.zig");
     _ = @import("tests/coverage.zig");
+    _ = @import("tests/cache_epoch.zig");
 }

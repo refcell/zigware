@@ -57,6 +57,10 @@ variants (MinPk, MinSig) must match exactly.
   commonware's names and cases.
 - [x] p2p fuzz targets (commonware p2p/fuzz), taken over from p2p: simulated
   (`src/p2p/fuzz/simulated.zig`), discovery and lookup (`src/p2p/fuzz/authenticated.zig`).
+- [ ] marshal standard/mod.rs lines 1987-2543 (the cache-epoch tests), a slice from
+  consensus-marshal: `src/consensus/marshal/standard/tests/cache_epoch.zig`. Seven of eight
+  pass. The interrupted-prune test is skipped until consensus-marshal fixes `core/cache.zig`'s
+  `prune_by_view`, which deinitializes archives a failed destroy already released.
 - [x] Check marshal's and aggregation's threshold paths against the simplex VRF scheme:
   aggregation's matched; marshal limits gained commonware's two VRF fixture cases.
 
