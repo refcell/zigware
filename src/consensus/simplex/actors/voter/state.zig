@@ -978,7 +978,7 @@ pub fn State(comptime S: type, comptime E: type, comptime D: type) type {
         }
 
         /// The highest view of `view`'s term, at or below it, with a nullification.
-        fn highest_nullification_in_term(self: *const Self, view: View) ?View {
+        pub fn highest_nullification_in_term(self: *const Self, view: View) ?View {
             const low, const high = view.covering_range(self.term_length());
             return self.nullification_views.highest_in(low, high);
         }
@@ -1005,7 +1005,7 @@ pub fn State(comptime S: type, comptime E: type, comptime D: type) type {
 
         /// The leader of the term starting at `view`, elected before the certificate that
         /// unlocks it exists (null when `view` starts no term or the elector is dynamic).
-        fn handoff_leader(self: *const Self, view: View) ?Participant {
+        pub fn handoff_leader(self: *const Self, view: View) ?Participant {
             if (!view.is_term_start(self.term_length())) return null;
             if (E.mode != .scheduled) return null;
             return self.elector.elect(.new(self.epoch, view), {});
@@ -1172,7 +1172,7 @@ pub fn State(comptime S: type, comptime E: type, comptime D: type) type {
 
         /// The parent's payload when it precedes `view`, is not below the finalized view, is
         /// certified (or finalized), and every view between is nullified.
-        fn parent_payload_for(self: *const Self, view: View, parent: View) PayloadResult {
+        pub fn parent_payload_for(self: *const Self, view: View, parent: View) PayloadResult {
             if (self.validate_parent_span(view, parent)) |err| return .{ .err = err };
             if (self.ancestry_payload_for_child(view, parent)) |payload| {
                 return .{ .payload = payload };
