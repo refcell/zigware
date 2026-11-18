@@ -224,5 +224,12 @@ variants need `runtime` storage; do them after its interface lands.
     prefixes, rebuilt gaps and tails, `init_at_most` restart sweeps, and retries after sync,
     remove, and resize faults on `runtime.storage.faulty`. Planted bug (unbounded scan on a
     bounded open) fails the read-count test.
-  - [ ] fixed.rs: the start-sync and cache-accounting tests (lines 2915-3400 and 8233-8895).
+  - [x] fixed.rs batch 5 (`fixed_sync_faults_test.zig`): failed flush in `start_sync`,
+    failed watermark advance, failed watermark lowering on a bounded reopen, truncation below
+    the durable size. Planted bug (lower the watermark after truncating blobs) fails two.
+    Skipping the flush is not caught: the checkpoint write fails with the same error, as in
+    commonware's test. Not ported: start-sync tests of parked or dropped sync handles
+    (`DelayedSyncContext`, `PendingSyncs`), which synchronous syncs cannot produce, and the
+    snapshot and cache-hit accounting tests (no snapshot readers, no per-read hit metrics
+    on the fixed journal's reads here).
   - [ ] variable.rs: the remaining ~120 tests.
