@@ -707,3 +707,152 @@ test "any init_from_log rebuilds an opened log and refuses an empty one" {
         try db.destroy();
     }
 }
+
+/// A floor policy that evicts the keys in `targets` and keeps every other update it reaches,
+/// recording the locations it decides (commonware's `Script` with `Choice::Evict`/`Keep`).
+const EvictKeys = struct {
+    targets: []const Digest,
+    locations: [16]u64 = undefined,
+    decided: usize = 0,
+
+    pub fn evicts(_: *const EvictKeys) bool {
+        return true;
+    }
+
+    pub fn limits(_: *const EvictKeys, _: usize) floor_mod.Limits {
+        return .{ .entries = std.math.maxInt(usize), .skips = std.math.maxInt(u64) };
+    }
+
+    pub fn decide(
+        self: *EvictKeys,
+        comptime K: type,
+        comptime V: type,
+        entry: floor_mod.Entry(K, V),
+    ) floor_mod.Decision(V) {
+        assert(self.decided < self.locations.len);
+        self.locations[self.decided] = entry.location;
+        self.decided += 1;
+        for (self.targets) |target| {
+            if (!target.eql(entry.key.*)) continue;
+            const decision, _ = entry.evict(); // Digest values own no memory.
+            return decision;
+        }
+        return entry.keep();
+    }
+};
+
+test "any a key the batch creates and the walk evicts ends deleted with no base" {
+    inline for (families) |F| {
+        const Db = support.UnorderedFixed(F);
+        var harness = try support.Harness.init(gpa);
+        defer harness.deinit();
+        var db = try harness.open(Db, null);
+        defer db.deinit();
+        const kept = Digest{ .bytes = @splat(1) };
+        const created = Digest{ .bytes = @splat(2) };
+        var seed = try db.new_batch();
+        try seed.write(kept, kept);
+        var hold: floor_mod.Hold = .{};
+        const seeded = try seed.merkleize_with(&db, &hold);
+        try db.apply_batch(seeded);
+        seeded.release();
+        var policy: EvictKeys = .{ .targets = &.{created} };
+        var batch = try db.new_batch();
+        try batch.write(created, created);
+        const merkleized = try batch.merkleize_with(&db, &policy);
+        defer merkleized.release();
+        try testing.expectEqualSlices(u64, &.{ 1, 3 }, policy.locations[0..policy.decided]);
+        const entries = merkleized.diff.entries;
+        try testing.expectEqual(@as(usize, 2), entries.len);
+        try testing.expect(entries[0].key.eql(kept));
+        try testing.expectEqual(@as(?u64, 4), entries[0].entry.loc());
+        try testing.expectEqual(@as(?u64, 1), entries[0].entry.base_old_loc());
+        try testing.expect(entries[1].key.eql(created));
+        try testing.expectEqual(@as(?u64, null), entries[1].entry.loc());
+        try testing.expectEqual(@as(?u64, null), entries[1].entry.base_old_loc());
+        try testing.expectEqual(@as(usize, 1), merkleized.total_active_keys);
+        _, const ops = merkleized.operations();
+        try testing.expect(ops[0] == .update and ops[0].update.key.eql(created));
+        try testing.expect(ops[1] == .update and ops[1].update.key.eql(kept));
+        try testing.expect(ops[2] == .delete and ops[2].delete.eql(created));
+        try db.apply_batch(merkleized);
+        try expect_value(&db, created, null);
+        try expect_value(&db, kept, kept);
+        try testing.expectEqual(@as(usize, 1), db.active_keys);
+        // The reopened rebuild agrees.
+        const root = db.root();
+        try db.sync();
+        db.deinit();
+        db = try harness.open(Db, null);
+        try testing.expect(db.root().eql(root));
+        try expect_value(&db, created, null);
+        try testing.expectEqual(@as(usize, 1), db.active_keys);
+    }
+}
+
+test "any evicting every committed key empties the database and survives reopen" {
+    inline for (families) |F| {
+        const Db = support.UnorderedFixed(F);
+        var harness = try support.Harness.init(gpa);
+        defer harness.deinit();
+        var db = try harness.open(Db, null);
+        defer db.deinit();
+        var writes: [4]Write = undefined;
+        var targets: [4]Digest = undefined;
+        for (&writes, &targets, 0..) |*w, *t, i| {
+            w.* = .{ .key = key(i), .value = val(i, 1) };
+            t.* = key(i);
+        }
+        try support.apply_writes(Db, &db, &writes);
+        var policy: EvictKeys = .{ .targets = &targets };
+        var batch = try db.new_batch();
+        try batch.write(key(9), val(9, 1));
+        const merkleized = try batch.merkleize_with(&db, &policy);
+        defer merkleized.release();
+        try db.apply_batch(merkleized);
+        for (targets) |t| try expect_value(&db, t, null);
+        try expect_value(&db, key(9), val(9, 1));
+        try testing.expectEqual(@as(usize, 1), db.active_keys);
+        const root = db.root();
+        try db.sync();
+        db.deinit();
+        db = try harness.open(Db, null);
+        try testing.expect(db.root().eql(root));
+        try testing.expectEqual(@as(usize, 1), db.active_keys);
+        for (targets) |t| try expect_value(&db, t, null);
+    }
+}
+
+test "any evicting the batch's own update of a committed key deletes the committed one" {
+    inline for (families) |F| {
+        const Db = support.UnorderedFixed(F);
+        var harness = try support.Harness.init(gpa);
+        defer harness.deinit();
+        var db = try harness.open(Db, null);
+        defer db.deinit();
+        try support.apply_writes(Db, &db, &.{
+            .{ .key = key(1), .value = val(1, 1) },
+            .{ .key = key(2), .value = val(2, 1) },
+        });
+        // The batch rewrites key(1); the walk reaches that rewrite and evicts it, so the key's
+        // committed update must leave the snapshot too.
+        var policy: EvictKeys = .{ .targets = &.{key(1)} };
+        var batch = try db.new_batch();
+        try batch.write(key(1), val(1, 2));
+        const merkleized = try batch.merkleize_with(&db, &policy);
+        defer merkleized.release();
+        const entry = merkleized.diff.lookup(&key(1)).?;
+        try testing.expect(entry.* == .deleted);
+        try testing.expect(entry.base_old_loc() != null);
+        try db.apply_batch(merkleized);
+        try expect_value(&db, key(1), null);
+        try expect_value(&db, key(2), val(2, 1));
+        try testing.expectEqual(@as(usize, 1), db.active_keys);
+        const root = db.root();
+        try db.sync();
+        db.deinit();
+        db = try harness.open(Db, null);
+        try testing.expect(db.root().eql(root));
+        try expect_value(&db, key(1), null);
+    }
+}

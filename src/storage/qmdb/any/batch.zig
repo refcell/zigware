@@ -13,7 +13,8 @@
 //!
 //! A merkleized batch is reference counted (`retain`/`release`); a child holds a weak link to
 //! its parent and the diffs of its live ancestors, so reads and applies stay exact after the
-//! ancestors are released. Only policies that never evict are supported so far.
+//! ancestors are released. Unordered batches support evicting floor policies (an evicted
+//! key is deleted at the tip); ordered ones do not yet (their links need repair).
 //!
 //! Staging (`stage` → `expand` → `Staged.merkleize(slots, unstaged)`) reads keys through the
 //! batch and records where each resolved (`StagedLoc`); a staged merkleize then takes one
@@ -153,7 +154,8 @@ pub fn Unmerkleized(comptime D: type) type {
         /// Hashes the batch, advancing the floor with `policy` (which must not evict).
         pub fn merkleize_with(self: *Self, db: *D, policy: anytype) !*D.MerkleizedBatch {
             floor_mod.check(@TypeOf(policy.*));
-            assert(!policy.evicts()); // Evicting policies are not supported yet.
+            // Ordered evictions need their predecessors' links repaired (not yet supported).
+            assert(!D.Update.siblings or !policy.evicts());
             const gpa = self.gpa;
             var m = try Merkleizer(D).init(self, db);
             defer m.deinit();
@@ -419,6 +421,24 @@ fn Walked(comptime D: type) type {
                 .base_old_loc = base_old_loc,
             } } });
             try self.ops.append(gpa, .{ .update = update });
+        }
+
+        /// Appends a delete of `key` at the tip (an evicted update), recording it as `mv`
+        /// directs.
+        fn evict(self: *Self, gpa: Allocator, key: D.Key, mv: Move) !void {
+            const ops_before = self.ops.items.len;
+            switch (mv) {
+                .existing => |e| self.diff.items[e.index].entry = .{ .deleted = .{
+                    .base_old_loc = e.base_old_loc,
+                } },
+                .new => |n| try self.floor_diff.append(gpa, .{
+                    .key = key,
+                    .entry = .{ .deleted = .{ .base_old_loc = n.base_old_loc } },
+                }),
+            }
+            try self.ops.append(gpa, .{ .delete = key });
+            self.active_keys_delta -= 1;
+            assert(self.ops.items.len == ops_before + 1);
         }
 
         /// Appends `update` at the tip, recording its move as `mv` directs.
@@ -735,25 +755,43 @@ fn Merkleizer(comptime D: type) type {
                 if (op != .update) return error.DataCorrupted; // Active operations are updates.
                 if (!w.reach(loc)) return false;
                 const update = op.update;
-                const entry: floor_mod.Entry(K, V) = .{
-                    .location = loc,
-                    .key = &update.key,
-                    .value = update.value,
-                };
-                const decision = policy.decide(K, V, entry);
-                switch (decision.action) {
-                    .write => |value| {
-                        // A replaced value belongs to the walk; the released one to its read.
-                        if (decision.released != null) try self.written.append(self.gpa, value);
-                        var moved = update; // Ordered updates keep their next key.
-                        moved.value = value;
-                        try walked.relocate(self.gpa, moved, mv);
-                    },
-                    .stop => return false,
-                    .evict => unreachable, // `merkleize_with` refuses evicting policies.
-                }
+                if (!try self.decide(walked, update, loc, mv, policy)) return false;
                 w.decide();
                 if (w.entries == 0) return false;
+            }
+            return true;
+        }
+
+        /// Hands `policy` the active `update` at `loc` (with a value it owns, as commonware's
+        /// `Entry` does) and applies its decision at the tip; false if it stopped the walk.
+        fn decide(
+            self: *Self,
+            walked: *Walked(D),
+            update: D.Update,
+            loc: u64,
+            mv: Move,
+            policy: anytype,
+        ) !bool {
+            const gpa = self.gpa;
+            try self.written.ensureUnusedCapacity(gpa, 1);
+            const entry: floor_mod.Entry(K, V) = .{
+                .location = loc,
+                .key = &update.key,
+                .value = try value_mod.clone(V, gpa, update.value),
+            };
+            const decision = policy.decide(K, V, entry);
+            if (decision.released) |released| codec.free(V, gpa, released);
+            switch (decision.action) {
+                .write => |value| {
+                    // The walk owns the written value until the journal batch takes a copy.
+                    self.written.appendAssumeCapacity(value);
+                    var moved = update; // Ordered updates keep their next key.
+                    moved.value = value;
+                    try walked.relocate(gpa, moved, mv);
+                },
+                // The policy owns the evicted value.
+                .evict => try walked.evict(gpa, update.key, mv),
+                .stop => return false,
             }
             return true;
         }
