@@ -630,6 +630,18 @@ pub fn Merkleized(comptime D: type) type {
             return self.inner.get(key, &db.any);
         }
 
+        /// The smallest active key above `key` after this batch (ordered, not wrapping).
+        pub fn get_next_key(self: *const Self, key: *const D.Key, db: *D) !?D.Key {
+            comptime assert(D.Any.Update.siblings);
+            return self.inner.get_next_key(key, &db.any);
+        }
+
+        /// The largest active key below `key` after this batch (ordered, not wrapping).
+        pub fn get_prev_key(self: *const Self, key: *const D.Key, db: *D) !?D.Key {
+            comptime assert(D.Any.Update.siblings);
+            return self.inner.get_prev_key(key, &db.any);
+        }
+
         /// A child batch on top of this one.
         pub fn new_batch(self: *Self) D.UnmerkleizedBatch {
             return .{

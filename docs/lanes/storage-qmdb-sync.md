@@ -57,9 +57,12 @@ it comes first once `any` lands.
   the faulty storage) and tampered-witness tests.
 - [x] `qmdb_current_{unordered,ordered}_batch_root` (current/batch_root_fuzz_test.zig) and
   `qmdb_current_recovery` (current/recovery_fuzz_test.zig), on storage-qmdb's
-  `qmdb/fuzz_floor.zig` oracle. Ordered neighbors are checked at the Db until ordered
-  batches expose `get_prev_key`/`get_next_key`.
-- [ ] `qmdb_current_{unordered,ordered}_operations` and `qmdb_current_mmb_prune_grow`.
+  `qmdb/fuzz_floor.zig` oracle. Ordered neighbors are checked on every batch (current's
+  `MerkleizedBatch.get_prev_key`/`get_next_key`, over any's) and on the database.
+- [x] `qmdb_current_{unordered,ordered}_operations` (current/operations_fuzz_test.zig) and
+  `qmdb_current_mmb_prune_grow` (current/prune_grow_fuzz_test.zig). Keys come from a
+  128-key space or the seeded keys so proofs and deletes hit live keys.
+- [ ] compact/sync.zig against the crypto lane's sync `Database` interface (87cf833).
 - [ ] Fuzz targets and benches for these modules.
 
 ## Agreement with storage-qmdb (2026-11-16)
@@ -177,3 +180,4 @@ it comes first once `any` lands.
 - 2026-11-18: compact qmdb (keyless and immutable) with its 10 conformance hashes.
 - 2026-11-18: compact crash-point and tampered-witness tests.
 - 2026-11-18: current batch-root and recovery fuzz targets (planted bugs caught).
+- 2026-11-18: current operations and MMB prune-grow fuzz targets; ordered batch neighbors.

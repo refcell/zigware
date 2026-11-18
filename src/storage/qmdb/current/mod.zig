@@ -25,6 +25,8 @@ test {
     _ = @import("canonical_test.zig");
     _ = @import("db_test.zig");
     _ = @import("batch_root_fuzz_test.zig");
+    _ = @import("operations_fuzz_test.zig");
+    _ = @import("prune_grow_fuzz_test.zig");
     _ = @import("recovery_fuzz_test.zig");
     _ = @import("grafting_test.zig");
     _ = @import("proof_test.zig");

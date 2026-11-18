@@ -7,8 +7,8 @@
 //! reopening, and comparing the roots, floor, and every key with the model.
 //!
 //! Ordered databases also check strict, non-wrapping neighbors of every key in the space
-//! (and one above it) against the model. Commonware asks pending batches for neighbors; this
-//! port asks the database after each apply until ordered batches expose the lookups.
+//! (and one above it) against the model, on every batch as it is merkleized, on the pending
+//! and rebuilt child once its parent is committed, and on the database.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -153,6 +153,7 @@ fn Driver(comptime D: type) type {
             const bounds = merkleized.bounds();
             assert(bounds.tip.size > 0);
             try recorder.check(gpa, model, inherited, bounds.inactivity_floor, bounds.tip.size - 1);
+            try expect_neighbors(db, merkleized, model);
             return merkleized;
         }
 
@@ -199,6 +200,8 @@ fn Driver(comptime D: type) type {
             try db.commit();
             const rebuilt = try rebuild(db, null, input.child, input.plans[2], &walk);
             defer rebuilt.release();
+            try expect_neighbors(db, rebuilt, model);
+            try expect_neighbors(db, child, model);
             try expect_same_tip(db, child, rebuilt);
         }
 
@@ -268,9 +271,21 @@ fn Driver(comptime D: type) type {
             };
         }
 
-        /// The database's strict, non-wrapping neighbors match the model's, for every key of
-        /// the space and one above it. Unordered databases have none to check.
-        fn expect_neighbors(db: *D, model: *const Model) !void {
+        fn neighbor(
+            comptime side: enum { prev, next },
+            db: *D,
+            batch: ?*const Batch,
+            query: *const D.Key,
+        ) !?D.Key {
+            if (batch) |b| {
+                return if (side == .prev) b.get_prev_key(query, db) else b.get_next_key(query, db);
+            }
+            return if (side == .prev) db.get_prev_key(query) else db.get_next_key(query);
+        }
+
+        /// The strict, non-wrapping neighbors after `batch` (or of the database) match the
+        /// model's, for every key of the space and one above it. Unordered databases have none.
+        fn expect_neighbors(db: *D, batch: ?*const Batch, model: *const Model) !void {
             if (comptime !D.Any.Update.siblings) return;
             var queries: [record_capacity + 1][32]u8 = undefined;
             for (0..collision_groups) |prefix| for (0..key_space) |suffix| {
@@ -289,8 +304,9 @@ fn Driver(comptime D: type) type {
                     if (order == .gt and (next == null or std.mem.order(u8, &k, &next.?) == .lt))
                         next = k;
                 }
-                const got_prev = try db.get_prev_key(&.{ .bytes = q.* });
-                const got_next = try db.get_next_key(&.{ .bytes = q.* });
+                const query: D.Key = .{ .bytes = q.* };
+                const got_prev = try neighbor(.prev, db, batch, &query);
+                const got_next = try neighbor(.next, db, batch, &query);
                 try testing.expectEqual(prev == null, got_prev == null);
                 try testing.expectEqual(next == null, got_next == null);
                 if (prev) |p| try testing.expectEqualSlices(u8, &p, &got_prev.?.bytes);
@@ -312,7 +328,7 @@ fn Driver(comptime D: type) type {
             try testing.expect(db.ops_root().eql(ops_root));
             try testing.expectEqual(floor, db.inactivity_floor());
             try expect_matches_model(db, model);
-            try expect_neighbors(db, model);
+            try expect_neighbors(db, null, model);
         }
 
         fn run(input: *const Input) !void {
@@ -327,13 +343,13 @@ fn Driver(comptime D: type) type {
             defer initial.release();
             try db.apply_batch(initial);
             try db.commit();
-            try expect_neighbors(&db, &model);
+            try expect_neighbors(&db, null, &model);
             switch (input.schedule) {
                 .pending_parent => try pending_parent(&db, input, &model),
                 .pending_chain => try pending_chain(&db, input, &model),
                 .dropped_prefix_chain => try dropped_prefix_chain(&db, input, &model),
             }
-            try expect_neighbors(&db, &model);
+            try expect_neighbors(&db, null, &model);
             try expect_recovers(&harness, &db, &model);
         }
     };
