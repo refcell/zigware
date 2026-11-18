@@ -20,7 +20,8 @@ a test harness), `transfers` (4.4k with tests and benches), `stateful` (about 33
   `PlanError`. An engine definition `D` (see `engine.zig`) declares `PublicKey`, `Engine`,
   `State`, `participants`, `channels` (`[]const ChannelSpec`), `max_message_size`,
   `init(InitContext(P)) !struct { Engine, State }`, `start(Engine) !Handle(void)`, and
-  optionally `deinit_state`. Engines report through `Monitor(P).send(update)`.
+  optionally `deinit_state`. Engines report through `Monitor(P).send(update)`, or put
+  `MonitorReporter(P, R).init(pk, monitor, inner)` in marshal's reporter chain.
 - `ExitCondition(P, S).from(&value)` with `MinimumFinalizations` and `ProcessedHeightAtLeast`;
   `FinalizationProperty(S).from(&value)` and `Property(P, S).from(&value)`; `Team(D)`.
 - `glue.transfers`: `Plan(K, A)` (`init(gpa, transfers, seed, strategy, &rejection)`,
@@ -63,7 +64,8 @@ a test harness), `transfers` (4.4k with tests and benches), `stateful` (about 33
 - [x] simulate: tracker, action (Schedule, Action, Crash) with their tests.
 - [x] simulate: processed, property, exit conditions, engine definition, team, plan (the
   driver) with the plan tests and their stub engines.
-- [ ] simulate: `MonitorReporter` waits on marshal's `Update`/`Tip` (consensus-marshal).
+- [x] simulate: `MonitorReporter` (examples lane): forwards marshal's `Update.tip` to the
+  plan's `Monitor`, then every update to the wrapped reporter.
 - [x] transfers: `Plan`, `settle`, and `Selection`, with the plan, settle, and selection tests
   that need no database.
 - [x] transfers: the nonced-account (effect) tests.
@@ -354,3 +356,4 @@ Owns `src/glue/dkg`. Reference: `glue/src/dkg` (about 24k Rust lines).
   setup's helpers with its 5 tests.
 - 2026-11-18: inclusion's pending-log scan, request queue, and verification retention.
 - 2026-11-18: the reshare actor's core, setup, and follower mode.
+- 2026-11-18: simulate's `MonitorReporter` (examples lane), with its tests.

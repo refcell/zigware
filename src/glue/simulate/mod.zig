@@ -6,6 +6,7 @@
 //! - `Schedule`, `Action`, and `Crash` describe the faults a plan injects.
 //! - `Plan` runs an engine definition (`engine.zig`) on every validator, injecting its faults
 //!   and checking its exit condition and properties.
+//! - `MonitorReporter` forwards marshal's finalized tips to the plan.
 
 const std = @import("std");
 
@@ -18,6 +19,7 @@ pub const plan = @import("plan.zig");
 pub const processed = @import("processed.zig");
 pub const property = @import("property.zig");
 pub const team = @import("team.zig");
+pub const reporter = @import("reporter.zig");
 
 pub const Action = action.Action;
 pub const Schedule = action.Schedule;
@@ -38,9 +40,11 @@ pub const Property = property.Property;
 pub const Plan = plan.Plan;
 pub const PlanError = plan.Error;
 pub const Team = team.Team;
+pub const MonitorReporter = reporter.MonitorReporter;
 
 test {
     std.testing.refAllDecls(@This());
     _ = @import("simulate_test.zig");
     _ = @import("plan_test.zig");
+    _ = @import("reporter_test.zig");
 }
