@@ -2249,3 +2249,126 @@ test "standard finalized batch verifies each epoch under admission scope" {
         }
     }.body);
 }
+
+test "standard start floor height one without metadata delivers anchor" {
+    try run(struct {
+        fn body(ctx: Ctx) anyerror!void {
+            const prefix = "start-floor-height-one-without-metadata";
+            var rng = utils.rng.test_rng();
+            var fixture = try harness.fixture(gpa, &rng);
+            defer fixture.deinit(gpa);
+            var floor_block = try block_at(hash("genesis-parent"), 1, 100);
+            defer floor_block.deinit();
+            var floor = try finalize(&fixture, 1, 0, &floor_block);
+            defer floor.deinit(gpa);
+            const blocks = [_]Block{floor_block};
+            const finalized = [_]seed.FinalizationAt{.{ .height = .new(1), .finalization = floor }};
+            try seed.inconsistent_restart_state(
+                ctx.child("seed_restart_state"),
+                prefix,
+                &blocks,
+                &finalized,
+            );
+            var created = try common.HoldingBlockReporter.init_after(gpa, ctx.io(), .zero());
+            defer created.started.deinit();
+            var started = try start_holding(
+                ctx.child("validator"),
+                prefix,
+                &fixture,
+                created.reporter,
+                try common.RecordingBuffer.init(gpa, ctx.io()),
+                .{ .floor = try floor.clone(gpa) },
+            );
+            defer started.crash();
+            // The height-one startup floor is delivered without prior metadata, and its
+            // stored anchor is not fetched.
+            try testing.expectEqual(1, (try created.started.recv()).get());
+            try testing.expectEqual(0, started.resolver.fetch_count());
+        }
+    }.body);
+}
+
+const GapFetch = struct { resolver: common.RecordingResolver, digest: D, height: u64 };
+
+/// Whether a block fetch of `digest` for the finalized-by-height subscriber at `height` was
+/// recorded.
+fn gap_fetched(state: GapFetch) bool {
+    const fetches = state.resolver.fetches(gpa) catch return false;
+    defer gpa.free(fetches);
+    const key: common.Key = .{ .block = state.digest };
+    const subscriber: common.Annotation = .{ .finalized = .{ .by_height = .new(state.height) } };
+    for (fetches) |fetch| {
+        if (fetch.key.eql(key) and fetch.subscriber.eql(subscriber)) return true;
+    }
+    return false;
+}
+
+test "standard set floor repairs gap after anchor arrives" {
+    try run(struct {
+        fn body(ctx: Ctx) anyerror!void {
+            var rng = utils.rng.test_rng();
+            var fixture = try harness.fixture(gpa, &rng);
+            defer fixture.deinit(gpa);
+            var floor: Floor = try .init(&fixture, "floor-parent");
+            defer floor.deinit();
+            var application = try App.manual_ack(gpa, ctx.io());
+            defer application.deinit();
+            var started = try start_manual(
+                ctx.child("validator"),
+                "set-floor-repairs-gap-after-anchor",
+                &fixture,
+                application.clone(),
+                try common.RecordingBuffer.init(gpa, ctx.io()),
+            );
+            defer started.crash();
+            try started.mailbox.set_floor(try floor.clone_finalization());
+            try wait_block_fetch(ctx, started.resolver, floor.block.digest());
+
+            // Block 7 finalizes over the missing block 6.
+            const missing = try block_digest(floor.block.digest(), 6, 600);
+            try finalize_child(&started, &fixture, missing, 7);
+            const gap: GapFetch = .{ .resolver = started.resolver, .digest = missing, .height = 6 };
+            // Gap repair waits until the floor anchor is resolved.
+            try testing.expect(!gap_fetched(gap));
+
+            try testing.expect(try started.mailbox.verified(round_at(5), floor.block.clone()));
+            try common.wait_until(ctx, 5000, "missing post-floor parent fetch", gap, gap_fetched);
+        }
+    }.body);
+}
+
+test "standard local floor anchor resumes gap repair" {
+    try run(struct {
+        fn body(ctx: Ctx) anyerror!void {
+            const prefix = "local-floor-anchor-resumes-gap-repair";
+            var rng = utils.rng.test_rng();
+            var fixture = try harness.fixture(gpa, &rng);
+            defer fixture.deinit(gpa);
+            var floor: Floor = try .init(&fixture, "floor-parent");
+            defer floor.deinit();
+            var next = try block_at(floor.block.digest(), 6, 600);
+            defer next.deinit();
+            var next_finalization = try finalize(&fixture, 6, 5, &next);
+            defer next_finalization.deinit(gpa);
+            const finalized = [_]seed.FinalizationAt{
+                .{ .height = .new(6), .finalization = next_finalization },
+            };
+            try seed.inconsistent_restart_state(ctx.child("storage"), prefix, &.{}, &finalized);
+
+            var created = try common.HoldingBlockReporter.init(gpa, ctx.io());
+            defer created.started.deinit();
+            var started = try start_holding(
+                ctx.child("validator"),
+                prefix,
+                &fixture,
+                created.reporter,
+                try common.RecordingBuffer.init(gpa, ctx.io()),
+                .{ .floor = try floor.clone_finalization() },
+            );
+            defer started.crash();
+            try wait_block_fetch(ctx, started.resolver, floor.block.digest());
+            try testing.expect(try started.mailbox.verified(round_at(5), floor.block.clone()));
+            try wait_block_fetch(ctx, started.resolver, next.digest());
+        }
+    }.body);
+}
