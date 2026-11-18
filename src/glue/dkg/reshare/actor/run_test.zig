@@ -16,12 +16,13 @@ const TestActor = @import("actor.zig").Actor(mocks.ActorTypes);
 const Digested = TestActor.Digested;
 const Runner = run_mod.Runner(mocks.ActorTypes);
 const mocks_p2p = p2p.utils.mocks;
-const Muxer = p2p.utils.mux.Muxer(mocks_p2p.InertSender(P), mocks_p2p.InertReceiver(P));
 const gpa = testing.allocator;
 
-fn run_loop(h: *Harness, handle: *Muxer.Handle) anyerror!void {
-    return Runner.run_epochs(&h.actor, &h.store, handle, null);
+fn run_actor(h: *Harness, channel: Channel) anyerror!void {
+    return Runner.run(&h.actor, &h.store, channel.sender, channel.receiver, .{});
 }
+
+const Channel = @TypeOf(mocks_p2p.inert_channel(P, gpa, undefined, &.{}));
 
 // The loop participates in a committed epoch: it deals and includes through the epoch's
 // final block, commits and registers the next epoch's info, then enters that epoch.
@@ -48,10 +49,7 @@ test "run: a participating epoch commits the next epoch at its final block" {
 
             const peers = (&h.public_key)[0..1];
             const channel = mocks_p2p.inert_channel(P, gpa, io, peers);
-            var mux = try Muxer.init(gpa, io, channel.sender, channel.receiver);
-            defer mux.muxer.deinit();
-            defer mux.handle.deinit();
-            var running = try io.concurrent(run_loop, .{ &h, &mux.handle });
+            var running = try io.concurrent(run_actor, .{ &h, channel });
             try waiters[3].wait();
             // The loop has entered epoch one's dealing window, which waits for blocks.
             if (running.cancel(io)) |_| {} else |err| try testing.expectEqual(error.Canceled, err);

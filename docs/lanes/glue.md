@@ -402,11 +402,15 @@ Owns `src/glue/dkg`. Reference: `glue/src/dkg` (about 24k Rust lines).
   `participate`) over a `p2p.utils.mux` handle.
 - [x] reshare actor: one-shot DKG mode (`dkg.Dkg(T).run_dkg`, terminal, restart from the
   stored final block), with a singleton ceremony test driven through the mailbox.
-- [ ] reshare actor: `start` (store init, mux, state-sync
+- [x] reshare actor: `run.Runner(T).run`, the actor task over its dealing channel (mux,
+  startup tip, state-synced epoch registration, DKG or reshare mode).
+- [ ] reshare actor: resolving the startup from marshal's anchor and the state-sync plan
+  (commonware `start`'s preamble) (store init, mux, state-sync
   resolution, startup tip); inclusion's remaining window tests (gated and stalled ancestry, scan
   yielding to finalization, closed verification) and `finalization_error_panics`; the dkg
   window; the run loop; application.
-- [ ] bootstrap, probe (wire with conformance, discovery, service), orchestrator.
+- [ ] orchestrator. (bootstrap and probe moved to the p2p lane, T-01a1d59c-49e5, which
+  owns src/glue/dkg/bootstrap/ and src/glue/dkg/probe/.)
 - [ ] tests: the dkg and reshare harnesses, properties, and mocks; lookup's peer-activation
   test.
 
@@ -427,5 +431,7 @@ Owns `src/glue/dkg`. Reference: `glue/src/dkg` (about 24k Rust lines).
 - 2026-11-18: the inclusion window loop; its 2 tests catch a late scan start and a lost
   redelivery acknowledgement.
 - 2026-11-18: the reshare epoch loop; its test catches a skipped dealing window.
+- 2026-11-18: `Runner(T).run`; the epoch-loop test now runs through it and catches an
+  inverted mode dispatch.
 - 2026-11-18: one-shot DKG mode; a singleton ceremony completes through the mailbox
   (dealing, next_log, inclusion, epoch_info), and the test catches a lost outcome.

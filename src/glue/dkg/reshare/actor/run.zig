@@ -5,12 +5,19 @@
 //! follows the chain to the epoch's final block; otherwise it registers the epoch's
 //! subchannel on the dealing mux and runs the epoch's dealing window (when it entered in the
 //! early phase), then its inclusion window, which answers the requests dealing held.
+//!
+//! `run` is the actor's task (commonware `Actor::start`'s `run`): it multiplexes the
+//! dealing channel by epoch, applies the resolved startup, and runs DKG mode or the epoch
+//! loop. Resolving the startup from marshal's processed anchor and the state-sync plan is
+//! the caller's (commonware does it at the top of `run`).
 
 const std = @import("std");
 const assert = std.debug.assert;
 const dealing = @import("dealing.zig");
 const inclusion_window = @import("inclusion_window.zig");
 const actor_mod = @import("actor.zig");
+const dkg = @import("dkg.zig");
+const p2p = @import("p2p");
 
 /// The epoch-loop functions for `Actor(T)`.
 pub fn Runner(comptime T: type) type {
@@ -18,6 +25,47 @@ pub fn Runner(comptime T: type) type {
         const Actor = actor_mod.Actor(T);
         const Dealing = dealing.Window(T);
         const Inclusion = inclusion_window.Window(T);
+
+        /// Where the actor starts: the tip it already applied (commonware `startup`'s
+        /// result) and the state-synced epoch, if any (owned).
+        pub const Start = struct {
+            tip: ?Actor.Tip = null,
+            state_sync: ?Actor.StateSyncStart = null,
+        };
+
+        /// Runs the actor on its dealing channel (`sender` and `receiver`, taken) until the
+        /// mailbox or a dealing channel closes.
+        pub fn run(
+            self: *Actor,
+            store: *Actor.Store,
+            sender: anytype,
+            receiver: anytype,
+            start: Start,
+        ) !void {
+            const Mux = p2p.utils.mux.Muxer(@TypeOf(sender), @TypeOf(receiver));
+            var state_sync = start.state_sync;
+            errdefer if (state_sync) |*synced| synced.info.deinit(self.gpa);
+            const built = try Mux.init(self.gpa, self.io, sender, receiver);
+            var handle = built.handle;
+            defer handle.deinit();
+            var demux = try built.muxer.start();
+            defer if (demux.cancel(self.io)) |_| {} else |_| {};
+            // Register the synced epoch before setup decides whether to participate in it.
+            if (state_sync) |*synced| {
+                const share = try self.recovered_share(store, &synced.info);
+                try self.register_epoch(&synced.info, share);
+            }
+            assert(self.tip == null);
+            self.tip = start.tip;
+            if (self.mode == .dkg) {
+                if (state_sync) |*synced| synced.info.deinit(self.gpa);
+                state_sync = null;
+                return dkg.Dkg(T).run_dkg(self, store, &handle);
+            }
+            const synced = state_sync;
+            state_sync = null;
+            return run_epochs(self, store, &handle, synced);
+        }
 
         /// Runs `prepared`'s dealing window when the epoch was entered in its early phase,
         /// then its inclusion window (commonware `participate`). `proceed` once the epoch's
