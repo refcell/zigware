@@ -7,6 +7,9 @@ const testing = std.testing;
 const Io = std.Io;
 const assert = std.debug.assert;
 const base = @import("state_test.zig");
+const codec = @import("codec");
+const mocks_application = @import("../../mocks/application.zig");
+const mocks_relay = @import("../../mocks/relay.zig");
 const parallel = @import("parallel");
 const context = @import("../context.zig");
 const elector = @import("../../elector.zig");
@@ -3058,6 +3061,186 @@ test "voter state a same-view replacement cannot prepare the displaced tip" {
             try testing.expect(!request.is_handoff());
             try testing.expectEqual(5, request.context().parent[0].get());
             try testing.expect(request.context().parent[1].eql(replacement.payload));
+        }
+    }.body);
+}
+
+/// commonware's dead-chain fixture: views 1 to 3 certified, our votes for a4 and a5, and
+/// a certified conflicting b4 notarized by peers 0 to 2.
+const DeadChain = struct {
+    const a4 = proposal(9, 4, 3, 14);
+    const a5 = proposal(9, 5, 4, 15);
+    const b4 = proposal(9, 4, 3, 24);
+    const b5 = proposal(9, 5, 4, 25);
+
+    /// The certified anchors, without our votes (a follower's journal).
+    follower: Journal = .{},
+    /// The anchors, a4's vote, b4's notarization and certification, then a5's vote.
+    journal: Journal = .{},
+
+    fn init(self: *DeadChain, io: Io) !void {
+        self.* = .{};
+        var live: Env = undefined;
+        try live.start(io, handoff_options(4, 3));
+        defer live.stop();
+        var anchors: Journal = .{};
+        defer anchors.deinit();
+        try certified_chain(&live, &anchors, 3);
+        for (anchors.items.items) |artifact| {
+            try self.journal.push(try clone_artifact(artifact));
+            if (artifact != .notarize) try self.follower.push(try clone_artifact(artifact));
+        }
+        const a4_vote = try journaled_vote(&live.state, a4);
+        const a5_vote = try journaled_vote(&live.state, a5);
+        const b4_notarized = try notarization_from(&live.fixture, &.{ 0, 1, 2 }, b4);
+        try testing.expect((try live.state.add_notarization(try b4_notarized.clone(gpa))).added);
+        try testing.expectEqual(null, live.state.optimistic_ancestry_payload(.new(5)));
+        try self.journal.push(a4_vote);
+        try self.journal.push(.{ .notarization = try b4_notarized.clone(gpa) });
+        try self.journal.push(certification_of(b4));
+        try self.journal.push(a5_vote);
+        try self.follower.push(.{ .notarization = b4_notarized });
+        try self.follower.push(certification_of(b4));
+    }
+
+    fn deinit(self: *DeadChain) void {
+        self.journal.deinit();
+        self.follower.deinit();
+    }
+};
+
+fn certification_of(value: Proposal) Artifact {
+    return .{ .certification = .{ .round = value.round, .certified = true } };
+}
+
+fn clone_artifact(artifact: Artifact) !Artifact {
+    return switch (artifact) {
+        .notarization => |notarized| .{ .notarization = try notarized.clone(gpa) },
+        .notarize, .certification => artifact,
+        else => unreachable, // Proof: `certified_chain` journals only these.
+    };
+}
+
+/// commonware's mock application payload: the contents `(round, parent, 66)` and their
+/// hash.
+fn dead_chain_payload(round: Rnd, parent: Digest, buffer: []u8) struct { Digest, []const u8 } {
+    var writer: codec.Writer = .init(buffer);
+    round.write(&writer);
+    codec.write(Digest, parent, &writer);
+    codec.write(u64, 66, &writer);
+    const contents = writer.written();
+    return .{ cryptography.Sha256.hash(&.{contents}), contents };
+}
+
+/// A follower holding certified b4 and b5 rejects the handoff candidate `c` built on a5:
+/// the application sees a parent mismatch.
+fn follower_rejects(
+    io: Io,
+    chain: *DeadChain,
+    c: Proposal,
+    contents: []const u8,
+    leader: Scheme.PublicKey,
+) !void {
+    var peer: Env = undefined;
+    try replayed_state(&peer, io, 1, &chain.follower);
+    defer peer.stop();
+    const state = &peer.state;
+    try testing.expect(try state.set_proposal(.new(6), &c));
+    const verify = state.try_verify();
+    // Certified b5 ancestry is supplied to verification.
+    try expect_ready(verify, c, 5, DeadChain.b5.payload);
+    const Application = mocks_application.Application(cryptography.Sha256, Scheme.PublicKey);
+    var relay = mocks_relay.Relay(Digest, Scheme.PublicKey).init(gpa, io);
+    defer relay.deinit();
+    const zero: mocks_application.Latency = .{ .mean = 0, .std_dev = 0 };
+    var application = try Application.init(gpa, io, .{
+        .relay = &relay,
+        .me = peer.fixture.participants[1],
+        .propose_latency = zero,
+        .verify_latency = zero,
+        .certify_latency = zero,
+    });
+    defer application.deinit();
+    application.reject_mismatches = true;
+    try application.register();
+    relay.broadcast(leader, .all, c.payload, contents);
+    try testing.expectEqual(false, (try application.verify(io, verify.ready.context, c.payload)).?);
+    state.verification_failed(.new(6), .invalid_proposal);
+    try testing.expectEqual(null, try state.construct_notarize(.new(6)));
+}
+
+test "voter state a replayed descendant without a binding can prepare a dead chain" {
+    // commonware `replayed_descendant_without_binding_can_prepare_dead_chain`.
+    try run(struct {
+        fn body(io: Io) !void {
+            var chain: DeadChain = undefined;
+            try chain.init(io);
+            defer chain.deinit();
+            var restarted: Env = undefined;
+            try replayed_state(&restarted, io, 3, &chain.journal);
+            const state = &restarted.state;
+            var stopped = false;
+            defer if (!stopped) restarted.stop();
+            try testing.expect(state.rounds.get(.new(5)).?.verifying() == null);
+            try testing.expectEqual(null, state.explicit_ancestry_payload(.new(5)));
+            try testing.expect(state.optimistic_ancestry_payload(.new(5)).?.eql(.fill(15)));
+            const request = state.try_propose().?;
+            try testing.expect(request.is_handoff());
+            const handoff = request.context();
+            try testing.expectEqual(5, handoff.parent[0].get());
+            try testing.expect(handoff.parent[1].eql(DeadChain.a5.payload));
+            var buffer: [64]u8 = undefined;
+            const payload, const contents =
+                dead_chain_payload(handoff.round, DeadChain.a5.payload, &buffer);
+            const c = Proposal.init(handoff.round, .new(5), payload);
+            try testing.expect(state.proposed(&handoff, c.payload));
+            const c_vote = (try state.construct_notarize(.new(6))).?;
+            try testing.expectEqualDeep(c, c_vote.proposal);
+            const peers = [_]usize{ 0, 1, 2 };
+            const b5_notarized = try notarization_from(&restarted.fixture, &peers, DeadChain.b5);
+            try chain.follower.push(.{ .notarization = try b5_notarized.clone(gpa) });
+            try chain.follower.push(certification_of(DeadChain.b5));
+            try testing.expect((try state.add_notarization(b5_notarized)).added);
+            try testing.expect(try state.certified(.new(5), true) != null);
+            try testing.expect(state.explicit_ancestry_payload(.new(5)).?.eql(.fill(25)));
+            const alternate: base.State.Context = .{
+                .round = c.round,
+                .leader = restarted.fixture.participants[3],
+                .parent = .{ .new(5), DeadChain.b5.payload },
+            };
+            _ = state.proposed(&alternate, .fill(76));
+            try testing.expectEqualDeep(c, state.rounds.get(.new(6)).?.proposal().?.*);
+            try testing.expectEqual(null, try state.construct_notarize(.new(6)));
+            const leader = restarted.fixture.participants[3];
+            try follower_rejects(io, &chain, c, contents, leader);
+            restarted.stop();
+            stopped = true;
+
+            try chain.journal.push(.{ .notarize = c_vote });
+            var again: Env = undefined;
+            try replayed_state(&again, io, 3, &chain.journal);
+            defer again.stop();
+            try testing.expect(again.state.try_propose() == null);
+            try testing.expectEqual(null, try again.state.construct_notarize(.new(6)));
+        }
+    }.body);
+}
+
+test "voter state a replayed child vote stays bound to its replaced parent" {
+    // zigware-only: commonware's replay binds a replayed vote to its parent's held payload,
+    // but no state.rs test fails without the binding.
+    try run(struct {
+        fn body(io: Io) !void {
+            var env: Env = undefined;
+            try env.start(io, epoch_nine(5, 10, 2));
+            defer env.stop();
+            const state = &env.state;
+            try replay_vote(&env, 1, proposal(9, 1, 0, 31));
+            try replay_vote(&env, 1, proposal(9, 2, 1, 32));
+            try testing.expect(state.optimistic_ancestry_payload(.new(2)).?.eql(.fill(32)));
+            // A conflicting view-1 certificate kills the chain our view-2 vote built on.
+            try add_notarized(state, &env.fixture, proposal(9, 1, 0, 41));
+            try testing.expectEqual(null, state.optimistic_ancestry_payload(.new(2)));
         }
     }.body);
 }
