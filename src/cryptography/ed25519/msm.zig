@@ -7,6 +7,7 @@ const std = @import("std");
 const assert = std.debug.assert;
 
 const core = @import("core.zig");
+const verify_avx2 = @import("verify_avx2.zig");
 const Point = core.Point;
 const Fe = Point.Fe;
 const scalar = Point.scalar;
@@ -87,61 +88,115 @@ fn add_mixed(p: Point, q: *const Cached, negate: bool) Point {
     return .{ .x = x.mul(t), .y = y.mul(z), .z = z.mul(t), .t = x.mul(y) };
 }
 
-/// Up to `chunk_terms` MSM terms: points prepared for mixed addition and their scalars'
-/// signed digits, stored window-major so each bucket pass reads one row.
-pub const Terms = struct {
-    points: [chunk_terms]Cached,
-    digits: [windows][chunk_terms]i8,
-    count: usize,
+/// The std `Point` code behind the packed-point interface (`verify_avx2.zig`), for CPUs without
+/// a packed backend. Its terms must be affine (`Z = 1`), which `add_signers` ensures.
+pub const scalar_backend = struct {
+    pub const available = true;
 
-    pub fn init() Terms {
-        return .{ .points = undefined, .digits = undefined, .count = 0 };
-    }
+    pub const PackedCached = struct {
+        cached: Cached,
 
-    pub fn add(terms: *Terms, point: Point, s: *const [32]u8) void {
-        assert(terms.count < chunk_terms);
-        terms.points[terms.count] = .init(point);
-        const digits = signed_digits(s);
-        for (&terms.digits, digits) |*row, digit| row[terms.count] = digit;
-        terms.count += 1;
-    }
-
-    /// `sum s_i P_i` by the bucket method: per window from the top, `width` doublings, then
-    /// every term added to (or subtracted from) the bucket of its digit's magnitude, and the
-    /// buckets folded with two running sums into `sum j bucket_j`.
-    pub fn sum(terms: *const Terms) Point {
-        assert(terms.count <= chunk_terms);
-        var result = Point.identityElement;
-        var buckets: [bucket_count]Point = undefined;
-        var window: usize = windows;
-        while (window > 0) {
-            window -= 1;
-            for (0..width) |_| result = result.dbl();
-            @memset(&buckets, Point.identityElement);
-            var used: usize = 0;
-            const row = terms.digits[window][0..terms.count];
-            for (row, terms.points[0..terms.count]) |digit, *point| {
-                if (digit == 0) continue;
-                const magnitude = @abs(digit);
-                buckets[magnitude - 1] = add_mixed(buckets[magnitude - 1], point, digit < 0);
-                used = @max(used, magnitude);
-            }
-            result = result.add(fold(buckets[0..used]));
+        pub fn from_point(point: Point) PackedCached {
+            return .{ .cached = .init(point) };
         }
-        return result;
-    }
+    };
+
+    pub const PackedPoint = struct {
+        point: Point,
+
+        pub const identity_element: PackedPoint = .{ .point = Point.identityElement };
+
+        pub fn from_point(point: Point) PackedPoint {
+            return .{ .point = point };
+        }
+
+        pub fn to_point(self: PackedPoint) Point {
+            return self.point;
+        }
+
+        pub fn add_cached(self: PackedPoint, q: *const PackedCached, negate: bool) PackedPoint {
+            return .{ .point = add_mixed(self.point, &q.cached, negate) };
+        }
+
+        pub fn add_point(self: PackedPoint, other: PackedPoint) PackedPoint {
+            return .{ .point = self.point.add(other.point) };
+        }
+
+        pub fn dbl(self: PackedPoint) PackedPoint {
+            return .{ .point = self.point.dbl() };
+        }
+    };
 };
 
+/// Every backend the bucket MSM can run on, fastest first; tests compare them all.
+pub const backends = .{ verify_avx2, scalar_backend };
+
+/// The backend `Terms` uses: the first one this target supports.
+pub const Backend = if (verify_avx2.available) verify_avx2 else scalar_backend;
+
+pub const Terms = TermsWith(Backend);
+
+/// Up to `chunk_terms` MSM terms on `B`: points prepared for addition and their scalars'
+/// signed digits, stored window-major so each bucket pass reads one row.
+pub fn TermsWith(comptime B: type) type {
+    comptime assert(@hasDecl(B, "PackedPoint") and @hasDecl(B, "PackedCached"));
+    return struct {
+        const Self = @This();
+        points: [chunk_terms]B.PackedCached,
+        digits: [windows][chunk_terms]i8,
+        count: usize,
+
+        pub fn init() Self {
+            return .{ .points = undefined, .digits = undefined, .count = 0 };
+        }
+
+        pub fn add(terms: *Self, point: Point, s: *const [32]u8) void {
+            assert(terms.count < chunk_terms);
+            terms.points[terms.count] = .from_point(point);
+            const digits = signed_digits(s);
+            for (&terms.digits, digits) |*row, digit| row[terms.count] = digit;
+            terms.count += 1;
+        }
+
+        /// `sum s_i P_i` by the bucket method: per window from the top, `width` doublings, then
+        /// every term added to (or subtracted from) the bucket of its digit's magnitude, and
+        /// the buckets folded with two running sums into `sum j bucket_j`.
+        pub fn sum(terms: *const Self) Point {
+            assert(terms.count <= chunk_terms);
+            const P = B.PackedPoint;
+            var result = P.identity_element;
+            var buckets: [bucket_count]P = undefined;
+            var window: usize = windows;
+            while (window > 0) {
+                window -= 1;
+                for (0..width) |_| result = result.dbl();
+                @memset(&buckets, P.identity_element);
+                var used: usize = 0;
+                const row = terms.digits[window][0..terms.count];
+                for (row, terms.points[0..terms.count]) |digit, *point| {
+                    if (digit == 0) continue;
+                    const magnitude = @abs(digit);
+                    const bucket = &buckets[magnitude - 1];
+                    bucket.* = bucket.add_cached(point, digit < 0);
+                    used = @max(used, magnitude);
+                }
+                result = result.add_point(fold(P, buckets[0..used]));
+            }
+            return result.to_point();
+        }
+    };
+}
+
 /// `sum (j + 1) buckets[j]`, from the top bucket down.
-fn fold(buckets: []const Point) Point {
+fn fold(comptime P: type, buckets: []const P) P {
     assert(buckets.len <= bucket_count);
-    var running = Point.identityElement;
-    var total = Point.identityElement;
+    var running = P.identity_element;
+    var total = P.identity_element;
     var index = buckets.len;
     while (index > 0) {
         index -= 1;
-        running = running.add(buckets[index]);
-        total = total.add(running);
+        running = running.add_point(buckets[index]);
+        total = total.add_point(running);
     }
     return total;
 }

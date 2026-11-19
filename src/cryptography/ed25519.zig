@@ -14,6 +14,7 @@ pub const certificate = @import("ed25519/certificate.zig");
 
 test {
     _ = @import("ed25519/tests.zig");
+    _ = @import("ed25519/msm_test.zig");
     _ = @import("ed25519/certificate.zig");
     _ = @import("ed25519/verify_msm.zig");
     _ = @import("ed25519/verify_ifma.zig");
