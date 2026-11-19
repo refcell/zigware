@@ -112,12 +112,14 @@ it comes first once `any` lands.
 - [x] Fuzz targets: all six `qmdb_current_*` (commonware has no compact fuzz target; compact
   is covered by its crash-point and tamper tests). Benches: commonware's `qmdb/benches` span
   every variant, current included, so they stay with storage-qmdb's benches item.
-- [ ] Reshare harness phase 2 (coordinator, split agreed with bls-math): commonware's ten
+- [x] Reshare harness phase 2 (coordinator, split agreed with bls-math): commonware's ten
   state-sync ceremonies from `glue/src/dkg/tests/reshare/mod.rs` in
   src/glue/dkg/tests/reshare/state_sync_{block,app,validator,test}.zig, over a validator
   variant with the probe, QMDB resolver, `Stateful` app, and DKG state-sync plan. Each runs
   under both of commonware's electors, with `with_stale` as a `Swap` probe receiver. The
   ceremonies are `-Dslow-tests`; the block codec test runs per push.
+  Done 2026-11-19: all ten pass on both networks under both electors with no leaks
+  (ReleaseSafe, a221d476); the nightly glue job runs them (all of test-glue, -Dslow-tests).
 - [x] Reshare `Network::Lookup` cases (agreed with bls-math, option b): tests/reshare/lookup.zig
   holds `Network`, `TestDirectory` (`Option<Addresses>`, participant `i` at
   127.0.0.1:(10000 + i)), and `TestManager` (`KeyOnlyManager` or
@@ -196,6 +198,8 @@ it comes first once `any` lands.
   `verify_exclusion_proof(proof, key, &root)`, `get_span`, `get_next_key`, `get_prev_key`.
 
 ## Design: concurrent reads of any and current (2026-11-19)
+
+Implemented: a8d3ecb0, 300b7049, e5941c1f (`any/concurrent_test.zig`).
 
 Commonware shares a database as `Arc<D>` (benches) or `Arc<AsyncRwLock<Option<D>>>`
 (`glue::stateful::db::Shared`): `get`, `get_many`, `get_metadata`, and proofs take `&self`,
@@ -298,3 +302,8 @@ Design:
 - 2026-11-19: any and current on the shared sync harness.
 - 2026-11-19: current merkleize, chained_growth, and constantinople benches.
 - 2026-11-19: reshare state-sync harness (block, app, validator, engine) and its ten tests.
+- 2026-11-19: reshare phase 2 ceremonies verified on both networks and electors.
+- 2026-11-19: `qmdb_sync_codec` fuzz target for the sync wire decoders (`Target`, `Request`,
+  `Response`), with a drawn-field validity oracle (planted `start == size` bug caught). A
+  30-minute `just fuzz` campaign (-j4) over it, `qmdb_any_{fixed,variable}_sync`, and
+  storage-archive's targets found nothing.

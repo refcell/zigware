@@ -19,9 +19,7 @@ Six lane files track the zigware port:
 [storage-archive](../../docs/lanes/storage-archive.md),
 [storage-qmdb](../../docs/lanes/storage-qmdb.md),
 [storage-qmdb-sync](../../docs/lanes/storage-qmdb-sync.md), and
-[coding](../../docs/lanes/coding.md) (for bmt). Every backlog item is ticked except one:
-storage-qmdb-sync's reshare harness phase 2, the ten state-sync ceremonies in
-`src/glue/dkg/tests/reshare/`.
+[coding](../../docs/lanes/coding.md) (for bmt). Every backlog item is ticked.
 
 ## Modules
 

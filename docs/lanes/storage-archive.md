@@ -215,3 +215,6 @@ Partial:
   15 pipelined tests (clearing lane).
 - 2026-11-19: step 4b: oversized's in-flight marker generation and the archive's last 4
   pipelined tests (clearing lane).
+- 2026-11-19: 30-minute `just fuzz` campaign (-j4, ReleaseSafe) over `archive_prunable_*`,
+  `archive_immutable_recovery`, `ordinal_operations`, and qmdb-sync's targets: no crashes
+  (corpora of 31 to 202 inputs per target).
