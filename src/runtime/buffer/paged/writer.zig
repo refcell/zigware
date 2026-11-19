@@ -565,7 +565,7 @@ pub const Writer = struct {
     }
 
     /// The read view over the flushed pages and the write buffer.
-    pub fn view(self: *Self) View {
+    pub fn view(self: *const Self) View {
         assert(self.buffer.size() >= self.buffer.offset);
         assert(self.buffer.offset == self.current_page * self.page_size());
         return .{
@@ -579,24 +579,24 @@ pub const Writer = struct {
     }
 
     /// Read exactly `buf.len` bytes at logical `offset`.
-    pub fn read_into(self: *Self, buf: []u8, offset: u64) Error!void {
+    pub fn read_into(self: *const Self, buf: []u8, offset: u64) Error!void {
         return self.view().read_into(buf, offset);
     }
 
     /// Read exactly `buf.len` bytes at logical `offset` (the `Blob.read_at` argument order).
-    pub fn read_at(self: *Self, offset: u64, buf: []u8) Error!void {
+    pub fn read_at(self: *const Self, offset: u64, buf: []u8) Error!void {
         return self.view().read_into(buf, offset);
     }
 
     /// Read up to `buf.len` bytes at `offset`, returning how many were available. Fails if
     /// none are.
-    pub fn read_up_to(self: *Self, offset: u64, buf: []u8) Error!usize {
+    pub fn read_up_to(self: *const Self, offset: u64, buf: []u8) Error!usize {
         return self.view().read_up_to(offset, buf);
     }
 
     /// Read into `buf` only from the write buffer and page cache. Returns false (leaving
     /// `buf` unspecified) if any byte needs a blob read.
-    pub fn try_read_sync_into(self: *Self, buf: []u8, offset: u64) bool {
+    pub fn try_read_sync_into(self: *const Self, buf: []u8, offset: u64) bool {
         return self.view().try_read_sync_into(buf, offset);
     }
 
@@ -604,7 +604,7 @@ pub const Writer = struct {
 
     /// Read `ranges` into consecutive slots of `buf`. Returns how many were served from the
     /// write buffer and page cache without a blob read (empty ranges count as served).
-    pub fn read_ranges_into(self: *Self, buf: []u8, ranges: []const Range) Error!usize {
+    pub fn read_ranges_into(self: *const Self, buf: []u8, ranges: []const Range) Error!usize {
         return self.view().read_ranges_into(buf, ranges);
     }
 

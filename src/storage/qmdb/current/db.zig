@@ -347,15 +347,15 @@ pub fn Db(F: type, U: type, C: type, I: type, H: type, comptime N: usize) type {
             return self.any.bounds();
         }
 
-        pub fn get(self: *Self, key: *const Key) !?Value {
+        pub fn get(self: *const Self, key: *const Key) !?Value {
             return self.any.get(key);
         }
 
-        pub fn get_many(self: *Self, keys: []const Key, out: []?Value) !void {
+        pub fn get_many(self: *const Self, keys: []const Key, out: []?Value) !void {
             return self.any.get_many(keys, out);
         }
 
-        pub fn get_metadata(self: *Self) !?Value {
+        pub fn get_metadata(self: *const Self) !?Value {
             return self.any.get_metadata();
         }
 
@@ -533,17 +533,17 @@ pub fn Db(F: type, U: type, C: type, I: type, H: type, comptime N: usize) type {
         }
 
         /// The active key after `key` (not wrapping), as in `any`.
-        pub fn get_next_key(self: *Self, key: *const Key) !?Key {
+        pub fn get_next_key(self: *const Self, key: *const Key) !?Key {
             return self.any.get_next_key(key);
         }
 
         /// The active key before `key` (not wrapping), as in `any`.
-        pub fn get_prev_key(self: *Self, key: *const Key) !?Key {
+        pub fn get_prev_key(self: *const Self, key: *const Key) !?Key {
             return self.any.get_prev_key(key);
         }
 
         /// The active update whose span covers `key`, and its location, as in `any`.
-        pub fn get_span(self: *Self, key: *const Key) !?Any.Located {
+        pub fn get_span(self: *const Self, key: *const Key) !?Any.Located {
             return self.any.get_span(key);
         }
 

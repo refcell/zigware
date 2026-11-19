@@ -434,7 +434,7 @@ pub fn Recovery(comptime A: type) type {
         }
 
         /// Read a retained item (`BackingRecovery::read`).
-        pub fn read(self: *Self, position: u64) Error!A {
+        pub fn read(self: *const Self, position: u64) Error!A {
             return self.item(position);
         }
 
@@ -453,7 +453,7 @@ pub fn Recovery(comptime A: type) type {
         }
 
         /// Read an item for recovery selection or validation.
-        pub fn item(self: *Self, position: u64) Error!A {
+        pub fn item(self: *const Self, position: u64) Error!A {
             if (position < self.bounds.start) return error.ItemPruned;
             if (position >= self.bounds.end) return error.ItemOutOfRange;
             const items_per_blob = self.cfg.items_per_blob;
@@ -1029,26 +1029,26 @@ pub fn Journal(comptime A: type) type {
             if (position < self.bounds.start) return error.ItemPruned;
         }
 
-        const Located = struct { writer: *paged.Writer, offset: u64 };
+        const Located = struct { writer: *const paged.Writer, offset: u64 };
 
-        fn locate(self: *Self, position: u64) Error!Located {
+        fn locate(self: *const Self, position: u64) Error!Located {
             try self.validate_readable(position);
             const blob = position_to_blob(position, self.items_per_blob);
             const first = try first_in_blob(self.bounds.start, blob, self.items_per_blob);
             const offset = std.math.mul(u64, position - first, chunk_u64) catch
                 return error.OffsetOverflow;
             // A position in bounds maps to a retained blob.
-            return .{ .writer = self.blobs.get(blob).?, .offset = offset };
+            return .{ .writer = self.blobs.get_const(blob).?, .offset = offset };
         }
 
         /// Read the item at `position`.
-        pub fn read(self: *Self, position: u64) Error!A {
+        pub fn read(self: *const Self, position: u64) Error!A {
             self.metrics.read_calls.metric().inc();
             return self.read_item(position);
         }
 
         /// `read` without counting a call (`read_many` counts one per batch).
-        fn read_item(self: *Self, position: u64) Error!A {
+        fn read_item(self: *const Self, position: u64) Error!A {
             if (self.try_read_sync(position)) |value| return value;
             const located = try self.locate(position);
             self.metrics.cache_misses.metric().inc();
@@ -1060,7 +1060,7 @@ pub fn Journal(comptime A: type) type {
         }
 
         /// Read the items at strictly increasing `positions` into `out`.
-        pub fn read_many(self: *Self, positions: []const u64, out: []A) Error!void {
+        pub fn read_many(self: *const Self, positions: []const u64, out: []A) Error!void {
             assert(out.len == positions.len);
             for (positions, 0..) |position, index| {
                 if (index > 0) assert(positions[index - 1] < position);
@@ -1071,7 +1071,7 @@ pub fn Journal(comptime A: type) type {
         }
 
         /// The item if it can be read without I/O; decode failures also decline.
-        pub fn try_read_sync(self: *Self, position: u64) ?A {
+        pub fn try_read_sync(self: *const Self, position: u64) ?A {
             const located = self.locate(position) catch return null;
             var bytes: [chunk]u8 = undefined;
             if (!located.writer.try_read_sync_into(&bytes, located.offset)) return null;
@@ -1082,7 +1082,7 @@ pub fn Journal(comptime A: type) type {
         }
 
         /// Probe strictly increasing `positions`, serving those readable without I/O.
-        pub fn try_read_many_sync(self: *Self, positions: []const u64, out: []?A) void {
+        pub fn try_read_many_sync(self: *const Self, positions: []const u64, out: []?A) void {
             assert(out.len == positions.len);
             for (positions, out, 0..) |position, *slot, index| {
                 if (index > 0) assert(positions[index - 1] < position);

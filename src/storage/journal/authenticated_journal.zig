@@ -75,18 +75,18 @@ pub fn Journal(comptime F: type, comptime C: type, comptime H: type) type {
         }
 
         /// The item at `position`; for an item type that owns memory the caller frees it.
-        pub fn read(self: *Self, position: u64) Error!Item {
+        pub fn read(self: *const Self, position: u64) Error!Item {
             return self.journal.read(position);
         }
 
         /// The items at strictly increasing `positions` into `out`.
-        pub fn read_many(self: *Self, positions: []const u64, out: []Item) Error!void {
+        pub fn read_many(self: *const Self, positions: []const u64, out: []Item) Error!void {
             assert(positions.len == out.len);
             return self.journal.read_many(positions, out);
         }
 
         /// The item if it can be read without I/O.
-        pub fn try_read_sync(self: *Self, position: u64) ?Item {
+        pub fn try_read_sync(self: *const Self, position: u64) ?Item {
             return self.journal.try_read_sync(position);
         }
 

@@ -266,6 +266,15 @@ pub const Writable = struct {
         return null;
     }
 
+    /// The writer of a retained blob, for reads.
+    pub fn get_const(self: *const Writable, index: u64) ?*const Writer {
+        if (index < self.oldest_blob_index) return null;
+        const offset = index - self.oldest_blob_index;
+        if (offset < self.sealed.items.len) return &self.sealed.items[@intCast(offset)];
+        if (index == self.tail_blob_index()) return &self.tail;
+        return null;
+    }
+
     /// Seal the full tail (making it durable) and open the next blob as the new tail.
     pub fn seal_tail(self: *Writable) Error!void {
         const next_blob = std.math.add(u64, self.tail_blob_index(), 1) catch

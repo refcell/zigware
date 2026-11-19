@@ -525,7 +525,7 @@ pub fn Recovery(comptime V: type) type {
 
         /// Read a retained item through the acknowledged and rebuilt offsets
         /// (`BackingRecovery::read`). The caller owns the item.
-        pub fn read(self: *Self, position: u64) Error!V {
+        pub fn read(self: *const Self, position: u64) Error!V {
             if (position < self.bounds.start) return error.ItemPruned;
             if (position >= self.bounds.end) return error.ItemOutOfRange;
             const blob = position_to_blob(position, self.per_blob());
@@ -1187,19 +1187,19 @@ pub fn Journal(comptime V: type) type {
             if (position < self.bounds.start) return error.ItemPruned;
         }
 
-        fn data_writer(self: *Self, position: u64) *paged.Writer {
+        fn data_writer(self: *const Self, position: u64) *const paged.Writer {
             // A position in bounds maps to a retained blob.
-            return self.blobs.get(position_to_blob(position, self.items_per_blob)).?;
+            return self.blobs.get_const(position_to_blob(position, self.items_per_blob)).?;
         }
 
         /// Read the item at `position`. The caller owns it.
-        pub fn read(self: *Self, position: u64) Error!V {
+        pub fn read(self: *const Self, position: u64) Error!V {
             self.metrics.read_calls.metric().inc();
             return self.read_item(position);
         }
 
         /// `read` without counting a call (`read_many` counts one per batch).
-        fn read_item(self: *Self, position: u64) Error!V {
+        fn read_item(self: *const Self, position: u64) Error!V {
             try self.validate_readable(position);
             const cached = self.offsets.try_read_sync(position);
             if (cached) |offset| {
@@ -1221,7 +1221,7 @@ pub fn Journal(comptime V: type) type {
         }
 
         /// Read the items at strictly increasing `positions` into `out`. The caller owns them.
-        pub fn read_many(self: *Self, positions: []const u64, out: []V) Error!void {
+        pub fn read_many(self: *const Self, positions: []const u64, out: []V) Error!void {
             assert(out.len == positions.len);
             if (positions.len == 0) return;
             if (positions[0] < self.bounds.start) return error.ItemPruned;
@@ -1240,7 +1240,7 @@ pub fn Journal(comptime V: type) type {
         }
 
         /// The item if its offset and frame are readable without I/O.
-        pub fn try_read_sync(self: *Self, position: u64) ?V {
+        pub fn try_read_sync(self: *const Self, position: u64) ?V {
             self.validate_readable(position) catch return null;
             const offset = self.offsets.try_read_sync(position) orelse return null;
             const item = self.try_read_frame_sync(position, offset) orelse return null;
@@ -1250,7 +1250,7 @@ pub fn Journal(comptime V: type) type {
         }
 
         /// Probe strictly increasing `positions`, serving those readable without I/O.
-        pub fn try_read_many_sync(self: *Self, positions: []const u64, out: []?V) void {
+        pub fn try_read_many_sync(self: *const Self, positions: []const u64, out: []?V) void {
             assert(out.len == positions.len);
             for (positions, out, 0..) |position, *slot, index| {
                 if (index > 0) assert(positions[index - 1] < position);
@@ -1259,7 +1259,7 @@ pub fn Journal(comptime V: type) type {
         }
 
         /// Decode the frame at `offset` from cached bytes; any miss declines.
-        fn try_read_frame_sync(self: *Self, position: u64, offset: u64) ?V {
+        fn try_read_frame_sync(self: *const Self, position: u64, offset: u64) ?V {
             const writer = self.data_writer(position);
             const remaining = std.math.sub(u64, writer.size(), offset) catch return null;
             const header_len: usize = @intCast(@min(remaining, max_prefix_size));
