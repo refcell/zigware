@@ -17,6 +17,7 @@ const single = @import("single_db.zig");
 const db = @import("../db/mod.zig");
 const actor_mod = @import("../actor/mod.zig");
 const fixture_for = @import("../actor/marshal_fixture_for.zig");
+const wait_until = @import("../actor/marshal_fixture.zig").wait_until;
 
 const Ctx = runtime.deterministic.Context;
 const Height = consensus.Height;
@@ -291,4 +292,143 @@ fn out_of_order_certifications(ctx: Ctx) !void {
 // six-block chain, requested out of height order, all complete with a true verdict.
 test "stateful tests: out-of-order certifications complete on qmdb" {
     try run(out_of_order_certifications);
+}
+
+/// An ancestry that never yields a block (commonware `PendingAncestry`): the proposal it
+/// carries waits for its parent until cancelled.
+const PendingAncestry = struct {
+    pub const Block = qmdb_targeted.Block;
+    io: Io,
+
+    pub fn peek(_: *const PendingAncestry) ?*const Digested {
+        return null;
+    }
+
+    pub fn next(self: *PendingAncestry) !?Digested {
+        // Each pass sleeps an hour; only cancellation ends the loop.
+        while (true) try self.io.sleep(.fromSeconds(3_600), .awake);
+    }
+
+    pub fn clone(self: *const PendingAncestry) !PendingAncestry {
+        return self.*;
+    }
+
+    pub fn deinit(_: *PendingAncestry) void {}
+};
+
+/// A proposal run beside the test, recording when it returns.
+const Proposal = struct {
+    done: bool = false,
+
+    fn run(self: *Proposal, mailbox: *StatefulMailbox, io: Io, context: Block.Context) void {
+        defer self.done = true;
+        var built = (mailbox.propose({}, context, PendingAncestry{ .io = io }, {}) catch
+            return) orelse return;
+        built.deinit();
+    }
+};
+
+/// A finalization of `block` signed by the node's validator (commonware `finalization`).
+fn finalization_of(node: *Node, block: *const Block) !Types.Finalization {
+    const gpa = node.gpa;
+    const Vote = consensus.simplex.types.Finalize(Scheme, Digest);
+    const context = block.context();
+    const proposal = consensus.simplex.types.Proposal(Digest).init(
+        context.round,
+        context.parent[0],
+        block.digest(),
+    );
+    const scheme = &node.validators.schemes[0];
+    var votes = [1]Vote{(try Vote.sign(gpa, scheme, proposal)).?};
+    const sequential = @import("parallel").sequential;
+    return Types.Finalization.from_votes(gpa, scheme, &votes, sequential);
+}
+
+fn dispatched_through(reporter: Types.Application, count: usize) !bool {
+    return reporter.block_count() >= count;
+}
+
+/// Reports finalizations of `blocks` to marshal and waits until it dispatches genesis and
+/// each of them, in height order, with its finalization stored.
+fn marshal_finalizes(ctx: Ctx, node: *Node, blocks: []const Block) !void {
+    const gpa = ctx.gpa();
+    for (blocks) |*block| {
+        var certificate = try finalization_of(node, block);
+        defer certificate.deinit(gpa);
+        _ = node.marshal.mailbox.report(.{ .finalization = certificate });
+    }
+    const reporter = node.marshal.reporter.?;
+    try wait_until(ctx, 1000, dispatched_through, .{ reporter, blocks.len + 1 });
+    const entries = try reporter.blocks(gpa);
+    defer Types.Application.free_blocks(gpa, entries);
+    try testing.expectEqual(blocks.len + 1, entries.len);
+    for (entries, 0..) |entry, height| try testing.expectEqual(height, entry.height.get());
+    for (blocks) |*block| {
+        var stored = try node.marshal.mailbox.get_finalization(block.height()) orelse
+            return error.TestFinalizationMissing;
+        stored.deinit(gpa);
+    }
+}
+
+/// Reports `blocks` as finalized to the stateful actor, returning their acknowledgements.
+fn report_finalized(
+    node: *Node,
+    blocks: []const Block,
+    waiters: []utils.acknowledgement.ExactWaiter,
+) !void {
+    assert(blocks.len == waiters.len);
+    for (blocks, waiters) |*block, *waiter| {
+        const handle = try utils.acknowledgement.Exact.handle(node.gpa, node.actor.io);
+        waiter.* = handle.waiter;
+        const update: StatefulMailbox.Update = .{ .block = .{
+            .block = try Digested.precomputed(node.gpa, block.*, block.digest()),
+            .ack = handle.acknowledgement,
+        } };
+        try testing.expect(node.mailbox.report(update) != .closed);
+    }
+}
+
+fn during_parent_lookup(ctx: Ctx) !void {
+    const gpa = ctx.gpa();
+    const io = ctx.io();
+    var blocks: [6]Block = undefined;
+    try build_chain(ctx, &blocks);
+    var node: Node = undefined;
+    try node.start(ctx, "deferred-qmdb");
+    defer node.stop();
+    for (&blocks) |*block| {
+        const digested = try Digested.precomputed(gpa, block.*, block.digest());
+        try testing.expect(try node.marshal.mailbox.verified(block.context().round, digested));
+    }
+    // Marshal finalizes the first three blocks before the actor applies them, so a
+    // certification below the applied tip can look up the canonical block.
+    try marshal_finalizes(ctx, &node, blocks[0..3]);
+    // A proposal whose parent never arrives, then the first three finalized blocks.
+    var proposal: Proposal = .{};
+    var proposer = node.mailbox.clone();
+    defer proposer.deinit();
+    const args = .{ &proposal, &proposer, io, blocks[5].context() };
+    var pending = try io.concurrent(Proposal.run, args);
+    defer pending.cancel(io);
+    try ctx.sleep(.fromMilliseconds(10));
+    try testing.expect(!proposal.done);
+    var waiters: [3]utils.acknowledgement.ExactWaiter = undefined;
+    try report_finalized(&node, blocks[0..3], &waiters);
+    defer for (&waiters) |*waiter| waiter.deinit();
+    // Out-of-order certifications queued after them complete as well.
+    try certify_all(io, node.wrapper, &blocks, &.{ 5, 1, 4, 0, 3, 2 });
+    for (&waiters) |*waiter| try waiter.wait();
+    // The proposal still waits for its parent until its caller cancels it.
+    try testing.expect(!proposal.done);
+    const databases = try node.mailbox.subscribe_databases();
+    const committed = try databases.committed_targets();
+    const expected = single.App.sync_targets(&blocks[2]);
+    try testing.expect(db.targets_eql(Any.SyncTarget, &committed, &expected));
+}
+
+// commonware `finalizations_and_certifications_complete_during_proposal_parent_lookup_on_qmdb`:
+// on a real QMDB, finalizations and the out-of-order certifications queued after them
+// complete while a proposal still waits for a parent that never arrives.
+test "stateful tests: finalizations and certifications complete during a parent lookup" {
+    try run(during_parent_lookup);
 }
