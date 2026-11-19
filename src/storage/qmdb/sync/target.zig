@@ -2,8 +2,8 @@
 //!
 //! A `Target` is the trusted state a sync converges to: the ops root the engine verifies
 //! streamed batches against and the range of operations to fetch, from the inclusive lower
-//! bound to the exclusive target size. A `CompactTarget` names only a root and a size, for
-//! compact-storage databases. Locations encode as commonware's `Location` varints.
+//! bound to the exclusive target size; a compact-storage database's range covers only its last
+//! commit. Locations encode as commonware's `Location` varints.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -12,7 +12,6 @@ const codec = @import("codec");
 const merkle = @import("../../merkle/mod.zig");
 const operation = @import("../operation.zig");
 const value = @import("../value.zig");
-const errors = @import("error.zig");
 
 /// The state to sync to: `root` over operations `[start, end)`.
 pub fn Target(comptime F: type, comptime D: type) type {
@@ -75,63 +74,6 @@ pub fn Target(comptime F: type, comptime D: type) type {
             const lower = u.int_in_range(u64, 0, F.max_leaves - 1);
             const upper = u.int_in_range(u64, lower + 1, F.max_leaves);
             return init(root, lower, upper);
-        }
-    };
-}
-
-/// The state to sync a compact-storage database to: `root` at `size` operations.
-pub fn CompactTarget(comptime F: type, comptime D: type) type {
-    merkle.check_family(F);
-    return struct {
-        const Self = @This();
-        pub const Ranged = Target(F, D);
-
-        root: D,
-        size: u64,
-
-        pub fn eql(a: Self, b: Self) bool {
-            return a.root.eql(b.root) and a.size == b.size;
-        }
-
-        /// The ranged target replaying the one operation that ends at `size`.
-        pub fn to_target(self: Self) errors.EngineError!Ranged {
-            if (self.size == 0 or !merkle.location_is_valid(F, self.size)) {
-                return error.InvalidTarget;
-            }
-            const ranged = Ranged.init(self.root, self.size - 1, self.size);
-            assert(ranged.end - ranged.start == 1);
-            return ranged;
-        }
-
-        pub fn encode_size(self: Self) usize {
-            return codec.encode_size(D, self.root) + operation.location_size(self.size);
-        }
-
-        pub fn write(self: Self, writer: *codec.Writer) void {
-            codec.write(D, self.root, writer);
-            operation.write_location(self.size, writer);
-        }
-
-        pub fn read(gpa: Allocator, reader: *codec.Reader, _: void) codec.Error!Self {
-            const root = try codec.read(D, gpa, reader);
-            const size = try operation.read_location(F, reader);
-            if (size == 0) {
-                return reader.invalid(
-                    "storage::qmdb::sync::CompactTarget",
-                    "size must be in 1..=MAX_LEAVES",
-                );
-            }
-            assert(merkle.location_is_valid(F, size));
-            return .{ .root = root, .size = size };
-        }
-
-        pub fn arbitrary(
-            gpa: Allocator,
-            u: *codec.arbitrary.Unstructured,
-        ) codec.arbitrary.Error!Self {
-            const root = try value.arbitrary(D, gpa, u);
-            const size = u.int_in_range(u64, 1, F.max_leaves);
-            return .{ .root = root, .size = size };
         }
     };
 }

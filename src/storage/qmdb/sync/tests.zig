@@ -16,7 +16,6 @@ const Mmr = merkle.mmr.Family;
 const Mmb = merkle.mmb.Family;
 const D = cryptography.Sha256.Digest;
 const Target = sync.Target(Mmr, D);
-const CompactTarget = sync.CompactTarget(Mmr, D);
 
 fn target(root: D, start: u64, end: u64) Target {
     return Target.init(root, start, end);
@@ -67,37 +66,6 @@ test "target advances" {
     try testing.expect(!target(advanced_root, 5, 200).advances(current));
     // An end outside the location domain does not advance.
     try testing.expect(!target(advanced_root, 10, Mmr.max_leaves + 1).advances(current));
-}
-
-test "compact target serialization and rejections" {
-    const original: CompactTarget = .{ .root = D.fill(42), .size = 100 };
-    const encoded = try codec.encode(CompactTarget, gpa, original);
-    defer gpa.free(encoded);
-    try testing.expectEqual(original.encode_size(), encoded.len);
-    try testing.expect(original.eql(try codec.decode(CompactTarget, gpa, encoded)));
-    for ([_]u64{ 0, Mmr.max_leaves + 1 }) |size| {
-        const invalid: CompactTarget = .{ .root = D.fill(42), .size = size };
-        const bytes = try codec.encode(CompactTarget, gpa, invalid);
-        defer gpa.free(bytes);
-        try testing.expectError(error.Invalid, codec.decode(CompactTarget, gpa, bytes));
-    }
-}
-
-test "compact target to ranged" {
-    const root = D.fill(42);
-    // The derived range replays the one operation ending at the target.
-    const ranged = try (CompactTarget{ .root = root, .size = 100 }).to_target();
-    try testing.expect(ranged.root.eql(root));
-    try testing.expectEqual(99, ranged.start);
-    try testing.expectEqual(100, ranged.end);
-    const genesis = try (CompactTarget{ .root = root, .size = 1 }).to_target();
-    try testing.expectEqual(0, genesis.start);
-    try testing.expectEqual(1, genesis.end);
-    // A zero size has no operation to replay; a size beyond the domain is rejected.
-    for ([_]u64{ 0, Mmr.max_leaves + 1 }) |size| {
-        const compact: CompactTarget = .{ .root = root, .size = size };
-        try testing.expectError(error.InvalidTarget, compact.to_target());
-    }
 }
 
 const Request = sync.Request(Mmr);
@@ -180,13 +148,6 @@ test "conformance CodecConformance<Target>" {
         "CodecConformance<Target<MmrFamily,sha256::Digest>>");
     try support.verify_codec(sync.Target(Mmb, D), target_prefix ++
         "CodecConformance<Target<mmb::Family,sha256::Digest>>");
-}
-
-test "conformance CodecConformance<CompactTarget>" {
-    try support.verify_codec(CompactTarget, target_prefix ++
-        "CodecConformance<CompactTarget<MmrFamily,sha256::Digest>>");
-    try support.verify_codec(sync.CompactTarget(Mmb, D), target_prefix ++
-        "CodecConformance<CompactTarget<mmb::Family,sha256::Digest>>");
 }
 
 test "conformance CodecConformance<Request>" {

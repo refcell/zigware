@@ -30,7 +30,6 @@ pub const Served = source.Served;
 pub const JournalSource = source.JournalSource;
 pub const target = @import("target.zig");
 pub const Target = target.Target;
-pub const CompactTarget = target.CompactTarget;
 
 test {
     std.testing.refAllDecls(@This());
