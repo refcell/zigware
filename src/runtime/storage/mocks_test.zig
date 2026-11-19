@@ -106,9 +106,14 @@ test "recording storage preserves data and records options" {
         &.{.{ .dont_cache = true }},
         recordings.writes.items,
     );
+    try testing.expectEqual(@as(u64, 0), recordings.syncs);
+    try blob.sync();
+    try blob.sync();
+    try testing.expectEqual(@as(u64, 2), recordings.syncs);
     recordings.clear();
     try testing.expectEqual(@as(usize, 0), recordings.reads.items.len);
     try testing.expectEqual(@as(usize, 0), recordings.writes.items.len);
+    try testing.expectEqual(@as(u64, 0), recordings.syncs);
 }
 
 /// A wrapper over recording storage forwards each read's options unchanged.

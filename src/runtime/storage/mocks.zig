@@ -170,6 +170,8 @@ pub const Recordings = struct {
     lock: Lock = .{},
     reads: std.ArrayList(iface.ReadOptions) = .empty,
     writes: std.ArrayList(iface.WriteOptions) = .empty,
+    /// Blob syncs, counted when each reaches the wrapper.
+    syncs: u64 = 0,
 
     pub fn init(gpa: Allocator) Recordings {
         return .{ .gpa = gpa };
@@ -187,6 +189,7 @@ pub const Recordings = struct {
         defer self.lock.unlock();
         self.reads.clearRetainingCapacity();
         self.writes.clearRetainingCapacity();
+        self.syncs = 0;
         assert(self.reads.items.len == 0 and self.writes.items.len == 0);
     }
 
@@ -227,7 +230,11 @@ pub const Recordings = struct {
     }
 
     fn sync(self: *Recordings, selected: bool) Error!void {
-        _ = .{ self, selected };
+        assert(selected);
+        self.lock.lock();
+        defer self.lock.unlock();
+        self.syncs += 1;
+        assert(self.syncs > 0);
     }
 };
 
