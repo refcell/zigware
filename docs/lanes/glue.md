@@ -388,8 +388,8 @@ ones: d = deployer (thread T-01a1d5b9-c237), u = utils, j = storage-journal
 | stateful/actor/core/processing.rs, 1070-3396 | 47 | 46 | 0 | 1 | |
 | stateful/actor/core/processing.rs, 3451-5885 | 39 | 38 | 0 | 1 | s |
 | stateful/actor/processor/mod.rs | 44 | 40 | 0 | 4 | |
-| stateful/tests/mod.rs, floor.rs | 28 | 24 | 4 | 0 | j |
-| **total** | **474** | **460** | **4** | **10** | |
+| stateful/tests/mod.rs, floor.rs | 28 | 27 | 1 | 0 | j |
+| **total** | **474** | **463** | **1** | **10** | |
 
 - db/mod.rs's barrier tests are ported since async start_sync step 6 (`Barrier` holds each
   member's `runtime.storage.Completion`): `barrier_waits_for_every_handle` (8),
@@ -495,10 +495,16 @@ ones: d = deployer (thread T-01a1d5b9-c237), u = utils, j = storage-journal
   Simplex's part, done: floor.rs (both cases) in tests/floor_test.zig (four boots on one
   runner); out_of_order_certifications and the proposal-parent-lookup test in
   tests/qmdb_targeted_test.zig, on a real marshal (actor/marshal_fixture_for.zig over the e2e
-  `Block`), Stateful over a real QMDB, and `Deferred`. Open: 2276
-  `pruning_joins_verification_on_real_qmdbs` is a multi-db test (`build_multi_chain`,
-  `GatedMultiApp`), so with 1805 and 2039 it waits on storage-journal's multi_db.zig
-  (`MultiBlock`, `MultiApp`); Tuple Stateful is on main (8cc85b5). 1614
+  `Block`), Stateful over a real QMDB, and `Deferred`. The multi-db three, 1805
+  `overlapping_finalizations_complete_on_multi_qmdb`, 2039
+  `deferred_finalizations_keep_verifications_on_multi_qmdb`, and 2276
+  `pruning_joins_verification_on_real_qmdbs`, are in tests/multi_db_targeted_test.zig over
+  multi_db.zig's `Block`, `App`, and `Databases`, with commonware's `GatedMultiApp` (propose,
+  process, and finalize gates; `release.is_closed()` is the gate's `Sender.is_closed`). The
+  databases handle is taken at startup, as commonware's is: the actor answers no
+  `subscribe_databases` while a finalization hook is gated. 2276 adds one check beyond
+  commonware: with the reader dropped and the execution still held, history stays (a prune that
+  ignored the execution passes commonware's checks, since the held reader blocks it too). 1614
   `stable_leader_finalizations_outpace_slow_qmdb_sync` is done in tests/slow_sync_test.zig
   (runtime `DelayedSync`); before the pipelined barrier (40cbd76) it serialized 66 syncs for 32
   blocks and stalled.

@@ -31,4 +31,5 @@ test {
     _ = @import("tests/qmdb_targeted_test.zig");
     _ = @import("tests/floor_test.zig");
     _ = @import("tests/slow_sync_test.zig");
+    _ = @import("tests/multi_db_targeted_test.zig");
 }
