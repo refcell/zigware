@@ -200,8 +200,9 @@ qmdb `current` (balances, over the MMB) and `keyless` (payout log, over the MMR)
 - [x] Step 4b: oversized's in-flight marker generation (`marker_sync_pending`) on metadata's
   `start_sync` completion (step 2c), and the archive's 4 marker-pipeline tests.
 - [ ] Storage perf (coordinator, 2026-11-19): [x] `index::grinding` lookup (per-partition
-  arrays); [ ] archive put and get by key; [x] freezer work check. Then the `should_panic`
-  tests left after storage-merkle takes index's 30 and bitmap's 4: translator 1, ordinal 1.
+  arrays); [ ] archive put and get by key; [x] freezer work check; [x] the `should_panic`
+  tests left after storage-merkle takes index's 30 and bitmap's 4: translator's 1 is ported
+  (ordinal's was already ported as an error check).
 
 ## Log
 - 2026-11-16: namespace, amounts, lookup with their tests; Amounts and Lookup conformance
@@ -280,3 +281,7 @@ qmdb `current` (balances, over the MMB) and `keyless` (payout log, over the MMR)
   ported (7 spill, 7 `partition.rs`), and the whole battery also runs spilling at 2 entries;
   40 not portable remain (38 storage-merkle.md, 2 bmt). Freezer bench checked: both sides do
   about the same syscalls per op; the 14 to 33× is commonware's `spawn_blocking` per blob op.
+- 2026-11-19: translator's `identity_hasher_panics_on_large_write_slice` ported with
+  `utils.death.expect_panic` (planted: an early return instead of the assert fails it). The
+  lane's not portable: 40 to 39 (37 storage-merkle.md, of them 34 `should_panic` that
+  storage-merkle is porting, and 2 bmt).

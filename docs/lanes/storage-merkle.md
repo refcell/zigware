@@ -256,9 +256,9 @@ Commonware's `#[test]` functions matched to zigware tests by what they check.
 | index | 172 | 139 | 0 | 0 | 33 |
 | rmap | 39 | 39 | 0 | 0 | 0 |
 | bitmap | 15 | 11 | 0 | 0 | 4 |
-| translator | 18 | 17 | 0 | 0 | 1 |
+| translator | 18 | 18 | 0 | 0 | 0 |
 
-Not portable: 35 `should_panic` tests (zig tests cannot catch panics; each panic exists),
+Not portable: 34 `should_panic` tests (storage-merkle is porting them with `utils.death`),
 two worker-metrics tests (a worker publishes metrics to the full index in registry batches),
 and the metrics-registry range test (the indices keep plain counters, not registry metrics). The 3
 `cursor_across_threads` tests are ported as `index cursor across threads` (an index behind a
@@ -266,11 +266,11 @@ and the metrics-registry range test (the indices keep plain counters, not regist
 start_sync, DelayedSync, the faulty wrap, and parallel conformance: none of the other
 not-portable entries depends on them. Not-portable review (2026-11-19, coding lane): rmap's one
 (`test_missing_items_zero_n`) became the plain `test_missing_items_zero_limit` upstream
-(e7987e8c3), which is ported. By category: panic 35 (index 30, bitmap 4, translator 1); design
-difference 3 (the 2 worker-metrics batch tests and the registry range test). 38 in all. The
-per-partition arrays (2026-11-19, clearing lane) ported the 7 spill tests,
-`partitioned_ordered_spilling` (the whole battery at threshold 2), the spilling case of
-`soa_get_many_matches_get`, and the 7 `partition.rs` tests (4 on `Partition` directly;
+(e7987e8c3), which is ported. By category: panic 34 (index 30, bitmap 4; translator's 1 is
+ported with `utils.death`); design difference 3 (the 2 worker-metrics batch tests and the
+registry range test). 37 in all. The per-partition arrays (2026-11-19, clearing lane) ported the
+7 spill tests, `partitioned_ordered_spilling` (the whole battery at threshold 2), the spilling
+case of `soa_get_many_matches_get`, and the 7 `partition.rs` tests (4 on `Partition` directly;
 navigation, `set`, and `drain_runs` through the index's navigation, cursor-update, and
 spill-transition tests).
 

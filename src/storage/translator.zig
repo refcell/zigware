@@ -414,6 +414,16 @@ test "identity hasher integer writes differ" {
     }
 }
 
+test "identity hasher panics on a write over 8 bytes" {
+    // commonware's `identity_hasher_panics_on_large_write_slice` (`should_panic`).
+    try utils.death.expect_panic(@src(), "reached unreachable code", struct {
+        fn body() !void {
+            var hasher: UintIdentity = .{};
+            hasher.write("too big for an int");
+        }
+    }.body);
+}
+
 test "hashed consistency and seed determinism" {
     const t = Hashed(TwoCap).from_seed(42, .{});
     try testing.expectEqual(t.transform("hello"), t.transform("hello"));
