@@ -7,7 +7,7 @@ A Zig port of commonware's
 
 ![Two networks finalize each other's certificates](../../docs/assets/bridge-demo.gif)
 
-([video](../../docs/assets/bridge-demo.mp4); `etc/scripts/record-demo.sh bridge` records it
+([video](../../docs/assets/bridge-demo.mp4?raw=true); `etc/scripts/record-demo.sh bridge` records it
 again.)
 
 ## Status

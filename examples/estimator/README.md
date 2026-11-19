@@ -12,9 +12,9 @@ deviation) per proposer and averaged over all runs.
 
 ![The estimator simulates a Simplex round across three AWS regions](../../docs/assets/estimator-demo.gif)
 
-([video](../../docs/assets/estimator-demo.mp4); `etc/scripts/record-demo.sh estimator` records
-it again.) Here Simplex finalizes across seven validators in three regions in about 114 ms at
-the mean.
+([video](../../docs/assets/estimator-demo.mp4?raw=true); `etc/scripts/record-demo.sh estimator`
+records it again.) Here Simplex finalizes across seven validators in three regions in about
+114 ms at the mean.
 
 ## Usage
 

@@ -7,7 +7,8 @@ A Zig port of commonware's
 
 ![Four validators run Simplex and finalize blocks over TCP](../../docs/assets/log-demo.gif)
 
-([video](../../docs/assets/log-demo.mp4); `etc/scripts/record-demo.sh log` records it again.)
+([video](../../docs/assets/log-demo.mp4?raw=true); `etc/scripts/record-demo.sh log` records it
+again.)
 
 ## Status
 

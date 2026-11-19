@@ -8,7 +8,8 @@ floods peers deployed to AWS EC2 with the deployer.
 
 ![Four flood peers exchange messages over real TCP](../../docs/assets/flood-demo.gif)
 
-([video](../../docs/assets/flood-demo.mp4); `etc/scripts/record-demo.sh flood` records it again.)
+([video](../../docs/assets/flood-demo.mp4?raw=true); `etc/scripts/record-demo.sh flood` records
+it again.)
 
 ## Status
 

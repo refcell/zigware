@@ -7,7 +7,8 @@ A Zig port of commonware's
 
 ![Validators reshare each epoch while a fifth joins by state sync](../../docs/assets/dkg-demo.gif)
 
-([video](../../docs/assets/dkg-demo.mp4); `etc/scripts/record-demo.sh dkg` records it again.)
+([video](../../docs/assets/dkg-demo.mp4?raw=true); `etc/scripts/record-demo.sh dkg` records it
+again.)
 
 ## Status
 
