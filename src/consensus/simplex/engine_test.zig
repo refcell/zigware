@@ -1061,9 +1061,10 @@ pub fn Suite(comptime F: type) type {
             return count;
         }
 
-        /// Checks validator 0 never voted in `validator`'s view, and counts the views it led (after
-        /// a certified view, as commonware's reporter elects them) without a quorum of nullifies or
-        /// a nullification.
+        /// Checks validator 0 never voted in `validator`'s view, and counts the views it led
+        /// without a quorum of nullifies or a nullification. As commonware's reporter elects
+        /// them, a led view is one a certificate unlocks: a notarization of the view before it,
+        /// or a nullification whose term ends just before it (`next_term_start`).
         fn offline_exceptions(validator: *Validator, through: u64) !u32 {
             const quorum = utils.N3f1.quorum(@as(u32, 5));
             const offline: Reporter.Signers = 1;
@@ -1074,10 +1075,7 @@ pub fn Suite(comptime F: type) type {
                 const votes = validator.reporter.votes(view);
                 const signers = votes.notarize | votes.nullify | votes.finalize;
                 try testing.expectEqual(0, signers & offline);
-                const previous: View = .new(value - 1);
-                const certified = validator.reporter.notarized(previous) or
-                    validator.reporter.nullified(previous);
-                if (!certified) continue;
+                if (!unlocked(validator, view)) continue;
                 const leader = validator.elector.elect(.new(epoch, view), {});
                 if (leader.get() != 0) continue;
                 offline_views += 1;
@@ -1086,6 +1084,22 @@ pub fn Suite(comptime F: type) type {
             }
             try testing.expect(offline_views > 0);
             return exceptions;
+        }
+
+        /// Whether a certificate `validator` saw unlocks `view`.
+        fn unlocked(validator: *Validator, view: View) bool {
+            assert(view.get() > 0);
+            const previous: View = .new(view.get() - 1);
+            if (validator.reporter.notarized(previous)) return true;
+            // A nullification unlocks the first view of the next term, so only a term's first
+            // view is unlocked by one, from any view of the term before.
+            const term_length = validator.elector.terms().length;
+            if (view.term_start(term_length).get() != view.get()) return false;
+            const start = previous.term_start(term_length).get();
+            for (start..view.get()) |raw| {
+                if (validator.reporter.nullified(.new(raw))) return true;
+            }
+            return false;
         }
 
         test "one offline: the others finalize and nullify its views" {
