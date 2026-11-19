@@ -1302,8 +1302,15 @@ pub fn Merkleized(comptime D: type) type {
             const tip = self.bounds.tip.size;
             try db.bitmap.extend_to(self.gpa, tip);
             if (self.ancestor_diffs.len == 0) {
-                for (self.diff.entries) |*pair| {
-                    try apply_diff(db, &pair.key, &pair.entry, pair.entry.base_old_loc());
+                // Each chunk of the diff is probed and then applied.
+                var chunks = std.mem.window(Pair, self.diff.entries, probe_chunk, probe_chunk);
+                while (chunks.next()) |chunk| {
+                    var probed: u64 = 0;
+                    for (chunk) |*pair| probe_key(&db.snapshot, &pair.key, &probed);
+                    std.mem.doNotOptimizeAway(probed);
+                    for (chunk) |*pair| {
+                        try apply_diff(db, &pair.key, &pair.entry, pair.entry.base_old_loc());
+                    }
                 }
             } else {
                 try self.apply_chain(db, db_size);
@@ -1330,22 +1337,69 @@ pub fn Merkleized(comptime D: type) type {
             defer resolver.deinit(gpa);
             var merge = try diff_mod.Merge(K, V).init(gpa, streams);
             defer merge.deinit(gpa);
-            var base_at: usize = 0;
-            const base_locs = self.ancestor_base_locs;
-            while (merge.next()) |pair| {
-                while (base_at < base_locs.len and
-                    diff_mod.order(K, &base_locs[base_at].key, &pair.key) == .lt) base_at += 1;
-                var old = pair.entry.base_old_loc();
-                if (resolver.resolve(&pair.key)) |entry| {
-                    old = entry.loc();
-                } else if (base_at < base_locs.len and
-                    diff_mod.order(K, &base_locs[base_at].key, &pair.key) == .eq)
-                {
-                    old = base_locs[base_at].loc;
-                    base_at += 1;
+            var olds: OldLocs = .{ .resolver = &resolver, .base_locs = self.ancestor_base_locs };
+            // Prior locations come from the diffs alone, so each chunk of merged entries is
+            // resolved and probed before any of it is applied, as the diff's chunks are.
+            var chunk: [probe_chunk]Merged = undefined;
+            while (true) {
+                var len: usize = 0;
+                while (len < probe_chunk) : (len += 1) {
+                    const pair = merge.next() orelse break;
+                    chunk[len] = .{ .pair = pair, .old = olds.resolve(pair) };
                 }
-                try apply_diff(db, &pair.key, &pair.entry, old);
+                if (len == 0) break;
+                var probed: u64 = 0;
+                for (chunk[0..len]) |m| probe_key(&db.snapshot, &m.pair.key, &probed);
+                std.mem.doNotOptimizeAway(probed);
+                for (chunk[0..len]) |m| try apply_diff(db, &m.pair.key, &m.pair.entry, m.old);
             }
+        }
+
+        /// A merged diff entry and the location it replaces in the index.
+        const Merged = struct { pair: *const Pair, old: ?u64 };
+
+        /// Resolves the location each merged entry replaces in the index: the newest write of
+        /// an applied ancestor, else the location saved for a dropped ancestor's key, else
+        /// where the key was when the chain began. Merged keys ascend, so `base_at` only
+        /// moves forward.
+        const OldLocs = struct {
+            resolver: *diff_mod.Cursors(K, V),
+            base_locs: @FieldType(Self, "ancestor_base_locs"),
+            base_at: usize = 0,
+
+            fn resolve(olds: *OldLocs, pair: *const Pair) ?u64 {
+                const base_locs = olds.base_locs;
+                while (olds.base_at < base_locs.len and
+                    diff_mod.order(K, &base_locs[olds.base_at].key, &pair.key) == .lt)
+                {
+                    olds.base_at += 1;
+                }
+                if (olds.resolver.resolve(&pair.key)) |entry| return entry.loc();
+                if (olds.base_at < base_locs.len and
+                    diff_mod.order(K, &base_locs[olds.base_at].key, &pair.key) == .eq)
+                {
+                    olds.base_at += 1;
+                    return base_locs[olds.base_at - 1].loc;
+                }
+                return pair.entry.base_old_loc();
+            }
+        };
+
+        /// Diff entries `probe_key` looks up together before any of them is applied: long
+        /// enough to keep several misses in flight, short enough that the probed lines are
+        /// still cached when the apply loop reaches them (commonware's `PROBE_CHUNK`).
+        const probe_chunk = 64;
+
+        /// Looks `key` up ahead of applying its entry, in a tight loop over a chunk, so the
+        /// cache misses of the chunk's index entries overlap (commonware's `probe_index`). The
+        /// hit's location feeds `probed`, a checksum the caller keeps from the optimizer, so the
+        /// probe loads the value line too. Does nothing for an index whose lookups do not warm
+        /// its updates.
+        fn probe_key(snapshot: *const @FieldType(D, "snapshot"), key: *const K, probed: *u64) void {
+            const Index = @FieldType(D, "snapshot");
+            if (comptime !Index.lookup_warms_update) return;
+            var values = snapshot.get(value_mod.bytes(K, key));
+            if (values.next()) |loc| probed.* ^= loc.*;
         }
 
         fn apply_diff(db: *D, key: *const K, entry: *const diff_mod.Entry(V), old: ?u64) !void {

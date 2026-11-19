@@ -475,3 +475,4 @@ which every database here is built on.
 - 2026-11-19: upstream 102430409: shared batched get_many read, store strategy (decision reversed).
 - 2026-11-19: immutable apply indexes before its append; `apply_indexes_while_journal_waits`.
 - 2026-11-19: any `Config.strategy` (Merkle hashing, batched reads), as commonware's.
+- 2026-11-19: any apply probes the index 64 keys ahead (commonware's `PROBE_CHUNK`), both paths.
