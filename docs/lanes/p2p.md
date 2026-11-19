@@ -447,112 +447,112 @@ Open:
 - [x] `authenticated/discovery/actors/tracker/record.rs`
   `test_reserve_with_unbounded_cooldown_does_not_panic`: reserve with a max cooldown succeeds, and
   after release returns rate_limited without overflowing; record_test.zig
-- [ ] `authenticated/lookup/mod.rs` `test_determinism_one`: Mode::One over 10 seeds with replay
+- [x] `authenticated/lookup/mod.rs` `test_determinism_one`: Mode::One over 10 seeds with replay
   comparison (lookup network_test.zig)
-- [ ] `authenticated/lookup/mod.rs` `test_determinism_some`: run_network in Mode::Some (each peer
+- [x] `authenticated/lookup/mod.rs` `test_determinism_some`: run_network in Mode::Some (each peer
   sends to a subset) over seeds 0..10, running each seed twice and comparing auditor state; zig
   connectivity only covers Mode::All with no replay comparison; goes in lookup/network_test.zig
 - [ ] `authenticated/lookup/mod.rs` `test_tokio_connectivity`: run_network (10 peers, Mode::One) on
   the production runtime over real sockets; runtime.production exists, but the lane skipped the
   discovery twin as redundant with the deterministic run (docs/lanes/p2p.md 2026-11-18); would go in
   lookup/network_test.zig
-- [ ] `authenticated/lookup/types.rs` `test_decode_does_not_allocate`: decode a lookup Message::Data
+- [x] `authenticated/lookup/types.rs` `test_decode_does_not_allocate`: decode a lookup Message::Data
   with a failing allocator and check the payload slice points into the input buffer (discovery has
   this for Payload in discovery/types_test.zig, lookup does not); goes in lookup/types.zig
 - [ ] `authenticated/lookup/actors/dialer.rs` `test_dial_timeout_releases_reservation`: a dial to a
   peer that never answers releases its reservation after dial_timeout; zigware's lookup (and
   discovery) config has dial_timeout, but network.zig dial_peer never applies it, so the behavior is
   missing too; goes in lookup/network_test.zig after dial_peer applies the timeout
-- [ ] `authenticated/lookup/actors/dialer.rs` `test_dialer_dials_one_peer_per_tick`: with many
+- [x] `authenticated/lookup/actors/dialer.rs` `test_dialer_dials_one_peer_per_tick`: with many
   dialable peers, dial_loop makes one dial per dial_frequency tick (2-4 dials in 3 ticks); could
   count dialer_attempts in a lookup network test or test dial_loop/next_deadline in network.zig
-- [ ] `authenticated/lookup/actors/dialer.rs` `test_dialer_uses_tracker_next_query_deadline`: with
+- [x] `authenticated/lookup/actors/dialer.rs` `test_dialer_uses_tracker_next_query_deadline`: with
   nothing dialable and next_query_at sooner than dial_frequency, the refresh is held to
   dial_frequency (1 refresh in 350ms at 500ms freq); unit test of Network.next_deadline in
   lookup/network.zig
-- [ ] `authenticated/lookup/actors/dialer.rs`
+- [x] `authenticated/lookup/actors/dialer.rs`
   `test_dialer_keeps_dialing_queued_peers_when_next_query_deadline_is_unknown`: queued peers keep
   draining at dial_frequency when next_query_at is null (3 dials in 250ms at 100ms);
   dial_loop/next_deadline test in lookup/network.zig
-- [ ] `authenticated/lookup/actors/dialer.rs`
+- [x] `authenticated/lookup/actors/dialer.rs`
   `test_dialer_does_not_panic_when_dial_frequency_exceeds_peer_connection_cooldown`: cooldown (50ms)
   < dial_frequency (200ms) must not invert the [min,max] clamp; next_deadline unit test in
   lookup/network.zig
-- [ ] `authenticated/lookup/actors/dialer.rs`
+- [x] `authenticated/lookup/actors/dialer.rs`
   `test_dialer_does_not_panic_with_unbounded_peer_connection_cooldown`: peer_connection_cooldown =
   Duration::MAX saturates, and next_query_at still drives refreshes; next_deadline unit test in
   lookup/network.zig
-- [ ] `authenticated/lookup/actors/listener.rs` `rate_limits_ip`: repeated inbound connects from one
+- [x] `authenticated/lookup/actors/listener.rs` `rate_limits_ip`: repeated inbound connects from one
   IP beyond the per-IP quota raise handshake_ip_rate_limited_total to 3 (subnet 0, blocked 0);
   lookup network test over the deterministic transport checking listener counters
   (network_lifecycle_test.zig or a new listener test)
-- [ ] `authenticated/lookup/actors/listener.rs` `rate_limits_subnet`: same as rate_limits_ip with
+- [x] `authenticated/lookup/actors/listener.rs` `rate_limits_subnet`: same as rate_limits_ip with
   the per-subnet quota: handshake_subnet_rate_limited_total 3, ip 0; lookup network test checking
   listener counters
-- [ ] `authenticated/lookup/actors/listener.rs` `rate_limits_both`: both quotas at 1/hour: ip and
+- [x] `authenticated/lookup/actors/listener.rs` `rate_limits_both`: both quotas at 1/hour: ip and
   subnet rate-limited counters both reach 3 (each limit charged even when the other rejects, as
   Network.admit does); lookup network test checking listener counters
-- [ ] `authenticated/lookup/actors/listener.rs` `blocks_unregistered_ips`: an inbound connect from
+- [x] `authenticated/lookup/actors/listener.rs` `blocks_unregistered_ips`: an inbound connect from
   an IP no tracked peer uses raises handshakes_blocked_total to 1; lookup network test checking
   listener counters
-- [ ] `authenticated/lookup/actors/listener.rs` `allows_unregistered_ips`: with bypass_ip_check, an
+- [x] `authenticated/lookup/actors/listener.rs` `allows_unregistered_ips`: with bypass_ip_check, an
   unregistered IP is not blocked (handshakes_blocked_total 0); lookup network test checking listener
   counters
-- [ ] `authenticated/lookup/actors/listener.rs` `blocks_private_ips`: with allow_private_ips=false
+- [x] `authenticated/lookup/actors/listener.rs` `blocks_private_ips`: with allow_private_ips=false
   (and bypass_ip_check), an inbound connect from a registered loopback IP still raises
   handshakes_blocked_total; lookup network test checking listener counters
-- [ ] `authenticated/lookup/actors/peer/actor.rs`
+- [x] `authenticated/lookup/actors/peer/actor.rs`
   `test_invalid_channel_no_unbounded_metric_cardinality`: a Data frame on an unregistered channel
   ends the connection with InvalidChannel and adds no per-channel metric series (peer.zig deliver
   counts meters.invalid); peer test with an upgraded stream pair (needs a peer.zig test harness)
-- [ ] `authenticated/lookup/actors/peer/actor.rs`
+- [x] `authenticated/lookup/actors/peer/actor.rs`
   `test_batches_outbound_sends_into_single_runtime_write`: with send_batch_size 2, two queued sends
   go out in one sink write (counting sink), in order; peer.zig sender task test
-- [ ] `authenticated/lookup/actors/peer/actor.rs` `test_oversized_data_returns_error`: a Data frame
+- [x] `authenticated/lookup/actors/peer/actor.rs` `test_oversized_data_returns_error`: a Data frame
   one byte over max_message_size (but within the stream frame limit) ends the peer with a decode
   error; peer.zig test
 - [ ] `authenticated/lookup/actors/peer/ingress.rs` `kill_retained_on_overflow`: two kills into a
   full one-slot peer mailbox yield exactly one Kill and nothing after; zigware's shared outbox.zig
   ("kill comes first and closes later sends") checks one kill with room left, not a repeated kill on
   a full outbox; goes in authenticated/outbox.zig
-- [ ] `authenticated/lookup/actors/tracker/actor.rs`
+- [x] `authenticated/lookup/actors/tracker/actor.rs`
   `test_add_set_severs_connection_on_address_change`: tracking a new set that moves a connected peer
   to a new address kills its connection and moves the registered IP; tracker_test.zig covers only
   reserved, not connected, peers for a tracked change (.tracked); goes in lookup/tracker_test.zig
-- [ ] `authenticated/lookup/actors/tracker/directory.rs` `test_track_overwrite`: re-tracking a
+- [x] `authenticated/lookup/actors/tracker/directory.rs` `test_track_overwrite`: re-tracking a
   primary peer at a new address updates its ingress and directory_updates_total=1, other peers keep
   theirs, our own key never gets an ingress, and a stale index returns null; zig checks only the
   stale index ("track returns only live peers for teardown") and the update counter for secondaries;
   goes in lookup/directory_test.zig
-- [ ] `authenticated/lookup/actors/tracker/directory.rs`
+- [x] `authenticated/lookup/actors/tracker/directory.rs`
   `test_track_primary_wins_conflicting_overlap_when_updating_existing_address`: a connected peer
   re-tracked as primary at a new address and secondary at the old one is killed, keeps the primary
   (new) ingress, dials the new address, and only the new IP is listenable; goes in
   lookup/directory_test.zig
-- [ ] `authenticated/lookup/actors/tracker/directory.rs`
+- [x] `authenticated/lookup/actors/tracker/directory.rs`
   `test_blocked_peer_remains_blocked_on_update`: a blocked peer re-tracked at a new address stays
   blocked, takes the new ingress, and keeps it after unblock_expired; goes in
   lookup/directory_test.zig
-- [ ] `authenticated/lookup/actors/tracker/directory.rs` `test_asymmetric_addresses`: asymmetric
+- [x] `authenticated/lookup/actors/tracker/directory.rs` `test_asymmetric_addresses`: asymmetric
   ingress/egress records and listenable egress IPs (lookup/directory_test.zig)
-- [ ] `authenticated/lookup/actors/tracker/directory.rs`
+- [x] `authenticated/lookup/actors/tracker/directory.rs`
   `test_listenable_ip_collision_eligible_wins`: two peers sharing an egress IP: the IP stays
   listenable while either is eligible and drops only when both are blocked; goes in
   lookup/directory_test.zig
-- [ ] `authenticated/lookup/actors/tracker/directory.rs` `test_dialable_empty`: an empty directory's
+- [x] `authenticated/lookup/actors/tracker/directory.rs` `test_dialable_empty`: an empty directory's
   dialable() has no peers and next_query_at null; goes in lookup/directory_test.zig
-- [ ] `authenticated/lookup/actors/tracker/directory.rs`
+- [x] `authenticated/lookup/actors/tracker/directory.rs`
   `test_dialable_expired_block_without_unblock`: after a block expires but before unblock_expired,
   dialable() lists the peer with next_query_at null and dial() succeeds; zig checks only eligible()
   at expiry; goes in lookup/directory_test.zig
-- [ ] `authenticated/lookup/actors/tracker/directory.rs` `test_overwrite_peer_not_in_set`: overwrite
+- [x] `authenticated/lookup/actors/tracker/directory.rs` `test_overwrite_peer_not_in_set`: overwrite
   of a peer whose only set was evicted (max_sets=1) returns false; zig checks only a never-tracked
   key; goes in lookup/directory_test.zig
-- [ ] `authenticated/lookup/actors/tracker/directory.rs` `test_overwrite_blocked_peer`: overwrite of
+- [x] `authenticated/lookup/actors/tracker/directory.rs` `test_overwrite_blocked_peer`: overwrite of
   a blocked peer succeeds and updates its ingress, and after unblock_expired it is dialable at the
   new address; tracker_test.zig "an overwritten blocked peer stays out of the listener's set" checks
   only the listenable side; goes in lookup/directory_test.zig
-- [ ] `authenticated/lookup/actors/tracker/directory.rs`
+- [x] `authenticated/lookup/actors/tracker/directory.rs`
   `test_dial_rejects_dns_ingress_when_disabled_after_address_change`: with allow_dns=false,
   overwriting a dialable peer to a DNS ingress removes it from dialable() and dial() returns null;
   discovery has "dial rejects an ingress disallowed after an update", lookup does not; goes in

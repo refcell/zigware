@@ -8,6 +8,7 @@ const Io = std.Io;
 const codec = @import("codec");
 const cryptography = @import("cryptography");
 const runtime = @import("runtime");
+const build_options = @import("build_options");
 const stream = @import("stream");
 const metrics = runtime.telemetry.metrics;
 const p2p = @import("../../root.zig");
@@ -181,7 +182,43 @@ pub fn release_node(node: *Node) void {
 
 /// Every node sends its identity to all peers until each has heard from every other
 /// (commonware `run_network` with `Mode::All`).
-fn connectivity(io: Io, transport: *Transport, scope: metrics.Scope, n: usize) !void {
+/// How each node addresses its identity (commonware's `Mode`).
+const Mode = enum { one, some, all };
+
+/// Sends `keys[me]` to every other node per `mode`; true once every recipient took it.
+fn send_identity(node: *Node, keys: []const PublicKey, me: usize, mode: Mode) !bool {
+    var recipients: [peers_max]PublicKey = undefined;
+    var count: usize = 0;
+    for (keys, 0..) |key, index| {
+        if (index == me) continue;
+        recipients[count] = key;
+        count += 1;
+    }
+    std.sort.pdq(PublicKey, recipients[0..count], {}, PublicKey.less_than);
+    const payload: []const []const u8 = &.{&keys[me].key.bytes};
+    const sender = &node.registered.sender;
+    if (mode == .one) {
+        var delivered: usize = 0;
+        for (recipients[0..count]) |recipient| {
+            const sent = try sender.send(.{ .one = recipient }, payload, true);
+            defer gpa.free(sent);
+            delivered += sent.len;
+        }
+        return delivered == count;
+    }
+    const to: Recipients = if (mode == .some) .{ .some = recipients[0..count] } else .all;
+    const sent = try sender.send(to, payload, true);
+    defer gpa.free(sent);
+    return sent.len == count;
+}
+
+fn connectivity(
+    io: Io,
+    transport: *Transport,
+    scope: metrics.Scope,
+    n: usize,
+    mode: Mode,
+) !void {
     assert(n <= peers_max);
     var keys: [peers_max]PublicKey = undefined;
     for (keys[0..n], 0..) |*key, index| key.* = PrivateKey.from_seed(index).public_key();
@@ -193,8 +230,7 @@ fn connectivity(io: Io, transport: *Transport, scope: metrics.Scope, n: usize) !
     while (!all_heard(&heard, n)) : (rounds += 1) {
         try testing.expect(rounds < 600);
         for (nodes[0..n], 0..) |*node, index| {
-            const sent = try node.registered.sender.send(.all, &.{&keys[index].key.bytes}, true);
-            gpa.free(sent);
+            _ = try send_identity(node, keys[0..n], index, mode);
         }
         for (nodes[0..n], 0..) |*node, index| {
             while (node.registered.receiver.try_recv()) |message| {
@@ -351,7 +387,34 @@ pub fn run_deterministic(seed: u64, comptime function: anytype, args: anytype) !
 
 test "tracked peers connect at their addresses and exchange messages" {
     // commonware `test_determinism_all` with 25 peers; seeds 0 and 1 here.
-    for ([_]u64{ 0, 1 }) |seed| try run_deterministic(seed, connectivity, .{@as(usize, 5)});
+    for ([_]u64{ 0, 1 }) |seed| {
+        try run_deterministic(seed, connectivity, .{ @as(usize, 5), Mode.all });
+    }
+}
+
+/// Runs `connectivity` with `seed`; returns the auditor state and the final simulated time.
+fn run_audited(seed: u64, n: usize, mode: Mode) !struct { [8]u8, u64 } {
+    const timeout_ns = 600 * std.time.ns_per_s;
+    const config: runtime.deterministic.Config = .{ .seed = seed, .timeout_ns = timeout_ns };
+    var runner = try runtime.deterministic.Runner.init(gpa, config);
+    defer runner.deinit();
+    const args = .{ runner.io(), runner.network(), runner.metrics(), n, mode };
+    try (try runner.start(connectivity, args));
+    return .{ runner.auditor.state(), runner.now_ns() };
+}
+
+test "connectivity replays exactly for each recipient mode" {
+    // commonware `test_determinism_{one,some,all}`: 25 peers and seeds 0..10 in its slow
+    // group; 10 peers and fewer seeds here, more under fuzz soak.
+    const seeds: u64 = 1 * build_options.fuzz_soak;
+    for (0..seeds) |seed| {
+        for ([_]Mode{ .one, .some, .all }) |mode| {
+            const first = try run_audited(seed, 10, mode);
+            const second = try run_audited(seed, 10, mode);
+            try testing.expectEqualSlices(u8, &first[0], &second[0]);
+            try testing.expectEqual(first[1], second[1]);
+        }
+    }
 }
 
 test "the frame fits the payload limit and its overhead" {

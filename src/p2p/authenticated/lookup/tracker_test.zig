@@ -527,3 +527,32 @@ test "the peer set limit counts the local identity" {
     try testing.expectEqual(2, Tracker.set_size(&primary, &secondary, key(1)));
     try testing.expectEqual(1, Tracker.set_size(&primary, &primary, key(1)));
 }
+
+fn severs_on_address_change(io: Io) !void {
+    var harness: Harness = undefined;
+    var config = test_config(false);
+    config.tracked_peer_sets = 2;
+    try harness.start(io, config);
+    defer harness.stop(io);
+    const tracker = &harness.tracker;
+    const pk = key(1);
+    const a = v4(8, 8, 8, 8);
+    const b = v4(9, 9, 9, 9);
+    try track(tracker, 0, &.{.{ .key = pk, .value = address(a, 1001) }});
+    try testing.expect(tracker.registered(a));
+    const reservation = tracker.listen(pk, a).?;
+    defer tracker.release(reservation);
+    var outbox = Outbox.init(gpa, io, 1);
+    defer outbox.deinit();
+    try testing.expect(tracker.connect(pk, &outbox));
+    try testing.expect(!killed(&outbox));
+    // The same peer tracked at another address loses its connection.
+    try track(tracker, 1, &.{.{ .key = pk, .value = address(b, 1002) }});
+    try testing.expect(killed(&outbox));
+    try testing.expect(!tracker.registered(a) and tracker.registered(b));
+}
+
+test "a new set severs a connected peer whose address changed" {
+    // commonware `test_add_set_severs_connection_on_address_change`.
+    try run(severs_on_address_change, .{});
+}
