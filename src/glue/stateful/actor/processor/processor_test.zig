@@ -231,3 +231,52 @@ test "stateful processor: a retained replay survives its parent's finalization" 
     try testing.expectEqual(2, digest_u64((try fork.get(&counter_key())).?));
     try testing.expectEqual(2, digest_u64((try fork.get(&height_key(child.height()))).?));
 }
+
+test "stateful processor: a proposal caches its state on the parent" {
+    var harness: Harness = undefined;
+    try harness.init();
+    defer harness.deinit();
+    const genesis = TestBlock.genesis();
+    const block1 = try harness.stage_pending_child(&genesis, 1);
+    var ancestry = try harness.ancestry(&.{block1});
+    defer ancestry.deinit();
+    const context: TestBlock.Context = .{ .round = harness_mod.round(2) };
+    var built = (try harness.processor.propose(context, &ancestry, {})).?;
+    defer built.deinit();
+    try testing.expectEqual(block1.digest(), built.inner().parent());
+    try testing.expectEqual(2, built.inner().height().get());
+    try testing.expect(harness.execution.pending_contains(built.digest()));
+    var fork = try harness.execution.fork_batches(built.digest());
+    defer fork.deinit();
+    try testing.expectEqual(2, digest_u64((try fork.get(&counter_key())).?));
+}
+
+test "stateful processor: a proposal on unknown state declines" {
+    var harness: Harness = undefined;
+    try harness.init();
+    defer harness.deinit();
+    const genesis = TestBlock.genesis();
+    const unknown = harness_mod.u64_digest(5);
+    const orphan = TestBlock.init(unknown, .new(1), harness_mod.round(1), genesis.target);
+    var ancestry = try harness.ancestry(&.{orphan});
+    defer ancestry.deinit();
+    const context: TestBlock.Context = .{ .round = harness_mod.round(2) };
+    try testing.expectEqual(null, try harness.processor.propose(context, &ancestry, {}));
+    var again = try harness.ancestry(&.{orphan});
+    defer again.deinit();
+    try testing.expect((try harness.processor.prepare(context, &again, {})) == .wait);
+}
+
+test "stateful processor: prepare caches the block it votes on" {
+    var harness: Harness = undefined;
+    try harness.init();
+    defer harness.deinit();
+    const genesis = TestBlock.genesis();
+    var ancestry = try harness.ancestry(&.{genesis});
+    defer ancestry.deinit();
+    const context: TestBlock.Context = .{ .round = harness_mod.round(1) };
+    var decision = try harness.processor.prepare(context, &ancestry, {});
+    try testing.expect(decision == .vote);
+    defer decision.vote.deinit();
+    try testing.expect(harness.execution.pending_contains(decision.vote.digest()));
+}

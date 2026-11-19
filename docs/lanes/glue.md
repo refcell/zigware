@@ -210,7 +210,10 @@ marshal's actors (consensus-marshal) for the actor; until then it ports what is 
   `PrepareBatchesError` (`Invalid`, `Incomplete`).
 - `glue.stateful.actor.Processor(P)` (`P` as for `Execution`; `App` adds `Captured`, `capture`,
   and `finalized`): `init(gpa, io, app, databases, anchor, ?Pruning)`, `boundary(block)`,
-  `redelivered(block)`, `finalize(*const Provider, block, start_barrier)` → `Applied{barrier,
+  `redelivered(block)`, `propose(context, *Ancestry, input)` → `?Digested`, `prepare(...)` →
+  `Handoff(Digested)` (both cache the built state first; `actor.processor.Proposed(App)` is the
+  application's `{block, merkleized}`), `finalize(*const Provider, block, start_barrier)` →
+  `Applied{barrier,
   prune}`, `branch_anchor`, `flights_idle`, `deinit`. `actor.Boxed(B)` is the type-erased
   ancestry (commonware `BoxedAncestry`).
 - `glue.stateful.actor.Verifier(P)` (`Processor.verifier()`; `P.Provider` adds
@@ -324,7 +327,8 @@ marshal's actors (consensus-marshal) for the actor; until then it ports what is 
 - [x] actor/core: `Durability` (barriers and the acknowledgements awaiting them).
 - [x] actor/core: the `Verifications` handler (phases, admission, pause/resume, answers).
 - [x] actor/core: the mailbox (overflow, prepare/propose/verify/report, subscribe_databases).
-- [ ] actor/core: propose, processing loop, syncing; app tests (after marshal); tests (single and
+- [x] actor: `Processor.propose`/`prepare` (build on the parent, cache before answering).
+- [ ] actor/core: processing loop, syncing, the `Stateful` actor; app tests (after marshal); tests (single and
   multi db apps, floor, properties).
 
 ## Log
@@ -364,6 +368,7 @@ marshal's actors (consensus-marshal) for the actor; until then it ports what is 
 - 2026-11-19 (stateful): the core actor's `Durability`.
 - 2026-11-19 (stateful): the core actor's `Verifications` handler; waiting verifies abstain.
 - 2026-11-19 (stateful): the core actor's mailbox.
+- 2026-11-19 (stateful): the processor's propose and prepare.
 
 ## dkg (owner: coding lane, thread T-01a1d58d-bff1-75a1-8ccb-4b8dd7bc9755)
 

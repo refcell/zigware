@@ -237,6 +237,11 @@ pub const TestApp = struct {
     /// What the finalized hook saw (commonware `FinalizedObservation`).
     pub const Observation = struct { captured: Captured, post_counter: u64, post_view: u64 };
 
+    pub const Context = TestBlock.Context;
+    pub const Input = void;
+    pub const Merkleized = Any.Merkleized;
+    const Built = processor_mod.Proposed(TestApp);
+
     pub fn sync_targets(block: *const TestBlock) Any.SyncTarget {
         return block.target;
     }
@@ -272,6 +277,49 @@ pub const TestApp = struct {
             return err;
         };
         return try execute(owned, block.inner().height(), context.round.view.get());
+    }
+
+    /// Builds the next block on the parent at the head of `ancestry` (commonware
+    /// `ExecutionApp::propose`).
+    pub fn propose(
+        app: *TestApp,
+        _: Io,
+        context: TestBlock.Context,
+        ancestry: *Execution.Ancestry,
+        batches: Any.Unmerkleized,
+        _: void,
+    ) !?Built {
+        _ = app;
+        var owned = batches;
+        var parent = (ancestry.next() catch |err| {
+            owned.deinit();
+            return err;
+        }) orelse {
+            owned.deinit();
+            return null;
+        };
+        defer parent.deinit();
+        const at = parent.inner().height().next();
+        var merkleized = try execute(owned, at, context.round.view.get());
+        errdefer merkleized.deinit();
+        const bounds = &merkleized.inner.bounds;
+        const floor = bounds.inactivity_floor;
+        const target: Any.SyncTarget = .init(merkleized.root(), floor, bounds.tip.size);
+        const block = TestBlock.init(parent.digest(), at, context.round, target);
+        return .{ .block = block, .merkleized = merkleized };
+    }
+
+    /// Votes on every block it builds.
+    pub fn prepare(
+        app: *TestApp,
+        io_: Io,
+        context: TestBlock.Context,
+        ancestry: *Execution.Ancestry,
+        batches: Any.Unmerkleized,
+        input: void,
+    ) !consensus.Handoff(Built) {
+        const built = try app.propose(io_, context, ancestry, batches, input) orelse return .wait;
+        return .{ .vote = built };
     }
 
     pub fn capture(

@@ -1,11 +1,15 @@
-//! The processor's finalization path (commonware `glue/src/stateful/actor/processor/mod.rs`:
-//! `Processor::new`, `boundary`, `redelivered`, `finalize`, and `Applied`).
+//! The processor's build and finalization paths (commonware
+//! `glue/src/stateful/actor/processor/mod.rs`: `Processor::new`, `propose`, `cache_proposed`,
+//! `boundary`, `redelivered`, `finalize`, and `Applied`).
 //!
 //! `Processor(P)` owns the application handle, the shared `Execution` (heap-allocated, since
 //! flights and verifiers point at it), and the optional prune schedule. Beyond `Execution`'s
 //! contract, `P.App` declares `Captured`, `capture(*App, io, Block.Context, *const Block,
 //! *const Merkleized, Readers) !Captured`, and `finalized(*App, io, Block.Context, *const
-//! Block, Captured, Readers) !void`.
+//! Block, Captured, Readers) !void`. To build, it declares `Context` (the consensus context,
+//! with a `round` field), `Input`, `propose(*App, io, Context, *Ancestry, Unmerkleized, Input)
+//! !?Proposed(App)`, and optionally `prepare(...) !Handoff(Proposed(App))`; both take the
+//! batches and the input.
 //!
 //! Commonware panics when a finalized block fails to reproduce its state; so does this port.
 
@@ -23,6 +27,11 @@ const ancestry_mod = consensus.marshal.ancestry;
 
 /// `ProcessorOf` keyed by `P`'s `App`, `Databases`, and `Provider` only, so every `P` that
 /// declares the same three (such as the core actor's, which adds `Recover`) shares one type.
+/// A block the application built and its merkleized state (commonware `Proposed`).
+pub fn Proposed(comptime App: type) type {
+    return struct { block: App.Block, merkleized: App.Merkleized };
+}
+
 pub fn Processor(comptime P: type) type {
     return ProcessorOf(P.App, P.Databases, P.Provider);
 }
@@ -47,6 +56,9 @@ fn ProcessorOf(comptime App_: type, comptime Databases_: type, comptime Provider
         pub const Prune = pruning.Prune(SyncTargets);
         pub const Boundary = Execution.State.Boundary;
         pub const Verifier = verifier_mod.Verifier(P);
+        pub const Ancestry = Execution.Ancestry;
+        pub const Built = Proposed(App);
+        const Handoff = consensus.Handoff;
 
         /// The result of applying a finalized block (commonware `Applied`).
         pub const Applied = struct {
@@ -102,6 +114,86 @@ fn ProcessorOf(comptime App_: type, comptime Databases_: type, comptime Provider
             execution.mutex.lockUncancelable(execution.io);
             defer execution.mutex.unlock(execution.io);
             return execution.state.boundary(block.digest(), block.inner().context().round);
+        }
+
+        /// Builds on the parent at the head of `ancestry` through the application's `propose`
+        /// and caches the state before answering. Null when the application builds nothing or
+        /// the parent is neither cached nor the anchor. The caller runs no finalization
+        /// meanwhile. Panics when the built state misses the block's commitments.
+        pub fn propose(
+            self: *Self,
+            context: App.Context,
+            ancestry: *Ancestry,
+            input: App.Input,
+        ) !?Digested {
+            const parent = (ancestry.peek() orelse unreachable).digest(); // Recovered first.
+            const batches = self.execution.fork_batches(parent) catch |err| switch (err) {
+                error.Invalid => return null,
+                else => |other| return other,
+            };
+            var app = self.app;
+            const io = self.execution.io;
+            const built = try app.propose(io, context, ancestry, batches, input) orelse return null;
+            return try self.cache_proposed(context.round, parent, built);
+        }
+
+        /// Like `propose`, before the parent certifies: the block under the application's
+        /// decision, or `.wait` (always, when the application has no `prepare`).
+        pub fn prepare(
+            self: *Self,
+            context: App.Context,
+            ancestry: *Ancestry,
+            input: App.Input,
+        ) !Handoff(Digested) {
+            if (comptime !@hasDecl(App, "prepare")) {
+                if (comptime @hasDecl(App, "deinit_input")) {
+                    var dropped = input;
+                    App.deinit_input(&dropped);
+                }
+                return .wait;
+            }
+            const parent = (ancestry.peek() orelse unreachable).digest();
+            const batches = self.execution.fork_batches(parent) catch |err| switch (err) {
+                error.Invalid => return .wait,
+                else => |other| return other,
+            };
+            var app = self.app;
+            const decision = try app.prepare(self.execution.io, context, ancestry, batches, input);
+            const round = context.round;
+            return switch (decision) {
+                .wait => .wait,
+                .vote => |built| .{ .vote = try self.cache_proposed(round, parent, built) },
+                .stage => |built| .{ .stage = try self.cache_proposed(round, parent, built) },
+            };
+        }
+
+        /// Caches a built block's state (taken) on `parent` and returns the block with its
+        /// digest. Only a finalization discards `parent`'s state, and none runs during a build.
+        fn cache_proposed(
+            self: *Self,
+            round: consensus.Round,
+            parent: Digest,
+            built: Built,
+        ) !Digested {
+            var merkleized = built.merkleized;
+            const targets = App.sync_targets(&built.block);
+            if (!Databases.matches_sync_targets(&merkleized, &targets)) {
+                @panic("proposed state must match block commitments");
+            }
+            const block = Digested.compute(self.gpa, built.block) catch |err| {
+                merkleized.deinit();
+                return err;
+            };
+            errdefer block.discard();
+            const entry: Execution.Entry = .{
+                .round = round,
+                .parent = parent,
+                .merkleized = merkleized,
+            };
+            if (!try self.execution.cache_pending(block.digest(), entry)) {
+                @panic("proposal parent must remain compatible until the proposal completes");
+            }
+            return block;
         }
 
         /// Whether `block` is at or below the branch anchor's height. A different block at the
