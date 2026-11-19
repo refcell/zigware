@@ -851,12 +851,13 @@ pub fn Harness(comptime F: type) type {
             payload: Digest,
             round: Round,
             parent: Digest,
+            nonce: u64,
         ) void {
             var buffer: [128]u8 = undefined;
             var writer: codec.Writer = .init(&buffer);
             round.write(&writer);
             codec.write(Digest, parent, &writer);
-            codec.write(u64, 0, &writer);
+            codec.write(u64, nonce, &writer);
             net.relay.broadcast(net.keys()[sender], .all, payload, writer.written());
         }
 

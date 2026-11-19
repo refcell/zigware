@@ -133,7 +133,7 @@ pub fn Tests(comptime h: type) type {
                     _ = try stack.next_update(ctx, 5_000);
                     const payload = h.Sha256.hash(&.{"same_term_timeout_view_1"});
                     const proposal_1: h.Proposal = .init(first, .zero(), payload);
-                    h.relay_contents(&net, leader, payload, first, h.genesis(epoch));
+                    h.relay_contents(&net, leader, payload, first, h.genesis(epoch), 0);
                     try stack.mailbox.proposal(proposal_1);
                     const quorum = net.quorum();
                     const certificate = try h.build(

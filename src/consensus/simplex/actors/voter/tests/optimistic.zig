@@ -173,6 +173,75 @@ pub fn Tests(comptime h: type) type {
             }.body);
         }
 
+        // commonware test_optimistic_future_verify_uses_local_parent_notarize: a buffered
+        // optimistic child (view 2) starts verification as soon as our own view 1 notarize
+        // makes its parent available, before that notarize is broadcast.
+        test "voter optimistic future verify uses local parent notarize" {
+            try h.covers(.ed25519);
+            try run(struct {
+                fn body(ctx: Ctx) anyerror!void {
+                    const gpa = ctx.gpa();
+                    const traces = runtime.telemetry.traces;
+                    var collector = traces.Collector.init(gpa, .{});
+                    defer collector.deinit();
+                    var subscriber = collector.subscriber();
+                    subscriber.level = .debug;
+                    var net: h.Network = undefined;
+                    try net.start(ctx, 5, "optimistic_future_verify_uses_local_parent_notarize");
+                    defer net.deinit();
+                    const elector = h.term_elector(5, 30_000, 2);
+                    const leader = try h.leader_of(gpa, elector, 1);
+                    var stack: h.VoterStack = undefined;
+                    try stack.start(ctx, &net, .{
+                        // No timeout fires: progress past view 1 is only optimistic.
+                        .leader_timeout_ms = 10_000,
+                        .certification_timeout_ms = 10_000,
+                        .timeout_retry_ms = 30_000,
+                        .local_index = (leader + 1) % 5,
+                        .verify_latency_ms = 200.0,
+                        .elector = elector,
+                        .tracer = .init(subscriber, "commonware_consensus::simplex::voter"),
+                    });
+                    defer stack.stop();
+                    _ = try stack.next_update(ctx, 5_000);
+                    const round_1: h.Round = .new(epoch, .new(1));
+                    const payload_1 = h.Sha256.hash(&.{"optimistic_future_verify_view_1"});
+                    h.relay_contents(&net, leader, payload_1, round_1, h.genesis(epoch), 0);
+                    try stack.mailbox.proposal(.init(round_1, .zero(), payload_1));
+                    try stack.wait_verification_request(ctx, 1);
+                    const round_2: h.Round = .new(epoch, .new(2));
+                    const payload_2 = h.Sha256.hash(&.{"optimistic_future_verify_view_2"});
+                    h.relay_contents(&net, leader, payload_2, round_2, payload_1, 1);
+                    try stack.mailbox.proposal(.init(round_2, .new(1), payload_2));
+                    try wait_vote(ctx, &stack, .notarize, 2);
+                    const verify_next = try h.trace_position(
+                        &collector,
+                        "requested proposal verification",
+                        "simplex.voter.verify",
+                        2,
+                    );
+                    const broadcast = try h.trace_position(
+                        &collector,
+                        "broadcasting notarize",
+                        "simplex.voter.notify",
+                        1,
+                    );
+                    try testing.expect(verify_next < broadcast);
+                }
+            }.body);
+        }
+
+        /// Waits up to 8 s per message for our vote of `kind` at `view`.
+        fn wait_vote(ctx: Ctx, stack: *h.VoterStack, comptime kind: anytype, view: u64) !void {
+            // Bounded by the per-message wait.
+            while (true) {
+                const next = try stack.next_batcher(ctx, 8_000);
+                const message = next orelse return error.NoVote;
+                if (message != .constructed or message.constructed != kind) continue;
+                if (message.constructed.view().get() == view) return;
+            }
+        }
+
         /// Waits up to 5 s per message for our nullify at `view`.
         fn wait_nullify(ctx: Ctx, stack: *h.VoterStack, view: u64) !void {
             // Bounded by the per-message wait.
