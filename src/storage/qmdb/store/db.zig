@@ -89,9 +89,12 @@ pub fn Db(comptime K: type, comptime E: type, comptime T: type) type {
             if (log.size() == 0) _ = try log.append(genesis);
             // Persist recovery repairs and any genesis commit.
             try log.sync();
+            // Recovery selected a commit, so any other last operation is unexpected data.
             var last = try log.read(log.size() - 1);
-            const floor = last.inactivity_floor().?; // Recovery selected a commit.
+            const commit_floor = last.inactivity_floor();
             last.deinit(gpa);
+            const floor = commit_floor orelse return error.UnexpectedData;
+            if (floor >= log.size()) return error.DataCorrupted;
             var snapshot = Index.init(gpa, cfg.translator);
             errdefer snapshot.deinit();
             const cache_size = cfg.init_cache;

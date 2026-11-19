@@ -438,6 +438,15 @@ test "immutable init_from_log rebuilds an opened log and refuses an empty one" {
         const empty = try qmdb.init_journal(Db.Journal, gpa, storage, cfg.merkle, cfg.log, options);
         const refused = Db.init_from_log(gpa, scope, empty, cfg.translator);
         try testing.expectError(error.HistoricalFloorPruned, refused);
+        // A log ending in a set is unexpected data (commonware's `commit_floor_at` check).
+        const Journal = Db.Journal;
+        var unfinished = try qmdb.init_journal(Journal, gpa, storage, cfg.merkle, cfg.log, options);
+        _ = unfinished.append(.{ .set = .{ .key = fill(1), .value = fill(2) } }) catch |err| {
+            unfinished.deinit();
+            return err;
+        };
+        const unexpected = Db.init_from_log(gpa, scope, unfinished, cfg.translator);
+        try testing.expectError(error.UnexpectedData, unexpected);
         var db = try harness.open(F, null);
         errdefer db.deinit();
         try commit_sets(&db, &.{ 1, 2 }, null);

@@ -163,7 +163,9 @@ pub fn Db(F: type, K: type, E: type, C: type, H: type, T: type) type {
             errdefer journal.deinit();
             if (journal.size() == 0) return error.HistoricalFloorPruned;
             var reader: LogReader = .{ .journal = &journal };
-            const floor = try qmdb.find_inactivity_floor_at(gpa, &reader, journal.size());
+            // The log ends with a commit, or its data is unexpected.
+            const commit_floor = try qmdb.commit_floor_at(gpa, &reader, journal.size());
+            const floor = commit_floor orelse return error.UnexpectedData;
             var snapshot = try build_snapshot(gpa, translator, floor, &journal);
             errdefer snapshot.deinit();
             const inactive_peaks = merkle.inactive_peaks(F, journal.size(), floor);

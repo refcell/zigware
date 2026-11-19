@@ -203,8 +203,11 @@ which every database here is built on.
 - [x] Upstream 90960d81c (#5770): immutable `get`/`get_many` read from the inactivity floor,
   so live, pruned, reopened, and synced databases at one commitment answer alike; sets below
   the floor stay indexed until pruned. Its mod.rs and sync/tests.rs assertions are ported.
-- [ ] Upstream `qmdb::commit_floor_at`: immutable init reads its floor through it and
-  returns its errors instead of panicking.
+- [x] Upstream `qmdb::commit_floor_at`: `qmdb.commit_floor_at` returns the floor of the
+  commit at `size - 1`, or null for a non-commit (`HistoricalFloorPruned` at size 0,
+  `ItemPruned`, `DataCorrupted` past its own location); `find_inactivity_floor_at` wraps it.
+  Immutable and keyless `init_from_log` and store init return `UnexpectedData` when the log
+  does not end with a commit (store used to panic there).
 - [ ] Upstream 102430409 (#5649): the store's strategy and any's shared batched read.
 
 ## Public API (on main)
@@ -433,3 +436,4 @@ which every database here is built on.
 - 2026-11-19: qmdb dbs pass their `io` down to their journals.
 - 2026-11-19: upstream a9ffc25f3: one qmdb operation tag table; hashes and vectors updated.
 - 2026-11-19: upstream 90960d81c: immutable database reads start at the inactivity floor.
+- 2026-11-19: upstream commit_floor_at: qmdb inits refuse a log not ending in a commit.

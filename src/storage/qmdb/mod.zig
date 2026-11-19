@@ -44,7 +44,8 @@ pub const Error = error{
     KeyNotFound,
     /// The key exists in the db, so its exclusion cannot be proven.
     KeyExists,
-    /// A compact sync result is not exactly one commit at the expected location.
+    /// A log that must end with a commit does not, or a compact sync result is not exactly
+    /// one commit at the expected location.
     UnexpectedData,
     /// A requested location is at or past the size of the database or batch being read.
     LocationOutOfBounds,
@@ -194,24 +195,35 @@ fn validate_pending(
     if (bounds.end < options.minimum_size) return error.HistoricalFloorPruned;
 }
 
-/// The inactivity floor declared at the commit immediately preceding `op_count`
-/// (commonware's `find_inactivity_floor_at`). `reader` provides `bounds()` (a
+/// The inactivity floor declared by the commit at `op_count - 1`, or null if that operation is
+/// not a commit (commonware's `commit_floor_at`). `reader` provides `bounds()` (a
 /// `journal.contiguous.Bounds`) and `read(gpa, location)` returning an owned operation with
-/// `inactivity_floor()` and `deinit(gpa)`.
+/// `inactivity_floor()` and `deinit(gpa)`. Fails with `HistoricalFloorPruned` when `op_count`
+/// is zero, `ItemPruned` when `op_count - 1` precedes the retained start, and `DataCorrupted`
+/// when the commit declares a floor past its own location.
+pub fn commit_floor_at(gpa: std.mem.Allocator, reader: anytype, op_count: u64) !?u64 {
+    if (op_count == 0) return error.HistoricalFloorPruned;
+    const last = op_count - 1;
+    const bounds = reader.bounds();
+    if (last < bounds.start) return error.ItemPruned;
+    assert(last < bounds.end);
+    var op = try reader.read(gpa, last);
+    defer op.deinit(gpa);
+    const inactivity_floor = op.inactivity_floor() orelse return null;
+    if (inactivity_floor > last) return error.DataCorrupted;
+    return inactivity_floor;
+}
+
+/// The inactivity floor declared by the commit at `op_count - 1` (commonware's
+/// `find_inactivity_floor_at`): `commit_floor_at` for callers that require a commit there, so
+/// a retained non-commit is `HistoricalFloorPruned`.
 pub fn find_inactivity_floor_at(
     gpa: std.mem.Allocator,
     reader: anytype,
     op_count: u64,
 ) !u64 {
-    if (op_count == 0) return error.HistoricalFloorPruned;
-    const last = op_count - 1;
-    const bounds = reader.bounds();
-    if (last < bounds.start) return error.ItemPruned;
-    var op = try reader.read(gpa, last);
-    defer op.deinit(gpa);
-    const inactivity_floor = op.inactivity_floor() orelse return error.HistoricalFloorPruned;
-    if (inactivity_floor > last) return error.DataCorrupted;
-    return inactivity_floor;
+    const inactivity_floor = try commit_floor_at(gpa, reader, op_count);
+    return inactivity_floor orelse error.HistoricalFloorPruned;
 }
 
 /// The inactive peak count of the log at historical size `op_count`.
