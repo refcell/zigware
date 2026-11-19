@@ -26,4 +26,5 @@ pub fn Database(comptime D: type, comptime H: type) type {
 
 test {
     _ = @import("sync_test.zig");
+    _ = @import("sync_fuzz_test.zig");
 }

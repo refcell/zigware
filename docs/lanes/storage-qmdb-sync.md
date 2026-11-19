@@ -48,8 +48,17 @@ it comes first once `any` lands.
   syncs with reopen, post-sync batches, replacing a client's pruned db, local pins. Decision:
   `discard_local_state` also clears grafted metadata as commonware does; no test isolates
   it, since the first `sync` rewrites the metadata and `init` clears it beside an empty log.
-- [ ] the `qmdb_any_{fixed,variable}_sync` fuzz targets. Keyless and immutable glue, the engine, and the shared harness stay with the
-  crypto lane.
+- [x] the `qmdb_any_{fixed,variable}_sync` fuzz targets (any/sync_fuzz_test.zig). The fixed
+  target syncs a source of digest values (commit-counter metadata, prunes, unclean reopens)
+  into a fresh database through one shared page cache, and the synced root must match. The
+  variable target drives owned byte values through commits, reads, proofs, and historical
+  proofs against recorded roots, with every read checked against a model. Decisions: syncs and
+  proofs must succeed where commonware ignores their errors, and historical proofs start at or
+  above the sync boundary. Planted bugs (a wrong historical-proof floor, a corrupted sync pin)
+  are caught. The sync tests share one page cache between source and target, as commonware's
+  do. Keyless and immutable glue, the engine, and the shared harness stay with the crypto lane.
+- [ ] qmdb benches: the current variants of commonware's `qmdb/benches` (compact has none),
+  split with storage-qmdb.
 - [x] sync journal (`journal.init`/`resize`/`append` over contiguous journals, `Memory(Op)`)
   and the request tracker (`requests.Requests(F)`), with their commonware tests.
 - [ ] sync engine, database, source, harness; per-variant sync glue
@@ -198,3 +207,4 @@ it comes first once `any` lands.
 - 2026-11-18: compact sync `Database` interface.
 - 2026-11-19: any sync glue.
 - 2026-11-19: current sync glue.
+- 2026-11-19: any fixed and variable sync fuzz targets.

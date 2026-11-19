@@ -41,10 +41,9 @@ fn Source(comptime S: type) type {
 
 const Harness = struct {
     storage: runtime.buffer.mocks.Storage,
-    /// One page cache per database: the engine's tasks read the source while they write the
-    /// target, and a page cache is not shared across tasks.
+    /// One page cache shared by source and target, which the engine's tasks read and write
+    /// concurrently.
     cache_ref: runtime.buffer.paged.CacheRef,
-    target_cache_ref: runtime.buffer.paged.CacheRef,
     source_registry: metrics.Registry,
     target_registry: metrics.Registry,
 
@@ -52,7 +51,6 @@ const Harness = struct {
         return .{
             .storage = .init(gpa),
             .cache_ref = try .init(gpa, 101, 11),
-            .target_cache_ref = try .init(gpa, 101, 11),
             .source_registry = .init(gpa),
             .target_registry = .init(gpa),
         };
@@ -61,14 +59,12 @@ const Harness = struct {
     fn deinit(self: *Harness) void {
         self.target_registry.deinit();
         self.source_registry.deinit();
-        self.target_cache_ref.deinit();
         self.cache_ref.deinit();
         self.storage.deinit();
     }
 
     fn cfg(self: *Harness, comptime S: type, comptime prefix: []const u8) S.Config {
-        const is_target = comptime std.mem.eql(u8, prefix, "target");
-        const cache_ref = if (is_target) &self.target_cache_ref else &self.cache_ref;
+        const cache_ref = &self.cache_ref;
         var log = qmdb_support.log_config(@FieldType(S.Config, "log"), cache_ref);
         log.partition = prefix ++ "-log";
         return .{
