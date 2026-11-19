@@ -41,6 +41,10 @@ pub const Family = storage.mmr.Family;
 pub const Target = storage.qmdb.sync.Target(Family, Digest);
 pub const Payload = glue_dkg.types.Payload(MinSig, PublicKey, Unit);
 pub const EpochInfo = glue_dkg.types.EpochInfo(MinSig, PublicKey, Unit);
+/// The consensus signing scheme: threshold VRF over the epoch's DKG output (commonware
+/// `bls12381_threshold::vrf::Scheme<ed25519::PublicKey, MinSig>`).
+pub const Scheme =
+    consensus.simplex.scheme.bls12381_threshold.vrf.Scheme(Digest, PublicKey, MinSig);
 
 /// Globally unique namespace for every message signed by this example.
 pub const namespace = "_COMMONWARE_EXAMPLES_DKG";

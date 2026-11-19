@@ -18,8 +18,13 @@ setup. Owns `examples/dkg` (commonware `examples/dkg`).
       checked against commonware's state roots and ranges.
 - [x] `bootstrap.zig`: the genesis hand-off (`write_genesis_to_sibling_validators`) with
       commonware's test.
-- [ ] `bootstrap` run (glue bootstrap engine, p2p lane) and `validator.zig` on glue.dkg's actor, bootstrap,
-      probe, and orchestrator (coding lane, in progress).
+- [x] `validator.zig`: the probe's configuration over the persisted `SyncPlan`
+      (`probe_config`, commonware's `probe_resumes_persisted_floor`).
+- [ ] `validator` run: p2p, broadcast, marshal, probe, QMDB resolver, reshare, orchestrator,
+      and the stateful application. Waits on glue.stateful's `Stateful` actor (utils lane) and
+      the QMDB resolver actor (deployer lane); the reshare actor, orchestrator, and probe are on
+      main.
+- [ ] `bootstrap` run: waits on glue.dkg's bootstrap `Engine` (bls-math lane).
 - [ ] Demo recording (`just` recipe `dkg`, etc/scripts/record-demo.sh).
 
 ## Decisions
@@ -36,6 +41,9 @@ setup. Owns `examples/dkg` (commonware `examples/dkg`).
   order of checks (see `cli.zig`). `--worker-threads` is parsed and ignored: the production
   runner runs on `std.Io.Threaded`, not Tokio.
 - Until glue.dkg's actor `run` lands, `bootstrap` and `validator` parse and exit 1.
+- zigware's probe takes the persisted floor's epoch (`floor_epoch`), not the floor, so
+  `probe_resumes_persisted_floor` checks the epoch; its manager and blocker come from the
+  simulated network instead of a discovery network, since the config only carries them.
 
 - `application.zig`'s hooks take the parent block (propose) or the block height (process)
   directly until glue's stateful `Application` contract lands; its root vectors come from a
@@ -48,3 +56,4 @@ setup. Owns `examples/dkg` (commonware `examples/dkg`).
 - 2026-11-18: the clap CLI with commonware-dkg's recorded cases (examples lane).
 - 2026-11-18: the application with commonware's state-root vectors (examples lane).
 - 2026-11-19: bootstrap's genesis hand-off with commonware's test (examples lane).
+- 2026-11-19: the validator's probe config over the sync plan (examples lane).

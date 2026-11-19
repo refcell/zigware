@@ -59,4 +59,5 @@ test {
     _ = @import("config_test.zig");
     _ = @import("setup_test.zig");
     _ = @import("types_test.zig");
+    _ = @import("validator_test.zig");
 }
