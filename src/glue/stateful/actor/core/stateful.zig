@@ -115,7 +115,10 @@ pub fn Stateful(comptime P: type) type {
             random: ?std.Random = null,
             /// State sync (needed only when the plan holds a floor): engine tuning, the
             /// resolvers it fetches through and attaches the databases to, and the floor marshal
-            /// returned at initialization.
+            /// returned at initialization. Resolvers also serve peers once the databases open,
+            /// on either startup path. They borrow the databases, which the actor closes when it
+            /// returns (commonware's resolvers hold `Arc` clones): stop them before the actor
+            /// ends, as src/glue/stateful/tests/single_db.zig's `stateful_task` does.
             sync_config: ?state_sync.SyncEngineConfig = null,
             resolvers: ?Resolvers = null,
             floor: ?consensus.marshal.core.Floor = null,
@@ -206,6 +209,12 @@ pub fn Stateful(comptime P: type) type {
             var databases = try Databases.open(config.env, config.db_config, targets);
             defer databases.deinit();
             try config.plan.set_completed(inner.height());
+            // Serve the opened databases to syncing peers (commonware `recover`).
+            if (comptime has_sync) {
+                if (config.resolvers) |resolvers| {
+                    try state_sync.attach_databases(resolvers, databases);
+                }
+            }
             const anchor: Processor.Anchor = .{
                 .height = inner.height(),
                 .round = inner.context().round,
@@ -275,8 +284,9 @@ pub fn Stateful(comptime P: type) type {
             defer ready.databases.deinit();
             defer ready.processor.deinit();
             defer ready.deferred.deinit(self.gpa);
+            // `process` takes the requests; the list's deinit frees only its buffer. Clearing it
+            // first would overwrite them (`clearRetainingCapacity` sets items undefined).
             const deferred = ready.deferred.items;
-            ready.deferred.clearRetainingCapacity(); // `process` takes the requests.
             return self.process(&ready.processor, deferred);
         }
     };

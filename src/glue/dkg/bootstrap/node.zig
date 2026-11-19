@@ -95,6 +95,7 @@ pub fn Node(comptime T: type) type {
             }
         };
         pub const Buffer = marshal.standard.Buffer(Block, PublicKey);
+        pub const Start = marshal.config.Start(T.Scheme, Digest, Variant.Block);
         pub const Params = struct {
             pub const Scheme = T.Scheme;
             pub const Provider = T.Provider;
@@ -135,6 +136,9 @@ pub fn Node(comptime T: type) type {
             page_cache: *runtime.buffer.paged.CacheRef,
             /// The height-zero block marshal starts from (taken).
             genesis: Variant.Block,
+            /// Where marshal starts instead of `genesis` (taken; `genesis` is then released),
+            /// such as a state sync plan's `marshal_start`.
+            start: ?Start = null,
             block_codec_config: Block.Cfg,
             blocks_per_epoch: u64,
             items_per_section: u64,
@@ -160,6 +164,9 @@ pub fn Node(comptime T: type) type {
         mailbox: Mailbox,
         /// The processed floor marshal restored, if any.
         processed: ?Height,
+        /// The floor marshal returned at initialization (commonware `MarshalActor::init`'s
+        /// third value), for `Stateful`'s state sync.
+        floor: marshal.core.Floor,
 
         const kinds = [_][]const u8{
             "finalizations-metadata", "finalizations-key", "finalizations-value",
@@ -315,7 +322,12 @@ pub fn Node(comptime T: type) type {
             const actor_config: Actor.Config = .{
                 .provider = config.provider,
                 .epocher = .new(length),
-                .start = .{ .genesis = config.genesis },
+                .start = start: {
+                    const given = config.start orelse break :start .{ .genesis = config.genesis };
+                    var unused = config.genesis;
+                    unused.deinit();
+                    break :start given;
+                },
                 .partition_prefix = self.names[6],
                 .mailbox_size = config.mailbox_size,
                 .view_retention = .new(10),
@@ -337,6 +349,7 @@ pub fn Node(comptime T: type) type {
             );
             self.actor = initialized.actor;
             self.mailbox = initialized.mailbox;
+            self.floor = initialized.floor;
             const processed = initialized.floor.processed;
             self.processed = if (processed) |value| value.height() else null;
         }
