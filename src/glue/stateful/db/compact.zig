@@ -203,4 +203,5 @@ pub fn Compact(comptime F: type, comptime O: type, comptime H: type) type {
 test {
     std.testing.refAllDecls(@This());
     _ = @import("compact_test.zig");
+    _ = @import("compact_sync_test.zig");
 }

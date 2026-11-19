@@ -357,7 +357,7 @@ ones: d = deployer (thread T-01a1d5b9-c237), u = utils.
 | stateful/db/current.rs | 11 | 11 | 0 | 0 | |
 | stateful/db/keyless/standard.rs | 5 | 5 | 0 | 0 | |
 | stateful/db/immutable/standard.rs | 2 | 2 | 0 | 0 | |
-| stateful/db/compact.rs | 39 | 25 | 14 | 0 | d |
+| stateful/db/compact.rs | 39 | 39 | 0 | 0 | |
 | stateful/db/p2p/actor.rs | 24 | 16 | 8 | 0 | d |
 | stateful/db/p2p/handler.rs, limits.rs | 3 | 3 | 0 | 0 | |
 | stateful/db/p2p/mailbox.rs | 4 | 3 | 1 | 0 | d |
@@ -371,7 +371,7 @@ ones: d = deployer (thread T-01a1d5b9-c237), u = utils.
 | stateful/actor/core/processing.rs | 86 | 0 | 86 | 0 | u |
 | stateful/actor/processor/mod.rs | 44 | 22 | 22 | 0 | u |
 | stateful/tests/mod.rs, floor.rs | 28 | 0 | 28 | 0 | u |
-| **total** | **469** | **264** | **183** | **22** | |
+| **total** | **469** | **278** | **169** | **22** | |
 
 - Not portable (db/mod.rs, 22): zigware's `Barrier` is synchronous (databases persist inside
   `finalize`), so `barrier_waits_for_every_handle` (8), `barrier_cancellation_releases_handles`
@@ -387,11 +387,8 @@ ones: d = deployer (thread T-01a1d5b9-c237), u = utils.
     are two different types. `single_state_sync_adopts_queued_tip_before_finishing` passes
     under every planted ordering bug: zigware's coordinator handles every completed wake
     before its finish check, so the race it guards cannot arise there.
-  - compact.rs, each for keyless and immutable: `state_sync_stops_compact_update_forwarder_after_completion`,
-    `state_sync_drains_queued_target_before_reporting_reached`,
-    `state_sync_reports_compact_progress_from_{compact,full}_source`,
-    `state_sync_supersedes_in_flight_stale_target_from_{compact,full}_source`,
-    `managed_db_initializes_multiple_commit_ranges`.
+  - compact.rs: done. The state-sync cases are in compact_sync_test.zig (deterministic
+    runtime, commonware's `SupersedingSource`), and multiple commit ranges in compact_test.zig.
   - db/p2p actor.rs: `completed_request_cleanup_preserves_new_subscriber`,
     `cancellation_before_resolver_admission_preserves_replacement`,
     `fanout_waits_for_slow_receipt_and_preserves_other_demand_on_cancel` (2),
