@@ -340,6 +340,111 @@ EOF
       wait %%
       t kill-server
       ;;
+    interop-dkg)
+      # commonware's and zigware's dkg validators in one network (etc/scripts/interop_dkg.py
+      # checks it): a mixed epoch-0 DKG, validators rrzzr finalizing the same heights through
+      # each epoch's reshare, and zigware's validator 5 joining late with --state-sync.
+      reference=${COMMONWARE_REF:-$HOME/.cache/zigware/commonware-ref}
+      target=${INTEROP_TARGET:-${TMPDIR:-/tmp}/zigware-interop-target}
+      (cd "$reference" && CARGO_TARGET_DIR="$target" cargo build --release --offline -q \
+        -p commonware-dkg)
+      if [ -n "$(find src examples/dkg build.zig -newer zig-out/bin/dkg -print -quit \
+        2>/dev/null || echo stale)" ] || [ ! -x zig-out/bin/dkg ]; then
+        zig build -Doptimize=ReleaseFast >/dev/null
+      fi
+      dir=/tmp/zigware-interop-dkg-demo
+      rm -rf "$dir"
+      mkdir -p "$dir"
+      export PATH="$target/release:$PWD/zig-out/bin:$PATH" NO_COLOR=1
+      # One line format for both: drop commonware's colors, thread ids, and source locations.
+      trim='s/\x1b\[[0-9;]*m//g; s/ ThreadId\([0-9]+\)//; s/ [a-z_/]+\.rs:[0-9]+://'
+      trim+='; s/^[0-9-]+T([0-9:]+)\.[0-9]+Z +/\1 /; s/commonware_glue::dkg::/dkg::/'
+      trim+='; s/commonware_//; s/Epoch\(([0-9]+)\)/\1/g; s/([0-9a-f]{8})[0-9a-f]{16,}/\1../g'
+      trim+='; s/ dealers=.*//'
+      cat >"$dir/follow.sh" <<FOLLOW
+#!/usr/bin/env bash
+# Validator \$1's events: every DKG event, its first finalized block, and every eighth height,
+# so the same heights line up across panes.
+tail -n +1 -F $dir/validator-\$1.log 2>/dev/null | sed -u -E '$trim' |
+  awk '/reshare ceremony|entered epoch/ || (/finalized block/ && (!seen++ ||
+    (match(\$0, /height=[0-9]+/) && substr(\$0, RSTART + 7, RLENGTH - 7) % 8 == 0))) {
+    print; fflush() }' |
+  sed -u -E 's/ (INFO|WARN) / /; s/^(.{106}).*/\1/;
+    s/(completed reshare ceremony.*)/\x1b[32m\1\x1b[0m/; s/(entered epoch)/\x1b[33m\1\x1b[0m/'
+FOLLOW
+      cat >"$dir/join.sh" <<JOIN
+#!/usr/bin/env bash
+# The late joiner: once validators 0-4 completed epoch 1's reshare, type its command, start
+# it, and follow its events.
+until [ "\$(sed -E '$trim' $dir/validator-[0-4].log |
+  grep -c 'completed reshare ceremony epoch=1 ')" -ge 5 ]; do sleep 0.5; done
+command='dkg validator --node-dir $dir/data/validator-5 --state-sync'
+printf '\033[1;32m\$\033[0m '
+for ((i = 0; i < \${#command}; i++)); do printf '%s' "\${command:i:1}"; sleep 0.025; done
+printf '\n'
+\$command >$dir/validator-5.log 2>&1 &
+echo \$! >$dir/joiner.pid
+exec $dir/follow.sh 5
+JOIN
+      chmod +x "$dir/follow.sh" "$dir/join.sh"
+      printf '\033[H\033[2J'
+      type_cmd "commonware-dkg setup --node-dir $dir/data --peers 6 --committee-size 4 \
+--base-port 3500 >/dev/null" 1
+      type_cmd "for i in 0 1; do commonware-dkg bootstrap --node-dir $dir/data/validator-\$i \
+>$dir/bootstrap-\$i.log 2>&1 & done; for i in 2 3; do dkg bootstrap --node-dir \
+$dir/data/validator-\$i >$dir/bootstrap-\$i.log 2>&1 & done" 0
+      until [ "$(cat "$dir"/bootstrap-*.log 2>/dev/null | grep -c 'bootstrap complete')" = 4 ]; do
+        sleep 0.5
+      done
+      for i in 0 1 2 3; do
+        impl=commonware; [ "$i" -ge 2 ] && impl=zigware
+        printf '%-10s ' "$impl"
+        grep -h 'bootstrap complete' "$dir/bootstrap-$i.log" | sed -E "$trim" | cut -c1-150
+      done
+      type_cmd "md5sum $dir/data/validator-*/genesis.json | cut -c1-32 | uniq -c" 3
+      # Stop the bootstraps and let their ports close before the validators bind them.
+      jobs -p >"$dir/bootstrap.pids"
+      while read -r pid; do kill "$pid" 2>/dev/null || true; done <"$dir/bootstrap.pids"
+      wait 2>/dev/null || true
+      while ss -ltn | grep -qE ':350[0-5] '; do sleep 0.2; done
+      kinds=(commonware-dkg commonware-dkg dkg dkg commonware-dkg)
+      for i in 0 1 2 3 4; do
+        "${kinds[$i]}" validator --node-dir "$dir/data/validator-$i" \
+          >"$dir/validator-$i.log" 2>&1 &
+      done
+      t() { tmux -L zigware-demo -f /dev/null "$@"; }
+      t kill-server 2>/dev/null || true
+      t new-session -d -s idkg -x 220 -y 50 "$dir/follow.sh 0"
+      t set-option -g status off
+      t set-option -g pane-border-status top
+      t set-option -g pane-border-format ' #[bold]#{pane_title}#[default] '
+      t select-pane -t idkg -T 'commonware (Rust): validator 0'
+      titles=('commonware (Rust): validator 1' 'zigware (Zig): validator 2'
+        'zigware (Zig): validator 3' 'commonware (Rust): validator 4')
+      for i in 1 2 3 4; do
+        t split-window -t idkg "$dir/follow.sh $i"
+        t select-pane -t idkg -T "${titles[$((i - 1))]}"
+        t select-layout -t idkg tiled
+      done
+      t split-window -t idkg "$dir/join.sh"
+      t select-pane -t idkg -T 'zigware (Zig): validator 5, joins with --state-sync'
+      t select-layout -t idkg tiled
+      (
+        # End just after the joiner completed its first reshare ceremony.
+        for _ in $(seq 480); do
+          grep -q 'completed reshare ceremony' "$dir/validator-5.log" 2>/dev/null && break
+          sleep 0.5
+        done
+        sleep 3
+        t detach-client -s idkg
+      ) &
+      t attach -t idkg || true
+      wait %%
+      t kill-server
+      if [ -f "$dir/joiner.pid" ]; then kill "$(cat "$dir/joiner.pid")" 2>/dev/null || true; fi
+      kill $(jobs -p) 2>/dev/null || true
+      wait 2>/dev/null || true
+      ;;
     *) echo "unknown demo: $name" >&2; exit 1 ;;
   esac
   exit 0
@@ -353,14 +458,17 @@ case $name in
   dkg) size=220x50 ;;
   interop) size=220x50 ;;
   interop-log) size=200x64 ;;
+  interop-dkg) size=220x50 ;;
   *) size=104x40 ;;
 esac
 DEMO_SESSION=1 TERM=xterm-256color asciinema rec --overwrite --quiet --output-format asciicast-v2 --window-size "$size" \
   --command "$0 $name" "$out.cast"
 if [ "$name" = chat ] || [ "$name" = log ] || [ "$name" = bridge ] || [ "$name" = dkg ] ||
-  [ "$name" = interop ] || [ "$name" = interop-log ]; then
-  # End on the panes, not tmux's exit screen: cut where tmux leaves the alternate screen.
-  awk 'index($0, "\\u001b[?1049l") { exit } { print }' "$out.cast" >"$out.cast.cut"
+  [ "$name" = interop ] || [ "$name" = interop-log ] || [ "$name" = interop-dkg ]; then
+  # End on the panes, not tmux's exit screen: cut where tmux leaves the alternate screen, and
+  # drop the screen clear tmux sometimes writes as a separate event just before it.
+  awk 'index($0, "\\u001b[?1049l") { if (held && !index(held, "\\u001b[2J")) print held; exit }
+    { if (held) print held; held = $0 }' "$out.cast" >"$out.cast.cut"
   mv "$out.cast.cut" "$out.cast"
 fi
 # log redraws four wide, busy panes: a smaller font and frame rate keep its gif near 1 MB.
@@ -370,9 +478,11 @@ font=16 fps=30
 [ "$name" = dkg ] && font=12 fps=8
 [ "$name" = interop ] && font=14 fps=12
 [ "$name" = interop-log ] && font=12 fps=8
+[ "$name" = interop-dkg ] && font=12 fps=8
 # x264's default quality (crf 23) puts dkg's five busy panes near 4 MB; 28 keeps it under 3.
 crf=23
 [ "$name" = dkg ] && crf=28
+[ "$name" = interop-dkg ] && crf=28
 agg --theme monokai --font-size "$font" --idle-time-limit 3 --last-frame-duration 6 \
   --fps-cap "$fps" "$out.cast" "$out.gif"
 ffmpeg -y -loglevel error -i "$out.gif" -movflags faststart -pix_fmt yuv420p -crf "$crf" \

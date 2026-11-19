@@ -232,6 +232,16 @@ by name or by reading both bodies (a zigware test may cover several). 476 tests:
 open, 31 not portable. The 86 first found open are all ported now (ticked under Open below),
 none reclassified; the table was recounted on 2026-11-19.
 
+Not-portable re-audit (2026-11-19, against main after async `start_sync`, `DelayedSync`,
+faulty's `Storage.wrap`, and the drain and recancel rules): none of the 31 became portable.
+- 20 are `#[should_panic]`. Zig tests cannot catch a panic, and no lane has a death-test
+  helper, so they stay unported repo-wide (bls-math records the same).
+- The other 11 test Rust structure zigware replaced, and main still has the replacements: the
+  router and spawner actors' mailboxes (router.zig is locked shared state; connections start
+  in an `Io.Group`), lookup's listener actor (`listen_loop` calls the tracker), the
+  `stream::Config` wrapper, `From<SocketAddr>`, and BitSet's `IntoIterator`.
+- None of the 31 touch storage, sync, or cancellation, so those changes do not reach them.
+
 `lib.rs`'s `recipient_unions` is one rstest fn of 25 cases (5 x 5 values); the zigware test covers
 all 25.
 
@@ -758,6 +768,11 @@ After:
   - After a join, finalization slows to about 3 blocks/s for about 25 s and then recovers. A
     pure commonware network does the same: the joiner's floor lands past the epoch's
     midpoint, so it sits out that ceremony and counts as faulty (commonware's dkg README).
+  - Demo: `record-demo.sh interop-dkg` (docs/assets/interop-dkg-demo.{gif,mp4}, 57 s). It
+    shows the mixed bootstrap with identical genesis files, then six titled panes: `rrzzr`,
+    and zigware's validator 5 joining with `--state-sync`. They show the same digests at
+    every eighth height through each epoch's reshare. In the recorded run all six agreed on
+    heights 191–383, where the joiner synced in at 191.
   - Found on the way, not interop: a pure-zigware dkg network aborted in 2 of 6 runs. The
     cause is a null unwrap in glue's inclusion window (`.closed` after `.scan` took the
     request in the same window). The coding lane owns it.
