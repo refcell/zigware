@@ -71,5 +71,53 @@ pub fn Tests(comptime h: type) type {
                 }
             }.body);
         }
+
+        // commonware test_next_propose_dispatches_before_sync: while the journal sync of
+        // view 1's notarize is held, the view 2 proposal request still reaches the
+        // application, and the view 1 notarize is published only after the sync.
+        test "voter next propose dispatches before sync" {
+            try h.covers(.ed25519);
+            try run(struct {
+                fn body(ctx: Ctx) anyerror!void {
+                    var net: h.Network = undefined;
+                    try net.start(ctx, 5, "next_propose_dispatches_before_sync");
+                    defer net.deinit();
+                    const elector = h.term_elector(5, 30_000, 2);
+                    var gates: runtime.storage.mocks.SyncGates = .init(ctx.io());
+                    var stack: h.VoterStack = undefined;
+                    try stack.start(ctx, &net, .{
+                        .local_index = try h.leader_of(ctx.gpa(), elector, 1),
+                        .propose_latency_ms = 200.0,
+                        .elector = elector,
+                        .sync_gates = &gates,
+                    });
+                    defer stack.stop();
+                    try stack.wait_proposal_request(ctx, 1);
+                    gates.arm();
+                    // The voter appends view 1's notarize and blocks on the gated sync.
+                    var waited: u64 = 0;
+                    while (!gates.blocked()) : (waited += 1) {
+                        if (waited >= 1_000) return error.SyncNotGated;
+                        try ctx.sleep(.fromMilliseconds(1));
+                    }
+                    try stack.wait_proposal_request(ctx, 2);
+                    // Nothing for view 1 reaches the batcher before its sync.
+                    // Bounded by the batcher mailbox's contents.
+                    while (stack.batcher.try_recv()) |message| {
+                        if (message != .constructed or message.constructed != .notarize) continue;
+                        try testing.expect(message.constructed.view().get() != 1);
+                    } else |_| {}
+                    try testing.expectEqual(@as(u64, 1), gates.calls());
+                    gates.release();
+                    // Bounded by the 5 s wait per message.
+                    while (true) {
+                        const next = try stack.next_batcher(ctx, 5_000);
+                        const message = next orelse return error.NoNotarize;
+                        if (message != .constructed or message.constructed != .notarize) continue;
+                        if (message.constructed.view().get() == 1) return;
+                    }
+                }
+            }.body);
+        }
     };
 }

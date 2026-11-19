@@ -30,6 +30,7 @@ const application_mod = @import("../../../mocks/application.zig");
 const relay_mod = @import("../../../mocks/relay.zig");
 const reporter_mod = @import("../../../mocks/reporter.zig");
 const voter = @import("../actor.zig");
+const traits_mod = @import("../../../../traits.zig");
 const batcher_ingress = @import("../../batcher/ingress.zig");
 const resolver_ingress = @import("../../resolver/ingress.zig");
 
@@ -169,18 +170,99 @@ pub fn Harness(comptime F: type) type {
         pub const BatcherMessage = batcher_ingress.Message(Scheme, Digest);
         pub const ResolverMessage = resolver_ingress.Message(Scheme, Digest);
 
+        /// The mock application as the voter's automaton, recording each request when it
+        /// arrives (commonware's `set_propose_observer` and `set_verify_observer`).
+        pub const Automaton = struct {
+            pub const Context = harness_context;
+            pub const Digest = Sha256.Digest;
+            const D = Sha256.Digest;
+            const requests_max = 256;
+
+            application: *Application,
+            io: Io,
+            mutex: Io.Mutex = .init,
+            proposals: [requests_max]Context = undefined,
+            proposals_count: u32 = 0,
+            verifications: [requests_max]View = undefined,
+            verifications_count: u32 = 0,
+
+            fn record_proposal(self: *Automaton, request: harness_context) void {
+                self.mutex.lockUncancelable(self.io);
+                defer self.mutex.unlock(self.io);
+                assert(self.proposals_count < requests_max);
+                self.proposals[self.proposals_count] = request;
+                self.proposals_count += 1;
+            }
+
+            pub fn propose(self: *Automaton, io: Io, request: harness_context) Io.Cancelable!?D {
+                self.record_proposal(request);
+                return self.application.propose(io, request);
+            }
+
+            pub fn prepare(
+                self: *Automaton,
+                io: Io,
+                request: harness_context,
+            ) Io.Cancelable!?traits_mod.Handoff(D) {
+                self.record_proposal(request);
+                return self.application.prepare(io, request);
+            }
+
+            pub fn verify(
+                self: *Automaton,
+                io: Io,
+                request: harness_context,
+                payload: D,
+            ) Io.Cancelable!?bool {
+                {
+                    self.mutex.lockUncancelable(self.io);
+                    defer self.mutex.unlock(self.io);
+                    assert(self.verifications_count < requests_max);
+                    self.verifications[self.verifications_count] = request.round.view;
+                    self.verifications_count += 1;
+                }
+                return self.application.verify(io, request, payload);
+            }
+
+            pub fn certify(self: *Automaton, io: Io, at: Round, payload: D) Io.Cancelable!?bool {
+                return self.application.certify(io, at, payload);
+            }
+
+            /// Whether a proposal (or handoff) request for `view` arrived.
+            pub fn proposal_requested(self: *Automaton, view: u64) bool {
+                self.mutex.lockUncancelable(self.io);
+                defer self.mutex.unlock(self.io);
+                for (self.proposals[0..self.proposals_count]) |request| {
+                    if (request.round.view.get() == view) return true;
+                }
+                return false;
+            }
+
+            /// Whether a verification request for `view` arrived.
+            pub fn verification_requested(self: *Automaton, view: u64) bool {
+                self.mutex.lockUncancelable(self.io);
+                defer self.mutex.unlock(self.io);
+                for (self.verifications[0..self.verifications_count]) |requested| {
+                    if (requested.get() == view) return true;
+                }
+                return false;
+            }
+        };
+
         pub const Params = struct {
             pub const Scheme = harness_scheme;
             pub const Elector = F.Elector;
             pub const Digest = harness_digest;
             pub const Blocker = Net.Control;
-            pub const Automaton = Application;
+            pub const Automaton = harness_automaton;
             pub const Relay = *Application;
             pub const Reporter = *reporter_mod.Reporter(harness_scheme, harness_digest);
             pub const Sender = Net.Sender;
         };
         const harness_scheme = Scheme;
         const harness_digest = Digest;
+        const harness_automaton = Automaton;
+        const harness_context = Application.Context;
         pub const Voter = voter.Actor(Params);
 
         /// commonware `TEST_QUOTA`.
@@ -216,6 +298,8 @@ pub fn Harness(comptime F: type) type {
             /// The round-robin elector, with commonware's `with_term` settings when a test sets
             /// them.
             elector: elector_mod.RoundRobin(Sha256) = elector_mod.RoundRobin(Sha256).default(),
+            /// Routes the voter's journal through this gate (commonware `DelayedSyncContext`).
+            sync_gates: ?*runtime.storage.mocks.SyncGates = null,
         };
 
         /// commonware `start_voter_with_floor`'s voter: 5 s leader, 6 s certification, and 60 min
@@ -365,6 +449,9 @@ pub fn Harness(comptime F: type) type {
             gpa: Allocator,
             io: Io,
             application: Application,
+            automaton: Automaton,
+            /// The journal storage when `Options.sync_gates` is set.
+            gated: runtime.storage.mocks.SyncGated,
             reporter: Reporter,
             page_cache: runtime.buffer.paged.CacheRef,
             voter: Voter,
@@ -389,6 +476,8 @@ pub fn Harness(comptime F: type) type {
                 self.task = null;
                 try self.start_application(net, net.keys()[options.local_index], options);
                 errdefer self.application.deinit();
+                // Kept across restarts, as commonware's observers are.
+                self.automaton = .{ .application = &self.application, .io = io };
                 self.reporter = .init(gpa, io, &net.fixture.verifier);
                 errdefer self.reporter.deinit();
                 self.page_cache = try .init(gpa, page_size, page_cache_size);
@@ -410,6 +499,10 @@ pub fn Harness(comptime F: type) type {
                 self.partition = @splat(0);
                 const partition = options.partition orelse
                     try std.fmt.bufPrint(&self.partition, "voter_test_{d}", .{index});
+                const journal_storage = if (options.sync_gates) |gates| gated: {
+                    self.gated = .init(gpa, ctx.storage, gates);
+                    break :gated self.gated.storage();
+                } else ctx.storage;
                 const floor: Floor = if (options.floor) |finalization|
                     .{ .finalized = finalization }
                 else
@@ -418,7 +511,7 @@ pub fn Harness(comptime F: type) type {
                     .scheme = scheme,
                     .elector = self.elector,
                     .blocker = net.oracle().control(me),
-                    .automaton = &self.application,
+                    .automaton = &self.automaton,
                     .relay = &self.application,
                     .reporter = &self.reporter,
                     .floor = floor,
@@ -433,7 +526,7 @@ pub fn Harness(comptime F: type) type {
                     .replay_buffer = 10240,
                     .write_buffer = 10240,
                     .cache_ref = &self.page_cache,
-                    .storage = ctx.storage,
+                    .storage = journal_storage,
                     .scope = ctx.scope.child("voter"),
                 });
                 const batcher =
@@ -523,6 +616,25 @@ pub fn Harness(comptime F: type) type {
             pub fn restart(self: *VoterStack, ctx: Ctx, net: *Network, options: Options) !void {
                 self.stop_voter();
                 try self.start_voter(ctx, net, options);
+            }
+
+            /// Waits up to 1 s of simulated time for a proposal request for `view`
+            /// (commonware `wait_for_request` over `propose_requests`).
+            pub fn wait_proposal_request(self: *VoterStack, ctx: Ctx, view: u64) !void {
+                var waited: u64 = 0;
+                while (!self.automaton.proposal_requested(view)) : (waited += 1) {
+                    if (waited >= 1_000) return error.NoProposalRequest;
+                    try ctx.sleep(.fromMilliseconds(1));
+                }
+            }
+
+            /// Waits up to 1 s of simulated time for a verification request for `view`.
+            pub fn wait_verification_request(self: *VoterStack, ctx: Ctx, view: u64) !void {
+                var waited: u64 = 0;
+                while (!self.automaton.verification_requested(view)) : (waited += 1) {
+                    if (waited >= 1_000) return error.NoVerificationRequest;
+                    try ctx.sleep(.fromMilliseconds(1));
+                }
             }
 
             /// The next batcher message within `limit_ms` of simulated time, or null.
