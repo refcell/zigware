@@ -14,7 +14,9 @@ concurrency:
 jobs:
   test:
     runs-on: macos-latest
-    timeout-minutes: 30
+    # Debug and ReleaseSafe back to back no longer fit in 30 minutes, so every run was cut
+    # off; per push, macOS runs Debug only, and the Linux jobs cover ReleaseSafe.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - name: install zig
@@ -23,5 +25,3 @@ jobs:
           echo "$HOME/zig" >> "$GITHUB_PATH"
       - name: test
         run: zig build test --summary all
-      - name: test release-safe
-        run: zig build test -Doptimize=ReleaseSafe
