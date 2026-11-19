@@ -543,3 +543,313 @@ test "keyless init_from_log builds over an opened log and refuses an empty one" 
         try db.destroy();
     }
 }
+
+/// Commonware's unclean `drop(db)` and reopen: the storage loses what was not synced.
+fn crash_reopen(comptime F: type, harness: *Harness, db: *TestDb(F)) !void {
+    harness.storage.crash();
+    db.deinit();
+    db.* = try harness.open(F);
+}
+
+/// Appends `count` values from `make(first)` to a batch and drops it unapplied (a failed
+/// commit).
+fn abandon_appends(comptime F: type, db: *TestDb(F), first: u64, count: u64) !void {
+    var batch = try db.new_batch();
+    defer batch.deinit();
+    for (first..first + count) |i| try batch.append(make(i));
+    assert(batch.size() == db.bounds().end + count);
+}
+
+test "keyless empty database recovers from failed commits" {
+    inline for (families) |F| {
+        var harness = try Harness.init();
+        defer harness.deinit();
+        var db = try harness.open(F);
+        errdefer db.deinit();
+        const root = db.root();
+        const elements: u64 = 200;
+        try crash_reopen(F, &harness, &db);
+        try testing.expectEqual(@as(u64, 1), db.bounds().end);
+        try testing.expect(db.root().eql(root));
+        for ([_]u64{ 0, 500, 1000 }, [_]u64{ 1, 1, 3 }) |first, batches| {
+            try abandon_appends(F, &db, first, elements * batches);
+            try crash_reopen(F, &harness, &db);
+            try testing.expectEqual(@as(u64, 1), db.bounds().end);
+            try testing.expect(db.root().eql(root));
+        }
+        try append_range(F, &db, 2000, 2000 + elements);
+        try db.commit();
+        try crash_reopen(F, &harness, &db);
+        try testing.expect(db.bounds().end > 1);
+        try testing.expect(!db.root().eql(root));
+        try db.destroy();
+    }
+}
+
+test "keyless replay drops trailing unapplied appends" {
+    inline for (families) |F| {
+        var harness = try Harness.init();
+        defer harness.deinit();
+        var db = try harness.open(F);
+        errdefer db.deinit();
+        try append_range(F, &db, 0, 10);
+        try db.commit();
+        const committed_root = db.root();
+        const committed_size = db.bounds().end;
+        try abandon_appends(F, &db, 99, 1);
+        try crash_reopen(F, &harness, &db);
+        try testing.expectEqual(committed_size, db.bounds().end);
+        try testing.expect(db.root().eql(committed_root));
+        // Appends resume at the recovered end.
+        var batch = try db.new_batch();
+        try testing.expectEqual(committed_size, batch.size());
+        batch.deinit();
+        try append_batch(F, &db, &.{make(77)}, null);
+        try db.commit();
+        try testing.expectEqual(make(77), (try db.get(committed_size)).?);
+        const new_root = db.root();
+        const new_size = db.bounds().end;
+        try abandon_appends(F, &db, 200, 5);
+        try crash_reopen(F, &harness, &db);
+        try testing.expectEqual(new_size, db.bounds().end);
+        try testing.expect(db.root().eql(new_root));
+        try db.destroy();
+    }
+}
+
+test "keyless non-empty database recovers from failed commits, also after pruning" {
+    inline for (families) |F| {
+        var harness = try Harness.init();
+        defer harness.deinit();
+        var db = try harness.open(F);
+        errdefer db.deinit();
+        const elements: u64 = 200;
+        // The floor advances to the new commit, so history may later be pruned up to it.
+        var values: [elements]U64 = undefined;
+        for (&values, 0..) |*item, i| item.* = make(i);
+        try append_batch(F, &db, &values, db.bounds().end + elements);
+        try db.commit();
+        const root = db.root();
+        const op_count = db.bounds().end;
+        try crash_reopen(F, &harness, &db);
+        try testing.expectEqual(op_count, db.bounds().end);
+        try testing.expect(db.root().eql(root));
+        try abandon_appends(F, &db, 1000, elements);
+        try crash_reopen(F, &harness, &db);
+        try testing.expectEqual(op_count, db.bounds().end);
+        try testing.expect(db.root().eql(root));
+        try db.prune(db.bounds().end - 1);
+        try testing.expectEqual(op_count, db.bounds().end);
+        try testing.expect(db.root().eql(root));
+        try db.sync();
+        try abandon_appends(F, &db, 2000, elements);
+        try crash_reopen(F, &harness, &db);
+        try testing.expectEqual(op_count, db.bounds().end);
+        try testing.expect(db.root().eql(root));
+        try append_range(F, &db, 3000, 3000 + elements);
+        try db.commit();
+        try crash_reopen(F, &harness, &db);
+        try testing.expect(db.bounds().end > op_count);
+        try testing.expect(!db.root().eql(root));
+        try db.destroy();
+    }
+}
+
+/// Commonware's `commit_appends`: appends `count` values from `make(first)` with the floor
+/// at the new commit, applies them, and commits.
+fn commit_appends(comptime F: type, db: *TestDb(F), first: u64, count: u64) !void {
+    var batch = try db.new_batch();
+    const merkleized = merkleized: {
+        errdefer batch.deinit();
+        for (first..first + count) |i| try batch.append(make(i));
+        batch.with_inactivity_floor(db.bounds().end + count);
+        break :merkleized try batch.merkleize(db);
+    };
+    defer merkleized.release();
+    try db.apply_batch(merkleized);
+    try db.commit();
+}
+
+test "keyless proofs over many ranges verify only where they belong" {
+    inline for (families) |F| {
+        var harness = try Harness.init();
+        defer harness.deinit();
+        var db = try harness.open(F);
+        defer db.deinit();
+        const elements: u64 = 100;
+        try append_range(F, &db, 0, elements);
+        const past_end = db.historical_proof(db.bounds().end + 1, 5, 10);
+        try testing.expectError(error.RangeOutOfBounds, past_end);
+        const root = db.root();
+        const wrong_root = Sha256.hash(&.{&@as([32]u8, @splat(0xFF))});
+        const Range = struct { u64, u64 };
+        const ranges = [_]Range{
+            .{ 0, 10 }, .{ 10, 5 },           .{ 50, 20 },      .{ 90, 15 },
+            .{ 0, 1 },  .{ elements - 1, 1 }, .{ elements, 1 },
+        };
+        for (ranges) |range| {
+            const start, const max_ops = range;
+            var proved = try db.proof(start, max_ops);
+            defer proved.deinit(gpa);
+            const proof = &proved.proof;
+            try testing.expect(try verified(F, proof, start, proved.items, &root));
+            const expected = @min(max_ops, db.bounds().end - start);
+            try testing.expectEqual(expected, proved.items.len);
+            try testing.expect(!try verified(F, proof, start, proved.items, &wrong_root));
+            if (start > 0) {
+                try testing.expect(!try verified(F, proof, start - 1, proved.items, &root));
+            }
+        }
+    }
+}
+
+test "keyless proofs verify after pruning and reopening" {
+    inline for (families) |F| {
+        var harness = try Harness.init();
+        defer harness.deinit();
+        var db = try harness.open(F);
+        errdefer db.deinit();
+        const elements: u64 = 100;
+        var values: [elements]U64 = undefined;
+        for (0..2) |round| {
+            for (&values, 0..) |*item, i| item.* = make(round * elements + i);
+            try append_batch(F, &db, &values, db.bounds().end + elements);
+        }
+        const root = db.root();
+        try db.prune(30);
+        const oldest_retained = db.bounds().start;
+        try testing.expect(db.root().eql(root));
+        try db.sync();
+        db.deinit();
+        db = try harness.open(F);
+        try testing.expect(db.root().eql(root));
+        const Range = struct { u64, u64 };
+        const ranges = [_]Range{
+            .{ oldest_retained, 10 }, .{ 50, 20 }, .{ 150, 10 }, .{ 190, 15 },
+        };
+        for (ranges) |range| {
+            const start, const max_ops = range;
+            if (start < oldest_retained) continue;
+            var proved = try db.proof(start, max_ops);
+            defer proved.deinit(gpa);
+            try testing.expect(try verified(F, &proved.proof, start, proved.items, &root));
+        }
+        for ([_]u64{ 150, db.bounds().end - 5 }) |prune_to| {
+            try db.prune(prune_to);
+            const oldest = db.bounds().start;
+            var proved = try db.proof(oldest, 20);
+            defer proved.deinit(gpa);
+            try testing.expect(try verified(F, &proved.proof, oldest, proved.items, &root));
+        }
+        try db.destroy();
+    }
+}
+
+test "keyless reads past the end are empty or out of bounds" {
+    inline for (families) |F| {
+        var harness = try Harness.init();
+        defer harness.deinit();
+        var db = try harness.open(F);
+        defer db.deinit();
+        // Location 0 is the initial commit, which holds no value.
+        try testing.expectEqual(@as(?U64, null), try db.get(0));
+        try append_batch(F, &db, &.{ make(1), make(2) }, null);
+        try testing.expectEqual(make(1), (try db.get(1)).?);
+        try testing.expectEqual(@as(?U64, null), try db.get(3));
+        try testing.expectError(error.LocationOutOfBounds, db.get(4));
+    }
+}
+
+test "keyless reads below the pruning boundary fail" {
+    inline for (families) |F| {
+        var harness = try Harness.init();
+        defer harness.deinit();
+        var db = try harness.open(F);
+        defer db.deinit();
+        var round: u64 = 0;
+        while (db.bounds().start == 0) {
+            round += 1;
+            try testing.expect(round <= 64);
+            try commit_appends(F, &db, round * 100, 16);
+            try db.prune(db.bounds().end - 1);
+        }
+        const start = db.bounds().start;
+        var out: [2]?U64 = undefined;
+        try testing.expectError(error.ItemPruned, db.get(start - 1));
+        try testing.expectError(error.ItemPruned, db.get_many(&.{ start - 1, start }, &out));
+        _ = try db.get(start);
+        try db.get_many(&.{start}, out[0..1]);
+    }
+}
+
+test "keyless bounded initialization at a pruned target fails" {
+    inline for (families) |F| {
+        var harness = try Harness.init();
+        defer harness.deinit();
+        var db = try harness.open(F);
+        errdefer db.deinit();
+        const first_start = db.bounds().end;
+        try commit_appends(F, &db, 0, 16);
+        var round: u64 = 0;
+        while (db.bounds().start <= first_start) {
+            round += 1;
+            try testing.expect(round <= 64);
+            try commit_appends(F, &db, round * 100, 16);
+            try db.prune(db.bounds().end - 1);
+        }
+        const oldest_retained = db.bounds().start;
+        db.deinit();
+        try testing.expectError(error.ItemPruned, harness.open_at_most(F, oldest_retained));
+        db = try harness.open(F);
+        db.deinit();
+        try testing.expectError(error.ItemPruned, harness.open_at_most(F, first_start));
+        db = try harness.open(F);
+        try db.destroy();
+    }
+}
+
+/// Commits two batches of two appends with floors 3 and 6, and returns the size after the first.
+fn commit_two_floors(comptime F: type, db: *TestDb(F)) !u64 {
+    try append_batch(F, db, &.{ make(1), make(2) }, 3);
+    try db.commit();
+    const bound = db.bounds().end;
+    try append_batch(F, db, &.{ make(3), make(4) }, 6);
+    try db.commit();
+    try testing.expectEqual(@as(u64, 6), db.inactivity_floor());
+    return bound;
+}
+
+test "keyless bounded initialization restores the earlier floor and gates pruning" {
+    inline for (families) |F| {
+        var harness = try Harness.init();
+        defer harness.deinit();
+        var db = try harness.open(F);
+        errdefer db.deinit();
+        const bound = try commit_two_floors(F, &db);
+        db.deinit();
+        db = try harness.open_at_most(F, bound);
+        try testing.expectEqual(@as(u64, 3), db.inactivity_floor());
+        try db.prune(3);
+        try testing.expectError(error.PruneBeyondMinRequired, db.prune(4));
+        try db.destroy();
+    }
+}
+
+test "keyless bounded initialization after a reopen is durable" {
+    inline for (families) |F| {
+        var harness = try Harness.init();
+        defer harness.deinit();
+        var db = try harness.open(F);
+        errdefer db.deinit();
+        const bound = try commit_two_floors(F, &db);
+        try crash_reopen(F, &harness, &db);
+        try testing.expectEqual(@as(u64, 6), db.inactivity_floor());
+        db.deinit();
+        db = try harness.open_at_most(F, bound);
+        try testing.expectEqual(@as(u64, 3), db.inactivity_floor());
+        try testing.expectEqual(@as(u64, 3), db.bounds().end - 1);
+        try crash_reopen(F, &harness, &db);
+        try testing.expectEqual(@as(u64, 3), db.inactivity_floor());
+        try db.destroy();
+    }
+}

@@ -35,7 +35,12 @@ which every database here is built on.
 - [x] keyless: variable values over the contiguous variable journal; batches own their
   values and reads return owned copies; `KeylessMmr/MmbVariableConf` root conformance
   (matches).
-- [ ] keyless: the remaining mod.rs/fixed.rs scenarios.
+- [x] keyless: empty and non-empty recovery from failed commits, replay with trailing
+  appends, comprehensive and post-prune proofs, out-of-bounds and pruned reads, and the
+  bounded-initialization scenarios (pruned target, restored floor, durable after reopen).
+- [ ] keyless: the remaining mod.rs batch scenarios (dropped-ancestor and stacked reads,
+  merkleize across prune, foreign/stale/forked batches, ancestor states, empty and large
+  batches, child roots, single-commit live set, floor tracking and root effects).
 - [x] Switch the interim `qmdb.authenticated` to storage-journal's
   `journal.authenticated.Journal` (keyless, any, immutable); the interim copy is deleted.
 - [x] any, unordered fixed (MMR and MMB): `Db`, batches with chaining, the floor walk under
@@ -305,3 +310,4 @@ which every database here is built on.
 - 2026-11-19: `qmdb::init` and `qmdb::apply_batch` benches; split into `qmdb/benches/`.
 - 2026-11-19: `qmdb::merkleize` benches (main grid and churned).
 - 2026-11-19: immutable bounded-initialization, recovery, prune, get_many, and batch scenarios.
+- 2026-11-19: keyless recovery, proof, read, and bounded-initialization scenarios.
