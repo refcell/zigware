@@ -14,7 +14,8 @@
 //! 2^-128. The codec reads any 32 bytes as a `VerifyingKey` (a key that is not a curve point
 //! fails every verification) and any 64 bytes as a `Signature`.
 //!
-//! The arithmetic is `cryptography.ed25519.core`, which implements exactly these criteria.
+//! The arithmetic is `cryptography.ed25519.core`, which implements exactly these criteria;
+//! batches run through `batch`, the crate's counter-mode coefficients and bucket MSM.
 
 const std = @import("std");
 const codec = @import("codec");
@@ -22,6 +23,7 @@ const cryptography = @import("cryptography");
 const formatting = @import("formatting");
 const assert = std.debug.assert;
 const core = cryptography.ed25519.core;
+const batch = @import("batch.zig");
 
 /// An Ed25519 signing key. `deinit` zeroizes it. The encoding is the raw secret seed, so the
 /// encoded bytes are secret key material.
@@ -152,7 +154,7 @@ pub const VerifyingKey = struct {
             }
         };
         const view: View = .{ .items = items, .projector = projector };
-        return core.verify_batch(rng, items.len, view, strategy);
+        return batch.verify_batch(rng, items.len, view, strategy);
     }
 
     /// `verify_batch` over raw RFC 8032 messages (commonware's test-only `verify_batch_raw`).
@@ -172,7 +174,7 @@ pub const VerifyingKey = struct {
                 };
             }
         };
-        return core.verify_batch(rng, items.len, View{ .items = items }, strategy);
+        return batch.verify_batch(rng, items.len, View{ .items = items }, strategy);
     }
 
     pub const RawEntry = struct {

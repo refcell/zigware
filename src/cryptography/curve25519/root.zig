@@ -15,6 +15,7 @@ pub const VerifyingKey = signing.VerifyingKey;
 pub const Signature = signing.Signature;
 
 pub const key_exchange = @import("key_exchange.zig");
+pub const batch = @import("batch.zig");
 
 test {
     @import("std").testing.refAllDecls(@This());
@@ -22,4 +23,5 @@ test {
     _ = @import("conformance_test.zig");
     _ = @import("signing_test.zig");
     _ = @import("fuzz_test.zig");
+    _ = @import("batch_test.zig");
 }
