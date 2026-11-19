@@ -385,10 +385,10 @@ ones: d = deployer (thread T-01a1d5b9-c237), u = utils, j = storage-journal
 | stateful/actor/core/mod.rs | 4 | 4 | 0 | 0 | |
 | stateful/actor/core/syncing.rs | 16 | 15 | 0 | 1 | |
 | stateful/actor/core/processing.rs, 1070-3396 | 47 | see backlog | see backlog | | u |
-| stateful/actor/core/processing.rs, 3451-5885 | 39 | 33 | 0 | 6 | |
+| stateful/actor/core/processing.rs, 3451-5885 | 39 | 35 | 2 | 2 | s |
 | stateful/actor/processor/mod.rs | 44 | 40 | 0 | 4 | |
-| stateful/tests/mod.rs, floor.rs | 28 | 20 | 8 | 0 | j |
-| **total** | **469** | **400** | **55** | **14** | |
+| stateful/tests/mod.rs, floor.rs | 28 | 21 | 7 | 0 | j |
+| **total** | **469** | **403** | **56** | **10** | |
 
 - db/mod.rs's barrier tests are ported since async start_sync step 6 (`Barrier` holds each
   member's `runtime.storage.Completion`): `barrier_waits_for_every_handle` (8),
@@ -432,14 +432,18 @@ ones: d = deployer (thread T-01a1d5b9-c237), u = utils, j = storage-journal
   - core/processing.rs, second half (3451-5885), done in core/processing_late_test.zig: 32
     zigware tests for 39 cases (24 `#[test]`, 7 rstests with 15 cases). 5325
     `ready_aborted_flush_stops_processing` is covered by 5285's test, since no barrier is ever
-    left pending. Not portable: the should_panic tests 4754 and 5474, and four that need a
-    barrier that is still pending: 4822
-    `stable_leader_finalizations_coalesce_while_barrier_pending`, 5181
-    `shutdown_preempts_successor_barrier_waiting_for_verification_reader`, 5448
-    `shutdown_cancels_pending_flush_ack`, and 4504 `duplicate_reports_wait_for_durability`'s
-    failure case. Portable once storage-merkle's async start_sync rollout (step 6, glue's
-    barriers) lands; the adapted tests that skip held-flush checks (4055, 4184, 4327, 4405,
-    4548, 5238, 5285, 5365) can then gain them. Each test's doc comment records its adaptation.
+    left pending. Not portable: the should_panic tests 4754 and 5474. Since step 6, 5448
+    `shutdown_cancels_pending_flush_ack` and 4504 `duplicate_reports_wait_for_durability`'s
+    failure case are in core/processing_barrier_test.zig, over `runtime.storage.mocks.
+    DelayedSynced` (`Harness.init_with`); held acks cancel when `Processing.deinit` releases
+    durability, not when `run` returns. Open, s (simplex): 4822
+    `stable_leader_finalizations_coalesce_while_barrier_pending` and 5181
+    `shutdown_preempts_successor_barrier_waiting_for_verification_reader` apply later blocks
+    with a barrier pending; commonware runs them on a mock database (`control.flushes`), and on
+    a real QMDB the next apply waits for the parked sync, so they need a mock database set whose
+    `finalize` returns `Completion.init_pending`. The adapted tests that skip held-flush checks
+    (4055, 4184, 4327, 4405, 4548, 5238, 5285, 5365) can gain them on that mock. Each test's doc
+    comment records its adaptation.
   - processor/mod.rs, done: the 18 remaining tests are in processor/processor_mod_test.zig
     (simplex lane, T-01a1d5ad-c8d6). Not portable: the should_panic tests 2467, 3174, 3193,
     and 3317. Adapted: 3215 and 3301 share one test (zigware's duplicate check is
@@ -471,10 +475,11 @@ ones: d = deployer (thread T-01a1d5b9-c237), u = utils, j = storage-journal
   tests/qmdb_targeted_test.zig, on a real marshal (actor/marshal_fixture_for.zig over the e2e
   `Block`), Stateful over a real QMDB, and `Deferred`. Open: 2276
   `pruning_joins_verification_on_real_qmdbs` is a multi-db test (`build_multi_chain`,
-  `GatedMultiApp`), so it waits on Tuple Stateful with 1805 and 2039; 1614
-  `stable_leader_finalizations_outpace_slow_qmdb_sync` parks low-level syncs
-  (`DelayedContext`) and counts coalesced sync calls, so it waits on async start_sync reaching
-  qmdb and glue's `Barrier` (storage-merkle steps 5 and 6).
+  `GatedMultiApp`), so with 1805 and 2039 it waits on storage-journal's multi_db.zig
+  (`MultiBlock`, `MultiApp`); Tuple Stateful is on main (8cc85b5). 1614
+  `stable_leader_finalizations_outpace_slow_qmdb_sync` is done in tests/slow_sync_test.zig
+  (runtime `DelayedSync`); before the pipelined barrier (40cbd76) it serialized 66 syncs for 32
+  blocks and stalled.
 
 ### Backlog
 - [x] db: `Shared`, `Reader`, `Barrier`, single and tuple sets, with mod.rs's set tests.
