@@ -135,9 +135,12 @@ resolver; those lanes are running, so do the types first and the actors as they 
 ## Decisions
 - Twins: commonware's recursive generator helpers (compositions, the transition DFS, fault
   allocation) are lexicographic successor steps and an odometer here (TigerStyle: no
-  recursion), emitting in the same order. The brute-force reference enumerator test is not
-  ported; the single-round space is checked against its closed form, and enumerated
-  multi-round scenarios are checked distinct.
+  recursion), emitting in the same order. commonware's brute-force reference enumerator
+  (twins.rs 1294-1561) is in mocks/twins_reference_test.zig, also without recursion: each
+  cell's choices are listed and an odometer walks their cross product, and rounds expand a
+  multiset of residual cells (counts) or a set of scenarios (the space). It checks
+  `compressed_counts_match_reference_enumeration` (2 to 4 participants, 1 to 3 rounds) and
+  `compressed_unranking_matches_reference_space` (2 over 3 rounds, 3 over 2).
 - `Epoch`/`Height`/`View`/deltas are non-exhaustive `enum(u64)` so they compare with `==`,
   hash, and never mix with each other or raw integers (commonware's newtypes).
 - `Round` is a `packed struct(u128)` so `==` works; its fields are public (`round.epoch`).
@@ -328,7 +331,7 @@ resolver; those lanes are running, so do the types first and the actors as they 
   in the Zig code. mocks/twins.rs `route_with_groups_covers_reachable_split_targets`
   has no counterpart because routing here takes participant-index masks
   (`route_masks`, covered by the route tests).
-- [ ] Not-portable review (2026-11-19, coding lane): before 28, after 27. Every panic case
+- [x] Not-portable review (2026-11-19, coding lane): before 28, after 27. Every panic case
   still panics or asserts in zigware (category panic, 26); `route_with_groups_covers_
   reachable_split_targets` is a design difference (mask routing). Reopened as portable:
   `compressed_counts_match_reference_enumeration` (twins.rs:1707). It only needs commonware's
@@ -336,6 +339,7 @@ resolver; those lanes are running, so do the types first and the actors as they 
   `twins_generator.Generator.count` for 2-4 participants and 1-3 rounds; a plant reading
   `counts[0]` instead of `counts[remaining - 1]` in `count` would fail it from two rounds. The
   same enumerator lets `compressed_unranking_matches_reference_space` check set equality.
+  Done 2026-11-19 (simplex): both are in mocks/twins_reference_test.zig.
 - [x] Tracing: actor events are done (voter, batcher, resolver, engine). The voter opens
   commonware's `simplex.voter.start`, `.timeout`, `.process`, and `.notify` spans, and
   events inside them carry them. Each view's root `simplex.voter.view` span opens on entry

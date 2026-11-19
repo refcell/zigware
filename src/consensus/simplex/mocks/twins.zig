@@ -281,4 +281,5 @@ fn expand_rounds(
 
 test {
     _ = @import("twins_test.zig");
+    _ = @import("twins_reference_test.zig");
 }

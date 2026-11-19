@@ -1,7 +1,6 @@
 //! commonware `simplex/mocks/twins.rs` tests: the canonical scenario space, case
-//! generation, routing, and the scripted elector. (The brute-force reference enumerator
-//! that cross-checks multi-round counts is not ported; the single-round space is checked
-//! against its closed form.)
+//! generation, routing, and the scripted elector. The brute-force reference enumerator that
+//! cross-checks multi-round counts and the unranked space is in twins_reference_test.zig.
 
 const std = @import("std");
 const testing = std.testing;
