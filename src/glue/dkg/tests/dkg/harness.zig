@@ -210,9 +210,9 @@ pub const DkgEngine = struct {
         const index = ctx.index;
         const store = &self.stores[index];
         try self.inits[index].append(gpa, store.has_share(Epoch.zero()));
-        const inner = try gpa.create(Inner);
-        errdefer gpa.destroy(inner);
-        inner.* = .{ .gpa = gpa, .store = store };
+        var node_state = try self.state(index);
+        errdefer deinit_state(&node_state);
+        const inner = node_state.inner;
         const manager = try gpa.create(Types.Manager);
         manager.* = .init(ctx.oracle.manager());
         var wrapped: [channel_count]Bootstrap.Channel = undefined;
@@ -237,7 +237,17 @@ pub const DkgEngine = struct {
             },
             .inner = inner,
         };
-        return .{ started, .{ .inner = inner } };
+        return .{ started, node_state };
+    }
+
+    /// A fresh incarnation's state for participant `index`: it shares the participant's
+    /// secret store but none of an earlier incarnation's completion. Free with `deinit_state`.
+    pub fn state(self: *const DkgEngine, index: usize) !NodeState {
+        assert(index < self.stores.len);
+        const inner = try self.gpa.create(Inner);
+        inner.* = .{ .gpa = self.gpa, .store = &self.stores[index] };
+        assert(!inner.completed);
+        return .{ .inner = inner };
     }
 
     fn config(
@@ -280,11 +290,11 @@ pub const DkgEngine = struct {
         return started.context.spawn(run_node, .{started});
     }
 
-    pub fn deinit_state(state: *NodeState) void {
-        const inner = state.inner;
+    pub fn deinit_state(node_state: *NodeState) void {
+        const inner = node_state.inner;
         if (inner.info) |*info| info.deinit(inner.gpa);
         inner.gpa.destroy(inner);
-        state.* = undefined;
+        node_state.* = undefined;
     }
 };
 

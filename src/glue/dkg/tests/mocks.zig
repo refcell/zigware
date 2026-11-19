@@ -311,6 +311,9 @@ pub const MemorySecretStore = struct {
     seeds: std.ArrayList(struct { u64, Summary }) = .empty,
     dealings: std.ArrayList(struct { u64, TestPublicKey, fd.DealerPrivMsg }) = .empty,
     prunes: std.ArrayList(u64) = .empty,
+    /// Set by `stall`: the next `put_share` persists its share, then blocks on this `Io`
+    /// until canceled.
+    stall_io: ?Io = null,
 
     pub fn init(allocator: Allocator) MemorySecretStore {
         return .{ .gpa = allocator };
@@ -328,7 +331,22 @@ pub const MemorySecretStore = struct {
         return false;
     }
 
+    /// Makes the next `put_share` persist its share and then never return (commonware
+    /// `stall`): it blocks on `io` until its task is canceled.
+    pub fn stall(self: *MemorySecretStore, io: Io) void {
+        assert(self.stall_io == null);
+        self.stall_io = io;
+    }
+
     pub fn put_share(self: *MemorySecretStore, epoch: Epoch, share: Share) !void {
+        try self.insert_share(epoch, share);
+        const io = self.stall_io orelse return;
+        self.stall_io = null;
+        assert(self.has_share(epoch));
+        while (true) try io.sleep(.fromSeconds(3600), .awake);
+    }
+
+    fn insert_share(self: *MemorySecretStore, epoch: Epoch, share: Share) !void {
         for (self.shares.items) |*entry| if (entry[0] == epoch.get()) {
             entry[1] = share;
             return;

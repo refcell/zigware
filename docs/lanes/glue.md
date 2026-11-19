@@ -671,9 +671,10 @@ shared `tests/mocks.zig`, which takes additive edits only (agreed with the glue 
   all participants complete, a deaf participant completes, activation failure completes empty,
   restart without share, restart after failure, share without final block (an error here),
   and, behind -Dslow-tests, the lossy network and the filtered DKG channel.
-- [ ] mod.rs's remaining 6: closed network receiver, restart completion state is fresh, restart
-  after completion (needs `MemorySecretStore.stall`), and the scheduled-restart, random-crash,
-  and laggard plans.
+- [x] mod.rs's closed network receiver, restart completion state is fresh, and restart after
+  completion (`MemorySecretStore.stall`). The engine's select also ends when buffered broadcast's
+  receiver closes (commonware selects on `buffer_handle`), through `Node.watch_broadcast`.
+- [ ] mod.rs's scheduled-restart, random-crash, and laggard plans.
 - [ ] tests/reshare harness, properties, and mod.rs's ceremony tests (needs the orchestrator).
 - [x] lookup's peer-activation test: network.rs's
   `lookup_secondary_dials_primary_and_receives_response` in `network_test.zig` (consensus-marshal
@@ -692,3 +693,5 @@ shared `tests/mocks.zig`, which takes additive edits only (agreed with the glue 
 - 2026-11-19: the engine and node take `T.Context`; a compile check instantiates them on the
   production context, and a planted `@compileError` deep in `init_consensus` shows it analyzes
   the whole engine.
+- 2026-11-19: three more single-node dkg tests; without the broadcast watcher, the closed
+  receiver test finds 9 engine tasks still running.

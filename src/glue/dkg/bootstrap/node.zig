@@ -61,8 +61,39 @@ pub fn Node(comptime T: type) type {
             Block,
             T.PeerProvider,
             T.Blocker,
-            T.Network,
+            BroadcastNetwork,
         );
+        /// The network buffered broadcast runs on: `T.Network` with a receiver that reports
+        /// its closing, so the engine's select can end when broadcast does (commonware puts
+        /// `buffer_handle` in `Handle::select`; zigware's engine runs as a plain future,
+        /// whose await is not cancelable).
+        const BroadcastNetwork = struct {
+            pub const Sender = T.Network.Sender;
+            pub const Receiver = WatchedReceiver;
+        };
+        const WatchedReceiver = struct {
+            pub const PublicKey = T.Network.Receiver.PublicKey;
+            inner: T.Network.Receiver,
+            io: Io,
+            /// Borrowed from the node; set once `recv` fails for any reason but cancelation.
+            closed: *Io.Event,
+
+            pub fn recv(self: *WatchedReceiver) @TypeOf(self.inner.recv()) {
+                return self.inner.recv() catch |err| {
+                    if (err != error.Canceled) self.closed.set(self.io);
+                    return err;
+                };
+            }
+
+            pub fn capacity(self: *const WatchedReceiver) @TypeOf(self.inner.capacity()) {
+                return self.inner.capacity();
+            }
+
+            pub fn deinit(self: *WatchedReceiver) void {
+                self.inner.deinit();
+                self.* = undefined;
+            }
+        };
         pub const Buffer = marshal.standard.Buffer(Block, PublicKey);
         pub const Params = struct {
             pub const Scheme = T.Scheme;
@@ -121,6 +152,8 @@ pub fn Node(comptime T: type) type {
         blocks: BlockArchive,
         buffer: Buffer,
         broadcast_future: Io.Future(BroadcastEngine.Error!void),
+        /// Set when buffered broadcast's network receiver closes.
+        broadcast_closed: Io.Event,
         resolver: Resolver.Started,
         /// Set by `init`; started by `start`.
         actor: ?*Actor,
@@ -261,7 +294,13 @@ pub fn Node(comptime T: type) type {
             });
             var mailbox = created.mailbox;
             errdefer mailbox.deinit();
-            self.broadcast_future = try created.engine.start(channel.sender, channel.receiver);
+            self.broadcast_closed = .unset;
+            const receiver: WatchedReceiver = .{
+                .inner = channel.receiver,
+                .io = self.io,
+                .closed = &self.broadcast_closed,
+            };
+            self.broadcast_future = try created.engine.start(channel.sender, receiver);
             self.buffer = .init(mailbox);
         }
 
@@ -317,6 +356,13 @@ pub fn Node(comptime T: type) type {
             );
             self.actor = null;
             return handle;
+        }
+
+        /// Returns once buffered broadcast's network receiver closes, which stops its engine
+        /// (commonware's `buffer_handle` ending). Cancelable: abort it to stop waiting.
+        pub fn watch_broadcast(self: *Self) anyerror!void {
+            try self.broadcast_closed.wait(self.io);
+            assert(self.broadcast_closed.isSet());
         }
 
         /// Stops the engines and releases the node's storage handles, as a crash would, so a

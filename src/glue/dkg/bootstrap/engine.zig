@@ -548,17 +548,22 @@ pub fn Engine(comptime T: type) type {
             return Simplex.run(ctx, engine, convert(votes), certs, convert(resolver));
         }
 
-        /// Starts the reshare actor, marshal, and simplex, and runs until one of them ends
-        /// (commonware's `Handle::select`).
+        fn buffer_task(_: Ctx, self: *Self) anyerror!void {
+            return self.node.watch_broadcast();
+        }
+
+        /// Starts the reshare actor, marshal, and simplex, and runs until one of them or
+        /// buffered broadcast ends (commonware's `Handle::select`).
         fn supervise(self: *Self, ctx: Ctx, channels: Channels) anyerror!void {
             const Task = ReshareTask(T.Network.Sender, T.Network.Receiver);
-            var handles: [3]runtime.context.Handle(anyerror!void) = undefined;
+            var handles: [4]runtime.context.Handle(anyerror!void) = undefined;
             const dkg = channels.dkg;
             const reshare_args = .{ self, dkg.sender, dkg.receiver };
             handles[0] = try ctx.child("reshare").spawn(Task.run, reshare_args);
             handles[1] = try self.node.start(.{ .mailbox = self.reshare_mailbox.clone() });
             const args = .{ self, channels.votes, channels.certificates, channels.resolver };
             handles[2] = try ctx.child("engine").spawn(simplex_task, args);
+            handles[3] = try ctx.child("buffer").spawn(buffer_task, .{self});
             const first = try runtime.context.select(anyerror!void, self.io, &handles);
             return first;
         }
