@@ -110,6 +110,11 @@ resize, sync), `runtime.storage`, with the in-memory backend `runtime.storage.me
 - [x] Metrics: contiguous fixed and variable journals (`size`, `pruning_boundary`, `retained`,
   `tail_items`, call and read counters; the variable journal's offsets under `offsets`).
 - [x] Metrics: the blob and section managers (`tracked`, `synced`, `pruned`).
+- [x] Benches: the 12 journal benches (`storage/src/journal/benches`, bench `journal`) under
+  `src/storage/journal/benches/`, with commonware's names (`journal::<module>/...`).
+- [ ] Benches: metadata (`overwrite`, `restart`, `sync`).
+- [ ] Benches: runtime buffer (`buffer_paged::append`, `read`, `sync`) in
+  `src/runtime/benches.zig`.
 - Handed to storage-merkle (2026-11-16): `src/storage/journal/zstd.zig`'s real compressor and
   the `journal_fixed_operations` and `queue_operations` fuzz targets.
 
@@ -352,6 +357,18 @@ resize, sync), `runtime.storage`, with the in-memory backend `runtime.storage.me
   store, instead of failing the next sync (commonware's dropped-handle and failure tests map
   onto that, on faulty storage).
 
+- Journal benches measure on the production storage in a temporary `.zig-cache/tmp` directory
+  (commonware's tokio runtime) and smoke-test (`zig build test`) on the in-memory storage, so
+  the test suite does not wait on disk syncs. Smoke inputs trim the largest cases commonware
+  smoke-tests in full, since unoptimized builds take seconds on them: `fixed_read_sequential`
+  and the replays run 1,000 items, `variable_prepare_append` skips 32,768 records and the
+  1 MiB size (Debug copies each record by value along the encoding path and overflows the
+  stack), and `variable_read_compressed` caps items at 500. Measured inputs are commonware's.
+- `fixed_read_random`/`variable_read_random` `mode=concurrent` issues its reads back to back:
+  the journals take reads through one handle, so there are no futures to join. Syncs complete
+  synchronously, so `append_sync`'s `start_sync` mode has no handle to await.
+- `variable_read_compressed` and `variable_prepare_append`'s level-3 cases compress with our
+  zstd encoder; frame sizes match libzstd's only once storage-merkle's byte-exact port lands.
 - Contiguous journal duration histograms (`*_duration`) are not ported: journals hold no clock.
   Their scope is `Config.metrics` (null by default).
 - Metrics record through `runtime.telemetry.metrics` handles; without a scope, handles are
@@ -401,3 +418,4 @@ resize, sync), `runtime.storage`, with the in-memory backend `runtime.storage.me
 - 2026-11-18: oversized `destroy` stops at its first failed or cancelled step, as commonware
   does (reported through marshal: it kept destroying the other journals, which re-parked
   after a cancellation).
+- 2026-11-19: ported the 12 journal benches (`src/storage/journal/benches/`).
