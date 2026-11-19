@@ -86,7 +86,7 @@ which every database here is built on.
   chained schedules against committed rebuilds; same roots and floor walks; recovery).
 - [x] fuzz target: `qmdb_any_ordered_batching` (metadata across commits, final span links).
   Every qmdb fuzz target in my scope is ported (the any sync targets belong to the crypto lane).
-- [ ] benches for any, immutable, keyless, and store (coordinator split, 2026-11-19: current and
+- [x] benches for any, immutable, keyless, and store (coordinator split, 2026-11-19: current and
   compact benches go to storage-qmdb-sync), in `qmdb/benches/` (`common.zig` holds the
   variant registry, configs, storage, and seeding; storage-qmdb-sync adds current there).
   - [x] `qmdb::generate`: the any fixed, variable, and variable-vec variants (MMR and MMB),
@@ -96,6 +96,11 @@ which every database here is built on.
   - [x] `qmdb::merkleize`: the main grid (chained, seed sync, cache clear; `blob_reads` metric
     through a storage meter) and the churned case, over the eight any variants.
   - `qmdb::chained_growth` benches only `current` variants, so it goes to storage-qmdb-sync.
+  - [x] the opt-in CLI harnesses `cold_read`, `constantinople`, and `scale` in
+    `qmdb/benches/{cold_read,constantinople,scale}.zig` (shared pieces in `harness.zig`):
+    `zig build qmdb-cold-read|qmdb-constantinople|qmdb-scale -- <commonware's args>`, built
+    in ReleaseFast; `zig build test` runs a tiny smoke test of each. Their `any` variants;
+    storage-qmdb-sync adds `current` to constantinople's `variants` tuple.
 - [x] immutable (fixed, MMR and MMB): `Db`, chained batches, floor-filtered batch reads,
   prune, recovery, `ImmutableMmr/MmbFixedConf` root conformance (matches), mod.rs's core
   scenarios, and a randomized chain check against the reopened rebuild.
@@ -110,7 +115,7 @@ which every database here is built on.
   sequential, large, sibling-apply proof refusal, operations match the applied log;
   `batch_test.zig`), including its `ElementPruned` tail after a flushing commit.
 - [x] Fuzz: `qmdb_keyless_operations` (seeded and `std.testing.fuzz`), with a value model.
-- [ ] Fuzz targets under storage/fuzz for these databases; benches under `benches.zig`.
+- [x] Fuzz targets under storage/fuzz for these databases; benches under `qmdb/benches/`.
 
 ## Public API (on main)
 - `storage.qmdb.value`: `Fixed(V)`, `Variable(V)` (encodings with `Value`, `fixed`), `check`,
@@ -192,10 +197,17 @@ which every database here is built on.
   `find_inactivity_floor_at`, `inactive_peaks_at`.
 
 ## Decisions
-- Not ported (deferred): cold_read, constantinople, and scale. In commonware they are opt-in
-  CLI harnesses for multi-GB on-disk runs that no-op without subcommand arguments, not
-  criterion benches, so `zig build bench` has no place for them; they would need their own
-  executables. The `*_gungraun` instruction-count benches need valgrind.
+- cold_read, constantinople, and scale are commonware's opt-in CLI harnesses (`harness =
+  false` bench binaries that no-op without arguments), so they are executables with their own
+  run steps (`zig build qmdb-<name> -- ...`, build.zig `add_qmdb_harnesses`), outside
+  `zig build bench`, with commonware's arguments, defaults, partitions, and output lines.
+  zigware's databases are not shared across threads, so modes commonware runs as concurrent
+  futures (cold_read's chunked, shared, get_concurrent, pipeline, sustained; scale's readers)
+  issue the same reads one after another, `blob_read_many` reads page by page, and the
+  `threads`, `workers`, `blocking`, and init `concurrency` arguments are reported only.
+  cold_read accepts only the 4096-byte physical page zigware's storage writes. scale's Zipf
+  ports `rand_distr` 0.6's sampler and matches its value-stability vector. The `*_gungraun`
+  instruction-count benches need valgrind and are not ported.
 - Benches run over the production disk storage, as commonware's tokio runtime does. On smoke
   inputs (`zig build test`) they use the in-memory storage and smaller cases (generate: 100
   elements and 1,000 operations; init: 100 and 1,000; apply_batch: 256 keys and 64 updates),
@@ -314,3 +326,4 @@ which every database here is built on.
 - 2026-11-19: immutable bounded-initialization, recovery, prune, get_many, and batch scenarios.
 - 2026-11-19: keyless recovery, proof, read, bounded-init, and stale-batch scenarios.
 - 2026-11-19: keyless batch-read, stale-chain, and floor scenarios; keyless mod.rs done.
+- 2026-11-19: the cold_read, constantinople, and scale CLI harnesses; benches done.

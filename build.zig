@@ -258,6 +258,54 @@ fn add_benches(
             }
         }
     }
+    add_qmdb_harnesses(b, &measured_modules, modules, target, optimize, test_step, check_step);
+}
+
+/// commonware's opt-in QMDB harnesses (`storage/src/qmdb/benches/{cold_read,constantinople,
+/// scale}.rs`): `zig build qmdb-<name> -- <args>` runs one in ReleaseFast unless -Doptimize
+/// says otherwise; `zig build test` runs each harness's tiny smoke test.
+fn add_qmdb_harnesses(
+    b: *std.Build,
+    measured_modules: []const *std.Build.Module,
+    modules: []const *std.Build.Module,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    test_step: *std.Build.Step,
+    check_step: *std.Build.Step,
+) void {
+    const harness_optimize: std.builtin.OptimizeMode = if (optimize == .debug) .fast else optimize;
+    const imports = [_][]const u8{
+        "bench", "codec", "cryptography", "runtime", "storage", "utils",
+    };
+    for ([_][]const u8{ "cold_read", "constantinople", "scale" }) |name| {
+        const source = b.path(b.fmt("src/storage/qmdb/benches/{s}.zig", .{name}));
+        const step_name = b.fmt("qmdb-{s}", .{name});
+        std.mem.replaceScalar(u8, @constCast(step_name), '_', '-');
+        for ([_]bool{ true, false }) |measured| {
+            const graph = if (measured) measured_modules else modules;
+            const root = b.createModule(.{
+                .root_source_file = source,
+                .target = target,
+                .optimize = if (measured) harness_optimize else optimize,
+            });
+            for (imports) |dep| root.addImport(dep, graph[package_index(dep)]);
+            if (measured) {
+                const exe = b.addExecutable(.{ .name = step_name, .root_module = root });
+                check_step.dependOn(&exe.step);
+                const run = b.addRunArtifact(exe);
+                run.addPassthruArgs();
+                run.has_side_effects = true;
+                const description = b.fmt("Run the {s} QMDB harness", .{name});
+                b.step(step_name, description).dependOn(&run.step);
+            } else {
+                const tests = b.addTest(.{
+                    .name = b.fmt("test-{s}", .{step_name}),
+                    .root_module = root,
+                });
+                test_step.dependOn(&b.addRunArtifact(tests).step);
+            }
+        }
+    }
 }
 
 fn bench_harness(

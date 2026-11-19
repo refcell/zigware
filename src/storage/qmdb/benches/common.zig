@@ -254,15 +254,30 @@ pub const Disk = struct {
     opened: bool = false,
     /// A wrapper of the backend (such as a storage meter) that databases open through instead.
     override: ?runtime.storage.Storage = null,
+    /// A directory the caller names (the CLI harnesses' `<dir>`), created if absent and kept
+    /// on close.
+    path: ?[]const u8 = null,
 
     pub fn init(runner: *const bench.Runner) Disk {
         return .{ .io = runner.io, .memory = runner.inputs == .smoke };
+    }
+
+    /// Production storage at `path`, kept on close.
+    pub fn at(io: Io, path: []const u8) Disk {
+        assert(path.len > 0);
+        return .{ .io = io, .memory = false, .path = path };
     }
 
     pub fn open(disk: *Disk, gpa: Allocator) !void {
         assert(!disk.opened);
         if (disk.memory) {
             disk.backend = .{ .memory = .init(gpa) };
+            disk.opened = true;
+            return;
+        }
+        if (disk.path) |path| {
+            const root = try Io.Dir.cwd().createDirPathOpen(disk.io, path, .{});
+            disk.backend = .{ .production = try .init(disk.io, gpa, root, .{}) };
             disk.opened = true;
             return;
         }
@@ -290,6 +305,7 @@ pub const Disk = struct {
         disk.opened = false;
         if (disk.memory) return disk.backend.memory.deinit();
         disk.backend.production.deinit();
+        if (disk.path != null) return;
         const name = disk.directory[0..disk.directory_len];
         Io.Dir.cwd().deleteTree(disk.io, name) catch |err|
             std.log.warn("qmdb benches: could not remove {s}: {t}", .{ name, err });
@@ -304,6 +320,17 @@ pub const Options = struct {
     init_cache: ?usize = init_cache_size,
     /// Pages of the page cache.
     page_cache_pages: u32 = page_cache_size,
+    /// The page cache's logical page size (commonware's unaligned-layout override).
+    logical_page_size: u16 = page_size,
+    /// Partition names replacing the bench defaults (the CLI harnesses' own names).
+    names: ?Names = null,
+};
+
+/// The partitions of one database.
+pub const Names = struct {
+    merkle_journal: []const u8,
+    merkle_metadata: []const u8,
+    log: []const u8,
 };
 
 /// One open database of type `D` with its page cache and metrics (commonware creates both
@@ -318,14 +345,16 @@ pub fn Session(comptime D: type) type {
 
         pub fn open(self: *Self, gpa: Allocator, disk: *Disk, options: Options) !void {
             assert(options.items_per_blob > 0);
-            self.cache = try .init(gpa, page_size, options.page_cache_pages);
+            assert(options.logical_page_size > 0);
+            self.cache = try .init(gpa, options.logical_page_size, options.page_cache_pages);
             errdefer self.cache.deinit();
             self.registry = .init(gpa);
             errdefer self.registry.deinit();
             const backend = disk.storage();
             const suffix = comptime partition(D);
             const blob = options.items_per_blob;
-            const log = log_config(@FieldType(D.Cfg, "log"), suffix, &self.cache, blob);
+            var log = log_config(@FieldType(D.Cfg, "log"), suffix, &self.cache, blob);
+            if (options.names) |names| log.partition = names.log;
             if (D == StoreDb) {
                 const cfg: D.Cfg = .{
                     .log = log,
@@ -338,6 +367,10 @@ pub fn Session(comptime D: type) type {
             const scope = metrics.Scope.init(&self.registry).child("storage");
             var cfg: D.Cfg = undefined;
             cfg.merkle = merkle_config(suffix, &self.cache, blob);
+            if (options.names) |names| {
+                cfg.merkle.journal_partition = names.merkle_journal;
+                cfg.merkle.metadata_partition = names.merkle_metadata;
+            }
             cfg.log = log;
             if (comptime @hasField(D.Cfg, "translator")) {
                 const T = @FieldType(D.Cfg, "translator");
