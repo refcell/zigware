@@ -142,10 +142,28 @@ encoding parts as soon as `codec` has its core API (see docs/lanes/codec.md).
   pairs with per-sequence reference counts instead of per-message `Arc`s.
 - `sync`: commonware's re-exported `parking_lot`/`tokio` locks are `std.Io.Mutex`/`RwLock`/
   `Condition`; `Exclusive` (a `Sync` marker) and the traced locks (tracing spans) have no Zig
-  counterpart. `Widen` is `@as`, and `max` is `@max`.
+  counterpart. `Widen` is `@as`, and `max` is `@max`. Caller audit (2026-11-19, commonware
+  a9ffc25f3): no crate or example outside utils uses `TracedAsyncMutex`/`TracedAsyncRwLock`;
+  `Exclusive`'s one outside user is runtime `utils/handle.rs`, which wraps a boxed completion
+  future so the handle is `Sync`. Zig has no `Sync` bound, and runtime's `Handle` holds a
+  supervision header and a result pointer, not a future, so there is nothing to wrap.
+  Intentionally not ported.
 - `futures`: pools run functions as `std.Io` tasks instead of holding futures; aborting is an
   explicit `Aborter.abort()` (Rust aborts on drop). `OptionFuture`, `rebind`/`rebind_entry`,
-  and `Shared` exist for Rust ownership and polling and are not ported.
+  and `Shared` exist for Rust ownership and polling and are intentionally not ported. Caller
+  audit (2026-11-19, commonware a9ffc25f3): no crate or example outside utils calls
+  `rebind`/`rebind_entry` or utils' `Shared` (runtime's `signal.rs`, `buffer/mod.rs` and
+  `storage/faulty.rs` use the `futures` crate's `Shared`, which zigware's ports replace with
+  latches and completions). `OptionFuture` is used by marshal `core/acks.rs` and
+  `ancestry.rs` (the `futures` crate's), glue `stateful/actor/syncer` and
+  `dkg/reshare/actor/inclusion.rs`: a future that pends forever when empty, so a `select!` arm
+  sleeps. Their Zig ports keep a plain optional (marshal `acks.zig`'s armed ack) and only wait
+  on it when it is set, so the type has no meaningful Zig counterpart.
+- `channel/ring.rs` `send_all` (futures `Sink::send_all` over a `Stream`) and `rng.rs`
+  `FuzzRng::try_fill_bytes` (rand's `TryRng`, infallible here) are trait conveniences with no
+  caller outside utils: zigware has no `Sink`/`Stream` traits, and its RNG interface is the
+  infallible `fill_bytes` (runtime contexts and `cryptography.transcript` implement their own
+  `try_fill_bytes` against rand, not FuzzRng's). Intentionally not ported (2026-11-19).
 - `src/utils/fuzz.zig` is the utils fuzz driver: a body over `*FuzzRng`, run seeded in
   `zig build test` and under `std.testing.fuzz`.
 

@@ -307,3 +307,8 @@ qmdb `current` (balances, over the MMB) and `keyless` (payout log, over the MMR)
   strategy tests (planted: `strategy()` ignoring parallelism, `wait` skipping the hand-back) and
   the empty layout range death test (planted: no range check) are new. The rest stay: they
   inspect state after `catch_unwind`, Rust futures/wakers/`Drop`, or unported features.
+- 2026-11-19: caller audit of the utils APIs zigware lacks (`rebind`/`rebind_entry`, `Shared`,
+  `OptionFuture`, ring `send_all`, FuzzRng `try_fill_bytes`, traced locks, `Exclusive`): none
+  is called outside utils except `OptionFuture` (marshal, glue) and `Exclusive` (runtime
+  handle), whose Zig ports use a plain optional and need no `Sync` wrapper. All recorded in
+  utils.md Decisions as intentionally not ported; utils stays 75 not portable.
