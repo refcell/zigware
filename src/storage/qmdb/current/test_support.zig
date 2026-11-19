@@ -54,6 +54,21 @@ pub fn OrderedVariable(comptime F: type) type {
     return current.Db(F, U, Journal, any_support.OrderedIndex, Sha256, 32);
 }
 
+/// Unordered and ordered `current` databases of owned byte values (`Vec<u8>`).
+pub fn UnorderedBytes(comptime F: type) type {
+    const E = value.Variable([]const u8);
+    const Journal = variable.Journal(any.operation.Unordered(F, Digest, E));
+    const U = any.operation.update.Unordered(Digest, E);
+    return current.Db(F, U, Journal, any_support.Index, Sha256, 32);
+}
+
+pub fn OrderedBytes(comptime F: type) type {
+    const E = value.Variable([]const u8);
+    const Journal = variable.Journal(any.operation.Ordered(F, Digest, E));
+    const U = any.operation.update.Ordered(Digest, E);
+    return current.Db(F, U, Journal, any_support.OrderedIndex, Sha256, 32);
+}
+
 /// `any`'s storage harness, opening `current` databases.
 pub const Harness = struct {
     inner: any_support.Harness,

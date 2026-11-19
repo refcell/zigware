@@ -35,4 +35,5 @@ test {
     _ = @import("grafting_test.zig");
     _ = @import("proof_test.zig");
     _ = @import("verification_test.zig");
+    _ = @import("variable_test.zig");
 }

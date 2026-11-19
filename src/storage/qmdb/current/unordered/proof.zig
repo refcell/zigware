@@ -41,6 +41,23 @@ pub fn KeyValueProof(comptime F: type, comptime D: type, comptime chunk_size: ?u
             return verification.verify_typed_operation(F, H, Op, &self.proof, op, root);
         }
 
+        /// `verify` for update types that own memory, encoding the update with `gpa`.
+        pub fn verify_alloc(
+            self: *const Self,
+            gpa: Allocator,
+            comptime H: type,
+            comptime U: type,
+            key: U.Key,
+            value: U.Value,
+            root: *const D,
+        ) Allocator.Error!bool {
+            const Op = operation.Operation(F, U);
+            comptime assert(!U.siblings);
+            const op: Op = .{ .update = .{ .key = key, .value = value } };
+            const verify_op = verification.verify_typed_operation_alloc;
+            return verify_op(F, H, Op, gpa, &self.proof, op, root);
+        }
+
         pub fn eql(a: Self, b: Self) bool {
             return a.proof.eql(b.proof);
         }

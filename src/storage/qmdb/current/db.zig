@@ -424,6 +424,7 @@ pub fn Db(F: type, U: type, C: type, I: type, H: type, comptime N: usize) type {
 
             pub fn deinit(self: *Ranged, gpa: Allocator) void {
                 self.proof.deinit(gpa);
+                codec.free_items(Operation, gpa, self.operations);
                 gpa.free(self.operations);
                 gpa.free(self.chunks);
                 self.* = undefined;
@@ -443,9 +444,13 @@ pub fn Db(F: type, U: type, C: type, I: type, H: type, comptime N: usize) type {
             errdefer proof.deinit(self.gpa);
             const operations = try self.gpa.alloc(Operation, @intCast(end - start));
             errdefer self.gpa.free(operations);
+            var read: usize = 0;
+            errdefer codec.free_items(Operation, self.gpa, operations[0..read]);
             for (operations, start..) |*operation, location| {
                 operation.* = try self.any.log.read(location);
+                read += 1;
             }
+            assert(read == operations.len);
             const first_chunk = start / chunk_bits;
             const last_chunk = (end - 1) / chunk_bits;
             const chunks = try self.gpa.alloc([N]u8, @intCast(last_chunk - first_chunk + 1));
@@ -463,13 +468,15 @@ pub fn Db(F: type, U: type, C: type, I: type, H: type, comptime N: usize) type {
 
             pub fn deinit(self: *ProvedValue, gpa: Allocator) void {
                 self.proof.deinit(gpa);
+                codec.free(Value, gpa, self.value);
                 self.* = undefined;
             }
         };
 
         /// The proof of `key`'s current value. Fails with `KeyNotFound` if it has none.
         pub fn key_value_proof(self: *Self, key: *const Key) !ProvedValue {
-            const located = try self.any.get_with_loc(key) orelse return error.KeyNotFound;
+            var located = try self.any.get_with_loc(key) orelse return error.KeyNotFound;
+            errdefer located.update.deinit(self.gpa);
             assert(value_mod.eql(Key, located.update.key, key.*));
             const proof = try self.operation_proof(located.location);
             assert(proof.loc == located.location);
@@ -485,14 +492,16 @@ pub fn Db(F: type, U: type, C: type, I: type, H: type, comptime N: usize) type {
         /// active.
         pub fn exclusion_proof(self: *Self, key: *const Key) !ExclusionProof {
             comptime assert(U.siblings);
-            if (try self.any.get_span(key)) |span| {
-                const bytes = std.mem.asBytes;
-                if (std.mem.eql(u8, bytes(&span.update.key), bytes(key))) return error.KeyExists;
+            if (try self.any.get_span(key)) |located| {
+                var span = located;
+                errdefer span.update.deinit(self.gpa);
+                if (value_mod.eql(Key, span.update.key, key.*)) return error.KeyExists;
                 const proof = try self.operation_proof(span.location);
                 return .{ .key_value = .{ .proof = proof, .update = span.update } };
             }
             const last = self.any.log.size() - 1;
-            const op = try self.any.log.read(last);
+            var op = try self.any.log.read(last);
+            errdefer op.deinit(self.gpa);
             if (op != .commit) return error.DataCorrupted; // The log ends with a commit.
             // An empty database's last commit raised its floor to itself.
             if (op.commit.floor != last) return error.DataCorrupted;
@@ -509,6 +518,18 @@ pub fn Db(F: type, U: type, C: type, I: type, H: type, comptime N: usize) type {
         ) bool {
             comptime assert(U.siblings);
             return proof.verify(H, key, root_value);
+        }
+
+        /// `verify_exclusion_proof` for values that own memory, encoding with `gpa`.
+        pub fn verify_exclusion_proof_alloc(
+            gpa: Allocator,
+            proof: *const ExclusionProof,
+            key: Key,
+            root_value: *const Digest,
+        ) Allocator.Error!bool {
+            comptime assert(U.siblings);
+            const verify = ordered_proof.verify_exclusion;
+            return verify(F, H, ExclusionProof, proof, gpa, key, root_value);
         }
 
         /// The active key after `key` (not wrapping), as in `any`.
@@ -534,6 +555,19 @@ pub fn Db(F: type, U: type, C: type, I: type, H: type, comptime N: usize) type {
             root_value: *const Digest,
         ) bool {
             return proof.verify(H, U, key, value, root_value);
+        }
+
+        /// `verify_key_value_proof` for values that own memory, encoding with `gpa`.
+        pub fn verify_key_value_proof_alloc(
+            gpa: Allocator,
+            proof: *const KeyValueProof,
+            key: Key,
+            value: Value,
+            root_value: *const Digest,
+        ) Allocator.Error!bool {
+            if (comptime !U.siblings) return proof.verify_alloc(gpa, H, U, key, value, root_value);
+            const update: U = .{ .key = key, .value = value, .next_key = proof.next_key };
+            return ordered_proof.verify_update(F, H, U, gpa, &proof.proof, update, root_value);
         }
 
         /// Prunes operations below `location`, which may not exceed the sync boundary. Commits

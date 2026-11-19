@@ -57,6 +57,15 @@ it comes first once `any` lands.
   above the sync boundary. Planted bugs (a wrong historical-proof floor, a corrupted sync pin)
   are caught. The sync tests share one page cache between source and target, as commonware's
   do. Keyless and immutable glue, the engine, and the shared harness stay with the crypto lane.
+- [x] current over owned byte values (`Vec<u8>`, current/variable_test.zig, unordered and
+  ordered, both families): batches, the floor walk, reads, key-value, range, and exclusion
+  proofs, prune, and reopen under the leak checker. Fixed leaks of owned values in
+  `range_proof` (and its partial reads), `ProvedValue`, and the error paths of
+  `key_value_proof`/`exclusion_proof`; `exclusion_proof` compares keys with `value.eql`.
+  Decision: verifying an owned value's proof allocates its encoding, so it goes through
+  `verify_key_value_proof_alloc`/`verify_exclusion_proof_alloc(gpa, ...)` (commonware's
+  `verify` encodes into a `Vec`); the bool-returning verifiers keep their inline encoding
+  and assert at comptime that the operation owns no memory.
 - [ ] qmdb benches: the current variants of commonware's `qmdb/benches` (compact has none),
   split with storage-qmdb.
 - [x] sync journal (`journal.init`/`resize`/`append` over contiguous journals, `Memory(Op)`)
@@ -208,3 +217,4 @@ it comes first once `any` lands.
 - 2026-11-19: any sync glue.
 - 2026-11-19: current sync glue.
 - 2026-11-19: any fixed and variable sync fuzz targets.
+- 2026-11-19: current over owned byte values.

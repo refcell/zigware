@@ -9,6 +9,7 @@
 
 const std = @import("std");
 const assert = std.debug.assert;
+const Allocator = std.mem.Allocator;
 const codec = @import("codec");
 const merkle = @import("../../merkle/mod.zig");
 const grafting = @import("grafting.zig");
@@ -154,7 +155,8 @@ pub const max_inline_operation_bytes: usize = 4096;
 
 /// `verify_operation` of the operation `op` of type `Op`, encoded here: in place for a
 /// fixed-size type, else into a stack buffer. A variable-sized `Op` must hold keys and values
-/// of bounded size (no owned memory), so its encoding fits `max_inline_operation_bytes`.
+/// of bounded size (no owned memory), so its encoding fits `max_inline_operation_bytes`; an
+/// `Op` that owns memory verifies through `verify_typed_operation_alloc`.
 pub fn verify_typed_operation(
     comptime F: type,
     comptime H: type,
@@ -163,7 +165,29 @@ pub fn verify_typed_operation(
     op: Op,
     root: *const H.Digest,
 ) bool {
-    comptime assert(!codec.owns_memory(Op)); // Owned values need an allocating encoder.
+    comptime assert(!codec.owns_memory(Op));
+    return verify_typed_operation_alloc(F, H, Op, null, operation_proof, op, root) catch
+        unreachable; // Proof: an `Op` without owned memory encodes inline, never allocating.
+}
+
+/// `verify_typed_operation` that encodes an `Op` owning memory (unbounded values, such as
+/// byte vectors) with `gpa`, which such an `Op` requires; any other `Op` encodes inline.
+pub fn verify_typed_operation_alloc(
+    comptime F: type,
+    comptime H: type,
+    comptime Op: type,
+    gpa: ?Allocator,
+    operation_proof: anytype,
+    op: Op,
+    root: *const H.Digest,
+) Allocator.Error!bool {
+    if (comptime codec.owns_memory(Op)) {
+        assert(gpa != null);
+        const encoded = try codec.encode(Op, gpa.?, op);
+        defer gpa.?.free(encoded);
+        assert(encoded.len == codec.encode_size(Op, op));
+        return verify_operation(F, H, operation_proof, encoded, root);
+    }
     const size = comptime codec.fixed_size(Op) orelse max_inline_operation_bytes;
     var buffer: [size]u8 = undefined;
     const encoded_size = codec.encode_size(Op, op);

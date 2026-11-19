@@ -18,7 +18,8 @@ pub const key_value_context: u8 = 0;
 /// Exclusion-proof tag of an empty database's commit.
 pub const commit_context: u8 = 1;
 
-/// A proof that a key has a value, with the next active key in sorted order.
+/// A proof that a key has a value, with the next active key in sorted order. `verify` takes
+/// updates that own no memory; owned values verify through `verify_update` with an allocator.
 pub fn KeyValueProof(
     comptime F: type,
     comptime K: type,
@@ -49,9 +50,10 @@ pub fn KeyValueProof(
             value_of_key: U.Value,
             root: *const D,
         ) bool {
-            comptime assert(U.siblings and U.Key == K);
+            comptime assert(U.siblings and U.Key == K and !codec.owns_memory(U));
             const update: U = .{ .key = key, .value = value_of_key, .next_key = self.next_key };
-            return verify_update(F, H, U, &self.proof, update, root);
+            return verify_update(F, H, U, null, &self.proof, update, root) catch
+                unreachable; // Proof: an update without owned memory encodes inline.
         }
 
         pub fn eql(a: Self, b: Self) bool {
@@ -114,7 +116,10 @@ pub fn ExclusionProof(
 
         /// Whether this proves `key` absent from a database with canonical `root`.
         pub fn verify(self: *const Self, comptime H: type, key: K, root: *const D) bool {
-            return verify_exclusion(F, H, Self, self, key, root);
+            // Owned values verify through `verify_exclusion` with an allocator.
+            comptime assert(!codec.owns_memory(Update));
+            return verify_exclusion(F, H, Self, self, null, key, root) catch
+                unreachable; // Proof: operations without owned memory encode inline.
         }
 
         pub fn eql(a: Self, b: Self) bool {
@@ -169,44 +174,49 @@ fn deinit_exclusion(comptime Self: type, self: *Self, gpa: Allocator) void {
     self.* = undefined;
 }
 
-/// Whether `operation_proof` shows the ordered update `update` active under `root`.
-fn verify_update(
+/// Whether `operation_proof` shows the ordered update `update` active under `root`. `gpa`
+/// encodes an update that owns memory, which requires it.
+pub fn verify_update(
     comptime F: type,
     comptime H: type,
     comptime U: type,
+    gpa: ?Allocator,
     operation_proof: anytype,
     update: U,
     root: *const H.Digest,
-) bool {
+) Allocator.Error!bool {
     comptime assert(U.siblings);
     const Op = any.Operation(F, U);
     const op: Op = .{ .update = update };
-    return verification.verify_typed_operation(F, H, Op, operation_proof, op, root);
+    return verification.verify_typed_operation_alloc(F, H, Op, gpa, operation_proof, op, root);
 }
 
 /// `ExclusionProof.verify`: the proven update's cyclic span `[key, next_key)` covers `key` and
 /// is not its own, or the proven commit is an empty database's (its floor is its location).
-fn verify_exclusion(
+/// `gpa` encodes operations that own memory, which require it.
+pub fn verify_exclusion(
     comptime F: type,
     comptime H: type,
     comptime Self: type,
     self: *const Self,
+    gpa: ?Allocator,
     key: Self.Update.Key,
     root: *const H.Digest,
-) bool {
+) Allocator.Error!bool {
     const K = Self.Update.Key;
     switch (self.*) {
         .key_value => |*span| {
             const update = &span.update;
             if (value.eql(K, update.key, key)) return false;
             if (!ordered.in_span(K, &update.key, &update.next_key, &key)) return false;
-            return verify_update(F, H, Self.Update, &span.proof, update.*, root);
+            return verify_update(F, H, Self.Update, gpa, &span.proof, update.*, root);
         },
         .commit => |*commit| {
             const Op = any.Operation(F, Self.Update);
             const floor = commit.proof.loc;
             const op: Op = .{ .commit = .{ .metadata = commit.value, .floor = floor } };
-            return verification.verify_typed_operation(F, H, Op, &commit.proof, op, root);
+            const verify_op = verification.verify_typed_operation_alloc;
+            return verify_op(F, H, Op, gpa, &commit.proof, op, root);
         },
     }
 }
