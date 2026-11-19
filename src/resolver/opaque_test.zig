@@ -540,8 +540,9 @@ fn repeat_after_verdict_body(io: Io) !void {
     if (repeat_outcome_under_test) |outcome| try first.send(outcome) else first.drop();
     try subject.add_fetch(1, &.{10});
 
-    // The fetch applied the verdict, so it is not reported again and cannot retire the
-    // repeat (commonware's pool reports `Aborted` for it instead).
+    // The fetch applied the verdict, so the wait for the first delivery aborts and cannot
+    // retire the repeat.
+    try testing.expectError(error.Aborted, subject.deliveries.try_next_completion());
     try testing.expect(try subject.deliveries.try_next_completion() == null);
     try testing.expectEqualSlices(u16, &.{10}, subject.subscribers.pending(1).?);
 
@@ -577,16 +578,37 @@ fn repeat_joins_inflight_body(io: Io) !void {
 
     // The accepted response is redelivered to 11 and then to the repeat for 10, each after
     // the previous verdict is applied, and the source is not asked again.
-    for ([_]u16{ 11, 10 }, 0..) |subscriber, index| {
-        if (index > 0) try direct.deliver_next();
-        var delivery = direct.consumer.pop().?;
+    for ([_]u16{ 11, 10 }) |subscriber| {
+        var delivery = try next_delivery(&direct);
         try testing.expectEqualStrings("value", delivery.value);
         try testing.expectEqualSlices(u16, &.{subscriber}, delivery.subscribers);
         try delivery.send(complete);
     }
-    try direct.deliver_next();
+    try handle_next_completion(subject);
     try testing.expect(!subject.subscribers.contains(1));
     try testing.expectEqual(@as(u32, 1), fetcher.calls());
+}
+
+/// Waits for and handles the next completion, skipping aborted waits (commonware's test loop
+/// skips them too). Bounded: each tracked delivery aborts at most once.
+fn handle_next_completion(subject: *DirectActor) !void {
+    for (0..8) |_| {
+        const completed = subject.deliveries.next_completion() catch |err| switch (err) {
+            error.Aborted => continue,
+            else => return err,
+        };
+        return subject.handle_delivered(completed);
+    }
+    return error.TestTooManyAborts;
+}
+
+/// The consumer's next delivery, handling completions until one arrives.
+fn next_delivery(direct: *Direct) !Captured {
+    for (0..8) |_| {
+        if (direct.consumer.pop()) |delivery| return delivery;
+        try handle_next_completion(direct.actor);
+    }
+    return error.TestNoDelivery;
 }
 
 test "verdict sent before a repeat fetch does not retire it (issue_5720_regression)" {

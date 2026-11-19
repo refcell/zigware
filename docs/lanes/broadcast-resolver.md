@@ -168,9 +168,8 @@ top of the p2p engine's and the opaque actor's `add_fetch`, with the three new t
 `test_try_completion_takes_a_sent_verdict` ("try_completion takes a sent verdict"), and the
 `issue_5720_regression` tests of p2p/engine.rs (engine_delivery_test.zig) and opaque.rs
 (opaque_test.zig), each named "verdict sent before a repeat fetch does not retire it". Each fails
-with its fix removed. Decision: `try_completion` takes the slot off the completion queue, so
-`next_completion` never reports it, where commonware's pool reports `Aborted` for it once; the tests
-check that no completion is pending instead. The existing "fetch after accepted verdict restarts"
+with its fix removed. As in commonware, a taken completion is reported once more as `error.Aborted`
+(its abandoned wait), which both actors ignore. The existing "fetch after accepted verdict restarts"
 passes even without the fix (the verdict task queues before the engine reads the fetch), so the
 direct engine test is the one that covers it.
 

@@ -107,6 +107,9 @@ pub fn Tracker(comptime C: type, comptime Context: type, comptime State: type) t
             /// Slots whose verdict wait finished, oldest first. Capacity is reserved for
             /// every live slot, so tasks never allocate.
             done: std.ArrayList(*Slot) = .empty,
+            /// Deliveries `try_completion` took; each is reported once as `error.Aborted`,
+            /// like commonware's pooled wait that finds its `Pending` taken.
+            aborted: u32 = 0,
         };
 
         const Response = struct { context: Context, value: V, accepted: bool };
@@ -160,7 +163,7 @@ pub fn Tracker(comptime C: type, comptime Context: type, comptime State: type) t
 
         /// Whether a completion is queued. The caller holds the signal's mutex.
         pub fn has_completion_locked(self: *const Self) bool {
-            return self.shared.done.items.len > 0;
+            return self.shared.done.items.len > 0 or self.shared.aborted > 0;
         }
 
         /// Cancels every pending verdict wait and frees everything.
@@ -314,10 +317,11 @@ pub fn Tracker(comptime C: type, comptime Context: type, comptime State: type) t
             const slot = blk: {
                 self.shared.signal.mutex.lockUncancelable(self.io);
                 defer self.shared.signal.mutex.unlock(self.io);
-                while (self.shared.done.items.len == 0) {
+                while (self.shared.done.items.len == 0 and self.shared.aborted == 0) {
                     const signal = self.shared.signal;
                     try self.shared.completed.wait(self.io, &signal.mutex);
                 }
+                if (self.take_aborted_locked()) return error.Aborted;
                 break :blk self.shared.done.orderedRemove(0);
             };
             return self.finish(slot);
@@ -329,6 +333,7 @@ pub fn Tracker(comptime C: type, comptime Context: type, comptime State: type) t
             const slot = blk: {
                 self.shared.signal.mutex.lockUncancelable(self.io);
                 defer self.shared.signal.mutex.unlock(self.io);
+                if (self.take_aborted_locked()) return error.Aborted;
                 if (self.shared.done.items.len == 0) return null;
                 break :blk self.shared.done.orderedRemove(0);
             };
@@ -338,10 +343,10 @@ pub fn Tracker(comptime C: type, comptime Context: type, comptime State: type) t
         /// Take the completion of the key's delivery if the consumer already sent its verdict
         /// or dropped its sender (commonware `try_completion`). Call this before adding
         /// subscribers to a key so such a verdict cannot retire them. Returns the completion
-        /// `next_completion` would otherwise return, frees the delivery slot, and removes it
-        /// from the queue, so `next_completion` never reports it (commonware's pool reports
-        /// `Aborted` once instead). Returns null if the key has no delivery or its verdict is
-        /// still pending.
+        /// `next_completion` would otherwise return and frees the delivery slot; the next
+        /// `next_completion` then reports `error.Aborted` once for it, as commonware's
+        /// abandoned pooled wait does. Returns null if the key has no delivery or its verdict
+        /// is still pending.
         pub fn try_completion(self: *Self, key: K) ?Done {
             const entry = self.entries.getPtr(key) orelse return null;
             const slot = entry.delivery orelse return null;
@@ -355,7 +360,20 @@ pub fn Tracker(comptime C: type, comptime Context: type, comptime State: type) t
                 slot.future.await(self.io);
             }
             // Proof: the slot is active, and only a canceled slot aborts.
-            return self.retire(slot) catch unreachable;
+            const completed = self.retire(slot) catch unreachable;
+            self.shared.signal.mutex.lockUncancelable(self.io);
+            defer self.shared.signal.mutex.unlock(self.io);
+            self.shared.aborted += 1;
+            self.shared.signal.condition.broadcast(self.io);
+            self.shared.completed.broadcast(self.io);
+            return completed;
+        }
+
+        /// Consumes one taken delivery's `Aborted` report. The caller holds the signal's mutex.
+        fn take_aborted_locked(self: *Self) bool {
+            if (self.shared.aborted == 0) return false;
+            self.shared.aborted -= 1;
+            return true;
         }
 
         /// Removes `slot` from the completion queue; false if its wait has not queued it.
@@ -792,11 +810,12 @@ test "try_completion takes a sent verdict" {
             try testing.expect(!completed.previously_accepted);
             try testing.expect(tracker.try_completion(k) == null);
 
-            // The slot is free for the next delivery, and the taken verdict is never
-            // reported again (commonware's pool reports `Aborted` for it once).
+            // The slot is free for the next delivery. The abandoned wait reports `Aborted`
+            // once without completing or clearing that delivery.
             tracker.accept_response(k);
             try tracker.redeliver(unit_delivery(k));
             sender = consumer.pop();
+            try testing.expectError(error.Aborted, tracker.try_next_completion());
             try testing.expect(try no_completion(&tracker));
             try testing.expectEqual(@as(usize, 1), tracker.pending());
             try take_pending_verdict(io, &tracker, k, &sender);
@@ -829,6 +848,7 @@ fn take_pending_verdict(
     var queued = tracker.try_completion(k).?;
     defer queued.deinit(gpa);
     try testing.expect(queued.outcome.?.eql(complete));
+    try testing.expectError(error.Aborted, tracker.next_completion());
     try testing.expect(try no_completion(tracker));
     try testing.expectEqual(@as(usize, 0), tracker.pending());
 }
@@ -848,6 +868,7 @@ fn take_dropped_sender(tracker: *PendingTracker, k: MockKey, consumer: PendingCo
     try tracker.redeliver(unit_delivery(k));
     var last = consumer.pop();
     try last.send(true);
+    try testing.expectError(error.Aborted, tracker.next_completion());
     var final = try tracker.next_completion();
     final.deinit(gpa);
 }

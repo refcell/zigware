@@ -1439,8 +1439,9 @@ fn repeat_after_verdict(io: Io) !void {
     // The consumer fetches again; the engine takes the fetch before it reads the verdict.
     try add_one(engine, k);
 
-    // The fetch applied the verdict, so it is not reported again and cannot complete the
-    // repeat (commonware's pool reports `Aborted` for it instead).
+    // The fetch applied the verdict, so the wait for the first delivery aborts and cannot
+    // complete the repeat.
+    try testing.expectError(error.Aborted, engine.inflight.try_next_delivery());
     try testing.expect(try engine.inflight.try_next_delivery() == null);
 
     // The repeat keeps its subscriber and waits for a request of its own.
