@@ -9,7 +9,8 @@
 //! - The result is never made affine: `x(R) = r mod n` is checked as `X = r Z^2` (and
 //!   `(r + n) Z^2` when `r + n < p`), which saves a field inversion.
 //! - `s^-1 mod n` is a binary extended GCD instead of std's constant-time divsteps.
-//! - On x86_64, field multiplication is aws-lc's `mulx`/`adcx`/`adox` form (field.zig).
+//! - On x86_64, field multiplication is aws-lc's `mulx`/`adcx`/`adox` form, and addition and
+//!   subtraction are u256 arithmetic (field.zig).
 //!
 //! Every input is public, so branching on it leaks nothing. The answer is the same as std's.
 
@@ -44,40 +45,40 @@ const Jacobian = struct {
         const delta = field.sq(p.z);
         const gamma = field.sq(p.y);
         const beta = field.mul(p.x, gamma);
-        const alpha = field.mul(p.x.sub(delta), p.x.add(delta));
-        const alpha3 = alpha.dbl().add(alpha);
-        const beta4 = beta.dbl().dbl();
-        const x = field.sq(alpha3).sub(beta4.dbl());
-        const z = field.sq(p.y.add(p.z)).sub(gamma).sub(delta);
-        const gamma_sq8 = field.sq(gamma).dbl().dbl().dbl();
-        const y = field.mul(alpha3, beta4.sub(x)).sub(gamma_sq8);
+        const alpha = field.mul(field.sub(p.x, delta), field.add(p.x, delta));
+        const alpha3 = field.add(field.dbl(alpha), alpha);
+        const beta4 = field.dbl(field.dbl(beta));
+        const x = field.sub(field.sq(alpha3), field.dbl(beta4));
+        const z = field.sub(field.sub(field.sq(field.add(p.y, p.z)), gamma), delta);
+        const gamma_sq8 = field.dbl(field.dbl(field.dbl(field.sq(gamma))));
+        const y = field.sub(field.mul(alpha3, field.sub(beta4, x)), gamma_sq8);
         return .{ .x = x, .y = y, .z = z };
     }
 
     /// `p + q` for an affine `q` (madd-2007-bl), or `p - q` when `negate`.
     fn add_affine(p: Jacobian, q: *const Affine, negate: bool) Jacobian {
-        const qy = if (negate) q.y.neg() else q.y;
+        const qy = if (negate) field.neg(q.y) else q.y;
         if (p.is_identity()) return .{ .x = q.x, .y = qy, .z = Fe.one };
         const z1z1 = field.sq(p.z);
         const x2z = field.mul(q.x, z1z1);
         const s2 = field.mul(field.mul(qy, p.z), z1z1);
-        const h = x2z.sub(p.x);
-        const r = s2.sub(p.y).dbl();
+        const h = field.sub(x2z, p.x);
+        const r = field.dbl(field.sub(s2, p.y));
         if (h.isZero()) return if (r.isZero()) p.double() else identity;
         const hh = field.sq(h);
-        const i = hh.dbl().dbl();
+        const i = field.dbl(field.dbl(hh));
         const j = field.mul(h, i);
         const v = field.mul(p.x, i);
-        const x = field.sq(r).sub(j).sub(v.dbl());
-        const y = field.mul(r, v.sub(x)).sub(field.mul(p.y, j).dbl());
-        const z = field.sq(p.z.add(h)).sub(z1z1).sub(hh);
+        const x = field.sub(field.sub(field.sq(r), j), field.dbl(v));
+        const y = field.sub(field.mul(r, field.sub(v, x)), field.dbl(field.mul(p.y, j)));
+        const z = field.sub(field.sub(field.sq(field.add(p.z, h)), z1z1), hh);
         return .{ .x = x, .y = y, .z = z };
     }
 
     /// `p + q` (add-2007-bl), or `p - q` when `negate`.
     fn add(p: Jacobian, q: *const Jacobian, negate: bool) Jacobian {
         if (q.is_identity()) return p;
-        const qy = if (negate) q.y.neg() else q.y;
+        const qy = if (negate) field.neg(q.y) else q.y;
         if (p.is_identity()) return .{ .x = q.x, .y = qy, .z = q.z };
         const z1z1 = field.sq(p.z);
         const z2z2 = field.sq(q.z);
@@ -85,15 +86,15 @@ const Jacobian = struct {
         const x2z = field.mul(q.x, z1z1);
         const s1 = field.mul(field.mul(p.y, q.z), z2z2);
         const s2 = field.mul(field.mul(qy, p.z), z1z1);
-        const h = x2z.sub(x1z);
-        const r = s2.sub(s1).dbl();
+        const h = field.sub(x2z, x1z);
+        const r = field.dbl(field.sub(s2, s1));
         if (h.isZero()) return if (r.isZero()) p.double() else identity;
-        const i = field.sq(h.dbl());
+        const i = field.sq(field.dbl(h));
         const j = field.mul(h, i);
         const v = field.mul(x1z, i);
-        const x = field.sq(r).sub(j).sub(v.dbl());
-        const y = field.mul(r, v.sub(x)).sub(field.mul(s1, j).dbl());
-        const z = field.mul(field.sq(p.z.add(q.z)).sub(z1z1).sub(z2z2), h);
+        const x = field.sub(field.sub(field.sq(r), j), field.dbl(v));
+        const y = field.sub(field.mul(r, field.sub(v, x)), field.dbl(field.mul(s1, j)));
+        const z = field.mul(field.sub(field.sub(field.sq(field.add(p.z, q.z)), z1z1), z2z2), h);
         return .{ .x = x, .y = y, .z = z };
     }
 };

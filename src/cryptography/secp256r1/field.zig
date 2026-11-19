@@ -1,8 +1,10 @@
-//! P-256 field multiplication on x86_64 with BMI2 and ADX, as aws-lc's `ecp_nistz256_mul_mont`
-//! does it: Montgomery multiplication (R = 2^256) that interleaves `mulx` with two carry
-//! chains (`adcx`, `adox`) and reduces each limb with shifts, since `-p^-1 = 1 mod 2^64` and
-//! `p = 2^256 - 2^224 + 2^192 + 2^96 - 1`. The limbs are std's (fiat-crypto's) Montgomery
-//! limbs, fully reduced, so `mul` returns exactly std's `Fe.mul`; other builds call std.
+//! P-256 field arithmetic for verify.zig. Multiplication on x86_64 with BMI2 and ADX runs as
+//! aws-lc's `ecp_nistz256_mul_mont` does it: Montgomery multiplication (R = 2^256) that
+//! interleaves `mulx` with two carry chains (`adcx`, `adox`) and reduces each limb with
+//! shifts, since `-p^-1 = 1 mod 2^64` and `p = 2^256 - 2^224 + 2^192 + 2^96 - 1`. The limbs
+//! are std's (fiat-crypto's) Montgomery limbs, fully reduced, so `mul` returns exactly std's
+//! `Fe.mul`; other builds call std. Addition and subtraction are plain u256 arithmetic, about
+//! twice as fast as std's, with the same limbs.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -16,32 +18,73 @@ const accelerated = builtin.zig_backend == .stage2_llvm and builtin.cpu.arch == 
 /// `a b` in the field: the same limbs as `a.mul(b)`.
 pub inline fn mul(a: Fe, b: Fe) Fe {
     if (!accelerated) return a.mul(b);
-    var result: [4]u64 = undefined;
+    var l0: u64 = undefined;
+    var l1: u64 = undefined;
+    var l2: u64 = undefined;
+    var l3: u64 = undefined;
     asm volatile (mul_text
-        :
-        : [r] "r" (&result),
-          [a] "r" (&a.limbs),
+        : [l0] "=&{rax}" (l0),
+          [l1] "=&{rcx}" (l1),
+          [l2] "=&{r14}" (l2),
+          [l3] "=&{r11}" (l3),
+        : [a] "r" (&a.limbs),
           [b] "r" (&b.limbs),
+          // The asm reads `a` and `b` through their pointers.
         : .{
-          .rax = true,
-          .rcx = true,
           .rdx = true,
           .r8 = true,
           .r9 = true,
           .r10 = true,
-          .r11 = true,
           .r12 = true,
           .r13 = true,
-          .r14 = true,
           .cc = true,
           .memory = true,
         });
-    return .{ .limbs = result };
+    return .{ .limbs = .{ l0, l1, l2, l3 } };
 }
 
-/// `a^2` in the field: the same limbs as `a.sq()`.
+/// `a^2` in the field: the same limbs as `a.sq()`. A dedicated squaring (aws-lc's
+/// `sqr_mont`) measured no faster here: the four serial reductions bound both.
 pub inline fn sq(a: Fe) Fe {
     return mul(a, a);
+}
+
+/// `a + b`: the same limbs as `a.add(b)` (both fully reduced).
+pub inline fn add(a: Fe, b: Fe) Fe {
+    if (!little_endian) return a.add(b);
+    const sum = @addWithOverflow(wide(a), wide(b));
+    const diff = @subWithOverflow(sum[0], Fe.field_order);
+    // The sum is below p exactly when it did not carry out and subtracting p borrows.
+    return narrow(if (sum[1] == 0 and diff[1] == 1) sum[0] else diff[0]);
+}
+
+/// `a - b`: the same limbs as `a.sub(b)`.
+pub inline fn sub(a: Fe, b: Fe) Fe {
+    if (!little_endian) return a.sub(b);
+    const diff = @subWithOverflow(wide(a), wide(b));
+    return narrow(if (diff[1] == 1) diff[0] +% Fe.field_order else diff[0]);
+}
+
+/// `2 a`: the same limbs as `a.dbl()`.
+pub inline fn dbl(a: Fe) Fe {
+    return add(a, a);
+}
+
+/// `-a`: the same limbs as `a.neg()` (zero stays zero).
+pub inline fn neg(a: Fe) Fe {
+    return sub(Fe.zero, a);
+}
+
+/// std's limbs are least significant first, so they are a native u256 on little-endian hosts.
+const little_endian = builtin.cpu.arch.endian() == .little;
+
+inline fn wide(a: Fe) u256 {
+    return @bitCast(a.limbs);
+}
+
+inline fn narrow(value: u256) Fe {
+    assert(value < Fe.field_order);
+    return .{ .limbs = @bitCast(value) };
 }
 
 /// The six accumulator registers; round `i` treats `accumulator[(i + k) % 6]` as limb `k`, so
@@ -118,11 +161,7 @@ fn subtract_modulus(comptime round: usize) []const u8 {
         "cmovcq " ++ limb(round, 0) ++ ", %%rax\n" ++
         "cmovcq " ++ limb(round, 1) ++ ", %%rcx\n" ++
         "cmovcq " ++ limb(round, 2) ++ ", %%r14\n" ++
-        "cmovcq " ++ limb(round, 3) ++ ", " ++ top ++ "\n" ++
-        "movq %%rax, 0(%[r])\n" ++
-        "movq %%rcx, 8(%[r])\n" ++
-        "movq %%r14, 16(%[r])\n" ++
-        "movq " ++ top ++ ", 24(%[r])\n";
+        "cmovcq " ++ limb(round, 3) ++ ", " ++ top ++ "\n";
 }
 
 const testing = std.testing;
@@ -133,7 +172,7 @@ fn field_element(value: u256) !Fe {
     return Fe.fromBytes(bytes, .big);
 }
 
-test "secp256r1 field mul and sq equal std's at the edges" {
+test "secp256r1 field arithmetic equals std's at the edges" {
     const p: u256 = Fe.field_order;
     const values = [_]u256{
         0, 1, 2, p - 1, p - 2, p >> 1, 1 << 255, 0xffffffff, 1 << 224, p - (1 << 64), 1 << 96,
@@ -141,18 +180,24 @@ test "secp256r1 field mul and sq equal std's at the edges" {
     for (values) |x| {
         const a = try field_element(x);
         try testing.expectEqualSlices(u64, &a.sq().limbs, &sq(a).limbs);
+        try testing.expectEqualSlices(u64, &a.dbl().limbs, &dbl(a).limbs);
+        try testing.expectEqualSlices(u64, &a.neg().limbs, &neg(a).limbs);
         for (values) |y| {
             const b = try field_element(y);
             try testing.expectEqualSlices(u64, &a.mul(b).limbs, &mul(a, b).limbs);
+            try testing.expectEqualSlices(u64, &a.add(b).limbs, &add(a, b).limbs);
+            try testing.expectEqualSlices(u64, &a.sub(b).limbs, &sub(a, b).limbs);
         }
     }
 }
 
-test "secp256r1 field mul equals std's on random elements" {
+test "secp256r1 field arithmetic equals std's on random elements" {
     var rng = std.Random.DefaultPrng.init(0x256);
     for (0..20_000) |_| {
         const a = try field_element(rng.random().int(u256) % Fe.field_order);
         const b = try field_element(rng.random().int(u256) % Fe.field_order);
         try testing.expectEqualSlices(u64, &a.mul(b).limbs, &mul(a, b).limbs);
+        try testing.expectEqualSlices(u64, &a.add(b).limbs, &add(a, b).limbs);
+        try testing.expectEqualSlices(u64, &a.sub(b).limbs, &sub(a, b).limbs);
     }
 }
