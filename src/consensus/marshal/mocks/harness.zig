@@ -478,15 +478,22 @@ fn StandardValidator(comptime App: type) type {
 /// `<prefix>-finalized-blocks-*`), ten items per section; the same shape as
 /// `standard/tests/common.zig`'s `PrunableStores`. Must not move once opened.
 pub fn PrunableArchives(comptime StoredBlock: type) type {
+    return PrunableArchivesWith(S, D, StoredBlock);
+}
+
+/// `PrunableArchives` with finalizations under `Scheme` over commitment `C` (the coding
+/// harness's scheme and commitments).
+pub fn PrunableArchivesWith(comptime Scheme: type, comptime C: type, comptime Block: type) type {
     return struct {
         const Self = @This();
         const Translator = storage.translator.EightCap;
+        pub const Certificate = simplex_types.Finalization(Scheme, C);
         pub const FinalizationArchive = storage.archive.prunable.Archive(
             Translator,
             [32]u8,
-            Finalization,
+            Certificate,
         );
-        pub const BlockArchive = storage.archive.prunable.Archive(Translator, [32]u8, StoredBlock);
+        pub const BlockArchive = storage.archive.prunable.Archive(Translator, [32]u8, Block);
         const kinds = [_][]const u8{
             "finalizations-by-height-metadata", "finalizations-by-height-key",
             "finalizations-by-height-value",    "finalized-blocks-metadata",
@@ -511,12 +518,12 @@ pub fn PrunableArchives(comptime StoredBlock: type) type {
             assert(made == kinds.len);
             self.cache_ref = try .init(gpa, page_size, page_cache_size);
             errdefer self.cache_ref.deinit();
-            const certificate_config = S.certificate_codec_config_unbounded();
+            const certificate_config = Scheme.certificate_codec_config_unbounded();
             const label = "finalizations_by_height";
             const config = certificate_config;
-            self.finalizations = try self.open_prunable(Finalization, ctx, 0, label, config);
+            self.finalizations = try self.open_prunable(Certificate, ctx, 0, label, config);
             errdefer self.finalizations.deinit();
-            self.blocks = try self.open_prunable(StoredBlock, ctx, 3, "finalized_blocks", {});
+            self.blocks = try self.open_prunable(Block, ctx, 3, "finalized_blocks", {});
         }
 
         pub fn deinit(self: *Self) void {

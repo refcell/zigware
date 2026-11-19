@@ -230,13 +230,49 @@ pub const CodingHarness = struct {
 
     /// One validator with application `App` (cloneable; the actor gets a clone).
     pub fn Validator(comptime App: type) type {
-        return CodingValidator(App);
+        return CodingValidator(App, Archives);
     }
+
+    /// A validator whose finalized archives are prunable (commonware
+    /// `CodingHarness::setup_prunable_validator`).
+    pub fn PrunableValidator(comptime App: type) type {
+        return CodingValidator(App, PrunableArchives);
+    }
+
+    /// Starts validator `me` over prunable finalized archives, signing with validator 0's
+    /// scheme as commonware does. The validator derives its partition names from `me`, so
+    /// `prefix` only documents the scenario. Takes ownership of `application`.
+    pub fn setup_prunable_validator(
+        ctx: runtime.deterministic.Context,
+        network: *shared.Network,
+        me: K,
+        validators: *const Fixture,
+        prefix: []const u8,
+        application: anytype,
+    ) !*PrunableValidator(@TypeOf(application)) {
+        assert(prefix.len > 0);
+        const provider: CodingProvider = .init(&validators.schemes[0]);
+        return PrunableValidator(@TypeOf(application)).setup(
+            ctx,
+            network,
+            me,
+            provider,
+            1,
+            application,
+        );
+    }
+
+    /// Persists `block` (borrowed) as verified for the pruning scenarios.
+    pub const verify_for_prune = verify;
 };
 
 /// A validator's archives: finalizations under the coding scheme over coding commitments.
 /// The shared `ArchivesOf` fixes the shared scheme, so the coding archives are opened here.
 pub const Archives = shared.ArchivesWith(CodingScheme, TestCommitment, CodingVariant.StoredBlock);
+
+/// A validator's prunable finalized archives (commonware `setup_prunable_validator`).
+pub const PrunableArchives =
+    shared.PrunableArchivesWith(CodingScheme, TestCommitment, CodingVariant.StoredBlock);
 
 /// The shards engine's types in a validator.
 pub const ShardTypes = struct {
@@ -250,12 +286,14 @@ pub const ShardTypes = struct {
     pub const Strategy = parallel.Sequential;
 };
 
-fn CodingValidator(comptime App: type) type {
+/// A coding validator with application `App` over finalized archives `StoredArchives`
+/// (`Archives` or `PrunableArchives`).
+fn CodingValidator(comptime App: type, comptime StoredArchives: type) type {
     return struct {
         const Self = @This();
         const H = CodingHarness;
         const Network = shared.Network;
-        pub const Stored = Archives;
+        pub const Stored = StoredArchives;
         pub const ShardEngine = shards.Engine(ShardTypes);
         pub const Resolver = resolver_p2p.Resolver(
             TestCommitment,

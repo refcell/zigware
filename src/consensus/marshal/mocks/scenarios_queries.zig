@@ -165,7 +165,7 @@ pub fn Single(comptime H: type) type {
 /// Chain heights 1 through `blocks.len` from genesis, block `h` stamped `h` (owned).
 fn make_chain(comptime H: type, gpa: Allocator, blocks: []H.TestBlock) !void {
     var made: usize = 0;
-    errdefer for (blocks[0..made]) |*block| block.deinit();
+    errdefer for (blocks[0..made]) |*block| H.Variant.deinit_block(gpa, block);
     var parent = harness.genesis_parent();
     var parent_commitment = H.genesis_parent_commitment(num_validators);
     for (blocks, 1..) |*block, value| {
@@ -177,8 +177,8 @@ fn make_chain(comptime H: type, gpa: Allocator, blocks: []H.TestBlock) !void {
     assert(made == blocks.len);
 }
 
-fn free_chain(blocks: anytype) void {
-    for (blocks) |*block| block.deinit();
+fn free_chain(comptime H: type, gpa: Allocator, blocks: []H.TestBlock) void {
+    for (blocks) |*block| H.Variant.deinit_block(gpa, block);
 }
 
 /// Proposes each block of `blocks` at view = height, sleeps one link latency, and finalizes
@@ -219,7 +219,7 @@ pub fn GetInfoBasic(comptime H: type) type {
             try testing.expectEqual(null, try mailbox.get_info(.latest));
             // The genesis anchor is stored as a finalized block without a finalization row.
             var genesis = try H.genesis_block(gpa, num_validators);
-            defer genesis.deinit();
+            defer H.Variant.deinit_block(gpa, &genesis);
             const genesis_digest = H.digest(&genesis);
             try expect_info(try mailbox.get_info(.{ .height = .zero() }), .zero(), genesis_digest);
             const by_digest = try mailbox.get_info(.{ .digest = genesis_digest });
@@ -229,7 +229,7 @@ pub fn GetInfoBasic(comptime H: type) type {
 
             var blocks: [1]H.TestBlock = undefined;
             try make_chain(H, gpa, &blocks);
-            defer free_chain(&blocks);
+            defer free_chain(H, gpa, &blocks);
             try propose_and_finalize(H, ctx, &single, &blocks);
             const digest = H.digest(&blocks[0]);
             try expect_info(try mailbox.get_info(.latest), .new(1), digest);
@@ -256,7 +256,7 @@ pub fn GetInfoLatestProgression(comptime H: type) type {
             defer single.stop(gpa);
             var blocks: [5]H.TestBlock = undefined;
             try make_chain(H, gpa, &blocks);
-            defer free_chain(&blocks);
+            defer free_chain(H, gpa, &blocks);
             for (&blocks, 1..) |*block, height| {
                 try propose_and_finalize(H, ctx, &single, block[0..1]);
                 // Latest always points to the most recently finalized block.
@@ -302,7 +302,7 @@ pub fn GetBlockByHeightAndLatest(comptime H: type) type {
             try testing.expectEqual(null, try mailbox.get_block(.latest));
             var blocks: [3]H.TestBlock = undefined;
             try make_chain(H, gpa, &blocks);
-            defer free_chain(&blocks);
+            defer free_chain(H, gpa, &blocks);
             try propose_and_finalize(H, ctx, &single, &blocks);
             for (&blocks, 1..) |*block, height| {
                 const found = try mailbox.get_block(.{ .height = .new(height) });
@@ -329,7 +329,7 @@ pub fn GetBlockByCommitment(comptime H: type) type {
             defer single.stop(gpa);
             var blocks: [1]H.TestBlock = undefined;
             try make_chain(H, gpa, &blocks);
-            defer free_chain(&blocks);
+            defer free_chain(H, gpa, &blocks);
             try propose_and_finalize(H, ctx, &single, &blocks);
             const digest = H.digest(&blocks[0]);
             const found = try single.nodes[0].mailbox.get_block(.{ .digest = digest });
@@ -357,7 +357,7 @@ pub fn GetFinalizationByHeight(comptime H: type) type {
             try testing.expectEqual(null, try mailbox.get_finalization(.new(1)));
             var blocks: [3]H.TestBlock = undefined;
             try make_chain(H, gpa, &blocks);
-            defer free_chain(&blocks);
+            defer free_chain(H, gpa, &blocks);
             for (&blocks, 1..) |*block, height| {
                 try propose_and_finalize(H, ctx, &single, block[0..1]);
                 var found = (try mailbox.get_finalization(.new(height))) orelse
@@ -474,7 +474,7 @@ pub fn SubscribeBasic(comptime H: type) type {
             defer at.stop(gpa);
             var blocks: [1]H.TestBlock = undefined;
             try make_chain(H, gpa, &blocks);
-            defer free_chain(&blocks);
+            defer free_chain(H, gpa, &blocks);
             var receiver = try subscribe_at_round(at.mailbox(), &blocks[0], H);
             defer receiver.deinit();
             try at.drive(gpa, &blocks[0]);
@@ -498,7 +498,7 @@ pub fn SubscribeMultiple(comptime H: type) type {
             defer at.stop(gpa);
             var blocks: [2]H.TestBlock = undefined;
             try make_chain(H, gpa, &blocks);
-            defer free_chain(&blocks);
+            defer free_chain(H, gpa, &blocks);
             var first = try subscribe_at_round(at.mailbox(), &blocks[0], H);
             defer first.deinit();
             var second = try subscribe_at_round(at.mailbox(), &blocks[1], H);
@@ -527,7 +527,7 @@ pub fn SubscribeCanceled(comptime H: type) type {
             defer at.stop(gpa);
             var blocks: [2]H.TestBlock = undefined;
             try make_chain(H, gpa, &blocks);
-            defer free_chain(&blocks);
+            defer free_chain(H, gpa, &blocks);
             var first = try subscribe_at_round(at.mailbox(), &blocks[0], H);
             var second = try subscribe_at_round(at.mailbox(), &blocks[1], H);
             defer second.deinit();
@@ -553,7 +553,7 @@ pub fn SubscribeDifferentSources(comptime H: type) type {
             defer at.stop(gpa);
             var blocks: [5]H.TestBlock = undefined;
             try make_chain(H, gpa, &blocks);
-            defer free_chain(&blocks);
+            defer free_chain(H, gpa, &blocks);
             var receivers: [5]Subscription(@TypeOf(at.mailbox())) = undefined;
             var made: usize = 0;
             defer for (receivers[0..made]) |*receiver| receiver.deinit();
@@ -604,7 +604,7 @@ pub fn AncestryStream(comptime H: type) type {
             defer single.stop(gpa);
             var blocks: [5]H.TestBlock = undefined;
             try make_chain(H, gpa, &blocks);
-            defer free_chain(&blocks);
+            defer free_chain(H, gpa, &blocks);
             try propose_and_finalize(H, ctx, &single, &blocks);
             const mailbox = single.nodes[0].mailbox;
             const latest = (try mailbox.get_info(.latest)) orelse return error.TestNoInfo;
@@ -635,7 +635,7 @@ pub fn InitProcessedHeight(comptime H: type) type {
             try testing.expectEqual(null, single.nodes[0].height);
             var blocks: [5]H.TestBlock = undefined;
             try make_chain(H, gpa, &blocks);
-            defer free_chain(&blocks);
+            defer free_chain(H, gpa, &blocks);
             try propose_and_finalize(H, ctx, &single, &blocks);
             try wait_for_tip(ctx, single.nodes[0].application, .new(5));
             try single.restart(ctx, try .init(gpa, ctx.io()));
@@ -667,7 +667,7 @@ pub fn BroadcastCachesBlock(comptime H: type) type {
             defer single.stop(gpa);
             var blocks: [1]H.TestBlock = undefined;
             try make_chain(H, gpa, &blocks);
-            defer free_chain(&blocks);
+            defer free_chain(H, gpa, &blocks);
             const block = &blocks[0];
             const digest = H.digest(block);
             try H.propose(single.nodes[0], round_at(1), block);
@@ -699,7 +699,7 @@ pub fn FinalizeSameHeightDifferentViews(comptime H: type) type {
             try single.add(ctx, try .init(gpa, ctx.io()));
             var blocks: [1]H.TestBlock = undefined;
             try make_chain(H, gpa, &blocks);
-            defer free_chain(&blocks);
+            defer free_chain(H, gpa, &blocks);
             const block = &blocks[0];
             for (single.nodes[0..2]) |node| try H.propose(node, round_at(1), block);
             try ctx.sleep(.fromMilliseconds(link_latency_ms));
@@ -760,7 +760,7 @@ pub fn HintFinalizedTriggersFetch(comptime H: type) type {
             try single.network.link_all(participants[0..2], harness.link);
             var blocks: [5]H.TestBlock = undefined;
             try make_chain(H, gpa, &blocks);
-            defer free_chain(&blocks);
+            defer free_chain(H, gpa, &blocks);
             try propose_and_finalize(H, ctx, &single, &blocks);
             try wait_for_tip(ctx, single.nodes[0].application, .new(5));
             const mailbox = single.nodes[1].mailbox;
@@ -857,7 +857,7 @@ pub fn CommitmentFetchHeightHintMismatch(comptime H: type) type {
             const parent_commitment = H.genesis_parent_commitment(num_validators);
             const height: Height = .new(at[0]);
             var block = try H.make_test_block(gpa, parent, parent_commitment, height, at[1], 4);
-            defer block.deinit();
+            defer H.Variant.deinit_block(gpa, &block);
             try H.propose(single.nodes[1], round_at(at[1]), &block);
             const fallback: core.CommitmentFallback = .{ .fetch_by_commitment = .new(hint) };
             const mailbox = single.nodes[0].mailbox;
@@ -1014,7 +1014,7 @@ pub fn PruneFinalizedArchives(comptime H: type) type {
             var node = try single.add(ctx, "init", 0);
             var blocks: [20]H.TestBlock = undefined;
             try make_chain(H, gpa, &blocks);
-            defer free_chain(&blocks);
+            defer free_chain(H, gpa, &blocks);
             try verify_and_finalize(H, ctx, &single, node, &blocks);
             try wait_for_tip(ctx, node.application, .new(20));
             try wait_processed(ctx, node.mailbox, 20);
@@ -1060,7 +1060,7 @@ pub fn FloorRetainsProcessedPredecessor(comptime H: type) type {
             const node = try single.add(ctx, "validator", 0);
             var blocks: [20]H.TestBlock = undefined;
             try make_chain(H, gpa, &blocks);
-            defer free_chain(&blocks);
+            defer free_chain(H, gpa, &blocks);
             // Finalize 1 through 19; block 20 is only verified, so its floor lands above the
             // processed height.
             try verify_and_finalize(H, ctx, &single, node, blocks[0..19]);
@@ -1114,7 +1114,7 @@ pub fn RejectStaleBlockDeliveryAfterFloorUpdate(comptime H: type) type {
             const parent_commitment = H.genesis_parent_commitment(num_validators);
             const stale_parent = harness.Sha256.hash(&.{"stale-parent"});
             var stale = try H.make_test_block(gpa, stale_parent, parent_commitment, .new(5), 5, 4);
-            defer stale.deinit();
+            defer H.Variant.deinit_block(gpa, &stale);
             try H.propose(attacker, round_at(5), &stale);
             try H.verify(attacker, round_at(5), &stale);
             // The finalization makes the victim fetch the block; responses are cut off.
@@ -1145,11 +1145,11 @@ pub fn RejectStaleBlockDeliveryAfterFloorUpdate(comptime H: type) type {
             const grandparent = harness.Sha256.hash(&.{"floor-grandparent"});
             var floor_parent =
                 try H.make_test_block(gpa, grandparent, parent_commitment, .new(9), 9, 4);
-            defer floor_parent.deinit();
+            defer H.Variant.deinit_block(gpa, &floor_parent);
             const parent = H.digest(&floor_parent);
             const commitment = H.commitment(&floor_parent);
             var anchor = try H.make_test_block(gpa, parent, commitment, .new(10), 10, 4);
-            defer anchor.deinit();
+            defer H.Variant.deinit_block(gpa, &anchor);
             try victim.mailbox.set_floor(try single.finalization(gpa, &anchor));
             try H.verify(victim, round_at(10), &anchor);
             // Mailbox messages are FIFO, so this answers after `set_floor` is handled.
@@ -1184,7 +1184,7 @@ pub fn SyncHeightFloor(comptime H: type) type {
             const blocks = try gpa.alloc(H.TestBlock, harness.num_blocks);
             defer gpa.free(blocks);
             try make_chain(H, gpa, blocks);
-            defer free_chain(blocks);
+            defer free_chain(H, gpa, blocks);
             for (blocks) |*block| try drive(ctx, &single, block);
             try wait_delivered(ctx, &single);
 
