@@ -348,7 +348,7 @@ const Tracker = struct {
     fn occupy(tracker: *Tracker, regional: *Counter) void {
         regional.enter();
         tracker.global.enter();
-        tracker.io.sleep(.fromMilliseconds(10), .awake) catch {};
+        tracker.io.sleep(.fromMilliseconds(10), .awake) catch tracker.io.recancel();
         tracker.global.exit();
         regional.exit();
     }

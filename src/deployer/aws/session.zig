@@ -309,7 +309,10 @@ pub const Session = struct {
     }
 
     pub fn exists(session: *Session, path: []const u8) bool {
-        Io.Dir.cwd().access(session.io, path, .{}) catch return false;
+        Io.Dir.cwd().access(session.io, path, .{}) catch |err| {
+            if (err == error.Canceled) session.io.recancel();
+            return false;
+        };
         return true;
     }
 

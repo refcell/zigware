@@ -59,7 +59,10 @@ pub fn cache_image(
         .ok => |url| url,
         .failure => |failure| return session.fail(failure),
     };
-    Io.Dir.cwd().deleteFile(session.io, gz_path) catch {}; // Scratch; commonware ignores it too.
+    // Scratch; commonware ignores a failure too.
+    Io.Dir.cwd().deleteFile(session.io, gz_path) catch |err| {
+        if (err == error.Canceled) session.io.recancel();
+    };
     return url;
 }
 

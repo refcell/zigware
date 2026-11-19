@@ -39,7 +39,10 @@ pub fn deployer_directory(
 pub const Filter = enum { not_destroyed, created };
 
 fn exists(dir: Io.Dir, io: Io, sub_path: []const u8) bool {
-    dir.access(io, sub_path, .{}) catch return false;
+    dir.access(io, sub_path, .{}) catch |err| {
+        if (err == error.Canceled) io.recancel();
+        return false;
+    };
     return true;
 }
 
@@ -56,12 +59,16 @@ pub fn load_deployments(
     var iterator = deployer_dir.iterate();
     while (try iterator.next(io)) |entry| {
         if (entry.kind != .directory) continue;
-        var tag_dir = deployer_dir.openDir(io, entry.name, .{}) catch continue;
+        var tag_dir = deployer_dir.openDir(io, entry.name, .{}) catch |err| {
+            if (err == error.Canceled) return err;
+            continue;
+        };
         defer tag_dir.close(io);
         if (exists(tag_dir, io, aws.destroyed_file_name)) continue;
         if (filter == .created and !exists(tag_dir, io, aws.created_file_name)) continue;
         const limit: Io.Limit = .limited(file_size_max);
-        const text = tag_dir.readFileAlloc(io, aws.metadata_file_name, arena, limit) catch {
+        const text = tag_dir.readFileAlloc(io, aws.metadata_file_name, arena, limit) catch |err| {
+            if (err == error.Canceled) return err;
             continue;
         };
         const metadata = aws.Metadata.parse(arena, text) catch continue;
@@ -136,10 +143,16 @@ pub fn find_instance(
 ) !?InstanceMatch {
     const deployments = try load_deployments(arena, io, deployer_dir, .created);
     for (deployments) |metadata| {
-        var tag_dir = deployer_dir.openDir(io, metadata.tag, .{}) catch continue;
+        var tag_dir = deployer_dir.openDir(io, metadata.tag, .{}) catch |err| {
+            if (err == error.Canceled) return err;
+            continue;
+        };
         defer tag_dir.close(io);
         const limit: Io.Limit = .limited(file_size_max);
-        const text = tag_dir.readFileAlloc(io, hosts_file_name, arena, limit) catch continue;
+        const text = tag_dir.readFileAlloc(io, hosts_file_name, arena, limit) catch |err| {
+            if (err == error.Canceled) return err;
+            continue;
+        };
         const hosts = aws.Hosts.parse(arena, text) catch continue;
         if (find_host_match(metadata.tag, &hosts, ip)) |found| return found;
     }
