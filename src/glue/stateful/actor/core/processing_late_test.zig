@@ -655,7 +655,8 @@ test "stateful processing: a prune waiting on a held sync drives an active verif
     // The verdict arrives while block 1's sync is still held, and nothing is pruned yet.
     try release.send({});
     try testing.expect(try recv_within(&verdict, 2_000));
-    try testing.expectEqual(held, pending.parked());
+    // Block 1's barrier parks its member syncs one at a time, so more may have parked since.
+    try testing.expect(pending.parked() >= held);
     try testing.expectEqual(0, fixture.prunes.items.len);
     try testing.expect(waiter.poll() == null);
 

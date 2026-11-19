@@ -68,6 +68,13 @@ const Parked = struct {
         return error.TestTimedOut;
     }
 
+    /// Waits for the loop to end on its own (the mailbox stays open) and returns how it ended.
+    fn join(self: *Parked) anyerror!void {
+        var future = self.fixture.future.?;
+        self.fixture.future = null;
+        return future.await(io);
+    }
+
     /// Closes the mailbox and returns how the loop ended, leaving the rest for `stop`.
     fn close(self: *Parked) anyerror!void {
         const fixture = &self.fixture;
@@ -125,8 +132,10 @@ test "stateful processing: a failed flush cancels a duplicate report's receipt" 
     try testing.expectEqual(@as(?u64, 1), try fixture.counter());
     try parked.next_flush();
     try expect_pending(&duplicate);
+    // A failed flush ends processing on its own (commonware awaits the actor; closing the
+    // mailbox here would race the loop observing the failure).
     parked.pending.fail_all();
-    try testing.expectError(error.DatabaseSyncFailed, parked.close());
+    try testing.expectError(error.DatabaseSyncFailed, parked.join());
     parked.stop();
     try expect_canceled(&duplicate);
 }
