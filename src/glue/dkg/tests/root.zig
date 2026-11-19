@@ -5,5 +5,5 @@
 test {
     _ = @import("mocks_network_test.zig");
     _ = @import("dkg/root.zig");
-    _ = @import("reshare/properties_test.zig");
+    _ = @import("reshare/root.zig");
 }
