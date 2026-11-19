@@ -195,6 +195,11 @@ pub fn Harness(comptime F: type) type {
             hold_handoffs: bool = false,
             handoffs: [requests_max]HeldHandoff = undefined,
             handoffs_count: u32 = 0,
+            /// When set, `verify` holds each request until the voter drops it (commonware
+            /// `set_verify_holder`).
+            hold_verifications: bool = false,
+            dropped: [requests_max]View = undefined,
+            dropped_count: u32 = 0,
 
             /// A built handoff candidate the test answers.
             pub const HeldHandoff = struct {
@@ -344,7 +349,25 @@ pub fn Harness(comptime F: type) type {
                     self.verifications[self.verifications_count] = request.round.view;
                     self.verifications_count += 1;
                 }
+                if (self.hold_verifications) return self.hold_verification(request.round.view);
                 return self.application.verify(io, request, payload);
+            }
+
+            /// Never answers: waits until the voter cancels the request, then records it.
+            fn hold_verification(self: *Automaton, view: View) Io.Cancelable!?bool {
+                assert(self.hold_verifications);
+                assert(view.get() > 0);
+                // Bounded by the voter: it ends only when the request is canceled.
+                while (true) {
+                    self.io.sleep(.fromSeconds(3600), .awake) catch |err| {
+                        self.mutex.lockUncancelable(self.io);
+                        defer self.mutex.unlock(self.io);
+                        assert(self.dropped_count < requests_max);
+                        self.dropped[self.dropped_count] = view;
+                        self.dropped_count += 1;
+                        return err;
+                    };
+                }
             }
 
             pub fn certify(self: *Automaton, io: Io, at: Round, payload: D) Io.Cancelable!?bool {
@@ -420,6 +443,17 @@ pub fn Harness(comptime F: type) type {
                 defer self.mutex.unlock(self.io);
                 for (self.verifications[0..self.verifications_count]) |requested| {
                     if (requested.get() == view) return true;
+                }
+                return false;
+            }
+
+            /// Whether the voter dropped a held verification of `view` (commonware's held
+            /// response `is_closed`).
+            pub fn verification_dropped(self: *Automaton, view: u64) bool {
+                self.mutex.lockUncancelable(self.io);
+                defer self.mutex.unlock(self.io);
+                for (self.dropped[0..self.dropped_count]) |dropped| {
+                    if (dropped.get() == view) return true;
                 }
                 return false;
             }

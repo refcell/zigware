@@ -15,12 +15,9 @@ test {
             _ = @import("optimistic.zig").Tests(h);
             _ = @import("handoff.zig").Tests(h);
             _ = @import("handoff_held.zig").Tests(h);
+            _ = @import("nullify_test.zig").Tests(h);
+            _ = @import("certification_test.zig").Tests(h);
+            _ = @import("verification_test.zig").Tests(h);
         }
     }
-}
-
-// Tests on the ed25519 harness's module-level names, until they move into the loop above.
-test {
-    _ = @import("nullify_test.zig");
-    _ = @import("certification_test.zig");
 }

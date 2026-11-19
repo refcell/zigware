@@ -75,9 +75,17 @@ handshake), then certificate, secp256r1, the rest, zk last. banderwagon moved to
   any, current, and compact sync glue and the `qmdb_any_*_sync` fuzz targets.
 - [ ] simplex voter `actors/voter/mod.rs` tests, shared with runtime (T-01a1d57b-1bfd): runtime
   ports lines 881-6716 (52 tests), this lane 6717-end (44 tests) in
-  `src/consensus/simplex/actors/voter/tests/{nullify,certification,replay,timeout}_test.zig`
-  on runtime's `tests/harness.zig`. Done: the four nullify fast-path tests and
-  recovered_finalization_is_reported (each group checked by a planted bug).
+  `src/consensus/simplex/actors/voter/tests/{nullify,certification,verification,replay,
+  timeout}_test.zig`, each `Tests(h)` over runtime's fixture-generic `Harness(F)` with
+  commonware's per-test scheme coverage. Done (each group checked by a planted bug): the four
+  nullify fast-path tests, recovered_finalization_is_reported, missed_notarization_is_fetched,
+  failed_certification_blocks_direct_descendant_verify, and the finalization and conflicting
+  notarization in-flight verification cancels. Next: certification_precludes_verification
+  (on runtime's certify `Hold`), then 8397 onward in file order.
+  - finalization_cancels_inflight_verification's final check (no notarize for the finalized
+    view) is defended at four layers (the actor's drop, `verified`'s staleness check,
+    `admits_outbound`, and `verification_matches`); removing all four together still does
+    not break it, so its planted bug targets the in-flight precondition instead.
 
 ## Log
 - Digests are `Digest(length, name)`: one distinct type per hasher, encoded as raw bytes.
