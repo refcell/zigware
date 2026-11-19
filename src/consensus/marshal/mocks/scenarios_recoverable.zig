@@ -50,11 +50,17 @@ fn Node(comptime H: type) type {
 
         /// Starts validator 0 of `fixture` under `ctx`, with an auto-acknowledging application.
         pub fn start(self: *Self, ctx: Ctx, fixture: *const H.Fixture) !void {
+            try self.start_with(ctx, fixture, try App.init(ctx.gpa(), ctx.io()));
+        }
+
+        /// Starts validator 0 of `fixture` under `ctx`, taking ownership of `application`.
+        pub fn start_with(self: *Self, ctx: Ctx, fixture: *const H.Fixture, app: App) !void {
             const gpa = ctx.gpa();
+            var application = app;
+            errdefer application.deinit();
             const participants = fixture.participants;
             self.network = try .start(gpa, ctx.io(), 1, participants, 1024 * 1024);
             errdefer self.network.stop();
-            const application = try App.init(gpa, ctx.io());
             const provider: H.Provider = .init(&fixture.schemes[0]);
             const network = self.network.network;
             self.validator = try Validator.setup(
@@ -391,6 +397,92 @@ pub fn ReverifySameRound(comptime H: type, comptime action: Reverify) type {
                     @tagName(action),
                 });
                 return error.SameRoundBlockLost;
+            }
+        }
+    };
+}
+
+/// commonware `delivery_visibility_implies_recoverable_after_restart`: once marshal delivers
+/// finalized block 1 to the application, the block and its finalization are durable: two to
+/// four recoveries find both by height.
+pub fn DeliveryVisibilityRecoverable(comptime H: type) type {
+    return struct {
+        const Proposal = simplex_types.Proposal(H.Commitment);
+        const State = struct {
+            fixture: H.Fixture,
+            block: H.TestBlock,
+            finalization: H.Finalization,
+            seed: u64,
+        };
+
+        /// Runs the contract for each of `seeds`.
+        pub fn run(gpa: Allocator, seeds: []const u64) !void {
+            for (seeds) |seed| try run_seed(gpa, seed);
+        }
+
+        fn run_seed(gpa: Allocator, seed: u64) !void {
+            var rng = utils.rng.TestRng.init(seed);
+            var state: State = undefined;
+            state.seed = seed;
+            state.fixture = try H.fixture(gpa, &rng);
+            defer state.fixture.deinit(gpa);
+            const parent_commitment = H.genesis_parent_commitment(num_validators);
+            const parent = harness.genesis_parent();
+            state.block = try H.make_test_block(gpa, parent, parent_commitment, .new(1), 100, 4);
+            defer H.Variant.deinit_block(gpa, &state.block);
+            const proposal = Proposal.init(round_at(1), .zero(), H.commitment(&state.block));
+            state.finalization =
+                try H.make_finalization(gpa, &state.fixture, proposal, harness.quorum);
+            defer state.finalization.deinit(gpa);
+            var runner = try runtime.deterministic.Runner.init(gpa, contract_config(seed));
+            defer runner.deinit();
+            try try runner.start_context(deliver, .{&state});
+            for (0..restart_cycles_for_seed(seed)) |cycle| {
+                try try runner.start_context(recover, .{ &state, cycle });
+            }
+        }
+
+        fn deliver(ctx: Ctx, state: *const State) anyerror!void {
+            var app: Node(H).App = try .manual_ack(ctx.gpa(), ctx.io());
+            defer app.deinit();
+            var node: Node(H) = undefined;
+            const child = ctx.child("validator").with_attribute("index", 0);
+            try node.start_with(child, &state.fixture, app.clone());
+            defer node.crash();
+            try H.verify(node.validator, round_at(1), &state.block);
+            _ = node.validator.mailbox.report(.{ .finalization = state.finalization });
+            while (true) {
+                const height = try app.acknowledged();
+                if (height.get() == 1) break;
+                // Only genesis may precede the first finalized block before the restart.
+                if (!height.is_zero()) return error.UnexpectedDelivery;
+            }
+        }
+
+        fn recover(ctx: Ctx, state: *const State, cycle: usize) anyerror!void {
+            const gpa = ctx.gpa();
+            var node: Node(H) = undefined;
+            const child = ctx.child("validator").with_attribute("index", 0)
+                .with_attribute("restart", cycle);
+            try node.start(child, &state.fixture);
+            defer node.crash();
+            const mailbox = &node.validator.mailbox;
+            var block = (try mailbox.get_block(.{ .height = .new(1) })) orelse {
+                std.log.err("delivered block lost (seed={d}, cycle={d})", .{ state.seed, cycle });
+                return error.DeliveredBlockLost;
+            };
+            defer H.Variant.deinit_block(gpa, &block);
+            if (block.inner().height().get() != 1) return error.WrongBlockRecovered;
+            var finalization = (try mailbox.get_finalization(.new(1))) orelse {
+                std.log.err(
+                    "delivered finalization lost (seed={d}, cycle={d})",
+                    .{ state.seed, cycle },
+                );
+                return error.DeliveredFinalizationLost;
+            };
+            defer finalization.deinit(gpa);
+            if (!std.meta.eql(finalization.round(), state.finalization.round())) {
+                return error.WrongFinalizationRecovered;
             }
         }
     };

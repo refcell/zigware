@@ -283,3 +283,7 @@ test "standard verified after restart reverify same round implies recoverable" {
 test "standard certify after restart reverify same round implies recoverable" {
     try recoverable.ReverifySameRound(H, .certified).run(gpa);
 }
+
+test "standard delivery visibility implies recoverable after restart" {
+    try recoverable.DeliveryVisibilityRecoverable(H).run(gpa, contract_seeds);
+}

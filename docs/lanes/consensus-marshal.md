@@ -200,7 +200,12 @@ ports its range's tests and the helpers defined in it, into
 - runtime thread (T-01a1d57b-1bfd), `tests/recoverable.zig`: lines 176-432 (local blocks
   hash once and replay once, with `mocks.DigestCounter` counting `Block.digest` calls; the
   block provider's parent walkback by commitment) and the recoverable/certify family
-  (514-562) as generic scenarios in `mocks/scenarios_recoverable.zig`.
+  (514-562) as generic scenarios in `mocks/scenarios_recoverable.zig` (harness.rs
+  1009-1876, done: success-implies-recoverable for proposed/verified/certified, certify
+  persists equivocated block, later-view certify survives pruning, reverify same round
+  after restart for verified/certify, delivery visibility). Collector can run them on the
+  coding harness. Each group fails a planted bug (unsynced cache puts, notarized-write
+  skips, index-only verified dedupe, deferred same-view sync, dispatch before sync).
 - runtime thread (T-01a1d57b-1bfd), `tests/coverage.zig`: lines 12605-14905 (prune,
   pipelined handoff, reproposal coverage across restarts, closed-epoch floors, cache
   retention).
