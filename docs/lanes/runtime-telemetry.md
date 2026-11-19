@@ -243,21 +243,21 @@ Open:
   ETIME as a timeout, other errors as failure
 - [x] `iouring/operation.rs:369` `test_expired_registration_does_not_consume_ready_data`:
   expired recv leaves socket data unread
-- [ ] `iouring/request.rs:1439` `test_cqe_result_from_raw_retryable_codes`: EAGAIN, EWOULDBLOCK,
+- [x] `iouring/request.rs:1439` `test_cqe_result_from_raw_retryable_codes`: EAGAIN, EWOULDBLOCK,
   and EINTR results retry
-- [ ] `iouring/request.rs:1526` `test_scalar_length_prefix_boundary`: an I/O length above
+- [x] `iouring/request.rs:1526` `test_scalar_length_prefix_boundary`: an I/O length above
   u32::MAX is clamped per SQE
-- [ ] `iouring/request.rs:1537` `test_scalar_builders_preserve_partial_progress`: resubmitted
+- [x] `iouring/request.rs:1537` `test_scalar_builders_preserve_partial_progress`: resubmitted
   send/recv/read SQEs start after prior progress
-- [ ] `iouring/request.rs:1574` `test_active_send_paths`: send retries EAGAIN, crosses buffers,
+- [x] `iouring/request.rs:1574` `test_active_send_paths`: send retries EAGAIN, crosses buffers,
   maps errors to SendFailed
-- [ ] `iouring/request.rs:1613` `test_active_recv_paths`: recv retry, exact vs. partial
+- [x] `iouring/request.rs:1613` `test_active_recv_paths`: recv retry, exact vs. partial
   completion, EOF and error mapping
-- [ ] `iouring/request.rs:1652` `test_active_read_at_paths`: read_at retries, accumulates, short
+- [x] `iouring/request.rs:1652` `test_active_read_at_paths`: read_at retries, accumulates, short
   read gives InsufficientLength, EIO ReadFailed
-- [ ] `iouring/request.rs:2125` `test_large_single_write_preserves_progress_and_durability`:
+- [x] `iouring/request.rs:2125` `test_large_single_write_preserves_progress_and_durability`:
   write above u32::MAX bytes completes across CQEs
-- [ ] `iouring/request.rs:2167` `test_active_write_at_paths`: write_at retries, keeps its prefix,
+- [x] `iouring/request.rs:2167` `test_active_write_at_paths`: write_at retries, keeps its prefix,
   0/EIO/ECANCELED give WriteFailed
 - [x] `iouring/tests.rs:1082`
   `test_nested_same_directory_rejected_before_closure_and_outer_remains_usable`: second runner

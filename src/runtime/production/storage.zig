@@ -26,6 +26,7 @@ const builtin = @import("builtin");
 const iface = @import("../storage.zig");
 const header = @import("../storage/header.zig");
 const ring_mod = @import("ring.zig");
+const request_mod = @import("request.zig");
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -450,52 +451,50 @@ fn or_canceled(err: anyerror, failure: Error) Error {
     return if (err == error.Canceled) error.Canceled else failure;
 }
 
-/// Reads up to `buffer.len` bytes at `offset`, fewer only at the end of the file.
-fn file_read(storage: *const Storage, file: File, buffer: []u8, offset: u64) Error!usize {
-    const worker = ring_worker(storage) orelse
-        return file.readPositionalAll(storage.io, buffer, offset) catch |err|
-            or_canceled(err, error.ReadFailed);
-    var done: usize = 0;
-    while (done < buffer.len) {
-        const result = try ring_perform(worker, .{ .read = .{
-            .fd = file.handle,
-            .buffer = buffer[done..],
-            .offset = offset + done,
-        } }) orelse continue;
-        if (result.failed) return error.ReadFailed;
-        if (result.count == 0) break;
-        done += result.count;
+/// Reads all of `buffer` at `offset`; the end of the file first is `BlobInsufficientLength`.
+fn file_read(storage: *const Storage, file: File, buffer: []u8, offset: u64) Error!void {
+    assert(buffer.len > 0);
+    const worker = ring_worker(storage) orelse {
+        const read = file.readPositionalAll(storage.io, buffer, offset) catch |err|
+            return or_canceled(err, error.ReadFailed);
+        if (read < buffer.len) return error.BlobInsufficientLength;
+        return;
+    };
+    var request: request_mod.ReadAt = .{ .fd = file.handle, .buffer = buffer, .offset = offset };
+    // Bounded: each SQE completes, retries an interrupt, or makes progress.
+    while (true) {
+        const result = try ring_perform(worker, request.operation());
+        if (request.on_cqe(result)) |done| return done;
     }
-    assert(done <= buffer.len);
-    return done;
 }
 
 fn file_write(storage: *const Storage, file: File, bytes: []const u8, offset: u64) Error!void {
+    assert(bytes.len > 0);
     const worker = ring_worker(storage) orelse
         return file.writePositionalAll(storage.io, bytes, offset) catch |err|
             or_canceled(err, error.WriteFailed);
-    var done: usize = 0;
-    while (done < bytes.len) {
-        const result = try ring_perform(worker, .{ .write = .{
-            .fd = file.handle,
-            .bytes = bytes[done..],
-            .offset = offset + done,
-        } }) orelse continue;
-        if (result.failed or result.count == 0) return error.WriteFailed;
-        done += result.count;
+    var request: request_mod.WriteAt = .{ .fd = file.handle, .bytes = bytes, .offset = offset };
+    // Bounded: each SQE completes, retries an interrupt, or makes progress.
+    while (true) {
+        const result = try ring_perform(worker, request.operation());
+        if (request.on_cqe(result)) |done| return done;
     }
-    assert(done == bytes.len);
 }
 
 fn file_sync(storage: *const Storage, file: File) Error!void {
     const worker = ring_worker(storage) orelse
         return file.sync(storage.io) catch |err| or_canceled(err, error.BlobSyncFailed);
+    // Bounded: an interrupted fsync is retried, and any other result ends it.
     while (true) {
-        const result = try ring_perform(worker, .{ .fsync = .{ .fd = file.handle } }) orelse
-            continue;
-        if (result.failed) return error.BlobSyncFailed;
-        assert(result.count == 0);
-        return;
+        const result = try ring_perform(worker, .{ .fsync = .{ .fd = file.handle } });
+        switch (request_mod.CqeResult.from_raw(result)) {
+            .retry => continue,
+            .failure => return error.BlobSyncFailed,
+            .count => |count| {
+                assert(count == 0);
+                return;
+            },
+        }
     }
 }
 
@@ -505,18 +504,11 @@ fn ring_worker(storage: *const Storage) ?*ring_mod.Worker {
     return ring.worker();
 }
 
-const RingResult = struct { count: usize, failed: bool };
-
-/// One ring operation: its count, a failure, or null for an interrupted call to retry.
-fn ring_perform(worker: *ring_mod.Worker, operation: ring_mod.Operation) Error!?RingResult {
-    const result = worker.perform(operation, .none) catch |err| switch (err) {
+/// One ring operation's raw result: a count or a negated errno.
+fn ring_perform(worker: *ring_mod.Worker, operation: ring_mod.Operation) Error!i32 {
+    return worker.perform(operation, .none) catch |err| switch (err) {
         error.Canceled => return error.Canceled,
         error.Timeout => unreachable, // No timeout was given.
-    };
-    if (result >= 0) return .{ .count = @intCast(result), .failed = false };
-    return switch (ring_mod.errno(result)) {
-        .INTR, .AGAIN => null,
-        else => .{ .count = 0, .failed = true },
     };
 }
 
@@ -616,9 +608,7 @@ pub const Blob = struct {
         // The kernel rejects offsets past the signed file extent (commonware's "read failed");
         // std.Io would report that EINVAL as a bug.
         if (start > std.math.maxInt(i64)) return error.ReadFailed;
-        const read = try file_read(self.storage, self.file, buffer, start);
-        if (read < buffer.len) return error.BlobInsufficientLength;
-        assert(read == buffer.len);
+        try file_read(self.storage, self.file, buffer, start);
     }
 
     pub fn write_at(
@@ -637,6 +627,7 @@ pub const Blob = struct {
         {
             defer self.mutated();
             for (chunks) |chunk| {
+                if (chunk.len == 0) continue;
                 try file_write(self.storage, self.file, chunk, position);
                 position += chunk.len;
             }

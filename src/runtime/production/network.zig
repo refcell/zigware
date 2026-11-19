@@ -14,6 +14,7 @@ const net = Io.net;
 const posix = std.posix;
 const network = @import("../network.zig");
 const ring_mod = @import("ring.zig");
+const request_mod = @import("request.zig");
 
 const Address = network.Address;
 const Error = network.Error;
@@ -103,6 +104,9 @@ pub const Sink = struct {
     fn write_all(sink: *Sink, bufs: []const []const u8) Error!void {
         const io = sink.shared.io;
         const timeout = deadline_after(io, sink.write_timeout_ns);
+        if (sink.shared.ring) |ring| if (ring.worker()) |worker| {
+            return ring_send(worker, sink.shared.stream.socket.handle, bufs, timeout);
+        };
         var index: usize = 0;
         var offset: usize = 0;
         while (index < bufs.len) {
@@ -137,9 +141,6 @@ pub const Sink = struct {
         assert(first.len > 0);
         const shared = sink.shared;
         const fd = shared.stream.socket.handle;
-        if (shared.ring) |ring| if (ring.worker()) |worker| {
-            return ring_send(worker, fd, first, rest, timeout);
-        };
         const result = operate_until(shared.io, .{ .net_write = .{
             .socket_handle = fd,
             .header = first,
@@ -210,7 +211,16 @@ pub const Stream = struct {
         assert(into.len > 0);
         const shared = stream.shared;
         if (shared.ring) |ring| if (ring.worker()) |worker| {
-            return ring_recv(worker, shared.stream.socket.handle, into, timeout);
+            var request: request_mod.Recv = .{
+                .fd = shared.stream.socket.handle,
+                .buffer = into,
+                .exact = false,
+            };
+            // Bounded: each SQE completes or retries an interrupt.
+            while (true) {
+                const result = try ring_perform(worker, request.operation(), timeout);
+                if (request.on_cqe(result)) |done| return done;
+            }
         };
         const io = shared.io;
         var data: [1][]u8 = .{into};
@@ -243,71 +253,31 @@ pub const Stream = struct {
     }
 };
 
-/// Most buffers one ring send carries (as `std.Io.Threaded` does per write).
-const send_iovecs_max = 8;
-
-/// One `sendmsg` of `first` and up to 7 buffers of `rest` through the ring.
+/// Sends every buffer of `bufs` through the ring, resubmitting from its progress.
 fn ring_send(
     worker: *ring_mod.Worker,
     fd: posix.fd_t,
-    first: []const u8,
-    rest: []const []const u8,
+    bufs: []const []const u8,
     timeout: Io.Timeout,
-) Error!usize {
-    var iovecs: [send_iovecs_max]posix.iovec_const = undefined;
-    iovecs[0] = .{ .base = first.ptr, .len = first.len };
-    const count = 1 + @min(rest.len, send_iovecs_max - 1);
-    for (iovecs[1..count], rest[0 .. count - 1]) |*iovec, buf| {
-        iovec.* = .{ .base = buf.ptr, .len = buf.len };
+) Error!void {
+    var request: request_mod.Send = .init(fd, bufs);
+    // Bounded: each SQE completes, retries an interrupt, or makes progress.
+    while (!request.is_complete()) {
+        const result = try ring_perform(worker, request.operation(), timeout);
+        if (request.on_cqe(result)) |done| return done;
     }
-    const msg: posix.msghdr_const = .{
-        .name = null,
-        .namelen = 0,
-        .iov = &iovecs,
-        .iovlen = @intCast(count),
-        .control = null,
-        .controllen = 0,
-        .flags = 0,
-    };
-    const operation: ring_mod.Operation = .{ .sendmsg = .{ .fd = fd, .msg = &msg } };
-    const sent = try ring_perform(worker, operation, timeout) orelse return error.SendFailed;
-    if (sent == 0) return error.SendFailed;
-    return sent;
 }
 
-/// One `recv` into `into` through the ring; the end of the stream fails.
-fn ring_recv(
-    worker: *ring_mod.Worker,
-    fd: posix.fd_t,
-    into: []u8,
-    timeout: Io.Timeout,
-) Error!usize {
-    const operation: ring_mod.Operation = .{ .recv = .{ .fd = fd, .buffer = into } };
-    const read = try ring_perform(worker, operation, timeout) orelse return error.RecvFailed;
-    if (read == 0) return error.RecvFailed;
-    assert(read <= into.len);
-    return read;
-}
-
-/// Runs a ring operation, retrying interrupted ones: its count, or null if it failed.
+/// One ring operation's raw result (a count or a negated errno), or its timeout.
 fn ring_perform(
     worker: *ring_mod.Worker,
     operation: ring_mod.Operation,
     timeout: Io.Timeout,
-) Error!?usize {
-    var attempts: u32 = 0;
-    while (true) : (attempts += 1) {
-        assert(attempts < 1024); // Interrupts do not repeat without end.
-        const result = worker.perform(operation, timeout) catch |err| return switch (err) {
-            error.Canceled => error.Canceled,
-            error.Timeout => error.Timeout,
-        };
-        if (result >= 0) return @intCast(result);
-        switch (ring_mod.errno(result)) {
-            .INTR, .AGAIN => continue,
-            else => return null,
-        }
-    }
+) Error!i32 {
+    return worker.perform(operation, timeout) catch |err| switch (err) {
+        error.Canceled => error.Canceled,
+        error.Timeout => error.Timeout,
+    };
 }
 
 /// Splits a connected socket into its two halves, applying the socket options.

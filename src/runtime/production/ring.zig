@@ -367,4 +367,5 @@ pub fn errno(result: i32) linux.E {
 
 test {
     _ = @import("ring_test.zig");
+    _ = @import("request_test.zig");
 }
