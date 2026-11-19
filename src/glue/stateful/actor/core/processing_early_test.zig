@@ -406,3 +406,241 @@ test "stateful processing: a cancelled handoff proposal unblocks finalization" {
     try await_acknowledged(&waiter);
     try await_closed(&release.?);
 }
+
+/// A probe gate whose release is dropped on any exit, so a failed assertion still lets the
+/// held application call end.
+const Held = struct {
+    started: oneshot.Receiver(void),
+    release: ?oneshot.Sender(void),
+
+    fn add(probe: *Probe) !Held {
+        const gate = try probe.add_gate();
+        return .{ .started = gate.started, .release = gate.release };
+    }
+
+    /// Waits (bounded) until the held call starts.
+    fn await_started(held: *Held) !void {
+        // Each pass sleeps 1 ms; the bound is a hang guard.
+        for (0..10_000) |_| {
+            if (held.started.is_ready()) return held.started.recv();
+            try std.testing.io.sleep(.fromMilliseconds(1), .awake);
+        }
+        return error.TestTimedOut;
+    }
+
+    fn open(held: *Held) !void {
+        var sender = held.release.?;
+        held.release = null;
+        try sender.send({});
+    }
+
+    fn deinit(held: *Held) void {
+        held.started.deinit();
+        if (held.release) |*sender| sender.deinit();
+    }
+};
+
+/// Waits (bounded) for a verification's verdict.
+fn await_verdict(verdict: *oneshot.Receiver(bool)) !bool {
+    // Each pass sleeps 1 ms; the bound is a hang guard.
+    for (0..10_000) |_| {
+        if (verdict.is_ready()) return verdict.recv();
+        try std.testing.io.sleep(.fromMilliseconds(1), .awake);
+    }
+    return error.TestTimedOut;
+}
+
+// commonware `finalization_joins_and_reuses_winning_execution`: finalizing a block whose
+// verification is processing it waits for that processing and reuses its result: the block is
+// processed once, never re-executed on the finalized path, and captured once. Adapted:
+// commonware learns the finalization started waiting from a parked acquisition; here the test
+// waits 20 ms and checks the acknowledgement and the capture are still pending.
+test "stateful processing: a finalization joins and reuses the winning execution" {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer check(&fixture);
+    const genesis = TestBlock.genesis();
+    const block = try uncached_child(&fixture, &genesis, 1);
+    var verify_probe: Probe = .{ .target = block.digest() };
+    defer verify_probe.deinit();
+    var candidate = try Held.add(&verify_probe);
+    defer candidate.deinit();
+    fixture.processing.verifications.verifier.app.probe = &verify_probe;
+    var finalized_path: Probe = .{ .target = block.digest() };
+    defer finalized_path.deinit();
+    fixture.processing.processor.app.probe = &finalized_path;
+    var capture_probe: Probe = .{ .target = block.digest() };
+    defer capture_probe.deinit();
+    fixture.processing.processor.app.capture_probe = &capture_probe;
+    var hook_probe: Probe = .{ .target = block.digest() };
+    defer hook_probe.deinit();
+    var hook = try Held.add(&hook_probe);
+    defer hook.deinit();
+    fixture.processing.processor.app.finalized_probe = &hook_probe;
+
+    var verdict = try fixture.verify(&.{ block, genesis });
+    defer verdict.deinit();
+    try candidate.await_started();
+    var waiter = try fixture.finalize(block);
+    defer waiter.deinit();
+    try std.testing.io.sleep(.fromMilliseconds(20), .awake);
+    try testing.expect(waiter.poll() == null);
+    try testing.expectEqual(0, capture_probe.calls);
+    try candidate.open();
+    try hook.await_started();
+    try testing.expect(waiter.poll() == null);
+    try hook.open();
+    try await_acknowledged(&waiter);
+    try testing.expect(try await_verdict(&verdict));
+    try testing.expectEqual(1, verify_probe.calls);
+    try testing.expectEqual(0, finalized_path.calls);
+    try testing.expectEqual(1, capture_probe.calls);
+}
+
+// commonware `finalized_block_request_continues_during_finalization`: a request whose
+// processing of the finalized block finishes during finalization goes on to process the
+// block's child, and answers, before the finalized hook completes. Adapted: as above, the test
+// waits 20 ms for the finalization to start waiting instead of a parked acquisition.
+test "stateful processing: a request on the finalized block continues during finalization" {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer check(&fixture);
+    const block, const child = try uncached_pair(&fixture);
+    // Null target: the gates hold the recovery's processing of the block, then the child's.
+    var probe: Probe = .{ .target = null };
+    defer probe.deinit();
+    var block_gate = try Held.add(&probe);
+    defer block_gate.deinit();
+    var child_gate = try Held.add(&probe);
+    defer child_gate.deinit();
+    fixture.processing.verifications.verifier.app.probe = &probe;
+    var hook_probe: Probe = .{ .target = block.digest() };
+    defer hook_probe.deinit();
+    var hook = try Held.add(&hook_probe);
+    defer hook.deinit();
+    fixture.processing.processor.app.finalized_probe = &hook_probe;
+
+    var verdict = try fixture.verify(&.{ child, block });
+    defer verdict.deinit();
+    try block_gate.await_started();
+    var waiter = try fixture.finalize(block);
+    defer waiter.deinit();
+    try std.testing.io.sleep(.fromMilliseconds(20), .awake);
+    try testing.expect(waiter.poll() == null);
+    try block_gate.open();
+    try hook.await_started();
+    // The child is processed, and the verification answers, while the hook is held.
+    try child_gate.await_started();
+    try child_gate.open();
+    try testing.expect(try await_verdict(&verdict));
+    try testing.expect(waiter.poll() == null);
+    try hook.open();
+    try await_acknowledged(&waiter);
+    try testing.expectEqual(2, probe.calls);
+}
+
+const Competing = enum { verify, prepare, propose };
+
+/// Sends `kind` on `block` (over genesis) and returns whether it was accepted: a verification's
+/// verdict, or whether a build answered a block.
+const CompetingRequest = union(Competing) {
+    verify: oneshot.Receiver(bool),
+    prepare: oneshot.Receiver(fixture_mod.Mailbox.Built),
+    propose: oneshot.Receiver(fixture_mod.Mailbox.Digested),
+
+    fn send(fixture: *Fixture, kind: Competing, block: TestBlock) !CompetingRequest {
+        const genesis = TestBlock.genesis();
+        switch (kind) {
+            .verify => return .{ .verify = try fixture.verify(&.{ block, genesis }) },
+            .propose => return .{ .propose = try fixture.propose_async(&.{ block, genesis }, 9) },
+            .prepare => {
+                const pair = try oneshot.channel(fixture_mod.Mailbox.Built, gpa, std.testing.io);
+                try fixture.send(.{ .propose = .{
+                    .context = .{ .round = harness_mod.round(9) },
+                    .ancestry = try fixture.harness.ancestry(&.{ block, genesis }),
+                    .upstream = {},
+                    .proposal = .{ .prepare = pair.sender },
+                } });
+                return .{ .prepare = pair.receiver };
+            },
+        }
+    }
+
+    fn accepted(request: *CompetingRequest) !bool {
+        switch (request.*) {
+            .verify => |*verdict| return verdict.recv(),
+            .prepare => |*receiver| {
+                const built = try receiver.recv();
+                defer built.discard();
+                return !built.handoff.is_wait();
+            },
+            .propose => |*receiver| {
+                const built = receiver.recv() catch |err| switch (err) {
+                    error.Closed => return false, // Declined: no block.
+                    else => return err,
+                };
+                var owned = built;
+                owned.deinit();
+                return true;
+            },
+        }
+    }
+
+    fn deinit(request: *CompetingRequest) void {
+        switch (request.*) {
+            inline else => |*receiver| receiver.deinit(),
+        }
+    }
+};
+
+fn competing_finalization(kind: Competing) !void {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer check(&fixture);
+    const genesis = TestBlock.genesis();
+    const block = try uncached_child(&fixture, &genesis, 1);
+    const competing = try uncached_child(&fixture, &genesis, 2);
+    var probe: Probe = .{ .target = block.digest() };
+    defer probe.deinit();
+    var gate = try Held.add(&probe);
+    defer gate.deinit();
+    fixture.processing.verifications.verifier.app.probe = &probe;
+    var capture_probe: Probe = .{ .target = competing.digest() };
+    defer capture_probe.deinit();
+    fixture.processing.processor.app.capture_probe = &capture_probe;
+
+    var request = try CompetingRequest.send(&fixture, kind, block);
+    defer request.deinit();
+    try gate.await_started();
+    // The competing finalization waits for the losing execution to finish, then rejects it.
+    var waiter = try fixture.finalize(competing);
+    defer waiter.deinit();
+    try std.testing.io.sleep(.fromMilliseconds(20), .awake);
+    try testing.expect(waiter.poll() == null);
+    try testing.expectEqual(0, capture_probe.calls);
+    try testing.expect(!gate.release.?.is_closed());
+    try gate.open();
+    try testing.expect(!try request.accepted());
+    try await_acknowledged(&waiter);
+    try testing.expectEqual(1, probe.calls);
+}
+
+// commonware `competing_finalization_rejects_executing_request` (verify case): a competing
+// finalization lets the request finish executing its block, then rejects it: the verification
+// votes false. Adapted: the test waits 20 ms for the finalization to start waiting instead of
+// a parked acquisition.
+test "stateful processing: a competing finalization rejects an executing verification" {
+    try competing_finalization(.verify);
+}
+
+// commonware `competing_finalization_rejects_executing_request` (prepare case): the build on
+// the block declines.
+test "stateful processing: a competing finalization rejects an executing prepare" {
+    try competing_finalization(.prepare);
+}
+
+// commonware `competing_finalization_rejects_executing_request` (propose case): the build on
+// the block declines.
+test "stateful processing: a competing finalization rejects an executing proposal" {
+    try competing_finalization(.propose);
+}

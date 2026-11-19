@@ -346,6 +346,34 @@ pub fn Verifications(comptime P: type) type {
             assert(self.done.items.len > 0);
         }
 
+        /// Handles each request whose phase ends until `finished` is set, waking on every post
+        /// and on `interrupt`. The actor drives requests this way while a finalization runs on
+        /// another task, as commonware polls them during finalization.
+        pub fn drive(self: *Self, finished: *const std.atomic.Value(bool)) Io.Cancelable!void {
+            assert(self.admission == .finalizing);
+            // Each pass handles one posted work or ends; posts are bounded by the live works.
+            while (true) {
+                const work = taken: {
+                    self.mutex.lockUncancelable(self.io);
+                    defer self.mutex.unlock(self.io);
+                    while (self.done.items.len == 0) {
+                        if (finished.load(.acquire)) return;
+                        try self.condition.wait(self.io, &self.mutex);
+                    }
+                    break :taken self.done.orderedRemove(0);
+                };
+                self.complete(work);
+                assert(self.admission == .finalizing);
+            }
+        }
+
+        /// Wakes `drive` after its `finished` flag was set (from any task).
+        pub fn interrupt(self: *Self) void {
+            self.mutex.lockUncancelable(self.io);
+            defer self.mutex.unlock(self.io);
+            self.condition.signal(self.io);
+        }
+
         /// Handles every request whose phase already ended.
         pub fn complete_ready(self: *Self) void {
             // Each pass handles one posted work; posts are bounded by the live works.

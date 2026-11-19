@@ -426,10 +426,9 @@ fn ProcessingOf(comptime key: [4]type) type {
                 try self.verifications.pause(boundary);
                 defer self.verifications.@"resume"();
                 const start = self.durability.barrier == null;
-                const result = try self.processor.finalize(&self.provider, &owned_block, start);
-                // Steps that finished while the hooks ran on this task select their successors
-                // under the finalization's boundary, as commonware drives them during
-                // finalization: a successor the finalized block made stale is rejected
+                const result = try self.finalize_driven(&owned_block, start);
+                // Steps that finished as the finalization ended still select their successors
+                // under its boundary: a successor the finalized block made stale is rejected
                 // unprocessed rather than admitted once admission reopens.
                 self.complete_ready();
                 break :applied result;
@@ -442,6 +441,48 @@ fn ProcessingOf(comptime key: [4]type) type {
                 if (!self.durability.complete()) return error.DatabaseSyncFailed;
             }
             if (applied.prune) |prune| self.pending_prune = prune;
+        }
+
+        const Finalizing = struct {
+            processing: *Self,
+            block: *const Digested,
+            start_barrier: bool,
+            /// Written by the task before it sets `finished`.
+            outcome: ?anyerror!Processor.Applied = null,
+            finished: std.atomic.Value(bool) = .init(false),
+
+            fn run(finalizing: *Finalizing) void {
+                const processing = finalizing.processing;
+                finalizing.outcome = processing.processor.finalize(
+                    &processing.provider,
+                    finalizing.block,
+                    finalizing.start_barrier,
+                );
+                finalizing.finished.store(true, .release);
+                processing.verifications.interrupt();
+            }
+        };
+
+        /// Finalizes `block` on another task while this one drives the speculative requests
+        /// under the finalization's admission, as commonware polls them while its finalized
+        /// hook runs: a retained request goes on to its next step, or is rejected when the
+        /// finalized block makes that step stale, before the hook returns.
+        fn finalize_driven(self: *Self, block: *const Digested, start: bool) !Processor.Applied {
+            assert(self.verifications.admission == .finalizing);
+            var finalizing: Finalizing = .{
+                .processing = self,
+                .block = block,
+                .start_barrier = start,
+            };
+            var future = self.io.concurrent(Finalizing.run, .{&finalizing}) catch
+                return self.processor.finalize(&self.provider, block, start);
+            self.verifications.drive(&finalizing.finished) catch |err| {
+                future.cancel(self.io);
+                return err;
+            };
+            future.await(self.io);
+            assert(finalizing.finished.load(.acquire));
+            return finalizing.outcome.?;
         }
 
         /// Prunes the databases and marshal once every execution step has finished and a

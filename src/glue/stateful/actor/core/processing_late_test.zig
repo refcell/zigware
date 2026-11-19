@@ -1167,14 +1167,11 @@ test "stateful processing: a tip redelivery keeps an acquiring verification" {
 }
 
 /// A probe's gate with its two ends, the release still owned until sent.
-/// Waits (bounded) until a speculative request's phase has posted its completion.
-fn await_posted(fixture: *Fixture) !void {
-    const verifications = &fixture.processing.verifications;
-    for (0..2000) |_| {
-        verifications.mutex.lockUncancelable(io);
-        const posted = verifications.done.items.len > 0;
-        verifications.mutex.unlock(io);
-        if (posted) return;
+/// Receives from `receiver` once it is ready (bounded, so a missing answer fails).
+fn await_ready(comptime T: type, receiver: *utils.channel.oneshot.Receiver(T)) !T {
+    // Each pass sleeps 1 ms; the bound is a hang guard.
+    for (0..10_000) |_| {
+        if (receiver.is_ready()) return receiver.recv();
         try testing.io.sleep(.fromMilliseconds(1), .awake);
     }
     return error.TestTimedOut;
@@ -1335,11 +1332,7 @@ test "stateful processing: a paused acquisition restarts after finalization" {
 // retained across a finalization selects a successor whose round is at or before the
 // finalized round; the finalization's boundary rejects it unprocessed, the handoff declines,
 // and the retained block is processed once. Adapted: the finalized and retained blocks are
-// served by the provider; the retained step's completion is awaited before the hook opens
-// (commonware's scheduler finishes it while the hook is held); and the answer is read after
-// the hook returns, since the loop that answers also runs the hook. The loop completes posted
-// steps under the finalizing admission before reopening it, so the successor is still
-// selected under the boundary.
+// served by the provider.
 test "stateful processing: a finalization rejects a next step with a stale round" {
     var fixture: Fixture = undefined;
     try fixture.init();
@@ -1392,14 +1385,13 @@ test "stateful processing: a finalization rejects a next step with a stale round
     defer receipt.deinit();
     try hook.started.recv();
     try held.open();
-    try await_posted(&fixture); // The retained step finishes while the hook is held.
-    // The loop runs the hook, so the handoff's answer follows it here (commonware answers
-    // while the hook is still held).
+    // The retained step selects the stale block while the hook is held, and declines.
+    const built = try await_ready(core.Mailbox.Built, &prepared);
+    defer built.discard();
+    try testing.expect(built.handoff.is_wait());
+    try testing.expectEqual(null, receipt.poll());
     try hook.open();
     try receipt.wait();
-    const built = try prepared.recv();
-    defer built.discard();
-    try testing.expect(built.handoff.is_wait()); // The handoff on the stale block declines.
     // The retained block once; the stale block never (commonware's
     // `process_calls.at(stale) == 0`).
     try testing.expectEqual(1, probe.calls);
