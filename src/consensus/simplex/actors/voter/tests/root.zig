@@ -22,6 +22,7 @@ test {
             _ = @import("handoff_supersede.zig").Tests(h);
             _ = @import("handoff_restart.zig").Tests(h);
             _ = @import("handoff_dropped.zig").Tests(h);
+            _ = @import("handoff_displaced.zig").Tests(h);
         }
     }
 }

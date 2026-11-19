@@ -548,7 +548,17 @@ pub fn Harness(comptime F: type) type {
 
         /// The index of the leader `elector` picks for `view` of the default epoch among 5.
         pub fn leader_of(gpa: Allocator, elector: elector_mod.RoundRobin(Sha256), view: u64) !u32 {
-            var built = try elector.build(gpa, 5);
+            return leader_among(gpa, elector, 5, view);
+        }
+
+        /// `leader_of` among `n` validators.
+        pub fn leader_among(
+            gpa: Allocator,
+            elector: elector_mod.RoundRobin(Sha256),
+            n: u32,
+            view: u64,
+        ) !u32 {
+            var built = try elector.build(gpa, n);
             defer built.deinit(gpa);
             return built.elect(.new(default_epoch, .new(view)), {}).get();
         }
@@ -1146,11 +1156,23 @@ pub fn Harness(comptime F: type) type {
             nonce: u64,
         ) void {
             var buffer: [128]u8 = undefined;
-            var writer: codec.Writer = .init(&buffer);
+            const contents = mock_contents(&buffer, round, parent, nonce);
+            net.relay.broadcast(net.keys()[sender], .all, payload, contents);
+        }
+
+        /// The mock application's payload contents: `round`, the parent's payload, and
+        /// `nonce`, written into `buffer` (commonware `(round, parent, nonce).encode()`).
+        pub fn mock_contents(
+            buffer: *[128]u8,
+            round: Round,
+            parent: Digest,
+            nonce: u64,
+        ) []const u8 {
+            var writer: codec.Writer = .init(buffer);
             round.write(&writer);
             codec.write(Digest, parent, &writer);
             codec.write(u64, nonce, &writer);
-            net.relay.broadcast(net.keys()[sender], .all, payload, writer.written());
+            return writer.written();
         }
 
         /// The mock application's genesis payload in `epoch`.
