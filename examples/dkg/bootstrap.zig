@@ -3,8 +3,8 @@
 //!
 //! After the ceremony, the bootstrap hands its epoch-0 share to the validator's store and
 //! writes the resulting genesis into every validator directory that may use it. The ceremony
-//! runs glue's bootstrap engine; `complete` finishes it. `run` waits on the engine taking a
-//! production context (docs/lanes/examples-dkg.md).
+//! runs glue's bootstrap engine on the discovery network; `complete` finishes it, and the node
+//! then keeps serving peers that have not completed until stopped.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -13,6 +13,13 @@ const Io = std.Io;
 const zigware = @import("zigware");
 const config = @import("config.zig");
 const types = @import("types.zig");
+const net_mod = @import("network.zig");
+
+const glue_dkg = zigware.glue.dkg;
+const production = zigware.runtime.production;
+const Net = net_mod.Net;
+/// commonware's tracing target for this module.
+const target = "commonware_dkg::bootstrap";
 
 /// The runtime storage partition of the bootstrap's `Secrets` store.
 pub const partition: types.Partition = .bootstrap;
@@ -125,4 +132,136 @@ fn contains(keys: []const types.PublicKey, key: types.PublicKey) bool {
         if (each.eql(key)) return true;
     }
     return false;
+}
+
+/// The bootstrap engine's types on the production runtime and the discovery network.
+pub const EngineTypes = struct {
+    pub const Context = production.runner.Context;
+    pub const Variant = types.MinSig;
+    pub const Directory = types.Unit;
+    pub const Manager = glue_dkg.network.KeyOnlyManager(Net.Oracle);
+    pub const PeerProvider = Net.Oracle;
+    pub const Blocker = Net.Oracle;
+    pub const SecretStore = types.Secrets;
+    pub const Network = Net;
+};
+const Engine = glue_dkg.bootstrap.Engine(EngineTypes);
+
+/// commonware's bootstrap `Config` for `signer` over `committee` (borrowed by the engine).
+pub fn engine_config(
+    signer: types.ed25519.PrivateKey,
+    oracle: Net.Oracle,
+    manager: *EngineTypes.Manager,
+    store: *types.Secrets,
+    committee: types.Set(types.PublicKey),
+) glue_dkg.bootstrap.Config(EngineTypes) {
+    assert(committee.len() > 0);
+    return .{
+        .signer = signer,
+        .manager = manager,
+        .peer_provider = oracle,
+        .blocker = oracle,
+        .secret_store = store,
+        .namespace = types.namespace,
+        .sharing_mode = types.sharing_mode,
+        .reveal = types.reveal,
+        .max_supported_mode = types.max_supported_mode,
+        .partition_prefix = "bootstrap",
+        .page_size = types.page_size,
+        .page_cache_size = types.page_cache_size,
+        .write_buffer = types.io_buffer_size,
+        .replay_buffer = types.io_buffer_size,
+        .mailbox_size = types.mailbox_size,
+        .fetch_timeout = .from_secs(2),
+        .fetch_retry_delay = .from_millis(100),
+        .items_per_section = types.items_per_section,
+        .participants = committee,
+        .directory = .{},
+        .blocks_per_epoch = types.blocks_per_epoch,
+    };
+}
+
+fn channels(net: *Net) !Engine.Channels {
+    const ids = [_]u64{
+        types.vote_channel,     types.certificate_channel, types.resolver_channel,
+        types.backfill_channel, types.broadcast_channel,   types.dkg_channel,
+    };
+    var out: [ids.len]Engine.Channel = undefined;
+    for (&out, ids) |*channel, id| {
+        const registered = try net_mod.register(net, id);
+        channel.* = .{ .sender = registered.sender, .receiver = registered.receiver };
+    }
+    return .{
+        .votes = out[0],
+        .certificates = out[1],
+        .resolver = out[2],
+        .backfill = out[3],
+        .broadcast = out[4],
+        .dkg = out[5],
+    };
+}
+
+fn run_network(net: *Net) Io.Cancelable!void {
+    net.run() catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        else => std.debug.panic("network failed: {t}", .{err}),
+    };
+}
+
+/// Runs the one-shot DKG for the epoch-0 committee from `node_dir`'s config, writes the
+/// genesis, and keeps serving until stopped (commonware `bootstrap::run`).
+pub fn run(ctx: production.runner.Context, arena: Allocator, node_dir: []const u8) !void {
+    const gpa = ctx.gpa();
+    const io = ctx.io();
+    var dir = try Io.Dir.cwd().openDir(io, node_dir, .{});
+    defer dir.close(io);
+    const node = try config.NodeConfig.load(io, arena, dir);
+    const network = try config.NetworkConfig.load(io, arena, dir);
+    try network.validate();
+    var participants: types.Participants = try .init(gpa, &network);
+    defer participants.deinit(gpa);
+    var committee = try participants.get(gpa, .zero());
+    defer committee.deinit(gpa);
+    const committee_size: u32 = @intCast(committee.len());
+    const payload = glue_dkg.bootstrap.max_payload_size(
+        types.MinSig,
+        types.Unit,
+        committee_size,
+        types.max_supported_mode,
+    );
+    var net_config = try net_mod.network_config(arena, &node, &network, payload);
+    net_config.tracer = ctx.tracer("commonware_p2p");
+    const net = try Net.create(gpa, io, ctx.network, ctx.scope.child("network"), net_config);
+    defer net.destroy();
+    const engine_channels = try channels(net);
+    var network_task = try io.concurrent(run_network, .{net});
+    defer network_task.cancel(io) catch {};
+
+    var store: types.Secrets = try .init(io, gpa, ctx.storage, partition);
+    defer store.deinit();
+    var manager = EngineTypes.Manager.init(net.oracle());
+    const settings = engine_config(node.signer, net.oracle(), &manager, &store, committee);
+    var started = try Engine.start(ctx.child("bootstrap"), settings, engine_channels);
+    defer started.completion.deinit();
+    const written = try complete(io, gpa, &started.completion, &store, ctx.storage, .{
+        .base = Io.Dir.cwd(),
+        .node_dir = node_dir,
+        .local = node.public_key(),
+        .network = &network,
+        .participants = &participants,
+    });
+    var next_players = try participants.get(gpa, .new(1));
+    defer next_players.deinit(gpa);
+    ctx.tracer(target).event(.info, "bootstrap complete, serving peers until stopped", .{
+        .epoch = @as(u64, 0),
+        .players = committee.len(),
+        .next_players = next_players.len(),
+        .directories = written,
+    });
+    // Keep serving the one-shot chain so participants that have not completed can catch up.
+    if (started.handle.join()) |result| {
+        result catch |err| {
+            ctx.tracer(target).event(.@"error", "bootstrap task failed", .{ .err = err });
+        };
+    } else |err| return err;
 }

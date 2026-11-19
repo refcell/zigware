@@ -9,12 +9,18 @@
 //!
 //! `setup` creates every `validator-*` directory with node and network config, then prints the
 //! `mprocs` commands that run the epoch-0 bootstrap players and the validators. `bootstrap`
-//! and `validator` follow as glue's DKG actor lands (docs/lanes/examples-dkg.md).
+//! runs the epoch-0 ceremony; `validator` follows (docs/lanes/examples-dkg.md). Node commands
+//! keep their runtime storage in `<node-dir>/runtime`.
 
 const std = @import("std");
 const Io = std.Io;
+const zigware = @import("zigware");
+const ui = @import("ui");
 const cli = @import("cli.zig");
 const setup = @import("setup.zig");
+const bootstrap = @import("bootstrap.zig");
+
+const production = zigware.runtime.production;
 
 const log = std.log.scoped(.dkg);
 
@@ -44,9 +50,25 @@ pub fn main(init: std.process.Init) !u8 {
             try stdout.interface.flush();
             return 0;
         },
-        .bootstrap, .validator => {
-            log.err("bootstrap and validator wait on glue.dkg's reshare actor " ++
-                "(docs/lanes/examples-dkg.md)", .{});
+        .bootstrap => |node| {
+            var fmt: ui.fmt.Fmt = .{
+                .io = io,
+                .out = &stdout.interface,
+                .ansi = ui.fmt.ansi_enabled(init.environ_map.get("NO_COLOR")),
+                .level = parsed.log_level,
+            };
+            const runtime_dir = try std.fs.path.join(arena, &.{ node.node_dir, "runtime" });
+            var runner: production.Runner = undefined;
+            try runner.init(init.gpa, .{
+                .storage_directory = runtime_dir,
+                .subscriber = fmt.subscriber(),
+            });
+            defer runner.deinit();
+            try (try runner.start_context(bootstrap.run, .{ arena, node.node_dir }));
+            return 0;
+        },
+        .validator => {
+            log.err("validator waits on its actor wiring (docs/lanes/examples-dkg.md)", .{});
             return 1;
         },
     }
