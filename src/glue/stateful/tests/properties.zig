@@ -84,9 +84,8 @@ pub const QmdbPruned = struct {
 
 /// At least one validator used state sync and then processed past the synced height.
 ///
-/// Beyond commonware, the validator's plan must also have recorded completion: syncing
-/// acknowledges retained blocks to marshal, so marshal's processed height advances past the
-/// synced height even while a sync that never finishes is still fetching.
+/// Syncing acknowledges retained blocks to marshal, so this also holds while a sync is still
+/// fetching (commonware's slow-sync plans end mid-sync); `StateSyncCompleted` checks completion.
 pub const LateJoinerStateSyncHandoff = struct {
     pub const name = "late_joiner_state_sync_handoff";
 
@@ -94,7 +93,6 @@ pub const LateJoinerStateSyncHandoff = struct {
         assert(states.len > 0);
         for (states) |state| {
             const synced = state.state_sync_height() orelse continue;
-            if (!state.state_sync_completed()) continue;
             if (state.processed_height() > synced) return;
         }
         log.err("no validator both used state sync and advanced beyond the synced height", .{});
@@ -104,7 +102,6 @@ pub const LateJoinerStateSyncHandoff = struct {
 
 /// A validator crashed during state sync, restarted into it from its persisted floor, and
 /// then processed past the synced height.
-/// Like `LateJoinerStateSyncHandoff`, its plan must also have recorded completion.
 pub const CrashDuringStateSyncRecovery = struct {
     pub const name = "crash_during_state_sync_recovery";
 
@@ -119,10 +116,31 @@ pub const CrashDuringStateSyncRecovery = struct {
                 processed,
             });
             const synced = state.state_sync_height() orelse continue;
-            if (!state.state_sync_completed()) continue;
             if (state.state_sync_resumed() and processed > synced) return;
         }
         log.err("no validator re-entered state sync after a crash and then advanced", .{});
         return error.NoStateSyncRecovery;
+    }
+};
+
+/// Every validator that used state sync recorded its completion in its plan (beyond
+/// commonware, whose properties read only marshal's processed height). Plans whose sync
+/// converges before the exit height check it; commonware's slow-sync plans end mid-sync.
+pub const StateSyncCompleted = struct {
+    pub const name = "state_sync_completed";
+
+    pub fn check(_: *const StateSyncCompleted, _: anytype, states: anytype) !void {
+        assert(states.len > 0);
+        var synced: usize = 0;
+        for (states, 0..) |state, index| {
+            _ = state.state_sync_height() orelse continue;
+            synced += 1;
+            if (!state.state_sync_completed()) {
+                log.err("validator {d} used state sync but never completed it", .{index});
+                return error.StateSyncIncomplete;
+            }
+        }
+        if (synced == 0) return error.NoStateSyncHandoff;
+        assert(synced <= states.len);
     }
 };

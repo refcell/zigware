@@ -64,6 +64,8 @@ const Options = struct {
     pruning: bool = false,
     /// Check that a late joiner state synced and then advanced.
     state_sync: bool = false,
+    /// With `state_sync`, also check that every sync completed (see `StateSyncCompleted`).
+    sync_completes: bool = true,
     /// Check that a validator recovered state sync after a crash.
     crash_recovery: bool = false,
     /// Crashes each run must count.
@@ -88,8 +90,9 @@ fn run_plan(
     const qmdb: properties.QmdbPruned = .{ .min_oldest_retained = 1 };
     const handoff: properties.LateJoinerStateSyncHandoff = .{};
     const recovery: properties.CrashDuringStateSyncRecovery = .{};
+    const completed: properties.StateSyncCompleted = .{};
     const Plan = simulate.Plan(E);
-    var checks: [5]Plan.Property = undefined;
+    var checks: [6]Plan.Property = undefined;
     var count: usize = 0;
     checks[count] = .from(&agreement);
     count += 1;
@@ -101,6 +104,10 @@ fn run_plan(
     if (options.state_sync) {
         checks[count] = .from(&handoff);
         count += 1;
+        if (options.sync_completes) {
+            checks[count] = .from(&completed);
+            count += 1;
+        }
     }
     if (options.crash_recovery) {
         checks[count] = .from(&recovery);
@@ -480,26 +487,26 @@ test "stateful e2e: state sync lossy network" {
 }
 
 // The late joiner crashes mid-sync and restarts without clearing any partition, resuming state
-// sync from its persisted floor. Commonware runs rotating leaders only, crashing at 6.25 s and
-// restarting at 7 s; here the joiner reaches view 80 near 6.3 s (seed 0), so the crash is at
-// 6.6 s with the same 750 ms downtime.
-//
-// Skipped: with `with_slow_state_sync` (batches of one, one request outstanding) the joiner's
-// sync does not record completion by height 130 here, even without the crash; commonware's
-// completes. Open in docs/lanes/glue.md.
+// sync from its persisted floor. Its batches of one never catch up with a target that moves
+// every block, so the sync is still running at the exit height (commonware's too: its
+// properties read only marshal's processed height, which syncing advances), and the plan skips
+// `StateSyncCompleted`. Commonware runs rotating leaders only, crashing at 6.25 s and
+// restarting at 7 s; here the joiner reaches view 80 later (after 6.6 s in some seeds), so the
+// crash is at 7.5 s with the same 750 ms downtime.
 fn run_state_sync_crash_during_sync(comptime E: type) !void {
     var engine = try make_state_sync(E, .default(), true);
     defer engine.deinit();
     const late_joiner = engine.participants()[0];
     var schedule: Schedule = .empty;
     defer schedule.deinit(gpa);
-    try schedule.add(gpa, .from_millis(6600), .{ .crash = late_joiner });
-    try schedule.add(gpa, .from_millis(7350), .{ .restart = late_joiner });
+    try schedule.add(gpa, .from_millis(7500), .{ .crash = late_joiner });
+    try schedule.add(gpa, .from_millis(8250), .{ .restart = late_joiner });
     const crashes = [_]Crash{ delay_first(engine.participants(), 80), .{ .schedule = &schedule } };
     const options: Options = .{
         .height = 130,
         .crashes = &crashes,
         .state_sync = true,
+        .sync_completes = false,
         .crash_recovery = true,
         .expected_crashes = 1,
     };
@@ -508,18 +515,18 @@ fn run_state_sync_crash_during_sync(comptime E: type) !void {
 
 test "stateful e2e: state sync crash during sync" {
     try skip_slow();
-    if (true) return error.SkipZigTest;
     inline for (engines) |E| try run_state_sync_crash_during_sync(E);
 }
 
 // The late joiner is partitioned, crashed mid-sync, and restarted into the same partition: it
 // cannot recover before the network heals, so the run times out (commonware `should_panic`
-// on the runtime timeout, one test per engine). The runner returns `error.Timeout` without
-// ending its tasks, so the plan runs on an arena: the tasks' memory is released with it.
+// on the runtime timeout, one test per engine). The runner discards tasks still blocked at the
+// timeout without running their defers, so the plan runs on an arena: their memory is
+// released with it.
 //
-// Skipped: since peers serve state sync, tearing the timed-out runner down segfaults; it also
-// runs the slow sync that `..._crash_during_sync` shows does not complete here. Open in
-// docs/lanes/glue.md.
+// Skipped: tearing the timed-out runner down faults. Its shutdown cancels every task at once,
+// and a finishing `Io.Select` branch's `putOneUncancelable` into its owner's queue then hits a
+// general protection fault (which select is not yet known). Open in docs/lanes/glue.md.
 fn run_partitioned_restart(comptime E: type, elector: RoundRobin) !void {
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
@@ -538,6 +545,7 @@ fn run_partitioned_restart(comptime E: type, elector: RoundRobin) !void {
         .crashes = &crashes,
         .timeout = .from_secs(20),
         .state_sync = true,
+        .sync_completes = false,
         .allocator = arena.allocator(),
     };
     try testing.expectError(error.Timeout, run_plan(E, &engine, &seeds(5), options, null));

@@ -387,8 +387,8 @@ ones: d = deployer (thread T-01a1d5b9-c237), u = utils, j = storage-journal
 | stateful/actor/core/processing.rs, 1070-3396 | 47 | 22 | 24 | 1 | u |
 | stateful/actor/core/processing.rs, 3451-5885 | 39 | 37 | 0 | 2 | s |
 | stateful/actor/processor/mod.rs | 44 | 40 | 0 | 4 | |
-| stateful/tests/mod.rs, floor.rs | 28 | 21 | 7 | 0 | j |
-| **total** | **473** | **431** | **31** | **11** | |
+| stateful/tests/mod.rs, floor.rs | 28 | 22 | 6 | 0 | j |
+| **total** | **473** | **432** | **30** | **11** | |
 
 - db/mod.rs's barrier tests are ported since async start_sync step 6 (`Barrier` holds each
   member's `runtime.storage.Completion`): `barrier_waits_for_every_handle` (8),
@@ -473,14 +473,14 @@ ones: d = deployer (thread T-01a1d5b9-c237), u = utils, j = storage-journal
   crashes, full outage, partition, and the state sync scenarios: handoff (and with storage
   faults), determinism, random crashes, lossy, crash during sync, and the partitioned restart
   (one test per engine). One 20-block single-db plan always runs; the rest need -Dslow-tests.
-  Adaptations: crash during sync crashes at 6.6 s, not 6.25 s (the joiner reaches view 80
-  later here); the state sync properties also require the plan's recorded completion, since
-  syncing acknowledges retained blocks and marshal's processed height advances during a sync
-  that never finishes; DB-B's sync target is zigware's `CompactTarget` (root and size).
-  Written but skipped: crash during sync and both partitioned restarts, all on
-  `with_slow_state_sync`, whose sync does not complete by height 130 here (commonware's does);
-  the partitioned plans' timed-out teardown also segfaults. Open: those three. simplex
-  (T-01a1d5ad) has floor.rs and mod.rs's six targeted qmdb tests.
+  Adaptations: crash during sync crashes at 7.5 s, not 6.25 s (the joiner reaches view 80
+  later here); DB-B's sync target is zigware's `CompactTarget` (root and size). Beyond
+  commonware, `StateSyncCompleted` checks that every fast-sync plan's joiner recorded
+  completion (syncing acknowledges retained blocks, so the handoff properties alone pass while
+  a sync never finishes; the slow-sync plans end mid-sync in commonware too, and skip it).
+  Written but skipped: both partitioned restarts, whose timed-out runner faults on teardown (an
+  `Io.Select` branch finishing during shutdown). Open: those two. simplex (T-01a1d5ad) has
+  floor.rs and mod.rs's six targeted qmdb tests.
   Split (agreed 2026-11-19): storage-journal keeps the state sync scenarios and multi_db_app;
   simplex (T-01a1d5ad-c8d6) takes floor.rs (`live_floor_preserves_application_recovery`, 2
   cases) and the six targeted qmdb tests (out_of_order_certifications, finalizations and
