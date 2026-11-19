@@ -84,17 +84,19 @@ pub const Fp2 = struct {
     }
 
     /// Karatsuba with lazy reduction (blst's `mul_mont_384x`): three double-width products
-    /// and two Montgomery reductions. v0 - v1 + p^2 and cross - v0 - v1 = a0 b1 + a1 b0 both
-    /// lie in [0, 2p^2), below p R.
+    /// and two Montgomery reductions.
     pub fn mul(a: Fp2, b: Fp2) Fp2 {
+        return mul_wide(a, b).reduce();
+    }
+
+    /// The product before reduction: v0 - v1 mod p R and cross - v0 - v1 = a0 b1 + a1 b0,
+    /// which lies in [0, 2p^2), below p R.
+    pub fn mul_wide(a: Fp2, b: Fp2) Fp2Wide {
         comptime assert(Fp.lazy_supported);
         const v0 = Fp.mul_wide(a.c0, b.c0);
         const v1 = Fp.mul_wide(a.c1, b.c1);
         const cross = Fp.mul_wide(a.c0.add_unreduced(a.c1), b.c0.add_unreduced(b.c1));
-        return .{
-            .c0 = Fp.reduce_wide(Fp.wide_sub_plus_p_squared(v0, v1)),
-            .c1 = Fp.reduce_wide(Fp.wide_sub(Fp.wide_sub(cross, v0), v1)),
-        };
+        return .{ .c0 = Fp.wide_sub_mod(v0, v1), .c1 = Fp.wide_sub(Fp.wide_sub(cross, v0), v1) };
     }
 
     pub fn square(a: Fp2) Fp2 {
@@ -206,6 +208,54 @@ const frobenius_w = Fp2.from_ints_comptime(
         0xec0c8ec971f63c5f282d5ac14d6c7ec22cf78a126ddc4af3,
 );
 
+/// An Fp2 element as two double-width values below p R, before Montgomery reduction
+/// (blst's vec384x2): the lazy tower adds products here and reduces each coefficient once.
+pub const Fp2Wide = struct {
+    c0: Fp.WideLimbs,
+    c1: Fp.WideLimbs,
+
+    pub fn add(a: Fp2Wide, b: Fp2Wide) Fp2Wide {
+        return .{ .c0 = Fp.wide_add_mod(a.c0, b.c0), .c1 = Fp.wide_add_mod(a.c1, b.c1) };
+    }
+
+    pub fn sub(a: Fp2Wide, b: Fp2Wide) Fp2Wide {
+        return .{ .c0 = Fp.wide_sub_mod(a.c0, b.c0), .c1 = Fp.wide_sub_mod(a.c1, b.c1) };
+    }
+
+    /// Multiplication by xi = u + 1: (c0 - c1) + (c0 + c1) u.
+    pub fn mul_by_nonresidue(a: Fp2Wide) Fp2Wide {
+        return .{ .c0 = Fp.wide_sub_mod(a.c0, a.c1), .c1 = Fp.wide_add_mod(a.c0, a.c1) };
+    }
+
+    pub fn reduce(a: Fp2Wide) Fp2 {
+        return .{ .c0 = Fp.reduce_wide(a.c0), .c1 = Fp.reduce_wide(a.c1) };
+    }
+};
+
+/// An Fp6 element with double-width Fp2 coefficients (blst's vec384fp6x2).
+const Fp6Wide = struct {
+    c0: Fp2Wide,
+    c1: Fp2Wide,
+    c2: Fp2Wide,
+
+    fn add(a: Fp6Wide, b: Fp6Wide) Fp6Wide {
+        return .{ .c0 = a.c0.add(b.c0), .c1 = a.c1.add(b.c1), .c2 = a.c2.add(b.c2) };
+    }
+
+    fn sub(a: Fp6Wide, b: Fp6Wide) Fp6Wide {
+        return .{ .c0 = a.c0.sub(b.c0), .c1 = a.c1.sub(b.c1), .c2 = a.c2.sub(b.c2) };
+    }
+
+    /// Multiplication by v (the Fp12 non-residue).
+    fn mul_by_nonresidue(a: Fp6Wide) Fp6Wide {
+        return .{ .c0 = a.c2.mul_by_nonresidue(), .c1 = a.c0, .c2 = a.c1 };
+    }
+
+    fn reduce(a: Fp6Wide) Fp6 {
+        return .{ .c0 = a.c0.reduce(), .c1 = a.c1.reduce(), .c2 = a.c2.reduce() };
+    }
+};
+
 pub const Fp6 = struct {
     c0: Fp2,
     c1: Fp2,
@@ -239,12 +289,20 @@ pub const Fp6 = struct {
     }
 
     pub fn mul(a: Fp6, b: Fp6) Fp6 {
-        const aa = a.c0.mul(b.c0);
-        const bb = a.c1.mul(b.c1);
-        const cc = a.c2.mul(b.c2);
-        const t1 = a.c1.add(a.c2).mul(b.c1.add(b.c2)).sub(bb).sub(cc).mul_by_nonresidue().add(aa);
-        const t2 = a.c0.add(a.c1).mul(b.c0.add(b.c1)).sub(aa).sub(bb).add(cc.mul_by_nonresidue());
-        const t3 = a.c0.add(a.c2).mul(b.c0.add(b.c2)).sub(aa).add(bb).sub(cc);
+        return mul_wide(a, b).reduce();
+    }
+
+    /// Karatsuba over Fp2 with lazy reduction (blst's mul_fp6x2): six double-width Fp2
+    /// products combined modulo p R, before any reduction.
+    fn mul_wide(a: Fp6, b: Fp6) Fp6Wide {
+        const aa = Fp2.mul_wide(a.c0, b.c0);
+        const bb = Fp2.mul_wide(a.c1, b.c1);
+        const cc = Fp2.mul_wide(a.c2, b.c2);
+        const t1 = Fp2.mul_wide(a.c1.add(a.c2), b.c1.add(b.c2)).sub(bb).sub(cc)
+            .mul_by_nonresidue().add(aa);
+        const t2 = Fp2.mul_wide(a.c0.add(a.c1), b.c0.add(b.c1)).sub(aa).sub(bb)
+            .add(cc.mul_by_nonresidue());
+        const t3 = Fp2.mul_wide(a.c0.add(a.c2), b.c0.add(b.c2)).sub(aa).add(bb).sub(cc);
         return .{ .c0 = t1, .c1 = t2, .c2 = t3 };
     }
 
@@ -275,16 +333,28 @@ pub const Fp6 = struct {
 
     /// Product with the sparse element b1 v.
     pub fn mul_by_1(a: Fp6, b1: Fp2) Fp6 {
-        return .{ .c0 = a.c2.mul(b1).mul_by_nonresidue(), .c1 = a.c0.mul(b1), .c2 = a.c1.mul(b1) };
+        return mul_by_1_wide(a, b1).reduce();
+    }
+
+    fn mul_by_1_wide(a: Fp6, b1: Fp2) Fp6Wide {
+        return .{
+            .c0 = Fp2.mul_wide(a.c2, b1).mul_by_nonresidue(),
+            .c1 = Fp2.mul_wide(a.c0, b1),
+            .c2 = Fp2.mul_wide(a.c1, b1),
+        };
     }
 
     /// Product with the sparse element b0 + b1 v.
     pub fn mul_by_01(a: Fp6, b0: Fp2, b1: Fp2) Fp6 {
-        const aa = a.c0.mul(b0);
-        const bb = a.c1.mul(b1);
-        const t1 = a.c2.mul(b1).mul_by_nonresidue().add(aa);
-        const t2 = b0.add(b1).mul(a.c0.add(a.c1)).sub(aa).sub(bb);
-        const t3 = a.c2.mul(b0).add(bb);
+        return mul_by_01_wide(a, b0, b1).reduce();
+    }
+
+    fn mul_by_01_wide(a: Fp6, b0: Fp2, b1: Fp2) Fp6Wide {
+        const aa = Fp2.mul_wide(a.c0, b0);
+        const bb = Fp2.mul_wide(a.c1, b1);
+        const t1 = Fp2.mul_wide(a.c2, b1).mul_by_nonresidue().add(aa);
+        const t2 = Fp2.mul_wide(b0.add(b1), a.c0.add(a.c1)).sub(aa).sub(bb);
+        const t3 = Fp2.mul_wide(a.c2, b0).add(bb);
         return .{ .c0 = t1, .c1 = t2, .c2 = t3 };
     }
 
@@ -332,19 +402,23 @@ pub const Fp12 = struct {
         return .{ .c0 = a.c0.sub(b.c0), .c1 = a.c1.sub(b.c1) };
     }
 
+    /// Karatsuba over Fp6 with lazy reduction (blst's mul_fp12): three double-width Fp6
+    /// products and one reduction per coefficient.
     pub fn mul(a: Fp12, b: Fp12) Fp12 {
-        const aa = a.c0.mul(b.c0);
-        const bb = a.c1.mul(b.c1);
-        const cross = a.c0.add(a.c1).mul(b.c0.add(b.c1)).sub(aa).sub(bb);
-        return .{ .c0 = bb.mul_by_nonresidue().add(aa), .c1 = cross };
+        const aa = Fp6.mul_wide(a.c0, b.c0);
+        const bb = Fp6.mul_wide(a.c1, b.c1);
+        const cross = Fp6.mul_wide(a.c0.add(a.c1), b.c0.add(b.c1)).sub(aa).sub(bb);
+        return .{ .c0 = bb.mul_by_nonresidue().add(aa).reduce(), .c1 = cross.reduce() };
     }
 
+    /// (c0 + c1 w)^2 = (c0 + c1)(c0 + v c1) - c0 c1 - v c0 c1 + 2 c0 c1 w, with the c0
+    /// product lazily reduced.
     pub fn square(a: Fp12) Fp12 {
-        const ab = a.c0.mul(a.c1);
+        const ab = Fp6.mul_wide(a.c0, a.c1);
         const sum = a.c0.add(a.c1);
         const shifted = a.c0.add(a.c1.mul_by_nonresidue());
-        const c0 = shifted.mul(sum).sub(ab).sub(ab.mul_by_nonresidue());
-        return .{ .c0 = c0, .c1 = ab.double() };
+        const c0 = Fp6.mul_wide(shifted, sum).sub(ab).sub(ab.mul_by_nonresidue());
+        return .{ .c0 = c0.reduce(), .c1 = ab.add(ab).reduce() };
     }
 
     /// Conjugation is the p^6-power Frobenius; it inverts unitary elements.
@@ -366,11 +440,13 @@ pub const Fp12 = struct {
     }
 
     /// Product with the sparse line value b0 + b1 v + b4 v w (M-type twist).
+    /// Product with the sparse line b0 + b1 v + b4 v w, lazily reduced (blst's
+    /// mul_by_xy00z0_fp12): one reduction per coefficient.
     pub fn mul_by_014(a: Fp12, b0: Fp2, b1: Fp2, b4: Fp2) Fp12 {
-        const aa = a.c0.mul_by_01(b0, b1);
-        const bb = a.c1.mul_by_1(b4);
-        const cross = a.c1.add(a.c0).mul_by_01(b0, b1.add(b4)).sub(aa).sub(bb);
-        return .{ .c0 = bb.mul_by_nonresidue().add(aa), .c1 = cross };
+        const aa = Fp6.mul_by_01_wide(a.c0, b0, b1);
+        const bb = Fp6.mul_by_1_wide(a.c1, b4);
+        const cross = Fp6.mul_by_01_wide(a.c1.add(a.c0), b0, b1.add(b4)).sub(aa).sub(bb);
+        return .{ .c0 = bb.mul_by_nonresidue().add(aa).reduce(), .c1 = cross.reduce() };
     }
 
     /// Squaring in the cyclotomic subgroup (Granger-Scott).

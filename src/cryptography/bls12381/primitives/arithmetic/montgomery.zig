@@ -356,6 +356,59 @@ pub fn Field(comptime limb_count: comptime_int, comptime modulus_int: anytype) t
             return out;
         }
 
+        const modulus_r_wide: WideLimbs = wide_from_int(@as(Wide, modulus) << bits);
+
+        /// Whether a double-width value lies below p R, the input range of `reduce_wide`.
+        pub fn wide_below_modulus_r(value: WideLimbs) bool {
+            return limbs_to_int(value[limbs..].*) < modulus;
+        }
+
+        /// (a + b) mod p R for a, b below p R (blst's add_mod_384x384): the lazy tower's
+        /// double-width sums stay where `reduce_wide` takes them.
+        pub fn wide_add_mod(a: WideLimbs, b: WideLimbs) WideLimbs {
+            comptime assert(lazy_supported);
+            assert(wide_below_modulus_r(a) and wide_below_modulus_r(b));
+            var sum = wide_add(a, b);
+            var trial: [limbs]u64 = undefined;
+            var borrow: u1 = 0;
+            inline for (0..limbs) |j| {
+                const step1 = @subWithOverflow(sum[limbs + j], modulus_limbs[j]);
+                const step2 = @subWithOverflow(step1[0], borrow);
+                trial[j] = step2[0];
+                borrow = step1[1] | step2[1];
+            }
+            // Keep the sum when subtracting p R borrowed (the sum was below p R).
+            const keep = 0 -% @as(u64, borrow);
+            inline for (0..limbs) |j| sum[limbs + j] = (sum[limbs + j] & keep) | (trial[j] & ~keep);
+            assert(wide_below_modulus_r(sum));
+            return sum;
+        }
+
+        /// (a - b) mod p R for a, b below p R (blst's sub_mod_384x384).
+        pub fn wide_sub_mod(a: WideLimbs, b: WideLimbs) WideLimbs {
+            comptime assert(lazy_supported);
+            assert(wide_below_modulus_r(a) and wide_below_modulus_r(b));
+            var out: WideLimbs = undefined;
+            var borrow: u1 = 0;
+            inline for (0..2 * limbs) |index| {
+                const step1 = @subWithOverflow(a[index], b[index]);
+                const step2 = @subWithOverflow(step1[0], borrow);
+                out[index] = step2[0];
+                borrow = step1[1] | step2[1];
+            }
+            // Add p R back when the difference went negative.
+            const mask = 0 -% @as(u64, borrow);
+            var carry: u1 = 0;
+            inline for (0..limbs) |j| {
+                const step1 = @addWithOverflow(out[limbs + j], modulus_limbs[j] & mask);
+                const step2 = @addWithOverflow(step1[0], carry);
+                out[limbs + j] = step2[0];
+                carry = step1[1] | step2[1];
+            }
+            assert(wide_below_modulus_r(out));
+            return out;
+        }
+
         /// a - b + p^2, nonnegative for a, b below p^2.
         pub fn wide_sub_plus_p_squared(a: WideLimbs, b: WideLimbs) WideLimbs {
             return wide_sub(wide_add(a, modulus_squared_wide), b);
