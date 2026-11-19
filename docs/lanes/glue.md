@@ -444,6 +444,12 @@ ones: d = deployer (thread T-01a1d5b9-c237), u = utils, j = storage-journal
   height 130 here (commonware's does); the partitioned plan's timed-out teardown also
   segfaults. Open: those two, multi_db_app (and the multi-db partitioned restart), floor.rs,
   and mod.rs's six targeted qmdb tests.
+  Split (agreed 2026-11-19): storage-journal keeps the state sync scenarios and multi_db_app;
+  simplex (T-01a1d5ad-c8d6) takes floor.rs (`live_floor_preserves_application_recovery`, 2
+  cases) and the six targeted qmdb tests (out_of_order_certifications, finalizations and
+  certifications during the proposal parent lookup, stable-leader finalizations outpacing a
+  slow sync, pruning joins verification, and the two multi_qmdb ones once Stateful compiles
+  over a `db.Tuple`).
 
 ### Backlog
 - [x] db: `Shared`, `Reader`, `Barrier`, single and tuple sets, with mod.rs's set tests.
