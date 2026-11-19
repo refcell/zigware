@@ -563,7 +563,9 @@ shared `tests/mocks.zig`, which takes additive edits only (agreed with the glue 
   `widest_addresses`) in `tests/mocks_network.zig`, re-exported by `tests/mocks.zig`.
 - [x] tests/dkg/properties.rs (`DkgOutcome`). `expected` is comptime, since
   `simulate.Property` needs a constant `name`.
-- [ ] bootstrap engine (bootstrap/mod.rs), with its 3 tests.
+- [x] bootstrap `Block` and `max_payload_size`, with mod.rs's `max_encode_size_covers_widest_block`
+  and `covers_every_component` (128 participants behind -Dslow-tests in Debug).
+- [ ] bootstrap `Engine` and `rejects_unsupported_sharing_mode`.
 - [ ] tests/dkg/harness.rs and mod.rs's 14 ceremony tests on the bootstrap engine (the lossy,
   filtered, crash, and laggard plans behind -Dslow-tests).
 - [ ] tests/reshare harness, properties, and mod.rs's ceremony tests (needs the orchestrator).
@@ -572,3 +574,5 @@ shared `tests/mocks.zig`, which takes additive edits only (agreed with the glue 
 ### Log
 - 2026-11-19: the network mocks and `DkgOutcome`; the tests catch a planted skipped
   output-agreement check and an inverted epoch filter.
+- 2026-11-19: bootstrap's block and payload bound; the tests catch a missing payload-flag
+  byte and a dropped marshal term.

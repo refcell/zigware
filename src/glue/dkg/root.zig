@@ -26,6 +26,7 @@
 const std = @import("std");
 const consensus = @import("consensus");
 
+pub const bootstrap = @import("bootstrap/mod.zig");
 pub const fence = @import("fence.zig");
 pub const limits = @import("limits.zig");
 pub const max_payload_size = limits.max_payload_size;
