@@ -66,6 +66,10 @@ Other bench prefixes: `sha256::`, `sha512::`, `blake3::`, `secp256r1::`, `bls123
 
 ## Differences from commonware
 
+- BLS operations take a `strategy` only where commonware's parallel path is ported:
+  `PublicKey.verify_batch` hashes messages through it, and `G1`/`G2.msm_strategy` sums in
+  strategy-cut tiles. Results never depend on the strategy shape
+  ([bls-math decisions](../../docs/lanes/bls-math.md#decisions)).
 - Traits are comptime interfaces, and each hasher has its own `Digest` type. See the
   [crypto lane log](../../docs/lanes/crypto.md#log).
 - Hashing never allocates. `finalize` resets the hasher in place, and `hash_many` writes into

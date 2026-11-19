@@ -72,6 +72,10 @@ coverage-guided fuzzing, run `zig build test --fuzz -Doptimize=ReleaseSafe`.
 - qmdb databases are single-owner, with no `RwLock` around the activity bitmap. Harness modes
   that commonware runs as concurrent futures issue the same reads one after another
   ([storage-qmdb decisions](../../docs/lanes/storage-qmdb.md#decisions)).
+- qmdb's parallel snapshot build (`init_concurrency`, qmdb/snapshot_parallel.zig) runs in
+  barrier steps over a `parallel` strategy instead of commonware's tasks and channels. It
+  builds the same snapshot as the serial build under every strategy shape
+  ([storage-qmdb decisions](../../docs/lanes/storage-qmdb.md#decisions)).
 - Benchmarks measure on production disk storage under `.zig-cache/tmp`. Smoke runs use
   in-memory storage and smaller inputs
   ([storage-journal decisions](../../docs/lanes/storage-journal.md#decisions)).

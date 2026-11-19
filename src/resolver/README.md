@@ -11,8 +11,7 @@ A Zig port of commonware's
 path. See commonware's [stability levels](https://github.com/commonwarexyz/monorepo#stability).
 The zigware port's backlog is done.
 [docs/lanes/broadcast-resolver.md](../../docs/lanes/broadcast-resolver.md) tracks it. Its
-[test audit][ta] counts 178 commonware tests: 165 ported, 8 open, 5 not portable. The 8 open
-items are since checked off.
+[test audit][ta] counts 178 commonware tests: 173 ported, 0 open, and 5 not portable.
 
 [ta]: ../../docs/lanes/broadcast-resolver.md#test-audit-resolver-2026-11-19-commonware-43b357a41
 

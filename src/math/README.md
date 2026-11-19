@@ -12,8 +12,8 @@ Stability upstream varies by primitive. lib.rs puts `algebra` and `poly` in the 
 inside `algebra` and `poly`.
 See commonware's [stability levels](https://github.com/commonwarexyz/monorepo#stability).
 The math backlog item in [docs/lanes/bls-math.md](../../docs/lanes/bls-math.md) is done, and
-its test audit ports all 24 of math's tests. The lane records that math's conformance hashes
-wait for the `conformance` harness.
+its test audit ports all 24 of math's tests. Math's conformance hashes
+(`math/conformance.toml`) are not ported yet.
 
 ## Modules
 
@@ -23,7 +23,8 @@ wait for the `conformance` harness.
   modulo 2^64 - 2^32 + 1.
 - `ntt` ([ntt.zig](ntt.zig)): number theoretic transforms, batch evaluation and interpolation,
   and erasure recovery.
-- `poly` ([poly.zig](poly.zig)): `Poly(K)` polynomials, commitments, and interpolation.
+- `poly` ([poly.zig](poly.zig)): `Poly(K)` polynomials, commitments, and interpolation,
+  including `interpolate_strategy`, which sums through `K.msm_strategy` when `K` has one.
 - `synthetic` ([synthetic.zig](synthetic.zig)): `Synthetic(F, G)`, linear combinations of free
   generators and concrete points.
 - `testing` ([testing.zig](testing.zig)): a small prime field `F` and group `G` for testing
@@ -54,3 +55,6 @@ All of these are recorded in the
 - Randomness comes in as a `utils.rng` generator pointer, so ported tests draw the same values
   as the Rust tests.
 - Property tests run on `invariants.minifuzz` with commonware's draw order.
+- Ops take a `strategy` only where commonware's parallel path is ported, such as
+  `Poly.interpolate_strategy`; the rest run sequentially. Results never depend on the strategy
+  shape ([bls-math decisions](../../docs/lanes/bls-math.md#decisions)).

@@ -214,7 +214,7 @@ Every commonware `#[test]` in this lane's crates (macro and rstest cases expande
 | --- | --- | --- | --- | --- |
 | acknowledgement.rs | 5 | 5 | 0 | 0 |
 | amount.rs | 2 | 2 | 0 | 0 |
-| cache.rs | 50 | 42 | 2 | 6 |
+| cache.rs | 50 | 44 | 0 | 6 |
 | channel/fallible.rs | 18 | 18 | 0 | 0 |
 | channel/reservation.rs | 5 | 5 | 0 | 0 |
 | channel/ring.rs | 14 | 11 | 0 | 3 |
@@ -223,7 +223,7 @@ Every commonware `#[test]` in this lane's crates (macro and rstest cases expande
 | faults.rs | 55 | 45 | 0 | 10 |
 | futures.rs | 22 | 12 | 0 | 10 |
 | futures/shared.rs | 13 | 0 | 0 | 13 |
-| futures/try_join_all.rs | 30 | 5 | 8 | 17 |
+| futures/try_join_all.rs | 30 | 13 | 0 | 17 |
 | handles.rs | 13 | 12 | 0 | 1 |
 | hostname.rs | 12 | 10 | 0 | 2 |
 | iter.rs | 9 | 5 | 0 | 4 |
@@ -248,7 +248,7 @@ Every commonware `#[test]` in this lane's crates (macro and rstest cases expande
 | thread_local.rs | 8 | 5 | 0 | 3 |
 | time.rs | 19 | 16 | 0 | 3 |
 | vec.rs | 32 | 26 | 0 | 6 |
-| **Total** | **489** | **381** | **10** | **98** |
+| **Total** | **489** | **391** | **0** | **98** |
 
 Counting notes:
 - rstest cases are counted one per case. faults.rs `test_bft3f1_quorum_and_max_faults` (21)
@@ -364,18 +364,18 @@ Not portable:
 | File | Tests | Ported | Open | Not portable |
 | --- | --- | --- | --- | --- |
 | bitmap/atomic.rs | 5 | 2 | 0 | 3 |
-| bitmap/mod.rs | 74 | 57 | 8 | 9 |
+| bitmap/mod.rs | 74 | 65 | 0 | 9 |
 | bitmap/prunable.rs | 54 | 44 | 0 | 10 |
 | bitmap/historical/tests.rs | 20 | 17 | 0 | 3 |
-| bitmap/roaring/container/array.rs | 25 | 24 | 1 | 0 |
-| bitmap/roaring/container/bitmap.rs | 26 | 21 | 5 | 0 |
-| bitmap/roaring/container/mod.rs | 27 | 12 | 15 | 0 |
-| bitmap/roaring/container/run.rs | 26 | 21 | 3 | 2 |
+| bitmap/roaring/container/array.rs | 25 | 25 | 0 | 0 |
+| bitmap/roaring/container/bitmap.rs | 26 | 26 | 0 | 0 |
+| bitmap/roaring/container/mod.rs | 27 | 27 | 0 | 0 |
+| bitmap/roaring/container/run.rs | 26 | 24 | 0 | 2 |
 | bitmap/roaring/fuzz.rs | 1 | 1 | 0 | 0 |
 | bitmap/roaring/mod.rs | 32 | 28 | 0 | 4 |
 | bitmap/roaring/ops.rs | 43 | 43 | 0 | 0 |
 | bitmap/roaring/prunable.rs | 27 | 22 | 0 | 5 |
-| **Total** | **360** | **292** | **32** | **36** |
+| **Total** | **360** | **324** | **0** | **36** |
 
 Open:
 - [x] `bitmap/mod.rs:1800` `test_multi_chunk_operations`: and/or/xor over two full 4-byte chunks

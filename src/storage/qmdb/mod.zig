@@ -1,7 +1,7 @@
 //! A collection of authenticated databases inspired by QMDB (Quick Merkle Database).
 //!
-//! Port of commonware's `storage/src/qmdb` (shared modules, keyless, immutable, and any; the
-//! current, sync, and compact variants come later). A database's state is derived from an
+//! Port of commonware's `storage/src/qmdb`: the shared modules and the keyless, immutable,
+//! any, store, current, sync, and compact databases. A database's state is derived from an
 //! append-only log of operations; its Merkle root commits to that log, and proofs show that
 //! operations (and, for keyed variants, key values) are in it. See commonware's module
 //! documentation for the batch lifecycle, batch validity, durability, and initialization

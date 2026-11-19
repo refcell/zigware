@@ -104,9 +104,13 @@ variants (MinPk, MinSig) must match exactly.
 - Encodings use the `codec` package interface (`fixed_size`/`encode_size`, `write`, `read`,
   `Cfg`); `Poly(K).Cfg` is `codec.SliceCfg` (zero coefficients always rejected) and
   `Poly(K).max_encode_size_with(n)` is commonware's `Poly::max_encode_size(n)`.
-- `Strategy` parameters are omitted (sequential) in math and bls12381 ops; results do not
-  depend on the strategy. Adding `strategy: anytype` (parallel package) is a later step.
-- Conformance hashes (math/conformance.toml) wait for the `conformance` harness.
+- `Strategy` parameters (`strategy: anytype`, parallel package) are taken where commonware's
+  parallel paths are ported; results never depend on the strategy shape. `Poly.interpolate_strategy`
+  (commonware `interpolate(evals, strategy)`) sums through `K.msm_strategy` when `K` provides
+  one, else runs `interpolate`; `G1`/`G2.msm_strategy` sum in strategy-cut tiles
+  (`arithmetic.msm.msm_tiled`). Ops without a ported parallel path stay sequential.
+- Conformance hashes (math/conformance.toml) are not ported yet; the `conformance` harness
+  they need exists.
 - Randomness is injected as a `utils.rng` generator pointer (`next_u64`/`fill_bytes`, commonware's
   `CryptoRng`), so ported tests draw the same values as the Rust tests.
 
@@ -136,8 +140,9 @@ variants (MinPk, MinSig) must match exactly.
   `{ dealer, log }` pairs. The test plan's 3+ round cases run only in release builds or with
   `-Dslow-tests`.
 
-- scheme: `PublicKey.verify_batch` takes a `strategy` but runs sequentially (one random linear
-  combination per 64 entries, drawing scalars in commonware's order); the
+- scheme: `PublicKey.verify_batch` hashes each 64-entry chunk's messages through its `strategy`
+  (`map_into`), as commonware does, then checks one random linear combination per chunk,
+  drawing scalars in commonware's order; the
   `projected_batch_indexes_zero_sized_items` test runs on `parallel.sequential` only, not
   commonware's `mocks::explore` shapes.
 

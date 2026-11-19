@@ -338,11 +338,13 @@ which every database here is built on.
 - verify: commonware's `ProofExt` trait methods are free functions; `verify_multi` takes
   locations and operations as two parallel slices (mismatched lengths fail), like
   `merkle.Proof.verify_multi_inclusion`. Operations are encoded into scratch from `gpa`.
-- snapshot: only the serial build is ported (commonware's `Sequential` path). The parallel
-  build over partitioned indices (decoder tasks, worker channels, prefetch pipelining) waits
-  for a reason to spawn work during init; its results are identical. The build reads the log
-  one position at a time through `read` rather than a replay stream, so any reader (the fixed
-  journal, an in-memory log) fits.
+- snapshot: the serial build (commonware's `Sequential` path) reads the log one position at a
+  time through `read` rather than a replay stream, so any reader (the fixed journal, an
+  in-memory log) fits. The parallel build over partitioned indices is ported too
+  (qmdb/snapshot_parallel.zig, actor-stream lane ce3e897): an `init_concurrency` budget split
+  between decode units and per-range insert workers, run in barrier steps over a strategy
+  instead of commonware's channels, with results identical to the serial build under every
+  strategy shape (snapshot_parallel_test.zig, any/parallel_init_test.zig).
 - bitmap: no `RwLock` around the activity bitmap; databases are single-owner.
 - Display formats an encoding of up to 4096 bytes as hex and prints `<N bytes>` beyond that
   (formatting does not allocate).

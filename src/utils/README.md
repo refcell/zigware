@@ -14,8 +14,9 @@ in the **BETA** scope. With `std`, so are `rng`, `acknowledgement`, `net`, `time
 `amount`, the test generators in `rng`, and `bitmap::roaring` are ALPHA, and so are a few items
 inside `range` and `rng`.
 See commonware's [stability levels](https://github.com/commonwarexyz/monorepo#stability).
-Every backlog item in [docs/lanes/utils.md](../../docs/lanes/utils.md) is done, and every open
-test its test audit lists is checked off.
+Every backlog item in [docs/lanes/utils.md](../../docs/lanes/utils.md) is done. Its test audit
+lists no open tests: outside `bitmap/`, 391 of 489 are ported and 98 are not portable; in
+`bitmap/`, 324 of 360 are ported and 36 are not portable.
 
 ## Modules
 

@@ -174,8 +174,8 @@ passes even without the fix (the verdict task queues before the engine reads the
 direct engine test is the one that covers it.
 
 Every `#[test]`/`#[test_traced]`/`#[rstest]` fn in commonware `resolver/src`, matched to a zigware
-test by name or by reading both bodies (a zigware test may cover several). 178 tests: 165 ported, 8
-open, 5 not portable.
+test by name or by reading both bodies (a zigware test may cover several). 178 tests: 173 ported, 0
+open, 5 not portable (the 8 inflight tests below are ported in src/resolver/p2p/inflight_test.zig).
 
 | commonware file | tests | ported | open | not portable |
 |---|---|---|---|---|
@@ -184,13 +184,13 @@ open, 5 not portable.
 | `opaque.rs` | 13 | 13 | 0 | 0 |
 | `subscribers.rs` | 5 | 5 | 0 | 0 |
 | `p2p/fetcher.rs` | 58 | 58 | 0 | 0 |
-| `p2p/inflight.rs` | 9 | 0 | 8 | 1 |
+| `p2p/inflight.rs` | 9 | 8 | 0 | 1 |
 | `p2p/ingress.rs` | 7 | 7 | 0 | 0 |
 | `p2p/mod.rs` | 51 | 51 | 0 | 0 |
 | `p2p/score.rs` | 7 | 7 | 0 | 0 |
 | `p2p/wire.rs` | 8 | 5 | 0 | 3 |
 
-Open:
+Ported since the audit:
 - [x] `p2p/inflight.rs` `test_insert_contains_cancel_remove_round_trip`: Inflight
   insert/contains/cancel round trip, with a second cancel returning false. Goes in
   src/resolver/p2p/inflight.zig, which has no tests; delivery.zig "insert contains remove round
