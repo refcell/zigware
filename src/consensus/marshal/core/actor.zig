@@ -332,8 +332,7 @@ pub fn Actor(comptime P: type) type {
             }
             // A stale anchor below the processed height is ignored.
             if (last_processed) |existing| if (height.get() < existing.get()) return;
-            const stored = try V.into_stored(gpa, anchor);
-            defer codec.free(V.StoredBlock, gpa, stored);
+            const stored = V.stored_view(anchor);
             try finalized_blocks.put(anchor.digest(), &stored);
             try finalized_blocks.sync();
         }

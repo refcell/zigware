@@ -78,8 +78,7 @@ fn apply_floor(self: anytype, finalization: anytype, block: anytype) !void {
     }
     const digest = block.digest();
     const round = finalization.round();
-    const stored = try V.into_stored(self.gpa, block);
-    defer codec.free(V.StoredBlock, self.gpa, stored);
+    const stored = V.stored_view(block);
     try self.finalized_blocks.put(digest, &stored);
     try self.finalizations_by_height.put(height, digest, finalization);
     try sync_finalized(self);
@@ -134,8 +133,7 @@ pub fn store_finalization(
         try advance_tip(self, value.round(), height, digest);
         return false;
     }
-    const stored = try V.into_stored(self.gpa, block);
-    defer codec.free(V.StoredBlock, self.gpa, stored);
+    const stored = V.stored_view(block);
     try self.finalized_blocks.put(digest, &stored);
     if (owned) |*value| try self.finalizations_by_height.put(height, digest, value);
     // The write is readable before it is durable: hold dispatch at it until a sync.

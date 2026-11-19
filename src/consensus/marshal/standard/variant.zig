@@ -85,6 +85,11 @@ pub fn Standard(comptime B: type) type {
                 };
         }
 
+        /// The block's own value, borrowed for an archive write (the caller does not free it).
+        pub fn stored_view(block: *const Block) StoredBlock {
+            return block.inner().*;
+        }
+
         /// Pairs a stored block with its known digest (takes ownership; on error the
         /// caller keeps it).
         pub fn restore(gpa: Allocator, stored: StoredBlock, digest: B.Digest) !Block {

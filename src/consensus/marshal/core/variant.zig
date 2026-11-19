@@ -14,6 +14,8 @@
 //! - `decode_block(gpa, bytes, block_config, ExpectedCommitment(Commitment), strategy)
 //!   codec.Error!Block`: decodes and checks the block against the commitment.
 //! - `into_stored(gpa, *const Block) !StoredBlock` (an owned copy for the archive),
+//!   `stored_view(*const Block) StoredBlock` (a borrowed form to write, valid while the block
+//!   lives and never freed, so archive writes do not copy the payload),
 //!   `restore(gpa, StoredBlock, Block.Digest) !Block`, and
 //!   `restore_across(gpa, StoredBlock, strategy) !Block` (takes ownership of the stored
 //!   block; on error the caller keeps it).
@@ -57,7 +59,7 @@ const variant_decls = [_][]const u8{
     "decode_block",            "into_stored",              "restore",
     "restore_across",          "into_shared",              "from_application_block",
     "max_backfill_block_size", "max_buffer_payload_size",  "clone_block",
-    "deinit_block",
+    "deinit_block",            "stored_view",
 };
 
 pub fn assert_variant(comptime V: type) void {

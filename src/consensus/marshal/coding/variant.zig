@@ -103,6 +103,15 @@ pub fn Coding(comptime B: type, comptime C: type, comptime H: type, comptime P: 
             return stored;
         }
 
+        /// The block's application handle, borrowed for an archive write (the caller does
+        /// not free it).
+        pub fn stored_view(block: *const Block) StoredBlock {
+            return .{
+                .inner_value = block.inner_value,
+                .commitment_value = block.commitment_value,
+            };
+        }
+
         /// The coded block of a stored block keyed by `digest` (takes ownership).
         pub fn restore(gpa: Allocator, stored: StoredBlock, digest: B.Digest) !Block {
             _ = gpa;

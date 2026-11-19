@@ -180,9 +180,9 @@ ports its range's tests and the helpers defined in it, into
   `parse_processed_height`. The three paced-sync tests (finalization_sync_does_not_block_mailbox,
   stale_floor_anchor_holds_dispatch_until_durable, overlapping_finalized_syncs_release_per_batch)
   are ported but skipped behind `pooled_finalized_sync` until `start_finalized_sync` runs off
-  the actor loop, as commonware pools it. cache_writes_do_not_clone_block_payloads is not
-  ported: it counts Rust `Clone` calls on the block's context, and Zig copies a value-type
-  block implicitly with no hook to count (shared blocks are refcounted `Digested` handles).
+  the actor loop, as commonware pools it. cache_writes_do_not_clone_block_payloads is ported
+  in core/cache.zig over a heap-payload block that counts `clone` calls: archive writes now
+  encode a borrowed `V.stored_view` instead of `into_stored`'s deep copy.
 - deployer thread (T-01a1d5b9-c237-73f2-a935-c93580e28133), `tests/floor.zig`: lines
   6740-10611 (redelivery, start/set floor, floor anchors and acks, delivery verification
   across scopes, processed and round floors, unverifiable delivery, sync dispatch). Done
@@ -374,7 +374,8 @@ dropped its responder unreleased, so the requester waited forever; `actor_ingres
 now releases it. `cache_writes_do_not_clone_block_payloads` moved to in progress: its reason
 was wrong. `cache.put_block` deep-copies an owning block through `V.into_stored` before the
 archive encodes it; the mock block owns no memory, so nothing showed. It needs a payload-owning
-test block and a borrowed encode in `put_block` (marshal lane). After: 5.
+test block and a borrowed encode in `put_block` (marshal lane). After: 5. The marshal lane
+then ported it in core/cache.zig: archive writes encode a borrowed `V.stored_view`.
 
 #### standard/mod.rs
 
@@ -526,7 +527,7 @@ test block and a borrowed encode in `put_block` (marshal lane). After: 5.
 - L9967 `test_standard_round_floor_advance_releases_superseded_pending_floor`: ported (standard/tests/floor.zig)
 - L10119 `test_standard_unverifiable_delivery_is_ignored`: ported (standard/tests/floor.zig)
 - L10275 `test_standard_dispatches_finalized_blocks_after_sync`: ported (standard/tests/floor.zig)
-- L10612 `test_standard_cache_writes_do_not_clone_block_payloads`: in progress (see the review above)
+- L10612 `test_standard_cache_writes_do_not_clone_block_payloads`: ported (core/cache.zig)
 - L10723 `test_standard_notarized_delivery_decodes_after_verification`: ported (standard/tests/dispatch.zig)
 - L10819 `test_standard_finalization_sync_does_not_block_mailbox`: ported (standard/tests/dispatch.zig)
 - L10942 `test_standard_stale_floor_anchor_holds_dispatch_until_durable`: ported (standard/tests/dispatch.zig)

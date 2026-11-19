@@ -304,15 +304,13 @@ pub fn Manager(comptime V: type, comptime S: type) type {
 
         /// Stores `block` (borrowed) in `archive` at `index` under `digest`, then starts a sync.
         fn put_block(
-            self: *Self,
             archive: *BlockArchive,
             index: u64,
             digest: Digest,
             block: *const V.Block,
             multi: bool,
         ) !Completion {
-            const stored = try V.into_stored(self.gpa, block);
-            defer codec.free(V.StoredBlock, self.gpa, stored);
+            const stored = V.stored_view(block);
             if (multi) return archive.put_multi_start_sync(index, digest.bytes, stored);
             return archive.put_start_sync(index, digest.bytes, stored);
         }
@@ -335,7 +333,7 @@ pub fn Manager(comptime V: type, comptime S: type) type {
             if (try cache.verified_blocks.has_at(view, &digest.bytes)) {
                 return cache.verified_blocks.start_sync();
             }
-            return self.put_block(&cache.verified_blocks, view, digest, block, true);
+            return put_block(&cache.verified_blocks, view, digest, block, true);
         }
 
         /// Adds a block to the height-indexed certified archive, whether or not it is certified.
@@ -355,7 +353,7 @@ pub fn Manager(comptime V: type, comptime S: type) type {
             const cache = try self.with_epoch(epoch) orelse return;
             if (try cache.certified_blocks.has_at(height.get(), &digest.bytes)) return;
             const archive = &cache.certified_blocks;
-            try (try self.put_block(archive, height.get(), digest, block, true)).wait_release();
+            try (try put_block(archive, height.get(), digest, block, true)).wait_release();
         }
 
         /// Adds a notarized block and starts its sync.
@@ -366,7 +364,7 @@ pub fn Manager(comptime V: type, comptime S: type) type {
             block: *const V.Block,
         ) !Completion {
             const cache = try self.with_epoch(round.epoch) orelse return .ok;
-            return self.put_block(&cache.notarized_blocks, round.view.get(), digest, block, false);
+            return put_block(&cache.notarized_blocks, round.view.get(), digest, block, false);
         }
 
         /// Starts a sync of every write the round's verified-block archive accepted; the caller
@@ -543,7 +541,11 @@ const Harness = struct {
     }
 
     fn open(self: *Harness) !TestManager {
-        var manager: TestManager = try .init(
+        return self.open_as(TestManager);
+    }
+
+    fn open_as(self: *Harness, comptime M: type) !M {
+        var manager: M = try .init(
             testing.allocator,
             self.storage.interface(),
             Scope.init(&self.registry),
@@ -645,4 +647,84 @@ test "pruning by view destroys older epochs and refuses their writes" {
     try manager.put_certified(.new(9), .new(90), block.digest(), &block);
     try testing.expectEqual(2, manager.open_epochs(&epochs).len);
     try manager.prune_by_height(.new(10));
+}
+
+/// A block that owns a heap payload and counts its clones (commonware's `CloneCounter`).
+const ClonedBlock = struct {
+    const Self = @This();
+    pub const Digest = TestBlock.Digest;
+    pub const Context = TestBlock.Context;
+    pub const owns_memory = true;
+    var clones: usize = 0;
+
+    base: TestBlock,
+    payload: []const u8,
+
+    pub fn digest(self: Self) Digest {
+        return self.base.digest();
+    }
+
+    pub fn height(self: Self) Height {
+        return self.base.height();
+    }
+
+    pub fn parent(self: Self) Digest {
+        return self.base.parent();
+    }
+
+    pub fn context(self: Self) Context {
+        return self.base.context();
+    }
+
+    pub fn write(self: Self, writer: *codec.Writer) void {
+        self.base.write(writer);
+        codec.write([]const u8, self.payload, writer);
+    }
+
+    pub fn encode_size(self: Self) usize {
+        return self.base.encode_size() + codec.encode_size([]const u8, self.payload);
+    }
+
+    pub fn read(gpa: Allocator, reader: *codec.Reader, _: void) codec.Error!Self {
+        const base = try TestBlock.read(gpa, reader, {});
+        const payload = try codec.read_cfg([]const u8, gpa, reader, .{ .range = .full() });
+        return .{ .base = base, .payload = payload };
+    }
+
+    pub fn clone(self: *const Self, gpa: Allocator) Allocator.Error!Self {
+        clones += 1;
+        return .{ .base = self.base, .payload = try gpa.dupe(u8, self.payload) };
+    }
+
+    pub fn deinit(self: *Self, gpa: Allocator) void {
+        gpa.free(self.payload);
+        self.* = undefined;
+    }
+};
+
+// commonware `test_standard_cache_writes_do_not_clone_block_payloads`: verified and certified
+// writes, each delivered twice, encode the block without copying its payload.
+test "cache writes do not clone block payloads" {
+    const ClonedVariant = Standard(ClonedBlock);
+    var harness: Harness = undefined;
+    try harness.init();
+    defer harness.deinit();
+    var manager = try harness.open_as(Manager(ClonedVariant, TestScheme));
+    defer manager.deinit();
+    const payload = try testing.allocator.dupe(u8, "payload");
+    var block: ClonedVariant.Block = try .compute(testing.allocator, .{
+        .base = .init(.fill(0), .new(1), 10),
+        .payload = payload,
+    });
+    defer block.deinit();
+    ClonedBlock.clones = 0;
+    const round: Round = .new(.new(0), .new(1));
+    for (0..2) |_| {
+        try (try manager.put_verified(round, block.digest(), &block)).wait_release();
+        try manager.put_certified(.new(0), .new(1), block.digest(), &block);
+        try testing.expectEqual(0, ClonedBlock.clones);
+    }
+    var stored = (try manager.get_verified(round)).?;
+    defer stored.deinit(testing.allocator);
+    try testing.expectEqualStrings("payload", stored.payload);
 }
