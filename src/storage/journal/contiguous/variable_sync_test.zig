@@ -3,7 +3,7 @@
 //! below the sync range, ranges at and within blob boundaries, empty journals recovered at a
 //! stale position, and the first open after a clear crashed with its intent staged.
 //!
-//! The reversed-range test expects a panic, which is an assertion here, and is not ported.
+//! The reversed-range test expects a panic and is a death test in death_test.zig.
 
 const std = @import("std");
 const testing = std.testing;

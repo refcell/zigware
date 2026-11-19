@@ -4,8 +4,7 @@
 //!
 //! Snapshot readers are not ported, so replays run on the journal directly. Crash scenarios
 //! stage the checkpoint state an interrupted clear leaves, as commonware does. The two
-//! `read_many` tests of unsorted and duplicate positions are not ported: they expect a panic,
-//! which is an assertion here.
+//! `read_many` tests of unsorted and duplicate positions are death tests in death_test.zig.
 
 const std = @import("std");
 const testing = std.testing;

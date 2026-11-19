@@ -5,8 +5,8 @@
 //! The tampered offsets a batched read must reject, and the extents of cached frames with cold
 //! successors and of a blob's last frame, are in `variable_read_many_test.zig`. commonware's
 //! tests of batched-read accounting, probe reuse of offsets, and recorded blob reads count
-//! metrics and blob reads zigware does not record per batch. Ownership (`View`) tests, the
-//! should-panic ordering tests (assertions here), and snapshot tests are not ported either.
+//! metrics and blob reads zigware does not record per batch. Ownership (`View`) tests and
+//! snapshot tests are not ported either; the should-panic ordering tests are in death_test.zig.
 
 const std = @import("std");
 const testing = std.testing;

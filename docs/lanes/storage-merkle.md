@@ -226,13 +226,18 @@ check. Status after the 24 open ports landed (two `read_location` tests went to 
 | file | tests | ported | open | not portable |
 |---|---|---|---|---|
 | merkle batch, mem, proof, verification, hasher, storage, position | 219 | 211 | 0 | 8 |
-| mmr (mod, mem, full, iterator, proof), mmb, persisted/compact | 87 | 69 | 2 (qmdb) | 16 |
+| mmr (mod, mem, full, iterator, proof), mmb, persisted/compact | 87 | 71 | 2 (qmdb) | 14 |
 | persisted/full.rs | 121 | 118 | 0 | 3 |
-| journal/contiguous/fixed.rs | 136 | 127 | 0 | 9 |
-| journal/contiguous/variable.rs | 152 | 133 | 0 | 19 |
+| journal/contiguous/fixed.rs | 136 | 129 | 0 | 7 |
+| journal/contiguous/variable.rs | 152 | 136 | 0 | 16 |
 
+The `should_panic` tests are death tests (`utils.death`) in merkle/death_test.zig (mmr
+`to_nearest_size` past `MAX_NODES`, mmb `children` of a leaf) and journal/contiguous/death_test.zig
+(unsorted and duplicate `read_many` on both journals, a reversed `init_sync` range); removing
+each panic fails all 7. The batch `add_many_past_limit` pair stays a deviation: zigware returns
+`LocationOverflow` and batch_test.zig checks it.
 Not portable: positions are plain `u64` (Display, operator, checked/saturating sub tests),
-`should_panic` tests, `View` sharing,
+the batch overflow pair above, `View` sharing,
 snapshot readers, decode counts, batched `read_many` internals, Rust type checks, and the
 `ExactSizeIterator` length test (Zig takes slices). The parallel-strategy and duration-histogram
 tests are ported.
