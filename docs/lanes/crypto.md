@@ -358,33 +358,33 @@ Open:
   empty namespace through scheme.PublicKey.verify; the only "" namespace use is the batch in
   "bls12381 scheme: projected batch indexes zero-sized items" (batch path, slow-only) and fuzz-drawn
   namespaces. Add to src/cryptography/bls12381/scheme_tests.zig
-- [ ] `lib.rs` `test_secp256r1_standard_validate`: secp256r1/tests.zig "secp256r1 codec round trips"
+- [x] `lib.rs` `test_secp256r1_standard_validate`: secp256r1/tests.zig "secp256r1 codec round trips"
   checks decode(encode(pk)).eql(pk) for a fixed key, but nothing checks order == .eq for the decoded
   key or that a second random key differs. Add to src/cryptography/secp256r1/tests.zig (inline for
   schemes covers both)
-- [ ] `lib.rs` `test_secp256r1_standard_public_key_order`: No test checks that PublicKey.order/eql
+- [x] `lib.rs` `test_secp256r1_standard_public_key_order`: No test checks that PublicKey.order/eql
   (which compare decoded points via inner.order) agree with byte-wise ordering of the 33-byte
   encodings over 16 random keys and their decoded copies. Add to
   src/cryptography/secp256r1/tests.zig
-- [ ] `lib.rs` `test_secp256r1_standard_sign_and_verify_wrong_message`: No namespaced verify with a
+- [x] `lib.rs` `test_secp256r1_standard_sign_and_verify_wrong_message`: No namespaced verify with a
   wrong message (scheme sign checks only a wrong namespace; vectors use verify_raw). Add !verify(ns,
   "wrong_message", sig) to src/cryptography/secp256r1/tests.zig
-- [ ] `lib.rs` `test_secp256r1_standard_invalid_signature_publickey_pair`: No test verifies a
+- [x] `lib.rs` `test_secp256r1_standard_invalid_signature_publickey_pair`: No test verifies a
   signature under a different key's public key and expects false. Add to
   src/cryptography/secp256r1/tests.zig (from_seed(0) signs, from_seed(1).public_key() rejects)
-- [ ] `lib.rs` `test_secp256r1_recoverable_validate`: Same gap as the standard scheme: no order ==
+- [x] `lib.rs` `test_secp256r1_recoverable_validate`: Same gap as the standard scheme: no order ==
   .eq for decoded key and no distinct-key check. Add to src/cryptography/secp256r1/tests.zig
-- [ ] `lib.rs` `test_secp256r1_recoverable_public_key_order`: Same gap as the standard scheme:
+- [x] `lib.rs` `test_secp256r1_recoverable_public_key_order`: Same gap as the standard scheme:
   order/eql vs byte order of encodings untested. Add to src/cryptography/secp256r1/tests.zig
-- [ ] `lib.rs` `test_secp256r1_recoverable_sign_and_verify_wrong_message`: No namespaced verify with
+- [x] `lib.rs` `test_secp256r1_recoverable_sign_and_verify_wrong_message`: No namespaced verify with
   a wrong message for the recoverable scheme either. Add to src/cryptography/secp256r1/tests.zig
-- [ ] `lib.rs` `test_secp256r1_recoverable_invalid_signature_publickey_pair`: No test that another
+- [x] `lib.rs` `test_secp256r1_recoverable_invalid_signature_publickey_pair`: No test that another
   key's public key rejects the signature (recover_signer checks a flipped signature, not a wrong
   key). Add to src/cryptography/secp256r1/tests.zig
-- [ ] `sha512.rs` `test_hash_many_overlapping_messages`: No test hashes overlapping/aliased slices
+- [x] `sha512.rs` `test_hash_many_overlapping_messages`: No test hashes overlapping/aliased slices
   of one buffer through Sha512.hash_many (20 messages backing[lane..lane*13+100], and 9 aliases of
   the whole buffer) on sequential and a parallel strategy. Add to src/cryptography/sha512.zig
-- [ ] `transcript.rs` `test_shuffle_label_and_history_matter`: Label part is checked (t shuffle A vs
+- [x] `transcript.rs` `test_shuffle_label_and_history_matter`: Label part is checked (t shuffle A vs
   B), but history is not isolated: Zig compares with_data/"shuffle" against t/"A", which differ in
   both label and history. Add same-label different-history check (v0 test shuffle A vs v0 test +
   commit DATA shuffle A) to src/cryptography/transcript_test.zig "transcript shuffle and sample"
@@ -398,11 +398,11 @@ Open:
   the 1..3 x 1..3 loops and per-item alteration but verifies only under parallel.sequential;
   missing: run Fixture.verify through parallel.mocks.explore so serial, parallel and seeded split
   shapes are each checked, in src/cryptography/ed25519/tests.zig
-- [ ] `secp256r1/certificate/mod.rs` `test_scheme_clone_and_verifier`: verifier.sign returning null
+- [x] `secp256r1/certificate/mod.rs` `test_scheme_clone_and_verifier`: verifier.sign returning null
   is asserted in "secp256r1 certificate sign, verify, and filter attestations", but no test clones a
   secp256r1 signer Scheme (Scheme.clone exists in secp256r1/certificate.zig) and asserts the clone
   still signs; add to src/cryptography/secp256r1/certificate_test.zig
-- [ ] `sha256/mod.rs` `test_hash_many_aliased_unaligned_inputs_match_individual_hashes`: No test
+- [x] `sha256/mod.rs` `test_hash_many_aliased_unaligned_inputs_match_individual_hashes`: No test
   passes overlapping, unaligned slices of one buffer (backing[lane..lane+129], counts 1..16) or 16
   aliases of one slice through Sha256.hash_many on sequential and parallel strategies. Add to
   src/cryptography/sha256.zig

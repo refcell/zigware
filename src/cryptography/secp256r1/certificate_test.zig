@@ -452,3 +452,20 @@ test "secp256r1 certificate fixture over ed25519 identities" {
     const verifier = &fixture.verifier;
     try testing.expect(try verifier.verify_certificate(gpa, &rng, subject, &cert, sequential));
 }
+
+test "secp256r1 certificate clones keep signing and verifiers cannot" {
+    // commonware `test_scheme_clone_and_verifier`.
+    var rng = utils.rng.test_rng();
+    var fixture = try Fixture.init(&rng, 4);
+    defer fixture.deinit();
+    var cloned = try fixture.schemes[0].clone(gpa);
+    defer cloned.deinit(gpa);
+    const attestation = (try cloned.sign(gpa, subject)).?;
+    const original = (try fixture.schemes[0].sign(gpa, subject)).?;
+    try testing.expectEqual(original.signer, attestation.signer);
+    const scheme = &fixture.schemes[0];
+    try testing.expect(try scheme.verify_attestation(gpa, &rng, subject, &attestation, sequential));
+    var verifier = try fixture.verifier.clone(gpa);
+    defer verifier.deinit(gpa);
+    try testing.expect((try verifier.sign(gpa, subject)) == null);
+}

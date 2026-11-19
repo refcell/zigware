@@ -151,3 +151,14 @@ test "sha256 fuzz hasher entrypoints (coverage-guided)" {
         }
     }.run, .{});
 }
+
+test "sha256 hash_many on aliased and unaligned inputs" {
+    // commonware `test_hash_many_aliased_unaligned_inputs_match_individual_hashes`.
+    var backing: [160]u8 = undefined;
+    for (&backing, 0..) |*byte, i| byte.* = @truncate(i);
+    var messages: [16][]const u8 = undefined;
+    for (&messages, 0..) |*message, lane| message.* = backing[lane .. lane + 129];
+    for (1..messages.len + 1) |count| try fuzz.check_hash_many(Sha256, messages[0..count]);
+    const aliased: [16][]const u8 = @splat(backing[1..130]);
+    try fuzz.check_hash_many(Sha256, &aliased);
+}

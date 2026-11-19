@@ -4,6 +4,7 @@
 const std = @import("std");
 const testing = std.testing;
 const codec = @import("codec");
+const utils = @import("utils");
 const common = @import("common.zig");
 const standard = @import("standard.zig");
 const recoverable = @import("recoverable.zig");
@@ -323,4 +324,45 @@ test "secp256r1 recover signer" {
         try testing.expect(!other.eql(expected));
     }
     try testing.expect(!expected.verify(namespace, "recover with no namespace", &flipped));
+}
+
+test "secp256r1 public keys decode equal and order by their encoding" {
+    // commonware lib.rs `test_validate` and `test_public_key_order`, for both schemes.
+    inline for (schemes) |scheme| {
+        const M = scheme.module;
+        var rng = utils.test_rng();
+        var keys: [32]M.PublicKey = undefined;
+        var encoded: [32][common.public_key_length]u8 = undefined;
+        for (0..16) |index| {
+            const key = M.PrivateKey.random(&rng).public_key();
+            const bytes = codec.encode_fixed(M.PublicKey, key);
+            const decoded = try codec.decode(M.PublicKey, testing.allocator, &bytes);
+            try testing.expect(key.eql(decoded) and key.order(decoded) == .eq);
+            keys[2 * index] = key;
+            keys[2 * index + 1] = decoded;
+        }
+        try testing.expect(!keys[0].eql(keys[2]));
+        for (&keys, &encoded) |key, *bytes| bytes.* = codec.encode_fixed(M.PublicKey, key);
+        for (keys, encoded) |a, a_bytes| {
+            for (keys, encoded) |b, b_bytes| {
+                const expected = std.mem.order(u8, &a_bytes, &b_bytes);
+                try testing.expectEqual(expected, a.order(b));
+                try testing.expectEqual(expected == .eq, a.eql(b));
+            }
+        }
+    }
+}
+
+test "secp256r1 verify rejects a wrong message and another key" {
+    // commonware lib.rs `test_sign_and_verify_wrong_message` and
+    // `test_invalid_signature_publickey_pair`, for both schemes.
+    inline for (schemes) |scheme| {
+        const M = scheme.module;
+        const key = M.PrivateKey.from_seed(0);
+        const signature = key.sign("test_namespace", "test_message");
+        try testing.expect(key.public_key().verify("test_namespace", "test_message", &signature));
+        try testing.expect(!key.public_key().verify("test_namespace", "wrong_message", &signature));
+        const other = M.PrivateKey.from_seed(1).public_key();
+        try testing.expect(!other.verify("test_namespace", "test_message", &signature));
+    }
 }

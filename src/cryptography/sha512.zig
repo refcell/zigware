@@ -103,3 +103,15 @@ test "sha512 fuzz hasher entrypoints" {
     try fuzz.fuzz_hasher(Sha512, 0x5ad512);
     try fuzz.fuzz_hash_many(Sha512, 0x5ad512);
 }
+
+test "sha512 hash_many on overlapping and aliased messages" {
+    // commonware `test_hash_many_overlapping_messages`: message `lane` starts at byte `lane`
+    // and spans `100 + 12 * lane` bytes; nine aliases of one buffer spill past a lane group.
+    var backing: [400]u8 = undefined;
+    message_bytes(&backing, 0);
+    var messages: [20][]const u8 = undefined;
+    for (&messages, 0..) |*message, lane| message.* = backing[lane .. lane * 13 + 100];
+    try fuzz.check_hash_many(Sha512, &messages);
+    const aliased: [9][]const u8 = @splat(&backing);
+    try fuzz.check_hash_many(Sha512, &aliased);
+}

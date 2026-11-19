@@ -184,6 +184,22 @@ pub fn fuzz_hasher(comptime H: type, seed: u64) !void {
     }
 }
 
+/// Checks `H.hash_many` on `messages` (which may overlap or alias one buffer) against hashing
+/// each alone, on the sequential strategy and on a thread pool.
+pub fn check_hash_many(comptime H: type, messages: []const []const u8) !void {
+    const gpa = std.testing.allocator;
+    const pool = try parallel.ThreadPool.create(gpa, std.testing.io, .{ .threads = 3 });
+    defer pool.destroy();
+    const digests = try gpa.alloc(H.Digest, messages.len);
+    defer gpa.free(digests);
+    @memset(digests, H.Digest.empty);
+    H.hash_many(messages, digests, parallel.sequential);
+    for (messages, digests) |message, digest| try expect_digest(H, H.hash(&.{message}), digest);
+    @memset(digests, H.Digest.empty);
+    H.hash_many(messages, digests, parallel.Rayon.init(pool));
+    for (messages, digests) |message, digest| try expect_digest(H, H.hash(&.{message}), digest);
+}
+
 /// Checks `H.hash_many` on `count` arbitrary messages against hashing each alone, on the
 /// sequential strategy and on a thread pool.
 pub fn fuzz_hash_many(comptime H: type, seed: u64) !void {

@@ -184,6 +184,11 @@ test "transcript shuffle and sample" {
     t.shuffle("B", @as([]u32, &d));
     try testing.expect(!std.mem.eql(u32, &c, &d));
     try testing.expect(!std.mem.eql(u32, &a, &c));
+    // The same label after different history shuffles differently.
+    var e = c;
+    for (&e, 0..) |*item, i| item.* = @intCast(i);
+    with_data.shuffle("A", @as([]u32, &e));
+    try testing.expect(!std.mem.eql(u32, &c, &e));
 
     var rng = t.noise("sample");
     for ([_]u64{ 1, 2, 3, 7, 100, 1 << 40, std.math.maxInt(u64) }) |bound| {
