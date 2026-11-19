@@ -544,8 +544,17 @@ Added, each a seeded fuzz scaled by `fuzz_soak` plus a `std.testing.fuzz` target
   polynomial bound off by one, the share bound off by one, and a `Set` decode that accepts
   duplicate keys or unsorted keys.
 
-After: every commonware fuzz target in these crates has a counterpart (runtime 3/3), and every
-fuzz test in them has both halves. Not fuzzed on purpose: eVRF `Proof`, `VrfCommitments`, and
-`DealerLog`. Building a valid one needs bulletproofs, which take minutes per proof and are
-gated behind `-Dslow-tests`. Random bytes reach only their length checks, and those use the
-same `codec` range reads the fuzzes above already check.
+- [x] `bls12381/dkg/golden/evrf_fuzz_test.zig`: `SignedDealerLog`, `DealerLog`,
+  `VrfCommitments`, and the eVRF `Proof`. A valid proof needs bulletproofs, so the seeds come from
+  one embedded `SignedDealerLog` (`golden/testdata/signed_dealer_log.hex`, 3063 bytes, 2 dealers
+  and 3 players, built once in ReleaseSafe from `utils.test_rng`). The seeds are its re-encoded
+  parts, plus a `VrfCommitments` with a fourth commitment beside the three-player proof. Inputs
+  are mutated (flips, truncation, extension, a duplicated or swapped commitment key) and decoded
+  without verifying, under bounds of 1 to 4 players. Plants caught: the commitment and proof-vector
+  bounds each off by one, and `Set` accepting duplicate keys or unsorted keys. Not caught: doubling
+  the circuit proof's internal length bound. A mutated seed never produces a longer vector that
+  still decodes. That bound is checked by `ipa_test.zig` "ipa proof decoding bounds the rounds
+  by the length".
+
+After: every commonware fuzz target in these crates has a counterpart (runtime 3/3), every fuzz
+test in them has both halves, and every decoder found in the audit has a fuzz.
