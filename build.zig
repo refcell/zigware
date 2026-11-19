@@ -171,8 +171,28 @@ pub fn build(b: *std.Build) void {
 
     add_examples(b, zigware, options_module, target, optimize, test_step, check_step, filters);
     add_benches(b, &modules, options_module, target, optimize, test_step, check_step);
+    add_test_rest(b, test_step);
 
     add_deployer(b, modules[package_index("deployer")], target, optimize, check_step);
+}
+
+/// `test-rest`: every test `test` runs except consensus's and glue's, which CI's other
+/// ReleaseSafe job runs (`zig build test-consensus test-glue`).
+fn add_test_rest(b: *std.Build, test_step: *std.Build.Step) void {
+    const split_packages = [_][]const u8{ "consensus", "glue" };
+    var split_runs: [split_packages.len]*std.Build.Step = undefined;
+    for (split_packages, &split_runs) |name, *run| {
+        const package_step = b.top_level_steps.get(b.fmt("test-{s}", .{name})).?;
+        std.debug.assert(package_step.step.dependencies.items.len == 1);
+        run.* = package_step.step.dependencies.items[0];
+    }
+    const rest_step = b.step("test-rest", "Run every unit test except consensus and glue");
+    for (test_step.dependencies.items) |dependency| {
+        const split = std.mem.indexOfScalar(*std.Build.Step, &split_runs, dependency) != null;
+        if (!split) rest_step.dependOn(dependency);
+    }
+    const total = test_step.dependencies.items.len;
+    std.debug.assert(rest_step.dependencies.items.len + split_runs.len == total);
 }
 
 /// `deployer`: commonware's deployer CLI (`zig build run-deployer -- aws list`).
