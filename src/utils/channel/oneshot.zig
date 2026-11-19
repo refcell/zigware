@@ -22,8 +22,8 @@
 //!
 //! Handles are values: each side is released exactly once, by `send`/`deinit` (sender) or
 //! `deinit` (receiver); the state is freed with the last one. A value dropped by the channel
-//! (sent but never received) is passed to `T.discard(value)` when `T` declares it (Rust
-//! `Drop`), so values that own resources are not leaked.
+//! (sent but never received) is passed to `T.discard(value)` when `T` (or the child of an
+//! optional `T`) declares it (Rust `Drop`), so values that own resources are not leaked.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -252,9 +252,15 @@ fn State(comptime T: type) type {
 }
 
 fn discard(comptime T: type, value: T) void {
-    switch (@typeInfo(T)) {
+    // A `?T` reply (marshal's `get_block`) owns its payload when present.
+    const Child = switch (@typeInfo(T)) {
+        .optional => |optional| optional.child,
+        else => T,
+    };
+    const inner: Child = if (comptime Child == T) value else value orelse return;
+    switch (@typeInfo(Child)) {
         .@"struct", .@"union", .@"enum", .@"opaque" => {
-            if (@hasDecl(T, "discard")) T.discard(value);
+            if (@hasDecl(Child, "discard")) Child.discard(inner);
         },
         else => {},
     }
@@ -324,6 +330,18 @@ test "unreceived value is discarded" {
     try pair.sender.send(.{ .dropped = &dropped });
     try testing.expectEqual(@as(u32, 0), dropped);
     pair.receiver.deinit();
+    try testing.expectEqual(@as(u32, 1), dropped);
+}
+
+test "unreceived optional value is discarded" {
+    var dropped: u32 = 0;
+    var pair = try channel(?Owned, testing.allocator, testing.io);
+    try pair.sender.send(.{ .dropped = &dropped });
+    pair.receiver.deinit();
+    try testing.expectEqual(@as(u32, 1), dropped);
+    var empty = try channel(?Owned, testing.allocator, testing.io);
+    try empty.sender.send(null);
+    empty.receiver.deinit();
     try testing.expectEqual(@as(u32, 1), dropped);
 }
 
