@@ -1,5 +1,6 @@
 //! Ephemeral X25519 keys for SAKE (commonware `handshake/sake/exchange.rs`, on
-//! `x25519-dalek`), backed by `std.crypto.dh.X25519`.
+//! `x25519-dalek`), backed by `std.crypto.dh.X25519`, with public keys from ed25519's
+//! fixed-base table.
 //!
 //! A secret key is 32 random bytes, clamped when used (RFC 7748). An exchange whose shared
 //! secret is all zeroes (a low-order peer key) is non-contributory and rejected, as
@@ -10,6 +11,7 @@ const assert = std.debug.assert;
 const codec = @import("codec");
 const Opaque = @import("../secret.zig").Opaque;
 const X25519 = std.crypto.dh.X25519;
+const base_mul = @import("../ed25519/base_mul.zig");
 
 /// An ephemeral X25519 public key: its 32-byte u-coordinate, kept as given.
 pub const EphemeralPublicKey = struct {
@@ -52,9 +54,10 @@ pub const SecretKey = struct {
     }
 
     pub fn public(self: *const SecretKey) EphemeralPublicKey {
-        // Proof: the clamped scalar is a nonzero multiple of 8 below the group order times 8,
-        // so the base point (of prime order) never maps to the identity.
-        return .{ .bytes = X25519.recoverPublicKey(self.bytes.value) };
+        // The clamped scalar is a nonzero multiple of 8 below the group order times 8, so the
+        // base point (of prime order) never maps to the identity. A fixed-base table, not
+        // std's ladder, as x25519-dalek's `PublicKey::from` (`mul_base_clamped`).
+        return .{ .bytes = base_mul.x25519_public_key(self.bytes.value) };
     }
 
     /// The shared secret with `other`, or null when it is non-contributory. Consumes the key:

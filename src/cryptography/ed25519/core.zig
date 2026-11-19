@@ -22,6 +22,7 @@ const transcript = @import("../transcript.zig");
 const Opaque = @import("../secret.zig").Opaque;
 const msm = @import("msm.zig");
 const verify_msm = @import("verify_msm.zig");
+const base_mul = @import("base_mul.zig");
 
 pub const Point = std.crypto.ecc.Edwards25519;
 const Fe = Point.Fe;
@@ -130,9 +131,9 @@ pub const SigningKey = struct {
         scalar.clamp(&clamped);
         const secret = scalar.reduce(clamped);
         std.crypto.secureZero(u8, &clamped);
-        // Proof: a clamped scalar is in [2^254, 2^255) and a multiple of 8, so it is not a
-        // multiple of l (8 l > 2^255) and the product is never the identity.
-        const a = Point.basePoint.mul(secret) catch unreachable;
+        // A clamped scalar is in [2^254, 2^255) and a multiple of 8, so it is not a multiple
+        // of l (8 l > 2^255) and the product is never the identity (asserted below).
+        const a = base_mul.mul_base(secret);
         const a_bytes = a.toBytes();
         const key: SigningKey = .{
             .seed = .{ .value = seed },
@@ -153,7 +154,7 @@ pub const SigningKey = struct {
         defer std.crypto.secureZero(u8, &nonce_digest);
         const nonce = scalar.reduce64(nonce_digest);
         // A zero nonce makes R the identity, whose encoding is still a valid signature.
-        const r = Point.basePoint.mul(nonce) catch Point.identityElement;
+        const r = base_mul.mul_base(nonce);
         var signature: [64]u8 = undefined;
         signature[0..32].* = r.toBytes();
         const k = challenge(signature[0..32], &self.verification_key.bytes, namespace, message);
