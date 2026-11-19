@@ -86,7 +86,6 @@ pub fn Application(comptime I: type) type {
             mailbox_size: u32,
         ) Allocator.Error!Self {
             assert(mailbox_size > 0);
-            assert(!this_network.eql(other_network.identity()));
             return .{
                 .gpa = gpa,
                 .indexer = indexer,

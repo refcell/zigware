@@ -174,6 +174,38 @@ test "bridge: finalizations cross from one network into the other's blocks" {
     try testing.expectEqual(false, try one.verify(io, context(71), digest));
 }
 
+test "bridge: a validator whose other network is its own bridges its own finalizations" {
+    // commonware does not reject `--other-public` equal to the validator's own identity: the
+    // validator fetches and bridges its own network's finalizations, which verify.
+    var bridge: Bridge = undefined;
+    try bridge.init();
+    defer bridge.deinit();
+    const gpa = testing.allocator;
+    const io = testing.io;
+    const tracer = bridge.collector.tracer(application.target);
+    const own = &bridge.one.verifier;
+    var one: App = try .init(gpa, io, &bridge.local, bridge.public(1), own, tracer, 8);
+    defer one.deinit();
+
+    const finalization = try store_test.finalize(gpa, &bridge.one, 3, .fill(3));
+    var rng = zigware.utils.rng.test_rng();
+    const put: types.Inbound = .{ .put_finalization = .{
+        .network = bridge.public(1),
+        .finalization = finalization,
+    } };
+    try testing.expect((try bridge.store.handle(gpa, &rng, put)).success);
+    var bridged: ?lib.Digest = null;
+    for (1..65) |view| {
+        const digest = (try one.propose(io, context(view))).?;
+        if (block_of(&bridge, 1, digest).? == .bridge) {
+            bridged = digest;
+            break;
+        }
+    }
+    try testing.expect(block_of(&bridge, 1, bridged.?).?.bridge.eql(finalization));
+    try testing.expectEqual(true, try one.verify(io, context(70), bridged.?));
+}
+
 test "bridge: blocks print as Rust's Debug" {
     var buffer: [512]u8 = undefined;
     const random = try std.fmt.bufPrint(&buffer, "{f}", .{application.Debug{
