@@ -29,9 +29,22 @@ const gpa = testing.allocator;
 const Log = struct {
     blocked: std.ArrayList(Key) = .empty,
     reported: u32 = 0,
+    /// Each reported activity's kind and view, in order.
+    activities: std.ArrayList(Seen) = .empty,
+
+    const Seen = struct { tag: std.meta.Tag(ActivityType), view: u64 };
 
     fn deinit(self: *Log) void {
         self.blocked.deinit(gpa);
+        self.activities.deinit(gpa);
+    }
+
+    fn count(self: *const Log, tag: std.meta.Tag(ActivityType), view: u64) usize {
+        var total: usize = 0;
+        for (self.activities.items) |seen| {
+            total += @intFromBool(seen.tag == tag and seen.view == view);
+        }
+        return total;
     }
 };
 
@@ -48,8 +61,10 @@ const Reporter = struct {
     log: *Log,
     pub const Activity = ActivityType;
     pub fn report(self: Reporter, activity: ActivityType) actor.Feedback {
-        _ = activity;
         self.log.reported += 1;
+        const tag = std.meta.activeTag(activity);
+        const seen: Log.Seen = .{ .tag = tag, .view = activity.view().get() };
+        self.log.activities.append(gpa, seen) catch @panic("out of memory");
         return .ok;
     }
 };
@@ -178,13 +193,28 @@ const Harness = struct {
         return self.start_scoped(io, null);
     }
 
+    /// Starts with historical votes kept (commonware `track_historical_votes`).
+    fn start_historical(self: *Harness, io: Io) !void {
+        return self.start_with(io, null, true);
+    }
+
     /// Starts with the batcher's metrics registered under `scope`, if any.
     fn start_scoped(self: *Harness, io: Io, scope: ?runtime.telemetry.metrics.Scope) !void {
+        return self.start_with(io, scope, false);
+    }
+
+    fn start_with(
+        self: *Harness,
+        io: Io,
+        scope: ?runtime.telemetry.metrics.Scope,
+        track_historical_votes: bool,
+    ) !void {
         var rng = utils.rng.test_rng();
         const fixture = try ed25519.fixture(Digest, gpa, &rng, "batcher", 4);
         self.* = .{ .io = io, .fixture = fixture };
         var cfg = config(&fixture.schemes[0], &self.log);
         cfg.scope = scope;
+        cfg.track_historical_votes = track_historical_votes;
         self.batcher, self.mailbox = try Batcher.init(gpa, io, cfg);
         const voter = try actor.mailbox.new(VoterMessage, gpa, io, 16);
         self.voter = voter.receiver;
@@ -483,6 +513,7 @@ test "batcher skips votes for finalized views" {
             try testing.expectEqual(1, first.verified.certificate.view().get());
             // View 2 is finalized: its votes form nothing.
             try harness.mailbox.update(.new(3), .init(1), .new(2), null);
+            try io.sleep(.fromMilliseconds(10), .awake);
             for (1..3) |signer| {
                 const bytes = try notarize_bytes(fixture, signer, 2);
                 try harness.votes.deliver(fixture.participants[signer], bytes);
@@ -535,6 +566,67 @@ test "batcher blocks a peer that resends a vote with another attestation" {
                 try testing.expectEqual(1, harness.log.blocked.items.len);
                 try testing.expect(harness.log.blocked.items[0].eql(peer));
             }
+        }
+    };
+    try run_deterministic(Root.run);
+}
+
+fn nullify_bytes(fixture: anytype, signer: usize, view: u64) ![]u8 {
+    const round: consensus_types.Round = .new(.new(0), .new(view));
+    const vote = (try types.Nullify(Scheme).sign(gpa, &fixture.schemes[signer], round)).?;
+    return codec.encode(types.Vote(Scheme, Digest), gpa, .{ .nullify = vote });
+}
+
+// commonware `test_network_votes_below_current_are_not_assembled`: votes for an untracked
+// view below the current one are reported, but even a quorum that needs no proposal
+// assembles nothing there.
+test "batcher reports votes below the current view without assembling them" {
+    const Root = struct {
+        fn run(io: Io) !void {
+            var harness: Harness = undefined;
+            try harness.start(io);
+            defer harness.stop();
+            const fixture = &harness.fixture;
+            try harness.mailbox.update(.new(10), .init(0), .zero(), null);
+            // The update and the votes arrive on different channels: let it land first.
+            try io.sleep(.fromMilliseconds(10), .awake);
+            for (1..4) |signer| {
+                const bytes = try nullify_bytes(fixture, signer, 5);
+                try harness.votes.deliver(fixture.participants[signer], bytes);
+            }
+            try io.sleep(.fromMilliseconds(50), .awake);
+            try testing.expectEqual(3, harness.log.count(.nullify, 5));
+            while (harness.voter.try_recv()) |message| {
+                defer VoterMessage.discard(message);
+                try testing.expect(message != .verified);
+            } else |err| try testing.expectEqual(error.Empty, err);
+        }
+    };
+    try run_deterministic(Root.run);
+}
+
+// commonware `test_historical_votes_detect_conflicts_below_current`: with historical votes
+// kept, conflicting votes below the current view still make evidence and block the sender.
+test "batcher keeping historical votes detects conflicts below the current view" {
+    const Root = struct {
+        fn run(io: Io) !void {
+            var harness: Harness = undefined;
+            try harness.start_historical(io);
+            defer harness.stop();
+            const fixture = &harness.fixture;
+            try harness.mailbox.update(.new(10), .init(0), .zero(), null);
+            // The update and the votes arrive on different channels: let it land first.
+            try io.sleep(.fromMilliseconds(10), .awake);
+            const round: consensus_types.Round = .new(.new(0), .new(5));
+            for ([_]u8{ 1, 2 }) |payload| {
+                const value: types.Proposal(Digest) = .init(round, .new(4), .fill(payload));
+                const bytes = try notarize_proposal_bytes(fixture, 1, value);
+                try harness.votes.deliver(fixture.participants[1], bytes);
+                try io.sleep(.fromMilliseconds(10), .awake);
+            }
+            try testing.expectEqual(1, harness.log.blocked.items.len);
+            try testing.expect(harness.log.blocked.items[0].eql(fixture.participants[1]));
+            try testing.expectEqual(1, harness.log.count(.conflicting_notarize, 5));
         }
     };
     try run_deterministic(Root.run);

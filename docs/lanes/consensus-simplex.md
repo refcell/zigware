@@ -292,7 +292,7 @@ resolver; those lanes are running, so do the types first and the actors as they 
   pipelined handoff build lifecycle, nullify on failed or dropped propose and verify,
   certification ordering and replay). None are ported; they need a voter-actor harness
   with a mock batcher, resolver, and automaton on the deterministic runtime.
-- [ ] actors/batcher/mod.rs: 51 of its 76 tests still to port (forwarding, leader activity,
+- [ ] actors/batcher/mod.rs: 49 of its 76 tests still to port (forwarding, leader activity,
   optimistic assembly fallback, construction order, the per-fixture quorum test on the
   other 7 fixtures). Round-level ones ported in round_test.zig (2026-11-19): forwarding a
   notarization's proposal without a leader, certificate vote release and retention,
@@ -301,7 +301,8 @@ resolver; those lanes are running, so do the types first and the actors as they 
   conflicting-finalize evidence; in actor_test.zig, a future
   notarization forwarded without a leader, a tampered certificate blocking its sender,
   vote and certificate deduplication, skipping votes for finalized views, and blocking a
-  resent notarize or finalize with another attestation.
+  resent notarize or finalize with another attestation, and votes below the current view
+  (reported but not assembled; with historical votes, conflicts detected).
   verifier.rs: 29 of its 32 have counterparts
   (lazy vote buffers, quorum reservations, the ready, exact-quorum, empty-pending, and
   verified-quorum cases, late leader votes, non-batchable finalize accounting, and nullify
