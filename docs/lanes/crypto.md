@@ -73,6 +73,11 @@ handshake), then certificate, secp256r1, the rest, zk last. banderwagon moved to
   the three issue-5669 interrupted-destroy regressions), instantiated for keyless and
   immutable over commonware's variable harnesses in both families. storage-qmdb-sync owns
   any, current, and compact sync glue and the `qmdb_any_*_sync` fuzz targets.
+- [ ] simplex voter `actors/voter/mod.rs` tests, shared with runtime (T-01a1d57b-1bfd): runtime
+  ports lines 881-6716 (52 tests), this lane 6717-end (44 tests) in
+  `src/consensus/simplex/actors/voter/tests/{nullify,certification,replay,timeout}_test.zig`
+  on runtime's `tests/harness.zig`. Done: the four nullify fast-path tests and
+  recovered_finalization_is_reported (each group checked by a planted bug).
 
 ## Log
 - Digests are `Digest(length, name)`: one distinct type per hasher, encoded as raw bytes.

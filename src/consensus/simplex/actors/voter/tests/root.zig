@@ -7,4 +7,6 @@ test {
     _ = @import("conflicts.zig");
     _ = @import("timeouts.zig");
     _ = @import("optimistic.zig");
+    _ = @import("nullify_test.zig");
+    _ = @import("certification_test.zig");
 }
