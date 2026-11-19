@@ -47,6 +47,7 @@ const runtime = @import("runtime");
 
 pub const any = @import("any.zig");
 pub const current = @import("current.zig");
+pub const keyless = @import("keyless.zig");
 pub const p2p = @import("p2p/mod.zig");
 pub const sync = @import("sync.zig");
 pub const Anchor = sync.Anchor;

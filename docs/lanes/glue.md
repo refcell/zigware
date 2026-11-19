@@ -126,6 +126,11 @@ marshal's actors (consensus-marshal) for the actor; until then it ports what is 
   `merkleize(slots, unstaged)`, `deinit`), and `Merkleized` (`root`, `ops_root`, `new_batch`,
   `get`, `get_many`, `clone`, `deinit`). Its `SyncTarget` is the ops root over
   `[sync_boundary, size)`.
+- `glue.stateful.db.keyless.Keyless(F, E, C, H)`: the ManagedDb of a `storage.qmdb.keyless.Db`
+  (fixed or variable by the encoding `E` and journal `C`), with `Unmerkleized` (`append`,
+  `with_metadata`, `with_inactivity_floor`, `get(loc)`, `get_many(locs, out)`, `merkleize`) and
+  `Merkleized` (`root`, `bounds`, `new_batch`, `get`, `get_many`, `clone`, `deinit`). Its
+  `SyncTarget` is the root over `[sync_boundary, size)`.
 - `glue.stateful.db.sync` (also `db.Anchor`, `db.TipUpdate`): `Anchor(D)` (`height`, `round`,
   `digest`, `eql`), `TipUpdate(D, T)` (`init`, `with_observation(gpa, io, anchor, targets)`
   → update and a `oneshot.Receiver(void)`, `record(context)` calling
@@ -299,6 +304,7 @@ marshal's actors (consensus-marshal) for the actor; until then it ports what is 
 - 2026-11-18 (stateful): the processor's finalization path and boxed ancestry.
 - 2026-11-18 (stateful): the db/p2p `Mailbox` sync source with commonware's mailbox tests.
 - 2026-11-19 (stateful): the processor's `Verifier`.
+- 2026-11-19 (stateful, broadcast-resolver lane): the `keyless` ManagedDb adapter.
 
 ## dkg (owner: coding lane, thread T-01a1d58d-bff1-75a1-8ccb-4b8dd7bc9755)
 
