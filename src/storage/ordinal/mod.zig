@@ -120,3 +120,27 @@ test {
     _ = @import("tests.zig");
     _ = @import("conformance_test.zig");
 }
+
+test "bits for indices" {
+    // commonware's `utils.rs` `test_bits_for_indices`.
+    const gpa = std.testing.allocator;
+    const empty = try bits_for_indices(gpa, 10, &.{});
+    defer free_bits(gpa, empty);
+    try std.testing.expectEqual(@as(usize, 0), empty.len);
+    // Out of order, so a list that only appends would misorder its sections.
+    const bits = try bits_for_indices(gpa, 10, &.{ 25, 0, 10, 1, 9 });
+    defer free_bits(gpa, bits);
+    const expected = [_]struct { section: u64, set: []const u64 }{
+        .{ .section = 0, .set = &.{ 0, 1, 9 } },
+        .{ .section = 1, .set = &.{0} },
+        .{ .section = 2, .set = &.{5} },
+    };
+    try std.testing.expectEqual(expected.len, bits.len);
+    for (expected, bits) |want, got| {
+        try std.testing.expectEqual(want.section, got.section);
+        const bitmap = got.bits.?;
+        try std.testing.expectEqual(@as(u64, 10), bitmap.len());
+        try std.testing.expectEqual(@as(u64, want.set.len), bitmap.count_ones());
+        for (want.set) |bit| try std.testing.expect(bitmap.get(bit));
+    }
+}

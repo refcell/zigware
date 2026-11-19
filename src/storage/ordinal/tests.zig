@@ -995,8 +995,23 @@ test "ordinal init clears unmarked records" {
     var marked = try bitmap_with(500, &.{1});
     defer marked.deinit(gpa);
     {
-        var store = try harness.open(Value, config, &.{.{ .section = 0, .bits = &marked }});
+        var recordings: runtime.storage.mocks.Recordings = .init(gpa);
+        defer recordings.deinit();
+        const inner = harness.storage.interface();
+        var recording: runtime.storage.mocks.Recording = .init(gpa, inner, &recordings);
+        const scope = metrics.Scope.init(&harness.registry).child("storage");
+        const bits: []const SectionBits = &.{.{ .section = 0, .bits = &marked }};
+        var store = try ordinal.Ordinal(Value).init_diagnostic(
+            gpa,
+            recording.storage(),
+            scope,
+            config,
+            bits,
+            null,
+        );
         defer store.deinit();
+        // Recovery zeroes every unmarked record and makes that durable with one sync.
+        try testing.expectEqual(@as(u64, 1), recordings.syncs);
         try testing.expect(store.has(1));
         try testing.expect(!store.has(5));
         try testing.expect(!store.has(900));

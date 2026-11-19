@@ -832,3 +832,100 @@ test "freezer committed value section short by one byte fails init" {
         try testing.expectError(error.Corruption, harness.open(Key, i32, cfg, checkpoint));
     }
 }
+
+/// The bytes of `entry` as the table stores them (big-endian fields, then the CRC).
+fn entry_bytes(entry: freezer.Entry) [freezer.Entry.fixed_size]u8 {
+    var bytes: [freezer.Entry.fixed_size]u8 = undefined;
+    std.mem.writeInt(u64, bytes[0..8], entry.epoch, .big);
+    std.mem.writeInt(u64, bytes[8..16], entry.section, .big);
+    std.mem.writeInt(u64, bytes[16..24], entry.position, .big);
+    bytes[24] = entry.added;
+    std.mem.writeInt(u32, bytes[25..29], entry.crc, .big);
+    return bytes;
+}
+
+test "freezer recovery zeroes a torn table slot" {
+    var harness = try Harness.init();
+    defer harness.deinit();
+    var cfg = table_config(&harness, 4, 4);
+    cfg.table_resize_frequency = 4;
+    const fixed = freezer.Entry.fixed_size;
+    // Commit one key, leaving its entry with a valid slot beside an empty one.
+    const key = key_at_index(4, 0);
+    const checkpoint = checkpoint: {
+        var store = try harness.open(Key, i32, cfg, null);
+        errdefer store.deinit();
+        _ = try store.put(key, 42);
+        break :checkpoint try store.close();
+    };
+    {
+        const table = try read_table(&harness);
+        defer gpa.free(table);
+        try testing.expect(!std.mem.allEqual(u8, table[0..fixed], 0));
+        try testing.expect(std.mem.allEqual(u8, table[fixed .. 2 * fixed], 0));
+    }
+    // Tear a write of the next epoch's slot into the empty one: all but its CRC lands.
+    const torn = entry_bytes(freezer.Entry.init(checkpoint.epoch + 1, 0, 1, 2));
+    try harness.write_table(fixed, torn[0 .. fixed - 4]);
+    harness.reset_metrics();
+    {
+        var store = try harness.open(Key, i32, cfg, checkpoint);
+        defer store.deinit();
+        try testing.expectEqual(@as(?i32, 42), try store.get(.{ .key = &key }));
+    }
+    // The torn slot is zeroed, and the zeroing is durable.
+    harness.storage.crash();
+    const table = try read_table(&harness);
+    defer gpa.free(table);
+    try testing.expect(std.mem.allEqual(u8, table[fixed .. 2 * fixed], 0));
+}
+
+test "freezer checkpoint rewinds a completed resize" {
+    var harness = try Harness.init();
+    defer harness.deinit();
+    const cfg = table_config(&harness, 2, 2);
+    const key = key_at_index(4, 3);
+    const stale = stale: {
+        var store = try harness.open(Key, i32, cfg, null);
+        defer store.deinit();
+        const stale = try store.sync();
+        try testing.expectEqual(@as(u32, 2), stale.table_size);
+        _ = try store.put(key, 42);
+        const checkpoint = try store.sync();
+        try testing.expectEqual(@as(u32, 4), checkpoint.table_size);
+        try testing.expectEqual(@as(?u32, null), store.resizing());
+        try testing.expectEqual(@as(?i32, 42), try store.get(.{ .key = &key }));
+        break :stale stale;
+    };
+    harness.reset_metrics();
+    var store = try harness.open(Key, i32, cfg, stale);
+    defer store.deinit();
+    try testing.expectEqual(@as(u32, 2), store.table_size);
+    try testing.expectEqual(@as(?i32, null), try store.get(.{ .key = &key }));
+}
+
+test "freezer non-empty checkpoint against a short table fails without resizing it" {
+    var harness = try Harness.init();
+    defer harness.deinit();
+    const cfg = table_config(&harness, 2, 1);
+    const short_len: u64 = freezer.Entry.full_size;
+    {
+        const opened = try harness.storage.open("test-table", freezer.table_blob_name);
+        defer opened.blob.close();
+        try opened.blob.resize(short_len);
+        try opened.blob.sync();
+    }
+    const checkpoint: Checkpoint = .{
+        .epoch = 1,
+        .section = 0,
+        .oversized_size = 0,
+        .table_size = 2,
+    };
+    for (0..2) |_| {
+        harness.reset_metrics();
+        try testing.expectError(error.CheckpointMismatch, harness.open(Key, i32, cfg, checkpoint));
+    }
+    const opened = try harness.storage.open("test-table", freezer.table_blob_name);
+    defer opened.blob.close();
+    try testing.expectEqual(short_len, opened.len);
+}
