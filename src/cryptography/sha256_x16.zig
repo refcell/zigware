@@ -21,9 +21,14 @@ const sha_ni = builtin.cpu.arch == .x86_64 and
     std.Target.x86.featureSetHas(builtin.cpu.features, .sha);
 /// The fewest equal-length messages the kernel hashes; shorter runs hash one at a time.
 pub const minimum_batch_len: usize = if (sha_ni) 7 else 2;
+/// Messages per batch unit `hash_many` hands the strategy (commonware's `lanes`): whole kernel
+/// calls without SHA-NI, where idle lanes cost as much as busy ones; one with SHA-NI, where a
+/// share too small for the kernel hashes on SHA-NI instead.
+pub const batch_lanes: usize = if (sha_ni) 1 else lanes;
 
 comptime {
     assert(minimum_batch_len >= 2 and minimum_batch_len <= lanes);
+    assert(batch_lanes == 1 or batch_lanes == lanes);
     assert(@sizeOf(Lane) == lanes * 4);
 }
 

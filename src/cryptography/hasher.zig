@@ -120,8 +120,10 @@ pub fn hash_batches(
     run_hash_batches(H, 1, hash_each, messages, digests, strategy);
 }
 
-/// commonware `hash_batches` with `Kernel.lanes` lanes: batches hold whole units of
-/// `Kernel.lanes` messages, so the kernel finds every unit but the last one full.
+/// commonware `hash_batches` with `Kernel.batch_lanes` lanes: batches hold whole units of that
+/// many messages. A kernel that costs the same however few lanes are active batches by its full
+/// width; one that falls back to a faster single-message hash (SHA-NI) batches by one, so the
+/// strategy may split the messages one at a time across more workers.
 pub fn hash_batches_with(
     comptime H: type,
     comptime Kernel: type,
@@ -134,7 +136,7 @@ pub fn hash_batches_with(
             hash_runs(Hash, Kernel, batch, out);
         }
     };
-    run_hash_batches(H, Kernel.lanes, Each.each, messages, digests, strategy);
+    run_hash_batches(H, Kernel.batch_lanes, Each.each, messages, digests, strategy);
 }
 
 fn run_hash_batches(
