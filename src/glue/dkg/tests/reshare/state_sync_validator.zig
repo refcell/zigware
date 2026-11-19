@@ -402,8 +402,12 @@ pub fn StateSyncValidator(comptime T: type) type {
             errdefer self.deinit_plan();
             try self.init_probe(ctx, channels.probe);
             errdefer self.deinit_probe();
+            // Until `supervise` hands them to their actors, this validator owns the other
+            // channels: a crash in `select_floor` must not leak them.
+            var node_took = false;
+            errdefer release_unstarted(channels, node_took);
             try self.select_floor();
-            try self.init_node(ctx, channels);
+            try self.init_node(ctx, channels, &node_took);
             errdefer self.node.deinit();
             try self.init_qmdb(ctx);
             errdefer self.deinit_qmdb();
@@ -627,7 +631,29 @@ pub fn StateSyncValidator(comptime T: type) type {
             @panic("state-sync floor source must be available");
         }
 
-        fn init_node(self: *Self, ctx: Ctx, channels: Channels) !void {
+        /// Releases the channels `supervise` would have taken, and backfill and broadcast
+        /// unless the node took them.
+        fn release_unstarted(channels: Channels, node_took: bool) void {
+            var owned = channels;
+            assert(@sizeOf(Channels) > 0);
+            for ([_]*Channel{
+                &owned.votes, &owned.certificates, &owned.resolver,
+                &owned.qmdb,  &owned.dkg,
+            }) |channel| release_channel(channel);
+            if (node_took) return;
+            release_channel(&owned.backfill);
+            release_channel(&owned.broadcast);
+        }
+
+        fn release_channel(channel: *Channel) void {
+            channel.sender.deinit();
+            channel.receiver.inner.deinit();
+            channel.* = undefined;
+        }
+
+        /// Sets `node_took` once `node.init` has taken backfill and broadcast.
+        fn init_node(self: *Self, ctx: Ctx, channels: Channels, node_took: *bool) !void {
+            assert(!node_took.*);
             const gpa = self.gpa;
             const config = &self.config;
             const raw = try self.genesis_block.clone(gpa);
@@ -638,6 +664,7 @@ pub fn StateSyncValidator(comptime T: type) type {
                 .genesis => |*block| block.deinit(),
                 .floor => |*finalization| finalization.deinit(gpa),
             };
+            node_took.* = true; // `node.init` takes both channels on every path.
             try self.node.init(ctx, .{
                 .public_key = self.key,
                 .peer_provider = config.peer_provider,
