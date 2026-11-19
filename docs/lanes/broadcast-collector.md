@@ -71,8 +71,8 @@ that harness. It builds on `coding` (ReedSolomon), `consensus.types.coding.Commi
 - `broadcast.Digested` owns its value (reference counted) because the cache, waiters, and
   responders share values decoded from the network; `cryptography.Digested` borrows. It
   hashes inline (commonware runs the hash as a job on a `Strategy`).
-- No `Strategy` in the buffered config: p2p's `WrappedBackgroundReceiver` is not ported, so
-  the engine's ingress task decodes inline (commonware with `Sequential`), blocks peers whose
+- No `Strategy` in the buffered config: the engine does not use p2p's
+  `WrappedBackgroundReceiver` (ported since, 6f151f7), so the engine's ingress task decodes inline (commonware with `Sequential`), blocks peers whose
   messages fail to decode, and drops decoded messages beyond the receiver's capacity. It
   records `ingress_decode{status}`; its internal mailbox's always-zero backoff counter is not
   registered.

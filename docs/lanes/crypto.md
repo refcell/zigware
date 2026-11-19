@@ -118,8 +118,9 @@ handshake), then certificate, secp256r1, the rest, zk last. banderwagon moved to
 - `Hasher.finalize` resets the hasher in place and returns the digest (Rust returns the reset
   hasher by value). `hash_many` writes into a caller-provided digest slice instead of
   returning a `Vec`, so hashing never allocates.
-- `strategy` parameters (`hash_across`, `hash_pair`, `hash_many`) take any value and run on
-  the calling thread until the parallel package lands; the digests are identical.
+- `strategy` parameters (`hash_across`, `hash_pair`, `hash_many`) run on the given
+  `parallel` strategy; `Blake3.hash_across` splits a long message into subtrees across it, as
+  commonware does (61ef1580). The digests are identical.
 - `Crc32.resume` is `Crc32.resume_from` (`resume` is a Zig keyword).
 - `ChaCha20Rng` (`rng.zig`) is byte-identical to Rust `rand_chacha` 0.10, so `from_seed(u64)`
   keys match commonware's `Signer::from_seed`.
@@ -187,8 +188,8 @@ handshake), then certificate, secp256r1, the rest, zk last. banderwagon moved to
   `run_batches`; ed25519 `verify_batch` shards like commonware (one seed per call, one
   equation per batch, coefficients committed to the batch ordinal) but splits by index range
   without the first-key-byte counting sort, which only helps an implementation that coalesces
-  repeated keys. `hash_across`/`hash_pair` stay on the calling thread: Blake3's parallel
-  subtree hashing needs chaining values that `std.crypto.hash.Blake3` does not expose.
+  repeated keys. `hash_across`/`hash_pair` hash a long message as subtrees across the strategy
+  (`blake3_tree.zig`, 61ef1580), with their own chaining values.
 - `{}` passed as a strategy still means `parallel.sequential` (`hasher.resolve_strategy`), so
   other lanes' placeholder calls keep compiling until they switch.
 - `Digested(T)` holds a borrowed `*const T` instead of an `Arc<T>`: the owner keeps the value

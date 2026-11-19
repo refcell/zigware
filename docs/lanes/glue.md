@@ -94,7 +94,7 @@ a test harness), `transfers` (4.4k with tests and benches), `stateful` (about 33
   new tests; see the bca770a0c entry above (5369b34, 58f6e7b). bca770a0c is simulate's only
   change between 43b357a41 and a9ffc25f3, and all 16 of plan.rs's tests are ported.
 - [ ] stateful: see the stateful section below (curve25519/utils thread).
-- [ ] dkg (coding thread).
+- [x] dkg (coding thread): every item in the dkg sections below is done.
 
 ## transfers (owner: thread T-01a1d58d-7682-700c-a399-735d897bbd46)
 
@@ -937,7 +937,8 @@ orchestrator.
   height, as marshal's `get_finalization`/`get_block` do); `MarshalSource` adapts marshal.
 - [x] discovery.rs's 4 decoding tests (standard and coding variants, mock and BLS threshold
   schemes); marshal's `mocks.Block(Sha256, CodingContext)` stands in for `CodingBlock`.
-- [ ] bootstrap engine (bootstrap/mod.rs), with its tests: moved to bls-math on 2026-11-19.
+- [x] bootstrap engine (bootstrap/mod.rs), with its tests: moved to bls-math on 2026-11-19,
+  done there (`bootstrap/engine.zig`; see the bls-math section below).
 - 2026-11-19: the reshare harness without state sync and its single-participant test; a
   block builder that drops the reshare payload fails it. Each validator's orchestrator task now
   spawns from the orchestrator's own context, so an abort finishes its epoch engines first.

@@ -231,7 +231,7 @@ Every commonware `#[test]` in this lane's crates (macro and rstest cases expande
 | types/btree_map.rs | 7 | 7 | 0 | 0 |
 | types/btree_set.rs | 7 | 7 | 0 | 0 |
 | types/bytes.rs | 3 | 3 | 0 | 0 |
-| types/hash_map.rs | 15 | 13 | 1 | 1 |
+| types/hash_map.rs | 15 | 14 | 0 | 1 |
 | types/hash_set.rs | 14 | 13 | 0 | 1 |
 | types/lazy.rs | 9 | 9 | 0 | 0 |
 | types/net.rs | 8 | 8 | 0 | 0 |
@@ -241,11 +241,11 @@ Every commonware `#[test]` in this lane's crates (macro and rstest cases expande
 | uint.rs | 4 | 4 | 0 | 0 |
 | util.rs | 4 | 2 | 0 | 2 |
 | varint.rs | 18 | 15 | 0 | 3 |
-| Total | 172 | 141 | 1 | 30 |
+| Total | 172 | 142 | 0 | 30 |
 
 Open:
 - [x] `types/hash_map.rs:407` `test_hashmap_malicious_allocation`: u32::MAX map length, one entry,
-  fails EndOfBuffer unallocated
+  fails EndOfBuffer unallocated (ported in types/map_test.zig, 0f16ca79)
   (map_test.zig checks this for sets only; `Map.read` is never fed a hostile length)
 
 Not portable:

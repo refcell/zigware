@@ -71,9 +71,9 @@ variants (MinPk, MinSig) must match exactly.
   decodes in arrival order (commonware forwards in completion order). A canceled background
   receiver still awaits and forwards the decodes it submitted, since a Zig task must be
   awaited.
-- Cryptography benches: `blake3::hash_message` keeps only `conc=1` (zigware's `hash_across`
-  does not split a message); `bulletproofs::ipa::verify`'s `conc=8` rows time the same
-  sequential `eval`. Inputs commonware rebuilds per iteration are reset in `before_iter` or
+- Cryptography benches: `blake3::hash_message` has commonware's `conc=1` and `conc=8` rows
+  since `hash_across` splits a message (61ef1580); `bulletproofs::ipa::verify`'s `conc=8` rows
+  time the same sequential `eval`. Inputs commonware rebuilds per iteration are reset in `before_iter` or
   built once when no iteration changes them. Smoke runs use the first case of each list.
 - p2p fuzz: inputs decode from `Unstructured` as commonware's `Arbitrary` derive does, and
   the coverage-guided target runs commonware's decoder unchanged. The seeded minifuzz run
