@@ -645,8 +645,8 @@ eight cases stayed within 0.51× to 0.98×.
 
 All twenty cases of commonware's `bulletproofs::ipa` bench, with bench-compare.sh's settings.
 The two sides alternated per case over three runs, and each number is the best of the three
-medians. Before is main at 91c3b6f4 (load 42 to 58), after is b442db13 on 3d7a069c (load 59
-to 108). Every row is now at most 1.14×.
+medians. Before is main at 91c3b6f4 (load 42 to 58). After is 8ff7bb34, measured on its tree
+before the rebase onto 356e1da9 (load 59 to 108). Every row is now at most 1.14×.
 
 | bench | parameters | commonware | zigware before | zigware after | after / commonware |
 |---|---|---|---|---|---|
