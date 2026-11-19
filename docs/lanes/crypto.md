@@ -82,8 +82,17 @@ handshake), then certificate, secp256r1, the rest, zk last. banderwagon moved to
   failed_certification_blocks_direct_descendant_verify, the finalization and conflicting
   notarization in-flight verification cancels, certification_precludes_verification,
   invalid_ancestry_emits_nullify_immediately, and
-  dropped_verify_still_votes_after_prior_participation. Next: 8937
-  (no_recertification_after_replay) onward in file order.
+  dropped_verify_still_votes_after_prior_participation, no_recertification_after_replay
+  (replay_test.zig), and no_self_verify_when_proposing,
+  no_self_propose_or_verify_after_restart, nullify_after_crash_in_propose_window, and
+  no_self_verify_after_restart (own_proposal_test.zig). Next: 10127
+  (certifies_own_proposal_when_proposing) onward in file order.
+  - no_recertification_after_replay: replay marks a view certified both in `Round.replay` and
+    in the actor's `handle_certification`; dropping either alone still passes, and dropping
+    both is caught as a voter panic (the replayed view cannot advance), not a recertify.
+  - The restart tests use the harness's `VoterStack.replace` (fresh recording automaton,
+    commonware's new mock application); no_recertification_after_replay uses `restart` so
+    the automaton's `certify_calls` count spans the restart.
   - finalization_cancels_inflight_verification's final check (no notarize for the finalized
     view) is defended at four layers (the actor's drop, `verified`'s staleness check,
     `admits_outbound`, and `verification_matches`); removing all four together still does

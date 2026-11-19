@@ -18,6 +18,8 @@ test {
             _ = @import("nullify_test.zig").Tests(h);
             _ = @import("certification_test.zig").Tests(h);
             _ = @import("verification_test.zig").Tests(h);
+            _ = @import("replay_test.zig").Tests(h);
+            _ = @import("own_proposal_test.zig").Tests(h);
             _ = @import("handoff_cancel.zig").Tests(h);
             _ = @import("handoff_supersede.zig").Tests(h);
             _ = @import("handoff_restart.zig").Tests(h);

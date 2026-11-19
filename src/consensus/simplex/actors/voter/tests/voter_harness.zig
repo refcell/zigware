@@ -200,6 +200,8 @@ pub fn Harness(comptime F: type) type {
             hold_verifications: bool = false,
             dropped: [requests_max]View = undefined,
             dropped_count: u32 = 0,
+            /// Certification requests received (commonware's tracking `Certifier::Custom`).
+            certify_calls: u32 = 0,
 
             /// A built handoff candidate the test answers.
             pub const HeldHandoff = struct {
@@ -377,6 +379,7 @@ pub fn Harness(comptime F: type) type {
             }
 
             pub fn certify(self: *Automaton, io: Io, at: Round, payload: D) Io.Cancelable!?bool {
+                _ = @atomicRmw(u32, &self.certify_calls, .Add, 1, .acq_rel);
                 const held = switch (self.hold) {
                     .none => return self.application.certify(io, at, payload),
                     .all => true,
