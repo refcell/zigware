@@ -294,8 +294,8 @@ resolver; those lanes are running, so do the types first and the actors as they 
   certification ordering and replay). None are ported; they need a voter-actor harness
   with a mock batcher, resolver, and automaton on the deterministic runtime. Handed to the
   runtime lane on 2026-11-19 (actors/voter/tests/).
-- [ ] actors/batcher/mod.rs: 40 of its 76 tests still to port (forwarding,
-  optimistic assembly fallback, construction order, the per-fixture quorum test on the
+- [ ] actors/batcher/mod.rs: 29 of its 76 tests still to port (optimistic assembly
+  fallback, construction order, the per-fixture quorum test on the
   other 7 fixtures). Round-level ones ported in round_test.zig (2026-11-19): forwarding a
   notarization's proposal without a leader, certificate vote release and retention,
   nullify-finalize conflicts with held and compacted evidence, our own votes reported
@@ -450,3 +450,10 @@ resolver; those lanes are running, so do the types first and the actors as they 
   activity, the leader-nullify fast path after an inactivity hint, leader nullifies and
   relayed certificates counting as activity, and the view-entry and wrong-view nullify
   hints.
+- 2026-11-19: batcher actor_test.zig ports the 11 forwarding tests: silent-voter and
+  silent-leader forwards on view advance (local and network notarizations), self and
+  member-only exclusion, conflicting and nullify-only voters included, finalize voters
+  excluded, and the leader's proposal reaching the voter before, after, and ahead of the
+  leader update. The harness records relay forwards and takes `forward`, `member_only`,
+  `view_retention`, and `floor` options. Split: lookup (T-01a1d59c) ports 4935, 6506,
+  6513, 6819, 6966, and 7128 in actor_late_test.zig.

@@ -19,6 +19,7 @@ const ed25519 = @import("../../scheme/ed25519.zig");
 const actor_mod = @import("actor.zig");
 const voter_ingress = @import("../voter/ingress.zig");
 const TimeoutReason = @import("../../metrics.zig").TimeoutReason;
+const config_mod = @import("../../config.zig");
 
 pub const Digest = cryptography.Sha256.Digest;
 pub const Scheme = ed25519.Scheme(Digest);
@@ -34,11 +35,17 @@ pub const Log = struct {
     /// Each reported activity's kind and view, in order.
     activities: std.ArrayList(Seen) = .empty,
 
+    /// Each forward the relay was asked to send (commonware `MockRelay::broadcasts`).
+    forwards: std.ArrayList(Forward) = .empty,
+
     const Seen = struct { tag: std.meta.Tag(ActivityType), view: u64 };
+    pub const Forward = struct { digest: Digest, view: u64, peers: []Key };
 
     pub fn deinit(self: *Log) void {
         self.blocked.deinit(gpa);
         self.activities.deinit(gpa);
+        for (self.forwards.items) |forward| gpa.free(forward.peers);
+        self.forwards.deinit(gpa);
     }
 
     pub fn count(self: *const Log, tag: std.meta.Tag(ActivityType), view: u64) usize {
@@ -72,7 +79,19 @@ const Reporter = struct {
 };
 
 const Relay = struct {
-    pub fn broadcast(_: Relay, _: Digest, _: lookahead.Plan(Key)) actor.Feedback {
+    log: *Log,
+    pub fn broadcast(self: Relay, digest: Digest, plan: lookahead.Plan(Key)) actor.Feedback {
+        const forward = switch (plan) {
+            .forward => |forward| forward,
+            .prepare, .propose => return .ok,
+        };
+        const peers = gpa.dupe(Key, forward.recipients.some) catch @panic("out of memory");
+        const entry: Log.Forward = .{
+            .digest = digest,
+            .view = forward.round.view.get(),
+            .peers = peers,
+        };
+        self.log.forwards.append(gpa, entry) catch @panic("out of memory");
         return .ok;
     }
 };
@@ -131,7 +150,7 @@ pub fn config(scheme: *const Scheme, log: *Log) actor_mod.Config(P) {
         .blocker = .{ .log = log },
         .reporter = .{ .log = log },
         .track_historical_votes = false,
-        .relay = .{},
+        .relay = .{ .log = log },
         .strategy = parallel.sequential,
         .view_retention = .new(10),
         .skip = .disabled,
@@ -181,6 +200,8 @@ fn next_certificate(receiver: *actor.mailbox.Receiver(VoterMessage)) !VoterMessa
 pub const Harness = struct {
     io: Io,
     fixture: cryptography.certificate.mocks.Fixture(Scheme),
+    /// Participant 0's member-only scheme, when `Options.member_only` is set.
+    local: ?Scheme = null,
     log: Log = .{},
     batcher: Batcher = undefined,
     mailbox: Batcher.Mailbox = undefined,
@@ -207,6 +228,12 @@ pub const Harness = struct {
         participants: u32 = 4,
         /// Enables skipping with this timeout (commonware `SkipPolicy::Enabled`).
         skip_timeout_s: ?u64 = null,
+        forward: config_mod.ForwardPolicy = .disabled,
+        /// Participant 0 keeps its membership but cannot sign (commonware `Scheme::member`).
+        member_only: bool = false,
+        view_retention: u64 = 10,
+        /// The view the batcher restores from (commonware `floor`).
+        floor: u64 = 0,
     };
 
     /// Starts with the batcher's metrics registered under `scope`, if any.
@@ -225,12 +252,20 @@ pub const Harness = struct {
         const n = options.participants;
         const fixture = try ed25519.fixture(Digest, gpa, &rng, "batcher", n);
         self.* = .{ .io = io, .fixture = fixture };
-        var cfg = config(&fixture.schemes[0], &self.log);
+        if (options.member_only) {
+            const set = try fixture.schemes[0].participants().clone(gpa);
+            self.local = (try Scheme.member(gpa, "batcher", set, fixture.participants[0])).?;
+        }
+        const scheme = if (self.local) |*local| local else &fixture.schemes[0];
+        var cfg = config(scheme, &self.log);
         cfg.scope = scope;
         if (options.skip_timeout_s) |seconds| {
             cfg.skip = .{ .enabled = .{ .timeout = .from_secs(seconds) } };
         }
         cfg.track_historical_votes = options.track_historical_votes;
+        cfg.forward = options.forward;
+        cfg.view_retention = .new(options.view_retention);
+        cfg.floor = .new(options.floor);
         cfg.lookahead = .{
             .term_length = .new(utils.NonZero(u32).init(options.term_length).?),
             .optimistic_views = .new(options.optimistic_views),
@@ -252,6 +287,7 @@ pub const Harness = struct {
         self.mailbox.deinit();
         self.batcher.deinit();
         self.log.deinit();
+        if (self.local) |*local| local.deinit(gpa);
         self.fixture.deinit(gpa);
     }
 
@@ -400,13 +436,17 @@ pub fn notarization_bytes_as(
     shown: types.Proposal(Digest),
 ) ![]u8 {
     const Notarize = types.Notarize(Scheme, Digest);
-    var votes: [3]Notarize = undefined;
-    for (&votes, 0..) |*vote, signer| {
+    const n: u32 = @intCast(fixture.participants.len);
+    const signers = n - (n - 1) / 3;
+    var votes: [8]Notarize = undefined;
+    assert(signers <= votes.len);
+    for (votes[0..signers], 0..) |*vote, signer| {
         vote.* = (try Notarize.sign(gpa, &fixture.schemes[signer], value)).?;
     }
     const scheme = &fixture.schemes[0];
     const Notarization = types.Notarization(Scheme, Digest);
-    var notarization = try Notarization.from_votes(gpa, scheme, &votes, parallel.sequential);
+    const strategy = parallel.sequential;
+    var notarization = try Notarization.from_votes(gpa, scheme, votes[0..signers], strategy);
     defer notarization.deinit(gpa);
     notarization.proposal = shown;
     const certificate: types.Certificate(Scheme, Digest) = .{ .notarization = notarization };
@@ -550,7 +590,11 @@ test "batcher skips votes for finalized views" {
     try run_deterministic(Root.run);
 }
 
-pub fn vote_bytes(fixture: anytype, comptime kind: enum { notarize, finalize }, signer: usize) ![]u8 {
+pub fn vote_bytes(
+    fixture: anytype,
+    comptime kind: enum { notarize, finalize },
+    signer: usize,
+) ![]u8 {
     const Vote = types.Vote(Scheme, Digest);
     const scheme = &fixture.schemes[signer];
     const value = proposal(1);
@@ -921,6 +965,303 @@ test "batcher ignores a leader nullify for another view" {
             try io.sleep(.fromMilliseconds(10), .awake);
             try deliver_nullifies(&harness, &.{2}, 3);
             try expect_no_timeout(&harness);
+        }
+    };
+    try run_deterministic(Root.run);
+}
+
+/// A proposal at `view` with parent `parent` and payload byte `fill`.
+fn proposal_at(view: u64, parent: u64, fill: u8) types.Proposal(Digest) {
+    return .init(.new(.new(0), .new(view)), .new(parent), .fill(fill));
+}
+
+/// Delivers a notarize for `value` from each signer in `signers`.
+fn deliver_notarizes(
+    harness: *Harness,
+    signers: []const usize,
+    value: types.Proposal(Digest),
+) !void {
+    assert(signers.len > 0);
+    for (signers) |signer| {
+        const bytes = try notarize_proposal_bytes(&harness.fixture, signer, value);
+        try harness.votes.deliver(harness.fixture.participants[signer], bytes);
+    }
+}
+
+/// Our own notarize for `value`, handed to the batcher as constructed.
+fn construct_notarize(harness: *Harness, value: types.Proposal(Digest)) !void {
+    const Notarize = types.Notarize(Scheme, Digest);
+    const vote = (try Notarize.sign(gpa, &harness.fixture.schemes[0], value)).?;
+    try harness.mailbox.constructed(.{ .notarize = vote });
+}
+
+/// Waits for a notarization of `value`, then checks nothing was forwarded yet.
+fn expect_notarization_unforwarded(harness: *Harness, value: types.Proposal(Digest)) !void {
+    const message = try harness.next_certificate();
+    defer VoterMessage.discard(message);
+    try testing.expect(message.verified.certificate == .notarization);
+    try testing.expect(message.verified.certificate.notarization.proposal.eql(value));
+    try testing.expectEqual(0, harness.log.forwards.items.len);
+}
+
+/// Advances to `view` under `leader` with `value` forwardable, then expects one forward of
+/// `value` to exactly `targets` (none when empty).
+fn expect_forward_on_advance(
+    harness: *Harness,
+    view: u64,
+    leader: u32,
+    value: types.Proposal(Digest),
+    targets: []const usize,
+) !void {
+    try harness.mailbox.update(.new(view), .init(leader), .zero(), value);
+    try harness.io.sleep(.fromMilliseconds(50), .awake);
+    const forwards = harness.log.forwards.items;
+    if (targets.len == 0) return testing.expectEqual(0, forwards.len);
+    try testing.expectEqual(1, forwards.len);
+    try testing.expect(std.mem.eql(u8, &forwards[0].digest.bytes, &value.payload.bytes));
+    try testing.expectEqual(value.view().get(), forwards[0].view);
+    try testing.expectEqual(targets.len, forwards[0].peers.len);
+    for (targets, forwards[0].peers) |target, peer| {
+        try testing.expect(peer.eql(harness.fixture.participants[target]));
+    }
+}
+
+const forward_voters: Harness.Options = .{ .participants = 5, .forward = .silent_voters };
+
+// commonware `test_forward_emitted_on_view_advance_with_forwardable_proposal`: a
+// notarization alone forwards nothing; advancing with its proposal forwardable sends it
+// to the one participant that did not vote.
+test "batcher forwards a proposal to silent voters on view advance" {
+    const Root = struct {
+        fn run(io: Io) !void {
+            var harness: Harness = undefined;
+            try harness.start_with(io, null, forward_voters);
+            defer harness.stop();
+            try harness.mailbox.update(.new(1), .init(1), .zero(), null);
+            try io.sleep(.fromMilliseconds(10), .awake);
+            const value = proposal_at(1, 0, 1);
+            try deliver_notarizes(&harness, &.{ 1, 2, 3 }, value);
+            try construct_notarize(&harness, value);
+            try expect_notarization_unforwarded(&harness, value);
+            try expect_forward_on_advance(&harness, 2, 2, value, &.{4});
+        }
+    };
+    try run_deterministic(Root.run);
+}
+
+/// commonware `silent_leader_forwarding_respects_missing_vote`: `silent_leader` forwards
+/// only to the next leader, and only when its matching vote was not observed.
+fn silent_leader_forwarding(io: Io, leader_voted: bool) !void {
+    var harness: Harness = undefined;
+    try harness.start_with(io, null, .{ .participants = 5, .forward = .silent_leader });
+    defer harness.stop();
+    try harness.mailbox.update(.new(1), .init(1), .zero(), null);
+    try io.sleep(.fromMilliseconds(10), .awake);
+    const value = proposal_at(1, 0, 7);
+    const voters: []const usize = if (leader_voted) &.{ 1, 2, 3 } else &.{ 1, 3, 4 };
+    try deliver_notarizes(&harness, voters, value);
+    try construct_notarize(&harness, value);
+    try expect_notarization_unforwarded(&harness, value);
+    const targets: []const usize = if (leader_voted) &.{} else &.{2};
+    try expect_forward_on_advance(&harness, 2, 2, value, targets);
+}
+
+// commonware `test_silent_leader_forwarding_targets_missing_leader`.
+test "batcher forwards to a silent next leader" {
+    const Root = struct {
+        fn run(io: Io) !void {
+            try silent_leader_forwarding(io, false);
+        }
+    };
+    try run_deterministic(Root.run);
+}
+
+// commonware `test_silent_leader_forwarding_skips_observed_leader`.
+test "batcher skips forwarding to a next leader that voted" {
+    const Root = struct {
+        fn run(io: Io) !void {
+            try silent_leader_forwarding(io, true);
+        }
+    };
+    try run_deterministic(Root.run);
+}
+
+// commonware `test_forward_emitted_for_network_notarization_on_view_advance`: a network
+// notarization completing sub-quorum votes forwards only on view advance, to the
+// participants whose vote was not observed.
+test "batcher forwards a network notarization's proposal on view advance" {
+    const Root = struct {
+        fn run(io: Io) !void {
+            var harness: Harness = undefined;
+            try harness.start_with(io, null, forward_voters);
+            defer harness.stop();
+            try harness.mailbox.update(.new(1), .init(1), .zero(), null);
+            try io.sleep(.fromMilliseconds(10), .awake);
+            const value = proposal_at(1, 0, 9);
+            try deliver_notarizes(&harness, &.{ 1, 2 }, value);
+            try construct_notarize(&harness, value);
+            const bytes = try notarization_bytes(&harness.fixture, value);
+            try harness.certificates.deliver(harness.fixture.participants[1], bytes);
+            try expect_notarization_unforwarded(&harness, value);
+            try expect_forward_on_advance(&harness, 2, 2, value, &.{ 3, 4 });
+        }
+    };
+    try run_deterministic(Root.run);
+}
+
+/// commonware `self_excluded_from_forward_targets`: a certificate-only proposal forwards
+/// to every remote participant but never to ourselves, signer or member-only.
+fn self_excluded_from_forward_targets(io: Io, member_only: bool) !void {
+    var harness: Harness = undefined;
+    var options = forward_voters;
+    options.member_only = member_only;
+    try harness.start_with(io, null, options);
+    defer harness.stop();
+    try harness.mailbox.update(.new(1), .init(1), .zero(), null);
+    try io.sleep(.fromMilliseconds(10), .awake);
+    const value = proposal_at(1, 0, 3);
+    const bytes = try notarization_bytes(&harness.fixture, value);
+    try harness.certificates.deliver(harness.fixture.participants[1], bytes);
+    try expect_notarization_unforwarded(&harness, value);
+    try expect_forward_on_advance(&harness, 2, 2, value, &.{ 1, 2, 3, 4 });
+}
+
+// commonware `test_self_excluded_from_forward_targets`.
+test "batcher never forwards to itself" {
+    const Root = struct {
+        fn run(io: Io) !void {
+            try self_excluded_from_forward_targets(io, false);
+        }
+    };
+    try run_deterministic(Root.run);
+}
+
+// commonware `test_member_without_share_excluded_from_forward_targets`.
+test "batcher as a member without a share never forwards to itself" {
+    const Root = struct {
+        fn run(io: Io) !void {
+            try self_excluded_from_forward_targets(io, true);
+        }
+    };
+    try run_deterministic(Root.run);
+}
+
+// commonware `test_conflicting_notarize_voter_is_forwarded`: a peer that notarized a
+// conflicting proposal, and one that only nullified, still get the winning proposal.
+test "batcher forwards to conflicting and nullifying voters" {
+    const Root = struct {
+        fn run(io: Io) !void {
+            var harness: Harness = undefined;
+            try harness.start_with(io, null, .{ .participants = 7, .forward = .silent_voters });
+            defer harness.stop();
+            try harness.mailbox.update(.new(2), .init(1), .zero(), null);
+            try io.sleep(.fromMilliseconds(10), .awake);
+            const winner = proposal_at(2, 1, 0xa);
+            try deliver_notarizes(&harness, &.{1}, winner);
+            try deliver_nullifies(&harness, &.{6}, 2);
+            try deliver_notarizes(&harness, &.{2}, proposal_at(2, 1, 0xb));
+            try deliver_notarizes(&harness, &.{ 3, 4, 5 }, winner);
+            try construct_notarize(&harness, winner);
+            try expect_notarization_unforwarded(&harness, winner);
+            try expect_forward_on_advance(&harness, 3, 3, winner, &.{ 2, 6 });
+        }
+    };
+    try run_deterministic(Root.run);
+}
+
+// commonware `test_finalize_voter_excluded_from_forwarding`: a peer that finalized the
+// proposal already has the block and gets no forward.
+test "batcher does not forward to finalize voters" {
+    const Root = struct {
+        fn run(io: Io) !void {
+            var harness: Harness = undefined;
+            try harness.start_with(io, null, .{ .participants = 7, .forward = .silent_voters });
+            defer harness.stop();
+            try harness.mailbox.update(.new(2), .init(1), .zero(), null);
+            try io.sleep(.fromMilliseconds(10), .awake);
+            const value = proposal_at(2, 1, 0xc);
+            const Finalize = types.Finalize(Scheme, Digest);
+            const finalize = (try Finalize.sign(gpa, &harness.fixture.schemes[6], value)).?;
+            const Vote = types.Vote(Scheme, Digest);
+            const bytes = try codec.encode(Vote, gpa, .{ .finalize = finalize });
+            try harness.votes.deliver(harness.fixture.participants[6], bytes);
+            try io.sleep(.fromMilliseconds(10), .awake);
+            try deliver_notarizes(&harness, &.{ 1, 2, 3, 4 }, value);
+            try construct_notarize(&harness, value);
+            try expect_notarization_unforwarded(&harness, value);
+            try expect_forward_on_advance(&harness, 3, 3, value, &.{5});
+        }
+    };
+    try run_deterministic(Root.run);
+}
+
+/// Expects the next voter message to be `value` forwarded as the leader's proposal.
+fn expect_voter_proposal(harness: *Harness, value: types.Proposal(Digest)) !void {
+    const message = try harness.voter.try_recv();
+    defer VoterMessage.discard(message);
+    try testing.expect(message == .proposal);
+    try testing.expect(message.proposal.eql(value));
+}
+
+// commonware `test_proposal_forwarded_after_leader_set`: the leader's notarize forwards
+// its proposal to the voter.
+test "batcher forwards the leader's proposal to the voter" {
+    const Root = struct {
+        fn run(io: Io) !void {
+            var harness: Harness = undefined;
+            try harness.start_with(io, null, .{ .participants = 5 });
+            defer harness.stop();
+            try harness.mailbox.update(.new(1), .init(1), .zero(), null);
+            try io.sleep(.fromMilliseconds(10), .awake);
+            const value = proposal_at(1, 0, 1);
+            try deliver_notarizes(&harness, &.{1}, value);
+            try io.sleep(.fromMilliseconds(50), .awake);
+            try expect_voter_proposal(&harness, value);
+        }
+    };
+    try run_deterministic(Root.run);
+}
+
+// commonware `test_proposal_forwarded_before_leader_set`: a leader notarize that arrives
+// before the leader is known forwards its proposal once the leader is set.
+test "batcher forwards a leader's early proposal once the leader is set" {
+    const Root = struct {
+        fn run(io: Io) !void {
+            var harness: Harness = undefined;
+            try harness.start_with(io, null, .{ .participants = 5 });
+            defer harness.stop();
+            const value = proposal_at(1, 0, 1);
+            try deliver_notarizes(&harness, &.{1}, value);
+            try io.sleep(.fromMilliseconds(50), .awake);
+            try testing.expectError(error.Empty, harness.voter.try_recv());
+            try harness.mailbox.update(.new(1), .init(1), .zero(), null);
+            try io.sleep(.fromMilliseconds(50), .awake);
+            try expect_voter_proposal(&harness, value);
+        }
+    };
+    try run_deterministic(Root.run);
+}
+
+// commonware `test_optimistic_future_proposal_forwarded`: with terms of 5 and two
+// optimistic views, the leader's notarize for in-window view 3 forwards its proposal
+// while we are still at view 1.
+test "batcher forwards an optimistic future proposal" {
+    const Root = struct {
+        fn run(io: Io) !void {
+            var harness: Harness = undefined;
+            const options: Harness.Options = .{
+                .participants = 5,
+                .term_length = 5,
+                .optimistic_views = 2,
+            };
+            try harness.start_with(io, null, options);
+            defer harness.stop();
+            try harness.mailbox.update(.new(1), .init(1), .zero(), null);
+            try io.sleep(.fromMilliseconds(10), .awake);
+            const value = proposal_at(3, 2, 3);
+            try deliver_notarizes(&harness, &.{1}, value);
+            try io.sleep(.fromMilliseconds(250), .awake);
+            try expect_voter_proposal(&harness, value);
         }
     };
     try run_deterministic(Root.run);
