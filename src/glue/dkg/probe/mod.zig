@@ -107,4 +107,5 @@ test {
     _ = wire;
     _ = @import("wire_test.zig");
     _ = @import("probe_test.zig");
+    _ = @import("discovery_test.zig");
 }

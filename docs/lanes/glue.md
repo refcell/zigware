@@ -541,8 +541,8 @@ orchestrator.
 - [x] probe mailbox and actor (discovery, service), with mod.rs's 20 tests on the simulated
   network. A `MemorySource` stands in for commonware's marshal-backed source (it answers by
   height, as marshal's `get_finalization`/`get_block` do); `MarshalSource` adapts marshal.
-- [ ] discovery.rs's 4 decoding tests (they need a coding-variant `CodingBlock` and the BLS
-  threshold scheme).
+- [x] discovery.rs's 4 decoding tests (standard and coding variants, mock and BLS threshold
+  schemes); marshal's `mocks.Block(Sha256, CodingContext)` stands in for `CodingBlock`.
 - [ ] bootstrap engine (bootstrap/mod.rs), with its tests: moved to bls-math on 2026-11-19.
 
 ### Log
@@ -551,6 +551,7 @@ orchestrator.
 - 2026-11-19: probe actor (discovery, service, mailbox) with mod.rs's tests; they catch a
   responder mismatch, blocking stale replies, a late failover, a wrong boundary height, and
   kept subscribers after a failed activation.
+- 2026-11-19: discovery.rs's decoding tests; they catch a block decoded as untrusted.
 
 ## dkg bootstrap and test harnesses (owner: bls-math lane)
 
