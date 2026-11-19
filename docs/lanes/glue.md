@@ -233,6 +233,11 @@ marshal's actors (consensus-marshal) for the actor; until then it ports what is 
   ancestry, input)` → `Handoff(Digested)`, `propose(...)` → `?Digested`, `verify(ctx, context,
   ancestry)` → `bool` (no verdict waits until cancelled, never `false`), `report(Update)`,
   `subscribe_databases()`. `ProposalRequest` is the verifications handler's `Recover`.
+- `glue.stateful.actor.Processing(P)` (core; the processing loop): `P` adds `Marshal` (with
+  `prune(Height) !void`) to App/Databases/Provider. `init(gpa, io, *Receiver, provider,
+  marshal, *Processor)`, `defer_verification(VerificationRequest)`, `run()` (until the mailbox
+  closes; a database failure is fatal), `deinit`. Builds run concurrently with verifications;
+  acknowledgements wait for a barrier (synchronous here); prunes run once idle.
 - `glue.stateful.db.p2p.Mailbox(DB, F, Op, D)`: the `qmdb.sync` Source over the resolver
   actor's mailbox. `init(io, actor.mailbox.Sender(Message))`, `clone`, `deinit`,
   `attach_database(db.Shared(DB))`, `serve(gpa, request)` → `Served` (first candidate and its
@@ -332,7 +337,8 @@ marshal's actors (consensus-marshal) for the actor; until then it ports what is 
 - [x] actor/core: the `Verifications` handler (phases, admission, pause/resume, answers).
 - [x] actor/core: the mailbox (overflow, prepare/propose/verify/report, subscribe_databases).
 - [x] actor: `Processor.propose`/`prepare` (build on the parent, cache before answering).
-- [ ] actor/core: processing loop, syncing, the `Stateful` actor; app tests (after marshal); tests (single and
+- [x] actor/core: the processing loop (builds, finalization, durability, prune).
+- [ ] actor/core: the rest of processing.rs's 46 tests, syncing, the `Stateful` actor; app tests (after marshal); tests (single and
   multi db apps, floor, properties).
 
 ## Log
@@ -375,6 +381,7 @@ marshal's actors (consensus-marshal) for the actor; until then it ports what is 
 - 2026-11-19 (stateful): the core actor's `Verifications` handler; waiting verifies abstain.
 - 2026-11-19 (stateful): the core actor's mailbox.
 - 2026-11-19 (stateful): the processor's propose and prepare.
+- 2026-11-19 (stateful): the core processing loop; a waiting verify gives no vote end to end.
 
 ## dkg (owner: coding lane, thread T-01a1d58d-bff1-75a1-8ccb-4b8dd7bc9755)
 

@@ -269,6 +269,17 @@ pub fn Verifications(comptime P: type) type {
             return self.done.orderedRemove(0);
         }
 
+        /// Waits until some request's phase has ended, without handling it (the actor then calls
+        /// `complete_ready`). With no live request it waits until cancelled. At most one task
+        /// waits at a time (the condition counts signals).
+        pub fn wait_ready(self: *Self) Io.Cancelable!void {
+            self.mutex.lockUncancelable(self.io);
+            defer self.mutex.unlock(self.io);
+            // Each pass waits for one post.
+            while (self.done.items.len == 0) try self.condition.wait(self.io, &self.mutex);
+            assert(self.done.items.len > 0);
+        }
+
         /// Handles every request whose phase already ended.
         pub fn complete_ready(self: *Self) void {
             // Each pass handles one posted work; posts are bounded by the live works.
