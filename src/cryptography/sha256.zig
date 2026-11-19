@@ -1,7 +1,8 @@
 //! SHA-256 implementation of the hasher interface (commonware `cryptography/src/sha256`).
 //!
 //! Backed by `std.crypto.hash.sha2.Sha256`, which uses SHA-NI or ARMv8 SHA2 when the target
-//! has them. Digests encode as their 32 raw bytes.
+//! has them, and `hash_many` hashes equal-length runs sixteen at a time on AVX-512
+//! (`sha256_x16.zig`), as commonware does. Digests encode as their 32 raw bytes.
 
 const std = @import("std");
 const parallel = @import("parallel");
@@ -17,8 +18,12 @@ const digest_length = 32;
 /// Digest of a SHA-256 hashing operation.
 pub const Digest = digest.Digest(digest_length, "sha256");
 
+/// The sixteen-message kernel `Sha256.hash_many` runs equal-length runs on, where the target
+/// has it (AVX-512).
+pub const x16 = @import("sha256_x16.zig");
+
 /// SHA-256 hasher.
-pub const Sha256 = hasher.Streaming(Core, Digest);
+pub const Sha256 = hasher.StreamingWith(Core, Digest, if (x16.supported) x16 else void);
 
 comptime {
     assert(Core.digest_length == digest_length);
@@ -180,6 +185,32 @@ test "sha256 hash_many matches individual hashes" {
     }
 }
 
+/// `hash_many` of 40 messages under an explorer's batch split: runs of equal lengths that span
+/// batch boundaries, so a batch range that is not whole kernel units shows.
+const ManyAcross = struct {
+    messages: []const []const u8,
+
+    pub fn run(op: ManyAcross, explorer: parallel.mocks.Explorer) [40]Digest {
+        var digests: [40]Digest = undefined;
+        Sha256.hash_many(op.messages, &digests, explorer);
+        return digests;
+    }
+};
+
+test "sha256 hash_many matches individual hashes across batch splits" {
+    var storage: [40][300]u8 = undefined;
+    var messages: [40][]const u8 = undefined;
+    for (&storage, &messages, 0..) |*bytes, *message, index| {
+        for (bytes, 0..) |*byte, i| byte.* = @truncate(i *% 7 +% index);
+        // 20 of 300 bytes, 12 of 64, then 8 of 299: runs longer and shorter than 16 lanes.
+        const len: usize = if (index < 20) 300 else if (index < 32) 64 else 299;
+        message.* = bytes[0..len];
+    }
+    const op: ManyAcross = .{ .messages = &messages };
+    const digests = try parallel.mocks.explore(testing.allocator, testing.io, op);
+    for (messages, digests) |message, d| try testing.expect(d.eql(Sha256.hash(&.{message})));
+}
+
 test "sha256 digest codec and size" {
     const d = Sha256.hash(&.{"hello world"});
     const encoded = codec.encode_fixed(Digest, d);
@@ -204,4 +235,8 @@ test "sha256 hash_many on aliased and unaligned inputs" {
     for (1..messages.len + 1) |count| try fuzz.check_hash_many(Sha256, messages[0..count]);
     const aliased: [16][]const u8 = @splat(backing[1..130]);
     try fuzz.check_hash_many(Sha256, &aliased);
+}
+
+test {
+    _ = x16;
 }

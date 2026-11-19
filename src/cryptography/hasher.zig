@@ -42,6 +42,13 @@ pub fn assert_hasher(comptime H: type) void {
 
 /// A hasher over `Core`, a `std.crypto` hash with `init(.{})`, `update`, and `final`.
 pub fn Streaming(comptime Core: type, comptime DigestType: type) type {
+    return StreamingWith(Core, DigestType, void);
+}
+
+/// `Streaming` whose `hash_many` hashes runs of equal-length messages with `Kernel` (`void`
+/// for none): a multi-message kernel with `lanes`, `minimum_batch_len`, and
+/// `hash([lanes][]const u8) [lanes][digest_length]u8`, as commonware's SHA-256 x16 kernel.
+pub fn StreamingWith(comptime Core: type, comptime DigestType: type, comptime Kernel: type) type {
     comptime assert(DigestType.fixed_size > 0);
     return struct {
         const Self = @This();
@@ -90,7 +97,8 @@ pub fn Streaming(comptime Core: type, comptime DigestType: type) type {
 
         /// Hashes each message alone into `digests`, which must be as long as `messages`.
         pub fn hash_many(messages: []const []const u8, digests: []Digest, strategy: anytype) void {
-            hash_batches(Self, messages, digests, strategy);
+            if (Kernel == void) return hash_batches(Self, messages, digests, strategy);
+            hash_batches_with(Self, Kernel, messages, digests, strategy);
         }
     };
 }
@@ -109,29 +117,91 @@ pub fn hash_batches(
     digests: []H.Digest,
     strategy: anytype,
 ) void {
+    run_hash_batches(H, 1, hash_each, messages, digests, strategy);
+}
+
+/// commonware `hash_batches` with `Kernel.lanes` lanes: batches hold whole units of
+/// `Kernel.lanes` messages, so the kernel finds every unit but the last one full.
+pub fn hash_batches_with(
+    comptime H: type,
+    comptime Kernel: type,
+    messages: []const []const u8,
+    digests: []H.Digest,
+    strategy: anytype,
+) void {
+    const Each = struct {
+        fn each(comptime Hash: type, batch: []const []const u8, out: []Hash.Digest) void {
+            hash_runs(Hash, Kernel, batch, out);
+        }
+    };
+    run_hash_batches(H, Kernel.lanes, Each.each, messages, digests, strategy);
+}
+
+fn run_hash_batches(
+    comptime H: type,
+    comptime lanes: usize,
+    comptime each: fn (comptime type, []const []const u8, []H.Digest) void,
+    messages: []const []const u8,
+    digests: []H.Digest,
+    strategy: anytype,
+) void {
+    comptime assert(lanes > 0);
     const resolved = resolve_strategy(strategy);
     assert(messages.len == digests.len);
     if (messages.len == 0) return;
     var bytes: usize = 0;
     for (messages) |message| bytes +|= message.len;
+    const units = std.math.divCeil(usize, messages.len, lanes) catch unreachable;
     const Batch = struct {
         messages: []const []const u8,
         digests: []H.Digest,
 
         pub fn run(batch: @This(), batches: anytype) void {
             // A serial run hashes the whole input as one batch.
-            if (batches.is_whole()) return hash_each(H, batch.messages, batch.digests);
+            if (batches.is_whole()) return each(H, batch.messages, batch.digests);
             var done: [parallel.max_chunks]void = undefined;
             batches.map_collect(done[0..batches.count()], batch);
         }
 
         pub fn map(batch: @This(), _: usize, range: parallel.Range) void {
-            const messages_range = batch.messages[range.start..range.end];
-            hash_each(H, messages_range, batch.digests[range.start..range.end]);
+            const start = range.start * lanes;
+            const end = @min(range.end *| lanes, batch.messages.len);
+            each(H, batch.messages[start..end], batch.digests[start..end]);
         }
     };
     const batch: Batch = .{ .messages = messages, .digests = digests };
-    // `messages` is not empty, so the division is defined.
-    const bytes_per_message = std.math.divCeil(usize, bytes, messages.len) catch unreachable;
-    resolved.run_batches(messages.len, 1, bytes_per_message, batch);
+    // `units` is not zero (`messages` is not empty), so the division is defined.
+    const bytes_per_unit = std.math.divCeil(usize, bytes, units) catch unreachable;
+    resolved.run_batches(units, 1, bytes_per_unit, batch);
+}
+
+/// commonware sha256 `hash_batch`: adjacent equal-length runs go through `Kernel` in chunks of
+/// `Kernel.lanes` (spare lanes borrow the chunk's first message); a chunk shorter than
+/// `Kernel.minimum_batch_len` hashes one message at a time.
+fn hash_runs(
+    comptime H: type,
+    comptime Kernel: type,
+    messages: []const []const u8,
+    digests: []H.Digest,
+) void {
+    comptime assert(Kernel.minimum_batch_len >= 1 and Kernel.minimum_batch_len <= Kernel.lanes);
+    assert(messages.len == digests.len);
+    var start: usize = 0;
+    while (start < messages.len) {
+        const len = messages[start].len;
+        var end = start + 1;
+        while (end < messages.len and end - start < Kernel.lanes and
+            messages[end].len == len) end += 1;
+        const count = end - start;
+        if (count < Kernel.minimum_batch_len) {
+            hash_each(H, messages[start..end], digests[start..end]);
+        } else {
+            var inputs: [Kernel.lanes][]const u8 = @splat(messages[start]);
+            @memcpy(inputs[0..count], messages[start..end]);
+            const out = Kernel.hash(inputs);
+            for (digests[start..end], out[0..count]) |*digest, bytes| digest.bytes = bytes;
+        }
+        start = end;
+    }
+    assert(start == messages.len);
 }
