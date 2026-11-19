@@ -484,3 +484,32 @@ test "vrf: a ciphertext to a round decrypts with that round's seed" {
         try testing.expectError(error.InvalidPublicKey, at_identity.encrypt(&rng, target, &zeros));
     }
 }
+
+// commonware `test_is_not_attributable` and `test_is_batchable`: threshold partials prove no
+// single signer's fault, and votes verify in batches.
+test "vrf: the scheme is batchable but not attributable" {
+    inline for (variants) |V| {
+        try testing.expect(!SchemeOf(V).is_attributable());
+        try testing.expect(SchemeOf(V).is_batchable());
+    }
+}
+
+// commonware `test_verifier_accepts_votes`: a verifier that holds no share still verifies a
+// signer's vote, and rejects it for another subject.
+test "vrf: a verifier without a share verifies signers' votes" {
+    inline for (variants) |V| {
+        const S = SchemeOf(V);
+        var fixture = try setup(V, 4, 11);
+        defer fixture.deinit(testing.allocator);
+        var rng = utils.rng.test_rng();
+        const proposal = sample_proposal(0, 3, 4);
+        const subject: S.Subject = .{ .notarize = &proposal };
+        const vote = (try fixture.schemes[1].sign(testing.allocator, subject)).?;
+        const verifier = &fixture.verifier;
+        try testing.expect(verifier.me() == null);
+        const a = testing.allocator;
+        try testing.expect(try verifier.verify_attestation(a, &rng, subject, &vote, sequential));
+        const other: S.Subject = .{ .nullify = proposal.round };
+        try testing.expect(!try verifier.verify_attestation(a, &rng, other, &vote, sequential));
+    }
+}

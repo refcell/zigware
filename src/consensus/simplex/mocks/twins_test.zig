@@ -294,6 +294,116 @@ test "view helpers split at the term start modulo n" {
     }
 }
 
+// commonware `scripted_partitions_can_follow_stable_leader_terms`: with terms of 3 views, each
+// scripted round covers a whole term, then everyone is in both halves.
+test "scripted partitions and routes follow stable-leader terms" {
+    var rounds = [_]RoundScenario{
+        .{ .leader = 0, .primary_mask = 0b001, .secondary_mask = 0b010 },
+        .{ .leader = 2, .primary_mask = 0b100, .secondary_mask = 0b011 },
+    };
+    const scenario: twins.Scenario = .{ .rounds = &rounds };
+    const term = TermLength.new(utils.NonZero(u32).init(3).?);
+    try expect_masks(scenario.masks(.new(3), term, 3), 0b001, 0b010);
+    try testing.expectEqual(.primary, scenario.route(.new(2), term, 0, 3));
+    try expect_masks(scenario.masks(.new(6), term, 3), 0b100, 0b011);
+    try testing.expectEqual(.secondary, scenario.route(.new(5), term, 0, 3));
+    try expect_masks(scenario.masks(.new(7), term, 3), 0b111, 0b111);
+    try testing.expectEqual(.both, scenario.route(.new(7), term, 2, 3));
+}
+
+fn expect_masks(masks: twins.Masks, primary: u64, secondary: u64) !void {
+    try testing.expectEqual(primary, masks.primary);
+    try testing.expectEqual(secondary, masks.secondary);
+}
+
+// commonware `view_helpers_can_follow_stable_leader_terms`: the split follows the term start.
+test "view helpers follow stable-leader terms" {
+    const term = TermLength.new(utils.NonZero(u32).init(3).?);
+    const one: TermLength = .one;
+    try testing.expectEqual(twins.view_masks(.new(1), one, 5), twins.view_masks(.new(3), term, 5));
+    try testing.expectEqual(twins.view_masks(.new(4), one, 5), twins.view_masks(.new(6), term, 5));
+    try testing.expectEqual(.primary, twins.view_route(.new(2), term, 0, 5));
+    try testing.expectEqual(.secondary, twins.view_route(.new(6), term, 4, 5));
+}
+
+// commonware `leader_visible_to_both_halves_preserves_partitions_and_route`.
+test "a leader in both halves keeps the partitions and routes to both" {
+    var rounds = [_]RoundScenario{
+        .{ .leader = 3, .primary_mask = 0b1010, .secondary_mask = 0b1100 },
+    };
+    const scenario: twins.Scenario = .{ .rounds = &rounds };
+    const keys = [_]u32{ 0, 1, 2, 3 };
+    const masks = scenario.masks(.new(1), .one, 4);
+    const primary = try twins.partition(gpa, u32, masks.primary, &keys);
+    defer gpa.free(primary);
+    try testing.expectEqualSlices(u32, &.{ 1, 3 }, primary);
+    const secondary = try twins.partition(gpa, u32, masks.secondary, &keys);
+    defer gpa.free(secondary);
+    try testing.expectEqualSlices(u32, &.{ 2, 3 }, secondary);
+    try testing.expectEqual(.both, scenario.route(.new(1), .one, 3, 4));
+}
+
+// commonware `mask_helpers_set_boundary_ranges` and `scenario_masks_route_within_one_word`:
+// participant 63 is the last bit of the one-word masks.
+test "masks cover the 64th participant" {
+    const top = range_mask(63, 1);
+    try testing.expect(top & (@as(u64, 1) << 62) == 0);
+    try testing.expect(top & (@as(u64, 1) << 63) != 0);
+    const high = range_mask(60, 4);
+    for (60..64) |index| try testing.expect(high & (@as(u64, 1) << @intCast(index)) != 0);
+    try testing.expect(high & (@as(u64, 1) << 59) == 0);
+    const secondary = range_mask(61, 1) | range_mask(63, 1);
+    var rounds = [_]RoundScenario{
+        .{ .leader = 63, .primary_mask = high, .secondary_mask = secondary },
+    };
+    const scenario: twins.Scenario = .{ .rounds = &rounds };
+    var keys: [64]u32 = undefined;
+    for (&keys, 0..) |*key, index| key.* = @intCast(index);
+    const masks = scenario.masks(.new(1), .one, 64);
+    const primary = try twins.partition(gpa, u32, masks.primary, &keys);
+    defer gpa.free(primary);
+    try testing.expectEqualSlices(u32, &.{ 60, 61, 62, 63 }, primary);
+    const second = try twins.partition(gpa, u32, masks.secondary, &keys);
+    defer gpa.free(second);
+    try testing.expectEqualSlices(u32, &.{ 61, 63 }, second);
+    try testing.expectEqual(.primary, scenario.route(.new(1), .one, 60, 64));
+    try testing.expectEqual(.both, scenario.route(.new(1), .one, 61, 64));
+    try testing.expectEqual(.both, scenario.route(.new(1), .one, 63, 64));
+    try testing.expectEqual(.none, scenario.route(.new(1), .one, 0, 64));
+}
+
+// commonware `cases_support_64_participants`.
+test "cases support 64 participants" {
+    const generated = try generate(.{
+        .participants = twins.participants_max,
+        .faults = 1,
+        .rounds = 1,
+        .mode = .sampled,
+        .max_cases = 1,
+    });
+    defer twins.free_cases(gpa, generated);
+    try testing.expectEqual(1, generated.len);
+}
+
+// commonware `cases_fewer_than_naive_cross_product`: symmetry pruning keeps fewer cases than
+// every scenario crossed with every compromised participant.
+test "cases are fewer than the naive cross product" {
+    const all = try generate(.{
+        .participants = 5,
+        .faults = 1,
+        .rounds = 1,
+        .mode = .sampled,
+        .max_cases = std.math.maxInt(u32),
+    });
+    defer twins.free_cases(gpa, all);
+    var generator = Generator.init(gpa, 5);
+    defer generator.deinit();
+    var rng = utils.rng.test_rng();
+    const scenarios = try generator.generate(&rng, 1, std.math.maxInt(u32));
+    defer generator_mod.free_generated(gpa, scenarios);
+    try testing.expect(all.len < scenarios.len * 5);
+}
+
 const RoundRobin = elector_mod.RoundRobin(cryptography.Sha256);
 
 test "the twins elector follows scripted leaders, then the fallback" {
