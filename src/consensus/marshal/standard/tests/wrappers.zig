@@ -181,10 +181,6 @@ fn buffered_anchor_installs_floor(ctx: Ctx, subscribe: bool) !void {
     try testing.expectEqual(null, try mailbox.get_block(.{ .height = .new(5) }));
     // The anchor reaches the buffer while only the pending floor's waiter awaits it.
     try buffer_deliver(validator, &anchor);
-    // commonware's actor polls buffer waiters before its mailbox, so the floor waiter wins
-    // over a later query. zigware's actor handles events in arrival order and its waiter
-    // reaches the inbox a few scheduler cycles after the buffer sees the block, so let it.
-    try ctx.sleep(.fromMilliseconds(20));
     if (subscribe) {
         // A query queued behind the subscription observes the installed floor.
         var subscription = try mailbox.subscribe_by_commitment(anchor.digest(), .wait);
@@ -861,4 +857,203 @@ test "inline certify fork below finalized round after prune" {
 test "deferred certify fork below finalized round after prune" {
     // commonware `test_deferred_certify_fork_below_finalized_round_after_prune`.
     try run_for(60, BelowFinalized(DeferredWrapper, true).body);
+}
+
+fn GenesisParent(comptime W: type) type {
+    return struct {
+        fn body(ctx: Ctx) anyerror!void {
+            const net = try Net.start(ctx, harness.num_validators);
+            defer net.stop();
+            const validator = try net.validator(ctx, "validator", 0);
+            defer validator.crash();
+            const me = net.fixture.participants[0];
+            const marshal = validator.mailbox.clone();
+            const mock = Mock.init(gpa);
+            const wrapper = try W.create(ctx.child("wrapper"), mock, marshal, epocher());
+            defer wrapper.destroy();
+            defer ctx.io().sleep(.fromMilliseconds(100), .awake) catch {};
+            const genesis = try harness.make_raw_block(gpa, hash(""), .zero(), 0);
+            var block = try proposed_block(round_at(1), me, 0, genesis.digest(), 1, 100);
+            defer block.deinit();
+            try H.verify(validator, round_at(1), &block);
+            try ctx.io().sleep(.fromMilliseconds(10), .awake);
+            const context = block.inner().context();
+            const verified = try wrapper.verify(undefined, context, block.digest());
+            try testing.expectEqual(@as(?bool, true), verified);
+            const certified = try wrapper.certify(undefined, round_at(1), block.digest());
+            try testing.expectEqual(@as(?bool, true), certified);
+        }
+    };
+}
+
+test "inline certify first block fetches genesis parent" {
+    // commonware `test_standard_certify_first_block_fetches_genesis_parent` (Inline).
+    try run_for(30, GenesisParent(InlineWrapper).body);
+}
+
+test "deferred certify first block fetches genesis parent" {
+    // commonware `test_standard_certify_first_block_fetches_genesis_parent` (Deferred).
+    try run_for(30, GenesisParent(DeferredWrapper).body);
+}
+
+/// The timestamp of the Byzantine proposals the epoch-switch test's application rejects.
+const invalid_timestamp: u64 = std.math.maxInt(u64);
+
+fn rejects_invalid(block: *const harness.B) bool {
+    return block.timestamp == invalid_timestamp;
+}
+
+/// The epoch-switch test's chain: its delivered digests, and the parent of the next block.
+const SwitchChain = struct {
+    digests: std.ArrayList(D) = .empty,
+    parent_view: u64 = 0,
+    parent: D,
+};
+
+const Switch = struct {
+    net: *Net,
+    validator: *Validator,
+    chain: *SwitchChain,
+
+    /// Verifies (and with `certify` certifies) `block` through `wrapper`, expecting `verdict`.
+    fn check(wrapper: anytype, block: *const Block, verdict: bool) !void {
+        const verified = try wrapper.verify(undefined, block.inner().context(), block.digest());
+        try testing.expectEqual(@as(?bool, verdict), verified);
+    }
+
+    fn notarize(self: Switch, round: Round, digest: D) !void {
+        const parent_view: types.View = .new(self.chain.parent_view);
+        const proposal = harness.Proposal.init(round, parent_view, digest);
+        var notarization = try harness.make_notarization(
+            gpa,
+            &self.net.fixture,
+            proposal,
+            harness.quorum,
+        );
+        defer notarization.deinit(gpa);
+        _ = self.validator.mailbox.report(.{ .notarization = notarization });
+    }
+
+    /// The Byzantine proposal at `round` has the correct context but fails application
+    /// verification: Inline rejects it at verify, Deferred at certification.
+    fn byzantine(self: Switch, comptime W: type, wrapper: *W, round: Round, height: u64) !void {
+        const leader = self.net.fixture.participants[1];
+        const chain = self.chain;
+        var block = try proposed_block(
+            round,
+            leader,
+            chain.parent_view,
+            chain.parent,
+            height,
+            invalid_timestamp,
+        );
+        defer block.deinit();
+        try H.verify(self.validator, round, &block);
+        try check(wrapper, &block, W == DeferredWrapper);
+        if (W != DeferredWrapper) return;
+        try self.notarize(round, block.digest());
+        const certified = try wrapper.certify(undefined, round, block.digest());
+        try testing.expectEqual(@as(?bool, false), certified);
+    }
+
+    /// The honest proposal at `round` builds on the last valid block and is finalized.
+    fn honest(self: Switch, wrapper: anytype, round: Round, height: u64) !void {
+        const leader = self.net.fixture.participants[0];
+        const chain = self.chain;
+        var block = try proposed_block(
+            round,
+            leader,
+            chain.parent_view,
+            chain.parent,
+            height,
+            height,
+        );
+        defer block.deinit();
+        try H.verify(self.validator, round, &block);
+        try check(wrapper, &block, true);
+        const certified = try wrapper.certify(undefined, round, block.digest());
+        try testing.expectEqual(@as(?bool, true), certified);
+        const parent_view: types.View = .new(chain.parent_view);
+        const proposal = harness.Proposal.init(round, parent_view, block.digest());
+        const finalization = try harness.make_finalization(
+            gpa,
+            &self.net.fixture,
+            proposal,
+            harness.quorum,
+        );
+        report(&self.validator.mailbox, finalization);
+        chain.parent_view = round.view.get();
+        chain.parent = block.digest();
+        try chain.digests.append(gpa, block.digest());
+    }
+
+    /// Runs `epoch` on a fresh `W` over the shared marshal, rejecting one Byzantine proposal.
+    fn epoch(self: Switch, comptime W: type, ctx: Ctx, epoch_value: u64) !void {
+        const mock = Mock.init(gpa).with_reject(&rejects_invalid);
+        const marshal = self.validator.mailbox.clone();
+        const name = ctx.child("wrapper").with_attribute("epoch", epoch_value);
+        const wrapper = try W.create(name, mock, marshal, epocher());
+        defer wrapper.destroy();
+        const at: types.Epoch = .new(epoch_value);
+        const first = @max(epocher().first(at).?.get(), 1);
+        const last = epocher().last(at).?.get();
+        const invalid_height = if (epoch_value == 0) last else first;
+        // Each epoch starts at view 1, with genesis or the preceding boundary block as its
+        // view-0 parent.
+        self.chain.parent_view = 0;
+        var view: u64 = 0;
+        var rejected: u32 = 0;
+        for (first..last + 1) |height| {
+            view += 1;
+            if (height == invalid_height) {
+                try self.byzantine(W, wrapper, .new(at, .new(view)), height);
+                rejected += 1;
+                view += 1;
+            }
+            try self.honest(wrapper, .new(at, .new(view)), height);
+        }
+        try testing.expectEqual(@as(u32, 1), rejected);
+        try ctx.io().sleep(.fromMilliseconds(100), .awake);
+    }
+};
+
+fn switch_wrapper(comptime Old: type, comptime New: type, ctx: Ctx) !void {
+    const net = try Net.start(ctx, harness.num_validators);
+    defer net.stop();
+    const validator = try net.validator(ctx, "validator", 0);
+    defer validator.crash();
+    const genesis = try harness.make_raw_block(gpa, hash(""), .zero(), 0);
+    var chain: SwitchChain = .{ .parent = genesis.digest() };
+    defer chain.digests.deinit(gpa);
+    try chain.digests.append(gpa, genesis.digest());
+    const run: Switch = .{ .net = net, .validator = validator, .chain = &chain };
+    try run.epoch(Old, ctx, 0);
+    try run.epoch(New, ctx, 1);
+    // The application holds the complete valid chain, including genesis.
+    const tip = epocher().last(.new(1)).?.get();
+    try wait_holds(ctx, validator.application, tip);
+    const delivered = try validator.application.blocks(gpa);
+    defer App.free_blocks(gpa, delivered);
+    try testing.expectEqual(chain.digests.items.len, delivered.len);
+    for (chain.digests.items, delivered) |expected, entry| {
+        try testing.expect(expected.eql(entry.block.digest()));
+    }
+}
+
+fn SwitchCase(comptime Old: type, comptime New: type) type {
+    return struct {
+        fn body(ctx: Ctx) anyerror!void {
+            try switch_wrapper(Old, New, ctx);
+        }
+    };
+}
+
+test "switch inline to deferred wrapper at epoch boundary" {
+    // commonware `test_standard_switch_wrapper_at_epoch_boundary` (Inline -> Deferred).
+    try run_for(60, SwitchCase(InlineWrapper, DeferredWrapper).body);
+}
+
+test "switch deferred to inline wrapper at epoch boundary" {
+    // commonware `test_standard_switch_wrapper_at_epoch_boundary` (Deferred -> Inline).
+    try run_for(60, SwitchCase(DeferredWrapper, InlineWrapper).body);
 }
