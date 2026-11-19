@@ -459,6 +459,38 @@ fn Coordinator(comptime D: type, comptime Target: type) type {
     };
 }
 
+/// The sync `Source` over a shared database (commonware's `impl Source for Shared<DB>`): it
+/// serves each request from `DB.sync_source()` while holding the database's lock, so a
+/// mutation never interleaves with a read. `DB` declares `SyncSource`, a `qmdb.sync` source,
+/// and `sync_source(*DB) SyncSource`.
+pub fn SharedSource(comptime DB: type) type {
+    const S = DB.SyncSource;
+    comptime qmdb.sync.source.assert_source(S);
+    return struct {
+        const Self = @This();
+        pub const Family = S.Family;
+        pub const Op = S.Op;
+        pub const Digest = S.Digest;
+        pub const Error = S.Error;
+        pub const Request = qmdb.sync.Request(Family);
+        pub const Response = qmdb.sync.Response(Family, Op, Digest);
+
+        shared: db.Shared(DB),
+
+        pub fn serve(
+            self: *Self,
+            gpa: Allocator,
+            request: Request,
+        ) (Error || Io.Cancelable)!qmdb.sync.Served(Response) {
+            assert(request.max_ops() > 0);
+            var guard = try self.shared.read();
+            defer guard.deinit();
+            var source = guard.get().sync_source();
+            return source.serve(gpa, request);
+        }
+    };
+}
+
 /// Attaches each synced database to the resolver that serves sync requests from it
 /// (commonware's `AttachableResolverSet`). `resolvers` is one resolver (a value or pointer
 /// declaring `attach_database(db.Shared(DB)) !void`, commonware's `AttachableResolver`) with

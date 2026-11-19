@@ -13,6 +13,8 @@ pub const Subscriber = handler.Subscriber;
 pub const mailbox = @import("mailbox.zig");
 pub const Mailbox = mailbox.Mailbox;
 pub const Message = mailbox.Message;
+pub const metrics = @import("metrics.zig");
+pub const Metrics = metrics.Metrics;
 
 test {
     std.testing.refAllDecls(@This());

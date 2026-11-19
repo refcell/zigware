@@ -76,6 +76,36 @@ pub fn Compact(comptime F: type, comptime O: type, comptime H: type) type {
             return target;
         }
 
+        /// Serves peers' sync requests from this database's current peaks (commonware's
+        /// `Source` for the locked database, which `state_sync.SharedSource` takes under the
+        /// lock). Responses carry no feedback.
+        pub const SyncSource = struct {
+            pub const Family = F;
+            pub const Op = O;
+            pub const Digest = D.Digest;
+            pub const Error = ServeError;
+            const ServeError = @typeInfo(@typeInfo(@TypeOf(D.serve)).@"fn".return_type.?)
+                .error_union.error_set;
+
+            database: *D,
+
+            /// The response is allocated with the database's allocator, which must be `gpa`.
+            pub fn serve(
+                self: *SyncSource,
+                gpa: std.mem.Allocator,
+                request: D.Request,
+            ) Error!qmdb.sync.Served(D.Response) {
+                assert(gpa.ptr == self.database.gpa.ptr);
+                const response = try self.database.serve(request);
+                assert(std.mem.eql(u8, @tagName(response), @tagName(request)));
+                return .{ .response = response, .feedback = null };
+            }
+        };
+
+        pub fn sync_source(self: *Self) SyncSource {
+            return .{ .database = &self.inner };
+        }
+
         /// Syncs a new database from `source` (the StateSyncDb contract, `state_sync.zig`).
         pub fn sync_db(
             env: anytype,

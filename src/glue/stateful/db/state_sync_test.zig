@@ -680,16 +680,12 @@ fn expect_standard_sync(
     try seed(source, 4, fill);
     const target = try source.committed_targets();
 
-    var guard = try source.read();
-    defer guard.deinit();
-    const Journal = T.SyncDatabase.Db.Journal;
-    var journal_source: qmdb.sync.JournalSource(Family, Journal) = .{
-        .journal = &guard.get().inner.journal,
-    };
+    // Each request is served under the source's lock (commonware's `Shared<DB>: Source`).
+    var shared_source: state_sync.SharedSource(T) = .{ .shared = source };
     var node: Node = undefined;
     try node.init();
     defer node.deinit();
-    const synced = try sync_closed(T, node.env(), configure(&node), &journal_source, target, .{
+    const synced = try sync_closed(T, node.env(), configure(&node), &shared_source, target, .{
         .fetch_batch_size = 3,
         .apply_batch_size = 2,
         .max_outstanding_requests = 2,
@@ -724,29 +720,6 @@ test "stateful state sync: an engine that cannot open releases the sync's report
     try testing.expectError(error.InvalidTarget, result);
 }
 
-/// A compact database served as a sync source (commonware's `Arc<Db>: Source`).
-fn CompactSource(comptime D: type) type {
-    return struct {
-        const Self = @This();
-        pub const Family = D.Family;
-        pub const Op = D.Operation;
-        pub const Digest = D.Digest;
-        const Served = @typeInfo(@TypeOf(D.serve)).@"fn".return_type.?;
-        pub const Error = @typeInfo(Served).error_union.error_set;
-        const Response = qmdb.sync.Response(D.Family, D.Operation, D.Digest);
-
-        db: *D,
-
-        pub fn serve(
-            self: *Self,
-            _: std.mem.Allocator,
-            request: qmdb.sync.Request(D.Family),
-        ) (Error || std.Io.Cancelable)!qmdb.sync.Served(Response) {
-            return .{ .response = try self.db.serve(request), .feedback = null };
-        }
-    };
-}
-
 /// commonware's `state_sync_fetches_compact_state`: a fresh compact database syncs the state
 /// of a compact source with one synced batch.
 fn expect_compact_sync(comptime A: type, comptime mutate: anytype) !void {
@@ -758,20 +731,20 @@ fn expect_compact_sync(comptime A: type, comptime mutate: anytype) !void {
     try seed(source, 1, mutate);
     const target = try source.committed_targets();
 
-    var guard = try source.read();
-    defer guard.deinit();
-    var compact_source: CompactSource(A.Database) = .{ .db = &guard.get().inner };
+    var shared_source: state_sync.SharedSource(A) = .{ .shared = source };
     var node: Node = undefined;
     try node.init();
     defer node.deinit();
     const config = node.compact_config(A);
-    const synced = try sync_closed(A, node.env(), config, &compact_source, target, engine_config);
+    const synced = try sync_closed(A, node.env(), config, &shared_source, target, engine_config);
     defer synced.databases.deinit();
     const reached = try synced.databases.committed_targets();
     try testing.expect(reached.eql(target));
     var synced_guard = try synced.databases.read();
     defer synced_guard.deinit();
     const metadata = try synced_guard.get().inner.get_metadata();
+    var guard = try source.read();
+    defer guard.deinit();
     try testing.expect(std.meta.eql(metadata, try guard.get().inner.get_metadata()));
 }
 
@@ -795,7 +768,7 @@ test "stateful state sync: an unconvertible compact target fails the sync" {
     try node.init();
     defer node.deinit();
     var unused: KeylessCompact.Database = undefined;
-    var compact_source: CompactSource(KeylessCompact.Database) = .{ .db = &unused };
+    var compact_source: KeylessCompact.SyncSource = .{ .database = &unused };
     const zero: KeylessCompact.SyncTarget = .{ .root = .{ .bytes = @splat(0) }, .size = 0 };
     const config = node.compact_config(KeylessCompact);
     const source = &compact_source;

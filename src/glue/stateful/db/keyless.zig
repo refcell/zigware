@@ -85,6 +85,14 @@ pub fn Keyless(comptime F: type, comptime E: type, comptime C: type, comptime H:
         /// The database's `qmdb.sync` interface.
         pub const SyncDatabase = qmdb.keyless.sync.Database(F, E, C, H);
 
+        /// Serves peers' sync requests from this database (commonware's `Source` for the
+        /// locked database, which `state_sync.SharedSource` takes under the lock).
+        pub const SyncSource = qmdb.sync.JournalSource(F, D.Journal);
+
+        pub fn sync_source(self: *Self) SyncSource {
+            return .{ .journal = &self.inner.journal };
+        }
+
         /// Syncs a new database from `source` (the StateSyncDb contract, `state_sync.zig`).
         pub fn sync_db(
             env: anytype,
