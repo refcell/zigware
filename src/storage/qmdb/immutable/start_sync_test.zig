@@ -170,3 +170,54 @@ fn prune_waits(ctx: Context) !void {
 test "immutable start_sync prune waits (test_fixed_start_sync_prune_waits)" {
     try run(prune_waits);
 }
+
+fn applying(ctx: Context, db: *Db, batch: *Db.MerkleizedBatch, done: *bool) anyerror!void {
+    _ = ctx;
+    try db.apply_batch(batch);
+    done.* = true;
+}
+
+/// An apply whose append waits on the in-flight sync indexes its sets meanwhile; the database
+/// publishes the batch only once both are done.
+fn apply_indexes_while_journal_waits(ctx: Context) !void {
+    var f: Fixture = undefined;
+    try f.init(ctx);
+    defer f.deinit();
+    var db = try f.open();
+    defer db.deinit();
+    try apply_set(&db, fill(1), fill(101), 0);
+    const completion = try db.start_sync();
+    // Exceed the write buffer, so the append must wait for the outstanding sync.
+    var batch = try db.new_batch();
+    const merkleized = merkleized: {
+        errdefer batch.deinit();
+        for (2..34) |i| try batch.set(fill(@intCast(i)), fill(@intCast(i + 100)));
+        break :merkleized try batch.merkleize(&db);
+    };
+    defer merkleized.release();
+    const root = merkleized.root();
+    const completions_before = f.pending.completions();
+    var done = false;
+    const apply = try ctx.child("apply").spawn(applying, .{ &db, merkleized, &done });
+    try ctx.sleep(.fromMilliseconds(10));
+    try testing.expect(!done); // The append waits on the parked sync.
+    // Indexing finished while the journal is parked; publication waits for both.
+    try testing.expectEqual(@as(u64, 33), db.snapshot.len());
+    try testing.expectEqual(@as(u64, 3), db.bounds().end);
+    try testing.expectEqual(completions_before, f.pending.completions());
+    f.pending.unblock();
+    try try apply.join();
+    try completion.wait_release();
+    try testing.expect(db.root().eql(root));
+    try testing.expectEqual(@as(u64, 36), db.bounds().end);
+    try db.sync();
+    db.deinit();
+    db = try f.open();
+    try testing.expect(db.root().eql(root));
+    for (1..34) |i| try expect_value(&db, fill(@intCast(i)), fill(@intCast(i + 100)));
+}
+
+// fixed.rs `test_fixed_apply_indexes_while_journal_waits`.
+test "immutable apply indexes while the journal waits" {
+    try run(apply_indexes_while_journal_waits);
+}

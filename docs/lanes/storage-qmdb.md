@@ -151,7 +151,9 @@ which every database here is built on.
     takes its journal config as given.
   - `start_sync` no longer completes synchronously (step 5, below): `start_sync_overlaps_work`,
     `start_sync_failure_propagates` (in full), and `start_sync_prune_waits` are ported in
-    immutable/start_sync_test.zig; `apply_indexes_while_journal_waits` is still open.
+    immutable/start_sync_test.zig, with `apply_indexes_while_journal_waits`: apply indexes
+    the batch's sets before the append, which may wait on an in-flight sync (commonware joins
+    the two).
     Compact root
     compatibility is the compact lane's.
   - [x] Ported with async start_sync step 5 (storage-merkle.md, "Design: asynchronous
@@ -466,3 +468,4 @@ which every database here is built on.
 - 2026-11-19: upstream 8bf364011 batch 2: `CompactTarget` and its conformance entries removed.
 - 2026-11-19: immutable and store in-flight start_sync tests (overlap, failure, prune waits).
 - 2026-11-19: upstream 102430409: shared batched get_many read, store strategy (decision reversed).
+- 2026-11-19: immutable apply indexes before its append; `apply_indexes_while_journal_waits`.

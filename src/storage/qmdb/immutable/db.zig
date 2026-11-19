@@ -402,12 +402,15 @@ pub fn Db(F: type, K: type, E: type, C: type, H: type, T: type) type {
             defer timing.finish();
             try self.validate_batch(batch);
             const db_size = self.journal.size();
-            try self.journal.apply_batch(batch.journal_batch);
-            try self.index_diff(batch.diff);
+            // The snapshot inserts are independent of the journal until publication, so they
+            // run first and complete while the append waits on an in-flight sync (commonware
+            // joins the two). A failure leaves only `deinit` valid either way.
+            try self.index_diff(batch.diff, batch.bounds.tip.size);
             for (batch.ancestor_diffs, batch.bounds.ancestors) |ancestor, state| {
                 if (state.size <= db_size) continue; // Already applied.
-                try self.index_diff(ancestor);
+                try self.index_diff(ancestor, batch.bounds.tip.size);
             }
+            try self.journal.apply_batch(batch.journal_batch);
             self.inactivity_floor_loc = batch.bounds.inactivity_floor;
             self.root_digest = batch.root();
             assert(self.journal.size() == batch.bounds.tip.size);
@@ -415,9 +418,11 @@ pub fn Db(F: type, K: type, E: type, C: type, H: type, T: type) type {
             self.metrics.operations_applied.metric().inc_by(self.journal.size() - db_size);
         }
 
-        fn index_diff(self: *Self, batch_diff: *const BatchDiff) !void {
+        /// Indexes `batch_diff`'s sets, all below `tip`, the size the batch applies to.
+        fn index_diff(self: *Self, batch_diff: *const BatchDiff, tip: u64) !void {
+            assert(tip >= self.journal.size());
             for (batch_diff.entries) |*entry| {
-                assert(entry.loc < self.journal.size());
+                assert(entry.loc < tip);
                 try self.snapshot.insert(value_mod.bytes(K, &entry.key), entry.loc);
             }
         }
