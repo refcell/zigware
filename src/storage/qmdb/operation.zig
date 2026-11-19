@@ -161,15 +161,32 @@ test "fixed commit layout" {
     try testing.expectEqual(@as(u64, 9), commit.floor);
 }
 
-test "location codec refuses values beyond max_leaves" {
-    const F = merkle.mmr.Family;
+/// Decodes `value`'s varint encoding as a location of family `F`.
+fn decode_location(comptime F: type, value: u64) !u64 {
     var buffer: [10]u8 = undefined;
     var writer = codec.Writer.init(&buffer);
-    write_location(F.max_leaves + 1, &writer);
+    write_location(value, &writer);
     var reader = codec.Reader.init(writer.written());
-    try testing.expectError(error.Invalid, read_location(F, &reader));
-    writer = codec.Writer.init(&buffer);
-    write_location(F.max_leaves, &writer);
-    reader = codec.Reader.init(writer.written());
-    try testing.expectEqual(F.max_leaves, try read_location(F, &reader));
+    const location = read_location(F, &reader) catch |err| {
+        try testing.expectEqualStrings("Location", reader.diagnostic.context);
+        return err;
+    };
+    try testing.expectEqual(@as(usize, 0), reader.remaining());
+    return location;
+}
+
+// merkle/mmr/mod.rs `test_location_read_cfg_valid_values`.
+test "location read accepts every value up to max_leaves" {
+    const F = merkle.mmr.Family;
+    for ([_]u64{ 0, 12345, F.max_leaves - 1, F.max_leaves }) |value| {
+        try testing.expectEqual(value, try decode_location(F, value));
+    }
+}
+
+// merkle/mmr/mod.rs `test_location_read_cfg_invalid_values`.
+test "location read refuses values beyond max_leaves" {
+    const F = merkle.mmr.Family;
+    for ([_]u64{ F.max_leaves + 1, std.math.maxInt(u64) }) |value| {
+        try testing.expectError(error.Invalid, decode_location(F, value));
+    }
 }
