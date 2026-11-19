@@ -10,8 +10,8 @@
 //! into aligned subtrees of that length, each a node of the BLAKE3 tree. Rounds of at most
 //! `round_subtrees` subtrees hash with `strategy.map_into`, and their chaining values merge on
 //! the same chaining-value stack the streaming hasher keeps. The bytes after the last whole
-//! subtree, at least one and at most `subtree_len`, hash on the calling thread, so the last
-//! chunk is the root's rightmost leaf. No recursion, no allocation.
+//! subtree, at least one and at most `subtree_len`, hash as one more item of the last round,
+//! and its last chunk is the root's rightmost leaf. No recursion, no allocation.
 
 const std = @import("std");
 const parallel = @import("parallel");
@@ -28,6 +28,11 @@ pub const subtrees = 8;
 pub const subtree_len_min = 16 * chunk_len;
 /// Upper clamp, in bytes, on the subtree bound: 64 chunks (commonware `MAX_SUBTREE_LEN`).
 pub const subtree_len_max = 64 * chunk_len;
+/// Lower bound, in bytes, on the subtrees a split message is actually cut into: 32 chunks.
+/// Below this, dispatching a task to the pool costs more than the 16 chunks it hashes save
+/// (128 KiB at conc=8: 14.5 µs as 4 subtrees against 17.3 µs as 8, min of 4 rounds), so the
+/// shortest split messages spread across fewer, larger tasks than commonware's bound.
+const subtree_len_floor = 2 * subtree_len_min;
 /// Length, in bytes, of the shortest message `hash_across` splits (commonware `MIN_SPLIT_LEN`).
 pub const split_len_min = subtrees * subtree_len_min;
 
@@ -64,6 +69,7 @@ comptime {
     assert(std.math.isPowerOfTwo(lanes));
     assert(lanes <= subtree_len_min / chunk_len);
     assert(split_len_min > subtree_len_max);
+    assert(subtree_len_floor >= subtree_len_min and subtree_len_floor <= subtree_len_max);
 }
 
 /// A chaining value: the first eight output words of a compression.
@@ -382,69 +388,122 @@ fn finish(stack_unmerged: Stack, last: Cv, counter: u64) [32]u8 {
 }
 
 /// The length of the aligned subtrees a message of `len` bytes is cut into: commonware's task
-/// bound, `len / subtrees` clamped to `subtree_len_min` and `subtree_len_max`, rounded down to
-/// a power of two.
+/// bound, `len / subtrees` clamped to `subtree_len_floor` and `subtree_len_max`, rounded down
+/// to a power of two.
 pub fn subtree_len_for(len: usize) usize {
-    const bound = std.math.clamp(len / subtrees, subtree_len_min, subtree_len_max);
+    const bound = std.math.clamp(len / subtrees, subtree_len_floor, subtree_len_max);
     const subtree_len = std.math.floorPowerOfTwo(usize, bound);
-    assert(subtree_len >= subtree_len_min and subtree_len <= bound);
+    assert(subtree_len >= subtree_len_floor and subtree_len <= bound);
     return subtree_len;
 }
 
+/// The chaining values of a message's rest, the bytes after its last whole subtree: its whole
+/// chunks as aligned runs of decreasing powers of two, then its last chunk.
+const Rest = struct {
+    /// A rest of fewer than `subtree_chunks_max` whole chunks has at most this many runs.
+    const runs_max = std.math.log2_int(usize, subtree_chunks_max);
+
+    runs: [runs_max]Cv = undefined,
+    run_starts: [runs_max]u64 = undefined,
+    run_count: usize = 0,
+    last: Cv = undefined,
+    last_counter: u64 = 0,
+};
+
+comptime {
+    assert(@popCount(@as(usize, subtree_chunks_max - 1)) <= Rest.runs_max);
+}
+
+/// Hashes the rest of the `len`-byte message `parts` from byte `offset`, a subtree boundary.
+fn hash_rest(parts: []const []const u8, len: usize, offset: usize, rest: *Rest) void {
+    assert(offset < len);
+    // A whole last chunk compresses in the same batch as the others; only its merge into the
+    // root differs.
+    const rest_len = len - offset;
+    const last_whole = rest_len % chunk_len == 0;
+    const rest_chunks = (rest_len - 1) / chunk_len;
+    const batched = rest_chunks + @intFromBool(last_whole);
+    assert(batched <= subtree_chunks_max);
+    var cursor = Cursor.at(parts, offset);
+    var cvs: [subtree_chunks_max]Cv = undefined;
+    const first = offset / chunk_len;
+    chunks_cvs(&cursor, first, cvs[0..batched]);
+    // Merge the whole chunks as aligned runs, so the stack takes one entry per run and every
+    // merge inside a run runs at full width.
+    rest.run_count = 0;
+    var merged: usize = 0;
+    while (merged < rest_chunks) {
+        const run = std.math.floorPowerOfTwo(usize, rest_chunks - merged);
+        assert((first + merged) % run == 0);
+        rest.runs[rest.run_count] = merge_subtree(cvs[merged..][0..run]);
+        rest.run_starts[rest.run_count] = first + merged;
+        rest.run_count += 1;
+        merged += run;
+    }
+    assert(merged == rest_chunks);
+    rest.last_counter = first + rest_chunks;
+    if (last_whole) {
+        rest.last = cvs[rest_chunks];
+        return;
+    }
+    var scratch: [chunk_len]u8 = undefined;
+    const last = cursor.take(rest_len - rest_chunks * chunk_len, &scratch);
+    rest.last = last_chunk_cv(last, rest.last_counter);
+}
+
+/// Item `index` of a round: subtree `index`, or, at index `whole`, the rest, which it writes
+/// to `rest` (its own output slot is unused). Hashing the rest in the round keeps it off the
+/// calling thread's critical path.
 const SubtreeOp = struct {
     parts: []const []const u8,
+    len: usize,
     subtree_len: usize,
+    whole: usize,
+    rest: *Rest,
 
     pub fn map(op: SubtreeOp, index: usize) Cv {
+        assert(index <= op.whole);
+        if (index == op.whole) {
+            hash_rest(op.parts, op.len, op.whole * op.subtree_len, op.rest);
+            return @splat(0);
+        }
         return subtree_cv(op.parts, index * op.subtree_len, op.subtree_len / chunk_len);
     }
 };
 
 /// The BLAKE3 digest of the `len`-byte concatenation of `parts`, which spans more than one
-/// chunk, with its whole subtrees hashed across `strategy`.
+/// chunk, with its whole subtrees and its rest hashed across `strategy`.
 pub fn hash_subtrees(parts: []const []const u8, len: usize, strategy: anytype) [32]u8 {
     assert(len > chunk_len);
     const subtree_len = subtree_len_for(len);
     const subtree_chunks = subtree_len / chunk_len;
-    // Leave the last chunk, and so at least one byte, to the calling thread.
+    // The rest holds the last chunk, and so at least one byte.
     const whole = (len - 1) / subtree_len;
+    var rest: Rest = .{};
+    const op: SubtreeOp = .{
+        .parts = parts,
+        .len = len,
+        .subtree_len = subtree_len,
+        .whole = whole,
+        .rest = &rest,
+    };
     var stack: Stack = .{};
     var done: usize = 0;
-    while (done < whole) {
-        const count = @min(round_subtrees, whole - done);
+    // Rounds of `round_subtrees` items; the last one also hashes the rest.
+    while (done <= whole) {
+        const count = @min(round_subtrees, whole + 1 - done);
         var cvs: [round_subtrees]Cv = undefined;
-        const op: SubtreeOp = .{ .parts = parts, .subtree_len = subtree_len };
         strategy.map_into(parallel.Range.init(done, done + count), cvs[0..count], op);
-        for (cvs[0..count], done..) |cv, index| stack.push(cv, index * subtree_chunks);
+        for (cvs[0..count], done..) |cv, index| {
+            if (index < whole) stack.push(cv, index * subtree_chunks);
+        }
         done += count;
     }
-    // The rest: its whole chunks, then the last chunk. A whole last chunk compresses in the
-    // same batch as the others; only its merge into the root differs.
-    const rest_offset = whole * subtree_len;
-    const rest_len = len - rest_offset;
-    const last_whole = rest_len % chunk_len == 0;
-    const rest_chunks = (rest_len - 1) / chunk_len;
-    const batched = rest_chunks + @intFromBool(last_whole);
-    assert(batched <= subtree_chunks_max);
-    var cursor = Cursor.at(parts, rest_offset);
-    var cvs: [subtree_chunks_max]Cv = undefined;
-    const first = rest_offset / chunk_len;
-    chunks_cvs(&cursor, first, cvs[0..batched]);
-    // Merge the whole chunks as aligned runs of decreasing powers of two, so the stack takes
-    // one entry per run and every merge inside a run runs at full width.
-    var merged: usize = 0;
-    while (merged < rest_chunks) {
-        const run = std.math.floorPowerOfTwo(usize, rest_chunks - merged);
-        assert((first + merged) % run == 0);
-        stack.push(merge_subtree(cvs[merged..][0..run]), first + merged);
-        merged += run;
+    assert(done == whole + 1);
+    for (rest.runs[0..rest.run_count], rest.run_starts[0..rest.run_count]) |cv, start| {
+        stack.push(cv, start);
     }
-    assert(merged == rest_chunks);
-    const counter = first + rest_chunks;
-    if (last_whole) return finish(stack, cvs[rest_chunks], counter);
-    var scratch: [chunk_len]u8 = undefined;
-    const last = cursor.take(rest_len - rest_chunks * chunk_len, &scratch);
-    return finish(stack, last_chunk_cv(last, counter), counter);
+    return finish(stack, rest.last, rest.last_counter);
 }
 
 /// The root node of a BLAKE3 tree: the inputs of its last compression, which the XOF repeats

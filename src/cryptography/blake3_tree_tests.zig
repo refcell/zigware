@@ -177,10 +177,11 @@ test "blake3 a message of at least the split length hashes across the strategy" 
     }
 }
 
-test "blake3 subtrees are commonware's task bound rounded down to a power of two" {
-    try testing.expectEqual(16 * chunk_len, tree.subtree_len_for(split_len));
-    try testing.expectEqual(16 * chunk_len, tree.subtree_len_for(2 * split_len - 1));
+test "blake3 subtrees are commonware's task bound, floored, rounded down to a power of two" {
+    try testing.expectEqual(32 * chunk_len, tree.subtree_len_for(split_len));
     try testing.expectEqual(32 * chunk_len, tree.subtree_len_for(2 * split_len));
+    try testing.expectEqual(32 * chunk_len, tree.subtree_len_for(4 * split_len - 1));
+    try testing.expectEqual(64 * chunk_len, tree.subtree_len_for(4 * split_len));
     try testing.expectEqual(64 * chunk_len, tree.subtree_len_for(1 << 30));
 }
 
