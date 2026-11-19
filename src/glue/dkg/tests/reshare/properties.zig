@@ -312,3 +312,226 @@ pub fn AllNodesRecovered(comptime S: type) type {
         }
     };
 }
+
+/// Whether `registrations` holds an `epoch` registration with membership `expected`.
+fn registered(registrations: []const Registration, epoch: Epoch, expected: ?Membership) bool {
+    const wanted: Registration = .{ .epoch = epoch, .membership = expected };
+    for (registrations) |registration| if (registration.eql(wanted)) return true;
+    return false;
+}
+
+/// The signer membership of `key` in `players`, or null when it is not a player.
+fn signer_in(players: Set, key: PublicKey) ?Membership {
+    const index = players.index(key) orelse return null;
+    return .{ .signer = index };
+}
+
+/// Each boundary's players are the previous boundary's next players, its next players follow
+/// the schedule, a success's output players are the previous players, and a failure carries
+/// the previous output forward (commonware `EpochInfoContinuity`).
+pub fn EpochInfoContinuity(comptime S: type) type {
+    return struct {
+        const Self = @This();
+        pub const name = "epoch_info_continuity";
+
+        gpa: Allocator,
+        epochs: u64,
+        schedule: CommitteeSchedule,
+
+        pub fn check(self: *const Self, _: *const Tracker, states: []const *const S) !void {
+            for (0..self.epochs) |epoch| try self.check_epoch(states, epoch);
+        }
+
+        fn check_epoch(self: *const Self, states: []const *const S, epoch: u64) !void {
+            const gpa = self.gpa;
+            var previous = try boundary_info(S, gpa, states, previous_height(epoch));
+            defer previous.deinit(gpa);
+            var info = try boundary_info(S, gpa, states, final_height(epoch));
+            defer info.deinit(gpa);
+            if (info.epoch.get() != epoch + 1) return error.WrongEpoch;
+            if (!info.players.eql(previous.next_players)) return error.PlayersNotPreviousNext;
+            var expected_next = try self.schedule.players(gpa, epoch + 2);
+            defer expected_next.deinit(gpa);
+            if (!info.next_players.eql(expected_next)) return error.NextPlayersOffSchedule;
+            switch (info.outcome) {
+                .success => if (!info.output.players.eql(previous.players)) {
+                    return error.OutputPlayers;
+                },
+                .failure => if (!info.output.eql(previous.output)) return error.OutputNotCarried,
+            }
+        }
+    };
+}
+
+/// `epoch`'s ceremony failed: its boundary carries the previous output forward, advances to
+/// the previous next players, refreshes next players from the schedule, and every validator
+/// registered the carried epoch with its previous signer membership (commonware
+/// `FailedCeremonyCarryOver`). A state-synced validator whose floor covers the boundary must
+/// hold it itself.
+pub fn FailedCeremonyCarryOver(comptime S: type) type {
+    return struct {
+        const Self = @This();
+        pub const name = "failed_ceremony_carry_over";
+
+        gpa: Allocator,
+        epoch: u64,
+        schedule: CommitteeSchedule,
+
+        pub fn check(self: *const Self, _: *const Tracker, states: []const *const S) !void {
+            const gpa = self.gpa;
+            var previous = try boundary_info(S, gpa, states, previous_height(self.epoch));
+            defer previous.deinit(gpa);
+            var info = try self.carried(states);
+            defer info.deinit(gpa);
+            if (info.epoch.get() != self.epoch + 1) return error.WrongEpoch;
+            if (info.outcome != .failure) return error.UnexpectedSuccess;
+            if (!info.output.eql(previous.output)) return error.OutputNotCarried;
+            if (!info.players.eql(previous.next_players)) return error.PlayersNotPreviousNext;
+            var expected_next = try self.schedule.players(gpa, self.epoch + 2);
+            defer expected_next.deinit(gpa);
+            if (!info.next_players.eql(expected_next)) return error.NextPlayersOffSchedule;
+            const carried_epoch: Epoch = .new(self.epoch + 1);
+            for (states) |state| {
+                const expected = signer_in(previous.output.players, state.public_key());
+                if (!registered(state.registrations(), carried_epoch, expected)) {
+                    return error.NotRegistered;
+                }
+            }
+        }
+
+        /// The carry-over boundary, from a state-synced validator whose floor covers it when
+        /// there is one, and otherwise from any validator that holds it.
+        fn carried(self: *const Self, states: []const *const S) !S.Info {
+            const height = final_height(self.epoch);
+            for (states) |state| {
+                const floor = state.state_sync_height() orelse continue;
+                if (floor > height) continue;
+                var boundary = try state.boundary(self.gpa, height);
+                switch (boundary) {
+                    .info => |info| return info,
+                    .missing => return error.MissingBoundary,
+                    .no_payload, .other_payload => {
+                        boundary.deinit(self.gpa);
+                        return error.NotEpochInfo;
+                    },
+                }
+            }
+            return boundary_info(S, self.gpa, states, height);
+        }
+    };
+}
+
+/// Every listed validator registered `epoch` with its signer membership in the output of the
+/// ceremony that produced it (commonware `SchemesRegistered`). The boundary is read from the
+/// first active state.
+pub fn SchemesRegistered(comptime S: type) type {
+    return struct {
+        const Self = @This();
+        pub const name = "schemes_registered";
+
+        gpa: Allocator,
+        /// Borrowed; outlive the property.
+        public_keys: []const PublicKey,
+        epoch: u64,
+
+        pub fn check(self: *const Self, _: *const Tracker, states: []const *const S) !void {
+            if (self.epoch == 0) return error.NoReshareOutput;
+            if (states.len == 0) return error.StateCount;
+            const gpa = self.gpa;
+            const height = final_height(self.epoch - 1);
+            var info = try boundary_info(S, gpa, states[0..1], height);
+            defer info.deinit(gpa);
+            if (info.epoch.get() != self.epoch) return error.WrongEpoch;
+            for (self.public_keys) |key| {
+                const state = for (states) |state| {
+                    if (state.public_key().eql(key)) break state;
+                } else return error.NotRecovered;
+                const expected = signer_in(info.output.players, key);
+                if (!registered(state.registrations(), .new(self.epoch), expected)) {
+                    return error.NotRegistered;
+                }
+            }
+        }
+    };
+}
+
+/// The records state-sync properties read across restarts (commonware's shared
+/// `registrations` and `state_syncs` maps). `L` provides
+/// `registrations_of(ledger, key) []const Registration` and `state_sync_of(ledger, key) ?u64`.
+fn assert_ledger(comptime L: type) void {
+    comptime assert(@hasDecl(L, "registrations_of") and @hasDecl(L, "state_sync_of"));
+}
+
+/// `public_key` state synced and later registered as a signer at or after `min_epoch`
+/// (commonware `StateSyncedSigner`).
+pub fn StateSyncedSigner(comptime S: type, comptime L: type) type {
+    assert_ledger(L);
+    return struct {
+        pub const name = "state_synced_signer";
+
+        public_key: PublicKey,
+        min_epoch: u64,
+        /// Borrowed; outlives the property.
+        ledger: *const L,
+
+        pub fn check(self: *const @This(), _: *const Tracker, _: []const *const S) !void {
+            _ = self.ledger.state_sync_of(self.public_key) orelse return error.NotStateSynced;
+            for (self.ledger.registrations_of(self.public_key)) |registration| {
+                if (registration.signs() and registration.epoch.get() >= self.min_epoch) return;
+            }
+            return error.NoSigner;
+        }
+    };
+}
+
+/// `public_key` state synced at a height in `min_height..=max_height` (commonware
+/// `StateSyncedAtHeight`).
+pub fn StateSyncedAtHeight(comptime S: type, comptime L: type) type {
+    assert_ledger(L);
+    return struct {
+        pub const name = "state_synced_at_height";
+
+        public_key: PublicKey,
+        min_height: u64,
+        max_height: u64,
+        /// Borrowed; outlives the property.
+        ledger: *const L,
+
+        pub fn check(self: *const @This(), _: *const Tracker, _: []const *const S) !void {
+            assert(self.min_height <= self.max_height);
+            const height = self.ledger.state_sync_of(self.public_key) orelse
+                return error.NotStateSynced;
+            if (height < self.min_height or height > self.max_height) {
+                return error.StateSyncHeight;
+            }
+        }
+    };
+}
+
+/// The schedule makes `public_key` a newcomer at `next_player_epoch`: absent from the epoch
+/// before and from that epoch's players, and a player of the epoch after (commonware
+/// `StateSyncMembership`).
+pub fn StateSyncMembership(comptime S: type) type {
+    return struct {
+        const Self = @This();
+        pub const name = "state_sync_membership";
+
+        gpa: Allocator,
+        schedule: CommitteeSchedule,
+        public_key: PublicKey,
+        next_player_epoch: u64,
+
+        pub fn check(self: *const Self, _: *const Tracker, _: []const *const S) !void {
+            const epoch = self.next_player_epoch;
+            if (epoch > 0 and try self.plays(epoch - 1)) return error.PresentBeforeSync;
+            if (try self.plays(epoch)) return error.PlayerAtSync;
+            if (!try self.plays(epoch + 1)) return error.NotNextPlayer;
+        }
+
+        fn plays(self: *const Self, epoch: u64) !bool {
+            var players = try self.schedule.players(self.gpa, epoch);
+            defer players.deinit(self.gpa);
+            return players.position(self.public_key) != null;
+        }
+    };
+}

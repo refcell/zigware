@@ -773,9 +773,14 @@ shared `tests/mocks.zig`, which takes additive edits only (agreed with the glue 
   `AllActiveProcessedHeight`, `SignerRegistered`, `BoundaryEpochInfos`, `BoundaryOutputMode`,
   and `AllNodesRecovered`, generic over a validator-state contract (`boundary(height)` stands in
   for `marshal.get_block` plus `payload()`).
-- [ ] the rest of properties.rs (`EpochInfoContinuity`, `FailedCeremonyCarryOver`,
-  `SchemesRegistered`, the state-sync properties), then the reshare harness and mod.rs's 33
-  ceremony tests (on the orchestrator and `bootstrap.Node`).
+- [x] the rest of properties.rs: `EpochInfoContinuity`, `FailedCeremonyCarryOver`,
+  `SchemesRegistered`, `StateSyncedSigner`, `StateSyncedAtHeight`, and `StateSyncMembership`.
+  The state-sync properties read a ledger (`registrations_of`, `state_sync_of`) that outlives
+  restarts, as commonware's shared maps do.
+- [ ] the reshare harness and mod.rs's 33 ceremony tests. Decision: phase 1 is a validator
+  without state sync (orchestrator, reshare actor, `bootstrap.Node`, a plain block app), for the
+  tests that never state sync. Phase 2 adds glue.stateful's QMDB app, the dkg probe, and the
+  state-sync plans for the rest.
 - [x] lookup's peer-activation test: network.rs's
   `lookup_secondary_dials_primary_and_receives_response` in `network_test.zig` (consensus-marshal
   lane, 2026-11-19); it catches the addressable manager dropping the secondary role.
@@ -799,3 +804,5 @@ shared `tests/mocks.zig`, which takes additive edits only (agreed with the glue 
   task saw its cancelation made run_node panic, until it checked for cancelation first.
 - 2026-11-19: the first reshare properties; dropping the unexpected-success check fails their
   test.
+- 2026-11-19: the rest of the reshare properties; dropping the failed-ceremony carry-over check
+  from continuity fails their test.

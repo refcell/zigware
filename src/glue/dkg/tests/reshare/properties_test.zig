@@ -17,13 +17,13 @@ const Set = utils.ordered.Set(Key);
 const Unit = utils.sequence.Unit;
 const MinPk = cryptography.bls12381.primitives.MinPk;
 const fd = cryptography.bls12381.dkg.feldman_desmedt;
-const Info = types.EpochInfo(MinPk, Key, Unit);
-const Boundary = properties.Boundary(Info);
+const TestInfo = types.EpochInfo(MinPk, Key, Unit);
+const Boundary = properties.Boundary(TestInfo);
 const Tracker = properties.Tracker;
 
 /// A validator whose final blocks carry `outcomes[epoch]`'s info (null: no block).
 const FakeState = struct {
-    pub const Info = types.EpochInfo(MinPk, Key, Unit);
+    pub const Info = TestInfo;
 
     key: Key,
     processed: u64 = 0,
@@ -31,6 +31,8 @@ const FakeState = struct {
     registered: []const properties.Registration = &.{},
     outcomes: []const ?types.EpochOutcome,
     mode: cryptography.bls12381.primitives.sharing.Mode = .non_zero_counter,
+    /// Failures deal a fresh output instead of carrying the previous one forward (a bug).
+    fresh_failures: bool = false,
 
     pub fn public_key(self: *const FakeState) Key {
         return self.key;
@@ -49,11 +51,34 @@ const FakeState = struct {
     }
 
     pub fn boundary(self: *const FakeState, allocator: Allocator, height: u64) !Boundary {
+        // Genesis carries epoch zero's info.
+        if (height == 0) return .{ .info = try self.info_at(allocator, 0, .success, 0) };
         const epoch = (height + 1) / properties.epoch_length - 1;
         std.debug.assert(properties.final_height(epoch) == height);
         if (epoch >= self.outcomes.len) return .missing;
         const outcome = self.outcomes[epoch] orelse return .missing;
-        return .{ .info = try info_for(allocator, self.key, epoch + 1, outcome, self.mode) };
+        return .{ .info = try self.info_at(allocator, epoch + 1, outcome, self.dealt_seed(epoch)) };
+    }
+
+    /// The seed of the output `epoch`'s boundary carries: its own on success, and on failure
+    /// the last successful boundary's (genesis is seed 0), unless `fresh_failures`.
+    fn dealt_seed(self: *const FakeState, epoch: u64) u64 {
+        var at = epoch + 1;
+        while (at > 0) : (at -= 1) {
+            const outcome = self.outcomes[at - 1] orelse return at;
+            if (outcome == .success or self.fresh_failures) return at;
+        }
+        return 0;
+    }
+
+    fn info_at(
+        self: *const FakeState,
+        allocator: Allocator,
+        epoch: u64,
+        outcome: types.EpochOutcome,
+        seed: u64,
+    ) !TestInfo {
+        return info_for(allocator, self.key, epoch, outcome, self.mode, seed);
     }
 };
 
@@ -63,8 +88,9 @@ fn info_for(
     epoch: u64,
     outcome: types.EpochOutcome,
     mode: cryptography.bls12381.primitives.sharing.Mode,
-) !Info {
-    var rng = utils.rng.TestRng.init(epoch);
+    seed: u64,
+) !TestInfo {
+    var rng = utils.rng.TestRng.init(seed);
     // `deal` takes the players.
     const participants = try Set.from_dedup(allocator, &.{key});
     var dealt = try fd.deal(MinPk, Key, utils.N3f1, allocator, &rng, mode, participants);
@@ -176,4 +202,134 @@ test "reshare properties: all active processed height" {
     try testing.expect(!try exit.reached({}, @as([]const *const FakeState, &.{&b}), 2));
     a.processed = 30;
     try testing.expect(!try exit.reached({}, @as([]const *const FakeState, &.{ &a, &b }), 2));
+}
+
+test "reshare properties: epoch info continuity and failed carry-over" {
+    var tracker: Tracker = .init(gpa);
+    defer tracker.deinit();
+    const keys = [_]Key{key_of(0)};
+    const schedule: properties.CommitteeSchedule = .{
+        .participants = &keys,
+        .committee_sizes = &.{1},
+        .rotation_stride = 1,
+    };
+    const Membership = cryptography.certificate.Membership;
+    const carried: []const properties.Registration = &.{
+        .{ .epoch = .new(2), .membership = Membership{ .signer = .from_usize(0) } },
+    };
+    var state = FakeState{
+        .key = keys[0],
+        .registered = carried,
+        .outcomes = &.{ .success, .failure, .failure, .success },
+    };
+    const Continuity = properties.EpochInfoContinuity(FakeState);
+    const continuity: Continuity = .{ .gpa = gpa, .epochs = 4, .schedule = schedule };
+    try continuity.check(&tracker, &.{&state});
+    const Carry = properties.FailedCeremonyCarryOver(FakeState);
+    const carry: Carry = .{ .gpa = gpa, .epoch = 1, .schedule = schedule };
+    try carry.check(&tracker, &.{&state});
+    // Epoch 3 succeeded, so it is no carry-over.
+    const not_failed: Carry = .{ .gpa = gpa, .epoch = 3, .schedule = schedule };
+    try testing.expectError(error.UnexpectedSuccess, not_failed.check(&tracker, &.{&state}));
+    // A failure that deals a fresh output breaks both properties.
+    state.fresh_failures = true;
+    try testing.expectError(error.OutputNotCarried, continuity.check(&tracker, &.{&state}));
+    try testing.expectError(error.OutputNotCarried, carry.check(&tracker, &.{&state}));
+    // A validator that never registered the carried epoch fails carry-over.
+    state.fresh_failures = false;
+    state.registered = &.{};
+    try testing.expectError(error.NotRegistered, carry.check(&tracker, &.{&state}));
+    // Next players off the schedule fail continuity.
+    const other = [_]Key{key_of(1)};
+    var shifted = continuity;
+    shifted.schedule.participants = &other;
+    try testing.expectError(error.NextPlayersOffSchedule, shifted.check(&tracker, &.{&state}));
+}
+
+test "reshare properties: schemes registered" {
+    var tracker: Tracker = .init(gpa);
+    defer tracker.deinit();
+    const Membership = cryptography.certificate.Membership;
+    const signer: []const properties.Registration = &.{
+        .{ .epoch = .new(1), .membership = Membership{ .signer = .from_usize(0) } },
+    };
+    const wrong: []const properties.Registration = &.{
+        .{ .epoch = .new(1), .membership = Membership{ .member = .from_usize(0) } },
+    };
+    const keys = [_]Key{key_of(0)};
+    var state = FakeState{ .key = keys[0], .registered = signer, .outcomes = &.{.success} };
+    const Schemes = properties.SchemesRegistered(FakeState);
+    const schemes: Schemes = .{ .gpa = gpa, .public_keys = &keys, .epoch = 1 };
+    try schemes.check(&tracker, &.{&state});
+    state.registered = wrong;
+    try testing.expectError(error.NotRegistered, schemes.check(&tracker, &.{&state}));
+    const genesis: Schemes = .{ .gpa = gpa, .public_keys = &keys, .epoch = 0 };
+    try testing.expectError(error.NoReshareOutput, genesis.check(&tracker, &.{&state}));
+}
+
+const FakeLedger = struct {
+    key: Key,
+    synced: ?u64,
+    registered: []const properties.Registration,
+
+    pub fn registrations_of(self: *const FakeLedger, key: Key) []const properties.Registration {
+        return if (key.eql(self.key)) self.registered else &.{};
+    }
+
+    pub fn state_sync_of(self: *const FakeLedger, key: Key) ?u64 {
+        return if (key.eql(self.key)) self.synced else null;
+    }
+};
+
+test "reshare properties: state-synced signer, height, and membership" {
+    var tracker: Tracker = .init(gpa);
+    defer tracker.deinit();
+    const Membership = cryptography.certificate.Membership;
+    const late_signer: []const properties.Registration = &.{
+        .{ .epoch = .new(1), .membership = Membership{ .member = .from_usize(0) } },
+        .{ .epoch = .new(3), .membership = Membership{ .signer = .from_usize(0) } },
+    };
+    var ledger = FakeLedger{ .key = key_of(0), .synced = 40, .registered = late_signer };
+    const Signer = properties.StateSyncedSigner(FakeState, FakeLedger);
+    const synced: Signer = .{ .public_key = key_of(0), .min_epoch = 3, .ledger = &ledger };
+    try synced.check(&tracker, &.{});
+    const too_late: Signer = .{ .public_key = key_of(0), .min_epoch = 4, .ledger = &ledger };
+    try testing.expectError(error.NoSigner, too_late.check(&tracker, &.{}));
+    const stranger: Signer = .{ .public_key = key_of(1), .min_epoch = 0, .ledger = &ledger };
+    try testing.expectError(error.NotStateSynced, stranger.check(&tracker, &.{}));
+
+    const Height = properties.StateSyncedAtHeight(FakeState, FakeLedger);
+    const window: Height = .{
+        .public_key = key_of(0),
+        .min_height = 32,
+        .max_height = 63,
+        .ledger = &ledger,
+    };
+    try window.check(&tracker, &.{});
+    ledger.synced = 64;
+    try testing.expectError(error.StateSyncHeight, window.check(&tracker, &.{}));
+
+    // Participants 0..3, committees of two, stride two: epoch 1 is {2, 3}, epoch 2 is {0, 1}.
+    const keys = [_]Key{ key_of(0), key_of(1), key_of(2), key_of(3) };
+    const schedule: properties.CommitteeSchedule = .{
+        .participants = &keys,
+        .committee_sizes = &.{2},
+        .rotation_stride = 2,
+    };
+    const Joining = properties.StateSyncMembership(FakeState);
+    // Participant 0 plays epochs 0 and 2, so as a next player of epoch 1 it was present before.
+    const returning: Joining = .{
+        .gpa = gpa,
+        .schedule = schedule,
+        .public_key = keys[0],
+        .next_player_epoch = 1,
+    };
+    try testing.expectError(error.PresentBeforeSync, returning.check(&tracker, &.{}));
+    // At epoch 0 there is no epoch before: participant 2 plays epoch 1 only.
+    var newcomer = returning;
+    newcomer.public_key = keys[2];
+    newcomer.next_player_epoch = 0;
+    try newcomer.check(&tracker, &.{});
+    newcomer.next_player_epoch = 1;
+    try testing.expectError(error.PlayerAtSync, newcomer.check(&tracker, &.{}));
 }
