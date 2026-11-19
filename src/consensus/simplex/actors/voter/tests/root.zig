@@ -32,6 +32,7 @@ test {
             _ = @import("cert_restart.zig").Tests(h);
             _ = @import("cert_timeouts.zig").Tests(h);
             _ = @import("spans.zig").Tests(h);
+            _ = @import("replay_floor_fetch.zig").Tests(h);
         }
     }
 }

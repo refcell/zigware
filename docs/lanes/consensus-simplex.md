@@ -299,11 +299,15 @@ resolver; those lanes are running, so do the types first and the actors as they 
   fails on a Rayon chunking bug.
 - [x] mod.rs remainder: the 13 DSTs named above, ported by the broadcast-collector lane on
   2026-11-19 (engine_optimistic_test.zig).
-- [ ] actors/voter/mod.rs: the 96 voter-actor tests (restart and floor journaling, the
+- [x] actors/voter/mod.rs: all 96 voter-actor tests (restart and floor journaling, the
   pipelined handoff build lifecycle, nullify on failed or dropped propose and verify,
-  certification ordering and replay). None are ported; they need a voter-actor harness
-  with a mock batcher, resolver, and automaton on the deterministic runtime. Handed to the
-  runtime lane on 2026-11-19 (actors/voter/tests/).
+  certification ordering and replay) are in actors/voter/tests/, over voter_harness.zig's
+  mock batcher, resolver, and automaton on the deterministic runtime. The runtime lane
+  (T-01a1d57b-1bfd) ported most and the crypto lane (T-01a1d57b-08a0) 6717-11712; simplex
+  took the directory back on 2026-11-19 and ported the last one,
+  `test_restart_replay_fetches_only_above_recovered_floor` (replay_floor_fetch.zig, six
+  journal shapes, the restarted voter's resolver messages fed through a one-slot mailbox
+  into `resolver.State`).
 - [x] actors/batcher/mod.rs: all 76 tests ported (2026-11-19). Lookup (T-01a1d59c) landed
   6 in actor_late_test.zig (8905ff8, ed25519): 4935 conflicting votes, 6506 and 6513
   same-term optimistic future votes, 6819 and 6966 activity-window reporting, and 7128
