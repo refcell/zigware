@@ -625,7 +625,16 @@ test "a policy records only its own strategy's calls and is shared by copies" {
 /// cancel is still pending after the teardown, so a later wait fails at once.
 fn teardown_after_cancel(ready: *std.atomic.Value(bool)) bool {
     const io = testing.io;
-    const pool = ThreadPool.create(gpa, io, .{ .threads = 2 }) catch return false;
+    // Not `gpa`: on Darwin its free captures a stack trace through the MachO unwinder, which
+    // takes a cancelable debug-info lock and so consumes this task's pending cancel. This
+    // allocator still checks for leaks but captures no traces.
+    var safe: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{
+        .stack_trace_frames = 0,
+    });
+    defer std.debug.assert(safe.deinit() == 0);
+    const pool = ThreadPool.create(safe.allocator(), io, .{ .threads = 2 }) catch {
+        return false;
+    };
     ready.store(true, .release);
     // The cancel is acknowledged here, so it is re-armed, as AGENTS.md requires.
     if (io.sleep(.fromSeconds(60), .awake)) |_| {} else |_| io.recancel();
