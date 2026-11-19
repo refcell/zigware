@@ -787,9 +787,10 @@ After:
   `interop-logs`: the dkg nodes' logs, the log validators' screens, and the chat screens,
   which the drivers keep under `$TMPDIR`. First run on CI: 44565356294, 17 minutes, green.
 
-### Upstream finding: commonware's flood sender starves its tokio worker (not reported yet)
+### Upstream finding: commonware's flood sender starves its tokio worker
 
-Held for Andreas's decision on whether to report it upstream; nothing has been filed.
+Filed as https://github.com/commonwarexyz/monorepo/issues/5809, with Andreas's approval. If
+commonware asks for the patch there, ask the coordinator first; nothing else has been posted.
 Seen at commonware `a9ffc25f3`, in `examples/flood/src/bin/flood.rs`, while doing the flood
 head-to-head in docs/BENCHMARKS.md.
 
