@@ -18,17 +18,22 @@ jobs:
       fail-fast: false
       matrix:
         # x86-64 and aarch64 Linux: fibers and SIMD differ per target. Debug runs every
-        # package in one job. ReleaseSafe splits in two: consensus and glue compile and run
-        # for about 20 minutes, the rest about as long, and one job held both past 40.
+        # package in one job. ReleaseSafe splits by package: the rest takes about 30 minutes,
+        # and one job held it with consensus and glue past 40. Consensus and glue get a job
+        # each: compiled side by side they need 8 to 14 GB apiece, over a 16 GB arm runner,
+        # which the runner then shuts down (exit 143, 12e54c3 and 315b6d9).
         os: [ubuntu-latest, ubuntu-24.04-arm]
-        group: [debug, release-consensus-glue, release-rest]
+        group: [debug, release-consensus, release-glue, release-rest]
         include:
           - group: debug
             optimize: Debug
             steps: test
-          - group: release-consensus-glue
+          - group: release-consensus
             optimize: ReleaseSafe
-            steps: test-consensus test-glue
+            steps: test-consensus
+          - group: release-glue
+            optimize: ReleaseSafe
+            steps: test-glue
           - group: release-rest
             optimize: ReleaseSafe
             steps: test-rest
@@ -46,6 +51,8 @@ jobs:
       - name: tidy
         if: matrix.group == 'debug'
         run: bash etc/scripts/tidy.sh
+      - name: memory
+        run: free -m && nproc && df -h .
       - name: test
         run: zig build ${{ matrix.steps }} -Doptimize=${{ matrix.optimize }} --summary all
 
