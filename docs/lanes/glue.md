@@ -482,7 +482,8 @@ ones: d = deployer (thread T-01a1d5b9-c237), u = utils, j = storage-journal
   thread-safe. `SharedSource.serve` and proofs take the exclusive slot (the authenticated
   journal hashes through its own state). Tested in adapters_test.zig: guard sharing and
   writers waiting (deterministic), and readers merkleizing beside a writer (threaded).
-- [ ] db: opt keyless and immutable into `concurrent_reads` (const reads since 9589543).
+- [x] db: keyless and immutable opt into `concurrent_reads` too (const reads since 9589543);
+  compact stays on the mutex.
 - [ ] tests: single_db_app.rs's engine on `glue.simulate` (simplex, marshal, buffered broadcast,
   marshal and qmdb resolvers, probe, `Stateful`), then tests/mod.rs's scenarios (finalize,
   crash/restart, pruning, state sync, lossy, partitions), multi_db_app, floor, properties.

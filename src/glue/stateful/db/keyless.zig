@@ -32,6 +32,9 @@ pub fn Keyless(comptime F: type, comptime E: type, comptime C: type, comptime H:
         /// it.
         pub const SyncTarget = qmdb.sync.Target(F, D.Digest);
         pub const Shared = db.Shared(Self);
+        /// qmdb keyless/immutable reads, batch reads, and merkleize take `*const` and are safe
+        /// from several tasks at once, so `Shared` read guards share the database.
+        pub const concurrent_reads = true;
 
         inner: D,
 

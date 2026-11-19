@@ -331,8 +331,18 @@ fn run_deterministic(comptime body: fn (std.Io) anyerror!void) !void {
 test "stateful db adapters: concurrent-read databases share read guards; writers wait" {
     comptime std.debug.assert(AnyFixed.Shared.concurrent);
     comptime std.debug.assert(CurrentUnorderedFixed.Shared.concurrent);
-    comptime std.debug.assert(!KeylessFixed.Shared.concurrent);
-    inline for (.{ AnyFixed, CurrentUnorderedFixed, KeylessFixed }) |DB| {
+    comptime std.debug.assert(KeylessFixed.Shared.concurrent);
+    comptime std.debug.assert(ImmutableFixed.Shared.concurrent);
+    // Compact databases still serialize readers.
+    comptime std.debug.assert(!KeylessCompactFixed.Shared.concurrent);
+    const cases = .{
+        AnyFixed,
+        CurrentUnorderedFixed,
+        KeylessFixed,
+        ImmutableFixed,
+        KeylessCompactFixed,
+    };
+    inline for (cases) |DB| {
         try run_deterministic(guard_sharing(DB));
     }
 }
