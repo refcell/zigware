@@ -743,6 +743,66 @@ fn cached(shards: *const common.ShardMailbox, commitment: common.Commitment) !bo
     return true;
 }
 
+test "coding reproposal verify fetches block by parent round" {
+    try common.run(struct {
+        fn body(ctx: Ctx) anyerror!void {
+            var validators = try fixture();
+            defer validators.deinit(gpa);
+            const pair = validators.participants[0..2];
+            var network: shared.TestNetwork = try .start(gpa, ctx.io(), 1, pair, 1024 * 1024);
+            defer network.stop();
+            const Validator = common.ValidatorStack.Validator;
+            var nodes: [2]*Validator = undefined;
+            var started: usize = 0;
+            defer for (nodes[0..started]) |node| node.crash();
+            for (&nodes, pair, 0..) |*node, me, index| {
+                const node_ctx = ctx.child("validator").with_attribute("index", index);
+                const provider: common.Provider = .init(&validators.schemes[index]);
+                const app = try common.App.init(gpa, ctx.io());
+                node.* = try Validator.setup(node_ctx, network.network, me, provider, 1, app);
+                started += 1;
+            }
+            try network.link_all(pair, shared.link);
+
+            // The boundary block of epoch 0, originally proposed at view 5.
+            const original_round = common.round_at(0, 5);
+            const original_context: common.CodingCtx = .{
+                .round = original_round,
+                .leader = pair[0],
+                .parent = .{ .new(4), harness.genesis_commitment() },
+            };
+            const parent = harness.Sha256.hash(&.{"parent"});
+            const height = shared.blocks_per_epoch - 1;
+            var block = try common.coded(gpa, original_context, parent, height, 1900);
+            defer block.deinit(gpa);
+            const commitment = block.commitment();
+
+            // Serving a fetch by round needs the block and the round's notarization.
+            try testing.expect(try nodes[0].mailbox.verified(original_round, block.clone()));
+            const proposal = common.Proposal.init(original_round, .new(4), commitment);
+            var notarization = try H.make_notarization(gpa, &validators, proposal, quorum);
+            defer notarization.deinit(gpa);
+            _ = nodes[0].mailbox.report(.{ .notarization = notarization });
+
+            // The re-proposal names its own parent, so verification targets the parent
+            // round. Validator 1 never held the payload.
+            try testing.expect(!try cached(&nodes[1].extra, commitment));
+            const M = common.ValidatorStack.M;
+            const provider: common.Provider = .init(&validators.schemes[1]);
+            const app = common.MockVerifyingApp.init(gpa);
+            const marshal = nodes[1].mailbox.clone();
+            const shards = nodes[1].extra.clone();
+            const config = common.marshaled_config(M, app, marshal, shards, provider);
+            var marshaled = try M.init(ctx.child("marshaled"), config);
+            defer marshaled.deinit();
+            const context = reproposal(common.round_at(0, 7), pair[1], 5, commitment);
+            var verify = try marshaled.start_verify(context, commitment);
+            defer verify.deinit();
+            try testing.expect(try verdict_within(ctx, &verify, 30_000));
+        }
+    }.body);
+}
+
 test "coding reproposal recreates shard state after eviction" {
     try common.run(struct {
         fn body(ctx: Ctx) anyerror!void {
