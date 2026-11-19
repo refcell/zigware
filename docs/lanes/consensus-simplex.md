@@ -502,3 +502,9 @@ resolver; those lanes are running, so do the types first and the actors as they 
   expired deadline even with events queued, closing the item above: commonware's biased
   `select_loop!` fires `sleep_until(deadline)` before any other branch. Only the voter
   passes a deadline; the batcher and resolver call `next()`.
+- 2026-11-19 (runtime lane): voter mailbox messages are processed under commonware's enqueue
+  span (`simplex.voter.mailbox.proposal`, `.timeout`, `.recovered`) as the parent of
+  `simplex.voter.process`. Zig spans are stack values, so the voter opens that span from the
+  message when it processes it, with the message's epoch, view, and reason or certificate
+  kind; the enqueuing task's own span ancestry is not carried. Ported for
+  `test_view_spans_track_automaton_boundary` (actors/voter/tests/spans.zig).

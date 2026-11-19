@@ -1095,6 +1095,28 @@ pub fn Actor(comptime P: type) type {
             return root.child(name, fields);
         }
 
+        /// The span a mailbox message carries (commonware's `simplex.voter.mailbox.*` spans
+        /// opened by `Mailbox::proposal`, `timeout`, and `recovered`).
+        fn mailbox_span(self: *const Self, message: Message) Span {
+            assert(self.span == null);
+            return switch (message) {
+                .proposal => |proposal| self.tracer.span("simplex.voter.mailbox.proposal", .{
+                    .epoch = proposal.round.epoch.get(),
+                    .view = proposal.view().get(),
+                }),
+                .timeout => |request| self.tracer.span("simplex.voter.mailbox.timeout", .{
+                    .epoch = request.round.epoch.get(),
+                    .view = request.round.view.get(),
+                    .reason = @tagName(request.reason),
+                }),
+                .verified => |verified| self.tracer.span("simplex.voter.mailbox.recovered", .{
+                    .epoch = verified.certificate.epoch().get(),
+                    .view = verified.certificate.view().get(),
+                    .certificate = @tagName(verified.certificate),
+                }),
+            };
+        }
+
         /// Emits an event inside the open span, if any.
         fn trace(
             self: *const Self,
@@ -1173,7 +1195,10 @@ pub fn Actor(comptime P: type) type {
             return switch (event) {
                 .closed => .stop,
                 .mailbox => |message| {
-                    var span = self.tracer.span("simplex.voter.process", .{
+                    // commonware carries each message's enqueue span into processing; Zig
+                    // spans are stack values, so the voter opens it from the message itself.
+                    var origin = self.mailbox_span(message);
+                    var span = origin.child("simplex.voter.process", .{
                         .operation = @tagName(message),
                         .epoch = self.state.epoch.get(),
                         .view = message.view().get(),
