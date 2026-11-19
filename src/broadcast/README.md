@@ -46,5 +46,6 @@ All of these are recorded in the
   messages fail to decode, and drops decoded messages beyond the receiver's capacity.
 - The engine's `select_loop!` is a signal fed by an ingress task and two forwarders. It is
   checked in commonware's biased order: peer sets, mailbox, network.
-- `count_running_tasks` has no counterpart. The shutdown tests check that aborted engines free
-  everything and close their mailboxes.
+- `count_running_tasks` exists (`runtime.telemetry.metrics.task`) but sees nothing here, because
+  the engines start their tasks with `io.concurrent`. The shutdown tests check instead that
+  aborted engines free everything and close their mailboxes.

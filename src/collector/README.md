@@ -41,7 +41,8 @@ All of these are recorded in the
   futures `Pool`.
 - Commonware's collector has no conformance hashes. The mocks check the request and response
   encodings byte for byte.
-- `count_running_tasks` has no counterpart. The shutdown tests check that aborted engines free
-  everything and close their mailboxes.
+- `count_running_tasks` exists (`runtime.telemetry.metrics.task`) but sees nothing here, because
+  the engines start their tasks with `io.concurrent`. The shutdown tests check instead that
+  aborted engines free everything and close their mailboxes.
 - The fuzz target draws its inputs like commonware's `arbitrary` impls. Its `Recipients::Some`
   shuffle is checked against rand 0.10.3 vectors.
