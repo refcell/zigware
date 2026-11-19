@@ -192,6 +192,7 @@ pub fn Payload(comptime Key: type) type {
 
 const testing = std.testing;
 const MockKey = @import("mocks/key.zig").Key;
+const utils = @import("utils");
 
 fn expect_roundtrip(message: Message(MockKey)) !void {
     const gpa = testing.allocator;
@@ -289,6 +290,17 @@ test "max message size" {
     try testing.expectEqual(64 + request_overhead, max_message_size([64]u8, 0));
     const largest: usize = std.math.maxInt(u32);
     try testing.expectEqual(largest + response_overhead_max, max_message_size(u8, largest));
+}
+
+test "max message size beyond the length prefix" {
+    // commonware `test_max_message_size_beyond_prefix` (`should_panic`, "value must fit the
+    // u32 length prefix").
+    try utils.death.expect_panic(@src(), "reached unreachable code", struct {
+        fn body() !void {
+            const largest: usize = std.math.maxInt(u32);
+            _ = max_message_size(u8, largest + 1);
+        }
+    }.body);
 }
 
 fn CodecConformance(comptime T: type) type {

@@ -1,8 +1,5 @@
 //! Tests for `fetcher.zig`, ported from commonware `resolver/src/p2p/fetcher.rs`, on the
 //! deterministic runtime.
-//!
-//! commonware's `test_add_retry_duplicate_panics` checks an assertion and has no counterpart:
-//! Zig assertions cannot be caught.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -220,6 +217,20 @@ fn expect_lens(fetcher: *const Fetcher, total: usize, pending: usize, active: us
     try testing.expectEqual(total, fetcher.len());
     try testing.expectEqual(pending, fetcher.len_pending());
     try testing.expectEqual(active, fetcher.len_active());
+}
+
+test "add retry of a pending key panics" {
+    // commonware `test_add_retry_duplicate_panics` (`should_panic`).
+    try utils.death.expect_panic(@src(), "reached unreachable code", struct {
+        fn body() !void {
+            try run(struct {
+                fn run_body(env: Env) !void {
+                    try env.fetcher.add_retry(key(1));
+                    try env.fetcher.add_retry(key(1));
+                }
+            }.run_body);
+        }
+    }.body);
 }
 
 test "retain function" {

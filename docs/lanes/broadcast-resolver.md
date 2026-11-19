@@ -111,8 +111,8 @@ on p2p's simulated network and the deterministic runtime.
   that queues finished slots; cancellation is decided when a completion is read and canceled
   receivers are closed then, matching commonware's biased `select!` and lazy close. The
   tracker owns cached values (freed through `C.deinit_value` when declared) and lends them to
-  `deliver` for the call. `test_redeliver_requires_cached_response` (`should_panic`) is an
-  assertion here.
+  `deliver` for the call. `test_redeliver_requires_cached_response` (`should_panic`) is a
+  death test (`utils.death`).
 - `utils.channel.oneshot.Receiver.recv` returns `error.Closed` once the receiver is closed
   without a value (tokio behavior; the delivery tracker relies on it).
 - Actors wait on one `delivery.Signal` instead of `select_loop!`: fetch and verdict tasks
@@ -132,7 +132,7 @@ on p2p's simulated network and the deterministic runtime.
   arrays ordered by `codec.order` instead of hash maps; selection draws from `std.Io`'s
   randomness and time from `Io.Clock.real`, so it is deterministic under the deterministic
   runtime (sampling matches commonware's for the same random stream). Its tests reach into
-  fields as commonware's do; `test_add_retry_duplicate_panics` is an assertion here.
+  fields as commonware's do; `test_add_retry_duplicate_panics` is a death test.
 - The p2p engine is generic over `Params(...)` (one type parameter) and uses forwarder tasks
   for peer sets, blocked sets, the mailbox, and the network that fill one-slot inboxes under
   the shared `delivery.Signal`; each turn handles one event in commonware's select order, then
@@ -175,21 +175,21 @@ passes even without the fix (the verdict task queues before the engine reads the
 direct engine test is the one that covers it.
 
 Every `#[test]`/`#[test_traced]`/`#[rstest]` fn in commonware `resolver/src`, matched to a zigware
-test by name or by reading both bodies (a zigware test may cover several). 178 tests: 174 ported, 0
-open, 4 not portable (the 8 inflight tests below are ported in src/resolver/p2p/inflight_test.zig).
+test by name or by reading both bodies (a zigware test may cover several). 178 tests: 178 ported, 0
+open, 0 not portable (the 8 inflight tests below are ported in src/resolver/p2p/inflight_test.zig).
 
 | commonware file | tests | ported | open | not portable |
 |---|---|---|---|---|
-| `delivery.rs` | 9 | 8 | 0 | 1 |
+| `delivery.rs` | 9 | 9 | 0 | 0 |
 | `ingress.rs` | 11 | 11 | 0 | 0 |
 | `opaque.rs` | 13 | 13 | 0 | 0 |
 | `subscribers.rs` | 5 | 5 | 0 | 0 |
-| `p2p/fetcher.rs` | 58 | 57 | 0 | 1 |
-| `p2p/inflight.rs` | 9 | 8 | 0 | 1 |
+| `p2p/fetcher.rs` | 58 | 58 | 0 | 0 |
+| `p2p/inflight.rs` | 9 | 9 | 0 | 0 |
 | `p2p/ingress.rs` | 7 | 7 | 0 | 0 |
 | `p2p/mod.rs` | 51 | 51 | 0 | 0 |
 | `p2p/score.rs` | 7 | 7 | 0 | 0 |
-| `p2p/wire.rs` | 8 | 7 | 0 | 1 |
+| `p2p/wire.rs` | 8 | 8 | 0 | 0 |
 
 Ported since the audit:
 - [x] `p2p/inflight.rs` `test_insert_contains_cancel_remove_round_trip`: Inflight
@@ -218,21 +218,19 @@ Ported since the audit:
   Complete -> complete(key); a later cancel returns false without asserting. Goes in
   src/resolver/p2p/inflight.zig
 
-Not portable:
-- `delivery.rs` `test_redeliver_requires_cached_response`: #[should_panic]; an assertion in Zig
-  (docs/lanes/broadcast-resolver.md Decisions)
-- `p2p/inflight.rs` `test_complete_panics_on_missing_key`: #[should_panic] ("inflight entry"); an
-  assertion (.? unwrap) in Inflight.complete
-- `p2p/wire.rs` `test_max_message_size_beyond_prefix`: #[should_panic] ("value must fit the u32
-  length prefix"); an assertion in Zig
-- `p2p/fetcher.rs` `test_add_retry_duplicate_panics`: #[should_panic]; `Fetcher.add_retry`
-  asserts (missing from the table until the 2026-11-19 review)
+Ported on `utils.death.expect_panic` (9d412335), each failing with its panic removed:
+- [x] `delivery.rs` `test_redeliver_requires_cached_response` ("redeliver requires a cached
+  response", delivery.zig)
+- [x] `p2p/inflight.rs` `test_complete_panics_on_missing_key` (inflight_test.zig)
+- [x] `p2p/wire.rs` `test_max_message_size_beyond_prefix` (wire.zig)
+- [x] `p2p/fetcher.rs` `test_add_retry_duplicate_panics` ("add retry of a pending key panics",
+  fetcher_test.zig)
 
 Not-portable review (2026-11-19, coding lane): before 6 (5 counted, plus the uncounted
 `test_add_retry_duplicate_panics`). The two wire `encode_iobufs` tests were stale:
 `runtime.iobuf` has existed since da3bee6. They are ported in p2p/wire.zig with
 `Message.write_bufs` and `Payload.write_bufs`, and catch a response written with the request
-tag. After: 4, all panic (zigware asserts or unwraps too).
+tag. After: 4, all panic (zigware asserts or unwraps too), since ported as death tests.
 
 ## Log
 - 2026-11-13: resolver lib.rs types, subscribers tracker, p2p wire (conformance hashes match).

@@ -956,3 +956,28 @@ test "deinit cancels pending verdict waits" {
 test {
     _ = @import("delivery_fuzz_test.zig");
 }
+
+test "redeliver requires a cached response" {
+    // commonware `test_redeliver_requires_cached_response` (`should_panic`).
+    try utils.death.expect_panic(@src(), "attempt to use null value", struct {
+        fn body() !void {
+            try run(struct {
+                fn run_body(io: Io) !void {
+                    const gpa = testing.allocator;
+                    const consumer = try MockConsumer.init(gpa, io);
+                    defer consumer.deinit();
+                    var tracker = try TestTracker.init(gpa, io, consumer);
+                    defer tracker.deinit();
+                    const k = mock_key(7);
+                    _ = try tracker.insert(k);
+                    try tracker.deliver(unit_delivery(k), 3, "first");
+                    var completed = try tracker.next_completion();
+                    defer completed.deinit(gpa);
+                    try testing.expect(completed.outcome.?.eql(complete));
+                    tracker.discard_response(k);
+                    try tracker.redeliver(unit_delivery(k));
+                }
+            }.run_body);
+        }
+    }.body);
+}

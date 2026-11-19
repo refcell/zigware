@@ -180,3 +180,19 @@ test "inflight: cancellation keeps a ready verdict without recording the duratio
         }
     }.body);
 }
+
+test "inflight: complete panics on a missing key" {
+    // commonware `test_complete_panics_on_missing_key` (`should_panic`, "inflight entry").
+    try utils.death.expect_panic(@src(), "attempt to use null value", struct {
+        fn body() !void {
+            try run(struct {
+                fn run_body(io: Io) !void {
+                    var f: Fixture = undefined;
+                    try f.init(io);
+                    defer f.deinit();
+                    f.inflight.complete(io, key(1));
+                }
+            }.run_body);
+        }
+    }.body);
+}
