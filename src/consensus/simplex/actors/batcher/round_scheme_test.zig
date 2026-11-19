@@ -373,3 +373,42 @@ test "batcher round counts a constructed leader notarize once" {
     try testing.expect(!batch.fallback);
     try testing.expect(batch.certificate.? == .notarization);
 }
+
+/// commonware `verify_and_construct`: a notarize from every participant verifies on
+/// `strategy` and certifies without fallback; the certificate verifies under the
+/// non-signing verifier, and the completed kind constructs nothing more.
+fn verify_and_construct(comptime entry: anytype, strategy: anytype) !void {
+    const T = Setup(entry);
+    var fixture = try T.fixture("batcher_test", 5);
+    defer fixture.deinit(gpa);
+    const value = proposal_at(0, 1, 0x0f);
+    var round = T.Round.init(value.round, &fixture.schemes[0], .{}, .{}, false);
+    defer round.deinit(gpa);
+    round.set_leader(.init(0));
+    for (fixture.schemes, fixture.participants) |*scheme, peer| {
+        const vote = try T.sign(scheme, .notarization, value);
+        try testing.expect(try round.add_network(gpa, peer, vote));
+    }
+    var rng = utils.rng.test_rng();
+    var batch = (try round.try_construct(gpa, &rng, strategy)).?;
+    defer batch.deinit(gpa);
+    try testing.expectEqual(5, batch.processed);
+    try testing.expectEqual(0, batch.invalid.len);
+    try testing.expect(!batch.fallback);
+    const certificate = &batch.certificate.?;
+    try testing.expect(certificate.notarization.proposal.eql(value));
+    try testing.expect(try certificate.verify(gpa, &rng, &fixture.verifier, sequential));
+    try testing.expectEqual(null, try round.try_construct(gpa, &rng, strategy));
+}
+
+// commonware `test_offload_on_multithreaded_pool`: verification and construction run on a
+// two-worker pool, so jobs finish on pool threads.
+test "batcher round verifies and constructs on a multithreaded pool" {
+    const pool = try parallel.ThreadPool.create(gpa, testing.io, .{ .threads = 2 });
+    defer pool.destroy();
+    const strategy = parallel.Rayon.init(pool);
+    if (bls) try verify_and_construct(schemes[4], strategy);
+    if (bls) try verify_and_construct(schemes[3], strategy);
+    try verify_and_construct(schemes[0], strategy);
+    try verify_and_construct(schemes[1], strategy);
+}

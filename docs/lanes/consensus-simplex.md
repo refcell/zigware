@@ -300,10 +300,11 @@ resolver; those lanes are running, so do the types first and the actors as they 
   certification ordering and replay). None are ported; they need a voter-actor harness
   with a mock batcher, resolver, and automaton on the deterministic runtime. Handed to the
   runtime lane on 2026-11-19 (actors/voter/tests/).
-- [ ] actors/batcher/mod.rs: 16 of its 76 tests still to port (Round restore and
-  construction-order cases, the rayon offload test, leader-proposal multi-kind, and the
-  notarization-unlock cases). Round-level ones ported in round_test.zig (2026-11-19): forwarding a
-  notarization's proposal without a leader, certificate vote release and retention,
+- [ ] actors/batcher/mod.rs: 70 of its 76 tests ported (2026-11-19); the 6 left are
+  handed over to lookup (T-01a1d59c), which ports them in actor_late_test.zig: 4935
+  conflicting votes, 6506 and 6513 same-term optimistic future votes, 6819 and 6966
+  activity-window reporting, and 7128 constructed votes not future-bounded. Round-level ones in round_test.zig: forwarding
+  a notarization's proposal without a leader, certificate vote release and retention,
   nullify-finalize conflicts with held and compacted evidence, our own votes reported
   once, finalization- and finalize-established proposals, both skipped-round cases, and
   conflicting-finalize evidence; in actor_test.zig, a future
@@ -469,3 +470,11 @@ resolver; those lanes are running, so do the types first and the actors as they 
   fallback (both quorum shapes, every scheme), per-kind fallback isolation, VRF seed-only
   corruption, the constructed quorum before a leader update, and the constructed leader
   notarize counted once. BLS cases run outside Debug or with `-Dslow-tests`.
+- 2026-11-19: the rest of my batcher mod.rs share: Round restores (constructed finalize,
+  notarization-restored finalizes), local certificate authority, kind priority, no mixed
+  finalizes across an override, a filtered finalize's conflict still reported; in the
+  actor, buffered finalizations drained by the leader's notarize, a network notarization,
+  or one pass over every ready kind, future finalizes unlocked by their notarization and
+  an old notarization after its nullification (both on every scheme), the VRF
+  optimistic-recovery fallback with its block and counter, and verification on a
+  two-worker pool.

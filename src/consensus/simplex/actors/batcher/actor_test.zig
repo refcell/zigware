@@ -2,6 +2,8 @@
 //! certificate for the voter, and invalid traffic is blocked.
 
 const std = @import("std");
+const builtin = @import("builtin");
+const build_options = @import("build_options");
 const testing = std.testing;
 const Io = std.Io;
 const assert = std.debug.assert;
@@ -1189,6 +1191,200 @@ test "batcher verifies every ready vote kind once the leader's proposal is known
             try testing.expectError(error.Empty, harness.voter.try_recv());
             try deliver_notarizes(&harness, &.{4}, value);
             try expect_notarization_and_finalization(&harness, value);
+        }
+    };
+    try run_deterministic(Root.run);
+}
+
+/// A quorum certificate of `kind` over `value` from `fixture`'s first signers, encoded.
+fn quorum_certificate_bytes(
+    comptime S: type,
+    fixture: anytype,
+    comptime kind: enum { notarization, nullification },
+    value: types.Proposal(Digest),
+) ![]u8 {
+    const n: u32 = @intCast(fixture.participants.len);
+    const quorum = n - (n - 1) / 3;
+    assert(quorum <= 8);
+    const Certificate = types.Certificate(S, Digest);
+    const scheme = &fixture.schemes[0];
+    var certificate: Certificate = switch (kind) {
+        .notarization => certificate: {
+            var votes: [8]types.Notarize(S, Digest) = undefined;
+            for (votes[0..quorum], fixture.schemes[0..quorum]) |*vote, *signer| {
+                vote.* = (try types.Notarize(S, Digest).sign(gpa, signer, value)).?;
+            }
+            const signed = votes[0..quorum];
+            break :certificate .{
+                .notarization = try .from_votes(gpa, scheme, signed, parallel.sequential),
+            };
+        },
+        .nullification => certificate: {
+            var votes: [8]types.Nullify(S) = undefined;
+            for (votes[0..quorum], fixture.schemes[0..quorum]) |*vote, *signer| {
+                vote.* = (try types.Nullify(S).sign(gpa, signer, value.round)).?;
+            }
+            const signed = votes[0..quorum];
+            break :certificate .{
+                .nullification = try .from_votes(gpa, scheme, signed, parallel.sequential),
+            };
+        },
+    };
+    defer certificate.deinit(gpa);
+    return codec.encode(Certificate, gpa, certificate);
+}
+
+/// commonware `notarization_unlocks_future_finalizes`: finalizes buffered for the next
+/// view, whose leader is unknown, become usable once its notarization arrives; with our
+/// own finalize they make a finalization after the forwarded notarization.
+fn notarization_unlocks_future_finalizes(comptime entry: anytype) !void {
+    const Root = struct {
+        fn run(io: Io) !void {
+            const S = entry[0];
+            const K = actor_harness.Kit(S, entry[1]);
+            var harness: K.Harness = undefined;
+            try harness.start_with(io, null, .{ .participants = 5 });
+            defer harness.stop();
+            const fixture = &harness.fixture;
+            try harness.mailbox.update(.new(1), .init(0), .zero(), null);
+            try io.sleep(.fromMilliseconds(10), .awake);
+            const value = proposal_at(2, 1, 2);
+            const Finalize = types.Finalize(S, Digest);
+            const Vote = types.Vote(S, Digest);
+            for (1..4) |signer| {
+                const vote = (try Finalize.sign(gpa, &fixture.schemes[signer], value)).?;
+                const bytes = try codec.encode(Vote, gpa, .{ .finalize = vote });
+                try harness.votes.deliver(fixture.participants[signer], bytes);
+            }
+            try io.sleep(.fromMilliseconds(10), .awake);
+            const bytes = try quorum_certificate_bytes(S, fixture, .notarization, value);
+            try harness.certificates.deliver(fixture.participants[4], bytes);
+            var notarized = false;
+            for (0..8) |_| {
+                const message = (try harness.voter.recv()) orelse return error.Closed;
+                defer K.VoterMessage.discard(message);
+                if (message != .verified) continue;
+                switch (message.verified.certificate) {
+                    .notarization => |notarization| {
+                        try testing.expect(notarization.proposal.eql(value));
+                        const ours = (try Finalize.sign(gpa, &fixture.schemes[0], value)).?;
+                        try harness.mailbox.constructed(.{ .finalize = ours });
+                        notarized = true;
+                    },
+                    .finalization => |finalization| {
+                        try testing.expect(notarized);
+                        try testing.expect(finalization.proposal.eql(value));
+                        return;
+                    },
+                    .nullification => return error.UnexpectedNullification,
+                }
+            }
+            return error.NoFinalization;
+        }
+    };
+    try run_deterministic(Root.run);
+}
+
+// commonware `test_notarization_unlocks_future_finalizes`, on every scheme.
+test "batcher finalizes buffered future finalizes after their notarization on every scheme" {
+    try types_scheme_test.for_each_scheme(notarization_unlocks_future_finalizes);
+}
+
+/// commonware `old_notarization_after_nullification_is_forwarded`: after view 1's
+/// nullification and the move to view 2, view 1's notarization is still forwarded.
+fn old_notarization_after_nullification(comptime entry: anytype) !void {
+    const Root = struct {
+        fn run(io: Io) !void {
+            const S = entry[0];
+            const K = actor_harness.Kit(S, entry[1]);
+            var harness: K.Harness = undefined;
+            try harness.start_with(io, null, .{ .participants = 5 });
+            defer harness.stop();
+            const fixture = &harness.fixture;
+            try harness.mailbox.update(.new(1), .init(0), .zero(), null);
+            try io.sleep(.fromMilliseconds(10), .awake);
+            const value = proposal_at(1, 0, 1);
+            const nullification = try quorum_certificate_bytes(S, fixture, .nullification, value);
+            try harness.certificates.deliver(fixture.participants[4], nullification);
+            const first = try harness.next_certificate();
+            defer K.VoterMessage.discard(first);
+            try testing.expect(first.verified.certificate == .nullification);
+            try testing.expectEqual(1, first.verified.certificate.view().get());
+            try harness.mailbox.update(.new(2), .init(1), .zero(), null);
+            try io.sleep(.fromMilliseconds(10), .awake);
+            const notarization = try quorum_certificate_bytes(S, fixture, .notarization, value);
+            try harness.certificates.deliver(fixture.participants[4], notarization);
+            const second = try harness.next_certificate();
+            defer K.VoterMessage.discard(second);
+            try testing.expect(second.verified.certificate == .notarization);
+            try testing.expect(second.verified.certificate.notarization.proposal.eql(value));
+        }
+    };
+    try run_deterministic(Root.run);
+}
+
+// commonware `test_old_notarization_after_nullification_is_forwarded`, on every scheme.
+test "batcher forwards an old notarization after its view's nullification on every scheme" {
+    try types_scheme_test.for_each_scheme(old_notarization_after_nullification);
+}
+
+// commonware `test_actor_optimistic_recovery_fallback` (threshold VRF MinPk): a leader
+// notarize with a corrupted seed fails optimistic recovery; the batcher blocks the
+// leader, counts the fallback, forwards no certificate, and certifies once a fresh
+// signer completes the retained quorum.
+test "batcher blocks an invalid share after optimistic recovery fails" {
+    if (builtin.mode == .debug and !build_options.slow_tests) return;
+    const Root = struct {
+        fn run(io: Io) !void {
+            const entry = types_scheme_test.schemes[4];
+            const S = entry[0];
+            const K = actor_harness.Kit(S, entry[1]);
+            const metrics = runtime.telemetry.metrics;
+            var registry = metrics.Registry.init(gpa);
+            defer registry.deinit();
+            var harness: K.Harness = undefined;
+            const scope = metrics.Scope.init(&registry).child("batcher");
+            try harness.start_with(io, scope, .{ .participants = 5 });
+            defer harness.stop();
+            const fixture = &harness.fixture;
+            try harness.mailbox.update(.new(1), .init(1), .zero(), null);
+            try io.sleep(.fromMilliseconds(10), .awake);
+            const value = proposal_at(1, 0, 0xfb);
+            const Notarize = types.Notarize(S, Digest);
+            const Vote = types.Vote(S, Digest);
+            var leader = (try Notarize.sign(gpa, &fixture.schemes[1], value)).?;
+            const other = (try Notarize.sign(gpa, &fixture.schemes[1], proposal_at(2, 1, 7))).?;
+            var corrupted = leader.attestation.signature.get().?;
+            corrupted.seed_signature = other.attestation.signature.get().?.seed_signature;
+            leader.attestation.signature = .init(corrupted);
+            const leader_bytes = try codec.encode(Vote, gpa, .{ .notarize = leader });
+            try harness.votes.deliver(fixture.participants[1], leader_bytes);
+            for (2..4) |signer| {
+                const vote = (try Notarize.sign(gpa, &fixture.schemes[signer], value)).?;
+                const bytes = try codec.encode(Vote, gpa, .{ .notarize = vote });
+                try harness.votes.deliver(fixture.participants[signer], bytes);
+            }
+            const ours = (try Notarize.sign(gpa, &fixture.schemes[0], value)).?;
+            try harness.mailbox.constructed(.{ .notarize = ours });
+            try io.sleep(.fromMilliseconds(50), .awake);
+            try testing.expectEqual(1, harness.log.blocked.items.len);
+            try testing.expect(harness.log.blocked.items[0].eql(fixture.participants[1]));
+            const text = try registry.encode(gpa);
+            defer gpa.free(text);
+            try testing.expect(std.mem.indexOf(u8, text, "construct_fallback_total 1\n") != null);
+            while (harness.voter.try_recv()) |message| {
+                defer K.VoterMessage.discard(message);
+                try testing.expect(message != .verified);
+            } else |err| try testing.expectEqual(error.Empty, err);
+            const replacement = (try Notarize.sign(gpa, &fixture.schemes[4], value)).?;
+            const bytes = try codec.encode(Vote, gpa, .{ .notarize = replacement });
+            try harness.votes.deliver(fixture.participants[4], bytes);
+            const message = try harness.next_certificate();
+            defer K.VoterMessage.discard(message);
+            try testing.expect(message.verified.certificate.notarization.proposal.eql(value));
+            const after = try registry.encode(gpa);
+            defer gpa.free(after);
+            try testing.expect(std.mem.indexOf(u8, after, "construct_fallback_total 1\n") != null);
         }
     };
     try run_deterministic(Root.run);

@@ -642,3 +642,22 @@ test "round does not mix finalizes across an overridden proposal" {
     defer batch.deinit(gpa);
     try testing.expect(batch.certificate.?.finalization.proposal.eql(proposal(2)));
 }
+
+// commonware `test_rejected_finalize_still_detects_conflicting_finalize`: a finalize for a
+// proposal the notarization displaced is tracked though not verified, so the signer's
+// later finalize for the certified proposal is still reported as conflicting.
+test "round detects a conflicting finalize after filtering the first" {
+    const gpa = testing.allocator;
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    var round = h.round(0);
+    defer round.deinit(gpa);
+    var notarization = try build_certificate(&h.fixture, .notarization, 2, utils.N3f1.quorum(5));
+    defer notarization.deinit(gpa);
+    _ = try round.record_certificate(gpa, &notarization);
+    try testing.expect(try round.add_network(gpa, h.peer(1), try h.finalize(1, 1)));
+    try testing.expectEqual(0, count_activities(&h.log, .conflicting_finalize));
+    try testing.expect(!try round.add_network(gpa, h.peer(1), try h.finalize(1, 2)));
+    try testing.expectEqual(1, count_activities(&h.log, .conflicting_finalize));
+}
