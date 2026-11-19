@@ -306,4 +306,5 @@ test {
     _ = @import("striped_test.zig");
     _ = @import("adversarial_test.zig");
     _ = @import("scheme_test.zig");
+    _ = @import("death_test.zig");
 }

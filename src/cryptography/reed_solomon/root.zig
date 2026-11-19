@@ -234,5 +234,6 @@ test {
     _ = engine;
     _ = rate;
     _ = @import("tests.zig");
+    _ = @import("death_test.zig");
     _ = fuzz;
 }

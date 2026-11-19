@@ -1145,6 +1145,63 @@ test "coding floor preserves registered commitment subscription" {
     }.body);
 }
 
+// commonware `test_coding_floor_anchor_panics_on_parent_commitment_mismatch`: the floor block's
+// context names genesis as its parent commitment, but its parent digest is block 1's.
+test "coding floor anchor panics on parent commitment mismatch" {
+    try utils.death.expect_panic(@src(), "floor block parent commitment mismatch", struct {
+        fn body() !void {
+            try common.run(floor_parent_commitment_mismatch);
+        }
+    }.body);
+}
+
+fn empty_hash() shared.D {
+    return harness.Sha256.hash(&.{""});
+}
+
+fn floor_parent_commitment_mismatch(ctx: Ctx) anyerror!void {
+    var validators = try fixture();
+    defer validators.deinit(gpa);
+    const provider: common.Provider = .init(&validators.schemes[0]);
+    var buffer = try common.RecordingCodingBuffer.init(gpa, ctx.io());
+    defer buffer.deinit();
+    var stack = try common.start_coding_actor_with_recording(
+        ctx.child("validator"),
+        "floor-parent-commitment-mismatch",
+        provider,
+        buffer,
+    );
+    defer stack.stop();
+
+    const leader = validators.participants[0];
+    const parent_context: common.CodingCtx = .{
+        .round = common.round_at(0, 1),
+        .leader = leader,
+        .parent = .{ .zero(), harness.genesis_commitment() },
+    };
+    const parent = try harness.make_coding_block(gpa, parent_context, empty_hash(), .new(1), 100);
+    const floor_round = common.round_at(0, 2);
+    const bad_context: common.CodingCtx = .{
+        .round = floor_round,
+        .leader = leader,
+        .parent = .{ .new(1), harness.genesis_commitment() },
+    };
+    const floor_block =
+        try harness.make_coding_block(gpa, bad_context, parent.digest(), .new(2), 200);
+    var coded_floor = try common.encode_block(gpa, floor_block, common.committee_config());
+    defer coded_floor.deinit(gpa);
+    try testing.expect(!coded_floor.parent().eql(coded_floor.context().parent[1].block()));
+
+    const proposal = common.Proposal.init(floor_round, .new(1), coded_floor.commitment());
+    var finalization = try H.make_finalization(gpa, &validators, proposal, quorum);
+    defer finalization.deinit(gpa);
+    const value = try common.encode_coded(gpa, &coded_floor);
+    defer gpa.free(value);
+    try stack.resolver.respond_to_next_fetch(value);
+    try stack.mailbox.set_floor(finalization);
+    try ctx.sleep(.fromSeconds(5));
+}
+
 /// A fixed epocher that knows no epoch above `max_epoch` (commonware `LimitedEpocher`).
 const LimitedEpocher = struct {
     inner: consensus_types.FixedEpocher,

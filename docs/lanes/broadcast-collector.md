@@ -98,12 +98,13 @@ that harness. It builds on `coding` (ReedSolomon), `consensus.types.coding.Commi
   the message; `CodedBlock.shard` copies them out of the shared encoding), where commonware
   shares `Bytes`. `CodedBlock.from_decoded` returns `ConfigMismatch`, `BlockDigestMismatch`,
   `RecommitFailed`, or `CommitmentMismatch` for commonware's `Invalid("CodedBlock", ...)`
-  messages. Strategy jobs run inline. The two `should_panic` tests have no counterpart (zigware
-  panics too); `test_shard_encode_iobufs_matches_encode` is ported (`Shard.write_bufs`, 2026-11-19
-  not-portable review: it catches a dropped shard index). Still not portable after that review:
-  those two panics and `floor_anchor_panics_on_parent_commitment_mismatch` (panic). The 4 shard
-  engine job tests are ported since reconstruction runs as strategy jobs (2026-11-19). Before 8,
-  after 3. `count_running_tasks` exists in runtime telemetry, but these engines start tasks with
+  messages. Strategy jobs run inline. `test_shard_encode_iobufs_matches_encode` is ported
+  (`Shard.write_bufs`, 2026-11-19 not-portable review: it catches a dropped shard index). The 4
+  shard engine job tests are ported since reconstruction runs as strategy jobs (2026-11-19).
+  Before 8, after 3: the two types `should_panic` tests and
+  `floor_anchor_panics_on_parent_commitment_mismatch`. All three are death tests
+  (`utils.death`) since 2026-11-19, so none is left.
+  `count_running_tasks` exists in runtime telemetry, but these engines start tasks with
   `io.concurrent`, which it does not count; `WrappedBackgroundReceiver` exists in p2p utils.
 
 - marshal coding validation: `validate_proposal(H, gpa, commitment, config, ?context)`,
@@ -182,7 +183,8 @@ that harness. It builds on `coding` (ReedSolomon), `consensus.types.coding.Commi
   - runtime (T-01a1d57b-1bfd): mod.rs 4989-6420 (15 propose, prepare, relay, restart, and
     certify-release tests) in `tests/propose_test.zig`, adding
     `RecordingCodingBuffer.sent_to_all`.
-  Not portable: `floor_anchor_panics_on_parent_commitment_mismatch` (a `should_panic` test).
+  `floor_anchor_panics_on_parent_commitment_mismatch` (a `should_panic` test) is a death test in
+  `coding/mod_test.zig`; none is left not portable.
 
 ### Test audit: broadcast (2026-11-19, commonware 43b357a41)
 

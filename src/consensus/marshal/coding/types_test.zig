@@ -12,6 +12,7 @@ const coding = @import("coding");
 const conformance = @import("conformance");
 const cryptography = @import("cryptography");
 const parallel = @import("parallel");
+const death = @import("utils").death;
 
 const types = @import("types.zig");
 
@@ -108,11 +109,19 @@ test "coding config for participants valid for minimum set" {
     const config = types.coding_config_for_participants(4);
     try testing.expectEqual(@as(u16, 2), config.minimum_shards);
     try testing.expectEqual(@as(u16, 2), config.extra_shards);
-    // commonware's `should_panic` test for 3 participants has no counterpart (Zig cannot
-    // catch panics); larger sets keep `f + 1` minimum shards.
+    // Larger sets keep `f + 1` minimum shards.
     const large = types.coding_config_for_participants(10);
     try testing.expectEqual(@as(u16, 4), large.minimum_shards);
     try testing.expectEqual(@as(u16, 6), large.extra_shards);
+}
+
+// commonware `test_coding_config_for_participants_panics_for_small_sets`.
+test "coding config for participants panics for small sets" {
+    try death.expect_panic(@src(), "Need at least 4 participants", struct {
+        fn body() !void {
+            std.mem.doNotOptimizeAway(types.coding_config_for_participants(3));
+        }
+    }.body);
 }
 
 // `CodecConformance<Shard<TestBlock, ReedSolomon<Sha256>, Sha256>>`: the derived `Arbitrary`
@@ -303,8 +312,23 @@ test "coded block decode trusted rejects block digest mismatch" {
     try testing.expectError(error.BlockDigestMismatch, decode(encoded, expected));
 }
 
-// commonware's `test_coded_block_trusted_wrong_root_panics_on_shards` has no counterpart: Zig
-// cannot catch the panic (`shards` panics when a trusted root does not code the block).
+// commonware `test_coded_block_trusted_wrong_root_panics_on_shards`: a trusted commitment is
+// not re-encoded at decode, so a root that does not code the block is caught only when the
+// shards are generated.
+test "coded block trusted wrong root panics on shards" {
+    try death.expect_panic(@src(), "does not match commitment", struct {
+        fn body() !void {
+            var coded = try encode_block(test_block(42), one_two);
+            defer coded.deinit(gpa);
+            const expected = with_root(coded.commitment(), Sha256.hash(&.{"wrong root"}));
+            const encoded = try encode_coded(coded);
+            defer gpa.free(encoded);
+            var decoded = try decode(encoded, .{ .trusted = expected });
+            defer decoded.deinit(gpa);
+            _ = try decoded.shards(gpa, sequential);
+        }
+    }.body);
+}
 
 test "coded block clone shares shards" {
     var coded = try encode_block(test_block(42), one_two);

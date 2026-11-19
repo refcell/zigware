@@ -348,7 +348,7 @@ line, with where its Zig counterpart lives. Counts:
 | File | Ported | In progress | Not portable | Total |
 | --- | --- | --- | --- | --- |
 | standard/mod.rs | 192 | 1 | 4 | 197 |
-| coding/mod.rs | 100 | 0 | 1 | 101 |
+| coding/mod.rs | 101 | 0 | 0 | 101 |
 
 `mocks/harness.rs` has no tests of its own: all 31 generic scenario functions are ported
 (`mocks/scenarios.zig`, `scenarios_queries.zig`, `scenarios_recoverable.zig`) and run through
@@ -359,8 +359,9 @@ coding lane's. Commonware has no marshal fuzz targets; AGENTS.md's fuzz bodies
 codec, `Annotation` order, standard `decode_block`, `DispatchGate`, `PendingAcks`, `Staged`,
 the mailbox overflow policy, and the ancestor stream. Not portable (after the 2026-11-19
 review below): panic, where zigware panics with commonware's message too: the two floor
-`rejects_invalid_finalization` tests, `restart_rejects_mismatched_genesis_anchor`, and coding's
-`floor_anchor_panics_on_parent_commitment_mismatch`; missing feature:
+`rejects_invalid_finalization` tests, `restart_rejects_mismatched_genesis_anchor` (coding's
+`floor_anchor_panics_on_parent_commitment_mismatch` is a death test since 2026-11-19, in
+coding/mod_test.zig); missing feature:
 `resolver_delivery_waits_for_identity_job` (standard's `decode_block` digests inline, so there
 is no strategy job to gate; `parallel`'s `spawn` runs inline under `Sequential`).
 
@@ -669,7 +670,7 @@ then ported it in core/cache.zig: archive writes encode a borrowed `V.stored_vie
 - L4672 `test_coding_certification_retention_follows_finalized_tip`: ported (coding/mod_test.zig)
 - L4796 `test_coding_notarized_delivery_recomputes_root`: ported (coding/mod_test.zig)
 - L4843 `test_coding_untrusted_delivery_rejects_mismatched_root`: ported (coding/mod_test.zig)
-- L4936 `test_coding_floor_anchor_panics_on_parent_commitment_mismatch`: not portable (see above)
+- L4936 `test_coding_floor_anchor_panics_on_parent_commitment_mismatch`: ported (coding/mod_test.zig, death test)
 - L4989 `test_coding_default_prepare_declines`: ported (coding/tests/propose_test.zig)
 - L5045 `test_marshaled_missing_scheme_skips_propose_and_verify`: ported (coding/tests/propose_test.zig)
 - L5104 `test_marshaled_certify_persists_block_before_resolving`: ported (coding/tests/propose_test.zig)
