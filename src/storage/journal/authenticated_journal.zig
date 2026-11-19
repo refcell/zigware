@@ -95,6 +95,16 @@ pub fn Journal(comptime F: type, comptime C: type, comptime H: type) type {
             return self.journal.replay(range, buffer_bytes);
         }
 
+        /// `replay` with the backing journal's blob reads using `read_options`.
+        pub fn replay_options(
+            self: *Self,
+            range: Bounds,
+            buffer_bytes: usize,
+            read_options: runtime.storage.ReadOptions,
+        ) Error!C.Replay {
+            return self.journal.replay_options(range, buffer_bytes, read_options);
+        }
+
         /// Wraps published components, replaying journal items the Merkle structure lacks,
         /// then syncs the structure. Fails with `Corruption` when the structure has more
         /// leaves than the journal has items. Takes both components, also on error.

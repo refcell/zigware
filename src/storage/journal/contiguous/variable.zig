@@ -1289,6 +1289,16 @@ pub fn Journal(comptime V: type) type {
         /// and of about `buffer_bytes` encoded bytes. Fails with `ItemPruned` if the range
         /// starts before the bounds, or `ItemOutOfRange` if it ends after them or is inverted.
         pub fn replay(self: *Self, range: Bounds, buffer_bytes: usize) Error!Replay {
+            return self.replay_options(range, buffer_bytes, .{});
+        }
+
+        /// `replay` whose blob reads all use `read_options` (commonware's replay argument).
+        pub fn replay_options(
+            self: *Self,
+            range: Bounds,
+            buffer_bytes: usize,
+            read_options: runtime.storage.ReadOptions,
+        ) Error!Replay {
             assert(buffer_bytes > 0);
             if (range.start > range.end or range.end > self.bounds.end) {
                 return error.ItemOutOfRange;
@@ -1301,6 +1311,7 @@ pub fn Journal(comptime V: type) type {
                 .budget = buffer_bytes,
                 .position = range.start,
                 .offset = offset,
+                .read_options = read_options,
             };
         }
 
@@ -1357,6 +1368,7 @@ fn ReplayType(comptime V: type) type {
         range: Bounds,
         /// Encoded bytes decoded per batch, at least.
         budget: u64,
+        read_options: runtime.storage.ReadOptions,
         /// Next position to yield.
         position: u64,
         /// Byte offset of `position`'s frame in its blob.
@@ -1410,7 +1422,7 @@ fn ReplayType(comptime V: type) type {
             const per = journal.items_per_blob;
             const blob = position_to_blob(self.position, per);
             const writer = journal.blobs.get(blob).?;
-            var reader = try writer.view_replay(journal.replay_buffer, .{});
+            var reader = try writer.view_replay(journal.replay_buffer, self.read_options);
             errdefer reader.deinit();
             try reader.seek_to(self.offset);
             self.reader = reader;

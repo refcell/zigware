@@ -664,6 +664,27 @@ test "replay from the start and the middle" {
     try run(replay_operations);
 }
 
+test "replay forwards its read options to the backing journal" {
+    var harness = try Harness.init();
+    defer harness.deinit();
+    var journal = try harness.open_with_ops(merkle.mmr.Family, "replay-options", 8);
+    defer journal.deinit();
+    try journal.sync();
+    // Evict cached pages so the first item needs a backing read through the wrapper.
+    harness.journal_cache.clear();
+    const options: runtime.storage.ReadOptions = .{ .dont_cache = true };
+    var replay = try journal.replay_options(.{ .start = 0, .end = 8 }, 100, options);
+    defer replay.deinit();
+    const reads = harness.storage.reads;
+    const dont_cache = harness.storage.dont_cache_reads;
+    const batch = (try replay.next()).?;
+    try testing.expectEqual(@as(u64, 0), batch.start);
+    try expect_op(create_operation(0), batch.items[0]);
+    const replayed = harness.storage.dont_cache_reads - dont_cache;
+    try testing.expect(replayed > 0);
+    try testing.expectEqual(replayed, harness.storage.reads - reads);
+}
+
 /// A batch on `parent` (or the journal when null) with `ops` added and merkleized.
 fn batch_of(
     comptime F: type,

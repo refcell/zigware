@@ -1094,6 +1094,16 @@ pub fn Journal(comptime A: type) type {
         /// and of at most about `buffer_bytes` bytes. Fails with `ItemPruned` if the range
         /// starts before the bounds, or `ItemOutOfRange` if it ends after them or is inverted.
         pub fn replay(self: *Self, range: Bounds, buffer_bytes: usize) Error!Replay {
+            return self.replay_options(range, buffer_bytes, .{});
+        }
+
+        /// `replay` whose blob reads all use `read_options` (commonware's replay argument).
+        pub fn replay_options(
+            self: *Self,
+            range: Bounds,
+            buffer_bytes: usize,
+            read_options: runtime.storage.ReadOptions,
+        ) Error!Replay {
             assert(buffer_bytes > 0);
             if (range.start > range.end or range.end > self.bounds.end) {
                 return error.ItemOutOfRange;
@@ -1105,6 +1115,7 @@ pub fn Journal(comptime A: type) type {
                 .buffer_bytes = buffer_bytes,
                 .items_per_batch = @max(buffer_bytes / chunk, 1),
                 .position = range.start,
+                .read_options = read_options,
             };
         }
 
@@ -1165,6 +1176,7 @@ fn ReplayType(comptime A: type) type {
         range: Bounds,
         buffer_bytes: usize,
         items_per_batch: usize,
+        read_options: runtime.storage.ReadOptions,
         /// Next position to yield.
         position: u64,
         /// The replay of the blob holding `position`, and that blob's exclusive end.
@@ -1213,7 +1225,7 @@ fn ReplayType(comptime A: type) type {
             const first = try first_in_blob(journal.bounds.start, blob, per_blob);
             const offset = (self.position - first) * chunk;
             const writer = journal.blobs.get(blob).?;
-            var reader = try writer.view_replay(self.buffer_bytes, .{});
+            var reader = try writer.view_replay(self.buffer_bytes, self.read_options);
             errdefer reader.deinit();
             try reader.seek_to(offset);
             self.reader = reader;

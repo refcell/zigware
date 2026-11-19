@@ -70,7 +70,16 @@ resize, sync), `runtime.storage`, with the in-memory backend `runtime.storage.me
 - [x] journal/authenticated.rs `Journal` (items plus persisted Merkle, recovery, batches,
   proofs) with its ported tests under both families, including the interrupted-destroy
   regression (issue 5668) over both backings and the equal-length-branch crash on
-  `runtime.storage.faulty` (unsynced writes kept, unsynced resizes lost).
+  `runtime.storage.faulty` (unsynced writes kept, unsynced resizes lost). commonware runs
+  each test per family (`_inner`/`_mmr`/`_mmb`); here one test covers both families. The
+  contiguous journals and `Journal` gained `replay_options` (commonware's replay
+  `read_options` argument; `replay` keeps the defaults), with
+  `replay_propagates_read_options_to_backing_journal`. No counterpart: the sync-order,
+  `start_sync` overlap and failure-handle, and Merkle-watermark tests (they drive delayed
+  sync contexts and in-flight handles; `Recovery.finish` syncs items before the Merkle
+  structure, as commonware's order test checks), the strategy-pool `read_many` sharding and
+  parallel-align tests (no thread pool here), the cancellation test, and should_panic
+  argument checks.
 - [x] metadata (two-blob atomic key-value store).
 - [x] metadata: the `metadata_recovery` fuzz target and the overwrite-crash-during-sync test
   on `runtime.storage.faulty` (with storage-archive's `archive/faults.zig` harness).
@@ -253,8 +262,8 @@ resize, sync), `runtime.storage`, with the in-memory backend `runtime.storage.me
   `drain` consume the recovery even on error. commonware passes replay `read_options` as an
   argument to `preflight_floors`, `init`, and `init_with_markers`; here it is the configs'
   `replay_read_options` field with a default, so callers that keep the defaults (every lane
-  but tests today) need no change. The replay never fills the page cache. Tests of in-flight `start_sync` handles and of dropping a `next` mid-repair
-  have no counterpart: syncs and repairs complete synchronously. Removing a section removes
+  but tests today) need no change. The replay never fills the page cache. Tests of in-flight
+  `start_sync` handles and of dropping a `next` mid-repair have no counterpart: syncs and repairs complete synchronously. Removing a section removes
   its blob name before closing its writer, as commonware does.
 - The storage mocks provide `reads` and `dont_cache_reads` (commonware's `RecordingContext`
   read count and recorded options) and
