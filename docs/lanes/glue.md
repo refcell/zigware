@@ -467,7 +467,7 @@ ones: d = deployer (thread T-01a1d5b9-c237), u = utils.
 - [x] actor/core: deployer's `Syncing` wired into `Stateful.run`'s floor branch (Config's
   `sync_config`, `resolvers`, marshal's `floor`; `P.Resolvers`).
 - [ ] actor/core: the rest of processing.rs's tests. First half (1070-3396) here, in
-  core/processing_early_test.zig: 5 of 22 so far. Second half (3451-5885) is with simplex
+  core/processing_early_test.zig: 6 of 22 so far. Second half (3451-5885) is with simplex
   (T-01a1d5ad-c8d6), in core/processing_late_test.zig. Both build on core/testing.zig.
 - [ ] tests: single_db_app.rs's engine on `glue.simulate` (simplex, marshal, buffered broadcast,
   marshal and qmdb resolvers, probe, `Stateful`), then tests/mod.rs's scenarios (finalize,

@@ -130,3 +130,30 @@ test "stateful processing: a proposal on incomplete ancestry declines" {
     const databases = try fixture.mailbox.?.subscribe_databases();
     try testing.expectEqual(fixture.harness.databases.cell, databases.cell);
 }
+
+test "stateful processing: a recovered parent answers its own verification" {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer check(&fixture);
+    const genesis = TestBlock.genesis();
+    const parent = try fixture.harness.stage_pending_child(&genesis, 1);
+    const child, var batch = try fixture.harness.build_child(&parent, 2);
+    batch.deinit();
+    // Neither block's state is cached: verifying the child recovers the parent.
+    fixture.harness.execution.state.clear();
+    var probe: Probe = .{ .target = parent.digest() };
+    defer probe.deinit();
+    fixture.processing.verifications.verifier.app.probe = &probe;
+
+    var verdict = try fixture.verify(&.{ child, parent });
+    defer verdict.deinit();
+    try testing.expect(try verdict.recv());
+    try testing.expectEqual(@as(u32, 1), probe.calls);
+    // The recovered state answers the parent's own verifications without processing it again.
+    for (0..2) |_| {
+        var again = try fixture.verify(&.{ parent, genesis });
+        defer again.deinit();
+        try testing.expect(try again.recv());
+    }
+    try testing.expectEqual(@as(u32, 1), probe.calls);
+}
