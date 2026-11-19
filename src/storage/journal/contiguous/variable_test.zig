@@ -872,3 +872,69 @@ test "variable: recovery fails on a complete undecodable frame" {
     journal.deinit();
     try testing.expectError(error.EndOfBuffer, h.open());
 }
+
+/// One run of the interrupted-destroy regression: destroy a synced, pruned journal whose
+/// mutations stop after `interrupted`, and return the reopened bounds (null once the destroy
+/// completes). Either way a completed destroy restores empty storage.
+fn interrupted_destroy_reopen(interrupted: u64) !?Bounds {
+    var h = try Harness.init("interrupted-destroy", 2);
+    defer h.deinit();
+    const empty = h.storage.backend.audit();
+    var journal = try h.open();
+    // Sync twice around a prune, leaving seven items in four sections above the boundary.
+    try append_scaled(&journal, 7, 1);
+    try journal.sync();
+    _ = try journal.prune(4);
+    for (7..11) |item| try testing.expectEqual(item, try journal.append(item));
+    try journal.sync();
+    try testing.expectEqual(Bounds{ .start = 4, .end = 11 }, journal.get_bounds());
+    const data = "interrupted-destroy" ++ variable.data_suffix;
+    const names = try h.storage.interface().scan(gpa, data);
+    defer names.deinit(gpa);
+    try testing.expectEqual(4, names.items.len);
+    // Destroy fails exactly when one of its mutations was refused.
+    h.storage.allow_mutations(interrupted);
+    const destroyed = if (journal.destroy()) true else |_| false;
+    try testing.expectEqual(!destroyed, h.storage.mutation_refused);
+    h.storage.mutations_allowed = null;
+    h.storage.crash();
+    if (destroyed) {
+        try testing.expectEqual(empty, h.storage.backend.audit());
+        return null;
+    }
+    // The reopened journal is the synced one or a fresh one.
+    journal = try h.open();
+    const reopened = journal.get_bounds();
+    if (reopened.start == 4) {
+        try testing.expectEqual(Bounds{ .start = 4, .end = 11 }, reopened);
+        try expect_items(&journal, 4, 11, 1);
+    } else {
+        try testing.expectEqual(Bounds{ .start = 0, .end = 0 }, reopened);
+    }
+    // A retried destroy completes and leaves no blob behind.
+    try journal.destroy();
+    try testing.expectEqual(empty, h.storage.backend.audit());
+    return reopened;
+}
+
+// Regression test for commonware issue 5668: a destroy interrupted at any point leaves a
+// journal that reopens as a crash would recover it or as a fresh journal, and that a retried
+// destroy removes. Once a stop leaves the journal empty, no later stop leaves it unchanged.
+test "variable: interrupted destroy reopens unchanged or empty" {
+    const sections = 4;
+    var unchanged: u64 = 0;
+    var emptied: u64 = 0;
+    var interrupted: u64 = 0;
+    while (try interrupted_destroy_reopen(interrupted)) |reopened| : (interrupted += 1) {
+        if (reopened.is_empty()) {
+            emptied += 1;
+        } else {
+            try testing.expectEqual(0, emptied);
+            unchanged += 1;
+        }
+    }
+    try testing.expect(unchanged > 0 and emptied > 0);
+    // Destroy stages the clear, removes every data section and the data partition, then the
+    // offsets journal's blobs and checkpoint, so it can stop at least once before each.
+    try testing.expect(interrupted >= sections + 4);
+}

@@ -367,6 +367,45 @@ test "fixed: bounded recovery repairs a torn rewrite at the cap" {
     try journal.destroy();
 }
 
+// A bounded open whose cap lies below the watermark, both inside a torn page, repairs the page
+// at the end of its durable prefix. The acknowledged items survive, the persisted watermark is
+// untouched, and a later open with a larger cap or none recovers all of them.
+test "fixed: bounded recovery below the watermark keeps acknowledged items" {
+    const Test = Harness("torn-rewrite-below-watermark");
+    var h = try Test.init(.{ .items_per_blob = 64, .page_size = 100 });
+    defer h.deinit();
+    {
+        var journal = try h.open(Digest);
+        defer journal.deinit();
+        for (0..33) |i| _ = try journal.append(test_digest(i));
+        try journal.sync();
+        for (33..38) |i| _ = try journal.append(test_digest(i));
+        try journal.commit();
+    }
+    try testing.expect(try h.set_byte(0, 10, 60, 0) != 0);
+    // Cap 32 and watermark 33 both end inside torn page 10.
+    {
+        var recovery = try fixed.Recovery(Digest).open(gpa, h.iface(), h.cfg(), 32);
+        defer recovery.deinit();
+        try testing.expectEqual(Bounds{ .start = 0, .end = 32 }, recovery.get_bounds());
+        try testing.expectEqual(test_digest(31), try recovery.item(31));
+    }
+    const partition = "torn-rewrite-below-watermark";
+    const watermark = try fixed.Journal(Digest).persisted_watermark(gpa, h.iface(), partition);
+    try testing.expectEqual(33, watermark.?);
+    // A larger cap and no cap both recover the 33 acknowledged items.
+    {
+        var recovery = try fixed.Recovery(Digest).open(gpa, h.iface(), h.cfg(), 36);
+        defer recovery.deinit();
+        try testing.expectEqual(Bounds{ .start = 0, .end = 33 }, recovery.get_bounds());
+        try testing.expectEqual(test_digest(32), try recovery.item(32));
+    }
+    var journal = try h.open(Digest);
+    try testing.expectEqual(Bounds{ .start = 0, .end = 33 }, journal.get_bounds());
+    for (0..33) |i| try testing.expectEqual(test_digest(i), try journal.read(i));
+    try journal.destroy();
+}
+
 fn match_all(_: void, _: Digest) bool {
     return true;
 }

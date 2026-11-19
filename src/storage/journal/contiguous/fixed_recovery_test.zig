@@ -314,6 +314,30 @@ test "fixed: partial replay and replay range" {
     try journal.destroy();
 }
 
+/// commonware's `check_replay_batches` over digests: batches tile `range` in position order,
+/// are non-empty, never cross a blob, and exceed `buffer` by less than one item.
+fn check_digest_batches(journal: *Journal, range: Bounds, buffer: usize) !void {
+    var replay = try journal.replay(range, buffer);
+    defer replay.deinit();
+    var next = range.start;
+    while (try replay.next()) |batch| {
+        try testing.expectEqual(next, batch.start);
+        try testing.expect(batch.items.len > 0);
+        try testing.expect((batch.items.len - 1) * digest_size < buffer);
+        const end = batch.start + batch.items.len;
+        try testing.expect(end <= range.end);
+        try testing.expectEqual(batch.start / 7, (end - 1) / 7);
+        for (batch.items, 0..) |item, index| {
+            try testing.expectEqual(test_digest(batch.start + index), item);
+        }
+        next = end;
+    }
+    try testing.expectEqual(range.end, next);
+}
+
+// Replay tiles a range in position order without crossing blob boundaries, through sealed
+// blobs and the unsynced tail, at budgets of one item, part of a blob, and the whole journal;
+// a synced tail is replayed through its sealed pages.
 test "fixed: replay batches stay within blobs and budgets" {
     var h = try Harness.init(7);
     defer h.deinit();
@@ -325,21 +349,130 @@ test "fixed: replay batches stay within blobs and budgets" {
         .{ .start = 30, .end = 30 },   .{ .start = 70, .end = total },
     };
     for ([_]usize{ digest_size, 100, 2048 }) |buffer| {
-        for (ranges) |range| {
-            var replay = try journal.replay(range, buffer);
-            defer replay.deinit();
-            var next = range.start;
-            while (try replay.next()) |batch| {
-                try testing.expectEqual(next, batch.start);
-                try testing.expect((batch.items.len - 1) * digest_size < buffer);
-                const end = batch.start + batch.items.len;
-                try testing.expectEqual(batch.start / 7, (end - 1) / 7);
-                next = end;
-            }
-            try testing.expectEqual(range.end, next);
-        }
+        for (ranges) |range| try check_digest_batches(&journal, range, buffer);
     }
+    try journal.sync();
+    try check_digest_batches(&journal, .{ .start = 65, .end = total }, 100);
     try journal.destroy();
+}
+
+// A page with a bad checksum ends the replay after the items decoded before it, with exactly
+// one `InvalidChecksum`, whether the page starts its fill or sits inside it, at buffers of 8
+// and 64 physical pages. commonware splits the buffer into four read-ahead batches; zigware
+// fills the whole buffer at once, so the bad page sits in the third fill and the items of the
+// two fills before it are yielded. Valid pages of the bad page's fill are not yielded.
+test "fixed: a bad page in a read-ahead fill ends the replay" {
+    const page = 64;
+    const items = 1280;
+    const physical = page + 12;
+    const items_per_page = page / 8;
+    for ([_][2]u64{ .{ 8, 0 }, .{ 8, 1 }, .{ 64, 0 }, .{ 64, 1 } }) |scenario| {
+        const buffer_pages, const within_fill = scenario;
+        const bad_page = 2 * buffer_pages + within_fill;
+        const expected_items = 2 * buffer_pages * items_per_page;
+        var storage = Storage.init(gpa);
+        defer storage.deinit();
+        var cache_ref = try paged.CacheRef.init(gpa, page, 4);
+        defer cache_ref.deinit();
+        const cfg: fixed.Config = .{
+            .partition = "bad-page",
+            .items_per_blob = items,
+            .cache_ref = &cache_ref,
+            .write_buffer = 2048,
+            .replay_buffer = 2048,
+        };
+        {
+            var journal = try fixed.Journal(u64).init(gpa, storage.interface(), cfg);
+            defer journal.deinit();
+            for (0..items) |item| _ = try journal.append(item);
+            try journal.sync();
+        }
+        const name = manager_mod.section_name(0);
+        try paged.corrupt_page(storage.interface(), "bad-page-blobs", &name, bad_page, page);
+        cache_ref.clear();
+        var journal = try fixed.Journal(u64).init(gpa, storage.interface(), cfg);
+        defer journal.deinit();
+        const range: Bounds = .{ .start = 0, .end = items };
+        var replay = try journal.replay_options(range, buffer_pages * physical, .{
+            .dont_cache = true,
+        });
+        defer replay.deinit();
+        var next: u64 = 0;
+        const failure = while (true) {
+            const batch = replay.next() catch |err| break err;
+            const yielded = batch orelse return error.TestUnexpectedResult;
+            try testing.expectEqual(next, yielded.start);
+            for (yielded.items) |item| {
+                try testing.expectEqual(next, item);
+                next += 1;
+            }
+        };
+        try testing.expectEqual(error.InvalidChecksum, failure);
+        try testing.expectEqual(expected_items, next);
+        try testing.expectEqual(null, try replay.next());
+    }
+}
+
+/// Replay `range` with `options`, checking `[range.start, range.start + count)` are
+/// `test_digest(position)`, and return how many backing reads it made and how many of them
+/// were `dont_cache`.
+fn replay_reads(
+    h: *Harness,
+    journal: *Journal,
+    range: Bounds,
+    buffer: usize,
+    options: runtime.storage.ReadOptions,
+) !struct { u64, u64 } {
+    h.cache_ref.clear();
+    var replay = try journal.replay_options(range, buffer, options);
+    defer replay.deinit();
+    const reads = h.storage.reads;
+    const dont_cache = h.storage.dont_cache_reads;
+    var next = range.start;
+    while (try replay.next()) |batch| {
+        try testing.expectEqual(next, batch.start);
+        for (batch.items, 0..) |item, index| {
+            try testing.expectEqual(test_digest(next + index), item);
+        }
+        next += batch.items.len;
+    }
+    try testing.expectEqual(range.end, next);
+    return .{ h.storage.reads - reads, h.storage.dont_cache_reads - dont_cache };
+}
+
+// Replay's read options reach sealed history and the writable tip: sealed blobs carry the
+// caller's options on every read, and a synced tip's full pages arrive in one read carrying
+// them. commonware replays a tip holding an unwritten full page through the page cache, which
+// faults pages with `dont_cache` whatever the caller passed; zigware replays the tip's flushed
+// pages from the blob and its buffered bytes from memory, so the caller's option still holds.
+test "fixed: replay read options reach history and tip" {
+    var h = try Harness.init(6);
+    defer h.deinit();
+    var journal = try h.open();
+    defer journal.deinit();
+    // The tip blob holds three items across two full pages and a partial page.
+    try Harness.fill(&journal, 0, 9);
+    try journal.sync();
+    const dont_cache: runtime.storage.ReadOptions = .{ .dont_cache = true };
+    const history = try replay_reads(&h, &journal, .{ .start = 0, .end = 9 }, 56, dont_cache);
+    try testing.expect(history[0] > 0);
+    try testing.expectEqual(history[0], history[1]);
+    for ([_]runtime.storage.ReadOptions{ .{}, dont_cache }) |options| {
+        const tip = try replay_reads(&h, &journal, .{ .start = 6, .end = 9 }, 2048, options);
+        try testing.expectEqual(1, tip[0]);
+        try testing.expectEqual(@intFromBool(options.dont_cache), tip[1]);
+        // A replay that skipped the cache leaves the next read to fault the page in.
+        const before = h.storage.reads;
+        try testing.expectEqual(test_digest(6), try journal.read(6));
+        try testing.expect(h.storage.reads > before);
+        const cached = h.storage.reads;
+        try testing.expectEqual(test_digest(6), try journal.read(6));
+        try testing.expectEqual(cached, h.storage.reads);
+    }
+    // A tip with a buffered full page is still replayed with the caller's options.
+    try Harness.fill(&journal, 9, 2);
+    const buffered = try replay_reads(&h, &journal, .{ .start = 6, .end = 11 }, 2048, .{});
+    try testing.expectEqual(0, buffered[1]);
 }
 
 test "fixed: replay batches stop at codec error" {

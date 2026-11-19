@@ -16,6 +16,7 @@ const mocks = runtime.buffer.mocks;
 const paged = runtime.buffer.paged;
 const contiguous = @import("mod.zig");
 const variable = @import("variable.zig");
+const frame = @import("../frame.zig");
 
 const gpa = testing.allocator;
 const Bounds = contiguous.Bounds;
@@ -537,4 +538,105 @@ test "variable: journal metrics" {
     try testing.expectEqual(1, m.sync_calls.metric().get());
     try testing.expectEqual(4, m.cache_hits.metric().get());
     try testing.expectEqual(0, m.cache_misses.metric().get());
+}
+
+/// Replay `range` of a journal of `u64` positions with `options` from a cold cache, checking
+/// every item, and return how many backing reads it made and how many were `dont_cache`.
+fn replay_reads(
+    h: anytype,
+    journal: anytype,
+    range: Bounds,
+    buffer: usize,
+    options: runtime.storage.ReadOptions,
+) !struct { u64, u64 } {
+    h.cache_ref.clear();
+    var replay = try journal.replay_options(range, buffer, options);
+    defer replay.deinit();
+    const reads = h.storage.reads;
+    const dont_cache = h.storage.dont_cache_reads;
+    var next = range.start;
+    while (try replay.next()) |batch| {
+        try testing.expectEqual(next, batch.start);
+        for (batch.items) |item| {
+            try testing.expectEqual(next, item);
+            next += 1;
+        }
+    }
+    try testing.expectEqual(range.end, next);
+    return .{ h.storage.reads - reads, h.storage.dont_cache_reads - dont_cache };
+}
+
+// Replay's read options reach sealed history and the writable tip: sealed sections carry the
+// caller's options on every read, and a synced tip's full pages arrive in one read carrying
+// them. commonware replays a tip holding an unwritten full page through the page cache, which
+// faults pages with `dont_cache` whatever the caller passed; zigware replays the tip's flushed
+// pages from the blob and its buffered bytes from memory, so the caller's option still holds.
+test "variable: replay read options reach history and tip" {
+    const Test = Harness(u64, "variable-replay-read-options");
+    var h = try Test.init(.{ .items_per_section = 20, .page_size = 40, .cache_pages = 8 });
+    defer h.deinit();
+    var journal = try h.open();
+    defer journal.deinit();
+    // The tip section's fifteen 9-byte frames fill three full pages and a partial page.
+    for (0..35) |item| try testing.expectEqual(item, try journal.append(item));
+    try journal.sync();
+    const dont_cache: runtime.storage.ReadOptions = .{ .dont_cache = true };
+    const history = try replay_reads(&h, &journal, bounds(0, 35), 32, dont_cache);
+    try testing.expect(history[0] > 0);
+    try testing.expectEqual(history[0], history[1]);
+    for ([_]runtime.storage.ReadOptions{ .{}, dont_cache }) |options| {
+        const tip = try replay_reads(&h, &journal, bounds(20, 35), 2048, options);
+        try testing.expectEqual(1, tip[0]);
+        try testing.expectEqual(@intFromBool(options.dont_cache), tip[1]);
+        // The first read faults its page into the cache; the second is served from it.
+        h.cache_ref.clear();
+        const before = h.storage.reads;
+        try testing.expectEqual(20, try journal.read(20));
+        try testing.expect(h.storage.reads > before);
+        const cached = h.storage.reads;
+        try testing.expectEqual(20, try journal.read(20));
+        try testing.expectEqual(cached, h.storage.reads);
+    }
+    // A tip with a buffered full page is still replayed with the caller's options.
+    for (35..39) |item| try testing.expectEqual(item, try journal.append(item));
+    const buffered = try replay_reads(&h, &journal, bounds(20, 39), 2048, .{});
+    try testing.expectEqual(0, buffered[1]);
+}
+
+// A prepared compressed append encodes exactly the frames `encode_frame_into` would, with
+// each item's start recorded: a highly compressible large record, many small random records,
+// and small records followed by a large one. commonware's spare-capacity bound has no
+// counterpart: zigware's prepared buffers are exact-size owned slices.
+test "variable: prepared compressed appends match their frames" {
+    const Test = Harness(Bytes, "prepared-compressed-capacity");
+    var h = try Test.init(.{ .items_per_section = 1024, .compression = 3, .page_size = 64 });
+    defer h.deinit();
+    var journal = try h.open();
+    defer journal.deinit();
+    const large = try gpa.alloc(u8, 1 << 20);
+    defer gpa.free(large);
+    @memset(large, 0xAB);
+    const records = try gpa.alloc([64]u8, 4096);
+    defer gpa.free(records);
+    var prng = std.Random.DefaultPrng.init(0x5eed);
+    for (records) |*record| prng.random().bytes(record);
+    const small = try gpa.alloc(Bytes, records.len);
+    defer gpa.free(small);
+    for (small, records) |*item, *record| item.* = record;
+    var mixed: [65]Bytes = undefined;
+    @memcpy(mixed[0..64], small[0..64]);
+    mixed[64] = large;
+    for ([_][]const Bytes{ &.{large}, small, &mixed }) |batch| {
+        var prepared = try journal.prepare_append(&.{batch});
+        defer prepared.deinit(gpa);
+        var expected: std.ArrayList(u8) = .empty;
+        defer expected.deinit(gpa);
+        try testing.expectEqual(batch.len, prepared.starts.len);
+        for (batch, prepared.starts) |record, start| {
+            try testing.expectEqual(expected.items.len, start);
+            _ = try frame.encode_frame_into(Bytes, gpa, 3, record, &expected);
+        }
+        try testing.expectEqualSlices(u8, expected.items, prepared.encoded);
+        try testing.expect(prepared.compressed);
+    }
 }

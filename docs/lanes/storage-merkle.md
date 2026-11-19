@@ -67,7 +67,40 @@ variants need `runtime` storage; do them after its interface lands.
   bench against the raw-block path. Byte identity with libzstd is not required.
 - [x] Storage fuzz targets `journal_fixed_operations` and `queue_operations` (handed over from
   storage-journal).
-- [ ] Partitioned index `new_range`/`install_range`, if storage-qmdb asks for it.
+- Partitioned index `new_range`/`install_range`: moved to the clearing lane with its index tests.
+- [ ] Parallel merkleize strategy over the `parallel` package (commonware's `Strategy` on
+  `UnmerkleizedBatch`/`MerkleizedBatch`; the benches' workers=8 and BatchedParallel cases), and
+  the tests that need it (`level_batches_keep_pairs`, `batch_parallel_update_leaf`,
+  `test_mem_mmr_batched_root_parallel`).
+- [ ] Duration histograms for the journals' `read_miss_timed`, if runtime telemetry has them.
+
+## Test tally (2026-11-19, merkle and journal internals)
+Commonware's tests in `storage/src/merkle` and the contiguous journals, matched by what they
+check. Status after the 24 open ports landed (two `read_location` tests went to storage-qmdb).
+
+| file | tests | ported | open | not portable |
+|---|---|---|---|---|
+| merkle batch, mem, proof, verification, hasher, storage, position | 219 | 207 | 0 | 12 |
+| mmr (mod, mem, full, iterator, proof), mmb, persisted/compact | 87 | 68 | 2 (qmdb) | 17 |
+| persisted/full.rs | 121 | 116 | 0 | 5 |
+| journal/contiguous/fixed.rs | 136 | 118 | 0 | 18 |
+| journal/contiguous/variable.rs | 152 | 121 | 0 | 31 |
+
+Not portable: positions are plain `u64` (Display, operator, checked/saturating sub tests),
+`should_panic` tests, start_sync handles (parked, dropped, or failed syncs), `View` sharing,
+snapshot readers, decode counts, batched `read_many` internals, and Rust type checks. The
+parallel-strategy and duration-histogram tests are capabilities, now in the backlog.
+
+Deviations in the ports:
+- Replay read options: commonware replays a tip holding an unwritten full page through the page
+  cache, which faults pages with `dont_cache`; zigware replays the tip's flushed pages from the
+  blob with the caller's options and its buffered bytes from memory, and the tests assert that.
+- A bad page in a read-ahead fill: commonware splits the replay buffer into four read-ahead
+  batches; zigware fills the whole buffer at once, so the test corrupts a page of the third
+  fill and expects the two fills before it.
+- Bounded open below a torn watermark page: there is no `Recovery::unbounded()`, so the test
+  drops the capped recovery and reopens without a cap.
+- Prepared compressed appends: no spare-capacity bound (prepared buffers are exact-size).
 
 ## Test tally (2026-11-19, clearing lane)
 Commonware's `#[test]` functions matched to zigware tests by what they check.
@@ -403,3 +436,4 @@ Partial:
     as fast as the earlier encoder and writes libzstd's level 3 ratio, so journals lose nothing
     by using it; `Mode.compress` stays only for comparison.
 - 2026-11-19: test tally of index, rmap, bitmap, and translator against commonware (clearing lane).
+- 2026-11-19: tally of merkle and journal internals; ported its 22 open tests in this lane.

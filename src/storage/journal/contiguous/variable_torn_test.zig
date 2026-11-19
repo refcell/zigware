@@ -460,3 +460,45 @@ test "variable: recovery of an unsynced tail keeps the contiguous prefix" {
     try testing.expectEqual(2000, try journal.read(20));
     try journal.destroy();
 }
+
+/// The durable logical bytes of blob 0 of `partition`, even while a handle is open, owned by
+/// the caller (commonware's `logical_blob`).
+fn blob_bytes(h: *TornRewrite, partition: []const u8) ![]u8 {
+    const name = manager_mod.section_name(0);
+    const bytes = try h.storage.backend.logical_blob(gpa, partition, &name);
+    return bytes.?;
+}
+
+// A bounded open whose cap lies in a page below the watermark's page truncates the torn data
+// page at once, since the data scan covers the whole blob, but repairs the offsets journal only
+// through the cap's page. The torn rewrite of the watermark's offsets page stays for a later
+// open, and widening the view recovers every acknowledged item. zigware has no `unbounded()`
+// recovery, so the capped recovery is dropped and the journal reopened without a cap.
+test "variable: bounded open below a torn watermark page, then widened" {
+    var h = try TornRewrite.init(torn_options);
+    defer h.deinit();
+    try torn_rewrite_seed(&h);
+    try h.tear_rewrite(TornRewrite.data, 10, 95);
+    try h.tear_rewrite(TornRewrite.offsets ++ "-blobs", 2, 70);
+    // Cap 10 ends in offsets page 0, while the watermark's last offset is in page 2.
+    {
+        var recovery = try variable.Recovery(Wide).open(gpa, h.iface(), h.cfg(), 10);
+        defer recovery.deinit();
+        try testing.expectEqual(bounds(0, 10), recovery.get_bounds());
+        try testing.expectEqual(@as(Wide, @splat(9)), try recovery.read(9));
+        // The data blob ends at page 10's 89 durable bytes, while offsets page 2 still
+        // validates only its 64 durable bytes with page 3 behind it.
+        const physical = 100 + checksum_size;
+        const data = try blob_bytes(&h, TornRewrite.data);
+        defer gpa.free(data);
+        try testing.expectEqual(11 * physical, data.len);
+        const offsets = try blob_bytes(&h, TornRewrite.offsets ++ "-blobs");
+        defer gpa.free(offsets);
+        try testing.expect(offsets.len >= 4 * physical);
+        try testing.expectEqual(64, paged.page_len(offsets[2 * physical ..][0..physical], 100));
+    }
+    var journal = try h.open();
+    try testing.expectEqual(bounds(0, 33), journal.get_bounds());
+    for (0..33) |i| try testing.expectEqual(@as(Wide, @splat(@intCast(i))), try journal.read(i));
+    try journal.destroy();
+}
