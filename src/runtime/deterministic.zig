@@ -210,11 +210,11 @@ const Task = struct {
         return .{ .name = task.label(), .kind = task.label_kind, .execution = .shared };
     }
 
-    /// With `-Dcancel-audit`, panics when the task reaches a cancelation point while holding a
-    /// cancel it already acknowledged and never re-armed: it caught `error.Canceled` without
-    /// propagating it or calling `io.recancel()`, so this point cannot deliver the cancel and a
-    /// cancelable wait here is never woken by it. Deliberate work after a cancel opts out by
-    /// blocking cancelation (`io.swapCancelProtection(.blocked)`).
+    /// With `-Dcancel-audit` (the default), panics when the task reaches a cancelation point
+    /// while holding a cancel it already acknowledged and never re-armed: it caught
+    /// `error.Canceled` without propagating it or calling `io.recancel()`, so this point cannot
+    /// deliver the cancel and a cancelable wait here is never woken by it. Deliberate work
+    /// after a cancel opts out by blocking cancelation (`io.swapCancelProtection(.blocked)`).
     fn audit_cancel(task: *const Task) void {
         if (!build_options.cancel_audit) return;
         if (!task.cancel_requested or !task.cancel_acknowledged) return;

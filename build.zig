@@ -184,15 +184,16 @@ fn add_test_options(b: *std.Build, options: *std.Build.Step.Options) void {
     add_cancel_audit_option(b, options);
 }
 
-/// `-Dcancel-audit`: the deterministic runtime panics when a task swallows its cancel (catches
-/// `error.Canceled` without propagating it or calling `io.recancel()`) and then reaches another
-/// cancelation point.
+/// `-Dcancel-audit` (on by default): the deterministic runtime panics when a task swallows its
+/// cancel (catches `error.Canceled` without propagating it or calling `io.recancel()`) and then
+/// reaches another cancelation point. `-Dcancel-audit=false` turns it off.
 fn add_cancel_audit_option(b: *std.Build, options: *std.Build.Step.Options) void {
     const cancel_audit = b.option(
         bool,
         "cancel-audit",
-        "Panic when a deterministic task swallows its cancel (no recancel) and waits again",
-    ) orelse false;
+        "Panic when a deterministic task swallows its cancel (no recancel) and waits again " ++
+            "(default: true)",
+    ) orelse true;
     options.addOption(bool, "cancel_audit", cancel_audit);
 }
 

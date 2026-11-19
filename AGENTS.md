@@ -144,6 +144,9 @@ Read this whole file before you change anything. These rules are not optional.
   acknowledged, the next wait blocks forever, so a supervisor never reaches its abort and
   drain (the partitioned-restart teardown assert, found by marshal). A catch-all `catch` that
   can see `Canceled` counts too.
+  The deterministic runtime enforces this: a task that reaches a cancelation point while
+  holding a cancel it caught and never re-armed panics (`-Dcancel-audit`, on by default).
+  Deliberate work after a cancel opts out with `io.swapCancelProtection(.blocked)`.
 - On the deterministic runtime every hand-off between tasks costs a scheduler cycle (1 ms of
   simulated time), so a one-item inbox caps a pipeline near 500 items/s. Hand off through a
   bounded ring or queue, not one slot.
