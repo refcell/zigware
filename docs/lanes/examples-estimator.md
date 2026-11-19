@@ -83,7 +83,7 @@ statistics, output, CLI) and run against a minimal in-lane stand-in, then switch
 - [x] Binary on `runtime.production.Runner` and p2p `authenticated::discovery`, with the
   metrics endpoint; 4 local peers flood each other over TCP.
 - [x] Demo recording (`etc/scripts/record-demo.sh flood`): docs/assets/flood-demo.{gif,mp4}.
-- [ ] `setup` (config generation) on `deployer.aws`; see Follow-ups.
+- [x] `setup` (config generation) on `deployer.aws`: ported by the deployer lane in 746eb43.
 
 ### chat (commonware `examples/chat`)
 - [x] Logger and handler (TUI with plain ANSI, no deps), CLI, `peer_set_limit` test. The
