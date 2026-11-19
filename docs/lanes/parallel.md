@@ -132,6 +132,8 @@ placeholder until this lands, so land `Strategy` first and tell the coordinator 
   benches.
 
 ## Log
+- 2026-11-19: reviewed the 216 not-portable tests; ported the 15 that test API promises
+  (pool_api_tests.zig). The pool needed no changes.
 - 2026-11-19: the audit's open tests: rayon join/sort/meter/spawn, the adaptive Rayon's
   policy use (adaptive_tests.zig), and policy.rs's spawn-placement, confined, interleaved, and
   worker-spawn tests (policy_late_tests.zig). No open tests remain.
@@ -165,11 +167,11 @@ Every commonware `#[test]` in this lane's crates (macro and rstest cases expande
 ### parallel (lib.rs, mocks.rs, policy.rs, topology.rs)
 | File | Tests | Ported | Open | Not portable |
 | --- | --- | --- | --- | --- |
-| lib.rs | 106 | 52 | 0 | 54 |
+| lib.rs | 106 | 60 | 0 | 46 |
 | mocks.rs | 12 | 9 | 0 | 3 |
 | policy.rs | 83 | 83 | 0 | 0 |
 | topology.rs | 35 | 7 | 0 | 28 |
-| Total | 236 | 151 | 0 | 85 |
+| Total | 236 | 159 | 0 | 77 |
 
 Open:
 - [x] `lib.rs:3790` `spawn_inlines_a_sub_overhead_job`: adaptive spawn honors an inline decision
@@ -270,12 +272,11 @@ Open:
 Not portable:
 - `lib.rs` `forced_parallel_uses_idle_group`, `local_calls_home_group`,
   `nested_calls_record_current_placement`, `unhomed_calls_compare_remote_group`,
-  `single_group_places_outside_calls`, `fold_init_wide_seed_preserves_order`,
-  `local_nested_calls_stay_on_group`, `wide_nested_calls_span_groups`,
+  `single_group_places_outside_calls`, `local_nested_calls_stay_on_group`, `wide_nested_calls_span_groups`,
   `sort_inherits_worker_placement`, `local_calls_use_only_group_workers`,
-  `grouped_jobs_and_runs_complete`, `spawn_inline_leaves_groups_untouched`,
+  `spawn_inline_leaves_groups_untouched`,
   `sort_leases_only_its_group`, `join_seeds_wide_then_home_group`,
-  `waiting_worker_runs_queued_dependencies`, `root_keeps_claim_on_execution_group`,
+  `root_keeps_claim_on_execution_group`,
   `root_uses_learned_descendant_width`, `narrow_root_runs_wide_unrecorded`,
   `spawn_inherits_worker_placement`, `spawn_dropped_future_keeps_claims`,
   `spawn_detached_local_keeps_group_busy`, `spawn_detached_wide_keeps_groups_busy`,
@@ -306,12 +307,8 @@ Not portable:
   `nested_block_on_keeps_the_outer_wake`, `spawn_future_moved_from_outside_to_worker_keeps_helping`,
   `spawn_driven_inline_on_member_thread`: polling, moving, or block_on of arbitrary futures;
   zigware's spawn takes a caller-owned Task, not a future (lane Decisions)
-- `lib.rs` `nested_calls_use_current_pool`, `new_keeps_builder_settings`,
-  `taken_over_thread_leaves_no_jobs`: rayon builder and worker features (install_in, thread names,
-  start handler, use_current_thread, yield_now)
-- `lib.rs` `adaptive_policy_is_scoped_to_rayon`, `adaptive_policy_is_shared_by_clones`,
-  `strategy_without_policy_records_nothing`: Rust's per-Rayon Arc policy, Clone, and without_policy;
-  zigware's policy is opt-in, caller-owned, shared by pointer
+- `lib.rs` `new_keeps_builder_settings`: rayon builder and worker features (install_in,
+  thread names, start handler, use_current_thread, yield_now)
 - `mocks.rs` `pending_rejects_single_worker`,
   `parallel_explorer_refuses_to_inline_a_handed_off_job`: #[should_panic]
 - `mocks.rs` `explore_drops_its_pool_on_return`: Arc weak-pointer drop check
@@ -339,13 +336,13 @@ Not portable:
 | rayon/join/test.rs | 9 | 3 | 0 | 6 |
 | rayon/meter/test.rs | 22 | 3 | 0 | 19 |
 | rayon/registry/injector.rs | 1 | 0 | 0 | 1 |
-| rayon/registry/test.rs | 32 | 0 | 0 | 32 |
+| rayon/registry/test.rs | 32 | 4 | 0 | 28 |
 | rayon/sort.rs | 12 | 8 | 0 | 4 |
 | rayon/spawn/test.rs | 4 | 2 | 0 | 2 |
 | rayon/test.rs | 7 | 2 | 0 | 5 |
-| rayon/thread_pool/test.rs | 21 | 2 | 0 | 19 |
+| rayon/thread_pool/test.rs | 21 | 5 | 0 | 16 |
 | rayon/wake_loom_tests.rs | 3 | 0 | 0 | 3 |
-| Total | 157 | 26 | 0 | 131 |
+| Total | 157 | 33 | 0 | 124 |
 
 Open:
 - [x] `rayon/bridge.rs:1961` `try_fold_stops_at_an_error_and_drops_every_item_once`: try_fold
@@ -419,7 +416,7 @@ Not portable:
   `idle_yields_charge_nothing`: install, groups, broadcast, yield_now not ported
 - `rayon/registry/injector.rs` `contended_admission_keeps_worker_available`: grouped
   injector, placements, and yield_now not ported (pool is one group, topology Decision)
-- `rayon/registry/test.rs` all 32 (`workers_form_consecutive_groups` ...
+- `rayon/registry/test.rs` 28 of 32 (`workers_form_consecutive_groups` ...
   `wide_work_survives_concurrent_local_wakes`): worker groups, Local/Wide placements,
   install, per-worker deques, broadcast, thread names; pool is one group (Decisions)
 - `rayon/sort.rs` `test_heapsort`, `test_split_for_merge`: rayon sort internals; zigware
@@ -437,8 +434,6 @@ Not portable:
   catch_unwind, and zigware ops need no worker
 - `rayon/thread_pool/test.rs` `panic_propagate`: #[should_panic]; `panic_thread_name`:
   thread_name and catch_unwind; `failed_thread_stack`: stack_size not ported
-- `rayon/thread_pool/test.rs` `self_install`, `mutual_install`, `mutual_install_sleepy`:
-  install not ported (operations run on the caller)
 - `rayon/thread_pool/test.rs` `spawn_lifo_order`: FIFO queue by design;
   `yield_now_to_spawn`: yield_now not ported
 - `rayon/thread_pool/test.rs` `result_wakes_sleeping_worker`,
@@ -452,3 +447,27 @@ Not portable:
   `injection_races_local_wake_handoff`: loom models of the grouped sleep protocol; no
   grouped pool and no loom
 
+### Not-portable review (2026-11-19)
+
+The 216 not-portable tests were reread now that collector and storage-merkle run real work on
+the Rayon strategy and pool. 201 stay not portable: they test rayon's own internals or features
+zigware deliberately leaves out (grouped pools, homing, and affinity; broadcast, install, and
+yield_now; future polling and wakers; per-thread busy accounting; panics, unwinding, and drop
+counting; LIFO deques; thread names and start handlers). 15 test behavior the `parallel` API
+promises and are ported in `pool_api_tests.zig`, with placements, worker identities, and
+futures dropped. The pool met every one unchanged; each group catches a planted bug (a LIFO
+queue, a waiter that neither reclaims nor helps, workers never woken, a dropped policy, swapped
+reductions, a skipped join side).
+- [x] `lib.rs` `fold_init_wide_seed_preserves_order`: item order across slow items
+- [x] `lib.rs` `grouped_jobs_and_runs_complete`: concurrent callers' jobs and maps complete
+- [x] `lib.rs` `waiting_worker_runs_queued_dependencies`: a waiting job runs its dependency
+- [x] `lib.rs` `nested_calls_use_current_pool`: nested maps use every worker, nothing queued
+- [x] `lib.rs` `taken_over_thread_leaves_no_jobs`: a zero-thread pool maps and folds
+- [x] `lib.rs` `adaptive_policy_is_scoped_to_rayon`, `adaptive_policy_is_shared_by_clones`,
+  `strategy_without_policy_records_nothing`: one test of policy scoping
+- [x] `rayon/registry/test.rs` `random_placements_complete`: random job trees from 8 threads
+- [x] `rayon/registry/test.rs` `spawn_external_jobs_keep_submission_order`,
+  `spawn_contended_producers_keep_submission_order`: FIFO order per producer and thread
+- [x] `rayon/registry/test.rs` `install_crosses_pools_and_returns`, `rayon/thread_pool/test.rs`
+  `self_install`, `mutual_install`, `mutual_install_sleepy`: nested spawns within and across
+  one-worker pools never deadlock (sleeps of 100 ms, not 1 s)
