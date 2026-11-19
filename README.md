@@ -77,6 +77,20 @@ are one validator from each network, where `block=Bridge(..)` marks a proposal c
 other network's finalization ([video](docs/assets/bridge-demo.mp4)).
 `etc/scripts/record-demo.sh bridge` records it again.
 
+<p align="center">
+  <img src="docs/assets/dkg-demo.gif" width="800"
+    alt="Four validators reshare a threshold BLS12-381 key at every epoch boundary">
+</p>
+
+[dkg](examples/dkg) follows commonware's flow: `dkg setup` writes configs for four peers
+with a committee of three, the three epoch-zero players run `bootstrap` to complete a one-shot
+DKG and write the genesis, then four `validator`s run Simplex over marshal and a QMDB-backed
+stateful application. At every epoch boundary the committee reshares its threshold key on
+chain: each pane shows dealings and acks arriving, dealer logs observed on chain,
+`completed reshare ceremony ... success=true`, and the orchestrator entering the next epoch
+with the new key ([video](docs/assets/dkg-demo.mp4)).
+`etc/scripts/record-demo.sh dkg` records it again.
+
 > [!WARNING]
 > zigware is pre-alpha and being ported now. Do not use it in production.
 
