@@ -124,6 +124,10 @@ Read this whole file before you change anything. These rules are not optional.
 - On the deterministic runtime every hand-off between tasks costs a scheduler cycle (1 ms of
   simulated time), so a one-item inbox caps a pipeline near 500 items/s. Hand off through a
   bounded ring or queue, not one slot.
+- `{}` and `{any}` ignore a type's `format` method and print every struct field (to depth 3),
+  so a custom `format` does not redact secrets. Store key material in
+  `cryptography.secret.Opaque(T)` (an untagged union std.fmt prints as `.{ ... }`) and read
+  it through `.value`; `cryptography/redaction_test.zig` checks every private key type.
 - The build runner prints `run test test-X stderr` and a `failed command: ...` line for any
   test step that wrote to stderr, even when every test in it passed. That alone is not a
   failure: look for a step line with `fail`, `crash`, `timeout`, or `leaks`, an `error:`
