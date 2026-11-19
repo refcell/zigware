@@ -189,11 +189,16 @@ pub fn select(
     var started: usize = 0;
     while (started < handles.len) : (started += 1) {
         race.concurrent(.done, Waiter.wait, .{ io, handles[started], started }) catch |err| {
+            // A cancel the caller's own joins take here is its, and must outlive the drain.
+            var canceled = false;
             for (handles[started..]) |handle| {
-                if (handle.abort()) |_| {} else |_| {}
+                if (handle.abort()) |_| {} else |join_err| {
+                    canceled = canceled or join_err == error.Canceled;
+                }
             }
             abort_all(tree, nodes[0..started]);
             drain(Race, &race, started);
+            if (canceled) return error.Canceled;
             return err;
         };
     }

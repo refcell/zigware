@@ -199,7 +199,16 @@ pub const Blob = struct {
     /// a `start_sync` entry sync inline and return a ready completion, as commonware's memory
     /// backend does.
     pub fn start_sync(blob: Blob) Error!Completion {
-        const start = blob.vtable.start_sync orelse return Completion.ready(blob.sync());
+        const start = blob.vtable.start_sync orelse {
+            // A cancel the inline sync took is the caller's, not the completion's: returned
+            // in a ready completion that is only polled or released, it would be lost, and the
+            // task's next wait would never wake.
+            blob.sync() catch |err| {
+                if (err == error.Canceled) return error.Canceled;
+                return .ready(err);
+            };
+            return .ok;
+        };
         return start(blob.ptr);
     }
 
@@ -302,6 +311,69 @@ test "options are single bits" {
     try std.testing.expectEqual(@as(u8, 1), @as(u8, @bitCast(WriteOptions{ .sync = true })));
     try std.testing.expectEqual(@as(u8, 2), @as(u8, @bitCast(WriteOptions{ .dont_cache = true })));
     try std.testing.expectEqual(@as(u8, 1), @as(u8, @bitCast(ReadOptions{ .dont_cache = true })));
+}
+
+/// A blob whose `sync` waits until canceled, with no `start_sync` entry.
+const CancelableSync = struct {
+    const Ctx = @import("deterministic.zig").Context;
+    const vtable: Blob.VTable = .{
+        .read_at = unused_read,
+        .write_at = unused_write,
+        .resize = unused_resize,
+        .sync = sync,
+        .close = unused_close,
+    };
+
+    fn sync(ptr: *anyopaque) Error!void {
+        const ctx: *const Ctx = @ptrCast(@alignCast(ptr));
+        ctx.sleep(.fromSeconds(3600)) catch return error.Canceled;
+        unreachable; // The test cancels the sync.
+    }
+    fn unused_read(_: *anyopaque, _: u64, _: []u8, _: ReadOptions) Error!void {
+        unreachable;
+    }
+    fn unused_write(_: *anyopaque, _: u64, _: []const []const u8, _: WriteOptions) Error!void {
+        unreachable;
+    }
+    fn unused_resize(_: *anyopaque, _: u64) Error!void {
+        unreachable;
+    }
+    fn unused_close(_: *anyopaque) void {}
+
+    /// Starts a sync that is canceled inside, then sleeps 5 s, which a swallowed cancel
+    /// would let run to the end.
+    fn task(ctx: Ctx, started: *std.Io.Event, outcome: *?anyerror) anyerror!void {
+        const blob: Blob = .{ .ptr = @constCast(&ctx), .vtable = &vtable };
+        started.set(ctx.io());
+        const completion = blob.start_sync() catch |err| {
+            outcome.* = err;
+            return err;
+        };
+        completion.release();
+        outcome.* = error.CancelSwallowed;
+        try ctx.sleep(.fromSeconds(5));
+    }
+
+    fn body(ctx: Ctx) !void {
+        var started: std.Io.Event = .unset;
+        var outcome: ?anyerror = null;
+        const handle = try ctx.child("sync").spawn(task, .{ &started, &outcome });
+        try started.wait(ctx.io());
+        try ctx.sleep(.fromMilliseconds(1));
+        const before = ctx.current();
+        if (handle.abort()) |_| {} else |_| {} // The task's own result is checked below.
+        const elapsed = before.durationTo(ctx.current()).toNanoseconds();
+        try std.testing.expectEqual(@as(?anyerror, error.Canceled), outcome);
+        // Its next wait does not run out the 5 s sleep.
+        try std.testing.expect(elapsed < std.time.ns_per_s);
+    }
+};
+
+test "an inline start_sync canceled inside its sync returns error.Canceled" {
+    const deterministic = @import("deterministic.zig");
+    var runner = try deterministic.Runner.init(std.testing.allocator, .{});
+    defer runner.deinit();
+    try try runner.start_context(CancelableSync.body, .{});
 }
 
 test {
