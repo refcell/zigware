@@ -132,6 +132,9 @@ placeholder until this lands, so land `Strategy` first and tell the coordinator 
   benches.
 
 ## Log
+- 2026-11-19: the audit's open tests: rayon join/sort/meter/spawn, the adaptive Rayon's
+  policy use (adaptive_tests.zig), and policy.rs's spawn-placement, confined, interleaved, and
+  worker-spawn tests (policy_late_tests.zig). No open tests remain.
 - 2026-11-16: allocator integration tests (arena object limit, configured options, default
   config, cross-thread stats); refuse metadata-group alignments; `Stats.arenas` excludes
   pages mapped on their own. Backlog done.
@@ -162,11 +165,11 @@ Every commonware `#[test]` in this lane's crates (macro and rstest cases expande
 ### parallel (lib.rs, mocks.rs, policy.rs, topology.rs)
 | File | Tests | Ported | Open | Not portable |
 | --- | --- | --- | --- | --- |
-| lib.rs | 106 | 37 | 15 | 54 |
+| lib.rs | 106 | 52 | 0 | 54 |
 | mocks.rs | 12 | 9 | 0 | 3 |
-| policy.rs | 83 | 49 | 34 | 0 |
+| policy.rs | 83 | 83 | 0 | 0 |
 | topology.rs | 35 | 7 | 0 | 28 |
-| Total | 236 | 102 | 49 | 85 |
+| Total | 236 | 151 | 0 | 85 |
 
 Open:
 - [x] `lib.rs:3790` `spawn_inlines_a_sub_overhead_job`: adaptive spawn honors an inline decision
@@ -197,71 +200,71 @@ Open:
   the caller
 - [x] `lib.rs:5189` `join_shares_policy_entry_per_callsite`: repeated joins at one site share one
   entry
-- [ ] `policy.rs:2140` `spawn_placement_recovers_cold_loser`: a cold Wide seed regains the lead at
+- [x] `policy.rs:2140` `spawn_placement_recovers_cold_loser`: a cold Wide seed regains the lead at
   its probe
-- [ ] `policy.rs:2165` `spawn_placement_recovers_after_spike`: one slow Wide sample's lead loss is
+- [x] `policy.rs:2165` `spawn_placement_recovers_after_spike`: one slow Wide sample's lead loss is
   undone
-- [ ] `policy.rs:2210` `spawn_placement_slow_probe_stays_damped`: a slow probe blends and keeps
+- [x] `policy.rs:2210` `spawn_placement_slow_probe_stays_damped`: a slow probe blends and keeps
   normal backoff
-- [ ] `policy.rs:2234` `spawn_placement_reverts_lucky_probe`: a lucky Wide probe loses the lead
+- [x] `policy.rs:2234` `spawn_placement_reverts_lucky_probe`: a lucky Wide probe loses the lead
   within two samples
-- [ ] `policy.rs:2274` `spawn_round_trip_skips_placement`: a round trip alone seeds no placement
-- [ ] `policy.rs:2309` `spawn_overflow_leaves_seeds_untouched`: overflow roots don't advance
+- [x] `policy.rs:2274` `spawn_round_trip_skips_placement`: a round trip alone seeds no placement
+- [x] `policy.rs:2309` `spawn_overflow_leaves_seeds_untouched`: overflow roots don't advance
   placement seeds
-- [ ] `policy.rs:2487` `choice_local_seed_keeps_serial_due`: seeds Wide, Local, probe, then serial
+- [x] `policy.rs:2487` `choice_local_seed_keeps_serial_due`: seeds Wide, Local, probe, then serial
   seed
-- [ ] `policy.rs:2518` `confined_seed_preserves_cadence_after_serial`: a late Wide seed sets no
+- [x] `policy.rs:2518` `confined_seed_preserves_cadence_after_serial`: a late Wide seed sets no
   immediate boundary
-- [ ] `policy.rs:2550` `confined_wide_leaves_local_seed_due`: a confined Wide caller leaves the
+- [x] `policy.rs:2550` `confined_wide_leaves_local_seed_due`: a confined Wide caller leaves the
   Local seed due
-- [ ] `policy.rs:2600` `choice_parallel_estimate_tracks_preferred_placement`: parallel estimate is
+- [x] `policy.rs:2600` `choice_parallel_estimate_tracks_preferred_placement`: parallel estimate is
   the preferred placement's
-- [ ] `policy.rs:2668` `busy_budget_ignores_strategy_parallelism`: the serial budget uses busy time
+- [x] `policy.rs:2668` `busy_budget_ignores_strategy_parallelism`: the serial budget uses busy time
   at parallelism 64
-- [ ] `policy.rs:2706` `local_busy_time_tracks_recent_runs`: cheaper Local runs lower busy time and
+- [x] `policy.rs:2706` `local_busy_time_tracks_recent_runs`: cheaper Local runs lower busy time and
   allow serial
-- [ ] `policy.rs:2892` `confined_calls_compare_own_placement`: a confined caller races serial
+- [x] `policy.rs:2892` `confined_calls_compare_own_placement`: a confined caller races serial
   against its placement
-- [ ] `policy.rs:2940` `interleaved_callers_choose_fastest_paths`: mixed callers on one entry each
+- [x] `policy.rs:2940` `interleaved_callers_choose_fastest_paths`: mixed callers on one entry each
   get their best
-- [ ] `policy.rs:2990` `confined_calls_rediscover_faster_placement`: confined probes find a
+- [x] `policy.rs:2990` `confined_calls_rediscover_faster_placement`: confined probes find a
   placement now faster
-- [ ] `policy.rs:3009` `confined_calls_notice_serial_slowdown`: a confined caller moves off serial
+- [x] `policy.rs:3009` `confined_calls_notice_serial_slowdown`: a confined caller moves off serial
   when it slows
-- [ ] `policy.rs:3028` `confined_calls_probe_while_serial_wins`: confined probes find their
+- [x] `policy.rs:3028` `confined_calls_probe_while_serial_wins`: confined probes find their
   placement beats serial
-- [ ] `policy.rs:3069` `choice_rediscovers_placement_while_serial_wins`: the choice finds a faster
+- [x] `policy.rs:3069` `choice_rediscovers_placement_while_serial_wins`: the choice finds a faster
   stale placement
-- [ ] `policy.rs:3113` `choice_caps_probes_while_serial_wins`: each losing placement is probed once
+- [x] `policy.rs:3113` `choice_caps_probes_while_serial_wins`: each losing placement is probed once
   per capped interval
-- [ ] `policy.rs:3151` `choice_ignores_ineligible_serial_when_pacing`: an over-budget serial doesn't
+- [x] `policy.rs:3151` `choice_ignores_ineligible_serial_when_pacing`: an over-budget serial doesn't
   stretch probe pacing
-- [ ] `policy.rs:3193` `confined_calls_keep_big_work_parallel`: an over-budget confined placement
+- [x] `policy.rs:3193` `confined_calls_keep_big_work_parallel`: an over-budget confined placement
   never samples serial
-- [ ] `policy.rs:3226` `confined_calls_pay_only_own_probes`: a confined caller pays only its own
+- [x] `policy.rs:3226` `confined_calls_pay_only_own_probes`: a confined caller pays only its own
   cadence's probes
-- [ ] `policy.rs:3269` `confined_calls_leave_choice_untouched`: Local-only samples leave Wide's seed
+- [x] `policy.rs:3269` `confined_calls_leave_choice_untouched`: Local-only samples leave Wide's seed
   due
-- [ ] `policy.rs:3322` `interleaved_callers_keep_independent_cadences`: interleaved populations
+- [x] `policy.rs:3322` `interleaved_callers_keep_independent_cadences`: interleaved populations
   decide as if alone
-- [ ] `policy.rs:3379` `confined_local_samples_update_shared_choice`: confined Local samples move
+- [x] `policy.rs:3379` `confined_local_samples_update_shared_choice`: confined Local samples move
   the choice to Wide
-- [ ] `policy.rs:3416` `choice_advances_run_cadence_once`: a choice caller advances the run cadence
+- [x] `policy.rs:3416` `choice_advances_run_cadence_once`: a choice caller advances the run cadence
   once per call
-- [ ] `policy.rs:3467` `interleaved_callers_refresh_local_estimate`: the Local estimate follows a
+- [x] `policy.rs:3467` `interleaved_callers_refresh_local_estimate`: the Local estimate follows a
   slowdown under any rhythm
-- [ ] `policy.rs:3546` `interleaved_callers_rediscover_faster_local_placement`: the choice caller's
+- [x] `policy.rs:3546` `interleaved_callers_rediscover_faster_local_placement`: the choice caller's
   probes return to Local
-- [ ] `policy.rs:3605` `confined_races_back_off_until_flip`: a close race backs off, then resets on
+- [x] `policy.rs:3605` `confined_races_back_off_until_flip`: a close race backs off, then resets on
   a flip
-- [ ] `policy.rs:3667` `confined_flips_reset_confirmations_between_boundaries`: flips between
+- [x] `policy.rs:3667` `confined_flips_reset_confirmations_between_boundaries`: flips between
   boundaries reset to the base
-- [ ] `policy.rs:3718` `confined_noisy_races_rediscover_stale_placement`: stale Wide overtakes
+- [x] `policy.rs:3718` `confined_noisy_races_rediscover_stale_placement`: stale Wide overtakes
   serial at the derived call
-- [ ] `policy.rs:3835` `spawn_workers_preserve_outside_inline_preference`: worker spawns keep
+- [x] `policy.rs:3835` `spawn_workers_preserve_outside_inline_preference`: worker spawns keep
   outside callers inlining
-- [ ] `policy.rs:3866` `spawn_workers_learn_inline_preference`: a worker-only site settles inline
-- [ ] `policy.rs:3890` `spawn_populations_keep_independent_cadences`: worker and outside spawns keep
+- [x] `policy.rs:3866` `spawn_workers_learn_inline_preference`: a worker-only site settles inline
+- [x] `policy.rs:3890` `spawn_populations_keep_independent_cadences`: worker and outside spawns keep
   separate cadences
 
 Not portable:
@@ -331,18 +334,18 @@ Not portable:
 ### parallel (rayon/)
 | File | Tests | Ported | Open | Not portable |
 | --- | --- | --- | --- | --- |
-| rayon/bridge.rs | 33 | 5 | 1 | 27 |
+| rayon/bridge.rs | 33 | 6 | 0 | 27 |
 | rayon/broadcast/test.rs | 13 | 0 | 0 | 13 |
-| rayon/join/test.rs | 9 | 0 | 3 | 6 |
-| rayon/meter/test.rs | 22 | 0 | 3 | 19 |
+| rayon/join/test.rs | 9 | 3 | 0 | 6 |
+| rayon/meter/test.rs | 22 | 3 | 0 | 19 |
 | rayon/registry/injector.rs | 1 | 0 | 0 | 1 |
 | rayon/registry/test.rs | 32 | 0 | 0 | 32 |
-| rayon/sort.rs | 12 | 3 | 5 | 4 |
-| rayon/spawn/test.rs | 4 | 1 | 1 | 2 |
-| rayon/test.rs | 7 | 1 | 1 | 5 |
+| rayon/sort.rs | 12 | 8 | 0 | 4 |
+| rayon/spawn/test.rs | 4 | 2 | 0 | 2 |
+| rayon/test.rs | 7 | 2 | 0 | 5 |
 | rayon/thread_pool/test.rs | 21 | 2 | 0 | 19 |
 | rayon/wake_loom_tests.rs | 3 | 0 | 0 | 3 |
-| Total | 157 | 12 | 14 | 131 |
+| Total | 157 | 26 | 0 | 131 |
 
 Open:
 - [x] `rayon/bridge.rs:1961` `try_fold_stops_at_an_error_and_drops_every_item_once`: try_fold

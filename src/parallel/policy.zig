@@ -724,4 +724,5 @@ pub fn len_bucket(len: usize) u8 {
 
 test {
     _ = @import("policy_tests.zig");
+    _ = @import("policy_late_tests.zig");
 }
