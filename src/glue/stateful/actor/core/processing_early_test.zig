@@ -880,3 +880,136 @@ test "stateful processing: a deferred finalization fences later verifications" {
     try testing.expect(try await_verdict(&verify_child));
     try testing.expectEqual(3, probe.calls);
 }
+
+/// Two verifications of `block` (valid unless `valid` is false, which claims a root its state
+/// cannot match) share one processing and answer with its verdict.
+fn shared_processing(valid: bool) !void {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer check(&fixture);
+    const genesis = TestBlock.genesis();
+    const candidate = try uncached_child(&fixture, &genesis, 1);
+    const block = if (valid) candidate else candidate.with_root(harness_mod.u64_digest(404));
+    var probe: Probe = .{ .target = block.digest() };
+    defer probe.deinit();
+    var gate = try Held.add(&probe);
+    defer gate.deinit();
+    fixture.processing.verifications.verifier.app.probe = &probe;
+
+    var first = try fixture.verify(&.{ block, genesis });
+    defer first.deinit();
+    try gate.await_started();
+    var second = try fixture.verify(&.{ block, genesis });
+    defer second.deinit();
+    // The second joins the first's processing (commonware waits for a later database
+    // subscription; here the flight's joiners show it).
+    try fixture.await_joiners(block.digest(), 2);
+    try testing.expect(!second.is_ready());
+    try testing.expectEqual(1, probe.calls);
+    try gate.open();
+    try testing.expectEqual(valid, try await_verdict(&first));
+    try testing.expectEqual(valid, try await_verdict(&second));
+    try testing.expectEqual(1, probe.calls);
+}
+
+// commonware `concurrent_verifications_share_one_processing` (accept case). Adapted: the
+// reject case claims a mismatched root instead of an unexecutable block.
+test "stateful processing: concurrent verifications share one accepting processing" {
+    try shared_processing(true);
+}
+
+// commonware `concurrent_verifications_share_one_processing` (reject case).
+test "stateful processing: concurrent verifications share one rejecting processing" {
+    try shared_processing(false);
+}
+
+/// A handoff build on `blocks` (the parent first) at view 0xff, without waiting.
+fn prepare_async(
+    fixture: *Fixture,
+    blocks: []const TestBlock,
+) !oneshot.Receiver(fixture_mod.Mailbox.Built) {
+    const pair = try oneshot.channel(fixture_mod.Mailbox.Built, gpa, std.testing.io);
+    try fixture.send(.{ .propose = .{
+        .context = .{ .round = harness_mod.round(0xff) },
+        .ancestry = try fixture.harness.ancestry(blocks),
+        .upstream = {},
+        .proposal = .{ .prepare = pair.sender },
+    } });
+    return pair.receiver;
+}
+
+/// Sends the verification of `parent` and a handoff build on it, the verification first when
+/// `verify_first`; the second is sent once the first holds `gate`, and both are returned once
+/// the second has joined the first's execution (commonware `send_handoff_requests`).
+fn send_handoff_requests(
+    fixture: *Fixture,
+    parent: TestBlock,
+    verify_first: bool,
+    gate: *Held,
+) !struct { oneshot.Receiver(bool), oneshot.Receiver(fixture_mod.Mailbox.Built) } {
+    const genesis = TestBlock.genesis();
+    var verify: oneshot.Receiver(bool) = undefined;
+    var prepare: oneshot.Receiver(fixture_mod.Mailbox.Built) = undefined;
+    if (verify_first) {
+        verify = try fixture.verify(&.{ parent, genesis });
+        errdefer verify.deinit();
+        try gate.await_started();
+        prepare = try prepare_async(fixture, &.{ parent, genesis });
+    } else {
+        prepare = try prepare_async(fixture, &.{ parent, genesis });
+        errdefer prepare.deinit();
+        try gate.await_started();
+        verify = try fixture.verify(&.{ parent, genesis });
+    }
+    errdefer {
+        verify.deinit();
+        prepare.deinit();
+    }
+    try fixture.await_joiners(parent.digest(), 2);
+    return .{ verify, prepare };
+}
+
+fn handoff_and_parent(verify_first: bool) !void {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer check(&fixture);
+    const genesis = TestBlock.genesis();
+    const parent = try uncached_child(&fixture, &genesis, 1);
+    var probe: Probe = .{ .target = parent.digest() };
+    defer probe.deinit();
+    var gate = try Held.add(&probe);
+    defer gate.deinit();
+    fixture.processing.verifications.verifier.app.probe = &probe;
+
+    var verify, var prepare = try send_handoff_requests(&fixture, parent, verify_first, &gate);
+    defer verify.deinit();
+    defer prepare.deinit();
+    try testing.expect(!verify.is_ready());
+    try testing.expect(!prepare.is_ready());
+    try testing.expectEqual(1, probe.calls);
+    try gate.open();
+    try testing.expect(try await_verdict(&verify));
+    const built = try prepare.recv();
+    defer built.discard();
+    const block = switch (built.handoff) {
+        .vote => |*vote| vote,
+        else => return error.TestUnexpectedResult, // The handoff must build on the parent.
+    };
+    try testing.expect(block.inner().parent().eql(parent.digest()));
+    try testing.expectEqual(1, probe.calls);
+    // The parent's state and the built child's state are pending.
+    try testing.expect(fixture.harness.execution.pending_contains(parent.digest()));
+    try testing.expect(fixture.harness.execution.pending_contains(block.digest()));
+}
+
+// commonware `handoff_and_parent_verification_execute_parent_once` (verify first): a handoff
+// build on an uncertified parent and the parent's own verification execute the parent once.
+// Adapted: the pending blocks are checked in the cache rather than through a gauge.
+test "stateful processing: a handoff and its parent's verification execute it once, verify first" {
+    try handoff_and_parent(true);
+}
+
+// commonware `handoff_and_parent_verification_execute_parent_once` (prepare first).
+test "stateful processing: a handoff and its parent's verification execute it once, prepare first" {
+    try handoff_and_parent(false);
+}

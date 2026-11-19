@@ -541,10 +541,16 @@ ones: d = deployer (thread T-01a1d5b9-c237), u = utils, j = storage-journal
   `sync_config`, `resolvers`, marshal's `floor`; `P.Resolvers`).
 - [ ] actor/core: the rest of processing.rs's tests. First half (1070-3396) here, in
   core/processing_early_test.zig and core/processing_deferred_test.zig (2928 on
-  `FixtureFor` and marshal's `Deferred`): 23 of 47 cases ported, 1 not portable
+  `FixtureFor` and marshal's `Deferred`): 27 of 47 cases ported, 1 not portable
   (processing_runs_on_the_actor_context: `Mailbox.verify` takes no caller runtime context and
-  `App.process` sees only `std.Io`, so no label or attribute can reach the application), 23
-  open (2620 and 22 rstest cases). Second half (3451-5885) is with simplex
+  `App.process` sees only `std.Io`, so no label or attribute can reach the application), 19
+  open (2620 and 18 rstest cases). Split (2026-11-19): crypto (T-01a1d57b-08a0) takes
+  finalization_completes_build_processing_finalized_parent ×6,
+  recovered_handoff_ancestry_executes_once ×2, retained_verification_finishes_during_
+  finalization ×2, and maintenance_preserves_owned_requests_and_retained_work ×2, in
+  core/processing_mid_test.zig; utils keeps 2620, handoff_and_parent ×2,
+  shared_parent_execution_survives_cancellation ×4, unexecutable_handoff ×2, and
+  concurrent_verifications_share_one_processing ×2, in core/processing_early_test.zig. Second half (3451-5885) is with simplex
   (T-01a1d5ad-c8d6), in core/processing_late_test.zig. Both build on core/testing.zig.
 - [x] db: `Shared` as commonware's `AsyncRwLock` for DBs declaring `concurrent_reads = true`
   (any and current): an `Io.RwLock` whose read guards give `*const DB`, while `write` keeps
