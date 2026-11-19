@@ -298,3 +298,15 @@ test "the production runner publishes runtime_process_rss (test_process_rss_metr
     try runner.start(expect_rss_published, .{&runner});
     try (try runner.start_context(rss_root, .{&runner}));
 }
+
+test "empty layout range (test_storage_blob_layout_restriction_rejects_empty_range)" {
+    try @import("utils").death.expect_panic(@src(), "reached unreachable code", struct {
+        fn body() !void {
+            const config: production.Config = .{
+                .storage_directory = "unused",
+                .storage = .{ .layouts = .{ .min = .v1, .max = .v0 } },
+            };
+            config.validate();
+        }
+    }.body);
+}

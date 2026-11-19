@@ -169,6 +169,119 @@ test "nested strategy runs inline (test_nested_strategy_runs_inline)" {
     try run("nested strategy runs inline");
 }
 
+/// The deterministic runtime's strategy cases (commonware `deterministic.rs`): pools whose
+/// work runs inline on the executor thread, explored at their most parallel shape.
+const Strategies = struct {
+    const Explorer = parallel.mocks.Explorer;
+
+    const Increment = struct {
+        pub fn map(_: Increment, index: usize) usize {
+            return index + 1;
+        }
+    };
+
+    /// A spawned job collecting `index + 1` for each of `len` items on its strategy.
+    fn Collect(comptime S: type) type {
+        return struct {
+            strategy: S,
+            len: usize,
+
+            pub fn call(op: @This()) std.mem.Allocator.Error![]usize {
+                const items = parallel.Range.upto(op.len);
+                return op.strategy.map_collect(testing.allocator, items, Increment{});
+            }
+        };
+    }
+
+    const Shape = struct {
+        pub fn serial(_: Shape) []const u8 {
+            return "serial";
+        }
+        pub fn parallel(_: Shape) []const u8 {
+            return "parallel";
+        }
+    };
+
+    const Sum = struct {
+        pub fn identity(_: Sum) u64 {
+            return 0;
+        }
+        pub fn fold(_: Sum, acc: u64, index: usize) u64 {
+            return acc + index;
+        }
+        pub fn reduce(_: Sum, a: u64, b: u64) u64 {
+            return a + b;
+        }
+    };
+
+    /// Spawns a job collecting `len` items on `strategy` and checks it yields `1..=len`.
+    fn expect_spawned(strategy: anytype, len: usize) !void {
+        const S = @TypeOf(strategy);
+        var task: parallel.Task(Collect(S)) = .init(.{ .strategy = strategy, .len = len });
+        strategy.spawn(len, &task);
+        const output = try strategy.block_on(&task);
+        defer testing.allocator.free(output);
+        try testing.expectEqual(len, output.len);
+        for (output, 1..) |value, expected| try testing.expectEqual(expected, value);
+    }
+
+    fn spawn_completes(ctx: deterministic.Context) !void {
+        var pool = try ctx.child("pool").strategy(2);
+        defer pool.deinit();
+        try expect_spawned(Explorer.parallel(pool.rayon), 2);
+    }
+
+    fn reuse_first(ctx: deterministic.Context) !void {
+        var first = try ctx.child("pool_a").strategy(1);
+        defer first.deinit();
+        try testing.expectEqualStrings("serial", first.rayon.run(2, Shape{}));
+        try expect_spawned(first.rayon, 2);
+
+        var pool_b = try ctx.child("pool_b").strategy(3);
+        defer pool_b.deinit();
+        const second = Explorer.parallel(pool_b.rayon);
+        try testing.expectEqualStrings("parallel", second.run(2, Shape{}));
+        try expect_spawned(second, 3);
+    }
+
+    fn reuse_later(ctx: deterministic.Context) !void {
+        var pool_c = try ctx.child("pool_c").strategy(4);
+        defer pool_c.deinit();
+        const third = Explorer.parallel(pool_c.rayon);
+        try testing.expectEqualStrings("parallel", third.run(2, Shape{}));
+        try expect_spawned(third, 4);
+    }
+
+    fn survives_suspension(ctx: deterministic.Context) !void {
+        var pool = try ctx.child("pool").strategy(2);
+        defer pool.deinit();
+        const strategy = Explorer.parallel(pool.rayon);
+        try ctx.sleep(.fromMilliseconds(10));
+        try expect_spawned(strategy, 2);
+        try ctx.sleep(.fromMilliseconds(10));
+        try testing.expectEqual(@as(u64, 4950), strategy.fold(parallel.Range.upto(100), Sum{}));
+    }
+
+    fn start(comptime body: fn (deterministic.Context) anyerror!void) !void {
+        var runner = try deterministic.Runner.init(testing.allocator, .{});
+        defer runner.deinit();
+        try (try runner.start_context(body, .{}));
+    }
+};
+
+test "parallel strategy spawn completes (test_parallel_strategy_spawn_completes)" {
+    try Strategies.start(Strategies.spawn_completes);
+}
+
+test "strategies reuse pool across runners (test_strategies_reuse_pool_across_runners)" {
+    try Strategies.start(Strategies.reuse_first);
+    try Strategies.start(Strategies.reuse_later);
+}
+
+test "pool survives suspension (test_pool_survives_suspension)" {
+    try Strategies.start(Strategies.survives_suspension);
+}
+
 /// Runs `Handles(deterministic.Context)`'s case `name` on the deterministic runner, as
 /// commonware runs `utils::handle` tests.
 fn run_handles(comptime name: []const u8) !void {

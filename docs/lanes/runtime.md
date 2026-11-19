@@ -253,7 +253,7 @@ Every commonware `#[test]` in this lane's crates (macro and rstest cases expande
 | File | Tests | Ported | Open | Not portable |
 | --- | --- | --- | --- | --- |
 | conformance.rs | 3 | 3 | 0 | 0 |
-| deterministic.rs | 50 | 34 | 0 | 16 |
+| deterministic.rs | 50 | 37 | 0 | 13 |
 | lib.rs | 59 | 50 | 0 | 9 |
 | mocks.rs | 20 | 19 | 0 | 1 |
 | network/audited.rs | 5 | 4 | 0 | 1 |
@@ -265,21 +265,21 @@ Every commonware `#[test]` in this lane's crates (macro and rstest cases expande
 | telemetry/metrics/batched.rs | 4 | 4 | 0 | 0 |
 | telemetry/metrics/histogram.rs | 1 | 1 | 0 | 0 |
 | telemetry/metrics/mod.rs | 18 | 17 | 0 | 1 |
-| tokio/runtime.rs | 21 | 6 | 0 | 15 |
+| tokio/runtime.rs | 21 | 7 | 0 | 14 |
 | utils/abort.rs | 11 | 1 | 0 | 10 |
 | utils/buffer/mod.rs | 46 | 39 | 0 | 7 |
 | utils/buffer/paged/cache.rs | 49 | 17 | 0 | 32 |
-| utils/buffer/paged/mod.rs | 17 | 13 | 0 | 4 |
+| utils/buffer/paged/mod.rs | 17 | 17 | 0 | 0 |
 | utils/buffer/paged/read.rs | 17 | 6 | 0 | 11 |
-| utils/buffer/paged/sealed.rs | 26 | 23 | 0 | 3 |
-| utils/buffer/paged/tip.rs | 13 | 1 | 0 | 12 |
+| utils/buffer/paged/sealed.rs | 26 | 24 | 0 | 2 |
+| utils/buffer/paged/tip.rs | 13 | 7 | 0 | 6 |
 | utils/buffer/paged/view.rs | 4 | 4 | 0 | 0 |
-| utils/buffer/paged/writer.rs | 96 | 81 | 0 | 15 |
+| utils/buffer/paged/writer.rs | 96 | 84 | 0 | 12 |
 | utils/buffer/tip.rs | 7 | 5 | 0 | 2 |
 | utils/handle.rs | 19 | 10 | 0 | 9 |
 | utils/mod.rs | 3 | 0 | 0 | 3 |
 | utils/supervision.rs | 9 | 4 | 0 | 5 |
-| Total | 526 | 364 | 0 | 162 |
+| Total | 526 | 382 | 0 | 144 |
 
 Open (none are in runtime/src/telemetry/, the runtime-telemetry lane's directory):
 - [x] `deterministic.rs:1742` `test_logical_open_releases_retained_mutations`: unsynced fragments of
@@ -321,6 +321,12 @@ Open (none are in runtime/src/telemetry/, the runtime-telemetry lane's directory
   just below u64::MAX
 - [x] `utils/buffer/paged/tip.rs:466` `test_page_geometry_handles_one_and_non_power_of_two`: tip
   drain with page size 1, a non-power-of-two size, and u16::MAX
+Re-audit (clearing lane, 2026-11-19): the 14 paged `#[should_panic]` tests (mod.rs 4, sealed.rs 1,
+tip.rs 6, writer.rs 3) were already death tests in `buffer/paged/panic_test.zig`; the three
+deterministic strategy tests are in `context_test.zig` and
+`test_storage_blob_layout_restriction_rejects_empty_range` is a death test in
+`production/runner_test.zig`. Not portable 162 to 144.
+
 Not portable:
 - `deterministic.rs` `test_retired_write_owner_releases_other_blob`,
   `test_sync_retirement_progresses_with_namespace_open`: write-owner `Drop` callbacks and `Arc` drop
@@ -334,9 +340,6 @@ Not portable:
   exists. Their other `#[should_panic]` tests are death tests in `panic_test.zig`
 - `deterministic.rs` `test_borrowed_non_send_root`: compile-time check that the root needs no
   `Send`/`'static` bound
-- `deterministic.rs` `test_parallel_strategy_spawn_completes`,
-  `test_strategies_reuse_pool_across_runners`, `test_pool_survives_suspension`: runtime.md backlog:
-  deterministic "strategies and pools" tests have no counterpart
 - `deterministic.rs` `test_alarm_min_heap`, `test_sleep_refreshes_one_alarm_after_repolling`:
   waker/poll internals (runtime.md names `alarm_min_heap`, `sleep_refreshes_one_alarm`)
 - `lib.rs` `test_blob_version`: `BlobVersion` is a `u16` alias; test checks Rust Display/Debug/Range
@@ -376,9 +379,8 @@ Not portable:
 - `tokio/runtime.rs` `test_strategy_spawn_keeps_sibling_futures_polling`,
   `test_root_factory_builds_runtime_futures`: Rust future polling: `select!` over a pending strategy
   job / eager root factory
-- `tokio/runtime.rs` `test_storage_blob_layout_restriction_rejects_empty_range`,
-  `test_runner_propagates_panic_during_drain`, `test_disposal_panic_is_task_panic`,
-  `test_disposal_panic_reported_before_tracker_release`,
+- `tokio/runtime.rs` `test_runner_propagates_panic_during_drain`,
+  `test_disposal_panic_is_task_panic`, `test_disposal_panic_reported_before_tracker_release`,
   `test_runner_resumes_strategy_panic_payload_after_pool_work`: `#[should_panic]` or panic
   propagation/`catch_unwind`; Zig cannot catch a panic
 - `tokio/runtime.rs` `test_default_thread_stack_size_uses_system_default`,
@@ -421,11 +423,6 @@ Not portable:
   share in-flight reads" (joins, batches)
 - `utils/buffer/paged/cache.rs` `test_observed_miss_filled_before_completion`: relies on a Rust
   future doing nothing until first polled
-- `utils/buffer/paged/mod.rs` `test_corrupt_page_rejects_short_blob`,
-  `test_validate_read_ranges_rejects_buffer_len_mismatch`,
-  `test_validate_read_ranges_rejects_overlapping_ranges`,
-  `test_validate_read_ranges_rejects_unsorted_ranges`: `#[should_panic]` or panic
-  propagation/`catch_unwind`; Zig cannot catch a panic
 - `utils/buffer/paged/read.rs` `test_replay_buf_bytes_share_pages`: storage-journal.md: `IoBuf`
   ownership/chunk structure (reads copy into caller buffers)
 - `utils/buffer/paged/read.rs` `test_failed_read_ahead_is_read_again_on_demand`,
@@ -439,15 +436,8 @@ Not portable:
   fault-injecting mock blob and per-batch futures, which have no counterpart here. Off by default:
   each start is a `std.Io` task hand-off, which made fixed replay about 4x slower on tmpfs
 - `utils/buffer/paged/read.rs` `test_replay_is_sync`: compile-time Rust `Sync` bound check
-- `utils/buffer/paged/sealed.rs` `test_sealed_read_many_into_rejects_unsorted_offsets`:
-  `#[should_panic]` or panic propagation/`catch_unwind`; Zig cannot catch a panic
 - `utils/buffer/paged/sealed.rs` `test_replay_preserves_tail_during_partial_page_rewrite`:
   storage-journal.md: `SplitWriteBlob` partial-page rewrite races
-- `utils/buffer/paged/tip.rs` `test_typed_append_rejects_short_encoding`,
-  `test_typed_append_rejects_long_encoding`, `test_zero_page_size_is_rejected`,
-  `test_misaligned_capacity_is_rejected`, `test_full_page_seed_is_rejected`,
-  `test_full_page_replacement_is_rejected`: `#[should_panic]` or panic propagation/`catch_unwind`;
-  Zig cannot catch a panic
 - `utils/buffer/paged/tip.rs` `test_extension_preserves_prior_allocation_pointers`,
   `test_typed_append_crosses_allocations_and_pages`, `test_zero_size_typed_append_stays_detached`,
   `test_drain_reuses_independent_partial_page`,
@@ -459,9 +449,6 @@ Not portable:
 - `utils/buffer/paged/writer.rs` `test_append_variable_value_encodes_in_place`,
   `test_to_physical_pages_preserves_chunk_owners`: storage-journal.md: `IoBuf` ownership/chunk
   structure (reads copy into caller buffers)
-- `utils/buffer/paged/writer.rs` `test_read_many_into_rejects_invalid_buffer_len`,
-  `test_read_many_into_rejects_unsorted_offsets`, `test_read_many_into_rejects_overlapping_offsets`:
-  `#[should_panic]` or panic propagation/`catch_unwind`; Zig cannot catch a panic
 - `utils/buffer/paged/writer.rs` `test_recoverable_prefix_len_batches_reads`: storage-journal.md:
   "`recoverable_prefix_len` reads one page at a time"
 - `utils/buffer/paged/writer.rs` `test_sync_preserves_partial_tip_allocation`: storage-journal.md:

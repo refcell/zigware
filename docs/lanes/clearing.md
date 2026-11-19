@@ -301,3 +301,9 @@ qmdb `current` (balances, over the MMB) and `keyless` (payout log, over the MMR)
   other five run 0.2 to 0.7× commonware's. Planted: recording a known fingerprint as new
   crashes both checker tests. Index inserts' remaining 1.2 to 1.4× is mimalloc (commonware's
   bench allocator) against `smp_allocator`; recorded, not changed.
+- 2026-11-19: cross-lane not-portable re-audit of utils and runtime. utils 76 to 75: time's
+  `as_millis_u64` overflow is two death tests (planted: saturating fails both). runtime 162 to
+  144: 14 paged `#[should_panic]` tests were already death tests (tally only); the deterministic
+  strategy tests (planted: `strategy()` ignoring parallelism, `wait` skipping the hand-back) and
+  the empty layout range death test (planted: no range check) are new. The rest stay: they
+  inspect state after `catch_unwind`, Rust futures/wakers/`Drop`, or unported features.
