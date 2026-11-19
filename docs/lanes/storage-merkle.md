@@ -86,6 +86,108 @@ variants need `runtime` storage; do them after its interface lands.
   never observe. The variable journal passes its io to its offsets journal. Ports
   `read_miss_timed` for both journals.
 
+## Design: asynchronous start_sync (2026-11-19, proposed, not implemented)
+
+Commonware's `Blob::start_sync` returns once the runtime has fixed which completed writes the
+sync covers and taken responsibility for it; the returned `Handle<()>` only observes. Dropping
+it cancels nothing, and a failure is retained and resurfaces on the owner's next durability or
+mutating call. There is no background task anywhere above the runtime: every layer flushes
+inline, starts blob syncs, and keeps the in-flight completion in a bounded slot
+(`SyncState::Pending`, `tail_predecessor_sync`, `Barrier.pending`, metadata `pending`,
+oversized `marker_sync_pending`, archive `requested`, compact `pending_sync`). Commonware's
+memory backend (the deterministic runtime's) completes the sync inline (`Handle::ready`); only
+the `DelayedSyncContext` test mock (`runtime/src/mocks.rs:869-1190`) holds syncs in flight.
+
+### API
+- `runtime.storage.Completion`: a reference-counted completion (commonware's shared
+  `Handle<()>`). `poll() ?Error!void` (null while in flight), `wait() Error!void`, `retain()`,
+  `release()`. `Completion.ready(result)` costs no allocation; `Completion.join(a, b)`
+  completes when both do, reporting the first error (commonware's `try_join`). A pending
+  completion carries the `Io` of whoever created it and waits on an `Io.Event`, so journals
+  and databases stay free of `Io`; a ready one never waits.
+- `Blob.VTable.start_sync: fn (ptr) Error!Completion`. Every backend fixes its coverage at
+  the call: memory snapshots inline and returns `ready` (as commonware); faulty rolls its fault
+  at start and journals a durability cut that a crash honors only if the completion succeeded;
+  audited and metered record at start and forward. Production returns `ready` after an inline
+  fsync at first (allowed by the contract); a detached fsync (`Io.concurrent`, or the ring) is
+  a later runtime-lane optimization that changes no caller.
+- Every `start_sync` above the blob returns `Error!Completion` instead of `Error!void`
+  (buffer writers, paged `Writer.start_sync`/`seal`, blobs, fixed/variable/segmented/oversized
+  journals, checkpoint, metadata, authenticated journal, merkle full, archive, qmdb, glue).
+
+### Ownership
+- A returned completion is one reference owned by the caller; `release` without `wait` is
+  commonware's drop: the sync continues and its failure stays retained by the owner.
+- Each owner keeps its own reference in its slot (`SyncState.pending`, the blobs' predecessor
+  slot, `Barrier`, metadata, archive, compact), so at most one or two completions per owner
+  exist: allocation is bounded and happens only for pending syncs.
+- Every blob mutation (flush, write, resize, rollover, prune, truncate, clear, destroy) first
+  waits for the owner's pending completion; buffer-only appends and reads do not. A failed
+  wait marks the owner failed (the existing `failed` flags), as commonware drops the owner.
+- `durable_page_state` advances only after a pending sync is observed, as commonware's paged
+  writer does, so a tip page is never rewritten under an in-flight sync.
+- The journals' `durability.Barrier(Completion)` already ports commonware's barrier; the
+  stand-in `Done` completion is replaced by `runtime.storage.Completion`, so the watermark
+  trails by one `start_sync` call exactly as commonware's does.
+
+### std.Io and the deterministic runtime
+- With stock backends nothing changes in timing: memory completes inline, so every existing
+  test and DST keeps its behavior.
+- `runtime.storage.mocks.DelayedSync` ports `DelayedSyncContext`/`PendingSyncs`: it parks each
+  started sync (counters `starts`, `entered`, `completions`; `next`, `release_next`,
+  `release_all`, `fail_all`, `arm_fail`, `unblock`, and the `arm` gate on blocking syncs). A
+  release runs the inner blob's `sync` then, so durability is taken at completion, as in the
+  mock. The existing `SyncGates` mock folds into it.
+- Commonware tests assert an operation is blocked with `now_or_never().is_none()`. Here the
+  test runs the operation as an `Io.concurrent` task on the deterministic runtime, waits until
+  the mock reports the wait entered, asserts the task has not finished, releases, and joins.
+  Results returned from concurrent tasks stay free of `Io.Timestamp` (AGENTS.md pitfall).
+
+### Rollout (each step keeps main green; callers that do not overlap call `wait()`)
+1. runtime: `Completion`, `Blob.start_sync` on every backend, `DelayedSync` mock; buffer
+   `SyncState.pending` and paged `Writer.start_sync`/`seal` handles.
+2. journals: contiguous blobs (predecessor slot), fixed, variable, checkpoint, metadata,
+   segmented manager and journals, oversized tracked sync.
+3. authenticated journal and merkle full (joined handles).
+4. archive prunable (`requested` sections, marker publication).
+5. qmdb (any, current, keyless, immutable, store, compact `pending_sync`).
+6. glue `Barrier` and marshal (replace `store.Durable`'s paced stand-in).
+
+### Tests this unlocks (commonware file: tests)
+- runtime (~40): storage/{audited,faulty,metered,tokio/mod,tokio/blob,iouring}.rs, the 10
+  named at runtime.md:608-618 plus faulty's two overlapping-write epoch tests (619-621);
+  mocks.rs `delayed_sync_blob_forwards_read_options`; utils/buffer/mod.rs 8
+  (runtime.md:377-384); paged/writer.rs 18 (runtime.md:457-473); paged/sealed.rs
+  `test_sealed_reads_while_seal_sync_pending`. The io_uring driver/operation/request tests stay
+  not portable (zigware's ring is synchronous by design).
+- storage-journal (~35): segmented/manager.rs 7 (`test_concurrent_sync_reports_later_error`,
+  combined/reused handles, truncate/prune/destroy wait and surface); segmented/fixed.rs 5
+  (prune/destroy/clear wait, prune surfaces failure, replay dropped during repair);
+  segmented/variable.rs `test_journal_replay_dropped_during_repair_fails_replay`;
+  oversized.rs `..._alignment_sync_concurrency`, `..._dropped_handle_driven_by_next_sync`;
+  contiguous/tests.rs 12 (overlaps_predecessor_and_tail, overlaps_work, waits_for_prior,
+  failure_propagates, prune_waits_for_pending_sync, prune_surfaces_failed_sync, both
+  journals; unrecorded today); journal/authenticated.rs 7 (overlaps_work, failure_propagates,
+  merkle_failure_fails_handle, two issue_5668 destroy tests, reopen watermark, init ordering);
+  metadata/mod.rs `test_start_sync_second_sync_waits_for_first` and the handle counts.
+- storage-merkle (22): contiguous/fixed.rs 8 (keeps_predecessor_sync, watermark_lagged,
+  failure_blocks_watermark, truncate_drains_parked_watermark_advance, deferred_failure, two
+  dropped_failed_start_sync, destroy_observes_failed_watermark_sync); contiguous/variable.rs 11
+  (keeps_predecessor_sync, stages_offsets_while_data_waits, offsets_watermark_lagged,
+  watermark_requires_joint_proof, truncate_truncates_durable_size, deferred_failure, two
+  dropped-failure tests, three destroy_observes_failed_*_sync); persisted/full.rs 3
+  (`test_full_sync_observes_clean_start_sync_failure`, issue_5668 destroy mmr/mmb).
+- storage-archive (15): archive/prunable/mod.rs, the 12 pipelined put/start_sync tests and the
+  3 marker tests (storage-archive.md:131-133), plus the fuzz target's abandoned start_syncs.
+- storage-qmdb (~23): immutable/fixed.rs 3 (start_sync_overlaps_work,
+  apply_indexes_while_journal_waits, start_sync_prune_waits); store/db.rs 2 (overlaps_work,
+  prune_waits); keyless/fixed.rs 5 and any/unordered/fixed.rs 3 (unrecorded today); compact
+  db.rs 10 `test_compact_start_sync_*`/`apply_overlaps_start_sync`; and the reduced
+  `*_failure_propagates` ports become full ports.
+- glue: stateful/db/mod.rs `barrier_waits_for_every_handle`,
+  `barrier_cancellation_releases_handles`, `barrier_reports_shutdown_as_not_durable`, and the
+  shutdown half of `barrier_panics_on_later_failure`.
+
 ## Test tally (2026-11-19, merkle and journal internals)
 Commonware's tests in `storage/src/merkle` and the contiguous journals, matched by what they
 check. Status after the 24 open ports landed (two `read_location` tests went to storage-qmdb).
@@ -451,3 +553,4 @@ Partial:
 - 2026-11-19: tally of merkle and journal internals; ported its 22 open tests in this lane.
 - 2026-11-19: partitioned index ranges (`new_range`/`install_range`) and their 5 tests
   (clearing lane).
+- 2026-11-19: proposed the asynchronous start_sync design (awaiting the coordinator).
