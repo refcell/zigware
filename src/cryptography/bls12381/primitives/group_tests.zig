@@ -297,6 +297,13 @@ test "group: msm matches the naive sum" {
     for ([_]usize{ 1, 10 }) |count| try check_msm(G2, count);
 }
 
+test "group: g2 msm on empty input and many points" {
+    // commonware `test_g2_msm`; its 50,000-point case runs outside Debug or with -Dslow-tests.
+    try testing.expect(G2.msm(&.{}, @as([]const Scalar, &.{})).eql(G2.zero));
+    const large = @import("builtin").mode != .debug or build_options.slow_tests;
+    try check_msm(G2, if (large) 50_000 else 300);
+}
+
 test "group: msm over small scalars" {
     var rng = utils.test_rng();
     var points: [6]G1 = undefined;

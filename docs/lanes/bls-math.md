@@ -222,7 +222,7 @@ coverage test checks a twelve-worker cut of 64 points still reaches a one-point 
 | `bls12381/primitives/ops/threshold.rs` | 19 | 19 | 0 | 0 |
 
 Open:
-- [ ] `bls12381/primitives/group.rs` `test_g2_msm`: Zig
+- [x] `bls12381/primitives/group.rs` `test_g2_msm`: Zig
   src/cryptography/bls12381/primitives/group_tests.zig "group: msm matches the naive sum" covers G2
   at 1 and 10 points (random, identity point, zero scalar, all-zero scalars/points, single) but not
   G2 empty input or the 50,000-point G2 case (large-window path); add both to group_tests.zig (big
