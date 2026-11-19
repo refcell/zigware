@@ -558,3 +558,27 @@ Added, each a seeded fuzz scaled by `fuzz_soak` plus a `std.testing.fuzz` target
 
 After: every commonware fuzz target in these crates has a counterpart (runtime 3/3), every fuzz
 test in them has both halves, and every decoder found in the audit has a fuzz.
+
+## blake3 conc=8 at 128 and 256 KiB (2026-11-19)
+
+At 128 and 256 KiB, `blake3::hash_message conc=8` is slower than `conc=1` in zigware but not in
+commonware. Both were run on the same desktop at load ~70 to 95, so every number is noisy.
+
+| msg_len | commonware conc=1 | commonware conc=8 | zigware conc=1 | zigware conc=8 |
+|---|---|---|---|---|
+| 131072 | 39.5 µs | 14.1 µs | 18.4 µs | 42.2 µs |
+| 262144 | 39.4 µs | 30.5 µs | 33.1 µs | 50.3 µs |
+| 1048576 | 110 µs | 108 µs | 141 µs | 78.5 µs |
+
+The overhead is zigware's, from two sources (measured with probe benches, not committed):
+- **Kernel.** `blake3_tree.zig`'s own compression hashes the tree serially in 36 µs at
+  128 KiB and 63 µs at 256 KiB, against 18 and 33 µs for std's `Blake3`. That is 2× slower,
+  so a split pays twice the hashing before it gains from parallelism. std keeps its SIMD
+  chunk kernel (`hashMany`) private, so the tree cannot call it.
+- **Dispatch.** `map_into` handing a pool of 8 trivial jobs costs 3.9 µs for 7 jobs and
+  8.0 µs for 15. That is around a quarter of the 128 KiB budget, before futex wake latency
+  on a loaded machine.
+
+Next step (not done): port std's `hashVec`/`compressChunksParallel` layout (interleaved G
+rounds, `std.math.rotr`) into `blake3_tree.zig` so subtrees hash at std's speed. With that,
+128 KiB should land near commonware's ratio.
