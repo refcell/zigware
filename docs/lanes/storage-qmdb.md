@@ -86,7 +86,9 @@ which every database here is built on.
     the store, and keyless, with commonware's names and constants.
   - [x] `qmdb::init` (both cache sizes, any and store) and `qmdb::apply_batch` (all eight
     cases, including the p256-partitioned ordered and immutable variants).
-  - [ ] `qmdb::merkleize`, `qmdb::chained_growth`, then cold_read, constantinople, scale.
+  - [x] `qmdb::merkleize`: the main grid (chained, seed sync, cache clear; `blob_reads` metric
+    through a storage meter) and the churned case, over the eight any variants.
+  - `qmdb::chained_growth` benches only `current` variants, so it goes to storage-qmdb-sync.
 - [x] immutable (fixed, MMR and MMB): `Db`, chained batches, floor-filtered batch reads,
   prune, recovery, `ImmutableMmr/MmbFixedConf` root conformance (matches), mod.rs's core
   scenarios, and a randomized chain check against the reopened rebuild.
@@ -179,6 +181,10 @@ which every database here is built on.
   `find_inactivity_floor_at`, `inactive_peaks_at`.
 
 ## Decisions
+- Not ported (deferred): cold_read, constantinople, and scale. In commonware they are opt-in
+  CLI harnesses for multi-GB on-disk runs that no-op without subcommand arguments, not
+  criterion benches, so `zig build bench` has no place for them; they would need their own
+  executables. The `*_gungraun` instruction-count benches need valgrind.
 - Benches run over the production disk storage, as commonware's tokio runtime does. On smoke
   inputs (`zig build test`) they use the in-memory storage and smaller cases (generate: 100
   elements and 1,000 operations; init: 100 and 1,000; apply_batch: 256 keys and 64 updates),
@@ -293,3 +299,4 @@ which every database here is built on.
 - 2026-11-19: `qmdb_any_ordered_batching` fuzz target.
 - 2026-11-19: `qmdb::generate` benches (any, store, keyless).
 - 2026-11-19: `qmdb::init` and `qmdb::apply_batch` benches; split into `qmdb/benches/`.
+- 2026-11-19: `qmdb::merkleize` benches (main grid and churned).

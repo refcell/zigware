@@ -133,7 +133,7 @@ fn ApplyWorkload(comptime D: type, comptime case: Case) type {
             const db = try self.fresh.next();
             self.rng = .init(7);
             self.counter = 0;
-            if (immutable) try self.seed_immutable(db) else try seed_any(D, db, self.keys);
+            if (immutable) try self.seed_immutable(db) else try common.seed_db(D, db, self.keys);
             for (0..case.depth()) |level| {
                 var batch = if (level == 0)
                     try db.new_batch()
@@ -206,20 +206,6 @@ fn ApplyWorkload(comptime D: type, comptime case: Case) type {
             assert(self.counter == self.keys);
         }
     };
-}
-
-/// Commonware's `seed_db`: `keys` keys with values drawn from `TestRng::new(42)`, committed.
-fn seed_any(comptime D: type, db: *D, keys: u64) !void {
-    var rng: TestRng = .init(42);
-    var batch = try db.new_batch();
-    {
-        errdefer batch.deinit();
-        for (0..keys) |i| {
-            try common.write(D, db.gpa, &batch, key_at(i), try make_value(Digest, db.gpa, &rng));
-        }
-    }
-    try apply_commit(D, db, &batch);
-    assert(db.bounds().end > keys);
 }
 
 /// Merkleizes `batch` (consumed on success), applies it, and commits.

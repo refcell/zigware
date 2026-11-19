@@ -214,6 +214,8 @@ pub const Disk = struct {
         memory: runtime.storage.memory.Storage,
     } = undefined,
     opened: bool = false,
+    /// A wrapper of the backend (such as a storage meter) that databases open through instead.
+    override: ?runtime.storage.Storage = null,
 
     pub fn init(runner: *const bench.Runner) Disk {
         return .{ .io = runner.io, .memory = runner.inputs == .smoke };
@@ -240,6 +242,7 @@ pub const Disk = struct {
 
     pub fn storage(disk: *Disk) runtime.storage.Storage {
         assert(disk.opened);
+        if (disk.override) |wrapper| return wrapper;
         if (disk.memory) return disk.backend.memory.storage();
         return disk.backend.production.storage();
     }
@@ -261,6 +264,8 @@ pub const Options = struct {
     items_per_blob: u64 = items_per_blob,
     /// Entries of the init-time `location -> key` cache; null disables it.
     init_cache: ?usize = init_cache_size,
+    /// Pages of the page cache.
+    page_cache_pages: u32 = page_cache_size,
 };
 
 /// One open database of type `D` with its page cache and metrics (commonware creates both
@@ -275,7 +280,7 @@ pub fn Session(comptime D: type) type {
 
         pub fn open(self: *Self, gpa: Allocator, disk: *Disk, options: Options) !void {
             assert(options.items_per_blob > 0);
-            self.cache = try .init(gpa, page_size, page_cache_size);
+            self.cache = try .init(gpa, page_size, options.page_cache_pages);
             errdefer self.cache.deinit();
             self.registry = .init(gpa);
             errdefer self.registry.deinit();
@@ -485,4 +490,33 @@ pub fn Fresh(comptime D: type) type {
             try self.session.close();
         }
     };
+}
+
+/// Commonware's `seed_db`: `keys` keys with values drawn from `TestRng::new(42)`, committed.
+pub fn seed_db(comptime D: type, db: *D, keys: u64) !void {
+    var rng: TestRng = .init(42);
+    var batch: ?D.UnmerkleizedBatch = try db.new_batch();
+    errdefer if (batch) |*pending| pending.deinit();
+    for (0..keys) |i| {
+        try write(D, db.gpa, &batch.?, key_at(i), try make_value(D.Value, db.gpa, &rng));
+    }
+    try flush(D, db, &batch, true, false);
+    assert(db.bounds().end > keys);
+}
+
+/// Commonware's `write_random_updates`: `updates` writes of keys below `keys`, sampled with
+/// replacement, to fresh values.
+pub fn write_random_updates(
+    comptime D: type,
+    batch: *D.UnmerkleizedBatch,
+    updates: u64,
+    keys: u64,
+    rng: *TestRng,
+) !void {
+    assert(keys > 0);
+    assert(updates > 0);
+    for (0..updates) |_| {
+        const key = key_at(rng.next_u64() % keys);
+        try write(D, batch.gpa, batch, key, try make_value(D.Value, batch.gpa, rng));
+    }
 }
