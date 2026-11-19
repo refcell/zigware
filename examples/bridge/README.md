@@ -170,6 +170,17 @@ INFO commonware_bridge::application::actor: finalized view=1 payload=bad0598e9a6
 INFO commonware_bridge::application::actor: proposed block=Bridge(Finalization { proposal: ...
 ```
 
+### Stalls at 10 messages per second
+
+As in commonware's validator, each consensus channel is rate-limited to 10 messages per second
+per peer (commonware: "To support more views per second, increase the rate"). When views run
+faster, as in the first seconds of a run, the limiter drops a validator's votes and
+certificates, the network can split across two views, and no nullification forms until
+`timeout_retry` (10 s) sends the votes again. In one 90 s run of `local.sh` on one machine,
+commonware's binaries stalled this way once in each network (views 1 and 49) and this port's
+once in one network (view 12, where the limiter dropped every view-11 notarize, notarization,
+and finalize broadcast of two validators to all three peers).
+
 ## Testing
 
 ```sh
