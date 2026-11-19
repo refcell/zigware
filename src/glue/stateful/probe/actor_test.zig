@@ -75,7 +75,7 @@ const Sender = struct {
     }
 };
 
-const Receiver = struct {
+pub const Receiver = struct {
     receiver: mpsc.Receiver(NetMessage),
 
     pub fn recv(self: *Receiver) Io.Cancelable!?NetMessage {
@@ -87,8 +87,8 @@ const Receiver = struct {
     }
 };
 
-const Blocker = struct {
-    const Log = struct {
+pub const Blocker = struct {
+    pub const Log = struct {
         mutex: Io.Mutex = .init,
         blocked: std.ArrayList(K) = .empty,
     };
@@ -101,7 +101,7 @@ const Blocker = struct {
         return .ok;
     }
 
-    fn count(self: Blocker) usize {
+    pub fn count(self: Blocker) usize {
         self.log.mutex.lockUncancelable(io);
         defer self.log.mutex.unlock(io);
         return self.log.blocked.items.len;
@@ -142,14 +142,14 @@ fn finalize_all(fixture: *const Fixture, view: u64) !Finalization {
     return .{ .proposal = proposal, .certificate = certificate };
 }
 
-fn deliver(network: mpsc.Sender(NetMessage), peer: K, bytes: []const u8) !void {
+pub fn deliver(network: mpsc.Sender(NetMessage), peer: K, bytes: []const u8) !void {
     const payload = try gpa.dupe(u8, bytes);
     errdefer gpa.free(payload);
     try network.send(.{ .peer = peer, .payload = payload, .gpa = gpa });
 }
 
 /// Waits (in real time) until `done(context)` holds.
-fn wait_for(context: anytype, comptime done: fn (@TypeOf(context)) bool) !void {
+pub fn wait_for(context: anytype, comptime done: fn (@TypeOf(context)) bool) !void {
     var waited: u32 = 0;
     while (!done(context)) : (waited += 1) {
         if (waited > 2_000) return error.TestTimedOut;

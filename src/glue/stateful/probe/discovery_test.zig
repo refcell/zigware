@@ -15,9 +15,9 @@ const discovery_mod = @import("discovery.zig");
 const gpa = testing.allocator;
 const io = testing.io;
 const oneshot = utils.channel.oneshot;
-const Digest = cryptography.Sha256.Digest;
+pub const Digest = cryptography.Sha256.Digest;
 const ed25519 = consensus.simplex.scheme.ed25519;
-const S = ed25519.Scheme(Digest);
+pub const S = ed25519.Scheme(Digest);
 const types = consensus.simplex.types;
 const Proposal = types.Proposal(Digest);
 const Finalization = types.Finalization(S, Digest);
@@ -25,13 +25,13 @@ const Round = consensus.Round;
 const V = struct {
     pub const Commitment = Digest;
 };
-const Message = wire.Message(S, V);
-const Fixture = cryptography.certificate.mocks.Fixture(S);
-const namespace = "_COMMONWARE_GLUE_PROBE_TEST";
+pub const Message = wire.Message(S, V);
+pub const Fixture = cryptography.certificate.mocks.Fixture(S);
+pub const namespace = "_COMMONWARE_GLUE_PROBE_TEST";
 
 /// Schemes by epoch (commonware's `EpochProvider`).
-const Provider = struct {
-    const Entry = struct { epoch: u64, scheme: *const S };
+pub const Provider = struct {
+    pub const Entry = struct { epoch: u64, scheme: *const S };
     entries: []const Entry,
 
     pub fn scoped(self: Provider, epoch: consensus.Epoch) ?cryptography.certificate.Scoped(S) {
@@ -45,10 +45,10 @@ const Provider = struct {
     }
 };
 
-const Discovery = discovery_mod.Discovery(S, Digest, Provider);
-const FloorValue = Discovery.FloorValue;
+pub const Discovery = discovery_mod.Discovery(S, Digest, Provider);
+pub const FloorValue = Discovery.FloorValue;
 
-fn finalize_all(fixture: *const Fixture, proposal: Proposal) !Finalization {
+pub fn finalize_all(fixture: *const Fixture, proposal: Proposal) !Finalization {
     const subject: types.Subject(Digest) = .{ .finalize = &proposal };
     const votes = try gpa.alloc(S.Attestation, fixture.schemes.len);
     defer gpa.free(votes);
@@ -59,14 +59,14 @@ fn finalize_all(fixture: *const Fixture, proposal: Proposal) !Finalization {
 
 /// Two committees of four (the second signs nothing the first accepts), a provider, and
 /// encoded replies.
-const Harness = struct {
+pub const Harness = struct {
     committee: Fixture,
     outsiders: Fixture,
     entries_buffer: [2]Provider.Entry,
     entry_count: usize,
     rng: utils.rng.TestRng,
 
-    fn init(harness: *Harness) !void {
+    pub fn init(harness: *Harness) !void {
         harness.rng = utils.rng.test_rng();
         harness.committee = try ed25519.fixture(Digest, gpa, &harness.rng, namespace, 4);
         harness.outsiders = try ed25519.fixture(Digest, gpa, &harness.rng, namespace, 4);
@@ -74,21 +74,21 @@ const Harness = struct {
         harness.entry_count = 1;
     }
 
-    fn deinit(harness: *Harness) void {
+    pub fn deinit(harness: *Harness) void {
         harness.outsiders.deinit(gpa);
         harness.committee.deinit(gpa);
     }
 
-    fn provider(harness: *const Harness) Provider {
+    pub fn provider(harness: *const Harness) Provider {
         return .{ .entries = harness.entries_buffer[0..harness.entry_count] };
     }
 
-    fn peer(harness: *const Harness, index: usize) S.PublicKey {
+    pub fn peer(harness: *const Harness, index: usize) S.PublicKey {
         return harness.committee.participants[index];
     }
 
     /// An encoded response at `(epoch, view)` signed by `fixture`.
-    fn reply(fixture: *const Fixture, epoch: u64, view: u64) ![]u8 {
+    pub fn reply(fixture: *const Fixture, epoch: u64, view: u64) ![]u8 {
         const round: Round = .new(.new(epoch), .new(view));
         const proposal = Proposal.init(round, .new(view - 1), .fill(@intCast(view)));
         var finalization = try finalize_all(fixture, proposal);
@@ -96,7 +96,7 @@ const Harness = struct {
         return codec.encode(Message, gpa, .{ .response = finalization });
     }
 
-    fn receive(
+    pub fn receive(
         harness: *Harness,
         d: *Discovery,
         peer_index: usize,
@@ -106,14 +106,14 @@ const Harness = struct {
     }
 };
 
-const Subscription = oneshot.Pair(FloorValue);
+pub const Subscription = oneshot.Pair(FloorValue);
 
-fn subscribe(d: *Discovery) !struct { Subscription, bool } {
+pub fn subscribe(d: *Discovery) !struct { Subscription, bool } {
     const pair = try oneshot.channel(FloorValue, gpa, io);
     return .{ pair, try d.subscribe(pair.sender) };
 }
 
-fn expect_floor_view(receiver: *oneshot.Receiver(FloorValue), view: u64) !void {
+pub fn expect_floor_view(receiver: *oneshot.Receiver(FloorValue), view: u64) !void {
     var floor = try receiver.try_recv();
     defer floor.deinit();
     try testing.expectEqual(view, floor.finalization.view().get());

@@ -351,7 +351,7 @@ ones: d = deployer (thread T-01a1d5b9-c237), u = utils, j = storage-journal
 | --- | --- | --- | --- | --- | --- |
 | simulate (action, plan, tracker) | 16 | 16 | 0 | 0 | |
 | transfers/tests.rs | 53 | 53 | 0 | 0 | |
-| stateful/probe/mod.rs (+2 conformance) | 22 | 18 | 4 | 0 | u |
+| stateful/probe/mod.rs (+2 conformance) | 22 | 22 | 0 | 0 | |
 | stateful/probe/limits.rs | 1 | 1 | 0 | 0 | |
 | stateful/db/mod.rs | 83 | 61 | 0 | 22 | |
 | stateful/db/any.rs | 3 | 3 | 0 | 0 | |
@@ -372,7 +372,7 @@ ones: d = deployer (thread T-01a1d5b9-c237), u = utils, j = storage-journal
 | stateful/actor/core/processing.rs | 86 | 0 | 86 | 0 | u |
 | stateful/actor/processor/mod.rs | 44 | 22 | 22 | 0 | u |
 | stateful/tests/mod.rs, floor.rs | 28 | 17 | 11 | 0 | j |
-| **total** | **469** | **320** | **125** | **24** | |
+| **total** | **469** | **324** | **121** | **24** | |
 
 - Not portable (db/mod.rs, 22): zigware's `Barrier` is synchronous (databases persist inside
   `finalize`), so `barrier_waits_for_every_handle` (8), `barrier_cancellation_releases_handles`
@@ -409,10 +409,6 @@ ones: d = deployer (thread T-01a1d5b9-c237), u = utils, j = storage-journal
     zigware's barrier is synchronous, and the partial-window test checks the
     ack-before-completion order it also covers.
 - Open, u (utils):
-  - probe: `requests_finalizations_only_from_current_participants`,
-    `invalid_duplicate_finalization_is_ignored`,
-    `resolves_rotated_committee_finalization_from_solicited_peers`,
-    `sample_size_uses_scoped_scheme_with_participantless_all_verifier`.
   - core/processing.rs: all 86 scenarios. zigware's 16 core unit tests (processing,
     verifications, durability, stateful) cover the same mechanisms, but none is a one-to-one
     port.
