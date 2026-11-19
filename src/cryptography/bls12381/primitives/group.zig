@@ -726,11 +726,11 @@ fn Point(comptime kind: PointKind) type {
         pub fn hash_to_group_parts(dst: []const u8, parts: []const []const u8) Self {
             assert(dst.len <= arithmetic.map.dst_length_max);
             // The dst length is checked above and the expansion length is fixed.
-            const affine = switch (kind) {
-                .g1 => arithmetic.map.hash_to_g1_parts(parts, dst),
-                .g2 => arithmetic.map.hash_to_g2_parts(parts, dst),
+            const point = switch (kind) {
+                .g1 => arithmetic.map.hash_to_g1_jacobian_parts(parts, dst),
+                .g2 => arithmetic.map.hash_to_g2_jacobian_parts(parts, dst),
             } catch unreachable;
-            return from_affine(affine);
+            return .{ .point = point };
         }
 
         pub fn arbitrary(u: *Unstructured) minifuzz.Error!Self {

@@ -105,8 +105,16 @@ fn SswuParameters(comptime F: type) type {
 /// Simplified SWU (RFC 9380 section 6.6.2) onto y^2 = x^3 + A x + B.
 fn map_to_curve_sswu(comptime F: type, comptime params: SswuParameters(F), u: F) [2]F {
     const z_u2 = params.z.mul(u.square());
-    const denominator = z_u2.square().add(z_u2);
-    const tv1 = denominator.inverse();
+    return sswu_finish(F, params, u, z_u2, sswu_denominator(F, z_u2).inverse());
+}
+
+/// The SSWU denominator Z^2 u^4 + Z u^2, whose inverse `sswu_finish` takes.
+fn sswu_denominator(comptime F: type, z_u2: F) F {
+    return z_u2.square().add(z_u2);
+}
+
+/// SSWU from `tv1`, the inverse of `sswu_denominator(z_u2)` (zero when it is zero).
+fn sswu_finish(comptime F: type, comptime params: SswuParameters(F), u: F, z_u2: F, tv1: F) [2]F {
     const x1 = if (tv1.is_zero()) params.b_over_za else params.minus_b_over_a.mul(F.one.add(tv1));
     var x = x1;
     var y = if (F == Fp) sswu_y_fp(params, u, z_u2, &x) else sswu_y_generic(F, params, z_u2, &x);
@@ -179,16 +187,74 @@ fn IsogenyMap(comptime F: type) type {
 
 /// Applies an isogeny map to (x', y'); a zero denominator gives the identity.
 fn isogeny(comptime F: type, comptime map: IsogenyMap(F), point: [2]F) ?[2]F {
-    const x_num = polynomial(F, map.x_numerator, point[0]);
-    const x_den = polynomial_monic(F, map.x_denominator, point[0]);
-    const y_num = polynomial(F, map.y_numerator, point[0]);
-    const y_den = polynomial_monic(F, map.y_denominator, point[0]);
-    const denominators = x_den.mul(y_den);
+    const parts = isogeny_parts(F, map, point[0]);
+    const denominators = parts.x_den.mul(parts.y_den);
     if (denominators.is_zero()) return null;
-    const inverse = denominators.inverse();
-    const x = x_num.mul(y_den).mul(inverse);
-    const y = point[1].mul(y_num).mul(x_den).mul(inverse);
-    return .{ x, y };
+    return isogeny_finish(F, parts, point[1], denominators.inverse());
+}
+
+/// The isogeny's four polynomials at x'.
+fn IsogenyParts(comptime F: type) type {
+    return struct { x_num: F, x_den: F, y_num: F, y_den: F };
+}
+
+fn isogeny_parts(comptime F: type, comptime map: IsogenyMap(F), x: F) IsogenyParts(F) {
+    return .{
+        .x_num = polynomial(F, map.x_numerator, x),
+        .x_den = polynomial_monic(F, map.x_denominator, x),
+        .y_num = polynomial(F, map.y_numerator, x),
+        .y_den = polynomial_monic(F, map.y_denominator, x),
+    };
+}
+
+/// The image of (x', y') from `inverse` = 1 / (x_den y_den), which must be nonzero.
+fn isogeny_finish(comptime F: type, parts: IsogenyParts(F), y: F, inverse: F) [2]F {
+    assert(!inverse.is_zero());
+    return .{
+        parts.x_num.mul(parts.y_den).mul(inverse),
+        y.mul(parts.y_num).mul(parts.x_den).mul(inverse),
+    };
+}
+
+/// 1 / a and 1 / b from one inversion (Montgomery's trick); inverse(0) = 0 as `inverse`.
+fn inverse_pair(comptime F: type, values: [2]F) [2]F {
+    const product = values[0].mul(values[1]);
+    if (product.is_zero()) return .{ values[0].inverse(), values[1].inverse() };
+    const inverse = product.inverse();
+    const result: [2]F = .{ inverse.mul(values[1]), inverse.mul(values[0]) };
+    assert(result[0].mul(values[0]).eql(F.one) and result[1].mul(values[1]).eql(F.one));
+    return result;
+}
+
+/// SSWU then the isogeny for both of hash_to_curve's field elements, sharing each stage's
+/// inversion between them. Each result is the same point `isogeny(map_to_curve_sswu(u))`
+/// gives; null is the identity.
+fn map_pair(
+    comptime F: type,
+    comptime params: SswuParameters(F),
+    comptime map: IsogenyMap(F),
+    u: [2]F,
+) [2]?[2]F {
+    var z_u2: [2]F = undefined;
+    var denominators: [2]F = undefined;
+    for (&z_u2, &denominators, u) |*z, *denominator, value| {
+        z.* = params.z.mul(value.square());
+        denominator.* = sswu_denominator(F, z.*);
+    }
+    const tv1 = inverse_pair(F, denominators);
+    var points: [2][2]F = undefined;
+    var parts: [2]IsogenyParts(F) = undefined;
+    for (&points, &parts, &denominators, 0..) |*point, *part, *denominator, index| {
+        point.* = sswu_finish(F, params, u[index], z_u2[index], tv1[index]);
+        part.* = isogeny_parts(F, map, point[0]);
+        denominator.* = part.x_den.mul(part.y_den);
+    }
+    const inverses = inverse_pair(F, denominators);
+    var out: [2]?[2]F = undefined;
+    for (&out, parts, points, inverses) |*mapped, part, point, inverse| {
+        mapped.* = if (inverse.is_zero()) null else isogeny_finish(F, part, point[1], inverse);
+    }
+    return out;
 }
 
 const g1_sswu: SswuParameters(Fp) = .{
@@ -260,13 +326,32 @@ pub fn hash_to_g1(message: []const u8, dst: []const u8) ExpandError!g1.Affine {
 
 /// hash_to_g1 of the concatenation of `parts`.
 pub fn hash_to_g1_parts(parts: []const []const u8, dst: []const u8) ExpandError!g1.Affine {
+    return (try hash_to_g1_jacobian_parts(parts, dst)).to_affine();
+}
+
+/// hash_to_g1_parts in Jacobian coordinates, for callers that keep points projective.
+pub fn hash_to_g1_jacobian_parts(parts: []const []const u8, dst: []const u8) ExpandError!g1.G1 {
     const u = try hash_to_field_fp_parts(parts, dst);
-    const sum = map_to_curve_g1(u[0]).add(map_to_curve_g1(u[1]));
-    const result = g1.clear_cofactor(sum).to_affine();
+    const result = g1.clear_cofactor(sum_mapped(g1.G1, map_pair(Fp, g1_sswu, g1_isogeny, u)));
     // A subgroup check is a third of the hash. ReleaseFast never checks an assert, yet LLVM
     // keeps this one's work, so it runs only in builds that check asserts.
-    if (std.debug.runtime_safety) assert(g1.is_in_subgroup(result));
+    if (std.debug.runtime_safety) assert(g1.is_in_subgroup(result.to_affine()));
     return result;
+}
+
+/// The sum of two `map_pair` results as a `Point` (g1.G1 or g2.G2).
+fn sum_mapped(comptime Point: type, mapped: anytype) Point {
+    var sum = Point.identity;
+    for (mapped) |point| {
+        const affine: Point.Affine = .{
+            .x = (point orelse continue)[0],
+            .y = point.?[1],
+            .infinity = false,
+        };
+        assert(affine.is_on_curve());
+        sum = sum.add_affine(affine);
+    }
+    return sum;
 }
 
 /// hash_to_curve for BLS12381G2_XMD:SHA-256_SSWU_RO_ with a caller-chosen DST.
@@ -276,12 +361,16 @@ pub fn hash_to_g2(message: []const u8, dst: []const u8) ExpandError!g2.Affine {
 
 /// hash_to_g2 of the concatenation of `parts`.
 pub fn hash_to_g2_parts(parts: []const []const u8, dst: []const u8) ExpandError!g2.Affine {
+    return (try hash_to_g2_jacobian_parts(parts, dst)).to_affine();
+}
+
+/// hash_to_g2_parts in Jacobian coordinates, for callers that keep points projective.
+pub fn hash_to_g2_jacobian_parts(parts: []const []const u8, dst: []const u8) ExpandError!g2.G2 {
     const u = try hash_to_field_fp2_parts(parts, dst);
-    const sum = map_to_curve_g2(u[0]).add(map_to_curve_g2(u[1]));
-    const result = g2.clear_cofactor(sum).to_affine();
+    const result = g2.clear_cofactor(sum_mapped(g2.G2, map_pair(Fp2, g2_sswu, g2_isogeny, u)));
     // A subgroup check is a third of the hash. ReleaseFast never checks an assert, yet LLVM
     // keeps this one's work, so it runs only in builds that check asserts.
-    if (std.debug.runtime_safety) assert(g2.is_in_subgroup(result));
+    if (std.debug.runtime_safety) assert(g2.is_in_subgroup(result.to_affine()));
     return result;
 }
 
