@@ -359,7 +359,7 @@ ones: d = deployer (thread T-01a1d5b9-c237), u = utils, j = storage-journal
 | stateful/db/keyless/standard.rs | 5 | 5 | 0 | 0 | |
 | stateful/db/immutable/standard.rs | 2 | 2 | 0 | 0 | |
 | stateful/db/compact.rs | 39 | 39 | 0 | 0 | |
-| stateful/db/p2p/actor.rs | 24 | 16 | 8 | 0 | d |
+| stateful/db/p2p/actor.rs | 24 | 24 | 0 | 0 | |
 | stateful/db/p2p/handler.rs, limits.rs | 3 | 3 | 0 | 0 | |
 | stateful/db/p2p/mailbox.rs | 4 | 4 | 0 | 0 | |
 | stateful/actor/syncer/actor.rs | 13 | 8 | 5 | 0 | d |
@@ -372,7 +372,7 @@ ones: d = deployer (thread T-01a1d5b9-c237), u = utils, j = storage-journal
 | stateful/actor/core/processing.rs | 86 | 0 | 86 | 0 | u |
 | stateful/actor/processor/mod.rs | 44 | 22 | 22 | 0 | u |
 | stateful/tests/mod.rs, floor.rs | 28 | 11 | 17 | 0 | j |
-| **total** | **469** | **290** | **157** | **22** | |
+| **total** | **469** | **298** | **149** | **22** | |
 
 - Not portable (db/mod.rs, 22): zigware's `Barrier` is synchronous (databases persist inside
   `finalize`), so `barrier_waits_for_every_handle` (8), `barrier_cancellation_releases_handles`
@@ -390,13 +390,9 @@ ones: d = deployer (thread T-01a1d5b9-c237), u = utils, j = storage-journal
     before its finish check, so the race it guards cannot arise there.
   - compact.rs: done. The state-sync cases are in compact_sync_test.zig (deterministic
     runtime, commonware's `SupersedingSource`), and multiple commit ranges in compact_test.zig.
-  - db/p2p actor.rs: `completed_request_cleanup_preserves_new_subscriber`,
-    `cancellation_before_resolver_admission_preserves_replacement`,
-    `fanout_waits_for_slow_receipt_and_preserves_other_demand_on_cancel` (2),
-    `concurrent_serves_complete_after_database_is_available`,
-    `concurrent_serves_preserve_actor_progress`,
-    `pending_feedback_allows_fetches_serves_and_cancellation`,
-    `late_subscriber_receives_cached_response_after_verdict_or_cancellation`.
+  - db/p2p actor.rs: done. The handler-level cases are in actor_test.zig; the live ones
+    (concurrent serves, pending feedback, late subscribers, cancellation before resolver
+    admission) in actor_live_test.zig, on a simulated two-peer network.
   - syncer: `resolve_follows_live_floor_after_startup` (2),
     `restart_resumes_floor_installed_before_stateful`,
     `resolve_skips_selected_block_pruned_by_newer_floor`,
