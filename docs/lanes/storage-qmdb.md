@@ -74,7 +74,7 @@ which every database here is built on.
 - [x] store (`qmdb/store`): the unauthenticated variable-value KV over `any` unordered operations
   (MMR family, 64-byte bitmap chunks), with floor policies, bounded init, and db.rs's core tests
   (exact sizes, floors, and pruning boundaries match commonware's).
-- [ ] store: the `qmdb_store_operations` fuzz target.
+- [x] store: the `qmdb_store_operations` fuzz target (floor oracle on every commit, crash reopens).
 - [ ] fuzz targets: the any batch_root and batching targets.
 - [ ] benches (commonware `qmdb/benches`).
 - [x] immutable (fixed, MMR and MMB): `Db`, chained batches, floor-filtered batch reads,
@@ -274,3 +274,4 @@ which every database here is built on.
 - 2026-11-18: ordered merkleized-batch neighbor lookups (`get_prev_key`/`get_next_key`).
 - 2026-11-18: `qmdb_verify_proof` fuzz target.
 - 2026-11-18: the store (`qmdb/store`).
+- 2026-11-19: `qmdb_store_operations` fuzz target.
