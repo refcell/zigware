@@ -30,7 +30,7 @@ if [ "${DEMO_SESSION:-}" = "1" ]; then
       type_cmd 'zig build run-estimator -Doptimize=ReleaseFast -- examples/estimator/simplex.lazy \
 --distribution us-east-1:3,eu-west-1:2,ap-northeast-1:2' 6
       ;;
-    flood)
+    flood | flood-262144)
       # Build outside the recording when possible: skip it while the binary is fresh.
       if [ -n "$(find src examples/flood build.zig -newer zig-out/bin/flood -print -quit \
         2>/dev/null || echo stale)" ] || [ ! -x zig-out/bin/flood ]; then
@@ -38,7 +38,12 @@ if [ "${DEMO_SESSION:-}" = "1" ]; then
       fi
       rm -rf /tmp/zigware-flood
       printf '\033[H\033[2J'
-      type_cmd 'examples/flood/local.sh 4 /tmp/zigware-flood' 1
+      # flood-262144 runs 1024-byte messages at the rate where docs/BENCHMARKS.md saturates.
+      if [ "$name" = flood ]; then
+        type_cmd 'examples/flood/local.sh 4 /tmp/zigware-flood' 1
+      else
+        type_cmd 'examples/flood/local.sh 4 /tmp/zigware-flood 1024 262144' 1
+      fi
       printf '\n'
       type_cmd 'examples/flood/demo.sh /tmp/zigware-flood 6' 1
       ;;
@@ -538,7 +543,7 @@ sed -u -E '$line; s/^(.{$width}).*/\\1/; $green; $yellow'"
 fi
 
 case $name in
-  flood) size=150x40 ;;
+  flood | flood-262144) size=150x40 ;;
   chat) size=200x50 ;;
   log) size=200x44 ;;
   bridge) size=160x40 ;;
