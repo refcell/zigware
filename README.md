@@ -120,7 +120,7 @@ setup, the commands, and the caveats). Below 1× means zigware is faster.
 | bench | zigware / commonware |
 | --- | --- |
 | `codec::lazy::get` (100k shared) | 0.17× |
-| `journal::append_sync` (fixed) / `fixed_append` (10k) / `fixed_replay` (100k) | 0.11× / 0.23× / 0.70× |
+| `journal::append_sync` (fixed) / `fixed_append` (10k) / `fixed_replay` (100k) | 0.11× / 0.23× / 0.76× |
 | `buffer_paged::append` (4 KiB) | 0.43× |
 | `bls12381::aggregate_verify_same_message` (1000 keys) / single verify | 0.98× / 0.79× |
 | `sha256::hash_message` (4 KiB / 1 MiB) | 1.11× / 1.12× |
@@ -130,8 +130,7 @@ setup, the commands, and the caveats). Below 1× means zigware is faster.
 These were measured on a busy desktop with storage on tmpfs, so ratios near 1 are noise and
 the storage numbers measure code, not the disk. ed25519 single verify uses an AVX-512 IFMA
 backend where the CPU has one; batch verify uses IFMA, then AVX2 (0.76×), then a scalar
-path. The BLS and `fixed_replay` rows wait on a quiet re-run, and the qmdb gap is being
-worked on.
+path. The BLS rows wait on a quiet re-run, and the qmdb gap is being worked on.
 
 ## Design
 
