@@ -238,6 +238,10 @@ fn add_benches(
 ) void {
     const bench_step = b.step("bench", "Measure every package's benchmarks");
     const bench_filter = b.option([]const u8, "bench-filter", "Only run benchmarks matching");
+    const bench_install = b.step(
+        "bench-install",
+        "Install the measured bench harnesses to zig-out/bench (etc/scripts/bench-compare.sh)",
+    );
     const bench_optimize: std.builtin.OptimizeMode = if (optimize == .debug)
         .fast
     else
@@ -273,6 +277,10 @@ fn add_benches(
             } else {
                 run.addArg("--bench");
                 run.has_side_effects = true;
+                const installed = b.addInstallArtifact(exe, .{
+                    .dest_dir = .{ .override = .{ .custom = "bench" } },
+                });
+                bench_install.dependOn(&installed.step);
                 if (bench_filter) |filter| run.addArgs(&.{ "--", filter });
                 bench_step.dependOn(&run.step);
             }
