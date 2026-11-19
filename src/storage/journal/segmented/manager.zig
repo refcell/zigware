@@ -481,7 +481,26 @@ pub fn Manager(comptime Factory: type) type {
                 if (index > 0) assert(sizes[index - 1].section < entry.section);
                 try self.prune_guard(entry.section);
             }
-            for (sizes) |entry| try self.truncate_section(entry.section, entry.size);
+            // Independent sections truncate concurrently (commonware): every section's sync
+            // starts before any is awaited.
+            var joined = Completion.ok;
+            errdefer joined.release();
+            for (sizes) |entry| {
+                const position = self.search(entry.section);
+                if (!position.found) continue;
+                const buffer = &self.sections.items[position.index].buffer;
+                if (entry.size >= buffer.size()) continue;
+                try buffer.resize(entry.size);
+                const started = try buffer.start_sync();
+                // `join` consumes both references, also on error.
+                joined = Completion.join(joined, started) catch |err| {
+                    joined = Completion.ok;
+                    return err;
+                };
+            }
+            const all = joined;
+            joined = Completion.ok;
+            try all.wait_release();
         }
 
         fn truncate_section(self: *Self, section: u64, bytes: u64) Error!void {

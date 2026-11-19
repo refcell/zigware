@@ -7,7 +7,8 @@ const std = @import("std");
 const testing = std.testing;
 const manager_mod = @import("manager.zig");
 const base = @import("oversized_test.zig");
-const paged = @import("runtime").buffer.paged;
+const runtime = @import("runtime");
+const paged = runtime.buffer.paged;
 
 const gpa = testing.allocator;
 const Harness = base.Harness;
@@ -1719,4 +1720,115 @@ test "oversized recovery: a value read cancelled during replay fails the replay"
         defer markers.deinit();
         try testing.expectEqual(retained, markers.get(1).?.*);
     }
+}
+
+fn finishing(
+    ctx: runtime.deterministic.Context,
+    recovery: *Journal.Recovery,
+    out: *?Journal,
+) anyerror!void {
+    _ = ctx;
+    out.* = try recovery.finish();
+}
+
+fn orphan_value_alignment_sync_concurrency(ctx: runtime.deterministic.Context) !void {
+    var h = try Harness.init();
+    defer h.deinit();
+    // Seed one durable entry per section.
+    var journal = try h.open_tracked();
+    var seeded: [2]Located = undefined;
+    for (&seeded, 1..) |*slot, section| {
+        slot.* = try append(&journal, section, section, fill(section));
+    }
+    try journal.sync_all();
+    // Sync only the values: their tails are durable while the index additions stay buffered.
+    for (1..3) |section| _ = try append(&journal, section, 100 + section, fill(100 + section));
+    try journal.values.sync_all();
+    journal.deinit();
+
+    // Reopen and replay the index, leaving each section's value tail longer than its last
+    // retained entry; every started sync parks.
+    var pending: runtime.storage.mocks.DelayedSync = .init(gpa, ctx.io());
+    defer pending.deinit();
+    var delayed: runtime.storage.mocks.DelayedSynced =
+        .init(gpa, h.storage.interface(), &pending);
+    var recovery = try Journal.init_with_markers(gpa, delayed.storage(), h.cfg(), "test-markers");
+    try recovery.drain();
+    var out: ?Journal = null;
+    const task = try ctx.child("finish").spawn(finishing, .{ &recovery, &out });
+    // Independent value truncations each reach their sync before either completes.
+    try ctx.sleep(.fromMilliseconds(10));
+    try testing.expect(out == null);
+    try testing.expectEqual(@as(usize, 2), pending.parked());
+    while (out == null) {
+        pending.release_all();
+        try ctx.sleep(.fromMilliseconds(1));
+    }
+    try (try task.join());
+    var aligned = out.?;
+    // Each section keeps its entry, and its value tail ends at that entry.
+    for (seeded, 1..) |slot, section| {
+        try testing.expectEqual(chunk, try aligned.size(section));
+        try testing.expectEqual(section, (try aligned.get(section, 0)).id);
+        try expect_value(&aligned, section, slot, fill(section));
+        try testing.expectEqual(byte_end(slot), try aligned.values.size(section));
+    }
+    pending.unblock();
+    try aligned.destroy();
+}
+
+test "oversized recovery: value alignment truncates sections concurrently" {
+    // commonware `test_oversized_orphan_value_alignment_sync_concurrency`.
+    var runner = try runtime.deterministic.Runner.init(gpa, .{});
+    defer runner.deinit();
+    try (try runner.start_context(orphan_value_alignment_sync_concurrency, .{}));
+}
+
+fn syncing(ctx: runtime.deterministic.Context, journal: *Journal, done: *bool) anyerror!void {
+    _ = ctx;
+    defer done.* = true;
+    try journal.sync(&.{1});
+}
+
+fn dropped_handle_driven_by_next_sync(ctx: runtime.deterministic.Context) !void {
+    var h = try Harness.init();
+    defer h.deinit();
+    var pending: runtime.storage.mocks.DelayedSync = .init(gpa, ctx.io());
+    defer pending.deinit();
+    var delayed: runtime.storage.mocks.DelayedSynced =
+        .init(gpa, h.storage.interface(), &pending);
+    const checkpoint: @import("oversized.zig").Checkpoint = .{ .section = 0, .size = 0 };
+    var journal = try Journal.init_with_checkpoint(gpa, delayed.storage(), h.cfg(), checkpoint);
+    const located = try append(&journal, 1, 1, fill(1));
+    // Drop the completion without observing it: the next sync must wait for the started syncs
+    // and complete the work.
+    const started = try journal.start_sync(&.{1});
+    try testing.expect(started.is_pending());
+    started.release();
+    var done = false;
+    const task = try ctx.child("sync").spawn(syncing, .{ &journal, &done });
+    try ctx.sleep(.fromMilliseconds(10));
+    try testing.expect(!done);
+    while (!done) {
+        pending.release_all();
+        try ctx.sleep(.fromMilliseconds(1));
+    }
+    try (try task.join());
+    // The next sync waited for the dropped completion's syncs: none is left parked.
+    try testing.expectEqual(@as(usize, 0), pending.parked());
+    journal.deinit();
+    h.storage.crash();
+    // Restore at the boundary the completed sync covered.
+    var restored = try h.open_checkpoint(.{ .section = 1, .size = chunk });
+    try testing.expectEqual(chunk, try restored.size(1));
+    try testing.expectEqual(1, (try restored.get(1, located.position)).id);
+    try expect_value(&restored, 1, located, fill(1));
+    try restored.destroy();
+}
+
+test "oversized start_sync: a dropped completion is driven by the next sync" {
+    // commonware `test_oversized_start_sync_dropped_handle_driven_by_next_sync`.
+    var runner = try runtime.deterministic.Runner.init(gpa, .{});
+    defer runner.deinit();
+    try (try runner.start_context(dropped_handle_driven_by_next_sync, .{}));
 }

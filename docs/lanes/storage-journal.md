@@ -368,11 +368,16 @@ resize, sync), `runtime.storage`, with the in-memory backend `runtime.storage.me
   workloads run only with `-Dslow-tests` in every mode: zstd makes each take about 40 s even in
   ReleaseSafe (154 s of CI's test-storage step); nightly's ReleaseSafe `-Dslow-tests` run keeps
   them covered.
-- Oversized `start_sync` is `sync`, so commonware's dropped-`start_sync`-handle test has no
-  counterpart; its sync-failure tests use a test-local partition sync fault (`SyncFault`).
-- metadata `start_sync` is `sync`: a failed started sync fails at the call and consumes the
-  store, instead of failing the next sync (commonware's dropped-handle and failure tests map
-  onto that, on faulty storage).
+- Oversized's sync-failure tests use a test-local partition sync fault (`SyncFault`). Its
+  in-flight `start_sync` tests run on `runtime.storage.mocks.DelayedSync`: a dropped completion
+  is driven by the next sync, and recovery's value alignment truncates independent sections
+  concurrently (every section's sync starts before any is awaited, as in commonware).
+- metadata's failure tests run on faulty storage, which completes a started sync at the call,
+  so a failure surfaces on the next durability operation and consumes the store. Its
+  second-sync-waits test runs on `DelayedSync`.
+- authenticated's in-flight tests (`authenticated_start_sync_test.zig`) include both issue 5668
+  destroy regressions and the initialization order (operations sync before Merkle repair); a
+  canceled task stands in for commonware's dropped destroy future.
 
 - Journal benches measure on the production storage in a temporary `.zig-cache/tmp` directory
   (commonware's tokio runtime) and smoke-test (`zig build test`) on the in-memory storage, so

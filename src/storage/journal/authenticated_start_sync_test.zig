@@ -57,7 +57,13 @@ const Fixture = struct {
     }
 
     fn open_on(self: *Fixture, storage: runtime.storage.Storage) !Journal {
-        const merkle_config: merkle.full.Config = .{
+        const merkle_cfg = self.merkle_config();
+        const journal_cfg = self.journal_config();
+        return Journal.init(gpa, storage, merkle_cfg, journal_cfg, is_commit, .forward_fold);
+    }
+
+    fn merkle_config(self: *Fixture) merkle.full.Config {
+        return .{
             .journal_partition = "mmr-journal",
             .metadata_partition = "mmr-metadata",
             .items_per_blob = 11,
@@ -65,14 +71,16 @@ const Fixture = struct {
             .replay_buffer = 1024,
             .cache_ref = &self.merkle_cache,
         };
-        const journal_config: fixed.Config = .{
+    }
+
+    fn journal_config(self: *Fixture) fixed.Config {
+        return .{
             .partition = "journal",
             .items_per_blob = 7,
             .write_buffer = 1024,
             .replay_buffer = 1024,
             .cache_ref = &self.journal_cache,
         };
-        return Journal.init(gpa, storage, merkle_config, journal_config, is_commit, .forward_fold);
     }
 };
 
@@ -211,4 +219,191 @@ test "authenticated reopen persists the Merkle watermark" {
     var runner = try runtime.deterministic.Runner.init(gpa, .{});
     defer runner.deinit();
     try (try runner.start_context(reopen_persists_merkle_watermark, .{}));
+}
+
+const commit_op: Op = .{ 1, @splat(0), @splat(0) };
+
+/// Commits 30 operations and prunes to 20, so the Merkle metadata holds a boundary and pins.
+/// With `recommit`, commits 6 more, which syncs the operation log but merely flushes Merkle
+/// nodes; without it, syncs again.
+fn setup(ctx: Context, journal: *Journal, recommit: bool, done: *bool) anyerror!void {
+    _ = ctx;
+    defer done.* = true;
+    for (0..30) |i| _ = try journal.append(create_operation(@intCast(i)));
+    _ = try journal.append(commit_op);
+    try journal.sync();
+    _ = try journal.prune(20);
+    if (!recommit) return journal.sync();
+    for (30..36) |i| _ = try journal.append(create_operation(@intCast(i)));
+    _ = try journal.append(commit_op);
+    try journal.commit();
+}
+
+/// Runs `setup` while releasing every sync it parks (commonware `drive_pending_syncs`).
+fn drive_setup(ctx: Context, f: *Fixture, journal: *Journal, recommit: bool) !void {
+    var done = false;
+    const task = try ctx.child("setup").spawn(setup, .{ journal, recommit, &done });
+    while (!done) {
+        f.pending.release_all();
+        try ctx.sleep(.fromMilliseconds(1));
+    }
+    try (try task.join());
+    f.pending.release_all();
+}
+
+/// A failed Merkle sync nobody observed surfaces at destroy before anything is removed, so the
+/// journal reopens at its last commit (commonware issue 5668).
+fn destroy_observes_failed_merkle_sync(ctx: Context) !void {
+    var f: Fixture = undefined;
+    try f.init(ctx);
+    defer f.deinit();
+    var journal = try f.open();
+    try drive_setup(ctx, &f, &journal, true);
+    const bounds = journal.get_bounds();
+    const root = try journal.root(0);
+    try testing.expect(bounds.start > 0);
+    // Start a sync and drop its completion. The operation log's only parked sync is its
+    // watermark advance: it lands, and every Merkle journal sync fails.
+    (try journal.start_sync()).release();
+    try testing.expect(f.pending.parked() > 1);
+    f.pending.next().release({});
+    f.pending.fail_all();
+    f.pending.unblock();
+    // Destroy returns the failure, and the last commit survives it.
+    try testing.expectError(error.Io, journal.destroy());
+    var reopened = try f.open();
+    try testing.expectEqual(bounds, reopened.get_bounds());
+    try testing.expectEqual(root, try reopened.root(0));
+    try reopened.destroy();
+}
+
+test "authenticated destroy observes a failed Merkle sync before removal" {
+    // commonware `issue_5668_regression_destroy_observes_failed_merkle_sync_before_removal`.
+    var runner = try runtime.deterministic.Runner.init(gpa, .{});
+    defer runner.deinit();
+    try (try runner.start_context(destroy_observes_failed_merkle_sync, .{}));
+}
+
+fn destroying(ctx: Context, journal: *Journal, done: *bool) anyerror!void {
+    _ = ctx;
+    defer done.* = true;
+    try journal.destroy();
+}
+
+/// A destroy dropped while the operation journal's clear is still being staged has removed
+/// nothing, so the pruned journal reopens at its last commit (commonware issue 5668).
+fn destroy_stages_journal_clear(ctx: Context) !void {
+    var f: Fixture = undefined;
+    try f.init(ctx);
+    defer f.deinit();
+    var journal = try f.open();
+    try drive_setup(ctx, &f, &journal, false);
+    const bounds = journal.get_bounds();
+    const root = try journal.root(0);
+    try testing.expect(bounds.start > 0);
+    // Park destroy's first durability operation, then drop the destroy there.
+    try f.pending.arm();
+    var done = false;
+    const task = try ctx.child("destroy").spawn(destroying, .{ &journal, &done });
+    try ctx.sleep(.fromMilliseconds(10));
+    try testing.expect(!done);
+    try testing.expectEqual(@as(u64, 1), f.pending.calls());
+    const ended = task.abort();
+    if (ended) |result| result catch {} else |_| {}
+    f.pending.unblock();
+    // The unfinished clear is not durable, so the last commit reopens.
+    var reopened = try f.open();
+    try testing.expectEqual(bounds, reopened.get_bounds());
+    try testing.expectEqual(root, try reopened.root(0));
+    try reopened.destroy();
+}
+
+test "authenticated destroy stages the journal clear before removal" {
+    // commonware `issue_5668_regression_destroy_stages_journal_clear_before_removal`.
+    var runner = try runtime.deterministic.Runner.init(gpa, .{});
+    defer runner.deinit();
+    try (try runner.start_context(destroy_stages_journal_clear, .{}));
+}
+
+fn finishing(ctx: Context, recovery: *Journal.Recovery, out: *?Journal) anyerror!void {
+    _ = ctx;
+    out.* = try recovery.finish();
+}
+
+/// Seeds the Merkle structure with one leaf and the operation journal with one operation.
+fn seed_sync_order(f: *Fixture, merkle_storage: runtime.storage.Storage) !void {
+    const hasher = Journal.Hasher.init(.forward_fold);
+    var structure = try Journal.Merkle.init(gpa, merkle_storage, &hasher, f.merkle_config());
+    defer structure.deinit();
+    var batch = try structure.new_batch();
+    const leaf: [32]u8 = @splat(1);
+    batch.add(gpa, &hasher, &leaf) catch |err| {
+        batch.deinit(gpa);
+        return err;
+    };
+    const merkleized = try batch.merkleize(&structure, &hasher);
+    defer merkleized.release(gpa);
+    try structure.apply_batch(merkleized);
+    try structure.sync();
+    var items = try fixed.Journal(Op).init(gpa, f.delayed.storage(), f.journal_config());
+    defer items.deinit();
+    _ = try items.append(create_operation(1));
+    try items.sync();
+}
+
+/// Finishing recovery syncs the operations before any Merkle sync.
+fn initialization_sync_order(ctx: Context) !void {
+    var f: Fixture = undefined;
+    try f.init(ctx);
+    defer f.deinit();
+    // Control operation and Merkle durability independently.
+    var merkle_pending: runtime.storage.mocks.DelayedSync = .init(gpa, ctx.io());
+    defer merkle_pending.deinit();
+    var merkle_delayed: runtime.storage.mocks.DelayedSynced =
+        .init(gpa, f.inner.storage(), &merkle_pending);
+    try seed_sync_order(&f, merkle_delayed.storage());
+    // Keep no Merkle leaf, so finishing repairs the structure from the one operation.
+    const hasher = Journal.Hasher.init(.forward_fold);
+    var structure = try Journal.Merkle.Recovery.prepare(
+        gpa,
+        merkle_delayed.storage(),
+        &hasher,
+        f.merkle_config(),
+        .{ .at_most = 0 },
+    );
+    const Items = fixed.Journal(Op);
+    const items = Items.recover(gpa, f.delayed.storage(), f.journal_config(), null) catch |err| {
+        structure.deinit();
+        return err;
+    };
+    var recovery: Journal.Recovery = .{
+        .gpa = gpa,
+        .journal = items,
+        .merkle = structure,
+        .hasher = hasher,
+        .selected_end = 1,
+    };
+    try f.pending.arm();
+    try merkle_pending.arm();
+    var out: ?Journal = null;
+    const task = try ctx.child("finish").spawn(finishing, .{ &recovery, &out });
+    try ctx.sleep(.fromMilliseconds(10));
+    try testing.expect(out == null);
+    try testing.expectEqual(@as(u64, 1), f.pending.calls());
+    try testing.expectEqual(@as(u64, 0), merkle_pending.calls());
+    // Complete both syncs and check the published operation prefix.
+    f.pending.unblock();
+    merkle_pending.unblock();
+    try (try task.join());
+    var journal = out.?;
+    try testing.expectEqual(@as(u64, 0), journal.get_bounds().start);
+    try testing.expectEqual(@as(u64, 1), journal.get_bounds().end);
+    try journal.destroy();
+}
+
+test "authenticated initialization syncs operations before Merkle repair" {
+    // commonware `test_initialization_syncs_operations_before_merkle_repair`.
+    var runner = try runtime.deterministic.Runner.init(gpa, .{});
+    defer runner.deinit();
+    try (try runner.start_context(initialization_sync_order, .{}));
 }

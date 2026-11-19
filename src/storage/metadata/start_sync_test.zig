@@ -8,6 +8,7 @@
 
 const std = @import("std");
 const testing = std.testing;
+const runtime = @import("runtime");
 const metadata = @import("mod.zig");
 const Faults = @import("../archive/faults.zig").Faults;
 
@@ -143,4 +144,53 @@ test "start_sync: a write failure consumes the store" {
     var reopened = try open(&faults);
     defer reopened.deinit();
     try expect_value(&reopened, 1, 2, 8);
+}
+
+fn syncing(ctx: runtime.deterministic.Context, store: *Store, done: *bool) anyerror!void {
+    _ = ctx;
+    defer done.* = true;
+    try store.sync();
+}
+
+fn second_sync_waits_for_first(ctx: runtime.deterministic.Context) !void {
+    var inner: runtime.storage.memory.Storage = .init(gpa);
+    defer inner.deinit();
+    var pending: runtime.storage.mocks.DelayedSync = .init(gpa, ctx.io());
+    defer pending.deinit();
+    var delayed: runtime.storage.mocks.DelayedSynced = .init(gpa, inner.storage(), &pending);
+    var store = try Store.init(gpa, delayed.storage(), config);
+    var live = true;
+    defer if (live) store.deinit();
+    // Park the first sync, then start a second: until the first sync completes, its target
+    // copy's on-disk state is unknown, so the second must not write a byte to the other (only
+    // durable) copy.
+    try put(&store, 1, 3, 1);
+    const first = try store.start_sync();
+    defer first.release();
+    try put(&store, 1, 4, 1);
+    const before = inner.audit();
+    var done = false;
+    const second = try ctx.child("second").spawn(syncing, .{ &store, &done });
+    try ctx.sleep(.fromMilliseconds(10));
+    try testing.expect(!done);
+    try testing.expectEqualSlices(u8, &before, &inner.audit());
+    try testing.expectEqual(@as(u64, 1), pending.starts());
+    // Releasing the first lets the second write and sync.
+    pending.release_all();
+    try first.wait();
+    while (!done) {
+        pending.release_all();
+        try ctx.sleep(.fromMilliseconds(1));
+    }
+    try (try second.join());
+    try expect_value(&store, 1, 4, 1);
+    live = false;
+    try store.destroy();
+}
+
+test "start_sync: a second sync waits for the first" {
+    // commonware `test_start_sync_second_sync_waits_for_first`.
+    var runner = try runtime.deterministic.Runner.init(gpa, .{});
+    defer runner.deinit();
+    try (try runner.start_context(second_sync_waits_for_first, .{}));
 }
