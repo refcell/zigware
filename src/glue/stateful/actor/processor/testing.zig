@@ -315,7 +315,10 @@ pub const TestApp = struct {
         var copy = try ancestry.clone();
         defer copy.deinit();
         while (record.len < record.digests.len) : (record.len += 1) {
-            var block = (copy.next() catch break) orelse break;
+            var block = (copy.next() catch |err| {
+                if (err == error.Canceled) return err; // Propagated, never swallowed.
+                break;
+            }) orelse break;
             defer block.deinit();
             record.digests[record.len] = block.digest();
         }

@@ -1120,3 +1120,89 @@ test "stateful processing: an unexecutable handoff parent executes once, verify 
 test "stateful processing: an unexecutable handoff parent executes once, prepare first" {
     try unexecutable_handoff(false);
 }
+
+/// Counts the attempts to acquire it (each slowed by 5 ms on the loop, so a backlog takes a
+/// while to admit) and never yields a block (commonware `PendingAncestry`).
+const CountingAncestry = struct {
+    pub const Block = TestBlock;
+
+    admissions: *std.atomic.Value(u32),
+
+    pub fn peek(_: *const CountingAncestry) ?*const harness_mod.Digested {
+        return null;
+    }
+
+    pub fn next(_: *CountingAncestry) !?harness_mod.Digested {
+        // Each pass sleeps an hour; only cancellation ends the loop.
+        while (true) try std.testing.io.sleep(.fromSeconds(3_600), .awake);
+    }
+
+    pub fn clone(self: *const CountingAncestry) !CountingAncestry {
+        std.testing.io.sleep(.fromMilliseconds(5), .awake) catch {};
+        _ = self.admissions.fetchAdd(1, .monotonic);
+        return self.*;
+    }
+
+    pub fn deinit(_: *CountingAncestry) void {}
+};
+
+// commonware `pending_proposal_polls_ready_verification_before_ingress`: while a build is held
+// on a verification's verdict, the loop answers that ready verification before it has admitted
+// a queued backlog of verifications. Adapted: the build is held by the test until the verdict
+// arrives (commonware's gate awaits it), and each admission takes 5 ms so the backlog cannot be
+// drained before the verification finishes.
+test "stateful processing: a pending proposal polls a ready verification before ingress" {
+    const backlog = 16;
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer check(&fixture);
+    const genesis = TestBlock.genesis();
+    const block = try uncached_child(&fixture, &genesis, 1);
+    var verify_probe: Probe = .{ .target = block.digest() };
+    defer verify_probe.deinit();
+    var verify_gate = try Held.add(&verify_probe);
+    defer verify_gate.deinit();
+    fixture.processing.verifications.verifier.app.probe = &verify_probe;
+    var propose_probe: Probe = .{ .target = genesis.digest() };
+    defer propose_probe.deinit();
+    var build = try Held.add(&propose_probe);
+    defer build.deinit();
+    fixture.processing.processor.app.propose_probe = &propose_probe;
+
+    var verdict = try fixture.verify(&.{ block, genesis });
+    defer verdict.deinit();
+    try verify_gate.await_started();
+    var proposal = try fixture.propose_async(&.{genesis}, 2);
+    defer proposal.deinit();
+    try build.await_started();
+
+    // A backlog of verifications whose callers stay alive, so none is dropped as cancelled.
+    var admissions: std.atomic.Value(u32) = .init(0);
+    var queued: [backlog]oneshot.Receiver(bool) = undefined;
+    var sent: usize = 0;
+    defer for (queued[0..sent]) |*receiver| receiver.deinit();
+    for (&queued) |*receiver| {
+        const ancestry = try harness_mod.Execution.Ancestry.init(gpa, CountingAncestry{
+            .admissions = &admissions,
+        });
+        const pair = try oneshot.channel(bool, gpa, std.testing.io);
+        try fixture.send(.{ .verify = .{ .ancestry = ancestry, .verification = pair.sender } });
+        receiver.* = pair.receiver;
+        sent += 1;
+    }
+
+    // The ready verification answers before the loop has received the whole backlog.
+    try verify_gate.open();
+    try testing.expect(try await_verdict(&verdict));
+    const admitted = admissions.load(.monotonic);
+    // commonware asserts fewer than the whole backlog; here the select's armed receive can hold
+    // one message, so a loop that drains ingress first still stops one short. Ready-first
+    // admits one or two.
+    try testing.expect(admitted < backlog / 2);
+    try build.open();
+    var built = proposal.recv() catch |err| switch (err) {
+        error.Closed => return, // Declined.
+        else => return err,
+    };
+    built.deinit();
+}

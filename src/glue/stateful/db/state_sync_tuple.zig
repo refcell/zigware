@@ -372,9 +372,16 @@ pub fn sync_tuple(
     }
     var tasks = try Tasks(@TypeOf(members)).start(env.io, &members);
     opened = 0; // The tasks own the members' ends now.
-    const converged = coordinate(types, D, &members, &events, &tips, anchor, targets);
+    const coordinated = coordinate(types, D, &members, &events, &tips, anchor, targets);
     inline for (0..count) |i| members[i].release_coordinator();
     tasks.join(env.io);
+    // A canceled coordinator converged nothing: collect closes what the members opened, then
+    // the cancel propagates (swallowing it would leave the caller's later waits unwakeable).
+    const converged = coordinated catch |err| {
+        assert(err == error.Canceled);
+        _ = collect(types, D, env, &members, &events, null, failure) catch {};
+        return error.Canceled;
+    };
     return collect(types, D, env, &members, &events, converged, failure);
 }
 
@@ -450,7 +457,7 @@ fn coordinate(
     tips: anytype,
     anchor: Anchor(D),
     targets: db.Tuple(types).SyncTargets,
-) ?Converged(D, db.Tuple(types).SyncTargets) {
+) Io.Cancelable!?Converged(D, db.Tuple(types).SyncTargets) {
     const T = db.Tuple(types).SyncTargets;
     var state = sync.CoordinatorState(D, T).init(types.len, anchor, targets);
     while (true) {
@@ -469,7 +476,11 @@ fn coordinate(
             },
             .wait => {},
         }
-        if (!(wait(D, T, events, tips, &state) catch return null)) return null;
+        const keep = wait(D, T, events, tips, &state) catch |err| switch (err) {
+            error.Canceled => return error.Canceled,
+            else => return null,
+        };
+        if (!keep) return null;
     }
 }
 

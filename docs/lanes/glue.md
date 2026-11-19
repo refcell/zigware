@@ -384,7 +384,7 @@ ones: d = deployer (thread T-01a1d5b9-c237), u = utils, j = storage-journal
 | stateful/actor/core/mailbox.rs | 2 | 2 | 0 | 0 | |
 | stateful/actor/core/mod.rs | 4 | 4 | 0 | 0 | |
 | stateful/actor/core/syncing.rs | 16 | 15 | 0 | 1 | |
-| stateful/actor/core/processing.rs, 1070-3396 | 47 | 22 | 24 | 1 | u |
+| stateful/actor/core/processing.rs, 1070-3396 | 47 | 46 | 0 | 1 | |
 | stateful/actor/core/processing.rs, 3451-5885 | 39 | 37 | 0 | 2 | s |
 | stateful/actor/processor/mod.rs | 44 | 40 | 0 | 4 | |
 | stateful/tests/mod.rs, floor.rs | 28 | 24 | 4 | 0 | j |
@@ -546,21 +546,21 @@ ones: d = deployer (thread T-01a1d5b9-c237), u = utils, j = storage-journal
 - [x] actor/core: the `Stateful` actor, recovering from marshal (no floor).
 - [x] actor/core: deployer's `Syncing` wired into `Stateful.run`'s floor branch (Config's
   `sync_config`, `resolvers`, marshal's `floor`; `P.Resolvers`).
-- [ ] actor/core: the rest of processing.rs's tests. First half (1070-3396) here, in
-  core/processing_early_test.zig and core/processing_deferred_test.zig (2928 on
-  `FixtureFor` and marshal's `Deferred`): 33 of 47 cases ported, 1 not portable
-  (processing_runs_on_the_actor_context: `Mailbox.verify` takes no caller runtime context and
-  `App.process` sees only `std.Io`, so no label or attribute can reach the application), 13
-  open (2620 and crypto's 12 rstest cases). Split (2026-11-19): crypto (T-01a1d57b-08a0) takes
+- [x] actor/core: the rest of processing.rs's tests, all on core/testing.zig. First half
+  (1070-3396): 46 of 47 cases ported, 1 not portable (processing_runs_on_the_actor_context:
+  `Mailbox.verify` takes no caller runtime context and `App.process` sees only `std.Io`, so
+  no label or attribute can reach the application). utils has 34, in
+  core/processing_early_test.zig and core/processing_deferred_test.zig (2928 on `FixtureFor`
+  and marshal's `Deferred`). crypto (T-01a1d57b-08a0) has 12, in core/processing_mid_test.zig:
   finalization_completes_build_processing_finalized_parent ×6,
-  recovered_handoff_ancestry_executes_once ×2, retained_verification_finishes_during_
-  finalization ×2, and maintenance_preserves_owned_requests_and_retained_work ×2, all 12
-  ported in core/processing_mid_test.zig (maintenance drives `Verifications` directly; it
-  found that a cancelled paused acquisition or parked request waited for `resume`, which
-  `complete_ready` now ends, as commonware's work future does); utils keeps 2620, handoff_and_parent ×2,
-  shared_parent_execution_survives_cancellation ×4, unexecutable_handoff ×2, and
-  concurrent_verifications_share_one_processing ×2, in core/processing_early_test.zig. Second half (3451-5885) is with simplex
-  (T-01a1d5ad-c8d6), in core/processing_late_test.zig. Both build on core/testing.zig.
+  recovered_handoff_ancestry_executes_once ×2,
+  retained_verification_finishes_during_finalization ×2, and
+  maintenance_preserves_owned_requests_and_retained_work ×2. The maintenance test drives
+  `Verifications` directly; it found that a cancelled paused acquisition or parked request
+  waited for `resume`, which `complete_ready` now ends, as commonware's work future does.
+  2620's ready-before-ingress ordering already held (1 or 2 of a 16-verification backlog
+  admitted before the verdict; a loop draining ingress first admits 15). Second half
+  (3451-5885) is simplex's (T-01a1d5ad-c8d6), in core/processing_late_test.zig.
 - [x] db: `Shared` as commonware's `AsyncRwLock` for DBs declaring `concurrent_reads = true`
   (any and current): an `Io.RwLock` whose read guards give `*const DB`, while `write` keeps
   `*DB`. Batches merkleize on the reader's task with the database's allocator, which must be

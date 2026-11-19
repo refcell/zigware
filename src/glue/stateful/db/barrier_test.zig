@@ -136,3 +136,56 @@ test "stateful db barrier: a later failure wins without waiting (barrier_panics_
         try later_failure(count, true);
     }
 }
+
+/// Settles `barrier` and records the outcome.
+const SettleWaiter = struct {
+    barrier: *const Barrier,
+    settled: Barrier.Error!void = {},
+    done: std.atomic.Value(bool) = .init(false),
+
+    fn run(self: *SettleWaiter) void {
+        self.settled = self.barrier.settle();
+        self.done.store(true, .release);
+    }
+};
+
+fn cancel_task(future: *std.Io.Future(void)) void {
+    future.cancel(io);
+}
+
+// A waiter canceled as one sync completes still sees its cancellation: `settle` returns
+// `error.Canceled` instead of waiting on the other sync (an already-taken cancel never wakes a
+// later wait). The race is timing-dependent, so it repeats; a swallowed cancel leaves the
+// waiter blocked until the held sync finishes, and `settle` then reports success.
+test "stateful db barrier: a cancel racing a completed sync is not swallowed" {
+    for (0..400) |attempt| {
+        const first = try Completion.init_pending(gpa, io);
+        defer first.release();
+        const held = try Completion.init_pending(gpa, io);
+        defer held.release();
+        const completions = [_]Completion{ first.retain(), held.retain() };
+        var barrier: Barrier = .from_completions("TestDb", &completions);
+        defer barrier.deinit();
+        var waiter: SettleWaiter = .{ .barrier = &barrier };
+        var future = try io.concurrent(SettleWaiter.run, .{&waiter});
+        // Let the waiter block on the first sync, then cancel it and complete the sync a
+        // varying few microseconds apart, so both orders of the race are sampled.
+        try io.sleep(.fromMicroseconds(200), .awake);
+        var canceler = try io.concurrent(cancel_task, .{&future});
+        var spin: u32 = 0;
+        while (spin < (attempt % 40) * 50) : (spin += 1) std.atomic.spinLoopHint();
+        first.finish({});
+        var stuck = true;
+        for (0..2000) |_| {
+            if (waiter.done.load(.acquire)) {
+                stuck = false;
+                break;
+            }
+            try io.sleep(.fromMicroseconds(500), .awake);
+        }
+        held.finish({}); // Unblocks a stuck waiter so the test can report it.
+        canceler.await(io);
+        try testing.expect(!stuck);
+        try testing.expectError(error.Canceled, waiter.settled);
+    }
+}

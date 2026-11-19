@@ -465,10 +465,17 @@ pub const Barrier = struct {
         if (barrier.poll() != null) return;
         // Each wait either surfaces a failure, which settles the barrier, or completes a sync.
         for (barrier.syncs[0..barrier.count]) |entry| {
-            entry.completion.wait() catch {
+            entry.completion.wait() catch |err| {
                 // A sync that completed with an error settles the barrier below; one still
                 // pending means this waiter was canceled.
-                if (entry.completion.is_pending()) return error.Canceled;
+                const own = entry.completion.poll() orelse return error.Canceled;
+                // A cancel that raced the sync's completion is this waiter's, unless the sync
+                // itself reports one: swallowing it would leave later waits unwakeable.
+                if (err == error.Canceled) {
+                    if (own) |_| return error.Canceled else |sync_err| {
+                        if (sync_err != error.Canceled) return error.Canceled;
+                    }
+                }
             };
             if (barrier.poll() != null) return;
         }
