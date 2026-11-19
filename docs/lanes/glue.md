@@ -547,8 +547,9 @@ ones: d = deployer (thread T-01a1d5b9-c237), u = utils, j = storage-journal
   completes it once settled (a `wait_idle` arm beside requests and the mailbox), so heights
   applied while it runs coalesce into the next barrier. A prune waits for the active barrier
   (without driving verifications meanwhile, where commonware drives them). Stopping with a
-  barrier pending drops it, canceling the acks it held. Marshal's `store.Durable` stand-in is
-  not converted yet.
+  barrier pending drops it, canceling the acks it held. Marshal keeps its own completions
+  (`store.Durable = runtime.storage.Completion`, eced10a); glue only gets `Update.block`'s ack,
+  which it signals once the covering barrier completes.
 - [ ] db drift (8bf364011), open:
   - `sync::Target` is `{ root, range }` for compact too (storage lane). Until storage's
     `CompactTarget` goes, `sync_compact_db` keeps its update and reached forwarders, so the
