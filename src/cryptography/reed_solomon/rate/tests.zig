@@ -493,6 +493,7 @@ test "high and low rate limits" {
     try L.validate(4096, 61440, SHARD_CHUNK_BYTES);
 
     inline for (.{ H.Encoder, H.Decoder }) |Coder| {
+        try testing.expect(!Coder.supports(4096, 61440) and Coder.supports(61440, 4096));
         try testing.expectError(
             error.UnsupportedShardCount,
             Coder.validate(4096, 61440, SHARD_CHUNK_BYTES),
@@ -506,6 +507,7 @@ test "high and low rate limits" {
         );
     }
     inline for (.{ L.Encoder, L.Decoder }) |Coder| {
+        try testing.expect(Coder.supports(4096, 61440) and !Coder.supports(61440, 4096));
         try testing.expectError(
             error.UnsupportedShardCount,
             Coder.validate(61440, 4096, SHARD_CHUNK_BYTES),

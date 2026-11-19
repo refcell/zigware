@@ -173,18 +173,18 @@ portable.
 | `reed_solomon/rate/rate_low.rs` | 38 | 36 | 2 | 0 |
 
 Open:
-- [ ] `reed_solomon/rate/rate_high.rs` `supports`:
+- [x] `reed_solomon/rate/rate_high.rs` `supports`:
   HighRateEncoder(Scalar).supports(4096,61440)==false and supports(61440,4096)==true are never
   called in Zig (only HighRate.supports and the encoder validate/init are tested). Add the two
   asserts to src/cryptography/reed_solomon/rate/tests.zig "high and low rate limits"
-- [ ] `reed_solomon/rate/rate_high.rs` `supports`:
+- [x] `reed_solomon/rate/rate_high.rs` `supports`:
   HighRateDecoder(Scalar).supports(4096,61440)==false and supports(61440,4096)==true are never
   called in Zig. Add the two asserts to src/cryptography/reed_solomon/rate/tests.zig "high and low
   rate limits"
-- [ ] `reed_solomon/rate/rate_low.rs` `supports`: LowRateEncoder(Scalar).supports(4096,61440)==true
+- [x] `reed_solomon/rate/rate_low.rs` `supports`: LowRateEncoder(Scalar).supports(4096,61440)==true
   and supports(61440,4096)==false are never called in Zig. Add the two asserts to
   src/cryptography/reed_solomon/rate/tests.zig "high and low rate limits"
-- [ ] `reed_solomon/rate/rate_low.rs` `supports`: LowRateDecoder(Scalar).supports(4096,61440)==true
+- [x] `reed_solomon/rate/rate_low.rs` `supports`: LowRateDecoder(Scalar).supports(4096,61440)==true
   and supports(61440,4096)==false are never called in Zig. Add the two asserts to
   src/cryptography/reed_solomon/rate/tests.zig "high and low rate limits"
 
