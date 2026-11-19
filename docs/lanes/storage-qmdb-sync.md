@@ -66,8 +66,12 @@ it comes first once `any` lands.
   `verify_key_value_proof_alloc`/`verify_exclusion_proof_alloc(gpa, ...)` (commonware's
   `verify` encodes into a `Vec`); the bool-returning verifiers keep their inline encoding
   and assert at comptime that the operation owns no memory.
-- [ ] qmdb benches: the current variants of commonware's `qmdb/benches` (compact has none),
-  split with storage-qmdb.
+- [x] qmdb benches, current half (storage-qmdb owns the shared `qmdb/benches` code): the 12
+  `current::*` entries of commonware's fixed and vec variant registries (`common.CurrentDb`,
+  sharing any's partitions plus `grafted-metadata-<suffix>`), so generate and init measure
+  current. Commonware's apply_batch has no current variants.
+- [ ] qmdb benches: `chained_growth` (current only), then current's merkleize variants and
+  the opt-in cold_read, constantinople, and scale harnesses.
 - [x] sync journal (`journal.init`/`resize`/`append` over contiguous journals, `Memory(Op)`)
   and the request tracker (`requests.Requests(F)`), with their commonware tests.
 - [ ] sync engine, database, source, harness; per-variant sync glue
@@ -218,3 +222,4 @@ it comes first once `any` lands.
 - 2026-11-19: current sync glue.
 - 2026-11-19: any fixed and variable sync fuzz targets.
 - 2026-11-19: current over owned byte values.
+- 2026-11-19: current variants of the qmdb generate and init benches.

@@ -63,6 +63,32 @@ pub fn AnyDb(comptime F: type, comptime order: Order, comptime E: type) type {
     return any.Db(F, U, C, I, Sha256, chunk_bytes);
 }
 
+/// Commonware's `current` database over the same types as `AnyDb`, with `N`-byte chunks.
+pub fn CurrentChunksDb(
+    comptime F: type,
+    comptime order: Order,
+    comptime E: type,
+    comptime N: usize,
+) type {
+    // The variant tuples build every database type in one comptime evaluation.
+    @setEvalBranchQuota(100_000);
+    const A = AnyDb(F, order, E);
+    const any = qmdb.any;
+    const U = switch (order) {
+        .unordered => any.operation.update.Unordered(Digest, E),
+        .ordered => any.operation.update.Ordered(Digest, E),
+    };
+    const I = switch (order) {
+        .unordered => storage.index.unordered.Index(Translator, u64),
+        .ordered => storage.index.ordered.Index(Translator, u64),
+    };
+    return qmdb.current.Db(F, U, @FieldType(A.Log, "journal"), I, Sha256, N);
+}
+
+pub fn CurrentDb(comptime F: type, comptime order: Order, comptime E: type) type {
+    return CurrentChunksDb(F, order, E, chunk_bytes);
+}
+
 pub fn KeylessDb(comptime F: type) type {
     const C = contiguous.variable.Journal(qmdb.keyless.Operation(F, VariableBytes));
     return qmdb.keyless.Db(F, VariableBytes, C, Sha256);
@@ -81,7 +107,7 @@ pub fn Variant(comptime name_: []const u8, comptime D: type) type {
 pub const mmr = merkle.mmr.Family;
 pub const mmb = merkle.mmb.Family;
 
-/// Commonware's `define_fixed_variants` (digest values), without the `current` entries.
+/// Commonware's `define_fixed_variants` (digest values).
 pub const fixed_variants = .{
     Variant("any::unordered::fixed::mmr", AnyDb(mmr, .unordered, FixedDigest)),
     Variant("any::unordered::fixed::mmb", AnyDb(mmb, .unordered, FixedDigest)),
@@ -91,14 +117,26 @@ pub const fixed_variants = .{
     Variant("any::unordered::variable::mmb", AnyDb(mmb, .unordered, VariableDigest)),
     Variant("any::ordered::variable::mmr", AnyDb(mmr, .ordered, VariableDigest)),
     Variant("any::ordered::variable::mmb", AnyDb(mmb, .ordered, VariableDigest)),
+    Variant("current::unordered::fixed::mmr", CurrentDb(mmr, .unordered, FixedDigest)),
+    Variant("current::unordered::fixed::mmb", CurrentDb(mmb, .unordered, FixedDigest)),
+    Variant("current::ordered::fixed::mmr", CurrentDb(mmr, .ordered, FixedDigest)),
+    Variant("current::ordered::fixed::mmb", CurrentDb(mmb, .ordered, FixedDigest)),
+    Variant("current::unordered::variable::mmr", CurrentDb(mmr, .unordered, VariableDigest)),
+    Variant("current::unordered::variable::mmb", CurrentDb(mmb, .unordered, VariableDigest)),
+    Variant("current::ordered::variable::mmr", CurrentDb(mmr, .ordered, VariableDigest)),
+    Variant("current::ordered::variable::mmb", CurrentDb(mmb, .ordered, VariableDigest)),
 };
 
-/// Commonware's `define_vec_variants` (`Vec<u8>` values), without the `current` entries.
+/// Commonware's `define_vec_variants` (`Vec<u8>` values).
 pub const vec_variants = .{
     Variant("any::unordered::variable-vec::mmr", AnyDb(mmr, .unordered, VariableBytes)),
     Variant("any::unordered::variable-vec::mmb", AnyDb(mmb, .unordered, VariableBytes)),
     Variant("any::ordered::variable-vec::mmr", AnyDb(mmr, .ordered, VariableBytes)),
     Variant("any::ordered::variable-vec::mmb", AnyDb(mmb, .ordered, VariableBytes)),
+    Variant("current::unordered::variable-vec::mmr", CurrentDb(mmr, .unordered, VariableBytes)),
+    Variant("current::unordered::variable-vec::mmb", CurrentDb(mmb, .unordered, VariableBytes)),
+    Variant("current::ordered::variable-vec::mmr", CurrentDb(mmr, .ordered, VariableBytes)),
+    Variant("current::ordered::variable-vec::mmb", CurrentDb(mmb, .ordered, VariableBytes)),
 };
 
 pub const keyless_variants = .{
@@ -194,7 +232,7 @@ pub fn merkle_config(
 pub fn partition(comptime D: type) []const u8 {
     if (D == StoreDb) return "bench-store";
     if (comptime @hasDecl(D, "Set")) return "bench-immutable";
-    if (comptime @hasField(D, "snapshot")) {
+    if (comptime @hasField(D, "snapshot") or @hasField(D, "grafted_tree")) {
         const variable = @hasField(@FieldType(D.Cfg, "log"), "items_per_section");
         return if (variable) "bench-variable" else "bench-fixed";
     }
@@ -307,6 +345,9 @@ pub fn Session(comptime D: type) type {
                 cfg.translator = if (comptime @hasField(T, "inner")) .init(.{}) else .{};
             }
             if (comptime @hasField(D.Cfg, "init_cache")) cfg.init_cache = options.init_cache;
+            if (comptime @hasField(D.Cfg, "grafted_metadata_partition")) {
+                cfg.grafted_metadata_partition = "grafted-metadata-" ++ suffix;
+            }
             self.db = try D.init(gpa, backend, scope, cfg, null);
             assert(self.db.bounds().end > 0);
         }
