@@ -289,10 +289,10 @@ ports its range's tests and the helpers defined in it, into
 - The actor is one task over the simplex `Inbox`: pumps feed it the mailbox and the
   resolver handler, buffer waiters and a watcher on the current application ack push their
   completions, and events are handled in arrival order rather than `select_loop!`'s
-  priority. Archive writes are durable when they return, so commonware's pooled syncs
-  (`start_finalized_sync`, notarization syncs) complete inside the event that starts them
-  and release the dispatch gate there; the gate still holds dispatch between a buffered
-  write and that sync. A storage or allocation error ends the actor with the error where
+  priority. `store.Durable` is `runtime.storage.Completion` (async start_sync step 6): a
+  finalized sync still in flight when it starts is pooled in `Syncs` until it completes,
+  and one already complete releases the dispatch gate in the event that starts it. The
+  cache's verified and notarization syncs are still waited inline. A storage or allocation error ends the actor with the error where
   commonware panics. The actor is split into `actor.zig` (state, init, loop, waiters),
   `actor_ingress.zig` (mailbox), `actor_backfill.zig` (resolver), and `actor_finalize.zig`
   (storage, floors, repair, dispatch) to keep files and functions within TigerStyle.
@@ -810,3 +810,6 @@ job to gate, and `mocks/strategy.rs`'s GatedStrategy has no other user).
   child's own round fails both. The ancestry-delivery annotation test expects `round: null`
   exactly. `RecordingResolver` tracks active fetches (`retain` drops rejected ones), as
   upstream's does, for the two regressions.
+- 2026-11-19: async start_sync step 6 (marshal half, part 1): `store.Durable` is
+  `runtime.storage.Completion`; the archives' completions are no longer waited inline, and
+  a finalized sync in flight is pooled until it completes (a failed one stops the actor).

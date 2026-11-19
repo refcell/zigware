@@ -8,9 +8,9 @@
 //! arrival order, except that it first releases every durable pooled sync, then takes every
 //! ready buffer waiter, then every resolved acknowledgement, even before their notices
 //! arrive, as commonware's biased `select_loop!` prefers syncs, then waiters, then
-//! acknowledgements, then the mailbox, then the resolver. Zigware's archives are durable
-//! when a write or sync returns, so a finalized sync is pooled only when its store's handle
-//! carries a delay (a paced test store). The durability acks of `proposed`, `verified`, and
+//! acknowledgements, then the mailbox, then the resolver. A finalized sync whose completion
+//! is still in flight when it starts is pooled until it completes; one already complete
+//! releases its batch at once. The durability acks of `proposed`, `verified`, and
 //! `certified` fire once the write returns. A storage or allocation error stops the actor
 //! with that error (commonware panics).
 //!
@@ -388,7 +388,7 @@ pub fn Actor(comptime P: type) type {
             switch (event) {
                 .closed => return false,
                 .synced => |seq| {
-                    if (self.syncs.take_notified(seq)) try self.release_sync(seq);
+                    if (self.syncs.take_notified(seq)) |taken| try self.release_sync(taken);
                 },
                 .waiter => |id| {
                     const done = self.waiters.take_notified(id) orelse return true;
@@ -448,14 +448,17 @@ pub fn Actor(comptime P: type) type {
         fn drain_ready_syncs(self: *Self) !void {
             const ready_max = self.syncs.tasks.count();
             for (0..ready_max) |_| {
-                const seq = self.syncs.take_ready() orelse return;
-                try self.release_sync(seq);
+                const taken = self.syncs.take_ready() orelse return;
+                try self.release_sync(taken);
             }
         }
 
-        /// A durable finalized-archive sync releases its batch for dispatch.
-        fn release_sync(self: *Self, seq: u64) !void {
+        /// A durable finalized-archive sync releases its batch for dispatch; a failed one
+        /// stops the actor (commonware panics on a failed finalized sync).
+        fn release_sync(self: *Self, taken: Syncs.Taken) !void {
+            const seq = taken.seq;
             assert(!self.syncs.tasks.contains(seq));
+            try taken.result;
             self.dispatch_gate.release(seq);
             try finalize.try_dispatch_blocks(self);
         }
@@ -737,9 +740,9 @@ pub fn Actor(comptime P: type) type {
             }
         };
 
-        /// Pooled finalized-archive syncs (commonware's `PooledSync::Finalized`): each waits out
-        /// its handle's delay in its own task, marks itself durable, and posts a `synced`
-        /// notice. A sync cancelled at shutdown releases nothing.
+        /// Pooled finalized-archive syncs (commonware's `PooledSync::Finalized`): each waits on
+        /// its completion in its own task, records the result, and posts a `synced` notice. A
+        /// sync cancelled at shutdown releases nothing.
         pub const Syncs = struct {
             gpa: Allocator,
             io: Io,
@@ -749,45 +752,60 @@ pub fn Actor(comptime P: type) type {
 
             const Pending = struct {
                 durable: std.atomic.Value(bool) = .init(false),
+                /// Written before `durable` is set.
+                failure: ?SyncError = null,
                 future: Io.Future(void) = undefined,
             };
+            const SyncError = runtime.storage.Error;
 
-            /// Pools sync `seq`, durable `durable.delay_ns` from now.
+            /// A completed sync taken from the pool.
+            pub const Taken = struct { seq: u64, result: SyncError!void };
+
+            /// Pools sync `seq` until `durable` (taken) completes.
             pub fn push(self: *Syncs, seq: u64, durable: store.Durable) !void {
-                assert(durable.delay_ns > 0);
+                errdefer durable.release();
+                assert(durable.is_pending());
                 assert(!self.tasks.contains(seq));
                 try self.tasks.ensureUnusedCapacity(self.gpa, 1);
                 const pending = try self.gpa.create(Pending);
                 errdefer self.gpa.destroy(pending);
                 pending.* = .{};
-                const args = .{ self.inbox, seq, durable.delay_ns, pending };
+                const args = .{ self.inbox, seq, durable, pending };
                 pending.future = try self.io.concurrent(wait, args);
                 self.tasks.putAssumeCapacityNoClobber(seq, pending);
             }
 
-            fn wait(inbox: *Inbox, seq: u64, delay_ns: u64, pending: *Pending) void {
-                const io = inbox.io;
-                io.sleep(.fromNanoseconds(@intCast(delay_ns)), .awake) catch return;
+            fn wait(inbox: *Inbox, seq: u64, durable: store.Durable, pending: *Pending) void {
+                durable.wait_release() catch |err| switch (err) {
+                    error.Canceled => return, // Shutdown: release nothing.
+                    else => pending.failure = err,
+                };
                 pending.durable.store(true, .release);
                 _ = inbox.push(.{ .synced = seq });
             }
 
-            /// Takes the oldest durable sync, if any.
-            pub fn take_ready(self: *Syncs) ?u64 {
+            fn result_of(pending: *const Pending) SyncError!void {
+                if (pending.failure) |err| return err;
+            }
+
+            /// Takes the oldest completed sync, if any.
+            pub fn take_ready(self: *Syncs) ?Taken {
                 for (self.tasks.keys(), self.tasks.values()) |seq, pending| {
                     if (!pending.durable.load(.acquire)) continue;
+                    const result = result_of(pending);
                     self.reap(seq);
-                    return seq;
+                    return .{ .seq = seq, .result = result };
                 }
                 return null;
             }
 
-            /// Takes sync `seq` after its notice; false when already taken.
-            pub fn take_notified(self: *Syncs, seq: u64) bool {
-                const pending = self.tasks.get(seq) orelse return false;
+            /// Takes sync `seq` after its notice; null when already taken.
+            pub fn take_notified(self: *Syncs, seq: u64) ?Taken {
+                const pending = self.tasks.get(seq) orelse return null;
                 assert(pending.durable.load(.acquire));
+                const result = result_of(pending);
                 self.reap(seq);
-                return true;
+                return .{ .seq = seq, .result = result };
             }
 
             fn reap(self: *Syncs, seq: u64) void {

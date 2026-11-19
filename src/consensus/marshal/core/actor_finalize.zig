@@ -218,18 +218,26 @@ pub fn sync_finalized(self: anytype) !void {
     assert(self.dispatch_gate.barrier() == null);
 }
 
-/// Syncs the finalized archives if anything was written since the last sync, then releases
-/// the writes it covers for dispatch (commonware pools this sync; here it returns durable).
+/// Starts a sync of the finalized archives if anything was written since the last sync; the
+/// writes it covers are released for dispatch once it completes (commonware's pooled sync).
 pub fn start_finalized_sync(self: anytype) !void {
     const seq = try self.dispatch_gate.adopt(self.gpa) orelse return;
     const blocks = try self.finalized_blocks.start_sync();
-    const finalizations = try self.finalizations_by_height.start_sync();
-    const durable = blocks.join(finalizations);
-    // A sync durable at once releases its batch here (commonware's pool yields it on the
-    // next loop iteration, ahead of every other event); a delayed one is pooled.
-    if (durable.delay_ns > 0) return self.syncs.push(seq, durable);
-    self.dispatch_gate.release(seq);
-    try try_dispatch_blocks(self);
+    const finalizations = self.finalizations_by_height.start_sync() catch |err| {
+        blocks.release();
+        return err;
+    };
+    const durable = try blocks.join(finalizations);
+    // A sync already complete releases its batch here (commonware's pool yields it on the
+    // next loop iteration, ahead of every other event); one in flight is pooled. A failed
+    // finalized sync stops the actor, as commonware panics.
+    if (durable.poll()) |result| {
+        durable.release();
+        try result;
+        self.dispatch_gate.release(seq);
+        return try_dispatch_blocks(self);
+    }
+    return self.syncs.push(seq, durable);
 }
 
 /// A finalized block in its stored form (owned by the caller).

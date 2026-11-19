@@ -117,7 +117,7 @@ const SingleStore = struct {
     pub fn sync(_: SingleStore) Error!void {}
 
     pub fn start_sync(_: SingleStore) Error!store.Durable {
-        return .done;
+        return .ok;
     }
 
     pub fn get(self: SingleStore, id: store.Identifier(Digest)) Error!?TestBlock {

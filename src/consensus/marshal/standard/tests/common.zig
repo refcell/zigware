@@ -1095,8 +1095,7 @@ pub fn PacedCertificates(comptime T: type) type {
         /// Starts the inner sync; it counts as durable `pace_ms` later (commonware's
         /// `PacedStore` sleeps inside the sync handle).
         pub fn start_sync(self: Self) Error!store.Durable {
-            const inner = try self.inner.start_sync();
-            return inner.join(.{ .delay_ns = self.pace_ms * std.time.ns_per_ms });
+            return paced_completion(self.ctx, try self.inner.start_sync(), self.pace_ms);
         }
 
         pub fn get(self: Self, id: store.Identifier(BlockDigest)) Error!?Finalization {
@@ -1144,8 +1143,7 @@ pub fn PacedBlocks(comptime T: type, comptime StoredBlock: type) type {
         /// Starts the inner sync; it counts as durable `pace_ms` later (commonware's
         /// `PacedStore` sleeps inside the sync handle).
         pub fn start_sync(self: Self) Error!store.Durable {
-            const inner = try self.inner.start_sync();
-            return inner.join(.{ .delay_ns = self.pace_ms * std.time.ns_per_ms });
+            return paced_completion(self.ctx, try self.inner.start_sync(), self.pace_ms);
         }
 
         pub fn get(self: Self, id: store.Identifier(Digest)) Error!?StoredBlock {
@@ -1173,6 +1171,33 @@ pub fn PacedBlocks(comptime T: type, comptime StoredBlock: type) type {
 fn pace(ctx: Ctx, pace_ms: u64) Io.Cancelable!void {
     assert(pace_ms > 0);
     try ctx.sleep(.fromMilliseconds(@intCast(pace_ms)));
+}
+
+/// A completion of `inner` (taken) that completes `pace_ms` after it starts at the earliest
+/// (commonware `PacedStore`'s handle sleeps before awaiting the inner one). A task that cannot
+/// be spawned reports `OutOfMemory`.
+fn paced_completion(ctx: Ctx, inner: store.Durable, pace_ms: u64) Allocator.Error!store.Durable {
+    errdefer inner.release();
+    assert(pace_ms > 0);
+    const producer = try store.Durable.init_pending(ctx.gpa(), ctx.io());
+    const handed = producer.retain();
+    const args = .{ producer, inner, pace_ms };
+    const handle = ctx.child("paced_sync").spawn(finish_paced, args) catch {
+        handed.release();
+        producer.release();
+        return error.OutOfMemory;
+    };
+    handle.detach();
+    return handed;
+}
+
+fn finish_paced(ctx: Ctx, producer: store.Durable, inner: store.Durable, pace_ms: u64) void {
+    defer producer.release();
+    pace(ctx, pace_ms) catch |err| {
+        inner.release();
+        return producer.finish(err);
+    };
+    producer.finish(inner.wait_release());
 }
 
 /// The prunable finalized stores the direct actor tests open (commonware
