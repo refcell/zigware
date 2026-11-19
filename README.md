@@ -88,7 +88,9 @@ DKG and write the genesis, then four `validator`s run Simplex over marshal and a
 stateful application. At every epoch boundary the committee reshares its threshold key on
 chain: each pane shows dealings and acks arriving, dealer logs observed on chain,
 `completed reshare ceremony ... success=true`, and the orchestrator entering the next epoch
-with the new key ([video](docs/assets/dkg-demo.mp4)).
+with the new key ([video](docs/assets/dkg-demo.mp4)). A validator that joins late with
+`--state-sync` syncs the application's QMDB state from a peer's floor instead of replaying
+every block, then votes and reshares with the rest.
 `etc/scripts/record-demo.sh dkg` records it again.
 
 > [!WARNING]
