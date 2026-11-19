@@ -21,6 +21,7 @@ const hasher_mod = @import("../hasher.zig");
 const transcript = @import("../transcript.zig");
 const Opaque = @import("../secret.zig").Opaque;
 const msm = @import("msm.zig");
+const verify_msm = @import("verify_msm.zig");
 
 pub const Point = std.crypto.ecc.Edwards25519;
 const Fe = Point.Fe;
@@ -62,7 +63,7 @@ pub fn is_small_order(point: Point) bool {
 pub const VerificationKey = struct {
     bytes: [32]u8,
     minus_a: Point,
-    /// `A` has order dividing 8, which std's double-base multiplication rejects.
+    /// `A` has order dividing 8.
     small_order: bool,
 
     pub fn decode(bytes: [32]u8) ?VerificationKey {
@@ -79,22 +80,7 @@ pub const VerificationKey = struct {
         const s = signature[32..64].*;
         scalar.rejectNonCanonical(s) catch return false;
         const r = decompress(signature[0..32].*) orelse return false;
-        const r_prime = self.double_scalar_mul(k, s);
-        return is_identity(r.sub(r_prime).clearCofactor());
-    }
-
-    /// `k (-A) + s B`, in variable time (every input is public).
-    fn double_scalar_mul(self: *const VerificationKey, k: [32]u8, s: [32]u8) Point {
-        if (!self.small_order) {
-            // Proof: std rejects only points whose fourth multiple has x = 0, i.e. points of
-            // order dividing 8, which `small_order` excludes.
-            return Point.mulDoubleBasePublic(Point.basePoint, s, self.minus_a, k) catch
-                unreachable;
-        }
-        var sum = MultiScalar.init();
-        sum.add(Point.basePoint, s);
-        sum.add(self.minus_a, k);
-        return sum.finish();
+        return verify_msm.verify(r, self.minus_a, s, k);
     }
 };
 
