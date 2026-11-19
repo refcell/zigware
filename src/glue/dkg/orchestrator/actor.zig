@@ -42,7 +42,9 @@ const state_sync = @import("../state_sync.zig");
 const types = @import("../types.zig");
 const mailbox_mod = @import("mailbox.zig");
 
-const log = std.log.scoped(.dkg_orchestrator);
+const Tracer = runtime.telemetry.traces.Tracer;
+/// The tracing target of the orchestrator's events (commonware's module path).
+pub const trace_target = "commonware_glue::dkg::orchestrator::actor";
 const simplex = consensus.simplex;
 const mux = p2p.utils.mux;
 const Duration = utils.Duration;
@@ -195,6 +197,7 @@ pub fn Actor(comptime T: type) type {
         config: Config(T),
         epocher: FixedEpocher,
         mailbox: actor.mailbox.Receiver(Message),
+        tracer: Tracer,
 
         /// An orchestrator and the mailbox that receives finalized blocks (commonware
         /// `Actor::new`). Install the mailbox as a marshal reporter. Takes `config`'s handles.
@@ -210,6 +213,7 @@ pub fn Actor(comptime T: type) type {
                 .config = config,
                 .epocher = .new(utils.NonZero(u64).init(config.blocks_per_epoch).?),
                 .mailbox = pair.receiver,
+                .tracer = ctx.tracer(trace_target),
             };
             return .{ self, .init(pair.sender) };
         }
@@ -234,7 +238,7 @@ pub fn Actor(comptime T: type) type {
             defer start.info.deinit(self.gpa);
             const info = &start.info;
             var active = self.enter_epoch(start.epoch, start.floor, info, &channels) catch |err|
-                return startup_failed(start.epoch, err);
+                return self.startup_failed(start.epoch, err);
             defer self.stop(active);
             while (true) {
                 const events = try self.next_events(active, &channels);
@@ -250,12 +254,20 @@ pub fn Actor(comptime T: type) type {
             }
         }
 
-        fn startup_failed(epoch: Epoch, err: anyerror) anyerror!void {
+        fn startup_failed(self: *Self, epoch: Epoch, err: anyerror) anyerror!void {
+            const t = self.tracer;
             switch (err) {
-                error.GateClosed => log.debug("epoch gate closed before startup {f}", .{epoch}),
-                error.PeerSet => log.warn("failed to activate startup peer set {f}", .{epoch}),
-                error.MuxClosed => log.debug("consensus mux closed before startup", .{}),
-                error.Stopped => log.debug("context shutdown before startup epoch", .{}),
+                error.GateClosed => t.event(.debug, "epoch gate closed before startup", .{
+                    .epoch = epoch.get(),
+                }),
+                error.PeerSet => t.event(.warn, "failed to activate startup peer set", .{
+                    .epoch = epoch,
+                    .@"error" = err,
+                }),
+                error.MuxClosed => t.event(.debug, "consensus mux closed before startup epoch", .{
+                    .epoch = epoch.get(),
+                }),
+                error.Stopped => t.event(.debug, "context shutdown before startup epoch", .{}),
                 else => return err,
             }
             assert(err != error.OutOfMemory);
@@ -340,7 +352,8 @@ pub fn Actor(comptime T: type) type {
             else
                 Height.zero();
             var boundary = try self.config.marshal.get_block(.{ .height = height }) orelse {
-                log.err("boundary block {f} unavailable, shutting down orchestrator", .{height});
+                const message = "boundary block unavailable, shutting down orchestrator";
+                self.tracer.event(.@"error", message, .{ .epoch = epoch, .height = height });
                 return null;
             };
             defer boundary.deinit();
@@ -467,9 +480,20 @@ pub fn Actor(comptime T: type) type {
         fn handle_event(self: *Self, active: **Active, event: Event, channels: *Channels) !bool {
             assert(active.*.epoch.get() == active.*.engine_epoch);
             switch (event) {
-                .vote, .certificate => |response| {
+                .vote => |response| {
                     var value = response orelse {
-                        log.debug("consensus mux backup channel closed, stopping", .{});
+                        self.tracer.event(.debug, "vote mux backup channel closed, " ++
+                            "shutting down orchestrator", .{});
+                        return false;
+                    };
+                    defer value.deinit();
+                    try self.handle_backup(active.*.epoch, value.subchannel, value.message.peer);
+                    return true;
+                },
+                .certificate => |response| {
+                    var value = response orelse {
+                        self.tracer.event(.debug, "certificate mux backup channel closed, " ++
+                            "shutting down orchestrator", .{});
                         return false;
                     };
                     defer value.deinit();
@@ -477,12 +501,14 @@ pub fn Actor(comptime T: type) type {
                     return true;
                 },
                 .engine => {
-                    log.debug("simplex engine stopped, shutting down orchestrator", .{});
+                    const message = "simplex engine stopped, shutting down orchestrator";
+                    self.tracer.event(.debug, message, .{ .epoch = active.*.epoch.get() });
                     return false;
                 },
                 .mailbox => |message| {
                     const value = message orelse {
-                        log.debug("mailbox closed, shutting down orchestrator", .{});
+                        const text = "mailbox closed, shutting down orchestrator";
+                        self.tracer.event(.debug, text, .{});
                         return false;
                     };
                     return self.handle_finalized(active, value, channels);
@@ -494,13 +520,21 @@ pub fn Actor(comptime T: type) type {
         /// (commonware `handle_backup`).
         fn handle_backup(self: *Self, ours: Epoch, theirs: u64, from: PublicKey) !void {
             if (theirs <= ours.get()) {
-                log.debug("received message from past epoch {d} in {f}", .{ theirs, ours });
+                self.tracer.event(.debug, "received message from past epoch", .{
+                    .their_epoch = theirs,
+                    .our_epoch = ours,
+                    .from = from,
+                });
                 return;
             }
             const boundary = self.epocher.last(ours).?;
             assert(boundary.get() >= ours.get());
-            log.debug("message from future epoch {d}, ensuring boundary {f} finalization", .{
-                theirs, boundary,
+            self.tracer.event(.debug, "received backup message from future epoch, " ++
+                "ensuring boundary finalization", .{
+                .from = from,
+                .their_epoch = theirs,
+                .our_epoch = ours,
+                .boundary_height = boundary,
             });
             try self.config.marshal.hint_finalized(boundary, &.{from});
         }
@@ -531,14 +565,15 @@ pub fn Actor(comptime T: type) type {
             defer info.deinit(self.gpa);
             if (info.epoch.get() != next_epoch.get()) return error.MissingEpochInfo;
             var boundary = try self.config.marshal.get_block(.{ .height = height }) orelse {
-                log.debug("boundary block {f} unavailable, shutting down orchestrator", .{height});
+                const text = "boundary block unavailable, shutting down orchestrator";
+                self.tracer.event(.debug, text, .{ .height = height });
                 ack.deinit();
                 return false;
             };
             const floor: Floor = .{ .genesis = boundary.digest() };
             boundary.deinit();
             const next = self.enter_epoch(next_epoch, floor, &info, channels) catch |err| {
-                try boundary_failed(next_epoch, err);
+                try self.boundary_failed(next_epoch, err);
                 ack.deinit();
                 return false;
             };
@@ -548,12 +583,23 @@ pub fn Actor(comptime T: type) type {
             return true;
         }
 
-        fn boundary_failed(epoch: Epoch, err: anyerror) anyerror!void {
+        fn boundary_failed(self: *Self, epoch: Epoch, err: anyerror) anyerror!void {
+            const t = self.tracer;
+            const fields = .{ .next_epoch = epoch };
             switch (err) {
-                error.GateClosed => log.debug("epoch gate closed before {f}", .{epoch}),
-                error.PeerSet => log.warn("failed to activate boundary peer set {f}", .{epoch}),
-                error.MuxClosed => log.debug("consensus mux closed before {f}", .{epoch}),
-                error.Stopped => log.debug("context shutdown while entering {f}", .{epoch}),
+                error.GateClosed => {
+                    t.event(.debug, "epoch gate closed before boundary transition", fields);
+                },
+                error.PeerSet => t.event(.warn, "failed to activate boundary peer set", .{
+                    .next_epoch = epoch,
+                    .@"error" = err,
+                }),
+                error.MuxClosed => {
+                    t.event(.debug, "consensus mux closed before boundary transition", fields);
+                },
+                error.Stopped => {
+                    t.event(.debug, "context shutdown while waiting to enter epoch", fields);
+                },
                 else => return err,
             }
             assert(err != error.OutOfMemory);
@@ -592,7 +638,7 @@ pub fn Actor(comptime T: type) type {
             try active.engine.init(engine_ctx, self.engine_config(scheme.*, active, taken));
             errdefer active.engine.deinit();
             try self.start_engine(engine_ctx, active, channels);
-            log.info("entered epoch {f}", .{epoch});
+            self.tracer.event(.info, "entered epoch", .{ .epoch = epoch });
             return active;
         }
 
@@ -678,10 +724,9 @@ pub fn Actor(comptime T: type) type {
             var tracked = try participants.tracked_peers(self.gpa);
             defer tracked.deinit(self.gpa);
             assert(tracked.primary.len() == participants.dealers.len());
-            self.config.manager.track(epoch, tracked.view(), &info.directory) catch |err| {
-                log.warn("failed to activate peer set {f}: {t}", .{ epoch, err });
+            // The caller traces the failure, as commonware's `EnterEpochError::PeerSet` does.
+            self.config.manager.track(epoch, tracked.view(), &info.directory) catch
                 return error.PeerSet;
-            };
         }
 
         const GateOutcome = union(enum) {
@@ -720,8 +765,10 @@ pub fn Actor(comptime T: type) type {
         fn stop(self: *Self, active: *Active) void {
             assert(active.epoch.get() == active.engine_epoch);
             if (active.handle.abort()) |result| {
-                result catch |err| log.err("simplex engine for {f} failed: {t}", .{
-                    active.epoch, err,
+                const text = "simplex engine stopped unexpectedly";
+                result catch |err| self.tracer.event(.@"error", text, .{
+                    .epoch = active.epoch,
+                    .@"error" = err,
                 });
             } else |_| {}
             active.engine.deinit();
