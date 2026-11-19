@@ -483,3 +483,4 @@ which every database here is built on.
 - 2026-11-19: any `Config.strategy` (Merkle hashing, batched reads), as commonware's.
 - 2026-11-19: any apply probes the index 64 keys ahead (commonware's `PROBE_CHUNK`), both paths.
 - 2026-11-19: qmdb should_panic tests as death tests: 7 of 8 ported (1 not portable).
+- 2026-11-19: any index apply runs on the strategy beside the log append; apply_batch 1.07×.

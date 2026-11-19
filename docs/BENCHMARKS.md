@@ -17,7 +17,7 @@ better. A ratio below 1 means zigware is faster.
 | `journal::fixed_append` | `items=10000 size=32` | 2.00 ms | 456 µs | 0.23× |
 | `journal::append_sync` | `journal=fixed mode=sync` | 14.6 µs | 1.55 µs | 0.11× |
 | `journal::fixed_replay` | `items=100000 buffer=65536 size=32 read_options=cache` | 690 µs | 817 µs | 1.19× (fixed, see below) |
-| `qmdb::apply_batch` | `case=direct variant=any::unordered::fixed::mmb chunk=32 updates=16384` | 1.12 ms | 2.72 ms | 2.43× |
+| `qmdb::apply_batch` | `case=direct variant=any::unordered::fixed::mmb chunk=32 updates=16384` | 1.13 ms | 1.21 ms | 1.07× |
 | `buffer_paged::append` | `backend=tokio chunk=4096` | 66.1 ms | 28.2 ms | 0.43× |
 
 Measured 2026-11-19. The 1-minute load average was 28.9 to 83.3 during the runs (see Caveats).
@@ -104,12 +104,6 @@ directory under `BENCH_DIR` (default `$TMPDIR` or `/tmp`). commonware gets it th
   arithmetic. commonware's vendored curve25519 code picks a SIMD backend (AVX2 or IFMA) on
   x86-64, which this Zen CPU supports. Guess: a vectorized field backend, or a wider
   precomputed base-point table for the `s B` half.
-- **`qmdb::apply_batch` (2.43×), owned by the storage-qmdb lane
-  (`src/storage/qmdb/any/db.zig`, `any/batch.zig`).** Applying 16384 updates runs
-  `apply_to_index`, and each diff entry does a snapshot `get_mut`, a linear `find` over the
-  key's locations, and an update. `log.apply_batch` also copies the journal batch. Guess: the
-  per-key index cursor work and allocations dominate. Compare with commonware's index update
-  path, which is allocation-free here and runs over mimalloc.
 
 ## Updates since the table
 
@@ -172,6 +166,18 @@ directory under `BENCH_DIR` (default `$TMPDIR` or `/tmp`). commonware gets it th
   1.30×). The aggregate's per-run ratios swung from 0.53× to 1.43×, so its 0.98× shows no
   winner. Per-phase timing counters before the fixes put zigware's single verify at about
   1.17× blst's assembly, so re-run at a quiet moment before quoting the single-verify lead.
+- **`qmdb::apply_batch`, 2026-11-19 (row re-measured).** Was 2.72 ms against 1.12 ms
+  (2.43×). Timing counters split zigware's apply into the index update (about 2.75 ms) and the
+  log append (about 0.7 ms); commonware's Sequential build spends about 1.27 ms and 0.37 ms.
+  Two of commonware's apply steps were missing: ffaef15a/eb8466cd probes the index 64 keys
+  ahead of each applied chunk (`PROBE_CHUNK`), which halves the index time, and d28ed752 runs
+  the index apply as a strategy job alongside the log append, with the bench's databases on
+  commonware's 8-thread pool. Allocation is not a factor (no page faults while encoding), so
+  no allocator change. Back to back at a load average of 36 to 45, best of three:
+  commonware 1.13 ms (runs 1.13 to 1.69), zigware 1.21 ms (1.21 to 1.29). What remains is
+  the fixed journal append, about 3× commonware's: a per-op stack-copy encode and a second
+  copy through the paged tip. The profile and a patch are with the storage-journal and
+  runtime lanes.
 
 ## Storage: index, archive, freezer (2026-11-19, clearing lane)
 
