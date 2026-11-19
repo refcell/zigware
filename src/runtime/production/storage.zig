@@ -50,6 +50,12 @@ pub const Config = struct {
     /// Fsync an inherited partition's directory the first time this instance scans, opens, or
     /// removes a blob in it. Like commonware, only off Linux by default.
     sync_inherited_partitions: bool = builtin.os.tag != .linux,
+    /// Give blobs a `start_read` that reads on another task, so a paged `Replay` keeps
+    /// batches in flight (commonware `start_read_many`). Off by default: each started read is
+    /// a `std.Io` task hand-off of several microseconds, more than a read the page cache
+    /// serves, and fixed_replay ran 4 times slower with it on tmpfs. It pays off when a read
+    /// waits on the device.
+    read_ahead: bool = false,
 };
 
 /// Most partitions remembered as synced; past it, inherited partitions sync on every access.
@@ -566,7 +572,9 @@ pub const Blob = struct {
     }
 
     pub fn blob(self: *Blob) iface.Blob {
-        return .{ .ptr = self, .vtable = &blob_vtable };
+        const read_ahead = self.storage.config.read_ahead;
+        const vtable = if (read_ahead) &blob_vtable_read_ahead else &blob_vtable;
+        return .{ .ptr = self, .vtable = vtable };
     }
 
     const blob_vtable: iface.Blob.VTable = .{
@@ -576,6 +584,68 @@ pub const Blob = struct {
         .sync = sync_erased,
         .close = close_erased,
     };
+
+    const blob_vtable_read_ahead: iface.Blob.VTable = vtable: {
+        var with_reads = blob_vtable;
+        with_reads.start_read = start_read_erased;
+        break :vtable with_reads;
+    };
+
+    /// A read started on another task of the storage's `Io` (commonware's
+    /// `start_read_many`): `finish` awaits it, or cancels it when the reader abandons it.
+    const Inflight = struct {
+        gpa: Allocator,
+        io: Io,
+        future: Io.Future(Error!void),
+
+        fn finish(ptr: *anyopaque, abandon: bool) Error!void {
+            const self: *Inflight = @ptrCast(@alignCast(ptr));
+            const result = if (abandon) self.future.cancel(self.io) else self.future.await(self.io);
+            self.gpa.destroy(self);
+            return result;
+        }
+    };
+
+    fn start_read_erased(
+        ptr: *anyopaque,
+        offset: u64,
+        buffer: []u8,
+        options: iface.ReadOptions,
+    ) Error!iface.PendingRead {
+        const self: *Blob = @ptrCast(@alignCast(ptr));
+        const storage = self.storage;
+        // A concurrent task, not `async`: an `async` run inline would leave a cancel the
+        // caller took inside the handle, where abandoning it would lose it.
+        const inflight = storage.gpa.create(Inflight) catch return self.read_inline(
+            offset,
+            buffer,
+            options,
+        );
+        const future = storage.io.concurrent(read_task, .{ self, offset, buffer, options }) catch {
+            storage.gpa.destroy(inflight);
+            return self.read_inline(offset, buffer, options);
+        };
+        inflight.* = .{ .gpa = storage.gpa, .io = storage.io, .future = future };
+        return .started(.{ .ptr = inflight, .finish = Inflight.finish });
+    }
+
+    /// `start_read` without a task (no memory or concurrency for one): a ready handle.
+    fn read_inline(
+        self: *Blob,
+        offset: u64,
+        buffer: []u8,
+        options: iface.ReadOptions,
+    ) Error!iface.PendingRead {
+        self.read_at(offset, buffer, options) catch |err| {
+            if (err == error.Canceled) return error.Canceled;
+            return .ready(err);
+        };
+        return .ready({});
+    }
+
+    fn read_task(self: *Blob, offset: u64, buffer: []u8, options: iface.ReadOptions) Error!void {
+        return self.read_at(offset, buffer, options);
+    }
 
     fn read_erased(
         ptr: *anyopaque,

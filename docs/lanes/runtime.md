@@ -253,33 +253,33 @@ Every commonware `#[test]` in this lane's crates (macro and rstest cases expande
 | File | Tests | Ported | Open | Not portable |
 | --- | --- | --- | --- | --- |
 | conformance.rs | 3 | 3 | 0 | 0 |
-| deterministic.rs | 50 | 33 | 1 | 16 |
+| deterministic.rs | 50 | 34 | 0 | 16 |
 | lib.rs | 59 | 50 | 0 | 9 |
 | mocks.rs | 20 | 19 | 0 | 1 |
-| network/audited.rs | 5 | 2 | 2 | 1 |
+| network/audited.rs | 5 | 4 | 0 | 1 |
 | network/deterministic.rs | 2 | 2 | 0 | 0 |
-| network/iouring.rs | 14 | 4 | 5 | 5 |
-| network/metered.rs | 3 | 2 | 1 | 0 |
+| network/iouring.rs | 14 | 9 | 0 | 5 |
+| network/metered.rs | 3 | 3 | 0 | 0 |
 | network/tokio.rs | 7 | 7 | 0 | 0 |
-| process/metered.rs | 2 | 0 | 1 | 1 |
+| process/metered.rs | 2 | 1 | 0 | 1 |
 | telemetry/metrics/batched.rs | 4 | 4 | 0 | 0 |
 | telemetry/metrics/histogram.rs | 1 | 1 | 0 | 0 |
 | telemetry/metrics/mod.rs | 18 | 17 | 0 | 1 |
-| tokio/runtime.rs | 21 | 4 | 2 | 15 |
+| tokio/runtime.rs | 21 | 6 | 0 | 15 |
 | utils/abort.rs | 11 | 1 | 0 | 10 |
-| utils/buffer/mod.rs | 46 | 38 | 1 | 7 |
-| utils/buffer/paged/cache.rs | 49 | 11 | 6 | 32 |
+| utils/buffer/mod.rs | 46 | 39 | 0 | 7 |
+| utils/buffer/paged/cache.rs | 49 | 17 | 0 | 32 |
 | utils/buffer/paged/mod.rs | 17 | 13 | 0 | 4 |
 | utils/buffer/paged/read.rs | 17 | 6 | 0 | 11 |
 | utils/buffer/paged/sealed.rs | 26 | 23 | 0 | 3 |
-| utils/buffer/paged/tip.rs | 13 | 0 | 1 | 12 |
+| utils/buffer/paged/tip.rs | 13 | 1 | 0 | 12 |
 | utils/buffer/paged/view.rs | 4 | 4 | 0 | 0 |
 | utils/buffer/paged/writer.rs | 96 | 81 | 0 | 15 |
 | utils/buffer/tip.rs | 7 | 5 | 0 | 2 |
 | utils/handle.rs | 19 | 10 | 0 | 9 |
 | utils/mod.rs | 3 | 0 | 0 | 3 |
 | utils/supervision.rs | 9 | 4 | 0 | 5 |
-| Total | 526 | 344 | 20 | 162 |
+| Total | 526 | 364 | 0 | 162 |
 
 Open (none are in runtime/src/telemetry/, the runtime-telemetry lane's directory):
 - [x] `deterministic.rs:1742` `test_logical_open_releases_retained_mutations`: unsynced fragments of
@@ -433,8 +433,11 @@ Not portable:
   `test_fill_keeps_batches_in_flight`, `test_seek_discards_the_batches_in_flight`,
   `test_failed_fill_reads_the_same_batch_again`, `test_dropped_fill_reads_the_same_batch_again`,
   `test_batches_landing_before_and_after_their_wait_are_served`,
-  `test_read_error_after_the_batch_fails_the_fill`: storage-journal.md: read.rs batch pipeline
-  (read-ahead, in-flight batches) not ported
+  `test_read_error_after_the_batch_fails_the_fill`: read-ahead is ported opt-in (storage
+  `Config.read_ahead`, `Blob.start_read`, up to 3 batches in flight in `paged.Replay`;
+  read_ahead_test.zig checks it against the appended bytes), but these tests drive commonware's
+  fault-injecting mock blob and per-batch futures, which have no counterpart here. Off by default:
+  each start is a `std.Io` task hand-off, which made fixed replay about 4x slower on tmpfs
 - `utils/buffer/paged/read.rs` `test_replay_is_sync`: compile-time Rust `Sync` bound check
 - `utils/buffer/paged/sealed.rs` `test_sealed_read_many_into_rejects_unsorted_offsets`:
   `#[should_panic]` or panic propagation/`catch_unwind`; Zig cannot catch a panic

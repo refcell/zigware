@@ -23,6 +23,7 @@ const paged = @import("mod.zig");
 const storage_iface = @import("../../storage.zig");
 const Blob = storage_iface.Blob;
 const Completion = storage_iface.Completion;
+const PendingRead = storage_iface.PendingRead;
 const ReadOptions = storage_iface.ReadOptions;
 const SyncState = @import("../mod.zig").SyncState;
 const Buffer = @import("tip.zig").Buffer;
@@ -821,7 +822,16 @@ pub const Replay = struct {
     batch_pages: usize,
     /// The options of every blob read.
     read_options: ReadOptions,
+    /// `slot_count` buffers of `batch_pages` physical pages: one being validated and the rest
+    /// for reads in flight.
     batch: []u8,
+    /// 1 when the blob reads inline; `read_ahead_max + 1` when it starts reads ahead.
+    slot_count: u8,
+    /// Bit `i` set: slot `i` holds no batch.
+    free_slots: u8,
+    /// Batches read ahead of `next_page`, contiguous and in page order, oldest first.
+    inflight: [read_ahead_max]Inflight = undefined,
+    inflight_len: u8 = 0,
     /// Logical bytes read and not yet consumed start at `start`.
     data: std.ArrayList(u8),
     start: usize = 0,
@@ -832,6 +842,19 @@ pub const Replay = struct {
     skip: usize = 0,
     exhausted: bool = false,
 
+    /// Batches kept in flight ahead of the one being validated (commonware `MAX_READ_AHEAD`),
+    /// on blobs that start reads ahead. One request at a time leaves the device idle for a
+    /// request latency at every batch boundary; the replay buffer is split among them.
+    pub const read_ahead_max = 3;
+
+    /// A batch started ahead of the decoder.
+    const Inflight = struct { first_page: u64, pages: usize, slot: u8, read: PendingRead };
+
+    /// A batch whose bytes have landed in its slot.
+    const Landed = struct { pages: usize, slot: u8 };
+
+    /// `batch_pages` physical pages per blob read, or that split among the batches in flight
+    /// (rounded up) when the blob starts reads ahead (commonware's `PageReader`).
     pub fn init(
         gpa: Allocator,
         blob: Blob,
@@ -843,26 +866,32 @@ pub const Replay = struct {
     ) Allocator.Error!Self {
         assert(page_size > 0);
         assert(batch_pages > 0);
+        const slot_count: u8 = if (blob.reads_ahead()) read_ahead_max + 1 else 1;
+        const read_pages = std.math.divCeil(usize, batch_pages, slot_count) catch unreachable;
         const partial_copy = try gpa.dupe(u8, partial);
         errdefer gpa.free(partial_copy);
-        const batch = try gpa.alloc(u8, batch_pages * (page_size + checksum_size));
+        const batch = try gpa.alloc(u8, slot_count * read_pages * (page_size + checksum_size));
         errdefer gpa.free(batch);
         var data: std.ArrayList(u8) = .empty;
-        try data.ensureTotalCapacity(gpa, batch_pages * page_size + page_size);
+        try data.ensureTotalCapacity(gpa, read_pages * page_size + page_size);
+        comptime assert(read_ahead_max + 1 <= 8); // `free_slots` is one bit per slot.
         return .{
             .gpa = gpa,
             .blob = blob,
             .page_size = page_size,
             .full_pages = full_pages,
             .partial = partial_copy,
-            .batch_pages = batch_pages,
+            .batch_pages = read_pages,
             .read_options = read_options,
             .batch = batch,
+            .slot_count = slot_count,
+            .free_slots = @intCast((@as(u16, 1) << @intCast(slot_count)) - 1),
             .data = data,
         };
     }
 
     pub fn deinit(self: *Self) void {
+        self.abandon_inflight();
         self.gpa.free(self.partial);
         self.gpa.free(self.batch);
         self.data.deinit(self.gpa);
@@ -921,11 +950,11 @@ pub const Replay = struct {
 
     fn fill_pages(self: *Self) Error!void {
         const physical = self.page_size + checksum_size;
-        const count: usize = @intCast(@min(self.batch_pages, self.full_pages - self.next_page));
-        const batch = self.batch[0 .. count * physical];
-        try self.blob.read_at_options(self.next_page * physical, batch, self.read_options);
-        try self.data.ensureUnusedCapacity(self.gpa, count * self.page_size);
-        for (0..count) |index| {
+        const landed = try self.take_batch();
+        defer self.free_slot(landed.slot);
+        const batch = self.slot_bytes(landed.slot)[0 .. landed.pages * physical];
+        try self.data.ensureUnusedCapacity(self.gpa, landed.pages * self.page_size);
+        for (0..landed.pages) |index| {
             const page = batch[index * physical ..][0..physical];
             // Every stored page must hold a full page: the partial page is frozen.
             const checksum = Checksum.validate_page(page) orelse return error.InvalidChecksum;
@@ -933,12 +962,122 @@ pub const Replay = struct {
             self.data.appendSliceAssumeCapacity(page[self.skip..self.page_size]);
             self.skip = 0;
         }
-        self.next_page += count;
+        // The position advances only past validated pages, so a corrupt page fails every
+        // fill that reaches it.
+        self.next_page += landed.pages;
+    }
+
+    /// The batch at `next_page`: the one read ahead for it when it landed, else a read on
+    /// demand. Either way the batches after it are started first, so the device works while
+    /// the caller validates and decodes (commonware `read_batch`).
+    fn take_batch(self: *Self) Error!Landed {
+        assert(self.next_page < self.full_pages);
+        if (self.inflight_len > 0 and self.inflight[0].first_page == self.next_page) {
+            var front = self.pop_front();
+            self.top_up(front.first_page + front.pages);
+            // A failed read ahead (perhaps abandoned by whoever started it) is read again
+            // on demand below.
+            if (front.read.wait()) {
+                return .{ .pages = front.pages, .slot = front.slot };
+            } else |_| self.free_slot(front.slot);
+        }
+        self.abandon_inflight();
+        const pages = self.pages_at(self.next_page);
+        const slot = self.claim_slot();
+        errdefer self.free_slot(slot);
+        self.top_up(self.next_page + pages);
+        errdefer self.abandon_inflight();
+        // Inline, so the caller's own cancel and errors surface here.
+        const physical = self.page_size + checksum_size;
+        const offset = self.next_page * physical;
+        const target = self.slot_bytes(slot)[0 .. pages * physical];
+        try self.blob.read_at_options(offset, target, self.read_options);
+        return .{ .pages = pages, .slot = slot };
+    }
+
+    /// Starts batches after the queued ones, or after `consumed_end` when none is queued,
+    /// until `read_ahead_max` are in flight or the stored pages end. A batch that cannot
+    /// start stops the top-up: the decoder reads it on demand when it gets there.
+    fn top_up(self: *Self, consumed_end: u64) void {
+        if (self.slot_count == 1) return;
+        var next = if (self.inflight_len > 0) blk: {
+            const back = self.inflight[self.inflight_len - 1];
+            break :blk back.first_page + back.pages;
+        } else consumed_end;
+        // Bounded: one batch per pass, at most `read_ahead_max`.
+        while (self.inflight_len < read_ahead_max and next < self.full_pages) {
+            const pages = self.pages_at(next);
+            const slot = self.claim_slot();
+            const physical = self.page_size + checksum_size;
+            const target = self.slot_bytes(slot)[0 .. pages * physical];
+            const read = self.blob.start_read(next * physical, target, self.read_options) catch {
+                // A cancel taken here is the caller's; the demand read will see it again.
+                self.free_slot(slot);
+                return;
+            };
+            self.inflight[self.inflight_len] = .{
+                .first_page = next,
+                .pages = pages,
+                .slot = slot,
+                .read = read,
+            };
+            self.inflight_len += 1;
+            next += pages;
+        }
+        assert(self.inflight_len <= read_ahead_max);
+    }
+
+    /// Physical pages of the batch starting at stored page `first`.
+    fn pages_at(self: *const Self, first: u64) usize {
+        assert(first < self.full_pages);
+        return @intCast(@min(self.batch_pages, self.full_pages - first));
+    }
+
+    fn pop_front(self: *Self) Inflight {
+        assert(self.inflight_len > 0);
+        const front = self.inflight[0];
+        std.mem.copyForwards(
+            Inflight,
+            self.inflight[0 .. self.inflight_len - 1],
+            self.inflight[1..self.inflight_len],
+        );
+        self.inflight_len -= 1;
+        return front;
+    }
+
+    /// Discards every batch read ahead, waiting until none touches its slot.
+    fn abandon_inflight(self: *Self) void {
+        for (self.inflight[0..self.inflight_len]) |*entry| {
+            entry.read.abandon();
+            self.free_slot(entry.slot);
+        }
+        self.inflight_len = 0;
+    }
+
+    fn claim_slot(self: *Self) u8 {
+        assert(self.free_slots != 0);
+        const slot: u8 = @ctz(self.free_slots);
+        assert(slot < self.slot_count);
+        self.free_slots &= ~(@as(u8, 1) << @intCast(slot));
+        return slot;
+    }
+
+    fn free_slot(self: *Self, slot: u8) void {
+        const bit = @as(u8, 1) << @intCast(slot);
+        assert(slot < self.slot_count and self.free_slots & bit == 0);
+        self.free_slots |= bit;
+    }
+
+    fn slot_bytes(self: *const Self, slot: u8) []u8 {
+        const len = self.batch_pages * (self.page_size + checksum_size);
+        assert(slot < self.slot_count);
+        return self.batch[slot * len ..][0..len];
     }
 
     /// Position the replay at logical `offset`.
     pub fn seek_to(self: *Self, offset: u64) Error!void {
         if (offset > self.blob_size()) return error.BlobInsufficientLength;
+        self.abandon_inflight();
         self.data.clearRetainingCapacity();
         self.start = 0;
         self.exhausted = false;
@@ -952,5 +1091,6 @@ pub const Replay = struct {
 
 test {
     _ = @import("writer_test.zig");
+    _ = @import("read_ahead_test.zig");
     _ = @import("integrity_fuzz_test.zig");
 }

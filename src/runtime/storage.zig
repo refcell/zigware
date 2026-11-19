@@ -36,6 +36,7 @@ pub const metered = @import("storage/metered.zig");
 pub const mocks = @import("storage/mocks.zig");
 pub const tests = @import("storage/tests.zig");
 pub const Completion = @import("storage/completion.zig").Completion;
+pub const PendingRead = @import("storage/pending_read.zig").PendingRead;
 
 pub const Error = error{
     PartitionNameInvalid,
@@ -158,6 +159,13 @@ pub const Blob = struct {
         close: *const fn (ptr: *anyopaque) void,
         /// Null for backends whose `start_sync` is `sync` run inline (`Blob.start_sync`).
         start_sync: ?*const fn (ptr: *anyopaque) Error!Completion = null,
+        /// Null for backends whose `start_read` is `read_at` run inline (`Blob.start_read`).
+        start_read: ?*const fn (
+            ptr: *anyopaque,
+            offset: u64,
+            buffer: []u8,
+            options: ReadOptions,
+        ) Error!PendingRead = null,
     };
 
     /// Read exactly `buffer.len` bytes at `offset`; `error.BlobInsufficientLength` if the blob
@@ -210,6 +218,32 @@ pub const Blob = struct {
             return .ok;
         };
         return start(blob.ptr);
+    }
+
+    /// Start reading exactly `buffer.len` bytes at `offset` (commonware `start_read_many` of one
+    /// range). The read proceeds whether or not the result is waited for; `buffer` must stay
+    /// alive until the returned handle is waited or abandoned. Backends without a `start_read`
+    /// entry read inline and return a ready handle, so their callers see no concurrency.
+    pub fn start_read(
+        blob: Blob,
+        offset: u64,
+        buffer: []u8,
+        options: ReadOptions,
+    ) Error!PendingRead {
+        const start = blob.vtable.start_read orelse {
+            // As in `start_sync`, a cancel the inline read took is the caller's.
+            blob.read_at_options(offset, buffer, options) catch |err| {
+                if (err == error.Canceled) return error.Canceled;
+                return .ready(err);
+            };
+            return .ready({});
+        };
+        return start(blob.ptr, offset, buffer, options);
+    }
+
+    /// Whether `start_read` can overlap reads with the caller's work.
+    pub fn reads_ahead(blob: Blob) bool {
+        return blob.vtable.start_read != null;
     }
 
     /// Release the handle. Unsynced changes may be discarded; closing does not sync.
@@ -384,6 +418,7 @@ test {
     _ = metered;
     _ = mocks;
     _ = @import("storage/completion.zig");
+    _ = @import("storage/pending_read.zig");
     _ = @import("storage/memory_test.zig");
     _ = @import("storage/blob_creation_fuzz_test.zig");
 }
