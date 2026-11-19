@@ -5,6 +5,7 @@ const std = @import("std");
 const testing = std.testing;
 const codec = @import("codec");
 const runtime = @import("runtime");
+const utils = @import("utils");
 const h = @import("harness.zig");
 
 const Ctx = h.Ctx;
@@ -89,4 +90,57 @@ test "voter nullification notification omits floor but retry broadcasts entry" {
             try expect_broadcast(ctx, &net, &observer, .{ .nullification = nullification });
         }
     }.body);
+}
+
+// commonware stall_timeout_nullifies_current_view: with two-view terms and a 5 s stall
+// timeout, the voter that enters view 2 late (certification takes 3.5 s) nullifies it on
+// the term's stall deadline, before its own 3 s leader timeout could fire.
+test "voter stall timeout nullifies current view" {
+    try run_long(struct {
+        fn body(ctx: Ctx) anyerror!void {
+            const gpa = ctx.gpa();
+            var net: h.Network = undefined;
+            try net.start(ctx, 5, "stall_timeout_nullifies_current_view");
+            defer net.deinit();
+            const elector = h.elector_mod.RoundRobin(h.Sha256).default().with_term(
+                .new(utils.NonZero(u32).init(2).?),
+                .from_secs(5),
+                .new(0),
+            );
+            var built = try elector.build(gpa, 5);
+            const first: h.Round = .new(epoch, .new(1));
+            const leader = built.elect(first, {});
+            built.deinit(gpa);
+            var stack: h.VoterStack = undefined;
+            try stack.start(ctx, &net, .{
+                .leader_timeout_ms = 3_000,
+                .certification_timeout_ms = 4_000,
+                .timeout_retry_ms = 2_000,
+                .certify_latency_ms = 3_500.0,
+                .elector = elector,
+            });
+            defer stack.stop();
+            _ = try stack.next_update(ctx, 5_000);
+            const payload = h.Sha256.hash(&.{"same_term_timeout_view_1"});
+            const proposal_1: h.Proposal = .init(first, .zero(), payload);
+            h.relay_contents(&net, leader.get(), payload, first, h.genesis(epoch));
+            try stack.mailbox.proposal(proposal_1);
+            const quorum = net.quorum();
+            const certificate = try h.build(gpa, .notarization, net.schemes(), proposal_1, quorum);
+            try stack.mailbox.recovered(gpa, .{ .notarization = certificate });
+            try wait_view(ctx, &stack, 2);
+            // The very next batcher message must be the nullify for view 2, within 2 s.
+            const message = (try stack.next_batcher(ctx, 2_000)) orelse return error.NoNullify;
+            try testing.expect(message == .constructed and message.constructed == .nullify);
+            try testing.expectEqual(2, message.constructed.view().get());
+        }
+    }.body);
+}
+
+fn run_long(comptime body: fn (Ctx) anyerror!void) !void {
+    var runner = try runtime.deterministic.Runner.init(testing.allocator, .{
+        .timeout_ns = 30 * std.time.ns_per_s,
+    });
+    defer runner.deinit();
+    try try runner.start_context(body, .{});
 }

@@ -18,7 +18,7 @@ const utils = @import("utils");
 const consensus_types = @import("../../../../types.zig");
 const types = @import("../../../types.zig");
 const config_mod = @import("../../../config.zig");
-const elector_mod = @import("../../../elector.zig");
+pub const elector_mod = @import("../../../elector.zig");
 const ed25519 = @import("../../../scheme/ed25519.zig");
 const application_mod = @import("../../../mocks/application.zig");
 const relay_mod = @import("../../../mocks/relay.zig");
@@ -99,6 +99,8 @@ pub const Options = struct {
     partition: ?[]const u8 = null,
     batcher_capacity: u32 = 16,
     resolver_capacity: u32 = 8,
+    /// The round-robin elector, with commonware's `with_term` settings when a test sets them.
+    elector: elector_mod.RoundRobin(Sha256) = elector_mod.RoundRobin(Sha256).default(),
 };
 
 /// commonware `start_voter_with_floor`'s voter: 5 s leader, 6 s certification, and 60 min
@@ -265,7 +267,7 @@ pub const VoterStack = struct {
         const me = net.keys()[index];
         const scheme = &net.schemes()[index];
         const n: u32 = @intCast(net.keys().len);
-        self.elector = try elector_mod.RoundRobin(Sha256).default().build(gpa, n);
+        self.elector = try options.elector.build(gpa, n);
         errdefer self.elector.deinit(gpa);
         self.partition = @splat(0);
         const partition = options.partition orelse
@@ -559,6 +561,29 @@ pub fn advance_to_view(stack: *VoterStack, ctx: Ctx, net: *const Network, target
         try std.testing.expectEqual(target, update.current.get());
         return payload;
     }
+}
+
+/// Relays `payload`'s contents from validator `sender` the way the mock application builds
+/// them: `round`, the parent's payload, and a zero nonce (commonware
+/// `relay.broadcast(&leader, Recipients::All, (payload, contents))`).
+pub fn relay_contents(
+    net: *Network,
+    sender: usize,
+    payload: Digest,
+    round: Round,
+    parent: Digest,
+) void {
+    var buffer: [128]u8 = undefined;
+    var writer: codec.Writer = .init(&buffer);
+    round.write(&writer);
+    codec.write(Digest, parent, &writer);
+    codec.write(u64, 0, &writer);
+    net.relay.broadcast(net.keys()[sender], .all, payload, writer.written());
+}
+
+/// The mock application's genesis payload in `epoch`.
+pub fn genesis(epoch: Epoch) Digest {
+    return application_mod.genesis(Sha256, epoch);
 }
 
 /// A proposal at `view` of `epoch` over `view - 1`, with payload `hash(label)`.
