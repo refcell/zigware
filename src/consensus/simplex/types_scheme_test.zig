@@ -38,7 +38,7 @@ fn make_ed25519(
 }
 
 /// commonware's scheme list for these tests, in its order.
-const schemes = .{
+pub const schemes = .{
     .{ ed25519.Scheme(Digest), make_ed25519 },
     .{ secp256r1.Scheme(Digest, Key), secp256r1.fixture },
     .{ multisig.Scheme(Digest, Key, MinPk), multisig.fixture },
@@ -62,7 +62,7 @@ fn proposal(digest: u8) types.Proposal(Digest) {
 
 /// Runs `body` on every scheme. BLS signing is slow in Debug, so Debug without
 /// `-Dslow-tests` runs the ed25519 and secp256r1 schemes only.
-fn for_each_scheme(comptime body: anytype) !void {
+pub fn for_each_scheme(comptime body: anytype) !void {
     const all = builtin.mode != .debug or build_options.slow_tests;
     inline for (schemes, 0..) |entry, index| {
         if (all or index < 2) try body(entry);

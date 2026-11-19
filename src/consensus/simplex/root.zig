@@ -86,6 +86,7 @@ test {
     _ = @import("actors/ingress_test.zig");
     _ = @import("actors/batcher/actor_test.zig");
     _ = @import("actors/batcher/actor_late_test.zig");
+    _ = @import("actors/batcher/round_scheme_test.zig");
     _ = actors.voter.slot;
     _ = actors.voter.round;
     _ = actors.voter.views;
