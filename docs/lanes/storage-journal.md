@@ -116,6 +116,12 @@ resize, sync), `runtime.storage`, with the in-memory backend `runtime.storage.me
   `src/storage/metadata/benches/`.
 - [x] Benches: runtime buffer (`buffer_paged::append`, `read`, `sync`) under
   `src/runtime/buffer/benches/`, run from `src/runtime/benches.zig`.
+- [x] Benches: runtime `iobuf::decode_fixed` (`src/runtime/iobuf_benches.zig`), modes
+  `iobuf_bytes`, `iobuf_native`, their `_ref`s, `vec_slice`, and `slice`. Not ported: `bytes`
+  and `bytes_ref` (the `bytes` crate) and `vec` (the same slice decode as `vec_slice`);
+  `iobuf_bytes` wraps with `from_static`, since `IoBuf` has no external counted owner.
+- [x] Benches: bmt's seven benches were already ported (`src/storage/bmt/benches.zig`) with
+  commonware's names and sizes; no gaps.
 - Handed to storage-merkle (2026-11-16): `src/storage/journal/zstd.zig`'s real compressor and
   the `journal_fixed_operations` and `queue_operations` fuzz targets.
 
@@ -422,3 +428,5 @@ resize, sync), `runtime.storage`, with the in-memory backend `runtime.storage.me
 - 2026-11-19: ported the 12 journal benches (`src/storage/journal/benches/`).
 - 2026-11-19: ported the metadata benches (`src/storage/metadata/benches/`).
 - 2026-11-19: ported the runtime buffer benches (`src/runtime/buffer/benches/`).
+- 2026-11-19: ported the variable journal start_sync flush and init sync-order fault tests
+  (from storage-merkle's backlog) and the iobuf bench.
