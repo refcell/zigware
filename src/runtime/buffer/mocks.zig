@@ -11,6 +11,7 @@
 //!   `remove`, `write_at`, `resize`, `sync`) succeed, then every later one fails with `Io` and
 //!   sets `mutation_refused`. Reads and opens of stored blobs are not mutations.
 //! - `remove_failures_after` fails removals with `Io` once that many more have succeeded.
+//! - `keep_unsynced` keeps unsynced writes across closes and crashes (crash retention 1.0).
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -39,6 +40,9 @@ pub const Storage = struct {
     mutations_allowed: ?u64 = null,
     /// Whether a mutation failed since `allow_mutations`.
     mutation_refused: bool = false,
+    /// Keep unsynced writes, as commonware's crash retention 1.0 does: closing a handle keeps
+    /// what it wrote, and `crash` keeps what open handles wrote.
+    keep_unsynced: bool = false,
 
     const vtable: iface.Storage.VTable = .{
         .open_versioned = open_erased,
@@ -64,7 +68,8 @@ pub const Storage = struct {
     /// Crash: durable contents survive, unsynced changes of open handles are lost, and every
     /// blob can be opened again (open handles must still be closed).
     pub fn crash(self: *Storage) void {
-        self.backend.crash();
+        if (!self.keep_unsynced) return self.backend.crash();
+        self.backend.crash_keeping_unsynced() catch @panic("out of memory keeping writes");
     }
 
     /// The durable logical length of a blob, even while a handle is open (commonware's
@@ -215,6 +220,14 @@ const Blob = struct {
     fn close(ptr: *anyopaque) void {
         const self = from(ptr);
         const gpa = self.storage.gpa;
+        if (self.storage.keep_unsynced) {
+            // Not a mutation: the OS, not the caller, keeps the written bytes. A removed or
+            // crashed blob has nothing to keep them in.
+            self.inner.sync() catch |err| switch (err) {
+                error.BlobMissing => {},
+                else => @panic("mock storage could not keep unsynced writes"),
+            };
+        }
         self.inner.close();
         gpa.destroy(self);
     }
@@ -250,6 +263,23 @@ test "crash discards unsynced changes" {
     defer second.blob.close();
     try testing.expectEqual(@as(u64, 7), second.len);
     try testing.expectEqual(@as(?u64, 7), try storage.durable_len("partition", "blob"));
+}
+
+test "keep_unsynced keeps writes across a close and a crash" {
+    var storage = Storage.init(testing.allocator);
+    defer storage.deinit();
+    storage.keep_unsynced = true;
+    const closed = try storage.open("partition", "closed");
+    try closed.blob.write_at(0, "closed", .{});
+    closed.blob.close();
+    const open = try storage.open("partition", "open");
+    try open.blob.write_at(0, "open", .{});
+    storage.crash();
+    open.blob.close();
+    try testing.expectEqual(@as(?u64, 6), try storage.durable_len("partition", "closed"));
+    try testing.expectEqual(@as(?u64, 4), try storage.durable_len("partition", "open"));
+    // Neither kept write counted as a mutation.
+    try testing.expectEqual(@as(u64, 2), storage.writes);
 }
 
 test "remove fault injection" {

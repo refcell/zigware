@@ -429,6 +429,27 @@ test "memory crash keeps only durable contents" {
     try expect_read(reopened.blob, 0, "durable");
 }
 
+test "memory crash keeping unsynced writes keeps them durable" {
+    var storage: Storage = .init(testing.allocator);
+    defer storage.deinit();
+    const blob = (try storage.open("partition", "blob")).blob;
+    defer blob.close();
+    try blob.write_at(0, "durable", .{});
+    try blob.sync();
+    try blob.write_at(7, " kept", .{});
+    const closed = (try storage.open("partition", "closed")).blob;
+    try closed.write_at(0, "gone", .{});
+    closed.close();
+    try storage.crash_keeping_unsynced();
+    // The open handle's unsynced bytes survive; a closed handle's were already discarded.
+    try testing.expectError(error.BlobMissing, blob.sync());
+    const reopened = try storage.open("partition", "blob");
+    defer reopened.blob.close();
+    try testing.expectEqual(@as(u64, 12), reopened.len);
+    try expect_read(reopened.blob, 0, "durable kept");
+    try expect_reopened(&storage, "closed", "");
+}
+
 // Audit digests match commonware's `storage_audit` for the same operations, computed with
 // commonware's deterministic runtime: open "storage-conformance"/<seed big-endian>, write
 // [seed, 1, 2, 3] and sync, then open "other-part"/"zz" and write [9, 9, 9] at 5 unsynced.

@@ -315,6 +315,25 @@ pub const Storage = struct {
         assert(self.partitions.items.len == 0 or self.partitions.items[0].name.len > 0);
     }
 
+    /// Crash as if every write had reached disk (commonware's crash retention 1.0): each open
+    /// handle's unsynced contents become durable, then every generation retires as in `crash`.
+    pub fn crash_keeping_unsynced(self: *Storage) Error!void {
+        {
+            self.lock();
+            defer self.unlock();
+            for (self.partitions.items) |*partition| {
+                for (partition.entries.items) |*entry| {
+                    const live = entry.live orelse continue;
+                    if (entry.generation != live.generation) continue;
+                    entry.content.clearRetainingCapacity();
+                    try entry.content.appendSlice(self.gpa, live.content.items);
+                    assert(entry.content.items.len == live.content.items.len);
+                }
+            }
+        }
+        self.crash();
+    }
+
     /// The durable entry whose current incarnation is `generation`. Called with the lock held.
     fn entry_of_generation(self: *Storage, generation: u64) ?*Entry {
         for (self.partitions.items) |*partition| {
