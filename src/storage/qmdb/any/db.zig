@@ -532,8 +532,11 @@ pub fn Db(F: type, U: type, C: type, I: type, H: type, comptime N: usize) type {
             defer timing.finish();
             try self.validate_batch(batch);
             const db_size = self.log.size();
-            try self.log.apply_batch(batch.journal_batch);
-            try batch.apply_to_index(self, db_size);
+            if (self.strategy) |pool| {
+                try self.apply_joined(pool, batch, db_size);
+            } else {
+                try self.apply_joined(parallel.sequential, batch, db_size);
+            }
             self.active_keys = batch.total_active_keys;
             self.inactivity_floor_loc = batch.bounds.inactivity_floor;
             self.root_digest = batch.root();
@@ -542,6 +545,42 @@ pub fn Db(F: type, U: type, C: type, I: type, H: type, comptime N: usize) type {
             self.update_metrics();
             self.metrics.operations_applied.metric().inc_by(self.log.size() - db_size);
         }
+
+        /// Applies `batch` to the index on `strategy` while its journal batch is appended here.
+        /// The two touch disjoint state (the snapshot and bitmap vs the log), so commonware
+        /// spawns the index job and joins it with the append. The job finishes before this
+        /// returns, also when the append fails; either failure leaves only `deinit` valid.
+        fn apply_joined(
+            self: *Self,
+            strategy: anytype,
+            batch: *const MerkleizedBatch,
+            db_size: u64,
+        ) !void {
+            // The job's size: the diff entries it merges or scans (commonware's `work_hint`).
+            var work: usize = batch.diff.entries.len;
+            for (batch.ancestor_diffs) |diff| work += diff.entries.len;
+            var task: parallel.Task(IndexJob) = .init(.{
+                .db = self,
+                .batch = batch,
+                .db_size = db_size,
+            });
+            strategy.spawn(work, &task);
+            const appended = self.log.apply_batch(batch.journal_batch);
+            const indexed = strategy.block_on(&task);
+            try appended;
+            try indexed;
+        }
+
+        /// `apply_to_index` as a strategy job.
+        const IndexJob = struct {
+            db: *Self,
+            batch: *const MerkleizedBatch,
+            db_size: u64,
+
+            pub fn call(job: IndexJob) Allocator.Error!void {
+                return job.batch.apply_to_index(job.db, job.db_size);
+            }
+        };
 
         /// A batch on the database's current state.
         pub fn new_batch(self: *const Self) !UnmerkleizedBatch {

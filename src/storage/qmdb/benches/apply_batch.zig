@@ -6,6 +6,7 @@ const std = @import("std");
 const assert = std.debug.assert;
 const bench = @import("bench");
 const storage = @import("storage");
+const parallel = @import("parallel");
 const common = @import("common.zig");
 
 const qmdb = storage.qmdb;
@@ -70,17 +71,21 @@ pub fn run(runner: *bench.Runner) !void {
     // Smoke inputs shrink the case: `zig build test` runs these in debug builds.
     const keys = runner.inputs.pick(u64, 256, num_keys, num_keys);
     const updates = runner.inputs.pick(u64, 64, updates_standard, updates_standard);
+    // Commonware's bench databases run on a pool of `THREADS` (8) threads.
+    const pool = try parallel.ThreadPool.create(runner.allocator, runner.io, .{ .threads = 8 });
+    defer pool.destroy();
+    const strategy = parallel.Rayon.init(pool);
     const any = "any::unordered::fixed::mmb";
-    try run_case(AnyDb, .direct, any, runner, keys, updates);
+    try run_case(AnyDb, .direct, any, runner, keys, updates, strategy);
     const p256 = "any::ordered::p256::fixed::mmb";
-    try run_case(OrderedP256Db, .direct, p256, runner, keys, updates);
-    try run_case(AnyDb, .uncomm_ancestor, any, runner, keys, updates);
-    try run_case(AnyDb, .comm_ancestor, any, runner, keys, updates);
-    try run_case(AnyDb, .comm_uncomm_chain, any, runner, keys, updates);
-    try run_case(AnyDb, .multi_uncomm, any, runner, keys, updates);
+    try run_case(OrderedP256Db, .direct, p256, runner, keys, updates, strategy);
+    try run_case(AnyDb, .uncomm_ancestor, any, runner, keys, updates, strategy);
+    try run_case(AnyDb, .comm_ancestor, any, runner, keys, updates, strategy);
+    try run_case(AnyDb, .comm_uncomm_chain, any, runner, keys, updates, strategy);
+    try run_case(AnyDb, .multi_uncomm, any, runner, keys, updates, strategy);
     const immutable = "immutable::fixed::mmb";
-    try run_case(ImmutableDb, .direct, immutable, runner, keys, updates);
-    try run_case(ImmutableDb, .uncomm_ancestor, immutable, runner, keys, updates);
+    try run_case(ImmutableDb, .direct, immutable, runner, keys, updates, strategy);
+    try run_case(ImmutableDb, .uncomm_ancestor, immutable, runner, keys, updates, strategy);
 }
 
 fn run_case(
@@ -90,6 +95,7 @@ fn run_case(
     runner: *bench.Runner,
     keys: u64,
     updates: u64,
+    strategy: parallel.Rayon,
 ) !void {
     const benchmark = bench.Benchmark.init("qmdb::apply_batch")
         .with_param("case", @tagName(case))
@@ -101,7 +107,7 @@ fn run_case(
         .fresh = .{
             .gpa = runner.allocator,
             .disk = .init(runner),
-            .options = .{ .items_per_blob = apply_items_per_blob },
+            .options = .{ .items_per_blob = apply_items_per_blob, .strategy = strategy },
         },
         .keys = keys,
         .updates = updates,
