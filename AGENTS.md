@@ -58,6 +58,11 @@ Read this whole file before you change anything. These rules are not optional.
    commonware's so the two can interoperate; check with commonware's own test vectors and
    conformance hashes.
 
+10. **Keep your cache small.** All lanes share one disk, and a clone's `.zig-cache` grows past
+   100 GB in a day (/home filled at 2026-11-19 11:45 and pushes failed with ENOSPC). When none
+   of your builds is running and your clone's `.zig-cache` is over about 50 GB
+   (`du -sh .zig-cache`), delete it with `rm -rf .zig-cache` in your own clone only.
+
 ## Style: TigerStyle (see docs/TIGER_STYLE.md)
 
 - Safety, then performance, then developer experience.
