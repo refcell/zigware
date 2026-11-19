@@ -94,15 +94,13 @@ pub fn Engine(comptime P: type) type {
             const io = ctx.io();
             var rng: @import("actors/context.zig").IoRng = .{ .io = io };
             cfg.assert_valid(gpa, &rng);
-            const participants: u64 = cfg.scheme.participants().len();
             const skip_budget: u64 = switch (cfg.skip) {
                 .disabled => 0,
-                .enabled => |skip| skip.budget.resolve(participants),
+                .enabled => |skip| skip.budget.resolve(cfg.scheme.participants().len()),
             };
             const terms = cfg.elector.terms();
             // Stall timeout must be greater than certification timeout.
             if (terms.stall_timeout) |stall| assert(stall.order(cfg.certification_timeout) == .gt);
-            self.* = undefined;
             self.gpa = gpa;
             self.io = io;
             self.mutex = .init;
@@ -126,6 +124,7 @@ pub fn Engine(comptime P: type) type {
                 .floor = cfg.floor.view(),
                 .scope = ctx.scope.child("batcher"),
             });
+            errdefer self.batcher.deinit();
             self.voter, self.voter_mailbox = try Voter.init(gpa, io, .{
                 .scheme = &self.scheme,
                 .elector = cfg.elector,
@@ -148,6 +147,7 @@ pub fn Engine(comptime P: type) type {
                 .storage = ctx.storage,
                 .scope = ctx.scope.child("voter"),
             });
+            errdefer self.voter.deinit();
             self.resolver, self.resolver_mailbox = try Resolver.init(gpa, io, .{
                 .scheme = &self.scheme,
                 .blocker = cfg.blocker,
