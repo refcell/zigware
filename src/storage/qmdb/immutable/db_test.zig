@@ -176,6 +176,12 @@ test "immutable chain reads survive dropped ancestors" {
             try expect_value(try c.get(&fill(k), &db), fill(k + 100));
             try expect_value(try child.get(&fill(k), &db), fill(k + 100));
         }
+        const keys = [_]Digest{ fill(0), fill(1), fill(2), fill(3) };
+        var values: [4]?Digest = undefined;
+        try c.get_many(&keys, &db, &values);
+        for (values, 0..) |v, i| try expect_value(v, fill(@as(u8, @intCast(i)) + 100));
+        try child.get_many(&keys, &db, &values);
+        for (values, 0..) |v, i| try expect_value(v, fill(@as(u8, @intCast(i)) + 100));
         // Merkleizing past dropped, unapplied ancestors is stale.
         try testing.expectError(error.StaleBatch, child.merkleize(&db));
         try db.apply_batch(c);
@@ -846,5 +852,62 @@ test "immutable a child of to_batch applies and reads" {
         try testing.expect(db.root().eql(child.root()));
         try expect_value(try db.get(&fill(1)), fill(101));
         try expect_value(try db.get(&fill(2)), fill(102));
+    }
+}
+
+// Commonware's run_merkleize_across_prune: a child built before its parent applied still
+// merkleizes to the same root after the database prunes to the parent's floor.
+test "immutable a held child merkleizes across a prune" {
+    inline for (families) |F| {
+        var harness = try support.Harness.init(gpa);
+        defer harness.deinit();
+        var db = try harness.open(F, null);
+        defer db.deinit();
+        var seed: [40]u8 = undefined;
+        for (&seed, 0..) |*k, i| k.* = @intCast(i);
+        try commit_sets(&db, &seed, null); // Spans several journal blobs.
+        var batch = try db.new_batch();
+        try batch.set(fill(200), fill(212));
+        batch.with_inactivity_floor(db.bounds().end + 1); // The parent's own commit.
+        const parent = try batch.merkleize(&db);
+        defer parent.release();
+        var child = parent.new_batch();
+        errdefer child.deinit();
+        try child.set(fill(201), fill(213));
+        const twin = try merkleize_set(&db, parent, 201, 213);
+        const expected = twin.root();
+        twin.release();
+        try db.apply_batch(parent);
+        try db.commit();
+        try db.prune(db.inactivity_floor());
+        try testing.expect(db.bounds().start > 0); // The prune removed history.
+        const merkleized = try child.merkleize(&db);
+        defer merkleized.release();
+        try testing.expect(merkleized.root().eql(expected));
+    }
+}
+
+// The rest of commonware's run_batch_chain and run_batch_chained_merkleized_get: a chain reads
+// a key none of it set as absent, and a later batch sets it.
+test "immutable a chain reads unset keys as absent until a later batch sets them" {
+    inline for (families) |F| {
+        var harness = try support.Harness.init(gpa);
+        defer harness.deinit();
+        var db = try harness.open(F, null);
+        defer db.deinit();
+        const parent = try merkleize_set(&db, null, 1, 11);
+        defer parent.release();
+        const child = try merkleize_set(&db, parent, 2, 12);
+        defer child.release();
+        try expect_value(try child.get(&fill(1), &db), fill(11));
+        try expect_value(try child.get(&fill(2), &db), fill(12));
+        try expect_value(try child.get(&fill(3), &db), null);
+        try db.apply_batch(child);
+        try db.commit();
+        try expect_value(try db.get(&fill(1)), fill(11));
+        try expect_value(try db.get(&fill(2)), fill(12));
+        try expect_value(try db.get(&fill(3)), null);
+        try commit_sets(&db, &.{3}, null);
+        try expect_value(try db.get(&fill(3)), fill(103));
     }
 }

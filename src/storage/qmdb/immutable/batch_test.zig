@@ -170,6 +170,17 @@ fn Captured(comptime Db: type) type {
             try testing.expectEqual(applied_end, self.start + self.ops.len);
         }
 
+        /// The batch's proof and pinned nodes against `db` are still the captured ones.
+        fn check_unchanged(self: *const Self, batch: *Db.MerkleizedBatch, db: *Db) !void {
+            var proof = try batch.proof(db);
+            defer proof.deinit(gpa);
+            try testing.expect(proof.eql(&self.proof));
+            var pins: [merkle.max_pinned_nodes]Db.Digest = undefined;
+            const got = try batch.pinned_nodes(db, &pins);
+            try testing.expectEqual(self.pins_len, got.len);
+            for (got, self.pins_buffer[0..self.pins_len]) |a, b| try testing.expect(a.eql(b));
+        }
+
         fn check_log(self: *const Self, db: *Db) !void {
             const F = Db.Family;
             const end = self.start + self.ops.len;
@@ -248,6 +259,8 @@ test "immutable batch operations match the applied log" {
             start = db.bounds().end;
             try db.apply_batch(batch);
             try captured[at].check_applied(start, db.bounds().end);
+            // With the database at the parent's tip, the child's proof and pins are unchanged.
+            if (at == 1) try captured[2].check_unchanged(child, &db);
         }
         const empty = try merkleize_range(&db, null, 0, 0, null);
         defer empty.release();

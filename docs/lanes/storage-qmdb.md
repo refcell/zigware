@@ -127,7 +127,7 @@ which every database here is built on.
   - [x] batch C1, chains: `run_partial_ancestor_commit`,
     `run_delayed_merkleize_after_ancestor_apply`,
     `run_child_root_matches_pending_and_committed`, and the rest of `run_to_batch`.
-  - [ ] batch C2: `run_merkleize_across_prune`, and the partial `run_batch_chain`,
+  - [x] batch C2: `run_merkleize_across_prune`, and the partial `run_batch_chain`,
     `run_batch_chained_merkleized_get`, `run_dropped_ancestor_reads`,
     `run_operations_match_applied_log` (child proof unchanged).
   - [ ] batch D, prune and build: `run_pruning` (5 items per blob), `run_prune_retires_pruned_sets`,
@@ -378,3 +378,4 @@ which every database here is built on.
 - 2026-11-19: immutable audit; batch A (floor scenarios and batch floor inheritance).
 - 2026-11-19: immutable batch B (stale reads and merkleizes); empty `get_many` stale check.
 - 2026-11-19: immutable batch C1 (partial-ancestor apply, delayed merkleize, to_batch).
+- 2026-11-19: immutable batch C2 (merkleize across prune, chain reads, child proof unchanged).
