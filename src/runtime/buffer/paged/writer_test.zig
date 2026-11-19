@@ -1877,3 +1877,104 @@ test "read_ranges_into: missed ranges on adjacent pages share one blob read" {
     try testing.expectEqual(ranges.len, try w.read_ranges_into(&out, &ranges));
     try testing.expectEqual(reads_before + 2, h.storage.reads);
 }
+
+/// Tears write number `fail_on`: only its first `durable_payload_len` bytes and its trailing
+/// checksum footer reach the blob, durably, and the write fails (commonware
+/// `TornExtensionBlob`).
+const TornExtension = struct {
+    inner: Blob,
+    writes: u32 = 0,
+    fail_on: u32,
+    durable_payload_len: usize,
+
+    fn blob(self: *TornExtension) Blob {
+        return .{ .ptr = self, .vtable = &vtable };
+    }
+
+    const vtable: Blob.VTable = .{
+        .read_at = read_at,
+        .write_at = write_at,
+        .resize = resize,
+        .sync = sync,
+        .close = close,
+    };
+
+    fn from(ptr: *anyopaque) *TornExtension {
+        return @ptrCast(@alignCast(ptr));
+    }
+
+    fn read_at(ptr: *anyopaque, offset: u64, out: []u8, options: ReadOptions) Error!void {
+        return from(ptr).inner.read_at_options(offset, out, options);
+    }
+
+    fn write_at(
+        ptr: *anyopaque,
+        offset: u64,
+        chunks: []const []const u8,
+        options: WriteOptions,
+    ) Error!void {
+        const self = from(ptr);
+        self.writes += 1;
+        if (self.writes != self.fail_on) {
+            return self.inner.vtable.write_at(self.inner.ptr, offset, chunks, options);
+        }
+        var bytes: [2 * physical_page_size]u8 = undefined;
+        var len: usize = 0;
+        for (chunks) |chunk| {
+            @memcpy(bytes[len..][0..chunk.len], chunk);
+            len += chunk.len;
+        }
+        assert(len >= paged.checksum_size);
+        const footer_start = len - paged.checksum_size;
+        assert(self.durable_payload_len <= footer_start);
+        try self.inner.write_at(offset, bytes[0..self.durable_payload_len], .{});
+        try self.inner.write_at(offset + footer_start, bytes[footer_start..len], .{});
+        try self.inner.sync();
+        return error.Io;
+    }
+
+    fn resize(ptr: *anyopaque, length: u64) Error!void {
+        return from(ptr).inner.resize(length);
+    }
+
+    fn sync(ptr: *anyopaque) Error!void {
+        return from(ptr).inner.sync();
+    }
+
+    fn close(ptr: *anyopaque) void {
+        from(ptr).inner.close();
+    }
+};
+
+test "a torn extension with its new footer recovers the previous prefix" {
+    // commonware `test_torn_extension_with_new_footer_recovers_previous_prefix`.
+    var h = try Harness.init();
+    defer h.deinit();
+    const opened = try h.storage.open(partition, "torn_extension_footer");
+    var torn: TornExtension = .{ .inner = opened.blob, .fail_on = 2, .durable_payload_len = 4 };
+    var w = try W.init(gpa, torn.blob(), opened.len, buffer_size, &h.cache_ref);
+    _ = try w.append("abc");
+    try w.sync();
+    try testing.expectEqual(1, torn.writes);
+    _ = try w.append("def");
+    try testing.expectError(error.Io, w.sync());
+    try testing.expectEqual(2, torn.writes);
+    var page: [physical_page_size]u8 = undefined;
+    try torn.inner.read_at(0, &page);
+    try testing.expectEqualSlices(u8, "abcd\x00\x00", page[0..6]);
+    const checksum = Checksum.decode(page[page_size..][0..paged.checksum_size]);
+    try testing.expectEqual(@as(u16, 3), checksum.len1);
+    try testing.expectEqual(@as(u16, 6), checksum.len2);
+    w.deinit();
+
+    var cache_ref = try CacheRef.init(gpa, page_size, buffer_size);
+    defer cache_ref.deinit();
+    const reopened = try h.storage.open(partition, "torn_extension_footer");
+    var recovered = try W.init(gpa, reopened.blob, reopened.len, buffer_size, &cache_ref);
+    defer recovered.deinit();
+    try testing.expectEqual(3, recovered.size());
+    // The protected slot proves exactly the previously committed boundary: the torn
+    // extension cannot make any later byte part of the recoverable prefix.
+    try testing.expectEqual(3, try recovered.recoverable_prefix_len(0));
+    try expect_read(&recovered, 0, "abc");
+}

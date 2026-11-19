@@ -1442,6 +1442,28 @@ test "same seed, same order; different seed, different order (test_same_seed_sam
     try testing.expect(!std.mem.eql(u8, &first[1], &other[1]));
 }
 
+test "alarms pop earliest first, ties in arming order (test_alarm_min_heap)" {
+    var task: Task = undefined;
+    var alarms: std.PriorityQueue(Alarm, void, Alarm.order) = .empty;
+    defer alarms.deinit(testing.allocator);
+    const deadlines = [_]u64{ 10, 5, 15, 5 };
+    for (deadlines, 0..) |deadline_s, sequence| {
+        try alarms.push(testing.allocator, .{
+            .deadline_ns = deadline_s * std.time.ns_per_s,
+            .sequence = sequence,
+            .task = &task,
+            .generation = 0,
+        });
+    }
+    const expected = [_]struct { u64, u64 }{ .{ 5, 1 }, .{ 5, 3 }, .{ 10, 0 }, .{ 15, 2 } };
+    for (expected) |entry| {
+        const alarm = alarms.pop().?;
+        try testing.expectEqual(entry[0] * std.time.ns_per_s, alarm.deadline_ns);
+        try testing.expectEqual(entry[1], alarm.sequence);
+    }
+    try testing.expectEqual(null, alarms.pop());
+}
+
 test "auditor separates events (test_auditor_separates_events)" {
     var a: Auditor = .{};
     a.event("ab", &.{"c"});

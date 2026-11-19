@@ -1092,5 +1092,6 @@ pub const Replay = struct {
 test {
     _ = @import("writer_test.zig");
     _ = @import("read_ahead_test.zig");
+    _ = @import("delayed_read_test.zig");
     _ = @import("integrity_fuzz_test.zig");
 }

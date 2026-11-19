@@ -1617,3 +1617,41 @@ test "task labels feed the audit" {
     }
     try testing.expect(!std.mem.eql(u8, &digests[0], &digests[1]));
 }
+
+/// commonware `utils::abort` `concurrent_abort_and_poll`: an abort on one worker thread races a
+/// pending task starting and parking on another. Every round must end aborted; a lost wake
+/// hangs the join.
+const AbortRace = struct {
+    const rounds = 500;
+
+    fn pending(ctx: production.Context) anyerror!void {
+        var never: Io.Event = .unset;
+        try never.wait(ctx.io());
+        return error.Unreachable;
+    }
+
+    fn aborter(ctx: production.Context, handle: context.Handle(anyerror!void)) anyerror!void {
+        _ = ctx;
+        try testing.expectError(error.Closed, handle.abort());
+    }
+
+    fn body(ctx: production.Context) !void {
+        for (0..rounds) |_| {
+            const handle = try ctx.child("pending").spawn(pending, .{});
+            const racer = try ctx.child("aborter").spawn(aborter, .{handle});
+            try (try racer.join());
+        }
+    }
+};
+
+test "an abort racing a task's first poll always aborts it (concurrent_abort_and_poll)" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var buffer: [128]u8 = undefined;
+    const directory = std.fmt.bufPrint(&buffer, ".zig-cache/tmp/{s}/runner", .{tmp.sub_path}) catch
+        unreachable; // The buffer fits the fixed-length temporary path.
+    var runner: production.Runner = undefined;
+    try runner.init(testing.allocator, .{ .storage_directory = directory, .worker_threads = 4 });
+    defer runner.deinit();
+    try (try runner.start_context(AbortRace.body, .{}));
+}

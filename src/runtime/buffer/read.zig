@@ -353,3 +353,109 @@ test "read: resize to zero" {
     defer reader.deinit();
     try expect_short(&reader, 1);
 }
+
+/// Parks the next `read_at` once `park` is set, until its task is canceled; counts reads
+/// (commonware's `MigratingReadBlob` holding a read pending).
+const Parking = struct {
+    inner: Blob,
+    io: std.Io,
+    park: bool = false,
+    parked: std.Io.Event = .unset,
+    reads: u32 = 0,
+
+    fn blob(self: *Parking) Blob {
+        return .{ .ptr = self, .vtable = &vtable };
+    }
+
+    const vtable: Blob.VTable = .{
+        .read_at = read_at,
+        .write_at = write_at,
+        .resize = resize_erased,
+        .sync = sync,
+        .close = close,
+    };
+
+    fn from(ptr: *anyopaque) *Parking {
+        return @ptrCast(@alignCast(ptr));
+    }
+
+    fn read_at(ptr: *anyopaque, offset: u64, out: []u8, options: storage.ReadOptions) Error!void {
+        const self = from(ptr);
+        self.reads += 1;
+        if (!self.park) return self.inner.read_at_options(offset, out, options);
+        self.park = false;
+        self.parked.set(self.io);
+        var never: std.Io.Event = .unset;
+        try never.wait(self.io);
+        unreachable; // Nothing sets `never`; only a cancelation ends the wait.
+    }
+
+    fn write_at(
+        ptr: *anyopaque,
+        offset: u64,
+        chunks: []const []const u8,
+        options: storage.WriteOptions,
+    ) Error!void {
+        const inner = from(ptr).inner;
+        return inner.vtable.write_at(inner.ptr, offset, chunks, options);
+    }
+
+    fn resize_erased(ptr: *anyopaque, length: u64) Error!void {
+        return from(ptr).inner.resize(length);
+    }
+
+    fn sync(ptr: *anyopaque) Error!void {
+        return from(ptr).inner.sync();
+    }
+
+    fn close(ptr: *anyopaque) void {
+        from(ptr).inner.close();
+    }
+};
+
+fn read_into(reader: *Read, out: []u8) Error!void {
+    return reader.read(out);
+}
+
+/// A read canceled in its refill leaves the reader where it started.
+fn cancelled_refill(io: std.Io, start: usize, seek_after_cancel: bool) !void {
+    const data = "abcdefghijkl";
+    var h = mocks.Storage.init(test_gpa);
+    defer h.deinit();
+    const opened = try h.open("partition", "cancelled-read");
+    try opened.blob.write_at(0, data, .{});
+    var parking: Parking = .{ .inner = opened.blob, .io = io };
+    var reader = try Read.init(test_gpa, parking.blob(), data.len, 4);
+    defer reader.deinit();
+    try expect_read(&reader, data[0..start]);
+    const reads = parking.reads;
+    // An empty read neither moves the cursor nor reads.
+    try expect_read(&reader, "");
+    try testing.expectEqual(start, reader.position());
+    try testing.expectEqual(reads, parking.reads);
+    // With start = 2, the read consumes the buffered bytes before its refill parks.
+    parking.park = true;
+    var out: [10]u8 = undefined;
+    var pending = try io.concurrent(read_into, .{ &reader, &out });
+    try parking.parked.wait(io);
+    try testing.expectEqual(reads + 1, parking.reads);
+    try testing.expectError(error.Canceled, pending.cancel(io));
+    try testing.expectEqual(start, reader.position());
+    try testing.expectEqual(data.len - start, reader.blob_remaining());
+    const resumed: usize = if (seek_after_cancel) 6 else start;
+    if (seek_after_cancel) try reader.seek_to(resumed);
+    try expect_read(&reader, data[resumed..]);
+    try testing.expectEqual(data.len, reader.position());
+    try testing.expectEqual(0, reader.blob_remaining());
+}
+
+test "read: a canceled refill rewinds (test_read_cancelled_refill_rewinds)" {
+    const deterministic = @import("../deterministic.zig");
+    for ([_]usize{ 0, 2 }) |start| {
+        for ([_]bool{ false, true }) |seek_after_cancel| {
+            var runner = try deterministic.Runner.init(test_gpa, .{});
+            defer runner.deinit();
+            try (try runner.start(cancelled_refill, .{ runner.io(), start, seek_after_cancel }));
+        }
+    }
+}
