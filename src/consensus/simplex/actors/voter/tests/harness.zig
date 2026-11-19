@@ -117,6 +117,25 @@ pub fn floor_start(partition: []const u8, floor: ?Finalization, skip_budget: u64
     };
 }
 
+/// commonware `RoundRobin::default().with_term(length, stall_timeout, optimistic_views)`.
+pub fn term_elector(
+    length: u32,
+    stall_timeout_ms: u64,
+    optimistic_views: u64,
+) elector_mod.RoundRobin(Sha256) {
+    const term_length: consensus_types.TermLength = .new(utils.NonZero(u32).init(length).?);
+    const stall: Duration = .from_millis(stall_timeout_ms);
+    const builder = elector_mod.RoundRobin(Sha256).default();
+    return builder.with_term(term_length, stall, .new(optimistic_views));
+}
+
+/// The index of the leader `elector` picks for `view` of the default epoch among 5.
+pub fn leader_of(gpa: Allocator, elector: elector_mod.RoundRobin(Sha256), view: u64) !u32 {
+    var built = try elector.build(gpa, 5);
+    defer built.deinit(gpa);
+    return built.elect(.new(default_epoch, .new(view)), {}).get();
+}
+
 /// `n` ed25519 validators on one simulated network (commonware
 /// `start_test_network_with_peers`). Must not move.
 pub const Network = struct {

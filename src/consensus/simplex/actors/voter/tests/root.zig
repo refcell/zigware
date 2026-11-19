@@ -6,4 +6,5 @@ test {
     _ = @import("backfill.zig");
     _ = @import("conflicts.zig");
     _ = @import("timeouts.zig");
+    _ = @import("optimistic.zig");
 }
