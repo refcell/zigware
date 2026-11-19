@@ -1,6 +1,5 @@
-//! Tests of `SafeTip` (commonware `aggregation/safe_tip.rs` tests). The `should_panic` cases
-//! (empty set, size mismatch, decrementing a missing height) have no counterpart: Zig tests
-//! cannot catch a panic.
+//! Tests of `SafeTip` (commonware `aggregation/safe_tip.rs` tests). `test_validation_failures`'s
+//! three `catch_unwind` cases are death tests (`utils.death`), one per case.
 
 const std = @import("std");
 const testing = std.testing;
@@ -159,6 +158,37 @@ test "edge cases for f" {
             try testing.expectEqual(case.n - case.f, safe_tip.lo.get(h(0)).?);
         }
     }
+}
+
+// commonware `test_validation_failures`: init with an empty validator set.
+test "validation failure: init with an empty set panics" {
+    try utils.death.expect_panic(@src(), "empty validator set", struct {
+        fn body() !void {
+            var validators = try set_of(&.{});
+            var safe_tip: SafeTip = .empty;
+            try safe_tip.init(gpa, &validators);
+        }
+    }.body);
+}
+
+// commonware `test_validation_failures`: reconcile with a set of another size.
+test "validation failure: reconcile with a size mismatch panics" {
+    try utils.death.expect_panic(@src(), "Validator set size mismatch", struct {
+        fn body() !void {
+            var safe_tip, _ = try setup(4);
+            try reconcile(&safe_tip, &.{ key(1), key(2), key(3) });
+        }
+    }.body);
+}
+
+// commonware `test_validation_failures`: decrementing a height no validator holds.
+test "validation failure: decrementing a missing height panics" {
+    try utils.death.expect_panic(@src(), "Cannot decrement a non-existent entry", struct {
+        fn body() !void {
+            var counts = try Counts.init(gpa, 4);
+            counts.dec(h(42));
+        }
+    }.body);
 }
 
 test "counts inc and dec" {

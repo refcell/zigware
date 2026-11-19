@@ -117,6 +117,15 @@ test "durable reports shutdown as not durable" {
     try testing.expect(!durable(error.Closed, .zero(), "test"));
 }
 
+// commonware `test_durable_panics_on_sync_failure`.
+test "durable panics on sync failure" {
+    try @import("utils").death.expect_panic(@src(), "failed to sync test", struct {
+        fn body() !void {
+            _ = durable(error.WriteFailed, .zero(), "test");
+        }
+    }.body);
+}
+
 test "gate defer keeps lowest write" {
     var gate: DispatchGate = .{};
     defer gate.deinit(testing.allocator);

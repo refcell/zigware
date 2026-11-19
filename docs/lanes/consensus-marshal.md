@@ -187,7 +187,8 @@ ports its range's tests and the helpers defined in it, into
   6740-10611 (redelivery, start/set floor, floor anchors and acks, delivery verification
   across scopes, processed and round floors, unverifiable delivery, sync dispatch). Done
   2026-11-18: 39 of 43 tests;
-  the 3 `should_panic` tests and the identity-job gate have no Zig counterpart (file header).
+  the 3 `should_panic` tests are death tests (2026-11-19) and the identity-job gate has no
+  Zig counterpart (file header).
 - runtime thread (T-01a1d57b-1bfd), `tests/propose_validation.zig`: lines 4994-5931 of
   the wrappers range (propose and prepare paths, propose rebuilds after restart, the
   deferred unlinked-parent handoff, reproposal, ancestry, and application-verify checks).
@@ -230,8 +231,8 @@ ports its range's tests and the helpers defined in it, into
   without commonware's expected/found counts.
 - `SafeTip` allocates its validator, tip, and heap arrays at `init` (heaps are sorted
   (height, count) arrays in place of `BTreeMap`), so updates and reconciles never allocate.
-  Its `should_panic` tests have no counterpart (Zig cannot catch panics); a seeded fuzz
-  against a sorting reference covers the heaps instead.
+  Its `should_panic` cases are death tests (`utils.death`), and a seeded fuzz against a
+  sorting reference covers the heaps.
 - The engine waits on one `Io.Condition`: the network receiver, the epoch subscription, and
   each digest request run as `std.Io` tasks that hand results to an inbox; due rebroadcasts
   bound the wait. Each turn handles one event in commonware's `select_loop!` order.
@@ -277,8 +278,8 @@ ports its range's tests and the helpers defined in it, into
 
 - Ancestry streams block in `next` on the runtime's `std.Io` instead of being polled; a
   parent already available when subscribed is buffered at once, so `peek` and prefetching
-  behave as in commonware. Commonware's `should_panic` ancestry cases are covered through
-  `is_contiguous_chain` (Zig cannot catch panics).
+  behave as in commonware. Commonware's `should_panic` ancestry cases are death tests
+  (`utils.death`); `is_contiguous_chain` checks the same chains without panicking.
 - The gates' staged ack is `oneshot.Sender(void)`, sent once the block's sync completes,
   instead of a sync handle.
 - Mailbox messages are `{ gpa, body }`: the body owns its blocks, certificates, `some`
@@ -307,8 +308,8 @@ outside simplex and marshal, matched to its Zig counterpart. Nothing is open.
 | Source | Tests | Ported | Open | Not portable |
 | --- | --- | --- | --- | --- |
 | aggregation/mod.rs (9 scenarios x 6 fixtures + 3) | 57 | 57 | 0 | 0 |
-| aggregation/safe_tip.rs | 17 | 16 | 0 | 1 |
-| aggregation/engine.rs | 3 | 2 | 0 | 1 |
+| aggregation/safe_tip.rs | 17 | 17 | 0 | 0 |
+| aggregation/engine.rs | 3 | 3 | 0 | 0 |
 | aggregation/types.rs (+ 5 conformance hashes) | 8 | 8 | 0 | 0 |
 | aggregation/limits.rs, mocks/monitor.rs | 2 | 2 | 0 | 0 |
 | types.rs (+ 5 conformance hashes) | 80 | 72 | 0 | 8 |
@@ -332,9 +333,9 @@ outside simplex and marshal, matched to its Zig counterpart. Nothing is open.
   `std.testing.fuzz` test. The fuzz crate's `property_test_*_connected` (proptest over
   `FuzzInput`) are covered by each scheme's seeded minifuzz run; `test_can_finalize_logic` is
   in `fuzz/types.zig`.
-- Not portable: `should_panic` (a Zig test cannot catch a panic): engine.rs
-  `assembly_failure_panics`, safe_tip.rs `test_validation_failures` (three `catch_unwind`
-  cases), and types.rs's `{epoch,height,view}_next_overflow`,
+- engine.rs `assembly_failure_panics` and safe_tip.rs `test_validation_failures` (three
+  `catch_unwind` cases) are death tests (`utils.death`, 2026-11-19).
+- Not portable: `should_panic` (a Zig test cannot catch a panic): types.rs's `{epoch,height,view}_next_overflow`,
   `view_term_end_overflow_panics`, `view_next_term_start_overflow_panics`, and
   `fixed_epocher_rejects_length_one`; and types.rs `test_round_conversions`, which checks
   Rust's `From`/`Into` tuple conversions (Zig's `Round` has plain `epoch`/`view` fields,
@@ -347,7 +348,7 @@ line, with where its Zig counterpart lives. Counts:
 
 | File | Ported | In progress | Not portable | Total |
 | --- | --- | --- | --- | --- |
-| standard/mod.rs | 192 | 1 | 4 | 197 |
+| standard/mod.rs | 196 | 0 | 1 | 197 |
 | coding/mod.rs | 101 | 0 | 0 | 101 |
 
 `mocks/harness.rs` has no tests of its own: all 31 generic scenario functions are ported
@@ -357,11 +358,12 @@ the standard wrappers above. `conformance.rs`'s StandardStorageConformance workl
 coding lane's. Commonware has no marshal fuzz targets; AGENTS.md's fuzz bodies
 (seeded and `std.testing.fuzz`, each with a planted bug caught) cover the resolver `Key`
 codec, `Annotation` order, standard `decode_block`, `DispatchGate`, `PendingAcks`, `Staged`,
-the mailbox overflow policy, and the ancestor stream. Not portable (after the 2026-11-19
-review below): panic, where zigware panics with commonware's message too: the two floor
-`rejects_invalid_finalization` tests, `restart_rejects_mismatched_genesis_anchor` (coding's
-`floor_anchor_panics_on_parent_commitment_mismatch` is a death test since 2026-11-19, in
-coding/mod_test.zig); missing feature:
+the mailbox overflow policy, and the ancestor stream. Commonware's `should_panic` tests are
+death tests (`utils.death.expect_panic`, 2026-11-19): the two floor
+`rejects_invalid_finalization` tests and `restart_rejects_mismatched_genesis_anchor`
+(standard/tests/floor.zig), coding's `floor_anchor_panics_on_parent_commitment_mismatch`
+(coding lane, coding/mod_test.zig), and ancestry.rs (7), limits.rs (3), core/durability.rs
+(1), and coding/types.rs (2, coding lane). Not portable, a missing feature:
 `resolver_delivery_waits_for_identity_job` (standard's `decode_block` digests inline, so there
 is no strategy job to gate; `parallel`'s `spawn` runs inline under `Sequential`).
 
@@ -487,8 +489,8 @@ then ported it in core/cache.zig: archive writes encode a borrowed `V.stored_vie
 - L6151 `test_certified_covered_by_verified_write_recoverable_after_restart`: ported (standard/tests/wrappers.zig)
 - L6740 `test_standard_application_shutdown_redelivers_pending_ack_after_restart`: ported (standard/tests/floor.zig)
 - L6850 `test_standard_actor_starts_without_buffer`: ported (standard/tests/floor.zig)
-- L6894 `test_standard_start_floor_rejects_invalid_finalization`: not portable (see above)
-- L6927 `test_standard_set_floor_rejects_invalid_finalization`: not portable (see above)
+- L6894 `test_standard_start_floor_rejects_invalid_finalization`: ported (standard/tests/floor.zig, death test)
+- L6927 `test_standard_set_floor_rejects_invalid_finalization`: ported (standard/tests/floor.zig, death test)
 - L6959 `test_standard_start_floor_fetches_async_and_serves_requests`: ported (standard/tests/floor.zig)
 - L7028 `test_standard_start_floor_applies_local_anchor_without_fetch`: ported (standard/tests/floor.zig)
 - L7128 `test_standard_start_floor_height_one_without_metadata_delivers_anchor`: ported (standard/tests/floor.zig)
@@ -520,7 +522,7 @@ then ported it in core/cache.zig: archive writes encode a borrowed `V.stored_vie
 - L9301 `test_standard_finalized_batch_verifies_each_epoch_under_admission_scope`: ported (standard/tests/floor.zig)
 - L9406 `test_standard_processed_round_skips_fetch_and_preserves_subscription`: ported (standard/tests/floor.zig)
 - L9485 `test_standard_finalization_rejects_processed_round_block_fetch`: ported (standard/tests/floor.zig)
-- L9553 `test_standard_restart_rejects_mismatched_genesis_anchor`: not portable (see above)
+- L9553 `test_standard_restart_rejects_mismatched_genesis_anchor`: ported (standard/tests/floor.zig, death test)
 - L9599 `test_standard_processed_round_restored_after_restart`: ported (standard/tests/floor.zig)
 - L9700 `test_standard_round_floor_does_not_restore_missing_next_block`: ported (standard/tests/floor.zig)
 - L9800 `test_standard_round_floor_restores_unacknowledged_anchor`: ported (standard/tests/floor.zig)
@@ -832,3 +834,12 @@ then ported it in core/cache.zig: archive writes encode a borrowed `V.stored_vie
   observed). New dispatch.zig tests hold the cache's syncs with `DelayedSync`: the mailbox
   answers and `certified` waits until release, and a failed sync stops the actor
   (the Zig side of `test_mailbox_certified_sync_failure_panics`, still not portable).
+- 2026-11-19: the rest of marshal's and aggregation's `should_panic` tests are death tests on
+  `utils.death.expect_panic`, 16 here: ancestry.rs 7, limits.rs 3, core/durability.rs 1,
+  standard/mod.rs 3 (both floor rejections and the genesis anchor), aggregation engine.rs 1,
+  and safe_tip.rs's `test_validation_failures` (three cases); the coding lane did marshal
+  coding's 3 (948da417). Each fails when a planted bug removes its panic. limits.rs's
+  `response_overflow` expects "reached unreachable code": resolver's `max_message_size`
+  asserts the u32 bound where commonware `expect`s with a message. Not portable in the
+  marshal tally goes from 4 to 1 (standard `resolver_delivery_waits_for_identity_job`, a
+  missing feature) and in aggregation from 2 to 0.

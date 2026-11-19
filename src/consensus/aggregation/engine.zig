@@ -803,9 +803,7 @@ pub fn Engine(comptime P: type) type {
     };
 }
 
-// Tests of the engine's handlers (commonware `aggregation/engine.rs` tests). The
-// `assembly_failure_panics` test (`should_panic`) has no counterpart: Zig tests cannot catch a
-// panic.
+// Tests of the engine's handlers (commonware `aggregation/engine.rs` tests).
 
 const testing = std.testing;
 
@@ -979,6 +977,36 @@ test "a digest for a height that is not pending is dropped" {
             try testing.expectEqual(1, sender.sent);
         }
     }.body);
+}
+
+// commonware `assembly_failure_panics`: a same-item quorum whose certificate fails to
+// assemble panics. Commonware wraps the scheme with `Behavior::RecoveryFailure`; here the acks
+// name signers outside the committee, which the ed25519 scheme rejects at assembly.
+test "assembly failure panics" {
+    const expected = "verified acknowledgement quorum must assemble";
+    try @import("utils").death.expect_panic(@src(), expected, struct {
+        fn death_body() !void {
+            try TestHarness.run(struct {
+                fn body(
+                    io: Io,
+                    storage: runtime.storage.Storage,
+                    scope: runtime.telemetry.metrics.Scope,
+                ) anyerror!void {
+                    var harness: TestHarness = undefined;
+                    try harness.init(io, storage, scope, "aggregation-recovery-failure");
+                    const engine = harness.engine;
+                    const height: Height = .zero();
+                    const digest = TestHarness.cryptography.Sha256.hash(&.{"payload"});
+                    try engine.pending.put_new(engine.gpa, height, .{ .digest = digest });
+                    for (0..3) |signer| {
+                        var ack = try harness.ack(signer, height, digest);
+                        ack.attestation.signer = .init(@intCast(signer + 4));
+                        _ = try engine.handle_ack(&ack);
+                    }
+                }
+            }.body);
+        }
+    }.death_body);
 }
 
 test "a certificate for a confirmed height is dropped" {

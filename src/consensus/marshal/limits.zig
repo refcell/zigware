@@ -184,3 +184,44 @@ test "variable and fixed certificate overhead (secp256r1 and bls12381)" {
     try check_fixture(V, vrf.Scheme(D, PublicKey, MinSig), vrf.fixture, 4, 0);
     try check_fixture(V, vrf.Scheme(D, PublicKey, MinPk), vrf.fixture, 4, 1000);
 }
+
+// commonware `response_overflow`: one more block byte pushes the response value past
+// `maxInt(u32)`. `resolver.p2p.wire.max_message_size` asserts this bound (commonware's
+// "value must fit the u32 length prefix" `expect`).
+test "response overflow" {
+    try utils.death.expect_panic(@src(), "reached unreachable code", struct {
+        fn body() !void {
+            const S = simplex_scheme.ed25519.Scheme(Sha256.Digest);
+            const overhead = resolver.p2p.wire.response_overhead_max;
+            const empty = max_backfill_size(StandardVariant, S, 4, 0);
+            const widest: usize = std.math.maxInt(u32);
+            const largest = widest - (empty - overhead);
+            try testing.expectEqual(
+                widest + overhead,
+                max_backfill_size(StandardVariant, S, 4, largest),
+            );
+            _ = max_backfill_size(StandardVariant, S, 4, largest + 1);
+        }
+    }.body);
+}
+
+const CodingVariant = @import("coding/harness.zig").CodingVariant;
+
+// commonware `coding_too_few_participants`.
+test "coding too few participants" {
+    try utils.death.expect_panic(@src(), "committee must have at least 4 members", struct {
+        fn body() !void {
+            _ = CodingVariant.max_buffer_payload_size(3, 100);
+        }
+    }.body);
+}
+
+// commonware `coding_unsupported_participants`: one member more than the largest committee
+// the Reed-Solomon coder supports.
+test "coding unsupported participants" {
+    try utils.death.expect_panic(@src(), "backend must support the shard counts", struct {
+        fn body() !void {
+            _ = CodingVariant.max_buffer_payload_size(49_154, 100);
+        }
+    }.body);
+}

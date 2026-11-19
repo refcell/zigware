@@ -433,6 +433,7 @@ pub fn AncestorStream(comptime M: type) type {
 const testing = std.testing;
 const Sha256 = @import("cryptography").Sha256;
 const mocks_block = @import("mocks/block.zig");
+const death = utils.death;
 
 const TestBlock = mocks_block.EmptyBlock(Sha256);
 const TestDigested = broadcast.Digested(TestBlock);
@@ -558,6 +559,108 @@ test "contiguity checks" {
     var wrong = try digested(wrong_parent);
     defer wrong.deinit();
     try testing.expect(!is_contiguous_chain(TestDigested, &.{ handles[1], wrong }));
+}
+
+// commonware `test_panics_on_non_contiguous_initial_blocks_height`.
+test "panics on non contiguous initial blocks height" {
+    try death.expect_panic(@src(), "initial blocks must be contiguous in height", struct {
+        fn body() !void {
+            var state: ProviderState = .{};
+            const blocks = [_]TestBlock{ block_at(empty, 1, 1), block_at(empty, 3, 3) };
+            _ = try stream_of(&state, &blocks);
+        }
+    }.body);
+}
+
+// commonware `test_panics_on_non_contiguous_initial_blocks_digest`.
+test "panics on non contiguous initial blocks digest" {
+    try death.expect_panic(@src(), "initial blocks must be contiguous in ancestry", struct {
+        fn body() !void {
+            var state: ProviderState = .{};
+            const blocks = [_]TestBlock{ block_at(empty, 1, 1), block_at(empty, 2, 2) };
+            _ = try stream_of(&state, &blocks);
+        }
+    }.body);
+}
+
+// commonware `test_from_iter_panics_on_non_contiguous_height`.
+test "from iter panics on non contiguous height" {
+    try death.expect_panic(@src(), "blocks must be contiguous in height", struct {
+        fn body() !void {
+            const parent = block_at(empty, 1, 1);
+            const child = block_at(parent.digest(), 3, 3);
+            const blocks = [_]TestDigested{ try digested(child), try digested(parent) };
+            _ = try from_iter(TestBlock, testing.allocator, &blocks);
+        }
+    }.body);
+}
+
+// commonware `test_from_iter_panics_on_non_contiguous_ancestry`.
+test "from iter panics on non contiguous ancestry" {
+    try death.expect_panic(@src(), "blocks must be contiguous in ancestry", struct {
+        fn body() !void {
+            const expected_parent = block_at(empty, 1, 1);
+            const wrong_parent = block_at(empty, 1, 2);
+            const child = block_at(expected_parent.digest(), 2, 3);
+            const blocks = [_]TestDigested{ try digested(child), try digested(wrong_parent) };
+            _ = try from_iter(TestBlock, testing.allocator, &blocks);
+        }
+    }.body);
+}
+
+// commonware `test_from_iter_panics_on_reordered_chain`.
+test "from iter panics on reordered chain" {
+    try death.expect_panic(@src(), "blocks must be contiguous in height", struct {
+        fn body() !void {
+            const parent = block_at(empty, 1, 1);
+            const child = block_at(parent.digest(), 2, 2);
+            const grandchild = block_at(child.digest(), 3, 3);
+            const blocks = [_]TestDigested{
+                try digested(grandchild),
+                try digested(parent),
+                try digested(child),
+            };
+            _ = try from_iter(TestBlock, testing.allocator, &blocks);
+        }
+    }.body);
+}
+
+// commonware `test_with_prefix_panics_on_non_contiguous_prefix`.
+test "with prefix panics on non contiguous prefix" {
+    try death.expect_panic(@src(), "blocks must be contiguous in height", struct {
+        fn body() !void {
+            const parent = block_at(empty, 1, 1);
+            const child = block_at(parent.digest(), 3, 3);
+            const tail = try from_iter(TestBlock, testing.allocator, &.{});
+            const blocks = [_]TestDigested{ try digested(child), try digested(parent) };
+            _ = try with_prefix(Bounded(TestBlock), testing.allocator, &blocks, tail);
+        }
+    }.body);
+}
+
+// commonware `test_with_prefix_panics_when_pending_tail_breaks_height`: the seam is checked
+// against a tail block that arrives after the prefix is consumed. Zig's `next` blocks, so the
+// pending poll is replaced by completing the fetch before the tail block is taken.
+test "with prefix panics when pending tail breaks height" {
+    try death.expect_panic(@src(), "blocks must be contiguous in height", struct {
+        fn body() !void {
+            const parent = block_at(empty, 1, 1);
+            const consumed = block_at(parent.digest(), 2, 2);
+            var state: ProviderState = .{ .pending_first = std.math.maxInt(u32) };
+            var tail = try stream_of(&state, &.{consumed});
+            try expect_next(&tail, consumed);
+            try testing.expectEqual(null, tail.peek());
+            try testing.expectEqual(1, state.senders.items.len);
+            const child = block_at(consumed.digest(), 3, 3);
+            const blocks = [_]TestDigested{try digested(child)};
+            var ancestry = try with_prefix(TestStream, testing.allocator, &blocks, tail);
+            try expect_next(&ancestry, child);
+            var fetched = try digested(parent);
+            defer fetched.deinit();
+            state.complete_all(fetched);
+            _ = try ancestry.next();
+        }
+    }.body);
 }
 
 test "ends on non contiguous fetched parent height" {

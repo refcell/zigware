@@ -1,12 +1,8 @@
 //! The standard actor's floors, floor anchors, and acknowledgements (commonware
 //! `marshal/standard/mod.rs`, lines 6740-10611), on the direct actor from `common.zig`.
 //!
-//! commonware's `#[should_panic]` tests have no counterpart, since Zig cannot catch a panic:
-//! `test_standard_start_floor_rejects_invalid_finalization` and
-//! `test_standard_set_floor_rejects_invalid_finalization` ("floor finalization must verify",
-//! `core/actor_ingress.zig`), and `test_standard_restart_rejects_mismatched_genesis_anchor`
-//! ("stored genesis block does not match configured anchor"). The actor panics with the same
-//! messages.
+//! commonware's `#[should_panic]` tests run as death tests (`utils.death`): the actor panics
+//! with commonware's messages.
 //!
 //! `test_standard_resolver_delivery_waits_for_identity_job` has no counterpart either: it gates
 //! the strategy job that computes a delivered block's digest, but the standard variant's
@@ -248,6 +244,62 @@ test "standard start floor fetches async and serves requests" {
 
             try testing.expect(try mailbox.verified(round_at(5), floor.block.clone()));
             try testing.expectEqual(5, (try created.started.recv()).get());
+        }
+    }.body);
+}
+
+/// A death test body: starts an actor whose provider's scheme comes from another fixture, so
+/// the floor finalization at height 5 does not verify, then sets it as the start floor
+/// (`at_start`) or through `set_floor`, and waits for the panic.
+fn reject_invalid_floor(ctx: Ctx, at_start: bool) !void {
+    var rng = utils.rng.test_rng();
+    var fixture = try harness.fixture(gpa, &rng);
+    defer fixture.deinit(gpa);
+    var wrong = try harness.fixture(gpa, &rng);
+    defer wrong.deinit(gpa);
+    var floor: Floor = try .init(&fixture, "floor-parent");
+    defer floor.deinit();
+    var created = try common.HoldingBlockReporter.init_after(gpa, ctx.io(), .zero());
+    defer created.started.deinit();
+    const start: common.Start = if (at_start)
+        .{ .floor = try floor.clone_finalization() }
+    else
+        try genesis_start();
+    var started = try start_holding(
+        ctx.child("validator"),
+        if (at_start) "start-floor-invalid" else "set-floor-invalid",
+        &wrong,
+        created.reporter,
+        try common.RecordingBuffer.init(gpa, ctx.io()),
+        start,
+    );
+    defer started.crash();
+    if (!at_start) try started.mailbox.set_floor(try floor.clone_finalization());
+    try ctx.sleep(.fromSeconds(1));
+}
+
+// commonware `test_standard_start_floor_rejects_invalid_finalization`.
+test "standard start floor rejects invalid finalization" {
+    try utils.death.expect_panic(@src(), "floor finalization must verify", struct {
+        fn body() !void {
+            try run(struct {
+                fn body(ctx: Ctx) anyerror!void {
+                    try reject_invalid_floor(ctx, true);
+                }
+            }.body);
+        }
+    }.body);
+}
+
+// commonware `test_standard_set_floor_rejects_invalid_finalization`.
+test "standard set floor rejects invalid finalization" {
+    try utils.death.expect_panic(@src(), "floor finalization must verify", struct {
+        fn body() !void {
+            try run(struct {
+                fn body(ctx: Ctx) anyerror!void {
+                    try reject_invalid_floor(ctx, false);
+                }
+            }.body);
         }
     }.body);
 }
@@ -1765,6 +1817,60 @@ fn expect_round_floor_restored(
     var delivered = try subscription.recv();
     defer delivered.deinit();
     try testing.expect(delivered.digest().eql(missing.digest()));
+}
+
+/// Starts an actor at `genesis` (taking it) on the `prefix` partitions.
+fn start_at_genesis(
+    ctx: Ctx,
+    prefix: []const u8,
+    fixture: *const harness.Fixture,
+    genesis: Block,
+) !Manual {
+    const provider: harness.Provider = .init(&fixture.schemes[0]);
+    return common.start_standard_actor(
+        harness.Provider,
+        App,
+        common.RecordingBuffer,
+        ctx,
+        prefix,
+        provider,
+        try App.manual_ack(gpa, ctx.io()),
+        try common.RecordingBuffer.init(gpa, ctx.io()),
+        .{ .genesis = genesis },
+    );
+}
+
+// commonware `test_standard_restart_rejects_mismatched_genesis_anchor`.
+test "standard restart rejects mismatched genesis anchor" {
+    const expected = "stored genesis block does not match configured anchor";
+    try utils.death.expect_panic(@src(), expected, struct {
+        fn death_body() !void {
+            try run(struct {
+                fn body(ctx: Ctx) anyerror!void {
+                    const prefix = "restart-keeps-existing-genesis";
+                    var rng = utils.rng.test_rng();
+                    var fixture = try harness.fixture(gpa, &rng);
+                    defer fixture.deinit(gpa);
+                    var original = try block_at(hash("original-genesis"), 0, 0);
+                    defer original.deinit();
+                    var replacement = try block_at(hash("replacement-genesis"), 0, 1);
+                    defer replacement.deinit();
+                    try testing.expect(!original.digest().eql(replacement.digest()));
+                    const ctx_first = ctx.child("validator");
+                    var started =
+                        try start_at_genesis(ctx_first, prefix, &fixture, original.clone());
+                    var stored = (try started.mailbox.get_block(.{ .height = .zero() })).?;
+                    defer stored.deinit();
+                    try testing.expect(stored.digest().eql(original.digest()));
+                    started.crash();
+                    const ctx_restart = ctx.child("validator_restart");
+                    var restarted =
+                        try start_at_genesis(ctx_restart, prefix, &fixture, replacement.clone());
+                    defer restarted.crash();
+                }
+            }.body);
+        }
+    }.death_body);
 }
 
 test "standard processed round restored after restart" {
