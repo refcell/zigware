@@ -64,10 +64,7 @@ pub fn Immutable(F: type, K: type, E: type, C: type, H: type, T: type) type {
         }
 
         pub fn matches_sync_target(batch: *const Merkleized, target: *const SyncTarget) bool {
-            const bounds = &batch.inner.bounds;
-            return batch.root().eql(target.root) and
-                target.start == bounds.inactivity_floor and
-                target.end == bounds.tip.size;
+            return batch.inner.target().eql(target.*);
         }
 
         /// Applies `batch` and its unapplied ancestors; durability starts with `finalize`.

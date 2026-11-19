@@ -600,7 +600,7 @@ ones: d = deployer (thread T-01a1d5b9-c237), u = utils, j = storage-journal
   fails the sync either way (`StateSyncDb::sync_db`'s new contract): state_sync_test's "a
   compact target wider than one commit fails the sync" and compact_sync_test's "an
   unreachable target on tip_updates fails the sync" check both. `matches_sync_target` checks
-  the root and range itself until storage's merkleized-batch `target()` lands.
+  `batch.target()`, as every qmdb adapter now does (storage's e87dad2).
 - [ ] tests: single_db_app.rs's engine on `glue.simulate` (simplex, marshal, buffered broadcast,
   marshal and qmdb resolvers, probe, `Stateful`), then tests/mod.rs's scenarios (finalize,
   crash/restart, pruning, state sync, lossy, partitions), multi_db_app, floor, properties.

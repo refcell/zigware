@@ -55,11 +55,7 @@ pub fn Compact(comptime F: type, comptime O: type, comptime H: type) type {
         }
 
         pub fn matches_sync_target(batch: *const Merkleized, target: *const SyncTarget) bool {
-            const size = batch.inner.bounds.tip.size;
-            assert(size > 0);
-            return batch.root().eql(target.root) and
-                target.start == size - 1 and
-                target.end == size;
+            return batch.inner.target().eql(target.*);
         }
 
         /// Applies `batch` and its unapplied ancestors; durability starts with `finalize`.

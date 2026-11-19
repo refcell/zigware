@@ -62,9 +62,7 @@ pub fn Current(comptime D: type) type {
         }
 
         pub fn matches_sync_target(batch: *const Merkleized, target: *const SyncTarget) bool {
-            return batch.inner.ops_root().eql(target.root) and
-                target.start == batch.inner.sync_boundary() and
-                target.end == batch.inner.bounds().tip.size;
+            return batch.inner.target().eql(target.*);
         }
 
         /// Applies `batch` and its unapplied ancestors; durability starts with `finalize`.
