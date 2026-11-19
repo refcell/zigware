@@ -134,10 +134,19 @@ which every database here is built on.
     `run_prune_retires_pruned_sets`, `run_single_commit_live_set`, `run_build_and_authenticate`.
   - [x] batch D2: the partial `run_build_basic`, `run_batch_many_sequential`,
     `run_batch_empty_batch`, `run_reads_ignore_inactive_operations` (colliding twin, reopen).
-  - [ ] batch E, fixed.rs: `start_sync` recovery and failure (synchronous forms), metrics,
-    `bounded_init_then_set_crash_recovers_history`. Not portable while `start_sync` completes
-    synchronously: `start_sync_overlaps_work`, `apply_indexes_while_journal_waits`,
-    `start_sync_prune_waits`. Compact root compatibility is the compact lane's.
+  - [x] batch E, fixed.rs: `start_sync` recovery (through a crash) and failure (synchronous
+    forms), metrics (gauges and call counters), `bounded_init_then_set_crash_recovers_history`
+    (faulty storage keeping unsynced writes and dropping unsynced resizes). A skipped bounded
+    truncation fails it; a truncation left unsynced is still recovered correctly (not traced
+    which layer covers it, likely the journal's durable checkpoint watermark).
+  - [ ] metrics: the `db_*_duration` histograms are registered but never observed. Timing needs
+    an `Io` in every qmdb database's `init` (any, current, keyless, immutable, store), so it is
+    a cross-variant change to agree with storage-qmdb-sync and the crypto lane first.
+  - Not portable while `start_sync` completes synchronously: `start_sync_overlaps_work`,
+    `apply_indexes_while_journal_waits`, `start_sync_prune_waits`. Compact root
+    compatibility is the compact lane's.
+  - The audit is done: every mod.rs scenario is ported; the variable-journal instances run on
+    the fixed journal (its owned-value behavior is `variable_test.zig`'s).
 - [x] Fuzz: `qmdb_keyless_operations` (seeded and `std.testing.fuzz`), with a value model.
 - [x] store batch 1: shared-prefix snapshot rebuild, floor bound (`churn` and
   `randomized_churn` with commonware's `bounded` replay check), collision reads (floors and
@@ -381,3 +390,4 @@ which every database here is built on.
 - 2026-11-19: immutable batch C2 (merkleize across prune, chain reads, child proof unchanged).
 - 2026-11-19: immutable batch D1 (pruning boundaries, pruned-set retirement, live commit).
 - 2026-11-19: immutable batch D2 (colliding twin and reopen reads, empty batch, full proofs).
+- 2026-11-19: immutable batch E (start_sync, metrics, bounded-init crash history); audit done.

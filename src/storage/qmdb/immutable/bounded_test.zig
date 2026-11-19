@@ -10,6 +10,8 @@ const testing = std.testing;
 const merkle = @import("../../merkle/mod.zig");
 const metrics = @import("runtime").telemetry.metrics;
 const support = @import("test_support.zig");
+const Faults = @import("../../archive/faults.zig").Faults;
+const CacheRef = @import("runtime").buffer.paged.CacheRef;
 
 const gpa = testing.allocator;
 const families = .{ merkle.mmr.Family, merkle.mmb.Family };
@@ -246,4 +248,122 @@ test "immutable bounded initialization rebuilds each commit's own snapshot" {
         try testing.expectEqual(@as(u64, 0), db.inactivity_floor());
         try db.destroy();
     }
+}
+
+/// Storage that keeps every unsynced write and drops every unsynced resize at a crash, with one
+/// operation per log page (commonware's `rebranch_config` and fault config).
+const Rebranch = struct {
+    const D = support.Fixed(merkle.mmr.Family);
+
+    faults: Faults,
+    page_cache: CacheRef,
+    registry: metrics.Registry,
+
+    fn init(self: *Rebranch, harness: *support.Harness) !void {
+        self.faults.init(gpa, 0);
+        errdefer self.faults.deinit();
+        self.faults.layer.config = .{ .write_rate = .{
+            .failure_rate = .zero,
+            .retention_rate = .one,
+            .mode = .prefix,
+        } };
+        self.page_cache = try CacheRef.init(gpa, @intCast(D.Operation.fixed_size.?), 11);
+        self.registry = metrics.Registry.init(gpa);
+        _ = harness;
+    }
+
+    fn deinit(self: *Rebranch) void {
+        self.registry.deinit();
+        self.page_cache.deinit();
+        self.faults.deinit();
+    }
+
+    fn open(self: *Rebranch, harness: *support.Harness, max_size: ?u64) !D {
+        self.registry.deinit();
+        self.registry = metrics.Registry.init(gpa);
+        var cfg = harness.cfg(D);
+        cfg.merkle.items_per_blob = 100_000;
+        cfg.log.items_per_blob = 100_000; // One blob, so both histories' writes overlap.
+        cfg.log.cache_ref = &self.page_cache; // One operation per page.
+        const scope = metrics.Scope.init(&self.registry).child("db");
+        return D.init(gpa, self.faults.interface(), scope, cfg, max_size);
+    }
+};
+
+/// `value(branch, i)`: 32 bytes of `branch` ending in `i`.
+fn branch_value(branch: u8, i: u8) Digest {
+    var v = fill(branch);
+    v.bytes[31] = i;
+    return v;
+}
+
+/// Sets `fill(i)` to `branch_value(branch, i)` for `i` in `[first, last]` in one batch, applies
+/// it, and commits if `durable`. Returns the batch's root.
+fn set_branch(db: anytype, branch: u8, first: u8, last: u8, durable: bool) !Digest {
+    var batch = try db.new_batch();
+    const merkleized = merkleized: {
+        errdefer batch.deinit();
+        var i = first;
+        while (true) : (i += 1) {
+            try batch.set(fill(i), branch_value(branch, i));
+            if (i == last) break;
+        }
+        break :merkleized try batch.merkleize(db);
+    };
+    defer merkleized.release();
+    try db.apply_batch(merkleized);
+    if (durable) try db.commit();
+    return merkleized.root();
+}
+
+// fixed.rs `test_immutable_fixed_bounded_init_then_set_crash_recovers_history`: reopening at an
+// earlier commit, then applying an uncommitted batch over the discarded suffix and crashing,
+// recovers one legitimate history and never splices the new batch onto the discarded suffix.
+test "immutable bounded reopen then a crash recovers one legitimate history" {
+    var harness = try support.Harness.init(gpa);
+    defer harness.deinit();
+    var rebranch: Rebranch = undefined;
+    try rebranch.init(&harness);
+    defer rebranch.deinit();
+    var db = try rebranch.open(&harness, null);
+    const root_a = try set_branch(&db, 1, 1, 100, true);
+    try testing.expectEqual(@as(u64, 102), db.bounds().end);
+    const root_b = try set_branch(&db, 2, 101, 200, true);
+    try testing.expectEqual(@as(u64, 203), db.bounds().end);
+    db.deinit();
+    db = try rebranch.open(&harness, 102); // Discards B.
+    try testing.expect(db.root().eql(root_a));
+    // N over B's bytes, never committed: a commit would sync and hide a missing init sync.
+    const root_n = try set_branch(&db, 3, 201, 250, false);
+    try testing.expectEqual(merkle.Range{ .start = 0, .end = 153 }, db.bounds());
+    db.deinit();
+    try rebranch.faults.layer.crash();
+    db = try rebranch.open(&harness, null);
+    const root = db.root();
+    try testing.expect(!root.eql(root_b));
+    for (1..201) |i| {
+        const k: u8 = @intCast(i);
+        try expect_value(try db.get(&fill(k)), if (i <= 100) branch_value(1, k) else null);
+    }
+    const recovered_n = switch (db.bounds().end) {
+        102 => false,
+        153 => true,
+        else => return error.TestUnexpectedResult, // Neither history.
+    };
+    try testing.expect(root.eql(if (recovered_n) root_n else root_a));
+    for (201..251) |i| {
+        const k: u8 = @intCast(i);
+        try expect_value(try db.get(&fill(k)), if (recovered_n) branch_value(3, k) else null);
+    }
+    // A commit on the recovered history must survive the next restart.
+    _ = try set_branch(&db, 5, 255, 255, true);
+    const size = db.bounds().end;
+    const committed = db.root();
+    db.deinit();
+    try rebranch.faults.layer.crash();
+    db = try rebranch.open(&harness, null);
+    defer db.deinit();
+    try testing.expectEqual(size, db.bounds().end);
+    try testing.expect(db.root().eql(committed));
+    try expect_value(try db.get(&fill(255)), branch_value(5, 255));
 }

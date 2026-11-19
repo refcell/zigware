@@ -11,6 +11,7 @@ const testing = std.testing;
 const merkle = @import("../../merkle/mod.zig");
 const metrics = @import("runtime").telemetry.metrics;
 const support = @import("test_support.zig");
+const Faults = @import("../../archive/faults.zig").Faults;
 
 const gpa = testing.allocator;
 const families = .{ merkle.mmr.Family, merkle.mmb.Family };
@@ -258,5 +259,80 @@ test "immutable get_many reads the database, batches, and chains" {
         try db.get_many(&.{ k1, missing, k1, k1 }, &out);
         try expect_values(&out, &.{ fill(11), null, fill(11), fill(11) });
         try db.destroy();
+    }
+}
+
+// fixed.rs `test_fixed_start_sync_recovery`. zigware's `start_sync` completes before it returns,
+// so what it made durable survives a crash.
+test "immutable state persisted by start_sync survives a crash" {
+    inline for (families) |F| {
+        var harness = try support.Harness.init(gpa);
+        defer harness.deinit();
+        var db = try harness.open(F, null);
+        errdefer db.deinit();
+        try apply_sets(&db, &.{.{ fill(1), fill(2) }}, db.inactivity_floor());
+        try db.start_sync();
+        const root = db.root();
+        harness.storage.crash();
+        db.deinit();
+        db = try harness.open(F, null);
+        try testing.expect(db.root().eql(root));
+        try expect_values(&.{try db.get(&fill(1))}, &.{fill(2)});
+        try db.destroy();
+    }
+}
+
+// fixed.rs `test_fixed_start_sync_failure_propagates`. A failed mutator leaves only `deinit` (the
+// failures-are-fatal contract), so the failure surfaces from `start_sync` itself.
+test "immutable start_sync surfaces a failed sync" {
+    inline for (families) |F| {
+        var harness = try support.Harness.init(gpa);
+        defer harness.deinit();
+        var faults: Faults = undefined;
+        faults.init(gpa, 7);
+        defer faults.deinit();
+        const D = support.Fixed(F);
+        const scope = metrics.Scope.init(&harness.registry).child("db");
+        var db = try D.init(gpa, faults.interface(), scope, harness.cfg(D), null);
+        defer db.deinit();
+        try apply_sets(&db, &.{.{ fill(1), fill(2) }}, db.inactivity_floor());
+        faults.layer.config = .{ .sync_rate = .one };
+        try testing.expectError(error.Io, db.start_sync());
+    }
+}
+
+// fixed.rs `test_fixed_metrics`: the gauges and call counters after one of each operation.
+// zigware's databases do not time their calls yet (they hold no `Io`), so the duration
+// histograms' counts are not checked.
+test "immutable metrics count each operation" {
+    var harness = try support.Harness.init(gpa);
+    defer harness.deinit();
+    var db = try harness.open(merkle.mmr.Family, null);
+    defer db.deinit();
+    try apply_sets(&db, &.{.{ fill(1), fill(2) }}, null);
+    try expect_values(&.{try db.get(&fill(1))}, &.{fill(2)});
+    var many: [1]?Digest = undefined;
+    try db.get_many(&.{fill(1)}, &many);
+    try expect_values(&many, &.{fill(2)});
+    try db.commit();
+    try db.sync();
+    try db.start_sync();
+    try db.prune(0);
+    const text = try harness.registry.encode(gpa);
+    defer gpa.free(text);
+    const expected = [_][2][]const u8{
+        .{ "db_size", "3" },                    .{ "db_pruning_boundary", "0" },
+        .{ "db_retained", "3" },                .{ "db_inactivity_floor", "0" },
+        .{ "db_last_commit", "2" },             .{ "db_get_calls_total", "1" },
+        .{ "db_get_many_calls_total", "1" },    .{ "db_lookups_requested_total", "2" },
+        .{ "db_apply_batch_calls_total", "1" }, .{ "db_operations_applied_total", "2" },
+        .{ "db_commit_calls_total", "1" },      .{ "db_sync_calls_total", "1" },
+        .{ "db_start_sync_calls_total", "1" },  .{ "db_prune_calls_total", "1" },
+    };
+    for (expected) |pair| {
+        testing.expect(metrics.has_metric_value(text, pair[0], pair[1])) catch |err| {
+            std.debug.print("missing {s} {s}\n{s}\n", .{ pair[0], pair[1], text });
+            return err;
+        };
     }
 }
