@@ -491,11 +491,42 @@ fn ProcessingOf(comptime key: [4]type) type {
             return finalizing.outcome.?;
         }
 
+        /// Completes the active barrier, handling each request whose phase ends while it
+        /// syncs, as commonware drives verifications while a prune waits for the barrier.
+        /// Messages stay queued in the mailbox until the prune finishes.
+        fn complete_barrier_driven(self: *Self) !void {
+            assert(self.durability.barrier != null);
+            assert(self.verifications.admission == .open);
+            // Each pass handles the requests one wake found; posts are bounded by live works.
+            while (!self.durability.settled()) {
+                var buffer: [2]Wait = undefined;
+                var select: Io.Select(Wait) = .init(self.io, &buffer);
+                try select.concurrent(.ready, Verifications.wait_ready, .{&self.verifications});
+                const settle = Durability.settle;
+                select.concurrent(.barrier, settle, .{&self.durability}) catch |err| {
+                    select.cancelDiscard();
+                    return err;
+                };
+                const first = select.await() catch |err| {
+                    while (select.cancel()) |_| {}
+                    return err;
+                };
+                while (select.cancel()) |_| {}
+                switch (first) {
+                    .ready, .barrier => |result| try result,
+                    .message => unreachable, // Proof: only `.ready` and `.barrier` were started.
+                }
+                self.complete_ready();
+            }
+            try self.durability.complete();
+            assert(self.durability.barrier == null);
+        }
+
         /// Prunes the databases and marshal once every execution step has finished and a
         /// barrier covers the prune target.
         fn run_prune(self: *Self, prune: Prune) !void {
             // Pruning waits for the active barrier (it removes history a branch may read).
-            if (self.durability.barrier != null) try self.durability.complete();
+            if (self.durability.barrier != null) try self.complete_barrier_driven();
             try self.verifications.pause(null);
             defer self.verifications.@"resume"();
             assert(self.processor.flights_idle());

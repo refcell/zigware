@@ -7,6 +7,7 @@ const std = @import("std");
 const testing = std.testing;
 const actor = @import("actor");
 const utils = @import("utils");
+const runtime = @import("runtime");
 const core = @import("testing.zig");
 
 const harness = core.harness;
@@ -608,6 +609,122 @@ test "stateful processing: a pending prune does not block an active verification
     defer third_waiter.deinit();
     try third_waiter.wait();
     try testing.expectEqual(1, fixture.prunes.items[0]);
+}
+
+// commonware `prune_starts_after_target_barrier`'s first half, on a held sync: the prune
+// waits for block 1's barrier and drives the active verification to its verdict meanwhile,
+// then prunes once the sync is released. Adapted: commonware holds a mock database's flush;
+// here block 1's real syncs park in `DelayedSync`, and the prune is due at block 1 (no
+// pending acknowledgements), since applying block 2 would wait on block 1's held sync.
+test "stateful processing: a prune waiting on a held sync drives an active verification" {
+    var pending: DelayedSync = .init(gpa, io);
+    defer pending.deinit();
+    var fixture: Fixture = undefined;
+    var delayed: DelayedSynced = undefined;
+    try init_delayed(&fixture, &delayed, &pending);
+    defer deinit_fixture(&fixture);
+    defer pending.unblock();
+    fixture.harness.processor.pruning = try harness.Processor.Pruning.init(gpa, .{
+        .maintenance_interval = 1,
+        .retained_marshal_blocks = 0,
+        .retained_qmdb_blocks = 0,
+    }, 0, 0);
+    const genesis = TestBlock.genesis();
+    const block1 = try fixture.harness.stage_pending_child(&genesis, 1);
+    const block2 = try fixture.harness.stage_pending_child(&block1, 2);
+    const block3, var batch = try fixture.harness.build_child(&block2, 3);
+    batch.deinit();
+    var probe: harness.Probe = .{ .target = block3.digest() };
+    defer probe.deinit();
+    const gate = try probe.add_gate();
+    var started = gate.started;
+    defer started.deinit();
+    var release = gate.release;
+    fixture.processing.verifications.verifier.app.probe = &probe;
+
+    var verdict = try fixture.verify(&.{ block3, block2 });
+    defer verdict.deinit();
+    try started.recv();
+    var waiter = try fixture.finalize(block1);
+    defer waiter.deinit();
+    try wait_until_parked(&pending);
+    const held = pending.parked();
+    try testing.io.sleep(.fromMilliseconds(20), .awake);
+    try testing.expect(waiter.poll() == null);
+
+    // The verdict arrives while block 1's sync is still held, and nothing is pruned yet.
+    try release.send({});
+    try testing.expect(try recv_within(&verdict, 2_000));
+    try testing.expectEqual(held, pending.parked());
+    try testing.expectEqual(0, fixture.prunes.items.len);
+    try testing.expect(waiter.poll() == null);
+
+    pending.release_all();
+    try waiter.wait();
+    try wait_until_pruned(&fixture);
+    try testing.expectEqual(1, fixture.prunes.items[0]);
+}
+
+const DelayedSync = runtime.storage.mocks.DelayedSync;
+const DelayedSynced = runtime.storage.mocks.DelayedSynced;
+
+/// Opens `fixture` over `delayed`, a `DelayedSynced` of its storage, releasing the open's
+/// syncs. None of the three may move afterwards.
+fn init_delayed(fixture: *Fixture, delayed: *DelayedSynced, pending: *DelayedSync) !void {
+    fixture.harness.init_storage();
+    delayed.* = .init(gpa, fixture.harness.storage.interface(), pending);
+    var releaser: Releaser = .{ .pending = pending };
+    var releasing = try io.concurrent(Releaser.run, .{&releaser});
+    defer {
+        releaser.stop.store(true, .release);
+        releasing.await(io);
+    }
+    try fixture.init_with(delayed.storage());
+}
+
+/// Releases every parked sync until `stop` is set, so a database opens over a DelayedSync.
+const Releaser = struct {
+    pending: *DelayedSync,
+    stop: std.atomic.Value(bool) = .init(false),
+
+    fn run(self: *Releaser) void {
+        // Each pass releases what parked since the last one; the open is bounded.
+        while (!self.stop.load(.acquire)) {
+            if (self.pending.parked() > 0) self.pending.release_all();
+            io.sleep(.fromMilliseconds(1), .awake) catch return;
+        }
+        std.debug.assert(self.stop.load(.acquire));
+    }
+};
+
+/// Receives `receiver`'s value, failing after about `timeout_ms` rather than hanging.
+fn recv_within(receiver: anytype, timeout_ms: u64) !bool {
+    // Each pass polls once and sleeps a millisecond.
+    for (0..timeout_ms) |_| {
+        if (receiver.try_recv()) |value| return value else |err| switch (err) {
+            error.Empty => try io.sleep(.fromMilliseconds(1), .awake),
+            error.Closed => return err,
+        }
+    }
+    return error.Timeout;
+}
+
+fn wait_until_parked(pending: *DelayedSync) !void {
+    // Each pass sleeps a millisecond; the barrier's syncs start with the finalization.
+    for (0..2_000) |_| {
+        if (pending.parked() > 0) return;
+        try io.sleep(.fromMilliseconds(1), .awake);
+    }
+    return error.Timeout;
+}
+
+fn wait_until_pruned(fixture: *const Fixture) !void {
+    // Each pass sleeps a millisecond; the prune follows the released sync.
+    for (0..2_000) |_| {
+        if (fixture.prunes.items.len > 0) return;
+        try io.sleep(.fromMilliseconds(1), .awake);
+    }
+    return error.Timeout;
 }
 
 // commonware `finalized_handoff_survives_pending_barrier`: block 1's acknowledgement waits

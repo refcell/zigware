@@ -546,7 +546,11 @@ ones: d = deployer (thread T-01a1d5b9-c237), u = utils, j = storage-journal
   `settle`, `durable`, `deinit`), and `Durability` keeps at most one active barrier: Processing
   completes it once settled (a `wait_idle` arm beside requests and the mailbox), so heights
   applied while it runs coalesce into the next barrier. A prune waits for the active barrier
-  (without driving verifications meanwhile, where commonware drives them). Stopping with a
+  while it drives verifications to their verdicts, as commonware's does
+  (`complete_barrier_driven`; processing_late_test's "a prune waiting on a held sync drives
+  an active verification" holds block 1's real syncs in `DelayedSync`. Commonware holds a
+  mock database's flush instead. Because runtime's buffer makes a write wait for its blob's
+  in-flight sync, as commonware's does, the prune is due at block 1 there). Stopping with a
   barrier pending drops it, canceling the acks it held. Marshal keeps its own completions
   (`store.Durable = runtime.storage.Completion`, eced10a); glue only gets `Update.block`'s ack,
   which it signals once the covering barrier completes.
