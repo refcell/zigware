@@ -22,7 +22,9 @@ jobs:
         os: [ubuntu-latest, ubuntu-24.04-arm]
         optimize: [Debug, ReleaseSafe]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 50
+    # ReleaseSafe hit 50 minutes on x86 at 9d1a066 while slow tests move to nightly; lower
+    # this again once runtime-telemetry's trims bring it back near 25 minutes.
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@v4
       - name: install zig
