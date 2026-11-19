@@ -310,3 +310,26 @@ test "empty layout range (test_storage_blob_layout_restriction_rejects_empty_ran
         }
     }.body);
 }
+
+fn threads_stack_size(config_stack_bytes: ?usize) !usize {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [64]u8 = undefined;
+    const path = storage_directory(&path_buffer, &tmp);
+    var config: production.Config = .{ .storage_directory = path };
+    if (config_stack_bytes) |bytes| config.thread_stack_size_bytes = bytes;
+    var runner: Runner = undefined;
+    try runner.init(testing.allocator, config);
+    defer runner.deinit();
+    return runner.threaded.stack_size;
+}
+
+test "worker threads default to std's stack size (test_default_thread_stack_size_*_default)" {
+    // commonware's default is the system's thread stack size; zigware's is std's.
+    const default = std.Thread.SpawnConfig.default_stack_size;
+    try testing.expectEqual(default, try threads_stack_size(null));
+}
+
+test "worker threads take the configured stack size (test_thread_stack_size_override)" {
+    try testing.expectEqual(4 * 1024 * 1024, try threads_stack_size(4 * 1024 * 1024));
+}
