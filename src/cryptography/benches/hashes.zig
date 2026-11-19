@@ -1,8 +1,8 @@
 //! Benchmarks of the hashers (commonware `cryptography/src/{blake3,sha256,sha512}/benches`),
 //! with commonware's names and cases.
 //!
-//! `blake3::hash_message` keeps only its `conc=1` rows: zigware's `Blake3.hash_across` does
-//! not split one message across threads, so a `conc=8` row would time the same work.
+//! `blake3::hash_message`'s `conc=8` rows hash with `Blake3.hash_across` on a pool of eight
+//! workers, which splits messages of at least 128 KiB into subtrees.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -32,13 +32,25 @@ fn HashMessage(comptime H: type) type {
     };
 }
 
-/// `<prefix>/msg_len=<n>[ conc=1]` over random messages of each length `2^exponent`.
+fn HashAcross(comptime H: type) type {
+    return struct {
+        message: []const u8,
+        rayon: parallel.Rayon,
+
+        pub fn iter(workload: *@This()) H.Digest {
+            return H.hash_across(&.{workload.message}, workload.rayon);
+        }
+    };
+}
+
+/// `<prefix>/msg_len=<n>[ conc=<1|8>]` over random messages of each length `2^exponent`; the
+/// `conc` rows exist when `rayon` is given, and `conc=8` hashes across it.
 fn bench_hash_message(
     comptime H: type,
     runner: *bench.Runner,
     prefix: []const u8,
     exponents: []const u6,
-    conc: bool,
+    rayon: ?parallel.Rayon,
 ) !void {
     const gpa = runner.allocator;
     var rng = utils.test_rng();
@@ -48,10 +60,16 @@ fn bench_hash_message(
         defer gpa.free(message);
         rng.fill_bytes(message);
         var name = bench.Benchmark.init(prefix).with_param("msg_len", len);
-        if (conc) name = name.with_param("conc", 1);
-        if (try skip(runner, name)) continue;
-        var workload: HashMessage(H) = .{ .message = message };
-        try runner.run(name, &workload);
+        const serial_name = if (rayon != null) name.with_param("conc", 1) else name;
+        if (!try skip(runner, serial_name)) {
+            var workload: HashMessage(H) = .{ .message = message };
+            try runner.run(serial_name, &workload);
+        }
+        const pool = rayon orelse continue;
+        const across_name = name.with_param("conc", concurrency);
+        if (try skip(runner, across_name)) continue;
+        var across: HashAcross(H) = .{ .message = message, .rayon = pool };
+        try runner.run(across_name, &across);
     }
 }
 
@@ -230,18 +248,51 @@ fn bench_digest_cmp(runner: *bench.Runner) !void {
     }
 }
 
+const HashParts = struct {
+    parts: []const []const u8,
+
+    pub fn iter(workload: *HashParts) Sha256.Digest {
+        return Sha256.hash(workload.parts);
+    }
+};
+
+/// `sha256::hash_parts/shape=<shape>`: one 72-byte message cut as the MMR and binary Merkle
+/// tree hash their nodes and leaves.
+fn bench_hash_parts(runner: *bench.Runner) !void {
+    var rng = utils.test_rng();
+    var message: [72]u8 = undefined;
+    rng.fill_bytes(&message);
+    const shapes = [_]struct { []const u8, []const []const u8 }{
+        .{ "mmr_node", &.{ message[0..8], message[8..40], message[40..] } },
+        .{ "bmt_node", &.{ message[0..32], message[32..64] } },
+        .{ "mmr_leaf", &.{ message[0..8], message[8..40] } },
+        .{ "bmt_leaf", &.{ message[0..4], message[4..36] } },
+    };
+    for (shapes) |shape| {
+        const name = bench.Benchmark.init("sha256::hash_parts").with_param("shape", shape[0]);
+        if (try skip(runner, name)) continue;
+        var workload: HashParts = .{ .parts = shape[1] };
+        try runner.run(name, &workload);
+    }
+}
+
 pub fn run(runner: *bench.Runner) !void {
+    const pool = try parallel.ThreadPool.create(runner.allocator, runner.io, .{
+        .threads = concurrency,
+    });
+    defer pool.destroy();
     try bench_hash_message(Blake3, runner, "blake3::hash_message", &.{
         8, 12, 16, 17, 18, 19, 20, 24,
-    }, true);
+    }, parallel.Rayon.init(pool));
     try bench_hash_message(Sha256, runner, "sha256::hash_message", &.{
         8, 12, 16, 19, 20, 24,
-    }, false);
+    }, null);
     try bench_hash_many(Sha256, runner, "sha256::hash_many", .{
         .lens = &.{ 64, 256, 4096, 16_384, 65_536, 262_144 },
         .counts = &.{ 1, 2, 6, 7, 15, 16, 17, 32, 128 },
     });
     try bench_hash_pair(runner);
+    try bench_hash_parts(runner);
     try bench_digest_cmp(runner);
     try bench_hash_many(Sha512, runner, "sha512::hash_many", .{
         .lens = &.{ 96, 1024, 16_384, 65_536, 262_144 },
