@@ -460,3 +460,41 @@ test "batcher forwards one notarization when votes complete a certified quorum" 
     };
     try run_deterministic(Root.run);
 }
+
+// commonware `test_votes_skipped_for_finalized_views`: votes above the finalized view
+// assemble, and votes at the finalized view are skipped once it advances.
+test "batcher skips votes for finalized views" {
+    const Root = struct {
+        fn run(io: Io) !void {
+            var harness: Harness = undefined;
+            try harness.start(io);
+            defer harness.stop();
+            const fixture = &harness.fixture;
+            try harness.mailbox.update(.new(1), .init(1), .zero(), null);
+            for (1..3) |signer| {
+                const bytes = try notarize_bytes(fixture, signer, 1);
+                try harness.votes.deliver(fixture.participants[signer], bytes);
+            }
+            const Notarize = types.Notarize(Scheme, Digest);
+            const ours = (try Notarize.sign(gpa, &fixture.schemes[0], proposal(1))).?;
+            try harness.mailbox.constructed(.{ .notarize = ours });
+            const first = try harness.next_certificate();
+            defer VoterMessage.discard(first);
+            try testing.expectEqual(1, first.verified.certificate.view().get());
+            // View 2 is finalized: its votes form nothing.
+            try harness.mailbox.update(.new(3), .init(1), .new(2), null);
+            for (1..3) |signer| {
+                const bytes = try notarize_bytes(fixture, signer, 2);
+                try harness.votes.deliver(fixture.participants[signer], bytes);
+            }
+            const late = (try Notarize.sign(gpa, &fixture.schemes[0], proposal(2))).?;
+            try harness.mailbox.constructed(.{ .notarize = late });
+            try io.sleep(.fromMilliseconds(150), .awake);
+            while (harness.voter.try_recv()) |message| {
+                defer VoterMessage.discard(message);
+                try testing.expect(message != .verified);
+            } else |err| try testing.expectEqual(error.Empty, err);
+        }
+    };
+    try run_deterministic(Root.run);
+}
