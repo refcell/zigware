@@ -23,6 +23,7 @@ const qmdb = @import("../mod.zig");
 const chain = @import("../chain.zig");
 const value_mod = @import("../value.zig");
 const authenticated = @import("../../journal/authenticated.zig");
+const parallel = @import("parallel");
 const metrics_mod = @import("../metrics.zig");
 const snapshot_mod = @import("../snapshot.zig");
 const snapshot_parallel = @import("../snapshot_parallel.zig");
@@ -412,13 +413,10 @@ pub fn Db(F: type, U: type, C: type, I: type, H: type, comptime N: usize) type {
             const timing = self.metrics.start("get_many_duration");
             defer timing.finish();
             self.metrics.lookups_requested.metric().inc_by(keys.len);
-            var filled: usize = 0;
-            errdefer for (out[0..filled]) |value| codec.free(?Value, self.gpa, value);
-            for (keys, out) |*key, *slot| {
-                const found = try self.get_with_loc(key);
-                slot.* = if (found) |f| f.update.value else null;
-                filled += 1;
-            }
+            // Commonware batches through the Merkle structure's strategy; zigware's has none,
+            // so the cached pass runs on the calling thread.
+            const read = BatchedRead(Operation).read;
+            try read(self.gpa, &self.snapshot, &self.log, parallel.sequential, keys, out);
         }
 
         pub fn update_metrics(self: *Self) void {
@@ -572,6 +570,236 @@ pub fn Db(F: type, U: type, C: type, I: type, H: type, comptime N: usize) type {
 
         fn matches(target: u64, location: *const u64) bool {
             return location.* == target;
+        }
+    };
+}
+
+/// The batched read `any` and `store` share for `get_many` (commonware's `read_many_map`, with
+/// the value map both its callers use), over operations `Op` whose `update` holds `key` and
+/// `value`. Positions the page cache holds are served without I/O, split across the strategy
+/// when the batch is large enough; one `read_many` then serves the rest. Every candidate
+/// position is decoded by exactly one of the two passes, so corruption detection does not
+/// depend on cache state. Each matching slot gets its own value (commonware clones for earlier
+/// duplicates and moves into the last; here every slot owns a copy).
+pub fn BatchedRead(comptime Op: type) type {
+    return struct {
+        const U = @FieldType(Op, "update");
+        pub const Key = @FieldType(U, "key");
+        pub const Value = @FieldType(U, "value");
+        const siblings = @hasDecl(U, "siblings") and U.siblings;
+        pub const Error = Allocator.Error || error{DataCorrupted};
+
+        /// A key slot and one of its candidate positions.
+        const Candidate = struct { key_index: usize, position: u64 };
+        const Candidates = std.ArrayList(Candidate);
+
+        /// Reads `keys` (not empty) through `snapshot` and `reader` into `out`, which the
+        /// caller owns. On error nothing in `out` is owned. A parallel `strategy` needs a
+        /// thread-safe `gpa`.
+        pub fn read(
+            gpa: Allocator,
+            snapshot: anytype,
+            reader: anytype,
+            strategy: anytype,
+            keys: []const Key,
+            out: []?Value,
+        ) !void {
+            assert(keys.len == out.len);
+            assert(keys.len > 0);
+            @memset(out, null);
+            errdefer for (out) |*slot| {
+                codec.free(?Value, gpa, slot.*);
+                slot.* = null;
+            };
+            const run: Run(@TypeOf(snapshot), @TypeOf(reader)) = .{ .shard = .{
+                .gpa = gpa,
+                .snapshot = snapshot,
+                .reader = reader,
+                .keys = keys,
+                .out = out,
+            } };
+            var misses = try strategy.try_run_batches(keys.len, 1, 1, run);
+            defer misses.deinit(gpa);
+            if (misses.items.len == 0) return;
+            // Fallback: read each distinct missed position once with one batched read.
+            std.mem.sortUnstable(Candidate, misses.items, {}, by_position);
+            const positions = try dedup_positions(gpa, misses.items);
+            defer gpa.free(positions);
+            const ops = try gpa.alloc(Op, positions.len);
+            defer gpa.free(ops);
+            try reader.read_many(positions, ops);
+            try match_read_ops(gpa, keys, misses.items, ops, out, null);
+        }
+
+        fn Run(comptime Snapshot: type, comptime Reader: type) type {
+            return struct {
+                shard: Shard(Snapshot, Reader),
+
+                /// Resolves every batch from the cache and joins their misses, keeping the
+                /// first batch's list so a whole-input run moves nothing.
+                pub fn run(self: @This(), batches: anytype) Error!Candidates {
+                    const shard = self.shard;
+                    assert(shard.out.len == shard.keys.len);
+                    const count = batches.count();
+                    var shards: [parallel.max_chunks]Candidates = undefined;
+                    try batches.try_map_collect(shards[0..count], shard);
+                    defer for (shards[1..count]) |*other| other.deinit(shard.gpa);
+                    errdefer shards[0].deinit(shard.gpa);
+                    var total: usize = 0;
+                    for (shards[0..count]) |list| total += list.items.len;
+                    try shards[0].ensureTotalCapacity(shard.gpa, total);
+                    for (shards[1..count]) |list| shards[0].appendSliceAssumeCapacity(list.items);
+                    assert(shards[0].items.len == total);
+                    return shards[0];
+                }
+            };
+        }
+
+        fn Shard(comptime Snapshot: type, comptime Reader: type) type {
+            return struct {
+                gpa: Allocator,
+                snapshot: Snapshot,
+                reader: Reader,
+                keys: []const Key,
+                out: []?Value,
+
+                pub fn map(self: @This(), _: usize, range: parallel.Range) Error!Candidates {
+                    assert(range.end <= self.keys.len);
+                    return resolve_cached(self, range.start, range.end);
+                }
+
+                pub fn discard(self: @This(), list: Candidates) void {
+                    var owned = list;
+                    owned.deinit(self.gpa);
+                }
+            };
+        }
+
+        /// Probes the index for `keys[start..end]`, serves page-cache hits, and matches them
+        /// back to keys. Returns the candidates the cache could not serve, recorded even when
+        /// their key already resolved so the fallback read still validates the position.
+        fn resolve_cached(shard: anytype, start: usize, end: usize) Error!Candidates {
+            const gpa = shard.gpa;
+            assert(start < end);
+            // Each key may map to several locations due to translated-key collisions.
+            var candidates: Candidates = .empty;
+            defer candidates.deinit(gpa);
+            for (shard.keys[start..end], start..) |*key, key_index| {
+                var locations = shard.snapshot.get(value_mod.bytes(Key, key));
+                while (locations.next()) |location| {
+                    try candidates.append(gpa, .{ .key_index = key_index, .position = location.* });
+                }
+            }
+            // No key is indexed: nothing to read or validate. Temporary: the variable
+            // journal's `try_read_many_sync` panics on empty positions (de86473); remove this
+            // once storage-merkle's fix is on main.
+            if (candidates.items.len == 0) return .empty;
+            std.mem.sortUnstable(Candidate, candidates.items, {}, by_position);
+            const positions = try dedup_positions(gpa, candidates.items);
+            defer gpa.free(positions);
+            assert(positions.len > 0);
+            const served = try gpa.alloc(?Op, positions.len);
+            defer gpa.free(served);
+            shard.reader.try_read_many_sync(positions, served);
+            var misses: Candidates = .empty;
+            errdefer misses.deinit(gpa);
+            try match_read_ops(gpa, shard.keys, candidates.items, served, shard.out, &misses);
+            assert(misses.items.len <= candidates.items.len);
+            return misses;
+        }
+
+        fn by_position(_: void, a: Candidate, b: Candidate) bool {
+            return a.position < b.position;
+        }
+
+        /// The distinct positions of position-sorted `candidates`.
+        fn dedup_positions(gpa: Allocator, candidates: []const Candidate) ![]u64 {
+            var distinct: usize = 0;
+            for (candidates, 0..) |c, i| {
+                if (i == 0 or candidates[i - 1].position != c.position) distinct += 1;
+            }
+            const positions = try gpa.alloc(u64, distinct);
+            var at: usize = 0;
+            for (candidates, 0..) |c, i| {
+                if (i > 0 and candidates[i - 1].position == c.position) continue;
+                positions[at] = c.position;
+                at += 1;
+            }
+            assert(at == distinct);
+            return positions;
+        }
+
+        /// Matches `ops` (one per distinct position of position-sorted `candidates`, consumed;
+        /// `?Op` slots are null where the cache could not serve) back to the candidates,
+        /// filling each unresolved slot whose update carries its exact key. Unserved
+        /// candidates go to `misses`, which only a `?Op` pass passes.
+        fn match_read_ops(
+            gpa: Allocator,
+            keys: []const Key,
+            candidates: []const Candidate,
+            ops: anytype,
+            out: []?Value,
+            misses: ?*Candidates,
+        ) Error!void {
+            assert(ops.len <= candidates.len);
+            var next: usize = 0; // The first op not yet consumed.
+            errdefer for (ops[next..]) |*op| free_op(gpa, op);
+            var start: usize = 0;
+            while (start < candidates.len) {
+                const position = candidates[start].position;
+                var end = start + 1;
+                while (end < candidates.len and candidates[end].position == position) end += 1;
+                const group = candidates[start..end];
+                start = end;
+                assert(next < ops.len);
+                const slot: ?Op = ops[next];
+                next += 1;
+                var op = slot orelse {
+                    for (group) |c| try misses.?.append(gpa, c);
+                    continue;
+                };
+                try match_group(gpa, keys, group, &op, out);
+            }
+            assert(next == ops.len);
+        }
+
+        /// Gives the group's matching unresolved slots the update's value; consumes `op`.
+        fn match_group(
+            gpa: Allocator,
+            keys: []const Key,
+            group: []const Candidate,
+            op: *Op,
+            out: []?Value,
+        ) Error!void {
+            assert(group.len > 0);
+            if (op.* != .update) {
+                op.deinit(gpa);
+                return error.DataCorrupted; // The snapshot holds update locations.
+            }
+            const update = &op.update;
+            var last: ?usize = null;
+            for (group) |c| {
+                if (out[c.key_index] != null) continue;
+                if (!value_mod.eql(Key, update.key, keys[c.key_index])) continue;
+                if (last) |prev| out[prev] = value_mod.clone(Value, gpa, update.value) catch {
+                    op.deinit(gpa);
+                    return error.OutOfMemory;
+                };
+                last = c.key_index;
+            }
+            const into = last orelse {
+                op.deinit(gpa);
+                return;
+            };
+            assert(out[into] == null);
+            out[into] = update.value;
+            codec.free(Key, gpa, update.key);
+            if (comptime siblings) codec.free(Key, gpa, update.next_key);
+        }
+
+        fn free_op(gpa: Allocator, op: anytype) void {
+            if (@TypeOf(op.*) == Op) return op.deinit(gpa);
+            if (op.*) |*held| held.deinit(gpa);
         }
     };
 }

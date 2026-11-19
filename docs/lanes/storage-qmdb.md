@@ -70,8 +70,8 @@ which every database here is built on.
 - [x] any, ordered: `range(start, end)` (commonware's `stream_range`; `Range.next_key` is
   `keys`), a pull iterator over buckets, checked against a sorted model under every bound pair.
 - [x] any: ordered staging (the staged-ancestor scenarios run on ordered databases too).
-  Batched `get_many` stays a loop over `get` by decision (coordinator, 2026-11-18): commonware's
-  batching only groups reads by position for speed, and the results are identical.
+  `get_many` was a loop over `get` by a 2026-11-18 decision, reversed 2026-11-19 (coordinator):
+  any's and the store's `get_many` batch their reads as commonware's do (102430409 below).
 - [x] fuzz targets: keyless, immutable, and any unordered/ordered operations, with the floor
   oracle `qmdb/fuzz_floor.zig` (commonware `storage/fuzz/src/floor.rs`).
 - [x] any: ordered `MerkleizedBatch.get_prev_key`/`get_next_key` (strict, non-wrapping, through the
@@ -218,12 +218,18 @@ which every database here is built on.
   `ItemPruned`, `DataCorrupted` past its own location); `find_inactivity_floor_at` wraps it.
   Immutable and keyless `init_from_log` and store init return `UnexpectedData` when the log
   does not end with a commit (store used to panic there).
-- [x] Upstream 102430409 (#5649): the store's strategy and any's shared batched read. The
-  commit moves any's batched `get_many` into a shared `read_many_map` and gives the store a
-  `strategy`; under the 2026-11-18 decision both `get_many`s stay loops over `get` and there
-  is no `strategy`, so neither change applies (results are identical). Ported its one new
-  test, `test_store_get_many_cached_and_uncached` (store/db_test.zig), with a fresh page cache
+- [x] Upstream 102430409 (#5649): the store's strategy and any's shared batched read.
+  `any.db.BatchedRead(Op)` is commonware's `read_many_map`: probe the index, sort and dedup
+  candidate positions, serve page-cache hits through `try_read_many_sync` (split across the
+  strategy by `try_run_batches`), then one `read_many` for the misses; each duplicate slot owns
+  its value. The store's `Db(K, E, T, S)` and `Config.strategy` take a `parallel` strategy
+  (tests use `Sequential`); any has no Merkle strategy in zigware, so it runs `sequential`.
+  Ported `test_store_get_many_cached_and_uncached` (store/db_test.zig) with a fresh page cache
   on reopen as in commonware's `test_config`; it also checks the repeat read is all cache hits.
+  `zig build qmdb-scale -- get_many` (200,000 keys, batches of 64, warm, under other lanes'
+  load): one reader 85-88 ms against 107-118 ms for the per-key loop in the quietest rounds;
+  four readers show no clear difference. The cache pass skips an empty batch until the variable
+  journal's `try_read_many_sync` accepts empty positions (storage-merkle).
 
 ## Public API (on main)
 - `storage.qmdb.value`: `Fixed(V)`, `Variable(V)` (encodings with `Value`, `fixed`), `check`,
@@ -360,7 +366,7 @@ which every database here is built on.
   (contiguous below its own items), so reads and applies stay exact after ancestors are
   released.
   Mutators take `*Self` (commonware threads the database by value); `start_sync` returns no
-  handle; there is no `strategy`.
+  handle; any has no `strategy` (its batched read runs `sequential`).
 
 - any: values may own memory, keys may not (a comptime check). A merkleize borrows values from
   the batch, its log reads (kept until the merkleize ends), and its ancestors, then gives the
@@ -459,3 +465,4 @@ which every database here is built on.
 - 2026-11-19: upstream 8bf364011: merkleized batches report their sync `target()`.
 - 2026-11-19: upstream 8bf364011 batch 2: `CompactTarget` and its conformance entries removed.
 - 2026-11-19: immutable and store in-flight start_sync tests (overlap, failure, prune waits).
+- 2026-11-19: upstream 102430409: shared batched get_many read, store strategy (decision reversed).

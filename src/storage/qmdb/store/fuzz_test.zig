@@ -18,10 +18,12 @@ const fuzz_bytes = @import("../../fuzz_bytes.zig");
 const fuzz_floor = @import("../fuzz_floor.zig");
 const test_support = @import("../test_support.zig");
 const store = @import("mod.zig");
+const parallel = @import("parallel");
+const Sequential = parallel.Sequential;
 
 const gpa = testing.allocator;
 const Digest = cryptography.Blake3.Digest;
-const Db = store.Db(Digest, value.Variable(Digest), translator.TwoCap);
+const Db = store.Db(Digest, value.Variable(Digest), translator.TwoCap, Sequential);
 const Recorder = fuzz_floor.Recorder(Digest, Digest, 256);
 const Model = Recorder.Model;
 
@@ -128,6 +130,7 @@ const Driver = struct {
             },
             .translator = .{},
             .init_cache = 3,
+            .strategy = .{},
         };
         return Db.init(gpa, self.storage.interface(), cfg, null);
     }

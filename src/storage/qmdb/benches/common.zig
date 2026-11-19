@@ -11,6 +11,8 @@ const cryptography = @import("cryptography");
 const runtime = @import("runtime");
 const storage = @import("storage");
 const utils = @import("utils");
+const parallel = @import("parallel");
+const Sequential = parallel.Sequential;
 
 const qmdb = storage.qmdb;
 const merkle = storage.merkle;
@@ -94,7 +96,7 @@ pub fn KeylessDb(comptime F: type) type {
     return qmdb.keyless.Db(F, VariableBytes, C, Sha256);
 }
 
-pub const StoreDb = qmdb.store.Db(Digest, VariableBytes, Translator);
+pub const StoreDb = qmdb.store.Db(Digest, VariableBytes, Translator, Sequential);
 
 /// A named database type of one benchmark variant.
 pub fn Variant(comptime name_: []const u8, comptime D: type) type {
@@ -366,6 +368,7 @@ pub fn Session(comptime D: type) type {
                     .log = log,
                     .translator = .{},
                     .init_cache = options.init_cache,
+                    .strategy = .{},
                 };
                 self.db = try D.init(gpa, backend, cfg, null);
                 return;

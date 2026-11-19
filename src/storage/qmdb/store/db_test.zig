@@ -17,10 +17,12 @@ const store = @import("mod.zig");
 const gpa = testing.allocator;
 const Digest = cryptography.Blake3.Digest;
 const Bytes = []const u8;
-const Db = store.Db(Digest, value.Variable(Bytes), translator.TwoCap);
+const Db = store.Db(Digest, value.Variable(Bytes), translator.TwoCap, Sequential);
 const Write = Db.Write;
 const Storage = runtime.storage.Storage;
 const CacheRef = runtime.buffer.paged.CacheRef;
+const parallel = @import("parallel");
+const Sequential = parallel.Sequential;
 
 /// Commonware's `Blake3::hash(&[&i.to_be_bytes()])`.
 const CodecCfg = @FieldType(Db.Journal.Cfg, "codec_config");
@@ -65,6 +67,7 @@ fn open_on(storage: Storage, cache_ref: *CacheRef, max_size: ?u64) !Db {
         },
         .translator = .{},
         .init_cache = 1024,
+        .strategy = .{},
     };
     return Db.init(gpa, storage, cfg, max_size);
 }
@@ -1179,8 +1182,7 @@ test "store get_many reads cached and uncached positions" {
     const reads = metrics.items_read.metric().get() - reads_before;
     try testing.expect(hits > 0 and hits < reads);
     // Reading one key leaves its pages in the cache, so reading it again never reaches the
-    // log's batched read. zigware reads key by key (never through `read_many`), so this also
-    // checks that the cache served every read.
+    // log's batched read; every item it reads is a cache hit.
     try expect_cached_reads(&db, ids[0..1]);
     const calls_before = metrics.read_many_calls.metric().get();
     const hits_one = metrics.cache_hits.metric().get();
@@ -1467,7 +1469,7 @@ test "store bitmap tracks activity through every policy action, prune, and reope
 }
 
 /// A store keyed by variable-length byte strings (commonware's `VecKeyStore`).
-const VecKeyDb = store.Db(Bytes, value.Variable(Bytes), translator.TwoCap);
+const VecKeyDb = store.Db(Bytes, value.Variable(Bytes), translator.TwoCap, Sequential);
 
 fn open_vec_keys(self: *Harness) !VecKeyDb {
     const Cfg = @FieldType(VecKeyDb.Journal.Cfg, "codec_config");
@@ -1484,6 +1486,7 @@ fn open_vec_keys(self: *Harness) !VecKeyDb {
         },
         .translator = .{},
         .init_cache = 1024,
+        .strategy = .{},
     };
     return VecKeyDb.init(gpa, self.storage.interface(), cfg, null);
 }

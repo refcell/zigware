@@ -13,12 +13,13 @@ const translator = @import("../../translator.zig");
 const value = @import("../value.zig");
 const test_support = @import("../test_support.zig");
 const store = @import("mod.zig");
+const Sequential = @import("parallel").Sequential;
 
 const gpa = testing.allocator;
 const Context = runtime.deterministic.Context;
 const Digest = cryptography.Blake3.Digest;
 const Bytes = []const u8;
-const Db = store.Db(Digest, value.Variable(Bytes), translator.TwoCap);
+const Db = store.Db(Digest, value.Variable(Bytes), translator.TwoCap, Sequential);
 const CodecCfg = @FieldType(Db.Journal.Cfg, "codec_config");
 
 fn key(i: u64) Digest {
@@ -60,6 +61,7 @@ const Fixture = struct {
             },
             .translator = .{},
             .init_cache = 1024,
+            .strategy = .{},
         };
         return Db.init(gpa, self.delayed.storage(), cfg, null);
     }

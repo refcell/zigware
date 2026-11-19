@@ -1,12 +1,12 @@
 //! An unauthenticated key-value store of variable-size values over an append-only log of
 //! operations (qmdb/store/db.rs).
 //!
-//! `Db(K, E, T)`: keys `K` (fixed arrays, or `[]const u8` for variable-length keys, which the
-//! store copies), a value encoding `E` (`qmdb.value.Variable`),
-//! and translator `T`. The log holds `any` unordered operations over the MMR family, as in
-//! commonware, so a store's log is byte-identical to commonware's. A snapshot maps each active
-//! key to its latest update, and an activity bitmap marks the active locations the floor walk
-//! reads.
+//! `Db(K, E, T, S)`: keys `K` (fixed arrays, or `[]const u8` for variable-length keys, which the
+//! store copies), a value encoding `E` (`qmdb.value.Variable`), translator `T`, and the
+//! `parallel` strategy `S` of batched reads. The log holds `any` unordered operations over the
+//! MMR family, as in commonware, so a store's log is byte-identical to commonware's. A snapshot
+//! maps each active key to its latest update, and an activity bitmap marks the active locations
+//! the floor walk reads.
 //!
 //! Differences from commonware: mutators take `*Self` (after a storage error only `deinit` may
 //! follow), syncs complete synchronously, a batch is built against the store passed to its
@@ -18,6 +18,7 @@ const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const codec = @import("codec");
 const runtime = @import("runtime");
+const parallel = @import("parallel");
 const utils = @import("utils");
 const merkle = @import("../../merkle/mod.zig");
 const index = @import("../../index/mod.zig");
@@ -29,6 +30,7 @@ const floor_mod = @import("../floor.zig");
 const bitmap_mod = @import("../bitmap.zig");
 const snapshot_mod = @import("../snapshot.zig");
 const any_operation = @import("../any/operation.zig");
+const any_db = @import("../any/db.zig");
 
 const Storage = runtime.storage.Storage;
 
@@ -36,7 +38,7 @@ const Storage = runtime.storage.Storage;
 pub const bitmap_chunk_bytes = 64;
 
 /// Configuration of a store.
-pub fn Config(comptime T: type, comptime LogConfig: type) type {
+pub fn Config(comptime T: type, comptime LogConfig: type, comptime S: type) type {
     return struct {
         /// The operation log.
         log: LogConfig,
@@ -45,11 +47,15 @@ pub fn Config(comptime T: type, comptime LogConfig: type) type {
         /// Entries in the `location -> key` cache that resolves snapshot collisions during
         /// init; null disables it.
         init_cache: ?usize = null,
+        /// The strategy that parallelizes batched reads. A parallel one needs a thread-safe
+        /// allocator.
+        strategy: S,
     };
 }
 
-pub fn Db(comptime K: type, comptime E: type, comptime T: type) type {
+pub fn Db(comptime K: type, comptime E: type, comptime T: type, comptime S: type) type {
     value_mod.check(E);
+    parallel.assert_strategy(S);
     return struct {
         const Self = @This();
         pub const Family = merkle.mmr.Family;
@@ -59,7 +65,7 @@ pub fn Db(comptime K: type, comptime E: type, comptime T: type) type {
         pub const Journal = variable.Journal(Operation);
         pub const Index = index.unordered.Index(T, u64);
         pub const Bitmap = bitmap_mod.Shared(bitmap_chunk_bytes);
-        pub const Cfg = Config(T, Journal.Cfg);
+        pub const Cfg = Config(T, Journal.Cfg, S);
         /// A key and its new value, or null to delete it.
         pub const Write = struct { key: K, value: ?Value };
         pub const Batch = BatchOf(Self);
@@ -77,6 +83,8 @@ pub fn Db(comptime K: type, comptime E: type, comptime T: type) type {
         bitmap: Bitmap,
         /// Every operation below it is inactive.
         inactivity_floor_loc: u64,
+        /// The strategy that parallelizes batched reads.
+        strategy: S,
 
         /// Opens the store: selects the last commit (within `max_size` operations), creates the
         /// initial commit if the log is empty, syncs, and rebuilds the snapshot and bitmap from
@@ -110,6 +118,7 @@ pub fn Db(comptime K: type, comptime E: type, comptime T: type) type {
                 .active_keys = built.active_keys,
                 .bitmap = bitmap,
                 .inactivity_floor_loc = floor,
+                .strategy = cfg.strategy,
             };
             assert(self.inactivity_floor_loc < self.log.size());
             return self;
@@ -205,13 +214,13 @@ pub fn Db(comptime K: type, comptime E: type, comptime T: type) type {
         /// The values of `keys` into `out`. The caller owns them.
         pub fn get_many(self: *Self, keys: []const K, out: []?Value) !void {
             assert(keys.len == out.len);
-            var filled: usize = 0;
-            errdefer for (out[0..filled]) |v| codec.free(?Value, self.gpa, v);
-            for (keys, out) |*key, *slot| {
-                slot.* = try self.get(key);
-                filled += 1;
-            }
-            assert(filled == keys.len);
+            if (keys.len == 0) return;
+            const read = any_db.BatchedRead(Operation).read;
+            read(self.gpa, &self.snapshot, &self.log, self.strategy, keys, out) catch |err|
+                return switch (err) {
+                    error.ItemPruned => error.OperationPruned,
+                    else => err,
+                };
         }
 
         const Located = struct { location: u64, value: Value };

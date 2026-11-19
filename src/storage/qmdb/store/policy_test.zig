@@ -11,6 +11,8 @@ const value = @import("../value.zig");
 const floor_mod = @import("../floor.zig");
 const test_support = @import("../test_support.zig");
 const store = @import("mod.zig");
+const parallel = @import("parallel");
+const Sequential = parallel.Sequential;
 
 const gpa = testing.allocator;
 const Sha256 = cryptography.Sha256;
@@ -44,7 +46,7 @@ const CountingCap = struct {
 };
 
 fn Store(comptime T: type) type {
-    return store.Db(Digest, value.Variable(Digest), T);
+    return store.Db(Digest, value.Variable(Digest), T, Sequential);
 }
 
 const Db = Store(translator.OneCap);
@@ -84,6 +86,7 @@ fn Harness(comptime T: type) type {
                 },
                 .translator = .{},
                 .init_cache = 1024,
+                .strategy = .{},
             };
             return D.init(gpa, self.storage.interface(), cfg, null);
         }

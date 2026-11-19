@@ -333,7 +333,7 @@ fn add_qmdb_harnesses(
 ) void {
     const harness_optimize: std.builtin.OptimizeMode = if (optimize == .debug) .fast else optimize;
     const imports = [_][]const u8{
-        "bench", "codec", "cryptography", "runtime", "storage", "utils",
+        "bench", "codec", "cryptography", "parallel", "runtime", "storage", "utils",
     };
     for ([_][]const u8{ "cold_read", "constantinople", "scale" }) |name| {
         const source = b.path(b.fmt("src/storage/qmdb/benches/{s}.zig", .{name}));

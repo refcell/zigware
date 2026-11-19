@@ -94,6 +94,12 @@ pub fn Journal(comptime F: type, comptime C: type, comptime H: type) type {
             return self.journal.try_read_sync(position);
         }
 
+        /// Probes strictly increasing `positions`, serving those readable without I/O.
+        pub fn try_read_many_sync(self: *const Self, positions: []const u64, out: []?Item) void {
+            assert(positions.len == out.len);
+            self.journal.try_read_many_sync(positions, out);
+        }
+
         /// Replays the items in `range` (see the backing journal's `replay`).
         pub fn replay(self: *Self, range: Bounds, buffer_bytes: usize) Error!C.Replay {
             return self.journal.replay(range, buffer_bytes);
