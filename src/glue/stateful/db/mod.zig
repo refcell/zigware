@@ -120,6 +120,10 @@ pub fn Shared(comptime DB: type) type {
             fn try_lock_exclusive(cell: *Cell) bool {
                 return if (concurrent) cell.lock.tryLock(cell.io) else cell.lock.tryLock();
             }
+
+            fn try_lock_shared(cell: *Cell) bool {
+                return if (concurrent) cell.lock.tryLockShared(cell.io) else cell.lock.tryLock();
+            }
         };
 
         /// Shares `database`, identified by `label` in diagnostics.
@@ -240,6 +244,16 @@ pub fn Shared(comptime DB: type) type {
         pub fn new_batches(self: Self) !Unmerkleized {
             var guard = try self.read();
             defer guard.deinit();
+            return DB.new_batch(self.batch_context(&guard));
+        }
+
+        /// `new_batches` when the read lock is free now, else null without waiting. Lets a
+        /// set build an uncontended member on the calling task instead of spawning one.
+        pub fn try_new_batches(self: Self) ?(anyerror!Unmerkleized) {
+            if (!self.cell.try_lock_shared()) return null;
+            var guard: ReadGuard = .{ .cell = self.cell };
+            defer guard.deinit();
+            if (self.cell.database == null) @panic(lost_message);
             return DB.new_batch(self.batch_context(&guard));
         }
 
@@ -559,15 +573,31 @@ pub fn Tuple(comptime types: anytype) type {
         /// joins the members' reads). Each member's lock is released before its task ends, so
         /// no lock is held when this returns. Fails with the first failing member's error, by
         /// index, after releasing the batches built.
+        ///
+        /// A member whose read lock is free builds on the calling task, one at a time; only a
+        /// contended member gets a task, so contended reads still queue at once. Commonware's
+        /// join polls every member on the caller's task; a task here costs two scheduler
+        /// hand-offs (two simulated milliseconds) on every proposal and verification.
         pub fn new_batches(self: *const Self) !Unmerkleized {
             var batches: Unmerkleized = undefined;
             var results: [count]anyerror!void = undefined;
             var group: Io.Group = .init;
+            var spawned: usize = 0;
             inline for (0..count) |i| {
-                group.async(self.io(), Task(i).new_batch, .{ self, &batches[i], &results[i] });
+                if (self.members[i].try_new_batches()) |attempt| {
+                    if (attempt) |built| {
+                        batches[i] = built;
+                        results[i] = {};
+                    } else |err| results[i] = err;
+                } else {
+                    group.async(self.io(), Task(i).new_batch, .{ self, &batches[i], &results[i] });
+                    spawned += 1;
+                }
             }
-            // Drains every member, forwarding a cancel to them, before anything is released.
-            const awaited = group.await(self.io());
+            assert(spawned <= count);
+            // Drains every spawned member, forwarding a cancel to them, before anything is
+            // released.
+            const awaited: Io.Cancelable!void = if (spawned > 0) group.await(self.io()) else {};
             const failure = first_failure(&results, awaited);
             if (failure) |err| {
                 inline for (0..count) |i| {

@@ -519,7 +519,7 @@ test "stateful e2e: state sync lossy network" {
 // every block, so the sync is still running at the exit height (commonware's too: its
 // properties read only marshal's processed height, which syncing advances), and the plan skips
 // `StateSyncCompleted`. Commonware runs rotating leaders only, crashing at 6.25 s and
-// restarting at 7 s. Here the joiner starts later (view 80 at 7.3-7.7 s, multi-db last: each
+// restarting at 7 s. Here the joiner starts later (view 80 at 7.3-7.45 s, multi-db last: each
 // task hand-off costs a simulated millisecond), and a crash before it starts finds nothing to
 // crash. So the crash is at 9 s, with the same 750 ms downtime, well inside a sync that runs to
 // the exit (after 16 s on every seed).
