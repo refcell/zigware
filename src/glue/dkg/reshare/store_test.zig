@@ -296,3 +296,258 @@ test "store: prune removes old protocol state and secret shares" {
     try testing.expect(secrets.has_share(.new(1)));
     _ = types;
 }
+
+const runtime = @import("runtime");
+const Ctx = runtime.deterministic.Context;
+const MutationFaults = runtime.storage.mocks.MutationFaults;
+const MutationFault = runtime.storage.mocks.MutationFault;
+
+/// Where a player stops while it records a dealing (commonware `Interruption`).
+const Interruption = union(enum) {
+    /// The journal completes this many mutations and parks every later one.
+    journal: u64,
+    /// `put_dealing` stores nothing and never returns.
+    secret_store,
+};
+
+/// A dealing's public message and private half, owned.
+const TestDealing = struct {
+    public: fd.DealerPubMsg(MinPk),
+    private: fd.DealerPrivMsg,
+
+    fn eql(a: *const TestDealing, b: *const TestDealing) bool {
+        return a.public.eql(b.public) and a.private.eql(b.private);
+    }
+
+    fn deinit(self: *TestDealing) void {
+        self.public.deinit(gpa);
+        self.private.zeroize();
+    }
+};
+
+/// The dealing the first signer sends the second when it deals from `summary(seed)`
+/// (commonware `dealing`). Different seeds give different dealings.
+fn dealing(seed: u8) !TestDealing {
+    var harness = try Harness.init();
+    defer harness.deinit();
+    var secrets: MemorySecretStore = .init(gpa);
+    defer secrets.deinit();
+    var store = try harness.open("dealing", &secrets);
+    defer store.deinit();
+    var info = try round_info();
+    defer info.deinit(gpa);
+    const signer = signers()[0];
+    const seeded = summary(seed);
+    const created = try store.create_dealer(N3f1, PrivateKey, .zero(), signer, &info, null, seeded);
+    var dealer = created.?;
+    defer dealer.deinit();
+    const player = signers()[1].public_key();
+    for (dealer.shares_to_distribute()) |item| if (item.player.eql(player)) {
+        return .{ .public = try dealer.public.clone(gpa), .private = item.msg };
+    };
+    return error.MissingDealing;
+}
+
+/// What one run of `handle_dealing` saw.
+const Handled = struct {
+    /// The dealings replay restored at startup.
+    restored: std.ArrayList(TestDealing) = .empty,
+    ack: ?fd.PlayerAck(P) = null,
+
+    fn deinit(self: *Handled) void {
+        for (self.restored.items) |*item| item.deinit();
+        self.restored.deinit(gpa);
+    }
+
+    fn expect_restored(self: *const Handled, expected: ?*const TestDealing) !void {
+        const count: usize = if (expected == null) 0 else 1;
+        try testing.expectEqual(count, self.restored.items.len);
+        if (expected) |value| try testing.expect(self.restored.items[0].eql(value));
+    }
+};
+
+/// The player's `handle` running in its own task; `done` is set once it returns.
+const Handle = struct {
+    player: *Player,
+    store: *TestStore,
+    sent: *const TestDealing,
+    done: bool = false,
+    result: anyerror!fd.PlayerAck(P) = error.Unfinished,
+
+    fn run(task_ctx: Ctx, self: *Handle) anyerror!void {
+        _ = task_ctx;
+        const dealer = signers()[0].public_key();
+        const sent = self.sent;
+        self.result = self.player.handle(self.store, .zero(), dealer, sent.public, sent.private);
+        self.done = true;
+    }
+};
+
+/// Runs the second signer's player from startup on `runner`'s storage and `secrets` until it
+/// has handled `sent` from the first signer or stops at `interruption` (commonware
+/// `handle_dealing`). The runner keeps only synced storage for its next run.
+fn handle_dealing(
+    runner: *runtime.deterministic.Runner,
+    secrets: *MemorySecretStore,
+    sent: *const TestDealing,
+    interruption: ?Interruption,
+) !Handled {
+    var handled: Handled = .{};
+    errdefer handled.deinit();
+    try try runner.start_context(handle_body, .{ secrets, sent, interruption, &handled });
+    return handled;
+}
+
+fn handle_body(
+    ctx: Ctx,
+    secrets: *MemorySecretStore,
+    sent: *const TestDealing,
+    interruption: ?Interruption,
+    handled: *Handled,
+) anyerror!void {
+    // Start from the journal and secrets as earlier runs left them. The journal's faults are
+    // armed only after startup, so replay is never interrupted.
+    var faults: MutationFaults = .init(ctx.io());
+    var wrapper: MutationFault = .init(gpa, ctx.storage, &faults);
+    var cache_ref = try runtime.buffer.paged.CacheRef.init(gpa, 1024, 10);
+    defer cache_ref.deinit();
+    var store = try TestStore.init(gpa, wrapper.storage(), .{
+        .partition_prefix = "interrupted",
+        .max_participants = 16,
+        .cache_ref = &cache_ref,
+        .write_buffer = 1024,
+        .replay_buffer = 1024,
+    }, secrets);
+    defer store.deinit();
+    for (store.dealings(.zero())) |entry| {
+        const public = try entry.public.clone(gpa);
+        const copy: TestDealing = .{ .public = public, .private = entry.private };
+        try handled.restored.append(gpa, copy);
+    }
+    var info = try round_info();
+    defer info.deinit(gpa);
+    const joined = try store.create_player(N3f1, PrivateKey, .zero(), signers()[1], &info);
+    var player = joined orelse return error.PlayerMustResume;
+    defer player.deinit();
+
+    // A storage failure is fatal to the store, so a dealing is stopped by parking one of its
+    // writes and abandoning it.
+    const parks = interruption != null and interruption.? == .secret_store;
+    secrets.park_dealings(if (parks) ctx.io() else null);
+    defer secrets.park_dealings(null);
+    if (interruption) |stop| if (stop == .journal) faults.park_after(stop.journal);
+    var task: Handle = .{ .player = &player, .store = &store, .sent = sent };
+    const running = try ctx.child("handle").spawn(Handle.run, .{&task});
+    var polls: u32 = 0;
+    while (!task.done and polls < 16) : (polls += 1) try ctx.sleep(.fromMilliseconds(1));
+    if (task.done) {
+        try try running.join();
+        handled.ack = try task.result;
+    } else {
+        if (running.abort()) |_| {} else |_| {}
+    }
+    faults.disarm();
+
+    // A dealing is acknowledged exactly when none of its writes parked; a journal interruption
+    // past the dealing's last mutation parks nothing.
+    if (interruption) |stop| switch (stop) {
+        .journal => try testing.expectEqual(handled.ack != null, !faults.parked()),
+        .secret_store => try testing.expect(handled.ack == null),
+    };
+}
+
+fn new_runner() !runtime.deterministic.Runner {
+    return runtime.deterministic.Runner.init(gpa, .{ .timeout_ns = 60 * std.time.ns_per_s });
+}
+
+/// Every place a dealing can stop: in the secret store, or before each journal mutation of an
+/// uninterrupted dealing.
+fn interruptions(buffer: []Interruption, sent: *const TestDealing) ![]const Interruption {
+    buffer[0] = .secret_store;
+    var count: usize = 1;
+    var allowed: u64 = 0;
+    while (count < buffer.len) : (allowed += 1) {
+        var runner = try new_runner();
+        defer runner.deinit();
+        var secrets: MemorySecretStore = .init(gpa);
+        defer secrets.deinit();
+        var handled = try handle_dealing(&runner, &secrets, sent, .{ .journal = allowed });
+        defer handled.deinit();
+        if (handled.ack != null) break;
+        buffer[count] = .{ .journal = allowed };
+        count += 1;
+    }
+    try testing.expect(count > 1 and count < buffer.len);
+    return buffer[0..count];
+}
+
+// commonware `issue_5721_regression` (https://github.com/commonwarexyz/monorepo/issues/5721):
+// a dealing interrupted while it is recorded is restored whole or not at all, also when the
+// dealer follows it with a different dealing that is interrupted too.
+test "store: an interrupted dealing is restored whole or not at all (issue 5721)" {
+    var dealings: [3]TestDealing = .{ try dealing(2), try dealing(3), try dealing(4) };
+    defer for (&dealings) |*item| item.deinit();
+    const first, const second, const third = .{ &dealings[0], &dealings[1], &dealings[2] };
+    var buffer: [16]Interruption = undefined;
+    const stops = try interruptions(&buffer, first);
+    for (stops) |first_stop| for (stops) |second_stop| {
+        // The dealer sends one dealing and, after the player restarts, a different one.
+        var runner = try new_runner();
+        defer runner.deinit();
+        var secrets: MemorySecretStore = .init(gpa);
+        defer secrets.deinit();
+        var initial = try handle_dealing(&runner, &secrets, first, first_stop);
+        initial.deinit();
+        var later = try handle_dealing(&runner, &secrets, second, second_stop);
+        defer later.deinit();
+
+        // The restarted player has the second dealing exactly when it acknowledged it.
+        // Otherwise it has none and acknowledges the next one it is sent.
+        var next = try handle_dealing(&runner, &secrets, third, null);
+        defer next.deinit();
+        const ack = next.ack orelse return error.UninterruptedDealingUnhandled;
+        const acknowledged = if (later.ack != null) second else third;
+        if (later.ack) |second_ack| {
+            try next.expect_restored(second);
+            try testing.expect(ack.eql(second_ack));
+        } else {
+            try next.expect_restored(null);
+        }
+
+        // After another restart, the acknowledged dealing is restored whole and handling a
+        // dealing again returns the same acknowledgement.
+        var replayed = try handle_dealing(&runner, &secrets, third, null);
+        defer replayed.deinit();
+        try replayed.expect_restored(acknowledged);
+        try testing.expect(replayed.ack.?.eql(ack));
+    };
+}
+
+// commonware `interrupted_dealing_is_recorded_when_resent`.
+test "store: an interrupted dealing is recorded when it is sent again" {
+    var sent = try dealing(2);
+    defer sent.deinit();
+    // The first attempt leaves only the private half (or, in commonware, only the public one).
+    for ([_]Interruption{ .secret_store, .{ .journal = 0 } }) |stop| {
+        var runner = try new_runner();
+        defer runner.deinit();
+        var secrets: MemorySecretStore = .init(gpa);
+        defer secrets.deinit();
+        var interrupted = try handle_dealing(&runner, &secrets, &sent, stop);
+        defer interrupted.deinit();
+        try testing.expect(interrupted.ack == null);
+
+        // The restarted player has no dealing and acknowledges the one sent again.
+        var resent = try handle_dealing(&runner, &secrets, &sent, null);
+        defer resent.deinit();
+        try resent.expect_restored(null);
+        const ack = resent.ack orelse return error.UninterruptedDealingUnhandled;
+
+        // After another restart, the dealing is restored whole and handling it again returns
+        // the same acknowledgement.
+        var replayed = try handle_dealing(&runner, &secrets, &sent, null);
+        defer replayed.deinit();
+        try replayed.expect_restored(&sent);
+        try testing.expect(replayed.ack.?.eql(ack));
+    }
+}

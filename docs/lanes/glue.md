@@ -751,6 +751,12 @@ Owns `src/glue/dkg`. Reference: `glue/src/dkg` (about 24k Rust lines).
 - 2026-11-19: application.rs's last 3 tests; the canceled-proposal test found a double free
   of the ancestry when the inner app fails (fixed), and they catch an ignored dealer log in
   prepare and a canceled proposal that keeps its reservation.
+- 2026-11-19: upstream drift 43b357a41..a9ffc25f3. Ported 0f104147e (a dealing's private half is
+  found by its public message: `SecretStore.put_dealing/get_dealing` take `public`; store replay
+  and `append_dealing`, `MemorySecretStore` with `park_dealings`, examples' `Secrets` key) with
+  `issue_5721_regression` and `interrupted_dealing_is_recorded_when_resent`, and 519f7dd4c's
+  `SecretStore` recovery contract (root.zig docs). bca770a0c and a9ffc25f3 touch only
+  tests/reshare/harness.rs and mod.rs, forwarded to bls-math.
 
 ## dkg probe/bootstrap (owner: p2p lane)
 

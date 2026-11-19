@@ -72,11 +72,16 @@ pub fn assert_registrar(comptime R: type) void {
 
 /// Asserts `S` is application-owned storage for the secret material of DKG and reshare
 /// ceremonies: `put_share`/`get_share` (this node's share per epoch), `put_seed`/`get_seed`
-/// (this node's dealer RNG seed per epoch, replayed after a restart so a dealer deals the same
-/// shares), `put_dealing`/`get_dealing` (private dealings received from each dealer), and
+/// (this node's dealer RNG seed per epoch; restarted dealers reuse it to deal the same shares),
+/// `put_dealing(epoch, dealer, public: *const DealerPubMsg, private)` and
+/// `get_dealing(epoch, dealer, public) ?DealerPrivMsg` (private dealings received from each
+/// dealer, keyed by the public message they arrived with: one dealer can send several dealings
+/// in an epoch, and a private dealing is valid only with its own public message), and
 /// `prune(io, min)` (drops secrets older than `min`). All stored material must stay private,
 /// and writes must be durable when they return: losing one can make a dealer equivocate after
-/// a restart or lose a share already in use.
+/// a restart or lose a share already in use. Once a restarted node starts reading the store,
+/// operations from earlier runs, including writes and prunes that never returned, must not
+/// change stored material, and reads reflect the state those operations left.
 pub fn assert_secret_store(comptime S: type) void {
     assert_decls(S, &.{
         "put_share",   "get_share",   "put_seed", "get_seed",

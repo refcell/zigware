@@ -157,7 +157,11 @@ pub fn Store(comptime V: type, comptime P: type, comptime D: type, comptime SS: 
             const target = try self.epoch_cache(epoch);
             switch (event) {
                 .dealing => |dealing| {
-                    const stored = try self.secret_store.get_dealing(epoch, dealing.dealer);
+                    // A journaled message is restored only with the private half received
+                    // with it: an interrupted dealing leaves its public message behind, so
+                    // one dealer can have several journaled messages (commonware #5721).
+                    const secrets = self.secret_store;
+                    const stored = try secrets.get_dealing(epoch, dealing.dealer, &dealing.public);
                     const private = stored orelse {
                         var public = dealing.public;
                         public.deinit(self.gpa);
@@ -309,9 +313,10 @@ pub fn Store(comptime V: type, comptime P: type, comptime D: type, comptime SS: 
             private: fd.DealerPrivMsg,
         ) !bool {
             if (find_sorted(DealingEntry, self.dealings(epoch), dealer) != null) return false;
-            // Replay restores a dealing only when both halves survived, so a crash between
-            // the two writes drops the dealing instead of splitting it.
-            try self.secret_store.put_dealing(epoch, dealer, private);
+            // Replay restores a dealing only when both halves survived, and finds the private
+            // half by its public message, so a crash between the two writes drops the dealing
+            // instead of pairing it with another dealing's half.
+            try self.secret_store.put_dealing(epoch, dealer, &public, private);
             try self.append_synced(epoch, .{ .dealing = .{ .dealer = dealer, .public = public } });
             const copy = try public.clone(self.gpa);
             const entry: DealingEntry = .{ .key = dealer, .public = copy, .private = private };

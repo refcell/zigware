@@ -311,13 +311,13 @@ comptime {
 /// Key kinds in `Secrets`.
 const Kind = enum(u8) { share = 0, seed = 1, dealing = 2 };
 
-/// Size of a `Secrets` key: the kind, the big-endian epoch, and the SHA-256 digest of the
-/// dealer's public key (zero for shares and seeds).
+/// Size of a `Secrets` key: the kind, the big-endian epoch, and the SHA-256 digest of a
+/// dealing's dealer and public message (zero for shares and seeds).
 const key_size = 1 + 8 + Digest.fixed_size;
 const Key = [key_size]u8;
 const Store = storage.metadata.Metadata(Key, []const u8);
 
-/// The key of the `kind` entry for `epoch` and, for a dealing, `dealer`.
+/// The key of the `kind` entry for `epoch` and, for a dealing, `dealing`.
 fn secret_key(kind: Kind, epoch: Epoch, dealer: ?Digest) Key {
     assert((kind == .dealing) == (dealer != null));
     var key = std.mem.zeroes(Key);
@@ -438,18 +438,26 @@ pub const Secrets = struct {
         return self.get(Summary, secret_key(.seed, epoch, null));
     }
 
+    /// Stores `private`, keyed by `dealer` and the public message it arrived with.
     pub fn put_dealing(
         self: *Secrets,
         epoch: Epoch,
         dealer: anytype,
+        public: anytype,
         private: DealerPrivMsg,
     ) Error!void {
-        const key = secret_key(.dealing, epoch, dealer_digest(dealer));
+        const key = secret_key(.dealing, epoch, try self.dealing_digest(dealer, public));
         try self.put(DealerPrivMsg, key, private);
     }
 
-    pub fn get_dealing(self: *Secrets, epoch: Epoch, dealer: anytype) Error!?DealerPrivMsg {
-        return self.get(DealerPrivMsg, secret_key(.dealing, epoch, dealer_digest(dealer)));
+    pub fn get_dealing(
+        self: *Secrets,
+        epoch: Epoch,
+        dealer: anytype,
+        public: anytype,
+    ) Error!?DealerPrivMsg {
+        const key = secret_key(.dealing, epoch, try self.dealing_digest(dealer, public));
+        return self.get(DealerPrivMsg, key);
     }
 
     /// Durably drops every secret of an epoch below `min`.
@@ -465,12 +473,16 @@ pub const Secrets = struct {
         return key_epoch(key).get() >= min.get();
     }
 
-    /// SHA-256 of the dealer's codec encoding.
-    fn dealer_digest(dealer: anytype) Digest {
+    /// SHA-256 of the dealer's codec encoding followed by the public message's (commonware
+    /// `Sha256::hash(&[&dealer, &public.encode()])`).
+    fn dealing_digest(self: *const Secrets, dealer: anytype, public: anytype) Error!Digest {
         const P = @TypeOf(dealer);
         var bytes: [codec.fixed_size(P).?]u8 = undefined;
         _ = codec.encode_to(P, dealer, &bytes);
-        return Sha256.hash(&.{&bytes});
+        const encoded = try codec.encode(@TypeOf(public.*), self.gpa, public.*);
+        defer self.gpa.free(encoded);
+        assert(encoded.len > 0);
+        return Sha256.hash(&.{ &bytes, encoded });
     }
 };
 

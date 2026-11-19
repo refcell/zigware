@@ -224,12 +224,40 @@ test "dkg: genesis replaces unreadable artifact" {
     }
 }
 
-/// A share dealt to one player, a seed, and one dealing from each of `dealers`.
+const PubMsg = fd.DealerPubMsg(types.MinSig);
+
+/// The public message of a dealing dealt from `seed` over a singleton round (commonware
+/// `public_message`). Different seeds give different messages.
+fn public_message(seed: u64) !PubMsg {
+    var key_rng = zigware.utils.rng.TestRng.init(0);
+    const signer = ed25519.PrivateKey.random(&key_rng);
+    const N3f1 = zigware.utils.N3f1;
+    const dealers = try types.Set(ed25519.PublicKey).from_dedup(gpa, &.{signer.public_key()});
+    const players = try dealers.clone(gpa);
+    const mode = types.sharing_mode;
+    var info: fd.Info(types.MinSig, ed25519.PublicKey) =
+        try .init(N3f1, gpa, types.namespace, 0, null, mode, types.reveal, dealers, players);
+    defer info.deinit(gpa);
+    var rng = zigware.utils.rng.TestRng.init(seed);
+    const Dealer = fd.Dealer(types.MinSig, ed25519.PrivateKey);
+    var started = try Dealer.start(N3f1, gpa, &rng, &info, signer, null);
+    started.dealer.deinit(gpa);
+    for (started.priv_msgs) |*item| item.msg.zeroize();
+    gpa.free(started.priv_msgs);
+    return started.pub_msg;
+}
+
+/// One dealing: its dealer, the index of its public message, and its private half.
+const Dealing = struct { dealer: usize, public: usize, private: fd.DealerPrivMsg };
+
+/// A share dealt to one player, a seed, and three dealings: two dealers send a dealing with
+/// the same public message, and the first dealer sends another with a second message.
 const Material = struct {
     share: types.Share,
     seed: types.Summary,
-    dealings: [2]fd.DealerPrivMsg,
     dealers: [2]ed25519.PublicKey,
+    publics: [2]PubMsg,
+    dealings: [3]Dealing,
 
     fn init() !Material {
         const participants = keys(3);
@@ -237,14 +265,27 @@ const Material = struct {
         const set = try types.Set(ed25519.PublicKey).from_dedup(gpa, participants[0..1]);
         var dealt = try deal(&rng, set);
         defer dealt.deinit(gpa);
+        var first = try public_message(1);
+        errdefer first.deinit(gpa);
         var material: Material = .{
             .share = dealt.shares.get_value(participants[0]).?.*,
             .seed = undefined,
-            .dealings = .{ .init(Scalar.random(&rng)), .init(Scalar.random(&rng)) },
             .dealers = .{ participants[1], participants[2] },
+            .publics = .{ first, try public_message(2) },
+            .dealings = undefined,
         };
         rng.fill_bytes(&material.seed.bytes);
+        const layout = [_][2]usize{ .{ 0, 0 }, .{ 1, 0 }, .{ 0, 1 } };
+        for (layout, &material.dealings) |pair, *dealing| {
+            const private: fd.DealerPrivMsg = .init(Scalar.random(&rng));
+            dealing.* = .{ .dealer = pair[0], .public = pair[1], .private = private };
+        }
+        std.debug.assert(!material.publics[0].eql(material.publics[1]));
         return material;
+    }
+
+    fn deinit(self: *Material) void {
+        for (&self.publics) |*public| public.deinit(gpa);
     }
 };
 
@@ -254,29 +295,35 @@ fn expect_share(secrets: *types.Secrets, epoch: Epoch, expected: ?types.Share) !
     if (expected) |share| try testing.expect(got.?.eql(share));
 }
 
-fn expect_dealing(
+/// Expects each of `material`'s dealings stored in `epoch` (`present`) or absent.
+fn expect_dealings(
     secrets: *types.Secrets,
     epoch: Epoch,
-    dealer: ed25519.PublicKey,
-    expected: ?fd.DealerPrivMsg,
+    material: *const Material,
+    present: bool,
 ) !void {
-    const got = try secrets.get_dealing(epoch, dealer);
-    try testing.expectEqual(expected == null, got == null);
-    if (expected) |dealing| try testing.expect(got.?.eql(dealing));
+    for (material.dealings) |dealing| {
+        const dealer = material.dealers[dealing.dealer];
+        const got = try secrets.get_dealing(epoch, dealer, &material.publics[dealing.public]);
+        try testing.expectEqual(present, got != null);
+        if (present) try testing.expect(got.?.eql(dealing.private));
+    }
 }
 
 fn put_all(secrets: *types.Secrets, epoch: Epoch, material: *const Material) !void {
     try secrets.put_share(epoch, material.share);
     try secrets.put_seed(epoch, material.seed);
-    for (material.dealers, material.dealings) |dealer, dealing| {
-        try secrets.put_dealing(epoch, dealer, dealing);
+    for (material.dealings) |dealing| {
+        const dealer = material.dealers[dealing.dealer];
+        try secrets.put_dealing(epoch, dealer, &material.publics[dealing.public], dealing.private);
     }
 }
 
 // Every put survives an unclean restart, and a prune durably removes only the material below
 // its epoch.
 test "dkg: secrets survive restart and prune" {
-    const material: Material = try .init();
+    var material: Material = try .init();
+    defer material.deinit();
     var backend: MockStorage = .init(gpa);
     defer backend.deinit();
 
@@ -295,9 +342,7 @@ test "dkg: secrets survive restart and prune" {
         for ([_]u64{ 1, 2 }) |epoch| {
             try expect_share(&secrets, .new(epoch), material.share);
             try testing.expect((try secrets.get_seed(.new(epoch))).?.eql(material.seed));
-            for (material.dealers, material.dealings) |dealer, dealing| {
-                try expect_dealing(&secrets, .new(epoch), dealer, dealing);
-            }
+            try expect_dealings(&secrets, .new(epoch), &material, true);
         }
         try secrets.prune(.new(2));
         backend.crash();
@@ -309,16 +354,15 @@ test "dkg: secrets survive restart and prune" {
     try testing.expect(try secrets.get_seed(.new(1)) == null);
     try expect_share(&secrets, .new(2), material.share);
     try testing.expect((try secrets.get_seed(.new(2))).?.eql(material.seed));
-    for (material.dealers, material.dealings) |dealer, dealing| {
-        try expect_dealing(&secrets, .new(1), dealer, null);
-        try expect_dealing(&secrets, .new(2), dealer, dealing);
-    }
+    try expect_dealings(&secrets, .new(1), &material, false);
+    try expect_dealings(&secrets, .new(2), &material, true);
 }
 
 // The `bootstrap` handoff copies only the epoch-0 share from the bootstrap partition into the
 // validator partition, and the share survives an unclean restart.
 test "dkg: handoff carries only share" {
-    const material: Material = try .init();
+    var material: Material = try .init();
+    defer material.deinit();
     var backend: MockStorage = .init(gpa);
     defer backend.deinit();
     {
@@ -340,13 +384,14 @@ test "dkg: handoff carries only share" {
     defer secrets.deinit();
     try expect_share(&secrets, .zero(), material.share);
     try testing.expect(try secrets.get_seed(.zero()) == null);
-    try expect_dealing(&secrets, .zero(), material.dealers[0], null);
+    try expect_dealings(&secrets, .zero(), &material, false);
 }
 
 // Destroying the bootstrap partition erases the ceremony's share, seed, and dealing across a
 // restart.
 test "dkg: destroy erases bootstrap" {
-    const material: Material = try .init();
+    var material: Material = try .init();
+    defer material.deinit();
     var backend: MockStorage = .init(gpa);
     defer backend.deinit();
     {
@@ -365,5 +410,5 @@ test "dkg: destroy erases bootstrap" {
     defer bootstrap.deinit();
     try expect_share(&bootstrap, .zero(), null);
     try testing.expect(try bootstrap.get_seed(.zero()) == null);
-    try expect_dealing(&bootstrap, .zero(), material.dealers[0], null);
+    try expect_dealings(&bootstrap, .zero(), &material, false);
 }

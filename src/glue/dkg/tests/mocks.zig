@@ -307,15 +307,23 @@ pub const StoreHarness = struct {
 };
 
 /// Secret material kept in memory (commonware's `MemorySecretStore`), recording every prune.
+/// Dealings are keyed by epoch, dealer, and encoded public message; storing a different
+/// private dealing for a stored dealing panics.
 pub const MemorySecretStore = struct {
+    /// Epoch, dealer, encoded public message (owned), and private dealing.
+    const Dealing = struct { u64, TestPublicKey, []u8, fd.DealerPrivMsg };
+
     gpa: Allocator,
     shares: std.ArrayList(struct { u64, Share }) = .empty,
     seeds: std.ArrayList(struct { u64, Summary }) = .empty,
-    dealings: std.ArrayList(struct { u64, TestPublicKey, fd.DealerPrivMsg }) = .empty,
+    dealings: std.ArrayList(Dealing) = .empty,
     prunes: std.ArrayList(u64) = .empty,
     /// Set by `stall`: the next `put_share` persists its share, then blocks on this `Io`
     /// until canceled.
     stall_io: ?Io = null,
+    /// Set by `park_dealings`: every `put_dealing` stores nothing and blocks on this `Io`
+    /// until canceled.
+    park_io: ?Io = null,
 
     pub fn init(allocator: Allocator) MemorySecretStore {
         return .{ .gpa = allocator };
@@ -324,6 +332,7 @@ pub const MemorySecretStore = struct {
     pub fn deinit(self: *MemorySecretStore) void {
         self.shares.deinit(self.gpa);
         self.seeds.deinit(self.gpa);
+        for (self.dealings.items) |entry| self.gpa.free(entry[2]);
         self.dealings.deinit(self.gpa);
         self.prunes.deinit(self.gpa);
     }
@@ -338,6 +347,13 @@ pub const MemorySecretStore = struct {
     pub fn stall(self: *MemorySecretStore, io: Io) void {
         assert(self.stall_io == null);
         self.stall_io = io;
+    }
+
+    /// Makes every later `put_dealing` store nothing and never return (commonware
+    /// `park_dealings`); null stops parking.
+    pub fn park_dealings(self: *MemorySecretStore, io: ?Io) void {
+        self.park_io = io;
+        assert(self.park_io == null or io != null);
     }
 
     pub fn put_share(self: *MemorySecretStore, epoch: Epoch, share: Share) !void {
@@ -378,22 +394,43 @@ pub const MemorySecretStore = struct {
         self: *MemorySecretStore,
         epoch: Epoch,
         dealer: TestPublicKey,
+        public: anytype,
         private: fd.DealerPrivMsg,
     ) !void {
-        for (self.dealings.items) |*entry| if (entry[0] == epoch.get() and entry[1].eql(dealer)) {
-            entry[2] = private;
+        if (self.park_io) |io| while (true) try io.sleep(.fromSeconds(3600), .awake);
+        const encoded = try codec.encode(@TypeOf(public.*), self.gpa, public.*);
+        if (self.find_dealing(epoch, dealer, encoded)) |stored| {
+            self.gpa.free(encoded);
+            if (!stored[3].eql(private)) @panic("stored private dealing must not change");
             return;
-        };
-        try self.dealings.append(self.gpa, .{ epoch.get(), dealer, private });
+        }
+        errdefer self.gpa.free(encoded);
+        try self.dealings.append(self.gpa, .{ epoch.get(), dealer, encoded, private });
+        assert(self.dealings.items.len > 0);
     }
 
     pub fn get_dealing(
         self: *MemorySecretStore,
         epoch: Epoch,
         dealer: TestPublicKey,
+        public: anytype,
     ) !?fd.DealerPrivMsg {
-        for (self.dealings.items) |entry| {
-            if (entry[0] == epoch.get() and entry[1].eql(dealer)) return entry[2];
+        const encoded = try codec.encode(@TypeOf(public.*), self.gpa, public.*);
+        defer self.gpa.free(encoded);
+        const stored = self.find_dealing(epoch, dealer, encoded) orelse return null;
+        return stored[3];
+    }
+
+    fn find_dealing(
+        self: *const MemorySecretStore,
+        epoch: Epoch,
+        dealer: TestPublicKey,
+        encoded: []const u8,
+    ) ?*const Dealing {
+        assert(encoded.len > 0);
+        for (self.dealings.items) |*entry| {
+            const same = entry[0] == epoch.get() and entry[1].eql(dealer);
+            if (same and std.mem.eql(u8, entry[2], encoded)) return entry;
         }
         return null;
     }
@@ -402,7 +439,8 @@ pub const MemorySecretStore = struct {
         try self.prunes.append(self.gpa, min.get());
         retain(@TypeOf(self.shares.items[0]), &self.shares, min.get());
         retain(@TypeOf(self.seeds.items[0]), &self.seeds, min.get());
-        retain(@TypeOf(self.dealings.items[0]), &self.dealings, min.get());
+        for (self.dealings.items) |entry| if (entry[0] < min.get()) self.gpa.free(entry[2]);
+        retain(Dealing, &self.dealings, min.get());
     }
 
     fn retain(comptime T: type, list: *std.ArrayList(T), min: u64) void {
