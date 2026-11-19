@@ -29,8 +29,23 @@ pub fn FixedBytes(comptime N: usize) type {
             return &self.bytes;
         }
 
+        /// Lexicographic, a big-endian 64-bit word at a time (commonware's `Ord`, which keeps
+        /// the derived compare, a memcmp, up to 16 and past 64 bytes; `std.mem.order` compares
+        /// byte by byte, so zigware takes the words at every size from 8).
         pub fn order(a: Self, b: Self) std.math.Order {
-            return std.mem.order(u8, &a.bytes, &b.bytes);
+            if (N < 8) return std.mem.order(u8, &a.bytes, &b.bytes);
+            const words = N / 8;
+            for (0..words) |index| {
+                const left = std.mem.readInt(u64, a.bytes[index * 8 ..][0..8], .big);
+                const right = std.mem.readInt(u64, b.bytes[index * 8 ..][0..8], .big);
+                if (left != right) return std.math.order(left, right);
+            }
+            if (N % 8 == 0) return .eq;
+            // Every earlier byte is equal, so the last 8 bytes (overlapping the last whole
+            // word) decide.
+            const left = std.mem.readInt(u64, a.bytes[N - 8 ..][0..8], .big);
+            const right = std.mem.readInt(u64, b.bytes[N - 8 ..][0..8], .big);
+            return std.math.order(left, right);
         }
 
         pub fn eql(a: Self, b: Self) bool {
