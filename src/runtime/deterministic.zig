@@ -82,14 +82,38 @@ pub const Error = error{
 };
 
 /// Hashes an unambiguous sequence of length-prefixed fields (commonware `AuditHasher`).
+///
+/// Short fields are staged in an aligned buffer and checksummed together: CRC-32C costs one
+/// serially dependent instruction per unaligned byte, so checksumming each small field where
+/// it lies took most of a scheduler cycle. The checksum streams, so the digest is the same.
 pub const AuditHasher = struct {
     crc: cryptography.Crc32 = cryptography.Crc32.init(),
+    staged: [staged_size]u8 align(8) = undefined,
+    staged_len: u32 = 0,
+
+    const staged_size = 128;
 
     pub fn update(hasher: *AuditHasher, value: []const u8) void {
         var length: [8]u8 = undefined;
         std.mem.writeInt(u64, &length, value.len, .big);
-        hasher.crc.update(&length);
-        hasher.crc.update(value);
+        hasher.absorb(&length);
+        hasher.absorb(value);
+    }
+
+    fn absorb(hasher: *AuditHasher, bytes: []const u8) void {
+        assert(hasher.staged_len <= staged_size);
+        if (hasher.staged_len + bytes.len > staged_size) {
+            hasher.flush();
+            if (bytes.len >= staged_size) return hasher.crc.update(bytes);
+        }
+        assert(hasher.staged_len + bytes.len <= staged_size);
+        @memcpy(hasher.staged[hasher.staged_len..][0..bytes.len], bytes);
+        hasher.staged_len += @intCast(bytes.len);
+    }
+
+    fn flush(hasher: *AuditHasher) void {
+        hasher.crc.update(hasher.staged[0..hasher.staged_len]);
+        hasher.staged_len = 0;
     }
 
     pub fn update_int(hasher: *AuditHasher, comptime T: type, value: T) void {
@@ -105,11 +129,13 @@ pub const AuditHasher = struct {
         for (chunks) |chunk| total += chunk.len;
         var length: [8]u8 = undefined;
         std.mem.writeInt(u64, &length, total, .big);
-        hasher.crc.update(&length);
-        for (chunks) |chunk| hasher.crc.update(chunk);
+        hasher.absorb(&length);
+        for (chunks) |chunk| hasher.absorb(chunk);
     }
 
     pub fn finalize(hasher: *AuditHasher) [4]u8 {
+        hasher.flush();
+        assert(hasher.staged_len == 0);
         return hasher.crc.finalize().bytes;
     }
 };
@@ -734,7 +760,7 @@ pub const Runner = struct {
                 @panic("deterministic: executor time overflowed");
             try runner.wake_until_progress();
             runner.iterations += 1;
-            runner.iterations_counter.?.metric().inc();
+            increment(runner.iterations_counter.?.metric());
         }
     }
 
@@ -751,7 +777,7 @@ pub const Runner = struct {
             var id: [16]u8 = undefined;
             std.mem.writeInt(u128, &id, task.id, .big);
             runner.auditor.event("process_task", &.{ &id, task.label() });
-            task.polls.inc();
+            increment(task.polls);
             runner.resume_task(task);
             if (stop_at_root and runner.root_finished) {
                 // Tasks not reached this iteration stay ready for the drain.
@@ -762,6 +788,14 @@ pub const Runner = struct {
                 return;
             }
         }
+    }
+
+    /// Bumps one of the runner's counters. Only the runner's thread writes them, so a plain
+    /// load and store replace the locked add (readers still see whole values).
+    fn increment(counter: *telemetry.metrics.raw.Counter) void {
+        const value = counter.value.load(.monotonic);
+        counter.value.store(value +% 1, .monotonic);
+        assert(counter.value.raw == value +% 1);
     }
 
     fn check_deadline(runner: *const Runner) Error!void {
@@ -1632,6 +1666,36 @@ test "the auditor ignores buffer chunking (test_auditor_ignores_buffer_chunking)
     var different: Auditor = .{};
     different.event_chunked("send", &.{}, &.{ "a", "bc", "e" }, &.{});
     try testing.expect(!std.mem.eql(u8, &contiguous.state(), &different.state()));
+}
+
+test "audit digests are the checksum of the length-prefixed fields, at any field length" {
+    var bytes: [300]u8 = undefined;
+    for (&bytes, 0..) |*byte, index| byte.* = @truncate(index *% 151 +% 7);
+    // Field lengths on both sides of the staging buffer's size, and runs that overflow it.
+    const lengths = [_]usize{ 0, 1, 7, 8, 9, 100, 119, 120, 121, 127, 128, 129, 255, 300 };
+    for (lengths) |first| {
+        for (lengths) |second| {
+            var hasher: AuditHasher = .{};
+            hasher.update(bytes[0..first]);
+            hasher.update_chunks(&.{ bytes[0..second], bytes[0 .. second / 2] });
+            hasher.update_int(u32, @intCast(first));
+            var expected = cryptography.Crc32.init();
+            var length: [8]u8 = undefined;
+            std.mem.writeInt(u64, &length, first, .big);
+            expected.update(&length);
+            expected.update(bytes[0..first]);
+            std.mem.writeInt(u64, &length, second + second / 2, .big);
+            expected.update(&length);
+            expected.update(bytes[0..second]);
+            expected.update(bytes[0 .. second / 2]);
+            std.mem.writeInt(u64, &length, 4, .big);
+            expected.update(&length);
+            var value: [4]u8 = undefined;
+            std.mem.writeInt(u32, &value, @intCast(first), .big);
+            expected.update(&value);
+            try testing.expectEqual(expected.finalize().bytes, hasher.finalize());
+        }
+    }
 }
 
 /// Draws `draws` random bytes, then writes and syncs `data` to a blob; returns the audit state.
