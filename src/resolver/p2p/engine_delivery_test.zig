@@ -9,6 +9,7 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const utils = @import("utils");
 const runtime = @import("runtime");
+const actor = @import("actor");
 const resolver = @import("../root.zig");
 const base = @import("engine_test.zig");
 const MockKey = @import("mocks/key.zig").Key;
@@ -1378,4 +1379,76 @@ test "shutdown aborts pending delivery" {
             try testing.expect(consumer.try_event() == null);
         }
     }.body);
+}
+
+/// Drops every fetch from the fetcher, standing in for a request answered by its peer.
+const DropAll = struct {
+    pub fn call(_: DropAll, _: MockKey) bool {
+        return false;
+    }
+};
+
+/// Adds a fetch for `value` with one subscriber and no span.
+fn add_one(engine: *base.Engine, value: MockKey) !void {
+    var spans = [_]?*resolver.Span{null};
+    try engine.add_fetch(value, &.{{}}, &spans, null);
+}
+
+/// commonware `engine.rs` `issue_5720_regression`: a verdict sent before the consumer fetches
+/// the key again does not retire that fetch, even when the engine takes the fetch before it
+/// reads the verdict.
+fn repeat_after_verdict(io: Io) !void {
+    const setup = try base.SetupWith(base.Consumer).init(io, &.{1}, .{});
+    defer setup.deinit();
+    const consumer = try setup.make_consumer();
+    const producer = try setup.make_producer(&.{});
+    // An engine that never runs, so the test calls its handlers in the order under test.
+    const connection = setup.connections[0].?;
+    setup.connections[0] = null;
+    var pair = try actor.mailbox.new(base.Engine.Message, gpa, io, 1);
+    defer pair.sender.deinit();
+    const scope = runtime.telemetry.metrics.Scope.init(&setup.registry).child("actor");
+    const engine = try base.Engine.create(gpa, io, scope, .{
+        .peer_provider = setup.oracle().manager(),
+        .blocker = setup.oracle().control(setup.peers[0]),
+        .consumer = consumer,
+        .producer = producer,
+        .mailbox_size = 1,
+        .me = null,
+        .fetch_timeout = Duration.from_secs(1),
+        .fetch_retry_delay = Duration.from_secs(1),
+        .priority_requests = false,
+        .priority_responses = false,
+    }, pair.receiver, connection.sender, connection.receiver);
+    defer engine.destroy();
+    const k = key(1);
+
+    // Stand in for a request and its response: the fetcher drops the key and the consumer
+    // receives the value, answering inside `deliver`.
+    try add_one(engine, k);
+    engine.fetcher.retain(DropAll{});
+    const value = try gpa.dupe(u8, "value");
+    const delivery: resolver.Delivery(MockKey, void) = .{
+        .key = k,
+        .subscribers = engine.subscribers.pending(k).?,
+    };
+    try engine.inflight.deliver(delivery, base.key_of(1), Duration.zero, value);
+    var event = consumer.try_event().?;
+    event.deinit(gpa);
+
+    // The consumer fetches again; the engine takes the fetch before it reads the verdict.
+    try add_one(engine, k);
+
+    // The fetch applied the verdict, so it is not reported again and cannot complete the
+    // repeat (commonware's pool reports `Aborted` for it instead).
+    try testing.expect(try engine.inflight.try_next_delivery() == null);
+
+    // The repeat keeps its subscriber and waits for a request of its own.
+    try testing.expect(engine.subscribers.contains(k));
+    try testing.expect(engine.inflight.contains(k));
+    try testing.expectEqual(@as(usize, 1), engine.fetcher.len_pending());
+}
+
+test "verdict sent before a repeat fetch does not retire it (issue_5720_regression)" {
+    try base.run(10, repeat_after_verdict);
 }

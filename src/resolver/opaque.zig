@@ -392,6 +392,11 @@ pub fn Actor(comptime F: type, comptime C: type) type {
             spans: ?[]?*resolver.Span,
         ) Error!void {
             assert(added.len > 0);
+            // Apply a verdict the consumer already sent before adding these subscribers so it
+            // cannot retire them. They then start a new fetch or join those that remain.
+            if (self.deliveries.try_completion(key)) |completed| {
+                try self.handle_delivered(completed);
+            }
             const is_new = try self.subscribers.insert_spanned(self.gpa, key, added, spans);
             if (!is_new) return;
             const attempt = try self.start_fetch(key);

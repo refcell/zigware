@@ -160,6 +160,20 @@ on p2p's simulated network and the deterministic runtime.
 
 ### Test audit: resolver (2026-11-19, commonware 43b357a41)
 
+Drift check (commonware 43b357a41 to a9ffc25f3, p2p lane, 2026-11-19): 7de47bdd1 (issue 5720)
+applies a verdict the consumer already sent before a fetch joins its key, so the verdict cannot
+retire the new subscribers. Ported: `delivery.zig` `Tracker.try_completion` (with
+`utils.channel.oneshot` `Receiver.is_resolved`), `p2p/inflight.zig` `try_delivery`, and calls at the
+top of the p2p engine's and the opaque actor's `add_fetch`, with the three new tests: delivery.rs
+`test_try_completion_takes_a_sent_verdict` ("try_completion takes a sent verdict"), and the
+`issue_5720_regression` tests of p2p/engine.rs (engine_delivery_test.zig) and opaque.rs
+(opaque_test.zig), each named "verdict sent before a repeat fetch does not retire it". Each fails
+with its fix removed. Decision: `try_completion` takes the slot off the completion queue, so
+`next_completion` never reports it, where commonware's pool reports `Aborted` for it once; the tests
+check that no completion is pending instead. The existing "fetch after accepted verdict restarts"
+passes even without the fix (the verdict task queues before the engine reads the fetch), so the
+direct engine test is the one that covers it.
+
 Every `#[test]`/`#[test_traced]`/`#[rstest]` fn in commonware `resolver/src`, matched to a zigware
 test by name or by reading both bodies (a zigware test may cover several). 178 tests: 165 ported, 8
 open, 5 not portable.

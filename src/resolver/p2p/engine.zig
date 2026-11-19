@@ -558,8 +558,9 @@ pub fn Engine(comptime T: type) type {
         }
 
         /// Tracks `added` for `key`, taking the spans of new subscribers from `spans` (one per
-        /// subscriber; the caller frees what is left).
-        fn add_fetch(
+        /// subscriber; the caller frees what is left). Public for tests that drive an engine
+        /// without running it.
+        pub fn add_fetch(
             self: *Self,
             key: K,
             added: []const S,
@@ -568,6 +569,9 @@ pub fn Engine(comptime T: type) type {
         ) Error!void {
             assert(added.len > 0);
             assert(spans.len == added.len);
+            // Apply a verdict the consumer already sent before adding these subscribers so it
+            // cannot retire them. They then start a new fetch or join those that remain.
+            if (self.inflight.try_delivery(key)) |completed| try self.handle_delivery(completed);
             const is_new = !self.inflight.contains(key);
             _ = try self.subscribers.insert_spanned(self.gpa, key, added, spans);
             if (targets) |peers| {

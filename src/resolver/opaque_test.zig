@@ -516,6 +516,87 @@ test "canceled delivery cannot change reinserted key" {
     }
 }
 
+var repeat_outcome_under_test: ?Outcome = undefined;
+
+/// commonware `issue_5720_regression`, first part: with no other subscriber keeping the key
+/// in flight, a repeat fetch after an accepted, ignored, or dropped verdict starts a second
+/// source fetch and is delivered the new response.
+fn repeat_after_verdict_body(io: Io) !void {
+    const fetcher = try MockFetcher.init();
+    defer fetcher.deinit();
+    try fetcher.push(1, "old");
+    try fetcher.push(1, "new");
+    var registry = metrics.Registry.init(testing.allocator);
+    defer registry.deinit();
+    var direct = try Direct.init(io, &registry, fetcher);
+    defer direct.deinit();
+    const subject = direct.actor;
+    // The first fetch is served the old response, and its delivery to 10 awaits a verdict.
+    try subject.add_fetch(1, &.{10});
+    try direct.fetch_once();
+    var first = direct.consumer.pop().?;
+
+    // The consumer answers, then fetches again before the actor reads the verdict.
+    if (repeat_outcome_under_test) |outcome| try first.send(outcome) else first.drop();
+    try subject.add_fetch(1, &.{10});
+
+    // The fetch applied the verdict, so it is not reported again and cannot retire the
+    // repeat (commonware's pool reports `Aborted` for it instead).
+    try testing.expect(try subject.deliveries.try_next_completion() == null);
+    try testing.expectEqualSlices(u16, &.{10}, subject.subscribers.pending(1).?);
+
+    // The repeat causes a second source fetch and a second delivery.
+    try direct.fetch_once();
+    var second = direct.consumer.pop().?;
+    defer second.drop();
+    try testing.expectEqualStrings("new", second.value);
+    try testing.expectEqualSlices(u16, &.{10}, second.subscribers);
+    try testing.expectEqual(@as(u32, 2), fetcher.calls());
+}
+
+/// commonware `issue_5720_regression`, second part: when a later subscriber keeps the key in
+/// flight, the repeat joins it and both are served from the accepted response.
+fn repeat_joins_inflight_body(io: Io) !void {
+    const fetcher = try MockFetcher.init();
+    defer fetcher.deinit();
+    try fetcher.push(1, "value");
+    var registry = metrics.Registry.init(testing.allocator);
+    defer registry.deinit();
+    var direct = try Direct.init(io, &registry, fetcher);
+    defer direct.deinit();
+    const subject = direct.actor;
+    try subject.add_fetch(1, &.{10});
+    try direct.fetch_once();
+    var first = direct.consumer.pop().?;
+
+    // 11 joins while the delivery to 10 is judged. The consumer then accepts that delivery
+    // and fetches for 10 again before the actor reads the verdict.
+    try subject.add_fetch(1, &.{11});
+    try first.send(complete);
+    try subject.add_fetch(1, &.{10});
+
+    // The accepted response is redelivered to 11 and then to the repeat for 10, each after
+    // the previous verdict is applied, and the source is not asked again.
+    for ([_]u16{ 11, 10 }, 0..) |subscriber, index| {
+        if (index > 0) try direct.deliver_next();
+        var delivery = direct.consumer.pop().?;
+        try testing.expectEqualStrings("value", delivery.value);
+        try testing.expectEqualSlices(u16, &.{subscriber}, delivery.subscribers);
+        try delivery.send(complete);
+    }
+    try direct.deliver_next();
+    try testing.expect(!subject.subscribers.contains(1));
+    try testing.expectEqual(@as(u32, 1), fetcher.calls());
+}
+
+test "verdict sent before a repeat fetch does not retire it (issue_5720_regression)" {
+    for ([_]?Outcome{ complete, .ignored, null }) |outcome| {
+        repeat_outcome_under_test = outcome;
+        try run(repeat_after_verdict_body);
+    }
+    try run(repeat_joins_inflight_body);
+}
+
 test "missing fetch retries until value is available" {
     try run(struct {
         fn body(io: Io) !void {

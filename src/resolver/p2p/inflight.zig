@@ -162,6 +162,12 @@ pub fn Inflight(comptime C: type, comptime P: type) type {
             return self.deliveries.next_completion();
         }
 
+        /// The key's verdict if the consumer already sent it or dropped its sender, without
+        /// waiting for `next_delivery` to report it (commonware `try_delivery`).
+        pub fn try_delivery(self: *Self, key: Key) ?Completion {
+            return self.deliveries.try_completion(key);
+        }
+
         /// The next verdict if one is ready.
         pub fn try_next_delivery(self: *Self) error{Aborted}!?Completion {
             return self.deliveries.try_next_completion();

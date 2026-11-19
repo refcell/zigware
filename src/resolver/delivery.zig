@@ -151,6 +151,13 @@ pub fn Tracker(comptime C: type, comptime Context: type, comptime State: type) t
             return .{ .gpa = gpa, .io = io, .consumer = consumer, .shared = shared };
         }
 
+        /// Whether a completion is queued, taking the signal's mutex (tests).
+        fn has_completion_locked_for_test(self: *Self) bool {
+            self.shared.signal.mutex.lockUncancelable(self.io);
+            defer self.shared.signal.mutex.unlock(self.io);
+            return self.has_completion_locked();
+        }
+
         /// Whether a completion is queued. The caller holds the signal's mutex.
         pub fn has_completion_locked(self: *const Self) bool {
             return self.shared.done.items.len > 0;
@@ -328,6 +335,39 @@ pub fn Tracker(comptime C: type, comptime Context: type, comptime State: type) t
             return try self.finish(slot);
         }
 
+        /// Take the completion of the key's delivery if the consumer already sent its verdict
+        /// or dropped its sender (commonware `try_completion`). Call this before adding
+        /// subscribers to a key so such a verdict cannot retire them. Returns the completion
+        /// `next_completion` would otherwise return, frees the delivery slot, and removes it
+        /// from the queue, so `next_completion` never reports it (commonware's pool reports
+        /// `Aborted` once instead). Returns null if the key has no delivery or its verdict is
+        /// still pending.
+        pub fn try_completion(self: *Self, key: K) ?Done {
+            const entry = self.entries.getPtr(key) orelse return null;
+            const slot = entry.delivery orelse return null;
+            assert(!slot.canceled); // a canceled slot no longer belongs to an entry
+            if (!self.take_queued(slot)) {
+                if (!slot.receiver.is_resolved()) return null;
+                // The verdict is ready, so the wait returns at once and queues the slot.
+                slot.future.await(self.io);
+                assert(self.take_queued(slot));
+            } else {
+                slot.future.await(self.io);
+            }
+            // Proof: the slot is active, and only a canceled slot aborts.
+            return self.retire(slot) catch unreachable;
+        }
+
+        /// Removes `slot` from the completion queue; false if its wait has not queued it.
+        fn take_queued(self: *Self, slot: *Slot) bool {
+            self.shared.signal.mutex.lockUncancelable(self.io);
+            defer self.shared.signal.mutex.unlock(self.io);
+            const done = &self.shared.done;
+            const index = std.mem.indexOfScalar(*Slot, done.items, slot) orelse return false;
+            _ = done.orderedRemove(index);
+            return true;
+        }
+
         fn start(
             self: *Self,
             delivery: resolver.Delivery(K, S),
@@ -390,6 +430,11 @@ pub fn Tracker(comptime C: type, comptime Context: type, comptime State: type) t
 
         fn finish(self: *Self, slot: *Slot) error{Aborted}!Done {
             slot.future.await(self.io);
+            return self.retire(slot);
+        }
+
+        /// Frees a slot whose wait has ended and returns its completion.
+        fn retire(self: *Self, slot: *Slot) error{Aborted}!Done {
             const index = std.mem.indexOfScalar(*Slot, self.live.items, slot).?;
             _ = self.live.swapRemove(index);
             defer {
@@ -703,6 +748,108 @@ test "dropped verdict completes without outcome and redelivers" {
             try testing.expect(judged.outcome.?.eql(complete));
         }
     }.body);
+}
+
+/// Returns true when `tracker` has no completion ready to report.
+fn no_completion(tracker: *PendingTracker) !bool {
+    const ready = try tracker.try_next_completion();
+    if (ready) |completion| {
+        var owned = completion;
+        owned.deinit(testing.allocator);
+    }
+    return ready == null;
+}
+
+test "try_completion takes a sent verdict" {
+    // commonware `test_try_completion_takes_a_sent_verdict`.
+    try run(struct {
+        fn body(io: Io) !void {
+            const gpa = testing.allocator;
+            var senders: std.ArrayList(oneshot.Sender(bool)) = .empty;
+            defer senders.deinit(gpa);
+            const consumer: PendingConsumer = .{ .senders = &senders, .io = io };
+            var tracker = try PendingTracker.init(gpa, io, consumer);
+            defer tracker.deinit();
+            const k = mock_key(1);
+
+            // Nothing is taken without a delivery or while its verdict is pending.
+            try testing.expect(tracker.try_completion(k) == null);
+            _ = try tracker.insert(k);
+            try testing.expect(tracker.try_completion(k) == null);
+            try tracker.deliver(unit_delivery(k), 2, "v");
+            var sender = consumer.pop();
+            try testing.expect(try no_completion(&tracker));
+            try testing.expect(tracker.try_completion(k) == null);
+
+            // A sent verdict is taken once, before the queue reports it.
+            try sender.send(true);
+            var completed = tracker.try_completion(k).?;
+            defer completed.deinit(gpa);
+            try testing.expectEqual(@as(u8, 2), completed.context);
+            try testing.expect(completed.key.eql(k));
+            try testing.expect(completed.outcome.?.eql(complete));
+            try testing.expect(!completed.canceled);
+            try testing.expect(!completed.previously_accepted);
+            try testing.expect(tracker.try_completion(k) == null);
+
+            // The slot is free for the next delivery, and the taken verdict is never
+            // reported again (commonware's pool reports `Aborted` for it once).
+            tracker.accept_response(k);
+            try tracker.redeliver(unit_delivery(k));
+            sender = consumer.pop();
+            try testing.expect(try no_completion(&tracker));
+            try testing.expectEqual(@as(usize, 1), tracker.pending());
+            try take_pending_verdict(io, &tracker, k, &sender);
+            try take_dropped_sender(&tracker, k, consumer);
+        }
+    }.body);
+}
+
+/// A verdict pending when read completes through the queue, and one the wait already queued
+/// is taken by `try_completion` instead.
+fn take_pending_verdict(
+    io: Io,
+    tracker: *PendingTracker,
+    k: MockKey,
+    sender: *oneshot.Sender(bool),
+) !void {
+    const gpa = testing.allocator;
+    try testing.expect(tracker.try_completion(k) == null);
+    try sender.send(false);
+    var judged = try tracker.next_completion();
+    defer judged.deinit(gpa);
+    try testing.expect(judged.outcome.?.eql(.invalid));
+    try testing.expect(judged.previously_accepted);
+
+    try tracker.redeliver(unit_delivery(k));
+    var queued_sender = tracker.consumer.pop();
+    try queued_sender.send(true);
+    // Let the wait queue its slot first.
+    while (!tracker.has_completion_locked_for_test()) try io.sleep(.fromMilliseconds(1), .real);
+    var queued = tracker.try_completion(k).?;
+    defer queued.deinit(gpa);
+    try testing.expect(queued.outcome.?.eql(complete));
+    try testing.expect(try no_completion(tracker));
+    try testing.expectEqual(@as(usize, 0), tracker.pending());
+}
+
+/// A dropped sender is taken as a completion without an outcome, and the slot is free for
+/// the delivery that follows.
+fn take_dropped_sender(tracker: *PendingTracker, k: MockKey, consumer: PendingConsumer) !void {
+    const gpa = testing.allocator;
+    try tracker.redeliver(unit_delivery(k));
+    var dropped = consumer.pop();
+    dropped.deinit();
+    var completed = tracker.try_completion(k).?;
+    defer completed.deinit(gpa);
+    try testing.expect(completed.outcome == null);
+    try testing.expect(!completed.canceled);
+    try testing.expect(completed.previously_accepted);
+    try tracker.redeliver(unit_delivery(k));
+    var last = consumer.pop();
+    try last.send(true);
+    var final = try tracker.next_completion();
+    final.deinit(gpa);
 }
 
 test "redeliver reuses accepted response for new subscribers" {

@@ -173,6 +173,15 @@ pub fn Receiver(comptime T: type) type {
             return state.value != null;
         }
 
+        /// Whether `recv` would return without waiting: a value is waiting, or the sender is
+        /// gone (dropped, or done sending).
+        pub fn is_resolved(receiver: Self) bool {
+            const state = receiver.state;
+            state.lock();
+            defer state.unlock();
+            return state.value != null or !state.sender_alive;
+        }
+
         /// Drop the receiver and any unreceived value (passed to `T.discard`, if declared).
         pub fn deinit(receiver: *Self) void {
             const state = receiver.state;
