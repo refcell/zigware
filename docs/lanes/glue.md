@@ -362,9 +362,9 @@ ones: d = deployer (thread T-01a1d5b9-c237), u = utils, j = storage-journal
 | stateful/db/p2p/actor.rs | 24 | 24 | 0 | 0 | |
 | stateful/db/p2p/handler.rs, limits.rs | 3 | 3 | 0 | 0 | |
 | stateful/db/p2p/mailbox.rs | 4 | 4 | 0 | 0 | |
-| stateful/actor/syncer/actor.rs | 13 | 8 | 5 | 0 | d |
+| stateful/actor/syncer/actor.rs | 13 | 13 | 0 | 0 | |
 | stateful/actor/syncer/mailbox.rs | 2 | 2 | 0 | 0 | |
-| stateful/actor/syncer/plan.rs | 7 | 6 | 1 | 0 | d |
+| stateful/actor/syncer/plan.rs | 7 | 6 | 0 | 1 | |
 | stateful/actor/syncer/mod.rs (conformance) | 1 | 1 | 0 | 0 | |
 | stateful/actor/core/mailbox.rs | 2 | 2 | 0 | 0 | |
 | stateful/actor/core/mod.rs | 4 | 1 | 3 | 0 | u |
@@ -372,7 +372,7 @@ ones: d = deployer (thread T-01a1d5b9-c237), u = utils, j = storage-journal
 | stateful/actor/core/processing.rs | 86 | 0 | 86 | 0 | u |
 | stateful/actor/processor/mod.rs | 44 | 22 | 22 | 0 | u |
 | stateful/tests/mod.rs, floor.rs | 28 | 11 | 17 | 0 | j |
-| **total** | **469** | **298** | **149** | **22** | |
+| **total** | **469** | **303** | **143** | **23** | |
 
 - Not portable (db/mod.rs, 22): zigware's `Barrier` is synchronous (databases persist inside
   `finalize`), so `barrier_waits_for_every_handle` (8), `barrier_cancellation_releases_handles`
@@ -393,11 +393,12 @@ ones: d = deployer (thread T-01a1d5b9-c237), u = utils, j = storage-journal
   - db/p2p actor.rs: done. The handler-level cases are in actor_test.zig; the live ones
     (concurrent serves, pending feedback, late subscribers, cancellation before resolver
     admission) in actor_live_test.zig, on a simulated two-peer network.
-  - syncer: `resolve_follows_live_floor_after_startup` (2),
-    `restart_resumes_floor_installed_before_stateful`,
-    `resolve_skips_selected_block_pruned_by_newer_floor`,
-    `resolve_recovers_round_after_boundary_prune` (these run on a real prunable marshal:
-    marshal mocks' `PrunableArchives`); plan.rs `complete_height_cannot_move_backward`.
+  - syncer: done. The live-floor (2), pruned-by-newer-floor, boundary-prune, and
+    restart-resumes-installed-floor (`Stateful` over commonware's `WedgeSet`) cases are in
+    syncer/actor_marshal_test.zig, on a real restartable marshal over prunable archives
+    (actor/marshal_fixture.zig, commonware's tests/fixtures.rs). plan.rs's
+    `complete_height_cannot_move_backward` is `#[should_panic]`; zigware asserts instead,
+    so it is not portable.
   - core/syncing.rs: the transition, ack-window, retarget, and shutdown tests (11), which drive
     `Syncing` through the stateful wiring.
 - Open, u (utils):

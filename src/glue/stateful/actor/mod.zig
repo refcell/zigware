@@ -51,6 +51,7 @@ test {
     std.testing.refAllDecls(@This());
     _ = @import("syncer/plan_test.zig");
     _ = @import("syncer/actor_test.zig");
+    _ = @import("syncer/actor_marshal_test.zig");
     _ = @import("processor/pruning_test.zig");
     _ = @import("processor/pending_test.zig");
     _ = @import("processor/execution_test.zig");
