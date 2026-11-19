@@ -724,6 +724,13 @@ pub fn Db(comptime F: type, comptime O: type, comptime H: type) type {
                 return self.bounds.tip.root;
             }
 
+            /// The sync target reached once this batch is applied; its range covers only the
+            /// last commit, the one operation a compact db holds.
+            pub fn target(self: *const MerkleizedBatch) Target {
+                const end = self.bounds.tip.size;
+                return .init(self.root(), end - 1, end);
+            }
+
             /// This batch's operations and the location of the first.
             pub fn operations(self: *const MerkleizedBatch) struct { u64, []const O } {
                 return .{ self.bounds.base.size, self.ops };

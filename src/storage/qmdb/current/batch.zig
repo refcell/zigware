@@ -9,6 +9,7 @@
 //! batches still pending.
 
 const std = @import("std");
+const sync_target = @import("../sync/target.zig");
 const assert = std.debug.assert;
 const refcount = @import("../../refcount.zig");
 const RefCount = refcount.RefCount;
@@ -604,6 +605,12 @@ pub fn Merkleized(comptime D: type) type {
         /// The ops root after this batch.
         pub fn ops_root(self: *const Self) D.Digest {
             return self.inner.root();
+        }
+
+        /// The sync target reached once this batch is applied. Its root is the ops root, which
+        /// the sync engine verifies against, over `[sync_boundary, tip)`.
+        pub fn target(self: *const Self) sync_target.Target(D.Family, D.Digest) {
+            return .init(self.ops_root(), self.sync_boundary(), self.inner.bounds.tip.size);
         }
 
         pub fn bounds(self: *const Self) *const D.Any.Bounds {

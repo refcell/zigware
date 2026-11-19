@@ -208,8 +208,10 @@ which every database here is built on.
   `prune_to_target` and an optional `validate_target` the engine runs on the initial target
   and every adopted update (compact refuses wider than one operation). Compact `Db.target`
   returns the ranged `Target`. Ported `step_fails_on_same_root_advance`.
+- [x] 8bf364011: merkleized batches of any, current, immutable, keyless, and compact report
+  `target()`, the target reached once applied (current's is chunk-aligned on its ops root).
 - [ ] 8bf364011 batch 2: drop `CompactTarget` and its two conformance entries once glue's
-  compact adapter (deployer) takes `Target`; merkleized-batch `target()` for the dbs.
+  compact adapter (deployer, T-01a1d5b9-c237) takes `Target`.
 - [x] Upstream `qmdb::commit_floor_at`: `qmdb.commit_floor_at` returns the floor of the
   commit at `size - 1`, or null for a non-commit (`HistoricalFloorPruned` at size 0,
   `ItemPruned`, `DataCorrupted` past its own location); `find_inactivity_floor_at` wraps it.
@@ -453,3 +455,4 @@ which every database here is built on.
 - 2026-11-19: upstream commit_floor_at: qmdb inits refuse a log not ending in a commit.
 - 2026-11-19: upstream 102430409: store get_many cached/uncached test (refactor moot by decision).
 - 2026-11-19: upstream 8bf364011 batch 1: sync databases report `target()`; engine validates.
+- 2026-11-19: upstream 8bf364011: merkleized batches report their sync `target()`.

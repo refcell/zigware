@@ -132,6 +132,13 @@ test "compact sync accepts only a target covering the last commit" {
         try testing.expectEqual(db.size(), reached.end);
         try testing.expectEqual(reached.end - 1, reached.start);
         try Db.validate_target(reached);
+        // A merkleized batch reaches the target the db reports once it is applied.
+        var batch = try db.new_batch();
+        const merkleized = try batch.merkleize(&db);
+        defer merkleized.release();
+        const expected = merkleized.target();
+        try db.apply_batch(merkleized);
+        try testing.expect(db.target().eql(expected));
         const wide = Db.Target.init(reached.root, reached.start - 1, reached.end);
         try testing.expectError(error.InvalidTarget, Db.validate_target(wide));
     }

@@ -703,3 +703,24 @@ test "current metrics count and time each operation" {
     defer gpa.free(text);
     try testing.expect(std.mem.indexOf(u8, text, "current_get_calls_total") == null);
 }
+
+// Commonware's current/mod.rs sync-target check: a batch and the database it applies to agree
+// on the chunk-aligned sync target, with a nonzero sync boundary.
+test "current batch and database agree on the sync target" {
+    const Db = support.UnorderedFixed(merkle.mmr.Family);
+    var harness = try support.Harness.init(gpa);
+    defer harness.deinit();
+    var db = try harness.open(Db, null);
+    defer db.deinit();
+    try apply_random_ops(Db, &db, 300, 0x7072);
+    var batch = try db.new_batch();
+    try batch.write(key(0), val(1, 0));
+    const merkleized = try batch.merkleize(&db);
+    defer merkleized.release();
+    const expected = merkleized.target();
+    try db.apply_batch(merkleized);
+    try testing.expect(expected.root.eql(db.ops_root()));
+    try testing.expectEqual(db.sync_boundary(), expected.start);
+    try testing.expectEqual(db.bounds().end, expected.end);
+    try testing.expect(expected.start > 0); // A nonzero, chunk-aligned boundary.
+}

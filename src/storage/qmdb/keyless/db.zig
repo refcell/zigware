@@ -20,6 +20,7 @@ const codec = @import("codec");
 const runtime = @import("runtime");
 const merkle = @import("../../merkle/mod.zig");
 const qmdb = @import("../mod.zig");
+const sync_target = @import("../sync/target.zig");
 const chain = @import("../chain.zig");
 const value_mod = @import("../value.zig");
 const authenticated = @import("../../journal/authenticated.zig");
@@ -611,6 +612,12 @@ pub fn Db(comptime F: type, comptime E: type, comptime C: type, comptime H: type
 
             pub fn root(self: *const MerkleizedBatch) Digest {
                 return self.bounds.tip.root;
+            }
+
+            /// The sync target reached once this batch is applied: its root over
+            /// `[inactivity_floor, tip)` (commonware's `MerkleizedBatch::target`).
+            pub fn target(self: *const MerkleizedBatch) sync_target.Target(F, Digest) {
+                return .init(self.root(), self.bounds.inactivity_floor, self.bounds.tip.size);
             }
 
             /// This batch's own operations and the location of the first.
