@@ -318,22 +318,22 @@ Open:
 - [ ] `authenticated/discovery/actors/listener.rs` `blocks_private_ips`: with
   allow_private_ips=false an inbound localhost connection is rejected and counts
   handshakes_blocked_total 1; network_test.zig
-- [ ] `authenticated/discovery/actors/peer/actor.rs`
+- [x] `authenticated/discovery/actors/peer/actor.rs`
   `greeting_and_queued_data_progress_with_backpressure`: Peer.run over a small-buffer connection
   pair: queued bit vecs/peers/data and the greeting flow both ways, and sent/received per-type
   metrics are greeting 1, bit_vec 2, peers 1, data 1; peer.zig (no peer tests exist)
-- [ ] `authenticated/discovery/actors/peer/actor.rs` `test_missing_greeting_returns_error`: Peer.run
+- [x] `authenticated/discovery/actors/peer/actor.rs` `test_missing_greeting_returns_error`: Peer.run
   returns error.MissingGreeting when the first frame is not a greeting; peer.zig
-- [ ] `authenticated/discovery/actors/peer/actor.rs` `test_duplicate_greeting_returns_error`:
+- [x] `authenticated/discovery/actors/peer/actor.rs` `test_duplicate_greeting_returns_error`:
   Peer.run returns error.DuplicateGreeting on a second greeting; peer.zig
-- [ ] `authenticated/discovery/actors/peer/actor.rs`
+- [x] `authenticated/discovery/actors/peer/actor.rs`
   `test_greeting_public_key_mismatch_returns_error`: Peer.run returns error.GreetingMismatch when
   the greeting key differs from the authenticated peer; peer.zig
-- [ ] `authenticated/discovery/actors/peer/actor.rs`
+- [x] `authenticated/discovery/actors/peer/actor.rs`
   `test_invalid_channel_no_unbounded_metric_cardinality`: data on an unregistered channel returns
   error.InvalidChannel, increments the per-peer invalid counter once, and creates no per-channel
   series; peer.zig
-- [ ] `authenticated/discovery/actors/peer/actor.rs` `test_oversized_data_returns_error`: data one
+- [x] `authenticated/discovery/actors/peer/actor.rs` `test_oversized_data_returns_error`: data one
   byte over max_message_size makes Peer.run fail with a decode error; peer.zig ("a payload above the
   receiver's limit is never delivered" checks only non-delivery at network level)
 - [ ] `authenticated/discovery/actors/peer/ingress.rs` `kill_retained_on_overflow`: with the outbox

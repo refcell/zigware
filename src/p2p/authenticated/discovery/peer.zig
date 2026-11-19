@@ -408,3 +408,7 @@ pub fn Peer(comptime P: type) type {
         }
     };
 }
+
+test {
+    _ = @import("peer_test.zig");
+}
