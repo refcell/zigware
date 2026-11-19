@@ -7,9 +7,9 @@ the same name, the same public concepts, and the same dependency edges.
 | --- | --- |
 | `<crate>/src/lib.rs` | `src/<crate>/root.zig` |
 | `<crate>/src/<module>` | `src/<crate>/<module>/` (or `<module>.zig`) |
-| `<crate>/fuzz/` | `std.testing.fuzz` tests next to the code, plus seeded fuzz in `zig build test` |
+| `<crate>/fuzz/`, proptests | `std.testing.fuzz` tests and `invariants.minifuzz` targets next to the code, run seeded in `zig build test` |
 | `<crate>/src/**/conformance.rs` | the same conformance hashes, checked by `zig build test` |
-| `examples/<name>` | `examples/<name>/main.zig`, a `run-<name>` build step |
+| `examples/<name>` | `examples/<name>/main.zig` (or `<binary>.zig` per binary), a `run-<name>` build step |
 | `macros`, `*/macros` | comptime code in the package that uses it (no separate package) |
 | `docs`, `mcp`, `sol`, `docker`, `pipeline` | not ported |
 
@@ -21,9 +21,9 @@ on lines above it.
 
 | Package | Imports | commonware size (Rust lines) |
 | --- | --- | ---: |
-| formatting | | 0.6k |
-| allocator | | 2.2k |
-| bench | | 1.8k |
+| formatting |  | 0.6k |
+| allocator |  | 2.2k |
+| bench |  | 1.8k |
 | conformance | formatting | 0.8k |
 | invariants | formatting | 0.6k |
 | simd | invariants | 9k |
@@ -31,22 +31,25 @@ on lines above it.
 | utils | codec, formatting, conformance, invariants | 35k |
 | parallel | utils | 26k |
 | math | codec, invariants, parallel, utils, simd | 4.6k |
-| cryptography | codec, formatting, math, parallel, utils, invariants, simd, conformance | 87k |
+| cryptography | codec, formatting, math, parallel, utils, invariants, simd, conformance | 67k |
+| curve25519 (`src/cryptography/curve25519`) | codec, cryptography, formatting, math, parallel, utils, conformance, invariants | 20k |
 | runtime | codec, cryptography, formatting, parallel, utils, conformance | 99k |
 | actor | runtime, utils | 2.8k |
-| storage | codec, cryptography, formatting, parallel, runtime, utils, math, conformance | 220k |
+| storage | codec, cryptography, formatting, parallel, runtime, utils, math, conformance, invariants | 220k |
 | stream | codec, cryptography, formatting, math, runtime, utils | 4.3k |
-| coding | codec, cryptography, parallel, storage, utils, runtime, invariants | 4.3k |
-| clearing | codec, cryptography, formatting, parallel, storage, utils, runtime | 16k |
-| p2p | actor, codec, cryptography, math, parallel, runtime, stream, utils | 42k |
-| broadcast | actor, codec, cryptography, p2p, parallel, runtime, utils | 3.3k |
-| collector | actor, codec, cryptography, p2p, runtime, utils | 2.4k |
-| resolver | actor, codec, cryptography, p2p, runtime, stream, utils | 14k |
-| consensus | actor, broadcast, codec, coding, cryptography, formatting, math, parallel, p2p, resolver, runtime, storage, utils | 139k |
-| glue | everything above except clearing, collector, deployer | 68k |
+| coding | codec, cryptography, parallel, storage, utils, runtime, invariants, conformance | 4.3k |
+| clearing | codec, cryptography, formatting, parallel, storage, utils, runtime, conformance, invariants | 16k |
+| p2p | actor, codec, cryptography, math, parallel, runtime, stream, utils, conformance, invariants | 42k |
+| broadcast | actor, codec, cryptography, p2p, parallel, runtime, utils, invariants | 3.3k |
+| collector | actor, codec, cryptography, p2p, runtime, utils, invariants | 2.4k |
+| resolver | actor, codec, cryptography, p2p, runtime, stream, utils, conformance | 14k |
+| consensus | actor, broadcast, codec, coding, cryptography, formatting, math, parallel, p2p, resolver, runtime, storage, utils, conformance, invariants | 140k |
+| glue | actor, broadcast, codec, coding, consensus, cryptography, math, p2p, parallel, resolver, runtime, storage, stream, utils, conformance, invariants | 67k |
 | deployer | cryptography, utils | 8.8k |
 
-Rust line counts include tests, which are a large share of every crate.
+The table is `build.zig`'s `packages` list, in its order. Rust line counts are every `.rs` file
+under the crate at commonware a9ffc25f3 (2026-11-19), tests included, which are a large share
+of every crate; cryptography's excludes `curve25519`.
 
 ## Principles
 
@@ -57,11 +60,13 @@ Rust line counts include tests, which are a large share of every crate.
   `Spawner`, `Clock`, `Network`, `Storage`, `Metrics`, and an RNG. zigware does the same
   with `runtime.Context`: library code never reads the clock, opens a socket or file, or
   draws randomness except through it. There are two runtimes behind one interface:
-  - **deterministic**: single-threaded, seeded scheduler on stackful tasks, simulated time,
+  - **deterministic**: single-threaded, seeded scheduler on stackful fibers, simulated time,
     in-memory storage with fault injection, and an auditor hash of every event, so any run
     replays exactly from its seed and two runs can be compared;
-  - **production**: io_uring on Linux (kqueue on macOS) through `std.Io`, real clock and
-    sockets, files on disk.
+  - **production**: real clock, TCP, and files on disk. Its `Runner` owns a `std.Io.Threaded`
+    on every platform, since `std.Io.Uring` does not compile in Zig 0.17.1; on Linux,
+    `Config.io_uring` moves blob and socket I/O onto zigware's own io_uring rings
+    (`src/runtime/production/ring.zig`, commonware's `iouring-storage` and `iouring-network`).
   The runtime lane owns the exact interface and documents it in `src/runtime/root.zig`.
 - **Actors and bounded mailboxes.** Long-lived components are actors that own their state
   and talk through bounded mailboxes (`actor`), as in commonware.
