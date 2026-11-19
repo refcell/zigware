@@ -8,6 +8,7 @@ const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const actor_pkg = @import("actor");
+const codec = @import("codec");
 const cryptography = @import("cryptography");
 const p2p = @import("p2p");
 const parallel = @import("parallel");
@@ -166,6 +167,55 @@ pub const Network = struct {
 
     pub fn quorum(self: *const Network) u32 {
         return utils.N3f1.quorum(@as(u32, @intCast(self.keys().len)));
+    }
+};
+
+/// A peer watching what the voter at index 0 broadcasts on `channel` (0 votes,
+/// 1 certificates) over a lossless zero-latency link. Must not move.
+pub const Observer = struct {
+    sender: Net.Sender,
+    receiver: Net.Receiver,
+
+    /// Registers before the voter starts, as commonware's tests do.
+    pub fn start(self: *Observer, net: *const Network, index: usize, channel: u64) !void {
+        assert(index != 0);
+        const observer = net.keys()[index];
+        const registered = try net.oracle().control(observer).register(channel, test_quota);
+        self.sender, self.receiver = .{ registered.sender, registered.receiver };
+        errdefer self.deinit();
+        try net.oracle().add_link(net.keys()[0], observer, .{
+            .latency = .from_millis(0),
+            .jitter = .from_millis(0),
+            .success_rate = 1.0,
+        });
+    }
+
+    pub fn deinit(self: *Observer) void {
+        self.sender.deinit();
+        self.receiver.deinit();
+        self.* = undefined;
+    }
+
+    /// The next certificate broadcast (the caller frees it).
+    pub fn next_certificate(self: *Observer, gpa: Allocator, net: *const Network) !Certificate {
+        var message = try self.receiver.recv();
+        defer message.deinit();
+        const cfg = net.schemes()[0].certificate_codec_config();
+        return codec.decode_cfg(Certificate, gpa, message.payload, cfg);
+    }
+
+    /// Whether anything arrives within `limit_ms` of simulated time (it is dropped).
+    pub fn any_within(self: *Observer, ctx: Ctx, limit_ms: u64) !bool {
+        var waited: u64 = 0;
+        while (waited < limit_ms) : (waited += 1) {
+            if (self.receiver.try_recv()) |message| {
+                var owned = message;
+                owned.deinit();
+                return true;
+            } else |_| {}
+            try ctx.sleep(.fromMilliseconds(1));
+        }
+        return false;
     }
 };
 

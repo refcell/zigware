@@ -5,4 +5,5 @@ test {
     _ = @import("restart.zig");
     _ = @import("backfill.zig");
     _ = @import("conflicts.zig");
+    _ = @import("timeouts.zig");
 }
