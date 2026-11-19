@@ -37,7 +37,20 @@ const Height = consensus.Height;
 const Exact = utils.acknowledgement.Exact;
 const Durability = durability_mod.Durability;
 
+/// `ProcessingOf` keyed by `P`'s `App`, `Databases`, `Provider`, and `Marshal` only, so the
+/// actor and its syncing mode share one type.
 pub fn Processing(comptime P: type) type {
+    return ProcessingOf(.{ P.App, P.Databases, P.Provider, P.Marshal });
+}
+
+/// `key` is `{ App, Databases, Provider, Marshal }`.
+fn ProcessingOf(comptime key: [4]type) type {
+    const P = struct {
+        pub const App = key[0];
+        pub const Databases = key[1];
+        pub const Provider = key[2];
+        pub const Marshal = key[3];
+    };
     return struct {
         const Self = @This();
         pub const Mailbox = mailbox_mod.Mailbox(P);

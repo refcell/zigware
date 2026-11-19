@@ -12,10 +12,12 @@
 //! `subscribe_parent`, `prune`, `clone`, and `deinit`), and `Plan` (`SyncPlan(S, V)`).
 //! Marshal's blocks are the standard variant's `Digested(App.Block)`.
 //!
-//! Not yet ported: startup from a persisted state sync floor (commonware's `sync` path, the
-//! `Syncing` mode and the syncer actor) waits on the db state sync engines, so `run` fails with
-//! `error.StateSyncUnavailable` when the plan holds a floor. Attaching the databases to the
-//! state sync resolvers is likewise left to the caller for now.
+//! With a persisted floor in the plan, the actor first runs state sync toward it (commonware's
+//! `sync` path): `Syncing` declines proposals, defers verifications, and retains finalized
+//! blocks until the synced state is handed off, then processing continues from it. That needs
+//! `P.Resolvers` (see `db.state_sync.attach_databases`) and the Config's `sync_config`,
+//! `resolvers`, and marshal's `floor`; without them a floor fails with
+//! `error.StateSyncUnavailable`. Marshal then also needs `subscribe_by_commitment`.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -26,6 +28,8 @@ const consensus = @import("consensus");
 const db = @import("../../db/mod.zig");
 const pruning = @import("../processor/pruning.zig");
 const processing_mod = @import("processing.zig");
+const syncing_mod = @import("syncing.zig");
+const state_sync = @import("../../db/state_sync.zig");
 
 const Height = consensus.Height;
 
@@ -79,6 +83,17 @@ pub fn Stateful(comptime P: type) type {
         pub const Mailbox = Processing.Mailbox;
         pub const Message = Processing.Message;
         const SyncTargets = Databases.SyncTargets;
+        const has_sync = @hasDecl(P, "Resolvers");
+        pub const Resolvers = if (has_sync) P.Resolvers else void;
+        const SyncP = struct {
+            pub const App = P.App;
+            pub const Databases = P.Databases;
+            pub const Provider = MarshalProvider(P.Marshal);
+            pub const Marshal = P.Marshal;
+            pub const Plan = P.Plan;
+            pub const Resolvers = Self.Resolvers;
+        };
+        pub const Syncing = syncing_mod.Syncing(SyncP);
 
         pub const Config = struct {
             /// The inner application (copied into each call).
@@ -98,6 +113,12 @@ pub fn Stateful(comptime P: type) type {
             max_pending_acks: u64 = 1,
             /// Chooses the prune schedule's phase.
             random: ?std.Random = null,
+            /// State sync (needed only when the plan holds a floor): engine tuning, the
+            /// resolvers it fetches through and attaches the databases to, and the floor marshal
+            /// returned at initialization.
+            sync_config: ?state_sync.SyncEngineConfig = null,
+            resolvers: ?Resolvers = null,
+            floor: ?consensus.marshal.core.Floor = null,
         };
 
         gpa: Allocator,
@@ -151,8 +172,9 @@ pub fn Stateful(comptime P: type) type {
 
         /// Recovers from marshal and serves requests until the mailbox closes.
         pub fn run(self: *Self) anyerror!void {
-            if (self.config.plan.floor() != null) return error.StateSyncUnavailable;
-            return self.recover();
+            if (self.config.plan.floor() == null) return self.recover();
+            if (comptime !has_sync) return error.StateSyncUnavailable;
+            return self.sync();
         }
 
         /// The processed block marshal recovers from: its anchor, or the block at the recorded
@@ -200,17 +222,62 @@ pub fn Stateful(comptime P: type) type {
                 schedule,
             );
             defer processor.deinit();
-            const provider: Provider = .{ .marshal = config.marshal.clone() };
+            return self.process(&processor, &.{});
+        }
+
+        /// Runs processing over `processor`, first scheduling `deferred` (taken).
+        fn process(
+            self: *Self,
+            processor: *Processor,
+            deferred: []const Processing.Mailbox.VerificationRequest,
+        ) anyerror!void {
+            const provider: Provider = .{ .marshal = self.config.marshal.clone() };
             var processing: Processing = .init(
                 self.gpa,
                 self.io,
                 &self.receiver,
                 provider,
-                config.marshal,
-                &processor,
+                self.config.marshal,
+                processor,
             );
             defer processing.deinit();
+            for (deferred) |request| processing.defer_verification(request);
             return processing.run();
+        }
+
+        /// Runs state sync toward the plan's floor, then processing from the synced state.
+        fn sync(self: *Self) anyerror!void {
+            const config = &self.config;
+            const sync_config = config.sync_config orelse return error.StateSyncUnavailable;
+            const resolvers = config.resolvers orelse return error.StateSyncUnavailable;
+            const floor = config.floor orelse return error.StateSyncUnavailable;
+            var schedule = self.pruning;
+            self.pruning = null; // Syncing, then the processor, owns the schedule.
+            var syncing = Syncing.init(.{
+                .app = config.app,
+                .env = config.env,
+                .db_config = config.db_config,
+                .sync_config = sync_config,
+                .resolvers = resolvers,
+                .receiver = &self.receiver,
+                .marshal = config.marshal,
+                .floor = floor,
+                .plan = config.plan,
+                .provider = .{ .marshal = config.marshal.clone() },
+                .pruning = schedule,
+                .max_pending_acks = config.max_pending_acks,
+            }) catch |err| {
+                if (schedule) |*value| value.deinit(self.gpa);
+                return err;
+            };
+            defer syncing.deinit();
+            var ready = try syncing.run() orelse return;
+            defer ready.databases.deinit();
+            defer ready.processor.deinit();
+            defer ready.deferred.deinit(self.gpa);
+            const deferred = ready.deferred.items;
+            ready.deferred.clearRetainingCapacity(); // `process` takes the requests.
+            return self.process(&ready.processor, deferred);
         }
     };
 }

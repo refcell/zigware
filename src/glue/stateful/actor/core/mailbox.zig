@@ -35,7 +35,17 @@ const oneshot = utils.channel.oneshot;
 const Exact = utils.acknowledgement.Exact;
 const Handoff = consensus.Handoff;
 
+/// `MailboxOf` keyed by `P`'s `App` and `Databases` only, so every `P` declaring the same two
+/// (the actor's, its processing loop's, and its syncing mode's) shares one message type.
 pub fn Mailbox(comptime P: type) type {
+    return MailboxOf(P.App, P.Databases);
+}
+
+fn MailboxOf(comptime App_: type, comptime Databases_: type) type {
+    const P = struct {
+        pub const App = App_;
+        pub const Databases = Databases_;
+    };
     return struct {
         const Self = @This();
         pub const App = P.App;

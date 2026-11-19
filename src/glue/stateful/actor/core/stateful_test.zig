@@ -13,6 +13,8 @@ const db = @import("../../db/mod.zig");
 const harness_mod = @import("../processor/testing.zig");
 const plan_mod = @import("../syncer/plan.zig");
 const stateful_mod = @import("stateful.zig");
+const state_sync = @import("../../db/state_sync.zig");
+const qmdb_sync = @import("storage").qmdb.sync;
 
 const gpa = testing.allocator;
 const io = testing.io;
@@ -380,4 +382,32 @@ test "stateful actor: instantiates over marshal's core mailbox" {
     _ = &RealStateful.init;
     _ = &RealStateful.run;
     _ = &RealStateful.deinit;
+    // With resolvers, the floor path (state sync, then processing) instantiates too.
+    const SyncingP = struct {
+        pub const App = RealP.App;
+        pub const Databases = RealP.Databases;
+        pub const Marshal = RealP.Marshal;
+        pub const Plan = RealP.Plan;
+        pub const Resolvers = *StubResolvers;
+    };
+    _ = &stateful_mod.Stateful(SyncingP).run;
 }
+
+/// Resolvers that serve nothing (compile check of the state sync path).
+const StubResolvers = struct {
+    const Source = state_sync.SharedSource(Any);
+    pub const Family = Source.Family;
+    pub const Op = Source.Op;
+    pub const Digest = Source.Digest;
+    pub const Error = Source.Error;
+
+    pub fn serve(
+        _: *StubResolvers,
+        _: std.mem.Allocator,
+        _: Source.Request,
+    ) (Error || Io.Cancelable)!qmdb_sync.Served(Source.Response) {
+        return error.Canceled;
+    }
+
+    pub fn attach_database(_: *StubResolvers, _: Any.Shared) !void {}
+};

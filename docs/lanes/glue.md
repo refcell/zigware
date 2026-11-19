@@ -244,7 +244,9 @@ marshal's actors (consensus-marshal) for the actor; until then it ports what is 
   random})` → `{*Stateful, Mailbox}`, `start()` → `Io.Future(anyerror!void)`, `deinit` (after
   the future). It recovers from marshal's anchor (or the plan's completion height), opens the
   databases at that block's targets, records completion, and runs `Processing`. A persisted
-  floor fails with `error.StateSyncUnavailable` until the syncing mode lands.
+  floor runs state sync first through `Syncing` when `P` declares `Resolvers` and the Config
+  sets `sync_config`, `resolvers`, and `floor` (otherwise `error.StateSyncUnavailable`).
+  `Mailbox(P)` and `Processing(P)` are keyed by their parts only, so every `P` shares them.
   `MarshalProvider(M)` is the replay provider over marshal.
 - `glue.stateful.db.p2p.Mailbox(DB, F, Op, D)`: the `qmdb.sync` Source over the resolver
   actor's mailbox. `init(io, actor.mailbox.Sender(Message))`, `clone`, `deinit`,
@@ -469,8 +471,8 @@ ones: d = deployer (thread T-01a1d5b9-c237), u = utils.
 - [x] actor: `Processor.propose`/`prepare` (build on the parent, cache before answering).
 - [x] actor/core: the processing loop (builds, finalization, durability, prune).
 - [x] actor/core: the `Stateful` actor, recovering from marshal (no floor).
-- [ ] actor/core: wire deployer's `Syncing` into `Stateful.run`'s floor branch (Config gains
-  `sync_config`, `resolvers`, marshal's `Floor`; `P` gains `Resolvers`).
+- [x] actor/core: deployer's `Syncing` wired into `Stateful.run`'s floor branch (Config's
+  `sync_config`, `resolvers`, marshal's `floor`; `P.Resolvers`).
 - [ ] actor/core: the rest of processing.rs's 46 tests.
 - [ ] tests: single_db_app.rs's engine on `glue.simulate` (simplex, marshal, buffered broadcast,
   marshal and qmdb resolvers, probe, `Stateful`), then tests/mod.rs's scenarios (finalize,
@@ -521,6 +523,7 @@ ones: d = deployer (thread T-01a1d5b9-c237), u = utils.
 - 2026-11-19 (stateful): the processor's propose and prepare.
 - 2026-11-19 (stateful): the core processing loop; a waiting verify gives no vote end to end.
 - 2026-11-19 (stateful): the `Stateful` actor, recovering from marshal and restarting.
+- 2026-11-19 (stateful): the actor starts from a floor through deployer's `Syncing`.
 
 ## dkg (owner: coding lane, thread T-01a1d58d-bff1-75a1-8ccb-4b8dd7bc9755)
 
