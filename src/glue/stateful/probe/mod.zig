@@ -34,4 +34,5 @@ test {
     _ = @import("probe_test.zig");
     _ = @import("discovery_test.zig");
     _ = @import("actor_test.zig");
+    _ = @import("probe_dst_test.zig");
 }

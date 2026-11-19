@@ -313,7 +313,11 @@ marshal's actors (consensus-marshal) for the actor; until then it ports what is 
   pausing, blocking, epoch filtering).
 - [x] probe: the actor driver (simplex `Inbox` over mailbox and network, retry deadline,
   service from a source) with an in-memory actor test.
-- [ ] probe: a DST over marshal's harness and p2p.simulated.
+- [x] probe: a DST over marshal's harness and p2p.simulated (`probe/probe_dst_test.zig`, p2p
+  lane): four marshal validators serve a finalized chain through `MarshalSource`; a joiner
+  outside the committee discovers the tip over lossy links while the seed partitions one
+  validator and crashes and restarts another, within 64 request rounds, and each seed replays.
+  Debug runs one seed on 4 blocks; `-Dslow-tests` and optimized builds run 8 seeds on 40.
 - [x] actor: `SyncPlan` and `SyncState` with plan.rs's tests.
 - [x] actor: the processor's prune schedule and finalization boundary with their tests.
 - [x] actor: the processor's speculative `Pending` state (cache, descendants, retain_branch).
@@ -354,6 +358,8 @@ marshal's actors (consensus-marshal) for the actor; until then it ports what is 
 - 2026-11-18: the stateful `any` transfers test; transfers is fully ported.
 - 2026-11-18 (stateful): the probe's discovery state.
 - 2026-11-18 (stateful): the probe actor driver; `consensus.simplex.actors.inbox` exported.
+- 2026-11-19 (stateful, p2p lane): the probe DST; it catches a probe that never re-solicits
+  and a source that serves a stale height.
 - 2026-11-18 (stateful): the processor's speculative `Pending` state.
 - 2026-11-18 (stateful): the processor's execution layer and flight registry.
 - 2026-11-18 (stateful): the processor's finalization path and boxed ancestry.
