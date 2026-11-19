@@ -40,6 +40,10 @@ const ring = utils.channel.ring;
 const Anchor = sync.Anchor;
 const TipUpdate = sync.TipUpdate;
 
+/// Tuple sets' state sync (`sync_tuple`).
+pub const tuple = @import("state_sync_tuple.zig");
+pub const sync_tuple = tuple.sync_tuple;
+
 /// The sync engine's request and apply sizing (commonware's `SyncEngineConfig`).
 pub const SyncEngineConfig = struct {
     /// Most operations fetched per source request. Peers ignore requests larger than their

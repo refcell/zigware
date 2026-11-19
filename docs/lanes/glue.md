@@ -147,6 +147,11 @@ marshal's actors (consensus-marshal) for the actor; until then it ports what is 
   `sync_shared(T, D, env, config, source, anchor, target, tip_updates, sync_config)` →
   `Synced(T, D)` (`databases`, `anchor`), the single-database coordinator. The keyless,
   immutable, and compact adapters implement `sync_db`.
+- `glue.stateful.db.state_sync.sync_tuple(types, D, env, config, sources, anchor, targets,
+  tip_updates, sync_config, ?*?Failure)` → `tuple.Synced(types, D)`: tuple sets' state sync
+  over `sync.CoordinatorState`. Each member syncs in its own task beside a reporter of the
+  generations it reached. On failure it returns the first failing member's error, and
+  `Failure` names its index and type (commonware's error string).
 - `glue.stateful.db.sync` (also `db.Anchor`, `db.TipUpdate`): `Anchor(D)` (`height`, `round`,
   `digest`, `eql`), `TipUpdate(D, T)` (`init`, `with_observation(gpa, io, anchor, targets)`
   → update and a `oneshot.Receiver(void)`, `record(context)` calling
@@ -229,6 +234,11 @@ marshal's actors (consensus-marshal) for the actor; until then it ports what is 
   keeps only the latest attachment and live fetches while the mailbox is full.
 
 ### Decisions
+- Tuple state sync keeps each member's newest pending reached generation in a slot rather than
+  commonware's bounded mailbox with a per-database overflow policy. A member reports
+  non-decreasing generations and the coordinator ignores generations a member no longer has,
+  so the events the slot drops are ones commonware's coordinator would ignore
+  (broadcast-resolver lane).
 - ManagedDb and DatabaseSet are comptime contracts. Mutations take `*Self` and return errors
   where commonware moves the database by value and panics: a failed mutation loses the member
   (`WriteSlot.lose` closes it), later access panics, and the set returns the error for
@@ -347,6 +357,7 @@ marshal's actors (consensus-marshal) for the actor; until then it ports what is 
   adapters.
 - 2026-11-19 (stateful, broadcast-resolver lane): single-database state sync and the
   adapters' `sync_db`.
+- 2026-11-19 (stateful, broadcast-resolver lane): tuple-set state sync.
 - 2026-11-19 (stateful): the core actor's `Durability`.
 - 2026-11-19 (stateful): the core actor's `Verifications` handler; waiting verifies abstain.
 - 2026-11-19 (stateful): the core actor's mailbox.

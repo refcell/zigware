@@ -124,6 +124,8 @@ const Gate = struct {
     release: oneshot.Receiver(void),
     started: ?oneshot.Sender(void),
     duplicate: bool = false,
+    /// Target updates the database received (commonware's `update_count`).
+    updates: u64 = 0,
 
     fn wait(gate: *Gate) void {
         if (gate.started) |*started| started.send({}) catch {}; // Unwatched starts are fine.
@@ -171,58 +173,116 @@ fn gate_pair() !GatePair {
     };
 }
 
-const Signal = union(enum) {
-    finish: std.Io.Cancelable!?void,
-    update: std.Io.Cancelable!?u64,
-    slept: std.Io.Cancelable!void,
-};
+const Signal = union(enum) { finish, finish_closed, update: u64, updates_closed, slept };
 
-/// Waits for a finish signal or a target update (and the optional `sleep_ms` timeout).
+/// Polls for a finish signal, a target update, or the end of the optional `sleep_ms` window.
+/// Polling takes nothing it does not return, unlike a select that cancels the losers.
 fn next_signal(channels: *state_sync.Channels(u64), tips_open: bool, sleep_ms: ?u64) !Signal {
-    var buffer: [3]Signal = undefined;
-    var select: std.Io.Select(Signal) = .init(io, &buffer);
-    defer while (select.cancel()) |_| {};
-    if (channels.finish) |finish| {
-        try select.concurrent(.finish, mpsc.Receiver(void).recv, .{finish});
-    }
-    if (tips_open) {
-        try select.concurrent(.update, ring.Receiver(u64).recv, .{channels.tip_updates});
-    }
-    if (sleep_ms) |ms| try select.concurrent(.slept, std.Io.sleep, .{
-        io,
-        std.Io.Duration.fromMilliseconds(@intCast(ms)),
-        .awake,
-    });
-    return select.await();
-}
-
-/// Waits for its gate, then reports its target and adopts updates until told to finish
-/// (commonware `SlowSyncDb`).
-const SlowSync = struct {
-    fn run(gate: *Gate, target: u64, channels: *state_sync.Channels(u64)) !u64 {
-        gate.wait();
-        var final_target = target;
-        var tips_open = true;
-        while (true) {
-            if (channels.reached_target) |reached| {
-                if (!reached.send_lossy(final_target)) break;
-            }
-            if (channels.finish == null and !tips_open) break;
-            switch (try next_signal(channels, tips_open, null)) {
-                .finish => break,
-                .update => |update| if (try update) |value| {
-                    final_target = value;
-                } else {
-                    tips_open = false;
-                    if (channels.finish == null) break;
-                },
-                .slept => unreachable,
+    const start = std.Io.Clock.Timestamp.now(io, .awake);
+    while (true) {
+        if (channels.finish) |finish| {
+            if (finish.try_recv()) |_| return .finish else |err| switch (err) {
+                error.Empty => {},
+                error.Disconnected => return .finish_closed,
             }
         }
-        return final_target;
+        if (tips_open) {
+            if (channels.tip_updates.try_recv()) |value| return .{ .update = value } else |err| {
+                switch (err) {
+                    error.Empty => {},
+                    error.Disconnected => return .updates_closed,
+                }
+            }
+        }
+        if (sleep_ms) |ms| {
+            const elapsed = start.durationTo(std.Io.Clock.Timestamp.now(io, .awake)).raw;
+            if (elapsed.toMilliseconds() >= ms) return .slept;
+        }
+        try io.sleep(.fromMilliseconds(1), .awake);
+    }
+}
+
+/// How a looping mock reports and adopts targets.
+const LoopOptions = struct {
+    /// Report a target only once (commonware's `reported_target` guard).
+    dedupe: bool = false,
+    /// Report nothing until an update arrived (commonware `ObservedSlowSyncDb`).
+    after_update: bool = false,
+    /// Ignore an update that repeats the current target (`DistinctObservedFastSyncDb`).
+    distinct: bool = false,
+};
+
+/// Waits for its gate (signaling `started`), then reports its target and adopts updates until
+/// told to finish (commonware `SlowSyncDb`; with a gate already open, `FastSyncDb`; with
+/// options, the `Observed*` variants). Counts the updates it receives on the gate.
+fn LoopSync(comptime options: LoopOptions) type {
+    return struct {
+        fn run(gate: *Gate, target: u64, channels: *state_sync.Channels(u64)) !u64 {
+            gate.wait();
+            var final = target;
+            var tips_open = true;
+            var reported: ?u64 = null;
+            var observed = false;
+            while (true) {
+                const due = !options.dedupe or reported != final;
+                if (due and (!options.after_update or observed)) {
+                    if (channels.reached_target) |reached| {
+                        if (!reached.send_lossy(final)) break;
+                    }
+                    reported = final;
+                }
+                if (channels.finish == null and !tips_open) break;
+                switch (try next_signal(channels, tips_open, null)) {
+                    .finish, .finish_closed => break,
+                    .update => |value| {
+                        gate.updates += 1;
+                        if (options.distinct and value == final) continue;
+                        final = value;
+                        observed = true;
+                    },
+                    .updates_closed => {
+                        tips_open = false;
+                        if (channels.finish == null) break;
+                    },
+                    .slept => unreachable,
+                }
+            }
+            return final;
+        }
+    };
+}
+const SlowSyncDb = SyncMock(LoopSync(.{}));
+const ObservedSlowSyncDb = SyncMock(LoopSync(.{ .dedupe = true, .after_update = true }));
+const ObservedFastSyncDb = SyncMock(LoopSync(.{ .dedupe = true }));
+const DistinctObservedFastSyncDb = SyncMock(LoopSync(.{ .dedupe = true, .distinct = true }));
+
+/// Returns its target at once (commonware `ImmediateStateSyncDb`).
+const ImmediateSync = struct {
+    fn run(_: void, target: u64, _: *state_sync.Channels(u64)) !u64 {
+        return target;
     }
 };
-const SlowSyncDb = SyncMock(SlowSync);
+const ImmediateStateSyncDb = SyncMock(ImmediateSync);
+
+/// Reports its target, then finishes one past it (commonware `MismatchedTargetSyncDb`).
+const MismatchedSync = struct {
+    fn run(_: void, target: u64, channels: *state_sync.Channels(u64)) !u64 {
+        if (channels.reached_target) |reached| _ = reached.send_lossy(target);
+        if (channels.finish) |finish| _ = try finish.recv();
+        return target + 1;
+    }
+};
+const MismatchedTargetSyncDb = SyncMock(MismatchedSync);
+
+/// Waits to finish and fails if the finish channel closes (commonware `FinishClosedSyncDb`).
+const FinishClosedSync = struct {
+    fn run(_: void, target: u64, channels: *state_sync.Channels(u64)) !u64 {
+        const finish = channels.finish.?; // Sets always pass one.
+        _ = (try finish.recv()) orelse return error.FinishClosedSyncError;
+        return target;
+    }
+};
+const FinishClosedSyncDb = SyncMock(FinishClosedSync);
 
 /// Fails at once (commonware `FailingStateSyncDb`).
 const FailingSync = struct {
@@ -259,13 +319,13 @@ const StaleReachedSync = struct {
         const update = (try channels.tip_updates.recv()) orelse return error.ExpectedTip;
         if (channels.reached_target) |reached| _ = reached.send_lossy(target);
         switch (try next_signal(channels, false, 10)) {
-            .finish => return target,
+            .finish, .finish_closed => return target,
             .slept => {
                 if (channels.reached_target) |reached| _ = reached.send_lossy(update);
                 if (channels.finish) |finish| _ = try finish.recv();
                 return update;
             },
-            .update => unreachable,
+            .update, .updates_closed => unreachable,
         }
     }
 };
@@ -741,4 +801,246 @@ test "stateful state sync: an unconvertible compact target fails the sync" {
     const source = &compact_source;
     const result = sync_closed(KeylessCompact, node.env(), config, source, zero, engine_config);
     try testing.expectError(error.InvalidTarget, result);
+}
+
+// Tuple sets.
+
+const state_sync_tuple = @import("state_sync_tuple.zig");
+
+fn Pair(comptime A: type, comptime B: type) type {
+    const types = .{ A, B };
+    return struct {
+        const Targets = db.Tuple(types).SyncTargets;
+        const TipUpdates = ring.Receiver(sync.TipUpdate(Digest, Targets));
+        const Result = state_sync_tuple.Synced(types, Digest);
+
+        /// Syncs the pair from `sources` at `anchor(start)` toward `targets`.
+        fn run(
+            sources: anytype,
+            start: u64,
+            targets: Targets,
+            tips: TipUpdates,
+            failure: ?*?state_sync_tuple.Failure,
+        ) !Result {
+            const env: TestEnv = .{};
+            const config = .{ {}, {} };
+            const at = anchor(start);
+            return state_sync_tuple.sync_tuple(
+                types,
+                Digest,
+                env,
+                config,
+                sources,
+                at,
+                targets,
+                tips,
+                engine_config,
+                failure,
+            );
+        }
+
+        /// `run` over two gates, as a task function.
+        fn run_gated(a: *Gate, b: *Gate, start: u64, targets: Targets, tips: TipUpdates) !Result {
+            return run(.{ a, b }, start, targets, tips, null);
+        }
+
+        fn channel(capacity: usize) !ring.Pair(sync.TipUpdate(Digest, Targets)) {
+            return ring.channel(sync.TipUpdate(Digest, Targets), gpa, io, capacity);
+        }
+
+        /// The members' final targets; closes the set.
+        fn finals(result: Result) !struct { u64, u64 } {
+            var synced = result;
+            defer synced.databases.deinit();
+            var first = try synced.databases.members[0].read();
+            defer first.deinit();
+            var second = try synced.databases.members[1].read();
+            defer second.deinit();
+            return .{ first.get().final_target, second.get().final_target };
+        }
+    };
+}
+
+/// A gate already open: the database starts at once (commonware's fast databases).
+fn open_gate() !GatePair {
+    var pair = try gate_pair();
+    try pair.open();
+    return pair;
+}
+
+test "stateful state sync: a tuple sync converges before finishing" {
+    const P = Pair(SlowSyncDb, SlowSyncDb);
+    const tips = try P.channel(4);
+    var sender = tips.sender;
+    var slow = try gate_pair();
+    defer slow.deinit();
+    var fast = try open_gate();
+    defer fast.deinit();
+    defer slow.gate.deinit();
+    defer fast.gate.deinit();
+    const gates = .{ &slow.gate, &fast.gate };
+    var future = try io.concurrent(P.run_gated, gates ++ .{ 0, .{ 0, 0 }, tips.receiver });
+    try fast.park();
+    try testing.expect(sender.send_lossy(.init(anchor(1), .{ 1, 1 })));
+    try testing.expect(sender.send_lossy(.init(anchor(2), .{ 2, 2 })));
+    try slow.open();
+    sender.deinit();
+    const synced = try future.await(io);
+    const finals = try P.finals(synced);
+    // Every database finishes on the converged targets, those of the returned anchor.
+    try testing.expectEqual(finals[0], finals[1]);
+    try testing.expectEqual(finals[0], synced.anchor.height.get());
+}
+
+test "stateful state sync: a tuple sync ignores backward tip updates" {
+    const P = Pair(SlowSyncDb, SlowSyncDb);
+    const tips = try P.channel(8);
+    var sender = tips.sender;
+    var slow = try gate_pair();
+    defer slow.deinit();
+    var fast = try open_gate();
+    defer fast.deinit();
+    defer slow.gate.deinit();
+    defer fast.gate.deinit();
+    const gates = .{ &slow.gate, &fast.gate };
+    var future = try io.concurrent(P.run_gated, gates ++ .{ 0, .{ 0, 0 }, tips.receiver });
+    try fast.park();
+    try testing.expect(sender.send_lossy(.init(anchor(2), .{ 2, 2 })));
+    const Tip = sync.TipUpdate(Digest, P.Targets);
+    var backward = try Tip.with_observation(gpa, io, anchor(1), .{ 1, 1 });
+    defer backward.observed.deinit();
+    try testing.expect(sender.send_lossy(backward.update));
+    sender.deinit();
+    try backward.observed.recv(); // The coordinator records the backward tip.
+    try slow.open();
+    const synced = try future.await(io);
+    // Neither target moves backward, and the anchor stays on the highest tip seen.
+    try testing.expect(synced.anchor.eql(anchor(2)));
+    try testing.expectEqual(.{ @as(u64, 2), @as(u64, 2) }, try P.finals(synced));
+}
+
+test "stateful state sync: a tuple sync rejects a database target mismatch" {
+    const P = Pair(MismatchedTargetSyncDb, SlowSyncDb);
+    var tips = try P.channel(1);
+    defer tips.sender.deinit();
+    var fast = try open_gate();
+    defer fast.deinit();
+    defer fast.gate.deinit();
+    const result = P.run(.{ {}, &fast.gate }, 7, .{ 7, 7 }, tips.receiver, null);
+    try testing.expectError(error.SyncTargetMismatch, result);
+}
+
+/// Checks a tuple sync failed with the error of the `FailingStateSyncDb` at index 1.
+fn expect_second_failed(result: anytype, failure: ?state_sync_tuple.Failure) !void {
+    try testing.expectError(error.TestSyncError, result);
+    const first = failure.?;
+    try testing.expectEqual(@as(usize, 1), first.index);
+    try testing.expect(std.mem.indexOf(u8, first.name, "FailingSync") != null);
+    try testing.expectEqual(error.TestSyncError, first.err);
+}
+
+test "stateful state sync: a tuple sync returns a database's error when the anchor is missing" {
+    const P = Pair(ImmediateStateSyncDb, FailingStateSyncDb);
+    var tips = try P.channel(1);
+    defer tips.sender.deinit();
+    var failure: ?state_sync_tuple.Failure = null;
+    const result = P.run(.{ {}, {} }, 0, .{ 0, 0 }, tips.receiver, &failure);
+    try expect_second_failed(result, failure);
+}
+
+test "stateful state sync: a tuple sync returns a database's error while another waits" {
+    const P = Pair(SlowSyncDb, FailingStateSyncDb);
+    var tips = try P.channel(1);
+    defer tips.sender.deinit();
+    var slow = try open_gate();
+    defer slow.deinit();
+    defer slow.gate.deinit();
+    var failure: ?state_sync_tuple.Failure = null;
+    const result = P.run(.{ &slow.gate, {} }, 0, .{ 0, 0 }, tips.receiver, &failure);
+    try expect_second_failed(result, failure);
+}
+
+test "stateful state sync: a tuple sync keeps the original failure when a finish channel closes" {
+    const P = Pair(FinishClosedSyncDb, FailingStateSyncDb);
+    var tips = try P.channel(1);
+    defer tips.sender.deinit();
+    var failure: ?state_sync_tuple.Failure = null;
+    // The failure stops the coordinator, which closes the other database's finish channel;
+    // that database's later error is not the one returned.
+    const result = P.run(.{ {}, {} }, 0, .{ 0, 0 }, tips.receiver, &failure);
+    try expect_second_failed(result, failure);
+}
+
+test "stateful state sync: a reached tuple member takes no updates until a regroup" {
+    const P = Pair(ObservedSlowSyncDb, ObservedFastSyncDb);
+    const tips = try P.channel(32);
+    var sender = tips.sender;
+    var slow = try open_gate();
+    defer slow.deinit();
+    var fast = try open_gate();
+    defer fast.deinit();
+    defer slow.gate.deinit();
+    defer fast.gate.deinit();
+    const gates = .{ &slow.gate, &fast.gate };
+    var future = try io.concurrent(P.run_gated, gates ++ .{ 0, .{ 0, 0 }, tips.receiver });
+    try fast.park();
+    for (1..17) |target| {
+        try testing.expect(sender.send_lossy(.init(anchor(target), .{ target, target })));
+    }
+    sender.deinit();
+    const synced = try future.await(io);
+    const finals = try P.finals(synced);
+    try testing.expectEqual(finals[0], finals[1]);
+    try testing.expectEqual(finals[0], synced.anchor.height.get());
+    // A reached database must not receive tip updates before the regroup; only the regroup's
+    // retarget reaches it.
+    try testing.expectEqual(@as(u64, 1), fast.gate.updates);
+}
+
+test "stateful state sync: a tuple member at its target idles while another catches up" {
+    const P = Pair(SlowSyncDb, ObservedFastSyncDb);
+    var tips = try P.channel(4);
+    var slow = try gate_pair();
+    defer slow.deinit();
+    var fast = try open_gate();
+    defer fast.deinit();
+    defer slow.gate.deinit();
+    defer fast.gate.deinit();
+    const gates = .{ &slow.gate, &fast.gate };
+    var future = try io.concurrent(P.run_gated, gates ++ .{ 7, .{ 7, 7 }, tips.receiver });
+    try fast.park();
+    tips.sender.deinit();
+    try slow.open();
+    const synced = try future.await(io);
+    try testing.expect(synced.anchor.eql(anchor(7)));
+    try testing.expectEqual(.{ @as(u64, 7), @as(u64, 7) }, try P.finals(synced));
+    // The database already at its target receives no tip updates.
+    try testing.expectEqual(@as(u64, 0), fast.gate.updates);
+}
+
+test "stateful state sync: a tuple regroup completes when a database's target is unchanged" {
+    const P = Pair(SlowSyncDb, DistinctObservedFastSyncDb);
+    const tips = try P.channel(4);
+    var sender = tips.sender;
+    var slow = try gate_pair();
+    defer slow.deinit();
+    var fast = try open_gate();
+    defer fast.deinit();
+    defer slow.gate.deinit();
+    defer fast.gate.deinit();
+    const gates = .{ &slow.gate, &fast.gate };
+    var future = try io.concurrent(P.run_gated, gates ++ .{ 0, .{ 0, 7 }, tips.receiver });
+    try fast.park();
+    const Tip = sync.TipUpdate(Digest, P.Targets);
+    var update = try Tip.with_observation(gpa, io, anchor(9), .{ 9, 7 });
+    defer update.observed.deinit();
+    try testing.expect(sender.send_lossy(update.update));
+    try update.observed.recv(); // The coordinator records the tip.
+    try slow.open();
+    sender.deinit();
+    const synced = try future.await(io);
+    try testing.expect(synced.anchor.eql(anchor(9)));
+    try testing.expectEqual(.{ @as(u64, 9), @as(u64, 7) }, try P.finals(synced));
+    // The unchanged-target database receives no duplicate target updates.
+    try testing.expectEqual(@as(u64, 0), fast.gate.updates);
 }
