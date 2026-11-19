@@ -149,6 +149,18 @@ variants (MinPk, MinSig) must match exactly.
   picks the compile target's best profile at comptime. Profile-only instructions are `void`
   on other profiles, so misuse is a compile error. Operations declare `pub const Output`.
 
+## Drift: simd (commonware 43b357a41..a9ffc25f3)
+
+- [x] 21eb7bbf9 "Require tokens and vectors to be Send and Sync": adds `Send + Sync + 'static`
+  bounds to `Simd` and its vector types, plus README and doc text. Classified as no port: Zig
+  has no Send/Sync, and our tokens and vectors are plain values that any thread may hold. No
+  test, vector, or behavior changed.
+- [x] 162216038 "Track floating Rust compilers and pin lint tools": gates the x86-64 native
+  backend on `target_feature = "sse2"` and drops a `clone()` of a `Copy` value in the
+  operation test. Classified as already matched: `native_profile` selects `x86_v3` only with
+  avx2 (which implies sse2) and `x86_v4c` only with avx512, else `scalar`, so an x86-64
+  target without sse2 already gets the portable backend. No test changed behavior.
+
 ## Log
 - 2026-11-13: math algebra interfaces, goldilocks field, test field/group, fuzz driver.
 - 2026-11-13: math poly (Poly, commit, Interpolator) and varint wire helpers.
