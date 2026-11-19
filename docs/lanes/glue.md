@@ -384,8 +384,8 @@ ones: d = deployer (thread T-01a1d5b9-c237), u = utils, j = storage-journal
 | stateful/actor/core/processing.rs, 1070-3396 | 47 | see backlog | see backlog | | u |
 | stateful/actor/core/processing.rs, 3451-5885 | 39 | 33 | 0 | 6 | |
 | stateful/actor/processor/mod.rs | 44 | 40 | 0 | 4 | |
-| stateful/tests/mod.rs, floor.rs | 28 | 17 | 11 | 0 | j |
-| **total** | **469** | **377** | **58** | **34** | |
+| stateful/tests/mod.rs, floor.rs | 28 | 20 | 8 | 0 | j |
+| **total** | **469** | **380** | **55** | **34** | |
 
 - Not portable (db/mod.rs, 22): zigware's `Barrier` is synchronous (databases persist inside
   `finalize`), so `barrier_waits_for_every_handle` (8), `barrier_cancellation_releases_handles`
@@ -462,6 +462,15 @@ ones: d = deployer (thread T-01a1d5b9-c237), u = utils, j = storage-journal
   certifications during the proposal parent lookup, stable-leader finalizations outpacing a
   slow sync, pruning joins verification, and the two multi_qmdb ones once Stateful compiles
   over a `db.Tuple`).
+  Simplex's part, done: floor.rs (both cases) in tests/floor_test.zig (four boots on one
+  runner); out_of_order_certifications and the proposal-parent-lookup test in
+  tests/qmdb_targeted_test.zig, on a real marshal (actor/marshal_fixture_for.zig over the e2e
+  `Block`), Stateful over a real QMDB, and `Deferred`. Open: 2276
+  `pruning_joins_verification_on_real_qmdbs` is a multi-db test (`build_multi_chain`,
+  `GatedMultiApp`), so it waits on Tuple Stateful with 1805 and 2039; 1614
+  `stable_leader_finalizations_outpace_slow_qmdb_sync` parks low-level syncs
+  (`DelayedContext`) and counts coalesced sync calls, so it waits on async start_sync reaching
+  qmdb and glue's `Barrier` (storage-merkle steps 5 and 6).
 
 ### Backlog
 - [x] db: `Shared`, `Reader`, `Barrier`, single and tuple sets, with mod.rs's set tests.

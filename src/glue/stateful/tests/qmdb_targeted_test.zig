@@ -30,7 +30,7 @@ const Scheme = single.Scheme;
 const Digested = single.Digested;
 
 /// The marshal fixture's types over the e2e block and the mock scheme.
-const Types = struct {
+pub const Types = struct {
     pub const B = Block;
     pub const D = Digest;
     pub const K = single.Key;
@@ -45,16 +45,16 @@ const Types = struct {
         return Digested.precomputed(gpa, raw, raw.digest());
     }
 };
-const Marshal = fixture_for.FixtureFor(Types);
-const MarshalFixture = Marshal.Fixture(Marshal.PrunableStores);
-const Plan = actor_mod.SyncPlan(Scheme, Marshal.V);
-const Stateful = actor_mod.Stateful(struct {
+pub const Marshal = fixture_for.FixtureFor(Types);
+pub const MarshalFixture = Marshal.Fixture(Marshal.PrunableStores);
+pub const Plan = actor_mod.SyncPlan(Scheme, Marshal.V);
+pub const Stateful = actor_mod.Stateful(struct {
     pub const App = single.App;
     pub const Databases = Any.Shared;
     pub const Marshal = MarshalFixture.Mailbox;
     pub const Plan = qmdb_targeted.Plan;
 });
-const StatefulMailbox = Stateful.Mailbox;
+pub const StatefulMailbox = Stateful.Mailbox;
 const qmdb_targeted = @This();
 
 /// The stateful mailbox as `Deferred`'s application (which passes no upstream input).
@@ -96,11 +96,11 @@ const Wrapper = consensus.marshal.standard.Deferred(
     consensus.types.FixedEpocher,
 );
 
-const page_size: u16 = 1024;
-const page_cache_size: u32 = 10;
+pub const page_size: u16 = 1024;
+pub const page_cache_size: u32 = 10;
 const io_buffer_size: usize = 2048;
 
-fn env(ctx: Ctx, label: []const u8) db.Env {
+pub fn env(ctx: Ctx, label: []const u8) db.Env {
     return .{
         .gpa = ctx.gpa(),
         .io = ctx.io(),
@@ -110,7 +110,7 @@ fn env(ctx: Ctx, label: []const u8) db.Env {
 }
 
 /// The QMDB configuration over partitions named `prefix ++ suffix` (commonware `qmdb_config`).
-fn qmdb_config(comptime prefix: []const u8, cache: *runtime.buffer.paged.CacheRef) Any.Config {
+pub fn qmdb_config(comptime prefix: []const u8, cache: *runtime.buffer.paged.CacheRef) Any.Config {
     return .{
         .merkle = .{
             .journal_partition = prefix ++ "-qmdb-mmr-journal",
@@ -147,7 +147,7 @@ fn execute(batches: Any.Unmerkleized, at: Height) !Any.Merkleized {
 
 /// Blocks `1..=count` over genesis, each executed on a scratch QMDB from its parent's
 /// speculative batch, in view `height` (commonware `build_chain`).
-fn build_chain(ctx: Ctx, blocks: []Block) !void {
+pub fn build_chain(ctx: Ctx, blocks: []Block) !void {
     const gpa = ctx.gpa();
     var cache: runtime.buffer.paged.CacheRef = try .init(gpa, page_size, page_cache_size);
     defer cache.deinit();
@@ -267,7 +267,7 @@ fn certify_all(io: Io, wrapper: *Wrapper, blocks: []const Block, order: []const 
     for (verdicts[0..order.len]) |verdict| try testing.expectEqual(@as(?bool, true), verdict);
 }
 
-fn run(comptime body: fn (Ctx) anyerror!void) !void {
+pub fn run(comptime body: fn (Ctx) anyerror!void) !void {
     var runner = try runtime.deterministic.Runner.init(testing.allocator, .{
         .timeout_ns = 10 * std.time.ns_per_s,
     });
@@ -329,8 +329,11 @@ const Proposal = struct {
 };
 
 /// A finalization of `block` signed by the node's validator (commonware `finalization`).
-fn finalization_of(node: *Node, block: *const Block) !Types.Finalization {
-    const gpa = node.gpa;
+pub fn finalization_of(
+    gpa: std.mem.Allocator,
+    validators: *const Types.Validators,
+    block: *const Block,
+) !Types.Finalization {
     const Vote = consensus.simplex.types.Finalize(Scheme, Digest);
     const context = block.context();
     const proposal = consensus.simplex.types.Proposal(Digest).init(
@@ -338,7 +341,7 @@ fn finalization_of(node: *Node, block: *const Block) !Types.Finalization {
         context.parent[0],
         block.digest(),
     );
-    const scheme = &node.validators.schemes[0];
+    const scheme = &validators.schemes[0];
     var votes = [1]Vote{(try Vote.sign(gpa, scheme, proposal)).?};
     const sequential = @import("parallel").sequential;
     return Types.Finalization.from_votes(gpa, scheme, &votes, sequential);
@@ -353,7 +356,7 @@ fn dispatched_through(reporter: Types.Application, count: usize) !bool {
 fn marshal_finalizes(ctx: Ctx, node: *Node, blocks: []const Block) !void {
     const gpa = ctx.gpa();
     for (blocks) |*block| {
-        var certificate = try finalization_of(node, block);
+        var certificate = try finalization_of(gpa, &node.validators, block);
         defer certificate.deinit(gpa);
         _ = node.marshal.mailbox.report(.{ .finalization = certificate });
     }

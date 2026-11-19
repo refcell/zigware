@@ -289,13 +289,17 @@ pub fn FixtureFor(comptime T: type) type {
                     };
                 }
 
-                fn start_actor(self: *Self, ctx: Ctx, acknowledge: bool, given: ?Reporter) !void {
+                /// Starts an actor initialized with `options.acknowledge == null`, with reporter
+                /// `given` (taken) or else one that acknowledges (true) or holds (false) blocks.
+                pub fn start_actor(
+                    self: *Self,
+                    ctx: Ctx,
+                    acknowledge: bool,
+                    given: ?Reporter,
+                ) !void {
                     const gpa = self.gpa;
                     const actor = self.unstarted.?;
-                    var reporter: Reporter = given orelse if (acknowledge)
-                        try Reporter.init(gpa, ctx.io())
-                    else
-                        try Reporter.manual_ack(gpa, ctx.io());
+                    var reporter: Reporter = given orelse try default_reporter(ctx, acknowledge);
                     errdefer reporter.deinit();
                     const scope = ctx.scope.child("resolver_handler");
                     var channel = try handler.init(D, gpa, ctx.io(), &scope, 8);
@@ -307,6 +311,15 @@ pub fn FixtureFor(comptime T: type) type {
                     self.reporter = reporter;
                     self.handler = channel.handler;
                     assert(self.handle != null);
+                }
+
+                /// A reporter that acknowledges (true) or holds (false) blocks; a reporter type
+                /// without `init` and `manual_ack` must be given.
+                fn default_reporter(ctx: Ctx, acknowledge: bool) !Reporter {
+                    if (comptime !@hasDecl(Reporter, "manual_ack")) return error.ReporterRequired;
+                    const gpa = ctx.gpa();
+                    if (acknowledge) return Reporter.init(gpa, ctx.io());
+                    return Reporter.manual_ack(gpa, ctx.io());
                 }
 
                 /// Aborts the actor (if started) and releases its storage, as a crash would.

@@ -29,4 +29,5 @@ test {
     std.testing.refAllDecls(@This());
     _ = @import("tests/root.zig");
     _ = @import("tests/qmdb_targeted_test.zig");
+    _ = @import("tests/floor_test.zig");
 }
