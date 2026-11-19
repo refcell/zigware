@@ -396,7 +396,10 @@ pub fn free_base_port(io: Io, transport: *production.network.Network, count: u16
         while (bound < count) : (bound += 1) {
             const port = base + @as(u16, @intCast(bound));
             const address = network_mod.to_address(local_socket(port));
-            listeners[bound] = transport.bind(address) catch break;
+            listeners[bound] = transport.bind(address) catch |err| {
+                if (err == error.Canceled) return err;
+                break;
+            };
         }
         if (bound == count) return base;
     }
@@ -412,7 +415,8 @@ pub fn wait_listening(io: Io, transport: anytype, base: u16, count: usize) !void
         const address = network_mod.to_address(local_socket(port));
         var tries: u32 = 0;
         while (true) : (tries += 1) {
-            var connection = transport.dial(address) catch {
+            var connection = transport.dial(address) catch |err| {
+                if (err == error.Canceled) return err;
                 if (tries >= 1_000) {
                     std.debug.print("port {d} never accepted; another process took it\n", .{port});
                     return error.TestPortLost;
