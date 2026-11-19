@@ -1,9 +1,9 @@
 //! commonware `glue/src/stateful/db/mod.rs` tests of database sets, with its mock databases.
 //!
 //! commonware's tests of panics (`*_panic_identifies_failing_database`) check returned errors
-//! and lost databases here, since sets return errors. Its cancellation and concurrency tests
-//! (tuple apply in parallel, cancelled applies) have no counterpart while sets mutate their
-//! members one at a time.
+//! and lost databases here, since sets return errors. Its tuple apply locking and
+//! cancellation tests are in tuple_test.zig; its parallelism tests have no counterpart while
+//! sets mutate their members one at a time.
 
 const std = @import("std");
 const testing = std.testing;

@@ -553,4 +553,5 @@ test {
     std.testing.refAllDecls(@This());
     _ = @import("mod_test.zig");
     _ = @import("adapters_test.zig");
+    _ = @import("tuple_test.zig");
 }
