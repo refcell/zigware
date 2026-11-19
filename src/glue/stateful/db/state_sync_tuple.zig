@@ -214,7 +214,7 @@ fn Member(comptime DB: type, comptime Env: type, comptime Source: type) type {
         fn run_reporter(self: *Self) void {
             defer self.reached_rx.deinit();
             var reporter: Reporter = .{ .member = self, .current_target = self.target };
-            defer if (reporter.assignments_open) self.generation_rx.deinit();
+            defer reporter.close_assignments();
             while (true) {
                 reporter.drain_assignments();
                 const wake = reporter.wait() catch return;
@@ -237,18 +237,25 @@ fn Member(comptime DB: type, comptime Env: type, comptime Source: type) type {
                     const assignment = reporter.member.generation_rx.try_recv() catch |err| {
                         switch (err) {
                             error.Empty => return,
-                            error.Disconnected => {
-                                reporter.member.generation_rx.deinit();
-                                reporter.assignments_open = false;
-                                return;
-                            },
+                            error.Disconnected => return reporter.close_assignments(),
                         }
                     };
                     reporter.assign(assignment);
                 }
             }
 
+            /// Releases the assignment receiver once, however many wakes see it closed.
+            fn close_assignments(reporter: *Reporter) void {
+                if (!reporter.assignments_open) return;
+                reporter.member.generation_rx.deinit();
+                reporter.assignments_open = false;
+                assert(!reporter.assignments_open);
+            }
+
+            /// Adopts `assignment` unless a newer one was adopted: a wake handled after the
+            /// other wait's drain can carry an older assignment than the drain adopted.
             fn assign(reporter: *Reporter, assignment: Assignment) void {
+                if (assignment.generation < reporter.current_generation) return;
                 reporter.current_generation = assignment.generation;
                 reporter.current_target = assignment.target;
                 const reached = reporter.last_reached orelse return;
@@ -296,9 +303,9 @@ fn Member(comptime DB: type, comptime Env: type, comptime Source: type) type {
                         }
                     },
                     .assigned => |result| {
+                        // The other wait's drain may have closed the receiver already.
                         const assignment = (result catch return true) orelse {
-                            reporter.member.generation_rx.deinit();
-                            reporter.assignments_open = false;
+                            reporter.close_assignments();
                             return true;
                         };
                         reporter.assign(assignment);
@@ -624,4 +631,60 @@ fn collect(
 
 test {
     std.testing.refAllDecls(@This());
+}
+
+/// A database type for driving a member's reporter directly; it is never synced.
+const ReporterTestDb = struct {
+    pub const SyncTarget = u64;
+    pub const Config = void;
+
+    fn sync_db(
+        _: anytype,
+        _: void,
+        _: void,
+        _: u64,
+        _: state_sync.Channels(u64),
+        _: state_sync.SyncEngineConfig,
+    ) error{Unused}!ReporterTestDb {
+        unreachable; // The test runs only the reporter.
+    }
+};
+
+test "state sync tuple: a reporter woken by both waits releases its assignments once" {
+    // One wake can complete both of the reporter's waits (CI seed 0x6c117747). Handling the
+    // reached target drains the closed assignment channel; the assignment wait that completed
+    // in the same wake then carries an older assignment, and another sees the channel closed.
+    const TestEnv = struct { gpa: Allocator, io: Io };
+    const M = Member(ReporterTestDb, TestEnv, void);
+    const env: TestEnv = .{ .gpa = std.testing.allocator, .io = std.testing.io };
+    var events: Events = .{ .io = env.io, .count = 1 };
+    var member: M = undefined;
+    try member.init(.{
+        .index = 0,
+        .env = env,
+        .config = {},
+        .source = {},
+        .target = 5,
+        .sync_config = undefined,
+        .events = &events,
+    });
+    // The coordinator queued generation 2 at target 7, then closed its senders.
+    try member.generation_tx.send(.{ .generation = 2, .target = 7 });
+    member.release_coordinator();
+    member.target_rx.deinit();
+    member.finish_rx.deinit();
+    member.reached_tx.deinit();
+    defer member.reached_rx.deinit();
+
+    var reporter: M.Reporter = .{ .member = &member, .current_target = 5 };
+    defer reporter.close_assignments();
+    try std.testing.expect(reporter.handle(.{ .reached = 7 }));
+    try std.testing.expect(!reporter.assignments_open);
+    try std.testing.expectEqual(@as(?u64, 2), events.reached[0]);
+    // Generation 1 was taken by the assignment wait before generation 2 was queued.
+    try std.testing.expect(reporter.handle(.{ .assigned = .{ .generation = 1, .target = 5 } }));
+    try std.testing.expectEqual(@as(u64, 2), reporter.current_generation);
+    try std.testing.expectEqual(@as(u64, 7), reporter.current_target);
+    try std.testing.expect(reporter.handle(.{ .assigned = null }));
+    try std.testing.expect(!reporter.assignments_open);
 }
