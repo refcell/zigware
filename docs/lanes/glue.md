@@ -267,8 +267,20 @@ marshal's actors (consensus-marshal) for the actor; until then it ports what is 
   `state_sync.sync_set(DBs, D, ...)` syncs a `db.Shared`, a `db.Tuple`, or a set declaring
   `sync`. Where commonware panics these return errors (`MarshalAnchorMissing`,
   `BlockUnavailable`, `SyncerStopped`).
+- `glue.stateful.actor.Syncing(P)` (core/syncing.zig; P = {App, Databases, Provider, Marshal,
+  Plan, Resolvers}): `init(Config)` starts the syncer from `plan.floor()`; `run()` serves the
+  mailbox (declines proposals, defers verifications, retains finalizations, retargets on a full
+  ack window) until state sync converges, applies the retained blocks above its anchor, records
+  completion, attaches the resolvers, answers database subscribers, and returns
+  `Ready{processor, databases, deferred}` (null if the mailbox closed or it was cancelled).
+  `Stateful` builds `Processing` from it and schedules each deferred verification.
 
 ### Decisions
+- `Syncing.run` builds the `Processor` itself (the handoff applies blocks through
+  `Processor.finalize`) and returns it as `Ready`, where commonware moves straight into
+  `Processing`; the `Stateful` actor owns the step into processing. Retained blocks keep their
+  acknowledgement as an optional, so an error mid-handoff never releases an acknowledged one
+  (broadcast-resolver lane).
 - The db/p2p actor owns every caller's reply sender in a table keyed by subscription id, and
   the resolver engine's subscribers carry only the id, where commonware's carry the sender. A
   delivery reaches the callers its ids still name, so a queued delivery never touches a
@@ -411,6 +423,7 @@ marshal's actors (consensus-marshal) for the actor; until then it ports what is 
 - 2026-11-19 (stateful, broadcast-resolver lane): tuple-set state sync.
 - 2026-11-19 (stateful, broadcast-resolver lane): the db/p2p resolver actor and metrics.
 - 2026-11-19 (stateful, broadcast-resolver lane): the syncer's mailbox and actor.
+- 2026-11-19 (stateful, broadcast-resolver lane): the actor's `Syncing` mode and handoff.
 - 2026-11-19 (stateful): the core actor's `Durability`.
 - 2026-11-19 (stateful): the core actor's `Verifications` handler; waiting verifies abstain.
 - 2026-11-19 (stateful): the core actor's mailbox.

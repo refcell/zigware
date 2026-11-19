@@ -62,6 +62,11 @@ fn InnerOf(comptime Block: type) type {
     return if (@hasDecl(Block, "Inner")) *const Block.Inner else *const Block;
 }
 
+/// The anchor type of marshal block `B`.
+pub fn AnchorOf(comptime B: type) type {
+    return Anchor(B.Digest);
+}
+
 /// The anchor of marshal block `block` (commonware `Anchor::from_block`).
 pub fn anchor_of(block: anytype) Anchor(@TypeOf(block.*).Digest) {
     const inner = inner_of(block);
@@ -73,7 +78,7 @@ fn release(gpa: Allocator, block: anytype) void {
     var owned = block;
     const Block = @TypeOf(owned);
     if (comptime @hasDecl(Block, "deinit")) {
-        const takes_gpa = @typeInfo(@TypeOf(Block.deinit)).@"fn".params.len == 2;
+        const takes_gpa = @typeInfo(@TypeOf(Block.deinit)).@"fn".param_types.len == 2;
         if (takes_gpa) owned.deinit(gpa) else owned.deinit();
     }
 }
