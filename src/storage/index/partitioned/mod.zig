@@ -5,9 +5,8 @@
 //! key `(partition, translated sub-key)`, which `Translator(T, P)` produces. The unordered
 //! variant is exactly `index.unordered.Index` over it. The ordered variant keeps commonware's
 //! partitioned semantics, which differ from the flat ordered index: a key's values iterate in
-//! insertion order (see `ordered.zig`). Commonware stores each partition as a sorted array that
-//! spills to a `BTreeMap`; here every partition shares one balanced tree over the composite key,
-//! which has the same results and O(log n) operations without a spill threshold.
+//! insertion order (see `ordered.zig`). As commonware's, it stores each partition as sorted
+//! arrays that spill to an ordered tree.
 //!
 //! Commonware's crate-private `Partitioned` trait (for qmdb's parallel snapshot build) is
 //! `Range`: each variant's `new_range` makes an empty index restricted to a contiguous run of
@@ -112,11 +111,11 @@ pub fn Range(
         pub fn init(full: *const Index, offset: u32, count: u32) Self {
             assert(count > 0);
             assert(@as(u64, offset) + count <= Tr.partition_count);
-            return .{
-                .index = Index.init(full.gpa, full.translator),
-                .offset = offset,
-                .count = count,
-            };
+            const index = if (comptime @hasDecl(Index, "init_range"))
+                Index.init_range(full.gpa, full.translator, offset, count)
+            else
+                Index.init(full.gpa, full.translator);
+            return .{ .index = index, .offset = offset, .count = count };
         }
 
         pub fn deinit(self: *Self) void {

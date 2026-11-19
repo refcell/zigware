@@ -23,12 +23,16 @@ const TwoCap = translator.TwoCap;
 const OneCap = translator.OneCap;
 const PartitionedUnordered = partitioned.unordered.Index(OneCap, u64, 1);
 const PartitionedOrdered = partitioned.ordered.Index(OneCap, u64, 1);
+/// Spills a partition at two entries, so the battery runs on spilled partitions too
+/// (commonware's `test_partitioned_ordered_spilling`).
+const PartitionedSpilling = partitioned.ordered.IndexSpillAt(OneCap, u64, 1, 2);
 
 /// Every index the generic checks run against. A one-byte prefix with `OneCap` translates keys
 /// like `TwoCap` on a flat index, so every index sees the same collisions.
 const indices = .{
     unordered.Index(TwoCap, u64), ordered.Index(TwoCap, u64),
     PartitionedUnordered,         PartitionedOrdered,
+    PartitionedSpilling,
 };
 
 /// An empty index of type `I` with its default translator.
@@ -1145,8 +1149,13 @@ const ProbeVisits = struct {
 };
 
 test "partitioned ordered get_many matches get" {
-    // commonware's `test_soa_get_many_matches_get` (its inline case; nothing spills here).
-    var index = new(PartitionedOrdered);
+    // commonware's `test_soa_get_many_matches_get`: inline, and spilling at 12 entries.
+    try run_get_many_matches_get(PartitionedOrdered, false);
+    try run_get_many_matches_get(partitioned.ordered.IndexSpillAt(OneCap, u64, 1, 12), true);
+}
+
+fn run_get_many_matches_get(comptime I: type, spilling: bool) !void {
+    var index = new(I);
     defer index.deinit();
     // Partitions 0..128 hold 32 down to 1 keys; translated keys repeat every 24 entries.
     var value: u64 = 0;
@@ -1155,6 +1164,12 @@ test "partitioned ordered get_many matches get" {
             try index.insert(&.{ @intCast(partition), @intCast(j * 7 % 24) }, value);
             value += 1;
         }
+    }
+    // The low threshold spills some partitions and leaves others inline.
+    if (spilling) {
+        try testing.expect(index.spilled_count() > 0 and index.spilled_count() < 128);
+    } else {
+        try testing.expectEqual(@as(usize, 0), index.spilled_count());
     }
     var probes: [1550][2]u8 = undefined;
     for (probes[0..1500], 0..) |*probe, i| {

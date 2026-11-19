@@ -199,6 +199,9 @@ qmdb `current` (balances, over the MMB) and `keyless` (payout log, over the MMR)
 - [x] Async start_sync step 4: the prunable archive's pipelined `start_sync` and 11 tests.
 - [x] Step 4b: oversized's in-flight marker generation (`marker_sync_pending`) on metadata's
   `start_sync` completion (step 2c), and the archive's 4 marker-pipeline tests.
+- [ ] Storage perf (coordinator, 2026-11-19): [x] `index::grinding` lookup (per-partition
+  arrays); [ ] archive put and get by key; [x] freezer work check. Then the `should_panic`
+  tests left after storage-merkle takes index's 30 and bitmap's 4: translator 1, ordinal 1.
 
 ## Log
 - 2026-11-16: namespace, amounts, lookup with their tests; Amounts and Lookup conformance
@@ -271,3 +274,9 @@ qmdb `current` (balances, over the MMB) and `keyless` (payout log, over the MMR)
 - 2026-11-19: storage bench head-to-head in docs/BENCHMARKS.md (commonware's clearing has no
   benches): 12 index, archive, and freezer cases. Slower over 1.5×: `index::grinding` lookup
   (5.9×), archive put (2.0×, 1.7×) and get by key (2.0×).
+- 2026-11-19: partitioned ordered index on commonware's structure (sorted per-partition arrays
+  spilling to a tree at 512 entries), reversing storage-merkle's one-treap decision:
+  `index::grinding` lookup 847 µs to 143 µs (commonware 169 µs). 14 not-portable index tests
+  ported (7 spill, 7 `partition.rs`), and the whole battery also runs spilling at 2 entries;
+  40 not portable remain (38 storage-merkle.md, 2 bmt). Freezer bench checked: both sides do
+  about the same syscalls per op; the 14 to 33× is commonware's `spawn_blocking` per blob op.

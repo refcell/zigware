@@ -253,27 +253,31 @@ Commonware's `#[test]` functions matched to zigware tests by what they check.
 
 | module | tests | ported | partial | open | not portable |
 |---|---|---|---|---|---|
-| index | 172 | 125 | 0 | 0 | 47 |
+| index | 172 | 139 | 0 | 0 | 33 |
 | rmap | 39 | 39 | 0 | 0 | 0 |
 | bitmap | 15 | 11 | 0 | 0 | 4 |
 | translator | 18 | 17 | 0 | 0 | 1 |
 
 Not portable: 35 `should_panic` tests (zig tests cannot catch panics; each panic exists),
-index's spill tests (one tree, no spill threshold, see Decisions), and the metrics-registry
-range test (the indices keep plain counters, not registry metrics). The 3
+two worker-metrics tests (a worker publishes metrics to the full index in registry batches),
+and the metrics-registry range test (the indices keep plain counters, not registry metrics). The 3
 `cursor_across_threads` tests are ported as `index cursor across threads` (an index behind a
 `std.Io.Mutex`, updated through a cursor on a spawned thread). Re-audited 2026-11-19 against
 start_sync, DelayedSync, the faulty wrap, and parallel conformance: none of the other
 not-portable entries depends on them. Not-portable review (2026-11-19, coding lane): rmap's one
 (`test_missing_items_zero_n`) became the plain `test_missing_items_zero_limit` upstream
 (e7987e8c3), which is ported. By category: panic 35 (index 30, bitmap 4, translator 1); design
-difference 17 (one treap with no spill: 9 spill and worker-metrics tests, 7 `partition.rs`
-internals, and the registry range test). 52 in all.
+difference 3 (the 2 worker-metrics batch tests and the registry range test). 38 in all. The
+per-partition arrays (2026-11-19, clearing lane) ported the 7 spill tests,
+`partitioned_ordered_spilling` (the whole battery at threshold 2), the spilling case of
+`soa_get_many_matches_get`, and the 7 `partition.rs` tests (4 on `Partition` directly;
+navigation, `set`, and `drain_runs` through the index's navigation, cursor-update, and
+spill-transition tests).
 
 Open (index):
 - [x] `range_for_each_value_visits_all_values_once` and `install_range_nonzero_offset` for
   both partitioned indices, and `worker_prunes_count_live` (prunes counted at install).
-- [x] Partitioned ordered: `get_mut_or_insert` (spill parts aside), `get_many` matches `get`.
+- [x] Partitioned ordered: `get_mut_or_insert` (spilled too), `get_many` matches `get`.
 
 Partial:
 - [x] index: `cursor_insert_with_next` on the last value (3 indices), deleting the middle of
@@ -419,13 +423,16 @@ The ports found four differences from commonware, now fixed:
   partitioned index is a flat index over the composite key `(partition, sub-key)`
   (`partitioned.Translator(T, P)`): the unordered one is `unordered.Index` over it, and the
   ordered one keeps commonware's partitioned semantics (values in insertion order, offset
-  cursor) in one treap instead of per-partition sorted arrays that spill to a `BTreeMap`. Same
-  results and O(log n) operations, so the spill threshold and its tests do not apply. Every
-  generic index test runs against all four indices.
-  `absorb` (range install) joins the range's treap onto the full one in O(depth) and adopts
-  its pools when every range key orders after every full key, as ranges installing in
-  ascending partition order do, so no run is copied, like commonware's `install_range`
-  moving partition maps (actor-stream lane). Interleaved key sets still reinsert run by run.
+  cursor) and, since 2026-11-19, its structure: each partition is parallel sorted `keys`/`vals`
+  arrays (a run is adjacent equal keys, found by binary search) that spill to an ordered tree
+  in a side table at `spill_threshold` (512) entries and revert when the tree drains;
+  `IndexSpillAt` sets the threshold for tests. Reversal (clearing lane): the earlier design
+  kept every run in one treap over `(partition, sub-key)` for the same results without a
+  threshold, but `index::grinding` lookup ran 5.9× slower than commonware's arrays (847 µs
+  against 144 µs); with the arrays it is 0.85× (BENCHMARKS.md). Every generic index test runs
+  against all five indices, one of them spilling at 2 entries. `absorb` (range install) moves
+  the range's partitions slot by slot and adopts its spilled trees and pools, so no run is
+  copied, like commonware's `install_range` moving partition maps.
 - index/immutable: same ring of translated keys by position and exact prefix retirement.
   Positions live in `utils.handles.Table(u64)` as in commonware: `get` returns an iterator that
   confirms each candidate against its ring slot, and growth rehashes through the ring. Seeded and

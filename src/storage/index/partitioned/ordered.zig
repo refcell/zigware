@@ -1,15 +1,23 @@
 //! A partitioned ordered index (port of commonware's `storage/src/index/partitioned/ordered`).
 //!
 //! Unlike the flat indices, a key's values form a run in insertion order: `insert` appends to
-//! the run, `get` yields it front to back, and the cursor walks it by offset (commonware's
-//! partition cursor). Runs live in one treap over the composite key `(partition, sub-key)`, so
-//! ordered navigation crosses partitions in prefix order, as commonware's partition scans do.
+//! the run, `get` yields it front to back, and the cursor walks it by offset. As commonware's,
+//! each of the `256^P` partitions keeps its translated keys and values as two parallel sorted
+//! arrays, a run being adjacent equal keys, so a lookup is an array index and a short binary
+//! search. A partition whose arrays reach `spill_threshold` entries moves to a side table of
+//! ordered trees (commonware's `BTreeMap`) on its next access, which bounds the cost of inserts
+//! into a partition that grinding keys fill; it returns to arrays once emptied. The partition
+//! array is allocated on the first insert, so `init` does not allocate.
 
 const std = @import("std");
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const partitioned = @import("mod.zig");
 const storage = @import("../storage.zig");
+
+/// Array entries at which a partition spills to the side table (commonware's
+/// `SPILL_THRESHOLD`).
+pub const spill_threshold: usize = 512;
 
 /// A key's values, front to back.
 pub fn Run(comptime V: type) type {
@@ -46,16 +54,108 @@ pub fn new_range(
     return .init(full, offset, count);
 }
 
+/// One partition's runs as parallel sorted arrays (commonware's `Partition`).
+fn Partition(comptime K: type, comptime V: type, comptime order: fn (K, K) std.math.Order) type {
+    return struct {
+        const Self = @This();
+        pub const Span = struct { start: usize, end: usize };
+
+        keys: std.ArrayList(K) = .empty,
+        vals: std.ArrayList(V) = .empty,
+
+        fn deinit(self: *Self, gpa: Allocator) void {
+            self.keys.deinit(gpa);
+            self.vals.deinit(gpa);
+        }
+
+        fn len(self: *const Self) usize {
+            assert(self.keys.items.len == self.vals.items.len);
+            return self.keys.items.len;
+        }
+
+        /// The first entry whose key is not below `key` (`strict`: not at or below).
+        fn bound(self: *const Self, key: K, comptime strict: bool) usize {
+            var low: usize = 0;
+            var high: usize = self.keys.items.len;
+            while (low < high) {
+                const middle = low + (high - low) / 2;
+                const relation = order(self.keys.items[middle], key);
+                const before = relation == .lt or (strict and relation == .eq);
+                if (before) low = middle + 1 else high = middle;
+            }
+            assert(low <= self.keys.items.len);
+            return low;
+        }
+
+        /// The entries of `key`'s run; empty at its insertion point when absent.
+        fn run_range(self: *const Self, key: K) Span {
+            const start = self.bound(key, false);
+            var end = start;
+            while (end < self.keys.items.len and order(self.keys.items[end], key) == .eq) end += 1;
+            return .{ .start = start, .end = end };
+        }
+
+        fn run_of(self: *const Self, at: usize) Span {
+            assert(at < self.len());
+            const key = self.keys.items[at];
+            var span: Span = .{ .start = at, .end = at + 1 };
+            while (span.start > 0 and order(self.keys.items[span.start - 1], key) == .eq) {
+                span.start -= 1;
+            }
+            while (span.end < self.len() and order(self.keys.items[span.end], key) == .eq) {
+                span.end += 1;
+            }
+            return span;
+        }
+
+        fn values(self: *const Self, span: Span) []const V {
+            return self.vals.items[span.start..span.end];
+        }
+
+        /// Inserts at `at`; on error the arrays are unchanged.
+        fn insert_at(
+            self: *Self,
+            gpa: Allocator,
+            at: usize,
+            key: K,
+            value: V,
+        ) Allocator.Error!void {
+            try self.keys.ensureUnusedCapacity(gpa, 1);
+            try self.vals.ensureUnusedCapacity(gpa, 1);
+            self.keys.insertAssumeCapacity(at, key);
+            self.vals.insertAssumeCapacity(at, value);
+            assert(self.keys.items.len == self.vals.items.len);
+        }
+
+        fn remove_span(self: *Self, span: Span) void {
+            assert(span.start <= span.end and span.end <= self.len());
+            self.keys.replaceRangeAssumeCapacity(span.start, span.end - span.start, &.{});
+            self.vals.replaceRangeAssumeCapacity(span.start, span.end - span.start, &.{});
+        }
+    };
+}
+
 /// A partitioned ordered index whose first `P` key bytes select a partition and translator
 /// `T` (which must preserve key order) maps the rest.
 pub fn Index(comptime T: type, comptime V: type, comptime P: usize) type {
+    return IndexSpillAt(T, V, P, spill_threshold);
+}
+
+/// `Index` spilling at `threshold` array entries (commonware's `with_threshold`; tests use a
+/// small one to exercise spilled partitions cheaply).
+pub fn IndexSpillAt(comptime T: type, comptime V: type, comptime P: usize, comptime n: usize) type {
+    const threshold = n;
+    comptime assert(threshold > 0); // The spill threshold must be at least 1.
     return struct {
         const Self = @This();
         const Tr = partitioned.Translator(T, P);
-        const Tree = std.Treap(Tr.Key, Tr.order);
+        const K = T.Key;
+        const Slots = Partition(K, V, T.order);
+        const Tree = std.Treap(K, T.order);
         const List = std.ArrayList(V);
         const Item = struct { node: Tree.Node, values: List };
         const Pool = std.heap.MemoryPool(Item);
+        const Located = struct { slot: u32, key: K };
 
         pub const Translator = Tr;
         pub const Key = Tr.Key;
@@ -65,22 +165,47 @@ pub fn Index(comptime T: type, comptime V: type, comptime P: usize) type {
 
         gpa: Allocator,
         translator: Tr,
-        tree: Tree = .{},
+        /// The first global partition held (nonzero only for a worker's range).
+        offset: u32 = 0,
+        /// The partitions held.
+        count: u32 = Tr.partition_count,
+        /// `count` partitions, allocated by the first insert.
+        partitions: []Slots = &.{},
+        /// Spilled partitions by slot; a spilled partition's arrays are empty.
+        spilled: std.AutoHashMapUnmanaged(u32, Tree) = .empty,
+        /// Items of the spilled trees.
         pool: Pool = .empty,
-        /// Pools of absorbed indices whose runs `absorb` linked into `tree` in place. They live
-        /// as long as `self`; a destroyed run's item goes to `pool`'s free list, which is safe
-        /// because every pool is an arena freed only by `deinit`.
+        /// Pools of absorbed ranges whose spilled trees `absorb` took over. They live as long
+        /// as `self`; a destroyed item goes to `pool`'s free list, which is safe because every
+        /// pool is an arena freed only by `deinit`.
         adopted: std.ArrayList(Pool) = .empty,
         counters: storage.Counters = .{},
+        spill_total: u64 = 0,
 
         pub fn init(gpa: Allocator, translator: Tr) Self {
             comptime assert(T.ordered); // A partitioned ordered index needs an ordered translator.
             return .{ .gpa = gpa, .translator = translator };
         }
 
+        /// An empty index over partitions `[offset, offset + count)` (a worker's range).
+        pub fn init_range(gpa: Allocator, translator: Tr, offset: u32, count: u32) Self {
+            assert(count > 0);
+            assert(@as(u64, offset) + count <= Tr.partition_count);
+            var index = init(gpa, translator);
+            index.offset = offset;
+            index.count = count;
+            return index;
+        }
+
         pub fn deinit(self: *Self) void {
-            var current = self.tree.getMin();
-            while (current) |node| : (current = node.next()) item(node).values.deinit(self.gpa);
+            for (self.partitions) |*part| part.deinit(self.gpa);
+            self.gpa.free(self.partitions);
+            var trees = self.spilled.valueIterator();
+            while (trees.next()) |tree| {
+                var current = tree.getMin();
+                while (current) |node| : (current = node.next()) item(node).values.deinit(self.gpa);
+            }
+            self.spilled.deinit(self.gpa);
             self.pool.deinit(self.gpa);
             for (self.adopted.items) |*pool| pool.deinit(self.gpa);
             self.adopted.deinit(self.gpa);
@@ -91,10 +216,33 @@ pub fn Index(comptime T: type, comptime V: type, comptime P: usize) type {
             return @fieldParentPtr("node", node);
         }
 
-        fn find(self: *const Self, key: Key) ?*Item {
-            var current = self.tree.root;
+        fn locate(self: *const Self, key: []const u8) Located {
+            const split = partitioned.partition_index_and_sub_key(P, key);
+            assert(split.partition >= self.offset);
+            const slot = split.partition - self.offset;
+            assert(slot < self.count);
+            return .{ .slot = slot, .key = self.translator.inner.transform(split.sub_key) };
+        }
+
+        /// Allocates the partition array now; otherwise the first insert does (commonware
+        /// allocates it in `new`).
+        pub fn ensure_partitions(self: *Self) Allocator.Error!void {
+            if (self.partitions.len > 0) return;
+            const partitions = try self.gpa.alloc(Slots, self.count);
+            @memset(partitions, .{});
+            self.partitions = partitions;
+            assert(self.partitions.len == self.count);
+        }
+
+        fn tree_of(self: *const Self, slot: u32) ?*Tree {
+            if (self.spilled.count() == 0) return null;
+            return self.spilled.getPtr(slot);
+        }
+
+        fn find(tree: *const Tree, key: K) ?*Item {
+            var current = tree.root;
             while (current) |node| {
-                current = switch (Tr.order(key, node.key)) {
+                current = switch (T.order(key, node.key)) {
                     .eq => return item(node),
                     .lt => node.children[0],
                     .gt => node.children[1],
@@ -103,32 +251,20 @@ pub fn Index(comptime T: type, comptime V: type, comptime P: usize) type {
             return null;
         }
 
-        /// The run of `key`, created empty if missing.
-        fn find_or_create(self: *Self, key: Key) Allocator.Error!*Item {
-            var slot = self.tree.getEntryFor(key);
-            if (slot.node) |node| return item(node);
-            const created = try self.pool.create(self.gpa);
-            created.values = .empty;
-            slot.set(&created.node);
-            return created;
-        }
-
-        fn destroy(self: *Self, run: *Item) void {
-            assert(run.values.items.len == 0);
-            run.values.deinit(self.gpa);
-            var slot = self.tree.getEntryForExisting(&run.node);
-            slot.set(null);
-            self.pool.destroy(run);
-        }
-
-        fn values_of(run: ?*const Item) Values {
-            const found = run orelse return .{};
-            return .{ .items = found.values.items };
+        /// The run of `key` in slot `slot`, empty when absent.
+        fn values_at(self: *const Self, at: Located) Values {
+            if (self.partitions.len == 0) return .{};
+            const part = &self.partitions[at.slot];
+            if (part.len() > 0) return .{ .items = part.values(part.run_range(at.key)) };
+            const tree = self.tree_of(at.slot) orelse return .{};
+            const run = find(tree, at.key) orelse return .{};
+            assert(run.values.items.len > 0);
+            return .{ .items = run.values.items };
         }
 
         /// The values whose keys translate like `key`, in insertion order.
         pub fn get(self: *const Self, key: []const u8) Values {
-            return values_of(self.find(self.translator.transform(key)));
+            return self.values_at(self.locate(key));
         }
 
         pub fn get_many(
@@ -143,11 +279,115 @@ pub fn Index(comptime T: type, comptime V: type, comptime P: usize) type {
             }
         }
 
+        /// Moves slot `slot`'s runs to a spilled tree once its arrays reach the threshold
+        /// (commonware's `maybe_spill`). Spilling only changes the representation, so when it
+        /// runs out of memory the partition stays in its arrays, which hold the same runs.
+        fn maybe_spill(self: *Self, slot: u32) void {
+            if (self.partitions.len == 0) return;
+            if (self.partitions[slot].len() < threshold) return;
+            self.spill(slot) catch |err| switch (err) {
+                error.OutOfMemory => return,
+            };
+            assert(self.partitions[slot].len() == 0);
+        }
+
+        fn spill(self: *Self, slot: u32) Allocator.Error!void {
+            const part = &self.partitions[slot];
+            assert(self.tree_of(slot) == null);
+            try self.spilled.ensureUnusedCapacity(self.gpa, 1);
+            var tree: Tree = .{};
+            errdefer self.free_tree(&tree);
+            var at: usize = 0;
+            while (at < part.len()) {
+                const span = part.run_of(at);
+                const created = try self.pool.create(self.gpa);
+                created.values = .empty;
+                var entry = tree.getEntryFor(part.keys.items[at]);
+                assert(entry.node == null);
+                entry.set(&created.node);
+                try created.values.appendSlice(self.gpa, part.values(span));
+                at = span.end;
+            }
+            self.spilled.putAssumeCapacityNoClobber(slot, tree);
+            part.deinit(self.gpa);
+            part.* = .{};
+            self.spill_total += 1;
+        }
+
+        fn free_tree(self: *Self, tree: *Tree) void {
+            while (tree.getMin()) |node| {
+                const run = item(node);
+                run.values.deinit(self.gpa);
+                var entry = tree.getEntryForExisting(node);
+                entry.set(null);
+                self.pool.destroy(run);
+            }
+        }
+
+        /// Frees the emptied run of a spilled key, and the partition's tree if that was its
+        /// last key (the partition is back to empty arrays).
+        fn destroy_spilled(self: *Self, slot: u32, run: *Item) void {
+            assert(run.values.items.len == 0);
+            const tree = self.tree_of(slot).?;
+            run.values.deinit(self.gpa);
+            var entry = tree.getEntryForExisting(&run.node);
+            entry.set(null);
+            self.pool.destroy(run);
+            if (tree.root == null) assert(self.spilled.remove(slot));
+        }
+
+        /// Appends `value` to the run of `at`; returns whether it created the key.
+        fn insert_located(self: *Self, at: Located, value: V) Allocator.Error!bool {
+            const part = &self.partitions[at.slot];
+            if (part.len() == 0) {
+                if (self.tree_of(at.slot)) |tree| return self.insert_spilled(tree, at.key, value);
+            }
+            const span = part.run_range(at.key);
+            try part.insert_at(self.gpa, span.end, at.key, value);
+            return span.start == span.end;
+        }
+
+        fn insert_spilled(self: *Self, tree: *Tree, key: K, value: V) Allocator.Error!bool {
+            if (find(tree, key)) |run| {
+                try run.values.append(self.gpa, value);
+                return false;
+            }
+            const created = try self.pool.create(self.gpa);
+            created.values = .empty;
+            created.values.append(self.gpa, value) catch |err| {
+                self.pool.destroy(created);
+                return err;
+            };
+            var entry = tree.getEntryFor(key);
+            assert(entry.node == null);
+            entry.set(&created.node);
+            return true;
+        }
+
+        /// A cursor over the run of `at`, or null if the key has none.
+        fn cursor_at(self: *Self, at: Located) ?Cursor {
+            const part = &self.partitions[at.slot];
+            if (part.len() > 0) {
+                const span = part.run_range(at.key);
+                if (span.start == span.end) return null;
+                const run: Cursor.Array = .{
+                    .key = at.key,
+                    .start = span.start,
+                    .len = span.end - span.start,
+                };
+                return .{ .index = self, .slot = at.slot, .backing = .{ .array = run } };
+            }
+            const tree = self.tree_of(at.slot) orelse return null;
+            const run = find(tree, at.key) orelse return null;
+            return .{ .index = self, .slot = at.slot, .backing = .{ .spilled = run } };
+        }
+
         /// A cursor over the values of `key`, or null if it has none. Call `finish` when done.
         pub fn get_mut(self: *Self, key: []const u8) ?Cursor {
-            const run = self.find(self.translator.transform(key)) orelse return null;
-            assert(run.values.items.len > 0);
-            return .{ .index = self, .run = run };
+            const at = self.locate(key);
+            if (self.partitions.len == 0) return null;
+            self.maybe_spill(at.slot);
+            return self.cursor_at(at);
         }
 
         /// A cursor over the values of `key`, or, if it has none, inserts `value` and returns
@@ -160,14 +400,13 @@ pub fn Index(comptime T: type, comptime V: type, comptime P: usize) type {
 
         /// Appends `value` to the run of `key`.
         pub fn insert(self: *Self, key: []const u8, value: V) Allocator.Error!void {
-            const run = try self.find_or_create(self.translator.transform(key));
-            const created = run.values.items.len == 0;
-            run.values.append(self.gpa, value) catch |err| {
-                if (created) self.destroy(run);
-                return err;
-            };
+            const at = self.locate(key);
+            try self.ensure_partitions();
+            self.maybe_spill(at.slot);
+            const created = try self.insert_located(at, value);
             self.counters.keys += @intFromBool(created);
             self.counters.items += 1;
+            self.maybe_spill(at.slot);
         }
 
         /// Removes the values of `key` that `should_retain` rejects, then appends `value` if it
@@ -187,6 +426,7 @@ pub fn Index(comptime T: type, comptime V: type, comptime P: usize) type {
             } else if (should_retain(retain_context, &value)) {
                 try self.insert(key, value);
             }
+            self.maybe_spill(self.locate(key).slot);
         }
 
         pub fn retain(
@@ -202,88 +442,72 @@ pub fn Index(comptime T: type, comptime V: type, comptime P: usize) type {
 
         /// Removes every value of `key`.
         pub fn remove(self: *Self, key: []const u8) void {
-            const run = self.find(self.translator.transform(key)) orelse return;
-            const count = run.values.items.len;
+            const at = self.locate(key);
+            if (self.partitions.len == 0) return;
+            self.maybe_spill(at.slot);
+            const part = &self.partitions[at.slot];
+            var count: usize = 0;
+            if (part.len() > 0) {
+                const span = part.run_range(at.key);
+                count = span.end - span.start;
+                if (count == 0) return;
+                part.remove_span(span);
+            } else {
+                const tree = self.tree_of(at.slot) orelse return;
+                const run = find(tree, at.key) orelse return;
+                count = run.values.items.len;
+                run.values.clearRetainingCapacity();
+                self.destroy_spilled(at.slot, run);
+            }
             assert(count > 0);
-            run.values.clearRetainingCapacity();
-            self.destroy(run);
             self.counters.keys -= 1;
             self.counters.items -= count;
             self.counters.pruned += count;
         }
 
-        /// Moves every run of `other` into `self`, which holds none of `other`'s keys (the
-        /// `install_range` half of commonware's `Partitioned`). Reserves first, so an error
-        /// changes nothing.
+        /// Moves every run of `other`, a range within `self`'s partitions, into `self`, which
+        /// holds none of `other`'s keys (the `install_range` half of commonware's
+        /// `Partitioned`): partitions move slot by slot and spilled trees with their pools, so
+        /// no run is copied. Reserves first, so an error changes nothing.
         pub fn absorb(self: *Self, other: *Self) Allocator.Error!void {
             assert(self != other);
             assert(self.gpa.ptr == other.gpa.ptr);
-            if (self.precedes(other)) return self.adopt(other);
-            var runs: usize = 0;
-            var counting = other.tree.getMin();
-            while (counting) |node| : (counting = node.next()) runs += 1;
-            assert(runs == other.counters.keys);
-            try self.pool.addCapacity(self.gpa, runs);
-            var current = other.tree.getMin();
-            while (current) |node| : (current = node.next()) {
-                const moved = item(node);
-                assert(moved.values.items.len > 0);
-                // Proof: `addCapacity` above put `runs` free items in the pool.
-                const created = self.pool.create(self.gpa) catch unreachable;
-                created.values = moved.values;
-                moved.values = .empty;
-                var slot = self.tree.getEntryFor(node.key);
-                assert(slot.node == null);
-                slot.set(&created.node);
+            assert(other.offset >= self.offset);
+            assert(other.offset + other.count <= self.offset + self.count);
+            const base = other.offset - self.offset;
+            const trees = other.spilled.count();
+            if (other.partitions.len > 0) try self.ensure_partitions();
+            try self.spilled.ensureUnusedCapacity(self.gpa, trees);
+            const pools = 1 + other.adopted.items.len;
+            if (trees > 0) try self.adopted.ensureUnusedCapacity(self.gpa, pools);
+            for (other.partitions, 0..) |*part, local| {
+                if (part.len() == 0) continue;
+                const target = &self.partitions[base + local];
+                assert(target.len() == 0 and self.tree_of(@intCast(base + local)) == null);
+                target.deinit(self.gpa);
+                target.* = part.*;
+                part.* = .{};
+            }
+            var moved = other.spilled.iterator();
+            while (moved.next()) |entry| {
+                const slot = base + entry.key_ptr.*;
+                assert(self.partitions[slot].len() == 0);
+                self.spilled.putAssumeCapacityNoClobber(slot, entry.value_ptr.*);
+            }
+            other.spilled.clearRetainingCapacity();
+            if (trees > 0) {
+                self.adopted.appendAssumeCapacity(other.pool);
+                self.adopted.appendSliceAssumeCapacity(other.adopted.items);
+                other.pool = .empty;
+                other.adopted.clearRetainingCapacity();
             }
             self.counters.keys += other.counters.keys;
             self.counters.items += other.counters.items;
             self.counters.pruned += other.counters.pruned;
-            // `other`'s runs are empty now; drop them so it reads as an empty index.
+            self.spill_total += other.spill_total;
+            const offset, const count = .{ other.offset, other.count };
             other.deinit();
-            other.* = .init(self.gpa, self.translator);
-        }
-
-        /// Whether every key of `self` orders before every key of `other`, as when ranges
-        /// install in ascending partition order.
-        fn precedes(self: *const Self, other: *const Self) bool {
-            const last = self.tree.getMax() orelse return true;
-            const first = other.tree.getMin() orelse return true;
-            return Tr.order(last.key, first.key) == .lt;
-        }
-
-        /// `absorb` when `self` precedes `other`: joins the treaps along `self`'s right spine
-        /// and `other`'s left spine in O(depth), keeping the min-heap on priority, and adopts
-        /// `other`'s pools, so no run is copied (commonware's `install_range` moves partition
-        /// maps the same way).
-        fn adopt(self: *Self, other: *Self) Allocator.Error!void {
-            assert(self.precedes(other));
-            try self.adopted.ensureUnusedCapacity(self.gpa, 1 + other.adopted.items.len);
-            var link = &self.tree.root;
-            var parent: ?*Tree.Node = null;
-            var left = self.tree.root;
-            var right = other.tree.root;
-            while (true) {
-                const lower = left orelse break;
-                const upper = right orelse break;
-                const take_left = lower.priority <= upper.priority;
-                const node = if (take_left) lower else upper;
-                link.* = node;
-                node.parent = parent;
-                parent = node;
-                link = &node.children[@intFromBool(take_left)];
-                if (take_left) left = lower.children[1] else right = upper.children[0];
-            }
-            const rest = left orelse right;
-            link.* = rest;
-            if (rest) |node| node.parent = parent;
-            self.adopted.appendAssumeCapacity(other.pool);
-            self.adopted.appendSliceAssumeCapacity(other.adopted.items);
-            self.counters.keys += other.counters.keys;
-            self.counters.items += other.counters.items;
-            self.counters.pruned += other.counters.pruned;
-            other.adopted.deinit(other.gpa);
-            other.* = .init(self.gpa, self.translator);
+            other.* = .init_range(self.gpa, self.translator, offset, count);
         }
 
         pub fn for_each_value(
@@ -291,10 +515,55 @@ pub fn Index(comptime T: type, comptime V: type, comptime P: usize) type {
             visit_context: anytype,
             comptime visit: fn (@TypeOf(visit_context), *const V) void,
         ) void {
-            var current = self.tree.getMin();
-            while (current) |node| : (current = node.next()) {
-                for (item(node).values.items) |*value| visit(visit_context, value);
+            for (self.partitions, 0..) |*part, slot| {
+                for (part.vals.items) |*value| visit(visit_context, value);
+                const tree = self.tree_of(@intCast(slot)) orelse continue;
+                var current = tree.getMin();
+                while (current) |node| : (current = node.next()) {
+                    for (item(node).values.items) |*value| visit(visit_context, value);
+                }
             }
+        }
+
+        fn values_of(run: *const Item) Values {
+            return .{ .items = run.values.items };
+        }
+
+        /// The first (`last`: the last) run of slot `slot`, or null when it is empty.
+        fn edge_in(self: *const Self, slot: u32, comptime last: bool) ?Values {
+            const part = &self.partitions[slot];
+            if (part.len() > 0) {
+                return .{ .items = part.values(part.run_of(if (last) part.len() - 1 else 0)) };
+            }
+            const tree = self.tree_of(slot) orelse return null;
+            const node = (if (last) tree.getMax() else tree.getMin()).?;
+            return values_of(item(node));
+        }
+
+        /// The run of the smallest key above `key` in slot `slot` (`below`: the largest key
+        /// below it).
+        fn neighbor_in(self: *const Self, at: Located, comptime below: bool) ?Values {
+            const part = &self.partitions[at.slot];
+            if (part.len() > 0) {
+                if (below) {
+                    const lower = part.bound(at.key, false);
+                    if (lower == 0) return null;
+                    return .{ .items = part.values(part.run_of(lower - 1)) };
+                }
+                const upper = part.bound(at.key, true);
+                if (upper == part.len()) return null;
+                return .{ .items = part.values(part.run_of(upper)) };
+            }
+            const tree = self.tree_of(at.slot) orelse return null;
+            var best: ?*Tree.Node = null;
+            var current = tree.root;
+            while (current) |node| {
+                const relation = T.order(node.key, at.key);
+                const wanted = if (below) relation == .lt else relation == .gt;
+                if (wanted) best = node;
+                current = node.children[@intFromBool(wanted == below)];
+            }
+            return values_of(item(best orelse return null));
         }
 
         pub const Neighbor = storage.NeighborOf(Values);
@@ -302,41 +571,48 @@ pub fn Index(comptime T: type, comptime V: type, comptime P: usize) type {
         /// The values of the largest translated key below `key`'s, or of the largest key if
         /// there is none (`cycled`). Null when the index is empty.
         pub fn prev_translated_key(self: *const Self, key: []const u8) ?Neighbor {
-            const translated = self.translator.transform(key);
-            var best: ?*Tree.Node = null;
-            var current = self.tree.root;
-            while (current) |node| {
-                const below = Tr.order(node.key, translated) == .lt;
-                if (below) best = node;
-                current = node.children[@intFromBool(below)];
+            if (self.counters.keys == 0) return null;
+            const at = self.locate(key);
+            if (self.neighbor_in(at, true)) |values| return .{ .values = values, .cycled = false };
+            var slot = at.slot;
+            while (slot > 0) {
+                slot -= 1;
+                const values = self.edge_in(slot, true) orelse continue;
+                return .{ .values = values, .cycled = false };
             }
-            if (best) |node| return .{ .values = values_of(item(node)), .cycled = false };
-            const values = self.last_translated_key() orelse return null;
-            return .{ .values = values, .cycled = true };
+            return .{ .values = self.last_translated_key().?, .cycled = true };
         }
 
         /// The values of the smallest translated key above `key`'s, or of the smallest key if
         /// there is none (`cycled`). Null when the index is empty.
         pub fn next_translated_key(self: *const Self, key: []const u8) ?Neighbor {
-            const translated = self.translator.transform(key);
-            var best: ?*Tree.Node = null;
-            var current = self.tree.root;
-            while (current) |node| {
-                const above = Tr.order(node.key, translated) == .gt;
-                if (above) best = node;
-                current = node.children[@intFromBool(!above)];
+            if (self.counters.keys == 0) return null;
+            const at = self.locate(key);
+            if (self.neighbor_in(at, false)) |values| return .{ .values = values, .cycled = false };
+            var slot = at.slot + 1;
+            while (slot < self.count) : (slot += 1) {
+                const values = self.edge_in(slot, false) orelse continue;
+                return .{ .values = values, .cycled = false };
             }
-            if (best) |node| return .{ .values = values_of(item(node)), .cycled = false };
-            const values = self.first_translated_key() orelse return null;
-            return .{ .values = values, .cycled = true };
+            return .{ .values = self.first_translated_key().?, .cycled = true };
         }
 
         pub fn first_translated_key(self: *const Self) ?Values {
-            return values_of(item(self.tree.getMin() orelse return null));
+            if (self.counters.keys == 0) return null;
+            for (0..self.count) |slot| {
+                if (self.edge_in(@intCast(slot), false)) |values| return values;
+            }
+            unreachable; // A key is held, so some partition holds a run.
         }
 
         pub fn last_translated_key(self: *const Self) ?Values {
-            return values_of(item(self.tree.getMax() orelse return null));
+            if (self.counters.keys == 0) return null;
+            var slot = self.count;
+            while (slot > 0) {
+                slot -= 1;
+                if (self.edge_in(slot, true)) |values| return values;
+            }
+            unreachable; // A key is held, so some partition holds a run.
         }
 
         pub fn keys(self: *const Self) u64 {
@@ -351,6 +627,16 @@ pub fn Index(comptime T: type, comptime V: type, comptime P: usize) type {
             return self.counters.pruned;
         }
 
+        /// Partitions currently spilled (commonware's `spilled_count`).
+        pub fn spilled_count(self: *const Self) usize {
+            return self.spilled.count();
+        }
+
+        /// Spills so far (commonware's `spills` counter).
+        pub fn spills(self: *const Self) u64 {
+            return self.spill_total;
+        }
+
         const State = union(enum) {
             /// `next` must be called; it returns the value at this offset.
             need_next: usize,
@@ -358,13 +644,60 @@ pub fn Index(comptime T: type, comptime V: type, comptime P: usize) type {
             done,
         };
 
-        /// Walks and edits one key's run by offset (commonware's partition `Cursor`). End it
-        /// with `finish`, which removes the key if its run is empty; no other index method may
-        /// run in between.
+        /// Walks and edits one key's run by offset (commonware's partition `Cursor`), in the
+        /// partition's arrays or its spilled tree. End it with `finish`, which frees the key's
+        /// spilled run once it is empty; no other index method may run in between.
         pub const Cursor = struct {
+            pub const Array = struct { key: K, start: usize, len: usize };
+
             index: *Self,
-            run: *Item,
+            slot: u32,
+            backing: union(enum) { array: Array, spilled: *Item },
             state: State = .{ .need_next = 0 },
+
+            fn len(self: *const Cursor) usize {
+                return switch (self.backing) {
+                    .array => |run| run.len,
+                    .spilled => |run| run.values.items.len,
+                };
+            }
+
+            fn value_at(self: *Cursor, offset: usize) *V {
+                assert(offset < self.len());
+                return switch (self.backing) {
+                    .array => |run| {
+                        const vals = self.index.partitions[self.slot].vals.items;
+                        return &vals[run.start + offset];
+                    },
+                    .spilled => |run| &run.values.items[offset],
+                };
+            }
+
+            fn insert_at(self: *Cursor, offset: usize, value: V) Allocator.Error!void {
+                assert(offset <= self.len());
+                const gpa = self.index.gpa;
+                switch (self.backing) {
+                    .array => |*run| {
+                        const part = &self.index.partitions[self.slot];
+                        try part.insert_at(gpa, run.start + offset, run.key, value);
+                        run.len += 1;
+                    },
+                    .spilled => |run| try run.values.insert(gpa, offset, value),
+                }
+            }
+
+            fn remove_at(self: *Cursor, offset: usize) void {
+                assert(offset < self.len());
+                switch (self.backing) {
+                    .array => |*run| {
+                        const at = run.start + offset;
+                        const part = &self.index.partitions[self.slot];
+                        part.remove_span(.{ .start = at, .end = at + 1 });
+                        run.len -= 1;
+                    },
+                    .spilled => |run| _ = run.values.orderedRemove(offset),
+                }
+            }
 
             pub fn next(self: *Cursor) ?*V {
                 const offset = switch (self.state) {
@@ -372,12 +705,12 @@ pub fn Index(comptime T: type, comptime V: type, comptime P: usize) type {
                     .need_next => |from| from,
                     .active => |offset| offset + 1,
                 };
-                if (offset >= self.run.values.items.len) {
+                if (offset >= self.len()) {
                     self.state = .done;
                     return null;
                 }
                 self.state = .{ .active = offset };
-                return &self.run.values.items[offset];
+                return self.value_at(offset);
             }
 
             fn active(self: *const Cursor) usize {
@@ -389,23 +722,21 @@ pub fn Index(comptime T: type, comptime V: type, comptime P: usize) type {
             }
 
             pub fn update(self: *Cursor, value: V) void {
-                self.run.values.items[self.active()] = value;
+                self.value_at(self.active()).* = value;
             }
 
             /// Inserts `value` after the current one (`next` skips it), or appends it once
             /// every value was visited.
             pub fn insert(self: *Cursor, value: V) Allocator.Error!void {
-                const values = &self.run.values;
-                const gpa = self.index.gpa;
                 switch (self.state) {
                     .need_next => @panic("must call Cursor::next()"),
                     .active => |offset| {
-                        try values.insert(gpa, offset + 1, value);
+                        try self.insert_at(offset + 1, value);
                         self.state = .{ .need_next = offset + 2 };
                     },
                     .done => {
-                        try values.append(gpa, value);
-                        self.index.counters.keys += @intFromBool(values.items.len == 1);
+                        try self.insert_at(self.len(), value);
+                        self.index.counters.keys += @intFromBool(self.len() == 1);
                     },
                 }
                 self.index.counters.items += 1;
@@ -415,8 +746,8 @@ pub fn Index(comptime T: type, comptime V: type, comptime P: usize) type {
             pub fn delete(self: *Cursor) void {
                 const offset = self.active();
                 const counters = &self.index.counters;
-                _ = self.run.values.orderedRemove(offset);
-                counters.keys -= @intFromBool(self.run.values.items.len == 0);
+                self.remove_at(offset);
+                counters.keys -= @intFromBool(self.len() == 0);
                 counters.items -= 1;
                 counters.pruned += 1;
                 self.state = .{ .need_next = offset };
@@ -443,9 +774,15 @@ pub fn Index(comptime T: type, comptime V: type, comptime P: usize) type {
                 return false;
             }
 
-            /// Removes the key if its run is empty.
+            /// Frees the key's spilled run if it is empty (an emptied array run is already
+            /// gone from the arrays).
             pub fn finish(self: *Cursor) void {
-                if (self.run.values.items.len == 0) self.index.destroy(self.run);
+                switch (self.backing) {
+                    .array => {},
+                    .spilled => |run| if (run.values.items.len == 0) {
+                        self.index.destroy_spilled(self.slot, run);
+                    },
+                }
                 self.* = undefined;
             }
         };
@@ -633,4 +970,237 @@ test "partitioned ordered install below existing keys reinserts" {
         try range.install(&joined);
     }
     try expect_same(&serial, &joined);
+}
+
+/// Commonware's `new_index_spilling`: a partition spills at two entries.
+const SpillIndex = IndexSpillAt(translators.OneCap, u64, 1, 2);
+
+fn expect_run(index: *const SpillIndex, key: []const u8, expected: []const u64) !void {
+    var values = index.get(key);
+    try testing.expectEqual(expected.len, values.count());
+    for (expected) |value| try testing.expectEqual(value, values.next().?.*);
+}
+
+test "partitioned ordered spill transition" {
+    var index: SpillIndex = .init(test_gpa, .init(.{}));
+    defer index.deinit();
+    try index.insert(&.{ 0x10, 0x01 }, 1);
+    try testing.expectEqual(@as(usize, 0), index.spilled_count());
+    try index.insert(&.{ 0x10, 0x02 }, 2); // The second entry reaches the threshold.
+    try testing.expectEqual(@as(usize, 1), index.spilled_count());
+    try index.insert(&.{ 0x10, 0x03 }, 3); // Routed into the spilled tree.
+    try testing.expectEqual(@as(usize, 1), index.spilled_count());
+    try testing.expectEqual(@as(u64, 3), index.keys());
+    try expect_run(&index, &.{ 0x10, 0x01 }, &.{1});
+    try index.insert(&.{ 0x10, 0x02 }, 22);
+    try expect_run(&index, &.{ 0x10, 0x02 }, &.{ 2, 22 });
+    try testing.expectEqual(@as(u64, 4), index.items());
+    try index.insert(&.{ 0x20, 0x05 }, 5);
+    try testing.expectEqual(@as(usize, 1), index.spilled_count());
+    try expect_run(&index, &.{ 0x20, 0x05 }, &.{5});
+}
+
+fn expect_neighbor(found: ?SpillIndex.Neighbor, value: u64, cycled: bool) !void {
+    var neighbor = found.?;
+    try testing.expectEqual(cycled, neighbor.cycled);
+    try testing.expectEqual(value, neighbor.values.next().?.*);
+}
+
+test "partitioned ordered spill navigation" {
+    var index: SpillIndex = .init(test_gpa, .init(.{}));
+    defer index.deinit();
+    // 0x10 and 0x30 spill; 0x20 stays in its arrays.
+    const entries = [_][3]u8{
+        .{ 0x10, 0x01, 1 }, .{ 0x10, 0x02, 2 }, .{ 0x20, 0x05, 5 },
+        .{ 0x30, 0x07, 7 }, .{ 0x30, 0x08, 8 },
+    };
+    for (entries) |entry| {
+        try index.insert(entry[0..2], entry[2]);
+    }
+    try testing.expectEqual(@as(usize, 2), index.spilled_count());
+    var first = index.first_translated_key().?;
+    try testing.expectEqual(@as(u64, 1), first.next().?.*);
+    var last = index.last_translated_key().?;
+    try testing.expectEqual(@as(u64, 8), last.next().?.*);
+    try expect_neighbor(index.next_translated_key(&.{ 0x10, 0x01 }), 2, false);
+    try expect_neighbor(index.next_translated_key(&.{ 0x10, 0x02 }), 5, false);
+    try expect_neighbor(index.next_translated_key(&.{ 0x20, 0x05 }), 7, false);
+    try expect_neighbor(index.prev_translated_key(&.{ 0x30, 0x07 }), 5, false);
+    try expect_neighbor(index.prev_translated_key(&.{ 0x20, 0x05 }), 2, false);
+    try expect_neighbor(index.next_translated_key(&.{ 0x30, 0x08 }), 1, true);
+}
+
+test "partitioned ordered spill reverts on a full drain" {
+    var index: SpillIndex = .init(test_gpa, .init(.{}));
+    defer index.deinit();
+    try index.insert(&.{ 0x10, 0x01 }, 1);
+    try index.insert(&.{ 0x10, 0x02 }, 2);
+    try testing.expectEqual(@as(usize, 1), index.spilled_count());
+    index.remove(&.{ 0x10, 0x01 });
+    try testing.expectEqual(@as(usize, 1), index.spilled_count());
+    index.remove(&.{ 0x10, 0x02 });
+    try testing.expectEqual(@as(usize, 0), index.spilled_count());
+    try testing.expectEqual(@as(u64, 0), index.keys());
+    try index.insert(&.{ 0x10, 0x09 }, 9);
+    try testing.expectEqual(@as(usize, 0), index.spilled_count());
+    try expect_run(&index, &.{ 0x10, 0x09 }, &.{9});
+}
+
+fn delete_only(index: *SpillIndex, key: []const u8, value: u64) !void {
+    var cursor = index.get_mut(key).?;
+    defer cursor.finish();
+    try testing.expectEqual(value, cursor.next().?.*);
+    cursor.delete();
+}
+
+test "partitioned ordered spill full lifecycle through a cursor" {
+    var index: SpillIndex = .init(test_gpa, .init(.{}));
+    defer index.deinit();
+    try index.insert(&.{ 0x10, 0x01 }, 1);
+    try index.insert(&.{ 0x10, 0x02 }, 2);
+    try testing.expectEqual(@as(u64, 1), index.spills());
+    try delete_only(&index, &.{ 0x10, 0x01 }, 1);
+    try testing.expectEqual(@as(usize, 1), index.spilled_count());
+    try delete_only(&index, &.{ 0x10, 0x02 }, 2);
+    try testing.expectEqual(@as(usize, 0), index.spilled_count());
+    try testing.expectEqual(@as(u64, 1), index.spills()); // Cumulative.
+    try testing.expectEqual(@as(u64, 0), index.items());
+    try testing.expectEqual(@as(u64, 2), index.pruned());
+    try index.insert(&.{ 0x10, 0x03 }, 3);
+    try index.insert(&.{ 0x10, 0x04 }, 4);
+    try testing.expectEqual(@as(usize, 1), index.spilled_count());
+    try testing.expectEqual(@as(u64, 2), index.spills());
+    try expect_run(&index, &.{ 0x10, 0x03 }, &.{3});
+}
+
+test "partitioned ordered spill after cursor growth" {
+    var index: SpillIndex = .init(test_gpa, .init(.{}));
+    defer index.deinit();
+    const key = [_]u8{ 0x10, 0x01 };
+    try index.insert(&key, 1);
+    {
+        var cursor = index.get_mut(&key).?;
+        defer cursor.finish();
+        try testing.expectEqual(@as(u64, 1), cursor.next().?.*);
+        try testing.expect(cursor.next() == null);
+        try cursor.insert(2);
+    }
+    try testing.expectEqual(@as(usize, 0), index.spilled_count());
+    // The next mutation spills the over-full partition first.
+    try index.insert(&key, 3);
+    try testing.expectEqual(@as(usize, 1), index.spilled_count());
+    try expect_run(&index, &key, &.{ 1, 2, 3 });
+    // `get_mut` spills before handing out a cursor, which then serves the spilled tree.
+    const other = [_]u8{ 0x30, 0x01 };
+    try index.insert(&other, 6);
+    {
+        var cursor = index.get_mut(&other).?;
+        defer cursor.finish();
+        _ = cursor.next();
+        try testing.expect(cursor.next() == null);
+        try cursor.insert(7);
+    }
+    try testing.expectEqual(@as(usize, 1), index.spilled_count());
+    var cursor = index.get_mut(&other).?;
+    cursor.finish();
+    try testing.expectEqual(@as(usize, 2), index.spilled_count());
+    try expect_run(&index, &other, &.{ 6, 7 });
+}
+
+test "partitioned ordered spill get_mut_or_insert" {
+    var index: SpillIndex = .init(test_gpa, .init(.{}));
+    defer index.deinit();
+    try index.insert(&.{ 0x10, 0x01 }, 1);
+    try index.insert(&.{ 0x10, 0x02 }, 2);
+    try testing.expectEqual(@as(usize, 1), index.spilled_count());
+    {
+        // An existing key in a spilled partition: a cursor, and the value is not inserted.
+        var cursor = (try index.get_mut_or_insert(&.{ 0x10, 0x01 }, 99)).?;
+        defer cursor.finish();
+        try testing.expectEqual(@as(u64, 1), cursor.next().?.*);
+        try testing.expect(cursor.next() == null);
+    }
+    try testing.expectEqual(@as(u64, 2), index.items());
+    try expect_run(&index, &.{ 0x10, 0x01 }, &.{1});
+    // An absent key in a spilled partition is inserted, and the partition stays spilled.
+    try testing.expect(try index.get_mut_or_insert(&.{ 0x10, 0x03 }, 3) == null);
+    try testing.expectEqual(@as(usize, 1), index.spilled_count());
+    try testing.expectEqual(@as(u64, 3), index.keys());
+    try testing.expectEqual(@as(u64, 3), index.items());
+    try expect_run(&index, &.{ 0x10, 0x03 }, &.{3});
+}
+
+test "partitioned ordered spill after get_mut_or_insert cursor growth" {
+    var index: SpillIndex = .init(test_gpa, .init(.{}));
+    defer index.deinit();
+    const key = [_]u8{ 0x10, 0x01 };
+    try index.insert(&key, 1);
+    {
+        var cursor = (try index.get_mut_or_insert(&key, 2)).?;
+        defer cursor.finish();
+        try testing.expectEqual(@as(u64, 1), cursor.next().?.*);
+        try testing.expect(cursor.next() == null);
+        try cursor.insert(2);
+    }
+    try testing.expectEqual(@as(usize, 0), index.spilled_count());
+    // The next replay-style update spills before returning another collision cursor.
+    var cursor = (try index.get_mut_or_insert(&key, 3)).?;
+    cursor.finish();
+    try testing.expectEqual(@as(usize, 1), index.spilled_count());
+    try expect_run(&index, &key, &.{ 1, 2 });
+}
+
+fn order_u16(a: u16, b: u16) std.math.Order {
+    return std.math.order(a, b);
+}
+
+const TestPartition = Partition(u16, u64, order_u16);
+
+fn partition_insert(part: *TestPartition, key: u16, value: u64) !void {
+    try part.insert_at(test_gpa, part.run_range(key).end, key, value);
+}
+
+fn expect_partition_values(part: *const TestPartition, key: u16, expected: []const u64) !void {
+    try testing.expectEqualSlices(u64, expected, part.values(part.run_range(key)));
+}
+
+test "partitioned ordered partition empty and sorted insert" {
+    var part: TestPartition = .{};
+    defer part.deinit(test_gpa);
+    try expect_partition_values(&part, 5, &.{});
+    try testing.expectEqual(TestPartition.Span{ .start = 0, .end = 0 }, part.run_range(5));
+    // Inserted out of order, the arrays stay sorted by key.
+    for ([_][2]u16{ .{ 30, 300 }, .{ 10, 100 }, .{ 20, 200 } }) |entry| {
+        try partition_insert(&part, entry[0], entry[1]);
+    }
+    try testing.expectEqualSlices(u16, &.{ 10, 20, 30 }, part.keys.items);
+    try testing.expectEqualSlices(u64, &.{ 100, 200, 300 }, part.vals.items);
+    try expect_partition_values(&part, 20, &.{200});
+    try expect_partition_values(&part, 25, &.{});
+}
+
+test "partitioned ordered partition collision runs append in order" {
+    var part: TestPartition = .{};
+    defer part.deinit(test_gpa);
+    for ([_][2]u16{ .{ 10, 1 }, .{ 20, 2 }, .{ 10, 11 }, .{ 10, 111 } }) |entry| {
+        try partition_insert(&part, entry[0], entry[1]);
+    }
+    try expect_partition_values(&part, 10, &.{ 1, 11, 111 });
+    try expect_partition_values(&part, 20, &.{2});
+    try testing.expectEqualSlices(u16, &.{ 10, 10, 10, 20 }, part.keys.items);
+    try testing.expectEqual(TestPartition.Span{ .start = 0, .end = 3 }, part.run_range(10));
+    try testing.expectEqual(TestPartition.Span{ .start = 3, .end = 4 }, part.run_range(20));
+    try testing.expectEqual(TestPartition.Span{ .start = 0, .end = 3 }, part.run_of(1));
+}
+
+test "partitioned ordered partition remove keeps alignment" {
+    var part: TestPartition = .{};
+    defer part.deinit(test_gpa);
+    for ([_][2]u16{ .{ 10, 1 }, .{ 10, 11 }, .{ 20, 2 } }) |entry| {
+        try partition_insert(&part, entry[0], entry[1]);
+    }
+    part.remove_span(.{ .start = 1, .end = 2 }); // The newer value of key 10.
+    try testing.expectEqualSlices(u16, &.{ 10, 20 }, part.keys.items);
+    try testing.expectEqualSlices(u64, &.{ 1, 2 }, part.vals.items);
+    try expect_partition_values(&part, 10, &.{1});
 }

@@ -104,6 +104,8 @@ fn InsertWorkload(comptime I: type) type {
         pub fn before_iter(self: *Self) !void {
             self.teardown();
             self.index = I.init(self.gpa, self.translator);
+            // As commonware's untimed `new`, which allocates every partition.
+            if (@hasDecl(I, "ensure_partitions")) try self.index.?.ensure_partitions();
             if (!self.retain) return;
             // Seed the index, so the timed pass overwrites every key.
             for (self.kvs) |kv| try self.index.?.insert(&kv.key.bytes, kv.value);
@@ -390,6 +392,8 @@ const GrindingInsert = struct {
     pub fn before_iter(self: *GrindingInsert) !void {
         self.teardown();
         self.index = Grinding.init(self.gpa, .init(.{}));
+        // As commonware's untimed `new`, which allocates every partition.
+        try self.index.?.ensure_partitions();
     }
 
     pub fn iter(self: *GrindingInsert) !u64 {

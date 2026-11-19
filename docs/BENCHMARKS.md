@@ -189,7 +189,46 @@ Slower by more than 1.5×, unprofiled (no sampling profiler works here, see Cave
   and on read (commonware hands out `IoBuf`s without copying).
 - **`freezer::put` (0.07×) and `freezer::get` random (0.03×)** are far ahead of commonware,
   which this comparison does not explain; check that both sides do the same work (resizes,
-  the final sync, the key cache) before quoting them.
+  the final sync, the key cache) before quoting them. Checked below.
+
+### Partitioned ordered index: per-partition arrays (2026-11-19, clearing lane)
+
+`partitioned.ordered.Index` now stores each partition as commonware does: sorted parallel
+arrays that spill to a tree at 512 entries. Before is zigware `7f0df2c` (one treap), after is
+this change; commonware `a9ffc25f3`. Best of two alternating runs, load 52 to 60.
+
+| bench | parameters | commonware | before | after | after / commonware |
+|---|---|---|---|---|---|
+| `index::grinding` | `op=lookup dist=uniform items=10000` | 169 µs | 847 µs | 143 µs | 0.85× |
+| `index::grinding` | `op=lookup dist=grinding items=10000` | 590 µs | | 484 µs | 0.82× |
+| `index::grinding` | `op=insert dist=uniform items=10000` | 386 µs | | 473 µs | 1.23× |
+| `index::grinding` | `op=insert dist=grinding items=10000` | 904 µs | | 1.29 ms | 1.43× |
+| `index::insert` | `variant=partitioned_ordered_2 items=10000` | 409 µs | | 576 µs | 1.41× |
+
+The lookup gap is closed. The partition array is now allocated outside the timed region, as
+commonware's `new` allocates it; ordered inserts are still about 1.2 to 1.4× slower
+(unprofiled).
+
+### Freezer: same work, different I/O dispatch (2026-11-19, clearing lane)
+
+Both benches use the same configuration (1 MiB key and value write buffers, a 65,536-entry
+table, 64-byte keys, 128-byte values, a 10,000-page cache, one sync after the loads) and run on
+tmpfs. Sampling each process's `/proc/pid/io` over a whole bench run gives the syscalls per
+operation (rate × time per iteration):
+
+| bench | side | read or write syscalls/s | time per iteration | syscalls per op |
+|---|---|---|---|---|
+| `freezer::get` random serial, 1,000 reads | commonware | 229K reads/s | 8.1 ms | 1.9 |
+| | zigware | 3.9M reads/s | 0.51 ms | 2.0 |
+| `freezer::put`, 10,000 items | commonware | 100K writes/s | 94 ms | 0.94 |
+| | zigware | 730K writes/s | 9.2 ms | 0.67 |
+
+So both sides issue about the same reads per `get` (the table entry, then the key and value
+reads), and the same order of writes per `put`. The gap is the cost per syscall: about 4 µs on
+commonware, whose tokio blob runs each `read_at`/`write_at` on a `spawn_blocking` thread, against
+about 0.25 µs on zigware, which calls the kernel inline. The ratio measures the runtimes'
+blob dispatch, not the freezer, so quote it as that. The write counts differ by about 30%
+(unverified: the samples also cover the untimed setup).
 
 ## Appendix: bench coverage
 
