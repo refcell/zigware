@@ -137,6 +137,7 @@ const Node = struct {
             .replay_buffer = 1024,
         };
         if (@hasField(Full.Config, "translator")) config.translator = .{};
+        if (@hasField(Full.Config, "io")) config.io = null; // Untimed.
         return config;
     }
 
