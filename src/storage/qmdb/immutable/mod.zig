@@ -13,6 +13,7 @@ pub const sync = @import("sync.zig");
 
 test {
     std.testing.refAllDecls(@This());
+    _ = @import("batch_test.zig");
     _ = @import("bounded_test.zig");
     _ = @import("conformance_test.zig");
     _ = @import("db_test.zig");

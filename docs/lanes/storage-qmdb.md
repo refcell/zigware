@@ -99,8 +99,9 @@ which every database here is built on.
 - [x] immutable: bounded initialization (all six `run_bounded_initialization_*` scenarios),
   recovery from failed Merkle and log syncs, prune after an uncommitted floor, prune limits,
   collision-bucket pruning, and `get_many` (`bounded_test.zig`, `recovery_test.zig`).
-- [ ] immutable: the remaining mod.rs batch scenarios (large, many sequential, speculative
-  root, stacked apply, sibling-apply proof refusal, operations match the applied log).
+- [x] immutable: the mod.rs batch scenarios (stacked apply, speculative roots, many
+  sequential, large, sibling-apply proof refusal, operations match the applied log;
+  `batch_test.zig`), including its `ElementPruned` tail after a flushing commit.
 - [x] Fuzz: `qmdb_keyless_operations` (seeded and `std.testing.fuzz`), with a value model.
 - [ ] Fuzz targets under storage/fuzz for these databases; benches under `benches.zig`.
 
@@ -303,4 +304,4 @@ which every database here is built on.
 - 2026-11-19: `qmdb::generate` benches (any, store, keyless).
 - 2026-11-19: `qmdb::init` and `qmdb::apply_batch` benches; split into `qmdb/benches/`.
 - 2026-11-19: `qmdb::merkleize` benches (main grid and churned).
-- 2026-11-19: immutable bounded-initialization, recovery, prune, and get_many scenarios.
+- 2026-11-19: immutable bounded-initialization, recovery, prune, get_many, and batch scenarios.
