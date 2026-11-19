@@ -1,10 +1,10 @@
 //! commonware's `start_sync` metadata tests (`storage/src/metadata/mod.rs`), on
 //! `runtime.storage.faulty` where commonware injects faults.
 //!
-//! Syncs complete synchronously here: a started sync has finished (or failed) when
-//! `start_sync` returns, so a parked sync is one whose blob sync fails, and a dropped handle
-//! changes nothing. A failure consumes the store at the call that hits it (only `deinit` may
-//! follow) instead of at the next sync.
+//! The faulty backend completes a started sync at the call, so a parked sync is one whose
+//! blob sync fails: its completion reports the failure, and the store retains it until the
+//! next durability operation, which fails and consumes the store (only `deinit` may follow).
+//! A write failure inside `start_sync` consumes the store at once.
 
 const std = @import("std");
 const testing = std.testing;
@@ -41,9 +41,9 @@ test "start_sync: pipelined syncs then destroy leave nothing" {
     defer faults.deinit();
     var store = try open(&faults);
     try put(&store, 1, 3, 1);
-    try store.start_sync();
+    try (try store.start_sync()).wait_release();
     try put(&store, 1, 4, 1);
-    try store.start_sync();
+    try (try store.start_sync()).wait_release();
     try store.destroy();
     var reopened = try open(&faults);
     defer reopened.deinit();
@@ -58,9 +58,9 @@ test "start_sync: the newest copy wins on reopen" {
         var store = try open(&faults);
         defer store.deinit();
         try put(&store, 1, 3, 1);
-        try store.start_sync();
+        try (try store.start_sync()).wait_release();
         try put(&store, 1, 4, 1);
-        try store.start_sync();
+        try (try store.start_sync()).wait_release();
     }
     try faults.crash();
     var reopened = try open(&faults);
@@ -76,7 +76,7 @@ test "start_sync: a dropped handle does not cancel the sync" {
         var store = try open(&faults);
         defer store.deinit();
         try put(&store, 1, 3, 1);
-        try store.start_sync();
+        try (try store.start_sync()).wait_release();
         try store.sync();
     }
     try faults.crash();
@@ -102,7 +102,12 @@ test "start_sync: a failed sync consumes the store and keeps the durable copy" {
         try put(&store, 0, 4, 8);
         faults.layer.config = .{ .sync_rate = .one };
         defer faults.disarm();
-        try testing.expectError(error.Io, store.start_sync());
+        // The fault is rolled at start: the completion reports it, and the store retains it,
+        // so the next durability operation fails without writing.
+        const started = try store.start_sync();
+        try testing.expectError(error.Io, started.wait_release());
+        try testing.expect(!store.failed);
+        try testing.expectError(error.Io, store.sync());
         try testing.expect(store.failed);
     }
     try faults.crash();

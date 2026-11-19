@@ -85,7 +85,7 @@ fn Overwrite(comptime size: usize) type {
 
         pub fn iter(self: *Self) !usize {
             if (self.case.pipelined) {
-                try self.store.start_sync();
+                try (try self.store.start_sync()).wait_release();
             } else {
                 try self.store.sync();
             }

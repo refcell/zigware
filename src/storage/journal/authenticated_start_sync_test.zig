@@ -1,7 +1,7 @@
 //! commonware's `journal/authenticated.rs` in-flight `start_sync` tests, with
-//! `runtime.storage.mocks.DelayedSync` holding started syncs (`DelayedSyncContext`).
-//! `test_start_sync_merkle_failure_fails_handle` waits on a parked watermark sync, and the
-//! checkpoint's metadata still syncs inline, so it is not ported yet.
+//! `runtime.storage.mocks.DelayedSync` holding started syncs (`DelayedSyncContext`). Opening
+//! a journal syncs with blocking syncs here, which the mock passes, so no open needs
+//! `drive_pending_syncs`.
 
 const std = @import("std");
 const testing = std.testing;
@@ -136,4 +136,41 @@ test "authenticated start_sync failure propagates (test_start_sync_failure_propa
     var runner = try runtime.deterministic.Runner.init(gpa, .{});
     defer runner.deinit();
     try (try runner.start_context(failure_propagates, .{}));
+}
+
+/// Release parked syncs until `completion` completes (commonware `drive_pending_syncs`), then
+/// return its result.
+fn drive(f: *Fixture, completion: runtime.storage.Completion) !void {
+    while (completion.is_pending()) f.pending.release_all();
+    try completion.wait_release();
+}
+
+/// A Merkle-only sync failure fails the joined completion although the items' sync succeeded.
+fn merkle_failure_fails_handle(ctx: Context) !void {
+    var f: Fixture = undefined;
+    try f.init(ctx);
+    defer f.deinit();
+    var journal = try f.open();
+    defer journal.deinit();
+    for (0..4) |i| _ = try journal.append(create_operation(@intCast(i)));
+    // Prove the appends durable, then dirty only the Merkle journal: commit syncs the items
+    // but merely flushes Merkle nodes.
+    try drive(&f, try journal.start_sync());
+    for (4..6) |i| _ = try journal.append(create_operation(@intCast(i)));
+    try journal.commit();
+    // The items are durable, so their only parked sync is the watermark advance: release it,
+    // then fail the Merkle journal's syncs.
+    const completion = try journal.start_sync();
+    f.pending.next().release({});
+    f.pending.fail_all();
+    try testing.expectError(error.Io, completion.wait_release());
+    // The Merkle journal retained the failure: the next sync resurfaces it.
+    try testing.expectError(error.Io, journal.sync());
+}
+
+test "authenticated Merkle-only sync failure fails the joined completion" {
+    // commonware `test_start_sync_merkle_failure_fails_handle`.
+    var runner = try runtime.deterministic.Runner.init(gpa, .{});
+    defer runner.deinit();
+    try (try runner.start_context(merkle_failure_fails_handle, .{}));
 }

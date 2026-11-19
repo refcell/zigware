@@ -166,13 +166,18 @@ the `DelayedSyncContext` test mock (`runtime/src/mocks.rs:869-1190`) holds syncs
   completions; the manager's 7 in-flight tests. Not yet: oversized's tracked marker pipeline
   (`start_sync_tracked` still syncs inline and returns a ready completion, so
   `..._alignment_sync_concurrency` and `..._dropped_handle_driven_by_next_sync` stay open),
-  segmented fixed/variable's 6 wait tests, checkpoint and metadata `start_sync` (inline).
+  segmented fixed/variable's 6 wait tests.
+- Step 2c: metadata `start_sync` writes the next version and starts its blob sync, keeping it
+  as `pending` (at most one in flight); `sync`, `start_sync`, and `destroy` observe it first.
+  The checkpoint's `start_watermark_sync` returns that completion, and fixed/variable
+  `start_sync` join it (data, then the watermark, as commonware). Ports
+  `test_start_sync_merkle_failure_fails_handle`. A faulty backend's sync fault now reaches
+  the caller through the completion and the next durability operation, as in commonware.
 - Step 3: merkle full `start_sync` returns its journal's completion (covering the nodes
   flushed so far) and gains `wait_for_sync`, which `destroy` runs first; the authenticated
   journal's `start_sync` joins the items' and Merkle syncs, and its `destroy` surfaces a failed
   Merkle sync before removing anything. qmdb callers wait on it until step 5. Ports
-  `test_start_sync_overlaps_work` and `test_start_sync_failure_propagates`; open (they wait on
-  a parked metadata watermark sync): `test_start_sync_merkle_failure_fails_handle`,
+  `test_start_sync_overlaps_work` and `test_start_sync_failure_propagates`; open:
   `test_reopen_persists_merkle_watermark`, merkle full's
   `test_full_sync_observes_clean_start_sync_failure`.
 

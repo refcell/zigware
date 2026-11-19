@@ -36,6 +36,7 @@ const runtime_storage = @import("runtime").storage;
 const metrics = @import("runtime").telemetry.metrics;
 const Storage = runtime_storage.Storage;
 const Blob = runtime_storage.Blob;
+const Completion = runtime_storage.Completion;
 const Crc32 = @import("cryptography").crc32.Crc32;
 
 /// The names of the two blobs that store metadata.
@@ -119,6 +120,10 @@ pub fn Metadata(comptime K: type, comptime V: type) type {
         blobs: [2]Wrapper,
         /// Set when a storage operation failed; the store may then only be dropped.
         failed: bool = false,
+        /// The blob sync a `start_sync` started, until observed. At most one is in flight: a
+        /// new sync targets the copy the pending one left as last-known-durable, so it first
+        /// proves the pending one completed.
+        pending: ?Completion = null,
 
         /// Syncs that rewrote all data.
         sync_rewrites: metrics.Counter,
@@ -235,6 +240,7 @@ pub fn Metadata(comptime K: type, comptime V: type) type {
         }
 
         fn release(self: *Self) void {
+            if (self.pending) |completion| completion.release();
             free_entries(self.gpa, &self.entries);
             for (&self.blobs) |*wrapper| wrapper.deinit_memory(self.gpa);
             self.gpa.free(self.partition);
@@ -495,18 +501,42 @@ pub fn Metadata(comptime K: type, comptime V: type) type {
         pub fn sync(self: *Self) Error!void {
             assert(!self.failed);
             errdefer self.failed = true;
-            try self.write_next_version();
+            try self.wait_for_pending();
+            const done = try self.write_next_version(false);
+            assert(!done.is_pending());
         }
 
-        /// commonware's `start_sync`: blobs sync synchronously here, so the sync completes
-        /// (or fails, leaving the store failed) before this returns, and no second sync can
-        /// overlap it.
-        pub fn start_sync(self: *Self) Error!void {
-            return self.sync();
+        /// Write the next version and start its blob sync, returning a completion (one
+        /// reference, owned by the caller). The store keeps its own reference: the next
+        /// durability operation waits for it, so a failure is never lost.
+        pub fn start_sync(self: *Self) Error!Completion {
+            assert(!self.failed);
+            errdefer self.failed = true;
+            try self.wait_for_pending();
+            return self.write_next_version(true);
         }
 
-        /// Write and persist the next version of the store to the target blob.
-        fn write_next_version(self: *Self) Error!void {
+        /// Wait for an in-flight sync, surfacing its failure. A failure is surfaced without
+        /// writing: the failed copy's on-disk state is unknown, and writing the other (only
+        /// durable) copy could destroy both.
+        fn wait_for_pending(self: *Self) Error!void {
+            const completion = self.pending orelse return;
+            try completion.wait();
+            completion.release();
+            self.pending = null;
+            assert(self.pending == null);
+        }
+
+        /// Record a started blob sync as the pending one and return a reference to it.
+        fn record_pending(self: *Self, completion: Completion) Completion {
+            assert(self.pending == null);
+            self.pending = completion.retain();
+            return completion;
+        }
+
+        /// Write and persist (`pipelined`: start persisting) the next version of the store to
+        /// the target blob.
+        fn write_next_version(self: *Self, pipelined: bool) Error!Completion {
             const next_version = self.next_version;
             const key_order_changed = self.key_order_changed;
             // Syncing once per millisecond would overflow in 584,942,417 years.
@@ -519,16 +549,16 @@ pub fn Metadata(comptime K: type, comptime V: type) type {
             // has not received. If the target has none, the cursor already names a durable
             // copy of the latest state and writing would only rotate blobs.
             const stable = key_order_changed < past_version;
-            if (stable and self.blobs[target_cursor].modified.count() == 0) return;
+            if (stable and self.blobs[target_cursor].modified.count() == 0) return Completion.ok;
 
             self.cursor = target_cursor;
             self.next_version = next_next_version;
             const target = &self.blobs[target_cursor];
             if (stable and self.overwrite_values(target)) {
-                return self.write_overwrite(target, next_version);
+                return self.write_overwrite(target, next_version, pipelined);
             }
             target.modified.clearRetainingCapacity();
-            return self.write_rewrite(target, next_version);
+            return self.write_rewrite(target, next_version, pipelined);
         }
 
         /// Encode modified values into the target's buffer in place. Returns false (leaving
@@ -548,7 +578,12 @@ pub fn Metadata(comptime K: type, comptime V: type) type {
         }
 
         /// Persist an in-place overwrite: the new version, checksum, and changed values.
-        fn write_overwrite(self: *Self, target: *Wrapper, version: u64) Error!void {
+        fn write_overwrite(
+            self: *Self,
+            target: *Wrapper,
+            version: u64,
+            pipelined: bool,
+        ) Error!Completion {
             const data = target.data.items;
             assert(data.len >= version_size + checksum_size);
             std.mem.writeInt(u64, data[0..version_size], version, .big);
@@ -569,14 +604,28 @@ pub fn Metadata(comptime K: type, comptime V: type) type {
                 try target.blob.write_at(0, data[0..version_size], uncached);
                 try target.blob.write_at(checksum_index, data[checksum_index..], uncached);
             }
-            try target.blob.sync();
+            const started = try self.persist(target.blob, pipelined);
             target.modified.clearRetainingCapacity();
             target.version = version;
             self.sync_overwrites.metric().inc();
+            return self.record_pending(started);
+        }
+
+        /// Sync `blob`, or with `pipelined` start syncing it.
+        fn persist(self: *Self, blob: Blob, pipelined: bool) Error!Completion {
+            assert(self.pending == null);
+            if (pipelined) return blob.start_sync();
+            try blob.sync();
+            return Completion.ok;
         }
 
         /// Persist a full rewrite of the target blob.
-        fn write_rewrite(self: *Self, target: *Wrapper, version: u64) Error!void {
+        fn write_rewrite(
+            self: *Self,
+            target: *Wrapper,
+            version: u64,
+            pipelined: bool,
+        ) Error!Completion {
             const gpa = self.gpa;
             var data_len: usize = version_size + checksum_size;
             for (self.entries.items) |entry| {
@@ -607,9 +656,10 @@ pub fn Metadata(comptime K: type, comptime V: type) type {
 
             try target.blob.write_at(0, data, uncached);
             if (data_len < old_len) try target.blob.resize(data_len);
-            try target.blob.sync();
+            const started = try self.persist(target.blob, pipelined);
             target.version = version;
             self.sync_rewrites.metric().inc();
+            return self.record_pending(started);
         }
 
         /// Remove both blobs and the partition, then free the store.
@@ -618,6 +668,12 @@ pub fn Metadata(comptime K: type, comptime V: type) type {
         /// either the newest generation or an empty store, never a superseded generation.
         pub fn destroy(self: *Self) Error!void {
             assert(!self.failed);
+            // The removal order relies on the cursor naming the newest durable copy, which a
+            // failed started sync breaks, so that failure surfaces before anything is removed.
+            self.wait_for_pending() catch |err| {
+                self.deinit();
+                return err;
+            };
             const storage = self.storage;
             const cursor = self.cursor;
             for (&self.blobs) |*wrapper| wrapper.blob.close();

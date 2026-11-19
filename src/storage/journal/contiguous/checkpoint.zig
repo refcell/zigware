@@ -23,6 +23,7 @@ const VecU64 = @import("utils").sequence.VecU64;
 const metadata_mod = @import("../../metadata/mod.zig");
 
 const Storage = runtime.storage.Storage;
+const Completion = runtime.storage.Completion;
 const Store = metadata_mod.Metadata(u64, VecU64);
 
 /// Key of the mid-blob pruning boundary. Absent when the boundary is blob-aligned.
@@ -105,15 +106,16 @@ pub const Checkpoint = struct {
         try self.sync();
     }
 
-    /// Raise the watermark to `watermark_new` (all items below it are durable). A value at or
-    /// below the current one is ignored. Syncs complete synchronously (commonware's
-    /// `start_watermark_sync`).
-    pub fn start_watermark_sync(self: *Checkpoint, watermark_new: u64) Error!void {
+    /// Start raising the watermark to `watermark_new` (all items below it are durable),
+    /// returning the metadata sync's completion (one reference, owned by the caller). A value
+    /// at or below the current one is ignored (commonware `start_watermark_sync`).
+    pub fn start_watermark_sync(self: *Checkpoint, watermark_new: u64) Error!Completion {
         if (self.watermark()) |current| {
-            if (current >= watermark_new) return;
+            if (current >= watermark_new) return Completion.ok;
         }
         try self.put(recovery_watermark_key, watermark_new);
-        try self.sync();
+        assert(self.watermark().? == watermark_new);
+        return self.metadata.start_sync();
     }
 
     /// Lower a recorded watermark to `limit` if it is higher, staging the change. Call this

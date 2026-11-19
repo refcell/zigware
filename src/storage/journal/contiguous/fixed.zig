@@ -834,16 +834,18 @@ pub fn Journal(comptime A: type) type {
         }
 
         /// Start making the journal durable, returning a completion (one reference, owned by
-        /// the caller) for the data sync (commonware `start_sync`). The recovery watermark
-        /// advances only to the prefix an already completed sync proved, so it trails by one
-        /// call while syncs are in flight. Its publication is synchronous here.
+        /// the caller) for the data sync and the watermark publication (commonware
+        /// `start_sync`). The watermark advances only to the prefix an already completed sync
+        /// proved, so it trails by one call while syncs are in flight.
         pub fn start_sync(self: *Self) Error!Completion {
             assert(!self.failed);
             self.metrics.start_sync_calls.metric().inc();
             const data = try self.start_data_sync();
-            errdefer data.release();
-            try self.start_watermark_sync(self.barrier.boundary());
-            return data;
+            const watermark = self.start_watermark_sync(self.barrier.boundary()) catch |err| {
+                data.release();
+                return err;
+            };
+            return Completion.join(data, watermark);
         }
 
         /// Wait for every started sync, surfacing a failure without changing any blob.
@@ -864,13 +866,14 @@ pub fn Journal(comptime A: type) type {
             return data;
         }
 
-        /// Raise the recovery watermark toward `size`, capped at the proven barrier.
-        pub fn start_watermark_sync(self: *Self, size_target: u64) Error!void {
+        /// Start raising the recovery watermark toward `size`, capped at the proven barrier,
+        /// returning its completion (one reference, owned by the caller).
+        pub fn start_watermark_sync(self: *Self, size_target: u64) Error!Completion {
             assert(!self.failed);
             errdefer self.failed = true;
             const capped = @min(size_target, self.barrier.boundary());
             assert(capped <= self.bounds.end);
-            try self.checkpoint.start_watermark_sync(capped);
+            return self.checkpoint.start_watermark_sync(capped);
         }
 
         /// Durably persist the journal and its watermark, so no recovery is needed on startup.

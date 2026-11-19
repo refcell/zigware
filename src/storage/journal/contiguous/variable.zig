@@ -1134,15 +1134,21 @@ pub fn Journal(comptime V: type) type {
                 return err;
             };
             // Publish only the watermark already proved by a completed combined barrier.
-            self.offsets.start_watermark_sync(self.barrier.boundary()) catch |err| {
+            const boundary = self.barrier.boundary();
+            const watermark = self.offsets.start_watermark_sync(boundary) catch |err| {
                 data.release();
                 offsets.release();
                 return err;
             };
-            const both = try Completion.join(data, offsets);
+            const both = Completion.join(data, offsets) catch |err| {
+                watermark.release();
+                return err;
+            };
+            // The barrier advances once data and offsets are durable; the caller also
+            // observes the watermark publication.
             self.barrier.record(self.bounds.end, .{ .completion = both.retain() });
             assert(self.barrier.boundary() <= self.bounds.end);
-            return both;
+            return Completion.join(both, watermark);
         }
 
         /// Persist the data, then the offsets and their watermark.
