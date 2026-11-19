@@ -93,6 +93,12 @@ test "immutable many sequential batches stay readable" {
                 try expect_value(try db.get(&to_digest(i)), fill(@truncate(i)));
             }
         }
+        const root = db.root();
+        var proved = try db.proof(0, 10000);
+        defer proved.deinit(gpa);
+        const Op = support.Fixed(F).Operation;
+        const proof = &proved.proof;
+        try testing.expect(try verify.verify(F, Sha256, Op, gpa, proof, 0, proved.items, &root));
         try testing.expectEqual(1 + batches * (keys_per_batch + 1), db.bounds().end);
         try db.destroy();
     }
@@ -273,5 +279,29 @@ test "immutable batch operations match the applied log" {
         for (captured[0..captured_len]) |*c| try c.check_log(&db);
         try check_after_flush(Db, &db);
         try db.destroy();
+    }
+}
+
+// Commonware's run_batch_empty_batch: a batch with no sets appends only its commit, and its
+// speculative root is the applied root.
+test "immutable an empty batch appends one commit at its speculative root" {
+    inline for (families) |F| {
+        var harness = try support.Harness.init(gpa);
+        defer harness.deinit();
+        var db = try harness.open(F, null);
+        defer db.deinit();
+        const first = try merkleize_range(&db, null, 1, 2, null);
+        defer first.release();
+        try db.apply_batch(first);
+        const root_before = db.root();
+        const size_before = db.bounds().end;
+        var batch = try db.new_batch();
+        const empty = try batch.merkleize(&db);
+        defer empty.release();
+        const speculative = empty.root();
+        try db.apply_batch(empty);
+        try testing.expect(!db.root().eql(root_before));
+        try testing.expect(db.root().eql(speculative));
+        try testing.expectEqual(size_before + 1, db.bounds().end);
     }
 }

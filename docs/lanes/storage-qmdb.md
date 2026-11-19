@@ -132,7 +132,7 @@ which every database here is built on.
     `run_operations_match_applied_log` (child proof unchanged).
   - [x] batch D1, prune and build (`prune_test.zig`): `run_pruning` (5 items per section),
     `run_prune_retires_pruned_sets`, `run_single_commit_live_set`, `run_build_and_authenticate`.
-  - [ ] batch D2: the partial `run_build_basic`, `run_batch_many_sequential`,
+  - [x] batch D2: the partial `run_build_basic`, `run_batch_many_sequential`,
     `run_batch_empty_batch`, `run_reads_ignore_inactive_operations` (colliding twin, reopen).
   - [ ] batch E, fixed.rs: `start_sync` recovery and failure (synchronous forms), metrics,
     `bounded_init_then_set_crash_recovers_history`. Not portable while `start_sync` completes
@@ -380,3 +380,4 @@ which every database here is built on.
 - 2026-11-19: immutable batch C1 (partial-ancestor apply, delayed merkleize, to_batch).
 - 2026-11-19: immutable batch C2 (merkleize across prune, chain reads, child proof unchanged).
 - 2026-11-19: immutable batch D1 (pruning boundaries, pruned-set retirement, live commit).
+- 2026-11-19: immutable batch D2 (colliding twin and reopen reads, empty batch, full proofs).

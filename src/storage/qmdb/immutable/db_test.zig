@@ -100,6 +100,7 @@ test "immutable sets, metadata, and recovery" {
         try db.apply_batch(first);
         try db.commit();
         try expect_value(try db.get(&fill(1)), fill(3));
+        try expect_value(try db.get(&fill(2)), null);
         try testing.expectEqual(@as(u64, 3), db.bounds().end);
         try expect_value(try db.get_metadata(), fill(99));
         try db.sync();
@@ -107,6 +108,10 @@ test "immutable sets, metadata, and recovery" {
         try testing.expectEqual(@as(u64, 5), db.bounds().end);
         try expect_value(try db.get_metadata(), null);
         const root = db.root();
+        // An unmerkleized batch is lost on reopen.
+        var dropped = try db.new_batch();
+        try dropped.set(fill(5), fill(6));
+        dropped.deinit();
         // A crash keeps the committed (unsynced) sets: reopen replays them.
         harness.storage.crash();
         db.deinit();
@@ -116,6 +121,7 @@ test "immutable sets, metadata, and recovery" {
         try expect_value(try db.get(&fill(1)), fill(3));
         try expect_value(try db.get(&fill(2)), fill(102));
         try expect_value(try db.get(&fill(5)), null);
+        try expect_value(try db.get_metadata(), null);
         try db.destroy();
     }
 }
@@ -275,13 +281,39 @@ test "immutable batch reads ignore sets below their floor" {
         try db.commit();
         // The database itself still reads below the floor; batches on it do not.
         try expect_value(try db.get(&fill(1)), fill(101));
-        var on_db = try db.new_batch();
-        defer on_db.deinit();
-        try expect_value(try on_db.get(&fill(1), &db), null);
+        try expect_batch_reads(&db, &.{ fill(1), fill(2) }, &.{ null, fill(102) });
+        // `twin` shares `old`'s translated key, so the index yields both locations for either.
+        var twin = fill(1);
+        twin.bytes[31] = 9;
+        var collision = try db.new_batch();
+        try collision.set(twin, fill(104));
+        const collided = try collision.merkleize(&db);
+        defer collided.release();
+        try db.apply_batch(collided);
+        try db.commit();
+        try expect_batch_reads(&db, &.{ fill(1), twin }, &.{ null, fill(104) });
         try db.prune(base);
         try testing.expect(db.bounds().start > 1);
-        try expect_value(try on_db.get(&fill(2), &db), fill(102));
         try expect_value(try db.get(&fill(1)), null);
+        try expect_batch_reads(&db, &.{ fill(1), fill(2) }, &.{ null, fill(102) });
+        try expect_batch_reads(&db, &.{ fill(1), twin }, &.{ null, fill(104) });
+        db.deinit();
+        db = try harness.open(F, null);
+        try expect_batch_reads(&db, &.{ fill(1), fill(2) }, &.{ null, fill(102) });
+        try expect_batch_reads(&db, &.{ fill(1), twin }, &.{ null, fill(104) });
+    }
+}
+
+/// A fresh batch on `db` reads `keys` as `wants`, through both `get` and `get_many`.
+fn expect_batch_reads(db: anytype, keys: []const Digest, wants: []const ?Digest) !void {
+    var batch = try db.new_batch();
+    defer batch.deinit();
+    var values: [4]?Digest = undefined;
+    assert(keys.len <= values.len and keys.len == wants.len);
+    try batch.get_many(keys, db, values[0..keys.len]);
+    for (keys, wants, values[0..keys.len]) |*k, want, got| {
+        try expect_value(got, want);
+        try expect_value(try batch.get(k, db), want);
     }
 }
 
