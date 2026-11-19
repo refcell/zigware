@@ -50,6 +50,14 @@ pub fn MonitorReporter(comptime P: type, comptime R: type) type {
             return self.inner.report(activity);
         }
 
+        /// Releases a wrapped value reporter that owns resources (commonware drops it).
+        pub fn deinit(self: *Self) void {
+            if (comptime @typeInfo(R) != .pointer and std.meta.hasMethod(R, "deinit")) {
+                self.inner.deinit();
+            }
+            self.* = undefined;
+        }
+
         comptime {
             @import("consensus").traits.assert_reporter(Self);
         }

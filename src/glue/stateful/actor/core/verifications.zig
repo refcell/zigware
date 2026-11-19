@@ -179,6 +179,7 @@ pub fn Verifications(comptime P: type) type {
             self.done.deinit(self.gpa);
             self.builds.deinit(self.gpa);
             if (self.admission == .finalizing) self.admission.finalizing.deinit(self.gpa);
+            if (comptime @hasDecl(Provider, "deinit")) self.provider.deinit();
             self.* = undefined;
         }
 
