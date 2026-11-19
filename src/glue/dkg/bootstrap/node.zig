@@ -11,7 +11,9 @@
 //! - `Network`: provides the p2p `Sender` and `Receiver` (`p2p.simulated.Network(P)` does);
 //! - `PeerProvider`: the p2p `Manager` buffered broadcast and the resolver read peer sets
 //!   from, and `Blocker`: the p2p `Blocker` both use;
-//! - `Application`: marshal's `Reporter` of `Update` (cloned into the actor).
+//! - `Application`: marshal's `Reporter` of `Update` (cloned into the actor);
+//! - `Context`: the runtime context (`runtime.deterministic.Context` or
+//!   `runtime.production.runner.Context`).
 //!
 //! Partitions are `<prefix>-finalizations-{metadata,key,value}`,
 //! `<prefix>-blocks-{metadata,key,value}`, and marshal's own under `<prefix>-marshal`, as
@@ -82,6 +84,7 @@ pub fn Node(comptime T: type) type {
             pub const Application = T.Application;
             pub const Buffer = Self.Buffer;
             pub const Resolver = marshal.resolver.p2p.Mailbox(Digest, PublicKey);
+            pub const Context = T.Context;
         };
         pub const Actor = marshal.core.Actor(Params);
         pub const Mailbox = Actor.Mailbox;
@@ -135,7 +138,7 @@ pub fn Node(comptime T: type) type {
         /// resolver on `backfill` (both taken), and initializes the marshal actor.
         pub fn init(
             self: *Self,
-            ctx: runtime.deterministic.Context,
+            ctx: T.Context,
             config: Config,
             backfill: Channel,
             broadcast_channel: Channel,
@@ -166,7 +169,7 @@ pub fn Node(comptime T: type) type {
             assert(made == kinds.len);
         }
 
-        fn open_archives(self: *Self, ctx: runtime.deterministic.Context, config: Config) !void {
+        fn open_archives(self: *Self, ctx: T.Context, config: Config) !void {
             const certificates = T.Scheme.certificate_codec_config_unbounded();
             self.finalizations = try self.open_archive(
                 Finalization,
@@ -190,7 +193,7 @@ pub fn Node(comptime T: type) type {
         fn open_archive(
             self: *Self,
             comptime Value: type,
-            ctx: runtime.deterministic.Context,
+            ctx: T.Context,
             config: Config,
             comptime first: usize,
             comptime label: []const u8,
@@ -218,7 +221,7 @@ pub fn Node(comptime T: type) type {
 
         fn start_resolver(
             self: *Self,
-            ctx: runtime.deterministic.Context,
+            ctx: T.Context,
             config: Config,
             backfill: Channel,
         ) !void {
@@ -242,7 +245,7 @@ pub fn Node(comptime T: type) type {
 
         fn start_broadcast(
             self: *Self,
-            ctx: runtime.deterministic.Context,
+            ctx: T.Context,
             config: Config,
             channel: Channel,
         ) !void {
@@ -267,7 +270,7 @@ pub fn Node(comptime T: type) type {
             _ = self.broadcast_future.cancel(self.io) catch {};
         }
 
-        fn init_actor(self: *Self, ctx: runtime.deterministic.Context, config: Config) !void {
+        fn init_actor(self: *Self, ctx: T.Context, config: Config) !void {
             const length = utils.NonZero(u64).init(config.blocks_per_epoch) orelse
                 return error.InvalidEpochLength;
             const actor_config: Actor.Config = .{

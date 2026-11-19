@@ -54,6 +54,7 @@ pub const Types = struct {
     pub const PeerProvider = Net.Manager;
     pub const Blocker = Net.Control;
     pub const SecretStore = mocks.MemorySecretStore;
+    pub const Context = runtime.deterministic.Context;
     pub const Network = FilteredNetwork;
 };
 pub const Bootstrap = bootstrap.Engine(Types);

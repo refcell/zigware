@@ -139,6 +139,7 @@ const EngineTypes = struct {
     pub const PeerProvider = Net.Manager;
     pub const Blocker = Net.Control;
     pub const SecretStore = types.Secrets;
+    pub const Context = runtime.deterministic.Context;
     pub const Network = Net;
 };
 const Engine = glue_dkg.bootstrap.Engine(EngineTypes);

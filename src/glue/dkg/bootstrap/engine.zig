@@ -13,8 +13,9 @@
 //! `T` declares `Variant` (BLS), `Directory`, `Manager` (a DKG `network` manager),
 //! `PeerProvider` (the p2p `Manager` buffered broadcast and the resolver read peer sets
 //! from; commonware reuses the DKG manager, whose peer-set reads forward to it), `Blocker`,
-//! `SecretStore`, and `Network` (`Sender` and `Receiver`). The engine runs on the
-//! deterministic runtime, as every marshal and simplex composition in zigware does.
+//! `SecretStore`, `Network` (`Sender` and `Receiver`), and `Context`, the runtime context the
+//! engine runs on (`runtime.deterministic.Context` in tests, `runtime.production.runner.Context`
+//! in a binary).
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -34,7 +35,6 @@ const block_api = @import("block.zig");
 const limits = @import("limits.zig");
 const node_api = @import("node.zig");
 
-const Ctx = runtime.deterministic.Context;
 const Epoch = consensus.Epoch;
 const ed25519 = cryptography.ed25519;
 const Key = ed25519.PublicKey;
@@ -136,6 +136,7 @@ pub fn Config(comptime T: type) type {
 pub fn Engine(comptime T: type) type {
     return struct {
         const Self = @This();
+        const Ctx = T.Context;
         pub const V = T.Variant;
         pub const D = T.Directory;
         pub const Block = block_api.Block(V, D);
@@ -164,6 +165,7 @@ pub fn Engine(comptime T: type) type {
             pub const PeerProvider = T.PeerProvider;
             pub const Blocker = T.Blocker;
             pub const Application = MarshalReporter;
+            pub const Context = T.Context;
         };
         /// Marshal's view of the reshare mailbox: marshal's `Reporter` returns `Feedback`,
         /// and enqueueing only fails on allocation, where Rust aborts.

@@ -38,6 +38,7 @@ fn Types(comptime M: type) type {
         pub const PeerProvider = Net.Manager;
         pub const Blocker = Net.Control;
         pub const SecretStore = mocks.MemorySecretStore;
+        pub const Context = runtime.deterministic.Context;
         pub const Network = Net;
     };
 }

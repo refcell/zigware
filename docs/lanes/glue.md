@@ -659,7 +659,8 @@ shared `tests/mocks.zig`, which takes additive edits only (agreed with the glue 
   `simulate.Property` needs a constant `name`.
 - [x] bootstrap `Block` and `max_payload_size`, with mod.rs's `max_encode_size_covers_widest_block`
   and `covers_every_component` (128 participants behind -Dslow-tests in Debug).
-- [x] bootstrap `Engine` (`bootstrap.Engine(T).start`), which resolves the reshare actor's
+- [x] bootstrap `Engine` (`bootstrap.Engine(T).start`) on any runtime context `T.Context`
+  (the deterministic one in tests, `production.runner.Context` in the dkg example), which resolves the reshare actor's
   startup tip from marshal's anchor (`setup.startup`, no state sync), with `rejects_unsupported_sharing_mode`
   (an `error.UnsupportedSharingMode`, as zigware ports `should_panic`) and a singleton ceremony
   end to end on the simulated network. Its marshal stack is `bootstrap.Node(T)` (archives,
@@ -688,3 +689,6 @@ shared `tests/mocks.zig`, which takes additive edits only (agreed with the glue 
   the test catches a block builder that drops the reshare payload.
 - 2026-11-19: the dkg harness with 8 of its ceremony tests; dropping the final-block hint
   fails the deaf participant, and dropping the startup tip fails the restart test.
+- 2026-11-19: the engine and node take `T.Context`; a compile check instantiates them on the
+  production context, and a planted `@compileError` deep in `init_consensus` shows it analyzes
+  the whole engine.

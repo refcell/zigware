@@ -27,6 +27,7 @@ const Types = struct {
     pub const PeerProvider = Net.Manager;
     pub const Blocker = Net.Control;
     pub const SecretStore = mocks.MemorySecretStore;
+    pub const Context = runtime.deterministic.Context;
     pub const Network = Net;
 };
 const Engine = engine_api.Engine(Types);
@@ -61,6 +62,24 @@ fn config(
         .directory = .{},
         .blocks_per_epoch = 32,
     };
+}
+
+test "bootstrap engine compiles on the production runtime context" {
+    // The dkg example's `bootstrap` binary runs the engine on `production.Runner`. Analyzing
+    // `start` (and every task it spawns) keeps that instantiation compiling without running it.
+    const Production = struct {
+        pub const Variant = Types.Variant;
+        pub const Directory = Types.Directory;
+        pub const Manager = Types.Manager;
+        pub const PeerProvider = Types.PeerProvider;
+        pub const Blocker = Types.Blocker;
+        pub const SecretStore = Types.SecretStore;
+        pub const Context = runtime.production.runner.Context;
+        pub const Network = Types.Network;
+    };
+    const ProductionEngine = engine_api.Engine(Production);
+    comptime std.debug.assert(@TypeOf(&ProductionEngine.start) != @TypeOf(&Engine.start));
+    _ = &ProductionEngine.start;
 }
 
 // commonware `rejects_unsupported_sharing_mode`.
