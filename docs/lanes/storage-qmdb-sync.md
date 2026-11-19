@@ -172,6 +172,46 @@ it comes first once `any` lands.
   `exclusion_proof(&key) -> ExclusionProof` (`KeyExists` if active),
   `verify_exclusion_proof(proof, key, &root)`, `get_span`, `get_next_key`, `get_prev_key`.
 
+## Design: concurrent reads of any and current (2026-11-19)
+
+Commonware shares a database as `Arc<D>` (benches) or `Arc<AsyncRwLock<Option<D>>>`
+(`glue::stateful::db::Shared`): `get`, `get_many`, `get_metadata`, and proofs take `&self`,
+so any number of tasks read under a read guard, while `apply_batch`, `commit`, `prune`, and
+`sync` take the database by value or `&mut` under the write guard. Merkleizing a batch reads
+the database (`&self`) and so also runs beside other readers. Below the database, a page-cache
+miss (`CacheRef::read_after_miss`) reads into a buffer of its own and joins a fetch of the same
+page already in flight, so concurrent readers never share mutable read state.
+
+What zigware reads mutate today, on `any.get` → index lookup → `log.read` → contiguous journal
+`read` → paged `View.read_into`:
+- metrics counters: atomic, safe;
+- the page cache: locked since runtime's 404c831, safe (a page cached twice is overwritten);
+- the index, the blob map, the write buffer's tail, the variable journal's offsets: read only;
+- `View.read_blob` reads each missed page through the writer's single `page_scratch` buffer
+  (`runtime/buffer/paged/{writer,sealed,view}.zig`): two readers missing pages of one blob
+  overwrite each other's page before validating it. This is the one data race.
+
+Design:
+1. Runtime (runtime lane's files, not additive): `View.read_blob` reads a missed page into a
+   buffer of its own, on the stack for physical pages up to `blob_page_size` and from the
+   cache's allocator above it, instead of the shared `page_scratch` (which stays for the
+   writer's own recovery and flushes). Fetch deduplication is left out; it is a performance
+   step, not a safety one.
+2. Storage: the read path takes `*const Self` from `any.Db.get`/`get_many`/`get_metadata`/
+   `get_with_loc`/`get_span`/neighbors (and `current`'s delegates) down through
+   `authenticated_journal.read` and the contiguous fixed and variable journals' `read`,
+   `read_item`, `try_read_sync`, `locate`, and the paged `Writer.read_into`/`view`, so the
+   compiler proves a reader mutates nothing but atomics and the locked cache. Those are
+   signature-only edits in storage-journal's and runtime's files.
+3. Sharing: readers hold `utils.sync.UpgradableRwLock(Db)` read guards; `apply_batch`,
+   `commit`, `prune`, `sync`, and `destroy` take the write guard. Merkleize stays exclusive
+   (write guard) for now: it allocates into the batch but also reads through `*D`, and
+   widening it is a later step. glue's `db.Shared` keeps its mutex until its owner switches
+   it to the read-write lock.
+4. Test: a multi-thread stress test (`io.concurrent` readers on `std.Io.Threaded` doing
+   `get`/`get_many` of known keys over a tiny page cache, so most reads miss, beside a writer
+   applying batches under the write lock) checks every value read; it fails without step 1.
+
 ## Decisions
 - compact: `Db(F, O, H)` is generic over the keyless or immutable operation (detected by its
   `append`/`set` variant) instead of commonware's sealed trait; `compact.Keyless` and
