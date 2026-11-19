@@ -395,3 +395,6 @@ resolver; those lanes are running, so do the types first and the actors as they 
 - 2026-11-19: The resolver `Handler.deliver` keeps an owned copy of the first subscriber's fetch
   span (`resolver.own_span`), so pr_5097_regression now runs through the handler, as in
   commonware.
+- 2026-11-19: slow_validator, all_recovery, and all_crash_after_nullify run on every fixture
+  (`Cluster.slow`, `Cluster.crash_all`). The quick ReleaseSafe slice of every fixture DST
+  takes 2 min together.

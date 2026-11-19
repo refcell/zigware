@@ -195,17 +195,20 @@ fn Validator(comptime F: type) type {
             fixture: anytype,
             index: usize,
             oracle: Net.Oracle,
+            slow: bool,
         ) !void {
             const io = ctx.io();
             const key = fixture.participants[index];
             const normal: application_mod.Latency = .{ .mean = 10, .std_dev = 5 };
+            // commonware `slow_validator`'s application: 10 s per step.
+            const stalled: application_mod.Latency = .{ .mean = 10_000, .std_dev = 5 };
             self.handle = null;
             self.application = try .init(gpa, io, .{
                 .relay = relay,
                 .me = key,
-                .propose_latency = normal,
-                .verify_latency = normal,
-                .certify_latency = normal,
+                .propose_latency = if (slow) .{ .mean = 10_000, .std_dev = 0 } else normal,
+                .verify_latency = if (slow) stalled else normal,
+                .certify_latency = if (slow) stalled else normal,
             });
             try self.application.register();
             self.reporter = .init(gpa, io, &fixture.verifier);
@@ -257,6 +260,8 @@ fn Cluster(comptime F: type, comptime n: u32) type {
         relay: Relay,
         validators: [n]Validator(F),
         running: [n]bool,
+        /// The validator whose application takes 10 s per step, if any.
+        slow: ?usize,
 
         fn start(self: *Self, ctx: Context) !void {
             const io = ctx.io();
@@ -274,6 +279,7 @@ fn Cluster(comptime F: type, comptime n: u32) type {
             _ = self.oracle().manager().track(0, .init_primary(.init(self.fixture.participants)));
             self.relay = .init(gpa, io);
             self.running = @splat(false);
+            self.slow = null;
         }
 
         fn deinit(self: *Self) void {
@@ -306,8 +312,24 @@ fn Cluster(comptime F: type, comptime n: u32) type {
             const key = self.fixture.participants[index];
             validator_ctx.scope = scope.with_attribute("public_key", key);
             const validator = &self.validators[index];
-            try validator.start(validator_ctx, &self.relay, &self.fixture, index, self.oracle());
+            const slow = self.slow == index;
+            const fixture = &self.fixture;
+            try validator.start(validator_ctx, &self.relay, fixture, index, self.oracle(), slow);
             self.running[index] = true;
+        }
+
+        /// Crashes every running validator; each restarts from its journal on `start_validator`.
+        fn crash_all(self: *Self) void {
+            // Abort every engine before freeing any mock: live voters relay to all of them.
+            for (&self.validators, self.running) |*validator, running| {
+                if (running) validator.abort();
+            }
+            self.relay.deregister_all();
+            for (&self.validators, &self.running) |*validator, *running| {
+                if (running.*) validator.deinit();
+                running.* = false;
+            }
+            assert(std.mem.indexOfScalar(bool, &self.running, true) == null);
         }
 
         fn start_all_but(self: *Self, skipped: ?usize) !void {
@@ -494,6 +516,87 @@ fn backfill(comptime F: type, ctx: Context) !void {
     try cluster.check(required);
 }
 
+/// commonware `slow_validator`: validator 0's application takes 10 s per step; the rest
+/// finalize without its notarize or finalize votes.
+fn slow_validator(comptime F: type, ctx: Context) !void {
+    var cluster: Cluster(F, 5) = undefined;
+    try cluster.start(ctx);
+    defer cluster.deinit();
+    cluster.slow = 0;
+    try cluster.link_all(link_ms(10, 1, 1.0), null);
+    try cluster.start_all_but(null);
+    const required: u64 = if (full) 50 else 20;
+    try cluster.wait_all(required); // The slow validator learns finalizations from the rest.
+    try cluster.check(required);
+    for (&cluster.validators) |*validator| {
+        for (1..validator.reporter.latest_finalized().get() + 1) |value| {
+            const votes = validator.reporter.votes(.new(value));
+            try testing.expectEqual(0, (votes.notarize | votes.finalize) & 1);
+        }
+    }
+}
+
+/// commonware `all_recovery`: over 3 s links no view finishes for a minute; after a minute
+/// cut off and relinking at 10 ms, the views right after the highest nullified one are
+/// nearly all notarized (the skip timeout recovers quickly).
+fn all_recovery(comptime F: type, ctx: Context) !void {
+    var cluster: Cluster(F, 5) = undefined;
+    try cluster.start(ctx);
+    defer cluster.deinit();
+    try cluster.link_all(link_ms(3000, 0, 1.0), null);
+    try cluster.start_all_but(null);
+    try ctx.sleep(.fromSeconds(60));
+    try testing.expectEqual(0, cluster.max_finalized()); // Nothing finalizes over slow links.
+    try cluster.link_all(null, null);
+    try ctx.sleep(.fromSeconds(60));
+    var latest: u64 = 0;
+    for (&cluster.validators) |*validator| {
+        latest = @max(latest, validator.reporter.max_vote_view(.nullify).get());
+    }
+    try testing.expect(latest > 0);
+    try cluster.link_all(link_ms(10, 1, 1.0), null);
+    const view_retention = 10;
+    // Quick runs wait only until the checked views are past retention.
+    const required: u64 = if (full) 100 else latest + 2 * view_retention;
+    try cluster.wait_all(required);
+    try cluster.check(required);
+    const tolerated_missing = 3;
+    for (&cluster.validators) |*validator| {
+        var found: u32 = 0;
+        for (latest..latest + view_retention) |view| {
+            if (validator.reporter.notarized(.new(view))) found += 1;
+        }
+        try testing.expect(found >= view_retention - tolerated_missing);
+    }
+}
+
+/// commonware `all_crash_after_nullify`: validator 0 never starts and nothing is linked, so
+/// the rest only nullify view 1; they crash before a nullification can form, and once
+/// restarted from their journals and linked, they rebuild it and finalize.
+fn all_crash_after_nullify(comptime F: type, ctx: Context) !void {
+    var cluster: Cluster(F, 4) = undefined;
+    try cluster.start(ctx);
+    defer cluster.deinit();
+    try cluster.start_all_but(0);
+    // Wait for every online validator to have its nullify for view 1 reported.
+    const stalled: consensus_types.View = .new(1);
+    const Signers = reporter_mod.Reporter(F.Scheme, Digest).Signers;
+    for (1..cluster.validators.len) |index| {
+        const own: Signers = @as(Signers, 1) << @intCast(index);
+        const reporter = &cluster.validators[index].reporter;
+        while (reporter.votes(stalled).nullify & own == 0) try ctx.sleep(.fromMilliseconds(100));
+    }
+    // The batcher reports a vote before the voter's journal syncs it; let it sync.
+    try ctx.sleep(.fromSeconds(1));
+    try testing.expectEqual(0, cluster.max_finalized());
+    cluster.crash_all();
+    try cluster.link_all(link_ms(10, 1, 1.0), &not_zero);
+    try cluster.start_all_but(0);
+    // Validator 0 never votes, so every restarted vote is needed for a quorum.
+    try cluster.wait_all(10);
+    try cluster.check(10);
+}
+
 /// The quick slice's fixtures: one per scheme family (VRF MinPk, standard MinSig, multisig
 /// MinPk, secp256r1); engine_test.zig covers ed25519 in every build.
 const quick_fixtures = [fixtures.len]bool{ true, false, false, true, true, false, false, true };
@@ -533,6 +636,18 @@ test "all fixtures: slow and lossy links" {
 
 test "all fixtures: backfill" {
     try run_all(backfill, .{});
+}
+
+test "all fixtures: slow validator" {
+    try run_all(slow_validator, .{});
+}
+
+test "all fixtures: all recovery" {
+    try run_all(all_recovery, .{});
+}
+
+test "all fixtures: all crash after nullify" {
+    try run_all(all_crash_after_nullify, .{});
 }
 
 // commonware `twins`: `twins_campaign` on `TWINS_CAMPAIGN` over `TWINS_LINK`, with each
