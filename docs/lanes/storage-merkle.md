@@ -323,6 +323,10 @@ Partial:
   cursor) in one treap instead of per-partition sorted arrays that spill to a `BTreeMap`. Same
   results and O(log n) operations, so the spill threshold and its tests do not apply. Every
   generic index test runs against all four indices.
+  `absorb` (range install) joins the range's treap onto the full one in O(depth) and adopts
+  its pools when every range key orders after every full key, as ranges installing in
+  ascending partition order do, so no run is copied, like commonware's `install_range`
+  moving partition maps (actor-stream lane). Interleaved key sets still reinsert run by run.
 - index/immutable: same ring of translated keys by position and exact prefix retirement.
   Positions live in `utils.handles.Table(u64)` as in commonware: `get` returns an iterator that
   confirms each candidate against its ring slot, and growth rehashes through the ring. Seeded and

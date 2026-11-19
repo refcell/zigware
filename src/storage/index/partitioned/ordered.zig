@@ -67,6 +67,10 @@ pub fn Index(comptime T: type, comptime V: type, comptime P: usize) type {
         translator: Tr,
         tree: Tree = .{},
         pool: Pool = .empty,
+        /// Pools of absorbed indices whose runs `absorb` linked into `tree` in place. They live
+        /// as long as `self`; a destroyed run's item goes to `pool`'s free list, which is safe
+        /// because every pool is an arena freed only by `deinit`.
+        adopted: std.ArrayList(Pool) = .empty,
         counters: storage.Counters = .{},
 
         pub fn init(gpa: Allocator, translator: Tr) Self {
@@ -78,6 +82,8 @@ pub fn Index(comptime T: type, comptime V: type, comptime P: usize) type {
             var current = self.tree.getMin();
             while (current) |node| : (current = node.next()) item(node).values.deinit(self.gpa);
             self.pool.deinit(self.gpa);
+            for (self.adopted.items) |*pool| pool.deinit(self.gpa);
+            self.adopted.deinit(self.gpa);
             self.* = undefined;
         }
 
@@ -211,6 +217,8 @@ pub fn Index(comptime T: type, comptime V: type, comptime P: usize) type {
         /// changes nothing.
         pub fn absorb(self: *Self, other: *Self) Allocator.Error!void {
             assert(self != other);
+            assert(self.gpa.ptr == other.gpa.ptr);
+            if (self.precedes(other)) return self.adopt(other);
             var runs: usize = 0;
             var counting = other.tree.getMin();
             while (counting) |node| : (counting = node.next()) runs += 1;
@@ -233,6 +241,48 @@ pub fn Index(comptime T: type, comptime V: type, comptime P: usize) type {
             self.counters.pruned += other.counters.pruned;
             // `other`'s runs are empty now; drop them so it reads as an empty index.
             other.deinit();
+            other.* = .init(self.gpa, self.translator);
+        }
+
+        /// Whether every key of `self` orders before every key of `other`, as when ranges
+        /// install in ascending partition order.
+        fn precedes(self: *const Self, other: *const Self) bool {
+            const last = self.tree.getMax() orelse return true;
+            const first = other.tree.getMin() orelse return true;
+            return Tr.order(last.key, first.key) == .lt;
+        }
+
+        /// `absorb` when `self` precedes `other`: joins the treaps along `self`'s right spine
+        /// and `other`'s left spine in O(depth), keeping the min-heap on priority, and adopts
+        /// `other`'s pools, so no run is copied (commonware's `install_range` moves partition
+        /// maps the same way).
+        fn adopt(self: *Self, other: *Self) Allocator.Error!void {
+            assert(self.precedes(other));
+            try self.adopted.ensureUnusedCapacity(self.gpa, 1 + other.adopted.items.len);
+            var link = &self.tree.root;
+            var parent: ?*Tree.Node = null;
+            var left = self.tree.root;
+            var right = other.tree.root;
+            while (true) {
+                const lower = left orelse break;
+                const upper = right orelse break;
+                const take_left = lower.priority <= upper.priority;
+                const node = if (take_left) lower else upper;
+                link.* = node;
+                node.parent = parent;
+                parent = node;
+                link = &node.children[@intFromBool(take_left)];
+                if (take_left) left = lower.children[1] else right = upper.children[0];
+            }
+            const rest = left orelse right;
+            link.* = rest;
+            if (rest) |node| node.parent = parent;
+            self.adopted.appendAssumeCapacity(other.pool);
+            self.adopted.appendSliceAssumeCapacity(other.adopted.items);
+            self.counters.keys += other.counters.keys;
+            self.counters.items += other.counters.items;
+            self.counters.pruned += other.counters.pruned;
+            other.adopted.deinit(other.gpa);
             other.* = .init(self.gpa, self.translator);
         }
 
@@ -484,4 +534,103 @@ test "partitioned ordered install range at a nonzero offset" {
     // Ordered navigation crosses the installed partitions in prefix order.
     var next = full.next_translated_key(&.{ 0x7f, 0x01 }).?;
     try testing.expectEqual(@as(u64, 1), next.values.next().?.*);
+}
+
+fn expect_same(serial: *const TestIndex, joined: *const TestIndex) !void {
+    try testing.expectEqual(serial.keys(), joined.keys());
+    try testing.expectEqual(serial.items(), joined.items());
+    try testing.expectEqual(serial.pruned(), joined.pruned());
+    var expected: Seen = try .initCapacity(test_gpa, serial.items());
+    defer expected.deinit(test_gpa);
+    var actual: Seen = try .initCapacity(test_gpa, joined.items());
+    defer actual.deinit(test_gpa);
+    // In-order walks follow parent links, so a join that misses one reorders or drops runs.
+    serial.for_each_value(&expected, collect);
+    joined.for_each_value(&actual, collect);
+    try testing.expectEqualSlices(u64, expected.items, actual.items);
+    for (0..0x10000) |raw| {
+        const key: [2]u8 = @bitCast(@as(u16, @intCast(raw)));
+        var want = serial.get(&key);
+        var got = joined.get(&key);
+        try testing.expectEqual(want.count(), got.count());
+        while (want.next()) |value| try testing.expectEqual(value.*, got.next().?.*);
+        const want_next = serial.next_translated_key(&key);
+        const got_next = joined.next_translated_key(&key);
+        try testing.expectEqual(want_next == null, got_next == null);
+        if (want_next) |found| {
+            try testing.expectEqual(found.cycled, got_next.?.cycled);
+            var a = found.values;
+            var b = got_next.?.values;
+            try testing.expectEqual(a.next().?.*, b.next().?.*);
+        }
+    }
+}
+
+fn random_key(random: std.Random, lo: u32, len: u32) [2]u8 {
+    // A narrow second byte makes runs collide, so some hold several values.
+    return .{ @intCast(lo + random.uintLessThan(u32, len)), random.uintLessThan(u8, 6) };
+}
+
+test "partitioned ordered installs in partition order match serial inserts" {
+    for (0..24) |seed| {
+        var prng: std.Random.DefaultPrng = .init(seed);
+        const random = prng.random();
+        var serial: TestIndex = .init(test_gpa, .init(.{}));
+        defer serial.deinit();
+        var joined: TestIndex = .init(test_gpa, .init(.{}));
+        defer joined.deinit();
+        // Up to five contiguous ranges; some get no keys, so empty joins happen too.
+        var cuts = [_]u32{ 0, 0, 0, 0, 0, 256 };
+        for (cuts[1..5]) |*cut| cut.* = 1 + random.uintLessThan(u32, 255);
+        std.mem.sort(u32, &cuts, {}, std.sort.asc(u32));
+        var value: u64 = 0;
+        for (cuts[0..5], cuts[1..6]) |lo, hi| {
+            if (lo == hi) continue;
+            var range = new_test_range(&joined, lo, hi - lo);
+            errdefer range.deinit();
+            for (0..random.uintLessThan(usize, 300)) |_| {
+                const key = random_key(random, lo, hi - lo);
+                try serial.insert(&key, value);
+                try range.index.insert(&key, value);
+                value += 1;
+            }
+            try range.install(&joined);
+        }
+        try expect_same(&serial, &joined);
+        // Prunes and inserts after the joins reuse adopted items through the free list.
+        for (0..200) |_| {
+            const key = random_key(random, 0, 256);
+            if (random.boolean()) {
+                serial.remove(&key);
+                joined.remove(&key);
+            } else {
+                try serial.insert(&key, value);
+                try joined.insert(&key, value);
+                value += 1;
+            }
+        }
+        try expect_same(&serial, &joined);
+    }
+}
+
+test "partitioned ordered install below existing keys reinserts" {
+    var serial: TestIndex = .init(test_gpa, .init(.{}));
+    defer serial.deinit();
+    var joined: TestIndex = .init(test_gpa, .init(.{}));
+    defer joined.deinit();
+    // The high range installs first, so the low one interleaves and cannot join.
+    const spans = [_][2]u32{ .{ 0x80, 0x80 }, .{ 0, 0x80 } };
+    var value: u64 = 0;
+    for (spans) |span| {
+        var range = new_test_range(&joined, span[0], span[1]);
+        errdefer range.deinit();
+        for (0..40) |i| {
+            const key: [2]u8 = .{ @intCast(span[0] + i * 3 % span[1]), @intCast(i % 4) };
+            try serial.insert(&key, value);
+            try range.index.insert(&key, value);
+            value += 1;
+        }
+        try range.install(&joined);
+    }
+    try expect_same(&serial, &joined);
 }

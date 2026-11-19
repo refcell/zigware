@@ -183,6 +183,9 @@ qmdb parallel snapshot init (this lane's ce3e897), over `storage/src/qmdb/snapsh
   runtime.mocks, as in commonware).
 - 2026-11-13: mailbox `backoff` counter registered through `new_with_metrics`.
 - 2026-11-13: actor mailbox benches; the lane backlog is done.
+- 2026-11-19: partitioned ordered range install joins treaps instead of reinserting, so the
+  ordered parallel snapshot build (`init_concurrency` 8, 500k keys, 2M updates) drops from
+  412 ms to 340 ms best of 5 on a loaded host; the 1-worker build installs nothing.
 
 ## Test audit (2026-11-19, against main)
 
