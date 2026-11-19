@@ -304,6 +304,53 @@ by thread CPU time in scratch harnesses, best of ten:
   public key 14 µs. The two Diffie-Hellman ladders (about 44 µs each, std's) and the two
   verifications are unchanged.
 
+## End to end: flood, 4 peers (2026-11-19, p2p lane)
+
+`etc/scripts/flood-compare.py` runs four flood peers on this machine with commonware's binary,
+then the same four with zigware's (ReleaseFast). Both read one `examples/flood/local.sh`
+deployment, so they share the keys, 1024-byte messages, the rate, 2 worker threads, and a
+16384-entry mailbox. Every peer floods `p2p.authenticated.discovery` (SAKE and CUPS) over
+loopback TCP to the other three. After a warm-up (8 s), it reads each peer's metrics twice
+and reports the messages received per second and their mean latency. Each run is 15 or
+20 s, alternating sides, commonware `a9ffc25f3` against zigware `08b4d763`, at a load
+average of 30 to 100.
+
+The rate is flood's per-peer `Quota`, so each peer can receive at most 3 times the rate. The
+ranges cover the four peers over 2 or 3 rounds.
+
+| rate (msg/s per peer) | commonware received/s per peer | latency | zigware received/s per peer | latency |
+|---|---|---|---|---|
+| 200 (local.sh default) | 600 (cap) | 0.08–1.9 ms | 600 (cap) | 0.07–0.33 ms |
+| 16384 (commonware's README) | 49,152 (cap) | 0.6–72 ms | 49,152 (cap) | 0.08–0.34 ms |
+| 65536 | 196,600 (cap) | 2.8–3.5 ms | 196,600 (cap) | 0.18–0.21 ms |
+| 131072 | 392,000 (cap) | 6.7–10 ms | 393,300 (cap) | 1.0–1.3 ms |
+| 262144 | 212,000–266,000 (saturated) | 194–294 ms | 673,000–772,000 (saturated) | 23–80 ms |
+
+zigware reaches the cap at every rate up to 131072. At 262144, where commonware saturates,
+zigware delivers about 3 times as many messages at about a fifth of the latency. Below
+saturation, its mean latency is 5 to 10 times lower. No row is slower, so nothing was
+profiled.
+
+commonware's flood needed two local patches to run here (kept outside the repository):
+- **Binding.** It listens on `0.0.0.0:4545` and serves metrics on `0.0.0.0:9090`, so a
+  second peer on one machine cannot bind. As zigware's flood does, a peer whose host IP is
+  loopback binds that IP.
+- **A starved sender (an upstream bug).** `flood_sender` loops on
+  `check(Recipients::All)` and `send` without awaiting whenever the check passes. When no
+  send is accepted, for example before discovery has connected anyone, the loop spins on
+  its tokio worker. The network tasks it wakes sit in that worker's LIFO slot, which other
+  workers cannot steal, so no peer ever sends its greeting. After the handshakes, only about
+  140 bytes cross each connection, and every peer receives nothing (also with 8 worker
+  threads, or with 2 peers). One `commonware_runtime::reschedule().await` when a send is not
+  accepted fixes it. The same loop also starves at rates the quota never limits (1,000,000
+  msg/s: commonware receives 0, while zigware receives 450,000 to 740,000 per peer), so the
+  table stops at 262144. zigware's port has the same loop, but its sender runs on its own
+  `std.Io.Threaded` thread, so the spin starves nothing.
+
+Re-run: build commonware's `flood` with those two changes, then `zig build install
+-Doptimize=ReleaseFast`, `examples/flood/local.sh 4 <dir> 1024 <rate>`, and
+`etc/scripts/flood-compare.py <commonware-flood> zig-out/bin/flood <dir> 20 3 8`.
+
 ## Appendix: bench coverage
 
 Every Criterion bench in commonware a9ffc25f3 (`benches/` dirs with `criterion_main!`), listed

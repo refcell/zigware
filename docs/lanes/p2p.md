@@ -763,6 +763,11 @@ After:
   which the drivers keep under `$TMPDIR`.
 
 ## Log
+- 2026-11-19: end-to-end flood comparison (4 local peers, `etc/scripts/flood-compare.py`,
+  docs/BENCHMARKS.md). zigware reaches the quota cap at every rate commonware does, up to
+  131072 msg/s per peer, with 5 to 10 times lower mean latency. Where commonware saturates
+  (262144) it delivers about 3 times as much. commonware's flood sender starves its tokio
+  worker locally (an upstream bug, recorded there) and needed a `reschedule` patch to run.
 - 2026-11-19: head-to-head of p2p's hot paths (stream's cipher and handshake; p2p and stream
   have no benches of their own) in docs/BENCHMARKS.md. seal_open went from 2.7 to 3.3 times
   commonware to 0.66 to 1.00 (a lane-per-block ChaCha20 keystream), and sake from 1.33 to 0.55
