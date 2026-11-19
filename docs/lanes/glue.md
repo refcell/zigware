@@ -547,7 +547,8 @@ Owns `src/glue/dkg`. Reference: `glue/src/dkg` (about 24k Rust lines).
   not carried.
 - reshare `Application`: the inner app receives `application.Input(T)` (`{ gpa, payload }`,
   commonware's `Input` without `upstream`) instead of a bare `?Payload`, so a
-  `glue.stateful` app can declare `Input = reshare.application.Input(T)` and free an
+  `glue.stateful` app can declare `Input = reshare.application.InputOf(Payload)` (keyed by
+  the payload, so the app need not name `T`, which would be a comptime cycle) and free an
   undelivered one in `deinit_input(input) = input.deinit()` without an allocator.
 
 ### Backlog

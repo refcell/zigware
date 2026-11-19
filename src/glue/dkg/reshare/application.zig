@@ -14,7 +14,7 @@
 //! optionally, `A.prepare(..., input)` (always without a payload, as commonware forwards
 //! `payload: None`). `A.verify(*A, ctx, consensus_context, ancestry) !bool` is unchanged. The
 //! inner application owns `input` and `ancestry`; `Input.deinit` releases an input it never
-//! uses, so a `glue.stateful` app declares `Input = reshare.application.Input(T)` and
+//! uses, so a `glue.stateful` app declares `Input = reshare.application.InputOf(Payload)` and
 //! `deinit_input(input) = input.deinit()`.
 
 const std = @import("std");
@@ -35,10 +35,17 @@ const log = std.log.scoped(.dkg_reshare);
 /// Wraps marshal application `A` (pointer-free value, cloned like the inner) with the reshare
 /// mailbox of the actor types `T`.
 /// The reshare payload the inner application builds on, with the allocator that frees it.
+/// Keyed by the payload alone (`InputOf(PayloadOf(T))`), so every `T` with the same block
+/// shares one type, and an inner app can name it without naming `T`.
 pub fn Input(comptime T: type) type {
+    return InputOf(mailbox_mod.PayloadOf(T));
+}
+
+/// `Input` for the reshare payload type `P` (`types.Payload(V, P, D)`).
+pub fn InputOf(comptime P: type) type {
     return struct {
         const Self = @This();
-        pub const Payload = mailbox_mod.PayloadOf(T);
+        pub const Payload = P;
 
         gpa: Allocator,
         payload: ?Payload,

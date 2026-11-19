@@ -25,6 +25,11 @@ const Digested = broadcast.Digested(B);
 const Types = mocks.ActorTypes;
 const gpa = testing.allocator;
 
+comptime {
+    // Every `T` over the same block shares one `Input`, named by its payload alone.
+    std.debug.assert(application.Input(Types) == application.InputOf(Types.Block.Payload));
+}
+
 /// The inner application: records the payload of each proposal and builds a child of the
 /// parent carrying it, unless it rejects (commonware `RecordingApp`).
 const Recording = struct {
