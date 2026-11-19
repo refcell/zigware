@@ -1863,3 +1863,52 @@ test "a finished task's stale alarms are dropped with it" {
     };
     try (try runner.start(Root.run, .{ runner.io(), &runner }));
 }
+
+/// Overwrites a synced blob without syncing, syncs one byte of it, reopens, and (with
+/// `fresh`) supersedes it with a synced write; returns what the next run reads.
+fn logical_open(fresh: bool) ![5]u8 {
+    const retain_all: storage_mod.faulty.WriteConfig =
+        .{ .failure_rate = .zero, .retention_rate = .one, .mode = .prefix };
+    var runner = try test_runner(.{ .storage_faults = .{ .write_rate = retain_all } });
+    defer runner.deinit();
+    const Root = struct {
+        fn write(r: *Runner, sync: bool) !void {
+            const store = r.storage();
+            const blob = (try store.open("partition", "blob")).blob;
+            try blob.write_at(0, "saved", .{ .sync = true });
+            try blob.write_at(0, "stale", .{});
+            try blob.write_at(2, "X", .{ .sync = true });
+            blob.close();
+            // The reopen sees only the durable snapshot, not the retained fragments.
+            const reopened = try store.open("partition", "blob");
+            defer reopened.blob.close();
+            try testing.expectEqual(@as(u64, 5), reopened.len);
+            try storage_mod.tests.expect_read(reopened.blob, 0, "saXed");
+            // Duplicate opens are audited too.
+            const before = r.auditor.state();
+            try testing.expectError(error.BlobAlreadyOpen, store.open("partition", "blob"));
+            try testing.expect(!std.mem.eql(u8, &before, &r.auditor.state()));
+            if (sync) {
+                try reopened.blob.write_at(0, "fresh", .{});
+                try reopened.blob.sync();
+            }
+        }
+        fn read(store: storage_mod.Storage) ![5]u8 {
+            const opened = try store.open("partition", "blob");
+            defer opened.blob.close();
+            try testing.expectEqual(@as(u64, 5), opened.len);
+            var buffer: [5]u8 = undefined;
+            try opened.blob.read_at(0, &buffer);
+            return buffer;
+        }
+    };
+    try (try runner.start(Root.write, .{ &runner, fresh }));
+    return try (try runner.start(Root.read, .{runner.storage()}));
+}
+
+// commonware test_logical_open_releases_retained_mutations, both cases.
+test "a reopen drops the retained fragments of a closed open" {
+    // Crash replay must not restore fragments the successful reopen excluded.
+    try testing.expectEqualStrings("saXed", &try logical_open(false));
+    try testing.expectEqualStrings("fresh", &try logical_open(true));
+}

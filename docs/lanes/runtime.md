@@ -257,7 +257,7 @@ Every commonware `#[test]` in this lane's crates (macro and rstest cases expande
 | Total | 526 | 319 | 20 | 187 |
 
 Open (none are in runtime/src/telemetry/, the runtime-telemetry lane's directory):
-- [ ] `deterministic.rs:1742` `test_logical_open_releases_retained_mutations`: unsynced fragments of
+- [x] `deterministic.rs:1742` `test_logical_open_releases_retained_mutations`: unsynced fragments of
   a closed open are not replayed after reopen
 - [x] `network/audited.rs:233` `test_trait`: network suite over the audited deterministic network
   (auditor set)
