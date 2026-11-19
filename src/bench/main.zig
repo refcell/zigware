@@ -8,8 +8,15 @@
 //! `COMMONWARE_BENCH_METRICS_PATH` names a JSONL file custom metrics are appended to.
 
 const std = @import("std");
+const allocator = @import("allocator");
 const bench = @import("bench");
 const benches = @import("benches");
+
+/// Measured builds run on `allocator.Heap` (mimalloc's layout and default config), as every
+/// commonware bench binary sets `mimalloc::MiMalloc` with `Config::DEFAULT` as its global
+/// allocator. Safety-checked builds (the smoke runs in `zig build test`) keep `init.gpa`, which
+/// checks for leaks.
+const measured_heap = !std.debug.runtime_safety;
 
 const filters_max = 64;
 
@@ -76,9 +83,12 @@ pub fn main(init: std.process.Init) !void {
         try metrics_writer.seekTo(try file.length(io));
     }
 
+    var heap: allocator.Heap = if (measured_heap) .init(io, .default) else undefined;
+    defer if (measured_heap) heap.deinit();
+    const gpa = if (measured_heap) heap.allocator() else init.gpa;
     var runner: bench.Runner = .{
         .io = io,
-        .allocator = init.gpa,
+        .allocator = gpa,
         .out = &out.interface,
         .inputs = bench.Inputs.current(args, init.environ_map.get(bench.full_env)),
         .filters = parsed.filters[0..parsed.filters_len],

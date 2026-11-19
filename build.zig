@@ -411,6 +411,7 @@ fn bench_harness(
         .imports = &.{
             .{ .name = "bench", .module = bench },
             .{ .name = "benches", .module = benches },
+            .{ .name = "allocator", .module = modules[package_index("allocator")] },
         },
     });
     return b.addExecutable(.{ .name = b.fmt("bench-{s}", .{package.name}), .root_module = root });

@@ -71,8 +71,12 @@ directory under `BENCH_DIR` (default `$TMPDIR` or `/tmp`). commonware gets it th
   slower on `append_sync`. That gap came from the filesystem, not from zigware.
   `bench-compare.sh` now puts both sides on the same directory. A comparison on a real disk is
   still to do.
-- commonware's bench harnesses (journal, qmdb) install mimalloc as the global allocator.
-  zigware's benches use their own allocators.
+- Every commonware bench binary installs mimalloc (`Config::DEFAULT`) as its global
+  allocator. Since the commit "perf(bench): run measured benches on allocator.Heap"
+  (2026-11-19), zigware's measured (ReleaseFast) harnesses run on `allocator.Heap` with
+  `Config.default`, the port of that allocator and config; Debug and ReleaseSafe smoke runs keep
+  the leak-checking `init.gpa`. Rows measured before that commit ran on `smp_allocator`, which
+  maps any allocation in its 64 KiB class fresh and faults it in again on every call.
 - commonware's `bls12381` harness builds every case's inputs at startup even when filtered, so
   one run of it takes minutes. Only the measured iterations count toward the numbers.
 - No sampling profiler works on this machine: `perf` isn't installed, `ptrace_scope` is 1, and
@@ -485,6 +489,44 @@ changes, found by timing each stage of a transition per thread:
   four times per transition. Each worker now explores on a stack of its own and shares half
   of it while another waits, and the visited set is 64 shards by fingerprint, as
   Stateright's job market and sharded map do.
+
+## Bench harness on allocator.Heap (2026-11-19, storage-merkle lane)
+
+The measured harnesses moved from `smp_allocator` to `allocator.Heap` (`Config.default`), as
+commonware's 36 bench binaries all set `mimalloc::MiMalloc` with `Config::DEFAULT` (the only
+other global allocators in its tree are test fixtures). Rows above this section, and any row
+dated before this commit, ran on `smp_allocator`. Before and after, same tree, the two
+harnesses alternating per row; best of three medians (seven for `add_many` mmb, four for the
+other parallel rows, three for glue's plan rows), at a 1-minute load of 26 to 101:
+
+| bench | smp_allocator | allocator.Heap | change |
+|---|---|---|---|
+| `merkle::multi_proof/n=100000 items=100 family=mmr` | 13.8 µs | 8.54 µs | −38% |
+| `merkle::add_many/items=65536 workers=8 family=mmb` | 3.78 ms | 3.94 ms | +4% (medians 5.22 → 5.02 ms) |
+| `merkle::add_many/items=65536 workers=8 family=mmr` | 4.45 ms | 3.51 ms | −21% |
+| `merkle::update/... strategy=BatchedParallel family=mmr` | 40.9 ms | 33.7 ms | −18% |
+| `index::insert/variant=ordered items=10000` | 1.15 ms | 1.12 ms | −3% |
+| `index::insert/variant=partitioned_ordered_2 items=10000` | 550 µs | 473 µs | −14% |
+| `sha256::hash_message/msg_len=4096` | 1.99 µs | 1.92 µs | −3% |
+| `codec::lazy::get/source=shared txs=100000 conc=1` | 883 µs | 791 µs | −10% |
+| `mailbox::mailbox::enqueue_ready/capacity=1024` | 13.4 µs | 12.7 µs | −6% |
+| `reed_solomon::encode/msg_len=1048576 chunks=10 conc=1` | 1.28 ms | 1.30 ms | +1% |
+| `transfers::plan/transfers=1024 accounts=128 effects=none conc=1` | 49.1 µs | 27.9 µs | −43% |
+| `transfers::plan/transfers=1024 accounts=4096 effects=none conc=1` | 59.3 µs | 32.6 µs | −45% |
+| `transfers::plan/transfers=32768 accounts=4096 effects=none conc=1` | 1.68 ms | 1.43 ms | −15% |
+| `transfers::plan/transfers=16 accounts=128 effects=none conc=1` | 637 ns | 775 ns | +22% (each of 7 rounds +14% to +26%) |
+
+- The heap keeps freed large blocks (purged after 4 s, as mimalloc), so buffers that
+  `smp_allocator` unmapped and re-faulted every iteration are reused: `multi_proof`'s 38 KB
+  digests, glue's plan buffers (commonware: 21 µs at `transfers=1024`), and the index arrays
+  (clearing's finding above).
+- One lock guards a `Heap`. The parallel rows did not suffer measurably: `add_many` mmb's
+  seven rounds spread 3.8 to 6.6 ms on both sides (round 1 alone read +51%), but every small allocation pays a
+  mutex through the Io vtable and a page lookup by address, where mimalloc and `smp_allocator`
+  pop a thread-local free list. That fixed cost is the +22% on the 16-transfer plan, a few
+  hundred nanoseconds with a handful of allocations. A thread-local fast path in
+  `allocator.Heap` (parallel lane) is the fix; sub-microsecond, allocation-heavy rows read
+  high until then.
 
 ## Storage: merkle, bmt, rmap, variable journal reads (2026-11-19, storage-merkle lane)
 
