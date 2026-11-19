@@ -1,9 +1,13 @@
 //! commonware `glue::dkg::tests::reshare` (mod.rs): reshare ceremonies end to end over many
 //! epochs. Phase 1 runs the discovery network without state sync; see docs/lanes/glue.md.
+//! Commonware's `slow` group runs only with -Dslow-tests; the single-participant test always
+//! runs.
 
 const std = @import("std");
 const testing = std.testing;
 const build_options = @import("build_options");
+const assert = std.debug.assert;
+const p2p = @import("p2p");
 const simulate = @import("../../../simulate/mod.zig");
 const harness = @import("harness.zig");
 const properties = @import("properties.zig");
@@ -11,29 +15,88 @@ const properties = @import("properties.zig");
 const gpa = testing.allocator;
 const S = harness.ValidatorState;
 
-/// Runs a plan to `final_epoch`'s last block with commonware's successful-reshare properties
-/// (`successful_reshare_plan`).
-fn run_successful(engine: *harness.ReshareEngine, final_epoch: u64, seed: u64) !void {
-    const exit: simulate.exit.ProcessedHeightAtLeast = .{
-        .required = properties.final_height(final_epoch),
+/// The most epochs a plan checks `SchemesRegistered` for.
+const max_scheme_epochs = 8;
+
+fn skip_slow() error{SkipZigTest}!void {
+    if (!build_options.slow_tests) return error.SkipZigTest;
+}
+
+/// One plan's shape (commonware's `*_plan` builders in mod.rs).
+const Options = struct {
+    final_epoch: u64,
+    seed: u64 = 0,
+    timeout_secs: u64 = 60,
+    /// `BoundaryEpochInfos::with_min_successes`; null requires every boundary to succeed.
+    min_successes: ?u64 = null,
+    no_reveals: bool = true,
+    /// `failed_carry_over_plan`: a `FailedCeremonyCarryOver` per epoch.
+    failed: []const u64 = &.{},
+    /// `with_scheme_properties`: `SchemesRegistered` for epochs 1 through `final_epoch + 1`.
+    schemes: bool = true,
+    link: p2p.simulated.Link = harness.good_link,
+    crashes: []const simulate.action.Crash(harness.Key) = &.{},
+    /// `crash_storm_plan`: exit once every participant is active at the final height, and
+    /// check `AllNodesRecovered`.
+    recovery: bool = false,
+};
+
+/// Runs a plan to `options.final_epoch`'s last block with `SignerRegistered`,
+/// `BoundaryEpochInfos`, and `EpochInfoContinuity` (`reshare_plan_with_boundary`), plus the
+/// properties `options` adds.
+fn run_reshare(engine: *harness.ReshareEngine, options: Options) !void {
+    const final_epoch = options.final_epoch;
+    const epochs: usize = @intCast(final_epoch + 1);
+    assert(epochs <= max_scheme_epochs);
+    assert(options.failed.len <= max_scheme_epochs);
+    const height = properties.final_height(final_epoch);
+    const exit: simulate.exit.ProcessedHeightAtLeast = .{ .required = height };
+    const all_active: properties.AllActiveProcessedHeight = .{
+        .required = height,
+        .participants = engine.participants().len,
     };
+    const recovered: properties.AllNodesRecovered(S) = .{ .public_keys = engine.participants() };
     const signer: properties.SignerRegistered(S) = .{};
     var boundary = properties.BoundaryEpochInfos(S).init(gpa, final_epoch + 1);
-    boundary.no_reveals = true;
+    boundary.no_reveals = options.no_reveals;
+    if (options.min_successes) |min| boundary.min_successes = min;
     const continuity: properties.EpochInfoContinuity(S) = .{
         .gpa = gpa,
         .epochs = final_epoch + 1,
         .schedule = engine.schedule(),
     };
+    var checks: [4 + 2 * max_scheme_epochs]harness.Plan.Property = undefined;
+    checks[0] = .from(&signer);
+    checks[1] = .from(&boundary);
+    checks[2] = .from(&continuity);
+    var count: usize = 3;
+    if (options.recovery) {
+        checks[count] = .from(&recovered);
+        count += 1;
+    }
+    var schemes: [max_scheme_epochs]properties.SchemesRegistered(S) = undefined;
+    if (options.schemes) {
+        for (schemes[0..epochs], 1..) |*scheme, epoch| {
+            scheme.* = .{ .gpa = gpa, .public_keys = engine.participants(), .epoch = epoch };
+            checks[count] = .from(scheme);
+            count += 1;
+        }
+    }
+    var carried: [max_scheme_epochs]properties.FailedCeremonyCarryOver(S) = undefined;
+    for (carried[0..options.failed.len], options.failed) |*carry, epoch| {
+        carry.* = .{ .gpa = gpa, .epoch = epoch, .schedule = engine.schedule() };
+        checks[count] = .from(carry);
+        count += 1;
+    }
     const plan: harness.Plan = .{
         .engine = engine,
-        .seed = seed,
-        .link = harness.good_link,
-        .crashes = &.{},
+        .seed = options.seed,
+        .link = options.link,
+        .crashes = options.crashes,
         .required_finalizations = 0,
-        .exit_condition = .from(&exit),
-        .timeout = .from_secs(60),
-        .properties = &.{ .from(&signer), .from(&boundary), .from(&continuity) },
+        .exit_condition = if (options.recovery) .from(&all_active) else .from(&exit),
+        .timeout = .from_secs(options.timeout_secs),
+        .properties = checks[0..count],
     };
     var result = try plan.run(gpa);
     result.deinit();
@@ -43,10 +106,86 @@ fn run_successful(engine: *harness.ReshareEngine, final_epoch: u64, seed: u64) !
 test "reshare e2e single participant two epochs" {
     var engine = try harness.ReshareEngine.with_committees(gpa, 1, &.{1}, 1);
     defer engine.deinit();
-    try run_successful(&engine, 1, 0);
+    try run_reshare(&engine, .{ .final_epoch = 1 });
+}
+
+// commonware `reshare_e2e_rotates_participants`: five validators, four players per epoch.
+test "reshare e2e rotates participants" {
+    try skip_slow();
+    var engine = try harness.ReshareEngine.create(gpa);
+    defer engine.deinit();
+    try run_reshare(&engine, .{ .final_epoch = 0 });
+}
+
+// commonware `reshare_e2e_multiple_epochs`.
+test "reshare e2e multiple epochs" {
+    try skip_slow();
+    var engine = try harness.ReshareEngine.create(gpa);
+    defer engine.deinit();
+    try run_reshare(&engine, .{ .final_epoch = 4 });
+}
+
+// commonware `reshare_e2e_failed_ceremony_carries_committee`.
+test "reshare e2e failed ceremony carries committee" {
+    try skip_slow();
+    var engine = try harness.ReshareEngine.create(gpa);
+    defer engine.deinit();
+    engine.failures = &.{0};
+    try run_reshare(&engine, .{
+        .final_epoch = 0,
+        .min_successes = 0,
+        .no_reveals = false,
+        .failed = &.{0},
+        .schemes = false,
+    });
+}
+
+// commonware `reshare_e2e_consecutive_failed_ceremonies_carry_state`.
+test "reshare e2e consecutive failed ceremonies carry state" {
+    try skip_slow();
+    var engine = try harness.ReshareEngine.create(gpa);
+    defer engine.deinit();
+    engine.failures = &.{ 0, 1 };
+    try run_reshare(&engine, .{
+        .final_epoch = 2,
+        .timeout_secs = 90,
+        .min_successes = 1,
+        .failed = &.{ 0, 1 },
+        .schemes = false,
+    });
+}
+
+/// commonware `crash_storm_plan`: every boundary must succeed despite the crashes.
+fn run_crash_storm(
+    final_epoch: u64,
+    crash: simulate.action.Crash(harness.Key),
+    seed: u64,
+    timeout_secs: u64,
+) !void {
+    var engine = try harness.ReshareEngine.create(gpa);
+    defer engine.deinit();
+    try run_reshare(&engine, .{
+        .final_epoch = final_epoch,
+        .seed = seed,
+        .timeout_secs = timeout_secs,
+        .no_reveals = false,
+        .crashes = &.{crash},
+        .recovery = true,
+    });
+}
+
+// commonware `reshare_e2e_multiple_epochs_with_total_shutdown`: more uninterrupted uptime
+// than `certification_timeout`, so recovery progresses before the next total shutdown.
+test "reshare e2e multiple epochs with total shutdown" {
+    try skip_slow();
+    const crash: simulate.action.Crash(harness.Key) = .{ .random = .{
+        .frequency = .from_secs(4),
+        .downtime = .from_secs(1),
+        .count = 5,
+    } };
+    try run_crash_storm(3, crash, 0, 180);
 }
 
 test {
-    _ = build_options;
     _ = @import("properties_test.zig");
 }

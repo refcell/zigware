@@ -24,7 +24,7 @@ const validator = @import("validator.zig");
 
 const Epoch = consensus.Epoch;
 const ed25519 = cryptography.ed25519;
-const Key = ed25519.PublicKey;
+pub const Key = ed25519.PublicKey;
 const MinPk = cryptography.bls12381.primitives.MinPk;
 const fd = cryptography.bls12381.dkg.feldman_desmedt;
 const Share = cryptography.bls12381.primitives.group.Share;

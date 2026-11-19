@@ -747,6 +747,8 @@ orchestrator.
 - 2026-11-19: the reshare harness without state sync and its single-participant test; a
   block builder that drops the reshare payload fails it. Each validator's orchestrator task now
   spawns from the orchestrator's own context, so an abort finishes its epoch engines first.
+- 2026-11-19: five slow reshare ceremonies; removing the failure filter fails the failed
+  ceremony carry-over test.
 
 ### Log
 - 2026-11-19: probe wire and limits; the `Tag` and `Message` hashes match, and the message
@@ -798,7 +800,8 @@ shared `tests/mocks.zig`, which takes additive edits only (agreed with the glue 
   without state sync (orchestrator, reshare actor, `bootstrap.Node`, a plain block app), for the
   tests that never state sync. Phase 2 adds glue.stateful's QMDB app, the dkg probe, and the
   state-sync plans for the rest. Phase 1's harness is in `tests/reshare/` with its first test
-  (single participant, two epochs).
+  (single participant, two epochs). Ported behind -Dslow-tests: rotates participants,
+  multiple epochs, the failed and consecutive failed ceremony carry-overs, and total shutdown.
 - [x] lookup's peer-activation test: network.rs's
   `lookup_secondary_dials_primary_and_receives_response` in `network_test.zig` (consensus-marshal
   lane, 2026-11-19); it catches the addressable manager dropping the secondary role.
