@@ -131,4 +131,5 @@ pub const SyncState = union(enum) {
 test {
     std.testing.refAllDecls(@This());
     _ = @import("start_sync_test.zig");
+    _ = @import("sync_wait_test.zig");
 }

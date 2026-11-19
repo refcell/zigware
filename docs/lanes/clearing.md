@@ -241,3 +241,4 @@ qmdb `current` (balances, over the MMB) and `keyless` (payout log, over the MMR)
 - 2026-11-19: storage audit partials and the last index tests; audit backlog done.
 - 2026-11-19: `keep_unsynced` crash mode in the buffer mock; immutable destroy partial closed.
 - 2026-11-19: freezer determinism gated (per runtime-telemetry's test-storage profile).
+- 2026-11-19: paged writer start_sync waits and the buffer range-sync tests (sync counts).

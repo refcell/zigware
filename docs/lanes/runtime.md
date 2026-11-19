@@ -219,6 +219,12 @@ time, files, and network: build on it rather than around it where it fits.
 - 2026-11-16: `select`; `join` claims only ended tasks (an aborted joiner no longer
   blocks its child's abort); supervision.rs tests; utils triage.
 - 2026-11-16: storage test wrappers; remaining memory and iobuf tests.
+- 2026-11-19 (clearing lane): `buffer/sync_wait_test.zig` ports the paged writer's flush,
+  snapshot, replay, and truncate waits on an outstanding `start_sync`, its start_sync flush
+  failure, and the 10 range-sync tests of `buffer/mod.rs` and `paged/writer.rs` as write and
+  total-sync counts (commonware's full plus range syncs) via the new `buffer.mocks.Storage`
+  `syncs` and `resizes` counters; zigware's `Blob` has no range sync, so only the split is
+  unchecked.
 
 ## Test audit (2026-11-19, against main)
 
@@ -242,19 +248,19 @@ Every commonware `#[test]` in this lane's crates (macro and rstest cases expande
 | telemetry/metrics/mod.rs | 18 | 16 | 0 | 2 |
 | tokio/runtime.rs | 21 | 4 | 2 | 15 |
 | utils/abort.rs | 11 | 1 | 0 | 10 |
-| utils/buffer/mod.rs | 46 | 35 | 1 | 10 |
+| utils/buffer/mod.rs | 46 | 38 | 1 | 7 |
 | utils/buffer/paged/cache.rs | 49 | 11 | 6 | 32 |
 | utils/buffer/paged/mod.rs | 17 | 13 | 0 | 4 |
 | utils/buffer/paged/read.rs | 17 | 6 | 0 | 11 |
 | utils/buffer/paged/sealed.rs | 26 | 23 | 0 | 3 |
 | utils/buffer/paged/tip.rs | 13 | 0 | 1 | 12 |
 | utils/buffer/paged/view.rs | 4 | 4 | 0 | 0 |
-| utils/buffer/paged/writer.rs | 96 | 68 | 0 | 28 |
+| utils/buffer/paged/writer.rs | 96 | 81 | 0 | 15 |
 | utils/buffer/tip.rs | 7 | 5 | 0 | 2 |
 | utils/handle.rs | 19 | 10 | 0 | 9 |
 | utils/mod.rs | 3 | 0 | 0 | 3 |
 | utils/supervision.rs | 9 | 4 | 0 | 5 |
-| Total | 526 | 319 | 20 | 187 |
+| Total | 526 | 335 | 20 | 171 |
 
 Open (none are in runtime/src/telemetry/, the runtime-telemetry lane's directory):
 - [x] `deterministic.rs:1742` `test_logical_open_releases_retained_mutations`: unsynced fragments of
@@ -374,11 +380,6 @@ Not portable:
   cancelled reads (`MigratingReadBlob`, parked reads)
 - `utils/buffer/mod.rs` `test_read_structure_single_vs_chunked`: storage-journal.md: `IoBuf`
   ownership/chunk structure (reads copy into caller buffers)
-- `utils/buffer/mod.rs` `test_write_start_sync_persists_and_marks_clean`,
-  `test_write_sync_uses_range_sync_for_buffer_only_write`,
-  `test_write_sync_uses_full_sync_after_resize`: range-vs-full sync selection (zigware's `Blob`
-  has no range sync). The in-flight `start_sync` tests are ported in
-  `buffer/start_sync_test.zig` (2026-11-19).
 - `utils/buffer/paged/cache.rs` `test_read_cached_many_across_chunks`,
   `test_read_cached_many_stale_hint_after_eviction`,
   `test_read_cached_many_cross_blob_hint_collision`,
@@ -447,21 +448,6 @@ Not portable:
   `#[should_panic]` or panic propagation/`catch_unwind`; Zig cannot catch a panic
 - `utils/buffer/paged/writer.rs` `test_recoverable_prefix_len_batches_reads`: storage-journal.md:
   "`recoverable_prefix_len` reads one page at a time"
-- `utils/buffer/paged/writer.rs` `test_sync_uses_range_sync_for_single_flush`,
-  `test_start_sync_flush_failure_returns_err`,
-  `test_write_flush_waits_for_outstanding_start_sync`,
-  `test_snapshot_waits_for_outstanding_start_sync_before_flushing`,
-  `test_replay_waits_for_outstanding_start_sync_before_flushing`,
-  `test_recovery_truncate_shrink_waits_for_outstanding_start_sync_before_resizing`: not yet
-  ported (same flush/resize wait as the ported `start_sync_test.zig` cases);
-  `test_sync_uses_full_sync_after_prior_plain_flush`,
-  `test_sync_uses_full_sync_after_replay_plain_flush`,
-  `test_recreated_sync_preserves_replay_plain_flush_barrier`,
-  `test_recreated_sync_skips_barrier_after_invalid_truncation`,
-  `test_recovery_truncate_partial_shrink_without_physical_resize_uses_range_sync`,
-  `test_recovery_truncate_partial_shrink_with_physical_resize_clears_full_sync_requirement`,
-  `test_recovery_truncate_page_boundary_shrink_uses_full_sync`: storage-journal.md: in-flight
-  `start_sync` handles/waits, range-vs-full sync selection
 - `utils/buffer/paged/writer.rs` `test_sync_preserves_partial_tip_allocation`: storage-journal.md:
   tip is one contiguous allocation, not chained zero-copy chunks
 - `utils/buffer/paged/writer.rs` `test_torn_extension_with_new_footer_recovers_previous_prefix`:
