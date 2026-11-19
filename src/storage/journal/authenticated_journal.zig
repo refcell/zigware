@@ -27,6 +27,7 @@ const refcount = @import("../refcount.zig");
 const RefCount = refcount.RefCount;
 const contiguous = @import("contiguous/mod.zig");
 const authenticated = @import("authenticated.zig");
+const parallel = @import("parallel");
 
 const Storage = runtime.storage.Storage;
 const Bounds = contiguous.Bounds;
@@ -476,9 +477,19 @@ pub fn Journal(comptime F: type, comptime C: type, comptime H: type) type {
             /// Adds `items` (the batch owns each item on success; the slice stays the
             /// caller's).
             pub fn add_many(self: *UnmerkleizedBatch, gpa: Allocator, items: []const Item) !void {
+                return self.add_many_with(gpa, items, parallel.sequential);
+            }
+
+            /// `add_many` with the leaves hashed across `strategy` (same digests on every one).
+            pub fn add_many_with(
+                self: *UnmerkleizedBatch,
+                gpa: Allocator,
+                items: []const Item,
+                strategy: anytype,
+            ) !void {
                 const leaves_before = self.inner.leaves();
                 try self.items.ensureUnusedCapacity(gpa, items.len);
-                try self.inner.add_many(gpa, &self.hasher, Item, items);
+                try self.inner.add_many_with(gpa, &self.hasher, Item, items, strategy);
                 self.items.appendSliceAssumeCapacity(items);
                 assert(self.inner.leaves() == leaves_before + items.len);
             }
@@ -490,6 +501,17 @@ pub fn Journal(comptime F: type, comptime C: type, comptime H: type) type {
                 self: *UnmerkleizedBatch,
                 gpa: Allocator,
                 journal: *const Self,
+            ) !*MerkleizedBatch {
+                return self.merkleize_with(gpa, journal, parallel.sequential);
+            }
+
+            /// `merkleize` with each height hashed across `strategy` (same digests on every
+            /// one).
+            pub fn merkleize_with(
+                self: *UnmerkleizedBatch,
+                gpa: Allocator,
+                journal: *const Self,
+                strategy: anytype,
             ) !*MerkleizedBatch {
                 const ancestor_items: []const *ItemChunk = if (self.parent) |parent|
                     try collect_ancestor_items(gpa, parent)
@@ -504,7 +526,8 @@ pub fn Journal(comptime F: type, comptime C: type, comptime H: type) type {
                     return err;
                 };
                 const base = &journal.merkle.mem;
-                const inner = self.inner.merkleize(gpa, base, &self.hasher) catch |err| {
+                const hasher = &self.hasher;
+                const inner = self.inner.merkleize_with(gpa, base, hasher, strategy) catch |err| {
                     gpa.destroy(chunk);
                     self.items = .fromOwnedSlice(owned);
                     return err;

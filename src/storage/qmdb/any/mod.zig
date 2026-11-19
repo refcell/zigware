@@ -23,6 +23,7 @@ test {
     _ = @import("db_test.zig");
     _ = @import("start_sync_test.zig");
     _ = @import("parallel_init_test.zig");
+    _ = @import("strategy_test.zig");
     _ = @import("fuzz_test.zig");
     _ = @import("range.zig");
     _ = @import("variable_test.zig");

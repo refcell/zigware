@@ -18,7 +18,9 @@ pub fn Database(comptime D: type, comptime H: type) type {
         pub const Backing = @FieldType(D.Log, "journal");
         pub const Hasher = H;
         pub fn build(gpa: Allocator, scope: Scope, cfg: D.Cfg, log: D.Log) anyerror!D {
-            return D.init_from_log(gpa, scope, log, cfg.translator, cfg.init_cache);
+            var db = try D.init_from_log(gpa, scope, log, cfg.translator, cfg.init_cache);
+            db.strategy = cfg.strategy;
+            return db;
         }
     };
     return sync.database.Persisted(D.Family, V);

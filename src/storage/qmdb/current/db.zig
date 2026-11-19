@@ -12,6 +12,7 @@ const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const codec = @import("codec");
 const runtime = @import("runtime");
+const parallel = @import("parallel");
 const utils = @import("utils");
 const merkle = @import("../../merkle/mod.zig");
 const value_mod = @import("../value.zig");
@@ -54,6 +55,8 @@ pub fn Config(comptime T: type, comptime JournalConfig: type) type {
         init_cache: ?usize = null,
         /// Tasks the init snapshot build may use (see `any.Config.init_concurrency`).
         init_concurrency: usize = 1,
+        /// The `any` database's strategy (see `any.Config.strategy`).
+        strategy: ?parallel.Rayon = null,
     };
 }
 
@@ -143,6 +146,7 @@ pub fn Db(F: type, U: type, C: type, I: type, H: type, comptime N: usize) type {
                 .translator = cfg.translator,
                 .init_cache = cfg.init_cache,
                 .init_concurrency = cfg.init_concurrency,
+                .strategy = cfg.strategy,
             };
             const options: qmdb.InitOptions = .{
                 .max_size = max_size,
@@ -186,6 +190,7 @@ pub fn Db(F: type, U: type, C: type, I: type, H: type, comptime N: usize) type {
             var any_db = try Any.init_from_log(gpa, any_scope, owned_log, translator, cache);
             errdefer any_db.deinit();
             any_db.metrics.io = cfg.io;
+            any_db.strategy = cfg.strategy;
             try prune_any_bitmap(&any_db, pruned_chunks);
             var pins: [merkle.max_pinned_nodes]Digest = undefined;
             const pinned = try ops_pins(&any_db, pruned_chunks, &pins);

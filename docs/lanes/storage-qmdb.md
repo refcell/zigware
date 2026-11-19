@@ -368,7 +368,12 @@ which every database here is built on.
   (contiguous below its own items), so reads and applies stay exact after ancestors are
   released.
   Mutators take `*Self` (commonware threads the database by value); `start_sync` returns no
-  handle; any has no `strategy` (its batched read runs `sequential`).
+  handle. any's `Config.strategy: ?parallel.Rayon` (null = `sequential`; `current` passes
+  its own through) is commonware's Merkle strategy (`Db::strategy`): it hashes merkleized
+  batches (journal `add_many_with`/`merkleize_with`) and shards `get_many`'s cached pass.
+  commonware also runs the batch's diff sort/merge, update resolution, uncommitted reads,
+  ordered neighbor finishing, and apply on it; storage-qmdb takes apply, the rest is open.
+  `any/strategy_test.zig` checks roots and reads match `sequential` on pools of 1, 3, 4.
 
 - any: values may own memory, keys may not (a comptime check). A merkleize borrows values from
   the batch, its log reads (kept until the merkleize ends), and its ancestors, then gives the
@@ -469,3 +474,4 @@ which every database here is built on.
 - 2026-11-19: immutable and store in-flight start_sync tests (overlap, failure, prune waits).
 - 2026-11-19: upstream 102430409: shared batched get_many read, store strategy (decision reversed).
 - 2026-11-19: immutable apply indexes before its append; `apply_indexes_while_journal_waits`.
+- 2026-11-19: any `Config.strategy` (Merkle hashing, batched reads), as commonware's.

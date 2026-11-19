@@ -36,6 +36,8 @@ const floor_mod = @import("../floor.zig");
 const bitmap_mod = @import("../bitmap.zig");
 const diff_mod = @import("diff.zig");
 const ordered_mod = @import("ordered.zig");
+const parallel = @import("parallel");
+const sequential = parallel.sequential;
 
 /// The unmerkleized batch of database type `D`.
 pub fn Unmerkleized(comptime D: type) type {
@@ -913,8 +915,10 @@ fn Merkleizer(comptime D: type) type {
             errdefer gpa.free(diffs);
             const merkleized = try gpa.create(D.MerkleizedBatch);
             errdefer gpa.destroy(merkleized);
-            try add_owned(gpa, journal_batch, walked.ops.items);
-            const journal = try journal_batch.merkleize(gpa, &self.db.log);
+            const journal = if (self.db.strategy) |pool|
+                try hash_journal(gpa, journal_batch, walked.ops.items, &self.db.log, pool)
+            else
+                try hash_journal(gpa, journal_batch, walked.ops.items, &self.db.log, sequential);
             errdefer journal.release(gpa);
             const tip_size = commit_loc + 1;
             const peaks = merkle.inactive_peaks(D.Family, tip_size, floor);
@@ -942,14 +946,32 @@ fn Merkleizer(comptime D: type) type {
             return merkleized;
         }
 
+        /// Adds `ops` to the journal batch and merkleizes it against `log`, hashing across
+        /// `strategy` (commonware's `authenticated::Journal::merkleize` job on the strategy).
+        fn hash_journal(
+            gpa: Allocator,
+            journal_batch: *D.Log.UnmerkleizedBatch,
+            ops: []const D.Operation,
+            log: *const D.Log,
+            strategy: anytype,
+        ) !*D.Log.MerkleizedBatch {
+            try add_owned(gpa, journal_batch, ops, strategy);
+            const leaves = journal_batch.inner.leaves();
+            assert(leaves >= ops.len);
+            return journal_batch.merkleize_with(gpa, log, strategy);
+        }
+
         /// Adds copies of `ops` (which borrow their values) to the journal batch, which owns
         /// them after.
         fn add_owned(
             gpa: Allocator,
             journal_batch: *D.Log.UnmerkleizedBatch,
             ops: []const D.Operation,
+            strategy: anytype,
         ) !void {
-            if (comptime !D.Operation.owns_memory) return journal_batch.add_many(gpa, ops);
+            if (comptime !D.Operation.owns_memory) {
+                return journal_batch.add_many_with(gpa, ops, strategy);
+            }
             const owned = try gpa.alloc(D.Operation, ops.len);
             defer gpa.free(owned);
             var cloned: usize = 0;
@@ -958,7 +980,7 @@ fn Merkleizer(comptime D: type) type {
                 copy.* = try op.clone(gpa);
                 cloned += 1;
             }
-            try journal_batch.add_many(gpa, owned);
+            try journal_batch.add_many_with(gpa, owned, strategy);
             assert(cloned == ops.len);
         }
 

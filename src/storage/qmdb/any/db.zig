@@ -56,6 +56,10 @@ pub fn Config(comptime T: type, comptime JournalConfig: type) type {
         /// allocator must be thread-safe); other indexes, or a null `io`, build serially. The
         /// built state is the same for every value.
         init_concurrency: usize = 1,
+        /// The strategy that hashes merkleized batches and shards batched reads (commonware's
+        /// Merkle `strategy`, which `Db::strategy` returns); null runs `parallel.sequential`.
+        /// Results are the same on every strategy. A pool needs a thread-safe allocator.
+        strategy: ?parallel.Rayon = null,
     };
 }
 
@@ -99,6 +103,8 @@ pub fn Db(F: type, U: type, C: type, I: type, H: type, comptime N: usize) type {
         active_keys: usize,
         bitmap: Bitmap,
         metrics: metrics_mod.Metrics,
+        /// See `Config.strategy`.
+        strategy: ?parallel.Rayon = null,
 
         /// Opens the database: selects the last commit (within `max_size` operations), creates
         /// the initial commit if the log is empty, and rebuilds the snapshot and bitmap from
@@ -138,6 +144,7 @@ pub fn Db(F: type, U: type, C: type, I: type, H: type, comptime N: usize) type {
             };
             var db = try init_from_log_with(gpa, scope, log, cfg.translator, build);
             db.metrics.io = cfg.io;
+            db.strategy = cfg.strategy;
             return db;
         }
 
@@ -413,10 +420,13 @@ pub fn Db(F: type, U: type, C: type, I: type, H: type, comptime N: usize) type {
             const timing = self.metrics.start("get_many_duration");
             defer timing.finish();
             self.metrics.lookups_requested.metric().inc_by(keys.len);
-            // Commonware batches through the Merkle structure's strategy; zigware's has none,
-            // so the cached pass runs on the calling thread.
             const read = BatchedRead(Operation).read;
-            try read(self.gpa, &self.snapshot, &self.log, parallel.sequential, keys, out);
+            const gpa = self.gpa;
+            if (self.strategy) |pool| {
+                try read(gpa, &self.snapshot, &self.log, pool, keys, out);
+            } else {
+                try read(gpa, &self.snapshot, &self.log, parallel.sequential, keys, out);
+            }
         }
 
         pub fn update_metrics(self: *Self) void {

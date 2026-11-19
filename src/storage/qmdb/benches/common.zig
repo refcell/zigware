@@ -389,6 +389,7 @@ pub fn Session(comptime D: type) type {
             if (comptime @hasField(D.Cfg, "init_cache")) cfg.init_cache = options.init_cache;
             // Benches time themselves; only a parallel init needs the `Io`.
             if (comptime @hasField(D.Cfg, "io")) cfg.io = options.init_io;
+            if (comptime @hasField(D.Cfg, "strategy")) cfg.strategy = null; // Sequential.
             if (comptime @hasField(D.Cfg, "init_concurrency")) {
                 cfg.init_concurrency = options.init_concurrency;
             }
