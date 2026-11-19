@@ -253,6 +253,30 @@ test "store get many" {
     try testing.expectEqualSlices(u8, &.{4}, batch_out[2].?);
 }
 
+test "store rebuilds the snapshot for keys that share a translated prefix" {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    var db = try h.open(null);
+    const k1 = key(11);
+    var k2 = key(12);
+    @memcpy(k2.bytes[0..2], k1.bytes[0..2]); // Collides with `k1` under TwoCap.
+    _ = try apply(&db, &.{.{ .key = k1, .value = &.{ 1, 2, 3, 4, 5 } }}, null);
+    _ = try apply(&db, &.{.{ .key = k2, .value = &.{ 6, 7, 8, 9, 10 } }}, null);
+    try expect_value(&db, k1, &.{ 1, 2, 3, 4, 5 });
+    try expect_value(&db, k2, &.{ 6, 7, 8, 9, 10 });
+    try db.commit();
+    try db.sync();
+    db.deinit();
+    // Reopening resolves the shared bucket from the log.
+    db = try h.open(null);
+    try testing.expectEqual(@as(usize, 2), db.snapshot.get(&k1.bytes).count());
+    try expect_value(&db, k1, &.{ 1, 2, 3, 4, 5 });
+    try expect_value(&db, k2, &.{ 6, 7, 8, 9, 10 });
+    try expect_bitmap_consistent(&db);
+    try db.destroy();
+}
+
 test "store delete" {
     var h: Harness = undefined;
     try h.init();

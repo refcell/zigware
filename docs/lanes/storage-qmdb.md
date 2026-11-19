@@ -115,6 +115,12 @@ which every database here is built on.
   sequential, large, sibling-apply proof refusal, operations match the applied log;
   `batch_test.zig`), including its `ElementPruned` tail after a flushing commit.
 - [x] Fuzz: `qmdb_keyless_operations` (seeded and `std.testing.fuzz`), with a value model.
+- [ ] store: the rest of db.rs's tests (audit 2026-11-19): collision reads, shared-prefix
+  snapshot, floor bound, variable-length keys, `get_many` value moves, the policy scenarios
+  (hold edge cases, evicts owned, keep/evict/recover, reads reached candidates, limits, own
+  writes, limits read once, proportional probes once, unreachable own write), the bitmap
+  activity and chunk-prune recovery checks, the start_sync scenarios, and the
+  commit-after-sync and unsynced-floor recovery cases.
 - [x] Fuzz targets under storage/fuzz for these databases; benches under `qmdb/benches/`.
 
 ## Public API (on main)
