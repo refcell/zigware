@@ -144,3 +144,63 @@ fn run_long(comptime body: fn (Ctx) anyerror!void) !void {
     defer runner.deinit();
     try try runner.start_context(body, .{});
 }
+
+// commonware finalize_resumes_after_same_term_heal: a leader-timeout nullify at view 1
+// blocks finalize votes for the rest of its three-view term, until view 1's finalization
+// heals the term; view 3, certified after the heal, gets our finalize vote.
+test "voter finalize resumes after same term heal" {
+    try run_long(struct {
+        fn body(ctx: Ctx) anyerror!void {
+            const gpa = ctx.gpa();
+            var net: h.Network = undefined;
+            try net.start(ctx, 5, "finalize_resumes_after_same_term_heal");
+            defer net.deinit();
+            var stack: h.VoterStack = undefined;
+            try stack.start(ctx, &net, .{
+                .leader_timeout_ms = 1_000,
+                .certification_timeout_ms = 2_000,
+                .timeout_retry_ms = 10_000,
+                .certify_latency_ms = 0.0,
+                .elector = h.elector_mod.RoundRobin(h.Sha256).default().with_term(
+                    .new(utils.NonZero(u32).init(3).?),
+                    .from_secs(20),
+                    .new(0),
+                ),
+            });
+            defer stack.stop();
+            _ = try stack.next_update(ctx, 5_000);
+            // The term's leader never proposes, so we nullify view 1 on the leader timeout.
+            try wait_vote(ctx, &stack, .nullify, 1);
+            const quorum = net.quorum();
+            const proposal_1 = proposal(1, 0, "finalize_resume_view_1");
+            const proposal_2 = proposal(2, 1, "finalize_resume_view_2");
+            for ([_]h.Proposal{ proposal_1, proposal_2 }) |subject| {
+                const notarized = try h.build(gpa, .notarization, net.schemes(), subject, quorum);
+                try stack.mailbox.recovered(gpa, .{ .notarization = notarized });
+            }
+            // Bounded: views only advance, and each wait is limited.
+            while (true) {
+                const message = (try stack.next_batcher(ctx, 5_000)) orelse return error.TimedOut;
+                if (message == .constructed) try testing.expect(message.constructed != .finalize);
+                if (message == .update and message.update.current.get() == 3) break;
+            }
+            const finalized = try h.build(gpa, .finalization, net.schemes(), proposal_1, quorum);
+            try stack.mailbox.recovered(gpa, .{ .finalization = finalized });
+            const proposal_3 = proposal(3, 2, "finalize_resume_view_3");
+            const notarized = try h.build(gpa, .notarization, net.schemes(), proposal_3, quorum);
+            try stack.mailbox.recovered(gpa, .{ .notarization = notarized });
+            // Bounded by the 5 s wait per message.
+            while (true) {
+                const message = (try stack.next_batcher(ctx, 5_000)) orelse return error.TimedOut;
+                if (message != .constructed or message.constructed != .finalize) continue;
+                try testing.expectEqual(3, message.constructed.view().get());
+                return;
+            }
+        }
+    }.body);
+}
+
+/// A proposal at `view` over `parent` with payload `hash(label)`.
+fn proposal(view: u64, parent: u64, label: []const u8) h.Proposal {
+    return .init(.new(epoch, .new(view)), .new(parent), h.Sha256.hash(&.{label}));
+}
