@@ -774,5 +774,6 @@ pub fn ConstantProvider(comptime S: type) type {
 
 test {
     _ = @import("certificate_test.zig");
+    _ = @import("certificate_fuzz_test.zig");
     _ = mocks;
 }

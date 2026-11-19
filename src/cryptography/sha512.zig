@@ -100,8 +100,9 @@ test "sha512 digest codec" {
 }
 
 test "sha512 fuzz hasher entrypoints" {
-    try fuzz.fuzz_hasher(Sha512, 0x5ad512);
     try fuzz.fuzz_hash_many(Sha512, 0x5ad512);
+    // Last: in fuzz mode the coverage-guided half does not return.
+    try fuzz.fuzz_hasher(Sha512, 0x5ad512);
 }
 
 test "sha512 hash_many on overlapping and aliased messages" {

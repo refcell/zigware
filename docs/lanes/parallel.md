@@ -495,3 +495,57 @@ Ported:
 - [x] `fuzz.rs` `test_fuzz_plan` and `fuzz_targets/parallel.rs`: `fold_plan_tests.zig` "fuzz:
   fold plan checks hold on every plan", a seeded fuzz in `zig build test` and a
   `std.testing.fuzz` target, reading the plan as little-endian `i32` words
+
+## Fuzz coverage audit (2026-11-19, commonware a9ffc25f3)
+
+Split with p2p: p2p took the network-facing decoders (p2p, resolver, broadcast, simplex,
+marshal). This lane took storage, cryptography, coding, codec, math, runtime buffers, and utils.
+Two checks per crate: every commonware `*/fuzz/fuzz_targets/*` target has a zigware
+counterpart, and every zigware decoder or state machine has a `std.testing.fuzz` target plus a
+seeded fuzz in `zig build test`. Each new or changed body was checked against planted bugs, each
+reverted after it failed the body.
+
+Before:
+- Commonware targets: storage 44/44, cryptography 23/23, coding, codec 2/2, math, and utils
+  16/16 had counterparts. runtime had 0/3: `blob_creation`, `blob_integrity`, and `buffer` had
+  no counterpart.
+- Fuzz tests missing a coverage-guided half: the crc32, keccak256, sha512, and blake3 hasher
+  fuzzes (only sha256 had one), runtime "fuzz paged writer crashes (seeded)", and runtime
+  "shuffle is a permutation (seeded fuzz)".
+- Decoders with no fuzz at all: `certificate.zig`'s `Signers`, `Attestation`, and `Individual`
+  certificate (used by ed25519 and secp256r1), the bls12381 multisig `Certificate`, and the
+  golden DKG `Dealing`. The rest of the decoder list is fuzzed from crate-level files
+  (bls12381 `fuzz_tests.zig`, codec `fuzz_test.zig`, the qmdb and journal fuzz tests). The
+  `read(position)` methods of the storage databases are state machines, which those
+  databases' fuzz tests already drive.
+
+Added, each a seeded fuzz scaled by `fuzz_soak` plus a `std.testing.fuzz` target:
+- [x] `blob_creation.rs`: runtime `storage/blob_creation_fuzz_test.zig`, with commonware's
+  recovery oracle (recreated, kept, or rejected). Image lengths cluster at the torn head and
+  the region end. Plants caught: padding check skipped, torn CRC prefix accepted, garbage
+  past the head accepted, and the fixed-byte width narrowed.
+- [x] `blob_integrity.rs`: runtime `buffer/paged/integrity_fuzz_test.zig`. Plants caught:
+  page CRC never checked, a spurious replay checksum error, and a spurious `read_at` error.
+- [x] `buffer.rs`: runtime `buffer/buffer_fuzz_test.zig`. It drives all 22 of commonware's
+  operations, and it adds model checks commonware lacks: reads match the blob, writes and
+  appends read back, and replay matches `read_at`. Plants caught: a `Read` refill one byte
+  early, a `Write` tip offset off by one, a recovery truncate one byte short, and a replay page
+  missing its last byte.
+- [x] The hasher fuzzes: `cryptography/fuzz.zig` `fuzz_hasher` now ends with the
+  coverage-guided half, so all five hashers have one. sha256's separate copy is gone.
+- [x] Runtime "fuzz paged writer crashes" and "fuzz shuffle is a permutation" now run through
+  `utils.fuzz.run`. Plants caught: a recovery truncate one byte short, and a shuffle that
+  copies instead of swapping.
+- [x] `cryptography/certificate_fuzz_test.zig`: `Signers`, `Attestation`, the ed25519
+  certificate, and the bls12381 multisig certificate. Plants caught: an empty signer set
+  accepted (both certificates), a signature count above or below the signer count, and the
+  participant bound off by one.
+- [x] `bls12381/dkg/golden/dealing_fuzz_test.zig`: golden `Dealing`. Plants caught: the
+  polynomial bound off by one, the share bound off by one, and a `Set` decode that accepts
+  duplicate keys or unsorted keys.
+
+After: every commonware fuzz target in these crates has a counterpart (runtime 3/3), and every
+fuzz test in them has both halves. Not fuzzed on purpose: eVRF `Proof`, `VrfCommitments`, and
+`DealerLog`. Building a valid one needs bulletproofs, which take minutes per proof and are
+gated behind `-Dslow-tests`. Random bytes reach only their length checks, and those use the
+same `codec` range reads the fuzzes above already check.

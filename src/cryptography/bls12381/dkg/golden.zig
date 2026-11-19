@@ -503,4 +503,5 @@ test {
     _ = @import("golden/plan.zig");
     _ = @import("golden/protocol_tests.zig");
     _ = @import("golden/tests.zig");
+    _ = @import("golden/dealing_fuzz_test.zig");
 }

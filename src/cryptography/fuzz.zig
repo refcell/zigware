@@ -172,7 +172,8 @@ pub fn run_arbitrary_plan(comptime H: type, bytes: []const u8) !void {
     try run_plan(H, left.parts(&left_parts), right.parts(&right_parts));
 }
 
-/// The hasher differential fuzz: the empty plan, then seeded arbitrary plans.
+/// The hasher differential fuzz: the empty plan, seeded arbitrary plans, then the same plans
+/// decoded from coverage-guided input.
 pub fn fuzz_hasher(comptime H: type, seed: u64) !void {
     try run_plan(H, &.{}, &.{});
     var random = prng(seed);
@@ -182,6 +183,13 @@ pub fn fuzz_hasher(comptime H: type, seed: u64) !void {
         const length = random.random().uintAtMost(usize, bytes.len);
         try run_arbitrary_plan(H, bytes[0..length]);
     }
+    try std.testing.fuzz({}, struct {
+        fn run(_: void, smith: *std.testing.Smith) anyerror!void {
+            var input: [3 * message_length_max]u8 = undefined;
+            const length = smith.slice(&input);
+            try run_arbitrary_plan(H, input[0..length]);
+        }
+    }.run, .{});
 }
 
 /// Checks `H.hash_many` on `messages` (which may overlap or alias one buffer) against hashing

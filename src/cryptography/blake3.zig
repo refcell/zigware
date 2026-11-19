@@ -93,6 +93,7 @@ test "blake3 long messages split into parts" {
 }
 
 test "blake3 fuzz hasher entrypoints" {
-    try fuzz.fuzz_hasher(Blake3, 0xb1a4e3);
     try fuzz.fuzz_hash_many(Blake3, 0xb1a4e3);
+    // Last: in fuzz mode the coverage-guided half does not return.
+    try fuzz.fuzz_hasher(Blake3, 0xb1a4e3);
 }

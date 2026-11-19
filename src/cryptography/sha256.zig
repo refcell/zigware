@@ -190,18 +190,9 @@ test "sha256 digest codec and size" {
 }
 
 test "sha256 fuzz hasher entrypoints" {
-    try fuzz.fuzz_hasher(Sha256, 0x5ad256);
     try fuzz.fuzz_hash_many(Sha256, 0x5ad256);
-}
-
-test "sha256 fuzz hasher entrypoints (coverage-guided)" {
-    try testing.fuzz({}, struct {
-        fn run(_: void, smith: *testing.Smith) anyerror!void {
-            var bytes: [3 * fuzz.message_length_max]u8 = undefined;
-            const length = smith.slice(&bytes);
-            try fuzz.run_arbitrary_plan(Sha256, bytes[0..length]);
-        }
-    }.run, .{});
+    // Last: in fuzz mode the coverage-guided half does not return.
+    try fuzz.fuzz_hasher(Sha256, 0x5ad256);
 }
 
 test "sha256 hash_many on aliased and unaligned inputs" {
