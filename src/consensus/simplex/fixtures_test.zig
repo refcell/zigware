@@ -959,6 +959,9 @@ test "all fixtures: twins" {
 // slow builds (ed25519 runs them in every build).
 test {
     inline for (fixtures) |F| {
-        if (F != engine_test.Ed25519Fixture) _ = engine_test.Suite(F);
+        if (F != engine_test.Ed25519Fixture) {
+            _ = engine_test.Suite(F);
+            _ = @import("engine_optimistic_test.zig").Suite(F);
+        }
     }
 }

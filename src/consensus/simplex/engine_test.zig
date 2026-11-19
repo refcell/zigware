@@ -50,7 +50,7 @@ pub fn Suite(comptime F: type) type {
         const primary = F == Ed25519Fixture;
         const full = build_options.slow_tests;
         const fixture_enabled = primary or full;
-        const gpa = testing.allocator;
+        pub const gpa = testing.allocator;
         const Sha256 = cryptography.Sha256;
         const Digest = Sha256.Digest;
         const Key = cryptography.ed25519.PublicKey;
@@ -58,10 +58,10 @@ pub fn Suite(comptime F: type) type {
         /// Every engine signs through the wrapper; only `Role.invalid` makes validator 0 misbehave.
         const Scheme = wrapped.Scheme(F.Scheme);
         const Net = p2p.simulated.Network(Key);
-        const Context = runtime.deterministic.Context;
+        pub const Context = runtime.deterministic.Context;
         const Application = application_mod.Application(Sha256, Key);
         const Relay = relay_mod.Relay(Digest, Key);
-        const Reporter = reporter_mod.Reporter(Scheme, Digest);
+        pub const Reporter = reporter_mod.Reporter(Scheme, Digest);
         const Attributable = @import("scheme/reporter.zig").AttributableReporter(
             Scheme,
             Digest,
@@ -74,15 +74,15 @@ pub fn Suite(comptime F: type) type {
         const Impersonator = @import("mocks/impersonator.zig").Impersonator(Scheme, Sha256);
         const Outdated = @import("mocks/outdated.zig").Outdated(Scheme, Sha256);
         const Elector = F.Elector;
-        const RoundRobin = elector_mod.RoundRobin(Sha256);
-        const HandoffKind = std.meta.Tag(@import("../traits.zig").Handoff(Digest));
+        pub const RoundRobin = elector_mod.RoundRobin(Sha256);
+        pub const HandoffKind = std.meta.Tag(@import("../traits.zig").Handoff(Digest));
         const equivocator_mod = @import("mocks/equivocator.zig");
         const Equivocator = equivocator_mod.Equivocator(Scheme, Sha256, Key, Elector);
         const IoRng = @import("actors/context.zig").IoRng;
         const Reconfigurer = @import("mocks/reconfigurer.zig").Reconfigurer(Scheme, Sha256);
         const NullifyOnly = @import("mocks/nullify_only.zig").NullifyOnly(Scheme, Sha256);
-        const Duration = utils.Duration;
-        const Link = p2p.simulated.Link;
+        pub const Duration = utils.Duration;
+        pub const Link = p2p.simulated.Link;
         const View = consensus_types.View;
         const Epoch = consensus_types.Epoch;
 
@@ -105,8 +105,11 @@ pub fn Suite(comptime F: type) type {
         const test_quota = p2p.Quota.per_second(1024);
         /// Debug runs without `-Dslow-tests` shrink the DSTs (fewer views and seeds) to keep the
         /// suite fast; ReleaseSafe runs them at full size.
-        const quick = if (primary) builtin.mode == .debug and !build_options.slow_tests else !full;
-        const epoch: Epoch = .new(333);
+        pub const quick = if (primary)
+            builtin.mode == .debug and !build_options.slow_tests
+        else
+            !full;
+        pub const epoch: Epoch = .new(333);
         const page_size = 1024;
         const page_cache_size = 10;
 
@@ -218,7 +221,7 @@ pub fn Suite(comptime F: type) type {
         };
 
         /// One simulated network of validators. Must not move once started.
-        const Harness = struct {
+        pub const Harness = struct {
             ctx: Context,
             fixture: Fixture,
             /// The fixture's signing schemes, wrapped (validator 0's per `role`).
@@ -252,7 +255,7 @@ pub fn Suite(comptime F: type) type {
             /// How applications started from now on answer certification requests.
             should_certify: application_mod.Certifier(Digest) = .always,
 
-            const Timeouts = struct {
+            pub const Timeouts = struct {
                 leader_ms: u64 = 1000,
                 certification_ms: u64 = 2000,
                 retry_ms: u64 = 10_000,
@@ -262,28 +265,28 @@ pub fn Suite(comptime F: type) type {
             const Fixture = cryptography.certificate.mocks.Fixture(F.Scheme);
 
             /// The fixture's elector; round robin ones take the harness's term configuration.
-            fn build_elector(harness: *const Harness, n: u32) !Elector {
+            pub fn build_elector(harness: *const Harness, n: u32) !Elector {
                 const round_robin = Elector == elector_mod.RoundRobinElector;
                 if (round_robin) return harness.round_robin.build(gpa, n);
                 return F.elector(n);
             }
 
-            fn keys(harness: *const Harness) []const Key {
+            pub fn keys(harness: *const Harness) []const Key {
                 return harness.fixture.participants;
             }
 
-            fn oracle(harness: *const Harness) Net.Oracle {
+            pub fn oracle(harness: *const Harness) Net.Oracle {
                 return harness.network.oracle();
             }
 
             /// Starts `n` validators, every pair linked by `link` (when given); validator 0 plays
             /// `role`.
-            fn start(harness: *Harness, ctx: Context, n: u32, link: ?Link, role: Role) !void {
+            pub fn start(harness: *Harness, ctx: Context, n: u32, link: ?Link, role: Role) !void {
                 try harness.start_timed(ctx, n, link, role, .{});
             }
 
             /// `start` with the engines' leader, certification, and retry timeouts.
-            fn start_timed(
+            pub fn start_timed(
                 harness: *Harness,
                 ctx: Context,
                 n: u32,
@@ -303,7 +306,7 @@ pub fn Suite(comptime F: type) type {
             }
 
             /// Everything `start_timed` does except starting validators: all start absent.
-            fn start_network(
+            pub fn start_network(
                 harness: *Harness,
                 ctx: Context,
                 n: u32,
@@ -357,7 +360,7 @@ pub fn Suite(comptime F: type) type {
             }
 
             /// Starts validator `index` as the Byzantine mock `role`.
-            fn start_byzantine(harness: *Harness, index: usize, role: Role) !void {
+            pub fn start_byzantine(harness: *Harness, index: usize, role: Role) !void {
                 assert(role.is_byzantine());
                 const io = harness.ctx.io();
                 const validator = &harness.validators[index];
@@ -391,12 +394,12 @@ pub fn Suite(comptime F: type) type {
             }
 
             /// The validator at `index` when it runs the engine.
-            fn honest(harness: *Harness, index: usize) ?*Validator {
+            pub fn honest(harness: *Harness, index: usize) ?*Validator {
                 const validator = &harness.validators[index];
                 return if (validator.state == .honest) validator else null;
             }
 
-            fn deinit(harness: *Harness) void {
+            pub fn deinit(harness: *Harness) void {
                 const validators = harness.validators;
                 for (validators) |*validator| {
                     if (validator.state == .byzantine) validator.byzantine.stop();
@@ -417,14 +420,14 @@ pub fn Suite(comptime F: type) type {
 
             /// Aborts validator `index`'s engine and frees its mocks; its journal stays in storage
             /// for `start_validator` to recover.
-            fn crash(harness: *Harness, index: usize) void {
+            pub fn crash(harness: *Harness, index: usize) void {
                 harness.shutdown(index);
                 harness.validators[index].reporter.deinit();
             }
 
             /// `crash`, but the reporter lives on for `restart` (commonware hands the restarted
             /// engine the same reporter, so its checks span both runs).
-            fn shutdown(harness: *Harness, index: usize) void {
+            pub fn shutdown(harness: *Harness, index: usize) void {
                 const validator = harness.honest(index).?;
                 abort(validator);
                 // No broadcast reaches the application once deregistered, so it can be freed.
@@ -436,14 +439,14 @@ pub fn Suite(comptime F: type) type {
 
             /// Starts validator `index`, shut down with `shutdown`, from its journal on new
             /// channels, reporting to the reporter it kept.
-            fn restart(harness: *Harness, index: usize) !void {
+            pub fn restart(harness: *Harness, index: usize) !void {
                 const channels = try register(harness.oracle(), harness.keys()[index]);
                 try harness.start_engine(index, channels, .keep);
             }
 
             /// Aborts every engine and frees its mocks; the validators become absent, and their
             /// journals stay in storage for `start_validator` to recover.
-            fn crash_all(harness: *Harness) void {
+            pub fn crash_all(harness: *Harness) void {
                 const validators = harness.validators;
                 // Abort every engine before freeing any mock: live voters relay to all
                 // applications.
@@ -461,13 +464,13 @@ pub fn Suite(comptime F: type) type {
             }
 
             /// Replaces the link of every ordered pair `restrict` admits (commonware `Update`).
-            fn relink_all(harness: *Harness, link: Link, restrict: ?*const Restrict) !void {
+            pub fn relink_all(harness: *Harness, link: Link, restrict: ?*const Restrict) !void {
                 try harness.link_all(null, restrict);
                 try harness.link_all(link, restrict);
             }
 
             /// Links (or, with `link == null`, unlinks) every ordered pair `restrict` admits.
-            fn link_all(harness: *Harness, link: ?Link, restrict: ?*const Restrict) !void {
+            pub fn link_all(harness: *Harness, link: ?Link, restrict: ?*const Restrict) !void {
                 const peers = harness.keys();
                 for (peers, 0..) |from, a| for (peers, 0..) |to, b| {
                     if (a == b) continue;
@@ -481,19 +484,19 @@ pub fn Suite(comptime F: type) type {
             }
 
             /// Starts the engine of validator `index`.
-            fn start_validator(harness: *Harness, index: usize) !void {
+            pub fn start_validator(harness: *Harness, index: usize) !void {
                 const channels = try register(harness.oracle(), harness.keys()[index]);
                 try harness.start_validator_on(index, channels);
             }
 
             /// Starts validator `index`'s engine on `channels`, registered for it beforehand.
-            fn start_validator_on(harness: *Harness, index: usize, channels: [3]Channel) !void {
+            pub fn start_validator_on(harness: *Harness, index: usize, channels: [3]Channel) !void {
                 try harness.start_engine(index, channels, .new);
             }
 
             /// Starts validator `index`'s engine on `channels` with a new reporter, or the one it
             /// kept through `shutdown`.
-            fn start_engine(
+            pub fn start_engine(
                 harness: *Harness,
                 index: usize,
                 channels: [3]Channel,
@@ -561,7 +564,7 @@ pub fn Suite(comptime F: type) type {
             }
 
             /// Waits until every validator finalized `view`.
-            fn wait_all(harness: *Harness, view: u64) !void {
+            pub fn wait_all(harness: *Harness, view: u64) !void {
                 for (0..harness.validators.len) |index| {
                     const validator = harness.honest(index) orelse continue;
                     try validator.reporter.wait_for_finalized(.new(view));
@@ -569,7 +572,7 @@ pub fn Suite(comptime F: type) type {
             }
 
             /// The lowest finalized view across honest validators.
-            fn min_finalized(harness: *Harness) u64 {
+            pub fn min_finalized(harness: *Harness) u64 {
                 var lowest: u64 = std.math.maxInt(u64);
                 for (0..harness.validators.len) |index| {
                     const validator = harness.honest(index) orelse continue;
@@ -580,7 +583,7 @@ pub fn Suite(comptime F: type) type {
             }
 
             /// The highest finalized view across validators.
-            fn max_finalized(harness: *Harness) u64 {
+            pub fn max_finalized(harness: *Harness) u64 {
                 var highest: u64 = 0;
                 for (0..harness.validators.len) |index| {
                     const validator = harness.honest(index) orelse continue;
@@ -590,7 +593,7 @@ pub fn Suite(comptime F: type) type {
             }
 
             /// No faults, no invalid activity, one payload per finalized view, and no blocks.
-            fn check(harness: *Harness, through: u64) !void {
+            pub fn check(harness: *Harness, through: u64) !void {
                 for (harness.validators) |*validator| {
                     validator.reporter.assert_no_faults();
                 }
@@ -602,7 +605,7 @@ pub fn Suite(comptime F: type) type {
 
             /// No invalid activity, and every honest validator finalized the same payload at each
             /// view at or below `through`.
-            fn check_agreement(harness: *Harness, through: u64) !void {
+            pub fn check_agreement(harness: *Harness, through: u64) !void {
                 for (0..harness.validators.len) |index| {
                     const validator = harness.honest(index) orelse continue;
                     validator.reporter.assert_no_invalid();
@@ -620,7 +623,7 @@ pub fn Suite(comptime F: type) type {
 
             /// Only validator 0 committed faults, of the `allowed` kinds, at least once (none when
             /// `allowed` is empty); only honest validators blocked, and only validator 0.
-            fn check_byzantine(
+            pub fn check_byzantine(
                 harness: *Harness,
                 allowed: []const std.meta.Tag(Reporter.Activity),
             ) !void {
@@ -639,7 +642,7 @@ pub fn Suite(comptime F: type) type {
                 try harness.check_blocked_only_byzantine();
             }
 
-            fn check_blocked_only_byzantine(harness: *Harness) !void {
+            pub fn check_blocked_only_byzantine(harness: *Harness) !void {
                 const byzantine = harness.keys()[0];
                 const blocked = try harness.oracle().blocked(gpa);
                 defer gpa.free(blocked);
@@ -653,7 +656,7 @@ pub fn Suite(comptime F: type) type {
 
         const Restrict = fn (n: usize, a: usize, b: usize) bool;
 
-        fn link_ms(latency_ms: u64, jitter_ms: u64, success_rate: f64) Link {
+        pub fn link_ms(latency_ms: u64, jitter_ms: u64, success_rate: f64) Link {
             return .{
                 .latency = Duration.from_millis(latency_ms),
                 .jitter = Duration.from_millis(jitter_ms),
@@ -718,7 +721,7 @@ pub fn Suite(comptime F: type) type {
 
         /// Runs `scenario(ctx, args...)` on a fresh runner seeded with `seed`; returns the auditor
         /// state (commonware `context.auditor().state()`).
-        fn run_seeded(seed: u64, comptime scenario: anytype, args: anytype) ![8]u8 {
+        pub fn run_seeded(seed: u64, comptime scenario: anytype, args: anytype) ![8]u8 {
             var runner = try runtime.deterministic.Runner.init(gpa, .{ .seed = seed });
             defer runner.deinit();
             try (try runner.start_context(scenario, args));
@@ -2226,8 +2229,10 @@ pub fn Suite(comptime F: type) type {
 }
 
 const Primary = Suite(Ed25519Fixture);
+const PrimaryOptimistic = @import("engine_optimistic_test.zig").Suite(Ed25519Fixture);
 pub const count_nonzero_metric_lines = Primary.nonzero_metric_lines;
 
 test {
     _ = Primary;
+    _ = PrimaryOptimistic;
 }
