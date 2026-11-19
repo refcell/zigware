@@ -858,3 +858,48 @@ test "an open interrupted by cancellation fails with Canceled, not an I/O error"
     try io.sleep(.fromMilliseconds(5), .awake);
     try testing.expectError(error.Canceled, task.cancel(io));
 }
+
+/// Spins until this task's cancel request arrives, then leaves it pending, so the next
+/// cancelation point in the operation that follows takes it.
+fn await_cancel_request() void {
+    while (true) {
+        io.checkCancel() catch {
+            io.recancel();
+            return;
+        };
+        std.atomic.spinLoopHint();
+    }
+}
+
+const CanceledOperation = enum { remove_blob, remove_partition, scan };
+
+fn run_once_canceled(
+    storage: *file_storage.Storage,
+    operation: CanceledOperation,
+) iface.Error!void {
+    await_cancel_request();
+    switch (operation) {
+        .remove_blob => try storage.remove("partition", "blob"),
+        .remove_partition => try storage.remove("partition", null),
+        .scan => (try storage.scan(gpa, "partition")).deinit(gpa),
+    }
+}
+
+test "a canceled remove or scan fails with Canceled, not absence or an I/O error" {
+    // Each maps its file system errors to BlobMissing, Io, or ReadFailed, but a cancel must
+    // reach the caller as Canceled: mapped, it is taken and never delivered again.
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try open_storage(&tmp, "root");
+    defer storage.deinit();
+    var opened = try storage.open_versioned("partition", "blob", .only(0));
+    opened.blob.close();
+    for ([_]CanceledOperation{ .remove_blob, .remove_partition, .scan }) |operation| {
+        var task = try io.concurrent(run_once_canceled, .{ &storage, operation });
+        try testing.expectError(error.Canceled, task.cancel(io));
+    }
+    // The canceled removals left the blob in place.
+    var names = try storage.scan(gpa, "partition");
+    defer names.deinit(gpa);
+    try testing.expect(names.contains("blob"));
+}

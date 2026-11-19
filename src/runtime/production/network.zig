@@ -158,7 +158,10 @@ pub const Sink = struct {
         if (sink.closed) return;
         sink.closed = true;
         const shared = sink.shared;
-        shared.stream.shutdown(shared.io, .send) catch {};
+        // A cancel this call takes stays pending for the caller's next wait.
+        shared.stream.shutdown(shared.io, .send) catch |err| {
+            if (err == error.Canceled) shared.io.recancel();
+        };
         assert(sink.closed);
     }
 

@@ -421,3 +421,30 @@ test "socket options apply on accept and dial (test_socket_options_on_accept_and
     if (builtin.os.tag != .linux) return error.SkipZigTest;
     try on_both(socket_policy);
 }
+
+fn close_with_cancel_pending(sink: *production.Sink) Io.Cancelable!void {
+    // Spin until the cancel request arrives, then leave it pending for the close's shutdown.
+    while (true) {
+        testing.io.checkCancel() catch {
+            testing.io.recancel();
+            break;
+        };
+        std.atomic.spinLoopHint();
+    }
+    sink.deinit();
+    // The shutdown took the cancel, so it must re-arm it: this wait ends at once, not in 5 s.
+    try testing.io.sleep(.fromSeconds(5), .awake);
+}
+
+test "a sink closed while canceled leaves the cancel for the task's next wait" {
+    var tcp = new_network(testing.io);
+    defer tcp.deinit();
+    var pair = try Pair.init(&tcp);
+    defer {
+        pair.accepted.stream.deinit();
+        pair.connection.deinit();
+        pair.listener.deinit();
+    }
+    var task = try testing.io.concurrent(close_with_cancel_pending, .{&pair.accepted.sink});
+    try testing.expectError(error.Canceled, task.cancel(testing.io));
+}

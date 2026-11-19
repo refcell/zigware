@@ -98,6 +98,8 @@ pub const Storage = struct {
     config: Config,
     root: Dir,
     hold: File,
+    /// The hold file's inode, this root's entry in `held_roots`.
+    hold_inode: File.INode,
     mutex: Io.Mutex = .init,
     /// The live handle of each open blob, keyed by `partition/hex(name)` (owned by the blob).
     live: std.StringArrayHashMapUnmanaged(*Blob) = .empty,
@@ -117,14 +119,21 @@ pub const Storage = struct {
     /// nested runtime before it takes the hold.
     pub fn init(io: Io, gpa: Allocator, root: Dir, config: Config) Error!Storage {
         assert(config.layouts.contains(config.layout));
-        const hold = root.createFile(io, hold_name, .{ .truncate = false }) catch
-            return error.Io;
+        const hold = root.createFile(io, hold_name, .{ .truncate = false }) catch |err|
+            return or_canceled(err, error.Io);
         errdefer hold.close(io);
-        const inode = (hold.stat(io) catch return error.Io).inode;
+        const inode = (hold.stat(io) catch |err| return or_canceled(err, error.Io)).inode;
         try held_roots.claim(io, inode);
         errdefer held_roots.release(io, inode);
-        hold.lock(io, .exclusive) catch return error.Io;
-        return .{ .io = io, .gpa = gpa, .config = config, .root = root, .hold = hold };
+        hold.lock(io, .exclusive) catch |err| return or_canceled(err, error.Io);
+        return .{
+            .io = io,
+            .gpa = gpa,
+            .config = config,
+            .root = root,
+            .hold = hold,
+            .hold_inode = inode,
+        };
     }
 
     /// Every handle must be closed first. Releases the hold and closes the root.
@@ -135,8 +144,7 @@ pub const Storage = struct {
         for (self.synced.keys()) |key| self.gpa.free(key);
         self.synced.deinit(self.gpa);
         self.live.deinit(self.gpa);
-        held_roots.release(self.io, (self.hold.stat(self.io) catch unreachable).inode); // The
-        // hold is open, and fstat of an open descriptor fails only on a bad descriptor.
+        held_roots.release(self.io, self.hold_inode);
         self.hold.close(self.io);
         self.root.close(self.io);
         self.* = undefined;
@@ -282,22 +290,25 @@ pub const Storage = struct {
             if (blob_name.len > name_size_max) return error.BlobMissing;
             var key_buffer: [key_size_max]u8 = undefined;
             const key = blob_key(&key_buffer, partition, blob_name);
-            const partition_dir = self.root.openDir(self.io, partition, .{}) catch
-                return error.BlobMissing;
+            const partition_dir = self.root.openDir(self.io, partition, .{}) catch |err|
+                return or_canceled(err, error.BlobMissing);
             defer partition_dir.close(self.io);
             // Retired before the unlink, so a failed removal never leaves it marked durable.
             self.partition_invalidate(partition);
-            partition_dir.deleteFile(self.io, key[partition.len + 1 ..]) catch
-                return error.BlobMissing;
+            partition_dir.deleteFile(self.io, key[partition.len + 1 ..]) catch |err|
+                return or_canceled(err, error.BlobMissing);
             self.forget(key, false);
             try self.dir_sync(partition_dir);
             try self.partition_synced(partition);
         } else {
             const partition_dir = self.root.openDir(self.io, partition, .{}) catch |err|
-                return if (err == error.FileNotFound) error.PartitionMissing else error.Io;
+                return if (err == error.FileNotFound) error.PartitionMissing else or_canceled(
+                    err,
+                    error.Io,
+                );
             partition_dir.close(self.io);
             self.partition_invalidate(partition);
-            self.root.deleteTree(self.io, partition) catch return error.Io;
+            self.root.deleteTree(self.io, partition) catch |err| return or_canceled(err, error.Io);
             var prefix_buffer: [iface_partition_size_max + 1]u8 = undefined;
             if (partition.len > iface_partition_size_max) return error.PartitionNameInvalid;
             @memcpy(prefix_buffer[0..partition.len], partition);
@@ -372,7 +383,10 @@ pub const Storage = struct {
         defer self.mutex.unlock(self.io);
         const options: Dir.OpenOptions = .{ .iterate = true };
         const partition_dir = self.root.openDir(self.io, partition, options) catch |err|
-            return if (err == error.FileNotFound) error.PartitionMissing else error.ReadFailed;
+            return if (err == error.FileNotFound) error.PartitionMissing else or_canceled(
+                err,
+                error.ReadFailed,
+            );
         defer partition_dir.close(self.io);
         // Make inherited directory entries durable before exposing their blob names.
         try self.partition_sync_once(partition, partition_dir);
@@ -382,7 +396,10 @@ pub const Storage = struct {
             names.deinit(gpa);
         }
         var iterator = partition_dir.iterate();
-        while (iterator.next(self.io) catch return error.ReadFailed) |entry| {
+        while (true) {
+            const next = iterator.next(self.io) catch |err|
+                return or_canceled(err, error.ReadFailed);
+            const entry = next orelse break;
             if (entry.kind != .file) return error.PartitionCorrupt;
             // Like commonware, names that are not UTF-8 are skipped, not corrupt.
             if (!std.unicode.utf8ValidateSlice(entry.name)) continue;

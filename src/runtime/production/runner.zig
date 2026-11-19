@@ -94,8 +94,9 @@ pub const Runner = struct {
             network_config.ring = &runner.ring;
         }
         errdefer if (runner.ring_active) runner.ring.deinit();
-        const root = Io.Dir.cwd().createDirPathOpen(runner_io, config.storage_directory, .{}) catch
-            return error.Io;
+        const cwd = Io.Dir.cwd();
+        const root = cwd.createDirPathOpen(runner_io, config.storage_directory, .{}) catch |err|
+            return if (err == error.Canceled) error.Canceled else error.Io;
         errdefer root.close(runner_io);
         runner.file_storage = try .init(runner_io, gpa, root, storage_config);
         runner.tcp = .init(gpa, runner_io, network_config);
