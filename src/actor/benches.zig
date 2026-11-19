@@ -43,19 +43,48 @@ const Message = struct {
             .drop => return false,
             .spill => try overflow.pushBack(gpa, message),
             .replace => {
-                var index = overflow.len;
-                while (index > 0) {
-                    index -= 1;
-                    const pending = overflow.atPtr(index);
-                    if (pending.policy == .replace) {
-                        pending.* = message;
-                        return true;
-                    }
+                if (newest_replace(overflow)) |pending| {
+                    pending.* = message;
+                } else {
+                    try overflow.pushBack(gpa, message);
                 }
-                try overflow.pushBack(gpa, message);
             },
         }
         return true;
+    }
+
+    /// The newest pending replace message, scanning the deque's two contiguous halves from the
+    /// back (the reference's `iter_mut().rev().find`).
+    fn newest_replace(overflow: *Overflow) ?*Message {
+        const head_len = @min(overflow.len, overflow.buffer.len - overflow.head);
+        const halves = [2][]Message{
+            overflow.buffer[0 .. overflow.len - head_len],
+            overflow.buffer[overflow.head..][0..head_len],
+        };
+        for (halves) |half| {
+            if (last_replace(half)) |index| return &half[index];
+        }
+        return null;
+    }
+
+    /// The index of the last replace message in `half`, scanning its bytes from the back.
+    fn last_replace(half: []const Message) ?usize {
+        comptime assert(@sizeOf(Message) == 1);
+        const bytes: []const u8 = @ptrCast(half);
+        const target: u8 = @backingInt(Policy.replace);
+        var index = bytes.len;
+        // Four bytes per step, as Rust's unrolled slice `rfind` does.
+        while (index >= 4) {
+            index -= 4;
+            inline for (.{ 3, 2, 1, 0 }) |offset| {
+                if (bytes[index + offset] == target) return index + offset;
+            }
+        }
+        while (index > 0) {
+            index -= 1;
+            if (bytes[index] == target) return index;
+        }
+        return null;
     }
 };
 

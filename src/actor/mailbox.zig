@@ -56,11 +56,11 @@
 //!
 //! # Differences from commonware
 //!
-//! - One `std.Io.Mutex` guards ready and overflow and the receiver parks on a
-//!   `std.Io.Condition`, instead of a lock-free ready queue, an activity word, and an
-//!   `AtomicWaker`. Every interleaving commonware allows is still allowed; the stale-read
-//!   retries its fast path needs disappear. The mailbox runs on any `std.Io`, including the
-//!   deterministic runtime.
+//! - Ready is a lock-free bounded queue (crossbeam `ArrayQueue`), and an activity word keeps
+//!   senders off it while overflow is retained or changing, as in commonware. A futex word
+//!   replaces `AtomicWaker`, and an `std.Io.Mutex` guards overflow. Everything goes through
+//!   `std.Io` futexes, so the mailbox runs on any `std.Io`, including the deterministic
+//!   runtime.
 //! - Handles are values, so `Sender.clone`/`Sender.deinit` and `Receiver.deinit` replace Rust's
 //!   `Clone`/`Drop`. Copying a handle without `clone` breaks sender counting.
 //! - `new` takes no metrics context: its backoff counter is detached (commonware's test
@@ -125,13 +125,11 @@ fn new_state(
     state.* = .{
         .gpa = gpa,
         .io = io,
-        .capacity = capacity,
-        .ready = try .initCapacity(gpa, capacity),
-        .overflow = .empty,
+        .ready = try .init(gpa, capacity),
         .backoff = backoff,
     };
-    assert(state.ready.buffer.len >= capacity);
-    assert(state.handles == 2);
+    assert(state.ready.capacity == capacity);
+    assert(state.handles.load(.monotonic) == 2);
     return .{ .sender = .{ .state = state }, .receiver = .{ .state = state } };
 }
 
@@ -182,11 +180,10 @@ pub fn Sender(comptime T: type) type {
         /// Another sender for the same mailbox.
         pub fn clone(sender: Self) Self {
             const state = sender.state;
-            state.lock();
-            defer state.unlock();
-            assert(state.senders > 0);
-            state.senders += 1;
-            state.handles += 1;
+            // Live sender count drives receiver disconnect detection.
+            const senders = state.senders.fetchAdd(1, .monotonic);
+            assert(senders > 0);
+            _ = state.handles.fetchAdd(1, .monotonic);
             return .{ .state = state };
         }
 
@@ -195,29 +192,21 @@ pub fn Sender(comptime T: type) type {
         pub fn deinit(sender: *Self) void {
             const state = sender.state;
             sender.* = undefined;
-            state.lock();
-            assert(state.senders > 0);
-            assert(state.handles > state.senders - 1);
-            state.senders -= 1;
-            state.handles -= 1;
+            const senders = state.senders.fetchSub(1, .acq_rel);
+            assert(senders > 0);
             // Wake a receiver parked waiting for data or disconnect.
-            if (state.senders == 0) state.condition.signal(state.io);
-            const last = state.handles == 0;
-            state.unlock();
-            if (last) state.destroy();
+            if (senders == 1) state.waker.wake(state.io);
+            state.release();
         }
 
         /// Ready capacity (soft limit) of the mailbox.
         pub fn capacity(sender: Self) u32 {
-            return sender.state.capacity;
+            return sender.state.ready.capacity;
         }
 
         /// Whether the receiver closed the mailbox.
         pub fn is_closed(sender: Self) bool {
-            const state = sender.state;
-            state.lock();
-            defer state.unlock();
-            return state.closed;
+            return sender.state.closed.load(.acquire);
         }
 
         /// Number of enqueue calls that requested backoff (commonware `backoff` counter).
@@ -240,24 +229,27 @@ pub fn Receiver(comptime T: type) type {
         /// buffered message has been received.
         pub fn recv(receiver: *Self) Io.Cancelable!?T {
             const state = receiver.state;
-            state.lock();
-            defer state.unlock();
-            assert(!state.closed);
+            assert(!state.closed.load(.monotonic));
+            // Fast path avoids waker churn when a message is already ready.
+            if (state.pop()) |message| return message;
+            if (state.is_disconnected()) return state.pop();
+            defer state.waker.unpark();
             while (true) {
+                const parked = state.waker.park();
+                // A sender can enqueue and wake after the pop above but before the receiver
+                // parked. Re-check before sleeping so the wake is not lost.
                 if (state.pop()) |message| return message;
-                if (state.senders == 0) return null;
-                try state.condition.wait(state.io, &state.mutex);
+                if (state.is_disconnected()) return state.pop();
+                try state.io.futexWait(u32, &state.waker.word.raw, parked);
             }
         }
 
         /// Try to receive the next message without waiting.
         pub fn try_recv(receiver: *Self) TryRecvError!T {
             const state = receiver.state;
-            state.lock();
-            defer state.unlock();
-            assert(!state.closed);
+            assert(!state.closed.load(.monotonic));
             if (state.pop()) |message| return message;
-            if (state.senders == 0) return error.Disconnected;
+            if (state.is_disconnected()) return state.pop() orelse error.Disconnected;
             return error.Empty;
         }
 
@@ -267,36 +259,26 @@ pub fn Receiver(comptime T: type) type {
         }
 
         /// Close the mailbox: later sends return `closed` and every buffered message is
-        /// discarded (outside the lock, so a discarded message may own a sender of this
-        /// mailbox).
+        /// discarded (outside the overflow lock, so a discarded message may own a sender of
+        /// this mailbox).
         pub fn deinit(receiver: *Self) void {
             const state = receiver.state;
             receiver.* = undefined;
-            state.lock();
-            assert(!state.closed);
-            state.closed = true;
-            var ready = state.ready;
-            var overflow = state.overflow;
-            state.ready = .empty;
-            state.overflow = .empty;
-            state.unlock();
-
-            while (ready.popFront()) |message| discard(T, message);
-            ready.deinit(state.gpa);
-            var pusher: DiscardPusher(T) = .{};
-            drain_overflow(T, &overflow, &pusher);
-            assert(overflow_is_empty(T, &overflow));
-            overflow.deinit(state.gpa);
-
-            state.lock();
-            assert(state.handles > state.senders);
-            state.handles -= 1;
-            const last = state.handles == 0;
-            state.unlock();
-            if (last) state.destroy();
+            assert(!state.closed.load(.monotonic));
+            // Sequentially consistent with the ready fast path's closed re-check, so a racing
+            // sender either sees closure or leaves its message where `drain` finds it.
+            state.closed.store(true, .seq_cst);
+            state.drain();
+            state.release();
         }
     };
 }
+
+/// Low bit of `activity`: overflow has published messages, so the receiver must refill.
+const overflow_has_messages: usize = 1;
+/// Unit of `activity` held while a mutation may change or publish overflow, which keeps
+/// senders off the ready fast path (commonware `OVERFLOW_MUTATION`).
+const overflow_mutation: usize = 2;
 
 fn State(comptime T: type) type {
     comptime assert(@hasDecl(T, "Overflow"));
@@ -307,91 +289,163 @@ fn State(comptime T: type) type {
 
         gpa: Allocator,
         io: Io,
+        ready: Ready(T),
+        /// Guards `overflow`.
         mutex: Io.Mutex = .init,
-        condition: Io.Condition = .init,
-        capacity: u32,
-        ready: std.Deque(T),
-        overflow: T.Overflow,
-        closed: bool = false,
+        overflow: T.Overflow = .empty,
+        /// `overflow_has_messages` plus `overflow_mutation` per active mutation.
+        activity: std.atomic.Value(usize) = .init(0),
+        closed: std.atomic.Value(bool) = .init(false),
         /// Live senders; zero means disconnected.
-        senders: u32 = 1,
+        senders: std.atomic.Value(u32) = .init(1),
         /// Live handles (senders plus the receiver); zero frees the state.
-        handles: u32 = 2,
+        handles: std.atomic.Value(u32) = .init(2),
+        waker: Waker = .{},
         /// Enqueue calls that requested backoff (commonware `backoff` counter).
         backoff: metrics.Counter,
 
-        fn lock(state: *Self) void {
-            state.mutex.lockUncancelable(state.io);
-        }
-
-        fn unlock(state: *Self) void {
-            state.mutex.unlock(state.io);
-        }
-
         fn backoff_count(state: *Self) u64 {
-            assert(state.handles > 0);
-            assert(state.capacity > 0);
+            assert(state.handles.load(.monotonic) > 0);
             return state.backoff.metric().get();
         }
 
         fn enqueue(state: *Self, message: T) Allocator.Error!FeedbackType {
-            state.lock();
             // Receiver closure makes new sends fail immediately.
-            if (state.closed) {
-                state.unlock();
+            if (state.closed.load(.acquire)) {
                 discard(T, message);
                 return wrap(.closed);
             }
-            defer state.unlock();
-            assert(state.ready.len <= state.capacity);
-
-            // Common case: retained overflow stays ahead of this message, else use ready.
-            if (overflow_is_empty(T, &state.overflow) and state.ready.len < state.capacity) {
-                state.ready.pushBackAssumeCapacity(message);
-                state.condition.signal(state.io);
-                return wrap(.ok);
+            // Common case: publish directly to ready without taking the overflow lock, unless
+            // overflow is retained or changing.
+            var pending = message;
+            if (state.activity.load(.monotonic) == 0) {
+                pending = state.ready.push(message) orelse {
+                    if (state.closed.load(.seq_cst)) {
+                        state.drain();
+                        return wrap(.closed);
+                    }
+                    state.waker.wake(state.io);
+                    return wrap(.ok);
+                };
             }
 
-            // Slow path: apply the policy.
-            const handled = try call_handle(T, state.gpa, &state.overflow, message);
-            const feedback: FeedbackType = if (comptime is_unreliable(T))
-                (if (handled) .new(.backoff) else .rejected)
-            else
-                .backoff;
-            if (handled) state.backoff.metric().inc();
-            // A spill may be the only signal a parked receiver gets; spurious wakes are fine.
-            state.condition.signal(state.io);
-            return feedback;
+            // Slow path: serialize through overflow and apply the policy.
+            const feedback = try state.enqueue_overflow(pending);
+            if (feedback == null) {
+                discard(T, pending);
+                return wrap(.closed);
+            }
+            const handled = feedback.?;
+            if (handled == .handled) state.backoff.metric().inc();
+            // Wake after any non-closed slow-path enqueue: a receiver may have skipped refill
+            // while this mutation was active, and it is published by now.
+            state.waker.wake(state.io);
+            return switch (handled) {
+                .ready => wrap(.ok),
+                .handled => if (comptime is_unreliable(T)) .new(.backoff) else .backoff,
+                .rejected => if (comptime is_unreliable(T)) .rejected else unreachable,
+            };
+        }
+
+        const Outcome = enum { ready, handled, rejected };
+
+        /// The overflow slow path; null when the mailbox closed (the message is not taken).
+        fn enqueue_overflow(state: *Self, message: T) Allocator.Error!?Outcome {
+            // Mark overflow active so racing senders stay off the ready fast path.
+            state.begin_mutation();
+            defer state.end_mutation();
+            state.mutex.lockUncancelable(state.io);
+            defer state.mutex.unlock(state.io);
+            defer state.publish();
+            if (state.closed.load(.acquire)) return null;
+
+            // The fast path may have seen stale ready fullness. Retry ready before the policy,
+            // unless retained overflow must stay ahead of this message.
+            var pending = message;
+            if (overflow_is_empty(T, &state.overflow)) {
+                pending = state.ready.push(message) orelse return .ready;
+            }
+            const handled = try call_handle(T, state.gpa, &state.overflow, pending);
+            return if (handled) .handled else .rejected;
         }
 
         fn wrap(feedback: Feedback) FeedbackType {
             return if (comptime is_unreliable(T)) .new(feedback) else feedback;
         }
 
-        /// Pop the next message, refilling ready from overflow (lock held).
+        fn is_disconnected(state: *Self) bool {
+            return state.closed.load(.acquire) or state.senders.load(.acquire) == 0;
+        }
+
+        /// Pop the next message, refilling ready from overflow.
         fn pop(state: *Self) ?T {
-            if (state.ready.popFront()) |message| {
+            if (state.ready.pop()) |message| {
                 // A freed ready slot lets the oldest overflow message advance.
                 state.refill();
                 return message;
             }
+            // Empty ready may race with stale activity, so `refill` decides whether
+            // overflow is worth locking.
             state.refill();
-            return state.ready.popFront();
+            return state.ready.pop();
         }
 
         fn refill(state: *Self) void {
-            if (overflow_is_empty(T, &state.overflow)) return;
-            var pusher: ReadyPusher(T) = .{ .ready = &state.ready, .capacity = state.capacity };
+            // Skip the overflow lock unless non-empty overflow was published.
+            if (state.activity.load(.monotonic) & overflow_has_messages == 0) return;
+            state.begin_mutation();
+            defer state.end_mutation();
+            state.mutex.lockUncancelable(state.io);
+            defer state.mutex.unlock(state.io);
+            defer state.publish();
+            var pusher: ReadyPusher(T) = .{ .ready = &state.ready };
             drain_overflow(T, &state.overflow, &pusher);
-            assert(state.ready.len <= state.capacity);
         }
 
-        fn destroy(state: *Self) void {
-            assert(state.handles == 0);
-            assert(state.senders == 0);
-            assert(state.closed);
-            assert(state.ready.len == 0);
+        /// Discard everything buffered, outside the overflow lock (commonware `drain`).
+        fn drain(state: *Self) void {
+            state.begin_mutation();
+            defer state.end_mutation();
+            while (state.ready.pop()) |message| discard(T, message);
+            state.mutex.lockUncancelable(state.io);
+            var overflow = state.overflow;
+            state.overflow = .empty;
+            state.publish();
+            state.mutex.unlock(state.io);
+            var pusher: DiscardPusher(T) = .{};
+            drain_overflow(T, &overflow, &pusher);
+            assert(overflow_is_empty(T, &overflow));
+            overflow.deinit(state.gpa);
+            // A sender may have passed the fast-path activity check before this mutation
+            // began, so drain ready again.
+            while (state.ready.pop()) |message| discard(T, message);
+        }
+
+        fn begin_mutation(state: *Self) void {
+            _ = state.activity.fetchAdd(overflow_mutation, .monotonic);
+        }
+
+        fn end_mutation(state: *Self) void {
+            const activity = state.activity.fetchSub(overflow_mutation, .monotonic);
+            assert(activity >= overflow_mutation);
+        }
+
+        /// Publish whether overflow holds messages (overflow lock held).
+        fn publish(state: *Self) void {
+            if (overflow_is_empty(T, &state.overflow)) {
+                _ = state.activity.fetchAnd(~overflow_has_messages, .monotonic);
+            } else {
+                _ = state.activity.fetchOr(overflow_has_messages, .monotonic);
+            }
+        }
+
+        /// Release one handle, freeing the state with the last.
+        fn release(state: *Self) void {
+            if (state.handles.fetchSub(1, .acq_rel) != 1) return;
+            assert(state.senders.load(.monotonic) == 0);
+            assert(state.closed.load(.monotonic));
             assert(overflow_is_empty(T, &state.overflow));
+            assert(state.ready.pop() == null);
             const gpa = state.gpa;
             state.ready.deinit(gpa);
             state.overflow.deinit(gpa);
@@ -400,6 +454,126 @@ fn State(comptime T: type) type {
         }
     };
 }
+
+/// Bounded multi-producer, multi-consumer ready queue (crossbeam `ArrayQueue`). Each slot's
+/// stamp holds the lap and index at which it is next free (pushable) or full (poppable).
+fn Ready(comptime T: type) type {
+    return struct {
+        const Self = @This();
+        const Slot = struct { stamp: std.atomic.Value(usize), message: T };
+
+        head: std.atomic.Value(usize) align(std.atomic.cache_line) = .init(0),
+        tail: std.atomic.Value(usize) align(std.atomic.cache_line) = .init(0),
+        slots: []Slot,
+        capacity: u32,
+        /// A power of two above `capacity`: positions are `lap * one_lap + index`.
+        one_lap: usize,
+
+        fn init(gpa: Allocator, capacity: u32) Allocator.Error!Self {
+            assert(capacity > 0);
+            const slots = try gpa.alloc(Slot, capacity);
+            for (slots, 0..) |*slot, index| {
+                slot.* = .{ .stamp = .init(index), .message = undefined };
+            }
+            const one_lap = std.math.ceilPowerOfTwoAssert(usize, @as(usize, capacity) + 1);
+            assert(one_lap > capacity);
+            return .{ .slots = slots, .capacity = capacity, .one_lap = one_lap };
+        }
+
+        fn deinit(ready: *Self, gpa: Allocator) void {
+            gpa.free(ready.slots);
+            ready.* = undefined;
+        }
+
+        /// The position after `position`, wrapping the index into the next lap.
+        fn next(ready: *const Self, position: usize) usize {
+            const index = position & (ready.one_lap - 1);
+            const lap = position & ~(ready.one_lap - 1);
+            return if (index + 1 < ready.capacity) position + 1 else lap +% ready.one_lap;
+        }
+
+        /// Push `message`, or hand it back when ready is full.
+        pub fn push(ready: *Self, message: T) ?T {
+            var tail = ready.tail.load(.monotonic);
+            while (true) {
+                const slot = &ready.slots[tail & (ready.one_lap - 1)];
+                const stamp = slot.stamp.load(.acquire);
+                if (stamp == tail) {
+                    const moved_to = ready.next(tail);
+                    const moved = ready.tail.cmpxchgWeak(tail, moved_to, .seq_cst, .monotonic);
+                    if (moved) |seen| {
+                        tail = seen;
+                        continue;
+                    }
+                    slot.message = message;
+                    slot.stamp.store(tail + 1, .release);
+                    return null;
+                }
+                if (stamp +% ready.one_lap == tail + 1) {
+                    // The slot is still full from the previous lap.
+                    const head = ready.head.load(.seq_cst);
+                    if (head +% ready.one_lap == tail) return message;
+                } else {
+                    // Another producer moved the tail but has not stamped its slot yet.
+                    std.atomic.spinLoopHint();
+                }
+                tail = ready.tail.load(.monotonic);
+            }
+        }
+
+        /// Pop the oldest message, or null when ready is empty.
+        fn pop(ready: *Self) ?T {
+            var head = ready.head.load(.monotonic);
+            while (true) {
+                const slot = &ready.slots[head & (ready.one_lap - 1)];
+                const stamp = slot.stamp.load(.acquire);
+                if (stamp == head + 1) {
+                    const moved_to = ready.next(head);
+                    const moved = ready.head.cmpxchgWeak(head, moved_to, .seq_cst, .monotonic);
+                    if (moved) |seen| {
+                        head = seen;
+                        continue;
+                    }
+                    const message = slot.message;
+                    slot.stamp.store(head +% ready.one_lap, .release);
+                    return message;
+                }
+                if (stamp == head) {
+                    const tail = ready.tail.load(.seq_cst);
+                    if (tail == head) return null;
+                } else {
+                    // Another consumer moved the head but has not stamped its slot yet.
+                    std.atomic.spinLoopHint();
+                }
+                head = ready.head.load(.monotonic);
+            }
+        }
+    };
+}
+
+/// Receiver parking (futures `AtomicWaker`): a futex word whose high bits count wakes and
+/// whose low bit marks a parked receiver. Both sides change it with a read-modify-write, so
+/// either the sender sees the parked bit or the receiver's re-check sees the message.
+const Waker = struct {
+    word: std.atomic.Value(u32) = .init(0),
+
+    const parked_bit: u32 = 1;
+
+    /// Count a wake and wake a parked receiver.
+    fn wake(waker: *Waker, io: Io) void {
+        const word = waker.word.fetchAdd(parked_bit << 1, .acq_rel);
+        if (word & parked_bit != 0) io.futexWake(u32, &waker.word.raw, 1);
+    }
+
+    /// Mark the receiver parked; returns the word to wait on.
+    fn park(waker: *Waker) u32 {
+        return waker.word.fetchOr(parked_bit, .acq_rel) | parked_bit;
+    }
+
+    fn unpark(waker: *Waker) void {
+        _ = waker.word.fetchAnd(~parked_bit, .monotonic);
+    }
+};
 
 fn call_handle(
     comptime T: type,
@@ -446,13 +620,10 @@ pub fn deque_drain(comptime T: type, deque: *std.Deque(T), pusher: anytype) void
 
 fn ReadyPusher(comptime T: type) type {
     return struct {
-        ready: *std.Deque(T),
-        capacity: u32,
+        ready: *Ready(T),
 
         pub fn push(pusher: *@This(), message: T) ?T {
-            if (pusher.ready.len >= pusher.capacity) return message;
-            pusher.ready.pushBackAssumeCapacity(message);
-            return null;
+            return pusher.ready.push(message);
         }
     };
 }

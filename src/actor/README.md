@@ -34,12 +34,13 @@ zig build bench -Dbench-filter=mailbox  # mailbox benchmarks (ReleaseFast)
 All of these are recorded in the
 [actor-stream lane decisions](../../docs/lanes/actor-stream.md#decisions).
 
-- The mailbox guards its ready and overflow queues with one `std.Io.Mutex`, and the receiver
-  parks on a `std.Io.Condition`. Commonware uses a lock-free ready queue, an activity word, and
-  an `AtomicWaker` instead. Delivery semantics are the same.
+- The mailbox keeps commonware's lock-free ready queue and activity word, but a futex word
+  replaces `AtomicWaker`. Every wait goes through `std.Io`, so it also runs on the
+  deterministic runtime.
 - Handles are values: `clone` and `deinit` replace `Clone` and `Drop`. A dropped message goes
   through its type's optional `discard`.
 - `mailbox.new` takes no metrics context, so its backoff counter is detached.
   `new_with_metrics` registers the counter as `<scope>_backoff_total`.
-- There are no loom tests, because the lock-free paths they check do not exist here.
+- There are no loom tests, because Zig has no loom. `std.Io.Threaded` stress tests cover the
+  same lock-free paths.
   Concurrency is tested on the deterministic runtime and with a seeded FIFO fuzz instead.

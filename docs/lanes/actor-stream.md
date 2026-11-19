@@ -53,9 +53,15 @@ see docs/lanes/runtime.md). Write library code against `std.Io`.
   bouncer, and cancels the attempt (releasing its connection) on expiry.
 
 ## Decisions
-- The mailbox guards ready and overflow with one `std.Io.Mutex` and parks the receiver on a
-  `std.Io.Condition`, instead of crossbeam's lock-free ready queue, the activity word, and an
-  `AtomicWaker`. Same delivery semantics, simpler, and deterministic on the runtime.
+- The mailbox follows commonware's lock-free design: ready is a port of crossbeam's
+  `ArrayQueue`, the activity word keeps senders off it while overflow is retained or changing,
+  and a futex word replaces `AtomicWaker`. An `std.Io.Mutex` guards overflow. (It first used
+  one Mutex and Condition for everything; that lock made `try_recv_ready` 1.49× slower than
+  commonware, so it was replaced.) Every wait goes through `std.Io` futexes, so the mailbox
+  still runs on the deterministic runtime.
+- Mailbox `replace` benches scan overflow's two contiguous halves from the back, 4 bytes per
+  step, as Rust's slice `rfind` behind `iter_mut().rev().find` does, instead of `atPtr` per
+  element.
 - Handles are values: `clone`/`deinit` replace `Clone`/`Drop`; the state is freed when the
   last handle goes. Dropped messages go through the type's optional `discard`, called
   outside the lock on receiver close so a discarded message may own a sender of its mailbox.
@@ -92,9 +98,12 @@ see docs/lanes/runtime.md). Write library code against `std.Io`.
   Poly1305 by its Seal hash, and CUPS record bytes by `record encoding` against an
   independent oracle. The coordinator accepted this on 2026-11-13: the deterministic runtime
   will not imitate commonware's polling order, and these hashes stay unported.
-- Loom tests (thread interleavings of the lock-free paths) have no counterpart: the paths
-  they check do not exist here. Concurrency is covered on the deterministic runtime instead
-  (parked receivers, three producers, same-seed replay) plus a seeded FIFO fuzz.
+- Loom tests have no counterpart, because Zig has no loom model checker. The lock-free paths
+  they check are covered by two `std.Io.Threaded` stress tests (four producer threads, a
+  receiver alternating `recv` and `try_recv`, and receiver close at 40 points with
+  exactly-once delivery or discard), on top of the deterministic runtime tests and a seeded
+  FIFO fuzz. Planted bugs caught: a racy ready tail (22 of 60 runs fail), a missing closed
+  re-check after a fast-path push (16 of 60), and a missing futex wake (the test hangs).
 
 ## Backlog
 - [x] actor: mailbox (bounded ready queue plus policy-managed overflow), `Feedback`,
@@ -204,8 +213,9 @@ Open:
 
 Not portable:
 - `mailbox.rs` loom tests (`#[cfg(feature = "loom")]`): these check thread interleavings of the
-  lock-free ready queue, activity word, and AtomicWaker. Zig uses one Io.Mutex and Condition
-  instead (docs/lanes/actor-stream.md, Decisions: "Loom tests ... have no counterpart"):
+  lock-free ready queue, activity word, and waker under the loom model checker, which Zig
+  lacks. The threaded stress tests cover the same paths (Decisions: "Loom tests have no
+  counterpart"):
   `sender_drop_racing_waker_registration_wakes_or_disconnects`,
   `sender_enqueue_then_drop_racing_poll_recv_drains_message`,
   `sender_enqueue_then_drop_racing_try_recv_drains_message`,

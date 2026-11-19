@@ -546,7 +546,7 @@ fn expect_overflow_wakes(comptime T: type, io: Io, fill: T, spill: T) !void {
     try testing.expect(!received);
 
     // Prime ready directly to isolate the overflow wake (single-threaded runtime).
-    pair.sender.state.ready.pushBackAssumeCapacity(fill);
+    try testing.expectEqual(@as(?T, null), pair.sender.state.ready.push(fill));
     try io.sleep(.fromMilliseconds(5), .awake);
     try testing.expect(!received);
 
@@ -638,6 +638,85 @@ test "many producers keep per-sender order and replay from the seed" {
     }
     try testing.expectEqual(digests[0], digests[1]);
     try testing.expect(digests[0] != digests[2]);
+}
+
+// Threads: `std.Io.Threaded` interleaves the lock-free ready queue, the overflow activity
+// word, and the waker for real (commonware checks these with loom).
+
+/// Reliable FIFO policy that counts discarded messages.
+const Counted = struct {
+    producer: u32,
+    index: u64,
+
+    pub const Overflow = std.Deque(Counted);
+    var discarded: std.atomic.Value(u64) = .init(0);
+
+    pub fn handle(gpa: Allocator, overflow: *Overflow, message: Counted) !void {
+        try overflow.pushBack(gpa, message);
+    }
+
+    pub fn discard(_: Counted) void {
+        _ = discarded.fetchAdd(1, .monotonic);
+    }
+};
+
+const threaded_producers = 4;
+const threaded_messages = 20_000;
+
+fn produce_counted(sender: mailbox.Sender(Counted), producer: u32) Allocator.Error!void {
+    var owned = sender;
+    defer owned.deinit();
+    var index: u64 = 0;
+    while (index < threaded_messages) : (index += 1) {
+        _ = try owned.enqueue(.{ .producer = producer, .index = index });
+    }
+}
+
+/// Receive from producer threads until `stop` messages arrived (then close) or all senders
+/// left; every message is received in per-sender order or discarded, exactly once.
+fn threaded_round(capacity: u32, stop: u64) !void {
+    const io = testing.io;
+    Counted.discarded.store(0, .monotonic);
+    var pair = try mailbox.new(Counted, testing.allocator, io, capacity);
+    var receiver_open = true;
+    defer if (receiver_open) pair.receiver.deinit();
+    var futures: [threaded_producers]Io.Future(Allocator.Error!void) = undefined;
+    for (&futures, 0..) |*future, producer| {
+        future.* = try io.concurrent(produce_counted, .{ pair.sender.clone(), @intCast(producer) });
+    }
+    pair.sender.deinit();
+
+    var next: [threaded_producers]u64 = @splat(0);
+    var received: u64 = 0;
+    while (received < stop) : (received += 1) {
+        // Alternate the parking and polling receive paths.
+        const message = if (received % 2 == 0)
+            (try pair.receiver.recv()) orelse break
+        else
+            pair.receiver.try_recv() catch |err| switch (err) {
+                error.Empty => (try pair.receiver.recv()) orelse break,
+                error.Disconnected => break,
+            };
+        try testing.expectEqual(next[message.producer], message.index);
+        next[message.producer] += 1;
+    }
+    pair.receiver.deinit();
+    receiver_open = false;
+    for (&futures) |*future| try future.await(io);
+    const sent: u64 = threaded_producers * threaded_messages;
+    try testing.expectEqual(sent, received + Counted.discarded.load(.monotonic));
+}
+
+test "threads keep per-sender order and lose nothing" {
+    try threaded_round(2, threaded_producers * threaded_messages);
+}
+
+test "threads racing receiver close discard every unreceived message" {
+    // Close at spread-out points; a roomy ready queue keeps senders on the fast path, so
+    // some rounds close while a sender is mid push.
+    const total: u64 = threaded_producers * threaded_messages;
+    var round: u64 = 0;
+    while (round < 40) : (round += 1) try threaded_round(256, round * 7_919 % total);
 }
 
 // Seeded fuzz: a reliable FIFO mailbox against a counting model.
