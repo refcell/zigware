@@ -17,6 +17,11 @@ const Epoch = m.Epoch;
 /// The users of every workload, each a sender and a receiver.
 pub const users = 2;
 
+/// Whether the optional `index` is `value`.
+pub fn holds(index: ?usize, value: usize) bool {
+    return if (index) |held| held == value else false;
+}
+
 pub const Request = m.TestSender.Request;
 pub const Challenge = d.TestLedger.Challenge;
 pub const Signature = m.PublicKey.Signature;
@@ -179,7 +184,7 @@ pub const World = struct {
     violation: ?[]const u8 = null,
     budget: Budget,
 
-    pub fn deinit(self: *World) void {
+    pub fn deinit(self: *World, _: Allocator) void {
         self.ledger.deinit();
         self.operator.deinit();
         for (&self.senders) |*sender| sender.deinit();

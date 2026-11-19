@@ -108,6 +108,15 @@ qmdb `current` (balances, over the MMB) and `keyless` (payout log, over the MMR)
   property is an invariant, so the search order changes neither the verdict nor the unique
   state count, and depth first keeps only the stack in memory. No BFS mode. It runs on one
   thread where Stateright uses all cores.
+- model.rs's six workloads are in `tests/bajillion/model/` (`workload.zig` the predictors,
+  `actions.zig`, `steps.zig`, `properties.zig` the seven invariants, `model_test.zig`). The
+  first ("admits one payment", 232 states) runs in every `zig build test`; the other five run
+  only with `-Dslow-tests`, best under `-Doptimize=ReleaseSafe`, and print their counts. The
+  checker is bounded at 1 << 23 states (commonware has no bound). ReleaseSafe counts: replays a
+  dropped request 3,151 (depth 14); halts and claims 74,116 (17); rebuilds on the posted row
+  257,586 (21); retries payments 196,690 (17); recovers funds after a halt 3,099,281 (19, about
+  9 minutes). The fingerprint hashes the same fields as commonware's derived `Hash` on `World`,
+  with its sets kept as sorted maps like the BTreeSets.
 
 ## Backlog
 - [x] lib.rs types and traits (`Epoch`, `Amount`), namespace.
@@ -142,7 +151,7 @@ qmdb `current` (balances, over the MMB) and `keyless` (payout log, over the MMR)
 - [x] model.rs groundwork: `model/world.zig` (World with a deep `clone` and a structural
   fingerprint, and the roles' `clone`) and `model/replay.zig` (the committee replay, memoized
   by the last post and the candidate).
-- [ ] Integration tests: model.rs's workload, properties, and six workloads on the checker.
+- [x] Integration tests: model.rs's workload, properties, and six workloads on the checker.
 - [x] Fuzz targets `src/clearing/fuzz/{decode,verify}.zig` (commonware clearing/fuzz), seeded
   in `zig build test` and under `std.testing.fuzz`; the verify target includes BalanceProof.
 - [x] Benches `src/clearing/benches.zig` (zigware's own; commonware's clearing has none):
@@ -183,3 +192,4 @@ qmdb `current` (balances, over the MMB) and `keyless` (payout log, over the MMR)
 - 2026-11-18: lifecycle.rs, all 6 tests, including the mixed-schemes `u256` deployment.
 - 2026-11-18: the model checker for model.rs (`tests/bajillion/checker.zig`).
 - 2026-11-18: model.rs groundwork: World, its fingerprint, and the memoized committee replay.
+- 2026-11-19: model.rs: the workload, its seven properties, and all six workloads (five slow).

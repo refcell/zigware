@@ -41,18 +41,18 @@ test "model: a cloned world has the same fingerprint until one changes" {
         .receivers = .{ try m.receiver(0, 1), try m.receiver(1, 1) },
         .budget = .{ .sends = 1 },
     };
-    defer world.deinit();
+    defer world.deinit(gpa);
     try world.ledger.deposit(m.account(0), 3);
     try world.deposited.append(gpa, .{ 0, 3 });
     var copy = try world.clone();
-    defer copy.deinit();
+    defer copy.deinit(gpa);
     try std.testing.expectEqual(world.fingerprint(), copy.fingerprint());
     var request = try copy.senders[0].send(1, try m.amounts(&.{.{ 1, 1 }}));
     defer request.deinit(gpa);
     try std.testing.expect(world.fingerprint() != copy.fingerprint());
     copy.budget.sends -= 1;
     var again = try world.clone();
-    defer again.deinit();
+    defer again.deinit(gpa);
     again.budget.sends -= 1;
     try std.testing.expect(again.fingerprint() != copy.fingerprint());
     try std.testing.expect(again.fingerprint() != world.fingerprint());
