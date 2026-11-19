@@ -16,7 +16,8 @@
 //! ```
 //!
 //! An `assert` panics only with runtime safety on (Debug, ReleaseSafe); without it the call
-//! returns `error.SkipZigTest`. POSIX only (it reads the environment with `getPosix`).
+//! returns `error.SkipZigTest`, as it does in fuzz builds. POSIX only (it reads the environment
+//! with `getPosix`).
 //! Test-only: it spawns a process, which library code never does.
 
 const std = @import("std");
@@ -26,6 +27,9 @@ const assert = std.debug.assert;
 
 /// Present in the child's environment: the call runs `body` instead of spawning.
 pub const child_env = "ZIGWARE_DEATH_TEST";
+/// Whether death tests run: an `assert` panics only with runtime safety, the child reads its
+/// marker with `getPosix`, and a fuzz build's runner needs fuzzer state the child lacks.
+pub const supported = std.debug.runtime_safety and builtin.os.tag != .windows and !builtin.fuzz;
 /// How long the child may run before it is killed; a hang fails the test.
 pub const timeout_ms: i64 = 60_000;
 /// Whether a wrong panic message is printed; the helper's own test of that case clears it.
@@ -51,7 +55,7 @@ pub fn expect_panic(
     expected: []const u8,
     comptime body: fn () anyerror!void,
 ) anyerror!void {
-    if (!std.debug.runtime_safety or builtin.os.tag == .windows) return error.SkipZigTest;
+    if (!supported) return error.SkipZigTest;
     if (std.testing.environ.getPosix(child_env) != null) {
         try body();
         return error.DeathTestDidNotPanic;
@@ -192,7 +196,7 @@ test "death: an assert panics as unreachable" {
 }
 
 test "death: a body that returns fails" {
-    if (!std.debug.runtime_safety) return error.SkipZigTest;
+    if (!supported) return error.SkipZigTest;
     const result = expect_panic(@src(), "boom", struct {
         fn body() !void {}
     }.body);
@@ -201,7 +205,7 @@ test "death: a body that returns fails" {
 }
 
 test "death: a different panic message fails" {
-    if (!std.debug.runtime_safety) return error.SkipZigTest;
+    if (!supported) return error.SkipZigTest;
     report_wrong_message = false;
     defer report_wrong_message = true;
     const result = expect_panic(@src(), "expected text", struct {
