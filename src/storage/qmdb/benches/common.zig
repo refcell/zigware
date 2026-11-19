@@ -380,6 +380,7 @@ pub fn Session(comptime D: type) type {
                 cfg.translator = if (comptime @hasField(T, "inner")) .init(.{}) else .{};
             }
             if (comptime @hasField(D.Cfg, "init_cache")) cfg.init_cache = options.init_cache;
+            if (comptime @hasField(D.Cfg, "io")) cfg.io = null; // Benches time themselves.
             if (comptime @hasField(D.Cfg, "grafted_metadata_partition")) {
                 cfg.grafted_metadata_partition = "grafted-metadata-" ++ suffix;
                 if (options.names) |names| {
