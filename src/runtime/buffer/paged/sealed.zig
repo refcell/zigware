@@ -178,4 +178,5 @@ pub const Sealed = struct {
 
 test {
     _ = @import("sealed_test.zig");
+    _ = @import("panic_test.zig");
 }

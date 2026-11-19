@@ -1579,3 +1579,18 @@ fn init_at_most_equal_length_branch_crash(comptime F: type) !void {
 test "init_at_most then an equal-length branch crash never recovers the discarded branch" {
     try run(init_at_most_equal_length_branch_crash);
 }
+
+test "read_many rejects unsorted positions" {
+    // commonware `test_read_many_rejects_unsorted_positions` (should_panic, MMR only).
+    try utils.death.expect_panic(@src(), "reached unreachable code", struct {
+        fn body() !void {
+            // Leaks in the child, which panics before it would clean up.
+            var harness = try Harness.init();
+            var journal = try harness.open(merkle.mmr.Family, "unsorted");
+            for (0..2) |i| _ = try journal.append(create_operation(@intCast(i)));
+            try journal.sync();
+            var out: [2]Op = undefined;
+            try journal.read_many(&.{ 1, 0 }, &out);
+        }
+    }.body);
+}

@@ -23,9 +23,10 @@ resize, sync), `runtime.storage`, with the in-memory backend `runtime.storage.me
   writer.rs's and view.rs's batch-read tests (cache tried for every range before any blob read).
 - [x] paged `View` (view.rs) shared by `Writer` and `Sealed`; `Sealed` (sealed.rs) with
   `Writer.seal`/`snapshot`/`try_snapshot` and sealed.rs's tests (paged/sealed_test.zig).
-  Not ported: `test_sealed_read_many_into_rejects_unsorted_offsets` (a should_panic: unsorted
-  offsets are an assert) and the two `SplitWriteBlob`
-  partial-page rewrite races (writes cannot pause mid-call on a synchronous blob).
+  `test_sealed_read_many_into_rejects_unsorted_offsets` is a death test
+  (paged/panic_test.zig). Not ported: the `SplitWriteBlob` partial-page rewrite race
+  (`test_replay_preserves_tail_during_partial_page_rewrite`); portable now that a write can
+  park in a task, but it needs a split-write blob mock.
 - [x] The rest of writer.rs's 94 tests, mod.rs's, and read.rs's portable tests (snapshot,
   replay options, recoverable prefix, CRC slots, read_many, needs_sync, recovery truncate
   with commonware's `PartialWriteBlob` interrupted stages, whose write counts match, large
@@ -37,7 +38,11 @@ resize, sync), `runtime.storage`, with the in-memory backend `runtime.storage.me
   and allocation reuse (`to_physical_pages_preserves_chunk_owners`,
   `append_variable_value_encodes_in_place`, `replay_buf_bytes_share_pages`), delayed,
   cancelled, or read-ahead reads (read.rs's batch pipeline: our replay reads one batch at a
-  time), the torn-extension blob, and should_panic argument checks (asserts here).
+  time), and the torn-extension blob. The should_panic argument checks (mod.rs's
+  `corrupt_page` and `validate_read_ranges`, writer.rs's `read_many_into`, tip.rs's six) are
+  death tests in paged/panic_test.zig (`utils.death.expect_panic`), except
+  `test_validate_read_ranges_rejects_length_overflow`: commonware validates against a
+  `u64::MAX` size, and here a range past the writer returns `BlobInsufficientLength`.
 - [x] journal frame format and durability (frame.rs, durability.rs), byte-identical.
 - [x] journal/segmented: section manager and fixed segmented journal (append, read, replay,
   prune, bounded init, floors and checkpoint restore), torn-page repair; tests incl.
@@ -89,8 +94,8 @@ resize, sync), `runtime.storage`, with the in-memory backend `runtime.storage.me
   and failure-handle, and Merkle-watermark tests are in authenticated_start_sync_test.zig, on
   `DelayedSync`. No counterpart: the strategy-pool `read_many` sharding and parallel-align
   tests and `test_merkleize_retains_ancestors_after_cancellation` (merkleization runs
-  sequentially on the caller, so there is no detached job to outlive its waiter), and
-  should_panic argument checks.
+  sequentially on the caller, so there is no detached job to outlive its waiter).
+  `test_read_many_rejects_unsorted_positions` (should_panic) is a death test.
 - [x] metadata (two-blob atomic key-value store).
 - [x] metadata: the `metadata_recovery` fuzz target and the overwrite-crash-during-sync test
   on `runtime.storage.faulty` (with storage-archive's `archive/faults.zig` harness).
@@ -457,3 +462,10 @@ resize, sync), `runtime.storage`, with the in-memory backend `runtime.storage.me
   metadata's dropped-completion and failed-sync tests and pipelined overwrite crash, and the
   queue's reader after an interrupted mutation, each on `DelayedSync` or `ReadGate`; stale
   "no counterpart" and "syncs are synchronous" records updated.
+- 2026-11-19: 15 of this lane's 17 should_panic tests ported as death tests
+  (`utils.death.expect_panic`, 17 Zig tests counting tip.rs's rstest cases): the paged
+  buffer's mod.rs 4, writer.rs 3, sealed.rs 1, tip.rs 6, and the authenticated journal's
+  unsorted `read_many`, each with a planted bug. Still not ported:
+  `validate_read_ranges_rejects_length_overflow` (returns an error here) and metadata's
+  `value_too_big` (a 4 GiB allocation). contiguous fixed.rs/variable.rs's five belong to
+  storage-merkle's handed-over test files.
