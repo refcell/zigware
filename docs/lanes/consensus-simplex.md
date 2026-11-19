@@ -219,8 +219,9 @@ resolver; those lanes are running, so do the types first and the actors as they 
 - [x] simplex scheme: ed25519, bls12381_multisig, secp256r1, bls12381_threshold standard
   (on crypto's certificate schemes) and bls12381_threshold vrf (signing, seeds) with its
   tests, including timelock encrypt/decrypt to a round's seed.
-- [x] limits.rs (`max_payload_size`), checked against the widest VRF encodings; the
-  per-scheme widest-encoding tests follow with the schemes.
+- [x] limits.rs (`max_payload_size`) with all four widest-encoding tests on real fixtures
+  (ed25519, secp256r1, and multisig at 1, 4, 127, and 128 participants; threshold standard
+  and VRF, MinPk and MinSig, at 4 and 33; Debug runs the small committees).
 - [x] config.rs (Config, Floor, skip and forward policies) with its validation rules.
 - [x] simplex metrics, and the actors (voter, batcher, resolver) and engine, on p2p's
   simulated network and the deterministic runtime: 4 honest nodes finalize.
@@ -259,39 +260,52 @@ resolver; those lanes are running, so do the types first and the actors as they 
   delivery not blocking a nullification fetch. The inert and rate-limited senders are
   test-local `TestSender`/`SilentReceiver` types. `pr_5097_regression` is ported: `HandlerMessage.deliver`
   carries an owned root copy of the fetch's span (`span: ?*Span`), and processing runs
-  under `simplex.resolver.deliver` as its child. The p2p resolver's `Delivery` and fetches
-  carry no spans yet (commonware pairs each subscriber with its fetch span), so the test
-  builds the message directly and engine deliveries have no fetch parent.
-- [ ] simplex mod.rs tests (ed25519, round robin). Done: all_online (Debug runs 50 views
-  where commonware runs 100), partition, slow_and_lossy_links, determinism, the Byzantine
-  conflicter, nuller, impersonator, reconfigurer, invalid (2 seeds each, 20 or 50 views;
-  commonware runs 5 seeds of 50), outdated, equivocator, backfill, unclean_shutdown (100
-  views across journal-recovering restarts), one_offline (with its leader-labelled timeout
-  and nullification metric checks), slow_validator, all_recovery, all_crash_after_nullify,
-  received_certificates_are_reported, survives_burst, engine_shutdown (abort and graceful;
-  commonware's running-task count waits on the runtime's task metrics), and
-  attributable_reporter_filtering, and split_views_no_lockup (with the nullify-only mock).
-  The twins campaigns (sampled, sustained, stable leader, optimistic; the large ones in
-  slow builds) run on the mock scheme.
-  tle (threshold VRF, Random elector, MinPk and MinSig; slow builds) decrypts at the target
-  round's seed. The four slow-certifier DSTs (stable leader optimistic, stable leader,
-  rotating, and short-term handoff votes; slow builds) finalize 200 views with no
-  nullification. The three certified-split DSTs (group-led view, lone holder leads
-  first, displaced certified view) heal through targeted repair, and both cross-term
-  certified splits (terms of 5 views; backfill suppressed or allowed) finalize view 26
-  through recursive parent repair. hailstorm (10 restarts of a random validator, keeping
-  its reporter, then commonware's fork checks; two runs replay the same auditor state;
-  rotating and stable leader) runs in slow and ReleaseSafe builds. Debug runs without
-  `-Dslow-tests` shrink the heavier DSTs (`quick` in engine_test.zig: fewer views and
-  seeds; one twins case per campaign; MinPk only for the threshold VRF tests) so
-  test-consensus stays near 2 minutes. observer (a linked peer outside the committee),
-  non_genesis_floor_joiner (rotating and stable leader; the joiner starts from a mid-term
-  finalization), and dishonest_leader_certification_rejected (ed25519) pass. Twins nodes
-  reject mismatched payloads, as commonware's `mocks` build does. The twins pipelined
-  handoff campaign (applications vote handoffs through the prefix, then wait) checks that
-  honest and twin applications returned handoffs, and counts the nonzero
-  `VotedBeforeCertification` handoff-event series. Next: per-scheme twins, the per-scheme fixture variants, and
-  the rest, seeded.
+  under `simplex.resolver.deliver` as its child. `Handler.deliver` keeps an owned copy of the
+  first subscriber's fetch span (`resolver.own_span`), and the test runs through it.
+- [x] simplex mod.rs tests. Every `test_for_all_fixtures` callee runs on all 8 fixtures:
+  fixtures_test.zig ports 16 (all_online, one_offline with its metrics, partition,
+  slow_and_lossy_links, backfill, slow_validator, all_recovery, all_crash_after_nullify,
+  unclean_shutdown, determinism, the conflicter, nuller, impersonator, reconfigurer, and
+  outdated Byzantine DSTs, and twins), plus distinct_states, and engine_test.zig, a generic
+  `Suite(F, selected)`, runs the other 11 (equivocator, invalid,
+  received_certificates_are_reported, survives_burst, children_shutdown_on_engine_abort,
+  graceful_shutdown, attributable_reporter_filtering, split_views_no_lockup, hailstorm,
+  observer, non_genesis_floor_joiner). ed25519 runs every engine_test DST in every build
+  (Debug shrinks them, `quick`). Per push, ReleaseSafe runs a quick slice: fixtures_test on
+  one fixture per scheme family, engine_test's Suite on threshold VRF MinPk (about 4 min);
+  slow builds (nightly) run full sizes on every fixture. The engine reports through
+  `AttributableReporter` only in attributable_reporter_filtering, as commonware does. The
+  twins campaigns (sampled, pipelined handoff, sustained, stable leader, optimistic; the
+  large ones in slow builds), tle, the four slow-certifier DSTs, the certified splits and
+  cross-term certified splits, hailstorm and floor joiner with a stable leader, and
+  dishonest_leader_certification_rejected are ported. Not ported, each a 2026-11-19 audit
+  finding: `all_online_rayon` (parallel's thread-pool strategy is not wired into the
+  deterministic runtime), `1k` (1,000 views on the mock scheme; slow-only in commonware),
+  the stable-leader optimistic variants of unclean_shutdown, backfill, one_offline,
+  partition, slow_and_lossy_links, and equivocator, `stable_leader_finalizes_full_term_
+  without_nullification`, `stable_leader_optimistic_blocks_faster_than_network_latency`,
+  and the three `pipelined_handoff` latency DSTs. Those are the next mod.rs item below.
+- [ ] mod.rs remainder: the 13 DSTs named above.
+- [ ] actors/voter/mod.rs: the 96 voter-actor tests (restart and floor journaling, the
+  pipelined handoff build lifecycle, nullify on failed or dropped propose and verify,
+  certification ordering and replay). None are ported; they need a voter-actor harness
+  with a mock batcher, resolver, and automaton on the deterministic runtime.
+- [ ] actors/batcher/mod.rs: 69 of its 76 batcher-actor tests (forwarding, leader activity,
+  optimistic assembly fallback, vote retention, construction order, the per-fixture
+  quorum test on the other 7 fixtures), and 20 of verifier.rs's 32 (lazy vote buffers,
+  quorum reservations, the ready and empty-pending cases, late leader votes).
+- [x] Panicking tests are not ported: Zig test runners cannot catch a panic in process.
+  These are commonware's `#[should_panic]` cases in elector.rs (3), types.rs
+  (`issue_2944_regression_*_new`, 2), vrf.rs (12 constructor and certificate-verifier
+  checks), mocks/twins.rs (`route_with_groups_panics_when_sender_is_missing`,
+  `cases_panic_on_scenario_overflow`, `cases_reject_more_than_64_participants`,
+  `route_panics_when_sender_is_missing_from_participants`), voter/round.rs (the 2
+  replay-conflict cases), and batcher verifier.rs (3). Each guarded path asserts or panics
+  in the Zig code. mocks/twins.rs `route_with_groups_covers_reachable_split_targets`
+  has no counterpart because routing here takes participant-index masks
+  (`route_masks`, covered by the route tests), and
+  `compressed_counts_match_reference_enumeration` would need commonware's 200-line
+  brute-force enumerator; the single-round space is checked against its closed form.
 - [ ] Tracing: actor events are done (voter, batcher, resolver, engine). The voter opens
   commonware's `simplex.voter.start`, `.timeout`, `.process`, and `.notify` spans, and
   events inside them carry them. Each view's root `simplex.voter.view` span opens on entry
@@ -404,3 +418,10 @@ resolver; those lanes are running, so do the types first and the actors as they 
   and the conflicter, nuller, impersonator, reconfigurer, and outdated DSTs run on every
   fixture (`Byzantine(F)`, `Cluster.start_byzantine`). Every fixture DST's quick slice now
   takes 3 min together in ReleaseSafe.
+- 2026-11-19: engine_test.zig is a generic `Suite(F, selected)`, so every
+  `test_for_all_fixtures` DST runs on all 8 fixtures. limits.rs's widest encodings,
+  types.rs's wrong-namespace, wrong-scheme, sub-quorum, and fault-evidence tests (all 8
+  schemes), vrf.rs's attributability and verifier-only checks, and 6 more twins.rs cases are
+  ported. An audit against commonware's simplex tests found 453 of 724 ported (counting
+  macro expansions per fixture); the voter and batcher actor tests are the open gap. All 21
+  simplex conformance entries match; commonware has no simplex benches.
