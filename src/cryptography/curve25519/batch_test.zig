@@ -244,3 +244,110 @@ test "curve25519 batch: offsetting forgeries reject on both MSM paths" {
         try testing.expect(!set.verify(parallel.sequential));
     }
 }
+
+const minifuzz = @import("invariants").minifuzz;
+const vectors = @import("vectors.zig");
+
+fn decode_hex(hex: []const u8) [32]u8 {
+    var out: [32]u8 = undefined;
+    _ = std.fmt.hexToBytes(&out, hex) catch unreachable; // Fixture hex is valid.
+    return out;
+}
+
+/// A canonical scalar drawn from 64 bytes of `u`.
+fn draw_scalar(u: *minifuzz.Unstructured) [32]u8 {
+    var wide: [64]u8 = undefined;
+    u.fill(&wide);
+    return scalar.reduce64(wide);
+}
+
+fn straus_body(_: void, u: *minifuzz.Unstructured) anyerror!void {
+    // Two base terms (B and 2^128 B), then four variable points with a low-order component.
+    var high = scalar.zero;
+    high[16] = 1;
+    const bases = [2]Point{ Point.basePoint, naive_mul(Point.basePoint, high) };
+    var sum = core.MultiScalar.init();
+    var expected = Point.identityElement;
+    for (bases) |base| {
+        const s = draw_scalar(u);
+        sum.add(base, s);
+        expected = expected.add(naive_mul(base, s));
+    }
+    for (0..4) |_| {
+        var encoding: [32]u8 = undefined;
+        u.fill(&encoding);
+        const point = core.decompress(encoding) orelse Point.basePoint;
+        const index = u.int_in_range(usize, 0, vectors.zip215_points.len - 1);
+        const torsion = core.decompress(decode_hex(vectors.zip215_points[index])).?;
+        const s = draw_scalar(u);
+        sum.add(point.add(torsion), s);
+        expected = expected.add(naive_mul(point.add(torsion), s));
+    }
+    // The difference must be exactly the identity, so the torsion part is checked too.
+    try testing.expect(core.is_identity(sum.finish().sub(expected)));
+}
+
+test "curve25519 batch: Straus matches double-and-add with torsion" {
+    var zero = core.MultiScalar.init();
+    zero.add(Point.basePoint, scalar.zero);
+    zero.add(Point.basePoint, scalar.zero);
+    try testing.expect(core.is_identity(zero.finish()));
+    try (minifuzz.Builder{}).with_seed(0).with_search_limit(64).run(gpa, {}, straus_body);
+}
+
+test "curve25519 batch: Straus matches the serial MSMs across lane boundaries" {
+    const count = 383;
+    var rng = utils.TestRng.init(0x5354);
+    var points: [count]Point = undefined;
+    var scalars: [count][32]u8 = undefined;
+    for (&points, &scalars, 0..) |*point, *s, index| {
+        var seed: [64]u8 = undefined;
+        rng.fill_bytes(&seed);
+        point.* = affine(Point.basePoint.mulPublic(scalar.reduce64(seed)) catch unreachable);
+        if (index % 5 == 0) point.* = affine(point.add(core.decompress(@splat(0)).?));
+        rng.fill_bytes(&seed);
+        // Terms 8 through 16 have scalar zero, so a whole flush of 8 has no nonzero digit.
+        s.* = if (index >= 8 and index <= 16) scalar.zero else scalar.reduce64(seed);
+    }
+    const terms = try gpa.create(batch.Terms);
+    defer gpa.destroy(terms);
+    // Counts on both sides of multiples of MultiScalar's eight-term flush.
+    for ([_]usize{ 1, 7, 8, 9, 16, 17, 33, count }) |n| {
+        var straus = core.MultiScalar.init();
+        var expected = Point.identityElement;
+        for (points[0..n], scalars[0..n]) |point, s| {
+            straus.add(point, s);
+            expected = expected.add(naive_mul(point, s));
+        }
+        const actual = straus.finish();
+        try expect_point(expected, actual);
+        if (n > 2 * batch.chunk_signatures + 1) continue;
+        terms.* = .init();
+        for (points[0..n], scalars[0..n]) |point, *s| terms.add(point, s);
+        try expect_point(expected, terms.sum());
+    }
+}
+
+test "curve25519 batch: coefficients follow global indices under every shape" {
+    // Offsetting forgeries are caught only by distinct coefficients, so a shard that indexed
+    // its signatures from zero would accept a pair at the same offset of two shards. Pairs
+    // straddle the shard boundaries of every explored batch count, on both MSM paths.
+    for ([_]usize{ 40, 150 }) |count| {
+        const set = try Signatures.create(count);
+        defer gpa.destroy(set);
+        try testing.expect(try set.verify_explored());
+        const original = set.signatures;
+        for (2..9) |shards| {
+            const edge = parallel.ops.balanced(count, shards, 1).start;
+            const pairs = [_][2]usize{ .{ 0, edge }, .{ edge - 1, edge }, .{ 1, edge + 1 } };
+            for (pairs) |pair| {
+                defer set.signatures = original;
+                offset(set, pair[0], pair[1]);
+                testing.expect(!try set.verify_explored()) catch |err| {
+                    std.debug.print("count {d}, pair {d} {d}\n", .{ count, pair[0], pair[1] });
+                    return err;
+                };
+            }
+        }
+    }
+}

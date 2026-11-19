@@ -138,3 +138,53 @@ test "curve25519: ZIP-215 vectors verify singly and in every batch" {
     const entries = cryptography.entries;
     try testing.expect(signing.VerifyingKey.verify_batch(&rng, &items, entries, sequential));
 }
+
+test "curve25519: RFC 7748 iterated X25519" {
+    var k: [32]u8 = @splat(0);
+    k[0] = 9;
+    var u = k;
+    for (1..1001) |i| {
+        const next = key_exchange.SecretKey.from_raw(k).exchange(.{ .bytes = u }).?.bytes;
+        u = k;
+        k = next;
+        if (i == 1) {
+            const after_one = "422c8e7a6227d7bca1350b3e2bb7279f7897b87bb6854b783c60e80311ae3079";
+            try testing.expectEqualSlices(u8, &bytes(32, after_one), &k);
+        }
+    }
+    const after_thousand = "684cf59ba83309552800ef566f2f4d3c1c3887c49360e3875f2eb94d99532c51";
+    try testing.expectEqualSlices(u8, &bytes(32, after_thousand), &k);
+}
+
+test "curve25519: ZIP-215 full batch verifies under every strategy shape" {
+    const namespace = "_COMMONWARE_CRYPTOGRAPHY_CURVE25519_ZIP215_VECTORS";
+    const count = vectors.zip215_points.len * vectors.zip215_points.len;
+    var keys: [count]signing.VerifyingKey = undefined;
+    var signatures: [count]signing.Signature = undefined;
+    var items: [count]signing.VerifyingKey.Entry = undefined;
+    var index: usize = 0;
+    for (vectors.zip215_points) |a_hex| {
+        for (vectors.zip215_points) |r_hex| {
+            keys[index] = signing.VerifyingKey.from_bytes(bytes(32, a_hex));
+            signatures[index] = .{ .bytes = bytes(32, r_hex) ++ @as([32]u8, @splat(0)) };
+            items[index] = .{
+                .public_key = &keys[index],
+                .signature = &signatures[index],
+                .namespace = namespace,
+                .message = "Zcash",
+            };
+            index += 1;
+        }
+    }
+    // Shards below 44 signatures take Straus, larger ones the buckets.
+    const Op = struct {
+        items: []const signing.VerifyingKey.Entry,
+        pub fn run(op: @This(), explorer: parallel.mocks.Explorer) bool {
+            var rng = utils.test_rng();
+            const entries = cryptography.entries;
+            return signing.VerifyingKey.verify_batch(&rng, op.items, entries, explorer);
+        }
+    };
+    const op: Op = .{ .items = &items };
+    try testing.expect(try parallel.mocks.explore(testing.allocator, testing.io, op));
+}

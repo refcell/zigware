@@ -25,6 +25,7 @@ const Point = core.Point;
 const Fe = Point.Fe;
 const scalar = Point.scalar;
 const Sha512 = std.crypto.hash.sha2.Sha512;
+const serial_strategy = parallel.sequential;
 
 /// The most signatures one bucket MSM sums.
 pub const chunk_signatures = 128;
@@ -351,6 +352,11 @@ fn range_sum(items: anytype, range: parallel.Range, seed: [32]u8) ?Point {
 /// Verifies `count` signatures at once under a fresh 32-byte seed from `rng` (commonware
 /// `verify_batch_inner`). `strategy` splits the items into batches, whose sums add into one
 /// equation. `items` has `item(index) core.BatchItem`. An empty batch is rejected.
+///
+/// As in commonware, an outer `try_run` picks between the whole pipeline on the calling thread
+/// and on `strategy`. A structurally invalid batch (a non-canonical `s` or an undecodable `R`)
+/// stops before the batch equation and fails that `try_run`, so only batches that reach the
+/// equation give an adaptive strategy a complete-work sample.
 pub fn verify_batch(rng: anytype, count: usize, items: anytype, strategy: anytype) bool {
     const resolved = cryptography.hasher.resolve_strategy(strategy);
     if (count == 0) return false;
@@ -361,7 +367,7 @@ pub fn verify_batch(rng: anytype, count: usize, items: anytype, strategy: anytyp
         seed: [32]u8,
         count: usize,
 
-        pub fn run(batch: @This(), batches: anytype) bool {
+        pub fn run(batch: @This(), batches: anytype) error{Structural}!bool {
             var sums: [parallel.max_chunks]?Point = undefined;
             const shards = sums[0..batches.count()];
             if (batches.is_whole()) {
@@ -370,7 +376,7 @@ pub fn verify_batch(rng: anytype, count: usize, items: anytype, strategy: anytyp
                 batches.map_collect(shards, batch);
             }
             var total = Point.identityElement;
-            for (shards) |shard| total = total.add(shard orelse return false);
+            for (shards) |shard| total = total.add(shard orelse return error.Structural);
             return core.is_identity(total.clearCofactor());
         }
 
@@ -378,6 +384,23 @@ pub fn verify_batch(rng: anytype, count: usize, items: anytype, strategy: anytyp
             return range_sum(batch.items, range, batch.seed);
         }
     };
+    const Pipeline = struct {
+        batch: Batch,
+        strategy: @TypeOf(resolved),
+
+        pub fn serial(pipeline: @This()) error{Structural}!bool {
+            const b = pipeline.batch;
+            return serial_strategy.try_run_batches(b.count, 1, 1, b);
+        }
+
+        pub fn parallel(pipeline: @This()) error{Structural}!bool {
+            const b = pipeline.batch;
+            return pipeline.strategy.try_run_batches(b.count, 1, 1, b);
+        }
+    };
     const batch: Batch = .{ .items = items, .seed = seed, .count = count };
-    return resolved.run_batches(count, 1, 1, batch);
+    const pipeline: Pipeline = .{ .batch = batch, .strategy = resolved };
+    return resolved.try_run(count, pipeline) catch |err| switch (err) {
+        error.Structural => false,
+    };
 }

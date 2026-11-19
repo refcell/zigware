@@ -276,3 +276,196 @@ test "curve25519 signing: batch coalesces repeated signers" {
         try testing.expect(!try batch.check(explored));
     }
 }
+
+test "curve25519 signing: field decoding reduces non-canonical encodings" {
+    const Fe = Point.Fe;
+    var p: [32]u8 = @splat(0xff);
+    p[0] = 0xed;
+    p[31] = 0x7f;
+    // p + k for k in 0..19, with and without bit 255, decode to k.
+    for (0..19) |k| {
+        var canonical: [32]u8 = @splat(0);
+        canonical[0] = @intCast(k);
+        for ([_]u8{ 0, 0x80 }) |sign| {
+            var encoded = p;
+            encoded[0] += @intCast(k);
+            encoded[31] |= sign;
+            try testing.expectEqualSlices(u8, &canonical, &Fe.fromBytes(encoded).toBytes());
+        }
+    }
+    var p_minus_one = p;
+    p_minus_one[0] -= 1;
+    try testing.expectEqualSlices(u8, &p_minus_one, &Fe.fromBytes(p_minus_one).toBytes());
+    try testing.expectEqualSlices(u8, &p_minus_one, &Fe.zero.sub(Fe.one).toBytes());
+}
+
+test "curve25519 signing: canonical s decoding at the group order boundary" {
+    const scalar = Point.scalar;
+    const order: u256 = std.crypto.ecc.Edwards25519.scalar.field_order;
+    const Case = struct { value: u256, canonical: bool };
+    const cases = [_]Case{
+        .{ .value = 0, .canonical = true },
+        .{ .value = order - 1, .canonical = true },
+        .{ .value = order, .canonical = false },
+        .{ .value = order + 1, .canonical = false },
+        .{ .value = std.math.maxInt(u256), .canonical = false },
+    };
+    for (cases) |case| {
+        var encoded: [32]u8 = undefined;
+        std.mem.writeInt(u256, &encoded, case.value, .little);
+        const accepted = if (scalar.rejectNonCanonical(encoded)) |_| true else |_| false;
+        try testing.expectEqual(case.canonical, accepted);
+        // An accepted scalar round-trips unchanged through reduction.
+        if (case.canonical) try testing.expectEqualSlices(u8, &encoded, &scalar.reduce(encoded));
+    }
+    // A low-order key and R verify with s = 0 for every message; s = L (which reduces to 0)
+    // must be rejected as non-canonical rather than accepted.
+    var identity: [32]u8 = @splat(0);
+    identity[0] = 1;
+    const key = VerifyingKey.from_bytes(identity);
+    var signature: Signature = .{ .bytes = identity ++ @as([32]u8, @splat(0)) };
+    try testing.expect(key.verify("ns", "m", &signature));
+    std.mem.writeInt(u256, signature.bytes[32..64], order, .little);
+    try testing.expect(!key.verify("ns", "m", &signature));
+    const entry: VerifyingKey.Entry = .{
+        .namespace = "ns",
+        .message = "m",
+        .public_key = &key,
+        .signature = &signature,
+    };
+    try testing.expect(!verify_entries(&.{entry}, parallel.sequential));
+}
+
+/// commonware's `test::strategy::Recording`: runs every operation on a strategy without
+/// workers, serially or with two planned tasks, and records whether each adapted operation
+/// admits a complete-work sample (as the adaptive policy does, only successes count).
+const Recording = struct {
+    planned: usize,
+    pool: *parallel.ThreadPool,
+    samples: *std.ArrayList(bool),
+
+    pub const Adaptation = struct {
+        chosen: parallel.Rayon,
+        samples: *std.ArrayList(bool),
+
+        pub fn get(adaptation: *Adaptation) parallel.Rayon {
+            return adaptation.chosen;
+        }
+
+        pub fn finish(adaptation: *Adaptation, result: anytype) @TypeOf(result) {
+            const complete = if (@typeInfo(@TypeOf(result)) == .error_union)
+                (if (result) |_| true else |_| false)
+            else
+                true;
+            adaptation.samples.append(gpa, complete) catch @panic("out of memory");
+            return result;
+        }
+    };
+
+    pub fn adapt(r: Recording, _: usize, _: usize, _: usize, _: anytype) Adaptation {
+        const chosen = parallel.Rayon.init(r.pool).with_parallelism(r.planned);
+        return .{ .chosen = chosen, .samples = r.samples };
+    }
+
+    pub fn parallelism(r: Recording) usize {
+        return r.planned;
+    }
+
+    pub fn split(_: Recording, _: usize) usize {
+        return 1;
+    }
+
+    pub fn execute(
+        _: Recording,
+        count: usize,
+        context: anytype,
+        comptime body: fn (@TypeOf(context), usize) void,
+    ) void {
+        for (0..count) |index| body(context, index);
+    }
+
+    pub fn scratch(_: Recording) ?std.mem.Allocator {
+        return null;
+    }
+
+    const S = parallel.Sequential;
+    pub const run = S.run;
+    pub const try_run = S.try_run;
+    pub const run_batches = S.run_batches;
+    pub const try_run_batches = S.try_run_batches;
+    pub const fold = S.fold;
+    pub const fold_init = S.fold_init;
+    pub const try_fold = S.try_fold;
+    pub const map_into = S.map_into;
+    pub const map_init_into = S.map_init_into;
+    pub const try_map_into = S.try_map_into;
+    pub const map_collect = S.map_collect;
+    pub const map_init_collect = S.map_init_collect;
+    pub const try_map_collect = S.try_map_collect;
+    pub const map_partition_collect = S.map_partition_collect;
+    pub const join = S.join;
+    pub const sort_by = S.sort_by;
+    pub const sort_unstable_by = S.sort_unstable_by;
+};
+
+test "curve25519 signing: structural rejection does not record complete work" {
+    const signer = SigningKey.from_seed(@splat(7));
+    const key = signer.verifying_key();
+    const valid = signer.sign("resource", "control");
+    var bad_s = valid;
+    bad_s.bytes[63] |= 0x80;
+    var bad_r = valid;
+    bad_r.bytes[0..32].* = undecodable();
+    const bad_key = VerifyingKey.from_bytes(undecodable());
+    const Case = struct {
+        key: *const VerifyingKey,
+        signature: *const Signature,
+        message: []const u8,
+        valid: bool,
+        complete: bool,
+
+        fn init(
+            k: *const VerifyingKey,
+            sig: *const Signature,
+            m: []const u8,
+            v: bool,
+            done: bool,
+        ) @This() {
+            return .{ .key = k, .signature = sig, .message = m, .valid = v, .complete = done };
+        }
+    };
+    // A signature over another message reaches the batch equation and fails there.
+    const c = Case.init;
+    const cases = [_]Case{
+        c(&key, &valid, "control", true, true),
+        c(&key, &bad_s, "control", false, false),
+        c(&key, &bad_r, "control", false, false),
+        c(&bad_key, &valid, "control", false, false),
+        c(&key, &valid, "different", false, true),
+    };
+    const pool = try parallel.ThreadPool.create(gpa, testing.io, .{ .threads = 0 });
+    defer pool.destroy();
+    for ([_]usize{ 1, 2 }) |planned| {
+        for (cases) |case| {
+            var samples: std.ArrayList(bool) = .empty;
+            defer samples.deinit(gpa);
+            const strategy: Recording = .{ .planned = planned, .pool = pool, .samples = &samples };
+            const entry: VerifyingKey.Entry = .{
+                .namespace = "resource",
+                .message = case.message,
+                .public_key = case.key,
+                .signature = case.signature,
+            };
+            try testing.expectEqual(case.valid, verify_entries(&.{entry}, strategy));
+            // zigware rejects an undecodable key before any strategy call, so a structural
+            // rejection may record nothing; it must never record a complete sample.
+            const items = samples.items;
+            const last: ?bool = if (items.len > 0) items[items.len - 1] else null;
+            if (case.complete) {
+                try testing.expectEqual(@as(?bool, true), last);
+            } else {
+                try testing.expect(last != true);
+            }
+        }
+    }
+}
