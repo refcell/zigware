@@ -15,7 +15,8 @@ resize, sync), `runtime.storage`, with the in-memory backend `runtime.storage.me
   `recoverable_prefix_len`; `runtime.buffer`.
 - [x] runtime buffer `Write` and its tip (write.rs, tip.rs) with their tests (mod.rs's write
   tests, including the straddle, direct-write, at-size append, and pre-wrapped-mutation
-  cases). No counterpart: its in-flight `start_sync` and range-vs-full sync tests.
+  cases). Its in-flight `start_sync` tests are in runtime/buffer/start_sync_test.zig and its
+  range-vs-full sync tests in sync_wait_test.zig (as durability-operation counts).
 - [x] runtime buffer `Read` (read.rs) with mod.rs's read tests; `read` copies into the caller's
   buffer (one refill buffer allocated at `init`) and rewinds on failure.
 - [x] paged `Writer.read_many_into`/`read_ranges_into`/`try_read_ranges_sync_into` with
@@ -23,15 +24,16 @@ resize, sync), `runtime.storage`, with the in-memory backend `runtime.storage.me
 - [x] paged `View` (view.rs) shared by `Writer` and `Sealed`; `Sealed` (sealed.rs) with
   `Writer.seal`/`snapshot`/`try_snapshot` and sealed.rs's tests (paged/sealed_test.zig).
   Not ported: `test_sealed_read_many_into_rejects_unsorted_offsets` (a should_panic: unsorted
-  offsets are an assert), `test_sealed_reads_while_seal_sync_pending` (syncs are synchronous,
-  so `seal` returns a durable view and has no handle), and the two `SplitWriteBlob`
+  offsets are an assert) and the two `SplitWriteBlob`
   partial-page rewrite races (writes cannot pause mid-call on a synchronous blob).
 - [x] The rest of writer.rs's 94 tests, mod.rs's, and read.rs's portable tests (snapshot,
   replay options, recoverable prefix, CRC slots, read_many, needs_sync, recovery truncate
   with commonware's `PartialWriteBlob` interrupted stages, whose write counts match, large
   appends, replay seeks), plus two hints they check: `seal`'s flush writes with `dont_cache`
-  and a recovery shrink reads its retained page with `dont_cache`. No counterpart: tests of
-  in-flight `start_sync` handles and waits, range-vs-full sync selection, `IoBuf` ownership
+  and a recovery shrink reads its retained page with `dont_cache`. The in-flight
+  `start_sync` handle and wait tests (and `test_sealed_reads_while_seal_sync_pending`: `seal`
+  returns its sync's completion) are in runtime/buffer/start_sync_test.zig, range-vs-full
+  sync selection in sync_wait_test.zig. No counterpart: `IoBuf` ownership
   and allocation reuse (`to_physical_pages_preserves_chunk_owners`,
   `append_variable_value_encodes_in_place`, `replay_buf_bytes_share_pages`), delayed,
   cancelled, or read-ahead reads (read.rs's batch pipeline: our replay reads one batch at a
@@ -47,9 +49,9 @@ resize, sync), `runtime.storage`, with the in-memory backend `runtime.storage.me
 - [x] journal/segmented: oversized journal (fixed index plus glob values, checkpoint restore
   and marker-tracked recovery) with its core tests.
 - [x] journal/segmented: the rest of oversized.rs's recovery tests (61 ported in
-  oversized_recovery_test.zig). No counterpart: the value-alignment sync-concurrency test
-  and the dropped-`start_sync`-handle test (syncs complete serially and synchronously). The
-  dropped-replay read-gate test is ported as a `Canceled` value read.
+  oversized_recovery_test.zig), including the value-alignment sync-concurrency and
+  dropped-`start_sync`-handle tests on `DelayedSync`. The dropped-replay read-gate test is
+  ported as a `Canceled` value read, which ends the replay (`ReplayInterrupted`).
 - [x] `ReadOptions` (the `dont_cache` hint) through replay: `Writer.replay`/`view_replay` and
   `Sealed.replay` take it, and the segmented fixed, variable, and oversized configs carry
   `replay_read_options` (default `.{}`). Ported the fixed, variable, and oversized
@@ -83,12 +85,12 @@ resize, sync), `runtime.storage`, with the in-memory backend `runtime.storage.me
   each test per family (`_inner`/`_mmr`/`_mmb`); here one test covers both families. The
   contiguous journals and `Journal` gained `replay_options` (commonware's replay
   `read_options` argument; `replay` keeps the defaults), with
-  `replay_propagates_read_options_to_backing_journal`. No counterpart: the sync-order,
-  `start_sync` overlap and failure-handle, and Merkle-watermark tests (they drive delayed
-  sync contexts and in-flight handles; `Recovery.finish` syncs items before the Merkle
-  structure, as commonware's order test checks), the strategy-pool `read_many` sharding and
-  parallel-align tests (no thread pool here), the cancellation test, and should_panic
-  argument checks.
+  `replay_propagates_read_options_to_backing_journal`. The sync-order, `start_sync` overlap
+  and failure-handle, and Merkle-watermark tests are in authenticated_start_sync_test.zig, on
+  `DelayedSync`. No counterpart: the strategy-pool `read_many` sharding and parallel-align
+  tests and `test_merkleize_retains_ancestors_after_cancellation` (merkleization runs
+  sequentially on the caller, so there is no detached job to outlive its waiter), and
+  should_panic argument checks.
 - [x] metadata (two-blob atomic key-value store).
 - [x] metadata: the `metadata_recovery` fuzz target and the overwrite-crash-during-sync test
   on `runtime.storage.faulty` (with storage-archive's `archive/faults.zig` harness).
@@ -97,7 +99,8 @@ resize, sync), `runtime.storage`, with the in-memory backend `runtime.storage.me
   without its sync-handle counts; durability stays an explicit blob sync, where commonware
   folds a lone write's sync into `WriteOptions::SYNC`). No counterpart: `value_too_big`
   (a should_panic on a 4 GiB value), `determinism` (deterministic-runtime auditor state; the
-  conformance hash pins the bytes), and the dropped-handle and delayed-sync tests.
+  conformance hash pins the bytes). The dropped-handle, failed-sync, and delayed-sync tests
+  are in metadata/start_sync_test.zig, on `DelayedSync`.
 - [x] `queue_recovery` fuzz target on faulty storage.
 - [x] `journal_segmented_variable_recovery` fuzz target on faulty storage (raw-image oracle).
 - [x] `journal_oversized_recovery` fuzz target on faulty storage (marker-floor oracle).
@@ -277,8 +280,9 @@ resize, sync), `runtime.storage`, with the in-memory backend `runtime.storage.me
 - runtime buffer: the tip buffer is one contiguous allocation of `capacity + page_size`
   made at init (appends that would overflow it by a page bypass it), instead of chained
   zero-copy chunks. The page cache evicts with Clock2Q+ (`utils.Cache`) like commonware, but
-  has no slot hints and does not share in-flight reads (single-owner fibers). Blobs sync
-  synchronously, so `start_sync` is `sync` and `SyncState` has no pending state. A writer
+  has no slot hints and does not share in-flight reads (single-owner fibers). `start_sync`
+  returns a `runtime.storage.Completion`, and `SyncState` keeps it pending until a later
+  operation waits for it, as commonware's does. A writer
   takes ownership of its blob on success and closes it in `deinit`; a `Replay` borrows it.
   Large appends write their bulk pages in buffer-capacity chunks rather than one write; the
   bytes on disk are identical. `recoverable_prefix_len` reads one page at a time.
@@ -288,8 +292,10 @@ resize, sync), `runtime.storage`, with the in-memory backend `runtime.storage.me
   `drain` consume the recovery even on error. commonware passes replay `read_options` as an
   argument to `preflight_floors`, `init`, and `init_with_markers`; here it is the configs'
   `replay_read_options` field with a default, so callers that keep the defaults (every lane
-  but tests today) need no change. The replay never fills the page cache. Tests of in-flight
-  `start_sync` handles and of dropping a `next` mid-repair have no counterpart: syncs and repairs complete synchronously. Removing a section removes
+  but tests today) need no change. The replay never fills the page cache. Section
+  `start_sync`s run concurrently and are joined; a `next` canceled mid-call (commonware's
+  dropped replay future) ends the replay, so `next` returns null and `finish` fails, as
+  commonware's `ReplayInterrupted` does. Removing a section removes
   its blob name before closing its writer, as commonware does.
 - The storage mocks provide `reads` and `dont_cache_reads` (commonware's `RecordingContext`
   read count and recorded options) and
@@ -309,26 +315,26 @@ resize, sync), `runtime.storage`, with the in-memory backend `runtime.storage.me
 
 - queue: commonware's separate `Reader` (watch-channel snapshots, `recv` waiting across
   tasks) becomes the reader side of one `Queue` value reading the live journal up to the
-  published size, since nothing runs concurrently with the journal. Metrics `tip`, `next`, and
+  published size. A canceled or failed mutation publishes nothing and fails the queue, where
+  commonware's reader ends once the queue is dropped. Metrics `tip`, `next`, and
   the floor are plain fields until the metrics backlog item.
 
 - contiguous variable: commonware's clear callbacks (`init_cleared`, `open_cleared`,
   `clear_to_size_cleared`) only ever remove the data partition, so the fixed recovery takes
   the dependent partition name instead of a closure; `destroy_cleared` takes a value with a
-  `clear()` method. `read_many` reads item by item (no batched sync pass), and `start_sync`
-  advances the joint watermark to the current size since syncs complete synchronously.
+  `clear()` method. `start_sync` joins the data, offsets, and watermark syncs; the watermark
+  advances only to the boundary a completed combined sync proved, as in commonware.
 
-- contiguous fixed: syncs complete synchronously, so `start_sync` advances the watermark to
-  the current size (commonware advances it to the last observed sync), sealed blobs are
-  fully synced paged writers (no `Sealed` views or snapshots; `snapshot` readers are not
+- contiguous fixed: `start_sync` advances the watermark to the last observed sync, as in
+  commonware, and a sealed predecessor's sync stays in flight (`tail_predecessor_sync`).
+  Sealed blobs are paged writers (no `Sealed` views or snapshots; `snapshot` readers are not
   ported, since nothing runs concurrently with the journal; `runtime.buffer.paged.Sealed`
   exists since 48ec31b if a reader ever needs one), and `read_many` reads item by item
   through the page cache. Metrics are plain counters (`items_read`, `cache_hits`,
   `cache_misses`, blob `synced`/`pruned`).
 
-- oversized: syncs complete synchronously, so tracked barriers are recorded already
-  succeeded and marker generations are never in flight; markers persist with a blocking
-  metadata `sync`.
+- oversized: data syncs and one marker generation may be in flight (`start_sync_tracked`),
+  as in commonware; a failed generation surfaces at the next request.
 
 - authenticated: commonware's `Backing`/`BackingRecovery` traits are a comptime contract
   (`assert_backing`) over decl names; contexts become `(gpa, storage)`, and
@@ -342,8 +348,8 @@ resize, sync), `runtime.storage`, with the in-memory backend `runtime.storage.me
   `ItemPruned`, ...) without payloads. Batches are hand-refcounted like `merkle.batch`:
   `MerkleizedBatch.release` is the `Arc` drop, parent links are weak, and items live in
   refcounted chunks shared with descendants' `ancestor_items`. `merkleize` and `align_merkle`
-  hash sequentially (no strategy), `read_many` is not sharded, and `start_sync` completes at
-  once. Tests use a fixed stand-in `Op` (tag, key, value) for qmdb's operation, since they
+  hash sequentially (no strategy), `read_many` is not sharded, and `start_sync` joins the
+  journal's and the Merkle structure's syncs. Tests use a fixed stand-in `Op` (tag, key, value) for qmdb's operation, since they
   compare roots between journals only.
 
 - `journal_oversized_recovery` interrupts syncs by reaching into the section buffers: a
@@ -446,3 +452,8 @@ resize, sync), `runtime.storage`, with the in-memory backend `runtime.storage.me
 - 2026-11-19: ported the variable journal start_sync flush and init sync-order fault tests
   (from storage-merkle's backlog) and the iobuf bench.
 - 2026-11-19: enabled the four compressed (`<true>`) journal conformance hashes; all match.
+- 2026-11-19: not-portable re-audit after async start_sync: segmented replays end when a call
+  is canceled (fixed, variable, oversized resume), manager start_sync skips clean sections,
+  metadata's dropped-completion and failed-sync tests and pipelined overwrite crash, and the
+  queue's reader after an interrupted mutation, each on `DelayedSync` or `ReadGate`; stale
+  "no counterpart" and "syncs are synchronous" records updated.

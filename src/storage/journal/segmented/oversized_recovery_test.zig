@@ -1378,7 +1378,7 @@ test "oversized recovery: a completed start_sync is recoverable" {
 }
 
 test "oversized recovery: a failed value sync recovers clean" {
-    // commonware's sync and start_sync variants: start_sync is sync here.
+    // commonware's sync and start_sync variants.
     for ([_]bool{ false, true }) |started| {
         var h = try Harness.init();
         defer h.deinit();

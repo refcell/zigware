@@ -2,8 +2,8 @@
 //! 1024-byte pages, a 10-page cache, 4096-byte buffers).
 //!
 //! commonware's reader is a separate handle; here the queue is both, so reader tests call the
-//! queue. Tests of `recv` waiting, `select!`, and dropping an in-flight mutation have no
-//! counterpart, since nothing runs concurrently with the journal.
+//! queue. Tests of `recv` waiting and `select!` have no counterpart: one value holds both
+//! sides, so no reader waits across tasks. An in-flight mutation is canceled on `DelayedSync`.
 
 const std = @import("std");
 const testing = std.testing;
@@ -628,4 +628,55 @@ test "queue: random workload round-trips across a reopen" {
     }
     try testing.expectEqual(count - queue.journal.pruning_boundary(), delivered);
     try queue.sync();
+}
+
+fn enqueue_second(ctx: runtime.deterministic.Context, queue: *Queue) !void {
+    _ = ctx;
+    _ = try queue.enqueue("second");
+}
+
+fn interrupted_mutation(ctx: runtime.deterministic.Context) !void {
+    var inner: runtime.storage.memory.Storage = .init(gpa);
+    defer inner.deinit();
+    var pending: runtime.storage.mocks.DelayedSync = .init(gpa, ctx.io());
+    defer pending.deinit();
+    var delayed: runtime.storage.mocks.DelayedSynced = .init(gpa, inner.storage(), &pending);
+    var cache_ref = try paged.CacheRef.init(gpa, 1024, 10);
+    defer cache_ref.deinit();
+    var queue = try Queue.init(gpa, delayed.storage(), .{
+        .partition = "test_reader_interrupted",
+        .items_per_section = 10,
+        .codec_config = bytes_cfg,
+        .cache_ref = &cache_ref,
+        .write_buffer = 4096,
+        .replay_buffer = 4096,
+    }, null);
+    defer queue.deinit();
+    // Let started syncs complete so the first enqueue publishes.
+    pending.unblock();
+    try testing.expectEqual(0, try queue.enqueue("first"));
+    // Park the next enqueue's durable commit, then cancel it mid-flight.
+    try pending.arm();
+    const handle = try ctx.child("enqueue").spawn(enqueue_second, .{&queue});
+    try ctx.sleep(.fromMilliseconds(10));
+    try testing.expectEqual(@as(u64, 1), pending.calls());
+    if (handle.abort()) |result| {
+        try testing.expectError(error.Canceled, result);
+    } else |err| try testing.expectEqual(error.Closed, err);
+    pending.release_all();
+    // The reader delivers the published item, then nothing: the canceled commit published
+    // nothing, and it left the queue failed.
+    try testing.expect(queue.failed);
+    const received = (try queue.try_recv()).?;
+    defer codec.free(Bytes, gpa, received.item);
+    try testing.expectEqual(0, received.position);
+    try testing.expectEqualSlices(u8, "first", received.item);
+    try testing.expect(try queue.try_recv() == null);
+}
+
+test "queue: the reader ends after an interrupted mutation" {
+    // commonware `test_reader_ends_after_interrupted_mutation`, on `DelayedSync`.
+    var runner = try runtime.deterministic.Runner.init(gpa, .{});
+    defer runner.deinit();
+    try (try runner.start_context(interrupted_mutation, .{}));
 }
