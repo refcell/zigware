@@ -7,6 +7,7 @@ const testing = std.testing;
 const Io = std.Io;
 const actor = @import("actor");
 const consensus = @import("consensus");
+const runtime = @import("runtime");
 const utils = @import("utils");
 pub const harness = @import("../processor/testing.zig");
 const processing_mod = @import("processing.zig");
@@ -51,6 +52,21 @@ pub const Fixture = struct {
     pub fn init(fixture: *Fixture) !void {
         try fixture.harness.init();
         errdefer fixture.harness.deinit();
+        try fixture.start();
+    }
+
+    /// Like `init`, over `over` (see `Harness.init_with`); the caller already ran
+    /// `fixture.harness.init_storage()`. `fixture` must not move afterwards.
+    pub fn init_with(fixture: *Fixture, over: runtime.storage.Storage) !void {
+        fixture.harness.init_with(over) catch |err| {
+            fixture.harness.storage.deinit();
+            return err;
+        };
+        errdefer fixture.harness.deinit();
+        try fixture.start();
+    }
+
+    fn start(fixture: *Fixture) !void {
         fixture.prunes = .empty;
         const pair = try actor.mailbox.new(Message, gpa, io, 8);
         fixture.receiver = pair.receiver;

@@ -457,8 +457,20 @@ pub const Harness = struct {
 
     /// `harness` must not move afterwards: its provider points at its state.
     pub fn init(harness: *Harness) !void {
-        harness.storage = .init(gpa);
+        harness.init_storage();
         errdefer harness.storage.deinit();
+        try harness.init_with(harness.storage.interface());
+    }
+
+    /// Creates the backing storage only, for a test that wraps `storage.interface()` (for
+    /// example in `runtime.storage.mocks.DelayedSynced`) and then calls `init_with`.
+    pub fn init_storage(harness: *Harness) void {
+        harness.storage = .init(gpa);
+    }
+
+    /// Opens everything but the backing storage (created by `init_storage`, released by
+    /// `deinit` either way) over `over`, which must outlive the harness.
+    pub fn init_with(harness: *Harness, over: runtime.storage.Storage) !void {
         harness.cache_ref = try .init(gpa, 101, 11);
         errdefer harness.cache_ref.deinit();
         harness.registry = metrics.Registry.init(gpa);
@@ -466,7 +478,7 @@ pub const Harness = struct {
         const env: db.Env = .{
             .gpa = gpa,
             .io = io,
-            .storage = harness.storage.interface(),
+            .storage = over,
             .scope = metrics.Scope.init(&harness.registry).child("db"),
         };
         harness.databases = try Any.Shared.open(env, harness.config(), null);
