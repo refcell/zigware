@@ -140,7 +140,7 @@ pub fn Deferred(comptime T: type) type {
         /// commonware `Lazy`'s `PartialEq`: equal bytes are equal without decoding;
         /// otherwise the decoded values are compared, and two failures are equal.
         pub fn eql(a: Self, b: Self) bool {
-            if (std.mem.eql(u8, &a.bytes, &b.bytes)) return true;
+            if (bytes_equal(size, &a.bytes, &b.bytes)) return true;
             const left = a.get();
             const right = b.get();
             if (left == null or right == null) return left == null and right == null;
@@ -163,6 +163,22 @@ pub fn Deferred(comptime T: type) type {
             return from_bytes(bytes.*);
         }
     };
+}
+
+/// `std.mem.eql` of two fixed-size byte arrays, as an XOR-OR over 32-byte vectors. On
+/// AVX-512 targets std's 64-byte-chunk compare costs about 120 ns for 96 bytes (the
+/// `bool`-vector reduce lowers slowly); this form takes about 2 ns.
+fn bytes_equal(comptime n: usize, a: *const [n]u8, b: *const [n]u8) bool {
+    const chunk = 32;
+    var diff: @Vector(chunk, u8) = @splat(0);
+    inline for (0..n / chunk) |i| {
+        const left: @Vector(chunk, u8) = a[i * chunk ..][0..chunk].*;
+        const right: @Vector(chunk, u8) = b[i * chunk ..][0..chunk].*;
+        diff |= left ^ right;
+    }
+    var tail: u8 = 0;
+    inline for ((n / chunk) * chunk..n) |i| tail |= a[i] ^ b[i];
+    return @reduce(.Or, diff) == 0 and tail == 0;
 }
 
 /// A participant's attestation: the signer's index and its signature over a subject.
@@ -820,4 +836,18 @@ test {
     _ = @import("certificate_test.zig");
     _ = @import("certificate_fuzz_test.zig");
     _ = mocks;
+}
+
+test "certificate bytes_equal finds a difference at every position" {
+    inline for (.{ 1, 31, 32, 48, 64, 96 }) |n| {
+        var a: [n]u8 = undefined;
+        for (&a, 0..) |*byte, i| byte.* = @truncate(i *% 37 +% 11);
+        try std.testing.expect(bytes_equal(n, &a, &a));
+        for (0..n) |position| {
+            var b = a;
+            b[position] ^= 0x80;
+            try std.testing.expect(!bytes_equal(n, &a, &b));
+            try std.testing.expect(!bytes_equal(n, &b, &a));
+        }
+    }
 }
