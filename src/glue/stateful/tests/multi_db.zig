@@ -159,7 +159,7 @@ pub const App = struct {
     }
 
     /// Executes a block against both databases (commonware `App::execute`).
-    fn execute(batches: Databases.Unmerkleized, at: Height) !Databases.Merkleized {
+    pub fn execute(batches: Databases.Unmerkleized, at: Height) !Databases.Merkleized {
         var batch_a = batches[0];
         var batch_b = batches[1];
         var a_owned = true;
@@ -261,7 +261,7 @@ pub const App = struct {
 };
 
 /// The app's databases, their configuration, and their muxed resolvers (see `engine`).
-const Spec = struct {
+pub const Spec = struct {
     pub const Block = multi.Block;
     pub const App = multi.App;
     pub const Databases = multi.Databases;

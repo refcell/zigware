@@ -18,15 +18,17 @@ const testing_mod = @import("../actor/processor/testing.zig");
 
 const Height = consensus.Height;
 const Sha256 = cryptography.Sha256;
-const Key = engine.Key;
+pub const Key = engine.Key;
 pub const Any = testing_mod.Any;
 const SyncTarget = Any.SyncTarget;
-const u64_to_digest = engine.u64_to_digest;
-const digest_to_u64 = engine.digest_to_u64;
-const counter_key = engine.counter_key;
+pub const Scheme = engine.Scheme;
+pub const u64_to_digest = engine.u64_to_digest;
+pub const digest_to_u64 = engine.digest_to_u64;
+pub const counter_key = engine.counter_key;
 const height_key = engine.height_key;
 
 pub const SingleDbEngine = engine.StatefulEngine(Spec);
+pub const Digested = SingleDbEngine.Digested;
 
 /// A block carrying its consensus context and the state it commits to (commonware `Block`):
 /// `context || parent || height || state_root || range`, hashed with SHA-256.

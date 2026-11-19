@@ -467,8 +467,10 @@ ones: d = deployer (thread T-01a1d5b9-c237), u = utils, j = storage-journal
   `StatefulEngine(S)` runs Simplex, the marshal node, the probe, the QMDB sync resolvers, and
   `Stateful` over app `S`'s databases. `single_db.zig` (one fixed QMDB) and `multi_db.zig` (a
   fixed QMDB plus a compact immutable QMDB, whose resolvers share the sync channel through a
-  muxer) are its two apps. As in commonware (since bca770a0c), every scenario runs on both
-  engines under rotating and stable leaders: finalize (and with storage faults), determinism,
+  muxer) are its two apps. As in commonware, every scenario runs on both engines; commonware
+  (since bca770a0c) also runs each under stable leaders, which `root.zig`'s `electors()` leaves
+  off for now (open, consensus-marshal: crash counts, random, many and rapid crashes, and the
+  state sync handoff still fail under them). The scenarios: finalize (and with storage faults), determinism,
   crash/restart, pruning (marshal and QMDB), delayed start, lossy, random, many, and rapid
   crashes, full outage, partition, and the state sync scenarios: handoff (and with storage
   faults), determinism, random crashes, lossy, crash during sync, and the partitioned restart
@@ -478,8 +480,10 @@ ones: d = deployer (thread T-01a1d5b9-c237), u = utils, j = storage-journal
   commonware, `StateSyncCompleted` checks that every fast-sync plan's joiner recorded
   completion (syncing acknowledges retained blocks, so the handoff properties alone pass while
   a sync never finishes; the slow-sync plans end mid-sync in commonware too, and skip it).
-  Written but skipped: both partitioned restarts, whose timed-out runner faults on teardown (an
-  `Io.Select` branch finishing during shutdown). Open: those two. simplex (T-01a1d5ad) has
+  Written but skipped: both partitioned restarts, whose timed-out runner faults on teardown.
+  The `Io.Select` fault was marshal's canceled waits (3d0d720); they now end in
+  `supervision.zig`'s `tree.zombies == null` assertion when `plan.zig` deinits the timed-out
+  runner. Open: those two. simplex (T-01a1d5ad) has
   floor.rs and mod.rs's six targeted qmdb tests.
   Split (agreed 2026-11-19): storage-journal keeps the state sync scenarios and multi_db_app;
   simplex (T-01a1d5ad-c8d6) takes floor.rs (`live_floor_preserves_application_recovery`, 2
