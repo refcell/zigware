@@ -22,7 +22,8 @@ variants need `runtime` storage; do them after its interface lands.
 - bmt moved to the coding lane (it needs it first).
 - [x] bitmap (authenticated bitmap over MMR).
 - [x] index (ordered/unordered, partitioned, immutable) over translators. The partitioned
-  `new_range`/`install_range` (crate-private, for qmdb) come with qmdb.
+  ranges (`new_range`/`install_range`, crate-private in commonware, for qmdb) are
+  `partitioned.{unordered,ordered}.Range`.
 - [x] merkle/verification (`ProofStore`, `range_proof`/`historical_range_proof`/`multi_proof`
   over any source) and merkle/storage (the source interface, `get_nodes`).
 - [x] merkle/persisted/full core: `storage.merkle.full.Merkle(F, Digest)` over
@@ -67,7 +68,11 @@ variants need `runtime` storage; do them after its interface lands.
   bench against the raw-block path. Byte identity with libzstd is not required.
 - [x] Storage fuzz targets `journal_fixed_operations` and `queue_operations` (handed over from
   storage-journal).
-- Partitioned index `new_range`/`install_range`: moved to the clearing lane with its index tests.
+- [x] Partitioned index `new_range`/`install_range` (clearing lane):
+  `partitioned.{unordered,ordered}.new_range(T, V, P, &full, offset, count)` returns a
+  `Range` with `get_mut`, `get_mut_or_insert`, `for_each_value`, and `install(&full)`.
+  Commonware's ranges update the full index's metrics live; a zigware range keeps its own
+  counters and `install` adds them (the full index is not shared across threads).
 - [x] Parallel merkleize strategy over the `parallel` package: `merkleize_with` and
   `add_many_with` take any strategy (commonware stores it on the batch; zigware passes it per
   call, so batches stay plain values), and the benches' workers=8 and BatchedParallel cases run
@@ -111,7 +116,7 @@ Commonware's `#[test]` functions matched to zigware tests by what they check.
 
 | module | tests | ported | partial | open | not portable |
 |---|---|---|---|---|---|
-| index | 172 | 108 | 7 | 7 | 50 |
+| index | 172 | 113 | 7 | 2 | 50 |
 | rmap | 39 | 38 | 0 | 0 | 1 |
 | bitmap | 15 | 11 | 0 | 0 | 4 |
 | translator | 18 | 15 | 2 | 0 | 1 |
@@ -121,9 +126,8 @@ index's spill tests (one tree, no spill threshold, see Decisions), `cursor_acros
 and the metrics-registry range test.
 
 Open (index):
-- [ ] Need `new_range`/`install_range` (backlog): `range_for_each_value_visits_all_values_once`
-  and `install_range_nonzero_offset` for both partitioned indices, and
-  `worker_prunes_count_live`.
+- [x] `range_for_each_value_visits_all_values_once` and `install_range_nonzero_offset` for
+  both partitioned indices, and `worker_prunes_count_live` (prunes counted at install).
 - [ ] Partitioned ordered: `get_mut_or_insert` (spill parts aside), `get_many` matches `get`.
 
 Partial:
@@ -441,3 +445,5 @@ Partial:
     by using it; `Mode.compress` stays only for comparison.
 - 2026-11-19: test tally of index, rmap, bitmap, and translator against commonware (clearing lane).
 - 2026-11-19: tally of merkle and journal internals; ported its 22 open tests in this lane.
+- 2026-11-19: partitioned index ranges (`new_range`/`install_range`) and their 5 tests
+  (clearing lane).

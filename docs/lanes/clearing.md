@@ -186,6 +186,7 @@ qmdb `current` (balances, over the MMB) and `keyless` (payout log, over the MMR)
     `runtime.storage.mocks.Recordings`.
   - [ ] Archive's open tests (prunable markers and destroy; the sync-count tests need a sync
     count in `runtime.storage.mocks.Recordings`).
+  - [x] Partitioned index `new_range`/`install_range` and its 5 dependent tests.
   - [ ] Partials and index's open tests that do not need `new_range`.
 
 ## Log
@@ -232,3 +233,4 @@ qmdb `current` (balances, over the MMB) and `keyless` (payout log, over the MMR)
   runs under `-Dslow-tests`.
 - 2026-11-19: storage test audit: tallies in storage-archive.md, storage-merkle.md, coding.md.
 - 2026-11-19: freezer's 9 open tests, archive slow sizes, and the mock sync count.
+- 2026-11-19: partitioned index ranges and their 5 tests.

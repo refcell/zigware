@@ -29,6 +29,23 @@ pub fn Run(comptime V: type) type {
     };
 }
 
+/// A worker's range of an `Index(T, V, P)` (commonware's `RangeIndex`).
+pub fn Range(comptime T: type, comptime V: type, comptime P: usize) type {
+    return partitioned.Range(Index(T, V, P), Index(T, V, P).absorb);
+}
+
+/// An empty range over partitions `[offset, offset + count)` of `full`.
+pub fn new_range(
+    comptime T: type,
+    comptime V: type,
+    comptime P: usize,
+    full: *const Index(T, V, P),
+    offset: u32,
+    count: u32,
+) Range(T, V, P) {
+    return .init(full, offset, count);
+}
+
 /// A partitioned ordered index whose first `P` key bytes select a partition and translator
 /// `T` (which must preserve key order) maps the rest.
 pub fn Index(comptime T: type, comptime V: type, comptime P: usize) type {
@@ -187,6 +204,36 @@ pub fn Index(comptime T: type, comptime V: type, comptime P: usize) type {
             self.counters.keys -= 1;
             self.counters.items -= count;
             self.counters.pruned += count;
+        }
+
+        /// Moves every run of `other` into `self`, which holds none of `other`'s keys (the
+        /// `install_range` half of commonware's `Partitioned`). Reserves first, so an error
+        /// changes nothing.
+        pub fn absorb(self: *Self, other: *Self) Allocator.Error!void {
+            assert(self != other);
+            var runs: usize = 0;
+            var counting = other.tree.getMin();
+            while (counting) |node| : (counting = node.next()) runs += 1;
+            assert(runs == other.counters.keys);
+            try self.pool.addCapacity(self.gpa, runs);
+            var current = other.tree.getMin();
+            while (current) |node| : (current = node.next()) {
+                const moved = item(node);
+                assert(moved.values.items.len > 0);
+                // Proof: `addCapacity` above put `runs` free items in the pool.
+                const created = self.pool.create(self.gpa) catch unreachable;
+                created.values = moved.values;
+                moved.values = .empty;
+                var slot = self.tree.getEntryFor(node.key);
+                assert(slot.node == null);
+                slot.set(&created.node);
+            }
+            self.counters.keys += other.counters.keys;
+            self.counters.items += other.counters.items;
+            self.counters.pruned += other.counters.pruned;
+            // `other`'s runs are empty now; drop them so it reads as an empty index.
+            other.deinit();
+            other.* = .init(self.gpa, self.translator);
         }
 
         pub fn for_each_value(
@@ -353,4 +400,88 @@ pub fn Index(comptime T: type, comptime V: type, comptime P: usize) type {
             }
         };
     };
+}
+
+const testing = std.testing;
+const translators = @import("../../translator.zig");
+const test_gpa = testing.allocator;
+
+/// `P = 1` over `u64` with a one-byte translator, so keys sharing a partition and the next
+/// byte share a run.
+const TestIndex = Index(translators.OneCap, u64, 1);
+
+fn new_test_range(
+    full: *const TestIndex,
+    offset: u32,
+    count: u32,
+) Range(translators.OneCap, u64, 1) {
+    return new_range(translators.OneCap, u64, 1, full, offset, count);
+}
+
+const Seen = std.ArrayList(u64);
+
+fn collect(seen: *Seen, value: *const u64) void {
+    seen.appendAssumeCapacity(value.*);
+}
+
+fn expect_values(index: *const TestIndex, key: []const u8, expected: []const u64) !void {
+    var values = index.get(key);
+    var actual: [8]u64 = undefined;
+    var count: usize = 0;
+    while (values.next()) |value| : (count += 1) actual[count] = value.*;
+    try testing.expectEqualSlices(u64, expected, actual[0..count]);
+}
+
+test "partitioned ordered range visits every value once" {
+    var full: TestIndex = .init(test_gpa, .init(.{}));
+    defer full.deinit();
+    // A translated-key collision appends a second value to a run in partition 0x80; partition
+    // 0x81 holds one key.
+    var range = new_test_range(&full, 0x80, 2);
+    defer range.deinit();
+    try testing.expect(try range.get_mut_or_insert(&.{ 0x80, 0x01 }, 1) == null);
+    try testing.expect(try range.get_mut_or_insert(&.{ 0x80, 0x02, 0xaa }, 2) == null);
+    var existing = (try range.get_mut_or_insert(&.{ 0x80, 0x02, 0xbb }, 3)).?;
+    existing.finish();
+    {
+        var cursor = range.get_mut(&.{ 0x80, 0x02, 0xbb }).?;
+        defer cursor.finish();
+        _ = cursor.next();
+        try cursor.insert(3);
+    }
+    try testing.expect(try range.get_mut_or_insert(&.{ 0x81, 0x07 }, 4) == null);
+    var seen: Seen = try .initCapacity(test_gpa, 8);
+    defer seen.deinit(test_gpa);
+    range.for_each_value(&seen, collect);
+    std.mem.sort(u64, seen.items, {}, std.sort.asc(u64));
+    try testing.expectEqualSlices(u64, &.{ 1, 2, 3, 4 }, seen.items);
+}
+
+test "partitioned ordered install range at a nonzero offset" {
+    var full: TestIndex = .init(test_gpa, .init(.{}));
+    defer full.deinit();
+    // Something already in the full index outside the range stays.
+    try full.insert(&.{ 0x7f, 0x01 }, 9);
+    {
+        // A range over global partitions [0x80, 0x82): two keys in 0x80, one in 0x81.
+        var range = new_test_range(&full, 0x80, 2);
+        errdefer range.deinit();
+        try testing.expect(try range.get_mut_or_insert(&.{ 0x80, 0x01 }, 1) == null);
+        try testing.expect(try range.get_mut_or_insert(&.{ 0x80, 0x02 }, 2) == null);
+        try testing.expect(try range.get_mut_or_insert(&.{ 0x81, 0x07 }, 3) == null);
+        try testing.expectEqual(@as(u64, 3), range.index.keys());
+        try range.install(&full);
+    }
+    try testing.expectEqual(@as(u64, 4), full.keys());
+    try testing.expectEqual(@as(u64, 4), full.items());
+    try expect_values(&full, &.{ 0x80, 0x01 }, &.{1});
+    try expect_values(&full, &.{ 0x80, 0x02 }, &.{2});
+    try expect_values(&full, &.{ 0x81, 0x07 }, &.{3});
+    try expect_values(&full, &.{ 0x7f, 0x01 }, &.{9});
+    // A remap that dropped the offset would file the entries at partitions 0x00 and 0x01.
+    try expect_values(&full, &.{ 0x00, 0x01 }, &.{});
+    try expect_values(&full, &.{ 0x01, 0x07 }, &.{});
+    // Ordered navigation crosses the installed partitions in prefix order.
+    var next = full.next_translated_key(&.{ 0x7f, 0x01 }).?;
+    try testing.expectEqual(@as(u64, 1), next.values.next().?.*);
 }

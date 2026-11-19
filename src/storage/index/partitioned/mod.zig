@@ -9,11 +9,15 @@
 //! spills to a `BTreeMap`; here every partition shares one balanced tree over the composite key,
 //! which has the same results and O(log n) operations without a spill threshold.
 //!
-//! Commonware's crate-private `Partitioned` trait (`new_range`/`install_range`, for parallel
-//! merkleization in qmdb) is not ported yet; it comes with qmdb.
+//! Commonware's crate-private `Partitioned` trait (for qmdb's parallel snapshot build) is
+//! `Range`: each variant's `new_range` makes an empty index restricted to a contiguous run of
+//! partitions, a worker fills it through its cursor operations, and `install_range` moves its
+//! contents into the full index. Commonware's ranges update the full index's metrics live; here
+//! the range keeps its own counters and `install_range` adds them to the full index's.
 
 const std = @import("std");
 const assert = std.debug.assert;
+const Allocator = std.mem.Allocator;
 const translator_module = @import("../../translator.zig");
 
 pub const unordered = @import("unordered.zig");
@@ -46,6 +50,7 @@ pub fn Translator(comptime T: type, comptime P: usize) type {
 
         pub const Key = struct { partition: u32, key: T.Key };
         pub const ordered = T.ordered;
+        pub const prefix_length = P;
         pub const partition_count: u32 = @as(u32, 1) << @intCast(8 * P);
 
         inner: T,
@@ -73,6 +78,87 @@ pub fn Translator(comptime T: type, comptime P: usize) type {
 
         pub fn eql(a: Key, b: Key) bool {
             return a.partition == b.partition and T.eql(a.key, b.key);
+        }
+    };
+}
+
+/// Asserts that partitions `[offset, offset + count)` hold `key`.
+fn assert_covers(comptime P: usize, offset: u32, count: u32, key: []const u8) void {
+    const partition = partition_index_and_sub_key(P, key).partition;
+    assert(partition >= offset);
+    assert(partition - offset < count);
+}
+
+/// A worker's view of partitions `[offset, offset + count)` of a partitioned `Index`
+/// (commonware's `RangeIndex`): only the cursor operations and the value walk, each key's
+/// partition asserted inside the range. `absorb(full, part)` moves `part`'s contents into
+/// `full`, which must hold none of its keys, leaving `part` empty and unchanged on error.
+pub fn Range(
+    comptime Index: type,
+    comptime absorb: fn (*Index, *Index) Allocator.Error!void,
+) type {
+    const Tr = Index.Translator;
+    comptime assert(@hasDecl(Tr, "partition_count")); // Index must be partitioned.
+    return struct {
+        const Self = @This();
+
+        index: Index,
+        /// The first global partition the range covers.
+        offset: u32,
+        /// The number of partitions the range covers.
+        count: u32,
+
+        /// An empty range over partitions `[offset, offset + count)` of `full`.
+        pub fn init(full: *const Index, offset: u32, count: u32) Self {
+            assert(count > 0);
+            assert(@as(u64, offset) + count <= Tr.partition_count);
+            return .{
+                .index = Index.init(full.gpa, full.translator),
+                .offset = offset,
+                .count = count,
+            };
+        }
+
+        pub fn deinit(self: *Self) void {
+            self.index.deinit();
+            self.* = undefined;
+        }
+
+        /// A cursor over the values of `key`, whose partition the range must cover.
+        pub fn get_mut(self: *Self, key: []const u8) ?Index.Cursor {
+            assert_covers(Tr.prefix_length, self.offset, self.count, key);
+            return self.index.get_mut(key);
+        }
+
+        /// A cursor over the values of `key`, or, if it has none, inserts `value` and returns
+        /// null. The range must cover `key`'s partition.
+        pub fn get_mut_or_insert(
+            self: *Self,
+            key: []const u8,
+            value: Index.Value,
+        ) Allocator.Error!?Index.Cursor {
+            assert_covers(Tr.prefix_length, self.offset, self.count, key);
+            return self.index.get_mut_or_insert(key, value);
+        }
+
+        /// Visits every value the range holds, in unspecified order.
+        pub fn for_each_value(
+            self: *const Self,
+            visit_context: anytype,
+            comptime visit: fn (@TypeOf(visit_context), *const Index.Value) void,
+        ) void {
+            self.index.for_each_value(visit_context, visit);
+        }
+
+        /// Moves the range's contents into `full` and frees the range. `full` must hold no key
+        /// of the range's partitions. On error the range and `full` are unchanged.
+        pub fn install(self: *Self, full: *Index) Allocator.Error!void {
+            const keys_before = full.keys();
+            const keys_moved = self.index.keys();
+            try absorb(full, &self.index);
+            assert(full.keys() == keys_before + keys_moved);
+            assert(self.index.keys() == 0);
+            self.deinit();
         }
     };
 }
