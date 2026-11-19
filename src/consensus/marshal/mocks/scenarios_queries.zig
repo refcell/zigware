@@ -859,7 +859,9 @@ pub fn CommitmentFetchHeightHintMismatch(comptime H: type) type {
             var block = try H.make_test_block(gpa, parent, parent_commitment, height, at[1], 4);
             defer H.Variant.deinit_block(gpa, &block);
             try H.propose(single.nodes[1], round_at(at[1]), &block);
-            const fallback: core.CommitmentFallback = .{ .fetch_by_commitment = .new(hint) };
+            const fallback: core.CommitmentFallback = .{
+                .fetch_by_commitment = .{ .height = .new(hint) },
+            };
             const mailbox = single.nodes[0].mailbox;
             var receiver = try mailbox.subscribe_by_commitment(H.commitment(&block), fallback);
             defer receiver.deinit();

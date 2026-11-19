@@ -137,10 +137,15 @@ pub fn Coding(comptime B: type, comptime C: type, comptime H: type, comptime P: 
         /// The parent of `child` through marshal's `mailbox` (commonware's `BlockProvider` for
         /// `Mailbox<S, Coding<..>>`): fetched by the parent commitment in the child's context,
         /// retained up to the parent's height, and delivered as its application block.
-        /// Genesis has no parent, so its receiver is already closed.
+        /// Genesis has no parent, so its receiver is already closed. The request is bounded by
+        /// the parent round in the child's context, which the commitment binds and voters
+        /// compare with their own; the height alone is not safe, since a validator can vote for
+        /// a coded block before holding it. The caller's bound is never earlier than that
+        /// round, so it is ignored (commonware #5717).
         pub fn subscribe_parent(
             mailbox: anytype,
             child: *const broadcast.Digested(B),
+            _: ?consensus_types.Round,
         ) Allocator.Error!ParentReceiver {
             const block = child.inner();
             const parent_height = block.height().previous() orelse {
@@ -149,8 +154,11 @@ pub fn Coding(comptime B: type, comptime C: type, comptime H: type, comptime P: 
                 return .{ .inner = pair.receiver };
             };
             assert(parent_height.get() + 1 == block.height().get());
-            const receiver = try mailbox.subscribe_by_commitment(block.context().parent[1], .{
-                .fetch_by_commitment = parent_height,
+            const context = block.context();
+            const parent_round: consensus_types.Round =
+                .new(context.round.epoch, context.parent[0]);
+            const receiver = try mailbox.subscribe_by_commitment(context.parent[1], .{
+                .fetch_by_commitment = .{ .height = parent_height, .round = parent_round },
             });
             return .{ .inner = receiver };
         }

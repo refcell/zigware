@@ -51,8 +51,12 @@ pub fn MarshalProvider(comptime M: type) type {
             self.* = undefined;
         }
 
-        pub fn subscribe_parent(self: *const Self, child: anytype) !M.ParentReceiver {
-            return self.marshal.subscribe_parent(child);
+        pub fn subscribe_parent(
+            self: *const Self,
+            child: anytype,
+            bound: anytype,
+        ) !M.ParentReceiver {
+            return self.marshal.subscribe_parent(child, bound);
         }
 
         /// The finalized block's digest at `at`, if marshal knows it.

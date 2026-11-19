@@ -327,7 +327,8 @@ pub fn Tasks(comptime M: type) type {
             const io = ctx.io();
             var initial = [2]Digested{ block.inner_digested(), parent.inner_digested() };
             const fetch = &shared.timers.ancestor_fetch_duration;
-            const stream = shared.marshal.ancestor_stream(&initial, fetch) catch {
+            // Unbounded: the coding provider bounds each parent by its child's context.
+            const stream = shared.marshal.ancestor_stream(&initial, null, fetch) catch {
                 for (&initial) |*shared_block| shared_block.deinit();
                 return null;
             };
@@ -610,7 +611,8 @@ pub fn Tasks(comptime M: type) type {
         fn ancestry_of(shared: *M.Shared, parent: *const CodedBlock) !M.Ancestry {
             var initial = [1]Digested{parent.inner_digested()};
             const fetch = &shared.timers.ancestor_fetch_duration;
-            return shared.marshal.ancestor_stream(&initial, fetch) catch |err| {
+            // Unbounded: the coding provider bounds each parent by its child's context.
+            return shared.marshal.ancestor_stream(&initial, null, fetch) catch |err| {
                 initial[0].deinit();
                 return err;
             };

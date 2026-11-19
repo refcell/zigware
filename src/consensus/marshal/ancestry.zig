@@ -24,6 +24,7 @@ const utils = @import("utils");
 const types = @import("../types.zig");
 
 const Height = types.Height;
+const Round = types.Round;
 const Timed = runtime.telemetry.metrics.histogram.Timed;
 const Timer = runtime.telemetry.metrics.histogram.Timer;
 const oneshot = utils.channel.oneshot;
@@ -37,9 +38,13 @@ pub fn assert_ancestry(comptime A: type) void {
 }
 
 /// Asserts `M` implements `BlockProvider`: `M.Block` and
-/// `subscribe_parent(*M, *const Digested(Block)) !oneshot.Receiver(Digested(Block))` (or another
-/// receiver of `Digested(Block)` with `recv`, `try_recv`, and `deinit`), whose receiver closes
-/// without a value once the provider can no longer obtain the parent. A provider that
+/// `subscribe_parent(*M, *const Digested(Block), ?Round) !oneshot.Receiver(Digested(Block))` (or
+/// another receiver of `Digested(Block)` with `recv`, `try_recv`, and `deinit`), whose receiver
+/// closes without a value once the provider can no longer obtain the parent. The round bounds
+/// how long the caller needs the parent: the round consensus assigned to the child or to a
+/// descendant the caller walks from, or the round of the consensus request it serves. Null only
+/// when the child was checked against its own parent, such as a finalized block. The provider
+/// may stop fetching once a block finalized at the bound or later is processed. A provider that
 /// declares `clone() M` and `deinit(*M)` is cloned with each stream.
 pub fn assert_block_provider(comptime M: type) void {
     comptime {
@@ -236,7 +241,11 @@ pub fn with_prefix(
 /// The receiver `M.subscribe_parent` returns.
 pub fn ParentReceiver(comptime M: type) type {
     const D = broadcast.Digested(M.Block);
-    const Return = @TypeOf(M.subscribe_parent(@as(*M, undefined), @as(*const D, undefined)));
+    const Return = @TypeOf(M.subscribe_parent(
+        @as(*M, undefined),
+        @as(*const D, undefined),
+        @as(?Round, null),
+    ));
     return @typeInfo(Return).error_union.payload;
 }
 
@@ -254,6 +263,8 @@ pub fn AncestorStream(comptime M: type) type {
         gpa: Allocator,
         io: Io,
         provider: M,
+        /// The round passed with every parent request (see `assert_block_provider`).
+        bound: ?Round,
         fetch_duration: ?*const Timed,
         /// Blocks ready to yield, oldest first (the next block is last).
         buffered: std.ArrayList(D),
@@ -266,12 +277,14 @@ pub fn AncestorStream(comptime M: type) type {
 
         /// A stream from `initial` (any order, taking ownership), which must form a contiguous
         /// chain once sorted by height; panics otherwise. Starts only from blocks that are
-        /// safe to verify, certify, build on, or repair from.
+        /// safe to verify, certify, build on, or repair from. Every parent request carries
+        /// `bound`.
         pub fn init(
             gpa: Allocator,
             io: Io,
             provider: M,
             initial: []const D,
+            bound: ?Round,
             fetch_duration: ?*const Timed,
         ) Allocator.Error!Self {
             var buffered: std.ArrayList(D) = try .initCapacity(gpa, initial.len);
@@ -293,6 +306,7 @@ pub fn AncestorStream(comptime M: type) type {
                 .gpa = gpa,
                 .io = io,
                 .provider = provider,
+                .bound = bound,
                 .fetch_duration = fetch_duration,
                 .buffered = buffered,
             };
@@ -329,7 +343,7 @@ pub fn AncestorStream(comptime M: type) type {
         fn subscribe(self: *Self, child: *const D) !void {
             assert(self.pending == null and self.pending_child == null);
             assert(child.inner().height().get() > 0);
-            self.pending = try self.provider.subscribe_parent(child);
+            self.pending = try self.provider.subscribe_parent(child, self.bound);
             self.pending_child = child.clone();
             if (self.fetch_duration) |timed| self.timer = timed.timer(self.io);
         }
@@ -403,6 +417,7 @@ pub fn AncestorStream(comptime M: type) type {
                 .gpa = self.gpa,
                 .io = self.io,
                 .provider = provider,
+                .bound = self.bound,
                 .fetch_duration = self.fetch_duration,
                 .buffered = .empty,
             };
@@ -440,8 +455,11 @@ const ProviderState = struct {
     pending_first: u32 = 0,
     calls: u32 = 0,
     senders: std.ArrayList(oneshot.Sender(TestDigested)) = .empty,
+    /// The bound of every parent request, in order.
+    bounds: std.ArrayList(?Round) = .empty,
 
     fn deinit(self: *ProviderState) void {
+        self.bounds.deinit(testing.allocator);
         for (self.senders.items) |*sender| sender.deinit();
         self.senders.deinit(testing.allocator);
     }
@@ -463,8 +481,10 @@ const TestProvider = struct {
     pub fn subscribe_parent(
         self: *TestProvider,
         child: *const TestDigested,
+        bound: ?Round,
     ) !oneshot.Receiver(TestDigested) {
         const state = self.state;
+        try state.bounds.append(testing.allocator, bound);
         const pair = try oneshot.channel(TestDigested, testing.allocator, testing.io);
         var sender = pair.sender;
         state.calls += 1;
@@ -488,12 +508,16 @@ const TestProvider = struct {
 const TestStream = AncestorStream(TestProvider);
 
 fn stream_of(state: *ProviderState, initial: []const TestBlock) !TestStream {
+    return bounded_stream_of(state, initial, null);
+}
+
+fn bounded_stream_of(state: *ProviderState, initial: []const TestBlock, bound: ?Round) !TestStream {
     var handles: [4]TestDigested = undefined;
     assert(initial.len <= handles.len);
     for (initial, handles[0..initial.len]) |block, *handle| handle.* = try digested(block);
     const provider: TestProvider = .{ .state = state };
     const owned = handles[0..initial.len];
-    return TestStream.init(testing.allocator, testing.io, provider, owned, null);
+    return TestStream.init(testing.allocator, testing.io, provider, owned, bound, null);
 }
 
 /// Takes the next block and checks it is `expected` (or that the stream ended).
@@ -691,6 +715,29 @@ test "clone preserves pending parent fetch" {
     try expect_next(&cloned, parent);
     try expect_next(&stream, null);
     try expect_next(&cloned, null);
+}
+
+// commonware `test_requests_every_parent_under_the_stream_bound` (#5717): every parent request,
+// including a clone's resubscription, carries the stream's round bound.
+test "requests every parent under the stream bound" {
+    const grandparent = block_at(empty, 0, 0);
+    const parent = block_at(grandparent.digest(), 1, 1);
+    const child = block_at(parent.digest(), 2, 2);
+    const bound: Round = .new(.new(1), .new(7));
+    var state: ProviderState = .{ .pending_first = std.math.maxInt(u32) };
+    defer state.deinit();
+    var stream = try bounded_stream_of(&state, &.{child}, bound);
+    defer stream.deinit();
+    try expect_next(&stream, child);
+    var cloned = try stream.clone();
+    defer cloned.deinit();
+    var delivered = try digested(parent);
+    defer delivered.deinit();
+    state.complete_all(delivered);
+    try expect_next(&stream, parent);
+    try expect_next(&cloned, parent);
+    try testing.expectEqual(4, state.bounds.items.len);
+    for (state.bounds.items) |requested| try testing.expect(std.meta.eql(requested, bound));
 }
 
 test "empty yields none" {

@@ -305,7 +305,9 @@ test "policy preserves commitment subscription fallbacks" {
     defer wait.receiver.deinit();
     var by_round = try subscribe_by_commitment(2, .{ .fetch_by_round = round(2) });
     defer by_round.receiver.deinit();
-    var by_commitment = try subscribe_by_commitment(3, .{ .fetch_by_commitment = .new(3) });
+    var by_commitment = try subscribe_by_commitment(3, .{
+        .fetch_by_commitment = .{ .height = .new(3) },
+    });
     defer by_commitment.receiver.deinit();
 
     try handle(&overflow, wait.message);
@@ -320,7 +322,7 @@ test "policy preserves commitment subscription fallbacks" {
     const second = items[1].body.subscribe_by_commitment.fallback;
     try testing.expectEqual(round(2), second.fetch_by_round);
     const third = items[2].body.subscribe_by_commitment.fallback;
-    try testing.expectEqual(3, third.fetch_by_commitment.get());
+    try testing.expectEqual(3, third.fetch_by_commitment.height.get());
 }
 
 test "policy handles closed subscriptions" {
@@ -698,18 +700,18 @@ test "subscribe parent fetches the parent by commitment, bounded by its height" 
     var child = try mocks.ready(B, gpa, B.init(parent.digest(), .new(2), 2));
     defer child.deinit();
 
-    var receiver = try provider.subscribe_parent(&child);
+    var receiver = try provider.subscribe_parent(&child, null);
     defer receiver.deinit();
     const request = try pair.receiver.try_recv();
     defer TestMessage.discard(request);
     const body = request.body.subscribe_by_commitment;
     try testing.expect(body.commitment.eql(parent.digest()));
-    try testing.expectEqual(1, body.fallback.fetch_by_commitment.get());
+    try testing.expectEqual(1, body.fallback.fetch_by_commitment.height.get());
 
     // Genesis has no parent: its receiver is closed and nothing is sent.
     var genesis = try mocks.ready(B, gpa, B.init(D.empty, .zero(), 0));
     defer genesis.deinit();
-    var none = try provider.subscribe_parent(&genesis);
+    var none = try provider.subscribe_parent(&genesis, null);
     defer none.deinit();
     try testing.expectError(error.Closed, none.try_recv());
     try testing.expectError(error.Empty, pair.receiver.try_recv());
@@ -721,7 +723,7 @@ test "ancestry from a closed mailbox is missing" {
     defer closed.deinit();
     pair.receiver.deinit();
     try testing.expectEqual(null, try closed.ancestry_from(.wait, commitment(1), null));
-    var stream = try closed.ancestor_stream(&.{try block(3)}, null);
+    var stream = try closed.ancestor_stream(&.{try block(3)}, null, null);
     defer stream.deinit();
     try testing.expectEqual(3, stream.peek().?.inner().height().get());
 }

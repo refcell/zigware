@@ -233,7 +233,8 @@ fn deliver_block(
 /// Whether a `certified` or `untrusted` subscriber retains `height`.
 fn bounded_above(annotations: []const Annotation, height: Height) bool {
     for (annotations) |annotation| switch (annotation) {
-        .certified, .untrusted => |bound| if (height.get() <= bound.get()) return true,
+        .certified => |bound| if (height.get() <= bound.get()) return true,
+        .untrusted => |bound| if (height.get() <= bound.height.get()) return true,
         else => {},
     };
     return false;

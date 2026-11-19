@@ -145,8 +145,12 @@ const SyncMarshal = struct {
         return self.inner.get_info(identifier);
     }
 
-    pub fn subscribe_parent(self: SyncMarshal, child: *const Digested) !ParentReceiver {
-        return self.inner.subscribe_parent(child);
+    pub fn subscribe_parent(
+        self: SyncMarshal,
+        child: *const Digested,
+        bound: ?consensus.types.Round,
+    ) !ParentReceiver {
+        return self.inner.subscribe_parent(child, bound);
     }
 
     pub fn prune(self: SyncMarshal, height: consensus.Height) !void {

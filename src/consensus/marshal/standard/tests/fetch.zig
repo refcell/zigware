@@ -117,7 +117,8 @@ fn round_fetched(state: RoundFetch) bool {
 fn height_driven(fetch: common.Fetch, lied: u64) bool {
     if (fetch.key == .block) return true;
     return switch (fetch.subscriber) {
-        .certified, .untrusted => |height| height.get() == lied,
+        .certified => |height| height.get() == lied,
+        .untrusted => |untrusted| untrusted.height.get() == lied,
         else => false,
     };
 }

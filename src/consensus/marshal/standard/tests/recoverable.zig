@@ -138,7 +138,7 @@ fn walk_ancestry(validator: *Validator, tip: D) !void {
     var expected: u64 = 3;
     while (expected > 0) {
         expected -= 1;
-        var parent = try validator.mailbox.subscribe_parent(&cursor);
+        var parent = try validator.mailbox.subscribe_parent(&cursor, null);
         defer parent.deinit();
         const next = try parent.recv();
         cursor.deinit();
@@ -237,10 +237,37 @@ fn parent_by_commitment_body(ctx: Ctx) anyerror!void {
     const child = try harness.make_raw_block(gpa, parent.digest(), .new(2), 200);
     var shared = try mocks_block.ready(B, gpa, child);
     defer shared.deinit();
-    var subscription = try started.mailbox.subscribe_parent(&shared);
+    var subscription = try started.mailbox.subscribe_parent(&shared, null);
     defer subscription.deinit();
     try ctx.sleep(.fromMilliseconds(100));
     try testing.expectEqual(1, started.buffer.?.commitment_subscription_count());
+    // A caller's bound travels with the request (commonware #5717).
+    const round = round_at(7);
+    var bounded = try started.mailbox.subscribe_parent(&shared, round);
+    defer bounded.deinit();
+    // A stream that starts from a block found by round requests under that round.
+    try testing.expect(try started.mailbox.verified(round, shared.clone()));
+    var stream = (try started.mailbox.ancestry_from(
+        .{ .fetch_by_round = round },
+        child.digest(),
+        null,
+    )) orelse return error.TestNoStream;
+    defer stream.deinit();
+    var first = (try stream.next()).?;
+    defer first.deinit();
+    try testing.expect(first.digest().eql(child.digest()));
+    try ctx.sleep(.fromMilliseconds(100));
+    const fetches = try started.resolver.fetches(gpa);
+    defer gpa.free(fetches);
+    const bounds = [_]?Round{ null, round, round };
+    try testing.expectEqual(bounds.len, fetches.len);
+    for (bounds, fetches) |bound, fetch| {
+        try testing.expect(fetch.key.eql(.{ .block = parent.digest() }));
+        try testing.expect(fetch.subscriber.eql(.{ .untrusted = .{
+            .height = .new(1),
+            .round = bound,
+        } }));
+    }
 }
 
 test "standard block provider parent fetches by commitment" {

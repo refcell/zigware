@@ -387,7 +387,9 @@ const ParentWaiters = struct {
 fn parent_waiters(mailbox: anytype, missing: D, child: *const Block) !ParentWaiters {
     var by_round = try mailbox.subscribe_by_digest(missing, .{ .fetch_by_round = round_at(2) });
     errdefer by_round.deinit();
-    const by_commitment: core_mailbox.CommitmentFallback = .{ .fetch_by_commitment = .new(2) };
+    const by_commitment: core_mailbox.CommitmentFallback = .{
+        .fetch_by_commitment = .{ .height = .new(2) },
+    };
     var by_height = try mailbox.subscribe_by_commitment(missing, by_commitment);
     errdefer by_height.deinit();
     var wait = try mailbox.subscribe_by_digest(missing, .wait);
@@ -396,7 +398,7 @@ fn parent_waiters(mailbox: anytype, missing: D, child: *const Block) !ParentWait
         .by_round = by_round,
         .by_height = by_height,
         .wait = wait,
-        .parent = try mailbox.subscribe_parent(child),
+        .parent = try mailbox.subscribe_parent(child, null),
     };
 }
 

@@ -132,7 +132,9 @@ pub fn run_app_verify(
     comptime assert(@typeInfo(@TypeOf(application)) == .pointer);
     var blocks = [2]@TypeOf(block){ block, parent };
     // On success the stream owns both handles.
-    const stream = marshal.ancestor_stream(&blocks, fetch_duration) catch |err| {
+    // Bounded by the verified round: it ends the need for every ancestor fetched.
+    const bound = context.round;
+    const stream = marshal.ancestor_stream(&blocks, bound, fetch_duration) catch |err| {
         for (&blocks) |*owned| owned.deinit();
         return err;
     };

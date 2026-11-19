@@ -372,6 +372,52 @@ fn RecordingVerifyingAppOver(comptime T: [4]type) type {
     };
 }
 
+/// Reads the ancestry it is given block by block, recording each digest, and accepts a block
+/// only if that ancestry reaches the height-zero block; it never builds one (commonware
+/// `WalkingVerifyingApp`). Copies share the caller-owned log.
+pub fn WalkingVerifyingApp(
+    comptime B: type,
+    comptime Ctx: type,
+    comptime Context: type,
+    comptime Ancestry: type,
+) type {
+    return struct {
+        const Self = @This();
+        pub const Block = B;
+
+        gpa: Allocator,
+        /// The digests read, in order.
+        blocks: *std.ArrayList(B.Digest),
+
+        /// Reads `ancestry` (taken) to its end; whether it reached the height-zero block.
+        fn walk(self: *Self, ancestry: Ancestry) !bool {
+            var stream = ancestry;
+            defer stream.deinit();
+            while (try stream.next()) |value| {
+                var block = value;
+                defer block.deinit();
+                try self.blocks.append(self.gpa, block.digest());
+                if (block.inner().height().get() == 0) return true;
+            }
+            return false;
+        }
+
+        pub fn propose(
+            self: *Self,
+            _: Ctx,
+            _: Context,
+            ancestry: Ancestry,
+        ) anyerror!?broadcast.Digested(B) {
+            _ = try self.walk(ancestry);
+            return null;
+        }
+
+        pub fn verify(self: *Self, _: Ctx, _: Context, ancestry: Ancestry) anyerror!bool {
+            return self.walk(ancestry);
+        }
+    };
+}
+
 test {
     _ = @import("verifying_test.zig");
 }

@@ -343,21 +343,23 @@ fn fetch_fallback(self: anytype, key: anytype, fallback: anytype) !void {
         .fetch_by_round => |round| {
             _ = try self.floor.fetch_if_permitted(&self.resolver, .{ .notarized = round });
         },
-        .fetch_by_commitment => |height| {
+        .fetch_by_commitment => |bound| {
+            const height = bound.height;
             const commitment = switch (key) {
                 .commitment => |value| value,
                 .digest => unreachable, // Proof: digest fallbacks never fetch by commitment.
             };
             // Ancestry may be only notarized: reuse commitment material only when certified.
+            // Certification also fixes the block's height, so only an untrusted request needs
+            // the round as a bound.
             const Request = @TypeOf(self.*).Request;
-            const value: @FieldType(Request, "certified") = .{
-                .commitment = commitment,
-                .bound = height,
-            };
             const request: Request = if (self.certified.contains(height, commitment))
-                .{ .certified = value }
+                .{ .certified = .{ .commitment = commitment, .bound = height } }
             else
-                .{ .untrusted = value };
+                .{ .untrusted = .{
+                    .commitment = commitment,
+                    .bound = .{ .height = height, .round = bound.round },
+                } };
             _ = try self.floor.fetch_if_permitted(&self.resolver, request);
         },
     }

@@ -345,7 +345,7 @@ line, with where its Zig counterpart lives. Counts:
 
 | File | Ported | In progress | Not portable | Total |
 | --- | --- | --- | --- | --- |
-| standard/mod.rs | 184 | 0 | 9 | 193 |
+| standard/mod.rs | 188 | 0 | 9 | 197 |
 | coding/mod.rs | 96 | 0 | 1 | 97 |
 
 `mocks/harness.rs` has no tests of its own: all 31 generic scenario functions are ported
@@ -366,6 +366,11 @@ job to gate, and `mocks/strategy.rs`'s GatedStrategy has no other user).
 
 #### standard/mod.rs
 
+- L178 `mailbox_provides_application_blocks`: ported (standard/tests/bounds.zig)
+- L4001 `issue_5714_regression`: ported (standard/tests/optimistic.zig)
+- L4972 `test_standard_propose_requests_ancestry_under_its_round`: ported (standard/tests/bounds.zig)
+- L5067 `issue_5718_regression`: ported (standard/tests/bounds.zig)
+- L14959 `pr_5646_regression`: ported (standard/tests/coverage.zig)
 - L176 `test_standard_local_blocks_compute_digest_once_and_replay_once`: ported (standard/tests/recoverable.zig)
 - L378 `test_standard_block_provider_parent_fetches_by_commitment`: ported (standard/tests/recoverable.zig)
 - L433 `test_standard_finalize_good_links`: ported (standard/tests/scenarios.zig)
@@ -457,7 +462,7 @@ job to gate, and `mocks/strategy.rs`'s GatedStrategy has no other user).
 - L4994 `test_propose_paths`: ported (standard/tests/propose_validation.zig)
 - L5175 `test_propose_rebuilds_after_restart`: ported (standard/tests/propose_validation.zig)
 - L5323 `test_prepare_paths`: ported (standard/tests/propose_validation.zig)
-- L5465 `test_deferred_handoff_rejects_unvalidated_parent_link`: ported (standard/tests/propose_validation.zig)
+- L5465 `test_deferred_handoff_rejects_unvalidated_parent_link`: retired upstream by #5715 (the link check moved into Deferred's vote); test dropped
 - L5545 `test_verify_reproposal_validation`: ported (standard/tests/propose_validation.zig)
 - L5691 `test_verify_rejects_invalid_ancestry`: ported (standard/tests/propose_validation.zig)
 - L5839 `test_application_verify_failure`: ported (standard/tests/propose_validation.zig)
@@ -782,3 +787,13 @@ job to gate, and `mocks/strategy.rs`'s GatedStrategy has no other user).
   detaches, so select returned while the engine task still unwound, and the bootstrap freed
   the engine under it. The waiters now join uncancelably; context_test.zig has the
   regression test (it fails without the fix).
+- 2026-11-19: synced with commonware a9ffc25f3. Since the audit only #5715 and #5717 touched
+  marshal. #5715: Deferred rejects a block naming a parent other than its context's before
+  voting (and no longer skips proposals on an unlinked parent). #5717: untrusted commitment
+  fetches carry an optional round and retire at the round floor (`handler.Untrusted`,
+  `CommitmentFallback.fetch_by_commitment: ByCommitment`); `BlockProvider.subscribe_parent`
+  and `AncestorStream.init`/`ancestor_stream` take a `?Round` bound (standard wrappers pass
+  the proposal or verification round, coding passes none and bounds by the child's parent
+  round); `put_certified` no longer raises the epoch ceiling. The tally collected only
+  `fn test_*`, so it missed `mailbox_provides_application_blocks` and the `issue_*`/`pr_*`
+  regressions; those are now listed. The coding/mod.rs share of #5717 is the coding lane's.

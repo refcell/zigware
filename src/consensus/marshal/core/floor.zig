@@ -684,6 +684,39 @@ test "fetch if permitted applies height and round floors" {
     for (issued, resolver.fetches.items) |request, fetch| try expect_fetch(fetch, request);
 }
 
+// commonware `fetch_if_permitted_applies_both_floors_to_untrusted_requests` (#5717).
+test "fetch if permitted applies both floors to untrusted requests" {
+    var state = test_floor();
+    defer state.deinit(testing.allocator);
+    var resolver: TestResolver = .{ .gpa = testing.allocator };
+    defer resolver.deinit();
+    const untrusted = struct {
+        fn of(height: u64, round: ?Round) TestState.Request {
+            return .{ .untrusted = .{
+                .commitment = TestDigest.fill(1),
+                .bound = .{ .height = .new(height), .round = round },
+            } };
+        }
+    }.of;
+    // Either floor denies the request, whatever the other bound says.
+    const denied = [_]TestState.Request{
+        untrusted(6, round_at(5)),
+        untrusted(5, round_at(6)),
+        untrusted(5, null),
+    };
+    for (denied) |request| {
+        try testing.expectEqual(.denied, try state.fetch_if_permitted(&resolver, request));
+    }
+    try testing.expectEqual(0, resolver.fetches.items.len);
+    // Above the height floor, a round above the round floor or no round is issued.
+    const issued = [_]TestState.Request{ untrusted(6, round_at(6)), untrusted(6, null) };
+    for (issued) |request| {
+        try testing.expectEqual(.issued, try state.fetch_if_permitted(&resolver, request));
+    }
+    try testing.expectEqual(2, resolver.fetches.items.len);
+    for (issued, resolver.fetches.items) |request, fetch| try expect_fetch(fetch, request);
+}
+
 test "fetch targeted if permitted returns denied without fetching" {
     var state = test_floor();
     defer state.deinit(testing.allocator);

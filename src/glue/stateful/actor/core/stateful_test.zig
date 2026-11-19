@@ -99,7 +99,11 @@ pub const FakeMarshal = struct {
         return .{ .height = block.height(), .digest = block.digest() };
     }
 
-    pub fn subscribe_parent(self: FakeMarshal, child: *const Digested) !ParentReceiver {
+    pub fn subscribe_parent(
+        self: FakeMarshal,
+        child: *const Digested,
+        _: ?consensus.types.Round,
+    ) !ParentReceiver {
         const pair = try oneshot.channel(Digested, gpa, io);
         var sender = pair.sender;
         self.state.mutex.lockUncancelable(io);

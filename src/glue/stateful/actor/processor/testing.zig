@@ -135,6 +135,7 @@ pub const TestProvider = struct {
     pub fn subscribe_parent(
         self: *TestProvider,
         child: *const Digested,
+        _: ?consensus.types.Round,
     ) !oneshot.Receiver(Digested) {
         const pair = try oneshot.channel(Digested, gpa, io);
         var sender = pair.sender;

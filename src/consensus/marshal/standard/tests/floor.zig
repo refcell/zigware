@@ -425,7 +425,7 @@ fn expect_stale_ack_ignored(ctx: Ctx, started: *Manual, application: App, label:
     try ctx.sleep(.fromMilliseconds(100));
     var subscription = try started.mailbox.subscribe_by_commitment(
         hash(label),
-        .{ .fetch_by_commitment = .new(2) },
+        .{ .fetch_by_commitment = .{ .height = .new(2) } },
     );
     defer subscription.deinit();
     var block = (try started.mailbox.get_block(.{ .height = .new(5) })).?;

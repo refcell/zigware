@@ -114,8 +114,14 @@ pub fn Standard(comptime B: type) type {
 
         /// The parent of `child` through marshal's `mailbox` (commonware's `BlockProvider` for
         /// `Mailbox<S, Standard<B>>`): fetched by commitment, retained up to the parent's
-        /// height. Genesis has no parent, so its receiver is already closed.
-        pub fn subscribe_parent(mailbox: anytype, child: *const Block) !oneshot.Receiver(Block) {
+        /// height or until the round floor covers `bound`. A standard block need not carry a
+        /// consensus context, so the caller's bound is the only round that can retire the
+        /// request. Genesis has no parent, so its receiver is already closed.
+        pub fn subscribe_parent(
+            mailbox: anytype,
+            child: *const Block,
+            bound: ?types.Round,
+        ) !oneshot.Receiver(Block) {
             const block = child.inner();
             const parent_height = block.height().previous() orelse {
                 var pair = try oneshot.channel(Block, mailbox.gpa, mailbox.io);
@@ -123,7 +129,7 @@ pub fn Standard(comptime B: type) type {
                 return pair.receiver;
             };
             return mailbox.subscribe_by_commitment(block.parent(), .{
-                .fetch_by_commitment = parent_height,
+                .fetch_by_commitment = .{ .height = parent_height, .round = bound },
             });
         }
 

@@ -259,7 +259,9 @@ fn InlineOver(comptime T: [5]type) type {
                 }
                 const initial = [1]V.Block{parent};
                 const fetch = &self.ancestor_fetch_duration;
-                const stream = self.marshal.ancestor_stream(&initial, fetch) catch |err| {
+                // Bounded by the proposal round: it ends the need for every ancestor fetched.
+                const bound = context.round;
+                const stream = self.marshal.ancestor_stream(&initial, bound, fetch) catch |err| {
                     parent.deinit();
                     return err;
                 };

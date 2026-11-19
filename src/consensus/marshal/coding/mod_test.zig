@@ -114,7 +114,7 @@ test "coding block provider parent fetches by commitment" {
                 try harness.make_coding_block(gpa, context, parent.block.digest(), .new(2), 200);
             var child = try broadcast.Digested(common.CodingB).compute(gpa, raw);
             defer child.deinit();
-            var subscription = try stack.mailbox.subscribe_parent(&child);
+            var subscription = try stack.mailbox.subscribe_parent(&child, null);
             defer subscription.deinit();
 
             try ctx.sleep(.fromMilliseconds(100));
@@ -1931,7 +1931,7 @@ test "coding coalesced block delivery trusts finalized subscriber" {
             // finalized subscriber alone binds the coding root, so the shared delivery decodes
             // without recomputing it and lands in the finalized archive.
             const subscribers = [_]common.Annotation{
-                .{ .untrusted = height },
+                .{ .untrusted = .{ .height = height, .round = null } },
                 .{ .finalized = .{ .by_height = height } },
             };
             const value = try common.encode_coded(gpa, &candidate.block);
@@ -2036,7 +2036,7 @@ test "coding ancestry block delivery recomputes root" {
                 try stack.resolver.respond_to_next_fetch(value);
                 const commitment = block.block.commitment();
                 const fallback: core_mailbox.CommitmentFallback =
-                    .{ .fetch_by_commitment = .new(index + 1) };
+                    .{ .fetch_by_commitment = .{ .height = .new(index + 1) } };
                 var subscription = try stack.mailbox.subscribe_by_commitment(commitment, fallback);
                 defer subscription.deinit();
                 var delivered = try subscription.recv();
@@ -2138,7 +2138,7 @@ fn untrusted_rejects_mismatched_root(ctx: Ctx, notarized: bool) !void {
     const fallback: core_mailbox.CommitmentFallback = if (notarized)
         .{ .fetch_by_round = round }
     else
-        .{ .fetch_by_commitment = .new(1) };
+        .{ .fetch_by_commitment = .{ .height = .new(1) } };
     try stack.resolver.respond_to_next_fetch(value);
     var subscription = try stack.mailbox.subscribe_by_commitment(commitment, fallback);
     defer subscription.deinit();
@@ -2216,7 +2216,7 @@ fn certified_ancestry_skips_recoding(ctx: Ctx, cached_parent: bool, by_digest: b
         try stack.mailbox.subscribe_by_digest(parent.digest(), .wait)
     else
         try stack.mailbox.subscribe_by_commitment(parent.commitment(), .{
-            .fetch_by_commitment = .new(2),
+            .fetch_by_commitment = .{ .height = .new(2) },
         });
     defer subscription.deinit();
     var delivered = try subscription.recv();
@@ -2233,7 +2233,7 @@ fn certified_ancestry_skips_recoding(ctx: Ctx, cached_parent: bool, by_digest: b
     defer gpa.free(value);
     try stack.resolver.respond_to_next_fetch(value);
     var lower = try stack.mailbox.subscribe_by_commitment(grandparent.commitment(), .{
-        .fetch_by_commitment = .new(1),
+        .fetch_by_commitment = .{ .height = .new(1) },
     });
     defer lower.deinit();
     var ancestor = try lower.recv();
@@ -2431,7 +2431,9 @@ fn cache_certified_ancestor(
     const value = try common.encode_coded(gpa, ancestor);
     defer gpa.free(value);
     try stack.resolver.respond_to_next_fetch(value);
-    const fallback: core_mailbox.CommitmentFallback = .{ .fetch_by_commitment = .new(2) };
+    const fallback: core_mailbox.CommitmentFallback = .{
+        .fetch_by_commitment = .{ .height = .new(2) },
+    };
     var subscription = try stack.mailbox.subscribe_by_commitment(ancestor.commitment(), fallback);
     defer subscription.deinit();
     var certified = try subscription.recv();
@@ -2459,7 +2461,9 @@ fn serve_competing_ancestry(
         defer gpa.free(fetches);
         const item = fetches[index + 1];
         try testing.expect(item.key.eql(.{ .block = ancestor.commitment() }));
-        try testing.expect(item.subscriber.eql(.{ .untrusted = ancestor.height() }));
+        // Heights only: the parent-round bound (#5717) is checked by the coding lane's port.
+        try testing.expect(item.subscriber == .untrusted);
+        try testing.expect(item.subscriber.untrusted.height.get() == ancestor.height().get());
         var subscription = try stack.mailbox.subscribe_by_commitment(ancestor.commitment(), .wait);
         defer subscription.deinit();
         _ = try stack.mailbox.get_processed();
@@ -2613,6 +2617,12 @@ fn ancestry_annotations(
     return out[0..count];
 }
 
+/// An untrusted annotation at `height` carrying `got`'s round, if any.
+fn untrusted_like(height: consensus_types.Height, got: common.Annotation) common.Annotation {
+    const round = if (got == .untrusted) got.untrusted.round else null;
+    return .{ .untrusted = .{ .height = height, .round = round } };
+}
+
 /// Delivers `parent` for `fetch`, then subscribes to `grandparent` and checks processing is
 /// still held below it. Returns the grandparent subscription.
 fn deliver_below_tip(
@@ -2625,7 +2635,7 @@ fn deliver_below_tip(
     defer gpa.free(value);
     try testing.expect(try stack.resolver.deliver(fetch, value));
     var subscription = try stack.mailbox.subscribe_by_commitment(grandparent.commitment(), .{
-        .fetch_by_commitment = grandparent.height(),
+        .fetch_by_commitment = .{ .height = grandparent.height() },
     });
     errdefer subscription.deinit();
     const processed = try stack.mailbox.get_processed();
@@ -2664,7 +2674,7 @@ test "coding certification retention follows finalized tip" {
             defer notarization.deinit(gpa);
             _ = mailbox.report(.{ .certification = notarization });
             const fallback: core_mailbox.CommitmentFallback =
-                .{ .fetch_by_commitment = parent.height() };
+                .{ .fetch_by_commitment = .{ .height = parent.height() } };
             var subscriptions: [4]utils.channel.oneshot.Receiver(common.Block) = undefined;
             var made: usize = 0;
             defer for (subscriptions[0..made]) |*subscription| subscription.deinit();
@@ -2696,13 +2706,14 @@ test "coding certification retention follows finalized tip" {
             made += 1;
             var out: [8]common.Annotation = undefined;
             const annotations = try ancestry_annotations(stack.resolver, &out);
+            const untrusted = untrusted_like; // Heights only; coding checks the round.
+            try testing.expectEqual(4, annotations.len);
             const expected = [_]common.Annotation{
                 .{ .certified = parent.height() },
-                .{ .untrusted = parent.height() },
-                .{ .untrusted = parent.height() },
-                .{ .untrusted = grandparent.height() },
+                untrusted(parent.height(), annotations[1]),
+                untrusted(parent.height(), annotations[2]),
+                untrusted(grandparent.height(), annotations[3]),
             };
-            try testing.expectEqual(expected.len, annotations.len);
             for (expected, annotations) |want, got| try testing.expect(want.eql(got));
         }
     }.body);

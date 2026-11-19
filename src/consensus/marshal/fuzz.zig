@@ -83,7 +83,10 @@ fn draw_annotation(draws: Draws) Annotation {
     const round: Round = .new(.new(epoch), .new(draws.range_at_most(u64, 0, 2)));
     return switch (draws.range_at_most(u8, 0, 4)) {
         0 => .{ .notarization = round },
-        1 => .{ .untrusted = height },
+        1 => .{ .untrusted = .{
+            .height = height,
+            .round = if (draws.range_at_most(u8, 0, 1) == 0) null else round,
+        } },
         2 => .{ .certified = height },
         3 => .{ .finalized = .{ .by_height = height } },
         else => .{ .finalized = .{ .by_round = round } },
@@ -91,7 +94,8 @@ fn draw_annotation(draws: Draws) Annotation {
 }
 
 /// Rust's derived `Ord` for `Annotation`, written out: by variant in declaration order
-/// (`finalized` by height before by round), then by value, rounds by epoch then view.
+/// (`finalized` by height before by round), then by value, rounds by epoch then view, and an
+/// untrusted request's optional round after its height with no round first.
 fn model_order(a: Annotation, b: Annotation) std.math.Order {
     const rank = struct {
         fn rank(value: Annotation) u8 {
@@ -102,13 +106,17 @@ fn model_order(a: Annotation, b: Annotation) std.math.Order {
                 .finalized => |finalized| if (finalized == .by_height) 3 else 4,
             };
         }
-        fn key(value: Annotation) [2]u64 {
+        fn key(value: Annotation) [4]u64 {
             return switch (value) {
-                .notarization => |round| .{ round.epoch.get(), round.view.get() },
-                .untrusted, .certified => |height| .{ height.get(), 0 },
+                .notarization => |round| .{ round.epoch.get(), round.view.get(), 0, 0 },
+                .untrusted => |untrusted| if (untrusted.round) |round|
+                    .{ untrusted.height.get(), 1, round.epoch.get(), round.view.get() }
+                else
+                    .{ untrusted.height.get(), 0, 0, 0 },
+                .certified => |height| .{ height.get(), 0, 0, 0 },
                 .finalized => |finalized| switch (finalized) {
-                    .by_height => |height| .{ height.get(), 0 },
-                    .by_round => |round| .{ round.epoch.get(), round.view.get() },
+                    .by_height => |height| .{ height.get(), 0, 0, 0 },
+                    .by_round => |round| .{ round.epoch.get(), round.view.get(), 0, 0 },
                 },
             };
         }
@@ -117,8 +125,11 @@ fn model_order(a: Annotation, b: Annotation) std.math.Order {
     if (by_rank != .eq) return by_rank;
     const left = rank.key(a);
     const right = rank.key(b);
-    const first = std.math.order(left[0], right[0]);
-    return if (first != .eq) first else std.math.order(left[1], right[1]);
+    for (left, right) |l, r| {
+        const order = std.math.order(l, r);
+        if (order != .eq) return order;
+    }
+    return .eq;
 }
 
 fn fuzz_annotation_order(_: void, smith: *Smith) anyerror!void {

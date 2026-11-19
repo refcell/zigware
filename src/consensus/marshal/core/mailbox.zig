@@ -68,10 +68,16 @@ pub const CommitmentFallback = union(enum) {
     /// they hold its notarization; the request stays eligible until the processed round
     /// floor covers the round.
     fetch_by_round: Round,
-    /// Request the exact commitment from peers, retaining the request up to this height (a
-    /// local hint, never sent). Use it only without a parent round, with a locally
-    /// validated retention bound, such as when repairing a finalized gap.
-    fetch_by_commitment: Height,
+    /// Request the exact commitment from peers, for a caller that reads the block's height
+    /// from the block above it (repairing a finalized gap, walking ancestry). The request is
+    /// pruned once the processed height reaches `height` or, for an uncertified block, the
+    /// processed round floor covers `round`. At least one must be locally validated: a height
+    /// read from the block above is validated only once that block was checked against its own
+    /// parent; otherwise supply a `round` that ends the need for the block. Neither is sent to
+    /// peers or decides a response's validity.
+    fetch_by_commitment: ByCommitment,
+
+    pub const ByCommitment = struct { height: Height, round: ?Round = null };
 };
 
 /// A message to the marshal actor under scheme `S` and variant `V`.
@@ -700,8 +706,9 @@ pub fn Mailbox(comptime S: type, comptime V: type) type {
         pub fn subscribe_parent(
             self: *const Self,
             child: *const Shared,
+            bound: ?Round,
         ) Allocator.Error!ParentReceiver {
-            return V.subscribe_parent(self.*, child);
+            return V.subscribe_parent(self.*, child, bound);
         }
 
         /// The receiver `V.subscribe_parent` returns: `oneshot.Receiver(Shared)`, or a
@@ -709,6 +716,7 @@ pub fn Mailbox(comptime S: type, comptime V: type) type {
         pub const ParentReceiver = @typeInfo(@TypeOf(V.subscribe_parent(
             @as(Self, undefined),
             @as(*const Shared, undefined),
+            @as(?Round, null),
         ))).error_union.payload;
 
         /// A fetching ancestor stream from `initial` (owned, any order, contiguous), with its
@@ -717,11 +725,12 @@ pub fn Mailbox(comptime S: type, comptime V: type) type {
         pub fn ancestor_stream(
             self: Self,
             initial: []const Shared,
+            bound: ?Round,
             fetch_duration: ?*const Timed,
         ) Allocator.Error!ancestry.AncestorStream(Self) {
             var provider = self.clone();
             errdefer provider.deinit();
-            return .init(self.gpa, self.io, provider, initial, fetch_duration);
+            return .init(self.gpa, self.io, provider, initial, bound, fetch_duration);
         }
 
         /// The ancestry of the block `start`, leading to genesis, or null when the block
@@ -740,7 +749,13 @@ pub fn Mailbox(comptime S: type, comptime V: type) type {
             };
             var shared = V.into_shared(block);
             errdefer shared.deinit();
-            return try self.ancestor_stream(&.{shared}, fetch_duration);
+            // A round fallback bounds the stream; `wait` passes none, so start only from a
+            // block whose ancestry was checked, such as a certified or finalized one.
+            const bound: ?Round = switch (fallback) {
+                .wait => null,
+                .fetch_by_round => |round| round,
+            };
+            return try self.ancestor_stream(&.{shared}, bound, fetch_duration);
         }
 
         /// The consensus `Reporter`: forwards notarizations, certifications, and finalizations

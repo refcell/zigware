@@ -360,7 +360,7 @@ fn ExecutionOf(comptime App_: type, comptime Databases_: type, comptime Provider
         }
 
         fn fetch_parent(provider: *Provider, child: *const Digested) !Digested {
-            var receiver = try provider.subscribe_parent(child);
+            var receiver = try provider.subscribe_parent(child, null);
             defer receiver.deinit();
             return receiver.recv() catch |err| switch (err) {
                 error.Closed => return error.Incomplete,
@@ -375,7 +375,7 @@ fn ExecutionOf(comptime App_: type, comptime Databases_: type, comptime Provider
                 provider.clone()
             else
                 provider.*;
-            const ancestry = Stream.init(self.gpa, self.io, stream_provider, initial, null);
+            const ancestry = Stream.init(self.gpa, self.io, stream_provider, initial, null, null);
             const owned = ancestry catch |err| {
                 for (initial) |handle| handle.discard();
                 return err;

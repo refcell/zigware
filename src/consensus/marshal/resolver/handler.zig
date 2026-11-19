@@ -141,16 +141,44 @@ pub const Finalized = union(enum) {
     }
 };
 
+/// The local pruning metadata of a block requested by commitment without certification
+/// evidence. `height` is read from the block above the requested one, so it is only that
+/// block's claim until that block is checked against its own parent. `round`, when the
+/// requester knows one, is a consensus round that ends its need for the block. The request is
+/// retired once the processed height reaches `height` or the round floor covers `round`.
+pub const Untrusted = struct {
+    height: Height,
+    round: ?Round,
+
+    /// Rust's derived `Ord`: by height, then by round with `None` first.
+    pub fn order(a: Untrusted, b: Untrusted) std.math.Order {
+        const by_height = std.math.order(a.height.get(), b.height.get());
+        if (by_height != .eq) return by_height;
+        const left = a.round orelse return if (b.round == null) .eq else .lt;
+        const right = b.round orelse return .gt;
+        return left.order(right);
+    }
+
+    /// Whether the request stays above the processed round floor `cutoff` (without a round,
+    /// only the height retires it).
+    fn above_round_floor(self: Untrusted, cutoff: Cutoff) bool {
+        const round = self.round orelse return true;
+        return !cutoff.covers(round);
+    }
+};
+
 /// The local processing metadata of a request.
 pub const Annotation = union(enum) {
     /// A notarization requested by round.
     notarization: Round,
-    /// A block requested by commitment without certification evidence. The height is local
-    /// pruning metadata: a matching block above it is delivered but not cached. Commitment
-    /// material is recomputed unless another subscriber supplies certification evidence.
-    untrusted: Height,
+    /// A block requested by commitment without certification evidence. Its bounds are local
+    /// pruning metadata that never invalidate a matching response: a matching block above the
+    /// height is delivered but not cached. Commitment material is recomputed unless another
+    /// subscriber supplies certification evidence.
+    untrusted: Untrusted,
     /// A block this node certified, or an ancestor of one: deliveries reuse commitment
-    /// material. The height bounds it as for `untrusted`.
+    /// material, and certification fixed its height, so it needs no round. The height bounds
+    /// it as for `untrusted`.
     certified: Height,
     /// A block requested by commitment for the finalized chain.
     finalized: Finalized,
@@ -166,7 +194,7 @@ pub const Annotation = union(enum) {
         if (by_tag != .eq) return by_tag;
         return switch (a) {
             .notarization => |round| round.order(b.notarization),
-            .untrusted => |height| std.math.order(height.get(), b.untrusted.get()),
+            .untrusted => |untrusted| untrusted.order(b.untrusted),
             .certified => |height| std.math.order(height.get(), b.certified.get()),
             .finalized => |finalized| finalized.order(b.finalized),
         };
@@ -183,7 +211,7 @@ pub fn Request(comptime D: type) type {
         /// A finalization for a height.
         finalized: Height,
         /// A block by commitment without certification evidence.
-        untrusted: Committed(Height),
+        untrusted: Committed(Untrusted),
         /// A block this node certified, or an ancestor of one, by commitment.
         certified: Committed(Height),
         /// A finalized-chain block by commitment when its height is known. The commitment
@@ -200,8 +228,8 @@ pub fn Request(comptime D: type) type {
         /// height stay).
         pub fn above_height_floor(self: Self, floor: Height) bool {
             return switch (self) {
-                .untrusted, .certified, .finalized_by_height => |value| value.bound.get() >
-                    floor.get(),
+                .untrusted => |value| value.bound.height.get() > floor.get(),
+                .certified, .finalized_by_height => |value| value.bound.get() > floor.get(),
                 .finalized => |height| height.get() > floor.get(),
                 .notarized, .finalized_by_round => true,
             };
@@ -213,7 +241,8 @@ pub fn Request(comptime D: type) type {
             return switch (self) {
                 .notarized => |round| !cutoff.covers(round),
                 .finalized_by_round => |value| !cutoff.covers(value.bound),
-                .finalized, .untrusted, .certified, .finalized_by_height => true,
+                .untrusted => |value| value.bound.above_round_floor(cutoff),
+                .finalized, .certified, .finalized_by_height => true,
             };
         }
 
@@ -258,7 +287,8 @@ pub fn above_height_floor(
     return switch (key) {
         .finalized => |height| height.get() > floor.get(),
         .block => switch (annotation) {
-            .untrusted, .certified => |height| height.get() > floor.get(),
+            .untrusted => |untrusted| untrusted.height.get() > floor.get(),
+            .certified => |height| height.get() > floor.get(),
             .finalized => |finalized| switch (finalized) {
                 .by_height => |height| height.get() > floor.get(),
                 .by_round => true,
@@ -285,7 +315,8 @@ pub fn above_round_floor(
                 .by_round => |round| !cutoff.covers(round),
                 .by_height => true,
             },
-            .notarization, .untrusted, .certified => true,
+            .untrusted => |untrusted| untrusted.above_round_floor(cutoff),
+            .notarization, .certified => true,
         },
         .finalized => true,
     };
@@ -571,14 +602,16 @@ test "height floor predicate prunes height-bound requests at the floor" {
         .{ .{ .finalized = .new(200) }, .{ .finalized = .{ .by_height = .new(200) } } },
         .{ .{ .notarized = notarized_round }, .{ .notarization = notarized_round } },
         .{ block, .{ .certified = .new(101) } },
-        .{ block, .{ .untrusted = .new(101) } },
+        .{ block, .{ .untrusted = .{ .height = .new(101), .round = null } } },
     };
     for (kept) |entry| try testing.expect(above_height_floor(D, height_floor, entry[0], entry[1]));
     const pruned = [_]struct { Key(D), Annotation }{
         .{ .{ .finalized = .new(100) }, .{ .finalized = .{ .by_height = .new(100) } } },
         .{ block, .{ .finalized = .{ .by_height = .new(100) } } },
         .{ block, .{ .certified = .new(100) } },
-        .{ block, .{ .untrusted = .new(100) } },
+        .{ block, .{ .untrusted = .{ .height = .new(100), .round = null } } },
+        // A round bound does not keep a request the height floor retires.
+        .{ block, .{ .untrusted = .{ .height = .new(100), .round = notarized_round } } },
     };
     for (pruned) |entry| {
         try testing.expect(!above_height_floor(D, height_floor, entry[0], entry[1]));
@@ -606,6 +639,21 @@ test "round floor predicate prunes covered rounds" {
     try testing.expect(!above_round_floor(D, cutoff, block, .{
         .finalized = .{ .by_round = same },
     }));
+    // An untrusted request retires once the cutoff covers its round, and one without a round
+    // only at its height (commonware #5717).
+    const untrusted = struct {
+        fn of(round: ?Round) Annotation {
+            return .{ .untrusted = .{ .height = .new(100), .round = round } };
+        }
+    }.of;
+    try testing.expect(above_round_floor(D, cutoff, block, untrusted(higher)));
+    try testing.expect(above_round_floor(D, cutoff, block, untrusted(null)));
+    try testing.expect(!above_round_floor(D, cutoff, block, untrusted(same)));
+    const stale: Annotation = .{ .untrusted = .{
+        .height = .new(100),
+        .round = .new(.new(333), .new(150)),
+    } };
+    try testing.expect(above_height_floor(D, .new(99), block, stale));
 }
 
 test "epoch round floor predicate prunes the whole covered epoch" {
@@ -623,6 +671,13 @@ test "epoch round floor predicate prunes the whole covered epoch" {
         }));
         const request: Request(D) = .{ .notarized = round };
         try testing.expect(!request.above_round_floor(cutoff));
+        const untrusted: Annotation = .{ .untrusted = .{ .height = .new(100), .round = round } };
+        try testing.expect(!above_round_floor(D, cutoff, block, untrusted));
+        const untrusted_request: Request(D) = .{ .untrusted = .{
+            .commitment = block.block,
+            .bound = .{ .height = .new(100), .round = round },
+        } };
+        try testing.expect(!untrusted_request.above_round_floor(cutoff));
     }
     // The next epoch's first round and height-bound requests are retained.
     const next: Round = .new(.new(2), .zero());
@@ -631,6 +686,8 @@ test "epoch round floor predicate prunes the whole covered epoch" {
     }));
     const next_by_round: Annotation = .{ .finalized = .{ .by_round = next } };
     try testing.expect(above_round_floor(D, cutoff, block, next_by_round));
+    const next_untrusted: Annotation = .{ .untrusted = .{ .height = .new(100), .round = next } };
+    try testing.expect(above_round_floor(D, cutoff, block, next_untrusted));
     try testing.expect(above_round_floor(D, cutoff, .{ .finalized = .new(100) }, .{
         .finalized = .{ .by_height = .new(100) },
     }));

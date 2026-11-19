@@ -340,7 +340,8 @@ pub fn Manager(comptime V: type, comptime S: type) type {
             try self.put_block(&cache.verified_blocks, view, digest, block, true);
         }
 
-        /// Adds a block to the height-indexed certified archive.
+        /// Adds a block to the height-indexed certified archive, whether or not it is certified.
+        /// A block in an epoch below the floor (pruned) or above the ceiling is not stored.
         pub fn put_certified(
             self: *Self,
             epoch: Epoch,
@@ -348,6 +349,11 @@ pub fn Manager(comptime V: type, comptime S: type) type {
             digest: Digest,
             block: *const V.Block,
         ) !void {
+            // Startup reopens every epoch from the floor to the ceiling, and `epoch` derives
+            // from the block's own height, which can be an unchecked claim: it must not raise
+            // the ceiling (commonware #5717).
+            _, const ceiling = self.get_metadata();
+            if (epoch.get() > ceiling.get()) return;
             const cache = try self.with_epoch(epoch) orelse return;
             if (try cache.certified_blocks.has_at(height.get(), &digest.bytes)) return;
             try self.put_block(&cache.certified_blocks, height.get(), digest, block, true);
@@ -634,6 +640,9 @@ test "pruning by view destroys older epochs and refuses their writes" {
     try testing.expectEqual(1, manager.open_epochs(&epochs).len);
     // A write above the ceiling opens its epoch.
     try manager.put_verified(.new(.new(5), .new(0)), block.digest(), &block);
+    try testing.expectEqual(2, manager.open_epochs(&epochs).len);
+    // A certified write above the ceiling is dropped: its epoch comes from a claimed height.
+    try manager.put_certified(.new(9), .new(90), block.digest(), &block);
     try testing.expectEqual(2, manager.open_epochs(&epochs).len);
     try manager.prune_by_height(.new(10));
 }

@@ -209,12 +209,12 @@ test "subscribe parent fetches the parent by its coding commitment" {
     const inner = try InnerBlock.init(gpa, context, parent.digest(), .new(8), 1_234_568);
     var child = try mocks_block.ready(InnerBlock, gpa, inner);
     defer child.deinit();
-    var receiver = try provider.subscribe_parent(&child);
+    var receiver = try provider.subscribe_parent(&child, null);
     defer receiver.deinit();
     const request = try pair.receiver.try_recv();
     var body = request.body.subscribe_by_commitment;
     try testing.expect(body.commitment.eql(parent.commitment()));
-    try testing.expectEqual(7, body.fallback.fetch_by_commitment.get());
+    try testing.expectEqual(7, body.fallback.fetch_by_commitment.height.get());
     try testing.expectError(error.Empty, receiver.try_recv());
 
     // The coded parent arrives as its application block.
@@ -228,7 +228,7 @@ test "subscribe parent fetches the parent by its coding commitment" {
     const genesis_inner = try InnerBlock.init(gpa, context, Sha256.Digest.empty, .zero(), 0);
     var genesis = try mocks_block.ready(InnerBlock, gpa, genesis_inner);
     defer genesis.deinit();
-    var none = try provider.subscribe_parent(&genesis);
+    var none = try provider.subscribe_parent(&genesis, null);
     defer none.deinit();
     try testing.expectError(error.Closed, none.try_recv());
     try testing.expectError(error.Empty, pair.receiver.try_recv());
