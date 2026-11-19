@@ -853,3 +853,209 @@ test "keyless bounded initialization after a reopen is durable" {
         try db.destroy();
     }
 }
+
+/// Merkleizes a batch appending `values` on `parent` (or on `db` if null), with `floor`.
+fn merkleize_values(
+    comptime D: type,
+    db: *D,
+    parent: ?*D.MerkleizedBatch,
+    values: []const U64,
+    floor: ?u64,
+) !*D.MerkleizedBatch {
+    var batch = if (parent) |p| p.new_batch() else try db.new_batch();
+    errdefer batch.deinit();
+    for (values) |item| try batch.append(item);
+    if (floor) |loc| batch.with_inactivity_floor(loc);
+    return batch.merkleize(db);
+}
+
+/// A child of `parent` appending `make(200..280)`.
+fn build_child(comptime F: type, parent: *TestDb(F).MerkleizedBatch) !TestDb(F).UnmerkleizedBatch {
+    var child = parent.new_batch();
+    errdefer child.deinit();
+    for (200..280) |i| try child.append(make(i));
+    assert(child.size() == parent.bounds.tip.size + 80);
+    return child;
+}
+
+test "keyless a child merkleized across a prune keeps its root" {
+    inline for (families) |F| {
+        var harness = try Harness.init();
+        defer harness.deinit();
+        var db = try harness.open(F);
+        errdefer db.deinit();
+        try append_range(F, &db, 0, 80);
+        try db.commit();
+        const floor = db.bounds().end + 1;
+        const parent = try merkleize_values(TestDb(F), &db, null, &.{make(100)}, floor);
+        defer parent.release();
+        var child = try build_child(F, parent);
+        defer child.deinit();
+        var twin = try build_child(F, parent);
+        const expected = expected: {
+            errdefer twin.deinit();
+            break :expected try twin.merkleize(&db);
+        };
+        defer expected.release();
+        try db.apply_batch(parent);
+        try db.commit();
+        try db.prune(db.inactivity_floor());
+        try testing.expect(db.bounds().start > 0);
+        const merkleized = try child.merkleize(&db);
+        child = try db.new_batch(); // `merkleize` consumed it; the deferred deinit frees this.
+        defer merkleized.release();
+        try testing.expect(merkleized.root().eql(expected.root()));
+        try db.destroy();
+    }
+}
+
+test "keyless batches of a losing fork are stale" {
+    inline for (families) |F| {
+        var harness = try Harness.init();
+        defer harness.deinit();
+        var db = try harness.open(F);
+        defer db.deinit();
+        try append_batch(F, &db, &.{make(0)}, null);
+        try db.commit();
+        const winner = try merkleize_values(TestDb(F), &db, null, &.{make(1)}, null);
+        defer winner.release();
+        const loser = try merkleize_values(TestDb(F), &db, null, &.{make(2)}, null);
+        defer loser.release();
+        try testing.expectEqual(winner.bounds.tip.size, loser.bounds.tip.size);
+        try testing.expect(!winner.root().eql(loser.root()));
+        var child = loser.new_batch();
+        defer child.deinit();
+        try child.append(make(3));
+        var direct = try db.new_batch();
+        defer direct.deinit();
+        try direct.append(make(4));
+        try db.apply_batch(winner);
+        var out: [2]?U64 = undefined;
+        try testing.expectError(error.StaleRead, direct.get(0, &db));
+        try testing.expectError(error.StaleRead, direct.get_many(&.{0}, &db, out[0..1]));
+        try testing.expectError(error.StaleRead, child.get(0, &db));
+        try testing.expectError(error.StaleRead, child.get_many(&.{0}, &db, out[0..1]));
+        try testing.expectError(error.StaleRead, loser.get(0, &db));
+        try testing.expectError(error.StaleRead, child.get_many(&.{}, &db, out[0..0]));
+        try testing.expectError(error.StaleRead, loser.get_many(&.{}, &db, out[0..0]));
+        try testing.expectError(error.StaleRead, child.get(child.size(), &db));
+        try testing.expectError(error.StaleRead, loser.get(loser.bounds.tip.size, &db));
+        try testing.expectError(error.StaleRead, child.get_many(&.{ 1, 0 }, &db, &out));
+        try testing.expectError(error.StaleBatch, child.merkleize(&db));
+        try testing.expectError(error.StaleBatch, db.validate_batch(loser));
+    }
+}
+
+test "keyless applying a descendant makes its parent's reads stale" {
+    inline for (families) |F| {
+        var harness = try Harness.init();
+        defer harness.deinit();
+        var db = try harness.open(F);
+        defer db.deinit();
+        const parent = try merkleize_values(TestDb(F), &db, null, &.{make(1)}, null);
+        defer parent.release();
+        try testing.expectEqual(make(1), (try parent.get(1, &db)).?);
+        const child = try merkleize_values(TestDb(F), &db, parent, &.{make(2)}, null);
+        defer child.release();
+        try db.apply_batch(child);
+        try testing.expectEqual(make(1), (try child.get(1, &db)).?);
+        var out: [1]?U64 = undefined;
+        try testing.expectError(error.StaleRead, parent.get(1, &db));
+        try testing.expectError(error.StaleRead, parent.get_many(&.{1}, &db, &out));
+    }
+}
+
+test "keyless batches refuse to merkleize against another database" {
+    inline for (families) |F| {
+        var harness = try Harness.init();
+        defer harness.deinit();
+        var other = try Harness.init();
+        defer other.deinit();
+        var db = try harness.open(F);
+        defer db.deinit();
+        var foreign = try other.open(F);
+        defer foreign.deinit();
+        try append_batch(F, &db, &.{make(11)}, null);
+        try append_batch(F, &foreign, &.{make(99)}, null);
+        try testing.expectEqual(db.bounds().end, foreign.bounds().end);
+        try testing.expect(!db.root().eql(foreign.root()));
+        var batch = try db.new_batch();
+        defer batch.deinit();
+        try batch.append(make(22));
+        try testing.expectError(error.StaleBatch, batch.merkleize(&foreign));
+        const parent = try merkleize_values(TestDb(F), &db, null, &.{make(33)}, null);
+        defer parent.release();
+        var child = parent.new_batch();
+        defer child.deinit();
+        try child.append(make(44));
+        try testing.expectError(error.StaleBatch, child.merkleize(&foreign));
+    }
+}
+
+test "keyless batches whose sibling applied refuse to merkleize" {
+    inline for (families) |F| {
+        var harness = try Harness.init();
+        defer harness.deinit();
+        var db = try harness.open(F);
+        defer db.deinit();
+        var direct = try db.new_batch();
+        defer direct.deinit();
+        try direct.append(make(11));
+        const sibling = try merkleize_values(TestDb(F), &db, null, &.{make(22)}, null);
+        defer sibling.release();
+        try db.apply_batch(sibling);
+        try testing.expectError(error.StaleBatch, direct.merkleize(&db));
+        const parent = try merkleize_values(TestDb(F), &db, null, &.{make(33)}, null);
+        defer parent.release();
+        var child = parent.new_batch();
+        defer child.deinit();
+        try child.append(make(44));
+        const other = try merkleize_values(TestDb(F), &db, null, &.{make(55)}, null);
+        defer other.release();
+        try db.apply_batch(other);
+        try testing.expectError(error.StaleBatch, child.merkleize(&db));
+    }
+}
+
+test "keyless a child's root is the same whatever its ancestors' states" {
+    inline for (families) |F| {
+        var harness = try Harness.init();
+        defer harness.deinit();
+        var db = try harness.open(F);
+        errdefer db.deinit();
+        const grandparent = try merkleize_values(TestDb(F), &db, null, &.{make(1)}, null);
+        var grandparent_held = true;
+        defer if (grandparent_held) grandparent.release();
+        const parent = try merkleize_values(TestDb(F), &db, grandparent, &.{make(2)}, null);
+        defer parent.release();
+        const pending = try merkleize_values(TestDb(F), &db, parent, &.{make(3)}, null);
+        defer pending.release();
+        // The grandparent applied, then released.
+        try db.apply_batch(grandparent);
+        const applied = try merkleize_values(TestDb(F), &db, parent, &.{make(3)}, null);
+        defer applied.release();
+        try testing.expect(pending.root().eql(applied.root()));
+        grandparent.release();
+        grandparent_held = false;
+        const retired = try merkleize_values(TestDb(F), &db, parent, &.{make(3)}, null);
+        defer retired.release();
+        try testing.expect(retired.bounds.db.eql(db.commitment()));
+        try testing.expect(pending.root().eql(retired.root()));
+        // A child built before its parent applied, merkleized after.
+        var child_batch = parent.new_batch();
+        try child_batch.append(make(3));
+        try db.apply_batch(parent);
+        const child = child: {
+            errdefer child_batch.deinit();
+            break :child try child_batch.merkleize(&db);
+        };
+        defer child.release();
+        try testing.expect(pending.root().eql(child.root()));
+        try db.apply_batch(child);
+        var proved = try db.proof(0, 100);
+        defer proved.deinit(gpa);
+        const root = db.root();
+        try testing.expect(try verified(F, &proved.proof, 0, proved.items, &root));
+        try db.destroy();
+    }
+}
