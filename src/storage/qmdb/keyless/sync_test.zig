@@ -1,6 +1,7 @@
 //! End-to-end state sync of keyless databases (commonware's `qmdb/keyless/sync/tests.rs`
 //! core cases): a fresh database syncs from a populated one served through its journal, and
-//! the synced root, bounds, floor, and values match the source's.
+//! the synced root, bounds, floor, and values match the source's. The shared sync tests
+//! (`sync/harness.zig`) run over commonware's variable harness (byte values) in both families.
 
 const std = @import("std");
 const testing = std.testing;
@@ -8,9 +9,13 @@ const cryptography = @import("cryptography");
 const runtime = @import("runtime");
 const utils = @import("utils");
 const merkle = @import("../../merkle/mod.zig");
+const codec = @import("codec");
 const fixed = @import("../../journal/contiguous/fixed.zig");
+const variable = @import("../../journal/contiguous/variable.zig");
+const qmdb_support = @import("../test_support.zig");
 const value = @import("../value.zig");
 const sync = @import("../sync/mod.zig");
+const sync_harness = @import("../sync/harness.zig");
 const keyless = @import("mod.zig");
 const keyless_sync = @import("sync.zig");
 
@@ -182,4 +187,119 @@ test "keyless sync to a wrong root fails with RootMismatch or InvalidResponse" {
     const target: sync.Target(F, Sha256.Digest) = .init(.fill(3), 0, source_db.bounds().end);
     // Every response fails verification against the wrong root.
     try testing.expectError(error.InvalidResponse, sync_from(F, &harness, &source, target, 3, 2));
+}
+
+/// commonware's keyless `VariableHarness`: byte values of 1 to 100 random bytes per seed.
+fn VariableHarness(comptime F: type) type {
+    const E = value.Variable([]const u8);
+    const Log = variable.Journal(keyless.Operation(F, E));
+    return struct {
+        pub const Family = F;
+        pub const Sync = keyless_sync.Database(F, E, Log, Sha256);
+        pub const Source = sync.JournalSource(F, Sync.Db.Journal);
+        const Db = Sync.Db;
+        const Self = @This();
+        const sample_metadata: []const u8 = &.{42};
+
+        pub fn config(fixture: *sync_harness.Fixture, suffix: []const u8) !Sync.Config {
+            const LogCfg = @FieldType(Sync.Config, "log");
+            return .{
+                .merkle = .{
+                    .journal_partition = try fixture.partition(suffix, "journal"),
+                    .metadata_partition = try fixture.partition(suffix, "metadata"),
+                    .items_per_blob = 11,
+                    .write_buffer = 1024,
+                    .replay_buffer = 1024,
+                    .cache_ref = &fixture.cache_ref,
+                },
+                .log = .{
+                    .partition = try fixture.partition(suffix, "log"),
+                    .items_per_section = 5,
+                    .codec_config = qmdb_support.codec_config(@FieldType(LogCfg, "codec_config")),
+                    .cache_ref = &fixture.cache_ref,
+                    .write_buffer = 1024,
+                    .replay_buffer = 1024,
+                },
+            };
+        }
+
+        pub fn source(db: *Db) Self.Source {
+            return .{ .journal = &db.journal };
+        }
+
+        /// The next value of `create_ops_seeded`'s stream (owned by the caller).
+        fn next_value(random: std.Random) ![]u8 {
+            const bytes = try gpa.alloc(u8, random.uintLessThan(usize, 100) + 1);
+            random.bytes(bytes);
+            return bytes;
+        }
+
+        fn apply_with_floor(db: *Db, seed: u64, count: u64, metadata: bool, floor: u64) !void {
+            var prng: std.Random.DefaultPrng = .init(seed);
+            var batch = try db.new_batch();
+            const merkleized = merkleized: {
+                errdefer batch.deinit();
+                for (0..count) |_| {
+                    const bytes = try next_value(prng.random());
+                    errdefer gpa.free(bytes);
+                    try batch.append(bytes);
+                }
+                if (metadata) batch.with_metadata(try gpa.dupe(u8, sample_metadata));
+                batch.with_inactivity_floor(floor);
+                break :merkleized try batch.merkleize(db);
+            };
+            defer merkleized.release();
+            try db.apply_batch(merkleized);
+        }
+
+        pub fn apply_ops(db: *Db, seed: u64, count: u64, metadata: bool) !void {
+            try apply_with_floor(db, seed, count, metadata, db.inactivity_floor());
+        }
+
+        /// Prune requires the floor at or beyond `location`, so commit it as the floor first
+        /// unless the floor already exceeds it.
+        pub fn prune(db: *Db, location: u64) !void {
+            if (db.inactivity_floor() <= location) {
+                try apply_with_floor(db, 0, 0, false, location);
+                try db.commit();
+            }
+            try db.prune(location);
+        }
+
+        pub fn expect_ops_applied(db: *Db, start: u64, seed: u64, count: u64) !void {
+            var prng: std.Random.DefaultPrng = .init(seed);
+            for (start..start + count) |location| {
+                const expected = try next_value(prng.random());
+                defer gpa.free(expected);
+                const got = try db.get(location);
+                defer codec.free(?[]const u8, gpa, got);
+                try testing.expectEqualSlices(u8, expected, got orelse return error.TestMissing);
+            }
+        }
+
+        pub fn expect_ops_absent(db: *Db, seed: u64, count: u64) !void {
+            var prng: std.Random.DefaultPrng = .init(seed);
+            for (0..count) |_| {
+                const unexpected = try next_value(prng.random());
+                defer gpa.free(unexpected);
+                const bounds = db.bounds();
+                for (bounds.start..bounds.end) |location| {
+                    const got = try db.get(location);
+                    defer codec.free(?[]const u8, gpa, got);
+                    if (got) |bytes| try testing.expect(!std.mem.eql(u8, bytes, unexpected));
+                }
+            }
+        }
+
+        pub fn expect_sample_metadata(db: *Db) !void {
+            const got = try db.get_metadata();
+            defer codec.free(?[]const u8, gpa, got);
+            try testing.expectEqualSlices(u8, sample_metadata, got orelse return error.TestMissing);
+        }
+    };
+}
+
+comptime {
+    _ = sync_harness.Tests(VariableHarness(merkle.mmr.Family));
+    _ = sync_harness.Tests(VariableHarness(merkle.mmb.Family));
 }
