@@ -188,6 +188,11 @@ ports its range's tests and the helpers defined in it, into
   across scopes, processed and round floors, unverifiable delivery, sync dispatch). Done
   2026-11-18: 39 of 43 tests;
   the 3 `should_panic` tests and the identity-job gate have no Zig counterpart (file header).
+- runtime thread (T-01a1d57b-1bfd), `tests/propose_validation.zig`: lines 4994-5931 of
+  the wrappers range (propose and prepare paths, propose rebuilds after restart, the
+  deferred unlinked-parent handoff, reproposal, ancestry, and application-verify checks).
+  Done 2026-11-19: all 7 tests, each on both wrappers where commonware runs both. The 4
+  sync-failure panic tests after them (5932-6150) have no Zig counterpart.
 - runtime thread (T-01a1d57b-1bfd), `tests/coverage.zig`: lines 12605-14905 (prune,
   pipelined handoff, reproposal coverage across restarts, closed-epoch floors, cache
   retention).

@@ -366,3 +366,252 @@ test "inline propose paths" {
 test "deferred propose paths" {
     try run(ProposePaths(DeferredWrapper).body);
 }
+
+/// A validator restarted on `network` under `ctx.child(name)`, reopening the same storage.
+fn restart(
+    ctx: Ctx,
+    comptime name: []const u8,
+    network: *harness.TestNetwork,
+    fixture: *const harness.Fixture,
+) !*Validator {
+    const child = ctx.child(name).with_attribute("index", 0);
+    const provider: harness.Provider = .init(&fixture.schemes[0]);
+    const application = try App.init(gpa, ctx.io());
+    const me = fixture.participants[0];
+    return Validator.setup(child, network.network, me, provider, 1, application);
+}
+
+fn expect_verified(marshal: anytype, round: Round, digest: D) !void {
+    var block = (try marshal.get_verified(round)) orelse return error.VerifiedMissing;
+    defer block.deinit();
+    try testing.expect(block.digest().eql(digest));
+}
+
+fn expect_stored(marshal: anytype, digest: D) !void {
+    var block = (try marshal.get_block(.{ .digest = digest })) orelse return error.BlockLost;
+    block.deinit();
+}
+
+/// Persists the stale block a pre-crash relay broadcast stored for `round` by `me`, whose
+/// parent replay has since replaced; returns its digest.
+fn persist_stale(ctx: Ctx, validator: *Validator, me: harness.K, round: Round, genesis: D) !D {
+    const replaced = harness.Sha256.hash(&.{"replaced parent"});
+    const stale = try block_with(context_of(round, me, 1, replaced), genesis, 1, 100);
+    var persisted = try utils.channel.oneshot.channel(void, gpa, ctx.io());
+    defer persisted.receiver.deinit();
+    const ready = try mocks_block.ready(B, gpa, stale);
+    _ = try validator.mailbox.proposed(round, ready, .all, persisted.sender);
+    try persisted.receiver.recv();
+    return stale.digest();
+}
+
+fn RebuildsAfterRestart(comptime W: type) type {
+    return struct {
+        fn body(ctx: Ctx) anyerror!void {
+            var rng = utils.rng.test_rng();
+            var fixture = try harness.fixture(gpa, &rng);
+            defer fixture.deinit(gpa);
+            const me = fixture.participants[0];
+            var network: harness.TestNetwork =
+                try .start(gpa, ctx.io(), 1, fixture.participants, 1024 * 1024);
+            defer network.stop();
+            const genesis_block = try harness.make_raw_block(
+                gpa,
+                harness.genesis_parent(),
+                .zero(),
+                0,
+            );
+            const genesis = genesis_block.digest();
+            const round = round_at(2);
+            const first = try restart(ctx, "validator", &network, &fixture);
+            const stale = try persist_stale(ctx, first, me, round, genesis);
+            first.crash();
+            const restarted = try restart(ctx, "restarted", &network, &fixture);
+            // The restarted marshal restores the stale block.
+            try expect_verified(restarted.mailbox, round, stale);
+            const context = context_of(round, me, 0, genesis);
+            const fresh = try block_with(context, genesis, 1, 200);
+            const app = Mock.init(gpa).with_propose_result(fresh);
+            const marshal = restarted.mailbox.clone();
+            const wrapper = try W.create(ctx.child("wrapper"), app, marshal, epocher());
+            const digest = (try wrapper.propose(undefined, context)) orelse return error.NoProposal;
+            // A restarted leader builds a fresh block.
+            try testing.expect(digest.eql(fresh.digest()));
+            _ = wrapper.broadcast(digest, .{ .propose = .{ .round = round } });
+            // The fresh block certifies through the relay handshake.
+            const certified = try wrapper.certify(undefined, round, digest);
+            try testing.expectEqual(@as(?bool, true), certified);
+            // The stale block stays stored first at the round.
+            try expect_verified(restarted.mailbox, round, stale);
+            try ctx.sleep(.fromMilliseconds(100));
+            wrapper.destroy();
+            restarted.crash();
+            const recovered = try restart(ctx, "recovered", &network, &fixture);
+            defer recovered.crash();
+            // Both blocks are recoverable from storage.
+            try expect_stored(recovered.mailbox, stale);
+            try expect_stored(recovered.mailbox, digest);
+            const certifier =
+                try W.create(
+                    ctx.child("certifier"),
+                    Mock.init(gpa),
+                    recovered.mailbox.clone(),
+                    epocher(),
+                );
+            defer certifier.destroy();
+            // The fresh block certifies from storage after a restart.
+            const recertified = try certifier.certify(undefined, round, digest);
+            try testing.expectEqual(@as(?bool, true), recertified);
+            try ctx.sleep(.fromMilliseconds(100));
+        }
+    };
+}
+
+test "inline propose rebuilds after restart" {
+    try run(RebuildsAfterRestart(InlineWrapper).body);
+}
+
+test "deferred propose rebuilds after restart" {
+    try run(RebuildsAfterRestart(DeferredWrapper).body);
+}
+
+/// Whether the runtime spawned a task whose label contains `label` (commonware
+/// `spawned_task`).
+fn spawned_task(metrics: []const u8, label: []const u8) bool {
+    var lines = std.mem.splitScalar(u8, metrics, '\n');
+    while (lines.next()) |line| {
+        if (!std.mem.startsWith(u8, line, "runtime_tasks_spawned_total{")) continue;
+        if (std.mem.indexOf(u8, line, label) != null) return true;
+    }
+    return false;
+}
+
+/// A prepare by a new wrapper under `name` with `app` answers `expected`. Returns the
+/// wrapper, which the caller destroys once it has read the wrapper's metrics.
+fn expect_prepared(
+    comptime W: type,
+    ctx: Ctx,
+    env: *Env(W),
+    comptime name: []const u8,
+    app: Mock,
+    context: harness.Ctx,
+    expected: Handoff,
+) !*W {
+    const wrapper = try env.another(ctx, name, app);
+    errdefer wrapper.destroy();
+    const handoff = (try wrapper.prepare(undefined, context)) orelse return error.NoHandoff;
+    try testing.expect(std.meta.eql(handoff, expected));
+    return wrapper;
+}
+
+fn prepare_building(
+    comptime W: type,
+    ctx: Ctx,
+    env: *Env(W),
+    context: harness.Ctx,
+    child: B,
+) !void {
+    const cases = .{
+        .{ "staging", Handoff{ .stage = child.digest() } },
+        .{ "voting", Handoff{ .vote = child.digest() } },
+    };
+    inline for (cases) |case| {
+        const label = case[0];
+        const decision: @import("../../../traits.zig").Handoff(void) = switch (case[1]) {
+            .stage => .{ .stage = {} },
+            .vote => .{ .vote = {} },
+            .wait => unreachable,
+        };
+        const app = Mock.init(gpa).with_handoff(decision).with_propose_result(child);
+        // A prepared block carries the application's decision.
+        const wrapper = try expect_prepared(W, ctx, env, label, app, context, case[1]);
+        defer wrapper.destroy();
+        const metrics = try ctx.encode(gpa);
+        defer gpa.free(metrics);
+        // A prepare fetches the parent once, times the build, and runs in a task.
+        const fetched = label ++ "_parent_fetch_duration_count 1";
+        try testing.expect(std.mem.indexOf(u8, metrics, fetched) != null);
+        const timed = label ++ "_build_duration_count 1";
+        try testing.expect(std.mem.indexOf(u8, metrics, timed) != null);
+        try testing.expect(spawned_task(metrics, label ++ "_prepare"));
+    }
+}
+
+fn PreparePaths(comptime W: type) type {
+    return struct {
+        fn body(ctx: Ctx) anyerror!void {
+            var env: Env(W) = undefined;
+            try env.init(ctx, Mock.init(gpa));
+            defer env.deinit(ctx);
+            const genesis = env.genesis.digest();
+            const context = context_of(round_at(1), env.me(), 0, genesis);
+            const child = try block_with(context, genesis, 1, 100);
+            // The default declines once the parent is fetched.
+            const declining =
+                try expect_prepared(W, ctx, &env, "declining", Mock.init(gpa), context, .wait);
+            defer declining.destroy();
+            const fetched = "declining_parent_fetch_duration_count 1";
+            try testing.expect(try exposition_contains(ctx, fetched));
+            // A block stored for the round before a restart does not decide the view.
+            const rebuilt_round = round_at(2);
+            const replaced = harness.Sha256.hash(&.{"replaced parent"});
+            const stored_context = context_of(rebuilt_round, env.me(), 1, replaced);
+            try env.store(rebuilt_round, try block_with(stored_context, genesis, 1, 101));
+            const rebuilt_context = context_of(rebuilt_round, env.me(), 0, genesis);
+            const rebuilt = try block_with(rebuilt_context, genesis, 1, 102);
+            const app = Mock.init(gpa).with_handoff(.{ .vote = {} }).with_propose_result(rebuilt);
+            const rebuilt_vote: Handoff = .{ .vote = rebuilt.digest() };
+            const rebuilding =
+                try expect_prepared(W, ctx, &env, "rebuilding", app, rebuilt_context, rebuilt_vote);
+            rebuilding.destroy();
+            try prepare_building(W, ctx, &env, context, child);
+        }
+    };
+}
+
+test "inline prepare paths" {
+    try run(PreparePaths(InlineWrapper).body);
+}
+
+test "deferred prepare paths" {
+    try run(PreparePaths(DeferredWrapper).body);
+}
+
+/// Deferred votes before checking a block's parent link, so a handoff build may walk
+/// ancestry only through the parent its tip's own context names: an unlinked parent
+/// declines without asking the application.
+fn unvalidated_link_body(ctx: Ctx) anyerror!void {
+    var env: Env(DeferredWrapper) = undefined;
+    try env.init(ctx, Mock.init(gpa));
+    defer env.deinit(ctx);
+    const genesis = env.genesis.digest();
+    // Both tips carry an authentic context naming genesis; only the second links to it.
+    const tip_round = round_at(1);
+    const tip_context = context_of(tip_round, harness.default_leader(), 0, genesis);
+    const forged_parent = harness.Sha256.hash(&.{"forged parent link"});
+    const forged = try block_with(tip_context, forged_parent, 1, 100);
+    const linked = try block_with(tip_context, genesis, 1, 101);
+    inline for (.{ .{ "forged", false }, .{ "linked", true } }) |case| {
+        const tip = if (case[1]) linked else forged;
+        try env.store(tip_round, tip);
+        const context = context_of(round_at(2), env.me(), 1, tip.digest());
+        const child = try block_with(context, tip.digest(), 2, 200);
+        const app = Mock.init(gpa).with_handoff(.{ .stage = {} }).with_propose_result(child);
+        const expected: Handoff = if (case[1]) .{ .stage = child.digest() } else .wait;
+        // A handoff build requires a parent linked to its context.
+        const wrapper = try expect_prepared(
+            DeferredWrapper,
+            ctx,
+            &env,
+            case[0],
+            app,
+            context,
+            expected,
+        );
+        wrapper.destroy();
+    }
+}
+
+test "deferred handoff rejects unvalidated parent link" {
+    try run(unvalidated_link_body);
+}
