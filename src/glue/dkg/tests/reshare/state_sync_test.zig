@@ -32,6 +32,16 @@ const Prop = ssv.Plan.Property;
 
 /// commonware's `#[values(RoundRobin::default(), stable_leaders())]`.
 const electors = [_]RoundRobin{ .default(), stable_leaders() };
+/// Each ceremony runs with both electors on both networks (commonware's `case::discovery` and
+/// `case::lookup`).
+const cases = blk: {
+    var list: [electors.len * 2]struct { RoundRobin, harness.lookup.Network } = undefined;
+    for (electors, 0..) |elector, at| {
+        list[2 * at] = .{ elector, .discovery };
+        list[2 * at + 1] = .{ elector, .lookup };
+    }
+    break :blk list;
+};
 
 /// commonware `stable_leaders`: terms of two views, a 5 s stall timeout, and two optimistic
 /// views, so every dealer of the largest committee gets a term in an epoch's dealing window.
@@ -228,8 +238,9 @@ test "reshare state sync: block encoding round trips and bounds its size" {
 // epoch 1's first height and plays from epoch 2.
 test "reshare state sync: epoch-first next player" {
     try skip_slow();
-    for (electors) |elector| {
-        var engine = try Engine.with_committee(gpa, 6, 4);
+    for (cases) |case| {
+        const elector, const transport = case;
+        var engine = try Engine.with_committee(gpa, transport, 6, 4);
         defer engine.deinit();
         engine.elector = elector;
         engine.state_sync_floor = first_height(1);
@@ -250,8 +261,9 @@ test "reshare state sync: epoch-first next player" {
 // again.
 test "reshare state sync: restart before epoch boundary" {
     try skip_slow();
-    for (electors) |elector| {
-        var engine = try Engine.with_committee(gpa, 6, 4);
+    for (cases) |case| {
+        const elector, const transport = case;
+        var engine = try Engine.with_committee(gpa, transport, 6, 4);
         defer engine.deinit();
         engine.elector = elector;
         const floor = first_height(1);
@@ -283,8 +295,9 @@ test "reshare state sync: restart before epoch boundary" {
 // every bootstrap member's first latest reply on restart is an epoch-0 finalization.
 test "reshare state sync: restart with stale bootstrap" {
     try skip_slow();
-    for (electors) |elector| {
-        var engine = try Engine.with_committee(gpa, 6, 4);
+    for (cases) |case| {
+        const elector, const transport = case;
+        var engine = try Engine.with_committee(gpa, transport, 6, 4);
         defer engine.deinit();
         engine.elector = elector;
         engine.stale = properties.final_height(0);
@@ -309,8 +322,9 @@ test "reshare state sync: restart with stale bootstrap" {
 // validator joins epoch 1 as an active dealer and player, then is crashed late in it.
 test "reshare state sync: active player late restart" {
     try skip_slow();
-    for (electors) |elector| {
-        var engine = try Engine.with_committee(gpa, 4, 4);
+    for (cases) |case| {
+        const elector, const transport = case;
+        var engine = try Engine.with_committee(gpa, transport, 4, 4);
         defer engine.deinit();
         engine.elector = elector;
         engine.base.failures = &.{0};
@@ -349,8 +363,9 @@ test "reshare state sync: active player late restart" {
 // so the genesis share carries into epoch 2 for a validator synced mid-epoch 1.
 test "reshare state sync: late sync carries share across failure" {
     try skip_slow();
-    for (electors) |elector| {
-        var engine = try Engine.with_committee(gpa, 4, 4);
+    for (cases) |case| {
+        const elector, const transport = case;
+        var engine = try Engine.with_committee(gpa, transport, 4, 4);
         defer engine.deinit();
         engine.elector = elector;
         engine.base.failures = &.{ 0, 1 };
@@ -384,8 +399,9 @@ test "reshare state sync: late sync carries share across failure" {
 // and signs for epoch 4.
 test "reshare state sync: epoch crosses during sync" {
     try skip_slow();
-    for (electors) |elector| {
-        var engine = try Engine.with_committee(gpa, 6, 4);
+    for (cases) |case| {
+        const elector, const transport = case;
+        var engine = try Engine.with_committee(gpa, transport, 6, 4);
         defer engine.deinit();
         engine.elector = elector;
         engine.epoch_cross_during_sync = true;
@@ -414,8 +430,9 @@ test "reshare state sync: epoch crosses during sync" {
 // commonware `reshare_e2e_state_sync_epoch_zero_next_player`.
 test "reshare state sync: epoch-zero next player" {
     try skip_slow();
-    for (electors) |elector| {
-        var base = try harness.ReshareEngine.create(gpa);
+    for (cases) |case| {
+        const elector, const transport = case;
+        var base = try harness.ReshareEngine.create_on(gpa, transport);
         errdefer base.deinit();
         var engine = try Engine.from_base(base);
         defer engine.deinit();
@@ -436,8 +453,9 @@ test "reshare state sync: epoch-zero next player" {
 // commonware `reshare_e2e_state_sync_next_player_after_failed_ceremony`.
 test "reshare state sync: next player after failed ceremony" {
     try skip_slow();
-    for (electors) |elector| {
-        var engine = try Engine.with_committee(gpa, 6, 4);
+    for (cases) |case| {
+        const elector, const transport = case;
+        var engine = try Engine.with_committee(gpa, transport, 6, 4);
         defer engine.deinit();
         engine.elector = elector;
         engine.base.failures = &.{1};
@@ -466,8 +484,9 @@ test "reshare state sync: next player after failed ceremony" {
 // commonware `reshare_e2e_state_sync_existing_player_after_failed_ceremony`.
 test "reshare state sync: existing player after failed ceremony" {
     try skip_slow();
-    for (electors) |elector| {
-        var base = try harness.ReshareEngine.create(gpa);
+    for (cases) |case| {
+        const elector, const transport = case;
+        var base = try harness.ReshareEngine.create_on(gpa, transport);
         errdefer base.deinit();
         var engine = try Engine.from_base(base);
         defer engine.deinit();
@@ -502,9 +521,10 @@ test "reshare state sync: boundary participating synced validator" {
     const last = properties.final_height(1);
     const stopped_at = last - 2;
     const floor = first_height(1) + 2;
-    for (electors) |elector| {
+    for (cases) |case| {
+        const elector, const transport = case;
         for (0..6) |seed| {
-            var engine = try Engine.with_committee(gpa, 4, 4);
+            var engine = try Engine.with_committee(gpa, transport, 4, 4);
             defer engine.deinit();
             engine.elector = elector;
             engine.base.failures = &.{0};

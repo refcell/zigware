@@ -44,6 +44,7 @@ const simulate = @import("../../../simulate/mod.zig");
 const mocks = @import("../mocks.zig");
 const properties = @import("properties.zig");
 const support = @import("support.zig");
+const lookup = @import("lookup.zig");
 const block_mod = @import("state_sync_block.zig");
 const app_mod = @import("state_sync_app.zig");
 const validator = @import("validator.zig");
@@ -254,7 +255,8 @@ pub fn StateSyncValidator(comptime T: type) type {
             schedule: properties.CommitteeSchedule,
             /// Epoch zero's info, carried by genesis (borrowed).
             initial: *const Info,
-            directory: D,
+            /// Which transport the directories address (commonware `Network`).
+            network: lookup.Network,
             sharing_mode: SharingMode,
             elector: RoundRobin,
             /// Owned by the caller; outlives the validator.
@@ -459,7 +461,7 @@ pub fn StateSyncValidator(comptime T: type) type {
             _ = try self.provider.install(Epoch.zero(), info);
             self.participants = .{
                 .schedule = config.schedule,
-                .directory_value = config.directory,
+                .network = config.network,
             };
             assert(self.provider.scheme(Epoch.zero()) != null);
         }
@@ -505,7 +507,7 @@ pub fn StateSyncValidator(comptime T: type) type {
             errdefer if (reply) |bytes| gpa.free(bytes);
             self.probe = try Probe.init(gpa, self.io, .{
                 .discovery = .{
-                    .manager = T.Manager.init(self.config.peer_provider),
+                    .manager = self.config.manager.*,
                     .bootstrap = .{
                         .epoch = .zero(),
                         .participants = participants,
@@ -1062,8 +1064,14 @@ pub const StateSyncEngine = struct {
     }
 
     /// commonware `ReshareEngine::with_committee`.
-    pub fn with_committee(gpa: Allocator, total: u32, committee_size: usize) !StateSyncEngine {
-        var base = try harness.ReshareEngine.with_committees(gpa, total, &.{committee_size}, 1);
+    pub fn with_committee(
+        gpa: Allocator,
+        network_kind: harness.lookup.Network,
+        total: u32,
+        committee_size: usize,
+    ) !StateSyncEngine {
+        const sizes = &.{committee_size};
+        var base = try harness.ReshareEngine.with_network(gpa, network_kind, total, sizes, 1);
         errdefer base.deinit();
         return from_base(base);
     }
@@ -1131,7 +1139,7 @@ pub const StateSyncEngine = struct {
         const control = ctx.oracle.control(ctx.public_key);
         try control.reset_peer_sets();
         const manager = &self_mut.base.managers[index];
-        manager.* = .init(control.manager());
+        manager.* = .init(self.base.gpa, self.base.network, control);
         var wrapped: [channel_count]Validator.Channel = undefined;
         const failures = self.base.failures;
         for (&wrapped, ctx.channels, 0..) |*channel, registered, at| {
@@ -1179,14 +1187,14 @@ pub const StateSyncEngine = struct {
         return .{
             .signer = base.signers[index],
             .manager = manager,
-            .peer_provider = manager.manager,
+            .peer_provider = manager.provider(),
             .blocker = ctx.oracle.control(ctx.public_key),
             .secret_store = &base_mut.stores[index],
             .ledger = &base_mut.ledger,
             .monitor = ctx.monitor,
             .schedule = base.schedule(),
             .initial = &base.initial,
-            .directory = .{},
+            .network = base.network,
             .sharing_mode = base.sharing_mode,
             .elector = self.elector,
             .partition_prefix = prefixes[index],

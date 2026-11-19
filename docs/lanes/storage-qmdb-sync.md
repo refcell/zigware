@@ -115,12 +115,16 @@ it comes first once `any` lands.
   variant with the probe, QMDB resolver, `Stateful` app, and DKG state-sync plan. Each runs
   under both of commonware's electors, with `with_stale` as a `Swap` probe receiver. The
   ceremonies are `-Dslow-tests`; the block codec test runs per push.
-- [ ] Reshare `Network::Lookup` cases (agreed with bls-math, option b): make harness.zig's
-  `ReshareEngine` generic over the network (`TestDirectory` = `Option<Addresses>`,
-  `TestManager` over `KeyOnlyManager`/`AddressableManager(socket_manager)`, addressed
-  `ScheduleParticipants.directory`), on top of bls-math's per-node manager push; then the
-  lookup split of every state-sync ceremony and of harness_test.zig's manager test. Diff to
-  bls-math before pushing.
+- [x] Reshare `Network::Lookup` cases (agreed with bls-math, option b): tests/reshare/lookup.zig
+  holds `Network`, `TestDirectory` (`Option<Addresses>`, participant `i` at
+  127.0.0.1:(10000 + i)), and `TestManager` (`KeyOnlyManager` or
+  `AddressableManager(socket_manager)` over the node's own peer sets). One engine type takes the
+  network at runtime (`create_on`, `with_network`; `create`/`with_committees` stay discovery),
+  as commonware's single `TestDirectory` type does. `peer_provider` stays the node's
+  `Net.Manager` on both networks: the simulated `SocketManager` wraps the same per-node
+  tracker, so it reads what either manager tracked. Every mod.rs test with a `case::lookup`
+  runs both networks (the shareless-player test is discovery only, as upstream), and so does
+  harness_test.zig's manager test.
 
 ## Agreement with storage-qmdb (2026-11-16)
 - `any.Db(F, U, C, H, ...)` (family, update type, contiguous journal, hasher, index or

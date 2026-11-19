@@ -1,5 +1,5 @@
-//! The reshare end-to-end harness (commonware `glue::dkg::tests::reshare::harness`), phase 1:
-//! validators without state sync on the discovery network.
+//! The reshare end-to-end harness (commonware `glue::dkg::tests::reshare::harness`):
+//! validators without state sync, on the discovery or the lookup network (`lookup.zig`).
 //!
 //! `ReshareEngine` is the plan's engine definition. It deals epoch zero's output from a fixed
 //! seed to the schedule's first committee and seeds each player's secret store with its
@@ -21,6 +21,7 @@ const mocks = @import("../mocks.zig");
 const properties = @import("properties.zig");
 const support = @import("support.zig");
 const validator = @import("validator.zig");
+pub const lookup = @import("lookup.zig");
 
 const Epoch = consensus.Epoch;
 const ed25519 = cryptography.ed25519;
@@ -28,8 +29,8 @@ pub const Key = ed25519.PublicKey;
 const MinPk = cryptography.bls12381.primitives.MinPk;
 const fd = cryptography.bls12381.dkg.feldman_desmedt;
 const Share = cryptography.bls12381.primitives.group.Share;
-const Unit = utils.sequence.Unit;
 const Net = p2p.simulated.Network(Key);
+const Set = utils.ordered.Set(Key);
 const Context = simulate.engine.Context;
 const Duration = utils.time.Duration;
 
@@ -46,8 +47,8 @@ pub const FilteredNetwork = struct {
 
 pub const Types = struct {
     pub const Variant = MinPk;
-    pub const Directory = Unit;
-    pub const Manager = network.KeyOnlyManager(Net.Manager);
+    pub const Directory = lookup.TestDirectory;
+    pub const Manager = lookup.TestManager;
     pub const PeerProvider = Net.Manager;
     pub const Blocker = Net.Control;
     pub const SecretStore = mocks.MemorySecretStore;
@@ -116,6 +117,7 @@ pub const ReshareEngine = struct {
     pub const State = ValidatorState;
 
     gpa: Allocator,
+    network: lookup.Network,
     signers: []ed25519.PrivateKey,
     keys: []Key,
     committee_sizes: []usize,
@@ -135,10 +137,26 @@ pub const ReshareEngine = struct {
         return with_committees(gpa, 5, &.{4}, 1);
     }
 
-    /// commonware `with_committees`: each epoch's players start `rotation_stride` after the
-    /// previous epoch's.
+    /// `create` on `network_kind`.
+    pub fn create_on(gpa: Allocator, network_kind: lookup.Network) !ReshareEngine {
+        return with_network(gpa, network_kind, 5, &.{4}, 1);
+    }
+
+    /// `with_network` on the discovery network.
     pub fn with_committees(
         gpa: Allocator,
+        total: u32,
+        committee_sizes: []const usize,
+        rotation_stride: usize,
+    ) !ReshareEngine {
+        return with_network(gpa, .discovery, total, committee_sizes, rotation_stride);
+    }
+
+    /// commonware `with_committees`: each epoch's players start `rotation_stride` after the
+    /// previous epoch's.
+    pub fn with_network(
+        gpa: Allocator,
+        network_kind: lookup.Network,
         total: u32,
         committee_sizes: []const usize,
         rotation_stride: usize,
@@ -147,6 +165,7 @@ pub const ReshareEngine = struct {
         for (committee_sizes) |size| assert(size > 0 and size <= total);
         var self: ReshareEngine = undefined;
         self.gpa = gpa;
+        self.network = network_kind;
         self.sharing_mode = .non_zero_counter;
         self.failures = &.{};
         self.rotation_stride = rotation_stride;
@@ -184,15 +203,36 @@ pub const ReshareEngine = struct {
         for (dealt.shares.keys.items, dealt.shares.values) |key, share| {
             self.initial_shares[self.index_of(key)] = share;
         }
-        const output_players = try dealt.output.players.clone(gpa);
+        var output_players = try dealt.output.players.clone(gpa);
+        errdefer output_players.deinit(gpa);
+        var next_players = try committees.players(gpa, 1);
+        errdefer next_players.deinit(gpa);
+        const directory = try self.initial_directory(output_players, next_players);
         self.initial = .{
             .outcome = .success,
             .epoch = .zero(),
             .output = dealt.output,
             .players = output_players,
-            .next_players = try committees.players(gpa, 1),
-            .directory = .{},
+            .next_players = next_players,
+            .directory = directory,
         };
+        assert((self.initial.directory.addresses == null) == (self.network == .discovery));
+    }
+
+    /// commonware's `network.directory(initial_peers)`: epoch zero's dealers, players, and
+    /// next players.
+    fn initial_directory(
+        self: *const ReshareEngine,
+        players: Set,
+        next_players: Set,
+    ) !lookup.TestDirectory {
+        const gpa = self.gpa;
+        const joined = try std.mem.concat(gpa, Key, &.{ players.items, next_players.items });
+        defer gpa.free(joined);
+        var peers = try Set.from_dedup(gpa, joined);
+        defer peers.deinit(gpa);
+        assert(peers.items.len >= players.items.len);
+        return lookup.TestDirectory.of(gpa, self.network, self.keys, peers);
     }
 
     fn free_initial(self: *ReshareEngine) void {
@@ -261,8 +301,9 @@ pub const ReshareEngine = struct {
         const participants_max = validator.max_participants;
         const orchestrator_bound = @import("../../orchestrator/root.zig").limits
             .max_payload_size(Scheme, Digest, participants_max);
+        const mode = mocks.max_supported_mode;
         const payload = @import("../../bootstrap/mod.zig")
-            .max_payload_size(MinPk, Unit, participants_max, mocks.max_supported_mode);
+            .max_payload_size(MinPk, lookup.TestDirectory, participants_max, mode);
         return p2p.max_message_size(&.{ orchestrator_bound, payload, 1 << 20 });
     }
 
@@ -284,7 +325,7 @@ pub const ReshareEngine = struct {
         const control = ctx.oracle.control(ctx.public_key);
         try control.reset_peer_sets();
         const manager = &self.managers[index];
-        manager.* = .init(control.manager());
+        manager.* = .init(gpa, self.network, control);
         var wrapped: [channel_count]Validator.Channel = undefined;
         for (&wrapped, ctx.channels, 0..) |*channel, registered, at| {
             const filter: mocks.Filter = if (at == dkg_channel and self.failures.len > 0)
@@ -331,14 +372,14 @@ pub const ReshareEngine = struct {
         return .{
             .signer = self.signers[index],
             .manager = manager,
-            .peer_provider = manager.manager,
+            .peer_provider = manager.provider(),
             .blocker = ctx.oracle.control(ctx.public_key),
             .secret_store = &self_mut.stores[index],
             .ledger = &self_mut.ledger,
             .monitor = ctx.monitor,
             .schedule = self.schedule(),
             .initial = &self.initial,
-            .directory = .{},
+            .network = self.network,
             .sharing_mode = self.sharing_mode,
             .partition_prefix = prefixes[index],
         };

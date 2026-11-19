@@ -1,5 +1,5 @@
 //! commonware `glue::dkg::tests::reshare` (mod.rs): reshare ceremonies end to end over many
-//! epochs. Phase 1 runs the discovery network without state sync; see docs/lanes/glue.md.
+//! epochs, each on the discovery and the lookup network; see docs/lanes/glue.md.
 //! Commonware's `slow` group runs only with -Dslow-tests; the single-participant test always
 //! runs.
 
@@ -17,6 +17,10 @@ const properties = @import("properties.zig");
 const gpa = testing.allocator;
 const SharingMode = cryptography.bls12381.primitives.sharing.Mode;
 const S = harness.ValidatorState;
+const Network = harness.lookup.Network;
+
+/// commonware's `case::discovery` and `case::lookup`.
+const networks = [_]Network{ .discovery, .lookup };
 
 /// The most epochs a plan checks `SchemesRegistered` for.
 const max_scheme_epochs = 8;
@@ -116,10 +120,10 @@ fn run_reshare(engine: *harness.ReshareEngine, options: Options) ![8]u8 {
 }
 
 /// commonware `reshare_e2e_deterministic`: two runs of one seed end in the same state.
-fn expect_deterministic(seed: u64) !void {
+fn expect_deterministic(transport: Network, seed: u64) !void {
     var states: [2][8]u8 = undefined;
     for (&states) |*state| {
-        var engine = try harness.ReshareEngine.create(gpa);
+        var engine = try harness.ReshareEngine.create_on(gpa, transport);
         defer engine.deinit();
         state.* = try run_reshare(&engine, .{ .final_epoch = 1, .seed = seed, .schemes = false });
     }
@@ -129,99 +133,119 @@ fn expect_deterministic(seed: u64) !void {
 // commonware `reshare_e2e_deterministic`.
 test "reshare e2e deterministic" {
     try skip_slow();
-    try expect_deterministic(0);
+    for (networks) |transport| {
+        try expect_deterministic(transport, 0);
+    }
 }
 
 // commonware `reshare_e2e_deterministic_multiple_seeds`.
 test "reshare e2e deterministic multiple seeds" {
     try skip_slow();
-    for (0..3) |seed| try expect_deterministic(seed);
+    for (networks) |transport| {
+        for (0..3) |seed| try expect_deterministic(transport, seed);
+    }
 }
 
 // commonware `reshare_e2e_single_participant_two_epochs`.
 test "reshare e2e single participant two epochs" {
-    var engine = try harness.ReshareEngine.with_committees(gpa, 1, &.{1}, 1);
-    defer engine.deinit();
-    _ = try run_reshare(&engine, .{ .final_epoch = 1 });
+    for (networks) |transport| {
+        var engine = try harness.ReshareEngine.with_network(gpa, transport, 1, &.{1}, 1);
+        defer engine.deinit();
+        _ = try run_reshare(&engine, .{ .final_epoch = 1 });
+    }
 }
 
 // commonware `reshare_e2e_rotates_participants`: five validators, four players per epoch.
 test "reshare e2e rotates participants" {
     try skip_slow();
-    var engine = try harness.ReshareEngine.create(gpa);
-    defer engine.deinit();
-    _ = try run_reshare(&engine, .{ .final_epoch = 0 });
+    for (networks) |transport| {
+        var engine = try harness.ReshareEngine.create_on(gpa, transport);
+        defer engine.deinit();
+        _ = try run_reshare(&engine, .{ .final_epoch = 0 });
+    }
 }
 
 // commonware `reshare_e2e_multiple_epochs`.
 test "reshare e2e multiple epochs" {
     try skip_slow();
-    var engine = try harness.ReshareEngine.create(gpa);
-    defer engine.deinit();
-    _ = try run_reshare(&engine, .{ .final_epoch = 4 });
+    for (networks) |transport| {
+        var engine = try harness.ReshareEngine.create_on(gpa, transport);
+        defer engine.deinit();
+        _ = try run_reshare(&engine, .{ .final_epoch = 4 });
+    }
 }
 
 // commonware `reshare_e2e_four_epochs_changing_size`.
 test "reshare e2e four epochs changing size" {
     try skip_slow();
-    var engine = try harness.ReshareEngine.with_committees(gpa, 8, &.{ 4, 5, 6, 7, 4 }, 1);
-    defer engine.deinit();
-    _ = try run_reshare(&engine, .{ .final_epoch = 4 });
+    for (networks) |transport| {
+        const sizes = &.{ 4, 5, 6, 7, 4 };
+        var engine = try harness.ReshareEngine.with_network(gpa, transport, 8, sizes, 1);
+        defer engine.deinit();
+        _ = try run_reshare(&engine, .{ .final_epoch = 4 });
+    }
 }
 
 // commonware `reshare_e2e_failed_ceremony_carries_committee`.
 test "reshare e2e failed ceremony carries committee" {
     try skip_slow();
-    var engine = try harness.ReshareEngine.create(gpa);
-    defer engine.deinit();
-    engine.failures = &.{0};
-    _ = try run_reshare(&engine, .{
-        .final_epoch = 0,
-        .min_successes = 0,
-        .no_reveals = false,
-        .failed = &.{0},
-        .schemes = false,
-    });
+    for (networks) |transport| {
+        var engine = try harness.ReshareEngine.create_on(gpa, transport);
+        defer engine.deinit();
+        engine.failures = &.{0};
+        _ = try run_reshare(&engine, .{
+            .final_epoch = 0,
+            .min_successes = 0,
+            .no_reveals = false,
+            .failed = &.{0},
+            .schemes = false,
+        });
+    }
 }
 
 // commonware `reshare_e2e_consecutive_failed_ceremonies_carry_state`.
 test "reshare e2e consecutive failed ceremonies carry state" {
     try skip_slow();
-    var engine = try harness.ReshareEngine.create(gpa);
-    defer engine.deinit();
-    engine.failures = &.{ 0, 1 };
-    _ = try run_reshare(&engine, .{
-        .final_epoch = 2,
-        .timeout_secs = 90,
-        .min_successes = 1,
-        .failed = &.{ 0, 1 },
-        .schemes = false,
-    });
+    for (networks) |transport| {
+        var engine = try harness.ReshareEngine.create_on(gpa, transport);
+        defer engine.deinit();
+        engine.failures = &.{ 0, 1 };
+        _ = try run_reshare(&engine, .{
+            .final_epoch = 2,
+            .timeout_secs = 90,
+            .min_successes = 1,
+            .failed = &.{ 0, 1 },
+            .schemes = false,
+        });
+    }
 }
 
 // commonware `reshare_e2e_many_failed_ceremonies_carry_state`.
 test "reshare e2e many failed ceremonies carry state" {
     try skip_slow();
-    var engine = try harness.ReshareEngine.with_committees(gpa, 8, &.{ 4, 5 }, 1);
-    defer engine.deinit();
-    engine.failures = &.{ 0, 2, 3 };
-    _ = try run_reshare(&engine, .{
-        .final_epoch = 4,
-        .timeout_secs = 120,
-        .min_successes = 2,
-        .failed = &.{ 0, 2, 3 },
-        .schemes = false,
-    });
+    for (networks) |transport| {
+        var engine = try harness.ReshareEngine.with_network(gpa, transport, 8, &.{ 4, 5 }, 1);
+        defer engine.deinit();
+        engine.failures = &.{ 0, 2, 3 };
+        _ = try run_reshare(&engine, .{
+            .final_epoch = 4,
+            .timeout_secs = 120,
+            .min_successes = 2,
+            .failed = &.{ 0, 2, 3 },
+            .schemes = false,
+        });
+    }
 }
 
 /// commonware `crash_storm_plan`: every boundary must succeed despite the crashes.
 fn run_crash_storm(
+    transport: Network,
     final_epoch: u64,
     crash: simulate.action.Crash(harness.Key),
     seed: u64,
     timeout_secs: u64,
 ) !void {
-    var engine = try harness.ReshareEngine.create(gpa);
+    var engine = try harness.ReshareEngine.create_on(gpa, transport);
     defer engine.deinit();
     _ = try run_reshare(&engine, .{
         .final_epoch = final_epoch,
@@ -236,70 +260,82 @@ fn run_crash_storm(
 // commonware `reshare_e2e_multiple_epochs_with_random_crashes`.
 test "reshare e2e multiple epochs with random crashes" {
     try skip_slow();
-    const crash: simulate.action.Crash(harness.Key) = .{ .random = .{
-        .frequency = .from_secs(2),
-        .downtime = .from_millis(750),
-        .count = 1,
-    } };
-    for (0..3) |seed| try run_crash_storm(4, crash, seed, 180);
+    for (networks) |transport| {
+        const crash: simulate.action.Crash(harness.Key) = .{ .random = .{
+            .frequency = .from_secs(2),
+            .downtime = .from_millis(750),
+            .count = 1,
+        } };
+        for (0..3) |seed| try run_crash_storm(transport, 4, crash, seed, 180);
+    }
 }
 
 // commonware `reshare_e2e_multiple_epochs_with_many_random_crashes`.
 test "reshare e2e multiple epochs with many random crashes" {
     try skip_slow();
-    const crash: simulate.action.Crash(harness.Key) = .{ .random = .{
-        .frequency = .from_secs(2),
-        .downtime = .from_millis(750),
-        .count = 3,
-    } };
-    try run_crash_storm(4, crash, 0, 360);
+    for (networks) |transport| {
+        const crash: simulate.action.Crash(harness.Key) = .{ .random = .{
+            .frequency = .from_secs(2),
+            .downtime = .from_millis(750),
+            .count = 3,
+        } };
+        try run_crash_storm(transport, 4, crash, 0, 360);
+    }
 }
 
 // commonware `reshare_e2e_multiple_epochs_with_total_shutdown`: more uninterrupted uptime
 // than `certification_timeout`, so recovery progresses before the next total shutdown.
 test "reshare e2e multiple epochs with total shutdown" {
     try skip_slow();
-    const crash: simulate.action.Crash(harness.Key) = .{ .random = .{
-        .frequency = .from_secs(4),
-        .downtime = .from_secs(1),
-        .count = 5,
-    } };
-    try run_crash_storm(3, crash, 0, 180);
+    for (networks) |transport| {
+        const crash: simulate.action.Crash(harness.Key) = .{ .random = .{
+            .frequency = .from_secs(4),
+            .downtime = .from_secs(1),
+            .count = 5,
+        } };
+        try run_crash_storm(transport, 3, crash, 0, 180);
+    }
 }
 
 // commonware `reshare_e2e_rotating_subset`.
 test "reshare e2e rotating subset" {
     try skip_slow();
-    var engine = try harness.ReshareEngine.with_committees(gpa, 7, &.{4}, 1);
-    defer engine.deinit();
-    _ = try run_reshare(&engine, .{ .final_epoch = 0 });
+    for (networks) |transport| {
+        var engine = try harness.ReshareEngine.with_network(gpa, transport, 7, &.{4}, 1);
+        defer engine.deinit();
+        _ = try run_reshare(&engine, .{ .final_epoch = 0 });
+    }
 }
 
 // commonware `reshare_e2e_lossy_network`.
 test "reshare e2e lossy network" {
     try skip_slow();
-    var engine = try harness.ReshareEngine.create(gpa);
-    defer engine.deinit();
-    _ = try run_reshare(&engine, .{
-        .final_epoch = 4,
-        .timeout_secs = 720,
-        .min_successes = 1,
-        .schemes = false,
-        .link = .{
-            .latency = .from_millis(100),
-            .jitter = .from_millis(50),
-            .success_rate = 0.7,
-        },
-    });
+    for (networks) |transport| {
+        var engine = try harness.ReshareEngine.create_on(gpa, transport);
+        defer engine.deinit();
+        _ = try run_reshare(&engine, .{
+            .final_epoch = 4,
+            .timeout_secs = 720,
+            .min_successes = 1,
+            .schemes = false,
+            .link = .{
+                .latency = .from_millis(100),
+                .jitter = .from_millis(50),
+                .success_rate = 0.7,
+            },
+        });
+    }
 }
 
 // commonware `reshare_e2e_roots_of_unity_output`.
 test "reshare e2e roots of unity output" {
     try skip_slow();
-    var engine = try harness.ReshareEngine.create(gpa);
-    defer engine.deinit();
-    engine.sharing_mode = .roots_of_unity;
-    _ = try run_reshare(&engine, .{ .final_epoch = 0, .output_mode = .roots_of_unity });
+    for (networks) |transport| {
+        var engine = try harness.ReshareEngine.create_on(gpa, transport);
+        defer engine.deinit();
+        engine.sharing_mode = .roots_of_unity;
+        _ = try run_reshare(&engine, .{ .final_epoch = 0, .output_mode = .roots_of_unity });
+    }
 }
 
 const epocher: consensus.types.FixedEpocher = .{ .length = properties.epoch_length };
@@ -334,31 +370,33 @@ fn run_until_active(
 // it, so the restarted validator completes the only possible quorum.
 test "reshare e2e boundary lagging validator" {
     try skip_slow();
-    const epoch: consensus.Epoch = .new(1);
-    const first = epocher.first(epoch).?.get();
-    const midpoint = epocher.midpoint(epoch).?.get();
-    const last = properties.final_height(epoch.get());
-    const stopped_at = last - 1;
-    for (0..3) |seed| {
-        var engine = try harness.ReshareEngine.with_committees(gpa, 4, &.{4}, 1);
-        defer engine.deinit();
-        const keys = engine.participants();
-        const stopped = keys[2];
-        engine.ledger.hold = .{ .key = stopped, .height = stopped_at };
-        const crashes = [_]simulate.action.Crash(harness.Key){
-            .{ .processed_height = .{
-                .participants = keys[3..4],
-                .heights = .{ .min = first + 1, .max = midpoint - 8 },
-                .downtime = .from_secs(10),
-            } },
-            // Down for the rest of the run.
-            .{ .processed_height = .{
-                .participants = keys[2..3],
-                .heights = .{ .min = stopped_at, .max = stopped_at },
-                .downtime = .from_secs(3600),
-            } },
-        };
-        try run_until_active(&engine, seed, &crashes, last, 3);
+    for (networks) |transport| {
+        const epoch: consensus.Epoch = .new(1);
+        const first = epocher.first(epoch).?.get();
+        const midpoint = epocher.midpoint(epoch).?.get();
+        const last = properties.final_height(epoch.get());
+        const stopped_at = last - 1;
+        for (0..3) |seed| {
+            var engine = try harness.ReshareEngine.with_network(gpa, transport, 4, &.{4}, 1);
+            defer engine.deinit();
+            const keys = engine.participants();
+            const stopped = keys[2];
+            engine.ledger.hold = .{ .key = stopped, .height = stopped_at };
+            const crashes = [_]simulate.action.Crash(harness.Key){
+                .{ .processed_height = .{
+                    .participants = keys[3..4],
+                    .heights = .{ .min = first + 1, .max = midpoint - 8 },
+                    .downtime = .from_secs(10),
+                } },
+                // Down for the rest of the run.
+                .{ .processed_height = .{
+                    .participants = keys[2..3],
+                    .heights = .{ .min = stopped_at, .max = stopped_at },
+                    .downtime = .from_secs(3600),
+                } },
+            };
+            try run_until_active(&engine, seed, &crashes, last, 3);
+        }
     }
 }
 

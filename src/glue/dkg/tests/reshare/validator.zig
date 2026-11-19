@@ -32,6 +32,7 @@ const bootstrap = @import("../../bootstrap/mod.zig");
 const simulate = @import("../../../simulate/mod.zig");
 const properties = @import("properties.zig");
 const support = @import("support.zig");
+const lookup = @import("lookup.zig");
 
 const simplex = consensus.simplex;
 const Epoch = consensus.Epoch;
@@ -144,7 +145,8 @@ pub fn Validator(comptime T: type) type {
             schedule: properties.CommitteeSchedule,
             /// Epoch zero's info, carried by genesis (borrowed).
             initial: *const Info,
-            directory: D,
+            /// Which transport the directories address (commonware `Network`).
+            network: lookup.Network,
             sharing_mode: SharingMode,
             /// Owned by the caller; outlives the validator.
             partition_prefix: []const u8,
@@ -322,7 +324,7 @@ pub fn Validator(comptime T: type) type {
             try self.register_epoch_zero();
             self.participants = .{
                 .schedule = config.schedule,
-                .directory_value = config.directory,
+                .network = config.network,
             };
             try self.init_node(ctx, channels);
             errdefer self.node.deinit();

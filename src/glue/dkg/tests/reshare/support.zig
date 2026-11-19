@@ -16,6 +16,7 @@ const utils = @import("utils");
 const types = @import("../../types.zig");
 const network = @import("../../network.zig");
 const properties = @import("properties.zig");
+const lookup = @import("lookup.zig");
 
 const Epoch = consensus.Epoch;
 const Key = cryptography.ed25519.PublicKey;
@@ -237,8 +238,8 @@ pub fn Schemes(comptime S: type) type {
     };
 }
 
-/// Each epoch's players from the schedule, with directory `D` (commonware
-/// `ScheduleProvider`; the lookup variant's addresses come later).
+/// Each epoch's players from the schedule, with the directory `D.of` builds for `network`
+/// (commonware `ScheduleProvider`).
 pub fn ScheduleParticipants(comptime D: type) type {
     return struct {
         const Self = @This();
@@ -246,8 +247,7 @@ pub fn ScheduleParticipants(comptime D: type) type {
         pub const Directory = D;
 
         schedule: properties.CommitteeSchedule,
-        /// The directory for every epoch (borrowed).
-        directory_value: D,
+        network: lookup.Network,
 
         pub fn participants(self: *Self, io: Io, gpa: Allocator, epoch: Epoch) !Set {
             _ = io;
@@ -257,8 +257,10 @@ pub fn ScheduleParticipants(comptime D: type) type {
         }
 
         pub fn directory(self: *Self, io: Io, gpa: Allocator, epoch: Epoch, peers: Set) !D {
-            _ = .{ io, epoch, peers };
-            return network.DirectoryOps(Key, D).clone(self.directory_value, gpa);
+            _ = .{ io, epoch };
+            const built = try D.of(gpa, self.network, self.schedule.participants, peers);
+            assert(built.matches(peers));
+            return built;
         }
     };
 }
