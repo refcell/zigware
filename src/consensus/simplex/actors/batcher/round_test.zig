@@ -125,3 +125,116 @@ test "round constructs a notarization once the leader's proposal is known" {
     try testing.expectEqual(0, missing[0].get());
     try testing.expectEqual(null, try round.try_construct(gpa, &rng, sequential));
 }
+
+/// A certificate of `kind` over `payload` from the first `count` of `fixture`'s schemes.
+fn build_certificate(
+    fixture: anytype,
+    comptime kind: enum { notarization, finalization },
+    payload: u8,
+    count: usize,
+) !types.Certificate(Scheme, Digest) {
+    const gpa = testing.allocator;
+    const Vote = switch (kind) {
+        .notarization => types.Notarize(Scheme, Digest),
+        .finalization => types.Finalize(Scheme, Digest),
+    };
+    var votes: [8]Vote = undefined;
+    for (votes[0..count], fixture.schemes[0..count]) |*vote, *scheme| {
+        vote.* = (try Vote.sign(gpa, scheme, proposal(payload))).?;
+    }
+    const scheme = &fixture.schemes[0];
+    const signed = votes[0..count];
+    return switch (kind) {
+        .notarization => .{ .notarization = try .from_votes(gpa, scheme, signed, sequential) },
+        .finalization => .{ .finalization = try .from_votes(gpa, scheme, signed, sequential) },
+    };
+}
+
+// commonware `test_forward_proposal_from_notarization_without_leader`: a verified
+// notarization establishes the proposal, which is forwarded before the leader is known.
+test "round forwards a notarization's proposal before the leader is known" {
+    const gpa = testing.allocator;
+    var rng = utils.rng.test_rng();
+    var fixture = try ed25519.fixture(Digest, gpa, &rng, "batcher_test", 5);
+    defer fixture.deinit(gpa);
+    var log: Log = .{};
+    defer log.deinit();
+    var round = Round.init(at, &fixture.schemes[1], .{ .log = &log }, .{ .log = &log }, false);
+    defer round.deinit(gpa);
+    const Notarize = types.Notarize(Scheme, Digest);
+    const vote = (try Notarize.sign(gpa, &fixture.schemes[0], proposal(1))).?;
+    try testing.expect(try round.add_network(gpa, fixture.participants[0], .{ .notarize = vote }));
+    var certificate = try build_certificate(&fixture, .notarization, 1, utils.N3f1.quorum(5));
+    defer certificate.deinit(gpa);
+    _ = try round.record_certificate(gpa, &certificate);
+    try testing.expect(round.has_certificate(.notarization));
+    try testing.expect(round.try_forward_proposal(.init(1)).?.eql(proposal(1)));
+}
+
+/// commonware `certified_conflict_outcome`: a signer's vote, a certificate for the
+/// proposal, then the signer's vote for the other one; returns whether the conflict was
+/// reported and whether the signer was blocked.
+fn certified_conflict(
+    track_historical_votes: bool,
+    comptime kind: enum { notarization, finalization },
+    first_matches: bool,
+) !struct { bool, bool } {
+    const gpa = testing.allocator;
+    var rng = utils.rng.test_rng();
+    var fixture = try ed25519.fixture(Digest, gpa, &rng, "batcher_test", 5);
+    defer fixture.deinit(gpa);
+    var log: Log = .{};
+    defer log.deinit();
+    const scheme = &fixture.schemes[0];
+    const historical = track_historical_votes;
+    var round = Round.init(at, scheme, .{ .log = &log }, .{ .log = &log }, historical);
+    defer round.deinit(gpa);
+    const first: u8 = if (first_matches) 1 else 2;
+    const second: u8 = if (first_matches) 2 else 1;
+    const peer = fixture.participants[0];
+    const Vote = switch (kind) {
+        .notarization => types.Notarize(Scheme, Digest),
+        .finalization => types.Finalize(Scheme, Digest),
+    };
+    const tag = switch (kind) {
+        .notarization => "notarize",
+        .finalization => "finalize",
+    };
+    const Any = types.Vote(Scheme, Digest);
+    const early = (try Vote.sign(gpa, scheme, proposal(first))).?;
+    try testing.expect(try round.add_network(gpa, peer, @unionInit(Any, tag, early)));
+    var certificate = try build_certificate(&fixture, switch (kind) {
+        .notarization => .notarization,
+        .finalization => .finalization,
+    }, 1, utils.N3f1.quorum(5));
+    defer certificate.deinit(gpa);
+    _ = try round.record_certificate(gpa, &certificate);
+    const late = (try Vote.sign(gpa, scheme, proposal(second))).?;
+    try testing.expect(!try round.add_network(gpa, peer, @unionInit(Any, tag, late)));
+    const conflict: std.meta.Tag(ActivityType) = switch (kind) {
+        .notarization => .conflicting_notarize,
+        .finalization => .conflicting_finalize,
+    };
+    const Tag = std.meta.Tag(ActivityType);
+    const reported = std.mem.indexOfScalar(Tag, log.activities.items, conflict) != null;
+    const blocked = for (log.blocked.items) |key| {
+        if (key.eql(peer)) break true;
+    } else false;
+    return .{ reported, blocked };
+}
+
+// commonware `test_certificate_releases_votes_without_retention` and
+// `test_certificate_retains_votes_when_configured`: once a certificate releases the votes, a
+// conflicting vote still blocks its signer, and is reported as a fault only when historical
+// votes are kept.
+test "a certificate releases or retains votes, and a later conflict still blocks" {
+    for ([_]bool{ false, true }) |retain| {
+        inline for (.{ .notarization, .finalization }) |kind| {
+            for ([_]bool{ false, true }) |first_matches| {
+                const reported, const blocked = try certified_conflict(retain, kind, first_matches);
+                try testing.expectEqual(retain, reported);
+                try testing.expect(blocked);
+            }
+        }
+    }
+}
