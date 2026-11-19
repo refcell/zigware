@@ -345,31 +345,31 @@ Not portable:
 | Total | 157 | 12 | 14 | 131 |
 
 Open:
-- [ ] `rayon/bridge.rs:1961` `try_fold_stops_at_an_error_and_drops_every_item_once`: try_fold
+- [x] `rayon/bridge.rs:1961` `try_fold_stops_at_an_error_and_drops_every_item_once`: try_fold
   stops at the failing item serially; parallel returns one of several errors
-- [ ] `rayon/join/test.rs:46` `sort`: recursive join quicksort on a pool sorts random data
-- [ ] `rayon/join/test.rs:55` `sort_in_pool`: recursive join quicksort of 12K items in a pool
-- [ ] `rayon/join/test.rs:124` `join_counter_overflow`: 500,000 joins on a 2-thread pool all
+- [x] `rayon/join/test.rs:46` `sort`: recursive join quicksort on a pool sorts random data
+- [x] `rayon/join/test.rs:55` `sort_in_pool`: recursive join quicksort of 12K items in a pool
+- [x] `rayon/join/test.rs:124` `join_counter_overflow`: 500,000 joins on a 2-thread pool all
   run both sides
-- [ ] `rayon/meter/test.rs:147` `inline_joins_charge_both_sides`: a metered join charges both
+- [x] `rayon/meter/test.rs:147` `inline_joins_charge_both_sides`: a metered join charges both
   sides' busy time
-- [ ] `rayon/meter/test.rs:158` `joins_charge_the_stolen_side_but_not_the_wait`: metered join
+- [x] `rayon/meter/test.rs:158` `joins_charge_the_stolen_side_but_not_the_wait`: metered join
   charges the stolen side's time, not the wait
-- [ ] `rayon/meter/test.rs:206` `spawned_jobs_charge_nothing`: spawned jobs run while a metered
+- [x] `rayon/meter/test.rs:206` `spawned_jobs_charge_nothing`: spawned jobs run while a metered
   run waits add no busy time
-- [ ] `rayon/sort.rs:1879` `sorts_presorted_runs`: stable sort of ascending, descending, and
+- [x] `rayon/sort.rs:1879` `sorts_presorted_runs`: stable sort of ascending, descending, and
   chunk-reversed inputs
-- [ ] `rayon/sort.rs:1903` `sorts_zero_sized_values`: stable sort of zero-sized items never
-  calls the comparator
-- [ ] `rayon/sort.rs:1945` `quicksorts_presorted_reversed_and_equal_inputs`: unstable sort of
+- [x] `rayon/sort.rs:1903` `sorts_zero_sized_values`: stable sort of zero-sized items never
+  calls the comparator (sort now returns early for zero-sized items, as commonware's does)
+- [x] `rayon/sort.rs:1945` `quicksorts_presorted_reversed_and_equal_inputs`: unstable sort of
   presorted, reversed, equal, perturbed inputs
-- [ ] `rayon/sort.rs:2014` `quicksorts_zero_sized_values`: unstable sort of zero-sized, empty,
+- [x] `rayon/sort.rs:2014` `quicksorts_zero_sized_values`: unstable sort of zero-sized, empty,
   one-item slices
-- [ ] `rayon/sort.rs:2031` `an_inconsistent_comparator_still_permutes_the_slice`: random
+- [x] `rayon/sort.rs:2031` `an_inconsistent_comparator_still_permutes_the_slice`: random
   comparator keeps every element; a resort restores order
-- [ ] `rayon/spawn/test.rs:20` `spawn_then_join_in_worker`: a spawn from inside a pool job runs
+- [x] `rayon/spawn/test.rs:20` `spawn_then_join_in_worker`: a spawn from inside a pool job runs
   and delivers its result
-- [ ] `rayon/test.rs:47` `check_config_build`: a pool built with N threads reports N threads
+- [x] `rayon/test.rs:47` `check_config_build`: a pool built with N threads reports N threads
 
 Not portable:
 - `rayon/bridge.rs` `produce_too_many_items`, `produce_fewer_items`,

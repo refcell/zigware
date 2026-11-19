@@ -662,6 +662,8 @@ fn sort(
     context: anytype,
     comptime lessThan: fn (@TypeOf(context), T, T) bool,
 ) void {
+    // Zero-sized items are all alike: nothing to compare or move (commonware's sorts too).
+    if (@sizeOf(T) == 0) return;
     const runs = @min(strategy.parallelism(), max_chunks, items.len / sort_run_len_min);
     const allocator = strategy.scratch() orelse
         return sort_serial(mode, T, items, context, lessThan);

@@ -95,4 +95,5 @@ test {
     _ = @import("tests.zig");
     _ = @import("tiles_tests.zig");
     _ = @import("mocks_tests.zig");
+    _ = @import("rayon_tests.zig");
 }
