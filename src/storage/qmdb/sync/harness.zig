@@ -18,6 +18,8 @@
 //!   `create_ops_seeded(count, seed)`, applied as one batch at `start`, are present;
 //! - `expect_ops_absent(db, seed, count) !void`: none of those operations is present;
 //! - `expect_sample_metadata(db) !void`: the last commit carries the sample metadata;
+//! - `create_ops(seed, count) ![]Sync.Op`: those operations themselves, owned by the caller
+//!   (for the engine tests, which hand them to the engine);
 //! - optionally `ops_root(db)` (else `db.root()`) and `canonical_root(db)` (else the ops
 //!   root), for databases that authenticate more than their operations.
 //!
@@ -37,8 +39,10 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const runtime = @import("runtime");
 const channel = @import("utils").channel;
+const merkle = @import("../../merkle/mod.zig");
 const qmdb = @import("../mod.zig");
 const engine_mod = @import("engine.zig");
+const journal_mod = @import("journal.zig");
 const source_mod = @import("source.zig");
 const target_mod = @import("target.zig");
 
@@ -688,6 +692,369 @@ pub fn Tests(comptime H: type) type {
                 .apply_batch_size = 2,
             });
             try testing.expectError(error.KeyNotFound, result);
+        }
+
+        // commonware's `engine.rs` tests that run per harness: an engine over a real database
+        // whose fetches never answer (`FailSource`, its results never handled), driven by
+        // inserting requests and handing it results directly.
+
+        const Retention = engine_mod.Engine(H.Sync, Fail);
+
+        /// commonware's `retention_engine`: target `[5, 10)`, one request of one operation.
+        fn retention_engine(engine: *Retention, fixture: *Fixture, source: *Fail) !void {
+            const cfg = try H.config(fixture, "retention");
+            const target: Target = .init(.fill(1), 5, 10);
+            const config = try fixture.sync_config(H, Fail, cfg, source, target, .{
+                .fetch_batch_size = 1,
+                .apply_batch_size = 1,
+            });
+            try engine.init(gpa, io, config);
+        }
+
+        /// A late operations response at size 10 carrying `ops` (owned).
+        fn late_response(ops: []H.Sync.Op) Retention.Response {
+            return .{ .operations = .{ .proof = .{ .leaves = 10 }, .operations = ops } };
+        }
+
+        /// An operations request at the first target size, 10.
+        fn operations_at(start: u64, max_ops: u64) Retention.Request {
+            return .{ .operations = .{ .size = 10, .start = start, .max_ops = max_ops } };
+        }
+
+        fn batch_at(engine: *const Retention, start: u64) ?[]H.Sync.Op {
+            for (engine.fetched.items) |batch| {
+                if (batch.start == start) return batch.ops;
+            }
+            return null;
+        }
+
+        test "engine: a boundary response keeps a fetched batch at the lower bound" {
+            var fixture = try Fixture.init();
+            defer fixture.deinit();
+            var source: Fail = .{};
+            var engine: Retention = undefined;
+            try retention_engine(&engine, &fixture, &source);
+            defer engine.deinit();
+            const ops = try H.create_ops(0, 3);
+            try engine.store_operations(6, ops);
+            // Move the lower bound to the start of the fetched batch.
+            try engine.reset_for_target_update(.init(.fill(2), 6, 12));
+            try testing.expect(engine.pinned_nodes == null);
+            // The boundary response sets pinned nodes without replacing the batch.
+            const boundary: Retention.Request = .{ .boundary = .{ .size = 12, .start = 6 } };
+            const id = try engine.requests.insert(gpa, boundary);
+            const op = try H.create_ops(0, 1);
+            defer gpa.free(op);
+            const pins = try gpa.dupe(Digest, &.{.fill(7)});
+            try engine.handle_fetch_result(id, .{ .boundary = .{
+                .proof = .{ .leaves = 12 },
+                .op = op[0],
+                .pinned_nodes = pins,
+            } });
+            try testing.expectEqualSlices(Digest, &.{.fill(7)}, engine.pinned_nodes.?);
+            try testing.expectEqual(ops.ptr, batch_at(&engine, 6).?.ptr);
+            // Applying moves the journal past the whole batch.
+            try engine.apply_operations();
+            try testing.expectEqual(@as(u64, 9), engine.journal.size());
+        }
+
+        test "engine: moving the lower bound drops a canceled request's queued result" {
+            var fixture = try Fixture.init();
+            defer fixture.deinit();
+            var source: Fail = .{};
+            var engine: Retention = undefined;
+            try retention_engine(&engine, &fixture, &source);
+            defer engine.deinit();
+            // The boundary request and an operations request below the next lower bound.
+            try testing.expect(engine.requests.contains(5));
+            const request = operations_at(6, 1);
+            const old_id = try engine.requests.insert(gpa, request);
+            const queued = late_response(try H.create_ops(0, 1));
+            try testing.expectEqual(@as(usize, 2), engine.requests.len());
+            // Moving the lower bound beyond both starts cancels both requests.
+            try engine.reset_for_target_update(.init(.fill(2), 7, 12));
+            try testing.expectEqual(@as(usize, 0), engine.requests.len());
+            try testing.expect(engine.requests.remove(old_id) == null);
+            // The queued result of the canceled request is ignored, and no fetch is left.
+            try engine.handle_fetch_result(old_id, queued);
+            try testing.expectEqual(@as(usize, 0), engine.fetched.items.len);
+            try testing.expect(engine.pinned_nodes == null);
+            try testing.expectEqual(@as(usize, 0), engine.tasks.items.len);
+        }
+
+        test "engine: an old-size request beyond the floor survives target updates" {
+            var fixture = try Fixture.init();
+            defer fixture.deinit();
+            var source: Fail = .{};
+            var engine: Retention = undefined;
+            try retention_engine(&engine, &fixture, &source);
+            defer engine.deinit();
+            // A pending boundary request and an operations request at the first size.
+            try testing.expect(engine.requests.contains(5));
+            _ = try engine.requests.insert(gpa, .{ .boundary = .{ .size = 10, .start = 5 } });
+            const request = operations_at(8, 1);
+            const id = try engine.requests.insert(gpa, request);
+            try testing.expectEqual(@as(usize, 2), engine.requests.len());
+            // Updates with an unchanged lower bound keep both requests.
+            var root: u8 = 2;
+            for (11..21) |end| {
+                try engine.reset_for_target_update(.init(.fill(root), 5, end));
+                root += 1;
+                try testing.expect(engine.requests.contains(5));
+                try testing.expect(engine.requests.contains(8));
+                try testing.expectEqual(@as(usize, 2), engine.requests.len());
+            }
+            // Updates that move the lower bound below the request's start cancel the boundary
+            // and keep the operations request.
+            for ([_][2]u64{ .{ 6, 22 }, .{ 7, 24 } }) |range| {
+                try engine.reset_for_target_update(.init(.fill(root), range[0], range[1]));
+                root += 1;
+                try testing.expect(engine.requests.contains(8));
+                try testing.expectEqual(@as(usize, 1), engine.requests.len());
+            }
+            // The late response at the first size is stored at its start.
+            const ops = try H.create_ops(0, 1);
+            try engine.handle_fetch_result(id, late_response(ops));
+            try testing.expectEqual(@as(usize, 0), engine.requests.len());
+            try testing.expectEqual(ops.ptr, batch_at(&engine, 8).?.ptr);
+        }
+
+        test "engine: moving the floor cancels operations ending at the new bound" {
+            var fixture = try Fixture.init();
+            defer fixture.deinit();
+            var source: Fail = .{};
+            var engine: Retention = undefined;
+            try retention_engine(&engine, &fixture, &source);
+            defer engine.deinit();
+            // Operations requests below and beyond the next lower bound.
+            const below = operations_at(6, 2);
+            _ = try engine.requests.insert(gpa, below);
+            const beyond = operations_at(9, 1);
+            _ = try engine.requests.insert(gpa, beyond);
+            try testing.expectEqual(@as(usize, 3), engine.requests.len());
+            // A lower bound at the end of the first request cancels it and the old boundary.
+            try engine.reset_for_target_update(.init(.fill(2), 8, 14));
+            try testing.expect(!engine.requests.contains(5));
+            try testing.expect(!engine.requests.contains(6));
+            try testing.expect(engine.requests.contains(9));
+            try testing.expectEqual(@as(usize, 1), engine.requests.len());
+        }
+
+        test "engine: a moved floor schedules its boundary without the old operation" {
+            var fixture = try Fixture.init();
+            defer fixture.deinit();
+            var source: Fail = .{};
+            var engine: Retention = undefined;
+            try retention_engine(&engine, &fixture, &source);
+            defer engine.deinit();
+            const request = operations_at(6, 1);
+            const operation_id = try engine.requests.insert(gpa, request);
+            try testing.expect(engine.requests.contains(5));
+            // A lower bound at the start of the operations request cancels it and the old
+            // boundary; scheduling issues the boundary at the new lower bound.
+            try engine.reset_for_target_update(.init(.fill(2), 6, 12));
+            try engine.schedule_requests();
+            try testing.expect(engine.requests.remove(operation_id) == null);
+            try testing.expect(!engine.requests.contains(5));
+            try testing.expect(engine.requests.contains(6));
+            try testing.expectEqual(@as(usize, 1), engine.requests.len());
+        }
+
+        // commonware's issue 5669 regressions: client storage whose destroy stopped after
+        // emptying its log, beside a Merkle structure the destroy never removed.
+
+        /// Operations in each batch the interrupted-destroy tests apply.
+        const interrupted_destroy_ops = 300;
+        /// Least sync boundary `prune_to_sync_boundary` leaves.
+        const pruned_sync_boundary = 64;
+
+        /// Raises the sync boundary of `db` to at least `pruned_sync_boundary`, applying the
+        /// operations of `seed` again until it does, and prunes `db` to that boundary.
+        fn prune_to_sync_boundary(db: *Db, seed: u64) !void {
+            // A database that derives its floor raises it once the same keys are rewritten;
+            // a few passes suffice for every harness.
+            for (0..8) |_| {
+                try H.prune(db, pruned_sync_boundary);
+                const boundary = db.sync_boundary();
+                if (boundary >= pruned_sync_boundary) return H.prune(db, boundary);
+                try H.apply_ops(db, seed, interrupted_destroy_ops, false);
+            }
+            return error.TestUnexpectedResult;
+        }
+
+        /// Destroys the durable `db` that `cfg` names with every removal failing, so the
+        /// destroy stops once the clear of its log is durable. Consumes `db`.
+        fn interrupt_destroy(fixture: *Fixture, db: *Db, cfg: H.Sync.Config) !void {
+            const end = db.bounds().end;
+            // The first removal of a destroy follows the durable clear of its log.
+            fixture.storage.remove_failures_after = 0;
+            const result = db.destroy();
+            fixture.storage.remove_failures_after = null;
+            if (result) |_| return error.TestUnexpectedResult else |_| {}
+            // The log reopens empty beside the whole Merkle structure of the destroyed db.
+            const storage = fixture.storage.interface();
+            const log_cfg = H.Sync.journal_config(cfg);
+            const range: journal_mod.Bounds = .{ .start = 0, .end = end };
+            var log = try journal_mod.init(H.Sync.Journal, gpa, storage, log_cfg, range);
+            defer log.deinit();
+            try testing.expectEqual(@as(u64, 0), log.size());
+            const hasher = qmdb.hasher(H.Sync.Hasher);
+            const Merkle = merkle.full.Merkle(H.Family, Digest);
+            var structure = try Merkle.init(gpa, storage, &hasher, cfg.merkle);
+            defer structure.deinit();
+            try testing.expectEqual(end, structure.leaves());
+        }
+
+        /// A target, and client storage an interrupted destroy left holding other operations.
+        const Interrupted = struct {
+            /// Source of the target's operations; the caller closes it.
+            target_db: Db,
+            target: Target,
+            canonical: Digest,
+            /// Names the client storage.
+            cfg: H.Sync.Config,
+        };
+
+        /// The target's range starts at its sync boundary when `pruned`, else at zero. The
+        /// client's Merkle structure extends past that start, and past the end when `ahead`.
+        fn interrupted_destroy(fixture: *Fixture, pruned: bool, ahead: bool) !Interrupted {
+            var target_db = try fixture.open(H, try H.config(fixture, "target"));
+            errdefer target_db.deinit();
+            try H.apply_ops(&target_db, 0, interrupted_destroy_ops, true);
+            if (pruned) try prune_to_sync_boundary(&target_db, 0);
+            const start = if (pruned) target_db.sync_boundary() else 0;
+            const target = target_of(&target_db, start);
+            const local_ops = if (ahead) 2 * target.end else (start + 3 * target.end) / 4;
+            const cfg = try H.config(fixture, "client");
+            var local_db = try fixture.open(H, cfg);
+            {
+                errdefer local_db.deinit();
+                try H.apply_ops(&local_db, 1, local_ops, false);
+                try local_db.sync();
+                const local_end = local_db.bounds().end;
+                try testing.expect(local_end > start); // Nodes past the target's bound.
+                try testing.expectEqual(ahead, local_end > target.end);
+            }
+            try interrupt_destroy(fixture, &local_db, cfg);
+            const canonical = canonical_root(H, &target_db);
+            return .{
+                .target_db = target_db,
+                .target = target,
+                .canonical = canonical,
+                .cfg = cfg,
+            };
+        }
+
+        fn sync_after_interrupted_destroy_case(pruned: bool, ahead: bool) !void {
+            var fixture = try Fixture.init();
+            defer fixture.deinit();
+            var setup = try interrupted_destroy(&fixture, pruned, ahead);
+            defer setup.target_db.deinit();
+            const target = setup.target;
+            var source = locked(&setup.target_db);
+            var synced = try fixture.sync(H, Source, setup.cfg, &source, target, .{});
+            try testing.expect(ops_root(H, &synced.db).eql(target.root));
+            try testing.expect(canonical_root(H, &synced.db).eql(setup.canonical));
+            try testing.expectEqual(target.end, synced.db.bounds().end);
+            synced.deinit();
+            // A reopen recovers the target's state from storage alone.
+            var reopened = try fixture.open(H, setup.cfg);
+            defer reopened.deinit();
+            try testing.expect(ops_root(H, &reopened).eql(target.root));
+            try testing.expect(canonical_root(H, &reopened).eql(setup.canonical));
+            try testing.expectEqual(target.end, reopened.bounds().end);
+        }
+
+        test "issue 5669: a sync after an interrupted destroy reaches the target durably" {
+            for ([_]bool{ false, true }) |pruned| {
+                for ([_]bool{ false, true }) |ahead| {
+                    try sync_after_interrupted_destroy_case(pruned, ahead);
+                }
+            }
+        }
+
+        /// Steps `engine` until its journal holds `stop` operations, then makes it durable.
+        fn stop_at(engine: *Engine, stop: u64) !void {
+            while (engine.journal.size() < stop) {
+                if (try engine.step()) |synced| {
+                    var unexpected = synced;
+                    unexpected.deinit();
+                    return error.TestUnexpectedResult; // It completed before it was stopped.
+                }
+            }
+            try engine.journal.sync();
+        }
+
+        fn restart_after_destroy_case(pruned: bool, fetched: bool) !void {
+            var fixture = try Fixture.init();
+            defer fixture.deinit();
+            var setup = try interrupted_destroy(&fixture, pruned, false);
+            defer setup.target_db.deinit();
+            const target = setup.target;
+            var source = locked(&setup.target_db);
+            // Stop the first sync before it builds the database, with its journal durable.
+            {
+                const config = try fixture.sync_config(H, Source, setup.cfg, &source, target, .{});
+                var engine: Engine = undefined;
+                try engine.init(gpa, io, config);
+                defer engine.deinit();
+                try stop_at(&engine, if (fetched) target.end else target.start + 1);
+            }
+            // The restarted sync resumes the journal and reaches the target.
+            var synced = try fixture.sync(H, Source, setup.cfg, &source, target, .{});
+            defer synced.deinit();
+            try testing.expect(ops_root(H, &synced.db).eql(target.root));
+            try testing.expect(canonical_root(H, &synced.db).eql(setup.canonical));
+            try testing.expectEqual(target.end, synced.db.bounds().end);
+        }
+
+        test "issue 5669: a sync restarted after an interrupted destroy reaches the target" {
+            for ([_]bool{ false, true }) |pruned| {
+                for ([_]bool{ false, true }) |fetched| {
+                    try restart_after_destroy_case(pruned, fetched);
+                }
+            }
+        }
+
+        test "issue 5669: opening after a stopped sync recovers the target's first commit" {
+            var fixture = try Fixture.init();
+            defer fixture.deinit();
+            // The target rewrites the same keys before its first commit, so a database that
+            // derives its floor commits past every chunk the client pruned.
+            var target_db = try fixture.open(H, try H.config(&fixture, "target"));
+            defer target_db.deinit();
+            for (0..3) |_| try H.apply_ops(&target_db, 0, interrupted_destroy_ops, false);
+            const first_end = target_db.bounds().end;
+            const first_root = ops_root(H, &target_db);
+            const first_canonical = canonical_root(H, &target_db);
+            try H.apply_ops(&target_db, 2, interrupted_destroy_ops, false);
+            const target = target_of(&target_db, 0);
+            // The client pruned a different history before its destroy was interrupted.
+            const cfg = try H.config(&fixture, "client");
+            var local_db = try fixture.open(H, cfg);
+            {
+                errdefer local_db.deinit();
+                try H.apply_ops(&local_db, 1, interrupted_destroy_ops, false);
+                try prune_to_sync_boundary(&local_db, 1);
+                try local_db.sync();
+            }
+            try interrupt_destroy(&fixture, &local_db, cfg);
+            // Stop the sync between the target's commits, with its journal durable.
+            var source = locked(&target_db);
+            {
+                const config = try fixture.sync_config(H, Source, cfg, &source, target, .{});
+                var engine: Engine = undefined;
+                try engine.init(gpa, io, config);
+                defer engine.deinit();
+                try stop_at(&engine, first_end);
+                try testing.expect(engine.journal.size() < target.end);
+            }
+            // The reopened database holds the first commit under the target's roots.
+            var reopened = try fixture.open(H, cfg);
+            defer reopened.deinit();
+            try testing.expectEqual(first_end, reopened.bounds().end);
+            try testing.expect(ops_root(H, &reopened).eql(first_root));
+            try testing.expect(canonical_root(H, &reopened).eql(first_canonical));
         }
     };
 }

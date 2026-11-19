@@ -291,6 +291,17 @@ fn VariableHarness(comptime F: type) type {
             }
         }
 
+        pub fn create_ops(seed: u64, count: u64) ![]Sync.Op {
+            var prng: std.Random.DefaultPrng = .init(seed);
+            const ops = try gpa.alloc(Sync.Op, count);
+            for (ops, 0..) |*op, filled| {
+                errdefer for (ops[0..filled]) |done| codec.free(Sync.Op, gpa, done);
+                errdefer gpa.free(ops);
+                op.* = .{ .append = try next_value(prng.random()) };
+            }
+            return ops;
+        }
+
         pub fn expect_sample_metadata(db: *Db) !void {
             const got = try db.get_metadata();
             defer codec.free(?[]const u8, gpa, got);
