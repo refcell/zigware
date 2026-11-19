@@ -599,3 +599,68 @@ test "stateful processing: a pending prune does not block an active verification
     try third_waiter.wait();
     try testing.expectEqual(1, fixture.prunes.items[0]);
 }
+
+// commonware `finalized_handoff_survives_pending_barrier`: block 1's acknowledgement waits
+// while its finalized hook is held; after release, block 2 applies and both are
+// acknowledged, each captured once. Adapted: barriers are durable when they start, so
+// commonware's held flush (block 2 applying behind block 1's pending barrier) is not
+// modeled; the held hook stands in for the pending handoff.
+test "stateful processing: a finalized handoff survives a held finalized hook" {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer deinit_fixture(&fixture);
+    const genesis = TestBlock.genesis();
+    const block1 = try fixture.harness.stage_pending_child(&genesis, 1);
+    const block2, var batch = try fixture.harness.build_child(&block1, 2);
+    batch.deinit();
+    var hook: harness.Probe = .{ .target = block1.digest() };
+    defer hook.deinit();
+    const gate = try hook.add_gate();
+    var started = gate.started;
+    defer started.deinit();
+    var release = gate.release;
+    var captures: harness.Probe = .{ .target = null };
+    defer captures.deinit();
+    const app = &fixture.processing.processor.app;
+    app.finalized_probe = &hook;
+    app.capture_probe = &captures;
+
+    var first_waiter = try fixture.finalize(block1);
+    defer first_waiter.deinit();
+    try started.recv();
+    try testing.expectEqual(1, captures.calls);
+    try testing.io.sleep(.fromMilliseconds(20), .awake);
+    try testing.expectEqual(null, first_waiter.poll());
+    try release.send({});
+    var second_waiter = try fixture.finalize(block2);
+    defer second_waiter.deinit();
+    try first_waiter.wait();
+    try second_waiter.wait();
+    try testing.expectEqual(2, captures.calls);
+    try testing.expectEqual(2, try fixture.counter());
+}
+
+// commonware `duplicate_reports_wait_for_durability` (success case): a redelivered report
+// of an applied height is acknowledged once a barrier covers it, without applying the
+// block again. Adapted: the covering barrier is durable when it starts, so the duplicate
+// is acknowledged at once. The failure case (a failed covering flush stops processing and
+// cancels the duplicate) is not portable: the covering flush has already succeeded.
+test "stateful processing: a duplicate report waits for durability without reapplying" {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer deinit_fixture(&fixture);
+    const genesis = TestBlock.genesis();
+    const block1, var batch = try fixture.harness.build_child(&genesis, 1);
+    batch.deinit();
+    var captures: harness.Probe = .{ .target = null };
+    defer captures.deinit();
+    fixture.processing.processor.app.capture_probe = &captures;
+    var first_waiter = try fixture.finalize(block1);
+    defer first_waiter.deinit();
+    try first_waiter.wait();
+    var duplicate = try fixture.finalize(block1);
+    defer duplicate.deinit();
+    try duplicate.wait();
+    try testing.expectEqual(1, captures.calls);
+    try testing.expectEqual(1, try fixture.counter());
+}
