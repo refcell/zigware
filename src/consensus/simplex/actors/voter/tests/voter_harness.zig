@@ -165,6 +165,7 @@ pub fn Harness(comptime F: type) type {
         pub const Finalization = types.Finalization(Scheme, Digest);
         pub const Nullification = types.Nullification(Scheme);
         pub const Certificate = types.Certificate(Scheme, Digest);
+        pub const Vote = types.Vote(Scheme, Digest);
         pub const Artifact = types.Artifact(Scheme, Digest);
         pub const Floor = config_mod.Floor(Scheme, Digest);
         pub const BatcherMessage = batcher_ingress.Message(Scheme, Digest);
@@ -666,6 +667,21 @@ pub fn Harness(comptime F: type) type {
                 defer message.deinit();
                 const cfg = net.schemes()[0].certificate_codec_config();
                 return codec.decode_cfg(Certificate, gpa, message.payload, cfg);
+            }
+
+            /// The next vote broadcast within `limit_ms` of simulated time, or null.
+            pub fn next_vote(self: *Observer, ctx: Ctx, limit_ms: u64) !?Vote {
+                var waited: u64 = 0;
+                // Bounded by `limit_ms` of simulated time.
+                while (waited <= limit_ms) : (waited += 1) {
+                    if (self.receiver.try_recv()) |message| {
+                        var owned = message;
+                        defer owned.deinit();
+                        return try codec.decode(Vote, ctx.gpa(), owned.payload);
+                    } else |_| {}
+                    try ctx.sleep(.fromMilliseconds(1));
+                }
+                return null;
             }
 
             /// Whether anything arrives within `limit_ms` of simulated time (it is dropped).
@@ -1373,15 +1389,15 @@ pub fn Harness(comptime F: type) type {
             subject: if (kind == .nullification) Round else Proposal,
             count: u32,
         ) !@FieldType(Certificate, @tagName(kind)) {
-            const Vote = switch (kind) {
+            const Signer = switch (kind) {
                 .notarization => Notarize,
                 .finalization => Finalize,
                 .nullification => Nullify,
             };
-            var votes: [16]Vote = undefined;
+            var votes: [16]Signer = undefined;
             assert(count <= votes.len and count <= schemes.len);
             for (votes[0..count], schemes[0..count]) |*vote, *scheme| {
-                vote.* = (try Vote.sign(gpa, scheme, subject)).?;
+                vote.* = (try Signer.sign(gpa, scheme, subject)).?;
             }
             const Signed = @FieldType(Certificate, @tagName(kind));
             return Signed.from_votes(gpa, &schemes[0], votes[0..count], parallel.sequential);
