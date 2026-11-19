@@ -127,6 +127,11 @@ setup, the commands, and the caveats). Below 1× means zigware is faster.
 | `ed25519::signature_verification` / `batch_verify_same_message` (100 keys) | 0.55× / 0.52× |
 | `qmdb::apply_batch` (16384 updates) | 2.43× |
 
+End to end, four local [flood](examples/flood) peers over authenticated p2p at
+262144 msg/s each: zigware receives 673–772k msg/s per peer at 23–80 ms mean latency,
+commonware 212–266k at 194–294 ms. Below saturation both hit the rate cap, and zigware's
+latency is lower at every rate ([details](docs/BENCHMARKS.md#end-to-end-flood-4-peers-2026-11-19-p2p-lane)).
+
 These were measured on a busy desktop with storage on tmpfs, so ratios near 1 are noise and
 the storage numbers measure code, not the disk. ed25519 single verify uses an AVX-512 IFMA
 backend where the CPU has one; batch verify uses IFMA, then AVX2 (0.76×), then a scalar
