@@ -698,3 +698,7 @@ The ports found four differences from commonware, now fixed:
   (clearing lane).
 - 2026-11-19: proposed the asynchronous start_sync design (awaiting the coordinator).
 - 2026-11-19: index and translator partials and the last 2 open index tests (clearing lane).
+- 2026-11-19: head-to-head benches of merkle, bmt, rmap, and the variable journal reads (29
+  rows in bench-compare.sh, table in docs/BENCHMARKS.md). Fixed rmap's quadratic insert
+  (3.7× → 0.53×) and merkle multi_proof's out-of-order walk (positions 37.6 → 6.6 µs).
+  `bmt::build` (1.87×) waits on cryptography's sha256; the rest are within 1.3×.

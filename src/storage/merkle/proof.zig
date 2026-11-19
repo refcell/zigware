@@ -434,6 +434,12 @@ pub fn multi_proof_positions(
     var positions: std.ArrayList(u64) = .empty;
     errdefer positions.deinit(gpa);
     const peaks = peak_subtrees(F, size);
+    // At most one sibling per level per location, plus the peaks, and never more than every
+    // node: reserving that bound once replaces about ten regrowths of a typical proof.
+    var height_max: u64 = 0;
+    for (peaks.slice()) |peak| height_max = @max(height_max, peak.height);
+    const bound = std.math.mul(u64, locations.len, height_max) catch size;
+    try positions.ensureTotalCapacity(gpa, @intCast(@min(bound +| peaks.len, size)));
     var low: usize = 0;
     for (peaks.slice()) |peak| {
         const high = low + partition_point(locations[low..], peak.leaf_end());
@@ -442,8 +448,11 @@ pub fn multi_proof_positions(
         low = high;
     }
     assert(low == locations.len);
-    // An MMB can append a parent after leaves to its right, so sort.
-    std.sort.pdq(u64, positions.items, {}, std.sort.asc(u64)); // Distinct, so unstable is fine.
+    // An MMR's walk emits sorted positions; an MMB can append a parent after leaves to its
+    // right, so sort unless they already are (distinct, so unstable is fine).
+    if (!std.sort.isSorted(u64, positions.items, {}, std.sort.asc(u64))) {
+        std.sort.pdq(u64, positions.items, {}, std.sort.asc(u64));
+    }
     return positions.toOwnedSlice(gpa);
 }
 
@@ -454,21 +463,36 @@ fn collect_multi_siblings(
     locations: []const u64,
     out: *std.ArrayList(u64),
 ) Allocator.Error!void {
-    const Item = struct { node: Subtree, low: usize, high: usize };
+    // Commonware's recursion, unrolled: the left subtree, then the left sibling, the right
+    // subtree, and the right sibling. That is postorder, an MMR's position order, so its
+    // positions come out sorted. Each level leaves at most three items pending.
+    const Item = union(enum) {
+        visit: struct { node: Subtree, low: usize, high: usize },
+        emit: u64,
+    };
+    comptime assert(3 * 63 + 1 <= stack_capacity);
     var stack: BoundedList(Item, stack_capacity) = .{};
-    stack.append(.{ .node = peak, .low = 0, .high = locations.len });
+    stack.append(.{ .visit = .{ .node = peak, .low = 0, .high = locations.len } });
     while (stack.pop()) |item| {
-        if (item.node.height == 0) continue;
-        const kids = item.node.children(F);
-        const middle = item.low +
-            partition_point(locations[item.low..item.high], kids[1].leaf_start);
-        if (item.high > middle) {
-            try out.append(gpa, kids[0].position);
-            stack.append(.{ .node = kids[1], .low = middle, .high = item.high });
+        const visit = switch (item) {
+            .emit => |position| {
+                try out.append(gpa, position);
+                continue;
+            },
+            .visit => |visit| visit,
+        };
+        if (visit.node.height == 0) continue;
+        const kids = visit.node.children(F);
+        const middle = visit.low +
+            partition_point(locations[visit.low..visit.high], kids[1].leaf_start);
+        // Pushed in reverse of the order they run.
+        if (middle > visit.low) stack.append(.{ .emit = kids[1].position });
+        if (visit.high > middle) {
+            stack.append(.{ .visit = .{ .node = kids[1], .low = middle, .high = visit.high } });
+            stack.append(.{ .emit = kids[0].position });
         }
-        if (middle > item.low) {
-            try out.append(gpa, kids[1].position);
-            stack.append(.{ .node = kids[0], .low = item.low, .high = middle });
+        if (middle > visit.low) {
+            stack.append(.{ .visit = .{ .node = kids[0], .low = visit.low, .high = middle } });
         }
     }
 }

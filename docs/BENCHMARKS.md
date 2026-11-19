@@ -477,6 +477,69 @@ changes, found by timing each stage of a transition per thread:
   of it while another waits, and the visited set is 64 shards by fingerprint, as
   Stateright's job market and sharded map do.
 
+## Storage: merkle, bmt, rmap, variable journal reads (2026-11-19, storage-merkle lane)
+
+The rows bench-compare.sh now carries for storage-merkle's crates, with its settings (warm-up
+1 s, measurement 3 s, 50 samples), sinks per AGENTS.md (pointers). Three alternating runs at
+zigware 9dd371a3, which includes crypto's SHA-256 single and pair fast paths (f6518bb0) and
+the harness fix that times a workload without `before_iter` as one batch (5c5d48cd); each
+number is the best of three medians. The 1-minute load average was 41 to 85 and the storage
+benches ran on tmpfs, so per-run ratios swing: `merkle::append` mmr ran 0.91×, 1.66×, and
+0.96×, and `bmt::verify_multi` 1.11×, 1.33×, and 0.91×. Treat rows within 1.3× as even.
+
+| bench | parameters | commonware | zigware | zigware / commonware |
+|---|---|---|---|---|
+| `merkle::append` | `n=100000 family=mmr` | 16.4 ms | 25.2 ms | 1.54× |
+| `merkle::append` | `n=100000 family=mmb` | 16.6 ms | 17.9 ms | 1.07× |
+| `merkle::add_many` | `items=65536 workers=1 family=mmr` | 8.91 ms | 11.4 ms | 1.28× |
+| `merkle::add_many` | `items=65536 workers=8 family=mmb` | 4.85 ms | 4.05 ms | 0.83× |
+| `merkle::update` | `updates=100000 leaves=100000 strategy=BatchedSerial family=mmr` | 43.3 ms | 37.2 ms | 0.86× |
+| `merkle::flush` | `n=100000 family=mmr` | 2.88 ms | 2.95 ms | 1.02× |
+| `merkle::position_to_location` | `n=1000000 family=mmb` | 9.15 µs | 4.94 µs | 0.54× |
+| `merkle::proof` | `n=100000 samples=100 family=mmr` | 96.7 µs | 35.6 µs | 0.37× |
+| `merkle::proof` | `n=100000 samples=100 family=mmb` | 118 µs | 51 µs | 0.43× |
+| `merkle::multi_proof` | `n=100000 items=100 family=mmr` | 15 µs | 41.9 µs | 2.80× (fixed, see below) |
+| `merkle::range_proof` | `n=100000 range=100 samples=100 family=mmb` | 146 µs | 55.3 µs | 0.38× |
+| `merkle::verify_single_element` | `n=100000 samples=100 family=mmr` | 229 µs | 257 µs | 1.12× |
+| `merkle::verify_single_element` | `n=100000 samples=100 family=mmb` | 352 µs | 348 µs | 0.99× |
+| `merkle::verify_multi` | `n=100000 items=100 family=mmr` | 122 µs | 143 µs | 1.18× |
+| `merkle::verify_many_elements` | `n=100000 range=100 samples=100 family=mmr` | 1.53 ms | 1.8 ms | 1.17× |
+| `bmt::build` | `n=100000` | 6.66 ms | 12.5 ms | 1.87× |
+| `bmt::proof` | `n=100000` | 41.9 ns | 41.2 ns | 0.98× |
+| `bmt::multi_proof` | `n=100000 items=100` | 6.86 µs | 4.55 µs | 0.66× |
+| `bmt::range_proof` | `n=100000 items=100` | 72 ns | 45.7 ns | 0.63× |
+| `bmt::verify_single` | `n=100000 items=100` | 148 µs | 177 µs | 1.19× |
+| `bmt::verify_multi` | `n=100000 items=100` | 61.9 µs | 82.1 µs | 1.33× |
+| `bmt::verify_range` | `n=100000 items=100` | 10.9 µs | 12.4 µs | 1.14× |
+| `rmap::insert` | `items=100000` | 26.6 ms | 14 ms | 0.53× (fixed, see below) |
+| `journal::read_cached` | `journal=variable size=32` | 4.98 ms | 2.15 ms | 0.43× |
+| `journal::variable_read_random` | `mode=serial items=10000 size=32` | 180 ms | 26.8 ms | 0.15× |
+| `journal::variable_read_random` | `mode=read_many items=10000 size=32` | 31.7 ms | 20.8 ms | 0.65× |
+| `journal::variable_read_compressed` | `mode=read_many items=10000 size=1024 random=true` | 4.38 ms | 4.3 ms | 0.98× |
+| `journal::variable_read_compressed` | `mode=read_many_uncached items=10000 size=1024 random=true` | 8.5 ms | 4.93 ms | 0.58× |
+| `journal::variable_replay` | `items=100000 buffer=65536 size=32 read_options=cache` | 4.25 ms | 1.58 ms | 0.37× |
+
+- **`rmap::insert`, fixed (9c60febd).** Was 70–76 ms against 19–21 ms (3.7×). One sorted
+  array of ranges is quadratic under random inserts: 100,000 shuffled values moved 8 GB.
+  Ranges now live in chunks of at most 256, binary-searched by first start, so an insert moves
+  at most one chunk. 76.5 ms → 14.5 ms in an alternating A/B; 0.53× above.
+- **`merkle::multi_proof`, fixed (this section's commit).** zigware held at 42–45 µs in every
+  run (commonware 15–44 µs). Timed in parts with smp_allocator: the positions took 37.6 µs
+  of 49.2 µs. The explicit-stack walk emitted siblings before their subtrees, so an MMR's
+  1,194 positions needed a real sort; it now unrolls commonware's recursion in postorder
+  (sorted for an MMR, so the sort is skipped) and reserves the positions once instead of
+  growing them about ten times. Positions 37.6 → 6.6 µs, the whole proof 49.2 → 18.6 µs.
+  Of what remains, about 9 µs is the 38 KB digest buffer: smp_allocator maps anything in its
+  64 KiB class fresh and faults each page in on every call, where commonware's mimalloc
+  reuses pages. That is the harness's allocator (`src/bench`), not the proof code.
+- **`bmt::build` (1.87×) and the verify rows** are SHA-256 bound: 100,000 two-part 36-byte
+  leaf hashes and 50,000 `hash_pair`s. crypto's own rows still put `hash_parts` at 1.4–1.85×
+  and `hash_pair` near 1.3× commonware's hand-scheduled assembly; the bmt code adds one 3 MB
+  leaf copy (about 2%). The fix is in cryptography's sha256, not storage.
+- **Proof generation** (`merkle::proof`, `range_proof`, `bmt::proof`, `bmt::multi_proof`) is
+  0.37× to 0.98×. Before 5c5d48cd, `bmt::proof` (about 40 ns) and `bmt::multi_proof` read
+  1.8× and 2.9×: the clock read per iteration dominated.
+
 ## Actor: mailbox (2026-11-19, actor-stream lane)
 
 All ten cases of commonware's `mailbox` bench, with bench-compare.sh's settings (warm-up 1 s,
