@@ -1,5 +1,6 @@
 //! Tests for the mock certificate scheme (commonware `certificate/mocks.rs`). The
-//! truncated-signature and should-panic cases have no counterpart (see `mocks.zig`).
+//! truncated-signature case has no counterpart (see `mocks.zig`); the should-panic cases are
+//! death tests (`utils.death`).
 
 const std = @import("std");
 const testing = std.testing;
@@ -233,7 +234,6 @@ test "mock certificate assembly requires matching subjects, quorum, and distinct
     try testing.expectError(error.DuplicateSigner, duplicate);
 
     // A strict scheme still reports a sub-quorum instead of panicking.
-    const Strict = MockScheme(.{ .allow_invalid = false });
     var strict = try setup(Strict, &rng);
     defer strict.deinit(gpa);
     var strict_attestations: [2]Strict.Attestation = undefined;
@@ -289,4 +289,70 @@ test "mock certificate optimistic assemble" {
     defer result.deinit(gpa);
     try testing.expectEqualSlices(Participant, &.{.init(1)}, result.verification.invalid);
     try testing.expectEqual(3, result.verification.verified.len);
+}
+
+const death = utils.death;
+
+// commonware `signature_overflow_panics`: a ledger whose next signature ID is u64::MAX panics
+// when it records a new signature.
+test "mock certificate signature overflow panics" {
+    try death.expect_panic(@src(), "signature overflow", struct {
+        fn body() !void {
+            var rng = utils.rng.test_rng();
+            var fixture = try setup(Scheme, &rng);
+            defer fixture.deinit(gpa);
+            fixture.schemes[0].shared.signature_next = std.math.maxInt(u64);
+            _ = try fixture.schemes[0].sign(gpa, vote_1);
+        }
+    }.body);
+}
+
+// commonware `certificate_overflow_panics`: the same for a new certificate.
+test "mock certificate certificate overflow panics" {
+    try death.expect_panic(@src(), "certificate overflow", struct {
+        fn body() !void {
+            var rng = utils.rng.test_rng();
+            var fixture = try setup(Scheme, &rng);
+            defer fixture.deinit(gpa);
+            const attestations = try sign_all(&fixture, vote_1, 3);
+            defer gpa.free(attestations);
+            fixture.verifier.shared.certificate_next = std.math.maxInt(u64);
+            _ = try fixture.verifier.assemble(gpa, attestations, sequential);
+        }
+    }.body);
+}
+
+const Strict = MockScheme(.{ .allow_invalid = false });
+
+// commonware `strict_invalid_requests_panic`: a strict scheme panics on verifying an
+// attestation against the wrong subject instead of rejecting it.
+test "mock certificate strict scheme panics on an invalid request" {
+    try death.expect_panic(@src(), "invalid mock certificate request", struct {
+        fn body() !void {
+            var rng = utils.rng.test_rng();
+            var fixture = try setup(Strict, &rng);
+            defer fixture.deinit(gpa);
+            const attestation = (try fixture.schemes[0].sign(gpa, vote_1)).?;
+            const verifier = &fixture.verifier;
+            _ = try verifier.verify_attestation(gpa, &rng, vote_2, &attestation, sequential);
+        }
+    }.body);
+}
+
+// commonware `strict_invalid_assembly_requests_panic`: a strict scheme panics on assembling
+// attestations over mixed subjects instead of returning the error.
+test "mock certificate strict scheme panics on an invalid assembly" {
+    try death.expect_panic(@src(), "invalid mock certificate request", struct {
+        fn body() !void {
+            var rng = utils.rng.test_rng();
+            var fixture = try setup(Strict, &rng);
+            defer fixture.deinit(gpa);
+            const mixed = [_]Strict.Attestation{
+                (try fixture.schemes[0].sign(gpa, vote_1)).?,
+                (try fixture.schemes[1].sign(gpa, vote_2)).?,
+                (try fixture.schemes[2].sign(gpa, vote_1)).?,
+            };
+            _ = try fixture.verifier.assemble(gpa, &mixed, sequential);
+        }
+    }.body);
 }

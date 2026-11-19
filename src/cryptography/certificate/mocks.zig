@@ -7,7 +7,7 @@
 //! `fixture_with::<A, B, I>` is `fixture` over `Scheme(..., .{ ... })`.
 //!
 //! A `U64` signature is any eight bytes, so commonware's truncated-`Lazy` cases have no
-//! counterpart here, and Zig tests cannot catch the overflow panics.
+//! counterpart here; the overflow and strict-request panics are death tests.
 
 const std = @import("std");
 const assert = std.debug.assert;

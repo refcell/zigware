@@ -289,6 +289,18 @@ test "ed25519 private key is redacted" {
     try testing.expectEqualStrings("[REDACTED]", try std.fmt.bufPrint(&buffer, "{f}", .{key}));
 }
 
+// commonware `test_from_signing_key`: `From<SigningKey>` is the struct literal here.
+test "ed25519 private key from a core signing key" {
+    var rng = utils.rng.test_rng();
+    var seed: [32]u8 = undefined;
+    rng.fill_bytes(&seed);
+    const signing_key = ed25519.core.SigningKey.from_seed(seed);
+    const expected = signing_key.verification_key.bytes;
+    const private_key: PrivateKey = .{ .key = signing_key };
+    try testing.expectEqualSlices(u8, &expected, &private_key.public_key().key.bytes);
+    try testing.expect(private_key.eql(&test_key()));
+}
+
 /// Signs `count` 32-byte random messages with each of `signers` keys from `test_rng`.
 const Fixture = struct {
     const capacity = 160;

@@ -329,3 +329,17 @@ test "transcript conformance: TranscriptV1Ops" {
         transcript_v1_ops,
     );
 }
+
+// commonware `test_append_overflow_does_not_hash`: appending past u64::MAX pending bytes
+// panics. Its checks that `pending` and the hasher are unchanged after the unwind have no
+// counterpart: the panic ends the death test's child process. `append` checks the length
+// before it hashes anything.
+test "transcript append overflow panics" {
+    try utils.death.expect_panic(@src(), "transcript packet exceeds u64::MAX bytes", struct {
+        fn body() !void {
+            var t = v1("");
+            t.pending = std.math.maxInt(u64) - 1;
+            t.append("AB");
+        }
+    }.body);
+}

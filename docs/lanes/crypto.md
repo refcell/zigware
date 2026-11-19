@@ -290,26 +290,27 @@ or rename variables, with no behavior change.
 
 Every `#[test]`/`#[rstest]` fn in commonware `cryptography/src (outside bls12381 and reed_solomon)`,
 with each `#[case]` and each test-generating macro expansion counted separately, matched to a
-zigware test by name or by reading both bodies (a zigware test may cover several). 435 tests: 394
-ported, 27 open, 14 not portable.
+zigware test by name or by reading both bodies (a zigware test may cover several). 435 tests: 429
+ported, 0 open, 6 not portable (the 27 open items below were ported and ticked earlier; the
+table was reconciled 2026-11-19).
 
 | commonware file | tests | ported | open | not portable |
 |---|---|---|---|---|
 | `banderwagon.rs` | 27 | 27 | 0 | 0 |
-| `certificate.rs` | 29 | 20 | 9 | 0 |
+| `certificate.rs` | 29 | 29 | 0 | 0 |
 | `chacha20_poly1305.rs` | 7 | 7 | 0 | 0 |
 | `fuzz.rs` | 5 | 5 | 0 | 0 |
-| `lib.rs` | 42 | 29 | 12 | 1 |
-| `secret.rs` | 7 | 6 | 0 | 1 |
-| `sha512.rs` | 8 | 5 | 1 | 2 |
-| `transcript.rs` | 24 | 22 | 1 | 1 |
-| `blake3/mod.rs` | 7 | 6 | 0 | 1 |
+| `lib.rs` | 42 | 41 | 0 | 1 |
+| `secret.rs` | 7 | 7 | 0 | 0 |
+| `sha512.rs` | 8 | 6 | 0 | 2 |
+| `transcript.rs` | 24 | 24 | 0 | 0 |
+| `blake3/mod.rs` | 7 | 7 | 0 | 0 |
 | `bloomfilter/mod.rs` | 14 | 14 | 0 | 0 |
-| `certificate/mocks.rs` | 20 | 16 | 0 | 4 |
+| `certificate/mocks.rs` | 20 | 20 | 0 | 0 |
 | `crc32/mod.rs` | 13 | 13 | 0 | 0 |
-| `ed25519/scheme.rs` | 22 | 19 | 1 | 2 |
+| `ed25519/scheme.rs` | 22 | 21 | 0 | 1 |
 | `ed25519/certificate/mod.rs` | 26 | 25 | 0 | 1 |
-| `ed25519/core/batch.rs` | 3 | 2 | 1 | 0 |
+| `ed25519/core/batch.rs` | 3 | 3 | 0 | 0 |
 | `ed25519/core/verification_key.rs` | 1 | 1 | 0 | 0 |
 | `handshake/sake/protocol.rs` | 7 | 7 | 0 | 0 |
 | `keccak256/mod.rs` | 4 | 4 | 0 | 0 |
@@ -317,8 +318,8 @@ ported, 27 open, 14 not portable.
 | `secp256r1/common.rs` | 1 | 1 | 0 | 0 |
 | `secp256r1/recoverable.rs` | 50 | 50 | 0 | 0 |
 | `secp256r1/standard.rs` | 47 | 47 | 0 | 0 |
-| `secp256r1/certificate/mod.rs` | 27 | 26 | 1 | 0 |
-| `sha256/mod.rs` | 10 | 9 | 1 | 0 |
+| `secp256r1/certificate/mod.rs` | 27 | 27 | 0 | 0 |
+| `sha256/mod.rs` | 10 | 10 | 0 | 0 |
 | `sha512/padding.rs` | 1 | 0 | 0 | 1 |
 | `zk/circuit.rs` | 6 | 6 | 0 | 0 |
 | `zk/pedersen_to_plain.rs` | 3 | 3 | 0 | 0 |
@@ -447,44 +448,24 @@ Open:
   aliases of one slice through Sha256.hash_many on sequential and parallel strategies. Add to
   src/cryptography/sha256.zig
 
-Not portable:
+Not portable (re-audited against main 2026-11-19: the four `certificate/mocks.rs`
+`#[should_panic]` tests and `transcript.rs` `test_append_overflow_does_not_hash` are now death
+tests through `utils.death.expect_panic`, the transcript one without its after-unwind state
+checks, which a dead child cannot report; blake3's `test_hash_splits_long_messages` is ported by
+the parallel lane in `blake3_tree_tests.zig`; `secret.rs` `test_debug_redacted` is covered by
+`redaction_test.zig`, which checks `{any}`, Zig's Debug path; and `ed25519/scheme.rs`
+`test_from_signing_key` is "ed25519 private key from a core signing key", over main's
+`core.SigningKey`. The 6 below still have no counterpart, unchanged on main.):
 - `lib.rs` `test_hash_batches_shares_whole_units`: Tests the lanes parameter and caller-supplied
   batch closure of Rust hash_batches; zigware's hasher.hash_batches is fixed at one lane with no
   closure (docs/lanes/crypto.md Log: hash_many is commonware's one-lane hash_batches over
   run_batches), so whole-unit share cutting for lanes 2/8/16 has no counterpart; batch splitting
   itself is tested in src/parallel/tests.zig "run_batches supplies ordered balanced ranges"
-- `secret.rs` `test_debug_redacted`: Rust Debug impl; zigware Secret has only the Display-equivalent
-  format ({f}) and a debug_text constant (secret.zig "secret is redacted" asserts the constant,
-  which is tautological), there is no separate Debug formatter to exercise
 - `sha512.rs` `test_avx512_detection`: Checks runtime AVX-512F detection for the x86_64 multi-lane
   kernel; zigware SHA-512 is std.crypto.hash.sha2.Sha512 with no arch kernels or feature detection
   (docs/lanes/crypto.md: hashes on std.crypto)
 - `sha512.rs` `test_sha3_detection`: Checks aarch64 SHA3 feature detection for the paired kernel;
   zigware has no arch-specific SHA-512 backend (std.crypto, docs/lanes/crypto.md)
-- `transcript.rs` `test_append_overflow_does_not_hash`: Relies on catch_unwind of the overflow
-  panic; zigware's Transcript.append @panics on u64 overflow (checked before hashing) and panics are
-  not testable in-process
-- `blake3/mod.rs` `test_hash_splits_long_messages`: Counts jobs a Rayon worker runs when hash_across
-  splits a message of MIN_SPLIT_LEN or more into subtrees; zigware Blake3.hash_across never splits
-  (docs/lanes/crypto.md Log: Blake3 parallel subtree hashing needs chaining values
-  std.crypto.hash.Blake3 does not expose)
-- `certificate/mocks.rs` `signature_overflow_panics`: Rust #[should_panic]; zigware mocks.zig panics
-  at the same point (Shared.next @panic(what ++ " overflow"), what="signature") and Zig tests cannot
-  catch a panic in-process; recorded in the mocks.zig and mocks_test.zig module docs
-- `certificate/mocks.rs` `certificate_overflow_panics`: Rust #[should_panic]; zigware mocks.zig
-  panics at the same point (Shared.next @panic(what ++ " overflow"), what="certificate") and Zig
-  tests cannot catch a panic in-process; recorded in the mocks.zig and mocks_test.zig module docs
-- `certificate/mocks.rs` `strict_invalid_requests_panic`: Rust #[should_panic]; zigware mocks.zig
-  panics at the same point (invalid() @panic("invalid mock certificate request: " ++ reason)) and
-  Zig tests cannot catch a panic in-process; recorded in the mocks.zig and mocks_test.zig module
-  docs
-- `certificate/mocks.rs` `strict_invalid_assembly_requests_panic`: Rust #[should_panic]; zigware
-  mocks.zig panics at the same point (assembly_error() std.debug.panic("invalid mock certificate
-  request: {s}")) and Zig tests cannot catch a panic in-process; recorded in the mocks.zig and
-  mocks_test.zig module docs
-- `ed25519/scheme.rs` `test_from_signing_key`: Tests Rust From<ed_core::SigningKey> for PrivateKey;
-  zigware PrivateKey has no SigningKey conversion (only random/from_seed/from_bytes), so there is no
-  API to test
 - `ed25519/scheme.rs` `test_from_private_key_to_public_key`: Tests Rust From<PrivateKey> for
   PublicKey agreeing with public_key(); zigware has only PrivateKey.public_key() and no From
   conversion trait
@@ -502,3 +483,6 @@ Not portable:
   `secret.Opaque(T)` fields, an untagged union that std.fmt prints as `.{ ... }` at any depth;
   `redaction_test.zig` checks every private key type through `{any}`, `{}`, `{f}`, and a
   depth-16 print. `expectEqual` cannot compare such fields, so tests compare `== null`.
+- 2026-11-19: crypto `#[should_panic]` tests as death tests (mocks x4, transcript);
+  table reconciled with the 27 ticked open items; re-audit ports secret Debug redaction and
+  ed25519 from_signing_key. 394/27/14 -> 429/0/6.
