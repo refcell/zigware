@@ -25,6 +25,7 @@ timeout.
 import os
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -164,8 +165,26 @@ def join(run, kind, deadline):
     return "joiner timed out", None
 
 
+def free_base(port):
+    """The first base at or above `port` whose six validator ports bind on 127.0.0.1: other
+    processes on a shared machine may hold some (commonware's listener panics on BindFailed)."""
+    for base in range(port, port + 300, 6):
+        if all(bindable(base + offset) for offset in range(6)):
+            return base
+    raise RuntimeError(f"no six free ports from {port}")
+
+
+def bindable(port):
+    with socket.socket() as probe:
+        try:
+            probe.bind(("127.0.0.1", port))
+        except OSError:
+            return False
+    return True
+
+
 def network(binaries, mix, joiner, port, root, timeout_s):
-    run = Run(binaries, mix, port, root)
+    run = Run(binaries, mix, free_base(port), root)
     os.makedirs(run.dir)
     deadline = time.time() + timeout_s
     try:

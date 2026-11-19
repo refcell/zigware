@@ -734,7 +734,11 @@ After:
     3 blocks. A zigware actor returned cleanly, and supervision then stops the validator, as
     commonware's `Handle::select` does. It was at info level, so it is not yet known which
     actor. The harness now runs both joiners at debug, and a validator that exits fails the
-    run.
+    run. Closed: after 3d338a0, where glue's probes warn on a failed bootstrap activation
+    and propagate `error.Canceled` instead of returning cleanly, 12 runs had no silent exit.
+    One more run failed earlier: commonware's bootstrap panicked on `failed to bind listener`
+    because another process held its port. interop_dkg.py now starts each network at the
+    first base whose six ports bind.
   - An earlier six-validator run (`rrzzrz`, all launched together) finalized 2,612 heights
     through 33 epochs, each a successful reshare, with no digest mismatch. A joiner whose
     peers are all the other implementation (`rrrrr`+z, `zzzzz`+r) synced and matched too.
