@@ -210,6 +210,9 @@ pub fn Window(comptime T: type) type {
             events.collect(first);
             while (select.cancel()) |outcome| events.collect(outcome);
             events.order();
+            // Both receives returned `error.Canceled`, which `collect` drops: the actor's task
+            // is being canceled (a shutdown cancels every task at once).
+            if (events.len == 0) return error.Canceled;
             assert(events.len > 0);
             return events;
         }
