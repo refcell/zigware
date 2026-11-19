@@ -122,6 +122,17 @@ pub const InitOptions = struct {
     minimum_size: u64 = 0,
 };
 
+/// `log` timed on the database's clock `io` unless it names its own (one clock times the
+/// database and its journal). Journal configs without an `io` field pass through unchanged.
+pub fn log_with_io(log: anytype, io: ?std.Io) @TypeOf(log) {
+    var result = log;
+    if (comptime @hasField(@TypeOf(log), "io")) {
+        if (result.io == null) result.io = io;
+        assert(result.io != null or io == null);
+    }
+    return result;
+}
+
 /// Opens the authenticated journal `J` of a QMDB variant, selecting the last commit (within
 /// `options.max_size`) and validating it before any history is discarded (commonware's
 /// `init_journal`).

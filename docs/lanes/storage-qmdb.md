@@ -146,8 +146,9 @@ which every database here is built on.
     each variant's `test_*_fixed_metrics` with its duration counts. `init_from_log` keeps its
     signature, so a db built from a sync result is timed only once its caller sets
     `db.metrics.io`. The store has no metrics, as in commonware.
-  - [ ] pass the db's `io` down into its journal configs once storage-merkle's journal `io`
-    field lands.
+  - [x] the db's `io` also times its log: `qmdb.log_with_io` fills the journal config's `io`
+    when the caller left it null (current passes it through its `any` config). The store
+    takes its journal config as given.
   - Not portable while `start_sync` completes synchronously: `start_sync_overlaps_work`,
     `apply_indexes_while_journal_waits`, `start_sync_prune_waits`. Compact root
     compatibility is the compact lane's.
@@ -406,3 +407,4 @@ which every database here is built on.
 - 2026-11-19: immutable batch D2 (colliding twin and reopen reads, empty batch, full proofs).
 - 2026-11-19: immutable batch E (start_sync, metrics, bounded-init crash history); audit done.
 - 2026-11-19: qmdb duration metrics timed on an optional config `io`; metrics tests ported.
+- 2026-11-19: qmdb dbs pass their `io` down to their journals.

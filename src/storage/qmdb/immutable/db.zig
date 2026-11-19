@@ -140,7 +140,8 @@ pub fn Db(F: type, K: type, E: type, C: type, H: type, T: type) type {
             cfg: Cfg,
             max_size: ?u64,
         ) !Self {
-            var journal = try qmdb.init_journal(Journal, gpa, storage, cfg.merkle, cfg.log, .{
+            const log_cfg = qmdb.log_with_io(cfg.log, cfg.io);
+            var journal = try qmdb.init_journal(Journal, gpa, storage, cfg.merkle, log_cfg, .{
                 .max_size = max_size,
                 .replay_from_floor = true,
             });

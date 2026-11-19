@@ -117,7 +117,8 @@ pub fn Db(F: type, U: type, C: type, I: type, H: type, comptime N: usize) type {
             options: qmdb.InitOptions,
         ) !Self {
             assert(options.replay_from_floor);
-            var log = try qmdb.init_journal(Log, gpa, storage, cfg.merkle, cfg.log, options);
+            const log_cfg = qmdb.log_with_io(cfg.log, cfg.io);
+            var log = try qmdb.init_journal(Log, gpa, storage, cfg.merkle, log_cfg, options);
             if (log.size() == 0) {
                 errdefer log.deinit();
                 _ = try log.append(.{ .commit = .{ .metadata = null, .floor = 0 } });

@@ -979,6 +979,8 @@ test "any metrics count and time each operation" {
     defer harness.deinit();
     var cfg = harness.cfg(D);
     cfg.io = testing.io;
+    // The log names no clock of its own, so the database's times it too.
+    cfg.log.metrics = metrics.Scope.init(&harness.registry).child("log");
     const scope = metrics.Scope.init(&harness.registry).child("db");
     var db = try D.init(gpa, harness.storage.interface(), scope, cfg, null);
     defer db.deinit();
@@ -1003,4 +1005,8 @@ test "any metrics count and time each operation" {
         .{ "db_apply_batch_duration_count", "1" }, .{ "db_commit_duration_count", "1" },
         .{ "db_sync_duration_count", "1" },        .{ "db_prune_duration_count", "1" },
     });
+    const text = try harness.registry.encode(gpa);
+    defer gpa.free(text);
+    try testing.expect(std.mem.indexOf(u8, text, "log_commit_duration_count") != null);
+    try testing.expect(!metrics.has_metric_value(text, "log_commit_duration_count", "0"));
 }
