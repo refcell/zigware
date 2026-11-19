@@ -126,6 +126,8 @@ const Gate = struct {
     duplicate: bool = false,
     /// Target updates the database received (commonware's `update_count`).
     updates: u64 = 0,
+    /// Targets a looping database reported reached (read by the test while it runs).
+    reports: std.atomic.Value(u32) = .init(0),
 
     fn wait(gate: *Gate) void {
         if (gate.started) |*started| started.send({}) catch {}; // Unwatched starts are fine.
@@ -148,6 +150,19 @@ const GatePair = struct {
     /// tips that follow reach its select rather than its queued-tip drain).
     fn park(pair: *GatePair) !void {
         try pair.started.recv();
+        try io.sleep(.fromMilliseconds(5), .awake);
+    }
+
+    /// `park`, after the database's first reached report: tips that follow find it reached.
+    /// commonware's deterministic runtime runs the report first; on threads the test waits.
+    fn park_reported(pair: *GatePair) !void {
+        try pair.started.recv();
+        var waited: u32 = 0;
+        while (pair.gate.reports.load(.acquire) == 0) : (waited += 1) {
+            if (waited > 10_000) return error.TestTimedOut;
+            try io.sleep(.fromMilliseconds(1), .awake);
+        }
+        std.debug.assert(pair.gate.reports.load(.acquire) > 0);
         try io.sleep(.fromMilliseconds(5), .awake);
     }
 
@@ -230,6 +245,7 @@ fn LoopSync(comptime options: LoopOptions) type {
                         if (!reached.send_lossy(final)) break;
                     }
                     reported = final;
+                    _ = gate.reports.fetchAdd(1, .release);
                 }
                 if (channels.finish == null and !tips_open) break;
                 switch (try next_signal(channels, tips_open, null)) {
@@ -963,7 +979,7 @@ test "stateful state sync: a reached tuple member takes no updates until a regro
     defer fast.gate.deinit();
     const gates = .{ &slow.gate, &fast.gate };
     var future = try io.concurrent(P.run_gated, gates ++ .{ 0, .{ 0, 0 }, tips.receiver });
-    try fast.park();
+    try fast.park_reported();
     for (1..17) |target| {
         try testing.expect(sender.send_lossy(.init(anchor(target), .{ target, target })));
     }
@@ -988,7 +1004,7 @@ test "stateful state sync: a tuple member at its target idles while another catc
     defer fast.gate.deinit();
     const gates = .{ &slow.gate, &fast.gate };
     var future = try io.concurrent(P.run_gated, gates ++ .{ 7, .{ 7, 7 }, tips.receiver });
-    try fast.park();
+    try fast.park_reported();
     tips.sender.deinit();
     try slow.open();
     const synced = try future.await(io);
@@ -1010,7 +1026,7 @@ test "stateful state sync: a tuple regroup completes when a database's target is
     defer fast.gate.deinit();
     const gates = .{ &slow.gate, &fast.gate };
     var future = try io.concurrent(P.run_gated, gates ++ .{ 0, .{ 0, 7 }, tips.receiver });
-    try fast.park();
+    try fast.park_reported();
     const Tip = sync.TipUpdate(Digest, P.Targets);
     var update = try Tip.with_observation(gpa, io, anchor(9), .{ 9, 7 });
     defer update.observed.deinit();
@@ -1248,7 +1264,7 @@ test "stateful state sync: a tuple sync converges after evicted targets" {
     defer fast.gate.deinit();
     const gates = .{ &slow.gate, &fast.gate };
     var future = try io.concurrent(P.run_gated, gates ++ .{ 0, .{ 0, 0 }, tips.receiver });
-    try fast.park();
+    try fast.park_reported();
     // Each tip is its own generation while the slow database takes no targets, so its
     // one-slot target ring keeps only the newest.
     const Tip = sync.TipUpdate(Digest, P.Targets);
@@ -1279,7 +1295,7 @@ test "stateful state sync: a tuple sync ignores a stale reached report after a f
     // The stale database reports the initial target only after it takes the forwarded tip,
     // then holds there longer than a regroup takes. Accepting the stale report would finish
     // the set at mismatched targets.
-    try fast.park();
+    try fast.park_reported();
     try testing.expect(sender.send_lossy(.init(anchor(1), .{ 1, 1 })));
     sender.deinit();
     const synced = try future.await(io);
