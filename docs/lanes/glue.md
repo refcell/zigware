@@ -193,6 +193,10 @@ marshal's actors (consensus-marshal) for the actor; until then it ports what is 
   `canonical_digest(Height) !?Digest`): `prepare(*Provider, ancestry, verify)` → `Prepared`,
   `next(*const Provider, *Prepared)` → `?Next{step, ancestry}`, `process(ancestry)`.
   `Prepared.finish` returns the ancestry a proposal builds on.
+- `glue.stateful.actor.Durability` (core): `init(gpa, durable)`, `record(height, Exact)`,
+  `record_duplicate`, `applied`, `covers`, `needs_barrier`, `set_barrier(db.Barrier)`,
+  `complete()` (acknowledges what the barrier made durable; false on a failed barrier),
+  `deinit` (cancels the rest). `db.Barrier.record` is public for set implementations.
 - `glue.stateful.db.p2p.Mailbox(DB, F, Op, D)`: the `qmdb.sync` Source over the resolver
   actor's mailbox. `init(io, actor.mailbox.Sender(Message))`, `clone`, `deinit`,
   `attach_database(db.Shared(DB))`, `serve(gpa, request)` → `Served` (first candidate and its
@@ -273,7 +277,8 @@ marshal's actors (consensus-marshal) for the actor; until then it ports what is 
 - [x] db/p2p: the `Mailbox` sync source and its overflow policy.
 - [ ] db/p2p: the resolver actor (serving peers, response checks) on `qmdb.sync.sync`.
 - [x] actor: the processor's `Verifier` (prepare, step order, shared processing).
-- [ ] actor: processor propose (with the core mailbox), core (after marshal); tests (single and
+- [x] actor/core: `Durability` (barriers and the acknowledgements awaiting them).
+- [ ] actor/core: mailbox, propose, verifications, processing loop, syncing; app tests (after marshal); tests (single and
   multi db apps, floor, properties).
 
 ## Log
@@ -305,6 +310,7 @@ marshal's actors (consensus-marshal) for the actor; until then it ports what is 
 - 2026-11-18 (stateful): the db/p2p `Mailbox` sync source with commonware's mailbox tests.
 - 2026-11-19 (stateful): the processor's `Verifier`.
 - 2026-11-19 (stateful, broadcast-resolver lane): the `keyless` ManagedDb adapter.
+- 2026-11-19 (stateful): the core actor's `Durability`.
 
 ## dkg (owner: coding lane, thread T-01a1d58d-bff1-75a1-8ccb-4b8dd7bc9755)
 

@@ -28,6 +28,9 @@ pub const Processor = processor.Processor;
 pub const verifier = @import("processor/verifier.zig");
 pub const Verifier = verifier.Verifier;
 
+pub const durability = @import("core/durability.zig");
+pub const Durability = durability.Durability;
+
 test {
     std.testing.refAllDecls(@This());
     _ = @import("syncer/plan_test.zig");
@@ -36,4 +39,5 @@ test {
     _ = @import("processor/execution_test.zig");
     _ = @import("processor/processor_test.zig");
     _ = @import("processor/verifier_test.zig");
+    _ = @import("core/durability_test.zig");
 }

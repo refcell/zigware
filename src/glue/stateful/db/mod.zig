@@ -323,7 +323,12 @@ pub const Barrier = struct {
         err: anyerror,
     };
 
-    fn record(barrier: *Barrier, db_type: []const u8, index: ?usize, outcome: anyerror!void) void {
+    pub fn record(
+        barrier: *Barrier,
+        db_type: []const u8,
+        index: ?usize,
+        outcome: anyerror!void,
+    ) void {
         assert(barrier.count < max_members);
         barrier.failures[barrier.count] = if (outcome) |_| null else |err| .{
             .db_type = db_type,
