@@ -238,3 +238,186 @@ test "a certificate releases or retains votes, and a later conflict still blocks
         }
     }
 }
+
+fn build_nullification(fixture: anytype, count: usize) !types.Certificate(Scheme, Digest) {
+    const gpa = testing.allocator;
+    const Nullify = types.Nullify(Scheme);
+    var votes: [8]Nullify = undefined;
+    for (votes[0..count], fixture.schemes[0..count]) |*vote, *scheme| {
+        vote.* = (try Nullify.sign(gpa, scheme, at)).?;
+    }
+    const scheme = &fixture.schemes[0];
+    return .{ .nullification = try .from_votes(gpa, scheme, votes[0..count], sequential) };
+}
+
+fn count_activities(log: *const Log, tag: std.meta.Tag(ActivityType)) usize {
+    var total: usize = 0;
+    for (log.activities.items) |activity| total += @intFromBool(activity == tag);
+    return total;
+}
+
+const Harness = struct {
+    fixture: cryptography.certificate.mocks.Fixture(Scheme),
+    log: Log = .{},
+
+    fn init(self: *Harness) !void {
+        var rng = utils.rng.test_rng();
+        const fixture = try ed25519.fixture(Digest, testing.allocator, &rng, "batcher_test", 5);
+        self.* = .{ .fixture = fixture };
+    }
+
+    fn deinit(self: *Harness) void {
+        self.log.deinit();
+        self.fixture.deinit(testing.allocator);
+    }
+
+    fn round(self: *Harness, me: usize) Round {
+        const log = &self.log;
+        return Round.init(at, &self.fixture.schemes[me], .{ .log = log }, .{ .log = log }, false);
+    }
+
+    fn nullify(self: *Harness, signer: usize) !types.Vote(Scheme, Digest) {
+        const scheme = &self.fixture.schemes[signer];
+        const vote = try types.Nullify(Scheme).sign(testing.allocator, scheme, at);
+        return .{ .nullify = vote.? };
+    }
+
+    fn finalize(self: *Harness, signer: usize, payload: u8) !types.Vote(Scheme, Digest) {
+        const scheme = &self.fixture.schemes[signer];
+        const Finalize = types.Finalize(Scheme, Digest);
+        return .{ .finalize = (try Finalize.sign(testing.allocator, scheme, proposal(payload))).? };
+    }
+
+    fn notarize(self: *Harness, signer: usize, payload: u8) !types.Vote(Scheme, Digest) {
+        const scheme = &self.fixture.schemes[signer];
+        const Notarize = types.Notarize(Scheme, Digest);
+        return .{ .notarize = (try Notarize.sign(testing.allocator, scheme, proposal(payload))).? };
+    }
+
+    fn peer(self: *const Harness, index: usize) Key {
+        return self.fixture.participants[index];
+    }
+};
+
+// commonware `test_nullify_finalize_conflicts_reported_while_evidence_available`: a nullify
+// and a finalize from one signer are reported in either order, and against a certificate's
+// released votes while the signer's own vote is still held.
+test "round reports nullify-finalize conflicts while the evidence is held" {
+    const gpa = testing.allocator;
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    const quorum = utils.N3f1.quorum(5);
+    {
+        var round = h.round(0);
+        defer round.deinit(gpa);
+        try testing.expect(try round.add_network(gpa, h.peer(1), try h.finalize(1, 1)));
+        try testing.expect(!try round.add_network(gpa, h.peer(1), try h.nullify(1)));
+        try testing.expect(try round.add_network(gpa, h.peer(2), try h.nullify(2)));
+        try testing.expect(!try round.add_network(gpa, h.peer(2), try h.finalize(2, 1)));
+    }
+    {
+        var round = h.round(0);
+        defer round.deinit(gpa);
+        try testing.expect(try round.add_network(gpa, h.peer(1), try h.finalize(1, 1)));
+        var nullification = try build_nullification(&h.fixture, quorum);
+        defer nullification.deinit(gpa);
+        _ = try round.record_certificate(gpa, &nullification);
+        try testing.expect(!try round.add_network(gpa, h.peer(1), try h.nullify(1)));
+    }
+    {
+        var round = h.round(0);
+        defer round.deinit(gpa);
+        try testing.expect(try round.add_network(gpa, h.peer(2), try h.nullify(2)));
+        var finalization = try build_certificate(&h.fixture, .finalization, 1, quorum);
+        defer finalization.deinit(gpa);
+        _ = try round.record_certificate(gpa, &finalization);
+        try testing.expect(!try round.add_network(gpa, h.peer(2), try h.finalize(2, 1)));
+    }
+    try testing.expectEqual(4, count_activities(&h.log, .nullify_finalize));
+}
+
+// commonware `test_compacted_votes_still_block_nullify_finalize_conflicts`.
+test "round blocks nullify-finalize conflicts after a certificate compacts the votes" {
+    const gpa = testing.allocator;
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    const quorum = utils.N3f1.quorum(5);
+    {
+        var round = h.round(0);
+        defer round.deinit(gpa);
+        try testing.expect(try round.add_network(gpa, h.peer(1), try h.nullify(1)));
+        var nullification = try build_nullification(&h.fixture, quorum);
+        defer nullification.deinit(gpa);
+        _ = try round.record_certificate(gpa, &nullification);
+        try testing.expect(!try round.add_network(gpa, h.peer(1), try h.finalize(1, 1)));
+    }
+    {
+        var round = h.round(0);
+        defer round.deinit(gpa);
+        try testing.expect(try round.add_network(gpa, h.peer(2), try h.finalize(2, 1)));
+        var finalization = try build_certificate(&h.fixture, .finalization, 1, quorum);
+        defer finalization.deinit(gpa);
+        _ = try round.record_certificate(gpa, &finalization);
+        try testing.expect(!try round.add_network(gpa, h.peer(2), try h.nullify(2)));
+    }
+}
+
+// commonware `test_constructed_votes_reported_after_existing_certificates` and
+// `test_nullify_retry_after_certificate_is_not_reported_twice`: our own votes are reported
+// once each, even after a certificate of their kind.
+test "round reports our own votes once, even after their certificates" {
+    const gpa = testing.allocator;
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    const quorum = utils.N3f1.quorum(5);
+    var round = h.round(0);
+    defer round.deinit(gpa);
+    var notarization = try build_certificate(&h.fixture, .notarization, 1, quorum);
+    defer notarization.deinit(gpa);
+    _ = try round.record_certificate(gpa, &notarization);
+    _ = try round.accept_vote(gpa, try h.notarize(0, 1), true);
+    _ = try round.accept_vote(gpa, try h.nullify(0), true);
+    var nullification = try build_nullification(&h.fixture, quorum);
+    defer nullification.deinit(gpa);
+    _ = try round.record_certificate(gpa, &nullification);
+    // A nullify retry after the certificate is not reported again.
+    _ = try round.accept_vote(gpa, try h.nullify(0), true);
+    var finalization = try build_certificate(&h.fixture, .finalization, 1, quorum);
+    defer finalization.deinit(gpa);
+    _ = try round.record_certificate(gpa, &finalization);
+    _ = try round.accept_vote(gpa, try h.finalize(0, 1), true);
+    try testing.expectEqual(1, count_activities(&h.log, .notarize));
+    try testing.expectEqual(1, count_activities(&h.log, .nullify));
+    try testing.expectEqual(1, count_activities(&h.log, .finalize));
+}
+
+// commonware `test_finalization_establishes_proposal` and
+// `test_constructed_finalize_establishes_proposal`.
+test "a finalization or our own finalize establishes the proposal" {
+    const gpa = testing.allocator;
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    {
+        var round = h.round(1);
+        defer round.deinit(gpa);
+        // The leader's buffered notarize selects its proposal; the finalization replaces it.
+        try testing.expect(try round.add_network(gpa, h.peer(0), try h.notarize(0, 1)));
+        round.set_leader(.init(0));
+        const quorum = utils.N3f1.quorum(5);
+        var finalization = try build_certificate(&h.fixture, .finalization, 2, quorum);
+        defer finalization.deinit(gpa);
+        try testing.expect(!try round.record_certificate(gpa, &finalization));
+        try testing.expect(round.has_certificate(.finalization));
+        try testing.expect(round.try_forward_proposal(.init(1)).?.eql(proposal(2)));
+    }
+    {
+        var round = h.round(0);
+        defer round.deinit(gpa);
+        _ = try round.accept_vote(gpa, try h.finalize(0, 3), true);
+        try testing.expect(round.try_forward_proposal(.init(0)).?.eql(proposal(3)));
+    }
+}
