@@ -21,7 +21,18 @@ const verifier_mod = @import("verifier.zig");
 
 const ancestry_mod = consensus.marshal.ancestry;
 
+/// `ProcessorOf` keyed by `P`'s `App`, `Databases`, and `Provider` only, so every `P` that
+/// declares the same three (such as the core actor's, which adds `Recover`) shares one type.
 pub fn Processor(comptime P: type) type {
+    return ProcessorOf(P.App, P.Databases, P.Provider);
+}
+
+fn ProcessorOf(comptime App_: type, comptime Databases_: type, comptime Provider_: type) type {
+    const P = struct {
+        pub const App = App_;
+        pub const Databases = Databases_;
+        pub const Provider = Provider_;
+    };
     return struct {
         const Self = @This();
         pub const Execution = execution_mod.Execution(P);

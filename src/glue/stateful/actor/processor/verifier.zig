@@ -25,7 +25,18 @@ const ancestry_mod = consensus.marshal.ancestry;
 /// A verification that cannot finish yet: its ancestry or the canonical block is missing.
 pub const WaitError = error{Waiting};
 
+/// `VerifierOf` keyed by `P`'s `App`, `Databases`, and `Provider` only, so every `P` that
+/// declares the same three (such as the core actor's, which adds `Recover`) shares one type.
 pub fn Verifier(comptime P: type) type {
+    return VerifierOf(P.App, P.Databases, P.Provider);
+}
+
+fn VerifierOf(comptime App_: type, comptime Databases_: type, comptime Provider_: type) type {
+    const P = struct {
+        pub const App = App_;
+        pub const Databases = Databases_;
+        pub const Provider = Provider_;
+    };
     return struct {
         const Self = @This();
         pub const Execution = execution_mod.Execution(P);
