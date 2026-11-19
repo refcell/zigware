@@ -9,6 +9,8 @@ const shared = @import("../mocks/harness.zig");
 const core_mailbox = @import("../core/mailbox.zig");
 const common = @import("tests/common.zig");
 const broadcast = @import("broadcast");
+const parallel = @import("parallel");
+const consensus_types = @import("../../types.zig");
 
 const gpa = testing.allocator;
 const Mailbox = core_mailbox.Mailbox(shared.S, harness.CodingVariant);
@@ -1067,6 +1069,228 @@ test "coding floor preserves registered commitment subscription" {
             // The floor kept the registered subscription: local ingress resolves it.
             try shards.disperse(common.round_at(0, 3), missing);
             try testing.expect(try block_within(ctx, &subscription, missing_commitment, 5_000));
+        }
+    }.body);
+}
+
+/// A fixed epocher that knows no epoch above `max_epoch` (commonware `LimitedEpocher`).
+const LimitedEpocher = struct {
+    inner: consensus_types.FixedEpocher,
+    max_epoch: u64,
+
+    pub fn containing(
+        self: LimitedEpocher,
+        height: consensus_types.Height,
+    ) ?consensus_types.EpochInfo {
+        const bounds = self.inner.containing(height) orelse return null;
+        if (bounds.epoch.get() > self.max_epoch) return null;
+        return bounds;
+    }
+
+    pub fn first(self: LimitedEpocher, epoch: consensus_types.Epoch) ?consensus_types.Height {
+        if (epoch.get() > self.max_epoch) return null;
+        return self.inner.first(epoch);
+    }
+
+    pub fn last(self: LimitedEpocher, epoch: consensus_types.Epoch) ?consensus_types.Height {
+        if (epoch.get() > self.max_epoch) return null;
+        return self.inner.last(epoch);
+    }
+};
+
+const LimitedMarshaled = @import("marshaled.zig").Marshaled(struct {
+    pub const Context = Ctx;
+    pub const Application = common.MockVerifyingApp;
+    pub const Block = common.CodingB;
+    pub const Coding = harness.RS;
+    pub const Hasher = harness.Sha256;
+    pub const Provider = harness.CodingProvider;
+    pub const Strategy = parallel.Sequential;
+    pub const Epocher = LimitedEpocher;
+});
+
+test "marshaled rejects unsupported epoch" {
+    try common.run(struct {
+        fn body(ctx: Ctx) anyerror!void {
+            var validators = try fixture();
+            defer validators.deinit(gpa);
+            var stack: common.ValidatorStack = undefined;
+            try stack.start(ctx, &validators);
+            defer stack.stop();
+            const shards = stack.shards();
+            const epoch_length = utils.NonZero(u64).init(shared.blocks_per_epoch).?;
+            var marshaled = try LimitedMarshaled.init(ctx.child("limited"), .{
+                .application = common.MockVerifyingApp.init(gpa),
+                .marshal = stack.validator.mailbox.clone(),
+                .shards = shards.clone(),
+                .scheme_provider = .init(&validators.schemes[0]),
+                .strategy = parallel.sequential,
+                .epocher = .{ .inner = .new(epoch_length), .max_epoch = 0 },
+            });
+            defer marshaled.deinit();
+
+            // The parent is the last block of epoch 0 (supported).
+            const genesis = try common.genesis_block(gpa);
+            const parent_round = common.round_at(0, 19);
+            const parent_context: common.CodingCtx = .{
+                .round = parent_round,
+                .leader = shared.default_leader(),
+                .parent = .{ .zero(), harness.genesis_commitment() },
+            };
+            const parent = try common.coded(gpa, parent_context, genesis.digest(), 19, 1000);
+            const parent_digest = parent.digest();
+            const parent_commitment = parent.commitment();
+            try shards.disperse(parent_round, parent);
+
+            // The block is the first of epoch 1, which the epocher does not support.
+            const round = common.round_at(1, 20);
+            const block_context: common.CodingCtx = .{
+                .round = round,
+                .leader = shared.default_leader(),
+                .parent = .{ .new(19), parent_commitment },
+            };
+            const block = try common.coded(gpa, block_context, parent_digest, 20, 2000);
+            const commitment = block.commitment();
+            try shards.disperse(round, block);
+            try ctx.sleep(.fromMilliseconds(10));
+
+            const context: common.CodingCtx = .{
+                .round = round,
+                .leader = validators.participants[0],
+                .parent = .{ .new(19), parent_commitment },
+            };
+            var verify = try marshaled.start_verify(context, commitment);
+            verify.deinit();
+            var certify = try marshaled.start_certify(round, commitment);
+            defer certify.deinit();
+            // A block in an unsupported epoch is rejected.
+            try testing.expect(!try certify.recv());
+        }
+    }.body);
+}
+
+/// Verifies, then certifies, `commitment` (dispersed under `context`) and returns the
+/// deferred verification's verdict.
+fn certify_after_verify(
+    stack: *common.ValidatorStack,
+    context: common.CodingCtx,
+    commitment: common.Commitment,
+) !bool {
+    var verify = try stack.marshaled.start_verify(context, commitment);
+    verify.deinit();
+    return certify_now(stack, context.round, commitment);
+}
+
+test "marshaled rejects invalid ancestry" {
+    try common.run(struct {
+        fn body(ctx: Ctx) anyerror!void {
+            var validators = try fixture();
+            defer validators.deinit(gpa);
+            var stack: common.ValidatorStack = undefined;
+            try stack.start(ctx, &validators);
+            defer stack.stop();
+            const me = validators.participants[0];
+            const shards = stack.shards();
+            const epoch_length = shared.blocks_per_epoch;
+
+            // An honest parent at height 21 (epoch 1).
+            const genesis = try common.genesis_block(gpa);
+            const parent_round = common.round_at(1, 21);
+            const parent_context: common.CodingCtx = .{
+                .round = parent_round,
+                .leader = shared.default_leader(),
+                .parent = .{ .zero(), harness.genesis_commitment() },
+            };
+            const parent =
+                try common.coded(gpa, parent_context, genesis.digest(), epoch_length + 1, 1000);
+            const parent_digest = parent.digest();
+            const parent_commitment = parent.commitment();
+            try shards.disperse(parent_round, parent);
+
+            // A Byzantine block at a non-contiguous height (21 to 35).
+            const round = common.round_at(1, 35);
+            const context: common.CodingCtx = .{
+                .round = round,
+                .leader = me,
+                .parent = .{ .new(21), parent_commitment },
+            };
+            const skipping = try common.coded(gpa, context, parent_digest, epoch_length + 15, 2000);
+            const skipping_commitment = skipping.commitment();
+            try shards.disperse(round, skipping);
+            try ctx.sleep(.fromMilliseconds(10));
+            try testing.expect(!try certify_after_verify(&stack, context, skipping_commitment));
+
+            // A Byzantine block at the right height naming the wrong parent digest.
+            const second_round = common.round_at(1, 22);
+            const second_context: common.CodingCtx = .{
+                .round = second_round,
+                .leader = me,
+                .parent = .{ .new(21), parent_commitment },
+            };
+            const wrong_parent = genesis.digest();
+            const orphan =
+                try common.coded(gpa, second_context, wrong_parent, epoch_length + 2, 3000);
+            const orphan_commitment = orphan.commitment();
+            try shards.disperse(second_round, orphan);
+            try ctx.sleep(.fromMilliseconds(10));
+            const verdict = try certify_after_verify(&stack, second_context, orphan_commitment);
+            try testing.expect(!verdict);
+        }
+    }.body);
+}
+
+/// commonware's certify-without-prior-verify body: certifies a dispersed height-2 block that
+/// was never verified here, with an application answering `verify_result`.
+fn certify_without_prior_verify(ctx: Ctx, verify_result: bool) !bool {
+    var validators = try fixture();
+    defer validators.deinit(gpa);
+    var stack: common.ValidatorStack = undefined;
+    const app = common.MockVerifyingApp.with_verify_result(gpa, verify_result);
+    try stack.start_with(ctx, &validators, app);
+    defer stack.stop();
+    const shards = stack.shards();
+
+    const genesis = try common.genesis_block(gpa);
+    const parent_round = common.round_at(0, 1);
+    const parent_context: common.CodingCtx = .{
+        .round = parent_round,
+        .leader = shared.default_leader(),
+        .parent = .{ .zero(), harness.genesis_commitment() },
+    };
+    const parent = try common.coded(gpa, parent_context, genesis.digest(), 1, 100);
+    const parent_digest = parent.digest();
+    const parent_commitment = parent.commitment();
+    try shards.disperse(parent_round, parent);
+    const round = common.round_at(0, 2);
+    const context: common.CodingCtx = .{
+        .round = round,
+        .leader = validators.participants[0],
+        .parent = .{ .new(1), parent_commitment },
+    };
+    const child = try common.coded(gpa, context, parent_digest, 2, 200);
+    const commitment = child.commitment();
+    try shards.disperse(round, child);
+    try ctx.sleep(.fromMilliseconds(10));
+
+    var certify = try stack.marshaled.start_certify(round, commitment);
+    defer certify.deinit();
+    return verdict_within(ctx, &certify, 5_000);
+}
+
+test "certify without prior verify crash recovery" {
+    try common.run(struct {
+        fn body(ctx: Ctx) anyerror!void {
+            // A valid block certifies without a prior verify.
+            try testing.expect(try certify_without_prior_verify(ctx, true));
+        }
+    }.body);
+}
+
+test "certify without prior verify honors application rejection" {
+    try common.run(struct {
+        fn body(ctx: Ctx) anyerror!void {
+            // Certify propagates the application's rejection.
+            try testing.expect(!try certify_without_prior_verify(ctx, false));
         }
     }.body);
 }

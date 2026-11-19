@@ -845,6 +845,16 @@ pub const ValidatorStack = struct {
 
     /// Starts participant 0 of `validators` with the default application.
     pub fn start(self: *ValidatorStack, ctx: Ctx, validators: *const Fixture) !void {
+        return self.start_with(ctx, validators, MockVerifyingApp.init(ctx.gpa()));
+    }
+
+    /// Starts participant 0 of `validators`, wrapping `application` (owned).
+    pub fn start_with(
+        self: *ValidatorStack,
+        ctx: Ctx,
+        validators: *const Fixture,
+        application: MockVerifyingApp,
+    ) !void {
         const gpa = ctx.gpa();
         const participants = validators.participants;
         self.network = try .start(gpa, ctx.io(), 1, participants, 1024 * 1024);
@@ -859,7 +869,6 @@ pub const ValidatorStack = struct {
         errdefer self.validator.crash();
         const marshal = self.validator.mailbox.clone();
         const shard_mailbox = self.validator.extra.clone();
-        const application = MockVerifyingApp.init(gpa);
         const config = marshaled_config(M, application, marshal, shard_mailbox, provider);
         self.marshaled = try .init(ctx.child("marshaled"), config);
     }
