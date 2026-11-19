@@ -268,3 +268,6 @@ qmdb `current` (balances, over the MMB) and `keyless` (payout log, over the MMR)
   wrap, and parallel conformance): the 3 index `cursor_across_threads` tests port (mutex and a
   spawned thread); the rest are `should_panic`, the index spill and registry-metrics design,
   and bmt's slice inputs. 54 remain.
+- 2026-11-19: storage bench head-to-head in docs/BENCHMARKS.md (commonware's clearing has no
+  benches): 12 index, archive, and freezer cases. Slower over 1.5×: `index::grinding` lookup
+  (5.9×), archive put (2.0×, 1.7×) and get by key (2.0×).

@@ -138,6 +138,41 @@ directory under `BENCH_DIR` (default `$TMPDIR` or `/tmp`). commonware gets it th
   its best medians were 2.01 ms against 1.70 ms (1.18×), and its bucket MSM is the next user
   of the packed point type.
 
+## Storage: index, archive, freezer (2026-11-19, clearing lane)
+
+commonware's clearing crate has no benches (`[lib] bench = false`), so this head-to-head covers
+the storage benches the clearing lane ported (`index`, `archive`, `freezer`). Same method as
+the table above: `bench-compare.sh`'s criterion settings, best of three alternating runs,
+both sides on tmpfs, commonware `a9ffc25f3` against zigware `7f0df2c` (ReleaseFast). The
+1-minute load average was 28 to 84, so treat ratios near 1 as a tie.
+
+| bench | parameters | commonware | zigware | zigware / commonware |
+|---|---|---|---|---|
+| `index::insert` | `variant=unordered items=10000` | 267 µs | 200 µs | 0.75× |
+| `index::insert` | `variant=ordered items=10000` | 954 µs | 1.15 ms | 1.20× |
+| `index::insert` | `variant=partitioned_unordered_1 items=10000` | 356 µs | 308 µs | 0.87× |
+| `index::grinding` | `op=lookup dist=uniform items=10000` | 144 µs | 847 µs | 5.89× |
+| `index::hashmap_insert` | `n=100000 k=8` | 7.81 ms | 6.39 ms | 0.82× |
+| `archive::put` | `variant=prunable items=10000 comp=off` | 484 ms | 970 ms | 2.00× |
+| `archive::put` | `variant=immutable items=10000 comp=off` | 697 ms | 1.17 s | 1.68× |
+| `archive::get` | `variant=prunable mode=serial pattern=key comp=off items=10000 reads=1000` | 24.1 ms | 47.3 ms | 1.97× |
+| `archive::restart` | `variant=prunable items=10000 comp=off` | 4.36 ms | 2.99 ms | 0.69× |
+| `freezer::put` | `items=10000` | 134 ms | 9.99 ms | 0.07× |
+| `freezer::get` | `pattern=random mode=serial items=10000 reads=1000` | 15.7 ms | 468 µs | 0.03× |
+| `freezer::restart` | `items=10000` | 13.5 ms | 6.34 ms | 0.47× |
+
+Slower by more than 1.5×, unprofiled (no sampling profiler works here, see Caveats):
+- **`index::grinding` lookup (5.89×).** 10,000 `get`s on a partitioned ordered index
+  (`Cap<6>`, two-byte prefix). zigware keeps every run in one treap over
+  `(partition, sub-key)`; commonware keeps a sorted array per partition, so its lookups are a
+  short binary search over contiguous memory. Guess: pointer chasing in the treap.
+- **`archive::put` (2.00× prunable, 1.68× immutable) and `archive::get` serial by key
+  (1.97×).** 64 KiB values: guess, extra copies of each value through the paged write buffer
+  and on read (commonware hands out `IoBuf`s without copying).
+- **`freezer::put` (0.07×) and `freezer::get` random (0.03×)** are far ahead of commonware,
+  which this comparison does not explain; check that both sides do the same work (resizes,
+  the final sync, the key cache) before quoting them.
+
 ## Appendix: bench coverage
 
 Every Criterion bench in commonware a9ffc25f3 (`benches/` dirs with `criterion_main!`), listed
