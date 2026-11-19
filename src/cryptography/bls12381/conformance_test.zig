@@ -35,10 +35,21 @@ pub fn skip_slow() error{SkipZigTest}!void {
 
 /// Tests that take minutes even in ReleaseSafe (golden DKG rounds proving eVRF outputs, the
 /// largest Feldman-Desmedt conformance hashes) run only with `-Dslow-tests`, which the nightly
-/// workflow passes, so the per-push ReleaseSafe job stays within its time limit.
+/// workflow passes, so the per-push ReleaseSafe job stays within its time limit. Nightly
+/// splits them across jobs with `-Dheavy-shards=n -Dheavy-shard=i`: the test runner runs tests
+/// in a fixed order, one at a time, so the k-th heavy test runs only in shard k mod n.
 pub fn skip_heavy() error{SkipZigTest}!void {
     if (!build_options.slow_tests) return error.SkipZigTest;
+    const shards = build_options.heavy_shards;
+    std.debug.assert(shards > 0);
+    std.debug.assert(build_options.heavy_shard < shards);
+    const call = heavy_calls;
+    heavy_calls += 1;
+    if (call % shards != build_options.heavy_shard) return error.SkipZigTest;
 }
+
+/// skip_heavy calls so far in this test binary: each heavy test calls it once, first.
+var heavy_calls: u32 = 0;
 
 fn CodecConformance(comptime T: type, comptime gen: arbitrary.Generator(T)) type {
     return struct {

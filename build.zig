@@ -119,6 +119,7 @@ pub fn build(b: *std.Build) void {
     options.addOption([]const u8, "git_rev", git_rev orelse "unknown");
     const slow_tests = b.option(bool, "slow-tests", "Also run large tests") orelse false;
     options.addOption(bool, "slow_tests", slow_tests);
+    add_heavy_shard_options(b, options);
     const fuzz_soak = b.option(u32, "fuzz-soak", "Multiply seeded fuzz iterations") orelse 1;
     options.addOption(u32, "fuzz_soak", fuzz_soak);
     const fuzz_soak_budget_s = b.option(
@@ -175,6 +176,16 @@ pub fn build(b: *std.Build) void {
     add_test_rest(b, test_step);
 
     add_deployer(b, modules[package_index("deployer")], target, optimize, check_step);
+}
+
+/// `-Dheavy-shards=n -Dheavy-shard=i`: with `-Dslow-tests`, run only every n-th heavy test
+/// (cryptography's `skip_heavy`), starting at the i-th, so nightly splits them across jobs.
+fn add_heavy_shard_options(b: *std.Build, options: *std.Build.Step.Options) void {
+    const heavy_shards = b.option(u32, "heavy-shards", "Split heavy slow tests this way") orelse 1;
+    const heavy_shard = b.option(u32, "heavy-shard", "Which heavy-test split to run") orelse 0;
+    if (heavy_shards == 0 or heavy_shard >= heavy_shards) @panic("need -Dheavy-shard < shards");
+    options.addOption(u32, "heavy_shards", heavy_shards);
+    options.addOption(u32, "heavy_shard", heavy_shard);
 }
 
 /// `test-rest`: every test `test` runs except consensus's and glue's, which CI's other
