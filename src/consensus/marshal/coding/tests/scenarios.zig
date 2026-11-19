@@ -48,3 +48,50 @@ test "coding finalize bad links quorum sees finalization" {
     if (!slow) return error.SkipZigTest;
     for (0..seeds) |seed| try expect_finalize_deterministic(seed, shared.unreliable_link, true);
 }
+
+const Hailstorm = scenarios.Hailstorm(harness.CodingHarness);
+
+/// Two runs of one storm reach the same audit state.
+fn expect_hailstorm_deterministic(seed: u64, options: Hailstorm.Options) !void {
+    const first = try Hailstorm.run(gpa, seed, options);
+    const second = try Hailstorm.run(gpa, seed, options);
+    try testing.expectEqual(first, second);
+}
+
+fn storm(shutdowns: u32, interval: u64, max_down: u32) Hailstorm.Options {
+    return .{
+        .shutdowns = shutdowns,
+        .interval = interval,
+        .max_down = max_down,
+        .link = shared.link,
+    };
+}
+
+// commonware's hailstorm tests are in its slow group; outside slow builds one short storm per
+// shape keeps the coding crash and recovery path covered.
+test "coding hailstorm restarts" {
+    if (!slow) return expect_hailstorm_deterministic(0, storm(2, 3, 1));
+    for (0..2) |seed| try expect_hailstorm_deterministic(seed, storm(4, 4, 1));
+}
+
+test "coding hailstorm multi restarts" {
+    if (!slow) return expect_hailstorm_deterministic(1, storm(2, 3, 2));
+    for (0..2) |seed| try expect_hailstorm_deterministic(seed, storm(4, 4, 2));
+}
+
+// A longer storm crosses the epoch boundary while validators are down, so recovery
+// backfills certificates from a later epoch than the restarted validator last stored.
+test "coding hailstorm restarts across epochs" {
+    if (!slow) return error.SkipZigTest;
+    _ = try Hailstorm.run(gpa, 13, storm(5, 5, 2));
+}
+
+const AckPipeline = scenarios.AckPipeline(harness.CodingHarness);
+
+test "coding ack pipeline backlog" {
+    try AckPipeline.backlog(gpa);
+}
+
+test "coding ack pipeline backlog persists on restart" {
+    try AckPipeline.persists_on_restart(gpa);
+}

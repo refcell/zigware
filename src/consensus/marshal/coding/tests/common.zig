@@ -528,8 +528,16 @@ pub const RecordingResolver = struct {
     }
 };
 
+/// The finalized-block store over the immutable block archive.
+pub const ImmutableBlocks = store.Blocks(harness.Archives.BlockArchive, V.StoredBlock);
+
 /// The coding actor of the direct tests, with application `A`.
 pub fn Actor(comptime A: type) type {
+    return ActorOver(A, ImmutableBlocks);
+}
+
+/// `Actor` over the finalized-block store `FinalizedBlocks`.
+pub fn ActorOver(comptime A: type, comptime FinalizedBlocks: type) type {
     const Stores = harness.Archives;
     return core.Actor(struct {
         pub const Scheme = S;
@@ -547,7 +555,7 @@ pub fn Actor(comptime A: type) type {
             D,
             harness.TestCommitment,
         );
-        pub const Blocks = store.Blocks(Stores.BlockArchive, V.StoredBlock);
+        pub const Blocks = FinalizedBlocks;
         pub const Application = A;
         pub const Buffer = RecordingCodingBuffer;
         pub const Resolver = RecordingResolver;

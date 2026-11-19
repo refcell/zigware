@@ -1512,6 +1512,91 @@ test "verify resolves once assigned shard arrives" {
     }.body);
 }
 
+const mocks_store = @import("../mocks/store.zig");
+const RecordedBlocks = mocks_store.Recording(common.ImmutableBlocks, common.V.StoredBlock);
+const StagingActor = common.ActorOver(common.App, RecordedBlocks);
+
+/// A stored block's identity in the recorded puts. commonware records the stored payload's
+/// address; the Zig archive stores a value copy, so the put carries the block's timestamp.
+fn timestamp_address(block: *const common.V.StoredBlock) usize {
+    return @intCast(block.inner().timestamp);
+}
+
+test "coding dispatch delivers staged block without archive read" {
+    try common.run(struct {
+        fn body(ctx: Ctx) anyerror!void {
+            const prefix = "coding-staged-dispatch";
+            var validators = try fixture();
+            defer validators.deinit(gpa);
+            var stores: harness.Archives = undefined;
+            try stores.open(ctx, prefix);
+            defer stores.deinit();
+            var log = mocks_store.Log.init(gpa);
+            defer log.deinit();
+            const blocks: RecordedBlocks =
+                .init(.{ .archive = &stores.blocks }, &log, &timestamp_address);
+            const provider: common.Provider = .init(&validators.schemes[0]);
+            const config =
+                try common.test_config(StagingActor, gpa, prefix, provider, &stores.cache_ref);
+            const initialized = try StagingActor.init(
+                ctx.child("actor"),
+                .{ .archive = &stores.finalizations },
+                blocks,
+                config,
+            );
+            var mailbox = initialized.mailbox;
+            defer mailbox.deinit();
+            var holding =
+                try common.RecordingResolver.holding(gpa, ctx.io(), &ctx.scope.child("resolver"));
+            defer holding.resolver.deinit();
+            var application = try common.App.manual_ack(gpa, ctx.io());
+            defer application.deinit();
+            var buffer = try common.RecordingCodingBuffer.init(gpa, ctx.io());
+            defer buffer.deinit();
+            var handle = try initialized.actor.start(
+                application.clone(),
+                buffer.clone(),
+                holding.receiver,
+                holding.resolver.clone(),
+            );
+            defer {
+                const ended = handle.abort() catch {};
+                ended catch {};
+            }
+            try testing.expectEqual(0, (try application.acknowledged()).get());
+            // Store a verified block, then finalize it through consensus.
+            const genesis = try common.genesis_block(gpa);
+            const round = common.round_at(0, 1);
+            const context: common.CodingCtx = .{
+                .round = round,
+                .leader = shared.default_leader(),
+                .parent = .{ .zero(), try common.genesis_coding_commitment(gpa, &genesis) },
+            };
+            var block = try common.coded(gpa, context, genesis.digest(), 1, 100);
+            defer block.deinit(gpa);
+            try testing.expect(try mailbox.verified(round, block.clone()));
+            const proposal = common.Proposal.init(round, .zero(), block.commitment());
+            var finalization = try H.make_finalization(gpa, &validators, proposal, quorum);
+            defer finalization.deinit(gpa);
+            _ = mailbox.report(.{ .finalization = finalization });
+            try testing.expectEqual(1, (try application.acknowledged()).get());
+
+            var delivered = application.block(.new(1)) orelse return error.BlockMissing;
+            defer delivered.deinit();
+            try testing.expect(delivered.digest().eql(block.digest()));
+            const ops = log.ops.items;
+            const written = for (ops, 0..) |op, index| {
+                if (op == .put and op.put.height.get() == 1) break index;
+            } else return error.BlockNotWritten;
+            // Storage holds the block dispatched to the application.
+            const address: usize = @intCast(delivered.inner().timestamp);
+            try testing.expectEqual(address, ops[written].put.payload_address);
+            // Dispatch must not read the finalized block back from the archive.
+            for (ops[written..]) |op| try testing.expect(!op.eql(.{ .get = .new(1) }));
+        }
+    }.body);
+}
+
 test {
     _ = common;
 }
