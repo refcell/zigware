@@ -371,9 +371,9 @@ ones: d = deployer (thread T-01a1d5b9-c237), u = utils, j = storage-journal
 | stateful/actor/core/syncing.rs | 16 | 15 | 0 | 1 | |
 | stateful/actor/core/processing.rs, 1070-3396 | 47 | see backlog | see backlog | | u |
 | stateful/actor/core/processing.rs, 3451-5885 | 39 | 33 | 0 | 6 | |
-| stateful/actor/processor/mod.rs | 44 | 22 | 22 | 0 | u |
+| stateful/actor/processor/mod.rs | 44 | 40 | 0 | 4 | |
 | stateful/tests/mod.rs, floor.rs | 28 | 17 | 11 | 0 | j |
-| **total** | **469** | **326** | **119** | **24** | |
+| **total** | **469** | **377** | **58** | **34** | |
 
 - Not portable (db/mod.rs, 22): zigware's `Barrier` is synchronous (databases persist inside
   `finalize`), so `barrier_waits_for_every_handle` (8), `barrier_cancellation_releases_handles`
@@ -424,10 +424,11 @@ ones: d = deployer (thread T-01a1d5b9-c237), u = utils, j = storage-journal
     failure case. Portable once storage-merkle's async start_sync rollout (step 6, glue's
     barriers) lands; the adapted tests that skip held-flush checks (4055, 4184, 4327, 4405,
     4548, 5238, 5285, 5365) can then gain them. Each test's doc comment records its adaptation.
-  - processor/mod.rs: the `rebuild_pending` rejections (7), the finalize panics and duplicates
-    (6), the in-flight winner and late losing fork, forking before apply, ancestry across
-    recovery, the dropped-flight and woken-request hand-offs, overlapping rebuilds, and the
-    deferred-prune ordering.
+  - processor/mod.rs, done: the 18 remaining tests are in processor/processor_mod_test.zig
+    (simplex lane, T-01a1d5ad-c8d6). Not portable: the should_panic tests 2467, 3174, 3193,
+    and 3317. Adapted: 3215 and 3301 share one test (zigware's duplicate check is
+    `redelivered`, consulted before `finalize`), as do 3330 and 3357; the flight hand-offs
+    (2680, 2730) release a flight's joiner instead of dropping a polled future with a waker.
 - Open, j (storage-journal): tests/ (src/glue/stateful/tests/). `SingleDbEngine` runs Simplex,
   the marshal node, the probe, the qmdb sync resolver, and `Stateful` over one fixed QMDB per
   validator. Ported (single-db engine; commonware also runs each on `MultiDbEngine`, not yet
