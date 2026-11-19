@@ -330,3 +330,11 @@ variants need `runtime` storage; do them after its interface lands.
     2.3 MB mixed (past the window), and noise. Planted bugs (a shifted complementary insert, or
     `step < 3`) fail it. Order change: FSE (`fse_compress.c`, `hist.c`) comes next, before
     Huffman, because libzstd FSE-compresses the Huffman weights.
+  - [x] Piece 3: `zstd/fse_exact.zig`, libzstd's FSE encoder: `HIST_count_simple`,
+    `FSE_optimalTableLog_internal`, `FSE_normalizeCount` with `FSE_normalizeM2`,
+    `FSE_writeNCount`, `FSE_buildCTable_wksp` and `buildCTable_rle`, the two-state encoder,
+    and `BIT_CStream`'s `capacity - 8` overflow rule. A third scratch oracle compiled from
+    libzstd's own `fse_compress.c`/`hist.c` printed the table log, NCount header, and stream
+    for 648 generated inputs (60 reach M2): 0 mismatches. `fse_exact_test.zig` pins SHA-256
+    digests of 8 oracle lines plus the exact capacity edge. Planted bugs (M2 always failing,
+    swapped final states, `>` for `>=` in the overflow check) fail it.
