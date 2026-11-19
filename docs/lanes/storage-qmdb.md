@@ -124,11 +124,12 @@ which every database here is built on.
     `run_merkleize_foreign_db`, `run_merkleize_stale_sibling`,
     `run_stale_batch_child_applied_before_parent`, and the `StaleRead` halves of
     `run_stale_fork_refuses`, `run_stale_batch_rejected`, `run_stale_batch_chained`.
-  - [ ] batch C, chains: `run_partial_ancestor_commit`,
+  - [x] batch C1, chains: `run_partial_ancestor_commit`,
     `run_delayed_merkleize_after_ancestor_apply`,
-    `run_child_root_matches_pending_and_committed`, `run_merkleize_across_prune`, and the
-    partial `run_to_batch`, `run_batch_chain`, `run_batch_chained_merkleized_get`,
-    `run_dropped_ancestor_reads`, `run_operations_match_applied_log` (child proof unchanged).
+    `run_child_root_matches_pending_and_committed`, and the rest of `run_to_batch`.
+  - [ ] batch C2: `run_merkleize_across_prune`, and the partial `run_batch_chain`,
+    `run_batch_chained_merkleized_get`, `run_dropped_ancestor_reads`,
+    `run_operations_match_applied_log` (child proof unchanged).
   - [ ] batch D, prune and build: `run_pruning` (5 items per blob), `run_prune_retires_pruned_sets`,
     `run_single_commit_live_set`, `run_build_and_authenticate`, and the partial
     `run_build_basic`, `run_batch_many_sequential`, `run_batch_empty_batch`,
@@ -376,3 +377,4 @@ which every database here is built on.
 - 2026-11-19: store variable-length keys and `test_store_variable_length_keys`.
 - 2026-11-19: immutable audit; batch A (floor scenarios and batch floor inheritance).
 - 2026-11-19: immutable batch B (stale reads and merkleizes); empty `get_many` stale check.
+- 2026-11-19: immutable batch C1 (partial-ancestor apply, delayed merkleize, to_batch).

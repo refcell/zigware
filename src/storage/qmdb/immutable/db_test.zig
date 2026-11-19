@@ -721,3 +721,130 @@ test "immutable sibling children of a common parent are stale once one applies" 
         try testing.expectError(error.StaleBatch, db.validate_batch(sibling_b));
     }
 }
+
+/// The snapshot locations of `fill(key)` for each of `keys`, one per key (sorted within).
+fn snapshot_locations(db: anytype, comptime keys: []const u8) ![keys.len]u64 {
+    var result: [keys.len]u64 = undefined;
+    for (keys, &result) |k, *slot| {
+        const bytes = fill(k);
+        var positions = db.snapshot.get(&bytes.bytes);
+        slot.* = positions.next() orelse return error.TestUnexpectedResult;
+        try testing.expect(positions.next() == null); // One location per key.
+    }
+    return result;
+}
+
+// Commonware's run_partial_ancestor_commit: applying a descendant over an applied ancestor and
+// unapplied ones (one empty) indexes one location per key, as the reopened rebuild does.
+test "immutable a descendant applies over a partly applied chain" {
+    inline for (families) |F| {
+        var harness = try support.Harness.init(gpa);
+        defer harness.deinit();
+        var db = try harness.open(F, null);
+        defer db.deinit();
+        const a = try merkleize_set(&db, null, 1, 1);
+        defer a.release();
+        var empty = a.new_batch();
+        const e = try empty.merkleize(&db);
+        defer e.release();
+        const b = try merkleize_set(&db, e, 2, 2);
+        defer b.release();
+        const c = try merkleize_set(&db, b, 3, 3);
+        defer c.release();
+        try db.apply_batch(a);
+        try db.apply_batch(c);
+        try testing.expect(db.root().eql(c.root()));
+        for ([_]u8{ 1, 2, 3 }) |k| try expect_value(try db.get(&fill(k)), fill(k));
+        try testing.expectEqual(@as(u64, 3), db.snapshot.len());
+        const live = try snapshot_locations(&db, &.{ 1, 2, 3 });
+        try db.sync();
+        db.deinit();
+        db = try harness.open(F, null);
+        try testing.expectEqual(@as(u64, 3), db.snapshot.len());
+        try testing.expectEqual(live, try snapshot_locations(&db, &.{ 1, 2, 3 }));
+    }
+}
+
+// Commonware's run_delayed_merkleize_after_ancestor_apply: a held child merkleizes to the same
+// root after an ancestor applies, after that ancestor is released (the boundary advances to
+// the database), and after its own parent applies.
+test "immutable held children merkleize after their ancestors apply" {
+    inline for (families) |F| {
+        var harness = try support.Harness.init(gpa);
+        defer harness.deinit();
+        var db = try harness.open(F, null);
+        defer db.deinit();
+        const a = try merkleize_set(&db, null, 1, 1);
+        var a_held = true;
+        defer if (a_held) a.release();
+        const b = try merkleize_set(&db, a, 2, 2);
+        defer b.release();
+        const pending = try merkleize_set(&db, b, 3, 3);
+        defer pending.release();
+        const expected = pending.root();
+        var held = b.new_batch();
+        errdefer held.deinit();
+        try held.set(fill(3), fill(3));
+        try db.apply_batch(a);
+        const live = try merkleize_set(&db, b, 3, 3);
+        defer live.release();
+        try testing.expect(live.root().eql(expected));
+        a.release();
+        a_held = false;
+        const retired = try held.merkleize(&db);
+        defer retired.release();
+        try testing.expect(retired.bounds.db.eql(db.commitment()));
+        try testing.expect(retired.root().eql(expected));
+        var last = b.new_batch();
+        errdefer last.deinit();
+        try last.set(fill(3), fill(3));
+        try db.apply_batch(b);
+        const c = try last.merkleize(&db);
+        defer c.release();
+        try testing.expect(c.root().eql(expected));
+        try db.apply_batch(c);
+        try testing.expect(db.root().eql(expected));
+        for ([_]u8{ 1, 2, 3 }) |k| try expect_value(try db.get(&fill(k)), fill(k));
+    }
+}
+
+// Commonware's run_child_root_matches_pending_and_committed: a child of an unapplied parent
+// has the root of the same set merkleized on the database once the parent commits.
+test "immutable a pending child's root matches the committed rebuild" {
+    inline for (families) |F| {
+        var harness = try support.Harness.init(gpa);
+        defer harness.deinit();
+        var db = try harness.open(F, null);
+        defer db.deinit();
+        const parent = try merkleize_set(&db, null, 1, 1);
+        defer parent.release();
+        const pending = try merkleize_set(&db, parent, 2, 2);
+        defer pending.release();
+        try db.apply_batch(parent);
+        try db.commit();
+        const committed = try merkleize_set(&db, null, 2, 2);
+        defer committed.release();
+        try testing.expect(pending.root().eql(committed.root()));
+    }
+}
+
+// The rest of commonware's run_to_batch: a child chained from `to_batch` applies and reads.
+test "immutable a child of to_batch applies and reads" {
+    inline for (families) |F| {
+        var harness = try support.Harness.init(gpa);
+        defer harness.deinit();
+        var db = try harness.open(F, null);
+        defer db.deinit();
+        try commit_sets(&db, &.{1}, null);
+        const snapshot = try db.to_batch();
+        defer snapshot.release();
+        try testing.expect(snapshot.root().eql(db.root()));
+        const child = try merkleize_set(&db, snapshot, 2, 102);
+        defer child.release();
+        try expect_value(try child.get(&fill(1), &db), fill(101));
+        try db.apply_batch(child);
+        try testing.expect(db.root().eql(child.root()));
+        try expect_value(try db.get(&fill(1)), fill(101));
+        try expect_value(try db.get(&fill(2)), fill(102));
+    }
+}
