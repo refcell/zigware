@@ -243,8 +243,21 @@ marshal's actors (consensus-marshal) for the actor; until then it ports what is 
   `attach_database(db.Shared(DB))`, `serve(gpa, request)` → `Served` (first candidate and its
   `Feedback`; `error.ResponseDropped` when the actor drops the fetch). `Message(DB, F, Op, D)`
   keeps only the latest attachment and live fetches while the mailbox is full.
+- `glue.stateful.db.p2p.Actor(Params(P, D, B, DB, NetS, NetR))`: the QMDB sync resolver
+  (commonware `Actor`). `create(gpa, io, scope, Config(P, D, B, DB))` → `Created{actor,
+  mailbox}`; `actor.start(net_sender, net_receiver)` → a future that frees the actor when it
+  returns (cancel it to stop), else `destroy()`. It fetches for `Mailbox` callers and serves
+  peers from the attached database through `state_sync.SharedSource(DB)`, so `DB` declares
+  `SyncSource`/`sync_source` (keyless, immutable, and compact do). Metrics are
+  `p2p.Metrics` (`pending_requests`, `fetch_requests`, `deliveries`, `serve_requests`,
+  `has_database`); the engine's register under `scope.child("resolver")`.
 
 ### Decisions
+- The db/p2p actor owns every caller's reply sender in a table keyed by subscription id, and
+  the resolver engine's subscribers carry only the id, where commonware's carry the sender. A
+  delivery reaches the callers its ids still name, so a queued delivery never touches a
+  released sender. Request-id exhaustion returns `error.RequestIdOverflow` (commonware
+  panics) before submission (broadcast-resolver lane).
 - Tuple state sync keeps each member's newest pending reached generation in a slot rather than
   commonware's bounded mailbox with a per-database overflow policy. A member reports
   non-decreasing generations and the coordinator ignores generations a member no longer has,
@@ -331,7 +344,8 @@ marshal's actors (consensus-marshal) for the actor; until then it ports what is 
 - [x] actor: the processor's finalization (`Processor.finalize`, boundary, redelivery) with
   commonware's finalization tests.
 - [x] db/p2p: the `Mailbox` sync source and its overflow policy.
-- [ ] db/p2p: the resolver actor (serving peers, response checks) on `qmdb.sync.sync`.
+- [x] db/p2p: the resolver actor (serving peers, response checks) on `qmdb.sync.sync`, with
+  actor.rs's handler tests and live tests on the simulated network.
 - [x] actor: the processor's `Verifier` (prepare, step order, shared processing).
 - [x] actor/core: `Durability` (barriers and the acknowledgements awaiting them).
 - [x] actor/core: the `Verifications` handler (phases, admission, pause/resume, answers).
@@ -377,6 +391,7 @@ marshal's actors (consensus-marshal) for the actor; until then it ports what is 
 - 2026-11-19 (stateful, broadcast-resolver lane): single-database state sync and the
   adapters' `sync_db`.
 - 2026-11-19 (stateful, broadcast-resolver lane): tuple-set state sync.
+- 2026-11-19 (stateful, broadcast-resolver lane): the db/p2p resolver actor and metrics.
 - 2026-11-19 (stateful): the core actor's `Durability`.
 - 2026-11-19 (stateful): the core actor's `Verifications` handler; waiting verifies abstain.
 - 2026-11-19 (stateful): the core actor's mailbox.

@@ -15,8 +15,14 @@ pub const Mailbox = mailbox.Mailbox;
 pub const Message = mailbox.Message;
 pub const metrics = @import("metrics.zig");
 pub const Metrics = metrics.Metrics;
+pub const actor = @import("actor.zig");
+pub const Actor = actor.Actor;
+pub const Params = actor.Params;
+pub const Config = actor.Config;
 
 test {
     std.testing.refAllDecls(@This());
     _ = @import("mailbox_test.zig");
+    _ = @import("actor_test.zig");
+    _ = @import("actor_live_test.zig");
 }
