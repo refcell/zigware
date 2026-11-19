@@ -1444,3 +1444,14 @@ test "fuzz merkle proof accepts honest proofs" {
         try fuzz_proof_run(input[0 .. 3 + encoded.len]);
     }
 }
+
+// Commonware's `test_max_location_multi_proof` (mmr/proof.rs): a multi-proof over the last
+// leaf of the largest MMR plans, and one claiming MAX_LEAVES + 1 leaves is rejected.
+test "mmr multi proof positions at and past max leaves" {
+    const F = merkle.mmr.Family;
+    const positions = try multi_proof_positions(F, gpa, F.max_leaves, &.{F.max_leaves - 1});
+    defer gpa.free(positions);
+    try testing.expect(positions.len > 0);
+    const past = multi_proof_positions(F, gpa, F.max_leaves + 1, &.{F.max_leaves});
+    try testing.expect(std.meta.isError(past));
+}

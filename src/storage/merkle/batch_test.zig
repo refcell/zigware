@@ -1189,3 +1189,88 @@ test "fuzz merkle batch operations (seeded)" {
 test "fuzz merkle batch operations" {
     try testing.fuzz({}, fuzz_bytes.smith(512, batch_fuzz_run), .{});
 }
+
+// Commonware's `tip_proof_from_pins`: a structure rebuilt from only the pins at `n - 1`
+// reaches the reference root after re-adding the last element, and proves it.
+fn tip_proof_from_pins(comptime F: type) !void {
+    for ([_]u64{ 1, 2, 3, 8, 100, 199 }) |n| {
+        var reference = try build_reference(F, n);
+        defer reference.deinit(gpa);
+        const boundary = n - 1;
+        var positions_buffer: [merkle.max_pinned_nodes]u64 = undefined;
+        const positions = merkle.nodes_to_pin(F, boundary, &positions_buffer);
+        var pins_buffer: [merkle.max_pinned_nodes]D = undefined;
+        const pins = pins_buffer[0..positions.len];
+        for (pins, positions) |*pin, position| pin.* = reference.get_node(position).?;
+        const last = element(n - 1);
+        var peaks_count: usize = 0;
+        var peaks = F.peaks(F.location_to_position(n));
+        while (peaks.next()) |_| peaks_count += 1;
+        for (0..@min(peaks_count, 2) + 1) |inactive| {
+            const root = try reference.root(&hasher, inactive);
+            var rebuilt = try Mem(F).init(gpa, &.{}, boundary, pins);
+            defer rebuilt.deinit(gpa);
+            var batch = try rebuilt.new_batch(gpa);
+            errdefer batch.deinit(gpa);
+            try batch.add(gpa, &hasher, &last.bytes);
+            const m = try batch.merkleize(gpa, &rebuilt, &hasher);
+            defer m.release(gpa);
+            try rebuilt.apply_batch(gpa, m);
+            try testing.expect((try rebuilt.root(&hasher, inactive)).eql(root));
+            var proof = try rebuilt.proof(gpa, &hasher, boundary, inactive);
+            defer proof.deinit(gpa);
+            const proven = [_]D{last};
+            try testing.expect(proof.verify_range_inclusion(&hasher, boundary, &proven, &root));
+        }
+    }
+}
+
+// Commonware's `proof_verification`: element and range proofs from the structure a batch
+// was applied to verify against the batch's root.
+fn applied_proofs(comptime F: type) !void {
+    var base = try build_reference(F, 50);
+    defer base.deinit(gpa);
+    const m = try merkleized(F, &base, 50, 60);
+    defer m.release(gpa);
+    const batch_root = try root_of(m);
+    try base.apply_batch(gpa, m);
+    var proof = try base.proof(gpa, &hasher, 55, 0);
+    defer proof.deinit(gpa);
+    const bytes = element(55).bytes;
+    try testing.expect(proof.verify_element_inclusion(&hasher, 55, &bytes, &batch_root));
+    var elements: [5]D = undefined;
+    for (&elements, 50..) |*e, i| e.* = element(i);
+    var range_proof = try base.range_proof(gpa, &hasher, .{ .start = 50, .end = 55 }, 0);
+    defer range_proof.deinit(gpa);
+    try testing.expect(range_proof.verify_range_inclusion(&hasher, 50, &elements, &batch_root));
+}
+
+// Commonware's `batch_update_leaf` (mem.rs): one batch overwrites eight leaves with a fixed
+// element and is applied; a second restores their elements and with them the root.
+fn applied_leaf_updates(comptime F: type) !void {
+    var mem = try build_reference(F, 200);
+    defer mem.deinit(gpa);
+    const root = try root_of(&mem);
+    const leaves = [_]u64{ 0, 1, 10, 50, 100, 150, 197, 198 };
+    const fixed = "01234567012345670123456701234567";
+    for ([_]bool{ false, true }) |restore| {
+        var batch = try mem.new_batch(gpa);
+        errdefer batch.deinit(gpa);
+        for (leaves) |leaf| {
+            const bytes = element(leaf).bytes;
+            try batch.update_leaf(gpa, &hasher, leaf, if (restore) &bytes else fixed);
+        }
+        const m = try batch.merkleize(gpa, &mem, &hasher);
+        defer m.release(gpa);
+        try mem.apply_batch(gpa, m);
+        try testing.expectEqual(restore, (try root_of(&mem)).eql(root));
+    }
+}
+
+test "batch tip proofs from pins, applied proofs, and applied leaf updates" {
+    inline for (families) |F| {
+        try tip_proof_from_pins(F);
+        try applied_proofs(F);
+        try applied_leaf_updates(F);
+    }
+}

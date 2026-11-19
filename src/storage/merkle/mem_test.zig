@@ -435,3 +435,90 @@ test "mmb init size validation" {
     restored.deinit(gpa);
     try testing.expectError(error.InvalidSize, Mmb.init(gpa, nodes, 2, pinned));
 }
+
+const Mmr = Mem(merkle.mmr.Family);
+
+/// The nodes of `mem` from position `first` to its end.
+fn mmr_nodes_from(mem: *const Mmr, first: u64) ![]D {
+    const nodes = try gpa.alloc(D, @intCast(mem.size() - first));
+    for (nodes, first..) |*digest, position| digest.* = mem.get_node(position).?;
+    return nodes;
+}
+
+// Commonware's `test_mem_mmr_add_eleven_values`: structure, leaf digests, pruning and its
+// proofs, and a copy rebuilt from the retained nodes and pins.
+test "mmr add eleven values, prune, and reinit" {
+    const hasher = H.init(.forward_fold);
+    const element = "01234567012345670123456701234567";
+    var mmr: Mmr = .empty;
+    defer mmr.deinit(gpa);
+    for (0..11) |i| {
+        try testing.expectEqual(@as(u64, i), mmr.leaves());
+        try mmr.add(gpa, &hasher, element);
+    }
+    try testing.expectEqual(@as(u64, 0), mmr.pruning_boundary());
+    try testing.expectEqual(@as(u64, 19), mmr.size());
+    var heights = merkle.mmr.Family.parent_heights(mmr.leaves());
+    try testing.expectEqual(@as(?u32, 1), heights.next());
+    try testing.expectEqual(@as(?u32, 2), heights.next());
+    try testing.expectEqual(@as(?u32, null), heights.next());
+    for (0..11) |leaf| {
+        const position = merkle.mmr.Family.location_to_position(leaf);
+        const digest = hasher.leaf_digest(position, element);
+        try testing.expect(digest.eql(mmr.get_node(position).?));
+    }
+    const root = try mmr.root(&hasher, 0);
+
+    try mmr.prune(8);
+    try testing.expectEqual(@as(u64, 8), mmr.pruning_boundary());
+    try testing.expectError(error.ElementPruned, mmr.proof(gpa, &hasher, 0, 0));
+    try testing.expectError(error.ElementPruned, mmr.proof(gpa, &hasher, 6, 0));
+    try expect_provable(merkle.mmr.Family, &mmr, &hasher, 8);
+    try expect_provable(merkle.mmr.Family, &mmr, &hasher, 10);
+    try testing.expect(root.eql(try mmr.root(&hasher, 0)));
+    const straddling = mmr.range_proof(gpa, &hasher, .{ .start = 5, .end = 9 }, 0);
+    try testing.expect(std.meta.isError(straddling));
+    var range = try mmr.range_proof(gpa, &hasher, .{ .start = 8, .end = mmr.leaves() }, 0);
+    range.deinit(gpa);
+
+    const nodes = try mmr_nodes_from(&mmr, merkle.mmr.Family.location_to_position(8));
+    defer gpa.free(nodes);
+    var buffer: [merkle.max_pinned_nodes]D = undefined;
+    const pinned = mmr.node_digests_to_pin(8, &buffer);
+    var copy = try Mmr.init(gpa, nodes, 8, pinned);
+    defer copy.deinit(gpa);
+    try testing.expectEqual(@as(u64, 19), copy.size());
+    try testing.expectEqual(mmr.leaves(), copy.leaves());
+    try testing.expectEqual(mmr.pruning_boundary(), copy.pruning_boundary());
+    try testing.expect(root.eql(try copy.root(&hasher, 0)));
+}
+
+// Commonware's `test_init_size_validation` (mmr/mem.rs).
+test "mmr init size validation" {
+    const hasher = H.init(.forward_fold);
+    const none: []const D = &.{};
+    var empty = try Mmr.init(gpa, none, 0, none);
+    empty.deinit(gpa);
+    const two = [_]D{ hasher.digest("node1"), hasher.digest("node2") };
+    try testing.expectError(error.InvalidSize, Mmr.init(gpa, &two, 0, none));
+    const three = [_]D{ hasher.digest("leaf1"), hasher.digest("leaf2"), hasher.digest("parent") };
+    var small = try Mmr.init(gpa, &three, 0, none);
+    small.deinit(gpa);
+    var full = try build_raw(merkle.mmr.Family, &hasher, 64);
+    defer full.deinit(gpa);
+    try testing.expectEqual(@as(u64, 127), full.size());
+    const all = try mmr_nodes_from(&full, 0);
+    defer gpa.free(all);
+    var copy = try Mmr.init(gpa, all, 0, none);
+    copy.deinit(gpa);
+    var pruned = try build_raw(merkle.mmr.Family, &hasher, 11);
+    defer pruned.deinit(gpa);
+    try pruned.prune(4);
+    const nodes = try mmr_nodes_from(&pruned, 7);
+    defer gpa.free(nodes);
+    var buffer: [merkle.max_pinned_nodes]D = undefined;
+    const pinned = pruned.node_digests_to_pin(4, &buffer);
+    var restored = try Mmr.init(gpa, nodes, 4, pinned);
+    restored.deinit(gpa);
+    try testing.expectError(error.InvalidSize, Mmr.init(gpa, nodes, 5, pinned));
+}
