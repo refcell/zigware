@@ -357,7 +357,11 @@ pub fn Db(comptime F: type, comptime O: type, comptime H: type) type {
         /// prior sync's failure returns as a ready completion before a new sync replaces it.
         pub fn start_sync(self: *Self) !runtime.storage.Completion {
             const open = try self.open_witnesses();
-            open.wait_for_sync() catch |err| return .ready(err);
+            // A cancel taken while waiting is the caller's, not the prior sync's outcome.
+            open.wait_for_sync() catch |err| {
+                if (err == error.Canceled) return err;
+                return .ready(err);
+            };
             const completion = try open.journal.start_sync();
             open.release_sync();
             open.pending_sync = completion.retain();

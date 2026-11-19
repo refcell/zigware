@@ -75,12 +75,13 @@ const Fixture = struct {
 /// Releases every parked sync until finished (commonware's `drive_pending_syncs`).
 const Driver = struct {
     stop: std.atomic.Value(bool) = .init(false),
+    io: std.Io,
     task: ?runtime.context.Handle(anyerror!void) = null,
 
     fn start(ctx: Context, pending: *DelayedSync) !*Driver {
         const driver = try gpa.create(Driver);
         errdefer gpa.destroy(driver);
-        driver.* = .{};
+        driver.* = .{ .io = ctx.io() };
         const releasing = ctx.child("drive");
         driver.task = try releasing.spawn(release_until_stopped, .{ pending, &driver.stop });
         return driver;
@@ -101,6 +102,11 @@ const Driver = struct {
 
     fn finish(driver: *Driver) void {
         driver.stop.store(true, .release);
+        // A canceled join would leave the task running over the freed driver, so the join
+        // is uncancelable; a pending cancel stays pending for the caller's next wait.
+        const io = driver.io;
+        const protection = io.swapCancelProtection(.blocked);
+        defer _ = io.swapCancelProtection(protection);
         if (driver.task.?.join()) |outcome| outcome catch {} else |_| {}
         gpa.destroy(driver);
     }
@@ -290,6 +296,54 @@ test "compact start_sync then a no-op sync drains (test_compact_start_sync_then_
     inline for (all_dbs) |Db| try run(struct {
         fn body(ctx: Context) !void {
             try start_sync_then_noop_sync_drains(Db, ctx);
+        }
+    }.body);
+}
+
+/// A cancel taken while start_sync waits on the prior sync propagates as `error.Canceled`
+/// rather than returning a ready completion holding it, which a caller would carry on past.
+fn start_sync_canceled_while_waiting(comptime Db: type, ctx: Context) !void {
+    var f: Fixture = undefined;
+    try f.init(ctx);
+    defer f.deinit();
+    var db = try f.open_driven(ctx, Db);
+    defer db.deinit();
+    try apply(Db, &db, 1);
+    const held = try db.start_sync(); // Parked until released below.
+    var outcome: CancelOutcome = .{};
+    const task = try ctx.child("cancel").spawn(CancelOutcome.start_sync(Db), .{ &db, &outcome });
+    try ctx.sleep(.fromMilliseconds(10));
+    try testing.expect(!outcome.returned); // Waiting on the held sync.
+    if (task.abort()) |result| result catch {} else |_| {}
+    try testing.expect(outcome.returned);
+    try testing.expect(outcome.start_sync_canceled);
+    f.pending.unblock();
+    try held.wait_release();
+}
+
+const CancelOutcome = struct {
+    returned: bool = false,
+    start_sync_canceled: bool = false,
+
+    fn start_sync(comptime Db: type) fn (Context, *Db, *CancelOutcome) anyerror!void {
+        return struct {
+            fn run(ctx: Context, db: *Db, outcome: *CancelOutcome) anyerror!void {
+                _ = ctx;
+                defer outcome.returned = true;
+                const completion = db.start_sync() catch |err| {
+                    outcome.start_sync_canceled = err == error.Canceled;
+                    return err;
+                };
+                completion.release();
+            }
+        }.run;
+    }
+};
+
+test "compact start_sync canceled while waiting on the prior sync propagates" {
+    inline for (all_dbs) |Db| try run(struct {
+        fn body(ctx: Context) !void {
+            try start_sync_canceled_while_waiting(Db, ctx);
         }
     }.body);
 }
