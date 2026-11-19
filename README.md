@@ -31,6 +31,20 @@ current epoch and reshares in step with the rest ([video](docs/assets/dkg-demo.m
 `etc/scripts/record-demo.sh dkg` records it again.
 
 <p align="center">
+  <img src="docs/assets/interop-dkg-demo.gif" width="800"
+    alt="Three commonware and three zigware validators run one dkg network through reshares">
+</p>
+
+The same network runs with both implementations at once. One `commonware-dkg setup` writes
+the configs, commonware's players 0 and 1 and zigware's players 2 and 3 complete the
+epoch-zero DKG together, and all six genesis files come out identical. Then commonware's
+validators 0, 1 and 4 and zigware's validators 2 and 3 run Simplex, marshal, and the
+stateful application together, and zigware's validator 5 joins with `--state-sync`. Every
+pane shows the same digest at each height through every epoch's reshare
+([video](docs/assets/interop-dkg-demo.mp4)). `etc/scripts/interop.sh` runs this check, and
+`etc/scripts/record-demo.sh interop-dkg` records it again.
+
+<p align="center">
   <img src="docs/assets/interop-log-demo.gif" width="800"
     alt="Two commonware Rust validators and two zigware validators finalize the same blocks">
 </p>
