@@ -388,8 +388,7 @@ ones: d = deployer (thread T-01a1d5b9-c237), u = utils, j = storage-journal
 | stateful/actor/core/processing.rs, 3451-5885 | 39 | 37 | 0 | 2 | s |
 | stateful/actor/processor/mod.rs | 44 | 40 | 0 | 4 | |
 | stateful/tests/mod.rs, floor.rs | 28 | 24 | 4 | 0 | j |
-| **total** | **473** | **434** | **28** | **11** | |
-| **total** | **473** | **432** | **30** | **11** | |
+| **total** | **473** | **458** | **4** | **11** | |
 
 - db/mod.rs's barrier tests are ported since async start_sync step 6 (`Barrier` holds each
   member's `runtime.storage.Completion`): `barrier_waits_for_every_handle` (8),
