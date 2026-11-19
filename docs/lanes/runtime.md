@@ -283,18 +283,18 @@ Every commonware `#[test]` in this lane's crates (macro and rstest cases expande
 | tokio/runtime.rs | 21 | 9 | 0 | 12 |
 | utils/abort.rs | 11 | 2 | 0 | 9 |
 | utils/buffer/mod.rs | 46 | 40 | 0 | 6 |
-| utils/buffer/paged/cache.rs | 49 | 17 | 0 | 32 |
+| utils/buffer/paged/cache.rs | 49 | 28 | 0 | 21 |
 | utils/buffer/paged/mod.rs | 17 | 17 | 0 | 0 |
 | utils/buffer/paged/read.rs | 17 | 6 | 0 | 11 |
 | utils/buffer/paged/sealed.rs | 26 | 25 | 0 | 1 |
 | utils/buffer/paged/tip.rs | 13 | 7 | 0 | 6 |
 | utils/buffer/paged/view.rs | 4 | 4 | 0 | 0 |
-| utils/buffer/paged/writer.rs | 96 | 86 | 0 | 10 |
+| utils/buffer/paged/writer.rs | 96 | 87 | 0 | 9 |
 | utils/buffer/tip.rs | 7 | 5 | 0 | 2 |
 | utils/handle.rs | 19 | 10 | 0 | 9 |
 | utils/mod.rs | 3 | 0 | 0 | 3 |
 | utils/supervision.rs | 9 | 4 | 0 | 5 |
-| Total | 526 | 390 | 0 | 136 |
+| Total | 526 | 402 | 0 | 124 |
 
 Open (none are in runtime/src/telemetry/, the runtime-telemetry lane's directory):
 - [x] `deterministic.rs:1742` `test_logical_open_releases_retained_mutations`: unsynced fragments of
@@ -334,6 +334,19 @@ Open (none are in runtime/src/telemetry/, the runtime-telemetry lane's directory
   read_many_into reads each missing page once despite eviction
 - [x] `utils/buffer/paged/cache.rs:3361` `test_cache_at_high_offset`: caching two minimum-size pages
   just below u64::MAX
+- [x] `utils/buffer/paged/cache.rs:2271` `test_read_many_into_joins_fetch_in_flight`,
+  `:2296` `test_overlapping_reads_read_each_page_once`, `:2796` `test_failed_page_fails_its_readers`,
+  `:2971` `test_each_page_routes_to_its_joiners_only`, `:3002` `test_many_reads_join_one_page`,
+  `:3100` `test_cancelled_joins_do_not_disturb_other_reads`,
+  `:3251` `test_concurrent_reads_read_each_page_once`,
+  `:3399` `test_page_fetches_entry_removed_when_first_fetcher_cancelled`,
+  `:3441` `test_followers_keep_single_flight_after_first_fetcher_cancellation` (two reads, not
+  one: a canceled zigware read ends with its task),
+  `:3572` `test_page_fetch_error_removes_entry_for_all_waiters`,
+  `:3658` `test_cancelled_stale_waiter_preserves_new_fetch`: shared in-flight page reads
+  (`CacheRef.share_reads`, opt-in), in paged/shared_reads_test.zig over a gated blob
+- [x] `utils/buffer/paged/writer.rs:1981` `test_recoverable_prefix_len_batches_reads`:
+  `Writer.recoverable_prefix_len_scan` reads up to its budget of whole pages per blob read
 - [x] `utils/buffer/paged/tip.rs:466` `test_page_geometry_handles_one_and_non_power_of_two`: tip
   drain with page size 1, a non-power-of-two size, and u16::MAX
 Re-audit (clearing lane, 2026-11-19): the 14 paged `#[should_panic]` tests (mod.rs 4, sealed.rs 1,
@@ -351,8 +364,8 @@ each checked with a planted bug;
 `test_replay_preserves_tail_during_partial_page_rewrite` was already in
 paged/partial_rewrite_test.zig (91149b1d). The rest stay: panic recovery or propagation, Rust
 future, waker, `Drop`, and borrow semantics, `IoBuf` chunk ownership, and features zigware does
-not have (the `external` mode, accept on the ring, slot hints, shared in-flight page reads, a
-scan budget for `recoverable_prefix_len`, chained tip allocations).
+not have (the `external` mode, accept on the ring, slot hints, chained tip allocations; shared
+in-flight page reads and the `recoverable_prefix_len` scan budget have since landed).
 
 Not portable:
 - `deterministic.rs` `test_retired_write_owner_releases_other_blob`,
@@ -423,27 +436,21 @@ Not portable:
   `test_read_cached_many_cross_blob_hint_collision`,
   `test_read_cached_many_sparse_page_number_keeps_hints_fixed`: Rust cache's slot-hint and
   resolution-chunk internals; zigware's page cache has no slot hints
-- `utils/buffer/paged/cache.rs` `test_read_many_into_joins_fetch_in_flight`,
-  `test_overlapping_reads_read_each_page_once`,
-  `test_joining_many_pages_selects_all_before_driving`,
+- `utils/buffer/paged/cache.rs` `test_joining_many_pages_selects_all_before_driving`,
   `test_read_joins_unpolled_batch_under_eviction`, `test_read_joining_batch_outlives_its_starter`,
   `test_joined_read_finishes_before_its_batch`, `test_batch_read_polled_once_per_completion`,
   `test_reader_that_stops_driving_rewakes_waiting_reader`,
   `test_reader_that_stops_driving_rewakes_waiting_reader_on_tokio`,
-  `test_starting_read_waits_for_its_batch_to_end`, `test_failed_page_fails_its_readers`,
+  `test_starting_read_waits_for_its_batch_to_end`,
   `test_failed_read_fails_readers_still_waiting`, `test_read_fails_as_soon_as_any_source_fails`,
-  `test_each_page_routes_to_its_joiners_only`, `test_many_reads_join_one_page`,
   `test_subscription_dropped_unpolled_gets_no_pages`,
   `test_page_delivered_before_batch_fails_still_serves_its_reader`,
-  `test_cancelled_joins_do_not_disturb_other_reads`, `test_dropped_batches_are_unregistered`,
+  `test_dropped_batches_are_unregistered`,
   `test_batch_whose_driver_was_dropped_is_not_joined`, `test_overlapping_reads_with_cancellations`,
-  `test_concurrent_reads_read_each_page_once`,
-  `test_concurrent_reads_with_eviction_and_cancellation`,
-  `test_page_fetches_entry_removed_when_first_fetcher_cancelled`,
-  `test_followers_keep_single_flight_after_first_fetcher_cancellation`,
-  `test_page_fetch_error_removes_entry_for_all_waiters`,
-  `test_cancelled_stale_waiter_preserves_new_fetch`: storage-journal.md: the page cache "does not
-  share in-flight reads" (joins, batches)
+  `test_concurrent_reads_with_eviction_and_cancellation`: commonware's batch futures (one
+  shared future per batch, polled by whichever reader drives it, with subscriptions per page);
+  zigware's shared reads (`CacheRef.share_reads`) resolve each page fetch by itself, and a
+  read never outlives its task, so there is no batch, driver, or subscription to observe
 - `utils/buffer/paged/cache.rs` `test_observed_miss_filled_before_completion`: relies on a Rust
   future doing nothing until first polled
 - `utils/buffer/paged/read.rs` `test_replay_buf_bytes_share_pages`: storage-journal.md: `IoBuf`
@@ -471,8 +478,6 @@ Not portable:
 - `utils/buffer/paged/writer.rs` `test_append_variable_value_encodes_in_place`,
   `test_to_physical_pages_preserves_chunk_owners`: storage-journal.md: `IoBuf` ownership/chunk
   structure (reads copy into caller buffers)
-- `utils/buffer/paged/writer.rs` `test_recoverable_prefix_len_batches_reads`: storage-journal.md:
-  "`recoverable_prefix_len` reads one page at a time"
 - `utils/buffer/paged/writer.rs` `test_sync_preserves_partial_tip_allocation`: storage-journal.md:
   tip is one contiguous allocation, not chained zero-copy chunks
 - `utils/buffer/tip.rs` `test_tip_slice_uses_resolved_bounds`,

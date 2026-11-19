@@ -6,7 +6,9 @@ const std = @import("std");
 const assert = std.debug.assert;
 const paged = @import("mod.zig");
 const Blob = @import("../../storage.zig").Blob;
-const CacheRef = @import("cache.zig").CacheRef;
+const cache_mod = @import("cache.zig");
+const CacheRef = cache_mod.CacheRef;
+const Claim = cache_mod.Claim;
 
 pub const Error = paged.Error;
 
@@ -96,7 +98,11 @@ pub const View = struct {
         // One page buffer serves every run; no run spans more pages than the missed ranges.
         const physical: usize = @intCast(@as(u64, self.cache_ref.page_size) +
             paged.checksum_size);
-        const bytes = try gpa.alloc(u8, self.run_pages_bound(ranges, &missed) * physical);
+        // Shared reads assemble a run's logical pages apart from the physical pages they read.
+        const run_pages = self.run_pages_bound(ranges, &missed);
+        const shared = self.cache_ref.io != null;
+        const logical_len = if (shared) run_pages * self.page_size_bytes() else 0;
+        const bytes = try gpa.alloc(u8, run_pages * physical + logical_len);
         defer gpa.free(bytes);
         var run: ?Run = null;
         start = 0;
@@ -172,10 +178,15 @@ pub const View = struct {
         const physical: usize = @intCast(page_size_value + paged.checksum_size);
         const chunk_pages = @min(run.last - run.first + 1, max_run_pages);
         assert(bytes.len >= chunk_pages * physical);
+        const shared = self.cache_ref.io != null;
         var page = run.first;
         while (page <= run.last) {
             const count: usize = @intCast(@min(run.last - page + 1, max_run_pages));
-            const logical = try self.read_pages(bytes[0 .. count * physical], page, count);
+            const span = bytes[0 .. count * physical];
+            const logical = if (shared)
+                try self.read_pages_shared(span, bytes[chunk_pages * physical ..], page, count)
+            else
+                try self.read_pages(span, page, count);
             const span_start = page * page_size_value;
             var slot_start = run.slot_start;
             for (ranges[run.begin..run.end], run.begin..) |range, index| {
@@ -217,6 +228,160 @@ pub const View = struct {
         }
         const logical = bytes[0 .. count * page_size_value];
         assert(self.cache_ref.cache(self.id, logical, first * page_size_value) == 0);
+        return logical;
+    }
+
+    fn page_size_bytes(self: View) usize {
+        return self.cache_ref.page_size;
+    }
+
+    /// `read_pages` sharing reads with other readers through the cache: each page is copied
+    /// if cached, joined if another reader is fetching it, and otherwise claimed, and the
+    /// claimed pages are read in contiguous runs into `bytes`. The logical pages land in
+    /// `logical`. Every claimed page is resolved before any joined one is awaited, since two
+    /// readers waiting on each other's pages first would wait forever.
+    fn read_pages_shared(
+        self: View,
+        bytes: []u8,
+        logical: []u8,
+        first: u64,
+        count: usize,
+    ) Error![]const u8 {
+        const page_size_value = self.page_size_bytes();
+        assert(count <= max_run_pages and logical.len >= count * page_size_value);
+        var claims: [max_run_pages]Claim = undefined;
+        for (claims[0..count], 0..) |*claim, k| {
+            const dest = logical[k * page_size_value ..][0..page_size_value];
+            claim.* = self.cache_ref.begin_fetch(self.id, first + k, dest, true);
+        }
+        var failure: ?Error = null;
+        var k: usize = 0;
+        while (k < count) {
+            if (!owns(claims[k])) {
+                k += 1;
+                continue;
+            }
+            var end = k + 1;
+            while (end < count and owns(claims[end])) end += 1;
+            if (self.read_owned(bytes, logical, first, claims[k..end], k)) |err| failure = err;
+            k = end;
+        }
+        // Every claimed page is resolved, so `bytes` is free for re-reads of abandoned pages.
+        const physical = page_size_value + paged.checksum_size;
+        for (claims[0..count], 0..) |claim, index| switch (claim) {
+            .joined => |ticket| {
+                if (failure != null) {
+                    self.cache_ref.leave_fetch(ticket);
+                    continue;
+                }
+                const dest = logical[index * page_size_value ..][0..page_size_value];
+                const got = self.cache_ref.wait_fetch(ticket, dest) catch |err| {
+                    failure = err;
+                    continue;
+                };
+                if (got) continue;
+                self.fetch_page(first + index, dest, bytes[0..physical]) catch |err| {
+                    failure = err;
+                };
+            },
+            .cached, .claimed, .private => {},
+        };
+        if (failure) |err| return err;
+        return logical[0 .. count * page_size_value];
+    }
+
+    fn owns(claim: Claim) bool {
+        return claim == .claimed or claim == .private;
+    }
+
+    /// Read the pages `claims` (claimed or private, starting at run index `begin`) with one
+    /// blob read, copy each valid page into `logical`, and resolve every claim. Returns the
+    /// first failure.
+    fn read_owned(
+        self: View,
+        bytes: []u8,
+        logical: []u8,
+        first: u64,
+        claims: []const Claim,
+        begin: usize,
+    ) ?Error {
+        const page_size_value = self.page_size_bytes();
+        const physical = page_size_value + paged.checksum_size;
+        const start, _ = paged.physical_page(first + begin, page_size_value) catch |err| {
+            for (claims, begin..) |claim, k| self.resolve(claim, first + k, err);
+            return err;
+        };
+        const span = bytes[begin * physical ..][0 .. claims.len * physical];
+        self.blob.read_at(start, span) catch |err| {
+            for (claims, begin..) |claim, k| self.resolve(claim, first + k, err);
+            return err;
+        };
+        var failure: ?Error = null;
+        for (claims, begin..) |claim, k| {
+            const page_bytes = span[(k - begin) * physical ..][0..physical];
+            const result = full_page(page_bytes, page_size_value);
+            if (result) |page| {
+                @memcpy(logical[k * page_size_value ..][0..page_size_value], page);
+            } else |err| failure = err;
+            self.resolve(claim, first + k, result);
+        }
+        return failure;
+    }
+
+    /// The logical bytes of a full physical page, or `InvalidChecksum`.
+    fn full_page(page_bytes: []const u8, page_size_value: usize) Error![]const u8 {
+        const active = paged.Checksum.validate_page(page_bytes) orelse
+            return error.InvalidChecksum;
+        // Pages below the tip are full; a shorter one fell back to a partial checksum.
+        if (active.len != page_size_value) return error.InvalidChecksum;
+        return page_bytes[0..page_size_value];
+    }
+
+    /// Resolve an owned page: a claimed fetch for its joiners; a private page read is cached.
+    fn resolve(self: View, claim: Claim, page: u64, result: Error![]const u8) void {
+        switch (claim) {
+            .claimed => |ticket| self.cache_ref.finish_fetch(ticket, result),
+            .private => if (result) |bytes| {
+                const offset = page * self.page_size_bytes();
+                assert(self.cache_ref.cache(self.id, bytes, offset) == 0);
+            } else |_| {},
+            .cached, .joined => unreachable,
+        }
+    }
+
+    /// Fetch full page `page` into `dest`, sharing the read through the cache. A joined fetch
+    /// whose reader was canceled is tried again, joining once more; the third try reads alone.
+    /// `scratch` holds one physical page.
+    fn fetch_page(self: View, page: u64, dest: []u8, scratch: []u8) Error!void {
+        const page_size_value = self.page_size_bytes();
+        assert(dest.len == page_size_value);
+        assert(scratch.len == page_size_value + paged.checksum_size);
+        for (0..3) |attempt| {
+            const claim = self.cache_ref.begin_fetch(self.id, page, dest, attempt < 2);
+            switch (claim) {
+                .cached => return,
+                .joined => |ticket| if (try self.cache_ref.wait_fetch(ticket, dest)) return,
+                .claimed, .private => {
+                    const result = self.read_page_alone(page, scratch);
+                    self.resolve(claim, page, result);
+                    @memcpy(dest, try result);
+                    return;
+                },
+            }
+        }
+        unreachable; // The last try never joins, so it returns.
+    }
+
+    fn read_page_alone(self: View, page: u64, scratch: []u8) Error![]const u8 {
+        const page_size_value = self.page_size_bytes();
+        const logical, _ = try paged.read_page_with_checksum(
+            self.blob,
+            page,
+            page_size_value,
+            scratch,
+            .{},
+        );
+        if (logical.len != page_size_value) return error.InvalidChecksum;
         return logical;
     }
 
@@ -316,13 +481,43 @@ pub const View = struct {
     /// Physical pages up to this size are read into a stack buffer; larger ones allocate.
     const stack_page_bytes = 4096;
 
-    /// Reads `buf` at `offset` from the page cache, fetching missed pages from the blob. Each
-    /// call reads missed pages into a buffer of its own (commonware's `read_after_miss`), so
-    /// readers of one blob on several threads never share a page in flight.
+    /// Reads `buf` at `offset` from the page cache, fetching missed pages from the blob
+    /// (commonware's `read_after_miss`): shared with other readers once the cache shares reads,
+    /// otherwise each into a buffer of this call's own.
     fn read_blob(self: View, buf: []u8, offset: u64) Error!void {
-        const page_size_value = self.cache_ref.page_size;
-        var done = self.cache_ref.read_cached(self.id, buf, offset);
+        const done = self.cache_ref.read_cached(self.id, buf, offset);
         if (done == buf.len) return;
+        if (self.cache_ref.io != null) return self.read_blob_shared(buf, offset, done);
+        return self.read_blob_alone(buf, offset, done);
+    }
+
+    fn read_blob_shared(self: View, buf: []u8, offset: u64, cached: usize) Error!void {
+        const page_size_value = self.page_size_bytes();
+        const physical = page_size_value + paged.checksum_size;
+        var stack: [2 * stack_page_bytes]u8 = undefined;
+        const heap = physical + page_size_value > stack.len;
+        const gpa = self.cache_ref.gpa;
+        const scratch = if (heap)
+            try gpa.alloc(u8, physical + page_size_value)
+        else
+            stack[0 .. physical + page_size_value];
+        defer if (heap) gpa.free(scratch);
+        const page_bytes = scratch[physical..];
+        var done = cached;
+        while (done < buf.len) {
+            const page, const in_page = self.cache_ref.offset_to_page(offset + done);
+            try self.fetch_page(page, page_bytes, scratch[0..physical]);
+            const count = @min(buf.len - done, page_size_value - in_page);
+            @memcpy(buf[done..][0..count], page_bytes[@intCast(in_page)..][0..count]);
+            done += count;
+            done += self.cache_ref.read_cached(self.id, buf[done..], offset + done);
+        }
+        assert(done == buf.len);
+    }
+
+    fn read_blob_alone(self: View, buf: []u8, offset: u64, cached: usize) Error!void {
+        const page_size_value = self.cache_ref.page_size;
+        var done = cached;
         const physical: usize = @intCast(page_size_value + paged.checksum_size);
         var stack: [stack_page_bytes]u8 = undefined;
         const heap = physical > stack.len;

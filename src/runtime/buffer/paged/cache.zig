@@ -5,8 +5,15 @@
 //!
 //! Like commonware's, eviction is Clock2Q+ (`utils.Cache`): new pages enter a small probation
 //! queue and earn a place in the main ring only by a later hit, so a scan cannot flush the
-//! working set. commonware also shares in-flight page reads between concurrent async readers;
-//! zigware's misses are plain validated page reads (in the writer).
+//! working set.
+//!
+//! Shared reads (commonware's `page_fetches` and batches): once `share_reads` gives the cache an
+//! `Io` to wait with, a reader that misses a page another reader is fetching joins that fetch
+//! instead of reading the page again. A fetch lives in one of `fetch_slots_max` slots with a page
+//! buffer of its own, so a joiner gets the page even if the cache evicts it first. A fetch whose
+//! reader is canceled resolves as abandoned: its joiners read the page again, the first of them
+//! as a new fetch the others join, so a cancel never fails other readers. Without `share_reads`,
+//! or with every slot taken, a miss reads alone.
 //!
 //! Like commonware's, one cache may be shared by blobs that tasks on different threads use
 //! (on `std.Io.Threaded`, a sync engine's fetch task reads a source while the caller writes
@@ -17,7 +24,36 @@
 const std = @import("std");
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
+const Io = std.Io;
 const utils = @import("utils");
+
+pub const FetchError = @import("mod.zig").Error;
+
+/// One page fetch shared by its reader and the readers that joined it.
+const Fetch = struct {
+    key: Key = undefined,
+    state: enum { free, reading, done, failed, abandoned } = .free,
+    /// The fetch's reader until it resolves, plus each joiner still to collect the result.
+    refs: u32 = 0,
+    /// Bumped when the fetch resolves; joiners wait for it to change.
+    resolved: std.atomic.Value(u32) = .init(0),
+    failure: FetchError = error.Io,
+};
+
+/// A reader's part in a fetch: its slot and, for a joiner, `resolved` when it joined.
+pub const Ticket = struct { slot: u32, seen: u32 };
+
+/// How a reader gets a missed page (`CacheRef.begin_fetch`).
+pub const Claim = union(enum) {
+    /// The page was cached after all; it is in the caller's buffer.
+    cached,
+    /// Another reader is fetching it: collect it with `wait_fetch`.
+    joined: Ticket,
+    /// The caller fetches it for every joiner and resolves it with `finish_fetch`.
+    claimed: Ticket,
+    /// The caller reads it alone.
+    private,
+};
 
 const Key = struct { blob_id: u64, page: u64 };
 
@@ -37,6 +73,14 @@ pub const CacheRef = struct {
     slots: Slots,
     /// Held by every operation; see the file comment.
     lock: std.atomic.Value(bool) = .init(false),
+    /// Set by `share_reads`: what joiners wait with. Null keeps every miss a private read.
+    io: ?Io = null,
+    /// Shared fetches in flight or still being collected, with one page buffer per slot.
+    fetch_slots: []Fetch = &.{},
+    fetch_pages: []u8 = &.{},
+
+    /// The most page fetches shared at once.
+    pub const fetch_slots_max = 64;
 
     fn acquire(self: *CacheRef) void {
         while (self.lock.cmpxchgWeak(false, true, .acquire, .monotonic) != null) {
@@ -75,9 +119,142 @@ pub const CacheRef = struct {
     }
 
     pub fn deinit(self: *CacheRef) void {
+        for (self.fetch_slots) |*fetch| assert(fetch.state == .free);
+        self.gpa.free(self.fetch_slots);
+        self.gpa.free(self.fetch_pages);
         self.slots.deinit(self.gpa);
         self.gpa.free(self.pages);
         self.* = undefined;
+    }
+
+    /// Lets readers that miss the same page share one blob read, waiting with `io`.
+    pub fn share_reads(self: *CacheRef, io: Io) Allocator.Error!void {
+        assert(self.io == null);
+        const fetch_slots = try self.gpa.alloc(Fetch, fetch_slots_max);
+        errdefer self.gpa.free(fetch_slots);
+        const fetch_pages = try self.gpa.alloc(u8, fetch_slots_max * @as(usize, self.page_size));
+        @memset(fetch_slots, .{});
+        self.fetch_slots = fetch_slots;
+        self.fetch_pages = fetch_pages;
+        self.io = io;
+        assert(self.fetch_slots.len == fetch_slots_max);
+    }
+
+    fn fetch_page_bytes(self: *const CacheRef, slot: u32) []u8 {
+        assert(slot < self.fetch_slots.len);
+        return self.fetch_pages[@as(usize, slot) * self.page_size ..][0..self.page_size];
+    }
+
+    /// For a reader that missed page `page` of `blob_id`: copy it into `dest` if it is cached
+    /// now, join the fetch in flight for it (unless `may_join` is false), or claim a new fetch.
+    pub fn begin_fetch(
+        self: *CacheRef,
+        blob_id: u64,
+        page: u64,
+        dest: []u8,
+        may_join: bool,
+    ) Claim {
+        assert(dest.len == self.page_size);
+        self.acquire();
+        defer self.release();
+        if (self.find_page(blob_id, page)) |bytes| {
+            @memcpy(dest, bytes);
+            return .cached;
+        }
+        const key: Key = .{ .blob_id = blob_id, .page = page };
+        var free: ?u32 = null;
+        for (self.fetch_slots, 0..) |*fetch, index| {
+            if (fetch.state == .free) {
+                if (free == null) free = @intCast(index);
+                continue;
+            }
+            if (fetch.state != .reading or !std.meta.eql(fetch.key, key)) continue;
+            if (!may_join) return .private;
+            fetch.refs += 1;
+            return .{ .joined = .{ .slot = @intCast(index), .seen = fetch.resolved.raw } };
+        }
+        const slot = free orelse return .private;
+        const fetch = &self.fetch_slots[slot];
+        assert(fetch.refs == 0);
+        fetch.key = key;
+        fetch.state = .reading;
+        fetch.refs = 1;
+        return .{ .claimed = .{ .slot = slot, .seen = fetch.resolved.raw } };
+    }
+
+    /// Resolves a claimed fetch with the page's logical bytes or why reading it failed, caching
+    /// a page read: joiners get the page, the error, or (for `Canceled`) a retry.
+    pub fn finish_fetch(self: *CacheRef, ticket: Ticket, result: FetchError![]const u8) void {
+        const fetch = &self.fetch_slots[ticket.slot];
+        {
+            self.acquire();
+            defer self.release();
+            assert(fetch.state == .reading and fetch.refs > 0);
+            if (result) |page| {
+                @memcpy(self.fetch_page_bytes(ticket.slot), page);
+                self.insert(fetch.key, page);
+                fetch.state = .done;
+            } else |err| switch (err) {
+                error.Canceled => fetch.state = .abandoned,
+                else => {
+                    fetch.state = .failed;
+                    fetch.failure = err;
+                },
+            }
+            _ = fetch.resolved.fetchAdd(1, .release);
+            drop_ref(fetch);
+        }
+        self.io.?.futexWake(u32, &fetch.resolved.raw, std.math.maxInt(u32));
+    }
+
+    /// Waits for a joined fetch: true with the page in `dest`, false if its reader was canceled
+    /// (read the page again), or the fetch's error.
+    pub fn wait_fetch(self: *CacheRef, ticket: Ticket, dest: []u8) FetchError!bool {
+        assert(dest.len == self.page_size);
+        const fetch = &self.fetch_slots[ticket.slot];
+        while (fetch.resolved.load(.acquire) == ticket.seen) {
+            self.io.?.futexWait(u32, &fetch.resolved.raw, ticket.seen) catch |err| {
+                self.leave_fetch(ticket);
+                return err;
+            };
+        }
+        self.acquire();
+        defer self.release();
+        defer drop_ref(fetch);
+        return switch (fetch.state) {
+            .done => {
+                @memcpy(dest, self.fetch_page_bytes(ticket.slot));
+                return true;
+            },
+            .abandoned => false,
+            .failed => fetch.failure,
+            .free, .reading => unreachable, // `resolved` changed, and this joiner holds a ref.
+        };
+    }
+
+    /// Gives up a joined fetch without its result.
+    pub fn leave_fetch(self: *CacheRef, ticket: Ticket) void {
+        self.acquire();
+        defer self.release();
+        drop_ref(&self.fetch_slots[ticket.slot]);
+    }
+
+    fn drop_ref(fetch: *Fetch) void {
+        assert(fetch.refs > 0 and fetch.state != .free);
+        fetch.refs -= 1;
+        if (fetch.refs > 0) return;
+        // The fetch's reader holds a ref until it resolves the fetch.
+        assert(fetch.state != .reading);
+        fetch.state = .free;
+    }
+
+    /// The fetches not yet free (resolved fetches still being collected included).
+    pub fn fetches_active(self: *CacheRef) usize {
+        self.acquire();
+        defer self.release();
+        var active: usize = 0;
+        for (self.fetch_slots) |fetch| active += @intFromBool(fetch.state != .free);
+        return active;
     }
 
     /// A unique id for the next blob that uses this cache.
