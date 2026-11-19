@@ -1,0 +1,368 @@
+### 
+exit=2
+error: the following required arguments were not provided:
+  --peers <peers>
+  --bootstrappers <bootstrappers>
+  --regions <regions>
+  --instance-type <instance_type>
+  --storage-size <storage_size>
+  --storage-class <storage_class>
+  --worker-threads <worker-threads>
+  --message-size <message-size>
+  --message-rate <message-rate>
+  --mailbox-size <mailbox-size>
+  --dashboard <dashboard>
+  --instrument <instrument>
+  --output <output>
+
+Usage: setup --peers <peers> --bootstrappers <bootstrappers> --regions <regions> --instance-type <instance_type> --storage-size <storage_size> --storage-class <storage_class> --worker-threads <worker-threads> --message-size <message-size> --message-rate <message-rate> --mailbox-size <mailbox-size> --dashboard <dashboard> --instrument <instrument> --output <output>
+
+For more information, try '--help'.
+### --help
+exit=0
+generate configuration files
+
+Usage: setup [OPTIONS] --peers <peers> --bootstrappers <bootstrappers> --regions <regions> --instance-type <instance_type> --storage-size <storage_size> --storage-class <storage_class> --worker-threads <worker-threads> --message-size <message-size> --message-rate <message-rate> --mailbox-size <mailbox-size> --dashboard <dashboard> --instrument <instrument> --output <output>
+
+Options:
+      --peers <peers>
+          
+      --bootstrappers <bootstrappers>
+          
+      --regions <regions>
+          
+      --instance-type <instance_type>
+          
+      --storage-size <storage_size>
+          
+      --storage-class <storage_class>
+          
+      --storage-iops <storage_iops>
+          
+      --storage-throughput <storage_throughput>
+          
+      --worker-threads <worker-threads>
+          
+      --message-size <message-size>
+          
+      --message-rate <message-rate>
+          Offered messages per second per peer (sizes the derived channel mailboxes)
+      --mailbox-size <mailbox-size>
+          
+      --dashboard <dashboard>
+          
+      --instrument <instrument>
+          [possible values: true, false]
+      --output <output>
+          
+  -h, --help
+          Print help
+### -h
+exit=0
+generate configuration files
+
+Usage: setup [OPTIONS] --peers <peers> --bootstrappers <bootstrappers> --regions <regions> --instance-type <instance_type> --storage-size <storage_size> --storage-class <storage_class> --worker-threads <worker-threads> --message-size <message-size> --message-rate <message-rate> --mailbox-size <mailbox-size> --dashboard <dashboard> --instrument <instrument> --output <output>
+
+Options:
+      --peers <peers>
+          
+      --bootstrappers <bootstrappers>
+          
+      --regions <regions>
+          
+      --instance-type <instance_type>
+          
+      --storage-size <storage_size>
+          
+      --storage-class <storage_class>
+          
+      --storage-iops <storage_iops>
+          
+      --storage-throughput <storage_throughput>
+          
+      --worker-threads <worker-threads>
+          
+      --message-size <message-size>
+          
+      --message-rate <message-rate>
+          Offered messages per second per peer (sizes the derived channel mailboxes)
+      --mailbox-size <mailbox-size>
+          
+      --dashboard <dashboard>
+          
+      --instrument <instrument>
+          [possible values: true, false]
+      --output <output>
+          
+  -h, --help
+          Print help
+### --help=x
+exit=2
+error: unexpected value 'x' for '--help' found; no more were expected
+
+Usage: setup --peers <peers> --bootstrappers <bootstrappers> --regions <regions> --instance-type <instance_type> --storage-size <storage_size> --storage-class <storage_class> --worker-threads <worker-threads> --message-size <message-size> --message-rate <message-rate> --mailbox-size <mailbox-size> --dashboard <dashboard> --instrument <instrument> --output <output> --help
+
+For more information, try '--help'.
+### --peers x
+exit=2
+error: invalid value 'x' for '--peers <peers>': invalid digit found in string
+
+For more information, try '--help'.
+### --peers
+exit=2
+error: a value is required for '--peers <peers>' but none was supplied
+
+For more information, try '--help'.
+### --peers 1 --peers 2
+exit=2
+error: the argument '--peers <peers>' cannot be used multiple times
+
+Usage: setup [OPTIONS] --peers <peers> --bootstrappers <bootstrappers> --regions <regions> --instance-type <instance_type> --storage-size <storage_size> --storage-class <storage_class> --worker-threads <worker-threads> --message-size <message-size> --message-rate <message-rate> --mailbox-size <mailbox-size> --dashboard <dashboard> --instrument <instrument> --output <output>
+
+For more information, try '--help'.
+### --peer 1
+exit=2
+error: unexpected argument '--peer' found
+
+  tip: a similar argument exists: '--peers'
+
+Usage: setup --peers <peers> --bootstrappers <bootstrappers> --regions <regions> --instance-type <instance_type> --storage-size <storage_size> --storage-class <storage_class> --worker-threads <worker-threads> --message-size <message-size> --message-rate <message-rate> --mailbox-size <mailbox-size> --dashboard <dashboard> --instrument <instrument> --output <output>
+
+For more information, try '--help'.
+### --bogus
+exit=2
+error: unexpected argument '--bogus' found
+
+Usage: setup [OPTIONS] --peers <peers> --bootstrappers <bootstrappers> --regions <regions> --instance-type <instance_type> --storage-size <storage_size> --storage-class <storage_class> --worker-threads <worker-threads> --message-size <message-size> --message-rate <message-rate> --mailbox-size <mailbox-size> --dashboard <dashboard> --instrument <instrument> --output <output>
+
+For more information, try '--help'.
+### x
+exit=2
+error: unexpected argument 'x' found
+
+Usage: setup [OPTIONS] --peers <peers> --bootstrappers <bootstrappers> --regions <regions> --instance-type <instance_type> --storage-size <storage_size> --storage-class <storage_class> --worker-threads <worker-threads> --message-size <message-size> --message-rate <message-rate> --mailbox-size <mailbox-size> --dashboard <dashboard> --instrument <instrument> --output <output>
+
+For more information, try '--help'.
+### --peers=99999999999999999999
+exit=2
+error: invalid value '99999999999999999999' for '--peers <peers>': number too large to fit in target type
+
+For more information, try '--help'.
+### --bootstrappers -1
+exit=2
+error: unexpected argument '-1' found
+
+Usage: setup [OPTIONS] --peers <peers> --bootstrappers <bootstrappers> --regions <regions> --instance-type <instance_type> --storage-size <storage_size> --storage-class <storage_class> --worker-threads <worker-threads> --message-size <message-size> --message-rate <message-rate> --mailbox-size <mailbox-size> --dashboard <dashboard> --instrument <instrument> --output <output>
+
+For more information, try '--help'.
+### --storage-size x
+exit=2
+error: invalid value 'x' for '--storage-size <storage_size>': invalid digit found in string
+
+For more information, try '--help'.
+### --storage-size=-5 --peers 1
+exit=2
+error: the following required arguments were not provided:
+  --bootstrappers <bootstrappers>
+  --regions <regions>
+  --instance-type <instance_type>
+  --storage-class <storage_class>
+  --worker-threads <worker-threads>
+  --message-size <message-size>
+  --message-rate <message-rate>
+  --mailbox-size <mailbox-size>
+  --dashboard <dashboard>
+  --instrument <instrument>
+  --output <output>
+
+Usage: setup --peers <peers> --bootstrappers <bootstrappers> --regions <regions> --instance-type <instance_type> --storage-size <storage_size> --storage-class <storage_class> --worker-threads <worker-threads> --message-size <message-size> --message-rate <message-rate> --mailbox-size <mailbox-size> --dashboard <dashboard> --instrument <instrument> --output <output>
+
+For more information, try '--help'.
+### --storage-size 9999999999
+exit=2
+error: invalid value '9999999999' for '--storage-size <storage_size>': 9999999999 is not in -2147483648..=2147483647
+
+For more information, try '--help'.
+### --storage-size=-9999999999
+exit=2
+error: invalid value '-9999999999' for '--storage-size <storage_size>': -9999999999 is not in -2147483648..=2147483647
+
+For more information, try '--help'.
+### --storage-size 99999999999999999999
+exit=2
+error: invalid value '99999999999999999999' for '--storage-size <storage_size>': number too large to fit in target type
+
+For more information, try '--help'.
+### --storage-size=-99999999999999999999
+exit=2
+error: invalid value '-99999999999999999999' for '--storage-size <storage_size>': number too small to fit in target type
+
+For more information, try '--help'.
+### --storage-size=
+exit=2
+error: invalid value '' for '--storage-size <storage_size>': cannot parse integer from empty string
+
+For more information, try '--help'.
+### --storage-iops 3000000000
+exit=2
+error: invalid value '3000000000' for '--storage-iops <storage_iops>': 3000000000 is not in -2147483648..=2147483647
+
+For more information, try '--help'.
+### --storage-throughput x
+exit=2
+error: invalid value 'x' for '--storage-throughput <storage_throughput>': invalid digit found in string
+
+For more information, try '--help'.
+### --message-size 9999999999
+exit=2
+error: invalid value '9999999999' for '--message-size <message-size>': 9999999999 is not in 0..=4294967295
+
+For more information, try '--help'.
+### --message-size=-1
+exit=2
+error: invalid value '-1' for '--message-size <message-size>': -1 is not in 0..=4294967295
+
+For more information, try '--help'.
+### --message-size x
+exit=2
+error: invalid value 'x' for '--message-size <message-size>': invalid digit found in string
+
+For more information, try '--help'.
+### --message-rate 0
+exit=2
+error: invalid value '0' for '--message-rate <message-rate>': number would be zero for non-zero type
+
+For more information, try '--help'.
+### --message-rate 9999999999
+exit=2
+error: invalid value '9999999999' for '--message-rate <message-rate>': number too large to fit in target type
+
+For more information, try '--help'.
+### --message-rate=
+exit=2
+error: invalid value '' for '--message-rate <message-rate>': cannot parse integer from empty string
+
+For more information, try '--help'.
+### --message-rate +5 --x
+exit=2
+error: unexpected argument '--x' found
+
+Usage: setup --peers <peers> --bootstrappers <bootstrappers> --regions <regions> --instance-type <instance_type> --storage-size <storage_size> --storage-class <storage_class> --worker-threads <worker-threads> --message-size <message-size> --message-rate <message-rate> --mailbox-size <mailbox-size> --dashboard <dashboard> --instrument <instrument> --output <output>
+
+For more information, try '--help'.
+### --mailbox-size 0
+exit=2
+error: invalid value '0' for '--mailbox-size <mailbox-size>': number would be zero for non-zero type
+
+For more information, try '--help'.
+### --mailbox-size 99999999999999999999
+exit=2
+error: invalid value '99999999999999999999' for '--mailbox-size <mailbox-size>': number too large to fit in target type
+
+For more information, try '--help'.
+### --mailbox-size x
+exit=2
+error: invalid value 'x' for '--mailbox-size <mailbox-size>': invalid digit found in string
+
+For more information, try '--help'.
+### --instrument maybe
+exit=2
+error: invalid value 'maybe' for '--instrument <instrument>'
+  [possible values: true, false]
+
+For more information, try '--help'.
+### --instrument tru
+exit=2
+error: invalid value 'tru' for '--instrument <instrument>'
+  [possible values: true, false]
+
+  tip: a similar value exists: 'true'
+
+For more information, try '--help'.
+### --instrument True
+exit=2
+error: invalid value 'True' for '--instrument <instrument>'
+  [possible values: true, false]
+
+  tip: a similar value exists: 'true'
+
+For more information, try '--help'.
+### --instrument=
+exit=2
+error: a value is required for '--instrument <instrument>' but none was supplied
+  [possible values: true, false]
+
+For more information, try '--help'.
+### --instrument true
+exit=2
+error: the following required arguments were not provided:
+  --peers <peers>
+  --bootstrappers <bootstrappers>
+  --regions <regions>
+  --instance-type <instance_type>
+  --storage-size <storage_size>
+  --storage-class <storage_class>
+  --worker-threads <worker-threads>
+  --message-size <message-size>
+  --message-rate <message-rate>
+  --mailbox-size <mailbox-size>
+  --dashboard <dashboard>
+  --output <output>
+
+Usage: setup --peers <peers> --bootstrappers <bootstrappers> --regions <regions> --instance-type <instance_type> --storage-size <storage_size> --storage-class <storage_class> --worker-threads <worker-threads> --message-size <message-size> --message-rate <message-rate> --mailbox-size <mailbox-size> --dashboard <dashboard> --instrument <instrument> --output <output>
+
+For more information, try '--help'.
+### --regions a,b --instance-type t
+exit=2
+error: the following required arguments were not provided:
+  --peers <peers>
+  --bootstrappers <bootstrappers>
+  --storage-size <storage_size>
+  --storage-class <storage_class>
+  --worker-threads <worker-threads>
+  --message-size <message-size>
+  --message-rate <message-rate>
+  --mailbox-size <mailbox-size>
+  --dashboard <dashboard>
+  --instrument <instrument>
+  --output <output>
+
+Usage: setup --peers <peers> --bootstrappers <bootstrappers> --regions <regions> --instance-type <instance_type> --storage-size <storage_size> --storage-class <storage_class> --worker-threads <worker-threads> --message-size <message-size> --message-rate <message-rate> --mailbox-size <mailbox-size> --dashboard <dashboard> --instrument <instrument> --output <output>
+
+For more information, try '--help'.
+### --worker-threads 0
+exit=2
+error: the following required arguments were not provided:
+  --peers <peers>
+  --bootstrappers <bootstrappers>
+  --regions <regions>
+  --instance-type <instance_type>
+  --storage-size <storage_size>
+  --storage-class <storage_class>
+  --message-size <message-size>
+  --message-rate <message-rate>
+  --mailbox-size <mailbox-size>
+  --dashboard <dashboard>
+  --instrument <instrument>
+  --output <output>
+
+Usage: setup --peers <peers> --bootstrappers <bootstrappers> --regions <regions> --instance-type <instance_type> --storage-size <storage_size> --storage-class <storage_class> --worker-threads <worker-threads> --message-size <message-size> --message-rate <message-rate> --mailbox-size <mailbox-size> --dashboard <dashboard> --instrument <instrument> --output <output>
+
+For more information, try '--help'.
+### --worker-threads x --peers 1
+exit=2
+error: invalid value 'x' for '--worker-threads <worker-threads>': invalid digit found in string
+
+For more information, try '--help'.
+### --storage-iops 1 --nope
+exit=2
+error: unexpected argument '--nope' found
+
+Usage: setup --peers <peers> --bootstrappers <bootstrappers> --regions <regions> --instance-type <instance_type> --storage-size <storage_size> --storage-class <storage_class> --worker-threads <worker-threads> --message-size <message-size> --message-rate <message-rate> --mailbox-size <mailbox-size> --dashboard <dashboard> --instrument <instrument> --output <output> --storage-iops <storage_iops>
+
+For more information, try '--help'.
+### --instance-type
+exit=2
+error: a value is required for '--instance-type <instance_type>' but none was supplied
+
+For more information, try '--help'.

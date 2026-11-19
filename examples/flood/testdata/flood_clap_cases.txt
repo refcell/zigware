@@ -1,0 +1,97 @@
+### 
+exit=2
+error: the following required arguments were not provided:
+  --hosts <hosts>
+  --config <config>
+
+Usage: flood --hosts <hosts> --config <config>
+
+For more information, try '--help'.
+### --help
+exit=0
+Spam peers with random messages.
+
+Usage: flood --hosts <hosts> --config <config>
+
+Options:
+      --hosts <hosts>    
+      --config <config>  
+  -h, --help             Print help
+### -h
+exit=0
+Spam peers with random messages.
+
+Usage: flood --hosts <hosts> --config <config>
+
+Options:
+      --hosts <hosts>    
+      --config <config>  
+  -h, --help             Print help
+### --hosts
+exit=2
+error: a value is required for '--hosts <hosts>' but none was supplied
+
+For more information, try '--help'.
+### --hosts a
+exit=2
+error: the following required arguments were not provided:
+  --config <config>
+
+Usage: flood --hosts <hosts> --config <config>
+
+For more information, try '--help'.
+### --config c
+exit=2
+error: the following required arguments were not provided:
+  --hosts <hosts>
+
+Usage: flood --hosts <hosts> --config <config>
+
+For more information, try '--help'.
+### --host a
+exit=2
+error: unexpected argument '--host' found
+
+  tip: a similar argument exists: '--hosts'
+
+Usage: flood --hosts <hosts> --config <config>
+
+For more information, try '--help'.
+### --bogus
+exit=2
+error: unexpected argument '--bogus' found
+
+Usage: flood --hosts <hosts> --config <config>
+
+For more information, try '--help'.
+### x
+exit=2
+error: unexpected argument 'x' found
+
+Usage: flood --hosts <hosts> --config <config>
+
+For more information, try '--help'.
+### --hosts a --hosts b
+exit=2
+error: the argument '--hosts <hosts>' cannot be used multiple times
+
+Usage: flood --hosts <hosts> --config <config>
+
+For more information, try '--help'.
+### --hosts=a --help
+exit=0
+Spam peers with random messages.
+
+Usage: flood --hosts <hosts> --config <config>
+
+Options:
+      --hosts <hosts>    
+      --config <config>  
+  -h, --help             Print help
+### -x
+exit=2
+error: unexpected argument '-x' found
+
+Usage: flood --hosts <hosts> --config <config>
+
+For more information, try '--help'.

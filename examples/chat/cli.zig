@@ -17,7 +17,7 @@ pub const about = "send encrypted messages to a group of friends";
 
 const Clap = ui.clap.Parser(.{ .about = about, .args = &.{
     .{ .long = "me", .required = true },
-    .{ .long = "friends", .required = true, .delimited = true, .integer = true },
+    .{ .long = "friends", .required = true, .delimited = true, .value = .u64 },
     .{ .long = "bootstrappers", .delimited = true },
 } });
 

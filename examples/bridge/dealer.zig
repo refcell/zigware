@@ -26,12 +26,12 @@ const deal_anonymous = bls12381.dkg.feldman_desmedt.deal_anonymous;
 pub const about = "generate threshold secret";
 
 pub const Clap = ui.clap.Parser(.{ .about = about, .args = &.{
-    .{ .long = "seed", .required = true, .integer = true },
+    .{ .long = "seed", .required = true, .value = .u64 },
     .{
         .long = "participants",
         .required = true,
         .delimited = true,
-        .integer = true,
+        .value = .u64,
         .help = "All participants (arbiter and contributors)",
     },
 } });

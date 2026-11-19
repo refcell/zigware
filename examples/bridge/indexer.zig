@@ -44,7 +44,7 @@ pub const Clap = ui.clap.Parser(.{ .about = about, .args = &.{
         .long = "participants",
         .required = true,
         .delimited = true,
-        .integer = true,
+        .value = .u64,
         .help = "All participants",
     },
     .{ .long = "networks", .required = true, .delimited = true, .help = "All networks" },

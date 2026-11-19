@@ -2,6 +2,7 @@
 //! (written out here, field by field, as `setup.rs` serializes them), plus its refusals.
 
 const std = @import("std");
+const ui = @import("ui");
 const testing = std.testing;
 const Io = std.Io;
 const zigware = @import("zigware");
@@ -179,24 +180,33 @@ test "setup: parses clap's option forms" {
         "--instrument", "true", "--output", "assets",
     };
     // zig fmt: on
-    const parsed = (try setup.parse_options(arena, &args)).?;
+    var sink: std.Io.Writer.Discarding = .init(&.{});
+    const parsed = switch (try setup.parse(arena, &args, "setup", &sink.writer, &sink.writer)) {
+        .run => |parsed| parsed,
+        .exit => return error.TestUnexpectedResult,
+    };
     try testing.expectEqual(@as(u64, 3), parsed.peers);
     try testing.expectEqual(@as(usize, 2), parsed.regions.len);
     try testing.expectEqualStrings("eu-west-1", parsed.regions[1]);
     try testing.expectEqual(@as(?i32, 3000), parsed.storage_iops);
     try testing.expectEqual(@as(?i32, null), parsed.storage_throughput);
+    try testing.expectEqual(@as(u32, 16384), parsed.message_rate);
     try testing.expect(parsed.instrument);
-    // A missing option, a repeated one, a zero rate, and a bad bool are refused.
-    try testing.expect(try setup.parse_options(arena, args[0 .. args.len - 2]) == null);
-    const repeated = args ++ [_][]const u8{"--peers=4"};
-    try testing.expect(try setup.parse_options(arena, &repeated) == null);
-    var zero = args;
-    zero[17] = "0";
-    try testing.expectEqualStrings("--message-rate", zero[16]);
-    try testing.expect(try setup.parse_options(arena, &zero) == null);
-    var bad = args;
-    bad[23] = "yes";
-    try testing.expect(try setup.parse_options(arena, &bad) == null);
+}
+
+fn run_cli(gpa: std.mem.Allocator, args: []const []const u8, out: *std.Io.Writer) !u8 {
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    return switch (try setup.parse(arena_state.allocator(), args, "setup", out, out)) {
+        .exit => |status| status,
+        .run => unreachable, // Proof: every recorded case exits in clap.
+    };
+}
+
+test "setup: the CLI prints clap's help and errors" {
+    // Recorded from commonware's `setup` for the same arguments.
+    const cases = @embedFile("testdata/setup_clap_cases.txt");
+    try ui.clap.expect_cases(cases, 41, run_cli);
 }
 
 test "setup: flood reads the hosts file the deployer writes" {

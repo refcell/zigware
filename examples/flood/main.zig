@@ -20,6 +20,7 @@ const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const zigware = @import("zigware");
+const ui = @import("ui");
 const lib = @import("lib.zig");
 
 const p2p = zigware.p2p;
@@ -36,40 +37,30 @@ pub const metrics_port: u16 = 9090;
 /// The log target: the binary's crate name.
 const target = "flood";
 
-const usage = "Usage: flood --hosts <hosts> --config <config>\n";
+pub const about = "Spam peers with random messages.";
 
-const Arguments = struct { hosts: []const u8, config: []const u8 };
+/// commonware's `Command::new("runner")`.
+pub const Clap = ui.clap.Parser(.{ .about = about, .args = &.{
+    .{ .long = "hosts", .required = true },
+    .{ .long = "config", .required = true },
+} });
 
-fn parse_arguments(args: []const []const u8, stderr: *Io.Writer) !?Arguments {
-    var hosts: ?[]const u8 = null;
-    var config: ?[]const u8 = null;
-    var index: usize = 0;
-    while (index < args.len) : (index += 1) {
-        const arg = args[index];
-        if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
-            try stderr.print("Spam peers with random messages.\n\n{s}", .{usage});
-            return null;
-        }
-        const slot = if (std.mem.eql(u8, arg, "--hosts"))
-            &hosts
-        else if (std.mem.eql(u8, arg, "--config"))
-            &config
-        else {
-            try stderr.print("error: unexpected argument '{s}' found\n\n{s}", .{ arg, usage });
-            return error.Usage;
-        };
-        index += 1;
-        if (index == args.len) {
-            try stderr.print("error: a value is required for '{s}'\n\n{s}", .{ arg, usage });
-            return error.Usage;
-        }
-        slot.* = args[index];
-    }
-    if (hosts == null or config == null) {
-        try stderr.print("error: --hosts and --config are required\n\n{s}", .{usage});
-        return error.Usage;
-    }
-    return .{ .hosts = hosts.?, .config = config.? };
+/// Parses `args` (without argv[0]) as clap does: help goes to `stdout` (exit 0), usage
+/// errors to `stderr` (exit 2).
+pub fn parse(
+    args: []const []const u8,
+    bin_name: []const u8,
+    stdout: *Io.Writer,
+    stderr: *Io.Writer,
+) Io.Writer.Error!union(enum) { run: Clap.Values, exit: u8 } {
+    return switch (try Clap.parse(args, bin_name, stderr)) {
+        .help => {
+            try Clap.write_help(stdout, bin_name);
+            return .{ .exit = 0 };
+        },
+        .usage_error => .{ .exit = 2 },
+        .run => |values| .{ .run = values },
+    };
 }
 
 /// A peer from the hosts file: its key and IP.
@@ -107,13 +98,23 @@ pub fn main(init: std.process.Init) !void {
     var stderr_writer = Io.File.stderr().writer(io, &stderr_buffer);
     const stderr = &stderr_writer.interface;
     defer stderr.flush() catch {};
-    const arguments = parse_arguments(args[@min(args.len, 1)..], stderr) catch {
-        try stderr.flush();
-        std.process.exit(2);
-    } orelse return;
     var stdout_buffer: [4096]u8 = undefined;
     var stdout_writer = Io.File.stdout().writer(io, &stdout_buffer);
     const stdout = &stdout_writer.interface;
+    const bin_name = if (args.len > 0) std.fs.path.basename(args[0]) else "flood";
+    const values = switch (try parse(args[@min(args.len, 1)..], bin_name, stdout, stderr)) {
+        .run => |values| values,
+        .exit => |status| {
+            try stdout.flush();
+            try stderr.flush();
+            if (status == 0) return;
+            std.process.exit(status);
+        },
+    };
+    const arguments: struct { hosts: []const u8, config: []const u8 } = .{
+        .hosts = values[0].?,
+        .config = values[1].?,
+    };
 
     const limit: Io.Limit = .limited(1 << 20);
     const hosts_text = try Io.Dir.cwd().readFileAlloc(io, arguments.hosts, arena, limit);
@@ -349,4 +350,5 @@ fn run_receiver(io: Io, receiver: *Net.Receiver, latency: *metrics.raw.Histogram
 
 test {
     _ = lib;
+    _ = @import("main_test.zig");
 }

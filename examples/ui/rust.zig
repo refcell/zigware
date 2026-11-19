@@ -1,6 +1,6 @@
 //! The Rust standard library parsers whose results and error text the examples' `main`s
-//! show: `str::parse::<uN>()`, `SocketAddr::from_str`, and strsim's `jaro` (clap's
-//! did-you-mean).
+//! show: `str::parse::<uN>()` and `::<i64>()`, `SocketAddr::from_str`, and strsim's `jaro`
+//! (clap's did-you-mean).
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -31,6 +31,37 @@ pub fn int_error_text(failure: ParseIntError) []const u8 {
         error.Empty => "cannot parse integer from empty string",
         error.InvalidDigit => "invalid digit found in string",
         error.PosOverflow => "number too large to fit in target type",
+    };
+}
+
+pub const SignedError = ParseIntError || error{NegOverflow};
+
+/// Rust's `i64::from_str`.
+pub fn parse_i64(text: []const u8) SignedError!i64 {
+    if (text.len == 0) return error.Empty;
+    const signed = text[0] == '+' or text[0] == '-';
+    if (signed and text.len == 1) return error.InvalidDigit;
+    const negative = text[0] == '-';
+    const overflow: SignedError = if (negative) error.NegOverflow else error.PosOverflow;
+    var value: i64 = 0;
+    for (text[@intFromBool(signed)..]) |byte| {
+        if (byte < '0' or byte > '9') return error.InvalidDigit;
+        const digit: i64 = byte - '0';
+        value = std.math.mul(i64, value, 10) catch return overflow;
+        const step = if (negative)
+            std.math.sub(i64, value, digit)
+        else
+            std.math.add(i64, value, digit);
+        value = step catch return overflow;
+    }
+    assert(negative or value >= 0);
+    return value;
+}
+
+pub fn signed_error_text(failure: SignedError) []const u8 {
+    return switch (failure) {
+        error.NegOverflow => "number too small to fit in target type",
+        error.Empty, error.InvalidDigit, error.PosOverflow => |each| int_error_text(each),
     };
 }
 

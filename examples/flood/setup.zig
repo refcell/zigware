@@ -15,6 +15,7 @@ const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const zigware = @import("zigware");
+const ui = @import("ui");
 const lib = @import("lib.zig");
 
 const aws = zigware.deployer.aws;
@@ -179,105 +180,99 @@ pub fn write_files(
 
 // --- Command line ------------------------------------------------------------------------------
 
-const usage =
-    \\Usage: setup --peers <N> --bootstrappers <N> --regions <R1,R2,...> --instance-type <T>
-    \\             --storage-size <GB> --storage-class <C> [--storage-iops <N>]
-    \\             [--storage-throughput <N>] --worker-threads <N> --message-size <BYTES>
-    \\             --message-rate <N> --mailbox-size <N> --dashboard <PATH>
-    \\             --instrument <true|false> --output <DIR>
-    \\
-;
+pub const about = "generate configuration files";
 
-const names = [_][]const u8{
-    "peers",         "bootstrappers", "regions",            "instance-type",  "storage-size",
-    "storage-class", "storage-iops",  "storage-throughput", "worker-threads", "message-size",
-    "message-rate",  "mailbox-size",  "dashboard",          "instrument",     "output",
-};
+/// commonware's `Command::new("setup")`, in its order, with its ids and value parsers.
+pub const Clap = ui.clap.Parser(.{ .about = about, .args = &.{
+    .{ .long = "peers", .required = true, .value = .u64 },
+    .{ .long = "bootstrappers", .required = true, .value = .u64 },
+    .{ .long = "regions", .required = true, .delimited = true },
+    .{ .long = "instance-type", .id = "instance_type", .required = true },
+    .{ .long = "storage-size", .id = "storage_size", .required = true, .value = .i32 },
+    .{ .long = "storage-class", .id = "storage_class", .required = true },
+    .{ .long = "storage-iops", .id = "storage_iops", .value = .i32 },
+    .{ .long = "storage-throughput", .id = "storage_throughput", .value = .i32 },
+    .{ .long = "worker-threads", .required = true, .value = .u64 },
+    .{ .long = "message-size", .required = true, .value = .u32 },
+    .{
+        .long = "message-rate",
+        .required = true,
+        .help = "Offered messages per second per peer (sizes the derived channel mailboxes)",
+        .value = .non_zero_u32,
+    },
+    .{ .long = "mailbox-size", .required = true, .value = .non_zero_u64 },
+    .{ .long = "dashboard", .required = true },
+    .{ .long = "instrument", .required = true, .value = .bool },
+    .{ .long = "output", .required = true },
+} });
 
-/// Parses `--name value` or `--name=value` options (clap's forms); null on any mistake.
-pub fn parse_options(arena: Allocator, args: []const []const u8) !?Options {
-    var values: [names.len]?[]const u8 = @splat(null);
-    var index: usize = 0;
-    while (index < args.len) : (index += 1) {
-        const arg = args[index];
-        if (!std.mem.startsWith(u8, arg, "--")) return null;
-        const equals = std.mem.indexOfScalar(u8, arg, '=');
-        const name = arg[2 .. equals orelse arg.len];
-        const slot = for (names, 0..) |candidate, position| {
-            if (std.mem.eql(u8, candidate, name)) break position;
-        } else return null;
-        if (values[slot] != null) return null;
-        values[slot] = if (equals) |at| arg[at + 1 ..] else blk: {
-            index += 1;
-            if (index == args.len) return null;
-            break :blk args[index];
-        };
-    }
-    return options_from(arena, &values) catch |err| switch (err) {
-        error.OutOfMemory => error.OutOfMemory,
-        else => null,
+/// Parses `args` (without argv[0]) as clap does: help goes to `stdout` (exit 0), usage
+/// errors to `stderr` (exit 2). Allocates the regions from `arena`.
+pub fn parse(
+    arena: Allocator,
+    args: []const []const u8,
+    bin_name: []const u8,
+    stdout: *Io.Writer,
+    stderr: *Io.Writer,
+) !union(enum) { run: Options, exit: u8 } {
+    const values = switch (try Clap.parse(args, bin_name, stderr)) {
+        .help => {
+            try Clap.write_help(stdout, bin_name);
+            return .{ .exit = 0 };
+        },
+        .usage_error => return .{ .exit = 2 },
+        .run => |values| values,
     };
+    return .{ .run = try options_from(arena, &values) };
 }
 
-fn value(values: *const [names.len]?[]const u8, comptime name: []const u8) ?[]const u8 {
-    inline for (names, 0..) |candidate, index| {
-        if (comptime std.mem.eql(u8, candidate, name)) return values[index];
-    }
-    @compileError("unknown option " ++ name);
-}
-
-fn required(values: *const [names.len]?[]const u8, comptime name: []const u8) ![]const u8 {
-    return value(values, name) orelse error.MissingOption;
-}
-
-fn integer(comptime T: type, text: []const u8) !T {
-    return std.fmt.parseInt(T, text, 10);
-}
-
-fn options_from(arena: Allocator, values: *const [names.len]?[]const u8) !Options {
+/// The options clap accepted; every value already passed its parser.
+fn options_from(arena: Allocator, values: *const Clap.Values) Allocator.Error!Options {
     var regions: std.ArrayList([]const u8) = .empty;
-    var parts = std.mem.splitScalar(u8, try required(values, "regions"), ',');
+    var parts = std.mem.splitScalar(u8, values[2].?, ',');
     while (parts.next()) |region| try regions.append(arena, region);
-    const iops = value(values, "storage-iops");
-    const throughput = value(values, "storage-throughput");
     const options: Options = .{
-        .peers = try integer(u64, try required(values, "peers")),
-        .bootstrappers = try integer(u64, try required(values, "bootstrappers")),
+        .peers = integer(u64, values[0].?),
+        .bootstrappers = integer(u64, values[1].?),
         .regions = regions.items,
-        .instance_type = try required(values, "instance-type"),
-        .storage_size = try integer(i32, try required(values, "storage-size")),
-        .storage_class = try required(values, "storage-class"),
-        .storage_iops = if (iops) |text| try integer(i32, text) else null,
-        .storage_throughput = if (throughput) |text| try integer(i32, text) else null,
-        .worker_threads = try integer(u64, try required(values, "worker-threads")),
-        .message_size = try integer(u32, try required(values, "message-size")),
-        .message_rate = try integer(u32, try required(values, "message-rate")),
-        .mailbox_size = try integer(u64, try required(values, "mailbox-size")),
-        .dashboard = try required(values, "dashboard"),
-        .instrument = try boolean(try required(values, "instrument")),
-        .output = try required(values, "output"),
+        .instance_type = values[3].?,
+        .storage_size = integer(i32, values[4].?),
+        .storage_class = values[5].?,
+        .storage_iops = if (values[6]) |text| integer(i32, text) else null,
+        .storage_throughput = if (values[7]) |text| integer(i32, text) else null,
+        .worker_threads = integer(u64, values[8].?),
+        .message_size = integer(u32, values[9].?),
+        .message_rate = integer(u32, values[10].?),
+        .mailbox_size = integer(u64, values[11].?),
+        .dashboard = values[12].?,
+        .instrument = std.mem.eql(u8, values[13].?, "true"),
+        .output = values[14].?,
     };
-    if (options.message_rate == 0 or options.mailbox_size == 0) return error.ZeroValue;
+    assert(options.message_rate > 0 and options.mailbox_size > 0);
     return options;
 }
 
-/// clap's `bool` parser: `true` or `false`.
-fn boolean(text: []const u8) !bool {
-    if (std.mem.eql(u8, text, "true")) return true;
-    if (std.mem.eql(u8, text, "false")) return false;
-    return error.InvalidBool;
+/// A value clap's parser accepted: decimal digits with an optional sign.
+fn integer(comptime T: type, text: []const u8) T {
+    return std.fmt.parseInt(T, text, 10) catch unreachable; // Proof: clap checked it.
 }
 
 pub fn main(init: std.process.Init) !u8 {
     const io = init.io;
     const arena = init.arena.allocator();
     const args = try init.minimal.args.toSlice(arena);
-    var buffer: [1024]u8 = undefined;
-    var stderr = Io.File.stderr().writer(io, &buffer);
-    const options = try parse_options(arena, args[1..]) orelse {
-        try stderr.interface.writeAll(usage);
-        try stderr.interface.flush();
-        return 2;
+    var stdout_buffer: [4096]u8 = undefined;
+    var stdout_writer = Io.File.stdout().writer(io, &stdout_buffer);
+    var stderr_buffer: [1024]u8 = undefined;
+    var stderr_writer = Io.File.stderr().writer(io, &stderr_buffer);
+    defer stdout_writer.interface.flush() catch {};
+    defer stderr_writer.interface.flush() catch {};
+    const bin_name = if (args.len > 0) std.fs.path.basename(args[0]) else "setup";
+    const rest = args[@min(args.len, 1)..];
+    const stdout = &stdout_writer.interface;
+    const options = switch (try parse(arena, rest, bin_name, stdout, &stderr_writer.interface)) {
+        .exit => |status| return status,
+        .run => |options| options,
     };
     const tag = aws.ec2.new_client_token(io); // `Uuid::new_v4()`.
     log.info("generated deployment tag: tag={s}", .{&tag});

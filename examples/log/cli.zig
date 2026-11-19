@@ -19,7 +19,7 @@ const Clap = ui.clap.Parser(.{ .about = about, .args = &.{
         .long = "participants",
         .required = true,
         .delimited = true,
-        .integer = true,
+        .value = .u64,
         .help = "All participant keys (arbiter and contributors), including your own",
     },
     .{ .long = "storage-dir", .required = true },

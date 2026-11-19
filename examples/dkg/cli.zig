@@ -663,7 +663,8 @@ fn check_value(err: *Writer, kind: Kind, text: []const u8, value: []const u8) !?
         .count => if (rust.parse_unsigned(u64, value)) |_| return null else |failure| rust
             .int_error_text(failure),
         .port => port: {
-            const number = parse_i64(value) catch |failure| break :port signed_error_text(failure);
+            const number = rust.parse_i64(value) catch |failure|
+                break :port rust.signed_error_text(failure);
             if (number >= 0 and number <= std.math.maxInt(u16)) return null;
             // Proof: an i64 prints in at most 20 bytes.
             break :port std.fmt.bufPrint(&buffer, "{d} is not in 0..=65535", .{number}) catch
@@ -674,37 +675,6 @@ fn check_value(err: *Writer, kind: Kind, text: []const u8, value: []const u8) !?
     };
     try err.print("error: invalid value '{s}' for '{s}': {s}\n\n", .{ value, text, reason });
     return try more_information(err);
-}
-
-const SignedError = rust.ParseIntError || error{NegOverflow};
-
-/// Rust's `i64::from_str`.
-fn parse_i64(text: []const u8) SignedError!i64 {
-    if (text.len == 0) return error.Empty;
-    const signed = text[0] == '+' or text[0] == '-';
-    if (signed and text.len == 1) return error.InvalidDigit;
-    const negative = text[0] == '-';
-    const overflow: SignedError = if (negative) error.NegOverflow else error.PosOverflow;
-    var value: i64 = 0;
-    for (text[@intFromBool(signed)..]) |byte| {
-        if (byte < '0' or byte > '9') return error.InvalidDigit;
-        const digit: i64 = byte - '0';
-        value = std.math.mul(i64, value, 10) catch return overflow;
-        const step = if (negative)
-            std.math.sub(i64, value, digit)
-        else
-            std.math.add(i64, value, digit);
-        value = step catch return overflow;
-    }
-    assert(negative or value >= 0);
-    return value;
-}
-
-fn signed_error_text(failure: SignedError) []const u8 {
-    return switch (failure) {
-        error.NegOverflow => "number too small to fit in target type",
-        error.Empty, error.InvalidDigit, error.PosOverflow => |each| rust.int_error_text(each),
-    };
 }
 
 /// tracing's `Level::from_str`: a number 1-5 or a name in any case.
@@ -730,7 +700,7 @@ fn setup_options(values: [setup_spec.args.len]?[]const u8) setup.Options {
     if (values[1]) |text| options.peers = unsigned(text);
     if (values[2]) |text| options.committee_size = unsigned(text);
     // Proof: `check_value` accepted the port and the host.
-    if (values[3]) |text| options.base_port = @intCast(parse_i64(text) catch unreachable);
+    if (values[3]) |text| options.base_port = @intCast(rust.parse_i64(text) catch unreachable);
     if (values[4]) |text| options.host = IpAddr.parse(text) catch unreachable;
     return options;
 }

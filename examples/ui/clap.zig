@@ -1,13 +1,13 @@
 //! The slice of clap 4 the examples' `main`s use: long options taking one value each (some
-//! split on `,`, some parsed as `u64` piece by piece), `-h`/`--help`, and clap's help, usage,
-//! and error text. Help prints to stdout with exit 0, errors to stderr with exit 2.
+//! split on `,`, some checked by a value parser piece by piece), `-h`/`--help`, and clap's
+//! help, usage, and error text. Help prints to stdout with exit 0, errors to stderr with exit 2.
 //!
 //! clap reads arguments left to right and fails at the first error:
 //!
 //! - An unknown argument fails at once: a long one with smart usage once any option was used
 //!   (or one is suggested), a positional or short one with full usage.
 //! - A known option (or `-h`, `--help`, `--`) first settles the option before it: one still
-//!   waiting for its value fails as "a value is required", and a `u64` value is checked.
+//!   waiting for its value fails as "a value is required", and a parsed value is checked.
 //! - A second value for an option fails as "cannot be used multiple times" when it arrives.
 //! - After the last argument the option before settles the same way, then missing required
 //!   options fail.
@@ -17,16 +17,36 @@ const assert = std.debug.assert;
 const Writer = std.Io.Writer;
 const rust = @import("rust.zig");
 
-/// One long option taking a value (`Arg::new(long).long(long)`).
+/// One long option taking a value (`Arg::new(id).long(long)`).
 pub const Arg = struct {
     long: []const u8,
+    /// The `Arg::new` id, shown as the value name, when it differs from `long`.
+    id: ?[]const u8 = null,
     required: bool = false,
     help: []const u8 = "",
     /// `.value_delimiter(',')`.
     delimited: bool = false,
-    /// `.value_parser(value_parser!(u64))`: each piece must parse as a `u64`.
-    integer: bool = false,
+    /// The `value_parser!` each piece must pass.
+    value: Value = .string,
 };
+
+/// clap's `value_parser!` for each type the examples parse.
+pub const Value = enum {
+    string,
+    /// `u64` and `usize`: `str::parse`.
+    u64,
+    /// `i32` and `u32`: clap's ranged parser, an `i64` within the type's range.
+    i32,
+    u32,
+    /// `NonZeroU32` and `NonZeroUsize`: `str::parse`, then non-zero.
+    non_zero_u32,
+    non_zero_u64,
+    /// `bool`: `true` or `false`.
+    bool,
+};
+
+/// The help column past which clap's help moves each option's help below it.
+const term_width = 100;
 
 pub const Command = struct {
     about: []const u8,
@@ -87,14 +107,42 @@ pub fn Parser(comptime command: Command) type {
             try write_full_usage(writer, bin_name);
             try writer.writeAll("Options:\n");
             const width = comptime spec_width();
+            if (comptime next_line_help()) {
+                inline for (command.args, specs) |arg, spec| {
+                    const text = comptime about(arg);
+                    try writer.writeAll("      " ++ spec ++ "\n" ++ next_line ++ text ++ "\n");
+                }
+                try writer.writeAll("  -h, --help\n" ++ next_line ++ "Print help\n");
+                return;
+            }
             inline for (command.args, specs) |arg, spec| {
                 try writer.writeAll("      " ++ spec);
                 try writer.splatByteAll(' ', width - spec.len + 2);
-                try writer.writeAll(arg.help ++ "\n");
+                try writer.writeAll(comptime about(arg) ++ "\n");
             }
             try writer.writeAll("  -h, --help");
             try writer.splatByteAll(' ', width + 4 - "-h, --help".len + 2);
             try writer.writeAll("Print help\n");
+        }
+
+        const next_line = "          "; // clap's TAB and NEXT_LINE_INDENT.
+
+        /// An option's help and its possible values.
+        fn about(comptime arg: Arg) []const u8 {
+            if (arg.value != .bool) return arg.help;
+            if (arg.help.len == 0) return possible_values;
+            return arg.help ++ " " ++ possible_values;
+        }
+
+        /// clap's `will_args_wrap`: some option's help overflows the terminal width past a help
+        /// column that starts beyond 40% of it.
+        fn next_line_help() bool {
+            const taken = spec_width() + 8;
+            for (command.args) |arg| {
+                const overflows = about(arg).len > term_width -| taken;
+                if (taken <= term_width and taken * 5 > term_width * 2 and overflows) return true;
+            }
+            return false;
         }
 
         /// The widest `--long <long>`; the help column starts two spaces past it.
@@ -196,7 +244,7 @@ pub fn Parser(comptime command: Command) type {
             return null;
         }
 
-        /// Ends the option before: without a value it fails, and a `u64` value is checked.
+        /// Ends the option before: without a value it fails, and a parsed value is checked.
         fn settle(state: *State, err: *Writer) Writer.Error!?Outcome {
             if (state.awaiting) |index| {
                 state.awaiting = null;
@@ -207,33 +255,60 @@ pub fn Parser(comptime command: Command) type {
             state.used.add(index);
             const value = state.values[index].?;
             inline for (command.args, 0..) |arg, arg_index| {
-                if (arg.integer and arg_index == index) {
-                    return check_integers(err, arg.delimited, specs[arg_index], value);
+                if (arg.value != .string and arg_index == index) {
+                    // An empty value has no possible value, so clap reports it missing.
+                    if (arg.value == .bool and value.len == 0) return try missing_value(err, index);
+                    return check_values(err, arg, specs[arg_index], value);
                 }
             }
             return null;
         }
 
-        fn check_integers(
+        fn check_values(
             err: *Writer,
-            delimited: bool,
+            comptime arg: Arg,
             spec: []const u8,
             value: []const u8,
         ) Writer.Error!?Outcome {
             var pieces = std.mem.splitScalar(u8, value, ',');
             while (true) {
-                const piece = if (delimited) pieces.next() orelse break else value;
-                _ = rust.parse_unsigned(u64, piece) catch |failure| {
+                const piece = if (arg.delimited) pieces.next() orelse break else value;
+                if (arg.value == .bool) {
+                    if (std.mem.eql(u8, piece, "true") or std.mem.eql(u8, piece, "false")) {
+                        if (!arg.delimited) break;
+                        continue;
+                    }
+                    return try invalid_bool(err, spec, piece);
+                }
+                var reason: [64]u8 = undefined;
+                if (try value_error(arg.value, piece, &reason)) |text| {
                     try err.print("error: invalid value '{s}' for '{s}': {s}\n\n", .{
                         piece,
                         spec,
-                        rust.int_error_text(failure),
+                        text,
                     });
                     return try more_information(err);
-                };
-                if (!delimited) break;
+                }
+                if (!arg.delimited) break;
             }
             return null;
+        }
+
+        fn invalid_bool(err: *Writer, spec: []const u8, value: []const u8) Writer.Error!Outcome {
+            try err.print("error: invalid value '{s}' for '{s}'\n", .{ value, spec });
+            try err.writeAll("  " ++ possible_values ++ "\n\n");
+            // clap's did-you-mean over the possible values; later ones win ties.
+            var best: ?[]const u8 = null;
+            var best_confidence: f64 = 0;
+            for ([_][]const u8{ "true", "false" }) |candidate| {
+                const confidence = rust.jaro(value, candidate);
+                if (confidence > 0.7 and confidence >= best_confidence) {
+                    best = candidate;
+                    best_confidence = confidence;
+                }
+            }
+            if (best) |found| try err.print("  tip: a similar value exists: '{s}'\n\n", .{found});
+            return more_information(err);
         }
 
         fn flag_index(name: []const u8) ?usize {
@@ -315,9 +390,15 @@ pub fn Parser(comptime command: Command) type {
 
         fn missing_value(err: *Writer, index: usize) Writer.Error!Outcome {
             assert(index < count);
-            try err.print("error: a value is required for '{s}' but none was supplied\n\n", .{
+            try err.print("error: a value is required for '{s}' but none was supplied\n", .{
                 specs[index],
             });
+            inline for (command.args, 0..) |arg, arg_index| {
+                if (arg.value == .bool and arg_index == index) {
+                    try err.writeAll("  " ++ possible_values ++ "\n");
+                }
+            }
+            try err.writeAll("\n");
             return more_information(err);
         }
 
@@ -377,10 +458,44 @@ pub fn Parser(comptime command: Command) type {
     };
 }
 
-/// `--long <long>` for each option.
+const possible_values = "[possible values: true, false]";
+
+/// Why `piece` fails `value`'s parser, written into `buffer` when it names the value, or null.
+fn value_error(value: Value, piece: []const u8, buffer: *[64]u8) Writer.Error!?[]const u8 {
+    switch (value) {
+        .string, .bool => unreachable, // Strings pass, and booleans are matched by name.
+        .u64 => _ = rust.parse_unsigned(u64, piece) catch |failure| {
+            return rust.int_error_text(failure);
+        },
+        .non_zero_u32, .non_zero_u64 => {
+            const number: u64 = if (value == .non_zero_u32)
+                rust.parse_unsigned(u32, piece) catch |failure| return rust.int_error_text(failure)
+            else
+                rust.parse_unsigned(u64, piece) catch |failure| return rust.int_error_text(failure);
+            if (number == 0) return "number would be zero for non-zero type";
+        },
+        .i32, .u32 => {
+            const number = rust.parse_i64(piece) catch |failure| {
+                return rust.signed_error_text(failure);
+            };
+            const min: i64 = if (value == .i32) std.math.minInt(i32) else 0;
+            const max: i64 = if (value == .i32) std.math.maxInt(i32) else std.math.maxInt(u32);
+            if (number < min or number > max) {
+                var writer: Writer = .fixed(buffer);
+                try writer.print("{d} is not in {d}..={d}", .{ number, min, max });
+                return writer.buffered();
+            }
+        },
+    }
+    return null;
+}
+
+/// `--long <id>` for each option.
 fn value_names(comptime command: Command) [command.args.len][]const u8 {
     var names: [command.args.len][]const u8 = undefined;
-    for (&names, command.args) |*name, arg| name.* = "--" ++ arg.long ++ " <" ++ arg.long ++ ">";
+    for (&names, command.args) |*name, arg| {
+        name.* = "--" ++ arg.long ++ " <" ++ (arg.id orelse arg.long) ++ ">";
+    }
     return names;
 }
 
