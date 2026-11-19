@@ -29,6 +29,7 @@ test {
     _ = @import("tests/cache_epoch.zig");
     _ = @import("tests/scenarios.zig");
     _ = @import("tests/wrappers.zig");
+    _ = @import("tests/optimistic.zig");
     _ = @import("tests/queries.zig");
     _ = @import("tests/fetch.zig");
 }

@@ -211,9 +211,31 @@ fn RejectsInvalidAncestry(comptime W: type) type {
             const mismatched = try block_with(mismatched_context, genesis, 2, 400);
             try env.store(round_at(3), mismatched);
             try ctx.sleep(.fromMilliseconds(10));
-            try expect_rejected(W, &env, mismatched_context, mismatched.digest());
+            // Both wrappers refuse to vote for a block naming a parent other than its context's.
+            try testing.expect(!try env.verify(mismatched_context, mismatched.digest()));
+            if (W == DeferredWrapper) {
+                try testing.expect(!try env.certify(round_at(3), mismatched.digest()));
+                try unavailable_parent_rejected(ctx, &env, genesis);
+            }
         }
     };
+}
+
+/// Case 3 (Deferred only): a mismatched parent whose context parent is unavailable. The vote
+/// compares the block's parent digest with its context's, so neither the vote nor the
+/// certification waits for the parent.
+fn unavailable_parent_rejected(ctx: Ctx, env: *Env(DeferredWrapper), genesis: D) !void {
+    const round = round_at(5);
+    const missing = harness.Sha256.hash(&.{"unavailable parent"});
+    const context = context_of(round, env.me(), 4, missing);
+    const block = try block_with(context, genesis, 2, 500);
+    try env.store(round, block);
+    const io = ctx.io();
+    const start = std.Io.Clock.awake.now(io);
+    try testing.expect(!try env.verify(context, block.digest()));
+    try testing.expect(!try env.certify(round, block.digest()));
+    const elapsed = start.durationTo(std.Io.Clock.awake.now(io));
+    try testing.expect(elapsed.toNanoseconds() < 5 * std.time.ns_per_s);
 }
 
 test "inline verify rejects invalid ancestry" {
@@ -575,43 +597,4 @@ test "inline prepare paths" {
 
 test "deferred prepare paths" {
     try run(PreparePaths(DeferredWrapper).body);
-}
-
-/// Deferred votes before checking a block's parent link, so a handoff build may walk
-/// ancestry only through the parent its tip's own context names: an unlinked parent
-/// declines without asking the application.
-fn unvalidated_link_body(ctx: Ctx) anyerror!void {
-    var env: Env(DeferredWrapper) = undefined;
-    try env.init(ctx, Mock.init(gpa));
-    defer env.deinit(ctx);
-    const genesis = env.genesis.digest();
-    // Both tips carry an authentic context naming genesis; only the second links to it.
-    const tip_round = round_at(1);
-    const tip_context = context_of(tip_round, harness.default_leader(), 0, genesis);
-    const forged_parent = harness.Sha256.hash(&.{"forged parent link"});
-    const forged = try block_with(tip_context, forged_parent, 1, 100);
-    const linked = try block_with(tip_context, genesis, 1, 101);
-    inline for (.{ .{ "forged", false }, .{ "linked", true } }) |case| {
-        const tip = if (case[1]) linked else forged;
-        try env.store(tip_round, tip);
-        const context = context_of(round_at(2), env.me(), 1, tip.digest());
-        const child = try block_with(context, tip.digest(), 2, 200);
-        const app = Mock.init(gpa).with_handoff(.{ .stage = {} }).with_propose_result(child);
-        const expected: Handoff = if (case[1]) .{ .stage = child.digest() } else .wait;
-        // A handoff build requires a parent linked to its context.
-        const wrapper = try expect_prepared(
-            DeferredWrapper,
-            ctx,
-            &env,
-            case[0],
-            app,
-            context,
-            expected,
-        );
-        wrapper.destroy();
-    }
-}
-
-test "deferred handoff rejects unvalidated parent link" {
-    try run(unvalidated_link_body);
 }

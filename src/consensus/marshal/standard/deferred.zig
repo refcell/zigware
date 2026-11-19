@@ -6,12 +6,13 @@
 //! consensus context; it does not wait for the application. The application's verdict runs in
 //! the background beside the block's store and resolves the round's certification gate once
 //! the block is both valid and durable, so `certify` waits on it before the finalize vote.
+//! Before voting it also checks that the block names the context's parent as its own, so
+//! every parent digest an ancestry walk follows was named by a round of consensus.
 //! Without a gate (never verified here, a restart, or a recovery request), `certify` fetches
 //! the notarized block and verifies it under its embedded context, which the notarizing
 //! quorum's honest members checked. Certifying a block drops the round's other gates, which
 //! stops verification of conflicting blocks. `propose` and `prepare` build through
-//! `application.build`, re-proposing the epoch's last block, and build only on a parent that
-//! links to its own context parent.
+//! `application.build`, re-proposing the epoch's last block.
 //!
 //! Like `standard.Inline`, the wrapper is created on the heap and shared by pointer, its tasks
 //! borrow it, and each Zig `Automaton` call blocks until the commonware receiver would
@@ -164,9 +165,8 @@ fn DeferredOver(comptime T: [5]type) type {
             gpa.destroy(self);
         }
 
-        /// The proposal checks (commonware `checks`): fetch the parent, skip a parent that
-        /// does not link to its own context parent, re-propose the epoch's last block, or
-        /// build on the parent's ancestry. Borrows the wrapper.
+        /// The proposal checks (commonware `checks`): fetch the parent, re-propose the epoch's
+        /// last block, or build on the parent's ancestry. Borrows the wrapper.
         const Checks = struct {
             wrapper: *Self,
             context: Context,
@@ -188,13 +188,6 @@ fn DeferredOver(comptime T: [5]type) type {
                     error.Canceled => return error.Canceled,
                 };
                 timer.observe(io);
-                // Votes precede the link check, so an uncertified parent may be unlinked. A
-                // parent at view zero is the epoch's genesis, which has nothing to link to.
-                const linked = parent.inner().parent().eql(parent.inner().context().parent[1]);
-                if (parent_view.get() != 0 and !linked) {
-                    parent.deinit();
-                    return .skip;
-                }
                 // The current epoch exists while consensus asks to propose in it.
                 const last = self.epocher.last(context.epoch()).?;
                 if (parent.inner().height().get() == last.get()) {
@@ -422,6 +415,15 @@ fn DeferredOver(comptime T: [5]type) type {
             if (!candidate.inner().context().eql(context)) {
                 candidate.deinit();
                 send_lossy(GateOutcome, &owned.gate, .recover);
+                return send_lossy(bool, &tx, false);
+            }
+            // The block must also name the context's parent before the vote: consensus can
+            // verify a child of a block voted for here, or build on one, before it certifies,
+            // and both walk ancestry by parent digests. Certification reuses this rejection,
+            // since verifying under the (matching) embedded context finds the same mismatch.
+            if (!candidate.inner().parent().eql(context.parent[1])) {
+                candidate.deinit();
+                send_lossy(GateOutcome, &owned.gate, .{ .ready = false });
                 return send_lossy(bool, &tx, false);
             }
             const request = parent_request.?;
