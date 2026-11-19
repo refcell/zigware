@@ -542,10 +542,10 @@ ones: d = deployer (thread T-01a1d5b9-c237), u = utils, j = storage-journal
   `sync_config`, `resolvers`, marshal's `floor`; `P.Resolvers`).
 - [ ] actor/core: the rest of processing.rs's tests. First half (1070-3396) here, in
   core/processing_early_test.zig and core/processing_deferred_test.zig (2928 on
-  `FixtureFor` and marshal's `Deferred`): 27 of 47 cases ported, 1 not portable
+  `FixtureFor` and marshal's `Deferred`): 33 of 47 cases ported, 1 not portable
   (processing_runs_on_the_actor_context: `Mailbox.verify` takes no caller runtime context and
-  `App.process` sees only `std.Io`, so no label or attribute can reach the application), 19
-  open (2620 and 18 rstest cases). Split (2026-11-19): crypto (T-01a1d57b-08a0) takes
+  `App.process` sees only `std.Io`, so no label or attribute can reach the application), 13
+  open (2620 and crypto's 12 rstest cases). Split (2026-11-19): crypto (T-01a1d57b-08a0) takes
   finalization_completes_build_processing_finalized_parent ×6,
   recovered_handoff_ancestry_executes_once ×2, retained_verification_finishes_during_
   finalization ×2, and maintenance_preserves_owned_requests_and_retained_work ×2, all 12

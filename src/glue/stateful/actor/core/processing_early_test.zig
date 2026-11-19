@@ -1013,3 +1013,110 @@ test "stateful processing: a handoff and its parent's verification execute it on
 test "stateful processing: a handoff and its parent's verification execute it once, prepare first" {
     try handoff_and_parent(false);
 }
+
+/// Cancels the starter or the joiner of a handoff parent's shared execution (the verification
+/// started it when `verify_first`); the execution keeps running for the other request.
+fn shared_parent_cancellation(verify_first: bool, cancel_starter: bool) !void {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer check(&fixture);
+    const genesis = TestBlock.genesis();
+    const parent = try uncached_child(&fixture, &genesis, 1);
+    var probe: Probe = .{ .target = parent.digest() };
+    defer probe.deinit();
+    var gate = try Held.add(&probe);
+    defer gate.deinit();
+    // A second gate detects any repeated execution.
+    var duplicate = try Held.add(&probe);
+    defer duplicate.deinit();
+    fixture.processing.verifications.verifier.app.probe = &probe;
+
+    const sent = try send_handoff_requests(&fixture, parent, verify_first, &gate);
+    var verify: ?oneshot.Receiver(bool) = sent[0];
+    defer if (verify) |*receiver| receiver.deinit();
+    var prepare: ?oneshot.Receiver(fixture_mod.Mailbox.Built) = sent[1];
+    defer if (prepare) |*receiver| receiver.deinit();
+    if (verify_first == cancel_starter) {
+        verify.?.deinit();
+        verify = null;
+    } else {
+        prepare.?.deinit();
+        prepare = null;
+    }
+    // Once the loop answers a later subscription it has seen the cancellation, and the
+    // execution still runs for the remaining request.
+    try fixture.barrier();
+    try testing.expect(!gate.release.?.is_closed());
+    try gate.open();
+    if (verify) |*receiver| try testing.expect(try await_verdict(receiver));
+    if (prepare) |*receiver| {
+        const built = try receiver.recv();
+        defer built.discard();
+        const block = switch (built.handoff) {
+            .vote => |*vote| vote,
+            else => return error.TestUnexpectedResult, // The handoff must build on the parent.
+        };
+        try testing.expect(block.inner().parent().eql(parent.digest()));
+    }
+    try testing.expectEqual(1, probe.calls);
+    try testing.expect(!duplicate.started.is_ready());
+}
+
+// commonware `shared_parent_execution_survives_cancellation`: cancelling the request that
+// started a handoff parent's execution, or the one that joined it, leaves it running for the
+// other, and the parent executes once.
+test "stateful processing: a shared parent execution survives its starter leaving, verify first" {
+    try shared_parent_cancellation(true, true);
+}
+
+test "stateful processing: a shared parent execution survives its joiner leaving, verify first" {
+    try shared_parent_cancellation(true, false);
+}
+
+test "stateful processing: a shared parent execution survives its starter leaving, prepare first" {
+    try shared_parent_cancellation(false, true);
+}
+
+test "stateful processing: a shared parent execution survives its joiner leaving, prepare first" {
+    try shared_parent_cancellation(false, false);
+}
+
+/// A handoff parent claiming a root its state cannot match fails both the build and the
+/// parent's verification with one execution.
+fn unexecutable_handoff(verify_first: bool) !void {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer check(&fixture);
+    const genesis = TestBlock.genesis();
+    const valid = try uncached_child(&fixture, &genesis, 1);
+    const parent = valid.with_root(harness_mod.u64_digest(404));
+    var probe: Probe = .{ .target = parent.digest() };
+    defer probe.deinit();
+    var gate = try Held.add(&probe);
+    defer gate.deinit();
+    fixture.processing.verifications.verifier.app.probe = &probe;
+
+    var verify, var prepare = try send_handoff_requests(&fixture, parent, verify_first, &gate);
+    defer verify.deinit();
+    defer prepare.deinit();
+    try gate.open();
+    try testing.expect(!try await_verdict(&verify));
+    const built = prepare.recv() catch |err| switch (err) {
+        error.Closed => return error.TestUnexpectedResult, // A declined handoff answers wait.
+        else => return err,
+    };
+    defer built.discard();
+    try testing.expect(built.handoff.is_wait());
+    try testing.expectEqual(1, probe.calls);
+}
+
+// commonware `unexecutable_handoff_parent_executes_once` (verify first). Adapted: the parent
+// claims a mismatched root instead of an unexecutable height.
+test "stateful processing: an unexecutable handoff parent executes once, verify first" {
+    try unexecutable_handoff(true);
+}
+
+// commonware `unexecutable_handoff_parent_executes_once` (prepare first).
+test "stateful processing: an unexecutable handoff parent executes once, prepare first" {
+    try unexecutable_handoff(false);
+}
