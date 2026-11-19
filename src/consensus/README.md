@@ -19,8 +19,9 @@ The zigware port is in progress. Three lane files track it:
   `types`, `reporter`, and `simplex`. Every item in its backlog is done, including the 96
   voter-actor tests of `actors/voter/mod.rs`.
 - [docs/lanes/consensus-marshal.md](../../docs/lanes/consensus-marshal.md) tracks `marshal`
-  and `aggregation`. Its test tally ports 193 of the 197 tests in `marshal/standard/mod.rs`
-  (4 not portable) and all 101 in `marshal/coding/mod.rs`. Nothing is open in aggregation.
+  and `aggregation`. Its test tally ports 196 of the 197 tests in `marshal/standard/mod.rs`
+  (1 not portable: `resolver_delivery_waits_for_identity_job`, a missing feature; the
+  `should_panic` tests are death tests) and all 101 in `marshal/coding/mod.rs`. Nothing is open in aggregation.
 - [docs/lanes/broadcast-collector.md](../../docs/lanes/broadcast-collector.md) tracks
   `marshal/coding`, the erasure-coded variant.
 
