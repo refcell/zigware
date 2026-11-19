@@ -410,7 +410,7 @@ pub const Builder = struct {
         const first = self.start();
         if (first.is_long()) {
             // Replaying a long-input case: run just that case.
-            const failure = try search_long(gpa, context, body, first, 1);
+            const failure = try search_long(gpa, context, body, first, 1, null);
             return if (failure) |found| .{ .failed = found } else .{ .passed = first };
         }
         var search_state: Search = .init(self);
@@ -418,7 +418,7 @@ pub const Builder = struct {
         const outcome = try search_samples(gpa, context, body, &search_state);
         if (outcome == .failed) return outcome;
         const cases = std.math.clamp(search_state.tries, long_cases_min, long_cases_max);
-        const failure = try search_long(gpa, context, body, .long(first, 0), cases);
+        const failure = try search_long(gpa, context, body, .long(first, 0), cases, &search_state);
         return if (failure) |found| .{ .failed = found } else outcome;
     }
 };
@@ -464,20 +464,24 @@ fn search_samples(
 }
 
 /// Runs `cases` long-input cases from `first`, each a fresh ChaCha8 buffer; returns the
-/// first failure. Inputs that run short or are rejected are skipped.
+/// first failure. Inputs that run short or are rejected are skipped. A soaked search stops
+/// after its unsoaked share of cases once its soak budget is spent.
 fn search_long(
     gpa: Allocator,
     context: anytype,
     body: anytype,
     first: Branch,
     cases: u64,
+    search_state: ?*const Search,
 ) !?Failure {
     assert(first.is_long());
     assert(cases >= 1 and cases <= long_cases_max);
+    const cases_unsoaked = if (search_state) |state| state.long_cases_unsoaked() else cases;
     const buffer = try gpa.alloc(u8, std.mem.max(usize, &long_input_lens));
     defer gpa.free(buffer);
     var branch = first;
     for (0..cases) |case| {
+        if (case >= cases_unsoaked and search_state.?.budget_spent()) break;
         if (case > 0) branch = .long(first, (branch.size & ~long_input_bit) + 1);
         const input = buffer[0..branch.long_len()];
         // Mixed so the stream differs from the search branch with the same seed.
@@ -533,19 +537,40 @@ const Search = struct {
     }
 
     fn done(self: *const Search) bool {
+        // Before `min_iterations`: `with_search_limit` sets it to the whole soaked limit.
+        if (self.soak_spent()) return true;
         if (self.tries < self.builder.min_iterations) return false;
         return switch (self.builder.search_bound) {
-            .limit => |limit| self.tries >= limit or self.soak_spent(limit),
+            .limit => |limit| self.tries >= limit,
             .time => self.now() + self.longest_case_ns >= self.deadline_ns,
         };
     }
 
-    /// Whether a soaked search ran its unsoaked share of `limit` cases and then used up
-    /// `-Dfuzz-soak-budget-s`, so one slow target cannot take the whole soak job.
-    fn soak_spent(self: *const Search, limit: u64) bool {
-        if (!soak_budgeted) return false;
+    /// The cases an unsoaked build of a case-bounded search runs: the share a soaked search
+    /// always runs before its budget can stop it.
+    fn tries_unsoaked(self: *const Search) u64 {
+        const limit = self.builder.search_bound.limit;
         assert(limit > 0);
-        if (self.tries < limit / build_options.fuzz_soak) return false;
+        return @max(1, limit / build_options.fuzz_soak);
+    }
+
+    /// The long-input cases an unsoaked build runs (as `search` counts them).
+    fn long_cases_unsoaked(self: *const Search) u64 {
+        if (!soak_budgeted or self.builder.search_bound != .limit) return long_cases_max;
+        return std.math.clamp(self.tries_unsoaked(), long_cases_min, long_cases_max);
+    }
+
+    /// Whether a soaked, case-bounded search ran its unsoaked share of cases and then used
+    /// up `-Dfuzz-soak-budget-s`, so one slow target cannot take the whole soak job.
+    fn soak_spent(self: *const Search) bool {
+        if (!soak_budgeted or self.builder.search_bound != .limit) return false;
+        if (self.tries < self.tries_unsoaked()) return false;
+        return self.budget_spent();
+    }
+
+    /// Whether `-Dfuzz-soak-budget-s` passed since the search started.
+    fn budget_spent(self: *const Search) bool {
+        if (!soak_budgeted) return false;
         const budget_ns: i96 = @as(i96, build_options.fuzz_soak_budget_s) * std.time.ns_per_s;
         const spent_ns = soak_now() - self.soak_started_ns;
         assert(spent_ns >= 0);

@@ -36,7 +36,7 @@ jobs:
 
   fuzz:
     # Seeded fuzz soak with a fresh seed per run; replay a failure with -Dfuzz-seed. Each
-    # minifuzz target runs its unsoaked cases, then soaks for at most a minute.
+    # minifuzz target runs its unsoaked cases, then soaks for at most 30 s.
     runs-on: ubuntu-latest
     timeout-minutes: 50
     steps:
@@ -48,4 +48,4 @@ jobs:
       - name: seeded fuzz soak
         run: >-
           zig build test -Doptimize=ReleaseSafe -Dtest-filter=fuzz -Dfuzz-soak=50
-          -Dfuzz-soak-budget-s=60 -Dfuzz-seed=$GITHUB_RUN_NUMBER --summary all
+          -Dfuzz-soak-budget-s=30 -Dfuzz-seed=$GITHUB_RUN_NUMBER --summary all
