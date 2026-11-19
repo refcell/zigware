@@ -355,4 +355,19 @@ test "stored coded block into coded block" {
     try testing.expectEqual(@as(u16, 0), shard.index);
 }
 
-// `test_shard_encode_iobufs_matches_encode` has no counterpart: codec writes one buffer.
+// commonware `test_shard_encode_iobufs_matches_encode`: the vectored encoding writes the same
+// bytes as `codec.encode`, with the coded shard bytes pushed as their own chunk.
+test "coding types: shard encode_iobufs matches encode" {
+    const iobuf = @import("runtime").iobuf;
+    var shard = try first_shard("iobufs encoding test", one_two, one_two);
+    defer shard.deinit(gpa);
+    const encoded = try encode_shard(shard);
+    defer gpa.free(encoded);
+    var bufs = try iobuf.encode_iobufs(RShard, gpa, shard);
+    defer bufs.deinit(gpa);
+    try testing.expect(bufs.chunk_count() >= 3);
+    const out = try gpa.alloc(u8, bufs.len());
+    defer gpa.free(out);
+    bufs.copy_to(out);
+    try testing.expectEqualSlices(u8, encoded, out);
+}

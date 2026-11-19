@@ -56,5 +56,5 @@ All of these are recorded in the
   first fetch's span wins.
 - The p2p fetcher keeps peers, blocked peers, and per-key targets in sorted arrays instead of
   hash maps. It is deterministic under the deterministic runtime.
-- `Delivery.subscribers` is a slice instead of a `NonEmptyVec`. Wire `encode_iobufs` has no
-  counterpart, since there is no `IoBufs` yet.
+- `Delivery.subscribers` is a slice instead of a `NonEmptyVec`. Wire `Message` and `Payload`
+  declare `write_bufs`, so `runtime.iobuf.encode_iobufs` pushes a response's value unchanged.

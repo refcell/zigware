@@ -41,4 +41,4 @@ All of these are recorded in the [coding lane decisions](../../docs/lanes/coding
   encoder and decoder per thread.
 - The engine is chosen at compile time (`DefaultEngine = Simd`, which is `Scalar` without AVX2
   or NEON) instead of by runtime CPU detection. Every engine produces identical bytes.
-- `encode_iobufs` is not ported, because the codec has no vectored writes.
+- `Chunk.write_bufs` pushes the shard bytes as their own chunk for `runtime.iobuf.encode_iobufs`.

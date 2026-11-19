@@ -562,3 +562,21 @@ test "conformance CodecConformance<Chunk<Sha256Digest>>" {
         @embedFile("../conformance.toml"),
     );
 }
+
+// commonware `test_chunk_encode_iobufs_matches_encode`: the vectored encoding writes the same
+// bytes as `codec.encode`, with the shard pushed as its own chunk rather than copied.
+test "chunk encode_iobufs matches encode" {
+    const iobuf = @import("runtime").iobuf;
+    var encoding = try t.encode(5, 3, "iobufs encoding test", seq);
+    defer encoding.deinit(gpa);
+    const chunk = encoding.shards[0];
+    const encoded = try codec.encode(Chunk, gpa, chunk);
+    defer gpa.free(encoded);
+    var bufs = try iobuf.encode_iobufs(Chunk, gpa, chunk);
+    defer bufs.deinit(gpa);
+    try testing.expect(bufs.chunk_count() >= 3);
+    const out = try gpa.alloc(u8, bufs.len());
+    defer gpa.free(out);
+    bufs.copy_to(out);
+    try testing.expectEqualSlices(u8, encoded, out);
+}

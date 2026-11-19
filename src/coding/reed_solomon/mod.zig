@@ -29,6 +29,7 @@ const codec = @import("codec");
 const cryptography = @import("cryptography");
 const storage = @import("storage");
 const utils = @import("utils");
+const iobuf = @import("runtime").iobuf;
 const Config = @import("../root.zig").Config;
 pub const striped = @import("striped.zig");
 
@@ -88,6 +89,21 @@ pub fn Chunk(comptime D: type) type {
         pub fn encode_size(self: Self) usize {
             return codec.encode_size(codec.Bytes, .init(self.shard)) + 2 +
                 self.proof.encode_size();
+        }
+
+        /// The bytes `write_bufs` writes inline: everything but the shard bytes.
+        pub fn encode_inline_size(self: Self) usize {
+            return iobuf.IoBuf.from_static(self.shard).encode_inline_size() + 2 +
+                self.proof.encode_size();
+        }
+
+        /// Writes the chunk with the shard bytes pushed as a borrowed chunk (commonware
+        /// `Write::write_bufs`), so `runtime.iobuf.encode_iobufs` never copies them.
+        pub fn write_bufs(self: Self, gpa: Allocator, builder: *iobuf.Builder) !void {
+            assert(self.shard.len <= u32_max);
+            try iobuf.IoBuf.from_static(self.shard).write_bufs(gpa, builder);
+            builder.put(u16, self.index);
+            builder.put(Proof, self.proof);
         }
 
         pub fn read(gpa: Allocator, reader: *codec.Reader, cfg: Cfg) codec.Error!Self {

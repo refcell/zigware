@@ -8,6 +8,7 @@ const std = @import("std");
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const codec = @import("codec");
+const iobuf = @import("runtime").iobuf;
 
 const Unstructured = codec.arbitrary.Unstructured;
 const ArbitraryError = codec.arbitrary.Error;
@@ -54,6 +55,20 @@ pub fn Message(comptime Key: type) type {
 
         pub fn encode_size(self: Self) usize {
             return 8 + self.payload.encode_size();
+        }
+
+        /// The bytes `write_bufs` writes inline (commonware `encode_inline_size`).
+        pub fn encode_inline_size(self: Self) usize {
+            return 8 + self.payload.encode_inline_size();
+        }
+
+        /// Writes the id inline and the payload through `Payload.write_bufs` (commonware
+        /// `Write::write_bufs`), for `runtime.iobuf.encode_iobufs`.
+        pub fn write_bufs(self: Self, gpa: Allocator, builder: *iobuf.Builder) !void {
+            var id: [8]u8 = undefined;
+            std.mem.writeInt(u64, &id, self.id, .big);
+            builder.put_slice(&id);
+            try self.payload.write_bufs(gpa, builder);
         }
 
         pub fn read(gpa: Allocator, reader: *codec.Reader, _: void) codec.Error!Self {
@@ -109,6 +124,30 @@ pub fn Payload(comptime Key: type) type {
                 .response => |data| data.encode_size(),
                 .@"error" => 0,
             };
+        }
+
+        /// The bytes `write_bufs` writes inline: all but a response's value.
+        pub fn encode_inline_size(self: Self) usize {
+            return switch (self) {
+                .response => |data| 1 + iobuf.IoBuf.from_static(data.data).encode_inline_size(),
+                else => self.encode_size(),
+            };
+        }
+
+        /// Writes the payload with a response's value pushed as a borrowed chunk (commonware
+        /// `Write::write_bufs`), so `runtime.iobuf.encode_iobufs` never copies it.
+        pub fn write_bufs(self: Self, gpa: Allocator, builder: *iobuf.Builder) !void {
+            switch (self) {
+                .request => |key| {
+                    builder.put_slice(&.{tag_request});
+                    builder.put(Key, key);
+                },
+                .response => |data| {
+                    builder.put_slice(&.{tag_response});
+                    try iobuf.IoBuf.from_static(data.data).write_bufs(gpa, builder);
+                },
+                .@"error" => builder.put_slice(&.{tag_error}),
+            }
         }
 
         pub fn read(gpa: Allocator, reader: *codec.Reader, _: void) codec.Error!Self {
@@ -197,6 +236,31 @@ fn message_size(payload: Payload(u8)) !usize {
     const encoded = try codec.encode(Message(u8), gpa, message);
     defer gpa.free(encoded);
     return encoded.len;
+}
+
+/// Checks that `encode_iobufs(value)` writes `codec.encode`'s bytes, pushing the response.
+fn expect_iobufs_match(comptime T: type, value: T) !void {
+    const gpa = testing.allocator;
+    const encoded = try codec.encode(T, gpa, value);
+    defer gpa.free(encoded);
+    var bufs = try iobuf.encode_iobufs(T, gpa, value);
+    defer bufs.deinit(gpa);
+    try testing.expect(bufs.chunk_count() >= 2);
+    const out = try gpa.alloc(u8, bufs.len());
+    defer gpa.free(out);
+    bufs.copy_to(out);
+    try testing.expectEqualSlices(u8, encoded, out);
+}
+
+// commonware `test_message_encode_iobufs_matches_encode`.
+test "message encode_iobufs matches encode" {
+    const M = Message(MockKey);
+    try expect_iobufs_match(M, .{ .id = 42, .payload = .{ .response = .init("hello world") } });
+}
+
+// commonware `test_payload_response_encode_iobufs_matches_encode`.
+test "payload response encode_iobufs matches encode" {
+    try expect_iobufs_match(Payload(MockKey), .{ .response = .init("response data") });
 }
 
 test "message overhead" {

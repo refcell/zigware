@@ -18,6 +18,7 @@ const codec = @import("codec");
 const coding = @import("coding");
 const parallel = @import("parallel");
 const utils = @import("utils");
+const iobuf = @import("runtime").iobuf;
 
 const commitment_module = @import("../../commitment.zig");
 const Height = @import("../../types.zig").Height;
@@ -84,6 +85,28 @@ pub fn Shard(comptime B: type, comptime C: type, comptime H: type) type {
 
         pub fn encode_size(self: Self) usize {
             return Self.Commitment.fixed_size + 2 + self.inner.encode_size();
+        }
+
+        /// The bytes `write_bufs` writes inline (commonware `encode_inline_size`).
+        pub fn encode_inline_size(self: Self) usize {
+            const inner = if (comptime @hasDecl(C.Shard, "write_bufs"))
+                self.inner.encode_inline_size()
+            else
+                self.inner.encode_size();
+            return Self.Commitment.fixed_size + 2 + inner;
+        }
+
+        /// Writes the shard with the coded bytes pushed as their own chunk (commonware
+        /// `Write::write_bufs`), for `runtime.iobuf.encode_iobufs`.
+        pub fn write_bufs(self: Self, gpa: Allocator, builder: *iobuf.Builder) !void {
+            assert(Self.Commitment.fixed_size > 0);
+            builder.put(Self.Commitment, self.commitment_value);
+            builder.put(u16, self.index);
+            if (comptime @hasDecl(C.Shard, "write_bufs")) {
+                try self.inner.write_bufs(gpa, builder);
+            } else {
+                builder.put(C.Shard, self.inner);
+            }
         }
 
         /// A coded payload is the block followed by its coding config. The claimed config is
