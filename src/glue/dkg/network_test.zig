@@ -1,4 +1,5 @@
-//! Tests of commonware's `glue::dkg::network` (`mod tests`).
+//! Tests of commonware's `glue::dkg::network` (`mod tests`), including the lookup test that
+//! a secondary peer activated through `AddressableManager` dials the primary.
 
 const std = @import("std");
 const testing = std.testing;
@@ -233,4 +234,154 @@ test "network: missing address prevents registration" {
     try testing.expect(missing.eql(fixture.keys[1]));
     try testing.expectEqual(@as(usize, 0), inner.addressable.items.len);
     _ = Epoch;
+}
+
+const runtime = @import("runtime");
+const stream = @import("stream");
+const lookup = p2p.authenticated.lookup;
+const Upgrader = stream.SakeCups(ed25519.PrivateKey, cryptography.ChaCha20Poly1305);
+const Transport = runtime.network.deterministic.Network;
+const LookupNet = lookup.Network(Upgrader, Transport);
+const LookupManager = network.AddressableManager(LookupNet.Oracle);
+const Io = std.Io;
+const Scope = runtime.telemetry.metrics.Scope;
+
+const LookupNode = struct {
+    net: *LookupNet,
+    registered: LookupNet.Registered,
+    task: Io.Future(anyerror!void),
+
+    fn run(net: *LookupNet) anyerror!void {
+        return net.run();
+    }
+
+    /// Creates the network listening on `port` and activates epoch 3's peers from `directory`
+    /// through the DKG addressable manager.
+    fn start(
+        io: Io,
+        transport: *Transport,
+        scope: Scope,
+        signer: ed25519.PrivateKey,
+        port: u16,
+        peers: p2p.TrackedPeers(PublicKey),
+        directory: *const Addresses,
+    ) !LookupNode {
+        const gpa = testing.allocator;
+        const config = LookupNet.Config.local(.{
+            .upgrader = .init(.{
+                .signer = signer,
+                .synchrony_bound_ms = 5_000,
+                .max_handshake_age_ms = 10_000,
+                .version = .v1,
+            }, .v1),
+            .namespace = "_COMMONWARE_GLUE_DKG_LOOKUP_TEST",
+            .listen = lookup.network.to_address(address(port).symmetric),
+            .max_peers_per_set = 2,
+            .max_message_size = 1024,
+            .mailbox_size = 1_000,
+        });
+        const net = try LookupNet.create(gpa, io, transport, scope, config);
+        errdefer net.destroy();
+        var node: LookupNode = .{
+            .net = net,
+            .registered = try net.register(0, .per_second(100)),
+            .task = undefined,
+        };
+        var manager = LookupManager.init(gpa, net.oracle());
+        try manager.track(.new(3), peers, directory);
+        node.task = try io.concurrent(run, .{net});
+        return node;
+    }
+
+    fn stop(node: *LookupNode, io: Io) void {
+        node.task.cancel(io) catch {};
+        node.registered.sender.deinit();
+        while (node.registered.receiver.try_recv()) |message| {
+            var owned = message;
+            owned.deinit();
+        } else |_| {}
+        node.registered.receiver.deinit();
+        node.net.destroy();
+        node.* = undefined;
+    }
+
+    /// Sends `payload` to `to` every 100 ms until `receiver` gets a message, which must be
+    /// `payload` from `from` (commonware's spawned send loop, aborted on receipt).
+    fn exchange(
+        io: Io,
+        sender: *LookupNode,
+        receiver: *LookupNode,
+        to: PublicKey,
+        from: PublicKey,
+        payload: []const u8,
+    ) !void {
+        var attempts: u32 = 0;
+        while (true) : (attempts += 1) {
+            try testing.expect(attempts < 100);
+            const sent = try sender.registered.sender.send(.{ .one = to }, &.{payload}, true);
+            testing.allocator.free(sent);
+            if (receiver.registered.receiver.try_recv()) |message| {
+                var owned = message;
+                defer owned.deinit();
+                try testing.expect(owned.peer.eql(from));
+                try testing.expectEqualSlices(u8, payload, owned.payload);
+                return;
+            } else |err| try testing.expectEqual(error.Empty, err);
+            try io.sleep(.fromMilliseconds(100), .real);
+        }
+    }
+};
+
+fn lookup_secondary_dials_primary(io: Io, transport: *Transport, scope: Scope) !void {
+    const gpa = testing.allocator;
+    const dealer_signer = ed25519.PrivateKey.from_seed(10);
+    const participant_signer = ed25519.PrivateKey.from_seed(11);
+    const dealer_key = dealer_signer.public_key();
+    const participant_key = participant_signer.public_key();
+    // The participant's ingress and egress are the same socket, but asymmetric.
+    const participant_socket = address(6101).symmetric;
+    var directory = try Addresses.init(gpa, &.{
+        .{ dealer_key, address(6100) },
+        .{ participant_key, .{ .asymmetric = .{
+            .ingress = .{ .socket = participant_socket },
+            .egress = participant_socket,
+        } } },
+    });
+    defer directory.deinit(gpa);
+    var primary = try Set(PublicKey).from_dedup(gpa, &.{dealer_key});
+    defer primary.deinit(gpa);
+    var secondary = try Set(PublicKey).from_dedup(gpa, &.{participant_key});
+    defer secondary.deinit(gpa);
+    const peers: p2p.TrackedPeers(PublicKey) = .{
+        .primary = .{ .items = primary.items },
+        .secondary = .{ .items = secondary.items },
+    };
+    const dealer_scope = scope.child("dealer");
+    var dealer =
+        try LookupNode.start(io, transport, dealer_scope, dealer_signer, 6100, peers, &directory);
+    defer dealer.stop(io);
+    const participant_scope = scope.child("participant");
+    var participant = try LookupNode.start(
+        io,
+        transport,
+        participant_scope,
+        participant_signer,
+        6101,
+        peers,
+        &directory,
+    );
+    defer participant.stop(io);
+    // The secondary dials the primary; the request and the response cross the connection.
+    try LookupNode.exchange(io, &participant, &dealer, dealer_key, participant_key, "request");
+    try LookupNode.exchange(io, &dealer, &participant, participant_key, dealer_key, "response");
+}
+
+test "network: lookup secondary dials primary and receives response" {
+    var runner = try runtime.deterministic.Runner.init(testing.allocator, .{
+        .seed = 0,
+        .timeout_ns = 10 * std.time.ns_per_s,
+    });
+    defer runner.deinit();
+    const args = .{ runner.io(), runner.network(), runner.metrics() };
+    try (try runner.start(lookup_secondary_dials_primary, args));
 }

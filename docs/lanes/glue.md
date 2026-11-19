@@ -636,7 +636,9 @@ shared `tests/mocks.zig`, which takes additive edits only (agreed with the glue 
 - [ ] tests/dkg/harness.rs and mod.rs's 14 ceremony tests on the bootstrap engine (the lossy,
   filtered, crash, and laggard plans behind -Dslow-tests).
 - [ ] tests/reshare harness, properties, and mod.rs's ceremony tests (needs the orchestrator).
-- [ ] lookup's peer-activation tests.
+- [x] lookup's peer-activation test: network.rs's
+  `lookup_secondary_dials_primary_and_receives_response` in `network_test.zig` (consensus-marshal
+  lane, 2026-11-19); it catches the addressable manager dropping the secondary role.
 
 ### Log
 - 2026-11-19: the network mocks and `DkgOutcome`; the tests catch a planted skipped
