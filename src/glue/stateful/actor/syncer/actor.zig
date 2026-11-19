@@ -7,7 +7,8 @@
 //!
 //! `P` declares:
 //! - `App`, with `App.Block` (`Digest`, `digest()`, `height()`, `context()` whose `round` is
-//!   its consensus round) and `App.sync_targets(*const Block) Databases.SyncTargets`.
+//!   its consensus round) and `App.sync_targets(*const Block) Databases.SyncTargets`. Marshal's
+//!   blocks may wrap it (`Digested(App.Block)`, see `MarshalBlock` and `inner_of`).
 //! - `Databases`: the database set (`db.Shared(T)`, `db.Tuple`, or a set declaring `sync`, see
 //!   `state_sync.sync_set`), and `Resolvers`, the sources its sync fetches from.
 //! - `Marshal`: marshal's core mailbox (or a stand-in) with `get_anchor() !?{processed,
@@ -44,9 +45,27 @@ pub const Error = error{
     BlockUnavailable,
 };
 
-/// The anchor of `block` (commonware `Anchor::from_block`).
-pub fn anchor_of(comptime Block: type, block: *const Block) Anchor(Block.Digest) {
-    return .{ .height = block.height(), .round = block.context().round, .digest = block.digest() };
+/// The block marshal `M` returns (`get_block`'s payload): `Digested(App.Block)` for marshal's
+/// standard variant, or a bare block.
+pub fn MarshalBlock(comptime M: type) type {
+    const Returned = @typeInfo(@TypeOf(M.get_block)).@"fn".return_type.?;
+    return @typeInfo(@typeInfo(Returned).error_union.payload).optional.child;
+}
+
+/// The application block of marshal block `block` (a `Digested` wrapper or the block itself).
+pub fn inner_of(block: anytype) InnerOf(@TypeOf(block.*)) {
+    const Block = @TypeOf(block.*);
+    return if (comptime @hasDecl(Block, "Inner")) block.inner() else block;
+}
+
+fn InnerOf(comptime Block: type) type {
+    return if (@hasDecl(Block, "Inner")) *const Block.Inner else *const Block;
+}
+
+/// The anchor of marshal block `block` (commonware `Anchor::from_block`).
+pub fn anchor_of(block: anytype) Anchor(@TypeOf(block.*).Digest) {
+    const inner = inner_of(block);
+    return .{ .height = inner.height(), .round = inner.context().round, .digest = block.digest() };
 }
 
 /// Releases a block the caller owns, if it holds memory.
@@ -68,7 +87,7 @@ pub fn resolve(
     marshal: P.Marshal,
     floor: Floor,
     finalization: *const P.Finalization,
-) !P.App.Block {
+) !MarshalBlock(P.Marshal) {
     const payload = finalization.proposal.payload;
     // Marshal skips a startup floor whose round its durable round floor covers. That floor's
     // block may be pruned, so a local wait for it could hang: resolve from marshal's position.
@@ -101,7 +120,7 @@ pub fn resolve(
         release(gpa, selected);
         return err;
     }) orelse return selected;
-    if (anchored.processed.height().get() > selected.height().get()) {
+    if (anchored.processed.height().get() > inner_of(&selected).height().get()) {
         release(gpa, selected);
         return anchored.block;
     }
@@ -132,9 +151,9 @@ pub fn open(
         break :block found orelse return error.BlockUnavailable;
     };
     defer release(gpa, block);
-    const targets = P.App.sync_targets(&block);
+    const targets = P.App.sync_targets(inner_of(&block));
     const databases = try P.Databases.open(env, db_config, targets);
-    return .{ .databases = databases, .anchor = anchor_of(P.App.Block, &block) };
+    return .{ .databases = databases, .anchor = anchor_of(&block) };
 }
 
 /// Configuration for `Syncer` (commonware `Config`).
@@ -227,8 +246,8 @@ pub fn Syncer(comptime P: type, comptime Env: type) type {
             const config = &self.config;
             const finalization = config.finalization;
             const block = try resolve(P, self.gpa, config.marshal, config.floor, finalization);
-            const start_anchor = anchor_of(P.App.Block, &block);
-            const targets = P.App.sync_targets(&block);
+            const start_anchor = anchor_of(&block);
+            const targets = P.App.sync_targets(inner_of(&block));
             release(self.gpa, block);
             var tips = try ring.channel(Update, self.gpa, self.io, 1);
             var tips_tx: ?ring.Sender(Update) = tips.sender;
