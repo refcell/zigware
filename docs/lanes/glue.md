@@ -614,7 +614,12 @@ shared `tests/mocks.zig`, which takes additive edits only (agreed with the glue 
   `simulate.Property` needs a constant `name`.
 - [x] bootstrap `Block` and `max_payload_size`, with mod.rs's `max_encode_size_covers_widest_block`
   and `covers_every_component` (128 participants behind -Dslow-tests in Debug).
-- [ ] bootstrap `Engine` and `rejects_unsupported_sharing_mode`.
+- [x] bootstrap `Engine` (`bootstrap.Engine(T).start`) with `rejects_unsupported_sharing_mode`
+  (an `error.UnsupportedSharingMode`, as zigware ports `should_panic`) and a singleton ceremony
+  end to end on the simulated network. Its marshal stack is `bootstrap.Node(T)` (archives,
+  buffered broadcast, backfill resolver, marshal actor), shared with the orchestrator's cluster
+  tests. Broadcast and backfill read peer sets from `T.PeerProvider`, the p2p manager the DKG
+  manager wraps (commonware passes the DKG manager itself).
 - [ ] tests/dkg/harness.rs and mod.rs's 14 ceremony tests on the bootstrap engine (the lossy,
   filtered, crash, and laggard plans behind -Dslow-tests).
 - [ ] tests/reshare harness, properties, and mod.rs's ceremony tests (needs the orchestrator).
@@ -625,3 +630,6 @@ shared `tests/mocks.zig`, which takes additive edits only (agreed with the glue 
   output-agreement check and an inverted epoch filter.
 - 2026-11-19: bootstrap's block and payload bound; the tests catch a missing payload-flag
   byte and a dropped marshal term.
+
+- 2026-11-19: the bootstrap engine and node; a singleton ceremony completes end to end, and
+  the test catches a block builder that drops the reshare payload.

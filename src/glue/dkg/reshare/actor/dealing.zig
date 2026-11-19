@@ -369,7 +369,8 @@ pub fn Window(comptime T: type) type {
             assert(reason.len > 0);
             assert(self.config.max_participants > 0);
             log.info("epoch {d}: blocking peer: {s}", .{ epoch.get(), reason });
-            self.config.blocker.block(peer);
+            // A p2p blocker's `Feedback` only says whether the request was queued.
+            _ = self.config.blocker.block(peer);
         }
 
         /// Sends `message` to `recipient` with priority; false when nobody took it.

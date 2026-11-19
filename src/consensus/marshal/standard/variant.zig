@@ -73,6 +73,8 @@ pub fn Standard(comptime B: type) type {
         pub fn into_stored(gpa: Allocator, block: *const Block) Allocator.Error!StoredBlock {
             const inner = block.inner();
             if (comptime !codec.owns_memory(B)) return inner.*;
+            // A block with a codec configuration cannot decode under the unit one.
+            if (comptime @hasDecl(B, "clone")) return inner.clone(gpa);
             const encoded = try codec.encode(B, gpa, inner.*);
             defer gpa.free(encoded);
             // Proof: a block decodes from its own canonical encoding.

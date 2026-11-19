@@ -8,6 +8,12 @@
 
 const block = @import("block.zig");
 const limits = @import("limits.zig");
+const engine = @import("engine.zig");
+
+pub const node = @import("node.zig");
+pub const Node = node.Node;
+pub const Engine = engine.Engine;
+pub const Config = engine.Config;
 
 pub const Block = block.Block;
 pub const ConsensusScheme = limits.ConsensusScheme;
@@ -16,4 +22,5 @@ pub const max_payload_size = limits.max_payload_size;
 
 test {
     _ = @import("block_test.zig");
+    _ = @import("engine_test.zig");
 }
