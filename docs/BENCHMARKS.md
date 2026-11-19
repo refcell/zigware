@@ -11,7 +11,7 @@ better. A ratio below 1 means zigware is faster.
 | `sha256::hash_message` | `msg_len=4096` | 1.87 µs | 2.08 µs | 1.11× |
 | `sha256::hash_message` | `msg_len=1048576` | 480 µs | 538 µs | 1.12× |
 | `ed25519::signature_verification` | `ns_len=9 msg_len=32` | 26.7 µs | 43.3 µs | 1.62× (fixed, see below) |
-| `ed25519::batch_verify_same_message` | `pks=100 conc=1` | 1.43 ms | 1.07 ms | 0.75× (re-run, see below) |
+| `ed25519::batch_verify_same_message` | `pks=100 conc=1` | 1.52 ms | 789 µs | 0.52× (re-run, see below) |
 | `bls12381::signature_verification` | `ns_len=9 msg_len=32` | 1.51 ms | 1.20 ms | 0.79× (re-run, see below) |
 | `bls12381::aggregate_verify_same_message` | `pks=1000` | 3.19 ms | 3.13 ms | 0.98× (re-run, see below) |
 | `journal::fixed_append` | `items=10000 size=32` | 2.00 ms | 456 µs | 0.23× |
@@ -81,7 +81,7 @@ directory under `BENCH_DIR` (default `$TMPDIR` or `/tmp`). commonware gets it th
 
 ## Fixed perf bugs
 
-- **`ed25519::batch_verify_same_message`, 2.13× to 1.35× (then 0.75× on AVX2, below).** `verify_shard` summed every
+- **`ed25519::batch_verify_same_message`, 2.13× to 1.35× (then 0.52× on IFMA, below).** `verify_shard` summed every
   shard with `core.MultiScalar`, whose 8-point flushes each ran their own 256-doubling chain.
   Shards of 44 or more signatures now go through the bucket MSM in
   `src/cryptography/ed25519/msm.zig` (moved from curve25519's `batch.zig`, which shares it),
@@ -144,7 +144,11 @@ directory under `BENCH_DIR` (default `$TMPDIR` or `/tmp`). commonware gets it th
   has AVX2 and on std's scalar arithmetic otherwise. Head-to-head for
   `batch_verify_same_message` `pks=100 conc=1`, four alternating runs at a load average of 53
   to 57, best medians: commonware 1.43 ms, zigware on AVX2 1.07 ms (0.75×), zigware on the
-  scalar backend 1.95 ms. That is the table's row.
+  scalar backend 1.95 ms.
+- **ed25519 batch MSM on IFMA, 2026-11-19.** The bucket MSM picks `verify_ifma.zig`'s packed
+  point first where the target has AVX-512 IFMA (this machine), then AVX2, then std's scalar
+  arithmetic. Four alternating runs at a load average of 66 to 74, best medians: commonware
+  1.52 ms, zigware on IFMA 789 µs (0.52×), on AVX2 1.16 ms (0.76×). That is the table's row.
 - **bls12381, 2026-11-19 (simplex lane).** 67308018, 6e50645b, and 73cb985e sped up the
   pairing, hash-to-curve, and subgroup checks under single verify. The two bls12381 rows
   above are a re-run of this pair only at zigware 3181c058 (`etc/scripts/bench-compare.sh`'s

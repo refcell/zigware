@@ -141,7 +141,8 @@ handshake), then certificate, secp256r1, the rest, zk last. banderwagon moved to
   field and point arithmetic.
 - The bucket MSM's backends share `verify_ifma.zig`'s interface (`PackedPoint`, `PackedCached`):
   `verify_avx2.zig` (curve25519-dalek's AVX2 backend, ported lane for lane) and
-  `msm.scalar_backend` (std's `Point`). `msm.Backend` is the first one the target supports.
+  `msm.scalar_backend` (std's `Point`), after `verify_ifma.zig` (runtime's AVX-512 IFMA port)
+  where the target has IFMA. `msm.Backend` is the first one the target supports.
   The packed backends are portable vector code, so `msm_test.zig` checks every backend
   against std and `MultiScalar` on every target.
 - `verify_batch(rng, items, projector, strategy)`: `projector.project(index, *const Item)`

@@ -8,6 +8,7 @@ const assert = std.debug.assert;
 
 const core = @import("core.zig");
 const verify_avx2 = @import("verify_avx2.zig");
+const verify_ifma = @import("verify_ifma.zig");
 const Point = core.Point;
 const Fe = Point.Fe;
 const scalar = Point.scalar;
@@ -128,11 +129,20 @@ pub const scalar_backend = struct {
     };
 };
 
-/// Every backend the bucket MSM can run on, fastest first; tests compare them all.
-pub const backends = .{ verify_avx2, scalar_backend };
+/// Every backend the bucket MSM can run on here, fastest first; tests compare them all. AVX2
+/// and scalar are portable code; IFMA compiles only for targets that have it.
+pub const backends = if (verify_ifma.available)
+    .{ verify_ifma, verify_avx2, scalar_backend }
+else
+    .{ verify_avx2, scalar_backend };
 
 /// The backend `Terms` uses: the first one this target supports.
-pub const Backend = if (verify_avx2.available) verify_avx2 else scalar_backend;
+pub const Backend = if (verify_ifma.available)
+    verify_ifma
+else if (verify_avx2.available)
+    verify_avx2
+else
+    scalar_backend;
 
 pub const Terms = TermsWith(Backend);
 
