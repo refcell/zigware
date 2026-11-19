@@ -346,7 +346,7 @@ line, with where its Zig counterpart lives. Counts:
 | File | Ported | In progress | Not portable | Total |
 | --- | --- | --- | --- | --- |
 | standard/mod.rs | 188 | 0 | 9 | 197 |
-| coding/mod.rs | 96 | 0 | 1 | 97 |
+| coding/mod.rs | 98 | 2 | 1 | 101 |
 
 `mocks/harness.rs` has no tests of its own: all 31 generic scenario functions are ported
 (`mocks/scenarios.zig`, `scenarios_queries.zig`, `scenarios_recoverable.zig`) and run through
@@ -567,6 +567,11 @@ job to gate, and `mocks/strategy.rs`'s GatedStrategy has no other user).
 
 #### coding/mod.rs
 
+- L163 `mailbox_provides_application_blocks`: ported (coding/mod_test.zig)
+- L814 `test_coding_walk_ends_at_mismatched_parent_digest` (#5715): ported
+  (coding/tests/walk_test.zig); making ancestry's `is_parent` accept any digest fails it
+- L4703 `issue_5716_regression` (#5717): in progress (actor-stream lane)
+- L4848 `pr_5717_regression` (#5717): in progress (actor-stream lane)
 - L440 `test_config`: ported (coding/mod_test.zig)
 - L688 `test_coding_notarized_delivery_rejects_dishonest_payload_config`: ported (coding/mod_test.zig)
 - L766 `test_coding_block_provider_parent_fetches_by_commitment`: ported (coding/mod_test.zig)
@@ -797,3 +802,9 @@ job to gate, and `mocks/strategy.rs`'s GatedStrategy has no other user).
   round); `put_certified` no longer raises the epoch ceiling. The tally collected only
   `fn test_*`, so it missed `mailbox_provides_application_blocks` and the `issue_*`/`pr_*`
   regressions; those are now listed. The coding/mod.rs share of #5717 is the coding lane's.
+- 2026-11-19 (actor-stream lane): coding's share of #5715/#5717. The provider test now puts
+  the child in epoch 1 and asserts the request carries the parent's view in the child's epoch,
+  and the certified-cache conflict test asserts each walk request's round; bounding by the
+  child's own round fails both. The ancestry-delivery annotation test expects `round: null`
+  exactly. `RecordingResolver` tracks active fetches (`retain` drops rejected ones), as
+  upstream's does, for the two regressions.

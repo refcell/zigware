@@ -105,8 +105,9 @@ test "coding block provider parent fetches by commitment" {
             const me = validators.participants[0];
             var parent = try common.missing_candidate(gpa, me);
             defer parent.block.deinit(gpa);
+            // The child is in epoch 1; the validator does not hold its parent.
             const context: common.CodingCtx = .{
-                .round = common.round_at(0, 2),
+                .round = common.round_at(1, 2),
                 .leader = me,
                 .parent = .{ parent.context.round.view, parent.block.commitment() },
             };
@@ -120,6 +121,16 @@ test "coding block provider parent fetches by commitment" {
             try ctx.sleep(.fromMilliseconds(100));
             // Parent walkback should use the coding parent commitment.
             try testing.expectEqual(1, buffer.commitment_subscription_count());
+            // The request is bounded by the parent's view in the child's epoch: the parent is
+            // in epoch 0, so the bound shows which epoch the provider read.
+            const fetches = try stack.resolver.fetches(gpa);
+            defer gpa.free(fetches);
+            try testing.expectEqual(1, fetches.len);
+            const expected: common.Annotation = .{ .untrusted = .{
+                .height = .new(1),
+                .round = common.round_at(1, parent.context.round.view.get()),
+            } };
+            try testing.expect(fetches[0].subscriber.eql(expected));
         }
     }.body);
 }
@@ -2461,9 +2472,12 @@ fn serve_competing_ancestry(
         defer gpa.free(fetches);
         const item = fetches[index + 1];
         try testing.expect(item.key.eql(.{ .block = ancestor.commitment() }));
-        // Heights only: the parent-round bound (#5717) is checked by the coding lane's port.
-        try testing.expect(item.subscriber == .untrusted);
-        try testing.expect(item.subscriber.untrusted.height.get() == ancestor.height().get());
+        // The walk bounds each request by the round the child's context names for it.
+        const expected: common.Annotation = .{ .untrusted = .{
+            .height = ancestor.height(),
+            .round = ancestor.context().round,
+        } };
+        try testing.expect(item.subscriber.eql(expected));
         var subscription = try stack.mailbox.subscribe_by_commitment(ancestor.commitment(), .wait);
         defer subscription.deinit();
         _ = try stack.mailbox.get_processed();
@@ -2618,11 +2632,6 @@ fn ancestry_annotations(
 }
 
 /// An untrusted annotation at `height` carrying `got`'s round, if any.
-fn untrusted_like(height: consensus_types.Height, got: common.Annotation) common.Annotation {
-    const round = if (got == .untrusted) got.untrusted.round else null;
-    return .{ .untrusted = .{ .height = height, .round = round } };
-}
-
 /// Delivers `parent` for `fetch`, then subscribes to `grandparent` and checks processing is
 /// still held below it. Returns the grandparent subscription.
 fn deliver_below_tip(
@@ -2706,13 +2715,13 @@ test "coding certification retention follows finalized tip" {
             made += 1;
             var out: [8]common.Annotation = undefined;
             const annotations = try ancestry_annotations(stack.resolver, &out);
-            const untrusted = untrusted_like; // Heights only; coding checks the round.
             try testing.expectEqual(4, annotations.len);
+            // These subscriptions pass no round, so neither do their requests.
             const expected = [_]common.Annotation{
                 .{ .certified = parent.height() },
-                untrusted(parent.height(), annotations[1]),
-                untrusted(parent.height(), annotations[2]),
-                untrusted(grandparent.height(), annotations[3]),
+                .{ .untrusted = .{ .height = parent.height(), .round = null } },
+                .{ .untrusted = .{ .height = parent.height(), .round = null } },
+                .{ .untrusted = .{ .height = grandparent.height(), .round = null } },
             };
             for (expected, annotations) |want, got| try testing.expect(want.eql(got));
         }

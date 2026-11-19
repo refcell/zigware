@@ -331,6 +331,8 @@ pub const RecordingResolver = struct {
     pub const Key = handler.Key(Commitment);
     const State = struct {
         fetches: std.ArrayList(Fetch) = .empty,
+        /// The fetches no `retain` has dropped.
+        active: std.ArrayList(Fetch) = .empty,
         targeted: std.ArrayList(TargetedFetch) = .empty,
         auto_delivery: ?[]u8 = null,
         delivery_responses: std.ArrayList(oneshot.Receiver(Outcome)) = .empty,
@@ -375,6 +377,7 @@ pub const RecordingResolver = struct {
         for (state.delivery_responses.items) |*response| response.deinit();
         for (state.targeted.items) |item| gpa.free(item.targets);
         state.fetches.deinit(gpa);
+        state.active.deinit(gpa);
         state.targeted.deinit(gpa);
         state.delivery_responses.deinit(gpa);
         gpa.destroy(shared);
@@ -400,7 +403,10 @@ pub const RecordingResolver = struct {
         const gpa = self.shared.gpa;
         const state = self.shared.lock();
         defer self.shared.unlock();
-        try state.fetches.append(gpa, item);
+        try state.fetches.ensureUnusedCapacity(gpa, 1);
+        try state.active.ensureUnusedCapacity(gpa, 1);
+        state.fetches.appendAssumeCapacity(item);
+        state.active.appendAssumeCapacity(item);
         const value = state.auto_delivery orelse return;
         const sender = state.handler orelse return;
         state.auto_delivery = null;
@@ -456,6 +462,13 @@ pub const RecordingResolver = struct {
         return gpa.dupe(Fetch, state.fetches.items);
     }
 
+    /// Copies of the fetches no `retain` has dropped; the caller frees the slice.
+    pub fn active_fetches(self: RecordingResolver, gpa: Allocator) Allocator.Error![]Fetch {
+        const state = self.shared.lock();
+        defer self.shared.unlock();
+        return gpa.dupe(Fetch, state.active.items);
+    }
+
     pub fn fetch_count(self: RecordingResolver) usize {
         const state = self.shared.lock();
         defer self.shared.unlock();
@@ -500,10 +513,20 @@ pub const RecordingResolver = struct {
         return .ok;
     }
 
+    /// Drops the active fetches `predicate` rejects.
     pub fn retain(
-        _: *RecordingResolver,
-        _: resolver_api.Predicate(ResolverKey, Annotation),
+        self: *RecordingResolver,
+        predicate: resolver_api.Predicate(ResolverKey, Annotation),
     ) Allocator.Error!resolver_api.Feedback {
+        const state = self.shared.lock();
+        defer self.shared.unlock();
+        var kept: usize = 0;
+        for (state.active.items) |item| {
+            if (!predicate.call(item.key, item.subscriber)) continue;
+            state.active.items[kept] = item;
+            kept += 1;
+        }
+        state.active.shrinkRetainingCapacity(kept);
         return .ok;
     }
 
