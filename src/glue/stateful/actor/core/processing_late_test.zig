@@ -491,3 +491,111 @@ test "stateful processing: pruning joins a verification's replay before pruning"
 test "stateful processing: pruning joins a proposal's replay before pruning" {
     try pruning_joins_execution(.propose);
 }
+
+// commonware `prune_preserves_completed_verdict_before_later_finalization`: a verification
+// on a fork held while blocks 1 and 2 finalize holds the prune back; once released, the
+// prune runs, a later finalization of the competing block does not invalidate the
+// completed verdict, and a build on that block proceeds. Adapted: barriers and prunes
+// complete synchronously, so the prune is seen through marshal's recorded prunes; and the
+// test app builds a block where commonware's gated app declines.
+test "stateful processing: a prune preserves a completed verdict before a later finalization" {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer deinit_fixture(&fixture);
+    fixture.harness.processor.pruning = try eager_pruning();
+    const genesis = TestBlock.genesis();
+    const block1 = try fixture.harness.stage_pending_child(&genesis, 1);
+    const block2 = try fixture.harness.stage_pending_child(&block1, 2);
+    const losing, var losing_batch = try fixture.harness.build_child(&block2, 3);
+    losing_batch.deinit();
+    const winner, var winner_batch = try fixture.harness.build_child(&block2, 4);
+    winner_batch.deinit();
+
+    var verify_probe: harness.Probe = .{ .target = losing.digest() };
+    defer verify_probe.deinit();
+    const verify_gate = try verify_probe.add_gate();
+    var verify_started = verify_gate.started;
+    defer verify_started.deinit();
+    var verify_release = verify_gate.release;
+    fixture.processing.verifications.verifier.app.probe = &verify_probe;
+    var build_probe: harness.Probe = .{ .target = winner.digest() };
+    defer build_probe.deinit();
+    const build_gate = try build_probe.add_gate();
+    var build_started = build_gate.started;
+    defer build_started.deinit();
+    var build_release = build_gate.release;
+    fixture.processing.processor.app.propose_probe = &build_probe;
+
+    // The verification starts first: with no held target flush, the prune would otherwise
+    // run before it arrives.
+    var verdict = try fixture.verify(&.{ losing, block2 });
+    defer verdict.deinit();
+    try verify_started.recv();
+    var first_waiter = try fixture.finalize(block1);
+    defer first_waiter.deinit();
+    var second_waiter = try fixture.finalize(block2);
+    defer second_waiter.deinit();
+    try first_waiter.wait();
+    // The prune waits for the verification's running processing.
+    try testing.io.sleep(.fromMilliseconds(20), .awake);
+    try testing.expectEqual(0, fixture.prunes.items.len);
+    try verify_release.send({});
+
+    var winner_waiter = try fixture.finalize(winner);
+    defer winner_waiter.deinit();
+    var proposal = try Descendant.send(&fixture, .propose, &.{ winner, block2 });
+    defer proposal.deinit();
+    try build_started.recv();
+    try testing.expect(try verdict.recv()); // The later finalization kept the verdict.
+    try testing.expectEqual(1, verify_probe.calls);
+    try testing.expectEqual(1, fixture.prunes.items[0]);
+    try build_release.send({});
+    try testing.expect(try proposal.wait());
+    try second_waiter.wait();
+    try winner_waiter.wait();
+}
+
+// commonware `prune_starts_after_target_barrier`: with blocks 1 and 2 finalized, a
+// verification held in the application does not wait for the pending prune, and the prune
+// to block 1 runs once it finishes. Adapted: barriers are durable when they start, so
+// commonware's held target flush (and the acknowledgements it holds back) is not modeled;
+// what remains is that the prune neither blocks nor overtakes the active verification.
+test "stateful processing: a pending prune does not block an active verification" {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer deinit_fixture(&fixture);
+    fixture.harness.processor.pruning = try eager_pruning();
+    const genesis = TestBlock.genesis();
+    const block1 = try fixture.harness.stage_pending_child(&genesis, 1);
+    const block2 = try fixture.harness.stage_pending_child(&block1, 2);
+    const block3, var batch = try fixture.harness.build_child(&block2, 3);
+    batch.deinit();
+    var probe: harness.Probe = .{ .target = block3.digest() };
+    defer probe.deinit();
+    const gate = try probe.add_gate();
+    var started = gate.started;
+    defer started.deinit();
+    var release = gate.release;
+    fixture.processing.verifications.verifier.app.probe = &probe;
+
+    // Queued before pruning starts, as in commonware.
+    var verdict = try fixture.verify(&.{ block3, block2 });
+    defer verdict.deinit();
+    try started.recv();
+    var first_waiter = try fixture.finalize(block1);
+    defer first_waiter.deinit();
+    var second_waiter = try fixture.finalize(block2);
+    defer second_waiter.deinit();
+    try first_waiter.wait();
+    try second_waiter.wait();
+    try testing.io.sleep(.fromMilliseconds(20), .awake);
+    try testing.expectEqual(0, fixture.prunes.items.len);
+    try release.send({});
+    try testing.expect(try verdict.recv());
+    // The prune runs once the verification's processing finished, ahead of the next
+    // finalization's acknowledgement.
+    var third_waiter = try fixture.finalize(block3);
+    defer third_waiter.deinit();
+    try third_waiter.wait();
+    try testing.expectEqual(1, fixture.prunes.items[0]);
+}
