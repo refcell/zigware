@@ -149,13 +149,18 @@ which every database here is built on.
   - [x] the db's `io` also times its log: `qmdb.log_with_io` fills the journal config's `io`
     when the caller left it null (current passes it through its `any` config). The store
     takes its journal config as given.
-  - Not portable while `start_sync` completes synchronously: `start_sync_overlaps_work`,
-    `apply_indexes_while_journal_waits`, `start_sync_prune_waits`. Compact root
+  - `start_sync` no longer completes synchronously (step 5, below): `start_sync_overlaps_work`
+    and `start_sync_prune_waits` are ported; `apply_indexes_while_journal_waits` is still open.
+    Compact root
     compatibility is the compact lane's.
-  - [ ] Also skipped until the asynchronous start_sync lands (storage-merkle.md, "Design:
-    asynchronous start_sync", step 5), recorded 2026-11-19 by storage-merkle:
+  - [x] Ported with async start_sync step 5 (storage-merkle.md, "Design: asynchronous
+    start_sync"), 2026-11-19, by broadcast-resolver: any, current, keyless, immutable, and
+    store `start_sync` return the journal's `Completion` (the caller's reference); compact
+    keeps its own reference in `pending_sync` (commonware's), returns a prior sync's failure
+    as a ready completion, and `commit` waits on it; `sync` settles it. The tests are in
+    keyless/start_sync_test.zig and any/start_sync_test.zig on `mocks.DelayedSync`:
     keyless/fixed.rs `test_keyless_fixed_start_sync_overlaps_work`,
-    `test_keyless_fixed_start_sync_failure_propagates` (reduced port at most),
+    `test_keyless_fixed_start_sync_failure_propagates`,
     `test_keyless_fixed_start_sync_recovery`, `test_keyless_fixed_rebranch_sync_crash`, and
     `test_keyless_fixed_start_sync_prune_waits`; any/unordered/fixed.rs
     `test_start_sync_overlaps_work`, `test_start_sync_failure_propagates`, and

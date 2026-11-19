@@ -74,7 +74,7 @@ pub fn Keyless(comptime F: type, comptime E: type, comptime C: type, comptime H:
         }
 
         pub fn finalize(self: *Self) !void {
-            try self.inner.start_sync();
+            try (try self.inner.start_sync()).wait_release();
         }
 
         pub fn prune(self: *Self, target: *const SyncTarget) !void {

@@ -1225,8 +1225,8 @@ test "store recovery discards an update persisted without its commit" {
     try expect_value(&db, k, null);
 }
 
-// db.rs `test_store_start_sync_recovery`. zigware's `start_sync` completes before returning,
-// so commonware's overlap and prune-waits scenarios have nothing to observe.
+// db.rs `test_store_start_sync_recovery`. the completion is awaited before
+// the reopen.
 test "store state persisted by start_sync is recovered" {
     var h: Harness = undefined;
     try h.init();
@@ -1234,7 +1234,7 @@ test "store state persisted by start_sync is recovered" {
     var db = try h.open(null);
     const ones: [8]u8 = @splat(1);
     _ = try apply(&db, &.{.{ .key = key(0), .value = &ones }}, null);
-    try db.start_sync();
+    try (try db.start_sync()).wait_release();
     const size = db.bounds().end;
     db.deinit();
     db = try h.open(null);
@@ -1244,7 +1244,7 @@ test "store state persisted by start_sync is recovered" {
 }
 
 // db.rs `test_store_start_sync_failure_propagates`. A failed mutator leaves only `deinit` (the
-// failures-are-fatal contract), so the failure surfaces from `start_sync` itself.
+// failures-are-fatal contract); the failure surfaces from `start_sync` or its completion.
 test "store start_sync surfaces a failed sync" {
     var faults: Faults = undefined;
     faults.init(gpa, 7);
@@ -1255,7 +1255,8 @@ test "store start_sync surfaces a failed sync" {
     defer db.deinit();
     _ = try apply(&db, &.{.{ .key = key(0), .value = &.{ 1, 1, 1, 1, 1, 1, 1, 1 } }}, null);
     faults.layer.config = .{ .sync_rate = .one };
-    try testing.expectError(error.Io, db.start_sync());
+    const started = db.start_sync();
+    try testing.expectError(error.Io, if (started) |sync| sync.wait_release() else |err| err);
 }
 
 /// db.rs `BitmapPolicy`: three entries, unlimited skips, and one action per round, applied to

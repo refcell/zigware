@@ -1372,7 +1372,7 @@ test "keyless metrics count and time each operation" {
     try testing.expect(many[0].?.eql(U64.init(7)));
     try db.commit();
     try db.sync();
-    try db.start_sync();
+    try (try db.start_sync()).wait_release();
     try db.prune(0);
     try qmdb_support.expect_metric_values(gpa, &harness.registry, &.{
         .{ "db_size", "3" },                       .{ "db_pruning_boundary", "0" },

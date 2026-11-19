@@ -990,7 +990,7 @@ test "any metrics count and time each operation" {
     try db.get_many(&.{key(1)}, &many);
     try testing.expect(many[0].?.eql(val(1, 0)));
     try db.commit();
-    try db.start_sync();
+    try (try db.start_sync()).wait_release();
     try db.sync();
     try db.prune(0);
     try qmdb_support.expect_metric_values(gpa, &harness.registry, &.{

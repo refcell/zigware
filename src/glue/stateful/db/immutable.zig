@@ -75,7 +75,7 @@ pub fn Immutable(F: type, K: type, E: type, C: type, H: type, T: type) type {
         }
 
         pub fn finalize(self: *Self) !void {
-            try self.inner.start_sync();
+            try (try self.inner.start_sync()).wait_release();
         }
 
         pub fn prune(self: *Self, target: *const SyncTarget) !void {

@@ -253,10 +253,12 @@ pub fn Db(comptime F: type, comptime E: type, comptime C: type, comptime H: type
             try self.journal.sync();
         }
 
-        /// Starts a sync (it completes at once here).
-        pub fn start_sync(self: *Self) !void {
+        /// Starts a sync of the applied operations and returns its completion (one reference,
+        /// the caller's). Work continues while it is in flight; a dropped (released) one's
+        /// failure resurfaces from the next durability or mutating call.
+        pub fn start_sync(self: *Self) !runtime.storage.Completion {
             self.metrics.start_sync_calls.metric().inc();
-            try (try self.journal.start_sync()).wait_release();
+            return self.journal.start_sync();
         }
 
         /// Makes every applied operation durable; reopening may replay the log.

@@ -63,7 +63,7 @@ pub fn Compact(comptime F: type, comptime O: type, comptime H: type) type {
         }
 
         pub fn finalize(self: *Self) !void {
-            try self.inner.start_sync();
+            try (try self.inner.start_sync()).wait_release();
         }
 
         pub fn prune(self: *Self, target: *const SyncTarget) !void {

@@ -264,8 +264,8 @@ test "immutable get_many reads the database, batches, and chains" {
     }
 }
 
-// fixed.rs `test_fixed_start_sync_recovery`. zigware's `start_sync` completes before it returns,
-// so what it made durable survives a crash.
+// fixed.rs `test_fixed_start_sync_recovery`. what the awaited completion made
+// durable survives a crash.
 test "immutable state persisted by start_sync survives a crash" {
     inline for (families) |F| {
         var harness = try support.Harness.init(gpa);
@@ -273,7 +273,7 @@ test "immutable state persisted by start_sync survives a crash" {
         var db = try harness.open(F, null);
         errdefer db.deinit();
         try apply_sets(&db, &.{.{ fill(1), fill(2) }}, db.inactivity_floor());
-        try db.start_sync();
+        try (try db.start_sync()).wait_release();
         const root = db.root();
         harness.storage.crash();
         db.deinit();
@@ -285,7 +285,7 @@ test "immutable state persisted by start_sync survives a crash" {
 }
 
 // fixed.rs `test_fixed_start_sync_failure_propagates`. A failed mutator leaves only `deinit` (the
-// failures-are-fatal contract), so the failure surfaces from `start_sync` itself.
+// failures-are-fatal contract); the failure surfaces from `start_sync` or its completion.
 test "immutable start_sync surfaces a failed sync" {
     inline for (families) |F| {
         var harness = try support.Harness.init(gpa);
@@ -299,7 +299,8 @@ test "immutable start_sync surfaces a failed sync" {
         defer db.deinit();
         try apply_sets(&db, &.{.{ fill(1), fill(2) }}, db.inactivity_floor());
         faults.layer.config = .{ .sync_rate = .one };
-        try testing.expectError(error.Io, db.start_sync());
+        const started = db.start_sync();
+        try testing.expectError(error.Io, if (started) |sync| sync.wait_release() else |err| err);
     }
 }
 
@@ -321,7 +322,7 @@ test "immutable metrics count and time each operation" {
     try expect_values(&many, &.{fill(2)});
     try db.commit();
     try db.sync();
-    try db.start_sync();
+    try (try db.start_sync()).wait_release();
     try db.prune(0);
     const text = try harness.registry.encode(gpa);
     defer gpa.free(text);

@@ -643,9 +643,10 @@ pub fn Db(F: type, U: type, C: type, I: type, H: type, comptime N: usize) type {
             try self.any.commit();
         }
 
-        /// Starts a sync of applied operations (it completes at once here).
-        pub fn start_sync(self: *Self) !void {
-            try self.any.start_sync();
+        /// Starts a sync of applied operations (not the bitmap's pruning metadata) and returns
+        /// its completion (see any's `start_sync`).
+        pub fn start_sync(self: *Self) !runtime.storage.Completion {
+            return self.any.start_sync();
         }
 
         /// Syncs every database state to disk, including the bitmap's pruning metadata.

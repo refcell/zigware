@@ -81,6 +81,20 @@ pub fn Db(comptime F: type, comptime O: type, comptime H: type) type {
             journal: WitnessJournal,
             /// Whether a durability operation covers the tip.
             committed: bool,
+            /// The db's reference on the sync the last `start_sync` began, kept until the next
+            /// full journal sync, so a dropped completion's failure still surfaces.
+            pending_sync: ?runtime.storage.Completion = null,
+
+            /// Waits for the sync `start_sync` began, surfacing its failure.
+            fn wait_for_sync(open: *const Open) runtime.storage.Error!void {
+                const pending = open.pending_sync orelse return;
+                try pending.wait();
+            }
+
+            fn release_sync(open: *Open) void {
+                if (open.pending_sync) |pending| pending.release();
+                open.pending_sync = null;
+            }
         };
 
         /// Where the witnesses live: the open journal, or a compact-sync import not yet
@@ -214,7 +228,10 @@ pub fn Db(comptime F: type, comptime O: type, comptime H: type) type {
         /// Closes the db without syncing.
         pub fn deinit(self: *Self) void {
             switch (self.state) {
-                .open => |*open| open.journal.deinit(),
+                .open => |*open| {
+                    open.release_sync();
+                    open.journal.deinit();
+                },
                 .replacing => {},
             }
             self.merkle.deinit();
@@ -327,23 +344,34 @@ pub fn Db(comptime F: type, comptime O: type, comptime H: type) type {
         }
 
         /// Makes the current state durable (journaling a pending import first).
+        /// First waits for a sync `start_sync` began, surfacing its failure.
         pub fn commit(self: *Self) !void {
             const open = try self.open_witnesses();
+            try open.wait_for_sync();
             if (!open.committed) try open.journal.commit();
             open.committed = true;
         }
 
-        /// Starts persisting the current state; zigware syncs complete at once.
-        pub fn start_sync(self: *Self) !void {
+        /// Starts persisting the current state (journaling a pending import first) and returns
+        /// the sync's completion, one reference the caller owns; the db keeps another, so a
+        /// dropped completion's failure surfaces from the next `commit` or `start_sync`. A
+        /// prior sync's failure returns as a ready completion before a new sync replaces it.
+        pub fn start_sync(self: *Self) !runtime.storage.Completion {
             const open = try self.open_witnesses();
-            try (try open.journal.start_sync()).wait_release();
+            open.wait_for_sync() catch |err| return .ready(err);
+            const completion = try open.journal.start_sync();
+            open.release_sync();
+            open.pending_sync = completion.retain();
             open.committed = true;
+            assert(open.pending_sync != null);
+            return completion;
         }
 
         /// Makes the current state durable, journal metadata included.
         pub fn sync(self: *Self) !void {
             const open = try self.open_witnesses();
             try open.journal.sync();
+            open.release_sync(); // The full sync settles the pipelined one.
             open.committed = true;
         }
 
@@ -370,7 +398,10 @@ pub fn Db(comptime F: type, comptime O: type, comptime H: type) type {
                 self.* = undefined;
             }
             switch (self.state) {
-                .open => |*open| try open.journal.destroy(),
+                .open => |*open| {
+                    open.release_sync();
+                    try open.journal.destroy();
+                },
                 // Reset rather than open, so the previous witnesses are never decoded.
                 .replacing => {
                     const storage = self.storage;
