@@ -13,6 +13,9 @@
 # crosses implementations both ways: a zigware validator among three commonware ones, then a
 # commonware validator among three zigware ones, is restarted until it fetches a certificate it
 # missed from the other implementation's peers, and must then finalize the same digests.
+# Last, commonware's and zigware's `examples/dkg` share one network: a mixed epoch-0 DKG, mixed
+# validators resharing each epoch, and a late joiner of each implementation that state-syncs
+# and backfills blocks through marshal (etc/scripts/interop_dkg.py).
 #
 # Skips (exit 0) when cargo or the reference clone is missing.
 #
@@ -41,10 +44,10 @@ if ! command -v python3 > /dev/null 2>&1 || ! command -v tmux > /dev/null 2>&1; 
 fi
 
 revision=$(git -C "$reference" rev-parse --short HEAD)
-echo "interop: building commonware-chat and commonware-log at $revision"
+echo "interop: building commonware-chat, commonware-log, and commonware-dkg at $revision"
 (cd "$reference" && CARGO_TARGET_DIR="$target" cargo build --release --offline -q \
-    -p commonware-chat -p commonware-log)
-echo "interop: building zigware chat"
+    -p commonware-chat -p commonware-log -p commonware-dkg)
+echo "interop: building zigware's examples"
 (cd "$root" && zig build install -Doptimize=ReleaseSafe)
 
 rust_chat="$target/release/commonware-chat"
@@ -72,5 +75,9 @@ echo "interop: simplex resolver, commonware validator 3 fetching from zigware va
 INTEROP_LOG_MIX=zzzr INTEROP_LOG_RESOLVER=1 python3 -I "$root/etc/scripts/interop_log.py" \
     "$target/release/commonware-log" "$root/zig-out/bin/log" "$((port + 60))" \
     "$((timeout_s * 2))" 30
+
+echo "interop: dkg, mixed bootstrap and validators with a state-syncing joiner of each kind"
+python3 -I "$root/etc/scripts/interop_dkg.py" "$target/release/commonware-dkg" \
+    "$root/zig-out/bin/dkg" "$((port + 70))" "$((timeout_s * 3))"
 
 echo "interop: ok"

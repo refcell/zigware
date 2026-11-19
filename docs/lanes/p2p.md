@@ -731,6 +731,36 @@ After:
   - Example GUI differences, not wire: commonware's Activity lines carry span fields and its
     colors do not render under tmux.
   - Demo: `record-demo.sh interop-log` (docs/assets/interop-log-demo.{gif,mp4}).
+- [x] dkg, through the dkg examples (`etc/scripts/interop_dkg.py`, run by `interop.sh`). This
+  covers buffered broadcast, marshal block sync, glue's threshold DKG and per-epoch reshare,
+  and QMDB state sync. One `commonware-dkg setup` (6 participants, committees of 4) drives
+  two runs:
+  - `rrzz`: commonware players 0 and 1 and zigware players 2 and 3 run the epoch-0 bootstrap
+    DKG, and all six `genesis.json` files come out identical. Validators `rrzzr` (0–4)
+    finalized 225 heights with identical digests and completed 3 reshares each. zigware's
+    validator 5 then joined with `--state-sync`. It probed a recent finalized block from
+    peers, synced to height 255 instead of replaying from genesis, and finalized 22 more
+    heights with the others' digests.
+  - `zzrr`: validators `zzrrz` finalized 256 heights, and commonware's validator 5 joined. Its
+    debug log must show glue's probe `requesting boundary block` from peers. Without their
+    answer it cannot start above genesis. Marshal's `starting fetch for floor block` and
+    resolver deliveries (`received block`, `received finalization`, `received notarization`)
+    are reported when seen. Deliveries appeared in 6 of 8 runs; in the other two the floor
+    block arrived by broadcast or the probe first, which retires marshal's request.
+  - One zigware joiner, in about 8 runs, exited with status 0 and no log line after finalizing
+    3 blocks. A zigware actor returned cleanly, and supervision then stops the validator, as
+    commonware's `Handle::select` does. It was at info level, so it is not yet known which
+    actor. The harness now runs both joiners at debug, and a validator that exits fails the
+    run.
+  - An earlier six-validator run (`rrzzrz`, all launched together) finalized 2,612 heights
+    through 33 epochs, each a successful reshare, with no digest mismatch. A joiner whose
+    peers are all the other implementation (`rrrrr`+z, `zzzzz`+r) synced and matched too.
+  - After a join, finalization slows to about 3 blocks/s for about 25 s and then recovers. A
+    pure commonware network does the same: the joiner's floor lands past the epoch's
+    midpoint, so it sits out that ceremony and counts as faulty (commonware's dkg README).
+  - Found on the way, not interop: a pure-zigware dkg network aborted in 2 of 6 runs. The
+    cause is a null unwrap in glue's inclusion window (`.closed` after `.scan` took the
+    request in the same window). The coding lane owns it.
 - No wire mismatch turned up, so no vector was added.
 
 ## Log
