@@ -107,6 +107,12 @@ time, files, and network: build on it rather than around it where it fits.
   runner seeded with the case seed and commits `storage_audit()`, in `conformance.verify`'s
   `commit(gpa, seed)` shape; its three audit tests.
 - [x] memory/mod.rs: crash-write merging and subset writes keeping v0/v1 headers.
+- [x] storage/benches (the filesystem workload bench): `src/runtime/storage/benches/`
+  (config, filesystem, runner, workload, report) run from `src/runtime/benches.zig` as
+  `runtime::storage::<workload>` on the threaded and io_uring backends. commonware has no
+  tests there; `zig build test` builds each config through the ported flag parser, runs every
+  workload for 10 ms on a 64 KiB file, and renders both reports. `tokio` maps to the threaded
+  backend; Tokio's `--global-queue-interval` has no counterpart.
 - No counterpart elsewhere in the crate: utils/mod.rs `Blocker` (a waker-driven thread
   parker), macros.rs (`select!`; `std.Io.Select`), and process/metered.rs (process metrics of
   the production runtime, runtime-telemetry's).
