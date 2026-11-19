@@ -279,18 +279,15 @@ test "reshare state sync: restart before epoch boundary" {
 }
 
 // commonware `reshare_e2e_state_sync_restart_with_stale_bootstrap`: restarted before sync
-// completes, the delayed validator syncs again from its persisted floor.
-//
-// commonware also swaps each bootstrap member's first latest reply for an epoch-0 finalization
-// (`with_stale`), checking that the probe keeps the persisted floor's epoch. zigware's probe
-// already ignores replies below `floor_epoch` (probe/discovery_test.zig), so this run keeps
-// the restart and both sync starts but not the swapped replies.
-test "reshare state sync: restart with persisted floor" {
+// completes, the delayed validator syncs again from its persisted floor in epoch 1, although
+// every bootstrap member's first latest reply on restart is an epoch-0 finalization.
+test "reshare state sync: restart with stale bootstrap" {
     try skip_slow();
     for (electors) |elector| {
         var engine = try Engine.with_committee(gpa, 6, 4);
         defer engine.deinit();
         engine.elector = elector;
+        engine.stale = properties.final_height(0);
         const delayed = engine.participants()[5];
         const keys = [_]Key{delayed};
         const crashes = [_]Crash{

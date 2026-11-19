@@ -113,9 +113,14 @@ it comes first once `any` lands.
   state-sync ceremonies from `glue/src/dkg/tests/reshare/mod.rs` in
   src/glue/dkg/tests/reshare/state_sync_{block,app,validator,test}.zig, over a validator
   variant with the probe, QMDB resolver, `Stateful` app, and DKG state-sync plan. Each runs
-  under both of commonware's electors on the discovery network; the lookup network and
-  `with_stale` reply swapping are not ported (the stale test keeps its restart and two sync
-  starts). The ceremonies are `-Dslow-tests`; the block codec test runs per push.
+  under both of commonware's electors, with `with_stale` as a `Swap` probe receiver. The
+  ceremonies are `-Dslow-tests`; the block codec test runs per push.
+- [ ] Reshare `Network::Lookup` cases (agreed with bls-math, option b): make harness.zig's
+  `ReshareEngine` generic over the network (`TestDirectory` = `Option<Addresses>`,
+  `TestManager` over `KeyOnlyManager`/`AddressableManager(socket_manager)`, addressed
+  `ScheduleParticipants.directory`), on top of bls-math's per-node manager push; then the
+  lookup split of every state-sync ceremony and of harness_test.zig's manager test. Diff to
+  bls-math before pushing.
 
 ## Agreement with storage-qmdb (2026-11-16)
 - `any.Db(F, U, C, H, ...)` (family, update type, contiguous journal, hasher, index or

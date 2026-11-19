@@ -76,6 +76,47 @@ const mailbox_size = 100;
 /// How often the epoch-cross hold rechecks the committee (commonware sleeps 50 ms).
 const cross_poll_ms = 50;
 
+/// The probe receiver that swaps each peer's first latest-finalization reply for `reply`, if
+/// set (commonware's `Swap`). Owns `inner`, `reply`, and the swapped set.
+pub fn Swap(comptime R: type) type {
+    return struct {
+        const Self = @This();
+        pub const PublicKey = R.PublicKey;
+        const Message = p2p.Message(PublicKey);
+
+        gpa: Allocator,
+        inner: R,
+        reply: ?[]u8,
+        swapped: std.ArrayList(PublicKey) = .empty,
+
+        pub fn recv(self: *Self) !Message {
+            var message = try self.inner.recv();
+            const reply = self.reply orelse return message;
+            const latest = message.payload.len > 0 and
+                message.payload[0] == @backingInt(probe_mod.wire.Tag.latest_response);
+            if (!latest) return message;
+            for (self.swapped.items) |peer| if (peer.eql(message.peer)) return message;
+            try self.swapped.append(self.gpa, message.peer);
+            const copy = try self.gpa.dupe(u8, reply);
+            const peer = message.peer;
+            message.deinit();
+            assert(self.swapped.items.len > 0);
+            return .{ .peer = peer, .payload = copy, .gpa = self.gpa };
+        }
+
+        pub fn capacity(self: *const Self) usize {
+            return self.inner.capacity();
+        }
+
+        pub fn deinit(self: *Self) void {
+            if (@hasDecl(R, "deinit")) self.inner.deinit();
+            if (self.reply) |reply| self.gpa.free(reply);
+            self.swapped.deinit(self.gpa);
+            self.* = undefined;
+        }
+    };
+}
+
 pub fn StateSyncValidator(comptime T: type) type {
     return struct {
         const Self = @This();
@@ -176,9 +217,10 @@ pub fn StateSyncValidator(comptime T: type) type {
             pub const Source = probe_mod.MarshalSource(Node.Mailbox);
             pub const Blocker = T.Blocker;
             pub const NetSender = T.Network.Sender;
-            pub const NetReceiver = T.Network.Receiver;
+            pub const NetReceiver = Swap(T.Network.Receiver);
         };
         const Probe = probe_mod.Probe(ProbeTypes);
+        const Wire = probe_mod.wire.Message(Scheme, Node.Variant);
         const Artifact = Probe.Artifact;
         const Finalization = Artifact.Finalization;
         pub const Channel = Node.Channel;
@@ -224,6 +266,12 @@ pub fn StateSyncValidator(comptime T: type) type {
             state_sync_floor: ?u64 = null,
             /// Hold a state-sync startup until the sampled committee crosses an epoch.
             epoch_cross_during_sync: bool = false,
+            /// On a restart, swap each bootstrap member's first latest reply to the probe for
+            /// the finalization at this height from another validator (commonware
+            /// `with_stale`).
+            stale: ?u64 = null,
+            /// Whether this validator ran before in this run.
+            restarted: bool = false,
             /// Every validator's marshal slot, by participant index (borrowed). This
             /// validator publishes its own into `marshals[index]`.
             marshals: []MarshalSlot,
@@ -453,6 +501,8 @@ pub fn StateSyncValidator(comptime T: type) type {
             const directory = try network.DirectoryOps(Key, D).clone(initial.directory, gpa);
             const genesis = try initial.clone(gpa);
             const floor_epoch: ?Epoch = if (self.plan.floor()) |floor| floor.epoch() else null;
+            const reply = try self.stale_reply();
+            errdefer if (reply) |bytes| gpa.free(bytes);
             self.probe = try Probe.init(gpa, self.io, .{
                 .discovery = .{
                     .manager = T.Manager.init(self.config.peer_provider),
@@ -470,7 +520,11 @@ pub fn StateSyncValidator(comptime T: type) type {
                 },
                 .retry_timeout_ns = 500 * std.time.ns_per_ms,
                 .mailbox_size = mailbox_size,
-            }, channel.sender, channel.receiver);
+            }, channel.sender, .{
+                .gpa = gpa,
+                .inner = channel.receiver,
+                .reply = reply,
+            });
             errdefer {
                 self.probe.probe.deinit();
                 self.probe.mailbox.deinit();
@@ -478,6 +532,18 @@ pub fn StateSyncValidator(comptime T: type) type {
             self.probe_rng = .init(self.config.index);
             self.probe_handle = try ctx.child("dkg_probe").spawn(probe_task, .{self});
             assert(self.probe_handle != null);
+        }
+
+        /// The encoded latest reply a stale restart swaps in, or null (owned by the caller).
+        fn stale_reply(self: *Self) !?[]u8 {
+            const height = self.config.stale orelse return null;
+            if (!self.config.restarted) return null;
+            var finalization = try self.finalization_from_peer(height);
+            defer finalization.deinit(self.gpa);
+            const message: Wire = .{ .latest_response = finalization };
+            const bytes = try message.encode(self.gpa);
+            assert(bytes[0] == @backingInt(probe_mod.wire.Tag.latest_response));
+            return bytes;
         }
 
         const block_cfg: types.InfoCfg = .{
@@ -980,6 +1046,8 @@ pub const StateSyncEngine = struct {
     state_sync_floor: ?u64 = null,
     /// commonware `with_epoch_cross_during_sync`.
     epoch_cross_during_sync: bool = false,
+    /// commonware `with_stale`.
+    stale: ?u64 = null,
 
     /// Takes `base`.
     pub fn from_base(base: harness.ReshareEngine) !StateSyncEngine {
@@ -1058,8 +1126,12 @@ pub const StateSyncEngine = struct {
         // A restart means a processed hold served its purpose (commonware's release).
         if (self.boots[index] > 0) self_mut.base.ledger.release_hold(ctx.public_key);
         self_mut.boots[index] += 1;
+        // commonware `Network::manager`: a node starts, and restarts, with no peer sets, and
+        // tracks sets for itself alone.
+        const control = ctx.oracle.control(ctx.public_key);
+        try control.reset_peer_sets();
         const manager = &self_mut.base.managers[index];
-        manager.* = .init(ctx.oracle.manager());
+        manager.* = .init(control.manager());
         var wrapped: [channel_count]Validator.Channel = undefined;
         const failures = self.base.failures;
         for (&wrapped, ctx.channels, 0..) |*channel, registered, at| {
@@ -1107,7 +1179,7 @@ pub const StateSyncEngine = struct {
         return .{
             .signer = base.signers[index],
             .manager = manager,
-            .peer_provider = ctx.oracle.manager(),
+            .peer_provider = manager.manager,
             .blocker = ctx.oracle.control(ctx.public_key),
             .secret_store = &base_mut.stores[index],
             .ledger = &base_mut.ledger,
@@ -1121,6 +1193,8 @@ pub const StateSyncEngine = struct {
             .delayed = ctx.delayed,
             .state_sync_floor = self.state_sync_floor,
             .epoch_cross_during_sync = self.epoch_cross_during_sync,
+            .stale = self.stale,
+            .restarted = self.boots[index] > 1,
             .marshals = @constCast(self.marshals),
             .index = index,
         };
