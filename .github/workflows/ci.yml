@@ -21,9 +21,11 @@ jobs:
         # package in one job. ReleaseSafe splits by package: the rest takes about 30 minutes,
         # and one job held it with consensus and glue past 40. Consensus and glue get a job
         # each: compiled side by side they need 8 to 14 GB apiece, over a 16 GB arm runner,
-        # which the runner then shuts down (exit 143, 12e54c3 and 315b6d9).
+        # which the runner then shuts down (exit 143, 12e54c3 and 315b6d9). Storage gets one
+        # too: its 7 to 11 minute, 7 to 11 GB compile and 2 to 4 minute run were the long
+        # pole of a 33-minute release-rest (9dd371a3, c91855f7).
         os: [ubuntu-latest, ubuntu-24.04-arm]
-        group: [debug, release-consensus, release-glue, release-rest]
+        group: [debug, release-consensus, release-glue, release-storage, release-rest]
         include:
           - group: debug
             optimize: Debug
@@ -34,6 +36,9 @@ jobs:
           - group: release-glue
             optimize: ReleaseSafe
             steps: test-glue
+          - group: release-storage
+            optimize: ReleaseSafe
+            steps: test-storage
           - group: release-rest
             optimize: ReleaseSafe
             steps: test-rest

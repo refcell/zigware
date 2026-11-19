@@ -207,12 +207,13 @@ fn add_heavy_shard_options(b: *std.Build, options: *std.Build.Step.Options) void
     options.addOption(u32, "heavy_shard", heavy_shard);
 }
 
-/// `test-rest`: every test `test` runs except consensus's and glue's, which CI's other
-/// ReleaseSafe jobs run (`zig build test-consensus`, `test-glue`). `test-others` also leaves out
-/// cryptography, which nightly runs in jobs of its own.
+/// `test-rest`: every test `test` runs except consensus's, glue's, and storage's, which CI's
+/// other ReleaseSafe jobs run (`zig build test-consensus`, `test-glue`, `test-storage`).
+/// `test-others` leaves out consensus, glue, and cryptography, which nightly runs in jobs of
+/// their own.
 fn add_test_rest(b: *std.Build, test_step: *std.Build.Step) void {
-    const rest = "Run every unit test except consensus and glue";
-    add_test_except(b, test_step, "test-rest", rest, &.{ "consensus", "glue" });
+    const rest = "Run every unit test except consensus, glue, and storage";
+    add_test_except(b, test_step, "test-rest", rest, &.{ "consensus", "glue", "storage" });
     const others = "Run every unit test except consensus, glue, and cryptography";
     add_test_except(b, test_step, "test-others", others, &.{ "consensus", "glue", "cryptography" });
 }
