@@ -63,9 +63,14 @@ pub const Replayed = struct {
 };
 
 /// Replays computed so far, by the digest of the last post and the candidate. Every workload
-/// has the same accounts, so they are left out of the key.
+/// has the same accounts, so they are left out of the key. Safe to share between the checker's
+/// workers: as commonware's `REPLAYS`, a replay is computed outside the lock, and a second
+/// computation of the same key is dropped for the first one stored.
 pub const Replays = struct {
     computed: std.AutoHashMapUnmanaged([32]u8, *Replayed) = .empty,
+    mutex: std.Io.Mutex = .init,
+
+    const io = std.testing.io;
 
     pub fn deinit(self: *Replays) void {
         var values = self.computed.valueIterator();
@@ -90,14 +95,28 @@ pub const Replays = struct {
         hasher.update(&last.bytes);
         if (candidate) |c| try c.digest_into(&hasher);
         const key = hasher.finalize().bytes;
-        const slot = try self.computed.getOrPut(gpa, key);
-        if (slot.found_existing) return slot.value_ptr.*;
-        errdefer _ = self.computed.remove(key);
+        if (self.find(&key)) |found| return found;
         const replayed = try gpa.create(Replayed);
         errdefer gpa.destroy(replayed);
         replayed.* = try replay(accounts, posted, candidate);
+        errdefer replayed.deinit();
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        const slot = try self.computed.getOrPut(gpa, key);
+        if (slot.found_existing) {
+            // Another worker stored the same replay first; it is immutable, so either serves.
+            replayed.deinit();
+            gpa.destroy(replayed);
+            return slot.value_ptr.*;
+        }
         slot.value_ptr.* = replayed;
         return replayed;
+    }
+
+    fn find(self: *Replays, key: *const [32]u8) ?*const Replayed {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        return self.computed.get(key.*);
     }
 };
 

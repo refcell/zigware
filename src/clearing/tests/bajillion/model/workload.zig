@@ -128,6 +128,8 @@ pub const Workload = struct {
     budget: w.Budget,
     /// Flows the explored paths reached.
     witnessed: std.ArrayList([]const u8) = .empty,
+    /// Guards `witnessed`: the checker's workers record flows at once.
+    witness_mutex: std.Io.Mutex = .init,
     replays: r.Replays = .{},
 
     /// A workload of two users funded with 3 and 2, paying 1 at a time, depositing and
@@ -171,6 +173,8 @@ pub const Workload = struct {
 
     /// Records that the explored paths reached `flow`.
     pub fn witness(self: *Workload, flow: []const u8) !void {
+        self.witness_mutex.lockUncancelable(std.testing.io);
+        defer self.witness_mutex.unlock(std.testing.io);
         for (self.witnessed.items) |seen| if (std.mem.eql(u8, seen, flow)) return;
         try self.witnessed.append(gpa, flow);
     }

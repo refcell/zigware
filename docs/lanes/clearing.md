@@ -247,3 +247,6 @@ qmdb `current` (balances, over the MMB) and `keyless` (payout log, over the MMR)
 - 2026-11-19: paged writer start_sync waits and the buffer range-sync tests (sync counts).
 - 2026-11-19: archive async start_sync step 4 (pipelined start_sync, 11 of 15 tests).
 - 2026-11-19: async start_sync step 4b (oversized marker generations, 4 marker tests).
+- 2026-11-19: slow-test profile (ReleaseSafe, 1,263 s on one thread): the model checker runs
+  `Options.workers` threads as Stateright's `threads(n)` (same state counts), and the payment and
+  close conformance groups verify their entries concurrently; commonware's sizes unchanged.

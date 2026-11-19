@@ -23,7 +23,14 @@ const max_states = 1 << 23;
 fn check(epochs: m.Epoch, budget: w.Budget, flows: []const []const u8) !void {
     var model = try wl.Workload.init(epochs, budget);
     defer model.deinit();
-    const options: checker.Options = .{ .max_states = max_states };
+    // As commonware's `threads(available_parallelism)`.
+    const cores = std.Thread.getCpuCount() catch 1;
+    const workers: u32 = @intCast(@min(cores, checker.max_workers));
+    const options: checker.Options = .{
+        .max_states = max_states,
+        .workers = workers,
+        .io = std.testing.io,
+    };
     var result = checker.Checker(wl.Workload).run(gpa, &model, options) catch |err| {
         std.debug.print("model: the check stopped with {t}\n", .{err});
         return err;
