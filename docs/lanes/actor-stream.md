@@ -121,13 +121,14 @@ Drift check (commonware 43b357a41 to a9ffc25f3, p2p lane, 2026-11-19): stream ch
 Cargo.toml files. Nothing to port.
 
 Every `#[test]`/`#[test_traced]`/`#[rstest]` fn in commonware `stream/src`, matched to a zigware
-test by name or by reading both bodies (a zigware test may cover several). 39 tests: 35 ported, 1
-open, 3 not portable.
+test by name or by reading both bodies (a zigware test may cover several). 39 tests: 37 ported, 0
+open, 2 not portable (recounted 2026-11-19: the open item below is ported, and the
+`should_panic` test is a death test).
 
 | commonware file | tests | ported | open | not portable |
 |---|---|---|---|---|
-| `lib.rs` | 4 | 3 | 1 | 0 |
-| `cups/protocol.rs` | 14 | 13 | 0 | 1 |
+| `lib.rs` | 4 | 4 | 0 | 0 |
+| `cups/protocol.rs` | 14 | 14 | 0 | 0 |
 | `sake/protocol.rs` | 9 | 8 | 0 | 1 |
 | `utils/codec.rs` | 12 | 11 | 0 | 1 |
 
@@ -138,9 +139,10 @@ Open:
   src/stream/utils/timeout_test.zig (Zig calls are eager, so this may only need to check that the
   attempt returns Timeout without waiting another 50ms)
 
+Since ported: `cups/protocol.rs` `test_header_len_rejects_oversized_payload` (`#[should_panic]`)
+is a `utils.death.expect_panic` test in `cups_test.zig`; removing `header_len`'s assert fails it.
+
 Not portable:
-- `cups/protocol.rs` `test_header_len_rejects_oversized_payload`: #[should_panic] (header_len panics
-  on payload > MAX_SIZE); Zig asserts cannot be caught in tests
 - `sake/protocol.rs` `test_recv_decrypts_unique_frame_in_place`: Checks that IoBufs plaintext points
   into the stream's returned buffer; Zig receivers always decrypt in their own buffer (no zero-copy
   stream buffers); recorded in docs/lanes/actor-stream.md Decisions

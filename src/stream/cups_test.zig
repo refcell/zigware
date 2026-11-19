@@ -68,6 +68,16 @@ const AdmitAll = struct {
 
 const TestCups = cups.Cups(TestHandshake, RecordCipher);
 
+test "header len rejects oversized payload" {
+    // commonware `test_header_len_rejects_oversized_payload` (`should_panic`, "payload exceeds
+    // stream limit"): the assert that guards `header_len`.
+    try utils.death.expect_panic(@src(), "reached unreachable code", struct {
+        fn body() !void {
+            _ = cups.header_len(RecordCipher, .v1, std.math.maxInt(u32));
+        }
+    }.body);
+}
+
 fn run_deterministic(comptime function: anytype, args: anytype) !void {
     var runner = try runtime.deterministic.Runner.init(testing.allocator, .{});
     defer runner.deinit();
