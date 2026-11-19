@@ -202,3 +202,5 @@ qmdb `current` (balances, over the MMB) and `keyless` (payout log, over the MMR)
 - 2026-11-18: model.rs groundwork: World, its fingerprint, and the memoized committee replay.
 - 2026-11-19: model.rs: the workload, its seven properties, and all six workloads (five slow).
 - 2026-11-19: storage index benches (`src/storage/index/benches.zig`).
+- 2026-11-19: conformance payment and close (about 96 s and 63 s in ReleaseSafe) run only with
+  `-Dslow-tests`, in every mode; nightly covers them.

@@ -27,6 +27,12 @@ fn skip_slow() error{SkipZigTest}!void {
     if (builtin.mode == .debug and !build_options.slow_tests) return error.SkipZigTest;
 }
 
+/// For the cases that derive an ed25519 key for every public key drawn (about 96 s and 63 s in
+/// ReleaseSafe): skipped in every mode unless `-Dslow-tests` (nightly runs them).
+fn skip_unless_slow_tests() error{SkipZigTest}!void {
+    if (!build_options.slow_tests) return error.SkipZigTest;
+}
+
 fn CodecConformance(comptime T: type) type {
     return struct {
         fn gen(gpa: Allocator, u: *arb.Unstructured) arb.Error!T {
@@ -77,7 +83,7 @@ test "conformance: matrix opening" {
 }
 
 test "conformance: payment" {
-    try skip_slow();
+    try skip_unless_slow_tests();
     const tests = "payment::tests::conformance::";
     try verify(tests ++ "CodecConformance<State<PublicKey,Digest>>", mod.State(PublicKey, Digest));
     try verify(tests ++ "CodecConformance<Signatures<PublicKey>>", mod.Signatures(PublicKey));
@@ -100,7 +106,7 @@ test "conformance: settlement flow" {
 }
 
 test "conformance: close" {
-    try skip_slow();
+    try skip_unless_slow_tests();
     const tests = "close::tests::conformance::";
     try verify(tests ++ "CodecConformance<Deposit<PublicKey,u64>>", mod.Deposit(PublicKey, u64));
     try verify(
