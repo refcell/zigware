@@ -1839,3 +1839,41 @@ test "read_many_into: reads each missing page once under eviction" {
     for (buf, 0..) |value, page| try testing.expectEqual(@as(u8, @intCast(page)), value);
     try testing.expectEqual(reads + offsets.len, h.storage.reads);
 }
+
+test "read_ranges_into: missed ranges on adjacent pages share one blob read" {
+    // Cold ranges on pages 0-1 and page 2 form one run; page 5 starts another, and a range
+    // in a cached page needs none. A read per range or per page would take more reads.
+    var h = try Harness.init();
+    defer h.deinit();
+    var w = try h.writer("coalesce");
+    defer w.deinit();
+    var data: [6 * page_size + 5]u8 = undefined;
+    for (&data, 0..) |*byte, index| byte.* = @intCast(index % 253);
+    _ = try w.append(&data);
+    try w.sync();
+    const ranges = [_]W.Range{
+        .{ .offset = 3, .len = 4 },
+        .{ .offset = page_size - 2, .len = 5 },
+        .{ .offset = 2 * page_size + 1, .len = 2 },
+        .{ .offset = 4 * page_size, .len = 3 },
+        .{ .offset = 5 * page_size + 7, .len = 6 },
+    };
+    var expected: [20]u8 = undefined;
+    var start: usize = 0;
+    for (ranges) |range| {
+        const at: usize = @intCast(range.offset);
+        @memcpy(expected[start..][0..range.len], data[at..][0..range.len]);
+        start += range.len;
+    }
+    h.cache_ref.clear();
+    var one: [1]u8 = undefined;
+    try w.read_into(&one, 4 * page_size);
+    const reads_before = h.storage.reads;
+    var out: [20]u8 = @splat(0xEE);
+    try testing.expectEqual(1, try w.read_ranges_into(&out, &ranges));
+    try testing.expectEqualSlices(u8, &expected, &out);
+    try testing.expectEqual(reads_before + 2, h.storage.reads);
+    // The run's pages are cached now.
+    try testing.expectEqual(ranges.len, try w.read_ranges_into(&out, &ranges));
+    try testing.expectEqual(reads_before + 2, h.storage.reads);
+}

@@ -74,27 +74,150 @@ pub const View = struct {
     }
 
     /// Read `ranges` into consecutive slots of `buf`. Returns how many were served from the
-    /// tail and page cache without a blob read (empty ranges count as served).
+    /// tail and page cache without a blob read (empty ranges count as served). Missed ranges
+    /// whose pages touch or overlap coalesce into runs, and each run is one blob read of its
+    /// physical pages (at most `max_run_pages` at a time), not one read per page or range.
     pub fn read_ranges_into(self: View, buf: []u8, ranges: []const Range) Error!usize {
         try self.validate_ranges(buf.len, ranges);
+        const gpa = self.cache_ref.gpa;
+        var missed = try std.DynamicBitSetUnmanaged.initEmpty(gpa, ranges.len);
+        defer missed.deinit(gpa);
         // Like commonware, every range tries the cache before any blob read, so the count
         // does not depend on pages an earlier miss brought in.
         var served: usize = 0;
         var start: usize = 0;
-        for (ranges) |range| {
-            if (self.try_read_sync_into(buf[start..][0..range.len], range.offset)) served += 1;
-            start += range.len;
-        }
-        if (served == ranges.len) return served;
-        start = 0;
-        for (ranges) |range| {
+        for (ranges, 0..) |range, index| {
             const slot = buf[start..][0..range.len];
             start += range.len;
-            if (self.try_read_sync_into(slot, range.offset)) continue;
-            try self.read_into(slot, range.offset);
+            if (self.try_read_sync_into(slot, range.offset)) served += 1 else missed.set(index);
         }
         assert(start == buf.len and served <= ranges.len);
+        if (served == ranges.len) return served;
+        // One page buffer serves every run; no run spans more pages than the missed ranges.
+        const physical: usize = @intCast(@as(u64, self.cache_ref.page_size) +
+            paged.checksum_size);
+        const bytes = try gpa.alloc(u8, self.run_pages_bound(ranges, &missed) * physical);
+        defer gpa.free(bytes);
+        var run: ?Run = null;
+        start = 0;
+        for (ranges, 0..) |range, index| {
+            const slot_start = start;
+            start += range.len;
+            if (!missed.isSet(index)) continue;
+            // The tail part was copied by the probe; only the part below the tail is missing.
+            const below = self.copy_tail_overlap(buf[slot_start..][0..range.len], range.offset);
+            assert(below > 0); // A range wholly in the tail never misses.
+            const first, _ = self.cache_ref.offset_to_page(range.offset);
+            const last, _ = self.cache_ref.offset_to_page(range.offset + below - 1);
+            if (run) |*current| {
+                if (first <= current.last + 1 and @max(current.last, last) - current.first <
+                    max_run_pages)
+                {
+                    current.last = @max(current.last, last);
+                    current.end = index + 1;
+                    continue;
+                }
+                try self.read_run(buf, bytes, ranges, &missed, current.*);
+            }
+            run = .{
+                .first = first,
+                .last = last,
+                .begin = index,
+                .end = index + 1,
+                .slot_start = slot_start,
+            };
+        }
+        if (run) |current| try self.read_run(buf, bytes, ranges, &missed, current);
         return served;
+    }
+
+    /// The most physical pages one coalesced blob read covers. Eight 4 KiB pages make a
+    /// 32 KiB run buffer, the general-purpose allocator's largest size class: a larger buffer
+    /// is mapped and faulted in afresh by every call.
+    const max_run_pages: u64 = 8;
+
+    /// The most pages one run of the missed `ranges` reads at a time: the pages between the
+    /// first and last missed byte, capped at `max_run_pages`.
+    fn run_pages_bound(
+        self: View,
+        ranges: []const Range,
+        missed: *const std.DynamicBitSetUnmanaged,
+    ) usize {
+        const first_index = missed.findFirstSet().?;
+        const last_index = missed.findLastSet().?;
+        assert(first_index <= last_index and last_index < ranges.len);
+        const first, _ = self.cache_ref.offset_to_page(ranges[first_index].offset);
+        const last_range = ranges[last_index];
+        assert(last_range.len > 0);
+        const last, _ = self.cache_ref.offset_to_page(last_range.offset + last_range.len - 1);
+        return @intCast(@min(last - first + 1, max_run_pages));
+    }
+
+    /// Missed ranges `[begin, end)` whose pages span `[first, last]`; the first range's slot
+    /// starts at `slot_start` in the caller's buffer.
+    const Run = struct { first: u64, last: u64, begin: usize, end: usize, slot_start: usize };
+
+    /// Read `run`'s pages from the blob in reads of at most `max_run_pages`, validate and
+    /// cache them, and copy each missed range's bytes below the tail into its slot.
+    fn read_run(
+        self: View,
+        buf: []u8,
+        bytes: []u8,
+        ranges: []const Range,
+        missed: *const std.DynamicBitSetUnmanaged,
+        run: Run,
+    ) Error!void {
+        assert(run.first <= run.last and run.begin < run.end);
+        const page_size_value: u64 = self.cache_ref.page_size;
+        const physical: usize = @intCast(page_size_value + paged.checksum_size);
+        const chunk_pages = @min(run.last - run.first + 1, max_run_pages);
+        assert(bytes.len >= chunk_pages * physical);
+        var page = run.first;
+        while (page <= run.last) {
+            const count: usize = @intCast(@min(run.last - page + 1, max_run_pages));
+            const logical = try self.read_pages(bytes[0 .. count * physical], page, count);
+            const span_start = page * page_size_value;
+            var slot_start = run.slot_start;
+            for (ranges[run.begin..run.end], run.begin..) |range, index| {
+                const slot = buf[slot_start..][0..range.len];
+                slot_start += range.len;
+                if (!missed.isSet(index)) continue;
+                const below_end = @min(range.offset + range.len, self.tail_offset);
+                const lo = @max(range.offset, span_start);
+                const hi = @min(below_end, span_start + logical.len);
+                if (lo >= hi) continue;
+                const len: usize = @intCast(hi - lo);
+                const from: usize = @intCast(lo - span_start);
+                @memcpy(slot[@intCast(lo - range.offset)..][0..len], logical[from..][0..len]);
+            }
+            page += count;
+        }
+        assert(page == run.last + 1);
+    }
+
+    /// Read `count` consecutive physical pages starting at `first` into `bytes` with one blob
+    /// read, validate each, compact their logical bytes to the front, cache them, and return
+    /// the logical bytes. Pages below the tail are full; a shorter one is a bad checksum.
+    fn read_pages(self: View, bytes: []u8, first: u64, count: usize) Error![]const u8 {
+        const page_size_value: usize = self.cache_ref.page_size;
+        const start, const physical = try paged.physical_page(first, page_size_value);
+        assert(bytes.len == count * physical);
+        try self.blob.read_at(start, bytes);
+        for (0..count) |k| {
+            const page_bytes = bytes[k * physical ..][0..physical];
+            const active = paged.Checksum.validate_page(page_bytes) orelse
+                return error.InvalidChecksum;
+            if (active.len != page_size_value) return error.InvalidChecksum;
+            // Moving left never overruns a later page's unread bytes; `@memmove` is a block
+            // copy, where `copyForwards` copies byte by byte.
+            if (k > 0) @memmove(
+                bytes[k * page_size_value ..][0..page_size_value],
+                page_bytes[0..page_size_value],
+            );
+        }
+        const logical = bytes[0 .. count * page_size_value];
+        assert(self.cache_ref.cache(self.id, logical, first * page_size_value) == 0);
+        return logical;
     }
 
     /// Read `item_size`-byte items at sorted `offsets` into consecutive slots of `buf`.

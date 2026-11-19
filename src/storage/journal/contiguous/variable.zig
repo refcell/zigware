@@ -876,6 +876,8 @@ pub fn Journal(comptime V: type) type {
         /// The size proven durable for both the data and the offsets.
         barrier: Barrier,
         scratch: std.ArrayList(u8) = .empty,
+        /// Staging bytes `read_many` reuses across calls (commonware's per-thread scratch).
+        read_scratch: ReadScratch = .{},
         starts: std.ArrayList(usize) = .empty,
         positions: std.ArrayList(u64) = .empty,
         failed: bool = false,
@@ -954,6 +956,7 @@ pub fn Journal(comptime V: type) type {
             self.barrier.deinit();
             self.metrics.deinit();
             self.scratch.deinit(self.gpa);
+            self.read_scratch.bytes.deinit(self.gpa);
             self.starts.deinit(self.gpa);
             self.positions.deinit(self.gpa);
             self.names.deinit(self.gpa);
@@ -1273,15 +1276,20 @@ pub fn Journal(comptime V: type) type {
             self.metrics.read_many_calls.metric().inc();
             const timing = self.metrics.time("read_many_duration");
             defer timing.finish();
-            const slots = try self.gpa.alloc(?V, positions.len);
-            defer self.gpa.free(slots);
-            @memset(slots, null);
-            errdefer for (slots) |slot| if (slot) |item| codec.free(V, self.gpa, item);
+            // Items decode straight into `out`; a bitset tracks the filled slots, so the batch
+            // is never staged and copied.
+            var filled = try std.DynamicBitSetUnmanaged.initEmpty(self.gpa, positions.len);
+            defer filled.deinit(self.gpa);
+            const slots: Slots = .{ .direct = .{ .items = out, .filled = &filled } };
+            errdefer {
+                var owned = filled.iterator(.{});
+                while (owned.next()) |index| codec.free(V, self.gpa, out[index]);
+            }
             var misses: std.ArrayList(Miss) = .empty;
             defer misses.deinit(self.gpa);
             try self.read_many_sync_pass(positions, slots, &misses);
             try self.fetch_misses(misses.items, slots);
-            for (slots, out) |slot, *item| item.* = slot.?;
+            assert(filled.count() == positions.len);
         }
 
         /// The item if its offset and frame are readable without I/O.
@@ -1303,7 +1311,8 @@ pub fn Journal(comptime V: type) type {
                 assert(previous < position);
             }
             @memset(out, null);
-            self.read_many_sync_pass(positions, out, null) catch |err| switch (err) {
+            const slots: Slots = .{ .optional = out };
+            self.read_many_sync_pass(positions, slots, null) catch |err| switch (err) {
                 error.OutOfMemory => {},
             };
         }
@@ -1318,16 +1327,50 @@ pub fn Journal(comptime V: type) type {
             return next;
         }
 
-        /// Fill `out[i]` for each readable position whose offset and frame are cached and whose
+        /// Where the batched passes put decoded items: `try_read_many_sync`'s optional slots,
+        /// or `read_many`'s output with a bitset of the filled ones.
+        const Slots = union(enum) {
+            optional: []?V,
+            direct: struct { items: []V, filled: *std.DynamicBitSetUnmanaged },
+
+            fn len(slots: Slots) usize {
+                return switch (slots) {
+                    .optional => |items| items.len,
+                    .direct => |direct| direct.items.len,
+                };
+            }
+
+            fn has(slots: Slots, index: usize) bool {
+                return switch (slots) {
+                    .optional => |items| items[index] != null,
+                    .direct => |direct| direct.filled.isSet(index),
+                };
+            }
+
+            /// Store `item` in an empty slot; the slot owns it.
+            fn put(slots: Slots, index: usize, item: V) void {
+                assert(!slots.has(index));
+                switch (slots) {
+                    .optional => |items| items[index] = item,
+                    .direct => |direct| {
+                        direct.items[index] = item;
+                        direct.filled.set(index);
+                    },
+                }
+                assert(slots.has(index));
+            }
+        };
+
+        /// Fill slot `i` for each readable position whose offset and frame are cached and whose
         /// frame decodes. Appends a `Miss` to `misses` (when given) for every other position,
         /// carrying the offsets this pass found so completion can skip those lookups.
         fn read_many_sync_pass(
             self: *const Self,
             positions: []const u64,
-            out: []?V,
+            slots: Slots,
             misses: ?*std.ArrayList(Miss),
         ) Allocator.Error!void {
-            assert(out.len == positions.len);
+            assert(slots.len() == positions.len);
             if (positions.len == 0) return;
             // A frame at p spans [off(p), off(p + 1)), or [off(p), blob size) when p is its
             // blob's last readable position. Positions and their same-blob successors
@@ -1351,9 +1394,9 @@ pub fn Journal(comptime V: type) type {
             var extents: std.ArrayList(Extent) = try .initCapacity(self.gpa, positions.len);
             defer extents.deinit(self.gpa);
             self.cached_frame_extents(positions, lookups[0..count], offsets, &extents);
-            try self.serve_extents(positions, extents.items, out);
+            try self.serve_extents(positions, extents.items, slots);
             const list = misses orelse return;
-            try self.collect_misses(positions, lookups[0..count], offsets, out, list);
+            try self.collect_misses(positions, lookups[0..count], offsets, slots, list);
         }
 
         /// Resolve ordered, disjoint frame extents from cached offsets or length prefixes into
@@ -1407,28 +1450,31 @@ pub fn Journal(comptime V: type) type {
             self: *const Self,
             positions: []const u64,
             extents: []const Extent,
-            out: []?V,
+            slots: Slots,
         ) Allocator.Error!void {
             var ranges: std.ArrayList(paged.Writer.Range) = .empty;
             defer ranges.deinit(self.gpa);
             var missed: std.ArrayList(usize) = .empty;
             defer missed.deinit(self.gpa);
-            var buf: std.ArrayList(u8) = .empty;
-            defer buf.deinit(self.gpa);
+            var local: std.ArrayList(u8) = .empty;
+            defer local.deinit(self.gpa);
+            const borrowed = self.borrow_scratch();
+            defer if (borrowed != null) self.return_scratch();
+            const buf = borrowed orelse &local;
             var hits: u64 = 0;
             var group_start: usize = 0;
             while (group_start < extents.len) {
                 const first = positions[extents[group_start].index];
                 const blob = position_to_blob(first, self.items_per_blob);
-                // One blob per group, staged at most `max_stage_bytes` at a time (a larger
-                // frame is staged alone).
+                // One blob per group, staged at most `stage_chunk_bytes` at a time (a larger
+                // frame alone) so the staged bytes stay cache-resident until decoded.
                 var group_end = group_start + 1;
                 var total: usize = extents[group_start].len;
                 while (group_end < extents.len) : (group_end += 1) {
                     const extent = extents[group_end];
                     const position = positions[extent.index];
-                    const next_blob = position_to_blob(position, self.items_per_blob);
-                    if (next_blob != blob or total + extent.len > max_stage_bytes) break;
+                    if (position_to_blob(position, self.items_per_blob) != blob) break;
+                    if (extent.len > stage_chunk_bytes - @min(total, stage_chunk_bytes)) break;
                     total += extent.len;
                 }
                 const group = extents[group_start..group_end];
@@ -1442,7 +1488,7 @@ pub fn Journal(comptime V: type) type {
                 const view = self.data_writer(positions[group[0].index]).view();
                 const miss_count =
                     view.try_read_ranges_sync_into(buf.items, ranges.items, missed.items);
-                hits += self.decode_group(group, buf.items, missed.items[0..miss_count], out);
+                hits += self.decode_group(group, buf.items, missed.items[0..miss_count], slots);
             }
             self.metrics.cache_hits.metric().inc_by(hits);
             self.metrics.items_read.metric().inc_by(hits);
@@ -1455,7 +1501,7 @@ pub fn Journal(comptime V: type) type {
             group: []const Extent,
             bytes: []const u8,
             missed: []const usize,
-            out: []?V,
+            slots: Slots,
         ) u64 {
             var served: u64 = 0;
             var start: usize = 0;
@@ -1470,7 +1516,7 @@ pub fn Journal(comptime V: type) type {
                 const cfg = self.codec_config;
                 const compressed = self.compression != null;
                 const decoded = decode_frame_span(V, self.gpa, frame_bytes, cfg, compressed);
-                out[extent.index] = decoded catch continue;
+                slots.put(extent.index, decoded catch continue);
                 served += 1;
             }
             assert(start == bytes.len);
@@ -1484,13 +1530,13 @@ pub fn Journal(comptime V: type) type {
             positions: []const u64,
             lookups: []const u64,
             offsets: []const ?u64,
-            out: []const ?V,
+            slots: Slots,
             misses: *std.ArrayList(Miss),
         ) Allocator.Error!void {
             assert(lookups.len == offsets.len);
             var lookup_index: usize = 0;
-            for (positions, out, 0..) |position, slot, index| {
-                if (slot != null) continue;
+            for (positions, 0..) |position, index| {
+                if (slots.has(index)) continue;
                 while (lookups[lookup_index] != position) lookup_index += 1;
                 const end = if (self.next_in_blob(position) != null)
                     offsets[lookup_index + 1]
@@ -1509,7 +1555,7 @@ pub fn Journal(comptime V: type) type {
         /// Read the items for `misses` (strictly increasing by position) into their slots.
         /// Offsets the cached pass did not find come from one batched read of the offsets
         /// journal; each data blob's frames then come from one batched read.
-        fn fetch_misses(self: *const Self, misses: []const Miss, out: []?V) Error!void {
+        fn fetch_misses(self: *const Self, misses: []const Miss, slots: Slots) Error!void {
             if (misses.len == 0) return;
             // Validate before consulting the offsets so a declined out-of-bounds position
             // surfaces as a range error rather than corruption.
@@ -1540,7 +1586,7 @@ pub fn Journal(comptime V: type) type {
                     misses[group_end].position,
                     self.items_per_blob,
                 ) == blob) group_end += 1;
-                try self.read_frames(misses[group_start..group_end], &cursor, out);
+                try self.read_frames(misses[group_start..group_end], &cursor, slots);
                 group_start = group_end;
             }
             self.metrics.cache_misses.metric().inc_by(misses.len);
@@ -1553,7 +1599,7 @@ pub fn Journal(comptime V: type) type {
             self: *const Self,
             group: []const Miss,
             cursor: *Cursor,
-            out: []?V,
+            slots: Slots,
         ) Error!void {
             assert(group.len > 0);
             const writer = self.data_writer(group[0].position);
@@ -1577,28 +1623,50 @@ pub fn Journal(comptime V: type) type {
                 range.* = .{ .offset = offset, .len = len };
                 previous_end = end;
             }
-            // Every extent is checked above; the reads stage at most `max_stage_bytes` at a
-            // time (a larger frame alone).
-            var buf: std.ArrayList(u8) = .empty;
-            defer buf.deinit(self.gpa);
+            var local: std.ArrayList(u8) = .empty;
+            defer local.deinit(self.gpa);
+            const borrowed = self.borrow_scratch();
+            defer if (borrowed != null) self.return_scratch();
+            const buf = borrowed orelse &local;
+            const spans = try self.gpa.alloc(paged.Writer.Range, ranges.len);
+            defer self.gpa.free(spans);
+            // Every extent is checked above; the reads stage at most `stage_chunk_bytes` at a
+            // time (a larger frame alone), each chunk's adjacent frames as one span.
             var chunk_start: usize = 0;
             var staged: usize = 0;
             while (chunk_start < ranges.len) {
                 var chunk_end = chunk_start + 1;
                 var chunk_len = ranges[chunk_start].len;
-                while (chunk_end < ranges.len and
-                    chunk_len + ranges[chunk_end].len <= max_stage_bytes) : (chunk_end += 1)
-                {
+                while (chunk_end < ranges.len) : (chunk_end += 1) {
+                    const room = stage_chunk_bytes - @min(chunk_len, stage_chunk_bytes);
+                    if (ranges[chunk_end].len > room) break;
                     chunk_len += ranges[chunk_end].len;
                 }
                 try buf.resize(self.gpa, chunk_len);
                 const chunk = ranges[chunk_start..chunk_end];
-                _ = try writer.view().read_ranges_into(buf.items, chunk);
-                try self.decode_frames(group[chunk_start..chunk_end], chunk, buf.items, out);
+                const span_count = merge_spans(chunk, spans);
+                _ = try writer.view().read_ranges_into(buf.items, spans[0..span_count]);
+                try self.decode_frames(group[chunk_start..chunk_end], chunk, buf.items, slots);
                 staged += chunk_len;
                 chunk_start = chunk_end;
             }
             assert(staged == total);
+        }
+
+        /// Borrow the journal's read scratch, or null while another reader holds it (that
+        /// reader's caller then stages into a buffer of its own).
+        fn borrow_scratch(self: *const Self) ?*std.ArrayList(u8) {
+            // The journal lives in mutable memory; only the `busy` holder touches `bytes`.
+            const scratch: *ReadScratch = @constCast(&self.read_scratch);
+            if (scratch.busy.cmpxchgStrong(false, true, .acquire, .monotonic) != null) return null;
+            assert(scratch.busy.load(.monotonic));
+            return &scratch.bytes;
+        }
+
+        fn return_scratch(self: *const Self) void {
+            const scratch: *ReadScratch = @constCast(&self.read_scratch);
+            assert(scratch.busy.load(.monotonic));
+            scratch.busy.store(false, .release);
         }
 
         /// Decode each miss's frame from consecutive spans of `bytes` into its slot.
@@ -1607,7 +1675,7 @@ pub fn Journal(comptime V: type) type {
             misses: []const Miss,
             ranges: []const paged.Writer.Range,
             bytes: []const u8,
-            out: []?V,
+            slots: Slots,
         ) Error!void {
             assert(misses.len == ranges.len);
             var start: usize = 0;
@@ -1616,7 +1684,8 @@ pub fn Journal(comptime V: type) type {
             for (misses, ranges) |miss, range| {
                 const frame_bytes = bytes[start..][0..range.len];
                 start += range.len;
-                out[miss.index] = try decode_frame_span(V, self.gpa, frame_bytes, cfg, compressed);
+                const item = try decode_frame_span(V, self.gpa, frame_bytes, cfg, compressed);
+                slots.put(miss.index, item);
             }
             assert(start == bytes.len);
         }
@@ -1714,9 +1783,32 @@ pub fn Journal(comptime V: type) type {
     };
 }
 
-/// The most bytes `read_many` stages for one batched read; a larger frame is staged alone.
-/// commonware reuses one scratch buffer; a bound keeps a fresh buffer per call small.
-const max_stage_bytes: usize = 256 * 1024;
+/// The most bytes `read_many` stages before decoding them; a larger frame is staged alone.
+/// commonware stages a whole blob's frames at once; bounded chunks of the reused scratch keep
+/// the staged bytes in cache until they are decoded, and nothing else differs.
+const stage_chunk_bytes: usize = 256 * 1024;
+
+/// Merge byte-adjacent `ranges` into `spans` (commonware's `spans`), returning the count.
+fn merge_spans(ranges: []const paged.Writer.Range, spans: []paged.Writer.Range) usize {
+    assert(ranges.len > 0 and spans.len >= ranges.len);
+    var count: usize = 0;
+    for (ranges) |range| {
+        if (count > 0 and spans[count - 1].offset + spans[count - 1].len == range.offset) {
+            spans[count - 1].len += range.len;
+            continue;
+        }
+        spans[count] = range;
+        count += 1;
+    }
+    assert(count > 0 and count <= ranges.len);
+    return count;
+}
+
+/// The staging buffer `read_many` reuses, held by one reader at a time.
+const ReadScratch = struct {
+    busy: std.atomic.Value(bool) = .init(false),
+    bytes: std.ArrayList(u8) = .empty,
+};
 
 /// A position the cached pass of `read_many` could not serve (commonware's `Miss`).
 const Miss = struct {
