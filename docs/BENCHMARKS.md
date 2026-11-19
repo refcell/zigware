@@ -446,7 +446,7 @@ number is the best of the three medians. The 1-minute load average was 63 to 78.
 | `overflow_replace` | `capacity=1024 position=oldest` | 416 µs | 272 µs | 0.65× (fixed, see below) |
 | `concurrent_enqueue` | `producers=4 capacity=65536` | 3.74 ms | 1.66 ms | 0.45× |
 
-Fixed in 9cac0dd6:
+Fixed in d2b6c4f0:
 
 - **`try_recv_ready`, before 1.49× (10.8 µs against 7.25 µs at load 34 to 50).** Every pop
   locked and unlocked one `std.Io.Mutex` that guarded ready and overflow. With the lock
