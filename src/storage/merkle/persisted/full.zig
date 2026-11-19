@@ -363,9 +363,10 @@ pub fn Merkle(comptime F: type, comptime Digest: type) type {
                 const orphan = anchors.retained_size != journal.size() and
                     (max_leaves == null or retained_leaves < max_leaves.?);
                 if (orphan) {
+                    // A torn leaf is ignored; a cancel must not be swallowed.
                     if (journal.item(anchors.retained_size)) |leaf| {
                         try mem.add_leaf_digest(gpa, hasher, leaf);
-                    } else |_| {}
+                    } else |err| if (err == error.Canceled) return err;
                 }
                 return .{
                     .gpa = gpa,
