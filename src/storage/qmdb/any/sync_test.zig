@@ -13,6 +13,8 @@ const sync = @import("../sync/mod.zig");
 const qmdb_support = @import("../test_support.zig");
 const any_sync = @import("sync.zig");
 const support = @import("test_support.zig");
+const sync_harness = @import("../sync/harness.zig");
+const Sha256 = support.Sha256;
 
 const Digest = support.Digest;
 const metrics = runtime.telemetry.metrics;
@@ -33,6 +35,18 @@ const all_syncs = .{
 
 comptime {
     for (all_syncs) |S| sync.database.assert_database(S);
+}
+
+// The shared sync tests (`sync/harness.zig`), over commonware's any harnesses: fixed digest
+// values and owned byte values, unordered and ordered, both families.
+comptime {
+    const SyncHarness = @import("sync_harness.zig").Harness;
+    for (.{ Mmr, Mmb }) |F| {
+        _ = sync_harness.Tests(SyncHarness(any_sync.Database(support.UnorderedFixed(F), Sha256)));
+        _ = sync_harness.Tests(SyncHarness(any_sync.Database(support.OrderedFixed(F), Sha256)));
+        _ = sync_harness.Tests(SyncHarness(any_sync.Database(support.UnorderedBytes(F), Sha256)));
+        _ = sync_harness.Tests(SyncHarness(any_sync.Database(support.OrderedBytes(F), Sha256)));
+    }
 }
 
 fn Source(comptime S: type) type {

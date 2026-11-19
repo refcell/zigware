@@ -74,11 +74,14 @@ it comes first once `any` lands.
   the opt-in cold_read, constantinople, and scale harnesses.
 - [x] sync journal (`journal.init`/`resize`/`append` over contiguous journals, `Memory(Op)`)
   and the request tracker (`requests.Requests(F)`), with their commonware tests.
-- [ ] sync engine, database, source, harness; per-variant sync glue
-  (`keyless/sync.zig`, `immutable/sync.zig`, `any/sync/`, `current/sync.zig`): handed to the
-  crypto lane (T-01a1d57b-08a0-72a4-a12b-10ff47f6049d), which now owns `qmdb/sync/` and the
-  glue files. This lane keeps current and compact (including `compact/sync.zig`, on its
-  `Database` interface).
+- [x] sync engine, database, source, harness (crypto lane, T-01a1d57b-08a0-72a4-a12b-10ff47f6049d,
+  which owns `qmdb/sync/` and the keyless and immutable glue); any and current glue came back
+  to this lane (above).
+- [x] any and current on the shared sync harness (`any/sync_harness.zig`, commonware's
+  `any/sync/tests.rs` harnesses with `create_*_ops`): `sync_harness.Tests` over any (fixed
+  digests and owned bytes) and current (fixed and variable digests), unordered and ordered,
+  both families, including the engine retention and issue-5669 tests. Current checks its ops
+  root and canonical root. A planted `apply_ops`/`create_ops` mismatch fails all 16.
 - [x] current bounded reopen refuses a pruned floor without discarding later commits
   (clearing's d287952; regression test after clearing's
   `test_bounded_reopen_fails_once_the_floor_is_pruned`).
@@ -223,3 +226,4 @@ it comes first once `any` lands.
 - 2026-11-19: any fixed and variable sync fuzz targets.
 - 2026-11-19: current over owned byte values.
 - 2026-11-19: current variants of the qmdb generate and init benches.
+- 2026-11-19: any and current on the shared sync harness.

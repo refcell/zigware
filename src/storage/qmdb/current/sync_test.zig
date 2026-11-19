@@ -14,6 +14,7 @@ const sync = @import("../sync/mod.zig");
 const qmdb_support = @import("../test_support.zig");
 const current_sync = @import("sync.zig");
 const support = @import("test_support.zig");
+const sync_harness = @import("../sync/harness.zig");
 
 const Digest = support.Digest;
 const Sha256 = support.Sha256;
@@ -35,6 +36,12 @@ const all_syncs = .{
 
 comptime {
     for (all_syncs) |S| sync.database.assert_database(S);
+}
+
+// The shared sync tests (`sync/harness.zig`) over commonware's current harnesses, which
+// check the ops root and the canonical root.
+comptime {
+    for (all_syncs) |S| _ = sync_harness.Tests(@import("../any/sync_harness.zig").Harness(S));
 }
 
 fn Source(comptime S: type) type {
