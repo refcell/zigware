@@ -18,7 +18,13 @@ resize, sync), `runtime.storage`, with the in-memory backend `runtime.storage.me
   buffer (one refill buffer allocated at `init`) and rewinds on failure.
 - [x] paged `Writer.read_many_into`/`read_ranges_into`/`try_read_ranges_sync_into` with
   writer.rs's and view.rs's batch-read tests (cache tried for every range before any blob read).
-- [ ] runtime buffer rest: `Sealed`/`seal`/`snapshot` and the remaining writer tests.
+- [x] paged `View` (view.rs) shared by `Writer` and `Sealed`; `Sealed` (sealed.rs) with
+  `Writer.seal`/`snapshot`/`try_snapshot` and sealed.rs's tests (paged/sealed_test.zig).
+  Not ported: `test_sealed_read_many_into_rejects_unsorted_offsets` (a should_panic: unsorted
+  offsets are an assert), `test_sealed_reads_while_seal_sync_pending` (syncs are synchronous,
+  so `seal` returns a durable view and has no handle), and the two `SplitWriteBlob`
+  partial-page rewrite races (writes cannot pause mid-call on a synchronous blob).
+  `test_replay_with_dont_cache_leaves_cache_cold` waits on ReadOptions threading.
 - [x] journal frame format and durability (frame.rs, durability.rs), byte-identical.
 - [x] journal/segmented: section manager and fixed segmented journal (append, read, replay,
   prune, bounded init, floors and checkpoint restore), torn-page repair; tests incl.

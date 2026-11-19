@@ -24,6 +24,9 @@ const Blob = @import("../../storage.zig").Blob;
 const SyncState = @import("../mod.zig").SyncState;
 const Buffer = @import("tip.zig").Buffer;
 const CacheRef = @import("cache.zig").CacheRef;
+const view_mod = @import("view.zig");
+const View = view_mod.View;
+const Sealed = @import("sealed.zig").Sealed;
 const Checksum = paged.Checksum;
 const ActiveChecksum = paged.ActiveChecksum;
 const checksum_size: usize = paged.checksum_size;
@@ -410,6 +413,59 @@ pub const Writer = struct {
         return self.sync();
     }
 
+    /// Consume the writer: flush and sync every byte, then return a `Sealed` view that owns
+    /// the blob and keeps this writer's page-cache id. On error the writer is still owned by
+    /// the caller (and only `deinit` may follow). commonware starts the sync and hands back
+    /// its handle; blobs sync synchronously here, so the view is durable on return.
+    pub fn seal(self: *Self) Error!Sealed {
+        assert(self.phase == .append);
+        try self.sync();
+        assert(self.buffer.len < self.page_size());
+        const sealed = try self.sealed_handle(true);
+        self.buffer.deinit(self.gpa);
+        self.gpa.free(self.scratch);
+        self.gpa.free(self.page_scratch);
+        self.* = undefined;
+        return sealed;
+    }
+
+    /// Write complete pages, then return an immutable `Sealed` view of the logical bytes. It
+    /// borrows the blob (it must not outlive this writer) and owns a copy of the partial
+    /// page, so later appends do not change what it reads. Durability is not established.
+    pub fn snapshot(self: *Self) Error!Sealed {
+        assert(!self.failed);
+        errdefer self.failed = true;
+        _ = try self.flush_internal(false, false);
+        return self.sealed_handle(false);
+    }
+
+    /// `snapshot` without its flush: null while the write buffer holds a full page that has
+    /// not been written.
+    pub fn try_snapshot(self: *Self) Allocator.Error!?Sealed {
+        assert(!self.failed);
+        if (self.has_flush_work(false)) return null;
+        return try self.sealed_handle(false);
+    }
+
+    fn sealed_handle(self: *Self, owns_blob: bool) Allocator.Error!Sealed {
+        assert(self.current_page * self.page_size() == self.buffer.offset);
+        assert(self.buffer.len < self.page_size());
+        return Sealed.init(
+            self.gpa,
+            self.blob,
+            owns_blob,
+            self.cache_ref,
+            self.id,
+            self.size(),
+            self.buffer.partial(),
+        );
+    }
+
+    /// This writer's page-cache id (kept by `seal`).
+    pub fn cache_id(self: *const Self) u64 {
+        return self.id;
+    }
+
     /// Durably retain at most `target` logical bytes. A larger `target` leaves the length
     /// unchanged. Pending writes are synced either way. Recovery only.
     pub fn truncate(self: *Self, target: u64) Error!void {
@@ -493,79 +549,49 @@ pub const Writer = struct {
         return .{ .slot = new_slot, .len = new_len, .crc = new_crc };
     }
 
+    /// The read view over the flushed pages and the write buffer.
+    pub fn view(self: *Self) View {
+        assert(self.buffer.size() >= self.buffer.offset);
+        assert(self.buffer.offset == self.current_page * self.page_size());
+        return .{
+            .blob = self.blob,
+            .cache_ref = self.cache_ref,
+            .id = self.id,
+            .size = self.size(),
+            .tail_offset = self.buffer.offset,
+            .tail = self.buffer.bytes(),
+            .page_scratch = self.page_scratch,
+        };
+    }
+
     /// Read exactly `buf.len` bytes at logical `offset`.
     pub fn read_into(self: *Self, buf: []u8, offset: u64) Error!void {
-        const end = std.math.add(u64, offset, buf.len) catch return error.OffsetOverflow;
-        if (end > self.size()) return error.BlobInsufficientLength;
-        const prefix_len = self.copy_tail_overlap(buf, offset);
-        if (prefix_len > 0) try self.read_blob(buf[0..prefix_len], offset);
+        return self.view().read_into(buf, offset);
     }
 
     /// Read exactly `buf.len` bytes at logical `offset` (the `Blob.read_at` argument order).
     pub fn read_at(self: *Self, offset: u64, buf: []u8) Error!void {
-        return self.read_into(buf, offset);
+        return self.view().read_into(buf, offset);
     }
 
     /// Read up to `buf.len` bytes at `offset`, returning how many were available. Fails if
     /// none are.
     pub fn read_up_to(self: *Self, offset: u64, buf: []u8) Error!usize {
-        if (offset >= self.size()) return error.BlobInsufficientLength;
-        const len: usize = @intCast(@min(buf.len, self.size() - offset));
-        try self.read_into(buf[0..len], offset);
-        return len;
+        return self.view().read_up_to(offset, buf);
     }
 
     /// Read into `buf` only from the write buffer and page cache. Returns false (leaving
     /// `buf` unspecified) if any byte needs a blob read.
     pub fn try_read_sync_into(self: *Self, buf: []u8, offset: u64) bool {
-        const end = std.math.add(u64, offset, buf.len) catch return false;
-        if (end > self.size()) return false;
-        const prefix_len = self.copy_tail_overlap(buf, offset);
-        if (prefix_len == 0) return true;
-        return self.cache_ref.read_cached(self.id, buf[0..prefix_len], offset) == prefix_len;
+        return self.view().try_read_sync_into(buf, offset);
     }
 
-    /// A read range: `len` bytes at `offset`.
-    pub const Range = struct { offset: u64, len: usize };
-
-    /// Check `ranges` are sorted, non-overlapping, within the writer, and fill `buf` exactly
-    /// (commonware's `validate_read_ranges`; unsorted ranges or a wrong `buf` are a bug).
-    fn validate_ranges(self: *const Self, buf_len: usize, ranges: []const Range) Error!void {
-        var expected: usize = 0;
-        var previous_end: u64 = 0;
-        for (ranges, 0..) |range, index| {
-            expected += range.len;
-            const end = std.math.add(u64, range.offset, range.len) catch
-                return error.OffsetOverflow;
-            if (index > 0) assert(range.offset >= previous_end);
-            if (end > self.size()) return error.BlobInsufficientLength;
-            previous_end = end;
-        }
-        assert(expected == buf_len);
-    }
+    pub const Range = view_mod.Range;
 
     /// Read `ranges` into consecutive slots of `buf`. Returns how many were served from the
     /// write buffer and page cache without a blob read (empty ranges count as served).
     pub fn read_ranges_into(self: *Self, buf: []u8, ranges: []const Range) Error!usize {
-        try self.validate_ranges(buf.len, ranges);
-        // Like commonware, every range tries the cache before any blob read, so the count
-        // does not depend on pages an earlier miss brought in.
-        var served: usize = 0;
-        var start: usize = 0;
-        for (ranges) |range| {
-            if (self.try_read_sync_into(buf[start..][0..range.len], range.offset)) served += 1;
-            start += range.len;
-        }
-        if (served == ranges.len) return served;
-        start = 0;
-        for (ranges) |range| {
-            const slot = buf[start..][0..range.len];
-            start += range.len;
-            if (self.try_read_sync_into(slot, range.offset)) continue;
-            try self.read_into(slot, range.offset);
-        }
-        assert(start == buf.len and served <= ranges.len);
-        return served;
+        return self.view().read_ranges_into(buf, ranges);
     }
 
     /// Read `item_size`-byte items at sorted `offsets` into consecutive slots of `buf`.
@@ -576,87 +602,17 @@ pub const Writer = struct {
         offsets: []const u64,
         item_size: usize,
     ) Error!usize {
-        assert(item_size > 0);
-        assert(buf.len == offsets.len * item_size);
-        var served: usize = 0;
-        for (offsets, 0..) |offset, index| {
-            if (index > 0) assert(offset >= offsets[index - 1] + item_size);
-            const end = std.math.add(u64, offset, item_size) catch return error.OffsetOverflow;
-            if (end > self.size()) return error.BlobInsufficientLength;
-        }
-        for (offsets, 0..) |offset, index| {
-            const slot = buf[index * item_size ..][0..item_size];
-            if (self.try_read_sync_into(slot, offset)) served += 1;
-        }
-        if (served == offsets.len) return served;
-        for (offsets, 0..) |offset, index| {
-            const slot = buf[index * item_size ..][0..item_size];
-            if (!self.try_read_sync_into(slot, offset)) try self.read_into(slot, offset);
-        }
-        assert(served <= offsets.len);
-        return served;
+        return self.view().read_many_into(buf, offsets, item_size);
     }
 
-    /// Cache-only `read_ranges_into`: writes the indices of ranges that need a blob read into
-    /// `misses` (one slot per range) and returns how many there are. Every index misses when
-    /// the ranges extend past the writer; missed slots in `buf` hold unspecified bytes.
+    /// Cache-only `read_ranges_into` (see `View.try_read_ranges_sync_into`).
     pub fn try_read_ranges_sync_into(
         self: *Self,
         buf: []u8,
         ranges: []const Range,
         misses: []usize,
     ) usize {
-        assert(misses.len >= ranges.len);
-        var count: usize = 0;
-        self.validate_ranges(buf.len, ranges) catch {
-            for (misses[0..ranges.len], 0..) |*miss, index| miss.* = index;
-            return ranges.len;
-        };
-        var start: usize = 0;
-        for (ranges, 0..) |range, index| {
-            const slot = buf[start..][0..range.len];
-            start += range.len;
-            if (self.try_read_sync_into(slot, range.offset)) continue;
-            misses[count] = index;
-            count += 1;
-        }
-        assert(count <= ranges.len);
-        return count;
-    }
-
-    /// Copy the part of `[offset, offset + buf.len)` held in the write buffer; returns the
-    /// length of the prefix below it.
-    fn copy_tail_overlap(self: *const Self, buf: []u8, offset: u64) usize {
-        const tail_start = @max(self.buffer.offset, offset);
-        const end = offset + buf.len;
-        if (tail_start >= end) return buf.len;
-        const prefix_len: usize = @intCast(tail_start - offset);
-        const from: usize = @intCast(tail_start - self.buffer.offset);
-        @memcpy(buf[prefix_len..], self.buffer.bytes()[from..][0 .. buf.len - prefix_len]);
-        return prefix_len;
-    }
-
-    /// Read full pages below the write buffer through the page cache.
-    fn read_blob(self: *Self, buf: []u8, offset: u64) Error!void {
-        const page_size_value = self.page_size();
-        var done = self.cache_ref.read_cached(self.id, buf, offset);
-        while (done < buf.len) {
-            const page, const in_page = self.cache_ref.offset_to_page(offset + done);
-            const logical, _ = try paged.read_page_with_checksum(
-                self.blob,
-                page,
-                page_size_value,
-                self.page_scratch,
-            );
-            // Pages below the tip are full; a shorter one fell back to a partial checksum.
-            if (logical.len != page_size_value) return error.InvalidChecksum;
-            assert(self.cache_ref.cache(self.id, logical, page * page_size_value) == 0);
-            const count = @min(buf.len - done, page_size_value - in_page);
-            @memcpy(buf[done..][0..count], logical[@intCast(in_page)..][0..count]);
-            done += count;
-            done += self.cache_ref.read_cached(self.id, buf[done..], offset + done);
-        }
-        assert(done == buf.len);
+        return self.view().try_read_ranges_sync_into(buf, ranges, misses);
     }
 
     /// Flush buffered data, then return a `Replay` of the logical bytes reading
@@ -820,7 +776,7 @@ pub const Replay = struct {
     skip: usize = 0,
     exhausted: bool = false,
 
-    fn init(
+    pub fn init(
         gpa: Allocator,
         blob: Blob,
         page_size: usize,

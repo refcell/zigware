@@ -37,8 +37,12 @@ const Storage = storage_mod.Storage;
 
 pub const cache = @import("cache.zig");
 pub const tip = @import("tip.zig");
+pub const sealed = @import("sealed.zig");
+pub const view = @import("view.zig");
 pub const writer = @import("writer.zig");
 pub const CacheRef = cache.CacheRef;
+pub const Sealed = sealed.Sealed;
+pub const View = view.View;
 pub const Writer = writer.Writer;
 pub const Replay = writer.Replay;
 pub const read_range = writer.read_range;
