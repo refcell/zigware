@@ -143,6 +143,37 @@ fn probe_resumes_persisted_floor(io: Io) !void {
     try testing.expectEqual(@as(u64, 0), config.discovery.bootstrap.epoch.get());
 }
 
+const Unit = runtime.context.Handle(anyerror!void);
+
+fn completes(ctx: runtime.deterministic.Context) anyerror!void {
+    _ = ctx;
+}
+
+/// Runs until aborted, then counts its drop (commonware's `pending_handle`).
+fn pending(ctx: runtime.deterministic.Context, dropped: *std.atomic.Value(u32)) anyerror!void {
+    defer _ = dropped.fetchAdd(1, .monotonic);
+    var never: Io.Event = .unset;
+    try never.wait(ctx.io());
+    unreachable; // Nothing sets `never`: the wait ends only by cancellation.
+}
+
+fn actor_completion_stops_validator(ctx: runtime.deterministic.Context) !void {
+    var dropped: std.atomic.Value(u32) = .init(0);
+    // Model a clean actor exit alongside siblings that would otherwise run forever.
+    var actors: [8]Unit = undefined;
+    actors[0] = try ctx.child("completes").spawn(completes, .{});
+    for (actors[1..]) |*actor| actor.* = try ctx.child("pending").spawn(pending, .{&dropped});
+    // Supervision must complete and abort every pending sibling.
+    try (try runtime.context.select(anyerror!void, ctx.io(), &actors));
+    try testing.expectEqual(@as(u32, 7), dropped.load(.monotonic));
+}
+
+test "dkg: successful actor completion stops validator" {
+    var runner = try runtime.deterministic.Runner.init(gpa, .{});
+    defer runner.deinit();
+    try (try runner.start_context(actor_completion_stops_validator, .{}));
+}
+
 test "dkg: validator probe resumes persisted floor" {
     var runner = try runtime.deterministic.Runner.init(gpa, .{});
     defer runner.deinit();
