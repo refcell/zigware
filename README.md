@@ -70,9 +70,18 @@ top pane is the indexer storing blocks and finalizations from both networks; the
 are one validator from each network, where `block=Bridge(..)` marks a proposal carrying the
 other network's finalization ([video](docs/assets/bridge-demo.mp4?raw=true)).
 `etc/scripts/record-demo.sh bridge` records it again.
-In the nightly interop check, each network runs two commonware and two zigware validators
-from one shared dealing, and validators of both kinds finalize Bridge blocks that carry
-certificates from the other implementation.
+<p align="center">
+  <img src="docs/assets/interop-bridge-demo.gif" width="800"
+    alt="Mixed commonware and zigware validators on two networks bridge each other's certificates">
+</p>
+
+The same bridge runs with both implementations mixed. Each network has two commonware and two
+zigware validators from one shared dealing (commonware's `dealer` and zigware's `bridge-dealer`
+print identical shares), with commonware's indexer between them. Validators of both kinds
+finalize the same payloads and propose Bridge blocks carrying the other network's certificate,
+which voters of the other implementation verify
+([video](docs/assets/interop-bridge-demo.mp4?raw=true)). The nightly interop check runs this
+with each indexer, and `etc/scripts/record-demo.sh interop-bridge` records it again.
 
 The other examples have their own READMEs and recordings: [chat](examples/chat), an
 encrypted group chat over authenticated p2p, including a session with commonware's Rust chat;
