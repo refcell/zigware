@@ -75,8 +75,11 @@ which every database here is built on.
   (MMR family, 64-byte bitmap chunks), with floor policies, bounded init, and db.rs's core tests
   (exact sizes, floors, and pruning boundaries match commonware's).
 - [x] store: the `qmdb_store_operations` fuzz target (floor oracle on every commit, crash reopens).
-- [ ] fuzz targets: the any batch_root and batching targets.
-- [ ] benches (commonware `qmdb/benches`).
+- [x] fuzz targets: `qmdb_any_{unordered,ordered}_batch_root` (pending, dropped-prefix, and
+  chained schedules against committed rebuilds; same roots and floor walks; recovery).
+- [ ] fuzz target: `qmdb_any_ordered_batching`.
+- [ ] benches for any, immutable, keyless, and store (coordinator split, 2026-11-19: current and
+  compact benches go to storage-qmdb-sync).
 - [x] immutable (fixed, MMR and MMB): `Db`, chained batches, floor-filtered batch reads,
   prune, recovery, `ImmutableMmr/MmbFixedConf` root conformance (matches), mod.rs's core
   scenarios, and a randomized chain check against the reopened rebuild.
@@ -275,3 +278,4 @@ which every database here is built on.
 - 2026-11-18: `qmdb_verify_proof` fuzz target.
 - 2026-11-18: the store (`qmdb/store`).
 - 2026-11-19: `qmdb_store_operations` fuzz target.
+- 2026-11-19: any unordered/ordered batch_root fuzz targets.

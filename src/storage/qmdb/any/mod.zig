@@ -15,6 +15,7 @@ test {
     std.testing.refAllDecls(@This());
     _ = @import("conformance_test.zig");
     _ = @import("floor_conformance_test.zig");
+    _ = @import("batch_root_fuzz_test.zig");
     _ = @import("db_test.zig");
     _ = @import("fuzz_test.zig");
     _ = @import("range.zig");
