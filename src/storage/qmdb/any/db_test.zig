@@ -11,6 +11,7 @@ const floor_mod = @import("../floor.zig");
 const support = @import("test_support.zig");
 const qmdb = @import("../mod.zig");
 const metrics = @import("runtime").telemetry.metrics;
+const qmdb_support = @import("../test_support.zig");
 
 const gpa = testing.allocator;
 const families = .{ merkle.mmr.Family, merkle.mmb.Family };
@@ -968,4 +969,38 @@ test "any ordered range scans match a sorted model under every bound" {
         for (sorted) |k| try testing.expect((try all.next_key()).?.eql(k));
         try testing.expect(try all.next_key() == null);
     }
+}
+
+// Commonware's any/unordered/fixed.rs test_any_unordered_fixed_metrics: the gauges, call
+// counters, and duration histograms after one of each operation, timed on the config's `io`.
+test "any metrics count and time each operation" {
+    const D = support.UnorderedFixed(merkle.mmr.Family);
+    var harness = try support.Harness.init(gpa);
+    defer harness.deinit();
+    var cfg = harness.cfg(D);
+    cfg.io = testing.io;
+    const scope = metrics.Scope.init(&harness.registry).child("db");
+    var db = try D.init(gpa, harness.storage.interface(), scope, cfg, null);
+    defer db.deinit();
+    try support.apply_writes(D, &db, &.{.{ .key = key(1), .value = val(1, 0) }});
+    try expect_value(&db, key(1), val(1, 0));
+    var many: [1]?Digest = undefined;
+    try db.get_many(&.{key(1)}, &many);
+    try testing.expect(many[0].?.eql(val(1, 0)));
+    try db.commit();
+    try db.start_sync();
+    try db.sync();
+    try db.prune(0);
+    try qmdb_support.expect_metric_values(gpa, &harness.registry, &.{
+        .{ "db_size", "4" },                       .{ "db_pruning_boundary", "0" },
+        .{ "db_retained", "4" },                   .{ "db_inactivity_floor", "2" },
+        .{ "db_last_commit", "3" },                .{ "db_get_calls_total", "1" },
+        .{ "db_get_many_calls_total", "1" },       .{ "db_lookups_requested_total", "2" },
+        .{ "db_apply_batch_calls_total", "1" },    .{ "db_operations_applied_total", "3" },
+        .{ "db_commit_calls_total", "1" },         .{ "db_start_sync_calls_total", "1" },
+        .{ "db_sync_calls_total", "1" },           .{ "db_prune_calls_total", "1" },
+        .{ "db_get_duration_count", "1" },         .{ "db_get_many_duration_count", "1" },
+        .{ "db_apply_batch_duration_count", "1" }, .{ "db_commit_duration_count", "1" },
+        .{ "db_sync_duration_count", "1" },        .{ "db_prune_duration_count", "1" },
+    });
 }

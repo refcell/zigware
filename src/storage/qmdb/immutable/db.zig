@@ -37,6 +37,8 @@ pub fn Config(comptime T: type, comptime JournalConfig: type) type {
         merkle: merkle.full.Config,
         /// The operation log.
         log: JournalConfig,
+        /// The clock that times calls into the duration metrics; null skips timing.
+        io: ?std.Io = null,
         /// The translator of the key index.
         translator: T,
     };
@@ -147,7 +149,9 @@ pub fn Db(F: type, K: type, E: type, C: type, H: type, T: type) type {
                 _ = try journal.append(.{ .commit = .{ .metadata = null, .floor = 0 } });
                 try journal.sync();
             }
-            return init_from_log(gpa, scope, journal, cfg.translator);
+            var db = try init_from_log(gpa, scope, journal, cfg.translator);
+            db.metrics.io = cfg.io;
+            return db;
         }
 
         /// Builds the database over an opened `log` whose last operation is a commit (the
@@ -229,6 +233,8 @@ pub fn Db(F: type, K: type, E: type, C: type, H: type, T: type) type {
         /// owns it.
         pub fn get(self: *const Self, key: *const K) !?Value {
             self.metrics.get_calls.metric().inc();
+            const timing = self.metrics.start("get_duration");
+            defer timing.finish();
             self.metrics.lookups_requested.metric().inc();
             return self.get_from(key, 0);
         }
@@ -254,6 +260,8 @@ pub fn Db(F: type, K: type, E: type, C: type, H: type, T: type) type {
             assert(keys.len == out.len);
             if (keys.len == 0) return;
             self.metrics.get_many_calls.metric().inc();
+            const timing = self.metrics.start("get_many_duration");
+            defer timing.finish();
             self.metrics.lookups_requested.metric().inc_by(keys.len);
             var filled: usize = 0;
             errdefer for (out[0..filled]) |value| codec.free(?Value, self.gpa, value);
@@ -332,6 +340,8 @@ pub fn Db(F: type, K: type, E: type, C: type, H: type, T: type) type {
         /// Prunes operations below `location`, which may not exceed the inactivity floor.
         pub fn prune(self: *Self, location: u64) !void {
             self.metrics.prune_calls.metric().inc();
+            const timing = self.metrics.start("prune_duration");
+            defer timing.finish();
             if (location > self.inactivity_floor_loc) return error.PruneBeyondMinRequired;
             _ = try self.journal.prune(location);
             self.snapshot.prune(self.journal.get_bounds().start);
@@ -341,6 +351,8 @@ pub fn Db(F: type, K: type, E: type, C: type, H: type, T: type) type {
         /// Makes every applied operation durable, with no recovery needed on reopen.
         pub fn sync(self: *Self) !void {
             self.metrics.sync_calls.metric().inc();
+            const timing = self.metrics.start("sync_duration");
+            defer timing.finish();
             try self.journal.sync();
         }
 
@@ -353,6 +365,8 @@ pub fn Db(F: type, K: type, E: type, C: type, H: type, T: type) type {
         /// Makes every applied operation durable; reopening may replay the log.
         pub fn commit(self: *Self) !void {
             self.metrics.commit_calls.metric().inc();
+            const timing = self.metrics.start("commit_duration");
+            defer timing.finish();
             try self.journal.commit();
         }
 
@@ -375,6 +389,8 @@ pub fn Db(F: type, K: type, E: type, C: type, H: type, T: type) type {
         /// Applies `batch` and its unapplied ancestors; the caller keeps its reference.
         pub fn apply_batch(self: *Self, batch: *const MerkleizedBatch) !void {
             self.metrics.apply_batch_calls.metric().inc();
+            const timing = self.metrics.start("apply_batch_duration");
+            defer timing.finish();
             try self.validate_batch(batch);
             const db_size = self.journal.size();
             try self.journal.apply_batch(batch.journal_batch);

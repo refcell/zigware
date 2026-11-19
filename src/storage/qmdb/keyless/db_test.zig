@@ -18,6 +18,7 @@ const qmdb = @import("../mod.zig");
 const Sha256 = cryptography.Sha256;
 const U64 = utils.sequence.U64;
 const metrics = runtime.telemetry.metrics;
+const qmdb_support = @import("../test_support.zig");
 const gpa = testing.allocator;
 const families = .{ merkle.mmr.Family, merkle.mmb.Family };
 
@@ -1350,4 +1351,39 @@ test "keyless a chain with rising floors applies through its tip" {
         try testing.expectEqual(@as(u64, 6), db.bounds().end - 1);
         try testing.expectEqual(@as(u64, 5), db.inactivity_floor());
     }
+}
+
+// Commonware's keyless/fixed.rs test_keyless_fixed_metrics: the gauges, call counters, and
+// duration histograms after one of each operation, timed on the config's `io`.
+test "keyless metrics count and time each operation" {
+    const F = merkle.mmr.Family;
+    var harness = try Harness.init();
+    defer harness.deinit();
+    var cfg = harness.cfg(F);
+    cfg.io = testing.io;
+    const scope = metrics.Scope.init(&harness.registry).child("db");
+    var db = try TestDb(F).init(gpa, harness.storage.interface(), scope, cfg, null);
+    defer db.deinit();
+    const location = db.bounds().end;
+    try append_batch(F, &db, &.{U64.init(7)}, null);
+    try testing.expect((try db.get(location)).?.eql(U64.init(7)));
+    var many: [1]?U64 = undefined;
+    try db.get_many(&.{location}, &many);
+    try testing.expect(many[0].?.eql(U64.init(7)));
+    try db.commit();
+    try db.sync();
+    try db.start_sync();
+    try db.prune(0);
+    try qmdb_support.expect_metric_values(gpa, &harness.registry, &.{
+        .{ "db_size", "3" },                       .{ "db_pruning_boundary", "0" },
+        .{ "db_retained", "3" },                   .{ "db_inactivity_floor", "0" },
+        .{ "db_last_commit", "2" },                .{ "db_get_calls_total", "1" },
+        .{ "db_get_many_calls_total", "1" },       .{ "db_lookups_requested_total", "2" },
+        .{ "db_apply_batch_calls_total", "1" },    .{ "db_operations_applied_total", "2" },
+        .{ "db_commit_calls_total", "1" },         .{ "db_sync_calls_total", "1" },
+        .{ "db_start_sync_calls_total", "1" },     .{ "db_prune_calls_total", "1" },
+        .{ "db_get_duration_count", "1" },         .{ "db_get_many_duration_count", "1" },
+        .{ "db_apply_batch_duration_count", "1" }, .{ "db_commit_duration_count", "1" },
+        .{ "db_sync_duration_count", "1" },        .{ "db_prune_duration_count", "1" },
+    });
 }

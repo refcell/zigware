@@ -301,13 +301,16 @@ test "immutable start_sync surfaces a failed sync" {
     }
 }
 
-// fixed.rs `test_fixed_metrics`: the gauges and call counters after one of each operation.
-// zigware's databases do not time their calls yet (they hold no `Io`), so the duration
-// histograms' counts are not checked.
-test "immutable metrics count each operation" {
+// fixed.rs `test_fixed_metrics`: the gauges, call counters, and duration histograms after one
+// of each operation, timed on the config's `io`.
+test "immutable metrics count and time each operation" {
+    const D = support.Fixed(merkle.mmr.Family);
     var harness = try support.Harness.init(gpa);
     defer harness.deinit();
-    var db = try harness.open(merkle.mmr.Family, null);
+    var cfg = harness.cfg(D);
+    cfg.io = testing.io;
+    const scope = metrics.Scope.init(&harness.registry).child("db");
+    var db = try D.init(gpa, harness.storage.interface(), scope, cfg, null);
     defer db.deinit();
     try apply_sets(&db, &.{.{ fill(1), fill(2) }}, null);
     try expect_values(&.{try db.get(&fill(1))}, &.{fill(2)});
@@ -321,13 +324,16 @@ test "immutable metrics count each operation" {
     const text = try harness.registry.encode(gpa);
     defer gpa.free(text);
     const expected = [_][2][]const u8{
-        .{ "db_size", "3" },                    .{ "db_pruning_boundary", "0" },
-        .{ "db_retained", "3" },                .{ "db_inactivity_floor", "0" },
-        .{ "db_last_commit", "2" },             .{ "db_get_calls_total", "1" },
-        .{ "db_get_many_calls_total", "1" },    .{ "db_lookups_requested_total", "2" },
-        .{ "db_apply_batch_calls_total", "1" }, .{ "db_operations_applied_total", "2" },
-        .{ "db_commit_calls_total", "1" },      .{ "db_sync_calls_total", "1" },
-        .{ "db_start_sync_calls_total", "1" },  .{ "db_prune_calls_total", "1" },
+        .{ "db_size", "3" },                       .{ "db_pruning_boundary", "0" },
+        .{ "db_retained", "3" },                   .{ "db_inactivity_floor", "0" },
+        .{ "db_last_commit", "2" },                .{ "db_get_calls_total", "1" },
+        .{ "db_get_many_calls_total", "1" },       .{ "db_lookups_requested_total", "2" },
+        .{ "db_apply_batch_calls_total", "1" },    .{ "db_operations_applied_total", "2" },
+        .{ "db_commit_calls_total", "1" },         .{ "db_sync_calls_total", "1" },
+        .{ "db_start_sync_calls_total", "1" },     .{ "db_prune_calls_total", "1" },
+        .{ "db_get_duration_count", "1" },         .{ "db_get_many_duration_count", "1" },
+        .{ "db_apply_batch_duration_count", "1" }, .{ "db_commit_duration_count", "1" },
+        .{ "db_sync_duration_count", "1" },        .{ "db_prune_duration_count", "1" },
     };
     for (expected) |pair| {
         testing.expect(metrics.has_metric_value(text, pair[0], pair[1])) catch |err| {

@@ -42,6 +42,8 @@ pub fn Config(comptime T: type, comptime JournalConfig: type) type {
         merkle: merkle.full.Config,
         /// The operation log.
         log: JournalConfig,
+        /// The clock that times calls into the duration metrics; null skips timing.
+        io: ?std.Io = null,
         /// The translator of the snapshot index.
         translator: T,
         /// Entries in the `location -> key` cache that resolves snapshot collisions during
@@ -121,7 +123,9 @@ pub fn Db(F: type, U: type, C: type, I: type, H: type, comptime N: usize) type {
                 _ = try log.append(.{ .commit = .{ .metadata = null, .floor = 0 } });
                 try log.sync();
             }
-            return init_from_log(gpa, scope, log, cfg.translator, cfg.init_cache);
+            var db = try init_from_log(gpa, scope, log, cfg.translator, cfg.init_cache);
+            db.metrics.io = cfg.io;
+            return db;
         }
 
         /// Builds the database over an opened `log` whose last operation is a commit
@@ -350,6 +354,8 @@ pub fn Db(F: type, U: type, C: type, I: type, H: type, comptime N: usize) type {
         /// The key's value, if it is active. The caller owns it.
         pub fn get(self: *const Self, key: *const Key) !?Value {
             self.metrics.get_calls.metric().inc();
+            const timing = self.metrics.start("get_duration");
+            defer timing.finish();
             self.metrics.lookups_requested.metric().inc();
             const found = try self.get_with_loc(key) orelse return null;
             return found.update.value;
@@ -360,6 +366,8 @@ pub fn Db(F: type, U: type, C: type, I: type, H: type, comptime N: usize) type {
             assert(keys.len == out.len);
             if (keys.len == 0) return;
             self.metrics.get_many_calls.metric().inc();
+            const timing = self.metrics.start("get_many_duration");
+            defer timing.finish();
             self.metrics.lookups_requested.metric().inc_by(keys.len);
             var filled: usize = 0;
             errdefer for (out[0..filled]) |value| codec.free(?Value, self.gpa, value);
@@ -421,6 +429,8 @@ pub fn Db(F: type, U: type, C: type, I: type, H: type, comptime N: usize) type {
         /// Prunes operations below `location`, which may not exceed the inactivity floor.
         pub fn prune(self: *Self, location: u64) !void {
             self.metrics.prune_calls.metric().inc();
+            const timing = self.metrics.start("prune_duration");
+            defer timing.finish();
             try self.prune_log(location);
             self.prune_bitmap(location);
             self.update_metrics();
@@ -429,6 +439,8 @@ pub fn Db(F: type, U: type, C: type, I: type, H: type, comptime N: usize) type {
         /// Makes every applied operation durable, with no recovery needed on reopen.
         pub fn sync(self: *Self) !void {
             self.metrics.sync_calls.metric().inc();
+            const timing = self.metrics.start("sync_duration");
+            defer timing.finish();
             try self.log.sync();
         }
 
@@ -441,6 +453,8 @@ pub fn Db(F: type, U: type, C: type, I: type, H: type, comptime N: usize) type {
         /// Makes every applied operation durable; reopening may replay the log.
         pub fn commit(self: *Self) !void {
             self.metrics.commit_calls.metric().inc();
+            const timing = self.metrics.start("commit_duration");
+            defer timing.finish();
             try self.log.commit();
         }
 
@@ -461,6 +475,8 @@ pub fn Db(F: type, U: type, C: type, I: type, H: type, comptime N: usize) type {
         /// storage or allocation failure leaves only `deinit` valid.
         pub fn apply_batch(self: *Self, batch: *const MerkleizedBatch) !void {
             self.metrics.apply_batch_calls.metric().inc();
+            const timing = self.metrics.start("apply_batch_duration");
+            defer timing.finish();
             try self.validate_batch(batch);
             const db_size = self.log.size();
             try self.log.apply_batch(batch.journal_batch);
