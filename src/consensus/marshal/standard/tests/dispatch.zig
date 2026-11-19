@@ -12,6 +12,10 @@ const harness = @import("../../mocks/harness.zig");
 const mocks_block = @import("../../mocks/block.zig");
 const mocks_store = @import("../../mocks/store.zig");
 const common = @import("common.zig");
+const parallel = @import("parallel");
+const core = @import("../../core/root.zig");
+const core_variant = @import("../../core/variant.zig");
+const standard_variant = @import("../variant.zig");
 const codec = @import("codec");
 const handler = @import("../../resolver/handler.zig");
 const inline_mod = @import("../inline.zig");
@@ -1386,4 +1390,156 @@ fn overlapping_syncs_body(ctx: Ctx) anyerror!void {
 test "standard overlapping finalized syncs release per batch" {
     if (!pooled_finalized_sync) return error.SkipZigTest;
     try run(overlapping_syncs_body);
+}
+
+/// Counts block decodes through a zero-byte mock context (commonware `DecodeCounter`).
+const DecodeCounter = struct {
+    pub const fixed_size = 0;
+    pub const max_encode_size = 0;
+    /// The number of decodes (commonware's `DECODES`); tests compare before and after.
+    var decodes: usize = 0;
+
+    pub fn write(_: DecodeCounter, _: *codec.Writer) void {}
+
+    pub fn encode_size(_: DecodeCounter) usize {
+        return 0;
+    }
+
+    pub fn read(_: std.mem.Allocator, _: *codec.Reader, _: void) codec.Error!DecodeCounter {
+        decodes += 1;
+        return .{};
+    }
+};
+
+const CountedBlock = mocks_block.Block(cryptography.Sha256, DecodeCounter);
+const CountedVariant = standard_variant.Standard(CountedBlock);
+const CountedApp = @import("../../mocks/application.zig").Application(CountedBlock);
+const CountedStores = common.PrunableStores(CountedBlock);
+const CountedActor = core.Actor(struct {
+    pub const Scheme = harness.S;
+    pub const Provider = harness.Provider;
+    pub const Epocher = types.FixedEpocher;
+    pub const Strategy = parallel.Sequential;
+    pub const ApplicationBlock = CountedBlock;
+    pub const Block = CountedVariant.Block;
+    pub const Commitment = common.D;
+    pub const Variant = CountedVariant;
+    pub const Acknowledgement = harness.Exact;
+    pub const Certificates = CountedStores.Certificates;
+    pub const Blocks = CountedStores.Blocks;
+    pub const Application = CountedApp;
+    pub const Buffer = core_variant.NoBuffer(CountedVariant, harness.K);
+    pub const Resolver = common.RecordingResolver;
+});
+
+/// The validators' fixture over another namespace, whose certificates fail verification.
+fn forged_fixture(rng: anytype) !harness.Fixture {
+    const forged = "forged";
+    const n = harness.num_validators;
+    if (harness.fast_schemes) return simplex.scheme.ed25519.fixture(harness.D, gpa, rng, forged, n);
+    return simplex.scheme.bls12381_threshold.vrf.fixture(harness.S, gpa, rng, forged, n);
+}
+
+/// commonware `test_config` with a counted genesis.
+fn counted_config(
+    prefix: []const u8,
+    provider: harness.Provider,
+    stores: *CountedStores,
+) !CountedActor.Config {
+    const genesis = try CountedBlock.init(gpa, .{}, cryptography.Sha256.hash(&.{""}), .zero(), 0);
+    return .{
+        .provider = provider,
+        .epocher = epocher(),
+        .start = .{ .genesis = try mocks_block.ready(CountedBlock, gpa, genesis) },
+        .partition_prefix = prefix,
+        .mailbox_size = 100,
+        .view_retention = .new(10),
+        .prunable_items_per_section = 10,
+        .page_cache = &stores.cache_ref,
+        .replay_buffer = 1024,
+        .key_write_buffer = 1024,
+        .value_write_buffer = 1024,
+        .block_codec_config = {},
+        .max_repair = 10,
+        .max_pending_acks = 1,
+        .strategy = parallel.sequential,
+    };
+}
+
+/// Delivers the notarization of `block` from `fixture` as the response for round 1.
+fn deliver_notarized(
+    resolver: common.RecordingResolver,
+    fixture: *const harness.Fixture,
+    block: CountedBlock,
+) !common.Outcome {
+    const round = round_at(1);
+    const proposal = harness.Proposal.init(round, .zero(), block.digest());
+    var notarization = try harness.make_notarization(gpa, fixture, proposal, harness.quorum);
+    defer notarization.deinit(gpa);
+    const Value = struct { harness.Notarization, CountedBlock };
+    const bytes = try codec.encode(Value, gpa, .{ notarization, block });
+    defer gpa.free(bytes);
+    var response = try enqueue(
+        resolver,
+        .{ .notarized = round },
+        .{ .notarization = round },
+        bytes,
+    );
+    defer response.deinit();
+    return response.recv();
+}
+
+/// A notarized delivery's block is decoded only after its certificate verifies.
+fn notarized_decode_body(ctx: Ctx) anyerror!void {
+    const prefix = "notarized-decode";
+    var rng = utils.rng.test_rng();
+    var fixture = try harness.fixture(gpa, &rng);
+    defer fixture.deinit(gpa);
+    var forged = try forged_fixture(&rng);
+    defer forged.deinit(gpa);
+    const stores = try gpa.create(CountedStores);
+    defer gpa.destroy(stores);
+    try stores.open(ctx, prefix);
+    defer stores.deinit();
+    const config = try counted_config(prefix, .init(&fixture.schemes[0]), stores);
+    const initialized =
+        try CountedActor.init(
+            ctx.child("actor"),
+            stores.certificates(),
+            stores.blocks_store(),
+            config,
+        );
+    var mailbox = initialized.mailbox;
+    defer mailbox.deinit();
+    var holding = try common.RecordingResolver.holding(gpa, ctx.io(), &ctx.scope.child("resolver"));
+    defer holding.resolver.deinit();
+    var application = try CountedApp.init(gpa, ctx.io());
+    defer application.deinit();
+    var handle = try initialized.actor.start(
+        application.clone(),
+        .{ .gpa = gpa },
+        holding.receiver,
+        holding.resolver.clone(),
+    );
+    defer {
+        const ended = handle.abort() catch {};
+        ended catch {};
+    }
+    const genesis = try CountedBlock.init(gpa, .{}, cryptography.Sha256.hash(&.{""}), .zero(), 0);
+    const parent = genesis.digest();
+    const block = try CountedBlock.init(gpa, .{}, parent, .new(1), 1);
+    _ = try mailbox.get_processed();
+    const before = DecodeCounter.decodes;
+    // A notarization from another committee fails verification before the block decodes.
+    const rejected = try deliver_notarized(holding.resolver, &forged, block);
+    try testing.expect(rejected == .invalid);
+    try testing.expectEqual(before, DecodeCounter.decodes);
+    // A verified notarization decodes the block.
+    const accepted = try deliver_notarized(holding.resolver, &fixture, block);
+    try testing.expect(accepted == .resolved and accepted.resolved == .complete);
+    try testing.expect(DecodeCounter.decodes > before);
+}
+
+test "standard notarized delivery decodes after verification" {
+    try run(notarized_decode_body);
 }

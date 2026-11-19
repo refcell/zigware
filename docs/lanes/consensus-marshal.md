@@ -174,8 +174,15 @@ ports its range's tests and the helpers defined in it, into
 - lookup thread (T-01a1d59c), `tests/wrappers.zig` and `tests/dispatch.zig`: lines
   2592-6220 (buffered floor anchors, inline/deferred wrapper tests, certify/verify fetch
   paths, propose/prepare paths, reproposal and ancestry validation, sync failure panics,
-  certified-covered) and 10612-12604 (cache writes, notarized decode, finalization sync,
-  staged dispatch, relay sends, forward, hint_finalized).
+  certified-covered). Lines 10612-12604 (cache writes, notarized decode, finalization
+  sync, staged dispatch, relay sends, forward, hint_finalized) moved to the runtime thread
+  (T-01a1d57b-1bfd), `tests/dispatch.zig`. Done 2026-11-19: 23 of 24 tests, plus
+  `parse_processed_height`. The three paced-sync tests (finalization_sync_does_not_block_mailbox,
+  stale_floor_anchor_holds_dispatch_until_durable, overlapping_finalized_syncs_release_per_batch)
+  are ported but skipped behind `pooled_finalized_sync` until `start_finalized_sync` runs off
+  the actor loop, as commonware pools it. cache_writes_do_not_clone_block_payloads is not
+  ported: it counts Rust `Clone` calls on the block's context, and Zig copies a value-type
+  block implicitly with no hook to count (shared blocks are refcounted `Digested` handles).
 - deployer thread (T-01a1d5b9), `tests/floor.zig`: lines 6740-10611 (redelivery,
   start/set floor, floor anchors and acks, delivery verification across scopes, processed
   and round floors, unverifiable delivery, sync dispatch). Done 2026-11-18: 39 of 43 tests;
