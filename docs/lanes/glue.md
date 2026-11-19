@@ -993,12 +993,12 @@ shared `tests/mocks.zig`, which takes additive edits only (agreed with the glue 
   four epochs changing size, many failed ceremonies, many random crashes, the rotating subset,
   the lossy network, the roots-of-unity output, the two determinism tests, and random crashes.
   Also ported: the boundary lagging validator, the shareless player, and the multiple-epochs
-  rotating subset (12 runs pass in ReleaseSafe, about 5 minutes). Still open: the full rotation
-  with departed committee catch-up, blocked on glue/simulate (examples lane). `Team.crash` waits
-  for the aborted validator's teardown (about 57 ms of simulated time) inside the plan loop, so
-  the four departed crashes fire one teardown apart (t4549 to 4723, not within 4 ms as in
-  commonware), and the nodes still running ack enough epoch-2 dealings for it to succeed.
-  Aborting off the loop crashes all four within 6 ms, and the test passes (seed 0).
+  rotating subset (12 runs pass in ReleaseSafe, about 5 minutes), and the full rotation with
+  departed committee catch-up (12 runs, about 2 minutes in ReleaseSafe). Full rotation needed
+  simulate's non-blocking crash (97684e9, examples lane): `Team.crash` had waited for each
+  teardown inside the plan loop, so the departed committee crashed one teardown apart and its
+  running members acked enough epoch-2 dealings for the ceremony to succeed; it timed out on
+  every run before that fix.
 - [x] reshare drift (commonware 43b357a41..a9ffc25f3): bca770a0c runs the reshare suite under a
   stable `RoundRobin` elector with `TermLength`. Ported: `ReshareEngine.elector`,
   `harness.stable_leaders`, and every elector-parametrized ceremony loops over
@@ -1040,3 +1040,5 @@ shared `tests/mocks.zig`, which takes additive edits only (agreed with the glue 
 - 2026-11-19: a per-push check that the elector reaches the engine: under stable leaders both
   views of a term finalize with one leader, under the default never. Dropping the validator's
   elector config fails it (96 split pairs).
+- 2026-11-19: the full rotation with departed committee catch-up, on simulate's non-blocking
+  crash; it timed out on every run while crashes waited for teardown.

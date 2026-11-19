@@ -492,6 +492,43 @@ test "reshare e2e boundary lagging validator" {
     }
 }
 
+// commonware `reshare_e2e_full_rotation_departed_committee_catch_up`: with eight validators
+// and committees of four rotating by four, a validator of only the next committee restarts
+// after epoch 1's final block, once every member of the departing committee has stopped.
+test "reshare e2e full rotation departed committee catch up" {
+    try skip_slow();
+    const midpoint = epocher.midpoint(.new(1)).?.get();
+    const boundary = properties.final_height(1);
+    for (networks) |transport| {
+        for (harness.electors) |elector| {
+            for (0..3) |seed| {
+                var engine = try harness.ReshareEngine.with_network(gpa, transport, 8, &.{4}, 4);
+                defer engine.deinit();
+                engine.elector = elector;
+                const keys = engine.participants();
+                var crashes: [5]simulate.action.Crash(harness.Key) = undefined;
+                crashes[0] = .{ .processed_height = .{
+                    .participants = keys[4..5],
+                    .heights = .{ .min = midpoint + 2, .max = midpoint + 6 },
+                    .downtime = .from_secs(3),
+                } };
+                // A departed validator stops only after processing a block of the next epoch.
+                const departed_heights: simulate.action.HeightRange = .{
+                    .min = boundary + 1,
+                    .max = boundary + 4 * properties.epoch_length,
+                };
+                for (crashes[1..], 0..) |*crash, at| crash.* = .{ .processed_height = .{
+                    .participants = keys[at .. at + 1],
+                    .heights = departed_heights,
+                    .downtime = .from_secs(3600),
+                } };
+                const height = boundary + 2 * properties.epoch_length;
+                try run_until_active(&engine, seed, &crashes, height, 4);
+            }
+        }
+    }
+}
+
 // commonware `reshare_registers_shareless_player_as_member`: a player whose epoch-zero share
 // is gone before it starts registers a member scheme at its committee position, and the other
 // signers finish the epoch without it.
