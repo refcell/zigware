@@ -167,7 +167,8 @@ pub const GateHandles = struct { started: oneshot.Receiver(void), release: onesh
 /// `ApplicationProbe`).
 pub const Probe = struct {
     mutex: Io.Mutex = .init,
-    target: Sha256.Digest,
+    /// The gated block, or null to gate every processed block in call order.
+    target: ?Sha256.Digest,
     calls: u32 = 0,
     gates: std.ArrayList(Gate) = .empty,
 
@@ -187,7 +188,7 @@ pub const Probe = struct {
     }
 
     pub fn call(probe: *Probe, digest: Sha256.Digest) !void {
-        if (!digest.eql(probe.target)) return;
+        if (probe.target) |target| if (!digest.eql(target)) return;
         probe.mutex.lockUncancelable(io);
         probe.calls += 1;
         const next: ?Gate = if (probe.gates.items.len > 0) probe.gates.orderedRemove(0) else null;
