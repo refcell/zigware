@@ -741,3 +741,37 @@ test "stateful syncing: shutdown during target observation keeps the floor and c
     retarget.response.deinit();
     try testing.expectError(error.AcknowledgementCanceled, waiter.wait());
 }
+
+/// Runs the handoff of block 2 over an anchor at block 1 with `budget` storage writes
+/// allowed: true once its barrier failed (the blocks applied, only the flush aborted), after
+/// checking the failure kept the ack pending, sync incomplete, and the ack canceled on stop.
+fn aborted_flush(budget: u64) !bool {
+    var h: TestHarness = undefined;
+    try h.init(1);
+    defer h.deinit();
+    var applied = try h.retain(1, .apply);
+    defer applied.deinit();
+    h.source.storage.allow_mutations(budget);
+    const outcome = h.syncing.transition(try h.artifact(0));
+    h.source.storage.mutations_allowed = null;
+    if (outcome) |ready| {
+        var owned = ready;
+        release_ready(&owned);
+        return error.TestHandoffBecameDurable; // The budget covered every write.
+    } else |err| if (err != error.DatabaseSyncFailed) return false; // Failed before flushing.
+    try testing.expect(applied.poll() == null); // Not acknowledged before durability.
+    try testing.expectEqual(@as(?Height, null), h.plan.completed);
+    // Stopping the actor cancels marshal's acknowledgement.
+    h.syncing.deinit();
+    h.syncing_alive = false;
+    try testing.expectError(error.AcknowledgementCanceled, applied.wait());
+    return true;
+}
+
+test "stateful syncing: an aborted handoff flush cancels the ack and keeps sync incomplete" {
+    // Raise the write budget until the handoff applies its block and only the flush fails.
+    for (0..256) |budget| {
+        if (try aborted_flush(budget)) return;
+    }
+    return error.TestFlushNeverAborted;
+}
