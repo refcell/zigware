@@ -481,10 +481,11 @@ ones: d = deployer (thread T-01a1d5b9-c237), u = utils, j = storage-journal
   `StatefulEngine(S)` runs Simplex, the marshal node, the probe, the QMDB sync resolvers, and
   `Stateful` over app `S`'s databases. `single_db.zig` (one fixed QMDB) and `multi_db.zig` (a
   fixed QMDB plus a compact immutable QMDB, whose resolvers share the sync channel through a
-  muxer) are its two apps. As in commonware, every scenario runs on both engines; commonware
-  (since bca770a0c) also runs each under stable leaders, which `root.zig`'s `electors()` leaves
-  off for now (open, consensus-marshal: crash counts, random, many and rapid crashes, and the
-  state sync handoff still fail under them). The scenarios: finalize (and with storage
+  muxer) are its two apps. As in commonware, every scenario runs on both engines, each under
+  rotating and stable leaders (bca770a0c; `root.zig`'s `electors()`). Under stable leaders the
+  handoff and determinism plans skip `StateSyncCompleted` (`sync_completes`): a joiner can
+  still be retargeting when the plan exits, after handoff and the processed height passed,
+  which is all commonware's `LateJoinerStateSyncHandoff` checks. The scenarios: finalize (and with storage
   faults), determinism, crash/restart, pruning (marshal and QMDB), delayed start, lossy, random, many, and rapid
   crashes, full outage, partition, and the state sync scenarios: handoff (and with storage
   faults), determinism, random crashes, lossy, crash during sync, and the partitioned restart

@@ -28,13 +28,11 @@ fn skip_slow() error{SkipZigTest}!void {
 }
 
 /// commonware runs every scenario on `SingleDbEngine` and `MultiDbEngine`, each under rotating
-/// and stable leaders (`#[values(RoundRobin::default(), stable_leaders())]`). Stable leaders
-/// (`common.stable_leaders()`) are not enabled yet: several scenarios still fail under them
-/// (docs/lanes/glue.md, stateful/tests).
+/// and stable leaders (`#[values(RoundRobin::default(), stable_leaders())]`), as `each` does.
 const engines = .{ single.SingleDbEngine, multi.MultiDbEngine };
 
-fn electors() [1]RoundRobin {
-    return .{.default()};
+fn electors() [2]RoundRobin {
+    return .{ .default(), common.stable_leaders() };
 }
 
 /// Runs `scenario(E, elector)` for every engine and elector.
@@ -400,11 +398,24 @@ fn make_state_sync(comptime E: type, elector: RoundRobin, slow: bool) !E {
 
 // The first validator starts at view 80 and joins through state sync, then hands off to
 // marshal and advances past the synced height.
+/// Whether a handoff plan checks `StateSyncCompleted`: only under rotating leaders. Under
+/// stable leaders the joiner's DB can still be retargeting (+5 ops a block) when the plan exits,
+/// after handoff and the processed height already passed, as in commonware, whose
+/// `LateJoinerStateSyncHandoff` checks only those two.
+fn sync_completes(elector: RoundRobin) bool {
+    return elector.terms.length.get() == 1;
+}
+
 fn run_state_sync(comptime E: type, elector: RoundRobin) !void {
     var engine = try make_state_sync(E, elector, false);
     defer engine.deinit();
     const crashes = [_]Crash{delay_first(engine.participants(), 80)};
-    const options: Options = .{ .height = 150, .crashes = &crashes, .state_sync = true };
+    const options: Options = .{
+        .height = 150,
+        .crashes = &crashes,
+        .state_sync = true,
+        .sync_completes = sync_completes(elector),
+    };
     try run_plan(E, &engine, &seeds(5), options, null);
 }
 
@@ -444,7 +455,12 @@ fn run_state_sync_deterministic(comptime E: type, elector: RoundRobin) !void {
     var engine = try make_state_sync(E, elector, false);
     defer engine.deinit();
     const crashes = [_]Crash{delay_first(engine.participants(), 80)};
-    const options: Options = .{ .height = 100, .crashes = &crashes, .state_sync = true };
+    const options: Options = .{
+        .height = 100,
+        .crashes = &crashes,
+        .state_sync = true,
+        .sync_completes = sync_completes(elector),
+    };
     var first: [5][8]u8 = undefined;
     var second: [5][8]u8 = undefined;
     try run_plan(E, &engine, &seeds(5), options, &first);
