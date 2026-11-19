@@ -1863,3 +1863,34 @@ test "serve sends no greeting when the tracker or router rejects the peer" {
     _ = try run_deterministic(0, rejected_serve, .{Rejection.tracker});
     _ = try run_deterministic(0, rejected_serve, .{Rejection.router});
 }
+
+const stream_limit = "maximum message size exceeds stream limit";
+
+test "a payload limit of u32 max panics" {
+    // commonware `test_max_message_size_exceeds_stream_limit`.
+    try utils.death.expect_panic(@src(), stream_limit, struct {
+        fn body() !void {
+            try create_with_limit(std.math.maxInt(u32));
+        }
+    }.body);
+}
+
+test "a payload limit one above the stream boundary panics" {
+    // commonware `test_max_message_size_above_stream_boundary`.
+    try utils.death.expect_panic(@src(), stream_limit, struct {
+        fn body() !void {
+            try create_with_limit(data.max_size(Upgrader.max_size) + 1);
+        }
+    }.body);
+}
+
+/// Creates (and frees) a network whose payload limit is `size`.
+fn create_with_limit(size: u32) !void {
+    var transport = Transport.init(gpa, Io.failing);
+    defer transport.deinit();
+    var registry = metrics.Registry.init(gpa);
+    defer registry.deinit();
+    const config = test_config(PrivateKey.from_seed(0), 0, &.{}, size);
+    const network = try Net.create(gpa, Io.failing, &transport, .init(&registry), config);
+    network.destroy();
+}

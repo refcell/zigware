@@ -240,6 +240,7 @@ pub fn Channels(comptime P: type) type {
 
 const testing = std.testing;
 const runtime = @import("runtime");
+const death = @import("utils").death;
 
 const Peer = struct {
     id: u8,
@@ -277,4 +278,21 @@ test "registered rate sizes the inbound queue for every peer" {
 fn owned_message(text: []const u8) !p2p.Message(Peer) {
     const payload = try testing.allocator.dupe(u8, text);
     return .{ .peer = .{ .id = 1 }, .payload = payload, .gpa = testing.allocator };
+}
+
+test "register panics when the mailbox capacity overflows (derived_capacity_panics_on_overflow)" {
+    try death.expect_panic(@src(), "channel mailbox capacity overflow", struct {
+        fn body() !void {
+            var runner = try runtime.deterministic.Runner.init(testing.allocator, .{});
+            defer runner.deinit();
+            const io = runner.io();
+            var router = try router_mod.Router(Peer).init(testing.allocator, io);
+            defer router.deinit();
+            const max_peers = std.math.maxInt(usize);
+            var channels = Channels(Peer).init(testing.allocator, io, &router, 1024, max_peers);
+            defer channels.deinit();
+            var registered = try channels.register(0, .per_second(2));
+            registered.deinit();
+        }
+    }.body);
 }

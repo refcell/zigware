@@ -76,6 +76,7 @@ pub fn BitSet(comptime P: type) type {
 
 const testing = std.testing;
 const cryptography = @import("cryptography");
+const death = @import("utils").death;
 const ed25519 = cryptography.ed25519;
 const PublicKey = ed25519.PublicKey;
 
@@ -182,4 +183,17 @@ test "a single peer set" {
     try expect_bits(&set, &.{true});
     try testing.expect(set.update(key(42), false));
     try expect_bits(&set, &.{false});
+}
+
+test "indexing past the last peer panics (test_index_out_of_bounds_positive)" {
+    try death.expect_panic(@src(), "index out of bounds", struct {
+        fn body() !void {
+            const ordered = try testing.allocator.dupe(PublicKey, &.{key(1)});
+            var set = try BitSet(PublicKey).init(testing.allocator, ordered);
+            defer set.deinit(testing.allocator);
+            var index: usize = 1;
+            _ = &index;
+            _ = set.ordered[index];
+        }
+    }.body);
 }

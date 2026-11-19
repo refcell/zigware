@@ -8,6 +8,7 @@ const Io = std.Io;
 const codec = @import("codec");
 const cryptography = @import("cryptography");
 const runtime = @import("runtime");
+const utils = @import("utils");
 const build_options = @import("build_options");
 const stream = @import("stream");
 const metrics = runtime.telemetry.metrics;
@@ -440,4 +441,35 @@ test "the largest payload the stream carries is accepted" {
     const network = try Net.create(gpa, Io.failing, &transport, .init(&registry), config);
     defer network.destroy();
     try testing.expect(network.max_frame_size <= Upgrader.max_size);
+}
+
+const stream_limit = "maximum message size exceeds stream limit";
+
+test "a payload limit of u32 max panics" {
+    // commonware `test_max_message_size_exceeds_stream_limit`.
+    try utils.death.expect_panic(@src(), stream_limit, struct {
+        fn body() !void {
+            try create_with_limit(std.math.maxInt(u32));
+        }
+    }.body);
+}
+
+test "a payload limit one above the stream boundary panics" {
+    // commonware `test_max_message_size_above_stream_boundary`.
+    try utils.death.expect_panic(@src(), stream_limit, struct {
+        fn body() !void {
+            try create_with_limit(data.max_size(Upgrader.max_size) + 1);
+        }
+    }.body);
+}
+
+/// Creates (and frees) a network whose payload limit is `size`.
+fn create_with_limit(size: u32) !void {
+    var transport = Transport.init(gpa, Io.failing);
+    defer transport.deinit();
+    var registry = metrics.Registry.init(gpa);
+    defer registry.deinit();
+    const config = test_config(PrivateKey.from_seed(0), 0, size);
+    const network = try Net.create(gpa, Io.failing, &transport, .init(&registry), config);
+    network.destroy();
 }

@@ -1,8 +1,5 @@
 //! Tests for the muxer (commonware `p2p/src/utils/mux.rs` tests), run on the deterministic
 //! runtime over the simulated network or a mock receiver.
-//!
-//! `test_sub_sender_panics_above_limit_less_prefix` is not ported: it expects a panic, which
-//! Zig cannot catch.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -215,6 +212,32 @@ test "sub sender accepts limit less prefix" {
             try expect_message(&rx, two.key, payload);
         }
     }.run);
+}
+
+test "sub sender panics above limit less prefix" {
+    // commonware `test_sub_sender_panics_above_limit_less_prefix`.
+    try utils_pkg.death.expect_panic(@src(), "message too large", struct {
+        fn body() !void {
+            _ = try net.run_deterministic(0, struct {
+                fn run(io: Io) !void {
+                    var fixture = try Fixture.start(io);
+                    defer fixture.deinit();
+                    const one = try fixture.add_peer(0, .{});
+                    const two = try fixture.add_peer(1, .{});
+                    try fixture.link();
+                    var tx = try register_sender(two, std.math.maxInt(u64));
+                    defer tx.deinit();
+                    // One byte above the limit less the longest prefix is too large once
+                    // prefixed.
+                    const size = max_size - codec.varint.max_u64_varint_size + 1;
+                    const payload = try gpa.alloc(u8, size);
+                    defer gpa.free(payload);
+                    @memset(payload, 0);
+                    gpa.free(try tx.send(.{ .one = one.key }, &.{payload}, false));
+                }
+            }.run);
+        }
+    }.body);
 }
 
 test "basic routing" {

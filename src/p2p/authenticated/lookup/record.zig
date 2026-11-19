@@ -191,6 +191,8 @@ pub const Record = struct {
 const testing = std.testing;
 const Ipv4 = codec.Ipv4;
 const TestRng = utils.rng.TestRng;
+const death = utils.death;
+const unreachable_code = "reached unreachable code";
 
 fn socket(a: u8, b: u8, c: u8, d: u8, port: u16) codec.SocketAddr {
     return .{ .ip = .{ .v4 = Ipv4.init(a, b, c, d) }, .port = port };
@@ -364,4 +366,48 @@ test "dialable checks the ingress" {
     named.increment_primary();
     try testing.expectEqual(DialStatus.now, named.dialable(epoch, false, true));
     try testing.expectEqual(DialStatus.unavailable, named.dialable(epoch, false, false));
+}
+
+test "lookup record: decrement_primary at zero panics" {
+    // commonware `test_decrement_panics_at_zero`.
+    try death.expect_panic(@src(), unreachable_code, struct {
+        fn body() !void {
+            var record = Record.known(test_address());
+            try testing.expectEqual(0, record.primary_sets);
+            record.decrement_primary();
+        }
+    }.body);
+}
+
+test "lookup record: connect from inert panics" {
+    // commonware `test_connect_when_not_reserved_panics_from_inert`.
+    try death.expect_panic(@src(), unreachable_code, struct {
+        fn body() !void {
+            var record = Record.known(test_address());
+            _ = record.connect();
+        }
+    }.body);
+}
+
+test "lookup record: connect when active panics" {
+    // commonware `test_connect_when_active_panics`.
+    try death.expect_panic(@src(), unreachable_code, struct {
+        fn body() !void {
+            var rng = TestRng.init(0);
+            var record = Record.known(test_address());
+            try testing.expectEqual(.reserved, record.reserve(&rng, epoch, .zero));
+            try testing.expect(record.connect());
+            _ = record.connect();
+        }
+    }.body);
+}
+
+test "lookup record: release when inert panics" {
+    // commonware `test_release_when_inert_panics`.
+    try death.expect_panic(@src(), unreachable_code, struct {
+        fn body() !void {
+            var record = Record.known(test_address());
+            record.release();
+        }
+    }.body);
 }

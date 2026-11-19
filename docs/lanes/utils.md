@@ -15,6 +15,10 @@ encoding parts as soon as `codec` has its core API (see docs/lanes/codec.md).
 - `utils.rng.Uniform(T)`: `rand`'s precomputed `Uniform<T>` (Lemire), distinct from the
   one-shot `range_*` samplers.
 - `utils.range`: `Bound(T)`, `contains_cyclic`, `NonEmptyRange(T)` (codec encoding).
+- `utils.death` (test-only, added by the p2p lane): `expect_panic(@src(), expected, body)` for
+  commonware's `#[should_panic]`. It reruns the test binary in the runner's server mode,
+  running only the calling test, and passes on SIGABRT with a panic line containing
+  `expected`. 60 s timeout; skips without runtime safety. See AGENTS.md.
 - `utils.time`: `Duration` (Rust `Duration` semantics, `parse`, `from_nanos_saturating`,
   `as_millis_u64`), `SystemTime` (`epoch`, `epoch_millis`, `add_jittered`, `limit`,
   `saturating_add`, `from_timestamp(std.Io.Timestamp)`), `sample_duration` (rand-identical).

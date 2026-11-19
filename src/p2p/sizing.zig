@@ -75,6 +75,7 @@ pub fn peer_set_size(
 }
 
 const testing = std.testing;
+const death = @import("utils").death;
 
 const Int = struct {
     value: u32,
@@ -99,6 +100,23 @@ test "max_message_size (test_max_message_size)" {
 
 test "max_retained_peers (test_max_retained_peers)" {
     try testing.expectEqual(@as(usize, 14), max_retained_peers(3, 4, 2));
+}
+
+test "max_message_size panics above u32 (test_max_message_size_overflow)" {
+    try death.expect_panic(@src(), "payload must fit in u32", struct {
+        fn body() !void {
+            const largest = @as(usize, std.math.maxInt(u32)) + 1;
+            _ = max_message_size(&.{ 0, largest });
+        }
+    }.body);
+}
+
+test "max_retained_peers panics on overflow (test_max_retained_peers_overflow)" {
+    try death.expect_panic(@src(), "maximum retained peer count overflow", struct {
+        fn body() !void {
+            _ = max_retained_peers(std.math.maxInt(usize), 2, 0);
+        }
+    }.body);
 }
 
 test "peer_set_limit counts the local identity once" {

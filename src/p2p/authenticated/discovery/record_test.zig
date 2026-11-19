@@ -14,6 +14,7 @@ const Record = record_mod.Record(PublicKey);
 const Info = Record.Info;
 const Ingress = p2p_types.Ingress;
 const Duration = utils.Duration;
+const death = utils.death;
 const SystemTime = utils.SystemTime;
 
 const namespace = "test";
@@ -279,4 +280,51 @@ test "an unbounded reservation cooldown saturates" {
     try testing.expectEqual(.reserved, record.reserve(&rng, start, Duration.max));
     record.release();
     try testing.expectEqual(.rate_limited, record.reserve(&rng, start, Duration.max));
+}
+
+const unreachable_code = "reached unreachable code";
+
+test "discovery record: decrement_primary at zero panics" {
+    // commonware `test_decrement_panics_at_zero`.
+    try death.expect_panic(@src(), unreachable_code, struct {
+        fn body() !void {
+            var record = Record.unknown();
+            try testing.expectEqual(0, record.primary_sets);
+            record.decrement_primary();
+        }
+    }.body);
+}
+
+test "discovery record: connect from inert panics" {
+    // commonware `test_connect_when_not_reserved_panics_from_inert`.
+    try death.expect_panic(@src(), unreachable_code, struct {
+        fn body() !void {
+            var record = Record.unknown();
+            record.connect();
+        }
+    }.body);
+}
+
+test "discovery record: connect when active panics" {
+    // commonware `test_connect_when_active_panics`.
+    try death.expect_panic(@src(), unreachable_code, struct {
+        fn body() !void {
+            var rng = utils.rng.test_rng();
+            var record = Record.unknown();
+            const start: SystemTime = .UNIX_EPOCH;
+            try testing.expectEqual(.reserved, record.reserve(&rng, start, .zero));
+            record.connect();
+            record.connect();
+        }
+    }.body);
+}
+
+test "discovery record: release when inert panics" {
+    // commonware `test_release_when_inert_panics`.
+    try death.expect_panic(@src(), "Cannot release an Inert peer", struct {
+        fn body() !void {
+            var record = Record.unknown();
+            record.release();
+        }
+    }.body);
 }

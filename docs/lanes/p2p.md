@@ -228,19 +228,27 @@ handshake and the runtime's network, which the actor-stream and runtime lanes ar
 ### Test audit: p2p (2026-11-19, commonware 43b357a41)
 
 Every `#[test]`/`#[test_traced]`/`#[rstest]` fn in commonware `p2p/src`, matched to a zigware test
-by name or by reading both bodies (a zigware test may cover several). 476 tests: 445 ported, 0
-open, 31 not portable. The 86 first found open are all ported now (ticked under Open below),
-none reclassified; the table was recounted on 2026-11-19.
+by name or by reading both bodies (a zigware test may cover several). 476 tests: 463 ported, 0
+open, 13 not portable. The 86 first found open are all ported now (ticked under Open below),
+none reclassified; the table was recounted on 2026-11-19. 18 `#[should_panic]` tests moved from
+not portable to ported on `utils.death` (see Not portable below).
 
 Not-portable re-audit (2026-11-19, against main after async `start_sync`, `DelayedSync`,
-faulty's `Storage.wrap`, and the drain and recancel rules): none of the 31 became portable.
-- 20 are `#[should_panic]`. Zig tests cannot catch a panic, and no lane has a death-test
-  helper, so they stay unported repo-wide (bls-math records the same).
+faulty's `Storage.wrap`, and the drain and recancel rules): of the 31, none became portable
+through those changes. 20 were `#[should_panic]`; 18 of them are now ported on
+`utils.death.expect_panic`, which reruns the test binary as a child (AGENTS.md). Each was
+checked with a planted bug that removes its panic.
+- Ported on `utils.death`: sizing (2), channels `derived_capacity_panics_on_overflow`,
+  discovery and lookup `mod.rs` stream limits (4), bit_set `test_index_out_of_bounds_positive`
+  (it indexes `ordered`, so its plant is in the test), tracker
+  `test_peer_set_limit_counts_secondary_peers`, discovery and lookup `record.rs` (8), and
+  mux `test_sub_sender_panics_above_limit_less_prefix`.
+- The other 2 panic in APIs zigware does not have: `outbound_mailbox_size` and p2p's
+  `stream::Config::new`.
 - The other 11 test Rust structure zigware replaced, and main still has the replacements: the
   router and spawner actors' mailboxes (router.zig is locked shared state; connections start
   in an `Io.Group`), lookup's listener actor (`listen_loop` calls the tracker), the
   `stream::Config` wrapper, `From<SocketAddr>`, and BitSet's `IntoIterator`.
-- None of the 31 touch storage, sync, or cancellation, so those changes do not reach them.
 
 `lib.rs`'s `recipient_unions` is one rstest fn of 25 cases (5 x 5 values); the zigware test covers
 all 25.
@@ -255,14 +263,14 @@ and transport connect timeouts, see Decisions), so its dialer timeout test is to
 | commonware file | tests | ported | open | not portable |
 |---|---|---|---|---|
 | `lib.rs` | 1 | 1 | 0 | 0 |
-| `sizing.rs` | 7 | 5 | 0 | 2 |
+| `sizing.rs` | 7 | 7 | 0 | 0 |
 | `types.rs` | 13 | 12 | 0 | 1 |
-| `authenticated/channels.rs` | 4 | 1 | 0 | 3 |
+| `authenticated/channels.rs` | 4 | 2 | 0 | 2 |
 | `authenticated/data.rs` | 5 | 5 | 0 | 0 |
 | `authenticated/relay.rs` | 2 | 2 | 0 | 0 |
 | `authenticated/stream.rs` | 3 | 1 | 0 | 2 |
 | `authenticated/throttle.rs` | 2 | 2 | 0 | 0 |
-| `authenticated/discovery/mod.rs` | 30 | 28 | 0 | 2 |
+| `authenticated/discovery/mod.rs` | 30 | 30 | 0 | 0 |
 | `authenticated/discovery/network.rs` | 2 | 2 | 0 | 0 |
 | `authenticated/discovery/types.rs` | 22 | 22 | 0 | 0 |
 | `authenticated/discovery/actors/dialer.rs` | 6 | 6 | 0 | 0 |
@@ -272,11 +280,11 @@ and transport connect timeouts, see Decisions), so its dialer timeout test is to
 | `authenticated/discovery/actors/spawner/actor.rs` | 2 | 2 | 0 | 0 |
 | `authenticated/discovery/actors/spawner/ingress.rs` | 1 | 0 | 0 | 1 |
 | `authenticated/discovery/actors/tracker/actor.rs` | 22 | 22 | 0 | 0 |
-| `authenticated/discovery/actors/tracker/bit_set.rs` | 11 | 9 | 0 | 2 |
+| `authenticated/discovery/actors/tracker/bit_set.rs` | 11 | 10 | 0 | 1 |
 | `authenticated/discovery/actors/tracker/directory.rs` | 28 | 28 | 0 | 0 |
-| `authenticated/discovery/actors/tracker/ingress.rs` | 2 | 1 | 0 | 1 |
-| `authenticated/discovery/actors/tracker/record.rs` | 24 | 20 | 0 | 4 |
-| `authenticated/lookup/mod.rs` | 29 | 27 | 0 | 2 |
+| `authenticated/discovery/actors/tracker/ingress.rs` | 2 | 2 | 0 | 0 |
+| `authenticated/discovery/actors/tracker/record.rs` | 24 | 24 | 0 | 0 |
+| `authenticated/lookup/mod.rs` | 29 | 29 | 0 | 0 |
 | `authenticated/lookup/types.rs` | 6 | 6 | 0 | 0 |
 | `authenticated/lookup/actors/dialer.rs` | 6 | 6 | 0 | 0 |
 | `authenticated/lookup/actors/listener.rs` | 7 | 6 | 0 | 1 |
@@ -286,7 +294,7 @@ and transport connect timeouts, see Decisions), so its dialer timeout test is to
 | `authenticated/lookup/actors/tracker/actor.rs` | 27 | 27 | 0 | 0 |
 | `authenticated/lookup/actors/tracker/directory.rs` | 39 | 39 | 0 | 0 |
 | `authenticated/lookup/actors/tracker/ingress.rs` | 1 | 1 | 0 | 0 |
-| `authenticated/lookup/actors/tracker/record.rs` | 19 | 15 | 0 | 4 |
+| `authenticated/lookup/actors/tracker/record.rs` | 19 | 19 | 0 | 0 |
 | `authenticated/router/actor.rs` | 1 | 0 | 0 | 1 |
 | `authenticated/router/ingress.rs` | 3 | 0 | 0 | 3 |
 | `simulated/bandwidth.rs` | 12 | 12 | 0 | 0 |
@@ -295,7 +303,7 @@ and transport connect timeouts, see Decisions), so its dialer timeout test is to
 | `simulated/transmitter.rs` | 16 | 16 | 0 | 0 |
 | `utils/codec.rs` | 10 | 10 | 0 | 0 |
 | `utils/limited.rs` | 12 | 12 | 0 | 0 |
-| `utils/mux.rs` | 15 | 14 | 0 | 1 |
+| `utils/mux.rs` | 15 | 15 | 0 | 0 |
 | `utils/mocks/mod.rs` | 2 | 2 | 0 | 0 |
 
 Open:
@@ -582,9 +590,6 @@ Open:
   Ported in network_register_test.zig (73c919e).
 
 Not portable:
-- `sizing.rs` `test_max_message_size_overflow`: should_panic (payload must fit in u32)
-- `sizing.rs` `test_max_retained_peers_overflow`: should_panic (maximum retained peer count
-  overflow)
 - `types.rs` `test_from_socket_addr`: tests Rust From<SocketAddr> for Ingress/Address; Zig has no
   From conversion (union literals .{ .socket = a } / .{ .symmetric = a } replace it)
 - `authenticated/channels.rs` `registered_rates_size_shared_outbound_mailbox`: tests
@@ -592,20 +597,13 @@ Not portable:
   shared state (router.zig) with no mailbox, outboxes are sized by config.mailbox_size
 - `authenticated/channels.rs` `outbound_mailbox_size_panics_on_overflow`: should_panic; also
   outbound_mailbox_size absent (router.zig replaces router mailbox)
-- `authenticated/channels.rs` `derived_capacity_panics_on_overflow`: should_panic (channel mailbox
-  capacity overflow; channels.zig register panics the same way)
-- `authenticated/stream.rs` `test_max_message_size_above_limit`: should_panic (maximum message size
-  exceeds stream limit)
+- `authenticated/stream.rs` `test_max_message_size_above_limit`: should_panic in
+  `stream::Config::new`, which zigware does not have; the same limit panics in discovery's and
+  lookup's `Network.create`, whose death tests are ported
 - `authenticated/stream.rs` `test_dial_forwards_namespace_and_limit`: tests the stream::Config
   wrapper, absent in zigware: discovery/lookup network.zig pass stream_namespace and max_frame_size
   to the upgrader directly (partly covered by lookup/network_test.zig 'the frame fits the payload
   limit and its overhead' and discovery 'a payload above the receiver's limit is never delivered')
-- `authenticated/discovery/mod.rs` `test_max_message_size_exceeds_stream_limit`: should_panic
-  (u32::MAX limit panics in Network::new); the accepted boundary is "the payload limit may reach the
-  stream boundary"
-- `authenticated/discovery/mod.rs` `test_max_message_size_above_stream_boundary`: should_panic
-  (limit+1 panics in Network::new); accepted boundary tested by "the payload limit may reach the
-  stream boundary"
 - `authenticated/discovery/actors/spawner/ingress.rs`
   `spawn_overflow_rejects_message_and_releases_reservation`: tests the bounded spawner mailbox;
   zigware has no spawner actor: the handshake task calls Network.serve directly in the Io.Group
@@ -613,21 +611,6 @@ Not portable:
 - `authenticated/discovery/actors/tracker/bit_set.rs` `test_into_iterator`: tests Rust's
   IntoIterator impl; zigware's BitSet exposes peers as the public `ordered` slice with no iterator,
   and its order is checked by "initialization sorts peers and knows none"
-- `authenticated/discovery/actors/tracker/bit_set.rs` `test_index_out_of_bounds_positive`:
-  should_panic (index past end)
-- `authenticated/discovery/actors/tracker/ingress.rs` `test_peer_set_limit_counts_secondary_peers`:
-  should_panic ("peer set too large: 3 > 2"); Tracker.track panics the same way
-- `authenticated/discovery/actors/tracker/record.rs` `test_decrement_panics_at_zero`: should_panic
-- `authenticated/discovery/actors/tracker/record.rs`
-  `test_connect_when_not_reserved_panics_from_inert`: should_panic
-- `authenticated/discovery/actors/tracker/record.rs` `test_connect_when_active_panics`: should_panic
-- `authenticated/discovery/actors/tracker/record.rs` `test_release_when_inert_panics`: should_panic
-- `authenticated/lookup/mod.rs` `test_max_message_size_exceeds_stream_limit`: #[should_panic]
-  (u32::MAX max_message_size panics in Network::new); the accepted boundary is network_test.zig "the
-  largest payload the stream carries is accepted"
-- `authenticated/lookup/mod.rs` `test_max_message_size_above_stream_boundary`: #[should_panic]
-  (limit+1 panics in Network::new); the accepted boundary is network_test.zig "the largest payload
-  the stream carries is accepted"
 - `authenticated/lookup/actors/listener.rs` `mailbox_keeps_latest_registered_ips`: tests the
   listener's latest-value update mailbox; zigware has no listener actor: listen_loop calls
   tracker.registered(ip) directly under the tracker lock (network.zig Network.registered)
@@ -635,15 +618,6 @@ Not portable:
   `spawn_overflow_rejects_message_and_releases_reservation`: tests the spawner actor's bounded
   mailbox; zigware has no spawner: connections start with network.tasks.concurrent on one Io.Group,
   and a failed spawn releases the reservation inline (network.zig dial_loop/listen_loop catch)
-- `authenticated/lookup/actors/tracker/record.rs` `test_decrement_panics_at_zero`: #[should_panic];
-  Zig tests cannot catch a panic (assert in decrement)
-- `authenticated/lookup/actors/tracker/record.rs`
-  `test_connect_when_not_reserved_panics_from_inert`: #[should_panic]; Zig tests cannot catch a
-  panic
-- `authenticated/lookup/actors/tracker/record.rs` `test_connect_when_active_panics`:
-  #[should_panic]; Zig tests cannot catch a panic
-- `authenticated/lookup/actors/tracker/record.rs` `test_release_when_inert_panics`: #[should_panic];
-  Zig tests cannot catch a panic
 - `authenticated/router/actor.rs` `subscribe_retains_only_open_initial_sender`: tests router actor's
   open_subscriptions list of ring senders; replaced by router.zig's Watch(P) subscription (no
   per-subscriber sender list)
@@ -655,7 +629,6 @@ Not portable:
 - `authenticated/router/ingress.rs` `test_overflow_rejects_content_but_retains_control`: tests
   router actor mailbox overflow (content rejected, Release retained); router.zig has no mailbox.
   Per-connection analog: outbox.zig 'control frames go ahead of data and drop when full'
-- `utils/mux.rs` `test_sub_sender_panics_above_limit_less_prefix`: should_panic
 
 ### Fuzz coverage audit: network-facing crates (2026-11-19)
 

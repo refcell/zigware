@@ -97,6 +97,11 @@ Read this whole file before you change anything. These rules are not optional.
   tests them: many nodes in one deterministic runtime with a simulated network, fault
   injection (latency, drops, partitions, crashes, Byzantine actors), and a seed that replays
   the run exactly. A failing seed is a bug report.
+- **`#[should_panic]`**: a Zig test cannot catch a panic in-process. Port these tests with
+  `utils.death.expect_panic(@src(), expected, body)`: it reruns the test binary as a child
+  that runs only the calling test, and passes when the child dies by SIGABRT with a panic
+  line containing `expected` (`"reached unreachable code"` for an `assert`). It skips without
+  runtime safety (ReleaseFast). Plant a bug that removes the panic to check each one.
 - Linux io_uring tests: `just test-linux` runs the suite in a Docker Linux container.
 
 ## Zig 0.17.1 pitfalls

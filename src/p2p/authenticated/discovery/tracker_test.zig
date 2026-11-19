@@ -647,3 +647,21 @@ fn evicts_and_alternates(harness: *Harness, io: Io, outbox1: *Outbox) !void {
 test "bit vectors reflect knowledge, answer with missing info, and follow eviction" {
     try run(bit_vec_comprehensive, .{});
 }
+
+test "track counts secondary peers toward the set limit" {
+    // commonware `test_peer_set_limit_counts_secondary_peers` (tracker/ingress.rs).
+    try utils.death.expect_panic(@src(), "peer set too large: 3 > 2", struct {
+        fn body() !void {
+            try run(struct {
+                fn track(io: Io) !void {
+                    var config = test_config(io, &.{});
+                    config.max_peers_per_set = 2;
+                    var harness: Harness = undefined;
+                    try harness.start(io, config);
+                    defer harness.stop(io);
+                    try harness.track_both(0, &.{key(0)}, &.{ key(1), key(2) });
+                }
+            }.track, .{});
+        }
+    }.body);
+}
