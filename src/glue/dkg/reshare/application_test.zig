@@ -270,6 +270,36 @@ test "application: a final block must carry the derived epoch info" {
     }.body);
 }
 
+fn verify_task(app: *App, ancestry: Types.Ancestry) anyerror!bool {
+    return app.verify({}, {}, ancestry);
+}
+
+// A final block whose epoch info the actor cannot derive stays unresolved until consensus
+// cancels it, and cancellation releases its ancestry exactly once (a state-synced validator
+// hit the double release).
+test "application: a canceled pending final verification releases its ancestry once" {
+    try actor_test.run(struct {
+        fn body(io: Io) anyerror!void {
+            var carried = try epoch_payload(0);
+            defer carried.deinit(gpa);
+            var blocks: [2]Digested = undefined;
+            try chain(&blocks, carried);
+            defer free_blocks(&blocks);
+            var inner: Recording = .{};
+            defer inner.deinit();
+            var f: Fixture = undefined;
+            try f.init(io, &inner, 2);
+            defer f.deinit();
+            var task = try io.concurrent(verify_task, .{ &f.app, try ancestry_of(&blocks) });
+            var waited: u32 = 0;
+            while (f.fake.info_requests == 0 and waited < 100) : (waited += 1) try settle(io, &f);
+            try testing.expectEqual(@as(u32, 1), f.fake.info_requests);
+            try testing.expectError(error.Canceled, task.cancel(io));
+            try testing.expectEqual(@as(u32, 0), inner.verifies);
+        }
+    }.body);
+}
+
 /// Whether a block at height `count - 1` carrying `payload` verifies with 4-block epochs.
 fn verifies(io: Io, count: usize, payload: App.Payload) !bool {
     var blocks: [4]Digested = undefined;

@@ -266,6 +266,7 @@ pub fn Application(comptime A: type, comptime T: type) type {
                         // Consensus journals `false` as a failed certification, so a block
                         // this node cannot check stays unresolved until consensus cancels it.
                         owned.deinit();
+                        handed = true; // Released: cancellation must not release it again.
                         return pending(self.reshare.io);
                     },
                 }
