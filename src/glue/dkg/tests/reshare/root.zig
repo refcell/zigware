@@ -12,6 +12,7 @@ const cryptography = @import("cryptography");
 const p2p = @import("p2p");
 const simulate = @import("../../../simulate/mod.zig");
 const harness = @import("harness.zig");
+const support = @import("support.zig");
 const properties = @import("properties.zig");
 
 const gpa = testing.allocator;
@@ -423,6 +424,37 @@ fn run_until_active(
     };
     var result = try plan.run(gpa);
     result.deinit();
+}
+
+/// Counts the pairs of distinct views of one epoch and term among the processed blocks, and
+/// how many of them had different leaders.
+fn term_leader_pairs(proposals: []const support.Ledger.Proposal, term: u32) [2]usize {
+    var pairs: usize = 0;
+    var split: usize = 0;
+    for (proposals, 0..) |a, at| {
+        if (a.view == 0) continue;
+        for (proposals[at + 1 ..]) |b| {
+            if (b.epoch != a.epoch or b.view == a.view or b.view == 0) continue;
+            if ((a.view - 1) / term != (b.view - 1) / term) continue;
+            pairs += 1;
+            if (!a.leader.eql(b.leader)) split += 1;
+        }
+    }
+    return .{ pairs, split };
+}
+
+// The elector reaches the engine: under `stable_leaders` both views of a term finalize with one
+// leader, and under the default (a leader per view) they never do.
+test "reshare e2e stable leaders keep a leader for a term" {
+    for (harness.electors, [_]bool{ false, true }) |elector, stable| {
+        var engine = try harness.ReshareEngine.with_committees(gpa, 4, &.{4}, 1);
+        defer engine.deinit();
+        engine.elector = elector;
+        try run_until_active(&engine, 0, &.{}, 6, 4);
+        const pairs, const split = term_leader_pairs(engine.ledger.proposals_of(), 2);
+        try testing.expect(pairs > 0);
+        if (stable) try testing.expectEqual(0, split) else try testing.expectEqual(pairs, split);
+    }
 }
 
 // commonware `reshare_e2e_boundary_lagging_validator`: a validator that crashed early in

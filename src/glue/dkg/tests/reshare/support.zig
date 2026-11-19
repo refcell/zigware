@@ -37,8 +37,14 @@ pub const Ledger = struct {
     /// The participant whose application parks once it processes `height`, until it restarts
     /// (commonware `processed_hold`). Not cleared by `reset`, as commonware's is shared.
     hold: ?Hold = null,
+    /// The rounds and leaders of finalized blocks, as processed (every validator's copy), up
+    /// to `max_proposals`; later ones are dropped. Checks the elector the engine runs.
+    proposals: [max_proposals]Proposal = undefined,
+    proposal_count: usize = 0,
 
     pub const Hold = struct { key: Key, height: u64 };
+    pub const Proposal = struct { epoch: u64, view: u64, leader: Key };
+    pub const max_proposals = 512;
 
     pub fn init(gpa: Allocator, keys: []const Key) !Ledger {
         assert(keys.len > 0);
@@ -78,6 +84,21 @@ pub const Ledger = struct {
         @memset(self.processed, 0);
         @memset(self.state_syncs, null);
         @memset(self.state_sync_starts, 0);
+        self.proposal_count = 0;
+    }
+
+    /// The recorded proposals, oldest first.
+    pub fn proposals_of(self: *const Ledger) []const Proposal {
+        assert(self.proposal_count <= max_proposals);
+        return self.proposals[0..self.proposal_count];
+    }
+
+    /// Records a processed block's round and leader, while there is room.
+    pub fn record_proposal(self: *Ledger, proposal: Proposal) void {
+        assert(self.proposal_count <= max_proposals);
+        if (self.proposal_count == max_proposals) return;
+        self.proposals[self.proposal_count] = proposal;
+        self.proposal_count += 1;
     }
 
     fn index(self: *const Ledger, key: Key) usize {

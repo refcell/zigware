@@ -183,6 +183,12 @@ pub fn Validator(comptime T: type) type {
                     .block => |value| {
                         const height = value.block.inner().height().get();
                         self.ledger.record_processed(self.key, height);
+                        const context = value.block.inner().context();
+                        self.ledger.record_proposal(.{
+                            .epoch = context.round.epoch.get(),
+                            .view = context.round.view.get(),
+                            .leader = context.leader,
+                        });
                         // commonware `App::finalized`: park at the held height so the
                         // processed-height crash trigger observes it.
                         while (self.ledger.held(self.key, height)) {

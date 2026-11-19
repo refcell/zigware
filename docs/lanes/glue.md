@@ -1023,3 +1023,6 @@ shared `tests/mocks.zig`, which takes additive edits only (agreed with the glue 
   aborted before they ran, and an orchestrator `stop()` that freed an engine still running.
 - 2026-11-19: bca770a0c's stable leaders for every elector-parametrized reshare ceremony, and
   the multiple-epochs rotating subset.
+- 2026-11-19: a per-push check that the elector reaches the engine: under stable leaders both
+  views of a term finalize with one leader, under the default never. Dropping the validator's
+  elector config fails it (96 split pairs).
