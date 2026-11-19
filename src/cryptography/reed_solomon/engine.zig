@@ -15,6 +15,8 @@
 //! - `Scalar`: portable engine without SIMD.
 //! - `Simd`: the `Scalar` transforms with an AVX2 or NEON nibble-shuffle multiply (`Scalar`
 //!   elsewhere).
+//! - `Avx512`: the `Scalar` transforms with a GFNI multiply on 512-bit vectors, where the target
+//!   has AVX-512F and GFNI (`Simd` elsewhere).
 //! - `DefaultEngine`: the engine `Encoder` and `Decoder` use; chosen at compile time.
 //!
 //! `fft` transforms `data[pos..pos + size]`, producing the requested output prefix in
@@ -32,14 +34,17 @@ pub const shards = @import("engine/shards.zig");
 pub const Naive = @import("engine/naive.zig").Naive;
 pub const Scalar = @import("engine/scalar.zig").Scalar;
 pub const Simd = @import("engine/simd.zig").Simd;
+pub const Avx512 = @import("engine/avx512.zig").Avx512;
+/// Whether `Avx512` is the GFNI engine on this target.
+pub const avx512_available = @import("engine/avx512.zig").available;
 /// The name of `Simd`'s kernel on this target: `avx2`, `neon`, or `scalar` without one.
 pub const simd_name = @import("engine/simd.zig").name;
 pub const Shards = shards.Shards;
 pub const ShardsRefMut = shards.ShardsRefMut;
 
-/// The engine `Encoder` and `Decoder` use: `Simd` where the target has AVX2 or NEON, else
-/// `Scalar`.
-pub const DefaultEngine = Simd;
+/// The engine `Encoder` and `Decoder` use, as commonware's `DefaultEngine` picks it: `Avx512`
+/// where the target has AVX-512F and GFNI, `Simd` where it has AVX2 or NEON, else `Scalar`.
+pub const DefaultEngine = if (avx512_available) Avx512 else Simd;
 
 /// Size of a Galois field element in bits.
 pub const GF_BITS = 16;
@@ -130,6 +135,7 @@ test "transform empty shards and identity" {
     try expect_identity_transforms(Naive);
     try expect_identity_transforms(Scalar);
     try expect_identity_transforms(Simd);
+    try expect_identity_transforms(Avx512);
 }
 
 test "eval_poly matches across engines" {
@@ -156,4 +162,5 @@ test {
     _ = shards;
     _ = @import("engine/scalar.zig");
     _ = @import("engine/simd.zig");
+    _ = @import("engine/avx512.zig");
 }

@@ -321,6 +321,7 @@ fn benchmarks_engine(runner: *bench.Runner) !void {
     if (engine.Simd != engine.Scalar) {
         try benchmarks_engine_one(runner, engine.Simd, engine.simd_name);
     }
+    if (engine.avx512_available) try benchmarks_engine_one(runner, engine.Avx512, "avx512");
 }
 
 pub fn run(runner: *bench.Runner) !void {

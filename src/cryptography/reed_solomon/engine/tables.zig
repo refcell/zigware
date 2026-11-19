@@ -11,6 +11,7 @@
 //! | short Walsh | < 128 KiB | smaller power-of-two decoding domains     |
 //! | `mul16`     | 8 MiB     | `Scalar`                                  |
 //! | `skew`      | 128 KiB   | every engine (FFT and IFFT)               |
+//! | `mul_gfni`  | 2 MiB     | `Avx512`                                  |
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -34,6 +35,17 @@ pub const LogWalsh = [GF_ORDER]GfElement;
 pub const Mul16 = [GF_ORDER][4][16]GfElement;
 /// Logarithms of the butterfly coefficients; a `GF_MODULUS` entry encodes a zero coefficient.
 pub const Skew = [GF_MODULUS]GfElement;
+/// The GF2P8AFFINEQB matrices that multiply by one element: each maps an input byte (the low
+/// or high byte of a field element) to its contribution to an output byte. Row `i` of a matrix
+/// is byte `7 - i` of its `u64`, as the instruction reads it.
+pub const MultiplyGfni = struct {
+    low_from_low: u64,
+    low_from_high: u64,
+    high_from_low: u64,
+    high_from_high: u64,
+};
+/// `MultiplyGfni` for every logarithm; `GF_MODULUS` duplicates the identity at zero.
+pub const MulGfni = [GF_ORDER]MultiplyGfni;
 
 /// Exponentiation and logarithm tables.
 pub const ExpLog = struct {
@@ -66,6 +78,7 @@ var log_table: Log = undefined;
 var log_walsh_table: LogWalsh = undefined;
 var mul16_table: Mul16 = undefined;
 var skew_table: Skew = undefined;
+var mul_gfni_table: MulGfni = undefined;
 /// Short Walsh kernels: the kernel for `n = 1 << level` occupies `[n - 1, 2 * n - 1)`.
 var short_log_walsh_table: [GF_ORDER - 1]GfElement = undefined;
 
@@ -73,6 +86,7 @@ var exp_log_once: Once = .{};
 var log_walsh_once: Once = .{};
 var mul16_once: Once = .{};
 var skew_once: Once = .{};
+var mul_gfni_once: Once = .{};
 var short_log_walsh_once: Once = .{};
 
 /// Lazily initialized exponentiation and logarithm tables.
@@ -101,6 +115,12 @@ pub fn get_short_log_walsh(n: usize) []const GfElement {
 pub fn get_mul16() *const Mul16 {
     mul16_once.call(initialize_mul16);
     return &mul16_table;
+}
+
+/// Lazily initialized GFNI multiplication table for the `Avx512` engine.
+pub fn get_mul_gfni() *const MulGfni {
+    mul_gfni_once.call(initialize_mul_gfni);
+    return &mul_gfni_table;
 }
 
 /// Lazily initialized skew table used in FFT and IFFT operations.
@@ -185,6 +205,45 @@ fn initialize_mul16() void {
     assert(mul16_table[0][0][1] == 1);
 }
 
+/// Builds `MulGfni` by combining one matrix per coefficient bit along a Gray code.
+fn initialize_mul_gfni() void {
+    const exp_log = get_exp_log();
+    var basis_matrices: [GF_BITS][4]u64 = undefined;
+    for (&basis_matrices, 0..) |*matrix, coefficient_bit| {
+        const log_m = exp_log.log[@as(usize, 1) << @intCast(coefficient_bit)];
+        var rows: [4][8]u8 = @splat(@splat(0));
+        for (0..GF_BITS) |input_bit| {
+            const input = @as(GfElement, 1) << @intCast(input_bit);
+            const product = mul(input, log_m, exp_log.exp, exp_log.log);
+            for (0..GF_BITS) |output_bit| {
+                // Blocks follow the `MultiplyGfni` field order: 2 * output byte + input byte.
+                const block = (output_bit / 8) * 2 + input_bit / 8;
+                const bit: u8 = @truncate(product >> @intCast(output_bit));
+                rows[block][output_bit % 8] |= (bit & 1) << @intCast(input_bit % 8);
+            }
+        }
+        // GF2P8AFFINEQB reads row i from byte 7 - i of each 64-bit matrix.
+        for (matrix, rows) |*block, row| block.* = std.mem.readInt(u64, &row, .big);
+    }
+    // Multiplication is linear in the coefficient. After each basis-matrix XOR, `current` is
+    // the matrix for `step ^ (step >> 1)`: consecutive binary-reflected Gray codes differ in
+    // bit `@ctz(step)`.
+    var current: [4]u64 = @splat(0);
+    for (1..GF_ORDER) |step| {
+        for (&current, basis_matrices[@ctz(step)]) |*block, basis| block.* ^= basis;
+        const coefficient = step ^ (step >> 1);
+        mul_gfni_table[exp_log.log[coefficient]] = .{
+            .low_from_low = current[0],
+            .low_from_high = current[1],
+            .high_from_low = current[2],
+            .high_from_high = current[3],
+        };
+    }
+    // Exponents are taken modulo `GF_MODULUS`, so exponent `GF_MODULUS` duplicates zero's.
+    mul_gfni_table[GF_MODULUS] = mul_gfni_table[0];
+    assert(mul_gfni_table[0].low_from_low == 0x0102040810204080);
+}
+
 /// Builds `Skew`, the logarithms of the FFT butterfly coefficients. A zero coefficient is
 /// stored as `GF_MODULUS`, the logarithm `Log` assigns to zero.
 fn initialize_skew() void {
@@ -239,4 +298,36 @@ test "mul16 matches mul" {
             try std.testing.expectEqual(mul(x, log_m, exp_log.exp, exp_log.log), product);
         }
     }
+}
+
+/// GF2P8AFFINEQB on one byte: output bit `i` is the parity of `x` and row `i`, byte `7 - i`.
+fn affine_byte(matrix: u64, x: u8) u8 {
+    var out: u8 = 0;
+    for (0..8) |i| {
+        const row: u8 = @truncate(matrix >> @intCast(8 * (7 - i)));
+        out |= @as(u8, @popCount(row & x) & 1) << @intCast(i);
+    }
+    return out;
+}
+
+test "mul_gfni matrix semantics" {
+    // commonware `mul_gfni_matrix_semantics`: every matrix multiplies like `mul` under the
+    // instruction's row order, and `GF_MODULUS` duplicates the identity.
+    try std.testing.expectEqual(@as(usize, 2 * 1024 * 1024), @sizeOf(MulGfni));
+    const exp_log = get_exp_log();
+    const table = get_mul_gfni();
+    const samples = [_]GfElement{ 1, 2, 0x80, 0x100, 0x1234, 0x8000, 0xFFFF };
+    var log_m: usize = 0;
+    while (log_m < GF_ORDER) : (log_m += 97) {
+        const m = &table[log_m];
+        for (samples) |x| {
+            const lo: u8 = @truncate(x);
+            const hi: u8 = @truncate(x >> 8);
+            const low = affine_byte(m.low_from_low, lo) ^ affine_byte(m.low_from_high, hi);
+            const high = affine_byte(m.high_from_low, lo) ^ affine_byte(m.high_from_high, hi);
+            const expected = mul(x, @intCast(log_m), exp_log.exp, exp_log.log);
+            try std.testing.expectEqual(expected, @as(GfElement, high) << 8 | low);
+        }
+    }
+    try std.testing.expectEqual(table[0], table[GF_MODULUS]);
 }

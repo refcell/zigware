@@ -109,6 +109,9 @@ const Tables = struct {
 };
 
 pub const VectorKernel = struct {
+    pub const Table = @import("tables.zig").Mul16;
+    pub const table = @import("tables.zig").get_mul16;
+
     pub fn mul(lut: *const [4][16]GfElement, x: []Chunk) void {
         comptime assert(available);
         const tables: Tables = .init(lut);

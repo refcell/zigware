@@ -53,8 +53,14 @@ test "reed solomon scalar ifft rejects zero size" {
 test "reed solomon simd fft rejects zero size" {
     try dies(@src(), engine.Simd, false, .{ 4, 0, 0, 0, 0 });
 }
+test "reed solomon avx512 fft rejects zero size" {
+    try dies(@src(), engine.Avx512, false, .{ 4, 0, 0, 0, 0 });
+}
 test "reed solomon simd ifft rejects zero size" {
     try dies(@src(), engine.Simd, true, .{ 4, 0, 0, 0, 0 });
+}
+test "reed solomon avx512 ifft rejects zero size" {
+    try dies(@src(), engine.Avx512, true, .{ 4, 0, 0, 0, 0 });
 }
 
 // commonware `transform_non_power_of_two_size`.
@@ -73,8 +79,14 @@ test "reed solomon scalar ifft rejects non power of two size" {
 test "reed solomon simd fft rejects non power of two size" {
     try dies(@src(), engine.Simd, false, .{ 4, 0, 3, 0, 0 });
 }
+test "reed solomon avx512 fft rejects non power of two size" {
+    try dies(@src(), engine.Avx512, false, .{ 4, 0, 3, 0, 0 });
+}
 test "reed solomon simd ifft rejects non power of two size" {
     try dies(@src(), engine.Simd, true, .{ 4, 0, 3, 0, 0 });
+}
+test "reed solomon avx512 ifft rejects non power of two size" {
+    try dies(@src(), engine.Avx512, true, .{ 4, 0, 3, 0, 0 });
 }
 
 // commonware `transform_size_exceeds_field`.
@@ -93,8 +105,14 @@ test "reed solomon scalar ifft rejects size beyond the field" {
 test "reed solomon simd fft rejects size beyond the field" {
     try dies(@src(), engine.Simd, false, .{ 2 * GF_ORDER, 0, 2 * GF_ORDER, 0, 0 });
 }
+test "reed solomon avx512 fft rejects size beyond the field" {
+    try dies(@src(), engine.Avx512, false, .{ 2 * GF_ORDER, 0, 2 * GF_ORDER, 0, 0 });
+}
 test "reed solomon simd ifft rejects size beyond the field" {
     try dies(@src(), engine.Simd, true, .{ 2 * GF_ORDER, 0, 2 * GF_ORDER, 0, 0 });
+}
+test "reed solomon avx512 ifft rejects size beyond the field" {
+    try dies(@src(), engine.Avx512, true, .{ 2 * GF_ORDER, 0, 2 * GF_ORDER, 0, 0 });
 }
 
 // commonware `transform_range_out_of_bounds`.
@@ -137,20 +155,38 @@ test "reed solomon scalar ifft rejects range out of bounds at max" {
 test "reed solomon simd fft rejects range out of bounds at 3" {
     try dies(@src(), engine.Simd, false, .{ 4, 3, 2, 0, 0 });
 }
+test "reed solomon avx512 fft rejects range out of bounds at 3" {
+    try dies(@src(), engine.Avx512, false, .{ 4, 3, 2, 0, 0 });
+}
 test "reed solomon simd fft rejects range out of bounds at 4" {
     try dies(@src(), engine.Simd, false, .{ 4, 4, 2, 0, 0 });
+}
+test "reed solomon avx512 fft rejects range out of bounds at 4" {
+    try dies(@src(), engine.Avx512, false, .{ 4, 4, 2, 0, 0 });
 }
 test "reed solomon simd fft rejects range out of bounds at max" {
     try dies(@src(), engine.Simd, false, .{ 4, max, 2, 0, 0 });
 }
+test "reed solomon avx512 fft rejects range out of bounds at max" {
+    try dies(@src(), engine.Avx512, false, .{ 4, max, 2, 0, 0 });
+}
 test "reed solomon simd ifft rejects range out of bounds at 3" {
     try dies(@src(), engine.Simd, true, .{ 4, 3, 2, 0, 0 });
+}
+test "reed solomon avx512 ifft rejects range out of bounds at 3" {
+    try dies(@src(), engine.Avx512, true, .{ 4, 3, 2, 0, 0 });
 }
 test "reed solomon simd ifft rejects range out of bounds at 4" {
     try dies(@src(), engine.Simd, true, .{ 4, 4, 2, 0, 0 });
 }
+test "reed solomon avx512 ifft rejects range out of bounds at 4" {
+    try dies(@src(), engine.Avx512, true, .{ 4, 4, 2, 0, 0 });
+}
 test "reed solomon simd ifft rejects range out of bounds at max" {
     try dies(@src(), engine.Simd, true, .{ 4, max, 2, 0, 0 });
+}
+test "reed solomon avx512 ifft rejects range out of bounds at max" {
+    try dies(@src(), engine.Avx512, true, .{ 4, max, 2, 0, 0 });
 }
 
 // commonware `transform_truncation_out_of_bounds`.
@@ -169,8 +205,14 @@ test "reed solomon scalar ifft rejects truncation out of bounds" {
 test "reed solomon simd fft rejects truncation out of bounds" {
     try dies(@src(), engine.Simd, false, .{ 4, 0, 2, 3, 0 });
 }
+test "reed solomon avx512 fft rejects truncation out of bounds" {
+    try dies(@src(), engine.Avx512, false, .{ 4, 0, 2, 3, 0 });
+}
 test "reed solomon simd ifft rejects truncation out of bounds" {
     try dies(@src(), engine.Simd, true, .{ 4, 0, 2, 3, 0 });
+}
+test "reed solomon avx512 ifft rejects truncation out of bounds" {
+    try dies(@src(), engine.Avx512, true, .{ 4, 0, 2, 3, 0 });
 }
 
 // commonware `transform_skew_out_of_bounds`.
@@ -201,14 +243,26 @@ test "reed solomon scalar ifft rejects skew out of bounds by max" {
 test "reed solomon simd fft rejects skew out of bounds by order - 1" {
     try dies(@src(), engine.Simd, false, .{ 4, 0, 2, 0, GF_ORDER - 1 });
 }
+test "reed solomon avx512 fft rejects skew out of bounds by order - 1" {
+    try dies(@src(), engine.Avx512, false, .{ 4, 0, 2, 0, GF_ORDER - 1 });
+}
 test "reed solomon simd fft rejects skew out of bounds by max" {
     try dies(@src(), engine.Simd, false, .{ 4, 0, 2, 0, max });
+}
+test "reed solomon avx512 fft rejects skew out of bounds by max" {
+    try dies(@src(), engine.Avx512, false, .{ 4, 0, 2, 0, max });
 }
 test "reed solomon simd ifft rejects skew out of bounds by order - 1" {
     try dies(@src(), engine.Simd, true, .{ 4, 0, 2, 0, GF_ORDER - 1 });
 }
+test "reed solomon avx512 ifft rejects skew out of bounds by order - 1" {
+    try dies(@src(), engine.Avx512, true, .{ 4, 0, 2, 0, GF_ORDER - 1 });
+}
 test "reed solomon simd ifft rejects skew out of bounds by max" {
     try dies(@src(), engine.Simd, true, .{ 4, 0, 2, 0, max });
+}
+test "reed solomon avx512 ifft rejects skew out of bounds by max" {
+    try dies(@src(), engine.Avx512, true, .{ 4, 0, 2, 0, max });
 }
 
 // commonware `engine.rs` `eval_poly_truncation_out_of_bounds`.

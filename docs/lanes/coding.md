@@ -40,11 +40,13 @@ hashers (on main).
 - Errors carry no payload (Zig); names match commonware's `Error` variants.
 - Rust drops results to reset the coder; here `result.deinit()` does it. Coders take an
   allocator; decoding allocates nothing (erasure scratch lives in `DecoderWork`).
-- The engine is chosen at compile time (`DefaultEngine = Simd`, which is `Scalar` without AVX2
-  or NEON)
-  instead of runtime CPU detection;
-  every engine produces identical bytes. The fused 16-shard AVX-512 derivative leaf is not
-  ported (output is identical; it is a speedup).
+- The engine is chosen at compile time instead of runtime CPU detection: `DefaultEngine` is
+  `Avx512` (GFNI multiply on 512-bit vectors, `engine/avx512.zig`, commonware's
+  `engine_avx512.rs`) where the target has AVX-512F and GFNI and the build runs on LLVM, else
+  `Simd` (AVX2 or NEON nibble shuffle), else `Scalar`. Zig's own x86 backend (Debug) cannot pass
+  512-bit vectors to inline assembly, so Debug builds use `Simd` and the GFNI tests run in
+  ReleaseSafe (CI's `test-rest`). Every engine produces identical bytes. The fused 16-shard
+  AVX-512 derivative leaf is not ported (output is identical; it is a speedup).
 - Tables live in static memory behind an atomic once-guard, not on the heap.
 - `ChaCha8Rng` (`reed_solomon/test_util.zig`) matches `rand_chacha` 0.10 `from_seed`, so shard
   generation and every recovery-hash vector match commonware.
@@ -150,15 +152,16 @@ engine or table: `gfni_all_multipliers_basis`, `mul_gfni_matrix_semantics`; the 
 decision does not cover them), other 1 (`mul128_byte_layout`: no global Mul128 table). bmt's 2
 stay design differences (slices, not iterators). With `utils.death` (2026-11-19) the 25 panics
 and the 2 `RangeBounds` cases port as death tests (6 in `coding/reed_solomon/death_test.zig`,
-21 in `cryptography/reed_solomon/death_test.zig`): 1 + 6 = 7 left, none of them a panic.
+21 in `cryptography/reed_solomon/death_test.zig`): 1 + 6 = 7 left, none of them a panic. The GFNI
+engine then ports the 2 missing-feature tests: 1 + 4 = 5 left.
 
 
 ### Test audit: coding (2026-11-19, commonware 43b357a41, p2p lane)
 
 Every `#[test]`/`#[rstest]` fn in commonware `cryptography/src/reed_solomon`, with each `#[case]`
 and each test-generating macro expansion counted separately, matched to a zigware test by name or by
-reading both bodies (a zigware test may cover several). 156 tests: 150 ported, 0 open, 6 not
-portable (after the death-test ports below).
+reading both bodies (a zigware test may cover several). 156 tests: 152 ported, 0 open, 4 not
+portable (after the death-test ports and the GFNI engine below).
 
 | commonware file | tests | ported | open | not portable |
 |---|---|---|---|---|
@@ -170,11 +173,11 @@ portable (after the death-test ports below).
 | `reed_solomon/plan.rs` | 2 | 2 | 0 | 0 |
 | `reed_solomon/rate.rs` | 2 | 2 | 0 | 0 |
 | `reed_solomon/wrappers.rs` | 6 | 6 | 0 | 0 |
-| `reed_solomon/engine/engine_avx512.rs` | 1 | 0 | 0 | 1 |
+| `reed_solomon/engine/engine_avx512.rs` | 1 | 1 | 0 | 0 |
 | `reed_solomon/engine/engine_scalar.rs` | 1 | 1 | 0 | 0 |
 | `reed_solomon/engine/fwht.rs` | 3 | 3 | 0 | 0 |
 | `reed_solomon/engine/shards.rs` | 16 | 16 | 0 | 0 |
-| `reed_solomon/engine/tables.rs` | 2 | 0 | 0 | 2 |
+| `reed_solomon/engine/tables.rs` | 2 | 1 | 0 | 1 |
 | `reed_solomon/rate/rate_default.rs` | 7 | 7 | 0 | 0 |
 | `reed_solomon/rate/rate_high.rs` | 37 | 37 | 0 | 0 |
 | `reed_solomon/rate/rate_low.rs` | 38 | 38 | 0 | 0 |
@@ -195,6 +198,10 @@ Open:
   and supports(61440,4096)==false are never called in Zig. Add the two asserts to
   src/cryptography/reed_solomon/rate/tests.zig "high and low rate limits"
 
+Ported with the AVX-512 GFNI engine (2026-11-19): `gfni_all_multipliers_basis` in
+`engine/avx512.zig` and `mul_gfni_matrix_semantics` in `engine/tables.zig` (against a bitwise
+model of GF2P8AFFINEQB).
+
 Ported as death tests (`utils.death.expect_panic`, 2026-11-19) in
 `src/cryptography/reed_solomon/death_test.zig`: engine.rs's 6 `transform_*` tests (each on
 Naive, Scalar, and Simd, FFT and IFFT, as commonware checks every engine) and
@@ -213,14 +220,8 @@ Not portable:
   engine, rate, results, Error are Send); Zig has no Send/Sync traits, so there is nothing to assert
 - `reed_solomon/mod.rs` `test_sync`: Rust auto-trait compile-time check (the same types are Sync);
   Zig has no Send/Sync traits, so there is nothing to assert
-- `reed_solomon/engine/engine_avx512.rs` `gfni_all_multipliers_basis`: tests the AVX-512 GFNI
-  multiply kernel; zigware has no AVX-512/GFNI engine, only Scalar and the AVX2 vpshufb/NEON tbl
-  Simd kernel (docs/lanes/coding.md Decisions: AVX-512 leaf not ported)
 - `reed_solomon/engine/tables.rs` `mul128_byte_layout`: checks the global Mul128 vector table byte
   layout against mul16; zigware has no Mul128 table, the Simd kernel builds per-multiplier nibble
   tables from mul16 on each call (engine/simd.zig Tables.init); their correctness is covered end to
   end by src/cryptography/reed_solomon/engine/simd.zig "simd mul and mul_add match scalar" and "simd
   mul matches naive"
-- `reed_solomon/engine/tables.rs` `mul_gfni_matrix_semantics`: checks the MulGfni affine-matrix
-  table used only by the AVX-512 GFNI engine; zigware has no GFNI table or engine
-  (docs/lanes/coding.md Decisions: AVX-512 leaf not ported)

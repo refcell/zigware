@@ -16,19 +16,25 @@ const GfElement = engine.GfElement;
 const Chunk = engine.Chunk;
 const half = engine.SHARD_CHUNK_BYTES / 2;
 
-/// The transforms of `Scalar` over a multiply kernel: `Kernel.mul_add(lut, x, y)` computes
-/// `x ^= y * m` for the nibble tables `lut` of `m`, and `Kernel.mul(lut, x)` computes `x *= m`.
-/// Every kernel must produce the same bytes.
+/// The transforms of `Scalar` over a multiply kernel. `Kernel.Table` is indexed by a
+/// multiplier's logarithm and built by `Kernel.table()`; `Kernel.mul_add(lut, x, y)` computes
+/// `x ^= y * m` for the entry `lut` of `m`, and `Kernel.mul(lut, x)` computes `x *= m`. A kernel
+/// may also fuse two butterfly layers over four shards (`fft4`, `ifft4`, with the entries of
+/// `m01`, `m23`, and `m02`), used when no coefficient is zero. Every kernel must produce the
+/// same bytes.
 pub fn Engine(comptime Kernel: type) type {
+    comptime assert(@hasDecl(Kernel, "Table") and @hasDecl(Kernel, "table"));
+    comptime assert(@hasDecl(Kernel, "fft4") == @hasDecl(Kernel, "ifft4"));
     return struct {
         const Self = @This();
+        const fused = @hasDecl(Kernel, "fft4");
 
-        mul16: *const tables.Mul16,
+        mul16: *const Kernel.Table,
         skew: *const tables.Skew,
 
         /// Creates a `Scalar` engine and initializes its multiplication and skew tables.
         pub fn init() Self {
-            return .{ .mul16 = tables.get_mul16(), .skew = tables.get_skew() };
+            return .{ .mul16 = Kernel.table(), .skew = tables.get_skew() };
         }
 
         /// In-place decimation-in-time FFT of `data[pos..pos + size]` (see `engine.zig`).
@@ -156,6 +162,12 @@ pub fn Engine(comptime Kernel: type) type {
             log_m02: GfElement,
         ) void {
             const s0, const s1, const s2, const s3 = data.dist4(pos, dist);
+            if (fused and log_m01 != GF_MODULUS and log_m23 != GF_MODULUS and
+                log_m02 != GF_MODULUS)
+            {
+                const luts = .{ &scalar.mul16[log_m01], &scalar.mul16[log_m23] };
+                return Kernel.fft4(luts[0], luts[1], &scalar.mul16[log_m02], .{ s0, s1, s2, s3 });
+            }
             // First layer: (s0, s2) and (s1, s3). Second layer: (s0, s1) and (s2, s3).
             scalar.fft_butterfly(s0, s2, log_m02);
             scalar.fft_butterfly(s1, s3, log_m02);
@@ -174,6 +186,12 @@ pub fn Engine(comptime Kernel: type) type {
             log_m02: GfElement,
         ) void {
             const s0, const s1, const s2, const s3 = data.dist4(pos, dist);
+            if (fused and log_m01 != GF_MODULUS and log_m23 != GF_MODULUS and
+                log_m02 != GF_MODULUS)
+            {
+                const luts = .{ &scalar.mul16[log_m01], &scalar.mul16[log_m23] };
+                return Kernel.ifft4(luts[0], luts[1], &scalar.mul16[log_m02], .{ s0, s1, s2, s3 });
+            }
             // First layer: (s0, s1) and (s2, s3). Second layer: (s0, s2) and (s1, s3).
             scalar.ifft_butterfly(s0, s1, log_m01);
             scalar.ifft_butterfly(s2, s3, log_m23);
@@ -185,6 +203,9 @@ pub fn Engine(comptime Kernel: type) type {
 
 /// Multiplies one field element at a time with four nibble-table lookups.
 pub const ScalarKernel = struct {
+    pub const Table = tables.Mul16;
+    pub const table = tables.get_mul16;
+
     pub fn mul(lut: *const [4][16]GfElement, x: []Chunk) void {
         for (x) |*chunk| {
             for (0..half) |i| {
