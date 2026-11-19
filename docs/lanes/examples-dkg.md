@@ -30,7 +30,8 @@ setup. Owns `examples/dkg` (commonware `examples/dkg`).
       store, and write the genesis to sibling validators (singleton ceremony test).
 - [x] `bootstrap` run on discovery p2p and the production runner (`network.zig` holds the
       discovery setup the validator shares); runs end to end on a one-node network.
-- [ ] Demo recording (`just` recipe `dkg`, etc/scripts/record-demo.sh).
+- [x] Demo recording (`etc/scripts/record-demo.sh dkg`): setup, the epoch-0 bootstrap, and
+      four validators resharing over epochs; docs/assets/dkg-demo.{gif,mp4}.
 
 ## Decisions
 
@@ -76,3 +77,4 @@ setup. Owns `examples/dkg` (commonware `examples/dkg`).
 - 2026-11-19: the application on glue.stateful's Processor contract (examples lane).
 - 2026-11-19: the `bootstrap` subcommand on the production runtime (examples lane).
 - 2026-11-19: the validator composition, resharing across epochs on 4 nodes (examples lane).
+- 2026-11-19: the dkg demo recording (examples lane).

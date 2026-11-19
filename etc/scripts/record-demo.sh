@@ -156,6 +156,72 @@ grep --line-buffered -E '$pattern' | sed -u -E '$line; s/^(.{$width}).*/\\1/; $g
       kill "$network" 2>/dev/null || true
       wait "$network" 2>/dev/null || true
       ;;
+    dkg)
+      if [ -n "$(find src examples/dkg examples/ui build.zig -newer zig-out/bin/dkg -print \
+        -quit 2>/dev/null || echo stale)" ] || [ ! -x zig-out/bin/dkg ]; then
+        zig build -Doptimize=ReleaseFast >/dev/null
+      fi
+      # commonware's README flow: setup, the epoch-0 bootstrap, then four validators running
+      # DKG and resharing over epochs, each in a pane of a 2x2 tmux grid of its trace events.
+      dir=/tmp/zigware-dkg-demo
+      rm -rf "$dir"
+      mkdir -p "$dir"
+      export PATH="$PWD/zig-out/bin:$PATH" NO_COLOR=1
+      trim='s/^[0-9-]+T([0-9:]+)\.[0-9]+Z +/\1 /; s/commonware_glue::dkg::/dkg::/'
+      trim+='; s/commonware_//; s/([0-9a-f]{8})[0-9a-f]{16,}/\1../g'
+      cat >"$dir/follow.sh" <<EOF
+#!/usr/bin/env bash
+# Validator \$1's events: every DKG event, and one finalized block in eight.
+printf '\033[1mvalidator %s\033[0m\n' "\$1"
+tail -n +1 -F $dir/validator-\$1.log 2>/dev/null |
+  awk '!/finalized block/ || (match(\$0, /height=[0-9]+/) &&
+    substr(\$0, RSTART + 7, RLENGTH - 7) % 8 == 0) { print; fflush() }' |
+  sed -u -E '$trim; s/^(.{108}).*/\1/;
+    s/(completed reshare ceremony.*)/\x1b[32m\1\x1b[0m/; s/(entered epoch)/\x1b[33m\1\x1b[0m/'
+EOF
+      chmod +x "$dir/follow.sh"
+      printf '\033[H\033[2J'
+      type_cmd "dkg setup --node-dir $dir/data --peers 4 --committee-size 3 --base-port 3500" 3
+      printf '\n'
+      type_cmd "for i in 0 1 2; do dkg bootstrap --node-dir $dir/data/validator-\$i \
+>$dir/bootstrap-\$i.log 2>&1 & done" 0
+      until [ "$(cat "$dir"/bootstrap-*.log 2>/dev/null | grep -c 'bootstrap complete')" = 3 ]; do
+        sleep 0.5
+      done
+      grep -h 'bootstrap complete' "$dir"/bootstrap-*.log | sed -E "$trim"
+      sleep 3
+      # Stop the bootstraps and let their ports close before the validators bind them.
+      jobs -p >"$dir/bootstrap.pids"
+      while read -r pid; do kill "$pid" 2>/dev/null || true; done <"$dir/bootstrap.pids"
+      wait 2>/dev/null || true
+      while ss -ltn | grep -qE ':350[0-3] '; do sleep 0.2; done
+      for i in 0 1 2 3; do
+        dkg validator --node-dir "$dir/data/validator-$i" >"$dir/validator-$i.log" 2>&1 &
+      done
+      t() { tmux -L zigware-demo -f /dev/null "$@"; }
+      t kill-server 2>/dev/null || true
+      t new-session -d -s dkg -x 220 -y 50 "$dir/follow.sh 0"
+      t set-option -g status off
+      t split-window -h -t dkg "$dir/follow.sh 1"
+      t split-window -v -t dkg "$dir/follow.sh 3"
+      t select-pane -t dkg -L
+      t split-window -v -t dkg "$dir/follow.sh 2"
+      (
+        # End a few blocks into epoch 1, once every validator completed the first reshare.
+        for _ in $(seq 240); do
+          [ "$(cat "$dir"/validator-*.log | grep -c 'completed reshare ceremony epoch=1')" \
+            -ge 4 ] && break
+          sleep 0.5
+        done
+        sleep 6
+        t detach-client -s dkg
+      ) &
+      t attach -t dkg || true
+      wait %%
+      t kill-server
+      kill $(jobs -p) 2>/dev/null || true
+      wait 2>/dev/null || true
+      ;;
     *) echo "unknown demo: $name" >&2; exit 1 ;;
   esac
   exit 0
@@ -166,11 +232,12 @@ case $name in
   chat) size=200x50 ;;
   log) size=200x44 ;;
   bridge) size=160x40 ;;
+  dkg) size=220x50 ;;
   *) size=104x40 ;;
 esac
 DEMO_SESSION=1 TERM=xterm-256color asciinema rec --overwrite --quiet --output-format asciicast-v2 --window-size "$size" \
   --command "$0 $name" "$out.cast"
-if [ "$name" = chat ] || [ "$name" = log ] || [ "$name" = bridge ]; then
+if [ "$name" = chat ] || [ "$name" = log ] || [ "$name" = bridge ] || [ "$name" = dkg ]; then
   # End on the panes, not tmux's exit screen: cut where tmux leaves the alternate screen.
   awk 'index($0, "\\u001b[?1049l") { exit } { print }' "$out.cast" >"$out.cast.cut"
   mv "$out.cast.cut" "$out.cast"
@@ -179,6 +246,7 @@ fi
 font=16 fps=30
 [ "$name" = log ] && font=12 fps=6
 [ "$name" = bridge ] && font=14 fps=8
+[ "$name" = dkg ] && font=12 fps=8
 agg --theme monokai --font-size "$font" --idle-time-limit 3 --last-frame-duration 6 \
   --fps-cap "$fps" "$out.cast" "$out.gif"
 ffmpeg -y -loglevel error -i "$out.gif" -movflags faststart -pix_fmt yuv420p \
