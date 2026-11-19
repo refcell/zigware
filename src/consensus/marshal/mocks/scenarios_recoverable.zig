@@ -304,3 +304,94 @@ pub fn CertifyPersistsEquivocated(comptime H: type) type {
         }
     };
 }
+
+/// What the restarted validator does with the same-round blocks in the reverify contracts.
+pub const Reverify = enum {
+    /// commonware `verified_after_restart_reverify_same_round_implies_recoverable`: re-verify A
+    /// (a replayed duplicate of the pre-crash write), then verify the equivocated block B.
+    verified,
+    /// commonware `certify_after_restart_reverify_same_round_implies_recoverable`: verify only B,
+    /// so its certification is covered by B's verified write rather than a fresh notarized one,
+    /// then certify it. A stale same-round write for A must not count as coverage for B.
+    certified,
+};
+
+/// commonware `reverify_same_round_implies_recoverable`: run 1 verifies block A and crashes
+/// with it durable; run 2 restarts and acknowledges the equivocated same-round block B as
+/// `action` says, then crashes; run 3 finds both A and B by digest.
+pub fn ReverifySameRound(comptime H: type, comptime action: Reverify) type {
+    return struct {
+        const State = struct {
+            fixture: H.Fixture,
+            block_a: H.TestBlock,
+            block_b: H.TestBlock,
+        };
+
+        pub fn run(gpa: Allocator) !void {
+            var rng = utils.rng.test_rng();
+            var state: State = undefined;
+            state.fixture = try H.fixture(gpa, &rng);
+            defer state.fixture.deinit(gpa);
+            const parent = harness.genesis_parent();
+            const commitment = H.genesis_parent_commitment(num_validators);
+            // Two blocks at one height and round (leader equivocation): distinct timestamps
+            // give them distinct digests.
+            state.block_a = try H.make_test_block(gpa, parent, commitment, .new(1), 1, 4);
+            defer H.Variant.deinit_block(gpa, &state.block_a);
+            state.block_b = try H.make_test_block(gpa, parent, commitment, .new(1), 2, 4);
+            defer H.Variant.deinit_block(gpa, &state.block_b);
+            assert(!H.digest(&state.block_a).eql(H.digest(&state.block_b)));
+            var runner = try runtime.deterministic.Runner.init(gpa, contract_config(0));
+            defer runner.deinit();
+            try try runner.start_context(verify_a, .{&state});
+            try try runner.start_context(phase_two, .{&state});
+            try try runner.start_context(recover, .{&state});
+        }
+
+        fn verify_a(ctx: Ctx, state: *const State) anyerror!void {
+            var node: Node(H) = undefined;
+            try node.start(ctx.child("validator").with_attribute("index", 0), &state.fixture);
+            defer node.crash();
+            try H.verify(node.validator, round_at(1), &state.block_a);
+        }
+
+        fn phase_two(ctx: Ctx, state: *const State) anyerror!void {
+            var node: Node(H) = undefined;
+            const child = ctx.child("validator").with_attribute("index", 0)
+                .with_attribute("restart", 0);
+            try node.start(child, &state.fixture);
+            defer node.crash();
+            const round = round_at(1);
+            switch (action) {
+                .verified => {
+                    try H.verify(node.validator, round, &state.block_a);
+                    try H.verify(node.validator, round, &state.block_b);
+                },
+                .certified => {
+                    try H.verify(node.validator, round, &state.block_b);
+                    // certify must ack.
+                    if (!try H.certify(node.validator, round, &state.block_b)) {
+                        return error.CertifyNotAcknowledged;
+                    }
+                },
+            }
+        }
+
+        fn recover(ctx: Ctx, state: *const State) anyerror!void {
+            var node: Node(H) = undefined;
+            const child = ctx.child("validator").with_attribute("index", 0)
+                .with_attribute("restart", 1);
+            try node.start(child, &state.fixture);
+            defer node.crash();
+            // The pre-restart verified block A must remain recoverable.
+            const digest_a = H.digest(&state.block_a);
+            if (!try has_block(H, node.validator, digest_a)) return error.VerifiedBlockLost;
+            if (!try has_block(H, node.validator, H.digest(&state.block_b))) {
+                std.log.err("marshal.{s}() acked B, but B is lost after restart", .{
+                    @tagName(action),
+                });
+                return error.SameRoundBlockLost;
+            }
+        }
+    };
+}

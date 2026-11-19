@@ -275,3 +275,11 @@ test "standard certify at later view survives earlier view pruning" {
 test "standard certify persists equivocated block" {
     try recoverable.CertifyPersistsEquivocated(H).run(gpa);
 }
+
+test "standard verified after restart reverify same round implies recoverable" {
+    try recoverable.ReverifySameRound(H, .verified).run(gpa);
+}
+
+test "standard certify after restart reverify same round implies recoverable" {
+    try recoverable.ReverifySameRound(H, .certified).run(gpa);
+}
