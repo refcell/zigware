@@ -102,6 +102,10 @@ pub const Header = struct {
 
 const testing = std.testing;
 
+test {
+    _ = @import("data_alloc_test.zig");
+}
+
 test "max size leaves room for framing" {
     try testing.expectEqual(@as(u32, 1024 - 16), max_size(1024));
 }
