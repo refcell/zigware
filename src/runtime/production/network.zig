@@ -314,14 +314,29 @@ fn configure(config: *const Config, handle: net.Socket.Handle) void {
     if (config.tcp_nodelay) |nodelay| {
         const value: c_int = @intFromBool(nodelay);
         const bytes = std.mem.asBytes(&value);
-        posix.setsockopt(handle, posix.IPPROTO.TCP, posix.TCP.NODELAY, bytes) catch |err|
-            log.warn("failed to set TCP_NODELAY: {t}", .{err});
+        const errno = set_option(handle, posix.IPPROTO.TCP, posix.TCP.NODELAY, bytes);
+        if (errno != .SUCCESS) log.warn("failed to set TCP_NODELAY: {any}", .{errno});
     }
     if (config.zero_linger) {
         const value: posix.linger = .{ .onoff = 1, .linger = 0 };
         const bytes = std.mem.asBytes(&value);
-        posix.setsockopt(handle, posix.SOL.SOCKET, posix.SO.LINGER, bytes) catch |err|
-            log.warn("failed to set SO_LINGER: {t}", .{err});
+        const errno = set_option(handle, posix.SOL.SOCKET, posix.SO.LINGER, bytes);
+        if (errno != .SUCCESS) log.warn("failed to set SO_LINGER: {any}", .{errno});
+    }
+}
+
+/// `posix.setsockopt` without its `unreachable` on EINVAL, which macOS returns once the peer
+/// has reset the connection. Returns the errno, `.SUCCESS` when the option is set.
+fn set_option(handle: net.Socket.Handle, level: i32, name: u32, bytes: []const u8) posix.E {
+    assert(bytes.len > 0);
+    const len: posix.socklen_t = @intCast(bytes.len);
+    while (true) {
+        const errno = posix.errno(posix.system.setsockopt(handle, level, name, bytes.ptr, len));
+        switch (errno) {
+            .INTR => continue,
+            .BADF, .NOTSOCK, .FAULT => unreachable, // `handle` and `bytes` are this call's own.
+            else => return errno,
+        }
     }
 }
 
