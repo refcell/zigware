@@ -25,7 +25,8 @@ jobs:
         # package. test-consensus alone ran past 2 hours (6ace499), so it splits into groups
         # of test-name filters (etc/scripts/consensus-filters.sh). Cryptography ran 57 to 90
         # minutes, mostly skip_heavy tests (golden DKG rounds, 2 to 3 minutes each), which
-        # test-rest and two cryptography jobs split three ways with -Dheavy-shard.
+        # three cryptography jobs split with -Dheavy-shard. The rest job runs test-others,
+        # every other package: with cryptography's first shard it took 62 minutes on arm.
         os: [ubuntu-latest, ubuntu-24.04-arm]
         job:
           - consensus-marshal
@@ -41,6 +42,7 @@ jobs:
           - consensus-rest
           - glue
           - rest
+          - cryptography-0
           - cryptography-1
           - cryptography-2
         include:
@@ -56,7 +58,8 @@ jobs:
           - { job: consensus-simplex-twins, steps: test-consensus, group: simplex-twins }
           - { job: consensus-rest, steps: test-consensus, group: rest }
           - { job: glue, steps: test-glue }
-          - { job: rest, steps: test-rest }
+          - { job: rest, steps: test-others }
+          - { job: cryptography-0, steps: test-cryptography, heavy_shard: 0 }
           - { job: cryptography-1, steps: test-cryptography, heavy_shard: 1 }
           - { job: cryptography-2, steps: test-cryptography, heavy_shard: 2 }
     runs-on: ${{ matrix.os }}

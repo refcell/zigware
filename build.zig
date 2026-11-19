@@ -207,22 +207,36 @@ fn add_heavy_shard_options(b: *std.Build, options: *std.Build.Step.Options) void
 }
 
 /// `test-rest`: every test `test` runs except consensus's and glue's, which CI's other
-/// ReleaseSafe job runs (`zig build test-consensus test-glue`).
+/// ReleaseSafe job runs (`zig build test-consensus test-glue`). `test-others` also leaves out
+/// cryptography, which nightly runs in jobs of its own.
 fn add_test_rest(b: *std.Build, test_step: *std.Build.Step) void {
-    const split_packages = [_][]const u8{ "consensus", "glue" };
-    var split_runs: [split_packages.len]*std.Build.Step = undefined;
-    for (split_packages, &split_runs) |name, *run| {
-        const package_step = b.top_level_steps.get(b.fmt("test-{s}", .{name})).?;
+    const rest = "Run every unit test except consensus and glue";
+    add_test_except(b, test_step, "test-rest", rest, &.{ "consensus", "glue" });
+    const others = "Run every unit test except consensus, glue, and cryptography";
+    add_test_except(b, test_step, "test-others", others, &.{ "consensus", "glue", "cryptography" });
+}
+
+/// A step that runs every package test `test` runs except those of `excluded`.
+fn add_test_except(
+    b: *std.Build,
+    test_step: *std.Build.Step,
+    name: []const u8,
+    description: []const u8,
+    comptime excluded: []const []const u8,
+) void {
+    var excluded_runs: [excluded.len]*std.Build.Step = undefined;
+    for (excluded, &excluded_runs) |package, *run| {
+        const package_step = b.top_level_steps.get(b.fmt("test-{s}", .{package})).?;
         std.debug.assert(package_step.step.dependencies.items.len == 1);
         run.* = package_step.step.dependencies.items[0];
     }
-    const rest_step = b.step("test-rest", "Run every unit test except consensus and glue");
+    const step = b.step(name, description);
     for (test_step.dependencies.items) |dependency| {
-        const split = std.mem.indexOfScalar(*std.Build.Step, &split_runs, dependency) != null;
-        if (!split) rest_step.dependOn(dependency);
+        const skip = std.mem.indexOfScalar(*std.Build.Step, &excluded_runs, dependency) != null;
+        if (!skip) step.dependOn(dependency);
     }
     const total = test_step.dependencies.items.len;
-    std.debug.assert(rest_step.dependencies.items.len + split_runs.len == total);
+    std.debug.assert(step.dependencies.items.len + excluded_runs.len == total);
 }
 
 /// `deployer`: commonware's deployer CLI (`zig build run-deployer -- aws list`).
