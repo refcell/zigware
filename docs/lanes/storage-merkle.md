@@ -304,20 +304,26 @@ missing offsets in one offsets `read_many` and each blob's frames with one range
 Offsets that run backwards, overlap another frame, or point past their blob fail with
 `Corruption` (the cached pass serves nothing from such a batch); a frame whose prefix
 disagrees with its span fails with `OffsetDataMismatch`. Signatures and counters are
-unchanged. Deviation: staging is bounded at 256 KiB per ranged read (`max_stage_bytes`),
-because commonware reuses one scratch buffer and a fresh 16 MiB buffer per call cost more
-than the batch saved. Ported tests (`variable_read_many_test.zig`):
+unchanged. Ported tests (`variable_read_many_test.zig`):
 `..._rejects_inconsistent_offsets`, `..._rejects_overlapping_prefix_frame`,
 `..._cached_frame_with_cold_successor`, `..._last_frame_uses_blob_size` (reopen half). Not
 ported: tests counting recorded blob reads or per-batch metrics, `..._buffer_len`.
-Bench (`zig build bench -Dbench-filter=variable_read`, ReleaseFast, medians before -> after,
-one loaded shared desktop, so noisy): cached and sequential modes are flat (compressed
-read_many 10k x 64 B 5.59 -> 5.19 ms, 10k x 1 KiB 23.9 -> 24.0 ms, 1k x 16 KiB 41.9 ->
-38.3 ms); cold modes are slower (read_many_uncached 10k x 64 B 3.87 -> 5.24 ms, 10k x 1 KiB
-14.7 -> 16.0 ms; variable_read_random read_many 10k 29.6 -> 35.0 ms). The cost is the extra
-cache pass: `paged.View.read_ranges_into` probes the cache for every range and then reads
-each missed range separately, so zigware gets no vectored blob read in return. A real
-batched blob read in the runtime would recover it.
+The first cut (de86473) slowed cold reads, because `paged.View.read_ranges_into` read each
+missed range page by page. Now (runtime's go-ahead) it probes the cache for every range, then
+coalesces missed ranges whose pages touch into runs and reads each run with one blob read of
+at most 8 physical pages (a 32 KiB buffer, the allocator's largest size class), validating,
+compacting (`@memmove`), and caching them. Completion merges byte-adjacent frames into one span
+(commonware's `spans`). Items decode straight into the caller's slice (a bitset tracks filled
+slots), and staging uses a reused per-journal scratch (commonware's per-thread scratch),
+borrowed atomically, with a local buffer for a concurrent reader. Deviation: that scratch is
+filled at most 256 KiB at a time (a larger frame alone), so staged bytes stay in cache until
+decoded; commonware stages a whole blob's frames at once.
+Bench (`bench-storage --bench -- mode=read_many`, ReleaseFast, best low bound of alternating
+rounds against 64374a2, ms, loaded shared desktop): variable_read_random 100 0.013 -> 0.013,
+1k 0.138 -> 0.124, 10k 21.4 -> 20.6, 100k 79.3 -> 76.5; compressed read_many / uncached,
+sequential then random: 64 B 4.66 -> 4.39 / 3.03 -> 3.15 and 2.82 -> 2.57 / 1.94 -> 2.02;
+1 KiB 21.7 -> 21.0 / 13.7 -> 13.7 and 4.06 -> 3.40 / 5.23 -> 4.79; 16 KiB 30.2 -> 29.2 /
+18.9 -> 18.4 and 3.28 -> 2.79 / 4.65 -> 3.67. Every row is within noise or faster.
 ### Start-sync handle tests (2026-11-19)
 The 21 tests the start_sync skip audit found still marked not portable now run on the
 Completion API with `runtime.storage.mocks.DelayedSync` (`PendingSyncs`) or
