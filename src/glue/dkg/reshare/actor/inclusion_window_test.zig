@@ -599,3 +599,33 @@ test "inclusion: a requester leaving cancels its stalled scan" {
         }
     }.body);
 }
+
+// p2p's examples/dkg network: one race finished both the scan and the requester leaving, the
+// scan answered and released the request, and `.closed` then unwrapped the empty slot.
+test "inclusion: a scan and its requester leaving in one race release the request once" {
+    try actor_test.run(struct {
+        fn body(io: Io) anyerror!void {
+            var f: Fixture = undefined;
+            try f.init(io, "scan-and-closed", 6);
+            defer f.deinit();
+            const W = Fixture.Inclusion;
+            var pair = try utils.channel.oneshot.channel(Response, gpa, io);
+            pair.receiver.deinit();
+            const ancestry = try consensus.marshal.ancestry.from_iter(mocks.TestBlock, gpa, &.{});
+            var state: W.State = .{ .requests = .empty };
+            defer state.deinit(gpa);
+            state.scanning = .{ .ancestry = ancestry, .response = pair.sender };
+            var events: W.Events = .{ .gpa = gpa };
+            events.push(.{ .scan = null });
+            events.push(.closed);
+            const session: W.Session = .{
+                .epoch = .zero(),
+                .info = &f.round,
+                .store = &f.h.store,
+                .dealer = null,
+            };
+            try testing.expectEqual(.next, try W.run_events(&f.h.actor, session, &state, &events));
+            try testing.expect(state.scanning == null);
+        }
+    }.body);
+}

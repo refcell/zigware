@@ -50,8 +50,8 @@ pub fn Window(comptime T: type) type {
             dealer: ?*Actor.Dealer,
         };
 
-        /// Request work for one window.
-        const State = struct {
+        /// Request work for one window (pub for tests).
+        pub const State = struct {
             requests: Requests,
             verification: inclusion.Verification(V, P) = .empty,
             cache: Art.Cache = .empty,
@@ -62,7 +62,7 @@ pub fn Window(comptime T: type) type {
             /// A finalized block arrived after the scan began, so its result is stale.
             stale: bool = false,
 
-            fn deinit(state: *State, gpa: Allocator) void {
+            pub fn deinit(state: *State, gpa: Allocator) void {
                 if (state.scanning) |request| Requests.discard(request);
                 state.requests.deinit(gpa);
                 state.verification.deinit(gpa);
@@ -71,8 +71,8 @@ pub fn Window(comptime T: type) type {
             }
         };
 
-        const Event = union(enum) { mailbox: ?Message, scan: ?Logs, closed };
-        const Step = enum { next, done, stop };
+        pub const Event = union(enum) { mailbox: ?Message, scan: ?Logs, closed };
+        pub const Step = enum { next, done, stop };
 
         /// Runs the inclusion window of `session.epoch` (commonware `inclusion`). Returns
         /// `proceed` once the epoch's final block is applied and `stop` when the mailbox
@@ -197,13 +197,13 @@ pub fn Window(comptime T: type) type {
             }
         };
 
-        const Events = struct {
+        pub const Events = struct {
             gpa: Allocator,
             items: [3]Event = undefined,
             len: usize = 0,
             failure: ?anyerror = null,
 
-            fn push(events: *Events, event: Event) void {
+            pub fn push(events: *Events, event: Event) void {
                 assert(events.len < events.items.len);
                 events.items[events.len] = event;
                 events.len += 1;
@@ -254,7 +254,7 @@ pub fn Window(comptime T: type) type {
         }
 
         /// Handles `events` in order until one ends the window; the rest are released.
-        fn run_events(self: *Actor, session: Session, state: *State, events: *Events) !Step {
+        pub fn run_events(self: *Actor, session: Session, state: *State, events: *Events) !Step {
             assert(events.len > 0);
             var index: usize = 0;
             defer for (events.items[index..events.len]) |event| discard(self.gpa, event);
@@ -290,8 +290,10 @@ pub fn Window(comptime T: type) type {
                     }
                     try complete_scan(self, session, state, logs);
                 },
-                .closed => {
-                    Requests.discard(state.scanning.?);
+                // One race can finish both the scan and the requester leaving; a completed scan
+                // has already released the request (commonware's biased select fires once).
+                .closed => if (state.scanning) |request| {
+                    Requests.discard(request);
                     state.scanning = null;
                 },
             }
