@@ -338,3 +338,50 @@ test "batcher tracks each peer's latest vote view" {
     };
     try run_deterministic(Root.run);
 }
+
+fn notarization_bytes(fixture: anytype, value: types.Proposal(Digest)) ![]u8 {
+    const Notarize = types.Notarize(Scheme, Digest);
+    var votes: [3]Notarize = undefined;
+    for (&votes, 0..) |*vote, signer| {
+        vote.* = (try Notarize.sign(gpa, &fixture.schemes[signer], value)).?;
+    }
+    const scheme = &fixture.schemes[0];
+    const Notarization = types.Notarization(Scheme, Digest);
+    var notarization = try Notarization.from_votes(gpa, scheme, &votes, parallel.sequential);
+    defer notarization.deinit(gpa);
+    const certificate: types.Certificate(Scheme, Digest) = .{ .notarization = notarization };
+    return codec.encode(types.Certificate(Scheme, Digest), gpa, certificate);
+}
+
+// commonware `test_future_notarization_without_leader_does_not_panic`: a valid notarization
+// beyond the admission window makes a round with a proposal but no leader; the batcher
+// forwards the certificate and its proposal, and keeps processing certificates.
+test "batcher forwards a future notarization's proposal without a leader" {
+    const Root = struct {
+        fn run(io: Io) !void {
+            var harness: Harness = undefined;
+            try harness.start(io);
+            defer harness.stop();
+            const fixture = &harness.fixture;
+            try harness.mailbox.update(.new(1), .init(0), .zero(), null);
+            const future: types.Proposal(Digest) = .init(.new(.new(0), .new(3)), .zero(), .fill(9));
+            const bytes = try notarization_bytes(fixture, future);
+            try harness.certificates.deliver(fixture.participants[1], bytes);
+            const verified = (try harness.voter.recv()).?;
+            defer VoterMessage.discard(verified);
+            try testing.expect(verified == .verified);
+            try testing.expectEqual(3, verified.verified.certificate.view().get());
+            const forwarded = (try harness.voter.recv()).?;
+            defer VoterMessage.discard(forwarded);
+            try testing.expect(forwarded == .proposal);
+            try testing.expect(forwarded.proposal.eql(future));
+            const nullification = try nullification_bytes(fixture, 0, 1);
+            try harness.certificates.deliver(fixture.participants[2], nullification);
+            const message = try harness.next_certificate();
+            defer VoterMessage.discard(message);
+            try testing.expect(message.verified.certificate == .nullification);
+            try testing.expectEqual(1, message.verified.certificate.view().get());
+        }
+    };
+    try run_deterministic(Root.run);
+}
