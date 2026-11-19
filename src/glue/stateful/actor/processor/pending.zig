@@ -12,13 +12,14 @@ const std = @import("std");
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const consensus = @import("consensus");
+const db = @import("../../db/mod.zig");
 const sync = @import("../../db/sync.zig");
 const pruning = @import("pruning.zig");
 
 const Round = consensus.Round;
 
-/// Speculative state keyed by block digest `D`, holding merkleized batches `B` (with
-/// `clone() B` and `deinit()`, which the state owns).
+/// Speculative state keyed by block digest `D`, holding merkleized batches `B` (a database's,
+/// or a `db.Tuple`'s; see `db.deinit_merkleized`), which the state owns.
 pub fn Pending(comptime D: type, comptime B: type) type {
     return struct {
         const Self = @This();
@@ -37,7 +38,7 @@ pub fn Pending(comptime D: type, comptime B: type) type {
         }
 
         pub fn deinit(self: *Self) void {
-            for (self.entries.values()) |*entry| entry.merkleized.deinit();
+            for (self.entries.values()) |*entry| db.deinit_merkleized(B, &entry.merkleized);
             self.entries.deinit(self.gpa);
             self.* = undefined;
         }
@@ -66,18 +67,18 @@ pub fn Pending(comptime D: type, comptime B: type) type {
             if (self.entries.getPtr(digest)) |existing| {
                 assert(std.meta.eql(existing.parent, owned.parent));
                 assert(existing.round.order(owned.round) == .eq);
-                owned.merkleized.deinit();
+                db.deinit_merkleized(B, &owned.merkleized);
                 return true;
             }
             const later = owned.round.order(self.branch.round) == .gt;
             const linked = std.meta.eql(owned.parent, self.branch.digest) or
                 self.entries.contains(owned.parent);
             if (!later or !linked) {
-                owned.merkleized.deinit();
+                db.deinit_merkleized(B, &owned.merkleized);
                 return false;
             }
             self.entries.put(self.gpa, digest, owned) catch |err| {
-                owned.merkleized.deinit();
+                db.deinit_merkleized(B, &owned.merkleized);
                 return err;
             };
             return true;
@@ -126,11 +127,11 @@ pub fn Pending(comptime D: type, comptime B: type) type {
                 const entry: Entry = .{
                     .round = anchor.round,
                     .parent = parent,
-                    .merkleized = batch.clone(),
+                    .merkleized = db.clone_merkleized(B, batch),
                 };
                 self.entries.put(self.gpa, anchor.digest, entry) catch |err| {
                     var dropped = entry.merkleized;
-                    dropped.deinit();
+                    db.deinit_merkleized(B, &dropped);
                     return err;
                 };
             }
@@ -142,7 +143,7 @@ pub fn Pending(comptime D: type, comptime B: type) type {
                     index += 1;
                     continue;
                 }
-                self.entries.values()[index].merkleized.deinit();
+                db.deinit_merkleized(B, &self.entries.values()[index].merkleized);
                 self.entries.swapRemoveAt(index);
                 pruned += 1;
             }
@@ -155,14 +156,14 @@ pub fn Pending(comptime D: type, comptime B: type) type {
         /// cache once its hook completes).
         pub fn remove(self: *Self, digest: D) bool {
             var removed = self.entries.fetchSwapRemove(digest) orelse return false;
-            removed.value.merkleized.deinit();
+            db.deinit_merkleized(B, &removed.value.merkleized);
             assert(!self.entries.contains(digest));
             return true;
         }
 
         /// Discards every pending entry (a restart of speculative state).
         pub fn clear(self: *Self) void {
-            for (self.entries.values()) |*entry| entry.merkleized.deinit();
+            for (self.entries.values()) |*entry| db.deinit_merkleized(B, &entry.merkleized);
             self.entries.clearRetainingCapacity();
         }
     };

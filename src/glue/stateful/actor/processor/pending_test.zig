@@ -126,3 +126,38 @@ test "stateful pending: retain_branch prunes losing forks and their descendants"
     }
     try testing.expectEqual(0, live);
 }
+
+// A `db.Tuple` set's merkleized batches are a bare tuple, without `clone` or `deinit`.
+test "stateful pending: a tuple of batches is cloned and released member by member" {
+    const Tuple = struct { Batch, Batch };
+    const TuplePending = pending_mod.Pending(u64, Tuple);
+    var live: i64 = 0;
+    {
+        const anchor_1: TuplePending.Anchor = .{
+            .height = .new(1),
+            .round = round(1),
+            .digest = 1,
+        };
+        var state = TuplePending.init(gpa, anchor_1);
+        defer state.deinit();
+        const entry: TuplePending.Entry = .{
+            .round = round(2),
+            .parent = 1,
+            .merkleized = .{ .init(&live, 2), .init(&live, 20) },
+        };
+        try testing.expect(try state.cache(2, entry));
+        var batch: Tuple = .{ .init(&live, 3), .init(&live, 30) };
+        defer inline for (&batch) |*member| member.deinit();
+        // Finalizing uncached 3 caches a copy of both members; 2 no longer descends.
+        const anchor_3: TuplePending.Anchor = .{
+            .height = .new(2),
+            .round = round(3),
+            .digest = 3,
+        };
+        _ = try state.retain_branch(anchor_3, 1, &batch);
+        try testing.expect(!state.contains(2));
+        try testing.expectEqual(30, state.get(3).?.merkleized[1].id);
+        try testing.expectEqual(4, live);
+    }
+    try testing.expectEqual(0, live);
+}

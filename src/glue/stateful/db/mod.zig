@@ -515,6 +515,33 @@ pub fn Tuple(comptime types: anytype) type {
     };
 }
 
+/// Releases one share of merkleized batches `B`: a database's batch, or each member's of a
+/// `Tuple` (whose `Merkleized` is a bare tuple without methods).
+pub fn deinit_merkleized(comptime B: type, batches: *B) void {
+    if (comptime is_tuple(B)) {
+        comptime assert(@hasField(B, "0"));
+        inline for (batches) |*batch| batch.deinit();
+    } else {
+        comptime assert(@hasDecl(B, "deinit"));
+        batches.deinit();
+    }
+}
+
+/// Another share of merkleized batches `B` (see `deinit_merkleized`).
+pub fn clone_merkleized(comptime B: type, batches: *const B) B {
+    if (comptime is_tuple(B)) {
+        var result: B = undefined;
+        inline for (batches, 0..) |*batch, i| result[i] = batch.clone();
+        return result;
+    }
+    comptime assert(@hasDecl(B, "clone"));
+    return batches.clone();
+}
+
+fn is_tuple(comptime B: type) bool {
+    return @typeInfo(B) == .@"struct" and @typeInfo(B).@"struct".is_tuple;
+}
+
 fn SharedOf(comptime DB: type) type {
     return Shared(DB);
 }

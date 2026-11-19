@@ -181,7 +181,7 @@ fn ProcessorOf(comptime App_: type, comptime Databases_: type, comptime Provider
                 @panic("proposed state must match block commitments");
             }
             const block = Digested.compute(self.gpa, built.block) catch |err| {
-                merkleized.deinit();
+                db.deinit_merkleized(Databases.Merkleized, &merkleized);
                 return err;
             };
             errdefer block.discard();
@@ -225,7 +225,9 @@ fn ProcessorOf(comptime App_: type, comptime Databases_: type, comptime Provider
                 if (execution.flights.contains(block.digest())) {
                     @panic("finalized block must not be processed when its finalization starts");
                 }
-                if (execution.state.get(block.digest())) |entry| return entry.merkleized.clone();
+                if (execution.state.get(block.digest())) |entry| {
+                    return db.clone_merkleized(Databases.Merkleized, &entry.merkleized);
+                }
             }
             const batches = try execution.databases.new_batches();
             var ancestry = try execution.stream(provider, &.{block.clone()});
@@ -236,7 +238,7 @@ fn ProcessorOf(comptime App_: type, comptime Databases_: type, comptime Provider
             var batch = try processed orelse
                 @panic("finalize reconstruction must process the block");
             if (!Databases.matches_sync_targets(&batch, targets)) {
-                batch.deinit();
+                db.deinit_merkleized(Databases.Merkleized, &batch);
                 @panic("finalize reconstruction must match block commitments");
             }
             return batch;
@@ -264,7 +266,7 @@ fn ProcessorOf(comptime App_: type, comptime Databases_: type, comptime Provider
 
             const targets = App.sync_targets(inner);
             var batch = try self.finalized_batch(provider, block, &targets);
-            defer batch.deinit();
+            defer db.deinit_merkleized(Databases.Merkleized, &batch);
             const execution = self.execution;
             _ = try execution.retain_branch(finalized, inner.parent(), &batch);
 

@@ -27,6 +27,7 @@ const Io = std.Io;
 const broadcast = @import("broadcast");
 const consensus = @import("consensus");
 const boxed = @import("boxed.zig");
+const db = @import("../../db/mod.zig");
 const pending_mod = @import("pending.zig");
 
 const Height = consensus.types.Height;
@@ -174,7 +175,7 @@ fn ExecutionOf(comptime App_: type, comptime Databases_: type, comptime Provider
                 .candidate,
             ) orelse return error.Invalid;
             if (!Databases.matches_sync_targets(&merkleized, &targets)) {
-                merkleized.deinit();
+                db.deinit_merkleized(Databases.Merkleized, &merkleized);
                 return error.Invalid;
             }
             const entry: Entry = .{
