@@ -40,9 +40,9 @@ which every database here is built on.
   bounded-initialization scenarios (pruned target, restored floor, durable after reopen).
 - [x] keyless: merkleize across prune, stale forks, descendant-stale parent reads, foreign
   databases, stale siblings, and ancestor states.
-- [ ] keyless: the remaining mod.rs batch scenarios (dropped-ancestor and stacked reads,
-  empty and large batches, child roots, single-commit live set, floor tracking and root
-  effects).
+- [x] keyless: dropped-ancestor, stacked, and chained reads with their bounds, empty and
+  large batches, stale fork descendants and child-before-parent, pending child roots, floor
+  tracking, floors in the root, the single-commit live set, and chained rising floors.
 - [x] Switch the interim `qmdb.authenticated` to storage-journal's
   `journal.authenticated.Journal` (keyless, any, immutable); the interim copy is deleted.
 - [x] any, unordered fixed (MMR and MMB): `Db`, batches with chaining, the floor walk under
@@ -313,3 +313,4 @@ which every database here is built on.
 - 2026-11-19: `qmdb::merkleize` benches (main grid and churned).
 - 2026-11-19: immutable bounded-initialization, recovery, prune, get_many, and batch scenarios.
 - 2026-11-19: keyless recovery, proof, read, bounded-init, and stale-batch scenarios.
+- 2026-11-19: keyless batch-read, stale-chain, and floor scenarios; keyless mod.rs done.

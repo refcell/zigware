@@ -1059,3 +1059,295 @@ test "keyless a child's root is the same whatever its ancestors' states" {
         try db.destroy();
     }
 }
+
+test "keyless chain reads survive dropped ancestors" {
+    inline for (families) |F| {
+        const D = TestDb(F);
+        var harness = try Harness.init();
+        defer harness.deinit();
+        var db = try harness.open(F);
+        defer db.deinit();
+        try append_batch(F, &db, &.{make(0)}, null);
+        const base_a = db.bounds().end;
+        const a = try merkleize_values(D, &db, null, &.{ make(1), make(2) }, null);
+        var a_held = true;
+        defer if (a_held) a.release();
+        const base_b = a.bounds.tip.size;
+        const b = try merkleize_values(D, &db, a, &.{ make(3), make(4) }, null);
+        var b_held = true;
+        defer if (b_held) b.release();
+        const base_c = b.bounds.tip.size;
+        const c = try merkleize_values(D, &db, b, &.{make(5)}, null);
+        defer c.release();
+        var child = c.new_batch();
+        defer child.deinit();
+        a.release();
+        a_held = false;
+        b.release();
+        b_held = false;
+        // Values of all three levels resolve from the items the chain retains.
+        const locations = [_]u64{ base_a, base_a + 1, base_b, base_b + 1, base_c };
+        var out: [5]?U64 = undefined;
+        for (locations, 1..) |location, i| {
+            try testing.expectEqual(make(i), (try c.get(location, &db)).?);
+            try testing.expectEqual(make(i), (try child.get(location, &db)).?);
+        }
+        try c.get_many(&locations, &db, &out);
+        for (out, 1..) |got, i| try testing.expectEqual(make(i), got.?);
+        try child.get_many(&locations, &db, &out);
+        for (out, 1..) |got, i| try testing.expectEqual(make(i), got.?);
+        // The child's dropped ancestors are unapplied, so it cannot merkleize.
+        try testing.expectError(error.StaleBatch, child.merkleize(&db));
+        try db.apply_batch(c);
+        for (locations, 1..) |location, i| {
+            try testing.expectEqual(make(i), (try db.get(location)).?);
+        }
+    }
+}
+
+test "keyless batch reads end at the batch's size" {
+    inline for (families) |F| {
+        const D = TestDb(F);
+        var harness = try Harness.init();
+        defer harness.deinit();
+        var db = try harness.open(F);
+        defer db.deinit();
+        const base = db.bounds().end;
+        try append_batch(F, &db, &.{ make(10), make(11), make(12) }, null);
+        var batch = try db.new_batch();
+        defer batch.deinit();
+        for (0..3) |i| try testing.expectEqual(make(10 + i), (try batch.get(base + i, &db)).?);
+        const new_location = batch.size();
+        try batch.append(make(99));
+        try testing.expectEqual(make(99), (try batch.get(new_location, &db)).?);
+        const end = new_location + 1;
+        var out: [2]?U64 = undefined;
+        try testing.expectError(error.LocationOutOfBounds, batch.get(end, &db));
+        const past = batch.get_many(&.{ base, end }, &db, &out);
+        try testing.expectError(error.LocationOutOfBounds, past);
+        // A stacked child reads its parent's appends, and its own end bounds it.
+        const parent = try merkleize_values(D, &db, null, &.{make(1)}, null);
+        defer parent.release();
+        var child = parent.new_batch();
+        defer child.deinit();
+        try testing.expectEqual(make(1), (try child.get(db.bounds().end, &db)).?);
+        const child_location = child.size();
+        try child.append(make(2));
+        try testing.expectEqual(make(2), (try child.get(child_location, &db)).?);
+        try testing.expectError(error.LocationOutOfBounds, child.get(9999, &db));
+    }
+}
+
+test "keyless merkleized chain reads end at each batch's tip" {
+    inline for (families) |F| {
+        const D = TestDb(F);
+        var harness = try Harness.init();
+        defer harness.deinit();
+        var db = try harness.open(F);
+        defer db.deinit();
+        try append_batch(F, &db, &.{make(10)}, null);
+        const loc1 = db.bounds().end;
+        const parent = try merkleize_values(D, &db, null, &.{make(1)}, null);
+        defer parent.release();
+        const loc2 = parent.bounds.tip.size;
+        const child = try merkleize_values(D, &db, parent, &.{make(2)}, null);
+        defer child.release();
+        try testing.expectEqual(make(10), (try child.get(1, &db)).?);
+        try testing.expectEqual(make(1), (try child.get(loc1, &db)).?);
+        try testing.expectEqual(make(2), (try child.get(loc2, &db)).?);
+        const child_end = child.bounds.tip.size;
+        try testing.expectError(error.LocationOutOfBounds, child.get(child_end, &db));
+        // An ancestor's view ends at its own tip.
+        try testing.expectError(error.LocationOutOfBounds, parent.get(loc2, &db));
+        // Applying the descendant moves the database off the ancestor's states.
+        try db.apply_batch(child);
+        try testing.expectEqual(make(2), (try db.get(loc2)).?);
+        try testing.expectError(error.StaleRead, parent.get(loc1, &db));
+    }
+}
+
+test "keyless empty and large batches apply their speculative roots" {
+    inline for (families) |F| {
+        const D = TestDb(F);
+        var harness = try Harness.init();
+        defer harness.deinit();
+        var db = try harness.open(F);
+        defer db.deinit();
+        try append_batch(F, &db, &.{make(1)}, null);
+        // A batch with no appends still adds its commit.
+        const root_before = db.root();
+        const size_before = db.bounds().end;
+        const empty = try merkleize_values(D, &db, null, &.{}, null);
+        defer empty.release();
+        try db.apply_batch(empty);
+        try testing.expect(!db.root().eql(root_before));
+        try testing.expect(db.root().eql(empty.root()));
+        try testing.expectEqual(size_before + 1, db.bounds().end);
+        const n: u64 = 500;
+        const first = db.bounds().end;
+        try append_range(F, &db, 0, n);
+        for (0..n) |i| try testing.expectEqual(make(i), (try db.get(first + i)).?);
+        const root = db.root();
+        var proved = try db.proof(0, 1000);
+        defer proved.deinit(gpa);
+        try testing.expect(try verified(F, &proved.proof, 0, proved.items, &root));
+        try testing.expectEqual(first + n + 1, db.bounds().end);
+    }
+}
+
+test "keyless descendants of a stale fork are stale, and a child may not precede its parent" {
+    inline for (families) |F| {
+        const D = TestDb(F);
+        var harness = try Harness.init();
+        defer harness.deinit();
+        var db = try harness.open(F);
+        defer db.deinit();
+        const common = try merkleize_values(D, &db, null, &.{make(10)}, null);
+        defer common.release();
+        const sibling_a = try merkleize_values(D, &db, common, &.{make(11)}, null);
+        defer sibling_a.release();
+        const sibling_b = try merkleize_values(D, &db, common, &.{make(12)}, null);
+        defer sibling_b.release();
+        try db.apply_batch(sibling_a);
+        try testing.expectError(error.StaleBatch, db.validate_batch(sibling_b));
+        const parent_a = try merkleize_values(D, &db, null, &.{make(1)}, null);
+        defer parent_a.release();
+        const parent_b = try merkleize_values(D, &db, null, &.{make(2)}, null);
+        defer parent_b.release();
+        const child_b = try merkleize_values(D, &db, parent_b, &.{make(3)}, null);
+        defer child_b.release();
+        try db.apply_batch(parent_a);
+        try testing.expectError(error.StaleBatch, db.validate_batch(child_b));
+        // A child applied before its parent leaves the parent stale.
+        const parent = try merkleize_values(D, &db, null, &.{make(4)}, null);
+        defer parent.release();
+        const child = try merkleize_values(D, &db, parent, &.{make(5)}, null);
+        defer child.release();
+        try db.apply_batch(child);
+        try testing.expectError(error.StaleBatch, db.apply_batch(parent));
+    }
+}
+
+test "keyless a pending child's root matches the child rebuilt after its parent commits" {
+    inline for (families) |F| {
+        const D = TestDb(F);
+        var harness = try Harness.init();
+        defer harness.deinit();
+        var db = try harness.open(F);
+        defer db.deinit();
+        const parent = try merkleize_values(D, &db, null, &.{make(1)}, null);
+        defer parent.release();
+        const pending = try merkleize_values(D, &db, parent, &.{make(2)}, null);
+        defer pending.release();
+        try db.apply_batch(parent);
+        try db.commit();
+        const committed = try merkleize_values(D, &db, null, &.{make(2)}, null);
+        defer committed.release();
+        try testing.expect(pending.root().eql(committed.root()));
+    }
+}
+
+test "keyless floors track across commits and reopens" {
+    inline for (families) |F| {
+        var harness = try Harness.init();
+        defer harness.deinit();
+        var db = try harness.open(F);
+        errdefer db.deinit();
+        try testing.expectEqual(@as(u64, 0), db.inactivity_floor());
+        try append_batch(F, &db, &.{ make(1), make(2) }, 2);
+        try db.commit();
+        try testing.expectEqual(@as(u64, 2), db.inactivity_floor());
+        try crash_reopen(F, &harness, &db);
+        try testing.expectEqual(@as(u64, 2), db.inactivity_floor());
+        // A floor may stay put, then advance.
+        try append_batch(F, &db, &.{make(3)}, 2);
+        try testing.expectEqual(@as(u64, 2), db.inactivity_floor());
+        try append_batch(F, &db, &.{make(4)}, 5);
+        try testing.expectEqual(@as(u64, 5), db.inactivity_floor());
+        try db.destroy();
+    }
+}
+
+test "keyless the floor is part of the root, and may reach the commit" {
+    inline for (families) |F| {
+        var harness = try Harness.init();
+        defer harness.deinit();
+        var other = try Harness.init();
+        defer other.deinit();
+        var db_a = try harness.open(F);
+        defer db_a.deinit();
+        var db_b = try other.open(F);
+        defer db_b.deinit();
+        try append_batch(F, &db_a, &.{ make(1), make(2) }, null);
+        // Location 3 is the commit's own: the largest floor the commit accepts.
+        try append_batch(F, &db_b, &.{ make(1), make(2) }, 3);
+        try testing.expectEqual(@as(u64, 3), db_b.inactivity_floor());
+        try testing.expect(!db_a.root().eql(db_b.root()));
+    }
+}
+
+test "keyless a single live commit survives pruning and reopening" {
+    inline for (families) |F| {
+        var harness = try Harness.init();
+        defer harness.deinit();
+        var db = try harness.open(F);
+        errdefer db.deinit();
+        const metadata = make(42);
+        const commit_location: u64 = 4;
+        var batch = try db.new_batch();
+        for (1..4) |i| try batch.append(make(i));
+        batch.with_metadata(metadata);
+        batch.with_inactivity_floor(commit_location);
+        const merkleized = merkleized: {
+            errdefer batch.deinit();
+            break :merkleized try batch.merkleize(&db);
+        };
+        defer merkleized.release();
+        try db.apply_batch(merkleized);
+        try db.commit();
+        try testing.expectEqual(commit_location, db.inactivity_floor());
+        const root = db.root();
+        // Pruning is blob-aligned, so the start may stay below the floor.
+        try db.prune(commit_location);
+        try testing.expect(db.bounds().start <= commit_location);
+        try testing.expectEqual(commit_location + 1, db.bounds().end);
+        try testing.expectEqual(metadata, (try db.get(commit_location)).?);
+        try testing.expectEqual(metadata, (try db.get_metadata()).?);
+        try testing.expect(db.root().eql(root));
+        try db.sync();
+        try testing.expectError(error.PruneBeyondMinRequired, db.prune(commit_location + 1));
+        db.deinit();
+        db = try harness.open(F);
+        try testing.expectEqual(commit_location + 1, db.bounds().end);
+        try testing.expectEqual(commit_location, db.inactivity_floor());
+        try testing.expect(db.root().eql(root));
+        try testing.expectEqual(metadata, (try db.get_metadata()).?);
+        try append_batch(F, &db, &.{ make(5), make(6) }, 7);
+        try db.commit();
+        try testing.expectEqual(@as(u64, 7), db.bounds().end - 1);
+        try testing.expectEqual(@as(u64, 7), db.inactivity_floor());
+        try testing.expectEqual(make(5), (try db.get(5)).?);
+        try testing.expectEqual(make(6), (try db.get(6)).?);
+        try testing.expectEqual(metadata, (try db.get(commit_location)).?);
+        try db.destroy();
+    }
+}
+
+test "keyless a chain with rising floors applies through its tip" {
+    inline for (families) |F| {
+        const D = TestDb(F);
+        var harness = try Harness.init();
+        defer harness.deinit();
+        var db = try harness.open(F);
+        defer db.deinit();
+        const parent = try merkleize_values(D, &db, null, &.{make(1)}, 2);
+        defer parent.release();
+        const child = try merkleize_values(D, &db, parent, &.{make(2)}, 3);
+        defer child.release();
+        const grandchild = try merkleize_values(D, &db, child, &.{make(3)}, 5);
+        defer grandchild.release();
+        try db.apply_batch(grandchild);
+        try testing.expectEqual(@as(u64, 6), db.bounds().end - 1);
+        try testing.expectEqual(@as(u64, 5), db.inactivity_floor());
+    }
+}
