@@ -24,9 +24,10 @@ resize, sync), `runtime.storage`, with the in-memory backend `runtime.storage.me
 - [x] paged `View` (view.rs) shared by `Writer` and `Sealed`; `Sealed` (sealed.rs) with
   `Writer.seal`/`snapshot`/`try_snapshot` and sealed.rs's tests (paged/sealed_test.zig).
   `test_sealed_read_many_into_rejects_unsorted_offsets` is a death test
-  (paged/panic_test.zig). Not ported: the `SplitWriteBlob` partial-page rewrite race
-  (`test_replay_preserves_tail_during_partial_page_rewrite`); portable now that a write can
-  park in a task, but it needs a split-write blob mock.
+  (paged/panic_test.zig). The `SplitWriteBlob` partial-page rewrite race
+  (`test_replay_preserves_tail_during_partial_page_rewrite`, all 8 rstest cases) is in
+  paged/partial_rewrite_test.zig, with a test-local split-write blob whose paused write
+  parks in a spawned task.
 - [x] The rest of writer.rs's 94 tests, mod.rs's, and read.rs's portable tests (snapshot,
   replay options, recoverable prefix, CRC slots, read_many, needs_sync, recovery truncate
   with commonware's `PartialWriteBlob` interrupted stages, whose write counts match, large
@@ -469,3 +470,4 @@ resize, sync), `runtime.storage`, with the in-memory backend `runtime.storage.me
   `validate_read_ranges_rejects_length_overflow` (returns an error here) and metadata's
   `value_too_big` (a 4 GiB allocation). contiguous fixed.rs/variable.rs's five belong to
   storage-merkle's handed-over test files.
+- 2026-11-19: ported sealed.rs's partial-page rewrite replay race on a split-write blob mock.
