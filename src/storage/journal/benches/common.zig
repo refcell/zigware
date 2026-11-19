@@ -169,7 +169,9 @@ pub fn sort_dedup(positions: []u64) []u64 {
 pub fn drain(replay: anytype) !u64 {
     var seen: u64 = 0;
     while (try replay.next()) |batch| {
-        for (batch.items) |item| std.mem.doNotOptimizeAway(item);
+        // One opaque use of a copy of each item, as Rust's `black_box(item)`. Passed by
+        // value, std's `doNotOptimizeAway` emits one barrier per byte of an array item.
+        for (batch.items) |item| std.mem.doNotOptimizeAway(&item);
         seen += batch.items.len;
     }
     return seen;

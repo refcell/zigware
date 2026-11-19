@@ -16,7 +16,7 @@ better. A ratio below 1 means zigware is faster.
 | `bls12381::aggregate_verify_same_message` | `pks=1000` | 3.19 ms | 3.13 ms | 0.98× (re-run, see below) |
 | `journal::fixed_append` | `items=10000 size=32` | 2.00 ms | 456 µs | 0.23× |
 | `journal::append_sync` | `journal=fixed mode=sync` | 14.6 µs | 1.55 µs | 0.11× |
-| `journal::fixed_replay` | `items=100000 buffer=65536 size=32 read_options=cache` | 690 µs | 817 µs | 1.19× |
+| `journal::fixed_replay` | `items=100000 buffer=65536 size=32 read_options=cache` | 690 µs | 817 µs | 1.19× (fixed, see below) |
 | `qmdb::apply_batch` | `case=direct variant=any::unordered::fixed::mmb chunk=32 updates=16384` | 1.12 ms | 2.72 ms | 2.43× |
 | `buffer_paged::append` | `backend=tokio chunk=4096` | 66.1 ms | 28.2 ms | 0.43× |
 
@@ -137,6 +137,19 @@ directory under `BENCH_DIR` (default `$TMPDIR` or `/tmp`). commonware gets it th
   37.7 µs, about 0.55×. `batch_verify_same_message` (pks=100) does not use the backend yet;
   its best medians were 2.01 ms against 1.70 ms (1.18×), and its bucket MSM is the next user
   of the packed point type.
+- **`journal::fixed_replay`, 2026-11-19.** The 1.19× was the bench's consumer, not the replay.
+  By thread CPU time per 100k-item replay, the journal's fill (blob reads, CRC-32C at 24 GB/s,
+  page copy) took 310 to 450 µs and decoding 110 µs, but the drain loop took 600 µs:
+  `std.mem.doNotOptimizeAway(item)` on a `[32]u8` emits one barrier per byte, 32 per item,
+  where commonware's `black_box(item)` is one opaque use. The drain now consumes a copy of
+  each item through one barrier (`doNotOptimizeAway(&item)`), as `black_box` does; it also
+  serves `variable_replay`. Best of 3 at a load average of 74 to 82: zigware 481 µs (was
+  1.08 ms at a similar load), commonware 1.78 ms. commonware's multi-threaded runtime slows
+  far more under this load than zigware's replay, so the fair comparison is with its quiet
+  table figure: 481 µs against 690 µs, about 0.70× while loaded. Commonware's replay also
+  keeps three reads in flight ahead of the decoder (`Blob::start_read_many`); here the
+  blob reads cost about 120 to 270 µs of wall time on tmpfs, so read-ahead is a smaller,
+  later step.
 - **ed25519 batch MSM on AVX2, 2026-11-19.** `ed25519/verify_avx2.zig` ports
   curve25519-dalek 5.0.0's `backend/vector/avx2` (four radix-2^25.5 field elements per
   `u32x8` lane set, and its parallel extended-point add and double), the backend commonware's
