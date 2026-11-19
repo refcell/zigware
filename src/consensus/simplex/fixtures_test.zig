@@ -92,11 +92,6 @@ fn VrfFixture(comptime V: type) type {
     };
 }
 
-fn make_ed25519(allocator: Allocator, rng: anytype, namespace: []const u8, n: u32) !Ed25519 {
-    return ed25519.fixture(Digest, allocator, rng, namespace, n);
-}
-const Ed25519 = cryptography.certificate.mocks.Fixture(ed25519.Scheme(Digest));
-
 fn Maker(comptime S: type, comptime module: type) type {
     return struct {
         fn make(
@@ -130,7 +125,7 @@ const fixtures = .{
     BlsFixture(Standard, standard, primitives.MinSig),
     BlsFixture(Multisig, multisig, primitives.MinPk),
     BlsFixture(Multisig, multisig, primitives.MinSig),
-    RoundRobinFixture(ed25519.Scheme(Digest), make_ed25519),
+    engine_test.Ed25519Fixture,
     RoundRobinFixture(Secp, Maker(Secp, secp256r1).make),
 };
 
@@ -956,5 +951,14 @@ test "all fixtures: twins" {
     inline for (fixtures, quick_fixtures) |F, quick| {
         if (!full and !quick) continue;
         try campaigns.Suite(F).run_campaign(campaign, campaigns.twins_link);
+    }
+}
+
+// engine_test.zig's remaining `test_for_all_fixtures` DSTs on the other fixtures. Per push,
+// ReleaseSafe runs them on the threshold VRF MinPk fixture alone (the non-attributable path
+// and the Random elector); slow builds run all seven.
+test {
+    inline for (fixtures, 0..) |F, index| {
+        if (F != engine_test.Ed25519Fixture) _ = engine_test.Suite(F, index == 0);
     }
 }

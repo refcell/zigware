@@ -49,7 +49,7 @@ pub fn Scheme(comptime Inner: type) type {
             return self.inner.me();
         }
 
-        pub fn participants(self: *const Self) *const Participants {
+        pub fn participants(self: *const Self) *const utils.ordered.Set(PublicKey) {
             return self.inner.participants();
         }
 
