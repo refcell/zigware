@@ -25,7 +25,7 @@ and started when what they build on had landed (or could be stubbed behind an in
 | 3 | storage-qmdb | storage: qmdb shared modules, keyless, immutable, any, store | done |
 | 3 | storage-qmdb-sync | storage: qmdb current, sync, compact | done (reshare harness phase 2 landed; lane box to tick) |
 | 3 | consensus-simplex | consensus: types, simplex | done |
-| 3 | consensus-marshal | consensus: aggregation, marshal | done (marshal tally: 193/197 standard with 4 not portable, 101/101 coding) |
+| 3 | consensus-marshal | consensus: aggregation, marshal | done (marshal tally: 196/197 standard with 1 not portable, 0 in progress, 101/101 coding) |
 | 3 | deployer | deployer | done |
 | 3 | curve25519 | cryptography/curve25519 | done |
 | 4 | glue | glue: simulate, transfers, stateful, dkg | in progress (stateful: stable leaders; simulate and dkg done) |

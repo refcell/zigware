@@ -156,7 +156,7 @@ Read this whole file before you change anything. These rules are not optional.
   it through `.value`; `cryptography/redaction_test.zig` checks every private key type.
 - `std.mem.doNotOptimizeAway(value)` on an array of 64 bytes or less emits one asm barrier per
   byte, so a bench that sinks a `[32]u8` by value spends most of its time on barriers
-  (`journal::fixed_replay` read 1.19× commonware instead of 0.70×, c12261bd). In benches,
+  (`journal::fixed_replay` read 1.19× commonware instead of 0.76×, c12261bd). In benches,
   sink a pointer: `std.mem.doNotOptimizeAway(&item)`, as commonware's `black_box` is one use.
 - The build runner prints `run test test-X stderr` and a `failed command: ...` line for any
   test step that wrote to stderr, even when every test in it passed. That alone is not a
