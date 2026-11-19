@@ -101,6 +101,8 @@ pub fn MockBlock(comptime Dir: type) type {
         pub const PublicKey = TestPublicKey;
         pub const Directory = Dir;
         pub const Payload = types.Payload(Variant, PublicKey, Dir);
+        /// The block's codec configuration: none.
+        pub const Cfg = void;
 
         context_value: TestContext,
         parent_value: Digest,

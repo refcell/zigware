@@ -15,4 +15,5 @@ test {
     @import("std").testing.refAllDecls(@This());
     _ = @import("mailbox_test.zig");
     _ = @import("actor_test.zig");
+    _ = @import("cluster_test.zig");
 }
