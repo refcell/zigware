@@ -76,7 +76,9 @@ fn Cached(comptime kind: Kind, comptime size: usize) type {
 
         pub fn iter(self: *Self) !u64 {
             for (self.positions) |position| {
-                std.mem.doNotOptimizeAway(try self.journal.read(position));
+                // A pointer sink: by value, a small array gets one barrier per byte.
+                const item = try self.journal.read(position);
+                std.mem.doNotOptimizeAway(&item);
             }
             assert(self.positions.len == items);
             return self.positions.len;

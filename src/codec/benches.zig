@@ -125,13 +125,18 @@ fn GetWorkload(comptime T: type) type {
         }
 
         fn get_part(gpa: Allocator, lazies: []Lazy) void {
-            for (lazies) |*lazy| std.mem.doNotOptimizeAway(lazy.get(gpa).?);
+            // Pointer sinks: by value, an array of 64 bytes or less (`[33]u8`) gets one barrier
+            // per byte; Rust's `black_box` is one opaque use.
+            for (lazies) |*lazy| {
+                const value = lazy.get(gpa).?;
+                std.mem.doNotOptimizeAway(&value);
+            }
         }
 
         fn decode_part(gpa: Allocator, sources: []const []const u8) void {
             for (sources) |source| {
                 const value = codec.decode(T, gpa, source) catch unreachable; // Proof: encoded.
-                std.mem.doNotOptimizeAway(value);
+                std.mem.doNotOptimizeAway(&value);
             }
         }
 

@@ -57,7 +57,9 @@ const Sequential = struct {
 
     pub fn iter(self: *Sequential) !u64 {
         for (0..self.items) |position| {
-            std.mem.doNotOptimizeAway(try self.journal.read(position));
+            // A pointer sink: by value, a small array item gets one barrier per byte.
+            const item = try self.journal.read(position);
+            std.mem.doNotOptimizeAway(&item);
         }
         return self.items;
     }

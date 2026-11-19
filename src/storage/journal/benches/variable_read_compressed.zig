@@ -115,7 +115,9 @@ fn Compressed(comptime size: usize) type {
                     try self.journal.read_many(self.sorted, self.out[0..self.sorted.len]);
                 },
                 .read_uncached => for (self.sampled) |position| {
-                    std.mem.doNotOptimizeAway(try self.journal.read(position));
+                    // A pointer sink: by value, a small array gets one barrier per byte.
+                    const item = try self.journal.read(position);
+                    std.mem.doNotOptimizeAway(&item);
                 },
                 .replay => {
                     const bounds = self.journal.get_bounds();

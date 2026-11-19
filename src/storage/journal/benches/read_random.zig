@@ -121,7 +121,9 @@ fn Read(comptime J: type) type {
             switch (self.mode) {
                 .serial, .concurrent => {
                     for (self.positions) |position| {
-                        std.mem.doNotOptimizeAway(try self.journal.read(position));
+                        // A pointer sink: by value, a small array gets one barrier per byte.
+                        const item = try self.journal.read(position);
+                        std.mem.doNotOptimizeAway(&item);
                     }
                     return self.positions.len;
                 },
