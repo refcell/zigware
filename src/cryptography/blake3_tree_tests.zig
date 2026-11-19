@@ -183,3 +183,28 @@ test "blake3 subtrees are commonware's task bound rounded down to a power of two
     try testing.expectEqual(32 * chunk_len, tree.subtree_len_for(2 * split_len));
     try testing.expectEqual(64 * chunk_len, tree.subtree_len_for(1 << 30));
 }
+
+test "blake3 xof matches std across input and output lengths" {
+    var prng = std.Random.DefaultPrng.init(0xb1a3e);
+    const random = prng.random();
+    const data = try gpa.alloc(u8, 20 * 1024);
+    defer gpa.free(data);
+    random.bytes(data);
+    var got: [4200]u8 = undefined;
+    var expected: [4200]u8 = undefined;
+    // Inputs of 0 to 3 blocks, around the chunk boundary, and several chunks; outputs
+    // shorter than one block through several vector widths, and odd lengths.
+    const inputs = [_]usize{
+        0, 1, 63, 64, 65, 128, 1023, 1024, 1025, 2047, 2048, 2049, 3000, 4096, 9000, 16384, 17408,
+    };
+    for (inputs) |len| {
+        for ([_]usize{ 1, 32, 64, 65, 1000, 1024, 2048, 4200 }) |out_len| {
+            const cut = random.uintAtMost(usize, len);
+            tree.xof(&.{ data[0..cut], data[cut..len] }, got[0..out_len]);
+            var hasher = std.crypto.hash.Blake3.init(.{});
+            hasher.update(data[0..len]);
+            hasher.final(expected[0..out_len]);
+            try std.testing.expectEqualSlices(u8, expected[0..out_len], got[0..out_len]);
+        }
+    }
+}

@@ -11,12 +11,19 @@ const std = @import("std");
 const assert = std.debug.assert;
 const codec = @import("codec");
 const Blake3 = @import("blake3.zig").Blake3;
-const StdBlake3 = std.crypto.hash.Blake3;
+const tree = @import("blake3_tree.zig");
 
 /// Bytes of state.
 pub const size = 2048;
 /// `u16` elements of state.
 pub const elements = size / 2;
+
+/// `u16`s per arithmetic step: a 64-byte vector. Vectors stay `u16` arrays end to end: a
+/// bitcast from bytes compiled to element-wise code (lthash::add ran 130x slow at 1024 lanes
+/// and 4x slow at 32).
+const vector_len = 32;
+const Words = @Vector(vector_len, u16);
+const native_little = @import("builtin").cpu.arch.endian() == .little;
 
 /// The lattice hash state.
 pub const LtHash = struct {
@@ -32,28 +39,46 @@ pub const LtHash = struct {
 
     /// Adds `data` to the set.
     pub fn add(self: *LtHash, data: []const u8) void {
-        const expanded = expand(data);
-        for (&self.state, expanded) |*value, delta| value.* +%= delta;
+        var words: [elements]u16 = undefined;
+        expand(data, &words);
+        self.apply(&words, .add);
     }
 
     /// Removes `data` from the set.
     pub fn subtract(self: *LtHash, data: []const u8) void {
-        const expanded = expand(data);
-        for (&self.state, expanded) |*value, delta| value.* -%= delta;
+        var words: [elements]u16 = undefined;
+        expand(data, &words);
+        self.apply(&words, .subtract);
     }
 
     /// Adds every element of `other` to the set.
     pub fn combine(self: *LtHash, other: *const LtHash) void {
-        for (&self.state, other.state) |*value, delta| value.* +%= delta;
+        self.apply(&other.state, .add);
+    }
+
+    /// Adds or subtracts `words` element-wise with wrapping.
+    fn apply(self: *LtHash, words: *const [elements]u16, comptime op: enum { add, subtract }) void {
+        comptime assert(elements % vector_len == 0);
+        var index: usize = 0;
+        while (index < elements) : (index += vector_len) {
+            const delta: Words = words[index..][0..vector_len].*;
+            const current: Words = self.state[index..][0..vector_len].*;
+            self.state[index..][0..vector_len].* = switch (op) {
+                .add => current +% delta,
+                .subtract => current -% delta,
+            };
+        }
+        assert(index == elements);
     }
 
     /// The BLAKE3 hash of the state as little-endian `u16`s.
     pub fn checksum(self: *const LtHash) Blake3.Digest {
+        if (native_little) return .{ .bytes = tree.hash(&.{std.mem.asBytes(&self.state)}) };
         var bytes: [size]u8 = undefined;
         for (self.state, 0..) |value, index| {
             std.mem.writeInt(u16, bytes[index * 2 ..][0..2], value, .little);
         }
-        return Blake3.hash(&.{&bytes});
+        return .{ .bytes = tree.hash(&.{&bytes}) };
     }
 
     pub fn reset(self: *LtHash) void {
@@ -66,16 +91,13 @@ pub const LtHash = struct {
     }
 
     /// `data` expanded by BLAKE3 XOF to `elements` little-endian `u16`s.
-    fn expand(data: []const u8) [elements]u16 {
-        var bytes: [size]u8 = undefined;
-        var hasher = StdBlake3.init(.{});
-        hasher.update(data);
-        hasher.final(&bytes);
-        var result: [elements]u16 = undefined;
-        for (&result, 0..) |*value, index| {
-            value.* = std.mem.readInt(u16, bytes[index * 2 ..][0..2], .little);
+    fn expand(data: []const u8, words: *[elements]u16) void {
+        // The 2 KiB XOF compresses its output blocks many at a time (`blake3_tree.xof`),
+        // as the `blake3` crate's `fill` does; std's `final` compresses one block at a time.
+        tree.xof(&.{data}, std.mem.asBytes(words));
+        if (!native_little) {
+            for (words) |*word| word.* = @byteSwap(word.*);
         }
-        return result;
     }
 
     pub fn write(self: *const LtHash, writer: *codec.Writer) void {

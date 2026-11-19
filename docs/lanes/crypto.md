@@ -503,3 +503,12 @@ hold whole units of lanes" over coding's lane-aware `hash_batches`, and `sha512/
   lane mask, the tail resume, the padding tail, chunking) are caught. Standalone, 8 x 64 KiB
   took 844 µs on std and 135 µs on x8. Also ported `test_hash_batches_shares_whole_units`;
   not portable 6 -> 4 (431/0/4).
+- 2026-11-19: lthash. `expand` and `checksum` use `blake3_tree`'s XOF and hash, which
+  compress whole chunks and output blocks `lanes` at a time (std's Blake3 does one block at a
+  time), and add, subtract, and combine step through the state 32 `u16`s at a time (element
+  loops compiled to scalar adds inside the bench; one `@Vector(1024, u16)` bitcast from bytes
+  compiled to element-wise code and made add 130x slower). The XOF writes straight into
+  `[1024]u16`: a 32-lane bitcast from bytes still compiled element-wise (add 5 µs, against
+  0.4 µs without it). XOF tested against std across input and output lengths; planted bugs
+  (lane counter, upper half, parent flag, chunk start, last whole chunk, subtract and combine
+  sign) are caught.

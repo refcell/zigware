@@ -446,3 +446,158 @@ pub fn hash_subtrees(parts: []const []const u8, len: usize, strategy: anytype) [
     const last = cursor.take(rest_len - rest_chunks * chunk_len, &scratch);
     return finish(stack, last_chunk_cv(last, counter), counter);
 }
+
+/// The root node of a BLAKE3 tree: the inputs of its last compression, which the XOF repeats
+/// with output block counters 0, 1, 2, ... and the root flag.
+const Root = struct {
+    cv: Cv,
+    block: [16]u32,
+    block_len: u32,
+    flags: u32,
+};
+
+/// The root node of the `len`-byte concatenation of `parts`, hashed on the calling thread.
+fn root_of(parts: []const []const u8, len: usize) Root {
+    var cursor = Cursor.at(parts, 0);
+    var scratch: [chunk_len]u8 = undefined;
+    // Every chunk but the last, then the last (empty when the message is).
+    const before = if (len == 0) 0 else (len - 1) / chunk_len;
+    const last_len = len - before * chunk_len;
+    // A whole last chunk of a longer message is not the root, so it compresses in the same
+    // wide batch as the chunks before it.
+    const batched = before + @intFromBool(before > 0 and last_len == chunk_len);
+    var stack: Stack = .{};
+    var counter: u64 = 0;
+    var cvs: [lanes]Cv = undefined;
+    var output: Cv = undefined;
+    while (counter < batched) {
+        const count = @min(lanes, batched - counter);
+        chunks_cvs(&cursor, counter, cvs[0..count]);
+        for (cvs[0..count], 0..) |cv, index| {
+            if (counter + index == before) output = cv else stack.push(cv, counter + index);
+        }
+        counter += count;
+    }
+    counter = before;
+    if (batched == before) {
+        const last = if (last_len == 0) &.{} else cursor.take(last_len, &scratch);
+        if (before == 0) return chunk_root(last);
+        output = last_chunk_cv(last, counter);
+    }
+    stack.merge(counter);
+    assert(stack.len > 0);
+    var index = stack.len;
+    while (index > 1) {
+        index -= 1;
+        output = parent_cv(stack.cvs[index], output, 0);
+    }
+    var block: [16]u32 = undefined;
+    block[0..8].* = stack.cvs[0];
+    block[8..16].* = output;
+    return .{ .cv = iv, .block = block, .block_len = block_len, .flags = flag_parent };
+}
+
+/// The root node of a message of one chunk, `chunk` (0 to `chunk_len` bytes).
+fn chunk_root(chunk: []const u8) Root {
+    assert(chunk.len <= chunk_len);
+    const blocks = @max(1, (chunk.len + block_len - 1) / block_len);
+    var cv: [8]Vec(1) = splat_cv(1, iv);
+    var bytes: [block_len]u8 = @splat(0);
+    var root: Root = undefined;
+    for (0..blocks) |block| {
+        const start = @min(chunk.len, block * block_len);
+        const part = chunk[start..@min(chunk.len, start + block_len)];
+        @memset(&bytes, 0);
+        @memcpy(bytes[0..part.len], part);
+        var flags: u32 = if (block == 0) flag_chunk_start else 0;
+        if (block == blocks - 1) {
+            flags |= flag_chunk_end;
+            var out: [1]Cv = undefined;
+            lane_cvs(1, cv, &out);
+            root = .{
+                .cv = out[0],
+                .block = undefined,
+                .block_len = @intCast(part.len),
+                .flags = flags,
+            };
+            for (&root.block, 0..) |*word, w| word.* = read_word(bytes[4 * w ..][0..4]);
+            break;
+        }
+        var m: [16]Vec(1) = undefined;
+        for (&m, 0..) |*word, w| word.* = @splat(read_word(bytes[4 * w ..][0..4]));
+        cv = compress(1, cv, &m, .{
+            .counter_low = @splat(0),
+            .counter_high = @splat(0),
+            .block_len = @splat(block_len),
+            .flags = @splat(flags),
+        });
+    }
+    assert(root.flags & flag_chunk_end != 0);
+    return root;
+}
+
+/// The BLAKE3 digest of the concatenation of `parts`, as std's, with whole chunks compressed
+/// `lanes` at a time.
+pub fn hash(parts: []const []const u8) [32]u8 {
+    var out: [32]u8 = undefined;
+    xof(parts, &out);
+    return out;
+}
+
+/// BLAKE3's extended output of the concatenation of `parts` into `out`, as std's `final`
+/// with `out.len` bytes: the root's output blocks compress `lanes` at a time, as the
+/// `blake3` crate's `fill` does.
+pub fn xof(parts: []const []const u8, out: []u8) void {
+    var len: usize = 0;
+    for (parts) |part| len += part.len;
+    const root = root_of(parts, len);
+    var m: [16]Vec(lanes) = undefined;
+    for (&m, root.block) |*word, value| word.* = @splat(value);
+    const cv = splat_cv(lanes, root.cv);
+    var block_counter: u64 = 0;
+    var written: usize = 0;
+    while (written < out.len) : (block_counter += lanes) {
+        var low: [lanes]u32 = undefined;
+        var high: [lanes]u32 = undefined;
+        for (&low, &high, 0..) |*l, *h, lane| {
+            l.* = @truncate(block_counter + lane);
+            h.* = @truncate((block_counter + lane) >> 32);
+        }
+        const words = compress_full(cv, &m, .{
+            .counter_low = low,
+            .counter_high = high,
+            .block_len = @splat(root.block_len),
+            .flags = @splat(root.flags | flag_root),
+        });
+        var blocks: [lanes][block_len]u8 = undefined;
+        for (words, 0..) |word, w| {
+            const column: [lanes]u32 = word;
+            for (&blocks, column) |*bytes, value| {
+                std.mem.writeInt(u32, bytes[4 * w ..][0..4], value, .little);
+            }
+        }
+        const step = @min(out.len - written, lanes * block_len);
+        @memcpy(out[written..][0..step], std.mem.asBytes(&blocks)[0..step]);
+        written += step;
+    }
+    assert(written == out.len);
+}
+
+/// `compress` with BLAKE3's full 16-word output, which the XOF emits.
+fn compress_full(cv: [8]Vec(lanes), m: *const [16]Vec(lanes), words: Words(lanes)) [16]Vec(lanes) {
+    @setEvalBranchQuota(20_000);
+    var v: [16]Vec(lanes) = undefined;
+    inline for (0..8) |i| v[i] = cv[i];
+    inline for (0..4) |i| v[8 + i] = @splat(iv[i]);
+    v[12] = words.counter_low;
+    v[13] = words.counter_high;
+    v[14] = words.block_len;
+    v[15] = words.flags;
+    inline for (0..msg_schedule.len) |r| round(lanes, &v, m, r);
+    var out: [16]Vec(lanes) = undefined;
+    inline for (0..8) |i| {
+        out[i] = v[i] ^ v[i + 8];
+        out[i + 8] = v[i + 8] ^ cv[i];
+    }
+    return out;
+}
