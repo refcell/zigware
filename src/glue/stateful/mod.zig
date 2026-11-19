@@ -28,4 +28,5 @@ pub const Finality = enum {
 test {
     std.testing.refAllDecls(@This());
     _ = @import("tests/root.zig");
+    _ = @import("tests/qmdb_targeted_test.zig");
 }
