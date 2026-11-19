@@ -13,7 +13,7 @@ stable, and breaking changes come with a migration path. See commonware's
 [stability levels](https://github.com/commonwarexyz/monorepo#stability).
 The p2p lane's own backlog is done. [docs/lanes/p2p.md](../../docs/lanes/p2p.md) tracks it. Its
 [test audit](../../docs/lanes/p2p.md#test-audit-p2p-2026-11-19-commonware-43b357a41) counts 476
-commonware tests: 359 ported, 86 open, 31 not portable. `authenticated/lookup/` belongs to the
+commonware tests: 445 ported, 0 open, 31 not portable. `authenticated/lookup/` belongs to the
 parallel lane ([docs/lanes/parallel.md](../../docs/lanes/parallel.md)).
 
 ## Modules

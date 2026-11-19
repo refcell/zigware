@@ -15,7 +15,7 @@ and started when what they build on had landed (or could be stubbed behind an in
 | 2 | actor-stream | actor, stream | done |
 | 2 | storage-journal | storage: journal, metadata, queue; runtime/buffer | done |
 | 2 | storage-archive | storage: archive, freezer, ordinal, cache | done |
-| 2 | p2p | p2p: simulated, authenticated | backlog done; test audit 359 ported, 86 open, 31 not portable |
+| 2 | p2p | p2p: simulated, authenticated | done; test audit 445 ported, 0 open, 31 not portable |
 | 2 | coding | coding, storage/bmt, cryptography/reed_solomon | done |
 | 3 | broadcast-resolver | resolver | done |
 | 3 | broadcast-collector | broadcast, collector, consensus/marshal/coding | done |
