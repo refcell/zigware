@@ -25,7 +25,15 @@
 //! `P` declares what `Verifier(P)` needs, plus `Recover`: a proposal waiting for its parent's
 //! state, with an `ancestry: Verifier.Ancestry` field (its parent first), `is_cancelled(*const)
 //! bool`, `decline(*Recover)` (answers that no block was built, consuming it), and
-//! `deinit(*Recover)` (releases it unanswered).
+//! `deinit(*Recover)` (releases it unanswered), and optionally `closed(*const Recover)
+//! Io.Cancelable!void` (waits until its caller leaves).
+//!
+//! # Cancellation
+//!
+//! A caller that leaves cancels its request at once, as commonware drops the request's future:
+//! each phase task races the phase against the caller's channel closing and cancels the phase
+//! when the caller leaves first. A shared execution step keeps running for the other requests
+//! that joined its flight; the last one to leave cancels it.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -96,6 +104,22 @@ pub fn Verifications(comptime P: type) type {
                     },
                 }
                 request.* = undefined;
+            }
+
+            /// Whether the caller's departure can be awaited.
+            fn watchable(request: *const Request) bool {
+                return request.* == .verify or @hasDecl(Recover, "closed");
+            }
+
+            /// Waits until the caller leaves.
+            fn closed(request: *const Request) Io.Cancelable!void {
+                switch (request.*) {
+                    .verify => |*verify| return verify.verification.closed(),
+                    .recover => |*recover| {
+                        if (comptime @hasDecl(Recover, "closed")) return recover.closed();
+                        unreachable; // `watchable` excludes it.
+                    },
+                }
             }
 
             fn ancestry(request: *const Request) !Ancestry {
@@ -229,26 +253,67 @@ pub fn Verifications(comptime P: type) type {
         }
 
         fn acquire_task(work: *Work) void {
-            const handler = work.handler;
-            var verifier = handler.verifier;
-            const ancestry = work.input.?;
-            work.input = null;
-            const verify = work.request == .verify;
-            const result = verifier.prepare(&work.provider, ancestry, verify);
-            work.outcome = if (result) |prepared| prepared else |err| err;
-            handler.post(work);
+            work.outcome = watched(work, acquire_phase);
+            work.handler.post(work);
         }
 
         fn execute_task(work: *Work) void {
-            const handler = work.handler;
-            var verifier = handler.verifier;
+            work.outcome = watched(work, execute_phase);
+            work.handler.post(work);
+        }
+
+        fn acquire_phase(work: *Work) anyerror!?Prepared {
+            var verifier = work.handler.verifier;
             const ancestry = work.input.?;
             work.input = null;
-            // An explicit type: a bare `null` would clear the outer optional (no outcome).
-            const processed = verifier.process(ancestry);
-            const outcome: anyerror!?Prepared = if (processed) |_| null else |err| err;
-            work.outcome = outcome;
-            handler.post(work);
+            return try verifier.prepare(&work.provider, ancestry, work.request == .verify);
+        }
+
+        fn execute_phase(work: *Work) anyerror!?Prepared {
+            var verifier = work.handler.verifier;
+            const ancestry = work.input.?;
+            work.input = null;
+            try verifier.process(ancestry);
+            return null;
+        }
+
+        const Wake = union(enum) {
+            phase: anyerror!?Prepared,
+            closed: Io.Cancelable!void,
+        };
+
+        /// Runs `phase` on `work`, cancelling it with `error.Canceled` once the caller leaves.
+        fn watched(work: *Work, comptime phase: fn (*Work) anyerror!?Prepared) anyerror!?Prepared {
+            if (!work.request.watchable()) return phase(work);
+            const io = work.handler.io;
+            var buffer: [2]Wake = undefined;
+            var select: Io.Select(Wake) = .init(io, &buffer);
+            // Without a watcher the phase still runs; it only notices a departure when it ends.
+            select.concurrent(.closed, Request.closed, .{&work.request}) catch return phase(work);
+            select.concurrent(.phase, phase, .{work}) catch {
+                select.cancelDiscard();
+                return phase(work);
+            };
+            const first = select.await() catch |err| {
+                while (select.cancel()) |rest| discard_wake(work.handler.gpa, rest);
+                return err;
+            };
+            // Each pass collects one remaining task; the watcher and the phase are the only two.
+            while (select.cancel()) |rest| discard_wake(work.handler.gpa, rest);
+            return switch (first) {
+                .phase => |result| result,
+                .closed => error.Canceled,
+            };
+        }
+
+        fn discard_wake(gpa: Allocator, wake: Wake) void {
+            switch (wake) {
+                .phase => |result| {
+                    const prepared = (result catch return) orelse return;
+                    discard_prepared(gpa, prepared);
+                },
+                .closed => {},
+            }
         }
 
         fn post(self: *Self, work: *Work) void {

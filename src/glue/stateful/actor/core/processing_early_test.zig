@@ -12,6 +12,7 @@ const harness_mod = fixture_mod.harness;
 const Fixture = fixture_mod.Fixture;
 const TestBlock = harness_mod.TestBlock;
 const Probe = harness_mod.Probe;
+const oneshot = @import("utils").channel.oneshot;
 
 fn check(fixture: *Fixture) void {
     fixture.deinit() catch |err| std.debug.panic("processing failed: {}", .{err});
@@ -156,4 +157,142 @@ test "stateful processing: a recovered parent answers its own verification" {
         try testing.expect(try again.recv());
     }
     try testing.expectEqual(@as(u32, 1), probe.calls);
+}
+
+/// Waits until `sender`'s receiver closes (bounded): the application's processing was dropped.
+fn await_closed(sender: *const oneshot.Sender(void)) !void {
+    // Each pass sleeps 1 ms; the bound is a hang guard.
+    for (0..10_000) |_| {
+        if (sender.is_closed()) return;
+        try std.testing.io.sleep(.fromMilliseconds(1), .awake);
+    }
+    return error.TestTimedOut;
+}
+
+/// A parent whose state is not cached, and its child (uncached too), over genesis.
+fn uncached_pair(fixture: *Fixture) !struct { TestBlock, TestBlock } {
+    const genesis = TestBlock.genesis();
+    const parent = try fixture.harness.stage_pending_child(&genesis, 1);
+    const child, var batch = try fixture.harness.build_child(&parent, 2);
+    batch.deinit();
+    fixture.harness.execution.state.clear();
+    return .{ parent, child };
+}
+
+test "stateful processing: an abandoned verification cancels with its caller" {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer check(&fixture);
+    const genesis = TestBlock.genesis();
+    const block = try uncached_child(&fixture, &genesis, 1);
+    var probe: Probe = .{ .target = block.digest() };
+    defer probe.deinit();
+    var gate = try probe.add_gate();
+    defer gate.started.deinit();
+    fixture.processing.verifications.verifier.app.probe = &probe;
+
+    var verdict = try fixture.verify(&.{ block, genesis });
+    try gate.started.recv();
+    // Dropping the caller drops the application's processing, which closes its release gate.
+    verdict.deinit();
+    try await_closed(&gate.release);
+    gate.release.deinit();
+    // commonware's second half (an acquisition that never completes) has no counterpart: an
+    // unfetchable parent here answers `error.Waiting` at once instead of acquiring forever.
+}
+
+test "stateful processing: abandoned incomplete verifications do not block later work" {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer check(&fixture);
+    const genesis = TestBlock.genesis();
+    const block1 = try uncached_child(&fixture, &genesis, 1);
+    var probe: Probe = .{ .target = null };
+    defer probe.deinit();
+    var first_gate = try probe.add_gate();
+    defer first_gate.started.deinit();
+    var second_gate = try probe.add_gate();
+    defer second_gate.started.deinit();
+    fixture.processing.verifications.verifier.app.probe = &probe;
+
+    // A verification missing its parent, abandoned once the loop has received it.
+    var incomplete = try fixture.verify(&.{block1});
+    try fixture.barrier();
+    incomplete.deinit();
+    var first = try fixture.verify(&.{ block1, genesis });
+    defer first.deinit();
+    try first_gate.started.recv();
+    try first_gate.release.send({});
+    try testing.expect(try first.recv());
+
+    const block2, var batch = try fixture.harness.build_child(&block1, 2);
+    batch.deinit();
+    var missing_parent = try fixture.verify(&.{block2});
+    try fixture.barrier();
+    missing_parent.deinit();
+    var second = try fixture.verify(&.{ block2, block1 });
+    defer second.deinit();
+    try second_gate.started.recv();
+    try second_gate.release.send({});
+    try testing.expect(try second.recv());
+}
+
+test "stateful processing: a proposal shares its parent's replay with a verification" {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer check(&fixture);
+    const genesis = TestBlock.genesis();
+    const parent, const child = try uncached_pair(&fixture);
+    var probe: Probe = .{ .target = parent.digest() };
+    defer probe.deinit();
+    var gate = try probe.add_gate();
+    defer gate.started.deinit();
+    fixture.processing.verifications.verifier.app.probe = &probe;
+
+    // Verifying the child replays the missing parent, held in the application.
+    var verdict = try fixture.verify(&.{ child, parent });
+    defer verdict.deinit();
+    try gate.started.recv();
+    // A proposal on the parent joins that replay instead of processing the parent again.
+    var proposal = try fixture.propose_async(&.{ parent, genesis }, 3);
+    defer proposal.deinit();
+    try fixture.await_joiners(parent.digest(), 2);
+    try testing.expectEqual(@as(u32, 1), probe.calls);
+    try gate.release.send({});
+    try testing.expect(try verdict.recv());
+    const built = try proposal.recv();
+    built.discard();
+    try testing.expectEqual(@as(u32, 1), probe.calls);
+}
+
+test "stateful processing: a verification keeps a cancelled proposal's replay running" {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer check(&fixture);
+    const genesis = TestBlock.genesis();
+    const parent, const child = try uncached_pair(&fixture);
+    var probe: Probe = .{ .target = parent.digest() };
+    defer probe.deinit();
+    var gate = try probe.add_gate();
+    defer gate.started.deinit();
+    // A second gate detects any repeated processing of the parent.
+    var duplicate = try probe.add_gate();
+    defer duplicate.started.deinit();
+    defer duplicate.release.deinit();
+    fixture.processing.verifications.verifier.app.probe = &probe;
+
+    var proposal = try fixture.propose_async(&.{ parent, genesis }, 3);
+    try gate.started.recv();
+    var verdict = try fixture.verify(&.{ child, parent });
+    defer verdict.deinit();
+    try fixture.await_joiners(parent.digest(), 2);
+
+    // Cancelling the proposal leaves the replay running for the verification.
+    proposal.deinit();
+    try fixture.barrier();
+    try testing.expect(!gate.release.is_closed());
+    try gate.release.send({});
+    try testing.expect(try verdict.recv());
+    try testing.expectEqual(@as(u32, 1), probe.calls);
+    try testing.expectError(error.Empty, duplicate.started.try_recv());
 }

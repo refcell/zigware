@@ -105,6 +105,13 @@ fn MailboxOf(comptime App_: type, comptime Databases_: type) type {
                 return self.proposal.is_cancelled();
             }
 
+            /// Waits until the proposer leaves.
+            pub fn closed(self: *const ProposalRequest) Io.Cancelable!void {
+                return switch (self.proposal) {
+                    inline else => |sender| sender.closed(),
+                };
+            }
+
             /// Declines and releases the request.
             pub fn decline(self: *ProposalRequest) void {
                 self.release_inputs();

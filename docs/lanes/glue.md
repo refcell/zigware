@@ -474,7 +474,7 @@ ones: d = deployer (thread T-01a1d5b9-c237), u = utils, j = storage-journal
 - [x] actor/core: deployer's `Syncing` wired into `Stateful.run`'s floor branch (Config's
   `sync_config`, `resolvers`, marshal's `floor`; `P.Resolvers`).
 - [ ] actor/core: the rest of processing.rs's tests. First half (1070-3396) here, in
-  core/processing_early_test.zig: 6 of 22 so far. Second half (3451-5885) is with simplex
+  core/processing_early_test.zig: 10 of 22 so far. Second half (3451-5885) is with simplex
   (T-01a1d5ad-c8d6), in core/processing_late_test.zig. Both build on core/testing.zig.
 - [ ] db: `Shared` as commonware's `AsyncRwLock` for DBs declaring `concurrent_reads`
   (`utils.sync.UpgradableRwLock`, `*const DB` read guards), once qmdb any/current batch reads
@@ -531,6 +531,8 @@ ones: d = deployer (thread T-01a1d5b9-c237), u = utils, j = storage-journal
 - 2026-11-19 (stateful): the core processing loop; a waiting verify gives no vote end to end.
 - 2026-11-19 (stateful): the `Stateful` actor, recovering from marshal and restarting.
 - 2026-11-19 (stateful): the actor starts from a floor through deployer's `Syncing`.
+- 2026-11-19 (stateful): a caller leaving cancels its verification or proposal at once (a
+  watcher races each phase against the caller's channel), as commonware drops the future.
 
 ## dkg (owner: coding lane, thread T-01a1d58d-bff1-75a1-8ccb-4b8dd7bc9755)
 

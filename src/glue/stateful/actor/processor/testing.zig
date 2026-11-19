@@ -379,6 +379,10 @@ pub const TestRecover = struct {
         return self.response.is_closed();
     }
 
+    pub fn closed(self: *const TestRecover) Io.Cancelable!void {
+        return self.response.closed();
+    }
+
     pub fn decline(self: *TestRecover) void {
         self.ancestry.deinit();
         self.response.send(false) catch {}; // A caller that left needs no answer.

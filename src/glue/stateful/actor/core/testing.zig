@@ -102,6 +102,44 @@ pub const Fixture = struct {
         return mailbox.propose({}, context, ancestry, {});
     }
 
+    /// Sends a proposal on `blocks` (the parent first) at `view` without waiting, and returns
+    /// the built block's receiver (closed without a value when the proposal declines).
+    pub fn propose_async(
+        fixture: *Fixture,
+        blocks: []const TestBlock,
+        view: u64,
+    ) !oneshot.Receiver(Mailbox.Digested) {
+        const pair = try oneshot.channel(Mailbox.Digested, gpa, io);
+        try fixture.send(.{ .propose = .{
+            .context = .{ .round = harness.round(view) },
+            .ancestry = try fixture.harness.ancestry(blocks),
+            .upstream = {},
+            .proposal = .{ .propose = pair.sender },
+        } });
+        return pair.receiver;
+    }
+
+    /// Returns once the loop has handled every earlier message (a database subscription is
+    /// answered in mailbox order).
+    pub fn barrier(fixture: *Fixture) !void {
+        _ = try fixture.mailbox.?.subscribe_databases();
+    }
+
+    /// Waits until `count` requests hold the flight processing `digest` (bounded).
+    pub fn await_joiners(fixture: *Fixture, digest: TestBlock.Digest, count: u32) !void {
+        const execution = fixture.harness.execution;
+        // Each pass sleeps 1 ms; the bound is a hang guard.
+        for (0..10_000) |_| {
+            execution.mutex.lockUncancelable(io);
+            const flight = execution.flights.get(digest);
+            const joiners = if (flight) |value| value.joiners else 0;
+            execution.mutex.unlock(io);
+            if (joiners >= count) return;
+            try io.sleep(.fromMilliseconds(1), .awake);
+        }
+        return error.TestTimedOut;
+    }
+
     /// Reports `block` finalized and returns its acknowledgement's waiter.
     pub fn finalize(fixture: *Fixture, block: TestBlock) !Exact.Waiter {
         const handle = try Exact.handle(gpa, io);
