@@ -166,6 +166,9 @@ that harness. It builds on `coding` (ReedSolomon), `consensus.types.coding.Commi
   coding commitment (`CodingHarness.Scheme`/`Provider`/`Fixture`/`fixture`), since marshal's
   shared `S` is bound to digest subjects. Next: the mod.rs tests, and the scenario wrappers
   once marshal's generic scenarios land.
+  The runtime thread (T-01a1d57b-1bfd) ported mod.rs 4989-6420 (15 propose, prepare, relay,
+  restart, and certify-release tests) in `coding/tests/propose_test.zig`, adding
+  `RecordingCodingBuffer.sent_to_all` to `tests/common.zig`.
 
 ## Log
 - 2026-11-13: broadcast lib.rs and buffered (engine, mailbox, overflow policy, metrics,
