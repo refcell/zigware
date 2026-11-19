@@ -231,22 +231,36 @@ pub fn call_iter(workload: anytype) anyerror!void {
 
 /// Runs `workload` with Criterion's `iter_custom` timing model: `setup`, then `iters` times
 /// `before_iter` (untimed) and `iter` (timed), then `teardown`. Returns the timed nanoseconds.
+///
+/// A workload without `before_iter` times its `iters` iterations as one batch between two
+/// clock reads, as Criterion's `iter` does, so a nanosecond-scale `iter` is not floored at the
+/// cost of a clock pair. With `before_iter`, each iteration is timed on its own.
 pub fn criterion(io: std.Io, workload: anytype, iters: u64) anyerror!u64 {
-    assert_workload(@typeInfo(@TypeOf(workload)).pointer.child);
+    const W = @typeInfo(@TypeOf(workload)).pointer.child;
+    assert_workload(W);
     assert(iters > 0);
     try call_hook(workload, "setup");
     var total_ns: u64 = 0;
-    for (0..iters) |_| {
-        try call_hook(workload, "before_iter");
+    if (comptime !@hasDecl(W, "before_iter")) {
         const start = std.Io.Clock.awake.now(io);
-        try call_iter(workload);
-        const end = std.Io.Clock.awake.now(io);
-        const elapsed = end.nanoseconds - start.nanoseconds;
-        assert(elapsed >= 0);
-        total_ns +|= @intCast(elapsed);
+        for (0..iters) |_| try call_iter(workload);
+        total_ns = elapsed_ns(start, std.Io.Clock.awake.now(io));
+    } else {
+        for (0..iters) |_| {
+            try call_hook(workload, "before_iter");
+            const start = std.Io.Clock.awake.now(io);
+            try call_iter(workload);
+            total_ns +|= elapsed_ns(start, std.Io.Clock.awake.now(io));
+        }
     }
     try call_hook(workload, "teardown");
     return total_ns;
+}
+
+fn elapsed_ns(start: std.Io.Timestamp, end: std.Io.Timestamp) u64 {
+    const elapsed = end.nanoseconds - start.nanoseconds;
+    assert(elapsed >= 0);
+    return @intCast(elapsed);
 }
 
 const testing = std.testing;
@@ -333,6 +347,28 @@ test "criterion times every iteration and runs hooks once" {
     var workload: Counting = .{};
     _ = try criterion(testing.io, &workload, 5);
     const expected: Counting = .{ .setups = 1, .befores = 5, .iters = 5, .teardowns = 1 };
+    try testing.expectEqual(expected, workload);
+}
+
+test "criterion runs every iteration of a workload without before_iter" {
+    const Plain = struct {
+        setups: u32 = 0,
+        iters: u32 = 0,
+        teardowns: u32 = 0,
+        pub fn setup(plain: *@This()) void {
+            plain.setups += 1;
+        }
+        pub fn iter(plain: *@This()) u32 {
+            plain.iters += 1;
+            return plain.iters;
+        }
+        pub fn teardown(plain: *@This()) void {
+            plain.teardowns += 1;
+        }
+    };
+    var workload: Plain = .{};
+    _ = try criterion(testing.io, &workload, 7);
+    const expected: Plain = .{ .setups = 1, .iters = 7, .teardowns = 1 };
     try testing.expectEqual(expected, workload);
 }
 
