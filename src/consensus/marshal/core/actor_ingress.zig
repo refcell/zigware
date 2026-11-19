@@ -189,9 +189,12 @@ fn persist_verified(self: anytype, round: Round, block: anytype, ack: anytype) !
     var owned = block;
     defer V.deinit_block(self.gpa, &owned);
     var sender = ack;
-    errdefer sender.deinit();
+    // `settle` takes the acknowledgement, also when it fails.
+    var held = true;
+    errdefer if (held) sender.deinit();
     _ = try finalize.ingest(self, &owned);
     const durable = try self.cache.put_verified(round, owned.digest(), &owned);
+    held = false;
     return self.settle(.{ .ack = sender }, durable);
 }
 
@@ -202,7 +205,9 @@ fn certified(self: anytype, round: Round, block: anytype, ack: anytype) !void {
     var owned = block;
     defer V.deinit_block(self.gpa, &owned);
     var sender = ack;
-    errdefer sender.deinit();
+    // `settle` takes the acknowledgement, also when it fails.
+    var held = true;
+    errdefer if (held) sender.deinit();
     _ = try finalize.ingest(self, &owned);
     const digest = owned.digest();
     // At most one notarization exists per round, so the notarized slot cannot belong to
@@ -217,7 +222,9 @@ fn certified(self: anytype, round: Round, block: anytype, ack: anytype) !void {
         block_sync.release();
         return err;
     };
-    return self.settle(.{ .ack = sender }, try notarization_sync.join(block_sync));
+    const durable = try notarization_sync.join(block_sync);
+    held = false;
+    return self.settle(.{ .ack = sender }, durable);
 }
 
 /// Certification authenticates the block's commitment and its parent's.

@@ -1341,8 +1341,9 @@ fn verified_call(mailbox: Started.A.Mailbox, round: Round, block: common.Block) 
     return mailbox.verified(round, block);
 }
 
-/// What a failing sync test drives once startup is quiet.
-const SyncFailure = enum { verified, notarization };
+/// What a failing sync test drives once startup is quiet: `verified_at_once` fails the
+/// verified sync before marshal polls it, so it is released in place rather than pooled.
+const SyncFailure = enum { verified, verified_at_once, notarization };
 
 /// A verified block's or a notarization's failed sync ends the actor with the storage error
 /// (commonware panics in `test_mailbox_verified_sync_failure_panics` and
@@ -1383,6 +1384,11 @@ fn sync_failure_body(ctx: Ctx, comptime which: SyncFailure) anyerror!void {
             pending.fail_all();
             try testing.expect(!try call.await(io));
         },
+        .verified_at_once => {
+            pending.arm_fail();
+            pending.unblock();
+            try testing.expect(!try env.started.mailbox.verified(round, try ready(block)));
+        },
         .notarization => {
             try notarize(&env, 1, 0, block.digest());
             while (pending.parked() == 0) try ctx.sleep(.fromMilliseconds(1));
@@ -1403,6 +1409,14 @@ test "standard failed verified sync stops the actor" {
     try run(struct {
         fn body(ctx: Ctx) anyerror!void {
             return sync_failure_body(ctx, .verified);
+        }
+    }.body);
+}
+
+test "standard verified sync failed before it is polled stops the actor" {
+    try run(struct {
+        fn body(ctx: Ctx) anyerror!void {
+            return sync_failure_body(ctx, .verified_at_once);
         }
     }.body);
 }
