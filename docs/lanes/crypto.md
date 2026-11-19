@@ -74,22 +74,33 @@ handshake), then certificate, secp256r1, the rest, zk last. banderwagon moved to
   immutable over commonware's variable harnesses in both families. storage-qmdb-sync owns
   any, current, and compact sync glue and the `qmdb_any_*_sync` fuzz targets.
 - [ ] simplex voter `actors/voter/mod.rs` tests, shared with runtime (T-01a1d57b-1bfd): runtime
-  ports lines 881-6716 (52 tests) and 11858-end (16 tests, re-split at runtime's offer), this
-  lane 6717-11712 (28 tests) in
-  `src/consensus/simplex/actors/voter/tests/{nullify,certification,verification,replay,
-  timeout}_test.zig`, each `Tests(h)` over runtime's fixture-generic `Harness(F)` with
-  commonware's per-test scheme coverage. Done (each group checked by a planted bug): the four
-  nullify fast-path tests, recovered_finalization_is_reported, missed_notarization_is_fetched,
-  failed_certification_blocks_direct_descendant_verify, the finalization and conflicting
-  notarization in-flight verification cancels, certification_precludes_verification,
-  invalid_ancestry_emits_nullify_immediately, and
-  dropped_verify_still_votes_after_prior_participation, no_recertification_after_replay
-  (replay_test.zig), and no_self_verify_when_proposing,
-  no_self_propose_or_verify_after_restart, nullify_after_crash_in_propose_window, and
-  no_self_verify_after_restart, certifies_own_proposal_when_proposing,
-  certifies_own_proposal_after_restart, and certify_observer_fires_for_external_leader_proposal
-  (own_proposal_test.zig), and certification_cancelled_on_finalization. Next: 10793
-  (stale_same_parent_verification_failure_does_not_nullify_replacement) through 11712.
+  ports lines 881-6716 (52 tests) and 11858-end (16 tests, re-split at runtime's offer); this
+  lane's 6717-11712 (28 tests) are all ported, each `Tests(h)` over the fixture-generic voter
+  `Harness(F)` with commonware's per-test scheme coverage, and each group checked by a planted
+  bug. The item stays open until runtime's 11858-end lands.
+  - nullify_test.zig (6): verification_failure, leader_nullify_timeout_hint, dropped_propose,
+    and dropped_verify emit nullify immediately; invalid_ancestry_emits_nullify_immediately;
+    dropped_verify_still_votes_after_prior_participation.
+  - certification_test.zig (9): recovered_finalization_is_reported,
+    missed_notarization_is_fetched, certification_cancelled_on_finalization,
+    certification_still_reports_to_resolver_after_nullification,
+    late_notarization_after_nullification_still_certifies, certification_after_timeout,
+    certification_after_notarize_timeout_as_follower and _as_leader, and
+    cancelled_certification_does_not_hang.
+  - verification_test.zig (5): failed_certification_blocks_direct_descendant_verify,
+    finalization_cancels_inflight_verification,
+    conflicting_notarization_cancels_inflight_verification,
+    certification_precludes_verification, and
+    stale_same_parent_verification_failure_does_not_nullify_replacement.
+  - replay_test.zig (1): no_recertification_after_replay.
+  - own_proposal_test.zig (7): no_self_verify_when_proposing,
+    no_self_propose_or_verify_after_restart, nullify_after_crash_in_propose_window,
+    no_self_verify_after_restart, certifies_own_proposal_when_proposing,
+    certifies_own_proposal_after_restart, and
+    certify_observer_fires_for_external_leader_proposal.
+  - cancelled_certification_does_not_hang checks the "failed to certify proposal" debug event
+    and its round; the zigware voter logs no `err` field (commonware's `RecvError(())` is the
+    Rust oneshot's error).
   - no_recertification_after_replay: replay marks a view certified both in `Round.replay` and
     in the actor's `handle_certification`; dropping either alone still passes, and dropping
     both is caught as a voter panic (the replayed view cannot advance), not a recertify.

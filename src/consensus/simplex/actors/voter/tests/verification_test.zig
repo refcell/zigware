@@ -320,5 +320,66 @@ pub fn Tests(comptime h: type) type {
                 }
             }.body);
         }
+
+        /// Waits for view `view`'s certification verdict, failing on our nullify there.
+        fn expect_certified_not_nullified(ctx: Ctx, stack: *h.VoterStack, view: u64) !void {
+            var waited_ms: u64 = 0;
+            // Bounded by 3 s of simulated time.
+            while (waited_ms < 3_000) : (waited_ms += 1) {
+                if (stack.batcher.try_recv()) |message| {
+                    if (message == .constructed and message.constructed == .nullify and
+                        message.constructed.view().get() == view) return error.Nullified;
+                } else |_| {}
+                if (stack.resolver.try_recv()) |message| {
+                    defer message.discard();
+                    if (message == .certified and
+                        message.certified.notarization.view().get() == view)
+                    {
+                        try testing.expect(message.certified.success);
+                        return;
+                    }
+                } else |_| {}
+                try ctx.sleep(.fromMilliseconds(1));
+            }
+            return error.NotCertified;
+        }
+
+        // commonware test_stale_same_parent_verification_failure_does_not_nullify_replacement
+        test "voter stale same parent verification failure does not nullify replacement" {
+            try h.covers(.ed25519);
+            try run(10, struct {
+                fn body(ctx: Ctx) anyerror!void {
+                    const gpa = ctx.gpa();
+                    var net: h.Network = undefined;
+                    try net.start(ctx, 5, "stale-same-parent-verification");
+                    defer net.deinit();
+                    var stack: h.VoterStack = undefined;
+                    try stack.start(ctx, &net, .{
+                        .leader_timeout_ms = 5_000,
+                        .certification_timeout_ms = 5_000,
+                        .timeout_retry_ms = 60 * 60 * 1000,
+                        .verify_latency_ms = 100,
+                        .certify_latency_ms = 500,
+                        .fail_verification = true,
+                    });
+                    defer stack.stop();
+                    _ = try stack.next_update(ctx, 1_000);
+                    const parent = try h.advance_to_view(&stack, ctx, &net, 5);
+                    // Proposal A goes to verification, which will fail.
+                    const a = proposal(5, 4, "proposal-a");
+                    relay(&net, 1, a, parent, 1);
+                    try stack.mailbox.proposal(a);
+                    try ctx.sleep(.fromMilliseconds(10));
+                    try testing.expect(stack.automaton.verification_requested(5));
+                    // B, over the same parent, is notarized before A's failure lands: the stale
+                    // failure must not nullify the view B certifies.
+                    const b = proposal(5, 4, "proposal-b");
+                    const notarization =
+                        try h.build(gpa, .notarization, net.schemes(), b, net.quorum());
+                    try stack.mailbox.recovered(gpa, .{ .notarization = notarization });
+                    try expect_certified_not_nullified(ctx, &stack, 5);
+                }
+            }.body);
+        }
     };
 }

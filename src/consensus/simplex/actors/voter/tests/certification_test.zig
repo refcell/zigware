@@ -229,5 +229,286 @@ pub fn Tests(comptime h: type) type {
                 }
             }.body);
         }
+
+        /// Waits up to 6 s for the certification verdict of `view`, draining the batcher.
+        fn certified_verdict(ctx: Ctx, stack: *h.VoterStack, view: u64) !?bool {
+            var waited_ms: u64 = 0;
+            // Bounded by 6 s of simulated time.
+            while (waited_ms < 6_000) : (waited_ms += 1) {
+                while (stack.batcher.try_recv()) |_| {} else |_| {}
+                if (stack.resolver.try_recv()) |message| {
+                    defer message.discard();
+                    if (message == .certified and
+                        message.certified.notarization.view().get() == view)
+                    {
+                        return message.certified.success;
+                    }
+                } else |_| {}
+                try ctx.sleep(.fromMilliseconds(1));
+            }
+            return null;
+        }
+
+        /// Whether an update announces a view above `view` within 5 s.
+        fn advances_past(ctx: Ctx, stack: *h.VoterStack, view: u64) !bool {
+            var waited_ms: u64 = 0;
+            // Bounded by 5 s of simulated time.
+            while (waited_ms < 5_000) : (waited_ms += 1) {
+                const message = stack.batcher.try_recv() catch {
+                    try ctx.sleep(.fromMilliseconds(1));
+                    continue;
+                };
+                if (message == .update and message.update.current.get() > view) return true;
+            }
+            return false;
+        }
+
+        /// Waits up to `limit_ms` for our vote of `kind` at `view`.
+        fn expect_vote(
+            ctx: Ctx,
+            stack: *h.VoterStack,
+            comptime kind: anytype,
+            view: u64,
+            limit_ms: u64,
+        ) !void {
+            var waited_ms: u64 = 0;
+            // Bounded by `limit_ms` of simulated time.
+            while (waited_ms < limit_ms) {
+                const message = stack.batcher.try_recv() catch {
+                    try ctx.sleep(.fromMilliseconds(1));
+                    waited_ms += 1;
+                    continue;
+                };
+                if (message != .constructed or message.constructed != kind) continue;
+                if (message.constructed.view().get() == view) return;
+            }
+            return error.NoVote;
+        }
+
+        fn recover(
+            ctx: Ctx,
+            net: *h.Network,
+            stack: *h.VoterStack,
+            comptime kind: std.meta.Tag(h.Certificate),
+            subject: if (kind == .nullification) h.Round else h.Proposal,
+        ) !void {
+            const gpa = ctx.gpa();
+            const certificate = try h.build(gpa, kind, net.schemes(), subject, net.quorum());
+            const recovered = @unionInit(h.Certificate, @tagName(kind), certificate);
+            try stack.mailbox.recovered(gpa, recovered);
+        }
+
+        /// commonware's certification-after-timeout voter: 10 s timeouts, a 100 s retry.
+        const ten_second_timeouts: h.Options = .{
+            .leader_timeout_ms = 10_000,
+            .certification_timeout_ms = 10_000,
+            .timeout_retry_ms = 100_000,
+        };
+
+        // commonware test_certification_still_reports_to_resolver_after_nullification
+        test "voter certification still reports to resolver after nullification" {
+            try h.covers(.schemes);
+            try run_for(30, struct {
+                fn body(ctx: Ctx) anyerror!void {
+                    var net: h.Network = undefined;
+                    try net.start(ctx, 5, "consensus");
+                    defer net.deinit();
+                    // Certification takes 2 s, so the nullification arrives while it runs.
+                    var stack: h.VoterStack = undefined;
+                    try stack.start(ctx, &net, .{
+                        .leader_timeout_ms = 5_000,
+                        .certification_timeout_ms = 5_000,
+                        .timeout_retry_ms = 60 * 60 * 1000,
+                        .certify_latency_ms = 2_000,
+                        .partition = "cert_after_nullification_test",
+                        .batcher_capacity = 1024,
+                        .resolver_capacity = 10,
+                    });
+                    defer stack.stop();
+                    _ = try stack.next_update(ctx, 1_000);
+                    const round: h.Round = .new(epoch, .new(5));
+                    const payload = h.Sha256.hash(&.{"payload_to_certify"});
+                    const proposal: h.Proposal = .init(round, .new(0), payload);
+                    h.relay_contents(&net, 0, payload, round, h.Sha256.hash(&.{"genesis"}), 42);
+                    try stack.mailbox.proposal(proposal);
+                    try recover(ctx, &net, &stack, .notarization, proposal);
+                    try ctx.sleep(.fromMilliseconds(100));
+                    try recover(ctx, &net, &stack, .nullification, round);
+                    // The late verdict still reaches the resolver.
+                    const verdict = try certified_verdict(ctx, &stack, 5);
+                    try testing.expectEqual(@as(?bool, true), verdict);
+                }
+            }.body);
+        }
+
+        // commonware test_late_notarization_after_nullification_still_certifies
+        test "voter late notarization after nullification still certifies" {
+            try h.covers(.schemes_round_robin);
+            try run_for(30, struct {
+                fn body(ctx: Ctx) anyerror!void {
+                    var net: h.Network = undefined;
+                    try net.start(ctx, 5, "late_notarization_after_nullification");
+                    defer net.deinit();
+                    var stack: h.VoterStack = undefined;
+                    try stack.start(ctx, &net, .{
+                        .leader_timeout_ms = 5_000,
+                        .certification_timeout_ms = 5_000,
+                        .timeout_retry_ms = 5_000,
+                    });
+                    defer stack.stop();
+                    _ = try stack.next_update(ctx, 1_000);
+                    _ = try h.advance_to_view(&stack, ctx, &net, 3);
+                    // View 3 is nullified, then its notarization arrives and still certifies.
+                    try recover(ctx, &net, &stack, .nullification, .new(epoch, .new(3)));
+                    const late = h.proposal_at(epoch, 3, "late_notarization_after_nullification");
+                    try recover(ctx, &net, &stack, .notarization, late);
+                    const verdict = try certified_verdict(ctx, &stack, 3);
+                    try testing.expectEqual(@as(?bool, true), verdict);
+                }
+            }.body);
+        }
+
+        // commonware test_certification_after_timeout
+        test "voter certification after timeout" {
+            try h.covers(.schemes_round_robin);
+            try run_for(60, struct {
+                fn body(ctx: Ctx) anyerror!void {
+                    var net: h.Network = undefined;
+                    try net.start(ctx, 5, "certification_after_timeout");
+                    defer net.deinit();
+                    var stack: h.VoterStack = undefined;
+                    try stack.start(ctx, &net, ten_second_timeouts);
+                    defer stack.stop();
+                    _ = try stack.next_update(ctx, 1_000);
+                    // Round robin elects participant 1 for view 3: we follow, and get no
+                    // proposal, so we time out before any notarize.
+                    _ = try h.advance_to_view(&stack, ctx, &net, 3);
+                    try expect_vote(ctx, &stack, .nullify, 3, 15_000);
+                    // A delayed notarization still certifies and advances the view.
+                    const proposal = h.proposal_at(epoch, 3, "timeout_test");
+                    try recover(ctx, &net, &stack, .notarization, proposal);
+                    try testing.expect(try advances_past(ctx, &stack, 3));
+                }
+            }.body);
+        }
+
+        // commonware test_certification_after_notarize_timeout_as_follower
+        test "voter certification after notarize timeout as follower" {
+            try h.covers(.schemes_round_robin);
+            try run_for(60, struct {
+                fn body(ctx: Ctx) anyerror!void {
+                    var net: h.Network = undefined;
+                    try net.start(ctx, 5, "certification_after_notarize_timeout_as_follower");
+                    defer net.deinit();
+                    var stack: h.VoterStack = undefined;
+                    try stack.start(ctx, &net, ten_second_timeouts);
+                    defer stack.stop();
+                    _ = try stack.next_update(ctx, 1_000);
+                    const parent = try h.advance_to_view(&stack, ctx, &net, 3);
+                    // We notarize participant 1's proposal, then time out waiting for its
+                    // notarization.
+                    const proposal = h.proposal_at(epoch, 3, "follower_test");
+                    h.relay_contents(&net, 1, proposal.payload, proposal.round, parent, 0);
+                    try stack.mailbox.proposal(proposal);
+                    try expect_vote(ctx, &stack, .notarize, 3, 5_000);
+                    try ctx.sleep(.fromSeconds(11));
+                    try expect_vote(ctx, &stack, .nullify, 3, 1_000);
+                    // The late notarization still certifies and advances the view.
+                    try recover(ctx, &net, &stack, .notarization, proposal);
+                    try testing.expect(try advances_past(ctx, &stack, 3));
+                }
+            }.body);
+        }
+
+        /// Waits for our notarize at `view` and returns its proposal.
+        fn notarized_proposal(ctx: Ctx, stack: *h.VoterStack, view: u64) !h.Proposal {
+            // Bounded by the per-message wait.
+            while (true) {
+                const message = (try stack.next_batcher(ctx, 5_000)) orelse
+                    return error.NoNotarize;
+                if (message != .constructed or message.constructed != .notarize) continue;
+                const vote = message.constructed.notarize;
+                if (vote.view().get() == view) return vote.proposal;
+            }
+        }
+
+        // commonware test_certification_after_notarize_timeout_as_leader
+        test "voter certification after notarize timeout as leader" {
+            try h.covers(.schemes_round_robin);
+            try run_for(60, struct {
+                fn body(ctx: Ctx) anyerror!void {
+                    var net: h.Network = undefined;
+                    try net.start(ctx, 5, "certification_after_notarize_timeout_as_leader");
+                    defer net.deinit();
+                    var stack: h.VoterStack = undefined;
+                    try stack.start(ctx, &net, ten_second_timeouts);
+                    defer stack.stop();
+                    _ = try stack.next_update(ctx, 1_000);
+                    // Round robin elects us for view 2: we propose and notarize, then time out
+                    // waiting for its notarization.
+                    _ = try h.advance_to_view(&stack, ctx, &net, 2);
+                    const proposal = try notarized_proposal(ctx, &stack, 2);
+                    try ctx.sleep(.fromSeconds(11));
+                    try expect_vote(ctx, &stack, .nullify, 2, 1_000);
+                    // The late notarization still certifies and advances the view.
+                    try recover(ctx, &net, &stack, .notarization, proposal);
+                    try testing.expect(try advances_past(ctx, &stack, 2));
+                }
+            }.body);
+        }
+
+        /// Whether `event` is the debug "failed to certify proposal" for `round` (formatted the
+        /// way the voter's tracer writes it).
+        fn failed_to_certify(
+            round: h.Round,
+            event: runtime.telemetry.traces.collector.RecordedEvent,
+        ) bool {
+            if (!std.mem.eql(u8, event.metadata.content, "failed to certify proposal")) {
+                return false;
+            }
+            var buffer: [64]u8 = undefined;
+            var writer: std.Io.Writer = .fixed(&buffer);
+            runtime.telemetry.traces.write_field_value(&writer, round) catch return false;
+            for (event.metadata.fields) |field| {
+                if (!std.mem.eql(u8, field.name, "round")) continue;
+                if (std.mem.eql(u8, field.value, writer.buffered())) return true;
+            }
+            return false;
+        }
+
+        // commonware test_cancelled_certification_does_not_hang
+        test "voter cancelled certification does not hang" {
+            try h.covers(.schemes_round_robin);
+            try run_for(10, struct {
+                fn body(ctx: Ctx) anyerror!void {
+                    const traces = runtime.telemetry.traces;
+                    var collector = traces.Collector.init(ctx.gpa(), .{});
+                    defer collector.deinit();
+                    var subscriber = collector.subscriber();
+                    subscriber.level = .debug;
+                    var net: h.Network = undefined;
+                    try net.start(ctx, 5, "consensus");
+                    defer net.deinit();
+                    var stack: h.VoterStack = undefined;
+                    try stack.start(ctx, &net, .{
+                        .certification_timeout_ms = 500,
+                        .timeout_retry_ms = 60 * 60 * 1000,
+                        .certifier = .cancel,
+                        .tracer = .init(subscriber, "commonware_consensus::simplex::voter"),
+                    });
+                    defer stack.stop();
+                    _ = try stack.next_update(ctx, 1_000);
+                    const parent = try h.advance_to_view(&stack, ctx, &net, 3);
+                    const proposal = h.proposal_at(epoch, 3, "test_proposal");
+                    h.relay_contents(&net, 1, proposal.payload, proposal.round, parent, 0);
+                    try stack.mailbox.proposal(proposal);
+                    try recover(ctx, &net, &stack, .notarization, proposal);
+                    // The certifier drops the request, so the view times out to a nullify.
+                    try expect_vote(ctx, &stack, .nullify, 3, 5_000);
+                    const debug = collector.get_by_level(.debug);
+                    try debug.expect_event(proposal.round, failed_to_certify);
+                }
+            }.body);
+        }
     };
 }
