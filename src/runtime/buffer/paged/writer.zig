@@ -575,7 +575,6 @@ pub const Writer = struct {
             .size = self.size(),
             .tail_offset = self.buffer.offset,
             .tail = self.buffer.bytes(),
-            .page_scratch = self.page_scratch,
         };
     }
 

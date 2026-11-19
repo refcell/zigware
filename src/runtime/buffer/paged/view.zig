@@ -24,8 +24,6 @@ pub const View = struct {
     tail_offset: u64,
     /// The logical bytes `[tail_offset, size)`.
     tail: []const u8,
-    /// One physical page for reads.
-    page_scratch: []u8,
 
     /// Read exactly `buf.len` bytes at logical `offset`.
     pub fn read_into(self: View, buf: []u8, offset: u64) Error!void {
@@ -192,16 +190,30 @@ pub const View = struct {
     }
 
     /// Read full pages below the tail through the page cache.
+    /// Physical pages up to this size are read into a stack buffer; larger ones allocate.
+    const stack_page_bytes = 4096;
+
+    /// Reads `buf` at `offset` from the page cache, fetching missed pages from the blob. Each
+    /// call reads missed pages into a buffer of its own (commonware's `read_after_miss`), so
+    /// readers of one blob on several threads never share a page in flight.
     fn read_blob(self: View, buf: []u8, offset: u64) Error!void {
         const page_size_value = self.cache_ref.page_size;
         var done = self.cache_ref.read_cached(self.id, buf, offset);
+        if (done == buf.len) return;
+        const physical: usize = @intCast(page_size_value + paged.checksum_size);
+        var stack: [stack_page_bytes]u8 = undefined;
+        const heap = physical > stack.len;
+        const gpa = self.cache_ref.gpa;
+        const page_bytes = if (heap) try gpa.alloc(u8, physical) else stack[0..physical];
+        defer if (heap) gpa.free(page_bytes);
+        assert(page_bytes.len == physical);
         while (done < buf.len) {
             const page, const in_page = self.cache_ref.offset_to_page(offset + done);
             const logical, _ = try paged.read_page_with_checksum(
                 self.blob,
                 page,
                 page_size_value,
-                self.page_scratch,
+                page_bytes,
                 .{},
             );
             // Pages below the tip are full; a shorter one fell back to a partial checksum.
@@ -226,7 +238,6 @@ test "validate_ranges: in bounds, empty, zero-length, overflow, and past the end
         .size = 16,
         .tail_offset = 16,
         .tail = &.{},
-        .page_scratch = &.{},
     };
     try view.validate_ranges(12, &.{ .{ .offset = 0, .len = 4 }, .{ .offset = 4, .len = 8 } });
     try view.validate_ranges(0, &.{});

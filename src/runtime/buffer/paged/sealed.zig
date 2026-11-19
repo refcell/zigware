@@ -37,8 +37,6 @@ pub const Sealed = struct {
     size: u64,
     /// Logical bytes of the partial last page: offsets `[size - partial.len, size)`.
     partial: []u8,
-    /// One physical page for reads.
-    page_scratch: []u8,
 
     /// Build a sealed view of `size` logical bytes whose last `partial.len` bytes are
     /// `partial` (copied). Called by `Writer.seal` and `Writer.snapshot`.
@@ -55,8 +53,6 @@ pub const Sealed = struct {
         assert(partial.len <= size);
         assert((size - partial.len) % cache_ref.page_size == 0);
         const partial_copy = try gpa.dupe(u8, partial);
-        errdefer gpa.free(partial_copy);
-        const page_scratch = try gpa.alloc(u8, cache_ref.page_size + checksum_size);
         return .{
             .gpa = gpa,
             .blob = blob,
@@ -65,7 +61,6 @@ pub const Sealed = struct {
             .id = id,
             .size = size,
             .partial = partial_copy,
-            .page_scratch = page_scratch,
         };
     }
 
@@ -73,7 +68,6 @@ pub const Sealed = struct {
     pub fn deinit(self: *Self) void {
         if (self.owns_blob) self.blob.close();
         self.gpa.free(self.partial);
-        self.gpa.free(self.page_scratch);
         self.* = undefined;
     }
 
@@ -99,7 +93,6 @@ pub const Sealed = struct {
             .size = self.size,
             .tail_offset = self.size - self.partial.len,
             .tail = self.partial,
-            .page_scratch = self.page_scratch,
         };
     }
 

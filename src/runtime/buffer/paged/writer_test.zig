@@ -1732,3 +1732,45 @@ test "a torn shrink keeps the fallback slot validated from storage" {
     try testing.expectEqual(@as(u64, 50), w.size());
     try expect_read(&w, 0, data[0..50]);
 }
+
+/// Reads `rounds` pseudo-random pages of `w`, whose page `p` holds bytes `p`, checking each.
+fn read_pages(w: *W, pages: u64, seed: u64, rounds: usize, failures: *std.atomic.Value(u32)) void {
+    var prng: std.Random.DefaultPrng = .init(seed);
+    var buf: [page_size]u8 = undefined;
+    for (0..rounds) |_| {
+        const page = prng.random().uintLessThan(u64, pages);
+        w.read_into(&buf, page * page_size) catch {
+            _ = failures.fetchAdd(1, .monotonic);
+            continue;
+        };
+        for (buf) |byte| {
+            if (byte != @as(u8, @intCast(page))) {
+                _ = failures.fetchAdd(1, .monotonic);
+                break;
+            }
+        }
+    }
+}
+
+test "readers of one blob on several threads each fetch their own missed pages" {
+    // A one-page cache makes nearly every read miss, so every reader fetches pages from the
+    // blob at once. Readers sharing one page buffer overwrite each other's page mid-check.
+    var h = try Harness.init_cache(1);
+    defer h.deinit();
+    const pages = 64;
+    var data: [pages * page_size]u8 = undefined;
+    for (0..pages) |page| @memset(data[page * page_size ..][0..page_size], @intCast(page));
+    var w = try h.writer("concurrent_readers");
+    defer w.deinit();
+    _ = try w.append(&data);
+    try w.sync();
+    var failures: std.atomic.Value(u32) = .init(0);
+    const rounds = 4_000;
+    var threads: [3]std.Thread = undefined;
+    for (&threads, 1..) |*thread, seed| {
+        thread.* = try std.Thread.spawn(.{}, read_pages, .{ &w, pages, seed, rounds, &failures });
+    }
+    read_pages(&w, pages, 0, rounds, &failures);
+    for (threads) |thread| thread.join();
+    try testing.expectEqual(@as(u32, 0), failures.load(.monotonic));
+}
