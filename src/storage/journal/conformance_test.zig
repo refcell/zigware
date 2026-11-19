@@ -372,6 +372,12 @@ fn skip_large() !void {
     if (builtin.mode == .debug and !build_options.slow_tests) return error.SkipZigTest;
 }
 
+/// The compressed workloads spend about 40 s each in zstd even in ReleaseSafe, so they run only
+/// with -Dslow-tests in every mode (nightly runs ReleaseSafe with it).
+fn skip_compressed() !void {
+    if (!build_options.slow_tests) return error.SkipZigTest;
+}
+
 test "conformance StorageConformance<ContiguousFixedWorkload>" {
     try skip_large();
     try conformance.verify(
@@ -395,7 +401,7 @@ test "conformance StorageConformance<ContiguousVariableWorkload>" {
 }
 
 test "conformance StorageConformance<ContiguousVariableWorkload<true>>" {
-    try skip_large();
+    try skip_compressed();
     try conformance.verify(
         Workload(Variant(contiguous_variable, true)),
         std.testing.allocator,
@@ -428,7 +434,7 @@ test "conformance StorageConformance<SegmentedGlobWorkload>" {
 }
 
 test "conformance StorageConformance<SegmentedGlobWorkload<true>>" {
-    try skip_large();
+    try skip_compressed();
     try conformance.verify(
         Workload(Variant(segmented_glob, true)),
         std.testing.allocator,
@@ -450,7 +456,7 @@ test "conformance StorageConformance<SegmentedVariableWorkload>" {
 }
 
 test "conformance StorageConformance<SegmentedVariableWorkload<true>>" {
-    try skip_large();
+    try skip_compressed();
     try conformance.verify(
         Workload(Variant(segmented_variable_run, true)),
         std.testing.allocator,
@@ -472,7 +478,7 @@ test "conformance StorageConformance<SegmentedOversizedWorkload>" {
 }
 
 test "conformance StorageConformance<SegmentedOversizedWorkload<true>>" {
-    try skip_large();
+    try skip_compressed();
     try conformance.verify(
         Workload(Variant(segmented_oversized, true)),
         std.testing.allocator,

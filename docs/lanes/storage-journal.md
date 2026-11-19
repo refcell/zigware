@@ -363,7 +363,10 @@ resize, sync), `runtime.storage`, with the in-memory backend `runtime.storage.me
 - Storage conformance workloads follow storage-archive's harness (`cache/conformance_test.zig`):
   in-memory storage, `TestRng` seeded with the case seed, and the storage audit committed. The
   six large journal workloads (up to 16k items per case) run in Debug only with
-  `-Dslow-tests`, like other lanes' large conformance tests.
+  `-Dslow-tests`, like other lanes' large conformance tests. The four compressed (`<true>`)
+  workloads run only with `-Dslow-tests` in every mode: zstd makes each take about 40 s even in
+  ReleaseSafe (154 s of CI's test-storage step); nightly's ReleaseSafe `-Dslow-tests` run keeps
+  them covered.
 - Oversized `start_sync` is `sync`, so commonware's dropped-`start_sync`-handle test has no
   counterpart; its sync-failure tests use a test-local partition sync fault (`SyncFault`).
 - metadata `start_sync` is `sync`: a failed started sync fails at the call and consumes the
