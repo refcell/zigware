@@ -113,6 +113,52 @@ storage-journal (thread T-01a1d58d-a981-75c2-966d-93dcd484f46b).
   zigware's `sync` is synchronous, so there are no pending syncs to reorder.
 - Tests that commonware runs at 100,000 and 5,000 items (`slow` group) run at 2,000 and 600.
 
+## Test tally (2026-11-19, clearing lane)
+Commonware's `#[test]`, `#[test_traced]`, and `#[rstest]` functions and `conformance_tests!`
+entries, matched to zigware tests by what they check (zigware folds many into one test).
+
+| module | tests | ported | partial | open | not portable |
+|---|---|---|---|---|---|
+| archive | 93 | 61 | 3 | 14 | 15 |
+| freezer | 33 | 21 | 3 | 9 | 0 |
+| ordinal | 44 | 43 | 1 | 0 | 0 |
+| cache | 14 | 14 | 0 | 0 | 0 |
+| storage `utils.rs` (`bits_for_indices`, in ordinal) | 1 | 0 | 1 | 0 | 0 |
+
+Not portable: archive's 12 pipelined `start_sync` and in-flight sync tests (dropped, see
+Decisions), plus three that need a background marker sync, parked-sync ordering, or partly
+completed syncs (zigware's init and sync are synchronous).
+
+Open:
+- [ ] freezer regressions: `issue_2966_regression` (resize writes no valid epoch-0 slot into
+  empty entries), `issue_2955_regression` (both slots' CRCs corrupt: reopen does not panic).
+- [ ] freezer checkpoints: no checkpoint deletes a partial sync resize, a close-started
+  resize, and a completed resize; an empty checkpoint deletes data; a non-empty checkpoint
+  against an empty table is `CheckpointMismatch` (the check exists, no test reaches it).
+- [ ] freezer corruption: a corrupted committed value fails only its read; a committed value
+  section short by one byte fails init, again on retry.
+- [ ] archive (prunable): below-floor `put_sync` and `put_multi_sync` make earlier buffered
+  writes durable; six kinds of marker damage never mutate either journal; a corrupt floor
+  page is rejected before suffix repair; a torn index tail under a marker; prune clears the
+  marker before section reuse; three put_syncs into three sections reopen; interrupted
+  destroy (prunable) and destroy interrupted inside the journals (81 combinations).
+- [ ] archive (prunable) durability counts: startup publishes the marker without a data
+  resync; markers lag one sync; markers batched per section; an empty sync publishes the
+  final boundary; a reused section restarts its barrier. These count syncs, which
+  `runtime.storage.mocks.Recordings` does not record yet.
+
+Partial:
+- [ ] archive `many_keys_{prunable,immutable}_large`: 1,000 keys (one 1,024-item section)
+  where commonware runs 50,000 (and Decisions say 2,000), so several sections are never
+  exercised. Immutable interrupted destroy: zigware's `crash()` drops unsynced data, so
+  uncommitted bytes on disk during recovery are never tested.
+- [ ] freezer: `recovery_zeroes_torn_table_slot` (only the recovery fuzz covers torn slots;
+  the slot is not checked durably zeroed), `checkpoint_rewinds_completed_resize` (no resize
+  involved), short-table mismatch (no retry or unchanged-length check). Determinism runs 300
+  keys, not 1,000.
+- [ ] ordinal `init_clears_unmarked_records`: does not check that recovery issues one sync.
+- [ ] `bits_for_indices` has no direct test (utils.rs `test_bits_for_indices`).
+
 ## Log
 - 2026-11-13: cache with its ported tests, crash recovery, both conformance hashes, and the
   `cache_operations` fuzz target.
@@ -128,3 +174,4 @@ storage-journal (thread T-01a1d58d-a981-75c2-966d-93dcd484f46b).
   `archive_immutable_recovery` fuzz target. Backlog complete.
 - 2026-11-16: recovery fuzzers moved to faulty storage (torn writes and failed syncs) with
   commonware's faulted recovery chain; added the `freezer_recovery` fuzz target.
+- 2026-11-19: test tally of archive, freezer, ordinal, and cache against commonware (clearing lane).

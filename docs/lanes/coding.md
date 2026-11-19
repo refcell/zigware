@@ -96,6 +96,13 @@ hashers (on main).
 - [x] formatting (encode, decode, display) and codec (`codec::lazy::get`) benches, taken over
   from the closed codec lane.
 
+## bmt test tally (2026-11-19, clearing lane)
+Commonware's bmt has 66 tests (62 `#[test]`, 2 `#[rstest]`, 2 conformance entries): 64 ported
+and 2 not portable (`range_proof_iterator_length` and
+`multi_proof_stops_reading_at_first_invalid_position` read iterators; zigware takes slices).
+None open. One sub-case could still be added: a multi-proof forged with leaf count
+`maxInt(u32)` and an element at that position returns `InvalidPosition(maxInt)`.
+
 ## Log
 - 2026-11-13: reed_solomon engines, rates, wrappers, results, plans, and test vectors.
 - 2026-11-13: reed_solomon differential fuzzing (engine and rate plans, field oracle).
@@ -105,3 +112,4 @@ hashers (on main).
 - 2026-11-13: reed_solomon Simd engine (AVX2 nibble-shuffle kernel), now the default.
 - 2026-11-13: benches for coding, bmt, reed_solomon, formatting, and codec.
 - 2026-11-13: reed_solomon NEON kernel for `Simd` on aarch64.
+- 2026-11-19: bmt test tally against commonware (clearing lane): none open.

@@ -69,6 +69,33 @@ variants need `runtime` storage; do them after its interface lands.
   storage-journal).
 - [ ] Partitioned index `new_range`/`install_range`, if storage-qmdb asks for it.
 
+## Test tally (2026-11-19, clearing lane)
+Commonware's `#[test]` functions matched to zigware tests by what they check.
+
+| module | tests | ported | partial | open | not portable |
+|---|---|---|---|---|---|
+| index | 172 | 108 | 7 | 7 | 50 |
+| rmap | 39 | 38 | 0 | 0 | 1 |
+| bitmap | 15 | 11 | 0 | 0 | 4 |
+| translator | 18 | 15 | 2 | 0 | 1 |
+
+Not portable: 36 `should_panic` tests (zig tests cannot catch panics; each panic exists),
+index's spill tests (one tree, no spill threshold, see Decisions), `cursor_across_threads`,
+and the metrics-registry range test.
+
+Open (index):
+- [ ] Need `new_range`/`install_range` (backlog): `range_for_each_value_visits_all_values_once`
+  and `install_range_nonzero_offset` for both partitioned indices, and
+  `worker_prunes_count_live`.
+- [ ] Partitioned ordered: `get_mut_or_insert` (spill parts aside), `get_many` matches `get`.
+
+Partial:
+- [ ] index: `cursor_insert_with_next` on the last value (3 indices), deleting the middle of
+  three then `next()` twice null (2), partitioned ordered insertion order through the cursor,
+  `retain`, and `get_many`.
+- [ ] translator: `identity_hasher_integer_writes_differ` (0 against 1 at u16/u32/u64),
+  `hashed_all_cap_sizes` (EightCap).
+
 ## Log
 - translator: Rust's `Translator`/`BuildHasher` traits become a comptime interface
   (`Key`, `ordered`, `transform`, `hash`, `order`, `eql`; `translator.check`). `Hashed`
@@ -369,3 +396,4 @@ variants need `runtime` storage; do them after its interface lands.
     (`Mode.exact`); the faster encoder stays as `Mode.compress` for comparison, and the round
     trip fuzz and benches cover all three modes. The four `<true>` journal conformance
     workloads are not wired yet; storage-journal owns `journal/conformance_test.zig`.
+- 2026-11-19: test tally of index, rmap, bitmap, and translator against commonware (clearing lane).

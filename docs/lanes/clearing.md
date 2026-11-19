@@ -177,6 +177,15 @@ qmdb `current` (balances, over the MMB) and `keyless` (payout log, over the MMR)
     measured runs (as commonware's tokio benches use the disk) and in-memory storage on smoke
     inputs. The archive and freezer `mode=concurrent` reads run one after another, since
     zigware's stores are not shared between tasks.
+- Storage test audit (assigned after the benches): tally commonware's tests for archive,
+  freezer, ordinal, cache, index, rmap, bitmap, translator, utils, and bmt against zigware,
+  written into the owning lane files (storage-archive, storage-merkle, coding), then port the
+  open ones in batches with a planted bug each.
+  - [x] Tally: 495 tests, 375 ported, 17 partial, 30 open, 73 not portable.
+  - [ ] Freezer's 9 open tests.
+  - [ ] Archive's open tests (prunable markers and destroy; the sync-count tests need a sync
+    count in `runtime.storage.mocks.Recordings`).
+  - [ ] Partials and index's open tests that do not need `new_range`.
 
 ## Log
 - 2026-11-16: namespace, amounts, lookup with their tests; Amounts and Lookup conformance
@@ -220,3 +229,4 @@ qmdb `current` (balances, over the MMB) and `keyless` (payout log, over the MMR)
 - 2026-11-19: storage merkle, archive, and freezer benches; the storage bench backlog is done.
 - 2026-11-19: trimmed the storage benches' per-push smoke runs to about 3 s; the full list
   runs under `-Dslow-tests`.
+- 2026-11-19: storage test audit: tallies in storage-archive.md, storage-merkle.md, coding.md.
