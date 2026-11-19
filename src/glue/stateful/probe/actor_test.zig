@@ -268,3 +268,31 @@ test "stateful probe actor: discovers a floor, then serves peers" {
     try task.await(io);
     joined = true;
 }
+
+test "stateful probe actor: a canceled probe returns error.Canceled" {
+    // Swallowing the cancel would leave the caller's next wait unwakeable (AGENTS.md).
+    var rng = utils.rng.test_rng();
+    var fixture = try ed25519.fixture(Digest, gpa, &rng, "_COMMONWARE_GLUE_PROBE_TEST", 4);
+    defer fixture.deinit(gpa);
+    var sent_log: Sender.Log = .{};
+    defer Sender.free(&sent_log);
+    var block_log: Blocker.Log = .{};
+    defer block_log.blocked.deinit(gpa);
+    var network = try mpsc.channel(NetMessage, gpa, io, 16);
+    defer network.sender.deinit();
+    const created = try Probe.init(gpa, io, .{
+        .provider = .init(&fixture.verifier),
+        .blocker = .{ .log = &block_log },
+        .mailbox_size = 4,
+        .minimum_epoch = .zero(),
+        .retry_timeout_ns = 50 * std.time.ns_per_ms,
+    }, .{ .log = &sent_log }, .{ .receiver = network.receiver });
+    defer created.probe.deinit();
+    var mailbox = created.mailbox;
+    defer mailbox.deinit();
+    var verify_rng = utils.rng.test_rng();
+    var task = try io.concurrent(Runner.run, .{ created.probe, &verify_rng });
+    // Discovery waits for a subscriber; cancel it there.
+    try io.sleep(.fromMilliseconds(20), .awake);
+    try testing.expectError(error.Canceled, task.cancel(io));
+}

@@ -30,6 +30,7 @@ const discovery_mod = @import("discovery.zig");
 const wire = @import("wire.zig");
 
 const oneshot = utils.channel.oneshot;
+const log = std.log.scoped(.dkg_probe);
 const inbox_mod = consensus.simplex.actors.inbox;
 const Epoch = consensus.Epoch;
 const Height = consensus.Height;
@@ -215,7 +216,8 @@ pub fn Probe(comptime P: type) type {
         }
 
         /// Runs discovery, then service, until the network receiver closes, the mailbox closes
-        /// or the snapshot cannot be activated during discovery, or the task is canceled.
+        /// or the snapshot cannot be activated during discovery (logged as a warning); fails
+        /// with `error.Canceled` when the task is canceled.
         /// `rng` and `strategy` verify certificates; `strategy` also decodes blocks.
         pub fn run(self: *Self, rng: anytype, strategy: anytype) !void {
             self.inbox.init(self.io);
@@ -224,17 +226,14 @@ pub fn Probe(comptime P: type) type {
             try self.inbox.forward(.network, &self.net_receiver);
             // A probe stopped during discovery closes its pending subscriptions, as dropping
             // commonware's actor does.
+            // A cancel propagates, so the caller's next wait still sees it (AGENTS.md).
             const discovered = self.discover(rng, strategy) catch |err| {
                 self.discovery.drop_subscribers();
-                if (err == error.Canceled) return;
                 return err;
             };
             if (!discovered) return self.discovery.drop_subscribers();
             assert(self.source != null);
-            self.serve() catch |err| switch (err) {
-                error.Canceled => return,
-                else => return err,
-            };
+            try self.serve();
         }
 
         fn now_ns(self: *const Self) i96 {
@@ -266,7 +265,14 @@ pub fn Probe(comptime P: type) type {
                             ) catch |err| {
                                 // Drops every pending subscriber when the probe is freed. A
                                 // manager whose `track` cannot fail never infers the error.
-                                if (@as(anyerror, err) == error.BootstrapActivation) return false;
+                                if (@as(anyerror, err) == error.BootstrapActivation) {
+                                    log.warn(
+                                        "failed to activate bootstrap peer set, " ++
+                                            "shutting down (epoch {d})",
+                                        .{self.discovery.bootstrap.epoch.get()},
+                                    );
+                                    return false;
+                                }
                                 return err;
                             },
                             .attach => |source| self.attach(source),

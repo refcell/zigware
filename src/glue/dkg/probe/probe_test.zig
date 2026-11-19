@@ -984,3 +984,20 @@ test "dkg probe: a failed activation stops the probe and drops the subscriber" {
         }
     }.body);
 }
+
+test "dkg probe: a canceled probe returns error.Canceled" {
+    // Swallowing the cancel would leave the caller's next wait unwakeable (AGENTS.md).
+    try run(struct {
+        fn body(io: Io) anyerror!void {
+            var h: Harness = undefined;
+            try h.init(io, .{});
+            defer h.deinit();
+            // The source probe serves; the joiner waits in discovery for a subscriber.
+            try h.sleep_ms(50);
+            for (&h.tasks) |*task| {
+                try testing.expectError(error.Canceled, task.*.?.cancel(io));
+                task.* = null;
+            }
+        }
+    }.body);
+}

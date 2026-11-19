@@ -224,24 +224,18 @@ pub fn Probe(comptime P: type) type {
             gpa.destroy(self);
         }
 
-        /// Runs discovery, then service, until the network receiver closes, the mailbox
-        /// closes during discovery, or the task is canceled. `rng` and `strategy` verify
-        /// certificates.
+        /// Runs discovery, then service, until the network receiver closes or the mailbox
+        /// closes during discovery; fails with `error.Canceled` when the task is canceled.
+        /// `rng` and `strategy` verify certificates.
         pub fn run(self: *Self, rng: anytype, strategy: anytype) !void {
             self.inbox.init(self.io);
             defer self.inbox.shutdown();
             try self.inbox.forward(.mailbox, &self.mailbox);
             try self.inbox.forward(.network, &self.net_receiver);
-            const discovered = self.discover(rng, strategy) catch |err| switch (err) {
-                error.Canceled => return,
-                else => return err,
-            };
-            if (!discovered) return;
+            // A cancel propagates, so the caller's next wait still sees it (AGENTS.md).
+            if (!try self.discover(rng, strategy)) return;
             assert(self.source != null);
-            self.serve() catch |err| switch (err) {
-                error.Canceled => return,
-                else => return err,
-            };
+            try self.serve();
         }
 
         fn now_ns(self: *const Self) i96 {
