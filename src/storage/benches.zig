@@ -10,5 +10,6 @@ pub fn run(runner: *bench.Runner) !void {
     try @import("merkle/benches.zig").run(runner);
     try @import("journal/zstd_benches.zig").run(runner);
     try @import("journal/benches.zig").run(runner);
+    try @import("metadata/benches.zig").run(runner);
     try @import("qmdb/benches/mod.zig").run(runner);
 }

@@ -112,7 +112,8 @@ resize, sync), `runtime.storage`, with the in-memory backend `runtime.storage.me
 - [x] Metrics: the blob and section managers (`tracked`, `synced`, `pruned`).
 - [x] Benches: the 12 journal benches (`storage/src/journal/benches`, bench `journal`) under
   `src/storage/journal/benches/`, with commonware's names (`journal::<module>/...`).
-- [ ] Benches: metadata (`overwrite`, `restart`, `sync`).
+- [x] Benches: metadata (`metadata::overwrite`, `restart`, `sync`) under
+  `src/storage/metadata/benches/`.
 - [ ] Benches: runtime buffer (`buffer_paged::append`, `read`, `sync`) in
   `src/runtime/benches.zig`.
 - Handed to storage-merkle (2026-11-16): `src/storage/journal/zstd.zig`'s real compressor and
@@ -419,3 +420,4 @@ resize, sync), `runtime.storage`, with the in-memory backend `runtime.storage.me
   does (reported through marshal: it kept destroying the other journals, which re-parked
   after a cancellation).
 - 2026-11-19: ported the 12 journal benches (`src/storage/journal/benches/`).
+- 2026-11-19: ported the metadata benches (`src/storage/metadata/benches/`).
