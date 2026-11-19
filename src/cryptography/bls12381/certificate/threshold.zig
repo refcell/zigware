@@ -520,4 +520,5 @@ pub fn fixture(
 
 test {
     _ = @import("threshold_tests.zig");
+    _ = @import("optimistic_tests.zig");
 }

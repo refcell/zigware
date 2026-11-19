@@ -227,7 +227,7 @@ Open:
   at 1 and 10 points (random, identity point, zero scalar, all-zero scalars/points, single) but not
   G2 empty input or the 50,000-point G2 case (large-window path); add both to group_tests.zig (big
   case behind -Dslow-tests)
-- [ ] `bls12381/primitives/ops/batch.rs` `test_rejects_malleability`: batch::verify_same_signer
+- [x] `bls12381/primitives/ops/batch.rs` `test_rejects_malleability`: batch::verify_same_signer
   malleability: for MinPk and MinSig sign two messages with one key, forge sig1-delta and
   sig2+delta, check each fails verify_message, the aggregates are equal and naive aggregate verify
   over hm1+hm2 accepts, then batch.verify_same_signer rejects the forged entries and accepts the

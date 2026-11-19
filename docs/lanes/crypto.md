@@ -300,7 +300,7 @@ ported, 27 open, 14 not portable.
 | `zk/bulletproofs/ipa.rs` | 3 | 3 | 0 | 0 |
 
 Open:
-- [ ] `certificate.rs` `test_threshold_recovers_exact_certificate_with_verified_attestations`:
+- [x] `certificate.rs` `test_threshold_recovers_exact_certificate_with_verified_attestations`:
   Threshold (MinPk and MinSig) optimistic_assemble with 1 prior verified + quorum-1 pending returns
   a certificate equal to a direct assemble, makes zero attestation verifications (Recording
   wrapper), verifies under SUBJECT but not OTHER_SUBJECT, and with an extra unused bad vote beyond
@@ -308,51 +308,51 @@ Open:
   certificate: optimistic assembly" only checks pending-only success and a 1-invalid fallback
   (MinSig only). Add to src/cryptography/bls12381/certificate/threshold_tests.zig (needs a
   call-recording scheme wrapper)
-- [ ] `certificate.rs` `test_multisig_optimistic_assemble_uses_one_certificate_check`: Multisig
+- [x] `certificate.rs` `test_multisig_optimistic_assemble_uses_one_certificate_check`: Multisig
   (MinPk and MinSig, PoP-checked keys) optimistic_assemble with 1 prior + pending quorum certifies
   with exactly one verify_certificate call and zero attestation verifications, and the certificate
   rejects OTHER_SUBJECT. Zig "multisig: optimistic assembly" has no prior inputs, no call counting,
   MinSig only. Add to src/cryptography/bls12381/certificate/multisig_tests.zig with a recording
   wrapper
-- [ ] `certificate.rs` `test_rejected_certificate_verifies_pending_halves_directly`: Generic
+- [x] `certificate.rs` `test_rejected_certificate_verifies_pending_halves_directly`: Generic
   optimistic_assemble over threshold MinPk for n in {1,5,7} with a quorum of OTHER_SUBJECT votes:
   verified empty, invalid = all pending signers, and attestation verification calls are exactly the
   two halves (or one batch when quorum is 1). Zig "certificate generic optimistic assemble falls
   back to verifying halves" (ed25519, n=7, 2 bad) checks invalid/verified but not the all-invalid
   case, the n=1 path, or the half-split call pattern. Add to src/cryptography/certificate_test.zig
   or src/cryptography/bls12381/certificate/threshold_tests.zig with a recording wrapper
-- [ ] `certificate.rs` `test_malformed_assembly_falls_back_to_pending_halves`: Generic
+- [x] `certificate.rs` `test_malformed_assembly_falls_back_to_pending_halves`: Generic
   optimistic_assemble over threshold MinPk where pending[0] has an undecodable signature (assembly
   fails with MalformedSignature): for count quorum and n, verified = count-1, invalid = [0], calls =
   halves, and with count>quorum the survivors assemble and verify. No Zig test feeds a malformed
   signature to optimistic_assemble. Add to src/cryptography/bls12381/certificate/threshold_tests.zig
   (0xff Deferred bytes as in the assemble-rejects test)
-- [ ] `certificate.rs` `test_optimistic_assemble_retains_verified_inputs`: Generic
+- [x] `certificate.rs` `test_optimistic_assemble_retains_verified_inputs`: Generic
   optimistic_assemble (threshold MinPk) with 2 prior verified + pending [accepted, rejected]:
   verified == [accepted] only (prior not echoed), invalid == [rejected], calls
   [[accepted],[rejected]]; then a verified replacement plus prior assembles a valid certificate. Zig
   secp256r1 "optimistic assemble verifies pending once" covers a similar flow only for secp256r1 own
   override, not the generic path or call pattern. Add to
   src/cryptography/bls12381/certificate/threshold_tests.zig or src/cryptography/certificate_test.zig
-- [ ] `certificate.rs` `test_optimistic_assemble_with_verified_votes`: Generic optimistic_assemble
+- [x] `certificate.rs` `test_optimistic_assemble_with_verified_votes`: Generic optimistic_assemble
   (threshold MinPk) with pending_len 0/1/2 over a verified prior: certifies with exactly one
   assemble, one verify_certificate only when pending is non-empty (zero for verified-only), and zero
   attestation verifications. Zig ed25519 "optimistic assemble reuses verified attestations" and
   secp256r1 "verifies pending once" test the analogous property for their own schemes only. Add to
   src/cryptography/bls12381/certificate/threshold_tests.zig with a recording wrapper
-- [ ] `certificate.rs` `test_optimistic_assemble_retries_with_replacements`: Threshold MinPk, n=10,
+- [x] `certificate.rs` `test_optimistic_assemble_retries_with_replacements`: Threshold MinPk, n=10,
   failures 1 and 2: a failed quorum keeps local and valid peer votes, a second round with a new
   faulty signer mixed with honest replacements reports exactly that signer with one assemble, one
   certificate check, and per-signer attestation calls, and a final honest replacement certifies (and
   rejects OTHER_SUBJECT). No Zig counterpart. Add to
   src/cryptography/bls12381/certificate/threshold_tests.zig with a recording wrapper
-- [ ] `certificate.rs` `test_optimistic_assemble_below_quorum`: Generic optimistic_assemble
+- [x] `certificate.rs` `test_optimistic_assemble_below_quorum`: Generic optimistic_assemble
   (threshold MinPk) with 2 valid pending below quorum: verified == pending, invalid empty, and
   attestation calls are the two halves. Zig "certificate optimistic assemble requires a quorum"
   checks the verified/invalid outcome for ed25519 own optimistic_assemble but not the generic path
   nor the half-split call pattern. Add to src/cryptography/bls12381/certificate/threshold_tests.zig
   or src/cryptography/certificate_test.zig
-- [ ] `certificate.rs` `test_optimistic_assemble_unknown_pending_signer`: Generic
+- [x] `certificate.rs` `test_optimistic_assemble_unknown_pending_signer`: Generic
   optimistic_assemble (threshold MinPk) with pending[0].signer = 999 (assembly fails UnknownSigner):
   verified quorum-1, invalid [999], attestation calls [[999,1],[2,3]]. No Zig counterpart. Add to
   src/cryptography/bls12381/certificate/threshold_tests.zig or src/cryptography/certificate_test.zig

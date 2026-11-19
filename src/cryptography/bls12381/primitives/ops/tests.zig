@@ -505,3 +505,44 @@ test "batch: same message detects an identity signature" {
         try testing.expectEqualSlices(usize, &.{0}, found);
     }
 }
+
+test "ops: verify_same_signer rejects offsets that cancel in the aggregate" {
+    // commonware batch.rs `test_rejects_malleability`.
+    inline for (.{ MinPk, MinSig }) |V| {
+        var rng = utils.test_rng();
+        const keys = ops.keypair(V, &rng);
+        const sig1 = ops.sign_message(V, keys.private, "test", "message 1");
+        const sig2 = ops.sign_message(V, keys.private, "test", "message 2");
+        try ops.verify_message(V, keys.public, "test", "message 1", sig1);
+        try ops.verify_message(V, keys.public, "test", "message 2", sig2);
+        const delta = V.Signature.generator.mul(Scalar.random(&rng));
+        const forged1 = sig1.sub(delta);
+        const forged2 = sig2.add(delta);
+        const failure = error.InvalidSignature;
+        const forged1_alone = ops.verify_message(V, keys.public, "test", "message 1", forged1);
+        try testing.expectError(failure, forged1_alone);
+        const forged2_alone = ops.verify_message(V, keys.public, "test", "message 2", forged2);
+        try testing.expectError(failure, forged2_alone);
+        // The aggregates are equal, so naive aggregate verification accepts the forgeries.
+        const forged_aggregate = aggregate.combine_signatures(V, &.{ forged1, forged2 });
+        const valid_aggregate = aggregate.combine_signatures(V, &.{ sig1, sig2 });
+        try testing.expect(forged_aggregate.eql(valid_aggregate));
+        const hm1 = ops.hash_with_namespace(V, V.message, "test", "message 1");
+        const hm2 = ops.hash_with_namespace(V, V.message, "test", "message 2");
+        try V.verify(keys.public, hm1.add(hm2), forged_aggregate.value);
+        // Randomly weighted batch verification does not.
+        const Entry = batch.SignerEntry(V);
+        const forged = [_]Entry{
+            .{ .namespace = "test", .message = "message 1", .signature = forged1 },
+            .{ .namespace = "test", .message = "message 2", .signature = forged2 },
+        };
+        const strategy = parallel.sequential;
+        const forged_result = batch.verify_same_signer(V, &rng, keys.public, &forged, strategy);
+        try testing.expectError(failure, forged_result);
+        const valid = [_]Entry{
+            .{ .namespace = "test", .message = "message 1", .signature = sig1 },
+            .{ .namespace = "test", .message = "message 2", .signature = sig2 },
+        };
+        try batch.verify_same_signer(V, &rng, keys.public, &valid, strategy);
+    }
+}
