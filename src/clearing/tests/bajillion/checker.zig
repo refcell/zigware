@@ -7,9 +7,12 @@
 //! property that fails and returns the actions that lead there from an initial state. The
 //! number of unique states is bounded by `Options.max_states`.
 //!
-//! As Stateright's `threads(n)`, `Options.workers` explore at once: they share one stack, the
-//! visited set, and the node list behind a mutex, and expand states (actions, next states, and
-//! properties) outside it, so the model must be safe to call from several threads. Unique
+//! As Stateright's `threads(n)`, `Options.workers` explore at once, and the model must be safe
+//! to call from several threads. Each worker explores depth first on a stack of its own and
+//! hands half of it to a shared stack while another worker waits; the visited set is split
+//! into shards by fingerprint, each behind its own lock, and records how each state was first
+//! reached. Without the split, one lock taken several times per transition held a
+//! 32-worker check to a few cores (as Stateright's job market and sharded map avoid). Unique
 //! states, transitions, and the flows a model records do not depend on the worker count;
 //! `max_depth` and which violation is reported first may.
 
@@ -76,24 +79,38 @@ pub fn Checker(comptime M: type) type {
             }
         };
 
-        /// How a unique state was first reached: its parent node and the action taken there.
-        const Node = struct { parent: ?u32, action: ?Action, depth: u64 };
-        /// A state waiting on the stack to have its actions explored.
-        const Entry = struct { state: State, node: u32 };
+        /// How a unique state was first reached: its parent's fingerprint and the action taken
+        /// there.
+        const Node = struct { parent: ?u64, action: ?Action, depth: u64 };
+        /// A state waiting to have its actions explored.
+        const Entry = struct { state: State, fingerprint: u64, depth: u64 };
+        const Stack = std.ArrayList(Entry);
+        /// The visited set is split by fingerprint, so workers recording states rarely wait on
+        /// one another (as Stateright's sharded map).
+        const shard_count = 64;
+        const Shard = struct {
+            mutex: std.Io.Mutex = .init,
+            nodes: std.AutoHashMapUnmanaged(u64, Node) = .empty,
+        };
 
         gpa: Allocator,
         model: *M,
         options: Options,
-        visited: std.AutoHashMapUnmanaged(u64, void) = .empty,
-        nodes: std.ArrayList(Node) = .empty,
-        stack: std.ArrayList(Entry) = .empty,
-        transitions: u64 = 0,
-        max_depth: u64 = 0,
-        /// Guards every field above it but `gpa`, `model`, and `options`, and the three below.
+        shards: [shard_count]Shard = @splat(.{}),
+        unique: std.atomic.Value(u64) = .init(0),
+        transitions: std.atomic.Value(u64) = .init(0),
+        max_depth: std.atomic.Value(u64) = .init(0),
+        /// Set once a violation or an error ends the check.
+        stopped: std.atomic.Value(bool) = .init(false),
+        /// Workers waiting for shared states; a worker with spare states shares while nonzero.
+        waiting: std.atomic.Value(u32) = .init(0),
+        /// Guards the four fields below it.
         mutex: std.Io.Mutex = .init,
-        /// Signalled when the stack grows or the check ends.
+        /// Signalled when states are shared or the check ends.
         changed: std.Io.Condition = .init,
-        /// Workers expanding a popped state.
+        /// The initial states, and states workers shared.
+        stack: Stack = .empty,
+        /// Workers exploring states they took (each from its own stack).
         active: u32 = 0,
         /// The first violation found, which ends the check.
         violation: ?Violation = null,
@@ -108,29 +125,30 @@ pub fn Checker(comptime M: type) type {
             var self: Self = .{ .gpa = gpa, .model = model, .options = options };
             defer self.deinit();
             try self.seed();
-            if (self.violation == null) try self.explore();
+            if (!self.stopped.load(.monotonic)) self.explore();
             if (self.failure) |err| {
                 if (self.violation) |v| gpa.free(v.path);
                 return err;
             }
             const result: Result = .{
-                .unique = self.nodes.items.len,
-                .transitions = self.transitions,
-                .max_depth = self.max_depth,
+                .unique = self.unique.load(.monotonic),
+                .transitions = self.transitions.load(.monotonic),
+                .max_depth = self.max_depth.load(.monotonic),
                 .violation = self.violation,
             };
-            assert(result.unique == self.visited.count());
+            var recorded: u64 = 0;
+            for (&self.shards) |*shard| recorded += shard.nodes.count();
+            assert(result.unique == recorded);
             return result;
         }
 
         fn deinit(self: *Self) void {
             for (self.stack.items) |*entry| entry.state.deinit(self.gpa);
             self.stack.deinit(self.gpa);
-            self.nodes.deinit(self.gpa);
-            self.visited.deinit(self.gpa);
+            for (&self.shards) |*shard| shard.nodes.deinit(self.gpa);
         }
 
-        /// Discovers the initial states, on the caller's thread.
+        /// Discovers the initial states onto the shared stack, on the caller's thread.
         fn seed(self: *Self) !void {
             const initial = try M.init_states(self.model, self.gpa);
             defer self.gpa.free(initial);
@@ -139,13 +157,13 @@ pub fn Checker(comptime M: type) type {
             for (initial) |*state| {
                 const owned = state.*;
                 taken += 1;
-                self.discover(owned, null, null);
-                if (self.ended()) return;
+                self.discover(owned, null, null, &self.stack);
+                if (self.stopped.load(.monotonic)) return;
             }
         }
 
-        /// Runs `options.workers` workers until the stack drains or the check ends.
-        fn explore(self: *Self) !void {
+        /// Runs `options.workers` workers until every state is explored or the check ends.
+        fn explore(self: *Self) void {
             const extra = self.options.workers - 1;
             var futures: [max_workers - 1]std.Io.Future(void) = undefined;
             var started: usize = 0;
@@ -159,92 +177,134 @@ pub fn Checker(comptime M: type) type {
             self.work();
         }
 
-        fn lock(self: *Self) void {
-            if (self.options.io) |io| self.mutex.lockUncancelable(io);
+        fn lock(self: *Self, mutex: *std.Io.Mutex) void {
+            if (self.options.io) |io| mutex.lockUncancelable(io);
         }
 
-        fn unlock(self: *Self) void {
-            if (self.options.io) |io| self.mutex.unlock(io);
-        }
-
-        /// Whether a violation or an error ended the check (the lock held, or one worker).
-        fn ended(self: *const Self) bool {
-            return self.violation != null or self.failure != null;
+        fn unlock(self: *Self, mutex: *std.Io.Mutex) void {
+            if (self.options.io) |io| mutex.unlock(io);
         }
 
         /// Records `err` as the check's failure unless one is recorded, and wakes the workers.
         fn fail(self: *Self, err: anyerror) void {
-            self.lock();
-            defer self.unlock();
+            self.lock(&self.mutex);
+            defer self.unlock(&self.mutex);
             if (self.failure == null) self.failure = err;
-            self.wake();
+            self.stop();
         }
 
-        fn wake(self: *Self) void {
+        /// Ends the check (the lock held).
+        fn stop(self: *Self) void {
+            self.stopped.store(true, .monotonic);
             if (self.options.io) |io| self.changed.broadcast(io);
         }
 
-        /// Pops states and expands them until the stack is empty with no worker expanding, or
-        /// the check ends.
+        /// Takes shared states and explores each one's descendants depth first on a stack of
+        /// its own, until no worker holds states or the check ends.
         fn work(self: *Self) void {
             var actions: std.ArrayList(Action) = .empty;
             defer actions.deinit(self.gpa);
-            while (self.take()) |popped| {
-                var entry = popped;
-                defer entry.state.deinit(self.gpa);
-                self.expand(&entry, &actions) catch |err| self.fail(err);
-                self.lock();
+            var local: Stack = .empty;
+            defer local.deinit(self.gpa);
+            while (self.take()) |taken| {
+                self.drain(taken, &local, &actions);
+                assert(local.items.len == 0);
+                self.lock(&self.mutex);
+                defer self.unlock(&self.mutex);
                 assert(self.active > 0);
                 self.active -= 1;
-                if (self.stack.items.len == 0 and self.active == 0) self.wake();
-                self.unlock();
+                const idle = self.stack.items.len == 0 and self.active == 0;
+                if (idle) if (self.options.io) |io| self.changed.broadcast(io);
             }
         }
 
-        /// The next state to expand (counted active), or null once the check is over.
+        /// Explores `first` and every state it leads to through `local`; once the check ends,
+        /// frees the states left instead.
+        fn drain(self: *Self, first: Entry, local: *Stack, actions: *std.ArrayList(Action)) void {
+            var next: ?Entry = first;
+            while (next) |popped| {
+                var entry = popped;
+                defer entry.state.deinit(self.gpa);
+                if (!self.stopped.load(.monotonic)) {
+                    self.expand(&entry, actions, local) catch |err| self.fail(err);
+                    self.share(local);
+                }
+                next = local.pop();
+            }
+        }
+
+        /// The next shared state (counted active), or null once the check is over.
         fn take(self: *Self) ?Entry {
-            self.lock();
-            defer self.unlock();
+            self.lock(&self.mutex);
+            defer self.unlock(&self.mutex);
             while (true) {
-                if (self.ended()) return null;
+                if (self.stopped.load(.monotonic)) return null;
                 if (self.stack.pop()) |entry| {
                     self.active += 1;
                     return entry;
                 }
                 if (self.active == 0) return null;
                 // Only a multi-worker check waits: one worker never sees others active.
+                _ = self.waiting.fetchAdd(1, .monotonic);
+                defer _ = self.waiting.fetchSub(1, .monotonic);
                 self.changed.waitUncancelable(self.options.io.?, &self.mutex);
             }
         }
 
-        /// Applies every enabled action of `entry`'s state, discovering the next states.
-        fn expand(self: *Self, entry: *const Entry, actions: *std.ArrayList(Action)) !void {
+        /// Moves the older half of `local` to the shared stack while a worker waits for states.
+        fn share(self: *Self, local: *Stack) void {
+            if (self.waiting.load(.monotonic) == 0 or local.items.len < 2) return;
+            self.lock(&self.mutex);
+            defer self.unlock(&self.mutex);
+            const half = local.items.len / 2;
+            // Out of memory, the states stay on `local`, which explores them.
+            self.stack.appendSlice(self.gpa, local.items[0..half]) catch return;
+            local.replaceRangeAssumeCapacity(0, half, &.{});
+            assert(local.items.len > 0);
+            if (self.options.io) |io| self.changed.broadcast(io);
+        }
+
+        /// Applies every enabled action of `entry`'s state, discovering the next states onto
+        /// `local`.
+        fn expand(
+            self: *Self,
+            entry: *const Entry,
+            actions: *std.ArrayList(Action),
+            local: *Stack,
+        ) !void {
             actions.clearRetainingCapacity();
             try M.actions(self.model, self.gpa, &entry.state, actions);
             var generated: u64 = 0;
-            defer {
-                self.lock();
-                self.transitions += generated;
-                self.unlock();
-            }
+            defer _ = self.transitions.fetchAdd(generated, .monotonic);
             for (actions.items) |action| {
                 const next = try M.next_state(self.model, &entry.state, action) orelse continue;
                 generated += 1;
-                self.discover(next, entry.node, action);
+                self.discover(next, entry, action, local);
             }
         }
 
-        /// Records `state` (taken) if it is new, checks the properties in it, and pushes it.
-        /// A violation or an error ends the check.
-        fn discover(self: *Self, state: State, parent: ?u32, action: ?Action) void {
+        /// Records `state` (taken) if it is new, checks the properties in it, and pushes it on
+        /// `out`. A violation or an error ends the check.
+        fn discover(
+            self: *Self,
+            state: State,
+            parent: ?*const Entry,
+            action: ?Action,
+            out: *Stack,
+        ) void {
             var owned = state;
-            const node = self.record(&owned, parent, action) catch |err| {
+            const fingerprint = M.fingerprint(self.model, &owned);
+            const depth = if (parent) |p| p.depth + 1 else 0;
+            const node: Node = .{
+                .parent = if (parent) |p| p.fingerprint else null,
+                .action = action,
+                .depth = depth,
+            };
+            const fresh = self.record(fingerprint, node) catch |err| {
                 owned.deinit(self.gpa);
                 return self.fail(err);
-            } orelse {
-                owned.deinit(self.gpa);
-                return;
             };
+            if (!fresh) return owned.deinit(self.gpa);
             for (M.properties) |property| {
                 const holds = property.holds(self.model, &owned) catch |err| {
                     owned.deinit(self.gpa);
@@ -252,67 +312,67 @@ pub fn Checker(comptime M: type) type {
                 };
                 if (holds) continue;
                 owned.deinit(self.gpa);
-                return self.violate(property.name, node);
+                return self.violate(property.name, fingerprint);
             }
-            self.lock();
-            defer self.unlock();
-            self.stack.append(self.gpa, .{ .state = owned, .node = node }) catch |err| {
+            const entry: Entry = .{ .state = owned, .fingerprint = fingerprint, .depth = depth };
+            out.append(self.gpa, entry) catch |err| {
                 owned.deinit(self.gpa);
-                if (self.failure == null) self.failure = err;
-                return self.wake();
+                return self.fail(err);
             };
-            if (self.options.io) |io| self.changed.signal(io);
         }
 
-        /// Adds a node for `state` if its fingerprint is new, returning its index.
-        fn record(self: *Self, state: *const State, parent: ?u32, action: ?Action) !?u32 {
-            const fingerprint = M.fingerprint(self.model, state);
-            self.lock();
-            defer self.unlock();
-            if (self.ended()) return null;
-            const seen = try self.visited.getOrPut(self.gpa, fingerprint);
-            if (seen.found_existing) return null;
-            if (self.nodes.items.len >= self.options.max_states) {
-                _ = self.visited.remove(fingerprint);
+        /// Records `node` under `fingerprint` unless the fingerprint is known, returning whether
+        /// it was new.
+        fn record(self: *Self, fingerprint: u64, node: Node) !bool {
+            if (self.stopped.load(.monotonic)) return false;
+            const shard = &self.shards[fingerprint >> (64 - @ctz(@as(u64, shard_count)))];
+            self.lock(&shard.mutex);
+            defer self.unlock(&shard.mutex);
+            const seen = try shard.nodes.getOrPut(self.gpa, fingerprint);
+            if (seen.found_existing) return false;
+            if (self.unique.fetchAdd(1, .monotonic) >= self.options.max_states) {
+                _ = self.unique.fetchSub(1, .monotonic);
+                shard.nodes.removeByPtr(seen.key_ptr);
                 return error.StateSpaceTooLarge;
             }
-            const depth = if (parent) |p| self.nodes.items[p].depth + 1 else 0;
-            self.max_depth = @max(self.max_depth, depth);
-            const node: u32 = @intCast(self.nodes.items.len);
-            const reached: Node = .{ .parent = parent, .action = action, .depth = depth };
-            self.nodes.append(self.gpa, reached) catch |err| {
-                _ = self.visited.remove(fingerprint);
-                return err;
-            };
-            return node;
+            seen.value_ptr.* = node;
+            _ = self.max_depth.fetchMax(node.depth, .monotonic);
+            return true;
         }
 
-        /// Records the first violation, with the path to `node`, and ends the check.
-        fn violate(self: *Self, property: []const u8, node: u32) void {
-            self.lock();
-            defer self.unlock();
-            if (self.ended()) return;
-            const path = self.path_to(node) catch |err| {
+        /// Records the first violation, with the path to `fingerprint`, and ends the check.
+        fn violate(self: *Self, property: []const u8, fingerprint: u64) void {
+            self.lock(&self.mutex);
+            defer self.unlock(&self.mutex);
+            if (self.violation != null or self.failure != null) return;
+            if (self.path_to(fingerprint)) |path| {
+                self.violation = .{ .property = property, .path = path };
+            } else |err| {
                 self.failure = err;
-                return self.wake();
-            };
-            self.violation = .{ .property = property, .path = path };
-            self.wake();
+            }
+            self.stop();
         }
 
-        /// The actions from an initial state to `node`, in order.
-        fn path_to(self: *Self, node: u32) ![]Action {
-            const depth = self.nodes.items[node].depth;
+        fn node_of(self: *Self, fingerprint: u64) Node {
+            const shard = &self.shards[fingerprint >> (64 - @ctz(@as(u64, shard_count)))];
+            self.lock(&shard.mutex);
+            defer self.unlock(&shard.mutex);
+            return shard.nodes.get(fingerprint).?; // Proof: only recorded states are walked.
+        }
+
+        /// The actions from an initial state to the state of `fingerprint`, in order.
+        fn path_to(self: *Self, fingerprint: u64) ![]Action {
+            const depth = self.node_of(fingerprint).depth;
             const path = try self.gpa.alloc(Action, depth);
-            var at: ?u32 = node;
+            var at = fingerprint;
             var index = depth;
             while (index > 0) {
-                const n = self.nodes.items[at.?];
+                const n = self.node_of(at);
                 index -= 1;
                 path[index] = n.action.?;
-                at = n.parent;
+                at = n.parent.?;
             }
-            assert(self.nodes.items[at.?].parent == null);
+            assert(self.node_of(at).parent == null);
             return path;
         }
     };

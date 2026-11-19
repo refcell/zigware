@@ -433,6 +433,45 @@ Re-run: build commonware's `flood` with those two changes, then `zig build insta
 -Doptimize=ReleaseFast`, `examples/flood/local.sh 4 <dir> 1024 <rate>`, and
 `etc/scripts/flood-compare.py <commonware-flood> zig-out/bin/flood <dir> 20 3 8`.
 
+## Storage: partitioned ordered index inserts, mimalloc against smp_allocator (2026-11-19, clearing lane)
+
+`index::insert/variant=partitioned_ordered_2` stays 1.2 to 1.4× commonware's, and the reason
+is the allocator, not the index. Both benches time only the inserts (the partition array is
+allocated untimed), and each new key in an empty partition allocates its keys and values
+arrays on both sides. Commonware's index benches install mimalloc as the global allocator
+(`storage/src/index/benches/bench.rs`); zigware's run on `smp_allocator`. In an isolated
+harness the same 10,000 inserts take about 25 to 30% less time with their arrays in an arena,
+which is roughly the gap. Neither side is changed: the index matches commonware's structure,
+and its allocator is the caller's.
+
+## Clearing: model checking (2026-11-19, clearing lane)
+
+commonware's clearing has no benches, so this compares its stateright model checks
+(`tests/bajillion/model.rs`, `cargo test --release`, `threads(available_parallelism)`) with
+zigware's port (`-Dslow-tests -Doptimize=ReleaseSafe`, one worker per core) on the same six
+workloads. Both sides reach the same unique and generated state counts, which zigware's
+tests assert. Commonware's times are its reporter's whole seconds; 32 cores, the two runs
+back to back.
+
+| workload | unique states | commonware | zigware before | zigware after | after / commonware |
+|---|---|---|---|---|---|
+| admits one payment | 232 | 0 s | 0.05 s | 0.006 s | |
+| retries payments | 196,690 | 6 s | 29.4 s | 2.3 s | 0.38× |
+| halts and claims | 78,862 | 2 s | 7.1 s | 0.38 s | 0.19× |
+| rebuilds on the posted row | 257,586 | 3 s | 29.9 s | 2.1 s | 0.71× |
+| replays a dropped request | 3,151 | 0 s | 0.46 s | 0.03 s | |
+| recovers funds after a halt | 3,284,669 | 19 s | 355 s | 18.6 s | 0.98× |
+
+Before ran at load 80 to 100 against commonware's 21 s for the largest at load 100. Two
+changes, found by timing each stage of a transition per thread:
+- The model cloned each world from `std.testing.allocator`, a `SafeAllocator` behind one lock
+  that every worker shared; cloning took 50 µs of each 105 µs transition. Slow-test builds
+  now use `smp_allocator` (the default run keeps the testing allocator's leak checks).
+- The checker then spent about a quarter of its time waiting on its one mutex, taken three or
+  four times per transition. Each worker now explores on a stack of its own and shares half
+  of it while another waits, and the visited set is 64 shards by fingerprint, as
+  Stateright's job market and sharded map do.
+
 ## Actor: mailbox (2026-11-19, actor-stream lane)
 
 All ten cases of commonware's `mailbox` bench, with bench-compare.sh's settings (warm-up 1 s,

@@ -294,3 +294,10 @@ qmdb `current` (balances, over the MMB) and `keyless` (payout log, over the MMR)
   reuses one 64 KiB buffer. Archive get by key: prunable 11.2 ms, immutable 13.2 ms
   (commonware 16.8 and 24.2 ms). Planted: decompressing with the caller's allocator fails both
   new tests.
+- 2026-11-19: model checking against commonware's stateright runs on the six workloads, same
+  counts: the slow-test model now allocates from `smp_allocator` (the testing allocator's lock
+  made each world clone 50 µs) and the checker shards its visited set and gives each worker a
+  stack of its own. Largest workload 355 s to 18.6 s (commonware 19 s at the same load); the
+  other five run 0.2 to 0.7× commonware's. Planted: recording a known fingerprint as new
+  crashes both checker tests. Index inserts' remaining 1.2 to 1.4× is mimalloc (commonware's
+  bench allocator) against `smp_allocator`; recorded, not changed.

@@ -5,6 +5,7 @@
 //! every role, and each keeps that role's obligations.
 
 const std = @import("std");
+const build_options = @import("build_options");
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const codec = @import("codec");
@@ -37,7 +38,11 @@ pub const Queue = TestClose.QueueType;
 pub const Deposit = bajillion.Deposit(PublicKey, u64);
 pub const Forced = bajillion.ForcedWithdrawal(PublicKey, u64);
 pub const Assembled = TestClose.Assembled;
-pub const gpa = std.testing.allocator;
+/// The tests' allocator. With `-Dslow-tests` it is `smp_allocator`: the model checks clone
+/// a world per transition on up to 64 workers, and the testing allocator's one lock and
+/// bookkeeping made the largest check 17 times slower than commonware's, whose clones use the
+/// system allocator. The default run keeps the testing allocator and its leak checks.
+pub const gpa = if (build_options.slow_tests) std.heap.smp_allocator else std.testing.allocator;
 
 /// Namespace of the deployment under test.
 pub const namespace_bytes = "_COMMONWARE_CLEARING_BAJILLION_TEST";
