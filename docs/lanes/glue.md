@@ -238,6 +238,14 @@ marshal's actors (consensus-marshal) for the actor; until then it ports what is 
   marshal, *Processor)`, `defer_verification(VerificationRequest)`, `run()` (until the mailbox
   closes; a database failure is fatal), `deinit`. Builds run concurrently with verifications;
   acknowledgements wait for a barrier (synchronous here); prunes run once idle.
+- `glue.stateful.actor.Stateful(P)` (core; the actor): `P` declares App, Databases, Marshal
+  (marshal's core mailbox or the same surface), and Plan (`SyncPlan(S, V)`). `init(gpa, io,
+  Config{app, env, db_config, marshal, mailbox_size, plan, prune_config, max_pending_acks,
+  random})` → `{*Stateful, Mailbox}`, `start()` → `Io.Future(anyerror!void)`, `deinit` (after
+  the future). It recovers from marshal's anchor (or the plan's completion height), opens the
+  databases at that block's targets, records completion, and runs `Processing`. A persisted
+  floor fails with `error.StateSyncUnavailable` until the syncing mode lands.
+  `MarshalProvider(M)` is the replay provider over marshal.
 - `glue.stateful.db.p2p.Mailbox(DB, F, Op, D)`: the `qmdb.sync` Source over the resolver
   actor's mailbox. `init(io, actor.mailbox.Sender(Message))`, `clone`, `deinit`,
   `attach_database(db.Shared(DB))`, `serve(gpa, request)` → `Served` (first candidate and its
@@ -352,7 +360,9 @@ marshal's actors (consensus-marshal) for the actor; until then it ports what is 
 - [x] actor/core: the mailbox (overflow, prepare/propose/verify/report, subscribe_databases).
 - [x] actor: `Processor.propose`/`prepare` (build on the parent, cache before answering).
 - [x] actor/core: the processing loop (builds, finalization, durability, prune).
-- [ ] actor/core: the rest of processing.rs's 46 tests, syncing, the `Stateful` actor; app tests (after marshal); tests (single and
+- [x] actor/core: the `Stateful` actor, recovering from marshal (no floor).
+- [ ] actor/core: syncing (startup from a floor, on db/state_sync), the rest of processing.rs's
+  46 tests; app tests (after marshal); tests (single and
   multi db apps, floor, properties).
 
 ## Log
@@ -397,6 +407,7 @@ marshal's actors (consensus-marshal) for the actor; until then it ports what is 
 - 2026-11-19 (stateful): the core actor's mailbox.
 - 2026-11-19 (stateful): the processor's propose and prepare.
 - 2026-11-19 (stateful): the core processing loop; a waiting verify gives no vote end to end.
+- 2026-11-19 (stateful): the `Stateful` actor, recovering from marshal and restarting.
 
 ## dkg (owner: coding lane, thread T-01a1d58d-bff1-75a1-8ccb-4b8dd7bc9755)
 

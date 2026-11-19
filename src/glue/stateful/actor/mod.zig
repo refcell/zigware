@@ -36,6 +36,9 @@ pub const core_mailbox = @import("core/mailbox.zig");
 pub const Mailbox = core_mailbox.Mailbox;
 pub const processing = @import("core/processing.zig");
 pub const Processing = processing.Processing;
+pub const stateful = @import("core/stateful.zig");
+pub const Stateful = stateful.Stateful;
+pub const MarshalProvider = stateful.MarshalProvider;
 
 test {
     std.testing.refAllDecls(@This());
@@ -49,4 +52,5 @@ test {
     _ = @import("core/verifications_test.zig");
     _ = @import("core/mailbox_test.zig");
     _ = @import("core/processing_test.zig");
+    _ = @import("core/stateful_test.zig");
 }
