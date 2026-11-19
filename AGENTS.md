@@ -22,7 +22,9 @@ Read this whole file before you change anything. These rules are not optional.
    Stop processes through your own tool's PIDs (`shell_command_kill`). A leftover process
    that is provably yours (check its cwd is your clone and its args are your binary) may be
    stopped with `kill <that pid>`. Never `kill` a parent PID or anything you did not start:
-   lanes share one desktop.
+   lanes share one desktop. Never choose kill targets with `pgrep -f`/`pkill -f`: the pattern
+   matches your own shell, and killing its parent killed the desktop runner and every lane's
+   commands (2026-11-19).
 2. **Public content only.** Only port what is in the public commonware monorepo (reference
    clone: `~/.cache/zigware/commonware-ref`, refresh with
    `git -C ~/.cache/zigware/commonware-ref pull`), public papers and RFCs, and public test
