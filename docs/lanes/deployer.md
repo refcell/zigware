@@ -1,5 +1,8 @@
 # Lane: deployer
 
+Owner: thread T-01a1d5b9-c237-73f2-a935-c93580e28133 (also the broadcast-resolver lane, and
+glue's stateful db adapters; see glue.md's owner key `d`).
+
 Owns `src/deployer` (commonware `deployer`, about 8.8k Rust lines). Its packages: cryptography
 and utils.
 Also owns flood's deployer integration: `examples/flood/setup.zig` and `setup_test.zig`
