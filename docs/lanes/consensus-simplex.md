@@ -294,7 +294,7 @@ resolver; those lanes are running, so do the types first and the actors as they 
   certification ordering and replay). None are ported; they need a voter-actor harness
   with a mock batcher, resolver, and automaton on the deterministic runtime. Handed to the
   runtime lane on 2026-11-19 (actors/voter/tests/).
-- [ ] actors/batcher/mod.rs: 48 of its 76 tests still to port (forwarding, leader activity,
+- [ ] actors/batcher/mod.rs: 40 of its 76 tests still to port (forwarding,
   optimistic assembly fallback, construction order, the per-fixture quorum test on the
   other 7 fixtures). Round-level ones ported in round_test.zig (2026-11-19): forwarding a
   notarization's proposal without a leader, certificate vote release and retention,
@@ -445,3 +445,8 @@ resolver; those lanes are running, so do the types first and the actors as they 
   non-ed25519 engine_test Suite instances, and four of the five mock-scheme twins campaigns
   (all but sampled) run in ReleaseSafe only with `-Dslow-tests`; Debug keeps its one-case
   campaigns.
+- 2026-11-19: batcher actor_test.zig ports the 8 leader-activity tests on 5 validators with
+  skipping enabled: fail-open while the network is quiet, inactivity after quorum
+  activity, the leader-nullify fast path after an inactivity hint, leader nullifies and
+  relayed certificates counting as activity, and the view-entry and wrong-view nullify
+  hints.

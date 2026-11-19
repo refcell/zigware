@@ -4,6 +4,7 @@
 const std = @import("std");
 const testing = std.testing;
 const Io = std.Io;
+const assert = std.debug.assert;
 const actor = @import("actor");
 const codec = @import("codec");
 const cryptography = @import("cryptography");
@@ -17,6 +18,7 @@ const lookahead = @import("../../lookahead.zig");
 const ed25519 = @import("../../scheme/ed25519.zig");
 const actor_mod = @import("actor.zig");
 const voter_ingress = @import("../voter/ingress.zig");
+const TimeoutReason = @import("../../metrics.zig").TimeoutReason;
 
 const Digest = cryptography.Sha256.Digest;
 const Scheme = ed25519.Scheme(Digest);
@@ -202,6 +204,9 @@ const Harness = struct {
         track_historical_votes: bool = false,
         term_length: u32 = 1,
         optimistic_views: u64 = 0,
+        participants: u32 = 4,
+        /// Enables skipping with this timeout (commonware `SkipPolicy::Enabled`).
+        skip_timeout_s: ?u64 = null,
     };
 
     /// Starts with the batcher's metrics registered under `scope`, if any.
@@ -216,10 +221,15 @@ const Harness = struct {
         options: Options,
     ) !void {
         var rng = utils.rng.test_rng();
-        const fixture = try ed25519.fixture(Digest, gpa, &rng, "batcher", 4);
+        assert(options.participants >= 4);
+        const n = options.participants;
+        const fixture = try ed25519.fixture(Digest, gpa, &rng, "batcher", n);
         self.* = .{ .io = io, .fixture = fixture };
         var cfg = config(&fixture.schemes[0], &self.log);
         cfg.scope = scope;
+        if (options.skip_timeout_s) |seconds| {
+            cfg.skip = .{ .enabled = .{ .timeout = .from_secs(seconds) } };
+        }
         cfg.track_historical_votes = options.track_historical_votes;
         cfg.lookahead = .{
             .term_length = .new(utils.NonZero(u32).init(options.term_length).?),
@@ -681,6 +691,236 @@ test "batcher assembles a buffered next-term lane quorum on term entry" {
                 }
             } else |err| try testing.expectEqual(error.Empty, err);
             try testing.expect(proposed and notarized);
+        }
+    };
+    try run_deterministic(Root.run);
+}
+
+/// Fails if a voter timeout arrives within 50 ms (commonware `expect_no_timeout`).
+fn expect_no_timeout(harness: *Harness) !void {
+    try harness.io.sleep(.fromMilliseconds(50), .awake);
+    while (harness.voter.try_recv()) |message| {
+        defer VoterMessage.discard(message);
+        try testing.expect(message != .timeout);
+    } else |err| try testing.expectEqual(error.Empty, err);
+}
+
+/// Expects a voter timeout for `view` with `reason` within 100 ms (commonware
+/// `expect_timeout`): the first timeout received must match.
+fn expect_timeout(harness: *Harness, view: u64, reason: TimeoutReason) !void {
+    try harness.io.sleep(.fromMilliseconds(100), .awake);
+    while (harness.voter.try_recv()) |message| {
+        defer VoterMessage.discard(message);
+        if (message != .timeout) continue;
+        try testing.expectEqual(view, message.timeout.round.view.get());
+        try testing.expectEqual(reason, message.timeout.reason);
+        return;
+    } else |err| try testing.expectEqual(error.Empty, err);
+    return error.NoTimeout;
+}
+
+/// Delivers a nullify for `view` from each signer in `signers`.
+fn deliver_nullifies(harness: *Harness, signers: []const usize, view: u64) !void {
+    assert(signers.len > 0);
+    for (signers) |signer| {
+        const bytes = try nullify_bytes(&harness.fixture, signer, view);
+        try harness.votes.deliver(harness.fixture.participants[signer], bytes);
+    }
+}
+
+/// Our own nullify for `view`, handed to the batcher as constructed.
+fn construct_nullify(harness: *Harness, view: u64) !void {
+    const round: consensus_types.Round = .new(.new(0), .new(view));
+    const vote = (try types.Nullify(Scheme).sign(gpa, &harness.fixture.schemes[0], round)).?;
+    try harness.mailbox.constructed(.{ .nullify = vote });
+}
+
+const skip_options: Harness.Options = .{ .participants = 5, .skip_timeout_s = 5 };
+
+// commonware `test_leader_activity_detection`: leaders stay active while the network is
+// quiet (fewer than a quorum recently active), and a local leader never gets an
+// inactivity hint even once peers are active.
+test "batcher fails open on leader activity until a quorum is active" {
+    const Root = struct {
+        fn run(io: Io) !void {
+            var harness: Harness = undefined;
+            try harness.start_with(io, null, skip_options);
+            defer harness.stop();
+            for (1..5) |view| try harness.mailbox.update(.new(view), .init(1), .zero(), null);
+            try expect_no_timeout(&harness);
+            try harness.mailbox.update(.new(5), .init(1), .zero(), null);
+            try expect_no_timeout(&harness);
+            try harness.mailbox.update(.new(100), .init(1), .zero(), null);
+            try expect_no_timeout(&harness);
+            try deliver_nullifies(&harness, &.{ 1, 2, 3, 4 }, 99);
+            try io.sleep(.fromMilliseconds(50), .awake);
+            try harness.mailbox.update(.new(101), .init(0), .zero(), null);
+            try expect_no_timeout(&harness);
+        }
+    };
+    try run_deterministic(Root.run);
+}
+
+// commonware `test_leader_inactivity_reported_after_quorum_activity`: once we and three
+// peers are active, a silent leader gets an inactivity hint on the next view.
+test "batcher reports an inactive leader after quorum activity" {
+    const Root = struct {
+        fn run(io: Io) !void {
+            var harness: Harness = undefined;
+            try harness.start_with(io, null, skip_options);
+            defer harness.stop();
+            try harness.mailbox.update(.new(1), .init(1), .zero(), null);
+            try expect_no_timeout(&harness);
+            try construct_nullify(&harness, 1);
+            try deliver_nullifies(&harness, &.{ 2, 3, 4 }, 1);
+            try io.sleep(.fromMilliseconds(50), .awake);
+            try harness.mailbox.update(.new(2), .init(1), .zero(), null);
+            try expect_timeout(&harness, 2, .inactivity);
+        }
+    };
+    try run_deterministic(Root.run);
+}
+
+// commonware `test_leader_nullify_after_inactivity_still_fast_paths`: an inactivity hint
+// does not suppress the leader's own nullify for the same view.
+test "batcher fast-paths a leader nullify after an inactivity hint" {
+    const Root = struct {
+        fn run(io: Io) !void {
+            var harness: Harness = undefined;
+            try harness.start_with(io, null, skip_options);
+            defer harness.stop();
+            try harness.mailbox.update(.new(1), .init(1), .zero(), null);
+            try io.sleep(.fromMilliseconds(10), .awake);
+            try deliver_nullifies(&harness, &.{ 2, 3, 4 }, 1);
+            try io.sleep(.fromMilliseconds(50), .awake);
+            try harness.mailbox.update(.new(2), .init(1), .zero(), null);
+            try expect_timeout(&harness, 2, .inactivity);
+            try deliver_nullifies(&harness, &.{1}, 2);
+            try expect_timeout(&harness, 2, .leader_nullify);
+        }
+    };
+    try run_deterministic(Root.run);
+}
+
+// commonware `test_leader_nullify_marks_active`: a leader's nullify for a prior view
+// counts as activity, so no inactivity hint follows.
+test "batcher counts a leader nullify as activity" {
+    const Root = struct {
+        fn run(io: Io) !void {
+            var harness: Harness = undefined;
+            try harness.start_with(io, null, skip_options);
+            defer harness.stop();
+            for (1..6) |view| try harness.mailbox.update(.new(view), .init(1), .zero(), null);
+            try expect_no_timeout(&harness);
+            try construct_nullify(&harness, 4);
+            try deliver_nullifies(&harness, &.{ 2, 3, 4 }, 5);
+            try io.sleep(.fromMilliseconds(50), .awake);
+            try deliver_nullifies(&harness, &.{1}, 4);
+            try io.sleep(.fromMilliseconds(50), .awake);
+            try harness.mailbox.update(.new(6), .init(1), .zero(), null);
+            try expect_no_timeout(&harness);
+        }
+    };
+    try run_deterministic(Root.run);
+}
+
+/// A finalization of `value` signed by the first `signers` participants.
+fn finalization_bytes(fixture: anytype, value: types.Proposal(Digest), signers: usize) ![]u8 {
+    const Finalize = types.Finalize(Scheme, Digest);
+    var votes: [8]Finalize = undefined;
+    assert(signers <= votes.len);
+    for (votes[0..signers], 0..) |*vote, signer| {
+        vote.* = (try Finalize.sign(gpa, &fixture.schemes[signer], value)).?;
+    }
+    const scheme = &fixture.schemes[0];
+    const Finalization = types.Finalization(Scheme, Digest);
+    const strategy = parallel.sequential;
+    var finalization = try Finalization.from_votes(gpa, scheme, votes[0..signers], strategy);
+    defer finalization.deinit(gpa);
+    const certificate: types.Certificate(Scheme, Digest) = .{ .finalization = finalization };
+    return codec.encode(types.Certificate(Scheme, Digest), gpa, certificate);
+}
+
+// commonware `test_leader_certificate_marks_active`: a certificate relayed by the leader
+// counts as activity, so no inactivity hint follows.
+test "batcher counts a leader's relayed certificate as activity" {
+    const Root = struct {
+        fn run(io: Io) !void {
+            var harness: Harness = undefined;
+            try harness.start_with(io, null, skip_options);
+            defer harness.stop();
+            for (1..5) |view| try harness.mailbox.update(.new(view), .init(1), .zero(), null);
+            try expect_no_timeout(&harness);
+            try harness.mailbox.update(.new(5), .init(1), .zero(), null);
+            try expect_no_timeout(&harness);
+            try construct_nullify(&harness, 5);
+            try deliver_nullifies(&harness, &.{ 2, 3, 4 }, 5);
+            const at: consensus_types.Round = .new(.new(0), .new(5));
+            const value: types.Proposal(Digest) = .init(at, .zero(), .fill(5));
+            const bytes = try finalization_bytes(&harness.fixture, value, 4);
+            try harness.certificates.deliver(harness.fixture.participants[1], bytes);
+            const message = try harness.next_certificate();
+            defer VoterMessage.discard(message);
+            try testing.expect(message.verified.certificate == .finalization);
+            try testing.expectEqual(5, message.verified.certificate.view().get());
+            try harness.mailbox.update(.new(6), .init(1), .zero(), null);
+            try expect_no_timeout(&harness);
+        }
+    };
+    try run_deterministic(Root.run);
+}
+
+/// commonware `leader_nullify_on_view_entry`: a leader nullify buffered for view 2 while
+/// at view 1 is hinted on entering view 2 only when skipping is enabled.
+fn leader_nullify_on_view_entry(io: Io, skip_timeout_s: ?u64) !void {
+    var harness: Harness = undefined;
+    const options: Harness.Options = .{ .participants = 5, .skip_timeout_s = skip_timeout_s };
+    try harness.start_with(io, null, options);
+    defer harness.stop();
+    try harness.mailbox.update(.new(1), .init(1), .zero(), null);
+    try io.sleep(.fromMilliseconds(10), .awake);
+    try deliver_nullifies(&harness, &.{2}, 2);
+    try io.sleep(.fromMilliseconds(10), .awake);
+    try harness.mailbox.update(.new(2), .init(2), .zero(), null);
+    if (skip_timeout_s != null) {
+        try expect_timeout(&harness, 2, .leader_nullify);
+    } else {
+        try expect_no_timeout(&harness);
+    }
+}
+
+// commonware `test_leader_nullify_expire_on_view_entry`.
+test "batcher hints a buffered leader nullify on view entry" {
+    const Root = struct {
+        fn run(io: Io) !void {
+            try leader_nullify_on_view_entry(io, 5);
+        }
+    };
+    try run_deterministic(Root.run);
+}
+
+// commonware `test_disabled_skip_policy_ignores_leader_nullify_hint`.
+test "batcher with skipping disabled ignores a buffered leader nullify" {
+    const Root = struct {
+        fn run(io: Io) !void {
+            try leader_nullify_on_view_entry(io, null);
+        }
+    };
+    try run_deterministic(Root.run);
+}
+
+// commonware `test_leader_nullify_wrong_view_no_expire`: the current leader's nullify for
+// another view is no fast-path hint.
+test "batcher ignores a leader nullify for another view" {
+    const Root = struct {
+        fn run(io: Io) !void {
+            var harness: Harness = undefined;
+            try harness.start_with(io, null, skip_options);
+            defer harness.stop();
+            try harness.mailbox.update(.new(2), .init(2), .zero(), null);
+            try io.sleep(.fromMilliseconds(10), .awake);
+            try deliver_nullifies(&harness, &.{2}, 3);
+            try expect_no_timeout(&harness);
         }
     };
     try run_deterministic(Root.run);
