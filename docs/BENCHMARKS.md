@@ -226,6 +226,26 @@ The lookup gap is closed. The partition array is now allocated outside the timed
 commonware's `new` allocates it; ordered inserts are still about 1.2 to 1.4× slower
 (unprofiled).
 
+### Archive: RNG fill and the glob read buffer (2026-11-19, clearing lane)
+
+Before is zigware `7f0df2c`; after adds two changes. `utils.ChaChaRng.fill_bytes` (cff3e83d)
+streams whole buffers straight into the destination instead of copying one word at a time:
+filling the put bench's 10,000 64 KiB values took 609 ms of zigware's 970 ms, and now takes
+167 ms, byte-identical. Glob `get` reads into the journal's retained scratch buffer: a fresh
+64 KiB buffer per get was an mmap, a munmap, and 16 page faults, because `smp_allocator` maps
+every allocation over 32 KiB directly (31.5 µs for a fresh 64 KiB alloc and copy against
+1.8 µs reused, measured in isolation). Best of two alternating runs, load 43 to 72.
+
+| bench | parameters | commonware | before | after | after / commonware |
+|---|---|---|---|---|---|
+| `archive::put` | `variant=prunable items=10000 comp=off` | 517 ms | 970 ms | 410 ms | 0.79× |
+| `archive::put` | `variant=immutable items=10000 comp=off` | 670 ms | 1.17 s | 424 ms | 0.63× |
+| `archive::get` | `variant=prunable mode=serial pattern=key comp=off items=10000 reads=1000` | 24.5 ms | 47.3 ms | 31.0 ms | 1.26× |
+
+The rest of the get gap is the returned value: decoding still allocates its 64 KiB, which
+`smp_allocator` maps directly, where commonware's malloc reuses heap memory. The values'
+copies are not the cost: CRC32C over 10,000 64 KiB values takes 25 ms and a memcpy 12 ms.
+
 ### Freezer: same work, different I/O dispatch (2026-11-19, clearing lane)
 
 Both benches use the same configuration (1 MiB key and value write buffers, a 65,536-entry

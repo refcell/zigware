@@ -200,7 +200,7 @@ qmdb `current` (balances, over the MMB) and `keyless` (payout log, over the MMR)
 - [x] Step 4b: oversized's in-flight marker generation (`marker_sync_pending`) on metadata's
   `start_sync` completion (step 2c), and the archive's 4 marker-pipeline tests.
 - [ ] Storage perf (coordinator, 2026-11-19): [x] `index::grinding` lookup (per-partition
-  arrays); [ ] archive put and get by key; [x] freezer work check; [x] the `should_panic`
+  arrays); [x] archive put and get by key; [x] freezer work check; [x] the `should_panic`
   tests left after storage-merkle takes index's 30 and bitmap's 4: translator's 1 is ported
   (ordinal's was already ported as an error check).
 
@@ -285,3 +285,7 @@ qmdb `current` (balances, over the MMB) and `keyless` (payout log, over the MMR)
   `utils.death.expect_panic` (planted: an early return instead of the assert fails it). The
   lane's not portable: 40 to 39 (37 storage-merkle.md, of them 34 `should_panic` that
   storage-merkle is porting, and 2 bmt).
+- 2026-11-19: archive put and get by key: `utils.ChaChaRng.fill_bytes` streams whole buffers
+  (put 970 ms to 410 ms prunable, 1.17 s to 424 ms immutable; commonware 517 and 670 ms), and
+  glob `get` reads into its retained scratch instead of a fresh 64 KiB mmap (get 47.3 ms to
+  31.0 ms, commonware 24.5 ms; the rest is the decoded value's own mmap).

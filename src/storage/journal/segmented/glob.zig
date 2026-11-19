@@ -82,7 +82,8 @@ pub fn Glob(comptime V: type) type {
         manager: Manager,
         compression: ?u8,
         codec_config: codec.Cfg(V),
-        /// Reused entry encoding buffer.
+        /// Reused buffer for encoding an entry and for reading one back: a fresh buffer per
+        /// `get` costs an mmap and its page faults for values past the allocator's slab classes.
         scratch: std.ArrayList(u8) = .empty,
 
         fn open(gpa: Allocator, storage: Storage, cfg: Cfg, ceiling: u64) Error!Self {
@@ -151,8 +152,8 @@ pub fn Glob(comptime V: type) type {
         pub fn get(self: *Self, section: u64, offset: u64, size_bytes: u32) Error!V {
             const buffer = try self.manager.get(section) orelse return error.SectionOutOfRange;
             const gpa = self.manager.gpa;
-            const buf = try gpa.alloc(u8, size_bytes);
-            defer gpa.free(buf);
+            self.scratch.clearRetainingCapacity();
+            const buf = try self.scratch.addManyAsSlice(gpa, size_bytes);
             try buffer.read_at(offset, buf);
             if (buf.len < checksum_size) return error.BlobInsufficientLength;
             const data_len = buf.len - checksum_size;
