@@ -113,10 +113,9 @@ that harness. It builds on `coding` (ReedSolomon), `consensus.types.coding.Commi
   context's epoch is its `epoch()` method or, for `Round`, its field.
 
 - marshal coding shards: once a record holds enough shards it submits one reconstruction job
-  on the strategy (`parallel.Task`, `Strategy.spawn`), as commonware does. A completer task
-  awaits jobs in submission order (commonware's `AbortablePool` yields them as they finish;
-  here a later job's result waits behind an earlier one) and hands each to the loop as an
-  event. Evicting or caching a record discards its job, as dropping commonware's `Aborter`
+  on the strategy (`parallel.Task`, `Strategy.spawn`), as commonware does. Each job's waiter
+  task awaits it and hands it to the loop as an event, so results apply in the order jobs
+  finish (commonware's `AbortablePool::next_completed`). Evicting or caching a record discards its job, as dropping commonware's `Aborter`
   does, but the job still runs to its end: it borrows the record's shard bytes, so the
   discarded record's quorum moves into the job and is freed with it. Freeing the engine waits
   for every job. Unstarted engines apply jobs by hand: `next_finished` (commonware's

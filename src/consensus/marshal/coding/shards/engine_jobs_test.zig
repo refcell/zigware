@@ -399,33 +399,74 @@ test "reconstruction job does not stall engine" {
             try wait_reconstructed(io, mailbox, a.commitment());
             try testing.expectEqual(@as(usize, 0), try harness.blocked_count(network.net));
         }
+    }.run);
+}
 
-        fn encode_gated(config: coding.Config, id: u64) !GatedEngine.Coded {
-            const inner = harness.B.init(.empty, .new(id), id);
-            const shared = try GatedEngine.Coded.Inner.compute(gpa, inner);
-            return GatedEngine.Coded.encode(gpa, shared, config, parallel.sequential);
-        }
-
-        fn wait_set(io: Io, event: *const Io.Event) !void {
-            for (0..5_000) |_| {
-                if (event.isSet()) return;
-                try harness.sleep_ms(io, 1);
-            }
-            return error.Timeout;
-        }
-
-        fn wait_reconstructed(
-            io: Io,
-            mailbox: GatedEngine.Mailbox,
-            commitment: GatedEngine.Commitment,
-        ) !void {
-            for (0..5_000) |_| {
-                if (try mailbox.get(commitment)) |value| return harness.free_value(value);
-                try harness.sleep_ms(io, 1);
-            }
-            return error.NotReconstructed;
+// Results apply as jobs finish (commonware's `jobs.next_completed()`): while the job for A
+// holds in decode, a later job for B finishes first and its block is cached at once.
+test "later job that finishes first applies first" {
+    try harness.run_deterministic(struct {
+        fn run(io: Io) !void {
+            var network: Network = undefined;
+            try network.init(io);
+            defer network.deinit();
+            const strategy = try parallel.mocks.pooled(gpa, io, 2, 2);
+            defer strategy.pool.destroy();
+            var receiver = try network.start_engine(2, strategy);
+            defer receiver.stop();
+            const mailbox = receiver.mailbox;
+            const config = harness.types.coding_config_for_participants(4);
+            var gate: Gate = .{ .io = io };
+            defer gate.release.set(io);
+            armed_gate = &gate;
+            // A's job is submitted first and holds in decode.
+            var a = try encode_gated(config, 1);
+            defer a.deinit(gpa);
+            try mailbox.gather(a.commitment(), at(1));
+            try network.send(0, 2, &a, 2);
+            try network.send(1, 2, &a, 1);
+            try wait_set(io, &gate.started);
+            // B's job is submitted second, finishes first, and its block is cached while A's
+            // decode still holds.
+            var b = try encode_gated(config, 2);
+            defer b.deinit(gpa);
+            try mailbox.gather(b.commitment(), at(2));
+            try network.send(0, 2, &b, 2);
+            try network.send(1, 2, &b, 1);
+            try wait_reconstructed(io, mailbox, b.commitment());
+            try testing.expect(try mailbox.get(a.commitment()) == null);
+            gate.release.set(io);
+            try wait_reconstructed(io, mailbox, a.commitment());
+            try testing.expectEqual(@as(usize, 0), try harness.blocked_count(network.net));
         }
     }.run);
+}
+
+fn encode_gated(config: coding.Config, id: u64) !GatedEngine.Coded {
+    const inner = harness.B.init(.empty, .new(id), id);
+    const shared = try GatedEngine.Coded.Inner.compute(gpa, inner);
+    return GatedEngine.Coded.encode(gpa, shared, config, parallel.sequential);
+}
+
+fn wait_set(io: Io, event: *const Io.Event) !void {
+    for (0..5_000) |_| {
+        if (event.isSet()) return;
+        try harness.sleep_ms(io, 1);
+    }
+    return error.Timeout;
+}
+
+/// Waits (bounded) until the engine behind `mailbox` caches the block with `commitment`.
+fn wait_reconstructed(
+    io: Io,
+    mailbox: GatedEngine.Mailbox,
+    commitment: GatedEngine.Commitment,
+) !void {
+    for (0..5_000) |_| {
+        if (try mailbox.get(commitment)) |value| return harness.free_value(value);
+        try harness.sleep_ms(io, 1);
+    }
+    return error.NotReconstructed;
 }
 
 /// Four linked, tracked participants on channel 0 (the setup of commonware's

@@ -26,11 +26,12 @@
 //!
 //! Reconstruction jobs (commonware's `jobs` pool): once a record holds enough shards it
 //! submits one job on the strategy (`Strategy.spawn`) that batch-verifies the pending shards
-//! decoding needs and decodes the block, so the loop keeps handling shards meanwhile. A
-//! completer task awaits jobs in submission order and hands each result to the loop as an
-//! event. Evicting or caching a record discards its job (commonware drops the job's
-//! `Aborter`): the job still runs to its end, since it borrows the record's shard bytes, and
-//! its result is dropped. Freeing the engine waits for every job.
+//! decoding needs and decodes the block, so the loop keeps handling shards meanwhile. Each
+//! job's waiter task awaits it and hands it to the loop as an event, so results apply in the
+//! order jobs finish (commonware's `jobs.next_completed()`). Evicting or caching a record
+//! discards its job (commonware drops the job's `Aborter`): the job still runs to its end,
+//! since it borrows the record's shard bytes, and its result is dropped. Freeing the engine
+//! waits for every job.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -185,6 +186,8 @@ pub fn Engine(comptime T: type) type {
             discarded: bool = false,
             /// A discarded record's shards, kept until the job that borrows them ends.
             orphan: ?State.Quorum = null,
+            /// The task awaiting the job on a started engine (`await_job`).
+            waiter: ?Io.Future(void) = null,
 
             /// Waits for the job (once) and keeps its result.
             fn wait(job: *Job, strategy: T.Strategy) void {
@@ -285,11 +288,9 @@ pub fn Engine(comptime T: type) type {
         ingress_task: ?Io.Future(void) = null,
         mailbox_task: ?Io.Future(void) = null,
         peer_task: ?Io.Future(void) = null,
-        /// Jobs the completer awaits in submission order (guarded by `mutex`).
-        submitted: std.Deque(*Job) = .empty,
-        /// Awaited jobs whose results the loop has not applied (guarded by `mutex`).
+        /// Finished jobs whose results the loop has not applied, in the order they finished
+        /// (guarded by `mutex`).
         finished_jobs: std.Deque(*Job) = .empty,
-        completer_task: ?Io.Future(void) = null,
 
         /// Every job not yet completed, in submission order (engine loop only).
         jobs: std.ArrayList(*Job) = .empty,
@@ -360,7 +361,6 @@ pub fn Engine(comptime T: type) type {
             engine.peer_task = try engine.io.concurrent(forward_peer_sets, .{engine});
             engine.mailbox_task = try engine.io.concurrent(forward_mailbox, .{engine});
             engine.ingress_task = try engine.io.concurrent(receive_network, .{engine});
-            engine.completer_task = try engine.io.concurrent(complete_jobs, .{engine});
             while (true) {
                 engine.cleanup_subscriptions();
                 const event = engine.wait_event() catch return; // canceled
@@ -407,29 +407,21 @@ pub fn Engine(comptime T: type) type {
             }
         }
 
-        /// Awaits submitted jobs in submission order and hands each to the loop (commonware's
-        /// `jobs.next_completed()`), until canceled.
-        fn complete_jobs(engine: *Self) void {
+        /// Awaits `job` and hands it to the loop once it finished (commonware's
+        /// `jobs.next_completed()` yields jobs as they finish).
+        fn await_job(engine: *Self, job: *Job) void {
             assert(engine.started);
-            while (true) {
-                const job = engine.next_submitted() catch return; // canceled
-                job.wait(engine.config.strategy);
-                assert(job.result != null);
-                engine.mutex.lockUncancelable(engine.io);
-                defer engine.mutex.unlock(engine.io);
-                // Capacity was reserved when the job was submitted.
-                engine.finished_jobs.pushBackAssumeCapacity(job);
-                engine.condition.broadcast(engine.io);
-            }
+            job.wait(engine.config.strategy);
+            engine.finish_job(job);
         }
 
-        fn next_submitted(engine: *Self) Io.Cancelable!*Job {
+        fn finish_job(engine: *Self, job: *Job) void {
+            assert(job.result != null);
             engine.mutex.lockUncancelable(engine.io);
             defer engine.mutex.unlock(engine.io);
-            while (true) {
-                if (engine.submitted.popFront()) |job| return job;
-                try engine.condition.wait(engine.io, &engine.mutex);
-            }
+            // Capacity was reserved when the job was submitted.
+            engine.finished_jobs.pushBackAssumeCapacity(job);
+            engine.condition.broadcast(engine.io);
         }
 
         fn forward_peer_sets(engine: *Self) void {
@@ -515,7 +507,6 @@ pub fn Engine(comptime T: type) type {
             if (engine.ingress_task) |*task| task.cancel(io);
             if (engine.mailbox_task) |*task| task.cancel(io);
             if (engine.peer_task) |*task| task.cancel(io);
-            if (engine.completer_task) |*task| task.cancel(io);
             engine.free_jobs();
             if (engine.peer_slot) |*update| update.deinit();
             if (engine.message_slot) |message| Message.discard(message);
@@ -539,14 +530,14 @@ pub fn Engine(comptime T: type) type {
         /// Waits for every job not yet completed and frees it, before the records whose shard
         /// bytes the jobs borrow.
         fn free_jobs(engine: *Self) void {
-            // The completer has stopped: every job it took is in `finished_jobs` or awaited.
-            assert(engine.finished_jobs.len + engine.submitted.len <= engine.jobs.items.len);
+            assert(engine.finished_jobs.len <= engine.jobs.items.len);
             for (engine.jobs.items) |job| {
+                // A waiter's job wait is uncancelable: canceling it waits for the job.
+                if (job.waiter) |*waiter| waiter.cancel(engine.io);
                 job.wait(engine.config.strategy);
                 job.destroy(engine.gpa);
             }
             engine.jobs.deinit(engine.gpa);
-            engine.submitted.deinit(engine.gpa);
             engine.finished_jobs.deinit(engine.gpa);
         }
 
@@ -1194,16 +1185,15 @@ pub fn Engine(comptime T: type) type {
         }
 
         /// Takes the job's shards out of `quorum` and hands the job to the strategy and, on a
-        /// started engine, to the completer.
+        /// started engine, to a waiter task.
         fn submit(engine: *Self, job: *Job, quorum: *State.Quorum) Allocator.Error!void {
             const gpa = engine.gpa;
             const op = &job.task.op;
             assert(!quorum.job and !job.task.spawned);
             try engine.jobs.ensureUnusedCapacity(gpa, 1);
-            if (engine.completer_task != null) {
+            if (engine.started) {
                 engine.mutex.lockUncancelable(engine.io);
                 defer engine.mutex.unlock(engine.io);
-                try engine.submitted.ensureUnusedCapacity(gpa, 1);
                 try engine.finished_jobs.ensureTotalCapacity(gpa, engine.jobs.items.len + 1);
             }
             for (0..op.peers.len) |_| _ = quorum.pending.entries.orderedRemove(0);
@@ -1216,11 +1206,12 @@ pub fn Engine(comptime T: type) type {
             engine.config.strategy.spawn(len, &job.task);
             assert(job.task.spawned);
             engine.jobs.appendAssumeCapacity(job);
-            if (engine.completer_task == null) return;
-            engine.mutex.lockUncancelable(engine.io);
-            defer engine.mutex.unlock(engine.io);
-            engine.submitted.pushBackAssumeCapacity(job);
-            engine.condition.broadcast(engine.io);
+            if (!engine.started) return;
+            job.waiter = engine.io.concurrent(await_job, .{ engine, job }) catch {
+                // Without a task to spare, the loop awaits the job itself.
+                job.wait(engine.config.strategy);
+                return engine.finish_job(job);
+            };
         }
 
         /// Frees a job `submit` refused; `quorum` still holds every shard.
@@ -1249,6 +1240,9 @@ pub fn Engine(comptime T: type) type {
         pub fn complete(engine: *Self, job: *Job) Error!void {
             const gpa = engine.gpa;
             assert(job.result != null);
+            // The waiter handed the job over; let it return.
+            if (job.waiter) |*waiter| waiter.await(engine.io);
+            job.waiter = null;
             const position = std.mem.indexOfScalar(*Job, engine.jobs.items, job).?;
             _ = engine.jobs.orderedRemove(position);
             defer job.destroy(gpa);
