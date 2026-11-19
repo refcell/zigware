@@ -144,6 +144,15 @@ End to end, four local [flood](examples/flood) peers over authenticated p2p at
 commonware 212–266k at 194–294 ms. Below saturation both hit the rate cap, and zigware's
 latency is lower at every rate ([details](docs/BENCHMARKS.md#end-to-end-flood-4-peers-2026-11-19-p2p-lane)).
 
+<p align="center">
+  <img src="docs/assets/flood-262144-demo.gif" width="800"
+    alt="Four local zigware flood peers at 262144 msg/s, each receiving about 600k msg/s">
+</p>
+
+Four local zigware flood peers at 262144 msg/s with 1024-byte messages, each receiving about
+600k msg/s on a busy desktop ([video](docs/assets/flood-262144-demo.mp4?raw=true)).
+`etc/scripts/record-demo.sh flood-262144` records it again.
+
 These were measured on a busy desktop with storage on tmpfs, so ratios near 1 are noise and
 the storage numbers measure code, not the disk. ed25519 single verify uses an AVX-512 IFMA
 backend where the CPU has one; batch verify uses IFMA, then AVX2 (0.76×), then a scalar
