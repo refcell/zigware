@@ -197,8 +197,11 @@ the `DelayedSyncContext` test mock (`runtime/src/mocks.rs:869-1190`) holds syncs
   failure_propagates, prune_waits_for_pending_sync, prune_surfaces_failed_sync, both
   journals; unrecorded today); journal/authenticated.rs 7 (overlaps_work, failure_propagates,
   merkle_failure_fails_handle, two issue_5668 destroy tests, reopen watermark, init ordering);
-  metadata/mod.rs `test_start_sync_second_sync_waits_for_first` and the handle counts.
-- storage-merkle (22): contiguous/fixed.rs 8 (keeps_predecessor_sync, watermark_lagged,
+  metadata/mod.rs `test_start_sync_second_sync_waits_for_first` and the handle counts. Done in
+  ef5785ca (storage-journal): metadata's second-sync-waits, oversized's alignment truncation
+  and dropped completion, and authenticated's two issue_5668 destroys and init ordering.
+- storage-merkle (22, all ported 2026-11-19, see "Start-sync handle tests"): contiguous/fixed.rs
+  8 (keeps_predecessor_sync, watermark_lagged,
   failure_blocks_watermark, truncate_drains_parked_watermark_advance, deferred_failure, two
   dropped_failed_start_sync, destroy_observes_failed_watermark_sync); contiguous/variable.rs 11
   (keeps_predecessor_sync, stages_offsets_while_data_waits, offsets_watermark_lagged,
@@ -224,12 +227,12 @@ check. Status after the 24 open ports landed (two `read_location` tests went to 
 |---|---|---|---|---|
 | merkle batch, mem, proof, verification, hasher, storage, position | 219 | 211 | 0 | 8 |
 | mmr (mod, mem, full, iterator, proof), mmb, persisted/compact | 87 | 69 | 2 (qmdb) | 16 |
-| persisted/full.rs | 121 | 116 | 0 | 5 |
-| journal/contiguous/fixed.rs | 136 | 119 | 0 | 17 |
-| journal/contiguous/variable.rs | 152 | 122 | 0 | 30 |
+| persisted/full.rs | 121 | 118 | 0 | 3 |
+| journal/contiguous/fixed.rs | 136 | 127 | 0 | 9 |
+| journal/contiguous/variable.rs | 152 | 133 | 0 | 19 |
 
 Not portable: positions are plain `u64` (Display, operator, checked/saturating sub tests),
-`should_panic` tests, start_sync handles (parked, dropped, or failed syncs), `View` sharing,
+`should_panic` tests, `View` sharing,
 snapshot readers, decode counts, batched `read_many` internals, Rust type checks, and the
 `ExactSizeIterator` length test (Zig takes slices). The parallel-strategy and duration-histogram
 tests are ported.
@@ -315,6 +318,39 @@ read_many 10k x 64 B 5.59 -> 5.19 ms, 10k x 1 KiB 23.9 -> 24.0 ms, 1k x 16 KiB 4
 cache pass: `paged.View.read_ranges_into` probes the cache for every range and then reads
 each missed range separately, so zigware gets no vectored blob read in return. A real
 batched blob read in the runtime would recover it.
+### Start-sync handle tests (2026-11-19)
+The 21 tests the start_sync skip audit found still marked not portable now run on the
+Completion API with `runtime.storage.mocks.DelayedSync` (`PendingSyncs`) or
+`runtime.storage.faulty`'s sync failure rate (`storage_fault_config().sync_rate`).
+`drive_call` runs an operation as a task and releases parked syncs until it returns
+(`drive_pending_syncs`); commonware's `test_truncate` is a driven `sync` and an `init_at_most`
+reopen.
+- `fixed_start_sync_test.zig` (fixed.rs 8): keeps_predecessor_sync, watermark lagged, failure
+  blocks the watermark, truncate drains a parked advance, deferred advance failure, destroy
+  observes a failed watermark sync, and both dropped-failed-start_sync tests (the rstest runs
+  all six tail/predecessor x rollover/clear/destroy cases). Planted bugs: advancing the
+  watermark to the tip instead of the proven barrier fails five; `seal_tail` creating the
+  successor without observing outstanding syncs fails the dropped-failure test.
+- `variable_start_sync_test.zig` (variable.rs 11): keeps_predecessor_sync, stages offsets
+  while the data waits (both release orders), offsets watermark lagged, watermark requires a
+  joint proof, truncate truncates the durable size, deferred advance failure, both dropped
+  failure tests, and the three destroy_observes_failed_* tests. Planted bugs: starting the data
+  first always fails the staging test; dropping destroy's data wait fails the data-sync destroy
+  test; publishing the tip's watermark fails the joint-proof test.
+- `full_start_sync_test.zig`: issue_5668 destroy for mmr and mmb (a pruned tree's dropped,
+  failed sync surfaces at destroy and the synced tree reopens with its root). Planted bug:
+  skipping `wait_for_sync` in `destroy` fails both.
+The ports found four differences from commonware, now fixed:
+- `blobs.Writable.destroy` returned early on a failed sync without freeing the blobs, so a
+  failed fixed or variable destroy leaked them.
+- Fixed `destroy_cleared` staged the clear before observing the blobs' syncs; it now waits
+  first (commonware `wait_for_sync` before `stage_clear`), so a failed sync leaves a journal
+  that reopens recovered, not cleared.
+- Variable `destroy` likewise waits for the data blobs before the offsets stage their clear.
+- Variable `start_sync` starts the data and offsets syncs at once in commonware (`try_join`);
+  zigware starts the offsets first when the data tail's earlier sync is still in flight
+  (`Writable.tail_sync_in_flight`), so the offsets are staged while the data waits.
+
 - 082daecd6 merkle (batch, mem, mmr/mem, verification, benches): test and bench harnesses
   drop async wrappers; only indentation and line wrapping change. Nothing to port.
 - 162216038 bmt, merkle proof, merkle full, queue, ordinal fuzz: lint-only test edits
@@ -486,8 +522,8 @@ batched blob read in the runtime would recover it.
     failed watermark advance, failed watermark lowering on a bounded reopen, truncation below
     the durable size. Planted bug (lower the watermark after truncating blobs) fails two.
     Skipping the flush is not caught: the checkpoint write fails with the same error, as in
-    commonware's test. Not ported: start-sync tests of parked or dropped sync handles
-    (`DelayedSyncContext`, `PendingSyncs`), which synchronous syncs cannot produce, and the
+    commonware's test. The parked and dropped sync-handle tests are in
+    `fixed_start_sync_test.zig` (see "Start-sync handle tests" below). Not ported: the
     snapshot and cache-hit accounting tests (no snapshot readers, no per-read hit metrics
     on the fixed journal's reads here).
   - [x] variable.rs batch 1 (`variable_offsets_test.zig`): offsets and data disagreeing

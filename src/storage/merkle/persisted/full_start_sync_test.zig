@@ -33,7 +33,15 @@ const Fixture = struct {
     }
 
     fn open(self: *Fixture) !Merkle {
-        return Merkle.init(gpa, self.delayed.storage(), &support.hasher, .{
+        return self.open_family(merkle.mmr.Family, self.delayed.storage());
+    }
+
+    fn open_family(
+        self: *Fixture,
+        comptime F: type,
+        storage: runtime.storage.Storage,
+    ) !support.Merkle(F) {
+        return support.Merkle(F).init(gpa, storage, &support.hasher, .{
             .journal_partition = "journal-partition",
             .metadata_partition = "metadata-partition",
             .items_per_blob = 7,
@@ -80,4 +88,66 @@ test "full sync observes a clean start_sync failure" {
     var runner = try runtime.deterministic.Runner.init(gpa, .{});
     defer runner.deinit();
     try (try runner.start_context(observes_clean_start_sync_failure, .{}));
+}
+
+fn DestroyObservesFailedSync(comptime F: type) type {
+    return struct {
+        fn pruning(ctx: Context, structure: *support.Merkle(F), done: *bool) anyerror!void {
+            _ = ctx;
+            defer done.* = true;
+            try support.add_digests(F, structure, 0, 100);
+            try structure.prune(60);
+        }
+
+        fn body(ctx: Context) !void {
+            var f: Fixture = undefined;
+            try f.init(ctx);
+            defer f.deinit();
+            // Prune a tree of 100 leaves to 60, so the metadata holds the boundary and the pins
+            // for nodes the journal has pruned.
+            var structure = try f.open_family(F, f.delayed.storage());
+            var destroyed = false;
+            defer if (!destroyed) structure.deinit();
+            // Rollovers wait on parked syncs, so release them until the prune is done
+            // (commonware `drive_pending_syncs`).
+            var done = false;
+            const prune = try ctx.child("prune").spawn(pruning, .{ &structure, &done });
+            while (!done) {
+                f.pending.release_all();
+                try ctx.sleep(.fromMilliseconds(1));
+            }
+            try try prune.join();
+            const root = try structure.root(&support.hasher, 0);
+            // Start a sync of one more leaf, drop its handle, and fail it.
+            try support.add_digests(F, &structure, 100, 101);
+            const completion = try structure.start_sync();
+            completion.release();
+            try testing.expect(f.pending.parked() > 0);
+            f.pending.fail_all();
+            f.pending.unblock();
+            // Destroy returns the failure and the synced tree survives it.
+            destroyed = true;
+            try testing.expectError(error.Io, structure.destroy());
+            var reopened = try f.open_family(F, f.inner.storage());
+            defer reopened.destroy() catch unreachable; // Memory storage removes infallibly.
+            try testing.expectEqual(@as(u64, 100), reopened.leaves());
+            try testing.expect(root.eql(try reopened.root(&support.hasher, 0)));
+        }
+    };
+}
+
+test "issue 5668: destroy observes a failed sync before removal (mmr)" {
+    // commonware `issue_5668_regression_destroy_observes_failed_sync_before_removal_mmr`.
+    var runner = try runtime.deterministic.Runner.init(gpa, .{});
+    defer runner.deinit();
+    const body = DestroyObservesFailedSync(merkle.mmr.Family).body;
+    try (try runner.start_context(body, .{}));
+}
+
+test "issue 5668: destroy observes a failed sync before removal (mmb)" {
+    // commonware `issue_5668_regression_destroy_observes_failed_sync_before_removal_mmb`.
+    var runner = try runtime.deterministic.Runner.init(gpa, .{});
+    defer runner.deinit();
+    const body = DestroyObservesFailedSync(merkle.mmb.Family).body;
+    try (try runner.start_context(body, .{}));
 }

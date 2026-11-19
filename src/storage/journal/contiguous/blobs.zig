@@ -310,6 +310,15 @@ pub const Writable = struct {
         assert(self.tail_predecessor_sync == null);
     }
 
+    /// Whether the tail's started sync is still in flight, so a `start_sync` would wait.
+    pub fn tail_sync_in_flight(self: *const Writable) bool {
+        assert(!self.tail_closed);
+        return switch (self.tail.sync_state) {
+            .pending => |completion| completion.is_pending(),
+            else => false,
+        };
+    }
+
     /// Wait for every started sync, surfacing a failure without changing any blob.
     pub fn wait_for_sync(self: *Writable) Error!void {
         try self.drain_tail_predecessor_sync();
@@ -377,10 +386,13 @@ pub const Writable = struct {
         self.metrics.synced.metric().inc();
     }
 
-    /// Remove every blob and the partition, freeing the blobs.
+    /// Remove every blob and the partition, freeing the blobs, also on error.
     pub fn destroy(self: *Writable) Error!void {
         // A failed sync removes nothing.
-        try self.wait_for_sync();
+        self.wait_for_sync() catch |err| {
+            self.deinit();
+            return err;
+        };
         const newest = self.tail_blob_index();
         const oldest = self.oldest_blob_index;
         assert(!self.tail_closed);

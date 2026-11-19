@@ -1131,20 +1131,11 @@ pub fn Journal(comptime V: type) type {
             assert(!self.failed);
             self.metrics.start_sync_calls.metric().inc();
             errdefer self.failed = true;
-            const data = try self.blobs.start_sync();
-            const offsets = self.offsets.start_data_sync() catch |err| {
-                data.release();
-                return err;
-            };
+            const both = try self.start_data_and_offsets_sync();
             // Publish only the watermark already proved by a completed combined barrier.
             const boundary = self.barrier.boundary();
             const watermark = self.offsets.start_watermark_sync(boundary) catch |err| {
-                data.release();
-                offsets.release();
-                return err;
-            };
-            const both = Completion.join(data, offsets) catch |err| {
-                watermark.release();
+                both.release();
                 return err;
             };
             // The barrier advances once data and offsets are durable; the caller also
@@ -1152,6 +1143,26 @@ pub fn Journal(comptime V: type) type {
             self.barrier.record(self.bounds.end, .{ .completion = both.retain() });
             assert(self.barrier.boundary() <= self.bounds.end);
             return Completion.join(both, watermark);
+        }
+
+        /// Start the data and offsets syncs, returning their joint completion. commonware
+        /// starts both at once (`try_join`), so while the data waits on its tail's earlier sync,
+        /// the offsets sync is already started; zigware starts the offsets first then.
+        fn start_data_and_offsets_sync(self: *Self) Error!Completion {
+            assert(!self.failed);
+            var early: ?Completion = null;
+            if (self.blobs.tail_sync_in_flight()) early = try self.offsets.start_data_sync();
+            const data = self.blobs.start_sync() catch |err| {
+                if (early) |completion| completion.release();
+                return err;
+            };
+            const offsets = early orelse late: {
+                break :late self.offsets.start_data_sync() catch |err| {
+                    data.release();
+                    return err;
+                };
+            };
+            return Completion.join(data, offsets);
         }
 
         /// Persist the data, then the offsets and their watermark.
@@ -1178,6 +1189,11 @@ pub fn Journal(comptime V: type) type {
                 self.release();
                 self.* = undefined;
             }
+            // Surface a failed data sync before the offsets journal stages its clear.
+            self.blobs.wait_for_sync() catch |err| {
+                self.offsets.deinit();
+                return err;
+            };
             const Dependents = struct {
                 blobs: *Writable,
                 cleared: *bool,
@@ -2025,4 +2041,5 @@ test {
     _ = @import("variable_reads_test.zig");
     _ = @import("variable_read_many_test.zig");
     _ = @import("variable_faults_test.zig");
+    _ = @import("variable_start_sync_test.zig");
 }

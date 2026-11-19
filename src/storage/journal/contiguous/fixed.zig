@@ -1020,6 +1020,14 @@ pub fn Journal(comptime A: type) type {
             defer self.barrier.deinit();
             defer self.gpa.free(self.prefix);
             defer self.scratch.deinit(self.gpa);
+            // A failed started sync surfaces before the clear is staged, so the journal still
+            // reopens as a crash would recover it (the checkpoint's own failure surfaces when
+            // staging syncs it).
+            self.blobs.wait_for_sync() catch |err| {
+                self.blobs.deinit();
+                self.checkpoint.deinit();
+                return err;
+            };
             self.checkpoint.stage_clear(0) catch |err| {
                 self.blobs.deinit();
                 self.checkpoint.deinit();
@@ -1321,5 +1329,6 @@ test {
     _ = @import("fixed_reads_test.zig");
     _ = @import("fixed_bounded_recovery_test.zig");
     _ = @import("fixed_sync_faults_test.zig");
+    _ = @import("fixed_start_sync_test.zig");
     _ = @import("fixed_operations_fuzz_test.zig");
 }
