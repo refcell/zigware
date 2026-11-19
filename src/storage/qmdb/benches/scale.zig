@@ -27,8 +27,9 @@
 //!   `unordered` the P=2 (65,536-partition) unordered index. Bench a database with the flavor
 //!   it was generated with.
 //!
-//! zigware's databases are not shared across threads and have no parallel snapshot build, so
-//! readers run one after another and `concurrency` is reported only.
+//! The `get` and `get_many` readers run at once, reading the database through `*const D` as
+//! commonware's tasks share it. zigware has no parallel snapshot build, so `init`'s
+//! `concurrency` is reported only.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -444,7 +445,7 @@ fn get_bench(comptime D: type, context: Context, folder: []const u8, args: *cons
         }
         for ([_][]const u8{ "cold", "warm" }) |pass| {
             const start = harness.now_ns(context.io);
-            const found = try run_gets(D, &session.db, args, readers);
+            const found = try run_gets(D, context.io, &session.db, args, readers);
             const ms = harness.elapsed_ms(context.io, start);
             const total: f64 = @floatFromInt(args.num_gets);
             try context.out.print("  {s}[readers={d}]: {d} gets ({d} found) in {d:.2} ms  ", .{
@@ -458,36 +459,53 @@ fn get_bench(comptime D: type, context: Context, folder: []const u8, args: *cons
     }
 }
 
-/// One pass of `num_gets` uniform gets split across `readers` readers (the first
+/// One pass of `num_gets` uniform gets split across `readers` concurrent readers (the first
 /// `num_gets % readers` take one extra), each on its own `StdRng(reader)` key stream, so a
 /// repeat pass replays the same keys. Returns how many found a value.
-fn run_gets(comptime D: type, db: *D, args: *const GetArgs, readers: u64) !u64 {
+fn run_gets(comptime D: type, io: Io, db: *const D, args: *const GetArgs, readers: u64) !u64 {
     assert(readers > 0 and readers <= args.num_gets);
-    const per_reader = args.num_gets / readers;
-    const remainder = args.num_gets % readers;
-    var found: u64 = 0;
-    var keys: [1024]Digest = undefined;
-    var values: [1024]?Digest = undefined;
-    for (0..readers) |reader| {
-        var rng: TestRng = .init(reader);
-        var remaining = per_reader + @intFromBool(reader < remainder);
-        while (remaining > 0) {
-            const chunk = if (args.batch) |batch| @min(remaining, batch, keys.len) else 1;
-            const n: usize = @intCast(chunk);
-            for (keys[0..n]) |*key| {
-                key.* = common.key_at(rng_mod.range_less_than(&rng, u64, 0, args.keyspace));
-            }
-            if (args.batch == null) {
-                if (try db.get(&keys[0]) != null) found += 1;
-            } else {
-                try db.get_many(keys[0..n], values[0..n]);
-                for (values[0..n]) |value| found += @intFromBool(value != null);
-            }
-            remaining -= chunk;
-        }
-    }
+    comptime assert(readers_max <= harness.join_max);
+    var pass: Gets(D) = .{ .db = db, .args = args, .readers = readers };
+    try harness.join_all(io, @intCast(readers), &pass, Gets(D).read);
+    const found = pass.found.load(.monotonic);
     assert(found <= args.num_gets);
     return found;
+}
+
+fn Gets(comptime D: type) type {
+    return struct {
+        db: *const D,
+        args: *const GetArgs,
+        readers: u64,
+        found: std.atomic.Value(u64) = .init(0),
+
+        /// Reader `reader`'s share of the pass.
+        fn read(pass: *@This(), reader: usize) !void {
+            const args = pass.args;
+            assert(reader < pass.readers);
+            var rng: TestRng = .init(reader);
+            var remaining = args.num_gets / pass.readers +
+                @intFromBool(reader < args.num_gets % pass.readers);
+            var found: u64 = 0;
+            var keys: [1024]Digest = undefined;
+            var values: [1024]?Digest = undefined;
+            while (remaining > 0) {
+                const chunk = if (args.batch) |batch| @min(remaining, batch, keys.len) else 1;
+                const n: usize = @intCast(chunk);
+                for (keys[0..n]) |*key| {
+                    key.* = common.key_at(rng_mod.range_less_than(&rng, u64, 0, args.keyspace));
+                }
+                if (args.batch == null) {
+                    if (try pass.db.get(&keys[0]) != null) found += 1;
+                } else {
+                    try pass.db.get_many(keys[0..n], values[0..n]);
+                    for (values[0..n]) |value| found += @intFromBool(value != null);
+                }
+                remaining -= chunk;
+            }
+            _ = pass.found.fetchAdd(found, .monotonic);
+        }
+    };
 }
 
 /// Drops the OS page cache (needs passwordless sudo), returning whether it succeeded.

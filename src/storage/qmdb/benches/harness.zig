@@ -169,6 +169,34 @@ pub fn print_disk_delta(
     });
 }
 
+/// The most tasks `join_all` runs at once.
+pub const join_max = 64;
+
+/// Runs `task(context, index)` for every index below `count` at once, on their own threads
+/// where the `Io` has them, and returns the first error after all finish (commonware's
+/// `try_join_all` over futures that read a shared database).
+pub fn join_all(io: Io, count: usize, context: anytype, comptime task: anytype) !void {
+    assert(count > 0);
+    assert(count <= join_max);
+    const Context = @TypeOf(context);
+    const Run = struct {
+        fn run(ctx: Context, index: usize, slot: *?anyerror) Io.Cancelable!void {
+            task(ctx, index) catch |err| {
+                slot.* = err;
+            };
+        }
+    };
+    var errors: [join_max]?anyerror = @splat(null);
+    var group: Io.Group = .init;
+    defer group.cancel(io);
+    for (0..count) |index| {
+        const args = .{ context, index, &errors[index] };
+        group.concurrent(io, Run.run, args) catch group.async(io, Run.run, args);
+    }
+    try group.await(io);
+    for (errors[0..count]) |slot| if (slot) |err| return err;
+}
+
 /// A directory of `.zig-cache/tmp` for a harness's smoke test, removed by `cleanup`.
 pub const SmokeDir = struct {
     tmp: std.testing.TmpDir,
@@ -193,6 +221,20 @@ pub const SmokeDir = struct {
         self.* = undefined;
     }
 };
+
+test "harness: join_all runs every task at once and reports a task's error" {
+    const io = std.testing.io;
+    var hits: [join_max]std.atomic.Value(u32) = @splat(.init(0));
+    const Tasks = struct {
+        fn hit(all: *[join_max]std.atomic.Value(u32), index: usize) !void {
+            _ = all[index].fetchAdd(1, .monotonic);
+            if (index == 5) return error.Planted;
+        }
+    };
+    try std.testing.expectError(error.Planted, join_all(io, 9, &hits, Tasks.hit));
+    for (hits[0..9]) |*hit| try std.testing.expectEqual(@as(u32, 1), hit.load(.monotonic));
+    try std.testing.expectEqual(@as(u32, 0), hits[9].load(.monotonic));
+}
 
 test "harness: percentile, dedup, and parsing" {
     var values = [_]f64{ 4, 1, 3, 2, 5 };

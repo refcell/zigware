@@ -21,17 +21,20 @@
 //! - read modes: get_many, chunked (8 get_many chunks), shared (`depth` get_many of the same
 //!   batch), get_concurrent and get_serial (one `get` per key), stage (stage, merkleize, apply,
 //!   commit), pipeline (prefetch the next batch with get_many, then stage this one, then
-//!   commit), sustained (`2 * iters` batches with `depth` reported as in flight, one result)
+//!   commit; the prefetch runs beside the stage), sustained (`2 * iters` batches with `depth`
+//!   in flight, one result)
 //! - blob modes (random 4 KiB reads of the first log blob, no QMDB or page cache):
 //!   blob_read_at and blob_read_many
 //! - defaults: seed_batch 1,000,000; batch 1500; iters 20; depth 2; rseed 1234; disk nvme1n1;
 //!   page 4096 (the only physical page size zigware's storage writes); logical 0 (no
 //!   override); blob 10,000,000 items; cache 65,536 pages; threads 8; workers 8; blocking 512
 //!
-//! zigware's databases are not shared across threads, so the modes commonware runs as
-//! concurrent futures (chunked, shared, get_concurrent, pipeline, sustained) issue the same
-//! reads one after another, and blob_read_many reads its pages one by one. `threads`,
-//! `workers`, and `blocking` are accepted for commonware's command lines and reported only.
+//! The modes commonware runs as concurrent futures (chunked, shared, get_concurrent, pipeline,
+//! sustained) read the database from up to `harness.join_max` tasks at once through
+//! `*const Db`, as commonware's futures share `&db`; get_concurrent spreads its keys over that
+//! many tasks rather than one future per key. blob_read_many still reads its pages one by
+//! one. `threads`, `workers`, and `blocking` are accepted for commonware's command lines and
+//! reported only.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -101,7 +104,7 @@ pub const Args = struct {
                 args.read_mode = std.meta.stringToEnum(ReadMode, mode) orelse return null;
                 args.parse_batches(&p) orelse return null;
                 args.depth = p.optional(usize, args.depth) orelse return null;
-                if (args.depth == 0) return null;
+                if (args.depth == 0 or args.depth > harness.join_max) return null;
                 args.parse_sampling(&p) orelse return null;
                 args.parse_layout(&p) orelse return null;
             },
@@ -318,7 +321,7 @@ const Batches = struct {
 };
 
 /// Reads `keys` with one get_many, asserting every key is present.
-fn read_many(db: *Db, keys: []const Digest, values: []?Digest) !void {
+fn read_many(db: *const Db, keys: []const Digest, values: []?Digest) !void {
     assert(keys.len <= values.len);
     try db.get_many(keys, values[0..keys.len]);
     for (values[0..keys.len]) |value| if (value == null) return error.MissingKey;
@@ -379,20 +382,26 @@ fn read_iteration(
     assert(keys.len > 0 and keys.len <= values.len);
     switch (args.read_mode) {
         .get_many => try read_many(db, keys, values),
-        .get_serial, .get_concurrent => for (keys) |*key| {
+        .get_serial => for (keys) |*key| {
             const value = try db.get(key) orelse return error.MissingKey;
             std.mem.doNotOptimizeAway(value);
         },
+        .get_concurrent => {
+            const reads: Reads = .{ .db = db, .keys = keys, .values = values };
+            try harness.join_all(io, @min(keys.len, harness.join_max), &reads, Reads.gets);
+        },
         .chunked => {
             const chunk = @max(std.math.divCeil(usize, keys.len, 8) catch unreachable, 1);
-            var start: usize = 0;
-            while (start < keys.len) : (start += chunk) {
-                const end = @min(start + chunk, keys.len);
-                try read_many(db, keys[start..end], values[start..end]);
-            }
+            const reads: Reads = .{ .db = db, .keys = keys, .values = values, .chunk = chunk };
+            const chunks = std.math.divCeil(usize, keys.len, chunk) catch unreachable;
+            try harness.join_all(io, chunks, &reads, Reads.chunk_get_many);
         },
         .shared => {
-            for (0..args.depth) |_| try read_many(db, keys, values);
+            // Concurrent readers of one batch miss the same pages at the same time.
+            const all = try db.gpa.alloc(?Digest, keys.len * args.depth);
+            defer db.gpa.free(all);
+            const reads: Reads = .{ .db = db, .keys = keys, .values = all, .chunk = keys.len };
+            try harness.join_all(io, args.depth, &reads, Reads.whole_get_many);
             return std.fmt.bufPrint(buffer, " depth={d}", .{args.depth});
         },
         .stage => return stage_commit(io, db, keys, iter, values, buffer, null),
@@ -404,6 +413,41 @@ fn read_iteration(
     }
     return "";
 }
+
+/// Reads one batch's keys from several tasks; task `index` uses `values` from
+/// `index * chunk`. `chunk` is zero for per-key gets.
+const Reads = struct {
+    db: *const Db,
+    keys: []const Digest,
+    values: []?Digest,
+    chunk: usize = 0,
+
+    /// Gets every key at `index` modulo the task count.
+    fn gets(reads: *const Reads, index: usize) !void {
+        const tasks = @min(reads.keys.len, harness.join_max);
+        assert(index < tasks);
+        var at = index;
+        while (at < reads.keys.len) : (at += tasks) {
+            const value = try reads.db.get(&reads.keys[at]) orelse return error.MissingKey;
+            std.mem.doNotOptimizeAway(value);
+        }
+    }
+
+    /// One get_many of the `index`th chunk of the keys.
+    fn chunk_get_many(reads: *const Reads, index: usize) !void {
+        const start = index * reads.chunk;
+        assert(reads.chunk > 0 and start < reads.keys.len);
+        const end = @min(start + reads.chunk, reads.keys.len);
+        try read_many(reads.db, reads.keys[start..end], reads.values[start..end]);
+    }
+
+    /// One get_many of all the keys, into the `index`th values slice.
+    fn whole_get_many(reads: *const Reads, index: usize) !void {
+        assert(reads.chunk == reads.keys.len);
+        const values = reads.values[index * reads.chunk ..][0..reads.chunk];
+        try read_many(reads.db, reads.keys, values);
+    }
+};
 
 /// Stages `keys`, merkleizes a put to each, applies, and commits. With `prefetch` (the pipeline
 /// mode), first reads the next batch's keys with get_many, as an app given the keys ahead.
@@ -417,16 +461,30 @@ fn stage_commit(
     prefetch: ?[]const Digest,
 ) ![]const u8 {
     assert(keys.len > 0);
-    const start = harness.now_ns(io);
-    if (prefetch) |next| if (next.len > 0) try read_many(db, next, values);
-    const prefetch_ms = harness.elapsed_ms(io, start);
-    const stage_start = harness.now_ns(io);
+    const next = prefetch orelse &.{};
+    const next_values = try db.gpa.alloc(?Digest, next.len);
+    defer db.gpa.free(next_values);
     var batch = try db.new_batch();
-    var staged = staged: {
-        errdefer batch.deinit();
-        break :staged try batch.stage(keys, db, values[0..keys.len]);
+    var join: StageJoin = .{
+        .io = io,
+        .db = db,
+        .batch = &batch,
+        .keys = keys,
+        .values = values[0..keys.len],
+        .next = next,
+        .next_values = next_values,
     };
-    const stage_ms = harness.elapsed_ms(io, stage_start);
+    const joined = if (prefetch == null)
+        join.run(1)
+    else
+        harness.join_all(io, 2, &join, StageJoin.run);
+    joined catch |err| {
+        if (join.staged) |*staged| staged.deinit() else batch.deinit();
+        return err;
+    };
+    var staged = join.staged.?;
+    const prefetch_ms = join.prefetch_ms;
+    const stage_ms = join.stage_ms;
     const slots = slots: {
         errdefer staged.deinit();
         for (values[0..keys.len]) |value| if (value == null) return error.MissingKey;
@@ -453,6 +511,34 @@ fn stage_commit(
         "apply+commit={d:.2}", .{ prefetch_ms, stage_ms, merkle_ms, commit_ms });
 }
 
+/// The pipeline mode's prefetch of the next batch beside this batch's stage (commonware's
+/// `join!`): task 0 reads `next` into `next_values`, task 1 stages `keys` into `values`.
+const StageJoin = struct {
+    io: Io,
+    db: *const Db,
+    batch: *Db.UnmerkleizedBatch,
+    keys: []const Digest,
+    values: []?Digest,
+    next: []const Digest,
+    next_values: []?Digest,
+    staged: ?Db.StagedBatch = null,
+    prefetch_ms: f64 = 0,
+    stage_ms: f64 = 0,
+
+    fn run(join: *StageJoin, index: usize) !void {
+        assert(index < 2);
+        assert(join.values.len == join.keys.len);
+        const start = harness.now_ns(join.io);
+        if (index == 0) {
+            if (join.next.len > 0) try read_many(join.db, join.next, join.next_values);
+            join.prefetch_ms = harness.elapsed_ms(join.io, start);
+        } else {
+            join.staged = try join.batch.stage(join.keys, join.db, join.values);
+            join.stage_ms = harness.elapsed_ms(join.io, start);
+        }
+    }
+};
+
 /// `2 * iters` batches from their own key stream, timed from the first read as one result.
 fn sustained(gpa: Allocator, io: Io, db: *Db, args: *const Args, out: *Io.Writer) !void {
     assert(args.depth > 0);
@@ -460,12 +546,14 @@ fn sustained(gpa: Allocator, io: Io, db: *Db, args: *const Args, out: *Io.Writer
     const total = args.iters * 2;
     var pool: Batches = try .init(gpa, &rng, total, args.batch, args.keys);
     defer pool.deinit(gpa);
-    const values = try gpa.alloc(?Digest, args.batch);
+    const values = try gpa.alloc(?Digest, args.batch * args.depth);
     defer gpa.free(values);
+    var inflight: Inflight = .{ .db = db, .pool = &pool, .values = values, .batch = args.batch };
     const before = harness.diskstats(gpa, io, args.disk);
     const start = harness.now_ns(io);
-    for (0..total) |index| try read_many(db, pool.get(index), values);
+    try harness.join_all(io, args.depth, &inflight, Inflight.drain);
     const ms = harness.elapsed_ms(io, start);
+    assert(inflight.next.load(.monotonic) >= total);
     const after = harness.diskstats(gpa, io, args.disk);
     const per_batch = ms / @as(f64, @floatFromInt(total));
     try out.print("sustained:  depth={d} batches={d} ms_per_batch={d:.2} | total_ms={d:.1} | ", .{
@@ -475,6 +563,29 @@ fn sustained(gpa: Allocator, io: Io, db: *Db, args: *const Args, out: *Io.Writer
     try out.writeByte('\n');
     try out.flush();
 }
+
+/// Keeps `depth` batches in flight for the whole sustained run: each of `depth` tasks takes
+/// the next unread batch of the pool as its last one completes (commonware's refilled
+/// `FuturesUnordered`).
+const Inflight = struct {
+    db: *const Db,
+    pool: *const Batches,
+    values: []?Digest,
+    batch: usize,
+    next: std.atomic.Value(usize) = .init(0),
+
+    fn drain(inflight: *Inflight, index: usize) !void {
+        const values = inflight.values[index * inflight.batch ..][0..inflight.batch];
+        assert(values.len == inflight.batch);
+        const total = inflight.pool.lens.len;
+        // Each pass takes a distinct batch, so a task runs at most `total` passes.
+        for (0..total) |_| {
+            const taken = inflight.next.fetchAdd(1, .monotonic);
+            if (taken >= total) return;
+            try read_many(inflight.db, inflight.pool.get(taken), values);
+        }
+    }
+};
 
 /// Raw reads of random 4 KiB pages of the log's first data blob, bypassing QMDB and the page
 /// cache (commonware's `blob_phase`).

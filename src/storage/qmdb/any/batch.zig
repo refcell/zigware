@@ -113,7 +113,7 @@ pub fn Unmerkleized(comptime D: type) type {
         /// The key's value (owned by the caller) through this batch and where it resolved:
         /// null when this batch's own writes answer, the key is missing, or an ancestor deleted
         /// it.
-        fn stage_read(self: *const Self, key: *const K, db: *D) !StagedRead {
+        fn stage_read(self: *const Self, key: *const K, db: *const D) !StagedRead {
             if (self.find_mutation(key)) |mutation| {
                 return .{ .value = try value_mod.clone(?V, self.gpa, mutation.value), .loc = null };
             }
@@ -132,7 +132,7 @@ pub fn Unmerkleized(comptime D: type) type {
 
         /// Reads `keys` into `out` and stages the reads, so a staged merkleize takes one `Slot`
         /// per read. Consumes the batch on success; on error the batch is unchanged.
-        pub fn stage(self: *Self, keys: []const K, db: *D, out: []?V) !D.StagedBatch {
+        pub fn stage(self: *Self, keys: []const K, db: *const D, out: []?V) !D.StagedBatch {
             assert(keys.len == out.len);
             var staged: D.StagedBatch = .{ .batch = self.* };
             _ = staged.expand(keys, db, out) catch |err| {
@@ -261,7 +261,7 @@ pub fn Staged(comptime D: type) type {
         /// Reads more `keys` into `out` (owned by the caller), appending them as the returned
         /// range of slots. Keys are not deduplicated against earlier slots. On error the staged
         /// set is unchanged.
-        pub fn expand(self: *Self, keys: []const K, db: *D, out: []?V) !Range {
+        pub fn expand(self: *Self, keys: []const K, db: *const D, out: []?V) !Range {
             assert(keys.len == out.len);
             const gpa = self.batch.gpa;
             try self.batch.compatible(db);
