@@ -168,7 +168,12 @@ pub fn select(
     const Done = struct { index: usize, result: JoinError!T };
     const Race = union(enum) { done: Done };
     const Waiter = struct {
-        fn wait(handle: Handle(T), index: usize) Done {
+        // Uncancelable: a canceled join detaches its task, and select would then return while
+        // the task still runs on state its caller frees next (a runner's shutdown cancels
+        // every task, these waiters included). Every task is aborted, so each join ends.
+        fn wait(waiter_io: Io, handle: Handle(T), index: usize) Done {
+            const protection = waiter_io.swapCancelProtection(.blocked);
+            defer _ = waiter_io.swapCancelProtection(protection);
             return .{ .index = index, .result = handle.join() };
         }
     };
@@ -183,7 +188,7 @@ pub fn select(
     var race: Io.Select(Race) = .init(io, buffer[0..handles.len]);
     var started: usize = 0;
     while (started < handles.len) : (started += 1) {
-        race.concurrent(.done, Waiter.wait, .{ handles[started], started }) catch |err| {
+        race.concurrent(.done, Waiter.wait, .{ io, handles[started], started }) catch |err| {
             for (handles[started..]) |handle| {
                 if (handle.abort()) |_| {} else |_| {}
             }

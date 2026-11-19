@@ -197,6 +197,19 @@ test "a canceled select still aborts and reaps its tasks" {
     try run_handles("a canceled select still aborts and reaps its tasks");
 }
 
+test "a select canceled by runner shutdown returns only after its tasks end" {
+    // The runner's timeout shutdown cancels every task, select's waiters included.
+    var runner = try deterministic.Runner.init(testing.allocator, .{
+        .timeout_ns = std.time.ns_per_s,
+    });
+    defer runner.deinit();
+    const Case = Handles(deterministic.Context).@"select canceled by shutdown";
+    var flags: Case.Flags = .{};
+    try testing.expectError(error.Timeout, runner.start_context(Case.root, .{&flags}));
+    try testing.expect(flags.returned);
+    try testing.expect(flags.seen[0] and flags.seen[1]);
+}
+
 /// commonware `utils::handle::tests`.
 fn Handles(comptime Context: type) type {
     return struct {
@@ -285,6 +298,56 @@ fn Handles(comptime Context: type) type {
                 try testing.expectEqual(@as(u64, 0), try running(ctx, label));
             }
         }.body;
+
+        /// A select whose waiters are canceled must still return only after the tasks it
+        /// raced end: its caller frees what they use next (the dkg bootstrap freed a simplex
+        /// engine whose task was still joining its actors on a timed-out run).
+        pub const @"select canceled by shutdown" = struct {
+            pub const Flags = struct {
+                ended: [2]bool = .{ false, false },
+                /// `ended` when select returned.
+                seen: [2]bool = .{ false, false },
+                returned: bool = false,
+            };
+
+            fn hop() void {}
+
+            /// Unwinds over several scheduler rounds, uncancelably, as simplex's engine joins
+            /// its actors one after another.
+            fn parent(ctx: Context, ended: *bool) anyerror!void {
+                defer {
+                    const io = ctx.io();
+                    const protection = io.swapCancelProtection(.blocked);
+                    for (0..8) |_| {
+                        var future = io.concurrent(hop, .{}) catch @panic("no concurrency");
+                        future.await(io);
+                    }
+                    _ = io.swapCancelProtection(protection);
+                    ended.* = true;
+                }
+                try pending(ctx);
+            }
+
+            fn selecting(ctx: Context, flags: *Flags) anyerror!void {
+                // The first task ends at once on cancelation, so select takes its first
+                // result and drains the others' waiters, which shutdown cancels too.
+                const handles = [_]Unit{
+                    try ctx.child("quick").spawn(pending, .{}),
+                    try ctx.child("first").spawn(parent, .{&flags.ended[0]}),
+                    try ctx.child("second").spawn(parent, .{&flags.ended[1]}),
+                };
+                const result = context.select(anyerror!void, ctx.io(), &handles);
+                flags.seen = flags.ended;
+                flags.returned = true;
+                return try result;
+            }
+
+            pub fn root(ctx: Context, flags: *Flags) anyerror!void {
+                const handle = try ctx.child("selector").spawn(selecting, .{flags});
+                defer if (handle.abort()) |_| {} else |_| {};
+                while (true) try ctx.sleep(.fromMilliseconds(100));
+            }
+        };
     };
 }
 
