@@ -8,6 +8,7 @@ pub const Config = actor.Config;
 pub const ContractError = actor.ContractError;
 pub const Flow = actor.Flow;
 pub const assert_types = actor.assert_types;
+pub const trace_target = actor.trace_target;
 pub const artifact = @import("artifact.zig");
 pub const dealing = @import("dealing.zig");
 pub const inclusion = @import("inclusion.zig");
