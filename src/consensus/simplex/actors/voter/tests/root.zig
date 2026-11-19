@@ -4,4 +4,5 @@ test {
     _ = @import("harness.zig");
     _ = @import("restart.zig");
     _ = @import("backfill.zig");
+    _ = @import("conflicts.zig");
 }
