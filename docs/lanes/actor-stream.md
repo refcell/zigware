@@ -122,7 +122,8 @@ see docs/lanes/runtime.md). Write library code against `std.Io`.
   e2e with a corrupting/forging/tampering adversary) in `src/stream/fuzz.zig`, seeded in
   `zig build test` and coverage-guided under `--fuzz`.
 - [x] Stream transport contract and tests on `runtime.mocks` and `runtime.network`;
-  `src/stream/mocks.zig` deleted. SakeCups is also tested over bind/accept/dial.
+  stream's mock channel (`mocks.zig`, 1f64b02d) deleted. SakeCups is also tested over
+  bind/accept/dial.
 
 ### Test audit: stream (2026-11-19, commonware 43b357a41)
 
