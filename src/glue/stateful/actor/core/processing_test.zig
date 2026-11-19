@@ -1,124 +1,15 @@
 //! commonware `glue/src/stateful/actor/core/processing.rs` tests: proposals build on recovered
 //! state, verdicts, a waiting verification that never votes, finalization acknowledged once
-//! durable, redelivery, independence of verifications and builds, and mailbox shutdown.
+//! durable, redelivery, independence of verifications and builds, and mailbox shutdown. The
+//! fixture is in `testing.zig`.
 
 const std = @import("std");
 const testing = std.testing;
-const Io = std.Io;
-const actor = @import("actor");
-const consensus = @import("consensus");
-const utils = @import("utils");
-const harness_mod = @import("../processor/testing.zig");
-const processing_mod = @import("processing.zig");
+const fixture_mod = @import("testing.zig");
 
-const gpa = testing.allocator;
-const io = testing.io;
-const oneshot = utils.channel.oneshot;
-const Exact = utils.acknowledgement.Exact;
-const Harness = harness_mod.Harness;
+const harness_mod = fixture_mod.harness;
+const Fixture = fixture_mod.Fixture;
 const TestBlock = harness_mod.TestBlock;
-
-/// Records marshal prunes.
-const TestMarshal = struct {
-    prunes: *std.ArrayList(u64),
-
-    pub fn prune(self: TestMarshal, height: consensus.Height) !void {
-        try self.prunes.append(gpa, height.get());
-    }
-};
-
-const TestP = struct {
-    pub const App = harness_mod.TestApp;
-    pub const Databases = harness_mod.TestP.Databases;
-    pub const Provider = harness_mod.TestProvider;
-    pub const Marshal = TestMarshal;
-};
-
-const Processing = processing_mod.Processing(TestP);
-const Mailbox = Processing.Mailbox;
-const Message = Processing.Message;
-
-/// A processing loop running over a processor harness, fed through a mailbox.
-const Fixture = struct {
-    harness: Harness,
-    prunes: std.ArrayList(u64) = .empty,
-    receiver: Processing.Receiver,
-    mailbox: ?Mailbox,
-    processing: Processing,
-    future: ?Io.Future(anyerror!void) = null,
-
-    /// `fixture` must not move afterwards.
-    fn init(fixture: *Fixture) !void {
-        try fixture.harness.init();
-        errdefer fixture.harness.deinit();
-        fixture.prunes = .empty;
-        const pair = try actor.mailbox.new(Message, gpa, io, 8);
-        fixture.receiver = pair.receiver;
-        fixture.mailbox = Mailbox.init(gpa, io, pair.sender);
-        const marshal: TestMarshal = .{ .prunes = &fixture.prunes };
-        const processor = &fixture.harness.processor;
-        const provider = fixture.harness.provider();
-        fixture.processing = .init(gpa, io, &fixture.receiver, provider, marshal, processor);
-        fixture.future = try io.concurrent(run, .{&fixture.processing});
-    }
-
-    fn run(processing: *Processing) anyerror!void {
-        return processing.run();
-    }
-
-    /// Closes the mailbox, which stops the loop, and releases everything.
-    fn deinit(fixture: *Fixture) !void {
-        if (fixture.mailbox) |*mailbox| mailbox.deinit();
-        fixture.mailbox = null;
-        const outcome = if (fixture.future) |*future| future.await(io) else {};
-        fixture.processing.deinit();
-        fixture.receiver.deinit();
-        fixture.prunes.deinit(gpa);
-        fixture.harness.deinit();
-        try outcome;
-    }
-
-    fn send(fixture: *Fixture, message: Message) !void {
-        const mailbox = &fixture.mailbox.?;
-        const feedback = try mailbox.sender.enqueue(message);
-        try testing.expect(feedback != .closed);
-    }
-
-    /// Sends a verification of `blocks` (newest first) and returns its verdict's receiver.
-    fn verify(fixture: *Fixture, blocks: []const TestBlock) !oneshot.Receiver(bool) {
-        const pair = try oneshot.channel(bool, gpa, io);
-        try fixture.send(.{ .verify = .{
-            .ancestry = try fixture.harness.ancestry(blocks),
-            .verification = pair.sender,
-        } });
-        return pair.receiver;
-    }
-
-    /// Proposes on `parent` at `view` and returns the built block.
-    fn propose(fixture: *Fixture, parent: TestBlock, view: u64) !?Mailbox.Digested {
-        const mailbox = &fixture.mailbox.?;
-        const context: TestBlock.Context = .{ .round = harness_mod.round(view) };
-        const ancestry = try fixture.harness.ancestry(&.{parent});
-        return mailbox.propose({}, context, ancestry, {});
-    }
-
-    /// Reports `block` finalized and returns its acknowledgement's waiter.
-    fn finalize(fixture: *Fixture, block: TestBlock) !Exact.Waiter {
-        const handle = try Exact.handle(gpa, io);
-        const update: Mailbox.Update = .{ .block = .{
-            .block = try harness_mod.digested(block),
-            .ack = handle.acknowledgement,
-        } };
-        try testing.expect(fixture.mailbox.?.report(update) != .closed);
-        return handle.waiter;
-    }
-
-    fn counter(fixture: *Fixture) !?u64 {
-        const readers = fixture.harness.databases.readers();
-        const value = try harness_mod.read_applied(readers, harness_mod.counter_key());
-        return if (value) |digest| harness_mod.digest_u64(digest) else null;
-    }
-};
 
 test "stateful processing: a proposal builds on its parent and verifies" {
     var fixture: Fixture = undefined;
