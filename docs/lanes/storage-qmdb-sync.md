@@ -105,6 +105,13 @@ it comes first once `any` lands.
 - [x] Fuzz targets: all six `qmdb_current_*` (commonware has no compact fuzz target; compact
   is covered by its crash-point and tamper tests). Benches: commonware's `qmdb/benches` span
   every variant, current included, so they stay with storage-qmdb's benches item.
+- [ ] Reshare harness phase 2 (coordinator, split agreed with bls-math): commonware's ten
+  state-sync ceremonies from `glue/src/dkg/tests/reshare/mod.rs` in
+  src/glue/dkg/tests/reshare/state_sync_{block,app,validator,test}.zig, over a validator
+  variant with the probe, QMDB resolver, `Stateful` app, and DKG state-sync plan. Each runs
+  under both of commonware's electors on the discovery network; the lookup network and
+  `with_stale` reply swapping are not ported (the stale test keeps its restart and two sync
+  starts). The ceremonies are `-Dslow-tests`; the block codec test runs per push.
 
 ## Agreement with storage-qmdb (2026-11-16)
 - `any.Db(F, U, C, H, ...)` (family, update type, contiguous journal, hasher, index or
@@ -274,3 +281,4 @@ Design:
 - 2026-11-19: current variants of the qmdb generate and init benches.
 - 2026-11-19: any and current on the shared sync harness.
 - 2026-11-19: current merkleize, chained_growth, and constantinople benches.
+- 2026-11-19: reshare state-sync harness (block, app, validator, engine) and its ten tests.

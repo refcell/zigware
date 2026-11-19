@@ -303,4 +303,5 @@ test "reshare e2e roots of unity output" {
 
 test {
     _ = @import("properties_test.zig");
+    _ = @import("state_sync_test.zig");
 }
