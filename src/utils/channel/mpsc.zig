@@ -255,10 +255,12 @@ pub fn Receiver(comptime T: type) type {
             var buffer = state.buffer;
             state.buffer = .empty;
             state.condition.broadcast(state.io);
+            // Read before releasing: once released, the last sender may free `state`.
+            const gpa = state.gpa;
             const last = state.release_locked_keep();
             // Outside the lock: a discarded value may own a sender of this channel.
             while (buffer.popFront()) |value| discard(T, value);
-            buffer.deinit(state.gpa);
+            buffer.deinit(gpa);
             if (last) state.destroy();
         }
     };
