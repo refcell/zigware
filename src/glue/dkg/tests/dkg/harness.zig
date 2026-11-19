@@ -309,6 +309,9 @@ fn run_node(ctx: Context, started: Started) void {
     var completion = running.completion.recv() catch |err| {
         stop(running.handle);
         if (err == error.Canceled) return;
+        // A crash aborts this task's subtree: the engine can end, closing its completion,
+        // before this task reaches a cancelation point.
+        ctx.io().checkCancel() catch return;
         std.debug.panic("DKG engine stopped before completing: {t}", .{err});
     };
     started.inner.completed = true;

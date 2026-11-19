@@ -766,7 +766,9 @@ shared `tests/mocks.zig`, which takes additive edits only (agreed with the glue 
 - [x] mod.rs's closed network receiver, restart completion state is fresh, and restart after
   completion (`MemorySecretStore.stall`). The engine's select also ends when buffered broadcast's
   receiver closes (commonware selects on `buffer_handle`), through `Node.watch_broadcast`.
-- [ ] mod.rs's scheduled-restart, random-crash, and laggard plans.
+- [x] mod.rs's scheduled-restart, random-crash (16 seeds), and laggard plans, behind
+  -Dslow-tests. The laggard's restart schedule runs 4.5 s later than commonware's: the three
+  survivors complete near 6.9 s here, after commonware's 4.5 s crash.
 - [ ] tests/reshare harness, properties, and mod.rs's ceremony tests (needs the orchestrator).
 - [x] lookup's peer-activation test: network.rs's
   `lookup_secondary_dials_primary_and_receives_response` in `network_test.zig` (consensus-marshal
@@ -787,3 +789,5 @@ shared `tests/mocks.zig`, which takes additive edits only (agreed with the glue 
   the whole engine.
 - 2026-11-19: three more single-node dkg tests; without the broadcast watcher, the closed
   receiver test finds 9 engine tasks still running.
+- 2026-11-19: the crash plans; a crash that closed the engine's completion before the node
+  task saw its cancelation made run_node panic, until it checked for cancelation first.
