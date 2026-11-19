@@ -164,8 +164,8 @@ qmdb parallel snapshot init (this lane's ce3e897), over `storage/src/qmdb/snapsh
   defaults to the former, and the only override (immutable `Operation`) is true exactly for
   `Commit`, which always carries a floor, so snapshot.zig's check is equivalent. The same commit
   renumbers every qmdb operation tag (commit 0, update 1, delete 2, set 3, append 4) and
-  regenerates `storage/conformance.toml`; that is the storage-qmdb lane's codec and was reported
-  to it.
+  regenerates `storage/conformance.toml`; that is the storage-qmdb lane's codec, reported to
+  it and since applied there (storage-qmdb.md backlog).
 - 102430409, 90960d81c, 8bf364011 (store strategy, immutable floor-bounded reads and
   `commit_floor_at` init, unified sync targets) change storage-qmdb and storage-qmdb-sync code
   outside snapshot building; reported to those lanes.
