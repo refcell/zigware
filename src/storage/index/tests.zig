@@ -4,8 +4,8 @@
 //!
 //! Commonware's `should_panic` tests (cursor `update`/`delete`/`insert` before `next` or after
 //! the last value, a double delete) check panics, which a Zig test cannot catch; the panics are
-//! in `Cursor.active` and `Cursor.insert`. The cross-thread cursor test has no counterpart: an
-//! index is not shared between threads here.
+//! in `Cursor.active` and `Cursor.insert`. The cross-thread cursor test shares an index behind
+//! a `std.Io.Mutex`, as commonware's behind an `Arc<Mutex<_>>`.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -182,6 +182,51 @@ fn run_cursor_find(comptime I: type) !void {
 
 test "index cursor find" {
     inline for (indices) |I| try run_cursor_find(I);
+}
+
+/// An index behind a mutex, as commonware's `Arc<Mutex<I>>`.
+fn Shared(comptime I: type) type {
+    return struct {
+        mutex: std.Io.Mutex = .init,
+        index: I,
+
+        /// On another thread: finds value 200 of `test_key2` through a cursor and updates it to
+        /// 250, holding the lock for the cursor's lifetime.
+        fn update(shared: *@This(), updated: *bool) void {
+            const io = testing.io;
+            shared.mutex.lockUncancelable(io);
+            defer shared.mutex.unlock(io);
+            var cursor = shared.index.get_mut("test_key2") orelse return;
+            defer cursor.finish();
+            if (!cursor.find(@as(u64, 200), equal)) return;
+            cursor.update(250);
+            updated.* = true;
+        }
+    };
+}
+
+fn run_cursor_across_threads(comptime I: type) !void {
+    const io = testing.io;
+    var shared: Shared(I) = .{ .index = new(I) };
+    defer shared.index.deinit();
+    {
+        shared.mutex.lockUncancelable(io);
+        defer shared.mutex.unlock(io);
+        try shared.index.insert("test_key1", 100);
+        try shared.index.insert("test_key2", 200);
+    }
+    var updated = false;
+    const thread = try std.Thread.spawn(.{}, Shared(I).update, .{ &shared, &updated });
+    thread.join();
+    try testing.expect(updated);
+    // The update applied and the colliding value stayed.
+    shared.mutex.lockUncancelable(io);
+    defer shared.mutex.unlock(io);
+    try expect_values(&shared.index, "test_key2", &.{ 100, 250 });
+}
+
+test "index cursor across threads" {
+    inline for (indices) |I| try run_cursor_across_threads(I);
 }
 
 fn run_many_keys(comptime I: type) !void {

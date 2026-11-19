@@ -261,3 +261,7 @@ qmdb `current` (balances, over the MMB) and `keyless` (payout log, over the MMR)
 - 2026-11-19: prunable recovery fuzz pipelines start_syncs on the delayed-sync mock, holding,
   awaiting, failing, and abandoning their completions (planted bug: `start_sync` dropping
   `requested`, caught by synced ⇒ retained).
+- 2026-11-19: not-portable re-audit (57 entries, against start_sync, DelayedSync, the faulty
+  wrap, and parallel conformance): the 3 index `cursor_across_threads` tests port (mutex and a
+  spawned thread); the rest are `should_panic`, the index spill and registry-metrics design,
+  and bmt's slice inputs. 54 remain.

@@ -250,14 +250,18 @@ Commonware's `#[test]` functions matched to zigware tests by what they check.
 
 | module | tests | ported | partial | open | not portable |
 |---|---|---|---|---|---|
-| index | 172 | 122 | 0 | 0 | 50 |
+| index | 172 | 125 | 0 | 0 | 47 |
 | rmap | 39 | 38 | 0 | 0 | 1 |
 | bitmap | 15 | 11 | 0 | 0 | 4 |
 | translator | 18 | 17 | 0 | 0 | 1 |
 
 Not portable: 36 `should_panic` tests (zig tests cannot catch panics; each panic exists),
-index's spill tests (one tree, no spill threshold, see Decisions), `cursor_across_threads`,
-and the metrics-registry range test.
+index's spill tests (one tree, no spill threshold, see Decisions), and the metrics-registry
+range test (the indices keep plain counters, not registry metrics). The 3
+`cursor_across_threads` tests are ported as `index cursor across threads` (an index behind a
+`std.Io.Mutex`, updated through a cursor on a spawned thread). Re-audited 2026-11-19 against
+start_sync, DelayedSync, the faulty wrap, and parallel conformance: none of the other
+not-portable entries depends on them.
 
 Open (index):
 - [x] `range_for_each_value_visits_all_values_once` and `install_range_nonzero_offset` for
