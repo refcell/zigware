@@ -61,7 +61,7 @@ fmt:
 tidy:
     etc/scripts/tidy.sh
 
-# Check links, images, and anchors in the READMEs, docs/, and docs/lanes/ against local files
+# Check Markdown links, images, and anchors locally; --code-paths also checks `src/...` spans
 check-links *args:
     python3 -I etc/scripts/check-links.py "$@"
 
