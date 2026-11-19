@@ -55,10 +55,8 @@ test "voter restart newer floor skips stale journal" {
             // A stale finalization the configured floor must hide from replay.
             try seed_finalization(ctx, &net, partition, 3);
             var stack: h.VoterStack = undefined;
-            try stack.start(ctx, &net, .{
-                .partition = partition,
-                .floor = try finalization(ctx, &net, 8, "newer-floor-finalization"),
-            });
+            const floor = try finalization(ctx, &net, 8, "newer-floor-finalization");
+            try stack.start(ctx, &net, h.floor_start(partition, floor, std.math.maxInt(u64)));
             defer stack.stop();
             try h.expect_at_floor(&stack, ctx, .new(8));
             try testing.expect(finalization_count(&stack.reporter, ctx.io(), 8) > 0);
@@ -88,10 +86,9 @@ test "voter restart floor finalization not resent" {
             var floor = try finalization(ctx, &net, 8, "floor");
             defer floor.deinit(gpa);
             var stack: h.VoterStack = undefined;
-            try stack.start(ctx, &net, .{
-                .partition = "voter_restart_floor_not_resent",
-                .floor = try floor.clone(gpa),
-            });
+            const partition = "voter_restart_floor_not_resent";
+            const options = h.floor_start(partition, try floor.clone(gpa), std.math.maxInt(u64));
+            try stack.start(ctx, &net, options);
             defer stack.stop();
             try h.expect_at_floor(&stack, ctx, .new(8));
             // A peer forwards the floor finalization again, then a new one ending the watch.
@@ -151,10 +148,8 @@ test "voter restart older floor ignored for newer journal" {
             // A newer journaled finalization lets replay advance past the configured floor.
             try seed_finalization(ctx, &net, partition, 8);
             var stack: h.VoterStack = undefined;
-            try stack.start(ctx, &net, .{
-                .partition = partition,
-                .floor = try finalization(ctx, &net, 3, "older-floor-finalization"),
-            });
+            const floor = try finalization(ctx, &net, 3, "older-floor-finalization");
+            try stack.start(ctx, &net, h.floor_start(partition, floor, std.math.maxInt(u64)));
             defer stack.stop();
             try h.expect_at_floor(&stack, ctx, .new(8));
             try testing.expect(finalization_count(&stack.reporter, ctx.io(), 8) > 0);
@@ -185,10 +180,8 @@ test "voter replay floor does not move during replay" {
                 .{ .finalize = vote },
             });
             var stack: h.VoterStack = undefined;
-            try stack.start(ctx, &net, .{
-                .partition = partition,
-                .floor = try finalization(ctx, &net, 3, "static-replay-floor"),
-            });
+            const floor = try finalization(ctx, &net, 3, "static-replay-floor");
+            try stack.start(ctx, &net, h.floor_start(partition, floor, std.math.maxInt(u64)));
             defer stack.stop();
             try h.expect_at_floor(&stack, ctx, .new(8));
             const signers = stack.reporter.votes(.new(8)).finalize;
@@ -284,6 +277,45 @@ test "voter startup update timeout hint nullifies recovered view" {
                 if (message.constructed.nullify.view().get() == 3) return;
             }
             return error.NoImmediateNullify;
+        }
+    }.body);
+}
+
+// commonware test_replay_preserves_exhausted_skip_budget: replaying a skipped term keeps its
+// budget spent, so a leader-nullify hint waits; finalizing the skipped view then makes the
+// pending hint fire before the leader deadline.
+test "voter replay preserves exhausted skip budget" {
+    try run(struct {
+        fn body(ctx: Ctx) anyerror!void {
+            const gpa = ctx.gpa();
+            var net: h.Network = undefined;
+            try net.start(ctx, 5, "voter_replay_skip_budget");
+            defer net.deinit();
+            const partition = "voter_replay_skip_budget";
+            // The artifacts of skipping view 1: replaying the nullification enters view 2
+            // without moving the finalized floor.
+            const skipped: h.Round = .new(epoch, .new(1));
+            const quorum = net.quorum();
+            var nullification = try h.build(gpa, .nullification, net.schemes(), skipped, quorum);
+            defer nullification.deinit(gpa);
+            const local = (try h.Nullify.sign(gpa, &net.schemes()[0], skipped)).?;
+            try h.seed_journal(ctx, partition, &net.schemes()[0], .new(1), &.{
+                .{ .nullify = local },
+                .{ .nullification = nullification },
+            });
+            var stack: h.VoterStack = undefined;
+            try stack.start(ctx, &net, h.floor_start(partition, null, 1));
+            defer stack.stop();
+            try stack.expect_update(ctx, 2, 0);
+            // The replayed term spent budget 1, so this hint must stay pending.
+            try stack.mailbox.timeout(.new(epoch, .new(2)), .leader_nullify);
+            try testing.expect(!try stack.nullify_within(ctx, 2, 1_000));
+            // Finalizing view 1 makes the retained hint eligible before the 5 s deadline.
+            const payload = Sha256.hash(&.{"restore-skip-budget"});
+            const subject: h.Proposal = .init(skipped, .zero(), payload);
+            const restore = try h.build(gpa, .finalization, net.schemes(), subject, quorum);
+            try stack.mailbox.recovered(gpa, .{ .finalization = restore });
+            try testing.expect(try stack.nullify_within(ctx, 2, 1_000));
         }
     }.body);
 }

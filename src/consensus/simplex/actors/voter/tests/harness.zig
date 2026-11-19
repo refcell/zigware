@@ -100,6 +100,20 @@ pub const Options = struct {
     resolver_capacity: u32 = 8,
 };
 
+/// commonware `start_voter_with_floor`'s voter: 5 s leader, 6 s certification, and 60 min
+/// retry timeouts, over `partition` from `floor` (null for genesis).
+pub fn floor_start(partition: []const u8, floor: ?Finalization, skip_budget: u64) Options {
+    return .{
+        .leader_timeout_ms = 5_000,
+        .certification_timeout_ms = 6_000,
+        .timeout_retry_ms = 60 * 60 * 1_000,
+        .partition = partition,
+        .floor = floor,
+        .skip_budget = skip_budget,
+        .batcher_capacity = 8,
+    };
+}
+
 /// `n` ed25519 validators on one simulated network (commonware
 /// `start_test_network_with_peers`). Must not move.
 pub const Network = struct {
@@ -365,6 +379,26 @@ pub const VoterStack = struct {
         try std.testing.expect(message == .updated);
         try std.testing.expectEqual(kind, std.meta.activeTag(message.updated.certificate));
         try std.testing.expectEqual(view, message.updated.certificate.view().get());
+    }
+
+    /// Whether our nullify vote for `view` reaches the batcher within `limit_ms` of
+    /// simulated time (other messages are skipped).
+    pub fn nullify_within(self: *VoterStack, ctx: Ctx, view: u64, limit_ms: u64) !bool {
+        var waited: u64 = 0;
+        // Bounded by `limit_ms` of simulated time.
+        while (waited < limit_ms) {
+            const message = self.batcher.try_recv() catch |err| switch (err) {
+                error.Empty => {
+                    try ctx.sleep(.fromMilliseconds(1));
+                    waited += 1;
+                    continue;
+                },
+                else => return error.MailboxClosed,
+            };
+            if (message != .constructed or message.constructed != .nullify) continue;
+            if (message.constructed.nullify.view().get() == view) return true;
+        }
+        return false;
     }
 
     /// The next resolver message within `limit_ms` of simulated time, or null.
