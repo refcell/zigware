@@ -78,3 +78,26 @@ jobs:
           EOF
           fi
           zig build "$STEPS" "$@" --summary all
+
+  # The full-system examples end to end: dkg's bootstrap and validators, and bridge's indexer
+  # and two networks, each run locally until every node finalizes the same heights
+  # (etc/scripts/e2e.sh).
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: install zig
+        run: |
+          sh etc/scripts/install-zig.sh "$HOME/zig"
+          echo "$HOME/zig" >> "$GITHUB_PATH"
+      - name: e2e
+        env:
+          E2E_DIR: ${{ runner.temp }}/e2e
+        run: etc/scripts/e2e.sh
+      - name: logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-logs
+          path: ${{ runner.temp }}/e2e
