@@ -19,8 +19,7 @@ const hex_digits_lower = "0123456789abcdef";
 const lanes = 16;
 const Lanes = @Vector(lanes, u8);
 
-/// Shuffle masks: `interleave` pairs two vectors' bytes, `evens` and `odds` split one.
-const interleave = shuffle_mask(2 * lanes, .interleave);
+/// Shuffle masks that split one vector into its even and odd bytes.
 const evens = shuffle_mask(lanes, .evens);
 const odds = shuffle_mask(lanes, .odds);
 
@@ -40,24 +39,43 @@ fn either(a: @Vector(lanes, bool), b: @Vector(lanes, bool)) @Vector(lanes, bool)
     return @select(bool, a, a, b);
 }
 
+/// Bytes per step of the encoder's main loop: the target's widest byte vector (64 with
+/// AVX-512, 32 with AVX2), so long inputs run as wide as `const-hex`'s SIMD paths.
+const wide_lanes = @max(lanes, std.simd.suggestVectorLength(u8) orelse lanes);
+
 /// The lowercase hex digit of each nibble (each below 16).
-fn nibble_digits(nibbles: Lanes) Lanes {
-    const letter_gap: Lanes = @splat('a' - '0' - 10);
-    const gap = @select(u8, nibbles >= @as(Lanes, @splat(10)), letter_gap, @as(Lanes, @splat(0)));
-    return nibbles + @as(Lanes, @splat('0')) + gap;
+fn nibble_digits(comptime width: usize, nibbles: @Vector(width, u8)) @Vector(width, u8) {
+    const V = @Vector(width, u8);
+    const gap = @select(u8, nibbles >= @as(V, @splat(10)), @as(V, @splat('a' - '0' - 10)), @as(
+        V,
+        @splat(0),
+    ));
+    return nibbles + @as(V, @splat('0')) + gap;
+}
+
+/// Encodes whole `width`-byte steps of `bytes` from `start`; returns where they stop.
+fn encode_steps(comptime width: usize, out: []u8, bytes: []const u8, start: usize) usize {
+    assert(start <= bytes.len);
+    const V = @Vector(width, u8);
+    const pairs = comptime shuffle_mask(2 * width, .interleave);
+    var index = start;
+    while (index + width <= bytes.len) : (index += width) {
+        const chunk: V = bytes[index..][0..width].*;
+        const high = nibble_digits(width, chunk >> @splat(4));
+        const low = nibble_digits(width, chunk & @as(V, @splat(0x0f)));
+        out[index * 2 ..][0 .. 2 * width].* = @shuffle(u8, high, low, pairs);
+    }
+    assert(bytes.len - index < width);
+    return index;
 }
 
 /// Writes the lowercase hexadecimal encoding of `bytes` into `out` and returns the written
 /// prefix. `out` must hold at least `2 * bytes.len` bytes.
 pub fn hex_encode(out: []u8, bytes: []const u8) []u8 {
     assert(out.len >= bytes.len * 2);
-    var index: usize = 0;
-    while (index + lanes <= bytes.len) : (index += lanes) {
-        const chunk: Lanes = bytes[index..][0..lanes].*;
-        const high = nibble_digits(chunk >> @splat(4));
-        const low = nibble_digits(chunk & @as(Lanes, @splat(0x0f)));
-        out[index * 2 ..][0 .. 2 * lanes].* = @shuffle(u8, high, low, interleave);
-    }
+    var index = encode_steps(wide_lanes, out, bytes, 0);
+    // Shorter inputs and the wide loop's remainder take narrower steps, then single bytes.
+    if (wide_lanes > lanes) index = encode_steps(lanes, out, bytes, index);
     for (bytes[index..], index..) |byte, tail| {
         out[tail * 2] = hex_digits_lower[byte >> 4];
         out[tail * 2 + 1] = hex_digits_lower[byte & 0x0f];
@@ -401,12 +419,15 @@ fn expect_matches_reference(input: []const u8) !void {
     if (expected) |bytes| try testing.expectEqualSlices(u8, bytes, actual.?);
 }
 
+/// Lengths the reference test covers: past two wide steps, a narrow step, and a tail.
+const reference_len_max = 2 * wide_lanes + lanes + 3;
+
 // The vector encoder and decoder match the scalar code at every length across the lane
 // boundaries, and one non-digit at any position (each lane, either nibble, or the tail)
 // fails the decode.
 test "vector hex matches the scalar reference" {
     var rng = std.Random.DefaultPrng.init(0x6865);
-    var bytes: [3 * lanes + 3]u8 = undefined;
+    var bytes: [reference_len_max]u8 = undefined;
     var digits: [2 * bytes.len]u8 = undefined;
     var expected: [2 * bytes.len]u8 = undefined;
     for (0..bytes.len + 1) |len| {
@@ -434,7 +455,7 @@ test "vector hex matches the scalar reference" {
 /// Each stripped whitespace character, inserted at any position of `encoded`, still decodes
 /// as the reference does.
 fn expect_whitespace_stripped(encoded: []const u8) !void {
-    var spaced: [2 * (3 * lanes + 3) + 1]u8 = undefined;
+    var spaced: [2 * reference_len_max + 1]u8 = undefined;
     for (0..encoded.len + 1) |position| {
         for (" \t\n\r") |char| {
             @memcpy(spaced[0..position], encoded[0..position]);
