@@ -11,6 +11,7 @@
 
 const std = @import("std");
 const assert = std.debug.assert;
+const target = "commonware_glue::dkg::reshare::actor::dealing";
 const Io = std.Io;
 const codec = @import("codec");
 const consensus = @import("consensus");
@@ -20,7 +21,6 @@ const inclusion = @import("inclusion.zig");
 const actor_mod = @import("actor.zig");
 
 const Epoch = consensus.Epoch;
-const log = std.log.scoped(.dkg_reshare);
 
 /// The dealing window's functions for `Actor(T)`.
 pub fn Window(comptime T: type) type {
@@ -109,14 +109,16 @@ pub fn Window(comptime T: type) type {
             switch (event) {
                 .mailbox => |received| {
                     const message = received orelse {
-                        log.debug("mailbox closed, shutting down", .{});
+                        const text = "mailbox closed, shutting down";
+                        self.tracer.with_target(target).event(.debug, text, .{});
                         return .stop;
                     };
                     return handle_mailbox(self, session, sender, requests, message);
                 },
                 .network => |received| {
                     var message = received orelse {
-                        log.debug("dealing channel closed, shutting down", .{});
+                        const text = "dealing channel closed, shutting down";
+                        self.tracer.with_target(target).event(.debug, text, .{});
                         return .stop;
                     };
                     defer message.deinit();
@@ -143,7 +145,8 @@ pub fn Window(comptime T: type) type {
                         .response = body.response,
                     };
                     if (try requests.push(self.gpa, request)) {
-                        log.debug("holding final-block request until the midpoint", .{});
+                        const text = "holding final-block request until the epoch midpoint";
+                        self.tracer.with_target(target).event(.debug, text, .{});
                     }
                 },
                 .finalized => |body| {
@@ -334,9 +337,10 @@ pub fn Window(comptime T: type) type {
                     else => |other| return other,
                 };
             self.metrics.record_share(from, epoch.get());
-            log.info("epoch {d}: received dealing", .{epoch.get()});
+            const t = self.tracer.with_target(target);
+            t.event(.info, "received dealing", .{ .epoch = epoch, .dealer = from });
             const sent = try send_wire(self, sender, from, .{ .ack = ack });
-            if (!sent) log.info("epoch {d}: failed to send ack", .{epoch.get()});
+            if (!sent) t.event(.warn, "failed to send ack", .{ .epoch = epoch, .dealer = from });
             assert(player.acks.len() > 0);
         }
 
@@ -363,7 +367,8 @@ pub fn Window(comptime T: type) type {
             };
             if (outcome == .recorded) {
                 self.metrics.record_ack(from, epoch.get());
-                log.info("epoch {d}: received ack", .{epoch.get()});
+                const fields = .{ .epoch = epoch, .player = from };
+                self.tracer.with_target(target).event(.info, "received ack", fields);
             }
         }
 
@@ -371,7 +376,9 @@ pub fn Window(comptime T: type) type {
         fn block_peer(self: *Actor, peer: P, epoch: Epoch, reason: []const u8) void {
             assert(reason.len > 0);
             assert(self.config.max_participants > 0);
-            log.info("epoch {d}: blocking peer: {s}", .{ epoch.get(), reason });
+            // commonware_p2p's `block!`: a warning naming the peer and the reason.
+            const fields = .{ .peer = peer, .epoch = epoch };
+            self.tracer.with_target(target).event(.warn, reason, fields);
             // A p2p blocker's `Feedback` only says whether the request was queued.
             _ = self.config.blocker.block(peer);
         }
@@ -414,10 +421,11 @@ pub fn Window(comptime T: type) type {
                 const offer: Wire = .{
                     .dealer = .{ .pub_msg = dealer.public, .priv_msg = item.msg },
                 };
+                const fields = .{ .epoch = epoch, .recipient = item.player };
                 if (try send_wire(self, sender, item.player, offer)) {
-                    log.debug("epoch {d}: sent share", .{epoch.get()});
+                    self.tracer.with_target(target).event(.debug, "sent share", fields);
                 } else {
-                    log.debug("epoch {d}: failed to send share", .{epoch.get()});
+                    self.tracer.with_target(target).event(.debug, "failed to send share", fields);
                 }
             }
         }

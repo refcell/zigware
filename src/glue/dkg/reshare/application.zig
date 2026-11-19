@@ -30,13 +30,16 @@ const Height = consensus.Height;
 const EpochPhase = consensus.types.EpochPhase;
 const FixedEpocher = consensus.types.FixedEpocher;
 const Handoff = consensus.Handoff;
-const log = std.log.scoped(.dkg_reshare);
 
 /// Wraps marshal application `A` (pointer-free value, cloned like the inner) with the reshare
 /// mailbox of the actor types `T`.
 /// The reshare payload the inner application builds on, with the allocator that frees it.
 /// Keyed by the payload alone (`InputOf(PayloadOf(T))`), so every `T` with the same block
 /// shares one type, and an inner app can name it without naming `T`.
+/// The tracing target of the wrapper's events (commonware's module path).
+pub const trace_target = "commonware_glue::dkg::reshare::application";
+const Tracer = @import("runtime").telemetry.traces.Tracer;
+
 pub fn Input(comptime T: type) type {
     return InputOf(mailbox_mod.PayloadOf(T));
 }
@@ -91,6 +94,8 @@ pub fn Application(comptime A: type, comptime T: type) type {
         inner: A,
         reshare: Mailbox,
         epocher: FixedEpocher,
+        /// Receives the wrapper's events; set it from `ctx.tracer(trace_target)`.
+        tracer: Tracer = .none,
 
         /// Wraps `inner` (taken) with `reshare` (taken). `blocks_per_epoch` must equal the
         /// actor's.
@@ -187,7 +192,7 @@ pub fn Application(comptime A: type, comptime T: type) type {
             var handed = false;
             errdefer if (!handed) owned.deinit();
             const height = next_height(&owned) orelse {
-                log.debug("proposal rejected: missing parent ancestry", .{});
+                self.tracer.event(.debug, "proposal rejected: missing parent ancestry", .{});
                 owned.deinit();
                 return null;
             };
@@ -195,7 +200,8 @@ pub fn Application(comptime A: type, comptime T: type) type {
                 var response = try self.reshare.epoch_info(try owned.clone());
                 switch (response) {
                     .unavailable => {
-                        log.debug("proposal skipped: final block epoch info unavailable", .{});
+                        const text = "proposal skipped: final block epoch info is unavailable";
+                        self.tracer.event(.debug, text, .{});
                         response.deinit();
                         owned.deinit();
                         return null;
@@ -251,7 +257,8 @@ pub fn Application(comptime A: type, comptime T: type) type {
                 defer response.deinit();
                 switch (response) {
                     .available => |available| if (!payloads_equal(available.payload, carried)) {
-                        log.debug("verification rejected: final block payload mismatch", .{});
+                        const text = "verification rejected: final block payload mismatch";
+                        self.tracer.event(.debug, text, .{});
                         owned.deinit();
                         return false;
                     },
@@ -263,7 +270,9 @@ pub fn Application(comptime A: type, comptime T: type) type {
                     },
                 }
             } else if (!allowed_before_final(carried, self.phase(height))) {
-                log.debug("verification rejected: misplaced reshare payload", .{});
+                const text = "verification rejected: non-final block carried misplaced " ++
+                    "reshare payload";
+                self.tracer.event(.debug, text, .{});
                 owned.deinit();
                 return false;
             }

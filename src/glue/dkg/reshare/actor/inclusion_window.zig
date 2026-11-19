@@ -14,6 +14,7 @@
 
 const std = @import("std");
 const assert = std.debug.assert;
+const inclusion_target = "commonware_glue::dkg::reshare::actor::inclusion";
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const consensus = @import("consensus");
@@ -26,7 +27,6 @@ const actor_mod = @import("actor.zig");
 const Epoch = consensus.Epoch;
 const Height = consensus.Height;
 const N3f1 = utils.N3f1;
-const log = std.log.scoped(.dkg_reshare);
 
 /// The inclusion window's functions for `Actor(T)`.
 pub fn Window(comptime T: type) type {
@@ -123,6 +123,7 @@ pub fn Window(comptime T: type) type {
                 .epocher = self.epocher,
                 .finalized_tip = self.tip,
                 .final_height = self.epocher.last(session.epoch).?,
+                .tracer = self.tracer.with_target(inclusion_target),
             };
         }
 
@@ -272,7 +273,8 @@ pub fn Window(comptime T: type) type {
             switch (event) {
                 .mailbox => |received| {
                     const message = received orelse {
-                        log.debug("mailbox closed, shutting down", .{});
+                        const text = "mailbox closed, shutting down";
+                        self.tracer.with_target(inclusion_target).event(.debug, text, .{});
                         return .stop;
                     };
                     return handle_mailbox(self, session, state, message);

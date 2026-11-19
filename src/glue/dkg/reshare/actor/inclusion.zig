@@ -11,6 +11,7 @@
 
 const std = @import("std");
 const assert = std.debug.assert;
+const Tracer = @import("runtime").telemetry.traces.Tracer;
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const codec = @import("codec");
@@ -25,7 +26,6 @@ const Height = consensus.Height;
 const fd = cryptography.bls12381.dkg.feldman_desmedt;
 const Share = cryptography.bls12381.primitives.group.Share;
 const oneshot = utils.channel.oneshot;
-const log = std.log.scoped(.dkg_reshare);
 
 /// Dealer logs indexed by dealer for an epoch-info request or verification, sorted by key.
 pub fn PendingLogs(comptime V: type, comptime P: type) type {
@@ -110,6 +110,8 @@ pub fn PendingLogScan(comptime V: type, comptime P: type, comptime D: type) type
         epocher: FixedEpocher,
         finalized_tip: ?setup.FinalizedTip(D),
         final_height: Height,
+        /// Receives the scan's events (commonware's `inclusion` module path).
+        tracer: Tracer = .none,
     };
 }
 
@@ -136,13 +138,17 @@ pub fn pending_logs(
 
     // Verification ancestry starts at the final block and proposal ancestry at its parent.
     var first = try ancestry.next() orelse {
-        truncated(scan.epoch, cursor);
+        truncated(scan.tracer, "epoch info ancestry ended before yielding a boundary block", .{
+            .epoch = scan.epoch,
+            .cursor_height = cursor,
+        });
         return null;
     };
     if (first.inner().height().get() == scan.final_height.get()) {
         first.deinit();
         first = try ancestry.next() orelse {
-            truncated(scan.epoch, cursor);
+            const text = "epoch info ancestry ended before yielding the boundary parent";
+            truncated(scan.tracer, text, .{ .epoch = scan.epoch, .cursor_height = cursor });
             return null;
         };
     }
@@ -158,14 +164,15 @@ pub fn pending_logs(
             first.deinit();
             return err;
         };
-        attachment = try collect(gpa, ancestry, &blocks, first_pending, cursor) orelse
+        attachment = try collect(gpa, scan, ancestry, &blocks, first_pending, cursor) orelse
             return null;
     } else first.deinit();
 
     // Ancestry guarantees parent links between the blocks it yields, but not that they
     // extend the finalized chain.
     if (anchor) |digest| if (!digest.eql(attachment)) {
-        log.info("epoch info ancestry is detached from finalized prefix", .{});
+        const text = "epoch info ancestry is detached from finalized prefix";
+        scan.tracer.event(.warn, text, .{ .epoch = scan.epoch });
         return null;
     };
     return try authenticate(B, gpa, scan, blocks.items);
@@ -175,6 +182,7 @@ pub fn pending_logs(
 /// digest of the lowest one (null if the ancestry ends first).
 fn collect(
     gpa: Allocator,
+    scan: anytype,
     ancestry: anytype,
     blocks: anytype,
     first_pending: Height,
@@ -187,7 +195,8 @@ fn collect(
     while (cursor.get() > first_pending.get()) {
         cursor = cursor.previous() orelse @panic("pending ancestry must remain above genesis");
         var block = try ancestry.next() orelse {
-            truncated(Epoch.zero(), cursor);
+            const text = "epoch info ancestry ended before covering pending dealer logs";
+            truncated(scan.tracer, text, .{ .epoch = scan.epoch, .cursor_height = cursor });
             return null;
         };
         attachment = block.inner().parent();
@@ -200,12 +209,10 @@ fn collect(
     return attachment;
 }
 
-/// Logs a scan whose ancestry ended early.
-fn truncated(epoch: Epoch, cursor: Height) void {
-    log.info("epoch {d} ancestry ended before covering pending dealer logs at {d}", .{
-        epoch.get(),
-        cursor.get(),
-    });
+/// Traces a scan whose ancestry ended early.
+fn truncated(tracer: Tracer, text: []const u8, fields: anytype) void {
+    assert(text.len > 0);
+    tracer.event(.warn, text, fields);
 }
 
 /// Authenticates the logs `blocks` (newest first) carry, in chain order, so each dealer's
@@ -228,7 +235,9 @@ fn authenticate(
         }
         var signed = payload.dealer_log;
         if (!try fd.check_log(B.Variant, B.PublicKey, gpa, scan.info, &signed)) {
-            log.info("ignoring invalid pending dealer log", .{});
+            const height = blocks[index].inner().height();
+            const fields = .{ .epoch = scan.epoch, .height = height };
+            scan.tracer.event(.warn, "ignoring invalid pending dealer log", fields);
             signed.deinit(gpa);
             continue;
         }

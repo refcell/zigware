@@ -8,6 +8,7 @@
 
 const std = @import("std");
 const assert = std.debug.assert;
+const target = "commonware_glue::dkg::reshare::actor::inclusion";
 const Allocator = std.mem.Allocator;
 const consensus = @import("consensus");
 const cryptography = @import("cryptography");
@@ -21,7 +22,6 @@ const Epoch = consensus.Epoch;
 const fd = cryptography.bls12381.dkg.feldman_desmedt;
 const Share = cryptography.bls12381.primitives.group.Share;
 const N3f1 = utils.N3f1;
-const log = std.log.scoped(.dkg_reshare);
 
 /// Local-state and provider failures where commonware panics.
 pub const ArtifactError = error{
@@ -135,7 +135,9 @@ pub fn Artifacts(comptime T: type) type {
                 const finalized = crypto.finalize(N3f1, gpa, &rng, &selection, null) catch |err|
                     switch (err) {
                         error.InsufficientLogs => {
-                            log.info("epoch {d}: failed to finalize player", .{epoch.get()});
+                            const fields = .{ .epoch = epoch, .failure = err };
+                            const t = self.tracer.with_target(target);
+                            t.event(.warn, "failed to finalize player", fields);
                             return null;
                         },
                         error.OutOfMemory => return error.OutOfMemory,
@@ -147,7 +149,9 @@ pub fn Artifacts(comptime T: type) type {
                 switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,
                     else => {
-                        log.info("epoch {d}: failed to observe reshare outcome", .{epoch.get()});
+                        const fields = .{ .epoch = epoch, .@"error" = err };
+                        const t = self.tracer.with_target(target);
+                        t.event(.warn, "failed to observe reshare outcome", fields);
                         return null;
                     },
                 };
@@ -335,9 +339,10 @@ pub fn Artifacts(comptime T: type) type {
             var rng_state: actor_mod.IoRandom = undefined;
             const seed = try store.seed_or_random(expected, self.random(&rng_state));
             try store.commit_epoch(try info.clone(gpa), seed, share);
-            log.info("epoch {d}: completed reshare ceremony (success: {})", .{
-                info.epoch.get(),
-                info.outcome == .success,
+            self.tracer.with_target(target).event(.info, "completed reshare ceremony", .{
+                .epoch = info.epoch,
+                .round = info.epoch.get(),
+                .success = info.outcome == .success,
             });
             if (!dkg) try self.register_epoch(&info, share);
         }
@@ -360,23 +365,26 @@ pub fn Artifacts(comptime T: type) type {
             if (owned != .dealer_log) return;
             const signed = &owned.dealer_log;
             if (!try fd.check_log(V, P, gpa, info, signed)) {
-                log.info("epoch {d}: ignoring invalid dealer log", .{epoch.get()});
+                const fields = .{ .epoch = epoch };
+                self.tracer.with_target(target).event(.warn, "ignoring invalid dealer log", fields);
                 return;
             }
             // `check_log` authenticates the signature, not dealer membership: drop logs from
             // outside the committed epoch's players so a leader cannot grow storage.
             if (store.current_info()) |current| {
                 if (current.output.players.position(signed.dealer) == null) {
-                    log.info("epoch {d}: ignoring dealer log from non-dealer", .{epoch.get()});
+                    const text = "ignoring dealer log from non-dealer";
+                    self.tracer.with_target(target).event(.warn, text, .{ .epoch = epoch });
                     return;
                 }
             }
             const ours = signed.dealer.eql(self.config.signer.public_key());
             const stored = try store.append_log(epoch, signed.dealer, signed.log);
-            log.info("epoch {d}: observed dealer log on chain (ours: {}, stored: {})", .{
-                epoch.get(),
-                ours,
-                stored,
+            self.tracer.with_target(target).event(.info, "observed dealer log on chain", .{
+                .epoch = epoch,
+                .dealer = signed.dealer,
+                .ours = ours,
+                .stored = stored,
             });
             if (ours) if (dealer) |value| value.clear_finalized();
         }

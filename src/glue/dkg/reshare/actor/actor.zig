@@ -44,7 +44,6 @@ const SharingMode = cryptography.bls12381.primitives.Mode;
 const Summary = cryptography.transcript.Summary;
 const N3f1 = utils.N3f1;
 const oneshot = utils.channel.oneshot;
-const log = std.log.scoped(.dkg_reshare);
 
 /// Whether a window ran to its end (`proceed`) or the actor must stop (`stop`): Rust's
 /// `ControlFlow`.
@@ -55,6 +54,11 @@ fn release_marshal(marshal: anytype) void {
     const M = @TypeOf(marshal.*);
     if (comptime @typeInfo(M) != .pointer and @hasDecl(M, "deinit")) marshal.deinit();
 }
+
+/// The tracing target of the actor's own events (commonware's module path).
+pub const trace_target = "commonware_glue::dkg::reshare::actor";
+const setup_target = "commonware_glue::dkg::reshare::actor::setup";
+const Tracer = @import("runtime").telemetry.traces.Tracer;
 
 /// Marshal or provider contract violations, where commonware panics.
 pub const ContractError = error{
@@ -209,6 +213,9 @@ pub fn Actor(comptime T: type) type {
         mode: Mode = .reshare,
         /// Latest finalized block the actor has applied.
         tip: ?Tip = null,
+        /// Receives the actor's events; set it from `ctx.tracer(trace_target)` before
+        /// running the actor. Each module traces under its own commonware module path.
+        tracer: Tracer = .none,
 
         /// Creates an actor and the mailbox that feeds it.
         pub fn init(
@@ -383,8 +390,10 @@ pub fn Actor(comptime T: type) type {
             // A floor after the midpoint skipped blocks that may carry dealer logs.
             if (skipped) {
                 if (share != null) {
-                    log.info("validator synced past epoch {d}'s midpoint: it cannot vote " ++
-                        "to finalize the epoch's last block", .{epoch.get()});
+                    const text = "validator synced past the epoch midpoint, cannot vote to " ++
+                        "finalize the epoch's last block";
+                    const t = self.tracer.with_target(setup_target);
+                    t.event(.warn, text, .{ .epoch = epoch });
                 }
                 participants.deinit(self.gpa);
                 return .follow;

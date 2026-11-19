@@ -8,6 +8,7 @@
 
 const std = @import("std");
 const assert = std.debug.assert;
+const target = "commonware_glue::dkg::reshare::actor::dkg";
 const consensus = @import("consensus");
 const utils = @import("utils");
 const types = @import("../../types.zig");
@@ -16,7 +17,6 @@ const run_mod = @import("run.zig");
 
 const Epoch = consensus.Epoch;
 const Height = consensus.Height;
-const log = std.log.scoped(.dkg_reshare);
 
 /// DKG-mode failures where commonware panics.
 pub const DkgError = error{
@@ -60,12 +60,18 @@ pub fn Dkg(comptime T: type) type {
             // final block, which marshal stores before delivering it.
             const applied = self.tip != null and self.tip.?.height.get() >= last.get();
             if (applied or try store.share(epoch) != null) {
-                tracked catch log.info("failed to activate DKG peer set after completion", .{});
+                tracked catch |err| self.tracer.with_target(target).event(
+                    .warn,
+                    "failed to activate DKG peer set after completion",
+                    .{ .epoch = Epoch.zero(), .@"error" = err },
+                );
                 complete(self, try final_info(self, last));
                 return terminal(self);
             }
-            tracked catch {
-                log.info("failed to activate DKG peer set", .{});
+            tracked catch |err| {
+                const fields = .{ .epoch = Epoch.zero(), .@"error" = err };
+                const text = "failed to activate DKG peer set";
+                self.tracer.with_target(target).event(.warn, text, fields);
                 try complete_from(self, store);
                 return terminal(self);
             };
