@@ -149,3 +149,31 @@ test "append, threshold, and drain keep logical offsets" {
     buffer.replace(8, "xy");
     try testing.expectEqual(@as(u64, 10), buffer.size());
 }
+
+test "page geometry handles a page size of one and non-power-of-two sizes" {
+    // commonware `test_page_geometry_handles_one_and_non_power_of_two`. zigware's backing is
+    // one allocation made at init, so the tail-capacity checks become checks on its length.
+    var single = try Buffer.init(testing.allocator, 0, "", 4, 1);
+    defer single.deinit(testing.allocator);
+    try testing.expect(!single.append(&.{ 1, 2, 3 }));
+    try testing.expectEqual(@as(usize, 3), single.full_len());
+    single.consume_full_pages();
+    try testing.expect(single.is_empty());
+    try testing.expectEqual(@as(u64, 3), single.offset);
+
+    var odd = try Buffer.init(testing.allocator, 0, &.{ 1, 2 }, 309, 103);
+    defer odd.deinit(testing.allocator);
+    try testing.expect(!odd.append(&(@as([205]u8, @splat(3)))));
+    try testing.expectEqual(@as(usize, 206), odd.full_len());
+    odd.consume_full_pages();
+    try testing.expectEqualSlices(u8, &.{3}, odd.partial());
+    try testing.expectEqual(@as(u64, 206), odd.offset);
+
+    const max_page: usize = std.math.maxInt(u16);
+    var max = try Buffer.init(testing.allocator, 0, "", max_page * 2, max_page);
+    defer max.deinit(testing.allocator);
+    try testing.expect(!max.append(&.{ 4, 5, 6 }));
+    try testing.expectEqual(@as(usize, 0), max.full_len());
+    try testing.expectEqualSlices(u8, &.{ 4, 5, 6 }, max.partial());
+    try testing.expectEqual(max_page * 3, max.data.len);
+}

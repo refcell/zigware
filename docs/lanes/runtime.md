@@ -280,21 +280,21 @@ Open (none are in runtime/src/telemetry/, the runtime-telemetry lane's directory
   reject other layouts untouched, create allowed one
 - [ ] `tokio/runtime.rs:1620` `test_process_rss_metric`: production runner publishes a positive
   runtime_process_rss gauge
-- [ ] `utils/buffer/mod.rs:891` `test_read_resize_to_zero`: Read.resize(0) truncates the blob; a
+- [x] `utils/buffer/mod.rs:891` `test_read_resize_to_zero`: Read.resize(0) truncates the blob; a
   reopened reader's read fails
-- [ ] `utils/buffer/paged/cache.rs:1419` `test_clear_does_not_orphan_recached_page`: re-caching
+- [x] `utils/buffer/paged/cache.rs:1419` `test_clear_does_not_orphan_recached_page`: re-caching
   after clear keeps live pages reachable as slots are reused
-- [ ] `utils/buffer/paged/cache.rs:1624` `test_cache_clear_forces_uncached_blob_read`: after clear,
+- [x] `utils/buffer/paged/cache.rs:1624` `test_cache_clear_forces_uncached_blob_read`: after clear,
   a cached page is re-read from the blob with dont_cache
-- [ ] `utils/buffer/paged/cache.rs:1723` `test_cache_max_page`: caching and reading a page at the
+- [x] `utils/buffer/paged/cache.rs:1723` `test_cache_max_page`: caching and reading a page at the
   largest page-aligned offset
-- [ ] `utils/buffer/paged/cache.rs:1840` `test_read_after_misses_rejects_corruption`: batched miss
+- [x] `utils/buffer/paged/cache.rs:1840` `test_read_after_misses_rejects_corruption`: batched miss
   read fails on a corrupt page and does not cache it
-- [ ] `utils/buffer/paged/cache.rs:1881` `test_read_many_into_reads_each_missing_page_once`:
+- [x] `utils/buffer/paged/cache.rs:1881` `test_read_many_into_reads_each_missing_page_once`:
   read_many_into reads each missing page once despite eviction
-- [ ] `utils/buffer/paged/cache.rs:3361` `test_cache_at_high_offset`: caching two minimum-size pages
+- [x] `utils/buffer/paged/cache.rs:3361` `test_cache_at_high_offset`: caching two minimum-size pages
   just below u64::MAX
-- [ ] `utils/buffer/paged/tip.rs:466` `test_page_geometry_handles_one_and_non_power_of_two`: tip
+- [x] `utils/buffer/paged/tip.rs:466` `test_page_geometry_handles_one_and_non_power_of_two`: tip
   drain with page size 1, a non-power-of-two size, and u16::MAX
 Not portable:
 - `deterministic.rs` `test_retired_write_owner_releases_other_blob`,

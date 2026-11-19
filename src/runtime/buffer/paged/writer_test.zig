@@ -1774,3 +1774,71 @@ test "readers of one blob on several threads each fetch their own missed pages" 
     for (threads) |thread| thread.join();
     try testing.expectEqual(@as(u32, 0), failures.load(.monotonic));
 }
+
+test "a cleared cache forces a blob read" {
+    // commonware `test_cache_clear_forces_uncached_blob_read`: a miss reads the blob once, a
+    // hit reads nothing, and after clear the page is read again. commonware also checks the
+    // misses pass DONT_CACHE; zigware's page reads use default options, and its backends
+    // ignore the hint (runtime-telemetry.md).
+    var h = try Harness.init();
+    defer h.deinit();
+    const data: [page_size]u8 = @splat(7);
+    try h.append_synced("clear", &data);
+    var w = try h.writer("clear");
+    defer w.deinit();
+    h.cache_ref.clear();
+    const reads = h.storage.reads;
+    try expect_read(&w, 0, &data);
+    try testing.expectEqual(reads + 1, h.storage.reads);
+    try expect_read(&w, 0, &data);
+    try testing.expectEqual(reads + 1, h.storage.reads);
+    h.cache_ref.clear();
+    try expect_read(&w, 0, &data);
+    try testing.expectEqual(reads + 2, h.storage.reads);
+}
+
+test "read_many_into: a corrupt page fails and is never cached" {
+    // commonware `test_read_after_misses_rejects_corruption`.
+    var h = try Harness.init();
+    defer h.deinit();
+    var data: [page_size * 3]u8 = undefined;
+    for (&data, 0..) |*byte, index| byte.* = @intCast(index / page_size);
+    try h.append_synced("corrupt", &data);
+    try h.mangle("corrupt", physical_page_size + 1, &.{0xff});
+    var w = try h.writer("corrupt");
+    defer w.deinit();
+    h.cache_ref.clear();
+    var buf: [3]u8 = undefined;
+    const all = [_]u64{ 0, page_size, 2 * page_size };
+    try testing.expectError(error.InvalidChecksum, w.read_many_into(&buf, &all, 1));
+    var one: [1]u8 = undefined;
+    try testing.expectEqual(@as(usize, 0), h.cache_ref.read_cached(w.id, &one, page_size));
+    // The intact pages are served on their own.
+    const intact = [_]u64{ 0, 2 * page_size };
+    _ = try w.read_many_into(buf[0..2], &intact, 1);
+    try testing.expectEqualSlices(u8, &.{ 0, 2 }, buf[0..2]);
+}
+
+test "read_many_into: reads each missing page once under eviction" {
+    // commonware `test_read_many_into_reads_each_missing_page_once`: caching the 10 missing
+    // pages evicts most of them before they are served. commonware fills a 20-page cache
+    // whose probation queue holds 2 pages; zigware's CLOCK cache has no probation queue, so a
+    // 4-page cache full of pages 20..24 stands in.
+    var h = try Harness.init_cache(4);
+    defer h.deinit();
+    var data: [page_size * 40]u8 = undefined;
+    for (&data, 0..) |*byte, index| byte.* = @intCast(index / page_size);
+    try h.append_synced("once", &data);
+    var w = try h.writer("once");
+    defer w.deinit();
+    h.cache_ref.clear();
+    var byte: [1]u8 = undefined;
+    for (20..24) |page| try w.read_into(&byte, page * page_size);
+    var offsets: [10]u64 = undefined;
+    for (&offsets, 0..) |*offset, page| offset.* = page * page_size;
+    const reads = h.storage.reads;
+    var buf: [10]u8 = undefined;
+    try testing.expectEqual(@as(usize, 0), try w.read_many_into(&buf, &offsets, 1));
+    for (buf, 0..) |value, page| try testing.expectEqual(@as(u8, @intCast(page)), value);
+    try testing.expectEqual(reads + offsets.len, h.storage.reads);
+}

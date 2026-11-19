@@ -340,3 +340,16 @@ test "read: resize" {
     try expect_read(&reader, "ABCDEFGHIJKLM");
     try expect_read(&reader, &(@as([39]u8, @splat(0))));
 }
+
+test "read: resize to zero" {
+    var h = mocks.Storage.init(test_gpa);
+    defer h.deinit();
+    const data = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    var reader = try reader_over(&h, "test", data, 10);
+    try reader.resize(0);
+    const opened = try h.open("partition", "test");
+    try testing.expectEqual(0, opened.len);
+    reader = try Read.init(test_gpa, opened.blob, opened.len, 10);
+    defer reader.deinit();
+    try expect_short(&reader, 1);
+}

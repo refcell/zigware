@@ -244,3 +244,47 @@ test "cache shared by threads keeps its slot map consistent" {
         try testing.expectEqual(@as(u32, @intCast(slot)), cache_ref.slots.get(present).?);
     }
 }
+
+test "clear does not orphan a recached page" {
+    // commonware `test_clear_does_not_orphan_recached_page`.
+    var cache_ref = try CacheRef.init(testing.allocator, 4, 2);
+    defer cache_ref.deinit();
+    _ = cache_ref.cache(0, "aaaa", 0);
+    _ = cache_ref.cache(0, "bbbb", 4);
+    cache_ref.clear();
+    _ = cache_ref.cache(0, "cccc", 4);
+    var buf: [4]u8 = undefined;
+    try testing.expectEqual(@as(usize, 4), cache_ref.read_cached(0, &buf, 4));
+    try testing.expectEqualStrings("cccc", &buf);
+    // A new page takes the other freed slot instead of evicting live page 1.
+    _ = cache_ref.cache(0, "dddd", 8);
+    try testing.expectEqual(@as(usize, 4), cache_ref.read_cached(0, &buf, 4));
+    try testing.expectEqualStrings("cccc", &buf);
+    try testing.expectEqual(@as(usize, 4), cache_ref.read_cached(0, &buf, 8));
+    try testing.expectEqualStrings("dddd", &buf);
+}
+
+test "cache pages at the highest aligned offsets" {
+    // commonware `test_cache_max_page` (page size 1024) and `test_cache_at_high_offset` (the
+    // minimum page size, 13).
+    const max = std.math.maxInt(u64);
+    var one = try CacheRef.init(testing.allocator, 1024, 2);
+    defer one.deinit();
+    const page: [1024]u8 = @splat(42);
+    const max_offset = max - max % 1024;
+    try testing.expectEqual(@as(usize, 0), one.cache(0, &page, max_offset));
+    var buf: [1024]u8 = undefined;
+    try testing.expectEqual(@as(usize, 1024), one.read_cached(0, &buf, max_offset));
+    try testing.expectEqualSlices(u8, &page, &buf);
+
+    var small = try CacheRef.init(testing.allocator, 13, 2);
+    defer small.deinit();
+    const two: [26]u8 = @splat(1);
+    const high = (max - max % 13) - 26;
+    try testing.expectEqual(@as(usize, 0), small.cache(0, &two, high));
+    var page_buf: [13]u8 = undefined;
+    for ([_]u64{ high, high + 13 }) |offset| {
+        try testing.expectEqual(@as(usize, 13), small.read_cached(0, &page_buf, offset));
+        try testing.expectEqualSlices(u8, two[0..13], &page_buf);
+    }
+}
