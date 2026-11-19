@@ -540,8 +540,15 @@ test "upsert inserts a default or returns the existing value" {
 }
 
 test "full overwrite limit and crash survival" {
-    // Version, key, 2-byte value length prefix, value, and checksum.
-    for ([_]u64{ blob_page_size, blob_page_size + 1 }) |store_len| {
+    // commonware `test_full_overwrite_limit` and `test_overwrite_survives_crash`, blocking
+    // and pipelined. Version, key, 2-byte value length prefix, value, and checksum.
+    for ([4][2]u64{
+        .{ blob_page_size, 0 },
+        .{ blob_page_size, 1 },
+        .{ blob_page_size + 1, 0 },
+        .{ blob_page_size + 1, 1 },
+    }) |case| {
+        const store_len, const pipelined = case;
         const value_len: usize = @intCast(store_len - 8 - 8 - 2 - 4);
         var storage = Storage.init(gpa);
         defer storage.deinit();
@@ -552,7 +559,7 @@ test "full overwrite limit and crash survival" {
 
         storage.writes = 0;
         try put_fill(&store, 1, 2, value_len);
-        try store.sync();
+        if (pipelined == 1) try (try store.start_sync()).wait_release() else try store.sync();
         // A store larger than a page writes value, version, and checksum separately.
         const writes: u64 = if (store_len > blob_page_size) 3 else 1;
         try testing.expectEqual(writes, storage.writes);

@@ -194,3 +194,82 @@ test "start_sync: a second sync waits for the first" {
     defer runner.deinit();
     try (try runner.start_context(second_sync_waits_for_first, .{}));
 }
+
+/// A store over `delayed`, whose started syncs park in `pending`.
+const Delayed = struct {
+    inner: runtime.storage.memory.Storage,
+    pending: runtime.storage.mocks.DelayedSync,
+    delayed: runtime.storage.mocks.DelayedSynced,
+
+    fn init(self: *Delayed, ctx: runtime.deterministic.Context) void {
+        self.inner = .init(gpa);
+        self.pending = .init(gpa, ctx.io());
+        self.delayed = .init(gpa, self.inner.storage(), &self.pending);
+    }
+
+    fn deinit(self: *Delayed) void {
+        self.pending.deinit();
+        self.inner.deinit();
+    }
+};
+
+fn dropped_handle_does_not_cancel(ctx: runtime.deterministic.Context) !void {
+    var d: Delayed = undefined;
+    d.init(ctx);
+    defer d.deinit();
+    {
+        var store = try Store.init(gpa, d.delayed.storage(), config);
+        defer store.deinit();
+        // Drop the completion while its sync is still parked: the sync must proceed anyway.
+        try put(&store, 1, 3, 1);
+        const started = try store.start_sync();
+        try testing.expect(started.is_pending());
+        started.release();
+        d.pending.release_all();
+        try store.sync();
+    }
+    d.inner.crash();
+    var reopened = try Store.init(gpa, d.inner.storage(), config);
+    defer reopened.deinit();
+    try expect_value(&reopened, 1, 3, 1);
+}
+
+test "start_sync: a dropped completion does not cancel its sync" {
+    // commonware `test_start_sync_dropped_handle_does_not_cancel`, on `DelayedSync`.
+    var runner = try runtime.deterministic.Runner.init(gpa, .{});
+    defer runner.deinit();
+    try (try runner.start_context(dropped_handle_does_not_cancel, .{}));
+}
+
+fn failure_fails_next_sync(ctx: runtime.deterministic.Context, dropped: bool) !void {
+    var d: Delayed = undefined;
+    d.init(ctx);
+    defer d.deinit();
+    var store = try Store.init(gpa, d.delayed.storage(), config);
+    defer store.deinit();
+    try put(&store, 1, 3, 1);
+    const started = try store.start_sync();
+    d.pending.fail_all();
+    if (dropped) {
+        // Nobody observes the failure directly, but the next sync does.
+        started.release();
+    } else try testing.expectError(error.Io, started.wait_release());
+    // The failed copy's on-disk state is unknown: the next sync fails, consuming the store,
+    // without writing the only durable copy.
+    try put(&store, 1, 4, 1);
+    const before = d.inner.audit();
+    if (dropped) {
+        try testing.expectError(error.Io, store.sync());
+    } else try testing.expectError(error.Io, store.start_sync());
+    try testing.expectEqualSlices(u8, &before, &d.inner.audit());
+}
+
+test "start_sync: a failed sync fails the next sync" {
+    // commonware `test_start_sync_failure_fails_next_sync` and
+    // `test_start_sync_dropped_handle_fails_next_sync`, on `DelayedSync`.
+    for ([_]bool{ false, true }) |dropped| {
+        var runner = try runtime.deterministic.Runner.init(gpa, .{});
+        defer runner.deinit();
+        try (try runner.start_context(failure_fails_next_sync, .{dropped}));
+    }
+}

@@ -1660,10 +1660,15 @@ test "oversized recovery: a tracked journal reopens after a destroy stopped in i
 }
 
 test "oversized recovery: a value read cancelled during replay fails the replay" {
-    // commonware drops `next` while a gated value read is pending, with and without a
-    // resumed `next`, over a valid or a corrupt second value. Reads here are synchronous, so
-    // the cancellation surfaces as the value read's `Canceled` error.
-    for ([_]bool{ false, true }) |corrupt| {
+    // commonware `test_oversized_replay_dropped_during_value_read_fails_replay`: a canceled
+    // value read, with and without a resumed `next`, over a valid or a corrupt second value.
+    // The test storage fails the value read with `Canceled`, the error a canceled task's read
+    // returns.
+    const cases = [4][2]bool{
+        .{ false, false }, .{ false, true }, .{ true, false }, .{ true, true },
+    };
+    for (cases) |case| {
+        const corrupt, const resume_replay = case;
         var h = try Harness.init();
         defer h.deinit();
         var journal = try h.open_checkpoint(.{ .section = 0, .size = 0 });
@@ -1696,6 +1701,11 @@ test "oversized recovery: a value read cancelled during replay fails the replay"
         gate.cancel_reads = true;
         try testing.expectError(error.Canceled, recovery.next());
         gate.cancel_reads = false;
+        // The interrupted replay cannot resume (commonware's `ReplayInterrupted`, then none).
+        if (resume_replay) {
+            try testing.expectEqual(@as(?Journal.Recovery.Item, null), try recovery.next());
+            try testing.expectEqual(@as(?Journal.Recovery.Item, null), try recovery.next());
+        }
         try testing.expectError(error.ReplayFailed, recovery.finish());
         // The marker was not advanced past the interrupted entry.
         markers = try Markers.init(gpa, h.storage.interface(), .{

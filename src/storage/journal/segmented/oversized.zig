@@ -776,6 +776,8 @@ fn RecoveryType(comptime I: type, comptime V: type) type {
         truncations: std.ArrayList(Truncation) = .empty,
         /// Whether replay yielded a value-verification error.
         failed: bool = false,
+        /// A call was canceled: the replay ends (commonware's `ReplayInterrupted`).
+        interrupted: bool = false,
 
         /// Abandon the recovery, closing both journals and the markers.
         pub fn deinit(self: *Self) void {
@@ -790,6 +792,14 @@ fn RecoveryType(comptime I: type, comptime V: type) type {
         /// section that produced it; a value-verification error does not, and either makes
         /// `finish` fail with `ReplayFailed`.
         pub fn next(self: *Self) Error!?Item {
+            if (self.interrupted) return null;
+            const result = self.next_entry();
+            if (result) |_| {} else |err| self.interrupted = err == error.Canceled;
+            assert(!self.interrupted or self.failed or self.index.interrupted);
+            return result;
+        }
+
+        fn next_entry(self: *Self) Error!?Item {
             while (try self.index.next()) |item| {
                 // Each section validates forward from its durable floor.
                 if (self.current_section != item.section) {

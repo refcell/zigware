@@ -250,3 +250,39 @@ test "manager destroy waits for, and surfaces, an in-flight start_sync" {
         try (try runner.start_context(destroy_waits, .{fails}));
     }
 }
+
+fn skips_clean(ctx: Context) !void {
+    var f: Fixture = undefined;
+    try f.init(ctx);
+    defer f.deinit();
+    var manager = try f.open(&.{ 1, 2 });
+    defer manager.deinit();
+    // Freshly opened sections are dirty: the first sync starts one sync per section.
+    const first = try manager.start_sync(&.{ 1, 2 });
+    try testing.expectEqual(@as(u64, 2), f.pending.starts());
+    f.pending.release_all();
+    try first.wait_release();
+    // Clean sections need no work from sync_all, sync, or start_sync.
+    try manager.sync_all();
+    try manager.sync(&.{ 1, 2 });
+    const clean = try manager.start_sync(&.{ 1, 2 });
+    try testing.expect(!clean.is_pending());
+    try clean.wait_release();
+    try testing.expectEqual(@as(u64, 2), f.pending.starts());
+    try testing.expectEqual(@as(usize, 0), f.pending.parked());
+    // Only the section with new writes is synced, and both sections stay open.
+    _ = try (try manager.get(1)).?.append("x");
+    const dirty = try manager.start_sync(&.{ 1, 2 });
+    try testing.expectEqual(@as(u64, 3), f.pending.starts());
+    f.pending.release_all();
+    try dirty.wait_release();
+    try testing.expect((try manager.get(2)) != null);
+}
+
+test "manager start_sync skips clean sections" {
+    // commonware `test_sync_skips_clean_sections` (its sync counts; the metric half is
+    // "sync counts every selected section").
+    var runner = try runtime.deterministic.Runner.init(gpa, .{});
+    defer runner.deinit();
+    try (try runner.start_context(skips_clean, .{}));
+}

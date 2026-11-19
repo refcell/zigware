@@ -311,6 +311,8 @@ fn RecoveryType(comptime V: type) type {
         head: usize = 0,
         finished: bool = false,
         errored: bool = false,
+        /// A call was canceled: the replay ends (commonware's `ReplayInterrupted`).
+        interrupted: bool = false,
 
         /// Start replaying every section of `journal` from offset zero. Takes ownership of
         /// `journal`, closing it on error.
@@ -376,8 +378,13 @@ fn RecoveryType(comptime V: type) type {
 
         /// The next item, or null once every section is exhausted. The caller owns the item.
         pub fn next(self: *Self) Error!?Item {
+            if (self.interrupted) return null;
             const result = self.next_inner();
-            if (result) |_| {} else |_| self.errored = true;
+            if (result) |_| {} else |err| {
+                self.errored = true;
+                self.interrupted = err == error.Canceled;
+            }
+            assert(!self.interrupted or self.errored);
             return result;
         }
 

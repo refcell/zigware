@@ -199,3 +199,57 @@ test "segmented fixed replay canceled during repair fails the replay" {
         try (try runner.start_context(dropped_during_repair, .{torn}));
     }
 }
+
+fn dropped_during_read(ctx: Context, resume_replay: bool, drained: u64) !void {
+    var inner: runtime.storage.memory.Storage = .init(gpa);
+    defer inner.deinit();
+    var gate: runtime.storage.mocks.ReadGate = .init(ctx.io(), "repair");
+    var gated: runtime.storage.mocks.ReadGated = .init(gpa, inner.storage(), &gate);
+    var cache_ref = try paged.CacheRef.init(gpa, 16, 8);
+    defer cache_ref.deinit();
+    // Twelve u64 items fill six 16-byte pages, and replay reads one page at a time.
+    var cfg = aligned_cfg(&cache_ref);
+    cfg.replay_buffer = 16;
+    {
+        var journal = try IntJournal.init(gpa, inner.storage(), cfg);
+        defer journal.deinit();
+        for (0..12) |value| _ = try journal.append(0, value);
+        try journal.sync_all();
+    }
+    var recovery = try IntJournal.preflight_floors(gpa, gated.storage(), cfg, &.{});
+    for (0..drained) |value| {
+        try testing.expectEqual(value, (try recovery.next()).?.item);
+    }
+    // Park the next replay read, then cancel the call waiting on it.
+    gate.arm();
+    const handle = try ctx.child("next").spawn(replay_next, .{&recovery});
+    try ctx.sleep(.fromMilliseconds(10));
+    try testing.expect(gate.blocked() > 0);
+    if (handle.abort()) |result| {
+        try testing.expectError(error.Canceled, result);
+    } else |err| try testing.expectEqual(error.Closed, err);
+    gate.disarm();
+    // The interrupted read invalidates the replay without changing durable data.
+    if (resume_replay) {
+        try testing.expectEqual(@as(?IntJournal.Recovery.Item, null), try recovery.next());
+        try testing.expectEqual(@as(?IntJournal.Recovery.Item, null), try recovery.next());
+    }
+    try testing.expectError(error.ReplayFailed, recovery.finish());
+    var journal = try IntJournal.init(gpa, inner.storage(), cfg);
+    defer journal.deinit();
+    try testing.expectEqual(@as(u64, 12), try journal.section_len(0));
+    for (0..12) |value| try testing.expectEqual(@as(u64, value), try journal.get(0, value));
+}
+
+test "segmented fixed replay canceled during a read fails the replay" {
+    // commonware `test_segmented_fixed_replay_dropped_during_read_fails_replay` (finish and
+    // next, drained 0 and 2). A call is never dropped before it runs here, so the unpolled
+    // drop has no counterpart.
+    for ([_]bool{ false, true }) |resume_replay| {
+        for ([_]u64{ 0, 2 }) |drained| {
+            var runner = try runtime.deterministic.Runner.init(gpa, .{});
+            defer runner.deinit();
+            try (try runner.start_context(dropped_during_read, .{ resume_replay, drained }));
+        }
+    }
+}

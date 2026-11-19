@@ -77,3 +77,74 @@ test "segmented variable replay canceled during repair fails the replay" {
     defer runner.deinit();
     try (try runner.start_context(dropped_during_repair, .{}));
 }
+
+const Wide = [64]u8;
+const WideJournal = variable.Journal(Wide);
+
+fn replay_next_wide(ctx: Context, recovery: *WideJournal.Recovery) anyerror!void {
+    _ = ctx;
+    _ = try recovery.next();
+}
+
+fn dropped_during_read(ctx: Context, resume_replay: bool) !void {
+    var inner: runtime.storage.memory.Storage = .init(gpa);
+    defer inner.deinit();
+    var gate: runtime.storage.mocks.ReadGate = .init(ctx.io(), "variable-cancel-read");
+    var gated: runtime.storage.mocks.ReadGated = .init(gpa, inner.storage(), &gate);
+    var cache_ref = try paged.CacheRef.init(gpa, 16, 8);
+    defer cache_ref.deinit();
+    const cfg: variable.Config(Wide) = .{
+        .partition = "variable-cancel-read",
+        .codec_config = {},
+        .cache_ref = &cache_ref,
+        .write_buffer = 1024,
+        .replay_buffer = 16,
+    };
+    {
+        var recovery = try WideJournal.init(gpa, inner.storage(), cfg);
+        var journal = try recovery.finish();
+        defer journal.deinit();
+        // A second section shows whether an interrupted replay goes on.
+        for (0..2) |value| _ = try journal.append(0, @splat(@intCast(value)));
+        _ = try journal.append(1, @splat(2));
+        try journal.sync_all();
+    }
+    var recovery = try WideJournal.init(gpa, gated.storage(), cfg);
+    // Buffer the header, so `next` consumes it before its body read reaches the gate.
+    const front = &recovery.replays.items[recovery.head].reader;
+    try testing.expect(try front.ensure(5));
+    gate.arm();
+    const handle = try ctx.child("next").spawn(replay_next_wide, .{&recovery});
+    try ctx.sleep(.fromMilliseconds(10));
+    try testing.expect(gate.blocked() > 0);
+    if (handle.abort()) |result| {
+        try testing.expectError(error.Canceled, result);
+    } else |err| try testing.expectEqual(error.Closed, err);
+    gate.disarm();
+    // A cancellation after consuming a frame header cannot resume or finish its replay.
+    if (resume_replay) {
+        try testing.expect(try recovery.next() == null);
+        try testing.expect(try recovery.next() == null);
+    }
+    try testing.expectError(error.ReplayFailed, recovery.finish());
+    // The durable data is unchanged.
+    var reopened = try WideJournal.init(gpa, inner.storage(), cfg);
+    for (0..3) |value| {
+        const expected: Wide = @splat(@intCast(value));
+        try testing.expectEqual(expected, (try reopened.next()).?.item);
+    }
+    try testing.expect(try reopened.next() == null);
+    var journal = try reopened.finish();
+    try journal.destroy();
+}
+
+test "segmented variable replay canceled during a read fails the replay" {
+    // commonware `test_segmented_variable_replay_dropped_during_read_fails_replay` (finish,
+    // next). A call is never dropped before it runs here, so the unpolled drop has no
+    // counterpart.
+    for ([_]bool{ false, true }) |resume_replay| {
+        var runner = try runtime.deterministic.Runner.init(gpa, .{});
+        defer runner.deinit();
+        try (try runner.start_context(dropped_during_read, .{resume_replay}));
+    }
+}
