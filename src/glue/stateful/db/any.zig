@@ -3,11 +3,14 @@
 //!
 //! Batch reads consult the database at the time of the read for keys their batch chain does
 //! not write, and fail with `error.StaleRead` once the database is at no state of that chain.
+//! commonware manages unordered fixed and variable databases; the same adapter also manages
+//! ordered ones, whose batches commonware's any.rs merkleizes and stages alike.
 
 const std = @import("std");
 const assert = std.debug.assert;
 const storage = @import("storage");
 const db = @import("mod.zig");
+const state_sync = @import("state_sync.zig");
 
 const qmdb = storage.qmdb;
 
@@ -76,6 +79,29 @@ pub fn Any(comptime D: type, comptime H: type) type {
 
         pub fn sync_target(self: *const Self) SyncTarget {
             return .init(self.inner.root(), self.inner.sync_boundary(), self.inner.bounds().end);
+        }
+
+        pub const SyncDatabase = qmdb.any.sync.Database(D, H);
+
+        /// Syncs a new database from `source` (the StateSyncDb contract, `state_sync.zig`).
+        pub fn sync_db(
+            env: anytype,
+            config: Config,
+            source: anytype,
+            target: SyncTarget,
+            channels: state_sync.Channels(SyncTarget),
+            sync_config: state_sync.SyncEngineConfig,
+        ) !Self {
+            const synced = try state_sync.sync_standard_db(
+                SyncDatabase,
+                env,
+                config,
+                source,
+                target,
+                channels,
+                sync_config,
+            );
+            return .{ .inner = synced.db };
         }
 
         /// A speculative batch of updates and deletes over the shared database.
