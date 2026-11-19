@@ -69,8 +69,11 @@ pub fn warm_read_loop(blob: iface.Blob, buffer: []u8, ops: u64, blocks: anytype)
 }
 
 /// Whether the timed loop should keep running; reads the clock only every
-/// `deadline_check_stride` operations.
+/// `deadline_check_stride` operations. The first operation always runs, so a worker that
+/// starts after its window closed (a loaded machine and a short smoke window) still reports
+/// one, within the stride's overshoot that commonware already allows.
 pub fn should_continue(io: Io, deadline_ns: u64, completed_ops: u64) bool {
+    if (completed_ops == 0) return true;
     if (completed_ops % deadline_check_stride != 0) return true;
     return filesystem.now_ns(io, .awake) < deadline_ns;
 }
