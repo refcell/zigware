@@ -3,7 +3,7 @@
 //! orchestrator, on the simulated network. Each node's simplex application only records the
 //! contexts it is asked to propose on (commonware `MockApplication`), so finalized blocks
 //! reach marshal only when a test seeds the boundary block or a peer serves it.
-//! Only the genesis test runs per push; the rest need `-Dslow-tests`.
+//! Only the genesis and marshal-shutdown tests run per push; the rest need `-Dslow-tests`.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -822,5 +822,7 @@ fn marshal_shutdown_body(ctx: Ctx) anyerror!void {
 }
 
 test "orchestrator cluster: marshal shutdown during startup resolution stops cleanly" {
+    // Per push: one node whose marshal never starts, so no consensus runs and it ends within
+    // about 20 ms of simulated time (about 50 ms of wall time in Debug).
     try run_body(marshal_shutdown_body, 10);
 }
