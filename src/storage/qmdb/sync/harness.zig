@@ -403,7 +403,14 @@ pub fn Tests(comptime H: type) type {
             try testing.expectEqual(older.start, reopened.sync_boundary());
         }
 
-        fn update_during_sync_case(initial_ops: u64, additional_ops: u64, fetch: u64) !void {
+        /// `far` steps the client to just short of the initial target instead of just past its
+        /// lower bound, so the journal always holds operations past the updated lower bound.
+        fn update_during_sync_case(
+            initial_ops: u64,
+            additional_ops: u64,
+            fetch: u64,
+            far: bool,
+        ) !void {
             var fixture = try Fixture.init();
             defer fixture.deinit();
             var target_db = try fixture.open(H, try H.config(&fixture, "target"));
@@ -426,7 +433,7 @@ pub fn Tests(comptime H: type) type {
             try engine.init(gpa, io, config);
             defer engine.deinit();
             // Step the client past the initial lower bound, so the update arrives mid-sync.
-            try step_past(&engine, initial.start);
+            try step_past(&engine, if (far) initial.end - 2 else initial.start);
             const additional_start = target_db.bounds().end;
             const final = final: {
                 source.mutex.lockUncancelable(io);
@@ -434,17 +441,33 @@ pub fn Tests(comptime H: type) type {
                 try H.apply_ops(&target_db, 1, additional_ops, false);
                 break :final target_of(&target_db, target_db.sync_boundary());
             };
+            // No step runs until `finish`, which handles the update first, so the journal holds
+            // this many operations when the update resizes it.
+            const size_at_update = engine.journal.size();
+            if (far) try testing.expect(size_at_update > final.start);
             try testing.expect(updates.sender.send_lossy(final));
             var synced = try finish(&engine);
             defer synced.deinit();
             const got = &synced.db;
             try testing.expect(ops_root(H, got).eql(final.root));
             try testing.expectEqual(target_db.bounds().end, got.bounds().end);
-            try testing.expectEqual(final.start, got.bounds().start);
+            const got_start = got.bounds().start;
+            try expect_updated_start(got_start, initial.start, final.start, size_at_update);
             try testing.expectEqual(target_db.inactivity_floor(), got.inactivity_floor());
             try testing.expect(canonical_root(H, got).eql(canonical_root(H, &target_db)));
             try H.expect_ops_applied(got, initial_start, 0, initial_ops);
             try H.expect_ops_applied(got, additional_start, 1, additional_ops);
+        }
+
+        /// A resize rebuilds a journal that ends at or below the new lower bound exactly there,
+        /// but prunes one that holds operations past it only to a blob or section boundary, as
+        /// commonware's does. commonware's deterministic runtime lands one fetch per step, so
+        /// its client never passes the new bound before the update; zigware's concurrent
+        /// fetches can land out of order and then apply several at once (the 9b62ab9 flake).
+        fn expect_updated_start(got: u64, initial_start: u64, final_start: u64, size: u64) !void {
+            if (size <= final_start) return testing.expectEqual(final_start, got);
+            try testing.expect(got >= initial_start);
+            try testing.expect(got <= final_start);
         }
 
         test "sync: a client mid-sync adopts a target update and completes at it" {
@@ -456,8 +479,13 @@ pub fn Tests(comptime H: type) type {
             };
             for (cases) |case| {
                 if (case[0] + case[1] > 100 and !heavy()) continue;
-                try update_during_sync_case(case[0], case[1], case[2]);
+                try update_during_sync_case(case[0], case[1], case[2], false);
             }
+        }
+
+        test "sync: a target update below operations the client already holds completes" {
+            const cases = [_][3]u64{ .{ 20, 1, 1 }, .{ 20, 10, 3 }, .{ 50, 25, 2 } };
+            for (cases) |case| try update_during_sync_case(case[0], case[1], case[2], true);
         }
 
         test "sync: a historical target of an advanced source holds none of the later ops" {
