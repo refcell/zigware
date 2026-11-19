@@ -449,6 +449,31 @@ test "stateful compact: a database set's bounded initialization persists an alig
     }
 }
 
+test "stateful compact: bounded initialization spans multiple commit ranges" {
+    // commonware `managed_db_initializes_multiple_commit_ranges`.
+    inline for (adapter_cases) |C| {
+        var harness: Harness = undefined;
+        try harness.init();
+        defer harness.deinit();
+        const config = C.config(&harness, "stateful-compact-commit-ranges-witness");
+        var targets: [3]C.Adapter.SyncTarget = undefined;
+        {
+            var database = try C.Adapter.init(harness.env(), config, null);
+            defer database.deinit();
+            // Three committed ranges, so reopening at the first spans several commits.
+            for (&targets, [_]u64{ 1, 2, 3 }) |*target, seed| {
+                try commit_inner(C, &database.inner, &.{seed}, seed + 1000, null);
+                target.* = database.sync_target();
+            }
+            try testing.expect(!targets[2].eql(targets[0]));
+        }
+        var capped = try C.Adapter.init(harness.env(), config, targets[0]);
+        defer capped.deinit();
+        try testing.expect(capped.sync_target().eql(targets[0]));
+        try C.expect_value(1001, try capped.inner.get_metadata());
+    }
+}
+
 test "stateful compact: prune bounds bounded initialization history" {
     inline for (adapter_cases) |C| {
         var harness: Harness = undefined;

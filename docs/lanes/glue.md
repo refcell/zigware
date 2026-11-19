@@ -352,7 +352,7 @@ ones: d = deployer (thread T-01a1d5b9-c237), u = utils.
 | transfers/tests.rs | 53 | 53 | 0 | 0 | |
 | stateful/probe/mod.rs (+2 conformance) | 22 | 18 | 4 | 0 | u |
 | stateful/probe/limits.rs | 1 | 1 | 0 | 0 | |
-| stateful/db/mod.rs | 83 | 32 | 29 | 22 | d |
+| stateful/db/mod.rs | 83 | 61 | 0 | 22 | |
 | stateful/db/any.rs | 3 | 3 | 0 | 0 | |
 | stateful/db/current.rs | 11 | 11 | 0 | 0 | |
 | stateful/db/keyless/standard.rs | 5 | 5 | 0 | 0 | |
@@ -371,7 +371,7 @@ ones: d = deployer (thread T-01a1d5b9-c237), u = utils.
 | stateful/actor/core/processing.rs | 86 | 0 | 86 | 0 | u |
 | stateful/actor/processor/mod.rs | 44 | 22 | 22 | 0 | u |
 | stateful/tests/mod.rs, floor.rs | 28 | 0 | 28 | 0 | u |
-| **total** | **469** | **235** | **212** | **22** | |
+| **total** | **469** | **264** | **183** | **22** | |
 
 - Not portable (db/mod.rs, 22): zigware's `Barrier` is synchronous (databases persist inside
   `finalize`), so `barrier_waits_for_every_handle` (8), `barrier_cancellation_releases_handles`
@@ -380,17 +380,13 @@ ones: d = deployer (thread T-01a1d5b9-c237), u = utils.
   members run one after another under their mutexes, so `tuple_new_batches_queues_reads_concurrently`
   and `tuple_apply_runs_databases_in_parallel` have no concurrency to observe.
 - Open, d (deployer):
-  - db/mod.rs: the cross-adapter rstests `merkleize_stale_batch_returns_error` (6) and
-    `initial_sync_target_and_empty_apply_match_initialized_database` (14);
-    `tuple_apply_does_not_hold_ready_writer_while_waiting_for_reader`,
-    `tuple_apply_cancellation_leaves_completed_and_untouched_members`,
-    `heterogeneous_tuple_attach_compiles`; and the evicted-target and generation tests
-    `reached_events_keep_the_newest_event_per_database`,
-    `generation_drain_reports_only_the_newest_assignment`,
-    `single_state_sync_converges_with_late_reports_after_evicted_targets`,
-    `single_state_sync_adopts_queued_tip_before_finishing`,
-    `tuple_state_sync_converges_after_evicted_targets`,
-    `tuple_state_sync_ignores_stale_reached_after_forwarded_tip`.
+  - db/mod.rs: done. The cross-adapter rstests are in adapters_test.zig, the tuple apply
+    locking tests in tuple_test.zig, the generation and reached-event tests in
+    state_sync_tuple.zig, and the evicted-target scenarios in state_sync_test.zig.
+    `heterogeneous_tuple_attach_compiles` is "tuple attachment is index-stable", whose members
+    are two different types. `single_state_sync_adopts_queued_tip_before_finishing` passes
+    under every planted ordering bug: zigware's coordinator handles every completed wake
+    before its finish check, so the race it guards cannot arise there.
   - compact.rs, each for keyless and immutable: `state_sync_stops_compact_update_forwarder_after_completion`,
     `state_sync_drains_queued_target_before_reporting_reached`,
     `state_sync_reports_compact_progress_from_{compact,full}_source`,
