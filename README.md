@@ -87,24 +87,24 @@ it, and every recorded difference from commonware.
 | Package | What it does | Status |
 | --- | --- | --- |
 | [codec](src/codec) | Serialize structured data | ported |
-| [cryptography](src/cryptography) | Keys, signatures, hashes, BLS12-381 threshold crypto | porting |
+| [cryptography](src/cryptography) | Keys, signatures, hashes, BLS12-381 threshold crypto | ported |
 | [curve25519](src/cryptography/curve25519) | Curve25519 arithmetic, Ed25519 signing and batch verification, X25519 | ported |
 | [math](src/math) | Fields, polynomials, NTT | porting |
-| [runtime](src/runtime) | Async tasks with a deterministic scheduler or io_uring | porting |
+| [runtime](src/runtime) | Async tasks on a deterministic scheduler or std.Io (optional io_uring) | ported |
 | [storage](src/storage) | Journals, archives, MMRs, authenticated databases | porting |
 | [utils](src/utils) | Shared functionality across primitives | ported |
 | [parallel](src/parallel) | Parallel folds with pluggable strategies | ported |
 | [actor](src/actor) | Coordinate concurrent components | ported |
 | [stream](src/stream) | Encrypted messages over any transport | ported |
-| [p2p](src/p2p) | Communicate with authenticated peers | porting |
+| [p2p](src/p2p) | Communicate with authenticated peers | ported |
 | [broadcast](src/broadcast) | Disseminate data over a wide-area network | ported |
 | [resolver](src/resolver) | Resolve data by a fixed-length key | ported |
 | [collector](src/collector) | Collect responses to committable requests | ported |
 | [coding](src/coding) | Erasure-code data for recovery from fragments | ported |
-| [clearing](src/clearing) | Settle actions at scale | porting |
-| [consensus](src/consensus) | Order messages in a Byzantine environment (simplex, aggregation, marshal) | porting |
+| [clearing](src/clearing) | Settle actions at scale | ported |
+| [consensus](src/consensus) | Order messages in a Byzantine environment (simplex, aggregation, marshal) | ported |
 | [glue](src/glue) | Default constructions spanning several primitives | porting |
-| [deployer](src/deployer) | Deploy infrastructure across cloud providers | porting |
+| [deployer](src/deployer) | Deploy infrastructure across cloud providers | ported |
 
 Support packages: [formatting](src/formatting), [conformance](src/conformance),
 [invariants](src/invariants), [simd](src/simd), [allocator](src/allocator),
@@ -140,8 +140,9 @@ path. The BLS rows wait on a quiet re-run, and the qmdb gap is being worked on.
 ## Design
 
 - **Zero dependencies.** Only the Zig standard library: no C libraries, no vendored code,
-  `build.zig.zon` has an empty `.dependencies`. BLS12-381, ed25519, secp256r1, the hashes,
-  Reed-Solomon, the runtime, and the storage engines are all implemented here.
+  `build.zig.zon` has an empty `.dependencies`. BLS12-381, Reed-Solomon, the ed25519 verify
+  and MSM paths, the runtime, and the storage engines are implemented here; the hashes,
+  X25519, secp256r1, and ed25519's field arithmetic come from `std.crypto`.
 - **Same wire formats.** Encodings, storage layouts, and network messages match
   commonware's byte for byte, checked against commonware's own test vectors and
   conformance hashes.

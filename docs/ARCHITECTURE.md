@@ -8,7 +8,7 @@ the same name, the same public concepts, and the same dependency edges.
 | `<crate>/src/lib.rs` | `src/<crate>/root.zig` |
 | `<crate>/src/<module>` | `src/<crate>/<module>/` (or `<module>.zig`) |
 | `<crate>/fuzz/`, proptests | `std.testing.fuzz` tests and `invariants.minifuzz` targets next to the code, run seeded in `zig build test` |
-| `<crate>/src/**/conformance.rs` | the same conformance hashes, checked by `zig build test` |
+| `<crate>/src/**/conformance.rs` | the same conformance hashes, checked by `zig build test` (the heavy ones only with `-Dslow-tests`; math's 5 are not ported yet) |
 | `examples/<name>` | `examples/<name>/main.zig` (or `<binary>.zig` per binary), a `run-<name>` build step |
 | `macros`, `*/macros` | comptime code in the package that uses it (no separate package) |
 | `docs`, `mcp`, `sol`, `docker`, `pipeline` | not ported |
@@ -44,7 +44,7 @@ on lines above it.
 | collector | actor, codec, cryptography, p2p, runtime, utils, invariants | 2.4k |
 | resolver | actor, codec, cryptography, p2p, runtime, stream, utils, conformance | 14k |
 | consensus | actor, broadcast, codec, coding, cryptography, formatting, math, parallel, p2p, resolver, runtime, storage, utils, conformance, invariants | 140k |
-| glue | actor, broadcast, codec, coding, consensus, cryptography, math, p2p, parallel, resolver, runtime, storage, stream, utils, conformance, invariants | 67k |
+| glue | actor, broadcast, codec, coding, consensus, cryptography, math, p2p, parallel, resolver, runtime, storage, stream, utils, conformance, invariants | 68k |
 | deployer | cryptography, utils | 8.8k |
 
 The table is `build.zig`'s `packages` list, in its order. Rust line counts are every `.rs` file
