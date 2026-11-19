@@ -461,3 +461,60 @@ test "stateful processor: a request leaving after completion hands the flight on
     try testing.expect(execution.pending_contains(block.digest()));
     try testing.expect(execution.flights_idle());
 }
+
+fn rebuild_task(harness: *Harness, target: TestBlock) anyerror!void {
+    return rebuild(harness, target);
+}
+
+/// Waits until `count` requests hold the flight processing `digest` (bounded).
+fn await_joiners(execution: *harness_mod.Execution, digest: TestBlock.Digest, count: u32) !void {
+    for (0..10_000) |_| {
+        execution.mutex.lockUncancelable(testing.io);
+        const flight = execution.flights.get(digest);
+        const joiners = if (flight) |value| value.joiners else 0;
+        execution.mutex.unlock(testing.io);
+        if (joiners >= count) return;
+        try testing.io.sleep(.fromMilliseconds(1), .awake);
+    }
+    return error.TestTimedOut;
+}
+
+// commonware `overlapping_rebuilds_share_processing_across_cancellation`: rebuilds needing
+// the same missing ancestor share its processing; cancelling requests, including the one
+// that started it, leaves it running, and the rest complete from one call. Adapted: each
+// rebuild runs on its own task, and dropping a request is cancelling its task.
+test "stateful processor: overlapping rebuilds share processing across cancellation" {
+    var harness: Harness = undefined;
+    try harness.init();
+    defer harness.deinit();
+    const genesis = TestBlock.genesis();
+    const block1 = try harness.stage_pending_child(&genesis, 1);
+    const block2 = try harness.stage_pending_child(&block1, 2);
+    const block3 = try harness.stage_pending_child(&block2, 3);
+    harness.execution.state.clear();
+    var probe: Probe = .{ .target = block1.digest() };
+    defer probe.deinit();
+    const handles = try probe.add_gate();
+    var gate: HeldGate = .{ .started = handles.started, .release = handles.release };
+    defer gate.deinit();
+    harness.app.probe = &probe;
+    const io = testing.io;
+
+    var first = try io.concurrent(rebuild_task, .{ &harness, block2 });
+    try gate.started.recv();
+    var second = try io.concurrent(rebuild_task, .{ &harness, block2 });
+    var third = try io.concurrent(rebuild_task, .{ &harness, block3 });
+    var fourth = try io.concurrent(rebuild_task, .{ &harness, block2 });
+    try await_joiners(harness.execution, block1.digest(), 4);
+    try testing.expectEqual(1, probe.calls);
+    // Cancelling requests, including the one that started the processing, leaves it running.
+    try testing.expectError(error.Canceled, fourth.cancel(io));
+    try testing.expectError(error.Canceled, first.cancel(io));
+    try testing.expect(!gate.release.is_closed());
+    try gate.open();
+    try second.await(io);
+    try third.await(io);
+    try testing.expectEqual(1, probe.calls);
+    try testing.expect(harness.execution.flights_idle());
+    try testing.expect(harness.execution.pending_contains(block3.digest()));
+}
