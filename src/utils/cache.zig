@@ -62,9 +62,27 @@ fn has_decl(comptime T: type, comptime name: []const u8) bool {
 /// The hash of `key`: `K.hash(key)` when declared, else a seeded Wyhash of its contents.
 pub fn key_hash(comptime K: type, key: K) u64 {
     if (comptime has_decl(K, "hash")) return K.hash(key);
+    const info = @typeInfo(K);
+    if (comptime info == .int and info.int.bits <= 64) return integer_hash(key);
     var hasher = std.hash.Wyhash.init(hash_seed);
     std.hash.autoHashStrat(&hasher, key, .Deep);
     return hasher.final();
+}
+
+/// An integer key's hash: ahash's fallback (the hasher commonware's cache uses), two folded
+/// 64x64-bit multiplies, about a third of Wyhash's cost. Both the low bits (home slot) and
+/// the top byte (fingerprint) depend on every key bit.
+fn integer_hash(key: anytype) u64 {
+    const multiple: u64 = 6364136223846793005;
+    const value: u64 = @as(@Int(.unsigned, @bitSizeOf(@TypeOf(key))), @bitCast(key));
+    const buffer = folded_multiply(value ^ hash_seed, multiple);
+    const pad: u64 = 0x2d35_8dcc_aa6c_78a5;
+    return std.math.rotl(u64, folded_multiply(buffer, pad), buffer & 63);
+}
+
+fn folded_multiply(a: u64, b: u64) u64 {
+    const product = @as(u128, a) * b;
+    return @as(u64, @truncate(product)) ^ @as(u64, @truncate(product >> 64));
 }
 
 /// Key equality: `K.eql` when declared, contents for slices, else `std.meta.eql`.
@@ -697,7 +715,9 @@ pub fn Cache(comptime K: type, comptime V: type) type {
             // key moves to Ghost with the same hash.
             var historical_hash: ?u64 = null;
             const slot = if (plan.victim()) |victim| slot: {
-                const victim_hash = key_hash(K, self.slots.items[victim].key);
+                // The slot keeps its key's hash, so the victim is not rehashed.
+                const victim_hash = self.slots.items[victim].hash;
+                assert(victim_hash == key_hash(K, self.slots.items[victim].key));
                 assert(self.index.remove(victim_hash, victim));
                 if (self.unlink_resident(victim) == .small) historical_hash = victim_hash;
                 break :slot victim;
