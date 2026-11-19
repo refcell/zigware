@@ -55,3 +55,46 @@ test "stateful processing: finalization joins an incompatible verification" {
     try waiter.wait();
     try testing.expect(!try child.recv());
 }
+
+// commonware `finalization_rejects_deep_incompatible_verification`: a gated verification two
+// blocks deep on a fork the finalization prunes keeps running while finalization waits,
+// then resolves false. Adapted like the shallow case: the pending acknowledgement shows the
+// wait instead of a parked ancestry acquisition.
+test "stateful processing: finalization rejects a deep incompatible verification" {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer deinit_fixture(&fixture);
+    const genesis = TestBlock.genesis();
+    const winner, var winner_batch = try fixture.harness.build_child(&genesis, 1);
+    winner_batch.deinit();
+    const losing_parent = try fixture.harness.stage_pending_child(&genesis, 2);
+    const losing_child = try fixture.harness.stage_pending_child(&losing_parent, 3);
+    const grandchild, var grandchild_batch = try fixture.harness.build_child(&losing_child, 4);
+    grandchild_batch.deinit();
+
+    var parent = try fixture.verify(&.{ losing_parent, genesis });
+    defer parent.deinit();
+    try testing.expect(try parent.recv());
+    var child = try fixture.verify(&.{ losing_child, losing_parent });
+    defer child.deinit();
+    try testing.expect(try child.recv());
+
+    var probe: harness.Probe = .{ .target = grandchild.digest() };
+    defer probe.deinit();
+    const gate = try probe.add_gate();
+    var started = gate.started;
+    defer started.deinit();
+    var release = gate.release;
+    fixture.processing.verifications.verifier.app.probe = &probe;
+    var deep = try fixture.verify(&.{ grandchild, losing_child });
+    defer deep.deinit();
+    try started.recv();
+
+    var waiter = try fixture.finalize(winner);
+    defer waiter.deinit();
+    try testing.io.sleep(.fromMilliseconds(20), .awake);
+    try testing.expectEqual(null, waiter.poll());
+    try release.send({});
+    try waiter.wait();
+    try testing.expect(!try deep.recv());
+}
