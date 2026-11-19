@@ -137,22 +137,20 @@ keeps the largest inputs of some benches to full mode). Each package's benches r
 `zig build bench` (filter with `-Dbench-filter=`). Counts are bench cases (one Criterion name
 each); a group is the name before the first `/`.
 
-**2112 of 2262** commonware cases have a zigware bench of the same name. The 150 without one:
+**2224 of 2262** commonware cases have a zigware bench of the same name. The 38 without one:
 
-- 100 `conc=8` rows of six bls12381 groups and the 4 `sha256::hash_parts` cases. These crates
-  are in runtime's commonware-vs-zigware comparison set above, so the audit lists them without
-  porting them.
 - 18 `impl=roaring-rs` rows of the roaring bitmap benches: they measure an external Rust crate.
 - 15 `iobuf::iobuf::decode_fixed` cases: the `bytes` and `bytes_ref` modes measure the `bytes`
   crate, and `vec` is the same decode as `vec_slice` here (decided when the bench was ported).
-- 8 `blake3::hash_message` `conc=8` rows: `Blake3.hash_across` still hashes one message on the
-  calling thread, while commonware splits a long message into subtrees across the strategy.
-  This needs an implementation in `cryptography/blake3.zig`, not just a bench.
 - 5 `engine=avx512` rows of the Reed-Solomon engine benches: zigware has no AVX-512 engine.
 
 Ported by this audit: utils' `bitmap`, `cache`, `rational`, and `sequence` benches (168
-cases), storage's `ordinal` (13) and `rmap` (5), and curve25519's batch verify at
-commonware's concurrency levels 16 and 32. Renamed to commonware's Criterion names:
+cases), storage's `ordinal` (13) and `rmap` (5), curve25519's batch verify at
+commonware's concurrency levels 16 and 32, `sha256::hash_parts` (4), and the `conc=8` rows of
+`blake3::hash_message` (8, after `Blake3.hash_across` learned to split a long message into
+subtrees across the strategy, as commonware does) and of six bls12381 groups (100).
+`bls12381::aggregate_verify_same_signer` and `evaluate_point` fold and multiply across the
+strategy in the bench, because zigware's `combine_messages` and `eval_msm` take no strategy yet. Renamed to commonware's Criterion names:
 `curve25519::batch_verify` to `batch_verify::verify_batch_bytes_bench`, and
 `iobuf::decode_fixed` to `iobuf::iobuf::decode_fixed`.
 
@@ -178,7 +176,7 @@ and runtime's I/O backend benches (`runtime::network::echo`, `runtime::storage`)
 | codec | `codec` | `codec::lazy::get` | 10 | 10 |  |
 | coding | `coding_scheme_times` | `reed_solomon::encode` | 30 | 30 |  |
 | coding | `coding_scheme_times` | `reed_solomon::decode` | 130 | 130 |  |
-| cryptography | `blake3` | `blake3::hash_message` | 16 | 8 | `conc=8` missing: `Blake3.hash_across` still hashes one message on the calling thread, where commonware splits it into subtrees across the strategy (an implementation gap, not a bench gap) |
+| cryptography | `blake3` | `blake3::hash_message` | 16 | 16 |  |
 | cryptography | `bloomfilter` | `bloomfilter::insert` | 12 | 12 |  |
 | cryptography | `bloomfilter` | `bloomfilter::contains` | 24 | 24 |  |
 | cryptography | `bls12381` | `bls12381::batch_to_affine` | 8 | 8 |  |
@@ -186,7 +184,7 @@ and runtime's I/O backend benches (`runtime::network::echo`, `runtime::storage`)
 | cryptography | `bls12381` | `bls12381::dkg::golden::verify` | 3 | 3 |  |
 | cryptography | `bls12381` | `bls12381::dkg::feldman_desmedt_recovery` | 4 | 4 |  |
 | cryptography | `bls12381` | `bls12381::dkg::feldman_desmedt_reshare_recovery` | 4 | 4 |  |
-| cryptography | `bls12381` | `bls12381::hash_to_curve` | 8 | 4 | `conc=8` rows missing (bls12381 is in runtime's comparison set; not ported here) |
+| cryptography | `bls12381` | `bls12381::hash_to_curve` | 8 | 8 |  |
 | cryptography | `bls12381` | `bls12381::attestation_eq` | 2 | 2 |  |
 | cryptography | `bls12381` | `bls12381::threshold_recover` | 20 | 20 |  |
 | cryptography | `bls12381` | `bls12381::threshold_optimistic_assemble` | 32 | 32 |  |
@@ -196,15 +194,15 @@ and runtime's I/O backend benches (`runtime::network::echo`, `runtime::storage`)
 | cryptography | `bls12381` | `bls12381::signature_verification` | 1 | 1 |  |
 | cryptography | `bls12381` | `bls12381::batch_verify_same_signer` | 10 | 10 |  |
 | cryptography | `bls12381` | `bls12381::aggregate_verify_same_message` | 4 | 4 |  |
-| cryptography | `bls12381` | `bls12381::aggregate_verify_same_signer` | 10 | 5 | `conc=8` rows missing (in runtime's comparison set) |
+| cryptography | `bls12381` | `bls12381::aggregate_verify_same_signer` | 10 | 10 |  |
 | cryptography | `bls12381` | `bls12381::scheme_batch_verify_same_signer` | 10 | 10 |  |
 | cryptography | `bls12381` | `bls12381::scheme_batch_verify_same_message` | 10 | 10 |  |
-| cryptography | `bls12381` | `bls12381::evaluate_point` | 14 | 7 | `conc=8` rows missing (in runtime's comparison set) |
+| cryptography | `bls12381` | `bls12381::evaluate_point` | 14 | 14 |  |
 | cryptography | `bls12381` | `bls12381::msm` | 24 | 24 |  |
 | cryptography | `bls12381` | `bls12381::multisig_optimistic_assemble` | 16 | 16 |  |
-| cryptography | `bls12381` | `bls12381::threshold_batch_verify_same_message` | 56 | 28 | `conc=8` rows missing (in runtime's comparison set) |
-| cryptography | `bls12381` | `bls12381::threshold_batch_verify_same_message_pre` | 56 | 28 | `conc=8` rows missing (in runtime's comparison set) |
-| cryptography | `bls12381` | `bls12381::threshold_batch_verify_same_signer` | 56 | 28 | `conc=8` rows missing (in runtime's comparison set) |
+| cryptography | `bls12381` | `bls12381::threshold_batch_verify_same_message` | 56 | 56 |  |
+| cryptography | `bls12381` | `bls12381::threshold_batch_verify_same_message_pre` | 56 | 56 |  |
+| cryptography | `bls12381` | `bls12381::threshold_batch_verify_same_signer` | 56 | 56 |  |
 | cryptography | `bls12381` | `bls12381::tle_encrypt` | 1 | 1 |  |
 | cryptography | `bls12381` | `bls12381::tle_decrypt` | 1 | 1 |  |
 | cryptography | `bulletproofs` | `bulletproofs::ipa::prove` | 10 | 10 |  |
@@ -237,7 +235,7 @@ and runtime's I/O backend benches (`runtime::network::echo`, `runtime::storage`)
 | cryptography | `sha256` | `sha256::hash_many::individual` | 54 | 54 |  |
 | cryptography | `sha256` | `sha256::hash_many::batch` | 108 | 108 |  |
 | cryptography | `sha256` | `sha256::hash_pair` | 2 | 2 |  |
-| cryptography | `sha256` | `sha256::hash_parts` | 4 | 0 | missing (sha256 is in runtime's comparison set; not ported here) |
+| cryptography | `sha256` | `sha256::hash_parts` | 4 | 4 |  |
 | cryptography | `sha256` | `sha256::digest_cmp` | 12 | 12 |  |
 | cryptography | `sha512` | `sha512::hash_many::individual` | 40 | 40 |  |
 | cryptography | `sha512` | `sha512::hash_many::batch` | 80 | 80 |  |

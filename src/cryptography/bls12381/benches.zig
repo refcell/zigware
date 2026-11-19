@@ -3,14 +3,15 @@
 //!
 //! Where commonware rebuilds its inputs before every iteration (`iter_batched`), the inputs
 //! here are built once per benchmark: no routine consumes or changes them, so the timed work
-//! is the same, and setups such as 10,000 keypairs stay out of every sample. The operations
-//! are sequential, so only commonware's `conc=1` cases are ported.
+//! is the same, and setups such as 10,000 keypairs stay out of every sample. `conc=8` rows run
+//! on a Rayon of eight tasks (`benches/common.zig`).
 
 const std = @import("std");
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const bench = @import("bench");
 const cryptography = @import("cryptography");
+const parallel = @import("parallel");
 const utils = @import("utils");
 
 const bls12381 = cryptography.bls12381;
@@ -74,30 +75,42 @@ fn bench_signatures(runner: *bench.Runner) !void {
     try runner.run(verification_name, &verification);
 }
 
+/// Hashes every message to G1 with `strategy.map_into` (commonware's `map_collect_vec`).
 const HashToCurve = struct {
     messages: []const Message,
     out: []G1,
+    strategy: parallel.Rayon,
+
+    pub fn map(_: *const HashToCurve, message: *const Message) G1 {
+        return ops.hash_with_namespace(MinSig, MinSig.message, namespace, message);
+    }
 
     pub fn iter(workload: *HashToCurve) void {
-        for (workload.messages, workload.out) |*message, *hm| {
-            hm.* = ops.hash_with_namespace(MinSig, MinSig.message, namespace, message);
-        }
+        workload.strategy.map_into(workload.messages, workload.out, workload);
     }
 };
 
 fn bench_hash_to_curve(runner: *bench.Runner) !void {
     const gpa = runner.allocator;
     var rng = utils.test_rng();
+    const threads = try common.pool(runner);
+    defer threads.destroy();
     for (cases(runner, usize, &.{ 10, 50, 100, 200 })) |n| {
-        const name = bench.Benchmark.init("bls12381::hash_to_curve")
-            .with_param("n", n).with_param("conc", 1);
-        if (try skip(runner, name)) continue;
         const messages = try random_messages(gpa, &rng, n);
         defer gpa.free(messages);
         const out = try gpa.alloc(G1, n);
         defer gpa.free(out);
-        var workload: HashToCurve = .{ .messages = messages, .out = out };
-        try runner.run(name, &workload);
+        for (common.concurrencies) |conc| {
+            const name = bench.Benchmark.init("bls12381::hash_to_curve")
+                .with_param("n", n).with_param("conc", conc);
+            if (try skip(runner, name)) continue;
+            var workload: HashToCurve = .{
+                .messages = messages,
+                .out = out,
+                .strategy = common.strategy(threads, conc),
+            };
+            try runner.run(name, &workload);
+        }
     }
 }
 

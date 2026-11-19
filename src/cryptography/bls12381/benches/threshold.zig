@@ -110,6 +110,7 @@ const SameMessage = struct {
     partials: []Partial,
     invalid: u32,
     precomputed: bool,
+    strategy: parallel.Rayon,
 
     pub fn before_iter(workload: *SameMessage) void {
         if (!workload.precomputed) @memset(workload.sharing.evals, null);
@@ -125,7 +126,7 @@ const SameMessage = struct {
             namespace,
             message,
             workload.partials,
-            parallel.sequential,
+            workload.strategy,
         );
         defer workload.gpa.free(invalid);
         assert(invalid.len == workload.invalid);
@@ -135,6 +136,8 @@ const SameMessage = struct {
 
 fn bench_same_message(runner: *bench.Runner, precomputed: bool) !void {
     const gpa = runner.allocator;
+    const threads = try common.pool(runner);
+    defer threads.destroy();
     const prefix = if (precomputed)
         "bls12381::threshold_batch_verify_same_message_pre"
     else
@@ -142,10 +145,10 @@ fn bench_same_message(runner: *bench.Runner, precomputed: bool) !void {
     for (modes) |mode| {
         for (cases(runner, &.{ 5, 10, 20, 50, 100, 250, 500 })) |n| {
             const t = N3f1.quorum(n);
-            for ([_]u32{ 0, n - t }) |invalid| {
+            for ([_]u32{ 0, n - t }) |invalid| for (common.concurrencies) |conc| {
                 const name = bench.Benchmark.init(prefix)
                     .with_param("n", n).with_param("t", t).with_param("invalid", invalid)
-                    .with_param("conc", 1).with_param("mode", mode_name(mode));
+                    .with_param("conc", conc).with_param("mode", mode_name(mode));
                 if (try skip(runner, name)) continue;
                 var dealt = try Dealt.init(gpa, mode, n);
                 defer dealt.deinit(gpa);
@@ -159,9 +162,10 @@ fn bench_same_message(runner: *bench.Runner, precomputed: bool) !void {
                     .partials = partials,
                     .invalid = invalid,
                     .precomputed = precomputed,
+                    .strategy = common.strategy(threads, conc),
                 };
                 try runner.run(name, &workload);
-            }
+            };
         }
     }
 }
@@ -172,6 +176,7 @@ const SameSigner = struct {
     sharing: Sharing,
     index: utils.Participant,
     entries: []const threshold.SignerEntry(MinSig),
+    strategy: parallel.Rayon,
 
     pub fn before_iter(workload: *SameSigner) void {
         @memset(workload.sharing.evals, null);
@@ -185,20 +190,23 @@ const SameSigner = struct {
             workload.sharing,
             workload.index,
             workload.entries,
-            parallel.sequential,
+            workload.strategy,
         );
     }
 };
 
 fn bench_same_signer(runner: *bench.Runner) !void {
     const gpa = runner.allocator;
+    const threads = try common.pool(runner);
+    defer threads.destroy();
     for (modes) |mode| {
         for (cases(runner, &.{ 5, 10, 20, 50, 100, 250, 500 })) |n| {
             const counts = [_]u32{ 10, 100 };
-            for (runner.inputs.pick([]const u32, counts[0..1], &counts, &counts)) |count| {
+            const picked = runner.inputs.pick([]const u32, counts[0..1], &counts, &counts);
+            for (picked) |count| for (common.concurrencies) |conc| {
                 const name = bench.Benchmark.init("bls12381::threshold_batch_verify_same_signer")
                     .with_param("n", n).with_param("t", N3f1.quorum(n))
-                    .with_param("msgs", count).with_param("conc", 1)
+                    .with_param("msgs", count).with_param("conc", conc)
                     .with_param("mode", mode_name(mode));
                 if (try skip(runner, name)) continue;
                 var dealt = try Dealt.init(gpa, mode, n);
@@ -222,9 +230,10 @@ fn bench_same_signer(runner: *bench.Runner) !void {
                     .sharing = dealt.sharing,
                     .index = signer.index,
                     .entries = entries,
+                    .strategy = common.strategy(threads, conc),
                 };
                 try runner.run(name, &workload);
-            }
+            };
         }
     }
 }

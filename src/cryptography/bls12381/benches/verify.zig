@@ -75,14 +75,40 @@ fn bench_aggregate_same_message(runner: *bench.Runner) !void {
     }
 }
 
-/// Combines the message hashes, then verifies one signer's aggregate signature.
+/// commonware's `combine_messages` across a strategy: a fold of the message hashes.
+const CombineMessages = struct {
+    const Sum = aggregate.Message(MinSig);
+
+    pub fn identity(_: CombineMessages) Sum {
+        return .zero;
+    }
+
+    pub fn fold(_: CombineMessages, acc: Sum, item: *const aggregate.NamespacedMessage) Sum {
+        var sum = acc;
+        sum.add(ops.hash_with_namespace(MinSig, MinSig.message, item.namespace, item.message));
+        return sum;
+    }
+
+    pub fn reduce(_: CombineMessages, a: Sum, b: Sum) Sum {
+        var sum = a;
+        sum.add(b.value);
+        return sum;
+    }
+};
+
+/// Combines the message hashes (across `strategy` when it plans more than one task), then
+/// verifies one signer's aggregate signature.
 const AggregateSameSigner = struct {
     public: G2,
     messages: []const aggregate.NamespacedMessage,
     signature: aggregate.Signature(MinSig),
+    strategy: parallel.Rayon,
 
     pub fn iter(workload: *AggregateSameSigner) !void {
-        const combined = aggregate.combine_messages(MinSig, workload.messages);
+        const combined = if (workload.strategy.parallelism() > 1)
+            workload.strategy.fold(workload.messages, CombineMessages{})
+        else
+            aggregate.combine_messages(MinSig, workload.messages);
         try aggregate.verify_same_signer(MinSig, workload.public, combined, workload.signature);
     }
 };
@@ -105,9 +131,12 @@ const Signed = struct {
 fn bench_aggregate_same_signer(runner: *bench.Runner) !void {
     const gpa = runner.allocator;
     var rng = utils.test_rng();
-    for (cases(runner, usize, &.{ 2, 10, 100, 1000, 10000 })) |n| {
+    const threads = try common.pool(runner);
+    defer threads.destroy();
+    const sizes = cases(runner, usize, &.{ 2, 10, 100, 1000, 10000 });
+    for (sizes) |n| for (common.concurrencies) |conc| {
         const name = bench.Benchmark.init("bls12381::aggregate_verify_same_signer")
-            .with_param("conc", 1).with_param("msgs", n);
+            .with_param("conc", conc).with_param("msgs", n);
         if (try skip(runner, name)) continue;
         const messages = try random_messages(gpa, &rng, n);
         defer gpa.free(messages);
@@ -122,9 +151,10 @@ fn bench_aggregate_same_signer(runner: *bench.Runner) !void {
             .public = signed.public,
             .messages = namespaced,
             .signature = aggregate.combine_signatures(MinSig, signed.signatures),
+            .strategy = common.strategy(threads, conc),
         };
         try runner.run(name, &workload);
-    }
+    };
 }
 
 const BatchSameSigner = struct {
@@ -321,22 +351,37 @@ fn bench_msm(runner: *bench.Runner) !void {
     }
 }
 
+/// `polynomial.eval_msm(scalar)`, or with a strategy planning more than one task, the same
+/// powers of `scalar` and one multi-scalar multiplication across it (commonware's
+/// `eval_msm(&scalar, &strategy)`).
 const EvaluatePoint = struct {
     gpa: Allocator,
     polynomial: math.poly.Poly(G1),
     scalar: Scalar,
+    strategy: parallel.Rayon,
 
     pub fn iter(workload: *EvaluatePoint) !G1 {
-        return workload.polynomial.eval_msm(workload.gpa, Scalar, workload.scalar);
+        if (workload.strategy.parallelism() == 1) {
+            return workload.polynomial.eval_msm(workload.gpa, Scalar, workload.scalar);
+        }
+        const coeffs = workload.polynomial.coeffs;
+        const weights = try workload.gpa.alloc(Scalar, coeffs.len);
+        defer workload.gpa.free(weights);
+        var iterator = math.algebra.powers(Scalar, Scalar.one, workload.scalar);
+        for (weights) |*weight| weight.* = iterator.next();
+        return G1.msm_strategy(workload.gpa, coeffs, weights, workload.strategy);
     }
 };
 
 fn bench_evaluate_point(runner: *bench.Runner) !void {
     const gpa = runner.allocator;
-    for (cases(runner, u32, &.{ 5, 10, 20, 50, 100, 250, 500 })) |n| {
+    const threads = try common.pool(runner);
+    defer threads.destroy();
+    const sizes = cases(runner, u32, &.{ 5, 10, 20, 50, 100, 250, 500 });
+    for (sizes) |n| for (common.concurrencies) |conc| {
         const t = utils.N3f1.quorum(n);
         const name = bench.Benchmark.init("bls12381::evaluate_point")
-            .with_param("n", n).with_param("t", t).with_param("conc", 1);
+            .with_param("n", n).with_param("t", t).with_param("conc", conc);
         if (try skip(runner, name)) continue;
         var rng = utils.test_rng();
         var secret = try math.poly.Poly(Scalar).random(gpa, &rng, t - 1);
@@ -345,10 +390,11 @@ fn bench_evaluate_point(runner: *bench.Runner) !void {
             .gpa = gpa,
             .polynomial = try math.poly.commit(gpa, G1, secret),
             .scalar = Scalar.random(&rng),
+            .strategy = common.strategy(threads, conc),
         };
         defer workload.polynomial.deinit(gpa);
         try runner.run(name, &workload);
-    }
+    };
 }
 
 pub fn run(runner: *bench.Runner) !void {
