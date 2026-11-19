@@ -155,7 +155,7 @@ time, files, and network: build on it rather than around it where it fits.
   `Blob.close` replaces drop: handles must be closed, and closing does not sync.
 - Network backends are duck-typed (`Listener`, `Accepted`, `Connection` declared by the
   backend) rather than vtables, so sinks and streams stay concrete and inlinable. The mock
-  channel keeps `src/stream/mocks.zig`'s method shapes; unlike that stand-in, a canceled send
+  channel keeps the method shapes of stream's deleted `mocks.zig`; unlike that stand-in, a canceled send
   closes the sink (commonware drops it), so the peer's pending recv fails.
 - Fibers are entered with a null return address (tail jump from `trampoline`), so DWARF and
   frame-pointer unwinders stop at the entry function; a call left x30 pointing into the
