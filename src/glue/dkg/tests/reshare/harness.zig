@@ -273,10 +273,18 @@ pub const ReshareEngine = struct {
         assert(ctx.channels.len == channel_count);
         const gpa = self.gpa;
         const index = ctx.index;
+        // commonware: a node restarting means its processed hold served its purpose. A node
+        // that processed a block before is restarting.
+        const ledger: *support.Ledger = @constCast(&self.ledger);
+        if (ledger.processed_of(ctx.public_key) > 0) ledger.release_hold(ctx.public_key);
         const marshal = try gpa.create(ValidatorState.Marshal);
         marshal.* = .{};
+        // commonware `Network::manager`: a node starts, and restarts, with no peer sets, and
+        // tracks sets for itself alone.
+        const control = ctx.oracle.control(ctx.public_key);
+        try control.reset_peer_sets();
         const manager = &self.managers[index];
-        manager.* = .init(ctx.oracle.manager());
+        manager.* = .init(control.manager());
         var wrapped: [channel_count]Validator.Channel = undefined;
         for (&wrapped, ctx.channels, 0..) |*channel, registered, at| {
             const filter: mocks.Filter = if (at == dkg_channel and self.failures.len > 0)
@@ -323,7 +331,7 @@ pub const ReshareEngine = struct {
         return .{
             .signer = self.signers[index],
             .manager = manager,
-            .peer_provider = ctx.oracle.manager(),
+            .peer_provider = manager.manager,
             .blocker = ctx.oracle.control(ctx.public_key),
             .secret_store = &self_mut.stores[index],
             .ledger = &self_mut.ledger,

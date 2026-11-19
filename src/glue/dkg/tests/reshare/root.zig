@@ -7,6 +7,7 @@ const std = @import("std");
 const testing = std.testing;
 const build_options = @import("build_options");
 const assert = std.debug.assert;
+const consensus = @import("consensus");
 const cryptography = @import("cryptography");
 const p2p = @import("p2p");
 const simulate = @import("../../../simulate/mod.zig");
@@ -301,7 +302,90 @@ test "reshare e2e roots of unity output" {
     _ = try run_reshare(&engine, .{ .final_epoch = 0, .output_mode = .roots_of_unity });
 }
 
+const epocher: consensus.types.FixedEpocher = .{ .length = properties.epoch_length };
+
+/// Runs `crashes` until `active` validators process `height`, with no other properties.
+fn run_until_active(
+    engine: *harness.ReshareEngine,
+    seed: u64,
+    crashes: []const simulate.action.Crash(harness.Key),
+    height: u64,
+    active: usize,
+) !void {
+    const exit: properties.AllActiveProcessedHeight = .{
+        .required = height,
+        .participants = active,
+    };
+    const plan: harness.Plan = .{
+        .engine = engine,
+        .seed = seed,
+        .link = harness.good_link,
+        .crashes = crashes,
+        .required_finalizations = 0,
+        .exit_condition = .from(&exit),
+        .timeout = .from_secs(60),
+    };
+    var result = try plan.run(gpa);
+    result.deinit();
+}
+
+// commonware `reshare_e2e_boundary_lagging_validator`: a validator that crashed early in
+// epoch 1 restarts while the rest wait on the final block. Another stops at the block before
+// it, so the restarted validator completes the only possible quorum.
+test "reshare e2e boundary lagging validator" {
+    try skip_slow();
+    const epoch: consensus.Epoch = .new(1);
+    const first = epocher.first(epoch).?.get();
+    const midpoint = epocher.midpoint(epoch).?.get();
+    const last = properties.final_height(epoch.get());
+    const stopped_at = last - 1;
+    for (0..3) |seed| {
+        var engine = try harness.ReshareEngine.with_committees(gpa, 4, &.{4}, 1);
+        defer engine.deinit();
+        const keys = engine.participants();
+        const stopped = keys[2];
+        engine.ledger.hold = .{ .key = stopped, .height = stopped_at };
+        const crashes = [_]simulate.action.Crash(harness.Key){
+            .{ .processed_height = .{
+                .participants = keys[3..4],
+                .heights = .{ .min = first + 1, .max = midpoint - 8 },
+                .downtime = .from_secs(10),
+            } },
+            // Down for the rest of the run.
+            .{ .processed_height = .{
+                .participants = keys[2..3],
+                .heights = .{ .min = stopped_at, .max = stopped_at },
+                .downtime = .from_secs(3600),
+            } },
+        };
+        try run_until_active(&engine, seed, &crashes, last, 3);
+    }
+}
+
+// commonware `reshare_registers_shareless_player_as_member`: a player whose epoch-zero share
+// is gone before it starts registers a member scheme at its committee position, and the other
+// signers finish the epoch without it.
+test "reshare e2e shareless player registers as member" {
+    try skip_slow();
+    var engine = try harness.ReshareEngine.with_committees(gpa, 4, &.{4}, 1);
+    defer engine.deinit();
+    const key = engine.participants()[1];
+    const index = for (engine.initial.output.players.items, 0..) |player, at| {
+        if (player.eql(key)) break at;
+    } else unreachable; // Every participant is an epoch-zero player here.
+    try engine.stores[1].prune(.new(1));
+    _ = try run_reshare(&engine, .{ .final_epoch = 0, .schemes = false });
+    const expected: properties.Registration = .{
+        .epoch = .zero(),
+        .membership = .{ .member = .init(@intCast(index)) },
+    };
+    for (engine.ledger.registrations_of(key)) |registration| {
+        if (registration.eql(expected)) break;
+    } else return error.SharelessPlayerNotMember;
+}
+
 test {
+    _ = @import("harness_test.zig");
     _ = @import("properties_test.zig");
     _ = @import("state_sync_test.zig");
 }

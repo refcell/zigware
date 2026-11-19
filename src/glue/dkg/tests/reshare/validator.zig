@@ -158,6 +158,7 @@ pub fn Validator(comptime T: type) type {
         const MarshalReporter = struct {
             pub const Activity = Update;
             key: Key,
+            io: Io,
             ledger: *support.Ledger,
             monitor: ?Monitor,
             orchestrator_mailbox: Orchestrator.Mailbox,
@@ -176,6 +177,15 @@ pub fn Validator(comptime T: type) type {
                     .block => |value| {
                         const height = value.block.inner().height().get();
                         self.ledger.record_processed(self.key, height);
+                        // commonware `App::finalized`: park at the held height so the
+                        // processed-height crash trigger observes it.
+                        while (self.ledger.held(self.key, height)) {
+                            self.io.sleep(.fromMilliseconds(25), .awake) catch {
+                                // Re-arm the cancel so marshal's next wait observes it.
+                                self.io.recancel();
+                                break;
+                            };
+                        }
                     },
                 }
                 const copy: Update = switch (update) {
@@ -324,15 +334,27 @@ pub fn Validator(comptime T: type) type {
         /// commonware `InitialState::register_epoch_zero`: install epoch zero's scheme from
         /// the stored share before any actor runs, without recording it.
         fn register_epoch_zero(self: *Self) !void {
-            const gpa = self.gpa;
-            const initial = self.config.initial;
-            const share = try self.config.secret_store.get_share(Epoch.zero());
+            const key = self.config.signer.public_key();
+            const store = self.config.secret_store;
+            _ = try install_epoch_zero(self.gpa, &self.provider, self.config.initial, key, store);
+        }
+
+        /// Installs epoch zero's scheme for `key` from its stored share, if any (commonware
+        /// `InitialState::register_epoch_zero`). A player without its share still gets a
+        /// scheme that reports its committee position.
+        pub fn install_epoch_zero(
+            gpa: Allocator,
+            provider: *Self.Provider,
+            initial: *const Info,
+            key: Key,
+            store: *T.SecretStore,
+        ) !*const Scheme {
+            const share = try store.get_share(Epoch.zero());
             var players = try initial.output.players.clone(gpa);
             errdefer players.deinit(gpa);
             const sharing = try initial.output.public.clone(gpa);
-            const key = self.config.signer.public_key();
             const info = types.SchemeInfo(V, Key).init(key, players, sharing, share);
-            _ = try self.provider.install(Epoch.zero(), info);
+            return provider.install(Epoch.zero(), info);
         }
 
         fn init_node(self: *Self, ctx: Ctx, channels: Channels) !void {
@@ -511,6 +533,7 @@ pub fn Validator(comptime T: type) type {
             handles[0] = try ctx.child("reshare").spawn(Task.run, reshare_args);
             handles[1] = try self.node.start(.{
                 .key = self.config.signer.public_key(),
+                .io = self.io,
                 .ledger = self.config.ledger,
                 .monitor = self.config.monitor,
                 .orchestrator_mailbox = self.orchestrator_mailbox.clone(),

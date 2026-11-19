@@ -922,6 +922,10 @@ shared `tests/mocks.zig`, which takes additive edits only (agreed with the glue 
   multiple epochs, the failed and consecutive failed ceremony carry-overs, total shutdown,
   four epochs changing size, many failed ceremonies, many random crashes, the rotating subset,
   the lossy network, the roots-of-unity output, the two determinism tests, and random crashes.
+  Also ported: the boundary lagging validator and the shareless player. Still open: the
+  multiple-epochs rotating subset (not yet run) and the full rotation with departed committee
+  catch-up, which times out: the second committee finalizes epoch 3's final block (h95) and
+  then stalls, short of the 127 it needs (under investigation).
 - [ ] reshare drift (commonware 43b357a41..a9ffc25f3): bca770a0c runs the reshare suite under a
   stable `RoundRobin` elector with `TermLength` and changes every test's leader settings;
   a9ffc25f3 changes two harness lines (QMDB tag table, state-sync side).
@@ -950,3 +954,7 @@ shared `tests/mocks.zig`, which takes additive edits only (agreed with the glue 
   test.
 - 2026-11-19: the rest of the reshare properties; dropping the failed-ceremony carry-over check
   from continuity fails their test.
+- 2026-11-19: the boundary lagging and shareless-player ceremonies, plus harness tests for the
+  per-node peer-set manager and restart after epoch-zero pruning. Skipping the prune fails the
+  shareless test. The lagging ceremony found simplex engines that leaked their mailboxes when
+  aborted before they ran, and an orchestrator `stop()` that freed an engine still running.
