@@ -218,7 +218,8 @@ fn read_one_miss(journal: anytype, registry: *metrics.Registry, count: u64) ![]u
         }
     }
     const position = cold.?; // The page cache cannot hold every page.
-    _ = try journal.read(position);
+    // One read, as in commonware: under Clock2Q+ the missed page enters probation, where the
+    // variable journal's next page read can evict it before a second read.
     _ = try journal.read(position);
     return registry.encode(gpa);
 }

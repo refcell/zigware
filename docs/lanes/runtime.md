@@ -383,7 +383,7 @@ Not portable:
   `test_read_cached_many_stale_hint_after_eviction`,
   `test_read_cached_many_cross_blob_hint_collision`,
   `test_read_cached_many_sparse_page_number_keeps_hints_fixed`: Rust cache's slot-hint and
-  resolution-chunk internals; zigware's CLOCK cache has none
+  resolution-chunk internals; zigware's page cache has no slot hints
 - `utils/buffer/paged/cache.rs` `test_read_many_into_joins_fetch_in_flight`,
   `test_overlapping_reads_read_each_page_once`,
   `test_joining_many_pages_selects_all_before_driving`,

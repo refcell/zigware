@@ -1823,11 +1823,10 @@ test "read_many_into: a corrupt page fails and is never cached" {
 }
 
 test "read_many_into: reads each missing page once under eviction" {
-    // commonware `test_read_many_into_reads_each_missing_page_once`: caching the 10 missing
-    // pages evicts most of them before they are served. commonware fills a 20-page cache
-    // whose probation queue holds 2 pages; zigware's CLOCK cache has no probation queue, so a
-    // 4-page cache full of pages 20..24 stands in.
-    var h = try Harness.init_cache(4);
+    // commonware `test_read_many_into_reads_each_missing_page_once`: a 20-page cache, whose
+    // probation queue holds only 2 pages, full of pages 20..40 evicts most of the 10 missing
+    // pages before they are served.
+    var h = try Harness.init_cache(20);
     defer h.deinit();
     var data: [page_size * 40]u8 = undefined;
     for (&data, 0..) |*byte, index| byte.* = @intCast(index / page_size);
@@ -1836,7 +1835,7 @@ test "read_many_into: reads each missing page once under eviction" {
     defer w.deinit();
     h.cache_ref.clear();
     var byte: [1]u8 = undefined;
-    for (20..24) |page| try w.read_into(&byte, page * page_size);
+    for (20..40) |page| try w.read_into(&byte, page * page_size);
     var offsets: [10]u64 = undefined;
     for (&offsets, 0..) |*offset, page| offset.* = page * page_size;
     const reads = h.storage.reads;

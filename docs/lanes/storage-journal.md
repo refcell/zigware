@@ -275,8 +275,8 @@ resize, sync), `runtime.storage`, with the in-memory backend `runtime.storage.me
 
 - runtime buffer: the tip buffer is one contiguous allocation of `capacity + page_size`
   made at init (appends that would overflow it by a page bypass it), instead of chained
-  zero-copy chunks. The page cache evicts with CLOCK instead of Clock2Q+ and does not share
-  in-flight reads (single-owner fibers); hit rates differ, contents do not. Blobs sync
+  zero-copy chunks. The page cache evicts with Clock2Q+ (`utils.Cache`) like commonware, but
+  has no slot hints and does not share in-flight reads (single-owner fibers). Blobs sync
   synchronously, so `start_sync` is `sync` and `SyncState` has no pending state. A writer
   takes ownership of its blob on success and closes it in `deinit`; a `Replay` borrows it.
   Large appends write their bulk pages in buffer-capacity chunks rather than one write; the
