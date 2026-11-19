@@ -193,6 +193,14 @@ ports its range's tests and the helpers defined in it, into
   deferred unlinked-parent handoff, reproposal, ancestry, and application-verify checks).
   Done 2026-11-19: all 7 tests, each on both wrappers where commonware runs both. The 4
   sync-failure panic tests after them (5932-6150) have no Zig counterpart.
+  Two planted bugs survive, as accepted gaps: dropping the epoch precheck is masked by the
+  reproposal check, which also checks the epoch (commonware's tests share the gap), and
+  skipping the boundary re-proposal in `build.propose_task` has no generic plant (standard
+  and coding blocks free differently); prepare and propose_paths still cover the boundary.
+- runtime thread (T-01a1d57b-1bfd), `tests/recoverable.zig`: lines 176-432 (local blocks
+  hash once and replay once, with `mocks.DigestCounter` counting `Block.digest` calls; the
+  block provider's parent walkback by commitment) and the recoverable/certify family
+  (514-562) as generic scenarios in `mocks/scenarios_recoverable.zig`.
 - runtime thread (T-01a1d57b-1bfd), `tests/coverage.zig`: lines 12605-14905 (prune,
   pipelined handoff, reproposal coverage across restarts, closed-epoch floors, cache
   retention).

@@ -26,6 +26,51 @@ pub fn ready(
     return broadcast.Digested(B).precomputed(gpa, block, block.digest());
 }
 
+/// Counts `Block.digest` calls on tracked blocks and their decoded copies (commonware
+/// `DigestCounter`), for tests that check a block's digest is read once per path. One
+/// counter for the process: a test tracks at most `max_tracked` blocks and resets it.
+pub const DigestCounter = struct {
+    const max_tracked = 8;
+    const max_digest_bytes = 64;
+    var tracked: [max_tracked][max_digest_bytes]u8 = undefined;
+    var tracked_sizes: [max_tracked]u8 = undefined;
+    var tracked_len: std.atomic.Value(u32) = .init(0);
+    var calls: std.atomic.Value(u64) = .init(0);
+
+    /// Counts digest calls on blocks whose digest is `digest_bytes` from now on.
+    pub fn track(digest_bytes: []const u8) void {
+        const index = tracked_len.load(.acquire);
+        assert(index < max_tracked);
+        assert(digest_bytes.len <= max_digest_bytes);
+        @memcpy(tracked[index][0..digest_bytes.len], digest_bytes);
+        tracked_sizes[index] = @intCast(digest_bytes.len);
+        tracked_len.store(index + 1, .release);
+    }
+
+    /// The digest calls counted since the last `reset`.
+    pub fn count() u64 {
+        return calls.load(.acquire);
+    }
+
+    /// Stops tracking every block and zeroes the count.
+    pub fn reset() void {
+        tracked_len.store(0, .release);
+        calls.store(0, .release);
+        assert(count() == 0);
+    }
+
+    fn observe(digest_bytes: []const u8) void {
+        const len = tracked_len.load(.acquire);
+        if (len == 0) return;
+        for (tracked[0..len], tracked_sizes[0..len]) |*bytes, size| {
+            if (std.mem.eql(u8, bytes[0..size], digest_bytes)) {
+                _ = calls.fetchAdd(1, .acq_rel);
+                return;
+            }
+        }
+    }
+};
+
 /// A block with no explicit consensus context, hashed with `H`.
 pub fn EmptyBlock(comptime H: type) type {
     return struct {
@@ -143,6 +188,7 @@ pub fn Block(comptime H: type, comptime C: type) type {
         }
 
         pub fn digest(self: Self) Digest {
+            DigestCounter.observe(self.digest_value.as_slice());
             return self.digest_value;
         }
 
