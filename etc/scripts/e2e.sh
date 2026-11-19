@@ -9,12 +9,19 @@
 #           validator must finalize E2E_HEIGHTS views its whole network finalized, with one
 #           payload per view, and each network must propose a block carrying the other's
 #           finalization.
+#   log     4 validators in tmux (etc/scripts/interop_log.py with zigware on every seat) must
+#           finalize E2E_HEIGHTS views with one digest per view across all 4.
+#   chat    2 friends in pseudo-terminals (etc/scripts/interop_chat.py, zigware on both sides)
+#           must each show the other's message.
+#   flood   examples/flood/local.sh and demo.sh run 4 peers for 6 s; every peer must report
+#           received messages and a nonzero rate on its last sample, and log no error.
 #
-#   etc/scripts/e2e.sh [dkg|bridge]...   (default: both)
+#   etc/scripts/e2e.sh [dkg|bridge|log|chat|flood]...   (default: all five)
 #
 # Environment: E2E_HEIGHTS (default 20), E2E_TIMEOUT (seconds per example, default 120),
-# E2E_PORT (dkg's base port, default 24500; bridge uses local.sh's 3000-3008), E2E_DIR (work
-# directory, default a fresh temporary one, kept on failure).
+# E2E_PORT (base port, default 24500: dkg uses it, log +100, chat +120; bridge uses local.sh's
+# 3000-3008 and flood its fixed 4545 and 9090 on 127.0.0.1-4), E2E_DIR (work directory,
+# default a fresh temporary one, kept on failure).
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 
@@ -23,7 +30,7 @@ timeout_s=${E2E_TIMEOUT:-120}
 port=${E2E_PORT:-24500}
 work=${E2E_DIR:-$(mktemp -d "${TMPDIR:-/tmp}/zigware-e2e.XXXXXX")}
 examples=("$@")
-[ ${#examples[@]} -gt 0 ] || examples=(dkg bridge)
+[ ${#examples[@]} -gt 0 ] || examples=(dkg bridge log chat flood)
 mkdir -p "$work"
 export NO_COLOR=1
 
@@ -150,13 +157,60 @@ run_bridge() {
   echo "e2e: bridge: both networks of 4 finalized $heights identical views and bridged blocks"
 }
 
+run_log() {
+  local dir=$work/log
+  mkdir -p "$dir"
+  INTEROP_LOG_MIX=zzzz INTEROP_LOG_RESTART=0 python3 -I etc/scripts/interop_log.py \
+    zig-out/bin/log zig-out/bin/log $((port + 100)) "$timeout_s" "$heights" \
+    >"$dir/driver.log" 2>&1 || fail "$dir" "log validators did not agree"
+  echo "e2e: log: 4 validators finalized $(grep -o '[0-9]* views ([0-9.]*)' "$dir/driver.log")" \
+    "with identical digests"
+}
+
+run_chat() {
+  local dir=$work/chat
+  mkdir -p "$dir"
+  python3 -I etc/scripts/interop_chat.py zig-out/bin/chat zig-out/bin/chat $((port + 120)) \
+    "$timeout_s" >"$dir/driver.log" 2>&1 || fail "$dir" "chat messages did not cross"
+  echo "e2e: chat: both friends showed the other's message"
+}
+
+run_flood() {
+  local dir=$work/flood
+  mkdir -p "$dir"
+  examples/flood/local.sh 4 "$dir/deployment" >"$dir/setup.log" 2>&1 ||
+    fail "$dir" "local.sh failed"
+  examples/flood/demo.sh "$dir/deployment" 6 2>&1 | sed 's/\x1b\[[0-9;]*m//g' >"$dir/peers.log" ||
+    fail "$dir" "demo.sh failed"
+  # Every line a peer printed is a JSON event below ERROR; anything else is a crash or error.
+  if grep '^\[peer' "$dir/peers.log" | grep -vE '^\[peer [0-9]+\] \{' | grep -q . ||
+    grep -q '"level":"ERROR"' "$dir/peers.log"; then
+    fail "$dir" "a flood peer logged an error"
+  fi
+  # The last sample: one row per peer with received messages and a nonzero rate.
+  local last
+  last=$(awk '/received +messages/ { rows = "" } /^peer [0-9]+ / { rows = rows $0 "\n" }
+    END { printf "%s", rows }' "$dir/peers.log")
+  [ "$(grep -c . <<<"$last")" = 4 ] || fail "$dir" "flood reported fewer than 4 peers"
+  if awk '$3 !~ /^[1-9][0-9]*$/ || $4 !~ /^[1-9][0-9]*$/ { bad = 1 } END { exit !bad }' \
+    <<<"$last"; then
+    fail "$dir" "a flood peer received nothing: $(tr '\n' ';' <<<"$last")"
+  fi
+  local slowest
+  slowest=$(awk '{ print $4 }' <<<"$last" | sort -n | head -1)
+  echo "e2e: flood: 4 peers each received at least $slowest messages/s with no errors"
+}
+
 echo "e2e: building (ReleaseFast)"
 zig build -Doptimize=ReleaseFast
 for example in "${examples[@]}"; do
   case $example in
     dkg) run_dkg ;;
     bridge) run_bridge ;;
-    *) echo "usage: e2e.sh [dkg|bridge]..." >&2; exit 2 ;;
+    log) run_log ;;
+    chat) run_chat ;;
+    flood) run_flood ;;
+    *) echo "usage: e2e.sh [dkg|bridge|log|chat|flood]..." >&2; exit 2 ;;
   esac
 done
 [ -n "${E2E_DIR:-}" ] || rm -rf "$work"

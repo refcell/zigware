@@ -90,9 +90,9 @@ jobs:
           fi
           zig build "$STEPS" "$@" --summary all
 
-  # The full-system examples end to end: dkg's bootstrap and validators, and bridge's indexer
-  # and two networks, each run locally until every node finalizes the same heights
-  # (etc/scripts/e2e.sh).
+  # The examples end to end: dkg's bootstrap and validators, bridge's indexer and two
+  # networks, and log's validators run locally until every node finalizes the same heights;
+  # two chat friends exchange messages; flood's peers report traffic (etc/scripts/e2e.sh).
   e2e:
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -102,6 +102,8 @@ jobs:
         run: |
           sh etc/scripts/install-zig.sh "$HOME/zig"
           echo "$HOME/zig" >> "$GITHUB_PATH"
+      - name: install tmux
+        run: command -v tmux || (sudo apt-get update -q && sudo apt-get install -yq tmux)
       - name: e2e
         env:
           E2E_DIR: ${{ runner.temp }}/e2e
