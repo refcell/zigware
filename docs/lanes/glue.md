@@ -360,7 +360,7 @@ ones: d = deployer (thread T-01a1d5b9-c237), u = utils.
 | stateful/db/compact.rs | 39 | 39 | 0 | 0 | |
 | stateful/db/p2p/actor.rs | 24 | 16 | 8 | 0 | d |
 | stateful/db/p2p/handler.rs, limits.rs | 3 | 3 | 0 | 0 | |
-| stateful/db/p2p/mailbox.rs | 4 | 3 | 1 | 0 | d |
+| stateful/db/p2p/mailbox.rs | 4 | 4 | 0 | 0 | |
 | stateful/actor/syncer/actor.rs | 13 | 8 | 5 | 0 | d |
 | stateful/actor/syncer/mailbox.rs | 2 | 2 | 0 | 0 | |
 | stateful/actor/syncer/plan.rs | 7 | 6 | 1 | 0 | d |
@@ -371,7 +371,7 @@ ones: d = deployer (thread T-01a1d5b9-c237), u = utils.
 | stateful/actor/core/processing.rs | 86 | 0 | 86 | 0 | u |
 | stateful/actor/processor/mod.rs | 44 | 22 | 22 | 0 | u |
 | stateful/tests/mod.rs, floor.rs | 28 | 0 | 28 | 0 | u |
-| **total** | **469** | **278** | **169** | **22** | |
+| **total** | **469** | **279** | **168** | **22** | |
 
 - Not portable (db/mod.rs, 22): zigware's `Barrier` is synchronous (databases persist inside
   `finalize`), so `barrier_waits_for_every_handle` (8), `barrier_cancellation_releases_handles`
@@ -395,8 +395,7 @@ ones: d = deployer (thread T-01a1d5b9-c237), u = utils.
     `concurrent_serves_complete_after_database_is_available`,
     `concurrent_serves_preserve_actor_progress`,
     `pending_feedback_allows_fetches_serves_and_cancellation`,
-    `late_subscriber_receives_cached_response_after_verdict_or_cancellation`; mailbox.rs:
-    `dropping_get_operations_closes_queued_reply`.
+    `late_subscriber_receives_cached_response_after_verdict_or_cancellation`.
   - syncer: `resolve_follows_live_floor_after_startup` (2),
     `restart_resumes_floor_installed_before_stateful`,
     `resolve_skips_selected_block_pruned_by_newer_floor`,
@@ -469,6 +468,11 @@ ones: d = deployer (thread T-01a1d5b9-c237), u = utils.
 - [ ] actor/core: the rest of processing.rs's tests. First half (1070-3396) here, in
   core/processing_early_test.zig: 6 of 22 so far. Second half (3451-5885) is with simplex
   (T-01a1d5ad-c8d6), in core/processing_late_test.zig. Both build on core/testing.zig.
+- [ ] db: `Shared` as commonware's `AsyncRwLock` for DBs declaring `concurrent_reads`
+  (`utils.sync.UpgradableRwLock`, `*const DB` read guards), once qmdb any/current batch reads
+  take `*const D` (57b2db0, storage-qmdb-sync). Merkleize allocates from the database's
+  `gpa` on the reader's thread, so such a DB's allocator must be thread-safe. `SharedSource`
+  stays on the mutex until `JournalSource` and compact `serve` are const-safe (deployer).
 - [ ] tests: single_db_app.rs's engine on `glue.simulate` (simplex, marshal, buffered broadcast,
   marshal and qmdb resolvers, probe, `Stateful`), then tests/mod.rs's scenarios (finalize,
   crash/restart, pruning, state sync, lossy, partitions), multi_db_app, floor, properties.
