@@ -19,10 +19,13 @@ pub fn Database(comptime F: type, comptime E: type, comptime C: type, comptime H
         pub fn build(
             gpa: Allocator,
             scope: Scope,
-            _: DbAlias.Cfg,
+            cfg: DbAlias.Cfg,
             log: DbAlias.Journal,
         ) anyerror!DbAlias {
-            return DbAlias.init_from_log(gpa, scope, log);
+            var db = try DbAlias.init_from_log(gpa, scope, log);
+            // Times the synced db's operations as `init` does (`init_from_log` does not).
+            db.metrics.io = cfg.io;
+            return db;
         }
     };
     return sync.database.Persisted(F, V);
