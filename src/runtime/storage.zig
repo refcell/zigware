@@ -313,4 +313,5 @@ test {
     _ = mocks;
     _ = @import("storage/completion.zig");
     _ = @import("storage/memory_test.zig");
+    _ = @import("storage/blob_creation_fuzz_test.zig");
 }
