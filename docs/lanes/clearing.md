@@ -185,7 +185,7 @@ qmdb `current` (balances, over the MMB) and `keyless` (payout log, over the MMR)
   - [x] Freezer's 9 open tests; archive's slow tests at commonware's sizes; a sync count in
     `runtime.storage.mocks.Recordings`.
   - [x] Archive's open tests: 11 of 14 (markers, sync counts, below-floor syncs, destroys).
-  - [ ] Archive's marker-damage, floor-rejection, and torn-index-tail tests.
+  - [x] Archive's marker-damage, floor-rejection, and torn-index-tail tests.
   - [x] Partitioned index `new_range`/`install_range` and its 5 dependent tests.
   - [ ] Partials and index's open tests that do not need `new_range`.
 
@@ -235,3 +235,4 @@ qmdb `current` (balances, over the MMB) and `keyless` (payout log, over the MMR)
 - 2026-11-19: freezer's 9 open tests, archive slow sizes, and the mock sync count.
 - 2026-11-19: partitioned index ranges and their 5 tests.
 - 2026-11-19: 11 prunable archive tests (marker publication, below-floor syncs, destroys).
+- 2026-11-19: archive's marker-damage, floor-rejection, and torn-tail tests.

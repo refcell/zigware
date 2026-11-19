@@ -22,7 +22,7 @@ const default_items_per_section: u64 = 65536;
 const default_write_buffer: usize = 1024;
 const default_replay_buffer: usize = 4096;
 /// Physical size of one uncompressed i32 value frame: the value and its CRC32.
-const i32_frame_size: u64 = 4 + glob.checksum_size;
+pub const i32_frame_size: u64 = 4 + glob.checksum_size;
 const section_zero = std.mem.toBytes(std.mem.nativeToBig(u64, 0));
 
 pub fn test_key(name: []const u8) Key {

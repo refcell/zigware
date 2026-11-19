@@ -17,6 +17,7 @@ const Harness = tests.Harness;
 const Key = [64]u8;
 const Archive = prunable.Archive(translator.FourCap, Key, i32);
 const gpa = testing.allocator;
+const section_zero = std.mem.toBytes(std.mem.nativeToBig(u64, 0));
 
 /// The harness storage behind a sync-counting wrapper.
 const Counted = struct {
@@ -410,4 +411,212 @@ test "prunable below-floor put_sync and put_multi_sync cover prior pending write
         try expect_index(&archive, 2, 20);
         try expect_index(&archive, 0, null);
     }
+}
+
+const Damage = enum {
+    missing_index,
+    missing_values,
+    truncated_index,
+    truncated_values,
+    corrupt_index,
+    corrupt_values,
+
+    fn on_index(damage: Damage) bool {
+        return switch (damage) {
+            .missing_index, .truncated_index, .corrupt_index => true,
+            .missing_values, .truncated_values, .corrupt_values => false,
+        };
+    }
+};
+
+/// The logical length of section 0's blob in `partition`.
+fn section_zero_len(harness: *Harness, partition: []const u8) !u64 {
+    const opened = try harness.storage.open(partition, &section_zero);
+    defer opened.blob.close();
+    return opened.len;
+}
+
+/// Applies `damage` to section 0 and returns the damaged blob's length, or null if removed.
+fn apply_damage(harness: *Harness, partition: []const u8, damage: Damage) !?u64 {
+    switch (damage) {
+        .missing_index, .missing_values => {
+            try harness.storage.remove(partition, &section_zero);
+            return null;
+        },
+        else => {},
+    }
+    const opened = try harness.storage.open(partition, &section_zero);
+    defer opened.blob.close();
+    switch (damage) {
+        .truncated_index, .truncated_values => {
+            const size = if (damage.on_index()) opened.len - 1 else 0;
+            try opened.blob.resize(size);
+            try opened.blob.sync();
+            return size;
+        },
+        .corrupt_index, .corrupt_values => {
+            var byte: [1]u8 = undefined;
+            try opened.blob.read_at(0, &byte);
+            byte[0] ^= 0xff;
+            try opened.blob.write_at(0, &byte, .{});
+            try opened.blob.sync();
+            return opened.len;
+        },
+        .missing_index, .missing_values => unreachable,
+    }
+}
+
+test "prunable validation marker damage never mutates" {
+    const damages = .{
+        Damage.missing_index,    Damage.missing_values, Damage.truncated_index,
+        Damage.truncated_values, Damage.corrupt_index,  Damage.corrupt_values,
+    };
+    inline for (damages) |damage| {
+        var harness = try Harness.init();
+        defer harness.deinit();
+        const cfg = harness.config(@tagName(damage), 4, translator.FourCap);
+        {
+            // One marked item: put_sync proves it durable, the trailing sync publishes it.
+            var archive = try harness.open(translator.FourCap, i32, cfg, "seed");
+            defer archive.deinit();
+            try archive.put_sync(0, tests.test_key("zero"), 10);
+            try archive.sync();
+        }
+        const index_size = try section_zero_len(&harness, cfg.key_partition);
+        const value_size = try section_zero_len(&harness, cfg.value_partition);
+        const damaged_partition = if (damage.on_index()) cfg.key_partition else cfg.value_partition;
+        const damaged_size = try apply_damage(&harness, damaged_partition, damage);
+        for (0..2) |_| {
+            if (damage == .corrupt_values) {
+                // Marked values are not re-read at startup: the damage surfaces at get.
+                var archive = try harness.open(translator.FourCap, i32, cfg, "open");
+                defer archive.deinit();
+                try testing.expectError(error.ChecksumMismatch, archive.get(.{ .index = 0 }));
+            } else {
+                try testing.expectError(
+                    error.Corruption,
+                    harness.open(translator.FourCap, i32, cfg, "open"),
+                );
+            }
+            // Startup rejects or adopts the section before any repair could mutate it.
+            const surviving = if (damage.on_index()) cfg.value_partition else cfg.key_partition;
+            const surviving_size = if (damage.on_index()) value_size else index_size;
+            try testing.expectEqual(surviving_size, try section_zero_len(&harness, surviving));
+            if (damaged_size) |size| {
+                try testing.expectEqual(size, try section_zero_len(&harness, damaged_partition));
+            }
+        }
+    }
+}
+
+test "prunable validation floor rejection precedes index suffix repair" {
+    var harness = try Harness.init();
+    defer harness.deinit();
+    const cfg = harness.config("floor-order", 4, translator.FourCap);
+    {
+        var archive = try harness.open(translator.FourCap, i32, cfg, "seed");
+        defer archive.deinit();
+        try archive.put_sync(0, tests.test_key("zero"), 10);
+        try archive.sync();
+    }
+    // Trailing junk past the index tail, which suffix repair alone would truncate, then a
+    // broken floor page, which must be rejected first.
+    var expected: [4096]u8 = undefined;
+    const junk: [7]u8 = @splat(0xa5);
+    const expected_size = expected_size: {
+        const opened = try harness.storage.open(cfg.key_partition, &section_zero);
+        defer opened.blob.close();
+        try opened.blob.write_at(opened.len, &junk, .{});
+        var byte: [1]u8 = undefined;
+        try opened.blob.read_at(0, &byte);
+        byte[0] ^= 0xff;
+        try opened.blob.write_at(0, &byte, .{});
+        try opened.blob.sync();
+        const size = opened.len + 7;
+        std.debug.assert(size <= expected.len);
+        try opened.blob.read_at(0, expected[0..size]);
+        break :expected_size size;
+    };
+    for (0..2) |_| {
+        try testing.expectError(
+            error.Corruption,
+            harness.open(translator.FourCap, i32, cfg, "open"),
+        );
+        const opened = try harness.storage.open(cfg.key_partition, &section_zero);
+        defer opened.blob.close();
+        try testing.expectEqual(expected_size, opened.len);
+        var actual: [4096]u8 = undefined;
+        try opened.blob.read_at(0, actual[0..expected_size]);
+        try testing.expectEqualSlices(u8, expected[0..expected_size], actual[0..expected_size]);
+    }
+}
+
+test "prunable validation marker survives a torn index tail rewrite" {
+    var harness = try Harness.init();
+    defer harness.deinit();
+    const cfg = harness.config("marker-torn-tail", 4, translator.FourCap);
+    // A physical page is the logical page plus two (length u16, crc u32) slots.
+    const page_size = 1024;
+    const physical_page_size = page_size + 12;
+    const record_size = 8 + 64 + 8 + 4;
+    var old_page: [physical_page_size]u8 = undefined;
+    {
+        var archive = try harness.open(translator.FourCap, i32, cfg, "seed");
+        defer archive.deinit();
+        // Publish a marker for one record while its index fills part of the first page.
+        try archive.put_sync(0, tests.test_key("zero"), 10);
+        try archive.sync();
+        const logical = (try harness.storage.backend.logical_blob(
+            gpa,
+            cfg.key_partition,
+            &section_zero,
+        )).?;
+        defer gpa.free(logical);
+        try testing.expectEqual(@as(usize, physical_page_size), logical.len);
+        @memcpy(&old_page, logical);
+        const old_len = std.mem.readInt(u16, old_page[page_size..][0..2], .big);
+        try testing.expectEqual(@as(u16, record_size), old_len);
+        // The same-page extension fills slot 1 for two records.
+        try archive.put_sync(1, tests.test_key("one"), 20);
+    }
+    {
+        const opened = try harness.storage.open(cfg.key_partition, &section_zero);
+        defer opened.blob.close();
+        var new_page: [physical_page_size]u8 = undefined;
+        try opened.blob.read_at(0, &new_page);
+        try testing.expectEqualSlices(
+            u8,
+            old_page[page_size..][0..6],
+            new_page[page_size..][0..6],
+        );
+        const new_len = std.mem.readInt(u16, new_page[page_size + 6 ..][0..2], .big);
+        try testing.expectEqual(@as(u16, 2 * record_size), new_len);
+        // Restore the one-record image, then replay the extended image only through slot 1's
+        // length: both records' bytes, a valid slot 0, and slot 1 with a stale zero crc.
+        try opened.blob.write_at(0, &old_page, .{});
+        try opened.blob.write_at(0, new_page[0 .. page_size + 8], .{});
+        try opened.blob.sync();
+    }
+    try testing.expectEqual(
+        2 * tests.i32_frame_size,
+        try section_zero_len(&harness, cfg.value_partition),
+    );
+    {
+        var counted: Counted = undefined;
+        counted.wrap(&harness);
+        defer counted.deinit();
+        // Recovery trusts the marked record, durably zeroes the torn slot, and durably
+        // removes only the orphaned value suffix.
+        var archive = try counted.open(&harness, cfg, "reopen");
+        defer archive.deinit();
+        try testing.expectEqual(@as(u64, 2), counted.recordings.syncs);
+        try testing.expectEqual(@as(?u64, 0), archive.last_index());
+        try testing.expectEqual(@as(usize, 1), archive.ranges().len);
+        try expect_index(&archive, 0, 10);
+        try expect_index(&archive, 1, null);
+    }
+    try testing.expectEqual(
+        tests.i32_frame_size,
+        try section_zero_len(&harness, cfg.value_partition),
+    );
 }

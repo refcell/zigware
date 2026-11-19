@@ -122,7 +122,7 @@ entries, matched to zigware tests by what they check (zigware folds many into on
 
 | module | tests | ported | partial | open | not portable |
 |---|---|---|---|---|---|
-| archive | 93 | 72 | 3 | 3 | 15 |
+| archive | 93 | 75 | 3 | 0 | 15 |
 | freezer | 33 | 30 | 3 | 0 | 0 |
 | ordinal | 44 | 43 | 1 | 0 | 0 |
 | cache | 14 | 14 | 0 | 0 | 0 |
@@ -144,7 +144,7 @@ Open:
   make earlier buffered writes durable; prune clears the marker before section reuse; three
   put_syncs into three sections reopen; interrupted destroy and destroy interrupted inside
   the journals (81 combinations).
-- [ ] archive (prunable): six kinds of marker damage never mutate either journal; a corrupt
+- [x] archive (prunable): six kinds of marker damage never mutate either journal; a corrupt
   floor page is rejected before suffix repair; a torn index tail under a marker.
 - [x] archive (prunable) durability counts: startup publishes the marker without a data
   resync; markers lag one sync; markers batched per section; an empty sync publishes the
@@ -183,3 +183,5 @@ Partial:
 - 2026-11-19: 11 of the prunable archive's open tests (marker lag and batching counted
   through `Recordings.syncs`, below-floor syncs, marker reuse, interrupted destroys), each
   failing under a planted bug (clearing lane).
+- 2026-11-19: the prunable archive's last 3 open tests (marker damage, floor rejection before
+  suffix repair, torn index tail); archive open: 0 (clearing lane).
