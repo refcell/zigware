@@ -81,9 +81,9 @@ they were not run against AWS for it.
 ## Testing
 
 ```sh
-zig build test                  # every package and example, these tests included
-zig build run-flood -- --help   # the flood binary's CLI
-zig build run-flood-setup       # setup's usage (it exits 2 without options)
+zig build test-example-flood          # this example's tests
+zig build run-flood -- --help         # the flood binary's CLI
+zig build run-flood-setup -- --help   # setup's CLI
 ```
 
 ## Differences from commonware

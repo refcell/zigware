@@ -138,8 +138,8 @@ finalize it.
 ## Testing
 
 ```sh
-zig build test -Dtest-filter="dkg: "   # this example's tests
-zig build run-dkg -- --help            # the CLI
+zig build test-example-dkg   # this example's tests
+zig build run-dkg -- --help  # the CLI
 ```
 
 ## Differences from commonware

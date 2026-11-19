@@ -90,8 +90,8 @@ its Logs pane says so:
 ## Testing
 
 ```sh
-zig build test                  # every package and example, these tests included
-zig build run-chat -- --help    # the CLI
+zig build test-example-chat   # this example's tests
+zig build run-chat -- --help  # the CLI
 ```
 
 ## Differences from commonware

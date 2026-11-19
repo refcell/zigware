@@ -63,8 +63,8 @@ run the same command again: it resumes from its journal and finalizes with the r
 ## Testing
 
 ```sh
-zig build test                  # every package and example, these tests included
-zig build run-log -- --help     # the CLI
+zig build test-example-log   # this example's tests
+zig build run-log -- --help  # the CLI
 ```
 
 ## Differences from commonware

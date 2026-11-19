@@ -173,10 +173,10 @@ INFO commonware_bridge::application::actor: proposed block=Bridge(Finalization {
 ## Testing
 
 ```sh
-zig build test                              # every package and example, these tests included
-zig build run-bridge-dealer -- --help       # the dealer's CLI
-zig build run-bridge-indexer -- --help      # the indexer's CLI
-zig build run-bridge-validator -- --help    # the validator's CLI
+zig build test-example-bridge             # this example's tests
+zig build run-bridge-dealer -- --help     # the dealer's CLI
+zig build run-bridge-indexer -- --help    # the indexer's CLI
+zig build run-bridge-validator -- --help  # the validator's CLI
 ```
 
 ## Differences from commonware
