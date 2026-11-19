@@ -26,6 +26,7 @@ test {
             _ = @import("handoff_dropped.zig").Tests(h);
             _ = @import("handoff_displaced.zig").Tests(h);
             _ = @import("handoff_outgoing_term.zig").Tests(h);
+            _ = @import("floor_journal.zig").Tests(h);
         }
     }
 }
