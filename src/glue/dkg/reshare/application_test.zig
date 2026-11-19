@@ -274,7 +274,8 @@ fn verify_task(app: *App, ancestry: Types.Ancestry) anyerror!bool {
     return app.verify({}, {}, ancestry);
 }
 
-// A final block whose epoch info the actor cannot derive stays unresolved until consensus
+// commonware `verification_stays_pending_without_final_epoch_info`, extended by the examples
+// lane: a final block whose epoch info the actor cannot derive stays unresolved until consensus
 // cancels it, and cancellation releases its ancestry exactly once (a state-synced validator
 // hit the double release).
 test "application: a canceled pending final verification releases its ancestry once" {

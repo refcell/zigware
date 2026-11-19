@@ -720,6 +720,8 @@ Owns `src/glue/dkg`. Reference: `glue/src/dkg` (about 24k Rust lines).
 - Inclusion's dealer-log verification (commonware's spawned `VerificationTask`) runs on the
   caller's task in `artifact.Artifacts(T).verify`; the window decides when to call it.
   Invalid local state, mismatched directories, and a missing final payload are errors.
+  So commonware's `dropping_verification_aborts_active_task` has nothing to port: no task
+  outlives a dropped `Verification`.
 - The inclusion window races the mailbox, a scan of a fresh copy of the scanned request's
   ancestry, and that requester leaving (`Sender.closed`) with `Io.Select`, mailbox first.
   A scan that loses the race restarts next iteration; a finalized block marks it stale.
@@ -829,6 +831,10 @@ Owns `src/glue/dkg`. Reference: `glue/src/dkg` (about 24k Rust lines).
   floor in another epoch, and a state-synced entry activates peers from the in-band directory
   (`ClusterNode` is generic over the manager's directory). They catch an unchecked floor
   epoch and a dropped in-band directory.
+- 2026-11-19: dkg audit against commonware's test names: every test in the lane's files has a
+  port except `dropping_verification_aborts_active_task` (see Decisions). Added
+  `artifact_scan_cancels_stalled_ancestry_when_response_closes`, which catches a window that
+  ignores a requester leaving.
 
 ## dkg probe/bootstrap (owner: p2p lane)
 

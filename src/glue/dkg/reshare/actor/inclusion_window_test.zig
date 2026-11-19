@@ -567,3 +567,35 @@ test "inclusion: a canceled final block exits without acknowledging" {
         }
     }.body);
 }
+
+// commonware `artifact_scan_cancels_stalled_ancestry_when_response_closes`: a requester that
+// leaves while its scan is stalled on ancestry cancels that scan, so the next request is
+// scanned and answered.
+test "inclusion: a requester leaving cancels its stalled scan" {
+    try actor_test.run(struct {
+        fn body(io: Io) anyerror!void {
+            var f: GatedFixture = undefined;
+            try f.init(io, "closed-scan", 6);
+            defer f.deinit();
+            var log = try f.self_log();
+            defer log.deinit(gpa);
+            var h = try histories(log);
+            defer h.deinit();
+            const mid = &h.canonical[0];
+            const four = &h.canonical[1];
+            var inclusion = try io.concurrent(run_inclusion, .{&f});
+            defer _ = inclusion.cancel(io) catch {};
+            try finalize(&f, mid);
+
+            var gate: Gate = .{ .io = io };
+            var stalled: Asked = .{};
+            try stalled.start(io, &f, .init(four[0..1], &gate));
+            try gate.started.wait(io);
+            try testing.expectError(error.Canceled, stalled.task.cancel(io));
+
+            var next: Asked = .{};
+            try next.start(io, &f, .init(four[0..1], null));
+            try next.expect(io, false);
+        }
+    }.body);
+}
