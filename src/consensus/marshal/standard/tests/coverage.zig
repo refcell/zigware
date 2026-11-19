@@ -1458,7 +1458,6 @@ const simplex = @import("../../../simplex/root.zig");
 const simplex_types = @import("../../../simplex/types.zig");
 const traits = @import("../../../traits.zig");
 const broadcast = @import("broadcast");
-const actor_api = @import("actor");
 const oneshot = utils.channel.oneshot;
 const ConsensusContext = harness.Ctx;
 const Net = harness.Network;
@@ -1558,57 +1557,15 @@ const Wrapper = @import("../deferred.zig").Deferred(
     types.FixedEpocher,
 );
 
-/// The wrapper as the engine's automaton, relay, and reporter. Its calls can fail with
-/// allocation or spawn errors that consensus's traits do not carry; commonware aborts on
-/// those, so the adapter panics.
-const Adapter = struct {
-    pub const Context = Wrapper.Context;
-    pub const Digest = Wrapper.Digest;
-    pub const PublicKey = Wrapper.PublicKey;
-    pub const Plan = Wrapper.Plan;
-    pub const Activity = Wrapper.Activity;
-
-    wrapper: *Wrapper,
-
-    fn abort(err: anyerror) Io.Cancelable {
-        if (err == error.Canceled) return error.Canceled;
-        std.debug.panic("wrapper failed: {t}", .{err});
-    }
-
-    pub fn propose(self: *Adapter, io: Io, context: Context) Io.Cancelable!?Digest {
-        return self.wrapper.propose(io, context) catch |err| return abort(err);
-    }
-
-    pub fn verify(self: *Adapter, io: Io, context: Context, digest: Digest) Io.Cancelable!?bool {
-        return self.wrapper.verify(io, context, digest) catch |err| return abort(err);
-    }
-
-    pub fn prepare(self: *Adapter, io: Io, context: Context) Io.Cancelable!?traits.Handoff(Digest) {
-        return self.wrapper.prepare(io, context) catch |err| return abort(err);
-    }
-
-    pub fn certify(self: *Adapter, io: Io, round: Round, digest: Digest) Io.Cancelable!?bool {
-        return self.wrapper.certify(io, round, digest) catch |err| return abort(err);
-    }
-
-    pub fn broadcast(self: *Adapter, commitment: Digest, plan: Plan) actor_api.Feedback {
-        return self.wrapper.broadcast(commitment, plan);
-    }
-
-    pub fn report(self: *Adapter, activity: Activity) actor_api.Feedback {
-        return self.wrapper.report(activity);
-    }
-};
-
 const EngineParams = struct {
     pub const Context = Ctx;
     pub const Scheme = harness.S;
     pub const Elector = simplex.elector.RoundRobinElector;
     pub const Blocker = Net.Control;
     pub const Digest = harness.D;
-    pub const Automaton = *Adapter;
-    pub const Relay = *Adapter;
-    pub const Reporter = *Adapter;
+    pub const Automaton = *Wrapper;
+    pub const Relay = *Wrapper;
+    pub const Reporter = *Wrapper;
     pub const Strategy = parallel.Sequential;
     pub const Sender = Net.Sender;
     pub const Receiver = Net.Receiver;
@@ -1654,7 +1611,6 @@ const PipelineRun = struct {
     app_gates: PipelineGates,
     gates: Gates,
     wrapper: *Wrapper,
-    adapter: Adapter,
     elector: simplex.elector.RoundRobinElector,
     page_cache: runtime.buffer.paged.CacheRef,
     engine: Engine,
@@ -1771,7 +1727,6 @@ const PipelineRun = struct {
             self.validator.mailbox.clone(),
             epocher,
         );
-        self.adapter = .{ .wrapper = self.wrapper };
         self.elector = try simplex.elector.RoundRobin(cryptography.Sha256).default().build(
             gpa,
             harness.num_validators,
@@ -1781,9 +1736,9 @@ const PipelineRun = struct {
             .scheme = self.fixture.schemes[3],
             .elector = self.elector,
             .blocker = victim_control,
-            .automaton = &self.adapter,
-            .relay = &self.adapter,
-            .reporter = &self.adapter,
+            .automaton = self.wrapper,
+            .relay = self.wrapper,
+            .reporter = self.wrapper,
             .track_historical_votes = false,
             .strategy = parallel.sequential,
             .partition = partition,
