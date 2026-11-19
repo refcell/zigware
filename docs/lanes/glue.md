@@ -381,9 +381,12 @@ marshal's actors (consensus-marshal) for the actor; until then it ports what is 
 - [x] actor: `Processor.propose`/`prepare` (build on the parent, cache before answering).
 - [x] actor/core: the processing loop (builds, finalization, durability, prune).
 - [x] actor/core: the `Stateful` actor, recovering from marshal (no floor).
-- [ ] actor/core: syncing (startup from a floor, on db/state_sync), the rest of processing.rs's
-  46 tests; app tests (after marshal); tests (single and
-  multi db apps, floor, properties).
+- [ ] actor/core: wire deployer's `Syncing` into `Stateful.run`'s floor branch (Config gains
+  `sync_config`, `resolvers`, marshal's `Floor`; `P` gains `Resolvers`).
+- [ ] actor/core: the rest of processing.rs's 46 tests.
+- [ ] tests: single_db_app.rs's engine on `glue.simulate` (simplex, marshal, buffered broadcast,
+  marshal and qmdb resolvers, probe, `Stateful`), then tests/mod.rs's scenarios (finalize,
+  crash/restart, pruning, state sync, lossy, partitions), multi_db_app, floor, properties.
 
 ## Log
 - 2026-11-16: lane started; simulate's progress tracker and actions with their tests.
