@@ -459,6 +459,41 @@ fn Coordinator(comptime D: type, comptime Target: type) type {
     };
 }
 
+/// A synced database set `DBs` and the anchor whose targets it reached.
+pub fn SetSynced(comptime DBs: type, comptime D: type) type {
+    return struct { databases: DBs, anchor: Anchor(D) };
+}
+
+/// Syncs database set `DBs` from `sources` (commonware's `StateSyncSet::sync`): a `db.Tuple`
+/// through `sync_tuple`, a `db.Shared` through `sync_shared`, or any set declaring its own
+/// `sync(D, env, config, sources, anchor, targets, tip_updates, sync_config)` (test sets).
+pub fn sync_set(
+    comptime DBs: type,
+    comptime D: type,
+    env: anytype,
+    config: DBs.Config,
+    sources: anytype,
+    anchor: Anchor(D),
+    targets: DBs.SyncTargets,
+    tip_updates: ring.Receiver(TipUpdate(D, DBs.SyncTargets)),
+    sync_config: SyncEngineConfig,
+) !SetSynced(DBs, D) {
+    if (comptime @hasDecl(DBs, "sync")) {
+        return DBs.sync(D, env, config, sources, anchor, targets, tip_updates, sync_config);
+    }
+    if (comptime @hasDecl(DBs, "member_types")) {
+        const types = DBs.member_types;
+        const args = .{ env, config, sources, anchor, targets, tip_updates, sync_config, null };
+        const synced = try @call(.auto, sync_tuple, .{ types, D } ++ args);
+        return .{ .databases = synced.databases, .anchor = synced.anchor };
+    }
+    comptime assert(DBs == db.Shared(DBs.Database));
+    const T = DBs.Database;
+    const args = .{ env, config, sources, anchor, targets, tip_updates, sync_config };
+    const synced = try @call(.auto, sync_shared, .{ T, D } ++ args);
+    return .{ .databases = synced.databases, .anchor = synced.anchor };
+}
+
 /// The sync `Source` over a shared database (commonware's `impl Source for Shared<DB>`): it
 /// serves each request from `DB.sync_source()` while holding the database's lock, so a
 /// mutation never interleaves with a read. `DB` declares `SyncSource`, a `qmdb.sync` source,

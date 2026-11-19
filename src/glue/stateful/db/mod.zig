@@ -365,6 +365,8 @@ pub fn Tuple(comptime types: anytype) type {
     comptime assert(count >= 1 and count <= Barrier.max_members);
     return struct {
         const Self = @This();
+        /// The member database types, in order.
+        pub const member_types = types;
         pub const Members = Map(types, SharedOf);
         pub const Unmerkleized = Map(types, UnmerkleizedOf);
         pub const Merkleized = Map(types, MerkleizedOf);

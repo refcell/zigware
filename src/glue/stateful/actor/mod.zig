@@ -10,6 +10,8 @@ pub const SyncState = plan.SyncState;
 pub const syncer_mailbox = @import("syncer/mailbox.zig");
 pub const Artifact = syncer_mailbox.Artifact;
 pub const SyncerMailbox = syncer_mailbox.Mailbox;
+pub const syncer = @import("syncer/actor.zig");
+pub const Syncer = syncer.Syncer;
 
 pub const pruning = @import("processor/pruning.zig");
 pub const PruneConfig = pruning.PruneConfig;
@@ -46,6 +48,7 @@ pub const MarshalProvider = stateful.MarshalProvider;
 test {
     std.testing.refAllDecls(@This());
     _ = @import("syncer/plan_test.zig");
+    _ = @import("syncer/actor_test.zig");
     _ = @import("processor/pruning_test.zig");
     _ = @import("processor/pending_test.zig");
     _ = @import("processor/execution_test.zig");

@@ -259,6 +259,14 @@ marshal's actors (consensus-marshal) for the actor; until then it ports what is 
   `SyncSource`/`sync_source` (keyless, immutable, and compact do). Metrics are
   `p2p.Metrics` (`pending_requests`, `fetch_requests`, `deliveries`, `serve_requests`,
   `has_database`); the engine's register under `scope.child("resolver")`.
+- `glue.stateful.actor.Syncer(P, Env)` (syncer/actor.zig): `create(Config)` returns
+  `{syncer, mailbox}`; `start()` runs state sync from `syncer.resolve(P, ...)`'s block through
+  `state_sync.sync_set`, forwards `mailbox.retarget(anchor, targets)` updates, and sends the
+  converged `Artifact{databases, anchor}` on `completion`. `syncer.open(P, env, marshal,
+  db_config, completed)` reopens the set at the later of `completed` and marshal's anchor.
+  `state_sync.sync_set(DBs, D, ...)` syncs a `db.Shared`, a `db.Tuple`, or a set declaring
+  `sync`. Where commonware panics these return errors (`MarshalAnchorMissing`,
+  `BlockUnavailable`, `SyncerStopped`).
 
 ### Decisions
 - The db/p2p actor owns every caller's reply sender in a table keyed by subscription id, and
@@ -402,6 +410,7 @@ marshal's actors (consensus-marshal) for the actor; until then it ports what is 
   adapters' `sync_db`.
 - 2026-11-19 (stateful, broadcast-resolver lane): tuple-set state sync.
 - 2026-11-19 (stateful, broadcast-resolver lane): the db/p2p resolver actor and metrics.
+- 2026-11-19 (stateful, broadcast-resolver lane): the syncer's mailbox and actor.
 - 2026-11-19 (stateful): the core actor's `Durability`.
 - 2026-11-19 (stateful): the core actor's `Verifications` handler; waiting verifies abstain.
 - 2026-11-19 (stateful): the core actor's mailbox.
