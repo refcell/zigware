@@ -840,3 +840,74 @@ test "stateful processing: shutdown preempts a prune joining an execution" {
 test "stateful processing: a prune join lets the execution finish" {
     try prune_join(false);
 }
+
+fn finalization_join(stop: bool) !void {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    var live = true;
+    defer if (live) deinit_fixture(&fixture);
+    const genesis = TestBlock.genesis();
+    const winner, var winner_batch = try fixture.harness.build_child(&genesis, 1);
+    winner_batch.deinit();
+    const candidate, var candidate_batch = try fixture.harness.build_child(&genesis, 2);
+    candidate_batch.deinit();
+    // Cache the winner through its own verification.
+    var winner_verdict = try fixture.verify(&.{ winner, genesis });
+    defer winner_verdict.deinit();
+    try testing.expect(try winner_verdict.recv());
+
+    var probe: harness.Probe = .{ .target = candidate.digest() };
+    defer probe.deinit();
+    const gate = try probe.add_gate();
+    var started = gate.started;
+    defer started.deinit();
+    var release = gate.release;
+    var released = false;
+    defer if (!released) release.deinit();
+    fixture.processing.verifications.verifier.app.probe = &probe;
+    var captures: harness.Probe = .{ .target = null };
+    defer captures.deinit();
+    fixture.processing.processor.app.capture_probe = &captures;
+    var verdict = try fixture.verify(&.{ candidate, genesis });
+    defer verdict.deinit();
+    try started.recv();
+
+    // The winner finalizes while its sibling executes: finalization waits before applying.
+    var receipt = try fixture.finalize(winner);
+    defer receipt.deinit();
+    try testing.io.sleep(.fromMilliseconds(20), .awake);
+    try testing.expectEqual(null, receipt.poll());
+    try testing.expectEqual(0, captures.calls);
+    if (stop) {
+        try testing.expectError(error.Canceled, shutdown(&fixture));
+        live = false;
+        deinit_fixture(&fixture);
+        // Shutdown cancels the winner's receipt and drops the candidate's execution.
+        if (receipt.wait()) |_| return error.TestUnexpectedResult else |_| {}
+        try release.closed();
+        try testing.expectEqual(0, captures.calls);
+    } else {
+        released = true;
+        try release.send({});
+        try testing.expect(!try verdict.recv()); // The losing sibling is rejected.
+        try receipt.wait();
+        try testing.expectEqual(1, captures.calls);
+        try testing.expectEqual(1, try fixture.counter());
+    }
+}
+
+// commonware `finalization_join_preserves_execution_until_shutdown` (shutdown case): a
+// finalization waits for a running sibling execution; shutdown stops processing without
+// waiting, drops the execution, and cancels the finalized block's acknowledgement. Adapted:
+// shutdown is cancelling the loop's task, and the loop's executions are dropped when it is
+// released, so the checks follow its release.
+test "stateful processing: shutdown preempts a finalization joining an execution" {
+    try finalization_join(true);
+}
+
+// commonware `finalization_join_preserves_execution_until_shutdown` (ordinary case): the
+// finalization waits until the execution is released, rejects the sibling, and applies the
+// winner.
+test "stateful processing: a finalization join rejects the sibling and applies" {
+    try finalization_join(false);
+}
