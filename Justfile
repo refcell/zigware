@@ -57,9 +57,13 @@ fuzz-soak factor='100' seed='1':
 fmt:
     zig fmt build.zig build.zig.zon src $(test -d examples && echo examples)
 
-# Formatting, line length, function length, secrets, and dependency checks
+# Formatting, line length, function length, secrets, dependency, and README link checks
 tidy:
     etc/scripts/tidy.sh
+
+# Check README.md and examples/*/README.md links, images, and anchors against local files
+check-links *args:
+    python3 -I etc/scripts/check-links.py "$@"
 
 # Everything CI runs
 ci: tidy test
