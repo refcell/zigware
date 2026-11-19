@@ -235,7 +235,7 @@ pub fn Stateful(comptime P: type) type {
                 schedule,
             );
             defer processor.deinit();
-            return self.process(&processor, &.{});
+            return self.process(&processor, &.{}, null);
         }
 
         /// Runs processing over `processor`, first scheduling `deferred` (taken).
@@ -243,6 +243,7 @@ pub fn Stateful(comptime P: type) type {
             self: *Self,
             processor: *Processor,
             deferred: []const Processing.Mailbox.VerificationRequest,
+            held: ?Processing.Message,
         ) anyerror!void {
             const provider: Provider = .{ .marshal = self.config.marshal.clone() };
             var processing: Processing = .init(
@@ -255,6 +256,7 @@ pub fn Stateful(comptime P: type) type {
             );
             defer processing.deinit();
             for (deferred) |request| processing.defer_verification(request);
+            if (held) |message| processing.queue(message);
             return processing.run();
         }
 
@@ -291,7 +293,7 @@ pub fn Stateful(comptime P: type) type {
             // `process` takes the requests; the list's deinit frees only its buffer. Clearing it
             // first would overwrite them (`clearRetainingCapacity` sets items undefined).
             const deferred = ready.deferred.items;
-            return self.process(&ready.processor, deferred);
+            return self.process(&ready.processor, deferred, ready.held);
         }
     };
 }

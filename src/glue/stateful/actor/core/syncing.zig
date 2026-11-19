@@ -165,6 +165,8 @@ pub fn Syncing(comptime P: type) type {
             processor: Processor,
             databases: Databases,
             deferred: std.ArrayList(VerificationRequest),
+            /// A message the mailbox branch received as sync handed off, for processing first.
+            held: ?Message = null,
         };
 
         pub const Config = struct {
@@ -315,8 +317,30 @@ pub fn Syncing(comptime P: type) type {
                 // carries the same handles, and `discard` releases it only on shutdown.
                 self.handed_off = true;
                 try classify(Block, artifact.anchor, self.pending.items);
-                return try self.transition(artifact);
+                const held = self.take_received(&select);
+                var ready = self.transition(artifact) catch |err| {
+                    if (held) |message| Message.discard(message);
+                    return err;
+                };
+                ready.held = held;
+                return ready;
             }
+        }
+
+        /// Stops the select, keeping a message its mailbox branch already received: commonware's
+        /// receive is cancel-safe and leaves it queued, so dropping it would cancel a finalized
+        /// block's acknowledgement and stop marshal.
+        fn take_received(self: *Self, select: *Io.Select(Wake)) ?Message {
+            assert(self.handed_off);
+            var held: ?Message = null;
+            while (select.cancel()) |rest| switch (rest) {
+                .message => |result| if (result catch null) |message| {
+                    assert(held == null);
+                    held = message;
+                },
+                .artifact => self.discard(rest),
+            };
+            return held;
         }
 
         fn syncer_failure(self: *Self) anyerror {

@@ -204,7 +204,7 @@ fn ProcessingOf(comptime key: [4]type) type {
         }
 
         /// Queues a message that arrived while other work was selected.
-        fn queue(self: *Self, message: Message) void {
+        pub fn queue(self: *Self, message: Message) void {
             self.actions.pushBack(self.gpa, .{ .message = message }) catch Message.discard(message);
         }
 
