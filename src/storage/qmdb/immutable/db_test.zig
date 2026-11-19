@@ -553,3 +553,171 @@ test "immutable batches inherit the floor but not the metadata" {
         try testing.expectEqual(@as(u64, 1), next.bounds.inactivity_floor);
     }
 }
+
+/// Expects `get_many` of `keys` through `reader` to fail with `error.StaleRead`.
+fn expect_stale_many(reader: anytype, db: anytype, keys: []const Digest) !void {
+    var out: [4]?Digest = undefined;
+    assert(keys.len <= out.len);
+    try testing.expectError(error.StaleRead, reader.get_many(keys, db, out[0..keys.len]));
+}
+
+// Commonware's run_stale_fork_refuses: once one fork applies, every read and merkleize through
+// the other fork (and through batches built before the apply) is refused, even with no keys.
+test "immutable reads through a losing fork are stale" {
+    inline for (families) |F| {
+        var harness = try support.Harness.init(gpa);
+        defer harness.deinit();
+        var db = try harness.open(F, null);
+        defer db.deinit();
+        const winner = try merkleize_set(&db, null, 1, 3);
+        defer winner.release();
+        const loser = try merkleize_set(&db, null, 1, 4);
+        defer loser.release();
+        try testing.expectEqual(winner.bounds.tip.size, loser.bounds.tip.size);
+        try testing.expect(!winner.root().eql(loser.root()));
+        var child = loser.new_batch();
+        defer child.deinit();
+        try child.set(fill(2), fill(5));
+        var direct = try db.new_batch();
+        defer direct.deinit();
+        try direct.set(fill(2), fill(6));
+        try db.apply_batch(winner);
+        try testing.expectError(error.StaleRead, direct.get(&fill(1), &db));
+        try expect_stale_many(&direct, &db, &.{fill(1)});
+        try testing.expectError(error.StaleRead, child.get(&fill(1), &db));
+        try expect_stale_many(&child, &db, &.{fill(1)});
+        try testing.expectError(error.StaleRead, loser.get(&fill(1), &db));
+        try expect_stale_many(&child, &db, &.{});
+        try expect_stale_many(loser, &db, &.{});
+        try testing.expectError(error.StaleBatch, child.merkleize(&db));
+        try testing.expectError(error.StaleBatch, db.validate_batch(loser));
+    }
+}
+
+// Commonware's run_descendant_apply_makes_parent_reads_stale: after a child applies, it still
+// reads, but its parent (whose operations the child carried) is stale.
+test "immutable applying a child makes its parent's reads stale" {
+    inline for (families) |F| {
+        var harness = try support.Harness.init(gpa);
+        defer harness.deinit();
+        var db = try harness.open(F, null);
+        defer db.deinit();
+        const parent = try merkleize_set(&db, null, 1, 3);
+        defer parent.release();
+        try expect_value(try parent.get(&fill(1), &db), fill(3));
+        const child = try merkleize_set(&db, parent, 2, 4);
+        defer child.release();
+        try db.apply_batch(child);
+        try expect_value(try child.get(&fill(1), &db), fill(3));
+        try testing.expectError(error.StaleRead, parent.get(&fill(1), &db));
+        try expect_stale_many(parent, &db, &.{fill(1)});
+        // Commonware's run_stale_batch_child_applied_before_parent.
+        try testing.expectError(error.StaleBatch, db.apply_batch(parent));
+    }
+}
+
+// Commonware's run_merkleize_foreign_db: a batch built on one database does not merkleize
+// against another of the same size.
+test "immutable batches do not merkleize against a foreign database" {
+    inline for (families) |F| {
+        var harness = try support.Harness.init(gpa);
+        defer harness.deinit();
+        var other = try support.Harness.init(gpa);
+        defer other.deinit();
+        var db = try harness.open(F, null);
+        defer db.deinit();
+        var foreign = try other.open(F, null);
+        defer foreign.deinit();
+        const ours = try merkleize_set(&db, null, 1, 11);
+        defer ours.release();
+        try db.apply_batch(ours);
+        const theirs = try merkleize_set(&foreign, null, 1, 99);
+        defer theirs.release();
+        try foreign.apply_batch(theirs);
+        try testing.expectEqual(db.bounds().end, foreign.bounds().end);
+        try testing.expect(!db.root().eql(foreign.root()));
+        var direct = try db.new_batch();
+        defer direct.deinit();
+        try direct.set(fill(2), fill(22));
+        try testing.expectError(error.StaleBatch, direct.merkleize(&foreign));
+        const parent = try merkleize_set(&db, null, 3, 33);
+        defer parent.release();
+        var child = parent.new_batch();
+        defer child.deinit();
+        try child.set(fill(4), fill(44));
+        try testing.expectError(error.StaleBatch, child.merkleize(&foreign));
+    }
+}
+
+// Commonware's run_merkleize_stale_sibling: an unmerkleized batch, direct or on an unapplied
+// parent, refuses to merkleize once a sibling applies.
+test "immutable unmerkleized batches refuse to merkleize after a sibling applies" {
+    inline for (families) |F| {
+        var harness = try support.Harness.init(gpa);
+        defer harness.deinit();
+        var db = try harness.open(F, null);
+        defer db.deinit();
+        var direct = try db.new_batch();
+        defer direct.deinit();
+        try direct.set(fill(1), fill(11));
+        const first = try merkleize_set(&db, null, 2, 22);
+        defer first.release();
+        try db.apply_batch(first);
+        try testing.expectError(error.StaleBatch, direct.merkleize(&db));
+        const parent = try merkleize_set(&db, null, 3, 33);
+        defer parent.release();
+        var child = parent.new_batch();
+        defer child.deinit();
+        try child.set(fill(4), fill(44));
+        const second = try merkleize_set(&db, null, 5, 55);
+        defer second.release();
+        try db.apply_batch(second);
+        try testing.expectError(error.StaleBatch, child.merkleize(&db));
+    }
+}
+
+// Commonware's run_stale_batch_rejected: a refused stale batch changes nothing, also on reopen.
+test "immutable a refused stale batch leaves the database unchanged" {
+    inline for (families) |F| {
+        var harness = try support.Harness.init(gpa);
+        defer harness.deinit();
+        var db = try harness.open(F, null);
+        defer db.deinit();
+        const batch_a = try merkleize_set(&db, null, 1, 10);
+        defer batch_a.release();
+        const batch_b = try merkleize_set(&db, null, 2, 20);
+        defer batch_b.release();
+        try db.apply_batch(batch_a);
+        try expect_value(try db.get(&fill(1)), fill(10));
+        try expect_value(try db.get(&fill(2)), null);
+        try expect_value(try db.get_metadata(), null);
+        try db.commit();
+        const root = db.root();
+        const size = db.bounds().end;
+        try testing.expectError(error.StaleBatch, db.apply_batch(batch_b));
+        db.deinit();
+        db = try harness.open(F, null);
+        try testing.expect(db.root().eql(root));
+        try testing.expectEqual(size, db.bounds().end);
+        try expect_value(try db.get(&fill(1)), fill(10));
+        try expect_value(try db.get(&fill(2)), null);
+    }
+}
+
+// The first half of commonware's run_stale_batch_chained: sibling children of one parent.
+test "immutable sibling children of a common parent are stale once one applies" {
+    inline for (families) |F| {
+        var harness = try support.Harness.init(gpa);
+        defer harness.deinit();
+        var db = try harness.open(F, null);
+        defer db.deinit();
+        const common = try merkleize_set(&db, null, 10, 10);
+        defer common.release();
+        const sibling_a = try merkleize_set(&db, common, 11, 11);
+        defer sibling_a.release();
+        const sibling_b = try merkleize_set(&db, common, 12, 12);
+        defer sibling_b.release();
+        try db.apply_batch(sibling_a);
+        try testing.expectError(error.StaleBatch, db.validate_batch(sibling_b));
+    }
+}

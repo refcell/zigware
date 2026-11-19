@@ -516,8 +516,10 @@ fn Unmerkleized(comptime D: type) type {
             return db.get_from(key, floor);
         }
 
-        /// The values of `keys` into `out`. The caller owns them.
+        /// The values of `keys` into `out`. The caller owns them. A stale batch refuses even
+        /// an empty read.
         pub fn get_many(self: *const Self, keys: []const K, db: *D, out: []?V) !void {
+            try self.compatible(db);
             return get_each(self, keys, db, out);
         }
 
@@ -803,8 +805,10 @@ fn Merkleized(comptime D: type) type {
             return db.get_from(key, floor);
         }
 
-        /// The values of `keys` into `out`. The caller owns them.
+        /// The values of `keys` into `out`. The caller owns them. A stale batch refuses even
+        /// an empty read.
         pub fn get_many(self: *const Self, keys: []const K, db: *D, out: []?V) !void {
+            try self.bounds.compatible(db.commitment());
             return get_each(self, keys, db, out);
         }
 

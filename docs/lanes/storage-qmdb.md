@@ -119,7 +119,8 @@ which every database here is built on.
   - [x] batch A, floors: `run_inactivity_floor_tracking`, `run_floor_monotonicity`,
     `run_floor_monotonicity_violation`, `run_chained_floor_beyond_commit`, fixed.rs
     `test_batch_inherits_floor_but_not_metadata` (its compact half is the compact lane's).
-  - [ ] batch B, staleness: `run_descendant_apply_makes_parent_reads_stale`,
+  - [x] batch B, staleness (also fixes `get_many` with no keys, which skipped the stale
+    check commonware makes): `run_descendant_apply_makes_parent_reads_stale`,
     `run_merkleize_foreign_db`, `run_merkleize_stale_sibling`,
     `run_stale_batch_child_applied_before_parent`, and the `StaleRead` halves of
     `run_stale_fork_refuses`, `run_stale_batch_rejected`, `run_stale_batch_chained`.
@@ -374,3 +375,4 @@ which every database here is built on.
 - 2026-11-19: store batch 3 (bitmap, recovery, start_sync); `read_location` cfg tests.
 - 2026-11-19: store variable-length keys and `test_store_variable_length_keys`.
 - 2026-11-19: immutable audit; batch A (floor scenarios and batch floor inheritance).
+- 2026-11-19: immutable batch B (stale reads and merkleizes); empty `get_many` stale check.
