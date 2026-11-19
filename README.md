@@ -62,6 +62,18 @@ each side's message arrives on the other ([video](docs/assets/interop-demo.mp4))
 commonware source is missing), and `etc/scripts/record-demo.sh interop` records it again.
 
 <p align="center">
+  <img src="docs/assets/interop-log-demo.gif" width="800"
+    alt="Two commonware Rust validators and two zigware validators finalize the same blocks">
+</p>
+
+The two also agree on consensus. Here commonware's Rust [log](examples/log) validators 0 and 1
+and zigware's validators 2 and 3 form one Simplex committee: each implementation proposes about
+half the views, and all four finalize every view with the same digest. A zigware validator that
+is stopped and restarted on its storage rejoins and finalizes later views with the same digests
+([video](docs/assets/interop-log-demo.mp4)). `etc/scripts/interop.sh` runs this check after the
+chat one, and `etc/scripts/record-demo.sh interop-log` records it again.
+
+<p align="center">
   <img src="docs/assets/log-demo.gif" width="800"
     alt="Four validators run Simplex consensus and finalize blocks over real TCP">
 </p>
