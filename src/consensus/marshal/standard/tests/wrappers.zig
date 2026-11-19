@@ -1,8 +1,13 @@
-//! The standard actor's buffered floor anchors and the standard wrappers' certify, verify,
-//! propose, and prepare paths (commonware `marshal/standard/mod.rs`, lines 2592-6220).
+//! The standard actor's buffered floor anchors and the standard wrappers' gate, certify, and
+//! verify paths (commonware `marshal/standard/mod.rs`, lines 2592-4712 and 6151-6220).
 //!
 //! Tests that need a peer serve blocks the way commonware's harness does; the standard
 //! harness's `propose` stores nothing, so a server persists a block it must serve as verified.
+//!
+//! Lines 4713-4993 (the parent-fetch tests) are in tests/fetch.zig and 4994-5931 (propose,
+//! prepare, and verification) in tests/propose_validation.zig. The four sync-failure tests
+//! (5932-6150: verified, certified, notarization, and get-info read failures) have no Zig
+//! counterpart: commonware asserts that the actor panics, and a Zig test cannot catch a panic.
 
 const std = @import("std");
 const testing = std.testing;
@@ -1326,6 +1331,35 @@ test "deferred certify falls back after canceled verify" {
             try testing.expectEqual(@as(?bool, true), certified);
             try testing.expect(try case.started.resolver.wait_for_delivery_response());
             try expect_round_requested(case.started.resolver, round_at(1));
+        }
+    }.body);
+}
+
+test "certified covered by verified write recoverable after restart" {
+    // commonware `test_certified_covered_by_verified_write_recoverable_after_restart`: the
+    // verified write records the round's digest, so the certified delivery of the same block
+    // skips the notarized-archive copy and relies on the verified archive surviving a crash.
+    try run_for(30, struct {
+        fn body(ctx: Ctx) anyerror!void {
+            const net = try Net.start(ctx, harness.num_validators);
+            defer net.stop();
+            const genesis = try harness.make_raw_block(gpa, hash(""), .zero(), 0);
+            const leader = harness.default_leader();
+            var block = try proposed_block(round_at(1), leader, 0, genesis.digest(), 1, 100);
+            defer block.deinit();
+            const validator = try net.validator(ctx, "validator", 0);
+            try H.verify(validator, round_at(1), &block);
+            const certified = H.certify(validator, round_at(1), &block) catch |err| {
+                validator.crash();
+                return err;
+            };
+            validator.crash();
+            try testing.expect(certified);
+            const restarted = try net.validator(ctx, "validator_restart", 0);
+            defer restarted.crash();
+            const lookup = try restarted.mailbox.get_block(.{ .digest = block.digest() });
+            var stored = lookup orelse return error.CertifiedBlockLost;
+            stored.deinit();
         }
     }.body);
 }
