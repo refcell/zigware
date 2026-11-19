@@ -160,12 +160,13 @@ jobs:
           git -C "$COMMONWARE_REF" fetch -q --depth 1 \
             https://github.com/commonwarexyz/monorepo "$COMMONWARE_REVISION"
           git -C "$COMMONWARE_REF" checkout -q FETCH_HEAD
-      # Keyed by revision, and saved once the build succeeds, even if interop then fails.
+      # Keyed by revision and the examples built, and saved once the build succeeds, even if
+      # interop then fails.
       - name: restore cargo cache
         id: cargo-cache
         uses: actions/cache/restore@v4
         with:
-          key: interop-cargo-${{ runner.os }}-${{ env.COMMONWARE_REVISION }}
+          key: interop-cargo-${{ runner.os }}-${{ env.COMMONWARE_REVISION }}-chat-log-dkg-bridge
           path: |
             ~/.cargo/registry/index
             ~/.cargo/registry/cache
@@ -181,7 +182,7 @@ jobs:
         if: steps.cargo-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
-          key: interop-cargo-${{ runner.os }}-${{ env.COMMONWARE_REVISION }}
+          key: interop-cargo-${{ runner.os }}-${{ env.COMMONWARE_REVISION }}-chat-log-dkg-bridge
           path: |
             ~/.cargo/registry/index
             ~/.cargo/registry/cache
