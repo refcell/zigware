@@ -218,6 +218,21 @@ time, files, and network: build on it rather than around it where it fits.
   contract still takes `[]const []const u8`; `IoBufs.slices` adapts a chunk sequence to it.
 - The runner registers its storage and network metrics on first `storage()`/`network()`
   (the runner must not move by then) and panics if that registration runs out of memory.
+- A task spawned with `io.concurrent` or into a group first runs in the next scheduler batch,
+  and its awaiter wakes in the batch after it finishes, as commonware's executor queues spawned
+  and woken tasks for its next iteration. Spawn-then-await therefore costs two cycles (2
+  simulated ms) even when the children never block; glue's `Tuple.apply` pays about 70 ms over
+  80 views for spawning where commonware's `try_join` polls futures inline. That is a cost on
+  the spawning side, not a scheduler bug. A same-batch mode was rejected, even opt-in: it would
+  split the seed space (coordinator, 2026-11-19).
+- Real CPU per scheduler cycle (1fe045bf, recv_waiting at about 100 ns per cycle before), in TSC
+  cycles per task resume net of rdtsc's own ~31: the `process_task` audit event ~60 before and
+  ~55 after staging its fields, the task body with both fiber switches ~120, the two-task seeded
+  shuffle ~20, alarm push and pop and the counter bumps ~0 as measured. The locked counter adds
+  were worth more than rdtsc showed (their barrier costs fall outside the timed window): staging
+  plus plain load/store bumps cut recv_waiting's best median 174 to 148 us. Pre-encoding each
+  task's audit event at spawn and dropping the fiber switch's `stmxcsr`/`fnstcw` measured within
+  noise, so neither landed.
 
 ## Log
 - 2026-11-13: fibers, rand-compatible shuffle, deterministic executor implementing `std.Io`.
@@ -253,7 +268,7 @@ Every commonware `#[test]` in this lane's crates (macro and rstest cases expande
 | File | Tests | Ported | Open | Not portable |
 | --- | --- | --- | --- | --- |
 | conformance.rs | 3 | 3 | 0 | 0 |
-| deterministic.rs | 50 | 37 | 0 | 13 |
+| deterministic.rs | 50 | 38 | 0 | 12 |
 | lib.rs | 59 | 50 | 0 | 9 |
 | mocks.rs | 20 | 19 | 0 | 1 |
 | network/audited.rs | 5 | 4 | 0 | 1 |
@@ -265,21 +280,21 @@ Every commonware `#[test]` in this lane's crates (macro and rstest cases expande
 | telemetry/metrics/batched.rs | 4 | 4 | 0 | 0 |
 | telemetry/metrics/histogram.rs | 1 | 1 | 0 | 0 |
 | telemetry/metrics/mod.rs | 18 | 17 | 0 | 1 |
-| tokio/runtime.rs | 21 | 7 | 0 | 14 |
-| utils/abort.rs | 11 | 1 | 0 | 10 |
-| utils/buffer/mod.rs | 46 | 39 | 0 | 7 |
+| tokio/runtime.rs | 21 | 9 | 0 | 12 |
+| utils/abort.rs | 11 | 2 | 0 | 9 |
+| utils/buffer/mod.rs | 46 | 40 | 0 | 6 |
 | utils/buffer/paged/cache.rs | 49 | 17 | 0 | 32 |
 | utils/buffer/paged/mod.rs | 17 | 17 | 0 | 0 |
 | utils/buffer/paged/read.rs | 17 | 6 | 0 | 11 |
-| utils/buffer/paged/sealed.rs | 26 | 24 | 0 | 2 |
+| utils/buffer/paged/sealed.rs | 26 | 25 | 0 | 1 |
 | utils/buffer/paged/tip.rs | 13 | 7 | 0 | 6 |
 | utils/buffer/paged/view.rs | 4 | 4 | 0 | 0 |
-| utils/buffer/paged/writer.rs | 96 | 84 | 0 | 12 |
+| utils/buffer/paged/writer.rs | 96 | 86 | 0 | 10 |
 | utils/buffer/tip.rs | 7 | 5 | 0 | 2 |
 | utils/handle.rs | 19 | 10 | 0 | 9 |
 | utils/mod.rs | 3 | 0 | 0 | 3 |
 | utils/supervision.rs | 9 | 4 | 0 | 5 |
-| Total | 526 | 382 | 0 | 144 |
+| Total | 526 | 390 | 0 | 136 |
 
 Open (none are in runtime/src/telemetry/, the runtime-telemetry lane's directory):
 - [x] `deterministic.rs:1742` `test_logical_open_releases_retained_mutations`: unsynced fragments of
@@ -326,6 +341,18 @@ tip.rs 6, writer.rs 3) were already death tests in `buffer/paged/panic_test.zig`
 deterministic strategy tests are in `context_test.zig` and
 `test_storage_blob_layout_restriction_rejects_empty_range` is a death test in
 `production/runner_test.zig`. Not portable 162 to 144.
+Re-audit (runtime lane, 2026-11-19), 144 to 136: `test_alarm_min_heap` (deterministic.zig),
+`test_read_cancelled_refill_rewinds` (buffer/read.zig), the two thread stack size tests
+(production/runner_test.zig), `concurrent_abort_and_poll` as a 500-round `std.Io.Threaded` race of
+`Handle.abort` against a task's start (context_test.zig),
+`test_snapshot_fetch_populates_shared_cache_across_append` (paged/delayed_read_test.zig), and
+`test_torn_extension_with_new_footer_recovers_previous_prefix` (paged/writer_test.zig) are ported,
+each checked with a planted bug;
+`test_replay_preserves_tail_during_partial_page_rewrite` was already in
+paged/partial_rewrite_test.zig (91149b1d). The rest stay: panic recovery or propagation, Rust
+future, waker, `Drop`, and borrow semantics, `IoBuf` chunk ownership, and features zigware does
+not have (the `external` mode, accept on the ring, slot hints, shared in-flight page reads, a
+scan budget for `recoverable_prefix_len`, chained tip allocations).
 
 Not portable:
 - `deterministic.rs` `test_retired_write_owner_releases_other_blob`,
@@ -340,8 +367,8 @@ Not portable:
   exists. Their other `#[should_panic]` tests are death tests in `panic_test.zig`
 - `deterministic.rs` `test_borrowed_non_send_root`: compile-time check that the root needs no
   `Send`/`'static` bound
-- `deterministic.rs` `test_alarm_min_heap`, `test_sleep_refreshes_one_alarm_after_repolling`:
-  waker/poll internals (runtime.md names `alarm_min_heap`, `sleep_refreshes_one_alarm`)
+- `deterministic.rs` `test_sleep_refreshes_one_alarm_after_repolling`: waker/poll internals (a
+  sleep future repolled with new wakers)
 - `lib.rs` `test_blob_version`: `BlobVersion` is a `u16` alias; test checks Rust Display/Debug/Range
   impls
 - `lib.rs` `test_handle_can_use_futures_pool`, `test_clock_futures_move_between_tasks`,
@@ -383,16 +410,12 @@ Not portable:
   `test_disposal_panic_is_task_panic`, `test_disposal_panic_reported_before_tracker_release`,
   `test_runner_resumes_strategy_panic_payload_after_pool_work`: `#[should_panic]` or panic
   propagation/`catch_unwind`; Zig cannot catch a panic
-- `tokio/runtime.rs` `test_default_thread_stack_size_uses_system_default`,
-  `test_thread_stack_size_override`: runtime.md: `thread.rs` (`RUST_MIN_STACK`) has no counterpart
 - `utils/abort.rs` `wrapper_adds_one_pointer`, `abort_before_poll_skips_future`,
   `abort_wakes_latest_waker`, `abort_wakes_repeatedly_registered_waker`,
   `task_registers_waker_with_new_vtable`, `abort_wakes_task_behind_reused_waker_addresses`,
-  `concurrent_abort_and_poll`, `abort_races_first_poll`, `abort_races_repeat_poll_same_waker`,
+  `abort_races_first_poll`, `abort_races_repeat_poll_same_waker`,
   `abort_races_repeat_poll_new_waker`: runtime.md: `abort.rs` (waker registration) has no
   counterpart
-- `utils/buffer/mod.rs` `test_read_cancelled_refill_rewinds`: storage-journal.md: delayed or
-  cancelled reads (`MigratingReadBlob`, parked reads)
 - `utils/buffer/mod.rs` `test_read_structure_single_vs_chunked`: storage-journal.md: `IoBuf`
   ownership/chunk structure (reads copy into caller buffers)
 - `utils/buffer/paged/cache.rs` `test_read_cached_many_across_chunks`,
@@ -436,16 +459,15 @@ Not portable:
   fault-injecting mock blob and per-batch futures, which have no counterpart here. Off by default:
   each start is a `std.Io` task hand-off, which made fixed replay about 4x slower on tmpfs
 - `utils/buffer/paged/read.rs` `test_replay_is_sync`: compile-time Rust `Sync` bound check
-- `utils/buffer/paged/sealed.rs` `test_replay_preserves_tail_during_partial_page_rewrite`:
-  storage-journal.md: `SplitWriteBlob` partial-page rewrite races
 - `utils/buffer/paged/tip.rs` `test_extension_preserves_prior_allocation_pointers`,
   `test_typed_append_crosses_allocations_and_pages`, `test_zero_size_typed_append_stays_detached`,
   `test_drain_reuses_independent_partial_page`,
   `test_drain_keeps_chunks_and_detaches_mutable_suffix`, `test_replace_detaches_prior_owners`:
   storage-journal.md: tip is one contiguous allocation, not chained zero-copy chunks
-- `utils/buffer/paged/writer.rs` `test_cancelled_recovery_read_cannot_repopulate_after_truncate`,
-  `test_snapshot_fetch_populates_shared_cache_across_append`: storage-journal.md: delayed or
-  cancelled reads (`MigratingReadBlob`, parked reads)
+- `utils/buffer/paged/writer.rs` `test_cancelled_recovery_read_cannot_repopulate_after_truncate`:
+  a dropped Rust read completes later and could publish stale bytes; a canceled zigware read ends
+  at the cancel with `error.Canceled`, so no late completion exists (a planted "cache the bytes of
+  a canceled read" bug passes a port, so it would check nothing)
 - `utils/buffer/paged/writer.rs` `test_append_variable_value_encodes_in_place`,
   `test_to_physical_pages_preserves_chunk_owners`: storage-journal.md: `IoBuf` ownership/chunk
   structure (reads copy into caller buffers)
@@ -453,8 +475,6 @@ Not portable:
   "`recoverable_prefix_len` reads one page at a time"
 - `utils/buffer/paged/writer.rs` `test_sync_preserves_partial_tip_allocation`: storage-journal.md:
   tip is one contiguous allocation, not chained zero-copy chunks
-- `utils/buffer/paged/writer.rs` `test_torn_extension_with_new_footer_recovers_previous_prefix`:
-  storage-journal.md: "the torn-extension blob" not ported
 - `utils/buffer/tip.rs` `test_tip_slice_uses_resolved_bounds`,
   `test_tip_writable_copies_when_slice_is_live`: storage-journal.md: `IoBuf` ownership/chunk
   structure (reads copy into caller buffers)
