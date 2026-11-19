@@ -30,6 +30,7 @@ test {
             _ = @import("replay.zig").Tests(h);
             _ = @import("nullify_replay.zig").Tests(h);
             _ = @import("cert_restart.zig").Tests(h);
+            _ = @import("cert_timeouts.zig").Tests(h);
         }
     }
 }
