@@ -119,6 +119,23 @@ const Fetching = struct {
     }
 };
 
+test "stateful p2p mailbox: dropping a fetch closes its queued reply" {
+    // commonware `dropping_get_operations_closes_queued_reply`.
+    var mailbox, var receiver = try new_mailbox();
+    defer mailbox.deinit();
+    defer receiver.deinit();
+    var fetching: Fetching = .{ .mailbox = &mailbox };
+    var future = try io.concurrent(Fetching.run, .{&fetching});
+    // Let the request be enqueued, then abandon the fetch.
+    try io.sleep(.fromMilliseconds(20), .awake);
+    try testing.expectError(error.Canceled, future.cancel(io));
+    var message = try receiver.try_recv();
+    defer message.get_operations.response.deinit();
+    try testing.expect(message.get_operations.request.eql(request));
+    try testing.expect(message.get_operations.response.is_closed());
+    try testing.expectError(error.Empty, receiver.try_recv());
+}
+
 test "stateful p2p mailbox: a closed response ends the fetch" {
     var mailbox, var receiver = try new_mailbox();
     defer mailbox.deinit();
