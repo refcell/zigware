@@ -2,8 +2,8 @@
 //! `bls12381/certificate/threshold/mod.rs` tests).
 //!
 //! commonware's `#[should_panic]` cases (a certificate verifier verifying an attestation, a
-//! share index outside the sharing, and a sharing that does not fit the participant set)
-//! panic here too; Zig tests cannot catch a panic, so they are not ported.
+//! share index outside the sharing, and a sharing that does not fit the participant set) are
+//! death tests (`utils.death.expect_panic`), one per variant.
 
 const std = @import("std");
 const testing = std.testing;
@@ -19,6 +19,8 @@ const threshold = @import("threshold.zig");
 
 const Participant = utils.Participant;
 const N3f1 = utils.N3f1;
+const N5f1 = utils.N5f1;
+const death = utils.death;
 const MinPk = primitives.MinPk;
 const MinSig = primitives.MinSig;
 const sequential = parallel.sequential;
@@ -400,4 +402,135 @@ test "threshold certificate: mocks fixture" {
     defer cert.deinit(gpa);
     const verifier = &fixture.verifier;
     try testing.expect(try verifier.verify_certificate(gpa, &rng, subject, &cert, sequential));
+}
+
+/// The bodies of commonware's `#[should_panic]` tests; each panics at a constructor or
+/// verifier precondition.
+fn Panics(comptime V: type) type {
+    return struct {
+        /// commonware `make_participants`.
+        fn participants(rng: anytype, n: u32) !Scheme(V).Participants {
+            var keys: [8]ed25519.PublicKey = undefined;
+            for (keys[0..n]) |*key| key.* = ed25519.PrivateKey.random(rng).public_key();
+            return Scheme(V).Participants.init(gpa, keys[0..n]);
+        }
+
+        /// commonware `certificate_verifier_panics_on_vote`.
+        fn verifier_on_vote() !void {
+            var rng = utils.test_rng();
+            var fixture = try Fixture(V).init(&rng, 4);
+            defer fixture.deinit();
+            var verifier = try Scheme(V).certificate_verifier(
+                gpa,
+                namespace,
+                fixture.polynomial.public(),
+            );
+            defer verifier.deinit(gpa);
+            const vote = (try fixture.schemes[1].sign(gpa, subject)).?;
+            _ = try verifier.verify_attestation(gpa, &rng, subject, &vote, sequential);
+        }
+
+        /// commonware `signer_shares_must_match_participant_indices`.
+        fn share_index() !void {
+            var rng = utils.test_rng();
+            const set = try participants(&rng, 4);
+            var dealing = try dkg.deal_anonymous(V, N3f1, gpa, &rng, .non_zero_counter, 4);
+            defer dealing.deinit(gpa);
+            var share = dealing.shares[0];
+            share.index = .init(999);
+            const polynomial = try dealing.sharing.clone(gpa);
+            var scheme = try Scheme(V).signer(gpa, namespace, set, polynomial, share);
+            if (scheme) |*value| value.deinit(gpa);
+        }
+
+        /// A signer, or a verifier when `signer` is false, over `n` participants and a dealing
+        /// whose fault model `M` and player count `players` may not fit them.
+        fn construct(comptime M: type, n: u32, players: u32, signer: bool) !void {
+            var rng = utils.test_rng();
+            const set = try participants(&rng, n);
+            var dealing = try dkg.deal_anonymous(V, M, gpa, &rng, .non_zero_counter, players);
+            defer dealing.deinit(gpa);
+            const polynomial = try dealing.sharing.clone(gpa);
+            var scheme = if (signer)
+                try Scheme(V).signer(gpa, namespace, set, polynomial, dealing.shares[0])
+            else
+                try Scheme(V).verifier(gpa, namespace, set, polynomial);
+            if (scheme) |*value| value.deinit(gpa);
+        }
+
+        /// commonware `signer_validates_polynomial_degree`: N5f1 over four players deals a
+        /// degree-3 polynomial where N3f1 needs degree 2.
+        fn signer_degree() !void {
+            try construct(N5f1, 4, 4, true);
+        }
+
+        /// commonware `verifier_validates_polynomial_degree`.
+        fn verifier_degree() !void {
+            try construct(N5f1, 4, 4, false);
+        }
+
+        /// commonware `signer_polynomial_threshold_must_equal_quorum`: two players for five
+        /// participants.
+        fn signer_total() !void {
+            try construct(N3f1, 5, 2, true);
+        }
+
+        /// commonware `verifier_polynomial_threshold_must_equal_quorum`.
+        fn verifier_total() !void {
+            try construct(N3f1, 5, 2, false);
+        }
+    };
+}
+
+const on_vote = "can only be called for signer and verifier";
+const index_mismatch = "share index must match participant indices";
+const degree = "polynomial threshold must equal quorum";
+const total = "polynomial total must equal participant len";
+
+test "threshold certificate: a certificate verifier panics on a vote (MinPk)" {
+    try death.expect_panic(@src(), on_vote, Panics(MinPk).verifier_on_vote);
+}
+
+test "threshold certificate: a certificate verifier panics on a vote (MinSig)" {
+    try death.expect_panic(@src(), on_vote, Panics(MinSig).verifier_on_vote);
+}
+
+test "threshold certificate: a signer's share must match a participant index (MinPk)" {
+    try death.expect_panic(@src(), index_mismatch, Panics(MinPk).share_index);
+}
+
+test "threshold certificate: a signer's share must match a participant index (MinSig)" {
+    try death.expect_panic(@src(), index_mismatch, Panics(MinSig).share_index);
+}
+
+test "threshold certificate: a signer validates the polynomial degree (MinPk)" {
+    try death.expect_panic(@src(), degree, Panics(MinPk).signer_degree);
+}
+
+test "threshold certificate: a signer validates the polynomial degree (MinSig)" {
+    try death.expect_panic(@src(), degree, Panics(MinSig).signer_degree);
+}
+
+test "threshold certificate: a verifier validates the polynomial degree (MinPk)" {
+    try death.expect_panic(@src(), degree, Panics(MinPk).verifier_degree);
+}
+
+test "threshold certificate: a verifier validates the polynomial degree (MinSig)" {
+    try death.expect_panic(@src(), degree, Panics(MinSig).verifier_degree);
+}
+
+test "threshold certificate: a signer's polynomial total must equal the participants (MinPk)" {
+    try death.expect_panic(@src(), total, Panics(MinPk).signer_total);
+}
+
+test "threshold certificate: a signer's polynomial total must equal the participants (MinSig)" {
+    try death.expect_panic(@src(), total, Panics(MinSig).signer_total);
+}
+
+test "threshold certificate: a verifier's polynomial total must equal the participants (MinPk)" {
+    try death.expect_panic(@src(), total, Panics(MinPk).verifier_total);
+}
+
+test "threshold certificate: a verifier's polynomial total must equal the participants (MinSig)" {
+    try death.expect_panic(@src(), total, Panics(MinSig).verifier_total);
 }

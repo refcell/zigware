@@ -125,9 +125,9 @@ variants (MinPk, MinSig) must match exactly.
   for points, hashes, dealings, shares, and recovered signatures.
 
 - Certificate schemes fold commonware's `impl_certificate_bls12381_*!` macro and `Generic` into
-  `Scheme(Subject, Faults, P, V)`. The threshold scheme's `#[should_panic]` tests (certificate
-  verifier on a vote, mismatched sharing) still panic but are not ported: Zig cannot catch a
-  panic.
+  `Scheme(Subject, Faults, P, V)`. The threshold scheme's 12 `#[should_panic]` tests (certificate
+  verifier on a vote, mismatched sharing) are death tests through `utils.death.expect_panic`,
+  one Zig test per variant, since the helper reruns its whole calling test in a child.
 
 - feldman_desmedt: `Dealer`, `Player`, and `Logs` borrow their `Info` (commonware moves a
   clone into each), so the `Info` must outlive them. `Logs.select` returns a `Selection` of
@@ -224,12 +224,17 @@ src/cryptography/bls12381/primitives/group_msm_tests.zig. That makes 273 ported,
 portable. The Zig tile kernel reads only its own range, so one-point tiles are not padded; the
 coverage test checks a twelve-worker cut of 64 points still reaches a one-point tile.
 
+Since ported (bls-math lane, death tests): the 12 threshold `#[should_panic]` tests, in
+src/cryptography/bls12381/certificate/threshold_tests.zig. That makes 285 ported, 2 open, and 1 not
+portable. Planting a missing panic at each of the four preconditions (or a different message)
+fails all 12.
+
 | commonware file | tests | ported | open | not portable |
 |---|---|---|---|---|
 | `bls12381/scheme.rs` | 8 | 8 | 0 | 0 |
 | `bls12381/tle.rs` | 10 | 10 | 0 | 0 |
 | `bls12381/certificate/multisig/mod.rs` | 24 | 24 | 0 | 0 |
-| `bls12381/certificate/threshold/mod.rs` | 33 | 21 | 0 | 12 |
+| `bls12381/certificate/threshold/mod.rs` | 33 | 33 | 0 | 0 |
 | `bls12381/dkg/feldman_desmedt.rs` | 48 | 48 | 0 | 0 |
 | `bls12381/dkg/golden/mod.rs` | 32 | 32 | 0 | 0 |
 | `bls12381/dkg/golden/evrf/banderwagon.rs` | 8 | 7 | 0 | 1 |
@@ -258,64 +263,6 @@ Open:
   src/cryptography/bls12381/primitives/ops/tests.zig
 
 Not portable:
-- `bls12381/certificate/threshold/mod.rs` `test_certificate_verifier_panics_on_vote_min_pk`: Rust
-  #[should_panic]; zigware threshold.zig @panic("can only be called for signer and verifier") at the
-  same precondition and Zig tests cannot catch a panic in-process; docs/lanes/bls-math.md
-  (Decisions) records the threshold should_panic tests as not ported
-- `bls12381/certificate/threshold/mod.rs` `test_certificate_verifier_panics_on_vote_min_sig`: Rust
-  #[should_panic]; zigware threshold.zig @panic("can only be called for signer and verifier") at the
-  same precondition and Zig tests cannot catch a panic in-process; docs/lanes/bls-math.md
-  (Decisions) records the threshold should_panic tests as not ported
-- `bls12381/certificate/threshold/mod.rs`
-  `test_signer_shares_must_match_participant_indices_min_pk`: Rust #[should_panic]; zigware
-  threshold.zig @panic("share index must match participant indices") at the same precondition and
-  Zig tests cannot catch a panic in-process; docs/lanes/bls-math.md (Decisions) records the
-  threshold should_panic tests as not ported (the null-returning mismatched-share path is a
-  different case, covered by "threshold certificate: a share that does not match the sharing is
-  rejected")
-- `bls12381/certificate/threshold/mod.rs`
-  `test_signer_shares_must_match_participant_indices_min_sig`: Rust #[should_panic]; zigware
-  threshold.zig @panic("share index must match participant indices") at the same precondition and
-  Zig tests cannot catch a panic in-process; docs/lanes/bls-math.md (Decisions) records the
-  threshold should_panic tests as not ported (the null-returning mismatched-share path is a
-  different case, covered by "threshold certificate: a share that does not match the sharing is
-  rejected")
-- `bls12381/certificate/threshold/mod.rs` `test_signer_validates_polynomial_degree_min_pk`: Rust
-  #[should_panic]; zigware threshold.zig @panic("polynomial threshold must equal quorum") at the
-  same precondition and Zig tests cannot catch a panic in-process; docs/lanes/bls-math.md
-  (Decisions) records the threshold should_panic tests as not ported
-- `bls12381/certificate/threshold/mod.rs` `test_signer_validates_polynomial_degree_min_sig`: Rust
-  #[should_panic]; zigware threshold.zig @panic("polynomial threshold must equal quorum") at the
-  same precondition and Zig tests cannot catch a panic in-process; docs/lanes/bls-math.md
-  (Decisions) records the threshold should_panic tests as not ported
-- `bls12381/certificate/threshold/mod.rs` `test_verifier_validates_polynomial_degree_min_pk`: Rust
-  #[should_panic]; zigware threshold.zig @panic("polynomial threshold must equal quorum") at the
-  same precondition and Zig tests cannot catch a panic in-process; docs/lanes/bls-math.md
-  (Decisions) records the threshold should_panic tests as not ported
-- `bls12381/certificate/threshold/mod.rs` `test_verifier_validates_polynomial_degree_min_sig`: Rust
-  #[should_panic]; zigware threshold.zig @panic("polynomial threshold must equal quorum") at the
-  same precondition and Zig tests cannot catch a panic in-process; docs/lanes/bls-math.md
-  (Decisions) records the threshold should_panic tests as not ported
-- `bls12381/certificate/threshold/mod.rs`
-  `test_signer_polynomial_threshold_must_equal_quorum_min_pk`: Rust #[should_panic]; zigware
-  threshold.zig @panic("polynomial total must equal participant len") at the same precondition and
-  Zig tests cannot catch a panic in-process; docs/lanes/bls-math.md (Decisions) records the
-  threshold should_panic tests as not ported
-- `bls12381/certificate/threshold/mod.rs`
-  `test_signer_polynomial_threshold_must_equal_quorum_min_sig`: Rust #[should_panic]; zigware
-  threshold.zig @panic("polynomial total must equal participant len") at the same precondition and
-  Zig tests cannot catch a panic in-process; docs/lanes/bls-math.md (Decisions) records the
-  threshold should_panic tests as not ported
-- `bls12381/certificate/threshold/mod.rs`
-  `test_verifier_polynomial_threshold_must_equal_quorum_min_pk`: Rust #[should_panic]; zigware
-  threshold.zig @panic("polynomial total must equal participant len") at the same precondition and
-  Zig tests cannot catch a panic in-process; docs/lanes/bls-math.md (Decisions) records the
-  threshold should_panic tests as not ported
-- `bls12381/certificate/threshold/mod.rs`
-  `test_verifier_polynomial_threshold_must_equal_quorum_min_sig`: Rust #[should_panic]; zigware
-  threshold.zig @panic("polynomial total must equal participant len") at the same precondition and
-  Zig tests cannot catch a panic in-process; docs/lanes/bls-math.md (Decisions) records the
-  threshold should_panic tests as not ported
 - `bls12381/dkg/golden/evrf/banderwagon.rs` `measure_circuit_size_per_receiver`: #[ignore]
   diagnostic that only eprintln!s circuit sizes and asserts nothing; no behavior to port (circuit
   capacity exactness is asserted in src/cryptography/bls12381/dkg/golden/evrf/banderwagon_tests.zig
