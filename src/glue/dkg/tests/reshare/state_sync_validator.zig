@@ -575,7 +575,10 @@ pub fn StateSyncValidator(comptime T: type) type {
             const gpa = self.gpa;
             var receiver = try self.probe.mailbox.subscribe();
             defer receiver.deinit();
-            self.artifact = receiver.recv() catch return error.ProbeStopped;
+            // A crash cancels this wait; it must reach `run_node` as Canceled.
+            self.artifact = receiver.recv() catch |err| {
+                return if (err == error.Canceled) error.Canceled else error.ProbeStopped;
+            };
             const artifact = &self.artifact.?;
             const output = &artifact.info.output;
             const players = try output.players.clone(gpa);
@@ -904,7 +907,10 @@ pub fn StateSyncValidator(comptime T: type) type {
         fn recorder_task(_: Ctx, self: *Self, payload: Block.Digest) anyerror!void {
             var receiver = try self.node.mailbox.subscribe_by_commitment(payload, .wait);
             defer receiver.deinit();
-            var block = receiver.recv() catch return;
+            var block = receiver.recv() catch |err| {
+                if (err == error.Canceled) return error.Canceled;
+                return;
+            };
             defer block.deinit();
             const height = block.inner().height().get();
             self.config.ledger.record_state_sync(self.key, height);
