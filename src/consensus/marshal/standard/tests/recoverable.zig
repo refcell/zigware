@@ -267,3 +267,11 @@ test "standard verified success implies recoverable after restart" {
 test "standard certified success implies recoverable after restart" {
     try recoverable.SuccessRecoverable(H, .certified).run(gpa, contract_seeds);
 }
+
+test "standard certify at later view survives earlier view pruning" {
+    try recoverable.LaterViewSurvivesPruning(H).run(gpa);
+}
+
+test "standard certify persists equivocated block" {
+    try recoverable.CertifyPersistsEquivocated(H).run(gpa);
+}
