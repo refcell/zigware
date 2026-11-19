@@ -300,21 +300,26 @@ ports its range's tests and the helpers defined in it, into
 ## Test tally (2026-11-19, against main)
 
 Every `fn test_*` in commonware's `marshal/standard/mod.rs` and `marshal/coding/mod.rs`, by
-line, with where its Zig counterpart lives. Coding's in-progress owners: 24 examples (coding/tests/queries.zig), 13 broadcast-collector, 11 runtime, 5 consensus-marshal (this lane). Counts:
+line, with where its Zig counterpart lives. Coding's in-progress owners: 24 examples (coding/tests/queries.zig), 13 broadcast-collector, 11 runtime. Counts:
 
 | File | Ported | In progress | Not portable | Total |
 | --- | --- | --- | --- | --- |
-| standard/mod.rs | 188 | 0 | 5 | 193 |
-| coding/mod.rs | 43 | 53 | 1 | 97 |
+| standard/mod.rs | 184 | 0 | 9 | 193 |
+| coding/mod.rs | 48 | 48 | 1 | 97 |
 
 `mocks/harness.rs` has no tests of its own: all 31 generic scenario functions are ported
 (`mocks/scenarios.zig`, `scenarios_queries.zig`, `scenarios_recoverable.zig`) and run through
 the standard wrappers above. `conformance.rs`'s StandardStorageConformance workload is in
 `marshal/conformance.zig` (hash unreachable, see Log); CodingStorageConformance is the
-coding lane's. Not portable: the five `should_panic` tests (a Zig test cannot catch a panic;
-zigware returns the error, which stops the actor) and `cache_writes_do_not_clone_block_payloads`
+coding lane's. Not portable: the 8 `should_panic` tests (7 standard, 1 coding), because a Zig
+test cannot catch a panic (zigware panics with commonware's message in the floor and genesis
+cases, and returns the storage error, stopping the actor, in the sync-failure cases);
+`cache_writes_do_not_clone_block_payloads`
 (it counts implicit Rust payload clones; Zig blocks are refcounted handles and cache writes
-encode from a borrow).
+encode from a borrow), and `resolver_delivery_waits_for_identity_job` (it gates the strategy
+job that digests a delivered block; standard's `decode_block` digests inline, so there is no
+job to gate, and `mocks/strategy.rs`'s GatedStrategy has no other user).
+
 #### standard/mod.rs
 
 - L176 `test_standard_local_blocks_compute_digest_once_and_replay_once`: ported (standard/tests/recoverable.zig)
@@ -419,8 +424,8 @@ encode from a borrow).
 - L6151 `test_certified_covered_by_verified_write_recoverable_after_restart`: ported (standard/tests/wrappers.zig)
 - L6740 `test_standard_application_shutdown_redelivers_pending_ack_after_restart`: ported (standard/tests/floor.zig)
 - L6850 `test_standard_actor_starts_without_buffer`: ported (standard/tests/floor.zig)
-- L6894 `test_standard_start_floor_rejects_invalid_finalization`: ported (standard/tests/floor.zig)
-- L6927 `test_standard_set_floor_rejects_invalid_finalization`: ported (standard/tests/floor.zig)
+- L6894 `test_standard_start_floor_rejects_invalid_finalization`: not portable (see above)
+- L6927 `test_standard_set_floor_rejects_invalid_finalization`: not portable (see above)
 - L6959 `test_standard_start_floor_fetches_async_and_serves_requests`: ported (standard/tests/floor.zig)
 - L7028 `test_standard_start_floor_applies_local_anchor_without_fetch`: ported (standard/tests/floor.zig)
 - L7128 `test_standard_start_floor_height_one_without_metadata_delivers_anchor`: ported (standard/tests/floor.zig)
@@ -444,7 +449,7 @@ encode from a borrow).
 - L8707 `test_standard_notarized_delivery_ignored_without_full_scheme`: ported (standard/tests/floor.zig)
 - L8750 `test_standard_finalized_delivery_verifies_with_verify_only_scope`: ported (standard/tests/floor.zig)
 - L8838 `test_standard_finalized_delivery_rejects_different_block_bytes`: ported (standard/tests/floor.zig)
-- L8940 `test_standard_resolver_delivery_waits_for_identity_job`: ported (standard/tests/floor.zig)
+- L8940 `test_standard_resolver_delivery_waits_for_identity_job`: not portable (see above)
 - L9052 `test_standard_finalized_delivery_rejects_epoch_mismatch`: ported (standard/tests/floor.zig)
 - L9104 `test_standard_finalized_delivery_verifies_after_scope_retires`: ported (standard/tests/floor.zig)
 - L9171 `test_standard_notarized_delivery_verifies_after_scope_retires`: ported (standard/tests/floor.zig)
@@ -452,7 +457,7 @@ encode from a borrow).
 - L9301 `test_standard_finalized_batch_verifies_each_epoch_under_admission_scope`: ported (standard/tests/floor.zig)
 - L9406 `test_standard_processed_round_skips_fetch_and_preserves_subscription`: ported (standard/tests/floor.zig)
 - L9485 `test_standard_finalization_rejects_processed_round_block_fetch`: ported (standard/tests/floor.zig)
-- L9553 `test_standard_restart_rejects_mismatched_genesis_anchor`: ported (standard/tests/floor.zig)
+- L9553 `test_standard_restart_rejects_mismatched_genesis_anchor`: not portable (see above)
 - L9599 `test_standard_processed_round_restored_after_restart`: ported (standard/tests/floor.zig)
 - L9700 `test_standard_round_floor_does_not_restore_missing_next_block`: ported (standard/tests/floor.zig)
 - L9800 `test_standard_round_floor_restores_unacknowledged_anchor`: ported (standard/tests/floor.zig)
@@ -537,7 +542,7 @@ encode from a borrow).
 - L1360 `test_coding_proposed_success_implies_recoverable_after_restart`: in progress (examples (coding/tests/queries.zig))
 - L1365 `test_coding_verified_success_implies_recoverable_after_restart`: in progress (examples (coding/tests/queries.zig))
 - L1370 `test_coding_certified_success_implies_recoverable_after_restart`: in progress (examples (coding/tests/queries.zig))
-- L1375 `test_coding_delivery_visibility_implies_recoverable_after_restart`: in progress (consensus-marshal (this lane))
+- L1375 `test_coding_delivery_visibility_implies_recoverable_after_restart`: ported (coding/tests/recoverable.zig)
 - L1380 `test_coding_sync_height_floor`: in progress (examples (coding/tests/queries.zig))
 - L1385 `test_coding_prune_finalized_archives`: in progress (examples (coding/tests/queries.zig))
 - L1390 `test_coding_floor_retains_processed_predecessor`: in progress (examples (coding/tests/queries.zig))
@@ -555,10 +560,10 @@ encode from a borrow).
 - L1450 `test_coding_hint_finalized_triggers_fetch`: in progress (examples (coding/tests/queries.zig))
 - L1455 `test_coding_ancestry_stream`: in progress (examples (coding/tests/queries.zig))
 - L1460 `test_coding_finalize_same_height_different_views`: in progress (examples (coding/tests/queries.zig))
-- L1465 `test_coding_certify_persists_equivocated_block`: in progress (consensus-marshal (this lane))
-- L1470 `test_coding_verified_after_restart_reverify_same_round_implies_recoverable`: in progress (consensus-marshal (this lane))
-- L1475 `test_coding_certify_after_restart_reverify_same_round_implies_recoverable`: in progress (consensus-marshal (this lane))
-- L1480 `test_coding_certify_at_later_view_survives_earlier_view_pruning`: in progress (consensus-marshal (this lane))
+- L1465 `test_coding_certify_persists_equivocated_block`: ported (coding/tests/recoverable.zig)
+- L1470 `test_coding_verified_after_restart_reverify_same_round_implies_recoverable`: ported (coding/tests/recoverable.zig)
+- L1475 `test_coding_certify_after_restart_reverify_same_round_implies_recoverable`: ported (coding/tests/recoverable.zig)
+- L1480 `test_coding_certify_at_later_view_survives_earlier_view_pruning`: ported (coding/tests/recoverable.zig)
 - L1485 `test_coding_certify_first_block_fetches_genesis_parent`: ported (coding/mod_test.zig)
 - L1570 `test_coding_repair_reads_buffer_only_ancestor`: ported (coding/mod_test.zig)
 - L1648 `test_coding_init_processed_height`: in progress (examples (coding/tests/queries.zig))

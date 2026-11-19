@@ -37,6 +37,7 @@ test {
     _ = @import("tests/scenarios.zig");
     _ = @import("tests/propose_test.zig");
     _ = @import("tests/queries.zig");
+    _ = @import("tests/recoverable.zig");
     _ = @import("fuzz.zig");
     _ = @import("test_block.zig");
     _ = @import("shards/root.zig");
