@@ -503,16 +503,18 @@ test "stateful e2e: state sync lossy network" {
 // every block, so the sync is still running at the exit height (commonware's too: its
 // properties read only marshal's processed height, which syncing advances), and the plan skips
 // `StateSyncCompleted`. Commonware runs rotating leaders only, crashing at 6.25 s and
-// restarting at 7 s; here the joiner reaches view 80 later (after 6.6 s in some seeds), so the
-// crash is at 7.5 s with the same 750 ms downtime.
+// restarting at 7 s. Here the joiner starts later (view 80 at 7.3-7.7 s, multi-db last: each
+// task hand-off costs a simulated millisecond), and a crash before it starts finds nothing to
+// crash. So the crash is at 9 s, with the same 750 ms downtime, well inside a sync that runs to
+// the exit (after 16 s on every seed).
 fn run_state_sync_crash_during_sync(comptime E: type) !void {
     var engine = try make_state_sync(E, .default(), true);
     defer engine.deinit();
     const late_joiner = engine.participants()[0];
     var schedule: Schedule = .empty;
     defer schedule.deinit(gpa);
-    try schedule.add(gpa, .from_millis(7500), .{ .crash = late_joiner });
-    try schedule.add(gpa, .from_millis(8250), .{ .restart = late_joiner });
+    try schedule.add(gpa, .from_millis(9000), .{ .crash = late_joiner });
+    try schedule.add(gpa, .from_millis(9750), .{ .restart = late_joiner });
     const crashes = [_]Crash{ delay_first(engine.participants(), 80), .{ .schedule = &schedule } };
     const options: Options = .{
         .height = 130,
