@@ -19,6 +19,9 @@ const Digest = cryptography.Blake3.Digest;
 const Bytes = []const u8;
 const Db = store.Db(Digest, value.Variable(Bytes), translator.TwoCap);
 const Write = Db.Write;
+const Storage = runtime.storage.Storage;
+const CacheRef = runtime.buffer.paged.CacheRef;
+const Faults = @import("../../archive/faults.zig").Faults;
 
 /// Commonware's `Blake3::hash(&[&i.to_be_bytes()])`.
 const CodecCfg = @FieldType(Db.Journal.Cfg, "codec_config");
@@ -46,21 +49,26 @@ const Harness = struct {
     }
 
     fn open(self: *Harness, max_size: ?u64) !Db {
-        const cfg: Db.Cfg = .{
-            .log = .{
-                .partition = "journal",
-                .items_per_section = 7,
-                .codec_config = test_support.codec_config(CodecCfg),
-                .cache_ref = &self.cache_ref,
-                .write_buffer = 64 * 1024,
-                .replay_buffer = 64 * 1024,
-            },
-            .translator = .{},
-            .init_cache = 1024,
-        };
-        return Db.init(gpa, self.storage.interface(), cfg, max_size);
+        return open_on(self.storage.interface(), &self.cache_ref, max_size);
     }
 };
+
+/// Opens the test store (commonware's `test_config`) on `storage`.
+fn open_on(storage: Storage, cache_ref: *CacheRef, max_size: ?u64) !Db {
+    const cfg: Db.Cfg = .{
+        .log = .{
+            .partition = "journal",
+            .items_per_section = 7,
+            .codec_config = test_support.codec_config(CodecCfg),
+            .cache_ref = cache_ref,
+            .write_buffer = 64 * 1024,
+            .replay_buffer = 64 * 1024,
+        },
+        .translator = .{},
+        .init_cache = 1024,
+    };
+    return Db.init(gpa, storage, cfg, max_size);
+}
 
 /// Applies `writes` (copied) as one batch with `metadata`; returns the applied range's end.
 fn apply(db: *Db, writes: []const Write, metadata: ?Bytes) !u64 {
@@ -1135,4 +1143,261 @@ test "store get_many returns an owned value for every duplicate slot" {
         if (w) |tag| try testing.expectEqualSlices(u8, &.{tag}, got.?);
     }
     try testing.expect(out[0].?.ptr != out[4].?.ptr and out[4].?.ptr != out[5].?.ptr);
+}
+
+/// Commonware's `vec![(i % 255) as u8; (i % 13) + 7 + bump]`.
+fn sized_value(buffer: *[32]u8, i: u64, bump: u64) Bytes {
+    const len: usize = @intCast(i % 13 + 7 + bump);
+    @memset(buffer[0..len], @intCast((i + bump) % 255));
+    return buffer[0..len];
+}
+
+test "store reopens at a floor pruned before any further commit" {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    var db = try h.open(null);
+    var buffer: [32]u8 = undefined;
+    for (0..1000) |i| {
+        _ = try apply(&db, &.{.{ .key = key(i), .value = sized_value(&buffer, i, 0) }}, null);
+    }
+    try db.commit();
+    const durable_floor = db.inactivity_floor();
+    // Apply, without committing, writes that advance the floor past the durable one.
+    for (0..1000) |i| {
+        _ = try apply(&db, &.{.{ .key = key(i), .value = sized_value(&buffer, i, 1) }}, null);
+    }
+    const unsynced_floor = db.inactivity_floor();
+    try testing.expect(unsynced_floor > durable_floor);
+    // Prune commits the buffered operations first, so the replay reproduces the floor.
+    try db.prune(unsynced_floor);
+    const size = db.bounds().end;
+    db.deinit();
+    db = try h.open(null);
+    try testing.expectEqual(size, db.bounds().end);
+    try testing.expectEqual(unsynced_floor, db.inactivity_floor());
+    try db.destroy();
+}
+
+test "store recovers a commit made after a sync without a second sync" {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    var db = try h.open(null);
+    _ = try apply(&db, &.{.{ .key = key(0), .value = &.{ 0, 1, 2 } }}, null);
+    try db.commit();
+    try db.sync();
+    _ = try apply(&db, &.{.{ .key = key(1), .value = &.{ 3, 4, 5, 6 } }}, null);
+    try db.commit();
+    const end = db.bounds().end;
+    const floor = db.inactivity_floor();
+    db.deinit();
+    db = try h.open(null);
+    try testing.expectEqual(end, db.bounds().end);
+    try testing.expectEqual(floor, db.inactivity_floor());
+    try expect_value(&db, key(0), &.{ 0, 1, 2 });
+    try expect_value(&db, key(1), &.{ 3, 4, 5, 6 });
+    try db.destroy();
+}
+
+// db.rs `test_store_recovery_warns_when_discarding_uncommitted_suffix`, without the trace.
+test "store recovery discards an update persisted without its commit" {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    var db = try h.open(null);
+    const k = cryptography.Blake3.hash(&.{"uncommitted"});
+    // A crash during apply_batch can persist an update before its trailing commit.
+    _ = try db.log.append(.{ .update = .{ .key = k, .value = &.{7} } });
+    try db.log.sync();
+    db.deinit();
+    db = try h.open(null);
+    defer db.deinit();
+    try testing.expectEqual(@as(u64, 1), db.bounds().end);
+    try expect_value(&db, k, null);
+}
+
+// db.rs `test_store_start_sync_recovery`. zigware's `start_sync` completes before returning,
+// so commonware's overlap and prune-waits scenarios have nothing to observe.
+test "store state persisted by start_sync is recovered" {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    var db = try h.open(null);
+    const ones: [8]u8 = @splat(1);
+    _ = try apply(&db, &.{.{ .key = key(0), .value = &ones }}, null);
+    try db.start_sync();
+    const size = db.bounds().end;
+    db.deinit();
+    db = try h.open(null);
+    try testing.expectEqual(size, db.bounds().end);
+    try expect_value(&db, key(0), &ones);
+    try db.destroy();
+}
+
+// db.rs `test_store_start_sync_failure_propagates`. A failed mutator leaves only `deinit` (the
+// failures-are-fatal contract), so the failure surfaces from `start_sync` itself.
+test "store start_sync surfaces a failed sync" {
+    var faults: Faults = undefined;
+    faults.init(gpa, 7);
+    defer faults.deinit();
+    var cache = try CacheRef.init(gpa, 77, 9);
+    defer cache.deinit();
+    var db = try open_on(faults.interface(), &cache, null);
+    defer db.deinit();
+    _ = try apply(&db, &.{.{ .key = key(0), .value = &.{ 1, 1, 1, 1, 1, 1, 1, 1 } }}, null);
+    faults.layer.config = .{ .sync_rate = .one };
+    try testing.expectError(error.Io, db.start_sync());
+}
+
+/// db.rs `BitmapPolicy`: three entries, unlimited skips, and one action per round, applied to
+/// the value model.
+const BitmapPolicy = struct {
+    action: usize,
+    expected: *Model,
+    decisions: *[4]usize,
+
+    pub fn evicts(_: *const BitmapPolicy) bool {
+        return true;
+    }
+
+    pub fn limits(_: *const BitmapPolicy, _: usize) floor_mod.Limits {
+        return .{ .entries = 3, .skips = std.math.maxInt(u64) };
+    }
+
+    pub fn decide(
+        self: *BitmapPolicy,
+        comptime K: type,
+        comptime V: type,
+        entry: floor_mod.Entry(K, V),
+    ) floor_mod.Decision(V) {
+        self.decisions[self.action] += 1;
+        switch (self.action) {
+            0 => return entry.keep(),
+            1 => {
+                self.expected.put(entry.key.*, &.{0xff});
+                return entry.replace(gpa.dupe(u8, &.{0xff}) catch @panic("test allocation"));
+            },
+            2 => {
+                self.expected.remove(entry.key.*);
+                const decision, const evicted = entry.evict();
+                codec.free(V, gpa, evicted);
+                return decision;
+            },
+            else => return entry.stop(),
+        }
+    }
+};
+
+/// Each key's expected value, over at most 24 keys.
+const Model = struct {
+    keys: [24]Digest = undefined,
+    values: [24][8]u8 = undefined,
+    lens: [24]usize = undefined,
+    count: usize = 0,
+
+    fn find(self: *const Model, k: Digest) ?usize {
+        for (self.keys[0..self.count], 0..) |key_i, i| if (key_i.eql(k)) return i;
+        return null;
+    }
+
+    fn get(self: *const Model, k: Digest) ?Bytes {
+        const i = self.find(k) orelse return null;
+        return self.values[i][0..self.lens[i]];
+    }
+
+    fn put(self: *Model, k: Digest, v: Bytes) void {
+        const i = self.find(k) orelse i: {
+            self.keys[self.count] = k;
+            self.count += 1;
+            break :i self.count - 1;
+        };
+        @memcpy(self.values[i][0..v.len], v);
+        self.lens[i] = v.len;
+    }
+
+    fn remove(self: *Model, k: Digest) void {
+        const i = self.find(k) orelse return;
+        self.count -= 1;
+        self.keys[i] = self.keys[self.count];
+        self.values[i] = self.values[self.count];
+        self.lens[i] = self.lens[self.count];
+    }
+};
+
+fn expect_model(db: *Db, keys: []const Digest, expected: *const Model) !void {
+    try expect_bitmap_consistent(db);
+    try testing.expectEqual(expected.count, db.active_keys);
+    for (keys) |k| try expect_value(db, k, expected.get(k));
+}
+
+/// One round of `test_store_bitmap_tracks_activity`: random writes, then an empty batch whose
+/// policy takes the round's action.
+fn bitmap_round(
+    db: *Db,
+    rng: *utils.TestRng,
+    keys: []const Digest,
+    model: *Model,
+    round: u64,
+    decisions: *[4]usize,
+) !void {
+    const urng = utils.rng;
+    var writes: [12]Write = undefined;
+    var round_value: [8]u8 = undefined;
+    std.mem.writeInt(u64, &round_value, round, .big);
+    const count = urng.range_less_than(rng, usize, 0, 12);
+    for (writes[0..count]) |*w| {
+        const k = keys[urng.range_less_than(rng, usize, 0, keys.len)];
+        if (urng.bernoulli(rng, 0.3)) {
+            w.* = .{ .key = k, .value = null };
+            model.remove(k);
+        } else {
+            w.* = .{ .key = k, .value = &round_value };
+            model.put(k, &round_value);
+        }
+    }
+    _ = try apply(db, writes[0..count], null);
+    try expect_model(db, keys, model);
+    var policy: BitmapPolicy = .{
+        .action = @intCast(round % 4),
+        .expected = model,
+        .decisions = decisions,
+    };
+    _ = try apply_with(db, &.{}, &policy);
+    try expect_model(db, keys, model);
+}
+
+// db.rs `test_store_bitmap_tracks_activity` (its rng is `test_rng()`; batches differ from
+// commonware's, the checks are the same).
+test "store bitmap tracks activity through every policy action, prune, and reopen" {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    var db = try h.open(null);
+    var rng = utils.test_rng();
+    // 24 keys sharing three translated prefixes, so batches collide often.
+    var keys: [24]Digest = undefined;
+    for (&keys, 0..) |*k, i| {
+        k.* = cryptography.Blake3.hash(&.{&[_]u8{@intCast(i)}});
+        k.bytes[0] = 0;
+        k.bytes[1] = @intCast(i % 3);
+    }
+    var model: Model = .{};
+    var decisions: [4]usize = @splat(0);
+    for (0..60) |round| {
+        try bitmap_round(&db, &rng, &keys, &model, round, &decisions);
+        if (round % 10 == 9) {
+            try db.prune(db.inactivity_floor());
+            try expect_model(&db, &keys, &model);
+        }
+        if (round % 20 == 19) {
+            try db.commit();
+            try db.sync();
+            db.deinit();
+            db = try h.open(null);
+            try expect_model(&db, &keys, &model);
+        }
+    }
+    for (decisions) |count| try testing.expect(count > 0);
+    try db.destroy();
 }

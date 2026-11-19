@@ -124,8 +124,12 @@ which every database here is built on.
   ones, reads only reached candidates (both layouts), and the full limits grid against a port
   of `walk_model`. Commonware's clone counts are not checked: zigware's policies get owned
   values.
-- [ ] store: the bitmap activity and chunk-prune recovery checks, the start_sync scenarios,
-  and the commit-after-sync and unsynced-floor recovery cases.
+- [x] store batch 3: bitmap activity through every policy action, prune, and reopen; bitmap
+  chunk-prune recovery; prune at an unsynced floor then reopen; commit after sync recovers;
+  an update persisted without its commit is discarded; start_sync recovery; a failed
+  start_sync surfaces its error. Not observable here: commonware's `start_sync_overlaps_work`
+  and `start_sync_prune_waits`, because zigware's journal `start_sync` completes before it
+  returns (journal lane); they need an asynchronous `start_sync`.
 - [ ] store: variable-length keys (owned keys, as `any`'s variable values; fixed keys stay
   allocation-free), then `test_store_variable_length_keys`.
 - [x] Fuzz targets under storage/fuzz for these databases; benches under `qmdb/benches/`.
@@ -342,3 +346,4 @@ which every database here is built on.
 - 2026-11-19: the cold_read, constantinople, and scale CLI harnesses; benches done.
 - 2026-11-19: store floor bound, collision reads, shared prefix, and get_many duplicates.
 - 2026-11-19: store policy scenarios (batch 2) against `walk_model`.
+- 2026-11-19: store batch 3 (bitmap, recovery, start_sync); `read_location` cfg tests.

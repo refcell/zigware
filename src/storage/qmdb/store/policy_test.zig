@@ -659,3 +659,35 @@ test "store policy limits decide what the walk model predicts" {
         }
     }
 }
+
+test "store prune drops a whole bitmap chunk and reopening rebuilds it" {
+    var h: Harness(translator.OneCap) = undefined;
+    try h.init();
+    defer h.deinit();
+    var db = try h.open();
+    // Seed 300 keys at 1..301 and rewrite them at 302..602 under a held floor. An unlimited
+    // empty batch passes 0..302 and moves the rewrites to 603..903; its commit lies at 903.
+    const s = seed(300);
+    try hold(&db, &s);
+    var rewrites: [300]Write = undefined;
+    for (&rewrites, s) |*r, w| r.* = .{ .key = w.key, .value = digest(500) };
+    try hold(&db, &rewrites);
+    var policy: floor_mod.Bounded = .{ .entries = max_usize, .skips = max_u64 };
+    _ = try apply(&db, &.{}, &policy);
+    try testing.expectEqual(@as(u64, 603), db.inactivity_floor());
+    try testing.expectEqual(@as(u64, 904), db.bounds().end);
+    // Pruning keeps the log section from 602 and drops the bitmap's first 512-bit chunk.
+    try db.commit();
+    try db.prune(db.inactivity_floor());
+    try testing.expectEqual(@as(u64, 602), db.bounds().start);
+    try testing.expectEqual(@as(u64, 512), db.bitmap.pruned_bits());
+    var bits: [904 - 512]bool = undefined;
+    for (&bits, 512..) |*bit, loc| bit.* = db.bitmap.get_bit(loc);
+    db.deinit();
+    db = try h.open();
+    defer db.deinit();
+    try testing.expectEqual(@as(u64, 512), db.bitmap.pruned_bits());
+    try testing.expectEqual(@as(u64, 904), db.bitmap.len());
+    for (bits, 512..) |bit, loc| try testing.expectEqual(bit, db.bitmap.get_bit(loc));
+    for (s) |w| try expect_get(&db, w.key, digest(500));
+}
