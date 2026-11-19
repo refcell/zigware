@@ -15,12 +15,22 @@ const w = @import("world.zig");
 
 const gpa = m.gpa;
 
-/// Commonware's checker has no bound; the largest workload here reaches 3.1 million states.
+/// Commonware's checker has no bound; the largest workload here reaches 3.3 million states.
 const max_states = 1 << 23;
 
-/// Checks every interleaving of the workload of `epochs` with `budget`, and that its paths
-/// reach each flow in `flows`.
-fn check(epochs: m.Epoch, budget: w.Budget, flows: []const []const u8) !void {
+/// The state space commonware's Stateright check of the same workload reports
+/// (`Done. states=generated, unique=unique`). Generated counts the initial state and every next
+/// state an action produced, seen before or not.
+const Expected = struct { unique: u64, generated: u64 };
+
+/// Checks every interleaving of the workload of `epochs` with `budget`, that its paths reach
+/// each flow in `flows`, and that it explores exactly commonware's state space.
+fn check(
+    epochs: m.Epoch,
+    budget: w.Budget,
+    expected: Expected,
+    flows: []const []const u8,
+) !void {
     var model = try wl.Workload.init(epochs, budget);
     defer model.deinit();
     // As commonware's `threads(available_parallelism)`.
@@ -53,13 +63,15 @@ fn check(epochs: m.Epoch, budget: w.Budget, flows: []const []const u8) !void {
         const stats = .{ result.unique, result.transitions, result.max_depth };
         std.debug.print("model: {d} states, {d} transitions, depth {d}\n", stats);
     }
-    try std.testing.expect(result.unique > 1);
+    // The model has one initial state.
+    try std.testing.expectEqual(expected.unique, result.unique);
+    try std.testing.expectEqual(expected.generated, result.transitions + 1);
 }
 
 // One payment attempt around the funding cut is refused, or is admitted and stays pending, and
 // the funding posts. A request the cut overtakes is admitted in the epoch after its own.
 test "model: admits one payment" {
-    try check(1, .{ .sends = 1 }, &.{
+    try check(1, .{ .sends = 1 }, .{ .unique = 232, .generated = 424 }, &.{
         "every epoch posts",
         "a request is admitted in the epoch after its own",
         "a next state is admitted while the preceding close awaits its post",
@@ -72,7 +84,10 @@ test "model: admits one payment" {
 // payment at most once in every order of sends, deliveries, cuts, posts, and resolutions.
 test "model: retries payments" {
     if (!build_options.slow_tests) return error.SkipZigTest;
-    try check(2, .{ .sends = 2, .duplicates = 1, .losses = 1 }, &.{
+    try check(2, .{ .sends = 2, .duplicates = 1, .losses = 1 }, .{
+        .unique = 196_690,
+        .generated = 756_893,
+    }, &.{
         "every epoch posts",
         "a payment is admitted while the last close awaits its post",
         "a request is admitted in the epoch after its own",
@@ -92,7 +107,10 @@ test "model: retries payments" {
 // custody.
 test "model: halts and claims" {
     if (!build_options.slow_tests) return error.SkipZigTest;
-    try check(2, .{ .sends = 1, .forced = 1, .omissions = 1, .halts = 1 }, &.{
+    try check(2, .{ .sends = 1, .forced = 1, .omissions = 1, .halts = 1 }, .{
+        .unique = 78_862,
+        .generated = 316_157,
+    }, &.{
         "every epoch posts",
         "an omitted payment halts the ledger",
         "the ledger halts with a request pending",
@@ -107,7 +125,10 @@ test "model: halts and claims" {
 // the second on the posted row even when that row lacks the state the operator countersigned.
 test "model: rebuilds on the posted row" {
     if (!build_options.slow_tests) return error.SkipZigTest;
-    try check(3, .{ .sends = 2, .omissions = 1 }, &.{
+    try check(3, .{ .sends = 2, .omissions = 1 }, .{
+        .unique = 257_586,
+        .generated = 836_968,
+    }, &.{
         "every epoch posts",
         "an omitted payment halts the ledger",
         "a payment builds on a row the close omitted",
@@ -123,7 +144,7 @@ test "model: rebuilds on the posted row" {
 // that the close settled a map it did not record.
 test "model: replays a dropped request" {
     if (!build_options.slow_tests) return error.SkipZigTest;
-    try check(2, .{ .sends = 1, .replays = 1 }, &.{
+    try check(2, .{ .sends = 1, .replays = 1 }, .{ .unique = 3_151, .generated = 7_561 }, &.{
         "every epoch posts",
         "a request refused once is dropped",
         "a request its sender no longer awaits is admitted",
@@ -137,7 +158,7 @@ test "model: replays a dropped request" {
 test "model: recovers funds after a halt" {
     if (!build_options.slow_tests) return error.SkipZigTest;
     const budget: w.Budget = .{ .sends = 1, .deposits = 1, .soft = 1, .forced = 1, .halts = 1 };
-    try check(2, budget, &.{
+    try check(2, budget, .{ .unique = 3_284_669, .generated = 15_066_011 }, &.{
         "every epoch posts",
         "a payment is admitted while the last close awaits its post",
         "a soft withdrawal is collected while a close awaits its post",

@@ -330,7 +330,10 @@ pub const World = struct {
         for (&self.senders) |*sender| hash(&hasher, sender.persisted);
         for (&self.receivers) |*receiver| hash(&hasher, receiver.persisted);
         for (self.posted.items) |*p| hash(&hasher, p.summary.digest().bytes);
-        if (self.candidate) |*candidate| hash(&hasher, candidate.summary.digest().bytes);
+        if (self.candidate) |*candidate| {
+            hash(&hasher, candidate.summary.digest().bytes);
+            hash(&hasher, candidate.forced_queued);
+        }
         hasher.update(&.{@intFromBool(self.candidate != null)});
         inline for (.{
             "requests",  "replies",       "challenges", "sent",             "pending",

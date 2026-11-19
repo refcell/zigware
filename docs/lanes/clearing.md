@@ -111,12 +111,15 @@ qmdb `current` (balances, over the MMB) and `keyless` (payout log, over the MMR)
 - model.rs's six workloads are in `tests/bajillion/model/` (`workload.zig` the predictors,
   `actions.zig`, `steps.zig`, `properties.zig` the seven invariants, `model_test.zig`). The
   first ("admits one payment", 232 states) runs in every `zig build test`; the other five run
-  only with `-Dslow-tests`, best under `-Doptimize=ReleaseSafe`, and print their counts. The
-  checker is bounded at 1 << 23 states (commonware has no bound). ReleaseSafe counts: replays a
-  dropped request 3,151 (depth 14); halts and claims 74,116 (17); rebuilds on the posted row
-  257,586 (21); retries payments 196,690 (17); recovers funds after a halt 3,099,281 (19, about
-  9 minutes). The fingerprint hashes the same fields as commonware's derived `Hash` on `World`,
-  with its sets kept as sorted maps like the BTreeSets.
+  only with `-Dslow-tests`, best under `-Doptimize=ReleaseSafe`. The checker is bounded at
+  1 << 23 states (commonware has no bound). Each test asserts Stateright's counts exactly:
+  `unique` equals commonware's `unique`, and `transitions + 1` (the one initial state plus
+  every generated next state, Stateright's `state_count`) equals its `states`. They are
+  admits one payment 232/424, retries payments 196,690/756,893, halts and claims
+  78,862/316,157, rebuilds on the posted row 257,586/836,968, replays a dropped request
+  3,151/7,561, recovers funds after a halt 3,284,669/15,066,011. The fingerprint hashes the
+  same fields as commonware's derived `Hash` on `World` and `Candidate` (including the
+  candidate's `forced_queued`), with its sets kept as sorted maps like the BTreeSets.
 
 ## Backlog
 - [x] lib.rs types and traits (`Epoch`, `Amount`), namespace.
@@ -250,3 +253,11 @@ qmdb `current` (balances, over the MMB) and `keyless` (payout log, over the MMR)
 - 2026-11-19: slow-test profile (ReleaseSafe, 1,263 s on one thread): the model checker runs
   `Options.workers` threads as Stateright's `threads(n)` (same state counts), and the payment and
   close conformance groups verify their entries concurrently; commonware's sizes unchanged.
+- 2026-11-19: model counts match commonware exactly and are asserted: the fingerprint had
+  left out the candidate's `forced_queued` (halts and claims 74,116 → 78,862, recovers funds
+  3,099,281 → 3,284,669), and `transitions` now counts generated next states only.
+  `conformance.compute_hash_parallel`/`verify_parallel` commit seed chunks on `Io.concurrent`
+  tasks and hash them in seed order (byte-identical); clearing's conformance uses it.
+- 2026-11-19: prunable recovery fuzz pipelines start_syncs on the delayed-sync mock, holding,
+  awaiting, failing, and abandoning their completions (planted bug: `start_sync` dropping
+  `requested`, caught by synced ⇒ retained).

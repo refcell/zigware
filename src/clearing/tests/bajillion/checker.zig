@@ -62,7 +62,9 @@ pub fn Checker(comptime M: type) type {
         pub const Result = struct {
             /// Unique states reached, counting the initial ones.
             unique: u64,
-            /// Actions taken, including those leading to states already seen.
+            /// Next states generated, including those already seen; an action whose
+            /// `next_state` is null generates none (Stateright's `state_count` less the initial
+            /// states).
             transitions: u64,
             /// The deepest state reached, in actions from an initial state.
             max_depth: u64,
@@ -219,11 +221,15 @@ pub fn Checker(comptime M: type) type {
         fn expand(self: *Self, entry: *const Entry, actions: *std.ArrayList(Action)) !void {
             actions.clearRetainingCapacity();
             try M.actions(self.model, self.gpa, &entry.state, actions);
-            self.lock();
-            self.transitions += actions.items.len;
-            self.unlock();
+            var generated: u64 = 0;
+            defer {
+                self.lock();
+                self.transitions += generated;
+                self.unlock();
+            }
             for (actions.items) |action| {
                 const next = try M.next_state(self.model, &entry.state, action) orelse continue;
+                generated += 1;
                 self.discover(next, entry.node, action);
             }
         }

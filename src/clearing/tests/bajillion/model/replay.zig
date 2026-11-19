@@ -196,13 +196,13 @@ fn evaluate(
     const queue = candidate.queue();
     const close = try candidate.close.clone(gpa);
     var proposal = validator.verify(close, &queue) catch |err| {
-        if (err == error.OutOfMemory) return err;
+        if (err == error.OutOfMemory or err == error.Canceled) return err;
         return .{ .refused = err };
     };
     defer proposal.deinit(gpa);
     const summary = proposal.summary;
     validator.apply(&proposal, &summary.digest()) catch |err| {
-        if (err == error.OutOfMemory) return err;
+        if (err == error.OutOfMemory or err == error.Canceled) return err;
         return .{ .refused = err };
     };
     var balances: [users]u64 = undefined;
