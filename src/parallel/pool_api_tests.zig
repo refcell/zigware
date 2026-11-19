@@ -86,6 +86,45 @@ const Record = struct {
     }
 };
 
+/// Counts the jobs that ran.
+const Count = struct {
+    ran: *std.atomic.Value(usize),
+
+    pub fn call(count: Count) void {
+        _ = count.ran.fetchAdd(1, .acq_rel);
+    }
+};
+
+/// Waits up to 10 s for all `threads` workers of `pool` to sleep, and returns whether they did.
+fn await_sleepers(pool: *ThreadPool, threads: u32) bool {
+    const deadline = now_ns() + 10 * std.time.ns_per_s;
+    while (pool.sleepers.load(.acquire) < threads) {
+        if (now_ns() > deadline) return false;
+        sleep_ns(ms);
+    }
+    return true;
+}
+
+test "a job spawned while every worker sleeps wakes a worker to run it" {
+    // The pool skips the futex wake when no worker sleeps; a sleeper it fails to count would
+    // leave the job queued until its caller takes it back. Each round lets both workers park
+    // first, then requires a worker, not the caller, to run the job within the deadline.
+    const threads = 2;
+    const pool = try create_pool(threads);
+    defer pool.destroy();
+    const rayon = Rayon.init(pool);
+    var ran: std.atomic.Value(usize) = .init(0);
+    for (0..20) |round| {
+        try testing.expect(await_sleepers(pool, threads));
+        var task: Task(Count) = .init(.{ .ran = &ran });
+        rayon.spawn(1, &task);
+        // On failure the caller takes the job back, so teardown finds the queue empty.
+        defer rayon.block_on(&task);
+        try testing.expect(await_count(&ran, round + 1));
+    }
+    try testing.expect(queue_empty(pool));
+}
+
 test "jobs queued behind the held worker run in submission order" {
     // commonware `spawn_external_jobs_keep_submission_order`: on a one-worker pool held busy,
     // ten queued jobs run in the order they were spawned once the worker is released.
