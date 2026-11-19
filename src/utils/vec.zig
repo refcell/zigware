@@ -344,3 +344,31 @@ pub fn NonEmptyVec(comptime T: type) type {
 test {
     _ = @import("vec_test.zig");
 }
+
+const death = @import("death.zig");
+
+test "vec: from_unchecked panics on an empty list" {
+    // commonware `vec.rs test_from_unchecked_panics_on_empty` (#[should_panic]).
+    try death.expect_panic(@src(), "vector is empty", struct {
+        fn body() !void {
+            const list: std.ArrayList(i32) = .empty;
+            _ = NonEmptyVec(i32).from_unchecked(list);
+        }
+    }.body);
+}
+
+test "vec: mutate panics when the closure empties it" {
+    // commonware `vec.rs test_mutate_panics_on_empty` (#[should_panic]).
+    try death.expect_panic(@src(), "closure left vector empty", struct {
+        fn body() !void {
+            const gpa = std.testing.allocator;
+            var v = try NonEmptyVec(i32).init(gpa, 1);
+            defer v.deinit(gpa);
+            v.mutate({}, struct {
+                fn clear(_: void, list: *std.ArrayList(i32)) void {
+                    list.clearRetainingCapacity();
+                }
+            }.clear);
+        }
+    }.body);
+}

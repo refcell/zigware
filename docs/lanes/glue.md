@@ -384,16 +384,16 @@ ones: d = deployer (thread T-01a1d5b9-c237), u = utils, j = storage-journal
 | stateful/db/p2p/mailbox.rs | 4 | 4 | 0 | 0 | |
 | stateful/actor/syncer/actor.rs | 13 | 13 | 0 | 0 | |
 | stateful/actor/syncer/mailbox.rs | 2 | 2 | 0 | 0 | |
-| stateful/actor/syncer/plan.rs | 7 | 6 | 0 | 1 | |
+| stateful/actor/syncer/plan.rs | 7 | 7 | 0 | 0 | |
 | stateful/actor/syncer/mod.rs (conformance) | 1 | 1 | 0 | 0 | |
 | stateful/actor/core/mailbox.rs | 2 | 2 | 0 | 0 | |
 | stateful/actor/core/mod.rs | 4 | 4 | 0 | 0 | |
 | stateful/actor/core/syncing.rs | 16 | 16 | 0 | 0 | |
 | stateful/actor/core/processing.rs, 1070-3396 | 47 | 46 | 0 | 1 | |
-| stateful/actor/core/processing.rs, 3451-5885 | 39 | 38 | 0 | 1 | s |
-| stateful/actor/processor/mod.rs | 44 | 40 | 0 | 4 | |
+| stateful/actor/core/processing.rs, 3451-5885 | 39 | 39 | 0 | 0 | s |
+| stateful/actor/processor/mod.rs | 44 | 44 | 0 | 0 | |
 | stateful/tests/mod.rs, floor.rs | 28 | 27 | 1 | 0 | j |
-| **total** | **474** | **465** | **1** | **8** | |
+| **total** | **474** | **471** | **1** | **2** | |
 
 - db/mod.rs's barrier tests are ported since async start_sync step 6 (`Barrier` holds each
   member's `runtime.storage.Completion`): `barrier_waits_for_every_handle` (8),
@@ -425,8 +425,8 @@ ones: d = deployer (thread T-01a1d5b9-c237), u = utils, j = storage-journal
     restart-resumes-installed-floor (`Stateful` over commonware's `WedgeSet`) cases are in
     syncer/actor_marshal_test.zig, on a real restartable marshal over prunable archives
     (actor/marshal_fixture.zig, commonware's tests/fixtures.rs). plan.rs's
-    `complete_height_cannot_move_backward` is `#[should_panic]`; zigware asserts instead,
-    so it is not portable.
+    `#[should_panic]` `complete_height_cannot_move_backward` is a `utils.death` test in
+    syncer/plan_test.zig (zigware asserts).
   - core/syncing.rs: the reflected-hooks, retarget-artifact, partial-window (2), full-window
     retarget, and shutdown (2) tests are in core/syncing_test.zig, on commonware's
     `TestHarness` (`Syncing.assemble` around a syncer mailbox the test answers as the
@@ -455,7 +455,9 @@ ones: d = deployer (thread T-01a1d5b9-c237), u = utils, j = storage-journal
   - core/processing.rs, second half (3451-5885), done in core/processing_late_test.zig: 32
     zigware tests for 39 cases (24 `#[test]`, 7 rstests with 15 cases). 5325
     `ready_aborted_flush_stops_processing` is covered by 5285's test, since no barrier is ever
-    left pending. Not portable: the should_panic test 4754. 5474 `flush_failure_panics_processing`
+    left pending. 4754 `live_floor_skip_panics` is a `utils.death`
+    test in processor/execution_test.zig: it drives `Processor.finalize`, which Processing
+    calls with each finalized block, with a height-2 block on the genesis anchor. 5474 `flush_failure_panics_processing`
     is an error check (the loop returns `error.DatabaseSyncFailed`). Since step 6, 5448
     `shutdown_cancels_pending_flush_ack` and 4504 `duplicate_reports_wait_for_durability`'s
     failure case are in core/processing_barrier_test.zig, over `runtime.storage.mocks.
@@ -470,8 +472,9 @@ ones: d = deployer (thread T-01a1d5b9-c237), u = utils, j = storage-journal
     tests that skip held-flush checks (4055, 4184, 4327, 4405, 4548, 5238, 5285, 5365) can gain
     them on `FlushControl`. Each test's doc comment records its adaptation.
   - processor/mod.rs, done: the 18 remaining tests are in processor/processor_mod_test.zig
-    (simplex lane, T-01a1d5ad-c8d6). Not portable: the should_panic tests 2467, 3174, 3193,
-    and 3317. Adapted: 3215 and 3301 share one test (zigware's duplicate check is
+    (simplex lane, T-01a1d5ad-c8d6). The should_panic tests 2486, 3246, 3265, and 3389 are `utils.death`
+    tests in processor/execution_test.zig (3265's "does not extend the applied tip" is an
+    assert in zigware). Adapted: 3215 and 3301 share one test (zigware's duplicate check is
     `redelivered`, consulted before `finalize`), as do 3330 and 3357; the flight hand-offs
     (2680, 2730) release a flight's joiner instead of dropping a polled future with a waker.
 - Open, j (storage-journal): tests/ (src/glue/stateful/tests/). `engine.zig`'s
@@ -704,6 +707,10 @@ After: 11 (the stateful table's 10, plus dkg's 1), by category:
   `dropping_verification_aborts_active_task` (verification runs inline).
 Open item whose blocker should be rechecked: tests/mod.rs 1614 cites steps 5 and 6, which
 have landed.
+Since then (utils lane): db/mod.rs 3639 and 3751 are ported (tuple members now run
+concurrently, 5b0b8832), and the six panic entries are `utils.death` tests, each failing when
+its panic or assert is removed. Left: `ordered_any_is_qmdb` and
+`processing_runs_on_the_actor_context` (plus dkg's 1).
 
 ## dkg (owner: coding lane, thread T-01a1d58d-bff1-75a1-8ccb-4b8dd7bc9755)
 

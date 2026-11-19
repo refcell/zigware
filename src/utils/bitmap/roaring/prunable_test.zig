@@ -183,3 +183,68 @@ test "roaring prunable: encode size" {
     _ = q.prune(gpa, 0);
     try testing.expectEqual(before, q.encode_size());
 }
+
+const death = @import("../../death.zig");
+
+test "roaring prunable: insert below the pruned watermark panics" {
+    // commonware `bitmap/roaring/prunable.rs test_panic_on_insert_below_pruned` (#[should_panic]).
+    try death.expect_panic(@src(), "reached unreachable code", struct {
+        fn body() !void {
+            var p: Prunable = .empty;
+            defer p.deinit(gpa);
+            _ = p.prune(gpa, 131_072);
+            _ = try p.insert(gpa, 50);
+        }
+    }.body);
+}
+
+test "roaring prunable: contains below the pruned watermark panics" {
+    // commonware `bitmap/roaring/prunable.rs` `test_panic_on_contains_below_pruned`
+    // (#[should_panic]).
+    try death.expect_panic(@src(), "reached unreachable code", struct {
+        fn body() !void {
+            var p: Prunable = .empty;
+            defer p.deinit(gpa);
+            _ = p.prune(gpa, 131_072);
+            _ = p.contains(50);
+        }
+    }.body);
+}
+
+test "roaring prunable: insert_range below the pruned watermark panics" {
+    // commonware `bitmap/roaring/prunable.rs` `test_panic_on_insert_range_below_pruned`
+    // (#[should_panic]).
+    try death.expect_panic(@src(), "reached unreachable code", struct {
+        fn body() !void {
+            var p: Prunable = .empty;
+            defer p.deinit(gpa);
+            _ = p.prune(gpa, 131_072);
+            _ = try p.insert_range(gpa, 50, 100);
+        }
+    }.body);
+}
+
+test "roaring prunable: iter_range below the pruned watermark panics" {
+    // commonware `bitmap/roaring/prunable.rs` `test_panic_on_iter_range_below_pruned`
+    // (#[should_panic]).
+    try death.expect_panic(@src(), "reached unreachable code", struct {
+        fn body() !void {
+            var p: Prunable = .empty;
+            defer p.deinit(gpa);
+            _ = p.prune(gpa, 131_072);
+            _ = p.iter_range(50, 200_000);
+        }
+    }.body);
+}
+
+test "roaring prunable: extend below the pruned watermark panics" {
+    // commonware `bitmap/roaring/prunable.rs test_extend_below_pruned_panics` (#[should_panic]).
+    try death.expect_panic(@src(), "reached unreachable code", struct {
+        fn body() !void {
+            var p: Prunable = .empty;
+            defer p.deinit(gpa);
+            _ = p.prune(gpa, 131_072);
+            try p.extend(gpa, &.{ 200_000, 50 });
+        }
+    }.body);
+}

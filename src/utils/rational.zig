@@ -439,3 +439,29 @@ fn log2_digits_interval(
 test {
     _ = @import("rational_test.zig");
 }
+
+const death = @import("death.zig");
+
+test "rational: log2_ceil of a negative number panics" {
+    // commonware `rational/mod.rs log2_ceil_negative_panics` (#[should_panic]).
+    try death.expect_panic(@src(), "reached unreachable code", struct {
+        fn body() !void {
+            var value = try BigRational.from_integer(std.testing.allocator, @as(i64, -1));
+            defer value.deinit();
+            var result = try value.log2_ceil(8);
+            result.deinit();
+        }
+    }.body);
+}
+
+test "rational: log2_floor of a negative number panics" {
+    // commonware `rational/mod.rs log2_floor_negative_panics` (#[should_panic]).
+    try death.expect_panic(@src(), "reached unreachable code", struct {
+        fn body() !void {
+            var value = try BigRational.from_integer(std.testing.allocator, @as(i64, -1));
+            defer value.deinit();
+            var result = try value.log2_floor(8);
+            result.deinit();
+        }
+    }.body);
+}

@@ -616,3 +616,140 @@ fn fuzz_operation(
 test "fuzz prunable" {
     try fuzz.run({}, fuzz_prunable, 0x7072_756e, 300);
 }
+
+const death = @import("../death.zig");
+
+test "prunable: get_bit of a pruned bit panics" {
+    // commonware `bitmap/prunable.rs test_get_pruned_bit_panics` (#[should_panic]).
+    try death.expect_panic(@src(), "bit pruned", struct {
+        fn body() !void {
+            var p: Prunable(4) = .empty;
+            defer p.deinit(gpa);
+            try p.push_chunk(gpa, &.{ 1, 2, 3, 4 });
+            try p.push_chunk(gpa, &.{ 5, 6, 7, 8 });
+            p.prune_to_bit(32);
+            _ = p.get_bit(0);
+        }
+    }.body);
+}
+
+test "prunable: get_chunk_containing a pruned bit panics" {
+    // commonware `bitmap/prunable.rs test_get_pruned_chunk_panics` (#[should_panic]).
+    try death.expect_panic(@src(), "bit pruned", struct {
+        fn body() !void {
+            var p: Prunable(4) = .empty;
+            defer p.deinit(gpa);
+            try p.push_chunk(gpa, &.{ 1, 2, 3, 4 });
+            try p.push_chunk(gpa, &.{ 5, 6, 7, 8 });
+            p.prune_to_bit(32);
+            _ = p.get_chunk_containing(0);
+        }
+    }.body);
+}
+
+test "prunable: set_bit of a pruned bit panics" {
+    // commonware `bitmap/prunable.rs test_set_pruned_bit_panics` (#[should_panic]).
+    try death.expect_panic(@src(), "bit pruned", struct {
+        fn body() !void {
+            var p: Prunable(4) = .empty;
+            defer p.deinit(gpa);
+            try p.push_chunk(gpa, &.{ 1, 2, 3, 4 });
+            try p.push_chunk(gpa, &.{ 5, 6, 7, 8 });
+            p.prune_to_bit(32);
+            p.set_bit(0, true);
+        }
+    }.body);
+}
+
+test "prunable: prune_to_bit out of bounds panics" {
+    // commonware `bitmap/prunable.rs test_prune_to_bit_out_of_bounds` (#[should_panic]).
+    try death.expect_panic(@src(), "bit 25 out of bounds (len: 24)", struct {
+        fn body() !void {
+            var p: Prunable(1) = .empty;
+            defer p.deinit(gpa);
+            try p.push_byte(gpa, 1);
+            try p.push_byte(gpa, 2);
+            try p.push_byte(gpa, 3);
+            p.prune_to_bit(25);
+        }
+    }.body);
+}
+
+test "prunable: truncate into the pruned region panics" {
+    // commonware `bitmap/prunable.rs test_truncate_into_pruned_region_panics` (#[should_panic]).
+    try death.expect_panic(@src(), "cannot truncate into pruned region", struct {
+        fn body() !void {
+            var p: Prunable(4) = .empty;
+            defer p.deinit(gpa);
+            try p.push_chunk(gpa, &.{ 0xFF, 0xFF, 0xFF, 0xFF });
+            try p.push_chunk(gpa, &.{ 0xFF, 0xFF, 0xFF, 0xFF });
+            p.prune_to_bit(32);
+            p.truncate(31);
+        }
+    }.body);
+}
+
+test "prunable: pop_chunk when not chunk aligned panics" {
+    // commonware `bitmap/prunable.rs test_pop_chunk_not_aligned` (#[should_panic]).
+    try death.expect_panic(@src(), "cannot pop chunk when not chunk aligned", struct {
+        fn body() !void {
+            var p: Prunable(4) = .empty;
+            defer p.deinit(gpa);
+            try p.push_chunk(gpa, &.{ 0xFF, 0xFF, 0xFF, 0xFF });
+            try p.push(gpa, true);
+            _ = p.pop_chunk();
+        }
+    }.body);
+}
+
+test "prunable: pop_chunk with fewer than a chunk of bits panics" {
+    // commonware `bitmap/prunable.rs test_pop_chunk_insufficient_bits` (#[should_panic]).
+    try death.expect_panic(@src(), "bitmap has fewer than CHUNK_SIZE_BITS bits", struct {
+        fn body() !void {
+            var p: Prunable(4) = .empty;
+            defer p.deinit(gpa);
+            try p.push(gpa, true);
+            try p.push(gpa, false);
+            _ = p.pop_chunk();
+        }
+    }.body);
+}
+
+test "prunable: set_chunk_by_index rejects high bits in the last byte" {
+    // commonware `bitmap/prunable.rs` `test_set_chunk_by_index_rejects_high_bits_in_last_byte`
+    // (#[should_panic]).
+    try death.expect_panic(@src(), "non-zero bits beyond bitmap length", struct {
+        fn body() !void {
+            var p: Prunable(4) = .empty;
+            defer p.deinit(gpa);
+            try p.extend_to(gpa, 35);
+            p.set_chunk_by_index(1, &.{ 0b0000_1000, 0, 0, 0 });
+        }
+    }.body);
+}
+
+test "prunable: set_chunk_by_index rejects nonzero trailing bytes" {
+    // commonware `bitmap/prunable.rs` `test_set_chunk_by_index_rejects_nonzero_trailing_bytes`
+    // (#[should_panic]).
+    try death.expect_panic(@src(), "non-zero bits beyond bitmap length", struct {
+        fn body() !void {
+            var p: Prunable(4) = .empty;
+            defer p.deinit(gpa);
+            try p.extend_to(gpa, 35);
+            p.set_chunk_by_index(1, &.{ 0, 0xFF, 0, 0 });
+        }
+    }.body);
+}
+
+test "prunable: set_chunk_by_index rejects a nonzero final byte" {
+    // commonware `bitmap/prunable.rs` `test_set_chunk_by_index_rejects_nonzero_final_byte`
+    // (#[should_panic]).
+    try death.expect_panic(@src(), "non-zero bits beyond bitmap length", struct {
+        fn body() !void {
+            var p: Prunable(4) = .empty;
+            defer p.deinit(gpa);
+            try p.extend_to(gpa, 35);
+            p.set_chunk_by_index(1, &.{ 0, 0, 0, 1 });
+        }
+    }.body);
+}

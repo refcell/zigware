@@ -297,3 +297,25 @@ test "utils: participant encode and decode" {
     const truncated = codec.decode(Participant, testing.allocator, &.{0x80});
     try testing.expectError(error.EndOfBuffer, truncated);
 }
+
+test "utils: modulo by zero panics" {
+    // commonware `lib.rs test_modulo_zero_panics` (#[should_panic]).
+    try death.expect_panic(@src(), "modulus must be non-zero", struct {
+        fn body() !void {
+            var n: u64 = 0;
+            _ = &n;
+            _ = modulo(&.{ 1, 2, 3 }, n);
+        }
+    }.body);
+}
+
+test "utils: participant from_usize overflow panics" {
+    // commonware `lib.rs test_participant_from_usize_overflow` (#[should_panic]).
+    try death.expect_panic(@src(), "participant index exceeds u32::MAX", struct {
+        fn body() !void {
+            var index: usize = @as(usize, std.math.maxInt(u32)) + 1;
+            _ = &index;
+            _ = Participant.from_usize(index);
+        }
+    }.body);
+}

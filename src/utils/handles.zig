@@ -335,3 +335,17 @@ pub fn Table(comptime H: type) type {
 test {
     _ = @import("handles_test.zig");
 }
+
+const death = @import("death.zig");
+
+test "handles: partition rejects a count that is not a power of two" {
+    // commonware `handles.rs` `test_partition_rejects_a_count_that_is_not_a_power_of_two`
+    // (#[should_panic]).
+    try death.expect_panic(@src(), "reached unreachable code", struct {
+        fn body() !void {
+            var partitions: usize = 3;
+            _ = &partitions;
+            _ = partition(0, partitions);
+        }
+    }.body);
+}

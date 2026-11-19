@@ -219,3 +219,113 @@ test "stateful execution: rebuild_pending bounds parent requests by round" {
     try testing.expect(bounds.len >= 2); // The walk requests both parents.
     for (bounds) |bound| try testing.expectEqual(@as(?@TypeOf(round(3)), round(3)), bound);
 }
+
+const utils = @import("utils");
+
+test "stateful execution: finalizing an in-flight winner panics" {
+    // commonware `processor/mod.rs` `execution_finalization_rejects_in_flight_winner`
+    // (#[should_panic]).
+    const expected = "finalized block must not be processed when its finalization starts";
+    try utils.death.expect_panic(@src(), expected, struct {
+        fn body() !void {
+            var harness: Harness = undefined;
+            try harness.init();
+            defer harness.deinit();
+            const genesis = TestBlock.genesis();
+            const winner = try candidate(&harness, true);
+            var probe: Probe = .{ .target = winner.digest() };
+            defer probe.deinit();
+            var gate = try probe.add_gate();
+            defer gate.started.deinit();
+            const app: TestApp = .{ .probe = &probe };
+            // The gate keeps the winner's processing in flight.
+            const ancestry = try harness.ancestry(&.{ winner, genesis });
+            _ = (try harness.execution.join_flight(app, ancestry)).?;
+            try gate.started.recv();
+            try harness.finalize(&winner);
+        }
+    }.body);
+}
+
+test "stateful execution: a conflicting finalized block at the anchor height panics" {
+    // commonware `processor/mod.rs` `execution_finalize_panics_on_conflicting_duplicate_height`
+    // (#[should_panic]).
+    const expected = "received conflicting finalized block at anchor height";
+    try utils.death.expect_panic(@src(), expected, struct {
+        fn body() !void {
+            var harness: Harness = undefined;
+            try harness.init();
+            defer harness.deinit();
+            const genesis = TestBlock.genesis();
+            const canonical = try harness.stage_pending_child(&genesis, 1);
+            const conflicting = try harness.stage_pending_child(&genesis, 2);
+            try harness.finalize(&canonical);
+            try harness.finalize(&conflicting);
+        }
+    }.body);
+}
+
+test "stateful execution: finalizing an unlinked successor panics" {
+    // commonware `processor/mod.rs` `execution_finalize_panics_on_unlinked_successor`
+    // (#[should_panic]).
+    // zigware asserts the parent is the branch anchor ("does not extend the applied tip").
+    try utils.death.expect_panic(@src(), "reached unreachable code", struct {
+        fn body() !void {
+            var harness: Harness = undefined;
+            try harness.init();
+            defer harness.deinit();
+            const genesis = TestBlock.genesis();
+            const canonical = try harness.stage_pending_child(&genesis, 1);
+            const sibling = try harness.stage_pending_child(&genesis, 2);
+            try harness.finalize(&canonical);
+            // A height 2 block built on the canonical state, pointed at the sibling.
+            const child, var merkleized = try harness.build_child(&canonical, 3);
+            merkleized.deinit();
+            const unlinked = TestBlock.init(
+                sibling.digest(),
+                child.height(),
+                round(3),
+                child.target,
+            );
+            try harness.finalize(&unlinked);
+        }
+    }.body);
+}
+
+test "stateful execution: a reconstruction that misses the block commitments panics" {
+    // commonware `processor/mod.rs` `execution_finalize_reconstruction_rejects_state_root_mismatch`
+    // (#[should_panic]).
+    const expected = "finalize reconstruction must match block commitments";
+    try utils.death.expect_panic(@src(), expected, struct {
+        fn body() !void {
+            var harness: Harness = undefined;
+            try harness.init();
+            defer harness.deinit();
+            const genesis = TestBlock.genesis();
+            const block1 = try harness.stage_pending_child(&genesis, 1);
+            harness.execution.state.clear();
+            const wrong = block1.with_root(u64_digest(999));
+            try harness.finalize(&wrong);
+        }
+    }.body);
+}
+
+test "stateful execution: a finalized block that skips unapplied heights panics" {
+    // commonware `core/processing.rs live_floor_skip_panics` (#[should_panic]).
+    // Processing hands a finalized block to `Processor.finalize`, which asserts it is the
+    // anchor's successor; the test drives that call directly.
+    try utils.death.expect_panic(@src(), "reached unreachable code", struct {
+        fn body() !void {
+            var harness: Harness = undefined;
+            try harness.init();
+            defer harness.deinit();
+            const genesis = TestBlock.genesis();
+            const block1 = try harness.stage_pending_child(&genesis, 1);
+            const block2 = try harness.stage_pending_child(&block1, 2);
+            // Height 2 on the genesis anchor skips the unapplied height 1; it names the anchor
+            // as its parent, so only the height check can reject it.
+            const skipping = TestBlock.init(genesis.digest(), .new(2), round(2), block2.target);
+            try harness.finalize(&skipping);
+        }
+    }.body);
+}

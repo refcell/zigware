@@ -573,3 +573,52 @@ fn fuzz_operation(dirty: *Dirty, truth: *Prunable(4), generator: *rng.FuzzRng) !
 test "fuzz historical bitmap" {
     try fuzz.run({}, fuzz_historical, 0x6869_7374, 300);
 }
+
+const death = @import("../death.zig");
+
+test "historical: reading a popped bit panics" {
+    // commonware `bitmap/historical/tests.rs test_read_popped_bit_panics` (#[should_panic]).
+    try death.expect_panic(@src(), "bit offset 8 out of bounds (len: 8)", struct {
+        fn body() !void {
+            var bitmap: H = .empty;
+            defer bitmap.deinit(gpa);
+            try commit_bits(&bitmap, 1, &@as([10]bool, @splat(true)));
+            var dirty = bitmap.into_dirty();
+            defer bitmap = dirty.abort(gpa);
+            _ = dirty.pop();
+            _ = dirty.pop();
+            _ = dirty.get_bit(8);
+        }
+    }.body);
+}
+
+test "historical: pruning beyond the projected length panics" {
+    // commonware `bitmap/historical/tests.rs test_prune_beyond_length_panics` (#[should_panic]).
+    try death.expect_panic(@src(), "beyond projected length", struct {
+        fn body() !void {
+            var bitmap: H = .empty;
+            defer bitmap.deinit(gpa);
+            try commit_bits(&bitmap, 1, &@as([10]bool, @splat(true)));
+            var dirty = bitmap.into_dirty();
+            defer bitmap = dirty.abort(gpa);
+            _ = dirty.pop();
+            try dirty.prune_to_bit(gpa, 100);
+        }
+    }.body);
+}
+
+test "historical: popping into the pruned region panics" {
+    // commonware `bitmap/historical/tests.rs test_pop_into_pruned_region_panics` (#[should_panic]).
+    try death.expect_panic(@src(), "bit pruned: 31", struct {
+        fn body() !void {
+            var bitmap: H = .empty;
+            defer bitmap.deinit(gpa);
+            const full: [4]u8 = @splat(0xFF);
+            try commit_chunks(&bitmap, 1, &.{ full, full });
+            try commit_prune(&bitmap, 2, 32);
+            var dirty = bitmap.into_dirty();
+            defer bitmap = dirty.abort(gpa);
+            for (0..33) |_| _ = dirty.pop();
+        }
+    }.body);
+}

@@ -554,3 +554,25 @@ test "fuzz time" {
         }
     }.run, .{ .corpus = &.{ "30s", "500 ms", "18446744073709551615h" } });
 }
+
+const death = @import("death.zig");
+
+test "time: epoch before the epoch panics" {
+    // commonware `time.rs test_epoch_panics` (#[should_panic]).
+    try death.expect_panic(@src(), "failed to get epoch time", struct {
+        fn body() !void {
+            const time = SystemTime.UNIX_EPOCH.checked_sub(Duration.from_secs(1)).?;
+            _ = time.epoch();
+        }
+    }.body);
+}
+
+test "time: epoch_millis before the epoch panics" {
+    // commonware `time.rs test_epoch_millis_panics` (#[should_panic]).
+    try death.expect_panic(@src(), "failed to get epoch time", struct {
+        fn body() !void {
+            const time = SystemTime.UNIX_EPOCH.checked_sub(Duration.from_secs(1)).?;
+            _ = time.epoch_millis();
+        }
+    }.body);
+}

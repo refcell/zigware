@@ -99,3 +99,38 @@ test "atomic: shared setters" {
     defer expected.deinit(gpa_test);
     try testing.expect(actual.eql(&expected));
 }
+
+const death = @import("../death.zig");
+
+test "atomic: set past len panics" {
+    // commonware `bitmap/atomic.rs test_set_past_len_panics` (#[should_panic]).
+    try death.expect_panic(@src(), "bit 64 out of bounds (len: 64)", struct {
+        fn body() !void {
+            var bits = try Atomic.zeroes(gpa_test, 64);
+            defer bits.deinit(gpa_test);
+            bits.set(64);
+        }
+    }.body);
+}
+
+test "atomic: set past len in the tail word panics" {
+    // commonware `bitmap/atomic.rs test_set_past_len_in_tail_word_panics` (#[should_panic]).
+    try death.expect_panic(@src(), "bit 70 out of bounds (len: 65)", struct {
+        fn body() !void {
+            var bits = try Atomic.zeroes(gpa_test, 65);
+            defer bits.deinit(gpa_test);
+            bits.set(70);
+        }
+    }.body);
+}
+
+test "atomic: set on empty panics" {
+    // commonware `bitmap/atomic.rs test_set_on_empty_panics` (#[should_panic]).
+    try death.expect_panic(@src(), "bit 0 out of bounds (len: 0)", struct {
+        fn body() !void {
+            var bits = try Atomic.zeroes(gpa_test, 0);
+            defer bits.deinit(gpa_test);
+            bits.set(0);
+        }
+    }.body);
+}

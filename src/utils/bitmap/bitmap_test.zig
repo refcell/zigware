@@ -695,3 +695,119 @@ test "bitmap: is_unset across one-byte chunks (is_unset_chunk_boundaries)" {
     try testing.expect(!bitmap.is_unset(0, 8));
     try testing.expect(bitmap.is_unset(8, 32));
 }
+
+const death = @import("../death.zig");
+
+test "bitmap: truncate to a larger size panics" {
+    // commonware `bitmap/mod.rs test_truncate_larger_size_panics` (#[should_panic]).
+    try death.expect_panic(@src(), "cannot truncate to a larger size", struct {
+        fn body() !void {
+            var bv: BitMap(4) = .empty;
+            defer bv.deinit(gpa);
+            try bv.push(gpa, true);
+            bv.truncate(2);
+        }
+    }.body);
+}
+
+test "bitmap: pop_chunk when not chunk aligned panics" {
+    // commonware `bitmap/mod.rs test_pop_chunk_not_aligned` (#[should_panic]).
+    try death.expect_panic(@src(), "cannot pop chunk when not chunk aligned", struct {
+        fn body() !void {
+            var bv: BitMap(3) = .empty;
+            defer bv.deinit(gpa);
+            try bv.push_chunk(gpa, &.{ 0xFF, 0xFF, 0xFF });
+            try bv.push(gpa, true);
+            _ = bv.pop_chunk();
+        }
+    }.body);
+}
+
+test "bitmap: pop_chunk with fewer than a chunk of bits panics" {
+    // commonware `bitmap/mod.rs test_pop_chunk_insufficient_bits` (#[should_panic]).
+    try death.expect_panic(@src(), "bitmap has fewer than CHUNK_SIZE_BITS bits", struct {
+        fn body() !void {
+            var bv: BitMap(3) = .empty;
+            defer bv.deinit(gpa);
+            try bv.push(gpa, true);
+            try bv.push(gpa, false);
+            _ = bv.pop_chunk();
+        }
+    }.body);
+}
+
+test "bitmap: flip out of bounds panics" {
+    // commonware `bitmap/mod.rs test_flip_out_of_bounds` (#[should_panic]).
+    try death.expect_panic(@src(), "bit 1 out of bounds (len: 1)", struct {
+        fn body() !void {
+            var bv: BitMap(4) = .empty;
+            defer bv.deinit(gpa);
+            try bv.push(gpa, true);
+            bv.flip(1);
+        }
+    }.body);
+}
+
+test "bitmap: and of mismatched lengths panics" {
+    // commonware `bitmap/mod.rs test_and_length_mismatch` (#[should_panic]).
+    try death.expect_panic(@src(), "BitMap lengths don't match: 2 vs 1", struct {
+        fn body() !void {
+            var a = try pattern(4, 2, 2);
+            defer a.deinit(gpa);
+            var b = try pattern(4, 1, 2);
+            defer b.deinit(gpa);
+            a.@"and"(&b);
+        }
+    }.body);
+}
+
+test "bitmap: or of mismatched lengths panics" {
+    // commonware `bitmap/mod.rs test_or_length_mismatch` (#[should_panic]).
+    try death.expect_panic(@src(), "BitMap lengths don't match: 1 vs 2", struct {
+        fn body() !void {
+            var a = try pattern(4, 1, 2);
+            defer a.deinit(gpa);
+            var b = try pattern(4, 2, 2);
+            defer b.deinit(gpa);
+            a.@"or"(&b);
+        }
+    }.body);
+}
+
+test "bitmap: xor of mismatched lengths panics" {
+    // commonware `bitmap/mod.rs test_xor_length_mismatch` (#[should_panic]).
+    try death.expect_panic(@src(), "BitMap lengths don't match: 3 vs 2", struct {
+        fn body() !void {
+            var a = try pattern(4, 3, 2);
+            defer a.deinit(gpa);
+            var b = try pattern(4, 2, 2);
+            defer b.deinit(gpa);
+            a.xor(&b);
+        }
+    }.body);
+}
+
+test "bitmap: pruning more chunks than exist panics" {
+    // commonware `bitmap/mod.rs test_prune_too_many_chunks` (#[should_panic]).
+    try death.expect_panic(@src(), "cannot prune", struct {
+        fn body() !void {
+            var bv: BitMap(4) = .empty;
+            defer bv.deinit(gpa);
+            try bv.push_chunk(gpa, &.{ 1, 2, 3, 4 });
+            try bv.push_chunk(gpa, &.{ 5, 6, 7, 8 });
+            try bv.push(gpa, true);
+            bv.prune_chunks(4);
+        }
+    }.body);
+}
+
+test "bitmap: is_unset past the end panics" {
+    // commonware `bitmap/mod.rs is_unset_out_of_bounds` (#[should_panic]).
+    try death.expect_panic(@src(), "range end 65 out of bounds (len: 64)", struct {
+        fn body() !void {
+            var bitmap = try BitMap(8).zeroes(gpa, 64);
+            defer bitmap.deinit(gpa);
+            _ = bitmap.is_unset(0, 65);
+        }
+    }.body);
+}

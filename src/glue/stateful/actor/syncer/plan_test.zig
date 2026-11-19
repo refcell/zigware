@@ -218,3 +218,19 @@ test "stateful sync plan: set_floor ignores a selection at the persisted round" 
     try plan.set_floor(&other);
     try expect_floor(&plan, &stored);
 }
+
+test "stateful sync plan: a completed height cannot move backward" {
+    // commonware `syncer/plan.rs complete_height_cannot_move_backward` (#[should_panic]);
+    // zigware asserts.
+    try utils.death.expect_panic(@src(), "reached unreachable code", struct {
+        fn body() !void {
+            var harness: Harness = undefined;
+            try harness.init();
+            defer harness.deinit();
+            var plan = try harness.open("complete_height_cannot_move_backward");
+            defer plan.deinit();
+            try plan.set_completed(.new(7));
+            try plan.set_completed(.new(6));
+        }
+    }.body);
+}

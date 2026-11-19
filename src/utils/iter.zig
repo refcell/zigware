@@ -140,3 +140,36 @@ test "iter: zip_eq pairs equal lengths" {
     }
     try testing.expectEqual(null, pairs.next());
 }
+
+const death = @import("death.zig");
+
+test "iter: zip_eq panics when right is shorter" {
+    // commonware `iter.rs zip_eq_panics_when_right_is_shorter` (#[should_panic]).
+    try death.expect_panic(@src(), "right iterator exhausted first", struct {
+        fn body() !void {
+            var zipped = zip_eq(slice(u8, &.{ 1, 2 }), slice(u8, &.{1}));
+            while (zipped.next()) |_| {}
+        }
+    }.body);
+}
+
+test "iter: zip_eq panics when left is shorter" {
+    // commonware `iter.rs zip_eq_panics_when_left_is_shorter` (#[should_panic]).
+    try death.expect_panic(@src(), "left iterator exhausted first", struct {
+        fn body() !void {
+            var zipped = zip_eq(slice(u8, &.{1}), slice(u8, &.{ 1, 2 }));
+            while (zipped.next()) |_| {}
+        }
+    }.body);
+}
+
+test "iter: non_empty rejects an empty iterator" {
+    // commonware `iter.rs macro_rejects_empty_iterators` (#[should_panic]).
+    try death.expect_panic(@src(), "attempt to use null value", struct {
+        fn body() !void {
+            // Rust's `non_empty![@items]` is `NonEmpty.try_init(items).?` (module docs).
+            const items = NonEmpty(SliceIterator(u8)).try_init(slice(u8, &.{})).?;
+            _ = items;
+        }
+    }.body);
+}

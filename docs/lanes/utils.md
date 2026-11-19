@@ -213,6 +213,15 @@ caught).
 
 Every commonware `#[test]` in this lane's crates (macro and rstest cases expanded where noted), matched by reading both sides: ported (a Zig test checks the behavior, often one consolidated test), open, or not portable with the reason. Written by the consensus-marshal lane; tick a box when its test lands.
 
+- 2026-11-19 (utils lane): every `#[should_panic]` test in both lists is a `utils.death` test
+  next to the code it checks (faults.zig, handles.zig, iter.zig, root.zig, rational.zig,
+  time.zig, vec.zig, bitmap/atomic.zig, and the bitmap test files), except `futures.rs`'s two
+  `rebind` tests (not ported by design) and `probability.rs`'s macro test (no runtime panic).
+  Expected messages are zigware's where commonware's would also match a Zig safety panic
+  ("out of bounds" vs "index out of bounds"). Each file's panics were removed in one planted
+  bug and every one of its death tests failed: 52 utils tests (22 outside bitmap, 30 in it).
+  Outside bitmap 489/391/0/98 became 489/413/0/76; bitmap/ 360/330/0/30 became 360/360/0/0.
+
 Re-audit (2026-11-19, against main at f70cf67, after async start_sync, `DelayedSync`, faulty's
 `Storage.wrap`, `FlushControl`/`HeldShared`, and parallel conformance landed): 6 bitmap entries
 became portable and are ported; every other reason was rechecked against the Zig code and stands
@@ -241,21 +250,21 @@ Drop counting, Rust conversion traits, or not ported by design).
 | channel/ring.rs | 14 | 11 | 0 | 3 |
 | channel/tracked.rs | 7 | 6 | 0 | 1 |
 | concurrency.rs | 3 | 3 | 0 | 0 |
-| faults.rs | 55 | 45 | 0 | 10 |
+| faults.rs | 55 | 55 | 0 | 0 |
 | futures.rs | 22 | 12 | 0 | 10 |
 | futures/shared.rs | 13 | 0 | 0 | 13 |
 | futures/try_join_all.rs | 30 | 13 | 0 | 17 |
-| handles.rs | 13 | 12 | 0 | 1 |
+| handles.rs | 13 | 13 | 0 | 0 |
 | hostname.rs | 12 | 10 | 0 | 2 |
-| iter.rs | 9 | 5 | 0 | 4 |
-| lib.rs | 15 | 12 | 0 | 3 |
+| iter.rs | 9 | 8 | 0 | 1 |
+| lib.rs | 15 | 14 | 0 | 1 |
 | net.rs | 8 | 8 | 0 | 0 |
 | ordered.rs | 48 | 46 | 0 | 2 |
 | prefetch.rs | 4 | 4 | 0 | 0 |
 | priority_set.rs | 5 | 5 | 0 | 0 |
 | probability.rs | 7 | 6 | 0 | 1 |
 | range.rs | 12 | 8 | 0 | 4 |
-| rational/mod.rs | 28 | 26 | 0 | 2 |
+| rational/mod.rs | 28 | 28 | 0 | 0 |
 | rng.rs | 12 | 11 | 0 | 1 |
 | sampling.rs | 9 | 7 | 0 | 2 |
 | sequence/fixed_bytes.rs | 6 | 6 | 0 | 0 |
@@ -267,9 +276,9 @@ Drop counting, Rust conversion traits, or not ported by design).
 | sync/exclusive.rs | 1 | 0 | 0 | 1 |
 | sync/mod.rs | 7 | 4 | 0 | 3 |
 | thread_local.rs | 8 | 5 | 0 | 3 |
-| time.rs | 19 | 16 | 0 | 3 |
-| vec.rs | 32 | 26 | 0 | 6 |
-| **Total** | **489** | **391** | **0** | **98** |
+| time.rs | 19 | 18 | 0 | 1 |
+| vec.rs | 32 | 28 | 0 | 4 |
+| **Total** | **489** | **413** | **0** | **76** |
 
 Counting notes:
 - rstest cases are counted one per case. faults.rs `test_bft3f1_quorum_and_max_faults` (21)
@@ -312,19 +321,11 @@ Open:
   same, count 64
 
 Not portable:
-- `faults.rs` `test_bft3f1_max_faults_zero_panics`, `test_bft3f1_quorum_zero_panics`,
-  `test_bft5f1_max_faults_zero_panics`, `test_bft5f1_quorum_zero_panics`,
-  `test_bft5f1_m_quorum_zero_panics`, `test_bft5f1_l_quorum_zero_panics`,
-  `test_max_faults_negative_panics`, `test_max_faults_overflow_panics`,
-  `test_quorum_negative_panics`, `test_quorum_overflow_panics`: #[should_panic]
-- `futures.rs` `test_rebind_empty_slot_panics`, `test_rebind_entry_missing_entry_panics`;
-  `handles.rs` `test_partition_rejects_a_count_that_is_not_a_power_of_two`;
-  `iter.rs` `zip_eq_panics_when_right_is_shorter`, `zip_eq_panics_when_left_is_shorter`,
-  `macro_rejects_empty_iterators`; `lib.rs` `test_modulo_zero_panics`,
-  `test_participant_from_usize_overflow`; `probability.rs`
-  `expression_macro_rejects_invalid_probability`; `rational/mod.rs` `log2_ceil_negative_panics`,
-  `log2_floor_negative_panics`; `time.rs` `test_epoch_panics`, `test_epoch_millis_panics`;
-  `vec.rs` `test_from_unchecked_panics_on_empty`, `test_mutate_panics_on_empty`: #[should_panic]
+- `futures.rs` `test_rebind_empty_slot_panics`, `test_rebind_entry_missing_entry_panics`:
+  `rebind`/`rebind_entry` not ported by design (utils.md)
+- `probability.rs` `expression_macro_rejects_invalid_probability`: the `probability!` macro has
+  no runtime panic in zigware: `Probability.init` returns null and `ratio` rejects the input at
+  compile time
 - `time.rs` `test_as_millis_u64_overflow`; `sampling.rs`
   `weighted_index_update_panics_preserve_index`, `without_replacement_restores_weights_on_unwind`;
   `thread_local.rs` `test_nested_guards_rejected`, `test_create_panic_does_not_poison_held_flag`,
@@ -384,10 +385,10 @@ Not portable:
 ### utils (bitmap/)
 | File | Tests | Ported | Open | Not portable |
 | --- | --- | --- | --- | --- |
-| bitmap/atomic.rs | 5 | 2 | 0 | 3 |
-| bitmap/mod.rs | 74 | 65 | 0 | 9 |
-| bitmap/prunable.rs | 54 | 44 | 0 | 10 |
-| bitmap/historical/tests.rs | 20 | 17 | 0 | 3 |
+| bitmap/atomic.rs | 5 | 5 | 0 | 0 |
+| bitmap/mod.rs | 74 | 74 | 0 | 0 |
+| bitmap/prunable.rs | 54 | 54 | 0 | 0 |
+| bitmap/historical/tests.rs | 20 | 20 | 0 | 0 |
 | bitmap/roaring/container/array.rs | 25 | 25 | 0 | 0 |
 | bitmap/roaring/container/bitmap.rs | 26 | 26 | 0 | 0 |
 | bitmap/roaring/container/mod.rs | 27 | 27 | 0 | 0 |
@@ -395,8 +396,8 @@ Not portable:
 | bitmap/roaring/fuzz.rs | 1 | 1 | 0 | 0 |
 | bitmap/roaring/mod.rs | 32 | 32 | 0 | 0 |
 | bitmap/roaring/ops.rs | 43 | 43 | 0 | 0 |
-| bitmap/roaring/prunable.rs | 27 | 22 | 0 | 5 |
-| **Total** | **360** | **330** | **0** | **30** |
+| bitmap/roaring/prunable.rs | 27 | 27 | 0 | 0 |
+| **Total** | **360** | **360** | **0** | **0** |
 
 Open:
 - [x] `bitmap/mod.rs:1800` `test_multi_chunk_operations`: and/or/xor over two full 4-byte chunks
@@ -453,21 +454,5 @@ Open:
 - [x] `bitmap/roaring/container/run.rs:802` `test_encode_size_grows_per_run`: encode size for 5 runs
 
 Not portable:
-- `bitmap/atomic.rs` `test_set_past_len_panics`, `test_set_past_len_in_tail_word_panics`,
-  `test_set_on_empty_panics`: #[should_panic]
-- `bitmap/mod.rs` `test_truncate_larger_size_panics`, `test_pop_chunk_not_aligned`,
-  `test_pop_chunk_insufficient_bits`, `test_flip_out_of_bounds`, `test_and_length_mismatch`,
-  `test_or_length_mismatch`, `test_xor_length_mismatch`, `test_prune_too_many_chunks`,
-  `is_unset_out_of_bounds`: #[should_panic]
-- `bitmap/prunable.rs` `test_get_pruned_bit_panics`, `test_get_pruned_chunk_panics`,
-  `test_set_pruned_bit_panics`, `test_prune_to_bit_out_of_bounds`,
-  `test_truncate_into_pruned_region_panics`, `test_pop_chunk_not_aligned`,
-  `test_pop_chunk_insufficient_bits`, `test_set_chunk_by_index_rejects_high_bits_in_last_byte`,
-  `test_set_chunk_by_index_rejects_nonzero_trailing_bytes`,
-  `test_set_chunk_by_index_rejects_nonzero_final_byte`: #[should_panic]
-- `bitmap/historical/tests.rs` `test_read_popped_bit_panics`, `test_prune_beyond_length_panics`,
-  `test_pop_into_pruned_region_panics`: #[should_panic]
-- `bitmap/roaring/prunable.rs` `test_panic_on_insert_below_pruned`,
-  `test_panic_on_contains_below_pruned`, `test_panic_on_insert_range_below_pruned`,
-  `test_panic_on_iter_range_below_pruned`, `test_extend_below_pruned_panics`: #[should_panic]
+- none
 

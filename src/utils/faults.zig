@@ -156,3 +156,115 @@ test "faults: quorum relationships and safety for all n below 10000" {
         }
     }
 }
+
+const death = @import("death.zig");
+
+test "faults: test_bft3f1_max_faults_zero_panics" {
+    // commonware `faults.rs test_bft3f1_max_faults_zero_panics` (#[should_panic]).
+    try death.expect_panic(@src(), "n must not be zero", struct {
+        fn body() !void {
+            var n: u32 = 0;
+            _ = &n;
+            _ = N3f1.max_faults(n);
+        }
+    }.body);
+}
+
+test "faults: test_bft3f1_quorum_zero_panics" {
+    // commonware `faults.rs test_bft3f1_quorum_zero_panics` (#[should_panic]).
+    try death.expect_panic(@src(), "n must not be zero", struct {
+        fn body() !void {
+            var n: u32 = 0;
+            _ = &n;
+            _ = N3f1.quorum(n);
+        }
+    }.body);
+}
+
+test "faults: test_bft5f1_max_faults_zero_panics" {
+    // commonware `faults.rs test_bft5f1_max_faults_zero_panics` (#[should_panic]).
+    try death.expect_panic(@src(), "n must not be zero", struct {
+        fn body() !void {
+            var n: u32 = 0;
+            _ = &n;
+            _ = N5f1.max_faults(n);
+        }
+    }.body);
+}
+
+test "faults: test_bft5f1_quorum_zero_panics" {
+    // commonware `faults.rs test_bft5f1_quorum_zero_panics` (#[should_panic]).
+    try death.expect_panic(@src(), "n must not be zero", struct {
+        fn body() !void {
+            var n: u32 = 0;
+            _ = &n;
+            _ = N5f1.quorum(n);
+        }
+    }.body);
+}
+
+test "faults: test_bft5f1_m_quorum_zero_panics" {
+    // commonware `faults.rs test_bft5f1_m_quorum_zero_panics` (#[should_panic]).
+    try death.expect_panic(@src(), "n must not be zero", struct {
+        fn body() !void {
+            var n: u32 = 0;
+            _ = &n;
+            _ = N5f1.m_quorum(n);
+        }
+    }.body);
+}
+
+test "faults: test_bft5f1_l_quorum_zero_panics" {
+    // commonware `faults.rs test_bft5f1_l_quorum_zero_panics` (#[should_panic]).
+    try death.expect_panic(@src(), "n must not be zero", struct {
+        fn body() !void {
+            var n: u32 = 0;
+            _ = &n;
+            _ = N5f1.l_quorum(n);
+        }
+    }.body);
+}
+
+test "faults: test_max_faults_negative_panics" {
+    // commonware `faults.rs test_max_faults_negative_panics` (#[should_panic]).
+    try death.expect_panic(@src(), "fits in u32", struct {
+        fn body() !void {
+            var n = @as(i32, -1);
+            _ = &n;
+            _ = N3f1.max_faults(n);
+        }
+    }.body);
+}
+
+test "faults: test_max_faults_overflow_panics" {
+    // commonware `faults.rs test_max_faults_overflow_panics` (#[should_panic]).
+    try death.expect_panic(@src(), "fits in u32", struct {
+        fn body() !void {
+            var n: u64 = std.math.maxInt(u64);
+            _ = &n;
+            _ = N3f1.max_faults(n);
+        }
+    }.body);
+}
+
+test "faults: test_quorum_negative_panics" {
+    // commonware `faults.rs test_quorum_negative_panics` (#[should_panic]).
+    try death.expect_panic(@src(), "fits in u32", struct {
+        fn body() !void {
+            var n = @as(i32, -1);
+            _ = &n;
+            _ = N3f1.quorum(n);
+        }
+    }.body);
+}
+
+test "faults: test_quorum_overflow_panics" {
+    // commonware `faults.rs test_quorum_overflow_panics` (#[should_panic]).
+    try death.expect_panic(@src(), "fits in u32", struct {
+        fn body() !void {
+            var n: u64 = std.math.maxInt(u64);
+            _ = &n;
+            _ = N3f1.quorum(n);
+        }
+    }.body);
+}
