@@ -701,6 +701,19 @@ After:
   id 0 on 127.0.0.1. Each sent a message on channel 0 and received the other's from the right
   key. With different namespaces, neither side connects. Not scripted, because the Rust peer
   is not in the repo.
+- [x] Consensus, through the log examples (`etc/scripts/interop_log.py`, run by `interop.sh`):
+  commonware's `examples/log` validators 0 and 1 and zigware's validators 2 and 3 form one
+  simplex committee over discovery. Within about 30 s, 100 views were finalized by all four
+  with identical digests, about half proposed by each implementation. Votes, notarizations,
+  finalizations, and proposals cross between Rust and Zig and verify on both sides. A zigware
+  validator stopped for 10 s and restarted on its storage finalized later views with the same
+  digests within 4 s. Pure-Rust and pure-Zig networks nullify the same share of views (about
+  1 in 4, in pairs every 6 views), as the mixed one does, at similar throughput.
+  - Not exercised: simplex's resolver channel. A restarted validator catches up from broadcast
+    certificates, and no `received certificate for request` event appears.
+  - Example GUI differences, not wire: commonware's Activity lines carry span fields and its
+    colors do not render under tmux.
+  - Demo: `record-demo.sh interop-log` (docs/assets/interop-log-demo.{gif,mp4}).
 - No wire mismatch turned up, so no vector was added.
 
 ## Log

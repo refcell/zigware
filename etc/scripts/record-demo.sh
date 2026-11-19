@@ -296,6 +296,50 @@ EOF
       wait %%
       t kill-server
       ;;
+    interop-log)
+      # Two commonware validators (top rows) and two zigware validators (bottom rows) in one
+      # simplex network, from empty storage; their Activity panes show the same finalized digests at
+      # the same views (etc/scripts/interop_log.py checks it).
+      reference=${COMMONWARE_REF:-$HOME/.cache/zigware/commonware-ref}
+      target=${INTEROP_TARGET:-${TMPDIR:-/tmp}/zigware-interop-target}
+      (cd "$reference" && CARGO_TARGET_DIR="$target" cargo build --release --offline -q \
+        -p commonware-log)
+      if [ -n "$(find src examples/log examples/ui build.zig -newer zig-out/bin/log -print \
+        -quit 2>/dev/null || echo stale)" ] || [ ! -x zig-out/bin/log ]; then
+        zig build -Doptimize=ReleaseFast >/dev/null
+      fi
+      rust_log=$target/release/commonware-log
+      zig_log=$(realpath zig-out/bin/log)
+      dir=/tmp/zigware-interop-log-demo
+      rm -rf "$dir"
+      validator() {
+        local binary=$1 id=$2 boot=
+        [ "$id" = 0 ] || boot='--bootstrappers 0@127.0.0.1:3600'
+        echo "$binary $boot --me $id@360$id --participants 0,1,2,3 --storage-dir $dir/$id"
+      }
+      t() { tmux -L zigware-demo -f /dev/null "$@"; }
+      t kill-server 2>/dev/null || true
+      t new-session -d -s ilog -x 220 -y 50 "$(validator "$rust_log" 0)"
+      t set-option -g status off
+      t set-option -g pane-border-status top
+      t set-option -g pane-border-format ' #[bold]#{pane_title}#[default] '
+      t select-pane -t ilog -T 'commonware (Rust): validator 0'
+      # Full-width rows, so each finalized line shows its digest and view.
+      t split-window -v -t ilog "$(validator "$rust_log" 1)"
+      t select-pane -t ilog -T 'commonware (Rust): validator 1'
+      t split-window -v -t ilog "$(validator "$zig_log" 2)"
+      t select-pane -t ilog -T 'zigware (Zig): validator 2'
+      t split-window -v -t ilog "$(validator "$zig_log" 3)"
+      t select-pane -t ilog -T 'zigware (Zig): validator 3'
+      t select-layout -t ilog even-vertical
+      (
+        sleep 12
+        t detach-client -s ilog
+      ) &
+      t attach -t ilog || true
+      wait %%
+      t kill-server
+      ;;
     *) echo "unknown demo: $name" >&2; exit 1 ;;
   esac
   exit 0
@@ -308,12 +352,13 @@ case $name in
   bridge) size=160x40 ;;
   dkg) size=220x50 ;;
   interop) size=220x50 ;;
+  interop-log) size=200x64 ;;
   *) size=104x40 ;;
 esac
 DEMO_SESSION=1 TERM=xterm-256color asciinema rec --overwrite --quiet --output-format asciicast-v2 --window-size "$size" \
   --command "$0 $name" "$out.cast"
 if [ "$name" = chat ] || [ "$name" = log ] || [ "$name" = bridge ] || [ "$name" = dkg ] ||
-  [ "$name" = interop ]; then
+  [ "$name" = interop ] || [ "$name" = interop-log ]; then
   # End on the panes, not tmux's exit screen: cut where tmux leaves the alternate screen.
   awk 'index($0, "\\u001b[?1049l") { exit } { print }' "$out.cast" >"$out.cast.cut"
   mv "$out.cast.cut" "$out.cast"
@@ -324,6 +369,7 @@ font=16 fps=30
 [ "$name" = bridge ] && font=14 fps=8
 [ "$name" = dkg ] && font=12 fps=8
 [ "$name" = interop ] && font=14 fps=12
+[ "$name" = interop-log ] && font=12 fps=8
 # x264's default quality (crf 23) puts dkg's five busy panes near 4 MB; 28 keeps it under 3.
 crf=23
 [ "$name" = dkg ] && crf=28
