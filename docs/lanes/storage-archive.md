@@ -122,7 +122,7 @@ entries, matched to zigware tests by what they check (zigware folds many into on
 
 | module | tests | ported | partial | open | not portable |
 |---|---|---|---|---|---|
-| archive | 93 | 77 | 1 | 0 | 15 |
+| archive | 93 | 78 | 0 | 0 | 15 |
 | freezer | 33 | 33 | 0 | 0 | 0 |
 | ordinal | 44 | 44 | 0 | 0 | 0 |
 | cache | 14 | 14 | 0 | 0 | 0 |
@@ -152,8 +152,8 @@ Open:
   `runtime.storage.mocks.Recordings.syncs`.
 
 Partial:
-- [ ] archive immutable interrupted destroy: zigware's `crash()` drops unsynced data, so
-  uncommitted bytes on disk during recovery are never tested.
+- [x] archive immutable interrupted destroy: also runs with `mocks.Storage.keep_unsynced`
+  (commonware's crash retention 1.0), so recovery sees the uncommitted put on disk.
 - [x] archive `many_keys_{prunable,immutable}_large`: 50,000 keys under `-Dslow-tests`.
 - [x] freezer: `recovery_zeroes_torn_table_slot`, `checkpoint_rewinds_completed_resize`,
   short-table mismatch with retry and unchanged length. Determinism runs 300 keys, not 1,000
@@ -187,3 +187,5 @@ Partial:
   suffix repair, torn index tail); archive open: 0 (clearing lane).
 - 2026-11-19: the freezer, ordinal, and `bits_for_indices` partials completed; only archive's
   immutable interrupted destroy stays partial (clearing lane).
+- 2026-11-19: immutable interrupted destroy with unsynced writes kept; no partials left
+  (clearing lane).

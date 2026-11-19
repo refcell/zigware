@@ -2,7 +2,8 @@
 //! immutable cases of the shared `archive/mod.rs` tests.
 //!
 //! Restarts drop the archive (`deinit`) and reopen it on the same storage; `crash()` drops
-//! unsynced data as commonware's `start_and_recover` does. Commonware's interrupted-destroy
+//! unsynced data as commonware's `start_and_recover` does (the interrupted-destroy test also
+//! keeps it, as commonware's retention 1.0 does). Commonware's interrupted-destroy
 //! test samples removal faults by seed; here every removal budget up to a full destroy runs.
 
 const std = @import("std");
@@ -358,11 +359,37 @@ fn interrupted_destroy(harness: *Harness, removals: u32) !bool {
 }
 
 test "immutable interrupted destroy reopens" {
+    // Commonware retains every unsynced write across the crash (retention 1.0), so recovery
+    // also runs over the uncommitted put at index 10; dropping unsynced data is checked too.
+    try check_interrupted_destroy(true);
+    try check_interrupted_destroy(false);
+}
+
+/// The archive's audit after a destroy that stops at its first removal, keeping unsynced
+/// writes or not.
+fn first_removal_audit(keep_unsynced: bool) ![4]u8 {
+    var harness = try Harness.init();
+    defer harness.deinit();
+    harness.storage.keep_unsynced = keep_unsynced;
+    try testing.expect(try interrupted_destroy(&harness, 0));
+    harness.storage.crash();
+    return harness.storage.backend.audit();
+}
+
+test "immutable interrupted destroy keeps the uncommitted put on disk" {
+    // Otherwise the retention-1.0 case would test nothing the default case does not.
+    const kept = try first_removal_audit(true);
+    const dropped = try first_removal_audit(false);
+    try testing.expect(!std.mem.eql(u8, &kept, &dropped));
+}
+
+fn check_interrupted_destroy(keep_unsynced: bool) !void {
     var interrupted: u32 = 0;
     var removals: u32 = 0;
     while (true) : (removals += 1) {
         var harness = try Harness.init();
         defer harness.deinit();
+        harness.storage.keep_unsynced = keep_unsynced;
         if (!try interrupted_destroy(&harness, removals)) break;
         interrupted += 1;
         harness.storage.crash();

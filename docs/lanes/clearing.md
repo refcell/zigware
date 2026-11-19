@@ -188,8 +188,8 @@ qmdb `current` (balances, over the MMB) and `keyless` (payout log, over the MMR)
   - [x] Archive's marker-damage, floor-rejection, and torn-index-tail tests.
   - [x] Partitioned index `new_range`/`install_range` and its 5 dependent tests.
   - [x] Partials and index's last 2 open tests: 15 partials completed, each with a planted
-    bug. Left partial: archive immutable interrupted destroy (its `crash()` drops unsynced
-    data, so no recovery runs over uncommitted bytes on disk).
+    bug. The last one, archive immutable interrupted destroy, now runs with
+    `runtime.buffer.mocks.Storage.keep_unsynced` (retention 1.0).
 
 ## Log
 - 2026-11-16: namespace, amounts, lookup with their tests; Amounts and Lookup conformance
@@ -239,3 +239,4 @@ qmdb `current` (balances, over the MMB) and `keyless` (payout log, over the MMR)
 - 2026-11-19: 11 prunable archive tests (marker publication, below-floor syncs, destroys).
 - 2026-11-19: archive's marker-damage, floor-rejection, and torn-tail tests.
 - 2026-11-19: storage audit partials and the last index tests; audit backlog done.
+- 2026-11-19: `keep_unsynced` crash mode in the buffer mock; immutable destroy partial closed.
