@@ -4,14 +4,10 @@
 //!
 //! Differences from commonware, all from zigware's building blocks:
 //! - Marshal comes from glue's bootstrap `Node`, which names marshal's own partition
-//!   `validator-marshal` (commonware: `validator`) and always starts from genesis. A node with
-//!   a persisted state-sync floor, or `--state-sync`, fails with `error.StateSyncUnsupported`
-//!   until `Node` takes a floor start.
+//!   `validator-marshal` (commonware: `validator`).
 //! - The QMDB resolver and the `Stateful` actor run as plain futures, whose awaits are not
-//!   cancelable, so they are stopped at shutdown rather than supervised by `select`.
-//! - zigware's `Stateful` attaches its databases to the QMDB resolver only after state sync
-//!   (commonware also does after recovering from marshal), so `attach_task` attaches them once
-//!   `Stateful` opens them.
+//!   cancelable, so they are stopped at shutdown rather than supervised by `select`. The
+//!   resolver borrows `Stateful`'s databases, so it stops first.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -58,6 +54,13 @@ pub const Variant = consensus.marshal.standard.Standard(types.Block);
 /// The durable choice between peer state sync and recovery from marshal.
 pub const Plan = glue.stateful.SyncPlan(types.Scheme, Variant);
 
+/// QMDB state sync tuning (commonware `types::sync_config`).
+pub const sync_config: glue.stateful.db.state_sync.SyncEngineConfig = .{
+    .fetch_batch_size = types.sync_batch_size,
+    .apply_batch_size = 64,
+    .max_outstanding_requests = 8,
+};
+
 /// How long the probe waits before re-soliciting floors.
 pub const probe_retry_timeout_ns: u64 = 500 * std.time.ns_per_ms;
 
@@ -100,6 +103,7 @@ const StatefulTypes = struct {
     pub const Databases = application.Database;
     pub const Marshal = MarshalMailbox;
     pub const Plan = validator.Plan;
+    pub const Resolvers = *Qmdb.Mailbox;
 };
 const Stateful = glue.stateful.actor.Stateful(StatefulTypes);
 const ReshareApp = reshare.Application(Stateful.Mailbox, ReshareTypes);
@@ -335,6 +339,10 @@ const Validator = struct {
     probe: *Probe,
     probe_mailbox: Probe.ProbeMailbox,
     probe_rng: ProbeRng,
+    /// The probe's task, started before marshal so a state-sync startup can wait on it.
+    probe_handle: Handle,
+    /// This startup state-syncs from the plan's floor.
+    syncing: bool,
     qmdb: Qmdb.Created,
     dkg_plan: DkgPlan,
     fence: glue_dkg.fence.Fence,
@@ -402,8 +410,8 @@ const Validator = struct {
         return types.Block.genesis(self.gpa, leader, info, sync_target);
     }
 
-    /// Opens marshal's archives, broadcast, and backfill, then the probe.
-    fn init_marshal(self: *Validator, ctx: Ctx, state_sync: bool) !void {
+    /// Opens the page cache, the genesis block, and the stateful startup plan.
+    fn init_plan(self: *Validator, ctx: Ctx, state_sync: bool) !void {
         const gpa = self.gpa;
         self.page_cache = try .init(gpa, types.page_size, types.page_cache_size);
         errdefer self.page_cache.deinit();
@@ -411,10 +419,41 @@ const Validator = struct {
         errdefer self.genesis_block.deinit(gpa);
         const env = .{ .gpa = gpa, .storage = ctx.storage };
         self.plan = try Plan.init(env, partition_prefix);
-        errdefer self.plan.deinit();
-        if (self.plan.should_sync(state_sync)) return error.StateSyncUnsupported;
+        self.syncing = self.plan.should_sync(state_sync);
+        assert(!self.syncing or self.plan.may_sync());
+    }
+
+    /// Waits for the probe's artifact, registers its epoch's verifier for marshal, and
+    /// persists its floor (commonware's `should_state_sync` branch). Returns the DKG
+    /// state-sync material.
+    fn await_floor(self: *Validator) !DkgPlan.Material {
+        const gpa = self.gpa;
+        var receiver = try self.probe_mailbox.subscribe();
+        defer receiver.deinit();
+        var artifact = receiver.recv() catch return error.ProbeStopped;
+        defer artifact.deinit();
+        const output = &artifact.info.output;
+        const players = try output.players.clone(gpa);
+        const sharing = try output.public.clone(gpa);
+        const local = self.node_config.public_key();
+        const info = provider_mod.SchemeInfo.init(local, players, sharing, null);
+        try self.registrar.register(self.io, artifact.info.epoch, info);
+        try self.plan.set_floor(&artifact.floor);
+        var material_info = try artifact.info.clone(gpa);
+        errdefer material_info.deinit(gpa);
+        const floor = try artifact.floor.clone(gpa);
+        assert(self.plan.floor() != null);
+        return .{ .info = material_info, .floor = floor };
+    }
+
+    /// Opens marshal's archives, broadcast, and backfill, starting from the plan's floor when
+    /// it holds one.
+    fn init_marshal(self: *Validator, ctx: Ctx) !void {
+        const gpa = self.gpa;
         const raw = try self.genesis();
         const digested = try Node.Variant.Block.precomputed(gpa, raw, raw.digest());
+        var start: ?Node.Start = null;
+        if (self.plan.floor()) |floor| start = .{ .floor = try floor.clone(gpa) };
         try self.node.init(ctx, .{
             .public_key = self.node_config.public_key(),
             .peer_provider = self.net.oracle(),
@@ -424,6 +463,7 @@ const Validator = struct {
             .partition_prefix = partition_prefix,
             .page_cache = &self.page_cache,
             .genesis = digested,
+            .start = start,
             .block_codec_config = {},
             .blocks_per_epoch = types.blocks_per_epoch,
             .items_per_section = types.items_per_section,
@@ -433,8 +473,6 @@ const Validator = struct {
             .fetch_timeout = .from_secs(2),
             .fetch_retry_delay = .from_millis(100),
         }, node_channel(self.channels.backfill), node_channel(self.channels.broadcast));
-        errdefer self.node.deinit();
-        try self.init_probe();
     }
 
     fn init_probe(self: *Validator) !void {
@@ -465,7 +503,7 @@ const Validator = struct {
     }
 
     /// Creates the QMDB resolver and the DKG state-sync plan.
-    fn init_sync(self: *Validator, ctx: Ctx) !void {
+    fn init_sync(self: *Validator, ctx: Ctx, material: ?DkgPlan.Material) !void {
         const oracle = self.net.oracle();
         self.qmdb = try Qmdb.create(self.gpa, self.io, ctx.scope.child("qmdb_resolver"), .{
             .peer_provider = oracle,
@@ -484,8 +522,8 @@ const Validator = struct {
             .partition_prefix = partition_prefix,
             .max_participants = types.max_participants,
             .max_supported_mode = types.max_supported_mode,
-        }, null);
-        assert(self.plan.floor() == null);
+        }, material);
+        assert(material == null or self.syncing);
     }
 
     /// The reshare actor and its event journal. The orchestrator enters an epoch only once the
@@ -539,6 +577,9 @@ const Validator = struct {
             .marshal = self.node.mailbox.clone(),
             .mailbox_size = types.mailbox_size,
             .plan = &self.plan,
+            .sync_config = sync_config,
+            .resolvers = &self.qmdb.mailbox,
+            .floor = self.node.floor,
         });
         errdefer self.stateful.deinit();
         const blocks = types.blocks_per_epoch;
@@ -587,13 +628,26 @@ const Validator = struct {
         assert(self.orchestrator.config.blocks_per_epoch == types.blocks_per_epoch);
     }
 
+    /// Loads the node and starts what runs before marshal: the network's peers and the probe.
     fn init(self: *Validator, ctx: Ctx, arena: Allocator, dir: Io.Dir, state_sync: bool) !void {
         self.gpa = ctx.gpa();
         self.io = ctx.io();
         try self.init_network(ctx, arena, dir);
         try self.init_schemes(ctx);
-        try self.init_marshal(ctx, state_sync);
-        try self.init_sync(ctx);
+        try self.init_plan(ctx, state_sync);
+        try self.init_probe();
+    }
+
+    /// Initializes marshal and every actor over it; `material` is the DKG state-sync start.
+    fn init_actors(
+        self: *Validator,
+        ctx: Ctx,
+        arena: Allocator,
+        material: ?DkgPlan.Material,
+    ) !void {
+        assert(self.syncing == (material != null));
+        try self.init_marshal(ctx);
+        try self.init_sync(ctx, material);
         try self.init_reshare(ctx);
         try self.init_application(ctx, arena);
         try self.init_orchestrator(ctx);
@@ -632,30 +686,22 @@ const Validator = struct {
         return self.node.watch_broadcast();
     }
 
-    /// Attaches the application database to the QMDB resolver once `Stateful` opens it, so
-    /// the node serves peers' state sync (commonware's `attach_databases` after recovery).
-    fn attach_task(self: *Validator) anyerror!void {
-        const databases = try self.stateful_mailbox.subscribe_databases();
-        try self.qmdb.mailbox.attach_database(databases);
-    }
-
     /// Starts every actor and runs until one stops (commonware's `Handle::select`).
     fn supervise(self: *Validator, ctx: Ctx) anyerror!void {
         const io = self.io;
+        // Started first so it stops last: the resolver borrows its databases.
+        var stateful_task = try self.stateful.start();
+        defer _ = stateful_task.cancel(io) catch {};
         const qmdb_channel = self.channels.qmdb;
         var qmdb_task = try self.qmdb.actor.start(qmdb_channel.sender, qmdb_channel.receiver);
         defer _ = qmdb_task.cancel(io) catch {};
         var handles: [5]Handle = undefined;
-        handles[0] = try ctx.child("dkg_probe").spawn(probe_task, .{self});
+        handles[0] = self.probe_handle;
         handles[1] = try ctx.child("reshare").spawn(reshare_task, .{self});
         handles[2] = try ctx.child("orchestrator").spawn(orchestrator_task, .{self});
         handles[3] = try self.node.start(self.reporter(ctx));
         handles[4] = try ctx.child("buffer").spawn(broadcast_task, .{self});
         try self.probe_mailbox.attach(.{ .mailbox = self.node.mailbox.clone() });
-        var stateful_task = try self.stateful.start();
-        defer _ = stateful_task.cancel(io) catch {};
-        var attach = try io.concurrent(attach_task, .{self});
-        defer _ = attach.cancel(io) catch {};
         return try runtime.context.select(anyerror!void, io, &handles);
     }
 
@@ -671,6 +717,7 @@ const Validator = struct {
         self.reshare_store.deinit();
         self.fence.close();
         self.dkg_plan.deinit();
+        self.qmdb.mailbox.deinit();
         self.probe_mailbox.deinit();
         self.probe.deinit();
         self.verifier.deinit(gpa);
@@ -707,6 +754,15 @@ pub fn run(ctx: Ctx, arena: Allocator, node_dir: []const u8, state_sync: bool) !
     defer self.deinit();
     var network_task = try io.concurrent(run_network, .{self.net});
     defer network_task.cancel(io) catch {};
+    self.probe_handle = try ctx.child("dkg_probe").spawn(Validator.probe_task, .{self});
+    const material: ?DkgPlan.Material = if (self.syncing) self.await_floor() catch |err| {
+        if (self.probe_handle.abort()) |_| {} else |_| {}
+        return err;
+    } else null;
+    self.init_actors(ctx, arena, material) catch |err| {
+        if (self.probe_handle.abort()) |_| {} else |_| {}
+        return err;
+    };
     self.supervise(ctx) catch |err| {
         ctx.tracer(target).event(.@"error", "validator task failed", .{ .err = err });
     };

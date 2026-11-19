@@ -24,8 +24,11 @@ setup. Owns `examples/dkg` (commonware `examples/dkg`).
 - [x] `validator` run: p2p, broadcast, marshal, probe, QMDB resolver, reshare, orchestrator,
       and the stateful application. A 4-peer, committee-3 cluster reshares every epoch
       (`completed reshare ceremony ... success=true` through epoch 3) and recovers on restart.
-- [ ] `validator --state-sync` and startup from a persisted state-sync floor: needs glue's
-      bootstrap `Node` to take a floor start, plus `Stateful`'s resolvers and sync config.
+- [x] `validator --state-sync` and startup from a persisted state-sync floor: the probe runs
+      before marshal, and a syncing startup waits for its artifact, registers that epoch's
+      verifier, persists the floor, and starts marshal (`Node.start`), the DKG state-sync plan,
+      and `Stateful` (`floor`, resolvers, `sync_config`) from it. A late joiner (5 peers,
+      committee 4, joining at epoch 2) syncs in about 5 s, reshares, and survives restarts.
 - [x] `bootstrap.complete`: await the ceremony, hand epoch zero's share to the validator
       store, and write the genesis to sibling validators (singleton ceremony test).
 - [x] `bootstrap` run on discovery p2p and the production runner (`network.zig` holds the
@@ -47,11 +50,12 @@ setup. Owns `examples/dkg` (commonware `examples/dkg`).
   order of checks (see `cli.zig`). `--worker-threads` is parsed and ignored: the production
   runner runs on `std.Io.Threaded`, not Tokio.
 - `validator` builds marshal from glue's bootstrap `Node`, so marshal's own partition is
-  `validator-marshal` (commonware: `validator`) and it always starts from genesis; a state-sync
-  startup fails with `error.StateSyncUnsupported`. The QMDB resolver and `Stateful` run as
-  plain futures (their awaits are not cancelable) and stop at shutdown rather than in
-  `select`. zigware's `Stateful` attaches its databases to the resolver only after state sync,
-  so the validator attaches them once `Stateful` opens them (commonware's recovery path).
+  `validator-marshal` (commonware: `validator`). The QMDB resolver and `Stateful` run as plain
+  futures (their awaits are not cancelable) and stop at shutdown rather than in `select`; the
+  resolver stops first, since it borrows `Stateful`'s databases.
+- `DynamicProvider.register` replaces an epoch's scheme as commonware's `insert` does (the
+  state-sync verifier, then the reshare actor's scheme) and keeps replaced schemes until
+  `deinit`, standing in for commonware's `Arc`.
 - `Reporter` fans each finalized block out to the stateful, orchestrator, and reshare
   mailboxes with a clone of the block and acknowledgement each, then logs it
   (`commonware_dkg::types: finalized block`, commonware's `LogReporter`).
@@ -78,3 +82,4 @@ setup. Owns `examples/dkg` (commonware `examples/dkg`).
 - 2026-11-19: the `bootstrap` subcommand on the production runtime (examples lane).
 - 2026-11-19: the validator composition, resharing across epochs on 4 nodes (examples lane).
 - 2026-11-19: the dkg demo recording (examples lane).
+- 2026-11-19: `validator --state-sync` and floor startup, with a late joiner (examples lane).
