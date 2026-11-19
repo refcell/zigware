@@ -495,9 +495,9 @@ pub fn sync_set(
 }
 
 /// The sync `Source` over a shared database (commonware's `impl Source for Shared<DB>`): it
-/// serves each request from `DB.sync_source()` while holding the database's lock, so a
-/// mutation never interleaves with a read. `DB` declares `SyncSource`, a `qmdb.sync` source,
-/// and `sync_source(*DB) SyncSource`.
+/// serves each request from `DB.sync_source()` under a read guard, so a mutation never
+/// interleaves with a read, and databases with concurrent reads serve beside other readers.
+/// `DB` declares `SyncSource`, a `qmdb.sync` source, and `sync_source(*const DB) SyncSource`.
 pub fn SharedSource(comptime DB: type) type {
     const S = DB.SyncSource;
     comptime qmdb.sync.source.assert_source(S);
@@ -518,11 +518,11 @@ pub fn SharedSource(comptime DB: type) type {
             request: Request,
         ) (Error || Io.Cancelable)!qmdb.sync.Served(Response) {
             assert(request.max_ops() > 0);
-            // Sources read through `*DB` (the authenticated journal hashes through its own
-            // state), so serving excludes other readers even when they share the database.
-            var slot = try self.shared.write();
-            defer slot.put();
-            var source = slot.get().sync_source();
+            // Sources read through `*const DB`: a database with concurrent reads serves
+            // beside other readers; others hold their exclusive read lock.
+            var guard = try self.shared.read();
+            defer guard.deinit();
+            var source = guard.get().sync_source();
             return source.serve(gpa, request);
         }
     };

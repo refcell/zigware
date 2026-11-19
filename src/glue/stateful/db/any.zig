@@ -33,7 +33,7 @@ pub fn Any(comptime D: type, comptime H: type) type {
         pub const Shared = db.Shared(Self);
         /// qmdb any/current reads, batch reads, and merkleize take `*const` and are safe from
         /// several tasks at once, so `Shared` read guards share the database.
-        pub const concurrent_reads = true;
+        pub const concurrent_reads = false;
 
         inner: D,
 
@@ -110,7 +110,7 @@ pub fn Any(comptime D: type, comptime H: type) type {
         /// Serves this database's operations to syncing peers (`state_sync.SharedSource`).
         pub const SyncSource = qmdb.sync.JournalSource(D.Family, D.Log);
 
-        pub fn sync_source(self: *Self) SyncSource {
+        pub fn sync_source(self: *const Self) SyncSource {
             return .{ .journal = &self.inner.log };
         }
 

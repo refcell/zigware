@@ -87,7 +87,7 @@ pub fn Compact(comptime F: type, comptime O: type, comptime H: type) type {
             const ServeError = @typeInfo(@typeInfo(@TypeOf(D.serve)).@"fn".return_type.?)
                 .error_union.error_set;
 
-            database: *D,
+            database: *const D,
 
             /// The response is allocated with the database's allocator, which must be `gpa`.
             pub fn serve(
@@ -102,7 +102,7 @@ pub fn Compact(comptime F: type, comptime O: type, comptime H: type) type {
             }
         };
 
-        pub fn sync_source(self: *Self) SyncSource {
+        pub fn sync_source(self: *const Self) SyncSource {
             return .{ .database = &self.inner };
         }
 

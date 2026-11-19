@@ -35,7 +35,7 @@ pub fn Immutable(F: type, K: type, E: type, C: type, H: type, T: type) type {
         pub const Shared = db.Shared(Self);
         /// qmdb keyless/immutable reads, batch reads, and merkleize take `*const` and are safe
         /// from several tasks at once, so `Shared` read guards share the database.
-        pub const concurrent_reads = true;
+        pub const concurrent_reads = false;
 
         inner: D,
 
@@ -93,7 +93,7 @@ pub fn Immutable(F: type, K: type, E: type, C: type, H: type, T: type) type {
         /// locked database, which `state_sync.SharedSource` takes under the lock).
         pub const SyncSource = qmdb.sync.JournalSource(F, D.Journal);
 
-        pub fn sync_source(self: *Self) SyncSource {
+        pub fn sync_source(self: *const Self) SyncSource {
             return .{ .journal = &self.inner.journal };
         }
 

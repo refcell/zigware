@@ -476,11 +476,16 @@ ones: d = deployer (thread T-01a1d5b9-c237), u = utils, j = storage-journal
 - [x] db: `Shared` as commonware's `AsyncRwLock` for DBs declaring `concurrent_reads = true`
   (any and current): an `Io.RwLock` whose read guards give `*const DB`, while `write` keeps
   `*DB`. Batches merkleize on the reader's task with the database's allocator, which must be
-  thread-safe. `SharedSource.serve` and proofs take the exclusive slot (the authenticated
-  journal hashes through its own state). Tested in adapters_test.zig: guard sharing and
+  thread-safe. `SharedSource.serve` reads through a read guard (`sync_source` takes
+  `*const Self` since storage's 300b704). Tested in adapters_test.zig: guard sharing and
   writers waiting (deterministic), and readers merkleizing beside a writer (threaded).
-- [x] db: keyless and immutable opt into `concurrent_reads` too (const reads since 9589543);
-  compact stays on the mutex.
+- [ ] db: re-enable `concurrent_reads` on any, current, keyless, and immutable. It is off
+  because merkle batch reference counts (`storage/merkle/batch.zig`'s `references`,
+  `strong`, `weak`) are plain integers where commonware's are `Arc`s: with shared guards one
+  task's merkleize retains a shared parent's ancestors while another releases a sibling, and
+  processing_early/late tests crashed (write after free, unreachable) in 2 of 6 parallel
+  runs under load, 0 of 12 with the opt-in off. Flip the four flags once the counts are
+  atomic; compact stays on the mutex.
 - [ ] tests: single_db_app.rs's engine on `glue.simulate` (simplex, marshal, buffered broadcast,
   marshal and qmdb resolvers, probe, `Stateful`), then tests/mod.rs's scenarios (finalize,
   crash/restart, pruning, state sync, lossy, partitions), multi_db_app, floor, properties.
