@@ -11,6 +11,7 @@ const common = @import("tests/common.zig");
 const broadcast = @import("broadcast");
 const parallel = @import("parallel");
 const consensus_types = @import("../../types.zig");
+const handler = @import("../resolver/handler.zig");
 
 const gpa = testing.allocator;
 const Mailbox = core_mailbox.Mailbox(shared.S, harness.CodingVariant);
@@ -1593,6 +1594,342 @@ test "coding dispatch delivers staged block without archive read" {
             try testing.expectEqual(address, ops[written].put.payload_address);
             // Dispatch must not read the finalized block back from the archive.
             for (ops[written..]) |op| try testing.expect(!op.eql(.{ .get = .new(1) }));
+        }
+    }.body);
+}
+
+test "malformed commitment config rejected at deserialization" {
+    const codec = @import("codec");
+    // All-zero bytes carry an invalid coding config (zero shard counts).
+    const malformed: [common.Commitment.fixed_size]u8 = @splat(0);
+    try testing.expect(std.meta.isError(codec.decode(common.Commitment, gpa, &malformed)));
+    // A valid commitment still round-trips.
+    const valid: common.Commitment = .init(
+        harness.Sha256.hash(&.{"block"}),
+        harness.Sha256.hash(&.{"root"}),
+        harness.Sha256.hash(&.{"context"}),
+        common.committee_config(),
+    );
+    const encoded = codec.encode_fixed(common.Commitment, valid);
+    const decoded = try codec.decode(common.Commitment, gpa, &encoded);
+    try testing.expect(decoded.eql(valid));
+}
+
+test "certify propagates application verify failure" {
+    try common.run(struct {
+        fn body(ctx: Ctx) anyerror!void {
+            var validators = try fixture();
+            defer validators.deinit(gpa);
+            var stack: common.ValidatorStack = undefined;
+            const app = common.MockVerifyingApp.with_verify_result(gpa, false);
+            try stack.start_with(ctx, &validators, app);
+            defer stack.stop();
+            const me = validators.participants[0];
+            const shards = stack.shards();
+
+            const genesis = try common.genesis_block(gpa);
+            const parent_round = common.round_at(0, 1);
+            const parent_context: common.CodingCtx = .{
+                .round = parent_round,
+                .leader = me,
+                .parent = .{ .zero(), harness.genesis_commitment() },
+            };
+            const parent = try common.coded(gpa, parent_context, genesis.digest(), 1, 100);
+            const parent_digest = parent.digest();
+            const parent_commitment = parent.commitment();
+            try shards.disperse(parent_round, parent);
+            // A valid child passes the optimistic pre-checks.
+            const round = common.round_at(0, 2);
+            const context: common.CodingCtx = .{
+                .round = round,
+                .leader = me,
+                .parent = .{ .new(1), parent_commitment },
+            };
+            const block = try common.coded(gpa, context, parent_digest, 2, 200);
+            const commitment = block.commitment();
+            try shards.disperse(round, block);
+            try ctx.sleep(.fromMilliseconds(10));
+            try testing.expect(try verify_now(&stack, context, commitment));
+            // Certify observes the deferred application failure.
+            try testing.expect(!try certify_now(&stack, round, commitment));
+        }
+    }.body);
+}
+
+test "certify not poisoned by equivocating parent verify" {
+    try common.run(struct {
+        fn body(ctx: Ctx) anyerror!void {
+            var validators = try fixture();
+            defer validators.deinit(gpa);
+            var stack: common.ValidatorStack = undefined;
+            try stack.start(ctx, &validators);
+            defer stack.stop();
+            const me = validators.participants[0];
+            const shards = stack.shards();
+
+            // View 1: the parent this validator last certified.
+            const genesis = try common.genesis_block(gpa);
+            const certified_context: common.CodingCtx = .{
+                .round = common.round_at(0, 1),
+                .leader = shared.default_leader(),
+                .parent = .{ .zero(), harness.genesis_commitment() },
+            };
+            const certified = try common.coded(gpa, certified_context, genesis.digest(), 1, 100);
+            const certified_digest = certified.digest();
+            const certified_commitment = certified.commitment();
+            try shards.disperse(certified_context.round, certified);
+            // View 2: notarized by the network but only nullified here.
+            const notarized_context: common.CodingCtx = .{
+                .round = common.round_at(0, 2),
+                .leader = me,
+                .parent = .{ .new(1), certified_commitment },
+            };
+            const notarized = try common.coded(gpa, notarized_context, certified_digest, 2, 200);
+            const notarized_digest = notarized.digest();
+            const notarized_commitment = notarized.commitment();
+            try shards.disperse(notarized_context.round, notarized);
+            // View 3 builds on view 2.
+            const round = common.round_at(0, 3);
+            const block_context: common.CodingCtx = .{
+                .round = round,
+                .leader = me,
+                .parent = .{ .new(2), notarized_commitment },
+            };
+            const block = try common.coded(gpa, block_context, notarized_digest, 3, 300);
+            const commitment = block.commitment();
+            try shards.disperse(round, block);
+
+            // The equivocating proposal names view 1 as parent; the commitment's context
+            // digest exposes it, so verify rejects it without registering a gate.
+            const equivocating: common.CodingCtx = .{
+                .round = round,
+                .leader = me,
+                .parent = .{ .new(1), certified_commitment },
+            };
+            var verify = try stack.marshaled.start_verify(equivocating, commitment);
+            defer verify.deinit();
+            try testing.expect(!try verdict_within(ctx, &verify, 5_000));
+            // Certification of the notarized commitment recovers through its embedded context.
+            var certify = try stack.marshaled.start_certify(round, commitment);
+            defer certify.deinit();
+            try testing.expect(try verdict_within(ctx, &certify, 5_000));
+        }
+    }.body);
+}
+
+test "backfill block mismatched commitment" {
+    try common.run(struct {
+        fn body(ctx: Ctx) anyerror!void {
+            var validators = try fixture();
+            defer validators.deinit(gpa);
+            const pair = validators.participants[0..2];
+            var network: shared.TestNetwork = try .start(gpa, ctx.io(), 1, pair, 1024 * 1024);
+            defer network.stop();
+            const Validator = common.ValidatorStack.Validator;
+            var nodes: [2]*Validator = undefined;
+            var started: usize = 0;
+            defer for (nodes[0..started]) |node| node.crash();
+            for (&nodes, pair, 0..) |*node, me, index| {
+                const node_ctx = ctx.child("validator").with_attribute("index", index);
+                const provider: common.Provider = .init(&validators.schemes[index]);
+                const app = try common.App.init(gpa, ctx.io());
+                node.* = try Validator.setup(node_ctx, network.network, me, provider, 1, app);
+                started += 1;
+            }
+            try network.link_all(pair, shared.link);
+
+            // Same total shards (4) with another split: another root and config.
+            const config_a = common.committee_config();
+            const config_b: @import("coding").Config = .{
+                .minimum_shards = config_a.minimum_shards + 1,
+                .extra_shards = config_a.extra_shards - 1,
+            };
+            const genesis = try common.genesis_block(gpa);
+            const round = common.round_at(0, 1);
+            const context: common.CodingCtx = .{
+                .round = round,
+                .leader = pair[0],
+                .parent = .{ .zero(), harness.genesis_commitment() },
+            };
+            const raw = try harness.make_coding_block(gpa, context, genesis.digest(), .new(1), 100);
+            var block_a = try common.encode_block(gpa, raw, config_a);
+            defer block_a.deinit(gpa);
+            const block_b = try common.encode_block(gpa, raw, config_b);
+            try testing.expect(block_a.digest().eql(block_b.digest()));
+            try testing.expect(!block_a.commitment().eql(block_b.commitment()));
+
+            // Validator 1 holds the block under the other coding.
+            try testing.expect(try nodes[1].mailbox.verified(round, block_b));
+            // Validator 0 finalizes the first commitment, fetches it, and must reject
+            // validator 1's response, whose coding config does not match the key.
+            const proposal = common.Proposal.init(round, .zero(), block_a.commitment());
+            var finalization = try H.make_finalization(gpa, &validators, proposal, quorum);
+            defer finalization.deinit(gpa);
+            _ = nodes[0].mailbox.report(.{ .finalization = finalization });
+            try ctx.sleep(.fromSeconds(5));
+            try testing.expect(try nodes[0].mailbox.get_block(.{ .height = .new(1) }) == null);
+            try testing.expect(try nodes[0].mailbox.get_finalization(.new(1)) == null);
+        }
+    }.body);
+}
+
+/// Whether the shards of `block` were never computed (a delivery that skipped re-coding).
+fn shards_absent(block: *const common.Block) !bool {
+    var shard = (try block.shard(gpa, 0)) orelse return true;
+    shard.deinit(gpa);
+    return false;
+}
+
+/// Whether `resolver` fetched `commitment` for a finalized-by-round subscriber.
+fn fetched_finalized_by_round(
+    resolver: common.RecordingResolver,
+    commitment: common.Commitment,
+) !bool {
+    const fetches = try resolver.fetches(gpa);
+    defer gpa.free(fetches);
+    for (fetches) |item| {
+        if (item.key != .block or !item.key.block.eql(commitment)) continue;
+        if (item.subscriber == .finalized and item.subscriber.finalized == .by_round) return true;
+    }
+    return false;
+}
+
+/// Whether the actor stores a block at `height`.
+fn stored_at(stack: *common.ActorStack, height: u64) !bool {
+    var block = (try stack.mailbox.get_block(.{ .height = .new(height) })) orelse return false;
+    block.deinit(gpa);
+    return true;
+}
+
+test "coding finalized block delivery skips recoding" {
+    try common.run(struct {
+        fn body(ctx: Ctx) anyerror!void {
+            var validators = try fixture();
+            defer validators.deinit(gpa);
+            const provider: common.Provider = .init(&validators.schemes[0]);
+            var buffer = try common.RecordingCodingBuffer.init(gpa, ctx.io());
+            defer buffer.deinit();
+            var stack = try common.start_coding_actor_with_recording(
+                ctx.child("validator"),
+                "finalized-block-delivery",
+                provider,
+                buffer,
+            );
+            defer stack.stop();
+            var candidate = try common.missing_candidate(gpa, validators.participants[0]);
+            defer candidate.block.deinit(gpa);
+            const commitment = candidate.block.commitment();
+            var subscription = try stack.mailbox.subscribe_by_commitment(commitment, .wait);
+            defer subscription.deinit();
+            try ctx.sleep(.fromMilliseconds(100));
+
+            // The finalization names the commitment, so the fetched block is rebuilt from it
+            // without recomputing the coding root.
+            const round = candidate.context.round;
+            const proposal = common.Proposal.init(round, .zero(), commitment);
+            var finalization = try H.make_finalization(gpa, &validators, proposal, quorum);
+            defer finalization.deinit(gpa);
+            const value = try common.encode_coded(gpa, &candidate.block);
+            defer gpa.free(value);
+            try stack.resolver.respond_to_next_fetch(value);
+            _ = stack.mailbox.report(.{ .finalization = finalization });
+            var delivered = try subscription.recv();
+            defer delivered.deinit(gpa);
+            try testing.expect(delivered.commitment().eql(commitment));
+            try testing.expect(try shards_absent(&delivered));
+            try testing.expect(try stack.resolver.wait_for_delivery_response());
+            try testing.expect(try fetched_finalized_by_round(stack.resolver, commitment));
+            try testing.expect(try stored_at(&stack, 1));
+        }
+    }.body);
+}
+
+test "coding coalesced block delivery trusts finalized subscriber" {
+    try common.run(struct {
+        fn body(ctx: Ctx) anyerror!void {
+            var validators = try fixture();
+            defer validators.deinit(gpa);
+            const provider: common.Provider = .init(&validators.schemes[0]);
+            var buffer = try common.RecordingCodingBuffer.init(gpa, ctx.io());
+            defer buffer.deinit();
+            var stack = try common.start_coding_actor_with_recording(
+                ctx.child("validator"),
+                "coalesced-block-delivery",
+                provider,
+                buffer,
+            );
+            defer stack.stop();
+            var candidate = try common.missing_candidate(gpa, validators.participants[0]);
+            defer candidate.block.deinit(gpa);
+            const commitment = candidate.block.commitment();
+            const height: consensus_types.Height = .new(1);
+            var subscription = try stack.mailbox.subscribe_by_commitment(commitment, .wait);
+            defer subscription.deinit();
+            try ctx.sleep(.fromMilliseconds(100));
+
+            // One key carries an untrusted ancestry subscriber and a finalized-chain one; the
+            // finalized subscriber alone binds the coding root, so the shared delivery decodes
+            // without recomputing it and lands in the finalized archive.
+            const subscribers = [_]common.Annotation{
+                .{ .untrusted = height },
+                .{ .finalized = .{ .by_height = height } },
+            };
+            const value = try common.encode_coded(gpa, &candidate.block);
+            defer gpa.free(value);
+            var sender = stack.resolver.handler_clone();
+            defer sender.deinit();
+            const Delivery = handler.Message(common.Commitment).Delivery;
+            const key: common.ResolverKey = .{ .block = commitment };
+            const delivery: Delivery = .{ .key = key, .subscribers = &subscribers };
+            var response = try sender.deliver(delivery, value);
+            defer response.deinit();
+            const outcome = try response.recv();
+            try testing.expect(std.meta.eql(outcome, common.Outcome{ .resolved = .complete }));
+            var delivered = try subscription.recv();
+            defer delivered.deinit(gpa);
+            try testing.expect(delivered.commitment().eql(commitment));
+            try testing.expect(try shards_absent(&delivered));
+            try testing.expect(try stored_at(&stack, 1));
+        }
+    }.body);
+}
+
+test "coding finalized block delivery rejects digest mismatch" {
+    try common.run(struct {
+        fn body(ctx: Ctx) anyerror!void {
+            var validators = try fixture();
+            defer validators.deinit(gpa);
+            const provider: common.Provider = .init(&validators.schemes[0]);
+            var buffer = try common.RecordingCodingBuffer.init(gpa, ctx.io());
+            defer buffer.deinit();
+            var stack = try common.start_coding_actor_with_recording(
+                ctx.child("validator"),
+                "finalized-block-digest-mismatch",
+                provider,
+                buffer,
+            );
+            defer stack.stop();
+            var candidate = try common.missing_candidate(gpa, validators.participants[0]);
+            defer candidate.block.deinit(gpa);
+            const commitment = candidate.block.commitment();
+            const genesis = try common.genesis_block(gpa);
+            var other = try common.coded(gpa, candidate.context, genesis.digest(), 1, 101);
+            defer other.deinit(gpa);
+            try testing.expect(!other.digest().eql(candidate.block.digest()));
+
+            // The finalized decode skips the root, so the digest check rejects a different
+            // block under the same coding config.
+            const round = candidate.context.round;
+            const proposal = common.Proposal.init(round, .zero(), commitment);
+            var finalization = try H.make_finalization(gpa, &validators, proposal, quorum);
+            defer finalization.deinit(gpa);
+            const value = try common.encode_coded(gpa, &other);
+            defer gpa.free(value);
+            try stack.resolver.respond_to_next_fetch(value);
+            _ = stack.mailbox.report(.{ .finalization = finalization });
+            try ctx.sleep(.fromMilliseconds(100));
+            try testing.expect(!try stack.resolver.wait_for_delivery_response());
+            try testing.expect(!try stored_at(&stack, 1));
         }
     }.body);
 }

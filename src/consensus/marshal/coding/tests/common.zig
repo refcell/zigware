@@ -899,3 +899,16 @@ pub fn coded(gpa: Allocator, context: CodingCtx, parent: D, height: u64, timesta
     const raw = try harness.make_coding_block(gpa, context, parent, .new(height), timestamp);
     return encode_block(gpa, raw, committee_config());
 }
+
+/// `block.encode()`: a coded block's wire bytes (it writes but is not decodable as written).
+/// The caller frees them.
+pub fn encode_coded(gpa: Allocator, block: *const Block) ![]u8 {
+    const codec = @import("codec");
+    const size = block.encode_size();
+    const bytes = try gpa.alloc(u8, size);
+    errdefer gpa.free(bytes);
+    var writer: codec.Writer = .init(bytes);
+    block.write(&writer);
+    assert(writer.written().len == size);
+    return bytes;
+}
