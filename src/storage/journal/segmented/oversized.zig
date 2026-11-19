@@ -42,6 +42,7 @@ const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const codec = @import("codec");
 const runtime = @import("runtime");
+const Completion = runtime.storage.Completion;
 const Storage = runtime.storage.Storage;
 const paged = runtime.buffer.paged;
 const durability = @import("../durability.zig");
@@ -374,13 +375,17 @@ pub fn Oversized(comptime I: type, comptime V: type) type {
             if (dirty) try tracking.persist();
         }
 
-        /// commonware's `start_sync_tracked`: syncs complete synchronously.
+        /// commonware's `start_sync_tracked`. Tracked syncs still complete, and publish their
+        /// markers, before returning here (its marker pipeline is not ported yet), so the
+        /// completion is ready.
         pub fn start_sync_tracked(
             self: *Self,
             sections: []const u64,
             active: []const u64,
-        ) Error!void {
-            return self.sync_tracked(sections, active);
+        ) Error!Completion {
+            assert(self.tracking != null);
+            try self.sync_tracked(sections, active);
+            return Completion.ok;
         }
 
         /// Sync both journals for the given `sections` (ascending).
@@ -390,9 +395,16 @@ pub fn Oversized(comptime I: type, comptime V: type) type {
             try self.values.sync(sections);
         }
 
-        /// commonware's `start_sync`: syncs complete synchronously, so this is `sync`.
-        pub fn start_sync(self: *Self, sections: []const u64) Error!void {
-            return self.sync(sections);
+        /// Start syncing both journals for `sections`, returning a completion for both (one
+        /// reference, owned by the caller). A tracked journal syncs before returning.
+        pub fn start_sync(self: *Self, sections: []const u64) Error!Completion {
+            if (self.tracking != null) return self.start_sync_tracked(sections, sections);
+            const index = try self.index.start_sync(sections);
+            const values = self.values.start_sync(sections) catch |err| {
+                index.release();
+                return err;
+            };
+            return Completion.join(index, values);
         }
 
         /// Sync every section.

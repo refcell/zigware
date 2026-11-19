@@ -153,6 +153,21 @@ the `DelayedSyncContext` test mock (`runtime/src/mocks.rs:869-1190`) holds syncs
 5. qmdb (any, current, keyless, immutable, store, compact `pending_sync`).
 6. glue `Barrier` and marshal (replace `store.Durable`'s paced stand-in).
 
+### Progress
+- Step 1 (9e1f838, 83d1393): runtime `Completion`, `Blob.start_sync`, `DelayedSync`; buffer
+  and paged writers. `Completion.join` holds 8 in-flight leaves and waits for the oldest when
+  more are folded, so a fold never overflows (a fold over more than 8 parked syncs blocks
+  until the oldest completes; the manager test of 30 and 64 sections runs at 1, 2, and 8).
+- Step 2a (eaa11a3): contiguous blobs `tail_predecessor_sync`; fixed/variable `start_sync`
+  return a completion recorded in `Barrier(durability.Sync)`; the 12 shared-suite tests.
+- Step 2b: segmented manager `start_sync` (joined, reused when in flight), and every section
+  removal (prune, remove, truncate, clear, destroy) settles started syncs first, an already
+  failed one surfacing at once; segmented fixed/variable/glob and untracked oversized return
+  completions; the manager's 7 in-flight tests. Not yet: oversized's tracked marker pipeline
+  (`start_sync_tracked` still syncs inline and returns a ready completion, so
+  `..._alignment_sync_concurrency` and `..._dropped_handle_driven_by_next_sync` stay open),
+  segmented fixed/variable's 6 wait tests, checkpoint and metadata `start_sync` (inline).
+
 ### Tests this unlocks (commonware file: tests)
 - runtime (~40): storage/{audited,faulty,metered,tokio/mod,tokio/blob,iouring}.rs, the 10
   named at runtime.md:608-618 plus faulty's two overlapping-write epoch tests (619-621);

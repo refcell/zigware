@@ -32,6 +32,7 @@ const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const codec = @import("codec");
 const runtime = @import("runtime");
+const Completion = runtime.storage.Completion;
 const paged = runtime.buffer.paged;
 const Storage = runtime.storage.Storage;
 const frame = @import("../frame.zig");
@@ -228,7 +229,8 @@ pub fn Journal(comptime V: type) type {
             return self.manager.sync(targets);
         }
 
-        pub fn start_sync(self: *Self, targets: []const u64) Error!void {
+        /// Start syncing `targets`, returning their completion (`Manager.start_sync`).
+        pub fn start_sync(self: *Self, targets: []const u64) Error!Completion {
             return self.manager.start_sync(targets);
         }
 

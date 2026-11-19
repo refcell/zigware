@@ -1,8 +1,8 @@
 //! Tests for the segmented section manager, ported from commonware's `segmented/manager.rs`.
 //!
 //! commonware records removal order with a reversing storage wrapper; here a removal fault
-//! after the first removal shows which section went first. Tests of in-flight `start_sync`
-//! handles have no counterpart: syncs complete synchronously.
+//! after the first removal shows which section went first. The in-flight `start_sync` tests are
+//! in manager_start_sync_test.zig.
 
 const std = @import("std");
 const testing = std.testing;
@@ -217,7 +217,7 @@ test "sync counts every selected section" {
     // Clean sections need no work but still count (commonware's `manager_synced_total`).
     try manager.sync_all();
     try manager.sync(&.{ 1, 2 });
-    try manager.start_sync(&.{ 1, 2 });
+    try (try manager.start_sync(&.{ 1, 2 })).wait_release();
     const buffer = (try manager.get(1)).?;
     _ = try buffer.append("x");
     try testing.expect(buffer.needs_sync());

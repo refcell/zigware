@@ -31,6 +31,7 @@ const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const codec = @import("codec");
 const runtime = @import("runtime");
+const Completion = runtime.storage.Completion;
 const Crc32 = @import("cryptography").crc32.Crc32;
 const Storage = runtime.storage.Storage;
 const frame = @import("../frame.zig");
@@ -193,8 +194,8 @@ pub fn Glob(comptime V: type) type {
             return self.manager.sync(targets);
         }
 
-        /// commonware's `start_sync`: syncs complete synchronously, so this is `sync`.
-        pub fn start_sync(self: *Self, targets: []const u64) Error!void {
+        /// Start syncing `targets`, returning their completion (`Manager.start_sync`).
+        pub fn start_sync(self: *Self, targets: []const u64) Error!Completion {
             return self.manager.start_sync(targets);
         }
 

@@ -12,6 +12,7 @@ const std = @import("std");
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const runtime = @import("runtime");
+const Completion = runtime.storage.Completion;
 const paged = runtime.buffer.paged;
 const Storage = runtime.storage.Storage;
 const Blob = runtime.storage.Blob;
@@ -276,9 +277,54 @@ pub fn Manager(comptime Factory: type) type {
             }
         }
 
-        /// commonware's `start_sync`: syncs complete synchronously, so this is `sync`.
-        pub fn start_sync(self: *Self, sections: []const u64) Error!void {
-            return self.sync(sections);
+        /// Start syncing the given sections, returning a completion (one reference, owned by
+        /// the caller) for every selected section's sync; it fails on the first failure. A
+        /// section with an in-flight sync and no newer writes reuses it. Releasing the
+        /// completion cancels nothing: a failure resurfaces on the section's next sync or
+        /// mutation. Every selected section counts, as in `sync`.
+        pub fn start_sync(self: *Self, sections: []const u64) Error!Completion {
+            assert(!self.failed);
+            errdefer self.failed = true;
+            for (sections) |section| try self.prune_guard(section);
+            var joined = Completion.ok;
+            errdefer joined.release();
+            for (sections) |section| {
+                const position = self.search(section);
+                if (!position.found) continue;
+                const buffer = &self.sections.items[position.index].buffer;
+                self.metrics.synced.metric().inc();
+                if (!buffer.needs_sync()) continue;
+                const started = try buffer.start_sync();
+                // `join` consumes both references, also on error.
+                const next = Completion.join(joined, started) catch |err| {
+                    joined = Completion.ok;
+                    return err;
+                };
+                joined = next;
+            }
+            return joined;
+        }
+
+        /// Wait for every section's started sync, so a failure surfaces before any removal.
+        /// A sync that already failed surfaces first, without waiting behind earlier in-flight
+        /// ones (commonware's `try_join_all`).
+        fn wait_for_syncs(self: *Self) Error!void {
+            for (self.sections.items) |*entry| {
+                const completion = switch (entry.buffer.sync_state) {
+                    .pending => |completion| completion,
+                    .clean, .dirty => continue,
+                };
+                const result = completion.poll() orelse continue;
+                result catch try settle(&entry.buffer);
+            }
+            for (self.sections.items) |*entry| try settle(&entry.buffer);
+        }
+
+        /// Wait for `buffer`'s started sync, if any.
+        fn settle(buffer: *Buffer) Error!void {
+            if (buffer.sync_state != .pending) return;
+            try buffer.wait_for_sync();
+            assert(buffer.sync_state != .pending);
         }
 
         /// Sync every section.
@@ -295,6 +341,8 @@ pub fn Manager(comptime Factory: type) type {
         fn remove_at(self: *Self, index: usize) Error!void {
             assert(index < self.sections.items.len);
             const section = self.sections.items[index].section;
+            // Settle a started sync before removing the section's blob.
+            try settle(&self.sections.items[index].buffer);
             try self.storage.remove(self.partition, &section_name(section));
             var entry = self.sections.orderedRemove(index);
             entry.buffer.deinit();
@@ -371,6 +419,7 @@ pub fn Manager(comptime Factory: type) type {
         /// Remove every blob and the partition, then free the manager.
         pub fn destroy(self: *Self) Error!void {
             defer self.deinit();
+            try self.wait_for_syncs();
             while (self.sections.items.len > 0) try self.remove_at(0);
             for (self.discarded.items) |section| {
                 try self.storage.remove(self.partition, &section_name(section));
@@ -387,6 +436,7 @@ pub fn Manager(comptime Factory: type) type {
             assert(!self.failed);
             errdefer self.failed = true;
             try self.remove_discarded();
+            try self.wait_for_syncs();
             while (self.sections.items.len > 0) try self.remove_at(0);
             self.oldest_retained_section = 0;
         }
@@ -451,4 +501,5 @@ pub fn Manager(comptime Factory: type) type {
 
 test {
     _ = @import("manager_test.zig");
+    _ = @import("manager_start_sync_test.zig");
 }

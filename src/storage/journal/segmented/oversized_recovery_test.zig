@@ -1367,7 +1367,7 @@ test "oversized recovery: a completed start_sync is recoverable" {
     defer h.deinit();
     var journal = try h.open_checkpoint(.{ .section = 0, .size = 0 });
     _ = try append(&journal, 1, 1, fill(1));
-    try journal.start_sync(&.{1});
+    try (try journal.start_sync(&.{1})).wait_release();
     journal.deinit();
     h.storage.crash();
     journal = try h.open_checkpoint(.{ .section = 1, .size = chunk });
@@ -1392,7 +1392,10 @@ test "oversized recovery: a failed value sync recovers clean" {
         });
         _ = try append(&journal, 1, 1, fill(1));
         // The caller is never acknowledged; the index sync may still land.
-        const result = if (started) journal.start_sync(&.{1}) else journal.sync(&.{1});
+        const result: anyerror!void = if (started) started: {
+            const completion = journal.start_sync(&.{1}) catch |err| break :started err;
+            break :started completion.wait_release();
+        } else journal.sync(&.{1});
         try testing.expectError(error.Io, result);
         journal.deinit();
         h.storage.crash();
