@@ -13,9 +13,24 @@ concurrency:
 
 jobs:
   test:
+    # One job running every package hit the 60-minute limit on every run. On a 6-core Mac,
+    # storage alone takes about 26 minutes, consensus 10, glue 6, cryptography 5, and the
+    # rest (test-light) a few, so they split into four jobs. All run Debug; the Linux jobs
+    # cover ReleaseSafe.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - job: storage
+            steps: test-storage
+          - job: consensus
+            steps: test-consensus
+          - job: glue-cryptography
+            steps: test-glue test-cryptography
+          - job: light
+            steps: test-light
+    name: test (${{ matrix.job }})
     runs-on: macos-latest
-    # Debug and ReleaseSafe back to back no longer fit in 30 minutes, so every run was cut
-    # off; per push, macOS runs Debug only, and the Linux jobs cover ReleaseSafe.
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
@@ -24,4 +39,4 @@ jobs:
           sh etc/scripts/install-zig.sh "$HOME/zig"
           echo "$HOME/zig" >> "$GITHUB_PATH"
       - name: test
-        run: zig build test --summary all
+        run: zig build ${{ matrix.steps }} --summary all

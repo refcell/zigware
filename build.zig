@@ -210,12 +210,16 @@ fn add_heavy_shard_options(b: *std.Build, options: *std.Build.Step.Options) void
 /// `test-rest`: every test `test` runs except consensus's, glue's, and storage's, which CI's
 /// other ReleaseSafe jobs run (`zig build test-consensus`, `test-glue`, `test-storage`).
 /// `test-others` leaves out consensus, glue, and cryptography, which nightly runs in jobs of
-/// their own.
+/// their own, and `test-light` leaves out all four, for macOS.
 fn add_test_rest(b: *std.Build, test_step: *std.Build.Step) void {
     const rest = "Run every unit test except consensus, glue, and storage";
     add_test_except(b, test_step, "test-rest", rest, &.{ "consensus", "glue", "storage" });
     const others = "Run every unit test except consensus, glue, and cryptography";
     add_test_except(b, test_step, "test-others", others, &.{ "consensus", "glue", "cryptography" });
+    // macOS runs storage in a job of its own: alone it takes about 26 minutes there.
+    const light = "Run every unit test except consensus, glue, cryptography, and storage";
+    const heavy = &.{ "consensus", "glue", "cryptography", "storage" };
+    add_test_except(b, test_step, "test-light", light, heavy);
 }
 
 /// A step that runs every package test `test` runs except those of `excluded`.
