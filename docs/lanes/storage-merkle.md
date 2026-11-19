@@ -163,10 +163,9 @@ the `DelayedSyncContext` test mock (`runtime/src/mocks.rs:869-1190`) holds syncs
 - Step 2b: segmented manager `start_sync` (joined, reused when in flight), and every section
   removal (prune, remove, truncate, clear, destroy) settles started syncs first, an already
   failed one surfacing at once; segmented fixed/variable/glob and untracked oversized return
-  completions; the manager's 7 in-flight tests. Not yet: oversized's tracked marker pipeline
-  (`start_sync_tracked` still syncs inline and returns a ready completion, so
-  `..._alignment_sync_concurrency` and `..._dropped_handle_driven_by_next_sync` stay open),
-  segmented fixed/variable's 6 wait tests.
+  completions; the manager's 7 in-flight tests; segmented fixed's 5 and variable's 1 wait
+  tests (`fixed_start_sync_test.zig`, `variable_start_sync_test.zig`). Oversized's tracked
+  pipeline is clearing's (data half in d83f96f; `marker_sync_pending` is their backlog 4b).
 - Step 2c: metadata `start_sync` writes the next version and starts its blob sync, keeping it
   as `pending` (at most one in flight); `sync`, `start_sync`, and `destroy` observe it first.
   The checkpoint's `start_watermark_sync` returns that completion, and fixed/variable
@@ -177,9 +176,10 @@ the `DelayedSyncContext` test mock (`runtime/src/mocks.rs:869-1190`) holds syncs
   flushed so far) and gains `wait_for_sync`, which `destroy` runs first; the authenticated
   journal's `start_sync` joins the items' and Merkle syncs, and its `destroy` surfaces a failed
   Merkle sync before removing anything. qmdb callers wait on it until step 5. Ports
-  `test_start_sync_overlaps_work` and `test_start_sync_failure_propagates`; open:
-  `test_reopen_persists_merkle_watermark`, merkle full's
-  `test_full_sync_observes_clean_start_sync_failure`.
+  `test_start_sync_overlaps_work`, `test_start_sync_failure_propagates`,
+  `test_reopen_persists_merkle_watermark`, and merkle full's
+  `test_full_sync_observes_clean_start_sync_failure` (`full_start_sync_test.zig`; `start_sync`
+  marks the journal dirty so a later `sync` observes an unobserved failed completion).
 
 ### Tests this unlocks (commonware file: tests)
 - runtime (~40): storage/{audited,faulty,metered,tokio/mod,tokio/blob,iouring}.rs, the 10

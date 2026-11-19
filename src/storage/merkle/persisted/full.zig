@@ -854,6 +854,7 @@ pub fn Merkle(comptime F: type, comptime Digest: type) type {
 test {
     _ = @import("full_test.zig");
     _ = @import("full_sync_test.zig");
+    _ = @import("full_start_sync_test.zig");
     _ = @import("full_fuzz_test.zig");
     _ = @import("full_proof_test.zig");
     _ = @import("full_init_test.zig");

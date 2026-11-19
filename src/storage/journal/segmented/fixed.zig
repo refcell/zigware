@@ -621,4 +621,5 @@ fn RecoveryType(comptime A: type) type {
 
 test {
     _ = @import("fixed_test.zig");
+    _ = @import("fixed_start_sync_test.zig");
 }

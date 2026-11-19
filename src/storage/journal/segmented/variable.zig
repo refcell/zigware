@@ -523,5 +523,6 @@ fn RecoveryType(comptime V: type) type {
 
 test {
     _ = @import("variable_test.zig");
+    _ = @import("variable_start_sync_test.zig");
     _ = @import("variable_recovery_fuzz_test.zig");
 }

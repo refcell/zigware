@@ -53,6 +53,10 @@ const Fixture = struct {
     }
 
     fn open(self: *Fixture) !Journal {
+        return self.open_on(self.delayed.storage());
+    }
+
+    fn open_on(self: *Fixture, storage: runtime.storage.Storage) !Journal {
         const merkle_config: merkle.full.Config = .{
             .journal_partition = "mmr-journal",
             .metadata_partition = "mmr-metadata",
@@ -68,7 +72,6 @@ const Fixture = struct {
             .replay_buffer = 1024,
             .cache_ref = &self.journal_cache,
         };
-        const storage = self.delayed.storage();
         return Journal.init(gpa, storage, merkle_config, journal_config, is_commit, .forward_fold);
     }
 };
@@ -173,4 +176,39 @@ test "authenticated Merkle-only sync failure fails the joined completion" {
     var runner = try runtime.deterministic.Runner.init(gpa, .{});
     defer runner.deinit();
     try (try runner.start_context(merkle_failure_fails_handle, .{}));
+}
+
+/// The Merkle journal's recovery watermark persisted in `f`'s backing storage.
+fn merkle_watermark(f: *Fixture) !?u64 {
+    const Nodes = fixed.Journal(cryptography.Sha256.Digest);
+    return Nodes.persisted_watermark(gpa, f.inner.storage(), "mmr-journal");
+}
+
+/// Reopening recovers the Merkle journal bounded, so publication persists its recovery
+/// watermark even when no node is flushed.
+fn reopen_persists_merkle_watermark(ctx: Context) !void {
+    var f: Fixture = undefined;
+    try f.init(ctx);
+    defer f.deinit();
+    // Persist operations while the Merkle recovery watermark still describes genesis.
+    var journal = try f.open();
+    for (0..5) |i| _ = try journal.append(create_operation(@intCast(i)));
+    _ = try journal.append(.{ 1, @splat(0), @splat(0) });
+    try drive(&f, try journal.start_sync());
+    const size = journal.merkle.size();
+    journal.deinit();
+    // Confirm the first publication left the Merkle watermark at genesis.
+    try testing.expectEqual(@as(?u64, 0), try merkle_watermark(&f));
+    // Reopening publishes the recovered Merkle prefix even without new node writes.
+    var reopened = try f.open_on(f.inner.storage());
+    try testing.expectEqual(size, reopened.merkle.size());
+    reopened.deinit();
+    try testing.expectEqual(@as(?u64, size), try merkle_watermark(&f));
+}
+
+test "authenticated reopen persists the Merkle watermark" {
+    // commonware `test_reopen_persists_merkle_watermark`.
+    var runner = try runtime.deterministic.Runner.init(gpa, .{});
+    defer runner.deinit();
+    try (try runner.start_context(reopen_persists_merkle_watermark, .{}));
 }
