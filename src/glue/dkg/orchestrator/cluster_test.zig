@@ -3,6 +3,7 @@
 //! orchestrator, on the simulated network. Each node's simplex application only records the
 //! contexts it is asked to propose on (commonware `MockApplication`), so finalized blocks
 //! reach marshal only when a test seeds the boundary block or a peer serves it.
+//! Only the genesis test runs per push; the rest need `-Dslow-tests`.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -15,6 +16,7 @@ const p2p = @import("p2p");
 const parallel = @import("parallel");
 const runtime = @import("runtime");
 const utils = @import("utils");
+const build_options = @import("build_options");
 const mocks = @import("../tests/mocks.zig");
 const network = @import("../network.zig");
 const Fence = @import("../fence.zig").Fence;
@@ -582,6 +584,12 @@ fn ClusterOf(comptime M: type) type {
     };
 }
 
+/// Every cluster test but the genesis one runs only with `-Dslow-tests` (nightly), to keep
+/// per-push CI short.
+fn slow_only() !void {
+    if (!build_options.slow_tests) return error.SkipZigTest;
+}
+
 fn run_body(comptime body: fn (Ctx) anyerror!void, timeout_s: u64) !void {
     var runner = try runtime.deterministic.Runner.init(gpa, .{
         .timeout_ns = timeout_s * std.time.ns_per_s,
@@ -614,6 +622,7 @@ fn initial_epoch_body(ctx: Ctx) anyerror!void {
 }
 
 test "orchestrator cluster: the initial epoch starts without a mailbox transition" {
+    try slow_only();
     try run_body(initial_epoch_body, 30);
 }
 
@@ -631,6 +640,7 @@ fn boundary_enters_body(ctx: Ctx) anyerror!void {
 }
 
 test "orchestrator cluster: a finalized boundary enters the next epoch" {
+    try slow_only();
     try run_body(boundary_enters_body, 30);
 }
 
@@ -658,6 +668,7 @@ fn hint_body(ctx: Ctx) anyerror!void {
 }
 
 test "orchestrator cluster: a later-epoch vote hints marshal to fetch the boundary" {
+    try slow_only();
     try run_body(hint_body, 30);
 }
 
@@ -677,6 +688,7 @@ fn secondary_body(ctx: Ctx) anyerror!void {
 }
 
 test "orchestrator cluster: a boundary fetch reaches a secondary peer" {
+    try slow_only();
     try run_body(secondary_body, 60);
 }
 
@@ -694,6 +706,7 @@ fn recovered_body(ctx: Ctx) anyerror!void {
 }
 
 test "orchestrator cluster: a recovered node starts from the processed epoch" {
+    try slow_only();
     try run_body(recovered_body, 30);
 }
 
@@ -707,6 +720,7 @@ fn address_failure_body(ctx: Ctx) anyerror!void {
 }
 
 test "orchestrator cluster: a peer-set failure stops before the engine starts" {
+    try slow_only();
     try run_body(address_failure_body, 5);
 }
 
@@ -724,6 +738,7 @@ fn missing_boundary_body(ctx: Ctx) anyerror!void {
 }
 
 test "orchestrator cluster: a missing boundary block stops cleanly" {
+    try slow_only();
     try run_body(missing_boundary_body, 10);
 }
 
@@ -741,6 +756,7 @@ fn skipped_body(ctx: Ctx) anyerror!void {
 }
 
 test "orchestrator cluster: a skipped final block is a contract error" {
+    try slow_only();
     try run_body(skipped_body, 10);
 }
 
@@ -758,5 +774,6 @@ fn shutdown_body(ctx: Ctx) anyerror!void {
 }
 
 test "orchestrator cluster: shutdown interrupts the boundary gate wait" {
+    try slow_only();
     try run_body(shutdown_body, 10);
 }
