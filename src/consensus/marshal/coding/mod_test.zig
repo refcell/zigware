@@ -1934,6 +1934,268 @@ test "coding finalized block delivery rejects digest mismatch" {
     }.body);
 }
 
+/// Whether the shards of `block` were computed (a delivery that proved its root by re-coding).
+fn shards_present(block: *const common.Block) !bool {
+    return !try shards_absent(block);
+}
+
+test "coding ancestry block delivery recomputes root" {
+    try common.run(struct {
+        fn body(ctx: Ctx) anyerror!void {
+            var validators = try fixture();
+            defer validators.deinit(gpa);
+            const provider: common.Provider = .init(&validators.schemes[0]);
+            var buffer = try common.RecordingCodingBuffer.init(gpa, ctx.io());
+            defer buffer.deinit();
+            var stack = try common.start_coding_actor_with_recording(
+                ctx.child("validator"),
+                "ancestry-block-delivery",
+                provider,
+                buffer,
+            );
+            defer stack.stop();
+            var chain: [3]common.ChainLink = undefined;
+            try common.coding_chain(gpa, validators.participants[0], &chain);
+            defer for (&chain) |*link| link.block.deinit(gpa);
+
+            // Certification persists the candidate before the application verdict; that
+            // write alone must not authenticate its ancestry, so each fetch below still
+            // proves its coding root by re-encoding.
+            const candidate = &chain[2];
+            const payload = candidate.block.commitment();
+            const proposal = common.Proposal.init(candidate.round, .new(2), payload);
+            var notarization = try H.make_notarization(gpa, &validators, proposal, quorum);
+            defer notarization.deinit(gpa);
+            _ = stack.mailbox.report(.{ .notarization = notarization });
+            const copy = candidate.block.clone();
+            try testing.expect(try stack.mailbox.certified(candidate.round, copy));
+            for ([_]usize{ 1, 0 }) |index| {
+                const block = &chain[index];
+                const value = try common.encode_coded(gpa, &block.block);
+                defer gpa.free(value);
+                try stack.resolver.respond_to_next_fetch(value);
+                const commitment = block.block.commitment();
+                const fallback: core_mailbox.CommitmentFallback =
+                    .{ .fetch_by_commitment = .new(index + 1) };
+                var subscription = try stack.mailbox.subscribe_by_commitment(commitment, fallback);
+                defer subscription.deinit();
+                var delivered = try subscription.recv();
+                defer delivered.deinit(gpa);
+                try testing.expect(delivered.commitment().eql(commitment));
+                // Ancestry delivery recomputes the shards.
+                try testing.expect(try shards_present(&delivered));
+                try testing.expect(try stack.resolver.wait_for_delivery_response());
+            }
+            const fetches = try stack.resolver.fetches(gpa);
+            defer gpa.free(fetches);
+            try testing.expectEqual(2, fetches.len);
+            for (fetches) |item| {
+                try testing.expect(item.key == .block and item.subscriber == .untrusted);
+            }
+        }
+    }.body);
+}
+
+test "coding notarized delivery recomputes root" {
+    try common.run(struct {
+        fn body(ctx: Ctx) anyerror!void {
+            var validators = try fixture();
+            defer validators.deinit(gpa);
+            const provider: common.Provider = .init(&validators.schemes[0]);
+            var buffer = try common.RecordingCodingBuffer.init(gpa, ctx.io());
+            defer buffer.deinit();
+            var stack = try common.start_coding_actor_with_recording(
+                ctx.child("validator"),
+                "notarized-block-delivery",
+                provider,
+                buffer,
+            );
+            defer stack.stop();
+            var candidate = try common.missing_candidate(gpa, validators.participants[0]);
+            defer candidate.block.deinit(gpa);
+            const commitment = candidate.block.commitment();
+            const round = candidate.context.round;
+            // A notarization does not bind the coding root to the block, so the delivery
+            // proves it by re-encoding.
+            const proposal = common.Proposal.init(round, .zero(), commitment);
+            var notarization = try H.make_notarization(gpa, &validators, proposal, quorum);
+            defer notarization.deinit(gpa);
+            const value = try common.encode_notarized(gpa, &notarization, &candidate.block);
+            defer gpa.free(value);
+            try stack.resolver.respond_to_next_fetch(value);
+            const fallback: core_mailbox.CommitmentFallback = .{ .fetch_by_round = round };
+            var subscription = try stack.mailbox.subscribe_by_commitment(commitment, fallback);
+            defer subscription.deinit();
+            var delivered = try subscription.recv();
+            defer delivered.deinit(gpa);
+            try testing.expect(delivered.commitment().eql(commitment));
+            try testing.expect(try shards_present(&delivered));
+            try testing.expect(try stack.resolver.wait_for_delivery_response());
+        }
+    }.body);
+}
+
+/// commonware's untrusted-delivery body: a commitment whose root encodes another block,
+/// delivered with (`notarized`) or without a notarization, must be rejected.
+fn untrusted_rejects_mismatched_root(ctx: Ctx, notarized: bool) !void {
+    var validators = try fixture();
+    defer validators.deinit(gpa);
+    const provider: common.Provider = .init(&validators.schemes[0]);
+    var buffer = try common.RecordingCodingBuffer.init(gpa, ctx.io());
+    defer buffer.deinit();
+    var stack = try common.start_coding_actor_with_recording(
+        ctx.child("validator"),
+        "untrusted-delivery-mismatched-root",
+        provider,
+        buffer,
+    );
+    defer stack.stop();
+    var candidate = try common.missing_candidate(gpa, validators.participants[0]);
+    defer candidate.block.deinit(gpa);
+    const config = candidate.block.config();
+    const genesis = try common.genesis_block(gpa);
+    var other = try common.coded(gpa, candidate.context, genesis.digest(), 1, 101);
+    defer other.deinit(gpa);
+    const expected = candidate.block.commitment();
+    const commitment: common.Commitment =
+        .init(expected.block(), other.commitment().root(), expected.context(), config);
+    try testing.expect(!commitment.root().eql(expected.root()));
+    // Every assigned shard of the other block verifies against the advertised root.
+    const root = commitment.root();
+    for (try other.shards(gpa, parallel.sequential), 0..) |*shard, index| {
+        _ = try harness.RS.check(config, &root, @intCast(index), shard, parallel.sequential);
+    }
+
+    const round = candidate.context.round;
+    var notarization: ?H.Notarization = null;
+    defer if (notarization) |*value| value.deinit(gpa);
+    const value = if (notarized) blk: {
+        const proposal = common.Proposal.init(round, .zero(), commitment);
+        notarization = try H.make_notarization(gpa, &validators, proposal, quorum);
+        break :blk try common.encode_notarized(gpa, &notarization.?, &candidate.block);
+    } else try common.encode_coded(gpa, &candidate.block);
+    defer gpa.free(value);
+    const fallback: core_mailbox.CommitmentFallback = if (notarized)
+        .{ .fetch_by_round = round }
+    else
+        .{ .fetch_by_commitment = .new(1) };
+    try stack.resolver.respond_to_next_fetch(value);
+    var subscription = try stack.mailbox.subscribe_by_commitment(commitment, fallback);
+    defer subscription.deinit();
+    while (stack.resolver.fetch_count() == 0) try ctx.sleep(.fromMilliseconds(1));
+    try testing.expect(!try stack.resolver.wait_for_delivery_response());
+    try testing.expectError(error.Empty, subscription.try_recv());
+    const digest = candidate.block.digest();
+    try testing.expect(try stack.mailbox.get_block(.{ .digest = digest }) == null);
+}
+
+test "coding untrusted delivery rejects mismatched root" {
+    try common.run(struct {
+        fn body(ctx: Ctx) anyerror!void {
+            try untrusted_rejects_mismatched_root(ctx, false);
+        }
+    }.body);
+    try common.run(struct {
+        fn body(ctx: Ctx) anyerror!void {
+            try untrusted_rejects_mismatched_root(ctx, true);
+        }
+    }.body);
+}
+
+/// The heights of the recorded fetches with a certified subscriber, in order (at most 8).
+fn certified_fetch_heights(resolver: common.RecordingResolver, out: *[8]u64) ![]u64 {
+    const fetches = try resolver.fetches(gpa);
+    defer gpa.free(fetches);
+    var count: usize = 0;
+    for (fetches) |item| {
+        if (item.subscriber != .certified) continue;
+        out[count] = item.subscriber.certified.get();
+        count += 1;
+    }
+    return out[0..count];
+}
+
+/// commonware's certified-ancestry body: certifying a child keeps certification evidence for
+/// its parent (fetched, or `cached_parent`, subscribed `by_digest` or by commitment) and, once
+/// the parent resolves, its grandparent, so none of them is re-coded.
+fn certified_ancestry_skips_recoding(ctx: Ctx, cached_parent: bool, by_digest: bool) !void {
+    var validators = try fixture();
+    defer validators.deinit(gpa);
+    const provider: common.Provider = .init(&validators.schemes[0]);
+    var buffer = try common.RecordingCodingBuffer.init(gpa, ctx.io());
+    defer buffer.deinit();
+    var stack = try common.start_coding_actor_with_recording(
+        ctx.child("validator"),
+        "certified-ancestry-delivery",
+        provider,
+        buffer,
+    );
+    defer stack.stop();
+    var chain: [3]common.ChainLink = undefined;
+    try common.coding_chain(gpa, validators.participants[0], &chain);
+    defer for (&chain) |*link| link.block.deinit(gpa);
+    const grandparent = &chain[0].block;
+    const parent = &chain[1].block;
+    const child = &chain[2];
+    if (cached_parent) {
+        try testing.expect(try stack.mailbox.verified(chain[1].round, parent.clone()));
+    }
+    try testing.expect(try stack.mailbox.verified(child.round, child.block.clone()));
+    const proposal = common.Proposal.init(child.round, .new(2), child.block.commitment());
+    var notarization = try H.make_notarization(gpa, &validators, proposal, quorum);
+    defer notarization.deinit(gpa);
+    _ = stack.mailbox.report(.{ .certification = notarization });
+
+    // Local retrieval and remote delivery both keep the certification evidence.
+    if (!cached_parent) {
+        const value = try common.encode_coded(gpa, parent);
+        defer gpa.free(value);
+        try stack.resolver.respond_to_next_fetch(value);
+    }
+    var subscription = if (by_digest)
+        try stack.mailbox.subscribe_by_digest(parent.digest(), .wait)
+    else
+        try stack.mailbox.subscribe_by_commitment(parent.commitment(), .{
+            .fetch_by_commitment = .new(2),
+        });
+    defer subscription.deinit();
+    var delivered = try subscription.recv();
+    defer delivered.deinit(gpa);
+    try testing.expect(try shards_absent(&delivered));
+    if (cached_parent) {
+        try testing.expectEqual(0, stack.resolver.fetch_count());
+    } else {
+        try testing.expect(try stack.resolver.wait_for_delivery_response());
+    }
+
+    // Resolving the parent extends the evidence to the grandparent.
+    const value = try common.encode_coded(gpa, grandparent);
+    defer gpa.free(value);
+    try stack.resolver.respond_to_next_fetch(value);
+    var lower = try stack.mailbox.subscribe_by_commitment(grandparent.commitment(), .{
+        .fetch_by_commitment = .new(1),
+    });
+    defer lower.deinit();
+    var ancestor = try lower.recv();
+    defer ancestor.deinit(gpa);
+    try testing.expect(try shards_absent(&ancestor));
+    try testing.expect(try stack.resolver.wait_for_delivery_response());
+    var heights: [8]u64 = undefined;
+    const certified = try certified_fetch_heights(stack.resolver, &heights);
+    const expected: []const u64 = if (cached_parent) &.{1} else &.{ 2, 1 };
+    try testing.expectEqualSlices(u64, expected, certified);
+}
+
+test "coding certified ancestry delivery skips recoding" {
+    inline for (.{ .{ false, false }, .{ true, false }, .{ true, true } }) |shape| {
+        try common.run(struct {
+            fn body(ctx: Ctx) anyerror!void {
+                try certified_ancestry_skips_recoding(ctx, shape[0], shape[1]);
+            }
+        }.body);
+    }
+}
+
 test {
     _ = common;
 }
