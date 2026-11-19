@@ -30,4 +30,5 @@ test {
     _ = @import("tests/scenarios.zig");
     _ = @import("tests/wrappers.zig");
     _ = @import("tests/queries.zig");
+    _ = @import("tests/fetch.zig");
 }
