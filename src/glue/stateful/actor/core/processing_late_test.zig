@@ -201,3 +201,52 @@ test "stateful processing: a deferred verification resumes once processing start
     fixture.future = try io.concurrent(run_processing, .{&fixture.processing});
     try testing.expect(try verdict.recv());
 }
+
+/// A parent of genesis at view 1 and two children of it at views 2 and 3, built in a
+/// scratch harness so the fixture's cache does not hold the parent's state.
+fn uncached_family() !struct { TestBlock, TestBlock, TestBlock } {
+    var scratch: harness.Harness = undefined;
+    try scratch.init();
+    defer scratch.deinit();
+    const genesis = TestBlock.genesis();
+    const parent = try scratch.stage_pending_child(&genesis, 1);
+    const first, var first_batch = try scratch.build_child(&parent, 2);
+    first_batch.deinit();
+    const second, var second_batch = try scratch.build_child(&parent, 3);
+    second_batch.deinit();
+    return .{ parent, first, second };
+}
+
+// commonware `finalization_reuses_shared_parent_recovery`: two children's verifications
+// share one execution of their uncached parent; the parent's finalization waits for that
+// execution and reuses it, and both children then verify. The parent is processed once.
+test "stateful processing: finalization reuses a shared parent recovery" {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer deinit_fixture(&fixture);
+    const parent, const first_child, const second_child = try uncached_family();
+
+    var probe: harness.Probe = .{ .target = parent.digest() };
+    defer probe.deinit();
+    const gate = try probe.add_gate();
+    var started = gate.started;
+    defer started.deinit();
+    var release = gate.release;
+    fixture.processing.verifications.verifier.app.probe = &probe;
+    fixture.processing.processor.app.probe = &probe;
+
+    var first = try fixture.verify(&.{ first_child, parent });
+    defer first.deinit();
+    var second = try fixture.verify(&.{ second_child, parent });
+    defer second.deinit();
+    try started.recv();
+    var waiter = try fixture.finalize(parent);
+    defer waiter.deinit();
+    try testing.io.sleep(.fromMilliseconds(20), .awake);
+    try testing.expectEqual(null, waiter.poll());
+    try release.send({});
+    try waiter.wait();
+    try testing.expect(try first.recv());
+    try testing.expect(try second.recv());
+    try testing.expectEqual(1, probe.calls);
+}
