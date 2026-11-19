@@ -294,11 +294,10 @@ resolver; those lanes are running, so do the types first and the actors as they 
   with a mock batcher, resolver, and automaton on the deterministic runtime.
 - [ ] actors/batcher/mod.rs: 69 of its 76 batcher-actor tests (forwarding, leader activity,
   optimistic assembly fallback, vote retention, construction order, the per-fixture
-  quorum test on the other 7 fixtures). verifier.rs: 27 of its 32 have counterparts
+  quorum test on the other 7 fixtures). verifier.rs: 29 of its 32 have counterparts
   (lazy vote buffers, quorum reservations, the ready, exact-quorum, empty-pending, and
-  verified-quorum cases, late leader votes, and non-batchable finalize accounting,
-  2026-11-19). Still open: `add_nullify` and `add_finalize` bookkeeping (as "add notarize"
-  does for notarizes); its 3 panicking cases are not ported (below).
+  verified-quorum cases, late leader votes, non-batchable finalize accounting, and nullify
+  and finalize bookkeeping, 2026-11-19); its 3 panicking cases are not ported (below).
 - [x] Panicking tests are not ported: Zig test runners cannot catch a panic in process.
   These are commonware's `#[should_panic]` cases in elector.rs (3), types.rs
   (`issue_2944_regression_*_new`, 2), vrf.rs (12 constructor and certificate-verifier

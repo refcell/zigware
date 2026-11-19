@@ -409,3 +409,50 @@ fn expect_one_valid(comptime S: type, verifier: anytype, rng: anytype) !void {
     try testing.expect(batch.certificate == null);
     _ = S;
 }
+
+fn add_nullify_and_finalize(comptime C: type) !void {
+    const S = C.Scheme;
+    const gpa = testing.allocator;
+    var rng = utils.rng.test_rng();
+    var fixture = try C.fixture(gpa, &rng, 5);
+    defer fixture.deinit(gpa);
+    const schemes = fixture.schemes;
+    const quorum = utils.N3f1.quorum(@as(u32, 5));
+    var verifier = verifier_mod.Verifier(S, Digest).init(round_one, &schemes[0], quorum);
+    defer verifier.deinit(gpa);
+    const Nullify = types.Nullify(S);
+    try verifier.add(gpa, .{ .nullify = (try Nullify.sign(gpa, &schemes[0], round_one)).? }, false);
+    try expect_counts(verifier.nullify, 1, 0);
+    try verifier.add(gpa, .{ .nullify = (try Nullify.sign(gpa, &schemes[1], round_one)).? }, true);
+    try expect_counts(verifier.nullify, 1, 1);
+    // Finalizes for two proposals buffer until the leader's proposal is known, which drops
+    // the other proposal's.
+    const Finalize = types.Finalize(S, Digest);
+    const a: types.Proposal(Digest) = .init(round_one, .zero(), .fill(1));
+    const b: types.Proposal(Digest) = .init(round_one, .zero(), .fill(2));
+    try verifier.add(gpa, .{ .finalize = (try Finalize.sign(gpa, &schemes[1], b)).? }, false);
+    try expect_counts(verifier.finalize, 1, 0);
+    const finalize_a = (try Finalize.sign(gpa, &schemes[0], a)).?;
+    try verifier.add(gpa, .{ .finalize = finalize_a }, false);
+    try expect_counts(verifier.finalize, 2, 0);
+    verifier.set_leader(finalize_a.signer(), null);
+    try testing.expectEqual(null, verifier.proposal());
+    try verifier.add(gpa, .{ .notarize = try notarize(S, &schemes[0], round_one, 0, 1) }, false);
+    try expect_counts(verifier.finalize, 1, 0);
+    try testing.expect(verifier.finalize.pending.items[0].context.eql(a));
+    try verifier.add(gpa, .{ .finalize = (try Finalize.sign(gpa, &schemes[2], a)).? }, true);
+    try expect_counts(verifier.finalize, 1, 1);
+    // A finalize for the other proposal is now rejected.
+    try verifier.add(gpa, .{ .finalize = (try Finalize.sign(gpa, &schemes[3], b)).? }, false);
+    try expect_counts(verifier.finalize, 1, 1);
+}
+
+fn expect_counts(certification: anytype, pending: usize, verified: usize) !void {
+    try testing.expectEqual(pending, certification.pending.items.len);
+    try testing.expectEqual(verified, certification.verified.items.len);
+}
+
+// commonware `test_add_nullify` and `test_add_finalize`.
+test "add nullify and finalize" {
+    inline for (cases) |C| try add_nullify_and_finalize(C);
+}
