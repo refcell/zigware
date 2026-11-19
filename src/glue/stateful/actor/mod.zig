@@ -63,6 +63,7 @@ test {
     _ = @import("core/mailbox_test.zig");
     _ = @import("core/processing_test.zig");
     _ = @import("core/processing_early_test.zig");
+    _ = @import("core/processing_deferred_test.zig");
     _ = @import("core/processing_late_test.zig");
     _ = @import("core/processing_barrier_test.zig");
     _ = @import("core/syncing_test.zig");
