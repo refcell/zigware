@@ -313,6 +313,12 @@ pub fn Execution(comptime P: type) type {
             return .{ std.meta.eql(branch.digest, digest) or self.state.contains(digest), branch };
         }
 
+        /// Whether `digest` is the branch anchor or cached.
+        pub fn known_digest(self: *Self, digest: Digest) bool {
+            const result, _ = self.known(digest);
+            return result;
+        }
+
         /// Collects the missing blocks between `target` (taken) and cached or applied state,
         /// without forking batches. `error.Invalid` when the walk reaches the anchor's height
         /// without meeting the anchor or the provider returns a block that is not the parent one

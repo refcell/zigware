@@ -184,6 +184,10 @@ marshal's actors (consensus-marshal) for the actor; until then it ports what is 
   `redelivered(block)`, `finalize(*const Provider, block, start_barrier)` → `Applied{barrier,
   prune}`, `branch_anchor`, `flights_idle`, `deinit`. `actor.Boxed(B)` is the type-erased
   ancestry (commonware `BoxedAncestry`).
+- `glue.stateful.actor.Verifier(P)` (`Processor.verifier()`; `P.Provider` adds
+  `canonical_digest(Height) !?Digest`): `prepare(*Provider, ancestry, verify)` → `Prepared`,
+  `next(*const Provider, *Prepared)` → `?Next{step, ancestry}`, `process(ancestry)`.
+  `Prepared.finish` returns the ancestry a proposal builds on.
 - `glue.stateful.db.p2p.Mailbox(DB, F, Op, D)`: the `qmdb.sync` Source over the resolver
   actor's mailbox. `init(io, actor.mailbox.Sender(Message))`, `clone`, `deinit`,
   `attach_database(db.Shared(DB))`, `serve(gpa, request)` → `Served` (first candidate and its
@@ -208,6 +212,9 @@ marshal's actors (consensus-marshal) for the actor; until then it ports what is 
   one; commonware's synchronous drop prevents that overlap, and here the pending cache makes
   the duplicate processing idempotent. The application is a handle copied per call (Rust
   `Clone`), and every ancestry is marshal's `AncestorStream` (commonware boxes any ancestry).
+- Where commonware's verification future stays pending forever (missing ancestry or a
+  canonical block marshal lacks), `Verifier.prepare` returns `error.Waiting`; the core actor
+  leaves such a request unanswered until its caller cancels.
 - `probe.Sample` keeps replies in a peer-sorted list (commonware's `BTreeMap`), so ties
   between equal rounds resolve as commonware's do, and owns recorded finalizations.
 - `SyncPlan` mutates in place (commonware consumes and returns it) and returns storage errors
@@ -260,7 +267,8 @@ marshal's actors (consensus-marshal) for the actor; until then it ports what is 
   commonware's finalization tests.
 - [x] db/p2p: the `Mailbox` sync source and its overflow policy.
 - [ ] db/p2p: the resolver actor (serving peers, response checks) on `qmdb.sync.sync`.
-- [ ] actor: processor propose (with the core mailbox), verifier, core (after marshal); tests (single and
+- [x] actor: the processor's `Verifier` (prepare, step order, shared processing).
+- [ ] actor: processor propose (with the core mailbox), core (after marshal); tests (single and
   multi db apps, floor, properties).
 
 ## Log
@@ -290,6 +298,7 @@ marshal's actors (consensus-marshal) for the actor; until then it ports what is 
 - 2026-11-18 (stateful): the processor's execution layer and flight registry.
 - 2026-11-18 (stateful): the processor's finalization path and boxed ancestry.
 - 2026-11-18 (stateful): the db/p2p `Mailbox` sync source with commonware's mailbox tests.
+- 2026-11-19 (stateful): the processor's `Verifier`.
 
 ## dkg (owner: coding lane, thread T-01a1d58d-bff1-75a1-8ccb-4b8dd7bc9755)
 

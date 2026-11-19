@@ -25,6 +25,8 @@ pub const Boxed = @import("processor/boxed.zig").Boxed;
 
 pub const processor = @import("processor/processor.zig");
 pub const Processor = processor.Processor;
+pub const verifier = @import("processor/verifier.zig");
+pub const Verifier = verifier.Verifier;
 
 test {
     std.testing.refAllDecls(@This());
@@ -33,4 +35,5 @@ test {
     _ = @import("processor/pending_test.zig");
     _ = @import("processor/execution_test.zig");
     _ = @import("processor/processor_test.zig");
+    _ = @import("processor/verifier_test.zig");
 }

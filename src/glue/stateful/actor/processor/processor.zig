@@ -17,6 +17,7 @@ const consensus = @import("consensus");
 const db = @import("../../db/mod.zig");
 const execution_mod = @import("execution.zig");
 const pruning = @import("pruning.zig");
+const verifier_mod = @import("verifier.zig");
 
 const ancestry_mod = consensus.marshal.ancestry;
 
@@ -34,6 +35,7 @@ pub fn Processor(comptime P: type) type {
         pub const Pruning = pruning.Pruning(SyncTargets);
         pub const Prune = pruning.Prune(SyncTargets);
         pub const Boundary = Execution.State.Boundary;
+        pub const Verifier = verifier_mod.Verifier(P);
 
         /// The result of applying a finalized block (commonware `Applied`).
         pub const Applied = struct {
@@ -68,6 +70,11 @@ pub fn Processor(comptime P: type) type {
             self.gpa.destroy(self.execution);
             if (self.pruning) |*schedule| schedule.deinit(self.gpa);
             self.* = undefined;
+        }
+
+        /// A verifier sharing this processor's speculative state.
+        pub fn verifier(self: *Self) Verifier {
+            return .{ .app = self.app, .execution = self.execution };
         }
 
         pub fn branch_anchor(self: *Self) Anchor {

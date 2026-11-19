@@ -113,10 +113,13 @@ pub fn round(view: u64) Round {
 pub const ProviderState = struct {
     mutex: Io.Mutex = .init,
     blocks: std.AutoHashMapUnmanaged(Sha256.Digest, TestBlock) = .empty,
+    /// Finalized blocks by height (marshal's local store).
+    canonical: std.AutoHashMapUnmanaged(u64, Sha256.Digest) = .empty,
     fetches: u32 = 0,
 
     pub fn deinit(state: *ProviderState) void {
         state.blocks.deinit(gpa);
+        state.canonical.deinit(gpa);
     }
 
     pub fn insert(state: *ProviderState, block: TestBlock) !void {
@@ -146,6 +149,12 @@ pub const TestProvider = struct {
         const handle = try digested(block);
         sender.send(handle) catch unreachable; // The receiver is still open.
         return pair.receiver;
+    }
+
+    pub fn canonical_digest(self: *TestProvider, at: Height) !?Sha256.Digest {
+        self.state.mutex.lockUncancelable(io);
+        defer self.state.mutex.unlock(io);
+        return self.state.canonical.get(at.get());
     }
 };
 
@@ -355,6 +364,8 @@ pub const Harness = struct {
         harness.processor = try .init(gpa, io, .{}, harness.databases, anchor, null);
         harness.execution = harness.processor.execution;
         harness.provider_state = .{};
+        errdefer harness.provider_state.deinit();
+        try harness.provider_state.insert(genesis);
         harness.app = .{};
     }
 
@@ -433,6 +444,7 @@ pub const Harness = struct {
         const provider_value = harness.provider();
         const applied = try harness.processor.finalize(&provider_value, &handle, true);
         try applied.barrier.?.durable();
+        try harness.provider_state.canonical.put(gpa, block.height().get(), block.digest());
     }
 
     /// A fixed ancestry over `blocks`, newest first (commonware `from_iter`).
