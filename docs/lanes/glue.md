@@ -511,9 +511,16 @@ orchestrator.
 - [x] probe wire (`Tag`, `Message`, `read_request`, `read_response`, `read_block`) and limits
   (`max_payload_size`), with limits.rs's `widest_encodings` test; both `probe::wire`
   conformance hashes match commonware's (in `conformance_test.zig`).
-- [ ] probe mailbox and actor (discovery, service), with mod.rs's tests.
-- [ ] bootstrap engine (bootstrap/mod.rs), with its tests.
+- [x] probe mailbox and actor (discovery, service), with mod.rs's 20 tests on the simulated
+  network. A `MemorySource` stands in for commonware's marshal-backed source (it answers by
+  height, as marshal's `get_finalization`/`get_block` do); `MarshalSource` adapts marshal.
+- [ ] discovery.rs's 4 decoding tests (they need a coding-variant `CodingBlock` and the BLS
+  threshold scheme).
+- [ ] bootstrap engine (bootstrap/mod.rs), with its tests: moved to bls-math on 2026-11-19.
 
 ### Log
 - 2026-11-19: probe wire and limits; the `Tag` and `Message` hashes match, and the message
   hash catches a planted narrow timestamp.
+- 2026-11-19: probe actor (discovery, service, mailbox) with mod.rs's tests; they catch a
+  responder mismatch, blocking stale replies, a late failover, a wrong boundary height, and
+  kept subscribers after a failed activation.

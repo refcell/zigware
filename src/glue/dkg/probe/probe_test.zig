@@ -732,3 +732,255 @@ test "dkg probe: an invalid latest reply blocks its peer" {
         }
     }.body);
 }
+
+/// Completes the target sample and expects the epoch-1 boundary request at both peers.
+fn start_boundary_fetch(h: *Harness) !oneshot.Receiver(Artifact) {
+    var subscription = try subscribe_solicited(h);
+    errdefer subscription.deinit();
+    var target = try h.complete_target_sample();
+    defer target.deinit(gpa);
+    try testing.expectEqual(1, try next_boundary_request(&h.client.receiver));
+    try testing.expectEqual(1, try next_boundary_request(&h.backup.receiver));
+    return subscription;
+}
+
+fn send_boundary(h: *Harness, from: *Net.Registered) !void {
+    const joiner = h.fixture.participants[1];
+    try send_to(&from.sender, joiner, .{ .boundary_response = h.boundary_finalization });
+}
+
+fn send_block(h: *Harness, from: *Net.Registered, block: Block) !void {
+    const joiner = h.fixture.participants[1];
+    const response: Message.BlockResponse = .{ .epoch = .new(1), .block = block };
+    try send_to(&from.sender, joiner, .{ .block_response = response });
+}
+
+fn expect_boundary_artifact(h: *Harness, subscription: *oneshot.Receiver(Artifact)) !void {
+    var artifact = try subscription.try_recv();
+    defer artifact.deinit();
+    try expect_artifact(&artifact, &h.boundary_finalization, &h.boundary_info);
+}
+
+test "dkg probe: fetches the boundary block from one responder" {
+    try run(struct {
+        fn body(io: Io) anyerror!void {
+            var h: Harness = undefined;
+            try h.init(io, .{ .source_boundaries = &.{} });
+            defer h.deinit();
+            var subscription = try start_boundary_fetch(&h);
+            defer subscription.deinit();
+            try send_boundary(&h, &h.client);
+            try testing.expectEqual(1, try next_block_request(&h.client.receiver));
+            try h.sleep_ms(100);
+            try expect_silent(&h.backup.receiver); // No request to an unselected responder.
+            try send_block(&h, &h.client, h.boundary);
+            try h.sleep_ms(100);
+            try expect_boundary_artifact(&h, &subscription);
+        }
+    }.body);
+}
+
+test "dkg probe: retries the boundary block with another responder" {
+    try run(struct {
+        fn body(io: Io) anyerror!void {
+            var h: Harness = undefined;
+            try h.init(io, .{ .source_boundaries = &.{} });
+            defer h.deinit();
+            var subscription = try start_boundary_fetch(&h);
+            defer subscription.deinit();
+            try send_boundary(&h, &h.client);
+            try testing.expectEqual(1, try next_block_request(&h.client.receiver));
+            // The client stays silent; after the retry timeout the backup is asked.
+            try send_boundary(&h, &h.backup);
+            try testing.expectEqual(1, try next_block_request(&h.backup.receiver));
+            try send_block(&h, &h.backup, h.boundary);
+            try h.sleep_ms(100);
+            try expect_boundary_artifact(&h, &subscription);
+            try testing.expectEqual(0, try h.blocked_count());
+        }
+    }.body);
+}
+
+test "dkg probe: an invalid boundary block tries another responder at once" {
+    try run(struct {
+        fn body(io: Io) anyerror!void {
+            var h: Harness = undefined;
+            try h.init(io, .{ .source_boundaries = &.{} });
+            defer h.deinit();
+            var subscription = try start_boundary_fetch(&h);
+            defer subscription.deinit();
+            try send_boundary(&h, &h.client);
+            try testing.expectEqual(1, try next_block_request(&h.client.receiver));
+            try send_boundary(&h, &h.backup);
+            try h.sleep_ms(100);
+            var info = try epoch_info(2, h.participants);
+            defer info.deinit(gpa);
+            var wrong = try boundary_block(2, h.fixture.participants[0], info);
+            defer wrong.deinit();
+            try send_block(&h, &h.client, wrong);
+            // Failover comes well before the 500 ms retry timeout.
+            try h.sleep_ms(100);
+            var request = try h.backup.receiver.try_recv();
+            defer request.deinit();
+            const decoded = (try wire.read_request(gpa, request.payload)).?;
+            try testing.expectEqual(1, decoded.block.get());
+            try send_block(&h, &h.backup, h.boundary);
+            try h.sleep_ms(100);
+            try expect_boundary_artifact(&h, &subscription);
+            try h.expect_blocked(1, 2);
+        }
+    }.body);
+}
+
+test "dkg probe: re-broadcasts an unanswered boundary request" {
+    try run(struct {
+        fn body(io: Io) anyerror!void {
+            var h: Harness = undefined;
+            try h.init(io, .{ .source_boundaries = &.{} });
+            defer h.deinit();
+            var subscription = try h.joiner.subscribe();
+            defer subscription.deinit();
+            try expect_latest_request(&h.client.receiver);
+            var target = try h.complete_target_sample();
+            defer target.deinit(gpa);
+            try testing.expectEqual(1, try next_boundary_request(&h.client.receiver));
+            try testing.expectError(error.Empty, subscription.try_recv());
+            try testing.expectEqual(1, try next_boundary_request(&h.client.receiver));
+            try testing.expectError(error.Empty, subscription.try_recv());
+        }
+    }.body);
+}
+
+test "dkg probe: a terminal-epoch boundary response blocks its sender" {
+    try run(struct {
+        fn body(io: Io) anyerror!void {
+            var h: Harness = undefined;
+            try h.init(io, .{ .source_boundaries = &.{} });
+            defer h.deinit();
+            var subscription = try h.joiner.subscribe();
+            defer subscription.deinit();
+            try expect_latest_request(&h.client.receiver);
+            var target = try h.complete_target_sample();
+            defer target.deinit(gpa);
+            try testing.expectEqual(1, try next_boundary_request(&h.client.receiver));
+            const max = std.math.maxInt(u64);
+            const round: consensus.Round = .new(.new(max), .new(1));
+            const proposal: Proposal = .init(round, .zero(), h.boundary.digest());
+            var terminal = try finalize(&h.fixture, proposal);
+            defer terminal.deinit(gpa);
+            try send_to(&h.source_sender, h.fixture.participants[1], .{
+                .boundary_response = terminal,
+            });
+            try h.sleep_ms(100);
+            try h.expect_blocked(1, 0);
+            try testing.expectError(error.Empty, subscription.try_recv());
+        }
+    }.body);
+}
+
+test "dkg probe: does not solicit without a subscriber" {
+    try run(struct {
+        fn body(io: Io) anyerror!void {
+            var h: Harness = undefined;
+            try h.init(io, .{});
+            defer h.deinit();
+            try h.sleep_ms(700);
+            try expect_silent(&h.client.receiver);
+        }
+    }.body);
+}
+
+test "dkg probe: a late subscriber receives the cached artifact" {
+    try run(struct {
+        fn body(io: Io) anyerror!void {
+            var h: Harness = undefined;
+            try h.init(io, .{});
+            defer h.deinit();
+            var first = try h.joiner.subscribe();
+            defer first.deinit();
+            var target = try h.complete_target_sample();
+            defer target.deinit(gpa);
+            try h.sleep_ms(100);
+            try expect_boundary_artifact(&h, &first);
+            var second = try h.joiner.subscribe();
+            defer second.deinit();
+            try h.sleep_ms(10);
+            try expect_boundary_artifact(&h, &second);
+        }
+    }.body);
+}
+
+test "dkg probe: service answers a latest request from the source" {
+    try run(struct {
+        fn body(io: Io) anyerror!void {
+            var h: Harness = undefined;
+            try h.init(io, .{});
+            defer h.deinit();
+            try send_to(&h.client.sender, h.fixture.participants[0], .latest_request);
+            var response = try next_response(&h.client.receiver, &h.fixture);
+            defer response.deinit();
+            try testing.expect(response.response == .latest);
+            try expect_finalization(&h.boundary_finalization, &response.response.latest);
+        }
+    }.body);
+}
+
+test "dkg probe: service answers boundary finalization and block requests" {
+    try run(struct {
+        fn body(io: Io) anyerror!void {
+            var h: Harness = undefined;
+            try h.init(io, .{});
+            defer h.deinit();
+            const source = h.fixture.participants[0];
+            try send_to(&h.client.sender, source, .{ .boundary_request = .new(1) });
+            var boundary = try next_response(&h.client.receiver, &h.fixture);
+            defer boundary.deinit();
+            try testing.expect(boundary.response == .boundary);
+            const finalization = &boundary.response.boundary;
+            try expect_finalization(&h.boundary_finalization, finalization);
+
+            try send_to(&h.client.sender, source, .{ .block_request = .new(1) });
+            var response = try next_response(&h.client.receiver, &h.fixture);
+            defer response.deinit();
+            try testing.expect(response.response == .block);
+            const block_response = response.response.block;
+            try testing.expectEqual(1, block_response.epoch.get());
+            const commitment = finalization.proposal.payload;
+            const body_bytes = block_response.body;
+            const seq = parallel.sequential;
+            var block = try wire.read_block(V, gpa, body_bytes, commitment, {}, seq);
+            defer block.deinit();
+            try testing.expect(block.digest().eql(h.boundary.digest()));
+            try testing.expectEqual(1, block.inner().height().get());
+        }
+    }.body);
+}
+
+test "dkg probe: service ignores an epoch without a boundary" {
+    try run(struct {
+        fn body(io: Io) anyerror!void {
+            var h: Harness = undefined;
+            try h.init(io, .{});
+            defer h.deinit();
+            const source = h.fixture.participants[0];
+            try send_to(&h.client.sender, source, .{ .boundary_request = .zero() });
+            try h.sleep_ms(100);
+            try expect_silent(&h.client.receiver);
+        }
+    }.body);
+}
+
+test "dkg probe: a failed activation stops the probe and drops the subscriber" {
+    try run(struct {
+        fn body(io: Io) anyerror!void {
+            var h: Harness = undefined;
+            try h.init(io, .{ .fail_activation = true });
+            defer h.deinit();
+            var subscription = try h.joiner.subscribe();
+            defer subscription.deinit();
+            try testing.expectError(error.Closed, subscription.recv());
+            try h.tasks[1].?.await(io);
+            h.tasks[1] = null;
+        }
+    }.body);
+}
