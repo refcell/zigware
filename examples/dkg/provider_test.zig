@@ -56,10 +56,11 @@ test "dkg: provider registers each epoch's scheme with its role" {
     try testing.expect(dynamic.scheme(.new(2)).?.me() == null);
     try testing.expect(dynamic.scoped(.new(2)).?.into_scheme().? == dynamic.scheme(.new(2)).?);
 
-    // A second registration for an epoch keeps the first scheme where readers hold it.
+    // A second registration for an epoch replaces the first (commonware's `insert`), which
+    // stays valid for readers that hold it.
     const set = try dealt.output.players.clone(gpa);
     const sharing = try dealt.output.public.clone(gpa);
     try registrar.register(testing.io, .new(0), .init(outsider, set, sharing, null));
-    try testing.expect(dynamic.scheme(.new(0)).? == signer);
-    try testing.expect(signer.me() != null);
+    try testing.expect(dynamic.scheme(.new(0)).?.me() == null);
+    try testing.expectEqual(share_index, signer.me().?.signer.get());
 }

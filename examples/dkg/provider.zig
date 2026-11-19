@@ -37,12 +37,16 @@ pub fn scheme(gpa: Allocator, info: SchemeInfo) !Scheme {
 }
 
 /// Certificate provider whose per-epoch schemes are registered as ceremonies complete. A
-/// registered scheme stays at its address until `deinit`, so readers may hold its pointer.
+/// later registration for an epoch replaces the earlier one (commonware's `insert`); every
+/// registered scheme stays at its address until `deinit`, so readers may hold its pointer
+/// (commonware's `Arc`).
 pub const DynamicProvider = struct {
     gpa: Allocator,
     io: Io,
     mutex: Io.Mutex = .init,
     schemes: std.AutoHashMapUnmanaged(u64, *Scheme) = .empty,
+    /// Replaced schemes, freed at `deinit`.
+    retired: std.ArrayList(*Scheme) = .empty,
 
     pub fn init(gpa: Allocator, io: Io) DynamicProvider {
         return .{ .gpa = gpa, .io = io };
@@ -55,30 +59,30 @@ pub const DynamicProvider = struct {
             self.gpa.destroy(entry.*);
         }
         self.schemes.deinit(self.gpa);
+        for (self.retired.items) |entry| {
+            entry.deinit(self.gpa);
+            self.gpa.destroy(entry);
+        }
+        self.retired.deinit(self.gpa);
         self.* = undefined;
     }
 
-    /// Registers `epoch`'s scheme (taken); a scheme already registered for it is kept.
+    /// Registers `epoch`'s scheme (taken), replacing any registered before.
     pub fn register(self: *DynamicProvider, epoch: Epoch, value: Scheme) Allocator.Error!void {
         var owned = value;
+        errdefer owned.deinit(self.gpa);
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
-        const entry = self.schemes.getOrPut(self.gpa, epoch.get()) catch |err| {
-            owned.deinit(self.gpa);
-            return err;
-        };
-        if (entry.found_existing) {
-            owned.deinit(self.gpa);
-            return;
-        }
+        try self.retired.ensureUnusedCapacity(self.gpa, 1);
+        const entry = try self.schemes.getOrPut(self.gpa, epoch.get());
         const stored = self.gpa.create(Scheme) catch |err| {
-            self.schemes.removeByPtr(entry.key_ptr);
-            owned.deinit(self.gpa);
+            if (!entry.found_existing) self.schemes.removeByPtr(entry.key_ptr);
             return err;
         };
         stored.* = owned;
+        if (entry.found_existing) self.retired.appendAssumeCapacity(entry.value_ptr.*);
         entry.value_ptr.* = stored;
-        assert(self.schemes.count() > 0);
+        assert(self.schemes.get(epoch.get()).? == stored);
     }
 
     pub fn scheme(self: *DynamicProvider, epoch: Epoch) ?*const Scheme {
