@@ -12,7 +12,8 @@
 //!   journals, databases) need no `Io` of their own.
 //! - `Completion.join(a, b)` completes when both do and reports the first failure it observes
 //!   (commonware `try_join`). A joined completion holds only leaf completions, at most
-//!   `max_parts`, so waiting on one is a bounded loop (no recursion).
+//!   `max_parts`, so waiting on one is a bounded loop (no recursion); a join over more
+//!   in-flight syncs first waits for the oldest.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -139,43 +140,54 @@ pub const Completion = struct {
     }
 
     /// A completion of both `a` and `b`, which it consumes (commonware `try_join`). A part that
-    /// already failed fails the join at once; completed successes drop out.
+    /// already failed fails the join at once, and completed successes drop out. A join covers
+    /// at most `max_parts` in-flight syncs: when more are in flight, it first waits for the
+    /// oldest, so folding any number of syncs stays bounded.
     pub fn join(a: Completion, b: Completion) Allocator.Error!Completion {
-        if (a.state == .ready and a.state.ready != null) {
-            b.release();
-            return a;
-        }
-        if (b.state == .ready and b.state.ready != null) {
-            a.release();
-            return b;
-        }
         defer a.release();
         defer b.release();
-        var leaves: [max_parts]*Leaf = undefined;
-        var count: usize = 0;
+        var parts: Parts = .{};
         for ([_]Completion{ a, b }) |part| switch (part.state) {
-            .ready => {},
-            .leaf => |leaf| {
-                leaves[count] = leaf;
-                count += 1;
-            },
+            .ready => |failure| if (failure) |err| return ready(err),
+            .leaf => |leaf| parts.add(leaf) catch |err| return ready(err),
             .joined => |joined| for (joined.leaves[0..joined.count]) |leaf| {
-                assert(count < max_parts);
-                leaves[count] = leaf;
-                count += 1;
+                parts.add(leaf) catch |err| return ready(err);
             },
         };
-        assert(count <= max_parts);
-        if (count == 0) return ok;
-        if (count == 1) return (Completion{ .state = .{ .leaf = leaves[0] } }).retain();
-        const joined = try leaves[0].gpa.create(Joined);
-        joined.* = .{ .gpa = leaves[0].gpa, .count = @intCast(count) };
-        for (leaves[0..count], 0..) |leaf, index| {
+        assert(parts.count <= max_parts);
+        if (parts.count == 0) return ok;
+        const first = parts.leaves[0];
+        if (parts.count == 1) return (Completion{ .state = .{ .leaf = first } }).retain();
+        const joined = try first.gpa.create(Joined);
+        joined.* = .{ .gpa = first.gpa, .count = @intCast(parts.count) };
+        for (parts.leaves[0..parts.count], 0..) |leaf, index| {
             assert(leaf.refs.fetchAdd(1, .monotonic) > 0);
             joined.leaves[index] = leaf;
         }
         return .{ .state = .{ .joined = joined } };
     }
+
+    /// The in-flight leaves of a join being built (borrowed: the parts hold them).
+    const Parts = struct {
+        leaves: [max_parts]*Leaf = undefined,
+        count: usize = 0,
+
+        /// Add `leaf` unless it already completed; a completed failure is returned. When the
+        /// join is full, wait for its oldest leaf first.
+        fn add(parts: *Parts, leaf: *Leaf) Error!void {
+            assert(parts.count <= max_parts);
+            if (leaf.poll()) |result| return result;
+            if (parts.count == max_parts) {
+                try parts.leaves[0].wait();
+                const rest = parts.leaves[1..parts.count];
+                std.mem.copyForwards(*Leaf, parts.leaves[0..rest.len], rest);
+                parts.count -= 1;
+            }
+            assert(parts.count < max_parts);
+            parts.leaves[parts.count] = leaf;
+            parts.count += 1;
+        }
+    };
 };
 
 /// One in-flight sync.
@@ -273,4 +285,41 @@ test "join completes when both parts do and fails on the first failure" {
     try joined.wait();
     joined.release();
     single.release();
+}
+
+const deterministic = @import("../deterministic.zig");
+
+/// Finish the two oldest leaves after a delay, so a fold over them can wait.
+fn finish_two(ctx: deterministic.Context, first: Completion, second: Completion) anyerror!void {
+    try ctx.sleep(.fromMilliseconds(5));
+    first.finish({});
+    second.finish({});
+    first.release();
+    second.release();
+}
+
+fn fold_many(ctx: deterministic.Context) !void {
+    var leaves: [Completion.max_parts + 2]Completion = undefined;
+    for (&leaves) |*leaf| leaf.* = try Completion.init_pending(testing.allocator, ctx.io());
+    defer for (leaves) |leaf| leaf.release();
+    const handle = try ctx.child("finish").spawn(
+        finish_two,
+        .{ leaves[0].retain(), leaves[1].retain() },
+    );
+    // The last two adds wait for the oldest leaves instead of overflowing the join.
+    var folded = Completion.ok;
+    for (leaves) |leaf| folded = try Completion.join(folded, leaf.retain());
+    defer folded.release();
+    try try handle.join();
+    try testing.expect(folded.state == .joined);
+    try testing.expectEqual(@as(u8, Completion.max_parts), folded.state.joined.count);
+    try testing.expect(folded.is_pending());
+    for (leaves[2..]) |leaf| leaf.finish({});
+    try folded.wait();
+}
+
+test "join over more in-flight syncs than max_parts waits for the oldest" {
+    var runner = try deterministic.Runner.init(testing.allocator, .{});
+    defer runner.deinit();
+    try (try runner.start_context(fold_many, .{}));
 }
