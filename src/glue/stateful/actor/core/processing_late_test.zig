@@ -664,3 +664,179 @@ test "stateful processing: a duplicate report waits for durability without reapp
     try testing.expectEqual(1, captures.calls);
     try testing.expectEqual(1, try fixture.counter());
 }
+
+/// commonware `live_floor_fences_suffix_ack`'s body for a floor at `floor_height`, with
+/// genesis reported (and skipped as the anchor) first when `genesis_processed`.
+fn live_floor_redelivery(floor_height: u64, genesis_processed: bool) !void {
+    std.debug.assert(floor_height >= 1 and floor_height <= 2);
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer deinit_fixture(&fixture);
+    var chain: [5]TestBlock = undefined;
+    chain[0] = TestBlock.genesis();
+    const tip_index: usize = @intCast(floor_height + 2);
+    for (1..tip_index + 1) |index| {
+        chain[index] = try fixture.harness.stage_pending_child(&chain[index - 1], index);
+    }
+    const tip = chain[tip_index];
+    const child, var batch = try fixture.harness.build_child(&tip, floor_height + 3);
+    batch.deinit();
+    var captures: harness.Probe = .{ .target = null };
+    defer captures.deinit();
+    fixture.processing.processor.app.capture_probe = &captures;
+    var probe: harness.Probe = .{ .target = child.digest() };
+    defer probe.deinit();
+    const gate = try probe.add_gate();
+    var started = gate.started;
+    defer started.deinit();
+    var release = gate.release;
+    fixture.processing.verifications.verifier.app.probe = &probe;
+
+    const first: usize = if (genesis_processed) 0 else 1;
+    for (chain[first .. tip_index + 1]) |block| try finalize_and_wait(&fixture, block);
+    try testing.expectEqual(tip_index, captures.calls);
+    // A child of the applied tip stays valid while the floor's suffix is redelivered.
+    var verdict = try fixture.verify(&.{ child, tip });
+    defer verdict.deinit();
+    try started.recv();
+    // Installing the floor redelivers F through F+2 with fresh receipts: each is
+    // acknowledged and nothing is applied again.
+    for (chain[@intCast(floor_height) .. tip_index + 1]) |block| {
+        try finalize_and_wait(&fixture, block);
+    }
+    try testing.expectEqual(tip_index, captures.calls);
+    try testing.expect(!verdict.is_ready()); // The verification is not restarted.
+    try release.send({});
+    try testing.expect(try verdict.recv());
+    try testing.expectEqual(1, probe.calls);
+    try testing.expectEqual(tip_index, try fixture.counter());
+}
+
+fn finalize_and_wait(fixture: *Fixture, block: TestBlock) !void {
+    var waiter = try fixture.finalize(block);
+    defer waiter.deinit();
+    try waiter.wait();
+}
+
+// commonware `live_floor_fences_suffix_ack` (unprocessed genesis, floor 1): a live floor
+// redelivers the applied suffix; the fresh receipts are acknowledged without reapplying,
+// and a verification of the tip's child continues undisturbed. Adapted: commonware drives a
+// real marshal whose fanout observer holds every receipt; here the floor's redelivery is
+// the same blocks reported again, and barriers are durable when they start, so the fenced
+// acknowledgements of F+1 and F+2 are not modeled.
+test "stateful processing: a live floor redelivery from an unprocessed genesis" {
+    try live_floor_redelivery(1, false);
+}
+
+// commonware `live_floor_fences_suffix_ack` (same start: genesis processed, floor 1).
+test "stateful processing: a live floor redelivery from a processed genesis" {
+    try live_floor_redelivery(1, true);
+}
+
+// commonware `live_floor_fences_suffix_ack` (forward start: genesis processed, floor 2).
+test "stateful processing: a live floor redelivery from a forward floor" {
+    try live_floor_redelivery(2, true);
+}
+
+// commonware `successor_barrier_drives_verification_holding_database_read`: a verification
+// held mid-processing does not stall the successor barrier for block 2: block 2 is
+// acknowledged while the verification is held, which then passes. Adapted: zigware's
+// database read lock is released before the batch is returned (`Shared.new_batches`), so a
+// held verification holds no read and the barrier never waits for one.
+test "stateful processing: a successor barrier proceeds past a held verification" {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer deinit_fixture(&fixture);
+    const genesis = TestBlock.genesis();
+    const block1 = try fixture.harness.stage_pending_child(&genesis, 1);
+    const block2 = try fixture.harness.stage_pending_child(&block1, 2);
+    const block3, var batch = try fixture.harness.build_child(&block2, 3);
+    batch.deinit();
+    var probe: harness.Probe = .{ .target = block3.digest() };
+    defer probe.deinit();
+    const gate = try probe.add_gate();
+    var started = gate.started;
+    defer started.deinit();
+    var release = gate.release;
+    fixture.processing.verifications.verifier.app.probe = &probe;
+
+    try finalize_and_wait(&fixture, block1);
+    var verdict = try fixture.verify(&.{ block3, block2 });
+    defer verdict.deinit();
+    try started.recv();
+    try finalize_and_wait(&fixture, block2);
+    try testing.expect(!verdict.is_ready());
+    try release.send({});
+    try testing.expect(try verdict.recv());
+}
+
+/// Stops the processing loop by cancelling its task (commonware's runtime `stop`), and
+/// returns how it ended.
+fn shutdown(fixture: *Fixture) anyerror!void {
+    var future = fixture.future.?;
+    fixture.future = null;
+    return future.cancel(io);
+}
+
+fn prune_join(stop: bool) !void {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    var live = true;
+    defer if (live) deinit_fixture(&fixture);
+    fixture.harness.processor.pruning = try eager_pruning();
+    const genesis = TestBlock.genesis();
+    const block1 = try fixture.harness.stage_pending_child(&genesis, 1);
+    const block2 = try fixture.harness.stage_pending_child(&block1, 2);
+    const candidate, var batch = try fixture.harness.build_child(&block2, 3);
+    batch.deinit();
+    var probe: harness.Probe = .{ .target = candidate.digest() };
+    defer probe.deinit();
+    const gate = try probe.add_gate();
+    var started = gate.started;
+    defer started.deinit();
+    var release = gate.release;
+    var released = false;
+    defer if (!released) release.deinit();
+    fixture.processing.verifications.verifier.app.probe = &probe;
+
+    try finalize_and_wait(&fixture, block1);
+    // The candidate executes under the gate when block 2's finalization schedules the prune
+    // (sent first: with no held flush, the prune would otherwise run before it arrives).
+    var verdict = try fixture.verify(&.{ candidate, block2 });
+    defer verdict.deinit();
+    try started.recv();
+    try finalize_and_wait(&fixture, block2);
+    // The prune waits for the running execution.
+    try testing.io.sleep(.fromMilliseconds(20), .awake);
+    try testing.expectEqual(0, fixture.prunes.items.len);
+    try testing.expect(!verdict.is_ready());
+    if (stop) {
+        // Shutdown stops processing without waiting for the execution; releasing the loop
+        // (zigware drops its executions there) drops it.
+        try testing.expectError(error.Canceled, shutdown(&fixture));
+        try testing.expectEqual(0, fixture.prunes.items.len);
+        live = false;
+        deinit_fixture(&fixture);
+        try release.closed();
+    } else {
+        released = true;
+        try release.send({});
+        try testing.expect(try verdict.recv());
+        try testing.expectEqualSlices(u64, &.{1}, fixture.prunes.items);
+    }
+}
+
+// commonware `prune_join_preserves_execution_until_shutdown` (shutdown case): a prune waits
+// for a running candidate execution; shutdown stops processing without waiting and drops
+// the execution. Adapted: shutdown is cancelling the loop's task, the verification is sent
+// before block 2's finalization (barriers complete at once), and the loop's own task count
+// is not inspected.
+test "stateful processing: shutdown preempts a prune joining an execution" {
+    try prune_join(true);
+}
+
+// commonware `prune_join_preserves_execution_until_shutdown` (ordinary maintenance case):
+// the prune keeps waiting until the execution is released, lets it finish, then prunes.
+test "stateful processing: a prune join lets the execution finish" {
+    try prune_join(false);
+}
