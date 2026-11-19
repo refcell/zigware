@@ -15,77 +15,33 @@ there is a package here with the same name and the same dependency graph, and wi
 are byte-identical so the two can interoperate.
 
 <p align="center">
-  <img src="docs/assets/estimator-demo.gif" width="800"
-    alt="The estimator simulates a Simplex round across three AWS regions">
+  <img src="docs/assets/dkg-demo.gif" width="800"
+    alt="Validators reshare a threshold BLS12-381 key at every epoch boundary while a fifth joins with state sync">
 </p>
 
-The [estimator](examples/estimator) runs a consensus protocol written in a small DSL over
-the deterministic runtime and the simulated p2p network, with real AWS inter-region
-latencies, and reports when each region crosses each step
-([video](docs/assets/estimator-demo.mp4)). Here Simplex finalizes across seven validators in
-three regions in about 114 ms at the mean. `zig build run-estimator -- <file.lazy>
---distribution <region:count,...>` runs any protocol in [examples/estimator](examples/estimator).
-
-<p align="center">
-  <img src="docs/assets/flood-demo.gif" width="800"
-    alt="Four flood peers exchange messages over authenticated p2p on real TCP">
-</p>
-
-[flood](examples/flood) runs four peers as separate processes on real TCP sockets. They find
-each other through authenticated p2p discovery, encrypt every connection, and send each other
-random messages as fast as the network accepts them. Each peer prints its throughput and
-latency every 2 s ([video](docs/assets/flood-demo.mp4)): about 620 messages per second per
-peer at around 1 ms mean latency. `etc/scripts/record-demo.sh flood` runs it locally.
-
-<p align="center">
-  <img src="docs/assets/chat-demo.gif" width="800"
-    alt="Three chat peers exchange encrypted messages over authenticated p2p">
-</p>
-
-[chat](examples/chat) is an encrypted group chat between friends who know each other's public
-keys. Here three peers run as separate processes on the production runtime, connect through
-authenticated p2p discovery, and trade messages; each terminal shows the conversation, the
-peer's live metrics, and its logs, where p2p discovery reports its handshakes and peer
-updates under commonware's event names ([video](docs/assets/chat-demo.mp4)).
-`etc/scripts/record-demo.sh chat` records it again.
-
-<p align="center">
-  <img src="docs/assets/interop-demo.gif" width="800"
-    alt="commonware's Rust chat and zigware's Zig chat exchange messages over authenticated p2p">
-</p>
-
-zigware and commonware interoperate on the wire. On the left is commonware's own Rust
-`examples/chat`, built from the upstream source; on the right is zigware's chat. They find each
-other through authenticated p2p discovery, complete the handshake, open encrypted streams, and
-each side's message arrives on the other ([video](docs/assets/interop-demo.mp4)).
-`etc/scripts/interop.sh` runs the same check without recording (it skips when cargo or the
-commonware source is missing), and `etc/scripts/record-demo.sh interop` records it again.
+[dkg](examples/dkg) follows commonware's flow: `dkg setup` writes configs for five peers
+with a committee of four, the epoch-zero players run `bootstrap` to complete a one-shot DKG
+and write the genesis, then four `validator`s run Simplex over marshal and a QMDB-backed
+stateful application. At every epoch boundary the committee reshares its threshold key on
+chain: each pane shows dealings and acks arriving, dealer logs observed on chain,
+`completed reshare ceremony ... success=true`, and the orchestrator entering the next epoch
+with the new key. After the first reshare, the bottom pane starts a fifth validator with
+`--state-sync`: its first block is a peer's floor rather than genesis, and it enters the
+current epoch and reshares in step with the rest ([video](docs/assets/dkg-demo.mp4)).
+`etc/scripts/record-demo.sh dkg` records it again.
 
 <p align="center">
   <img src="docs/assets/interop-log-demo.gif" width="800"
     alt="Two commonware Rust validators and two zigware validators finalize the same blocks">
 </p>
 
-The two also agree on consensus. Here commonware's Rust [log](examples/log) validators 0 and 1
-and zigware's validators 2 and 3 form one Simplex committee: each implementation proposes about
-half the views, and all four finalize every view with the same digest. A zigware validator that
-is stopped and restarted on its storage rejoins and finalizes later views with the same digests
-([video](docs/assets/interop-log-demo.mp4)). `etc/scripts/interop.sh` runs this check after the
-chat one, and `etc/scripts/record-demo.sh interop-log` records it again.
-
-<p align="center">
-  <img src="docs/assets/log-demo.gif" width="800"
-    alt="Four validators run Simplex consensus and finalize blocks over real TCP">
-</p>
-
-[log](examples/log) runs [Simplex](src/consensus/simplex) BFT consensus across four
-validators, each a separate process on the production runtime connected through authenticated
-p2p discovery. Every validator proposes random payloads in turn and shows when each view is
-proposed (blue), notarized, and finalized (green), keeping its consensus journal on disk so a
-restarted validator resumes where it left off. The Logs panes stream the voter's tracing
-events as it broadcasts votes, recovers certificates, and prunes old views
-([video](docs/assets/log-demo.mp4)).
-`etc/scripts/record-demo.sh log` records it again.
+zigware and commonware run one network together. Here commonware's Rust [log](examples/log)
+validators 0 and 1 and zigware's validators 2 and 3 form one Simplex committee: each
+implementation proposes about half the views, and all four finalize every view with the same
+digest. A zigware validator that is stopped and restarted on its storage rejoins and finalizes
+later views with the same digests ([video](docs/assets/interop-log-demo.mp4)).
+`etc/scripts/interop.sh` runs this check, after a chat session between the two
+implementations, and `etc/scripts/record-demo.sh interop-log` records it again.
 
 <p align="center">
   <img src="docs/assets/bridge-demo.gif" width="800"
@@ -101,21 +57,10 @@ are one validator from each network, where `block=Bridge(..)` marks a proposal c
 other network's finalization ([video](docs/assets/bridge-demo.mp4)).
 `etc/scripts/record-demo.sh bridge` records it again.
 
-<p align="center">
-  <img src="docs/assets/dkg-demo.gif" width="800"
-    alt="Validators reshare a threshold BLS12-381 key at every epoch boundary while a fifth joins with state sync">
-</p>
-
-[dkg](examples/dkg) follows commonware's flow: `dkg setup` writes configs for five peers
-with a committee of four, the epoch-zero players run `bootstrap` to complete a one-shot DKG
-and write the genesis, then four `validator`s run Simplex over marshal and a QMDB-backed
-stateful application. At every epoch boundary the committee reshares its threshold key on
-chain: each pane shows dealings and acks arriving, dealer logs observed on chain,
-`completed reshare ceremony ... success=true`, and the orchestrator entering the next epoch
-with the new key. After the first reshare, the bottom pane starts a fifth validator with
-`--state-sync`: its first block is a peer's floor rather than genesis, and it enters the
-current epoch and reshares in step with the rest ([video](docs/assets/dkg-demo.mp4)).
-`etc/scripts/record-demo.sh dkg` records it again.
+The other examples have their own READMEs and recordings: [chat](examples/chat), an
+encrypted group chat over authenticated p2p, including a session with commonware's Rust chat;
+[log](examples/log), four Simplex validators over TCP; [flood](examples/flood), p2p load; and
+[estimator](examples/estimator), simulated consensus latency across AWS regions.
 
 > [!WARNING]
 > zigware is pre-alpha and being ported now. Do not use it in production.

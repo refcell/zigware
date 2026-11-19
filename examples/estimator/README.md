@@ -10,6 +10,12 @@ peers spread across AWS regions at cloudping.co's region-to-region latencies (P5
 jitter from P90) in virtual time. It then prints latency statistics (mean, median, standard
 deviation) per proposer and averaged over all runs.
 
+![The estimator simulates a Simplex round across three AWS regions](../../docs/assets/estimator-demo.gif)
+
+([video](../../docs/assets/estimator-demo.mp4); `etc/scripts/record-demo.sh estimator` records
+it again.) Here Simplex finalizes across seven validators in three regions in about 114 ms at
+the mean.
+
 ## Usage
 
 ```sh

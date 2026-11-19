@@ -10,6 +10,16 @@ A Zig port of commonware's
 
 ([video](../../docs/assets/chat-demo.mp4); `etc/scripts/record-demo.sh chat` records it again.)
 
+### With commonware's Rust chat
+
+![commonware's Rust chat and zigware's chat exchange messages](../../docs/assets/interop-demo.gif)
+
+zigware's chat and commonware's own Rust `examples/chat`, built from the upstream source, find
+each other through authenticated p2p discovery, complete the handshake, open encrypted streams,
+and each side's message arrives on the other ([video](../../docs/assets/interop-demo.mp4)).
+`etc/scripts/interop.sh` runs this check without recording (it skips when cargo or the
+commonware source is missing), and `etc/scripts/record-demo.sh interop` records it again.
+
 ## Status
 
 Every example is ALPHA upstream
