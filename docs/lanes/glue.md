@@ -985,12 +985,12 @@ shared `tests/mocks.zig`, which takes additive edits only (agreed with the glue 
   four epochs changing size, many failed ceremonies, many random crashes, the rotating subset,
   the lossy network, the roots-of-unity output, the two determinism tests, and random crashes.
   Also ported: the boundary lagging validator, the shareless player, and the multiple-epochs
-  rotating subset. Still open: the full rotation with departed committee catch-up, which times
-  out. Traced against commonware: there the departed committee crashes about 2 ms after the
-  first epoch-2 dealing, so the epoch-2 ceremony fails and the next committee deals epoch 3.
-  Here the crashes land 20 to 200 ms later, after 9 dealings are acknowledged, so epoch 2
-  succeeds and hands its output to a committee that never returns. The link (now commonware's
-  10 ms default) was not the cause; the processed-height crash trigger's timing is next.
+  rotating subset (12 runs pass in ReleaseSafe, about 5 minutes). Still open: the full rotation
+  with departed committee catch-up, blocked on glue/simulate (examples lane). `Team.crash` waits
+  for the aborted validator's teardown (about 57 ms of simulated time) inside the plan loop, so
+  the four departed crashes fire one teardown apart (t4549 to 4723, not within 4 ms as in
+  commonware), and the nodes still running ack enough epoch-2 dealings for it to succeed.
+  Aborting off the loop crashes all four within 6 ms, and the test passes (seed 0).
 - [x] reshare drift (commonware 43b357a41..a9ffc25f3): bca770a0c runs the reshare suite under a
   stable `RoundRobin` elector with `TermLength`. Ported: `ReshareEngine.elector`,
   `harness.stable_leaders`, and every elector-parametrized ceremony loops over
