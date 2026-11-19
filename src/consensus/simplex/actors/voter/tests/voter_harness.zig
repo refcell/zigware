@@ -970,6 +970,12 @@ pub fn Harness(comptime F: type) type {
                     .hold_handoffs = options.hold_handoffs,
                 };
                 self.application.should_certify = options.certifier;
+                self.application.propose_latency =
+                    .{ .mean = options.propose_latency_ms, .std_dev = 0 };
+                self.application.verify_latency =
+                    .{ .mean = options.verify_latency_ms, .std_dev = 0 };
+                self.application.certify_latency =
+                    .{ .mean = options.certify_latency_ms, .std_dev = 0 };
                 self.application.stall_proposals = options.stall_proposals;
                 self.application.drop_proposals = options.drop_proposals;
                 self.application.fail_verification = options.fail_verification;

@@ -29,6 +29,7 @@ test {
             _ = @import("floor_journal.zig").Tests(h);
             _ = @import("replay.zig").Tests(h);
             _ = @import("nullify_replay.zig").Tests(h);
+            _ = @import("cert_restart.zig").Tests(h);
         }
     }
 }
