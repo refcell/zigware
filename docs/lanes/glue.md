@@ -765,6 +765,8 @@ orchestrator.
   spawns from the orchestrator's own context, so an abort finishes its epoch engines first.
 - 2026-11-19: five slow reshare ceremonies; removing the failure filter fails the failed
   ceremony carry-over test.
+- 2026-11-19: six more slow reshare ceremonies; the rotating subset caught the dealing loop
+  leaking a received DKG message when its wait failed on shutdown (fixed in 38c641c).
 
 ### Log
 - 2026-11-19: probe wire and limits; the `Tag` and `Message` hashes match, and the message
@@ -817,7 +819,9 @@ shared `tests/mocks.zig`, which takes additive edits only (agreed with the glue 
   tests that never state sync. Phase 2 adds glue.stateful's QMDB app, the dkg probe, and the
   state-sync plans for the rest. Phase 1's harness is in `tests/reshare/` with its first test
   (single participant, two epochs). Ported behind -Dslow-tests: rotates participants,
-  multiple epochs, the failed and consecutive failed ceremony carry-overs, and total shutdown.
+  multiple epochs, the failed and consecutive failed ceremony carry-overs, total shutdown,
+  four epochs changing size, many failed ceremonies, many random crashes, the rotating subset,
+  the lossy network, and the roots-of-unity output.
 - [x] lookup's peer-activation test: network.rs's
   `lookup_secondary_dials_primary_and_receives_response` in `network_test.zig` (consensus-marshal
   lane, 2026-11-19); it catches the addressable manager dropping the secondary role.

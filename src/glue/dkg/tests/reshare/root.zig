@@ -7,12 +7,14 @@ const std = @import("std");
 const testing = std.testing;
 const build_options = @import("build_options");
 const assert = std.debug.assert;
+const cryptography = @import("cryptography");
 const p2p = @import("p2p");
 const simulate = @import("../../../simulate/mod.zig");
 const harness = @import("harness.zig");
 const properties = @import("properties.zig");
 
 const gpa = testing.allocator;
+const SharingMode = cryptography.bls12381.primitives.sharing.Mode;
 const S = harness.ValidatorState;
 
 /// The most epochs a plan checks `SchemesRegistered` for.
@@ -39,12 +41,15 @@ const Options = struct {
     /// `crash_storm_plan`: exit once every participant is active at the final height, and
     /// check `AllNodesRecovered`.
     recovery: bool = false,
+    /// `BoundaryOutputMode` for epoch zero.
+    output_mode: ?SharingMode = null,
 };
 
 /// Runs a plan to `options.final_epoch`'s last block with `SignerRegistered`,
 /// `BoundaryEpochInfos`, and `EpochInfoContinuity` (`reshare_plan_with_boundary`), plus the
 /// properties `options` adds.
-fn run_reshare(engine: *harness.ReshareEngine, options: Options) !void {
+/// Returns the runtime's audit state.
+fn run_reshare(engine: *harness.ReshareEngine, options: Options) ![8]u8 {
     const final_epoch = options.final_epoch;
     const epochs: usize = @intCast(final_epoch + 1);
     assert(epochs <= max_scheme_epochs);
@@ -65,13 +70,19 @@ fn run_reshare(engine: *harness.ReshareEngine, options: Options) !void {
         .epochs = final_epoch + 1,
         .schedule = engine.schedule(),
     };
-    var checks: [4 + 2 * max_scheme_epochs]harness.Plan.Property = undefined;
+    var checks: [5 + 2 * max_scheme_epochs]harness.Plan.Property = undefined;
     checks[0] = .from(&signer);
     checks[1] = .from(&boundary);
     checks[2] = .from(&continuity);
     var count: usize = 3;
     if (options.recovery) {
         checks[count] = .from(&recovered);
+        count += 1;
+    }
+    var output_mode: properties.BoundaryOutputMode(S) = undefined;
+    if (options.output_mode) |mode| {
+        output_mode = .{ .gpa = gpa, .epoch = 0, .mode = @backingInt(mode) };
+        checks[count] = .from(&output_mode);
         count += 1;
     }
     var schemes: [max_scheme_epochs]properties.SchemesRegistered(S) = undefined;
@@ -99,14 +110,15 @@ fn run_reshare(engine: *harness.ReshareEngine, options: Options) !void {
         .properties = checks[0..count],
     };
     var result = try plan.run(gpa);
-    result.deinit();
+    defer result.deinit();
+    return result.state;
 }
 
 // commonware `reshare_e2e_single_participant_two_epochs`.
 test "reshare e2e single participant two epochs" {
     var engine = try harness.ReshareEngine.with_committees(gpa, 1, &.{1}, 1);
     defer engine.deinit();
-    try run_reshare(&engine, .{ .final_epoch = 1 });
+    _ = try run_reshare(&engine, .{ .final_epoch = 1 });
 }
 
 // commonware `reshare_e2e_rotates_participants`: five validators, four players per epoch.
@@ -114,7 +126,7 @@ test "reshare e2e rotates participants" {
     try skip_slow();
     var engine = try harness.ReshareEngine.create(gpa);
     defer engine.deinit();
-    try run_reshare(&engine, .{ .final_epoch = 0 });
+    _ = try run_reshare(&engine, .{ .final_epoch = 0 });
 }
 
 // commonware `reshare_e2e_multiple_epochs`.
@@ -122,7 +134,15 @@ test "reshare e2e multiple epochs" {
     try skip_slow();
     var engine = try harness.ReshareEngine.create(gpa);
     defer engine.deinit();
-    try run_reshare(&engine, .{ .final_epoch = 4 });
+    _ = try run_reshare(&engine, .{ .final_epoch = 4 });
+}
+
+// commonware `reshare_e2e_four_epochs_changing_size`.
+test "reshare e2e four epochs changing size" {
+    try skip_slow();
+    var engine = try harness.ReshareEngine.with_committees(gpa, 8, &.{ 4, 5, 6, 7, 4 }, 1);
+    defer engine.deinit();
+    _ = try run_reshare(&engine, .{ .final_epoch = 4 });
 }
 
 // commonware `reshare_e2e_failed_ceremony_carries_committee`.
@@ -131,7 +151,7 @@ test "reshare e2e failed ceremony carries committee" {
     var engine = try harness.ReshareEngine.create(gpa);
     defer engine.deinit();
     engine.failures = &.{0};
-    try run_reshare(&engine, .{
+    _ = try run_reshare(&engine, .{
         .final_epoch = 0,
         .min_successes = 0,
         .no_reveals = false,
@@ -146,11 +166,26 @@ test "reshare e2e consecutive failed ceremonies carry state" {
     var engine = try harness.ReshareEngine.create(gpa);
     defer engine.deinit();
     engine.failures = &.{ 0, 1 };
-    try run_reshare(&engine, .{
+    _ = try run_reshare(&engine, .{
         .final_epoch = 2,
         .timeout_secs = 90,
         .min_successes = 1,
         .failed = &.{ 0, 1 },
+        .schemes = false,
+    });
+}
+
+// commonware `reshare_e2e_many_failed_ceremonies_carry_state`.
+test "reshare e2e many failed ceremonies carry state" {
+    try skip_slow();
+    var engine = try harness.ReshareEngine.with_committees(gpa, 8, &.{ 4, 5 }, 1);
+    defer engine.deinit();
+    engine.failures = &.{ 0, 2, 3 };
+    _ = try run_reshare(&engine, .{
+        .final_epoch = 4,
+        .timeout_secs = 120,
+        .min_successes = 2,
+        .failed = &.{ 0, 2, 3 },
         .schemes = false,
     });
 }
@@ -164,7 +199,7 @@ fn run_crash_storm(
 ) !void {
     var engine = try harness.ReshareEngine.create(gpa);
     defer engine.deinit();
-    try run_reshare(&engine, .{
+    _ = try run_reshare(&engine, .{
         .final_epoch = final_epoch,
         .seed = seed,
         .timeout_secs = timeout_secs,
@@ -172,6 +207,17 @@ fn run_crash_storm(
         .crashes = &.{crash},
         .recovery = true,
     });
+}
+
+// commonware `reshare_e2e_multiple_epochs_with_many_random_crashes`.
+test "reshare e2e multiple epochs with many random crashes" {
+    try skip_slow();
+    const crash: simulate.action.Crash(harness.Key) = .{ .random = .{
+        .frequency = .from_secs(2),
+        .downtime = .from_millis(750),
+        .count = 3,
+    } };
+    try run_crash_storm(4, crash, 0, 360);
 }
 
 // commonware `reshare_e2e_multiple_epochs_with_total_shutdown`: more uninterrupted uptime
@@ -184,6 +230,41 @@ test "reshare e2e multiple epochs with total shutdown" {
         .count = 5,
     } };
     try run_crash_storm(3, crash, 0, 180);
+}
+
+// commonware `reshare_e2e_rotating_subset`.
+test "reshare e2e rotating subset" {
+    try skip_slow();
+    var engine = try harness.ReshareEngine.with_committees(gpa, 7, &.{4}, 1);
+    defer engine.deinit();
+    _ = try run_reshare(&engine, .{ .final_epoch = 0 });
+}
+
+// commonware `reshare_e2e_lossy_network`.
+test "reshare e2e lossy network" {
+    try skip_slow();
+    var engine = try harness.ReshareEngine.create(gpa);
+    defer engine.deinit();
+    _ = try run_reshare(&engine, .{
+        .final_epoch = 4,
+        .timeout_secs = 720,
+        .min_successes = 1,
+        .schemes = false,
+        .link = .{
+            .latency = .from_millis(100),
+            .jitter = .from_millis(50),
+            .success_rate = 0.7,
+        },
+    });
+}
+
+// commonware `reshare_e2e_roots_of_unity_output`.
+test "reshare e2e roots of unity output" {
+    try skip_slow();
+    var engine = try harness.ReshareEngine.create(gpa);
+    defer engine.deinit();
+    engine.sharing_mode = .roots_of_unity;
+    _ = try run_reshare(&engine, .{ .final_epoch = 0, .output_mode = .roots_of_unity });
 }
 
 test {
