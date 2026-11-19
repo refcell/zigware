@@ -94,5 +94,70 @@ pub fn Tests(comptime h: type) type {
                 }
             }.body);
         }
+
+        // commonware test_pipelined_handoff_certifies_parent_before_child: a lone validator
+        // notarizes its term-start child (view 2) before the parent (view 1) certifies, but
+        // the application sees the parent's certification request first.
+        test "voter pipelined handoff certifies parent before child" {
+            try h.covers(.ed25519);
+            try run(struct {
+                fn body(ctx: Ctx) anyerror!void {
+                    const gpa = ctx.gpa();
+                    var net: h.Network = undefined;
+                    try net.start(ctx, 1, "pipelined_handoff_certifies_parent_before_child");
+                    defer net.deinit();
+                    var stack: h.VoterStack = undefined;
+                    try stack.start(ctx, &net, .{
+                        .leader_timeout_ms = 10_000,
+                        .certification_timeout_ms = 10_000,
+                        .timeout_retry_ms = 30_000,
+                        .hold_certifications = .all,
+                        .handoff = .vote,
+                    });
+                    defer stack.stop();
+                    var parent: ?h.Proposal = null;
+                    var child: ?h.Proposal = null;
+                    // Bounded by the 5 s wait per message.
+                    while (parent == null or child == null) {
+                        const next = try stack.next_batcher(ctx, 5_000);
+                        const message = next orelse return error.NoNotarize;
+                        if (message != .constructed or message.constructed != .notarize) continue;
+                        const proposal = message.constructed.notarize.proposal;
+                        switch (proposal.view().get()) {
+                            1 => parent = proposal,
+                            2 => child = proposal,
+                            else => {},
+                        }
+                    }
+                    try testing.expectEqual(1, child.?.parent.get());
+                    for ([_]h.Proposal{ child.?, parent.? }) |subject| {
+                        const certificate = try h.build(
+                            gpa,
+                            .notarization,
+                            net.schemes(),
+                            subject,
+                            1,
+                        );
+                        try stack.mailbox.recovered(gpa, .{ .notarization = certificate });
+                    }
+                    const automaton = &stack.automaton;
+                    const parent_slot = try automaton.take_certification(ctx, 1);
+                    // The child's certification must not run ahead of its parent's.
+                    try testing.expect(!automaton.certification_requested(2));
+                    automaton.answer_certification(parent_slot, true);
+                    const child_slot = try automaton.take_certification(ctx, 2);
+                    automaton.answer_certification(child_slot, true);
+                    // Bounded by the 5 s wait per message.
+                    while (true) {
+                        const next = try stack.next_batcher(ctx, 5_000);
+                        const message = next orelse return error.NoFinalize;
+                        if (message != .constructed or message.constructed != .finalize) continue;
+                        if (message.constructed.view().get() == 2) break;
+                    }
+                    try testing.expect(stack.reporter.certified(.new(1)));
+                    try testing.expect(stack.reporter.certified(.new(2)));
+                }
+            }.body);
+        }
     };
 }

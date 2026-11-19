@@ -170,6 +170,10 @@ pub fn Harness(comptime F: type) type {
         pub const BatcherMessage = batcher_ingress.Message(Scheme, Digest);
         pub const ResolverMessage = resolver_ingress.Message(Scheme, Digest);
 
+        /// Which certification requests the test answers itself (commonware's
+        /// `Certifier::Controlled` and `hold(view, ..)`); `none` lets the application answer.
+        pub const Hold = union(enum) { none, all, view: u64 };
+
         /// The mock application as the voter's automaton, recording each request when it
         /// arrives (commonware's `set_propose_observer` and `set_verify_observer`).
         pub const Automaton = struct {
@@ -185,6 +189,17 @@ pub fn Harness(comptime F: type) type {
             proposals_count: u32 = 0,
             verifications: [requests_max]View = undefined,
             verifications_count: u32 = 0,
+            hold: Hold = .none,
+            held: [requests_max]Held = undefined,
+            held_count: u32 = 0,
+
+            /// A certification request the test answers.
+            pub const Held = struct {
+                view: View,
+                taken: bool = false,
+                answer: bool = false,
+                answered: Io.Event = .unset,
+            };
 
             fn record_proposal(self: *Automaton, request: harness_context) void {
                 self.mutex.lockUncancelable(self.io);
@@ -225,7 +240,60 @@ pub fn Harness(comptime F: type) type {
             }
 
             pub fn certify(self: *Automaton, io: Io, at: Round, payload: D) Io.Cancelable!?bool {
-                return self.application.certify(io, at, payload);
+                const held = switch (self.hold) {
+                    .none => return self.application.certify(io, at, payload),
+                    .all => true,
+                    .view => |view| at.view.get() == view,
+                };
+                // commonware's `Certifier::Controlled` answers the others at once.
+                if (!held) return true;
+                const slot = self.park_certification(at.view);
+                try slot.answered.wait(self.io);
+                return slot.answer;
+            }
+
+            fn park_certification(self: *Automaton, view: View) *Held {
+                self.mutex.lockUncancelable(self.io);
+                defer self.mutex.unlock(self.io);
+                assert(self.held_count < requests_max);
+                const slot = &self.held[self.held_count];
+                slot.* = .{ .view = view };
+                self.held_count += 1;
+                return slot;
+            }
+
+            /// Takes the held certification request for `view`, waiting up to 5 s of
+            /// simulated time (commonware `take_certification_request`).
+            pub fn take_certification(self: *Automaton, ctx: Ctx, view: u64) !*Held {
+                var waited: u64 = 0;
+                while (waited < 5_000) : (waited += 1) {
+                    if (self.find_held(view, true)) |slot| return slot;
+                    try ctx.sleep(.fromMilliseconds(1));
+                }
+                return error.NoCertificationRequest;
+            }
+
+            /// Whether a held certification request for `view` has arrived (taken or not).
+            pub fn certification_requested(self: *Automaton, view: u64) bool {
+                return self.find_held(view, false) != null;
+            }
+
+            fn find_held(self: *Automaton, view: u64, take: bool) ?*Held {
+                self.mutex.lockUncancelable(self.io);
+                defer self.mutex.unlock(self.io);
+                for (self.held[0..self.held_count]) |*slot| {
+                    if (slot.view.get() != view or (take and slot.taken)) continue;
+                    if (take) slot.taken = true;
+                    return slot;
+                }
+                return null;
+            }
+
+            /// Answers a taken certification request.
+            pub fn answer_certification(self: *Automaton, slot: *Held, answer: bool) void {
+                assert(slot.taken);
+                slot.answer = answer;
+                slot.answered.set(self.io);
             }
 
             /// Whether a proposal (or handoff) request for `view` arrived.
@@ -300,6 +368,8 @@ pub fn Harness(comptime F: type) type {
             elector: elector_mod.RoundRobin(Sha256) = elector_mod.RoundRobin(Sha256).default(),
             /// Routes the voter's journal through this gate (commonware `DelayedSyncContext`).
             sync_gates: ?*runtime.storage.mocks.SyncGates = null,
+            /// Certification requests held for the test.
+            hold_certifications: Hold = .none,
             /// The voter's tracer (commonware `test_collect_traces`).
             tracer: runtime.telemetry.traces.Tracer = .none,
         };
@@ -479,7 +549,11 @@ pub fn Harness(comptime F: type) type {
                 try self.start_application(net, net.keys()[options.local_index], options);
                 errdefer self.application.deinit();
                 // Kept across restarts, as commonware's observers are.
-                self.automaton = .{ .application = &self.application, .io = io };
+                self.automaton = .{
+                    .application = &self.application,
+                    .io = io,
+                    .hold = options.hold_certifications,
+                };
                 self.reporter = .init(gpa, io, &net.fixture.verifier);
                 errdefer self.reporter.deinit();
                 self.page_cache = try .init(gpa, page_size, page_cache_size);
