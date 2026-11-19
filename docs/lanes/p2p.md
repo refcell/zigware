@@ -760,7 +760,65 @@ After:
   examples with cargo (registry and target cached by revision, saved once the build
   succeeds), and runs interop.sh. A skip fails the job, and a failed run uploads
   `interop-logs`: the dkg nodes' logs, the log validators' screens, and the chat screens,
-  which the drivers keep under `$TMPDIR`.
+  which the drivers keep under `$TMPDIR`. First run on CI: 44565356294, 17 minutes, green.
+
+### Upstream finding: commonware's flood sender starves its tokio worker (not reported yet)
+
+Held for Andreas's decision on whether to report it upstream; nothing has been filed.
+Seen at commonware `a9ffc25f3`, in `examples/flood/src/bin/flood.rs`, while doing the flood
+head-to-head in docs/BENCHMARKS.md.
+
+`flood_sender` loops on `flood_sender.check(Recipients::All)` and `checked.send(msg, true)`.
+It awaits only when the check is rate-limited. When the check passes but no send is accepted
+(before discovery has connected any peer, or when the quota never limits), the loop never
+yields. The network tasks it wakes sit in that worker's LIFO slot, which other workers cannot
+steal, so they never run. No peer sends its discovery greeting. After the handshakes, about
+140 bytes cross each connection, and every peer's `flood_receiver_latency_count` stays 0.
+That happens with 2 or 8 worker threads and with 2 or 4 peers.
+
+Minimal repro, on one machine:
+1. Apply patch 1, so several peers can share a machine.
+2. Run `examples/flood/local.sh 2 <dir> 1024 200` to write a two-peer deployment.
+3. In `<dir>`, start each peer with `flood --hosts hosts.yaml --config <key>.yaml`.
+4. After 10 s, `curl 127.0.0.{1,2}:9090/metrics` shows `flood_receiver_latency_count 0` while
+   `flood_sender_messages_total` grows. The logs show `completed handshake` and
+   `peer started` on every peer, and nothing after.
+
+Apply patch 2 and the same deployment receives 600 msg/s per peer. Even with patch 2, an
+unthrottled rate (`local.sh 4 <dir> 1024 1000000`) still receives 0, because the quota never
+limits the loop, while zigware's flood receives 450–740k per peer. zigware's sender has the
+same loop, but it runs on its own `std.Io.Threaded` thread, so the spin starves nothing.
+
+Patch 1 binds a loopback host to its own IP, as zigware's flood does. It is a local-run
+convenience, not part of the bug:
+
+```diff
+-            Some(SocketAddr::new(
+-                IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+-                METRICS_PORT,
+-            )),
++            Some(SocketAddr::new(local_bind(&peers, &public_key), METRICS_PORT)),
+...
+-            SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), config.port),
++            SocketAddr::new(local_bind(&peers, &public_key), config.port),
+             SocketAddr::new(*ip, config.port),
+...
++/// A loopback host binds its own IP, not 0.0.0.0, so several peers share one machine.
++fn local_bind(peers: &HashMap<PublicKey, IpAddr>, me: &PublicKey) -> IpAddr {
++    let ip = *peers.get(me).expect("Could not find self in IPs");
++    if ip.is_loopback() { ip } else { IpAddr::V4(Ipv4Addr::UNSPECIFIED) }
++}
+```
+
+Patch 2 is the fix: the sender yields when a send is not accepted.
+
+```diff
+                     if checked.send(msg, true).accepted() {
+                         messages.inc();
++                    } else {
++                        commonware_runtime::reschedule().await;
+                     }
+```
 
 ## Log
 - 2026-11-19: end-to-end flood comparison (4 local peers, `etc/scripts/flood-compare.py`,
