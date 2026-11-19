@@ -1001,3 +1001,160 @@ test "stateful processing: mailbox close finishes a scheduled prune" {
     try first_waiter.wait();
     try second_waiter.wait();
 }
+
+/// The shared side of a `GatedAncestry`: whether its blocks are available, how many
+/// acquisitions cloned it, and whether a cloned acquisition was dropped (maintenance drops
+/// an acquisition when it pauses it).
+const AncestryGate = struct {
+    mutex: std.Io.Mutex = .init,
+    open: bool = false,
+    clones: u32 = 0,
+    parked: bool = false,
+
+    fn read(gate: *AncestryGate, comptime field: []const u8) @FieldType(AncestryGate, field) {
+        gate.mutex.lockUncancelable(io);
+        defer gate.mutex.unlock(io);
+        return @field(gate, field);
+    }
+
+    fn release(gate: *AncestryGate) void {
+        gate.mutex.lockUncancelable(io);
+        defer gate.mutex.unlock(io);
+        gate.open = true;
+    }
+
+    /// Waits until an acquisition was dropped (bounded: a hang guard).
+    fn await_parked(gate: *AncestryGate) !void {
+        for (0..10_000) |_| {
+            if (gate.read("parked")) return;
+            try io.sleep(.fromMilliseconds(1), .awake);
+        }
+        return error.TestTimedOut;
+    }
+};
+
+/// commonware's `GatedAncestry` and `PendingAncestry`: an ancestry whose first `always`
+/// blocks are available at once and whose rest wait for its gate to open; with no gated
+/// blocks it never ends. Each clone is one acquisition.
+const GatedAncestry = struct {
+    pub const Block = TestBlock;
+
+    gate: *AncestryGate,
+    blocks: [3]?harness.Digested = .{ null, null, null },
+    index: usize = 0,
+    always: usize = 0,
+    acquisition: bool = false,
+
+    fn init(
+        gate: *AncestryGate,
+        blocks: []const TestBlock,
+        always: usize,
+    ) !harness.Execution.Ancestry {
+        std.debug.assert(blocks.len <= 3 and always <= blocks.len);
+        var ancestry: GatedAncestry = .{ .gate = gate, .always = always };
+        for (blocks, 0..) |block, index| ancestry.blocks[index] = try harness.digested(block);
+        return harness.Execution.Ancestry.init(gpa, ancestry);
+    }
+
+    fn available(self: *const GatedAncestry) bool {
+        return self.index < self.always or self.gate.read("open");
+    }
+
+    pub fn peek(self: *const GatedAncestry) ?*const harness.Digested {
+        if (self.index >= self.blocks.len or !self.available()) return null;
+        return if (self.blocks[self.index]) |*block| block else null;
+    }
+
+    pub fn next(self: *GatedAncestry) !?harness.Digested {
+        // Waits for the gate (cancelable): a gate that never opens never ends the stream.
+        while (!self.available()) try io.sleep(.fromMilliseconds(1), .awake);
+        if (self.index >= self.blocks.len) return null;
+        const block = self.blocks[self.index] orelse return null;
+        self.blocks[self.index] = null;
+        self.index += 1;
+        return block;
+    }
+
+    pub fn clone(self: *const GatedAncestry) !GatedAncestry {
+        self.gate.mutex.lockUncancelable(io);
+        self.gate.clones += 1;
+        self.gate.mutex.unlock(io);
+        var copy = self.*;
+        copy.acquisition = true;
+        for (&copy.blocks) |*slot| {
+            if (slot.*) |block| slot.* = block.clone();
+        }
+        return copy;
+    }
+
+    pub fn deinit(self: *GatedAncestry) void {
+        for (&self.blocks) |*slot| if (slot.*) |*block| block.deinit();
+        if (self.acquisition) {
+            self.gate.mutex.lockUncancelable(io);
+            self.gate.parked = true;
+            self.gate.mutex.unlock(io);
+        }
+    }
+};
+
+/// Sends a verification over `ancestry` (taken) and returns its verdict's receiver.
+fn verify_with(
+    fixture: *Fixture,
+    ancestry: harness.Execution.Ancestry,
+) !utils.channel.oneshot.Receiver(bool) {
+    const pair = try utils.channel.oneshot.channel(bool, gpa, io);
+    try fixture.send(.{ .verify = .{ .ancestry = ancestry, .verification = pair.sender } });
+    return pair.receiver;
+}
+
+fn unavailable_ancestry(block_available: bool) !void {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer deinit_fixture(&fixture);
+    const genesis = TestBlock.genesis();
+    const parent = try fixture.harness.stage_pending_child(&genesis, 1);
+    const child, var batch = try fixture.harness.build_child(&parent, 2);
+    batch.deinit();
+    // The ancestry never yields the block, or yields it but never its parent.
+    var gate: AncestryGate = .{};
+    const blocks: []const TestBlock = if (block_available) &.{child} else &.{};
+    var verdict = try verify_with(&fixture, try GatedAncestry.init(&gate, blocks, blocks.len));
+    defer verdict.deinit();
+    try fixture.barrier();
+    const acquisitions = gate.read("clones");
+    try testing.expect(acquisitions > 0);
+    // Finalization pauses the acquisition, completes, and then restarts it.
+    try finalize_and_wait(&fixture, parent);
+    try fixture.barrier();
+    try testing.expect(gate.read("clones") > acquisitions);
+    try testing.expect(!verdict.is_ready());
+}
+
+// commonware `unavailable_ancestry_does_not_block_finalization` (block case): a verification
+// whose block never arrives keeps acquiring across a finalization without delaying it.
+test "stateful processing: an unavailable block does not block finalization" {
+    try unavailable_ancestry(false);
+}
+
+// commonware `unavailable_ancestry_does_not_block_finalization` (parent case): the same when
+// the block arrives but its parent never does.
+test "stateful processing: an unavailable parent does not block finalization" {
+    try unavailable_ancestry(true);
+}
+
+// commonware `tip_redelivery_keeps_acquiring_verification`: a redelivered applied tip
+// (genesis) leaves a verification still acquiring its block running, without restarting it.
+test "stateful processing: a tip redelivery keeps an acquiring verification" {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer deinit_fixture(&fixture);
+    var gate: AncestryGate = .{};
+    var verdict = try verify_with(&fixture, try GatedAncestry.init(&gate, &.{}, 0));
+    defer verdict.deinit();
+    try fixture.barrier();
+    const attempts = gate.read("clones");
+    try finalize_and_wait(&fixture, TestBlock.genesis());
+    try fixture.barrier();
+    try testing.expectEqual(attempts, gate.read("clones"));
+    try testing.expect(!verdict.is_ready());
+}
