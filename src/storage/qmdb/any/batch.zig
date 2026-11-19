@@ -99,7 +99,7 @@ pub fn Unmerkleized(comptime D: type) type {
         }
 
         /// The key's value after this batch, its chain, and `db`. The caller owns it.
-        pub fn get(self: *const Self, key: *const K, db: *D) !?V {
+        pub fn get(self: *const Self, key: *const K, db: *const D) !?V {
             try self.compatible(db);
             if (self.find_mutation(key)) |mutation| {
                 return value_mod.clone(?V, self.gpa, mutation.value);
@@ -146,13 +146,13 @@ pub fn Unmerkleized(comptime D: type) type {
 
         /// Hashes the batch with the `Proportional` floor policy. Consumes the batch on
         /// success; on error only `deinit` may follow.
-        pub fn merkleize(self: *Self, db: *D) !*D.MerkleizedBatch {
+        pub fn merkleize(self: *Self, db: *const D) !*D.MerkleizedBatch {
             var policy: floor_mod.Proportional = .{};
             return self.merkleize_with(db, &policy);
         }
 
         /// Hashes the batch, advancing the floor with `policy` (which must not evict).
-        pub fn merkleize_with(self: *Self, db: *D, policy: anytype) !*D.MerkleizedBatch {
+        pub fn merkleize_with(self: *Self, db: *const D, policy: anytype) !*D.MerkleizedBatch {
             floor_mod.check(@TypeOf(policy.*));
             const gpa = self.gpa;
             var m = try Merkleizer(D).init(self, db);
@@ -322,7 +322,7 @@ pub fn Staged(comptime D: type) type {
             self: *Self,
             slots: []const Slot(V),
             unstaged: []const Mutation,
-            db: *D,
+            db: *const D,
         ) !*D.MerkleizedBatch {
             var policy: floor_mod.Proportional = .{};
             return self.merkleize_with(slots, unstaged, db, &policy);
@@ -334,7 +334,7 @@ pub fn Staged(comptime D: type) type {
             self: *Self,
             slots: []const Slot(V),
             unstaged: []const Mutation,
-            db: *D,
+            db: *const D,
             policy: anytype,
         ) !*D.MerkleizedBatch {
             try self.record(slots, unstaged);
@@ -496,7 +496,7 @@ fn Merkleizer(comptime D: type) type {
         const Mutation = Unmerkleized(D).Mutation;
 
         gpa: Allocator,
-        db: *D,
+        db: *const D,
         /// Operations read from the log, which own the values the walk borrows from them.
         reads: std.ArrayList(D.Operation) = .empty,
         /// Values floor policies wrote in place of an update's own, owned here.
@@ -513,7 +513,7 @@ fn Merkleizer(comptime D: type) type {
         base_active_keys: usize,
 
         /// Collects the live ancestors and validates the chain against `db`.
-        fn init(batch: *const Unmerkleized(D), db: *D) !Self {
+        fn init(batch: *const Unmerkleized(D), db: *const D) !Self {
             const gpa = batch.gpa;
             var ancestors: std.ArrayList(*D.MerkleizedBatch) = .empty;
             defer ancestors.deinit(gpa);
@@ -1148,7 +1148,7 @@ pub fn Merkleized(comptime D: type) type {
 
         /// The key's value through this batch's chain, falling back to `db`. The caller owns
         /// it.
-        fn read_through(self: *const Self, key: *const K, db: *D) !?V {
+        fn read_through(self: *const Self, key: *const K, db: *const D) !?V {
             if (try self.resolve_entry(key, db.log.size())) |entry| {
                 return value_mod.clone(?V, self.gpa, entry.value());
             }
@@ -1156,14 +1156,14 @@ pub fn Merkleized(comptime D: type) type {
         }
 
         /// The key's value after this batch. The caller owns it.
-        pub fn get(self: *const Self, key: *const K, db: *D) !?V {
+        pub fn get(self: *const Self, key: *const K, db: *const D) !?V {
             try self.bounds.compatible(db.commitment());
             return self.read_through(key, db);
         }
 
         /// The smallest active key strictly above `key` after this batch and its chain, null if
         /// none (not wrapping); `key` need not be active. Ordered databases only.
-        pub fn get_next_key(self: *const Self, key: *const K, db: *D) !?K {
+        pub fn get_next_key(self: *const Self, key: *const K, db: *const D) !?K {
             comptime assert(D.Update.siblings);
             try self.bounds.compatible(db.commitment());
             if (self.total_active_keys == 0) return null;
@@ -1175,7 +1175,7 @@ pub fn Merkleized(comptime D: type) type {
 
         /// The largest active key strictly below `key` after this batch and its chain, null if
         /// none (not wrapping); `key` need not be active. Ordered databases only.
-        pub fn get_prev_key(self: *const Self, key: *const K, db: *D) !?K {
+        pub fn get_prev_key(self: *const Self, key: *const K, db: *const D) !?K {
             comptime assert(D.Update.siblings);
             try self.bounds.compatible(db.commitment());
             if (self.total_active_keys == 0) return null;

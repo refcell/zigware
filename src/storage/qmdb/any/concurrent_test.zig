@@ -1,7 +1,8 @@
 //! Concurrent reads of `any` and `current` databases (commonware shares one behind an
 //! `AsyncRwLock`): reader tasks on `std.Io.Threaded` hold read guards and `get`/`get_many`
 //! seeded keys through `*const Db`, while the test applies and commits batches of other keys
-//! under the write guard (each commit's floor walk moves seeded updates to the tip). A page
+//! under the write guard (each commit's floor walk moves seeded updates to the tip). A batcher
+//! task merkleizes batches against the database under read guards beside them. A page
 //! cache of a few pages makes most reads miss, so readers fetch pages of one blob at once.
 
 const std = @import("std");
@@ -22,6 +23,7 @@ const seeded_keys = 200;
 const readers = 3;
 const read_rounds = 300;
 const write_rounds = 30;
+const batch_rounds = 40;
 
 fn Shared(comptime D: type) type {
     return utils.sync.UpgradableRwLock(D);
@@ -58,6 +60,43 @@ fn reader(comptime D: type) fn (*Shared(D), u64) u32 {
     }.read;
 }
 
+/// Builds `batch_rounds` batches beside the readers, each under a read guard: overwrites a
+/// seeded key, merkleizes against the shared database, and reads the new value and another
+/// seeded key back through the batch, counting every mismatch.
+fn batcher(comptime D: type) fn (*Shared(D), u64) u32 {
+    return struct {
+        fn run(lock: *Shared(D), seed: u64) u32 {
+            var prng: std.Random.DefaultPrng = .init(seed);
+            var failures: u32 = 0;
+            for (0..batch_rounds) |_| {
+                const i = prng.random().uintLessThan(u64, seeded_keys);
+                const other = (i + 1) % seeded_keys;
+                var guard = lock.read() catch return failures + 1;
+                defer guard.deinit();
+                failures += batch_round(D, guard.get(), i, other) catch 1;
+            }
+            return failures;
+        }
+    }.run;
+}
+
+fn batch_round(comptime D: type, db: *const D, i: u64, other: u64) !u32 {
+    assert(i != other);
+    var batch = try db.new_batch();
+    const merkleized = merkleized: {
+        errdefer batch.deinit();
+        try batch.write(any_support.to_digest(i), any_support.to_val(i, 1));
+        break :merkleized try batch.merkleize(db);
+    };
+    defer merkleized.release();
+    var failures: u32 = 0;
+    const got = try merkleized.get(&any_support.to_digest(i), db);
+    if (got == null or !got.?.eql(any_support.to_val(i, 1))) failures += 1;
+    const kept = try merkleized.get(&any_support.to_digest(other), db);
+    if (kept == null or !kept.?.eql(any_support.to_val(other, 0))) failures += 1;
+    return failures;
+}
+
 fn write_round(comptime D: type, lock: *Shared(D), round: u64) !void {
     var guard = try lock.write();
     defer guard.deinit();
@@ -87,13 +126,17 @@ fn run(comptime D: type, db_owned: D) !void {
         db.deinit();
     }
     try seed_db(D, &lock.value);
-    var futures: [readers]std.Io.Future(u32) = undefined;
+    // The readers, then one batcher.
+    var futures: [readers + 1]std.Io.Future(u32) = undefined;
     var started: usize = 0;
     defer for (futures[0..started]) |*future| {
         _ = future.cancel(io);
     };
     for (&futures, 0..) |*future, index| {
-        future.* = try io.concurrent(reader(D), .{ &lock, index + 1 });
+        future.* = if (index < readers)
+            try io.concurrent(reader(D), .{ &lock, index + 1 })
+        else
+            try io.concurrent(batcher(D), .{ &lock, index + 1 });
         started += 1;
     }
     for (0..write_rounds) |round| try write_round(D, &lock, round);

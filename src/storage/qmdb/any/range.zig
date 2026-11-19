@@ -26,14 +26,14 @@ pub fn Range(comptime D: type) type {
         pub const Pair = struct { key: K, value: V };
         const Cursor = union(enum) { start, next: K, done };
 
-        db: *D,
+        db: *const D,
         start: Bound(K),
         end: Bound(K),
         cursor: Cursor,
         /// The current bucket's pairs in range, in descending key order (popped from the end).
         pending: std.ArrayList(D.Update) = .empty,
 
-        pub fn init(db: *D, start: Bound(K), end: Bound(K)) Self {
+        pub fn init(db: *const D, start: Bound(K), end: Bound(K)) Self {
             comptime assert(D.Update.siblings);
             const empty = switch (start) {
                 .unbounded => false,

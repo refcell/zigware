@@ -517,7 +517,7 @@ pub fn Merkle(comptime F: type, comptime Digest: type) type {
         }
 
         /// The node at `position`, or null if it is pruned.
-        pub fn get_node(self: *Self, position: u64) Error!?Digest {
+        pub fn get_node(self: *const Self, position: u64) Error!?Digest {
             if (self.mem.get_node(position)) |node| return node;
             return self.journal.read(position) catch |err| switch (err) {
                 error.ItemPruned => null,
@@ -527,7 +527,7 @@ pub fn Merkle(comptime F: type, comptime Digest: type) type {
 
         /// The nodes at strictly increasing `positions` into `out`. Fails with `ElementPruned`
         /// at the first position below the journal's pruning boundary.
-        pub fn get_nodes(self: *Self, positions: []const u64, out: []Digest) Error!void {
+        pub fn get_nodes(self: *const Self, positions: []const u64, out: []Digest) Error!void {
             assert(positions.len == out.len);
             const start = self.journal.pruning_boundary();
             var journal_positions: std.ArrayList(u64) = .empty;

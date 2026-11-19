@@ -216,7 +216,7 @@ fn OpsView(comptime D: type) type {
         const Self = @This();
 
         batch: *const D.Any.Log.MerkleizedBatch,
-        base: *D.Any.Log.Merkle,
+        base: *const D.Any.Log.Merkle,
 
         pub fn size(self: *const Self) u64 {
             return self.batch.inner.size();
@@ -281,14 +281,14 @@ pub fn Unmerkleized(comptime D: type) type {
         }
 
         /// The key's value with this batch's writes.
-        pub fn get(self: *const Self, key: *const K, db: *D) !?V {
+        pub fn get(self: *const Self, key: *const K, db: *const D) !?V {
             assert(self.inner != null);
             return self.inner.?.get(key, &db.any);
         }
 
         /// Reads `keys` into `out` and stages the reads (commonware's `stage`). Consumes the
         /// batch on success; on error the batch is unchanged.
-        pub fn stage(self: *Self, keys: []const K, db: *D, out: []?V) !D.StagedBatch {
+        pub fn stage(self: *Self, keys: []const K, db: *const D, out: []?V) !D.StagedBatch {
             assert(self.inner != null);
             assert(keys.len == out.len);
             const inner = try self.inner.?.stage(keys, &db.any, out);
@@ -302,14 +302,14 @@ pub fn Unmerkleized(comptime D: type) type {
         }
 
         /// Merkleizes with commonware's default `Proportional` floor policy.
-        pub fn merkleize(self: *Self, db: *D) !*D.MerkleizedBatch {
+        pub fn merkleize(self: *Self, db: *const D) !*D.MerkleizedBatch {
             var policy: floor_mod.Proportional = .{};
             return self.merkleize_with(db, &policy);
         }
 
         /// Merkleizes the `any` batch with `policy`, then the activity layer and grafted tree
         /// over it. Consumes the batch on success; after an error only `deinit` may follow.
-        pub fn merkleize_with(self: *Self, db: *D, policy: anytype) !*D.MerkleizedBatch {
+        pub fn merkleize_with(self: *Self, db: *const D, policy: anytype) !*D.MerkleizedBatch {
             assert(self.inner != null);
             trim(D.chunk_bytes, self.gpa, &self.bitmap_parent, db.any.bitmap.len());
             const inner = try self.inner.?.merkleize_with(&db.any, policy);
@@ -368,7 +368,7 @@ pub fn Staged(comptime D: type) type {
 
         /// Reads more `keys` into `out`, appending them as the returned range of slots. On
         /// error the staged set is unchanged.
-        pub fn expand(self: *Self, more: []const D.Key, db: *D, out: []?V) !Range {
+        pub fn expand(self: *Self, more: []const D.Key, db: *const D, out: []?V) !Range {
             assert(more.len == out.len);
             return self.inner.expand(more, &db.any, out);
         }
@@ -378,7 +378,7 @@ pub fn Staged(comptime D: type) type {
             self: *Self,
             slots: []const Slot,
             unstaged: []const Mutation,
-            db: *D,
+            db: *const D,
         ) !*D.MerkleizedBatch {
             var policy: floor_mod.Proportional = .{};
             return self.merkleize_with(slots, unstaged, db, &policy);
@@ -390,7 +390,7 @@ pub fn Staged(comptime D: type) type {
             self: *Self,
             slots: []const Slot,
             unstaged: []const Mutation,
-            db: *D,
+            db: *const D,
             policy: anytype,
         ) !*D.MerkleizedBatch {
             assert(slots.len == self.len());
@@ -417,7 +417,7 @@ pub fn Staged(comptime D: type) type {
 /// regrafted, and the canonical root (commonware's `compute_current_layer`).
 fn current_layer(
     comptime D: type,
-    db: *D,
+    db: *const D,
     inner: *D.Any.MerkleizedBatch,
     grafted_parent: *D.GraftedBatch,
     bitmap_parent: ?*D.Layer,
@@ -468,7 +468,7 @@ fn current_layer(
 /// `grafted` over the database's.
 fn batch_witness(
     comptime D: type,
-    db: *D,
+    db: *const D,
     inner: *const D.Any.MerkleizedBatch,
     layer: *const D.Layer,
     grafted: *const D.GraftedBatch,
@@ -492,7 +492,7 @@ fn batch_witness(
 /// and the newly graftable chunks added.
 fn regraft(
     comptime D: type,
-    db: *D,
+    db: *const D,
     layer: *const D.Layer,
     grafted_parent: *D.GraftedBatch,
     ops: anytype,
@@ -626,18 +626,18 @@ pub fn Merkleized(comptime D: type) type {
         }
 
         /// The key's value after this batch.
-        pub fn get(self: *const Self, key: *const D.Key, db: *D) !?D.Value {
+        pub fn get(self: *const Self, key: *const D.Key, db: *const D) !?D.Value {
             return self.inner.get(key, &db.any);
         }
 
         /// The smallest active key above `key` after this batch (ordered, not wrapping).
-        pub fn get_next_key(self: *const Self, key: *const D.Key, db: *D) !?D.Key {
+        pub fn get_next_key(self: *const Self, key: *const D.Key, db: *const D) !?D.Key {
             comptime assert(D.Any.Update.siblings);
             return self.inner.get_next_key(key, &db.any);
         }
 
         /// The largest active key below `key` after this batch (ordered, not wrapping).
-        pub fn get_prev_key(self: *const Self, key: *const D.Key, db: *D) !?D.Key {
+        pub fn get_prev_key(self: *const Self, key: *const D.Key, db: *const D) !?D.Key {
             comptime assert(D.Any.Update.siblings);
             return self.inner.get_prev_key(key, &db.any);
         }
