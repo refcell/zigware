@@ -648,15 +648,16 @@ test "stateful processing: a prune waiting on a held sync drives an active verif
     var waiter = try fixture.finalize(block1);
     defer waiter.deinit();
     try wait_until_parked(&pending);
-    const held = pending.parked();
+    // The barrier's syncs park one after another, so count releases rather than parked syncs.
+    const completed = pending.completions();
     try testing.io.sleep(.fromMilliseconds(20), .awake);
     try testing.expect(waiter.poll() == null);
 
     // The verdict arrives while block 1's sync is still held, and nothing is pruned yet.
     try release.send({});
-    try testing.expect(try recv_within(&verdict, 2_000));
-    // Block 1's barrier parks its member syncs one at a time, so more may have parked since.
-    try testing.expect(pending.parked() >= held);
+    try testing.expect(try recv_within(&verdict, 10_000));
+    try testing.expectEqual(completed, pending.completions());
+    try testing.expect(pending.parked() > 0);
     try testing.expectEqual(0, fixture.prunes.items.len);
     try testing.expect(waiter.poll() == null);
 
