@@ -34,10 +34,11 @@ const Addresses = network.Addresses(P);
 const file = @embedFile("../conformance.toml");
 const prefix = "commonware_glue::dkg::";
 
-/// Types holding BLS points multiply a point by a scalar per case; Debug builds take minutes,
-/// so they run only in optimized builds or with `-Dslow-tests`.
+/// Types holding BLS points multiply a point by a scalar per case, so these hashes take 20 to
+/// 75 s each even in ReleaseSafe (and minutes in Debug). They run only with `-Dslow-tests`,
+/// which the nightly job sets.
 fn skip_slow() error{SkipZigTest}!void {
-    if (builtin.mode == .debug and !build_options.slow_tests) return error.SkipZigTest;
+    if (!build_options.slow_tests) return error.SkipZigTest;
 }
 
 fn CodecConformance(comptime T: type, comptime gen: arbitrary.Generator(T)) type {
