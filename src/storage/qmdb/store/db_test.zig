@@ -7,6 +7,7 @@ const testing = std.testing;
 const codec = @import("codec");
 const cryptography = @import("cryptography");
 const runtime = @import("runtime");
+const utils = @import("utils");
 const translator = @import("../../translator.zig");
 const value = @import("../value.zig");
 const floor_mod = @import("../floor.zig");
@@ -772,4 +773,366 @@ test "store walk with entries left passes the inactive tail" {
     try testing.expectEqual(@as(u64, 3), db.inactivity_floor());
     try expect_value(&db, key(50), &.{1});
     try expect_bitmap_consistent(&db);
+}
+
+/// Each key's latest update location (commonware's `live` map in `any::test::churn`).
+const Live = std.AutoArrayHashMapUnmanaged(Digest, u64);
+
+/// Commonware's `test_store_floor_bound` driver: every batch goes through `apply_bounded`,
+/// which replays the batch's operations into `live` and checks the floor bound.
+const Churn = struct {
+    db: *Db,
+    live: Live = .empty,
+    arena: std.heap.ArenaAllocator = .init(gpa),
+    writes: std.ArrayList(Write) = .empty,
+
+    fn deinit(self: *Churn) void {
+        self.live.deinit(gpa);
+        self.writes.deinit(gpa);
+        self.arena.deinit();
+    }
+
+    /// Commonware's `i.to_be_bytes().to_vec()`, alive until the batch applies.
+    fn value(self: *Churn, i: u64) !Bytes {
+        const bytes = try self.arena.allocator().alloc(u8, 8);
+        std.mem.writeInt(u64, bytes[0..8], i, .big);
+        return bytes;
+    }
+
+    fn put(self: *Churn, k: Digest, v: ?u64) !void {
+        try self.writes.append(gpa, .{ .key = k, .value = if (v) |i| try self.value(i) else null });
+    }
+
+    /// The live keys, oldest update first (commonware's `age`).
+    fn age(self: *const Churn) ![]Digest {
+        const Ctx = struct {
+            locs: []const u64,
+            pub fn lessThan(ctx: @This(), a: usize, b: usize) bool {
+                return ctx.locs[a] < ctx.locs[b];
+            }
+        };
+        const order = try gpa.alloc(usize, self.live.count());
+        defer gpa.free(order);
+        for (order, 0..) |*o, i| o.* = i;
+        std.mem.sort(usize, order, Ctx{ .locs = self.live.values() }, Ctx.lessThan);
+        const keys = try gpa.alloc(Digest, order.len);
+        for (keys, order) |*k, o| k.* = self.live.keys()[o];
+        return keys;
+    }
+
+    /// The live keys in key order.
+    fn sorted(self: *const Churn) ![]Digest {
+        const keys = try gpa.dupe(Digest, self.live.keys());
+        std.mem.sort(Digest, keys, {}, digest_less);
+        return keys;
+    }
+
+    /// Deletes the `n` newest (or, with `oldest`, oldest) live keys in one batch.
+    fn delete_aged(self: *Churn, n: usize, oldest: bool) !void {
+        const keys = try self.age();
+        defer gpa.free(keys);
+        std.debug.assert(n <= keys.len);
+        for (0..n) |i| try self.put(keys[if (oldest) i else keys.len - 1 - i], null);
+        try self.apply_bounded();
+    }
+
+    /// Commonware's `bounded`: applies the pending writes as one proportional batch, replays
+    /// its operations into `live` (each update moves at most once; a written key may appear
+    /// twice), and checks the keys and `assert_bound`.
+    fn apply_bounded(self: *Churn) !void {
+        defer {
+            self.writes.clearRetainingCapacity();
+            _ = self.arena.reset(.retain_capacity);
+        }
+        var expected = try self.keys_after();
+        defer expected.deinit(gpa);
+        const start = self.db.bounds().end;
+        var changeset = try Db.Changeset.init(gpa, self.writes.items);
+        try self.db.apply_batch(&changeset);
+        const end = self.db.bounds().end;
+        var updated: std.AutoHashMapUnmanaged(Digest, usize) = .empty;
+        defer updated.deinit(gpa);
+        for (start..end) |loc| {
+            var op = try self.db.log.read(loc);
+            defer op.deinit(gpa);
+            switch (op) {
+                .update => |u| {
+                    const count = try updated.getOrPutValue(gpa, u.key, 0);
+                    count.value_ptr.* += 1;
+                    const limit = 1 + @as(usize, @intFromBool(self.written(u.key)));
+                    try testing.expect(count.value_ptr.* <= limit); // Moved twice.
+                    try self.live.put(gpa, u.key, loc);
+                },
+                .delete => |k| _ = self.live.swapRemove(k),
+                .commit => {},
+            }
+        }
+        try testing.expectEqual(expected.count(), self.live.count());
+        for (self.live.keys()) |k| try testing.expect(expected.contains(k));
+        try testing.expectEqual(self.live.count(), self.db.active_keys);
+        try self.expect_bound(end);
+    }
+
+    fn written(self: *const Churn, k: Digest) bool {
+        for (self.writes.items) |w| if (w.key.eql(k)) return true;
+        return false;
+    }
+
+    /// Commonware's `keys_after`.
+    fn keys_after(self: *const Churn) !std.AutoHashMapUnmanaged(Digest, void) {
+        var keys: std.AutoHashMapUnmanaged(Digest, void) = .empty;
+        errdefer keys.deinit(gpa);
+        for (self.live.keys()) |k| try keys.put(gpa, k, {});
+        for (self.writes.items) |w| {
+            if (w.value != null) try keys.put(gpa, w.key, {}) else _ = keys.remove(w.key);
+        }
+        return keys;
+    }
+
+    /// Commonware's `assert_bound`: every live update lies in `[floor, tip - 1)` and the gap
+    /// from the floor to the tip is at most `3 * live + 1`.
+    fn expect_bound(self: *const Churn, tip: u64) !void {
+        const floor = self.db.inactivity_floor();
+        try testing.expect(floor < tip);
+        for (self.live.values()) |loc| try testing.expect(loc >= floor and loc < tip - 1);
+        try testing.expect(tip - floor <= 3 * @as(u64, self.live.count()) + 1);
+    }
+};
+
+/// Commonware's `any::test::churn`.
+fn churn(c: *Churn) !void {
+    for (0..256) |i| try c.put(key(i), i);
+    try c.apply_bounded();
+    for (0..64) |round| {
+        for (0..4) |i| try c.put(key(i), 1000 + round);
+        try c.apply_bounded();
+    }
+    // Delete a window of eight, then recreate it while deleting the next, 64 times.
+    for (0..8) |i| try c.put(key(i), null);
+    try c.apply_bounded();
+    for (0..64) |round| {
+        for (8 * round..8 * round + 8) |i| try c.put(key(i % 256), 2000 + round);
+        for (8 * round + 8..8 * round + 16) |i| try c.put(key(i % 256), null);
+        try c.apply_bounded();
+    }
+    while (c.live.count() > 8) try c.delete_aged(8, false);
+    for (0..4) |burst| {
+        const first = 1000 + 64 * burst;
+        for (first..first + 64) |i| try c.put(key(i), i);
+        try c.apply_bounded();
+        for (0..8) |_| try c.delete_aged(8, false);
+    }
+    for (2000..2512) |i| try c.put(key(i), i);
+    try c.apply_bounded();
+    for (0..4) |round| {
+        const keys = try c.sorted();
+        defer gpa.free(keys);
+        for (keys[0..64]) |k| try c.put(k, null);
+        for (keys[64..192]) |k| try c.put(k, round);
+        const first = 3000 + 32 * round;
+        for (first..first + 32) |i| try c.put(key(i), i);
+        try c.apply_bounded();
+    }
+}
+
+/// Commonware's `any::test::randomized_churn`, drawing from `TestRng(seed)` (commonware draws
+/// from the deterministic runtime's rng, so the batches differ; the checks are the same).
+fn randomized_churn(c: *Churn, seed: u64) !void {
+    var rng: utils.TestRng = .init(seed);
+    for (0..20) |i| try c.put(key(i), i);
+    try c.apply_bounded();
+    try c.delete_aged(19, false);
+    try testing.expectEqual(@as(usize, 1), c.live.count());
+    try c.delete_aged(1, false);
+    try c.apply_bounded();
+    for (0..19) |i| try c.put(key(i), i);
+    try c.apply_bounded();
+    while (c.live.count() > 1) try c.delete_aged(@min(3, c.live.count() - 1), false);
+    try c.delete_aged(1, false);
+    for (0..2) |epoch| try randomized_epoch(c, &rng, epoch);
+}
+
+fn randomized_epoch(c: *Churn, rng: *utils.TestRng, epoch: u64) !void {
+    const urng = utils.rng;
+    for (0..96) |i| try c.put(key(i), epoch * 1000 + i);
+    try c.apply_bounded();
+    const hot = try c.sorted();
+    defer gpa.free(hot);
+    for (0..32) |round| {
+        const count = urng.range_at_most(rng, u64, 0, 4);
+        for (0..count) |i| {
+            const k = hot[urng.range_less_than(rng, usize, 0, 8)];
+            try c.put(k, epoch * 1000 + round * 8 + i);
+        }
+        try c.apply_bounded();
+    }
+    while (c.live.count() > 1) {
+        const n = urng.range_at_most(rng, usize, 1, @min(8, c.live.count() - 1));
+        try c.delete_aged(n, epoch == 1);
+    }
+    for (0..48) |round| {
+        const count = urng.range_at_most(rng, usize, 0, 12);
+        for (0..count) |_| {
+            const k = key(urng.range_less_than(rng, u64, 0, 160));
+            try c.put(k, if (urng.bernoulli(rng, 0.55)) rng.next_u64() else null);
+        }
+        try c.apply_bounded();
+        if (round % 8 == 0) try c.apply_bounded();
+    }
+    if (c.live.count() == 0) {
+        try c.put(key(0), epoch);
+        try c.apply_bounded();
+    }
+    try c.delete_aged(c.live.count() - 1, false); // All but the oldest.
+    try testing.expectEqual(@as(usize, 1), c.live.count());
+    try c.apply_bounded();
+    try c.delete_aged(1, false);
+    for (0..3) |_| {
+        try c.apply_bounded();
+        try testing.expectEqual(@as(usize, 0), c.live.count());
+    }
+}
+
+test "store floor bound under churn and randomized churn" {
+    for ([_]?u64{ null, 0, 1, 7, 0x5133 }) |seed| {
+        var h: Harness = undefined;
+        try h.init();
+        defer h.deinit();
+        var db = try h.open(null);
+        var c: Churn = .{ .db = &db };
+        defer c.deinit();
+        if (seed) |s| try randomized_churn(&c, s) else try churn(&c);
+        try expect_bitmap_consistent(&db);
+        try db.destroy();
+    }
+}
+
+/// `count` keys in one TwoCap bucket: `a5 5a` then zeros, with `i` in the last eight bytes.
+fn bucket_key(i: u64) Digest {
+    var d: Digest = .{ .bytes = @splat(0) };
+    d.bytes[0] = 0xa5;
+    d.bytes[1] = 0x5a;
+    std.mem.writeInt(u64, d.bytes[24..32], i, .big);
+    return d;
+}
+
+const CollisionCase = struct {
+    count: u64,
+    positions: []const usize,
+    /// Commonware's bucket reads, which resolve the batch's keys in rounds.
+    rounds_reads: u64,
+    walk_reads: u64,
+    floor: u64,
+    value_len: usize,
+};
+
+fn collision_case(
+    count: u64,
+    positions: []const usize,
+    rounds_reads: u64,
+    walk_reads: u64,
+    floor: u64,
+    value_len: usize,
+) CollisionCase {
+    return .{
+        .count = count,
+        .positions = positions,
+        .rounds_reads = rounds_reads,
+        .walk_reads = walk_reads,
+        .floor = floor,
+        .value_len = value_len,
+    };
+}
+
+/// db.rs `test_store_collision_reads`. Commonware resolves a batch's keys in rounds, reading
+/// one bucket location per unresolved key each round; zigware resolves each key alone
+/// (db.zig), reading the bucket up to the key's position. The values, floors, and walk reads
+/// match; the bucket reads are commonware's when each key resolves in its own round.
+fn check_collision_reads(case: CollisionCase) !void {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    var db = try h.open(null);
+    var buffers: [64][4096]u8 = undefined;
+    const writes = try gpa.alloc(Write, case.count);
+    defer gpa.free(writes);
+    for (writes, 0..) |*w, i| {
+        @memset(buffers[i][0..case.value_len], @intCast(i));
+        w.* = .{ .key = bucket_key(i), .value = buffers[i][0..case.value_len] };
+    }
+    _ = try apply(&db, writes, null);
+    // The previous commit's entry moves the first key to `count + 1`, so it leads the bucket.
+    var bucket = db.snapshot.get(&bucket_key(0).bytes);
+    try testing.expectEqual(case.count + 1, bucket.next().?.*);
+    for (2..case.count + 1) |loc| try testing.expectEqual(@as(u64, loc), bucket.next().?.*);
+    try testing.expectEqual(@as(u64, 2), db.inactivity_floor());
+
+    try testing.expectEqual(@as(u64, case.positions.len) + 1, case.walk_reads);
+    var own_reads: u64 = 0;
+    for (case.positions) |p| own_reads += p + 1;
+    if (case.positions.len == 1) try testing.expectEqual(case.rounds_reads, own_reads);
+    const before = db.log.metrics.items_read.metric().get();
+    var rewrite: [8]Write = undefined;
+    const ff: [4096]u8 = @splat(0xff);
+    for (case.positions, 0..) |p, i| {
+        rewrite[i] = .{ .key = bucket_key(p), .value = ff[0..case.value_len] };
+    }
+    _ = try apply(&db, rewrite[0..case.positions.len], null);
+    const reads = db.log.metrics.items_read.metric().get() - before;
+    try testing.expectEqual(own_reads + case.walk_reads, reads);
+    try testing.expectEqual(case.floor, db.inactivity_floor());
+    try testing.expectEqual(@as(usize, @intCast(case.count)), db.active_keys);
+    for (0..case.count) |i| {
+        const rewritten = std.mem.indexOfScalar(usize, case.positions, i) != null;
+        const want = if (rewritten) ff[0..case.value_len] else writes[i].value;
+        try expect_value(&db, bucket_key(i), want);
+    }
+    try expect_bitmap_consistent(&db);
+    try db.commit();
+    db.deinit();
+    db = try h.open(null);
+    try expect_value(&db, bucket_key(case.positions[0]), ff[0..case.value_len]);
+    try db.destroy();
+}
+
+test "store collision reads resolve each key within its bucket" {
+    // (count, positions, bucket reads, walk reads, floor, value length), as commonware's cases.
+    const cases = [_]CollisionCase{
+        collision_case(8, &.{0}, 1, 2, 4, 4096),
+        collision_case(64, &.{0}, 1, 2, 4, 4096),
+        collision_case(8, &.{5}, 6, 2, 4, 1),
+        collision_case(8, &.{ 1, 2, 3 }, 4, 4, 9, 1),
+        collision_case(8, &.{ 5, 6, 7 }, 8, 4, 6, 1),
+    };
+    for (cases) |case| try check_collision_reads(case);
+}
+
+// db.rs `test_store_get_many_moves_values`: commonware moves each decoded value to its last
+// matching slot and clones it for earlier duplicates. zigware's `get_many` returns an owned
+// value per slot, so each duplicate holds its own allocation.
+test "store get_many returns an owned value for every duplicate slot" {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    var db = try h.open(null);
+    defer db.deinit();
+    const other: Digest = .{ .bytes = @splat(0xbb) };
+    var seed: [4]Write = undefined;
+    const tags = [_][1]u8{ .{0}, .{1}, .{2}, .{3} };
+    for (seed[0..3], 0..) |*w, i| w.* = .{ .key = bucket_key(i), .value = &tags[i] };
+    seed[3] = .{ .key = other, .value = &tags[3] };
+    var hold: floor_mod.Hold = .{};
+    _ = try apply_with(&db, &seed, &hold);
+    const keys = [_]Digest{
+        bucket_key(1), bucket_key(3), other, bucket_key(0), bucket_key(1), bucket_key(1),
+    };
+    var out: [keys.len]?Bytes = undefined;
+    try db.get_many(&keys, &out);
+    defer for (out) |o| codec.free(?Bytes, gpa, o);
+    const want = [_]?u8{ 1, null, 3, 0, 1, 1 };
+    for (out, want) |got, w| {
+        try testing.expectEqual(w == null, got == null);
+        if (w) |tag| try testing.expectEqualSlices(u8, &.{tag}, got.?);
+    }
+    try testing.expect(out[0].?.ptr != out[4].?.ptr and out[4].?.ptr != out[5].?.ptr);
 }

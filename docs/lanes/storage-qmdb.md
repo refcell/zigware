@@ -115,8 +115,11 @@ which every database here is built on.
   sequential, large, sibling-apply proof refusal, operations match the applied log;
   `batch_test.zig`), including its `ElementPruned` tail after a flushing commit.
 - [x] Fuzz: `qmdb_keyless_operations` (seeded and `std.testing.fuzz`), with a value model.
-- [ ] store: the rest of db.rs's tests (audit 2026-11-19): collision reads, shared-prefix
-  snapshot, floor bound, variable-length keys, `get_many` value moves, the policy scenarios
+- [x] store batch 1: shared-prefix snapshot rebuild, floor bound (`churn` and
+  `randomized_churn` with commonware's `bounded` replay check), collision reads (floors and
+  walk reads match; bucket reads are zigware's per-key resolution), `get_many` duplicates.
+  `test_store_variable_length_keys` is not portable: store keys may not own memory.
+- [ ] store: the rest of db.rs's tests (audit 2026-11-19): the policy scenarios
   (hold edge cases, evicts owned, keep/evict/recover, reads reached candidates, limits, own
   writes, limits read once, proportional probes once, unreachable own write), the bitmap
   activity and chunk-prune recovery checks, the start_sync scenarios, and the
@@ -333,3 +336,4 @@ which every database here is built on.
 - 2026-11-19: keyless recovery, proof, read, bounded-init, and stale-batch scenarios.
 - 2026-11-19: keyless batch-read, stale-chain, and floor scenarios; keyless mod.rs done.
 - 2026-11-19: the cold_read, constantinople, and scale CLI harnesses; benches done.
+- 2026-11-19: store floor bound, collision reads, shared prefix, and get_many duplicates.
