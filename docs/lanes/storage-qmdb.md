@@ -208,9 +208,6 @@ which every database here is built on.
   `ItemPruned`, `DataCorrupted` past its own location); `find_inactivity_floor_at` wraps it.
   Immutable and keyless `init_from_log` and store init return `UnexpectedData` when the log
   does not end with a commit (store used to panic there).
-- [ ] Upstream 102430409 (#5649): the store's strategy and any's shared batched read.
-- [ ] Upstream `qmdb::commit_floor_at`: immutable init reads its floor through it and
-  returns its errors instead of panicking.
 - [x] Upstream 102430409 (#5649): the store's strategy and any's shared batched read. The
   commit moves any's batched `get_many` into a shared `read_many_map` and gives the store a
   `strategy`; under the 2026-11-18 decision both `get_many`s stay loops over `get` and there
