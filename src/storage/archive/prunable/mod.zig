@@ -121,5 +121,6 @@ test {
     _ = @import("conformance_test.zig");
     _ = @import("sections.zig");
     _ = @import("tests.zig");
+    _ = @import("durability_test.zig");
     _ = @import("fuzz_test.zig");
 }

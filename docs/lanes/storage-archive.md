@@ -122,7 +122,7 @@ entries, matched to zigware tests by what they check (zigware folds many into on
 
 | module | tests | ported | partial | open | not portable |
 |---|---|---|---|---|---|
-| archive | 93 | 61 | 3 | 14 | 15 |
+| archive | 93 | 72 | 3 | 3 | 15 |
 | freezer | 33 | 30 | 3 | 0 | 0 |
 | ordinal | 44 | 43 | 1 | 0 | 0 |
 | cache | 14 | 14 | 0 | 0 | 0 |
@@ -140,12 +140,13 @@ Open:
   against an empty table is `CheckpointMismatch` (the check exists, no test reaches it).
 - [x] freezer corruption: a corrupted committed value fails only its read; a committed value
   section short by one byte fails init, again on retry.
-- [ ] archive (prunable): below-floor `put_sync` and `put_multi_sync` make earlier buffered
-  writes durable; six kinds of marker damage never mutate either journal; a corrupt floor
-  page is rejected before suffix repair; a torn index tail under a marker; prune clears the
-  marker before section reuse; three put_syncs into three sections reopen; interrupted
-  destroy (prunable) and destroy interrupted inside the journals (81 combinations).
-- [ ] archive (prunable) durability counts: startup publishes the marker without a data
+- [x] archive (prunable, `durability_test.zig`): below-floor `put_sync` and `put_multi_sync`
+  make earlier buffered writes durable; prune clears the marker before section reuse; three
+  put_syncs into three sections reopen; interrupted destroy and destroy interrupted inside
+  the journals (81 combinations).
+- [ ] archive (prunable): six kinds of marker damage never mutate either journal; a corrupt
+  floor page is rejected before suffix repair; a torn index tail under a marker.
+- [x] archive (prunable) durability counts: startup publishes the marker without a data
   resync; markers lag one sync; markers batched per section; an empty sync publishes the
   final boundary; a reused section restarts its barrier. These count syncs through
   `runtime.storage.mocks.Recordings.syncs`.
@@ -179,3 +180,6 @@ Partial:
 - 2026-11-19: freezer's 9 open storage.rs tests ported, each failing under a planted bug;
   archive's slow 50,000-key many-keys tests and 100,000/5,000-key restart tests run under
   `-Dslow-tests` (clearing lane).
+- 2026-11-19: 11 of the prunable archive's open tests (marker lag and batching counted
+  through `Recordings.syncs`, below-floor syncs, marker reuse, interrupted destroys), each
+  failing under a planted bug (clearing lane).
