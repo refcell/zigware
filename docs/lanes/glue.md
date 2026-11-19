@@ -984,7 +984,11 @@ shared `tests/mocks.zig`, which takes additive edits only (agreed with the glue 
   `SchemesRegistered`, `StateSyncedSigner`, `StateSyncedAtHeight`, and `StateSyncMembership`.
   The state-sync properties read a ledger (`registrations_of`, `state_sync_of`) that outlives
   restarts, as commonware's shared maps do.
-- [ ] the reshare harness and mod.rs's 33 ceremony tests. Decision: phase 1 is a validator
+- [x] the reshare harness and its 31 tests: mod.rs's 28 `reshare_e2e_*` ceremonies (the 10
+  state-sync ones in state_sync_test.zig, by storage-qmdb-sync) and harness.rs's 3 unit tests
+  (harness_test.zig, and the shareless player in root.zig). Each runs on both networks and, where
+  commonware parametrizes it, both electors. Audited name by name against commonware a9ffc25f3;
+  the earlier "33" was a miscount. Decision: phase 1 is a validator
   without state sync (orchestrator, reshare actor, `bootstrap.Node`, a plain block app), for the
   tests that never state sync. Phase 2 adds glue.stateful's QMDB app, the dkg probe, and the
   state-sync plans for the rest. Phase 1's harness is in `tests/reshare/` with its first test
