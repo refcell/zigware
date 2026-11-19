@@ -153,3 +153,8 @@ statistics, output, CLI) and run against a minimal in-lane stand-in, then switch
 - 2026-11-16: bridge's indexer binary; `ui.fmt` (tracing's default log format).
 - 2026-11-18: bridge's validator binary; bootstrapper parsing moves to `ui.rust`.
 - 2026-11-18: bridge demo recorded.
+- 2026-11-19: example READMEs for chat, dkg, flood, log, and bridge; bridge finishes each
+  indexer request before honoring a cancel (fcec398, test 8211852).
+- 2026-11-19: flood's setup and flood binaries parse through `ui.clap`, matching commonware's
+  help and errors (e4afaf8); `ui.fmt` and the dkg bootstrap and floor waits keep cancels
+  (536602d, 1906179).

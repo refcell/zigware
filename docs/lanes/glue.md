@@ -85,9 +85,10 @@ a test harness), `transfers` (4.4k with tests and benches), `stateful` (about 33
   random batches against their flat entries, `u256` amounts).
 - [x] transfers (owner: thread T-01a1d58d-7682-700c-a399-735d897bbd46): see the transfers
   section below.
-- [ ] simulate (owner from 2026-11-19: examples lane, thread T-01a1d5b9-c891): upstream
+- [x] simulate (owner from 2026-11-19: examples lane, thread T-01a1d5b9-c891): upstream
   bca770a0c's `Crash.ProcessedHeight` with `participants` (crashed together) and plan.rs's
-  new tests.
+  new tests; see the bca770a0c entry above (5369b34, 58f6e7b). bca770a0c is simulate's only
+  change between 43b357a41 and a9ffc25f3, and all 16 of plan.rs's tests are ported.
 - [ ] stateful: see the stateful section below (curve25519/utils thread).
 - [ ] dkg (coding thread).
 
