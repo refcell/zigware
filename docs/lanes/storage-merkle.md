@@ -167,6 +167,14 @@ the `DelayedSyncContext` test mock (`runtime/src/mocks.rs:869-1190`) holds syncs
   (`start_sync_tracked` still syncs inline and returns a ready completion, so
   `..._alignment_sync_concurrency` and `..._dropped_handle_driven_by_next_sync` stay open),
   segmented fixed/variable's 6 wait tests, checkpoint and metadata `start_sync` (inline).
+- Step 3: merkle full `start_sync` returns its journal's completion (covering the nodes
+  flushed so far) and gains `wait_for_sync`, which `destroy` runs first; the authenticated
+  journal's `start_sync` joins the items' and Merkle syncs, and its `destroy` surfaces a failed
+  Merkle sync before removing anything. qmdb callers wait on it until step 5. Ports
+  `test_start_sync_overlaps_work` and `test_start_sync_failure_propagates`; open (they wait on
+  a parked metadata watermark sync): `test_start_sync_merkle_failure_fails_handle`,
+  `test_reopen_persists_merkle_watermark`, merkle full's
+  `test_full_sync_observes_clean_start_sync_failure`.
 
 ### Tests this unlocks (commonware file: tests)
 - runtime (~40): storage/{audited,faulty,metered,tokio/mod,tokio/blob,iouring}.rs, the 10

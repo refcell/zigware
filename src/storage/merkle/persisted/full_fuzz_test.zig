@@ -240,7 +240,8 @@ test "fuzz merkle full operations" {
 // first failure the storage crashes; a faulted recovery attempt may crash again; then a clean
 // recovery must land within the tracked durable floors and attempted ceilings, match a
 // rebuilt reference tree node for node, and still write durably. Commonware samples fault
-// rates per operation; syncs complete synchronously here, so `start_sync` is a barrier.
+// rates per operation; the memory backend completes syncs inline, and `start_sync`'s
+// completion is waited for, so it is a barrier.
 
 const recovery_operations_max = 48;
 
@@ -301,7 +302,10 @@ fn recovery_operations(
                 expected.max_leaves = @max(expected.max_leaves, structure.leaves());
             },
             1, 3 => {
-                const result = if (reader.boolean()) structure.sync() else structure.start_sync();
+                const result = if (reader.boolean()) structure.sync() else started: {
+                    const completion = structure.start_sync() catch |err| break :started err;
+                    break :started completion.wait_release();
+                };
                 result catch return;
                 expected.barrier(structure);
                 expected.min_pruned = structure.bounds().start;

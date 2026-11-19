@@ -846,6 +846,14 @@ pub fn Journal(comptime A: type) type {
             return data;
         }
 
+        /// Wait for every started sync, surfacing a failure without changing any blob.
+        pub fn wait_for_sync(self: *Self) Error!void {
+            assert(!self.failed);
+            errdefer self.failed = true;
+            try self.blobs.wait_for_sync();
+            assert(self.blobs.tail_predecessor_sync == null);
+        }
+
         /// Start the data sync and record it in the barrier (commonware `start_data_sync`).
         pub fn start_data_sync(self: *Self) Error!Completion {
             assert(!self.failed);

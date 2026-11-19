@@ -8,7 +8,8 @@
 //!
 //! Commonware's mutators take the journal by value and drop it on error. Here mutators take
 //! `*Self`; after an error only `deinit` may follow (state not yet durable is lost, durable
-//! state stays recoverable). Syncs complete synchronously, so `start_sync` has no handle.
+//! state stays recoverable). `start_sync` joins the items' and the Merkle structure's started
+//! syncs into one completion.
 //!
 //! Batches are reference counted by hand, as in `merkle.batch`: `MerkleizedBatch.retain` and
 //! `release` are commonware's `Arc` clone and drop, and a child's parent link is weak. Items
@@ -20,6 +21,7 @@ const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const codec = @import("codec");
 const runtime = @import("runtime");
+const Completion = runtime.storage.Completion;
 const merkle = @import("../merkle/mod.zig");
 const refcount = @import("../refcount.zig");
 const RefCount = refcount.RefCount;
@@ -209,11 +211,15 @@ pub fn Journal(comptime F: type, comptime C: type, comptime H: type) type {
             try self.merkle.flush();
         }
 
-        /// Makes both components durable. The journal's started sync is waited for here
-        /// until this journal returns a completion (async start_sync step 3).
-        pub fn start_sync(self: *Self) Error!void {
-            try (try self.journal.start_sync()).wait_release();
-            try self.merkle.start_sync();
+        /// Starts making both components durable, returning a completion (one reference, owned
+        /// by the caller) for both (commonware `try_join` of the two handles).
+        pub fn start_sync(self: *Self) Error!Completion {
+            const journal_sync = try self.journal.start_sync();
+            const merkle_sync = self.merkle.start_sync() catch |err| {
+                journal_sync.release();
+                return err;
+            };
+            return Completion.join(journal_sync, merkle_sync);
         }
 
         /// Makes both components durable, so no recovery is needed on startup.
@@ -255,6 +261,12 @@ pub fn Journal(comptime F: type, comptime C: type, comptime H: type) type {
         /// discards the Merkle state beside it. Frees the journal, also on error.
         pub fn destroy(self: *Self) Error!void {
             defer self.* = undefined;
+            // Surface a failed Merkle sync before anything is removed.
+            self.merkle.wait_for_sync() catch |err| {
+                self.journal.deinit();
+                self.merkle.deinit();
+                return err;
+            };
             self.journal.destroy() catch |err| {
                 self.merkle.deinit();
                 return err;
@@ -798,4 +810,5 @@ pub fn Journal(comptime F: type, comptime C: type, comptime H: type) type {
 
 test {
     _ = @import("authenticated_journal_test.zig");
+    _ = @import("authenticated_start_sync_test.zig");
 }

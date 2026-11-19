@@ -490,7 +490,7 @@ pub fn Db(F: type, U: type, C: type, I: type, H: type, comptime N: usize) type {
         /// Starts a sync (it completes at once here).
         pub fn start_sync(self: *Self) !void {
             self.metrics.start_sync_calls.metric().inc();
-            try self.log.start_sync();
+            try (try self.log.start_sync()).wait_release();
         }
 
         /// Makes every applied operation durable; reopening may replay the log.

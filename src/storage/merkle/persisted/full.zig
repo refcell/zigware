@@ -20,6 +20,7 @@ const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const codec = @import("codec");
 const runtime = @import("runtime");
+const Completion = runtime.storage.Completion;
 const utils = @import("utils");
 const merkle = @import("../mod.zig");
 const mem_module = @import("../mem.zig");
@@ -584,12 +585,21 @@ pub fn Merkle(comptime F: type, comptime Digest: type) type {
             }
         }
 
-        /// Flushes cached nodes and starts making them durable (the sync completes at once
-        /// here). A later `sync` still performs a full durable sync.
-        pub fn start_sync(self: *Self) Error!void {
+        /// Flushes cached nodes and starts making them durable, returning a completion (one
+        /// reference, owned by the caller) that covers only the nodes flushed so far. A later
+        /// `sync` still performs a full durable sync.
+        pub fn start_sync(self: *Self) Error!Completion {
             try self.flush_internal();
-            try (try self.journal.start_sync()).wait_release();
+            const completion = try self.journal.start_sync();
             self.journal_dirty = true;
+            assert(self.journal.size() <= self.mem.size());
+            return completion;
+        }
+
+        /// Wait for an outstanding `start_sync`, surfacing its failure.
+        pub fn wait_for_sync(self: *Self) Error!void {
+            try self.journal.wait_for_sync();
+            assert(self.journal.size() <= self.mem.size());
         }
 
         /// Appends the cached nodes the journal lacks, then prunes them from memory, keeping
@@ -684,7 +694,12 @@ pub fn Merkle(comptime F: type, comptime Digest: type) type {
         /// reopens as the tree a crash would recover, or empty; a retried destroy empties it.
         pub fn destroy(self: *Self) Error!void {
             // The metadata goes first: a journal that outlives an interruption reopens whole
-            // while its start is zero, and once pruned, `prepare` discards it unanchored.
+            // while its start is zero, and once pruned, `prepare` discards it unanchored. A
+            // failed started sync surfaces first and removes nothing.
+            self.wait_for_sync() catch |err| {
+                self.deinit();
+                return err;
+            };
             self.mem.deinit(self.gpa);
             self.metadata.destroy() catch |err| {
                 self.journal.deinit();

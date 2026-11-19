@@ -4,9 +4,9 @@
 //! Commonware's test operation is qmdb's `any::operation::Unordered`; these tests only compare
 //! roots between journals, so a fixed stand-in (`Op`: a tag, a key, and a value) checks the
 //! same behavior. `drop` is `deinit` (unsynced state is discarded on close) and
-//! `start_and_recover` is `Storage.crash`. Tests that drive delayed or failing syncs, record
-//! read options, or run parallel strategies have no counterpart: syncs complete synchronously
-//! and merkleization is sequential here.
+//! `start_and_recover` is `Storage.crash`. The in-flight `start_sync` tests are in
+//! authenticated_start_sync_test.zig. Tests that record read options or run parallel
+//! strategies have no counterpart: merkleization is sequential here.
 
 const std = @import("std");
 const testing = std.testing;
@@ -430,7 +430,7 @@ fn start_sync_durability(comptime F: type) !void {
     var journal = try harness.open(F, "start_sync");
     for (0..5) |i| _ = try journal.append(create_operation(@intCast(i)));
     _ = try journal.append(commit_op);
-    try journal.start_sync();
+    try (try journal.start_sync()).wait_release();
     const root = try journal.root(0);
     journal.deinit();
     harness.storage.crash();

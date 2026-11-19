@@ -256,7 +256,7 @@ pub fn Db(comptime F: type, comptime E: type, comptime C: type, comptime H: type
         /// Starts a sync (it completes at once here).
         pub fn start_sync(self: *Self) !void {
             self.metrics.start_sync_calls.metric().inc();
-            try self.journal.start_sync();
+            try (try self.journal.start_sync()).wait_release();
         }
 
         /// Makes every applied operation durable; reopening may replay the log.
