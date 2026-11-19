@@ -11,6 +11,10 @@ on:
         description: "Test filter (-Dtest-filter); empty runs all"
         required: false
         default: ""
+      only:
+        description: "Run only this slow job, such as glue; empty runs all"
+        required: false
+        default: ""
 
 jobs:
   slow:
@@ -32,6 +36,7 @@ jobs:
           - consensus-simplex-fixtures-1
           - consensus-simplex-fixtures-2
           - consensus-simplex-fixtures-3
+          - consensus-simplex-fixtures-4
           - consensus-simplex-twins
           - consensus-rest
           - glue
@@ -47,6 +52,7 @@ jobs:
           - { job: consensus-simplex-fixtures-1, steps: test-consensus, group: simplex-fixtures-1 }
           - { job: consensus-simplex-fixtures-2, steps: test-consensus, group: simplex-fixtures-2 }
           - { job: consensus-simplex-fixtures-3, steps: test-consensus, group: simplex-fixtures-3 }
+          - { job: consensus-simplex-fixtures-4, steps: test-consensus, group: simplex-fixtures-4 }
           - { job: consensus-simplex-twins, steps: test-consensus, group: simplex-twins }
           - { job: consensus-rest, steps: test-consensus, group: rest }
           - { job: glue, steps: test-glue }
@@ -54,14 +60,19 @@ jobs:
           - { job: cryptography-1, steps: test-cryptography, heavy_shard: 1 }
           - { job: cryptography-2, steps: test-cryptography, heavy_shard: 2 }
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 180
+    # About twice the slowest job: arm's third of the fixtures DSTs took 56 minutes on
+    # 6e50645, before they split four ways; every other job took 50 or less.
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
+        if: inputs.only == '' || inputs.only == matrix.job
       - name: install zig
+        if: inputs.only == '' || inputs.only == matrix.job
         run: |
           sh etc/scripts/install-zig.sh "$HOME/zig"
           echo "$HOME/zig" >> "$GITHUB_PATH"
       - name: slow tests
+        if: inputs.only == '' || inputs.only == matrix.job
         env:
           FILTER: ${{ inputs.filter }}
           STEPS: ${{ matrix.steps }}
