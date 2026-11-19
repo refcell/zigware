@@ -539,8 +539,22 @@ fn chunk_root(chunk: []const u8) Root {
 /// The BLAKE3 digest of the concatenation of `parts`, as std's, with whole chunks compressed
 /// `lanes` at a time.
 pub fn hash(parts: []const []const u8) [32]u8 {
+    var len: usize = 0;
+    for (parts) |part| len += part.len;
+    const root = root_of(parts, len);
+    // The digest is the root's first output block's first half: one one-lane compression,
+    // where the XOF would compress `lanes` output blocks.
+    var m: [16]Vec(1) = undefined;
+    for (&m, root.block) |*word, value| word.* = @splat(value);
+    const cv = compress(1, splat_cv(1, root.cv), &m, .{
+        .counter_low = @splat(0),
+        .counter_high = @splat(0),
+        .block_len = @splat(root.block_len),
+        .flags = @splat(root.flags | flag_root),
+    });
     var out: [32]u8 = undefined;
-    xof(parts, &out);
+    inline for (0..8) |w| std.mem.writeInt(u32, out[4 * w ..][0..4], cv[w][0], .little);
+    assert(root.flags & flag_root == 0);
     return out;
 }
 

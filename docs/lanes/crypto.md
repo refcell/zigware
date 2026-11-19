@@ -524,3 +524,7 @@ hold whole units of lanes" over coding's lane-aware `hash_batches`, and `sha512/
   assembling the block on the stack, which clearing's `hash_36` port takes on). Planted bugs
   (digest word order, padding fill, part offset) are caught on x86-64; aarch64 tested under
   qemu.
+- 2026-11-19: `blake3_tree.hash` compresses the root once on one lane instead of running the
+  XOF over `lanes` output blocks: 32 bytes take 99 ns (std's `Blake3.hash` 133 ns), 1 KiB
+  1.38 µs (std 1.65 µs). Tested against std at every XOF test length; a dropped root flag is
+  caught.
