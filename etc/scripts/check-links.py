@@ -9,7 +9,7 @@ Every relative link, image, and HTML src or href must name a file or directory t
 target file, slugged as GitHub slugs them. Links into this repository on github.com are
 checked the same way; other external links are not fetched.
 
-With --code-paths, inline code that starts with a repository path (`src/...`, `examples/...`,
+Inline code that starts with a repository path (`src/...`, `examples/...`,
 `etc/...`, `docs/...`, the first word of a command) must exist too, and a `:line` or
 `:first-last` suffix must lie within the file. `{a,b}` groups expand; spans with `<name>` or
 `*` placeholders are skipped, and so are `.rs` paths, which name commonware's files.
@@ -127,8 +127,6 @@ def code_path_errors(source):
 
 
 def main(argv):
-    code_paths = "--code-paths" in argv
-    argv = [a for a in argv if a != "--code-paths"]
     files = [Path(a).resolve() for a in argv] or [ROOT / "README.md"] + sorted(
         [*ROOT.glob("examples/*/README.md"), *ROOT.glob("docs/*.md"),
          *ROOT.glob("docs/lanes/*.md"), *ROOT.glob("src/**/README.md")])
@@ -144,16 +142,15 @@ def main(argv):
                     line = text.count("\n", 0, match.start()) + 1
                     rel = source.relative_to(ROOT)
                     errors.append(f"{rel}:{line}: {target}: {error}")
-        if code_paths:
-            for line, span, error in code_path_errors(source):
-                checked += 1
-                if error:
-                    errors.append(f"{source.relative_to(ROOT)}:{line}: `{span}`: {error}")
+        for line, span, error in code_path_errors(source):
+            checked += 1
+            if error:
+                errors.append(f"{source.relative_to(ROOT)}:{line}: `{span}`: {error}")
     for error in errors:
         print(f"check-links: {error}")
     if errors:
         return 1
-    print(f"check-links: ok ({checked} links in {len(files)} files)")
+    print(f"check-links: ok ({checked} links and code paths in {len(files)} files)")
     return 0
 
 

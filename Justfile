@@ -61,7 +61,7 @@ fmt:
 tidy:
     etc/scripts/tidy.sh
 
-# Check Markdown links, images, and anchors locally; --code-paths also checks `src/...` spans
+# Check Markdown links, images, and anchors locally, and `src/...` paths in code
 check-links *args:
     python3 -I etc/scripts/check-links.py "$@"
 
