@@ -607,3 +607,54 @@ conc=8 rows are no faster than its conc=1 rows at 128 KiB to 1 MiB, and its conc
 faster than std's `Blake3` (the `blake3` crate has AVX-512 kernels). Zigware's conc=8 no longer
 trails its own serial path, and beats it at 1 MiB. "zigware before" is the 668cdc1 single
 benchmark run, not the interleaved minimum.
+
+## blake3 conc=8 dispatch and the bloomfilter group (2026-11-19)
+
+**blake3 at 128 and 256 KiB, conc=8.** Two dispatch costs remained after the kernel and pool
+fixes:
+
+- **Subtrees too small to pay for a task.** Commonware's bound cuts a 128 KiB message into 8
+  subtrees of 16 chunks. Here each pool job costs more than 16 chunks save, so `subtree_len_for`
+  now floors the bound at 32 chunks (`subtree_len_floor`): 128 KiB splits into 4 subtrees,
+  256 KiB into 8. A probe over fixed sizes at 128 KiB measured 14.5 µs for 4 subtrees of 32
+  chunks, 17.3 µs for 8 of 16, and 23.7 µs for 2 of 64. The digest does not depend on the
+  split.
+- **A serial tail.** The bytes after the last whole subtree are now one more item of the last
+  `map_into` round (`Rest`, `hash_rest`), not hashed on the caller after the round.
+
+The kernel also compresses a short last chunk batch at the narrowest power-of-two width that
+covers it, not always 16 lanes. `Blake3.hash` then routes one-shot messages of more than one
+chunk and less than 16 KiB through `hash_subtrees` on `parallel.sequential`, because std's
+`Blake3` compresses a batch of fewer than 4 chunks one chunk at a time. On 2 KiB, std takes
+3.4 µs and the tree takes 1.7 µs. On 16 KiB and up, std stays faster and keeps those lengths.
+
+`blake3::hash_message conc=8`, zigware's old (91c3b6f4) and new builds interleaved over 10
+rounds (minimum, then median). Commonware's range is from a 4-round interleaved run beside
+them:
+
+| msg_len | commonware | zigware old | zigware new |
+|---|---|---|---|
+| 131072 | 13.6 to 15.3 µs | 14.4 µs (24.7) | 13.6 µs (19.6) |
+| 262144 | 25.8 to 27.1 µs | 20.9 µs (28.1) | 16.0 µs (19.8) |
+
+**bloomfilter.** I re-measured the group on main after the criterion batch fix (5c5d48cd).
+Commonware and zigware were interleaved over 3 rounds, minimum point estimate, in µs:
+
+| row | commonware | before | after |
+|---|---|---|---|
+| insert blake3 2048 B 10% | 1.877 | 6.819 (3.63×) | 1.791 (0.95×) |
+| insert blake3 2048 B 0.1% | 3.167 | 6.609 (2.09×) | 1.807 (0.57×) |
+| insert blake3 4096 B 10% | 1.934 | 4.082 (2.11×) | 1.952 (1.01×) |
+| insert sha256 2048 B 10% | 1.300 | 2.219 (1.71×) | 1.070 (0.82×) |
+| insert sha256 4096 B 10% | 2.216 | 4.078 (1.84×) | 2.080 (0.94×) |
+| contains blake3 2048 B (4 rows) | 1.40 to 1.49 | 3.35 to 3.49 (2.27 to 2.50×) | 1.71 to 1.75 (1.16 to 1.25×) |
+| contains blake3 32 B (4 rows) | 0.103 to 0.130 | 0.139 to 0.160 | 0.163 to 0.170 (1.30 to 1.60×) |
+
+Two causes. First, `insert` ended with `assert(self.contains(item))`, which hashed every item a
+second time (asserts stay on in ReleaseFast). It now asserts each bit it sets. Second, the
+2048 B blake3 rows paid std's one-chunk-at-a-time compression of short batches, which the
+`Blake3.hash` routing above fixes. Hashing and bit layout are unchanged, and the conformance
+tests pass. The rows still over 1.3× are the 32 B blake3 contains rows. std's `Blake3` takes
+126 ns on 32 bytes, against 36 ns for `Sha256`: setup and finalize, not the compression.
+Those rows wait on the crypto lane's one-chunk root in `blake3_tree.zig`, which `Blake3.hash`
+will route ≤1 KiB messages through. Every other row in the group is ≤1.25×.
