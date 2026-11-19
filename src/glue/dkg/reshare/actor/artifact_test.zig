@@ -235,3 +235,51 @@ fn persist_round(h: *Harness, fixture: *const Fixture, partition: []const u8) !v
         try testing.expect(try store.append_log(epoch, entry.key, entry.log));
     }
 }
+
+// commonware `finalization_error_panics` (an error here): a persisted dealing that conflicts
+// with the finalized logs is invalid local state.
+test "artifact: a persisted dealing conflicting with the finalized logs is invalid state" {
+    try actor_test.run(struct {
+        fn body(io: Io) anyerror!void {
+            var h: Harness = undefined;
+            try h.init(io, "finalization-error-artifact-actor", 8);
+            defer h.deinit();
+            // Two valid ceremonies of one round give conflicting messages from one dealer.
+            var persisted: Fixture = undefined;
+            try persisted.init(30);
+            defer persisted.deinit();
+            var finalized: Fixture = undefined;
+            try finalized.init(40);
+            defer finalized.deinit();
+            var secrets: mocks.MemorySecretStore = .init(gpa);
+            defer secrets.deinit();
+            var store = try h.store_harness.open(gpa, "finalization-error-artifact", &secrets);
+            defer store.deinit();
+            const share = finalized.share(h.public_key);
+            try store.commit_epoch(try finalized.current(), seed_zero, share);
+            const epoch = Epoch.zero();
+            const target = signers()[0];
+            const round = &finalized.info;
+            const created = try store.create_player(N3f1, PrivateKey, epoch, target, round);
+            var player = created orelse return error.ExpectedPlayer;
+            defer player.deinit();
+
+            // Persist the alternate ceremony's dealing from the target's own dealer and the
+            // finalized ceremony's other dealings.
+            for (finalized.dealings, persisted.dealings) |kept, alternate| {
+                const mismatched = kept.dealer.eql(target.public_key());
+                const dealing = if (mismatched) alternate else kept;
+                const public = dealing.public;
+                _ = try player.handle(&store, epoch, dealing.dealer, public, dealing.private);
+            }
+            // The finalized public logs bind the player to the conflicting dealer message.
+            for (finalized.logs.entries.items) |entry| {
+                try testing.expect(try store.append_log(epoch, entry.key, entry.log));
+            }
+            var logs = try Logs.from_sorted(gpa, store.logs(epoch));
+            defer logs.deinit(gpa);
+            const result = Artifacts.verify(&h.actor, epoch, &finalized.info, &store, logs);
+            try testing.expectError(error.InvalidLocalState, result);
+        }
+    }.body);
+}

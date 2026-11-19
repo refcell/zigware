@@ -225,6 +225,8 @@ const Gated = struct {
     blocks: [2]D = undefined,
     head: usize = 0,
     len: usize = 0,
+    /// Leading blocks read and peeked without the gate (commonware `with_prefix`'s prefix).
+    free: usize = 0,
     gate: ?*Gate = null,
 
     /// Takes new handles to `blocks`.
@@ -235,6 +237,14 @@ const Gated = struct {
         return result;
     }
 
+    /// `blocks` (new handles) whose first `free` read without waiting for `gate`.
+    fn prefixed(blocks: []const D, free: usize, gate: *Gate) Gated {
+        std.debug.assert(free < blocks.len);
+        var result = init(blocks, gate);
+        result.free = free;
+        return result;
+    }
+
     fn opened(self: *const Gated) bool {
         const gate = self.gate orelse return true;
         return gate.released.isSet();
@@ -242,16 +252,17 @@ const Gated = struct {
 
     pub fn peek(self: *const Gated) ?*const D {
         std.debug.assert(self.head <= self.len);
-        if (!self.opened() or self.head == self.len) return null;
+        if (self.head == self.len) return null;
+        if (self.head >= self.free and !self.opened()) return null;
         return &self.blocks[self.head];
     }
 
     pub fn next(self: *Gated) Io.Cancelable!?D {
         std.debug.assert(self.head <= self.len);
-        if (self.gate) |gate| {
+        if (self.gate) |gate| if (self.head >= self.free) {
             gate.started.set(gate.io);
             try gate.released.wait(gate.io);
-        }
+        };
         if (self.head == self.len) return null;
         self.head += 1;
         return self.blocks[self.head - 1];
@@ -422,6 +433,86 @@ test "inclusion: unanchored or delayed ancestry does not block finalization" {
             try terminal_gate.started.wait(io);
             try finalize(&f, last);
             try terminal.expect(io, null);
+            try testing.expectEqual(.proceed, try inclusion.await(io));
+            try testing.expect(f.h.store.current_info() == null);
+        }
+    }.body);
+}
+
+/// Canonical heights 4 to 7 of an eight-block epoch (indices 0 to 3) and a losing history
+/// whose height-5 block carries `log` (index 0) with its child (index 1).
+const RaceHistories = struct {
+    canonical: [4]TestActor.Digested,
+    losing: [2]TestActor.Digested,
+
+    fn init(log: fd.SignedDealerLog(V, P)) !RaceHistories {
+        const genesis = mocks.genesis_block(mocks.TestSigner.from_seed(0).public_key());
+        var parent = genesis.digest();
+        var raw: [8]mocks.TestBlock = undefined;
+        for (raw[1..], 1..) |*block, height| {
+            block.* = gated_block(parent, height, height);
+            parent = block.digest();
+        }
+        const five = try gated_block(raw[4].digest(), 5, 8).with_payload(gpa, 16, .{
+            .dealer_log = log,
+        });
+        const six = gated_block(five.digest(), 6, 9);
+        return .{
+            .canonical = .{
+                try ready(raw[4]), try ready(raw[5]), try ready(raw[6]), try ready(raw[7]),
+            },
+            .losing = .{ try ready(five), try ready(six) },
+        };
+    }
+
+    fn deinit(self: *RaceHistories) void {
+        free_blocks(&self.canonical);
+        free_blocks(&self.losing);
+    }
+};
+
+// commonware `ready_scan_yields_to_admitted_finalization`: a finalized block admitted in the
+// same turn a cached losing-view scan finishes invalidates that scan before its result
+// escapes.
+test "inclusion: a ready scan yields to an admitted finalization" {
+    try actor_test.run(struct {
+        fn body(io: Io) anyerror!void {
+            var f: GatedFixture = undefined;
+            try f.init(io, "ready-scan", 8);
+            defer f.deinit();
+            var log = try f.self_log();
+            defer log.deinit(gpa);
+            var h = try RaceHistories.init(log);
+            defer h.deinit();
+            const losing = [_]TestActor.Digested{ h.losing[1], h.losing[0] };
+
+            // Anchor scans to the canonical midpoint before asking for boundary artifacts.
+            var inclusion = try io.concurrent(run_inclusion, .{&f});
+            defer _ = inclusion.cancel(io) catch {};
+            try finalize(&f, &h.canonical[0]);
+
+            // Prime the losing view's cache: its log makes the artifact available.
+            var primed: Asked = .{};
+            try primed.start(io, &f, .init(&losing, null));
+            try primed.expect(io, true);
+
+            // Hold a second scan of that view at the read past its first block.
+            var gate: Gate = .{ .io = io };
+            var raced: Asked = .{};
+            try raced.start(io, &f, .prefixed(&losing, 1, &gate));
+            try gate.started.wait(io);
+            try testing.expect(!raced.answered());
+
+            // The canonical block and the stale scan become ready together; the finalization
+            // must invalidate the scan before its cached losing-view result escapes.
+            var five = try f.h.deliver(&h.canonical[1]);
+            defer five.deinit();
+            gate.release();
+            try five.wait();
+            try raced.expect(io, null);
+
+            try finalize(&f, &h.canonical[2]);
+            try finalize(&f, &h.canonical[3]);
             try testing.expectEqual(.proceed, try inclusion.await(io));
             try testing.expect(f.h.store.current_info() == null);
         }
