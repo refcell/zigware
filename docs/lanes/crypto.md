@@ -139,6 +139,11 @@ handshake), then certificate, secp256r1, the rest, zk last. banderwagon moved to
   scalar work match or beat dalek; the bucket MSM is about 1.0 ms against dalek's 0.83 ms
   with its AVX2 backend and 1.6 ms with its serial one, so the rest of the gap is vectorized
   field and point arithmetic.
+- The bucket MSM's backends share `verify_ifma.zig`'s interface (`PackedPoint`, `PackedCached`):
+  `verify_avx2.zig` (curve25519-dalek's AVX2 backend, ported lane for lane) and
+  `msm.scalar_backend` (std's `Point`). `msm.Backend` is the first one the target supports.
+  The packed backends are portable vector code, so `msm_test.zig` checks every backend
+  against std and `MultiScalar` on every target.
 - `verify_batch(rng, items, projector, strategy)`: `projector.project(index, *const Item)`
   returns a `BatchEntry`; `cryptography.entries` projects a slice of entries.
 - Conformance hashes that run signature schemes thousands of times skip in Debug unless

@@ -11,7 +11,7 @@ better. A ratio below 1 means zigware is faster.
 | `sha256::hash_message` | `msg_len=4096` | 1.87 µs | 2.08 µs | 1.11× |
 | `sha256::hash_message` | `msg_len=1048576` | 480 µs | 538 µs | 1.12× |
 | `ed25519::signature_verification` | `ns_len=9 msg_len=32` | 26.7 µs | 43.3 µs | 1.62× (fixed, see below) |
-| `ed25519::batch_verify_same_message` | `pks=100 conc=1` | 1.38 ms | 1.86 ms | 1.35× (re-run, see below) |
+| `ed25519::batch_verify_same_message` | `pks=100 conc=1` | 1.43 ms | 1.07 ms | 0.75× (re-run, see below) |
 | `bls12381::signature_verification` | `ns_len=9 msg_len=32` | 1.23 ms | 1.59 ms | 1.30× |
 | `bls12381::aggregate_verify_same_message` | `pks=1000` | 2.27 ms | 2.16 ms | 0.96× |
 | `journal::fixed_append` | `items=10000 size=32` | 2.00 ms | 456 µs | 0.23× |
@@ -81,7 +81,7 @@ directory under `BENCH_DIR` (default `$TMPDIR` or `/tmp`). commonware gets it th
 
 ## Fixed perf bugs
 
-- **`ed25519::batch_verify_same_message`, 2.13× to 1.35×.** `verify_shard` summed every
+- **`ed25519::batch_verify_same_message`, 2.13× to 1.35× (then 0.75× on AVX2, below).** `verify_shard` summed every
   shard with `core.MultiScalar`, whose 8-point flushes each ran their own 256-doubling chain.
   Shards of 44 or more signatures now go through the bucket MSM in
   `src/cryptography/ed25519/msm.zig` (moved from curve25519's `batch.zig`, which shares it),
@@ -137,6 +137,14 @@ directory under `BENCH_DIR` (default `$TMPDIR` or `/tmp`). commonware gets it th
   37.7 µs, about 0.55×. `batch_verify_same_message` (pks=100) does not use the backend yet;
   its best medians were 2.01 ms against 1.70 ms (1.18×), and its bucket MSM is the next user
   of the packed point type.
+- **ed25519 batch MSM on AVX2, 2026-11-19.** `ed25519/verify_avx2.zig` ports
+  curve25519-dalek 5.0.0's `backend/vector/avx2` (four radix-2^25.5 field elements per
+  `u32x8` lane set, and its parallel extended-point add and double), the backend commonware's
+  batch MSM runs on x86-64. The bucket MSM in `ed25519/msm.zig` runs on it wherever the target
+  has AVX2 and on std's scalar arithmetic otherwise. Head-to-head for
+  `batch_verify_same_message` `pks=100 conc=1`, four alternating runs at a load average of 53
+  to 57, best medians: commonware 1.43 ms, zigware on AVX2 1.07 ms (0.75×), zigware on the
+  scalar backend 1.95 ms. That is the table's row.
 
 ## Storage: index, archive, freezer (2026-11-19, clearing lane)
 
