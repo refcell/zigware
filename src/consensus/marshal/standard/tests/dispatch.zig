@@ -12,6 +12,8 @@ const harness = @import("../../mocks/harness.zig");
 const mocks_block = @import("../../mocks/block.zig");
 const mocks_store = @import("../../mocks/store.zig");
 const common = @import("common.zig");
+const codec = @import("codec");
+const handler = @import("../../resolver/handler.zig");
 const inline_mod = @import("../inline.zig");
 const deferred_mod = @import("../deferred.zig");
 const simplex = @import("../../../simplex/root.zig");
@@ -1110,4 +1112,278 @@ fn epocher() types.FixedEpocher {
 test "standard boundary restage sends once" {
     try run(boundary_restage(InlineWrapper));
     try run(boundary_restage(DeferredWrapper));
+}
+
+const pace_ms = 100;
+
+/// Whether the actor pools its finalized-archive sync off the actor loop, as commonware's
+/// `start_finalized_sync` does. Marshal's `start_finalized_sync` still syncs inline, so a
+/// paced sync blocks the mailbox and serializes overlapping syncs: durability holds, but
+/// the timing these three tests pin does not. They run once the sync is pooled.
+const pooled_finalized_sync = false;
+const PacedActor = common.Actor(
+    harness.Provider,
+    App,
+    common.Unbuffered,
+    common.PacedCertificates(Prunable.Certificates),
+    common.PacedBlocks(Prunable.Blocks, B),
+);
+
+/// An unbuffered actor whose finalized stores take `pace_ms` to sync (commonware's
+/// `paced_finalized_stores` with an auto-acknowledging application).
+const Paced = struct {
+    fixture: harness.Fixture,
+    stores: *Prunable,
+    mailbox: PacedActor.Mailbox,
+    resolver: common.RecordingResolver,
+    application: App,
+    handle: runtime.context.Handle(anyerror!void),
+
+    fn init(self: *Paced, ctx: Ctx, comptime prefix: []const u8, pending_acks: u32) !void {
+        var rng = utils.rng.test_rng();
+        self.fixture = try harness.fixture(gpa, &rng);
+        errdefer self.fixture.deinit(gpa);
+        self.stores = try gpa.create(Prunable);
+        errdefer gpa.destroy(self.stores);
+        try self.stores.open(ctx, prefix);
+        errdefer self.stores.deinit();
+        const certificates, const blocks = self.stores.paced(ctx, pace_ms);
+        const provider: harness.Provider = .init(&self.fixture.schemes[0]);
+        const page_cache = &self.stores.cache_ref;
+        const config =
+            try common.test_config(PacedActor, gpa, prefix, provider, pending_acks, page_cache);
+        const initialized =
+            try PacedActor.init(ctx.child("actor"), certificates, blocks, config);
+        self.mailbox = initialized.mailbox;
+        var holding =
+            try common.RecordingResolver.holding(gpa, ctx.io(), &ctx.scope.child("resolver"));
+        self.resolver = holding.resolver;
+        self.application = try App.init(gpa, ctx.io());
+        self.handle = try initialized.actor.start(
+            self.application.clone(),
+            .{ .gpa = gpa },
+            holding.receiver,
+            holding.resolver.clone(),
+        );
+    }
+
+    fn deinit(self: *Paced) void {
+        const ended = self.handle.abort() catch {};
+        ended catch {};
+        self.mailbox.deinit();
+        self.application.deinit();
+        self.resolver.deinit();
+        self.stores.deinit();
+        gpa.destroy(self.stores);
+        self.fixture.deinit(gpa);
+    }
+
+    /// Reports the finalization of `digest` at `view` over `parent_view`.
+    fn finalize(self: *Paced, view: u64, parent_view: u64, digest: common.D) !void {
+        const proposal = harness.Proposal.init(round_at(view), .new(parent_view), digest);
+        var finalization = try harness.make_finalization(
+            gpa,
+            &self.fixture,
+            proposal,
+            harness.quorum,
+        );
+        defer finalization.deinit(gpa);
+        _ = self.mailbox.report(.{ .finalization = finalization });
+    }
+
+    fn holds(self: *const Paced, height: u64) bool {
+        return self.application.contains(.new(height));
+    }
+
+    /// Waits up to `deadline_ms` for the application to hold the block at `height`.
+    fn wait_holds(self: *const Paced, ctx: Ctx, deadline_ms: u64, height: u64) !void {
+        const start = ctx.current();
+        while (!self.holds(height)) {
+            if (ms_since(ctx, start) > deadline_ms) return error.WaitTimedOut;
+            try ctx.sleep(.fromMilliseconds(1));
+        }
+    }
+};
+
+fn ms_since(ctx: Ctx, start: anytype) u64 {
+    const elapsed = start.durationTo(ctx.current()).toNanoseconds();
+    return @intCast(@divFloor(elapsed, std.time.ns_per_ms));
+}
+
+/// A slow finalized-archive sync must not block the marshal mailbox: a `get_verified` (a
+/// prunable-cache read) issued while the sync is in flight is answered at once, and the
+/// finalized block reaches the application only after the paced sync (the durability
+/// barrier).
+fn sync_not_blocking_body(ctx: Ctx) anyerror!void {
+    var env: Paced = undefined;
+    try env.init(ctx, "paced-finalized-sync", 1);
+    defer env.deinit();
+    // Genesis flows through dispatch first, so the ack pipeline is idle.
+    try env.wait_holds(ctx, 1000, 0);
+    // Store a verified block for round 1 in the (unpaced) prunable cache.
+    const round = round_at(1);
+    const block = try harness.make_raw_block(gpa, try genesis_digest(), .new(1), 100);
+    try testing.expect(try env.mailbox.verified(round, try ready(block)));
+    // The finalization buffers the block into the finalized archives and starts the sync.
+    const finalized_at = ctx.current();
+    try env.finalize(1, 0, block.digest());
+    // A get_verified 1ms later must not queue behind the sync.
+    try ctx.sleep(.fromMilliseconds(1));
+    const requested_at = ctx.current();
+    var verified = (try env.mailbox.get_verified(round)) orelse return error.VerifiedMissing;
+    defer verified.deinit();
+    try testing.expect(verified.digest().eql(block.digest()));
+    try testing.expect(ms_since(ctx, requested_at) < 5);
+    // Durability barrier: no dispatch until the paced sync completes.
+    try testing.expect(!env.holds(1));
+    try ctx.sleep(.fromMilliseconds(90));
+    try testing.expect(!env.holds(1));
+    try env.wait_holds(ctx, 50, 1);
+    try testing.expect(ms_since(ctx, finalized_at) >= pace_ms);
+}
+
+test "standard finalization sync does not block mailbox" {
+    if (!pooled_finalized_sync) return error.SkipZigTest;
+    try run(sync_not_blocking_body);
+}
+
+fn processed_is_one(ctx: Ctx) bool {
+    const text = ctx.encode(gpa) catch return false;
+    defer gpa.free(text);
+    return parse_processed_height(text) == 1;
+}
+
+/// Enqueues the delivery of `value` for `key` to `subscriber`, returning its response.
+fn enqueue(
+    resolver: common.RecordingResolver,
+    key: common.Key,
+    subscriber: handler.Annotation,
+    value: []const u8,
+) !utils.channel.oneshot.Receiver(common.Outcome) {
+    var sender = resolver.handler_clone();
+    defer sender.deinit();
+    const subscribers = [_]handler.Annotation{subscriber};
+    return sender.deliver(.{ .key = key, .subscribers = &subscribers }, value);
+}
+
+/// Enqueues the repair delivery of `block`, finalized by height.
+fn enqueue_repair(resolver: common.RecordingResolver, block: B) !oneshot.Receiver(common.Outcome) {
+    const bytes = try codec.encode(B, gpa, block);
+    defer gpa.free(bytes);
+    const subscriber: handler.Annotation = .{ .finalized = .{ .by_height = block.height() } };
+    return enqueue(resolver, .{ .block = block.digest() }, subscriber, bytes);
+}
+
+fn expect_complete(response: *oneshot.Receiver(common.Outcome)) !void {
+    defer response.deinit();
+    const outcome = try response.recv();
+    try testing.expect(outcome == .resolved and outcome.resolved == .complete);
+}
+
+/// The anchor fetch for `digest` among the resolver's fetches, once issued.
+fn find_block_fetch(resolver: common.RecordingResolver, digest: common.D) !?common.Fetch {
+    const fetches = try resolver.fetches(gpa);
+    defer gpa.free(fetches);
+    for (fetches) |fetch| {
+        if (fetch.key == .block and fetch.key.block.eql(digest)) return fetch;
+    }
+    return null;
+}
+
+/// Finalizes block 1 until processed, then installs a pending floor anchor for a forked
+/// block 1 at view 5, returning the fork and its anchor fetch.
+fn stale_anchor_setup(ctx: Ctx, env: *Paced, block: B) !struct { B, common.Fetch } {
+    try testing.expect(try env.mailbox.verified(round_at(1), try ready(block)));
+    try env.finalize(1, 0, block.digest());
+    try common.wait_until(ctx, 5000, "block 1 processed", ctx, processed_is_one);
+    // A valid certificate at a round above the round floor whose block is unknown locally,
+    // so marshal fetches it. Its height (at or below processed) routes the arriving anchor
+    // into the stale-anchor branch.
+    const fork = try harness.make_raw_block(gpa, try genesis_digest(), .new(1), 999);
+    const proposal = harness.Proposal.init(round_at(5), .new(4), fork.digest());
+    try env.mailbox.set_floor(
+        try harness.make_finalization(gpa, &env.fixture, proposal, harness.quorum),
+    );
+    const start = ctx.current();
+    while (true) {
+        if (try find_block_fetch(env.resolver, fork.digest())) |fetch| return .{ fork, fetch };
+        if (ms_since(ctx, start) > 5000) return error.AnchorFetchMissing;
+        try ctx.sleep(.fromMilliseconds(1));
+    }
+}
+
+/// A buffered finalized-archive write freezes dispatch even when a stale floor anchor
+/// triggers dispatch before the batch's sync starts. The repair blocks arrive in ascending
+/// height order, so the batch keeps the lowest written height.
+fn stale_anchor_body(ctx: Ctx) anyerror!void {
+    var env: Paced = undefined;
+    try env.init(ctx, "stale-floor-anchor", 4);
+    defer env.deinit();
+    const block = try harness.make_raw_block(gpa, try genesis_digest(), .new(1), 100);
+    const fork, const anchor_fetch = try stale_anchor_setup(ctx, &env, block);
+    // Enqueue every delivery back-to-back so the actor drains them in one resolver batch:
+    // two repair blocks at and above the dispatch frontier, then the stale floor anchor.
+    const next = try harness.make_raw_block(gpa, block.digest(), .new(2), 200);
+    var next_response = try enqueue_repair(env.resolver, next);
+    const above = try harness.make_raw_block(gpa, next.digest(), .new(3), 300);
+    var above_response = try enqueue_repair(env.resolver, above);
+    const fork_bytes = try codec.encode(B, gpa, fork);
+    defer gpa.free(fork_bytes);
+    var anchor_response =
+        try enqueue(env.resolver, anchor_fetch.key, anchor_fetch.subscriber, fork_bytes);
+    const delivered_at = ctx.current();
+    try expect_complete(&next_response);
+    try expect_complete(&above_response);
+    try expect_complete(&anchor_response);
+    // Durability barrier: the stale-anchor branch dispatches before the batch's sync
+    // starts, so the repair block at height 2 stays held until the paced sync completes.
+    try ctx.sleep(.fromMilliseconds(1));
+    try testing.expect(!env.holds(2));
+    try ctx.sleep(.fromMilliseconds(90));
+    try testing.expect(!env.holds(2));
+    try env.wait_holds(ctx, 50, 3);
+    try testing.expect(env.holds(2));
+    try testing.expect(ms_since(ctx, delivered_at) >= pace_ms);
+}
+
+test "standard stale floor anchor holds dispatch until durable" {
+    if (!pooled_finalized_sync) return error.SkipZigTest;
+    try run(stale_anchor_body);
+}
+
+const stagger_ms = 50;
+
+/// Overlapping pooled syncs release the dispatch gate per batch: block 1 dispatches once
+/// its own sync completes, and block 2 waits for the second.
+fn overlapping_syncs_body(ctx: Ctx) anyerror!void {
+    var env: Paced = undefined;
+    try env.init(ctx, "overlapping-finalized-syncs", 4);
+    defer env.deinit();
+    try env.wait_holds(ctx, 5000, 0);
+    // Store both verified blocks, then finalize them one stagger apart so their syncs
+    // overlap.
+    const first = try harness.make_raw_block(gpa, try genesis_digest(), .new(1), 100);
+    try testing.expect(try env.mailbox.verified(round_at(1), try ready(first)));
+    const second = try harness.make_raw_block(gpa, first.digest(), .new(2), 200);
+    try testing.expect(try env.mailbox.verified(round_at(2), try ready(second)));
+    const started_at = ctx.current();
+    try env.finalize(1, 0, first.digest());
+    try ctx.sleep(.fromMilliseconds(stagger_ms));
+    try env.finalize(2, 1, second.digest());
+    // Block 1 dispatches as soon as the first sync completes.
+    try env.wait_holds(ctx, 150, 1);
+    const first_dispatched = ms_since(ctx, started_at);
+    try testing.expect(first_dispatched >= pace_ms);
+    try testing.expect(first_dispatched < stagger_ms + pace_ms);
+    // Block 2 stays held until its own sync completes.
+    try testing.expect(!env.holds(2));
+    try ctx.sleep(.fromMilliseconds(20));
+    try testing.expect(!env.holds(2));
+    try env.wait_holds(ctx, 50, 2);
+    try testing.expect(ms_since(ctx, started_at) >= stagger_ms + pace_ms);
+}
+
+test "standard overlapping finalized syncs release per batch" {
+    if (!pooled_finalized_sync) return error.SkipZigTest;
+    try run(overlapping_syncs_body);
 }
