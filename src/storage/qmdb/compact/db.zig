@@ -1,9 +1,8 @@
 //! The compact db and its batches (commonware's `qmdb/compact/db.rs`). See `mod.zig`.
 //!
-//! Differences from commonware, all from zigware's synchronous storage: `start_sync` completes
-//! at once (no pending sync to wait on or resurface), and the db is a value with `*Self`
-//! methods instead of being consumed and returned. After an error from a mutating method the
-//! db must only be closed (`deinit`), as commonware drops it.
+//! Difference from commonware: the db is a value with `*Self` methods instead of being
+//! consumed and returned. After an error from a mutating method the db must only be closed
+//! (`deinit`), as commonware drops it.
 
 const std = @import("std");
 const assert = std.debug.assert;

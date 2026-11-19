@@ -46,5 +46,6 @@ test {
     _ = @import("conformance_test.zig");
     _ = @import("db_test.zig");
     _ = @import("recovery_test.zig");
+    _ = @import("start_sync_test.zig");
     _ = @import("sync_test.zig");
 }

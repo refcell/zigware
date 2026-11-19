@@ -92,6 +92,10 @@ it comes first once `any` lands.
   and `CodecConformance<StoredWitness>`.
 - [x] compact crash-point tests (import replacement under torn writes and failed syncs from
   the faulty storage) and tampered-witness tests.
+- [x] compact's 10 in-flight `start_sync` tests (`test_compact_start_sync_*` and
+  `test_compact_apply_overlaps_start_sync`) in compact/start_sync_test.zig, on
+  `runtime.storage.mocks.DelayedSync`, over the keyless and immutable fixed dbs of both
+  families (ported by the glue lane, 2026-11-19).
 - [x] `qmdb_current_{unordered,ordered}_batch_root` (current/batch_root_fuzz_test.zig) and
   `qmdb_current_recovery` (current/recovery_fuzz_test.zig), on storage-qmdb's
   `qmdb/fuzz_floor.zig` oracle. Ordered neighbors are checked on every batch (current's
@@ -228,8 +232,8 @@ Design:
   `append`/`set` variant) instead of commonware's sealed trait; `compact.Keyless` and
   `compact.Immutable` are the aliases, kept under `compact/` so keyless/immutable stay
   storage-qmdb's. `Config` carries `codec_config` beside the witness journal config
-  (commonware splits it out of the journal config). `start_sync` completes at once, so there
-  is no pending-sync state to resurface.
+  (commonware splits it out of the journal config). Since async start_sync step 5, `Open`
+  keeps the last `start_sync`'s completion (`pending_sync`), so a dropped failure resurfaces.
 - current's per-batch activity chunks are a refcounted `Layer` chain ending at the
   database's bitmap (commonware's `BitmapBatch`); merkleize and apply cut layers the database
   already holds (`trim_committed`). Staleness is left to `any`'s chain validation instead of
