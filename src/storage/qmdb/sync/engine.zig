@@ -11,7 +11,10 @@
 //!
 //! `wait_for_event` selects over the target update channel, the finish channel, and the
 //! completion channel, and keeps every result that completed while the others were canceled,
-//! so no update is lost to the select.
+//! so no update is lost to the select. Woken events are handled in commonware's biased select
+//! order (finish, then target updates, then fetch results), and a queued update is polled
+//! before fetch results: fetches start eagerly here, so one a queued update retains out may
+//! already have finished, and its result is then ignored as commonware never serves it.
 //!
 //! The database type `DB` provides the interface in `database.zig`. Its journal is opened with
 //! `DB.open_journal(gpa, storage, cfg, range)` when declared, else with `journal.init` over
@@ -644,8 +647,8 @@ pub fn Engine(comptime DB: type, comptime S: type) type {
             }
         }
 
-        /// Events woken together, in the order they completed.
-        pub const Events = struct { items: [3]Event = undefined, len: usize = 0 };
+        /// Events woken together: the three waits and a polled queued update.
+        pub const Events = struct { items: [4]Event = undefined, len: usize = 0 };
 
         const Wake = union(enum) {
             update: Io.Cancelable!?Target,
@@ -672,6 +675,8 @@ pub fn Engine(comptime DB: type, comptime S: type) type {
             // A result that completes while the others are canceled is kept.
             while (select.cancel()) |rest| self.push_wake(&events, rest);
             assert(events.len <= 3);
+            self.poll_queued_update(&events);
+            std.sort.insertion(Event, events.items[0..events.len], {}, handled_before);
             return events;
         }
 
@@ -701,6 +706,39 @@ pub fn Engine(comptime DB: type, comptime S: type) type {
             assert(events.len < events.items.len);
             events.items[events.len] = event;
             events.len += 1;
+        }
+
+        /// Takes a queued update the select did not wake for, as commonware's biased select
+        /// would have.
+        fn poll_queued_update(self: *Self, events: *Events) void {
+            for (events.items[0..events.len]) |event| switch (event) {
+                .target_update, .update_closed => return,
+                else => {},
+            };
+            const rx = self.update_rx orelse return;
+            const event: Event = if (rx.try_recv()) |new_target|
+                .{ .target_update = new_target }
+            else |err| switch (err) {
+                error.Empty => return,
+                error.Disconnected => .update_closed,
+            };
+            assert(events.len < events.items.len);
+            events.items[events.len] = event;
+            events.len += 1;
+        }
+
+        /// commonware's biased select order: finish, then target updates, then fetch results,
+        /// so a fetch a woken update retains out is ignored rather than handled.
+        fn handled_before(_: void, a: Event, b: Event) bool {
+            return event_rank(a) < event_rank(b);
+        }
+
+        fn event_rank(event: Event) u2 {
+            return switch (event) {
+                .finish_requested, .finish_closed => 0,
+                .target_update, .update_closed => 1,
+                .fetched => 2,
+            };
         }
 
         fn wait_and_handle(self: *Self) !void {
