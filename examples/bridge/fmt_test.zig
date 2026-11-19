@@ -76,3 +76,56 @@ test "fmt follows NO_COLOR as tracing does" {
     try testing.expect(fmt.ansi_enabled(""));
     try testing.expect(!fmt.ansi_enabled("1"));
 }
+
+const Io = std.Io;
+const production = zigware.runtime.production;
+
+/// Holds `logging` from writing until the test has requested its cancel.
+const Gate = struct { open: std.atomic.Value(bool) = .init(false) };
+
+/// Logs once the gate opens, then waits: a cancel pending before the log must end the wait.
+fn log_then_wait(io: Io, subscriber: traces.Subscriber, gate: *Gate) Io.Cancelable!void {
+    while (!gate.open.load(.acquire)) std.atomic.spinLoopHint();
+    traces.Tracer.init(subscriber, "indexer").event(.info, "stored block", .{});
+    try io.sleep(.fromSeconds(5), .awake);
+}
+
+fn cancel(future: *Io.Future(Io.Cancelable!void), io: Io) Io.Cancelable!void {
+    return future.cancel(io);
+}
+
+fn pending_cancel_survives_a_log(io: Io) !void {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(io, "log", .{});
+    defer file.close(io);
+    var buffer: [256]u8 = undefined;
+    var file_writer = file.writer(io, &buffer);
+    var subscriber: fmt.Fmt = .{
+        .io = io,
+        .out = &file_writer.interface,
+        .ansi = false,
+        .level = .info,
+    };
+    var gate: Gate = .{};
+    var logging = try io.concurrent(log_then_wait, .{ io, subscriber.subscriber(), &gate });
+    var canceling = try io.concurrent(cancel, .{ &logging, io });
+    // Let the cancel request reach the logging task before it writes.
+    try io.sleep(.fromMilliseconds(50), .awake);
+    const start = Io.Clock.awake.now(io);
+    gate.open.store(true, .release);
+    try testing.expectError(error.Canceled, canceling.await(io));
+    const elapsed = start.durationTo(Io.Clock.awake.now(io));
+    try testing.expect(elapsed.nanoseconds < std.time.ns_per_s);
+}
+
+test "fmt leaves a pending cancel for the logging task's next wait" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path: [128]u8 = undefined;
+    const directory = try std.fmt.bufPrint(&path, ".zig-cache/tmp/{s}/runner", .{tmp.sub_path});
+    var runner: production.Runner = undefined;
+    try runner.init(testing.allocator, .{ .storage_directory = directory });
+    defer runner.deinit();
+    try runner.start(pending_cancel_survives_a_log, .{runner.io()});
+}

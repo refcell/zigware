@@ -55,6 +55,10 @@ pub const Fmt = struct {
         assert(line.buffered().len > 0);
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
+        // A write is a cancelation point whose cancel `Writer` reports only as `WriteFailed`;
+        // blocking it leaves a pending cancel for the logging task's next wait.
+        const protection = self.io.swapCancelProtection(.blocked);
+        defer _ = self.io.swapCancelProtection(protection);
         self.out.writeAll(line.buffered()) catch return;
         self.out.flush() catch return;
     }
