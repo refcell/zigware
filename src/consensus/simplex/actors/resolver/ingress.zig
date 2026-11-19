@@ -247,8 +247,7 @@ pub const HandlerMessage = union(enum) {
         asks: []ask.Ask,
         response: oneshot.Sender(resolver.Outcome),
         /// The span of the fetch that asked for `view` (commonware's first subscriber's
-        /// span), owned (allocated with `gpa`) and a root, so it outlives the fetch. The p2p
-        /// resolver's `Delivery` carries no spans yet, so deliveries from it have none.
+        /// span), owned (allocated with `gpa`) and a root, so it outlives the fetch.
         span: ?*Span = null,
     },
     /// A peer asks for the certificate this node serves for `view`.
@@ -353,12 +352,18 @@ pub const Handler = struct {
         const data = try self.gpa.dupe(u8, value);
         errdefer self.gpa.free(data);
         const asks = try self.gpa.dupe(ask.Ask, delivery.subscribers);
+        errdefer self.gpa.free(asks);
+        // Processing runs under the first subscriber's fetch span (commonware keeps a clone).
+        const first: ?*const Span = if (delivery.spans.len > 0) delivery.spans[0] else null;
+        const span = try resolver.own_span(self.gpa, first);
+        errdefer resolver.free_span(self.gpa, span);
         _ = try self.sender.enqueue(.{ .deliver = .{
             .gpa = self.gpa,
             .view = .new(delivery.key.get()),
             .data = data,
             .asks = asks,
             .response = pair.sender,
+            .span = span,
         } });
         return pair.receiver;
     }

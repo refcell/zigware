@@ -387,3 +387,11 @@ resolver; those lanes are running, so do the types first and the actors as they 
   twins_campaign_test.zig is a generic `Suite(F)`. Slow builds (nightly) run full sizes;
   ReleaseSafe runs a quick slice (fewer views, shorter waits, one twins case per fixture:
   3 min for every fixture DST together); Debug skips them.
+- 2026-11-19: The message conformance hashes, the large twins campaigns, and all-fixtures
+  all_online run only in slow builds (nightly), in every mode. commonware hashes all
+  `default_cases` vectors together, so a smaller count can't be checked. The per-push fixture
+  slice runs one fixture per scheme family (VRF MinPk, standard MinSig, multisig MinPk,
+  secp256r1): about 1 min in ReleaseSafe.
+- 2026-11-19: The resolver `Handler.deliver` keeps an owned copy of the first subscriber's fetch
+  span (`resolver.own_span`), so pr_5097_regression now runs through the handler, as in
+  commonware.

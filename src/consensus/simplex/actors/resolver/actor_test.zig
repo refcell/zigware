@@ -884,14 +884,30 @@ test "resolver actor processes a delivery under its fetch span (pr_5097_regressi
     try env.start();
     defer env.stop();
     env.actor.tracer = .init(subscriber, "commonware_consensus::simplex::actors::resolver");
-    const fetch = try gpa.create(Span);
-    {
-        // The fetch's tracer goes out of scope with its request; the span outlives it.
-        const tracer: traces.Tracer = .init(subscriber, "test");
-        fetch.* = tracer.span("test.fetch", .{});
-    }
+    const pair = try actor.mailbox.new(HandlerMessage, gpa, testing.io, 8);
+    var handler_sender = pair.sender;
+    defer handler_sender.deinit();
+    var handler_receiver = pair.receiver;
+    defer handler_receiver.deinit();
+    const handler: ingress.Handler = .{ .gpa = gpa, .io = testing.io, .sender = &handler_sender };
     const data = try encoded(.{ .notarization = try env.notarization(3) });
-    _ = try env.deliver_spanned(3, data, &.{.ancestry(.notarization)}, fetch);
+    defer gpa.free(data);
+    {
+        // The engine's span and delivery go away once `deliver` returns; the queued message
+        // holds the only copy.
+        const tracer: traces.Tracer = .init(subscriber, "test");
+        var fetch = tracer.span("test.fetch", .{});
+        const spans = [_]?*Span{&fetch};
+        const asks = [_]Ask{.ancestry(.notarization)};
+        var outcome = try handler.deliver(.{
+            .key = .init(3),
+            .subscribers = &asks,
+            .spans = &spans,
+        }, data);
+        outcome.deinit();
+    }
+    const message = (try handler_receiver.recv()).?;
+    try env.actor.handle_resolver(message, &env.voter, &env.recorder);
     const parented = struct {
         fn check(_: void, event: traces.collector.RecordedEvent) bool {
             for (0..event.spans.len -| 1) |index| {
