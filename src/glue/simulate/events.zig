@@ -1,6 +1,10 @@
 //! The plan's event queue (commonware's `select_loop!` over the monitor, restart, schedule, and
 //! crash channels): every source pushes into one queue, and the plan pops one event at a time,
 //! waking at least every poll interval. A mutex and condition give the timed wait.
+//!
+//! Control events (restarts, scheduled crashes, crash ticks) go before queued reports, as
+//! commonware's select polls those branches before the monitor's: a steady stream of reports
+//! cannot starve them.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -49,7 +53,10 @@ pub fn Events(comptime P: type) type {
         io: Io,
         mutex: Io.Mutex = .init,
         condition: Io.Condition = .init,
+        /// Reports, in arrival order.
         queue: std.Deque(Event) = .empty,
+        /// Every other event, in arrival order; taken before `queue`.
+        controls: std.Deque(Event) = .empty,
         closed: bool = false,
 
         pub fn init(gpa: Allocator, io: Io) Self {
@@ -57,8 +64,9 @@ pub fn Events(comptime P: type) type {
         }
 
         pub fn deinit(self: *Self) void {
-            while (self.queue.popFront()) |event| self.release(event);
+            while (self.pop()) |event| self.release(event);
             self.queue.deinit(self.gpa);
+            self.controls.deinit(self.gpa);
             self.* = undefined;
         }
 
@@ -75,11 +83,12 @@ pub fn Events(comptime P: type) type {
         pub fn push(self: *Self, event: Event) bool {
             self.mutex.lockUncancelable(self.io);
             defer self.mutex.unlock(self.io);
-            if (self.closed or self.queue.len >= capacity_max) {
+            if (self.closed or self.queue.len + self.controls.len >= capacity_max) {
                 self.release(event);
                 return false;
             }
-            self.queue.pushBack(self.gpa, event) catch {
+            const lane = if (event == .report) &self.queue else &self.controls;
+            lane.pushBack(self.gpa, event) catch {
                 self.release(event);
                 return false;
             };
@@ -95,14 +104,25 @@ pub fn Events(comptime P: type) type {
             try self.mutex.lock(self.io);
             defer self.mutex.unlock(self.io);
             while (true) {
-                if (self.queue.popFront()) |event| return event;
+                if (self.pop()) |event| return event;
                 if (self.closed) return null;
                 const waited = self.condition.waitTimeout(self.io, &self.mutex, deadline);
                 waited catch |err| switch (err) {
-                    error.Timeout => return self.queue.popFront(),
+                    error.Timeout => return self.pop(),
                     error.Canceled => return error.Canceled,
                 };
             }
+        }
+
+        /// The next control event, else the next report. Called with the mutex held.
+        fn pop(self: *Self) ?Event {
+            if (self.controls.popFront()) |event| {
+                assert(event != .report);
+                return event;
+            }
+            const event = self.queue.popFront() orelse return null;
+            assert(event == .report);
+            return event;
         }
 
         /// Stops accepting events; those already queued can still be taken with `next`.

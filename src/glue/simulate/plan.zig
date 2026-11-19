@@ -55,7 +55,9 @@ pub const Error = error{
     ScheduleNotExercised,
     /// A delay was configured but the delayed validators never started.
     DelayedNeverStarted,
-    /// A validator passed a `Crash.processed_height` window without landing in it.
+    /// A participant of a `Crash.processed_height` reported a height past its window before
+    /// the crash fired (commonware: "reported processed height must not be past the crash
+    /// window").
     SkippedProcessedHeightWindow,
     /// Not every `Crash.processed_height` window was reached.
     ProcessedHeightCrashNotReached,
@@ -63,6 +65,8 @@ pub const Error = error{
     UnknownParticipant,
     /// More than one `Crash.random` or `Crash.delay_round` is configured.
     DuplicateCrashStrategy,
+    /// A `Crash.processed_height` lists no participants (commonware's `NonEmptyVec`).
+    EmptyCrashParticipants,
 };
 
 /// A declarative simulation of engine definition `D` (commonware `Plan<D>`; its builder's
@@ -138,14 +142,18 @@ pub fn Plan(comptime D: type) type {
             return try runner.start_context(run_in_context, .{ self, &runner });
         }
 
-        /// At most one random crash strategy and one delay may be configured.
+        /// At most one random crash strategy and one delay may be configured, and every
+        /// processed-height crash names a participant.
         pub fn validate(self: *const Self) Error!void {
             var random: usize = 0;
             var delays: usize = 0;
             for (self.crashes) |crash| switch (crash) {
                 .random => random += 1,
                 .delay_round => delays += 1,
-                .processed_height, .schedule => {},
+                .processed_height => |window| if (window.participants.len == 0) {
+                    return error.EmptyCrashParticipants;
+                },
+                .schedule => {},
             };
             if (random > 1 or delays > 1) return error.DuplicateCrashStrategy;
             assert(random <= 1 and delays <= 1);
@@ -425,7 +433,8 @@ pub fn Plan(comptime D: type) type {
                 if (delayed and !sim.delayed_started) return error.DelayedNeverStarted;
             }
 
-            /// Crashes each validator whose processed height entered its configured window.
+            /// Crashes the participants of each processed-height window together once all of
+            /// them run and report a height inside it.
             fn trigger_processed_height_crashes(sim: *Run) !void {
                 for (sim.plan.crashes, sim.triggered) |crash, *triggered| {
                     const window = switch (crash) {
@@ -433,16 +442,39 @@ pub fn Plan(comptime D: type) type {
                         else => continue,
                     };
                     if (triggered.*) continue;
-                    const index = sim.team.index_of(window.participant) orelse
-                        return error.UnknownParticipant;
-                    const height = sim.team.processed_height(index) orelse continue;
-                    if (height < window.heights.min) continue;
-                    if (!window.heights.contains(height)) return error.SkippedProcessedHeightWindow;
+                    if (!try sim.processed_height_due(window.participants, window.heights)) {
+                        continue;
+                    }
                     triggered.* = true;
-                    if (!sim.team.crash(index)) continue;
-                    sim.crashes += 1;
-                    try sim.restart_after(window.participant, window.downtime);
+                    for (window.participants) |pk| {
+                        const index = sim.team.index_of(pk) orelse unreachable; // Checked above.
+                        if (!sim.team.crash(index)) continue;
+                        sim.crashes += 1;
+                        try sim.restart_after(pk, window.downtime);
+                    }
                 }
+            }
+
+            /// Whether every participant runs and reports a height inside `heights`. Checks
+            /// every participant, so a running one past the window fails the run even while
+            /// another is stopped or behind.
+            fn processed_height_due(
+                sim: *const Run,
+                participants: []const P,
+                heights: action.HeightRange,
+            ) Error!bool {
+                assert(participants.len > 0);
+                var due = true;
+                for (participants) |pk| {
+                    const index = sim.team.index_of(pk) orelse return error.UnknownParticipant;
+                    const height = sim.team.processed_height(index) orelse {
+                        due = false;
+                        continue;
+                    };
+                    if (height > heights.max) return error.SkippedProcessedHeightWindow;
+                    if (height < heights.min) due = false;
+                }
+                return due;
             }
 
             /// Starts the delayed validators, in random order, once a delay round is reached.

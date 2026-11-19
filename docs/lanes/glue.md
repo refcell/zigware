@@ -1,6 +1,7 @@
 # Lane: glue
 
-Owns `src/glue`.
+Owns `src/glue`. `src/glue/simulate` belongs to the examples lane (thread
+T-01a1d5b9-c891), which ports its upstream drift.
 
 Reference: `~/.cache/zigware/commonware-ref/glue` (about 68k Rust lines): `simulate` (2.3k,
 a test harness), `transfers` (4.4k with tests and benches), `stateful` (about 33k), and `dkg`
@@ -64,6 +65,14 @@ a test harness), `transfers` (4.4k with tests and benches), `stateful` (about 33
 - [x] simulate: tracker, action (Schedule, Action, Crash) with their tests.
 - [x] simulate: processed, property, exit conditions, engine definition, team, plan (the
   driver) with the plan tests and their stub engines.
+- [x] simulate drift, commonware bca770a0c (examples lane): `Crash.processed_height` takes
+      `participants: []const P` (non-empty, else `EmptyCrashParticipants`) and crashes them
+      together once each runs and reports a height inside the window; one past it fails with
+      `SkippedProcessedHeightWindow`. Restarts, schedule actions, and crash ticks go before
+      queued reports (`events.zig`'s control lane), as the reordered select does. plan.rs's six
+      new tests, plus one that a crash due behind queued reports still applies.
+      `random_crash_restarts_without_downtime` exits at five heights, not six: each restart's
+      task hand-offs cost simulated milliseconds, which push the sixth past the third crash.
 - [x] simulate: `MonitorReporter` (examples lane): forwards marshal's `Update.tip` to the
   plan's `Monitor`, then every update to the wrapped reporter.
 - [x] transfers: `Plan`, `settle`, and `Selection`, with the plan, settle, and selection tests
@@ -352,7 +361,7 @@ ones: d = deployer (thread T-01a1d5b9-c237), u = utils, j = storage-journal
 
 | commonware file | tests | ported | open | not portable | owner |
 | --- | --- | --- | --- | --- | --- |
-| simulate (action, plan, tracker) | 16 | 16 | 0 | 0 | |
+| simulate (action, plan, tracker) | 22 | 22 | 0 | 0 | |
 | transfers/tests.rs | 53 | 53 | 0 | 0 | |
 | stateful/probe/mod.rs (+2 conformance) | 22 | 22 | 0 | 0 | |
 | stateful/probe/limits.rs | 1 | 1 | 0 | 0 | |

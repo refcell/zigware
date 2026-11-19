@@ -94,14 +94,18 @@ pub fn Crash(comptime P: type) type {
             /// Round to wait for before starting delayed validators.
             round: consensus.Round,
         },
-        /// Crash a validator when its application enters a processed-height window, then
-        /// restart it after the downtime.
+        /// Crash validators together once all of them are running and report a processed
+        /// height inside the window, then restart them after the downtime. The run fails if a
+        /// reported height is past the window or the crash never happens.
+        ///
+        /// Validators that stop independently of each other take one entry each.
         processed_height: struct {
-            /// Validator to crash.
-            participant: P,
-            /// Processed-height window in which the crash must occur.
+            /// Validators to crash; borrowed and non-empty (commonware `NonEmptyVec`).
+            participants: []const P,
+            /// Window that every participant's reported processed height must be inside for
+            /// the crash to fire.
             heights: HeightRange,
-            /// How long the validator remains offline.
+            /// How long the validators remain offline.
             downtime: Duration,
         },
         /// Time-indexed action schedule for precise control; borrowed.

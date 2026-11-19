@@ -527,3 +527,338 @@ test "plan: only one delay strategy may be configured" {
     const plan: FinalizingPlan = .{ .engine = &engine, .crashes = &.{ delay, delay } };
     try testing.expectError(error.DuplicateCrashStrategy, run_one(&plan));
 }
+
+/// Validators that each process and report one height per period (commonware's
+/// `ProcessingEngine`).
+const ProcessingEngine = struct {
+    pub const PublicKey = Key;
+    pub const State = Processed;
+    pub const Engine = Node;
+
+    keys: []const Key,
+    /// Time each validator takes to process a height, in participant order.
+    periods: []const Duration,
+    /// Height each validator has processed, kept across restarts.
+    processed: []std.atomic.Value(u64),
+    /// Every validator start, in order.
+    starts: *Log,
+
+    /// A validator start: its index, and the height each validator had processed by then.
+    const Start = struct { index: usize, heights: [3]u64 };
+
+    const Log = struct {
+        items: [16]Start = undefined,
+        count: usize = 0,
+
+        fn slice(starts: *const Log) []const Start {
+            return starts.items[0..starts.count];
+        }
+    };
+
+    /// The height a validator has processed.
+    pub const Processed = struct {
+        value: *std.atomic.Value(u64),
+
+        pub fn processed_height(self: *const Processed) u64 {
+            return self.value.load(.monotonic);
+        }
+    };
+
+    pub const Node = struct {
+        context: Context,
+        monitor: simulate.Monitor(Key),
+        pk: Key,
+        period: Duration,
+        processed: *std.atomic.Value(u64),
+    };
+
+    pub fn participants(self: *const ProcessingEngine) []const Key {
+        return self.keys;
+    }
+
+    pub fn channels(_: *const ProcessingEngine) []const simulate.ChannelSpec {
+        return &.{};
+    }
+
+    pub fn max_message_size(_: *const ProcessingEngine) u32 {
+        return p2p.max_message_size(&.{});
+    }
+
+    pub fn init(self: *const ProcessingEngine, ctx: simulate.InitContext(Key)) !struct {
+        Node,
+        Processed,
+    } {
+        assert(self.processed.len <= 3 and self.starts.count < self.starts.items.len);
+        var record: Start = .{ .index = ctx.index, .heights = @splat(0) };
+        for (self.processed, 0..) |*height, index| record.heights[index] = height.load(.monotonic);
+        self.starts.items[self.starts.count] = record;
+        self.starts.count += 1;
+        const processed = &self.processed[ctx.index];
+        return .{ .{
+            .context = ctx.context,
+            .monitor = ctx.monitor,
+            .pk = ctx.public_key,
+            .period = self.periods[ctx.index],
+            .processed = processed,
+        }, .{ .value = processed } };
+    }
+
+    pub fn start(node: Node) !Handle {
+        return node.context.spawn(process, .{node});
+    }
+
+    fn process(ctx: Context, node: Node) void {
+        while (true) {
+            sleep(ctx, node.period) catch return;
+            const height = node.processed.fetchAdd(1, .monotonic) + 1;
+            const sent = node.monitor.send(.{
+                .pk = node.pk,
+                .round = round(height),
+                .height = Height.new(height),
+                .block_digest = &.{@truncate(height)},
+            });
+            if (!sent) return;
+        }
+    }
+};
+
+const ProcessingPlan = simulate.Plan(ProcessingEngine);
+
+/// Runs one validator against `crash` while its reports outpace the plan's checks, and
+/// returns the number of crashes the plan applied.
+const OutpacedChecks = struct {
+    fn run(
+        ctx: Context,
+        runner: *runtime.deterministic.Runner,
+        crash: simulate.Crash(Key),
+    ) !u64 {
+        // Emit reports every millisecond while each check takes five, so reports stay queued
+        // behind the check in progress.
+        const participants = keys(1);
+        const engine: FinalizingEngine = .{
+            .keys = &participants,
+            .finalize_after = .zero,
+            .finalizations = std.math.maxInt(u64),
+            .period = .from_millis(1),
+        };
+        var calls: u64 = 0;
+        const slow: SlowCheck = .{ .context = ctx.child("check"), .calls = &calls };
+        const plan: FinalizingPlan = .{
+            .engine = &engine,
+            .required_finalizations = 20,
+            .finalization_properties = &.{.from(&slow)},
+            .crashes = &.{crash},
+        };
+        var result = try FinalizingPlan.run_in_context(ctx, &plan, runner);
+        defer result.deinit();
+        return result.crashes;
+    }
+
+    fn crashes(crash: simulate.Crash(Key)) !u64 {
+        var runner = try runtime.deterministic.Runner.init(gpa, .{
+            .timeout_ns = 2 * std.time.ns_per_s,
+        });
+        defer runner.deinit();
+        return try runner.start_context(run, .{ &runner, crash });
+    }
+
+    /// The crash count of a schedule that crashes the validator at `crash_ms` and restarts
+    /// it ten milliseconds later.
+    fn scheduled(crash_ms: u64) !u64 {
+        const pk = keys(1)[0];
+        var schedule: Schedule = .empty;
+        defer schedule.deinit(gpa);
+        try schedule.add(gpa, .from_millis(crash_ms), .{ .crash = pk });
+        try schedule.add(gpa, .from_millis(crash_ms + 10), .{ .restart = pk });
+        return crashes(.{ .schedule = &schedule });
+    }
+};
+
+test "plan: scheduled crash applies while reports outpace checks" {
+    try testing.expectEqual(1, try OutpacedChecks.scheduled(10));
+}
+
+test "plan: a scheduled crash due behind queued reports applies before completion" {
+    // By 80ms the plan has checked about 16 reports, and reports up to 80 are queued. Taken in
+    // arrival order, the crash would wait behind the 20th report, which completes the run.
+    try testing.expectEqual(1, try OutpacedChecks.scheduled(80));
+}
+
+test "plan: random crash applies while reports outpace checks" {
+    const crashes = try OutpacedChecks.crashes(.{ .random = .{
+        .frequency = .from_millis(30),
+        .downtime = .from_millis(5),
+        .count = 1,
+    } });
+    try testing.expect(crashes > 0);
+}
+
+test "plan: processed height crash stops participants together" {
+    // The fast validators enter the shared window after about 50ms. The slow validator first
+    // stops alone at height 2 for 200ms, so it enters the window after about 350ms. It sits
+    // between the fast validators in participant order, so neither the first nor the last
+    // participant decides alone when the shared crash is due.
+    const slow = 1;
+    const fast = [_]usize{ 0, 2 };
+    const participants = keys(3);
+    var processed: [3]std.atomic.Value(u64) = @splat(.init(0));
+    var starts: ProcessingEngine.Log = .{};
+    const engine: ProcessingEngine = .{
+        .keys = &participants,
+        .periods = &.{ .from_millis(10), .from_millis(30), .from_millis(10) },
+        .processed = &processed,
+        .starts = &starts,
+    };
+    const condition: simulate.exit.ProcessedHeightAtLeast = .{ .required = 8 };
+    const plan: ProcessingPlan = .{
+        .engine = &engine,
+        .crashes = &.{
+            .{ .processed_height = .{
+                .participants = participants[slow .. slow + 1],
+                .heights = .{ .min = 2, .max = 2 },
+                .downtime = .from_millis(200),
+            } },
+            .{ .processed_height = .{
+                .participants = &participants,
+                .heights = .{ .min = 5, .max = 45 },
+                .downtime = .from_millis(100),
+            } },
+        },
+        .exit_condition = .from(&condition),
+        .timeout = .from_secs(2),
+    };
+    var result = try plan.run(gpa);
+    defer result.deinit();
+    // The slow validator stops twice and each fast validator once.
+    try testing.expectEqual(4, result.crashes);
+
+    // After every validator starts, the slow one restarts alone, once the fast ones have
+    // processed 20 heights or more. The last three restarts then record the same heights, so
+    // no validator ran while another was stopped. The slow validator stopped as it entered the
+    // window, when the fast ones were already inside it.
+    const all = starts.slice();
+    try testing.expect(all.len >= 4);
+    const alone = all[3];
+    try testing.expectEqual(slow, alone.index);
+    for (fast) |index| try testing.expect(alone.heights[index] >= 20);
+    const together = all[4..];
+    try testing.expectEqual(3, together.len);
+    var restarted: [3]bool = @splat(false);
+    for (together) |start| restarted[start.index] = true;
+    try testing.expectEqual([3]bool{ true, true, true }, restarted);
+    const heights = together[0].heights;
+    for (together) |start| try testing.expectEqual(heights, start.heights);
+    try testing.expectEqual(5, heights[slow]);
+    for (fast) |index| try testing.expect(heights[index] > 5);
+}
+
+test "plan: processed height crash requires every participant inside window" {
+    // The fast validator processes height 10, past the window, after about 100ms. The slow
+    // validator has then processed only height 3 and has yet to enter the window.
+    const participants = keys(2);
+    var processed: [2]std.atomic.Value(u64) = @splat(.init(0));
+    var starts: ProcessingEngine.Log = .{};
+    const engine: ProcessingEngine = .{
+        .keys = &participants,
+        .periods = &.{ .from_millis(10), .from_millis(30) },
+        .processed = &processed,
+        .starts = &starts,
+    };
+    const condition: simulate.exit.ProcessedHeightAtLeast = .{ .required = 8 };
+    const plan: ProcessingPlan = .{
+        .engine = &engine,
+        .crashes = &.{.{ .processed_height = .{
+            .participants = &participants,
+            .heights = .{ .min = 5, .max = 9 },
+            .downtime = .from_millis(100),
+        } }},
+        .exit_condition = .from(&condition),
+        .timeout = .from_secs(2),
+    };
+    try testing.expectError(error.SkippedProcessedHeightWindow, plan.run(gpa));
+}
+
+test "plan: processed height crash needs a participant" {
+    const participants = keys(1);
+    var processed: [1]std.atomic.Value(u64) = @splat(.init(0));
+    var starts: ProcessingEngine.Log = .{};
+    const engine: ProcessingEngine = .{
+        .keys = &participants,
+        .periods = &.{.from_millis(10)},
+        .processed = &processed,
+        .starts = &starts,
+    };
+    const plan: ProcessingPlan = .{
+        .engine = &engine,
+        .crashes = &.{.{ .processed_height = .{
+            .participants = &.{},
+            .heights = .{ .min = 1, .max = 1 },
+            .downtime = .zero,
+        } }},
+    };
+    try testing.expectError(error.EmptyCrashParticipants, plan.run(gpa));
+}
+
+/// Runs one validator that processes a height every 10ms against `crash` until it has
+/// processed `exit_height` heights. Returns the number of crashes the plan applied and the
+/// heights the validator had processed at its starts, in `heights`.
+fn crashes_and_start_heights(
+    crash: simulate.Crash(Key),
+    exit_height: u64,
+    heights: *std.ArrayList(u64),
+) !u64 {
+    const participants = keys(1);
+    var processed: [1]std.atomic.Value(u64) = @splat(.init(0));
+    var starts: ProcessingEngine.Log = .{};
+    const engine: ProcessingEngine = .{
+        .keys = &participants,
+        .periods = &.{.from_millis(10)},
+        .processed = &processed,
+        .starts = &starts,
+    };
+    var with_participant = crash;
+    if (with_participant == .processed_height) {
+        with_participant.processed_height.participants = &participants;
+    }
+    const condition: simulate.exit.ProcessedHeightAtLeast = .{ .required = exit_height };
+    const plan: ProcessingPlan = .{
+        .engine = &engine,
+        .crashes = &.{with_participant},
+        .exit_condition = .from(&condition),
+        .timeout = .from_secs(2),
+    };
+    var result = try plan.run(gpa);
+    defer result.deinit();
+    for (starts.slice()) |start| try heights.append(gpa, start.heights[0]);
+    return result.crashes;
+}
+
+test "plan: processed height crash restarts without downtime" {
+    var heights: std.ArrayList(u64) = .empty;
+    defer heights.deinit(gpa);
+    // `crashes_and_start_heights` fills in the validator.
+    const crashes = try crashes_and_start_heights(.{ .processed_height = .{
+        .participants = &.{},
+        .heights = .{ .min = 2, .max = 2 },
+        .downtime = .zero,
+    } }, 4, &heights);
+    try testing.expectEqual(1, crashes);
+    // The validator restarts at the height it stopped at.
+    try testing.expectEqualSlices(u64, &.{ 0, 2 }, heights.items);
+}
+
+test "plan: random crash restarts without downtime" {
+    var heights: std.ArrayList(u64) = .empty;
+    defer heights.deinit(gpa);
+    // A crash is due every 25ms. With immediate restarts the validator processes five heights
+    // in about 60ms, so it stops exactly twice. commonware exits at six heights (70ms); here each
+    // restart's task hand-offs cost simulated milliseconds, which would put the sixth height
+    // just after the third crash at 75ms.
+    const crashes = try crashes_and_start_heights(.{ .random = .{
+        .frequency = .from_millis(25),
+        .downtime = .zero,
+        .count = 1,
+    } }, 5, &heights);
+    try testing.expectEqual(2, crashes);
+    try testing.expectEqualSlices(u64, &.{ 0, 2, 4 }, heights.items);
+}
