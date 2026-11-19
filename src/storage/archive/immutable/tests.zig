@@ -7,6 +7,7 @@
 
 const std = @import("std");
 const testing = std.testing;
+const build_options = @import("build_options");
 const runtime = @import("runtime");
 const utils = @import("utils");
 const metrics = runtime.telemetry.metrics;
@@ -286,6 +287,13 @@ test "immutable many keys and determinism" {
     try testing.expectEqual(first, try check_many_keys(null, 1000));
     const compressed = try check_many_keys(3, 1000);
     try testing.expectEqual(compressed, try check_many_keys(3, 1000));
+}
+
+test "immutable many keys large" {
+    // Commonware's slow `test_many_keys_immutable_large`: 50,000 keys span many sections.
+    if (!build_options.slow_tests) return error.SkipZigTest;
+    const first = try check_many_keys(null, 50_000);
+    try testing.expectEqual(first, try check_many_keys(null, 50_000));
 }
 
 // Immutable archive tests (commonware `archive/immutable/mod.rs`).

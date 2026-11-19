@@ -182,7 +182,8 @@ qmdb `current` (balances, over the MMB) and `keyless` (payout log, over the MMR)
   written into the owning lane files (storage-archive, storage-merkle, coding), then port the
   open ones in batches with a planted bug each.
   - [x] Tally: 495 tests, 375 ported, 17 partial, 30 open, 73 not portable.
-  - [ ] Freezer's 9 open tests.
+  - [x] Freezer's 9 open tests; archive's slow tests at commonware's sizes; a sync count in
+    `runtime.storage.mocks.Recordings`.
   - [ ] Archive's open tests (prunable markers and destroy; the sync-count tests need a sync
     count in `runtime.storage.mocks.Recordings`).
   - [ ] Partials and index's open tests that do not need `new_range`.
@@ -230,3 +231,4 @@ qmdb `current` (balances, over the MMB) and `keyless` (payout log, over the MMR)
 - 2026-11-19: trimmed the storage benches' per-push smoke runs to about 3 s; the full list
   runs under `-Dslow-tests`.
 - 2026-11-19: storage test audit: tallies in storage-archive.md, storage-merkle.md, coding.md.
+- 2026-11-19: freezer's 9 open tests, archive slow sizes, and the mock sync count.

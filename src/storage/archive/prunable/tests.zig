@@ -7,6 +7,7 @@
 
 const std = @import("std");
 const testing = std.testing;
+const build_options = @import("build_options");
 const runtime = @import("runtime");
 const metrics = runtime.telemetry.metrics;
 const translator = @import("../../translator.zig");
@@ -302,6 +303,13 @@ test "prunable many keys and determinism" {
     try testing.expectEqual(first, try check_many_keys(null, 1000));
     const compressed = try check_many_keys(3, 1000);
     try testing.expectEqual(compressed, try check_many_keys(3, 1000));
+}
+
+test "prunable many keys large" {
+    // Commonware's slow `test_many_keys_prunable_large`: 50,000 keys span many sections.
+    if (!build_options.slow_tests) return error.SkipZigTest;
+    const first = try check_many_keys(null, 50_000);
+    try testing.expectEqual(first, try check_many_keys(null, 50_000));
 }
 
 test "prunable put_multi and get" {
@@ -724,6 +732,15 @@ fn prune_half(
 test "prunable keys and restart determinism" {
     const first = try check_keys_and_restart(1000);
     try testing.expectEqual(first, try check_keys_and_restart(1000));
+}
+
+test "prunable keys and restart at commonware's sizes" {
+    // Commonware's slow `test_archive_many_keys_and_restart` (100,000 keys) and
+    // `test_archive_keys_and_restart_determinism` (5,000 keys, twice).
+    if (!build_options.slow_tests) return error.SkipZigTest;
+    _ = try check_keys_and_restart(100_000);
+    const first = try check_keys_and_restart(5_000);
+    try testing.expectEqual(first, try check_keys_and_restart(5_000));
 }
 
 test "prunable key lookup skips pruned duplicates" {
