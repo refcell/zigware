@@ -899,7 +899,15 @@ pub const Replay = struct {
         assert(page_size > 0);
         assert(batch_pages > 0);
         const slot_count: u8 = if (blob.reads_ahead()) read_ahead_max + 1 else 1;
-        const read_pages = std.math.divCeil(usize, batch_pages, slot_count) catch unreachable;
+        // A read never spans more than the stored pages (`pages_at`), so capping the batch
+        // there leaves every read unchanged and sizes the buffers to the blob, not the
+        // requested buffer: commonware allocates per read, sized to what it reads.
+        const stored_pages: usize = @intCast(@max(1, full_pages));
+        const read_pages = @min(
+            std.math.divCeil(usize, batch_pages, slot_count) catch unreachable,
+            stored_pages,
+        );
+        assert(read_pages > 0);
         const partial_copy = try gpa.dupe(u8, partial);
         errdefer gpa.free(partial_copy);
         const batch = try gpa.alloc(u8, slot_count * read_pages * (page_size + checksum_size));

@@ -401,6 +401,8 @@ fn bench_harness(
     benches.addImport(package.name, modules[index]);
     benches.addImport("bench", bench);
     benches.addImport("build_options", options_module);
+    // commonware's bench harnesses install its allocator crate's mimalloc (a dev-dependency).
+    benches.addImport("allocator", modules[package_index("allocator")]);
     for (package.deps) |dep| benches.addImport(dep, modules[package_index(dep)]);
     const root = b.createModule(.{
         .root_source_file = b.path("src/bench/main.zig"),
