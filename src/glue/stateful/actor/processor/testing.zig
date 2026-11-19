@@ -320,11 +320,37 @@ pub fn read_applied(readers: Any.Shared.Readers, key: Sha256.Digest) !?Sha256.Di
     return guard.get().inner.get(&key);
 }
 
-pub const Processor = processor_mod.Processor(struct {
+/// A proposal waiting for its parent's state (the core actor's `Recover` contract).
+pub const TestRecover = struct {
+    ancestry: Execution.Ancestry,
+    /// Receives false when the proposal declines.
+    response: oneshot.Sender(bool),
+
+    pub fn is_cancelled(self: *const TestRecover) bool {
+        return self.response.is_closed();
+    }
+
+    pub fn decline(self: *TestRecover) void {
+        self.ancestry.deinit();
+        self.response.send(false) catch {}; // A caller that left needs no answer.
+        self.* = undefined;
+    }
+
+    pub fn deinit(self: *TestRecover) void {
+        self.ancestry.deinit();
+        self.response.deinit();
+        self.* = undefined;
+    }
+};
+
+pub const TestP = struct {
     pub const App = TestApp;
     pub const Databases = Any.Shared;
     pub const Provider = TestProvider;
-});
+    pub const Recover = TestRecover;
+};
+
+pub const Processor = processor_mod.Processor(TestP);
 pub const Execution = Processor.Execution;
 
 /// Storage, a page cache, metrics, the database, its execution, and a block provider.

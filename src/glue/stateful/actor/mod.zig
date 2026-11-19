@@ -30,6 +30,8 @@ pub const Verifier = verifier.Verifier;
 
 pub const durability = @import("core/durability.zig");
 pub const Durability = durability.Durability;
+pub const verifications = @import("core/verifications.zig");
+pub const Verifications = verifications.Verifications;
 
 test {
     std.testing.refAllDecls(@This());
@@ -40,4 +42,5 @@ test {
     _ = @import("processor/processor_test.zig");
     _ = @import("processor/verifier_test.zig");
     _ = @import("core/durability_test.zig");
+    _ = @import("core/verifications_test.zig");
 }

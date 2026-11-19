@@ -197,6 +197,10 @@ marshal's actors (consensus-marshal) for the actor; until then it ports what is 
   `record_duplicate`, `applied`, `covers`, `needs_barrier`, `set_barrier(db.Barrier)`,
   `complete()` (acknowledges what the barrier made durable; false on a failed barrier),
   `deinit` (cancels the rest). `db.Barrier.record` is public for set implementations.
+- `glue.stateful.actor.Verifications(P)` (core; `P` adds `Recover`, a proposal awaiting its
+  parent's state): `init(gpa, io, verifier, provider)`, `schedule(Request)` (`verify{ancestry,
+  verification: oneshot.Sender(bool)}` or `recover`), `complete_ready`, `complete_next`,
+  `pause(?Boundary)`, `resume`, `builds` (recovered proposals), `len`, `deinit`.
 - `glue.stateful.db.p2p.Mailbox(DB, F, Op, D)`: the `qmdb.sync` Source over the resolver
   actor's mailbox. `init(io, actor.mailbox.Sender(Message))`, `clone`, `deinit`,
   `attach_database(db.Shared(DB))`, `serve(gpa, request)` → `Served` (first candidate and its
@@ -221,6 +225,12 @@ marshal's actors (consensus-marshal) for the actor; until then it ports what is 
   one; commonware's synchronous drop prevents that overlap, and here the pending cache makes
   the duplicate processing idempotent. The application is a handle copied per call (Rust
   `Clone`), and every ancestry is marshal's `AncestorStream` (commonware boxes any ancestry).
+- A verification answers `false` only for `error.Invalid`/`error.Incomplete`; every other
+  outcome (`error.Waiting`, cancellation, allocation or spawn failure) drops the oneshot unsent,
+  which consensus reads as no verdict and leaves to its timeout, as marshal's wrappers do
+  (70c082e). A waiting block is never voted against; a test pins this.
+- The verifications handler runs each phase as an `io.concurrent` task that posts its work to
+  a completion list the actor drains (commonware polls the phases in a `FuturesUnordered`).
 - Where commonware's verification future stays pending forever (missing ancestry or a
   canonical block marshal lacks), `Verifier.prepare` returns `error.Waiting`; the core actor
   leaves such a request unanswered until its caller cancels.
@@ -278,7 +288,8 @@ marshal's actors (consensus-marshal) for the actor; until then it ports what is 
 - [ ] db/p2p: the resolver actor (serving peers, response checks) on `qmdb.sync.sync`.
 - [x] actor: the processor's `Verifier` (prepare, step order, shared processing).
 - [x] actor/core: `Durability` (barriers and the acknowledgements awaiting them).
-- [ ] actor/core: mailbox, propose, verifications, processing loop, syncing; app tests (after marshal); tests (single and
+- [x] actor/core: the `Verifications` handler (phases, admission, pause/resume, answers).
+- [ ] actor/core: mailbox, propose, processing loop, syncing; app tests (after marshal); tests (single and
   multi db apps, floor, properties).
 
 ## Log
@@ -311,6 +322,7 @@ marshal's actors (consensus-marshal) for the actor; until then it ports what is 
 - 2026-11-19 (stateful): the processor's `Verifier`.
 - 2026-11-19 (stateful, broadcast-resolver lane): the `keyless` ManagedDb adapter.
 - 2026-11-19 (stateful): the core actor's `Durability`.
+- 2026-11-19 (stateful): the core actor's `Verifications` handler; waiting verifies abstain.
 
 ## dkg (owner: coding lane, thread T-01a1d58d-bff1-75a1-8ccb-4b8dd7bc9755)
 
