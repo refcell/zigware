@@ -18,6 +18,7 @@ test {
     _ = @import("conformance_test.zig");
     _ = @import("db_test.zig");
     _ = @import("fuzz_test.zig");
+    _ = @import("prune_test.zig");
     _ = @import("recovery_test.zig");
     _ = @import("variable_test.zig");
 }

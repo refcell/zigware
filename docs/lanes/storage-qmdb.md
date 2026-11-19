@@ -130,10 +130,10 @@ which every database here is built on.
   - [x] batch C2: `run_merkleize_across_prune`, and the partial `run_batch_chain`,
     `run_batch_chained_merkleized_get`, `run_dropped_ancestor_reads`,
     `run_operations_match_applied_log` (child proof unchanged).
-  - [ ] batch D, prune and build: `run_pruning` (5 items per blob), `run_prune_retires_pruned_sets`,
-    `run_single_commit_live_set`, `run_build_and_authenticate`, and the partial
-    `run_build_basic`, `run_batch_many_sequential`, `run_batch_empty_batch`,
-    `run_reads_ignore_inactive_operations` (colliding twin, reopen).
+  - [x] batch D1, prune and build (`prune_test.zig`): `run_pruning` (5 items per section),
+    `run_prune_retires_pruned_sets`, `run_single_commit_live_set`, `run_build_and_authenticate`.
+  - [ ] batch D2: the partial `run_build_basic`, `run_batch_many_sequential`,
+    `run_batch_empty_batch`, `run_reads_ignore_inactive_operations` (colliding twin, reopen).
   - [ ] batch E, fixed.rs: `start_sync` recovery and failure (synchronous forms), metrics,
     `bounded_init_then_set_crash_recovers_history`. Not portable while `start_sync` completes
     synchronously: `start_sync_overlaps_work`, `apply_indexes_while_journal_waits`,
@@ -379,3 +379,4 @@ which every database here is built on.
 - 2026-11-19: immutable batch B (stale reads and merkleizes); empty `get_many` stale check.
 - 2026-11-19: immutable batch C1 (partial-ancestor apply, delayed merkleize, to_batch).
 - 2026-11-19: immutable batch C2 (merkleize across prune, chain reads, child proof unchanged).
+- 2026-11-19: immutable batch D1 (pruning boundaries, pruned-set retirement, live commit).
