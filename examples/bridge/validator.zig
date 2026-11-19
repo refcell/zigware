@@ -313,17 +313,28 @@ const Indexer = struct {
     /// The largest `Inbound`: a tag, a network, and a block carrying a finalization.
     const inbound_size_max = types.outbound_size_max + codec.fixed_size(types.Public).?;
 
+    /// Sends `inbound` and returns the indexer's response. The exchange is uncancelable, as
+    /// commonware's application actor finishes every request: a cancel between the send and
+    /// the receive would leave the response unread (or a frame half written), and every later
+    /// request on the connection would read the wrong response or find it closed.
     pub fn request(self: *Indexer, io: Io, inbound: types.Inbound) Io.Cancelable!types.Outbound {
-        _ = io;
+        const protection = io.swapCancelProtection(.blocked);
+        const outbound = self.exchange(inbound);
+        _ = io.swapCancelProtection(protection);
+        try io.checkCancel();
+        return outbound;
+    }
+
+    fn exchange(self: *Indexer, inbound: types.Inbound) types.Outbound {
         var buffer: [inbound_size_max]u8 = undefined;
         const encoded = codec.encode_to(types.Inbound, inbound, &buffer);
         assert(encoded.len <= inbound_size_max);
         self.connection.sender.send(encoded) catch |err| switch (err) {
-            error.Canceled => return error.Canceled,
+            error.Canceled => unreachable, // Cancel protection is blocked.
             else => std.debug.panic("failed to send to indexer: {t}", .{err}),
         };
         const message = self.connection.receiver.recv() catch |err| switch (err) {
-            error.Canceled => return error.Canceled,
+            error.Canceled => unreachable, // Cancel protection is blocked.
             else => std.debug.panic("failed to receive from indexer: {t}", .{err}),
         };
         return codec.decode(types.Outbound, self.gpa, message) catch |err|
