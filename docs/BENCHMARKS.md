@@ -230,6 +230,43 @@ about 0.25 µs on zigware, which calls the kernel inline. The ratio measures the
 blob dispatch, not the freezer, so quote it as that. The write counts differ by about 30%
 (unverified: the samples also cover the untimed setup).
 
+## p2p: stream's cipher and handshake (2026-11-19, p2p lane)
+
+commonware's p2p and stream crates have no Criterion benches of their own. Their hot paths
+are benched in cryptography: `chacha20_poly1305::seal_open` is stream's per-frame cipher,
+and `sake::sake` is one full handshake (two ed25519 keys, two ephemeral X25519 keys, the
+exchanges, and the signatures). `bench-compare.sh` now runs these four rows too
+(`BENCH_FILTER=` narrows a run to the names containing it). Same method as the table above:
+best of three alternating runs, commonware `a9ffc25f3`. "Before" is main at `f1b64446`,
+"after" adds `0d25f30c` (the cipher) and `d4996e72` (fixed-base multiplication). The 1-minute
+load average was 60 to 83, and commonware's own medians moved by up to 25% between runs, so
+each row shows that run's commonware figure.
+
+| bench | parameters | commonware | zigware before | commonware | zigware after | after / commonware |
+|---|---|---|---|---|---|---|
+| `chacha20_poly1305::seal_open` | `n=4096` | 3.6 µs | 9.67 µs (2.69×) | 3.64 µs | 3.63 µs | 1.00× |
+| `chacha20_poly1305::seal_open` | `n=65536` | 55.6 µs | 152 µs (2.74×) | 76 µs | 50.4 µs | 0.66× |
+| `chacha20_poly1305::seal_open` | `n=1048576` | 791 µs | 2.57 ms (3.25×) | 935 µs | 824 µs | 0.88× |
+| `sake::sake` | | 316 µs | 421 µs (1.33×) | 392 µs | 217 µs | 0.55× |
+
+There is no sampling profiler on this machine (see Caveats), so the components were timed
+by thread CPU time in scratch harnesses, best of ten:
+- **seal_open.** std's ChaCha20 picks a 4-way `ChaChaVecImpl` on AVX-512, and on this Zen 5
+  LLVM lowers it to about 6 ms/MiB, against 2 ms/MiB for std's own AVX2 path. commonware
+  runs aws-lc's assembly. zigware's keystream now runs one u32 vector lane per block (16
+  blocks per step on AVX-512), so the rounds have no shuffles, and a butterfly of
+  `@shuffle`s transposes the lanes back into blocks: 0.14 ms/MiB. Poly1305 (std's, about
+  0.23 ms/MiB) is now the larger half. A first try that cast `[64]u8` to a vector with
+  `@bitCast` compiled to thousands of scalar moves, at 4.8 ms/MiB; an unaligned vector
+  pointer fixed it.
+- **sake.** Fixed-base multiplications made up nearly all of the gap. std's
+  `basePoint.mul` takes about 43 µs (ed25519 keygen and each signature's `R`), and
+  `X25519.recoverPublicKey` is a full ladder at about 34 µs. dalek reads an
+  `EdwardsBasepointTable` for both. `ed25519/base_mul.zig` ports that: 64 signed radix-16
+  digits over 32 comptime tables, read in constant time. It takes 12.7 µs, and the X25519
+  public key 14 µs. The two Diffie-Hellman ladders (about 44 µs each, std's) and the two
+  verifications are unchanged.
+
 ## Appendix: bench coverage
 
 Every Criterion bench in commonware a9ffc25f3 (`benches/` dirs with `criterion_main!`), listed

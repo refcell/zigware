@@ -763,6 +763,11 @@ After:
   which the drivers keep under `$TMPDIR`.
 
 ## Log
+- 2026-11-19: head-to-head of p2p's hot paths (stream's cipher and handshake; p2p and stream
+  have no benches of their own) in docs/BENCHMARKS.md. seal_open went from 2.7 to 3.3 times
+  commonware to 0.66 to 1.00 (a lane-per-block ChaCha20 keystream), and sake from 1.33 to 0.55
+  (fixed-base tables for ed25519 and X25519 public keys, `ed25519/base_mul.zig`). The crypto
+  lane was told before the edits.
 - 2026-11-16: (parallel lane) lookup: graceful and clean shutdown, rate limiting, restarts,
   duplicate addresses, multi-index, and custom handshake tests; directory metrics with
   commonware's metric tests.

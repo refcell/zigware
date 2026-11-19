@@ -8,6 +8,7 @@
 # BENCH_DIR is where both sides' storage benches keep their files (default ${TMPDIR:-/tmp}):
 # commonware's tokio runner uses `env::temp_dir()` and zigware's benches `./.zig-cache/tmp`,
 # so commonware runs with TMPDIR and zigware with its working directory under it.
+# BENCH_FILTER keeps only the benches whose name contains it.
 # Each run alternates the two sides so both see the same machine load. The table goes to
 # stdout; the raw medians to .cache/bench-compare/raw.tsv.
 set -euo pipefail
@@ -38,6 +39,11 @@ benches=(
   "qmdb|storage|qmdb::apply_batch/case=direct variant=any::unordered::fixed::mmb chunk=32 \
 updates=16384"
   "buffer_paged|runtime|buffer_paged::append/backend=tokio chunk=4096"
+  # p2p's hot paths (stream's cipher and handshake); p2p and stream have no benches of their own.
+  "chacha20_poly1305|cryptography|chacha20_poly1305::seal_open/n=4096"
+  "chacha20_poly1305|cryptography|chacha20_poly1305::seal_open/n=65536"
+  "chacha20_poly1305|cryptography|chacha20_poly1305::seal_open/n=1048576"
+  "sake|cryptography|sake::sake"
 )
 
 echo "building commonware benches (cargo bench --no-run, release)" >&2
@@ -45,7 +51,8 @@ echo "building commonware benches (cargo bench --no-run, release)" >&2
   -p commonware-codec -p commonware-cryptography -p commonware-storage -p commonware-runtime \
   --features commonware-storage/test-traits \
   --bench codec --bench sha256 --bench ed25519 --bench bls12381 \
-  --bench journal --bench qmdb --bench buffer_paged 2> "$out/cargo.log") |
+  --bench journal --bench qmdb --bench buffer_paged --bench chacha20_poly1305 --bench sake \
+  2> "$out/cargo.log") |
   python3 -I -c '
 import json, sys
 for line in sys.stdin:
@@ -91,6 +98,7 @@ if found is not None:
 for run in $(seq 1 "$runs"); do
   for entry in "${benches[@]}"; do
     IFS='|' read -r target package name <<< "$entry"
+    [[ "$name" == *"${BENCH_FILTER:-}"* ]] || continue
     load=$(cut -d' ' -f1 /proc/loadavg 2> /dev/null || uptime | sed 's/.*average[s]*: //')
     # A failed run records nan (its stderr is in bench.log) instead of ending the comparison.
     log="$out/bench.log"
