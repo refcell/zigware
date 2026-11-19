@@ -8,7 +8,8 @@
 //!   additions). std adds about 128 times, every time with complete formulas.
 //! - The result is never made affine: `x(R) = r mod n` is checked as `X = r Z^2` (and
 //!   `(r + n) Z^2` when `r + n < p`), which saves a field inversion.
-//! - `s^-1 mod n` is a fixed-window Fermat power instead of std's constant-time divsteps.
+//! - `s^-1 mod n` is a binary extended GCD instead of std's constant-time divsteps.
+//! - On x86_64, field multiplication is aws-lc's `mulx`/`adcx`/`adox` form (field.zig).
 //!
 //! Every input is public, so branching on it leaks nothing. The answer is the same as std's.
 
@@ -17,6 +18,7 @@ const assert = std.debug.assert;
 const P256 = std.crypto.ecc.P256;
 const Fe = P256.Fe;
 const Scalar = P256.scalar.Scalar;
+const field = @import("field.zig");
 
 /// A point `(x, y)` on the curve, never the identity.
 pub const Affine = struct { x: Fe, y: Fe };
@@ -39,16 +41,16 @@ const Jacobian = struct {
 
     /// `2 p` (dbl-2001-b, for a = -3). The identity doubles to the identity.
     fn double(p: Jacobian) Jacobian {
-        const delta = p.z.sq();
-        const gamma = p.y.sq();
-        const beta = p.x.mul(gamma);
-        const alpha = p.x.sub(delta).mul(p.x.add(delta));
+        const delta = field.sq(p.z);
+        const gamma = field.sq(p.y);
+        const beta = field.mul(p.x, gamma);
+        const alpha = field.mul(p.x.sub(delta), p.x.add(delta));
         const alpha3 = alpha.dbl().add(alpha);
         const beta4 = beta.dbl().dbl();
-        const x = alpha3.sq().sub(beta4.dbl());
-        const z = p.y.add(p.z).sq().sub(gamma).sub(delta);
-        const gamma_sq8 = gamma.sq().dbl().dbl().dbl();
-        const y = alpha3.mul(beta4.sub(x)).sub(gamma_sq8);
+        const x = field.sq(alpha3).sub(beta4.dbl());
+        const z = field.sq(p.y.add(p.z)).sub(gamma).sub(delta);
+        const gamma_sq8 = field.sq(gamma).dbl().dbl().dbl();
+        const y = field.mul(alpha3, beta4.sub(x)).sub(gamma_sq8);
         return .{ .x = x, .y = y, .z = z };
     }
 
@@ -56,19 +58,19 @@ const Jacobian = struct {
     fn add_affine(p: Jacobian, q: *const Affine, negate: bool) Jacobian {
         const qy = if (negate) q.y.neg() else q.y;
         if (p.is_identity()) return .{ .x = q.x, .y = qy, .z = Fe.one };
-        const z1z1 = p.z.sq();
-        const x2z = q.x.mul(z1z1);
-        const s2 = qy.mul(p.z).mul(z1z1);
+        const z1z1 = field.sq(p.z);
+        const x2z = field.mul(q.x, z1z1);
+        const s2 = field.mul(field.mul(qy, p.z), z1z1);
         const h = x2z.sub(p.x);
         const r = s2.sub(p.y).dbl();
         if (h.isZero()) return if (r.isZero()) p.double() else identity;
-        const hh = h.sq();
+        const hh = field.sq(h);
         const i = hh.dbl().dbl();
-        const j = h.mul(i);
-        const v = p.x.mul(i);
-        const x = r.sq().sub(j).sub(v.dbl());
-        const y = r.mul(v.sub(x)).sub(p.y.mul(j).dbl());
-        const z = p.z.add(h).sq().sub(z1z1).sub(hh);
+        const j = field.mul(h, i);
+        const v = field.mul(p.x, i);
+        const x = field.sq(r).sub(j).sub(v.dbl());
+        const y = field.mul(r, v.sub(x)).sub(field.mul(p.y, j).dbl());
+        const z = field.sq(p.z.add(h)).sub(z1z1).sub(hh);
         return .{ .x = x, .y = y, .z = z };
     }
 
@@ -77,21 +79,21 @@ const Jacobian = struct {
         if (q.is_identity()) return p;
         const qy = if (negate) q.y.neg() else q.y;
         if (p.is_identity()) return .{ .x = q.x, .y = qy, .z = q.z };
-        const z1z1 = p.z.sq();
-        const z2z2 = q.z.sq();
-        const x1z = p.x.mul(z2z2);
-        const x2z = q.x.mul(z1z1);
-        const s1 = p.y.mul(q.z).mul(z2z2);
-        const s2 = qy.mul(p.z).mul(z1z1);
+        const z1z1 = field.sq(p.z);
+        const z2z2 = field.sq(q.z);
+        const x1z = field.mul(p.x, z2z2);
+        const x2z = field.mul(q.x, z1z1);
+        const s1 = field.mul(field.mul(p.y, q.z), z2z2);
+        const s2 = field.mul(field.mul(qy, p.z), z1z1);
         const h = x2z.sub(x1z);
         const r = s2.sub(s1).dbl();
         if (h.isZero()) return if (r.isZero()) p.double() else identity;
-        const i = h.dbl().sq();
-        const j = h.mul(i);
-        const v = x1z.mul(i);
-        const x = r.sq().sub(j).sub(v.dbl());
-        const y = r.mul(v.sub(x)).sub(s1.mul(j).dbl());
-        const z = p.z.add(q.z).sq().sub(z1z1).sub(z2z2).mul(h);
+        const i = field.sq(h.dbl());
+        const j = field.mul(h, i);
+        const v = field.mul(x1z, i);
+        const x = field.sq(r).sub(j).sub(v.dbl());
+        const y = field.mul(r, v.sub(x)).sub(field.mul(s1, j).dbl());
+        const z = field.mul(field.sq(p.z.add(q.z)).sub(z1z1).sub(z2z2), h);
         return .{ .x = x, .y = y, .z = z };
     }
 };
@@ -166,23 +168,44 @@ fn double_base(scalar_g: [32]u8, scalar_q: [32]u8, q: Affine) Jacobian {
     return sum;
 }
 
-/// `s^-1 mod n` for a nonzero `s`, as `s^(n - 2)` with a fixed 4-bit window.
+/// `s^-1 mod n` for a nonzero `s`, by the binary extended Euclidean algorithm, which keeps
+/// `x1 s = u` and `x2 s = v (mod n)` while `gcd(u, v) = 1` shrinks to `u = 1` or `v = 1`.
 pub fn invert_scalar(s: Scalar) Scalar {
     assert(!s.isZero());
-    const exponent: u256 = P256.scalar.field_order - 2;
-    var powers: [16]Scalar = undefined;
-    powers[0] = Scalar.one;
-    powers[1] = s;
-    for (2..16) |k| powers[k] = powers[k - 1].mul(s);
-    var result = Scalar.one;
-    var shift: u9 = 256;
-    while (shift > 0) {
-        shift -= 4;
-        for (0..4) |_| result = result.sq();
-        const window: u4 = @truncate(exponent >> @intCast(shift));
-        if (window != 0) result = result.mul(powers[window]);
+    const n = P256.scalar.field_order;
+    var u: u256 = std.mem.readInt(u256, &s.toBytes(.big), .big);
+    var v: u256 = n;
+    var x1: u256 = 1;
+    var x2: u256 = 0;
+    // Each pass halves u or v at least once; both start below 2^256.
+    var passes: u32 = 0;
+    while (u != 1 and v != 1) : (passes += 1) {
+        assert(passes < 2 * 256 and u != 0 and v != 0);
+        const u_shift: u8 = @intCast(@ctz(u));
+        for (0..u_shift) |_| x1 = half_mod_n(x1);
+        u >>= u_shift;
+        const v_shift: u8 = @intCast(@ctz(v));
+        for (0..v_shift) |_| x2 = half_mod_n(x2);
+        v >>= v_shift;
+        if (u >= v) {
+            u -= v;
+            x1 = if (x1 >= x2) x1 - x2 else x1 + (n - x2);
+        } else {
+            v -= u;
+            x2 = if (x2 >= x1) x2 - x1 else x2 + (n - x1);
+        }
     }
-    return result;
+    var bytes: [32]u8 = undefined;
+    std.mem.writeInt(u256, &bytes, if (u == 1) x1 else x2, .big);
+    // Proof: x1 and x2 stay below n.
+    return Scalar.fromBytes(bytes, .big) catch unreachable;
+}
+
+/// `x / 2 mod n` for `x < n`.
+fn half_mod_n(x: u256) u256 {
+    assert(x < P256.scalar.field_order);
+    if (x & 1 == 0) return x >> 1;
+    return @intCast((@as(u257, x) + P256.scalar.field_order) >> 1);
 }
 
 /// The field element of a value below 2^256 that is known to be below p.
@@ -200,13 +223,13 @@ pub fn verify(q: Affine, z: Scalar, r: Scalar, s: Scalar) bool {
     const w = invert_scalar(s);
     const point = double_base(z.mul(w).toBytes(.big), r.mul(w).toBytes(.big), q);
     if (point.is_identity()) return false;
-    const zz = point.z.sq();
+    const zz = field.sq(point.z);
     const r_int = std.mem.readInt(u256, &r.toBytes(.big), .big);
-    if (field_from(r_int).mul(zz).equivalent(point.x)) return true;
+    if (field.mul(field_from(r_int), zz).equivalent(point.x)) return true;
     // x(R) in [n, p) reduces to r = x - n.
     const p_minus_n = Fe.field_order - P256.scalar.field_order;
     if (r_int >= p_minus_n) return false;
-    return field_from(r_int + P256.scalar.field_order).mul(zz).equivalent(point.x);
+    return field.mul(field_from(r_int + P256.scalar.field_order), zz).equivalent(point.x);
 }
 
 const testing = std.testing;

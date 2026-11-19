@@ -20,4 +20,5 @@ test {
     _ = @import("secp256r1/fuzz_test.zig");
     _ = @import("secp256r1/certificate.zig");
     _ = @import("secp256r1/verify.zig");
+    _ = @import("secp256r1/field.zig");
 }

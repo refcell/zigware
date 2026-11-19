@@ -175,7 +175,9 @@ fn substitute(
     const r = try Scalar.fromBytes(signature.raw[0..32].*, .big);
     const t = e.mul(r.invert()).dbl();
     const t_g = try P256.basePoint.mul(t.toBytes(.big), .big);
-    const derived = key.inner.point.add(t_g).neg();
+    const affine = key.inner.point;
+    const point = try P256.fromAffineCoordinates(.{ .x = affine.x, .y = affine.y });
+    const derived = point.add(t_g).neg();
     return secp256r1.standard.PublicKey.from_bytes(derived.toCompressedSec1()).?;
 }
 
