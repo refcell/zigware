@@ -412,6 +412,8 @@ const SyncerReceiver = actor.mailbox.Receiver(SyncerMessage);
 
 const TestHarness = struct {
     source: harness_mod.Harness,
+    /// The source's storage when opened by `init_over` with parked syncs.
+    delayed: DelayedSynced = undefined,
     node: Node,
     blocks: [4]TestBlock,
     provider_state: harness_mod.ProviderState = .{},
@@ -429,14 +431,30 @@ const TestHarness = struct {
 
     /// Must not move afterwards.
     fn init(h: *TestHarness, window: u64) !void {
+        return h.init_over(window, null);
+    }
+
+    /// `init`, with the source databases opened over `DelayedSynced` storage parking its syncs
+    /// in `pending` once `init_over` returns (opening and the anchor's barrier are released).
+    fn init_over(h: *TestHarness, window: u64, pending: ?*DelayedSync) !void {
         var chain: harness_mod.Harness = undefined;
         try chain.init();
         defer chain.deinit();
         try build_chain(&chain, &h.blocks);
-        try h.source.init();
+        if (pending) |parked| {
+            h.source.init_storage();
+            h.delayed = .init(gpa, h.source.storage.interface(), parked);
+            var releaser = try io.concurrent(release_loop, .{parked});
+            defer releaser.cancel(io) catch {};
+            try h.source.init_with(h.delayed.storage());
+            for (h.blocks) |block| try h.source.provider_state.insert(block);
+            try h.source.finalize(&h.blocks[0]);
+        } else {
+            try h.source.init();
+            for (h.blocks) |block| try h.source.provider_state.insert(block);
+            try h.source.finalize(&h.blocks[0]);
+        }
         try h.node.init();
-        for (h.blocks) |block| try h.source.provider_state.insert(block);
-        try h.source.finalize(&h.blocks[0]);
         h.provider_state = .{};
         for (h.blocks) |block| try h.provider_state.insert(block);
         h.prunes = .empty;
@@ -514,6 +532,17 @@ const TestHarness = struct {
         return handle.waiter;
     }
 };
+
+const DelayedSync = runtime.storage.mocks.DelayedSync;
+const DelayedSynced = runtime.storage.mocks.DelayedSynced;
+
+fn release_loop(pending: *DelayedSync) Io.Cancelable!void {
+    // Each pass sleeps 1 ms; only cancellation ends the loop.
+    while (true) {
+        if (pending.parked() > 0) pending.release_all();
+        try io.sleep(.fromMilliseconds(1), .awake);
+    }
+}
 
 /// Releases a hand-off the test does not run as the stateful actor.
 fn release_ready(ready: *Syncing.Ready) void {
@@ -859,4 +888,58 @@ test "stateful syncing: a live floor redelivery holds every receipt when its flu
         if (try live_floor_redelivery(budget)) return;
     }
     return error.TestFlushNeverAborted;
+}
+
+fn transition_task(h: *TestHarness) anyerror!Syncing.Ready {
+    return h.syncing.transition(try h.artifact(0));
+}
+
+// commonware `transition_coalesces_handoff_durability_before_completion`: a reflected handoff
+// is acknowledged at once, while both applied handoffs wait for one database flush covering
+// them, and completion is recorded only after it is durable. Adapted: the flush is the
+// source database's real syncs parked in `DelayedSync` (commonware gates a mock database's
+// flush), so one barrier shows as both blocks applied while the first sync is held.
+test "stateful syncing: a transition coalesces handoff durability before completion" {
+    var pending: DelayedSync = .init(gpa, io);
+    defer pending.deinit();
+    var h: TestHarness = undefined;
+    try h.init_over(1, &pending);
+    defer h.deinit();
+    defer pending.unblock();
+    var captures: harness_mod.Probe = .{ .target = null };
+    defer captures.deinit();
+    h.syncing.config.app.capture_probe = &captures;
+    var reflected = try h.retain(0, .reflected);
+    defer reflected.deinit();
+    var first = try h.retain(1, .apply);
+    defer first.deinit();
+    var second = try h.retain(2, .apply);
+    defer second.deinit();
+    var task = try io.concurrent(transition_task, .{&h});
+    var running = true;
+    defer if (running) if (task.cancel(io)) |ready| {
+        var owned = ready;
+        release_ready(&owned);
+    } else |_| {};
+    // Each pass sleeps 1 ms; the handoff's flush parks once both blocks applied.
+    for (0..2_000) |_| {
+        if (pending.parked() > 0) break;
+        try io.sleep(.fromMilliseconds(1), .awake);
+    } else return error.TestFlushNeverParked;
+    try io.sleep(.fromMilliseconds(20), .awake);
+    // Both blocks applied before the one held flush, and only the reflected block is
+    // acknowledged.
+    try testing.expectEqual(@as(u32, 2), captures.calls);
+    try testing.expect(reflected.poll() != null);
+    try testing.expect(first.poll() == null and second.poll() == null);
+    try testing.expectEqual(@as(?Height, null), h.plan.completed);
+
+    var releaser = try io.concurrent(release_loop, .{&pending});
+    defer releaser.cancel(io) catch {};
+    try first.wait();
+    try second.wait();
+    running = false;
+    var ready = try task.await(io);
+    defer release_ready(&ready);
+    try testing.expectEqual(@as(u64, 3), h.plan.completed.?.get());
 }

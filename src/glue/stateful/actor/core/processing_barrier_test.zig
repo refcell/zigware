@@ -7,6 +7,8 @@
 //! `FlushControl` (commonware's mock database `control.flushes`): on a real QMDB over parked
 //! storage, the next block's apply waits for the parked sync (every blob mutation first waits
 //! for its owner's pending sync).
+//!
+//! `flush_failure_panics_processing` is an error check: zigware's loop returns the sync error.
 
 const std = @import("std");
 const testing = std.testing;
@@ -238,4 +240,25 @@ test "stateful processing: shutdown preempts a successor barrier and a held veri
     // Closing the mailbox stops the loop without waiting for the reader or the barrier.
     try fixture.deinit();
     try expect_canceled(&waiter2);
+}
+
+// commonware `flush_failure_panics_processing` (an error here): a failed flush ends the
+// processing loop with `error.DatabaseSyncFailed` (commonware panics naming the database), and
+// the block stays unacknowledged until the stopped loop is released.
+test "stateful processing: a failed flush stops processing with the sync error" {
+    var parked: Parked = undefined;
+    try parked.start();
+    defer parked.stop();
+    const fixture = &parked.fixture;
+    const block1, var batch = try fixture.harness.build_child(&TestBlock.genesis(), 1);
+    batch.deinit();
+    var waiter = try fixture.finalize(block1);
+    defer waiter.deinit();
+    try parked.next_flush();
+    try expect_pending(&waiter);
+    parked.pending.fail_all();
+    try testing.expectError(error.DatabaseSyncFailed, parked.join());
+    try expect_pending(&waiter);
+    parked.stop();
+    try expect_canceled(&waiter);
 }

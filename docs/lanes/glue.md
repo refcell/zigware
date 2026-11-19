@@ -370,7 +370,7 @@ ones: d = deployer (thread T-01a1d5b9-c237), u = utils, j = storage-journal
 | stateful/probe/mod.rs (+2 conformance) | 22 | 22 | 0 | 0 | |
 | stateful/probe/limits.rs | 1 | 1 | 0 | 0 | |
 | stateful/db/mod.rs | 83 | 81 | 0 | 2 | |
-| stateful/db/any.rs | 3 | 3 | 0 | 0 | |
+| stateful/db/any.rs | 4 | 3 | 0 | 1 | |
 | stateful/db/current.rs | 11 | 11 | 0 | 0 | |
 | stateful/db/keyless/standard.rs | 5 | 5 | 0 | 0 | |
 | stateful/db/immutable/standard.rs | 2 | 2 | 0 | 0 | |
@@ -384,17 +384,19 @@ ones: d = deployer (thread T-01a1d5b9-c237), u = utils, j = storage-journal
 | stateful/actor/syncer/mod.rs (conformance) | 1 | 1 | 0 | 0 | |
 | stateful/actor/core/mailbox.rs | 2 | 2 | 0 | 0 | |
 | stateful/actor/core/mod.rs | 4 | 4 | 0 | 0 | |
-| stateful/actor/core/syncing.rs | 16 | 15 | 0 | 1 | |
+| stateful/actor/core/syncing.rs | 16 | 16 | 0 | 0 | |
 | stateful/actor/core/processing.rs, 1070-3396 | 47 | 46 | 0 | 1 | |
-| stateful/actor/core/processing.rs, 3451-5885 | 39 | 37 | 0 | 2 | s |
+| stateful/actor/core/processing.rs, 3451-5885 | 39 | 38 | 0 | 1 | s |
 | stateful/actor/processor/mod.rs | 44 | 40 | 0 | 4 | |
 | stateful/tests/mod.rs, floor.rs | 28 | 24 | 4 | 0 | j |
-| **total** | **473** | **458** | **4** | **11** | |
+| **total** | **474** | **460** | **4** | **10** | |
 
 - db/mod.rs's barrier tests are ported since async start_sync step 6 (`Barrier` holds each
   member's `runtime.storage.Completion`): `barrier_waits_for_every_handle` (8),
   `barrier_cancellation_releases_handles` (8), `barrier_reports_shutdown_as_not_durable`, and
   `barrier_panics_on_later_failure`'s shutdown half (3) are in db/barrier_test.zig.
+- Not portable (db/any.rs, 1): `ordered_any_is_qmdb` checks a Rust trait bound on
+  commonware's `Qmdb` adapter trait, which zigware does not have (Rust-language).
 - Not portable (db/mod.rs, 2): tuple
   members run one after another under their mutexes, so `tuple_new_batches_queues_reads_concurrently`
   and `tuple_apply_runs_databases_in_parallel` have no concurrency to observe.
@@ -424,10 +426,9 @@ ones: d = deployer (thread T-01a1d5b9-c237), u = utils, j = storage-journal
     only the handoff barrier fails), and the live-floor redelivery rstest (2). That one replays
     marshal's redeliveries (blocks 2 and 3 again, with fresh receipts) into `finalized`:
     the marshal fixture runs marshal's mock block, not the processor harness's, and
-    syncer/actor_marshal_test.zig checks the redelivery against a real marshal. Not portable:
-    `transition_coalesces_handoff_durability_before_completion` gates an asynchronous flush;
-    zigware's barrier is synchronous, and the partial-window test checks the
-    ack-before-completion order it also covers.
+    syncer/actor_marshal_test.zig checks the redelivery against a real marshal.
+    `transition_coalesces_handoff_durability_before_completion` is ported since step 6
+    (not-portable review below): the source database opens over `DelayedSynced`.
 - Open, u (utils):
   - core/processing.rs, first half (1070-3396): 47 cases (22 `#[test]`, 25 rstest cases),
     22 ported in core/processing_early_test.zig (processing_test.zig's 5 are core unit tests,
@@ -446,7 +447,8 @@ ones: d = deployer (thread T-01a1d5b9-c237), u = utils, j = storage-journal
   - core/processing.rs, second half (3451-5885), done in core/processing_late_test.zig: 32
     zigware tests for 39 cases (24 `#[test]`, 7 rstests with 15 cases). 5325
     `ready_aborted_flush_stops_processing` is covered by 5285's test, since no barrier is ever
-    left pending. Not portable: the should_panic tests 4754 and 5474. Since step 6, 5448
+    left pending. Not portable: the should_panic test 4754. 5474 `flush_failure_panics_processing`
+    is an error check (the loop returns `error.DatabaseSyncFailed`). Since step 6, 5448
     `shutdown_cancels_pending_flush_ack` and 4504 `duplicate_reports_wait_for_durability`'s
     failure case are in core/processing_barrier_test.zig, over `runtime.storage.mocks.
     DelayedSynced` (`Harness.init_with`); held acks cancel when `Processing.deinit` releases
@@ -664,6 +666,30 @@ ones: d = deployer (thread T-01a1d5b9-c237), u = utils, j = storage-journal
   storage-journal; dkg 0f104147e, 519f7dd4c, bca770a0c, a9ffc25f3 to the coding lane;
   simulate bca770a0c to the examples lane. transfers/tests.rs changed only clones, and probe
   only an import alias: nothing to port.
+
+### Not-portable review (2026-11-19, coding lane)
+
+Every not-portable classification in this file was reread against main after async start_sync
+steps 1–6 (the coordinator's review; parallel's recovered 15 of 216). Before: 17 (db/mod.rs 2,
+plan.rs 1, syncing.rs 1, processing.rs 7, processor/mod.rs 4, dkg 1, plus uncounted
+`ordered_any_is_qmdb`, now listed). Ported here: 2, each catching a planted bug:
+- syncing.rs 726 `transition_coalesces_handoff_durability_before_completion`
+  (core/syncing_test.zig, source over `DelayedSynced`): catches a barrier per applied block
+  and applied handoffs acknowledged before the flush.
+- processing.rs 5474 `flush_failure_panics_processing` (core/processing_barrier_test.zig, an
+  error check): catches a `Barrier.poll` that reads a failed sync as canceled.
+The simplex lane ported 4 more: 5448 and 4504's failure case (546f977), 4822 and 5181 on the
+harness's `FlushControl` (851bca7).
+After: 11 (the stateful table's 10, plus dkg's 1), by category:
+- panic (zigware panics or asserts too): plan.rs 282, processing.rs 4754, processor/mod.rs
+  2486, 3246, 3265, 3389 (glue.md's 2467/3174/3193/3317 are older line numbers).
+- Rust-language: db/any.rs 373 `ordered_any_is_qmdb`.
+- design difference: db/mod.rs 3639 and 3751 (tuple members mutate one at a time),
+  processing.rs `processing_runs_on_the_actor_context` (`Mailbox.verify` takes no caller
+  context), dkg's
+  `dropping_verification_aborts_active_task` (verification runs inline).
+Open item whose blocker should be rechecked: tests/mod.rs 1614 cites steps 5 and 6, which
+have landed.
 
 ## dkg (owner: coding lane, thread T-01a1d58d-bff1-75a1-8ccb-4b8dd7bc9755)
 
