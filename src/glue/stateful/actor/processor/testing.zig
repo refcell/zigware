@@ -441,9 +441,153 @@ pub const TestRecover = struct {
     }
 };
 
+/// The test's hold on barriers (commonware's `FlushControl`): while armed, each barrier the
+/// harness's database set starts persists inline as usual, but its completion stays pending
+/// until the test finishes it, so later finalizations apply behind a pending barrier.
+pub const FlushControl = struct {
+    pub const capacity = 8;
+
+    mutex: Io.Mutex = .init,
+    armed: bool = false,
+    /// The producer's reference to each held barrier's completion, oldest first.
+    held: [capacity]runtime.storage.Completion = undefined,
+    count: usize = 0,
+    /// Barriers started while armed.
+    flushes: u32 = 0,
+
+    pub fn deinit(control: *FlushControl) void {
+        control.release_all();
+        control.* = undefined;
+    }
+
+    /// Finishes every held barrier successfully and holds no more: a held barrier would never
+    /// complete, so tests defer this ahead of stopping the processing loop.
+    pub fn release_all(control: *FlushControl) void {
+        control.mutex.lockUncancelable(io);
+        control.armed = false;
+        control.mutex.unlock(io);
+        while (control.pending() > 0) control.release_next({});
+    }
+
+    pub fn arm(control: *FlushControl) void {
+        control.mutex.lockUncancelable(io);
+        defer control.mutex.unlock(io);
+        control.armed = true;
+    }
+
+    /// A new held completion when armed, else null.
+    fn hold(control: *FlushControl) !?runtime.storage.Completion {
+        control.mutex.lockUncancelable(io);
+        defer control.mutex.unlock(io);
+        if (!control.armed) return null;
+        assert(control.count < capacity);
+        const completion = try runtime.storage.Completion.init_pending(gpa, io);
+        control.held[control.count] = completion;
+        control.count += 1;
+        control.flushes += 1;
+        return completion.retain();
+    }
+
+    pub fn pending(control: *FlushControl) usize {
+        control.mutex.lockUncancelable(io);
+        defer control.mutex.unlock(io);
+        return control.count;
+    }
+
+    /// Waits (bounded) until a barrier is held (commonware `next_flush`).
+    pub fn next_flush(control: *FlushControl) !void {
+        // Each pass sleeps 1 ms; the bound is a hang guard.
+        for (0..10_000) |_| {
+            if (control.pending() > 0) return;
+            try io.sleep(.fromMilliseconds(1), .awake);
+        }
+        return error.TestTimedOut;
+    }
+
+    /// Completes the oldest held barrier with `result` (commonware's `release.send`).
+    pub fn release_next(control: *FlushControl, result: runtime.storage.Error!void) void {
+        control.mutex.lockUncancelable(io);
+        assert(control.count > 0);
+        const completion = control.held[0];
+        std.mem.copyForwards(
+            runtime.storage.Completion,
+            control.held[0 .. control.count - 1],
+            control.held[1..control.count],
+        );
+        control.count -= 1;
+        control.mutex.unlock(io);
+        completion.finish(result);
+        completion.release();
+    }
+};
+
+/// `Any.Shared` with barriers the harness's `FlushControl` can hold; it delegates every other
+/// call, and behaves as `Any.Shared` while the control is unarmed.
+pub const HeldShared = struct {
+    pub const Unmerkleized = Any.Shared.Unmerkleized;
+    pub const Merkleized = Any.Shared.Merkleized;
+    pub const Readers = Any.Shared.Readers;
+    pub const Config = Any.Shared.Config;
+    pub const SyncTargets = Any.Shared.SyncTargets;
+
+    inner: Any.Shared,
+    control: *FlushControl,
+
+    pub fn deinit(self: HeldShared) void {
+        self.inner.deinit();
+    }
+
+    pub fn initial_sync_targets() SyncTargets {
+        return Any.Shared.initial_sync_targets();
+    }
+
+    pub fn new_batches(self: HeldShared) !Unmerkleized {
+        return self.inner.new_batches();
+    }
+
+    pub fn fork_batches(parent: *const Merkleized) !Unmerkleized {
+        return Any.Shared.fork_batches(parent);
+    }
+
+    pub fn matches_sync_targets(batches: *const Merkleized, targets: *const SyncTargets) bool {
+        return Any.Shared.matches_sync_targets(batches, targets);
+    }
+
+    pub fn readers(self: HeldShared) Readers {
+        return self.inner.readers();
+    }
+
+    pub fn apply(self: HeldShared, batches: *const Merkleized) !void {
+        return self.inner.apply(batches);
+    }
+
+    /// The inner barrier, or, while the control is armed, the inner state persisted at once
+    /// and a barrier over a completion the test finishes.
+    pub fn finalize(self: HeldShared) !db.Barrier {
+        var barrier = try self.inner.finalize();
+        const held = self.control.hold() catch |err| {
+            barrier.deinit();
+            return err;
+        } orelse return barrier;
+        barrier.durable() catch |err| {
+            held.release();
+            return err;
+        };
+        return db.Barrier.from_completions("held", &.{held});
+    }
+
+    pub fn prune(self: HeldShared, targets: *const SyncTargets) !void {
+        return self.inner.prune(targets);
+    }
+
+    pub fn committed_targets(self: HeldShared) !SyncTargets {
+        return self.inner.committed_targets();
+    }
+};
+
 pub const TestP = struct {
     pub const App = TestApp;
-    pub const Databases = Any.Shared;
+    pub const Databases = HeldShared;
     pub const Provider = TestProvider;
     pub const Recover = TestRecover;
 };
@@ -456,7 +600,9 @@ pub const Harness = struct {
     storage: runtime.buffer.mocks.Storage,
     cache_ref: runtime.buffer.paged.CacheRef,
     registry: metrics.Registry,
-    databases: Any.Shared,
+    databases: HeldShared,
+    /// Holds the database set's barriers once armed.
+    flushes: FlushControl = .{},
     processor: Processor,
     /// The processor's execution.
     execution: *Execution,
@@ -489,7 +635,9 @@ pub const Harness = struct {
             .storage = over,
             .scope = metrics.Scope.init(&harness.registry).child("db"),
         };
-        harness.databases = try Any.Shared.open(env, harness.config(), null);
+        harness.flushes = .{};
+        const shared = try Any.Shared.open(env, harness.config(), null);
+        harness.databases = .{ .inner = shared, .control = &harness.flushes };
         const genesis = TestBlock.genesis();
         const anchor: Execution.Anchor = .{
             .height = .zero(),
@@ -506,6 +654,7 @@ pub const Harness = struct {
     }
 
     pub fn deinit(harness: *Harness) void {
+        harness.flushes.deinit();
         harness.processor.deinit();
         harness.databases.deinit();
         harness.provider_state.deinit();

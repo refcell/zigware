@@ -385,10 +385,10 @@ ones: d = deployer (thread T-01a1d5b9-c237), u = utils, j = storage-journal
 | stateful/actor/core/mod.rs | 4 | 4 | 0 | 0 | |
 | stateful/actor/core/syncing.rs | 16 | 15 | 0 | 1 | |
 | stateful/actor/core/processing.rs, 1070-3396 | 47 | 22 | 24 | 1 | u |
-| stateful/actor/core/processing.rs, 3451-5885 | 39 | 35 | 2 | 2 | s |
+| stateful/actor/core/processing.rs, 3451-5885 | 39 | 37 | 0 | 2 | s |
 | stateful/actor/processor/mod.rs | 44 | 40 | 0 | 4 | |
 | stateful/tests/mod.rs, floor.rs | 28 | 21 | 7 | 0 | j |
-| **total** | **473** | **429** | **33** | **11** | |
+| **total** | **473** | **431** | **31** | **11** | |
 
 - db/mod.rs's barrier tests are ported since async start_sync step 6 (`Barrier` holds each
   member's `runtime.storage.Completion`): `barrier_waits_for_every_handle` (8),
@@ -449,14 +449,15 @@ ones: d = deployer (thread T-01a1d5b9-c237), u = utils, j = storage-journal
     `shutdown_cancels_pending_flush_ack` and 4504 `duplicate_reports_wait_for_durability`'s
     failure case are in core/processing_barrier_test.zig, over `runtime.storage.mocks.
     DelayedSynced` (`Harness.init_with`); held acks cancel when `Processing.deinit` releases
-    durability, not when `run` returns. Open, s (simplex): 4822
+    durability, not when `run` returns. 4822
     `stable_leader_finalizations_coalesce_while_barrier_pending` and 5181
     `shutdown_preempts_successor_barrier_waiting_for_verification_reader` apply later blocks
-    with a barrier pending; commonware runs them on a mock database (`control.flushes`), and on
-    a real QMDB the next apply waits for the parked sync, so they need a mock database set whose
-    `finalize` returns `Completion.init_pending`. The adapted tests that skip held-flush checks
-    (4055, 4184, 4327, 4405, 4548, 5238, 5285, 5365) can gain them on that mock. Each test's doc
-    comment records its adaptation.
+    with a barrier pending, which a real QMDB over parked storage cannot (the next apply waits
+    for the parked sync); like commonware's mock database (`control.flushes`) they run on the
+    harness's `FlushControl` (processor/testing.zig: `HeldShared` wraps `Any.Shared`, and once
+    armed each barrier's completion stays pending until the test releases it). The adapted
+    tests that skip held-flush checks (4055, 4184, 4327, 4405, 4548, 5238, 5285, 5365) can gain
+    them on `FlushControl`. Each test's doc comment records its adaptation.
   - processor/mod.rs, done: the 18 remaining tests are in processor/processor_mod_test.zig
     (simplex lane, T-01a1d5ad-c8d6). Not portable: the should_panic tests 2467, 3174, 3193,
     and 3317. Adapted: 3215 and 3301 share one test (zigware's duplicate check is

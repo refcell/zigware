@@ -129,7 +129,7 @@ test "stateful processing: a proposal on incomplete ancestry declines" {
 
     // The loop keeps serving: a database subscription after the proposal resolves.
     const databases = try fixture.mailbox.?.subscribe_databases();
-    try testing.expectEqual(fixture.harness.databases.cell, databases.cell);
+    try testing.expectEqual(fixture.harness.databases.inner.cell, databases.inner.cell);
 }
 
 test "stateful processing: a recovered parent answers its own verification" {

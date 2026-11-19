@@ -112,5 +112,5 @@ test "stateful processing: subscribe_databases answers the live set" {
     try fixture.init();
     defer fixture.deinit() catch |err| std.debug.panic("processing failed: {}", .{err});
     const databases = try fixture.mailbox.?.subscribe_databases();
-    try testing.expectEqual(fixture.harness.databases.cell, databases.cell);
+    try testing.expectEqual(fixture.harness.databases.inner.cell, databases.inner.cell);
 }

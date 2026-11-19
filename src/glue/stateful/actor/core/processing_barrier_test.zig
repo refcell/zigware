@@ -3,12 +3,10 @@
 //! `spawn_processing` control), so every sync a finalization starts parks until the test
 //! releases it.
 //!
-//! Not ported here: `stable_leader_finalizations_coalesce_while_barrier_pending` and
-//! `shutdown_preempts_successor_barrier_waiting_for_verification_reader` apply later blocks
-//! while a barrier is pending. commonware runs them on a mock database (`control.flushes`);
-//! on a real QMDB the next block's apply waits for the parked sync (every blob mutation first
-//! waits for its owner's pending sync), so they need a mock database set whose `finalize`
-//! returns a pending completion.
+//! The two that apply later blocks with a barrier pending run instead on the harness's
+//! `FlushControl` (commonware's mock database `control.flushes`): on a real QMDB over parked
+//! storage, the next block's apply waits for the parked sync (every blob mutation first waits
+//! for its owner's pending sync).
 
 const std = @import("std");
 const testing = std.testing;
@@ -131,4 +129,104 @@ test "stateful processing: a failed flush cancels a duplicate report's receipt" 
     try testing.expectError(error.DatabaseSyncFailed, parked.close());
     parked.stop();
     try expect_canceled(&duplicate);
+}
+
+/// Waits (bounded) until the applied counter reaches `count` (commonware `applied_at_least`).
+fn applied_at_least(fixture: *Fixture, count: u64) !void {
+    for (0..10_000) |_| {
+        if ((try fixture.counter() orelse 0) >= count) return;
+        try io.sleep(.fromMilliseconds(1), .awake);
+    }
+    return error.TestTimedOut;
+}
+
+// commonware `stable_leader_finalizations_coalesce_while_barrier_pending`: with block 1's
+// barrier pending, blocks 2 and 3 apply without starting a second barrier; once it
+// completes, one successor barrier covers both.
+test "stateful processing: finalizations coalesce while a barrier is pending" {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer fixture.deinit() catch {};
+    const control = &fixture.harness.flushes;
+    defer control.release_all();
+    control.arm();
+    const genesis = TestBlock.genesis();
+    const block1 = try fixture.harness.stage_pending_child(&genesis, 1);
+    const block2 = try fixture.harness.stage_pending_child(&block1, 2);
+    const block3 = try fixture.harness.stage_pending_child(&block2, 3);
+    var waiter1 = try fixture.finalize(block1);
+    defer waiter1.deinit();
+    try control.next_flush();
+    var waiter2 = try fixture.finalize(block2);
+    defer waiter2.deinit();
+    var waiter3 = try fixture.finalize(block3);
+    defer waiter3.deinit();
+    try applied_at_least(&fixture, 3);
+    // A pending barrier coalesces later finalized state instead of starting a second one.
+    try testing.expectEqual(@as(u32, 1), control.flushes);
+    try expect_pending(&waiter1);
+    try expect_pending(&waiter2);
+    try expect_pending(&waiter3);
+    control.release_next({});
+    try waiter1.wait();
+    try expect_pending(&waiter2);
+    try expect_pending(&waiter3);
+    // One successor barrier covers every coalesced block.
+    try control.next_flush();
+    try testing.expectEqual(@as(u32, 2), control.flushes);
+    control.release_next({});
+    try waiter2.wait();
+    try waiter3.wait();
+    try fixture.barrier();
+    try testing.expectEqual(@as(u32, 2), control.flushes);
+    try testing.expectEqual(@as(usize, 0), control.pending());
+}
+
+// commonware `shutdown_preempts_successor_barrier_waiting_for_verification_reader`: with
+// block 2 applied behind block 1's pending barrier and a verification of block 3 held in the
+// application, releasing the first barrier acknowledges block 1, and shutdown then stops
+// promptly and cancels block 2's receipt. Adapted: zigware's verification holds no database
+// read across the application call, so the successor barrier starts (held) rather than
+// waiting for the reader; shutdown must preempt both it and the held verification. The
+// receipt cancels when the stopped loop's state is released.
+test "stateful processing: shutdown preempts a successor barrier and a held verification" {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    var torn_down = false;
+    defer if (!torn_down) fixture.deinit() catch {};
+    const control = &fixture.harness.flushes;
+    defer if (!torn_down) control.release_all();
+    control.arm();
+    const genesis = TestBlock.genesis();
+    const block1 = try fixture.harness.stage_pending_child(&genesis, 1);
+    const block2 = try fixture.harness.stage_pending_child(&block1, 2);
+    const block3, var batch = try fixture.harness.build_child(&block2, 3);
+    batch.deinit();
+    var waiter1 = try fixture.finalize(block1);
+    defer waiter1.deinit();
+    try control.next_flush();
+    var waiter2 = try fixture.finalize(block2);
+    defer waiter2.deinit();
+    try applied_at_least(&fixture, 2);
+
+    var probe: harness.Probe = .{ .target = block3.digest() };
+    defer probe.deinit();
+    const gate = try probe.add_gate();
+    var started = gate.started;
+    defer started.deinit();
+    var release = gate.release;
+    defer release.deinit();
+    fixture.processing.verifications.verifier.app.probe = &probe;
+    var verify = try fixture.verify(&.{ block3, block2 });
+    defer verify.deinit();
+    try started.recv();
+
+    control.release_next({});
+    try waiter1.wait();
+    try control.next_flush();
+    try expect_pending(&waiter2);
+    torn_down = true;
+    // Closing the mailbox stops the loop without waiting for the reader or the barrier.
+    try fixture.deinit();
+    try expect_canceled(&waiter2);
 }

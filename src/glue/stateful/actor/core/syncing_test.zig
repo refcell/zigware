@@ -328,7 +328,7 @@ test "stateful syncing: state sync hands off the finalizations retained above it
     } };
     var gate = try oneshot.channel(void, gpa, io);
     var resolvers: Resolvers = .{
-        .source = .{ .shared = source.databases },
+        .source = .{ .shared = source.databases.inner },
         .gate = gate.receiver,
     };
     var pair = try actor.mailbox.new(Syncing.Message, gpa, io, 16);
@@ -444,7 +444,7 @@ const TestHarness = struct {
             .view = h.blocks[0].round.view.get(),
             .proposal = .{ .payload = h.blocks[0].digest() },
         } };
-        h.resolvers = .{ .source = .{ .shared = h.source.databases }, .gate = null };
+        h.resolvers = .{ .source = .{ .shared = h.source.databases.inner }, .gate = null };
         const pair = try actor.mailbox.new(Syncing.Message, gpa, io, 16);
         h.receiver = pair.receiver;
         h.mailbox = Mailbox.init(gpa, io, pair.sender);
@@ -500,7 +500,7 @@ const TestHarness = struct {
         const block = try harness_mod.digested(h.blocks[index]);
         var owned = block;
         defer owned.deinit();
-        return .{ .databases = h.source.databases, .anchor = syncer_actor.anchor_of(&owned) };
+        return .{ .databases = h.source.databases.inner, .anchor = syncer_actor.anchor_of(&owned) };
     }
 
     /// Retains block `index` with a fresh acknowledgement; its waiter is the caller's.
