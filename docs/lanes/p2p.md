@@ -121,7 +121,9 @@ handshake and the runtime's network, which the actor-stream and runtime lanes ar
   never allocate.
 - p2p imports `conformance` (a dev-dependency in commonware) for its conformance tests.
 - `Recipients.union_with` returns a new value (inputs borrowed); a `some` result is owned by
-  the caller. Message payloads are byte slices until the runtime lane ports `IoBuf`.
+  the caller. Message payloads are byte slices, not `runtime.iobuf.IoBuf` values. runtime has
+  ported `IoBuf` since, but nothing has moved to it yet. The bytes on the wire are the same
+  either way, so a move only changes the API (and could save copies on the receive path).
 - `Quota`/`KeyedRateLimiter` (commonware re-exports them from governor via runtime) live in
   `p2p/rate_limit.zig` until the runtime lane takes them; keys sit in a sorted array so the
   limiter is deterministic and needs no hashing of public keys.
