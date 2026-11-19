@@ -44,9 +44,10 @@ test-linux:
       alpine:3.20 sh -c 'apk add --no-cache curl xz >/dev/null && \
       etc/scripts/install-zig.sh /tmp/zig && /tmp/zig/zig build test'
 
-# Coverage-guided fuzzing of all fuzz tests
-fuzz:
-    zig build test --fuzz -Doptimize=ReleaseSafe
+# Coverage-guided fuzzing (`just fuzz [step] [args]`); fails on a crash, which raw
+# `zig build --fuzz` does not
+fuzz *args:
+    bash etc/scripts/fuzz.sh "$@"
 
 # Seeded fuzz soak: every seeded fuzz test, `factor` times the iterations, fresh seed
 fuzz-soak factor='100' seed='1':

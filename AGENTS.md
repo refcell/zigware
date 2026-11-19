@@ -86,7 +86,8 @@ Read this whole file before you change anything. These rules are not optional.
 - **Fuzz**: every decoder, parser, and state machine gets a `std.testing.fuzz` test and a
   deterministic seeded fuzz that runs in the normal `zig build test` (iterations scale with
   `build_options.fuzz_soak`, seed mixes in `build_options.fuzz_seed`).
-  Long fuzz: `zig build test --fuzz -Doptimize=ReleaseSafe`.
+  Long fuzz: `just fuzz` (etc/scripts/fuzz.sh). Raw `zig build test --fuzz` exits 0 even when
+  a test crashes; the script fails on a crash and keeps the saved input.
 - **Fuzz bodies**: on seeded random input, `std.testing.Smith`'s typed draws are nearly
   inert: `value`/`valueRangeAtMost`/`index` return the minimum for types under 64 bits,
   `eos()` ends a loop after about one step, and `slice` returns nothing when the input
