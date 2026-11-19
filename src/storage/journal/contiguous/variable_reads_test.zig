@@ -2,9 +2,10 @@
 //! cross pages, `append_many` past the write buffer, the size limit at the maximum position,
 //! and `read_many` and `try_read_many_sync` across cold, warm, and scattered positions.
 //!
-//! zigware's `read_many` reads item by item (no batched blob read), so commonware's tests of
-//! batched-read accounting, probe reuse of offsets, recorded blob reads, and the tampered
-//! offsets a batched read must reject have no counterpart. Ownership (`View`) tests, the
+//! The tampered offsets a batched read must reject, and the extents of cached frames with cold
+//! successors and of a blob's last frame, are in `variable_read_many_test.zig`. commonware's
+//! tests of batched-read accounting, probe reuse of offsets, and recorded blob reads count
+//! metrics and blob reads zigware does not record per batch. Ownership (`View`) tests, the
 //! should-panic ordering tests (assertions here), and snapshot tests are not ported either.
 
 const std = @import("std");

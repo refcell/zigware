@@ -281,8 +281,32 @@ for the async steps). Outside qmdb:
   starts at the recovered size); its docs now say so.
 - 5573c2929 variable journal: refactors the batched reader's cached frame extents
   (`cached_frame_extents`, `cached_frame_header`) and strengthens the tampered-offsets test.
-  No counterpart: zigware's `read_many` reads item by item, with no batched extents, and
-  `variable_reads_test.zig` records the tampered-offset tests as not ported.
+  On the coordinator's call, the variable journal's `read_many` now ports commonware's
+  batched path (see below) and its tests.
+
+### Variable journal batched read_many (2026-11-19)
+`read_many` and `try_read_many_sync` run commonware's two passes: a cached pass interleaves
+positions and same-blob successors into one offsets probe, resolves ordered disjoint frame
+extents (`cached_frame_extents`, from cached successor offsets or cached length prefixes),
+and serves each blob's cached frames with one cache-only ranged read; completion fetches the
+missing offsets in one offsets `read_many` and each blob's frames with one ranged read.
+Offsets that run backwards, overlap another frame, or point past their blob fail with
+`Corruption` (the cached pass serves nothing from such a batch); a frame whose prefix
+disagrees with its span fails with `OffsetDataMismatch`. Signatures and counters are
+unchanged. Deviation: staging is bounded at 256 KiB per ranged read (`max_stage_bytes`),
+because commonware reuses one scratch buffer and a fresh 16 MiB buffer per call cost more
+than the batch saved. Ported tests (`variable_read_many_test.zig`):
+`..._rejects_inconsistent_offsets`, `..._rejects_overlapping_prefix_frame`,
+`..._cached_frame_with_cold_successor`, `..._last_frame_uses_blob_size` (reopen half). Not
+ported: tests counting recorded blob reads or per-batch metrics, `..._buffer_len`.
+Bench (`zig build bench -Dbench-filter=variable_read`, ReleaseFast, medians before -> after,
+one loaded shared desktop, so noisy): cached and sequential modes are flat (compressed
+read_many 10k x 64 B 5.59 -> 5.19 ms, 10k x 1 KiB 23.9 -> 24.0 ms, 1k x 16 KiB 41.9 ->
+38.3 ms); cold modes are slower (read_many_uncached 10k x 64 B 3.87 -> 5.24 ms, 10k x 1 KiB
+14.7 -> 16.0 ms; variable_read_random read_many 10k 29.6 -> 35.0 ms). The cost is the extra
+cache pass: `paged.View.read_ranges_into` probes the cache for every range and then reads
+each missed range separately, so zigware gets no vectored blob read in return. A real
+batched blob read in the runtime would recover it.
 - 082daecd6 merkle (batch, mem, mmr/mem, verification, benches): test and bench harnesses
   drop async wrappers; only indentation and line wrapping change. Nothing to port.
 - 162216038 bmt, merkle proof, merkle full, queue, ordinal fuzz: lint-only test edits

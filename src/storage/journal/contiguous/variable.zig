@@ -1256,6 +1256,11 @@ pub fn Journal(comptime V: type) type {
         }
 
         /// Read the items at strictly increasing `positions` into `out`. The caller owns them.
+        /// A cached pass serves frames already in the page cache or the write buffer; the rest
+        /// come from one batched read per data blob. Offsets that run backwards, overlap another
+        /// frame, or point past their blob fail with `Corruption`, and a frame whose length
+        /// prefix disagrees with its extent fails with `OffsetDataMismatch` (commonware's
+        /// `read_many`).
         pub fn read_many(self: *const Self, positions: []const u64, out: []V) Error!void {
             assert(out.len == positions.len);
             if (positions.len == 0) return;
@@ -1268,12 +1273,15 @@ pub fn Journal(comptime V: type) type {
             self.metrics.read_many_calls.metric().inc();
             const timing = self.metrics.time("read_many_duration");
             defer timing.finish();
-            var done: usize = 0;
-            errdefer for (out[0..done]) |item| codec.free(V, self.gpa, item);
-            for (positions, out) |position, *item| {
-                item.* = try self.read_item(position, false);
-                done += 1;
-            }
+            const slots = try self.gpa.alloc(?V, positions.len);
+            defer self.gpa.free(slots);
+            @memset(slots, null);
+            errdefer for (slots) |slot| if (slot) |item| codec.free(V, self.gpa, item);
+            var misses: std.ArrayList(Miss) = .empty;
+            defer misses.deinit(self.gpa);
+            try self.read_many_sync_pass(positions, slots, &misses);
+            try self.fetch_misses(misses.items, slots);
+            for (slots, out) |slot, *item| item.* = slot.?;
         }
 
         /// The item if its offset and frame are readable without I/O.
@@ -1286,40 +1294,351 @@ pub fn Journal(comptime V: type) type {
             return item;
         }
 
-        /// Probe strictly increasing `positions`, serving those readable without I/O.
+        /// Probe strictly increasing `positions`, serving those whose offsets and frames are
+        /// readable without I/O. A batch whose cached offsets are inconsistent serves nothing,
+        /// so `read_many` reports the corruption; running out of memory also serves nothing.
         pub fn try_read_many_sync(self: *const Self, positions: []const u64, out: []?V) void {
             assert(out.len == positions.len);
-            for (positions, out, 0..) |position, *slot, index| {
-                if (index > 0) assert(positions[index - 1] < position);
-                slot.* = self.try_read_sync(position);
+            for (positions[1..], positions[0..positions.len -| 1]) |position, previous| {
+                assert(previous < position);
             }
+            @memset(out, null);
+            self.read_many_sync_pass(positions, out, null) catch |err| switch (err) {
+                error.OutOfMemory => {},
+            };
+        }
+
+        /// `position + 1` if it is readable and in the same data blob. Frames in a blob are
+        /// byte-adjacent, so its offset is where `position`'s frame ends.
+        fn next_in_blob(self: *const Self, position: u64) ?u64 {
+            const next = std.math.add(u64, position, 1) catch return null;
+            if (next >= self.bounds.end or next % self.items_per_blob == 0) return null;
+            assert(position_to_blob(next, self.items_per_blob) ==
+                position_to_blob(position, self.items_per_blob));
+            return next;
+        }
+
+        /// Fill `out[i]` for each readable position whose offset and frame are cached and whose
+        /// frame decodes. Appends a `Miss` to `misses` (when given) for every other position,
+        /// carrying the offsets this pass found so completion can skip those lookups.
+        fn read_many_sync_pass(
+            self: *const Self,
+            positions: []const u64,
+            out: []?V,
+            misses: ?*std.ArrayList(Miss),
+        ) Allocator.Error!void {
+            assert(out.len == positions.len);
+            if (positions.len == 0) return;
+            // A frame at p spans [off(p), off(p + 1)), or [off(p), blob size) when p is its
+            // blob's last readable position. Positions and their same-blob successors
+            // interleave into one strictly increasing lookup list for one offsets probe.
+            const lookups = try self.gpa.alloc(u64, positions.len * 2);
+            defer self.gpa.free(lookups);
+            var count: usize = 0;
+            for (positions) |position| {
+                if (count == 0 or lookups[count - 1] != position) {
+                    lookups[count] = position;
+                    count += 1;
+                }
+                if (self.next_in_blob(position)) |next| {
+                    lookups[count] = next;
+                    count += 1;
+                }
+            }
+            const offsets = try self.gpa.alloc(?u64, count);
+            defer self.gpa.free(offsets);
+            self.offsets.try_read_many_sync(lookups[0..count], offsets);
+            var extents: std.ArrayList(Extent) = try .initCapacity(self.gpa, positions.len);
+            defer extents.deinit(self.gpa);
+            self.cached_frame_extents(positions, lookups[0..count], offsets, &extents);
+            try self.serve_extents(positions, extents.items, out);
+            const list = misses orelse return;
+            try self.collect_misses(positions, lookups[0..count], offsets, out, list);
+        }
+
+        /// Resolve ordered, disjoint frame extents from cached offsets or length prefixes into
+        /// `extents` (capacity `positions.len`). Unknown extents are skipped; an inconsistent one
+        /// clears `extents`, leaving the whole batch for completion (commonware
+        /// `cached_frame_extents`).
+        fn cached_frame_extents(
+            self: *const Self,
+            positions: []const u64,
+            lookups: []const u64,
+            offsets: []const ?u64,
+            extents: *std.ArrayList(Extent),
+        ) void {
+            assert(lookups.len == offsets.len);
+            assert(extents.capacity >= positions.len);
+            var lookup_index: usize = 0;
+            var next_blob_start: u64 = 0;
+            var previous_end: u64 = 0;
+            for (positions, 0..) |position, index| {
+                while (lookups[lookup_index] != position) lookup_index += 1;
+                self.validate_readable(position) catch continue;
+                const offset = offsets[lookup_index] orelse continue;
+                // Each blob has its own byte offsets.
+                if (position >= next_blob_start) {
+                    const blob = position_to_blob(position, self.items_per_blob);
+                    next_blob_start = std.math.mul(u64, blob + 1, self.items_per_blob) catch
+                        std.math.maxInt(u64);
+                    previous_end = 0;
+                }
+                const writer = self.data_writer(position);
+                // A same-blob successor is adjacent in `lookups`.
+                const indexed_end: ?u64 = if (self.next_in_blob(position) != null)
+                    offsets[lookup_index + 1]
+                else
+                    writer.size();
+                if (offset < previous_end) return extents.clearRetainingCapacity();
+                var header: [max_prefix_size]u8 = undefined;
+                const end = indexed_end orelse
+                    (cached_frame_header(writer, offset, &header) orelse continue).end;
+                if (end <= offset or end > writer.size()) return extents.clearRetainingCapacity();
+                const len = std.math.cast(usize, end - offset) orelse continue;
+                previous_end = end;
+                extents.appendAssumeCapacity(.{ .index = index, .offset = offset, .len = len });
+            }
+        }
+
+        /// Serve `extents` with one cache-only read per data blob; a range the cache misses or
+        /// a frame that fails to decode stays unserved, so completion re-reads it and reports
+        /// the error.
+        fn serve_extents(
+            self: *const Self,
+            positions: []const u64,
+            extents: []const Extent,
+            out: []?V,
+        ) Allocator.Error!void {
+            var ranges: std.ArrayList(paged.Writer.Range) = .empty;
+            defer ranges.deinit(self.gpa);
+            var missed: std.ArrayList(usize) = .empty;
+            defer missed.deinit(self.gpa);
+            var buf: std.ArrayList(u8) = .empty;
+            defer buf.deinit(self.gpa);
+            var hits: u64 = 0;
+            var group_start: usize = 0;
+            while (group_start < extents.len) {
+                const first = positions[extents[group_start].index];
+                const blob = position_to_blob(first, self.items_per_blob);
+                // One blob per group, staged at most `max_stage_bytes` at a time (a larger
+                // frame is staged alone).
+                var group_end = group_start + 1;
+                var total: usize = extents[group_start].len;
+                while (group_end < extents.len) : (group_end += 1) {
+                    const extent = extents[group_end];
+                    const position = positions[extent.index];
+                    const next_blob = position_to_blob(position, self.items_per_blob);
+                    if (next_blob != blob or total + extent.len > max_stage_bytes) break;
+                    total += extent.len;
+                }
+                const group = extents[group_start..group_end];
+                group_start = group_end;
+                ranges.clearRetainingCapacity();
+                for (group) |extent| {
+                    try ranges.append(self.gpa, .{ .offset = extent.offset, .len = extent.len });
+                }
+                try buf.resize(self.gpa, total);
+                try missed.resize(self.gpa, group.len);
+                const view = self.data_writer(positions[group[0].index]).view();
+                const miss_count =
+                    view.try_read_ranges_sync_into(buf.items, ranges.items, missed.items);
+                hits += self.decode_group(group, buf.items, missed.items[0..miss_count], out);
+            }
+            self.metrics.cache_hits.metric().inc_by(hits);
+            self.metrics.items_read.metric().inc_by(hits);
+        }
+
+        /// Decode the cached frames of one blob's `group` from consecutive spans of `bytes`,
+        /// skipping the ranges listed in `missed`. Returns how many were served.
+        fn decode_group(
+            self: *const Self,
+            group: []const Extent,
+            bytes: []const u8,
+            missed: []const usize,
+            out: []?V,
+        ) u64 {
+            var served: u64 = 0;
+            var start: usize = 0;
+            var next_miss: usize = 0;
+            for (group, 0..) |extent, range_index| {
+                const frame_bytes = bytes[start..][0..extent.len];
+                start += extent.len;
+                if (next_miss < missed.len and missed[next_miss] == range_index) {
+                    next_miss += 1;
+                    continue;
+                }
+                const cfg = self.codec_config;
+                const compressed = self.compression != null;
+                const decoded = decode_frame_span(V, self.gpa, frame_bytes, cfg, compressed);
+                out[extent.index] = decoded catch continue;
+                served += 1;
+            }
+            assert(start == bytes.len);
+            assert(next_miss == missed.len);
+            return served;
+        }
+
+        /// Append a `Miss` for each unserved position, with the offsets the probe found.
+        fn collect_misses(
+            self: *const Self,
+            positions: []const u64,
+            lookups: []const u64,
+            offsets: []const ?u64,
+            out: []const ?V,
+            misses: *std.ArrayList(Miss),
+        ) Allocator.Error!void {
+            assert(lookups.len == offsets.len);
+            var lookup_index: usize = 0;
+            for (positions, out, 0..) |position, slot, index| {
+                if (slot != null) continue;
+                while (lookups[lookup_index] != position) lookup_index += 1;
+                const end = if (self.next_in_blob(position) != null)
+                    offsets[lookup_index + 1]
+                else
+                    null;
+                try misses.append(self.gpa, .{
+                    .index = index,
+                    .position = position,
+                    .offset = offsets[lookup_index],
+                    .end = end,
+                });
+            }
+            assert(misses.items.len <= positions.len);
+        }
+
+        /// Read the items for `misses` (strictly increasing by position) into their slots.
+        /// Offsets the cached pass did not find come from one batched read of the offsets
+        /// journal; each data blob's frames then come from one batched read.
+        fn fetch_misses(self: *const Self, misses: []const Miss, out: []?V) Error!void {
+            if (misses.len == 0) return;
+            // Validate before consulting the offsets so a declined out-of-bounds position
+            // surfaces as a range error rather than corruption.
+            for (misses) |miss| try self.validate_readable(miss.position);
+            var lookups: std.ArrayList(u64) = .empty;
+            defer lookups.deinit(self.gpa);
+            for (misses) |miss| {
+                if (miss.offset == null) try append_lookup(self.gpa, &lookups, miss.position);
+                if (miss.end != null) continue;
+                if (self.next_in_blob(miss.position)) |next| {
+                    try append_lookup(self.gpa, &lookups, next);
+                }
+            }
+            const fetched = try self.gpa.alloc(u64, lookups.items.len);
+            defer self.gpa.free(fetched);
+            // The misses are readable and every successor is below `bounds.end`, so the
+            // offsets journal must hold them all: a range error is corruption.
+            self.offsets.read_many(lookups.items, fetched) catch |err| return switch (err) {
+                error.ItemOutOfRange, error.ItemPruned => error.Corruption,
+                else => err,
+            };
+            var cursor: Cursor = .{ .lookups = lookups.items, .fetched = fetched };
+            var group_start: usize = 0;
+            while (group_start < misses.len) {
+                const blob = position_to_blob(misses[group_start].position, self.items_per_blob);
+                var group_end = group_start + 1;
+                while (group_end < misses.len and position_to_blob(
+                    misses[group_end].position,
+                    self.items_per_blob,
+                ) == blob) group_end += 1;
+                try self.read_frames(misses[group_start..group_end], &cursor, out);
+                group_start = group_end;
+            }
+            self.metrics.cache_misses.metric().inc_by(misses.len);
+            self.metrics.items_read.metric().inc_by(misses.len);
+        }
+
+        /// Read one blob's `group` of misses with one batched read, after checking that their
+        /// extents strictly increase and stay inside the blob, and decode each into its slot.
+        fn read_frames(
+            self: *const Self,
+            group: []const Miss,
+            cursor: *Cursor,
+            out: []?V,
+        ) Error!void {
+            assert(group.len > 0);
+            const writer = self.data_writer(group[0].position);
+            const blob_size = writer.size();
+            const ranges = try self.gpa.alloc(paged.Writer.Range, group.len);
+            defer self.gpa.free(ranges);
+            var total: usize = 0;
+            var previous_end: u64 = 0;
+            for (group, ranges) |miss, *range| {
+                const offset = miss.offset orelse cursor.lookup(miss.position);
+                const end = miss.end orelse if (self.next_in_blob(miss.position)) |next|
+                    cursor.lookup(next)
+                else
+                    blob_size;
+                // A consistent journal's offsets strictly increase within a blob and stay
+                // inside it; anything else would reach the batched read unsorted or oversized.
+                const ordered = offset < end and offset >= previous_end;
+                if (!ordered or end > blob_size) return error.Corruption;
+                const len = std.math.cast(usize, end - offset) orelse return error.OffsetOverflow;
+                total = std.math.add(usize, total, len) catch return error.OffsetOverflow;
+                range.* = .{ .offset = offset, .len = len };
+                previous_end = end;
+            }
+            // Every extent is checked above; the reads stage at most `max_stage_bytes` at a
+            // time (a larger frame alone).
+            var buf: std.ArrayList(u8) = .empty;
+            defer buf.deinit(self.gpa);
+            var chunk_start: usize = 0;
+            var staged: usize = 0;
+            while (chunk_start < ranges.len) {
+                var chunk_end = chunk_start + 1;
+                var chunk_len = ranges[chunk_start].len;
+                while (chunk_end < ranges.len and
+                    chunk_len + ranges[chunk_end].len <= max_stage_bytes) : (chunk_end += 1)
+                {
+                    chunk_len += ranges[chunk_end].len;
+                }
+                try buf.resize(self.gpa, chunk_len);
+                const chunk = ranges[chunk_start..chunk_end];
+                _ = try writer.view().read_ranges_into(buf.items, chunk);
+                try self.decode_frames(group[chunk_start..chunk_end], chunk, buf.items, out);
+                staged += chunk_len;
+                chunk_start = chunk_end;
+            }
+            assert(staged == total);
+        }
+
+        /// Decode each miss's frame from consecutive spans of `bytes` into its slot.
+        fn decode_frames(
+            self: *const Self,
+            misses: []const Miss,
+            ranges: []const paged.Writer.Range,
+            bytes: []const u8,
+            out: []?V,
+        ) Error!void {
+            assert(misses.len == ranges.len);
+            var start: usize = 0;
+            const cfg = self.codec_config;
+            const compressed = self.compression != null;
+            for (misses, ranges) |miss, range| {
+                const frame_bytes = bytes[start..][0..range.len];
+                start += range.len;
+                out[miss.index] = try decode_frame_span(V, self.gpa, frame_bytes, cfg, compressed);
+            }
+            assert(start == bytes.len);
         }
 
         /// Decode the frame at `offset` from cached bytes; any miss declines.
         fn try_read_frame_sync(self: *const Self, position: u64, offset: u64) ?V {
             const writer = self.data_writer(position);
-            const remaining = std.math.sub(u64, writer.size(), offset) catch return null;
-            const header_len: usize = @intCast(@min(remaining, max_prefix_size));
-            if (header_len == 0) return null;
             var header: [max_prefix_size]u8 = undefined;
-            if (!writer.try_read_sync_into(header[0..header_len], offset)) return null;
-            const found = frame.find_frame(header[0..header_len], offset) catch return null;
-            const varint_len: usize, const data_len: usize = switch (found.info) {
-                .complete => |complete| .{ complete.varint_len, complete.data_len },
-                .incomplete => |incomplete| .{ incomplete.varint_len, incomplete.total_len },
-            };
-            const item_len = varint_len + data_len;
-            if (item_len > remaining) return null;
+            const found = cached_frame_header(writer, offset, &header) orelse return null;
+            const item_len: usize = @intCast(found.end - offset);
             const cfg = self.codec_config;
             const compressed = self.compression != null;
-            if (item_len <= header_len) {
-                const payload = header[varint_len..item_len];
+            // If the whole frame fits in the header read, decode it directly.
+            if (item_len <= header.len) {
+                const payload = header[found.varint_len..item_len];
                 return frame.decode_item(V, self.gpa, payload, cfg, compressed) catch null;
             }
             const buf = self.gpa.alloc(u8, item_len) catch return null;
             defer self.gpa.free(buf);
             if (!writer.try_read_sync_into(buf, offset)) return null;
-            return frame.decode_item(V, self.gpa, buf[varint_len..], cfg, compressed) catch null;
+            const payload = buf[found.varint_len..];
+            return frame.decode_item(V, self.gpa, payload, cfg, compressed) catch null;
         }
 
         /// Replay the items in `range` as batches of consecutive items, each within one blob
@@ -1393,6 +1712,89 @@ pub fn Journal(comptime V: type) type {
             return self.blobs.tail.append(self.scratch.items);
         }
     };
+}
+
+/// The most bytes `read_many` stages for one batched read; a larger frame is staged alone.
+/// commonware reuses one scratch buffer; a bound keeps a fresh buffer per call small.
+const max_stage_bytes: usize = 256 * 1024;
+
+/// A position the cached pass of `read_many` could not serve (commonware's `Miss`).
+const Miss = struct {
+    /// The position's index in the request.
+    index: usize,
+    position: u64,
+    /// Where the frame starts, if the cached pass found it.
+    offset: ?u64,
+    /// Where the frame ends, if the cached pass found its same-blob successor's offset. A
+    /// blob's last readable frame has no successor, and completion ends it at the blob's size.
+    end: ?u64,
+};
+
+/// A cached frame's extent: request index, byte offset, and length, length prefix included.
+const Extent = struct { index: usize, offset: u64, len: usize };
+
+/// Forward-only lookup of the offsets `fetch_misses` read: requests come in `lookups` order.
+const Cursor = struct {
+    lookups: []const u64,
+    fetched: []const u64,
+    at: usize = 0,
+
+    fn lookup(self: *Cursor, position: u64) u64 {
+        while (self.lookups[self.at] < position) self.at += 1;
+        assert(self.lookups[self.at] == position); // Every requested position was looked up.
+        assert(self.lookups.len == self.fetched.len);
+        return self.fetched[self.at];
+    }
+};
+
+/// Append `position` to strictly increasing `lookups` unless it is already last.
+fn append_lookup(gpa: Allocator, lookups: *std.ArrayList(u64), position: u64) Allocator.Error!void {
+    if (lookups.items.len > 0) {
+        const last = lookups.items[lookups.items.len - 1];
+        assert(last <= position);
+        if (last == position) return;
+    }
+    try lookups.append(gpa, position);
+}
+
+/// A cached frame prefix: the frame's exclusive end and the prefix's length.
+const FrameHeader = struct { end: u64, varint_len: usize };
+
+/// Read the cached length prefix of the frame at `offset` into `header` (commonware
+/// `cached_frame_header`), or null when it is not cached, does not decode, or the frame runs
+/// past the blob.
+fn cached_frame_header(
+    writer: *const paged.Writer,
+    offset: u64,
+    header: *[max_prefix_size]u8,
+) ?FrameHeader {
+    const remaining = std.math.sub(u64, writer.size(), offset) catch return null;
+    const header_len: usize = @intCast(@min(remaining, max_prefix_size));
+    if (header_len == 0) return null;
+    if (!writer.try_read_sync_into(header[0..header_len], offset)) return null;
+    var reader = codec.Reader.init(header[0..header_len]);
+    const prefix = frame.decode_length_prefix(&reader) catch return null;
+    const len = @as(u64, prefix.size) + prefix.varint_len;
+    if (len > remaining) return null;
+    assert(len > 0);
+    return .{ .end = offset + len, .varint_len = prefix.varint_len };
+}
+
+/// Decode an item from a `span` that holds exactly its frame, length prefix included. Fails
+/// with `OffsetDataMismatch` if the prefix disagrees with the span's length.
+fn decode_frame_span(
+    comptime V: type,
+    gpa: Allocator,
+    span: []const u8,
+    cfg: codec.Cfg(V),
+    compressed: bool,
+) Error!V {
+    var reader = codec.Reader.init(span);
+    const prefix = try frame.decode_length_prefix(&reader);
+    const actual_len = @as(u64, prefix.size) + prefix.varint_len;
+    if (actual_len != span.len) return error.OffsetDataMismatch;
+    assert(prefix.varint_len <= span.len);
+    return frame.decode_item(V, gpa, span[prefix.varint_len..], cfg, compressed);
 }
 
 /// Sequential replay over a journal's retained data blobs (borrows the journal).
@@ -1528,5 +1930,6 @@ test {
     _ = @import("variable_bounded_test.zig");
     _ = @import("variable_repair_test.zig");
     _ = @import("variable_reads_test.zig");
+    _ = @import("variable_read_many_test.zig");
     _ = @import("variable_faults_test.zig");
 }
