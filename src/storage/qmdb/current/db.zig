@@ -18,6 +18,7 @@ const value_mod = @import("../value.zig");
 const metadata_mod = @import("../../metadata/mod.zig");
 const any = @import("../any/mod.zig");
 const qmdb = @import("../mod.zig");
+const metrics_mod = @import("../metrics.zig");
 const grafting = @import("grafting.zig");
 const grafted_mod = @import("grafted.zig");
 const canonical = @import("canonical.zig");
@@ -42,6 +43,9 @@ pub fn Config(comptime T: type, comptime JournalConfig: type) type {
         merkle: merkle.full.Config,
         /// The operation log.
         log: JournalConfig,
+        /// The clock that times calls into the duration metrics (also the `any` database's);
+        /// null skips timing.
+        io: ?std.Io = null,
         /// The partition of the grafted tree's metadata.
         grafted_metadata_partition: []const u8,
         /// The translator of the snapshot index.
@@ -133,6 +137,7 @@ pub fn Db(F: type, U: type, C: type, I: type, H: type, comptime N: usize) type {
             const any_cfg: Any.Cfg = .{
                 .merkle = cfg.merkle,
                 .log = cfg.log,
+                .io = cfg.io,
                 .translator = cfg.translator,
                 .init_cache = cfg.init_cache,
             };
@@ -145,7 +150,9 @@ pub fn Db(F: type, U: type, C: type, I: type, H: type, comptime N: usize) type {
             var any_db = try Any.init_with(gpa, storage, scope.child("any"), any_cfg, options);
             errdefer any_db.deinit();
             try prune_any_bitmap(&any_db, pruned_chunks);
-            return finish_init(gpa, scope, any_db, metadata, pinned);
+            var db = try finish_init(gpa, scope, any_db, metadata, pinned);
+            db.metrics.io = cfg.io;
+            return db;
         }
 
         /// Builds the database over `log`, an authenticated log state sync filled from its
@@ -175,11 +182,14 @@ pub fn Db(F: type, U: type, C: type, I: type, H: type, comptime N: usize) type {
             const cache = cfg.init_cache;
             var any_db = try Any.init_from_log(gpa, any_scope, owned_log, translator, cache);
             errdefer any_db.deinit();
+            any_db.metrics.io = cfg.io;
             try prune_any_bitmap(&any_db, pruned_chunks);
             var pins: [merkle.max_pinned_nodes]Digest = undefined;
             const pinned = try ops_pins(&any_db, pruned_chunks, &pins);
             assert(any_db.bitmap.pruned_chunks() == pruned_chunks);
-            return finish_init(gpa, scope, any_db, metadata, pinned);
+            var db = try finish_init(gpa, scope, any_db, metadata, pinned);
+            db.metrics.io = cfg.io;
+            return db;
         }
 
         /// The grafted tree's pins at `pruned_chunks` leaves, read from the ops tree.
@@ -576,6 +586,8 @@ pub fn Db(F: type, U: type, C: type, I: type, H: type, comptime N: usize) type {
         /// never behind it).
         pub fn prune(self: *Self, location: u64) !void {
             self.metrics.prune_calls.metric().inc();
+            const timing = self.metrics.start("prune_duration");
+            defer timing.finish();
             if (location > self.sync_boundary()) return error.PruneBeyondMinRequired;
             try self.any.commit();
             self.any.prune_bitmap(location);
@@ -636,6 +648,8 @@ pub fn Db(F: type, U: type, C: type, I: type, H: type, comptime N: usize) type {
         /// Syncs every database state to disk, including the bitmap's pruning metadata.
         pub fn sync(self: *Self) !void {
             self.metrics.sync_calls.metric().inc();
+            const timing = self.metrics.start("sync_duration");
+            defer timing.finish();
             try self.any.sync();
             try self.sync_metadata();
             self.update_metrics();
@@ -663,6 +677,8 @@ pub fn Db(F: type, U: type, C: type, I: type, H: type, comptime N: usize) type {
         /// Applies `batch` and its unapplied ancestors; the caller keeps its reference.
         pub fn apply_batch(self: *Self, batch: *const MerkleizedBatch) !void {
             self.metrics.apply_batch_calls.metric().inc();
+            const timing = self.metrics.start("apply_batch_duration");
+            defer timing.finish();
             try self.any.apply_batch(batch.inner);
             // Retain the newly graftable roots, then release those wholly below the floor.
             const leaves = batch.grafted.leaves();
@@ -705,8 +721,15 @@ pub const Metrics = struct {
     pruned_chunks: metrics_api.Gauge,
     sync_boundary: metrics_api.Gauge,
     apply_batch_calls: metrics_api.Counter,
+    apply_batch_duration: Timed,
     sync_calls: metrics_api.Counter,
+    sync_duration: Timed,
     prune_calls: metrics_api.Counter,
+    prune_duration: Timed,
+    /// The clock of the duration timers; null skips timing. The database sets it.
+    io: ?std.Io = null,
+
+    const Timed = metrics_api.histogram.Timed;
 
     pub fn init(scope: Scope) Allocator.Error!Metrics {
         var self: Metrics = undefined;
@@ -721,7 +744,22 @@ pub const Metrics = struct {
         self.sync_calls = try scope.counter("sync_calls", "Number of sync calls");
         errdefer self.sync_calls.deinit();
         self.prune_calls = try scope.counter("prune_calls", "Number of prune calls");
+        errdefer self.prune_calls.deinit();
+        const apply_duration = "Duration of apply-batch calls";
+        const apply_name = "apply_batch_duration";
+        self.apply_batch_duration = try Timed.register(&scope, apply_name, apply_duration);
+        errdefer self.apply_batch_duration.deinit();
+        self.sync_duration = try Timed.register(&scope, "sync_duration", "Duration of sync calls");
+        errdefer self.sync_duration.deinit();
+        const prune_help = "Duration of prune calls";
+        self.prune_duration = try Timed.register(&scope, "prune_duration", prune_help);
+        self.io = null;
         return self;
+    }
+
+    /// Starts timing a call into the duration histogram `name`, if the database has a clock.
+    pub fn start(self: *const Metrics, comptime name: []const u8) metrics_mod.Timing {
+        return .start(&@field(self, name), self.io);
     }
 
     pub fn deinit(self: *Metrics) void {
@@ -730,6 +768,9 @@ pub const Metrics = struct {
         self.apply_batch_calls.deinit();
         self.sync_calls.deinit();
         self.prune_calls.deinit();
+        self.apply_batch_duration.deinit();
+        self.sync_duration.deinit();
+        self.prune_duration.deinit();
         self.* = undefined;
     }
 

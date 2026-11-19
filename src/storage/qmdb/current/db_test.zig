@@ -14,6 +14,7 @@ const conformance = @import("conformance");
 const utils = @import("utils");
 const merkle = @import("../../merkle/mod.zig");
 const qmdb_support = @import("../test_support.zig");
+const metrics = @import("runtime").telemetry.metrics;
 const any_conformance = @import("../any/conformance_test.zig");
 const unordered_proof = @import("unordered/proof.zig");
 const ordered_proof = @import("ordered/proof.zig");
@@ -667,4 +668,38 @@ test "current ordered exclusion proofs" {
         const root = db.root();
         try testing.expect(!Db.verify_exclusion_proof(&empty_proof, k1, &root));
     }
+}
+
+// Commonware's current/unordered/fixed.rs test_current_unordered_fixed_metrics: current's own
+// counters and duration histograms (timed on the config's `io`) beside the `any` database's,
+// which registers under the `any` child scope.
+test "current metrics count and time each operation" {
+    const D = support.UnorderedFixed(merkle.mmr.Family);
+    var harness = try support.Harness.init(gpa);
+    defer harness.deinit();
+    var cfg = harness.cfg(D);
+    cfg.io = testing.io;
+    const registry = &harness.inner.registry;
+    const scope = metrics.Scope.init(registry).child("current");
+    var db = try D.init(gpa, harness.inner.storage.interface(), scope, cfg, null);
+    defer db.deinit();
+    try support.apply_writes(D, &db, &.{.{ .key = key(1), .value = val(1, 0) }});
+    try testing.expect((try db.get(&key(1))).?.eql(val(1, 0)));
+    try db.sync();
+    try db.prune(db.sync_boundary());
+    try qmdb_support.expect_metric_values(gpa, registry, &.{
+        .{ "current_apply_batch_calls_total", "1" },
+        .{ "current_sync_calls_total", "1" },
+        .{ "current_prune_calls_total", "1" },
+        .{ "current_pruned_chunks", "0" },
+        .{ "current_sync_boundary", "0" },
+        .{ "current_apply_batch_duration_count", "1" },
+        .{ "current_sync_duration_count", "1" },
+        .{ "current_prune_duration_count", "1" },
+        .{ "current_any_get_calls_total", "1" },
+        .{ "current_any_apply_batch_calls_total", "1" },
+    });
+    const text = try registry.encode(gpa);
+    defer gpa.free(text);
+    try testing.expect(std.mem.indexOf(u8, text, "current_get_calls_total") == null);
 }

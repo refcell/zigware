@@ -139,9 +139,15 @@ which every database here is built on.
     (faulty storage keeping unsynced writes and dropping unsynced resizes). A skipped bounded
     truncation fails it; a truncation left unsynced is still recovered correctly (not traced
     which layer covers it, likely the journal's durable checkpoint watermark).
-  - [ ] metrics: the `db_*_duration` histograms are registered but never observed. Timing needs
-    an `Io` in every qmdb database's `init` (any, current, keyless, immutable, store), so it is
-    a cross-variant change to agree with storage-qmdb-sync and the crypto lane first.
+  - [x] metrics: duration histograms observed. Each config of any, current, keyless, and
+    immutable has `io: ?std.Io = null` (storage-merkle's journal field); `Metrics` keeps it and
+    `Timing` times get, get_many, apply_batch, commit, sync, and prune, skipping timing without
+    an io. current also registers commonware's `apply_batch`/`sync`/`prune_duration`. Ported
+    each variant's `test_*_fixed_metrics` with its duration counts. `init_from_log` keeps its
+    signature, so a db built from a sync result is timed only once its caller sets
+    `db.metrics.io`. The store has no metrics, as in commonware.
+  - [ ] pass the db's `io` down into its journal configs once storage-merkle's journal `io`
+    field lands.
   - Not portable while `start_sync` completes synchronously: `start_sync_overlaps_work`,
     `apply_indexes_while_journal_waits`, `start_sync_prune_waits`. Compact root
     compatibility is the compact lane's.
@@ -391,3 +397,4 @@ which every database here is built on.
 - 2026-11-19: immutable batch D1 (pruning boundaries, pruned-set retirement, live commit).
 - 2026-11-19: immutable batch D2 (colliding twin and reopen reads, empty batch, full proofs).
 - 2026-11-19: immutable batch E (start_sync, metrics, bounded-init crash history); audit done.
+- 2026-11-19: qmdb duration metrics timed on an optional config `io`; metrics tests ported.
