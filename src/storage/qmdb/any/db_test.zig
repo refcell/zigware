@@ -12,6 +12,7 @@ const support = @import("test_support.zig");
 const qmdb = @import("../mod.zig");
 const metrics = @import("runtime").telemetry.metrics;
 const qmdb_support = @import("../test_support.zig");
+const death = @import("utils").death;
 
 const gpa = testing.allocator;
 const families = .{ merkle.mmr.Family, merkle.mmb.Family };
@@ -672,6 +673,54 @@ test "any staged batches refuse stale forks" {
         const slots = [_]Db.Slot{.{ .put = val(1, 1) }};
         try testing.expectError(error.StaleBatch, staged.merkleize(&slots, &.{}, &db));
     }
+}
+
+/// commonware's `staged_merkleize_rejects_slot_count_mismatch!`: merkleizing a one-key staged
+/// read with `slot_count` slots, other than one, violates the caller contract and panics.
+fn staged_slot_mismatch(comptime Db: type, comptime slot_count: usize) !void {
+    var harness = try support.Harness.init(gpa);
+    defer harness.deinit();
+    var db = try harness.open(Db, null);
+    defer db.deinit();
+    var batch = try db.new_batch();
+    var values: [1]?Digest = undefined;
+    const k0 = support.colliding_digest(0x40, 0);
+    var staged = staged: {
+        errdefer batch.deinit();
+        break :staged try batch.stage(&.{k0}, &db, &values);
+    };
+    defer staged.deinit();
+    const two = [_]Db.Slot{ .keep, .{ .put = support.colliding_digest(0x50, 0) } };
+    const merkleized = try staged.merkleize(two[0..slot_count], &.{}, &db);
+    merkleized.release();
+}
+
+fn StagedMismatch(comptime Db: type, comptime slot_count: usize) type {
+    return struct {
+        fn body() !void {
+            try staged_slot_mismatch(Db, slot_count);
+        }
+    };
+}
+
+const Unordered = support.UnorderedFixed(merkle.mmr.Family);
+const Ordered = support.OrderedFixed(merkle.mmr.Family);
+const unreachable_code = "reached unreachable code";
+
+test "staged merkleize rejects an extra slot (unordered)" {
+    try death.expect_panic(@src(), unreachable_code, StagedMismatch(Unordered, 2).body);
+}
+
+test "staged merkleize rejects an extra slot (ordered)" {
+    try death.expect_panic(@src(), unreachable_code, StagedMismatch(Ordered, 2).body);
+}
+
+test "staged merkleize rejects a missing slot (unordered)" {
+    try death.expect_panic(@src(), unreachable_code, StagedMismatch(Unordered, 0).body);
+}
+
+test "staged merkleize rejects a missing slot (ordered)" {
+    try death.expect_panic(@src(), unreachable_code, StagedMismatch(Ordered, 0).body);
 }
 
 test "any ordered predecessor rewrites take the nearest ancestor's update" {

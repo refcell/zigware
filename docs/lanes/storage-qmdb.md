@@ -215,6 +215,12 @@ which every database here is built on.
   `target()`, the target reached once applied (current's is chunk-aligned on its ops root).
 - [x] 8bf364011 batch 2: dropped `CompactTarget` and its two conformance entries after glue's
   compact adapter took `Target` (86dafbe).
+- [x] Death tests (`utils.death.expect_panic`) for commonware qmdb's 8 `#[should_panic]` tests:
+  7 ported, up from 1 (grafting's height-zero, 342eb386). New: cache `put_rejects_empty_marker`,
+  `diff_cursors_rejects_out_of_order_query`, and the 4 `staged_merkleize_rejects_*_slot_*`
+  (extra and missing, unordered and ordered). Each fails with its assert removed. Not
+  portable: ordered `find_next_key_ascending_rejects_out_of_order_query`, since zigware's
+  `find_next` binary-searches with no cursor, so an out-of-order query is still correct.
 - [x] Upstream `qmdb::commit_floor_at`: `qmdb.commit_floor_at` returns the floor of the
   commit at `size - 1`, or null for a non-commit (`HistoricalFloorPruned` at size 0,
   `ItemPruned`, `DataCorrupted` past its own location); `find_inactivity_floor_at` wraps it.
@@ -476,3 +482,4 @@ which every database here is built on.
 - 2026-11-19: immutable apply indexes before its append; `apply_indexes_while_journal_waits`.
 - 2026-11-19: any `Config.strategy` (Merkle hashing, batched reads), as commonware's.
 - 2026-11-19: any apply probes the index 64 keys ahead (commonware's `PROBE_CHUNK`), both paths.
+- 2026-11-19: qmdb should_panic tests as death tests: 7 of 8 ported (1 not portable).

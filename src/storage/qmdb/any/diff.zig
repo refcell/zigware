@@ -279,3 +279,18 @@ test "diff lookup, cursors, and merge prefer the nearest diff" {
     }
     try testing.expect(merge.next() == null);
 }
+
+// commonware `diff_cursors_rejects_out_of_order_query` (`#[should_panic]`): an out-of-order
+// query, which would return a wrong result, panics instead.
+test "diff cursors reject an out-of-order query" {
+    try @import("utils").death.expect_panic(@src(), "reached unreachable code", struct {
+        fn body() !void {
+            const diff = [_]P{ active(1, 1), active(5, 5) };
+            const diffs = [_][]const P{&diff};
+            var cursors = try Cursors(Key, u32).init(testing.allocator, &diffs);
+            defer cursors.deinit(testing.allocator);
+            try testing.expect(cursors.resolve(&.{ 0, 5 }) != null);
+            _ = cursors.resolve(&.{ 0, 1 });
+        }
+    }.body);
+}

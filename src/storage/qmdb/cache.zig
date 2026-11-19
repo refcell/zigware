@@ -118,6 +118,18 @@ fn present(cache: *const Cache(u64), start: u64, end: u64) usize {
     return count;
 }
 
+// commonware `test_put_rejects_empty_marker` (`#[should_panic]`): the empty-slot marker is
+// not a location.
+test "put rejects the empty marker" {
+    try utils.death.expect_panic(@src(), "reached unreachable code", struct {
+        fn body() !void {
+            var cache = try Cache(u64).init(testing.allocator, 16);
+            defer cache.deinit(testing.allocator);
+            cache.put(testing.allocator, std.math.maxInt(u64), 0);
+        }
+    }.body);
+}
+
 test "capacity is an upper bound" {
     const gpa = testing.allocator;
     for ([_]usize{ 1, 3, 15, 16, 17, 31, 32, 33, 100, 1000 }) |capacity| {
