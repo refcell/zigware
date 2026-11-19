@@ -1310,3 +1310,74 @@ test "stateful processing: a paused acquisition restarts after finalization" {
     try testing.expectEqual(2, probe.calls);
     try testing.expectEqual(1, hooks.calls);
 }
+
+// commonware `finalization_rejects_next_step_with_stale_round`: a handoff's recovery step
+// retained across a finalization selects a successor whose round is at or before the
+// finalized round; the handoff declines, and the retained block is processed once.
+// Adapted: the finalized and retained blocks are served by the provider, and the answer is
+// read after the finalized hook returns, since the loop that answers also runs the hook.
+// Divergence (reported to the stateful lane): commonware selects the successor while the
+// hook runs, under the finalization's boundary, which rejects it unprocessed; zigware
+// selects it once admission reopens, so the stale block is processed (and still declined),
+// and commonware's `process_calls.at(stale) == 0` is not asserted.
+test "stateful processing: a finalization rejects a next step with a stale round" {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer deinit_fixture(&fixture);
+    const genesis = TestBlock.genesis();
+    const finalized, var batch = try fixture.harness.build_child(&genesis, 1);
+    batch.deinit();
+    var cached = try fixture.verify(&.{ finalized, genesis });
+    defer cached.deinit();
+    try testing.expect(try cached.recv()); // Cached through its verification.
+    // The retained block comes from a scratch harness; marshal (the provider) serves both
+    // blocks to the recovery walk.
+    var scratch: harness.Harness = undefined;
+    try scratch.init();
+    defer scratch.deinit();
+    const scratch_finalized = try scratch.stage_pending_child(&genesis, 1);
+    try testing.expect(finalized.digest().eql(scratch_finalized.digest()));
+    const retained = try scratch.stage_pending_child(&finalized, 2);
+    try fixture.harness.provider_state.insert(finalized);
+    try fixture.harness.provider_state.insert(retained);
+    const stale_round = harness.round(1); // At the finalized round.
+    const stale_height = retained.height().next();
+    const stale = TestBlock.init(retained.digest(), stale_height, stale_round, retained.target);
+
+    // The gate holds the recovery's processing of the retained block.
+    var probe: harness.Probe = .{ .target = retained.digest() };
+    defer probe.deinit();
+    var held = try HeldGate.add(&probe);
+    defer held.deinit();
+    fixture.processing.verifications.verifier.app.probe = &probe;
+    fixture.processing.processor.app.probe = &probe;
+    var hook_probe: harness.Probe = .{ .target = finalized.digest() };
+    defer hook_probe.deinit();
+    var hook = try HeldGate.add(&hook_probe);
+    defer hook.deinit();
+    fixture.processing.processor.app.finalized_probe = &hook_probe;
+
+    const pair = try utils.channel.oneshot.channel(core.Mailbox.Built, gpa, io);
+    var prepared = pair.receiver;
+    defer prepared.deinit();
+    try fixture.send(.{ .propose = .{
+        .context = .{ .round = harness.round(0xff) },
+        .ancestry = try fixture.harness.ancestry(&.{ stale, retained }),
+        .upstream = {},
+        .proposal = .{ .prepare = pair.sender },
+    } });
+    try held.started.recv();
+    // Finalization retains that processing; its hook stays open while the step finishes.
+    var receipt = try fixture.finalize(finalized);
+    defer receipt.deinit();
+    try hook.started.recv();
+    try held.open();
+    // The loop runs the hook, so the handoff's answer follows it here (commonware answers
+    // while the hook is still held).
+    try hook.open();
+    try receipt.wait();
+    const built = try prepared.recv();
+    defer built.discard();
+    try testing.expect(built.handoff.is_wait()); // The handoff on the stale block declines.
+    try testing.expectEqual(1, probe.calls); // The retained block once.
+}
