@@ -17,65 +17,76 @@ on:
         default: ""
 
 jobs:
-  slow:
-    strategy:
-      fail-fast: false
-      matrix:
+  # Emits the slow jobs' matrix, only the one `only` names when set, so unselected jobs never
+  # request a runner (a skipped matrix entry still waits for one).
+  matrix:
+    if: inputs.only != 'e2e' && inputs.only != 'interop'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      include: ${{ steps.matrix.outputs.include }}
+    steps:
+      - id: matrix
+        env:
+          ONLY: ${{ inputs.only }}
         # One job ran every package for 136 minutes on x86 (fe3bdcb), so it splits by
         # package. test-consensus alone ran past 2 hours (6ace499), so it splits into groups
         # of test-name filters (etc/scripts/consensus-filters.sh). Cryptography ran 57 to 90
         # minutes, mostly skip_heavy tests (golden DKG rounds, 2 to 3 minutes each), which
         # three cryptography jobs split with -Dheavy-shard. The rest job runs test-others,
         # every other package: with cryptography's first shard it took 62 minutes on arm.
-        os: [ubuntu-latest, ubuntu-24.04-arm]
-        job:
-          - consensus-marshal
-          - consensus-aggregation
-          - consensus-simplex-engine-1
-          - consensus-simplex-engine-2
-          - consensus-simplex-engine-3
-          - consensus-simplex-fixtures-1
-          - consensus-simplex-fixtures-2
-          - consensus-simplex-fixtures-3
-          - consensus-simplex-fixtures-4
-          - consensus-simplex-twins
-          - consensus-rest
-          - glue
-          - rest
-          - cryptography-0
-          - cryptography-1
-          - cryptography-2
-        include:
-          - { job: consensus-marshal, steps: test-consensus, group: marshal }
-          - { job: consensus-aggregation, steps: test-consensus, group: aggregation }
-          - { job: consensus-simplex-engine-1, steps: test-consensus, group: simplex-engine-1 }
-          - { job: consensus-simplex-engine-2, steps: test-consensus, group: simplex-engine-2 }
-          - { job: consensus-simplex-engine-3, steps: test-consensus, group: simplex-engine-3 }
-          - { job: consensus-simplex-fixtures-1, steps: test-consensus, group: simplex-fixtures-1 }
-          - { job: consensus-simplex-fixtures-2, steps: test-consensus, group: simplex-fixtures-2 }
-          - { job: consensus-simplex-fixtures-3, steps: test-consensus, group: simplex-fixtures-3 }
-          - { job: consensus-simplex-fixtures-4, steps: test-consensus, group: simplex-fixtures-4 }
-          - { job: consensus-simplex-twins, steps: test-consensus, group: simplex-twins }
-          - { job: consensus-rest, steps: test-consensus, group: rest }
-          - { job: glue, steps: test-glue }
-          - { job: rest, steps: test-others }
-          - { job: cryptography-0, steps: test-cryptography, heavy_shard: 0 }
-          - { job: cryptography-1, steps: test-cryptography, heavy_shard: 1 }
-          - { job: cryptography-2, steps: test-cryptography, heavy_shard: 2 }
+        run: |
+          jobs='[
+            {"job": "consensus-marshal", "steps": "test-consensus", "group": "marshal"},
+            {"job": "consensus-aggregation", "steps": "test-consensus", "group": "aggregation"},
+            {"job": "consensus-simplex-engine-1", "steps": "test-consensus",
+             "group": "simplex-engine-1"},
+            {"job": "consensus-simplex-engine-2", "steps": "test-consensus",
+             "group": "simplex-engine-2"},
+            {"job": "consensus-simplex-engine-3", "steps": "test-consensus",
+             "group": "simplex-engine-3"},
+            {"job": "consensus-simplex-fixtures-1", "steps": "test-consensus",
+             "group": "simplex-fixtures-1"},
+            {"job": "consensus-simplex-fixtures-2", "steps": "test-consensus",
+             "group": "simplex-fixtures-2"},
+            {"job": "consensus-simplex-fixtures-3", "steps": "test-consensus",
+             "group": "simplex-fixtures-3"},
+            {"job": "consensus-simplex-fixtures-4", "steps": "test-consensus",
+             "group": "simplex-fixtures-4"},
+            {"job": "consensus-simplex-twins", "steps": "test-consensus", "group": "simplex-twins"},
+            {"job": "consensus-rest", "steps": "test-consensus", "group": "rest"},
+            {"job": "glue", "steps": "test-glue"},
+            {"job": "rest", "steps": "test-others"},
+            {"job": "cryptography-0", "steps": "test-cryptography", "heavy_shard": 0},
+            {"job": "cryptography-1", "steps": "test-cryptography", "heavy_shard": 1},
+            {"job": "cryptography-2", "steps": "test-cryptography", "heavy_shard": 2}
+          ]'
+          include=$(echo "$jobs" | jq -c --arg only "$ONLY" '
+            [.[] | select($only == "" or .job == $only)
+              | (. + {os: "ubuntu-latest"}), (. + {os: "ubuntu-24.04-arm"})]')
+          if [ "$include" = "[]" ]; then
+            echo "only: no job named $ONLY" >&2
+            exit 1
+          fi
+          echo "include=$include" >> "$GITHUB_OUTPUT"
+
+  slow:
+    needs: matrix
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.matrix.outputs.include) }}
     runs-on: ${{ matrix.os }}
     # About twice the slowest job: arm's third of the fixtures DSTs took 56 minutes on
     # 6e50645, before they split four ways; every other job took 50 or less.
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
-        if: inputs.only == '' || inputs.only == matrix.job
       - name: install zig
-        if: inputs.only == '' || inputs.only == matrix.job
         run: |
           sh etc/scripts/install-zig.sh "$HOME/zig"
           echo "$HOME/zig" >> "$GITHUB_PATH"
       - name: slow tests
-        if: inputs.only == '' || inputs.only == matrix.job
         env:
           FILTER: ${{ inputs.filter }}
           STEPS: ${{ matrix.steps }}
