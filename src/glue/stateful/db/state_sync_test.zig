@@ -20,7 +20,8 @@ const immutable = @import("immutable.zig");
 const compact = @import("compact.zig");
 
 const gpa = testing.allocator;
-const io = testing.io;
+/// The test I/O: threaded, except while `run_on_deterministic` runs a test on a runner.
+var io: std.Io = testing.io;
 const qmdb = storage.qmdb;
 const ring = utils.channel.ring;
 const mpsc = utils.channel.mpsc;
@@ -49,7 +50,7 @@ fn anchor(height: u64) Anchor {
 /// The environment mocks receive.
 const TestEnv = struct {
     gpa: std.mem.Allocator = gpa,
-    io: std.Io = io,
+    io: std.Io,
 };
 
 const TestUnmerkleized = struct {
@@ -154,8 +155,11 @@ const GatePair = struct {
     }
 
     /// `park`, after the database's first reached report: tips that follow find it reached.
-    /// commonware's deterministic runtime runs the report first; on threads the test waits.
+    /// Only under `run_on_deterministic`, whose simulated sleep lets the coordinator take the
+    /// report first, as commonware's deterministic runtime does; on threads a starved reporter
+    /// can still be behind the tips.
     fn park_reported(pair: *GatePair) !void {
+        std.debug.assert(io.userdata != testing.io.userdata); // Under `run_on_deterministic`.
         try pair.started.recv();
         var waited: u32 = 0;
         while (pair.gate.reports.load(.acquire) == 0) : (waited += 1) {
@@ -354,7 +358,7 @@ fn run_sync(
     start: u64,
     tips: ring.Receiver(Update),
 ) !state_sync.Synced(T, Digest) {
-    const env: TestEnv = .{};
+    const env: TestEnv = .{ .io = io };
     return state_sync.sync_shared(
         T,
         Digest,
@@ -813,7 +817,7 @@ fn Pair(comptime A: type, comptime B: type) type {
             tips: TipUpdates,
             failure: ?*?state_sync_tuple.Failure,
         ) !Result {
-            const env: TestEnv = .{};
+            const env: TestEnv = .{ .io = io };
             const config = .{ {}, {} };
             const at = anchor(start);
             return state_sync_tuple.sync_tuple(
@@ -968,6 +972,10 @@ test "stateful state sync: a tuple sync keeps the original failure when a finish
 }
 
 test "stateful state sync: a reached tuple member takes no updates until a regroup" {
+    try run_on_deterministic(reached_member_takes_no_updates);
+}
+
+fn reached_member_takes_no_updates() anyerror!void {
     const P = Pair(ObservedSlowSyncDb, ObservedFastSyncDb);
     const tips = try P.channel(32);
     var sender = tips.sender;
@@ -994,6 +1002,10 @@ test "stateful state sync: a reached tuple member takes no updates until a regro
 }
 
 test "stateful state sync: a tuple member at its target idles while another catches up" {
+    try run_on_deterministic(member_at_target_idles);
+}
+
+fn member_at_target_idles() anyerror!void {
     const P = Pair(SlowSyncDb, ObservedFastSyncDb);
     var tips = try P.channel(4);
     var slow = try gate_pair();
@@ -1015,6 +1027,10 @@ test "stateful state sync: a tuple member at its target idles while another catc
 }
 
 test "stateful state sync: a tuple regroup completes when a database's target is unchanged" {
+    try run_on_deterministic(regroup_completes_unchanged_target);
+}
+
+fn regroup_completes_unchanged_target() anyerror!void {
     const P = Pair(SlowSyncDb, DistinctObservedFastSyncDb);
     const tips = try P.channel(4);
     var sender = tips.sender;
@@ -1252,7 +1268,27 @@ test "stateful state sync: a single sync adopts a queued tip before finishing" {
     try run_deterministic(adopts_queued_tip_before_finishing);
 }
 
+/// Runs `body` with every helper's `io` on a deterministic runner, which runs a reached
+/// report before the parked test continues, as commonware's deterministic runtime does.
+fn run_on_deterministic(comptime body: fn () anyerror!void) !void {
+    const timeout_ns = 5 * std.time.ns_per_s;
+    var runner = try runtime.deterministic.Runner.init(gpa, .{ .timeout_ns = timeout_ns });
+    defer runner.deinit();
+    const threaded = io;
+    defer io = threaded;
+    io = runner.io();
+    try try runner.start(struct {
+        fn run(_: std.Io) anyerror!void {
+            try body();
+        }
+    }.run, .{runner.io()});
+}
+
 test "stateful state sync: a tuple sync converges after evicted targets" {
+    try run_on_deterministic(tuple_converges_after_evicted_targets);
+}
+
+fn tuple_converges_after_evicted_targets() anyerror!void {
     const P = Pair(SlowSyncDb, ObservedFastSyncDb);
     const tips = try P.channel(4);
     var sender = tips.sender;
@@ -1284,6 +1320,10 @@ test "stateful state sync: a tuple sync converges after evicted targets" {
 }
 
 test "stateful state sync: a tuple sync ignores a stale reached report after a forwarded tip" {
+    try run_on_deterministic(tuple_ignores_stale_reached_report);
+}
+
+fn tuple_ignores_stale_reached_report() anyerror!void {
     const P = Pair(StaleReachedSyncDb, ObservedFastSyncDb);
     const tips = try P.channel(4);
     var sender = tips.sender;
