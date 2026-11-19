@@ -55,6 +55,11 @@ fn Env(comptime W: type) type {
         genesis: B,
 
         fn init(self: *Self, ctx: Ctx, app: Mock) !void {
+            try self.init_named(ctx, "wrapper", app);
+        }
+
+        /// Like `init`, with the wrapper under `ctx.child(name)`.
+        fn init_named(self: *Self, ctx: Ctx, comptime name: []const u8, app: Mock) !void {
             var rng = utils.rng.test_rng();
             self.fixture = try harness.fixture(gpa, &rng);
             errdefer self.fixture.deinit(gpa);
@@ -75,7 +80,7 @@ fn Env(comptime W: type) type {
                 );
             errdefer self.validator.crash();
             const marshal = self.validator.mailbox.clone();
-            self.wrapper = try W.create(ctx.child("wrapper"), app, marshal, epocher());
+            self.wrapper = try W.create(ctx.child(name), app, marshal, epocher());
             self.genesis = try harness.make_raw_block(gpa, harness.genesis_parent(), .zero(), 0);
         }
 
@@ -86,6 +91,13 @@ fn Env(comptime W: type) type {
             self.validator.crash();
             self.network.stop();
             self.fixture.deinit(gpa);
+        }
+
+        /// Another wrapper over the same marshal, under `ctx.child(name)`; the caller destroys
+        /// it.
+        fn another(self: *Self, ctx: Ctx, comptime name: []const u8, app: Mock) !*W {
+            const marshal = self.validator.mailbox.clone();
+            return W.create(ctx.child(name), app, marshal, epocher());
         }
 
         fn me(self: *const Self) harness.K {
@@ -249,4 +261,108 @@ test "inline application verify failure" {
 
 test "deferred application verify failure" {
     try run(ApplicationVerifyFailure(DeferredWrapper).body);
+}
+
+fn PrepareTask(comptime W: type) type {
+    return struct {
+        fn run(wrapper: *W, context: harness.Ctx) Io.Cancelable!?Handoff {
+            return wrapper.prepare(undefined, context);
+        }
+    };
+}
+
+const Io = std.Io;
+const Handoff = @import("../../../traits.zig").Handoff(D);
+const ProposalGate = mocks.verifying.ProposalGate;
+
+/// Whether the metrics exposition holds `needle`.
+fn exposition_contains(ctx: Ctx, needle: []const u8) !bool {
+    const text = try ctx.encode(gpa);
+    defer gpa.free(text);
+    return std.mem.indexOf(u8, text, needle) != null;
+}
+
+/// A failed build answers no proposal and a `wait` handoff, and a dropped prepare cancels
+/// the application's build.
+fn propose_failures(comptime W: type, ctx: Ctx, env: *Env(W), context: harness.Ctx) !void {
+    // The mock cannot build, so the proposal is dropped and the build is not timed.
+    try testing.expectEqual(@as(?D, null), try env.wrapper.propose(undefined, context));
+    try testing.expect(try exposition_contains(ctx, "wrapper_under_test_build_duration_count 0"));
+    // A failed build answers wait, so consensus can still ask for an ordinary proposal.
+    const failing = try env.another(ctx, "failed", Mock.init(gpa).with_handoff(.{ .stage = {} }));
+    defer failing.destroy();
+    const handoff = (try failing.prepare(undefined, context)) orelse return error.NoHandoff;
+    try testing.expect(handoff == .wait);
+    // Dropping a prepare response cancels the application's build.
+    const io = ctx.io();
+    var gated = try ProposalGate.init(gpa, io);
+    defer gated.gate.deinit();
+    defer gated.started.deinit();
+    defer gated.dropped.deinit();
+    const gated_app = Mock.init(gpa).with_handoff(.{ .vote = {} }).with_proposal_gate(&gated.gate);
+    const canceled = try env.another(ctx, "cancelled", gated_app);
+    defer canceled.destroy();
+    var response = try io.concurrent(PrepareTask(W).run, .{ canceled, context });
+    try gated.started.recv();
+    _ = response.cancel(io) catch {};
+    try testing.expectError(error.Closed, gated.dropped.recv());
+}
+
+/// The boundary block is re-proposed whether or not the application builds, its gate
+/// certifies, and a handoff on it is staged regardless of the application's decision.
+fn propose_boundary(comptime W: type, ctx: Ctx, env: *Env(W)) !void {
+    const genesis = env.genesis.digest();
+    const leader = harness.default_leader();
+    const boundary_height = harness.blocks_per_epoch - 1;
+    const boundary_round = round_at(boundary_height);
+    const boundary_context = context_of(boundary_round, leader, 0, genesis);
+    const boundary = try block_with(boundary_context, genesis, boundary_height, 1900);
+    const digest = boundary.digest();
+    try env.store(boundary_round, boundary);
+    try ctx.sleep(.fromMilliseconds(10));
+    const reproposal_round = round_at(boundary_height + 1);
+    const reproposal = context_of(reproposal_round, env.me(), boundary_height, digest);
+    // An epoch-boundary proposal re-proposes the parent digest.
+    const proposed = (try env.wrapper.propose(undefined, reproposal)) orelse
+        return error.NoProposal;
+    try testing.expect(proposed.eql(digest));
+    // The re-proposal registers a gate certify awaits, and is stored at its round.
+    try testing.expect(try env.certify(reproposal_round, digest));
+    var stored = (try env.validator.mailbox.get_verified(reproposal_round)) orelse
+        return error.ReproposalMissing;
+    stored.deinit();
+    // A handoff takes the boundary re-proposal path without asking the application.
+    const pipeline_round = round_at(boundary_height + 2);
+    const pipeline_context = context_of(pipeline_round, leader, boundary_height, digest);
+    const unwanted = try block_with(pipeline_context, digest, boundary_height + 1, 2000);
+    const app = Mock.init(gpa).with_handoff(.{ .vote = {} }).with_propose_result(unwanted);
+    const pipeline = try env.another(ctx, "pipeline", app);
+    defer pipeline.destroy();
+    const handoff = (try pipeline.prepare(undefined, pipeline_context)) orelse
+        return error.NoHandoff;
+    try testing.expect(handoff == .stage and handoff.stage.eql(digest));
+    const certified = (try pipeline.certify(undefined, pipeline_round, digest)) orelse
+        return error.CertifyResultMissing;
+    try testing.expect(certified);
+}
+
+fn ProposePaths(comptime W: type) type {
+    return struct {
+        fn body(ctx: Ctx) anyerror!void {
+            var env: Env(W) = undefined;
+            try env.init_named(ctx, "wrapper_under_test", Mock.init(gpa));
+            defer env.deinit(ctx);
+            const context = context_of(round_at(1), env.me(), 0, env.genesis.digest());
+            try propose_failures(W, ctx, &env, context);
+            try propose_boundary(W, ctx, &env);
+        }
+    };
+}
+
+test "inline propose paths" {
+    try run(ProposePaths(InlineWrapper).body);
+}
+
+test "deferred propose paths" {
+    try run(ProposePaths(DeferredWrapper).body);
 }
