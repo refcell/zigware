@@ -4,16 +4,17 @@
 //! per item that declares its decompressed size. zigware has no C dependencies, so:
 //!
 //! - decompression uses `std.compress.zstd` and reads any frame libzstd writes;
-//! - compression writes frames with the same header fields libzstd writes (content size, no
-//!   checksum, no dictionary). Each block is compressed (LZ77 sequences coded with FSE, Huffman
-//!   literals; see `zstd/`) when that is smaller, else stored raw or RLE. The bytes differ
-//!   from libzstd's and the level is ignored; commonware never hashes compressed output, and
-//!   any zstd decoder reads the frames. Uncompressed journals are byte-identical.
+//! - compression writes the frame header `zstd::bulk::compress(.., 3)` writes (libzstd 1.5.7:
+//!   content size, no checksum or dictionary, level 3's window from `zstd/params.zig`). Each
+//!   block is compressed (LZ77 sequences coded with FSE, Huffman literals; see `zstd/`) when
+//!   that is smaller, else stored raw or RLE. Block bytes do not yet match libzstd's; the
+//!   byte-exact level 3 path is being ported (docs/lanes/storage-merkle.md).
 
 const std = @import("std");
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const block = @import("zstd/block.zig");
+const params = @import("zstd/params.zig");
 
 /// Sample inputs for tests and benchmarks.
 pub const corpus = @import("zstd/corpus.zig");
@@ -23,9 +24,6 @@ pub const magic: u32 = 0xFD2FB528;
 
 /// Largest block a frame may hold (`Block_Maximum_Size` with a window of at least 128 KiB).
 pub const block_size_max: usize = 128 * 1024;
-
-/// Window descriptor for a 128 KiB window: exponent 7 (`windowLog` 17), mantissa 0.
-const window_descriptor_128k: u8 = 7 << 3;
 
 const block_type_raw: u24 = 0;
 const block_type_rle: u24 = 1;
@@ -39,10 +37,15 @@ comptime {
     assert(block_size_max < (1 << 21)); // Block_Size is a 21-bit field.
 }
 
+/// Whether libzstd level 3 writes `len` bytes as one segment: its window covers the source.
+fn one_segment_for(len: u64) bool {
+    return (@as(u64, 1) << params.level3(len).window_log) >= len;
+}
+
 /// Bytes of the frame header (magic, descriptor, window, content size) for `len` bytes.
 fn header_size(len: u64) usize {
-    const single_segment = len <= block_size_max;
-    const window_size: usize = if (single_segment) 0 else 1;
+    const single_segment_now = one_segment_for(len);
+    const window_size: usize = if (single_segment_now) 0 else 1;
     return 4 + 1 + window_size + content_size_field_size(len);
 }
 
@@ -105,8 +108,9 @@ pub fn encode_into(
     return out.items[start..];
 }
 
+/// `ZSTD_writeFrameHeader` for level 3: no checksum and no dictionary id.
 fn write_header(len: usize, out: *std.ArrayList(u8)) void {
-    const single_segment = len <= block_size_max;
+    const one_segment = one_segment_for(len);
     const field_size = content_size_field_size(len);
     const fcs_flag: u8 = switch (field_size) {
         1 => 0,
@@ -117,10 +121,11 @@ fn write_header(len: usize, out: *std.ArrayList(u8)) void {
     };
     var header: [14]u8 = undefined;
     std.mem.writeInt(u32, header[0..4], magic, .little);
-    header[4] = (fcs_flag << 6) | (@as(u8, @intFromBool(single_segment)) << 5);
+    header[4] = (fcs_flag << 6) | (@as(u8, @intFromBool(one_segment)) << 5);
     var size: usize = 5;
-    if (!single_segment) {
-        header[size] = window_descriptor_128k;
+    if (!one_segment) {
+        const window_log = params.level3(len).window_log;
+        header[size] = @as(u8, window_log - params.window_log_min) << 3;
         size += 1;
     }
     const value: u64 = if (field_size == 2) len - 256 else len;
@@ -227,6 +232,7 @@ test {
     _ = @import("zstd/fse.zig");
     _ = @import("zstd/huffman.zig");
     _ = @import("zstd/match.zig");
+    _ = params;
     _ = @import("zstd_test.zig");
     _ = block;
 }
@@ -250,6 +256,33 @@ test "compress round trips through the std decoder" {
             defer gpa.free(decoded);
             try testing.expectEqualSlices(u8, data, decoded);
         }
+    }
+}
+
+// Frame headers (after the magic) that `zstd::bulk::compress(.., 3)` (libzstd 1.5.7)
+// writes, by source size: single segment up to the 2 MiB window, then a window byte.
+test "frame headers match libzstd level 3" {
+    const gpa = testing.allocator;
+    const cases = [_]struct { len: usize, header: []const u8 }{
+        .{ .len = 0, .header = &.{ 0x20, 0x00 } },
+        .{ .len = 255, .header = &.{ 0x20, 0xff } },
+        .{ .len = 256, .header = &.{ 0x60, 0x00, 0x00 } },
+        .{ .len = 65791, .header = &.{ 0x60, 0xff, 0xff } },
+        .{ .len = 65792, .header = &.{ 0xa0, 0x00, 0x01, 0x01, 0x00 } },
+        .{ .len = 131073, .header = &.{ 0xa0, 0x01, 0x00, 0x02, 0x00 } },
+        .{ .len = 2097152, .header = &.{ 0xa0, 0x00, 0x00, 0x20, 0x00 } },
+        .{ .len = 2097153, .header = &.{ 0x80, 0x58, 0x01, 0x00, 0x20, 0x00 } },
+    };
+    for (cases) |case| {
+        const data = try gpa.alloc(u8, case.len);
+        defer gpa.free(data);
+        @memset(data, 0);
+        var out: std.ArrayList(u8) = .empty;
+        defer out.deinit(gpa);
+        const frame = try compress_into(gpa, data, &out);
+        try testing.expectEqual(magic, std.mem.readInt(u32, frame[0..4], .little));
+        try testing.expectEqualSlices(u8, case.header, frame[4..][0..case.header.len]);
+        try testing.expectEqual(case.header.len + 4, header_size(case.len));
     }
 }
 

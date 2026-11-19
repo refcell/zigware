@@ -294,7 +294,30 @@ variants need `runtime` storage; do them after its interface lands.
   workloads written with `compression: Some(3)`, so compressed journals must emit exactly
   what `zstd::bulk::compress(.., 3)` writes: the dfast strategy with level 3's parameters,
   block splitting, Huffman literal tables and their repeat/raw choices, FSE normalization and
-  table modes, and the frame header. Pin: the libzstd that commonware's Cargo.lock selects
-  through zstd-sys (to record here). Check against the local `zstd -3` and the four hashes,
+  table modes, and the frame header. Check against the local `zstd -3` and the four hashes,
   which storage-journal enables through StorageConformance (fe7bafa). The current fast
   compressor stays only if level 3 turns out slower.
+  - Pin: commonware's Cargo.lock has zstd 0.13.3, zstd-safe 7.2.4, and zstd-sys
+    2.0.16+zstd.1.5.7, so libzstd 1.5.7 (`lib/compress` of that zstd-sys is the source
+    ported). The local `zstd` CLI is v1.5.7 too.
+  - Oracle: a scratch Rust program (outside the repo) built offline against exactly those
+    crates writes `zstd::bulk::compress(data, level)`. It matches `zstd -3 --no-check`
+    byte for byte from 0 B to 3 MB, so either serves as the reference.
+  - Path facts: `bulk::compress` is `compress2` with the pledged size equal to the input
+    and a `compressBound` output, which takes `ZSTD_compressEnd`'s direct path. Level 3
+    rows (W/C/H/S/L/T, dfast): over 256 KiB 21/16/17/1/5/0, up to 256 KiB 18/16/16/1/4/0,
+    up to 128 KiB 17/15/16/2/5/0, up to 16 KiB 14/14/15/2/4/0, then
+    `ZSTD_adjustCParams_internal` shrinks the window to the source. dfast has no pre-split
+    (`splitLevels[dfast]` is 1) and no post-split (btopt and up), so blocks are 128 KiB.
+    Blocks under 7 bytes are raw, and the first block is never RLE. Window indices start at
+    2 (`ZSTD_WINDOW_START_INDEX`).
+  - Pieces: (1) parameters and the frame header; (2) the dfast match finder and seqStore
+    (`zstd_double_fast.c`); (3) Huffman literals (`huf_compress.c`,
+    `zstd_compress_literals.c`); (4) FSE sequence tables and encoding modes
+    (`fse_compress.c`, `zstd_compress_sequences.c`); (5) block entropy and repeat state
+    (`ZSTD_entropyCompressSeqStore`, `ZSTD_compressBlock_internal`); (6) compressed journals
+    switched to it. Vectors: corpus inputs with the oracle's output length and SHA-256.
+  - [x] Piece 1: `zstd/params.zig` (level 3 rows and `adjustCParams` for a pledged size) and
+    the frame header: single segment while the window covers the source (up to 2 MiB), else
+    a window byte (0x58 above 2 MiB). Header vectors from the oracle; a planted off-by-one
+    on the single-segment test fails them.
