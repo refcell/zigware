@@ -48,44 +48,21 @@ fn CodecConformance(comptime T: type) type {
     };
 }
 
+/// Tasks that commit one entry's cases (commonware's harness runs one entry per thread, and
+/// the entries of a module at once; chunking each entry keeps every core busy instead).
+const workers = 16;
+
 fn verify(comptime name: []const u8, comptime T: type) !void {
     const entry = (try conformance.find(conformance_file, prefix ++ name)).?;
-    try conformance.verify(
+    try conformance.verify_parallel(
         CodecConformance(T),
         std.heap.smp_allocator,
+        std.testing.io,
+        workers,
         prefix ++ name,
         entry.n_cases,
         conformance_file,
     );
-}
-
-/// A verification of one conformance entry, as a function a task can run.
-fn Job(comptime name: []const u8, comptime T: type) type {
-    return struct {
-        fn run() anyerror!void {
-            return verify(name, T);
-        }
-    };
-}
-
-/// Runs `jobs` (each `Job(..).run`) at once, as commonware's test harness runs the entries
-/// of one module on its threads, and returns the first failure after every job finished.
-fn verify_concurrently(comptime jobs: anytype) !void {
-    const io = std.testing.io;
-    var futures: [jobs.len]std.Io.Future(anyerror!void) = undefined;
-    var started: usize = 0;
-    errdefer for (futures[0..started]) |*future| future.await(io) catch {};
-    inline for (jobs) |job| {
-        futures[started] = try io.concurrent(job, .{});
-        started += 1;
-    }
-    var first: anyerror!void = {};
-    for (&futures) |*future| {
-        const result = future.await(io);
-        if (first) |_| first = result else |_| {}
-    }
-    started = 0;
-    return first;
 }
 
 test "conformance: lookup" {
@@ -114,22 +91,20 @@ test "conformance: matrix opening" {
 test "conformance: payment" {
     try skip_unless_slow_tests();
     const tests = "payment::tests::conformance::";
-    try verify_concurrently(.{
-        Job(tests ++ "CodecConformance<State<PublicKey,Digest>>", mod.State(PublicKey, Digest)).run,
-        Job(tests ++ "CodecConformance<Signatures<PublicKey>>", mod.Signatures(PublicKey)).run,
-        Job(
-            tests ++ "CodecConformance<Request<PublicKey,Digest,u64>>",
-            mod.Request(PublicKey, Digest, u64),
-        ).run,
-        Job(
-            tests ++ "CodecConformance<Receipt<PublicKey,PublicKey,Digest,u64>>",
-            mod.Receipt(PublicKey, PublicKey, Digest, u64),
-        ).run,
-        Job(
-            tests ++ "CodecConformance<Challenge<PublicKey,PublicKey,Digest,u64>>",
-            mod.Challenge(PublicKey, PublicKey, Digest, u64),
-        ).run,
-    });
+    try verify(tests ++ "CodecConformance<State<PublicKey,Digest>>", mod.State(PublicKey, Digest));
+    try verify(tests ++ "CodecConformance<Signatures<PublicKey>>", mod.Signatures(PublicKey));
+    try verify(
+        tests ++ "CodecConformance<Request<PublicKey,Digest,u64>>",
+        mod.Request(PublicKey, Digest, u64),
+    );
+    try verify(
+        tests ++ "CodecConformance<Receipt<PublicKey,PublicKey,Digest,u64>>",
+        mod.Receipt(PublicKey, PublicKey, Digest, u64),
+    );
+    try verify(
+        tests ++ "CodecConformance<Challenge<PublicKey,PublicKey,Digest,u64>>",
+        mod.Challenge(PublicKey, PublicKey, Digest, u64),
+    );
 }
 
 test "conformance: settlement flow" {
@@ -139,22 +114,20 @@ test "conformance: settlement flow" {
 test "conformance: close" {
     try skip_unless_slow_tests();
     const tests = "close::tests::conformance::";
-    try verify_concurrently(.{
-        Job(tests ++ "CodecConformance<Deposit<PublicKey,u64>>", mod.Deposit(PublicKey, u64)).run,
-        Job(
-            tests ++ "CodecConformance<ForcedWithdrawal<PublicKey,u64>>",
-            mod.ForcedWithdrawal(PublicKey, u64),
-        ).run,
-        Job(
-            tests ++ "CodecConformance<Withdrawal<PublicKey,u64>>",
-            mod.Withdrawal(PublicKey, u64),
-        ).run,
-        Job(tests ++ "CodecConformance<Row<PublicKey,u64>>", mod.Row(PublicKey, u64)).run,
-        Job(
-            tests ++ "CodecConformance<Close<PublicKey,PublicKey,u64>>",
-            mod.Close(PublicKey, PublicKey, u64),
-        ).run,
-    });
+    try verify(tests ++ "CodecConformance<Deposit<PublicKey,u64>>", mod.Deposit(PublicKey, u64));
+    try verify(
+        tests ++ "CodecConformance<ForcedWithdrawal<PublicKey,u64>>",
+        mod.ForcedWithdrawal(PublicKey, u64),
+    );
+    try verify(
+        tests ++ "CodecConformance<Withdrawal<PublicKey,u64>>",
+        mod.Withdrawal(PublicKey, u64),
+    );
+    try verify(tests ++ "CodecConformance<Row<PublicKey,u64>>", mod.Row(PublicKey, u64));
+    try verify(
+        tests ++ "CodecConformance<Close<PublicKey,PublicKey,u64>>",
+        mod.Close(PublicKey, PublicKey, u64),
+    );
 }
 
 test "conformance: summary" {

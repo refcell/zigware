@@ -159,6 +159,107 @@ pub fn compute_hash(comptime C: type, gpa: Allocator, n_cases: u64) !Hash {
     return result;
 }
 
+/// Seeds one task of `compute_hash_parallel` commits at a time.
+pub const chunk_cases: u64 = 256;
+
+/// The most tasks `compute_hash_parallel` runs at once.
+pub const max_workers = 64;
+
+/// The length-prefixed commitments of one chunk of seeds, in seed order.
+const Chunk = struct {
+    bytes: std.ArrayList(u8) = .empty,
+
+    fn commit(comptime C: type, gpa: Allocator, chunk: *Chunk, first: u64, end: u64) !void {
+        assert(first < end and end - first <= chunk_cases);
+        chunk.bytes.clearRetainingCapacity();
+        var seed = first;
+        while (seed < end) : (seed += 1) {
+            const committed = try C.commit(gpa, seed);
+            defer gpa.free(committed);
+            var prefix: [8]u8 = undefined;
+            std.mem.writeInt(u64, &prefix, committed.len, .little);
+            try chunk.bytes.appendSlice(gpa, &prefix);
+            try chunk.bytes.appendSlice(gpa, committed);
+        }
+        assert(seed == end);
+    }
+};
+
+/// `Chunk.commit` for one `C`, as a task `std.Io.concurrent` can run.
+fn Task(comptime C: type) type {
+    return struct {
+        fn run(gpa: Allocator, chunk: *Chunk, first: u64, end: u64) anyerror!void {
+            return Chunk.commit(C, gpa, chunk, first, end);
+        }
+    };
+}
+
+/// `compute_hash` with the commitments computed by up to `workers` tasks on `io`, which must
+/// allow concurrency, in rounds of `workers` chunks of `chunk_cases` seeds. The caller's
+/// thread hashes each round's chunks in seed order, so the hash is `compute_hash`'s. `C.commit`
+/// must be safe to call from several threads at once, and `gpa` thread-safe.
+pub fn compute_hash_parallel(
+    comptime C: type,
+    gpa: Allocator,
+    io: std.Io,
+    workers: u32,
+    n_cases: u64,
+) !Hash {
+    assert(workers >= 1 and workers <= max_workers);
+    var chunks: [max_workers]Chunk = @splat(.{});
+    defer for (&chunks) |*chunk| chunk.bytes.deinit(gpa);
+    var hasher = Sha256.init(.{});
+    var next: u64 = 0;
+    while (next < n_cases) {
+        const round_start = next;
+        const count = try commit_round(C, gpa, io, chunks[0..workers], &next, n_cases);
+        assert(count > 0 and next > round_start);
+        for (chunks[0..count]) |*chunk| hasher.update(chunk.bytes.items);
+    }
+    assert(next == n_cases);
+    var digest: [Sha256.digest_length]u8 = undefined;
+    hasher.final(&digest);
+    var result: Hash = undefined;
+    const written = formatting.hex_encode(&result, &digest);
+    assert(written.len == result.len);
+    return result;
+}
+
+/// Commits the next chunks from `next.*` into `chunks`, one task each, and returns how many
+/// it filled. Every task is awaited before an error returns.
+fn commit_round(
+    comptime C: type,
+    gpa: Allocator,
+    io: std.Io,
+    chunks: []Chunk,
+    next: *u64,
+    n_cases: u64,
+) !usize {
+    assert(chunks.len > 0 and next.* < n_cases);
+    var futures: [max_workers]?std.Io.Future(anyerror!void) = @splat(null);
+    var count: usize = 0;
+    var first_error: anyerror!void = {};
+    while (count < chunks.len and next.* < n_cases) : (count += 1) {
+        const end = @min(n_cases, next.* + chunk_cases);
+        const run = Task(C).run;
+        futures[count] = io.concurrent(run, .{ gpa, &chunks[count], next.*, end }) catch null;
+        // Without a free task, the caller commits this chunk itself.
+        if (futures[count] == null) first_error = run(gpa, &chunks[count], next.*, end);
+        next.* = end;
+        if (first_error) |_| {} else |_| {
+            count += 1;
+            break;
+        }
+    }
+    for (futures[0..count]) |*maybe| {
+        const future = &(maybe.* orelse continue);
+        const result = future.await(io);
+        if (first_error) |_| first_error = result else |_| {}
+    }
+    try first_error;
+    return count;
+}
+
 pub const VerifyError = error{ ConformanceMismatch, ConformanceMissing } || ParseError;
 
 /// Checks that `C` still produces the hash recorded for `type_name` in `file_text`.
@@ -170,6 +271,25 @@ pub fn verify(
     file_text: []const u8,
 ) !void {
     const actual = try compute_hash(C, gpa, n_cases);
+    return check(actual, type_name, n_cases, file_text);
+}
+
+/// `verify` on `compute_hash_parallel`'s hash (the same hash, computed by `workers` tasks).
+pub fn verify_parallel(
+    comptime C: type,
+    gpa: Allocator,
+    io: std.Io,
+    workers: u32,
+    type_name: []const u8,
+    n_cases: u64,
+    file_text: []const u8,
+) !void {
+    const actual = try compute_hash_parallel(C, gpa, io, workers, n_cases);
+    return check(actual, type_name, n_cases, file_text);
+}
+
+/// Compares a computed hash with the entry recorded for `type_name`.
+fn check(actual: Hash, type_name: []const u8, n_cases: u64, file_text: []const u8) !void {
     const entry = try find(file_text, type_name) orelse {
         std.debug.print(
             \\conformance: no entry for '{s}'. Add it:
@@ -226,6 +346,26 @@ test "compute hash matches its definition" {
     _ = formatting.hex_encode(&expected, &expected_digest);
     const actual = try compute_hash(SimpleConformance, testing.allocator, 1);
     try testing.expectEqualSlices(u8, &expected, &actual);
+}
+
+test "compute hash parallel matches compute hash" {
+    // Case counts on both sides of a chunk boundary and of a round boundary, so a dropped,
+    // repeated, or reordered chunk changes the hash.
+    const n = chunk_cases;
+    const counts = [_]u64{ 0, 1, n - 1, n, n + 1, 3 * n + 7 };
+    for (counts) |n_cases| {
+        const expected = try compute_hash(SimpleConformance, testing.allocator, n_cases);
+        for ([_]u32{ 1, 2, 3 }) |workers| {
+            const actual = try compute_hash_parallel(
+                SimpleConformance,
+                testing.allocator,
+                testing.io,
+                workers,
+                n_cases,
+            );
+            try testing.expectEqualSlices(u8, &expected, &actual);
+        }
+    }
 }
 
 test "conformance file names with escapes" {
