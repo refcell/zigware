@@ -203,6 +203,8 @@ Not Criterion benches, so not in the table: `qmdb_gungraun` (an instruction-coun
 `coding_scheme_sizes` (a size report; zigware's `reed_solomon size (shard)` rows),
 `index_scale`, runtime's `storage` workload binary (zigware's `runtime::storage::<workload>`),
 and qmdb's `cold_read`, `scale`, and `constantinople` (zigware's `zig build qmdb-<name>`).
+Crates with no Criterion benches in commonware, so no rows: `resolver`, `broadcast`, and
+`collector` (no `[[bench]]` target or `benches/` dir); zigware has none for them either.
 zigware-only groups, with no commonware counterpart: `clearing::*`, `curve25519::{sign,
 verify, x25519}` (against `std.crypto`), `parallel::{fold, sort_by}`, `journal::zstd::encode`,
 and runtime's I/O backend benches (`runtime::network::echo`, `runtime::storage`).
