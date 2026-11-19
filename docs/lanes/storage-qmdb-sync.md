@@ -70,8 +70,10 @@ it comes first once `any` lands.
   `current::*` entries of commonware's fixed and vec variant registries (`common.CurrentDb`,
   sharing any's partitions plus `grafted-metadata-<suffix>`), so generate and init measure
   current. Commonware's apply_batch has no current variants.
-- [ ] qmdb benches: `chained_growth` (current only), then current's merkleize variants and
-  the opt-in cold_read, constantinople, and scale harnesses.
+- [x] qmdb benches: `chained_growth` (current only, `benches/chained_growth.zig`), current's
+  16 merkleize variants (chunk 32 and 256), and constantinople's two current databases
+  (`Names.grafted_metadata` names their grafted partition). Commonware's cold_read and scale
+  harnesses have no current variants.
 - [x] sync journal (`journal.init`/`resize`/`append` over contiguous journals, `Memory(Op)`)
   and the request tracker (`requests.Requests(F)`), with their commonware tests.
 - [x] sync engine, database, source, harness (crypto lane, T-01a1d57b-08a0-72a4-a12b-10ff47f6049d,
@@ -227,3 +229,4 @@ it comes first once `any` lands.
 - 2026-11-19: current over owned byte values.
 - 2026-11-19: current variants of the qmdb generate and init benches.
 - 2026-11-19: any and current on the shared sync harness.
+- 2026-11-19: current merkleize, chained_growth, and constantinople benches.

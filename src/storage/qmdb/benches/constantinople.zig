@@ -6,9 +6,10 @@
 //!     [updates] [threads] [page_cache] [policy]
 //! ```
 //!
-//! - db: `any::unordered::fixed::mmb`, `any::ordered::fixed::mmb`, or
-//!   `any::unordered::variable::mmb` (the `current` variants are storage-qmdb-sync's). Without
-//!   it, or with a `--` flag first, the harness does nothing.
+//! - db: `any::unordered::fixed::mmb`, `any::ordered::fixed::mmb`,
+//!   `any::unordered::variable::mmb`, `current::unordered::fixed::mmb`, or
+//!   `current::ordered::fixed::mmb`. Without it, or with a `--` flag first, the harness does
+//!   nothing.
 //! - depth: pending ancestor batches under the timed batch (default 0)
 //! - iters: timed iterations (default 15); keys: seeded keys (default 1,000,000)
 //! - reads: keys loaded per batch (default 32,768); read_chunks: split the reads into `stage`
@@ -41,13 +42,21 @@ const items_per_blob: u64 = 10_000_000;
 const churn_batches: u64 = 4;
 const init_cache: usize = 1 << 18;
 
-/// The databases the harness runs (commonware's `db` argument), without `current`.
+/// The databases the harness runs (commonware's `db` argument).
 pub const variants = .{
     common.Variant("any::unordered::fixed::mmb", AnyDb(common.mmb, .unordered, common.FixedDigest)),
     common.Variant("any::ordered::fixed::mmb", AnyDb(common.mmb, .ordered, common.FixedDigest)),
     common.Variant(
         "any::unordered::variable::mmb",
         AnyDb(common.mmb, .unordered, common.VariableDigest),
+    ),
+    common.Variant(
+        "current::unordered::fixed::mmb",
+        common.CurrentDb(common.mmb, .unordered, common.FixedDigest),
+    ),
+    common.Variant(
+        "current::ordered::fixed::mmb",
+        common.CurrentDb(common.mmb, .ordered, common.FixedDigest),
     ),
 };
 
@@ -205,6 +214,7 @@ fn pipeline(
                 "constantinople-var-log"
             else
                 "constantinople-log",
+            .grafted_metadata = "constantinople-grafted-metadata",
         },
     });
     defer session.close() catch |e| std.log.warn("constantinople: destroy failed: {t}", .{e});
@@ -430,6 +440,11 @@ test "constantinople: smoke run reproduces the proportional roots with the fixed
         const root_a = a[std.mem.indexOf(u8, a, "root=").?..];
         try std.testing.expectEqualStrings(root_a, b[std.mem.indexOf(u8, b, "root=").?..]);
     }
+    // Current runs the same pipeline.
+    const current_args = [_][]const u8{
+        "current::ordered::fixed::mmb", "1", "1", "64", "24", "3", "16", "1", "64", "fixed",
+    };
+    try run(gpa, io, &current_args, &outputs[0].writer, &err.writer);
     // No arguments, or a libtest flag, does nothing.
     try run(gpa, io, &.{}, &outputs[0].writer, &err.writer);
     try run(gpa, io, &.{"--list"}, &outputs[0].writer, &err.writer);

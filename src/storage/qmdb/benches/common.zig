@@ -331,6 +331,8 @@ pub const Names = struct {
     merkle_journal: []const u8,
     merkle_metadata: []const u8,
     log: []const u8,
+    /// The grafted metadata partition of a `current` database, if not the default.
+    grafted_metadata: ?[]const u8 = null,
 };
 
 /// One open database of type `D` with its page cache and metrics (commonware creates both
@@ -380,6 +382,9 @@ pub fn Session(comptime D: type) type {
             if (comptime @hasField(D.Cfg, "init_cache")) cfg.init_cache = options.init_cache;
             if (comptime @hasField(D.Cfg, "grafted_metadata_partition")) {
                 cfg.grafted_metadata_partition = "grafted-metadata-" ++ suffix;
+                if (options.names) |names| {
+                    if (names.grafted_metadata) |name| cfg.grafted_metadata_partition = name;
+                }
             }
             self.db = try D.init(gpa, backend, scope, cfg, null);
             assert(self.db.bounds().end > 0);
