@@ -263,10 +263,11 @@ pub fn Probe(comptime P: type) type {
                             .subscribe => |response| self.discovery.subscribe(
                                 response,
                                 &self.net_sender,
-                            ) catch |err| switch (err) {
-                                // Drops every pending subscriber when the probe is freed.
-                                error.BootstrapActivation => return false,
-                                else => return err,
+                            ) catch |err| {
+                                // Drops every pending subscriber when the probe is freed. A
+                                // manager whose `track` cannot fail never infers the error.
+                                if (@as(anyerror, err) == error.BootstrapActivation) return false;
+                                return err;
                             },
                             .attach => |source| self.attach(source),
                         },
