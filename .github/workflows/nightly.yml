@@ -94,6 +94,7 @@ jobs:
   # networks, and log's validators run locally until every node finalizes the same heights;
   # two chat friends exchange messages; flood's peers report traffic (etc/scripts/e2e.sh).
   e2e:
+    if: inputs.only == '' || inputs.only == 'e2e'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -114,3 +115,78 @@ jobs:
         with:
           name: e2e-logs
           path: ${{ runner.temp }}/e2e
+
+  # Live interop with commonware (etc/scripts/interop.sh): its chat, log, and dkg examples,
+  # built from the pinned reference revision, run against zigware's in shared networks. Chat
+  # over discovery, simplex log with a restart, simplex's resolver in both directions, and a
+  # mixed dkg network with a state-syncing joiner of each kind.
+  interop:
+    if: inputs.only == '' || inputs.only == 'interop'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      COMMONWARE_REVISION: a9ffc25f3798d555f34461123e09aefb16f01b60
+    steps:
+      - uses: actions/checkout@v4
+      - name: install zig
+        run: |
+          sh etc/scripts/install-zig.sh "$HOME/zig"
+          echo "$HOME/zig" >> "$GITHUB_PATH"
+          echo "COMMONWARE_REF=$HOME/commonware-ref" >> "$GITHUB_ENV"
+          echo "INTEROP_TARGET=$HOME/interop-target" >> "$GITHUB_ENV"
+      - name: install tmux and rust
+        run: |
+          command -v tmux > /dev/null || { sudo apt-get update && sudo apt-get install -y tmux; }
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+      - name: checkout commonware
+        run: |
+          git init -q "$COMMONWARE_REF"
+          git -C "$COMMONWARE_REF" fetch -q --depth 1 \
+            https://github.com/commonwarexyz/monorepo "$COMMONWARE_REVISION"
+          git -C "$COMMONWARE_REF" checkout -q FETCH_HEAD
+      # Keyed by revision, and saved once the build succeeds, even if interop then fails.
+      - name: restore cargo cache
+        id: cargo-cache
+        uses: actions/cache/restore@v4
+        with:
+          key: interop-cargo-${{ runner.os }}-${{ env.COMMONWARE_REVISION }}
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            ~/interop-target
+      - name: build commonware's examples
+        run: |
+          cd "$COMMONWARE_REF"
+          cargo fetch --locked
+          CARGO_TARGET_DIR="$INTEROP_TARGET" cargo build --release --offline --locked \
+            -p commonware-chat -p commonware-log -p commonware-dkg
+      - name: save cargo cache
+        if: steps.cargo-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          key: interop-cargo-${{ runner.os }}-${{ env.COMMONWARE_REVISION }}
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            ~/interop-target
+      - name: interop
+        env:
+          # The drivers keep a failed run's logs and screens under TMPDIR.
+          TMPDIR: ${{ runner.temp }}/interop
+          # Twice the local default: a runner has four cores to the desktop's many.
+          INTEROP_TIMEOUT: 120
+        run: |
+          set -o pipefail
+          mkdir -p "$TMPDIR"
+          etc/scripts/interop.sh 2>&1 | tee "$TMPDIR/interop.out"
+          # interop.sh exits 0 when it skips, so require its last line.
+          grep -qx "interop: ok" "$TMPDIR/interop.out"
+      - name: logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: interop-logs
+          path: ${{ runner.temp }}/interop

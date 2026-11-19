@@ -99,6 +99,8 @@ def main():
                                              timeout_s)
             detail += "; " + restart_detail
     finally:
+        if result != 0:
+            save_screens(socket)
         tmux(socket, "kill-server", check=False)
         shutil.rmtree(storage, ignore_errors=True)
     if result is None:
@@ -176,6 +178,17 @@ def watch_fetches(socket, window, seconds):
         views.update(int(view) for view in FETCHED.findall(screen))
         time.sleep(0.25)
     return views
+
+
+def save_screens(socket):
+    """Saves every validator's pane, with its scrollback, under $TMPDIR for a failed run."""
+    kept = tempfile.mkdtemp(prefix="zigware-interop-log-screens-")
+    for _, seed in NODES:
+        screen = tmux(socket, "capture-pane", "-p", "-S", "-", "-t", f"log:node{seed}",
+                      check=False)
+        with open(os.path.join(kept, f"node{seed}.screen"), "w") as out:
+            out.write(screen)
+    print(f"interop-log: validator screens kept in {kept}")
 
 
 def longest_run(views):

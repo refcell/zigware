@@ -18,6 +18,7 @@ import select
 import signal
 import struct
 import sys
+import tempfile
 import termios
 import time
 
@@ -120,7 +121,7 @@ def main():
             print(f"interop: {side} received the other side's message after {seconds:.1f}s")
     if None in got.values():
         for peer in (rust, zig):
-            path = f"/tmp/interop-{peer.name}.screen"
+            path = os.path.join(tempfile.gettempdir(), f"interop-{peer.name}.screen")
             with open(path, "wb") as out:
                 out.write(peer.screen_text())
             print(f"interop: {peer.name} screen text saved to {path}")

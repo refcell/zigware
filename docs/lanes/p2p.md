@@ -755,6 +755,12 @@ After:
     request in the same window). The coding lane fixed it in f1e5c99, with a regression
     test.
 - No wire mismatch turned up, so no vector was added.
+- [x] Nightly CI: nightly.yml's `interop` job (`gh workflow run nightly.yml -f only=interop`
+  runs it alone) fetches commonware at the pinned revision, builds its chat, log, and dkg
+  examples with cargo (registry and target cached by revision, saved once the build
+  succeeds), and runs interop.sh. A skip fails the job, and a failed run uploads
+  `interop-logs`: the dkg nodes' logs, the log validators' screens, and the chat screens,
+  which the drivers keep under `$TMPDIR`.
 
 ## Log
 - 2026-11-16: (parallel lane) lookup: graceful and clean shutdown, rate limiting, restarts,
