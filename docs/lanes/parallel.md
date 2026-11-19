@@ -169,33 +169,33 @@ Every commonware `#[test]` in this lane's crates (macro and rstest cases expande
 | Total | 236 | 102 | 49 | 85 |
 
 Open:
-- [ ] `lib.rs:3790` `spawn_inlines_a_sub_overhead_job`: adaptive spawn honors an inline decision
+- [x] `lib.rs:3790` `spawn_inlines_a_sub_overhead_job`: adaptive spawn honors an inline decision
   (runs on caller)
-- [ ] `lib.rs:3833` `spawn_keeps_offloading_big_jobs`: adaptive spawn of a 2ms job always runs on
+- [x] `lib.rs:3833` `spawn_keeps_offloading_big_jobs`: adaptive spawn of a 2ms job always runs on
   the pool
-- [ ] `lib.rs:3885` `measured_run_records_busy_time_of_all_items`: map busy time is the sum of item
+- [x] `lib.rs:3885` `measured_run_records_busy_time_of_all_items`: map busy time is the sum of item
   times
-- [ ] `lib.rs:3894` `measured_join_excludes_idle_waits`: join is charged both sides' work, not the
+- [x] `lib.rs:3894` `measured_join_excludes_idle_waits`: join is charged both sides' work, not the
   joiner's wait
-- [ ] `lib.rs:3928` `measured_run_excludes_queueing`: busy time excludes the time queued behind busy
+- [x] `lib.rs:3928` `measured_run_excludes_queueing`: busy time excludes the time queued behind busy
   workers
-- [ ] `lib.rs:4520` `run_batches_runs_serial_decision_on_calling_thread`: serial policy decision
+- [x] `lib.rs:4520` `run_batches_runs_serial_decision_on_calling_thread`: serial policy decision
   gives one whole batch
-- [ ] `lib.rs:4669` `run_batches_records_only_complete_success`: mapping or assembly errors record
+- [x] `lib.rs:4669` `run_batches_records_only_complete_success`: mapping or assembly errors record
   no samples
-- [ ] `lib.rs:4697` `run_batches_keeps_one_policy_decision_and_fixed_execution`: one run_batches
+- [x] `lib.rs:4697` `run_batches_keeps_one_policy_decision_and_fixed_execution`: one run_batches
   makes one policy entry
-- [ ] `lib.rs:5043` `adaptive_policy_records_all_adaptive_operations`: each of 12 operations makes
+- [x] `lib.rs:5043` `adaptive_policy_records_all_adaptive_operations`: each of 12 operations makes
   its own entry
-- [ ] `lib.rs:5095` `adaptive_policy_buckets_by_input_size`: map lens 1, 2, 3 make two entries
-- [ ] `lib.rs:5106` `adaptive_policy_buckets_by_work_multiplier`: multipliers 1, 2, 3 make two
+- [x] `lib.rs:5095` `adaptive_policy_buckets_by_input_size`: map lens 1, 2, 3 make two entries
+- [x] `lib.rs:5106` `adaptive_policy_buckets_by_work_multiplier`: multipliers 1, 2, 3 make two
   entries
-- [ ] `lib.rs:5117` `adaptive_run_buckets_by_input_size`: run lens 1, 2, 3 make two entries
-- [ ] `lib.rs:5162` `adaptive_policy_keys_default_methods_by_external_callsite`: fold and
+- [x] `lib.rs:5117` `adaptive_run_buckets_by_input_size`: run lens 1, 2, 3 make two entries
+- [x] `lib.rs:5162` `adaptive_policy_keys_default_methods_by_external_callsite`: fold and
   run_batches key by the caller
-- [ ] `lib.rs:5175` `adaptive_policy_keys_partition_map_by_external_callsite`: map_partition keys by
+- [x] `lib.rs:5175` `adaptive_policy_keys_partition_map_by_external_callsite`: map_partition keys by
   the caller
-- [ ] `lib.rs:5189` `join_shares_policy_entry_per_callsite`: repeated joins at one site share one
+- [x] `lib.rs:5189` `join_shares_policy_entry_per_callsite`: repeated joins at one site share one
   entry
 - [ ] `policy.rs:2140` `spawn_placement_recovers_cold_loser`: a cold Wide seed regains the lead at
   its probe
