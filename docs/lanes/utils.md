@@ -199,6 +199,14 @@ encoding parts as soon as `codec` has its core API (see docs/lanes/codec.md).
 
 ## Test audit (2026-11-19, against main)
 
+Drift check (commonware 43b357a41 to a9ffc25f3, p2p lane, 2026-11-19): 883eae27e moves the proptests
+to minifuzz with the same names and checks: bitmap `is_unset_matches_naive`, faults
+`test_n5f1_quorum_relationships` and `test_bft_model_safety_property`, and cache
+`cache_invariants_hold{,_with_wide_small}` (body moved to `cache/fuzz.rs`), plus `utils/src/fuzz.rs`
+`test_fuzz_plan` over all of them. All stay ported. "fuzz cache" now runs `check_invariants` after
+every operation, as commonware's `exercise_cache` does (planted bug: `clear` keeping its free list,
+caught).
+
 Every commonware `#[test]` in this lane's crates (macro and rstest cases expanded where noted), matched by reading both sides: ported (a Zig test checks the behavior, often one consolidated test), open, or not portable with the reason. Written by the consensus-marshal lane; tick a box when its test lands.
 
 ### utils (everything but bitmap/)

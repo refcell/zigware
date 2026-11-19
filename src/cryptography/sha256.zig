@@ -88,6 +88,58 @@ test "sha256 merkle node shapes match streaming" {
     try fuzz.run_plan(Sha256, &.{ &left_position, &a, &b }, &.{ &right_position, &c, &d });
 }
 
+/// Splits `message` into consecutive parts of `lengths` (at most four).
+fn split(message: []const u8, lengths: []const usize, parts: *[4][]const u8) []const []const u8 {
+    assert(lengths.len <= parts.len);
+    var offset: usize = 0;
+    for (lengths, 0..) |length, index| {
+        parts[index] = message[offset..][0..length];
+        offset += length;
+    }
+    assert(offset == message.len);
+    return parts[0..lengths.len];
+}
+
+test "sha256 single-message shapes and near misses match streaming" {
+    // commonware `test_hash_single_shape_matches_streaming`: the MMR node, BMT node, MMR leaf,
+    // and BMT leaf shapes over uniform, counting, and unaligned messages.
+    const shapes = [_][]const usize{ &.{ 8, 32, 32 }, &.{ 32, 32 }, &.{ 8, 32 }, &.{ 4, 32 } };
+    var backing: [5][73]u8 = undefined;
+    for (0..73) |i| {
+        backing[0][i] = 0;
+        backing[1][i] = 0xff;
+        backing[2][i] = @truncate(i);
+        backing[3][i] = 0xff -% @as(u8, @truncate(i));
+        backing[4][i] = @as(u8, @truncate(i)) *% 31;
+    }
+    var parts: [4][]const u8 = undefined;
+    for (shapes) |lengths| {
+        var total: usize = 0;
+        for (lengths) |length| total += length;
+        for (&backing, 0..) |*message, index| {
+            // The last message starts one byte into its buffer, for unaligned loads.
+            const start: usize = if (index == 4) 1 else 0;
+            const split_parts = split(message[start..][0..total], lengths, &parts);
+            try testing.expect(Sha256.hash(split_parts).eql(streamed(split_parts)));
+        }
+    }
+
+    // commonware `test_hash_single_near_miss_matches_streaming`: shapes a byte or a split away
+    // from those above.
+    const near_misses = [_][]const usize{
+        &.{ 7, 32 },  &.{ 9, 32 },     &.{ 3, 32 },        &.{ 5, 32 }, &.{ 8, 31 },
+        &.{ 32, 33 }, &.{ 8, 32, 31 }, &.{ 8, 32, 32, 1 }, &.{72},      &.{40},
+    };
+    var counting: [73]u8 = undefined;
+    for (&counting, 0..) |*byte, i| byte.* = @truncate(i);
+    for (near_misses) |lengths| {
+        var total: usize = 0;
+        for (lengths) |length| total += length;
+        const split_parts = split(counting[0..total], lengths, &parts);
+        try testing.expect(Sha256.hash(split_parts).eql(streamed(split_parts)));
+    }
+}
+
 test "sha256 hash_pair matches hash for BMT node shapes" {
     const zero: [32]u8 = @splat(0);
     const ff: [32]u8 = @splat(0xff);

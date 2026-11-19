@@ -1219,8 +1219,9 @@ fn fuzz_cache(_: void, generator: *rng.FuzzRng) !void {
         }
         try expectEqual(present, cache.len());
         try expectEqual(present == 0, cache.is_empty());
+        // Like commonware's `exercise_cache`, check the structure after every operation.
+        try check_invariants(&cache);
     }
-    try check_invariants(&cache);
 }
 
 test "fuzz cache" {

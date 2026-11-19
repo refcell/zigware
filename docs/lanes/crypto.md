@@ -262,6 +262,16 @@ handshake), then certificate, secp256r1, the rest, zk last. banderwagon moved to
 
 ### Test audit: crypto (2026-11-19, commonware 43b357a41, p2p lane)
 
+Drift check (commonware 43b357a41 to a9ffc25f3, p2p lane, 2026-11-19): add127f2c adds SHA-NI
+single-message kernels for the merkle shapes, with `test_hash_single_shape_matches_streaming` (4
+cases) and `test_hash_single_near_miss_matches_streaming` (10 cases). Both are ported in sha256.zig
+"sha256 single-message shapes and near misses match streaming" (planted bug: `hash` dropping a part
+of a `[5, 32]` message, caught). The kernels and the direct arm call in
+`test_sha256_hash_specialized_arms` are not portable: zigware's `hash` streams through std with no
+shape dispatch. 30249896c (clearing upper vector state before the SHA-NI pair kernels) is x86
+assembly only. The bloomfilter, feldman_desmedt, bulletproofs ipa, and sha256 x16 edits drop clones
+or rename variables, with no behavior change.
+
 Every `#[test]`/`#[rstest]` fn in commonware `cryptography/src (outside bls12381 and reed_solomon)`,
 with each `#[case]` and each test-generating macro expansion counted separately, matched to a
 zigware test by name or by reading both bodies (a zigware test may cover several). 435 tests: 394

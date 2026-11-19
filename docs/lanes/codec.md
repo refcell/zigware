@@ -212,6 +212,13 @@ TOML entries; here a missing entry fails `verify` and prints the line to add), a
 
 ## Test audit (2026-11-19, against main)
 
+Drift check (commonware 43b357a41 to a9ffc25f3, p2p lane, 2026-11-19): 883eae27e folds
+`types/lazy.rs`'s six proptests into one minifuzz `test_lazy_matches_direct` and adds
+`codec/src/fuzz.rs` `test_fuzz_plan`, which runs the same Lazy plan. The properties are unchanged,
+and `types/lazy.zig`'s exhaustive tests over all 256 bytes already check each one (encoding through
+`new` and `deferred`, `new` equal to `deferred`, order and equality, decoding agreement). No code
+change.
+
 Every commonware `#[test]` in this lane's crates (macro and rstest cases expanded where noted), matched by reading both sides: ported (a Zig test checks the behavior, often one consolidated test), open, or not portable with the reason. Written by the consensus-marshal lane; tick a box when its test lands.
 
 ### codec

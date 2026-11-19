@@ -176,6 +176,9 @@ that harness. It builds on `coding` (ReedSolomon), `consensus.types.coding.Commi
 
 ### Test audit: broadcast (2026-11-19, commonware 43b357a41)
 
+Drift check (commonware 43b357a41 to a9ffc25f3, p2p lane, 2026-11-19): `buffered/mod.rs` drops two
+clones in its tests. No behavior or test change.
+
 Every `#[test]`/`#[test_traced]`/`#[rstest]` fn in commonware `broadcast/src`, matched to a zigware
 test by name or by reading both bodies (a zigware test may cover several). 30 tests: 30 ported, 0
 open, 0 not portable.

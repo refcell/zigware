@@ -189,6 +189,10 @@ Not portable:
 
 ### Test audit: bls-math (2026-11-19, commonware 43b357a41, p2p lane)
 
+Drift check (commonware 43b357a41 to a9ffc25f3, p2p lane, 2026-11-19): `math/algebra.rs` renames an
+import, `bls12381/dkg/feldman_desmedt.rs` drops clones in its test plan, and
+`math/proptest-regressions/ntt.txt` is deleted. No behavior or test change.
+
 Every `#[test]`/`#[rstest]` fn in commonware `cryptography/src/bls12381`, with each `#[case]` and
 each test-generating macro expansion counted separately, matched to a zigware test by name or by
 reading both bodies (a zigware test may cover several). 288 tests: 267 ported, 5 open, 16 not

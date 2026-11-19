@@ -228,6 +228,10 @@ time, files, and network: build on it rather than around it where it fits.
 
 ## Test audit (2026-11-19, against main)
 
+Drift check (commonware 43b357a41 to a9ffc25f3, p2p lane, 2026-11-19): 162216038 drops a clone in an
+iouring test and restructures the test-only flush-failure injection in `storage/iouring.rs`.
+Behavior is unchanged and there is nothing to port.
+
 Every commonware `#[test]` in this lane's crates (macro and rstest cases expanded where noted), matched by reading both sides: ported (a Zig test checks the behavior, often one consolidated test), open, or not portable with the reason. Written by the consensus-marshal lane; tick a box when its test lands.
 
 ### runtime (everything but iouring/, storage/, iobuf/)

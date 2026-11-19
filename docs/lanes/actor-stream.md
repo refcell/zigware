@@ -117,6 +117,9 @@ see docs/lanes/runtime.md). Write library code against `std.Io`.
 
 ### Test audit: stream (2026-11-19, commonware 43b357a41)
 
+Drift check (commonware 43b357a41 to a9ffc25f3, p2p lane, 2026-11-19): stream changes only its
+Cargo.toml files. Nothing to port.
+
 Every `#[test]`/`#[test_traced]`/`#[rstest]` fn in commonware `stream/src`, matched to a zigware
 test by name or by reading both bodies (a zigware test may cover several). 39 tests: 35 ported, 1
 open, 3 not portable.
