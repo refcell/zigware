@@ -232,7 +232,13 @@ by name or by reading both bodies (a zigware test may cover several). 476 tests:
 open, 31 not portable.
 
 `lib.rs`'s `recipient_unions` is one rstest fn of 25 cases (5 x 5 values); the zigware test covers
-all 25. Lookup's `dial_timeout` is configured but unused by design (the dial relies on the handshake
+all 25.
+
+Drift check (2026-11-19, commonware a9ffc25f3): since 43b357a41 only 162216038 touches `p2p/`
+(Cargo `rust-version` and lint settings, and a dropped `.clone()` in `simulated/network.rs`). No
+test was added or changed, and no behavior changed, so the table above still holds.
+
+Lookup's `dial_timeout` is configured but unused by design (the dial relies on the handshake
 and transport connect timeouts, see Decisions), so its dialer timeout test is to be adapted to that.
 
 | commonware file | tests | ported | open | not portable |
