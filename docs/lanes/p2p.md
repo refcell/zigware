@@ -685,6 +685,24 @@ After:
   frames, so the decoder fuzzes cover their parsing; driving `handle_network` with arbitrary
   decoded messages has no commonware counterpart and is not added.
 
+### Live interop with commonware (2026-11-19, commonware a9ffc25f3)
+
+- [x] Discovery, through the chat examples: `etc/scripts/interop.sh` builds commonware's
+  `examples/chat` offline from the reference clone (target directory outside the repo) and
+  zigware's chat, then `etc/scripts/interop_chat.py` runs them in pseudo-terminals as friends 1
+  (commonware, bootstrapper) and 2 (zigware). Each side sends a chat line until the other side
+  shows it as a received line. Both directions arrive (2 to 17 s, depending on discovery's dial
+  timing), which needs SAKE, CUPS with ChaCha20-Poly1305, and discovery's greeting, bit vector,
+  and peer exchange to agree byte for byte. A control run with a dead bootstrapper fails. The
+  script skips (exit 0) without cargo, python3, or the reference clone.
+- [x] Lookup, one-off: a scratch commonware lookup peer (Rust, kept outside the repo at
+  `~/.cache/zigware/interop/lookup-peer`, built offline against the reference's `Cargo.lock`)
+  and a scratch zigware lookup peer on the production runtime, ed25519 seeds 1 and 2 tracked at
+  id 0 on 127.0.0.1. Each sent a message on channel 0 and received the other's from the right
+  key. With different namespaces, neither side connects. Not scripted, because the Rust peer
+  is not in the repo.
+- No wire mismatch turned up, so no vector was added.
+
 ## Log
 - 2026-11-16: (parallel lane) lookup: graceful and clean shutdown, rate limiting, restarts,
   duplicate addresses, multi-index, and custom handshake tests; directory metrics with
