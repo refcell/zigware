@@ -30,6 +30,9 @@ pub fn Current(comptime D: type) type {
         /// reach it.
         pub const SyncTarget = qmdb.sync.Target(D.Family, D.Digest);
         pub const Shared = db.Shared(Self);
+        /// qmdb any/current reads, batch reads, and merkleize take `*const` and are safe from
+        /// several tasks at once, so `Shared` read guards share the database.
+        pub const concurrent_reads = true;
 
         inner: D,
 

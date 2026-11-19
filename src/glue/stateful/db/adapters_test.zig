@@ -110,12 +110,14 @@ comptime {
 
 /// Storage, a page cache, and metrics for one adapter's database.
 const Harness = struct {
+    io: std.Io,
     storage: runtime.buffer.mocks.Storage,
     cache_ref: runtime.buffer.paged.CacheRef,
     registry: metrics.Registry,
 
-    fn init(harness: *Harness) !void {
+    fn init(harness: *Harness, io: std.Io) !void {
         harness.* = .{
+            .io = io,
             .storage = .init(gpa),
             .cache_ref = try .init(gpa, 101, 11),
             .registry = metrics.Registry.init(gpa),
@@ -131,7 +133,7 @@ const Harness = struct {
     fn open(harness: *Harness, comptime DB: type) !DB.Shared {
         const env: db.Env = .{
             .gpa = gpa,
-            .io = testing.io,
+            .io = harness.io,
             .storage = harness.storage.interface(),
             .scope = metrics.Scope.init(&harness.registry).child("db"),
         };
@@ -226,7 +228,7 @@ fn empty_merkleized(comptime DB: type, shared: DB.Shared) !DB.Merkleized {
 
 fn expect_stale_merkleize_fails(comptime DB: type) !void {
     var harness: Harness = undefined;
-    try harness.init();
+    try harness.init(testing.io);
     defer harness.deinit();
     const shared = try harness.open(DB);
     defer shared.deinit();
@@ -244,7 +246,7 @@ fn expect_stale_merkleize_fails(comptime DB: type) !void {
 
 fn expect_initial_target_and_empty_apply(comptime DB: type) !void {
     var harness: Harness = undefined;
-    try harness.init();
+    try harness.init(testing.io);
     defer harness.deinit();
     const initial = DB.Shared.initial_sync_targets();
     const shared = try harness.open(DB);
@@ -265,4 +267,146 @@ test "stateful db adapters: merkleizing a stale batch fails" {
 
 test "stateful db adapters: the initial target matches a fresh database and an empty apply" {
     inline for (initial_cases) |DB| try expect_initial_target_and_empty_apply(DB);
+}
+
+/// Tasks over a `DB` shared database, recording when they got through.
+fn Tasks(comptime DB: type) type {
+    return struct {
+        fn read(shared: DB.Shared, done: *bool) anyerror!void {
+            var guard = try shared.read();
+            defer guard.deinit();
+            _ = guard.get().sync_target();
+            done.* = true;
+        }
+
+        fn write(shared: DB.Shared, done: *bool) anyerror!void {
+            var batch = try empty_merkleized(DB, shared);
+            defer batch.deinit();
+            try shared.apply(&batch);
+            done.* = true;
+        }
+    };
+}
+
+fn guard_sharing(comptime DB: type) fn (std.Io) anyerror!void {
+    return struct {
+        fn body(io: std.Io) anyerror!void {
+            var harness: Harness = undefined;
+            try harness.init(io);
+            defer harness.deinit();
+            const shared = try harness.open(DB);
+            defer shared.deinit();
+            var first = try shared.read();
+            var first_held = true;
+            defer if (first_held) first.deinit();
+            var reader_done = false;
+            var reader = try io.concurrent(Tasks(DB).read, .{ shared, &reader_done });
+            defer reader.cancel(io) catch {};
+            try io.sleep(.fromMilliseconds(10), .awake);
+            // A second reader shares the guard only when the database opts in.
+            try testing.expectEqual(DB.Shared.concurrent, reader_done);
+            var writer_done = false;
+            var writer = try io.concurrent(Tasks(DB).write, .{ shared, &writer_done });
+            defer writer.cancel(io) catch {};
+            try io.sleep(.fromMilliseconds(10), .awake);
+            // A writer waits for every reader.
+            try testing.expect(!writer_done);
+            first.deinit();
+            first_held = false;
+            try reader.await(io);
+            try writer.await(io);
+            try testing.expect(reader_done and writer_done);
+        }
+    }.body;
+}
+
+/// Runs `body` on a deterministic runtime that fails after 5 simulated seconds.
+fn run_deterministic(comptime body: fn (std.Io) anyerror!void) !void {
+    const timeout_ns = 5 * std.time.ns_per_s;
+    var runner = try runtime.deterministic.Runner.init(gpa, .{ .timeout_ns = timeout_ns });
+    defer runner.deinit();
+    try try runner.start(body, .{runner.io()});
+}
+
+test "stateful db adapters: concurrent-read databases share read guards; writers wait" {
+    comptime std.debug.assert(AnyFixed.Shared.concurrent);
+    comptime std.debug.assert(CurrentUnorderedFixed.Shared.concurrent);
+    comptime std.debug.assert(!KeylessFixed.Shared.concurrent);
+    inline for (.{ AnyFixed, CurrentUnorderedFixed, KeylessFixed }) |DB| {
+        try run_deterministic(guard_sharing(DB));
+    }
+}
+
+fn digest_of(tag: []const u8, i: u64) Digest {
+    var bytes: [8]u8 = undefined;
+    std.mem.writeInt(u64, &bytes, i, .big);
+    return Sha256.hash(&.{ tag, &bytes });
+}
+
+const stress_keys = 16;
+
+/// Reads every key under shared guards and merkleizes batches, beside a writer.
+fn Stress(comptime DB: type) type {
+    return struct {
+        fn reader(shared: DB.Shared) anyerror!void {
+            for (0..40) |_| {
+                {
+                    var guard = try shared.read();
+                    defer guard.deinit();
+                    for (0..stress_keys) |i| {
+                        const found = try guard.get().inner.get(&digest_of("key", i));
+                        if (found) |value| try testing.expect(value.eql(digest_of("value", i)));
+                    }
+                }
+                var batch = try shared.new_batches();
+                errdefer batch.deinit();
+                try batch.write(digest_of("reader", 0), digest_of("value", 0));
+                // A writer may have applied since the batch was built.
+                var merkleized = batch.merkleize() catch |err| switch (err) {
+                    error.StaleBatch => {
+                        batch.deinit();
+                        continue;
+                    },
+                    else => return err,
+                };
+                merkleized.deinit();
+            }
+        }
+
+        fn run() !void {
+            const io = testing.io;
+            var harness: Harness = undefined;
+            try harness.init(io);
+            defer harness.deinit();
+            const shared = try harness.open(DB);
+            defer shared.deinit();
+            var readers: [4]std.Io.Future(anyerror!void) = undefined;
+            var started: usize = 0;
+            defer for (readers[0..started]) |*future| future.cancel(io) catch {};
+            for (&readers) |*future| {
+                future.* = try io.concurrent(reader, .{shared});
+                started += 1;
+            }
+            for (0..stress_keys) |i| {
+                var batch = try shared.new_batches();
+                errdefer batch.deinit();
+                try batch.write(digest_of("key", i), digest_of("value", i));
+                var merkleized = try batch.merkleize();
+                defer merkleized.deinit();
+                try shared.apply(&merkleized);
+            }
+            for (readers[0..started]) |*future| try future.await(io);
+            started = 0;
+            var guard = try shared.read();
+            defer guard.deinit();
+            for (0..stress_keys) |i| {
+                const value = (try guard.get().inner.get(&digest_of("key", i))).?;
+                try testing.expect(value.eql(digest_of("value", i)));
+            }
+        }
+    };
+}
+
+test "stateful db adapters: readers merkleize beside a writer" {
+    inline for (.{ AnyFixed, CurrentUnorderedFixed }) |DB| try Stress(DB).run();
 }

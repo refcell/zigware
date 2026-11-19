@@ -81,13 +81,18 @@ const lost_message =
 /// `WriteSlot.put`; a slot released without a put leaves the database lost, and every later
 /// `read` or `write` panics.
 ///
-/// Reads and writes are exclusive: storage reads take `*Db` (journal reads fill buffers), so
-/// two readers must not run at once. As in commonware, holding a guard while acquiring the same
+/// Reads and writes are exclusive unless `DB` declares `concurrent_reads` (see
+/// `concurrent_reads`): most storage reads take `*Db` (journal reads fill buffers), so two
+/// readers must not run at once. As in commonware, holding a guard while acquiring the same
 /// database again deadlocks.
 pub fn Shared(comptime DB: type) type {
     return struct {
         const Self = @This();
         pub const Database = DB;
+        /// Read guards share the database (commonware's `AsyncRwLock`).
+        pub const concurrent = concurrent_reads(DB);
+        /// What a read guard gives: `*const DB` when reads run concurrently.
+        pub const ReadPointer = if (concurrent) *const DB else *DB;
 
         cell: *Cell,
 
@@ -95,8 +100,24 @@ pub fn Shared(comptime DB: type) type {
             gpa: Allocator,
             io: Io,
             label: []const u8,
-            mutex: Io.Mutex = .init,
+            lock: if (concurrent) Io.RwLock else Io.Mutex = .init,
             database: ?DB,
+
+            fn lock_shared(cell: *Cell) Io.Cancelable!void {
+                if (concurrent) try cell.lock.lockShared(cell.io) else try cell.lock.lock(cell.io);
+            }
+
+            fn unlock_shared(cell: *Cell) void {
+                if (concurrent) cell.lock.unlockShared(cell.io) else cell.lock.unlock(cell.io);
+            }
+
+            fn unlock_exclusive(cell: *Cell) void {
+                cell.lock.unlock(cell.io);
+            }
+
+            fn try_lock_exclusive(cell: *Cell) bool {
+                return if (concurrent) cell.lock.tryLock(cell.io) else cell.lock.tryLock();
+            }
         };
 
         /// Shares `database`, identified by `label` in diagnostics.
@@ -109,7 +130,7 @@ pub fn Shared(comptime DB: type) type {
         /// Closes the database (if it was not lost) and frees the handle. No guard may be held.
         pub fn deinit(self: Self) void {
             const cell = self.cell;
-            assert(cell.mutex.tryLock());
+            assert(cell.try_lock_exclusive());
             if (cell.database) |*database| database.deinit();
             const gpa = cell.gpa;
             gpa.destroy(cell);
@@ -126,18 +147,23 @@ pub fn Shared(comptime DB: type) type {
 
         /// Access to the database; panics if it was lost.
         pub fn read(self: Self) Io.Cancelable!ReadGuard {
-            try self.cell.mutex.lock(self.cell.io);
+            try self.cell.lock_shared();
             if (self.cell.database == null) {
-                self.cell.mutex.unlock(self.cell.io);
+                self.cell.unlock_shared();
                 @panic(lost_message);
             }
             return .{ .cell = self.cell };
         }
 
-        /// Takes the database out for a mutation; panics if it was lost.
+        /// Takes the database out for a mutation, excluding every reader; panics if it was
+        /// lost.
         pub fn write(self: Self) Io.Cancelable!WriteSlot {
-            const guard = try self.read();
-            return .{ .cell = guard.cell };
+            try self.cell.lock.lock(self.cell.io);
+            if (self.cell.database == null) {
+                self.cell.unlock_exclusive();
+                @panic(lost_message);
+            }
+            return .{ .cell = self.cell };
         }
 
         /// A read-only handle (commonware `Reader`).
@@ -154,12 +180,12 @@ pub fn Shared(comptime DB: type) type {
         pub const ReadGuard = struct {
             cell: *Cell,
 
-            pub fn get(guard: ReadGuard) *DB {
+            pub fn get(guard: ReadGuard) ReadPointer {
                 return &guard.cell.database.?;
             }
 
             pub fn deinit(guard: *ReadGuard) void {
-                guard.cell.mutex.unlock(guard.cell.io);
+                guard.cell.unlock_shared();
                 guard.* = undefined;
             }
         };
@@ -175,7 +201,7 @@ pub fn Shared(comptime DB: type) type {
             /// Releases the lock after a successful mutation.
             pub fn put(slot: *WriteSlot) void {
                 assert(slot.cell.database != null);
-                slot.cell.mutex.unlock(slot.cell.io);
+                slot.cell.unlock_exclusive();
                 slot.* = undefined;
             }
 
@@ -183,7 +209,7 @@ pub fn Shared(comptime DB: type) type {
             pub fn lose(slot: *WriteSlot) void {
                 slot.cell.database.?.deinit();
                 slot.cell.database = null;
-                slot.cell.mutex.unlock(slot.cell.io);
+                slot.cell.unlock_exclusive();
                 slot.* = undefined;
             }
         };
@@ -253,6 +279,14 @@ pub fn Shared(comptime DB: type) type {
     };
 }
 
+/// Whether `DB` declares `pub const concurrent_reads = true`: its reads (`sync_target`,
+/// `new_batch`, and its batches' reads and merkleize) take `*const DB` and are safe from
+/// several tasks at once, so `Shared(DB)` lets read guards share it. Batches merkleize on the
+/// reader's task with the database's allocator, which must then be thread-safe.
+pub fn concurrent_reads(comptime DB: type) bool {
+    return @hasDecl(DB, "concurrent_reads") and DB.concurrent_reads;
+}
+
 /// Read-only access to a database managed by `Stateful`: it cannot write, build or apply
 /// batches, finalize, or prune, so observing finalized state cannot invalidate speculative
 /// batches.
@@ -270,7 +304,7 @@ pub fn Reader(comptime DB: type) type {
 /// this module construct it, and the batch may keep only `shared`.
 pub fn BatchContext(comptime DB: type) type {
     return struct {
-        database: *DB,
+        database: Shared(DB).ReadPointer,
         shared: Shared(DB),
     };
 }

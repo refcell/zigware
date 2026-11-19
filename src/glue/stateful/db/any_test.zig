@@ -484,10 +484,11 @@ fn syncs_from_populated(comptime Any: type) !void {
     try seed_keys(source);
     const target = try source.committed_targets();
 
-    var guard = try source.read();
-    defer guard.deinit();
+    // Serving reads the journal through `*Log`, so it holds the database exclusively.
+    var slot = try source.write();
+    defer slot.put();
     const Log = @FieldType(Any.Database, "log");
-    var log_source: qmdb.sync.JournalSource(Family, Log) = .{ .journal = &guard.get().inner.log };
+    var log_source: qmdb.sync.JournalSource(Family, Log) = .{ .journal = &slot.get().inner.log };
     var harness: Harness(Any) = undefined;
     try harness.init();
     defer harness.deinit();

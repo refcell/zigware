@@ -476,11 +476,13 @@ ones: d = deployer (thread T-01a1d5b9-c237), u = utils, j = storage-journal
 - [ ] actor/core: the rest of processing.rs's tests. First half (1070-3396) here, in
   core/processing_early_test.zig: 10 of 22 so far. Second half (3451-5885) is with simplex
   (T-01a1d5ad-c8d6), in core/processing_late_test.zig. Both build on core/testing.zig.
-- [ ] db: `Shared` as commonware's `AsyncRwLock` for DBs declaring `concurrent_reads`
-  (`utils.sync.UpgradableRwLock`, `*const DB` read guards), once qmdb any/current batch reads
-  take `*const D` (57b2db0, storage-qmdb-sync). Merkleize allocates from the database's
-  `gpa` on the reader's thread, so such a DB's allocator must be thread-safe. `SharedSource`
-  stays on the mutex until `JournalSource` and compact `serve` are const-safe (deployer).
+- [x] db: `Shared` as commonware's `AsyncRwLock` for DBs declaring `concurrent_reads = true`
+  (any and current): an `Io.RwLock` whose read guards give `*const DB`, while `write` keeps
+  `*DB`. Batches merkleize on the reader's task with the database's allocator, which must be
+  thread-safe. `SharedSource.serve` and proofs take the exclusive slot (the authenticated
+  journal hashes through its own state). Tested in adapters_test.zig: guard sharing and
+  writers waiting (deterministic), and readers merkleizing beside a writer (threaded).
+- [ ] db: opt keyless and immutable into `concurrent_reads` (const reads since 9589543).
 - [ ] tests: single_db_app.rs's engine on `glue.simulate` (simplex, marshal, buffered broadcast,
   marshal and qmdb resolvers, probe, `Stateful`), then tests/mod.rs's scenarios (finalize,
   crash/restart, pruning, state sync, lossy, partitions), multi_db_app, floor, properties.

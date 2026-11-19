@@ -518,9 +518,11 @@ pub fn SharedSource(comptime DB: type) type {
             request: Request,
         ) (Error || Io.Cancelable)!qmdb.sync.Served(Response) {
             assert(request.max_ops() > 0);
-            var guard = try self.shared.read();
-            defer guard.deinit();
-            var source = guard.get().sync_source();
+            // Sources read through `*DB` (the authenticated journal hashes through its own
+            // state), so serving excludes other readers even when they share the database.
+            var slot = try self.shared.write();
+            defer slot.put();
+            var source = slot.get().sync_source();
             return source.serve(gpa, request);
         }
     };

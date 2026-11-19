@@ -195,9 +195,10 @@ fn a_managed_db_applies_a_batch_and_proves_its_value(comptime Current: type) !vo
     try testing.expect(!expected_root.eql(merkleized.ops_root()));
     try apply_and_finalize(shared, &merkleized);
 
-    var guard = try shared.read();
-    defer guard.deinit();
-    const inner = &guard.get().inner;
+    // Proofs hash through the journal (`*Db`), so they hold the database exclusively.
+    var slot = try shared.write();
+    defer slot.put();
+    const inner = &slot.get().inner;
     try testing.expect(inner.root().eql(expected_root));
     try testing.expectEqual(value, (try inner.get(&key)).?);
     var proved = try inner.key_value_proof(&key);
@@ -459,9 +460,10 @@ fn applies_batch_and_proves_exclusion(comptime Current: type) !void {
     const expected_root = merkleized.root();
     try apply_and_finalize(shared, &merkleized);
 
-    var guard = try shared.read();
-    defer guard.deinit();
-    const inner = &guard.get().inner;
+    // Proofs hash through the journal (`*Db`), so they hold the database exclusively.
+    var slot = try shared.write();
+    defer slot.put();
+    const inner = &slot.get().inner;
     const root = inner.root();
     try testing.expect(root.eql(expected_root));
     try testing.expectEqual(value, (try inner.get(&key)).?);
@@ -498,9 +500,10 @@ fn syncs_from_populated(comptime Current: type) !void {
     try seed_keys(source);
     const target = try source.committed_targets();
 
-    var guard = try source.read();
-    defer guard.deinit();
-    var log_source = guard.get().sync_source();
+    // Serving reads the journal through `*Log`, so it holds the database exclusively.
+    var slot = try source.write();
+    defer slot.put();
+    var log_source = slot.get().sync_source();
     var harness: Harness(Current) = undefined;
     try harness.init();
     defer harness.deinit();
