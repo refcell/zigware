@@ -1,7 +1,13 @@
-//! Benchmarks of the production runtime's I/O backends: `std.Io.Threaded` system calls
-//! against our io_uring workers (`production/ring.zig`), on the loads that decide which one
-//! Linux uses by default (docs/lanes/runtime-telemetry.md). commonware has no runtime
-//! benches; the names follow its `runtime::<module>` convention.
+//! Benchmarks of the runtime package.
+//!
+//! - `buffer_paged::{append,read,sync}`: commonware's page-cache benches
+//!   (`runtime/src/utils/buffer/benches`), in `buffer/benches.zig`.
+//!
+//! The rest have no commonware counterpart: they measure the production runtime's I/O
+//! backends, `std.Io.Threaded` system calls against our io_uring workers
+//! (`production/ring.zig`), on the loads that decide which one Linux uses by default
+//! (docs/lanes/runtime-telemetry.md). Their names follow commonware's `runtime::<module>`
+//! convention.
 //!
 //! - `runtime::network::echo`: concurrent TCP connections over loopback, each sending
 //!   fixed-size messages that the server echoes back, one at a time.
@@ -31,6 +37,7 @@ const message_size = 4096;
 const page_size = 4096;
 
 pub fn run(runner: *bench.Runner) !void {
+    try @import("buffer/benches.zig").run(runner);
     inline for (.{ Backend.threaded, Backend.io_uring }) |backend| {
         var ring: Ring = undefined;
         const ring_ready = backend == .threaded or ring_init(&ring, runner.io);

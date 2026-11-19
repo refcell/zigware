@@ -114,8 +114,8 @@ resize, sync), `runtime.storage`, with the in-memory backend `runtime.storage.me
   `src/storage/journal/benches/`, with commonware's names (`journal::<module>/...`).
 - [x] Benches: metadata (`metadata::overwrite`, `restart`, `sync`) under
   `src/storage/metadata/benches/`.
-- [ ] Benches: runtime buffer (`buffer_paged::append`, `read`, `sync`) in
-  `src/runtime/benches.zig`.
+- [x] Benches: runtime buffer (`buffer_paged::append`, `read`, `sync`) under
+  `src/runtime/buffer/benches/`, run from `src/runtime/benches.zig`.
 - Handed to storage-merkle (2026-11-16): `src/storage/journal/zstd.zig`'s real compressor and
   the `journal_fixed_operations` and `queue_operations` fuzz targets.
 
@@ -421,3 +421,4 @@ resize, sync), `runtime.storage`, with the in-memory backend `runtime.storage.me
   after a cancellation).
 - 2026-11-19: ported the 12 journal benches (`src/storage/journal/benches/`).
 - 2026-11-19: ported the metadata benches (`src/storage/metadata/benches/`).
+- 2026-11-19: ported the runtime buffer benches (`src/runtime/buffer/benches/`).
