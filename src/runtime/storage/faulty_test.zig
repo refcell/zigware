@@ -1,6 +1,7 @@
-//! Tests of fault-injecting storage (commonware `storage::faulty::tests`). The `start_sync`
-//! tests and the ones that gate async backing I/O have no counterpart: zigware's `sync` is
-//! synchronous and the memory backend completes every operation at once.
+//! Tests of fault-injecting storage (commonware `storage::faulty::tests`). The tests that gate
+//! the backing I/O mid-operation (commonware's `OperationGate` over tokio and io_uring) have no
+//! counterpart: faulty wraps the memory backend, which completes every operation at once, and
+//! its `start_sync` is the default one (`sync` inline, then a ready completion).
 
 const std = @import("std");
 const testing = std.testing;
@@ -220,6 +221,35 @@ test "empty unsynced write does not create crash debt" {
     const blob = try h.open("test");
     try blob.write_at(0, "", .{});
     try testing.expectEqual(@as(usize, 0), h.pending());
+}
+
+test "start_sync fails when every sync fails (test_faulty_storage_start_sync_always_fails)" {
+    var h: Seeded = undefined;
+    h.init(.init(42), .{ .write_rate = write_rate(zero, one, .prefix), .sync_rate = one });
+    defer h.deinit();
+    const blob = try h.open("test");
+    try blob.write_at(0, "data", .{});
+    // The fault reaches the caller through the completion, and the write stays crash debt.
+    try testing.expectError(error.Io, (try blob.start_sync()).wait_release());
+    try testing.expectEqual(@as(usize, 1), h.pending());
+}
+
+// commonware `test_dropped_completed_start_sync_clears_the_crash_epoch`: a completed
+// start_sync retires the journal even when its completion is dropped unobserved, so a crash
+// does not replay the stale write over the synced one.
+test "a dropped completed start_sync clears the crash epoch" {
+    var h: Seeded = undefined;
+    h.init(.init(42), retain_all);
+    defer h.deinit();
+    const blob = try h.open("test");
+    try blob.write_at(0, "stale", .{});
+    h.storage.config.write_rate = null;
+    try blob.write_at(0, "fresh", .{});
+    (try blob.start_sync()).release();
+    h.storage.config.write_rate = write_rate(zero, one, .prefix);
+    try blob.write_at(5, "later", .{});
+    try h.storage.crash();
+    try h.expect_durable("test", "freshlater");
 }
 
 test "dynamic config" {

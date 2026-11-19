@@ -100,9 +100,16 @@ time, files, and network: build on it rather than around it where it fits.
 - [x] Storage test wrappers (`storage/mocks.zig`, commonware mocks.rs and
   mocks/read_gate.rs): `Recording`, `WriteFault`, `SyncFault`, `MutationFault` (fail or park
   after n mutations), and `ReadGated`, each a `Wrapper(Policy)` over `storage.Storage`, with
-  mocks.rs's wrapper tests. No counterpart: `DelayedSyncContext`/`PendingSyncs` (no
-  `start_sync`), `MigratingReadBlob` (moves a half-polled read), read batches (no
-  `read_many`).
+  mocks.rs's wrapper tests. `DelayedSyncContext`/`PendingSyncs` are `mocks.DelayedSync` and
+  `DelayedSynced` (delayed_sync.zig, async start_sync step 1). No counterpart:
+  `MigratingReadBlob` (moves a half-polled read), read batches (no `read_many`).
+- [x] The backends' `start_sync` tests (ported by the glue lane, 2026-11-19): audited
+  `test_audited_start_sync`, metered `test_metered_start_sync_increments_metric`, faulty
+  `test_faulty_storage_start_sync_always_fails` and
+  `test_dropped_completed_start_sync_clears_the_crash_epoch`, tokio/mod.rs
+  `test_start_sync_dropped_receiver` (production/storage_test.zig), and iouring.rs
+  `test_unpolled_sync_completion_releases_hold` on the ring storage, without its
+  `pending.owes` half (no pending-sync debt; a reopen checks the bytes instead).
 - [x] `conformance.StorageConformance(Workload)` (conformance.rs): runs a workload on a
   runner seeded with the case seed and commits `storage_audit()`, in `conformance.verify`'s
   `commit(gpa, seed)` shape; its three audit tests.
@@ -141,8 +148,10 @@ time, files, and network: build on it rather than around it where it fits.
   dropped because LLVM miscompiled its inline asm in optimized builds on aarch64 and x86_64.
 - `Storage` and `Blob` are vtable values like `std.Io`. Zig errors carry no payload, so
   storage errors keep commonware's variant names without partition/name details.
-  `Blob.read_at` fills a caller buffer (commonware's `read_at_buf`); `read_many` and
-  `start_sync` are not ported (callers loop, and `sync` is synchronous in zigware).
+  `Blob.read_at` fills a caller buffer (commonware's `read_at_buf`); `read_many` is not
+  ported (callers loop). `Blob.start_sync` returns a `runtime.storage.Completion`; a backend
+  without a `start_sync` entry (memory, audited, metered, faulty, file) syncs inline and
+  returns a ready completion, as commonware's memory backend does.
   `Blob.close` replaces drop: handles must be closed, and closing does not sync.
 - Network backends are duck-typed (`Listener`, `Accepted`, `Connection` declared by the
   backend) rather than vtables, so sinks and streams stay concrete and inlinable. The mock
@@ -173,8 +182,9 @@ time, files, and network: build on it rather than around it where it fits.
   that never spawns holds its node until then: make long-lived child contexts once rather
   than per message.
 - Faulty storage draws from the runtime RNG and journals by the memory backend's blob
-  generation. It has no `start_sync` (zigware's `sync` is synchronous), so commonware's
-  start_sync, async-gating, and read-option recording tests are not ported. The runner
+  generation. Its `start_sync` is the default one (`sync` inline, then a ready completion),
+  so commonware's tests that gate the backing I/O mid-operation and its read-option
+  recording tests are not ported; its start_sync fault and crash-epoch tests are. The runner
   crashes storage when each run ends, as commonware does, so `storage_audit` after a run
   includes the crash replay.
 - `Context.sleep_until` clamps deadlines past `context.deadline_max` (2262):
@@ -192,8 +202,8 @@ time, files, and network: build on it rather than around it where it fits.
   network type is unchanged for lanes that name it. Sent buffers hash as one length-prefixed
   payload, so chunking never changes the audit (test_auditor_ignores_buffer_chunking).
   Metered network works the same way; the production network can count into the same
-  `network.metered.Metrics`. Not ported: metered `start_sync` and shared-owner tests (no
-  `start_sync`; a Zig blob handle has one owner).
+  `network.metered.Metrics`. Not ported: the shared-owner test (a Zig blob handle has one
+  owner). Metered `start_sync` counts a sync, as `sync` does.
 - `IoBuf` keeps commonware's ownership rules with explicit `deinit`: a native buffer is one
   allocation with a refcounted header, so building one allocates once and clones, slices, and
   splits allocate nothing (commonware avoids even the header record until the first share).
@@ -337,8 +347,6 @@ Not portable:
   propagation/`catch_unwind`; Zig cannot catch a panic
 - `lib.rs` `test_select`: runtime.md: `select!` polls branches in order; `std.Io.Select` does not
   order ready ones
-- `mocks.rs` `delayed_sync_blob_forwards_read_options`: runtime.md:
-  `DelayedSyncContext`/`PendingSyncs` not ported (no `start_sync`)
 - `network/audited.rs` `test_stream_preserves_chunking`: Zig `Stream.recv` fills a caller buffer;
   there is no `IoBufs` chunk structure
 - `network/iouring.rs` `test_cancelled_recv_retains_descriptor_until_completion`: asserts `Arc`
@@ -583,26 +591,25 @@ The tokio/mod.rs partition-sync tests run on every platform with
 Not portable:
 - `storage/iouring.rs` `test_dirty_sync_waits_without_blocking_other_io`,
   `test_recreated_blob_does_not_wait_for_removed_opens_gate`: zigware's file storage has no
-  per-open durability permit and no `start_sync`; each sync runs on its caller
+  per-open durability permit, and its `start_sync` syncs inline on its caller
 - `storage/iouring.rs` `test_sync_dir_reports_missing_directory`: zigware's `sync_dir` takes an
   open `Dir`, so there is no missing path to report
 - `storage/tokio/blob.rs` `test_header_read_after_payload_shrink`: open reads the header under
   the storage mutex while no handle of the blob can be open (`BlobAlreadyOpen`), so its length
   cannot go stale; `header.resolve` asserts the read covers it
-- `storage/audited.rs` `test_audited_start_sync`; `storage/faulty.rs`
-  `test_start_sync_returns_before_backing_completion`,
-  `test_dropped_completed_start_sync_clears_the_crash_epoch`,
-  `test_dropped_start_sync_epoch_is_linearized_with_overlapping_write`,
-  `test_faulty_storage_start_sync_always_fails`; `storage/metered.rs`
-  `test_metered_start_sync_increments_metric`; `storage/iouring.rs`
-  `test_unpolled_sync_completion_releases_hold`,
-  `test_queued_write_and_start_sync_finish_through_shutdown`; `storage/tokio/mod.rs`
-  `test_start_sync_dropped_receiver`; `storage/tokio/blob.rs`
-  `test_reopen_after_start_sync_completion`: no `start_sync` (runtime.md: "`read_many` and
-  `start_sync` are not ported (callers loop, and `sync` is synchronous in zigware)")
+- `storage/faulty.rs` `test_start_sync_returns_before_backing_completion` and
+  `test_dropped_start_sync_epoch_is_linearized_with_overlapping_write`: they run faulty over a
+  tokio or io_uring blob gated mid-operation (`OperationGate`); zigware's faulty wraps the
+  memory backend, which completes every operation at once, and syncs inline in `start_sync`
+- `storage/iouring.rs` `test_queued_write_and_start_sync_finish_through_shutdown`: a
+  registration queued beyond a full ring and finished by the driver at shutdown; zigware's ring
+  submits and waits on its caller, so nothing is queued
+- `storage/tokio/blob.rs` `test_reopen_after_start_sync_completion`: pauses tokio's sync
+  worker (`after_start_sync`) and counts the reopen's flush of the pending-sync debt
+  (`pending.rs`); zigware syncs on the caller and keeps no such debt
 - `storage/faulty.rs` `test_completed_backing_write_cannot_record_after_later_full_sync`,
-  `test_full_sync_epoch_is_linearized_with_overlapping_write`: gate a write mid-poll; runtime.md:
-  "commonware's start_sync, async-gating, and read-option recording tests are not ported"
+  `test_full_sync_epoch_is_linearized_with_overlapping_write`: gate a backing write or sync
+  mid-poll (`OperationGate`), which faulty's memory backend cannot hold
 - `storage/faulty.rs` `test_write_config_arbitrary_is_compact_and_covers_grid`: Rust `Arbitrary`
   impl for `WriteConfig`; faulty.zig has none
 - `storage/header.rs` `test_header_create_empty_versions`: #[should_panic]

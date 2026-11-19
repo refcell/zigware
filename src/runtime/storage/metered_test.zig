@@ -1,5 +1,4 @@
 //! Tests of metered storage (commonware `storage::metered::tests`). No counterpart:
-//! `test_metered_start_sync_increments_metric` (zigware has no `start_sync`) and
 //! `test_shared_blob_owners_share_metrics` (a Zig handle has one owner; Rust shares it in an
 //! `Arc`).
 
@@ -77,6 +76,18 @@ test "metered blob metrics (test_metered_blob_metrics)" {
     try testing.expectEqual(@as(i64, 1), h.get("storage_resizes"));
     blob.close();
     try testing.expectEqual(@as(i64, 0), h.get("open_blobs"));
+}
+
+test "start_sync counts a sync, as sync does (test_metered_start_sync_increments_metric)" {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    const blob = (try h.storage.storage().open("partition", "test_blob")).blob;
+    defer blob.close();
+    try blob.write_at(0, "hello world", .{});
+    try testing.expectEqual(@as(i64, 0), h.get("storage_syncs"));
+    try (try blob.start_sync()).wait_release();
+    try testing.expectEqual(@as(i64, 1), h.get("storage_syncs"));
 }
 
 test "metered reads forward their options and count (test_metered_blob_forwards_read_options)" {

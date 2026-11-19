@@ -63,6 +63,62 @@ test "io_uring writes persist across storage instances" {
     }
 }
 
+test "a dropped start_sync leaves the blob usable (test_start_sync_dropped_receiver)" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try open_storage(&tmp, "root");
+    defer storage.deinit();
+    {
+        const opened = try storage.storage().open("partition", "test_blob");
+        defer opened.blob.close();
+        try opened.blob.write_at(0, "hello world", .{});
+        // Drop the completion at once; a later sync still persists the data.
+        (try opened.blob.start_sync()).release();
+        try (try opened.blob.start_sync()).wait_release();
+    }
+    const opened = try storage.storage().open("partition", "test_blob");
+    defer opened.blob.close();
+    try testing.expectEqual(@as(u64, 11), opened.len);
+    try iface.tests.expect_read(opened.blob, 0, "hello world");
+}
+
+// commonware iouring `test_unpolled_sync_completion_releases_hold`: closing the storage with
+// a start_sync completion still unobserved releases the directory hold, and the completion
+// then reports the sync. Adapted: commonware also checks the pending-sync debt
+// (`pending.owes`), which zigware does not track (runtime.md, `storage/pending.rs`); a second
+// storage reading the bytes back checks the sync instead.
+test "an unobserved start_sync completion does not keep the hold" {
+    var ring: Ring = undefined;
+    try init_ring(&ring);
+    defer ring.deinit();
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.createDirPathOpen(io, "root", .{});
+    var storage = try file_storage.Storage.init(io, gpa, root, .{ .ring = &ring });
+    const completion = completion: {
+        const opened = try storage.storage().open("partition", "retained");
+        defer opened.blob.close();
+        try opened.blob.write_at(0, "durable", .{});
+        break :completion try opened.blob.start_sync();
+    };
+    storage.deinit();
+    const contender = try tmp.dir.createFile(io, "root/" ++ file_storage.hold_name, .{
+        .truncate = false,
+    });
+    defer contender.close(io);
+    const released = try contender.tryLock(io, .exclusive);
+    if (released) contender.unlock(io);
+    try completion.wait_release();
+    try testing.expect(released); // The unobserved completion kept no hold.
+
+    const reopened_root = try tmp.dir.createDirPathOpen(io, "root", .{});
+    var reopened = try file_storage.Storage.init(io, gpa, reopened_root, .{ .ring = &ring });
+    defer reopened.deinit();
+    const opened = try reopened.storage().open("partition", "retained");
+    defer opened.blob.close();
+    try iface.tests.expect_read(opened.blob, 0, "durable");
+}
+
 const header = @import("../storage/header.zig");
 
 fn read_raw(tmp: *testing.TmpDir, path: []const u8) ![]u8 {

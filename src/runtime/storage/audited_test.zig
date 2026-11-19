@@ -192,3 +192,28 @@ test "audited writes keep their chunking and options" {
     try r.blob.read_at(0, &buffer);
     try testing.expectEqualStrings("ebcd", &buffer);
 }
+
+test "start_sync records a deterministic audit event (test_audited_start_sync)" {
+    // Two independent storages run the same sequence of operations.
+    var first: Harness = undefined;
+    first.init();
+    defer first.deinit();
+    var second: Harness = undefined;
+    second.init();
+    defer second.deinit();
+    const blob1 = (try first.storage.storage().open("partition", "test_blob")).blob;
+    defer blob1.close();
+    const blob2 = (try second.storage.storage().open("partition", "test_blob")).blob;
+    defer blob2.close();
+    try blob1.write_at(0, "hello world", .{});
+    try blob2.write_at(0, "hello world", .{});
+
+    // `start_sync` must record an auditor event, so the state advances.
+    const before = first.auditor.state();
+    try (try blob1.start_sync()).wait_release();
+    try testing.expect(!std.mem.eql(u8, &before, &first.auditor.state()));
+
+    // The recorded event is deterministic across independent runs.
+    try (try blob2.start_sync()).wait_release();
+    try testing.expectEqualSlices(u8, &first.auditor.state(), &second.auditor.state());
+}
