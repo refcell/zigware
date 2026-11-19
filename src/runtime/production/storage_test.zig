@@ -371,6 +371,8 @@ test "remove reports a missing partition, then a missing blob" {
 }
 
 test "scan skips file names that are not UTF-8 (test_scan_ignores_non_utf8_file_names)" {
+    // commonware runs it in iouring.rs (Linux only); APFS rejects non-UTF-8 names.
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
     var storage = try open_storage(&tmp, "root");

@@ -322,6 +322,14 @@ const UnsupportedWorker = struct {
     pub fn perform(_: *UnsupportedWorker, _: Operation, _: Io.Timeout) PerformError!i32 {
         unreachable; // No ring gives one.
     }
+
+    pub fn perform_then_abort(
+        _: *UnsupportedWorker,
+        _: Operation,
+        _: PerformError,
+    ) PerformError!i32 {
+        unreachable; // No ring gives one.
+    }
 };
 
 pub const EnterError = error{RingFailed};
