@@ -232,7 +232,7 @@ test {
     _ = @import("zstd/fse.zig");
     _ = @import("zstd/huffman.zig");
     _ = @import("zstd/match.zig");
-    _ = params;
+    _ = @import("zstd/level3.zig");
     _ = @import("zstd_test.zig");
     _ = block;
 }

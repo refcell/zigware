@@ -321,3 +321,12 @@ variants need `runtime` storage; do them after its interface lands.
     the frame header: single segment while the window covers the source (up to 2 MiB), else
     a window byte (0x58 above 2 MiB). Header vectors from the oracle; a planted off-by-one
     on the single-segment test fails them.
+  - [x] Piece 2: `zstd/dfast.zig`, `ZSTD_compressBlock_doubleFast_noDict_generic` step by step
+    (hashes, skip schedule, repeat checks, complementary insertion, `enforceMaxDist`). A second
+    scratch oracle prints `ZSTD_generateSequences` at level 3. Sequences matched exactly on 6 MB
+    of binary, 5 MB of source, mixed and random data, and every row-boundary size. (The oracle
+    cannot report frames whose last block is under 7 bytes, which libzstd stores raw.)
+    `dfast_test.zig` pins SHA-256 digests of the oracle's sequences for corpus text, records,
+    2.3 MB mixed (past the window), and noise. Planted bugs (a shifted complementary insert, or
+    `step < 3`) fail it. Order change: FSE (`fse_compress.c`, `hist.c`) comes next, before
+    Huffman, because libzstd FSE-compresses the Huffman weights.
