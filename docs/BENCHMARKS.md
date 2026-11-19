@@ -12,8 +12,8 @@ better. A ratio below 1 means zigware is faster.
 | `sha256::hash_message` | `msg_len=1048576` | 480 µs | 538 µs | 1.12× |
 | `ed25519::signature_verification` | `ns_len=9 msg_len=32` | 26.7 µs | 43.3 µs | 1.62× (fixed, see below) |
 | `ed25519::batch_verify_same_message` | `pks=100 conc=1` | 1.43 ms | 1.07 ms | 0.75× (re-run, see below) |
-| `bls12381::signature_verification` | `ns_len=9 msg_len=32` | 1.23 ms | 1.59 ms | 1.30× |
-| `bls12381::aggregate_verify_same_message` | `pks=1000` | 2.27 ms | 2.16 ms | 0.96× |
+| `bls12381::signature_verification` | `ns_len=9 msg_len=32` | 1.51 ms | 1.20 ms | 0.79× (re-run, see below) |
+| `bls12381::aggregate_verify_same_message` | `pks=1000` | 3.19 ms | 3.13 ms | 0.98× (re-run, see below) |
 | `journal::fixed_append` | `items=10000 size=32` | 2.00 ms | 456 µs | 0.23× |
 | `journal::append_sync` | `journal=fixed mode=sync` | 14.6 µs | 1.55 µs | 0.11× |
 | `journal::fixed_replay` | `items=100000 buffer=65536 size=32 read_options=cache` | 690 µs | 817 µs | 1.19× |
@@ -145,6 +145,16 @@ directory under `BENCH_DIR` (default `$TMPDIR` or `/tmp`). commonware gets it th
   `batch_verify_same_message` `pks=100 conc=1`, four alternating runs at a load average of 53
   to 57, best medians: commonware 1.43 ms, zigware on AVX2 1.07 ms (0.75×), zigware on the
   scalar backend 1.95 ms. That is the table's row.
+- **bls12381, 2026-11-19 (simplex lane).** 67308018, 6e50645b, and 73cb985e sped up the
+  pairing, hash-to-curve, and subgroup checks under single verify. The two bls12381 rows
+  above are a re-run of this pair only at zigware 3181c058 (`etc/scripts/bench-compare.sh`'s
+  settings, best of three alternating runs), at a 1-minute load average of 59 to 111.
+  commonware's best medians came out 1.2 to 1.4 times the earlier table's (1.23 ms and
+  2.27 ms), so the load inflates both sides and the wall-clock figures are not quotable.
+  Single verify had zigware ahead in every run (per-run ratios 0.73×, 0.86×, 0.79×; it was
+  1.30×). The aggregate's per-run ratios swung from 0.53× to 1.43×, so its 0.98× shows no
+  winner. Per-phase timing counters before the fixes put zigware's single verify at about
+  1.17× blst's assembly, so re-run at a quiet moment before quoting the single-verify lead.
 
 ## Storage: index, archive, freezer (2026-11-19, clearing lane)
 
