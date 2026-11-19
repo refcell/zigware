@@ -200,7 +200,8 @@ pub fn Syncing(comptime P: type) type {
         io: Io,
         config: Config,
         syncer: Syncer.Mailbox,
-        syncer_task: Io.Future(anyerror!void),
+        /// The syncer task `init` started; null when `assemble`d around another syncer.
+        syncer_task: ?Io.Future(anyerror!void),
         completion: oneshot.Receiver(Artifact),
         deferred: std.ArrayList(VerificationRequest) = .empty,
         subscribers: std.ArrayList(oneshot.Sender(Databases)) = .empty,
@@ -235,20 +236,34 @@ pub fn Syncing(comptime P: type) type {
                 mailbox.deinit();
                 return err;
             };
+            var self = assemble(config, created.mailbox, completion.receiver);
+            self.syncer_task = task;
+            return self;
+        }
+
+        /// A syncing actor around `syncer` and the `completion` its artifact arrives on, with
+        /// no syncer task of its own (commonware's tests build `Syncing` this way). Takes both.
+        pub fn assemble(
+            config: Config,
+            syncer: Syncer.Mailbox,
+            completion: oneshot.Receiver(Artifact),
+        ) Self {
+            assert(config.max_pending_acks > 0);
+            assert(config.plan.floor() != null);
             return .{
-                .gpa = gpa,
-                .io = io,
+                .gpa = config.env.gpa,
+                .io = config.env.io,
                 .config = config,
-                .syncer = created.mailbox,
-                .syncer_task = task,
-                .completion = completion.receiver,
+                .syncer = syncer,
+                .syncer_task = null,
+                .completion = completion,
             };
         }
 
         /// Stops the syncer and releases every retained request unanswered.
         pub fn deinit(self: *Self) void {
             self.syncer.deinit();
-            _ = self.syncer_task.cancel(self.io) catch {};
+            if (self.syncer_task) |*task| _ = task.cancel(self.io) catch {};
             if (self.completion.try_recv()) |artifact| {
                 // Published but never handed off.
                 if (!self.handed_off) {
@@ -305,7 +320,9 @@ pub fn Syncing(comptime P: type) type {
         }
 
         fn syncer_failure(self: *Self) anyerror {
-            self.syncer_task.await(self.io) catch |err| return err;
+            var task = self.syncer_task orelse return error.SyncerStopped;
+            self.syncer_task = null;
+            task.await(self.io) catch |err| return err;
             return error.SyncerStopped;
         }
 
@@ -387,7 +404,7 @@ pub fn Syncing(comptime P: type) type {
         /// Retains `block` with its acknowledgement; once marshal's window is full, records its
         /// newest block as the sync target and acknowledges every retained block. Returns the
         /// artifact when state sync finished first.
-        fn finalized(self: *Self, block: Block, acknowledgement: Exact) !?Artifact {
+        pub fn finalized(self: *Self, block: Block, acknowledgement: Exact) !?Artifact {
             var pending: Pending = .{ .block = block, .acknowledgement = acknowledgement };
             self.pending.append(self.gpa, pending) catch |err| {
                 pending.deinit();
@@ -408,9 +425,10 @@ pub fn Syncing(comptime P: type) type {
             return null;
         }
 
-        /// Applies the retained blocks above the anchor, records completion, and hands the
-        /// databases to resolvers and subscribers (commonware `transition`).
-        fn transition(self: *Self, artifact: Artifact) !Ready {
+        /// Applies the retained blocks above the anchor (classified by `classify`), records
+        /// completion, and hands the databases to resolvers and subscribers (commonware
+        /// `transition`). Takes the artifact's databases.
+        pub fn transition(self: *Self, artifact: Artifact) !Ready {
             const config = &self.config;
             const schedule = config.pruning;
             config.pruning = null; // The processor owns the schedule now.

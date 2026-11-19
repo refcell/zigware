@@ -368,11 +368,11 @@ ones: d = deployer (thread T-01a1d5b9-c237), u = utils, j = storage-journal
 | stateful/actor/syncer/mod.rs (conformance) | 1 | 1 | 0 | 0 | |
 | stateful/actor/core/mailbox.rs | 2 | 2 | 0 | 0 | |
 | stateful/actor/core/mod.rs | 4 | 1 | 3 | 0 | u |
-| stateful/actor/core/syncing.rs | 16 | 5 | 11 | 0 | d |
+| stateful/actor/core/syncing.rs | 16 | 12 | 3 | 1 | d |
 | stateful/actor/core/processing.rs | 86 | 0 | 86 | 0 | u |
 | stateful/actor/processor/mod.rs | 44 | 22 | 22 | 0 | u |
 | stateful/tests/mod.rs, floor.rs | 28 | 11 | 17 | 0 | j |
-| **total** | **469** | **303** | **143** | **23** | |
+| **total** | **469** | **310** | **135** | **24** | |
 
 - Not portable (db/mod.rs, 22): zigware's `Barrier` is synchronous (databases persist inside
   `finalize`), so `barrier_waits_for_every_handle` (8), `barrier_cancellation_releases_handles`
@@ -399,8 +399,15 @@ ones: d = deployer (thread T-01a1d5b9-c237), u = utils, j = storage-journal
     (actor/marshal_fixture.zig, commonware's tests/fixtures.rs). plan.rs's
     `complete_height_cannot_move_backward` is `#[should_panic]`; zigware asserts instead,
     so it is not portable.
-  - core/syncing.rs: the transition, ack-window, retarget, and shutdown tests (11), which drive
-    `Syncing` through the stateful wiring.
+  - core/syncing.rs: the reflected-hooks, retarget-artifact, partial-window (2), full-window
+    retarget, and shutdown (2) tests are in core/syncing_test.zig, on commonware's
+    `TestHarness` (`Syncing.assemble` around a syncer mailbox the test answers as the
+    coordinator). Open: `aborted_handoff_flush_cancels_ack_and_keeps_sync_incomplete` (needs a
+    database whose handoff barrier fails) and the live-floor redelivery rstest (2, a real
+    marshal reporting into the stateful mailbox). Not portable:
+    `transition_coalesces_handoff_durability_before_completion` gates an asynchronous flush;
+    zigware's barrier is synchronous, and the partial-window test checks the
+    ack-before-completion order it also covers.
 - Open, u (utils):
   - probe: `requests_finalizations_only_from_current_participants`,
     `invalid_duplicate_finalization_is_ignored`,
