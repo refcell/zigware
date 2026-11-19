@@ -192,6 +192,32 @@ pub fn Harness(comptime F: type) type {
             hold: Hold = .none,
             held: [requests_max]Held = undefined,
             held_count: u32 = 0,
+            hold_handoffs: bool = false,
+            handoffs: [requests_max]HeldHandoff = undefined,
+            handoffs_count: u32 = 0,
+
+            /// A built handoff candidate the test answers.
+            pub const HeldHandoff = struct {
+                view: View,
+                candidate: traits_mod.Handoff(D),
+                taken: bool = false,
+                /// The voter canceled the request (commonware's `is_closed`).
+                closed: bool = false,
+                answer: ?traits_mod.Handoff(D) = null,
+                answered: Io.Event = .unset,
+
+                pub fn is_closed(self: *const HeldHandoff) bool {
+                    return @atomicLoad(bool, &self.closed, .acquire);
+                }
+
+                /// The candidate's payload.
+                pub fn digest(self: *const HeldHandoff) D {
+                    return switch (self.candidate) {
+                        .vote, .stage => |payload| payload,
+                        .wait => unreachable, // Wait is answered without holding.
+                    };
+                }
+            };
 
             /// A certification request the test answers.
             pub const Held = struct {
@@ -220,7 +246,89 @@ pub fn Harness(comptime F: type) type {
                 request: harness_context,
             ) Io.Cancelable!?traits_mod.Handoff(D) {
                 self.record_proposal(request);
-                return self.application.prepare(io, request);
+                const built = try self.application.prepare(io, request) orelse return null;
+                if (!self.hold_handoffs or built == .wait) return built;
+                // commonware's handoff controller: the test answers the built candidate.
+                const slot = self.park_handoff(request.round.view, built);
+                slot.answered.wait(self.io) catch |err| {
+                    @atomicStore(bool, &slot.closed, true, .release);
+                    return err;
+                };
+                return slot.answer;
+            }
+
+            fn park_handoff(
+                self: *Automaton,
+                view: View,
+                built: traits_mod.Handoff(D),
+            ) *HeldHandoff {
+                self.mutex.lockUncancelable(self.io);
+                defer self.mutex.unlock(self.io);
+                assert(self.handoffs_count < requests_max);
+                const slot = &self.handoffs[self.handoffs_count];
+                slot.* = .{ .view = view, .candidate = built };
+                self.handoffs_count += 1;
+                return slot;
+            }
+
+            /// Takes the newest held handoff candidate, waiting up to 5 s of simulated time
+            /// (commonware `take_proposal_response`).
+            pub fn take_handoff(self: *Automaton, ctx: Ctx) !*HeldHandoff {
+                var waited: u64 = 0;
+                while (waited < 5_000) : (waited += 1) {
+                    if (self.newest_handoff()) |slot| return slot;
+                    try ctx.sleep(.fromMilliseconds(1));
+                }
+                return error.NoHandoffRequest;
+            }
+
+            fn newest_handoff(self: *Automaton) ?*HeldHandoff {
+                self.mutex.lockUncancelable(self.io);
+                defer self.mutex.unlock(self.io);
+                var index = self.handoffs_count;
+                while (index > 0) {
+                    index -= 1;
+                    const slot = &self.handoffs[index];
+                    if (slot.taken) continue;
+                    slot.taken = true;
+                    return slot;
+                }
+                return null;
+            }
+
+            /// Answers a taken handoff request; `null` drops it (commonware drops the sender).
+            pub fn answer_handoff(
+                self: *Automaton,
+                slot: *HeldHandoff,
+                answer: ?traits_mod.Handoff(D),
+            ) void {
+                assert(slot.taken);
+                slot.answer = answer;
+                slot.answered.set(self.io);
+            }
+
+            /// Proposal and handoff requests received for `view`.
+            pub fn requests_for(self: *Automaton, view: u64) u32 {
+                self.mutex.lockUncancelable(self.io);
+                defer self.mutex.unlock(self.io);
+                var count: u32 = 0;
+                for (self.proposals[0..self.proposals_count]) |request| {
+                    count += @intFromBool(request.round.view.get() == view);
+                }
+                return count;
+            }
+
+            /// The `index`th recorded proposal request for `view`.
+            pub fn request_for(self: *Automaton, view: u64, index: u32) ?harness_context {
+                self.mutex.lockUncancelable(self.io);
+                defer self.mutex.unlock(self.io);
+                var seen: u32 = 0;
+                for (self.proposals[0..self.proposals_count]) |request| {
+                    if (request.round.view.get() != view) continue;
+                    if (seen == index) return request;
+                    seen += 1;
+                }
+                return null;
             }
 
             pub fn verify(
@@ -370,6 +478,8 @@ pub fn Harness(comptime F: type) type {
             sync_gates: ?*runtime.storage.mocks.SyncGates = null,
             /// Certification requests held for the test.
             hold_certifications: Hold = .none,
+            /// Holds built handoff candidates for the test (commonware `handoff_responses`).
+            hold_handoffs: bool = false,
             /// The voter's tracer (commonware `test_collect_traces`).
             tracer: runtime.telemetry.traces.Tracer = .none,
         };
@@ -515,6 +625,58 @@ pub fn Harness(comptime F: type) type {
             }
         };
 
+        /// A relay listener under validator `index`'s key recording each payload it is sent
+        /// (commonware `relay.register(observer)`). Must not move while registered.
+        pub const RelayObserver = struct {
+            const payloads_max = 64;
+
+            net: *Network,
+            key: Key,
+            mutex: Io.Mutex = .init,
+            payloads: [payloads_max]Digest = undefined,
+            count: u32 = 0,
+            read: u32 = 0,
+
+            pub fn start(self: *RelayObserver, net: *Network, index: usize) !void {
+                self.* = .{ .net = net, .key = net.keys()[index] };
+                try net.relay.register(.{ .key = self.key, .context = self, .deliver = deliver });
+            }
+
+            pub fn deinit(self: *RelayObserver) void {
+                self.net.relay.deregister(self.key);
+                self.* = undefined;
+            }
+
+            fn deliver(context: *anyopaque, payload: Digest, contents: []const u8) void {
+                _ = contents;
+                const self: *RelayObserver = @ptrCast(@alignCast(context));
+                self.mutex.lockUncancelable(self.net.io);
+                defer self.mutex.unlock(self.net.io);
+                assert(self.count < payloads_max);
+                self.payloads[self.count] = payload;
+                self.count += 1;
+            }
+
+            /// The next relayed payload not yet read, if any.
+            pub fn try_next(self: *RelayObserver) ?Digest {
+                self.mutex.lockUncancelable(self.net.io);
+                defer self.mutex.unlock(self.net.io);
+                if (self.read == self.count) return null;
+                self.read += 1;
+                return self.payloads[self.read - 1];
+            }
+
+            /// The next relayed payload within `limit_ms` of simulated time.
+            pub fn next(self: *RelayObserver, ctx: Ctx, limit_ms: u64) !?Digest {
+                var waited: u64 = 0;
+                while (waited <= limit_ms) : (waited += 1) {
+                    if (self.try_next()) |payload| return payload;
+                    try ctx.sleep(.fromMilliseconds(1));
+                }
+                return null;
+            }
+        };
+
         /// One running voter with the mailboxes the test holds (commonware `setup_voter`'s
         /// returned tuple). Must not move.
         pub const VoterStack = struct {
@@ -553,6 +715,7 @@ pub fn Harness(comptime F: type) type {
                     .application = &self.application,
                     .io = io,
                     .hold = options.hold_certifications,
+                    .hold_handoffs = options.hold_handoffs,
                 };
                 self.reporter = .init(gpa, io, &net.fixture.verifier);
                 errdefer self.reporter.deinit();
@@ -986,6 +1149,48 @@ pub fn Harness(comptime F: type) type {
             try std.testing.expectEqual(expected.len, matched);
         }
 
+        /// The value of counter `family`'s series `label="value"`, or 0 when absent.
+        pub fn counter_value(
+            ctx: Ctx,
+            family: []const u8,
+            label: []const u8,
+            value: []const u8,
+        ) !u64 {
+            const gpa = ctx.gpa();
+            const encoded = try ctx.scope.encode(gpa);
+            defer gpa.free(encoded);
+            var pattern_buffer: [128]u8 = undefined;
+            const pattern = try std.fmt.bufPrint(
+                &pattern_buffer,
+                "_{s}_total{{{s}=\"{s}\"}}",
+                .{ family, label, value },
+            );
+            var lines = std.mem.splitScalar(u8, encoded, '\n');
+            // Bounded by the encoded text.
+            while (lines.next()) |line| {
+                if (std.mem.indexOf(u8, line, pattern) == null) continue;
+                const space = std.mem.lastIndexOfScalar(u8, line, ' ') orelse continue;
+                return std.fmt.parseInt(u64, line[space + 1 ..], 10);
+            }
+            return 0;
+        }
+
+        /// Waits up to 5 s of simulated time for counter `family`'s series `label="value"` to
+        /// count (commonware `wait_for_handoff_event`, `wait_for_handoff_abandoned`).
+        pub fn wait_counter(
+            ctx: Ctx,
+            family: []const u8,
+            label: []const u8,
+            value: []const u8,
+        ) !void {
+            var waited: u64 = 0;
+            // Bounded by 5 s of simulated time.
+            while (try counter_value(ctx, family, label, value) == 0) : (waited += 1) {
+                if (waited > 5_000) return error.CounterNotCounted;
+                try ctx.sleep(.fromMilliseconds(1));
+            }
+        }
+
         /// commonware `assert_handoff_metrics`.
         pub fn expect_handoff_metrics(
             ctx: Ctx,
@@ -1026,6 +1231,26 @@ pub fn Harness(comptime F: type) type {
         pub fn proposal_at(epoch: Epoch, view: u64, label: []const u8) Proposal {
             assert(view > 0);
             return .init(.new(epoch, .new(view)), .new(view - 1), Sha256.hash(&.{label}));
+        }
+
+        /// `build` signed by `count` of `schemes` other than `skip` (commonware
+        /// `build_*(&peers(schemes, local_index), ..)`).
+        pub fn build_peers(
+            gpa: Allocator,
+            comptime kind: std.meta.Tag(Certificate),
+            schemes: []const Scheme,
+            skip: usize,
+            subject: if (kind == .nullification) Round else Proposal,
+            count: u32,
+        ) !@FieldType(Certificate, @tagName(kind)) {
+            var peers: [16]Scheme = undefined;
+            var len: usize = 0;
+            for (schemes, 0..) |scheme, index| {
+                if (index == skip) continue;
+                peers[len] = scheme;
+                len += 1;
+            }
+            return build(gpa, kind, peers[0..len], subject, count);
         }
 
         /// A certificate of `kind` over `subject` signed by the first `count` of `schemes`

@@ -14,6 +14,7 @@ test {
             _ = @import("timeouts.zig").Tests(h);
             _ = @import("optimistic.zig").Tests(h);
             _ = @import("handoff.zig").Tests(h);
+            _ = @import("handoff_held.zig").Tests(h);
         }
     }
 }
