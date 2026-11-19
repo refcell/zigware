@@ -202,12 +202,15 @@ pub fn Window(comptime T: type) type {
             var buffer: [2]Tasks.Outcome = undefined;
             var select: Io.Select(Tasks.Outcome) = .init(self.io, &buffer);
             try select.concurrent(.mailbox, Tasks.mailbox, .{self});
+            // On failure, a receive that finished still owns its message: release it.
             select.concurrent(.network, Tasks.network, .{receiver}) catch |err| {
                 while (select.cancel()) |outcome| events.collect(outcome);
+                events.discard_all();
                 return err;
             };
             const first = select.await() catch |err| {
                 while (select.cancel()) |outcome| events.collect(outcome);
+                events.discard_all();
                 return err;
             };
             events.collect(first);
@@ -262,6 +265,12 @@ pub fn Window(comptime T: type) type {
                         events.push(.{ .network = message });
                     } else |_| {},
                 }
+            }
+
+            fn discard_all(events: *Events) void {
+                assert(events.len <= events.items.len);
+                for (events.items[0..events.len]) |event| discard(event);
+                events.len = 0;
             }
 
             /// Puts a mailbox event first, as commonware's biased select would.
