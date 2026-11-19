@@ -286,7 +286,9 @@ fn send_later(sender: Sender(i32), io: Io) Io.Cancelable!void {
     var owned = sender;
     defer owned.deinit();
     try io.sleep(.fromMilliseconds(1), .awake);
-    owned.send(9) catch unreachable; // Proof: the receiver waits in `recv`.
+    // Proof: the test awaits this task before it drops the receiver, so the channel is open
+    // whether or not the receiver has parked in `recv` yet.
+    owned.send(9) catch unreachable;
 }
 
 test "ring: recv waits for a concurrent sender" {
