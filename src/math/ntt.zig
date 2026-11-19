@@ -69,7 +69,7 @@ fn lg_of(rows: usize) u32 {
 fn ntt(comptime F: type, comptime forward: bool, rows: usize, cols: usize, view: anytype) void {
     algebra.assert_field_ntt(F);
     const lg_rows = lg_of(rows);
-    const root = F.root_of_unity(@intCast(lg_rows)) orelse @panic("too many rows to perform NTT");
+    const root = root_of_unity(F, @intCast(lg_rows)) orelse @panic("too many rows to perform NTT");
     // Undoing the transform uses w^-1 = w^(2^lg_rows - 1).
     const order_minus_one = (@as(u64, 1) << @intCast(lg_rows)) - 1;
     const w = if (forward) root else algebra.exp(F, root, &.{order_minus_one});
@@ -247,10 +247,33 @@ pub fn Vanishing(comptime F: type) type {
     };
 }
 
+/// `F.root_of_unity(lg)` from a table built at compile time. Each lookup otherwise squares
+/// down from the field's largest root (30 dependent multiplications for Goldilocks), which
+/// was a third of a small interpolator's setup.
+fn root_of_unity(comptime F: type, lg: u32) ?F {
+    const table = comptime roots_of_unity(F);
+    if (lg >= table.len) return null;
+    return table[lg];
+}
+
+/// Every root of unity of `F` by order: the largest from `F.root_of_unity`, the rest by
+/// squaring, which is how fields define the smaller roots.
+fn roots_of_unity(comptime F: type) []const F {
+    @setEvalBranchQuota(1_000_000);
+    var lg_max: u8 = 63;
+    while (F.root_of_unity(lg_max) == null) lg_max -= 1;
+    var table: [@as(usize, lg_max) + 1]F = undefined;
+    table[lg_max] = F.root_of_unity(lg_max).?;
+    var lg: usize = lg_max;
+    while (lg > 0) : (lg -= 1) table[lg - 1] = table[lg].mul(table[lg]);
+    const out = table;
+    return &out;
+}
+
 /// The negated chunk roots -w^0, -w^1, ... (w of order 2^lg_chunk_size), in reverse bit order.
 fn chunk_minus_roots(comptime F: type, lg_chunk_size: u32, out: []F) void {
     assert(out.len == @as(usize, 1) << @intCast(lg_chunk_size));
-    const w = F.root_of_unity(@intCast(lg_chunk_size)) orelse @panic("sub-root of unity");
+    const w = root_of_unity(F, @intCast(lg_chunk_size)) orelse @panic("sub-root of unity");
     var state = F.one;
     for (out) |*o| {
         o.* = state.neg();
@@ -348,7 +371,7 @@ fn vanishing_merge(
     defer allocator.free(scratch);
     const coeff_shifts = try allocator.alloc(F, out.len / 2);
     defer allocator.free(coeff_shifts);
-    const root = F.root_of_unity(@intCast(lg_len)) orelse @panic("domain too large");
+    const root = root_of_unity(F, @intCast(lg_len)) orelse @panic("domain too large");
     // w_inv for the domain, then squared per round: the first round uses the largest power.
     var w_invs: [64]F = undefined;
     var w_inv = algebra.exp(F, root, &.{(@as(u64, 1) << @intCast(lg_len)) - 1});
@@ -691,7 +714,7 @@ pub fn PolynomialVector(comptime F: type) type {
         fn evaluate_naive(self: Self, allocator: Allocator) !EvaluationVector(F) {
             const rows = self.data.rows;
             const lg_rows = lg_of(rows);
-            const w = F.root_of_unity(@intCast(lg_rows)) orelse @panic("too much data");
+            const w = root_of_unity(F, @intCast(lg_rows)) orelse @panic("too much data");
             var vandermonde = try Matrix(F).init_zero(allocator, rows, rows);
             defer vandermonde.deinit(allocator);
             var w_i = F.one;
@@ -1026,6 +1049,16 @@ test "ntt fuzz plan" {
 
 test "ntt fuzz plan (coverage-guided)" {
     try testing.fuzz({}, testing_types.smith_body(void, fuzz_plan), .{});
+}
+
+// The compile-time root table holds every Goldilocks root of unity, and nothing beyond.
+test "root table matches root_of_unity" {
+    for (0..64) |lg| {
+        const expected = GF.root_of_unity(@intCast(lg));
+        const actual = root_of_unity(GF, @intCast(lg));
+        try testing.expectEqual(expected == null, actual == null);
+        if (expected) |root| try testing.expect(root.eql(actual.?));
+    }
 }
 
 test "reverse bits" {
