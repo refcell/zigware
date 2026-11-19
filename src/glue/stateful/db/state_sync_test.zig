@@ -817,6 +817,11 @@ fn Pair(comptime A: type, comptime B: type) type {
             return run(.{ a, b }, start, targets, tips, null);
         }
 
+        /// `run` with a sourceless first database and a gated second, as a task function.
+        fn run_gated_second(b: *Gate, start: u64, targets: Targets, tips: TipUpdates) !Result {
+            return run(.{ {}, b }, start, targets, tips, null);
+        }
+
         fn channel(capacity: usize) !ring.Pair(sync.TipUpdate(Digest, Targets)) {
             return ring.channel(sync.TipUpdate(Digest, Targets), gpa, io, capacity);
         }
@@ -1064,4 +1069,219 @@ test "stateful state sync: tuple attachment is index-stable" {
     try testing.expectEqual(@as(usize, 2), log.len);
     try testing.expectEqualStrings("resolver_0", log.ids[0]);
     try testing.expectEqualStrings("resolver_1", log.ids[1]);
+}
+
+// Evicted targets and late reports (commonware `LaggingReportSyncDb` and its scenarios).
+
+/// Gates for `LaggingReportSyncDb`: it signals `started` once syncing, and each message on
+/// `report` makes it adopt the newest queued target and report every target it reached.
+const ReportGates = struct {
+    io: std.Io,
+    started: ?oneshot.Sender(void),
+    report: mpsc.Receiver(void),
+};
+
+/// Adopts targets and reports them only when told to, so the coordinator can queue several
+/// targets before one is taken and replace a reported target before the report arrives.
+const LaggingReportSync = struct {
+    fn run(gates: *ReportGates, target: u64, channels: *state_sync.Channels(u64)) !u64 {
+        if (gates.started) |*started| started.send({}) catch {}; // Unwatched starts are fine.
+        gates.started = null;
+        var current = target;
+        // Every target reached and not yet reported, in the order reached.
+        var unreported: [16]u64 = undefined;
+        unreported[0] = target;
+        var count: usize = 1;
+        while (true) {
+            // Like the engine, a requested finish completes at the current target.
+            if (channels.finish) |finish| {
+                if (finish.try_recv()) |_| break else |err| switch (err) {
+                    error.Empty => {},
+                    error.Disconnected => break,
+                }
+            }
+            if (gates.report.try_recv()) |_| {
+                while (channels.tip_updates.try_recv()) |update| {
+                    if (update <= current) continue;
+                    current = update;
+                    std.debug.assert(count < unreported.len);
+                    unreported[count] = update;
+                    count += 1;
+                } else |_| {}
+                if (channels.reached_target) |reached| {
+                    for (unreported[0..count]) |value| _ = reached.send_lossy(value);
+                }
+                count = 0;
+            } else |err| switch (err) {
+                error.Empty => {},
+                error.Disconnected => break,
+            }
+            try gates.io.sleep(.fromMilliseconds(1), .awake);
+        }
+        return current;
+    }
+};
+const LaggingReportSyncDb = SyncMock(LaggingReportSync);
+
+fn lagging_sync(
+    env: TestEnv,
+    gates: *ReportGates,
+    tips: ring.Receiver(Update),
+) !state_sync.Synced(LaggingReportSyncDb, Digest) {
+    const T = LaggingReportSyncDb;
+    return state_sync.sync_shared(T, Digest, env, {}, gates, anchor(0), 0, tips, engine_config);
+}
+
+/// Runs `body` on a deterministic runtime that fails after 5 simulated seconds.
+fn run_deterministic(comptime body: fn (std.Io) anyerror!void) !void {
+    const timeout_ns = 5 * std.time.ns_per_s;
+    var runner = try runtime.deterministic.Runner.init(gpa, .{ .timeout_ns = timeout_ns });
+    defer runner.deinit();
+    try try runner.start(body, .{runner.io()});
+}
+
+/// A lagging sync started and running, so the coordinator is parked before the test sends.
+const LaggingRun = struct {
+    gates: ReportGates,
+    report: mpsc.Sender(void),
+    tips: ring.Sender(Update),
+    future: std.Io.Future(anyerror!state_sync.Synced(LaggingReportSyncDb, Digest)),
+
+    fn start(run: *LaggingRun, io_: std.Io, tip_capacity: usize) !void {
+        const tips = try ring.channel(Update, gpa, io_, tip_capacity);
+        const report = try mpsc.channel(void, gpa, io_, 1);
+        var started = try oneshot.channel(void, gpa, io_);
+        defer started.receiver.deinit();
+        run.gates = .{ .io = io_, .started = started.sender, .report = report.receiver };
+        run.report = report.sender;
+        run.tips = tips.sender;
+        const env: TestEnv = .{ .io = io_ };
+        run.future = try io_.concurrent(lagging_sync_any, .{ env, &run.gates, tips.receiver });
+        try started.receiver.recv();
+    }
+
+    fn lagging_sync_any(
+        env: TestEnv,
+        gates: *ReportGates,
+        tips: ring.Receiver(Update),
+    ) anyerror!state_sync.Synced(LaggingReportSyncDb, Digest) {
+        return lagging_sync(env, gates, tips);
+    }
+
+    /// Sends `heights` without yielding, then waits until the coordinator recorded the last.
+    fn burst(run: *LaggingRun, io_: std.Io, first: u64, last: u64) !void {
+        var observed: ?oneshot.Receiver(void) = null;
+        defer if (observed) |*receiver| receiver.deinit();
+        var height = first;
+        while (height <= last) : (height += 1) {
+            if (observed) |*receiver| receiver.deinit();
+            const update = try Update.with_observation(gpa, io_, anchor(height), height);
+            observed = update.observed;
+            try testing.expect(run.tips.send_lossy(update.update));
+        }
+        try observed.?.recv();
+    }
+
+    /// Closes the tips and the reports, awaits the sync, and checks it converged at `height`.
+    fn expect_converged(run: *LaggingRun, io_: std.Io, height: u64) !void {
+        run.tips.deinit();
+        const synced = try run.future.await(io_);
+        run.report.deinit();
+        run.gates.report.deinit();
+        try testing.expect(synced.anchor.eql(anchor(height)));
+        try testing.expectEqual(height, try synced_target(LaggingReportSyncDb, synced));
+    }
+};
+
+fn converges_after_evicted_targets(io_: std.Io) anyerror!void {
+    var run: LaggingRun = undefined;
+    try run.start(io_, 2);
+    // Each burst overflows the two-slot tip ring, and the two dispatches overflow the
+    // one-slot target ring before the database takes a target.
+    try run.burst(io_, 1, 3);
+    try run.burst(io_, 4, 6);
+    // A third burst and a report request are queued without yielding, and the fourth burst
+    // evicts the third. The coordinator reads the report of its current target first but
+    // adopts the queued tips before finishing, so the sync continues to the newest target.
+    for (7..10) |height| try testing.expect(run.tips.send_lossy(.init(anchor(height), height)));
+    try run.report.try_send({});
+    try run.burst(io_, 10, 12);
+    // The database adopts the newest target and reports it, finishing the sync there.
+    try run.report.try_send({});
+    try run.expect_converged(io_, 12);
+}
+
+fn adopts_queued_tip_before_finishing(io_: std.Io) anyerror!void {
+    var run: LaggingRun = undefined;
+    try run.start(io_, 1);
+    // A report of the initial target and a newer tip reach the coordinator together. The
+    // report matches the target it last sent, but the queued tip is adopted first.
+    var update = try Update.with_observation(gpa, io_, anchor(1), 1);
+    defer update.observed.deinit();
+    try testing.expect(run.tips.send_lossy(update.update));
+    try run.report.try_send({});
+    try update.observed.recv();
+    // The database takes the tip's target and reports it, finishing the sync there.
+    try run.report.try_send({});
+    try run.expect_converged(io_, 1);
+}
+
+test "stateful state sync: a single sync converges with late reports after evicted targets" {
+    try run_deterministic(converges_after_evicted_targets);
+}
+
+test "stateful state sync: a single sync adopts a queued tip before finishing" {
+    try run_deterministic(adopts_queued_tip_before_finishing);
+}
+
+test "stateful state sync: a tuple sync converges after evicted targets" {
+    const P = Pair(SlowSyncDb, ObservedFastSyncDb);
+    const tips = try P.channel(4);
+    var sender = tips.sender;
+    var slow = try gate_pair();
+    defer slow.deinit();
+    var fast = try open_gate();
+    defer fast.deinit();
+    defer slow.gate.deinit();
+    defer fast.gate.deinit();
+    const gates = .{ &slow.gate, &fast.gate };
+    var future = try io.concurrent(P.run_gated, gates ++ .{ 0, .{ 0, 0 }, tips.receiver });
+    try fast.park();
+    // Each tip is its own generation while the slow database takes no targets, so its
+    // one-slot target ring keeps only the newest.
+    const Tip = sync.TipUpdate(Digest, P.Targets);
+    for (1..4) |target| {
+        var update = try Tip.with_observation(gpa, io, anchor(target), .{ target, target });
+        defer update.observed.deinit();
+        try testing.expect(sender.send_lossy(update.update));
+        try update.observed.recv();
+    }
+    sender.deinit();
+    try slow.open();
+    const synced = try future.await(io);
+    try testing.expect(synced.anchor.eql(anchor(3)));
+    try testing.expectEqual(.{ @as(u64, 3), @as(u64, 3) }, try P.finals(synced));
+    // The reached database is retargeted once, at the regroup.
+    try testing.expectEqual(@as(u64, 1), fast.gate.updates);
+}
+
+test "stateful state sync: a tuple sync ignores a stale reached report after a forwarded tip" {
+    const P = Pair(StaleReachedSyncDb, ObservedFastSyncDb);
+    const tips = try P.channel(4);
+    var sender = tips.sender;
+    var fast = try open_gate();
+    defer fast.deinit();
+    defer fast.gate.deinit();
+    const run = P.run_gated_second;
+    var future = try io.concurrent(run, .{ &fast.gate, 0, P.Targets{ 0, 0 }, tips.receiver });
+    // The stale database reports the initial target only after it takes the forwarded tip,
+    // then holds there longer than a regroup takes. Accepting the stale report would finish
+    // the set at mismatched targets.
+    try fast.park();
+    try testing.expect(sender.send_lossy(.init(anchor(1), .{ 1, 1 })));
+    sender.deinit();
+    const synced = try future.await(io);
+    try testing.expect(synced.anchor.eql(anchor(1)));
+    try testing.expectEqual(.{ @as(u64, 1), @as(u64, 1) }, try P.finals(synced));
+    try testing.expectEqual(@as(u64, 1), fast.gate.updates);
 }
