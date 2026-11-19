@@ -508,3 +508,14 @@ resolver; those lanes are running, so do the types first and the actors as they 
   message when it processes it, with the message's epoch, view, and reason or certificate
   kind; the enqueuing task's own span ancestry is not carried. Ported for
   `test_view_spans_track_automaton_boundary` (actors/voter/tests/spans.zig).
+- 2026-11-19: upstream drift audit (crypto lane) from the simplex test audit's reference
+  commit 43b357a41 to a9ffc25f3. 162216038 is lint-only (redundant `.clone()`s in mod.rs
+  tests and the outdated/reconfigurer mocks); 883eae27e moves `consensus/fuzz/src` to
+  `consensus/src/fuzz` with an unchanged run harness, puts the twins and wrapped mocks under
+  an ALPHA stability scope, and replaces proptest with minifuzz. No actor, engine, or type
+  behavior drifted. Ported from 883eae27e into fuzz/simplex.zig: `Scheme`, `ConnectedPlan`,
+  and `Plan` (drawn in commonware's `Arbitrary` order, including the one-variant scenario
+  tag), a per-push test that decodes a fixed plan and runs it on ed25519, and, under
+  `-Dslow-tests`, test_fuzz_plan, test_connected_boundaries, and the six
+  `minifuzz_*_connected` (search limit 100, 30 containers each). Each draw-order plant
+  (term and handoff swapped, scenario tag skipped) fails the per-push test.

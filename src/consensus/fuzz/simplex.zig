@@ -4,6 +4,7 @@
 //! `simplex.rs` connected tests.
 
 const std = @import("std");
+const assert = std.debug.assert;
 const builtin = @import("builtin");
 const testing = std.testing;
 const build_options = @import("build_options");
@@ -239,4 +240,179 @@ test "simplex_bls12381_threshold_minsig_twin fuzz target (minifuzz)" {
 
 test "simplex_bls12381_threshold_minsig_twin fuzz target (std fuzz)" {
     try coverage_guided(targets.Threshold(MinSig), .twin);
+}
+
+// commonware `consensus/src/fuzz.rs` and `fuzz/simplex/connected.rs` (883eae27e): a generated
+// `Plan` whose one scenario runs a connected `ConnectedPlan` on one `Scheme`, drawn in
+// commonware's `Arbitrary` order.
+
+/// commonware `fuzz::simplex::Scheme`, in its declaration order (the derived draw scales a
+/// u32 into it).
+pub const Scheme = enum {
+    ed25519,
+    secp256r1,
+    multisig_min_pk,
+    multisig_min_sig,
+    threshold_min_pk,
+    threshold_min_sig,
+
+    /// Runs `input` against this scheme's target (commonware `Scheme::run`).
+    pub fn run(self: Scheme, comptime mode: harness.Mode, input: Input) !void {
+        assert(input.required_containers > 0);
+        assert(input.term_length.length > 0);
+        const gpa = testing.allocator;
+        return switch (self) {
+            .ed25519 => harness.run(targets.Ed25519, mode, gpa, input),
+            .secp256r1 => harness.run(targets.Secp256r1, mode, gpa, input),
+            .multisig_min_pk => harness.run(targets.Multisig(MinPk), mode, gpa, input),
+            .multisig_min_sig => harness.run(targets.Multisig(MinSig), mode, gpa, input),
+            .threshold_min_pk => harness.run(targets.Threshold(MinPk), mode, gpa, input),
+            .threshold_min_sig => harness.run(targets.Threshold(MinSig), mode, gpa, input),
+        };
+    }
+};
+
+const Handoff = @TypeOf(harness.handoff_decisions[0]);
+
+/// commonware `ConnectedPlan`: a seed, a boundary term length, and a handoff decision.
+pub const ConnectedPlan = struct {
+    seed: u64,
+    term_length: u32,
+    handoff: Handoff,
+
+    /// commonware `TERM_LENGTH_BOUNDARIES`: single-view and multi-view terms.
+    pub const term_length_boundaries = [_]u32{ 1, 5 };
+    /// Containers each plan finalizes (commonware `CONTAINERS`).
+    pub const containers = 30;
+
+    /// commonware's hand-written `Arbitrary`: the term length, the handoff, then an 8-byte
+    /// big-endian seed.
+    pub fn arbitrary(u: *minifuzz.Unstructured) minifuzz.Error!ConnectedPlan {
+        const term_length = try u.choose(u32, &term_length_boundaries);
+        const handoff = try u.choose(Handoff, &harness.handoff_decisions);
+        const seed = std.mem.readInt(u64, (try u.bytes(8))[0..8], .big);
+        assert(term_length == 1 or term_length == 5);
+        return .{ .seed = seed, .term_length = term_length, .handoff = handoff };
+    }
+
+    /// commonware `ConnectedPlan::run`: `connected_input` with the plan's handoff.
+    pub fn run(self: ConnectedPlan, scheme: Scheme) !void {
+        assert(self.term_length == 1 or self.term_length == 5);
+        var input = test_input(self.seed, containers, self.term_length);
+        input.handoff = self.handoff;
+        assert(input.optimistic_views == self.term_length);
+        try scheme.run(.standard, input);
+    }
+};
+
+/// commonware `fuzz::Plan`: a generated scenario. Its only one is `Connected`.
+pub const Plan = union(enum) {
+    connected: struct { scheme: Scheme, plan: ConnectedPlan },
+
+    /// The derived `Arbitrary` of `Plan(Scenario)`: the scenario's u32 tag (drawn even with one
+    /// variant), then the variant's fields in order.
+    pub fn arbitrary(u: *minifuzz.Unstructured) minifuzz.Error!Plan {
+        const tag: u64 = try u.arbitrary(u32);
+        assert((tag * 1) >> 32 == 0); // One variant: every tag selects `Connected`.
+        const scheme = try u.arbitrary(Scheme);
+        const plan = try u.arbitrary(ConnectedPlan);
+        return .{ .connected = .{ .scheme = scheme, .plan = plan } };
+    }
+
+    /// Runs the scenario and checks its invariants (commonware `Plan::run`).
+    pub fn run(self: Plan) !void {
+        switch (self) {
+            .connected => |connected_plan| try connected_plan.plan.run(connected_plan.scheme),
+        }
+    }
+};
+
+fn skip_unless_slow() error{SkipZigTest}!void {
+    if (!build_options.slow_tests) return error.SkipZigTest;
+}
+
+fn plan_body(_: void, u: *minifuzz.Unstructured) anyerror!void {
+    const plan = try u.arbitrary(Plan);
+    try plan.run();
+}
+
+fn connected_plan_body(scheme: Scheme, u: *minifuzz.Unstructured) anyerror!void {
+    const plan = try u.arbitrary(ConnectedPlan);
+    try plan.run(scheme);
+}
+
+/// commonware's `minifuzz_connected`: 100 connected plans on `scheme`.
+fn minifuzz_connected(scheme: Scheme) !void {
+    try skip_unless_slow();
+    const builder = (minifuzz.Builder{}).with_search_limit(100 * build_options.fuzz_soak);
+    try builder.run(testing.allocator, scheme, connected_plan_body);
+}
+
+test "fuzz plan: draws commonware's order and runs an ed25519 connected plan" {
+    // Scenario tag, scheme 0 (ed25519), term index 1 (5), handoff index 2 (vote), seed 7.
+    const input = [_]u8{ 0, 0, 0, 0, 0, 0, 0, 0, 1, 2, 0, 0, 0, 0, 0, 0, 0, 7 };
+    var u: minifuzz.Unstructured = .init(&input);
+    const plan = try Plan.arbitrary(&u);
+    const connected_plan = plan.connected;
+    try testing.expectEqual(Scheme.ed25519, connected_plan.scheme);
+    try testing.expectEqual(@as(u32, 5), connected_plan.plan.term_length);
+    try testing.expectEqual(Handoff.vote, connected_plan.plan.handoff);
+    try testing.expectEqual(@as(u64, 7), connected_plan.plan.seed);
+    // A plan needs its whole seed.
+    var short: minifuzz.Unstructured = .init(input[0..17]);
+    try testing.expectError(error.NotEnoughData, Plan.arbitrary(&short));
+    try plan.run();
+}
+
+// commonware test_fuzz_plan
+test "fuzz plan (minifuzz)" {
+    try skip_unless_slow();
+    const builder = (minifuzz.Builder{}).with_search_limit(8 * build_options.fuzz_soak);
+    try builder.run(testing.allocator, {}, plan_body);
+}
+
+// commonware test_connected_boundaries
+test "fuzz plan: connected boundaries" {
+    try skip_unless_slow();
+    for (std.enums.values(Scheme)) |scheme| {
+        // The historical failure at both term lengths.
+        for (ConnectedPlan.term_length_boundaries) |term_length| {
+            const seed: u64 = 11_990_182_099_415_019_554;
+            const plan: ConnectedPlan =
+                .{ .seed = seed, .term_length = term_length, .handoff = .wait };
+            try plan.run(scheme);
+        }
+        // Its shrunk seed (eight zero bytes) at every term length and handoff.
+        for (ConnectedPlan.term_length_boundaries) |term_length| {
+            for (harness.handoff_decisions) |handoff| {
+                const plan: ConnectedPlan =
+                    .{ .seed = 0, .term_length = term_length, .handoff = handoff };
+                try plan.run(scheme);
+            }
+        }
+    }
+}
+
+test "simplex_ed25519: minifuzz connected" {
+    try minifuzz_connected(.ed25519);
+}
+
+test "simplex_secp256r1: minifuzz connected" {
+    try minifuzz_connected(.secp256r1);
+}
+
+test "simplex_bls12381_multisig_minpk: minifuzz connected" {
+    try minifuzz_connected(.multisig_min_pk);
+}
+
+test "simplex_bls12381_multisig_minsig: minifuzz connected" {
+    try minifuzz_connected(.multisig_min_sig);
+}
+
+test "simplex_bls12381_threshold_minpk: minifuzz connected" {
+    try minifuzz_connected(.threshold_min_pk);
+}
+
+test "simplex_bls12381_threshold_minsig: minifuzz connected" {
+    try minifuzz_connected(.threshold_min_sig);
 }
