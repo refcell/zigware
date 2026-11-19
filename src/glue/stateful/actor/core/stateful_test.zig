@@ -309,3 +309,75 @@ test "stateful actor: a restart recovers the processed state" {
     stopped = true;
     try second.stop();
 }
+
+/// A minimal application over marshal's mock block, so the actor instantiates against the real
+/// core mailbox (compile check of the surface the dkg validator uses).
+const MarshalApp = struct {
+    const marshal_harness = consensus.marshal.mocks.harness;
+    pub const Block = marshal_harness.B;
+    pub const Context = marshal_harness.Ctx;
+    pub const Input = void;
+    pub const Merkleized = Any.Merkleized;
+    const Built = @import("../processor/processor.zig").Proposed(MarshalApp);
+
+    pub fn sync_targets(_: *const Block) Any.SyncTarget {
+        return Any.initial_sync_target();
+    }
+
+    pub fn process(
+        _: *MarshalApp,
+        _: Io,
+        _: Context,
+        _: anytype,
+        batches: Any.Unmerkleized,
+        _: anytype,
+    ) !?Any.Merkleized {
+        var owned = batches;
+        return try owned.merkleize();
+    }
+
+    pub fn propose(
+        _: *MarshalApp,
+        _: Io,
+        _: Context,
+        _: anytype,
+        batches: Any.Unmerkleized,
+        _: void,
+    ) !?Built {
+        var owned = batches;
+        owned.deinit();
+        return null;
+    }
+
+    pub fn capture(
+        _: *MarshalApp,
+        _: Io,
+        _: Context,
+        _: *const Block,
+        _: anytype,
+        _: anytype,
+    ) !void {}
+
+    pub fn finalized(
+        _: *MarshalApp,
+        _: Io,
+        _: Context,
+        _: *const Block,
+        _: void,
+        _: anytype,
+    ) !void {}
+};
+
+test "stateful actor: instantiates over marshal's core mailbox" {
+    const H = consensus.marshal.mocks.harness.StandardHarness;
+    const RealP = struct {
+        pub const App = MarshalApp;
+        pub const Databases = Any.Shared;
+        pub const Marshal = consensus.marshal.core.Mailbox(H.Scheme, H.Variant);
+        pub const Plan = TestPlan;
+    };
+    const RealStateful = stateful_mod.Stateful(RealP);
+    _ = &RealStateful.init;
+    _ = &RealStateful.run;
+    _ = &RealStateful.deinit;
+}
