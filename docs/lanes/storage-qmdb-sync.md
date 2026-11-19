@@ -52,7 +52,6 @@ it comes first once `any` lands.
 - [x] compact db (witness journal over `merkle.compact`, batches, bounded init, prune,
   `init_from_sync` import, `serve`): `{Keyless,Immutable}{Mmr,Mmb}Compact{Fixed,Variable}Conf`
   and `CodecConformance<StoredWitness>`.
-- [ ] compact `sync.zig` (`Database` impl), once the crypto lane's `Database` interface lands.
 - [x] compact crash-point tests (import replacement under torn writes and failed syncs from
   the faulty storage) and tampered-witness tests.
 - [x] `qmdb_current_{unordered,ordered}_batch_root` (current/batch_root_fuzz_test.zig) and
@@ -65,7 +64,9 @@ it comes first once `any` lands.
 - [x] compact/sync.zig: the sync `Database` interface (plus the engine's `open_journal`
   hook) over `sync.journal.Memory`. `Db.Journal` is now the sync journal; the witness journal
   is `Db.WitnessJournal`.
-- [ ] Fuzz targets and benches for these modules.
+- [x] Fuzz targets: all six `qmdb_current_*` (commonware has no compact fuzz target; compact
+  is covered by its crash-point and tamper tests). Benches: commonware's `qmdb/benches` span
+  every variant, current included, so they stay with storage-qmdb's benches item.
 
 ## Agreement with storage-qmdb (2026-11-16)
 - `any.Db(F, U, C, H, ...)` (family, update type, contiguous journal, hasher, index or
