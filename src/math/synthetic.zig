@@ -62,22 +62,55 @@ pub fn Synthetic(comptime F: type, comptime G: type) type {
             return self.free.items[self.free.items.len - 1].index;
         }
 
-        fn merge_free(self: *Self, allocator: Allocator, term: FreeTerm, negate: bool) !void {
-            const weight = if (negate) term.weight.neg() else term.weight;
-            var position: usize = 0;
-            while (position < self.free.items.len) : (position += 1) {
-                const existing = &self.free.items[position];
-                if (existing.index == term.index) {
-                    existing.weight = existing.weight.add(weight);
-                    return;
+        /// Merges `rhs`'s free terms (both sorted by index) in one linear pass, as
+        /// commonware's `BTreeMap` merge does in `O(n log n)`: a per-term scan and insert
+        /// would be quadratic in the generator count.
+        fn merge_free(
+            self: *Self,
+            allocator: Allocator,
+            rhs: []const FreeTerm,
+            negate: bool,
+        ) !void {
+            if (rhs.len == 0) return;
+            const left = self.free.items;
+            // Terms added in index order (a synthetic MSM over generators) append in place.
+            if (left.len == 0 or left[left.len - 1].index < rhs[0].index) {
+                try self.free.ensureUnusedCapacity(allocator, rhs.len);
+                for (rhs) |term| {
+                    const weight = if (negate) term.weight.neg() else term.weight;
+                    self.free.appendAssumeCapacity(.{ .index = term.index, .weight = weight });
                 }
-                if (existing.index > term.index) break;
+                return;
             }
-            try self.free.insert(allocator, position, .{ .index = term.index, .weight = weight });
+            var merged = try std.ArrayList(FreeTerm).initCapacity(allocator, left.len + rhs.len);
+            var i: usize = 0;
+            var j: usize = 0;
+            while (i < left.len or j < rhs.len) {
+                const take_left = j == rhs.len or (i < left.len and left[i].index <= rhs[j].index);
+                const take_right = i == left.len or (j < rhs.len and rhs[j].index <= left[i].index);
+                assert(take_left or take_right);
+                var term: FreeTerm = undefined;
+                if (take_left) term = left[i];
+                if (take_right) {
+                    const weight = if (negate) rhs[j].weight.neg() else rhs[j].weight;
+                    term = if (take_left)
+                        .{ .index = term.index, .weight = term.weight.add(weight) }
+                    else
+                        .{ .index = rhs[j].index, .weight = weight };
+                }
+                const items = merged.items;
+                assert(items.len == 0 or items[items.len - 1].index < term.index);
+                merged.appendAssumeCapacity(term);
+                if (take_left) i += 1;
+                if (take_right) j += 1;
+            }
+            assert(merged.items.len >= @max(left.len, rhs.len));
+            self.free.deinit(allocator);
+            self.free = merged;
         }
 
         fn merge(self: *Self, allocator: Allocator, rhs: Self, negate: bool) !void {
-            for (rhs.free.items) |term| try self.merge_free(allocator, term, negate);
+            try self.merge_free(allocator, rhs.free.items, negate);
             try self.concrete.ensureUnusedCapacity(allocator, rhs.concrete.items.len);
             for (rhs.concrete.items) |term| {
                 const weight = if (negate) term.weight.neg() else term.weight;
@@ -430,6 +463,46 @@ test "equality handles zero free weights and concrete terms" {
     defer concrete.deinit(allocator);
     try testing.expect(try concrete.eql(concrete, allocator));
     try testing.expect(!try concrete.eql(S.zero, allocator));
+}
+
+test "merging interleaved free terms matches evaluating each side" {
+    const allocator = testing.allocator;
+    var generators: [8]TG = undefined;
+    for (&generators, 0..) |*point, i| point.* = TG.generator.mul(TF.from_u64(i * 7 + 3));
+    // `a` holds the even indices and 5, `b` the odd ones: overlaps at 5, and both orders.
+    const a_indices = [_]u32{ 0, 2, 4, 5, 6 };
+    const b_indices = [_]u32{ 1, 3, 5, 7 };
+    var a: S = .zero;
+    defer a.deinit(allocator);
+    for (a_indices, 1..) |index, weight| {
+        var term = try S.generator(allocator, index);
+        defer term.deinit(allocator);
+        term.mul_assign(TF.from_u64(weight));
+        try a.add_assign(allocator, term);
+    }
+    var b: S = .zero;
+    defer b.deinit(allocator);
+    for (b_indices, 10..) |index, weight| {
+        var term = try S.generator(allocator, index);
+        defer term.deinit(allocator);
+        term.mul_assign(TF.from_u64(weight));
+        try b.add_assign(allocator, term);
+    }
+    const a_value = try a.eval(allocator, &generators);
+    const b_value = try b.eval(allocator, &generators);
+    var total = try a.clone(allocator);
+    defer total.deinit(allocator);
+    try total.add_assign(allocator, b);
+    try testing.expectEqual(@as(usize, 8), total.free.items.len);
+    try testing.expect((try total.eval(allocator, &generators)).eql(a_value.add(b_value)));
+    var difference = try b.clone(allocator);
+    defer difference.deinit(allocator);
+    try difference.sub_assign(allocator, a);
+    const expected = b_value.add(a_value.neg());
+    try testing.expect((try difference.eval(allocator, &generators)).eql(expected));
+    for (total.free.items[1..], total.free.items[0 .. total.free.items.len - 1]) |later, earlier| {
+        try testing.expect(earlier.index < later.index);
+    }
 }
 
 test "documented example: 2 G0 + 3 G1" {
