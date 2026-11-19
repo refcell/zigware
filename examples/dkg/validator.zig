@@ -430,7 +430,10 @@ const Validator = struct {
         const gpa = self.gpa;
         var receiver = try self.probe_mailbox.subscribe();
         defer receiver.deinit();
-        var artifact = receiver.recv() catch return error.ProbeStopped;
+        var artifact = receiver.recv() catch |err| switch (err) {
+            error.Canceled => return error.Canceled,
+            else => return error.ProbeStopped,
+        };
         defer artifact.deinit();
         const output = &artifact.info.output;
         const players = try output.players.clone(gpa);

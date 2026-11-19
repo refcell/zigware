@@ -285,3 +285,29 @@ test "dkg: bootstrap completes a singleton ceremony and hands off genesis" {
     defer runner.deinit();
     try try runner.start_context(singleton_bootstrap, .{tmp.dir});
 }
+
+/// A completion receiver whose ceremony never ends: `recv` waits until canceled.
+const NeverCompletes = struct {
+    pub const Outcome = struct {
+        info: ?types.EpochInfo = null,
+
+        pub fn deinit(_: *Outcome) void {}
+    };
+
+    pub fn recv(_: *NeverCompletes) error{ Canceled, Closed }!Outcome {
+        try io.sleep(.fromSeconds(3600), .awake);
+        unreachable; // The test cancels the wait.
+    }
+};
+
+fn complete_never() anyerror!usize {
+    var completion: NeverCompletes = .{};
+    // `complete` fails in `recv` before it reads the store, the storage, or the handoff.
+    var store: types.Secrets = undefined;
+    return bootstrap.complete(io, gpa, &completion, &store, undefined, undefined);
+}
+
+test "dkg: bootstrap's wait for its ceremony passes a cancel on" {
+    var waiting = try io.concurrent(complete_never, .{});
+    try testing.expectError(error.Canceled, waiting.cancel(io));
+}

@@ -47,7 +47,10 @@ pub fn complete(
     backend: zigware.runtime.storage.Storage,
     handoff: Handoff,
 ) !usize {
-    var outcome = completion.recv() catch return error.BootstrapCompletionDropped;
+    var outcome = completion.recv() catch |err| switch (err) {
+        error.Canceled => return error.Canceled,
+        else => return error.BootstrapCompletionDropped,
+    };
     defer outcome.deinit();
     const info = outcome.info orelse return error.BootstrapDkgFailed;
     assert(info.epoch.is_zero());
@@ -96,10 +99,13 @@ pub fn write_genesis_to_sibling_validators(
     var entries = root.iterate();
     while (try entries.next(io)) |entry| {
         if (entry.kind != .directory) continue;
-        var candidate = root.openDir(io, entry.name, .{}) catch continue;
+        var candidate = root.openDir(io, entry.name, .{}) catch |err| switch (err) {
+            error.Canceled => return error.Canceled,
+            else => continue,
+        };
         defer candidate.close(io);
         const node = config.NodeConfig.load(io, gpa, candidate) catch |err| switch (err) {
-            error.OutOfMemory => return err,
+            error.OutOfMemory, error.Canceled => return err,
             else => continue,
         };
         const public_key = node.public_key();
