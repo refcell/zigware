@@ -774,7 +774,7 @@ Owns `src/glue/dkg`. Reference: `glue/src/dkg` (about 24k Rust lines).
 - [x] orchestrator: limits (`max_payload_size`) with `prefixes_simplex`.
 - [x] orchestrator: the actor, with tests of the epoch transition, catch-up hints, and
   missing schemes.
-- [ ] orchestrator: mod.rs's cluster tests, on bls-math's node composition. (bootstrap and
+- [x] orchestrator: mod.rs's cluster tests, on bls-math's node composition (all 13). (bootstrap and
   probe moved to other lanes, which own src/glue/dkg/bootstrap/ and src/glue/dkg/probe/.)
 - [x] ~~tests: the dkg and reshare harnesses, properties, and mocks; lookup's peer-activation
   test.~~ Moved to the bls-math lane (T-01a1d57b-1003).
@@ -825,6 +825,10 @@ Owns `src/glue/dkg`. Reference: `glue/src/dkg` (about 24k Rust lines).
   tests catch an ignored stale scan and an early final acknowledgement; closed verification is
   ported as a cancel during the final block's share write (verification runs inline here).
   `finalization_error_panics` (an `InvalidLocalState` error) catches a swallowed error.
+- 2026-11-19: orchestrator mod.rs's last 2 cluster tests (slow-tests): state sync rejects a
+  floor in another epoch, and a state-synced entry activates peers from the in-band directory
+  (`ClusterNode` is generic over the manager's directory). They catch an unchecked floor
+  epoch and a dropped in-band directory.
 
 ## dkg probe/bootstrap (owner: p2p lane)
 

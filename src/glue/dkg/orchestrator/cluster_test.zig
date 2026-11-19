@@ -113,7 +113,6 @@ const Recorder = struct {
     }
 };
 
-const OrchestratorMailbox = mailbox_mod.Mailbox(Block, Exact);
 const Filtered = mocks.FilteredReceiver(Net.Receiver);
 /// The network marshal's resolver and buffered broadcast run on: a deaf node drops every
 /// backfill message it receives, so it never serves fetches.
@@ -121,29 +120,48 @@ const ClusterNet = struct {
     pub const Sender = Net.Sender;
     pub const Receiver = Filtered;
 };
-const NodeTypes = struct {
-    pub const Block = mocks.TestBlock;
-    pub const Scheme = cluster.Scheme;
-    pub const Provider = cryptography.certificate.ConstantProvider(cluster.Scheme);
-    pub const Strategy = parallel.Sequential;
-    pub const Network = ClusterNet;
-    pub const PeerProvider = Net.Manager;
-    pub const Blocker = Net.Control;
-    pub const Application = OrchestratorMailbox;
-    pub const Context = Ctx;
-};
 const cluster = @This();
-const MarshalNode = node_api.Node(NodeTypes);
+
+/// The marshal node, orchestrator mailbox, and state-sync plan over blocks whose epoch infos
+/// carry `Dir` directories (key-only `Unit`, or in-band `Addresses`).
+fn Kit(comptime Dir: type) type {
+    return struct {
+        const K = @This();
+        pub const Block = mocks.MockBlock(Dir);
+        pub const Digested = broadcast.Digested(K.Block);
+        pub const Mailbox = mailbox_mod.Mailbox(K.Block, Exact);
+        pub const MarshalNode = node_api.Node(struct {
+            pub const Block = K.Block;
+            pub const Scheme = cluster.Scheme;
+            pub const Provider = cryptography.certificate.ConstantProvider(cluster.Scheme);
+            pub const Strategy = parallel.Sequential;
+            pub const Network = ClusterNet;
+            pub const PeerProvider = Net.Manager;
+            pub const Blocker = Net.Control;
+            pub const Application = K.Mailbox;
+            pub const Context = Ctx;
+        });
+        pub const Plan = state_sync.Plan(cluster.Scheme, Digest, mocks.TestBlsVariant, Dir);
+
+        /// The bare genesis block led by `leader`, or (key-only) one carrying epoch zero's
+        /// info (commonware `make_genesis_block`).
+        fn genesis(leader: Key, dealers: []const Key, players: []const Key) !K.Block {
+            if (Dir == utils.sequence.Unit) return make_genesis_block(leader, dealers, players);
+            const raw = mocks.genesis_block(leader);
+            return .init(raw.context(), raw.parent(), raw.height(), 0);
+        }
+    };
+}
 
 fn OrchestratorTypes(comptime M: type) type {
     return struct {
         pub const Context = Ctx;
-        pub const Block = mocks.TestBlock;
+        pub const Block = Kit(M.Directory).Block;
         pub const Ack = Exact;
         pub const Scheme = cluster.Scheme;
         pub const Provider = *const EpochProvider;
         pub const Manager = *M;
-        pub const Marshal = MarshalNode.Mailbox;
+        pub const Marshal = Kit(M.Directory).MarshalNode.Mailbox;
         pub const Blocker = Net.Control;
         pub const ElectorConfig = simplex.elector.RoundRobin(Sha256);
         pub const Elector = simplex.elector.RoundRobinElector;
@@ -165,7 +183,6 @@ fn OrchestratorTypes(comptime M: type) type {
 }
 const KeyOnly = network.KeyOnlyManager(Net.Manager);
 const Failing = mocks.FailingManager(Net.Manager);
-const StartPlan = state_sync.Plan(Scheme, Digest, mocks.TestBlsVariant, utils.sequence.Unit);
 const Info = @import("../types.zig").EpochInfo(mocks.TestBlsVariant, Key, utils.sequence.Unit);
 
 /// `epoch`'s info: an output dealt to `dealers` from seed `epoch + 1`, with `players` as its
@@ -221,13 +238,14 @@ fn make_height_one_block(leader: Key, dealers: []const Key, players: []const Key
     return with_info(.init(context, genesis.digest(), .new(1), 1), info);
 }
 
-/// A finalization of `payload` at view 1 of epoch zero signed by every scheme.
-fn make_finalization(fixture: *const Fixture, payload: Digest) !simplex.types.Finalization(
-    Scheme,
-    Digest,
-) {
+/// A finalization of `payload` at view 1 of `epoch` signed by every scheme.
+fn make_finalization(
+    fixture: *const Fixture,
+    epoch: Epoch,
+    payload: Digest,
+) !simplex.types.Finalization(Scheme, Digest) {
     assert(fixture.schemes.len <= max_nodes);
-    const proposal = simplex.types.Proposal(Digest).init(.new(.zero(), .new(1)), .zero(), payload);
+    const proposal = simplex.types.Proposal(Digest).init(.new(epoch, .new(1)), .zero(), payload);
     const Finalize = simplex.types.Finalize(Scheme, Digest);
     var finalizes: [max_nodes]Finalize = undefined;
     const count = fixture.schemes.len;
@@ -261,31 +279,34 @@ fn ClusterNode(comptime M: type) type {
         const Self = @This();
         pub const Types = OrchestratorTypes(M);
         pub const Actor = actor_mod.Actor(Types);
+        const K = Kit(M.Directory);
 
         ctx: Ctx,
         prefix_buffer: [32]u8,
         prefix: []const u8,
         page_cache: runtime.buffer.paged.CacheRef,
         simplex_cache: runtime.buffer.paged.CacheRef,
-        node: MarshalNode,
+        node: K.MarshalNode,
         manager: M,
         provider: EpochProvider,
         recorder: Recorder,
         fence: Fence,
-        plan: StartPlan,
+        plan: K.Plan,
         orchestrator: Actor,
-        mailbox: OrchestratorMailbox,
+        mailbox: K.Mailbox,
         channels: [3]Actor.Channel,
         marshal_handle: ?runtime.context.Handle(anyerror!void),
         task: ?Io.Future(anyerror!void),
 
         pub const Start = struct {
             index: usize,
-            boundary: ?*const Block,
+            boundary: ?*const K.Block,
             gate_epoch: u64,
             dealers: []const Key,
             deaf: bool,
             marshal_started: bool = true,
+            /// State-sync material the node starts from (owned); null disables state sync.
+            state_sync: ?K.Plan.Material = null,
         };
 
         fn start(
@@ -297,6 +318,8 @@ fn ClusterNode(comptime M: type) type {
             options: Start,
         ) !void {
             assert(options.index < fixture.participants.len);
+            var material = options.state_sync;
+            errdefer if (material) |*owned| owned.deinit(gpa);
             self.ctx = ctx;
             self.prefix = try std.fmt.bufPrint(
                 &self.prefix_buffer,
@@ -314,7 +337,15 @@ fn ClusterNode(comptime M: type) type {
             self.recorder = .{};
             self.fence = Fence.init(ctx.io());
             self.fence.mark(.new(options.gate_epoch));
-            self.plan = StartPlan.disabled(gpa, ctx.io());
+            self.plan = if (material) |owned| plan: {
+                material = null;
+                break :plan try K.Plan.init(gpa, ctx.io(), ctx.storage, .{
+                    .partition_prefix = self.prefix,
+                    .max_participants = max_participants,
+                    .max_supported_mode = mocks.max_supported_mode,
+                }, owned);
+            } else K.Plan.disabled(gpa, ctx.io());
+            errdefer self.plan.deinit();
             try self.start_actors(net, fixture, options);
             assert(self.task != null);
         }
@@ -322,8 +353,8 @@ fn ClusterNode(comptime M: type) type {
         fn init_node(self: *Self, net: *Net, fixture: *const Fixture, options: Start) !void {
             const key = fixture.participants[options.index];
             const control = net.oracle().control(key);
-            const raw = try make_genesis_block(key, options.dealers, fixture.participants);
-            const genesis = try Digested.precomputed(gpa, raw, raw.digest());
+            const raw = try K.genesis(key, options.dealers, fixture.participants);
+            const genesis = try K.Digested.precomputed(gpa, raw, raw.digest());
             const backfill = try control.register(backfill_channel, quota);
             const shared = try control.register(broadcast_channel, quota);
             const filtered: Filtered = if (options.deaf)
@@ -426,13 +457,13 @@ fn ClusterNode(comptime M: type) type {
         }
 
         /// Hands marshal `block` as certified and finalized (the cluster's boundary).
-        fn seed(self: *Self, fixture: *const Fixture, block: *const Block) !void {
+        fn seed(self: *Self, fixture: *const Fixture, block: *const K.Block) !void {
             assert(block.height().get() == 1);
             const copy = try block.clone(gpa);
-            const certified = try Digested.precomputed(gpa, copy, copy.digest());
+            const certified = try K.Digested.precomputed(gpa, copy, copy.digest());
             const round = block.context().round;
             try testing.expect(try self.node.mailbox.certified(round, certified));
-            var finalization = try make_finalization(fixture, block.digest());
+            var finalization = try make_finalization(fixture, .zero(), block.digest());
             defer finalization.deinit(gpa);
             const feedback = self.node.mailbox.report(.{ .finalization = finalization });
             try testing.expectEqual(consensus.Feedback.ok, feedback);
@@ -495,6 +526,8 @@ fn ClusterOf(comptime M: type) type {
             gate_epoch: u64 = 1,
             layout: Layout = .{},
             marshal_started: bool = true,
+            /// Node 0's state-sync material (owned).
+            state_sync: ?Node.K.Plan.Material = null,
         };
 
         const Self = @This();
@@ -502,6 +535,8 @@ fn ClusterOf(comptime M: type) type {
         fn start(self: *Self, ctx: Ctx, options: Options) !void {
             assert(options.nodes > 0 and options.nodes <= max_nodes);
             const io = ctx.io();
+            var material = options.state_sync;
+            errdefer if (material) |*owned| owned.deinit(gpa);
             self.ctx = ctx;
             self.started = 0;
             var rng = utils.rng.TestRng.init(7);
@@ -523,13 +558,22 @@ fn ClusterOf(comptime M: type) type {
                 .disconnect_on_block = true,
                 .tracked_peer_sets = 1,
             });
+            errdefer self.net.deinit();
             self.network_task = try io.concurrent(Net.run, .{self.net});
+            errdefer {
+                for (self.nodes[0..self.started]) |*node| node.stop();
+                self.net.close();
+                self.network_task.await(io) catch {};
+            }
             _ = self.net.oracle().manager().track(0, .init_primary(.init(participants)));
             for (participants) |from| for (participants) |to| {
                 if (!from.eql(to)) try self.net.oracle().add_link(from, to, link);
             };
             for (participants, 0..) |_, index| {
                 const seeded = options.seed_first or index > 0;
+                // Node 0 owns the material from here, even when its start fails.
+                const handed = if (index == 0) material else null;
+                if (index == 0) material = null;
                 try self.nodes[index].start(ctx.child("node"), self.net, &self.fixture, .init(
                     self.net.oracle().manager(),
                 ), .{
@@ -539,6 +583,7 @@ fn ClusterOf(comptime M: type) type {
                     .dealers = dealers,
                     .deaf = options.layout.is_deaf(index),
                     .marshal_started = options.marshal_started,
+                    .state_sync = handed,
                 });
                 self.started += 1;
             }
@@ -825,4 +870,138 @@ test "orchestrator cluster: marshal shutdown during startup resolution stops cle
     // Per push: one node whose marshal never starts, so no consensus runs and it ends within
     // about 20 ms of simulated time (about 50 ms of wall time in Debug).
     try run_body(marshal_shutdown_body, 10);
+}
+
+/// The cluster's four-node fixture, rebuilt from the same seed so a test can sign
+/// certificates before the cluster starts.
+fn cluster_fixture() !Fixture {
+    var rng = utils.rng.TestRng.init(7);
+    return simplex.scheme.ed25519.fixture(Digest, gpa, &rng, namespace, 4);
+}
+
+// commonware `state_sync_rejects_mismatched_floor_epoch` (an error here): node 0's state-sync
+// artifact is for epoch one, but its floor finalizes a block of epoch zero.
+fn mismatched_floor_body(ctx: Ctx) anyerror!void {
+    var fixture = try cluster_fixture();
+    defer fixture.deinit(gpa);
+    const participants = fixture.participants;
+    var info = try make_epoch_info(1, participants, participants);
+    errdefer info.deinit(gpa);
+    var genesis = try make_genesis_block(participants[0], participants, participants);
+    defer genesis.deinit(gpa);
+    const floor = try make_finalization(&fixture, .zero(), genesis.digest());
+    var c: Cluster = undefined;
+    const started = c.start(ctx, .{
+        .nodes = 4,
+        .seed_first = false,
+        .state_sync = .{ .info = info, .floor = floor },
+    });
+    try testing.expectError(error.EpochMismatch, started);
+}
+
+test "orchestrator cluster: state sync rejects a floor in another epoch" {
+    try slow_only();
+    try run_body(mismatched_floor_body, 10);
+}
+
+const InBand = mocks.DirectoryManager(KeyOnly);
+const Addresses = network.Addresses(Key);
+const AddressedInfo = @import("../types.zig").EpochInfo(mocks.TestBlsVariant, Key, Addresses);
+const synced_epoch = 3;
+
+/// Every participant at 127.0.0.1, from port 7000 by index.
+fn localhost_directory(participants: []const Key) !Addresses {
+    assert(participants.len <= max_nodes);
+    var pairs: [max_nodes]Addresses.Inner.Pair = undefined;
+    for (participants, pairs[0..participants.len], 0..) |peer, *pair, index| {
+        const port: u16 = @intCast(7000 + index);
+        pair.* = .{ peer, .{ .symmetric = .{ .ip = .{ .v4 = .localhost }, .port = port } } };
+    }
+    return Addresses.init(gpa, pairs[0..participants.len]);
+}
+
+/// The synced epoch's successful info, carrying `directory` (borrowed) in-band.
+fn addressed_info(participants: []const Key, directory: *const Addresses) !AddressedInfo {
+    var rng = utils.rng.TestRng.init(7);
+    const dealers = try Set.from_dedup(gpa, participants);
+    const V = mocks.TestBlsVariant;
+    var dealt = try fd.deal(V, Key, utils.N3f1, gpa, &rng, .non_zero_counter, dealers);
+    for (dealt.shares.values) |*share| share.private.zeroize();
+    dealt.shares.deinit(gpa);
+    errdefer dealt.output.deinit(gpa);
+    var players = try Set.from_dedup(gpa, participants);
+    errdefer players.deinit(gpa);
+    var next_players = try players.clone(gpa);
+    errdefer next_players.deinit(gpa);
+    return .{
+        .outcome = .success,
+        .epoch = .new(synced_epoch),
+        .output = dealt.output,
+        .players = players,
+        .next_players = next_players,
+        .directory = try directory.clone(gpa),
+    };
+}
+
+// commonware `state_sync_entry_activates_peers_from_in_band_directory`: a node entering at a
+// state-synced epoch has no application state to resolve addresses from, so it activates the
+// committee from the directory the synced artifact carries.
+fn in_band_body(ctx: Ctx) anyerror!void {
+    const io = ctx.io();
+    var fixture = try cluster_fixture();
+    defer fixture.deinit(gpa);
+    const participants = fixture.participants;
+    var net = try Net.init(gpa, io, .{
+        .max_size = 1024 * 1024,
+        .max_peers_per_set = max_nodes,
+        .disconnect_on_block = true,
+        .tracked_peer_sets = 1,
+    });
+    defer net.deinit();
+    var network_task = try io.concurrent(Net.run, .{net});
+    defer network_task.await(io) catch {};
+    defer net.close();
+    _ = net.oracle().manager().track(0, .init_primary(.init(participants)));
+
+    var directory = try localhost_directory(participants);
+    defer directory.deinit(gpa);
+    var info = try addressed_info(participants, &directory);
+    defer info.deinit(gpa);
+    const Node = ClusterNode(InBand);
+    var genesis = try Node.K.genesis(participants[0], participants, participants);
+    defer genesis.deinit(gpa);
+    const floor = try make_finalization(&fixture, .new(synced_epoch), genesis.digest());
+    var node: Node = undefined;
+    try node.start(ctx.child("node"), net, &fixture, .init(gpa, .init(net.oracle().manager())), .{
+        .index = 0,
+        .boundary = null,
+        .gate_epoch = synced_epoch,
+        .dealers = participants,
+        .deaf = false,
+        .state_sync = .{ .info = try info.clone(gpa), .floor = floor },
+    });
+    defer node.manager.deinit();
+    defer node.stop();
+
+    const tracked = &node.manager.tracked;
+    var polls: u32 = 0;
+    while (tracked.items.len == 0) : (polls += 1) {
+        if (polls == 1000) return error.NeverTracked;
+        try io.sleep(.fromMilliseconds(10), .awake);
+    }
+    try testing.expectEqual(@as(usize, 1), tracked.items.len);
+    const entry = &tracked.items[0];
+    try testing.expectEqual(@as(u64, synced_epoch), entry.epoch.get());
+    var roles = try info.participants(gpa);
+    defer roles.deinit(gpa);
+    var expected = try roles.tracked_peers(gpa);
+    defer expected.deinit(gpa);
+    try testing.expectEqualSlices(Key, expected.primary.items, entry.primary);
+    try testing.expectEqualSlices(Key, expected.secondary.items, entry.secondary);
+    try testing.expect(entry.directory.eql(directory));
+}
+
+test "orchestrator cluster: a state-synced entry activates peers from the in-band directory" {
+    try slow_only();
+    try run_body(in_band_body, 10);
 }
