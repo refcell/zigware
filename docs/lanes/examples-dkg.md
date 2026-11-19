@@ -48,10 +48,12 @@ setup. Owns `examples/dkg` (commonware `examples/dkg`).
   `probe_resumes_persisted_floor` checks the epoch; its manager and blocker come from the
   simulated network instead of a discovery network, since the config only carries them.
 
-- `application.zig`'s hooks take the parent block (propose) or the block height (process)
-  directly until glue's stateful `Application` contract lands; its root vectors come from a
-  scratch Rust test over commonware's `Database` and `db_config` (heights 1-4, forked batches,
-  height 2 applied and finalized).
+- `application.zig`'s `App` meets glue.stateful's `Processor` contract (`propose`/`process`
+  over the ancestry stream, empty `capture`/`finalized`); `build` and `execute` are their
+  cores. Its root vectors come from a scratch Rust test over commonware's `Database` and
+  `db_config` (heights 1-4, forked batches, height 2 applied and finalized).
+- `App.Input` is `{ gpa, payload: ?Payload }`, not commonware's `ReshareInput`: the stateful
+  actor frees an unused input with `App.deinit_input(*Input)`, which needs the allocator.
 
 ## Log
 
@@ -61,3 +63,4 @@ setup. Owns `examples/dkg` (commonware `examples/dkg`).
 - 2026-11-19: bootstrap's genesis hand-off with commonware's test (examples lane).
 - 2026-11-19: the validator's probe config over the sync plan (examples lane).
 - 2026-11-19: bootstrap's completion and genesis hand-off on the bootstrap engine (examples lane).
+- 2026-11-19: the application on glue.stateful's Processor contract (examples lane).

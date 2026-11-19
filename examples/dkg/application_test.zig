@@ -109,7 +109,7 @@ test "dkg: propose builds the parent's child over the state it reaches" {
     defer parent.deinit(gpa);
 
     var batch = try database.new_batches();
-    var proposed = try App.propose(gpa, context, &parent, &batch, null);
+    var proposed = try App.build(gpa, context, &parent, &batch, null);
     defer proposed.block.deinit(gpa);
     defer proposed.merkleized.deinit();
     try testing.expectEqual(1, proposed.block.height().get());
@@ -119,7 +119,70 @@ test "dkg: propose builds the parent's child over the state it reaches" {
 
     // Processing the proposal on another fork reaches the same state.
     var other = try database.new_batches();
-    var processed = try App.process(proposed.block.height(), &other);
+    var processed = try App.execute(proposed.block.height(), &other);
+    defer processed.deinit();
+    try testing.expect(processed.root().eql(proposed.block.target.root));
+}
+
+const Digested = zigware.broadcast.Digested(types.Block);
+
+/// The ancestry stream's surface over one block (or none): `peek`, then `next` hands it out.
+const OneAncestry = struct {
+    block: ?Digested,
+
+    pub fn peek(self: *const OneAncestry) ?*const Digested {
+        return if (self.block) |*block| block else null;
+    }
+
+    pub fn next(self: *OneAncestry) anyerror!?Digested {
+        const block = self.block orelse return null;
+        self.block = null;
+        return block;
+    }
+};
+
+test "dkg: the stateful hooks build on and re-execute the ancestry's head" {
+    const gpa = testing.allocator;
+    var harness: Harness = undefined;
+    try harness.init();
+    defer harness.deinit();
+    const database = try harness.open();
+    defer database.deinit();
+    const leader = ed25519.PrivateKey.from_seed(0).public_key();
+    const context: types.Context = .{
+        .round = .new(.zero(), .new(1)),
+        .leader = leader,
+        .parent = .{ .zero(), .empty },
+    };
+    const initial = Database.initial_sync_targets();
+    const genesis = try types.Block.init(gpa, context, .empty, .zero(), initial, null);
+    var app = App.init(gpa, &genesis);
+    var parent = try Digested.compute(gpa, genesis);
+    defer parent.deinit();
+
+    // No parent: nothing is built and the batches are released.
+    const io = testing.io;
+    var empty: OneAncestry = .{ .block = null };
+    const none = try app.propose(io, context, &empty, try database.new_batches(), .{ .gpa = gpa });
+    try testing.expectEqual(null, none);
+
+    var ancestry: OneAncestry = .{ .block = parent.clone() };
+    const batches = try database.new_batches();
+    var proposed = (try app.propose(io, context, &ancestry, batches, .{ .gpa = gpa })).?;
+    defer proposed.block.deinit(gpa);
+    defer proposed.merkleized.deinit();
+    try testing.expectEqual(1, proposed.block.height().get());
+    try testing.expect(proposed.block.parent().eql(parent.digest()));
+    const first = expected[0];
+    try expect_target(App.sync_targets(&proposed.block), first[0], first[1], first[2]);
+
+    // `process` re-executes the block at the head of the ancestry, reaching its state.
+    var child = try Digested.compute(gpa, try proposed.block.clone(gpa));
+    defer child.deinit();
+    var head: OneAncestry = .{ .block = child.clone() };
+    defer if (head.block) |*block| block.deinit();
+    const forked = try database.new_batches();
+    var processed = (try app.process(io, context, &head, forked, .finalized)).?;
     defer processed.deinit();
     try testing.expect(processed.root().eql(proposed.block.target.root));
 }

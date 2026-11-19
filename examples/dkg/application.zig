@@ -4,12 +4,13 @@
 //! Every non-genesis block writes its height to one fixed key. Epoch validation (`Deferred`),
 //! QMDB root and range validation (`stateful::Application`), and reshare payload validation
 //! (`reshare::Application`) belong to the layers above, as in commonware; this module only
-//! executes blocks. Until glue's stateful `Application` contract lands, the hooks take what
-//! commonware's ancestry stream yields (the parent block, or the block's height) directly.
+//! executes blocks. `App` meets glue.stateful's application contract (`Processor`): `propose`
+//! and `process` take the ancestry stream; `build` and `execute` are their cores.
 
 const std = @import("std");
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
+const Io = std.Io;
 const zigware = @import("zigware");
 const types = @import("types.zig");
 
@@ -76,16 +77,36 @@ pub fn target_of(merkleized: *const Merkleized) types.Target {
     return .init(merkleized.root(), bounds.inactivity_floor, bounds.tip.size);
 }
 
-/// A proposed block and the state it reaches.
-pub const Proposed = struct { block: types.Block, merkleized: Merkleized };
+/// A proposed block and the state it reaches (glue.stateful's `Proposed(App)`).
+pub const Proposed = zigware.glue.stateful.actor.processor.Proposed(App);
 
-/// Application logic: every non-genesis block writes its height to one fixed key.
+/// Application logic: every non-genesis block writes its height to one fixed key. A cheap
+/// handle: the stateful actor copies it into each call.
 pub const App = struct {
+    gpa: Allocator,
     genesis_block: *const types.Block,
 
-    pub fn init(genesis_block: *const types.Block) App {
+    pub const Block = types.Block;
+    pub const Context = types.Context;
+    pub const Merkleized = Managed.Merkleized;
+    /// The reshare payload the `reshare.Application` wrapper selected (commonware's
+    /// `ReshareInput`), with the allocator that frees it.
+    pub const Input = struct {
+        gpa: Allocator,
+        payload: ?types.Payload = null,
+    };
+    /// Nothing is read before a finalized block applies.
+    pub const Captured = void;
+
+    pub fn init(gpa: Allocator, genesis_block: *const types.Block) App {
         assert(genesis_block.height().get() == 0);
-        return .{ .genesis_block = genesis_block };
+        return .{ .gpa = gpa, .genesis_block = genesis_block };
+    }
+
+    /// Frees an unused input.
+    pub fn deinit_input(input: *Input) void {
+        if (input.payload) |*payload| payload.deinit(input.gpa);
+        input.payload = null;
     }
 
     /// The genesis block, copied for the caller.
@@ -94,7 +115,7 @@ pub const App = struct {
     }
 
     /// Writes `height` and merkleizes; consumes `batches`, also on error.
-    pub fn execute(height: types.Height, batches: *Unmerkleized) !Merkleized {
+    pub fn execute(height: types.Height, batches: *Unmerkleized) !Managed.Merkleized {
         errdefer batches.deinit();
         assert(height.get() > 0);
         try batches.write(height_key, .init(height.get()));
@@ -103,7 +124,7 @@ pub const App = struct {
 
     /// Builds the child of `parent` carrying `payload` (owned by the block on success), which
     /// the reshare wrapper selected. Consumes `batches`.
-    pub fn propose(
+    pub fn build(
         gpa: Allocator,
         context: types.Context,
         parent: *const types.Block,
@@ -119,10 +140,70 @@ pub const App = struct {
         return .{ .block = block, .merkleized = merkleized };
     }
 
-    /// Re-executes a block at `height` (the ancestry's head); consumes `batches`.
-    pub fn process(height: types.Height, batches: *Unmerkleized) !Merkleized {
-        return execute(height, batches);
+    /// Builds on the parent at the head of `ancestry` with the wrapper's `input` (commonware
+    /// `propose`); null when the parent is gone. Consumes `batches` and `input`.
+    pub fn propose(
+        app: *App,
+        _: Io,
+        context: types.Context,
+        ancestry: anytype,
+        batches: Unmerkleized,
+        input: Input,
+    ) !?Proposed {
+        var owned = batches;
+        var payload = input;
+        errdefer deinit_input(&payload);
+        var parent = (ancestry.next() catch |err| {
+            owned.deinit();
+            return err;
+        }) orelse {
+            owned.deinit();
+            deinit_input(&payload);
+            return null;
+        };
+        defer parent.deinit();
+        const built = try build(app.gpa, context, parent.inner(), &owned, payload.payload);
+        payload.payload = null;
+        return built;
     }
+
+    /// Re-executes the block at the head of `ancestry` (commonware `process`); null when it is
+    /// gone. Consumes `batches`.
+    pub fn process(
+        _: *App,
+        _: Io,
+        _: types.Context,
+        ancestry: anytype,
+        batches: Unmerkleized,
+        _: zigware.glue.stateful.actor.Finality,
+    ) !?Managed.Merkleized {
+        var owned = batches;
+        const head = ancestry.peek() orelse {
+            owned.deinit();
+            return null;
+        };
+        return try execute(head.inner().height(), &owned);
+    }
+
+    /// Reads nothing before a finalized block applies (commonware's empty `capture`).
+    pub fn capture(
+        _: *App,
+        _: Io,
+        _: types.Context,
+        _: *const Block,
+        _: *const Managed.Merkleized,
+        _: anytype,
+    ) !Captured {}
+
+    /// Does nothing once a block is finalized (commonware's empty `finalized`).
+    pub fn finalized(
+        _: *App,
+        _: Io,
+        _: types.Context,
+        _: *const Block,
+        _: Captured,
+        _: anytype,
+    ) !void {}
 
     /// The state a block claims to reach.
     pub fn sync_targets(block: *const types.Block) types.Target {
