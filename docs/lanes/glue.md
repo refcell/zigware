@@ -388,6 +388,10 @@ Owns `src/glue/dkg`. Reference: `glue/src/dkg` (about 24k Rust lines).
 - The inclusion window races the mailbox, a scan of a fresh copy of the scanned request's
   ancestry, and that requester leaving (`Sender.closed`) with `Io.Select`, mailbox first.
   A scan that loses the race restarts next iteration; a finalized block marks it stale.
+- zigware's marshal application contract has no `Input` type, so `reshare.Application(A, T)`
+  passes the reshare payload to the inner application as an extra `propose`/`prepare`
+  argument (`?Payload`, owned by the inner application) instead of commonware's
+  `Input { upstream, payload }`.
 - One-shot DKG reports its outcome on a `oneshot.Sender(Actor(T).DkgOutcome)` in
   `Mode.dkg.completion` (commonware's `DkgCompletion` callback); a failed manager `track`
   is logged at info and completes the ceremony without an output, as commonware does.
@@ -413,6 +417,9 @@ Owns `src/glue/dkg`. Reference: `glue/src/dkg` (about 24k Rust lines).
   stored final block), with a singleton ceremony test driven through the mailbox.
 - [x] reshare actor: `run.Runner(T).run`, the actor task over its dealing channel (mux,
   startup tip, state-synced epoch registration, DKG or reshare mode).
+- [x] reshare: the `Application` wrapper with 9 of application.rs's tests (final-block
+  proposal and verification, phase gating of dealer logs, reservation release).
+- [ ] reshare: application.rs's prepare and dropped-proposal tests.
 - [ ] reshare actor: resolving the startup from marshal's anchor and the state-sync plan
   (commonware `start`'s preamble) (store init, mux, state-sync
   resolution, startup tip); inclusion's remaining window tests (gated and stalled ancestry, scan
@@ -442,5 +449,7 @@ Owns `src/glue/dkg`. Reference: `glue/src/dkg` (about 24k Rust lines).
 - 2026-11-18: the reshare epoch loop; its test catches a skipped dealing window.
 - 2026-11-18: `Runner(T).run`; the epoch-loop test now runs through it and catches an
   inverted mode dispatch.
+- 2026-11-19: the reshare `Application` wrapper; its tests catch an accepted final-payload
+  mismatch, a kept reservation after a declined proposal, and an ungated dealer log.
 - 2026-11-18: one-shot DKG mode; a singleton ceremony completes through the mailbox
   (dealing, next_log, inclusion, epoch_info), and the test catches a lost outcome.

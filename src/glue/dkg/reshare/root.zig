@@ -19,6 +19,8 @@ pub const Mailbox = mailbox.Mailbox;
 pub const Message = mailbox.Message;
 pub const LogReservation = mailbox.LogReservation;
 pub const EpochInfoResponse = mailbox.EpochInfoResponse;
+pub const application = @import("application.zig");
+pub const Application = application.Application;
 pub const metrics = @import("metrics.zig");
 pub const Metrics = metrics.Metrics;
 pub const Phase = metrics.Phase;
@@ -27,4 +29,5 @@ test {
     @import("std").testing.refAllDecls(@This());
     _ = @import("mailbox_test.zig");
     _ = @import("metrics_test.zig");
+    _ = @import("application_test.zig");
 }

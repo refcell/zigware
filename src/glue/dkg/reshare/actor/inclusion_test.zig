@@ -91,7 +91,7 @@ fn scan_blocks(scan_value: Scan, blocks: []const B) !?Logs {
 }
 
 /// The signed log of `signers()[index]`'s dealer for epoch zero, seeded with `seed`.
-fn signed_log(index: usize, seed: u8) !fd.SignedDealerLog(V, P) {
+pub fn signed_log(index: usize, seed: u8) !fd.SignedDealerLog(V, P) {
     var harness = try mocks.StoreHarness.init(gpa);
     defer harness.deinit();
     var secrets: mocks.MemorySecretStore = .init(gpa);
