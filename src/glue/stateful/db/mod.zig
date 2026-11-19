@@ -46,6 +46,7 @@ const Io = std.Io;
 const runtime = @import("runtime");
 
 pub const any = @import("any.zig");
+pub const compact = @import("compact.zig");
 pub const current = @import("current.zig");
 pub const immutable = @import("immutable.zig");
 pub const keyless = @import("keyless.zig");

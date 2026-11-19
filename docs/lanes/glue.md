@@ -131,6 +131,15 @@ marshal's actors (consensus-marshal) for the actor; until then it ports what is 
   `with_metadata`, `with_inactivity_floor`, `get(loc)`, `get_many(locs, out)`, `merkleize`) and
   `Merkleized` (`root`, `bounds`, `new_batch`, `get`, `get_many`, `clone`, `deinit`). Its
   `SyncTarget` is the root over `[sync_boundary, size)`.
+- `glue.stateful.db.immutable.Immutable(F, K, E, C, H, T)`: the ManagedDb of a
+  `storage.qmdb.immutable.Db` (fixed or variable), with `Unmerkleized` (`set`, `with_metadata`,
+  `with_inactivity_floor`, `get(key)`, `get_many(keys, out)`, `merkleize`) and `Merkleized`
+  (`root`, `bounds`, `new_batch`, `get`, `get_many`, `clone`, `deinit`).
+- `glue.stateful.db.compact.Compact(F, O, H)`: the ManagedDb of a `storage.qmdb.compact.Db`
+  over keyless or immutable operations `O`, with `Unmerkleized` (`append` for keyless, `set` for
+  immutable, `with_metadata`, `with_inactivity_floor`, `merkleize`; no reads) and `Merkleized`
+  (`root`, `bounds`, `new_batch`, `clone`, `deinit`). Its `SyncTarget` is a
+  `qmdb.sync.CompactTarget` (root and size).
 - `glue.stateful.db.sync` (also `db.Anchor`, `db.TipUpdate`): `Anchor(D)` (`height`, `round`,
   `digest`, `eql`), `TipUpdate(D, T)` (`init`, `with_observation(gpa, io, anchor, targets)`
   → update and a `oneshot.Receiver(void)`, `record(context)` calling
@@ -321,6 +330,8 @@ marshal's actors (consensus-marshal) for the actor; until then it ports what is 
 - 2026-11-18 (stateful): the db/p2p `Mailbox` sync source with commonware's mailbox tests.
 - 2026-11-19 (stateful): the processor's `Verifier`.
 - 2026-11-19 (stateful, broadcast-resolver lane): the `keyless` ManagedDb adapter.
+- 2026-11-19 (stateful, broadcast-resolver lane): the `immutable` and `compact` ManagedDb
+  adapters.
 - 2026-11-19 (stateful): the core actor's `Durability`.
 - 2026-11-19 (stateful): the core actor's `Verifications` handler; waiting verifies abstain.
 
