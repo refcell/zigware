@@ -1,76 +1,38 @@
-//! The single-database stateful e2e engine (commonware `glue/src/stateful/tests/single_db_app.rs`
-//! and `common.rs`).
+//! The single-database stateful e2e app (commonware `glue/src/stateful/tests/single_db_app.rs`).
 //!
-//! `SingleDbEngine` is a `simulate` engine definition: every validator runs Simplex over marshal's
-//! `Deferred` wrapper, the marshal node (prunable archives, buffered broadcast, and the backfill
-//! resolver), and the `Stateful` actor over one unordered fixed QMDB. Its `App` bumps a counter
-//! and records each height, and every block commits to the resulting state through its sync
-//! target. A validator's `NodeState` reads its marshal (processed height, finalized digests) and
-//! its databases (the oldest retained operation) for the plan's properties.
-//!
-//! Differences from commonware:
-//! - The node task builds every actor, so `init` only records the incarnation; commonware's
-//!   async `init` builds them before `start`.
-//! - The marshal node names marshal's own partitions `<prefix>-marshal` (the dkg bootstrap
-//!   node's layout); commonware passes the bare prefix.
-//! - With state sync enabled, a delayed validator selects its floor through the probe before
-//!   marshal starts, as commonware's `init` does, inside its node task.
+//! `SingleDbEngine` runs `engine.StatefulEngine` over one unordered fixed QMDB per validator. Its
+//! `App` bumps a counter and records each height, and every block commits to the resulting
+//! state through its sync target.
 
 const std = @import("std");
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
-const broadcast = @import("broadcast");
 const codec = @import("codec");
 const consensus = @import("consensus");
 const cryptography = @import("cryptography");
-const p2p = @import("p2p");
-const parallel = @import("parallel");
 const runtime = @import("runtime");
-const utils = @import("utils");
-const simulate = @import("../../simulate/mod.zig");
-const node_api = @import("../../dkg/bootstrap/node.zig");
-const db = @import("../db/mod.zig");
-const actor_mod = @import("../actor/mod.zig");
+const engine = @import("engine.zig");
 const processor_mod = @import("../actor/processor/processor.zig");
 const testing_mod = @import("../actor/processor/testing.zig");
-const probe_mod = @import("../probe/mod.zig");
-const qmdb_p2p = @import("../db/p2p/mod.zig");
-const state_sync = @import("../db/state_sync.zig");
 
-const simplex = consensus.simplex;
 const Height = consensus.Height;
-const Epoch = consensus.Epoch;
 const Sha256 = cryptography.Sha256;
-const Digest = Sha256.Digest;
-const ed25519 = cryptography.ed25519;
-pub const Key = ed25519.PublicKey;
-const Net = p2p.simulated.Network(Key);
-const Context = simulate.engine.Context;
+const Key = engine.Key;
 pub const Any = testing_mod.Any;
-pub const Scheme = simplex.mocks.scheme.Scheme(Digest);
-const Provider = cryptography.certificate.ConstantProvider(Scheme);
-const Fixture = cryptography.certificate.mocks.Fixture(Scheme);
 const SyncTarget = Any.SyncTarget;
+const u64_to_digest = engine.u64_to_digest;
+const digest_to_u64 = engine.digest_to_u64;
+const counter_key = engine.counter_key;
+const height_key = engine.height_key;
 
-pub const namespace = "stateful_e2e_test";
-pub const num_validators: u32 = 5;
-const page_size: u16 = 1024;
-const page_cache_size: usize = 10;
-const io_buffer_size: usize = 2048;
-const test_quota = p2p.Quota.per_second(1024);
-const channel_count = 7;
-const mailbox_size: u32 = 100;
-/// Operations served per QMDB sync request and fetched per batch.
-pub const sync_batch_size: u64 = 16;
-/// Marshal blocks retained with the slowest state sync.
-pub const slow_sync_marshal_retention: u64 = 128;
+pub const SingleDbEngine = engine.StatefulEngine(Spec);
 
 /// A block carrying its consensus context and the state it commits to (commonware `Block`):
 /// `context || parent || height || state_root || range`, hashed with SHA-256.
 pub const Block = struct {
     pub const Digest = Sha256.Digest;
-    pub const Context = simplex.types.Context(Sha256.Digest, Key);
+    pub const Context = engine.BlockContext;
     pub const Cfg = void;
 
     context_value: Block.Context,
@@ -107,14 +69,8 @@ pub const Block = struct {
 
     /// The height-zero block over the empty database (commonware `Block::genesis`).
     pub fn genesis() Block {
-        const leader = ed25519.PrivateKey.from_seed(0).public_key();
         const empty: Sha256.Digest = .fill(0);
-        const context_value: Block.Context = .{
-            .round = .new(.zero(), .zero()),
-            .leader = leader,
-            .parent = .{ .zero(), empty },
-        };
-        return init(context_value, empty, .zero(), Any.initial_sync_target());
+        return init(engine.genesis_context(), empty, .zero(), Any.initial_sync_target());
     }
 
     pub fn digest(self: Block) Sha256.Digest {
@@ -156,28 +112,6 @@ pub const Block = struct {
         return init(context_value, parent_digest, at, target);
     }
 };
-
-pub const Digested = broadcast.Digested(Block);
-
-pub fn u64_to_digest(value: u64) Sha256.Digest {
-    var result: Sha256.Digest = .fill(0);
-    std.mem.writeInt(u64, result.bytes[0..8], value, .big);
-    return result;
-}
-
-pub fn digest_to_u64(value: Sha256.Digest) u64 {
-    return std.mem.readInt(u64, value.bytes[0..8], .big);
-}
-
-pub fn counter_key() Sha256.Digest {
-    return Sha256.hash(&.{"counter"});
-}
-
-fn height_key(at: Height) Sha256.Digest {
-    var bytes: [8]u8 = undefined;
-    std.mem.writeInt(u64, &bytes, at.get(), .big);
-    return Sha256.hash(&.{&bytes});
-}
 
 /// The application: each block increments `counter` and writes `height -> height` (commonware
 /// `App`).
@@ -271,706 +205,99 @@ pub const App = struct {
     }
 };
 
-const single = @This();
-
-const NodeTypes = struct {
+/// The app's databases, their configuration, and their one resolver (see `engine`).
+const Spec = struct {
     pub const Block = single.Block;
-    pub const Scheme = single.Scheme;
-    pub const Provider = single.Provider;
-    pub const Strategy = parallel.Sequential;
-    pub const Network = Net;
-    pub const PeerProvider = Net.Manager;
-    pub const Blocker = Net.Control;
-    pub const Application = simulate.MonitorReporter(Key, Adapter);
-    pub const Context = simulate.engine.Context;
-};
-const Node = node_api.Node(NodeTypes);
-pub const MarshalMailbox = Node.Mailbox;
-const Variant = Node.Variant;
-const Plan = actor_mod.SyncPlan(Scheme, Variant);
-const QmdbActor = qmdb_p2p.actor.Actor(qmdb_p2p.actor.Params(
-    Key,
-    Net.Manager,
-    Net.Control,
-    Any,
-    Net.Sender,
-    Net.Receiver,
-));
-const QmdbMailbox = QmdbActor.Mailbox;
-const StatefulP = struct {
     pub const App = single.App;
     pub const Databases = Any.Shared;
-    pub const Marshal = MarshalMailbox;
-    pub const Plan = single.Plan;
-    pub const Resolvers = *QmdbMailbox;
-};
-const Stateful = actor_mod.Stateful(StatefulP);
-pub const StatefulMailbox = Stateful.Mailbox;
-const ProbeSource = probe_mod.MarshalSource(MarshalMailbox);
-const Probe = probe_mod.Probe(struct {
-    pub const Scheme = single.Scheme;
-    pub const Digest = Sha256.Digest;
-    pub const Provider = single.Provider;
-    pub const Source = ProbeSource;
-    pub const Blocker = Net.Control;
-    pub const NetSender = Net.Sender;
-    pub const NetReceiver = Net.Receiver;
-});
+    pub const Resolvers = ResolverSet;
 
-/// The stateful mailbox as marshal's `Deferred` application (which passes no upstream input)
-/// and as marshal's finalized-block reporter.
-const Adapter = struct {
-    pub const Activity = StatefulMailbox.Update;
-    mailbox: StatefulMailbox,
+    pub const DbConfig = struct {
+        names: [3][]u8,
+        cache: *runtime.buffer.paged.CacheRef,
 
-    pub fn propose(
-        self: *Adapter,
-        ctx: anytype,
-        context: Block.Context,
-        ancestry: anytype,
-    ) anyerror!?Digested {
-        return self.mailbox.propose(ctx, context, ancestry, {});
-    }
+        pub fn init(
+            gpa: Allocator,
+            prefix: []const u8,
+            cache: *runtime.buffer.paged.CacheRef,
+        ) !DbConfig {
+            const parts = [_][]const u8{
+                "-qmdb-mmr-journal",
+                "-qmdb-mmr-metadata",
+                "-qmdb-log-journal",
+            };
+            var names: [parts.len][]u8 = undefined;
+            var made: usize = 0;
+            errdefer for (names[0..made]) |name| gpa.free(name);
+            for (&names, parts) |*name, suffix| {
+                name.* = try std.mem.concat(gpa, u8, &.{ prefix, suffix });
+                made += 1;
+            }
+            assert(made == parts.len);
+            return .{ .names = names, .cache = cache };
+        }
 
-    pub fn verify(
-        self: *Adapter,
-        ctx: anytype,
-        context: Block.Context,
-        ancestry: anytype,
-    ) anyerror!bool {
-        return self.mailbox.verify(ctx, context, ancestry);
-    }
+        pub fn config(self: *const DbConfig) Any.Config {
+            return .{
+                .merkle = .{
+                    .journal_partition = self.names[0],
+                    .metadata_partition = self.names[1],
+                    .items_per_blob = 11,
+                    .write_buffer = engine.io_buffer_size,
+                    .replay_buffer = engine.io_buffer_size,
+                    .cache_ref = self.cache,
+                },
+                .log = .{
+                    .partition = self.names[2],
+                    .items_per_blob = 7,
+                    .cache_ref = self.cache,
+                    .write_buffer = engine.io_buffer_size,
+                    .replay_buffer = engine.io_buffer_size,
+                },
+                .translator = .{},
+                .init_cache = 1024,
+            };
+        }
 
-    pub fn report(self: *Adapter, activity: Activity) consensus.Feedback {
-        return self.mailbox.report(activity);
-    }
+        pub fn deinit(self: *DbConfig, gpa: Allocator) void {
+            for (self.names) |name| gpa.free(name);
+            self.* = undefined;
+        }
+    };
 
-    pub fn clone(self: *const Adapter) Adapter {
-        return .{ .mailbox = self.mailbox.clone() };
-    }
-
-    pub fn deinit(self: *Adapter) void {
-        self.mailbox.deinit();
-        self.* = undefined;
-    }
-};
-
-const Wrapper = consensus.marshal.standard.Deferred(
-    Context,
-    Scheme,
-    Adapter,
-    Block,
-    consensus.types.FixedEpocher,
-);
-const SimplexParams = struct {
-    pub const Context = simulate.engine.Context;
-    pub const Scheme = single.Scheme;
-    pub const Elector = simplex.elector.RoundRobinElector;
-    pub const Blocker = Net.Control;
-    pub const Digest = Sha256.Digest;
-    pub const Automaton = *Wrapper;
-    pub const Relay = *Wrapper;
-    pub const Reporter = *Wrapper;
-    pub const Strategy = parallel.Sequential;
-    pub const Sender = Net.Sender;
-    pub const Receiver = Net.Receiver;
-};
-const Simplex = simplex.engine.Engine(SimplexParams);
-
-/// What a validator's state reads, filled by its node task once marshal and the actor exist.
-const Inner = struct {
-    gpa: Allocator,
-    marshal: ?MarshalMailbox = null,
-    stateful: ?StatefulMailbox = null,
-    /// Whether this incarnation found a floor persisted by an interrupted state sync.
-    state_sync_resumed: bool = false,
-    /// The height state sync reached (or had completed at), when it was requested.
-    state_sync_height: ?u64 = null,
-    /// The running incarnation's plan; null while it is down.
-    plan: ?*const Plan = null,
-
-    fn deinit(inner: *Inner) void {
-        if (inner.marshal) |*mailbox| mailbox.deinit();
-        if (inner.stateful) |*mailbox| mailbox.deinit();
-        inner.* = undefined;
-    }
-};
-
-/// A validator's state for the plan's properties (commonware `MockValidatorState`).
-pub const NodeState = struct {
-    inner: *Inner,
-
-    /// The digest of the finalized block at `at`, if marshal serves it.
-    pub fn digest_at_height(self: *const NodeState, at: u64) !?Sha256.Digest {
-        const marshal = self.inner.marshal orelse return null;
-        var block = try marshal.get_block(.{ .height = .new(at) }) orelse return null;
-        defer block.deinit();
-        return block.digest();
-    }
-
-    /// The oldest operation location the database still retains.
-    pub fn oldest_retained(self: *const NodeState) !u64 {
-        const mailbox = self.inner.stateful orelse return error.NotStarted;
-        // Borrowed: the set stays with the actor.
-        const databases = try mailbox.subscribe_databases();
+    pub fn oldest_retained(databases: Any.Shared) !u64 {
         var guard = try databases.read();
         defer guard.deinit();
         return guard.get().inner.bounds().start;
     }
-
-    pub fn state_sync_height(self: *const NodeState) ?u64 {
-        return self.inner.state_sync_height;
-    }
-
-    pub fn state_sync_resumed(self: *const NodeState) bool {
-        return self.inner.state_sync_resumed;
-    }
-
-    /// Whether the running incarnation's plan recorded state sync completion.
-    pub fn state_sync_completed(self: *const NodeState) bool {
-        const plan = self.inner.plan orelse return false;
-        return plan.completed() != null;
-    }
-
-    /// Marshal's processed height, zero before it starts or once it stops.
-    pub fn processed_height(self: *const NodeState) u64 {
-        const marshal = self.inner.marshal orelse return 0;
-        const processed = marshal.get_processed() catch return 0;
-        return if (processed) |value| value.height().get() else 0;
-    }
 };
 
-/// A started validator: what its node task takes.
-pub const Started = struct {
-    context: Context,
-    index: usize,
-    delayed: bool,
-    public_key: Key,
-    oracle: Net.Oracle,
-    channels: [channel_count]Net.Registered,
-    monitor: simulate.events.Monitor(Key),
-    engine: *const SingleDbEngine,
-    inner: *Inner,
-};
+/// One resolver on the QMDB sync channel.
+const ResolverSet = struct {
+    const Resolver = engine.QmdbResolver(Any, engine.Net.Sender, engine.Net.Receiver);
+    pub const Handles = *Resolver.Mailbox;
+    pub const payload_size = Resolver.payload_size;
 
-pub const SingleDbEngine = struct {
-    pub const PublicKey = Key;
-    pub const Engine = Started;
-    pub const State = NodeState;
+    resolver: Resolver,
 
-    gpa: Allocator,
-    fixture: Fixture,
-    /// Marshal blocks retained beyond the acknowledgement window.
-    retained_marshal_blocks: u64 = 10,
-    /// A validator whose actors fail (an injected storage fault) stays down until the plan
-    /// restarts it, as commonware's engine handle ends; otherwise a failure panics.
-    tolerate_failures: bool = false,
-    /// Delayed validators join through peer state sync.
-    enable_state_sync: bool = false,
-    sync_config: state_sync.SyncEngineConfig = .{
-        .fetch_batch_size = sync_batch_size,
-        .apply_batch_size = 64,
-        .max_outstanding_requests = 8,
-    },
-
-    pub fn create(gpa: Allocator, n: u32) !SingleDbEngine {
-        assert(n > 0);
-        var rng = utils.rng.test_rng();
-        const fixture = try simplex.mocks.scheme.fixture(Sha256.Digest, gpa, &rng, namespace, n);
-        assert(fixture.participants.len == n);
-        return .{ .gpa = gpa, .fixture = fixture };
+    pub fn init(self: *ResolverSet, args: engine.ResolverArgs) !void {
+        const channel = args.channel;
+        try self.resolver.init(&args, "qmdb", channel.sender, channel.receiver);
+        assert(self.resolver.task != null);
     }
 
-    pub fn deinit(self: *SingleDbEngine) void {
-        self.fixture.deinit(self.gpa);
-        self.* = undefined;
+    pub fn handles(self: *ResolverSet) Handles {
+        return &self.resolver.mailbox;
     }
 
-    pub fn participants(self: *const SingleDbEngine) []const Key {
-        return self.fixture.participants;
+    pub fn stop(self: *ResolverSet) void {
+        self.resolver.stop();
     }
 
-    pub fn channels(_: *const SingleDbEngine) []const simulate.ChannelSpec {
-        const specs = comptime blk: {
-            var list: [channel_count]simulate.ChannelSpec = undefined;
-            for (&list, 0..) |*spec, index| spec.* = .{ .channel = index, .quota = test_quota };
-            break :blk list;
-        };
-        return &specs;
-    }
-
-    pub fn max_message_size(self: *const SingleDbEngine) u32 {
-        const count: u32 = @intCast(self.fixture.participants.len);
-        return p2p.max_message_size(&.{
-            simplex.limits.max_payload_size(Scheme, Sha256.Digest, count),
-            consensus.marshal.max_payload_size(Variant, Scheme, count, {}),
-            probe_mod.wire.max_payload_size(Variant, Scheme, count),
-            qmdb_p2p.limits.max_payload_size(
-                QmdbActor.Family,
-                Sha256.Digest,
-                sync_batch_size,
-                codec.fixed_size(QmdbActor.Op).?,
-            ) catch unreachable, // Proof: 16 operations fit a u32.
-        });
-    }
-
-    /// Delayed validators join through state sync (commonware `with_state_sync`).
-    pub fn with_state_sync(self: *SingleDbEngine) void {
-        self.enable_state_sync = true;
-    }
-
-    /// State sync in the smallest batches (commonware `with_slow_state_sync`).
-    pub fn with_slow_state_sync(self: *SingleDbEngine) void {
-        self.sync_config = .{
-            .fetch_batch_size = 1,
-            .apply_batch_size = 1,
-            .max_outstanding_requests = 1,
-        };
-        self.retained_marshal_blocks = slow_sync_marshal_retention;
-    }
-
-    pub fn init(self: *const SingleDbEngine, ctx: simulate.InitContext(Key)) !struct {
-        Started,
-        NodeState,
-    } {
-        assert(ctx.channels.len == channel_count);
-        assert(ctx.public_key.eql(self.fixture.participants[ctx.index]));
-        const inner = try self.gpa.create(Inner);
-        inner.* = .{ .gpa = self.gpa };
-        var registered: [channel_count]Net.Registered = undefined;
-        @memcpy(&registered, ctx.channels);
-        const started: Started = .{
-            .context = ctx.context,
-            .index = ctx.index,
-            .delayed = ctx.delayed,
-            .public_key = ctx.public_key,
-            .oracle = ctx.oracle,
-            .channels = registered,
-            .monitor = ctx.monitor,
-            .engine = self,
-            .inner = inner,
-        };
-        return .{ started, .{ .inner = inner } };
-    }
-
-    pub fn start(started: Started) !simulate.engine.Handle {
-        return started.context.spawn(run_node, .{started});
-    }
-
-    pub fn deinit_state(state: *NodeState) void {
-        const inner = state.inner;
-        const gpa = inner.gpa;
-        inner.deinit();
-        gpa.destroy(inner);
-        state.* = undefined;
-    }
-};
-
-/// Runs a validator until the plan aborts it; an engine that stops on its own fails the run.
-fn run_node(ctx: Context, started: Started) void {
-    const gpa = ctx.gpa();
-    const validator = gpa.create(Validator) catch @panic("out of memory");
-    defer gpa.destroy(validator);
-    validator.run(ctx, started) catch |err| {
-        if (err == error.Canceled) return;
-        // A crash aborts this task's subtree, so an actor can end before this task notices.
-        ctx.io().checkCancel() catch return;
-        if (started.engine.tolerate_failures) return;
-        std.debug.panic("stateful validator {d} failed: {t}", .{ started.index, err });
-    };
-    ctx.io().checkCancel() catch return;
-    // An injected fault can end an actor without an error (a closed mailbox).
-    if (started.engine.tolerate_failures) return;
-    std.debug.panic("stateful validator {d} stopped", .{started.index});
-}
-
-/// One incarnation's actors. It must not move: the node and the wrapper point into it.
-const Validator = struct {
-    gpa: Allocator,
-    io: Io,
-    prefix: []u8,
-    simplex_partition: []u8,
-    scheme: Scheme,
-    page_cache: runtime.buffer.paged.CacheRef,
-    node: Node,
-    plan: Plan,
-    probe: Probe.Created,
-    probe_rng: utils.rng.TestRng,
-    probe_task: Io.Future(anyerror!void),
-    qmdb_mailbox: QmdbMailbox,
-    /// Canceled by the stateful task (see `stateful_task`), or by `deinit` if it never ran.
-    qmdb_task: ?Io.Future(QmdbActor.Error!void),
-    /// The floor state sync runs toward, when this startup syncs.
-    sync_floor: ?consensus.Height = null,
-    should_sync: bool,
-    prng: std.Random.DefaultPrng,
-    db_names: [3][]u8,
-    actor: *Stateful,
-    mailbox: StatefulMailbox,
-    wrapper: *Wrapper,
-    elector: simplex.elector.RoundRobinElector,
-    simplex_engine: Simplex,
-    /// The validator's state, which reads this incarnation's plan while it runs.
-    inner: *Inner,
-
-    fn run(self: *Validator, ctx: Context, started: Started) anyerror!void {
-        try self.init(ctx, started);
-        defer self.deinit();
-        return self.supervise(ctx, started);
-    }
-
-    fn init(self: *Validator, ctx: Context, started: Started) !void {
-        const gpa = ctx.gpa();
-        self.gpa = gpa;
-        self.io = ctx.io();
-        self.inner = started.inner;
-        self.prefix = try std.fmt.allocPrint(gpa, "validator-{d}", .{started.index});
-        errdefer gpa.free(self.prefix);
-        self.simplex_partition = try std.fmt.allocPrint(gpa, "{s}-simplex", .{self.prefix});
-        errdefer gpa.free(self.simplex_partition);
-        self.scheme = try started.engine.fixture.schemes[started.index].clone(gpa);
-        errdefer self.scheme.deinit(gpa);
-        self.page_cache = try .init(gpa, page_size, page_cache_size);
-        errdefer self.page_cache.deinit();
-        self.plan = try .init(env(ctx, "plan"), self.prefix);
-        errdefer self.plan.deinit();
-        try self.init_probe(ctx, started);
-        errdefer self.deinit_probe();
-        try self.select_floor(started);
-        try self.init_node(ctx, started);
-        errdefer self.node.deinit();
-        try self.init_qmdb_resolver(ctx, started);
-        errdefer self.deinit_qmdb_resolver();
-        try self.init_stateful(ctx, started);
-        errdefer self.deinit_stateful();
-        try self.init_consensus(ctx, started);
-        assert(self.simplex_partition.len > self.prefix.len);
-    }
-
-    fn env(ctx: Context, label: []const u8) db.Env {
-        return .{
-            .gpa = ctx.gpa(),
-            .io = ctx.io(),
-            .storage = ctx.storage,
-            .scope = ctx.scope.child(label),
-        };
-    }
-
-    fn init_probe(self: *Validator, ctx: Context, started: Started) !void {
-        const channel = started.channels[6];
-        self.probe = try Probe.init(self.gpa, self.io, .{
-            .provider = .init(&self.scheme),
-            .blocker = started.oracle.control(started.public_key),
-            .mailbox_size = mailbox_size,
-            .minimum_epoch = .zero(),
-            .retry_timeout_ns = 100 * std.time.ns_per_ms,
-        }, channel.sender, channel.receiver);
-        errdefer {
-            self.probe.probe.deinit();
-            self.probe.mailbox.deinit();
-        }
-        self.probe_rng = .init(started.index);
-        const args = .{ self.probe.probe, &self.probe_rng };
-        self.probe_task = try ctx.io().concurrent(run_probe, args);
-    }
-
-    fn run_probe(target: *Probe, rng: *utils.rng.TestRng) anyerror!void {
-        return target.run(rng, parallel.sequential);
-    }
-
-    fn deinit_probe(self: *Validator) void {
-        self.probe_task.cancel(self.io) catch {};
-        self.probe.probe.deinit();
-        self.probe.mailbox.deinit();
-    }
-
-    /// Selects and persists a floor when this startup state syncs (commonware's `init`).
-    fn select_floor(self: *Validator, started: Started) !void {
-        const requested = started.engine.enable_state_sync and started.delayed;
-        self.should_sync = self.plan.should_sync(requested);
-        started.inner.state_sync_resumed = self.plan.floor() != null;
-        if (self.should_sync) {
-            var receiver = try self.probe.mailbox.subscribe();
-            defer receiver.deinit();
-            var floor = try receiver.recv();
-            defer floor.deinit();
-            try self.plan.set_floor(&floor.finalization);
-            assert(self.plan.floor() != null);
-        } else if (requested) {
-            const completed = self.plan.completed();
-            started.inner.state_sync_height = if (completed) |at| at.get() else null;
-        }
-    }
-
-    fn init_qmdb_resolver(self: *Validator, ctx: Context, started: Started) !void {
-        const channel = started.channels[5];
-        const created = try QmdbActor.create(self.gpa, self.io, ctx.scope.child("qmdb"), .{
-            .peer_provider = started.oracle.manager(),
-            .blocker = started.oracle.control(started.public_key),
-            .database = null,
-            .mailbox_size = mailbox_size,
-            .me = started.public_key,
-            .fetch_timeout = .from_secs(2),
-            .fetch_retry_delay = .from_millis(100),
-            .max_serve_ops = sync_batch_size,
-            .priority_requests = false,
-            .priority_responses = false,
-        });
-        self.qmdb_mailbox = created.mailbox;
-        errdefer self.qmdb_mailbox.deinit();
-        self.qmdb_task = created.actor.start(channel.sender, channel.receiver) catch |err| {
-            created.actor.destroy();
-            return err;
-        };
-    }
-
-    /// Stops the resolver; its task frees the actor and its serve tasks when it returns.
-    fn stop_qmdb_resolver(self: *Validator) void {
-        var task = self.qmdb_task orelse return;
-        self.qmdb_task = null;
-        _ = task.cancel(self.io) catch {};
-        assert(self.qmdb_task == null);
-    }
-
-    fn deinit_qmdb_resolver(self: *Validator) void {
-        self.stop_qmdb_resolver();
-        self.qmdb_mailbox.deinit();
-    }
-
-    fn init_node(self: *Validator, ctx: Context, started: Started) !void {
-        const raw = Block.genesis();
-        var genesis = try Digested.precomputed(self.gpa, raw, raw.digest());
-        errdefer genesis.deinit();
-        var start_genesis = try Digested.precomputed(self.gpa, raw, raw.digest());
-        var start: ?Node.Start = self.plan.marshal_start(Digested, start_genesis) catch |err| {
-            start_genesis.deinit();
-            return err;
-        };
-        if (start.? == .floor) start_genesis.deinit();
-        errdefer if (start) |*value| switch (value.*) {
-            .genesis => |*block| block.deinit(),
-            .floor => |*finalization| finalization.deinit(self.gpa),
-        };
-        const backfill = started.channels[3];
-        const broadcast_channel = started.channels[4];
-        try self.node.init(ctx, .{
-            .public_key = started.public_key,
-            .peer_provider = started.oracle.manager(),
-            .blocker = started.oracle.control(started.public_key),
-            .provider = .init(&self.scheme),
-            .strategy = .{},
-            .partition_prefix = self.prefix,
-            .page_cache = &self.page_cache,
-            .genesis = genesis,
-            .start = start,
-            .block_codec_config = {},
-            .blocks_per_epoch = std.math.maxInt(u64),
-            .items_per_section = 10,
-            .mailbox_size = mailbox_size,
-            .write_buffer = io_buffer_size,
-            .replay_buffer = io_buffer_size,
-            .fetch_timeout = .from_secs(2),
-            .fetch_retry_delay = .from_millis(100),
-        }, .{ .sender = backfill.sender, .receiver = backfill.receiver }, .{
-            .sender = broadcast_channel.sender,
-            .receiver = broadcast_channel.receiver,
-        });
-        start = null; // The node took it.
-        assert(self.node.actor != null);
-    }
-
-    fn db_config(self: *Validator) !Any.Config {
-        const gpa = self.gpa;
-        const parts = [_][]const u8{
-            "-qmdb-mmr-journal",
-            "-qmdb-mmr-metadata",
-            "-qmdb-log-journal",
-        };
-        var names: [parts.len][]u8 = undefined;
-        for (&names, parts) |*name, suffix| {
-            name.* = try std.mem.concat(gpa, u8, &.{ self.prefix, suffix });
-        }
-        self.db_names = names;
-        return .{
-            .merkle = .{
-                .journal_partition = names[0],
-                .metadata_partition = names[1],
-                .items_per_blob = 11,
-                .write_buffer = io_buffer_size,
-                .replay_buffer = io_buffer_size,
-                .cache_ref = &self.page_cache,
-            },
-            .log = .{
-                .partition = names[2],
-                .items_per_blob = 7,
-                .cache_ref = &self.page_cache,
-                .write_buffer = io_buffer_size,
-                .replay_buffer = io_buffer_size,
-            },
-            .translator = .{},
-            .init_cache = 1024,
-        };
-    }
-
-    fn init_stateful(self: *Validator, ctx: Context, started: Started) !void {
-        var seed: [8]u8 = undefined;
-        ctx.io().random(&seed);
-        self.prng = .init(std.mem.readInt(u64, &seed, .little));
-        const config = try self.db_config();
-        const engine = started.engine;
-        self.actor, self.mailbox = try Stateful.init(self.gpa, self.io, .{
-            .app = .{},
-            .env = env(ctx, "stateful"),
-            .db_config = config,
-            .marshal = self.node.mailbox.clone(),
-            .mailbox_size = mailbox_size,
-            .plan = &self.plan,
-            .prune_config = .{
-                .maintenance_interval = 5,
-                .retained_marshal_blocks = engine.retained_marshal_blocks,
-                .retained_qmdb_blocks = 0,
-            },
-            .max_pending_acks = 1,
-            .random = self.prng.random(),
-            .sync_config = engine.sync_config,
-            .resolvers = &self.qmdb_mailbox,
-            .floor = self.node.floor,
-        });
-        assert(self.should_sync == (self.plan.floor() != null));
-    }
-
-    fn deinit_stateful(self: *Validator) void {
-        self.mailbox.deinit();
-        self.actor.deinit();
-        for (self.db_names) |name| self.gpa.free(name);
-    }
-
-    fn init_consensus(self: *Validator, ctx: Context, started: Started) !void {
-        const gpa = self.gpa;
-        const adapter: Adapter = .{ .mailbox = self.mailbox.clone() };
-        const length = utils.NonZero(u64).init(std.math.maxInt(u64)).?;
-        const marshal = self.node.mailbox.clone();
-        self.wrapper = try Wrapper.create(ctx.child("deferred"), adapter, marshal, .new(length));
-        errdefer self.wrapper.destroy();
-        const count: u32 = @intCast(started.engine.fixture.participants.len);
-        const elector = simplex.elector.RoundRobin(Sha256).default();
-        self.elector = try elector.build(gpa, count);
-        errdefer self.elector.deinit(gpa);
-        try self.simplex_engine.init(ctx.child("simplex"), .{
-            .scheme = self.scheme,
-            .elector = self.elector,
-            .blocker = started.oracle.control(started.public_key),
-            .automaton = self.wrapper,
-            .relay = self.wrapper,
-            .reporter = self.wrapper,
-            .track_historical_votes = false,
-            .strategy = .{},
-            .partition = self.simplex_partition,
-            .mailbox_size = 3,
-            .epoch = Epoch.zero(),
-            .floor = .{ .genesis = Block.genesis().digest() },
-            .replay_buffer = io_buffer_size,
-            .write_buffer = io_buffer_size,
-            .page_cache = &self.page_cache,
-            .leader_timeout = .from_secs(1),
-            .certification_timeout = .from_secs(2),
-            .timeout_retry = .from_millis(500),
-            .view_retention = .new(10),
-            .skip = .{ .enabled = .{ .timeout = .from_secs(5) } },
-            .fetch_timeout = .from_secs(2),
-            .fetch_retry_delay = .from_secs(2),
-            .forward = .disabled,
-        });
-    }
-
-    /// Runs the actor, stopping the qmdb resolver first when it ends or is aborted. The resolver
-    /// borrows the databases the actor closes on its way out (commonware's resolver holds an
-    /// `Arc` clone), so a crash cancels the resolver before it cancels the actor.
-    fn stateful_task(_: Context, self: *Validator) anyerror!void {
-        const Done = union(enum) { actor: anyerror!void };
-        var buffer: [1]Done = undefined;
-        var select: Io.Select(Done) = .init(self.io, &buffer);
-        select.concurrent(.actor, Stateful.run, .{self.actor}) catch |err| {
-            self.stop_qmdb_resolver();
-            return err;
-        };
-        const done = select.await() catch |err| {
-            self.stop_qmdb_resolver();
-            while (select.cancel()) |_| {}
-            return err;
-        };
-        // An actor that ended on its own has already closed its databases.
-        self.stop_qmdb_resolver();
-        return done.actor;
-    }
-
-    fn simplex_task(ctx: Context, self: *Validator, started: Started) anyerror!void {
-        const votes = convert(started.channels[0]);
-        const certificates = convert(started.channels[1]);
-        const resolver = convert(started.channels[2]);
-        return Simplex.run(ctx, &self.simplex_engine, votes, certificates, resolver);
-    }
-
-    fn convert(channel: Net.Registered) simplex.engine.Channel(SimplexParams) {
-        return .{ .sender = channel.sender, .receiver = channel.receiver };
-    }
-
-    fn buffer_task(_: Context, self: *Validator) anyerror!void {
-        return self.node.watch_broadcast();
-    }
-
-    /// Starts the actor, marshal, and simplex, and runs until one of them or buffered broadcast
-    /// ends (commonware's engine handle).
-    fn supervise(self: *Validator, ctx: Context, started: Started) anyerror!void {
-        var handles: [4]runtime.context.Handle(anyerror!void) = undefined;
-        const reporter = NodeTypes.Application.init(
-            started.public_key,
-            started.monitor,
-            .{ .mailbox = self.mailbox.clone() },
-        );
-        handles[1] = try self.node.start(reporter);
-        // Until `select` takes every handle, a failure stops marshal here.
-        var marshal_owned = true;
-        errdefer if (marshal_owned) {
-            const ended = handles[1].abort();
-            if (ended) |result| result catch {} else |_| {}
-        };
-        started.inner.marshal = self.node.mailbox.clone();
-        started.inner.stateful = self.mailbox.clone();
-        started.inner.plan = &self.plan;
-        // Attaching marshal puts the probe in service; a syncing node consumed its floor.
-        try self.probe.mailbox.attach(.{ .mailbox = self.node.mailbox.clone() });
-        if (self.should_sync) {
-            const payload = self.plan.floor().?.proposal.payload;
-            var receiver = try self.node.mailbox.subscribe_by_commitment(payload, .wait);
-            defer receiver.deinit();
-            var block = try receiver.recv();
-            defer block.deinit();
-            started.inner.state_sync_height = block.inner().height().get();
-        }
-        handles[0] = try ctx.child("stateful").spawn(stateful_task, .{self});
-        handles[2] = try ctx.child("engine").spawn(simplex_task, .{ self, started });
-        handles[3] = try ctx.child("buffer").spawn(buffer_task, .{self});
-        marshal_owned = false;
-        const first = try runtime.context.select(anyerror!void, self.io, &handles);
-        return first;
-    }
-
-    fn deinit(self: *Validator) void {
-        const gpa = self.gpa;
-        self.inner.plan = null;
-        self.simplex_engine.deinit();
-        self.elector.deinit(gpa);
-        self.wrapper.destroy();
-        self.deinit_stateful();
-        self.deinit_qmdb_resolver();
-        self.node.deinit();
-        self.deinit_probe();
-        self.plan.deinit();
-        self.page_cache.deinit();
-        self.scheme.deinit(gpa);
-        gpa.free(self.simplex_partition);
-        gpa.free(self.prefix);
+    pub fn deinit(self: *ResolverSet) void {
+        self.resolver.deinit();
         self.* = undefined;
     }
 };
+
+const single = @This();

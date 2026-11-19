@@ -122,7 +122,7 @@ pub fn Stateful(comptime P: type) type {
             /// returned at initialization. Resolvers also serve peers once the databases open,
             /// on either startup path. They borrow the databases, which the actor closes when it
             /// returns (commonware's resolvers hold `Arc` clones): stop them before the actor
-            /// ends, as src/glue/stateful/tests/single_db.zig's `stateful_task` does.
+            /// ends, as src/glue/stateful/tests/engine.zig's `run_stateful` does.
             sync_config: ?state_sync.SyncEngineConfig = null,
             resolvers: ?Resolvers = null,
             floor: ?consensus.marshal.core.Floor = null,

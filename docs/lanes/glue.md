@@ -463,21 +463,24 @@ ones: d = deployer (thread T-01a1d5b9-c237), u = utils, j = storage-journal
     and 3317. Adapted: 3215 and 3301 share one test (zigware's duplicate check is
     `redelivered`, consulted before `finalize`), as do 3330 and 3357; the flight hand-offs
     (2680, 2730) release a flight's joiner instead of dropping a polled future with a waker.
-- Open, j (storage-journal): tests/ (src/glue/stateful/tests/). `SingleDbEngine` runs Simplex,
-  the marshal node, the probe, the qmdb sync resolver, and `Stateful` over one fixed QMDB per
-  validator. Ported (single-db engine; commonware also runs each on `MultiDbEngine`, not yet
-  ported): finalize (and with storage faults), determinism, crash/restart, pruning (marshal and
-  QMDB), delayed start, lossy, random, many, and rapid crashes, full outage, partition, and
-  the state sync scenarios: handoff (and with storage faults), determinism, random crashes,
-  lossy, crash during sync, and the partitioned restart. One 20-block plan always runs; the
-  rest need -Dslow-tests. Adaptations: crash during sync crashes at 6.6 s, not 6.25 s (the
-  joiner reaches view 80 later here); the state sync properties also require the plan's
-  recorded completion, since syncing acknowledges retained blocks and marshal's processed
-  height advances during a sync that never finishes. Written but skipped: crash during sync
-  and the partitioned restart, both on `with_slow_state_sync`, whose sync does not complete by
-  height 130 here (commonware's does); the partitioned plan's timed-out teardown also
-  segfaults. Open: those two, multi_db_app (and the multi-db partitioned restart), floor.rs,
-  and mod.rs's six targeted qmdb tests.
+- Open, j (storage-journal): tests/ (src/glue/stateful/tests/). `engine.zig`'s
+  `StatefulEngine(S)` runs Simplex, the marshal node, the probe, the QMDB sync resolvers, and
+  `Stateful` over app `S`'s databases. `single_db.zig` (one fixed QMDB) and `multi_db.zig` (a
+  fixed QMDB plus a compact immutable QMDB, whose resolvers share the sync channel through a
+  muxer) are its two apps. As in commonware (since bca770a0c), every scenario runs on both
+  engines under rotating and stable leaders: finalize (and with storage faults), determinism,
+  crash/restart, pruning (marshal and QMDB), delayed start, lossy, random, many, and rapid
+  crashes, full outage, partition, and the state sync scenarios: handoff (and with storage
+  faults), determinism, random crashes, lossy, crash during sync, and the partitioned restart
+  (one test per engine). One 20-block single-db plan always runs; the rest need -Dslow-tests.
+  Adaptations: crash during sync crashes at 6.6 s, not 6.25 s (the joiner reaches view 80
+  later here); the state sync properties also require the plan's recorded completion, since
+  syncing acknowledges retained blocks and marshal's processed height advances during a sync
+  that never finishes; DB-B's sync target is zigware's `CompactTarget` (root and size).
+  Written but skipped: crash during sync and both partitioned restarts, all on
+  `with_slow_state_sync`, whose sync does not complete by height 130 here (commonware's does);
+  the partitioned plans' timed-out teardown also segfaults. Open: those three. simplex
+  (T-01a1d5ad) has floor.rs and mod.rs's six targeted qmdb tests.
   Split (agreed 2026-11-19): storage-journal keeps the state sync scenarios and multi_db_app;
   simplex (T-01a1d5ad-c8d6) takes floor.rs (`live_floor_preserves_application_recovery`, 2
   cases) and the six targeted qmdb tests (out_of_order_certifications, finalizations and
