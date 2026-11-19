@@ -27,8 +27,8 @@ const PublicKey = ed25519.PublicKey;
 const production = zigware.runtime.production;
 const traces = zigware.runtime.telemetry.traces;
 const Store = store_mod.Store;
-const Cups = zigware.stream.SakeCups(ed25519.PrivateKey, zigware.cryptography.ChaCha20Poly1305);
-const Upgrader = zigware.stream.utils.Timeout(Cups);
+pub const Cups = zigware.stream.SakeCups(ed25519.PrivateKey, zigware.cryptography.ChaCha20Poly1305);
+pub const Upgrader = zigware.stream.utils.Timeout(Cups);
 
 /// The log target of the indexer's events (the binary's module path).
 pub const target = "indexer";
@@ -234,7 +234,7 @@ fn run(
 const Connection = Cups.Accepted(production.network.Stream, production.network.Sink);
 
 /// Accepts validators and answers their requests from the store.
-const Server = struct {
+pub const Server = struct {
     gpa: Allocator,
     io: Io,
     store: *Store,
@@ -252,7 +252,7 @@ const Server = struct {
     }
 
     /// Accepts and authenticates one connection, then serves it in `connections`.
-    fn accept(
+    pub fn accept(
         server: *Server,
         listener: *production.network.Network.Listener,
         upgrader: Upgrader,

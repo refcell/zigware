@@ -35,7 +35,7 @@ const simplex = zigware.consensus.simplex;
 const traces = zigware.runtime.telemetry.traces;
 const production = zigware.runtime.production;
 const discovery = zigware.p2p.authenticated.discovery;
-const Cups = zigware.stream.SakeCups(ed25519.PrivateKey, zigware.cryptography.ChaCha20Poly1305);
+pub const Cups = zigware.stream.SakeCups(ed25519.PrivateKey, zigware.cryptography.ChaCha20Poly1305);
 const Net = discovery.Network(Cups, production.network.Network);
 
 /// The log target of the validator's own events (the binary's module path).
@@ -306,7 +306,7 @@ const Stream = production.network.Stream;
 const Sink = production.network.Sink;
 
 /// The indexer connection: one request, then its response.
-const Indexer = struct {
+pub const Indexer = struct {
     gpa: Allocator,
     connection: Cups.Connection(Stream, Sink),
 
