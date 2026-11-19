@@ -8,6 +8,7 @@ const Io = std.Io;
 const runtime = @import("runtime");
 const utils = @import("utils");
 const metrics = runtime.telemetry.metrics;
+const rate_limit = @import("../../rate_limit.zig");
 const network_mod = @import("network.zig");
 const harness = @import("network_test.zig");
 
@@ -117,6 +118,41 @@ test "the dialer drains its queue at dial_frequency" {
     // commonware `test_dialer_keeps_dialing_queued_peers_when_next_query_deadline_is_unknown`
     // on the network: three queued peers are dialed at 0, 100, and 200 ms.
     try run(queued_peers, .{});
+}
+
+fn reserved(scope: metrics.Scope, value: i64) !bool {
+    const text = try scope.encode(gpa);
+    defer gpa.free(text);
+    return metrics.has_metric_value(text, "directory_reserved", value);
+}
+
+fn handshake_timeout_releases(io: Io, transport: *Transport, scope: metrics.Scope) !void {
+    // The peer's address is bound but never accepts, so the handshake hangs.
+    const silent = try transport.bind(network_mod.to_address(harness.local_socket(8_000)));
+    defer silent.deinit();
+    var config = dialer_config(1_000, .from_secs(60));
+    config.handshake_timeout = .from_millis(100);
+    const entries: [1]harness.Entry = .{.{
+        .key = harness.PrivateKey.from_seed(1).public_key(),
+        .value = .{ .symmetric = harness.local_socket(8_000) },
+    }};
+    const tracked: Net.Tracker.Tracked = .init_primary(.init(&entries));
+    const quota: rate_limit.Quota = .per_second(100);
+    var node = try harness.start_network(io, transport, scope, config, 0, tracked, quota);
+    defer harness.stop_node(io, &node);
+    try io.sleep(.fromMilliseconds(50), .awake);
+    try testing.expectEqual(@as(u64, 1), try attempts(scope));
+    try testing.expect(try reserved(scope, 1));
+    // The handshake timeout ends the dial well before the next one is due.
+    try io.sleep(.fromMilliseconds(150), .awake);
+    try testing.expect(try reserved(scope, 0));
+    try testing.expectEqual(@as(u64, 1), try attempts(scope));
+}
+
+test "a dial whose handshake never completes releases its reservation" {
+    // commonware `test_dial_timeout_releases_reservation`, adapted: lookup bounds a dial by
+    // the handshake timeout (see p2p.md's Decisions), not a separate dial timeout.
+    try run(handshake_timeout_releases, .{});
 }
 
 fn run(comptime function: anytype, args: anytype) !void {

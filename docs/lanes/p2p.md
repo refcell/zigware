@@ -459,10 +459,11 @@ Open:
 - [x] `authenticated/lookup/types.rs` `test_decode_does_not_allocate`: decode a lookup Message::Data
   with a failing allocator and check the payload slice points into the input buffer (discovery has
   this for Payload in discovery/types_test.zig, lookup does not); goes in lookup/types.zig
-- [ ] `authenticated/lookup/actors/dialer.rs` `test_dial_timeout_releases_reservation`: a dial to a
+- [x] `authenticated/lookup/actors/dialer.rs` `test_dial_timeout_releases_reservation`: a dial to a
   peer that never answers releases its reservation after dial_timeout; zigware's lookup (and
   discovery) config has dial_timeout, but network.zig dial_peer never applies it, so the behavior is
   missing too; goes in lookup/network_test.zig after dial_peer applies the timeout
+  Done as handshake-timeout release in lookup/network_dialer_test.zig.
 - [x] `authenticated/lookup/actors/dialer.rs` `test_dialer_dials_one_peer_per_tick`: with many
   dialable peers, dial_loop makes one dial per dial_frequency tick (2-4 dials in 3 ticks); could
   count dialer_attempts in a lookup network test or test dial_loop/next_deadline in network.zig
@@ -511,10 +512,11 @@ Open:
 - [x] `authenticated/lookup/actors/peer/actor.rs` `test_oversized_data_returns_error`: a Data frame
   one byte over max_message_size (but within the stream frame limit) ends the peer with a decode
   error; peer.zig test
-- [ ] `authenticated/lookup/actors/peer/ingress.rs` `kill_retained_on_overflow`: two kills into a
+- [x] `authenticated/lookup/actors/peer/ingress.rs` `kill_retained_on_overflow`: two kills into a
   full one-slot peer mailbox yield exactly one Kill and nothing after; zigware's shared outbox.zig
   ("kill comes first and closes later sends") checks one kill with room left, not a repeated kill on
   a full outbox; goes in authenticated/outbox.zig
+  Done in lookup/peer_test.zig; outbox.zig has the discovery case.
 - [x] `authenticated/lookup/actors/tracker/actor.rs`
   `test_add_set_severs_connection_on_address_change`: tracking a new set that moves a connected peer
   to a new address kills its connection and moves the registered IP; tracker_test.zig covers only

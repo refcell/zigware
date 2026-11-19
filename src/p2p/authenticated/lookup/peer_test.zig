@@ -243,3 +243,21 @@ fn run(comptime function: fn (Io) anyerror!void) !void {
     defer runner.deinit();
     try (try runner.start(function, .{runner.io()}));
 }
+
+test "two kills into a full one-slot mailbox leave one kill and nothing after" {
+    // commonware lookup `kill_retained_on_overflow`. A kill here is a state that drains the
+    // queues, so it lands with the mailbox full and nothing is left behind it.
+    var outbox = Outbox.init(gpa, Io.failing, 1);
+    defer outbox.deinit();
+    const frame = try Frame.create(gpa, 0, &.{"queued"});
+    defer frame.release();
+    try testing.expect(outbox.send(frame, false).accepted());
+    try testing.expect(!outbox.send(frame, false).accepted());
+    try testing.expectEqual(@as(u32, 2), frame.refs.load(.monotonic));
+    outbox.kill();
+    outbox.kill();
+    // The kill dropped the queued frame's reference.
+    try testing.expectEqual(@as(u32, 1), frame.refs.load(.monotonic));
+    for (0..2) |_| try testing.expect(outbox.try_next().? == .killed);
+    try testing.expect(!outbox.send(frame, false).accepted());
+}
