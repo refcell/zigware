@@ -162,7 +162,9 @@ grep --line-buffered -E '$pattern' | sed -u -E '$line; s/^(.{$width}).*/\\1/; $g
         zig build -Doptimize=ReleaseFast >/dev/null
       fi
       # commonware's README flow: setup, the epoch-0 bootstrap, then four validators running
-      # DKG and resharing over epochs, each in a pane of a 2x2 tmux grid of its trace events.
+      # DKG and resharing over epochs in a 2x2 tmux grid of their trace events. A fifth peer
+      # joins mid-run with --state-sync in the bottom pane: it starts from the probe's floor
+      # (its first block is the floor's, not genesis) and catches up into the next reshare.
       dir=/tmp/zigware-dkg-demo
       rm -rf "$dir"
       mkdir -p "$dir"
@@ -171,21 +173,34 @@ grep --line-buffered -E '$pattern' | sed -u -E '$line; s/^(.{$width}).*/\\1/; $g
       trim+='; s/commonware_//; s/([0-9a-f]{8})[0-9a-f]{16,}/\1../g'
       cat >"$dir/follow.sh" <<EOF
 #!/usr/bin/env bash
-# Validator \$1's events: every DKG event, and one finalized block in eight.
-printf '\033[1mvalidator %s\033[0m\n' "\$1"
+# Validator \$1's events: every DKG event, its first finalized block, and one in eight.
 tail -n +1 -F $dir/validator-\$1.log 2>/dev/null |
-  awk '!/finalized block/ || (match(\$0, /height=[0-9]+/) &&
+  awk '!/finalized block/ || !seen++ || (match(\$0, /height=[0-9]+/) &&
     substr(\$0, RSTART + 7, RLENGTH - 7) % 8 == 0) { print; fflush() }' |
   sed -u -E '$trim; s/^(.{108}).*/\1/;
     s/(completed reshare ceremony.*)/\x1b[32m\1\x1b[0m/; s/(entered epoch)/\x1b[33m\1\x1b[0m/'
 EOF
-      chmod +x "$dir/follow.sh"
+      cat >"$dir/join.sh" <<EOF
+#!/usr/bin/env bash
+# The late joiner: once every validator completed epoch 1's reshare, type its command, start
+# it, and follow its events.
+until [ "\$(cat $dir/validator-[0-3].log | grep -c 'completed reshare ceremony epoch=1')" \
+  -ge 4 ]; do sleep 0.5; done
+command='dkg validator --node-dir $dir/data/validator-4 --state-sync'
+printf '\033[1;32m\$\033[0m '
+for ((i = 0; i < \${#command}; i++)); do printf '%s' "\${command:i:1}"; sleep 0.025; done
+printf '\n'
+\$command >$dir/validator-4.log 2>&1 &
+echo \$! >$dir/joiner.pid
+exec $dir/follow.sh 4
+EOF
+      chmod +x "$dir/follow.sh" "$dir/join.sh"
       printf '\033[H\033[2J'
-      type_cmd "dkg setup --node-dir $dir/data --peers 4 --committee-size 3 --base-port 3500" 3
+      type_cmd "dkg setup --node-dir $dir/data --peers 5 --committee-size 4 --base-port 3500" 3
       printf '\n'
-      type_cmd "for i in 0 1 2; do dkg bootstrap --node-dir $dir/data/validator-\$i \
+      type_cmd "for i in 0 1 2 3; do dkg bootstrap --node-dir $dir/data/validator-\$i \
 >$dir/bootstrap-\$i.log 2>&1 & done" 0
-      until [ "$(cat "$dir"/bootstrap-*.log 2>/dev/null | grep -c 'bootstrap complete')" = 3 ]; do
+      until [ "$(cat "$dir"/bootstrap-*.log 2>/dev/null | grep -c 'bootstrap complete')" = 4 ]; do
         sleep 0.5
       done
       grep -h 'bootstrap complete' "$dir"/bootstrap-*.log | sed -E "$trim"
@@ -194,7 +209,7 @@ EOF
       jobs -p >"$dir/bootstrap.pids"
       while read -r pid; do kill "$pid" 2>/dev/null || true; done <"$dir/bootstrap.pids"
       wait 2>/dev/null || true
-      while ss -ltn | grep -qE ':350[0-3] '; do sleep 0.2; done
+      while ss -ltn | grep -qE ':350[0-4] '; do sleep 0.2; done
       for i in 0 1 2 3; do
         dkg validator --node-dir "$dir/data/validator-$i" >"$dir/validator-$i.log" 2>&1 &
       done
@@ -202,23 +217,33 @@ EOF
       t kill-server 2>/dev/null || true
       t new-session -d -s dkg -x 220 -y 50 "$dir/follow.sh 0"
       t set-option -g status off
+      t set-option -g pane-border-status top
+      t set-option -g pane-border-format ' #[bold]#{pane_title}#[default] '
+      t select-pane -t dkg -T 'validator 0'
+      t split-window -v -l 14 -t dkg "$dir/join.sh"
+      t select-pane -t dkg -T 'validator 4 (joins with --state-sync)'
+      t select-pane -t dkg -U
       t split-window -h -t dkg "$dir/follow.sh 1"
+      t select-pane -t dkg -T 'validator 1'
       t split-window -v -t dkg "$dir/follow.sh 3"
+      t select-pane -t dkg -T 'validator 3'
       t select-pane -t dkg -L
       t split-window -v -t dkg "$dir/follow.sh 2"
+      t select-pane -t dkg -T 'validator 2'
       (
-        # End a few blocks into epoch 1, once every validator completed the first reshare.
-        for _ in $(seq 240); do
-          [ "$(cat "$dir"/validator-*.log | grep -c 'completed reshare ceremony epoch=1')" \
-            -ge 4 ] && break
+        # End just after the joiner completed its first reshare ceremony, while its pane still
+        # shows the floor start.
+        for _ in $(seq 480); do
+          grep -q 'completed reshare ceremony' "$dir/validator-4.log" 2>/dev/null && break
           sleep 0.5
         done
-        sleep 6
+        sleep 2
         t detach-client -s dkg
       ) &
       t attach -t dkg || true
       wait %%
       t kill-server
+      if [ -f "$dir/joiner.pid" ]; then kill "$(cat "$dir/joiner.pid")" 2>/dev/null || true; fi
       kill $(jobs -p) 2>/dev/null || true
       wait 2>/dev/null || true
       ;;
@@ -247,9 +272,12 @@ font=16 fps=30
 [ "$name" = log ] && font=12 fps=6
 [ "$name" = bridge ] && font=14 fps=8
 [ "$name" = dkg ] && font=12 fps=8
+# x264's default quality (crf 23) puts dkg's five busy panes near 4 MB; 28 keeps it under 3.
+crf=23
+[ "$name" = dkg ] && crf=28
 agg --theme monokai --font-size "$font" --idle-time-limit 3 --last-frame-duration 6 \
   --fps-cap "$fps" "$out.cast" "$out.gif"
-ffmpeg -y -loglevel error -i "$out.gif" -movflags faststart -pix_fmt yuv420p \
+ffmpeg -y -loglevel error -i "$out.gif" -movflags faststart -pix_fmt yuv420p -crf "$crf" \
   -vf 'fps=30,scale=trunc(iw/2)*2:trunc(ih/2)*2' "$out.mp4"
 rm "$out.cast"
 ls -lh "$out.gif" "$out.mp4"

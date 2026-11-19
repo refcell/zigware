@@ -33,8 +33,11 @@ setup. Owns `examples/dkg` (commonware `examples/dkg`).
       store, and write the genesis to sibling validators (singleton ceremony test).
 - [x] `bootstrap` run on discovery p2p and the production runner (`network.zig` holds the
       discovery setup the validator shares); runs end to end on a one-node network.
-- [x] Demo recording (`etc/scripts/record-demo.sh dkg`): setup, the epoch-0 bootstrap, and
-      four validators resharing over epochs; docs/assets/dkg-demo.{gif,mp4}.
+- [x] Demo recording (`etc/scripts/record-demo.sh dkg`): setup, the epoch-0 bootstrap, four
+      validators resharing over epochs, and a fifth peer joining mid-run with `--state-sync`
+      (its first block is the probe's floor); docs/assets/dkg-demo.{gif,mp4}. commonware logs
+      nothing at info on the state-sync path, so the demo shows it by the floor block, not by
+      an added line. Restarting on the bootstraps' ports needed SO_REUSEADDR (1726a13).
 
 ## Decisions
 
