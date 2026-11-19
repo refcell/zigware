@@ -77,7 +77,8 @@ which every database here is built on.
 - [x] store: the `qmdb_store_operations` fuzz target (floor oracle on every commit, crash reopens).
 - [x] fuzz targets: `qmdb_any_{unordered,ordered}_batch_root` (pending, dropped-prefix, and
   chained schedules against committed rebuilds; same roots and floor walks; recovery).
-- [ ] fuzz target: `qmdb_any_ordered_batching`.
+- [x] fuzz target: `qmdb_any_ordered_batching` (metadata across commits, final span links).
+  Every qmdb fuzz target in my scope is ported (the any sync targets belong to the crypto lane).
 - [ ] benches for any, immutable, keyless, and store (coordinator split, 2026-11-19: current and
   compact benches go to storage-qmdb-sync).
 - [x] immutable (fixed, MMR and MMB): `Db`, chained batches, floor-filtered batch reads,
@@ -279,3 +280,4 @@ which every database here is built on.
 - 2026-11-18: the store (`qmdb/store`).
 - 2026-11-19: `qmdb_store_operations` fuzz target.
 - 2026-11-19: any unordered/ordered batch_root fuzz targets.
+- 2026-11-19: `qmdb_any_ordered_batching` fuzz target.
