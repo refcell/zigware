@@ -174,6 +174,16 @@ that harness. It builds on `coding` (ReedSolomon), `consensus.types.coding.Commi
     `RecordingCodingBuffer.sent_to_all`.
   Not portable: `floor_anchor_panics_on_parent_commitment_mismatch` (a `should_panic` test).
 
+### Test audit: broadcast (2026-11-19, commonware 43b357a41)
+
+Every `#[test]`/`#[test_traced]`/`#[rstest]` fn in commonware `broadcast/src`, matched to a zigware
+test by name or by reading both bodies (a zigware test may cover several). 30 tests: 30 ported, 0
+open, 0 not portable.
+
+| commonware file | tests | ported | open | not portable |
+|---|---|---|---|---|
+| `buffered/mod.rs` | 30 | 30 | 0 | 0 |
+
 ## Log
 - 2026-11-13: broadcast lib.rs and buffered (engine, mailbox, overflow policy, metrics,
   mocks) with all 27 mod.rs tests; `broadcast.Digested`.

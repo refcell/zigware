@@ -115,6 +115,37 @@ see docs/lanes/runtime.md). Write library code against `std.Io`.
 - [x] Stream transport contract and tests on `runtime.mocks` and `runtime.network`;
   `src/stream/mocks.zig` deleted. SakeCups is also tested over bind/accept/dial.
 
+### Test audit: stream (2026-11-19, commonware 43b357a41)
+
+Every `#[test]`/`#[test_traced]`/`#[rstest]` fn in commonware `stream/src`, matched to a zigware
+test by name or by reading both bodies (a zigware test may cover several). 39 tests: 35 ported, 1
+open, 3 not portable.
+
+| commonware file | tests | ported | open | not portable |
+|---|---|---|---|---|
+| `lib.rs` | 4 | 3 | 1 | 0 |
+| `cups/protocol.rs` | 14 | 13 | 0 | 1 |
+| `sake/protocol.rs` | 9 | 8 | 0 | 1 |
+| `utils/codec.rs` | 12 | 11 | 0 | 1 |
+
+Open:
+- [ ] `lib.rs` `handshake_starts_timeout_when_called`: The deadline starts at the dial/listen call,
+  not when awaited: start an attempt with a pending upgrader, sleep 100ms past the 50ms timeout
+  before awaiting, expect error.Timeout and released channels, for dialer and listener. Goes in
+  src/stream/utils/timeout_test.zig (Zig calls are eager, so this may only need to check that the
+  attempt returns Timeout without waiting another 50ms)
+
+Not portable:
+- `cups/protocol.rs` `test_header_len_rejects_oversized_payload`: #[should_panic] (header_len panics
+  on payload > MAX_SIZE); Zig asserts cannot be caught in tests
+- `sake/protocol.rs` `test_recv_decrypts_unique_frame_in_place`: Checks that IoBufs plaintext points
+  into the stream's returned buffer; Zig receivers always decrypt in their own buffer (no zero-copy
+  stream buffers); recorded in docs/lanes/actor-stream.md Decisions
+- `utils/codec.rs` `test_recv_frame_max_length`: Checks summed recv request lengths for a pending 4
+  GiB frame (u32 overflow in receive requests); Zig receives into a caller buffer bounded by the
+  frame limit and reads usize lengths, so the path does not exist; recorded in
+  docs/lanes/actor-stream.md Decisions
+
 ## Log
 - 2026-11-13: actor `Feedback`, `Unreliable`, and `mailbox` with commonware's tests.
 - 2026-11-13: stream framing codec, mock sink/stream channel, framing fuzz.

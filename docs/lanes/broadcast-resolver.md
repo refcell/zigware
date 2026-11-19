@@ -158,6 +158,64 @@ on p2p's simulated network and the deterministic runtime.
   the code under test fails within a few iterations).
 - Moved to the broadcast-collector lane: broadcast and collector.
 
+### Test audit: resolver (2026-11-19, commonware 43b357a41)
+
+Every `#[test]`/`#[test_traced]`/`#[rstest]` fn in commonware `resolver/src`, matched to a zigware
+test by name or by reading both bodies (a zigware test may cover several). 178 tests: 165 ported, 8
+open, 5 not portable.
+
+| commonware file | tests | ported | open | not portable |
+|---|---|---|---|---|
+| `delivery.rs` | 9 | 8 | 0 | 1 |
+| `ingress.rs` | 11 | 11 | 0 | 0 |
+| `opaque.rs` | 13 | 13 | 0 | 0 |
+| `subscribers.rs` | 5 | 5 | 0 | 0 |
+| `p2p/fetcher.rs` | 58 | 58 | 0 | 0 |
+| `p2p/inflight.rs` | 9 | 0 | 8 | 1 |
+| `p2p/ingress.rs` | 7 | 7 | 0 | 0 |
+| `p2p/mod.rs` | 51 | 51 | 0 | 0 |
+| `p2p/score.rs` | 7 | 7 | 0 | 0 |
+| `p2p/wire.rs` | 8 | 5 | 0 | 3 |
+
+Open:
+- [ ] `p2p/inflight.rs` `test_insert_contains_cancel_remove_round_trip`: Inflight
+  insert/contains/cancel round trip, with a second cancel returning false. Goes in
+  src/resolver/p2p/inflight.zig, which has no tests; delivery.zig "insert contains remove round
+  trip" covers only the underlying Tracker
+- [ ] `p2p/inflight.rs` `test_cancel_suppresses_duration_metric`: Inflight.cancel after insert
+  leaves the fetch-duration histogram count at 0. Goes in src/resolver/p2p/inflight.zig
+- [ ] `p2p/inflight.rs` `test_complete_records_duration_metric`: Inflight.complete after insert
+  records one fetch-duration observation (count 1). Goes in src/resolver/p2p/inflight.zig
+- [ ] `p2p/inflight.rs` `test_retain_drops_non_matching_and_suppresses_metric`: Inflight.retain with
+  an odd-key predicate drops 1 of keys 1..3, keeps 1 and 3, and the duration count stays 0. Goes in
+  src/resolver/p2p/inflight.zig
+- [ ] `p2p/inflight.rs` `test_drain_removes_all_and_suppresses_metric`: Inflight.drain returns 2,
+  removes both keys, and the duration count stays 0. Goes in src/resolver/p2p/inflight.zig
+- [ ] `p2p/inflight.rs` `test_deliver_completes_with_consumer_result`: Inflight.deliver(peer, 17ms,
+  "data") -> next_delivery has the key, the Source{peer, 17ms, 4} context, a Complete outcome, and
+  not canceled; the consumer saw (key, value). Goes in src/resolver/p2p/inflight.zig (delivery.zig
+  "deliver completes with context and consumer result" covers only the Tracker with a u8 context)
+- [ ] `p2p/inflight.rs` `test_cancellation_preserves_ready_verdict_without_recording_duration`:
+  After deliver then cancel (or drain), next_delivery is canceled but keeps the Source context and
+  Complete outcome; the key is gone and the duration count is 0. Goes in
+  src/resolver/p2p/inflight.zig (engine_delivery_test "cancellation preserves submitted verdict" is
+  engine-level and checks no metric)
+- [ ] `p2p/inflight.rs` `test_cancel_after_completion_is_idempotent`: deliver -> next_delivery
+  Complete -> complete(key); a later cancel returns false without asserting. Goes in
+  src/resolver/p2p/inflight.zig
+
+Not portable:
+- `delivery.rs` `test_redeliver_requires_cached_response`: #[should_panic]; an assertion in Zig
+  (docs/lanes/broadcast-resolver.md Decisions)
+- `p2p/inflight.rs` `test_complete_panics_on_missing_key`: #[should_panic] ("inflight entry"); an
+  assertion (.? unwrap) in Inflight.complete
+- `p2p/wire.rs` `test_max_message_size_beyond_prefix`: #[should_panic] ("value must fit the u32
+  length prefix"); an assertion in Zig
+- `p2p/wire.rs` `test_message_encode_iobufs_matches_encode`: No encode_iobufs/IoBufs API in Zig;
+  writes go to one buffer (docs/lanes/broadcast-resolver.md Decisions)
+- `p2p/wire.rs` `test_payload_response_encode_iobufs_matches_encode`: No encode_iobufs/IoBufs API in
+  Zig; writes go to one buffer (docs/lanes/broadcast-resolver.md Decisions)
+
 ## Log
 - 2026-11-13: resolver lib.rs types, subscribers tracker, p2p wire (conformance hashes match).
 - 2026-11-13: resolver ingress (coalescing mailbox policy, targets metadata).
