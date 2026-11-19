@@ -20,15 +20,15 @@ const actor_mod = @import("actor.zig");
 const voter_ingress = @import("../voter/ingress.zig");
 const TimeoutReason = @import("../../metrics.zig").TimeoutReason;
 
-const Digest = cryptography.Sha256.Digest;
-const Scheme = ed25519.Scheme(Digest);
-const Key = cryptography.ed25519.PublicKey;
+pub const Digest = cryptography.Sha256.Digest;
+pub const Scheme = ed25519.Scheme(Digest);
+pub const Key = cryptography.ed25519.PublicKey;
 const ActivityType = types.Activity(Scheme, Digest);
 const NetMessage = p2p.Message(Key);
-const VoterMessage = voter_ingress.Message(Scheme, Digest);
+pub const VoterMessage = voter_ingress.Message(Scheme, Digest);
 const gpa = testing.allocator;
 
-const Log = struct {
+pub const Log = struct {
     blocked: std.ArrayList(Key) = .empty,
     reported: u32 = 0,
     /// Each reported activity's kind and view, in order.
@@ -36,12 +36,12 @@ const Log = struct {
 
     const Seen = struct { tag: std.meta.Tag(ActivityType), view: u64 };
 
-    fn deinit(self: *Log) void {
+    pub fn deinit(self: *Log) void {
         self.blocked.deinit(gpa);
         self.activities.deinit(gpa);
     }
 
-    fn count(self: *const Log, tag: std.meta.Tag(ActivityType), view: u64) usize {
+    pub fn count(self: *const Log, tag: std.meta.Tag(ActivityType), view: u64) usize {
         var total: usize = 0;
         for (self.activities.items) |seen| {
             total += @intFromBool(seen.tag == tag and seen.view == view);
@@ -78,17 +78,17 @@ const Relay = struct {
 };
 
 /// A network receiver fed by the test.
-const NetReceiver = struct {
+pub const NetReceiver = struct {
     buffer: [16]NetMessage = undefined,
     queue: Io.Queue(NetMessage) = undefined,
     io: Io,
 
-    fn init(self: *NetReceiver, io: Io) void {
+    pub fn init(self: *NetReceiver, io: Io) void {
         self.* = .{ .io = io };
         self.queue = .init(&self.buffer);
     }
 
-    fn deliver(self: *NetReceiver, peer: Key, payload: []u8) !void {
+    pub fn deliver(self: *NetReceiver, peer: Key, payload: []u8) !void {
         try self.queue.putOne(self.io, .{ .peer = peer, .payload = payload, .gpa = gpa });
     }
 
@@ -118,14 +118,14 @@ fn Params(
         pub const Receiver = N;
     };
 }
-const P = Params(Scheme, Digest, Blocker, Reporter, Relay, NetReceiver);
-const Batcher = actor_mod.Actor(P);
+pub const P = Params(Scheme, Digest, Blocker, Reporter, Relay, NetReceiver);
+pub const Batcher = actor_mod.Actor(P);
 
-fn proposal(view: u64) types.Proposal(Digest) {
+pub fn proposal(view: u64) types.Proposal(Digest) {
     return .init(.new(.new(0), .new(view)), .new(view - 1), .fill(@intCast(view)));
 }
 
-fn config(scheme: *const Scheme, log: *Log) actor_mod.Config(P) {
+pub fn config(scheme: *const Scheme, log: *Log) actor_mod.Config(P) {
     return .{
         .scheme = scheme,
         .blocker = .{ .log = log },
@@ -146,17 +146,17 @@ fn config(scheme: *const Scheme, log: *Log) actor_mod.Config(P) {
     };
 }
 
-fn run_deterministic(comptime function: fn (Io) anyerror!void) !void {
+pub fn run_deterministic(comptime function: fn (Io) anyerror!void) !void {
     var runner = try runtime.deterministic.Runner.init(gpa, .{});
     defer runner.deinit();
     try (try runner.start(function, .{runner.io()}));
 }
 
-fn notarize_bytes(fixture: anytype, signer: usize, view: u64) ![]u8 {
+pub fn notarize_bytes(fixture: anytype, signer: usize, view: u64) ![]u8 {
     return notarize_proposal_bytes(fixture, signer, proposal(view));
 }
 
-fn notarize_proposal_bytes(
+pub fn notarize_proposal_bytes(
     fixture: anytype,
     signer: usize,
     value: types.Proposal(Digest),
@@ -178,7 +178,7 @@ fn next_certificate(receiver: *actor.mailbox.Receiver(VoterMessage)) !VoterMessa
 
 /// One batcher (participant 0 of 4) running against test channels. Must not move once
 /// started: the receivers' queues point into themselves.
-const Harness = struct {
+pub const Harness = struct {
     io: Io,
     fixture: cryptography.certificate.mocks.Fixture(Scheme),
     log: Log = .{},
@@ -191,16 +191,16 @@ const Harness = struct {
 
     const RunResult = @typeInfo(@TypeOf(Batcher.run)).@"fn".return_type.?;
 
-    fn start(self: *Harness, io: Io) !void {
+    pub fn start(self: *Harness, io: Io) !void {
         return self.start_scoped(io, null);
     }
 
     /// Starts with historical votes kept (commonware `track_historical_votes`).
-    fn start_historical(self: *Harness, io: Io) !void {
+    pub fn start_historical(self: *Harness, io: Io) !void {
         return self.start_with(io, null, .{ .track_historical_votes = true });
     }
 
-    const Options = struct {
+    pub const Options = struct {
         track_historical_votes: bool = false,
         term_length: u32 = 1,
         optimistic_views: u64 = 0,
@@ -210,11 +210,11 @@ const Harness = struct {
     };
 
     /// Starts with the batcher's metrics registered under `scope`, if any.
-    fn start_scoped(self: *Harness, io: Io, scope: ?runtime.telemetry.metrics.Scope) !void {
+    pub fn start_scoped(self: *Harness, io: Io, scope: ?runtime.telemetry.metrics.Scope) !void {
         return self.start_with(io, scope, .{});
     }
 
-    fn start_with(
+    pub fn start_with(
         self: *Harness,
         io: Io,
         scope: ?runtime.telemetry.metrics.Scope,
@@ -246,7 +246,7 @@ const Harness = struct {
         });
     }
 
-    fn stop(self: *Harness) void {
+    pub fn stop(self: *Harness) void {
         _ = self.future.cancel(self.io) catch {};
         self.voter.deinit();
         self.mailbox.deinit();
@@ -256,7 +256,7 @@ const Harness = struct {
     }
 
     /// Receives voter messages until a verified certificate arrives.
-    fn next_certificate(self: *Harness) !VoterMessage {
+    pub fn next_certificate(self: *Harness) !VoterMessage {
         for (0..8) |_| {
             const message = (try self.voter.recv()) orelse return error.Closed;
             if (message == .verified) return message;
@@ -292,7 +292,7 @@ test "batcher builds a notarization from network votes" {
     try run_deterministic(Root.run);
 }
 
-fn nullification_bytes(fixture: anytype, epoch: u64, view: u64) ![]u8 {
+pub fn nullification_bytes(fixture: anytype, epoch: u64, view: u64) ![]u8 {
     const Nullify = types.Nullify(Scheme);
     const round: consensus_types.Round = .new(.new(epoch), .new(view));
     var votes: [3]Nullify = undefined;
@@ -332,7 +332,7 @@ test "batcher forwards verified certificates and blocks foreign epochs" {
 }
 
 /// Whether `registry`'s exposition has `latest_vote{peer="<participant>"} <view>`.
-fn has_latest_vote(registry: *runtime.telemetry.metrics.Registry, peer: Key, view: u64) !bool {
+pub fn has_latest_vote(registry: *runtime.telemetry.metrics.Registry, peer: Key, view: u64) !bool {
     const text = try registry.encode(gpa);
     defer gpa.free(text);
     var buffer: [256]u8 = undefined;
@@ -389,12 +389,12 @@ test "batcher tracks each peer's latest vote view" {
     try run_deterministic(Root.run);
 }
 
-fn notarization_bytes(fixture: anytype, value: types.Proposal(Digest)) ![]u8 {
+pub fn notarization_bytes(fixture: anytype, value: types.Proposal(Digest)) ![]u8 {
     return notarization_bytes_as(fixture, value, value);
 }
 
 /// A notarization signed over `value` but carrying `shown` (tampered when they differ).
-fn notarization_bytes_as(
+pub fn notarization_bytes_as(
     fixture: anytype,
     value: types.Proposal(Digest),
     shown: types.Proposal(Digest),
@@ -550,7 +550,7 @@ test "batcher skips votes for finalized views" {
     try run_deterministic(Root.run);
 }
 
-fn vote_bytes(fixture: anytype, comptime kind: enum { notarize, finalize }, signer: usize) ![]u8 {
+pub fn vote_bytes(fixture: anytype, comptime kind: enum { notarize, finalize }, signer: usize) ![]u8 {
     const Vote = types.Vote(Scheme, Digest);
     const scheme = &fixture.schemes[signer];
     const value = proposal(1);
@@ -591,7 +591,7 @@ test "batcher blocks a peer that resends a vote with another attestation" {
     try run_deterministic(Root.run);
 }
 
-fn nullify_bytes(fixture: anytype, signer: usize, view: u64) ![]u8 {
+pub fn nullify_bytes(fixture: anytype, signer: usize, view: u64) ![]u8 {
     const round: consensus_types.Round = .new(.new(0), .new(view));
     const vote = (try types.Nullify(Scheme).sign(gpa, &fixture.schemes[signer], round)).?;
     return codec.encode(types.Vote(Scheme, Digest), gpa, .{ .nullify = vote });
@@ -697,7 +697,7 @@ test "batcher assembles a buffered next-term lane quorum on term entry" {
 }
 
 /// Fails if a voter timeout arrives within 50 ms (commonware `expect_no_timeout`).
-fn expect_no_timeout(harness: *Harness) !void {
+pub fn expect_no_timeout(harness: *Harness) !void {
     try harness.io.sleep(.fromMilliseconds(50), .awake);
     while (harness.voter.try_recv()) |message| {
         defer VoterMessage.discard(message);
@@ -707,7 +707,7 @@ fn expect_no_timeout(harness: *Harness) !void {
 
 /// Expects a voter timeout for `view` with `reason` within 100 ms (commonware
 /// `expect_timeout`): the first timeout received must match.
-fn expect_timeout(harness: *Harness, view: u64, reason: TimeoutReason) !void {
+pub fn expect_timeout(harness: *Harness, view: u64, reason: TimeoutReason) !void {
     try harness.io.sleep(.fromMilliseconds(100), .awake);
     while (harness.voter.try_recv()) |message| {
         defer VoterMessage.discard(message);
@@ -720,7 +720,7 @@ fn expect_timeout(harness: *Harness, view: u64, reason: TimeoutReason) !void {
 }
 
 /// Delivers a nullify for `view` from each signer in `signers`.
-fn deliver_nullifies(harness: *Harness, signers: []const usize, view: u64) !void {
+pub fn deliver_nullifies(harness: *Harness, signers: []const usize, view: u64) !void {
     assert(signers.len > 0);
     for (signers) |signer| {
         const bytes = try nullify_bytes(&harness.fixture, signer, view);
@@ -729,13 +729,13 @@ fn deliver_nullifies(harness: *Harness, signers: []const usize, view: u64) !void
 }
 
 /// Our own nullify for `view`, handed to the batcher as constructed.
-fn construct_nullify(harness: *Harness, view: u64) !void {
+pub fn construct_nullify(harness: *Harness, view: u64) !void {
     const round: consensus_types.Round = .new(.new(0), .new(view));
     const vote = (try types.Nullify(Scheme).sign(gpa, &harness.fixture.schemes[0], round)).?;
     try harness.mailbox.constructed(.{ .nullify = vote });
 }
 
-const skip_options: Harness.Options = .{ .participants = 5, .skip_timeout_s = 5 };
+pub const skip_options: Harness.Options = .{ .participants = 5, .skip_timeout_s = 5 };
 
 // commonware `test_leader_activity_detection`: leaders stay active while the network is
 // quiet (fewer than a quorum recently active), and a local leader never gets an
@@ -825,7 +825,7 @@ test "batcher counts a leader nullify as activity" {
 }
 
 /// A finalization of `value` signed by the first `signers` participants.
-fn finalization_bytes(fixture: anytype, value: types.Proposal(Digest), signers: usize) ![]u8 {
+pub fn finalization_bytes(fixture: anytype, value: types.Proposal(Digest), signers: usize) ![]u8 {
     const Finalize = types.Finalize(Scheme, Digest);
     var votes: [8]Finalize = undefined;
     assert(signers <= votes.len);
