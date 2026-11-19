@@ -3,8 +3,10 @@
 //! `ReadGateContext`). `Wrapper(Policy)` wraps a `storage.Storage` and is one, so the wrappers
 //! nest (commonware's `forward_context!` has no counterpart: Context's storage is a field).
 //!
-//! No counterpart: `DelayedSyncContext`/`PendingSyncs` (zigware's `sync` is synchronous, with
-//! no `start_sync` to defer), `MigratingReadBlob` (moves a half-polled read between tasks),
+//! `SyncGates` is commonware's `PendingSyncs` over `DelayedSyncContext` without the deferred
+//! queue: zigware's `sync` is synchronous, with no `start_sync` to defer, so only the armed
+//! one-shot gate parks a sync (it blocks its caller until released). No counterpart:
+//! `MigratingReadBlob` (moves a half-polled read between tasks),
 //! and recorded read batches (there is no `read_many`).
 //!
 //! A parked operation waits until its caller is canceled and then returns `error.Canceled`
@@ -544,6 +546,106 @@ pub const ReadGate = struct {
 };
 
 pub const ReadGated = Wrapper(ReadGate);
+
+/// A one-shot durability gate (commonware `PendingSyncs::arm` over `DelayedSyncContext`):
+/// once armed, the next durability operation (a `sync`, or a `write_at` with `sync` set)
+/// parks its caller until `release`, and `calls` counts the operations since `arm`.
+pub const SyncGates = struct {
+    io: Io,
+    lock: Lock = .{},
+    /// Whether `arm` ran (commonware's gate `tracking`).
+    tracking: bool = false,
+    operations: u64 = 0,
+    gate: enum { idle, armed, blocked, released } = .idle,
+    released: Io.Event = .unset,
+
+    pub fn init(io: Io) SyncGates {
+        return .{ .io = io };
+    }
+
+    /// Installs the gate for the next durability operation and restarts `calls`.
+    pub fn arm(self: *SyncGates) void {
+        self.lock.lock();
+        defer self.lock.unlock();
+        assert(self.gate == .idle or self.gate == .released); // One gate at a time.
+        self.tracking = true;
+        self.operations = 0;
+        self.gate = .armed;
+        self.released = .unset;
+    }
+
+    /// Whether a durability operation is parked at the gate (commonware `DeferredSync::blocked`).
+    pub fn blocked(self: *SyncGates) bool {
+        self.lock.lock();
+        defer self.lock.unlock();
+        return self.gate == .blocked;
+    }
+
+    /// The durability operations since `arm`, including the gated one.
+    pub fn calls(self: *SyncGates) u64 {
+        self.lock.lock();
+        defer self.lock.unlock();
+        assert(self.tracking);
+        return self.operations;
+    }
+
+    /// Lets the gated operation (or, if none arrived yet, the next one) through.
+    pub fn release(self: *SyncGates) void {
+        self.lock.lock();
+        assert(self.gate == .armed or self.gate == .blocked);
+        self.gate = .released;
+        self.lock.unlock();
+        self.released.set(self.io);
+    }
+
+    fn durable(self: *SyncGates) Error!void {
+        self.lock.lock();
+        if (!self.tracking) return self.lock.unlock();
+        self.operations += 1;
+        const block = self.gate == .armed;
+        if (block) self.gate = .blocked;
+        self.lock.unlock();
+        if (block) try self.released.wait(self.io);
+    }
+
+    fn open(
+        self: *SyncGates,
+        gpa: Allocator,
+        inner: iface.Storage,
+        partition: []const u8,
+        name: []const u8,
+    ) Error!bool {
+        _ = .{ self, gpa, inner, partition, name };
+        return true;
+    }
+
+    fn remove(self: *SyncGates) Error!void {
+        _ = self;
+    }
+
+    fn read(self: *SyncGates, selected: bool, options: iface.ReadOptions) Error!void {
+        _ = .{ self, selected, options };
+    }
+
+    fn write(self: *SyncGates, options: iface.WriteOptions) Error!void {
+        if (options.sync) try self.durable();
+    }
+
+    fn wrote(self: *SyncGates) void {
+        _ = self;
+    }
+
+    fn resize(self: *SyncGates) Error!void {
+        _ = self;
+    }
+
+    fn sync(self: *SyncGates, selected: bool) Error!void {
+        assert(selected); // `open` selects every blob.
+        try self.durable();
+    }
+};
+
+pub const SyncGated = Wrapper(SyncGates);
 
 test {
     _ = @import("mocks_test.zig");

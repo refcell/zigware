@@ -217,3 +217,40 @@ test "read gate parks reads of its partition while armed" {
     defer runner.deinit();
     try (try runner.start_context(Gate.body, .{}));
 }
+
+const SyncGateTest = struct {
+    fn syncing(ctx: deterministic.Context, blob: iface.Blob) anyerror!void {
+        _ = ctx;
+        try blob.sync();
+    }
+
+    fn body(ctx: deterministic.Context) !void {
+        var inner: memory.Storage = .init(gpa);
+        defer inner.deinit();
+        var gates: mocks.SyncGates = .init(ctx.io());
+        var wrapper: mocks.SyncGated = .init(gpa, inner.storage(), &gates);
+        const blob = (try wrapper.storage().open("partition", "blob")).blob;
+        defer blob.close();
+        // Unarmed, syncs pass.
+        try blob.write_at(0, "data", .{ .sync = true });
+        try blob.sync();
+        gates.arm();
+        const handle = try ctx.child("sync").spawn(syncing, .{blob});
+        try ctx.sleep(.fromMilliseconds(10));
+        try testing.expect(gates.blocked());
+        try testing.expectEqual(@as(u64, 1), gates.calls());
+        gates.release();
+        try try handle.join();
+        try testing.expect(!gates.blocked());
+        // Only the first operation after `arm` parks; later ones are counted.
+        try blob.write_at(0, "more", .{ .sync = true });
+        try testing.expectEqual(@as(u64, 2), gates.calls());
+        try expect_read(blob, 0, "more");
+    }
+};
+
+test "sync gate parks the first durability operation after arm until released" {
+    var runner = try deterministic.Runner.init(gpa, .{});
+    defer runner.deinit();
+    try (try runner.start_context(SyncGateTest.body, .{}));
+}
