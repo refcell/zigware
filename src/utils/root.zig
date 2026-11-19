@@ -22,6 +22,8 @@ pub const test_rng = rng.test_rng;
 /// The seeded fuzz driver over `FuzzRng` (used by other packages' fuzz tests).
 pub const fuzz = @import("fuzz.zig");
 
+pub const death = @import("death.zig");
+
 pub const range = @import("range.zig");
 
 pub const bitmap = @import("bitmap.zig");
