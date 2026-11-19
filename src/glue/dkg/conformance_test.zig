@@ -391,3 +391,74 @@ test "conformance: dkg reshare journal event" {
     const name = "reshare::store::conformance::CodecConformance<Event<MinSig,ed25519::PublicKey>>";
     try verify(name, Event, gen_event, conformance.default_cases);
 }
+
+const probe_wire = @import("probe/wire.zig");
+const mocks = @import("tests/mocks.zig");
+const ProbeVariant = consensus.marshal.standard.Standard(mocks.TestBlock);
+const ProbeMessage = probe_wire.Message(Scheme, ProbeVariant);
+
+/// `MockBlock`'s derived `Arbitrary`: its fields in order, the payload an
+/// `Option<EncodedPayload>` whose `NonZeroU32` rejects zero.
+fn gen_test_block(gpa: Allocator, u: *Unstructured) Error!mocks.TestBlock {
+    const context: mocks.TestContext = .{
+        .round = try consensus.Round.arbitrary(gpa, u),
+        .leader = try gen_public_key(gpa, u),
+        .parent = .{ try consensus.View.arbitrary(gpa, u), try gen_digest(gpa, u) },
+    };
+    const parent = try gen_digest(gpa, u);
+    const height = try consensus.Height.arbitrary(gpa, u);
+    const timestamp = u.int(u64);
+    const encoded: ?mocks.EncodedPayload = if (u.boolean()) blk: {
+        const max_participants = u.int(u32);
+        if (max_participants == 0) return error.IncorrectFormat;
+        const bytes = try arbitrary.collect(u8, gpa, u);
+        break :blk .{ .max_participants = max_participants, .bytes = bytes };
+    } else null;
+    return .{
+        .context_value = context,
+        .parent_value = parent,
+        .height_value = height,
+        .timestamp = timestamp,
+        .encoded = encoded,
+        .digest_value = try gen_digest(gpa, u),
+    };
+}
+
+/// `Message::arbitrary`: the tag, then its fields. `Digested::arbitrary` keeps the block's
+/// carried digest (`precomputed`).
+fn gen_probe_message(gpa: Allocator, u: *Unstructured) Error!ProbeMessage {
+    return switch (try probe_wire.Tag.arbitrary(gpa, u)) {
+        .boundary_request => .{ .boundary_request = try consensus.Epoch.arbitrary(gpa, u) },
+        .boundary_response => .{ .boundary_response = try gen_floor(gpa, u) },
+        .block_request => .{ .block_request = try consensus.Epoch.arbitrary(gpa, u) },
+        .block_response => blk: {
+            const epoch = try consensus.Epoch.arbitrary(gpa, u);
+            const block = try gen_test_block(gpa, u);
+            const Block = @FieldType(ProbeMessage.BlockResponse, "block");
+            const digested = try Block.precomputed(gpa, block, block.digest_value);
+            break :blk .{ .block_response = .{ .epoch = epoch, .block = digested } };
+        },
+        .latest_request => .latest_request,
+        .latest_response => .{ .latest_response = try gen_floor(gpa, u) },
+    };
+}
+
+/// `Message` has no decoder (receivers split requests from responses), so it encodes itself.
+const ProbeConformance = struct {
+    pub fn commit(gpa: Allocator, seed: u64) ![]u8 {
+        var arena = std.heap.ArenaAllocator.init(gpa);
+        defer arena.deinit();
+        const message =
+            try arbitrary.generate(ProbeMessage, gen_probe_message, arena.allocator(), seed);
+        return message.encode(gpa);
+    }
+};
+
+test "conformance: dkg probe tag and message" {
+    const name = "probe::wire::tests::CodecConformance<";
+    const cases = conformance.default_cases;
+    try verify(name ++ "Tag>", probe_wire.Tag, probe_wire.Tag.arbitrary, cases);
+    const message_name =
+        prefix ++ name ++ "Message<mocks::TestScheme,mocks::TestMarshalVariant\n>>";
+    try conformance.verify(ProbeConformance, std.heap.smp_allocator, message_name, cases, file);
+}

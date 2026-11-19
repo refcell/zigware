@@ -459,3 +459,19 @@ Owns `src/glue/dkg`. Reference: `glue/src/dkg` (about 24k Rust lines).
   mismatch, a kept reservation after a declined proposal, and an ungated dealer log.
 - 2026-11-18: one-shot DKG mode; a singleton ceremony completes through the mailbox
   (dealing, next_log, inclusion, epoch_info), and the test catches a lost outcome.
+
+## dkg probe/bootstrap (owner: p2p lane)
+
+The p2p lane owns `src/glue/dkg/probe/` and `src/glue/dkg/bootstrap/` (agreed with the glue
+lane on 2026-11-19). The glue lane keeps the reshare actor, the application, and the
+orchestrator.
+
+- [x] probe wire (`Tag`, `Message`, `read_request`, `read_response`, `read_block`) and limits
+  (`max_payload_size`), with limits.rs's `widest_encodings` test; both `probe::wire`
+  conformance hashes match commonware's (in `conformance_test.zig`).
+- [ ] probe mailbox and actor (discovery, service), with mod.rs's tests.
+- [ ] bootstrap engine (bootstrap/mod.rs), with its tests.
+
+### Log
+- 2026-11-19: probe wire and limits; the `Tag` and `Message` hashes match, and the message
+  hash catches a planted narrow timestamp.
