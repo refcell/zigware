@@ -15,6 +15,7 @@
 
 const std = @import("std");
 const assert = std.debug.assert;
+const verify_ifma = @import("verify_ifma.zig");
 
 pub const Point = std.crypto.ecc.Edwards25519;
 const Fe = Point.Fe;
@@ -28,7 +29,10 @@ pub const naf_width = 5;
 /// NAF width of the static basepoint tables (commonware `ODD_MULTIPLES_NAF_WIDTH`).
 pub const base_naf_width = 8;
 /// NAF digits of a scalar below 2^128.
-const digits_len = 130;
+pub const digits_len = 130;
+
+/// A point and its scalar, below 2^128, in a Straus sum.
+pub const Term = struct { Point, u128 };
 
 /// A point prepared for addition: `(Y + X, Y - X, Z, 2 d T)` (commonware's cached form).
 pub const Cached = struct {
@@ -79,7 +83,7 @@ pub fn odd_multiples(comptime len: usize, p: Point) [len]Cached {
 }
 
 /// Odd multiples of `B` and of `2^128 B` (commonware's static `ODD_MULTIPLES`).
-const base_tables: [2][1 << (base_naf_width - 2)]Cached = tables: {
+pub const base_tables: [2][1 << (base_naf_width - 2)]Cached = tables: {
     @setEvalBranchQuota(100_000_000);
     const low = plain_base_point();
     var high = low;
@@ -177,10 +181,6 @@ const Projective = struct {
             .t = zz2.sub(yy_minus_xx),
         };
     }
-
-    fn is_identity(p: Projective) bool {
-        return p.x.isZero() and p.y.equivalent(p.z);
-    }
 };
 
 /// A point `((X : Z), (Y : T))` as additions and doublings leave it (commonware's
@@ -219,7 +219,7 @@ const Completed = struct {
 
 /// `base[0] B + base[1] 2^128 B + sum(scalar point)`, with every scalar below 2^128, by
 /// Straus's method over one shared doubling chain (commonware `straus`).
-fn straus(base: [2]u128, terms: [2]struct { Point, u128 }) Projective {
+fn straus(base: [2]u128, terms: [2]Term) Projective {
     const base_digits = [2][digits_len]i8{
         naf(base_naf_width, base[0]),
         naf(base_naf_width, base[1]),
@@ -230,18 +230,9 @@ fn straus(base: [2]u128, terms: [2]struct { Point, u128 }) Projective {
         d.* = naf(naf_width, term[1]);
         table.* = odd_multiples(1 << (naf_width - 2), term[0]);
     }
-    // The shared chain starts at the highest nonzero digit of any scalar.
-    var top: ?usize = null;
-    for (base_digits ++ digits) |d| {
-        var index: usize = digits_len;
-        while (index > 0) : (index -= 1) {
-            if (d[index - 1] == 0) continue;
-            top = @max(top orelse 0, index - 1);
-            break;
-        }
-    }
+    const all = base_digits ++ digits;
     var sum = Projective.identity;
-    var index = (top orelse return sum) + 1;
+    var index = (top_digit(&all) orelse return sum) + 1;
     // Horner's rule over digit positions, most significant first. A doubling leaves a
     // completed point, converted to extended coordinates only when an addition follows.
     while (index > 0) {
@@ -252,6 +243,22 @@ fn straus(base: [2]u128, terms: [2]struct { Point, u128 }) Projective {
         sum = step.to_projective();
     }
     return sum;
+}
+
+/// The highest position holding a nonzero digit of any scalar, where the shared chain starts.
+pub fn top_digit(all: []const [digits_len]i8) ?usize {
+    assert(all.len > 0);
+    var top: ?usize = null;
+    for (all) |d| {
+        var index: usize = digits_len;
+        while (index > 0) : (index -= 1) {
+            if (d[index - 1] == 0) continue;
+            top = @max(top orelse 0, index - 1);
+            break;
+        }
+    }
+    assert(top == null or top.? < digits_len);
+    return top;
 }
 
 fn add_digit(step: Completed, table: []const Cached, digit: i8) Completed {
@@ -275,10 +282,24 @@ pub fn verify(r: Point, minus_a: Point, s: [32]u8, k: [32]u8) bool {
     const us = scalar.mul(s, magnitude_bytes);
     const low = std.mem.readInt(u128, us[0..16], .little);
     const high = std.mem.readInt(u128, us[16..32], .little);
-    var sum = straus(.{ low, high }, .{ .{ r.neg(), magnitude }, .{ a_term, split.v } });
+    const sum = cofactored_sum(.{ low, high }, .{ .{ r.neg(), magnitude }, .{ a_term, split.v } });
+    return sum[0].isZero() and sum[1].equivalent(sum[2]);
+}
+
+/// `[8](base[0] B + base[1] 2^128 B + sum(scalar point))` as `[X, Y, Z]`, on the AVX-512 IFMA
+/// backend when the target has it and on the scalar one otherwise.
+pub fn cofactored_sum(base: [2]u128, terms: [2]Term) [3]Fe {
+    if (comptime verify_ifma.available) return verify_ifma.cofactored_sum(base, terms);
+    return scalar_cofactored_sum(base, terms);
+}
+
+/// `cofactored_sum` on the scalar backend, on every target.
+pub fn scalar_cofactored_sum(base: [2]u128, terms: [2]Term) [3]Fe {
+    var sum = straus(base, terms);
     // Multiplying by the cofactor (8) maps the sum into the prime-order subgroup.
     for (0..3) |_| sum = sum.double().to_projective();
-    return sum.is_identity();
+    assert(!sum.z.isZero());
+    return .{ sum.x, sum.y, sum.z };
 }
 
 const testing = std.testing;

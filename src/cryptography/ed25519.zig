@@ -16,4 +16,5 @@ test {
     _ = @import("ed25519/tests.zig");
     _ = @import("ed25519/certificate.zig");
     _ = @import("ed25519/verify_msm.zig");
+    _ = @import("ed25519/verify_ifma.zig");
 }
