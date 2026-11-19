@@ -455,6 +455,28 @@ pub fn expect_at_floor(stack: *VoterStack, ctx: Ctx, finalized: View) !void {
     }
 }
 
+/// Finalizes `target - 1` (payload `hash(be64(target - 1))`) and waits for the update
+/// announcing `target` (commonware `advance_to_view`). Returns the finalized payload.
+pub fn advance_to_view(stack: *VoterStack, ctx: Ctx, net: *const Network, target: u64) !Digest {
+    assert(target > 1);
+    const previous = target - 1;
+    var be: [8]u8 = undefined;
+    std.mem.writeInt(u64, &be, previous, .big);
+    const payload = Sha256.hash(&.{&be});
+    const round: Round = .new(default_epoch, .new(previous));
+    const proposal: Proposal = .init(round, .new(previous - 1), payload);
+    const gpa = ctx.gpa();
+    const finalization = try build(gpa, .finalization, net.schemes(), proposal, net.quorum());
+    try stack.mailbox.recovered(gpa, .{ .finalization = finalization });
+    // Bounded: views only advance, and each wait is limited.
+    while (true) {
+        const update = try stack.next_update(ctx, 5_000);
+        if (update.current.get() < target) continue;
+        try std.testing.expectEqual(target, update.current.get());
+        return payload;
+    }
+}
+
 /// A proposal at `view` of `epoch` over `view - 1`, with payload `hash(label)`.
 pub fn proposal_at(epoch: Epoch, view: u64, label: []const u8) Proposal {
     assert(view > 0);

@@ -246,3 +246,44 @@ test "voter populate resolver on restart" {
         }
     }.body);
 }
+
+// commonware startup_update_timeout_hint_nullifies_recovered_view: a leader-nullify timeout
+// hint sent right after the restarted voter's first update makes it nullify the recovered
+// view at once, although every timer is 10 s or more.
+test "voter startup update timeout hint nullifies recovered view" {
+    try run(struct {
+        fn body(ctx: Ctx) anyerror!void {
+            var net: h.Network = undefined;
+            try net.start(ctx, 5, "startup_update_timeout_hint");
+            defer net.deinit();
+            const options: h.Options = .{
+                .partition = "voter_startup_update_timeout_hint_nullify",
+                // Long deadlines prove the nullify comes from the hint, not a timer.
+                .leader_timeout_ms = 10_000,
+                .certification_timeout_ms = 10_000,
+                .timeout_retry_ms = 60 * 60 * 1_000,
+                .batcher_capacity = 32,
+            };
+            var stack: h.VoterStack = undefined;
+            try stack.start(ctx, &net, options);
+            defer stack.stop();
+            _ = try stack.next_update(ctx, 5_000);
+            _ = try h.advance_to_view(&stack, ctx, &net, 3);
+            try stack.restart(ctx, &net, options);
+            const first = (try stack.next_batcher(ctx, 5_000)) orelse return error.TimedOut;
+            try testing.expect(first == .update);
+            try testing.expectEqual(3, first.update.current.get());
+            try testing.expectEqual(2, first.update.finalized.get());
+            try stack.mailbox.timeout(.new(epoch, .new(3)), .leader_nullify);
+            // Each wait is bounded by 1 s (commonware's whole-loop deadline) and the batcher
+            // sees only a handful of messages before the nullify.
+            var received: u32 = 0;
+            while (received < 64) : (received += 1) {
+                const message = (try stack.next_batcher(ctx, 1_000)) orelse break;
+                if (message != .constructed or message.constructed != .nullify) continue;
+                if (message.constructed.nullify.view().get() == 3) return;
+            }
+            return error.NoImmediateNullify;
+        }
+    }.body);
+}
