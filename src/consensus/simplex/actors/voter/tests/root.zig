@@ -18,6 +18,7 @@ test {
             _ = @import("nullify_test.zig").Tests(h);
             _ = @import("certification_test.zig").Tests(h);
             _ = @import("verification_test.zig").Tests(h);
+            _ = @import("handoff_cancel.zig").Tests(h);
         }
     }
 }

@@ -79,6 +79,17 @@ pub fn Fixture(comptime h: type) type {
             return self.candidate.?.digest();
         }
 
+        /// Waits up to 1 s of simulated time for the voter to cancel the held build. The
+        /// voter counts the abandonment before its cancel joins the build's task.
+        pub fn wait_closed(self: *Self, ctx: Ctx) !void {
+            var waited: u64 = 0;
+            // Bounded by 1 s of simulated time.
+            while (!self.candidate.?.is_closed()) : (waited += 1) {
+                if (waited > 1_000) return error.BuildNotCanceled;
+                try ctx.sleep(.fromMilliseconds(1));
+            }
+        }
+
         /// Answers the pending handoff with the built candidate.
         pub fn respond(self: *Self) void {
             const slot = self.candidate.?;
