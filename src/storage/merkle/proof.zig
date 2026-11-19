@@ -443,7 +443,7 @@ pub fn multi_proof_positions(
     }
     assert(low == locations.len);
     // An MMB can append a parent after leaves to its right, so sort.
-    std.mem.sort(u64, positions.items, {}, std.sort.asc(u64));
+    std.sort.pdq(u64, positions.items, {}, std.sort.asc(u64)); // Distinct, so unstable is fine.
     return positions.toOwnedSlice(gpa);
 }
 
