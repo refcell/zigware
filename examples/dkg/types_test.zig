@@ -327,7 +327,7 @@ test "dkg: secrets survive restart and prune" {
     var backend: MockStorage = .init(gpa);
     defer backend.deinit();
 
-    // Store material for epochs 1 and 2, with a dealing from each dealer, then crash.
+    // Store material for epochs 1 and 2, with every dealing, then crash.
     {
         var secrets: types.Secrets = try .init(io, gpa, backend.interface(), .validator);
         defer secrets.deinit();

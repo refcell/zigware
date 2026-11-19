@@ -851,9 +851,11 @@ test "plan: random crash restarts without downtime" {
     var heights: std.ArrayList(u64) = .empty;
     defer heights.deinit(gpa);
     // A crash is due every 25ms. With immediate restarts the validator processes five heights
-    // in about 60ms, so it stops exactly twice. commonware exits at six heights (70ms); here each
-    // restart's task hand-offs cost simulated milliseconds, which would put the sixth height
-    // just after the third crash at 75ms.
+    // in about 66ms, so it stops exactly twice. commonware exits at six heights. Measured on
+    // both runtimes, a crash at 27ms restarts the validator at 29ms there and 31ms here: an
+    // abort here waits for the canceled task to reach its cancelation point and then resumes
+    // the aborter, one 1ms cycle each, where commonware drops the future at once. Two restarts
+    // put the sixth height at 76ms, just after the third crash at 75ms (73ms in commonware).
     const crashes = try crashes_and_start_heights(.{ .random = .{
         .frequency = .from_millis(25),
         .downtime = .zero,

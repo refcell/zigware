@@ -71,8 +71,11 @@ a test harness), `transfers` (4.4k with tests and benches), `stateful` (about 33
       `SkippedProcessedHeightWindow`. Restarts, schedule actions, and crash ticks go before
       queued reports (`events.zig`'s control lane), as the reordered select does. plan.rs's six
       new tests, plus one that a crash due behind queued reports still applies.
-      `random_crash_restarts_without_downtime` exits at five heights, not six: each restart's
-      task hand-offs cost simulated milliseconds, which push the sixth past the third crash.
+      `random_crash_restarts_without_downtime` exits at five heights, not six. Measured against
+      commonware with timing logs: a crash at 27ms restarts at 31ms here and 29ms there, since
+      an abort waits two scheduler cycles for the canceled task (Zig cannot drop a future), so
+      the sixth height lands at 76ms, past the third crash at 75ms (73ms in commonware). No
+      restart step waits on a timer or a retry.
 - [x] simulate: `MonitorReporter` (examples lane): forwards marshal's `Update.tip` to the
   plan's `Monitor`, then every update to the wrapped reporter.
 - [x] transfers: `Plan`, `settle`, and `Selection`, with the plan, settle, and selection tests
