@@ -318,6 +318,10 @@ pub const Options = struct {
     items_per_blob: u64 = items_per_blob,
     /// Entries of the init-time `location -> key` cache; null disables it.
     init_cache: ?usize = init_cache_size,
+    /// Tasks the init snapshot build may use (commonware's `init_concurrency`).
+    init_concurrency: usize = 1,
+    /// Starts the threads of a parallel init build; it also times the duration metrics.
+    init_io: ?std.Io = null,
     /// Pages of the page cache.
     page_cache_pages: u32 = page_cache_size,
     /// The page cache's logical page size (commonware's unaligned-layout override).
@@ -380,7 +384,11 @@ pub fn Session(comptime D: type) type {
                 cfg.translator = if (comptime @hasField(T, "inner")) .init(.{}) else .{};
             }
             if (comptime @hasField(D.Cfg, "init_cache")) cfg.init_cache = options.init_cache;
-            if (comptime @hasField(D.Cfg, "io")) cfg.io = null; // Benches time themselves.
+            // Benches time themselves; only a parallel init needs the `Io`.
+            if (comptime @hasField(D.Cfg, "io")) cfg.io = options.init_io;
+            if (comptime @hasField(D.Cfg, "init_concurrency")) {
+                cfg.init_concurrency = options.init_concurrency;
+            }
             if (comptime @hasField(D.Cfg, "grafted_metadata_partition")) {
                 cfg.grafted_metadata_partition = "grafted-metadata-" ++ suffix;
                 if (options.names) |names| {

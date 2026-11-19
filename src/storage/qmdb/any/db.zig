@@ -25,6 +25,7 @@ const value_mod = @import("../value.zig");
 const authenticated = @import("../../journal/authenticated.zig");
 const metrics_mod = @import("../metrics.zig");
 const snapshot_mod = @import("../snapshot.zig");
+const snapshot_parallel = @import("../snapshot_parallel.zig");
 const bitmap_mod = @import("../bitmap.zig");
 const operation = @import("operation.zig");
 const batch_mod = @import("batch.zig");
@@ -49,6 +50,11 @@ pub fn Config(comptime T: type, comptime JournalConfig: type) type {
         /// Entries in the `location -> key` cache that resolves snapshot collisions during
         /// init; null disables it.
         init_cache: ?usize = null,
+        /// Tasks the init snapshot build may use (commonware's `init_concurrency`). Above 1, a
+        /// partitioned index builds in parallel on threads started through `io` (also its
+        /// allocator must be thread-safe); other indexes, or a null `io`, build serially. The
+        /// built state is the same for every value.
+        init_concurrency: usize = 1,
     };
 }
 
@@ -124,7 +130,12 @@ pub fn Db(F: type, U: type, C: type, I: type, H: type, comptime N: usize) type {
                 _ = try log.append(.{ .commit = .{ .metadata = null, .floor = 0 } });
                 try log.sync();
             }
-            var db = try init_from_log(gpa, scope, log, cfg.translator, cfg.init_cache);
+            const build: InitBuild = .{
+                .cache = cfg.init_cache,
+                .concurrency = cfg.init_concurrency,
+                .io = cfg.io,
+            };
+            var db = try init_from_log_with(gpa, scope, log, cfg.translator, build);
             db.metrics.io = cfg.io;
             return db;
         }
@@ -140,6 +151,38 @@ pub fn Db(F: type, U: type, C: type, I: type, H: type, comptime N: usize) type {
             translator: I.Translator,
             init_cache: ?usize,
         ) !Self {
+            const build: InitBuild = .{ .cache = init_cache, .concurrency = 1, .io = null };
+            return init_from_log_with(gpa, scope, log_owned, translator, build);
+        }
+
+        /// How init builds the snapshot (see `Config.init_concurrency`).
+        const InitBuild = struct { cache: ?usize, concurrency: usize, io: ?std.Io };
+
+        fn build_snapshot(
+            gpa: Allocator,
+            floor: u64,
+            log: *Log,
+            snapshot: *I,
+            build: InitBuild,
+        ) !snapshot_mod.Build {
+            assert(build.concurrency >= 1);
+            if (comptime snapshot_parallel.is_partitioned(I)) {
+                if (build.io) |io| if (build.concurrency > 1) {
+                    const concurrency = build.concurrency;
+                    const run = snapshot_parallel.build_on_io;
+                    return run(Operation, gpa, io, floor, log, snapshot, build.cache, concurrency);
+                };
+            }
+            return snapshot_mod.build(Operation, gpa, floor, log, snapshot, build.cache);
+        }
+
+        fn init_from_log_with(
+            gpa: Allocator,
+            scope: Scope,
+            log_owned: Log,
+            translator: I.Translator,
+            build: InitBuild,
+        ) !Self {
             var log = log_owned;
             errdefer log.deinit();
             if (log.size() == 0) return error.HistoricalFloorPruned;
@@ -147,8 +190,7 @@ pub fn Db(F: type, U: type, C: type, I: type, H: type, comptime N: usize) type {
             errdefer snapshot.deinit();
             var reader: LogReader = .{ .log = &log };
             const floor = try qmdb.find_inactivity_floor_at(gpa, &reader, log.size());
-            var built =
-                try snapshot_mod.build(Operation, gpa, floor, &log, &snapshot, init_cache);
+            var built = try build_snapshot(gpa, floor, &log, &snapshot, build);
             defer built.deinit(gpa);
             var bitmap = try init_bitmap(gpa, log.get_bounds().start, floor, &built.activity);
             errdefer bitmap.deinit(gpa);

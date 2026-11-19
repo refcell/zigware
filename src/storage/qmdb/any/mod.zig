@@ -21,6 +21,7 @@ test {
     _ = @import("batching_fuzz_test.zig");
     _ = @import("concurrent_test.zig");
     _ = @import("db_test.zig");
+    _ = @import("parallel_init_test.zig");
     _ = @import("fuzz_test.zig");
     _ = @import("range.zig");
     _ = @import("variable_test.zig");

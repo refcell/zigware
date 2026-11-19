@@ -52,6 +52,8 @@ pub fn Config(comptime T: type, comptime JournalConfig: type) type {
         translator: T,
         /// Entries in the `location -> key` cache used during init; null disables it.
         init_cache: ?usize = null,
+        /// Tasks the init snapshot build may use (see `any.Config.init_concurrency`).
+        init_concurrency: usize = 1,
     };
 }
 
@@ -140,6 +142,7 @@ pub fn Db(F: type, U: type, C: type, I: type, H: type, comptime N: usize) type {
                 .io = cfg.io,
                 .translator = cfg.translator,
                 .init_cache = cfg.init_cache,
+                .init_concurrency = cfg.init_concurrency,
             };
             const options: qmdb.InitOptions = .{
                 .max_size = max_size,

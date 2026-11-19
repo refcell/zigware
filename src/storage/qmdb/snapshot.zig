@@ -189,4 +189,5 @@ pub fn build(
 
 test {
     _ = @import("snapshot_test.zig");
+    _ = @import("snapshot_parallel.zig");
 }

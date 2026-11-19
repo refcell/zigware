@@ -156,6 +156,8 @@ const Harness = struct {
                 "adapters-grafted"
             else if (comptime std.mem.eql(u8, name, "init_cache"))
                 1024
+            else if (comptime std.mem.eql(u8, name, "init_concurrency"))
+                1
             else if (comptime std.mem.eql(u8, name, "translator"))
                 .{}
             else if (comptime std.mem.eql(u8, name, "codec_config"))

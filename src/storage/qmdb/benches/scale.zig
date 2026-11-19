@@ -18,7 +18,9 @@
 //!   multiple of 10,000 and pruning to the sync boundary every 100 commits; then prunes, syncs,
 //!   and reports the build time.
 //! - init: reopens the database and times one `init` with an init cache of `cache` entries
-//!   (`0` disables it), reporting the replay region (`end - inactivity floor`).
+//!   (`0` disables it) and a snapshot build of `concurrency` tasks (`1` = serial, otherwise
+//!   decode and insert tasks on their own threads), reporting the replay region
+//!   (`end - inactivity floor`).
 //! - get / get_many: opens the database (untimed), then for each reader count drops the OS page
 //!   cache (passwordless sudo; warns otherwise) and runs a cold pass of `num_gets` uniform gets,
 //!   then a warm pass over the same keys. Readers draw from their own `StdRng(reader)` streams.
@@ -28,8 +30,7 @@
 //!   it was generated with.
 //!
 //! The `get` and `get_many` readers run at once, reading the database through `*const D` as
-//! commonware's tasks share it. zigware has no parallel snapshot build, so `init`'s
-//! `concurrency` is reported only.
+//! commonware's tasks share it.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -135,7 +136,7 @@ pub const Zipf = struct {
 const usage_text =
     \\usage:
     \\  generate <folder> <keyspace> <num_updates> [zipf_exponent] [ordered|unordered]   build a database (omit exponent => zipf 1.0; 0 => uniform)
-    \\  init     <folder> <cache> <concurrency> [ordered|unordered]   reopen + time one init (cache=entries, 0=off)
+    \\  init     <folder> <cache> <concurrency> [ordered|unordered]   reopen + time one init (cache=entries, 0=off; concurrency=1 serial / N build tasks)
     \\  get      <folder> <keyspace> <num_gets> <concurrency>[,...] [ordered|unordered] [cache_pages]   time random point reads (cold after an OS cache drop, then warm)
     \\  get_many <folder> <keyspace> <num_gets> <concurrency>[,...] <batch> [ordered|unordered] [cache_pages]   like get, in `batch`-key get_many calls
     \\  destroy  <folder>                          delete the database
@@ -325,7 +326,7 @@ fn init_command(context: Context, folder: []const u8, args: []const []const u8) 
         return;
     }
     const timed = switch (index) {
-        inline else => |kind| try time_init(kind.Db(), context, folder, cache),
+        inline else => |kind| try time_init(kind.Db(), context, folder, cache, concurrency),
     };
     if (timed.region == 0) {
         try context.err.print("database at {s} is empty; run `generate {s} <keyspace> " ++
@@ -339,8 +340,16 @@ fn init_command(context: Context, folder: []const u8, args: []const []const u8) 
 
 const Timed = struct { ms: f64, region: u64 };
 
-/// Times one `init` with an init cache of `cache` entries (0: off).
-fn time_init(comptime D: type, context: Context, folder: []const u8, cache: usize) !Timed {
+/// Times one `init` with an init cache of `cache` entries (0: off) and a snapshot build of
+/// `concurrency` tasks.
+fn time_init(
+    comptime D: type,
+    context: Context,
+    folder: []const u8,
+    cache: usize,
+    concurrency: u64,
+) !Timed {
+    assert(concurrency >= 1);
     var disk: common.Disk = .at(context.io, folder);
     try disk.open(context.gpa);
     defer disk.close();
@@ -350,6 +359,8 @@ fn time_init(comptime D: type, context: Context, folder: []const u8, cache: usiz
         .items_per_blob = items_per_blob,
         .page_cache_pages = context.page_cache_pages,
         .init_cache = if (cache == 0) null else cache,
+        .init_concurrency = @intCast(concurrency),
+        .init_io = if (concurrency > 1) context.io else null,
     });
     const ms = harness.elapsed_ms(context.io, start);
     defer session.shut();

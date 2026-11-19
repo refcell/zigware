@@ -272,7 +272,8 @@ which every database here is built on.
   zigware's databases are not shared across threads, so modes commonware runs as concurrent
   futures (cold_read's chunked, shared, get_concurrent, pipeline, sustained; scale's readers)
   issue the same reads one after another, `blob_read_many` reads page by page, and the
-  `threads`, `workers`, `blocking`, and init `concurrency` arguments are reported only.
+  `threads`, `workers`, and `blocking` arguments are reported only. scale's init `concurrency`
+  runs the parallel snapshot build (qmdb/snapshot_parallel.zig).
   cold_read accepts only the 4096-byte physical page zigware's storage writes. scale's Zipf
   ports `rand_distr` 0.6's sampler and matches its value-stability vector. The `*_gungraun`
   instruction-count benches need valgrind and are not ported.

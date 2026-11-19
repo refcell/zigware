@@ -53,6 +53,7 @@ pub fn Harness(comptime S: type) type {
             cfg.log = log;
             cfg.translator = .{};
             cfg.init_cache = 3;
+            cfg.init_concurrency = 1;
             cfg.io = null; // Untimed.
             if (comptime current) {
                 cfg.grafted_metadata_partition = try fixture.partition(suffix, "grafted");
