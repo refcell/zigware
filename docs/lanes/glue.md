@@ -627,14 +627,20 @@ shared `tests/mocks.zig`, which takes additive edits only (agreed with the glue 
   `simulate.Property` needs a constant `name`.
 - [x] bootstrap `Block` and `max_payload_size`, with mod.rs's `max_encode_size_covers_widest_block`
   and `covers_every_component` (128 participants behind -Dslow-tests in Debug).
-- [x] bootstrap `Engine` (`bootstrap.Engine(T).start`) with `rejects_unsupported_sharing_mode`
+- [x] bootstrap `Engine` (`bootstrap.Engine(T).start`), which resolves the reshare actor's
+  startup tip from marshal's anchor (`setup.startup`, no state sync), with `rejects_unsupported_sharing_mode`
   (an `error.UnsupportedSharingMode`, as zigware ports `should_panic`) and a singleton ceremony
   end to end on the simulated network. Its marshal stack is `bootstrap.Node(T)` (archives,
   buffered broadcast, backfill resolver, marshal actor), shared with the orchestrator's cluster
   tests. Broadcast and backfill read peer sets from `T.PeerProvider`, the p2p manager the DKG
   manager wraps (commonware passes the DKG manager itself).
-- [ ] tests/dkg/harness.rs and mod.rs's 14 ceremony tests on the bootstrap engine (the lossy,
-  filtered, crash, and laggard plans behind -Dslow-tests).
+- [x] tests/dkg/harness.rs (`DkgEngine`, `NodeState`, `run_plan`) and 8 of mod.rs's 14 tests:
+  all participants complete, a deaf participant completes, activation failure completes empty,
+  restart without share, restart after failure, share without final block (an error here),
+  and, behind -Dslow-tests, the lossy network and the filtered DKG channel.
+- [ ] mod.rs's remaining 6: closed network receiver, restart completion state is fresh, restart
+  after completion (needs `MemorySecretStore.stall`), and the scheduled-restart, random-crash,
+  and laggard plans.
 - [ ] tests/reshare harness, properties, and mod.rs's ceremony tests (needs the orchestrator).
 - [x] lookup's peer-activation test: network.rs's
   `lookup_secondary_dials_primary_and_receives_response` in `network_test.zig` (consensus-marshal
@@ -648,3 +654,5 @@ shared `tests/mocks.zig`, which takes additive edits only (agreed with the glue 
 
 - 2026-11-19: the bootstrap engine and node; a singleton ceremony completes end to end, and
   the test catches a block builder that drops the reshare payload.
+- 2026-11-19: the dkg harness with 8 of its ceremony tests; dropping the final-block hint
+  fails the deaf participant, and dropping the startup tip fails the restart test.

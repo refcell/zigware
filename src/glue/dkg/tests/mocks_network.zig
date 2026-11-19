@@ -181,6 +181,7 @@ pub fn FilteredReceiver(comptime R: type) type {
         const Self = @This();
         pub const PublicKey = R.PublicKey;
         const Recv = @typeInfo(ReturnType(R.recv)).error_union;
+        const TryRecv = @typeInfo(ReturnType(R.try_recv)).error_union;
         pub const Error = Recv.error_set;
 
         inner: R,
@@ -217,6 +218,20 @@ pub fn FilteredReceiver(comptime R: type) type {
                     return std.mem.indexOfScalar(u64, listed, epoch) == null;
                 },
             }
+        }
+
+        /// The next kept message already queued (`error.Empty` when none is).
+        pub fn try_recv(self: *Self) TryRecv.error_set!Recv.payload {
+            while (true) {
+                var message = try self.inner.try_recv();
+                if (self.keeps(&message)) return message;
+                message.deinit();
+            }
+        }
+
+        pub fn deinit(self: *Self) void {
+            self.inner.deinit();
+            self.* = undefined;
         }
 
         pub fn capacity(self: *const Self) usize {

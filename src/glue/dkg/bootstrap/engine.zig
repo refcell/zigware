@@ -514,8 +514,20 @@ pub fn Engine(comptime T: type) type {
 
         fn ReshareTask(comptime Sender: type, comptime Receiver: type) type {
             return struct {
+                /// Resolves the startup tip from marshal's processed anchor (commonware
+                /// `startup`; bootstrap has no state sync), then runs the actor. A restart
+                /// that already applied the final block reports it instead of rerunning.
                 fn run(_: Ctx, self: *Self, sender: Sender, receiver: Receiver) anyerror!void {
-                    return Runner.run(&self.actor, &self.store, sender, receiver, .{});
+                    var anchor = try self.node.mailbox.get_anchor();
+                    defer if (anchor) |*value| value.block.deinit();
+                    const Processed = consensus.marshal.core.floor.Processed;
+                    const Anchor = struct { Processed, *const Digested };
+                    const processed: ?Anchor = if (anchor) |*value|
+                        .{ value.processed, &value.block }
+                    else
+                        null;
+                    const tip = reshare.actor.setup.startup(Digested, processed, null);
+                    return Runner.run(&self.actor, &self.store, sender, receiver, .{ .tip = tip });
                 }
             };
         }
