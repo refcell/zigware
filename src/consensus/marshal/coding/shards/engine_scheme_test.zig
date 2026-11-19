@@ -1,6 +1,6 @@
 //! Shard engine tests on a custom coding scheme, ported from commonware
-//! `marshal/coding/shards/engine.rs`. commonware's `Gated` and `Recording` schemes back its
-//! reconstruction job tests, which have no counterpart: reconstruction runs inline.
+//! `marshal/coding/shards/engine.rs`. commonware's `Gated` scheme and `Recording` strategy,
+//! which back its reconstruction job tests, are in engine_jobs_test.zig.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -102,6 +102,7 @@ test "pending shards batch validated at quorum" {
             // reconstruct the block.
             try engine.shard(0, (try block.shard(gpa, 3)).?);
             try testing.expectEqual(@as(u32, 1), BatchChecking.batches);
+            try engine.finish();
             const record = engine.engine.records.get(commitment).?;
             const cached = record.block orelse return error.NotReconstructed;
             try testing.expect(cached.commitment().eql(commitment));

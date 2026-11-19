@@ -77,6 +77,6 @@ test.
 - Error variants carry no payload. For example, `Certificate.from_acks` returns
   `InsufficientAttestations` without the expected and found counts.
   ([marshal decisions](../../docs/lanes/consensus-marshal.md#decisions))
-- The erasure-coded marshal runs strategy jobs inline. Block reconstruction runs as soon as
-  enough shards are held, where commonware runs a strategy job and completes it as an event.
+- The erasure-coded marshal's shard engine awaits reconstruction jobs in submission order,
+  where commonware yields them as they finish.
   ([broadcast-collector decisions](../../docs/lanes/broadcast-collector.md#decisions))

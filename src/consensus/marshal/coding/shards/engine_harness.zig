@@ -101,6 +101,11 @@ pub const Types = TypesOf(C);
 
 /// The engine's types with coding scheme `Coding`.
 pub fn TypesOf(comptime CodingScheme: type) type {
+    return TypesWith(CodingScheme, parallel.Sequential);
+}
+
+/// The engine's types with coding scheme `CodingScheme` and strategy `StrategyType`.
+pub fn TypesWith(comptime CodingScheme: type, comptime StrategyType: type) type {
     return struct {
         pub const Block = B;
         pub const Coding = CodingScheme;
@@ -109,7 +114,7 @@ pub fn TypesOf(comptime CodingScheme: type) type {
         pub const Blocker = Net.Control;
         pub const PeerProvider = Net.Manager;
         pub const Network = Net;
-        pub const Strategy = parallel.Sequential;
+        pub const Strategy = StrategyType;
     };
 }
 
@@ -502,6 +507,11 @@ pub fn UnstartedOf(comptime Engine: type) type {
         coding_config: coding.Config,
 
         pub fn init(io: Io, options: Options) !*Self {
+            return init_with(io, options, parallel.sequential);
+        }
+
+        /// `init` with the engine running on `strategy`.
+        pub fn init_with(io: Io, options: Options, strategy: Engine.Strategy) !*Self {
             assert(options.count <= peers_max and options.index < options.count);
             const self = try gpa.create(Self);
             errdefer gpa.destroy(self);
@@ -528,11 +538,11 @@ pub fn UnstartedOf(comptime Engine: type) type {
             else
                 (try Scheme.signer(gpa, scheme_namespace, set, self.keys[options.index])).?;
             try self.provider.add(0, scheme);
-            try self.create(options.records);
+            try self.create(options.records, strategy);
             return self;
         }
 
-        fn create(self: *Self, records: usize) !void {
+        fn create(self: *Self, records: usize, strategy: Engine.Strategy) !void {
             const control = self.network.oracle().control(self.me());
             const registered = try control.register(0, test_quota);
             self.receiver = registered.receiver;
@@ -541,7 +551,7 @@ pub fn UnstartedOf(comptime Engine: type) type {
                 .scheme_provider = .{ .provider = &self.provider },
                 .blocker = control,
                 .block_codec_config = {},
-                .strategy = parallel.sequential,
+                .strategy = strategy,
                 .mailbox_size = 16,
                 .peer_buffer_size = 4,
                 .records = records,
@@ -579,6 +589,16 @@ pub fn UnstartedOf(comptime Engine: type) type {
 
         pub fn shard(self: *Self, from: usize, value: Engine.ShardType) !void {
             try self.engine.handle_network_shard(self.peers[from], value);
+        }
+
+        /// Waits for the engine's oldest job and applies it (commonware's `finished` then
+        /// `complete`).
+        pub fn finish(self: *Self) !void {
+            try self.engine.complete(self.engine.next_finished());
+        }
+
+        pub fn jobs(self: *const Self) usize {
+            return self.engine.jobs.items.len;
         }
 
         pub fn gather(self: *Self, commitment: Engine.Commitment, at_round: Round) !void {

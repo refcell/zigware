@@ -39,8 +39,12 @@ pub fn State(comptime P: type, comptime B: type, comptime C: type, comptime H: t
             checked: std.ArrayList(Sized) = .empty,
             /// The index of each sender's shard pending batch verification.
             pending: SortedMap(P, u16) = .empty,
+            /// Whether a reconstruction job is in flight (commonware `job`). The job owns the
+            /// checked shards and the pending shards it took; it borrows their bytes from
+            /// `received`, so a discarded job keeps this quorum alive until it ends.
+            job: bool = false,
 
-            fn deinit(quorum: *Quorum, gpa: Allocator) void {
+            pub fn deinit(quorum: *Quorum, gpa: Allocator) void {
                 for (quorum.received.items()) |*entry| free_inner(gpa, &entry.value);
                 quorum.received.deinit(gpa);
                 quorum.checked.deinit(gpa);

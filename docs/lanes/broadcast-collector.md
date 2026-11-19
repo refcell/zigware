@@ -101,9 +101,9 @@ that harness. It builds on `coding` (ReedSolomon), `consensus.types.coding.Commi
   messages. Strategy jobs run inline. The two `should_panic` tests have no counterpart (zigware
   panics too); `test_shard_encode_iobufs_matches_encode` is ported (`Shard.write_bufs`, 2026-11-19
   not-portable review: it catches a dropped shard index). Still not portable after that review:
-  those two panics, `floor_anchor_panics_on_parent_commitment_mismatch` (panic), and the 4 shard
-  engine job tests (missing feature: reconstruction runs inline, with no job set). Before 8,
-  after 7. `count_running_tasks` exists in runtime telemetry, but these engines start tasks with
+  those two panics and `floor_anchor_panics_on_parent_commitment_mismatch` (panic). The 4 shard
+  engine job tests are ported since reconstruction runs as strategy jobs (2026-11-19). Before 8,
+  after 3. `count_running_tasks` exists in runtime telemetry, but these engines start tasks with
   `io.concurrent`, which it does not count; `WrappedBackgroundReceiver` exists in p2p utils.
 
 - marshal coding validation: `validate_proposal(H, gpa, commitment, config, ?context)`,
@@ -112,12 +112,17 @@ that harness. It builds on `coding` (ReedSolomon), `consensus.types.coding.Commi
   payload (commonware's `ContextDigest(expected, actual)` is plain `ContextDigest`). A
   context's epoch is its `epoch()` method or, for `Round`, its field.
 
-- marshal coding shards: reconstruction runs inline when enough shards are held (commonware
-  runs a strategy job and completes it as an event), so a record never holds an in-flight
-  job; the tests that drive jobs by hand (`finished`, unstarted engines) check the same
-  outcomes through the mailbox. The engine's event loop follows the buffered broadcast
-  engine: forwarder tasks feed one signal in commonware's biased order (peer sets, mailbox,
-  network). Tests that drive commonware's unstarted engine call its public handlers
+- marshal coding shards: once a record holds enough shards it submits one reconstruction job
+  on the strategy (`parallel.Task`, `Strategy.spawn`), as commonware does. A completer task
+  awaits jobs in submission order (commonware's `AbortablePool` yields them as they finish;
+  here a later job's result waits behind an earlier one) and hands each to the loop as an
+  event. Evicting or caching a record discards its job, as dropping commonware's `Aborter`
+  does, but the job still runs to its end: it borrows the record's shard bytes, so the
+  discarded record's quorum moves into the job and is freed with it. Freeing the engine waits
+  for every job. Unstarted engines apply jobs by hand: `next_finished` (commonware's
+  `finished`) then `complete`. The engine's event loop follows the buffered broadcast
+  engine: forwarder tasks feed one signal in commonware's biased order (finished jobs, peer
+  sets, mailbox, network). Tests that drive commonware's unstarted engine call its public handlers
   (`handle_gather`, `handle_network_shard`, `disperse_shards`, `cache_block`, `trim`,
   `subscribe_assigned`, `subscribe_commitment`) after `attach_sender` and
   `update_primary_peers`, and inspect `records` and `buffered`.
@@ -135,11 +140,12 @@ that harness. It builds on `coding` (ReedSolomon), `consensus.types.coding.Commi
 - [x] Validation uses `marshal.ancestry.has_contiguous_height` and
   `marshal.application.validation.is_block_in_expected_epoch` (its copies are gone).
 - [x] marshal coding `shards`: mailbox, metrics, reconstruction state, engine, e2e test.
-- [x] marshal coding `shards`: engine.rs's tests (66 ported). commonware's `Gated` and
-  `Recording` schemes back only its job tests (`reconstruction_job_does_not_stall_engine`,
-  `reconstruction_result_discarded_with_its_record`,
-  `mid_job_shards_merge_with_insufficient_result`, `job_len_counts_taken_shards`), which have
-  no counterpart while reconstruction runs inline.
+- [x] marshal coding `shards`: engine.rs's tests (70 ported). The 4 job tests
+  (`reconstruction_job_does_not_stall_engine`, `reconstruction_result_discarded_with_its_record`,
+  `mid_job_shards_merge_with_insufficient_result`, `job_len_counts_taken_shards`) are in
+  engine_jobs_test.zig with commonware's `Gated` scheme and `Recording` strategy, each catching
+  a planted bug; a fifth test there checks pooled and inline reconstruction give the same
+  bytes (2026-11-19, coding lane).
 - [x] marshal coding `variant`: `Coding(B, C, H, P)` passes core's `assert_variant`, and
   `Buffer(B, C, H, P)` adapts the shards Mailbox to `assert_buffer` (an adapter, since the
   Mailbox's own `subscribe_by_digest` returns a receiver, not an optional one); variant.rs's

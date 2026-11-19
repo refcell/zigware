@@ -203,6 +203,7 @@ test "cached record retains no shards" {
             // shard arrives.
             try engine.gather(commitment, at(1));
             try deliver_own(engine, &block, &.{ 2, 3 });
+            try engine.finish();
             const record = try record_of(engine, commitment);
             try testing.expect(record.block != null);
             try testing.expect(record.reconstruction.?.quorum == null);
@@ -263,6 +264,7 @@ fn record_verifies_assigned_shard(io: Io, member: bool, early: bool) !void {
     // shards while the assigned shard has yet to arrive.
     const gossip: []const usize = if (early) &.{2} else &.{ 2, 3 };
     try deliver_own(engine, &block, gossip);
+    try engine.finish();
     try testing.expect((try record_of(engine, commitment)).block != null);
     if (!early) {
         try harness.expect_pending(&verified);
@@ -336,6 +338,7 @@ test "cached record classifies shards until assigned shard verified" {
             const commitment = block.commitment();
             try engine.gather(commitment, at(1));
             try deliver_own(engine, &block, &.{ 2, 3 });
+            try engine.finish();
             try testing.expect((try record_of(engine, commitment)).block != null);
             // Peer 1's gossip shard is ignored without blocking it.
             try engine.shard(1, try shard_of(&block, 1));
@@ -380,6 +383,7 @@ test "repeated gather only refreshes round" {
             try testing.expect(record.round == at(3));
             // Peer 2's gossip shard and the assigned shard decode the block.
             try engine.shard(2, try shard_of(&block, 2));
+            try engine.finish();
             // A repeated gather for the cached record raises its round.
             try engine.gather(commitment, at(5));
             record = try record_of(engine, commitment);
@@ -419,6 +423,7 @@ test "failed reconstruction closes subscriptions" {
             for ([_]usize{ 2, 3 }) |index| {
                 try engine.shard(index, try harness.shard_for(&actual, index, commitment));
             }
+            try engine.finish();
             // The failure removes the record and closes both subscriptions without blocking.
             try testing.expect(!engine.has_record(commitment));
             try harness.expect_closed(&assigned);
@@ -479,6 +484,7 @@ test "non participant holds proposer shard as gossip" {
             try testing.expectEqual(@as(usize, 1), state.quorum.?.pending.count());
             // Peer 2's gossip shard and the proposer's shard decode the block.
             try engine.shard(2, try shard_of(&block, 2));
+            try engine.finish();
             const record = try record_of(engine, commitment);
             try testing.expect(record.block.?.commitment().eql(commitment));
             // Readiness stays pending, for an earlier and a later subscription alike.

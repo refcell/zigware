@@ -19,11 +19,18 @@
 //! Event loop: like the buffered broadcast engine, tasks feed one signal: a forwarder moves
 //! peer-set updates into a slot, another moves mailbox messages into a slot, and an ingress
 //! task decodes network shards into a queue sized to the receiver's capacity. Each turn
-//! handles one event in commonware's biased `select_loop!` order: peer-set updates, mailbox
-//! messages, then network shards. Reconstruction jobs run inline when their shards are held
-//! (commonware runs them on its strategy and completes them as events). The loop ends when
-//! the peer-set subscription, the mailbox, or the network receiver closes, or the task is
+//! handles one event in commonware's biased `select_loop!` order: finished reconstruction
+//! jobs, peer-set updates, mailbox messages, then network shards. The loop ends when the
+//! peer-set subscription, the mailbox, or the network receiver closes, or the task is
 //! canceled; the task then frees the engine.
+//!
+//! Reconstruction jobs (commonware's `jobs` pool): once a record holds enough shards it
+//! submits one job on the strategy (`Strategy.spawn`) that batch-verifies the pending shards
+//! decoding needs and decodes the block, so the loop keeps handling shards meanwhile. A
+//! completer task awaits jobs in submission order and hands each result to the loop as an
+//! event. Evicting or caching a record discards its job (commonware drops the job's
+//! `Aborter`): the job still runs to its end, since it borrows the record's shard bytes, and
+//! its result is dropped. Freeing the engine waits for every job.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -33,6 +40,7 @@ const actor = @import("actor");
 const codec = @import("codec");
 const coding = @import("coding");
 const p2p = @import("p2p");
+const parallel = @import("parallel");
 const utils = @import("utils");
 const metrics = @import("runtime").telemetry.metrics;
 
@@ -108,6 +116,102 @@ pub fn Engine(comptime T: type) type {
         const Subscription = Payload(@TypeOf(T.PeerProvider.subscribe));
         const Update = Payload(@TypeOf(Subscription.try_recv));
         const Decoded = struct { peer: P, shard: ShardType };
+        pub const Strategy = T.Strategy;
+        const CodecConfig = @FieldType(Config(T), "block_codec_config");
+
+        /// What a reconstruction job found (commonware `Outcome`).
+        pub const Outcome = union(enum) {
+            /// Fewer than the minimum shards passed verification; the job's checked shards
+            /// return to the record.
+            insufficient,
+            /// Enough shards passed verification; the block decoded, or failed to match the
+            /// commitment.
+            decoded: anyerror!B,
+        };
+
+        /// One reconstruction job's work (commonware `reconstruct`): verifies the taken
+        /// pending shards and decodes the block once at least the minimum are checked. Runs
+        /// off the engine loop, so it touches only its own fields.
+        pub const Reconstruct = struct {
+            gpa: Allocator,
+            strategy: T.Strategy,
+            codec_config: CodecConfig,
+            commitment: Commitment,
+            /// The record's checked shards, then the ones this job checks (owned list; bytes
+            /// borrowed from the record's received shards).
+            checked: std.ArrayList(State.Sized),
+            /// The senders of the pending shards taken, in sender order, and their shards
+            /// (shallow copies of the record's received shards).
+            peers: []P,
+            shards: []C.Shard,
+            refs: []C.ShardRef,
+            results: []C.Error!C.CheckedShard,
+            /// Senders whose shards failed verification (capacity reserved at submission).
+            invalid: std.ArrayList(P),
+
+            pub fn call(op: *Reconstruct) Allocator.Error!Outcome {
+                assert(op.peers.len == op.shards.len and op.refs.len == op.shards.len);
+                assert(op.checked.unusedCapacitySlice().len >= op.shards.len);
+                if (op.shards.len > 0) {
+                    const root = op.commitment.root();
+                    const config = op.commitment.config();
+                    const refs = op.refs;
+                    try C.check_many(op.gpa, config, &root, refs, op.results, op.strategy);
+                    // The batch result order keeps verification failures bound to senders.
+                    for (op.peers, op.shards, op.results) |peer, *shard, result| {
+                        const checked = result catch {
+                            op.invalid.appendAssumeCapacity(peer);
+                            continue;
+                        };
+                        const size = shard.encode_size();
+                        op.checked.appendAssumeCapacity(.{ .shard = checked, .size = size });
+                    }
+                }
+                const minimum: usize = op.commitment.config().minimum_shards;
+                if (op.checked.items.len < minimum) return .insufficient;
+                return .{ .decoded = decode_block(op) };
+            }
+        };
+
+        /// A submitted reconstruction job (heap; the engine owns it until `complete`).
+        pub const Job = struct {
+            task: parallel.Task(Reconstruct),
+            commitment: Commitment,
+            started: Io.Timestamp,
+            /// Set once awaited.
+            result: ?Allocator.Error!Outcome = null,
+            /// Set when the record that submitted the job was evicted or cached: the result is
+            /// dropped (commonware drops the job's `Aborter`).
+            discarded: bool = false,
+            /// A discarded record's shards, kept until the job that borrows them ends.
+            orphan: ?State.Quorum = null,
+
+            /// Waits for the job (once) and keeps its result.
+            fn wait(job: *Job, strategy: T.Strategy) void {
+                if (job.result != null) return;
+                job.result = strategy.block_on(&job.task);
+                assert(job.task.is_done());
+            }
+
+            fn destroy(job: *Job, gpa: Allocator) void {
+                assert(job.result != null);
+                const op = &job.task.op;
+                if (job.result.?) |outcome| switch (outcome) {
+                    .insufficient => {},
+                    .decoded => |decoded| if (decoded) |inner| {
+                        codec.free(B, gpa, inner);
+                    } else |_| {},
+                } else |_| {}
+                op.checked.deinit(gpa);
+                op.invalid.deinit(gpa);
+                gpa.free(op.peers);
+                gpa.free(op.shards);
+                gpa.free(op.refs);
+                gpa.free(op.results);
+                if (job.orphan) |*quorum| quorum.deinit(gpa);
+                gpa.destroy(job);
+            }
+        };
 
         /// The lifecycle of one observed commitment. Its round orders eviction and names
         /// the epoch whose participants classify its shards.
@@ -137,6 +241,7 @@ pub fn Engine(comptime T: type) type {
             peer_set: Update,
             message: Message,
             network: Decoded,
+            job: *Job,
             stopped,
         };
 
@@ -180,6 +285,14 @@ pub fn Engine(comptime T: type) type {
         ingress_task: ?Io.Future(void) = null,
         mailbox_task: ?Io.Future(void) = null,
         peer_task: ?Io.Future(void) = null,
+        /// Jobs the completer awaits in submission order (guarded by `mutex`).
+        submitted: std.Deque(*Job) = .empty,
+        /// Awaited jobs whose results the loop has not applied (guarded by `mutex`).
+        finished_jobs: std.Deque(*Job) = .empty,
+        completer_task: ?Io.Future(void) = null,
+
+        /// Every job not yet completed, in submission order (engine loop only).
+        jobs: std.ArrayList(*Job) = .empty,
 
         /// The engine (not running yet; `start` runs it, `destroy` frees it unstarted) and
         /// its mailbox. Metrics register under `scope`, the mailbox's under
@@ -247,6 +360,7 @@ pub fn Engine(comptime T: type) type {
             engine.peer_task = try engine.io.concurrent(forward_peer_sets, .{engine});
             engine.mailbox_task = try engine.io.concurrent(forward_mailbox, .{engine});
             engine.ingress_task = try engine.io.concurrent(receive_network, .{engine});
+            engine.completer_task = try engine.io.concurrent(complete_jobs, .{engine});
             while (true) {
                 engine.cleanup_subscriptions();
                 const event = engine.wait_event() catch return; // canceled
@@ -264,6 +378,7 @@ pub fn Engine(comptime T: type) type {
                     .network => |decoded| {
                         try engine.handle_network_shard(decoded.peer, decoded.shard);
                     },
+                    .job => |job| try engine.complete(job),
                     .stopped => return,
                 }
             }
@@ -273,6 +388,7 @@ pub fn Engine(comptime T: type) type {
             engine.mutex.lockUncancelable(engine.io);
             defer engine.mutex.unlock(engine.io);
             while (true) {
+                if (engine.finished_jobs.popFront()) |job| return .{ .job = job };
                 if (engine.peer_slot) |update| {
                     engine.peer_slot = null;
                     engine.condition.broadcast(engine.io);
@@ -287,6 +403,31 @@ pub fn Engine(comptime T: type) type {
                 if (engine.mailbox_closed) return .stopped;
                 if (engine.decoded.popFront()) |decoded| return .{ .network = decoded };
                 if (engine.ingress_closed) return .stopped;
+                try engine.condition.wait(engine.io, &engine.mutex);
+            }
+        }
+
+        /// Awaits submitted jobs in submission order and hands each to the loop (commonware's
+        /// `jobs.next_completed()`), until canceled.
+        fn complete_jobs(engine: *Self) void {
+            assert(engine.started);
+            while (true) {
+                const job = engine.next_submitted() catch return; // canceled
+                job.wait(engine.config.strategy);
+                assert(job.result != null);
+                engine.mutex.lockUncancelable(engine.io);
+                defer engine.mutex.unlock(engine.io);
+                // Capacity was reserved when the job was submitted.
+                engine.finished_jobs.pushBackAssumeCapacity(job);
+                engine.condition.broadcast(engine.io);
+            }
+        }
+
+        fn next_submitted(engine: *Self) Io.Cancelable!*Job {
+            engine.mutex.lockUncancelable(engine.io);
+            defer engine.mutex.unlock(engine.io);
+            while (true) {
+                if (engine.submitted.popFront()) |job| return job;
                 try engine.condition.wait(engine.io, &engine.mutex);
             }
         }
@@ -374,6 +515,8 @@ pub fn Engine(comptime T: type) type {
             if (engine.ingress_task) |*task| task.cancel(io);
             if (engine.mailbox_task) |*task| task.cancel(io);
             if (engine.peer_task) |*task| task.cancel(io);
+            if (engine.completer_task) |*task| task.cancel(io);
+            engine.free_jobs();
             if (engine.peer_slot) |*update| update.deinit();
             if (engine.message_slot) |message| Message.discard(message);
             while (engine.decoded.popFront()) |decoded| {
@@ -391,6 +534,20 @@ pub fn Engine(comptime T: type) type {
             engine.shard_metrics.deinit();
             engine.* = undefined;
             gpa.destroy(engine);
+        }
+
+        /// Waits for every job not yet completed and frees it, before the records whose shard
+        /// bytes the jobs borrow.
+        fn free_jobs(engine: *Self) void {
+            // The completer has stopped: every job it took is in `finished_jobs` or awaited.
+            assert(engine.finished_jobs.len + engine.submitted.len <= engine.jobs.items.len);
+            for (engine.jobs.items) |job| {
+                job.wait(engine.config.strategy);
+                job.destroy(engine.gpa);
+            }
+            engine.jobs.deinit(engine.gpa);
+            engine.submitted.deinit(engine.gpa);
+            engine.finished_jobs.deinit(engine.gpa);
         }
 
         fn free_state(engine: *Self) void {
@@ -678,12 +835,31 @@ pub fn Engine(comptime T: type) type {
         }
 
         /// Removes `commitment`'s record without closing any subscription.
-        fn evict(engine: *Self, commitment: Commitment) void {
+        pub fn evict(engine: *Self, commitment: Commitment) void {
             var record = engine.records.remove(commitment) orelse return;
+            if (record.reconstruction) |*state| engine.discard_job(commitment, state);
             const states = engine.shard_metrics.reconstruction_states_count;
             if (record.reconstruction != null) dec(states);
             if (record.block != null) dec(engine.shard_metrics.reconstructed_blocks_cache_count);
             record.deinit(engine.gpa);
+        }
+
+        /// Discards the in-flight job of the record whose reconstruction `state` is being
+        /// dropped: the job keeps the record's shards until it ends, and its result is
+        /// dropped.
+        fn discard_job(engine: *Self, commitment: Commitment, state: *State) void {
+            const quorum = if (state.quorum) |*value| value else return;
+            if (!quorum.job) return;
+            assert(engine.jobs.items.len > 0);
+            for (engine.jobs.items) |job| {
+                if (job.discarded or !job.commitment.eql(commitment)) continue;
+                job.discarded = true;
+                assert(job.orphan == null);
+                job.orphan = quorum.*;
+                state.quorum = null;
+                return;
+            }
+            unreachable; // A record with a job in flight has exactly one undiscarded job.
         }
 
         fn inc(gauge: metrics.Gauge) void {
@@ -705,7 +881,10 @@ pub fn Engine(comptime T: type) type {
                 if (record.round.order(round) == .lt) record.round = round;
                 if (record.block == null) {
                     record.block = owned;
-                    if (record.reconstruction) |*state| state.into_ready(gpa);
+                    if (record.reconstruction) |*state| {
+                        engine.discard_job(owned.commitment(), state);
+                        state.into_ready(gpa);
+                    }
                     inc(engine.shard_metrics.reconstructed_blocks_cache_count);
                 } else owned.deinit(gpa);
                 return engine.notify_block(&record.block.?);
@@ -942,110 +1121,213 @@ pub fn Engine(comptime T: type) type {
             try engine.try_reconstruct(commitment);
         }
 
-        /// Verifies the pending shards decoding needs (in sender order) and decodes the block
-        /// once enough are checked; the shards that fail are replaced by later pending ones.
+        /// Submits a job that verifies the pending shards decoding needs (in sender order) and
+        /// decodes the block, once the checked and pending shards reach the minimum (commonware
+        /// `try_reconstruct`). A record holds at most one job.
         fn try_reconstruct(engine: *Self, commitment: Commitment) Error!void {
-            const minimum: usize = commitment.config().minimum_shards;
-            const started = Io.Clock.awake.now(engine.io);
-            while (true) {
-                const record = engine.records.get(commitment) orelse return;
-                if (record.block != null) return;
-                const quorum = &(record.reconstruction.?.quorum.?);
-                const checked = quorum.checked.items.len;
-                if (checked + quorum.pending.count() < minimum) return;
-                if (checked < minimum) {
-                    try engine.check_pending(commitment, quorum, minimum - checked);
-                    continue;
-                }
-                return engine.decode_and_cache(commitment, started);
-            }
-        }
-
-        /// Batch-verifies the first `count` pending shards, blocking the senders of invalid
-        /// ones.
-        fn check_pending(
-            engine: *Self,
-            commitment: Commitment,
-            quorum: *State.Quorum,
-            count: usize,
-        ) Allocator.Error!void {
-            const gpa = engine.gpa;
-            assert(count > 0 and count <= quorum.pending.count());
-            const peers = try gpa.alloc(P, count);
-            defer gpa.free(peers);
-            const refs = try gpa.alloc(C.ShardRef, count);
-            defer gpa.free(refs);
-            const results = try gpa.alloc(C.Error!C.CheckedShard, count);
-            defer gpa.free(results);
-            try quorum.checked.ensureUnusedCapacity(gpa, count);
-            for (peers, refs) |*peer, *ref| {
-                const entry = quorum.pending.entries.orderedRemove(0);
-                peer.* = entry.key;
-                ref.* = .{ .index = entry.value, .shard = quorum.received.get(entry.value).? };
-            }
-            const root = commitment.root();
-            const config = commitment.config();
-            try C.check_many(gpa, config, &root, refs, results, engine.config.strategy);
-            for (peers, refs, results) |peer, ref, result| {
-                const checked = result catch {
-                    _ = engine.config.blocker.block(peer); // invalid shard
-                    continue;
-                };
-                const size = ref.shard.encode_size();
-                quorum.checked.appendAssumeCapacity(.{ .shard = checked, .size = size });
-            }
-        }
-
-        /// Decodes the block from the checked shards and caches it, or drops the record and
-        /// closes its commitment's subscriptions if it does not match the commitment.
-        fn decode_and_cache(
-            engine: *Self,
-            commitment: Commitment,
-            started: Io.Timestamp,
-        ) Error!void {
-            const gpa = engine.gpa;
-            const record = engine.records.get(commitment).?;
-            const round = record.round;
+            const record = engine.records.get(commitment) orelse return;
+            if (record.block != null) return;
             const quorum = &(record.reconstruction.?.quorum.?);
-            const inner = engine.decode(commitment, quorum.checked.items) catch |err| {
-                if (err == error.OutOfMemory) return error.OutOfMemory;
-                engine.evict(commitment);
-                if (engine.assigned_subscriptions.remove(commitment)) |list| {
-                    var owned = list;
-                    for (owned.items) |*responder| responder.deinit();
-                    owned.deinit(gpa);
-                }
-                // A candidate may claim a digest it cannot reconstruct, so only the
-                // commitment's subscriptions close.
-                if (engine.commitment_subscriptions.remove(commitment)) |list| {
-                    var owned = list;
-                    for (owned.items) |*responder| responder.deinit();
-                    owned.deinit(gpa);
-                }
-                _ = engine.shard_metrics.reconstruction_failures_total.metric().inc();
-                return;
+            const minimum: usize = commitment.config().minimum_shards;
+            const checked = quorum.checked.items.len;
+            if (quorum.job or checked + quorum.pending.count() < minimum) return;
+            // Verify only the pending shards decoding needs; the rest replace any that fail.
+            const count = @min(minimum -| checked, quorum.pending.count());
+            const job = try engine.create_job(commitment, quorum, count);
+            engine.submit(job, quorum) catch |err| {
+                engine.restore_job(job, quorum);
+                return err;
             };
-            const histogram = engine.shard_metrics.reconstruction_duration.metric();
-            metrics.histogram.observe_between(histogram, started, Io.Clock.awake.now(engine.io));
-            var digested = try Coded.Inner.precomputed(gpa, inner, commitment.block());
-            errdefer digested.deinit();
-            try engine.cache_block(round, Coded.precomputed(digested, commitment));
-            _ = engine.shard_metrics.blocks_reconstructed_total.metric().inc();
+            assert(quorum.job and quorum.checked.items.len == 0);
         }
 
-        /// Decodes the block from `checked` shards and checks it against `commitment`.
-        fn decode(engine: *Self, commitment: Commitment, checked: []const State.Sized) !B {
+        /// A job taking `quorum`'s checked shards and its first `count` pending shards. The
+        /// quorum is unchanged until `submit`.
+        fn create_job(
+            engine: *Self,
+            commitment: Commitment,
+            quorum: *const State.Quorum,
+            count: usize,
+        ) Allocator.Error!*Job {
             const gpa = engine.gpa;
-            const shards = try gpa.alloc(C.CheckedShard, checked.len);
+            assert(count <= quorum.pending.count());
+            const job = try gpa.create(Job);
+            errdefer gpa.destroy(job);
+            const peers = try gpa.alloc(P, count);
+            errdefer gpa.free(peers);
+            const shards = try gpa.alloc(C.Shard, count);
+            errdefer gpa.free(shards);
+            const refs = try gpa.alloc(C.ShardRef, count);
+            errdefer gpa.free(refs);
+            const results = try gpa.alloc(C.Error!C.CheckedShard, count);
+            errdefer gpa.free(results);
+            var invalid = try std.ArrayList(P).initCapacity(gpa, count);
+            errdefer invalid.deinit(gpa);
+            const total = quorum.checked.items.len + count;
+            var checked = try std.ArrayList(State.Sized).initCapacity(gpa, total);
+            errdefer checked.deinit(gpa);
+            checked.appendSliceAssumeCapacity(quorum.checked.items);
+            const taken = quorum.pending.items()[0..count];
+            for (taken, peers, shards, refs) |entry, *peer, *shard, *ref| {
+                peer.* = entry.key;
+                shard.* = quorum.received.get(entry.value).?.*;
+                ref.* = .{ .index = entry.value, .shard = shard };
+            }
+            job.* = .{
+                .task = .init(.{
+                    .gpa = gpa,
+                    .strategy = engine.config.strategy,
+                    .codec_config = engine.config.block_codec_config,
+                    .commitment = commitment,
+                    .checked = checked,
+                    .peers = peers,
+                    .shards = shards,
+                    .refs = refs,
+                    .results = results,
+                    .invalid = invalid,
+                }),
+                .commitment = commitment,
+                .started = Io.Clock.awake.now(engine.io),
+            };
+            assert(job.task.op.checked.items.len == quorum.checked.items.len);
+            return job;
+        }
+
+        /// Takes the job's shards out of `quorum` and hands the job to the strategy and, on a
+        /// started engine, to the completer.
+        fn submit(engine: *Self, job: *Job, quorum: *State.Quorum) Allocator.Error!void {
+            const gpa = engine.gpa;
+            const op = &job.task.op;
+            assert(!quorum.job and !job.task.spawned);
+            try engine.jobs.ensureUnusedCapacity(gpa, 1);
+            if (engine.completer_task != null) {
+                engine.mutex.lockUncancelable(engine.io);
+                defer engine.mutex.unlock(engine.io);
+                try engine.submitted.ensureUnusedCapacity(gpa, 1);
+                try engine.finished_jobs.ensureTotalCapacity(gpa, engine.jobs.items.len + 1);
+            }
+            for (0..op.peers.len) |_| _ = quorum.pending.entries.orderedRemove(0);
+            quorum.checked.clearRetainingCapacity();
+            quorum.job = true;
+            // The spawn hint is the encoded size of the shards the job takes.
+            var len: usize = 0;
+            for (op.checked.items) |sized| len += sized.size;
+            for (op.shards) |*shard| len += shard.encode_size();
+            engine.config.strategy.spawn(len, &job.task);
+            assert(job.task.spawned);
+            engine.jobs.appendAssumeCapacity(job);
+            if (engine.completer_task == null) return;
+            engine.mutex.lockUncancelable(engine.io);
+            defer engine.mutex.unlock(engine.io);
+            engine.submitted.pushBackAssumeCapacity(job);
+            engine.condition.broadcast(engine.io);
+        }
+
+        /// Frees a job `submit` refused; `quorum` still holds every shard.
+        fn restore_job(engine: *Self, job: *Job, quorum: *const State.Quorum) void {
+            assert(!quorum.job);
+            assert(!job.task.spawned);
+            job.result = Outcome.insufficient;
+            job.destroy(engine.gpa);
+        }
+
+        /// Waits for the oldest job not yet completed and returns it (commonware's test helper
+        /// `finished`); apply it with `complete`. For an engine driven through its handlers.
+        pub fn next_finished(engine: *Self) *Job {
+            assert(!engine.started);
+            assert(engine.jobs.items.len > 0); // The engine must hold a job.
+            const job = engine.jobs.items[0];
+            job.wait(engine.config.strategy);
+            return job;
+        }
+
+        /// Applies a finished job (owned) to the record that submitted it (commonware
+        /// `complete`): blocks the senders of invalid shards; then a decoded block is cached,
+        /// a failed decode removes the record and closes its commitment's subscriptions, and
+        /// too few valid shards return the checked shards to the record and submit another job
+        /// once enough are held. A discarded job only blocks.
+        pub fn complete(engine: *Self, job: *Job) Error!void {
+            const gpa = engine.gpa;
+            assert(job.result != null);
+            const position = std.mem.indexOfScalar(*Job, engine.jobs.items, job).?;
+            _ = engine.jobs.orderedRemove(position);
+            defer job.destroy(gpa);
+            const op = &job.task.op;
+            for (op.invalid.items) |peer| _ = engine.config.blocker.block(peer); // invalid shard
+            const outcome = try job.result.?;
+            if (job.discarded) return;
+            const record = engine.records.get(job.commitment).?;
+            const quorum = &(record.reconstruction.?.quorum.?);
+            assert(quorum.job);
+            quorum.job = false;
+            switch (outcome) {
+                .insufficient => {
+                    try quorum.checked.appendSlice(gpa, op.checked.items);
+                    try engine.try_reconstruct(job.commitment);
+                },
+                .decoded => |decoded| {
+                    const inner = decoded catch |err| {
+                        if (err == error.OutOfMemory) return error.OutOfMemory;
+                        return engine.fail_reconstruction(job.commitment);
+                    };
+                    // The engine owns the block from here on.
+                    job.result = Outcome.insufficient;
+                    try engine.cache_reconstructed(job, record.round, inner);
+                },
+            }
+        }
+
+        /// Caches the block (owned) a job decoded.
+        fn cache_reconstructed(engine: *Self, job: *const Job, round: Round, inner: B) !void {
+            const histogram = engine.shard_metrics.reconstruction_duration.metric();
+            const now = Io.Clock.awake.now(engine.io);
+            assert(!job.discarded);
+            metrics.histogram.observe_between(histogram, job.started, now);
+            // Decoding verified the blob against the commitment.
+            var digested = try Coded.Inner.precomputed(engine.gpa, inner, job.commitment.block());
+            errdefer digested.deinit();
+            try engine.cache_block(round, Coded.precomputed(digested, job.commitment));
+            _ = engine.shard_metrics.blocks_reconstructed_total.metric().inc();
+            assert(engine.block_by_commitment(job.commitment) != null);
+        }
+
+        /// Drops a record whose shards decode to a block that does not match its commitment
+        /// and closes its commitment's subscriptions.
+        fn fail_reconstruction(engine: *Self, commitment: Commitment) void {
+            const gpa = engine.gpa;
+            assert(engine.records.contains(commitment));
+            engine.evict(commitment);
+            if (engine.assigned_subscriptions.remove(commitment)) |list| {
+                var owned = list;
+                for (owned.items) |*responder| responder.deinit();
+                owned.deinit(gpa);
+            }
+            // A candidate may claim a digest it cannot reconstruct, so only the commitment's
+            // subscriptions close.
+            if (engine.commitment_subscriptions.remove(commitment)) |list| {
+                var owned = list;
+                for (owned.items) |*responder| responder.deinit();
+                owned.deinit(gpa);
+            }
+            _ = engine.shard_metrics.reconstruction_failures_total.metric().inc();
+            assert(!engine.records.contains(commitment));
+        }
+
+        /// Decodes the block from a job's checked shards and checks it against its commitment.
+        fn decode_block(op: *const Reconstruct) !B {
+            const gpa = op.gpa;
+            assert(op.checked.items.len >= op.commitment.config().minimum_shards);
+            const shards = try gpa.alloc(C.CheckedShard, op.checked.items.len);
             defer gpa.free(shards);
-            for (shards, checked) |*shard, sized| shard.* = sized.shard;
+            for (shards, op.checked.items) |*shard, sized| shard.* = sized.shard;
+            const commitment = op.commitment;
             const root = commitment.root();
-            const strategy = engine.config.strategy;
+            const strategy = op.strategy;
             const blob = try C.decode(gpa, commitment.config(), &root, shards, strategy);
             defer gpa.free(blob);
             // The blob is the block followed by its coding config.
             var reader = codec.Reader.init(blob);
-            var inner = try codec.read_cfg(B, gpa, &reader, engine.config.block_codec_config);
+            var inner = try codec.read_cfg(B, gpa, &reader, op.codec_config);
             errdefer codec.free(B, gpa, inner);
             const config = try codec.read(CodingConfig, gpa, &reader);
             if (reader.remaining() != 0) return error.ExtraData;

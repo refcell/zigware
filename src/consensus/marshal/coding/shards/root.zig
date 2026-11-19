@@ -33,4 +33,5 @@ test {
     _ = @import("engine_recovery_test.zig");
     _ = @import("engine_members_test.zig");
     _ = @import("engine_scheme_test.zig");
+    _ = @import("engine_jobs_test.zig");
 }
