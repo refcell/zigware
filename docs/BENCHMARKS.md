@@ -11,7 +11,7 @@ better. A ratio below 1 means zigware is faster.
 | `sha256::hash_message` | `msg_len=4096` | 1.87 µs | 2.08 µs | 1.11× |
 | `sha256::hash_message` | `msg_len=1048576` | 480 µs | 538 µs | 1.12× |
 | `ed25519::signature_verification` | `ns_len=9 msg_len=32` | 26.7 µs | 43.3 µs | 1.62× |
-| `ed25519::batch_verify_same_message` | `pks=100 conc=1` | 1.04 ms | 2.21 ms | 2.13× |
+| `ed25519::batch_verify_same_message` | `pks=100 conc=1` | 1.38 ms | 1.86 ms | 1.35× (re-run, see below) |
 | `bls12381::signature_verification` | `ns_len=9 msg_len=32` | 1.23 ms | 1.59 ms | 1.30× |
 | `bls12381::aggregate_verify_same_message` | `pks=1000` | 2.27 ms | 2.16 ms | 0.96× |
 | `journal::fixed_append` | `items=10000 size=32` | 2.00 ms | 456 µs | 0.23× |
@@ -79,16 +79,20 @@ directory under `BENCH_DIR` (default `$TMPDIR` or `/tmp`). commonware gets it th
   gdb hung when it ran the bench as a child. The perf-bug causes below come from reading the
   hot paths. They are hypotheses until someone profiles them.
 
+## Fixed perf bugs
+
+- **`ed25519::batch_verify_same_message`, 2.13× to 1.35×.** `verify_shard` summed every
+  shard with `core.MultiScalar`, whose 8-point flushes each ran their own 256-doubling chain.
+  Shards of 44 or more signatures now go through the bucket MSM in
+  `src/cryptography/ed25519/msm.zig` (moved from curve25519's `batch.zig`, which shares it),
+  with one `A` term per distinct key, as commonware coalesces. The row above is a separate
+  re-run of this pair only (`etc/scripts/bench-compare.sh`'s settings, best of three
+  alternating runs, load average 34 to 62). An interleaved A/B of the old and new zigware code
+  at a load average of about 67 measured 3.02 ms against 1.90 ms. The remaining gap is probably
+  field arithmetic (unprofiled, as for `signature_verification` below).
+
 ## Perf bugs (zigware more than 1.5× slower)
 
-- **`ed25519::batch_verify_same_message` (2.13×), owned by the crypto lane
-  (`src/cryptography/ed25519/core.zig`).** `verify_shard` sums the batch with
-  `core.MultiScalar`, a Straus MSM that flushes every 8 points. Each flush runs its own
-  64-window chain of 256 doublings, so 100 signatures (201 terms) pay for about 26 doubling
-  chains. commonware runs one Pippenger or Straus over all terms, with one shared doubling
-  chain. The curve25519 lane's Pippenger in `src/cryptography/curve25519/batch.zig` already
-  does it that way. Guess: route the ed25519 batch through it, or share one doubling chain
-  across chunks.
 - **`ed25519::signature_verification` (1.62×), owned by the crypto lane.** Verification uses
   `std.crypto`'s `Edwards25519.mulDoubleBasePublic` over its radix-2^51 scalar field
   arithmetic. commonware's vendored curve25519 code picks a SIMD backend (AVX2 or IFMA) on
