@@ -36,9 +36,23 @@ pub fn compress(state: *[8]u32, blocks: []const u8) void {
     comptime assert(available);
     assert(blocks.len % 64 == 0);
     assert(blocks.len > 0);
+    var states = [1]*[8]u32{state};
+    compress_n(1, &states, .{blocks});
+}
+
+/// Compresses `left` into `states[0]` and `right` into `states[1]`, interleaving the two
+/// so each fills the other's SHA instruction latency (commonware's pair kernels).
+pub fn compress_pair(states: *[2]*[8]u32, left: []const u8, right: []const u8) void {
+    comptime assert(available);
+    assert(left.len == right.len);
+    assert(left.len % 64 == 0 and left.len > 0);
+    compress_n(2, states, .{ left, right });
+}
+
+fn compress_n(comptime n: usize, states: *[n]*[8]u32, inputs: [n][]const u8) void {
     switch (builtin.cpu.arch) {
-        .x86_64 => compress_x86(state, blocks),
-        .aarch64 => compress_aarch64(state, blocks),
+        .x86_64 => compress_x86(n, states, inputs),
+        .aarch64 => compress_aarch64(n, states, inputs),
         else => comptime unreachable,
     }
 }
@@ -51,98 +65,132 @@ inline fn load(bytes: []const u8, offset: usize) V4u32 {
     return @byteSwap(words);
 }
 
-fn compress_x86(state: *[8]u32, blocks: []const u8) void {
-    assert(blocks.len % 64 == 0);
-    // sha256rnds2 keeps the state as ABEF and CDGH.
-    var x: V4u32 = .{ state[5], state[4], state[1], state[0] };
-    var y: V4u32 = .{ state[7], state[6], state[3], state[2] };
-    var offset: usize = 0;
-    while (offset < blocks.len) : (offset += 64) {
-        const x_start = x;
-        const y_start = y;
-        var m = [4]V4u32{
-            load(blocks, offset),      load(blocks, offset + 16),
-            load(blocks, offset + 32), load(blocks, offset + 48),
-        };
-        inline for (0..16) |k| {
-            const w: V4u32 = m[k % 4] +% @as(V4u32, K[4 * k ..][0..4].*);
-            y = asm ("sha256rnds2 %[x], %[y]"
-                : [y] "=x" (-> V4u32),
-                : [_] "0" (y),
-                  [x] "x" (x),
-                  [_] "{xmm0}" (w),
-            );
-            x = asm ("sha256rnds2 %[y], %[x]"
-                : [x] "=x" (-> V4u32),
-                : [_] "0" (x),
-                  [y] "x" (y),
-                  [_] "{xmm0}" (@as(V4u32, @bitCast(@as(u128, @bitCast(w)) >> 64))),
-            );
-            if (k < 12) {
-                // Words 4(k+4) to 4(k+4)+3 from words 4k to 4k+15.
-                var tmp = m[k % 4];
-                m[k % 4] = asm (
-                    \\ sha256msg1 %[w4_7], %[tmp]
-                    \\ vpalignr $0x4, %[w8_11], %[w12_15], %[result]
-                    \\ paddd %[tmp], %[result]
-                    \\ sha256msg2 %[w12_15], %[result]
-                    : [tmp] "=&x" (tmp),
-                      [result] "=&x" (-> V4u32),
-                    : [_] "0" (tmp),
-                      [w4_7] "x" (m[(k + 1) % 4]),
-                      [w8_11] "x" (m[(k + 2) % 4]),
-                      [w12_15] "x" (m[(k + 3) % 4]),
-                );
-            }
-        }
-        x +%= x_start;
-        y +%= y_start;
-    }
-    assert(offset == blocks.len);
-    state.* = .{ x[3], x[2], y[3], y[2], x[1], x[0], y[1], y[0] };
+inline fn load_block(bytes: []const u8, offset: usize) [4]V4u32 {
+    return .{
+        load(bytes, offset),      load(bytes, offset + 16),
+        load(bytes, offset + 32), load(bytes, offset + 48),
+    };
 }
 
-fn compress_aarch64(state: *[8]u32, blocks: []const u8) void {
-    assert(blocks.len % 64 == 0);
-    var x: V4u32 = state[0..4].*;
-    var y: V4u32 = state[4..8].*;
+fn compress_x86(comptime n: usize, states: *[n]*[8]u32, inputs: [n][]const u8) void {
+    const len = inputs[0].len;
+    for (inputs) |input| assert(input.len == len);
+    // sha256rnds2 keeps the state as ABEF and CDGH.
+    var x: [n]V4u32 = undefined;
+    var y: [n]V4u32 = undefined;
+    inline for (0..n) |j| {
+        const state = states[j];
+        x[j] = .{ state[5], state[4], state[1], state[0] };
+        y[j] = .{ state[7], state[6], state[3], state[2] };
+    }
     var offset: usize = 0;
-    while (offset < blocks.len) : (offset += 64) {
+    while (offset < len) : (offset += 64) {
         const x_start = x;
         const y_start = y;
-        var m = [4]V4u32{
-            load(blocks, offset),      load(blocks, offset + 16),
-            load(blocks, offset + 32), load(blocks, offset + 48),
-        };
+        var m: [n][4]V4u32 = undefined;
+        inline for (0..n) |j| m[j] = load_block(inputs[j], offset);
         inline for (0..16) |k| {
-            if (k > 3) {
-                // Words 4k to 4k+3 from words 4(k-4) to 4k-1.
-                m[k % 4] = asm (
-                    \\sha256su0.4s %[w0_3], %[w4_7]
-                    \\sha256su1.4s %[w0_3], %[w8_11], %[w12_15]
-                    : [w0_3] "=&w" (-> V4u32),
-                    : [_] "0" (m[k % 4]),
-                      [w4_7] "w" (m[(k + 1) % 4]),
-                      [w8_11] "w" (m[(k + 2) % 4]),
-                      [w12_15] "w" (m[(k + 3) % 4]),
-                );
-            }
-            const w: V4u32 = m[k % 4] +% @as(V4u32, K[4 * k ..][0..4].*);
-            asm volatile (
-                \\mov.4s v0, %[x]
-                \\sha256h.4s %[x], %[y], %[w]
-                \\sha256h2.4s %[y], v0, %[w]
-                : [x] "=w" (x),
-                  [y] "=w" (y),
-                : [_] "0" (x),
-                  [_] "1" (y),
-                  [w] "w" (w),
-                : .{ .v0 = true });
+            inline for (0..n) |j| x86_rounds(k, &x[j], &y[j], &m[j]);
         }
-        x +%= x_start;
-        y +%= y_start;
+        inline for (0..n) |j| {
+            x[j] +%= x_start[j];
+            y[j] +%= y_start[j];
+        }
     }
-    assert(offset == blocks.len);
-    state[0..4].* = x;
-    state[4..8].* = y;
+    assert(offset == len);
+    inline for (0..n) |j| {
+        states[j].* = .{ x[j][3], x[j][2], y[j][3], y[j][2], x[j][1], x[j][0], y[j][1], y[j][0] };
+    }
+}
+
+/// Rounds 4k to 4k+3, then (for k < 12) message words 4(k+4) to 4(k+4)+3.
+inline fn x86_rounds(comptime k: usize, x: *V4u32, y: *V4u32, m: *[4]V4u32) void {
+    const w: V4u32 = m[k % 4] +% @as(V4u32, K[4 * k ..][0..4].*);
+    y.* = asm ("sha256rnds2 %[x], %[y]"
+        : [y] "=x" (-> V4u32),
+        : [_] "0" (y.*),
+          [x] "x" (x.*),
+          [_] "{xmm0}" (w),
+    );
+    x.* = asm ("sha256rnds2 %[y], %[x]"
+        : [x] "=x" (-> V4u32),
+        : [_] "0" (x.*),
+          [y] "x" (y.*),
+          [_] "{xmm0}" (@as(V4u32, @bitCast(@as(u128, @bitCast(w)) >> 64))),
+    );
+    if (k < 12) {
+        var tmp = m[k % 4];
+        m[k % 4] = asm (
+            \\ sha256msg1 %[w4_7], %[tmp]
+            \\ vpalignr $0x4, %[w8_11], %[w12_15], %[result]
+            \\ paddd %[tmp], %[result]
+            \\ sha256msg2 %[w12_15], %[result]
+            : [tmp] "=&x" (tmp),
+              [result] "=&x" (-> V4u32),
+            : [_] "0" (tmp),
+              [w4_7] "x" (m[(k + 1) % 4]),
+              [w8_11] "x" (m[(k + 2) % 4]),
+              [w12_15] "x" (m[(k + 3) % 4]),
+        );
+    }
+}
+
+fn compress_aarch64(comptime n: usize, states: *[n]*[8]u32, inputs: [n][]const u8) void {
+    const len = inputs[0].len;
+    for (inputs) |input| assert(input.len == len);
+    var x: [n]V4u32 = undefined;
+    var y: [n]V4u32 = undefined;
+    inline for (0..n) |j| {
+        x[j] = states[j][0..4].*;
+        y[j] = states[j][4..8].*;
+    }
+    var offset: usize = 0;
+    while (offset < len) : (offset += 64) {
+        const x_start = x;
+        const y_start = y;
+        var m: [n][4]V4u32 = undefined;
+        inline for (0..n) |j| m[j] = load_block(inputs[j], offset);
+        inline for (0..16) |k| {
+            inline for (0..n) |j| aarch64_rounds(k, &x[j], &y[j], &m[j]);
+        }
+        inline for (0..n) |j| {
+            x[j] +%= x_start[j];
+            y[j] +%= y_start[j];
+        }
+    }
+    assert(offset == len);
+    inline for (0..n) |j| {
+        states[j][0..4].* = x[j];
+        states[j][4..8].* = y[j];
+    }
+}
+
+/// (For k > 3) message words 4k to 4k+3, then rounds 4k to 4k+3.
+inline fn aarch64_rounds(comptime k: usize, x: *V4u32, y: *V4u32, m: *[4]V4u32) void {
+    if (k > 3) {
+        m[k % 4] = asm (
+            \\sha256su0.4s %[w0_3], %[w4_7]
+            \\sha256su1.4s %[w0_3], %[w8_11], %[w12_15]
+            : [w0_3] "=&w" (-> V4u32),
+            : [_] "0" (m[k % 4]),
+              [w4_7] "w" (m[(k + 1) % 4]),
+              [w8_11] "w" (m[(k + 2) % 4]),
+              [w12_15] "w" (m[(k + 3) % 4]),
+        );
+    }
+    const w: V4u32 = m[k % 4] +% @as(V4u32, K[4 * k ..][0..4].*);
+    var x_next: V4u32 = undefined;
+    var y_next: V4u32 = undefined;
+    asm volatile (
+        \\mov.4s v0, %[x]
+        \\sha256h.4s %[x], %[y], %[w]
+        \\sha256h2.4s %[y], v0, %[w]
+        : [x] "=w" (x_next),
+          [y] "=w" (y_next),
+        : [_] "0" (x.*),
+          [_] "1" (y.*),
+          [w] "w" (w),
+        : .{ .v0 = true });
+    x.* = x_next;
+    y.* = y_next;
 }

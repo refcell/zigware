@@ -73,8 +73,14 @@ pub fn StreamingWith(comptime Core: type, comptime DigestType: type, comptime Ke
             return digest;
         }
 
-        /// Hashes the concatenation of `parts` in one shot.
+        /// Hashes the concatenation of `parts` in one shot, through `Core.hash_parts` when the
+        /// core has a one-shot path.
         pub fn hash(parts: []const []const u8) Digest {
+            if (comptime @hasDecl(Core, "hash_parts")) {
+                var digest: Digest = undefined;
+                Core.hash_parts(parts, &digest.bytes);
+                return digest;
+            }
             var self = init();
             for (parts) |part| self.update(part);
             return self.finalize();
@@ -92,6 +98,13 @@ pub fn StreamingWith(comptime Core: type, comptime DigestType: type, comptime Ke
             strategy: anytype,
         ) [2]Digest {
             _ = resolve_strategy(strategy);
+            if (comptime @hasDecl(Core, "hash_pair_parts")) {
+                var out: [2]Digest = undefined;
+                var bytes: [2][Digest.fixed_size]u8 = undefined;
+                Core.hash_pair_parts(left, right, &bytes);
+                for (&out, bytes) |*digest, value| digest.bytes = value;
+                return out;
+            }
             return .{ hash(left), hash(right) };
         }
 

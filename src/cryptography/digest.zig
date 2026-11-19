@@ -60,9 +60,17 @@ pub fn Digest(comptime length: usize, comptime name: []const u8) type {
             return std.mem.eql(u8, &a.bytes, &b.bytes);
         }
 
-        /// Lexicographic order of the bytes, as commonware's `Ord`.
+        /// Lexicographic order of the bytes, as commonware's `Ord` (a `memcmp`): big-endian
+        /// 8-byte words compare as their bytes do, so whole words compare first.
         pub fn order(a: Self, b: Self) std.math.Order {
-            return std.mem.order(u8, &a.bytes, &b.bytes);
+            const words = length / 8;
+            inline for (0..words) |index| {
+                const x = std.mem.readInt(u64, a.bytes[index * 8 ..][0..8], .big);
+                const y = std.mem.readInt(u64, b.bytes[index * 8 ..][0..8], .big);
+                if (x != y) return std.math.order(x, y);
+            }
+            comptime assert(words * 8 <= length);
+            return std.mem.order(u8, a.bytes[words * 8 ..], b.bytes[words * 8 ..]);
         }
 
         /// Comparator for `std.sort`.
@@ -117,4 +125,28 @@ test "digest codec, order, and hex" {
     try std.testing.expectEqual(std.math.Order.lt, c.order(e));
     try std.testing.expectEqual(std.math.Order.gt, e.order(c));
     try std.testing.expectEqual(std.math.Order.eq, c.order(c));
+}
+
+test "digest order matches byte order at every position and length" {
+    var prng = std.Random.DefaultPrng.init(0xd16e57);
+    const random = prng.random();
+    inline for (.{ 4, 20, 32, 33, 64 }) |length| {
+        const D = Digest(length, "order");
+        for (0..length) |position| {
+            // Equal before `position`, then one differing byte, then bytes that disagree.
+            var a = D.random(random);
+            var b = a;
+            a.bytes[position] = random.int(u8);
+            b.bytes[position] = a.bytes[position] +% 1 +% random.uintLessThan(u8, 255);
+            for (a.bytes[position + 1 ..], b.bytes[position + 1 ..]) |*x, *y| {
+                x.* = 0xff;
+                y.* = 0x00;
+            }
+            const expected = std.mem.order(u8, &a.bytes, &b.bytes);
+            try std.testing.expect(expected != .eq);
+            try std.testing.expectEqual(expected, a.order(b));
+            try std.testing.expectEqual(expected.invert(), b.order(a));
+            try std.testing.expectEqual(std.math.Order.eq, a.order(a));
+        }
+    }
 }

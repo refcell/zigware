@@ -50,6 +50,84 @@ pub const Core = struct {
     pub fn final(self: *Core, out: *[StdSha256.digest_length]u8) void {
         self.inner.final(out);
     }
+
+    /// The longest message `hash_parts` pads on the stack: two blocks less the 0x80 byte and
+    /// the 8-byte length (Merkle leaves and nodes are 36 to 72 bytes).
+    const short_max = 2 * block_length - 9;
+
+    /// Hashes the concatenation of `parts` into `out`; a short message skips the streaming
+    /// state (commonware's `hash_single` kernels serve the same Merkle shapes).
+    pub fn hash_parts(parts: []const []const u8, out: *[StdSha256.digest_length]u8) void {
+        var total: usize = 0;
+        for (parts) |part| total +|= part.len;
+        if (comptime !blocks.available) return stream(parts, out);
+        if (total > short_max) return stream(parts, out);
+        var padded: [2 * block_length]u8 align(16) = @splat(0);
+        const len = pad_short(parts, total, &padded);
+        var state = iv;
+        blocks.compress(&state, padded[0..len]);
+        write_state(state, out);
+    }
+
+    const iv = StdSha256.init(.{}).s;
+
+    /// `parts` padded into `padded` as one or two final blocks; returns the padded length.
+    fn pad_short(parts: []const []const u8, total: usize, padded: *[2 * block_length]u8) usize {
+        assert(total <= short_max);
+        var offset: usize = 0;
+        for (parts) |part| {
+            @memcpy(padded[offset..][0..part.len], part);
+            offset += part.len;
+        }
+        assert(offset == total);
+        padded[total] = 0x80;
+        const len: usize = if (total + 9 <= block_length) block_length else 2 * block_length;
+        std.mem.writeInt(u64, padded[len - 8 ..][0..8], @as(u64, total) * 8, .big);
+        return len;
+    }
+
+    fn write_state(state: [8]u32, out: *[StdSha256.digest_length]u8) void {
+        for (state, 0..) |word, index| std.mem.writeInt(u32, out[index * 4 ..][0..4], word, .big);
+    }
+
+    /// The digests of `left` and `right`; two short messages of the same padded length
+    /// compress interleaved (commonware's `hash_pair` kernels serve the Merkle node shapes).
+    pub fn hash_pair_parts(
+        left: []const []const u8,
+        right: []const []const u8,
+        out: *[2][StdSha256.digest_length]u8,
+    ) void {
+        var totals: [2]usize = .{ 0, 0 };
+        for (left) |part| totals[0] +|= part.len;
+        for (right) |part| totals[1] +|= part.len;
+        const short = totals[0] <= short_max and totals[1] <= short_max;
+        if (comptime !blocks.available) return separate(left, right, out);
+        if (!short) return separate(left, right, out);
+        var padded: [2][2 * block_length]u8 align(16) = @splat(@splat(0));
+        const len_left = pad_short(left, totals[0], &padded[0]);
+        const len_right = pad_short(right, totals[1], &padded[1]);
+        if (len_left != len_right) return separate(left, right, out);
+        var states: [2][8]u32 = .{ iv, iv };
+        var pointers: [2]*[8]u32 = .{ &states[0], &states[1] };
+        blocks.compress_pair(&pointers, padded[0][0..len_left], padded[1][0..len_right]);
+        write_state(states[0], &out[0]);
+        write_state(states[1], &out[1]);
+    }
+
+    fn separate(
+        left: []const []const u8,
+        right: []const []const u8,
+        out: *[2][StdSha256.digest_length]u8,
+    ) void {
+        hash_parts(left, &out[0]);
+        hash_parts(right, &out[1]);
+    }
+
+    fn stream(parts: []const []const u8, out: *[StdSha256.digest_length]u8) void {
+        var core = init(.{});
+        for (parts) |part| core.update(part);
+        core.final(out);
+    }
 };
 
 const digest_length = 32;
@@ -105,12 +183,11 @@ test "sha256 block runs match std across lengths and split points" {
     defer gpa.free(data);
     var prng = std.Random.DefaultPrng.init(0x5ba256);
     prng.random().bytes(data);
-    var lengths: [96]usize = undefined;
-    for (&lengths, 0..) |*len, i| len.* = if (i < 64) i * 37 else prng.random().uintAtMost(
-        usize,
-        data.len,
-    );
-    lengths[95] = data.len;
+    // Every length through two blocks (the stack-padded path), then longer ones.
+    var lengths: [192]usize = undefined;
+    for (&lengths, 0..) |*len, i| len.* = if (i <= 130) i else if (i < 170) i * 37 else prng
+        .random().uintAtMost(usize, data.len);
+    lengths[191] = data.len;
     for (lengths) |len| {
         var expected: [32]u8 = undefined;
         StdSha256.hash(data[0..len], &expected, .{});
@@ -231,6 +308,31 @@ test "sha256 hash_pair matches hash for BMT node shapes" {
     );
 }
 
+test "sha256 hash_pair matches std across length pairs and parts" {
+    var prng = std.Random.DefaultPrng.init(0xa1256);
+    const random = prng.random();
+    var data: [400]u8 = undefined;
+    random.bytes(&data);
+    // Every pair of lengths in steps of 3 through 132 (one and two padded blocks, and the
+    // stream fallback past 119), each split into a random two-part shape.
+    var left_len: usize = 0;
+    while (left_len <= 132) : (left_len += 3) {
+        var right_len: usize = 0;
+        while (right_len <= 132) : (right_len += 3) {
+            const a = random.uintAtMost(usize, left_len);
+            const b = random.uintAtMost(usize, right_len);
+            const left = [_][]const u8{ data[0..a], data[a..left_len] };
+            const right = [_][]const u8{ data[200..][0..b], data[200 + b ..][0 .. right_len - b] };
+            const pair = Sha256.hash_pair(&left, &right, parallel.sequential);
+            var expected: [2][32]u8 = undefined;
+            StdSha256.hash(data[0..left_len], &expected[0], .{});
+            StdSha256.hash(data[200..][0..right_len], &expected[1], .{});
+            try testing.expectEqualSlices(u8, &expected[0], &pair[0].bytes);
+            try testing.expectEqualSlices(u8, &expected[1], &pair[1].bytes);
+        }
+    }
+}
+
 test "sha256 hash_many matches individual hashes" {
     const lengths = [_]usize{ 0, 1, 55, 56, 63, 64, 65, 119, 120, 128, 129, 255, 256, 1024 };
     var storage: [33][1024]u8 = undefined;
@@ -274,6 +376,37 @@ test "sha256 hash_many matches individual hashes across batch splits" {
     const op: ManyAcross = .{ .messages = &messages };
     const digests = try parallel.mocks.explore(testing.allocator, testing.io, op);
     for (messages, digests) |message, d| try testing.expect(d.eql(Sha256.hash(&.{message})));
+}
+
+test "sha256 hash_many over equal-length runs matches std" {
+    // Runs of 1 to 40 equal lengths (x16 chunks, short tails, and lone messages), across
+    // padding boundaries; every digest checked against std.
+    const gpa = testing.allocator;
+    var prng = std.Random.DefaultPrng.init(0x16a256);
+    const random = prng.random();
+    const data = try gpa.alloc(u8, 1 << 14);
+    defer gpa.free(data);
+    random.bytes(data);
+    var messages: [160][]const u8 = undefined;
+    var digests: [160]Digest = undefined;
+    for (0..24) |_| {
+        var count: usize = 0;
+        while (count < messages.len) {
+            const run = @min(1 + random.uintLessThan(usize, 40), messages.len - count);
+            const len = random.uintAtMost(usize, 300);
+            for (messages[count..][0..run]) |*message| {
+                const start = random.uintAtMost(usize, data.len - len);
+                message.* = data[start..][0..len];
+            }
+            count += run;
+        }
+        Sha256.hash_many(&messages, &digests, parallel.sequential);
+        for (messages, digests) |message, d| {
+            var expected: [32]u8 = undefined;
+            StdSha256.hash(message, &expected, .{});
+            try testing.expectEqualSlices(u8, &expected, &d.bytes);
+        }
+    }
 }
 
 test "sha256 digest codec and size" {

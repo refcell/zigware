@@ -493,3 +493,10 @@ the parallel lane in `blake3_tree_tests.zig`; `secret.rs` `test_debug_redacted` 
   crate's `compress256`, commonware's large-message path); `sha256.Core` hands it whole blocks
   and keeps std's buffering and padding. Tested against std on x86-64 and, under qemu, aarch64
   (planted bugs in both kernels and the length accounting caught). 1 MiB: 535 to 493 µs.
+- 2026-11-19: sha256 short and pair paths. `Sha256.hash` pads messages of at most 119 bytes on
+  the stack and compresses them straight from the IV (commonware's `hash_single` shapes);
+  `hash_pair` compresses two such messages interleaved, so each fills the other's SHA-NI/ARMv8
+  latency (commonware's pair kernels, which also serve storage's MMR and BMT nodes). Digest
+  `order` compares 8-byte big-endian words (a `memcmp`). Tested against std at every short
+  length and pair of lengths, on x86-64 and aarch64 under qemu; planted bugs in the padding
+  boundary, bit length, pair outputs, pair feed-forward, and word order are caught.
