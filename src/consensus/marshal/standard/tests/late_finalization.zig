@@ -440,3 +440,67 @@ fn late_in_batch_body(ctx: Ctx) anyerror!void {
 test "standard late finalization in batch keeps dispatch" {
     try run(late_in_batch_body);
 }
+
+/// Delivers `block` (encoded) through the handler to the fetch recorded for its commitment,
+/// with that fetch's subscriber; returns marshal's verdict.
+fn deliver_fetched_block(started: *Started, block: *const Block) !common.Outcome {
+    const fetches = try started.resolver.fetches(gpa);
+    defer gpa.free(fetches);
+    const key: common.Key = .{ .block = block.digest() };
+    const fetch = for (fetches) |item| {
+        if (item.key.eql(key)) break item;
+    } else return error.TestBlockFetchMissing;
+    var sender = started.resolver.handler_clone();
+    defer sender.deinit();
+    const encoded = try @import("codec").encode(harness.B, gpa, block.inner().*);
+    defer gpa.free(encoded);
+    const subscribers = [_]common.Annotation{fetch.subscriber};
+    var response = try sender.deliver(.{ .key = key, .subscribers = &subscribers }, encoded);
+    defer response.deinit();
+    return response.recv();
+}
+
+/// harness.rs `reject_stale_block_delivery_after_floor_update` never reaches a stale
+/// delivery: `set_floor` retires the pending fetch (commonware's does too), so the delayed
+/// response is dropped by the resolver. This variant delivers the stale response to marshal
+/// directly after the floor moves: marshal accepts it as valid (the serving peer is not
+/// blocked) and persists neither the block nor its finalization.
+fn stale_delivery_body(ctx: Ctx) anyerror!void {
+    var rng = utils.rng.test_rng();
+    var fixture = try harness.fixture(gpa, &rng);
+    defer fixture.deinit(gpa);
+    var chain: [11]Block = undefined;
+    try make_chain(&chain);
+    defer free_chain(&chain);
+    var application = try App.manual_ack(gpa, ctx.io());
+    defer application.deinit();
+    const prefix = "stale-delivery-below-floor";
+    var started = try start(ctx, prefix, &fixture, application, &chain, chain[10..]);
+    defer started.crash();
+    try testing.expectEqual(Height.zero(), try application.acknowledged());
+    // The finalization of block five, missing locally, starts a fetch for it.
+    try report(&started.mailbox, &fixture, &chain[5]);
+    const Fetched = struct {
+        started: *Started,
+        fn ready(self: @This()) bool {
+            return self.started.resolver.fetch_count() > 0;
+        }
+    };
+    const fetched: Fetched = .{ .started = &started };
+    try common.wait_until(ctx, 5000, "stale block fetch", fetched, Fetched.ready);
+    // The floor moves to block ten, whose anchor the buffer holds.
+    try started.mailbox.set_floor(try finalize(&fixture, &chain[10]));
+    try wait_processed(ctx, &started, .{ .absent = .new(9) });
+    const complete: common.Outcome = .{ .resolved = .complete };
+    try testing.expect(std.meta.eql(try deliver_fetched_block(&started, &chain[5]), complete));
+    if (try started.mailbox.get_block(.{ .height = .new(5) })) |found| {
+        var block = found;
+        block.deinit();
+        return error.TestStaleBlockStored;
+    }
+    try testing.expect(try started.mailbox.get_finalization(.new(5)) == null);
+}
+
+test "standard stale block delivery below floor is accepted and not stored" {
+    try run(stale_delivery_body);
+}
