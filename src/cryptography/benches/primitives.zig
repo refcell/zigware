@@ -393,16 +393,21 @@ fn equation(
     return ipa.verify(G1, gpa, &transcript, virtual, check.claim, check.proof);
 }
 
-const Verify = struct {
-    gpa: Allocator,
-    setup: *const ipa.Setup(G1),
-    check: Check,
+fn Verify(comptime S: type) type {
+    return struct {
+        gpa: Allocator,
+        setup: *const ipa.Setup(G1),
+        check: *const Check,
+        strategy: S,
 
-    pub fn iter(workload: *Verify) !void {
-        const result = try workload.setup.eval(workload.gpa, Scalar, &workload.check, equation);
-        assert(result.?.eql(G1.zero));
-    }
-};
+        pub fn iter(workload: *@This()) !void {
+            const setup = workload.setup;
+            const strategy = workload.strategy;
+            const result = try setup.eval(workload.gpa, Scalar, workload.check, equation, strategy);
+            assert(result.?.eql(G1.zero));
+        }
+    };
+}
 
 /// Whether to build length `len`'s setup and proof: when the filters select any of its rows
 /// (listing prints the rows here).
@@ -417,9 +422,8 @@ fn ipa_selected(runner: *bench.Runner, len: usize) !bool {
     return selected;
 }
 
-/// `bulletproofs::ipa::{prove,verify}/n=<n> conc=<1|8>`. commonware's `eval` takes the
-/// strategy for the final multi-scalar multiplication; zigware's evaluates sequentially, so
-/// the `verify` rows time the same work at both concurrencies.
+/// `bulletproofs::ipa::{prove,verify}/n=<n> conc=<1|8>`. `eval` runs the final multi-scalar
+/// multiplication through the row's strategy, as commonware's does.
 fn bench_ipa(runner: *bench.Runner, rayon: parallel.Rayon) !void {
     const gpa = runner.allocator;
     for (cases(runner, usize, &.{ 8, 16, 32, 64, 128 })) |len| {
@@ -448,15 +452,23 @@ fn bench_ipa(runner: *bench.Runner, rayon: parallel.Rayon) !void {
         const claim = proved.claim;
         const proof =
             (try ipa.prove(G1, gpa, &transcript, &setup, claim, &proved.witness, strategy)).?;
-        var verify: Verify = .{
+        var check: Check = .{ .claim = claim, .proof = proof };
+        defer check.proof.deinit(gpa);
+        const verify_name = bench.Benchmark.init("bulletproofs::ipa::verify").with_param("n", len);
+        var verify: Verify(parallel.Sequential) = .{
             .gpa = gpa,
             .setup = &setup,
-            .check = .{ .claim = claim, .proof = proof },
+            .check = &check,
+            .strategy = strategy,
         };
-        defer verify.check.proof.deinit(gpa);
-        const verify_name = bench.Benchmark.init("bulletproofs::ipa::verify").with_param("n", len);
         try runner.run(verify_name.with_param("conc", 1), &verify);
-        try runner.run(verify_name.with_param("conc", 8), &verify);
+        var verify_pooled: Verify(parallel.Rayon) = .{
+            .gpa = gpa,
+            .setup = &setup,
+            .check = &check,
+            .strategy = rayon,
+        };
+        try runner.run(verify_name.with_param("conc", 8), &verify_pooled);
     }
 }
 

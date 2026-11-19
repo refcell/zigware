@@ -109,22 +109,24 @@ pub fn Setup(comptime G: type) type {
         }
 
         /// Builds the virtual setup, calls `f(context, gpa, &virtual)` for a verification
-        /// equation, and evaluates it against these generators. Null when `f` returns null
-        /// (a malformed proof); otherwise zero means the proof verified.
+        /// equation, and evaluates it against these generators through `strategy`. Null when
+        /// `f` returns null (a malformed proof); otherwise zero means the proof verified.
         pub fn eval(
             self: Self,
             gpa: Allocator,
             comptime F: type,
             context: anytype,
             comptime f: anytype,
+            strategy: anytype,
         ) !?G {
+            comptime parallel.assert_strategy(@TypeOf(strategy));
             var virtual = try self.virtual_setup(gpa, F);
             defer virtual.deinit(gpa);
             var equation = (try f(context, gpa, &virtual)) orelse return null;
             defer equation.deinit(gpa);
             const flat = try self.flatten(gpa);
             defer gpa.free(flat);
-            return try equation.eval(gpa, flat);
+            return try equation.eval_strategy(gpa, flat, strategy);
         }
 
         pub fn eql(a: Self, b: Self) bool {

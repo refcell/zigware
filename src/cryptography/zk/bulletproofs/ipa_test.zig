@@ -130,7 +130,7 @@ const Prover = struct {
             .claim = self.claim,
             .proof = self.proof,
         };
-        const result = try self.setup.eval(gpa, F, check, equation);
+        const result = try self.setup.eval(gpa, F, check, equation, parallel.sequential);
         return if (result) |value| value.eql(G.zero) else false;
     }
 };

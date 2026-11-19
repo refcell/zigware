@@ -58,6 +58,7 @@ pub fn msm(comptime C: type, points: []const C.Affine, scalars: []const u256) C 
     assert(points.len == scalars.len);
     if (points.len == 0) return C.identity;
     if (points.len == 1) return single_mul(C, points[0], scalars[0]);
+    if (points.len <= straus_points_max(C)) return msm_straus(C, points, scalars);
     if (C == g1.G1 and points.len >= batch_affine_points_min) {
         return msm_batch_affine(C, points, scalars);
     }
@@ -84,6 +85,51 @@ pub fn msm(comptime C: type, points: []const C.Affine, scalars: []const u256) C 
             }
         }
         result = result.add(sum_buckets(C, buckets[0..bucket_count]));
+    }
+    return result;
+}
+
+/// Up to this many points, per-point tables with one shared doubling chain (Straus) beat
+/// Pippenger's buckets, whose narrow windows sum a bucket set per window (blst switches at 32).
+/// G2 stops at 16 so the tables fit the same stack as Pippenger's buckets.
+fn straus_points_max(comptime C: type) usize {
+    return if (@sizeOf(C) > 200) 16 else 32;
+}
+
+/// Straus's window: Booth digits in [-8, 8], so each point's table holds P, 2P, ..., 8P.
+const straus_bits = 4;
+const straus_multiples = 1 << (straus_bits - 1);
+
+/// sum_i [scalars[i]] points[i] over one doubling chain: each window doubles the sum
+/// `straus_bits` times and adds every point's table entry for its digit (Straus-Shamir).
+fn msm_straus(comptime C: type, points: []const C.Affine, scalars: []const u256) C {
+    const F = @TypeOf(@as(C.Affine, undefined).x);
+    const entries_max = comptime straus_points_max(C) * straus_multiples;
+    assert(points.len == scalars.len and points.len <= straus_points_max(C));
+    var jacobian: [entries_max]C = undefined;
+    var scratch: [entries_max]F = undefined;
+    var tables: [entries_max]C.Affine = undefined;
+    for (points, 0..) |point, index| {
+        const table = jacobian[index * straus_multiples ..][0..straus_multiples];
+        table[0] = point.to_jacobian();
+        table[1] = table[0].double();
+        for (2..straus_multiples) |multiple| {
+            table[multiple] = table[multiple - 1].add_affine(point);
+        }
+    }
+    const entries = points.len * straus_multiples;
+    C.batch_to_affine(jacobian[0..entries], tables[0..entries], scratch[0..entries]);
+    var result = C.identity;
+    var window = window_count_for(straus_bits);
+    while (window > 0) {
+        window -= 1;
+        for (0..straus_bits) |_| result = result.double();
+        for (scalars, 0..) |scalar, index| {
+            const digit = digit_at(scalar, window, straus_bits);
+            if (digit == 0) continue;
+            const entry = tables[index * straus_multiples + @abs(digit) - 1];
+            result = result.add_affine(if (digit > 0) entry else entry.neg());
+        }
     }
     return result;
 }
@@ -508,13 +554,14 @@ fn check_msm(
 }
 
 test "msm: G1 matches the sum of scalar multiplications" {
-    for ([_]usize{ 0, 1, 2, 3, 9, 40 }, 0..) |count, seed| {
+    // 2 to 32 points run Straus, 33 and 40 Pippenger.
+    for ([_]usize{ 0, 1, 2, 3, 9, 32, 33, 40 }, 0..) |count, seed| {
         try check_msm(g1.G1, g1.generator, count, seed, max_scalar);
     }
 }
 
 test "msm: G2 matches the sum of scalar multiplications" {
-    for ([_]usize{ 2, 7 }, 0..) |count, seed| {
+    for ([_]usize{ 2, 7, 16, 17 }, 0..) |count, seed| {
         try check_msm(g2.G2, g2.generator, count, seed, max_scalar);
     }
 }
@@ -524,6 +571,8 @@ test "msm: many points with a wide window" {
     try check_msm(g1.G1, g1.generator, chunk_points_max + 3, 99, std.math.maxInt(u24));
     // Tiny scalars force bucket collisions, equal-x additions and cancellations.
     try check_msm(g1.G1, g1.generator, chunk_points_max + 40, 7, 3);
+    // And Straus, where small digits reuse the first table entries.
+    try check_msm(g1.G1, g1.generator, 30, 8, 3);
 }
 
 test "msm: precomputed fixed-base msm matches msm (seeded)" {

@@ -140,6 +140,18 @@ pub fn Synthetic(comptime F: type, comptime G: type) type {
 
         /// Substitute `generators[i]` for each free index `i` and sum.
         pub fn eval(self: Self, allocator: Allocator, generators: []const G) !G {
+            return self.eval_strategy(allocator, generators, parallel.sequential);
+        }
+
+        /// `eval` with the final multi-scalar multiplication run through `strategy` where the
+        /// group supports it (commonware `eval(generators, strategy)`). Every strategy gives
+        /// the same point.
+        pub fn eval_strategy(
+            self: Self,
+            allocator: Allocator,
+            generators: []const G,
+            strategy: anytype,
+        ) !G {
             const total = self.free.items.len + self.concrete.items.len;
             const points = try allocator.alloc(G, total);
             defer allocator.free(points);
@@ -155,9 +167,9 @@ pub fn Synthetic(comptime F: type, comptime G: type) type {
                 points[offset + i] = term.point;
                 weights[offset + i] = term.weight;
             }
-            // commonware `G::msm(&points, &weights, strategy)`, on the calling thread.
+            // commonware `G::msm(&points, &weights, strategy)`.
             if (comptime @hasDecl(G, "msm_strategy")) {
-                return G.msm_strategy(allocator, points, weights, parallel.sequential);
+                return G.msm_strategy(allocator, points, weights, strategy);
             }
             return algebra.msm(G, F, points, weights);
         }
