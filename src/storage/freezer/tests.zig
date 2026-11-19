@@ -9,6 +9,7 @@ const std = @import("std");
 const testing = std.testing;
 const runtime = @import("runtime");
 const utils = @import("utils");
+const cryptography = @import("cryptography");
 const metrics = runtime.telemetry.metrics;
 const freezer = @import("mod.zig");
 const fuzz_bytes = @import("../fuzz_bytes.zig");
@@ -587,4 +588,247 @@ test "fuzz freezer operations (seeded)" {
 
 test "fuzz freezer operations" {
     try testing.fuzz({}, fuzz_bytes.smith(256, fuzz_run), .{});
+}
+
+// Ported from commonware's `freezer/storage.rs` tests.
+
+/// A freezer config with a small table: `initial` entries, resizing after every added item,
+/// `chunk` entries per resize step.
+fn table_config(harness: *Harness, initial: u32, chunk: u32) freezer.Config(i32) {
+    var cfg = harness.config(i32);
+    cfg.table_initial_size = initial;
+    cfg.table_resize_frequency = 1;
+    cfg.table_resize_chunk_size = chunk;
+    return cfg;
+}
+
+/// The first key `be(value) || zeros` whose table index is `table_index` at `table_size`
+/// (commonware `test_key_at_index`).
+fn key_at_index(table_size: u32, table_index: u32) Key {
+    std.debug.assert(std.math.isPowerOfTwo(table_size) and table_index < table_size);
+    var value: u64 = 0;
+    while (true) : (value += 1) {
+        var key: Key = @splat(0);
+        std.mem.writeInt(u64, key[0..8], value, .big);
+        if (cryptography.Crc32.checksum(&key) & (table_size - 1) == table_index) return key;
+    }
+}
+
+/// Reads the whole table blob. Caller frees it.
+fn read_table(harness: *Harness) ![]u8 {
+    const opened = try harness.storage.open("test-table", freezer.table_blob_name);
+    defer opened.blob.close();
+    const bytes = try gpa.alloc(u8, @intCast(opened.len));
+    errdefer gpa.free(bytes);
+    try opened.blob.read_at(0, bytes);
+    return bytes;
+}
+
+test "freezer resize leaves empty entries empty (issue 2966)" {
+    var harness = try Harness.init();
+    defer harness.deinit();
+    var store = try harness.open(Key, i32, table_config(&harness, 4, 4), null);
+    // Two keys in two of four entries leave two empty.
+    _ = store.put(test_key("key0"), 0) catch |err| return store_fail(&store, err);
+    _ = store.put(test_key("key2"), 1) catch |err| return store_fail(&store, err);
+    _ = try store.close();
+
+    const table = try read_table(&harness);
+    defer gpa.free(table);
+    const full = freezer.Entry.full_size;
+    try testing.expectEqual(@as(usize, 8 * full), table.len); // Resized from 4 to 8 entries.
+    // An empty slot is all zeros; resize must not write a valid epoch-0 slot into one.
+    var both_empty: usize = 0;
+    for (0..8) |index| {
+        const entry = table[index * full ..][0..full];
+        if (std.mem.allEqual(u8, entry, 0)) both_empty += 1;
+    }
+    try testing.expectEqual(@as(usize, 4), both_empty);
+}
+
+fn store_fail(store: *F, err: anyerror) anyerror {
+    store.deinit();
+    return err;
+}
+
+test "freezer reopens over an entry whose two slots have bad crcs (issue 2955)" {
+    var harness = try Harness.init();
+    defer harness.deinit();
+    const cfg = table_config(&harness, 4, 4);
+    const checkpoint = checkpoint: {
+        var store = try harness.open(Key, i32, cfg, null);
+        errdefer store.deinit();
+        _ = try store.put(test_key("key0"), 42);
+        _ = try store.sync();
+        break :checkpoint try store.close();
+    };
+    // Flip a CRC byte of both slots of entry 0. Recovery must clear them to truly empty
+    // slots, not to an all-zero entry with a valid CRC (two "valid" epoch-0 slots).
+    const fixed = freezer.Entry.fixed_size;
+    try harness.write_table(fixed - 4, &.{0xFF});
+    try harness.write_table(2 * fixed - 4, &.{0xFF});
+    harness.reset_metrics();
+    {
+        var store = try harness.open(Key, i32, cfg, checkpoint);
+        defer store.deinit();
+        const result = try store.get(.{ .key = &test_key("key0") });
+        try testing.expect(result == null or result.? == 42);
+    }
+    const table = try read_table(&harness);
+    defer gpa.free(table);
+    for (0..2) |slot| {
+        const bytes = table[slot * fixed ..][0..fixed];
+        try testing.expect(std.mem.allEqual(u8, bytes, 0));
+    }
+}
+
+/// Opens with no checkpoint and checks the freezer starts empty at its initial size.
+fn expect_reset(harness: *Harness, cfg: freezer.Config(i32), key: *const Key) !void {
+    harness.reset_metrics();
+    var store = try harness.open(Key, i32, cfg, null);
+    defer store.deinit();
+    try testing.expectEqual(@as(u32, 2), store.table_size);
+    try testing.expectEqual(@as(?u32, null), store.resizing());
+    try testing.expectEqual(@as(?i32, null), try store.get(.{ .key = key }));
+}
+
+test "freezer without a checkpoint deletes a resize a sync left partial" {
+    var harness = try Harness.init();
+    defer harness.deinit();
+    const cfg = table_config(&harness, 2, 1);
+    const key = key_at_index(4, 3);
+    {
+        var store = try harness.open(Key, i32, cfg, null);
+        defer store.deinit();
+        _ = try store.put(key, 42);
+        _ = try store.sync();
+        try testing.expectEqual(@as(?u32, 1), store.resizing());
+        try testing.expectEqual(@as(?i32, 42), try store.get(.{ .key = &key }));
+    }
+    try expect_reset(&harness, cfg, &key);
+}
+
+test "freezer without a checkpoint deletes a resize close started" {
+    var harness = try Harness.init();
+    defer harness.deinit();
+    const cfg = table_config(&harness, 2, 1);
+    const key = key_at_index(4, 3);
+    {
+        var store = try harness.open(Key, i32, cfg, null);
+        _ = store.put(key, 42) catch |err| return store_fail(&store, err);
+        const checkpoint = try store.close();
+        try testing.expectEqual(@as(u32, 2), checkpoint.table_size);
+    }
+    try expect_reset(&harness, cfg, &key);
+}
+
+test "freezer without a checkpoint deletes a completed resize" {
+    var harness = try Harness.init();
+    defer harness.deinit();
+    const cfg = table_config(&harness, 2, 2);
+    const key = key_at_index(4, 3);
+    {
+        var store = try harness.open(Key, i32, cfg, null);
+        defer store.deinit();
+        _ = try store.put(key, 42);
+        const checkpoint = try store.sync();
+        try testing.expectEqual(@as(u32, 4), checkpoint.table_size);
+        try testing.expectEqual(@as(?u32, null), store.resizing());
+        try testing.expectEqual(@as(?i32, 42), try store.get(.{ .key = &key }));
+    }
+    try expect_reset(&harness, cfg, &key);
+}
+
+test "freezer empty checkpoint deletes existing data" {
+    var harness = try Harness.init();
+    defer harness.deinit();
+    const cfg = table_config(&harness, 2, 1);
+    const key = key_at_index(4, 3);
+    {
+        var store = try harness.open(Key, i32, cfg, null);
+        defer store.deinit();
+        _ = try store.put(key, 42);
+        _ = try store.sync();
+        try testing.expectEqual(@as(?i32, 42), try store.get(.{ .key = &key }));
+    }
+    harness.reset_metrics();
+    var store = try harness.open(Key, i32, cfg, .{});
+    defer store.deinit();
+    try testing.expectEqual(@as(u32, 2), store.table_size);
+    try testing.expectEqual(@as(?i32, null), try store.get(.{ .key = &key }));
+}
+
+test "freezer non-empty checkpoint against an empty table is a mismatch" {
+    var harness = try Harness.init();
+    defer harness.deinit();
+    const checkpoint: Checkpoint = .{ .epoch = 1, .table_size = 2 };
+    try testing.expectError(
+        error.CheckpointMismatch,
+        harness.open(Key, i32, table_config(&harness, 2, 1), checkpoint),
+    );
+}
+
+test "freezer corrupted committed value surfaces at read" {
+    var harness = try Harness.init();
+    defer harness.deinit();
+    const cfg = table_config(&harness, 4, 4);
+    const checkpoint = checkpoint: {
+        var store = try harness.open(Key, i32, cfg, null);
+        errdefer store.deinit();
+        _ = try store.put(test_key("key0"), 42);
+        _ = try store.put(test_key("key1"), 43);
+        _ = try store.sync();
+        break :checkpoint try store.close();
+    };
+    try testing.expect(checkpoint.oversized_size > 0);
+    {
+        // Flip the last byte of the value journal (the last committed value's checksum).
+        var name: [8]u8 = undefined;
+        std.mem.writeInt(u64, &name, checkpoint.section, .big);
+        const opened = try harness.storage.open("test-value-journal", &name);
+        defer opened.blob.close();
+        var byte: [1]u8 = undefined;
+        try opened.blob.read_at(opened.len - 1, &byte);
+        byte[0] ^= 0xFF;
+        try opened.blob.write_at(opened.len - 1, &byte, .{});
+        try opened.blob.sync();
+    }
+    // Recovery does not probe committed values: init succeeds and only key1's read fails.
+    harness.reset_metrics();
+    var store = try harness.open(Key, i32, cfg, checkpoint);
+    defer store.deinit();
+    try testing.expectError(error.ChecksumMismatch, store.get(.{ .key = &test_key("key1") }));
+    try expect_get(&store, "key0", 42);
+    _ = try store.put(test_key("key2"), 44);
+    _ = try store.sync();
+    try expect_get(&store, "key2", 44);
+}
+
+test "freezer committed value section short by one byte fails init" {
+    var harness = try Harness.init();
+    defer harness.deinit();
+    var cfg = table_config(&harness, 4, 4);
+    cfg.value_target_size = 8; // One value per section.
+    const checkpoint = checkpoint: {
+        var store = try harness.open(Key, i32, cfg, null);
+        errdefer store.deinit();
+        _ = try store.put(test_key("key0"), 42);
+        _ = try store.put(test_key("key1"), 43);
+        _ = try store.sync();
+        break :checkpoint try store.close();
+    };
+    try testing.expect(checkpoint.section > 0);
+    {
+        var name: [8]u8 = @splat(0); // Section 0.
+        const opened = try harness.storage.open("test-value-journal", &name);
+        defer opened.blob.close();
+        try testing.expect(opened.len > 0);
+        try opened.blob.resize(opened.len - 1);
+        try opened.blob.sync();
+    }
+    // The checkpoint covers the damaged section: init fails, and nothing is repaired.
+    for (0..2) |_| {
+        harness.reset_metrics();
+        try testing.expectError(error.Corruption, harness.open(Key, i32, cfg, checkpoint));
+    }
 }
