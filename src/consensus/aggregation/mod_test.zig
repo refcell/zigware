@@ -500,13 +500,14 @@ const fixtures = .{
     },
 };
 
-/// Runs `scenario` with every scheme fixture. In Debug builds without `-Dslow-tests`, `slow`
-/// scenarios (commonware's slow group) skip and the rest run with ed25519 only.
+/// Runs `scenario` with every scheme fixture under `-Dslow-tests` (nightly), and with
+/// ed25519 only otherwise, to keep CI's wall time down. In Debug builds without
+/// `-Dslow-tests`, `slow` scenarios (commonware's slow group) skip.
 fn for_all_fixtures(comptime scenario: Scenario, comptime slow: bool) !void {
     const fast = builtin.mode == .debug and !build_options.slow_tests;
     if (slow and fast) return error.SkipZigTest;
     inline for (fixtures) |entry| {
-        if (entry[2] or !fast) _ = try Run(entry[0], entry[1], scenario).run();
+        if (entry[2] or build_options.slow_tests) _ = try Run(entry[0], entry[1], scenario).run();
     }
 }
 
@@ -823,7 +824,12 @@ fn UncleanShutdownWithUnsignedHeight(comptime S: type, comptime fixture: anytype
     };
 }
 
+// Every fixture under `-Dslow-tests` (nightly); otherwise (outside Debug) ed25519 only.
 test "unclean shutdown with an unsigned height" {
     try skip_slow();
-    inline for (fixtures) |entry| try UncleanShutdownWithUnsignedHeight(entry[0], entry[1]).run();
+    inline for (fixtures) |entry| {
+        if (entry[2] or build_options.slow_tests) {
+            try UncleanShutdownWithUnsignedHeight(entry[0], entry[1]).run();
+        }
+    }
 }

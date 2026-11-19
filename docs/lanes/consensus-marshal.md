@@ -646,14 +646,17 @@ job to gate, and `mocks/strategy.rs`'s GatedStrategy has no other user).
   produce/deliver backfill with walkback repair and a forged certificate).
 - [x] marshal: mocks/harness.rs shared parts and `StandardHarness`, `standard.Buffer`
   (smoke test: 4 validators finalize 24 blocks over p2p.simulated).
-- [ ] marshal: harness.rs scenario functions, then this lane's slice of standard/mod.rs's
+- [x] marshal: harness.rs scenario functions, then this lane's slice of standard/mod.rs's
   tests (see "standard/mod.rs test split"; the lookup thread owns standard/{validation,
   inline,deferred} and mocks/{application,resolver,store,strategy,verifying}).
 - [x] aggregation: the full `distinct states` comparison on the new runtime auditor.
 - (marshal/coding/ belongs to the broadcast-collector lane: types, shards, variant,
   validation, marshaled, and coding/mod.rs tests, on top of core.)
-- [ ] marshal resolver, core, standard (and coding) actors with their mocks and tests.
-- [ ] Fuzz targets (consensus/fuzz entries for aggregation and marshal).
+- [x] marshal resolver, core, and standard actors with their mocks and tests (coding's are
+  the broadcast-collector lane's; see the Test tally).
+- [x] Fuzz targets for aggregation and marshal. commonware's consensus/fuzz has none for
+  either; zigware's are `aggregation/fuzz.zig` and `marshal/fuzz.zig` (in-package bodies,
+  not consensus/fuzz harness entries).
 
 ## Log
 - 2026-11-13: aggregation types, schemes, limits, safe_tip; 5 conformance hashes match.
@@ -725,3 +728,10 @@ job to gate, and `mocks/strategy.rs`'s GatedStrategy has no other user).
 - 2026-11-19: marshal fuzz: 8 bodies, each against a model or round trip, each catching a
   planted bug. The mock `Block` carries its digest in its encoding (as commonware's), so
   decode_block's mutation property runs on `EmptyBlock`, which digests every field.
+- 2026-11-19: aggregation fuzz: `SafeTip` against a sorted model (updates and reconciles),
+  `HeightMap` against a per-height model, and the Item/TipAck/Activity codecs (valid,
+  mutated, and raw bytes decode only to canonical encodings); 4 planted bugs caught.
+- 2026-11-19: CI wall time: outside `-Dslow-tests`, in every build mode, coding finalize
+  runs good links on one seed and one short storm per hailstorm shape; aggregation's
+  scenario matrices and unsigned-height shutdown run ed25519 only; the BLS message
+  conformance hashes run nightly (the Item hash still runs on every push).

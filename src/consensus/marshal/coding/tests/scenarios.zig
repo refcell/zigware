@@ -3,11 +3,11 @@
 //! `CodingHarness`.
 //!
 //! commonware runs these in its `slow` test group over five seeds. Here the good-links run
-//! takes one seed in every build, and the full matrix of links, finalization modes, and five
-//! seeds runs under `-Dslow-tests` or an optimized build.
+//! and one short storm per hailstorm shape run in every build, and the full matrix of links,
+//! finalization modes, seeds, and storms runs under `-Dslow-tests` (nightly), in every build
+//! mode, to keep CI's wall time down.
 
 const std = @import("std");
-const builtin = @import("builtin");
 const testing = std.testing;
 const build_options = @import("build_options");
 const shared = @import("../../mocks/harness.zig");
@@ -16,7 +16,7 @@ const harness = @import("../harness.zig");
 
 const gpa = testing.allocator;
 const Finalize = scenarios.Finalize(harness.CodingHarness);
-const slow = !(builtin.mode == .debug and !build_options.slow_tests);
+const slow = build_options.slow_tests;
 const seeds: u64 = if (slow) 5 else 1;
 
 /// Two runs of one seed reach the same audit state.

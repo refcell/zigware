@@ -260,8 +260,10 @@ test "aggregation item conformance hash matches commonware" {
     try verify("Item<Sha256Digest>>", types.Item(ArbitraryDigest));
 }
 
+// Nightly only (`-Dslow-tests`): generating the BLS points takes about 18 s even in
+// ReleaseSafe. The item hash above runs on every push.
 test "aggregation message conformance hashes match commonware" {
-    try skip_slow();
+    if (!build_options.slow_tests) return error.SkipZigTest;
     const S = ConformanceScheme;
     const Dg = ArbitraryDigest;
     try verify("Ack<Scheme,Sha256Digest>>", types.Ack(S, Dg));
