@@ -313,7 +313,22 @@ const Fixture = struct {
         return fixture;
     }
 
-    fn verify(fixture: *const Fixture) bool {
+    fn verify(fixture: *const Fixture) !bool {
+        const Op = struct {
+            fixture: *const Fixture,
+            pub fn run(op: @This(), explorer: parallel.mocks.Explorer) bool {
+                return op.fixture.verify_with(explorer);
+            }
+        };
+        const verdict = try parallel.mocks.explore(testing.allocator, testing.io, Op{
+            .fixture = fixture,
+        });
+        try testing.expectEqual(fixture.verify_with(parallel.sequential), verdict);
+        return verdict;
+    }
+
+    /// The verdict under `strategy`; `verify` checks every strategy shape agrees.
+    fn verify_with(fixture: *const Fixture, strategy: anytype) bool {
         var items: [capacity]ed25519.core.BatchItem = undefined;
         for (0..fixture.count) |i| {
             items[i] = .{
@@ -331,7 +346,7 @@ const Fixture = struct {
         };
         var rng = utils.rng.test_rng();
         const view = Items{ .items = items[0..fixture.count] };
-        return ed25519.core.verify_batch(&rng, fixture.count, view, parallel.sequential);
+        return ed25519.core.verify_batch(&rng, fixture.count, view, strategy);
     }
 };
 
@@ -339,19 +354,19 @@ test "ed25519 batch rejects each altered item in every shape" {
     for (1..4) |signers| {
         for (1..4) |per_signer| {
             const valid = Fixture.init(signers, per_signer);
-            try testing.expect(valid.verify());
+            try testing.expect(try valid.verify());
             for (0..valid.count) |altered| {
                 var items = valid;
                 items.messages[altered][0] ^= 1;
-                try testing.expect(!items.verify());
+                try testing.expect(!try items.verify());
             }
         }
     }
     // Interleaved duplicate keys, and a batch larger than one multiscalar chunk.
     var many = Fixture.init(4, 8);
-    try testing.expect(many.verify());
+    try testing.expect(try many.verify());
     many.messages[29][0] ^= 1;
-    try testing.expect(!many.verify());
+    try testing.expect(!try many.verify());
 }
 
 test "ed25519 batch framing matches union_unique" {
@@ -418,11 +433,23 @@ test "ed25519 projected batch over records, empty, and noncanonical s" {
     };
     const projector = Projector{ .publics = &publics, .records = &records };
     const all: []const Record = &records;
+    // Every strategy shape reaches the sequential verdict (commonware explores them all).
+    const Op = struct {
+        records: []const Record,
+        projector: Projector,
+        pub fn run(op: @This(), explorer: parallel.mocks.Explorer) bool {
+            var op_rng = utils.rng.test_rng();
+            return PublicKey.verify_batch(&op_rng, op.records, op.projector, explorer);
+        }
+    };
+    const op = Op{ .records = all, .projector = projector };
+    try testing.expect(try parallel.mocks.explore(testing.allocator, testing.io, op));
     try testing.expect(PublicKey.verify_batch(&rng, all, projector, parallel.sequential));
     for (0..records.len) |index| {
         records[index].message[0] ^= 1;
         if (records[index].length == 0) records[index].length = 1;
         try testing.expect(!PublicKey.verify_batch(&rng, all, projector, parallel.sequential));
+        try testing.expect(!try parallel.mocks.explore(testing.allocator, testing.io, op));
         records[index].message[0] ^= 1;
         if (index % 3 == 0) records[index].length = 0;
     }

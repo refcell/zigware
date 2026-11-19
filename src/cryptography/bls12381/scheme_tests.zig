@@ -65,6 +65,28 @@ test "bls12381 scheme: from private" {
     try testing.expect(!private_key.public_key().verify("other", "test message", &signature));
 }
 
+test "bls12381 scheme: keys validate, compare, and verify" {
+    // commonware lib.rs `test_bls12381_{validate, validate_invalid_public_key,
+    // sign_and_verify_wrong_message, empty_namespace}`.
+    var rng = utils.test_rng();
+    const key = PrivateKey.random(&rng).public_key();
+    const bytes = codec.encode_fixed(PublicKey, key);
+    const decoded = try codec.decode(PublicKey, testing.allocator, &bytes);
+    try testing.expect(key.eql(decoded) and key.order(decoded) == .eq);
+    try testing.expect(!key.eql(PrivateKey.random(&rng).public_key()));
+    const zeros: [1024]u8 = @splat(0);
+    try testing.expect(std.meta.isError(codec.decode(PublicKey, testing.allocator, &zeros)));
+
+    const private = PrivateKey.from_seed(0);
+    const public = private.public_key();
+    const signature = private.sign("test_namespace", "test_message");
+    try testing.expect(public.verify("test_namespace", "test_message", &signature));
+    try testing.expect(!public.verify("test_namespace", "wrong_message", &signature));
+    const empty = private.sign("", "test_message");
+    try testing.expect(public.verify("", "test_message", &empty));
+    try testing.expect(!public.verify("test_namespace", "test_message", &empty));
+}
+
 test "bls12381 scheme: private key redacted" {
     var rng = utils.test_rng();
     const private_key = PrivateKey.random(&rng);

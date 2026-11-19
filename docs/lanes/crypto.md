@@ -345,19 +345,19 @@ Open:
   optimistic_assemble (threshold MinPk) with pending[0].signer = 999 (assembly fails UnknownSigner):
   verified quorum-1, invalid [999], attestation calls [[999,1],[2,3]]. No Zig counterpart. Add to
   src/cryptography/bls12381/certificate/threshold_tests.zig or src/cryptography/certificate_test.zig
-- [ ] `lib.rs` `test_bls12381_validate`: Only a fixed-vector decode/encode/eql round trip exists
+- [x] `lib.rs` `test_bls12381_validate`: Only a fixed-vector decode/encode/eql round trip exists
   (bls12381/scheme_tests.zig "bls12381 scheme: codec public key"). Missing: random key decoded from
   its bytes is eql with order == .eq, and a second random key differs. Add to
   src/cryptography/bls12381/scheme_tests.zig (bls-math lane)
-- [ ] `lib.rs` `test_bls12381_validate_invalid_public_key`: No test asserts that decoding 1024 zero
+- [x] `lib.rs` `test_bls12381_validate_invalid_public_key`: No test asserts that decoding 1024 zero
   bytes as bls12381 scheme.PublicKey fails; the decode fuzz (fuzz_tests.zig "bls12381 fuzz: decode",
   length 1024 included) only checks the result agrees with MinPk.Public decode. Add an expectError
   to src/cryptography/bls12381/scheme_tests.zig
-- [ ] `lib.rs` `test_bls12381_sign_and_verify_wrong_message`: No single-signature PublicKey.verify
+- [x] `lib.rs` `test_bls12381_sign_and_verify_wrong_message`: No single-signature PublicKey.verify
   with a wrong message at the scheme level; only verify_batch with a changed message ("bls12381
   scheme: batch verify invalid message") and the primitive-level noble tamper checks. Add
   !verify(ns, "wrong_message", sig) to src/cryptography/bls12381/scheme_tests.zig
-- [ ] `lib.rs` `test_bls12381_empty_namespace`: No deterministic test signs and verifies with an
+- [x] `lib.rs` `test_bls12381_empty_namespace`: No deterministic test signs and verifies with an
   empty namespace through scheme.PublicKey.verify; the only "" namespace use is the batch in
   "bls12381 scheme: projected batch indexes zero-sized items" (batch path, slow-only) and fuzz-drawn
   namespaces. Add to src/cryptography/bls12381/scheme_tests.zig
@@ -391,12 +391,12 @@ Open:
   B), but history is not isolated: Zig compares with_data/"shuffle" against t/"A", which differ in
   both label and history. Add same-label different-history check (v0 test shuffle A vs v0 test +
   commit DATA shuffle A) to src/cryptography/transcript_test.zig "transcript shuffle and sample"
-- [ ] `ed25519/scheme.rs` `projected_batch_borrows_records`: src/cryptography/ed25519/tests.zig
+- [x] `ed25519/scheme.rs` `projected_batch_borrows_records`: src/cryptography/ed25519/tests.zig
   "ed25519 projected batch over records, empty, and noncanonical s" ports the records,
   record-pointer identity, per-record alteration, noncanonical s and empty cases but runs only
   parallel.sequential; missing: run each verdict under parallel.mocks.explore (serial, parallel,
   seeded shapes) as commonware does, in src/cryptography/ed25519/tests.zig
-- [ ] `ed25519/core/batch.rs` `test_verify_rejects_each_altered_item_in_every_shape`:
+- [x] `ed25519/core/batch.rs` `test_verify_rejects_each_altered_item_in_every_shape`:
   src/cryptography/ed25519/tests.zig "ed25519 batch rejects each altered item in every shape" ports
   the 1..3 x 1..3 loops and per-item alteration but verifies only under parallel.sequential;
   missing: run Fixture.verify through parallel.mocks.explore so serial, parallel and seeded split
