@@ -10,7 +10,7 @@ better. A ratio below 1 means zigware is faster.
 | `codec::lazy::get` | `source=shared txs=100000 conc=1` | 3.57 ms | 590 µs | 0.17× |
 | `sha256::hash_message` | `msg_len=4096` | 1.87 µs | 2.08 µs | 1.11× |
 | `sha256::hash_message` | `msg_len=1048576` | 480 µs | 538 µs | 1.12× |
-| `ed25519::signature_verification` | `ns_len=9 msg_len=32` | 26.7 µs | 43.3 µs | 1.62× |
+| `ed25519::signature_verification` | `ns_len=9 msg_len=32` | 26.7 µs | 43.3 µs | 1.62× (fixed, see below) |
 | `ed25519::batch_verify_same_message` | `pks=100 conc=1` | 1.38 ms | 1.86 ms | 1.35× (re-run, see below) |
 | `bls12381::signature_verification` | `ns_len=9 msg_len=32` | 1.23 ms | 1.59 ms | 1.30× |
 | `bls12381::aggregate_verify_same_message` | `pks=1000` | 2.27 ms | 2.16 ms | 0.96× |
@@ -114,7 +114,7 @@ directory under `BENCH_DIR` (default `$TMPDIR` or `/tmp`). commonware gets it th
 ## Updates since the table
 
 - **ed25519, 2026-11-19.** The table above predates two fixes. 3907c86 (actor-stream) sums
-  batch shards with the bucket MSM. 077c6cc ports commonware curve25519's single-signature
+  batch shards with the bucket MSM. be8adb1 ports commonware curve25519's single-signature
   check (`ed25519/verify_msm.zig`): `half_size` splits `k` so every scalar is below 2^128,
   and one Straus doubling chain of at most 129 steps runs in projective and completed
   coordinates, with width-8 NAF tables of `B` and `2^128 B` built at compile time. The
@@ -127,6 +127,16 @@ directory under `BENCH_DIR` (default `$TMPDIR` or `/tmp`). commonware gets it th
   radix-2^51 field arithmetic (commonware selects an AVX-512 or NEON backend) and
   `half_size`, about 4.6 µs here as a 256-bit shift-and-subtract Euclid. A vectorized field
   and a Lehmer-style `half_size` are the next steps.
+- **ed25519 on AVX-512 IFMA, 2026-11-19.** `ed25519/verify_ifma.zig` ports commonware's
+  packed single-point backend (`curve/avx512/single.rs`): a point's four coordinates share
+  one 256-bit vector per limb, so each multiplication level of an addition or doubling is
+  one lane-wise IFMA product. It compiles only for targets with AVX-512F, VL, and IFMA (this
+  machine has them; CI runners without them keep the scalar Straus, and a test compares the
+  two wherever IFMA is present). Best of 3 at a load average of 63 to 73, where commonware's
+  `signature_verification` medians ran 37.7 to 54.8 µs: zigware 20.9 µs against commonware
+  37.7 µs, about 0.55×. `batch_verify_same_message` (pks=100) does not use the backend yet;
+  its best medians were 2.01 ms against 1.70 ms (1.18×), and its bucket MSM is the next user
+  of the packed point type.
 
 ## Appendix: bench coverage
 
