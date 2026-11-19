@@ -35,6 +35,27 @@ test "standard finalize good links" {
     for (0..seeds) |seed| try expect_finalize_deterministic(seed, harness.link, false);
 }
 
+/// Lossy links take several times longer, so in Debug they run only under `-Dslow-tests`.
+fn skip_lossy_in_debug() error{SkipZigTest}!void {
+    if (@import("builtin").mode == .debug and !build_options.slow_tests) {
+        return error.SkipZigTest;
+    }
+}
+
+test "standard finalize bad links" {
+    try skip_lossy_in_debug();
+    for (0..seeds) |seed| try expect_finalize_deterministic(seed, harness.unreliable_link, false);
+}
+
+test "standard finalize good links quorum sees finalization" {
+    for (0..seeds) |seed| try expect_finalize_deterministic(seed, harness.link, true);
+}
+
+test "standard finalize bad links quorum sees finalization" {
+    try skip_lossy_in_debug();
+    for (0..seeds) |seed| try expect_finalize_deterministic(seed, harness.unreliable_link, true);
+}
+
 const Hailstorm = scenarios.Hailstorm(harness.StandardHarness);
 
 /// Two runs of one storm reach the same audit state (`assert_hailstorm_deterministic`).

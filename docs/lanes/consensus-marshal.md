@@ -362,3 +362,7 @@ ports its range's tests and the helpers defined in it, into
   standard wrappers; a short storm per shape runs outside `-Dslow-tests`.
 - 2026-11-18: generic `mocks/scenarios.AckPipeline(H)` (`backlog`, `persists_on_restart`;
   harness.rs 3235-3441) with the standard wrappers.
+- 2026-11-18: finalize bad-links and quorum-sees-finalization wrappers (lossy ones skip in
+  Debug without `-Dslow-tests`). My 169-1218/1600-1986/2544-2591 range: digest-once (176),
+  block-provider parent fetch (378), and the recoverable/certify family (514-562) went to
+  runtime; sync_height_floor and reject_stale (563, 569, 2586) are bls-math's queries slice.
