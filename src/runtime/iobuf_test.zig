@@ -3,8 +3,8 @@
 //! allocation header), the `Bytes`, `BytesMut`, and `Vec` conversions, the `Buf`/`BufMut`
 //! trait methods zigware does not have (`copy_to_slice`, `copy_to_bytes`, `put_bytes`, `put`
 //! from another `Buf`), the oversized and impossible-alignment requests (they are
-//! `error.OutOfMemory` here), auto traits, and the should_panic tests (Zig asserts and cannot
-//! catch a panic).
+//! `error.OutOfMemory` here), and auto traits. The should_panic tests are death tests in
+//! `iobuf_panic_test.zig`.
 
 const std = @import("std");
 const testing = std.testing;

@@ -511,10 +511,10 @@ Not portable:
 | storage/tokio/blob/aio.rs | 7 | 0 | 0 | 7 |
 | storage/tokio/mod.rs | 42 | 10 | 9 | 23 |
 | storage/tracker.rs | 4 | 0 | 0 | 4 |
-| iobuf/buf.rs | 60 | 13 | 1 | 46 |
-| iobuf/bufs.rs | 98 | 45 | 7 | 46 |
+| iobuf/buf.rs | 60 | 20 | 1 | 39 |
+| iobuf/bufs.rs | 98 | 54 | 7 | 37 |
 | iobuf/owner.rs | 36 | 0 | 0 | 36 |
-| Total | 450 | 175 | 40 | 235 |
+| Total | 450 | 191 | 40 | 219 |
 
 Open:
 - [x] `storage/audited.rs:266` `test_audited_blob_forwards_read_options`: audited blob passes each
@@ -690,16 +690,14 @@ Not portable:
   read target; runtime.md: "`Blob.read_at` fills a caller buffer"
 - `storage/tokio/blob.rs` `test_fused_write_error_is_recorded_before_buffer_drop`: Rust `Drop` of
   the payload owner; `test_reopen_syncs_fallback_write_after_owner_panic`: catches a panic
-- `iobuf/buf.rs` `test_iobuf_advance_past_end`, `test_iobuf_copy_to_slice_past_end`,
-  `test_iobuf_copy_to_bytes_past_end`, `test_iobuf_slice_out_of_bounds`,
-  `test_iobuf_slice_inverted_range`, `test_iobuf_slice_inclusive_end_overflow`,
-  `test_iobuf_slice_excluded_start_overflow`, `test_iobuf_split_to_out_of_bounds`,
-  `test_iobufmut_advance_past_end`, `test_iobufmut_copy_to_slice_past_end`,
-  `test_iobufmut_copy_to_bytes_past_end`, `test_iobufmut_put_slice_past_capacity`,
-  `test_iobufmut_put_bytes_past_capacity`, `test_iobufmut_advance_mut_past_capacity`,
-  `test_iobufmut_put_past_capacity`, `test_iobufmut_put_does_not_trust_lying_buf`,
+- `iobuf/buf.rs` `test_iobuf_copy_to_slice_past_end`, `test_iobuf_copy_to_bytes_past_end`,
+  `test_iobuf_slice_inclusive_end_overflow`, `test_iobuf_slice_excluded_start_overflow`,
+  `test_iobufmut_copy_to_slice_past_end`, `test_iobufmut_copy_to_bytes_past_end`,
+  `test_iobufmut_put_bytes_past_capacity`, `test_iobufmut_put_past_capacity`,
+  `test_iobufmut_put_does_not_trust_lying_buf`,
   `test_iobufmut_with_capacity_rejects_oversized_request`, `test_iobufmut_set_len_overflow`:
-  #[should_panic]
+  #[should_panic] on methods or `RangeBounds` zigware lacks, or `error.OutOfMemory` here; the other
+  seven are death tests in `iobuf_panic_test.zig`
 - `iobuf/buf.rs` `test_iobuf_from_conversions_are_zero_copy`,
   `test_iobuf_additional_conversion_and_trait_paths`, `test_iobuf_from_bytes_zero_copy_round_trip`,
   `test_iobuf_from_bytes_mut_zero_copy`, `test_iobuf_static_into_bytes_uses_from_static`,
@@ -742,13 +740,11 @@ Not portable:
   `exclusive_promotion_shares_record_across_threads`): owner word, descriptor packing, Vec
   adoption, and refcount/drop ordering (many under loom); zigware's owner is one allocation
   header (runtime.md IoBuf decision)
-- `iobuf/bufs.rs` `test_iobufs_split_to_out_of_bounds`, `test_iobufs_advance_past_end`,
-  `test_iobufs_copy_to_bytes_past_end`, `test_iobufsmut_advance_past_end`,
-  `test_iobufsmut_copy_from_slice_wrong_length`, `test_iobufsmut_advance_mut_past_end_pair`,
+- `iobuf/bufs.rs` `test_iobufs_copy_to_bytes_past_end`,
   `test_iobufsmut_advance_mut_past_end_triple`, `test_iobufsmut_advance_mut_past_end_chunked`,
-  `test_iobufsmut_set_len_overflow`, `test_encode_iobufs_rejects_short_write`,
-  `test_inline_overflow_panics`, `test_put_exceeding_capacity_panics`,
-  `test_put_slice_exceeding_capacity_panics`, `test_write_past_full_panics`: #[should_panic]
+  `test_inline_overflow_panics`, `test_put_exceeding_capacity_panics`: #[should_panic] on
+  `copy_to_bytes`, `put` from a `Buf`, `put_u8`, or the Triple/Chunked representations zigware
+  lacks; the other nine are death tests in `iobuf_panic_test.zig`
 - `iobuf/bufs.rs` `test_take_owned_front_chunk`, `test_iobuf_owner_record_allocations`,
   `test_iobufs_chunked_split_allocations`, `test_iobufsmut_fast_path_shapes`,
   `test_iobufsmut_noncanonical_chunk_and_chunk_mut_paths`, `test_iobuf_internal_chunk_helpers`,

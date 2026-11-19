@@ -897,4 +897,5 @@ pub fn encode_iobufs(comptime T: type, gpa: Allocator, value: T) Allocator.Error
 
 test {
     _ = @import("iobuf_test.zig");
+    _ = @import("iobuf_panic_test.zig");
 }
