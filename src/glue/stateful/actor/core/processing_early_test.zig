@@ -13,6 +13,7 @@ const Fixture = fixture_mod.Fixture;
 const TestBlock = harness_mod.TestBlock;
 const Probe = harness_mod.Probe;
 const oneshot = @import("utils").channel.oneshot;
+const test_io = @import("../../test_io.zig");
 
 fn check(fixture: *Fixture) void {
     fixture.deinit() catch |err| std.debug.panic("processing failed: {}", .{err});
@@ -164,7 +165,7 @@ fn await_closed(sender: *const oneshot.Sender(void)) !void {
     // Each pass sleeps 1 ms; the bound is a hang guard.
     for (0..10_000) |_| {
         if (sender.is_closed()) return;
-        try std.testing.io.sleep(.fromMilliseconds(1), .awake);
+        try test_io.io.sleep(.fromMilliseconds(1), .awake);
     }
     return error.TestTimedOut;
 }
@@ -174,7 +175,7 @@ fn await_acknowledged(waiter: *const @import("utils").acknowledgement.Exact.Wait
     // Each pass sleeps 1 ms; the bound is a hang guard.
     for (0..10_000) |_| {
         if (waiter.poll()) |outcome| return outcome;
-        try std.testing.io.sleep(.fromMilliseconds(1), .awake);
+        try test_io.io.sleep(.fromMilliseconds(1), .awake);
     }
     return error.TestTimedOut;
 }
@@ -370,6 +371,10 @@ test "stateful processing: a pending proposal does not block a new verification"
 }
 
 test "stateful processing: a cancelled handoff proposal unblocks finalization" {
+    try test_io.run_on_deterministic(early_cancelled_handoff_unblocks);
+}
+
+fn early_cancelled_handoff_unblocks() anyerror!void {
     var fixture: Fixture = undefined;
     try fixture.init();
     defer check(&fixture);
@@ -384,7 +389,7 @@ test "stateful processing: a cancelled handoff proposal unblocks finalization" {
     fixture.processing.processor.app.propose_probe = &propose_probe;
 
     // A prepare on genesis, held in the application.
-    const pair = try oneshot.channel(fixture_mod.Mailbox.Built, gpa, std.testing.io);
+    const pair = try oneshot.channel(fixture_mod.Mailbox.Built, gpa, test_io.io);
     var proposer = pair.receiver;
     try fixture.send(.{ .propose = .{
         .context = .{ .round = harness_mod.round(1) },
@@ -397,7 +402,7 @@ test "stateful processing: a cancelled handoff proposal unblocks finalization" {
     const winner = try uncached_child(&fixture, &genesis, 1);
     var waiter = try fixture.finalize(winner);
     defer waiter.deinit();
-    try std.testing.io.sleep(.fromMilliseconds(20), .awake);
+    try test_io.io.sleep(.fromMilliseconds(20), .awake);
     try testing.expect(waiter.poll() == null);
     try testing.expect(!release.?.is_closed());
 
@@ -423,7 +428,7 @@ const Held = struct {
         // Each pass sleeps 1 ms; the bound is a hang guard.
         for (0..10_000) |_| {
             if (held.started.is_ready()) return held.started.recv();
-            try std.testing.io.sleep(.fromMilliseconds(1), .awake);
+            try test_io.io.sleep(.fromMilliseconds(1), .awake);
         }
         return error.TestTimedOut;
     }
@@ -445,7 +450,7 @@ fn await_verdict(verdict: *oneshot.Receiver(bool)) !bool {
     // Each pass sleeps 1 ms; the bound is a hang guard.
     for (0..10_000) |_| {
         if (verdict.is_ready()) return verdict.recv();
-        try std.testing.io.sleep(.fromMilliseconds(1), .awake);
+        try test_io.io.sleep(.fromMilliseconds(1), .awake);
     }
     return error.TestTimedOut;
 }
@@ -456,6 +461,10 @@ fn await_verdict(verdict: *oneshot.Receiver(bool)) !bool {
 // commonware learns the finalization started waiting from a parked acquisition; here the test
 // waits 20 ms and checks the acknowledgement and the capture are still pending.
 test "stateful processing: a finalization joins and reuses the winning execution" {
+    try test_io.run_on_deterministic(early_joins_winning_execution);
+}
+
+fn early_joins_winning_execution() anyerror!void {
     var fixture: Fixture = undefined;
     try fixture.init();
     defer check(&fixture);
@@ -483,7 +492,7 @@ test "stateful processing: a finalization joins and reuses the winning execution
     try candidate.await_started();
     var waiter = try fixture.finalize(block);
     defer waiter.deinit();
-    try std.testing.io.sleep(.fromMilliseconds(20), .awake);
+    try test_io.io.sleep(.fromMilliseconds(20), .awake);
     try testing.expect(waiter.poll() == null);
     try testing.expectEqual(0, capture_probe.calls);
     try candidate.open();
@@ -502,6 +511,10 @@ test "stateful processing: a finalization joins and reuses the winning execution
 // block's child, and answers, before the finalized hook completes. Adapted: as above, the test
 // waits 20 ms for the finalization to start waiting instead of a parked acquisition.
 test "stateful processing: a request on the finalized block continues during finalization" {
+    try test_io.run_on_deterministic(early_request_continues);
+}
+
+fn early_request_continues() anyerror!void {
     var fixture: Fixture = undefined;
     try fixture.init();
     defer check(&fixture);
@@ -525,7 +538,7 @@ test "stateful processing: a request on the finalized block continues during fin
     try block_gate.await_started();
     var waiter = try fixture.finalize(block);
     defer waiter.deinit();
-    try std.testing.io.sleep(.fromMilliseconds(20), .awake);
+    try test_io.io.sleep(.fromMilliseconds(20), .awake);
     try testing.expect(waiter.poll() == null);
     try block_gate.open();
     try hook.await_started();
@@ -554,7 +567,7 @@ const CompetingRequest = union(Competing) {
             .verify => return .{ .verify = try fixture.verify(&.{ block, genesis }) },
             .propose => return .{ .propose = try fixture.propose_async(&.{ block, genesis }, 9) },
             .prepare => {
-                const pair = try oneshot.channel(fixture_mod.Mailbox.Built, gpa, std.testing.io);
+                const pair = try oneshot.channel(fixture_mod.Mailbox.Built, gpa, test_io.io);
                 try fixture.send(.{ .propose = .{
                     .context = .{ .round = harness_mod.round(9) },
                     .ancestry = try fixture.harness.ancestry(&.{ block, genesis }),
@@ -615,7 +628,7 @@ fn competing_finalization(kind: Competing) !void {
     // The competing finalization waits for the losing execution to finish, then rejects it.
     var waiter = try fixture.finalize(competing);
     defer waiter.deinit();
-    try std.testing.io.sleep(.fromMilliseconds(20), .awake);
+    try test_io.io.sleep(.fromMilliseconds(20), .awake);
     try testing.expect(waiter.poll() == null);
     try testing.expectEqual(0, capture_probe.calls);
     try testing.expect(!gate.release.?.is_closed());
@@ -647,7 +660,7 @@ test "stateful processing: a competing finalization rejects an executing proposa
 
 /// Sends a database subscription without waiting, and returns its receiver.
 fn subscribe_async(fixture: *Fixture) !oneshot.Receiver(fixture_mod.Mailbox.Databases) {
-    const pair = try oneshot.channel(fixture_mod.Mailbox.Databases, gpa, std.testing.io);
+    const pair = try oneshot.channel(fixture_mod.Mailbox.Databases, gpa, test_io.io);
     try fixture.send(.{ .subscribe_databases = pair.sender });
     return pair.receiver;
 }
@@ -816,6 +829,10 @@ test "stateful processing: a deferred finalization does not block a completed ve
 // continues, work on a competing branch is rejected, and the finalization joins and reuses
 // the winner's execution.
 test "stateful processing: a deferred finalization fences later verifications" {
+    try test_io.run_on_deterministic(early_deferred_finalization_fences);
+}
+
+fn early_deferred_finalization_fences() anyerror!void {
     var fixture: Fixture = undefined;
     try fixture.init();
     defer check(&fixture);
@@ -867,7 +884,7 @@ test "stateful processing: a deferred finalization fences later verifications" {
     const built = try proposal.recv();
     var owned = built;
     owned.deinit();
-    try std.testing.io.sleep(.fromMilliseconds(20), .awake);
+    try test_io.io.sleep(.fromMilliseconds(20), .awake);
     try testing.expect(waiter.poll() == null);
     try winner_gate.open();
     try losing_gate.open();
@@ -928,7 +945,7 @@ fn prepare_async(
     fixture: *Fixture,
     blocks: []const TestBlock,
 ) !oneshot.Receiver(fixture_mod.Mailbox.Built) {
-    const pair = try oneshot.channel(fixture_mod.Mailbox.Built, gpa, std.testing.io);
+    const pair = try oneshot.channel(fixture_mod.Mailbox.Built, gpa, test_io.io);
     try fixture.send(.{ .propose = .{
         .context = .{ .round = harness_mod.round(0xff) },
         .ancestry = try fixture.harness.ancestry(blocks),
@@ -1134,11 +1151,11 @@ const CountingAncestry = struct {
 
     pub fn next(_: *CountingAncestry) !?harness_mod.Digested {
         // Each pass sleeps an hour; only cancellation ends the loop.
-        while (true) try std.testing.io.sleep(.fromSeconds(3_600), .awake);
+        while (true) try test_io.io.sleep(.fromSeconds(3_600), .awake);
     }
 
     pub fn clone(self: *const CountingAncestry) !CountingAncestry {
-        std.testing.io.sleep(.fromMilliseconds(5), .awake) catch {};
+        test_io.io.sleep(.fromMilliseconds(5), .awake) catch {};
         _ = self.admissions.fetchAdd(1, .monotonic);
         return self.*;
     }
@@ -1185,7 +1202,7 @@ test "stateful processing: a pending proposal polls a ready verification before 
         const ancestry = try harness_mod.Execution.Ancestry.init(gpa, CountingAncestry{
             .admissions = &admissions,
         });
-        const pair = try oneshot.channel(bool, gpa, std.testing.io);
+        const pair = try oneshot.channel(bool, gpa, test_io.io);
         try fixture.send(.{ .verify = .{ .ancestry = ancestry, .verification = pair.sender } });
         receiver.* = pair.receiver;
         sent += 1;

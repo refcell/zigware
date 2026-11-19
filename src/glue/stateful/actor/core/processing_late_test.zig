@@ -9,12 +9,12 @@ const actor = @import("actor");
 const utils = @import("utils");
 const runtime = @import("runtime");
 const core = @import("testing.zig");
+const test_io = @import("../../test_io.zig");
 
 const harness = core.harness;
 const TestBlock = harness.TestBlock;
 const Fixture = core.Fixture;
 const gpa = testing.allocator;
-const io = testing.io;
 
 fn deinit_fixture(fixture: *Fixture) void {
     fixture.deinit() catch |err| std.debug.panic("processing failed: {}", .{err});
@@ -25,6 +25,10 @@ fn deinit_fixture(fixture: *Fixture) void {
 // false. Adapted: commonware also parks an ancestry acquisition to learn when
 // finalization paused; here the pending acknowledgement shows the wait.
 test "stateful processing: finalization joins an incompatible verification" {
+    try test_io.run_on_deterministic(late_joins_incompatible);
+}
+
+fn late_joins_incompatible() anyerror!void {
     var fixture: Fixture = undefined;
     try fixture.init();
     defer deinit_fixture(&fixture);
@@ -54,7 +58,7 @@ test "stateful processing: finalization joins an incompatible verification" {
     var waiter = try fixture.finalize(winner);
     defer waiter.deinit();
     // Give finalization time to act: it must still be waiting on the gated child.
-    try testing.io.sleep(.fromMilliseconds(20), .awake);
+    try test_io.io.sleep(.fromMilliseconds(20), .awake);
     try testing.expectEqual(null, waiter.poll());
     try release.send({});
     try waiter.wait();
@@ -66,6 +70,10 @@ test "stateful processing: finalization joins an incompatible verification" {
 // then resolves false. Adapted like the shallow case: the pending acknowledgement shows the
 // wait instead of a parked ancestry acquisition.
 test "stateful processing: finalization rejects a deep incompatible verification" {
+    try test_io.run_on_deterministic(late_rejects_deep_incompatible);
+}
+
+fn late_rejects_deep_incompatible() anyerror!void {
     var fixture: Fixture = undefined;
     try fixture.init();
     defer deinit_fixture(&fixture);
@@ -97,7 +105,7 @@ test "stateful processing: finalization rejects a deep incompatible verification
 
     var waiter = try fixture.finalize(winner);
     defer waiter.deinit();
-    try testing.io.sleep(.fromMilliseconds(20), .awake);
+    try test_io.io.sleep(.fromMilliseconds(20), .awake);
     try testing.expectEqual(null, waiter.poll());
     try release.send({});
     try waiter.wait();
@@ -178,19 +186,19 @@ test "stateful processing: a deferred verification resumes once processing start
     try fixture.harness.init();
     fixture.prunes = .empty;
     fixture.future = null;
-    const pair = try actor.mailbox.new(core.Message, gpa, io, 8);
+    const pair = try actor.mailbox.new(core.Message, gpa, test_io.io, 8);
     fixture.receiver = pair.receiver;
-    fixture.mailbox = core.Mailbox.init(gpa, io, pair.sender);
+    fixture.mailbox = core.Mailbox.init(gpa, test_io.io, pair.sender);
     const marshal: core.TestMarshal = .{ .prunes = &fixture.prunes };
     const provider = fixture.harness.provider();
     const processor = &fixture.harness.processor;
-    fixture.processing = .init(gpa, io, &fixture.receiver, provider, marshal, processor);
+    fixture.processing = .init(gpa, test_io.io, &fixture.receiver, provider, marshal, processor);
     defer deinit_fixture(&fixture);
 
     const genesis = TestBlock.genesis();
     const block, var batch = try fixture.harness.build_child(&genesis, 1);
     batch.deinit();
-    const verdict_pair = try utils.channel.oneshot.channel(bool, gpa, io);
+    const verdict_pair = try utils.channel.oneshot.channel(bool, gpa, test_io.io);
     var verdict = verdict_pair.receiver;
     defer verdict.deinit();
     fixture.processing.defer_verification(.{
@@ -199,7 +207,7 @@ test "stateful processing: a deferred verification resumes once processing start
     });
     try testing.expect(!verdict.is_ready());
 
-    fixture.future = try io.concurrent(run_processing, .{&fixture.processing});
+    fixture.future = try test_io.io.concurrent(run_processing, .{&fixture.processing});
     try testing.expect(try verdict.recv());
 }
 
@@ -222,6 +230,10 @@ fn uncached_family() !struct { TestBlock, TestBlock, TestBlock } {
 // share one execution of their uncached parent; the parent's finalization waits for that
 // execution and reuses it, and both children then verify. The parent is processed once.
 test "stateful processing: finalization reuses a shared parent recovery" {
+    try test_io.run_on_deterministic(late_reuses_parent_recovery);
+}
+
+fn late_reuses_parent_recovery() anyerror!void {
     var fixture: Fixture = undefined;
     try fixture.init();
     defer deinit_fixture(&fixture);
@@ -243,7 +255,7 @@ test "stateful processing: finalization reuses a shared parent recovery" {
     try started.recv();
     var waiter = try fixture.finalize(parent);
     defer waiter.deinit();
-    try testing.io.sleep(.fromMilliseconds(20), .awake);
+    try test_io.io.sleep(.fromMilliseconds(20), .awake);
     try testing.expectEqual(null, waiter.poll());
     try release.send({});
     try waiter.wait();
@@ -264,7 +276,7 @@ const Descendant = union(Managed) {
         std.debug.assert(blocks.len >= 2);
         return switch (request) {
             .verify => .{ .verify = try fixture.verify(blocks) },
-            .propose => .{ .propose = try io.concurrent(propose_on, .{ fixture, blocks }) },
+            .propose => .{ .propose = try test_io.io.concurrent(propose_on, .{ fixture, blocks }) },
         };
     }
 
@@ -286,14 +298,14 @@ const Descendant = union(Managed) {
     fn wait(descendant: *Descendant) !bool {
         return switch (descendant.*) {
             .verify => |*verdict| verdict.recv(),
-            .propose => |*future| future.await(io),
+            .propose => |*future| future.await(test_io.io),
         };
     }
 
     fn deinit(descendant: *Descendant) void {
         switch (descendant.*) {
             .verify => |*verdict| verdict.deinit(),
-            .propose => |*future| _ = future.cancel(io) catch {},
+            .propose => |*future| _ = future.cancel(test_io.io) catch {},
         }
     }
 };
@@ -373,7 +385,7 @@ fn finalize_across(
 
     var first_waiter = try fixture.finalize(blocks[0]);
     defer first_waiter.deinit();
-    try testing.io.sleep(.fromMilliseconds(20), .awake);
+    try test_io.io.sleep(.fromMilliseconds(20), .awake);
     try testing.expectEqual(null, first_waiter.poll());
     try replay_release.send({});
     try first_waiter.wait();
@@ -401,6 +413,10 @@ test "stateful processing: consecutive finalizations preserve a descendant verif
 // commonware `consecutive_finalizations_preserve_descendant_replay` (propose case): the same
 // with a build on the descendant.
 test "stateful processing: consecutive finalizations preserve a descendant proposal" {
+    try test_io.run_on_deterministic(late_consecutive_finalizations);
+}
+
+fn late_consecutive_finalizations() anyerror!void {
     try consecutive_finalizations(.propose);
 }
 
@@ -476,7 +492,7 @@ fn pruning_joins_execution(request: Managed) !void {
     var second_waiter = try fixture.finalize(chain[1]);
     defer second_waiter.deinit();
     // The prune waits for the parent's replay to finish.
-    try testing.io.sleep(.fromMilliseconds(20), .awake);
+    try test_io.io.sleep(.fromMilliseconds(20), .awake);
     try testing.expectEqual(0, fixture.prunes.items.len);
     try replay_release.send({});
     // The request's next step starts only once the prune completed.
@@ -510,6 +526,10 @@ test "stateful processing: pruning joins a proposal's replay before pruning" {
 // complete synchronously, so the prune is seen through marshal's recorded prunes; and the
 // test app builds a block where commonware's gated app declines.
 test "stateful processing: a prune preserves a completed verdict before a later finalization" {
+    try test_io.run_on_deterministic(late_prune_preserves_verdict);
+}
+
+fn late_prune_preserves_verdict() anyerror!void {
     var fixture: Fixture = undefined;
     try fixture.init();
     defer deinit_fixture(&fixture);
@@ -548,7 +568,7 @@ test "stateful processing: a prune preserves a completed verdict before a later 
     defer second_waiter.deinit();
     try first_waiter.wait();
     // The prune waits for the verification's running processing.
-    try testing.io.sleep(.fromMilliseconds(20), .awake);
+    try test_io.io.sleep(.fromMilliseconds(20), .awake);
     try testing.expectEqual(0, fixture.prunes.items.len);
     try verify_release.send({});
 
@@ -572,6 +592,10 @@ test "stateful processing: a prune preserves a completed verdict before a later 
 // commonware's held target flush (and the acknowledgements it holds back) is not modeled;
 // what remains is that the prune neither blocks nor overtakes the active verification.
 test "stateful processing: a pending prune does not block an active verification" {
+    try test_io.run_on_deterministic(late_pending_prune_unblocked);
+}
+
+fn late_pending_prune_unblocked() anyerror!void {
     var fixture: Fixture = undefined;
     try fixture.init();
     defer deinit_fixture(&fixture);
@@ -599,7 +623,7 @@ test "stateful processing: a pending prune does not block an active verification
     defer second_waiter.deinit();
     try first_waiter.wait();
     try second_waiter.wait();
-    try testing.io.sleep(.fromMilliseconds(20), .awake);
+    try test_io.io.sleep(.fromMilliseconds(20), .awake);
     try testing.expectEqual(0, fixture.prunes.items.len);
     try release.send({});
     try testing.expect(try verdict.recv());
@@ -617,7 +641,11 @@ test "stateful processing: a pending prune does not block an active verification
 // here block 1's real syncs park in `DelayedSync`, and the prune is due at block 1 (no
 // pending acknowledgements), since applying block 2 would wait on block 1's held sync.
 test "stateful processing: a prune waiting on a held sync drives an active verification" {
-    var pending: DelayedSync = .init(gpa, io);
+    try test_io.run_on_deterministic(late_prune_drives_verification);
+}
+
+fn late_prune_drives_verification() anyerror!void {
+    var pending: DelayedSync = .init(gpa, test_io.io);
     defer pending.deinit();
     var fixture: Fixture = undefined;
     var delayed: DelayedSynced = undefined;
@@ -650,7 +678,7 @@ test "stateful processing: a prune waiting on a held sync drives an active verif
     try wait_until_parked(&pending);
     // The barrier's syncs park one after another, so count releases rather than parked syncs.
     const completed = pending.completions();
-    try testing.io.sleep(.fromMilliseconds(20), .awake);
+    try test_io.io.sleep(.fromMilliseconds(20), .awake);
     try testing.expect(waiter.poll() == null);
 
     // The verdict arrives while block 1's sync is still held, and nothing is pruned yet.
@@ -676,10 +704,10 @@ fn init_delayed(fixture: *Fixture, delayed: *DelayedSynced, pending: *DelayedSyn
     fixture.harness.init_storage();
     delayed.* = .init(gpa, fixture.harness.storage.interface(), pending);
     var releaser: Releaser = .{ .pending = pending };
-    var releasing = try io.concurrent(Releaser.run, .{&releaser});
+    var releasing = try test_io.io.concurrent(Releaser.run, .{&releaser});
     defer {
         releaser.stop.store(true, .release);
-        releasing.await(io);
+        releasing.await(test_io.io);
     }
     try fixture.init_with(delayed.storage());
 }
@@ -693,7 +721,7 @@ const Releaser = struct {
         // Each pass releases what parked since the last one; the open is bounded.
         while (!self.stop.load(.acquire)) {
             if (self.pending.parked() > 0) self.pending.release_all();
-            io.sleep(.fromMilliseconds(1), .awake) catch return;
+            test_io.io.sleep(.fromMilliseconds(1), .awake) catch return;
         }
         std.debug.assert(self.stop.load(.acquire));
     }
@@ -704,7 +732,7 @@ fn recv_within(receiver: anytype, timeout_ms: u64) !bool {
     // Each pass polls once and sleeps a millisecond.
     for (0..timeout_ms) |_| {
         if (receiver.try_recv()) |value| return value else |err| switch (err) {
-            error.Empty => try io.sleep(.fromMilliseconds(1), .awake),
+            error.Empty => try test_io.io.sleep(.fromMilliseconds(1), .awake),
             error.Closed => return err,
         }
     }
@@ -715,7 +743,7 @@ fn wait_until_parked(pending: *DelayedSync) !void {
     // Each pass sleeps a millisecond; the barrier's syncs start with the finalization.
     for (0..2_000) |_| {
         if (pending.parked() > 0) return;
-        try io.sleep(.fromMilliseconds(1), .awake);
+        try test_io.io.sleep(.fromMilliseconds(1), .awake);
     }
     return error.Timeout;
 }
@@ -724,7 +752,7 @@ fn wait_until_pruned(fixture: *const Fixture) !void {
     // Each pass sleeps a millisecond; the prune follows the released sync.
     for (0..2_000) |_| {
         if (fixture.prunes.items.len > 0) return;
-        try io.sleep(.fromMilliseconds(1), .awake);
+        try test_io.io.sleep(.fromMilliseconds(1), .awake);
     }
     return error.Timeout;
 }
@@ -735,6 +763,10 @@ fn wait_until_pruned(fixture: *const Fixture) !void {
 // commonware's held flush (block 2 applying behind block 1's pending barrier) is not
 // modeled; the held hook stands in for the pending handoff.
 test "stateful processing: a finalized handoff survives a held finalized hook" {
+    try test_io.run_on_deterministic(late_handoff_survives_held_hook);
+}
+
+fn late_handoff_survives_held_hook() anyerror!void {
     var fixture: Fixture = undefined;
     try fixture.init();
     defer deinit_fixture(&fixture);
@@ -758,7 +790,7 @@ test "stateful processing: a finalized handoff survives a held finalized hook" {
     defer first_waiter.deinit();
     try started.recv();
     try testing.expectEqual(1, captures.calls);
-    try testing.io.sleep(.fromMilliseconds(20), .awake);
+    try test_io.io.sleep(.fromMilliseconds(20), .awake);
     try testing.expectEqual(null, first_waiter.poll());
     try release.send({});
     var second_waiter = try fixture.finalize(block2);
@@ -873,6 +905,10 @@ test "stateful processing: a live floor redelivery from a forward floor" {
 // database read lock is released before the batch is returned (`Shared.new_batches`), so a
 // held verification holds no read and the barrier never waits for one.
 test "stateful processing: a successor barrier proceeds past a held verification" {
+    try test_io.run_on_deterministic(late_successor_barrier_proceeds);
+}
+
+fn late_successor_barrier_proceeds() anyerror!void {
     var fixture: Fixture = undefined;
     try fixture.init();
     defer deinit_fixture(&fixture);
@@ -904,7 +940,7 @@ test "stateful processing: a successor barrier proceeds past a held verification
 fn shutdown(fixture: *Fixture) anyerror!void {
     var future = fixture.future.?;
     fixture.future = null;
-    return future.cancel(io);
+    return future.cancel(test_io.io);
 }
 
 fn prune_join(stop: bool) !void {
@@ -936,7 +972,7 @@ fn prune_join(stop: bool) !void {
     try started.recv();
     try finalize_and_wait(&fixture, block2);
     // The prune waits for the running execution.
-    try testing.io.sleep(.fromMilliseconds(20), .awake);
+    try test_io.io.sleep(.fromMilliseconds(20), .awake);
     try testing.expectEqual(0, fixture.prunes.items.len);
     try testing.expect(!verdict.is_ready());
     if (stop) {
@@ -967,6 +1003,10 @@ test "stateful processing: shutdown preempts a prune joining an execution" {
 // commonware `prune_join_preserves_execution_until_shutdown` (ordinary maintenance case):
 // the prune keeps waiting until the execution is released, lets it finish, then prunes.
 test "stateful processing: a prune join lets the execution finish" {
+    try test_io.run_on_deterministic(late_prune_join_finishes);
+}
+
+fn late_prune_join_finishes() anyerror!void {
     try prune_join(false);
 }
 
@@ -1004,7 +1044,7 @@ fn finalization_join(stop: bool) !void {
     // The winner finalizes while its sibling executes: finalization waits before applying.
     var receipt = try fixture.finalize(winner);
     defer receipt.deinit();
-    try testing.io.sleep(.fromMilliseconds(20), .awake);
+    try test_io.io.sleep(.fromMilliseconds(20), .awake);
     try testing.expectEqual(null, receipt.poll());
     try testing.expectEqual(0, captures.calls);
     if (stop) {
@@ -1048,7 +1088,7 @@ fn stop_loop(fixture: *Fixture) anyerror!void {
     fixture.mailbox = null;
     var future = fixture.future.?;
     fixture.future = null;
-    return future.await(io);
+    return future.await(test_io.io);
 }
 
 fn expect_canceled(waiter: anytype) !void {
@@ -1141,14 +1181,14 @@ const AncestryGate = struct {
     parked: bool = false,
 
     fn read(gate: *AncestryGate, comptime field: []const u8) @FieldType(AncestryGate, field) {
-        gate.mutex.lockUncancelable(io);
-        defer gate.mutex.unlock(io);
+        gate.mutex.lockUncancelable(test_io.io);
+        defer gate.mutex.unlock(test_io.io);
         return @field(gate, field);
     }
 
     fn release(gate: *AncestryGate) void {
-        gate.mutex.lockUncancelable(io);
-        defer gate.mutex.unlock(io);
+        gate.mutex.lockUncancelable(test_io.io);
+        defer gate.mutex.unlock(test_io.io);
         gate.open = true;
     }
 
@@ -1156,7 +1196,7 @@ const AncestryGate = struct {
     fn await_parked(gate: *AncestryGate) !void {
         for (0..10_000) |_| {
             if (gate.read("parked")) return;
-            try io.sleep(.fromMilliseconds(1), .awake);
+            try test_io.io.sleep(.fromMilliseconds(1), .awake);
         }
         return error.TestTimedOut;
     }
@@ -1196,7 +1236,7 @@ const GatedAncestry = struct {
 
     pub fn next(self: *GatedAncestry) !?harness.Digested {
         // Waits for the gate (cancelable): a gate that never opens never ends the stream.
-        while (!self.available()) try io.sleep(.fromMilliseconds(1), .awake);
+        while (!self.available()) try test_io.io.sleep(.fromMilliseconds(1), .awake);
         if (self.index >= self.blocks.len) return null;
         const block = self.blocks[self.index] orelse return null;
         self.blocks[self.index] = null;
@@ -1205,9 +1245,9 @@ const GatedAncestry = struct {
     }
 
     pub fn clone(self: *const GatedAncestry) !GatedAncestry {
-        self.gate.mutex.lockUncancelable(io);
+        self.gate.mutex.lockUncancelable(test_io.io);
         self.gate.clones += 1;
-        self.gate.mutex.unlock(io);
+        self.gate.mutex.unlock(test_io.io);
         var copy = self.*;
         copy.acquisition = true;
         for (&copy.blocks) |*slot| {
@@ -1219,9 +1259,9 @@ const GatedAncestry = struct {
     pub fn deinit(self: *GatedAncestry) void {
         for (&self.blocks) |*slot| if (slot.*) |*block| block.deinit();
         if (self.acquisition) {
-            self.gate.mutex.lockUncancelable(io);
+            self.gate.mutex.lockUncancelable(test_io.io);
             self.gate.parked = true;
-            self.gate.mutex.unlock(io);
+            self.gate.mutex.unlock(test_io.io);
         }
     }
 };
@@ -1231,7 +1271,7 @@ fn verify_with(
     fixture: *Fixture,
     ancestry: harness.Execution.Ancestry,
 ) !utils.channel.oneshot.Receiver(bool) {
-    const pair = try utils.channel.oneshot.channel(bool, gpa, io);
+    const pair = try utils.channel.oneshot.channel(bool, gpa, test_io.io);
     try fixture.send(.{ .verify = .{ .ancestry = ancestry, .verification = pair.sender } });
     return pair.receiver;
 }
@@ -1294,7 +1334,7 @@ fn await_ready(comptime T: type, receiver: *utils.channel.oneshot.Receiver(T)) !
     // Each pass sleeps 1 ms; the bound is a hang guard.
     for (0..10_000) |_| {
         if (receiver.is_ready()) return receiver.recv();
-        try testing.io.sleep(.fromMilliseconds(1), .awake);
+        try test_io.io.sleep(.fromMilliseconds(1), .awake);
     }
     return error.TestTimedOut;
 }
@@ -1327,6 +1367,10 @@ const HeldGate = struct {
 // cancellation through the scheduler; here the test waits until the second request joined
 // the processing before cancelling the first.
 test "stateful processing: an admitted verification keeps processing alive" {
+    try test_io.run_on_deterministic(late_admitted_verification_alive);
+}
+
+fn late_admitted_verification_alive() anyerror!void {
     var fixture: Fixture = undefined;
     try fixture.init();
     defer deinit_fixture(&fixture);
@@ -1353,7 +1397,7 @@ test "stateful processing: an admitted verification keeps processing alive" {
     try fixture.await_joiners(block.digest(), 2);
     first.deinit(); // The first caller leaves.
     try fixture.barrier();
-    try testing.io.sleep(.fromMilliseconds(20), .awake);
+    try test_io.io.sleep(.fromMilliseconds(20), .awake);
     try testing.expect(!process.release.is_closed()); // The processing is still alive.
     try testing.expect(!repeat.started.is_ready());
     try testing.expectEqual(1, probe.calls);
@@ -1492,7 +1536,7 @@ test "stateful processing: a finalization rejects a next step with a stale round
     defer hook.deinit();
     fixture.processing.processor.app.finalized_probe = &hook_probe;
 
-    const pair = try utils.channel.oneshot.channel(core.Mailbox.Built, gpa, io);
+    const pair = try utils.channel.oneshot.channel(core.Mailbox.Built, gpa, test_io.io);
     var prepared = pair.receiver;
     defer prepared.deinit();
     try fixture.send(.{ .propose = .{

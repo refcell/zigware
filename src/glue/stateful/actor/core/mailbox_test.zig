@@ -9,15 +9,14 @@ const harness_mod = @import("../processor/testing.zig");
 const mailbox_mod = @import("mailbox.zig");
 
 const gpa = testing.allocator;
-const io = testing.io;
 const Exact = utils.acknowledgement.Exact;
 const TestBlock = harness_mod.TestBlock;
 const Mailbox = mailbox_mod.Mailbox(harness_mod.TestP);
 const Message = Mailbox.Message;
 
 fn new_mailbox(capacity: u32) !struct { Mailbox, actor.mailbox.Receiver(Message) } {
-    const pair = try actor.mailbox.new(Message, gpa, io, capacity);
-    return .{ Mailbox.init(gpa, io, pair.sender), pair.receiver };
+    const pair = try actor.mailbox.new(Message, gpa, test_io.io, capacity);
+    return .{ Mailbox.init(gpa, test_io.io, pair.sender), pair.receiver };
 }
 
 fn block_at(view: u64) !Mailbox.Digested {
@@ -28,7 +27,7 @@ fn block_at(view: u64) !Mailbox.Digested {
 }
 
 fn finalized(mailbox: *Mailbox, view: u64) !struct { actor.Feedback, Exact.Waiter } {
-    const handle = try Exact.handle(gpa, io);
+    const handle = try Exact.handle(gpa, test_io.io);
     const update: Mailbox.Update = .{ .block = .{
         .block = try block_at(view),
         .ack = handle.acknowledgement,
@@ -102,6 +101,7 @@ fn Call(comptime kind: enum { prepare, propose, verify }) type {
     };
 }
 const consensus_handoff = @import("consensus").Handoff(Mailbox.Digested);
+const test_io = @import("../../test_io.zig");
 
 test "stateful core mailbox: declined proposals answer wait and null" {
     var mailbox, var receiver = try new_mailbox(4);
@@ -109,18 +109,18 @@ test "stateful core mailbox: declined proposals answer wait and null" {
     defer mailbox.deinit();
 
     var prepare: Call(.prepare) = .{ .mailbox = &mailbox };
-    var prepared = try io.concurrent(Call(.prepare).run, .{&prepare});
+    var prepared = try test_io.io.concurrent(Call(.prepare).run, .{&prepare});
     var message = (try receiver.recv()).?;
     try testing.expect(message.propose.proposal == .prepare);
     message.propose.decline();
-    try testing.expect((try prepared.await(io)) == .wait);
+    try testing.expect((try prepared.await(test_io.io)) == .wait);
 
     var propose: Call(.propose) = .{ .mailbox = &mailbox };
-    var proposed = try io.concurrent(Call(.propose).run, .{&propose});
+    var proposed = try test_io.io.concurrent(Call(.propose).run, .{&propose});
     message = (try receiver.recv()).?;
     try testing.expect(message.propose.proposal == .propose);
     message.propose.decline();
-    try testing.expectEqual(null, try proposed.await(io));
+    try testing.expectEqual(null, try proposed.await(test_io.io));
 }
 
 test "stateful core mailbox: verify answers the verdict" {
@@ -129,37 +129,41 @@ test "stateful core mailbox: verify answers the verdict" {
     defer mailbox.deinit();
     for ([_]bool{ true, false }) |verdict| {
         var call: Call(.verify) = .{ .mailbox = &mailbox };
-        var future = try io.concurrent(Call(.verify).run, .{&call});
+        var future = try test_io.io.concurrent(Call(.verify).run, .{&call});
         var message = (try receiver.recv()).?;
         message.verify.ancestry.deinit();
         try message.verify.verification.send(verdict);
-        try testing.expectEqual(verdict, try future.await(io));
+        try testing.expectEqual(verdict, try future.await(test_io.io));
     }
 }
 
 test "stateful core mailbox: a verify without a verdict waits instead of voting" {
+    try test_io.run_on_deterministic(verify_without_verdict_waits);
+}
+
+fn verify_without_verdict_waits() anyerror!void {
     var mailbox, var receiver = try new_mailbox(4);
     defer receiver.deinit();
     defer mailbox.deinit();
     var call: Call(.verify) = .{ .mailbox = &mailbox };
-    var future = try io.concurrent(Call(.verify).run, .{&call});
+    var future = try test_io.io.concurrent(Call(.verify).run, .{&call});
     // The actor drops the verdict unsent (a waiting verification).
     var message = (try receiver.recv()).?;
     Message.discard(message);
     message = undefined;
     // The call stays unanswered until consensus cancels it: no `false` vote.
-    try io.sleep(.fromMilliseconds(20), .awake);
-    try testing.expectError(error.Canceled, future.cancel(io));
+    try test_io.io.sleep(.fromMilliseconds(20), .awake);
+    try testing.expectError(error.Canceled, future.cancel(test_io.io));
 }
 
 test "stateful core mailbox: overflow drops requests whose callers left" {
     var overflow: Message.Overflow = .empty;
     defer overflow.deinit(gpa);
     const utils_oneshot = utils.channel.oneshot;
-    const live = try utils_oneshot.channel(bool, gpa, io);
+    const live = try utils_oneshot.channel(bool, gpa, test_io.io);
     var live_receiver = live.receiver;
     defer live_receiver.deinit();
-    const gone = try utils_oneshot.channel(bool, gpa, io);
+    const gone = try utils_oneshot.channel(bool, gpa, test_io.io);
     var gone_receiver = gone.receiver;
     const ancestry = try Mailbox.Ancestry.from_blocks(gpa, &.{try block_at(1)});
     try Message.handle(gpa, &overflow, .{ .verify = .{

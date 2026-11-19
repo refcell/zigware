@@ -13,9 +13,9 @@ const storage = @import("storage");
 const utils = @import("utils");
 const db = @import("../mod.zig");
 const actor_mod = @import("actor.zig");
+const test_io = @import("../../test_io.zig");
 
 const gpa = testing.allocator;
-const io = testing.io;
 const sync = storage.qmdb.sync;
 const mpsc = utils.channel.mpsc;
 const oneshot = utils.channel.oneshot;
@@ -133,7 +133,7 @@ const Fixture = struct {
         fixture.* = .{ .registry = .init(gpa), .actor = undefined, .mailbox = undefined };
         errdefer fixture.registry.deinit();
         const scope = metrics.Scope.init(&fixture.registry).child("actor");
-        const created = try TestActor.create(gpa, io, scope, test_config(database));
+        const created = try TestActor.create(gpa, test_io.io, scope, test_config(database));
         fixture.actor = created.actor;
         fixture.mailbox = created.mailbox;
     }
@@ -145,7 +145,7 @@ const Fixture = struct {
 
     /// Hands the actor a fetch whose caller already left.
     fn get_operations_closed(fixture: *Fixture, request: Request) !void {
-        var pair = try mpsc.channel(Candidate, gpa, io, 1);
+        var pair = try mpsc.channel(Candidate, gpa, test_io.io, 1);
         pair.receiver.deinit();
         try fixture.actor.handle_mailbox_message(&fixture.recording, .{ .get_operations = .{
             .request = request,
@@ -167,7 +167,7 @@ const Fixture = struct {
     /// Registers a caller for `request` (commonware's `GetOperations` message); returns the
     /// caller's candidate receiver.
     fn get_operations(fixture: *Fixture, request: Request) !mpsc.Receiver(Candidate) {
-        const pair = try mpsc.channel(Candidate, gpa, io, 1);
+        const pair = try mpsc.channel(Candidate, gpa, test_io.io, 1);
         try fixture.actor.handle_mailbox_message(&fixture.recording, .{ .get_operations = .{
             .request = request,
             .response = pair.sender,
@@ -184,7 +184,7 @@ const Fixture = struct {
     ) !oneshot.Receiver(bool) {
         const subscribers = try gpa.alloc(Subscriber, ids.len);
         for (ids, subscribers) |sub_id, *subscriber| subscriber.* = .{ .id = sub_id, .reply = {} };
-        const verdict = try oneshot.channel(bool, gpa, io);
+        const verdict = try oneshot.channel(bool, gpa, test_io.io);
         try fixture.actor.handle_deliver(.{
             .gpa = gpa,
             .delivery = .{ .key = request, .subscribers = subscribers },
@@ -229,7 +229,7 @@ fn encoded_payload(leaves: u64, operations: []const u64) ![]u8 {
 
 fn mock_db(size: u64, feedback: ?sync.Feedback(Response)) !db.Shared(MockDb) {
     const encoded = try encoded_payload(size, &.{ 7, 8 });
-    return db.Shared(MockDb).init(gpa, io, "mock", .{
+    return db.Shared(MockDb).init(gpa, test_io.io, "mock", .{
         .encoded = encoded,
         .size = size,
         .feedback = feedback,
@@ -237,7 +237,7 @@ fn mock_db(size: u64, feedback: ?sync.Feedback(Response)) !db.Shared(MockDb) {
 }
 
 fn produce(fixture: *Fixture, request: Request) !oneshot.Receiver(Produced) {
-    const pair = try oneshot.channel(Produced, gpa, io);
+    const pair = try oneshot.channel(Produced, gpa, test_io.io);
     try fixture.actor.handle_produce(request, pair.sender);
     return pair.receiver;
 }
@@ -285,9 +285,9 @@ test "stateful p2p actor: the same request is served after attach" {
 }
 
 test "stateful p2p actor: produce drops source feedback without judging" {
-    var verdict = try oneshot.channel(bool, gpa, io);
+    var verdict = try oneshot.channel(bool, gpa, test_io.io);
     defer verdict.receiver.deinit();
-    var candidates = try mpsc.channel(Candidate, gpa, io, 1);
+    var candidates = try mpsc.channel(Candidate, gpa, test_io.io, 1);
     defer candidates.sender.deinit();
     const database = try mock_db(3, .init(verdict.sender, candidates.receiver));
     defer database.deinit();
@@ -318,6 +318,10 @@ test "stateful p2p actor: produce rejects a request above max_serve_ops" {
 }
 
 test "stateful p2p actor: concurrent serves complete once the database is available" {
+    try test_io.run_on_deterministic(concurrent_serves_complete);
+}
+
+fn concurrent_serves_complete() anyerror!void {
     // commonware `concurrent_serves_complete_after_database_is_available`.
     const database = try mock_db(3, null);
     defer database.deinit();
@@ -333,7 +337,7 @@ test "stateful p2p actor: concurrent serves complete once the database is availa
     var responses: [2]oneshot.Receiver(Produced) = undefined;
     for (requests, &responses) |request, *response| response.* = try produce(&fixture, request);
     defer for (&responses) |*response| response.deinit();
-    try io.sleep(.fromMilliseconds(20), .awake);
+    try test_io.io.sleep(.fromMilliseconds(20), .awake);
     // Restore access before asserting, so a failure cannot leave the reads blocked.
     // A reply that arrived or was dropped means a pending read blocked another serve.
     var replies_pending = true;
@@ -473,7 +477,7 @@ test "stateful p2p actor: request id exhaustion precedes submission" {
     defer existing.deinit();
     const existing_id = fixture.id(0);
     fixture.actor.next_id = std.math.maxInt(u64);
-    var pair = try mpsc.channel(Candidate, gpa, io, 1);
+    var pair = try mpsc.channel(Candidate, gpa, test_io.io, 1);
     defer pair.receiver.deinit();
     // Exhaustion fails before resolver submission can reuse an id.
     const result = fixture.actor.handle_mailbox_message(&fixture.recording, .{
@@ -596,6 +600,10 @@ test "stateful p2p actor: a fan-out applies the first verdict in subscriber orde
 }
 
 test "stateful p2p actor: an abandoned fan-out is unjudged and retracts every subscriber" {
+    try test_io.run_on_deterministic(abandoned_fan_out_retracts);
+}
+
+fn abandoned_fan_out_retracts() anyerror!void {
     try testing.expectEqual(@as(?bool, null), try fan_out(.{ null, null }));
     var fixture: Fixture = undefined;
     try fixture.init(null);
@@ -635,7 +643,7 @@ fn check_slow_receipt(rejecting: usize) !void {
 
     // One caller rejects; the verdict waits until the slow caller took its candidate.
     try judge(&callers[rejecting].?, payload, false);
-    try io.sleep(.fromMilliseconds(20), .awake);
+    try test_io.io.sleep(.fromMilliseconds(20), .awake);
     try testing.expectError(error.Empty, verdict.try_recv());
 
     // The rejecting caller leaves while the slow candidate is still queued. A fresh
