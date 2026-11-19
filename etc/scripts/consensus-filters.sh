@@ -7,7 +7,8 @@
 # `engine_shards` and `fixtures_shards` groups, by the names in their `test "..."`
 # declarations: `.test.<name>` also matches a test of a generic `Suite(F)`. `rest` takes
 # every entry of src/consensus/simplex that no other group names, plus consensus's top-level
-# files, so a new file always lands in some group. A filter may match a cheap test of another group too; no test is left out.
+# files, so a new file always lands in some group. A filter may match a cheap test of another
+# group too; no test is left out.
 # Usage: consensus-filters.sh <group>.
 set -eu
 
