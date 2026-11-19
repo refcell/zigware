@@ -139,7 +139,7 @@ fn load_persisted_epochs_finds_blocks_body(ctx: Ctx) anyerror!void {
     {
         var manager = try init_manager(ctx, "write", prefix, &cache_ref);
         defer manager.deinit();
-        try manager.put_notarized(round, digest, &block);
+        try (try manager.put_notarized(round, digest, &block)).wait_release();
     }
 
     // Re-init the cache (simulating restart): find_block fails before loading persisted epochs.
@@ -297,7 +297,7 @@ fn skipped_epoch_body(ctx: Ctx) anyerror!void {
     defer notarization.deinit(gpa);
     {
         defer manager.deinit();
-        try manager.put_notarization(old_round, H.digest(&old), &notarization);
+        try (try manager.put_notarization(old_round, H.digest(&old), &notarization)).wait_release();
         try expect_notarization(&manager, old_round);
         try expect_opened(ctx, "reopen", &.{ 10, 64 });
     }
@@ -554,8 +554,8 @@ fn start_sync_notarizations_body(ctx: Ctx) anyerror!void {
     {
         var manager = try init_manager(ctx, "write", prefix, &cache_ref);
         defer manager.deinit();
-        try manager.put_notarization(round, digest, &notarization);
-        try manager.start_sync_notarizations(round);
+        try (try manager.put_notarization(round, digest, &notarization)).wait_release();
+        try (try manager.start_sync_notarizations(round)).wait_release();
     }
 
     var manager = try open_manager(ctx, "read", prefix, &cache_ref);

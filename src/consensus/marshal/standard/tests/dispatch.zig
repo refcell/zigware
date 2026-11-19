@@ -1245,6 +1245,98 @@ test "standard finalization sync does not block mailbox" {
     try run(sync_not_blocking_body);
 }
 
+fn certify_call(
+    mailbox: Started.A.Mailbox,
+    round: Round,
+    block: common.Block,
+    returned: *bool,
+) !bool {
+    defer returned.* = true;
+    return mailbox.certified(round, block);
+}
+
+/// Releases every parked sync until `stop` is set (startup waits on started syncs).
+fn release_until(ctx: Ctx, pending: *runtime.storage.mocks.DelayedSync, stop: *const bool) void {
+    while (!stop.*) {
+        pending.release_all();
+        ctx.sleep(.fromMilliseconds(1)) catch return;
+    }
+}
+
+/// Cache syncs are pooled off the actor loop (commonware hands acks a sync handle and
+/// pools the notarization's). With the notarization's and the certified block's syncs held,
+/// the mailbox still answers and `certified` waits; on release it returns true, and on
+/// failure the actor ends with the error (commonware panics, as in
+/// `test_mailbox_certified_sync_failure_panics`).
+fn certify_sync_body(ctx: Ctx, comptime fail: bool) anyerror!void {
+    var pending: runtime.storage.mocks.DelayedSync = .init(gpa, ctx.io());
+    defer pending.deinit();
+    var delayed: runtime.storage.mocks.DelayedSynced = .init(gpa, ctx.storage, &pending);
+    var actor_ctx = ctx;
+    actor_ctx.storage = delayed.storage();
+    const io = ctx.io();
+    var stop = false;
+    var releaser = try io.concurrent(release_until, .{ ctx, &pending, &stop });
+    defer if (!stop) releaser.cancel(io);
+    var env: Env = undefined;
+    try env.init(actor_ctx, "certify-sync");
+    var ended = false;
+    defer if (!ended) {
+        pending.unblock();
+        env.deinit();
+    };
+    const round = round_at(1);
+    // Quiesce startup: after a mailbox round trip nothing is parked.
+    _ = try env.started.mailbox.get_verified(round);
+    stop = true;
+    releaser.cancel(io);
+    pending.release_all();
+    try testing.expectEqual(0, pending.parked());
+    const block = try block_one(100);
+    try notarize(&env, 1, 0, block.digest());
+    // The notarization's sync parks; then the certified block's.
+    while (pending.parked() == 0) try ctx.sleep(.fromMilliseconds(1));
+    const notarization_held = pending.parked();
+    var returned = false;
+    const args = .{ env.started.mailbox, round, try ready(block), &returned };
+    var call = try io.concurrent(certify_call, args);
+    defer _ = call.cancel(io) catch {};
+    while (pending.parked() == notarization_held) try ctx.sleep(.fromMilliseconds(1));
+    // The held syncs do not block the mailbox, and the barrier is not acknowledged.
+    try testing.expect(try env.started.mailbox.get_verified(round_at(2)) == null);
+    const held = pending.parked();
+    try ctx.sleep(.fromMilliseconds(50));
+    try testing.expectEqual(held, pending.parked());
+    try testing.expect(!returned);
+    if (fail) {
+        // The dropped acknowledgement reports not durable, and the actor ends with the error.
+        pending.fail_all();
+        try testing.expect(!try call.await(io));
+        ended = true;
+        defer env.fixture.deinit(gpa);
+        try testing.expectError(error.Io, env.started.join());
+        return;
+    }
+    pending.release_all();
+    try testing.expect(try call.await(io));
+}
+
+test "standard certify barrier sync is pooled off the actor loop" {
+    try run(struct {
+        fn body(ctx: Ctx) anyerror!void {
+            return certify_sync_body(ctx, false);
+        }
+    }.body);
+}
+
+test "standard failed certify barrier sync stops the actor" {
+    try run(struct {
+        fn body(ctx: Ctx) anyerror!void {
+            return certify_sync_body(ctx, true);
+        }
+    }.body);
+}
+
 fn processed_is_one(ctx: Ctx) bool {
     const text = ctx.encode(gpa) catch return false;
     defer gpa.free(text);

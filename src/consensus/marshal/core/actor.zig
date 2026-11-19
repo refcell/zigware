@@ -8,11 +8,12 @@
 //! arrival order, except that it first releases every durable pooled sync, then takes every
 //! ready buffer waiter, then every resolved acknowledgement, even before their notices
 //! arrive, as commonware's biased `select_loop!` prefers syncs, then waiters, then
-//! acknowledgements, then the mailbox, then the resolver. A finalized sync whose completion
-//! is still in flight when it starts is pooled until it completes; one already complete
-//! releases its batch at once. The durability acks of `proposed`, `verified`, and
-//! `certified` fire once the write returns. A storage or allocation error stops the actor
-//! with that error (commonware panics).
+//! acknowledgements, then the mailbox, then the resolver. Storage syncs return
+//! `runtime.storage.Completion`s, which `settle` releases at once when complete and pools
+//! otherwise: a finalized sync releases its dispatch batch, `proposed`/`verified`/`certified`
+//! send their durability ack, and a notarization's sync is observed. A storage or
+//! allocation error, including a failed pooled sync, stops the actor with that error
+//! (commonware panics).
 //!
 //! The handlers live in `actor_ingress.zig` (mailbox), `actor_backfill.zig` (resolver), and
 //! `actor_finalize.zig` (storage, floors, repair, and dispatch).
@@ -107,7 +108,7 @@ pub fn Actor(comptime P: type) type {
             resolver: HandlerMessage,
             /// Buffer waiter `id` recorded its outcome.
             waiter: u64,
-            /// The pooled finalized-archive sync `seq` became durable.
+            /// The pooled sync with this pool id completed.
             synced: u64,
             /// The armed application acknowledgement of this generation resolved.
             ack: u64,
@@ -155,7 +156,7 @@ pub fn Actor(comptime P: type) type {
         started: bool = false,
         inbox: Inbox = undefined,
         waiters: Waiters = undefined,
-        /// Finalized-archive syncs waiting to become durable.
+        /// Finalized-archive and certify syncs waiting to complete.
         syncs: Syncs = undefined,
         /// The task waiting on the current application acknowledgement.
         ack_watch: ?Io.Future(void) = null,
@@ -387,8 +388,8 @@ pub fn Actor(comptime P: type) type {
         fn handle(self: *Self, event: Event) !bool {
             switch (event) {
                 .closed => return false,
-                .synced => |seq| {
-                    if (self.syncs.take_notified(seq)) |taken| try self.release_sync(taken);
+                .synced => |id| {
+                    if (self.syncs.take_notified(id)) |taken| try self.release_sync(taken);
                 },
                 .waiter => |id| {
                     const done = self.waiters.take_notified(id) orelse return true;
@@ -453,14 +454,34 @@ pub fn Actor(comptime P: type) type {
             }
         }
 
-        /// A durable finalized-archive sync releases its batch for dispatch; a failed one
-        /// stops the actor (commonware panics on a failed finalized sync).
+        /// Releases `kind` (taken, also on error) once `durable` (taken) completes: at once
+        /// when it already has (commonware's pool would yield it next, ahead of every other
+        /// event), otherwise from the pool.
+        pub fn settle(self: *Self, kind: Syncs.Kind, durable: store.Durable) !void {
+            if (durable.poll()) |result| {
+                durable.release();
+                return self.release_sync(.{ .kind = kind, .result = result });
+            }
+            var owned = kind;
+            errdefer if (owned == .ack) owned.ack.deinit();
+            try self.syncs.push(owned, durable);
+        }
+
+        /// A durable sync releases what it holds: a finalized batch for dispatch, or an
+        /// acknowledgement. A failed one stops the actor (commonware panics on a failed
+        /// marshal sync) and drops its acknowledgement.
         fn release_sync(self: *Self, taken: Syncs.Taken) !void {
-            const seq = taken.seq;
-            assert(!self.syncs.tasks.contains(seq));
+            var kind = taken.kind;
+            errdefer if (kind == .ack) kind.ack.deinit();
             try taken.result;
-            self.dispatch_gate.release(seq);
-            try finalize.try_dispatch_blocks(self);
+            switch (kind) {
+                .finalized => |seq| {
+                    self.dispatch_gate.release(seq);
+                    try finalize.try_dispatch_blocks(self);
+                },
+                .ack => |*ack| ack.send({}) catch {},
+                .observed => {},
+            }
         }
 
         /// Handles every buffer waiter that is already ready, as commonware's biased
@@ -740,17 +761,30 @@ pub fn Actor(comptime P: type) type {
             }
         };
 
-        /// Pooled finalized-archive syncs (commonware's `PooledSync::Finalized`): each waits on
-        /// its completion in its own task, records the result, and posts a `synced` notice. A
-        /// sync cancelled at shutdown releases nothing.
+        /// Pooled syncs (commonware's `PooledSync`): each waits on its completion in its own
+        /// task, records the result, and posts a `synced` notice. A finalized sync releases its
+        /// dispatch batch; an acknowledged one sends its acknowledgement. A sync cancelled at
+        /// shutdown releases nothing and drops its acknowledgement.
         pub const Syncs = struct {
             gpa: Allocator,
             io: Io,
             inbox: *Inbox,
-            /// By sync sequence number, in start order.
+            /// By pool id, in start order.
             tasks: std.AutoArrayHashMapUnmanaged(u64, *Pending) = .empty,
+            id_next: u64 = 0,
+
+            /// What a completed sync releases.
+            pub const Kind = union(enum) {
+                /// The dispatch-gate batch `seq`.
+                finalized: u64,
+                /// A durability acknowledgement (`proposed`, `verified`, `certified`).
+                ack: oneshot.Sender(void),
+                /// Nothing: no caller waits, but a failure still stops the actor.
+                observed,
+            };
 
             const Pending = struct {
+                kind: Kind,
                 durable: std.atomic.Value(bool) = .init(false),
                 /// Written before `durable` is set.
                 failure: ?SyncError = null,
@@ -759,63 +793,68 @@ pub fn Actor(comptime P: type) type {
             const SyncError = runtime.storage.Error;
 
             /// A completed sync taken from the pool.
-            pub const Taken = struct { seq: u64, result: SyncError!void };
+            pub const Taken = struct { kind: Kind, result: SyncError!void };
 
-            /// Pools sync `seq` until `durable` (taken) completes.
-            pub fn push(self: *Syncs, seq: u64, durable: store.Durable) !void {
+            /// Pools `kind` until `durable` (taken) completes. On error the caller keeps `kind`.
+            pub fn push(self: *Syncs, kind: Kind, durable: store.Durable) !void {
                 errdefer durable.release();
                 assert(durable.is_pending());
-                assert(!self.tasks.contains(seq));
+                const id = self.id_next;
+                assert(!self.tasks.contains(id));
                 try self.tasks.ensureUnusedCapacity(self.gpa, 1);
                 const pending = try self.gpa.create(Pending);
                 errdefer self.gpa.destroy(pending);
-                pending.* = .{};
-                const args = .{ self.inbox, seq, durable, pending };
+                pending.* = .{ .kind = kind };
+                const args = .{ self.inbox, id, durable, pending };
                 pending.future = try self.io.concurrent(wait, args);
-                self.tasks.putAssumeCapacityNoClobber(seq, pending);
+                self.tasks.putAssumeCapacityNoClobber(id, pending);
+                self.id_next = id + 1;
             }
 
-            fn wait(inbox: *Inbox, seq: u64, durable: store.Durable, pending: *Pending) void {
+            fn wait(inbox: *Inbox, id: u64, durable: store.Durable, pending: *Pending) void {
                 durable.wait_release() catch |err| switch (err) {
                     error.Canceled => return, // Shutdown: release nothing.
                     else => pending.failure = err,
                 };
                 pending.durable.store(true, .release);
-                _ = inbox.push(.{ .synced = seq });
-            }
-
-            fn result_of(pending: *const Pending) SyncError!void {
-                if (pending.failure) |err| return err;
+                _ = inbox.push(.{ .synced = id });
             }
 
             /// Takes the oldest completed sync, if any.
             pub fn take_ready(self: *Syncs) ?Taken {
-                for (self.tasks.keys(), self.tasks.values()) |seq, pending| {
+                for (self.tasks.keys(), self.tasks.values()) |id, pending| {
                     if (!pending.durable.load(.acquire)) continue;
-                    const result = result_of(pending);
-                    self.reap(seq);
-                    return .{ .seq = seq, .result = result };
+                    return self.take(id);
                 }
                 return null;
             }
 
-            /// Takes sync `seq` after its notice; null when already taken.
-            pub fn take_notified(self: *Syncs, seq: u64) ?Taken {
-                const pending = self.tasks.get(seq) orelse return null;
+            /// Takes sync `id` after its notice; null when already taken.
+            pub fn take_notified(self: *Syncs, id: u64) ?Taken {
+                const pending = self.tasks.get(id) orelse return null;
                 assert(pending.durable.load(.acquire));
-                const result = result_of(pending);
-                self.reap(seq);
-                return .{ .seq = seq, .result = result };
+                return self.take(id);
             }
 
-            fn reap(self: *Syncs, seq: u64) void {
-                const pending = (self.tasks.fetchOrderedRemove(seq) orelse return).value;
+            fn take(self: *Syncs, id: u64) Taken {
+                const pending = self.tasks.get(id).?;
+                const result: SyncError!void = if (pending.failure) |err| err else {};
+                return .{ .kind = self.remove(id), .result = result };
+            }
+
+            fn remove(self: *Syncs, id: u64) Kind {
+                const pending = self.tasks.fetchOrderedRemove(id).?.value;
                 pending.future.cancel(self.io);
+                const kind = pending.kind;
                 self.gpa.destroy(pending);
+                return kind;
             }
 
             fn deinit(self: *Syncs) void {
-                while (self.tasks.count() > 0) self.reap(self.tasks.keys()[0]);
+                while (self.tasks.count() > 0) {
+                    var kind = self.remove(self.tasks.keys()[0]);
+                    if (kind == .ack) kind.ack.deinit();
+                }
                 self.tasks.deinit(self.gpa);
                 self.* = undefined;
             }

@@ -265,8 +265,9 @@ ports its range's tests and the helpers defined in it, into
 - Marshal's core types port commonware's `Arc`-shared blocks as variant handles:
   `clone_block` adds a reference, `deinit_block` drops one; staging, subscriptions, and
   caches own what they hold.
-- The Zig archives' `start_sync` finishes the sync before returning, so the cache's
-  `put_*`/`start_sync_*` calls are durable on return instead of returning sync handles.
+- The cache's `put_verified`/`put_notarized`/`put_notarization`/`start_sync_*` return the
+  archives' `runtime.storage.Completion` (commonware's sync handle); `put_certified`,
+  `put_finalization`, and the epoch metadata sync before they return, as commonware's do.
   `durable(result, round, name)` keeps commonware's policy: shutdown (`Canceled`/`Closed`)
   reports not durable, any other sync failure panics (no `should_panic` test in Zig).
 - Buffer waiters and the pending floor's waiter are aborted through an `Aborter` type
@@ -277,8 +278,8 @@ ports its range's tests and the helpers defined in it, into
   parent already available when subscribed is buffered at once, so `peek` and prefetching
   behave as in commonware. Commonware's `should_panic` ancestry cases are covered through
   `is_contiguous_chain` (Zig cannot catch panics).
-- The gates' staged ack is `oneshot.Sender(void)`, sent once the block is persisted (the
-  Zig caches are durable on return), instead of a sync handle.
+- The gates' staged ack is `oneshot.Sender(void)`, sent once the block's sync completes,
+  instead of a sync handle.
 - Mailbox messages are `{ gpa, body }`: the body owns its blocks, certificates, `some`
   recipients, hint targets, and responders, and `discard` frees them when the mailbox drops
   the message. `proposed`/`verified`/`certified` acks are `oneshot.Sender(void)` for the
@@ -290,9 +291,9 @@ ports its range's tests and the helpers defined in it, into
   resolver handler, buffer waiters and a watcher on the current application ack push their
   completions, and events are handled in arrival order rather than `select_loop!`'s
   priority. `store.Durable` is `runtime.storage.Completion` (async start_sync step 6): a
-  finalized sync still in flight when it starts is pooled in `Syncs` until it completes,
-  and one already complete releases the dispatch gate in the event that starts it. The
-  cache's verified and notarization syncs are still waited inline. A storage or allocation error ends the actor with the error where
+  sync still in flight is pooled in `Syncs` until it completes (a finalized batch, an ack,
+  or an observed notarization sync); one already complete is released in the event that
+  starts it. Backfill's notarized repair waits on its two syncs inline, as commonware does. A storage or allocation error ends the actor with the error where
   commonware panics. The actor is split into `actor.zig` (state, init, loop, waiters),
   `actor_ingress.zig` (mailbox), `actor_backfill.zig` (resolver), and `actor_finalize.zig`
   (storage, floors, repair, dispatch) to keep files and functions within TigerStyle.
@@ -813,3 +814,8 @@ job to gate, and `mocks/strategy.rs`'s GatedStrategy has no other user).
 - 2026-11-19: async start_sync step 6 (marshal half, part 1): `store.Durable` is
   `runtime.storage.Completion`; the archives' completions are no longer waited inline, and
   a finalized sync in flight is pooled until it completes (a failed one stops the actor).
+- 2026-11-19: step 6 part 2: the cache's verified, notarized, and notarization puts start
+  their syncs as commonware's do, and the actor pools them (`Syncs.Kind`: finalized, ack,
+  observed). New dispatch.zig tests hold the cache's syncs with `DelayedSync`: the mailbox
+  answers and `certified` waits until release, and a failed sync stops the actor
+  (the Zig side of `test_mailbox_certified_sync_failure_panics`, still not portable).

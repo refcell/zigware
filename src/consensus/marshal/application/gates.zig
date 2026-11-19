@@ -7,8 +7,8 @@
 //! `deinit`; commonware's `Arc<Mutex<..>>`) whose entries are ordered by round, so pruning
 //! releases them, and wakes the tasks parked on them, in a deterministic order.
 //!
-//! Commonware's staged ack carries a durable-sync handle; marshal's Zig caches are durable when
-//! a put returns, so the ack is `oneshot.Sender(void)`, sent once the block is persisted. A
+//! Commonware's staged ack carries a durable-sync handle; here the ack is
+//! `oneshot.Sender(void)`, which the actor sends once the block's sync completes. A
 //! dropped ack means the block was never persisted.
 
 const std = @import("std");

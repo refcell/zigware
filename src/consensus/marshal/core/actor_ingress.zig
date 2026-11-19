@@ -4,6 +4,7 @@
 //! message it handles.
 
 const std = @import("std");
+const runtime = @import("runtime");
 const assert = std.debug.assert;
 const codec = @import("codec");
 const types = @import("../../types.zig");
@@ -179,8 +180,8 @@ fn persist_verified(self: anytype, round: Round, block: anytype, ack: anytype) !
     var sender = ack;
     errdefer sender.deinit();
     _ = try finalize.ingest(self, &owned);
-    try self.cache.put_verified(round, owned.digest(), &owned);
-    sender.send({}) catch {};
+    const durable = try self.cache.put_verified(round, owned.digest(), &owned);
+    return self.settle(.{ .ack = sender }, durable);
 }
 
 /// Stores a certified block unless the verified archive holds it, and acknowledges once the
@@ -195,13 +196,17 @@ fn certified(self: anytype, round: Round, block: anytype, ack: anytype) !void {
     const digest = owned.digest();
     // At most one notarization exists per round, so the notarized slot cannot belong to
     // another payload: a held verified copy already vouches for the block.
-    if (try self.cache.has_verified(round, digest)) {
-        try self.cache.start_sync_verified(round);
-    } else {
+    const block_sync = if (try self.cache.has_verified(round, digest))
+        try self.cache.start_sync_verified(round)
+    else
         try self.cache.put_notarized(round, digest, &owned);
-    }
-    try self.cache.start_sync_notarizations(round);
-    sender.send({}) catch {};
+    // Hold the barrier until the round's notarization (when one was accepted before this
+    // message) is durable alongside the block. The pool waits off the actor loop.
+    const notarization_sync = self.cache.start_sync_notarizations(round) catch |err| {
+        block_sync.release();
+        return err;
+    };
+    return self.settle(.{ .ack = sender }, try notarization_sync.join(block_sync));
 }
 
 /// Certification authenticates the block's commitment and its parent's.
@@ -228,12 +233,13 @@ fn on_notarization(self: anytype, notarization: anytype) !void {
     const round = owned.round();
     const commitment = owned.proposal.payload;
     const digest = V.commitment_to_inner(commitment);
-    try self.cache.put_notarization(round, digest, &owned);
+    // No consensus caller waits on these syncs; the pool observes them.
+    try self.settle(.observed, try self.cache.put_notarization(round, digest, &owned));
     var block = try finalize.find_block_by_commitment(self, commitment) orelse return;
     defer V.deinit_block(self.gpa, &block);
     _ = try finalize.ingest(self, &block);
     if (try self.cache.has_verified(round, digest)) return;
-    try self.cache.put_notarized(round, digest, &block);
+    try self.settle(.observed, try self.cache.put_notarized(round, digest, &block));
 }
 
 /// Caches a finalization and stores its block when local, or fetches the block by round.

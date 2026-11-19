@@ -5,9 +5,9 @@
 //! round (older epochs are destroyed whole), the certified archive by height. A metadata store
 //! records the floor and ceiling epochs that may hold data, so a restart reopens only them.
 //!
-//! Marshal waits on the archives' `start_sync` completions at once (async start_sync rollout
-//! step 6 pipelines them), so commonware's sync handles become plain calls: a returned
-//! `put_*` is durable.
+//! `put_verified`, `put_notarized`, `put_notarization`, and the `start_sync_*` calls return
+//! the archives' completions (commonware's sync handles), which the caller waits on or pools;
+//! `put_certified`, `put_finalization`, and the epoch metadata are durable when they return.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -15,6 +15,7 @@ const Allocator = std.mem.Allocator;
 const codec = @import("codec");
 const runtime = @import("runtime");
 const storage = @import("storage");
+const Completion = runtime.storage.Completion;
 const types = @import("../../types.zig");
 const simplex_types = @import("../../simplex/types.zig");
 
@@ -301,7 +302,7 @@ pub fn Manager(comptime V: type, comptime S: type) type {
             });
         }
 
-        /// Stores `block` (borrowed) in `archive` at `index` under `digest`, then syncs.
+        /// Stores `block` (borrowed) in `archive` at `index` under `digest`, then starts a sync.
         fn put_block(
             self: *Self,
             archive: *BlockArchive,
@@ -309,17 +310,14 @@ pub fn Manager(comptime V: type, comptime S: type) type {
             digest: Digest,
             block: *const V.Block,
             multi: bool,
-        ) !void {
+        ) !Completion {
             const stored = try V.into_stored(self.gpa, block);
             defer codec.free(V.StoredBlock, self.gpa, stored);
-            if (multi) {
-                try archive.put_multi_sync(index, digest.bytes, stored);
-            } else {
-                try archive.put_sync(index, digest.bytes, stored);
-            }
+            if (multi) return archive.put_multi_start_sync(index, digest.bytes, stored);
+            return archive.put_start_sync(index, digest.bytes, stored);
         }
 
-        /// Adds a verify-stage candidate block and syncs it.
+        /// Adds a verify-stage candidate block and starts its sync.
         ///
         /// Callers may start this after structural validation and before the application
         /// verdict, so presence here does not mean the application accepted the block. No
@@ -331,13 +329,13 @@ pub fn Manager(comptime V: type, comptime S: type) type {
             round: Round,
             digest: Digest,
             block: *const V.Block,
-        ) !void {
-            const cache = try self.with_epoch(round.epoch) orelse return;
+        ) !Completion {
+            const cache = try self.with_epoch(round.epoch) orelse return .ok;
             const view = round.view.get();
             if (try cache.verified_blocks.has_at(view, &digest.bytes)) {
-                return cache.verified_blocks.sync();
+                return cache.verified_blocks.start_sync();
             }
-            try self.put_block(&cache.verified_blocks, view, digest, block, true);
+            return self.put_block(&cache.verified_blocks, view, digest, block, true);
         }
 
         /// Adds a block to the height-indexed certified archive, whether or not it is certified.
@@ -356,42 +354,44 @@ pub fn Manager(comptime V: type, comptime S: type) type {
             if (epoch.get() > ceiling.get()) return;
             const cache = try self.with_epoch(epoch) orelse return;
             if (try cache.certified_blocks.has_at(height.get(), &digest.bytes)) return;
-            try self.put_block(&cache.certified_blocks, height.get(), digest, block, true);
+            const archive = &cache.certified_blocks;
+            try (try self.put_block(archive, height.get(), digest, block, true)).wait_release();
         }
 
-        /// Adds a notarized block and syncs it.
+        /// Adds a notarized block and starts its sync.
         pub fn put_notarized(
             self: *Self,
             round: Round,
             digest: Digest,
             block: *const V.Block,
-        ) !void {
-            const cache = try self.with_epoch(round.epoch) orelse return;
-            try self.put_block(&cache.notarized_blocks, round.view.get(), digest, block, false);
+        ) !Completion {
+            const cache = try self.with_epoch(round.epoch) orelse return .ok;
+            return self.put_block(&cache.notarized_blocks, round.view.get(), digest, block, false);
         }
 
-        /// Syncs every write the round's verified-block archive accepted. An absent epoch has
-        /// nothing to sync.
-        pub fn start_sync_verified(self: *Self, round: Round) !void {
-            const cache = self.find(round.epoch) orelse return;
-            try (try cache.verified_blocks.start_sync()).wait_release();
+        /// Starts a sync of every write the round's verified-block archive accepted; the caller
+        /// waits on or releases the completion. An absent epoch has nothing to sync.
+        pub fn start_sync_verified(self: *Self, round: Round) !Completion {
+            const cache = self.find(round.epoch) orelse return .ok;
+            return cache.verified_blocks.start_sync();
         }
 
-        /// Syncs every write the round's notarization archive accepted.
-        pub fn start_sync_notarizations(self: *Self, round: Round) !void {
-            const cache = self.find(round.epoch) orelse return;
-            try (try cache.notarizations.start_sync()).wait_release();
+        /// Starts a sync of every write the round's notarization archive accepted.
+        pub fn start_sync_notarizations(self: *Self, round: Round) !Completion {
+            const cache = self.find(round.epoch) orelse return .ok;
+            return cache.notarizations.start_sync();
         }
 
-        /// Adds a notarization and syncs it.
+        /// Adds a notarization and starts its sync.
         pub fn put_notarization(
             self: *Self,
             round: Round,
             digest: Digest,
             notarization: *const Notarization,
-        ) !void {
-            const cache = try self.with_epoch(round.epoch) orelse return;
-            try cache.notarizations.put_sync(round.view.get(), digest.bytes, notarization.*);
+        ) !Completion {
+            const cache = try self.with_epoch(round.epoch) orelse return .ok;
+            const view = round.view.get();
+            return cache.notarizations.put_start_sync(view, digest.bytes, notarization.*);
         }
 
         /// Adds a finalization and syncs it. The blocking sync is intentional: an application
@@ -585,10 +585,10 @@ test "blocks round trip through the epoch caches and survive a restart" {
     const round: Round = .new(.new(2), .new(7));
 
     var manager = try harness.open();
-    try manager.put_verified(round, block.digest(), &block);
+    try (try manager.put_verified(round, block.digest(), &block)).wait_release();
     // A second put of the same candidate is not duplicated.
-    try manager.put_verified(round, block.digest(), &block);
-    try manager.put_notarized(.new(.new(3), .new(1)), block.digest(), &block);
+    try (try manager.put_verified(round, block.digest(), &block)).wait_release();
+    try (try manager.put_notarized(.new(.new(3), .new(1)), block.digest(), &block)).wait_release();
     try testing.expect(try manager.has_verified(round, block.digest()));
     try testing.expect(!try manager.has_verified(.new(.new(2), .new(8)), block.digest()));
     const stored = (try manager.get_verified(round)).?;
@@ -621,10 +621,10 @@ test "pruning by view destroys older epochs and refuses their writes" {
 
     var manager = try harness.open();
     defer manager.deinit();
-    try manager.put_verified(.new(.new(1), .new(4)), block.digest(), &block);
+    try (try manager.put_verified(.new(.new(1), .new(4)), block.digest(), &block)).wait_release();
     try manager.put_certified(.new(1), .new(1), block.digest(), &block);
-    try manager.put_verified(.new(.new(2), .new(1)), block.digest(), &block);
-    try manager.put_verified(.new(.new(2), .new(6)), block.digest(), &block);
+    try (try manager.put_verified(.new(.new(2), .new(1)), block.digest(), &block)).wait_release();
+    try (try manager.put_verified(.new(.new(2), .new(6)), block.digest(), &block)).wait_release();
 
     try manager.prune_by_view(.new(.new(2), .new(5)));
     var epochs: [4]Epoch = undefined;
@@ -636,10 +636,10 @@ test "pruning by view destroys older epochs and refuses their writes" {
     try testing.expect(try manager.has_verified(.new(.new(2), .new(6)), block.digest()));
 
     // Writes to a pruned epoch are dropped without reopening it.
-    try manager.put_verified(.new(.new(1), .new(9)), block.digest(), &block);
+    try (try manager.put_verified(.new(.new(1), .new(9)), block.digest(), &block)).wait_release();
     try testing.expectEqual(1, manager.open_epochs(&epochs).len);
     // A write above the ceiling opens its epoch.
-    try manager.put_verified(.new(.new(5), .new(0)), block.digest(), &block);
+    try (try manager.put_verified(.new(.new(5), .new(0)), block.digest(), &block)).wait_release();
     try testing.expectEqual(2, manager.open_epochs(&epochs).len);
     // A certified write above the ceiling is dropped: its epoch comes from a claimed height.
     try manager.put_certified(.new(9), .new(90), block.digest(), &block);

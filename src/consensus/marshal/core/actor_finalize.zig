@@ -227,17 +227,7 @@ pub fn start_finalized_sync(self: anytype) !void {
         blocks.release();
         return err;
     };
-    const durable = try blocks.join(finalizations);
-    // A sync already complete releases its batch here (commonware's pool yields it on the
-    // next loop iteration, ahead of every other event); one in flight is pooled. A failed
-    // finalized sync stops the actor, as commonware panics.
-    if (durable.poll()) |result| {
-        durable.release();
-        try result;
-        self.dispatch_gate.release(seq);
-        return try_dispatch_blocks(self);
-    }
-    return self.syncs.push(seq, durable);
+    return self.settle(.{ .finalized = seq }, try blocks.join(finalizations));
 }
 
 /// A finalized block in its stored form (owned by the caller).

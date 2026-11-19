@@ -100,5 +100,5 @@ pub fn cache_block(ctx: Ctx, prefix: []const u8, round: Round, block: *const H.T
     defer cache.deinit();
     try cache.load_persisted_epochs();
     assert(prefix.len > 0);
-    try cache.put_notarized(round, H.digest(block), block);
+    try (try cache.put_notarized(round, H.digest(block), block)).wait_release();
 }

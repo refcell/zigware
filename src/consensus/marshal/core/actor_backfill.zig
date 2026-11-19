@@ -463,9 +463,15 @@ fn process_notarized(self: anytype, item: anytype) !void {
     const round = notarization.round();
     const digest = V.commitment_to_inner(commitment);
     const height = block.inner().height();
-    // Both writes are durable when they return, before the repair bookkeeping below.
-    try self.cache.put_notarized(round, digest, &block);
-    try self.cache.put_notarization(round, digest, &notarization);
+    // Wait until both writes are durable, so the repair bookkeeping below never runs ahead
+    // of storage.
+    const block_sync = try self.cache.put_notarized(round, digest, &block);
+    const notarization_sync =
+        self.cache.put_notarization(round, digest, &notarization) catch |err| {
+            block_sync.release();
+            return err;
+        };
+    try (try block_sync.join(notarization_sync)).wait_release();
     // A notarized delivery can carry the pending floor block.
     if (try finalize.ingest(self, &block)) return;
     // A cached finalization for this block finalizes it now.
