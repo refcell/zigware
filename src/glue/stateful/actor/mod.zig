@@ -66,6 +66,7 @@ test {
     _ = @import("core/processing_deferred_test.zig");
     _ = @import("core/processing_late_test.zig");
     _ = @import("core/processing_barrier_test.zig");
+    _ = @import("core/processing_mid_test.zig");
     _ = @import("core/syncing_test.zig");
     _ = @import("core/stateful_test.zig");
     _ = @import("core/stateful_more_test.zig");

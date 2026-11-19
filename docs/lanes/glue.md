@@ -548,8 +548,10 @@ ones: d = deployer (thread T-01a1d5b9-c237), u = utils, j = storage-journal
   open (2620 and 18 rstest cases). Split (2026-11-19): crypto (T-01a1d57b-08a0) takes
   finalization_completes_build_processing_finalized_parent ×6,
   recovered_handoff_ancestry_executes_once ×2, retained_verification_finishes_during_
-  finalization ×2, and maintenance_preserves_owned_requests_and_retained_work ×2, in
-  core/processing_mid_test.zig; utils keeps 2620, handoff_and_parent ×2,
+  finalization ×2, and maintenance_preserves_owned_requests_and_retained_work ×2, all 12
+  ported in core/processing_mid_test.zig (maintenance drives `Verifications` directly; it
+  found that a cancelled paused acquisition or parked request waited for `resume`, which
+  `complete_ready` now ends, as commonware's work future does); utils keeps 2620, handoff_and_parent ×2,
   shared_parent_execution_survives_cancellation ×4, unexecutable_handoff ×2, and
   concurrent_verifications_share_one_processing ×2, in core/processing_early_test.zig. Second half (3451-5885) is with simplex
   (T-01a1d5ad-c8d6), in core/processing_late_test.zig. Both build on core/testing.zig.

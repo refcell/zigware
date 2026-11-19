@@ -378,6 +378,28 @@ pub fn Verifications(comptime P: type) type {
         pub fn complete_ready(self: *Self) void {
             // Each pass handles one posted work; posts are bounded by the live works.
             while (self.take(false) catch unreachable) |work| self.complete(work); // No wait.
+            self.drop_cancelled_parked();
+        }
+
+        /// Ends parked work and paused acquisitions whose callers left: commonware's work
+        /// future ends on its caller's cancellation in any phase, so they do not wait for
+        /// `resume`.
+        fn drop_cancelled_parked(self: *Self) void {
+            // Walk backwards: a release swaps in a work already visited.
+            var index = self.works.items.len;
+            while (index > 0) {
+                index -= 1;
+                const work = self.works.items[index];
+                const parked = switch (work.phase) {
+                    .ready => true,
+                    .acquiring => |acquiring| acquiring.paused,
+                    .executing => false,
+                };
+                if (!parked or !work.request.is_cancelled()) continue;
+                assert(work.future == null);
+                self.release(work, .abstain);
+            }
+            assert(index == 0);
         }
 
         /// Waits for the next request's phase to end and handles it.
