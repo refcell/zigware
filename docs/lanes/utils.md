@@ -221,6 +221,10 @@ Every commonware `#[test]` in this lane's crates (macro and rstest cases expande
   ("out of bounds" vs "index out of bounds"). Each file's panics were removed in one planted
   bug and every one of its death tests failed: 52 utils tests (22 outside bitmap, 30 in it).
   Outside bitmap 489/391/0/98 became 489/413/0/76; bitmap/ 360/330/0/30 became 360/360/0/0.
+  Re-audit (2026-11-19, clearing lane): `time.rs` `test_as_millis_u64_overflow` only asserts
+  the panic, so it is two death tests in time.zig (489/414/0/75). The other catch_unwind entries
+  (`sampling.rs` 2, `thread_local.rs` 3) check state after the unwind, which a death test cannot
+  see; the rest are design or Rust-trait entries.
 
 Re-audit (2026-11-19, against main at f70cf67, after async start_sync, `DelayedSync`, faulty's
 `Storage.wrap`, `FlushControl`/`HeldShared`, and parallel conformance landed): 6 bitmap entries
@@ -276,9 +280,9 @@ Drop counting, Rust conversion traits, or not ported by design).
 | sync/exclusive.rs | 1 | 0 | 0 | 1 |
 | sync/mod.rs | 7 | 4 | 0 | 3 |
 | thread_local.rs | 8 | 5 | 0 | 3 |
-| time.rs | 19 | 18 | 0 | 1 |
+| time.rs | 19 | 19 | 0 | 0 |
 | vec.rs | 32 | 28 | 0 | 4 |
-| **Total** | **489** | **413** | **0** | **76** |
+| **Total** | **489** | **414** | **0** | **75** |
 
 Counting notes:
 - rstest cases are counted one per case. faults.rs `test_bft3f1_quorum_and_max_faults` (21)
@@ -326,8 +330,7 @@ Not portable:
 - `probability.rs` `expression_macro_rejects_invalid_probability`: the `probability!` macro has
   no runtime panic in zigware: `Probability.init` returns null and `ratio` rejects the input at
   compile time
-- `time.rs` `test_as_millis_u64_overflow`; `sampling.rs`
-  `weighted_index_update_panics_preserve_index`, `without_replacement_restores_weights_on_unwind`;
+- `sampling.rs` `weighted_index_update_panics_preserve_index`, `without_replacement_restores_weights_on_unwind`;
   `thread_local.rs` `test_nested_guards_rejected`, `test_create_panic_does_not_poison_held_flag`,
   `test_reset_panic_does_not_poison_held_flag`: assert via catch_unwind (panic/unwind)
 - `cache.rs` `displaced_key_destructors_follow_replacement_bookkeeping`: panicking key Drop

@@ -347,6 +347,24 @@ test "time: as_millis_u64" {
     try testing.expect(std.math.cast(u64, Duration.max.as_millis()) == null);
 }
 
+// commonware's `test_as_millis_u64_overflow`, one death test per overflowing duration.
+test "time: as_millis_u64 panics one millisecond past u64" {
+    try death.expect_panic(@src(), "duration milliseconds should fit in u64", struct {
+        fn body() !void {
+            const max_millis = Duration.from_millis(std.math.maxInt(u64));
+            _ = max_millis.checked_add(Duration.from_millis(1)).?.as_millis_u64();
+        }
+    }.body);
+}
+
+test "time: as_millis_u64 panics at the largest duration" {
+    try death.expect_panic(@src(), "duration milliseconds should fit in u64", struct {
+        fn body() !void {
+            _ = Duration.max.as_millis_u64();
+        }
+    }.body);
+}
+
 test "time: epoch and epoch_millis" {
     try testing.expectEqual(Duration.zero, SystemTime.UNIX_EPOCH.epoch());
     const plus = SystemTime.UNIX_EPOCH.checked_add(Duration.from_millis(1_001)).?;
