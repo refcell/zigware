@@ -112,3 +112,18 @@ test "conformance: lookup Message encoding matches commonware" {
     const file = @embedFile("../../conformance.toml");
     try conformance.verify(MessageConformance(), testing.allocator, name, 65536, file);
 }
+
+// commonware `test_decode_does_not_allocate`: decoding a data frame neither copies its
+// message nor allocates; the message borrows the frame's bytes.
+test "decoding a data frame borrows its message without allocating" {
+    const original: Message = .{ .data = .{ .channel = 12345, .message = "Hello, world!" } };
+    const frame = try codec.encode(Message, testing.allocator, original);
+    defer testing.allocator.free(frame);
+    const decoded = try codec.decode_cfg(Message, testing.failing_allocator, frame, 1024);
+    try testing.expectEqual(@as(u64, 12345), decoded.data.channel);
+    try testing.expectEqualStrings("Hello, world!", decoded.data.message);
+    const start = @intFromPtr(frame.ptr);
+    const message = @intFromPtr(decoded.data.message.ptr);
+    const end = message + decoded.data.message.len;
+    try testing.expect(message >= start and end <= start + frame.len);
+}
