@@ -444,3 +444,63 @@ test "chunk peaks" {
         }
     }
 }
+
+test "location checked and saturating add at the leaf bound" {
+    const max = std.math.maxInt(u64);
+    try testing.expectEqual(@as(?u64, 15), merkle.checked_add(10, 5, test_max_leaves));
+    try testing.expectEqual(@as(?u64, null), merkle.checked_add(max, 1, test_max_leaves));
+    const past = merkle.checked_add(test_max_leaves, 1, test_max_leaves);
+    try testing.expectEqual(@as(?u64, null), past);
+    // The bound is inclusive: MAX_LEAVES itself is a valid location.
+    const at_bound = merkle.checked_add(test_max_leaves - 10, 10, test_max_leaves);
+    try testing.expectEqual(@as(?u64, test_max_leaves), at_bound);
+    try testing.expectEqual(@as(u64, 15), merkle.saturating_add(10, 5, test_max_leaves));
+    try testing.expectEqual(test_max_leaves, merkle.saturating_add(max, 1, test_max_leaves));
+    const far = merkle.saturating_add(test_max_leaves, 1000, test_max_leaves);
+    try testing.expectEqual(test_max_leaves, far);
+}
+
+// Every node of a growing MMR: a height-h parent created at leaf `i` has leftmost leaf
+// `i + 1 - 2^h`, and is born that many leaves after it.
+test "subtree root position" {
+    var next_position: u64 = 0;
+    for (0..500) |leaf| {
+        try testing.expectEqual(next_position, Family.subtree_root_position(leaf, 0));
+        next_position += 1;
+        var heights = Family.parent_heights(leaf);
+        while (heights.next()) |height| {
+            const leftmost = leaf + 1 - (@as(u64, 1) << @intCast(height));
+            try testing.expectEqual(next_position, Family.subtree_root_position(leftmost, height));
+            try testing.expectEqual(leaf + 1, leftmost + Family.birth_offset(height));
+            next_position += 1;
+        }
+    }
+    try testing.expectEqual(Family.location_to_position(500), next_position);
+}
+
+test "birth offset" {
+    try testing.expectEqual(@as(u64, 1), Family.birth_offset(0));
+    try testing.expectEqual(@as(u64, 8), Family.birth_offset(3));
+    // The root of a full 2^62-leaf MMR is the tallest node that can exist.
+    try testing.expectEqual(test_max_leaves, Family.birth_offset(62));
+}
+
+// The peaks of a 200-leaf MMR (which depend only on its size) round-trip through their
+// leftmost leaves.
+test "leftmost leaf" {
+    var peaks = Family.peaks(Family.location_to_position(200));
+    var count: usize = 0;
+    while (peaks.next()) |peak| : (count += 1) {
+        const leftmost = Family.leftmost_leaf(peak.position, peak.height);
+        try testing.expectEqual(peak.position, Family.subtree_root_position(leftmost, peak.height));
+    }
+    try testing.expectEqual(@as(usize, @popCount(@as(u64, 200))), count);
+}
+
+test "inactive peaks" {
+    // 11 leaves: peaks cover leaves 0..8, 8..10, and 10..11.
+    const cases = [_][2]u64{ .{ 0, 0 }, .{ 7, 0 }, .{ 8, 1 }, .{ 9, 1 }, .{ 10, 2 } };
+    for (cases) |case| {
+        try testing.expectEqual(case[1], merkle.inactive_peaks(Family, 11, case[0]));
+    }
+}
