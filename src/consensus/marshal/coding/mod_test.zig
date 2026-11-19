@@ -674,6 +674,135 @@ test "marshaled reproposal validation" {
     }.body);
 }
 
+test "invalid reproposal does not open reconstruction" {
+    try common.run(struct {
+        fn body(ctx: Ctx) anyerror!void {
+            var validators = try fixture();
+            defer validators.deinit(gpa);
+            var stack: common.ValidatorStack = undefined;
+            try stack.start(ctx, &validators);
+            defer stack.stop();
+            const participants = validators.participants;
+            try stack.network.link_all(participants[0..2], shared.link);
+            const shards = stack.shards();
+
+            // A mid-epoch block stored in core marshal without opening shard reconstruction.
+            const original_round = common.round_at(0, 5);
+            const original_context: common.CodingCtx = .{
+                .round = original_round,
+                .leader = participants[1],
+                .parent = .{ .new(4), harness.genesis_commitment() },
+            };
+            const parent = harness.Sha256.hash(&.{"parent"});
+            var block = try common.coded(gpa, original_context, parent, 5, 500);
+            defer block.deinit(gpa);
+            const commitment = block.commitment();
+            try testing.expect(try stack.validator.mailbox.verified(original_round, block.clone()));
+            try testing.expect(try shards.get(commitment) == null);
+
+            // Re-proposing the old block as epoch 1's genesis parent is invalid; the payload is
+            // the parent, so verify takes the re-proposal path.
+            const round = common.round_at(1, 1);
+            const context = reproposal(round, participants[1], 0, commitment);
+            var assigned = try shards.subscribe_assigned_shard_verified(commitment);
+            defer assigned.deinit();
+            try testing.expect(!try verify_now(&stack, context, commitment));
+
+            // The re-proposer delivers this node's assigned shard. Without reconstruction state
+            // it stays buffered, so assigned shard verification cannot complete.
+            try send_assigned_shard(&stack, participants[1], &block);
+            try ctx.sleep(.fromSeconds(1));
+            try testing.expectError(error.Empty, assigned.try_recv());
+        }
+    }.body);
+}
+
+/// Gathers a window of filler commitments in the views from `first` (commonware's `fill`),
+/// which evicts the shard engine's older records.
+fn fill(shards: *const common.ShardMailbox, first: u64) !void {
+    for (first..first + harness.records) |view| {
+        var view_bytes: [8]u8 = undefined;
+        std.mem.writeInt(u64, &view_bytes, view, .big);
+        const commitment: common.Commitment = .init(
+            harness.Sha256.hash(&.{&view_bytes}),
+            harness.Sha256.hash(&.{"filler_root"}),
+            harness.Sha256.hash(&.{"filler_context"}),
+            common.committee_config(),
+        );
+        try shards.gather(commitment, common.round_at(0, view));
+    }
+}
+
+/// Whether the shard engine holds `commitment` reconstructed.
+fn cached(shards: *const common.ShardMailbox, commitment: common.Commitment) !bool {
+    var found = (try shards.get(commitment)) orelse return false;
+    found.deinit(gpa);
+    return true;
+}
+
+test "coding reproposal recreates shard state after eviction" {
+    try common.run(struct {
+        fn body(ctx: Ctx) anyerror!void {
+            var validators = try fixture();
+            defer validators.deinit(gpa);
+            var stack: common.ValidatorStack = undefined;
+            try stack.start(ctx, &validators);
+            defer stack.stop();
+            const participants = validators.participants;
+            const me = participants[0];
+            try stack.network.link_all(participants[0..2], shared.link);
+            const shards = stack.shards();
+            const marshal = &stack.validator.mailbox;
+
+            // The boundary block, stored in core marshal (the durable backstop) and cached in
+            // the shard engine.
+            const boundary_height = shared.blocks_per_epoch - 1;
+            const boundary_round = common.round_at(0, boundary_height);
+            const boundary_context: common.CodingCtx = .{
+                .round = boundary_round,
+                .leader = me,
+                .parent = .{ .new(boundary_height - 1), harness.genesis_commitment() },
+            };
+            const parent = harness.Sha256.hash(&.{"parent"});
+            var block = try common.coded(gpa, boundary_context, parent, boundary_height, 1900);
+            defer block.deinit(gpa);
+            const commitment = block.commitment();
+            try testing.expect(try marshal.verified(boundary_round, block.clone()));
+            try shards.gather(commitment, boundary_round);
+            try shards.disperse(boundary_round, block.clone());
+            try testing.expect(try cached(shards, commitment));
+
+            // Records for a window of later views evict the cached block.
+            try fill(shards, boundary_height + 1);
+            try testing.expect(!try cached(shards, commitment));
+
+            // A re-proposal above those views verifies from the core backstop, and gathers
+            // again, so the recreated state accepts the re-proposer's assigned shard.
+            const round = common.round_at(0, 40);
+            const context = reproposal(round, participants[1], boundary_height, commitment);
+            try testing.expect(try verify_now(&stack, context, commitment));
+            var assigned = try shards.subscribe_assigned_shard_verified(commitment);
+            defer assigned.deinit();
+            try send_assigned_shard(&stack, participants[1], &block);
+            try recv_within(ctx, &assigned, 5_000);
+
+            // Later records evict the recreated state, so a new assigned-shard subscription
+            // waits; the block in core marshal keeps subscriptions and certification live.
+            try fill(shards, round.view.get() + 1);
+            var evicted = try shards.subscribe_assigned_shard_verified(commitment);
+            defer evicted.deinit();
+            try testing.expect(!try cached(shards, commitment));
+            try testing.expectError(error.Empty, evicted.try_recv());
+            var subscription = try marshal.subscribe_by_commitment(commitment, .wait);
+            defer subscription.deinit();
+            var core_block = try subscription.recv();
+            defer core_block.deinit(gpa);
+            try testing.expect(core_block.commitment().eql(commitment));
+            try testing.expect(try certify_now(&stack, round, commitment));
+        }
+    }.body);
+}
+
 test {
     _ = common;
 }
