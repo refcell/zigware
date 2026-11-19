@@ -472,8 +472,9 @@ Owns `src/glue/dkg`. Reference: `glue/src/dkg` (about 24k Rust lines).
 - [x] orchestrator: limits (`max_payload_size`) with `prefixes_simplex`.
 - [ ] orchestrator: mailbox, actor, and mod.rs's tests. (bootstrap and probe moved to the p2p lane, T-01a1d59c-49e5, which
   owns src/glue/dkg/bootstrap/ and src/glue/dkg/probe/.)
-- [ ] tests: the dkg and reshare harnesses, properties, and mocks; lookup's peer-activation
-  test.
+- [x] ~~tests: the dkg and reshare harnesses, properties, and mocks; lookup's peer-activation
+  test.~~ Moved to the bls-math lane (T-01a1d57b-1003).
+- [x] orchestrator: mailbox (`Mailbox(B, A).report`, reliable overflow).
 
 ### Log
 - 2026-11-16: types, network, limits, and fence with their tests; 8 types and network
@@ -499,6 +500,7 @@ Owns `src/glue/dkg`. Reference: `glue/src/dkg` (about 24k Rust lines).
   mismatch, a kept reservation after a declined proposal, and an ungated dealer log.
 - 2026-11-18: one-shot DKG mode; a singleton ceremony completes through the mailbox
   (dealing, next_log, inclusion, epoch_info), and the test catches a lost outcome.
+- 2026-11-19: orchestrator mailbox; its test catches an overflow policy that drops reports.
 
 ## dkg probe/bootstrap (owner: p2p lane)
 
