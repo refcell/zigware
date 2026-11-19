@@ -400,3 +400,7 @@ resolver; those lanes are running, so do the types first and the actors as they 
   takes 2 min together.
 - 2026-11-19: unclean_shutdown runs on every fixture, with a fixed-rng fixture
   (`Cluster.start_with`) and short timeouts (`Options.short_timeouts`).
+- 2026-11-19: determinism (1 seed per push, 5 in slow builds), distinct_states (slow builds),
+  and the conflicter, nuller, impersonator, reconfigurer, and outdated DSTs run on every
+  fixture (`Byzantine(F)`, `Cluster.start_byzantine`). Every fixture DST's quick slice now
+  takes 3 min together in ReleaseSafe.

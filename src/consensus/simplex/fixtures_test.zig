@@ -24,6 +24,11 @@ const twins_campaign_test = @import("twins_campaign_test.zig");
 const application_mod = @import("mocks/application.zig");
 const relay_mod = @import("mocks/relay.zig");
 const reporter_mod = @import("mocks/reporter.zig");
+const conflicter_mod = @import("mocks/conflicter.zig");
+const nuller_mod = @import("mocks/nuller.zig");
+const impersonator_mod = @import("mocks/impersonator.zig");
+const reconfigurer_mod = @import("mocks/reconfigurer.zig");
+const outdated_mod = @import("mocks/outdated.zig");
 const ed25519 = @import("scheme/ed25519.zig");
 const secp256r1 = @import("scheme/secp256r1.zig");
 const multisig = @import("scheme/bls12381_multisig.zig");
@@ -154,6 +159,73 @@ const Options = struct {
     short_timeouts: bool = false,
 };
 
+const Role = enum { conflicter, nuller, impersonator, reconfigurer, outdated };
+
+/// A Byzantine mock on the vote channel; the other channels stay registered and unused.
+fn Byzantine(comptime F: type) type {
+    const S = F.Scheme;
+    return struct {
+        const Self = @This();
+
+        role: Role,
+        conflicter: conflicter_mod.Conflicter(S, Sha256),
+        nuller: nuller_mod.Nuller(S, Sha256),
+        impersonator: impersonator_mod.Impersonator(S, Sha256),
+        reconfigurer: reconfigurer_mod.Reconfigurer(S, Sha256),
+        outdated: outdated_mod.Outdated(S, Sha256),
+        channels: [3]engine_mod.Channel(Params(F)),
+        handle: runtime.context.Handle(void),
+
+        /// Registers `key`'s channels and starts the mock. Must not move once started.
+        fn start(
+            self: *Self,
+            ctx: Context,
+            role: Role,
+            scheme: *const S,
+            control: Net.Control,
+        ) !void {
+            const io = ctx.io();
+            self.* = .{
+                .role = role,
+                .conflicter = .init(gpa, io, scheme),
+                .nuller = .init(gpa, scheme),
+                .impersonator = .init(gpa, scheme),
+                .reconfigurer = .init(gpa, scheme),
+                // Four times the view retention, as in commonware's `outdated` test.
+                .outdated = .init(gpa, scheme, .new(40)),
+                .channels = undefined,
+                .handle = undefined,
+            };
+            for (&self.channels, 0..) |*channel, kind| {
+                const registered = try control.register(kind, test_quota);
+                channel.* = .{ .sender = registered.sender, .receiver = registered.receiver };
+            }
+            self.handle = try ctx.child("byzantine").spawn(Self.run, .{self});
+            assert(scheme.me() != null);
+        }
+
+        fn run(_: Context, self: *Self) void {
+            const votes = &self.channels[0];
+            switch (self.role) {
+                .conflicter => self.conflicter.run(&votes.sender, &votes.receiver),
+                .nuller => self.nuller.run(&votes.sender, &votes.receiver),
+                .impersonator => self.impersonator.run(&votes.sender, &votes.receiver),
+                .reconfigurer => self.reconfigurer.run(&votes.sender, &votes.receiver),
+                .outdated => self.outdated.run(&votes.sender, &votes.receiver),
+            }
+        }
+
+        fn stop(self: *Self) void {
+            self.handle.abort() catch {};
+            self.outdated.deinit();
+            for (&self.channels) |*channel| {
+                channel.sender.deinit();
+                channel.receiver.deinit();
+            }
+        }
+    };
+}
+
 /// One validator's engine and mocks. Must not move once started.
 fn Validator(comptime F: type) type {
     const P = Params(F);
@@ -279,6 +351,8 @@ fn Cluster(comptime F: type, comptime n: u32) type {
         running: [n]bool,
         /// The validator whose application takes 10 s per step, if any.
         slow: ?usize,
+        /// Validator 0's Byzantine mock, when it runs one instead of the engine.
+        byzantine: ?*Byzantine(F),
         short_timeouts: bool,
 
         fn start(self: *Self, ctx: Context) !void {
@@ -304,11 +378,16 @@ fn Cluster(comptime F: type, comptime n: u32) type {
             self.relay = .init(gpa, io);
             self.running = @splat(false);
             self.slow = null;
+            self.byzantine = null;
             self.short_timeouts = false;
         }
 
         fn deinit(self: *Self) void {
             const io = self.ctx.io();
+            if (self.byzantine) |byzantine| {
+                byzantine.stop();
+                gpa.destroy(byzantine);
+            }
             // Abort every engine before freeing any mock: live voters relay to all of them.
             for (&self.validators, self.running) |*validator, running| {
                 if (running) validator.abort();
@@ -358,6 +437,17 @@ fn Cluster(comptime F: type, comptime n: u32) type {
                 running.* = false;
             }
             assert(std.mem.indexOfScalar(bool, &self.running, true) == null);
+        }
+
+        /// Starts validator 0 as the Byzantine mock `role`.
+        fn start_byzantine(self: *Self, role: Role) !void {
+            assert(self.byzantine == null);
+            assert(!self.running[0]);
+            const byzantine = try gpa.create(Byzantine(F));
+            errdefer gpa.destroy(byzantine);
+            const control = self.oracle().control(self.fixture.participants[0]);
+            try byzantine.start(self.ctx, role, &self.fixture.schemes[0], control);
+            self.byzantine = byzantine;
         }
 
         fn start_all_but(self: *Self, skipped: ?usize) !void {
@@ -415,9 +505,44 @@ fn Cluster(comptime F: type, comptime n: u32) type {
         /// No faults, invalid activity, disagreement among running validators, or blocks.
         fn check(self: *Self, through: u64) !void {
             for (&self.validators, self.running) |*validator, running| {
+                if (running) validator.reporter.assert_no_faults();
+            }
+            try self.check_agreement(through);
+            const blocked = try self.oracle().blocked(gpa);
+            defer gpa.free(blocked);
+            try testing.expectEqual(0, blocked.len);
+        }
+
+        /// Only validator 0 committed faults, each of an `allowed` kind, at least once (none
+        /// when `allowed` is empty); only running validators blocked, and only validator 0.
+        fn check_byzantine(self: *Self, comptime allowed: anytype) !void {
+            var count: usize = 0;
+            for (&self.validators, self.running) |*validator, running| {
                 if (!running) continue;
-                validator.reporter.assert_no_faults();
-                validator.reporter.assert_no_invalid();
+                for (validator.reporter.fault_list()) |fault| {
+                    try testing.expectEqual(0, fault.signer.get());
+                    const known = inline for (allowed) |kind| {
+                        if (fault.kind == kind) break true;
+                    } else false;
+                    try testing.expect(known);
+                    count += 1;
+                }
+            }
+            try testing.expectEqual(allowed.len > 0, count > 0);
+            const byzantine = self.fixture.participants[0];
+            const blocked = try self.oracle().blocked(gpa);
+            defer gpa.free(blocked);
+            try testing.expect(blocked.len > 0);
+            for (blocked) |pair| {
+                try testing.expect(pair.origin.order(byzantine) != .eq);
+                try testing.expect(pair.recipient.order(byzantine) == .eq);
+            }
+        }
+
+        /// No invalid activity, and running validators agree on every finalized view.
+        fn check_agreement(self: *Self, through: u64) !void {
+            for (&self.validators, self.running) |*validator, running| {
+                if (running) validator.reporter.assert_no_invalid();
             }
             for (1..through + 1) |view| {
                 var expected: ?Digest = null;
@@ -428,9 +553,6 @@ fn Cluster(comptime F: type, comptime n: u32) type {
                     expected = payload;
                 }
             }
-            const blocked = try self.oracle().blocked(gpa);
-            defer gpa.free(blocked);
-            try testing.expectEqual(0, blocked.len);
         }
     };
 }
@@ -520,13 +642,12 @@ fn partition(comptime F: type, ctx: Context) !void {
 }
 
 /// commonware `slow_and_lossy_links`: half the messages drop over 200 ms links.
-fn slow_and_lossy_links(comptime F: type, ctx: Context) !void {
+fn slow_and_lossy_links(comptime F: type, ctx: Context, required: u64) !void {
     var cluster: Cluster(F, 5) = undefined;
     try cluster.start(ctx);
     defer cluster.deinit();
     try cluster.link_all(link_ms(200, 150, 0.5), null);
     try cluster.start_all_but(null);
-    const required: u64 = if (full) 20 else 10;
     try cluster.wait_all(required);
     try cluster.check(required);
 }
@@ -677,6 +798,48 @@ fn unclean_shutdown(comptime F: type) !void {
     try testing.expect(restarts > 0);
 }
 
+/// commonware `slow_and_lossy_links_seeded`: the run's auditor state.
+fn lossy_state(comptime F: type, seed: u64, required: u64) ![8]u8 {
+    const Bound = struct {
+        fn call(ctx: Context, views: u64) !void {
+            return slow_and_lossy_links(F, ctx, views);
+        }
+    };
+    var runner = try runtime.deterministic.Runner.init(gpa, .{ .seed = seed });
+    defer runner.deinit();
+    try (try runner.start_context(Bound.call, .{required}));
+    return runner.auditor.state();
+}
+
+/// commonware `conflicter`, `nuller`, `impersonator`, and `reconfigurer`: validator 0 is
+/// Byzantine; the honest three still finalize, report its `allowed` faults, and block it.
+fn byzantine_scenario(comptime F: type, ctx: Context, role: Role, comptime allowed: anytype) !void {
+    var cluster: Cluster(F, 4) = undefined;
+    try cluster.start(ctx);
+    defer cluster.deinit();
+    try cluster.link_all(link_ms(10, 1, 1.0), null);
+    try cluster.start_byzantine(role);
+    try cluster.start_all_but(0);
+    const required: u64 = if (full) 50 else 10;
+    try cluster.wait_all(required);
+    try cluster.check_agreement(required);
+    try cluster.check_byzantine(allowed);
+}
+
+/// commonware `outdated`: re-votes for proposals 40 views old are ignored, without faults
+/// or blocks.
+fn outdated(comptime F: type, ctx: Context) !void {
+    var cluster: Cluster(F, 4) = undefined;
+    try cluster.start(ctx);
+    defer cluster.deinit();
+    try cluster.link_all(link_ms(10, 1, 1.0), null);
+    try cluster.start_byzantine(.outdated);
+    try cluster.start_all_but(0);
+    const required: u64 = 60; // Past the mock's 40-view-old re-votes.
+    try cluster.wait_all(required);
+    try cluster.check(required);
+}
+
 /// The quick slice's fixtures: one per scheme family (VRF MinPk, standard MinSig, multisig
 /// MinPk, secp256r1); engine_test.zig covers ed25519 in every build.
 const quick_fixtures = [fixtures.len]bool{ true, false, false, true, true, false, false, true };
@@ -711,7 +874,7 @@ test "all fixtures: partition heals" {
 }
 
 test "all fixtures: slow and lossy links" {
-    try run_all(slow_and_lossy_links, .{});
+    try run_all(slow_and_lossy_links, .{@as(u64, if (full) 20 else 10)});
 }
 
 test "all fixtures: backfill" {
@@ -728,6 +891,51 @@ test "all fixtures: all recovery" {
 
 test "all fixtures: all crash after nullify" {
     try run_all(all_crash_after_nullify, .{});
+}
+
+// commonware `determinism`: the same seed replays the same run (its most complex DST).
+test "all fixtures: determinism" {
+    if (builtin.mode == .debug and !full) return error.SkipZigTest;
+    const seeds: u64 = if (full) 5 else 1;
+    const required: u64 = if (full) 20 else 5;
+    inline for (fixtures, quick_fixtures) |F, quick| {
+        if (full or quick) for (0..seeds) |seed| {
+            const state = try lossy_state(F, seed, required);
+            try testing.expectEqualSlices(u8, &state, &try lossy_state(F, seed, required));
+        };
+    }
+}
+
+// commonware `test_distinct_states`: each fixture takes a different path on the same seed.
+test "all fixtures: distinct states" {
+    if (!full) return error.SkipZigTest;
+    var states: [fixtures.len][8]u8 = undefined;
+    inline for (fixtures, &states) |F, *state| state.* = try lossy_state(F, 7, 20);
+    for (states[0 .. states.len - 1], states[1..]) |a, b| {
+        try testing.expect(!std.mem.eql(u8, &a, &b));
+    }
+}
+
+test "all fixtures: conflicter is reported and blocked" {
+    const allowed = .{ .conflicting_notarize, .conflicting_finalize };
+    try run_all(byzantine_scenario, .{ Role.conflicter, allowed });
+}
+
+test "all fixtures: nuller is reported and blocked" {
+    try run_all(byzantine_scenario, .{ Role.nuller, .{.nullify_finalize} });
+}
+
+test "all fixtures: impersonator is blocked without faults" {
+    try run_all(byzantine_scenario, .{ Role.impersonator, .{} });
+}
+
+test "all fixtures: reconfigurer is blocked without faults" {
+    // Votes for the next epoch are not faults; validator 0 is blocked for the mismatch.
+    try run_all(byzantine_scenario, .{ Role.reconfigurer, .{} });
+}
+
+test "all fixtures: outdated votes are ignored" {
+    try run_all(outdated, .{});
 }
 
 test "all fixtures: unclean shutdown" {
