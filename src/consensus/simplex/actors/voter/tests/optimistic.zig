@@ -119,5 +119,69 @@ pub fn Tests(comptime h: type) type {
                 }
             }.body);
         }
+
+        // commonware test_stale_propose_does_not_block_replacement_dispatch: a single
+        // validator's view 1 proposal request stalls; its nullification exits view 1, and the
+        // voter skips to view 3 (the next term start). The stale request must not suppress the
+        // view 3 request, which dispatches before the view 1 nullification broadcast.
+        test "voter stale propose does not block replacement dispatch" {
+            try h.covers(.ed25519);
+            try run(struct {
+                fn body(ctx: Ctx) anyerror!void {
+                    const gpa = ctx.gpa();
+                    const traces = runtime.telemetry.traces;
+                    var collector = traces.Collector.init(gpa, .{});
+                    defer collector.deinit();
+                    var subscriber = collector.subscriber();
+                    subscriber.level = .debug;
+                    var net: h.Network = undefined;
+                    try net.start(ctx, 1, "stale_propose_does_not_block_replacement_dispatch");
+                    defer net.deinit();
+                    var stack: h.VoterStack = undefined;
+                    try stack.start(ctx, &net, .{
+                        .leader_timeout_ms = 10,
+                        .certification_timeout_ms = 10_000,
+                        .timeout_retry_ms = 30_000,
+                        .stall_proposals = true,
+                        .elector = h.term_elector(2, 30_000, 2),
+                        .tracer = .init(subscriber, "commonware_consensus::simplex::voter"),
+                    });
+                    defer stack.stop();
+                    _ = try stack.next_update(ctx, 5_000);
+                    // The stalled view 1 request occupies the pending request slot.
+                    try stack.wait_proposal_request(ctx, 1);
+                    try wait_nullify(ctx, &stack, 1);
+                    const round: h.Round = .new(epoch, .new(1));
+                    const certificate =
+                        try h.build(gpa, .nullification, net.schemes(), round, 1);
+                    try stack.mailbox.recovered(gpa, .{ .nullification = certificate });
+                    try stack.wait_proposal_request(ctx, 3);
+                    const replacement = try h.trace_position(
+                        &collector,
+                        "requested proposal from automaton",
+                        "simplex.voter.propose",
+                        3,
+                    );
+                    const broadcast = try h.trace_position(
+                        &collector,
+                        "broadcasting nullification",
+                        "simplex.voter.notify",
+                        1,
+                    );
+                    try testing.expect(replacement < broadcast);
+                }
+            }.body);
+        }
+
+        /// Waits up to 5 s per message for our nullify at `view`.
+        fn wait_nullify(ctx: Ctx, stack: *h.VoterStack, view: u64) !void {
+            // Bounded by the per-message wait.
+            while (true) {
+                const next = try stack.next_batcher(ctx, 5_000);
+                const message = next orelse return error.NoNullify;
+                if (message != .constructed or message.constructed != .nullify) continue;
+                if (message.constructed.view().get() == view) return;
+            }
+        }
     };
 }

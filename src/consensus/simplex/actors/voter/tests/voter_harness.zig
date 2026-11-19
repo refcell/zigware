@@ -300,6 +300,8 @@ pub fn Harness(comptime F: type) type {
             elector: elector_mod.RoundRobin(Sha256) = elector_mod.RoundRobin(Sha256).default(),
             /// Routes the voter's journal through this gate (commonware `DelayedSyncContext`).
             sync_gates: ?*runtime.storage.mocks.SyncGates = null,
+            /// The voter's tracer (commonware `test_collect_traces`).
+            tracer: runtime.telemetry.traces.Tracer = .none,
         };
 
         /// commonware `start_voter_with_floor`'s voter: 5 s leader, 6 s certification, and 60 min
@@ -529,6 +531,7 @@ pub fn Harness(comptime F: type) type {
                     .storage = journal_storage,
                     .scope = ctx.scope.child("voter"),
                 });
+                self.voter.tracer = options.tracer;
                 const batcher =
                     try actor_pkg.mailbox.new(BatcherMessage, gpa, io, options.batcher_capacity);
                 self.batcher = batcher.receiver;
@@ -860,6 +863,32 @@ pub fn Harness(comptime F: type) type {
         /// The mock application's genesis payload in `epoch`.
         pub fn genesis(epoch: Epoch) Digest {
             return application_mod.genesis(Sha256, epoch);
+        }
+
+        /// The position among debug events of the first `content` event whose innermost span is
+        /// `span_name` at `view` (commonware `trace_position`).
+        pub fn trace_position(
+            collector: *runtime.telemetry.traces.Collector,
+            content: []const u8,
+            span_name: []const u8,
+            view: u64,
+        ) !usize {
+            var buffer: [20]u8 = undefined;
+            const wanted = try std.fmt.bufPrint(&buffer, "{d}", .{view});
+            const events = collector.get_by_level(.debug);
+            var index: usize = 0;
+            // Bounded by the recorded events.
+            while (events.get(index)) |event| : (index += 1) {
+                if (!std.mem.eql(u8, event.metadata.content, content)) continue;
+                if (event.spans.len == 0) continue;
+                const span = event.spans[0];
+                if (!std.mem.eql(u8, span.content, span_name)) continue;
+                for (span.fields) |field| {
+                    if (!std.mem.eql(u8, field.name, "view")) continue;
+                    if (std.mem.eql(u8, field.value, wanted)) return index;
+                }
+            }
+            return error.MissingTrace;
         }
 
         /// A proposal at `view` of `epoch` over `view - 1`, with payload `hash(label)`.
