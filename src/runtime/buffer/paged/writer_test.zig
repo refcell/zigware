@@ -1978,3 +1978,47 @@ test "a torn extension with its new footer recovers the previous prefix" {
     try testing.expectEqual(3, try recovered.recoverable_prefix_len(0));
     try expect_read(&recovered, 0, "abc");
 }
+
+test "recoverable_prefix_len batches its reads (test_recoverable_prefix_len_batches_reads)" {
+    var h = try Harness.init();
+    defer h.deinit();
+    var w = try h.writer("prefix_batches");
+    defer w.deinit();
+    // Eight full pages plus a partial tail span three batches under a three-page budget.
+    const total = page_size * 8 + 10;
+    var data: [total]u8 = undefined;
+    for (&data, 0..) |*byte, index| byte.* = @truncate(index);
+    _ = try w.append(&data);
+    try w.sync();
+    // A sub-page budget falls back to one page per read.
+    const unbounded = std.math.maxInt(u64);
+    var reads = h.storage.reads;
+    try testing.expectEqual(total, try w.recoverable_prefix_len_scan(0, unbounded, 1, .{}));
+    try testing.expectEqual(reads + 9, h.storage.reads);
+    // A three-page budget coalesces the same scan into three reads.
+    reads = h.storage.reads;
+    const budget = physical_page_size * 3;
+    try testing.expectEqual(total, try w.recoverable_prefix_len_scan(0, unbounded, budget, .{}));
+    try testing.expectEqual(reads + 3, h.storage.reads);
+    // A cap inside the fifth page reads only the pages below it, in two batches.
+    reads = h.storage.reads;
+    const cap = page_size * 4 + 5;
+    try testing.expectEqual(cap, try w.recoverable_prefix_len_scan(0, cap, budget, .{}));
+    try testing.expectEqual(reads + 2, h.storage.reads);
+}
+
+test "a batched recoverable_prefix_len stops at a corrupt page inside a batch" {
+    var h = try Harness.init();
+    defer h.deinit();
+    var data: [page_size * 6]u8 = undefined;
+    for (&data, 0..) |*byte, index| byte.* = @truncate(index *% 7);
+    try h.append_synced("prefix_corrupt", &data);
+    // Corrupt page 4, the middle page of the second three-page batch.
+    try h.mangle("prefix_corrupt", 4 * physical_page_size + 3, &dummy_marker);
+    var w = try h.writer("prefix_corrupt");
+    defer w.deinit();
+    for ([_]usize{ 1, physical_page_size * 3, physical_page_size * 16 }) |budget| {
+        const len = try w.recoverable_prefix_len_scan(0, std.math.maxInt(u64), budget, .{});
+        try testing.expectEqual(4 * page_size, len);
+    }
+}

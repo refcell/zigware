@@ -706,30 +706,62 @@ pub const Writer = struct {
     }
 
     /// Length of the longest contiguous prefix of well-formed pages on the blob, at most
-    /// `max_size`. Pages wholly below `proven` (a logical offset known valid) are accepted
-    /// without reading. All appended bytes must have reached the blob.
+    /// `max_size`, read one page at a time (`recoverable_prefix_len_scan` with a one-page
+    /// budget).
     pub fn recoverable_prefix_len_at_most(self: *Self, proven: u64, max_size: u64) Error!u64 {
-        const page_size_value: u64 = self.page_size();
-        const pages = self.current_page + @intFromBool(self.partial_page_state != null);
-        const total_pages = @min(pages, std.math.divCeil(u64, max_size, page_size_value) catch
-            unreachable);
-        const start_page = @min(proven / page_size_value, self.current_page, total_pages);
-        var valid_len = start_page * page_size_value;
-        var page = start_page;
-        while (page < total_pages) : (page += 1) {
-            const start, _ = try paged.physical_page(page, page_size_value);
-            try self.blob.read_at(start, self.page_scratch);
-            const checksum = Checksum.validate_page(self.page_scratch) orelse break;
-            valid_len += checksum.len;
-            // A valid partial page ends the contiguous prefix wherever it appears.
-            if (checksum.len < page_size_value) break;
-        }
-        return @min(valid_len, max_size);
+        return self.recoverable_prefix_len_scan(proven, max_size, 1, .{});
     }
 
     /// `recoverable_prefix_len_at_most` without a cap.
     pub fn recoverable_prefix_len(self: *Self, proven: u64) Error!u64 {
         return self.recoverable_prefix_len_at_most(proven, std.math.maxInt(u64));
+    }
+
+    /// Length of the longest contiguous prefix of well-formed pages on the blob, at most
+    /// `max_size` (commonware `recoverable_prefix_len_at_most`). Scans forward, stopping at the
+    /// first invalid or short page. Pages wholly below `proven` (a logical offset known valid)
+    /// are accepted without reading. Each blob read covers at most `buffer_size` bytes of whole
+    /// physical pages, and at least one page. All appended bytes must have reached the blob.
+    pub fn recoverable_prefix_len_scan(
+        self: *Self,
+        proven: u64,
+        max_size: u64,
+        buffer_size: usize,
+        read_options: ReadOptions,
+    ) Error!u64 {
+        assert(buffer_size > 0);
+        const page_size_value: u64 = self.page_size();
+        const physical: usize = self.page_scratch.len;
+        const pages = self.current_page + @intFromBool(self.partial_page_state != null);
+        const total_pages = @min(pages, std.math.divCeil(u64, max_size, page_size_value) catch
+            unreachable);
+        const start_page = @min(proven / page_size_value, self.current_page, total_pages);
+        var valid_len = start_page * page_size_value;
+        if (start_page == total_pages) return @min(valid_len, max_size);
+        const batch_max: u64 = @min(@max(buffer_size / physical, 1), total_pages - start_page);
+        const batch_buffer = if (batch_max == 1)
+            self.page_scratch
+        else
+            try self.gpa.alloc(u8, @intCast(batch_max * physical));
+        defer if (batch_max > 1) self.gpa.free(batch_buffer);
+        var page = start_page;
+        while (page < total_pages) {
+            const batch: usize = @intCast(@min(batch_max, total_pages - page));
+            const start, _ = try paged.physical_page(page, page_size_value);
+            const bytes = batch_buffer[0 .. batch * physical];
+            try self.blob.read_at_options(start, bytes, read_options);
+            for (0..batch) |index| {
+                const page_bytes = bytes[index * physical ..][0..physical];
+                const checksum = Checksum.validate_page(page_bytes) orelse
+                    return @min(valid_len, max_size);
+                valid_len += checksum.len;
+                // A valid partial page ends the contiguous prefix wherever it appears.
+                if (checksum.len < page_size_value) return @min(valid_len, max_size);
+            }
+            page += batch;
+        }
+        assert(page == total_pages);
+        return @min(valid_len, max_size);
     }
 };
 
