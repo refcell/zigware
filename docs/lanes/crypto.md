@@ -487,3 +487,9 @@ the parallel lane in `blake3_tree_tests.zig`; `secret.rs` `test_debug_redacted` 
 - 2026-11-19: crypto `#[should_panic]` tests as death tests (mocks x4, transcript);
   table reconciled with the 27 ticked open items; re-audit ports secret Debug redaction and
   ed25519 from_signing_key. 394/27/14 -> 429/0/6.
+- 2026-11-19: sha256 checked for SHA-NI/ARMv8 SHA2: std's `Sha256` already uses them, but per
+  64-byte block it reloads and reshuffles the state from memory and stores the schedule.
+  `sha256_blocks.zig` compresses runs of whole blocks with the state in registers (the `sha2`
+  crate's `compress256`, commonware's large-message path); `sha256.Core` hands it whole blocks
+  and keeps std's buffering and padding. Tested against std on x86-64 and, under qemu, aarch64
+  (planted bugs in both kernels and the length accounting caught). 1 MiB: 535 to 493 µs.

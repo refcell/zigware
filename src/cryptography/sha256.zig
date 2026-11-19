@@ -1,7 +1,8 @@
 //! SHA-256 implementation of the hasher interface (commonware `cryptography/src/sha256`).
 //!
-//! Backed by `std.crypto.hash.sha2.Sha256`, which uses SHA-NI or ARMv8 SHA2 when the target
-//! has them, and `hash_many` hashes equal-length runs sixteen at a time on AVX-512
+//! Backed by `std.crypto.hash.sha2.Sha256`, except that runs of whole blocks compress on
+//! SHA-NI or ARMv8 SHA2 with the state held in registers (`sha256_blocks.zig`), where the
+//! target has them, and `hash_many` hashes equal-length runs sixteen at a time on AVX-512
 //! (`sha256_x16.zig`), as commonware does. Digests encode as their 32 raw bytes.
 
 const std = @import("std");
@@ -10,8 +11,46 @@ const codec = @import("codec");
 const assert = std.debug.assert;
 const hasher = @import("hasher.zig");
 const digest = @import("digest.zig");
+const blocks = @import("sha256_blocks.zig");
 
-pub const Core = std.crypto.hash.sha2.Sha256;
+const StdSha256 = std.crypto.hash.sha2.Sha256;
+
+/// `std.crypto.hash.sha2.Sha256` whose `update` hands whole blocks to `sha256_blocks`.
+pub const Core = struct {
+    inner: StdSha256,
+
+    pub const digest_length = StdSha256.digest_length;
+    pub const block_length = StdSha256.block_length;
+    pub const Options = StdSha256.Options;
+
+    pub fn init(options: Options) Core {
+        return .{ .inner = StdSha256.init(options) };
+    }
+
+    pub fn update(self: *Core, bytes: []const u8) void {
+        if (comptime !blocks.available) return self.inner.update(bytes);
+        var rest = bytes;
+        if (self.inner.buf_len != 0) {
+            // Top up the buffered block; std compresses it once it is full.
+            const take = @min(block_length - self.inner.buf_len, rest.len);
+            self.inner.update(rest[0..take]);
+            rest = rest[take..];
+        }
+        const whole = rest.len - rest.len % block_length;
+        if (whole > 0) {
+            assert(self.inner.buf_len == 0);
+            blocks.compress(&self.inner.s, rest[0..whole]);
+            self.inner.total_len += whole;
+            rest = rest[whole..];
+        }
+        assert(rest.len < block_length);
+        self.inner.update(rest);
+    }
+
+    pub fn final(self: *Core, out: *[StdSha256.digest_length]u8) void {
+        self.inner.final(out);
+    }
+};
 
 const digest_length = 32;
 
@@ -58,6 +97,32 @@ test "sha256 hello world through streaming and one-shot" {
     // The reset hasher returned by finalize hashes again from scratch.
     h.update("hello world");
     try testing.expect(h.finalize().eql(hello_digest));
+}
+
+test "sha256 block runs match std across lengths and split points" {
+    const gpa = testing.allocator;
+    const data = try gpa.alloc(u8, 1 << 16);
+    defer gpa.free(data);
+    var prng = std.Random.DefaultPrng.init(0x5ba256);
+    prng.random().bytes(data);
+    var lengths: [96]usize = undefined;
+    for (&lengths, 0..) |*len, i| len.* = if (i < 64) i * 37 else prng.random().uintAtMost(
+        usize,
+        data.len,
+    );
+    lengths[95] = data.len;
+    for (lengths) |len| {
+        var expected: [32]u8 = undefined;
+        StdSha256.hash(data[0..len], &expected, .{});
+        // Unaligned starts, splits inside and on block boundaries, and empty parts.
+        const a = prng.random().uintAtMost(usize, len);
+        const b = a + prng.random().uintAtMost(usize, len - a);
+        const splits = [_][2]usize{ .{ 0, 0 }, .{ a, b }, .{ len / 64 * 64, len } };
+        for (splits) |cut| {
+            const parts = [_][]const u8{ data[0..cut[0]], data[cut[0]..cut[1]], data[cut[1]..len] };
+            try testing.expectEqualSlices(u8, &expected, &Sha256.hash(&parts).bytes);
+        }
+    }
 }
 
 test "sha256 one-shot matches streaming across padding boundaries" {
