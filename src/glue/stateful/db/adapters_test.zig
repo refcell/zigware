@@ -331,8 +331,11 @@ fn run_deterministic(comptime body: fn (std.Io) anyerror!void) !void {
 }
 
 test "stateful db adapters: concurrent-read databases share read guards; writers wait" {
-    // No adapter opts in until merkle batch reference counts are atomic (see glue.md); then
-    // the qmdb variants share guards. Compact databases always serialize readers.
+    comptime std.debug.assert(AnyFixed.Shared.concurrent);
+    comptime std.debug.assert(CurrentUnorderedFixed.Shared.concurrent);
+    comptime std.debug.assert(KeylessFixed.Shared.concurrent);
+    comptime std.debug.assert(ImmutableFixed.Shared.concurrent);
+    // Compact databases still serialize readers.
     comptime std.debug.assert(!KeylessCompactFixed.Shared.concurrent);
     const cases = .{
         AnyFixed,

@@ -490,13 +490,10 @@ ones: d = deployer (thread T-01a1d5b9-c237), u = utils, j = storage-journal
   thread-safe. `SharedSource.serve` reads through a read guard (`sync_source` takes
   `*const Self` since storage's 300b704). Tested in adapters_test.zig: guard sharing and
   writers waiting (deterministic), and readers merkleizing beside a writer (threaded).
-- [ ] db: re-enable `concurrent_reads` on any, current, keyless, and immutable. It is off
-  because merkle batch reference counts (`storage/merkle/batch.zig`'s `references`,
-  `strong`, `weak`) are plain integers where commonware's are `Arc`s: with shared guards one
-  task's merkleize retains a shared parent's ancestors while another releases a sibling, and
-  processing_early/late tests crashed (write after free, unreachable) in 2 of 6 parallel
-  runs under load, 0 of 12 with the opt-in off. Flip the four flags once the counts are
-  atomic; compact stays on the mutex.
+- [x] db: `concurrent_reads` on any, current, keyless, and immutable again, since storage's
+  atomic batch reference counts (e5941c1, `storage.refcount`). They were off while merkle and
+  qmdb batch counts were plain integers: shared guards crashed processing_early/late tests in
+  2 of 6 parallel runs under load. Compact stays on the mutex.
 - [ ] tests: single_db_app.rs's engine on `glue.simulate` (simplex, marshal, buffered broadcast,
   marshal and qmdb resolvers, probe, `Stateful`), then tests/mod.rs's scenarios (finalize,
   crash/restart, pruning, state sync, lossy, partitions), multi_db_app, floor, properties.

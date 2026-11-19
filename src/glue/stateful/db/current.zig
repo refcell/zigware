@@ -32,7 +32,7 @@ pub fn Current(comptime D: type) type {
         pub const Shared = db.Shared(Self);
         /// qmdb any/current reads, batch reads, and merkleize take `*const` and are safe from
         /// several tasks at once, so `Shared` read guards share the database.
-        pub const concurrent_reads = false;
+        pub const concurrent_reads = true;
 
         inner: D,
 
