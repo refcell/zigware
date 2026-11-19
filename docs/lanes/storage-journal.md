@@ -124,7 +124,7 @@ resize, sync), `runtime.storage`, with the in-memory backend `runtime.storage.me
   `src/storage/metadata/benches/`.
 - [x] Benches: runtime buffer (`buffer_paged::append`, `read`, `sync`) under
   `src/runtime/buffer/benches/`, run from `src/runtime/benches.zig`.
-- [x] Benches: runtime `iobuf::decode_fixed` (`src/runtime/iobuf_benches.zig`), modes
+- [x] Benches: runtime `iobuf::iobuf::decode_fixed` (`src/runtime/iobuf_benches.zig`), modes
   `iobuf_bytes`, `iobuf_native`, their `_ref`s, `vec_slice`, and `slice`. Not ported: `bytes`
   and `bytes_ref` (the `bytes` crate) and `vec` (the same slice decode as `vec_slice`);
   `iobuf_bytes` wraps with `from_static`, since `IoBuf` has no external counted owner.

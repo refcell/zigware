@@ -1,4 +1,5 @@
-//! `iobuf::decode_fixed` (commonware `runtime/src/iobuf/benches`, bench `iobuf`): the cost of
+//! `iobuf::iobuf::decode_fixed` (commonware `runtime/src/iobuf/benches`; Criterion names it by
+//! module path, module `iobuf` in bench `iobuf`): the cost of
 //! an `IoBuf` handle compared to a deep-cloned vector and a borrowed slice, decoding one
 //! fixed-size value from a prebuilt payload that each iteration clones or wraps.
 //!
@@ -49,7 +50,7 @@ fn run_size(runner: *bench.Runner, comptime size: usize) !void {
     defer native.deinit(gpa);
     const borrowed = IoBuf.from_static(&payload);
     for (std.enums.values(Mode)) |mode| {
-        const benchmark = bench.Benchmark.init("iobuf::decode_fixed")
+        const benchmark = bench.Benchmark.init("iobuf::iobuf::decode_fixed")
             .with_param("mode", mode)
             .with_param("size", size);
         var workload: Decode(size) = .{

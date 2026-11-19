@@ -1,7 +1,8 @@
 //! Benchmarks of the curve25519 package (`zig build bench`).
 //!
-//! - `curve25519::batch_verify` is commonware's `benches/batch_verify.rs`: batches of
-//!   independent keys over independent 32-byte messages, sequential and on a pool.
+//! - `batch_verify::verify_batch_bytes_bench` is commonware's `benches/batch_verify.rs`, under
+//!   its Criterion name: batches of independent keys over independent 32-byte messages,
+//!   sequential and on pools of commonware's concurrency levels.
 //! - `curve25519::{sign, verify, x25519}` time single operations, each next to
 //!   `std.crypto`'s own (`impl=std`): std's Ed25519 verification is strict RFC 8032 rather
 //!   than ZIP-215, so it is a speed reference only.
@@ -89,23 +90,32 @@ fn bench_batch_verify(runner: *bench.Runner) !void {
     const gpa = runner.allocator;
     const all = [_]usize{ 1, 10, 100, 1_000, 10_000, 16_384 };
     const sizes = runner.inputs.pick([]const usize, all[0..1], all[0..4], &all);
-    const threads: u32 = 7;
-    const pool = try parallel.ThreadPool.create(gpa, runner.io, .{ .threads = threads });
-    defer pool.destroy();
+    // commonware's concurrency levels; a pool of `c - 1` workers plus the caller runs `c`.
+    const pooled_levels = [_]u32{ 8, 16, 32 };
+    var pools: [pooled_levels.len]*parallel.ThreadPool = undefined;
+    var created: usize = 0;
+    defer for (pools[0..created]) |pool| pool.destroy();
+    for (pooled_levels) |level| {
+        pools[created] = try parallel.ThreadPool.create(gpa, runner.io, .{ .threads = level - 1 });
+        created += 1;
+    }
     for (sizes) |n| {
         const batch = try Batch.init(gpa, n);
         defer batch.deinit(gpa);
-        const name = bench.Benchmark.init("curve25519::batch_verify").with_param("sigs", n);
+        const name = bench.Benchmark.init("batch_verify::verify_batch_bytes_bench")
+            .with_param("sigs", n);
         var sequential: BatchVerify(parallel.Sequential) = .{
             .batch = &batch,
             .strategy = parallel.sequential,
         };
         try runner.run(name.with_param("conc", 1), &sequential);
-        var pooled: BatchVerify(parallel.Rayon) = .{
-            .batch = &batch,
-            .strategy = parallel.Rayon.init(pool),
-        };
-        try runner.run(name.with_param("conc", threads + 1), &pooled);
+        for (pooled_levels, pools) |level, pool| {
+            var pooled: BatchVerify(parallel.Rayon) = .{
+                .batch = &batch,
+                .strategy = parallel.Rayon.init(pool),
+            };
+            try runner.run(name.with_param("conc", level), &pooled);
+        }
     }
 }
 

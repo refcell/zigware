@@ -2,8 +2,8 @@
 //!
 //! - `buffer_paged::{append,read,sync}`: commonware's page-cache benches
 //!   (`runtime/src/utils/buffer/benches`), in `buffer/benches.zig`.
-//! - `iobuf::decode_fixed`: commonware's `IoBuf` overhead bench (`runtime/src/iobuf/benches`),
-//!   in `iobuf_benches.zig`.
+//! - `iobuf::iobuf::decode_fixed`: commonware's `IoBuf` overhead bench
+//!   (`runtime/src/iobuf/benches`), in `iobuf_benches.zig`.
 //!
 //! The rest have no commonware counterpart: they measure the production runtime's I/O
 //! backends, `std.Io.Threaded` system calls against our io_uring workers
