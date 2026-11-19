@@ -548,7 +548,7 @@ batched blob read in the runtime would recover it.
   - [x] variable.rs: start_sync flush failure and the init data-before-offsets sync check,
     ported by storage-journal in `contiguous/variable_faults_test.zig` (the partition-scoped
     sync fault is `runtime.storage.mocks.SyncFault`, commonware's `SyncFaultContext`).
-- [ ] journal/zstd: byte-exact libzstd level 3 (coordinator, correcting the earlier "byte
+- [x] journal/zstd: byte-exact libzstd level 3 (coordinator, correcting the earlier "byte
   identity not required"). commonware's storage conformance hashes four `<true>` journal
   workloads written with `compression: Some(3)`, so compressed journals must emit exactly
   what `zstd::bulk::compress(.., 3)` writes: the dfast strategy with level 3's parameters,
