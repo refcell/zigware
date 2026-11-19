@@ -300,12 +300,12 @@ ports its range's tests and the helpers defined in it, into
 ## Test tally (2026-11-19, against main)
 
 Every `fn test_*` in commonware's `marshal/standard/mod.rs` and `marshal/coding/mod.rs`, by
-line, with where its Zig counterpart lives. Coding's in-progress owner: broadcast-collector (all 7). Counts:
+line, with where its Zig counterpart lives. Coding's in-progress owner: broadcast-collector. Counts:
 
 | File | Ported | In progress | Not portable | Total |
 | --- | --- | --- | --- | --- |
 | standard/mod.rs | 184 | 0 | 9 | 193 |
-| coding/mod.rs | 89 | 7 | 1 | 97 |
+| coding/mod.rs | 95 | 1 | 1 | 97 |
 
 `mocks/harness.rs` has no tests of its own: all 31 generic scenario functions are ported
 (`mocks/scenarios.zig`, `scenarios_queries.zig`, `scenarios_recoverable.zig`) and run through
@@ -597,12 +597,12 @@ job to gate, and `mocks/strategy.rs`'s GatedStrategy has no other user).
 - L4088 `test_coding_coalesced_block_delivery_trusts_finalized_subscriber`: ported (coding/mod_test.zig)
 - L4157 `test_coding_finalized_block_delivery_rejects_digest_mismatch`: ported (coding/mod_test.zig)
 - L4208 `test_coding_finalized_height_delivery_rejects_digest_mismatch`: ported (coding/mod_test.zig)
-- L4316 `test_coding_ancestry_block_delivery_recomputes_root`: in progress (broadcast-collector)
-- L4380 `test_coding_optimistic_ancestry_conflicts_with_certified_cache`: in progress (broadcast-collector)
-- L4572 `test_coding_certified_ancestry_delivery_skips_recoding`: in progress (broadcast-collector)
-- L4672 `test_coding_certification_retention_follows_finalized_tip`: in progress (broadcast-collector)
-- L4796 `test_coding_notarized_delivery_recomputes_root`: in progress (broadcast-collector)
-- L4843 `test_coding_untrusted_delivery_rejects_mismatched_root`: in progress (broadcast-collector)
+- L4316 `test_coding_ancestry_block_delivery_recomputes_root`: ported (coding/mod_test.zig)
+- L4380 `test_coding_optimistic_ancestry_conflicts_with_certified_cache`: ported (coding/mod_test.zig)
+- L4572 `test_coding_certified_ancestry_delivery_skips_recoding`: ported (coding/mod_test.zig)
+- L4672 `test_coding_certification_retention_follows_finalized_tip`: ported (coding/mod_test.zig)
+- L4796 `test_coding_notarized_delivery_recomputes_root`: ported (coding/mod_test.zig)
+- L4843 `test_coding_untrusted_delivery_rejects_mismatched_root`: ported (coding/mod_test.zig)
 - L4936 `test_coding_floor_anchor_panics_on_parent_commitment_mismatch`: not portable (see above)
 - L4989 `test_coding_default_prepare_declines`: ported (coding/tests/propose_test.zig)
 - L5045 `test_marshaled_missing_scheme_skips_propose_and_verify`: ported (coding/tests/propose_test.zig)
