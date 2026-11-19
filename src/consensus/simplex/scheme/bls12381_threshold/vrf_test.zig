@@ -229,7 +229,7 @@ test "vrf: assemble rejects too few, duplicate, unknown, and malformed attestati
         unknown[2].signer = .init(4);
         try testing.expectError(error.UnknownSigner, scheme.assemble(gpa, &unknown, sequential));
         var malformed = votes;
-        @memset(&malformed[1].signature.bytes, 0xff);
+        malformed[1].signature = .from_bytes(@splat(0xff));
         try testing.expectError(
             error.MalformedSignature,
             scheme.assemble(gpa, &malformed, sequential),

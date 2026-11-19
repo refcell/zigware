@@ -308,7 +308,7 @@ test "threshold certificate: assemble rejects sub-quorum, duplicate, unknown, ma
 
         const malformed = try gpa.dupe(Scheme(V).Attestation, attestations);
         defer gpa.free(malformed);
-        @memset(&malformed[0].signature.bytes, 0xff);
+        malformed[0].signature = .from_bytes(@splat(0xff));
         try testing.expectError(
             error.MalformedSignature,
             scheme.assemble(gpa, malformed, sequential),

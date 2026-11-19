@@ -131,7 +131,7 @@ fn verify(scheme: *const Scheme, item: TestSubject, cert: *const Certificate) !b
 }
 
 /// A signature that does not decode (commonware's truncated `Lazy`).
-const malformed: Deferred = .{ .bytes = @splat(0) };
+const malformed: Deferred = .from_bytes(@splat(0));
 
 test "secp256r1 certificate is attributable and not batchable" {
     try testing.expect(Scheme.is_attributable());

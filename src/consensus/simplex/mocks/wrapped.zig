@@ -88,15 +88,19 @@ pub fn Scheme(comptime Inner: type) type {
             var rng = utils.rng.test_rng();
             for (0..bit_len) |offset| {
                 const flip = (start + offset) % bit_len;
-                var candidate: InnerAttestation = signed;
-                candidate.signature.bytes[flip / 8] ^= @as(u8, 1) << @intCast(flip % 8);
+                var flipped = encoded;
+                flipped[flip / 8] ^= @as(u8, 1) << @intCast(flip % 8);
+                const candidate: InnerAttestation = .{
+                    .signer = signed.signer,
+                    .signature = .from_bytes(flipped),
+                };
                 if (candidate.signature.get() == null) continue;
                 const strategy = parallel.sequential;
                 if (try self.inner.verify_attestation(gpa, &rng, subject, &candidate, strategy)) {
                     continue;
                 }
                 assert(!candidate.signature.eql(signed.signature));
-                return .{ .bytes = candidate.signature.bytes };
+                return candidate.signature;
             }
             @panic("expected at least one invalid but decodable signature mutation");
         }
@@ -111,7 +115,7 @@ pub fn Scheme(comptime Inner: type) type {
         ) Allocator.Error!bool {
             const inner: InnerAttestation = .{
                 .signer = attestation.signer,
-                .signature = .{ .bytes = attestation.signature.bytes },
+                .signature = .from_bytes(attestation.signature.bytes),
             };
             return self.inner.verify_attestation(gpa, rng, subject, &inner, strategy);
         }
@@ -134,9 +138,9 @@ pub fn Scheme(comptime Inner: type) type {
                 return err;
             };
             for (verified, verification.verified) |*outer, attestation| {
-                outer.* = .{ .signer = attestation.signer, .signature = .{
-                    .bytes = attestation.signature.bytes,
-                } };
+                outer.* = .{ .signer = attestation.signer, .signature = .from_bytes(
+                    attestation.signature.bytes,
+                ) };
             }
             assert(verified.len + verification.invalid.len <= attestations.len);
             return .{ .verified = verified, .invalid = verification.invalid };
@@ -145,9 +149,9 @@ pub fn Scheme(comptime Inner: type) type {
         fn to_inner(gpa: Allocator, attestations: []const Attestation) ![]InnerAttestation {
             const inner = try gpa.alloc(InnerAttestation, attestations.len);
             for (inner, attestations) |*copy, attestation| {
-                copy.* = .{ .signer = attestation.signer, .signature = .{
-                    .bytes = attestation.signature.bytes,
-                } };
+                copy.* = .{ .signer = attestation.signer, .signature = .from_bytes(
+                    attestation.signature.bytes,
+                ) };
             }
             assert(inner.len == attestations.len);
             return inner;

@@ -445,7 +445,7 @@ test "optimistic assemble: malformed assembly falls back to pending halves" {
         const pending = try sign_all(S, fixture.schemes[0..count], subject);
         defer gpa.free(pending);
         // commonware stores a one-byte encoding; a fixed-size signature takes invalid bytes.
-        @memset(&pending[0].signature.bytes, 0xff);
+        pending[0].signature = .from_bytes(@splat(0xff));
         assert(pending[0].signature.get() == null);
         var verification = try take_verification(
             R,

@@ -47,13 +47,18 @@ fn valid_encoding(r: *FuzzRng, kind: u8, total: u32, out: *std.ArrayList(u8)) !v
     else
         signers_count;
     var signatures: [participants_max + 6]SignatureBytes = undefined;
-    for (signatures[0..signatures_count]) |*signature| r.fill_bytes(&signature.bytes);
+    for (signatures[0..signatures_count]) |*signature| {
+        var bytes: [SignatureBytes.fixed_size]u8 = undefined;
+        r.fill_bytes(&bytes);
+        signature.* = .from_bytes(bytes);
+    }
     const encoded = switch (kind) {
         0 => try codec.encode(Signers, gpa, signers),
         1 => blk: {
             const signer: Participant = .init(r.next_u32());
-            var attestation: Attestation = .{ .signer = signer, .signature = undefined };
-            r.fill_bytes(&attestation.signature.bytes);
+            var bytes: [SignatureBytes.fixed_size]u8 = undefined;
+            r.fill_bytes(&bytes);
+            const attestation: Attestation = .{ .signer = signer, .signature = .from_bytes(bytes) };
             break :blk try codec.encode(Attestation, gpa, attestation);
         },
         2 => try codec.encode(Certificate, gpa, .{
@@ -61,8 +66,9 @@ fn valid_encoding(r: *FuzzRng, kind: u8, total: u32, out: *std.ArrayList(u8)) !v
             .signatures = signatures[0..signatures_count],
         }),
         3 => blk: {
-            var multisig: Multisig = .{ .signers = signers, .signature = undefined };
-            r.fill_bytes(&multisig.signature.bytes);
+            var bytes: [@FieldType(Multisig, "signature").fixed_size]u8 = undefined;
+            r.fill_bytes(&bytes);
+            const multisig: Multisig = .{ .signers = signers, .signature = .from_bytes(bytes) };
             break :blk try codec.encode(Multisig, gpa, multisig);
         },
         else => unreachable,

@@ -78,6 +78,10 @@ pub const AssemblyError = error{
 /// the fixed-size signatures of attestations and certificates). Unlike `codec.Lazy` it owns
 /// its bytes inline, so a decoded attestation outlives the message it came from. Decoding
 /// never allocates.
+///
+/// Like `Lazy`, it caches the value: `init(value)` keeps it, and `decode` decodes read bytes
+/// once. A cached value is never decoded again, so `bytes` are read-only once built: change
+/// a signature by building a new one with `from_bytes`, or `get` returns the stale value.
 pub fn Deferred(comptime T: type) type {
     const size = codec.fixed_size(T) orelse @compileError("Deferred needs a fixed-size type");
     comptime assert(!codec.owns_memory(T));
@@ -88,22 +92,62 @@ pub fn Deferred(comptime T: type) type {
         pub const fixed_size: usize = size;
 
         bytes: [size]u8,
+        /// Whether `bytes` have been decoded (`Lazy`'s `OnceLock`). `value` is defined only
+        /// when `.valid`.
+        state: State,
+        value: T,
+
+        const State = enum { undecoded, valid, invalid };
 
         pub fn init(value: T) Self {
             var bytes: [size]u8 = undefined;
             const written = codec.encode_to(T, value, &bytes);
             assert(written.len == size);
-            return .{ .bytes = bytes };
+            return .{ .bytes = bytes, .state = .valid, .value = value };
         }
 
-        /// The decoded value, or null when the bytes are not a valid `T`.
+        /// Defers decoding `bytes` (commonware `Lazy::deferred`).
+        pub fn from_bytes(bytes: [size]u8) Self {
+            return .{ .bytes = bytes, .state = .undecoded, .value = undefined };
+        }
+
+        /// The decoded value, or null when the bytes are not a valid `T`. Returns the cached
+        /// value when there is one, and otherwise decodes without caching (see `decode`).
         pub fn get(self: *const Self) ?T {
-            return codec.decode_fixed(T, &self.bytes) catch null;
+            return switch (self.state) {
+                .valid => self.value,
+                .invalid => null,
+                .undecoded => codec.decode_fixed(T, &self.bytes) catch null,
+            };
         }
 
-        /// Byte equality: for canonical encodings the same as value equality.
+        /// `get`, caching the result so later calls never decode (commonware `Lazy::get`).
+        /// Like `codec.Lazy.get` it takes `*Self`: a value shared across threads is decoded
+        /// before it is shared, or under the owner's lock.
+        pub fn decode(self: *Self) ?T {
+            if (self.state == .undecoded) {
+                if (codec.decode_fixed(T, &self.bytes)) |value| {
+                    self.value = value;
+                    self.state = .valid;
+                } else |_| {
+                    self.state = .invalid;
+                }
+            }
+            assert(self.state != .undecoded);
+            return self.get();
+        }
+
+        /// commonware `Lazy`'s `PartialEq`: equal bytes are equal without decoding;
+        /// otherwise the decoded values are compared, and two failures are equal.
         pub fn eql(a: Self, b: Self) bool {
-            return std.mem.eql(u8, &a.bytes, &b.bytes);
+            if (std.mem.eql(u8, &a.bytes, &b.bytes)) return true;
+            const left = a.get();
+            const right = b.get();
+            if (left == null or right == null) return left == null and right == null;
+            if (comptime @typeInfo(T) == .@"struct" and @hasDecl(T, "eql")) {
+                return T.eql(left.?, right.?);
+            }
+            return codec.order(T, left.?, right.?) == .eq;
         }
 
         pub fn order(a: Self, b: Self) std.math.Order {
@@ -116,7 +160,7 @@ pub fn Deferred(comptime T: type) type {
 
         pub fn read(_: Allocator, reader: *codec.Reader, _: void) codec.Error!Self {
             const bytes = try reader.take_array(size);
-            return .{ .bytes = bytes.* };
+            return from_bytes(bytes.*);
         }
     };
 }

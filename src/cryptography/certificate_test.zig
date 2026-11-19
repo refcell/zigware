@@ -57,6 +57,39 @@ test "certificate max individual certificate size" {
     );
 }
 
+test "certificate deferred caches its value and compares like Lazy" {
+    const bls = @import("bls12381/primitives/root.zig");
+    const MinPk = bls.MinPk;
+    const Deferred = certificate.Deferred(MinPk.Signature);
+    var rng = utils.test_rng();
+    const private = bls.group.Private.random(&rng);
+    const first = bls.ops.sign_message(MinPk, private, "namespace", "first");
+    const second = bls.ops.sign_message(MinPk, private, "namespace", "second");
+
+    // A value is cached at init, and read bytes decode to the same value, once.
+    const built: Deferred = .init(first);
+    try testing.expect(built.get().?.eql(first));
+    var wire: Deferred = .from_bytes(built.bytes);
+    try testing.expect(wire.get().?.eql(first));
+    try testing.expect(wire.decode().?.eql(first));
+    try testing.expect(wire.get().?.eql(first));
+    var other: Deferred = .from_bytes(Deferred.init(second).bytes);
+    try testing.expect(other.decode().?.eql(second));
+    try testing.expect(!other.get().?.eql(first));
+
+    // Malformed bytes stay malformed after decoding.
+    var malformed: Deferred = .from_bytes(@splat(0xff));
+    try testing.expectEqual(null, malformed.get());
+    try testing.expectEqual(null, malformed.decode());
+    try testing.expectEqual(null, malformed.get());
+
+    // Equal bytes are equal, distinct values are not, and two failures are equal.
+    try testing.expect(built.eql(wire));
+    try testing.expect(!built.eql(other));
+    try testing.expect(!built.eql(malformed));
+    try testing.expect(malformed.eql(.from_bytes(@splat(0))));
+}
+
 test "certificate signers new" {
     var signers = try Signers.init(gpa, 6, &participants_of(&.{ 0, 3, 5 }));
     defer signers.deinit(gpa);
