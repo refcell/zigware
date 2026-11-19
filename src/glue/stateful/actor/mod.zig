@@ -56,6 +56,7 @@ test {
     _ = @import("processor/pending_test.zig");
     _ = @import("processor/execution_test.zig");
     _ = @import("processor/processor_test.zig");
+    _ = @import("processor/processor_mod_test.zig");
     _ = @import("processor/verifier_test.zig");
     _ = @import("core/durability_test.zig");
     _ = @import("core/verifications_test.zig");
