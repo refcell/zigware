@@ -1476,4 +1476,5 @@ test {
     _ = @import("variable_torn_test.zig");
     _ = @import("variable_size_test.zig");
     _ = @import("variable_sync_test.zig");
+    _ = @import("variable_bounded_test.zig");
 }

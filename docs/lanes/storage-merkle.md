@@ -255,7 +255,16 @@ variants need `runtime` storage; do them after its interface lands.
     leaves the data partition) fails the interrupted-clear test. An open-ended span for a
     staged clear is not caught by design: `init_sync` resets a recovered prefix short of its
     start. The reversed-range should-panic test is an assertion here and is not ported.
-  - [ ] variable.rs: bounded inspection and initialization, read_many, and the rest.
+  - [x] variable.rs batch 5 (`variable_bounded_test.zig`): unpublished bounded inspection
+    keeps acknowledged offsets and data above the watermark, a failed removal keeps durable
+    data, missing acknowledged data and offsets without data are corruption, an empty prefix
+    at the maximum position, interrupted empty publications at caps 9/10/11/none, a clean
+    cap adds no mutations, offset rebuild with a partial final page (slow), an interrupted
+    rebuild under write faults, bounded retries after sync/remove/resize faults, and
+    `init_at_most` restarts (compressed too) and discarded torn blobs. Planted bug (bounded
+    inspection always truncates the offsets to the ceiling) fails the preserve-offsets test.
+    Not ported: the two decode-count tests, which count through a `Read::Cfg` counter.
+  - [ ] variable.rs: read_many, compression, data-loss recovery, replay, and the rest.
 - [ ] journal/zstd: byte-exact libzstd level 3 (coordinator, correcting the earlier "byte
   identity not required"). commonware's storage conformance hashes four `<true>` journal
   workloads written with `compression: Some(3)`, so compressed journals must emit exactly
