@@ -803,6 +803,274 @@ test "coding reproposal recreates shard state after eviction" {
     }.body);
 }
 
+/// Waits up to `limit_ms` for a verdict on `receiver`, polling every 10 ms.
+fn verdict_within(ctx: Ctx, receiver: *utils.channel.oneshot.Receiver(bool), limit_ms: u64) !bool {
+    var waited: u64 = 0;
+    while (waited < limit_ms) : (waited += 10) {
+        return receiver.try_recv() catch |err| switch (err) {
+            error.Empty => {
+                try ctx.sleep(.fromMilliseconds(10));
+                continue;
+            },
+            error.Closed => return error.Closed,
+        };
+    }
+    return error.TestTimedOut;
+}
+
+test "marshaled rejects mismatched context digest" {
+    try common.run(struct {
+        fn body(ctx: Ctx) anyerror!void {
+            var validators = try fixture();
+            defer validators.deinit(gpa);
+            var stack: common.ValidatorStack = undefined;
+            try stack.start(ctx, &validators);
+            defer stack.stop();
+            const participants = validators.participants;
+            const shards = stack.shards();
+
+            const genesis = try common.genesis_block(gpa);
+            const parent_context: common.CodingCtx = .{
+                .round = common.round_at(0, 1),
+                .leader = shared.default_leader(),
+                .parent = .{ .zero(), harness.genesis_commitment() },
+            };
+            const parent = try common.coded(gpa, parent_context, genesis.digest(), 1, 100);
+            const parent_digest = parent.digest();
+            const parent_commitment = parent.commitment();
+            try shards.disperse(common.round_at(0, 1), parent);
+
+            // A block whose commitment binds context A, verified under context B.
+            const context_a: common.CodingCtx = .{
+                .round = common.round_at(0, 2),
+                .leader = participants[0],
+                .parent = .{ .new(1), parent_commitment },
+            };
+            var block = try common.coded(gpa, context_a, parent_digest, 2, 200);
+            defer block.deinit(gpa);
+            const context_b: common.CodingCtx = .{
+                .round = common.round_at(0, 3),
+                .leader = participants[1],
+                .parent = .{ .new(1), parent_commitment },
+            };
+            var verify = try stack.marshaled.start_verify(context_b, block.commitment());
+            defer verify.deinit();
+            // Rejected, and promptly.
+            try testing.expect(!try verdict_within(ctx, &verify, 5_000));
+        }
+    }.body);
+}
+
+test "reproposal certify recovers after verify receiver drop" {
+    try common.run(struct {
+        fn body(ctx: Ctx) anyerror!void {
+            var validators = try fixture();
+            defer validators.deinit(gpa);
+            var stack: common.ValidatorStack = undefined;
+            try stack.start(ctx, &validators);
+            defer stack.stop();
+            const me = validators.participants[0];
+            const shards = stack.shards();
+
+            // A valid boundary re-proposal whose block stays unavailable until the
+            // optimistic verify receiver is dropped.
+            const genesis = try common.genesis_block(gpa);
+            const boundary_height = shared.blocks_per_epoch - 1;
+            const boundary_round = common.round_at(0, boundary_height);
+            const boundary_context: common.CodingCtx = .{
+                .round = boundary_round,
+                .leader = me,
+                .parent = .{ .zero(), harness.genesis_commitment() },
+            };
+            const timestamp = boundary_height * 100;
+            const root = genesis.digest();
+            const block = try common.coded(gpa, boundary_context, root, boundary_height, timestamp);
+            const commitment = block.commitment();
+            const round = common.round_at(0, boundary_height + 1);
+            const context = reproposal(round, me, boundary_height, commitment);
+
+            var verify = try stack.marshaled.start_verify(context, commitment);
+            verify.deinit();
+            try ctx.sleep(.fromMilliseconds(10));
+            try shards.disperse(boundary_round, block);
+            try ctx.sleep(.fromMilliseconds(10));
+
+            // Certify recovers through the embedded-context path instead of the stale gate.
+            var certify = try stack.marshaled.start_certify(round, commitment);
+            defer certify.deinit();
+            try testing.expect(try verdict_within(ctx, &certify, 5_000));
+        }
+    }.body);
+}
+
+/// Sends `shard` (borrowed) from `from` to the validator over the shard channel.
+fn send_shard(stack: *common.ValidatorStack, from: common.K, shard: *const common.Shard) !void {
+    const codec = @import("codec");
+    const control = stack.network.network.oracle().control(from);
+    var registered = try control.register(2, shared.test_quota);
+    defer registered.deinit();
+    const bytes = try codec.encode(common.Shard, gpa, shard.*);
+    defer gpa.free(bytes);
+    const sent = try registered.sender.send(.{ .one = stack.validator_key }, &.{bytes}, true);
+    gpa.free(sent);
+}
+
+/// Has participants 1 and 2 send their shards of `undecodable`'s rebound commitment, after
+/// `gather` opens its reconstruction: the shards verify, but the decoded block fails.
+fn fail_reconstruction(
+    stack: *common.ValidatorStack,
+    participants: []const common.K,
+    missing: anytype,
+    round: common.Round,
+) !void {
+    // Ordered after the subscription that reaches the shard engine.
+    _ = try stack.validator.mailbox.get_processed();
+    try stack.shards().gather(missing.commitment, round);
+    try stack.network.link_all(participants[0..3], shared.link);
+    for (participants[1..3], missing.shards[1..3]) |peer, *shard| {
+        try send_shard(stack, peer, shard);
+    }
+}
+
+test "reproposal missing block does not synthesize false" {
+    try common.run(struct {
+        fn body(ctx: Ctx) anyerror!void {
+            var validators = try fixture();
+            defer validators.deinit(gpa);
+            var stack: common.ValidatorStack = undefined;
+            try stack.start(ctx, &validators);
+            defer stack.stop();
+            const participants = validators.participants;
+            const me = participants[0];
+            var missing = try common.undecodable(gpa, me);
+            defer for (&missing.shards) |*shard| shard.deinit(gpa);
+            const round = common.round_at(0, 1);
+            const context = reproposal(round, me, 0, missing.commitment);
+
+            // Verify must not synthesize `false` when the block cannot be fetched: a failed
+            // reconstruction closes it without a verdict.
+            var verify = try stack.marshaled.start_verify(context, missing.commitment);
+            defer verify.deinit();
+            try fail_reconstruction(&stack, participants, missing, round);
+            try testing.expectError(error.Closed, verdict_within(ctx, &verify, 5_000));
+
+            // Certify stays pending on the recovery path instead of surfacing the closed gate.
+            var certify = try stack.marshaled.start_certify(round, missing.commitment);
+            defer certify.deinit();
+            try ctx.sleep(.fromMilliseconds(100));
+            try testing.expectError(error.Empty, certify.try_recv());
+        }
+    }.body);
+}
+
+test "core subscription closes when coding reconstruction fails" {
+    try common.run(struct {
+        fn body(ctx: Ctx) anyerror!void {
+            var validators = try fixture();
+            defer validators.deinit(gpa);
+            var stack: common.ValidatorStack = undefined;
+            try stack.start(ctx, &validators);
+            defer stack.stop();
+            const participants = validators.participants;
+            var missing = try common.undecodable(gpa, participants[0]);
+            defer for (&missing.shards) |*shard| shard.deinit(gpa);
+            const round = common.round_at(0, 1);
+
+            // A core subscription subscribes to the coding buffer and registers waiters.
+            const mailbox = &stack.validator.mailbox;
+            const fallback: core_mailbox.CommitmentFallback = .{ .fetch_by_round = round };
+            var block = try mailbox.subscribe_by_commitment(missing.commitment, fallback);
+            defer block.deinit();
+            try fail_reconstruction(&stack, participants, missing, round);
+
+            // The core actor closes the subscription promptly.
+            var waited: u64 = 0;
+            while (waited < 5_000) : (waited += 10) {
+                var value = block.try_recv() catch |err| switch (err) {
+                    error.Empty => {
+                        try ctx.sleep(.fromMilliseconds(10));
+                        continue;
+                    },
+                    error.Closed => return,
+                };
+                value.deinit(gpa);
+                return error.UnexpectedBlock;
+            }
+            return error.TestTimedOut;
+        }
+    }.body);
+}
+
+/// Whether `receiver` delivers a block with `commitment` within `limit_ms`.
+fn block_within(
+    ctx: Ctx,
+    receiver: *utils.channel.oneshot.Receiver(common.Block),
+    commitment: common.Commitment,
+    limit_ms: u64,
+) !bool {
+    var waited: u64 = 0;
+    while (waited < limit_ms) : (waited += 10) {
+        var block = receiver.try_recv() catch |err| switch (err) {
+            error.Empty => {
+                try ctx.sleep(.fromMilliseconds(10));
+                continue;
+            },
+            error.Closed => return error.Closed,
+        };
+        defer block.deinit(gpa);
+        return block.commitment().eql(commitment);
+    }
+    return error.TestTimedOut;
+}
+
+test "coding floor preserves registered commitment subscription" {
+    try common.run(struct {
+        fn body(ctx: Ctx) anyerror!void {
+            var validators = try fixture();
+            defer validators.deinit(gpa);
+            var stack: common.ValidatorStack = undefined;
+            try stack.start(ctx, &validators);
+            defer stack.stop();
+            const shards = stack.shards();
+            const mailbox = &stack.validator.mailbox;
+            const n = shared.num_validators;
+
+            const missing_round = common.round_at(0, 1);
+            const root = shared.genesis_parent();
+            const genesis = H.genesis_parent_commitment(n);
+            const missing = try H.make_test_block(gpa, root, genesis, .new(1), 100, n);
+            const missing_commitment = missing.commitment();
+            try shards.gather(missing_commitment, missing_round);
+            var subscription = try mailbox.subscribe_by_commitment(missing_commitment, .wait);
+            defer subscription.deinit();
+            try ctx.sleep(.fromMilliseconds(100));
+
+            // A floor above the missing block, installed from the shard engine.
+            const floor_round = common.round_at(0, 2);
+            const floor =
+                try H.make_test_block(gpa, missing.digest(), missing_commitment, .new(2), 200, n);
+            const floor_commitment = floor.commitment();
+            try shards.disperse(floor_round, floor);
+            var cached_floor = (try shards.get(floor_commitment)) orelse return error.NotCached;
+            cached_floor.deinit(gpa);
+            const proposal = common.Proposal.init(floor_round, .new(1), floor_commitment);
+            const finalization = try H.make_finalization(gpa, &validators, proposal, quorum);
+            try mailbox.set_floor(finalization);
+            var waited: u32 = 0;
+            while (true) : (waited += 1) {
+                if (waited > 3_000) return error.TestTimedOut;
+                const processed = try mailbox.get_processed();
+                if (processed) |value| if (std.meta.eql(value, .{ .block = .new(2) })) break;
+                try ctx.sleep(.fromMilliseconds(10));
+            }
+
+            // The floor kept the registered subscription: local ingress resolves it.
+            try shards.disperse(common.round_at(0, 3), missing);
+            try testing.expect(try block_within(ctx, &subscription, missing_commitment, 5_000));
+        }
+    }.body);
+}
+
 test {
     _ = common;
 }
