@@ -185,7 +185,14 @@ pub fn Engine(comptime DB: type, comptime S: type) type {
 
         /// Opens the sync journal and schedules the first requests. Must not move afterwards.
         pub fn init(self: *Self, gpa: Allocator, io: Io, config: Config(DB, S)) !void {
-            self.* = try open(gpa, io, config);
+            self.* = open(gpa, io, config) catch |err| {
+                // The engine owns the reporter, also when it fails to open.
+                if (config.reached_target_tx) |reporter| {
+                    var sender = reporter;
+                    sender.deinit();
+                }
+                return err;
+            };
             self.schedule_requests() catch |err| {
                 self.deinit();
                 return err;
@@ -439,7 +446,9 @@ pub fn Engine(comptime DB: type, comptime S: type) type {
             if (@hasDecl(DB.Journal, "clear_to_size")) {
                 try journal_mod.resize(&self.journal, start);
             } else {
-                try self.journal.resize(start);
+                // An in-memory journal (compact sync's `Memory`) resizes without failing.
+                const resized = self.journal.resize(start);
+                if (@typeInfo(@TypeOf(resized)) == .error_union) try resized;
             }
             assert(self.journal.size() >= start);
         }
