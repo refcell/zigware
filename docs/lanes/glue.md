@@ -437,7 +437,8 @@ Owns `src/glue/dkg`. Reference: `glue/src/dkg` (about 24k Rust lines).
   resolution, startup tip); inclusion's remaining window tests (gated and stalled ancestry, scan
   yielding to finalization, closed verification) and `finalization_error_panics`; the dkg
   window; the run loop; application.
-- [ ] orchestrator. (bootstrap and probe moved to the p2p lane, T-01a1d59c-49e5, which
+- [x] orchestrator: limits (`max_payload_size`) with `prefixes_simplex`.
+- [ ] orchestrator: mailbox, actor, and mod.rs's tests. (bootstrap and probe moved to the p2p lane, T-01a1d59c-49e5, which
   owns src/glue/dkg/bootstrap/ and src/glue/dkg/probe/.)
 - [ ] tests: the dkg and reshare harnesses, properties, and mocks; lookup's peer-activation
   test.
@@ -461,6 +462,7 @@ Owns `src/glue/dkg`. Reference: `glue/src/dkg` (about 24k Rust lines).
 - 2026-11-18: the reshare epoch loop; its test catches a skipped dealing window.
 - 2026-11-18: `Runner(T).run`; the epoch-loop test now runs through it and catches an
   inverted mode dispatch.
+- 2026-11-19: orchestrator limits; its test catches a missing subchannel prefix.
 - 2026-11-19: the reshare `Application` wrapper; its tests catch an accepted final-payload
   mismatch, a kept reservation after a declined proposal, and an ungated dealer log.
 - 2026-11-18: one-shot DKG mode; a singleton ceremony completes through the mailbox
