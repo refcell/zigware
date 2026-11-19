@@ -1,10 +1,5 @@
-//! Benchmarks of the QMDB databases (commonware `storage/src/qmdb/benches`), with commonware's
-//! names, constants, and workloads, over the production disk storage as commonware's tokio
-//! runtime runs them. This file holds the `any`, `keyless`, and `store` variants; `current`
-//! adds its own (docs/lanes/storage-qmdb.md).
-//!
-//! - `qmdb::generate`: seed a database, churn it with random updates and deletes (committing
-//!   periodically), then prune and sync it. Opening and destroying the database are untimed.
+//! Shared infrastructure of the QMDB benchmarks (commonware's `qmdb/benches/common.rs`): the
+//! variant registry, database configurations, storage, and the seeding workloads.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -22,30 +17,32 @@ const merkle = storage.merkle;
 const contiguous = storage.journal.contiguous;
 const metrics = runtime.telemetry.metrics;
 const paged = runtime.buffer.paged;
-const Sha256 = cryptography.Sha256;
-const Digest = Sha256.Digest;
-const TestRng = utils.TestRng;
-const Translator = storage.translator.EightCap;
+pub const Sha256 = cryptography.Sha256;
+pub const Digest = Sha256.Digest;
+pub const TestRng = utils.TestRng;
+pub const Translator = storage.translator.EightCap;
 
-const items_per_blob: u64 = 50_000;
-const page_size: u16 = paged.page_size(runtime.storage.blob_page_size);
+pub const items_per_blob: u64 = 50_000;
+/// Bytes per activity-bitmap chunk (commonware's `CHUNK_SIZE`).
+pub const chunk_bytes: usize = 32;
+pub const page_size: u16 = paged.page_size(runtime.storage.blob_page_size);
 const page_cache_size: u32 = 512;
-const delete_frequency: u32 = 10;
+pub const delete_frequency: u32 = 10;
 const variable_value_max_len: u32 = 256;
 const write_buffer_bytes: usize = 2 * 1024 * 1024;
 const replay_buffer_bytes: usize = 2 * 1024 * 1024;
-const init_cache_size: usize = 1 << 18;
+pub const init_cache_size: usize = 1 << 18;
 
-const Bytes = []const u8;
-const FixedDigest = qmdb.value.Fixed(Digest);
-const VariableDigest = qmdb.value.Variable(Digest);
-const VariableBytes = qmdb.value.Variable(Bytes);
+pub const Bytes = []const u8;
+pub const FixedDigest = qmdb.value.Fixed(Digest);
+pub const VariableDigest = qmdb.value.Variable(Digest);
+pub const VariableBytes = qmdb.value.Variable(Bytes);
 
-const Order = enum { unordered, ordered };
+pub const Order = enum { unordered, ordered };
 
 /// Commonware's `any` database over `Digest` keys, `EightCap`, and SHA-256: a fixed log for
 /// fixed values, a variable log otherwise.
-fn AnyDb(comptime F: type, comptime order: Order, comptime E: type) type {
+pub fn AnyDb(comptime F: type, comptime order: Order, comptime E: type) type {
     const any = qmdb.any;
     const Op = switch (order) {
         .unordered => any.operation.Unordered(F, Digest, E),
@@ -63,29 +60,29 @@ fn AnyDb(comptime F: type, comptime order: Order, comptime E: type) type {
         contiguous.fixed.Journal(Op)
     else
         contiguous.variable.Journal(Op);
-    return any.Db(F, U, C, I, Sha256, 32);
+    return any.Db(F, U, C, I, Sha256, chunk_bytes);
 }
 
-fn KeylessDb(comptime F: type) type {
+pub fn KeylessDb(comptime F: type) type {
     const C = contiguous.variable.Journal(qmdb.keyless.Operation(F, VariableBytes));
     return qmdb.keyless.Db(F, VariableBytes, C, Sha256);
 }
 
-const StoreDb = qmdb.store.Db(Digest, VariableBytes, Translator);
+pub const StoreDb = qmdb.store.Db(Digest, VariableBytes, Translator);
 
 /// A named database type of one benchmark variant.
-fn Variant(comptime name_: []const u8, comptime D: type) type {
+pub fn Variant(comptime name_: []const u8, comptime D: type) type {
     return struct {
         pub const name = name_;
         pub const Db = D;
     };
 }
 
-const mmr = merkle.mmr.Family;
-const mmb = merkle.mmb.Family;
+pub const mmr = merkle.mmr.Family;
+pub const mmb = merkle.mmb.Family;
 
 /// Commonware's `define_fixed_variants` (digest values), without the `current` entries.
-const fixed_variants = .{
+pub const fixed_variants = .{
     Variant("any::unordered::fixed::mmr", AnyDb(mmr, .unordered, FixedDigest)),
     Variant("any::unordered::fixed::mmb", AnyDb(mmb, .unordered, FixedDigest)),
     Variant("any::ordered::fixed::mmr", AnyDb(mmr, .ordered, FixedDigest)),
@@ -97,34 +94,27 @@ const fixed_variants = .{
 };
 
 /// Commonware's `define_vec_variants` (`Vec<u8>` values), without the `current` entries.
-const vec_variants = .{
+pub const vec_variants = .{
     Variant("any::unordered::variable-vec::mmr", AnyDb(mmr, .unordered, VariableBytes)),
     Variant("any::unordered::variable-vec::mmb", AnyDb(mmb, .unordered, VariableBytes)),
     Variant("any::ordered::variable-vec::mmr", AnyDb(mmr, .ordered, VariableBytes)),
     Variant("any::ordered::variable-vec::mmb", AnyDb(mmb, .ordered, VariableBytes)),
 };
 
-const keyless_variants = .{
+pub const keyless_variants = .{
     Variant("keyless::mmr", KeylessDb(mmr)),
     Variant("keyless::mmb", KeylessDb(mmb)),
 };
 
-pub fn run(runner: *bench.Runner) !void {
-    try bench_generate(runner);
-}
-
-// ---------------------------------------------------------------------------------------------
-// Shared infrastructure (commonware's `common.rs`).
-
 /// Commonware's `Sha256::hash(&[&i.to_be_bytes()])`.
-fn key_at(i: u64) Digest {
+pub fn key_at(i: u64) Digest {
     var bytes: [8]u8 = undefined;
     std.mem.writeInt(u64, &bytes, i, .big);
     return Sha256.hash(&.{&bytes});
 }
 
 /// Commonware's `make_fixed_value` or `make_var_value` (1 to 256 repeated bytes), by type.
-fn make_value(comptime V: type, gpa: Allocator, rng: *TestRng) !V {
+pub fn make_value(comptime V: type, gpa: Allocator, rng: *TestRng) !V {
     if (V == Digest) {
         var bytes: [4]u8 = undefined;
         std.mem.writeInt(u32, &bytes, rng.next_u32(), .big);
@@ -159,11 +149,16 @@ fn leaf_config(comptime C: type) C {
 }
 
 /// Commonware's `fix_log_cfg` or `var_log_cfg`, by the log's configuration type.
-fn log_config(comptime LogCfg: type, comptime suffix: []const u8, cache: *paged.CacheRef) LogCfg {
+pub fn log_config(
+    comptime LogCfg: type,
+    comptime suffix: []const u8,
+    cache: *paged.CacheRef,
+    blob: u64,
+) LogCfg {
     if (comptime @hasField(LogCfg, "items_per_section")) {
         return .{
             .partition = "log-journal-" ++ suffix,
-            .items_per_section = items_per_blob,
+            .items_per_section = blob,
             .codec_config = codec_config(@FieldType(LogCfg, "codec_config")),
             .cache_ref = cache,
             .write_buffer = write_buffer_bytes,
@@ -172,7 +167,7 @@ fn log_config(comptime LogCfg: type, comptime suffix: []const u8, cache: *paged.
     }
     return .{
         .partition = "log-journal-" ++ suffix,
-        .items_per_blob = items_per_blob,
+        .items_per_blob = blob,
         .cache_ref = cache,
         .write_buffer = write_buffer_bytes,
         .replay_buffer = replay_buffer_bytes,
@@ -180,11 +175,15 @@ fn log_config(comptime LogCfg: type, comptime suffix: []const u8, cache: *paged.
 }
 
 /// Commonware's `merkle_cfg`.
-fn merkle_config(comptime suffix: []const u8, cache: *paged.CacheRef) merkle.full.Config {
+pub fn merkle_config(
+    comptime suffix: []const u8,
+    cache: *paged.CacheRef,
+    blob: u64,
+) merkle.full.Config {
     return .{
         .journal_partition = "journal-" ++ suffix,
         .metadata_partition = "metadata-" ++ suffix,
-        .items_per_blob = items_per_blob,
+        .items_per_blob = blob,
         .write_buffer = write_buffer_bytes,
         .replay_buffer = replay_buffer_bytes,
         .cache_ref = cache,
@@ -192,8 +191,9 @@ fn merkle_config(comptime suffix: []const u8, cache: *paged.CacheRef) merkle.ful
 }
 
 /// The partition suffix of a database's configuration (commonware's `PARTITION_*`).
-fn partition(comptime D: type) []const u8 {
+pub fn partition(comptime D: type) []const u8 {
     if (D == StoreDb) return "bench-store";
+    if (comptime @hasDecl(D, "Set")) return "bench-immutable";
     if (comptime @hasField(D, "snapshot")) {
         const variable = @hasField(@FieldType(D.Cfg, "log"), "items_per_section");
         return if (variable) "bench-variable" else "bench-fixed";
@@ -204,7 +204,7 @@ fn partition(comptime D: type) []const u8 {
 /// Production disk storage under a fresh directory of `.zig-cache/tmp`, removed on close. On
 /// smoke inputs (`zig build test`) an in-memory storage stands in: every commit there would
 /// otherwise wait on the disk.
-const Disk = struct {
+pub const Disk = struct {
     io: Io,
     memory: bool,
     directory: [64]u8 = undefined,
@@ -215,11 +215,11 @@ const Disk = struct {
     } = undefined,
     opened: bool = false,
 
-    fn init(runner: *const bench.Runner) Disk {
+    pub fn init(runner: *const bench.Runner) Disk {
         return .{ .io = runner.io, .memory = runner.inputs == .smoke };
     }
 
-    fn open(disk: *Disk, gpa: Allocator) !void {
+    pub fn open(disk: *Disk, gpa: Allocator) !void {
         assert(!disk.opened);
         if (disk.memory) {
             disk.backend = .{ .memory = .init(gpa) };
@@ -238,13 +238,13 @@ const Disk = struct {
         assert(disk.directory_len > 0);
     }
 
-    fn storage(disk: *Disk) runtime.storage.Storage {
+    pub fn storage(disk: *Disk) runtime.storage.Storage {
         assert(disk.opened);
         if (disk.memory) return disk.backend.memory.storage();
         return disk.backend.production.storage();
     }
 
-    fn close(disk: *Disk) void {
+    pub fn close(disk: *Disk) void {
         assert(disk.opened);
         disk.opened = false;
         if (disk.memory) return disk.backend.memory.deinit();
@@ -255,9 +255,17 @@ const Disk = struct {
     }
 };
 
+/// How a session opens its database (commonware's `*_cfg_with` overrides).
+pub const Options = struct {
+    /// Items per log blob and Merkle journal blob.
+    items_per_blob: u64 = items_per_blob,
+    /// Entries of the init-time `location -> key` cache; null disables it.
+    init_cache: ?usize = init_cache_size,
+};
+
 /// One open database of type `D` with its page cache and metrics (commonware creates both
 /// afresh with each config and context).
-fn Session(comptime D: type) type {
+pub fn Session(comptime D: type) type {
     return struct {
         const Self = @This();
 
@@ -265,46 +273,61 @@ fn Session(comptime D: type) type {
         registry: metrics.Registry,
         db: D,
 
-        fn open(self: *Self, gpa: Allocator, disk: *Disk) !void {
+        pub fn open(self: *Self, gpa: Allocator, disk: *Disk, options: Options) !void {
+            assert(options.items_per_blob > 0);
             self.cache = try .init(gpa, page_size, page_cache_size);
             errdefer self.cache.deinit();
             self.registry = .init(gpa);
             errdefer self.registry.deinit();
             const backend = disk.storage();
             const suffix = comptime partition(D);
-            const log = log_config(@FieldType(D.Cfg, "log"), suffix, &self.cache);
+            const blob = options.items_per_blob;
+            const log = log_config(@FieldType(D.Cfg, "log"), suffix, &self.cache, blob);
             if (D == StoreDb) {
                 const cfg: D.Cfg = .{
                     .log = log,
                     .translator = .{},
-                    .init_cache = init_cache_size,
+                    .init_cache = options.init_cache,
                 };
                 self.db = try D.init(gpa, backend, cfg, null);
                 return;
             }
             const scope = metrics.Scope.init(&self.registry).child("storage");
             var cfg: D.Cfg = undefined;
-            cfg.merkle = merkle_config(suffix, &self.cache);
+            cfg.merkle = merkle_config(suffix, &self.cache, blob);
             cfg.log = log;
             if (comptime @hasField(D.Cfg, "translator")) {
-                cfg.translator = .{};
-                cfg.init_cache = init_cache_size;
+                const T = @FieldType(D.Cfg, "translator");
+                // A partitioned translator wraps the inner one.
+                cfg.translator = if (comptime @hasField(T, "inner")) .init(.{}) else .{};
             }
+            if (comptime @hasField(D.Cfg, "init_cache")) cfg.init_cache = options.init_cache;
             self.db = try D.init(gpa, backend, scope, cfg, null);
             assert(self.db.bounds().end > 0);
         }
 
         /// Destroys the database and frees its cache and metrics.
-        fn close(self: *Self) !void {
-            defer self.registry.deinit();
-            defer self.cache.deinit();
+        pub fn close(self: *Self) !void {
+            defer self.free();
             try self.db.destroy();
+        }
+
+        /// Closes the database, keeping its storage, and frees its cache and metrics.
+        pub fn shut(self: *Self) void {
+            defer self.free();
+            self.db.deinit();
+        }
+
+        fn free(self: *Self) void {
+            self.registry.deinit();
+            self.cache.deinit();
+            self.* = undefined;
         }
     };
 }
 
 /// Writes `value` (or a delete) to `batch`, freeing `value` if the write fails.
-fn write(comptime D: type, gpa: Allocator, batch: anytype, key: Digest, value: ?D.Value) !void {
+pub fn write(comptime D: type, gpa: Allocator, batch: anytype, key: Digest, value: ?D.Value) !void {
     batch.write(key, value) catch |err| {
         codec.free(?D.Value, gpa, value);
         return err;
@@ -314,7 +337,13 @@ fn write(comptime D: type, gpa: Allocator, batch: anytype, key: Digest, value: ?
 /// Merkleizes the pending `batch` and applies it to `db`, committing if `commit`. With
 /// `reopen`, leaves a fresh batch in `batch`; otherwise null. A batch is consumed only once
 /// merkleized, so the caller frees a non-null `batch` on error.
-fn flush(comptime D: type, db: *D, batch: *?D.UnmerkleizedBatch, commit: bool, reopen: bool) !void {
+pub fn flush(
+    comptime D: type,
+    db: *D,
+    batch: *?D.UnmerkleizedBatch,
+    commit: bool,
+    reopen: bool,
+) !void {
     const before = db.bounds().end;
     const merkleized = try batch.*.?.merkleize(db);
     batch.* = null;
@@ -330,7 +359,7 @@ fn flush(comptime D: type, db: *D, batch: *?D.UnmerkleizedBatch, commit: bool, r
 /// keys in one batch, then performs `operations` random updates and deletes (one in
 /// `delete_frequency`), applying and committing after a write when the rng draws a multiple
 /// of `commit_frequency`.
-fn gen_random_kv(
+pub fn gen_random_kv(
     comptime D: type,
     gpa: Allocator,
     db: *D,
@@ -361,7 +390,7 @@ fn gen_random_kv(
 
 /// Commonware's `gen_store_random_kv`: the same key, value, and commit sequence as
 /// `gen_random_kv`, applied to a store as changesets.
-fn gen_store_random_kv(
+pub fn gen_store_random_kv(
     gpa: Allocator,
     db: *StoreDb,
     elements: u64,
@@ -400,7 +429,11 @@ fn gen_store_random_kv(
 }
 
 /// Applies `writes` (taken, leaving it empty) to the store as one changeset, and commits.
-fn store_apply_commit(gpa: Allocator, db: *StoreDb, writes: *std.ArrayList(StoreDb.Write)) !void {
+pub fn store_apply_commit(
+    gpa: Allocator,
+    db: *StoreDb,
+    writes: *std.ArrayList(StoreDb.Write),
+) !void {
     const before = db.bounds().end;
     var changeset = try StoreDb.Changeset.from_writes(gpa, writes);
     writes.* = .empty;
@@ -410,186 +443,46 @@ fn store_apply_commit(gpa: Allocator, db: *StoreDb, writes: *std.ArrayList(Store
     assert(db.bounds().end > before);
 }
 
-// ---------------------------------------------------------------------------------------------
-// qmdb::generate (commonware's `generate.rs`).
-
-const generate_elements: u64 = 1_000;
-const generate_operations: u64 = 10_000;
-const commits_per_iteration: u64 = 100;
-const keyless_operations: u64 = 10_000;
-const keyless_commit_frequency: u32 = 25;
-
 /// A fresh database per iteration on its own disk: opened before the iteration and destroyed
 /// after it, untimed.
-fn Fresh(comptime D: type) type {
+pub fn Fresh(comptime D: type) type {
     return struct {
         const Self = @This();
 
         gpa: Allocator,
         disk: Disk,
+        options: Options = .{},
         session: Session(D) = undefined,
         open: bool = false,
 
-        fn setup(self: *Self) !void {
+        pub fn setup(self: *Self) !void {
             assert(!self.open);
             try self.disk.open(self.gpa);
         }
 
         /// Destroys the previous iteration's database and opens the next one.
-        fn next(self: *Self) !*D {
+        pub fn next(self: *Self) !*D {
             try self.close();
-            try self.session.open(self.gpa, &self.disk);
+            try self.session.open(self.gpa, &self.disk, self.options);
             self.open = true;
             return &self.session.db;
         }
 
-        fn db(self: *Self) *D {
+        pub fn db(self: *Self) *D {
             assert(self.open);
             return &self.session.db;
         }
 
-        fn teardown(self: *Self) !void {
+        pub fn teardown(self: *Self) !void {
             try self.close();
             self.disk.close();
             assert(!self.open);
         }
 
-        fn close(self: *Self) !void {
+        pub fn close(self: *Self) !void {
             if (!self.open) return;
             self.open = false;
             try self.session.close();
         }
     };
-}
-
-/// Seeds and churns a fresh database per iteration, then prunes it to its sync boundary (the
-/// store: its inactivity floor) and syncs it.
-fn GenerateWorkload(comptime D: type) type {
-    return struct {
-        const Self = @This();
-
-        fresh: Fresh(D),
-        elements: u64,
-        operations: u64,
-
-        pub fn setup(self: *Self) !void {
-            try self.fresh.setup();
-        }
-
-        pub fn before_iter(self: *Self) !void {
-            _ = try self.fresh.next();
-        }
-
-        pub fn iter(self: *Self) !u64 {
-            const gpa = self.fresh.gpa;
-            const db = self.fresh.db();
-            const elements = self.elements;
-            const operations = self.operations;
-            const commit_frequency: u32 = @intCast(operations / commits_per_iteration);
-            if (D == StoreDb) {
-                try gen_store_random_kv(gpa, db, elements, operations, commit_frequency);
-                try db.prune(db.inactivity_floor());
-            } else {
-                try gen_random_kv(D, gpa, db, elements, operations, commit_frequency);
-                try db.prune(db.sync_boundary());
-            }
-            try db.sync();
-            assert(db.bounds().end > elements);
-            return db.bounds().end;
-        }
-
-        pub fn teardown(self: *Self) !void {
-            try self.fresh.teardown();
-        }
-    };
-}
-
-fn bench_generate(runner: *bench.Runner) !void {
-    // Smoke inputs shrink the case: `zig build test` runs these in debug builds.
-    const elements = runner.inputs.pick(u64, 100, generate_elements, generate_elements);
-    const operations = runner.inputs.pick(u64, 1_000, generate_operations, generate_operations);
-    inline for (fixed_variants ++ vec_variants) |V| {
-        try run_generate(V, runner, elements, operations);
-    }
-    // The full run also measures the store at the init bench's population size.
-    try run_generate(Variant("store::variable", StoreDb), runner, elements, operations);
-    if (runner.inputs == .full) {
-        const variant = Variant("store::variable", StoreDb);
-        try run_generate(variant, runner, elements * 100, operations * 100);
-    }
-    const keyless_ops = runner.inputs.pick(u64, 1_000, keyless_operations, keyless_operations);
-    for ([_]u64{ keyless_ops, keyless_ops * 2 }) |ops| {
-        inline for (keyless_variants) |V| try run_keyless_generate(V, runner, ops);
-    }
-}
-
-fn run_generate(comptime V: type, runner: *bench.Runner, elements: u64, operations: u64) !void {
-    const benchmark = bench.Benchmark.init("qmdb::generate")
-        .with_param("variant", V.name)
-        .with_param("elements", elements)
-        .with_param("operations", operations);
-    if (!runner.matches(benchmark.name())) return;
-    var workload: GenerateWorkload(V.Db) = .{
-        .fresh = .{ .gpa = runner.allocator, .disk = .init(runner) },
-        .elements = elements,
-        .operations = operations,
-    };
-    try runner.run(benchmark, &workload);
-}
-
-/// Appends `operations` variable values to a fresh keyless database per iteration, applying
-/// a batch whenever the rng draws a multiple of `keyless_commit_frequency`, then syncs.
-fn KeylessGenerateWorkload(comptime D: type) type {
-    return struct {
-        const Self = @This();
-
-        fresh: Fresh(D),
-        operations: u64,
-
-        pub fn setup(self: *Self) !void {
-            try self.fresh.setup();
-        }
-
-        pub fn before_iter(self: *Self) !void {
-            _ = try self.fresh.next();
-        }
-
-        pub fn iter(self: *Self) !u64 {
-            const gpa = self.fresh.gpa;
-            const db = self.fresh.db();
-            var rng: TestRng = .init(42);
-            var batch: ?D.UnmerkleizedBatch = try db.new_batch();
-            errdefer if (batch) |*pending| pending.deinit();
-            for (0..self.operations) |_| {
-                const value = try make_value(Bytes, gpa, &rng);
-                batch.?.append(value) catch |err| {
-                    gpa.free(value);
-                    return err;
-                };
-                if (rng.next_u32() % keyless_commit_frequency == 0) {
-                    try flush(D, db, &batch, false, true);
-                }
-            }
-            try flush(D, db, &batch, false, false);
-            try db.sync();
-            assert(db.bounds().end > self.operations);
-            return db.bounds().end;
-        }
-
-        pub fn teardown(self: *Self) !void {
-            try self.fresh.teardown();
-        }
-    };
-}
-
-fn run_keyless_generate(comptime V: type, runner: *bench.Runner, operations: u64) !void {
-    const benchmark = bench.Benchmark.init("qmdb::generate")
-        .with_param("variant", V.name)
-        .with_param("operations", operations);
-    if (!runner.matches(benchmark.name())) return;
-    var workload: KeylessGenerateWorkload(V.Db) = .{
-        .fresh = .{ .gpa = runner.allocator, .disk = .init(runner) },
-        .operations = operations,
-    };
-    try runner.run(benchmark, &workload);
 }

@@ -80,11 +80,13 @@ which every database here is built on.
 - [x] fuzz target: `qmdb_any_ordered_batching` (metadata across commits, final span links).
   Every qmdb fuzz target in my scope is ported (the any sync targets belong to the crypto lane).
 - [ ] benches for any, immutable, keyless, and store (coordinator split, 2026-11-19: current and
-  compact benches go to storage-qmdb-sync), in `qmdb/benches.zig`.
+  compact benches go to storage-qmdb-sync), in `qmdb/benches/` (`common.zig` holds the
+  variant registry, configs, storage, and seeding; storage-qmdb-sync adds current there).
   - [x] `qmdb::generate`: the any fixed, variable, and variable-vec variants (MMR and MMB),
     the store, and keyless, with commonware's names and constants.
-  - [ ] `qmdb::init`, `qmdb::apply_batch` (with immutable), `qmdb::merkleize`,
-    `qmdb::chained_growth`.
+  - [x] `qmdb::init` (both cache sizes, any and store) and `qmdb::apply_batch` (all eight
+    cases, including the p256-partitioned ordered and immutable variants).
+  - [ ] `qmdb::merkleize`, `qmdb::chained_growth`, then cold_read, constantinople, scale.
 - [x] immutable (fixed, MMR and MMB): `Db`, chained batches, floor-filtered batch reads,
   prune, recovery, `ImmutableMmr/MmbFixedConf` root conformance (matches), mod.rs's core
   scenarios, and a randomized chain check against the reopened rebuild.
@@ -179,8 +181,8 @@ which every database here is built on.
 ## Decisions
 - Benches run over the production disk storage, as commonware's tokio runtime does. On smoke
   inputs (`zig build test`) they use the in-memory storage and smaller cases (generate: 100
-  elements and 1,000 operations), because on disk every commit's fsync made the smoke run take
-  about 67 s.
+  elements and 1,000 operations; init: 100 and 1,000; apply_batch: 256 keys and 64 updates),
+  because on disk every commit's fsync made the smoke run take about 67 s.
 - Value encodings are comptime structs (`value.Fixed(V)`, `value.Variable(V)`) instead of
   sealed traits; one generic operation type switches on `E.fixed` at comptime, so fixed and
   variable layouts share one implementation. Variable byte values are `[]const u8` (Rust
@@ -290,3 +292,4 @@ which every database here is built on.
 - 2026-11-19: any unordered/ordered batch_root fuzz targets.
 - 2026-11-19: `qmdb_any_ordered_batching` fuzz target.
 - 2026-11-19: `qmdb::generate` benches (any, store, keyless).
+- 2026-11-19: `qmdb::init` and `qmdb::apply_batch` benches; split into `qmdb/benches/`.
