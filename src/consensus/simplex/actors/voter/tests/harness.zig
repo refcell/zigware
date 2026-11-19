@@ -317,6 +317,72 @@ fn next_within(
     return null;
 }
 
+/// Appends `artifacts` (borrowed, all at `view`) to the voter journal `partition` and syncs
+/// it (commonware `seed_voter_journal_artifacts`).
+pub fn seed_journal(
+    ctx: Ctx,
+    partition: []const u8,
+    scheme: *const Scheme,
+    view: View,
+    artifacts: []const Artifact,
+) !void {
+    const gpa = ctx.gpa();
+    var page_cache: runtime.buffer.paged.CacheRef = try .init(gpa, page_size, page_cache_size);
+    defer page_cache.deinit();
+    const Journal = storage.journal.segmented.variable.Journal(Artifact);
+    var recovery = try Journal.init(gpa, ctx.storage, .{
+        .partition = partition,
+        .codec_config = scheme.certificate_codec_config(),
+        .cache_ref = &page_cache,
+        .write_buffer = 1024 * 1024,
+        .replay_buffer = 1024 * 1024,
+    });
+    errdefer recovery.deinit();
+    // Bounded by the journal's contents.
+    while (try recovery.next()) |entry| {
+        var artifact = entry.item;
+        artifact.deinit(gpa);
+    }
+    var journal = try recovery.finish();
+    defer journal.deinit();
+    for (artifacts) |artifact| {
+        assert(artifact.view().get() == view.get());
+        _ = try journal.append(view.get(), artifact);
+    }
+    try journal.sync(&.{view.get()});
+}
+
+/// Waits for the restarted voter to announce `finalized.next()` with `finalized` as its
+/// floor, and to report the finalization at `finalized` (none above it) to the resolver
+/// (commonware `expect_restarted_voter_at_floor`).
+pub fn expect_at_floor(stack: *VoterStack, ctx: Ctx, finalized: View) !void {
+    var saw_update = false;
+    var saw_finalization = false;
+    var waited: u64 = 0;
+    while (!(saw_update and saw_finalization)) : (waited += 1) {
+        if (waited > 5_000) return error.TimedOut;
+        if (stack.batcher.try_recv()) |message| {
+            if (message == .update) {
+                const update = message.update;
+                try std.testing.expectEqual(finalized.get() + 1, update.current.get());
+                try std.testing.expectEqual(finalized.get(), update.finalized.get());
+                saw_update = true;
+            }
+            continue;
+        } else |_| {}
+        if (stack.resolver.try_recv()) |message| {
+            defer message.discard();
+            if (message == .updated and message.updated.certificate == .finalization) {
+                const view = message.updated.certificate.view();
+                try std.testing.expect(view.get() <= finalized.get());
+                saw_finalization = saw_finalization or view.get() == finalized.get();
+            }
+            continue;
+        } else |_| {}
+        try ctx.sleep(.fromMilliseconds(1));
+    }
+}
+
 /// A proposal at `view` of `epoch` over `view - 1`, with payload `hash(label)`.
 pub fn proposal_at(epoch: Epoch, view: u64, label: []const u8) Proposal {
     assert(view > 0);
@@ -342,7 +408,6 @@ pub fn build(
     for (votes[0..count], schemes[0..count]) |*vote, *scheme| {
         vote.* = (try Vote.sign(gpa, scheme, subject)).?;
     }
-    defer for (votes[0..count]) |*vote| vote.deinit(gpa);
     const Signed = @FieldType(Certificate, @tagName(kind));
     return Signed.from_votes(gpa, &schemes[0], votes[0..count], parallel.sequential);
 }
