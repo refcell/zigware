@@ -880,7 +880,10 @@ shared `tests/mocks.zig`, which takes additive edits only (agreed with the glue 
   (single participant, two epochs). Ported behind -Dslow-tests: rotates participants,
   multiple epochs, the failed and consecutive failed ceremony carry-overs, total shutdown,
   four epochs changing size, many failed ceremonies, many random crashes, the rotating subset,
-  the lossy network, and the roots-of-unity output.
+  the lossy network, the roots-of-unity output, the two determinism tests, and random crashes.
+- [ ] reshare drift (commonware 43b357a41..a9ffc25f3): bca770a0c runs the reshare suite under a
+  stable `RoundRobin` elector with `TermLength` and changes every test's leader settings;
+  a9ffc25f3 changes two harness lines (QMDB tag table, state-sync side).
 - [x] lookup's peer-activation test: network.rs's
   `lookup_secondary_dials_primary_and_receives_response` in `network_test.zig` (consensus-marshal
   lane, 2026-11-19); it catches the addressable manager dropping the secondary role.

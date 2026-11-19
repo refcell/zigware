@@ -114,6 +114,29 @@ fn run_reshare(engine: *harness.ReshareEngine, options: Options) ![8]u8 {
     return result.state;
 }
 
+/// commonware `reshare_e2e_deterministic`: two runs of one seed end in the same state.
+fn expect_deterministic(seed: u64) !void {
+    var states: [2][8]u8 = undefined;
+    for (&states) |*state| {
+        var engine = try harness.ReshareEngine.create(gpa);
+        defer engine.deinit();
+        state.* = try run_reshare(&engine, .{ .final_epoch = 1, .seed = seed, .schemes = false });
+    }
+    try testing.expectEqual(states[0], states[1]);
+}
+
+// commonware `reshare_e2e_deterministic`.
+test "reshare e2e deterministic" {
+    try skip_slow();
+    try expect_deterministic(0);
+}
+
+// commonware `reshare_e2e_deterministic_multiple_seeds`.
+test "reshare e2e deterministic multiple seeds" {
+    try skip_slow();
+    for (0..3) |seed| try expect_deterministic(seed);
+}
+
 // commonware `reshare_e2e_single_participant_two_epochs`.
 test "reshare e2e single participant two epochs" {
     var engine = try harness.ReshareEngine.with_committees(gpa, 1, &.{1}, 1);
@@ -207,6 +230,17 @@ fn run_crash_storm(
         .crashes = &.{crash},
         .recovery = true,
     });
+}
+
+// commonware `reshare_e2e_multiple_epochs_with_random_crashes`.
+test "reshare e2e multiple epochs with random crashes" {
+    try skip_slow();
+    const crash: simulate.action.Crash(harness.Key) = .{ .random = .{
+        .frequency = .from_secs(2),
+        .downtime = .from_millis(750),
+        .count = 1,
+    } };
+    for (0..3) |seed| try run_crash_storm(4, crash, seed, 180);
 }
 
 // commonware `reshare_e2e_multiple_epochs_with_many_random_crashes`.
