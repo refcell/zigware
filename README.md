@@ -50,6 +50,18 @@ updates under commonware's event names ([video](docs/assets/chat-demo.mp4)).
 `etc/scripts/record-demo.sh chat` records it again.
 
 <p align="center">
+  <img src="docs/assets/interop-demo.gif" width="800"
+    alt="commonware's Rust chat and zigware's Zig chat exchange messages over authenticated p2p">
+</p>
+
+zigware and commonware interoperate on the wire. On the left is commonware's own Rust
+`examples/chat`, built from the upstream source; on the right is zigware's chat. They find each
+other through authenticated p2p discovery, complete the handshake, open encrypted streams, and
+each side's message arrives on the other ([video](docs/assets/interop-demo.mp4)).
+`etc/scripts/interop.sh` runs the same check without recording (it skips when cargo or the
+commonware source is missing), and `etc/scripts/record-demo.sh interop` records it again.
+
+<p align="center">
   <img src="docs/assets/log-demo.gif" width="800"
     alt="Four validators run Simplex consensus and finalize blocks over real TCP">
 </p>
