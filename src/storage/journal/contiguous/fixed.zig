@@ -77,6 +77,8 @@ pub const Config = struct {
     /// Where to register the journal's metrics (commonware's context metrics); without a
     /// scope they are recorded unregistered.
     metrics: ?runtime.telemetry.metrics.Scope = null,
+    /// The clock of the duration histograms; without one they never observe.
+    io: ?std.Io = null,
 };
 
 /// A sync completion that has already succeeded: syncs complete synchronously.
@@ -650,7 +652,7 @@ pub fn Recovery(comptime A: type) type {
                 try self.checkpoint.persist(items_per_blob, self.bounds.start, size_new);
             }
             const watermark = self.checkpoint.watermark().?;
-            var metrics = try Metrics.init(self.gpa, self.cfg.metrics);
+            var metrics = try Metrics.init(self.gpa, self.cfg.metrics, self.cfg.io);
             errdefer metrics.deinit();
             metrics.update(size_new, self.bounds.start, items_per_blob);
             const journal: Journal(A) = .{
@@ -828,6 +830,8 @@ pub fn Journal(comptime A: type) type {
         pub fn commit(self: *Self) Error!void {
             assert(!self.failed);
             self.metrics.commit_calls.metric().inc();
+            const timing = self.metrics.time("commit_duration");
+            defer timing.finish();
             errdefer self.failed = true;
             try self.blobs.sync();
             self.barrier.mark_durable(self.bounds.end);
@@ -848,6 +852,8 @@ pub fn Journal(comptime A: type) type {
         pub fn sync(self: *Self) Error!void {
             assert(!self.failed);
             self.metrics.sync_calls.metric().inc();
+            const timing = self.metrics.time("sync_duration");
+            defer timing.finish();
             errdefer self.failed = true;
             const size_now = self.bounds.end;
             try self.blobs.sync();
@@ -859,6 +865,8 @@ pub fn Journal(comptime A: type) type {
         pub fn append(self: *Self, value: A) Error!u64 {
             assert(!self.failed);
             self.metrics.append_calls.metric().inc();
+            const timing = self.metrics.time("append_duration");
+            defer timing.finish();
             const size_new = std.math.add(u64, self.bounds.end, 1) catch return error.SizeOverflow;
             if (self.blobs.tail.try_append_value(A, value) == null) {
                 const bytes = codec.encode_fixed(A, value);
@@ -879,6 +887,8 @@ pub fn Journal(comptime A: type) type {
         pub fn append_many_nested(self: *Self, nested: []const []const A) Error!u64 {
             assert(!self.failed);
             self.metrics.append_many_calls.metric().inc();
+            const timing = self.metrics.time("append_many_duration");
+            defer timing.finish();
             self.scratch.clearRetainingCapacity();
             try encode_items(self.gpa, &self.scratch, nested);
             return self.write_encoded(self.scratch.items);
@@ -909,6 +919,8 @@ pub fn Journal(comptime A: type) type {
         pub fn append_prepared(self: *Self, prepared: *PreparedAppend) Error!u64 {
             defer prepared.deinit(self.gpa);
             self.metrics.append_prepared_calls.metric().inc();
+            const timing = self.metrics.time("append_prepared_duration");
+            defer timing.finish();
             return self.write_encoded(prepared.bytes);
         }
 
@@ -1044,12 +1056,21 @@ pub fn Journal(comptime A: type) type {
         /// Read the item at `position`.
         pub fn read(self: *const Self, position: u64) Error!A {
             self.metrics.read_calls.metric().inc();
-            return self.read_item(position);
+            if (self.try_read_sync(position)) |value| return value;
+            // Only reads that miss the page cache are timed.
+            const timing = self.metrics.time("read_duration");
+            defer timing.finish();
+            return self.read_miss(position);
         }
 
         /// `read` without counting a call (`read_many` counts one per batch).
         fn read_item(self: *const Self, position: u64) Error!A {
             if (self.try_read_sync(position)) |value| return value;
+            return self.read_miss(position);
+        }
+
+        /// Read `position` from storage after the page cache missed.
+        fn read_miss(self: *const Self, position: u64) Error!A {
             const located = try self.locate(position);
             self.metrics.cache_misses.metric().inc();
             var bytes: [chunk]u8 = undefined;
@@ -1066,7 +1087,10 @@ pub fn Journal(comptime A: type) type {
                 if (index > 0) assert(positions[index - 1] < position);
                 try self.validate_readable(position);
             }
-            if (positions.len > 0) self.metrics.read_many_calls.metric().inc();
+            if (positions.len == 0) return;
+            self.metrics.read_many_calls.metric().inc();
+            const timing = self.metrics.time("read_many_duration");
+            defer timing.finish();
             for (positions, out) |position, *value| value.* = try self.read_item(position);
         }
 

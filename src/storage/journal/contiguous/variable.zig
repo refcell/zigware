@@ -84,6 +84,8 @@ pub fn Config(comptime V: type) type {
         /// Where to register the journal's metrics (commonware's context metrics); the offsets
         /// journal registers under its `offsets` child. Without a scope they are unregistered.
         metrics: ?runtime.telemetry.metrics.Scope = null,
+        /// The clock of the duration histograms; without one they never observe.
+        io: ?std.Io = null,
     };
 }
 
@@ -124,6 +126,7 @@ fn offsets_config(cfg: anytype, names: Names) fixed.Config {
         .write_buffer = cfg.write_buffer,
         .replay_buffer = cfg.replay_buffer,
         .metrics = if (cfg.metrics) |scope| scope.child("offsets") else null,
+        .io = cfg.io,
     };
 }
 
@@ -778,7 +781,7 @@ pub fn Recovery(comptime V: type) type {
             const data_scope = if (self.cfg.metrics) |scope| scope.child("data") else null;
             var blobs = try Writable.recover(partition, pending, tail, data_scope);
             errdefer blobs.deinit();
-            var metrics = try Metrics.init(self.gpa, self.cfg.metrics);
+            var metrics = try Metrics.init(self.gpa, self.cfg.metrics, self.cfg.io);
             errdefer metrics.deinit();
             metrics.update(bounds.end, bounds.start, self.per_blob());
             const watermark = self.offsets.?.recovery_watermark();
@@ -979,6 +982,8 @@ pub fn Journal(comptime V: type) type {
         /// Append `item`, returning its position.
         pub fn append(self: *Self, item: V) Error!u64 {
             self.metrics.append_calls.metric().inc();
+            const timing = self.metrics.time("append_duration");
+            defer timing.finish();
             return self.append_nested(&.{&.{item}});
         }
 
@@ -991,6 +996,8 @@ pub fn Journal(comptime V: type) type {
         /// Append every slice of `nested` in order, returning the last position.
         pub fn append_many_nested(self: *Self, nested: []const []const V) Error!u64 {
             self.metrics.append_many_calls.metric().inc();
+            const timing = self.metrics.time("append_many_duration");
+            defer timing.finish();
             return self.append_nested(nested);
         }
 
@@ -1029,6 +1036,8 @@ pub fn Journal(comptime V: type) type {
                 return error.InvalidConfiguration;
             }
             self.metrics.append_prepared_calls.metric().inc();
+            const timing = self.metrics.time("append_prepared_duration");
+            defer timing.finish();
             return self.write_encoded(prepared.encoded, prepared.starts);
         }
 
@@ -1110,6 +1119,8 @@ pub fn Journal(comptime V: type) type {
         pub fn commit(self: *Self) Error!void {
             assert(!self.failed);
             self.metrics.commit_calls.metric().inc();
+            const timing = self.metrics.time("commit_duration");
+            defer timing.finish();
             errdefer self.failed = true;
             try self.blobs.sync();
         }
@@ -1129,6 +1140,8 @@ pub fn Journal(comptime V: type) type {
         pub fn sync(self: *Self) Error!void {
             assert(!self.failed);
             self.metrics.sync_calls.metric().inc();
+            const timing = self.metrics.time("sync_duration");
+            defer timing.finish();
             errdefer self.failed = true;
             const size_now = self.bounds.end;
             // Make data durable before the offsets journal can acknowledge its prefix.
@@ -1195,11 +1208,12 @@ pub fn Journal(comptime V: type) type {
         /// Read the item at `position`. The caller owns it.
         pub fn read(self: *const Self, position: u64) Error!V {
             self.metrics.read_calls.metric().inc();
-            return self.read_item(position);
+            return self.read_item(position, true);
         }
 
-        /// `read` without counting a call (`read_many` counts one per batch).
-        fn read_item(self: *const Self, position: u64) Error!V {
+        /// `read` without counting a call (`read_many` counts one per batch). A miss is timed
+        /// when `timed`.
+        fn read_item(self: *const Self, position: u64, timed: bool) Error!V {
             try self.validate_readable(position);
             const cached = self.offsets.try_read_sync(position);
             if (cached) |offset| {
@@ -1209,6 +1223,11 @@ pub fn Journal(comptime V: type) type {
                     return item;
                 }
             }
+            const timing: Metrics.Span = if (timed)
+                self.metrics.time("read_duration")
+            else
+                .{ .io = null, .timer = null };
+            defer timing.finish();
             const offset = cached orelse try self.offsets.read(position);
             self.metrics.cache_misses.metric().inc();
             const writer = self.data_writer(position);
@@ -1231,10 +1250,12 @@ pub fn Journal(comptime V: type) type {
                 assert(previous < position);
             }
             self.metrics.read_many_calls.metric().inc();
+            const timing = self.metrics.time("read_many_duration");
+            defer timing.finish();
             var done: usize = 0;
             errdefer for (out[0..done]) |item| codec.free(V, self.gpa, item);
             for (positions, out) |position, *item| {
-                item.* = try self.read_item(position);
+                item.* = try self.read_item(position, false);
                 done += 1;
             }
         }

@@ -80,7 +80,11 @@ variants need `runtime` storage; do them after its interface lands.
   `batch_parallel_update_leaf`, `test_mem_mmr_batched_root_parallel`, `add_many_mixed_operations`
   on 1/2/3/8 workers, and `add_many_at_limit` split three ways. Bench: add_many of 65536 items
   11.6 ms on one worker, 3.4 ms on eight.
-- [ ] Duration histograms for the journals' `read_miss_timed`, if runtime telemetry has them.
+- [x] Contiguous journal duration histograms (append, append_many, append_prepared, read on a
+  cache miss, read_many, commit, sync) from commonware's `metrics.rs`, timed on the clock of the
+  config's `io: ?std.Io = null` (commonware's context clock); without an io they register but
+  never observe. The variable journal passes its io to its offsets journal. Ports
+  `read_miss_timed` for both journals.
 
 ## Test tally (2026-11-19, merkle and journal internals)
 Commonware's tests in `storage/src/merkle` and the contiguous journals, matched by what they
@@ -91,14 +95,14 @@ check. Status after the 24 open ports landed (two `read_location` tests went to 
 | merkle batch, mem, proof, verification, hasher, storage, position | 219 | 211 | 0 | 8 |
 | mmr (mod, mem, full, iterator, proof), mmb, persisted/compact | 87 | 69 | 2 (qmdb) | 16 |
 | persisted/full.rs | 121 | 116 | 0 | 5 |
-| journal/contiguous/fixed.rs | 136 | 118 | 0 | 18 |
-| journal/contiguous/variable.rs | 152 | 121 | 0 | 31 |
+| journal/contiguous/fixed.rs | 136 | 119 | 0 | 17 |
+| journal/contiguous/variable.rs | 152 | 122 | 0 | 30 |
 
 Not portable: positions are plain `u64` (Display, operator, checked/saturating sub tests),
 `should_panic` tests, start_sync handles (parked, dropped, or failed syncs), `View` sharing,
 snapshot readers, decode counts, batched `read_many` internals, Rust type checks, and the
-`ExactSizeIterator` length test (Zig takes slices). The parallel-strategy tests are ported;
-the duration-histogram tests are in the backlog.
+`ExactSizeIterator` length test (Zig takes slices). The parallel-strategy and duration-histogram
+tests are ported.
 
 Deviations in the ports:
 - Replay read options: commonware replays a tip holding an unwritten full page through the page
