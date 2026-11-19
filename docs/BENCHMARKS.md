@@ -183,7 +183,12 @@ directory under `BENCH_DIR` (default `$TMPDIR` or `/tmp`). commonware gets it th
   commonware 1.13 ms (runs 1.13 to 1.69), zigware 1.21 ms (1.21 to 1.29). What remains is
   the fixed journal append, about 3× commonware's: a per-op stack-copy encode and a second
   copy through the paged tip. The profile and a patch are with the storage-journal and
-  runtime lanes.
+  runtime lanes; the in-place encode landed as 55202ede.
+  Paired re-run with 55202ede (`bench-compare.sh 5`, each round commonware then zigware back
+  to back; load sampled at each round's start): 1.62/1.26 ms (0.78×, load 34.4), 1.19/1.55
+  (1.30×, 25.6), 1.66/1.71 (1.03×, 62.7), 1.58/1.93 (1.22×, 49.2), 1.65/1.84 (1.11×, 58.5).
+  The median of the per-round ratios is 1.11×, inside the row's noise. Load rose to about 80
+  inside round 2, so the start-of-round samples understate it.
 
 ## bls12381: the remaining benches (2026-11-19, bls-math lane)
 
