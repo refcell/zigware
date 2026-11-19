@@ -132,6 +132,9 @@ placeholder until this lands, so land `Strategy` first and tell the coordinator 
   benches.
 
 ## Log
+- 2026-11-19: adaptive call sites keyed by `noinline` entry points (release builds merged
+  them), measured tests on a virtual `TestClock`; upstream drift to a9ffc25f3 ported
+  (fold_plan_tests.zig).
 - 2026-11-19: reviewed the 216 not-portable tests; ported the 15 that test API promises
   (pool_api_tests.zig). The pool needed no changes.
 - 2026-11-19: the audit's open tests: rayon join/sort/meter/spawn, the adaptive Rayon's
@@ -471,3 +474,24 @@ reductions, a skipped join side).
 - [x] `rayon/registry/test.rs` `install_crosses_pools_and_returns`, `rayon/thread_pool/test.rs`
   `self_install`, `mutual_install`, `mutual_install_sleepy`: nested spawns within and across
   one-worker pools never deadlock (sleeps of 100 ms, not 1 s)
+
+### Upstream drift (2026-11-19, commonware 43b357a41..a9ffc25f3)
+
+The test audit above read commonware at 43b357a41, the reference clone's commit when the audit
+landed. Three commits since then touch `parallel/`:
+- #5774 (883eae27e) moves the eight fold and map proptests of `lib.rs` (`proptest!`) onto a
+  shared `fold_plan::Plan`, checks them on three regression inputs (empty, `[MAX, MAX, MIN]`, and
+  `1..=499`) and a minifuzz search, and adds `fuzz.rs` (`test_fuzz_plan`, the `fuzz` feature) and
+  the `parallel` libFuzzer target. The checks themselves are unchanged.
+- #5691 (162216038) and a later lint pass: `minimum_batch_len` (still `NonZeroUsize`) divides
+  without `.get()`, `join::<_, _, (), ()>` annotations in three panic tests, and a dropped
+  `clone` in a sort test. No behavior or API change.
+
+Ported:
+- [x] `fold_plan.rs` `Plan::regressions` and the eight `Plan` checks, including the two the
+  earlier proptest ports did not cover (`fold_equals_fold_init`,
+  `map_init_collect_vec_equals_fold_init`): `fold_plan_tests.zig` "fold plan checks pass on the
+  regression inputs"
+- [x] `fuzz.rs` `test_fuzz_plan` and `fuzz_targets/parallel.rs`: `fold_plan_tests.zig` "fuzz:
+  fold plan checks hold on every plan", a seeded fuzz in `zig build test` and a
+  `std.testing.fuzz` target, reading the plan as little-endian `i32` words

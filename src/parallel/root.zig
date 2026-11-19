@@ -100,4 +100,5 @@ test {
     _ = @import("rayon_tests.zig");
     _ = @import("adaptive_tests.zig");
     _ = @import("pool_api_tests.zig");
+    _ = @import("fold_plan_tests.zig");
 }
