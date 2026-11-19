@@ -780,3 +780,94 @@ test "encode_iobufs keeps the pushed iobuf (test_encode_iobufs_keeps_pushed_iobu
     defer recovered.deinit();
     try testing.expectEqual(ptr, recovered.ptr);
 }
+
+test "iobufmut aligned allocation declines impossible layouts" {
+    // commonware `test_iobufmut_try_with_alignment_declines_impossible_layouts`. Zig's
+    // `Alignment` is a power of two by construction, so the non-power-of-two case cannot
+    // arise; oversized requests fail with OutOfMemory instead of returning None.
+    const page: std.mem.Alignment = .fromByteUnits(4096);
+    const heap = std.heap.page_allocator;
+    const too_big = @as(usize, std.math.maxInt(isize)) + 1;
+    try testing.expectError(error.OutOfMemory, IoBufMut.with_alignment(heap, too_big, page));
+    try testing.expectError(
+        error.OutOfMemory,
+        IoBufMut.with_alignment(heap, std.math.maxInt(usize) - 100, page),
+    );
+    var buf = try IoBufMut.with_alignment(gpa, 100, page);
+    defer buf.deinit();
+    try testing.expectEqual(@as(usize, 100), buf.capacity);
+    try testing.expect(page.check(@intFromPtr(buf.ptr)));
+    var empty = try IoBufMut.with_alignment(gpa, 0, page);
+    defer empty.deinit();
+    try testing.expectEqual(@as(usize, 0), empty.capacity);
+}
+
+test "iobufsmut emptiness with reserved capacity" {
+    // commonware `test_iobufsmut_emptiness_with_reserved_capacity`.
+    for (0..9) |count| {
+        for (0..count + 1) |readable| {
+            var bufs: IoBufsMut = .empty;
+            defer bufs.deinit(gpa);
+            for (0..count) |index| {
+                var chunk: IoBufMut = try .with_capacity(gpa, 4);
+                if (index == readable) chunk.put_slice(&.{7});
+                try bufs.append(gpa, chunk);
+            }
+            try testing.expectEqual(readable == count, bufs.is_empty());
+            if (readable != count) {
+                bufs.advance(1);
+                try testing.expect(bufs.is_empty());
+            }
+            if (bufs.remaining_mut() > 0) {
+                bufs.put_slice(&.{9});
+                try testing.expect(!bufs.is_empty());
+            }
+        }
+    }
+}
+
+test "iobufsmut as_single" {
+    // commonware `test_iobufsmut_try_into_single`.
+    var single = try bufs_mut_of(&.{"hello"}, &.{0});
+    defer single.deinit(gpa);
+    try testing.expectEqualStrings("hello", single.as_single().?.bytes());
+    var multi = try bufs_mut_of(&.{ "ab", "cd" }, &.{ 0, 0 });
+    try testing.expect(multi.as_single() == null);
+    try expect_frozen(&multi, "abcd", 2);
+}
+
+test "encode_iobufs of containers, maps, lazy values, and ranges matches encode" {
+    // commonware `test_nested_container_encode_iobufs_matches_encode`,
+    // `test_map_encode_iobufs_matches_encode`, `test_lazy_encode_iobufs_matches_encode`, and
+    // `test_non_empty_range_encode_iobufs_matches_encode`. Zig containers encode inline (no
+    // `write_bufs`), so only the bytes are compared; a deferred `Lazy` is one inline chunk.
+    const aa: [256]u8 = @splat(0xaa);
+    const bb: [128]u8 = @splat(0xbb);
+    const cc: [64]u8 = @splat(0xcc);
+    const Nested = struct { ?[]const u8, []const []const u8 };
+    try expect_encode_iobufs_matches(Nested, .{ &aa, &.{ &bb, &cc } });
+    const dd: [96]u8 = @splat(0xdd);
+    const ee: [48]u8 = @splat(0xee);
+    inline for (.{ codec.Map(u8, []const u8), codec.HashMap(u8, []const u8) }) |M| {
+        const entries = [_]M.Entry{ .{ .key = 1, .value = &ee }, .{ .key = 2, .value = &dd } };
+        try expect_encode_iobufs_matches(M, .init(&entries));
+    }
+    const lazy_bytes: [200]u8 = @splat(0x44);
+    try expect_encode_iobufs_matches(codec.Lazy([]const u8), .init(&lazy_bytes));
+    const pending = try codec.encode(u64, gpa, 42);
+    defer gpa.free(pending);
+    try expect_encode_iobufs_matches(codec.Lazy(u64), .deferred(pending, {}));
+    const utils = @import("utils");
+    const range = try utils.range.NonEmptyRange(u64).init(32, 48);
+    try expect_encode_iobufs_matches(@TypeOf(range), range);
+}
+
+test "encode_iobufs of an empty value does not allocate" {
+    // commonware `test_encode_iobufs_without_inline_bytes_does_not_allocate`.
+    var failing = std.testing.FailingAllocator.init(gpa, .{ .fail_index = 0 });
+    var bufs = try iobuf.encode_iobufs([0]u8, failing.allocator(), .{});
+    defer bufs.deinit(failing.allocator());
+    try testing.expectEqual(@as(usize, 0), failing.allocations);
+    try testing.expectEqual(@as(usize, 0), bufs.len());
+    try testing.expectEqual(@as(usize, 0), bufs.chunk_count());
+}

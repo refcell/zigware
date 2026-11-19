@@ -587,21 +587,21 @@ Open:
   partition forgets its first-open flushed names
 - [ ] `storage/tokio/mod.rs:1669` `test_clean_sync_is_skipped`: sync with no mutation since the last
   sync skips the fsync
-- [ ] `iobuf/buf.rs:2386` `test_iobufmut_try_with_alignment_declines_impossible_layouts`: oversized
+- [x] `iobuf/buf.rs:2386` `test_iobufmut_try_with_alignment_declines_impossible_layouts`: oversized
   aligned allocations fail instead of panicking
-- [ ] `iobuf/bufs.rs:3075` `test_iobufsmut_emptiness_with_reserved_capacity`: is_empty, advance,
+- [x] `iobuf/bufs.rs:3075` `test_iobufsmut_emptiness_with_reserved_capacity`: is_empty, advance,
   put across up to 8 reserved-capacity chunks
-- [ ] `iobuf/bufs.rs:3523` `test_iobufsmut_try_into_single`: IoBufsMut as_single succeeds for one
+- [x] `iobuf/bufs.rs:3523` `test_iobufsmut_try_into_single`: IoBufsMut as_single succeeds for one
   chunk, fails for two
-- [ ] `iobuf/bufs.rs:4235` `test_nested_container_encode_iobufs_matches_encode`: encode_iobufs of
+- [x] `iobuf/bufs.rs:4235` `test_nested_container_encode_iobufs_matches_encode`: encode_iobufs of
   Option/Vec byte fields equals encode
-- [ ] `iobuf/bufs.rs:4244` `test_map_encode_iobufs_matches_encode`: encode_iobufs of BTreeMap and
+- [x] `iobuf/bufs.rs:4244` `test_map_encode_iobufs_matches_encode`: encode_iobufs of BTreeMap and
   HashMap byte values equals encode
-- [ ] `iobuf/bufs.rs:4257` `test_lazy_encode_iobufs_matches_encode`: encode_iobufs of Lazy and
+- [x] `iobuf/bufs.rs:4257` `test_lazy_encode_iobufs_matches_encode`: encode_iobufs of Lazy and
   deferred Lazy equals encode, one chunk
-- [ ] `iobuf/bufs.rs:4273` `test_encode_iobufs_without_inline_bytes_does_not_allocate`:
+- [x] `iobuf/bufs.rs:4273` `test_encode_iobufs_without_inline_bytes_does_not_allocate`:
   encode_iobufs of an empty array allocates nothing
-- [ ] `iobuf/bufs.rs:4281` `test_non_empty_range_encode_iobufs_matches_encode`: encode_iobufs of a
+- [x] `iobuf/bufs.rs:4281` `test_non_empty_range_encode_iobufs_matches_encode`: encode_iobufs of a
   NonEmptyRange of byte values equals encode
 
 Not portable:
