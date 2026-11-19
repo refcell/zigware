@@ -124,12 +124,13 @@ setup, the commands, and the caveats). Below 1× means zigware is faster.
 | `buffer_paged::append` (4 KiB) | 0.43× |
 | `bls12381::aggregate_verify_same_message` (1000 keys) / single verify | 0.96× / 1.30× |
 | `sha256::hash_message` (4 KiB / 1 MiB) | 1.11× / 1.12× |
-| `ed25519::signature_verification` / `batch_verify_same_message` (100 keys) | 1.62× / 2.13× |
+| `ed25519::signature_verification` / `batch_verify_same_message` (100 keys) | 0.55× / 1.18× |
 | `qmdb::apply_batch` (16384 updates) | 2.43× |
 
 These were measured on a busy desktop with storage on tmpfs, so ratios near 1 are noise and
-the storage numbers measure code, not the disk. The ed25519, BLS single verify, and qmdb
-gaps are being worked on.
+the storage numbers measure code, not the disk. ed25519 single verify uses an AVX-512 IFMA
+backend where the CPU has one (a scalar path elsewhere); batch verify, BLS single verify,
+and qmdb gaps are being worked on.
 
 ## Design
 
