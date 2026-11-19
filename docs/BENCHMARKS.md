@@ -106,3 +106,200 @@ directory under `BENCH_DIR` (default `$TMPDIR` or `/tmp`). commonware gets it th
   path, which is allocation-free here and runs over mimalloc.
 
 ## Appendix: bench coverage
+
+Every Criterion bench in commonware a9ffc25f3 (`benches/` dirs with `criterion_main!`), listed
+with `cargo bench --no-run` and each bench binary's `--list`, matched by exact name against
+zigware's `--list` output in both standard and full mode (`COMMONWARE_BENCH_FULL=1`; zigware
+keeps the largest inputs of some benches to full mode). Each package's benches run under
+`zig build bench` (filter with `-Dbench-filter=`). Counts are bench cases (one Criterion name
+each); a group is the name before the first `/`.
+
+**2112 of 2262** commonware cases have a zigware bench of the same name. The 150 without one:
+
+- 100 `conc=8` rows of six bls12381 groups and the 4 `sha256::hash_parts` cases. These crates
+  are in runtime's commonware-vs-zigware comparison set above, so the audit lists them without
+  porting them.
+- 18 `impl=roaring-rs` rows of the roaring bitmap benches: they measure an external Rust crate.
+- 15 `iobuf::iobuf::decode_fixed` cases: the `bytes` and `bytes_ref` modes measure the `bytes`
+  crate, and `vec` is the same decode as `vec_slice` here (decided when the bench was ported).
+- 8 `blake3::hash_message` `conc=8` rows: `Blake3.hash_across` still hashes one message on the
+  calling thread, while commonware splits a long message into subtrees across the strategy.
+  This needs an implementation in `cryptography/blake3.zig`, not just a bench.
+- 5 `engine=avx512` rows of the Reed-Solomon engine benches: zigware has no AVX-512 engine.
+
+Ported by this audit: utils' `bitmap`, `cache`, `rational`, and `sequence` benches (168
+cases), storage's `ordinal` (13) and `rmap` (5), and curve25519's batch verify at
+commonware's concurrency levels 16 and 32. Renamed to commonware's Criterion names:
+`curve25519::batch_verify` to `batch_verify::verify_batch_bytes_bench`, and
+`iobuf::decode_fixed` to `iobuf::iobuf::decode_fixed`.
+
+Not Criterion benches, so not in the table: `qmdb_gungraun` (an instruction-count harness),
+`coding_scheme_sizes` (a size report; zigware's `reed_solomon size (shard)` rows),
+`index_scale`, runtime's `storage` workload binary (zigware's `runtime::storage::<workload>`),
+and qmdb's `cold_read`, `scale`, and `constantinople` (zigware's `zig build qmdb-<name>`).
+zigware-only groups, with no commonware counterpart: `clearing::*`, `curve25519::{sign,
+verify, x25519}` (against `std.crypto`), `parallel::{fold, sort_by}`, `journal::zstd::encode`,
+and runtime's I/O backend benches (`runtime::network::echo`, `runtime::storage`).
+
+| Crate | Bench target | Group | commonware | zigware | Notes |
+|---|---|---|---:|---:|---|
+| actor | `mailbox` | `mailbox::mailbox::enqueue_ready` | 1 | 1 |  |
+| actor | `mailbox` | `mailbox::mailbox::try_recv_ready` | 1 | 1 |  |
+| actor | `mailbox` | `mailbox::mailbox::try_recv_overflow` | 1 | 1 |  |
+| actor | `mailbox` | `mailbox::mailbox::round_trip_ready` | 1 | 1 |  |
+| actor | `mailbox` | `mailbox::mailbox::recv_waiting` | 1 | 1 |  |
+| actor | `mailbox` | `mailbox::mailbox::overflow_drop` | 1 | 1 |  |
+| actor | `mailbox` | `mailbox::mailbox::overflow_spill` | 1 | 1 |  |
+| actor | `mailbox` | `mailbox::mailbox::overflow_replace` | 2 | 2 |  |
+| actor | `mailbox` | `mailbox::mailbox::concurrent_enqueue` | 1 | 1 |  |
+| codec | `codec` | `codec::lazy::get` | 10 | 10 |  |
+| coding | `coding_scheme_times` | `reed_solomon::encode` | 30 | 30 |  |
+| coding | `coding_scheme_times` | `reed_solomon::decode` | 130 | 130 |  |
+| cryptography | `blake3` | `blake3::hash_message` | 16 | 8 | `conc=8` missing: `Blake3.hash_across` still hashes one message on the calling thread, where commonware splits it into subtrees across the strategy (an implementation gap, not a bench gap) |
+| cryptography | `bloomfilter` | `bloomfilter::insert` | 12 | 12 |  |
+| cryptography | `bloomfilter` | `bloomfilter::contains` | 24 | 24 |  |
+| cryptography | `bls12381` | `bls12381::batch_to_affine` | 8 | 8 |  |
+| cryptography | `bls12381` | `bls12381::dkg::golden::deal` | 3 | 3 |  |
+| cryptography | `bls12381` | `bls12381::dkg::golden::verify` | 3 | 3 |  |
+| cryptography | `bls12381` | `bls12381::dkg::feldman_desmedt_recovery` | 4 | 4 |  |
+| cryptography | `bls12381` | `bls12381::dkg::feldman_desmedt_reshare_recovery` | 4 | 4 |  |
+| cryptography | `bls12381` | `bls12381::hash_to_curve` | 8 | 4 | `conc=8` rows missing (bls12381 is in runtime's comparison set; not ported here) |
+| cryptography | `bls12381` | `bls12381::attestation_eq` | 2 | 2 |  |
+| cryptography | `bls12381` | `bls12381::threshold_recover` | 20 | 20 |  |
+| cryptography | `bls12381` | `bls12381::threshold_optimistic_assemble` | 32 | 32 |  |
+| cryptography | `bls12381` | `bls12381::combine_public_keys` | 4 | 4 |  |
+| cryptography | `bls12381` | `bls12381::combine_signatures` | 4 | 4 |  |
+| cryptography | `bls12381` | `bls12381::signature_generation` | 1 | 1 |  |
+| cryptography | `bls12381` | `bls12381::signature_verification` | 1 | 1 |  |
+| cryptography | `bls12381` | `bls12381::batch_verify_same_signer` | 10 | 10 |  |
+| cryptography | `bls12381` | `bls12381::aggregate_verify_same_message` | 4 | 4 |  |
+| cryptography | `bls12381` | `bls12381::aggregate_verify_same_signer` | 10 | 5 | `conc=8` rows missing (in runtime's comparison set) |
+| cryptography | `bls12381` | `bls12381::scheme_batch_verify_same_signer` | 10 | 10 |  |
+| cryptography | `bls12381` | `bls12381::scheme_batch_verify_same_message` | 10 | 10 |  |
+| cryptography | `bls12381` | `bls12381::evaluate_point` | 14 | 7 | `conc=8` rows missing (in runtime's comparison set) |
+| cryptography | `bls12381` | `bls12381::msm` | 24 | 24 |  |
+| cryptography | `bls12381` | `bls12381::multisig_optimistic_assemble` | 16 | 16 |  |
+| cryptography | `bls12381` | `bls12381::threshold_batch_verify_same_message` | 56 | 28 | `conc=8` rows missing (in runtime's comparison set) |
+| cryptography | `bls12381` | `bls12381::threshold_batch_verify_same_message_pre` | 56 | 28 | `conc=8` rows missing (in runtime's comparison set) |
+| cryptography | `bls12381` | `bls12381::threshold_batch_verify_same_signer` | 56 | 28 | `conc=8` rows missing (in runtime's comparison set) |
+| cryptography | `bls12381` | `bls12381::tle_encrypt` | 1 | 1 |  |
+| cryptography | `bls12381` | `bls12381::tle_decrypt` | 1 | 1 |  |
+| cryptography | `bulletproofs` | `bulletproofs::ipa::prove` | 10 | 10 |  |
+| cryptography | `bulletproofs` | `bulletproofs::ipa::verify` | 10 | 10 |  |
+| cryptography | `chacha20_poly1305` | `chacha20_poly1305::seal_open` | 3 | 3 |  |
+| cryptography | `ed25519` | `ed25519::signature_generation` | 1 | 1 |  |
+| cryptography | `ed25519` | `ed25519::signature_verification` | 1 | 1 |  |
+| cryptography | `ed25519` | `ed25519::batch_verify_same_message` | 10 | 10 |  |
+| cryptography | `ed25519` | `ed25519::batch_verify_same_signer` | 10 | 10 |  |
+| cryptography | `ed25519` | `ed25519::batch_verify` | 5 | 5 |  |
+| cryptography | `lthash` | `lthash::add` | 4 | 4 |  |
+| cryptography | `lthash` | `lthash::subtract` | 3 | 3 |  |
+| cryptography | `lthash` | `lthash::combine` | 1 | 1 |  |
+| cryptography | `lthash` | `lthash::checksum` | 1 | 1 |  |
+| cryptography | `lthash` | `lthash::update` | 2 | 2 |  |
+| cryptography | `reed_solomon` | `reed_solomon::encoder` | 23 | 23 |  |
+| cryptography | `reed_solomon` | `reed_solomon::decoder` | 46 | 46 |  |
+| cryptography | `reed_solomon` | `reed_solomon::high_rate_encoder` | 9 | 9 |  |
+| cryptography | `reed_solomon` | `reed_solomon::low_rate_encoder` | 9 | 9 |  |
+| cryptography | `reed_solomon` | `reed_solomon::high_rate_decoder` | 9 | 9 |  |
+| cryptography | `reed_solomon` | `reed_solomon::low_rate_decoder` | 9 | 9 |  |
+| cryptography | `reed_solomon` | `reed_solomon::engine_eval_poly` | 8 | 6 | `engine=avx512` missing: zigware has no AVX-512 engine |
+| cryptography | `reed_solomon` | `reed_solomon::engine_mul` | 4 | 3 | `engine=avx512` missing: zigware has no AVX-512 engine |
+| cryptography | `reed_solomon` | `reed_solomon::engine_fft` | 4 | 3 | `engine=avx512` missing: zigware has no AVX-512 engine |
+| cryptography | `reed_solomon` | `reed_solomon::engine_ifft` | 4 | 3 | `engine=avx512` missing: zigware has no AVX-512 engine |
+| cryptography | `sake` | `sake::sake` | 1 | 1 |  |
+| cryptography | `secp256r1` | `secp256r1::signature_generation` | 2 | 2 |  |
+| cryptography | `secp256r1` | `secp256r1::signature_verification` | 2 | 2 |  |
+| cryptography | `sha256` | `sha256::hash_message` | 6 | 6 |  |
+| cryptography | `sha256` | `sha256::hash_many::individual` | 54 | 54 |  |
+| cryptography | `sha256` | `sha256::hash_many::batch` | 108 | 108 |  |
+| cryptography | `sha256` | `sha256::hash_pair` | 2 | 2 |  |
+| cryptography | `sha256` | `sha256::hash_parts` | 4 | 0 | missing (sha256 is in runtime's comparison set; not ported here) |
+| cryptography | `sha256` | `sha256::digest_cmp` | 12 | 12 |  |
+| cryptography | `sha512` | `sha512::hash_many::individual` | 40 | 40 |  |
+| cryptography | `sha512` | `sha512::hash_many::batch` | 80 | 80 |  |
+| curve25519 | `batch_verify` | `batch_verify::verify_batch_bytes_bench` | 24 | 24 | ported in full by this audit: renamed from `curve25519::batch_verify`, conc 16 and 32 added |
+| formatting | `formatting` | `formatting::encode` | 6 | 6 |  |
+| formatting | `formatting` | `formatting::decode` | 12 | 12 |  |
+| formatting | `formatting` | `formatting::display` | 6 | 6 |  |
+| glue | `transfers` | `transfers::plan` | 48 | 48 |  |
+| glue | `transfers` | `transfers::settle` | 48 | 48 |  |
+| glue | `transfers` | `transfers::select` | 48 | 48 |  |
+| math | `interpolation` | `interpolation::interpolator_creation` | 11 | 11 |  |
+| runtime | `buffer_paged` | `buffer_paged::append` | 8 | 8 |  |
+| runtime | `buffer_paged` | `buffer_paged::read` | 8 | 8 |  |
+| runtime | `buffer_paged` | `buffer_paged::sync` | 4 | 4 |  |
+| runtime | `iobuf` | `iobuf::iobuf::decode_fixed` | 45 | 30 | `bytes`, `bytes_ref`, `vec` not ported: no counterpart to the `bytes` crate, and `vec` is `vec_slice`'s decode here; renamed from `iobuf::decode_fixed` to commonware's name |
+| storage | `archive` | `archive::put` | 4 | 4 |  |
+| storage | `archive` | `archive::get` | 16 | 16 |  |
+| storage | `archive` | `archive::restart` | 4 | 4 |  |
+| storage | `bmt` | `bmt::build` | 7 | 7 |  |
+| storage | `bmt` | `bmt::proof` | 3 | 3 |  |
+| storage | `bmt` | `bmt::multi_proof` | 3 | 3 |  |
+| storage | `bmt` | `bmt::range_proof` | 3 | 3 |  |
+| storage | `bmt` | `bmt::verify_single` | 7 | 7 |  |
+| storage | `bmt` | `bmt::verify_multi` | 7 | 7 |  |
+| storage | `bmt` | `bmt::verify_range` | 7 | 7 |  |
+| storage | `freezer` | `freezer::get` | 4 | 4 |  |
+| storage | `freezer` | `freezer::put` | 1 | 1 |  |
+| storage | `freezer` | `freezer::restart` | 1 | 1 |  |
+| storage | `index` | `index::grinding` | 8 | 8 |  |
+| storage | `index` | `index::hashmap_iteration` | 4 | 4 |  |
+| storage | `index` | `index::hashmap_insert_fixed` | 1 | 1 |  |
+| storage | `index` | `index::hashmap_insert` | 4 | 4 |  |
+| storage | `index` | `index::insert` | 18 | 18 |  |
+| storage | `index` | `index::insert_and_retain` | 2 | 2 |  |
+| storage | `index` | `index::lookup` | 12 | 12 |  |
+| storage | `index` | `index::lookup_miss` | 6 | 6 |  |
+| storage | `journal` | `journal::append_sync` | 6 | 6 |  |
+| storage | `journal` | `journal::fixed_append` | 6 | 6 |  |
+| storage | `journal` | `journal::fixed_append_buffered` | 4 | 4 |  |
+| storage | `journal` | `journal::fixed_read_random` | 12 | 12 |  |
+| storage | `journal` | `journal::fixed_read_sequential` | 4 | 4 |  |
+| storage | `journal` | `journal::fixed_replay` | 24 | 24 |  |
+| storage | `journal` | `journal::read_cached` | 7 | 7 |  |
+| storage | `journal` | `journal::segmented_variable_append_buffered` | 2 | 2 |  |
+| storage | `journal` | `journal::variable_prepare_append` | 36 | 36 |  |
+| storage | `journal` | `journal::variable_read_compressed` | 24 | 24 |  |
+| storage | `journal` | `journal::variable_read_random` | 12 | 12 |  |
+| storage | `journal` | `journal::variable_replay` | 24 | 24 |  |
+| storage | `merkle` | `merkle::add_many` | 28 | 28 |  |
+| storage | `merkle` | `merkle::append` | 4 | 4 |  |
+| storage | `merkle` | `merkle::append_additional` | 16 | 16 |  |
+| storage | `merkle` | `merkle::flush` | 4 | 4 |  |
+| storage | `merkle` | `merkle::multi_proof` | 4 | 4 |  |
+| storage | `merkle` | `merkle::position_to_location` | 4 | 4 |  |
+| storage | `merkle` | `merkle::proof` | 4 | 4 |  |
+| storage | `merkle` | `merkle::range_proof` | 40 | 40 |  |
+| storage | `merkle` | `merkle::verify_single_element` | 4 | 4 |  |
+| storage | `merkle` | `merkle::verify_many_elements` | 40 | 40 |  |
+| storage | `merkle` | `merkle::verify_multi` | 4 | 4 |  |
+| storage | `merkle` | `merkle::update` | 8 | 8 |  |
+| storage | `metadata` | `metadata::sync` | 21 | 21 |  |
+| storage | `metadata` | `metadata::overwrite` | 12 | 12 |  |
+| storage | `metadata` | `metadata::restart` | 4 | 4 |  |
+| storage | `ordinal` | `ordinal::get` | 6 | 6 | ported by this audit; `mode=concurrent` keeps its name but reads serially (the store is not shared between tasks), as the freezer's does |
+| storage | `ordinal` | `ordinal::put` | 3 | 3 | ported by this audit |
+| storage | `ordinal` | `ordinal::restart` | 4 | 4 | ported by this audit |
+| storage | `qmdb` | `qmdb::apply_batch` | 8 | 8 |  |
+| storage | `qmdb` | `qmdb::chained_growth` | 4 | 4 |  |
+| storage | `qmdb` | `qmdb::generate` | 29 | 29 |  |
+| storage | `qmdb` | `qmdb::init` | 50 | 50 |  |
+| storage | `qmdb` | `qmdb::merkleize` | 128 | 128 |  |
+| storage | `rmap` | `rmap::insert` | 5 | 5 | ported by this audit |
+| utils | `bitmap` | `bitmap::count_ones` | 24 | 24 | ported by this audit |
+| utils | `bitmap` | `bitmap::write` | 24 | 24 | ported by this audit |
+| utils | `bitmap` | `bitmap::roaring_insert` | 6 | 3 | ported by this audit; `impl=roaring-rs` rows measure an external Rust crate |
+| utils | `bitmap` | `bitmap::roaring_insert_range` | 6 | 3 | ported by this audit; `impl=roaring-rs` rows measure an external Rust crate |
+| utils | `bitmap` | `bitmap::roaring_contains` | 6 | 3 | ported by this audit; `impl=roaring-rs` rows measure an external Rust crate |
+| utils | `bitmap` | `bitmap::roaring_union` | 4 | 2 | ported by this audit; `impl=roaring-rs` rows measure an external Rust crate |
+| utils | `bitmap` | `bitmap::roaring_intersection` | 4 | 2 | ported by this audit; `impl=roaring-rs` rows measure an external Rust crate |
+| utils | `bitmap` | `bitmap::roaring_difference` | 4 | 2 | ported by this audit; `impl=roaring-rs` rows measure an external Rust crate |
+| utils | `bitmap` | `bitmap::roaring_iteration` | 6 | 3 | ported by this audit; `impl=roaring-rs` rows measure an external Rust crate |
+| utils | `bitmap` | `bitmap::roaring_write` | 3 | 3 | ported by this audit |
+| utils | `cache` | `cache::get` | 3 | 3 | ported by this audit |
+| utils | `cache` | `cache::insert` | 3 | 3 | ported by this audit |
+| utils | `cache` | `cache::mixed` | 3 | 3 | ported by this audit |
+| utils | `cache` | `cache::refill` | 3 | 3 | ported by this audit |
+| utils | `rational` | `rational::log2_ceil` | 24 | 24 | ported by this audit |
+| utils | `sequence` | `sequence::cmp_bytes` | 63 | 63 | ported by this audit |

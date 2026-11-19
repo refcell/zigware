@@ -11,5 +11,7 @@ pub fn run(runner: *bench.Runner) !void {
     try @import("journal/zstd_benches.zig").run(runner);
     try @import("journal/benches.zig").run(runner);
     try @import("metadata/benches.zig").run(runner);
+    try @import("ordinal/benches.zig").run(runner);
     try @import("qmdb/benches/mod.zig").run(runner);
+    try @import("rmap/benches.zig").run(runner);
 }
