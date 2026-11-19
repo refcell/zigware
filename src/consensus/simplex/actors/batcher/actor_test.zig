@@ -195,26 +195,36 @@ const Harness = struct {
 
     /// Starts with historical votes kept (commonware `track_historical_votes`).
     fn start_historical(self: *Harness, io: Io) !void {
-        return self.start_with(io, null, true);
+        return self.start_with(io, null, .{ .track_historical_votes = true });
     }
+
+    const Options = struct {
+        track_historical_votes: bool = false,
+        term_length: u32 = 1,
+        optimistic_views: u64 = 0,
+    };
 
     /// Starts with the batcher's metrics registered under `scope`, if any.
     fn start_scoped(self: *Harness, io: Io, scope: ?runtime.telemetry.metrics.Scope) !void {
-        return self.start_with(io, scope, false);
+        return self.start_with(io, scope, .{});
     }
 
     fn start_with(
         self: *Harness,
         io: Io,
         scope: ?runtime.telemetry.metrics.Scope,
-        track_historical_votes: bool,
+        options: Options,
     ) !void {
         var rng = utils.rng.test_rng();
         const fixture = try ed25519.fixture(Digest, gpa, &rng, "batcher", 4);
         self.* = .{ .io = io, .fixture = fixture };
         var cfg = config(&fixture.schemes[0], &self.log);
         cfg.scope = scope;
-        cfg.track_historical_votes = track_historical_votes;
+        cfg.track_historical_votes = options.track_historical_votes;
+        cfg.lookahead = .{
+            .term_length = .new(utils.NonZero(u32).init(options.term_length).?),
+            .optimistic_views = .new(options.optimistic_views),
+        };
         self.batcher, self.mailbox = try Batcher.init(gpa, io, cfg);
         const voter = try actor.mailbox.new(VoterMessage, gpa, io, 16);
         self.voter = voter.receiver;
@@ -627,6 +637,50 @@ test "batcher keeping historical votes detects conflicts below the current view"
             try testing.expectEqual(1, harness.log.blocked.items.len);
             try testing.expect(harness.log.blocked.items[0].eql(fixture.participants[1]));
             try testing.expectEqual(1, harness.log.count(.conflicting_notarize, 5));
+        }
+    };
+    try run_deterministic(Root.run);
+}
+
+// commonware `test_term_entry_assembles_buffered_lane_quorum`: with terms of 10 views and two
+// optimistic views, votes for next-term lane view 14 buffered at view 9 assemble once the
+// node enters the next term.
+test "batcher assembles a buffered next-term lane quorum on term entry" {
+    const Root = struct {
+        fn run(io: Io) !void {
+            var harness: Harness = undefined;
+            try harness.start_with(io, null, .{ .term_length = 10, .optimistic_views = 2 });
+            defer harness.stop();
+            const fixture = &harness.fixture;
+            try harness.mailbox.update(.new(9), .init(1), .zero(), null);
+            try io.sleep(.fromMilliseconds(10), .awake);
+            const at: consensus_types.Round = .new(.new(0), .new(14));
+            const lane: types.Proposal(Digest) = .init(at, .new(13), .fill(14));
+            for (1..4) |signer| {
+                const bytes = try notarize_proposal_bytes(fixture, signer, lane);
+                try harness.votes.deliver(fixture.participants[signer], bytes);
+            }
+            try io.sleep(.fromMilliseconds(50), .awake);
+            try testing.expectError(error.Empty, harness.voter.try_recv());
+            try harness.mailbox.update(.new(11), .init(2), .zero(), null);
+            try io.sleep(.fromMilliseconds(50), .awake);
+            var proposed = false;
+            var notarized = false;
+            while (harness.voter.try_recv()) |message| {
+                defer VoterMessage.discard(message);
+                switch (message) {
+                    .proposal => |forwarded| {
+                        try testing.expect(forwarded.eql(lane));
+                        proposed = true;
+                    },
+                    .verified => |verified| if (verified.certificate == .notarization) {
+                        try testing.expect(verified.certificate.notarization.proposal.eql(lane));
+                        notarized = true;
+                    },
+                    else => {},
+                }
+            } else |err| try testing.expectEqual(error.Empty, err);
+            try testing.expect(proposed and notarized);
         }
     };
     try run_deterministic(Root.run);

@@ -287,12 +287,14 @@ resolver; those lanes are running, so do the types first and the actors as they 
   partition, slow_and_lossy_links, and equivocator, `stable_leader_finalizes_full_term_
   without_nullification`, `stable_leader_optimistic_blocks_faster_than_network_latency`,
   and the three `pipelined_handoff` latency DSTs. Those are the next mod.rs item below.
-- [ ] mod.rs remainder: the 13 DSTs named above.
+- [ ] mod.rs remainder: the 13 DSTs named above. Handed to the broadcast-collector lane on
+  2026-11-19.
 - [ ] actors/voter/mod.rs: the 96 voter-actor tests (restart and floor journaling, the
   pipelined handoff build lifecycle, nullify on failed or dropped propose and verify,
   certification ordering and replay). None are ported; they need a voter-actor harness
-  with a mock batcher, resolver, and automaton on the deterministic runtime.
-- [ ] actors/batcher/mod.rs: 49 of its 76 tests still to port (forwarding, leader activity,
+  with a mock batcher, resolver, and automaton on the deterministic runtime. Handed to the
+  runtime lane on 2026-11-19 (actors/voter/tests/).
+- [ ] actors/batcher/mod.rs: 48 of its 76 tests still to port (forwarding, leader activity,
   optimistic assembly fallback, construction order, the per-fixture quorum test on the
   other 7 fixtures). Round-level ones ported in round_test.zig (2026-11-19): forwarding a
   notarization's proposal without a leader, certificate vote release and retention,
@@ -302,7 +304,8 @@ resolver; those lanes are running, so do the types first and the actors as they 
   notarization forwarded without a leader, a tampered certificate blocking its sender,
   vote and certificate deduplication, skipping votes for finalized views, and blocking a
   resent notarize or finalize with another attestation, and votes below the current view
-  (reported but not assembled; with historical votes, conflicts detected).
+  (reported but not assembled; with historical votes, conflicts detected), and a buffered
+  next-term lane quorum assembling on term entry.
   verifier.rs: 29 of its 32 have counterparts
   (lazy vote buffers, quorum reservations, the ready, exact-quorum, empty-pending, and
   verified-quorum cases, late leader votes, non-batchable finalize accounting, and nullify
