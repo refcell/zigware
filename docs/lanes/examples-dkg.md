@@ -16,7 +16,9 @@ setup. Owns `examples/dkg` (commonware `examples/dkg`).
       `validator`, `help`), byte-identical to `commonware-dkg` over 176 recorded cases.
 - [x] `application.zig`: the height-writing QMDB application over `glue.stateful.db.any`,
       checked against commonware's state roots and ranges.
-- [ ] `bootstrap.zig`, `validator.zig` on glue.dkg's actor, bootstrap,
+- [x] `bootstrap.zig`: the genesis hand-off (`write_genesis_to_sibling_validators`) with
+      commonware's test.
+- [ ] `bootstrap` run (glue bootstrap engine, p2p lane) and `validator.zig` on glue.dkg's actor, bootstrap,
       probe, and orchestrator (coding lane, in progress).
 - [ ] Demo recording (`just` recipe `dkg`, etc/scripts/record-demo.sh).
 
@@ -45,3 +47,4 @@ setup. Owns `examples/dkg` (commonware `examples/dkg`).
 - 2026-11-18: config, types, and setup with commonware's tests and vectors.
 - 2026-11-18: the clap CLI with commonware-dkg's recorded cases (examples lane).
 - 2026-11-18: the application with commonware's state-root vectors (examples lane).
+- 2026-11-19: bootstrap's genesis hand-off with commonware's test (examples lane).

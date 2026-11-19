@@ -54,6 +54,7 @@ pub fn main(init: std.process.Init) !u8 {
 
 test {
     _ = @import("application_test.zig");
+    _ = @import("bootstrap_test.zig");
     _ = @import("cli_test.zig");
     _ = @import("config_test.zig");
     _ = @import("setup_test.zig");
