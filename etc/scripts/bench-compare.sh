@@ -39,6 +39,39 @@ benches=(
   "qmdb|storage|qmdb::apply_batch/case=direct variant=any::unordered::fixed::mmb chunk=32 \
 updates=16384"
   "buffer_paged|runtime|buffer_paged::append/backend=tokio chunk=4096"
+  # storage-merkle's merkle, bmt, rmap, and variable-journal read benches.
+  "merkle|storage|merkle::append/n=100000 family=mmr"
+  "merkle|storage|merkle::append/n=100000 family=mmb"
+  "merkle|storage|merkle::add_many/items=65536 workers=1 family=mmr"
+  "merkle|storage|merkle::add_many/items=65536 workers=8 family=mmb"
+  "merkle|storage|merkle::update/updates=100000 leaves=100000 strategy=BatchedSerial family=mmr"
+  "merkle|storage|merkle::flush/n=100000 family=mmr"
+  "merkle|storage|merkle::position_to_location/n=1000000 family=mmb"
+  "merkle|storage|merkle::proof/n=100000 samples=100 family=mmr"
+  "merkle|storage|merkle::proof/n=100000 samples=100 family=mmb"
+  "merkle|storage|merkle::multi_proof/n=100000 items=100 family=mmr"
+  "merkle|storage|merkle::range_proof/n=100000 range=100 samples=100 family=mmb"
+  "merkle|storage|merkle::verify_single_element/n=100000 samples=100 family=mmr"
+  "merkle|storage|merkle::verify_single_element/n=100000 samples=100 family=mmb"
+  "merkle|storage|merkle::verify_multi/n=100000 items=100 family=mmr"
+  "merkle|storage|merkle::verify_many_elements/n=100000 range=100 samples=100 family=mmr"
+  "bmt|storage|bmt::build/n=100000"
+  "bmt|storage|bmt::proof/n=100000"
+  "bmt|storage|bmt::multi_proof/n=100000 items=100"
+  "bmt|storage|bmt::range_proof/n=100000 items=100"
+  "bmt|storage|bmt::verify_single/n=100000 items=100"
+  "bmt|storage|bmt::verify_multi/n=100000 items=100"
+  "bmt|storage|bmt::verify_range/n=100000 items=100"
+  "rmap|storage|rmap::insert/items=100000"
+  "journal|storage|journal::read_cached/journal=variable size=32"
+  "journal|storage|journal::variable_read_random/mode=serial items=10000 size=32"
+  "journal|storage|journal::variable_read_random/mode=read_many items=10000 size=32"
+  "journal|storage|journal::variable_read_compressed/mode=read_many items=10000 size=1024 \
+random=true"
+  "journal|storage|journal::variable_read_compressed/mode=read_many_uncached items=10000 \
+size=1024 random=true"
+  "journal|storage|journal::variable_replay/items=100000 buffer=65536 size=32 \
+read_options=cache"
   # p2p's hot paths (stream's cipher and handshake); p2p and stream have no benches of their own.
   "chacha20_poly1305|cryptography|chacha20_poly1305::seal_open/n=4096"
   "chacha20_poly1305|cryptography|chacha20_poly1305::seal_open/n=65536"
@@ -51,7 +84,8 @@ echo "building commonware benches (cargo bench --no-run, release)" >&2
   -p commonware-codec -p commonware-cryptography -p commonware-storage -p commonware-runtime \
   --features commonware-storage/test-traits \
   --bench codec --bench sha256 --bench ed25519 --bench bls12381 \
-  --bench journal --bench qmdb --bench buffer_paged --bench chacha20_poly1305 --bench sake \
+  --bench journal --bench qmdb --bench merkle --bench bmt --bench rmap --bench buffer_paged \
+  --bench chacha20_poly1305 --bench sake \
   2> "$out/cargo.log") |
   python3 -I -c '
 import json, sys
