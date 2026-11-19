@@ -30,6 +30,7 @@ const utils = @import("utils");
 const types = @import("../types.zig");
 const network = @import("../network.zig");
 const reshare = @import("../reshare/root.zig");
+const state_sync = @import("../state_sync.zig");
 const Fence = @import("../fence.zig").Fence;
 const block_api = @import("block.zig");
 const limits = @import("limits.zig");
@@ -190,6 +191,8 @@ pub fn Engine(comptime T: type) type {
         };
         const Actor = reshare.actor.Actor(ReshareTypes);
         const Runner = reshare.actor.run.Runner(ReshareTypes);
+        /// No state sync in bootstrap: the plan is always `disabled`.
+        const StartPlan = state_sync.Plan(ConsensusScheme, Block.Digest, V, D);
         const App = reshare.Application(BlockBuilder, ReshareTypes);
         const Wrapper = consensus.marshal.standard.Deferred(
             Ctx,
@@ -514,20 +517,17 @@ pub fn Engine(comptime T: type) type {
 
         fn ReshareTask(comptime Sender: type, comptime Receiver: type) type {
             return struct {
-                /// Resolves the startup tip from marshal's processed anchor (commonware
-                /// `startup`; bootstrap has no state sync), then runs the actor. A restart
-                /// that already applied the final block reports it instead of rerunning.
-                fn run(_: Ctx, self: *Self, sender: Sender, receiver: Receiver) anyerror!void {
-                    var anchor = try self.node.mailbox.get_anchor();
-                    defer if (anchor) |*value| value.block.deinit();
-                    const Processed = consensus.marshal.core.floor.Processed;
-                    const Anchor = struct { Processed, *const Digested };
-                    const processed: ?Anchor = if (anchor) |*value|
-                        .{ value.processed, &value.block }
-                    else
-                        null;
-                    const tip = reshare.actor.setup.startup(Digested, processed, null);
-                    return Runner.run(&self.actor, &self.store, sender, receiver, .{ .tip = tip });
+                /// Resolves the actor's start with `Runner.resolve_start` (commonware's
+                /// preamble; bootstrap's plan is disabled, as it has no state sync), then runs
+                /// the actor. A restart that already applied the final block reports it.
+                fn run(ctx: Ctx, self: *Self, sender: Sender, receiver: Receiver) anyerror!void {
+                    var plan = StartPlan.disabled(ctx.gpa(), ctx.io());
+                    defer plan.deinit();
+                    const marshal = &self.node.mailbox;
+                    const storage = ctx.storage;
+                    const resolved = try Runner.resolve_start(&self.actor, storage, &plan, marshal);
+                    assert(resolved.state_sync == null);
+                    return Runner.run(&self.actor, &self.store, sender, receiver, resolved);
                 }
             };
         }
