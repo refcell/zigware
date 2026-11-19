@@ -2,7 +2,9 @@
 //! verification against a `Sharing`, batch verification of partials, and recovery of the
 //! group signature from at least `sharing.required()` partials.
 //!
-//! Operations run sequentially; commonware's `Strategy` parameters only parallelize them.
+//! Batch verification and multi-set recovery take commonware's `parallel` Strategy, which
+//! may run their independent work on several threads; results never depend on it. A single
+//! recovery's interpolation sum runs serially (commonware tiles its MSM).
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -84,6 +86,7 @@ pub fn batch_verify_same_signer(
     sharing: Sharing(V),
     index: Participant,
     entries: []const SignerEntry(V),
+    strategy: anytype,
 ) (Error || Allocator.Error)!void {
     assert(entries.len > 0);
     const combined = try gpa.alloc(batch.SignerEntry(V), entries.len);
@@ -97,7 +100,7 @@ pub fn batch_verify_same_signer(
         };
     }
     const public = try sharing.partial_public(index);
-    return batch.verify_same_signer(V, rng, public, combined);
+    return batch.verify_same_signer(V, rng, public, combined, strategy);
 }
 
 /// Verifies partial signatures over one message and returns the positions (in `partials`)
@@ -112,6 +115,7 @@ pub fn batch_verify_same_message(
     namespace: []const u8,
     message: []const u8,
     partials: []const PartialSignature(V),
+    strategy: anytype,
 ) Allocator.Error![]usize {
     assert(partials.len > 0);
     var invalid: std.ArrayList(usize) = .empty;
@@ -127,7 +131,15 @@ pub fn batch_verify_same_message(
         } else |_| try invalid.append(gpa, position);
     }
     if (pending.items.len > 0) {
-        const bad = try batch.verify_same_message(V, gpa, rng, namespace, message, pending.items);
+        const bad = try batch.verify_same_message(
+            V,
+            gpa,
+            rng,
+            namespace,
+            message,
+            pending.items,
+            strategy,
+        );
         defer gpa.free(bad);
         for (bad) |index| try invalid.append(gpa, pending_positions.items[index]);
     }
@@ -199,13 +211,15 @@ pub fn recover(
 }
 
 /// Recovers one signature per set of partials into `out`. Every set must select the same
-/// indices (`InvalidIndex` otherwise), so one interpolator serves them all.
+/// indices (`InvalidIndex` otherwise), so one interpolator serves them all. `strategy`
+/// interpolates the sets in parallel, as commonware does.
 pub fn recover_multiple(
     comptime V: type,
     gpa: Allocator,
     sharing: Sharing(V),
     sets: []const []const PartialSignature(V),
     out: []V.Signature,
+    strategy: anytype,
 ) (Error || Allocator.Error)!void {
     assert(sets.len == out.len);
     if (sets.len == 0) return;
@@ -223,9 +237,18 @@ pub fn recover_multiple(
     }
     var interpolator = try sharing.interpolator(gpa, first);
     defer interpolator.deinit(gpa);
-    for (out, prepared) |*signature, evals| {
-        signature.* = interpolator.interpolate(V.Signature, evals.keys, evals.values) orelse
-            return error.InvalidRecovery;
+    const Interpolate = struct {
+        interpolator: *const @TypeOf(interpolator),
+
+        pub fn map(self: @This(), evals: *const Evaluations(V)) ?V.Signature {
+            return self.interpolator.interpolate(V.Signature, evals.keys, evals.values);
+        }
+    };
+    const recovered = try gpa.alloc(?V.Signature, sets.len);
+    defer gpa.free(recovered);
+    strategy.map_into(prepared, recovered, Interpolate{ .interpolator = &interpolator });
+    for (out, recovered) |*signature, value| {
+        signature.* = value orelse return error.InvalidRecovery;
     }
 }
 
@@ -236,9 +259,10 @@ pub fn recover_pair(
     sharing: Sharing(V),
     first: []const PartialSignature(V),
     second: []const PartialSignature(V),
+    strategy: anytype,
 ) (Error || Allocator.Error)![2]V.Signature {
     var out: [2]V.Signature = undefined;
-    try recover_multiple(V, gpa, sharing, &.{ first, second }, &out);
+    try recover_multiple(V, gpa, sharing, &.{ first, second }, &out, strategy);
     return out;
 }
 

@@ -3,6 +3,7 @@
 //! (`test_vectors/min_pk.txt`, `min_sig.txt`) and the Ethereum bls12-381-tests vectors.
 
 const std = @import("std");
+const parallel = @import("parallel");
 const builtin = @import("builtin");
 const build_options = @import("build_options");
 const testing = std.testing;
@@ -327,6 +328,34 @@ test "aggregate: same signer over many messages" {
     }
 }
 
+/// Whether `entries` verify, under every strategy shape (commonware `explore`).
+fn same_signer_explored(
+    comptime V: type,
+    rng: *utils.TestRng,
+    public: V.Public,
+    entries: []const batch.SignerEntry(V),
+) !bool {
+    const Op = struct {
+        rng: utils.TestRng,
+        public: V.Public,
+        entries: []const batch.SignerEntry(V),
+
+        pub fn run(op: @This(), explorer: parallel.mocks.Explorer) bool {
+            var run_rng = op.rng;
+            batch.verify_same_signer(V, &run_rng, op.public, op.entries, explorer) catch
+                return false;
+            return true;
+        }
+    };
+    const op: Op = .{ .rng = rng.*, .public = public, .entries = entries };
+    const verdict = try parallel.mocks.explore(gpa, testing.io, op);
+    var serial_rng = rng.*;
+    const serial = batch.verify_same_signer(V, &serial_rng, public, entries, parallel.sequential);
+    try testing.expectEqual(std.meta.isError(serial), !verdict);
+    rng.* = serial_rng;
+    return verdict;
+}
+
 test "batch: same signer accepts valid and rejects identity and wrong signatures" {
     inline for (.{ MinPk, MinSig }) |V| {
         const Entry = batch.SignerEntry(V);
@@ -340,12 +369,9 @@ test "batch: same signer accepts valid and rejects identity and wrong signatures
                 .signature = ops.sign_message(V, pair.private, "test", m),
             };
         }
-        try batch.verify_same_signer(V, &rng, pair.public, &entries);
+        try testing.expect(try same_signer_explored(V, &rng, pair.public, &entries));
         entries[1].signature = entries[0].signature;
-        try testing.expectError(
-            error.InvalidSignature,
-            batch.verify_same_signer(V, &rng, pair.public, &entries),
-        );
+        try testing.expect(!try same_signer_explored(V, &rng, pair.public, &entries));
         const identity = [_]Entry{.{
             .namespace = "test",
             .message = "message",
@@ -353,7 +379,7 @@ test "batch: same signer accepts valid and rejects identity and wrong signatures
         }};
         try testing.expectError(
             error.InvalidSignature,
-            batch.verify_same_signer(V, &rng, pair.public, &identity),
+            batch.verify_same_signer(V, &rng, pair.public, &identity, parallel.sequential),
         );
     }
 }
@@ -381,14 +407,7 @@ fn check_bisection(comptime V: type) !void {
                 if (second != first) {
                     entries[second].signature = entries[second].signature.sub(offset);
                 }
-                const found = try batch.verify_same_message(
-                    V,
-                    gpa,
-                    &rng,
-                    "test",
-                    "message",
-                    entries[0..total],
-                );
+                const found = try find_explored(V, &rng, entries[0..total]);
                 defer gpa.free(found);
                 if (second == first) {
                     try testing.expectEqualSlices(usize, &.{first}, found);
@@ -398,10 +417,68 @@ fn check_bisection(comptime V: type) !void {
             }
         }
         const clean =
-            try batch.verify_same_message(V, gpa, &rng, "test", "message", valid[0..total]);
+            try batch.verify_same_message(
+                V,
+                gpa,
+                &rng,
+                "test",
+                "message",
+                valid[0..total],
+                parallel.sequential,
+            );
         defer gpa.free(clean);
         try testing.expectEqual(@as(usize, 0), clean.len);
     }
+}
+
+/// commonware's `explore(|strategy| find(..))`: the invalid indices, which every strategy shape
+/// (whole input, split batches, seeded schedules) must agree on. Each run draws from a copy
+/// of `rng`, which then advances as one run did.
+fn find_explored(comptime V: type, rng: *utils.TestRng, entries: []const batch.Entry(V)) ![]usize {
+    const Op = struct {
+        rng: utils.TestRng,
+        entries: []const batch.Entry(V),
+
+        pub fn run(op: @This(), explorer: parallel.mocks.Explorer) std.mem.Allocator.Error![]usize {
+            var run_rng = op.rng;
+            const message = "message";
+            return batch.verify_same_message(
+                V,
+                gpa,
+                &run_rng,
+                "test",
+                message,
+                op.entries,
+                explorer,
+            );
+        }
+
+        pub fn eql(_: @This(), a: []usize, b: []usize) bool {
+            return std.mem.eql(usize, a, b);
+        }
+
+        pub fn discard(_: @This(), found: []usize) void {
+            gpa.free(found);
+        }
+    };
+    const found = try parallel.mocks.explore(
+        gpa,
+        testing.io,
+        Op{ .rng = rng.*, .entries = entries },
+    );
+    errdefer gpa.free(found);
+    const serial = try batch.verify_same_message(
+        V,
+        gpa,
+        rng,
+        "test",
+        "message",
+        entries,
+        parallel.sequential,
+    );
+    defer gpa.free(serial);
+    try testing.expectEqualSlices(usize, serial, found);
+    return found;
 }
 
 test "batch: same message bisection finds corrupted entries" {
@@ -415,7 +492,15 @@ test "batch: same message detects an identity signature" {
         const pair = ops.keypair(V, &rng);
         const entry: batch.Entry(V) = .{ .public = pair.public, .signature = V.Signature.zero };
         const entries = [_]batch.Entry(V){entry};
-        const found = try batch.verify_same_message(V, gpa, &rng, "test", "message", &entries);
+        const found = try batch.verify_same_message(
+            V,
+            gpa,
+            &rng,
+            "test",
+            "message",
+            &entries,
+            parallel.sequential,
+        );
         defer gpa.free(found);
         try testing.expectEqualSlices(usize, &.{0}, found);
     }

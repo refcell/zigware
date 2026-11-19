@@ -7,6 +7,7 @@
 //! (untimed), which times the same work.
 
 const std = @import("std");
+const parallel = @import("parallel");
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const bench = @import("bench");
@@ -118,6 +119,7 @@ const SameMessage = struct {
             namespace,
             message,
             workload.partials,
+            parallel.sequential,
         );
         defer workload.gpa.free(invalid);
         assert(invalid.len == workload.invalid);
@@ -177,6 +179,7 @@ const SameSigner = struct {
             workload.sharing,
             workload.index,
             workload.entries,
+            parallel.sequential,
         );
     }
 };

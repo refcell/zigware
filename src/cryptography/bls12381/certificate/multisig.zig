@@ -233,7 +233,6 @@ pub fn Scheme(comptime Sub: type, comptime F: type, comptime P: type, comptime V
             attestations: []const Attestation,
             strategy: anytype,
         ) Allocator.Error!Verification {
-            _ = strategy;
             var invalid: std.ArrayList(Participant) = .empty;
             defer invalid.deinit(gpa);
             var candidates: std.ArrayList(Attestation) = try .initCapacity(gpa, attestations.len);
@@ -264,6 +263,7 @@ pub fn Scheme(comptime Sub: type, comptime F: type, comptime P: type, comptime V
                     namespace,
                     message,
                     entries.items,
+                    strategy,
                 );
                 defer gpa.free(bad);
                 for (bad) |index| try invalid.append(gpa, candidates.items[index].signer);

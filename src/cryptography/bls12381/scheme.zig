@@ -116,7 +116,7 @@ pub const PublicKey = struct {
     /// Verifies every entry `projector.project(index, &items[index])` with one random
     /// linear combination per 64 entries (commonware `BatchVerifier::verify_batch`); pass
     /// `cryptography.entries` for a slice of `Entry`. False for an empty batch or when any
-    /// signature is invalid. Runs sequentially for every `strategy`.
+    /// signature is invalid. `strategy` hashes the messages, as in commonware.
     pub fn verify_batch(rng: anytype, items: anytype, projector: anytype, strategy: anytype) bool {
         parallel.assert_strategy(@TypeOf(strategy));
         if (items.len == 0) return false;
@@ -131,14 +131,25 @@ pub const PublicKey = struct {
                 const index = start + offset;
                 const entry: Entry = projector.project(index, &items[index]);
                 publics[offset] = entry.public_key.key;
-                hms[offset] = ops.hash_with_namespace(
-                    MinPk,
-                    MinPk.message,
-                    entry.namespace,
-                    entry.message,
-                );
                 signatures[offset] = entry.signature.signature;
             }
+            // `strategy` hashes the messages, as in commonware.
+            const Hash = struct {
+                items: @TypeOf(items),
+                projector: @TypeOf(projector),
+
+                pub fn map(hash: @This(), index: usize) MinPk.Signature {
+                    const entry: Entry = hash.projector.project(index, &hash.items[index]);
+                    return ops.hash_with_namespace(
+                        MinPk,
+                        MinPk.message,
+                        entry.namespace,
+                        entry.message,
+                    );
+                }
+            };
+            const range = parallel.Range.init(start, start + count);
+            strategy.map_into(range, hms[0..count], Hash{ .items = items, .projector = projector });
             // Draws the same scalars, in the same order, as one batch over every entry.
             MinPk.batch_verify(rng, publics[0..count], hms[0..count], signatures[0..count]) catch
                 return false;

@@ -3,6 +3,7 @@
 //! exactly as commonware's does.
 
 const std = @import("std");
+const parallel = @import("parallel");
 const testing = std.testing;
 const codec = @import("codec");
 const utils = @import("utils");
@@ -92,7 +93,14 @@ test "threshold: recover multiple" {
         defer gpa.free(first);
         const second = try sign_all(V, dealing.shares[0..t], "test", "payload2");
         defer gpa.free(second);
-        const pair = try threshold.recover_pair(V, gpa, dealing.sharing, first, second);
+        const pair = try threshold.recover_pair(
+            V,
+            gpa,
+            dealing.sharing,
+            first,
+            second,
+            parallel.sequential,
+        );
         const public = dealing.sharing.public();
         try ops.verify_message(V, public, "test", "payload1", pair[0]);
         try ops.verify_message(V, public, "test", "payload2", pair[1]);
@@ -102,7 +110,7 @@ test "threshold: recover multiple" {
         defer gpa.free(shifted);
         try testing.expectError(
             error.InvalidIndex,
-            threshold.recover_pair(V, gpa, dealing.sharing, first, shifted),
+            threshold.recover_pair(V, gpa, dealing.sharing, first, shifted, parallel.sequential),
         );
     }
 }
@@ -192,6 +200,7 @@ fn expect_invalid(
         "test",
         "hello",
         partials,
+        parallel.sequential,
     );
     defer gpa.free(invalid);
     try testing.expectEqual(expected.len, invalid.len);
@@ -302,33 +311,81 @@ test "threshold: batch verify same signer" {
         const signer = dealing.shares[0];
         var entries: [3]threshold.SignerEntry(V) = undefined;
         signer_entries(V, signer, &same_namespace, &entries);
-        try threshold.batch_verify_same_signer(V, gpa, &rng, sharing, signer.index, &entries);
+        try threshold.batch_verify_same_signer(
+            V,
+            gpa,
+            &rng,
+            sharing,
+            signer.index,
+            &entries,
+            parallel.sequential,
+        );
 
         var alt: [3]threshold.SignerEntry(V) = undefined;
         signer_entries(V, signer, &alt_namespace, &alt);
-        try threshold.batch_verify_same_signer(V, gpa, &rng, sharing, signer.index, &alt);
+        try threshold.batch_verify_same_signer(
+            V,
+            gpa,
+            &rng,
+            sharing,
+            signer.index,
+            &alt,
+            parallel.sequential,
+        );
 
         var mixed: [3]threshold.SignerEntry(V) = undefined;
         signer_entries(V, signer, &mixed_namespaces, &mixed);
-        try threshold.batch_verify_same_signer(V, gpa, &rng, sharing, signer.index, &mixed);
+        try threshold.batch_verify_same_signer(
+            V,
+            gpa,
+            &rng,
+            sharing,
+            signer.index,
+            &mixed,
+            parallel.sequential,
+        );
 
         try testing.expectError(
             error.InvalidSignature,
-            threshold.batch_verify_same_signer(V, gpa, &rng, sharing, .init(1), &entries),
+            threshold.batch_verify_same_signer(
+                V,
+                gpa,
+                &rng,
+                sharing,
+                .init(1),
+                &entries,
+                parallel.sequential,
+            ),
         );
 
         var swapped = entries;
         std.mem.swap(PartialSignature(V), &swapped[0].partial, &swapped[1].partial);
         try testing.expectError(
             error.InvalidSignature,
-            threshold.batch_verify_same_signer(V, gpa, &rng, sharing, signer.index, &swapped),
+            threshold.batch_verify_same_signer(
+                V,
+                gpa,
+                &rng,
+                sharing,
+                signer.index,
+                &swapped,
+                parallel.sequential,
+            ),
         );
 
         var other_signer = entries;
         other_signer[0].partial = threshold.sign_message(V, dealing.shares[1], "ns", "msg1");
         try testing.expectError(
             error.InvalidSignature,
-            threshold.batch_verify_same_signer(V, gpa, &rng, sharing, signer.index, &other_signer),
+            threshold.batch_verify_same_signer(
+                V,
+                gpa,
+                &rng,
+                sharing,
+                signer.index,
+                &other_signer,
+                parallel.sequential,
+            ),
         );
     }
 }
@@ -424,6 +481,7 @@ test "threshold: batch verify same message rejects malleability" {
             "test",
             "message",
             &forged,
+            parallel.sequential,
         );
         defer gpa.free(bad);
         try testing.expect(bad.len > 0);
@@ -435,6 +493,7 @@ test "threshold: batch verify same message rejects malleability" {
             "test",
             "message",
             &valid,
+            parallel.sequential,
         );
         defer gpa.free(good);
         try testing.expectEqual(@as(usize, 0), good.len);
@@ -474,9 +533,25 @@ test "threshold: batch verify same signer rejects malleability" {
 
         try testing.expectError(
             error.InvalidSignature,
-            threshold.batch_verify_same_signer(V, gpa, &rng, sharing, signer.index, &forged),
+            threshold.batch_verify_same_signer(
+                V,
+                gpa,
+                &rng,
+                sharing,
+                signer.index,
+                &forged,
+                parallel.sequential,
+            ),
         );
-        try threshold.batch_verify_same_signer(V, gpa, &rng, sharing, signer.index, &valid);
+        try threshold.batch_verify_same_signer(
+            V,
+            gpa,
+            &rng,
+            sharing,
+            signer.index,
+            &valid,
+            parallel.sequential,
+        );
     }
 }
 

@@ -131,18 +131,29 @@ const BatchSameSigner = struct {
     rng: utils.TestRng,
     public: G2,
     entries: []const batch.SignerEntry(MinSig),
+    strategy: parallel.Rayon,
 
     pub fn iter(workload: *BatchSameSigner) !void {
-        try batch.verify_same_signer(MinSig, &workload.rng, workload.public, workload.entries);
+        const entries = workload.entries;
+        try batch.verify_same_signer(
+            MinSig,
+            &workload.rng,
+            workload.public,
+            entries,
+            workload.strategy,
+        );
     }
 };
 
 fn bench_batch_same_signer(runner: *bench.Runner) !void {
     const gpa = runner.allocator;
     var rng = utils.test_rng();
-    for (cases(runner, usize, &.{ 2, 10, 100, 1000, 10000 })) |n| {
+    const threads = try common.pool(runner);
+    defer threads.destroy();
+    const sizes = cases(runner, usize, &.{ 2, 10, 100, 1000, 10000 });
+    for (sizes) |n| for (common.concurrencies) |conc| {
         const name = bench.Benchmark.init("bls12381::batch_verify_same_signer")
-            .with_param("conc", 1).with_param("msgs", n);
+            .with_param("conc", conc).with_param("msgs", n);
         if (try skip(runner, name)) continue;
         const messages = try random_messages(gpa, &rng, n);
         defer gpa.free(messages);
@@ -157,9 +168,10 @@ fn bench_batch_same_signer(runner: *bench.Runner) !void {
             .rng = .init(1),
             .public = signed.public,
             .entries = entries,
+            .strategy = common.strategy(threads, conc),
         };
         try runner.run(name, &workload);
-    }
+    };
 }
 
 const Entry = cryptography.signer.BatchEntry(bls12381.PublicKey);
@@ -167,13 +179,14 @@ const Entry = cryptography.signer.BatchEntry(bls12381.PublicKey);
 const SchemeBatch = struct {
     rng: utils.TestRng,
     entries: []const Entry,
+    strategy: parallel.Rayon,
 
     pub fn iter(workload: *SchemeBatch) bool {
         const valid = bls12381.PublicKey.verify_batch(
             &workload.rng,
             workload.entries,
             cryptography.entries,
-            parallel.sequential,
+            workload.strategy,
         );
         assert(valid);
         return valid;
@@ -187,9 +200,12 @@ fn bench_scheme_same_message(runner: *bench.Runner) !void {
     var rng = utils.test_rng();
     var message: Message = undefined;
     rng.fill_bytes(&message);
-    for (cases(runner, usize, &.{ 1, 10, 100, 1000, 10000 })) |n| {
+    const threads = try common.pool(runner);
+    defer threads.destroy();
+    const sizes = cases(runner, usize, &.{ 1, 10, 100, 1000, 10000 });
+    for (sizes) |n| for (common.concurrencies) |conc| {
         const name = bench.Benchmark.init("bls12381::scheme_batch_verify_same_message")
-            .with_param("pks", n).with_param("conc", 1);
+            .with_param("pks", n).with_param("conc", conc);
         if (try skip(runner, name)) continue;
         const keyed = try gpa.alloc(Keyed, n);
         defer gpa.free(keyed);
@@ -208,17 +224,24 @@ fn bench_scheme_same_message(runner: *bench.Runner) !void {
                 .signature = &item.signature,
             };
         }
-        var workload: SchemeBatch = .{ .rng = .init(1), .entries = entries };
+        var workload: SchemeBatch = .{
+            .rng = .init(1),
+            .entries = entries,
+            .strategy = common.strategy(threads, conc),
+        };
         try runner.run(name, &workload);
-    }
+    };
 }
 
 fn bench_scheme_same_signer(runner: *bench.Runner) !void {
     const gpa = runner.allocator;
     var rng = utils.test_rng();
-    for (cases(runner, usize, &.{ 1, 10, 100, 1000, 10000 })) |n| {
+    const threads = try common.pool(runner);
+    defer threads.destroy();
+    const sizes = cases(runner, usize, &.{ 1, 10, 100, 1000, 10000 });
+    for (sizes) |n| for (common.concurrencies) |conc| {
         const name = bench.Benchmark.init("bls12381::scheme_batch_verify_same_signer")
-            .with_param("msgs", n).with_param("conc", 1);
+            .with_param("msgs", n).with_param("conc", conc);
         if (try skip(runner, name)) continue;
         const messages = try random_messages(gpa, &rng, n);
         defer gpa.free(messages);
@@ -237,9 +260,13 @@ fn bench_scheme_same_signer(runner: *bench.Runner) !void {
                 .signature = signature,
             };
         }
-        var workload: SchemeBatch = .{ .rng = .init(1), .entries = entries };
+        var workload: SchemeBatch = .{
+            .rng = .init(1),
+            .entries = entries,
+            .strategy = common.strategy(threads, conc),
+        };
         try runner.run(name, &workload);
-    }
+    };
 }
 
 fn Msm(comptime P: type) type {

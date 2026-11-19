@@ -447,7 +447,15 @@ fn threshold_same_signer(comptime V: type, gpa: Allocator, u: *Unstructured) !vo
     // As in commonware, entry `i` claims index `index + i`.
     for (entries, 0..) |*entry, i| entry.partial.index = .from_usize(index.get() + i);
     var rng = utils.test_rng();
-    threshold.batch_verify_same_signer(V, gpa, &rng, public, index, entries) catch |err|
+    threshold.batch_verify_same_signer(
+        V,
+        gpa,
+        &rng,
+        public,
+        index,
+        entries,
+        parallel.sequential,
+    ) catch |err|
         switch (err) {
             error.OutOfMemory => return err,
             else => {},
@@ -471,6 +479,7 @@ fn threshold_same_message(comptime V: type, gpa: Allocator, u: *Unstructured) !v
         namespace,
         message,
         partials,
+        parallel.sequential,
     );
     defer gpa.free(invalid);
     try testing.expect(invalid.len <= partials.len);
@@ -505,7 +514,14 @@ fn threshold_recover(
             _ = u.int_in_range(usize, 1, 4); // The concurrency; results do not depend on it.
             const out = try gpa.alloc(V.Signature, groups.len);
             defer gpa.free(out);
-            threshold.recover_multiple(V, gpa, sharing, groups, out) catch |err| switch (err) {
+            threshold.recover_multiple(
+                V,
+                gpa,
+                sharing,
+                groups,
+                out,
+                parallel.sequential,
+            ) catch |err| switch (err) {
                 error.OutOfMemory => return err,
                 else => {},
             };
@@ -515,7 +531,14 @@ fn threshold_recover(
             defer gpa.free(first);
             const second = try arbitrary_partials(V, gpa, u, 10, false);
             defer gpa.free(second);
-            _ = threshold.recover_pair(V, gpa, sharing, first, second) catch |err| switch (err) {
+            _ = threshold.recover_pair(
+                V,
+                gpa,
+                sharing,
+                first,
+                second,
+                parallel.sequential,
+            ) catch |err| switch (err) {
                 error.OutOfMemory => return err,
                 else => {},
             };

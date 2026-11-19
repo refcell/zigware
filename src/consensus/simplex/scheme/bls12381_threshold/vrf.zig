@@ -484,11 +484,10 @@ pub fn Scheme(comptime D: type, comptime P: type, comptime V: type) type {
             strategy: anytype,
         ) Allocator.Error!bool {
             _ = gpa;
-            _ = strategy;
             const sharing = self.committee_or_panic().sharing;
             const public_key = sharing.partial_public(attestation.signer) catch return false;
             const signature = attestation.signature.get() orelse return false;
-            return self.verify_pair(rng, public_key, subject, signature);
+            return self.verify_pair(rng, public_key, subject, signature, strategy);
         }
 
         /// Batch-verifies a vote signature and a seed signature from one signer.
@@ -498,6 +497,7 @@ pub fn Scheme(comptime D: type, comptime P: type, comptime V: type) type {
             public_key: V.Public,
             subject: Subject,
             signature: Self.Signature,
+            strategy: anytype,
         ) bool {
             var vote_buffer: [Subject.message_max_size]u8 = undefined;
             var seed_buffer: [Round.max_encode_size]u8 = undefined;
@@ -515,7 +515,7 @@ pub fn Scheme(comptime D: type, comptime P: type, comptime V: type) type {
             };
             assert(entries[0].message.len > 0);
             assert(entries[1].message.len > 0);
-            batch.verify_same_signer(V, rng, public_key, &entries) catch return false;
+            batch.verify_same_signer(V, rng, public_key, &entries, strategy) catch return false;
             return true;
         }
 
@@ -530,7 +530,6 @@ pub fn Scheme(comptime D: type, comptime P: type, comptime V: type) type {
             attestations: []const Attestation,
             strategy: anytype,
         ) Allocator.Error!Verification {
-            _ = strategy;
             const sharing = self.committee_or_panic().sharing;
             var invalid: std.ArrayList(Participant) = .empty;
             defer invalid.deinit(gpa);
@@ -544,9 +543,35 @@ pub fn Scheme(comptime D: type, comptime P: type, comptime V: type) type {
                 }) else try invalid.append(gpa, index);
             }
             if (pairs.items.len > 0) {
-                try self.batch_invalid(gpa, rng, sharing, subject, pairs.items, &invalid);
+                const pending = pairs.items;
+                try self.batch_invalid(gpa, rng, sharing, subject, pending, &invalid, strategy);
             }
             return collect(gpa, pairs.items, invalid.items);
+        }
+
+        /// One `batch_invalid` batch (namespace, message, partials) as a `join` arm.
+        fn BatchHalf(comptime Batch: type, comptime Strategy: type) type {
+            return struct {
+                gpa: Allocator,
+                sharing: Sharing(V),
+                batch: Batch,
+                key: [32]u8,
+                strategy: Strategy,
+
+                pub fn call(half: @This()) Allocator.Error![]usize {
+                    var batch_rng = ChaCha20Rng.init_key(half.key);
+                    return threshold_ops.batch_verify_same_message(
+                        V,
+                        half.gpa,
+                        &batch_rng,
+                        half.sharing,
+                        half.batch[0],
+                        half.batch[1],
+                        half.batch[2],
+                        half.strategy,
+                    );
+                }
+            };
         }
 
         /// Appends the signers whose vote or seed partial fails verification to `invalid`.
@@ -558,6 +583,7 @@ pub fn Scheme(comptime D: type, comptime P: type, comptime V: type) type {
             subject: Subject,
             pairs: []const Pair,
             invalid: *std.ArrayList(Participant),
+            strategy: anytype,
         ) Allocator.Error!void {
             assert(pairs.len > 0);
             const partials = try gpa.alloc(PartialSignature(V), 2 * pairs.len);
@@ -573,24 +599,33 @@ pub fn Scheme(comptime D: type, comptime P: type, comptime V: type) type {
             for (&keys) |*key| rng.fill_bytes(key);
             var vote_buffer: [Subject.message_max_size]u8 = undefined;
             var seed_buffer: [Round.max_encode_size]u8 = undefined;
-            const batches = [2]struct { []const u8, []const u8, []PartialSignature(V) }{
+            const Batch = struct { []const u8, []const u8, []PartialSignature(V) };
+            const batches = [2]Batch{
                 .{ subject.namespace(&self.namespace), subject.message_to(&vote_buffer), votes },
                 .{ self.namespace.seed, seed_message(subject, &seed_buffer), seeds },
             };
-            for (batches, keys) |entry, key| {
-                var batch_rng = ChaCha20Rng.init_key(key);
-                const bad = try threshold_ops.batch_verify_same_message(
-                    V,
-                    gpa,
-                    &batch_rng,
-                    sharing,
-                    entry[0],
-                    entry[1],
-                    entry[2],
-                );
-                defer gpa.free(bad);
-                for (bad) |position| try invalid.append(gpa, entry[2][position].index);
-            }
+            // The vote and seed batches run concurrently, as in commonware.
+            const Half = BatchHalf(Batch, @TypeOf(strategy));
+            const vote_half: Half = .{
+                .gpa = gpa,
+                .sharing = sharing,
+                .batch = batches[0],
+                .key = keys[0],
+                .strategy = strategy,
+            };
+            var seed_half = vote_half;
+            seed_half.batch = batches[1];
+            seed_half.key = keys[1];
+            const results = strategy.join(vote_half, seed_half);
+            const vote_bad = results[0] catch |err| {
+                if (results[1]) |bad| gpa.free(bad) else |_| {}
+                return err;
+            };
+            defer gpa.free(vote_bad);
+            const seed_bad = try results[1];
+            defer gpa.free(seed_bad);
+            for (vote_bad) |position| try invalid.append(gpa, votes[position].index);
+            for (seed_bad) |position| try invalid.append(gpa, seeds[position].index);
         }
 
         fn collect(
@@ -641,7 +676,6 @@ pub fn Scheme(comptime D: type, comptime P: type, comptime V: type) type {
             attestations: []const Attestation,
             strategy: anytype,
         ) (base.AssemblyError || Allocator.Error)!Self.Certificate {
-            _ = strategy;
             assert(attestations.len > 0);
             const sharing = self.committee_or_panic().sharing;
             const partials = try gpa.alloc(PartialSignature(V), 2 * attestations.len);
@@ -660,7 +694,14 @@ pub fn Scheme(comptime D: type, comptime P: type, comptime V: type) type {
             var signers = try base.Signers.init(gpa, sharing.total, indices);
             defer signers.deinit(gpa);
             try signers.require(sharing.required());
-            const recovered = threshold_ops.recover_pair(V, gpa, sharing, votes, seeds) catch |err|
+            const recovered = threshold_ops.recover_pair(
+                V,
+                gpa,
+                sharing,
+                votes,
+                seeds,
+                strategy,
+            ) catch |err|
                 switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,
                     else => return error.RecoveryFailed,
@@ -678,9 +719,8 @@ pub fn Scheme(comptime D: type, comptime P: type, comptime V: type) type {
             strategy: anytype,
         ) Allocator.Error!bool {
             _ = gpa;
-            _ = strategy;
             const signature = cert.get() orelse return false;
-            return self.verify_pair(rng, self.group_public, subject, signature);
+            return self.verify_pair(rng, self.group_public, subject, signature, strategy);
         }
 
         /// Verifies certificates in one same-signer batch. Certificates for one round share
@@ -692,7 +732,6 @@ pub fn Scheme(comptime D: type, comptime P: type, comptime V: type) type {
             items: []const Item,
             strategy: anytype,
         ) Allocator.Error!bool {
-            _ = strategy;
             assert(items.len > 0);
             const entries = try gpa.alloc(batch.SignerEntry(V), 2 * items.len);
             defer gpa.free(entries);
@@ -728,7 +767,7 @@ pub fn Scheme(comptime D: type, comptime P: type, comptime V: type) type {
                 count += 1;
             }
             assert(seed_count > 0 and count == items.len + seed_count);
-            batch.verify_same_signer(V, rng, self.group_public, entries[0..count]) catch
+            batch.verify_same_signer(V, rng, self.group_public, entries[0..count], strategy) catch
                 return false;
             return true;
         }

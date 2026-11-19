@@ -301,7 +301,6 @@ pub fn Scheme(comptime Sub: type, comptime F: type, comptime P: type, comptime V
             attestations: []const Attestation,
             strategy: anytype,
         ) Allocator.Error!Verification {
-            _ = strategy;
             const polynomial = self.committee_or_panic().polynomial;
             var invalid: std.ArrayList(Participant) = .empty;
             defer invalid.deinit(gpa);
@@ -324,6 +323,7 @@ pub fn Scheme(comptime Sub: type, comptime F: type, comptime P: type, comptime V
                     subject.namespace(&self.namespace),
                     message,
                     partials.items,
+                    strategy,
                 );
                 defer gpa.free(bad);
                 for (bad) |position| try invalid.append(gpa, partials.items[position].index);
@@ -426,7 +426,6 @@ pub fn Scheme(comptime Sub: type, comptime F: type, comptime P: type, comptime V
             items: []const Item,
             strategy: anytype,
         ) Allocator.Error!bool {
-            _ = strategy;
             assert(items.len > 0);
             const entries = try gpa.alloc(batch.SignerEntry(V), items.len);
             defer gpa.free(entries);
@@ -441,7 +440,13 @@ pub fn Scheme(comptime Sub: type, comptime F: type, comptime P: type, comptime V
                 };
                 built += 1;
             }
-            batch.verify_same_signer(V, rng, self.group_public, entries) catch return false;
+            batch.verify_same_signer(
+                V,
+                rng,
+                self.group_public,
+                entries,
+                strategy,
+            ) catch return false;
             return true;
         }
 

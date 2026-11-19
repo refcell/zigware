@@ -5,6 +5,7 @@ const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const bench = @import("bench");
 const cryptography = @import("cryptography");
+const parallel = @import("parallel");
 const utils = @import("utils");
 
 const Mode = cryptography.bls12381.primitives.sharing.Mode;
@@ -53,4 +54,20 @@ pub fn mode_name(mode: Mode) []const u8 {
         .non_zero_counter => "NonZeroCounter",
         .roots_of_unity => "RootsOfUnity",
     };
+}
+
+/// commonware's batch-verification concurrencies: `Sequential`, then a Rayon pool of 8.
+pub const concurrencies = [_]usize{ 1, 8 };
+
+/// A pool of `concurrencies`' largest count less one workers (the caller runs jobs too).
+pub fn pool(runner: *bench.Runner) !*parallel.ThreadPool {
+    const threads = concurrencies[concurrencies.len - 1] - 1;
+    return parallel.ThreadPool.create(runner.allocator, runner.io, .{ .threads = threads });
+}
+
+/// The strategy for `concurrency`: a Rayon planning one thread runs every job inline, as
+/// `Sequential` does.
+pub fn strategy(threads: *parallel.ThreadPool, concurrency: usize) parallel.Rayon {
+    assert(concurrency >= 1 and concurrency <= concurrencies[concurrencies.len - 1]);
+    return parallel.Rayon.init(threads).with_parallelism(concurrency);
 }

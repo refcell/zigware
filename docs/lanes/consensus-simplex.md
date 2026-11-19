@@ -291,8 +291,9 @@ resolver; those lanes are running, so do the types first and the actors as they 
   latency DSTs (40 measured views rather than 100) and the parent-nullify one; ReleaseSafe
   also runs the stable-leader variants and rayon (quick sizes, about 17 s and 6 s); the
   1000-view full term and 1k run in slow builds. A fixture with `harness_only` hosts only
-  these (engine_test's DSTs skip it). The VRF scheme ignores its strategy (`_ = strategy` in
-  vrf.zig), so the rayon DST cannot fail on a strategy bug yet.
+  these (engine_test's DSTs skip it). Since 2026-11-19 the VRF scheme verifies and recovers
+  through its strategy (joined vote and seed batches, as in commonware), so the rayon DST
+  fails on a Rayon chunking bug.
 - [x] mod.rs remainder: the 13 DSTs named above, ported by the broadcast-collector lane on
   2026-11-19 (engine_optimistic_test.zig).
 - [ ] actors/voter/mod.rs: the 96 voter-actor tests (restart and floor journaling, the
