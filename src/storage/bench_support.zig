@@ -1,14 +1,36 @@
-//! Storage for the storage package's benchmarks, as qmdb's benches open it: production disk
-//! storage under a fresh directory of `.zig-cache/tmp` (commonware's benches run on tokio's
-//! disk), removed on close. On smoke inputs (`zig build test`) an in-memory storage stands in,
-//! so the test suite never waits on the disk.
+//! Helpers of the storage package's benchmarks.
+//!
+//! `Disk` opens storage as qmdb's benches do: production disk storage under a fresh directory
+//! of `.zig-cache/tmp` (commonware's benches run on tokio's disk), removed on close. On smoke
+//! inputs (`zig build test`) an in-memory storage stands in, so the test suite never waits on
+//! the disk.
 
 const std = @import("std");
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const bench = @import("bench");
+const build_options = @import("build_options");
 const runtime = @import("runtime");
+
+/// Whether this is a per-push smoke run (`zig build test` without `-Dslow-tests`): it runs
+/// one or two cases of each benchmark on the smallest inputs, one of each MMR/MMB or
+/// compression pair. With `-Dslow-tests` (nightly), smoke runs every case.
+pub fn quick(runner: *const bench.Runner) bool {
+    return runner.inputs == .smoke and !build_options.slow_tests;
+}
+
+/// `all`, or on a quick run only its first `count` items (at least one).
+pub fn cases(
+    comptime T: type,
+    runner: *const bench.Runner,
+    all: []const T,
+    count: usize,
+) []const T {
+    assert(all.len > 0 and count > 0);
+    if (!quick(runner)) return all;
+    return all[0..@min(count, all.len)];
+}
 
 pub const Disk = struct {
     io: Io,

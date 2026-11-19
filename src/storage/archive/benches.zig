@@ -14,7 +14,10 @@ const codec = @import("codec");
 const runtime = @import("runtime");
 const storage = @import("storage");
 const utils = @import("utils");
-const Disk = @import("../bench_disk.zig").Disk;
+const Disk = @import("../bench_support.zig").Disk;
+const support = @import("../bench_support.zig");
+const quick = support.quick;
+const cases = support.cases;
 
 const archive = storage.archive;
 const metrics = runtime.telemetry.metrics;
@@ -154,6 +157,38 @@ fn comp_name(compression: ?u8) []const u8 {
 const variants = [_]Variant{ .prunable, .immutable };
 const compressions = [_]?u8{ null, 3 };
 
+/// Items a quick run stores in place of commonware's smallest input (1,000), whose 64 KiB
+/// values take about 0.9 s to write per fill.
+const quick_items: u64 = 100;
+
+/// `sizes`, or `quick_items` alone on a quick run.
+fn item_counts(runner: *const bench.Runner, sizes: []const u64) []const u64 {
+    return if (quick(runner)) &.{quick_items} else sizes;
+}
+
+/// An archive filled with `items` triples on first use, so runs that filter out or only list
+/// its benchmarks skip the fill.
+const Fill = struct {
+    gpa: Allocator,
+    disk: *Disk,
+    variant: Variant,
+    compression: ?u8,
+    items: u64,
+    /// Where the fill records its keys, if anywhere (sized `items`).
+    keys: ?[]Key = null,
+    done: bool = false,
+
+    fn ensure(self: *Fill) !void {
+        if (self.done) return;
+        var target: Archive = undefined;
+        try target.open(self.gpa, self.disk, self.variant, self.compression);
+        errdefer target.close(true) catch {};
+        try append_random(self.gpa, &target, self.items, self.keys);
+        try target.close(false);
+        self.done = true;
+    }
+};
+
 /// Appends `items` triples to a fresh archive (opened untimed before each iteration), syncs,
 /// then destroys it before the next.
 const PutWorkload = struct {
@@ -199,8 +234,8 @@ fn bench_put(runner: *bench.Runner) !void {
     try disk.open(runner.allocator, "archive-bench-put");
     defer disk.close();
     for (variants) |variant| {
-        for (compressions) |compression| {
-            for (sizes) |items| {
+        for (cases(?u8, runner, &compressions, 1)) |compression| {
+            for (item_counts(runner, sizes)) |items| {
                 const benchmark = bench.Benchmark.init("archive::put")
                     .with_param("variant", variant)
                     .with_param("items", items).with_param("comp", comp_name(compression));
@@ -217,28 +252,40 @@ fn bench_put(runner: *bench.Runner) !void {
     }
 }
 
-/// Reads the selected keys or indices from an archive reopened in `setup`.
+/// Reads `reads` keys or indices, drawn in `setup`, from the filled archive reopened there.
 const GetWorkload = struct {
-    gpa: Allocator,
-    disk: *Disk,
-    variant: Variant,
-    compression: ?u8,
-    keys: []const Key,
-    indices: []const u64,
+    fill: *Fill,
+    by_key: bool,
+    reads: usize,
+    selection: Selection,
     target: Archive = undefined,
     opened: bool = false,
 
     pub fn setup(self: *GetWorkload) !void {
         assert(!self.opened);
-        try self.target.open(self.gpa, self.disk, self.variant, self.compression);
+        try self.fill.ensure();
+        const keys = self.fill.keys.?;
+        select_reads(keys, self.reads, self.selection.keys[0..self.reads], self.indices());
+        const fill = self.fill;
+        try self.target.open(fill.gpa, fill.disk, fill.variant, fill.compression);
         self.opened = true;
     }
 
+    fn indices(self: *const GetWorkload) []u64 {
+        return self.selection.indices[0..self.reads];
+    }
+
     pub fn iter(self: *GetWorkload) !usize {
+        const gpa = self.fill.gpa;
         var total: usize = 0;
-        for (self.keys) |*key| total += try self.target.get(self.gpa, .{ .key = key });
-        for (self.indices) |index| total += try self.target.get(self.gpa, .{ .index = index });
-        assert(total == (self.keys.len + self.indices.len) * VALUE_SIZE);
+        if (self.by_key) {
+            for (self.selection.keys[0..self.reads]) |*key| {
+                total += try self.target.get(gpa, .{ .key = key });
+            }
+        } else {
+            for (self.indices()) |index| total += try self.target.get(gpa, .{ .index = index });
+        }
+        assert(total == self.reads * VALUE_SIZE);
         return total;
     }
 
@@ -258,9 +305,12 @@ fn select_reads(keys: []const Key, reads: usize, out_keys: []Key, out_indices: [
     for (out_indices) |*index| index.* = utils.rng.range_less_than(&rng, u64, 0, keys.len);
 }
 
+const Selection = struct { keys: []Key, indices: []u64 };
+
 fn bench_get(runner: *bench.Runner) !void {
     const gpa = runner.allocator;
-    const items = runner.inputs.pick(u64, 1_000, 10_000, 250_000);
+    const items_all = [_]u64{runner.inputs.pick(u64, 1_000, 10_000, 250_000)};
+    const items = item_counts(runner, &items_all)[0];
     const n_reads = runner.inputs.pick(
         []const usize,
         &.{100},
@@ -270,77 +320,66 @@ fn bench_get(runner: *bench.Runner) !void {
     const keys = try gpa.alloc(Key, @intCast(items));
     defer gpa.free(keys);
     const max_reads = n_reads[n_reads.len - 1];
-    const selected_keys = try gpa.alloc(Key, max_reads);
-    defer gpa.free(selected_keys);
-    const selected_indices = try gpa.alloc(u64, max_reads);
-    defer gpa.free(selected_indices);
+    const selection: Selection = .{
+        .keys = try gpa.alloc(Key, max_reads),
+        .indices = try gpa.alloc(u64, max_reads),
+    };
+    defer gpa.free(selection.keys);
+    defer gpa.free(selection.indices);
     for (variants) |variant| {
-        for (compressions) |compression| {
+        for (cases(?u8, runner, &compressions, 1)) |compression| {
             var disk: Disk = .init(runner);
             try disk.open(gpa, "archive-bench-get");
             defer disk.close();
-            if (!runner.list) {
-                // Setup: populate the archive once per variant and compression.
-                var target: Archive = undefined;
-                try target.open(gpa, &disk, variant, compression);
-                errdefer target.close(true) catch {};
-                try append_random(gpa, &target, items, keys);
-                try target.close(false);
-            }
-            try bench_get_modes(runner, &disk, variant, compression, keys, .{
-                .keys = selected_keys,
-                .indices = selected_indices,
-            }, n_reads);
+            var fill: Fill = .{
+                .gpa = gpa,
+                .disk = &disk,
+                .variant = variant,
+                .compression = compression,
+                .items = items,
+                .keys = keys,
+            };
+            try bench_get_modes(runner, &fill, selection, n_reads);
         }
     }
 }
 
-const Selection = struct { keys: []Key, indices: []u64 };
-
 fn bench_get_modes(
     runner: *bench.Runner,
-    disk: *Disk,
-    variant: Variant,
-    compression: ?u8,
-    keys: []const Key,
+    fill: *Fill,
     selection: Selection,
     n_reads: []const usize,
 ) !void {
-    for ([_][]const u8{ "serial", "concurrent" }) |mode| {
+    const modes: []const []const u8 = &.{ "serial", "concurrent" };
+    for (cases([]const u8, runner, modes, 1)) |mode| {
         for ([_][]const u8{ "key", "index" }) |pattern| {
             for (n_reads) |reads| {
-                const by_key = std.mem.eql(u8, pattern, "key");
-                if (!runner.list) {
-                    const chosen = selection.keys[0..reads];
-                    select_reads(keys, reads, chosen, selection.indices[0..reads]);
-                }
                 var workload: GetWorkload = .{
-                    .gpa = runner.allocator,
-                    .disk = disk,
-                    .variant = variant,
-                    .compression = compression,
-                    .keys = if (by_key) selection.keys[0..reads] else &.{},
-                    .indices = if (by_key) &.{} else selection.indices[0..reads],
+                    .fill = fill,
+                    .by_key = std.mem.eql(u8, pattern, "key"),
+                    .reads = reads,
+                    .selection = selection,
                 };
                 const benchmark = bench.Benchmark.init("archive::get")
-                    .with_param("variant", variant)
+                    .with_param("variant", fill.variant)
                     .with_param("mode", mode).with_param("pattern", pattern)
-                    .with_param("comp", comp_name(compression)).with_param("items", keys.len)
-                    .with_param("reads", reads);
+                    .with_param("comp", comp_name(fill.compression))
+                    .with_param("items", fill.items).with_param("reads", reads);
                 try runner.run(benchmark, &workload);
             }
         }
     }
 }
 
-/// Times reopening a populated archive; each reopened archive closes before the next.
+/// Times reopening the filled archive; each reopened archive closes before the next.
 const RestartWorkload = struct {
-    gpa: Allocator,
-    disk: *Disk,
-    variant: Variant,
-    compression: ?u8,
+    fill: *Fill,
     target: Archive = undefined,
     opened: bool = false,
+
+    pub fn setup(self: *RestartWorkload) !void {
+        try self.fill.ensure();
+    }
 
     pub fn before_iter(self: *RestartWorkload) !void {
         if (!self.opened) return;
@@ -350,7 +389,8 @@ const RestartWorkload = struct {
 
     pub fn iter(self: *RestartWorkload) !void {
         assert(!self.opened);
-        try self.target.open(self.gpa, self.disk, self.variant, self.compression);
+        const fill = self.fill;
+        try self.target.open(fill.gpa, fill.disk, fill.variant, fill.compression);
         self.opened = true;
     }
 
@@ -368,24 +408,19 @@ fn bench_restart(runner: *bench.Runner) !void {
         &.{ 10_000, 50_000, 100_000, 500_000 },
     );
     for (variants) |variant| {
-        for (compressions) |compression| {
-            for (sizes) |items| {
+        for (cases(?u8, runner, &compressions, 1)) |compression| {
+            for (item_counts(runner, sizes)) |items| {
                 var disk: Disk = .init(runner);
                 try disk.open(gpa, "archive-bench-restart");
                 defer disk.close();
-                if (!runner.list) {
-                    var target: Archive = undefined;
-                    try target.open(gpa, &disk, variant, compression);
-                    errdefer target.close(true) catch {};
-                    try append_random(gpa, &target, items, null);
-                    try target.close(false);
-                }
-                var workload: RestartWorkload = .{
+                var fill: Fill = .{
                     .gpa = gpa,
                     .disk = &disk,
                     .variant = variant,
                     .compression = compression,
+                    .items = items,
                 };
+                var workload: RestartWorkload = .{ .fill = &fill };
                 const benchmark = bench.Benchmark.init("archive::restart")
                     .with_param("variant", variant).with_param("items", items)
                     .with_param("comp", comp_name(compression));

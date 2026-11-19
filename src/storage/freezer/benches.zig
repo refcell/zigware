@@ -13,7 +13,10 @@ const bench = @import("bench");
 const runtime = @import("runtime");
 const storage = @import("storage");
 const utils = @import("utils");
-const Disk = @import("../bench_disk.zig").Disk;
+const Disk = @import("../bench_support.zig").Disk;
+const support = @import("../bench_support.zig");
+const quick = support.quick;
+const cases = support.cases;
 
 const freezer = storage.freezer;
 const metrics = runtime.telemetry.metrics;
@@ -99,27 +102,40 @@ fn append_random(store: *Store, count: u64, keys: ?[]Key) !void {
     _ = try store.inner.sync();
 }
 
-/// Creates and populates a freezer of `items` pairs, closing it; returns its checkpoint.
-fn populate(gpa: Allocator, disk: *Disk, items: u64, keys: ?[]Key) !freezer.Checkpoint {
-    var store: Store = undefined;
-    try store.open(gpa, disk, null);
-    errdefer store.destroy() catch {};
-    try append_random(&store, items, keys);
-    return store.close();
-}
-
-/// Reads the selected keys from a freezer reopened (from `checkpoint`) in `setup`.
-const GetWorkload = struct {
+/// A freezer filled with `items` pairs and closed on first use, so runs that filter out or
+/// only list its benchmarks skip the fill.
+const Fill = struct {
     gpa: Allocator,
     disk: *Disk,
-    checkpoint: freezer.Checkpoint,
-    keys: []const Key,
+    items: u64,
+    /// Where the fill records its keys, if anywhere (sized `items`).
+    keys: ?[]Key = null,
+    checkpoint: ?freezer.Checkpoint = null,
+
+    fn ensure(self: *Fill) !freezer.Checkpoint {
+        if (self.checkpoint) |checkpoint| return checkpoint;
+        var store: Store = undefined;
+        try store.open(self.gpa, self.disk, null);
+        errdefer store.destroy() catch {};
+        try append_random(&store, self.items, self.keys);
+        self.checkpoint = try store.close();
+        return self.checkpoint.?;
+    }
+};
+
+/// Reads keys chosen by `pattern` (in `setup`) from the filled freezer reopened there.
+const GetWorkload = struct {
+    fill: *Fill,
+    pattern: []const u8,
+    keys: []Key,
     store: Store = undefined,
     opened: bool = false,
 
     pub fn setup(self: *GetWorkload) !void {
         assert(!self.opened);
-        try self.store.open(self.gpa, self.disk, self.checkpoint);
+        const checkpoint = try self.fill.ensure();
+        select_keys(self.pattern, self.fill.keys.?, self.keys);
+        try self.store.open(self.fill.gpa, self.fill.disk, checkpoint);
         self.opened = true;
     }
 
@@ -155,20 +171,15 @@ fn bench_get(runner: *bench.Runner) !void {
     var disk: Disk = .init(runner);
     try disk.open(gpa, "freezer-bench-get");
     defer disk.close();
-    const checkpoint: freezer.Checkpoint = if (runner.list)
-        undefined
-    else
-        try populate(gpa, &disk, items, keys);
+    var fill: Fill = .{ .gpa = gpa, .disk = &disk, .items = items, .keys = keys };
+    const modes: []const []const u8 = &.{ "serial", "concurrent" };
     for ([_][]const u8{ "random", "recent" }) |pattern| {
-        for ([_][]const u8{ "serial", "concurrent" }) |mode| {
+        for (cases([]const u8, runner, modes, 1)) |mode| {
             for (n_reads) |reads| {
-                const chosen = selected[0..@min(reads, keys.len)];
-                if (!runner.list) select_keys(pattern, keys, chosen);
                 var workload: GetWorkload = .{
-                    .gpa = gpa,
-                    .disk = &disk,
-                    .checkpoint = checkpoint,
-                    .keys = chosen,
+                    .fill = &fill,
+                    .pattern = pattern,
+                    .keys = selected[0..@min(reads, keys.len)],
                 };
                 const benchmark = bench.Benchmark.init("freezer::get")
                     .with_param("pattern", pattern).with_param("mode", mode)
@@ -239,14 +250,17 @@ fn bench_put(runner: *bench.Runner) !void {
     }
 }
 
-/// Times reopening a populated freezer from its checkpoint; each reopened freezer closes
+/// Times reopening the filled freezer from its checkpoint; each reopened freezer closes
 /// (untimed) before the next.
 const RestartWorkload = struct {
-    gpa: Allocator,
-    disk: *Disk,
-    checkpoint: freezer.Checkpoint,
+    fill: *Fill,
+    checkpoint: freezer.Checkpoint = undefined,
     store: Store = undefined,
     opened: bool = false,
+
+    pub fn setup(self: *RestartWorkload) !void {
+        self.checkpoint = try self.fill.ensure();
+    }
 
     pub fn before_iter(self: *RestartWorkload) !void {
         if (!self.opened) return;
@@ -256,7 +270,7 @@ const RestartWorkload = struct {
 
     pub fn iter(self: *RestartWorkload) !void {
         assert(!self.opened);
-        try self.store.open(self.gpa, self.disk, self.checkpoint);
+        try self.store.open(self.fill.gpa, self.fill.disk, self.checkpoint);
         self.opened = true;
     }
 
@@ -277,11 +291,8 @@ fn bench_restart(runner: *bench.Runner) !void {
         var disk: Disk = .init(runner);
         try disk.open(gpa, "freezer-bench-restart");
         defer disk.close();
-        const checkpoint: freezer.Checkpoint = if (runner.list)
-            undefined
-        else
-            try populate(gpa, &disk, items, null);
-        var workload: RestartWorkload = .{ .gpa = gpa, .disk = &disk, .checkpoint = checkpoint };
+        var fill: Fill = .{ .gpa = gpa, .disk = &disk, .items = items };
+        var workload: RestartWorkload = .{ .fill = &fill };
         const benchmark = bench.Benchmark.init("freezer::restart").with_param("items", items);
         try runner.run(benchmark, &workload);
     }

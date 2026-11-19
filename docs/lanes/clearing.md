@@ -166,7 +166,14 @@ qmdb `current` (balances, over the MMB) and `keyless` (payout log, over the MMR)
     the sequential path. The proof benches share one tree per family and size.
   - [x] archive (get, put, restart; prunable and immutable, compression off and 3).
   - [x] freezer (get, put, restart).
-  - `src/storage/bench_disk.zig` opens production disk storage under `.zig-cache/tmp` for
+  - Per-push smoke runs are trimmed (`bench_support.quick`: smoke inputs without
+    `-Dslow-tests`): one or two cases per bench on the smallest input, MMR only, compression
+    off, serial reads, and archive fills of 100 items instead of commonware's 1,000 (64 KiB
+    values, about 0.9 s per fill in Debug). Index, merkle, archive, and freezer went from about
+    55 s to about 3 s together. `-Dslow-tests` (nightly) runs the full smoke list (61, 160, 24,
+    and 6 cases). Archive and freezer fill their data on first use, so filtered and listed runs
+    skip the fills.
+  - `src/storage/bench_support.zig` opens production disk storage under `.zig-cache/tmp` for
     measured runs (as commonware's tokio benches use the disk) and in-memory storage on smoke
     inputs. The archive and freezer `mode=concurrent` reads run one after another, since
     zigware's stores are not shared between tasks.
@@ -211,3 +218,5 @@ qmdb `current` (balances, over the MMB) and `keyless` (payout log, over the MMR)
 - 2026-11-19: conformance payment and close (about 96 s and 63 s in ReleaseSafe) run only with
   `-Dslow-tests`, in every mode; nightly covers them.
 - 2026-11-19: storage merkle, archive, and freezer benches; the storage bench backlog is done.
+- 2026-11-19: trimmed the storage benches' per-push smoke runs to about 3 s; the full list
+  runs under `-Dslow-tests`.

@@ -16,7 +16,10 @@ const cryptography = @import("cryptography");
 const runtime = @import("runtime");
 const storage = @import("storage");
 const utils = @import("utils");
-const Disk = @import("../bench_disk.zig").Disk;
+const Disk = @import("../bench_support.zig").Disk;
+const support = @import("../bench_support.zig");
+const quick = support.quick;
+const cases = support.cases;
 
 const merkle = storage.merkle;
 const Sha256 = cryptography.Sha256;
@@ -38,6 +41,7 @@ const families = .{
 const SAMPLE_SIZE: usize = 100;
 
 fn n_leaves(runner: *const bench.Runner) []const usize {
+    if (quick(runner)) return &.{10_000};
     return runner.inputs.pick(
         []const usize,
         &.{ 10_000, 100_000 },
@@ -255,7 +259,7 @@ fn bench_proofs_on(
         try runner.run(benchmark, &workload);
     }
     var ranges: [SAMPLE_SIZE]merkle.Range = undefined;
-    for (ranges_swept) |range| {
+    for (cases(u64, runner, &ranges_swept, 1)) |range| {
         rng = utils.test_rng();
         sample_ranges(&rng, n, range, &ranges);
         workload.ranges = &ranges;
@@ -274,8 +278,11 @@ fn bench_proofs_on(
 }
 
 fn bench_proofs(runner: *bench.Runner) !void {
-    inline for (families) |family| {
-        for (n_leaves(runner)) |n| try bench_proofs_on(runner, family[0], family[1], n);
+    inline for (families, 0..) |family, family_index| {
+        // A quick run takes MMR only.
+        if (family_index == 0 or !quick(runner)) {
+            for (n_leaves(runner)) |n| try bench_proofs_on(runner, family[0], family[1], n);
+        }
     }
 }
 
@@ -302,17 +309,21 @@ fn bench_position_to_location(runner: *bench.Runner) !void {
         &.{ 1_000_000, 1_000_000_000_000 },
         &.{ 1_000_000, 1_000_000_000_000, 1 << 62 },
     );
-    inline for (families) |family| {
-        const F = family[0];
-        for (sizes) |n| {
-            var rng = utils.test_rng();
-            var workload: PositionWorkload(F) = undefined;
-            for (&workload.positions) |*position| {
-                position.* = F.location_to_position(utils.rng.range_less_than(&rng, u64, 0, n));
+    const sizes_run = cases(u64, runner, sizes, 1);
+    inline for (families, 0..) |family, family_index| {
+        // A quick run takes MMR only.
+        if (family_index == 0 or !quick(runner)) {
+            const F = family[0];
+            for (sizes_run) |n| {
+                var rng = utils.test_rng();
+                var workload: PositionWorkload(F) = undefined;
+                for (&workload.positions) |*position| {
+                    position.* = F.location_to_position(utils.rng.range_less_than(&rng, u64, 0, n));
+                }
+                const benchmark = bench.Benchmark.init("merkle::position_to_location")
+                    .with_param("n", n).with_param("family", family[1]);
+                try runner.run(benchmark, &workload);
             }
-            const benchmark = bench.Benchmark.init("merkle::position_to_location")
-                .with_param("n", n).with_param("family", family[1]);
-            try runner.run(benchmark, &workload);
         }
     }
 }
@@ -353,16 +364,19 @@ fn AppendWorkload(comptime F: type) type {
 
 fn bench_append(runner: *bench.Runner) !void {
     const gpa = runner.allocator;
-    inline for (families) |family| {
-        for (n_leaves(runner)) |n| {
-            var rng = utils.test_rng();
-            const elements = try random_digests(gpa, &rng, n);
-            defer gpa.free(elements);
-            var workload: AppendWorkload(family[0]) = .{ .gpa = gpa, .elements = elements };
-            defer workload.teardown();
-            const benchmark = bench.Benchmark.init("merkle::append").with_param("n", n)
-                .with_param("family", family[1]);
-            try runner.run(benchmark, &workload);
+    inline for (families, 0..) |family, family_index| {
+        // A quick run takes MMR only.
+        if (family_index == 0 or !quick(runner)) {
+            for (n_leaves(runner)) |n| {
+                var rng = utils.test_rng();
+                const elements = try random_digests(gpa, &rng, n);
+                defer gpa.free(elements);
+                var workload: AppendWorkload(family[0]) = .{ .gpa = gpa, .elements = elements };
+                defer workload.teardown();
+                const benchmark = bench.Benchmark.init("merkle::append").with_param("n", n)
+                    .with_param("family", family[1]);
+                try runner.run(benchmark, &workload);
+            }
         }
     }
 }
@@ -373,26 +387,30 @@ const additions = [_]usize{ 100, 1_000, 10_000, 50_000 };
 /// unchanged, so one tree per size serves every iteration and addition count.
 fn bench_append_additional(runner: *bench.Runner) !void {
     const gpa = runner.allocator;
-    inline for (families) |family| {
-        const F = family[0];
-        for (n_leaves(runner)) |n| {
-            var rng = utils.test_rng();
-            const elements = try random_digests(gpa, &rng, n);
-            defer gpa.free(elements);
-            const additional = try random_digests(gpa, &rng, additions[additions.len - 1]);
-            defer gpa.free(additional);
-            var base: Mem(F) = .empty;
-            defer base.deinit(gpa);
-            if (!runner.list) try append_all(F, gpa, &base, elements);
-            for (additions) |a| {
-                var workload: AppendWorkload(F) = .{
-                    .gpa = gpa,
-                    .elements = additional[0..a],
-                    .base = &base,
-                };
-                const benchmark = bench.Benchmark.init("merkle::append_additional")
-                    .with_param("start", n).with_param("add", a).with_param("family", family[1]);
-                try runner.run(benchmark, &workload);
+    inline for (families, 0..) |family, family_index| {
+        // A quick run takes MMR only.
+        if (family_index == 0 or !quick(runner)) {
+            const F = family[0];
+            for (n_leaves(runner)) |n| {
+                var rng = utils.test_rng();
+                const elements = try random_digests(gpa, &rng, n);
+                defer gpa.free(elements);
+                const additional = try random_digests(gpa, &rng, additions[additions.len - 1]);
+                defer gpa.free(additional);
+                var base: Mem(F) = .empty;
+                defer base.deinit(gpa);
+                if (!runner.list) try append_all(F, gpa, &base, elements);
+                for (cases(usize, runner, &additions, 1)) |a| {
+                    var workload: AppendWorkload(F) = .{
+                        .gpa = gpa,
+                        .elements = additional[0..a],
+                        .base = &base,
+                    };
+                    const benchmark = bench.Benchmark.init("merkle::append_additional")
+                        .with_param("start", n).with_param("add", a)
+                        .with_param("family", family[1]);
+                    try runner.run(benchmark, &workload);
+                }
             }
         }
     }
@@ -459,7 +477,7 @@ fn bench_workers(
     items: []const []const u8,
 ) !void {
     var workload: AddManyWorkload(F) = .{ .gpa = runner.allocator, .mem = mem, .items = items };
-    for ([_]usize{ 1, WORKERS }) |workers| {
+    for (cases(usize, runner, &.{ 1, WORKERS }, 1)) |workers| {
         const benchmark = params.with_param("workers", workers).with_param("family", family);
         try runner.run(benchmark, &workload);
     }
@@ -500,14 +518,17 @@ fn bench_add_many_uniform(runner: *bench.Runner) !void {
     const gpa = runner.allocator;
     var mmr = try committed(storage.mmr.Family, gpa);
     defer mmr.deinit(gpa);
-    var mmb = try committed(storage.mmb.Family, gpa);
+    // A quick run skips MMB, so it skips building MMB's committed tree.
+    var mmb: Mem(storage.mmb.Family) = .empty;
+    if (!quick(runner)) mmb = try committed(storage.mmb.Family, gpa);
     defer mmb.deinit(gpa);
     var rng = utils.test_rng();
-    for (ITEMS) |n| {
+    for (cases(usize, runner, &ITEMS, 1)) |n| {
         const items = try random_items(gpa, &rng, n, {}, small_len);
         defer free_items(gpa, items);
         const params = bench.Benchmark.init("merkle::add_many").with_param("items", n);
         try bench_workers(runner, storage.mmr.Family, params, "mmr", &mmr, items);
+        if (quick(runner)) continue;
         try bench_workers(runner, storage.mmb.Family, params, "mmb", &mmb, items);
     }
 }
@@ -532,13 +553,15 @@ fn bench_add_many_skewed(runner: *bench.Runner) !void {
     var mmr = try committed(storage.mmr.Family, gpa);
     defer mmr.deinit(gpa);
     var rng = utils.test_rng();
-    const cases = [_]Skew{
+    const skews = [_]Skew{
         .{ .payload = "clustered", .large = MIB, .shape = .clustered },
         .{ .payload = "clustered", .large = 8 * KIB, .shape = .clustered },
         .{ .payload = "spread", .large = MIB, .shape = .spread },
         .{ .payload = "dominant", .large = 16 * MIB, .shape = .dominant },
     };
-    for (cases) |skew| {
+    // A quick run takes the 8 KiB clustered case, the cheapest to hash.
+    const run_cases: []const Skew = if (quick(runner)) skews[1..2] else &skews;
+    for (run_cases) |skew| {
         const items = try random_items(gpa, &rng, SKEWED_ITEMS, skew, Skew.len_of);
         defer free_items(gpa, items);
         const params = bench.Benchmark.init("merkle::add_many").with_param("items", SKEWED_ITEMS)
@@ -548,6 +571,7 @@ fn bench_add_many_skewed(runner: *bench.Runner) !void {
 }
 
 const UpdateMode = enum { BatchedSerial, BatchedParallel };
+const update_modes = [_]UpdateMode{ .BatchedSerial, .BatchedParallel };
 
 /// Times random leaf updates on a tree of `leaves` random elements: drawing `updates` random
 /// (leaf, element) pairs into a map (the caller batching leaves, as in commonware), then
@@ -610,6 +634,12 @@ fn UpdateWorkload(comptime F: type) type {
     };
 }
 
+/// Commonware's update counts; a quick run takes only the smaller.
+fn update_counts(runner: *const bench.Runner) []const usize {
+    const all: []const usize = &.{ 1_000_000, 100_000 };
+    return if (quick(runner)) all[1..] else all;
+}
+
 fn bench_update(runner: *bench.Runner) !void {
     const sizes = runner.inputs.pick(
         []const usize,
@@ -617,19 +647,22 @@ fn bench_update(runner: *bench.Runner) !void {
         &.{100_000},
         &.{ 100_000, 1_000_000, 5_000_000, 10_000_000 },
     );
-    inline for (families) |family| {
-        for ([_]usize{ 1_000_000, 100_000 }) |updates| {
-            for (sizes) |leaves| {
-                for ([_]UpdateMode{ .BatchedSerial, .BatchedParallel }) |mode| {
-                    const benchmark = bench.Benchmark.init("merkle::update")
-                        .with_param("updates", updates).with_param("leaves", leaves)
-                        .with_param("strategy", mode).with_param("family", family[1]);
-                    var workload: UpdateWorkload(family[0]) = .{
-                        .gpa = runner.allocator,
-                        .leaves = leaves,
-                        .updates = updates,
-                    };
-                    try runner.run(benchmark, &workload);
+    inline for (families, 0..) |family, family_index| {
+        // A quick run takes MMR only.
+        if (family_index == 0 or !quick(runner)) {
+            for (update_counts(runner)) |updates| {
+                for (sizes) |leaves| {
+                    for (cases(UpdateMode, runner, &update_modes, 1)) |mode| {
+                        const benchmark = bench.Benchmark.init("merkle::update")
+                            .with_param("updates", updates).with_param("leaves", leaves)
+                            .with_param("strategy", mode).with_param("family", family[1]);
+                        var workload: UpdateWorkload(family[0]) = .{
+                            .gpa = runner.allocator,
+                            .leaves = leaves,
+                            .updates = updates,
+                        };
+                        try runner.run(benchmark, &workload);
+                    }
                 }
             }
         }
@@ -721,20 +754,24 @@ fn bench_flush(runner: *bench.Runner) !void {
         &.{ 10_000, 100_000 },
         &.{ 10_000, 100_000, 1_000_000 },
     );
+    const sizes_run = cases(usize, runner, sizes, 1);
     var disk: Disk = .init(runner);
     try disk.open(runner.allocator, "merkle-bench-flush");
     defer disk.close();
-    inline for (families) |family| {
-        for (sizes) |n| {
-            const benchmark = bench.Benchmark.init("merkle::flush").with_param("n", n)
-                .with_param("family", family[1]);
-            var workload: FlushWorkload(family[0], family[1]) = .{
-                .gpa = runner.allocator,
-                .disk = &disk,
-                .n = n,
-                .cycles = @max(REBUILD_NODE_BUDGET / (2 * n), 1),
-            };
-            try runner.run(benchmark, &workload);
+    inline for (families, 0..) |family, family_index| {
+        // A quick run takes MMR only.
+        if (family_index == 0 or !quick(runner)) {
+            for (sizes_run) |n| {
+                const benchmark = bench.Benchmark.init("merkle::flush").with_param("n", n)
+                    .with_param("family", family[1]);
+                var workload: FlushWorkload(family[0], family[1]) = .{
+                    .gpa = runner.allocator,
+                    .disk = &disk,
+                    .n = n,
+                    .cycles = @max(REBUILD_NODE_BUDGET / (2 * n), 1),
+                };
+                try runner.run(benchmark, &workload);
+            }
         }
     }
 }

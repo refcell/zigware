@@ -10,6 +10,9 @@ const bench = @import("bench");
 const cryptography = @import("cryptography");
 const storage = @import("storage");
 const utils = @import("utils");
+const support = @import("../bench_support.zig");
+const quick = support.quick;
+const cases = support.cases;
 
 const index = storage.index;
 const translator = storage.translator;
@@ -138,10 +141,12 @@ fn bench_insert(runner: *bench.Runner) !void {
         &.{ 10_000, 50_000 },
         &.{ 10_000, 50_000, 100_000, 500_000, 1_000_000 },
     );
-    for (sizes) |items| {
+    for (cases(usize, runner, sizes, 1)) |items| {
         const kvs = try shuffled_kvs(gpa, items);
         defer gpa.free(kvs);
-        inline for (insert_variants) |V| {
+        // A quick run takes the ordered and unordered variants only.
+        const variant_count: usize = if (quick(runner)) 2 else insert_variants.len;
+        inline for (insert_variants, 0..) |V, variant_index| if (variant_index < variant_count) {
             const benchmark = bench.Benchmark.init("index::insert")
                 .with_param("variant", V.label)
                 .with_param("items", items);
@@ -152,7 +157,7 @@ fn bench_insert(runner: *bench.Runner) !void {
             };
             defer workload.teardown();
             try runner.run(benchmark, &workload);
-        }
+        };
     }
 }
 
@@ -164,7 +169,7 @@ fn bench_insert_and_retain(runner: *bench.Runner) !void {
         &.{ 10_000, 50_000 },
         &.{ 10_000, 50_000, 100_000, 500_000 },
     );
-    for (sizes) |items| {
+    for (cases(usize, runner, sizes, 1)) |items| {
         const kvs = try shuffled_kvs(gpa, items);
         defer gpa.free(kvs);
         const benchmark = bench.Benchmark.init("index::insert_and_retain")
@@ -254,11 +259,15 @@ fn bench_lookup(runner: *bench.Runner) !void {
         &.{ 10_000, 50_000 },
         &.{ 10_000, 50_000, 100_000, 500_000, 1_000_000 },
     );
-    const keys = try keys_of(gpa, sizes[sizes.len - 1]);
+    const sizes_run = cases(usize, runner, sizes, 1);
+    const keys = try keys_of(gpa, sizes_run[sizes_run.len - 1]);
     defer gpa.free(keys);
-    for (sizes) |items| {
-        // Sweep translators, and both partitioned variants at P=2.
-        inline for (lookup_translators) |V| try run_lookup(runner, V, "translator", items, keys);
+    for (sizes_run) |items| {
+        // Sweep translators, and both partitioned variants at P=2. A quick run takes one cap
+        // and the partitioned ordered variant.
+        inline for (lookup_translators, 0..) |V, i| if (i == 0 or !quick(runner)) {
+            try run_lookup(runner, V, "translator", items, keys);
+        };
         try run_lookup(
             runner,
             Variant(PartOrdered(Cap(6), 2), "partitioned_ordered_2", .init(.{})),
@@ -266,6 +275,7 @@ fn bench_lookup(runner: *bench.Runner) !void {
             items,
             keys,
         );
+        if (quick(runner)) continue;
         try run_lookup(
             runner,
             Variant(PartUnordered(Cap(6), 2), "partitioned_unordered_2", .init(.{})),
@@ -340,13 +350,15 @@ fn bench_lookup_miss(runner: *bench.Runner) !void {
         &.{ 10_000, 50_000 },
         &.{ 10_000, 50_000, 100_000, 500_000, 1_000_000 },
     );
-    const inserted = try keys_of(gpa, sizes[sizes.len - 1]);
+    const sizes_run = cases(usize, runner, sizes, 1);
+    const inserted = try keys_of(gpa, sizes_run[sizes_run.len - 1]);
     defer gpa.free(inserted);
-    for (sizes) |items| {
+    for (sizes_run) |items| {
         // OneCap cannot produce translated-key misses at these sizes.
         if (items <= std.math.maxInt(u16)) {
             try run_lookup_miss(runner, translator.TwoCap, "two_cap", items, inserted);
         }
+        if (quick(runner)) continue; // A quick run takes two_cap only.
         try run_lookup_miss(runner, translator.FourCap, "four_cap", items, inserted);
         try run_lookup_miss(runner, EightCap, "eight_cap", items, inserted);
     }
@@ -400,7 +412,7 @@ fn bench_grinding(runner: *bench.Runner) !void {
         &.{ 10_000, 50_000 },
         &.{ 10_000, 50_000, 200_000 },
     );
-    for (sizes) |items| {
+    for (cases(usize, runner, sizes, 1)) |items| {
         for ([_]bool{ false, true }) |grinding| {
             const dist: []const u8 = if (grinding) "grinding" else "uniform";
             const keys = try grinding_keys(gpa, items, grinding);
@@ -513,15 +525,16 @@ fn bench_hashmaps(runner: *bench.Runner) !void {
         &.{ 100_000, 1_000_000, 10_000_000 },
     );
     const Case = struct { prefix: []const u8, mode: @FieldType(HashMapWorkload, "mode") };
-    const cases = [_]Case{
+    const hashmap_cases = [_]Case{
         .{ .prefix = "index::hashmap_iteration", .mode = .iterate },
         .{ .prefix = "index::hashmap_insert_fixed", .mode = .insert_fixed },
         .{ .prefix = "index::hashmap_insert", .mode = .insert },
     };
-    for (cases) |case| {
+    for (hashmap_cases) |case| {
         for (sizes) |n| {
             const all_widths: []const usize = &.{ 4, 8, 16, 32 };
-            const widths = if (case.mode == .insert_fixed) all_widths[0..1] else all_widths;
+            const widths_all = if (case.mode == .insert_fixed) all_widths[0..1] else all_widths;
+            const widths = cases(usize, runner, widths_all, 1);
             for (widths) |k| {
                 const benchmark = bench.Benchmark.init(case.prefix).with_param("n", n)
                     .with_param("k", k);
@@ -646,7 +659,9 @@ fn bench_scale(runner: *bench.Runner) !void {
     const full = runner.inputs == .full;
     const sizes: []const u64 = if (full) &scale_items_full else &scale_items_smoke;
     for (sizes) |items| {
-        inline for (scale_variants) |V| {
+        // A quick run takes the P=3 partitioned ordered variant only.
+        const variant_count: usize = if (quick(runner)) 1 else scale_variants.len;
+        inline for (scale_variants, 0..) |V, variant_index| if (variant_index < variant_count) {
             const benchmark = bench.Benchmark.init("index_scale").with_param("variant", V.label)
                 .with_param("items", items).with_param("batch", scale_batch);
             var workload: ScaleWorkload(V.Index) = .{
@@ -670,7 +685,7 @@ fn bench_scale(runner: *bench.Runner) !void {
                 );
                 try runner.out.flush();
             }
-        }
+        };
     }
 }
 

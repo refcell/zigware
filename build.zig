@@ -243,7 +243,7 @@ fn add_benches(
         b.root.access(b.graph.io, path, .{}) catch continue;
         for ([_]std.builtin.OptimizeMode{ optimize, bench_optimize }, 0..) |mode, measured| {
             const graph = if (measured == 0) modules else &measured_modules;
-            const exe = bench_harness(b, graph, package, index, path, target, mode);
+            const exe = bench_harness(b, graph, options_module, package, index, path, target, mode);
             const run = b.addRunArtifact(exe);
             if (measured == 0) {
                 run.addArg("--test");
@@ -311,6 +311,7 @@ fn add_qmdb_harnesses(
 fn bench_harness(
     b: *std.Build,
     modules: []const *std.Build.Module,
+    options_module: *std.Build.Module,
     package: Package,
     index: usize,
     path: []const u8,
@@ -325,6 +326,7 @@ fn bench_harness(
     });
     benches.addImport(package.name, modules[index]);
     benches.addImport("bench", bench);
+    benches.addImport("build_options", options_module);
     for (package.deps) |dep| benches.addImport(dep, modules[package_index(dep)]);
     const root = b.createModule(.{
         .root_source_file = b.path("src/bench/main.zig"),
