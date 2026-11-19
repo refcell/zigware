@@ -235,13 +235,13 @@ Every commonware `#[test]` in this lane's crates (macro and rstest cases expande
 | Total | 397 | 8 | 15 | 374 |
 
 Open:
-- [ ] `iouring/driver.rs:1355` `test_expired_registration_never_stages`: an already-expired
+- [x] `iouring/driver.rs:1355` `test_expired_registration_never_stages`: an already-expired
   deadline submits nothing
-- [ ] `iouring/driver.rs:1537` `test_completion_wins_cancellation`: a success CQE after cancel
+- [x] `iouring/driver.rs:1537` `test_completion_wins_cancellation`: a success CQE after cancel
   keeps its result
-- [ ] `iouring/driver.rs:2929` `test_enter_distinguishes_timeout_from_failure`: enter treats
+- [x] `iouring/driver.rs:2929` `test_enter_distinguishes_timeout_from_failure`: enter treats
   ETIME as a timeout, other errors as failure
-- [ ] `iouring/operation.rs:369` `test_expired_registration_does_not_consume_ready_data`:
+- [x] `iouring/operation.rs:369` `test_expired_registration_does_not_consume_ready_data`:
   expired recv leaves socket data unread
 - [ ] `iouring/request.rs:1439` `test_cqe_result_from_raw_retryable_codes`: EAGAIN, EWOULDBLOCK,
   and EINTR results retry
@@ -259,12 +259,12 @@ Open:
   write above u32::MAX bytes completes across CQEs
 - [ ] `iouring/request.rs:2167` `test_active_write_at_paths`: write_at retries, keeps its prefix,
   0/EIO/ECANCELED give WriteFailed
-- [ ] `iouring/tests.rs:1082`
+- [x] `iouring/tests.rs:1082`
   `test_nested_same_directory_rejected_before_closure_and_outer_remains_usable`: second runner
   on a held dir fails first
-- [ ] `iouring/waiter.rs:991` `test_cancellation_preserves_terminal_results`: a result or error
+- [x] `iouring/waiter.rs:991` `test_cancellation_preserves_terminal_results`: a result or error
   that beats cancel wins over Timeout
-- [ ] `iouring/waiter.rs:1026`
+- [x] `iouring/waiter.rs:1026`
   `test_orphaned_reads_and_sends_stop_before_staging_or_after_partial_completion`: dropped
   op stops after partial progress
 
@@ -372,5 +372,5 @@ Not portable:
 - `iouring/sockaddr.rs` (both 2): raw sockaddr conversion for ring connect; Zig never
   connects over the ring
 
-Behavior gap found by the audit: `production/ring.zig` `abort` waits for the operation and its cancel, then returns the error even when the operation completed, so a recv that lost a cancel or timeout race drops bytes it already read. commonware keeps the completed result (iouring `driver.rs:1537`, `waiter.rs:991`).
+Behavior gap found by the audit: `production/ring.zig` `abort` waits for the operation and its cancel, then returns the error even when the operation completed, so a recv that lost a cancel or timeout race drops bytes it already read. commonware keeps the completed result (iouring `driver.rs:1537`, `waiter.rs:991`). Fixed in 130412f: an operation that completes first keeps its result and a consumed cancellation is re-armed. Two more gaps found while porting the rest, fixed with their tests: `perform` staged an operation for an already-canceled task, so a recv could consume ready data and a retry after EAGAIN or partial progress resubmitted (`waiter.rs:1026`); and a second storage on a root this process already held waited on its own process's lock forever, where commonware rejects a nested runtime before taking the hold (`tests.rs:1082`). `production.storage` now keeps a process-wide set of held roots and fails such an init with `error.Io`.
 

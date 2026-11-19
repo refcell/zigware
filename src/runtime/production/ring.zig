@@ -201,8 +201,11 @@ const LinuxWorker = struct {
         worker.busy = true;
         defer worker.busy = false;
         const deadline = timeout.toDeadline(worker.io);
-        // An already-expired deadline submits nothing (commonware's
-        // `test_expired_registration_never_stages`), so a recv leaves ready data unread.
+        // A canceled task or an already-expired deadline submits nothing (commonware's
+        // `test_expired_registration_never_stages` and `test_orphaned_reads_and_sends_stop_
+        // before_staging_or_after_partial_completion`): a recv leaves ready data unread, and a
+        // caller retrying after partial progress or EAGAIN stops at its next attempt.
+        try worker.io.checkCancel();
         if (deadline == .deadline) {
             const left = deadline.deadline.durationFromNow(worker.io).raw.nanoseconds;
             if (left <= 0) return error.Timeout;
@@ -257,37 +260,30 @@ const LinuxWorker = struct {
         return worker.result;
     }
 
+    /// Tests only: submits `operation` and aborts it at once with `err`, as when a
+    /// cancellation arrives right after staging; the kernel may complete it first.
+    pub fn perform_then_abort(
+        worker: *LinuxWorker,
+        operation: Operation,
+        err: PerformError,
+    ) PerformError!i32 {
+        comptime assert(builtin.is_test);
+        assert(worker.ready and !worker.busy);
+        worker.busy = true;
+        defer worker.busy = false;
+        worker.operation_done = false;
+        worker.queue(operation);
+        return worker.abort(err);
+    }
+
     /// Submits what is queued and waits up to `wait_ns` for a completion.
     fn enter(worker: *LinuxWorker, wait_ns: u64) void {
+        assert(worker.ready and worker.busy);
         assert(wait_ns > 0);
         const to_submit = worker.uring.flush_sq();
-        var ts: linux.kernel_timespec = .{
-            .sec = @intCast(wait_ns / std.time.ns_per_s),
-            .nsec = @intCast(wait_ns % std.time.ns_per_s),
-        };
-        var arg: linux.io_uring_getevents_arg = .{
-            .sigmask = 0,
-            .sigmask_sz = 0,
-            .pad = 0,
-            .ts = @intFromPtr(&ts),
-        };
-        const flags = linux.IORING_ENTER_GETEVENTS | linux.IORING_ENTER_EXT_ARG |
-            worker.enter_flags;
-        const rc = linux.syscall6(
-            .io_uring_enter,
-            @as(u32, @bitCast(worker.enter_fd)),
-            to_submit,
-            1,
-            flags,
-            @intFromPtr(&arg),
-            @sizeOf(linux.io_uring_getevents_arg),
-        );
-        switch (linux.errno(rc)) {
-            // A timeout or interrupt ends the slice; unsubmitted entries go with the next.
-            .SUCCESS, .TIME, .INTR, .AGAIN, .BUSY => {},
-            // The waiter would never wake; there is no recovery.
-            else => |e| std.debug.panic("io_uring enter failed: {t}", .{e}),
-        }
+        // The waiter would never wake; there is no recovery.
+        enter_wait(worker.enter_fd, worker.enter_flags, to_submit, wait_ns) catch |err|
+            std.debug.panic("io_uring enter failed: {t}", .{err});
     }
 
     /// Records every ready completion.
@@ -327,6 +323,41 @@ const UnsupportedWorker = struct {
         unreachable; // No ring gives one.
     }
 };
+
+pub const EnterError = error{RingFailed};
+
+/// One `io_uring_enter`: submits `to_submit` entries and waits up to `wait_ns` for a
+/// completion. A timeout, an interrupt, or a full completion queue ends the wait without an
+/// error; any other failure is `RingFailed` (commonware's
+/// `test_enter_distinguishes_timeout_from_failure`).
+pub fn enter_wait(fd: i32, flags: u32, to_submit: u32, wait_ns: u64) EnterError!void {
+    assert(wait_ns > 0);
+    assert(flags & ~@as(u32, linux.IORING_ENTER_REGISTERED_RING) == 0);
+    var ts: linux.kernel_timespec = .{
+        .sec = @intCast(wait_ns / std.time.ns_per_s),
+        .nsec = @intCast(wait_ns % std.time.ns_per_s),
+    };
+    var arg: linux.io_uring_getevents_arg = .{
+        .sigmask = 0,
+        .sigmask_sz = 0,
+        .pad = 0,
+        .ts = @intFromPtr(&ts),
+    };
+    const rc = linux.syscall6(
+        .io_uring_enter,
+        @as(u32, @bitCast(fd)),
+        to_submit,
+        1,
+        linux.IORING_ENTER_GETEVENTS | linux.IORING_ENTER_EXT_ARG | flags,
+        @intFromPtr(&arg),
+        @sizeOf(linux.io_uring_getevents_arg),
+    );
+    return switch (linux.errno(rc)) {
+        // A timeout or interrupt ends the wait; unsubmitted entries go with the next.
+        .SUCCESS, .TIME, .INTR, .AGAIN, .BUSY => {},
+        else => error.RingFailed,
+    };
+}
 
 /// Maps a negative result to its errno.
 pub fn errno(result: i32) linux.E {

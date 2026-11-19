@@ -60,6 +60,37 @@ pub const SyncGate = struct {
     release: Io.Event = .unset,
 };
 
+/// Storage roots this process holds, by their hold file's inode: a second storage on a held
+/// root would wait on its own process's lock forever. Inodes of different filesystems can
+/// coincide; such a root is then refused, never shared.
+const held_roots = struct {
+    const count_max = 64;
+    var mutex: Io.Mutex = .init;
+    var inodes: [count_max]File.INode = undefined;
+    var count: u32 = 0;
+
+    fn claim(io: Io, inode: File.INode) Error!void {
+        mutex.lockUncancelable(io);
+        defer mutex.unlock(io);
+        assert(count <= count_max);
+        if (std.mem.indexOfScalar(File.INode, inodes[0..count], inode) != null) {
+            return error.Io;
+        }
+        if (count == count_max) return error.Io;
+        inodes[count] = inode;
+        count += 1;
+    }
+
+    fn release(io: Io, inode: File.INode) void {
+        mutex.lockUncancelable(io);
+        defer mutex.unlock(io);
+        const index = std.mem.indexOfScalar(File.INode, inodes[0..count], inode).?;
+        count -= 1;
+        inodes[index] = inodes[count];
+        assert(std.mem.indexOfScalar(File.INode, inodes[0..count], inode) == null);
+    }
+};
+
 pub const Storage = struct {
     io: Io,
     gpa: Allocator,
@@ -79,14 +110,19 @@ pub const Storage = struct {
     /// Test hook: the next directory sync waits on this gate first.
     dir_sync_gate: ?*SyncGate = null,
 
-    /// Takes ownership of `root` and acquires its hold, waiting while another storage holds
-    /// it.
+    /// Takes ownership of `root` and acquires its hold, waiting while another process holds
+    /// it (commonware's `Hold::acquire`). A root this process already holds fails with
+    /// `error.Io` before any lock: the wait would never end, and commonware likewise rejects a
+    /// nested runtime before it takes the hold.
     pub fn init(io: Io, gpa: Allocator, root: Dir, config: Config) Error!Storage {
         assert(config.layouts.contains(config.layout));
-        const hold = root.createFile(io, hold_name, .{
-            .truncate = false,
-            .lock = .exclusive,
-        }) catch return error.Io;
+        const hold = root.createFile(io, hold_name, .{ .truncate = false }) catch
+            return error.Io;
+        errdefer hold.close(io);
+        const inode = (hold.stat(io) catch return error.Io).inode;
+        try held_roots.claim(io, inode);
+        errdefer held_roots.release(io, inode);
+        hold.lock(io, .exclusive) catch return error.Io;
         return .{ .io = io, .gpa = gpa, .config = config, .root = root, .hold = hold };
     }
 
@@ -98,6 +134,8 @@ pub const Storage = struct {
         for (self.synced.keys()) |key| self.gpa.free(key);
         self.synced.deinit(self.gpa);
         self.live.deinit(self.gpa);
+        held_roots.release(self.io, (self.hold.stat(self.io) catch unreachable).inode); // The
+        // hold is open, and fstat of an open descriptor fails only on a bad descriptor.
         self.hold.close(self.io);
         self.root.close(self.io);
         self.* = undefined;

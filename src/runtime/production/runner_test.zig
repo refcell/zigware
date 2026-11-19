@@ -156,6 +156,40 @@ test "the production runner runs a supervised Context root (start_context)" {
     try (try runner.start_context(context_root, .{&started}));
 }
 
+fn seven(_: Context) anyerror!u64 {
+    return 7;
+}
+
+fn nested_root(ctx: Context, path: []const u8) anyerror!void {
+    // A second runner on the held directory is refused before it starts or waits.
+    var nested: Runner = undefined;
+    try testing.expectError(
+        error.Io,
+        nested.init(testing.allocator, .{ .storage_directory = path }),
+    );
+    // The outer runner and its storage stay usable.
+    const handle = try ctx.child("after_rejection").spawn(seven, .{});
+    try testing.expectEqual(@as(u64, 7), try (try handle.join()));
+    const opened = try ctx.storage.open("partition", "blob");
+    opened.blob.close();
+    try ctx.sleep(.fromMilliseconds(1));
+}
+
+// commonware's `test_nested_same_directory_rejected_before_closure_and_outer_remains_usable`.
+test "a nested runner on a held directory fails and the outer one stays usable" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [64]u8 = undefined;
+    const path = storage_directory(&path_buffer, &tmp);
+    var runner: Runner = undefined;
+    try runner.init(testing.allocator, .{ .storage_directory = path });
+    defer runner.deinit();
+    try (try runner.start_context(nested_root, .{path}));
+    // Once the first runner is gone, the directory can be held again.
+    runner.deinit();
+    try runner.init(testing.allocator, .{ .storage_directory = path });
+}
+
 const iface = @import("../storage.zig");
 const header = @import("../storage/header.zig");
 

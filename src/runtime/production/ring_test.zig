@@ -110,17 +110,36 @@ test "an expired deadline submits nothing and leaves ready data unread" {
     try testing.expectEqualStrings("data", &buffer);
 }
 
+test "an operation that completes before its abort keeps its result" {
+    var ring: Ring = undefined;
+    try init_ring(&ring, 2);
+    defer ring.deinit();
+    const worker = try worker_or_skip(&ring);
+    const pair = try socket_pair();
+    defer Io.net.Socket.closeMany(io, &pair);
+    var buffer: [4]u8 = undefined;
+    const recv: ring_mod.Operation = .{ .recv = .{ .fd = pair[0].handle, .buffer = &buffer } };
+    // With data ready the recv completes before its cancellation: it keeps its bytes
+    // (commonware's `test_completion_wins_cancellation`).
+    const data = "data";
+    try testing.expectEqual(data.len, std.os.linux.write(pair[1].handle, data, data.len));
+    try testing.expectEqual(@as(i32, 4), try worker.perform_then_abort(recv, error.Timeout));
+    try testing.expectEqualStrings("data", &buffer);
+    // With nothing to read, the cancellation takes effect.
+    try testing.expectError(error.Timeout, worker.perform_then_abort(recv, error.Timeout));
+}
+
+/// Consumes this task's cancellation, as `perform` does when it notices one mid-operation,
+/// then aborts a recv whose data is ready.
 fn canceled_recv(ring: *Ring, fd: std.posix.fd_t) anyerror!i32 {
     var buffer: [4]u8 = undefined;
     const worker = try worker_or_skip(ring);
-    // Waits for the cancellation, so it is pending when the recv starts.
-    io.sleep(.fromSeconds(10), .awake) catch |err| {
-        if (err != error.Canceled) return err;
-        io.recancel();
-    };
-    const result = try worker.perform(.{ .recv = .{ .fd = fd, .buffer = &buffer } }, .none);
+    try testing.expectError(error.Canceled, io.sleep(.fromSeconds(10), .awake));
+    const recv: ring_mod.Operation = .{ .recv = .{ .fd = fd, .buffer = &buffer } };
+    const result = try worker.perform_then_abort(recv, error.Canceled);
     try testing.expectEqualStrings("data", &buffer);
-    // The completed recv returned its bytes and re-armed the cancellation.
+    // The completed recv returned its bytes and re-armed the cancellation it consumed
+    // (commonware's `test_cancellation_preserves_terminal_results`).
     try testing.expectError(error.Canceled, io.checkCancel());
     return result;
 }
@@ -136,6 +155,53 @@ test "a canceled recv that completed returns its bytes and stays canceled" {
     var future = try io.concurrent(canceled_recv, .{ &ring, pair[0].handle });
     try io.sleep(.fromMilliseconds(5), .awake);
     try testing.expectEqual(@as(i32, 4), try future.cancel(io));
+}
+
+/// Leaves this task's cancellation pending, then tries a recv whose data is ready.
+fn pending_cancel_recv(ring: *Ring, fd: std.posix.fd_t) anyerror!i32 {
+    var buffer: [4]u8 = undefined;
+    const worker = try worker_or_skip(ring);
+    try testing.expectError(error.Canceled, io.sleep(.fromSeconds(10), .awake));
+    io.recancel();
+    return worker.perform(.{ .recv = .{ .fd = fd, .buffer = &buffer } }, .none);
+}
+
+test "a canceled task stages nothing and leaves ready data unread" {
+    // commonware's `test_orphaned_reads_and_sends_stop_before_staging_or_after_partial_
+    // completion`: a caller retrying after partial progress or EAGAIN stops at its next try.
+    var ring: Ring = undefined;
+    try init_ring(&ring, 2);
+    defer ring.deinit();
+    const pair = try socket_pair();
+    defer Io.net.Socket.closeMany(io, &pair);
+    const data = "data";
+    try testing.expectEqual(data.len, std.os.linux.write(pair[1].handle, data, data.len));
+    var future = try io.concurrent(pending_cancel_recv, .{ &ring, pair[0].handle });
+    try io.sleep(.fromMilliseconds(5), .awake);
+    try testing.expectError(error.Canceled, future.cancel(io));
+    // The bytes are still in the socket.
+    var buffer: [4]u8 = undefined;
+    try testing.expectEqual(data.len, std.os.linux.read(pair[0].handle, &buffer, buffer.len));
+    try testing.expectEqualStrings("data", &buffer);
+}
+
+test "enter treats a timeout as a wait and a broken ring as a failure" {
+    // commonware's `test_enter_distinguishes_timeout_from_failure`.
+    if (!ring_mod.supported) return error.SkipZigTest;
+    const linux = std.os.linux;
+    var uring = linux.IoUring.init(2, 0) catch return error.SkipZigTest;
+    // An empty ring never completes: timed waits, long and short, end without an error.
+    try ring_mod.enter_wait(uring.fd, 0, 0, 5 * std.time.ns_per_ms);
+    try ring_mod.enter_wait(uring.fd, 0, 0, 1);
+    // A closed ring fails every enter; its mapping is leaked, not unmapped through a
+    // descriptor another thread may now own.
+    try testing.expectEqual(@as(usize, 0), linux.close(uring.fd));
+    try testing.expectError(error.RingFailed, ring_mod.enter_wait(uring.fd, 0, 0, 1));
+    try testing.expectError(
+        error.RingFailed,
+        ring_mod.enter_wait(uring.fd, 0, 0, 5 * std.time.ns_per_ms),
+    );
+    uring = undefined;
 }
 
 fn blocked_recv(ring: *Ring, fd: std.posix.fd_t) anyerror!i32 {
