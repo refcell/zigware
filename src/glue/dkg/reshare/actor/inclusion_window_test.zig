@@ -518,3 +518,52 @@ test "inclusion: a ready scan yields to an admitted finalization" {
         }
     }.body);
 }
+
+// commonware `closed_terminal_verification_exits_without_acknowledging`. Commonware closes the
+// actor's runtime context, so the final block's spawned verification fails and inclusion
+// breaks. Verification runs inline here; the equivalent is the window's task canceled while
+// it finishes the final block (in its share write). The final block stays unacknowledged
+// and no epoch is committed.
+test "inclusion: a canceled final block exits without acknowledging" {
+    try actor_test.run(struct {
+        fn body(io: Io) anyerror!void {
+            var f: GatedFixture = undefined;
+            try f.init(io, "closed-verification", 6);
+            defer f.deinit();
+            var log = try f.self_log();
+            defer log.deinit(gpa);
+            const genesis = mocks.genesis_block(mocks.TestSigner.from_seed(0).public_key());
+            const two = gated_block(genesis.digest(), 2, 2);
+            var mid = try ready(try gated_block(two.digest(), 3, 3).with_payload(gpa, 16, .{
+                .dealer_log = log,
+            }));
+            defer mid.deinit();
+            var four = try ready(gated_block(mid.digest(), 4, 4));
+            defer four.deinit();
+
+            var inclusion = try io.concurrent(run_inclusion, .{&f});
+            defer _ = inclusion.cancel(io) catch {};
+            try finalize(&f, &mid);
+            try finalize(&f, &four);
+
+            // The final block carries the epoch info this node's log produces.
+            var asked: Asked = .{};
+            try asked.start(io, &f, .init((&four)[0..1], null));
+            var response = try asked.task.await(io);
+            defer response.deinit();
+            try testing.expect(response == .available);
+            const payload = response.available.payload orelse return error.ExpectedPayload;
+            const raw_last = try gated_block(four.digest(), 5, 5).with_payload(gpa, 16, payload);
+            var last = try ready(raw_last);
+            defer last.deinit();
+
+            f.h.secrets.stall(io);
+            var waiter = try f.h.deliver(&last);
+            defer waiter.deinit();
+            while (!f.h.secrets.has_share(.zero())) try io.sleep(.fromMilliseconds(1), .awake);
+            try testing.expectError(error.Canceled, inclusion.cancel(io));
+            try testing.expectError(error.AcknowledgementCanceled, waiter.wait());
+            try testing.expect(f.h.store.current_info() == null);
+        }
+    }.body);
+}

@@ -769,7 +769,7 @@ Owns `src/glue/dkg`. Reference: `glue/src/dkg` (about 24k Rust lines).
 - [x] reshare: application.rs's prepare and dropped-proposal tests (all 12 ported).
 - [x] reshare actor: `Runner(T).resolve_start(actor, storage, plan, marshal) !Start`, the
   startup preamble (marshal's anchor, state-sync plan, synced floor block), with 3 tests.
-- [ ] reshare actor: inclusion's remaining window tests (gated and stalled ancestry, scan
+- [x] reshare actor: inclusion's remaining window tests (gated and stalled ancestry, scan
   yielding to finalization, closed verification) and `finalization_error_panics`.
 - [x] orchestrator: limits (`max_payload_size`) with `prefixes_simplex`.
 - [x] orchestrator: the actor, with tests of the epoch transition, catch-up hints, and
@@ -821,6 +821,10 @@ Owns `src/glue/dkg`. Reference: `glue/src/dkg` (about 24k Rust lines).
   `issue_5721_regression` and `interrupted_dealing_is_recorded_when_resent`, and 519f7dd4c's
   `SecretStore` recovery contract (root.zig docs). bca770a0c and a9ffc25f3 touch only
   tests/reshare/harness.rs and mod.rs, forwarded to bls-math.
+- 2026-11-19: inclusion's last window tests. The gated, ready-scan, and closed-verification
+  tests catch an ignored stale scan and an early final acknowledgement; closed verification is
+  ported as a cancel during the final block's share write (verification runs inline here).
+  `finalization_error_panics` (an `InvalidLocalState` error) catches a swallowed error.
 
 ## dkg probe/bootstrap (owner: p2p lane)
 
