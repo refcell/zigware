@@ -11,4 +11,5 @@ test {
     std.testing.refAllDecls(@This());
     _ = @import("db_test.zig");
     _ = @import("fuzz_test.zig");
+    _ = @import("policy_test.zig");
 }

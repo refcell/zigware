@@ -118,12 +118,16 @@ which every database here is built on.
 - [x] store batch 1: shared-prefix snapshot rebuild, floor bound (`churn` and
   `randomized_churn` with commonware's `bounded` replay check), collision reads (floors and
   walk reads match; bucket reads are zigware's per-key resolution), `get_many` duplicates.
-  `test_store_variable_length_keys` is not portable: store keys may not own memory.
-- [ ] store: the rest of db.rs's tests (audit 2026-11-19): the policy scenarios
-  (hold edge cases, evicts owned, keep/evict/recover, reads reached candidates, limits, own
-  writes, limits read once, proportional probes once, unreachable own write), the bitmap
-  activity and chunk-prune recovery checks, the start_sync scenarios, and the
-  commit-after-sync and unsynced-floor recovery cases.
+- [x] store batch 2 (`store/policy_test.zig`, commonware's `PolicyStore`): replace, evicts
+  in location order, unreachable own write, proportional probes the snapshot once, limits read
+  once, keep/evict/recover across commit, reopen, and prune, own writes decided like applied
+  ones, reads only reached candidates (both layouts), and the full limits grid against a port
+  of `walk_model`. Commonware's clone counts are not checked: zigware's policies get owned
+  values.
+- [ ] store: the bitmap activity and chunk-prune recovery checks, the start_sync scenarios,
+  and the commit-after-sync and unsynced-floor recovery cases.
+- [ ] store: variable-length keys (owned keys, as `any`'s variable values; fixed keys stay
+  allocation-free), then `test_store_variable_length_keys`.
 - [x] Fuzz targets under storage/fuzz for these databases; benches under `qmdb/benches/`.
 
 ## Public API (on main)
@@ -337,3 +341,4 @@ which every database here is built on.
 - 2026-11-19: keyless batch-read, stale-chain, and floor scenarios; keyless mod.rs done.
 - 2026-11-19: the cold_read, constantinople, and scale CLI harnesses; benches done.
 - 2026-11-19: store floor bound, collision reads, shared prefix, and get_many duplicates.
+- 2026-11-19: store policy scenarios (batch 2) against `walk_model`.
