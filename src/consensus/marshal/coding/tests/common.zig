@@ -236,6 +236,13 @@ pub const RecordingCodingBuffer = struct {
         return .{ item.round, item.block.commitment() };
     }
 
+    /// Whether the recorded send at `index` went to every peer (`Recipients::All`).
+    pub fn sent_to_all(self: RecordingCodingBuffer, index: usize) bool {
+        const state = self.shared.lock();
+        defer self.shared.unlock();
+        return state.sends.items[index].recipients == .all;
+    }
+
     fn subscribe(self: RecordingCodingBuffer, commitment: bool) Allocator.Error!?Receiver {
         const gpa = self.shared.gpa;
         var pair = try oneshot.channel(Block, gpa, self.shared.io);

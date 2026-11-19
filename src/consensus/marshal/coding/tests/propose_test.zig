@@ -343,3 +343,269 @@ test "marshaled propose relay sends staged block" {
         }
     }.body);
 }
+
+const Plan = M.Plan;
+const Handoff = @import("../../../traits.zig").Handoff(common.Commitment);
+
+/// The commitment of `block` coded for the committee.
+fn commitment_of(block: common.CodingB) !common.Commitment {
+    var coded = try common.encode_block(gpa, block, common.committee_config());
+    defer coded.deinit(gpa);
+    return coded.commitment();
+}
+
+/// The commitment of the block verified at `round`, or null.
+fn verified_commitment(marshal: common.Marshal, round: Round) !?common.Commitment {
+    var block = (try marshal.get_verified(round)) orelse return null;
+    defer block.deinit(gpa);
+    return block.commitment();
+}
+
+/// Waits (simulated time) until `done(arg)` holds; the runner timeout is the hang guard.
+fn wait_until(ctx: Ctx, comptime done: anytype, arg: anytype) !void {
+    while (!done(arg)) try ctx.sleep(.fromMilliseconds(1));
+}
+
+fn sent_twice(buffer: common.RecordingCodingBuffer) bool {
+    return buffer.send_count() >= 2;
+}
+
+test "coding prepare relay sends once and propose stores" {
+    try common.run(struct {
+        fn body(ctx: Ctx) anyerror!void {
+            var recorded: Recorded = undefined;
+            try recorded.init(ctx, "prepare-relay");
+            defer recorded.deinit();
+            const marshal = recorded.actor.mailbox;
+            const context = try first_context(recorded.validators.participants[0]);
+            const round = context.round;
+            // Two candidates for the round, each staged by its own wrapper's propose.
+            const abandoned_block = try first_block(context, 100);
+            const replacement_block = try first_block(context, 200);
+            const abandoned_commitment = try commitment_of(abandoned_block);
+            const replacement_commitment = try commitment_of(replacement_block);
+            const abandoned_app = Mock.init(gpa).with_propose_result(abandoned_block);
+            var abandoned = try recorded.wrap(ctx, "abandoned", abandoned_app);
+            defer abandoned.deinit();
+            const replacement_app = Mock.init(gpa).with_propose_result(replacement_block);
+            var replacement = try recorded.wrap(ctx, "replacement", replacement_app);
+            defer replacement.deinit();
+            const staged_a = (try abandoned.propose(ctx.io(), context)) orelse
+                return error.NoProposal;
+            try testing.expect(staged_a.eql(abandoned_commitment));
+            const staged_b = (try replacement.propose(ctx.io(), context)) orelse
+                return error.NoProposal;
+            try testing.expect(staged_b.eql(replacement_commitment));
+            // The early relay sends each held candidate and stores neither.
+            const prepare: Plan = .{ .prepare = .{ .round = round } };
+            try testing.expect(abandoned.broadcast(abandoned_commitment, prepare) == .ok);
+            try testing.expect(replacement.broadcast(replacement_commitment, prepare) == .ok);
+            try wait_until(ctx, sent_twice, recorded.buffer);
+            try testing.expectEqual(null, try verified_commitment(marshal, round));
+            // The lock-in stores the replacement without sending it again, and certification
+            // resolves through the staged durability handshake.
+            const propose: Plan = .{ .propose = .{ .round = round } };
+            try testing.expect(replacement.broadcast(replacement_commitment, propose) == .ok);
+            const certified = try replacement.certify(ctx.io(), round, replacement_commitment);
+            try testing.expectEqual(true, certified);
+            const stored = (try verified_commitment(marshal, round)) orelse
+                return error.ReplacementNotStored;
+            try testing.expect(stored.eql(replacement_commitment));
+            // An abandoned candidate is never stored.
+            const abandoned_digest = abandoned_block.digest();
+            try testing.expect(try marshal.get_block(.{ .digest = abandoned_digest }) == null);
+            // Each candidate is sent once, to everyone.
+            try testing.expectEqual(2, recorded.buffer.send_count());
+            for ([_]common.Commitment{ abandoned_commitment, replacement_commitment }, 0..) |c, i| {
+                const sent_round, const sent_commitment = recorded.buffer.sent(i);
+                try testing.expect(std.meta.eql(sent_round, round));
+                try testing.expect(sent_commitment.eql(c));
+                try testing.expect(recorded.buffer.sent_to_all(i));
+            }
+        }
+    }.body);
+}
+
+test "coding propose relay after claim sends once" {
+    try common.run(struct {
+        fn body(ctx: Ctx) anyerror!void {
+            var recorded: Recorded = undefined;
+            try recorded.init(ctx, "propose-relay-claim");
+            defer recorded.deinit();
+            const marshal = recorded.actor.mailbox;
+            const context = try first_context(recorded.validators.participants[0]);
+            const round = context.round;
+            const block = try first_block(context, 100);
+            const expected = try commitment_of(block);
+            const app = Mock.init(gpa).with_propose_result(block);
+            var wrapper = try recorded.wrap(ctx, "marshaled", app);
+            defer wrapper.deinit();
+            const commitment = (try wrapper.propose(ctx.io(), context)) orelse
+                return error.NoProposal;
+            try testing.expect(commitment.eql(expected));
+            // The early relay sends the candidate's shards. Each lookup goes through the
+            // same marshal mailbox as the relays, so it observes every send they requested.
+            const prepare: Plan = .{ .prepare = .{ .round = round } };
+            try testing.expect(wrapper.broadcast(commitment, prepare) == .ok);
+            try testing.expectEqual(null, try verified_commitment(marshal, round));
+            try testing.expectEqual(1, recorded.buffer.send_count());
+            // Certification claims the candidate and persists it.
+            try testing.expectEqual(true, try wrapper.certify(ctx.io(), round, commitment));
+            // The lock-in finds nothing staged and must not send the candidate again.
+            const propose: Plan = .{ .propose = .{ .round = round } };
+            try testing.expect(wrapper.broadcast(commitment, propose) == .ok);
+            const stored = (try verified_commitment(marshal, round)) orelse
+                return error.CandidateNotStored;
+            try testing.expect(stored.eql(commitment));
+            try testing.expectEqual(1, recorded.buffer.send_count());
+        }
+    }.body);
+}
+
+fn subscribed(buffer: common.RecordingCodingBuffer) bool {
+    return buffer.commitment_subscription_count() > 0;
+}
+
+fn fetched_any(resolver: common.RecordingResolver) bool {
+    return resolver.fetch_count() > 0;
+}
+
+test "coding prepare waits for parent without fetching" {
+    try common.run(struct {
+        fn body(ctx: Ctx) anyerror!void {
+            var recorded: Recorded = undefined;
+            try recorded.init(ctx, "prepare-parent-wait");
+            defer recorded.deinit();
+            const participants = recorded.validators.participants;
+            const resolver = recorded.actor.resolver;
+            var parent = try common.missing_candidate(gpa, participants[1]);
+            const parent_round = parent.context.round;
+            const context: common.CodingCtx = .{
+                .round = common.round_at(0, parent_round.view.get() + 1),
+                .leader = participants[0],
+                .parent = .{ parent_round.view, parent.block.commitment() },
+            };
+            const parent_digest = parent.block.digest();
+            const child = try harness.make_coding_block(gpa, context, parent_digest, .new(2), 7);
+            const child_commitment = try commitment_of(child);
+            const app = Mock.init(gpa).with_handoff(.{ .stage = {} }).with_propose_result(child);
+            var wrapper = try recorded.wrap(ctx, "marshaled", app);
+            defer wrapper.deinit();
+            // The actor issues any peer fetch before it registers the local wait, so a
+            // registered wait shows the prepare's parent lookup was handled.
+            var decision = try wrapper.start_prepare(context);
+            defer decision.deinit();
+            try wait_until(ctx, subscribed, recorded.buffer);
+            // Prepare must not fetch its parent.
+            try testing.expectEqual(0, resolver.fetch_count());
+            // An ordinary propose on the same parent fetches it by round.
+            var proposal = try wrapper.start_propose(context);
+            defer proposal.deinit();
+            try wait_until(ctx, fetched_any, resolver);
+            // Local delivery of the parent completes both requests without another fetch.
+            try testing.expect(try recorded.actor.mailbox.verified(parent_round, parent.block));
+            const handoff = try decision.recv();
+            try testing.expect(std.meta.eql(handoff, Handoff{ .stage = child_commitment }));
+            try testing.expect((try proposal.recv()).eql(child_commitment));
+            // Only the propose may fetch the parent, by round.
+            try testing.expectEqual(1, resolver.fetch_count());
+            const by_round: common.ResolverKey = .{ .notarized = parent_round };
+            try testing.expect(resolver.fetched(by_round, .{ .notarization = parent_round }));
+        }
+    }.body);
+}
+
+/// A handoff on a parent at `height` stored for view `view` answers stage when `built`, and
+/// wait otherwise (the parent can never certify in the request's epoch).
+fn prepare_on_parent(
+    ctx: Ctx,
+    env: *Env,
+    comptime name: []const u8,
+    view: u64,
+    height: u64,
+    built: bool,
+) !void {
+    const genesis = try common.genesis_block(gpa);
+    const parent_round = common.round_at(0, view);
+    const parent_context: common.CodingCtx = .{
+        .round = parent_round,
+        .leader = env.validators.participants[1],
+        .parent = .{ .zero(), try common.genesis_coding_commitment(gpa, &genesis) },
+    };
+    const parent = try common.coded(gpa, parent_context, genesis.digest(), height, view);
+    const parent_digest = parent.digest();
+    const parent_commitment = parent.commitment();
+    try testing.expect(try env.validator.mailbox.verified(parent_round, parent));
+    const context: common.CodingCtx = .{
+        .round = common.round_at(0, view + 1),
+        .leader = env.me(),
+        .parent = .{ .new(view), parent_commitment },
+    };
+    const child = try harness.make_coding_block(gpa, context, parent_digest, .new(2), 7);
+    const expected: Handoff = if (built) .{ .stage = try commitment_of(child) } else .wait;
+    const app = Mock.init(gpa).with_handoff(.{ .stage = {} }).with_propose_result(child);
+    var wrapper = try env.wrap(ctx, name, app);
+    defer wrapper.deinit();
+    const decision = (try wrapper.prepare(ctx.io(), context)) orelse
+        return error.PrepareDecisionMissing;
+    if (!std.meta.eql(decision, expected)) {
+        std.log.err("parent height {d}: unexpected handoff", .{height});
+        return error.UnexpectedHandoff;
+    }
+}
+
+test "coding prepare skips parent outside epoch" {
+    try run_seeded(0, struct {
+        fn body(ctx: Ctx) anyerror!void {
+            var env: Env = undefined;
+            try env.init(ctx);
+            defer env.deinit();
+            const epoch_length = shared.blocks_per_epoch;
+            try prepare_on_parent(ctx, &env, "max", 1, std.math.maxInt(u64), false);
+            try prepare_on_parent(ctx, &env, "later", 3, 3 * epoch_length, false);
+            try prepare_on_parent(ctx, &env, "inside", 5, 1, true);
+        }
+    }.body);
+}
+
+test "coding prepare builds on epoch genesis" {
+    try common.run(struct {
+        fn body(ctx: Ctx) anyerror!void {
+            var env: Env = undefined;
+            try env.init(ctx);
+            defer env.deinit();
+            const genesis = try common.genesis_block(gpa);
+            const epoch_length = utils.NonZero(u64).init(shared.blocks_per_epoch).?;
+            const epocher = types.FixedEpocher.new(epoch_length);
+            // The last block of epoch 0 is the genesis of epoch 1.
+            const boundary_height = epocher.last(.zero()).?;
+            const boundary_round = common.round_at(0, shared.blocks_per_epoch);
+            const boundary_context: common.CodingCtx = .{
+                .round = boundary_round,
+                .leader = env.validators.participants[1],
+                .parent = .{ .zero(), try common.genesis_coding_commitment(gpa, &genesis) },
+            };
+            const boundary =
+                try common.coded(gpa, boundary_context, genesis.digest(), boundary_height.get(), 1);
+            const boundary_digest = boundary.digest();
+            const boundary_commitment = boundary.commitment();
+            try testing.expect(try env.validator.mailbox.verified(boundary_round, boundary));
+            // The first proposal of epoch 1 names the boundary block at view zero.
+            const context: common.CodingCtx = .{
+                .round = common.round_at(1, 1),
+                .leader = env.me(),
+                .parent = .{ .zero(), boundary_commitment },
+            };
+            const child_height = boundary_height.next();
+            const child =
+                try harness.make_coding_block(gpa, context, boundary_digest, child_height, 2);
+            const child_commitment = try commitment_of(child);
+            const app = Mock.init(gpa).with_handoff(.{ .stage = {} }).with_propose_result(child);
+            var wrapper = try env.wrap(ctx, "marshaled", app);
+            defer wrapper.deinit();
+            const decision = (try wrapper.prepare(ctx.io(), context)) orelse
+                return error.PrepareDecisionMissing;
+            try testing.expect(std.meta.eql(decision, Handoff{ .stage = child_commitment }));
+        }
+    }.body);
+}
