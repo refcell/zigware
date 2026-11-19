@@ -489,3 +489,6 @@ resolver; those lanes are running, so do the types first and the actors as they 
   found, finalize withheld after a same-term nullify, missing parent during proposal,
   failed verification and uncertified ancestry, certification precheck failure, and an
   optimistic ancestor missing its nullification (state).
+- 2026-11-19: open item, assigned to broadcast-collector (T-01a1d58d): the threshold schemes
+  ignore `strategy` (`_ = strategy;` in vrf.zig's five verify and assemble paths, and in
+  bls12381 certificate/threshold.zig), so all_online_rayon cannot catch a strategy bug.
