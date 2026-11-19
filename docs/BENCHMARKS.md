@@ -577,6 +577,68 @@ by hand with `block_on`. The same loop with the mailbox swapped for a bare `fute
 `futexWake` handoff took 223 to 258 µs, against 247 to 294 µs with the mailbox in the same
 alternating runs, so about 90% of the time is the runtime's scheduler, not the mailbox.
 
+**Re-run after 1fe045bf (runtime's scheduler bookkeeping cut), load 35 to 55.** The other
+eight cases stayed within 0.51× to 0.98×.
+
+- **`recv_waiting`: 81.6 µs against 158 µs, 1.94× (from 2.01×).** The rest of each cycle is
+  spread over the task body and fiber switches (about 120 cycles), the audit event (about
+  55), and the shuffle (about 20), which the replay hashes depend on. It is the deterministic
+  runtime's per-message scheduler cycle, not the mailbox, so the item is closed at 1.94×.
+- **`concurrent_enqueue`: load-sensitive, no regression.** Four producer threads on a loaded
+  machine gave commonware medians of 5.6 to 14.8 ms and zigware 12.6 to 14.7 ms in this
+  re-run. Alternating the d2b6c4f0 bench binary with this build at load 43 gave the same
+  fastest sample (1.33 ms and 1.36 ms) and medians of 1.7 to 6.2 ms on both, so the
+  0.45× above stands as the quieter-machine number.
+
+## Bulletproofs: inner product argument (2026-11-19, actor-stream lane)
+
+All twenty cases of commonware's `bulletproofs::ipa` bench, with bench-compare.sh's settings.
+The two sides alternated per case over three runs, and each number is the best of the three
+medians. Before is main at 91c3b6f4 (load 42 to 58), after is b442db13 on 3d7a069c (load 59
+to 108). Every row is now at most 1.14×.
+
+| bench | parameters | commonware | zigware before | zigware after | after / commonware |
+|---|---|---|---|---|---|
+| `prove` | `n=8 conc=1` | 5.53 ms | 5.37 ms | 4.53 ms | 0.82× |
+| `prove` | `n=8 conc=8` | 6.11 ms | 5.22 ms | 4.37 ms | 0.72× |
+| `prove` | `n=16 conc=1` | 11.2 ms | 10.6 ms | 8.63 ms | 0.77× |
+| `prove` | `n=16 conc=8` | 10.2 ms | 10.1 ms | 8.51 ms | 0.83× |
+| `prove` | `n=32 conc=1` | 21.3 ms | 20.0 ms | 17.7 ms | 0.83× |
+| `prove` | `n=32 conc=8` | 20.9 ms | 17.9 ms | 13.6 ms | 0.65× |
+| `prove` | `n=64 conc=1` | 34.7 ms | 35.6 ms | 30.9 ms | 0.89× |
+| `prove` | `n=64 conc=8` | 21.5 ms | 31.8 ms | 22.3 ms | 1.04× |
+| `prove` | `n=128 conc=1` | 61.3 ms | 66.0 ms | 56.8 ms | 0.93× |
+| `prove` | `n=128 conc=8` | 35.5 ms | 40.5 ms | 35.7 ms | 1.00× |
+| `verify` | `n=8 conc=1` | 799 µs | 807 µs | 814 µs | 1.02× |
+| `verify` | `n=8 conc=8` | 911 µs | 1.05 ms | 409 µs | 0.45× |
+| `verify` | `n=16 conc=1` | 1.29 ms | 1.52 ms | 1.24 ms | 0.96× |
+| `verify` | `n=16 conc=8` | 1.43 ms | 1.36 ms | 619 µs | 0.43× |
+| `verify` | `n=32 conc=1` | 2.35 ms | 2.22 ms | 2.45 ms | 1.04× |
+| `verify` | `n=32 conc=8` | 1.77 ms | 2.37 ms | 1.15 ms | 0.65× |
+| `verify` | `n=64 conc=1` | 3.36 ms | 3.94 ms | 3.81 ms | 1.14× |
+| `verify` | `n=64 conc=8` | 2.89 ms | 4.07 ms | 1.57 ms | 0.54× |
+| `verify` | `n=128 conc=1` | 5.90 ms | 6.87 ms | 6.26 ms | 1.06× |
+| `verify` | `n=128 conc=8` | 4.37 ms | 6.87 ms | 1.85 ms | 0.42× |
+
+The commonware column and the last column are from the after run. Against the before run's
+own commonware medians, the rows over 1.3× were `verify` n=64 (1.32× and 1.43×) and `verify`
+n=128 conc=8 (2.28×, against 3.02 ms). Proofs and transcripts are unchanged: the ipa tests and conformance
+vectors pass, and every change below computes the same group elements.
+
+- **`verify` at conc=8: `Setup.eval` ignored the strategy.** commonware's `eval` takes one
+  for the final multi-scalar multiplication, and zigware's always summed sequentially, so
+  its conc=8 rows timed the conc=1 work. `eval` now takes the strategy, through
+  `Synthetic.eval_strategy`.
+- **Small MSMs: Straus instead of narrow-window Pippenger.** 2 to 32 points (16 in G2) used
+  Pippenger with 2- and 3-bit windows, about 1.7 times the point additions of per-point
+  tables. They now share one doubling chain over per-point tables of P to 8P, as blst does
+  below 32 points. zigware's own `bls12381::msm/group=g1 n=10 conc=1` went from 652 to
+  387 µs and `group=g2 n=10` from 1.60 ms to 834 µs, with `group=g1 n=50` (still Pippenger)
+  at 1.92 and 1.71 ms as the control. This speeds up the prove rows' small round MSMs.
+- Landed beside these on main, from another lane: 52d0b401 merges synthetic free terms in
+  one pass, and 3d7a069c sums a sequential MSM of more than 256 points in one Pippenger,
+  which covers `verify` n=128's 272-point MSM at conc=1.
+
 ## Appendix: bench coverage
 
 Every Criterion bench in commonware a9ffc25f3 (`benches/` dirs with `criterion_main!`), listed
