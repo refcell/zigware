@@ -644,3 +644,81 @@ test "stateful processing: a competing finalization rejects an executing prepare
 test "stateful processing: a competing finalization rejects an executing proposal" {
     try competing_finalization(.propose);
 }
+
+/// Sends a database subscription without waiting, and returns its receiver.
+fn subscribe_async(fixture: *Fixture) !oneshot.Receiver(fixture_mod.Mailbox.Databases) {
+    const pair = try oneshot.channel(fixture_mod.Mailbox.Databases, gpa, std.testing.io);
+    try fixture.send(.{ .subscribe_databases = pair.sender });
+    return pair.receiver;
+}
+
+// commonware `deferred_messages_keep_mailbox_order`: messages deferred behind a proposal run
+// in mailbox order once it ends, while a verification queued after them starts during the
+// proposal. Adapted: applied finalizations are counted by the finalized hook, and the
+// proposal is cancelled by dropping its receiver.
+test "stateful processing: deferred messages keep mailbox order" {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer check(&fixture);
+    const genesis = TestBlock.genesis();
+    const first, const second = try uncached_pair(&fixture);
+    const other = try uncached_child(&fixture, &genesis, 3);
+    var propose_probe: Probe = .{ .target = genesis.digest() };
+    defer propose_probe.deinit();
+    var build = try Held.add(&propose_probe);
+    defer build.deinit();
+    fixture.processing.processor.app.propose_probe = &propose_probe;
+    // Reconstructing the second finalized block is held.
+    var apply_probe: Probe = .{ .target = second.digest() };
+    defer apply_probe.deinit();
+    var apply = try Held.add(&apply_probe);
+    defer apply.deinit();
+    fixture.processing.processor.app.probe = &apply_probe;
+    var hooks: Probe = .{ .target = null };
+    defer hooks.deinit();
+    fixture.processing.processor.app.finalized_probe = &hooks;
+    var verify_probe: Probe = .{ .target = other.digest() };
+    defer verify_probe.deinit();
+    var verify_gate = try Held.add(&verify_probe);
+    defer verify_gate.deinit();
+    fixture.processing.verifications.verifier.app.probe = &verify_probe;
+
+    var proposal: ?oneshot.Receiver(fixture_mod.Mailbox.Digested) =
+        try fixture.propose_async(&.{genesis}, 4);
+    defer if (proposal) |*receiver| receiver.deinit();
+    try build.await_started();
+    // Finalizations and subscriptions queue behind the proposal, then a verification.
+    var first_waiter = try fixture.finalize(first);
+    defer first_waiter.deinit();
+    var first_databases = try subscribe_async(&fixture);
+    defer first_databases.deinit();
+    var second_waiter = try fixture.finalize(second);
+    defer second_waiter.deinit();
+    var second_databases = try subscribe_async(&fixture);
+    defer second_databases.deinit();
+    var verdict = try fixture.verify(&.{ other, genesis });
+    defer verdict.deinit();
+
+    // The verification overtakes every deferred message.
+    try verify_gate.await_started();
+    try verify_gate.open();
+    try testing.expect(try await_verdict(&verdict));
+    try testing.expect(!first_databases.is_ready());
+    try testing.expect(!second_databases.is_ready());
+    try testing.expect(second_waiter.poll() == null);
+    try testing.expectEqual(0, hooks.calls);
+
+    // Cancelling the proposal runs the deferred messages in order; reconstructing the second
+    // finalized block holds the loop between the two subscriptions.
+    proposal.?.deinit();
+    proposal = null;
+    try apply.await_started();
+    try testing.expectEqual(1, hooks.calls);
+    try testing.expect(first_databases.is_ready());
+    try testing.expect(!second_databases.is_ready());
+    try apply.open();
+    _ = try second_databases.recv();
+    try testing.expectEqual(2, hooks.calls);
+    try await_acknowledged(&first_waiter);
+    try await_acknowledged(&second_waiter);
+}
