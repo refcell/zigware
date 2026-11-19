@@ -282,9 +282,9 @@ and transport connect timeouts, see Decisions), so its dialer timeout test is to
 | `utils/mocks/mod.rs` | 2 | 2 | 0 | 0 |
 
 Open:
-- [ ] `authenticated/data.rs` `test_decode_does_not_allocate`: decode a Data frame with a
+- [x] `authenticated/data.rs` `test_decode_does_not_allocate`: decode a Data frame with a
   failing/counting allocator and assert message is a slice into the input buffer;
-  src/p2p/authenticated/data.zig
+  src/p2p/authenticated/data.zig. Ported in data_alloc_test.zig (73c919e).
 - [x] `authenticated/discovery/mod.rs` `test_tokio_connectivity`: run connectivity (10 peers,
   Mode.one) on runtime.production instead of the deterministic runner; no p2p test uses the
   production runner. Goes in network_test.zig
@@ -559,9 +559,10 @@ Open:
   overwriting a dialable peer to a DNS ingress removes it from dialable() and dial() returns null;
   discovery has "dial rejects an ingress disallowed after an update", lookup does not; goes in
   lookup/directory_test.zig
-- [ ] `simulated/mod.rs` `register_peer_set`: manager.peer_set(0) is null before any track;
+- [x] `simulated/mod.rs` `register_peer_set`: manager.peer_set(0) is null before any track;
   track(0xFF, {pk1,pk2}) then peer_set(0xFF) == primary set;
-  src/p2p/simulated/network_peers_test.zig (only partly covered by 'peer set window management')
+  src/p2p/simulated/network_peers_test.zig (only partly covered by 'peer set window management').
+  Ported in network_register_test.zig (73c919e).
 
 Not portable:
 - `sizing.rs` `test_max_message_size_overflow`: should_panic (payload must fit in u32)

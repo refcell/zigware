@@ -344,7 +344,8 @@ marshal's actors (consensus-marshal) for the actor; until then it ports what is 
 Every glue module outside dkg. Counts are commonware's `#[test]` functions per file, rstest
 cases and macro expansions (compact.rs's `adapter_tests!` twice, conformance macros) counted
 one each, matched by reading each test to a zigware counterpart. Owner is who ports the open
-ones: d = deployer (thread T-01a1d5b9-c237), u = utils.
+ones: d = deployer (thread T-01a1d5b9-c237), u = utils, j = storage-journal
+(thread T-01a1d58d-a981).
 
 | commonware file | tests | ported | open | not portable | owner |
 | --- | --- | --- | --- | --- | --- |
@@ -370,8 +371,8 @@ ones: d = deployer (thread T-01a1d5b9-c237), u = utils.
 | stateful/actor/core/syncing.rs | 16 | 5 | 11 | 0 | d |
 | stateful/actor/core/processing.rs | 86 | 0 | 86 | 0 | u |
 | stateful/actor/processor/mod.rs | 44 | 22 | 22 | 0 | u |
-| stateful/tests/mod.rs, floor.rs | 28 | 0 | 28 | 0 | u |
-| **total** | **469** | **279** | **168** | **22** | |
+| stateful/tests/mod.rs, floor.rs | 28 | 11 | 17 | 0 | j |
+| **total** | **469** | **290** | **157** | **22** | |
 
 - Not portable (db/mod.rs, 22): zigware's `Barrier` is synchronous (databases persist inside
   `finalize`), so `barrier_waits_for_every_handle` (8), `barrier_cancellation_releases_handles`
@@ -418,7 +419,14 @@ ones: d = deployer (thread T-01a1d5b9-c237), u = utils.
     (6), the in-flight winner and late losing fork, forking before apply, ancestry across
     recovery, the dropped-flight and woken-request hand-offs, overlapping rebuilds, and the
     deferred-prune ordering.
-  - tests/: the app scenarios on marshal's harness.
+- Open, j (storage-journal): tests/ (src/glue/stateful/tests/). `SingleDbEngine` runs Simplex,
+  the marshal node, and `Stateful` over one fixed QMDB per validator. Ported (single-db
+  engine; commonware also runs each on `MultiDbEngine`, not yet ported): finalize,
+  determinism, crash/restart, pruning (marshal and QMDB), delayed start, lossy, random, many,
+  and rapid crashes, full outage, and partition. One 20-block plan always runs; the rest need
+  -Dslow-tests. `..._with_storage_faults` is written but skipped: commonware runs it with
+  `catch_panics`, and zigware's Simplex voter panics on a failed sync. Open: the state sync
+  scenarios (probe, qmdb resolver), multi_db_app, floor.rs, and mod.rs's targeted qmdb tests.
 
 ### Backlog
 - [x] db: `Shared`, `Reader`, `Barrier`, single and tuple sets, with mod.rs's set tests.

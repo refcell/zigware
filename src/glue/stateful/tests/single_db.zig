@@ -374,8 +374,8 @@ pub const NodeState = struct {
     /// The oldest operation location the database still retains.
     pub fn oldest_retained(self: *const NodeState) !u64 {
         const mailbox = self.inner.stateful orelse return error.NotStarted;
-        var databases = try mailbox.subscribe_databases();
-        defer databases.deinit();
+        // Borrowed: the set stays with the actor.
+        const databases = try mailbox.subscribe_databases();
         var guard = try databases.read();
         defer guard.deinit();
         return guard.get().inner.bounds().start;
