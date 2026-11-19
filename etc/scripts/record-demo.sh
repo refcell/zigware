@@ -475,13 +475,13 @@ fi
 font=16 fps=30
 [ "$name" = log ] && font=12 fps=6
 [ "$name" = bridge ] && font=14 fps=8
-[ "$name" = dkg ] && font=12 fps=8
+[ "$name" = dkg ] && font=12 fps=6
 [ "$name" = interop ] && font=14 fps=12
 [ "$name" = interop-log ] && font=12 fps=8
 [ "$name" = interop-dkg ] && font=12 fps=8
-# x264's default quality (crf 23) puts dkg's five busy panes near 4 MB; 28 keeps it under 3.
+# x264's default quality (crf 23) puts dkg's five busy panes near 4 MB; 30 keeps it under 3.
 crf=23
-[ "$name" = dkg ] && crf=28
+[ "$name" = dkg ] && crf=30
 [ "$name" = interop-dkg ] && crf=28
 agg --theme monokai --font-size "$font" --idle-time-limit 3 --last-frame-duration 6 \
   --fps-cap "$fps" "$out.cast" "$out.gif"
