@@ -769,7 +769,13 @@ shared `tests/mocks.zig`, which takes additive edits only (agreed with the glue 
 - [x] mod.rs's scheduled-restart, random-crash (16 seeds), and laggard plans, behind
   -Dslow-tests. The laggard's restart schedule runs 4.5 s later than commonware's: the three
   survivors complete near 6.9 s here, after commonware's 4.5 s crash.
-- [ ] tests/reshare harness, properties, and mod.rs's ceremony tests (needs the orchestrator).
+- [x] tests/reshare/properties.rs, first part: `CommitteeSchedule`, `Registration`,
+  `AllActiveProcessedHeight`, `SignerRegistered`, `BoundaryEpochInfos`, `BoundaryOutputMode`,
+  and `AllNodesRecovered`, generic over a validator-state contract (`boundary(height)` stands in
+  for `marshal.get_block` plus `payload()`).
+- [ ] the rest of properties.rs (`EpochInfoContinuity`, `FailedCeremonyCarryOver`,
+  `SchemesRegistered`, the state-sync properties), then the reshare harness and mod.rs's 33
+  ceremony tests (on the orchestrator and `bootstrap.Node`).
 - [x] lookup's peer-activation test: network.rs's
   `lookup_secondary_dials_primary_and_receives_response` in `network_test.zig` (consensus-marshal
   lane, 2026-11-19); it catches the addressable manager dropping the secondary role.
@@ -791,3 +797,5 @@ shared `tests/mocks.zig`, which takes additive edits only (agreed with the glue 
   receiver test finds 9 engine tasks still running.
 - 2026-11-19: the crash plans; a crash that closed the engine's completion before the node
   task saw its cancelation made run_node panic, until it checked for cancelation first.
+- 2026-11-19: the first reshare properties; dropping the unexpected-success check fails their
+  test.
