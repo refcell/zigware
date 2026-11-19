@@ -226,3 +226,214 @@ handshake), then certificate, secp256r1, the rest, zk last. banderwagon moved to
   8 s instead of about 79 s in ReleaseSafe. The certificate Attestation and ed25519
   Certificate conformance hashes (about 40 s in ReleaseSafe) run only with `-Dslow-tests`
   (`conformance.skip_unless_slow`, nightly on every platform); `Signers` stays per push.
+
+### Test audit: crypto (2026-11-19, commonware 43b357a41, p2p lane)
+
+Every `#[test]`/`#[rstest]` fn in commonware `cryptography/src (outside bls12381 and reed_solomon)`,
+with each `#[case]` and each test-generating macro expansion counted separately, matched to a
+zigware test by name or by reading both bodies (a zigware test may cover several). 435 tests: 394
+ported, 27 open, 14 not portable.
+
+| commonware file | tests | ported | open | not portable |
+|---|---|---|---|---|
+| `banderwagon.rs` | 27 | 27 | 0 | 0 |
+| `certificate.rs` | 29 | 20 | 9 | 0 |
+| `chacha20_poly1305.rs` | 7 | 7 | 0 | 0 |
+| `fuzz.rs` | 5 | 5 | 0 | 0 |
+| `lib.rs` | 42 | 29 | 12 | 1 |
+| `secret.rs` | 7 | 6 | 0 | 1 |
+| `sha512.rs` | 8 | 5 | 1 | 2 |
+| `transcript.rs` | 24 | 22 | 1 | 1 |
+| `blake3/mod.rs` | 7 | 6 | 0 | 1 |
+| `bloomfilter/mod.rs` | 14 | 14 | 0 | 0 |
+| `certificate/mocks.rs` | 20 | 16 | 0 | 4 |
+| `crc32/mod.rs` | 13 | 13 | 0 | 0 |
+| `ed25519/scheme.rs` | 22 | 19 | 1 | 2 |
+| `ed25519/certificate/mod.rs` | 26 | 25 | 0 | 1 |
+| `ed25519/core/batch.rs` | 3 | 2 | 1 | 0 |
+| `ed25519/core/verification_key.rs` | 1 | 1 | 0 | 0 |
+| `handshake/sake/protocol.rs` | 7 | 7 | 0 | 0 |
+| `keccak256/mod.rs` | 4 | 4 | 0 | 0 |
+| `lthash/mod.rs` | 11 | 11 | 0 | 0 |
+| `secp256r1/common.rs` | 1 | 1 | 0 | 0 |
+| `secp256r1/recoverable.rs` | 50 | 50 | 0 | 0 |
+| `secp256r1/standard.rs` | 47 | 47 | 0 | 0 |
+| `secp256r1/certificate/mod.rs` | 27 | 26 | 1 | 0 |
+| `sha256/mod.rs` | 10 | 9 | 1 | 0 |
+| `sha512/padding.rs` | 1 | 0 | 0 | 1 |
+| `zk/circuit.rs` | 6 | 6 | 0 | 0 |
+| `zk/pedersen_to_plain.rs` | 3 | 3 | 0 | 0 |
+| `zk/bulletproofs/circuit.rs` | 10 | 10 | 0 | 0 |
+| `zk/bulletproofs/ipa.rs` | 3 | 3 | 0 | 0 |
+
+Open:
+- [ ] `certificate.rs` `test_threshold_recovers_exact_certificate_with_verified_attestations`:
+  Threshold (MinPk and MinSig) optimistic_assemble with 1 prior verified + quorum-1 pending returns
+  a certificate equal to a direct assemble, makes zero attestation verifications (Recording
+  wrapper), verifies under SUBJECT but not OTHER_SUBJECT, and with an extra unused bad vote beyond
+  quorum still returns the exact same certificate (lowest-quorum recovery). Zig "threshold
+  certificate: optimistic assembly" only checks pending-only success and a 1-invalid fallback
+  (MinSig only). Add to src/cryptography/bls12381/certificate/threshold_tests.zig (needs a
+  call-recording scheme wrapper)
+- [ ] `certificate.rs` `test_multisig_optimistic_assemble_uses_one_certificate_check`: Multisig
+  (MinPk and MinSig, PoP-checked keys) optimistic_assemble with 1 prior + pending quorum certifies
+  with exactly one verify_certificate call and zero attestation verifications, and the certificate
+  rejects OTHER_SUBJECT. Zig "multisig: optimistic assembly" has no prior inputs, no call counting,
+  MinSig only. Add to src/cryptography/bls12381/certificate/multisig_tests.zig with a recording
+  wrapper
+- [ ] `certificate.rs` `test_rejected_certificate_verifies_pending_halves_directly`: Generic
+  optimistic_assemble over threshold MinPk for n in {1,5,7} with a quorum of OTHER_SUBJECT votes:
+  verified empty, invalid = all pending signers, and attestation verification calls are exactly the
+  two halves (or one batch when quorum is 1). Zig "certificate generic optimistic assemble falls
+  back to verifying halves" (ed25519, n=7, 2 bad) checks invalid/verified but not the all-invalid
+  case, the n=1 path, or the half-split call pattern. Add to src/cryptography/certificate_test.zig
+  or src/cryptography/bls12381/certificate/threshold_tests.zig with a recording wrapper
+- [ ] `certificate.rs` `test_malformed_assembly_falls_back_to_pending_halves`: Generic
+  optimistic_assemble over threshold MinPk where pending[0] has an undecodable signature (assembly
+  fails with MalformedSignature): for count quorum and n, verified = count-1, invalid = [0], calls =
+  halves, and with count>quorum the survivors assemble and verify. No Zig test feeds a malformed
+  signature to optimistic_assemble. Add to src/cryptography/bls12381/certificate/threshold_tests.zig
+  (0xff Deferred bytes as in the assemble-rejects test)
+- [ ] `certificate.rs` `test_optimistic_assemble_retains_verified_inputs`: Generic
+  optimistic_assemble (threshold MinPk) with 2 prior verified + pending [accepted, rejected]:
+  verified == [accepted] only (prior not echoed), invalid == [rejected], calls
+  [[accepted],[rejected]]; then a verified replacement plus prior assembles a valid certificate. Zig
+  secp256r1 "optimistic assemble verifies pending once" covers a similar flow only for secp256r1 own
+  override, not the generic path or call pattern. Add to
+  src/cryptography/bls12381/certificate/threshold_tests.zig or src/cryptography/certificate_test.zig
+- [ ] `certificate.rs` `test_optimistic_assemble_with_verified_votes`: Generic optimistic_assemble
+  (threshold MinPk) with pending_len 0/1/2 over a verified prior: certifies with exactly one
+  assemble, one verify_certificate only when pending is non-empty (zero for verified-only), and zero
+  attestation verifications. Zig ed25519 "optimistic assemble reuses verified attestations" and
+  secp256r1 "verifies pending once" test the analogous property for their own schemes only. Add to
+  src/cryptography/bls12381/certificate/threshold_tests.zig with a recording wrapper
+- [ ] `certificate.rs` `test_optimistic_assemble_retries_with_replacements`: Threshold MinPk, n=10,
+  failures 1 and 2: a failed quorum keeps local and valid peer votes, a second round with a new
+  faulty signer mixed with honest replacements reports exactly that signer with one assemble, one
+  certificate check, and per-signer attestation calls, and a final honest replacement certifies (and
+  rejects OTHER_SUBJECT). No Zig counterpart. Add to
+  src/cryptography/bls12381/certificate/threshold_tests.zig with a recording wrapper
+- [ ] `certificate.rs` `test_optimistic_assemble_below_quorum`: Generic optimistic_assemble
+  (threshold MinPk) with 2 valid pending below quorum: verified == pending, invalid empty, and
+  attestation calls are the two halves. Zig "certificate optimistic assemble requires a quorum"
+  checks the verified/invalid outcome for ed25519 own optimistic_assemble but not the generic path
+  nor the half-split call pattern. Add to src/cryptography/bls12381/certificate/threshold_tests.zig
+  or src/cryptography/certificate_test.zig
+- [ ] `certificate.rs` `test_optimistic_assemble_unknown_pending_signer`: Generic
+  optimistic_assemble (threshold MinPk) with pending[0].signer = 999 (assembly fails UnknownSigner):
+  verified quorum-1, invalid [999], attestation calls [[999,1],[2,3]]. No Zig counterpart. Add to
+  src/cryptography/bls12381/certificate/threshold_tests.zig or src/cryptography/certificate_test.zig
+- [ ] `lib.rs` `test_bls12381_validate`: Only a fixed-vector decode/encode/eql round trip exists
+  (bls12381/scheme_tests.zig "bls12381 scheme: codec public key"). Missing: random key decoded from
+  its bytes is eql with order == .eq, and a second random key differs. Add to
+  src/cryptography/bls12381/scheme_tests.zig (bls-math lane)
+- [ ] `lib.rs` `test_bls12381_validate_invalid_public_key`: No test asserts that decoding 1024 zero
+  bytes as bls12381 scheme.PublicKey fails; the decode fuzz (fuzz_tests.zig "bls12381 fuzz: decode",
+  length 1024 included) only checks the result agrees with MinPk.Public decode. Add an expectError
+  to src/cryptography/bls12381/scheme_tests.zig
+- [ ] `lib.rs` `test_bls12381_sign_and_verify_wrong_message`: No single-signature PublicKey.verify
+  with a wrong message at the scheme level; only verify_batch with a changed message ("bls12381
+  scheme: batch verify invalid message") and the primitive-level noble tamper checks. Add
+  !verify(ns, "wrong_message", sig) to src/cryptography/bls12381/scheme_tests.zig
+- [ ] `lib.rs` `test_bls12381_empty_namespace`: No deterministic test signs and verifies with an
+  empty namespace through scheme.PublicKey.verify; the only "" namespace use is the batch in
+  "bls12381 scheme: projected batch indexes zero-sized items" (batch path, slow-only) and fuzz-drawn
+  namespaces. Add to src/cryptography/bls12381/scheme_tests.zig
+- [ ] `lib.rs` `test_secp256r1_standard_validate`: secp256r1/tests.zig "secp256r1 codec round trips"
+  checks decode(encode(pk)).eql(pk) for a fixed key, but nothing checks order == .eq for the decoded
+  key or that a second random key differs. Add to src/cryptography/secp256r1/tests.zig (inline for
+  schemes covers both)
+- [ ] `lib.rs` `test_secp256r1_standard_public_key_order`: No test checks that PublicKey.order/eql
+  (which compare decoded points via inner.order) agree with byte-wise ordering of the 33-byte
+  encodings over 16 random keys and their decoded copies. Add to
+  src/cryptography/secp256r1/tests.zig
+- [ ] `lib.rs` `test_secp256r1_standard_sign_and_verify_wrong_message`: No namespaced verify with a
+  wrong message (scheme sign checks only a wrong namespace; vectors use verify_raw). Add !verify(ns,
+  "wrong_message", sig) to src/cryptography/secp256r1/tests.zig
+- [ ] `lib.rs` `test_secp256r1_standard_invalid_signature_publickey_pair`: No test verifies a
+  signature under a different key's public key and expects false. Add to
+  src/cryptography/secp256r1/tests.zig (from_seed(0) signs, from_seed(1).public_key() rejects)
+- [ ] `lib.rs` `test_secp256r1_recoverable_validate`: Same gap as the standard scheme: no order ==
+  .eq for decoded key and no distinct-key check. Add to src/cryptography/secp256r1/tests.zig
+- [ ] `lib.rs` `test_secp256r1_recoverable_public_key_order`: Same gap as the standard scheme:
+  order/eql vs byte order of encodings untested. Add to src/cryptography/secp256r1/tests.zig
+- [ ] `lib.rs` `test_secp256r1_recoverable_sign_and_verify_wrong_message`: No namespaced verify with
+  a wrong message for the recoverable scheme either. Add to src/cryptography/secp256r1/tests.zig
+- [ ] `lib.rs` `test_secp256r1_recoverable_invalid_signature_publickey_pair`: No test that another
+  key's public key rejects the signature (recover_signer checks a flipped signature, not a wrong
+  key). Add to src/cryptography/secp256r1/tests.zig
+- [ ] `sha512.rs` `test_hash_many_overlapping_messages`: No test hashes overlapping/aliased slices
+  of one buffer through Sha512.hash_many (20 messages backing[lane..lane*13+100], and 9 aliases of
+  the whole buffer) on sequential and a parallel strategy. Add to src/cryptography/sha512.zig
+- [ ] `transcript.rs` `test_shuffle_label_and_history_matter`: Label part is checked (t shuffle A vs
+  B), but history is not isolated: Zig compares with_data/"shuffle" against t/"A", which differ in
+  both label and history. Add same-label different-history check (v0 test shuffle A vs v0 test +
+  commit DATA shuffle A) to src/cryptography/transcript_test.zig "transcript shuffle and sample"
+- [ ] `ed25519/scheme.rs` `projected_batch_borrows_records`: src/cryptography/ed25519/tests.zig
+  "ed25519 projected batch over records, empty, and noncanonical s" ports the records,
+  record-pointer identity, per-record alteration, noncanonical s and empty cases but runs only
+  parallel.sequential; missing: run each verdict under parallel.mocks.explore (serial, parallel,
+  seeded shapes) as commonware does, in src/cryptography/ed25519/tests.zig
+- [ ] `ed25519/core/batch.rs` `test_verify_rejects_each_altered_item_in_every_shape`:
+  src/cryptography/ed25519/tests.zig "ed25519 batch rejects each altered item in every shape" ports
+  the 1..3 x 1..3 loops and per-item alteration but verifies only under parallel.sequential;
+  missing: run Fixture.verify through parallel.mocks.explore so serial, parallel and seeded split
+  shapes are each checked, in src/cryptography/ed25519/tests.zig
+- [ ] `secp256r1/certificate/mod.rs` `test_scheme_clone_and_verifier`: verifier.sign returning null
+  is asserted in "secp256r1 certificate sign, verify, and filter attestations", but no test clones a
+  secp256r1 signer Scheme (Scheme.clone exists in secp256r1/certificate.zig) and asserts the clone
+  still signs; add to src/cryptography/secp256r1/certificate_test.zig
+- [ ] `sha256/mod.rs` `test_hash_many_aliased_unaligned_inputs_match_individual_hashes`: No test
+  passes overlapping, unaligned slices of one buffer (backing[lane..lane+129], counts 1..16) or 16
+  aliases of one slice through Sha256.hash_many on sequential and parallel strategies. Add to
+  src/cryptography/sha256.zig
+
+Not portable:
+- `lib.rs` `test_hash_batches_shares_whole_units`: Tests the lanes parameter and caller-supplied
+  batch closure of Rust hash_batches; zigware's hasher.hash_batches is fixed at one lane with no
+  closure (docs/lanes/crypto.md Log: hash_many is commonware's one-lane hash_batches over
+  run_batches), so whole-unit share cutting for lanes 2/8/16 has no counterpart; batch splitting
+  itself is tested in src/parallel/tests.zig "run_batches supplies ordered balanced ranges"
+- `secret.rs` `test_debug_redacted`: Rust Debug impl; zigware Secret has only the Display-equivalent
+  format ({f}) and a debug_text constant (secret.zig "secret is redacted" asserts the constant,
+  which is tautological), there is no separate Debug formatter to exercise
+- `sha512.rs` `test_avx512_detection`: Checks runtime AVX-512F detection for the x86_64 multi-lane
+  kernel; zigware SHA-512 is std.crypto.hash.sha2.Sha512 with no arch kernels or feature detection
+  (docs/lanes/crypto.md: hashes on std.crypto)
+- `sha512.rs` `test_sha3_detection`: Checks aarch64 SHA3 feature detection for the paired kernel;
+  zigware has no arch-specific SHA-512 backend (std.crypto, docs/lanes/crypto.md)
+- `transcript.rs` `test_append_overflow_does_not_hash`: Relies on catch_unwind of the overflow
+  panic; zigware's Transcript.append @panics on u64 overflow (checked before hashing) and panics are
+  not testable in-process
+- `blake3/mod.rs` `test_hash_splits_long_messages`: Counts jobs a Rayon worker runs when hash_across
+  splits a message of MIN_SPLIT_LEN or more into subtrees; zigware Blake3.hash_across never splits
+  (docs/lanes/crypto.md Log: Blake3 parallel subtree hashing needs chaining values
+  std.crypto.hash.Blake3 does not expose)
+- `certificate/mocks.rs` `signature_overflow_panics`: Rust #[should_panic]; zigware mocks.zig panics
+  at the same point (Shared.next @panic(what ++ " overflow"), what="signature") and Zig tests cannot
+  catch a panic in-process; recorded in the mocks.zig and mocks_test.zig module docs
+- `certificate/mocks.rs` `certificate_overflow_panics`: Rust #[should_panic]; zigware mocks.zig
+  panics at the same point (Shared.next @panic(what ++ " overflow"), what="certificate") and Zig
+  tests cannot catch a panic in-process; recorded in the mocks.zig and mocks_test.zig module docs
+- `certificate/mocks.rs` `strict_invalid_requests_panic`: Rust #[should_panic]; zigware mocks.zig
+  panics at the same point (invalid() @panic("invalid mock certificate request: " ++ reason)) and
+  Zig tests cannot catch a panic in-process; recorded in the mocks.zig and mocks_test.zig module
+  docs
+- `certificate/mocks.rs` `strict_invalid_assembly_requests_panic`: Rust #[should_panic]; zigware
+  mocks.zig panics at the same point (assembly_error() std.debug.panic("invalid mock certificate
+  request: {s}")) and Zig tests cannot catch a panic in-process; recorded in the mocks.zig and
+  mocks_test.zig module docs
+- `ed25519/scheme.rs` `test_from_signing_key`: Tests Rust From<ed_core::SigningKey> for PrivateKey;
+  zigware PrivateKey has no SigningKey conversion (only random/from_seed/from_bytes), so there is no
+  API to test
+- `ed25519/scheme.rs` `test_from_private_key_to_public_key`: Tests Rust From<PrivateKey> for
+  PublicKey agreeing with public_key(); zigware has only PrivateKey.public_key() and no From
+  conversion trait
+- `ed25519/certificate/mod.rs` `test_certificate_rejects_malformed_signature`: Builds a malformed
+  Lazy<Signature> from 3 bytes; zigware Deferred(T) keeps the fixed 64-byte encoding inline and
+  every 64 bytes decode as an ed25519 signature, so no malformed ed25519 attestation/certificate
+  exists (docs/lanes/crypto.md: ed25519 malformed-Lazy cases have no counterpart; secp256r1 covers
+  malformed signatures)
+- `sha512/padding.rs` `test_blocks_pad_messages`: Tests the block()/block_count() padding helper of
+  commonware's multi-message SHA-512 kernels; zigware has no such module and pads inside
+  std.crypto.hash.sha2.Sha512 (docs/lanes/crypto.md: hashes on std.crypto)

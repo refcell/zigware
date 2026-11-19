@@ -145,3 +145,169 @@ Not portable:
 - `reed_solomon.rs` `test_chunk_encode_iobufs_matches_encode`: `encode_iobufs` is not ported,
   because the codec has no vectored writes (documented in coding.md)
 
+
+### Test audit: coding (2026-11-19, commonware 43b357a41, p2p lane)
+
+Every `#[test]`/`#[rstest]` fn in commonware `cryptography/src/reed_solomon`, with each `#[case]`
+and each test-generating macro expansion counted separately, matched to a zigware test by name or by
+reading both bodies (a zigware test may cover several). 156 tests: 125 ported, 4 open, 27 not
+portable.
+
+| commonware file | tests | ported | open | not portable |
+|---|---|---|---|---|
+| `reed_solomon/decoder_result.rs` | 6 | 6 | 0 | 0 |
+| `reed_solomon/encoder_result.rs` | 2 | 2 | 0 | 0 |
+| `reed_solomon/engine.rs` | 9 | 1 | 0 | 8 |
+| `reed_solomon/fuzz.rs` | 21 | 21 | 0 | 0 |
+| `reed_solomon/mod.rs` | 3 | 1 | 0 | 2 |
+| `reed_solomon/plan.rs` | 2 | 2 | 0 | 0 |
+| `reed_solomon/rate.rs` | 2 | 2 | 0 | 0 |
+| `reed_solomon/wrappers.rs` | 6 | 6 | 0 | 0 |
+| `reed_solomon/engine/engine_avx512.rs` | 1 | 0 | 0 | 1 |
+| `reed_solomon/engine/engine_scalar.rs` | 1 | 1 | 0 | 0 |
+| `reed_solomon/engine/fwht.rs` | 3 | 3 | 0 | 0 |
+| `reed_solomon/engine/shards.rs` | 16 | 2 | 0 | 14 |
+| `reed_solomon/engine/tables.rs` | 2 | 0 | 0 | 2 |
+| `reed_solomon/rate/rate_default.rs` | 7 | 7 | 0 | 0 |
+| `reed_solomon/rate/rate_high.rs` | 37 | 35 | 2 | 0 |
+| `reed_solomon/rate/rate_low.rs` | 38 | 36 | 2 | 0 |
+
+Open:
+- [ ] `reed_solomon/rate/rate_high.rs` `supports`:
+  HighRateEncoder(Scalar).supports(4096,61440)==false and supports(61440,4096)==true are never
+  called in Zig (only HighRate.supports and the encoder validate/init are tested). Add the two
+  asserts to src/cryptography/reed_solomon/rate/tests.zig "high and low rate limits"
+- [ ] `reed_solomon/rate/rate_high.rs` `supports`:
+  HighRateDecoder(Scalar).supports(4096,61440)==false and supports(61440,4096)==true are never
+  called in Zig. Add the two asserts to src/cryptography/reed_solomon/rate/tests.zig "high and low
+  rate limits"
+- [ ] `reed_solomon/rate/rate_low.rs` `supports`: LowRateEncoder(Scalar).supports(4096,61440)==true
+  and supports(61440,4096)==false are never called in Zig. Add the two asserts to
+  src/cryptography/reed_solomon/rate/tests.zig "high and low rate limits"
+- [ ] `reed_solomon/rate/rate_low.rs` `supports`: LowRateDecoder(Scalar).supports(4096,61440)==true
+  and supports(61440,4096)==false are never called in Zig. Add the two asserts to
+  src/cryptography/reed_solomon/rate/tests.zig "high and low rate limits"
+
+Not portable:
+- `reed_solomon/engine.rs` `transform_zero_size`: catch_unwind test that every engine panics on an
+  invalid FFT/IFFT (size 0); zigware rejects it with std.debug.assert in
+  src/cryptography/reed_solomon/engine.zig transform precondition check; zigware panics are not
+  testable in-process (docs/lanes/coding.md Decisions: should_panic tests are assertions and panics
+  here and are not run)
+- `reed_solomon/engine.rs` `transform_non_power_of_two_size`: catch_unwind test that every engine
+  panics on an invalid FFT/IFFT (size 3); zigware rejects it with std.debug.assert in
+  src/cryptography/reed_solomon/engine.zig transform precondition check; zigware panics are not
+  testable in-process (docs/lanes/coding.md Decisions: should_panic tests are assertions and panics
+  here and are not run)
+- `reed_solomon/engine.rs` `transform_size_exceeds_field`: catch_unwind test that every engine
+  panics on an invalid FFT/IFFT (size 2*GF_ORDER); zigware rejects it with std.debug.assert in
+  src/cryptography/reed_solomon/engine.zig transform precondition check; zigware panics are not
+  testable in-process (docs/lanes/coding.md Decisions: should_panic tests are assertions and panics
+  here and are not run)
+- `reed_solomon/engine.rs` `transform_range_out_of_bounds`: catch_unwind test that every engine
+  panics on an invalid FFT/IFFT (pos 3/4/usize::MAX); zigware rejects it with std.debug.assert in
+  src/cryptography/reed_solomon/engine.zig transform precondition check; zigware panics are not
+  testable in-process (docs/lanes/coding.md Decisions: should_panic tests are assertions and panics
+  here and are not run)
+- `reed_solomon/engine.rs` `transform_truncation_out_of_bounds`: catch_unwind test that every engine
+  panics on an invalid FFT/IFFT (truncated_size > size); zigware rejects it with std.debug.assert in
+  src/cryptography/reed_solomon/engine.zig transform precondition check; zigware panics are not
+  testable in-process (docs/lanes/coding.md Decisions: should_panic tests are assertions and panics
+  here and are not run)
+- `reed_solomon/engine.rs` `transform_skew_out_of_bounds`: catch_unwind test that every engine
+  panics on an invalid FFT/IFFT (skew_delta GF_ORDER-1/usize::MAX); zigware rejects it with
+  std.debug.assert in src/cryptography/reed_solomon/engine.zig transform precondition check; zigware
+  panics are not testable in-process (docs/lanes/coding.md Decisions: should_panic tests are
+  assertions and panics here and are not run)
+- `reed_solomon/engine.rs` `eval_poly_feature_guard`: checks that AVX2/AVX512/NEON eval_poly panic
+  (catch_unwind) when the CPU feature is missing at runtime; zigware picks the engine at compile
+  time with no runtime CPU detection (docs/lanes/coding.md Decisions: engine chosen at compile
+  time); the supported half (DefaultEngine eval_poly equals Scalar on [1,0,1,1]) is in
+  src/cryptography/reed_solomon/engine.zig "eval_poly matches across engines"
+- `reed_solomon/engine.rs` `eval_poly_truncation_out_of_bounds`: #[should_panic] precondition check;
+  zigware enforces it with std.debug.assert in src/cryptography/reed_solomon/engine.zig/eval_poly
+  (truncated_size > GF_ORDER); zigware panics are not testable in-process (docs/lanes/coding.md
+  Decisions: should_panic tests are assertions and panics here and are not run)
+- `reed_solomon/mod.rs` `test_send`: Rust auto-trait compile-time check (Encoder, Decoder, Plan,
+  engine, rate, results, Error are Send); Zig has no Send/Sync traits, so there is nothing to assert
+- `reed_solomon/mod.rs` `test_sync`: Rust auto-trait compile-time check (the same types are Sync);
+  Zig has no Send/Sync traits, so there is nothing to assert
+- `reed_solomon/engine/engine_avx512.rs` `gfni_all_multipliers_basis`: tests the AVX-512 GFNI
+  multiply kernel; zigware has no AVX-512/GFNI engine, only Scalar and the AVX2 vpshufb/NEON tbl
+  Simd kernel (docs/lanes/coding.md Decisions: AVX-512 leaf not ported)
+- `reed_solomon/engine/shards.rs` `dimensions_overflow`: #[should_panic] (ShardsRefMut::new with
+  usize::MAX/2+1 overflows). In Zig this is an assertion panic, which a test cannot catch;
+  docs/lanes/coding.md (the lane that owns reed_solomon) records that #[should_panic] tests are
+  assertions and panics here and are not run
+- `reed_solomon/engine/shards.rs` `empty_shard_index_out_of_bounds`: #[should_panic] precondition
+  check; zigware enforces it with std.debug.assert in
+  src/cryptography/reed_solomon/engine/shards.zig or engine/utils.zig (index 2 of 2
+  (ShardsRefMut.get)); zigware panics are not testable in-process (docs/lanes/coding.md Decisions:
+  should_panic tests are assertions and panics here and are not run)
+- `reed_solomon/engine/shards.rs` `empty_shard_mutable_index_out_of_bounds`: #[should_panic]
+  precondition check; zigware enforces it with std.debug.assert in
+  src/cryptography/reed_solomon/engine/shards.zig or engine/utils.zig (mutable index 2 of 2
+  (ShardsRefMut.get)); zigware panics are not testable in-process (docs/lanes/coding.md Decisions:
+  should_panic tests are assertions and panics here and are not run)
+- `reed_solomon/engine/shards.rs` `empty_shard_split_out_of_bounds`: #[should_panic] precondition
+  check; zigware enforces it with std.debug.assert in
+  src/cryptography/reed_solomon/engine/shards.zig or engine/utils.zig (split_at(3) of 2); zigware
+  panics are not testable in-process (docs/lanes/coding.md Decisions: should_panic tests are
+  assertions and panics here and are not run)
+- `reed_solomon/engine/shards.rs` `empty_shard_range_out_of_bounds`: #[should_panic] precondition
+  check; zigware enforces it with std.debug.assert in
+  src/cryptography/reed_solomon/engine/shards.zig or engine/utils.zig (zero(0..3) of 2); zigware
+  panics are not testable in-process (docs/lanes/coding.md Decisions: should_panic tests are
+  assertions and panics here and are not run)
+- `reed_solomon/engine/shards.rs` `empty_shard_range_reversed`: #[should_panic] precondition check;
+  zigware enforces it with std.debug.assert in src/cryptography/reed_solomon/engine/shards.zig or
+  engine/utils.zig (zero(2..1)); zigware panics are not testable in-process (docs/lanes/coding.md
+  Decisions: should_panic tests are assertions and panics here and are not run)
+- `reed_solomon/engine/shards.rs` `empty_shard_range_start_overflow`: #[should_panic] precondition
+  check; zigware enforces it with std.debug.assert in
+  src/cryptography/reed_solomon/engine/shards.zig or engine/utils.zig (Bound::Excluded(usize::MAX)
+  start; zigware zero takes plain start/end usize so the Bound overflow case does not exist);
+  zigware panics are not testable in-process (docs/lanes/coding.md Decisions: should_panic tests are
+  assertions and panics here and are not run)
+- `reed_solomon/engine/shards.rs` `empty_shard_range_end_overflow`: #[should_panic] precondition
+  check; zigware enforces it with std.debug.assert in
+  src/cryptography/reed_solomon/engine/shards.zig or engine/utils.zig (..=usize::MAX end; zigware
+  zero takes plain start/end usize so the Bound overflow case does not exist); zigware panics are
+  not testable in-process (docs/lanes/coding.md Decisions: should_panic tests are assertions and
+  panics here and are not run)
+- `reed_solomon/engine/shards.rs` `empty_shard_xor_out_of_bounds`: #[should_panic] precondition
+  check; zigware enforces it with std.debug.assert in
+  src/cryptography/reed_solomon/engine/shards.zig or engine/utils.zig (xor_within past the end);
+  zigware panics are not testable in-process (docs/lanes/coding.md Decisions: should_panic tests are
+  assertions and panics here and are not run)
+- `reed_solomon/engine/shards.rs` `empty_shard_xor_overlapping`: #[should_panic] precondition check;
+  zigware enforces it with std.debug.assert in src/cryptography/reed_solomon/engine/shards.zig or
+  engine/utils.zig (xor_within overlapping ranges); zigware panics are not testable in-process
+  (docs/lanes/coding.md Decisions: should_panic tests are assertions and panics here and are not
+  run)
+- `reed_solomon/engine/shards.rs` `empty_shard_dist2_zero`: #[should_panic] precondition check;
+  zigware enforces it with std.debug.assert in src/cryptography/reed_solomon/engine/shards.zig or
+  engine/utils.zig (dist2(0,0)); zigware panics are not testable in-process (docs/lanes/coding.md
+  Decisions: should_panic tests are assertions and panics here and are not run)
+- `reed_solomon/engine/shards.rs` `empty_shard_dist4_zero`: #[should_panic] precondition check;
+  zigware enforces it with std.debug.assert in src/cryptography/reed_solomon/engine/shards.zig or
+  engine/utils.zig (dist4(0,0)); zigware panics are not testable in-process (docs/lanes/coding.md
+  Decisions: should_panic tests are assertions and panics here and are not run)
+- `reed_solomon/engine/shards.rs` `empty_shard_dist2_out_of_bounds`: #[should_panic] precondition
+  check; zigware enforces it with std.debug.assert in
+  src/cryptography/reed_solomon/engine/shards.zig or engine/utils.zig (dist2(1,1) of 2); zigware
+  panics are not testable in-process (docs/lanes/coding.md Decisions: should_panic tests are
+  assertions and panics here and are not run)
+- `reed_solomon/engine/shards.rs` `empty_shard_dist4_out_of_bounds`: #[should_panic] precondition
+  check; zigware enforces it with std.debug.assert in
+  src/cryptography/reed_solomon/engine/shards.zig or engine/utils.zig (dist4(1,1) of 4); zigware
+  panics are not testable in-process (docs/lanes/coding.md Decisions: should_panic tests are
+  assertions and panics here and are not run)
+- `reed_solomon/engine/tables.rs` `mul128_byte_layout`: checks the global Mul128 vector table byte
+  layout against mul16; zigware has no Mul128 table, the Simd kernel builds per-multiplier nibble
+  tables from mul16 on each call (engine/simd.zig Tables.init); their correctness is covered end to
+  end by src/cryptography/reed_solomon/engine/simd.zig "simd mul and mul_add match scalar" and "simd
+  mul matches naive"
+- `reed_solomon/engine/tables.rs` `mul_gfni_matrix_semantics`: checks the MulGfni affine-matrix
+  table used only by the AVX-512 GFNI engine; zigware has no GFNI table or engine
+  (docs/lanes/coding.md Decisions: AVX-512 leaf not ported)
