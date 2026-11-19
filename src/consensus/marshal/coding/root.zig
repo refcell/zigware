@@ -35,6 +35,7 @@ test {
     _ = @import("harness.zig");
     _ = @import("mod_test.zig");
     _ = @import("tests/scenarios.zig");
+    _ = @import("tests/propose_test.zig");
     _ = @import("fuzz.zig");
     _ = @import("test_block.zig");
     _ = @import("shards/root.zig");
