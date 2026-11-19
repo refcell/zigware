@@ -565,12 +565,10 @@ fn run_partitioned_restart(comptime E: type, elector: RoundRobin) !void {
 
 test "stateful e2e: state sync partitioned restart stays stuck until network heals" {
     try skip_slow();
-    if (true) return error.SkipZigTest;
     for (electors()) |elector| try run_partitioned_restart(Single, elector);
 }
 
 test "stateful e2e: state sync partitioned restart stays stuck until network heals multi db" {
     try skip_slow();
-    if (true) return error.SkipZigTest;
     for (electors()) |elector| try run_partitioned_restart(multi.MultiDbEngine, elector);
 }

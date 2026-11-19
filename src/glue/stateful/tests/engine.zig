@@ -390,7 +390,12 @@ pub fn StatefulEngine(comptime S: type) type {
             /// Marshal's processed height, zero before it starts or once it stops.
             pub fn processed_height(self: *const NodeState) u64 {
                 const marshal = self.inner.marshal orelse return 0;
-                const processed = marshal.get_processed() catch return 0;
+                // A plan checks its exit as the runner shuts it down: keep that cancel pending,
+                // or the root's next request blocks where no cancel can reach it.
+                const processed = marshal.get_processed() catch |err| {
+                    if (err == error.Canceled) marshal.io.recancel();
+                    return 0;
+                };
                 return if (processed) |value| value.height().get() else 0;
             }
         };

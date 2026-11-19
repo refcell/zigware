@@ -387,7 +387,8 @@ ones: d = deployer (thread T-01a1d5b9-c237), u = utils, j = storage-journal
 | stateful/actor/core/processing.rs, 1070-3396 | 47 | 22 | 24 | 1 | u |
 | stateful/actor/core/processing.rs, 3451-5885 | 39 | 37 | 0 | 2 | s |
 | stateful/actor/processor/mod.rs | 44 | 40 | 0 | 4 | |
-| stateful/tests/mod.rs, floor.rs | 28 | 22 | 6 | 0 | j |
+| stateful/tests/mod.rs, floor.rs | 28 | 24 | 4 | 0 | j |
+| **total** | **473** | **434** | **28** | **11** | |
 | **total** | **473** | **432** | **30** | **11** | |
 
 - db/mod.rs's barrier tests are ported since async start_sync step 6 (`Barrier` holds each
@@ -470,8 +471,8 @@ ones: d = deployer (thread T-01a1d5b9-c237), u = utils, j = storage-journal
   muxer) are its two apps. As in commonware, every scenario runs on both engines; commonware
   (since bca770a0c) also runs each under stable leaders, which `root.zig`'s `electors()` leaves
   off for now (open, consensus-marshal: crash counts, random, many and rapid crashes, and the
-  state sync handoff still fail under them). The scenarios: finalize (and with storage faults), determinism,
-  crash/restart, pruning (marshal and QMDB), delayed start, lossy, random, many, and rapid
+  state sync handoff still fail under them). The scenarios: finalize (and with storage
+  faults), determinism, crash/restart, pruning (marshal and QMDB), delayed start, lossy, random, many, and rapid
   crashes, full outage, partition, and the state sync scenarios: handoff (and with storage
   faults), determinism, random crashes, lossy, crash during sync, and the partitioned restart
   (one test per engine). One 20-block single-db plan always runs; the rest need -Dslow-tests.
@@ -480,11 +481,10 @@ ones: d = deployer (thread T-01a1d5b9-c237), u = utils, j = storage-journal
   commonware, `StateSyncCompleted` checks that every fast-sync plan's joiner recorded
   completion (syncing acknowledges retained blocks, so the handoff properties alone pass while
   a sync never finishes; the slow-sync plans end mid-sync in commonware too, and skip it).
-  Written but skipped: both partitioned restarts, whose timed-out runner faults on teardown.
-  The `Io.Select` fault was marshal's canceled waits (3d0d720); they now end in
-  `supervision.zig`'s `tree.zombies == null` assertion when `plan.zig` deinits the timed-out
-  runner. Open: those two. simplex (T-01a1d5ad) has
-  floor.rs and mod.rs's six targeted qmdb tests.
+  The partitioned restarts' timed-out runs used to fault on teardown: marshal's canceled waits
+  left select branches running (229c523), and `processed_height` swallowed the shutdown's
+  cancel, so the root blocked on a stopped marshal and never drained its tree. simplex
+  (T-01a1d5ad) has floor.rs and mod.rs's six targeted qmdb tests.
   Split (agreed 2026-11-19): storage-journal keeps the state sync scenarios and multi_db_app;
   simplex (T-01a1d5ad-c8d6) takes floor.rs (`live_floor_preserves_application_recovery`, 2
   cases) and the six targeted qmdb tests (out_of_order_certifications, finalizations and
