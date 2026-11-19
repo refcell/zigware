@@ -10,6 +10,7 @@ const std = @import("std");
 const assert = std.debug.assert;
 const storage = @import("storage");
 const db = @import("mod.zig");
+const state_sync = @import("state_sync.zig");
 
 const qmdb = storage.qmdb;
 
@@ -78,6 +79,37 @@ pub fn Current(comptime D: type) type {
         pub fn sync_target(self: *const Self) SyncTarget {
             const end = self.inner.bounds().end;
             return .init(self.inner.ops_root(), self.inner.sync_boundary(), end);
+        }
+
+        pub const SyncDatabase = qmdb.current.sync.Database(D, D.Hasher);
+
+        /// Syncs a new database from `source` (the StateSyncDb contract, `state_sync.zig`).
+        /// The target commits to the ops root.
+        pub fn sync_db(
+            env: anytype,
+            config: Config,
+            source: anytype,
+            target: SyncTarget,
+            channels: state_sync.Channels(SyncTarget),
+            sync_config: state_sync.SyncEngineConfig,
+        ) !Self {
+            const synced = try state_sync.sync_standard_db(
+                SyncDatabase,
+                env,
+                config,
+                source,
+                target,
+                channels,
+                sync_config,
+            );
+            return .{ .inner = synced.db };
+        }
+
+        /// Serves this database's operations to syncing peers (`state_sync.SharedSource`).
+        pub const SyncSource = qmdb.sync.JournalSource(D.Family, D.Any.Log);
+
+        pub fn sync_source(self: *Self) SyncSource {
+            return .{ .journal = &self.inner.any.log };
         }
 
         /// A speculative batch of updates and deletes over the shared database.

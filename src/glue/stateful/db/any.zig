@@ -104,6 +104,13 @@ pub fn Any(comptime D: type, comptime H: type) type {
             return .{ .inner = synced.db };
         }
 
+        /// Serves this database's operations to syncing peers (`state_sync.SharedSource`).
+        pub const SyncSource = qmdb.sync.JournalSource(D.Family, D.Log);
+
+        pub fn sync_source(self: *Self) SyncSource {
+            return .{ .journal = &self.inner.log };
+        }
+
         /// A speculative batch of updates and deletes over the shared database.
         pub const Unmerkleized = struct {
             batch: D.UnmerkleizedBatch,

@@ -1,93 +1,155 @@
-//! commonware `glue/src/stateful/db/current.rs` tests, over an unordered fixed `current`
-//! database of SHA-256 keys and values with a `TwoCap` index and 64-byte chunks (commonware's
-//! `FixedDb`). The ordered and variable tests wait on those `current` databases; the staged
-//! test runs on the unordered database here.
+//! commonware `glue/src/stateful/db/current.rs` tests, over `current` databases of SHA-256
+//! keys and values with a `TwoCap` index and 64-byte chunks: commonware's `FixedDb`, and the
+//! variable-encoded and ordered databases (`VariableDb`, `OrderedFixedDb`,
+//! `OrderedVariableDb`).
 
 const std = @import("std");
 const testing = std.testing;
+const codec = @import("codec");
 const cryptography = @import("cryptography");
 const runtime = @import("runtime");
 const storage = @import("storage");
+const utils = @import("utils");
 const db = @import("mod.zig");
 const current_mod = @import("current.zig");
+const state_sync = @import("state_sync.zig");
+const sync = @import("sync.zig");
 
 const qmdb = storage.qmdb;
 const Sha256 = cryptography.Sha256;
 const Digest = Sha256.Digest;
 const Family = storage.mmr.Family;
-const Encoding = qmdb.value.Fixed(Digest);
-const Journal = storage.journal.contiguous.fixed.Journal(
-    qmdb.any.operation.Unordered(Family, Digest, Encoding),
-);
-const Update = qmdb.any.operation.update.Unordered(Digest, Encoding);
-const Index = storage.index.unordered.Index(storage.translator.TwoCap, u64);
-const Inner = qmdb.current.Db(Family, Update, Journal, Index, Sha256, 64);
-const Current = current_mod.Current(Inner);
+const operation = qmdb.any.operation;
 const metrics = runtime.telemetry.metrics;
+const contiguous = storage.journal.contiguous;
+const UnorderedIndex = storage.index.unordered.Index(storage.translator.TwoCap, u64);
+const OrderedIndex = storage.index.ordered.Index(storage.translator.TwoCap, u64);
 
-/// Storage, a page cache, and metrics for opening test databases. Each open takes a distinct
-/// metrics label, as commonware's child contexts do.
-const Harness = struct {
-    storage: runtime.buffer.mocks.Storage,
-    cache_ref: runtime.buffer.paged.CacheRef,
-    registry: metrics.Registry,
+/// A `current` database over `Digest` keys and `E`-encoded values, ordered or not.
+fn Database(comptime ordered: bool, comptime E: type) type {
+    const Operation = if (ordered) operation.Ordered else operation.Unordered;
+    const Update = if (ordered) operation.update.Ordered else operation.update.Unordered;
+    const Op = Operation(Family, Digest, E);
+    const Journal = if (E.fixed) contiguous.fixed.Journal(Op) else contiguous.variable.Journal(Op);
+    const Index = if (ordered) OrderedIndex else UnorderedIndex;
+    const Inner = qmdb.current.Db(Family, Update(Digest, E), Journal, Index, Sha256, 64);
+    return current_mod.Current(Inner);
+}
 
-    fn init(harness: *Harness) !void {
-        harness.* = .{
-            .storage = .init(testing.allocator),
-            .cache_ref = try .init(testing.allocator, 101, 11),
-            .registry = metrics.Registry.init(testing.allocator),
-        };
-    }
-
-    fn deinit(harness: *Harness) void {
-        harness.registry.deinit();
-        harness.cache_ref.deinit();
-        harness.storage.deinit();
-    }
-
-    fn env(harness: *Harness, label: []const u8) db.Env {
-        return .{
-            .gpa = testing.allocator,
-            .io = testing.io,
-            .storage = harness.storage.interface(),
-            .scope = metrics.Scope.init(&harness.registry).child(label),
-        };
-    }
-
-    /// commonware's `fixed_config(suffix)`.
-    fn config(harness: *Harness, comptime suffix: []const u8) Current.Config {
-        return .{
-            .merkle = .{
-                .journal_partition = "stateful-current-journal-" ++ suffix,
-                .metadata_partition = "stateful-current-metadata-" ++ suffix,
-                .items_per_blob = 11,
-                .write_buffer = 1024,
-                .replay_buffer = 1024,
-                .cache_ref = &harness.cache_ref,
-            },
-            .log = .{
-                .partition = "stateful-current-log-" ++ suffix,
-                .items_per_blob = 7,
-                .cache_ref = &harness.cache_ref,
-                .write_buffer = 1024,
-                .replay_buffer = 1024,
-            },
-            .grafted_metadata_partition = "stateful-current-grafted-" ++ suffix,
-            .translator = .{},
-            .init_cache = 1024,
-        };
-    }
-
-    fn open(
-        harness: *Harness,
-        label: []const u8,
-        comptime suffix: []const u8,
-        expected: ?Current.SyncTarget,
-    ) !Current.Shared {
-        return Current.Shared.open(harness.env(label), harness.config(suffix), expected);
-    }
+const FixedDb = Database(false, qmdb.value.Fixed(Digest));
+const OrderedFixedDb = Database(true, qmdb.value.Fixed(Digest));
+const variants = .{
+    FixedDb,
+    Database(false, qmdb.value.Variable(Digest)),
+    OrderedFixedDb,
+    Database(true, qmdb.value.Variable(Digest)),
 };
+
+/// The codec configuration of a test operation: units stay units, and slices (a field
+/// `range`) are bounded to 10000 items. Configurations nest at most one tuple deep.
+fn codec_config(comptime C: type) C {
+    if (comptime is_slice_cfg(C) or C == void) return leaf_config(C);
+    var result: C = undefined;
+    inline for (@typeInfo(C).@"struct".field_types, 0..) |field_type, index| {
+        result[index] = leaf_config(field_type);
+    }
+    return result;
+}
+
+fn is_slice_cfg(comptime C: type) bool {
+    return @typeInfo(C) == .@"struct" and @hasField(C, "range");
+}
+
+fn leaf_config(comptime C: type) C {
+    if (comptime is_slice_cfg(C)) return .{ .range = .inclusive(0, 10000) };
+    return codec.unit_cfg(C);
+}
+
+fn log_config(
+    comptime LogCfg: type,
+    comptime suffix: []const u8,
+    cache_ref: *runtime.buffer.paged.CacheRef,
+) LogCfg {
+    const partition = "stateful-current-log-" ++ suffix;
+    if (comptime @hasField(LogCfg, "items_per_section")) return .{
+        .partition = partition,
+        .items_per_section = 7,
+        .codec_config = codec_config(@FieldType(LogCfg, "codec_config")),
+        .cache_ref = cache_ref,
+        .write_buffer = 1024,
+        .replay_buffer = 1024,
+    };
+    return .{
+        .partition = partition,
+        .items_per_blob = 7,
+        .cache_ref = cache_ref,
+        .write_buffer = 1024,
+        .replay_buffer = 1024,
+    };
+}
+
+/// Storage, a page cache, and metrics for opening test databases of `Current`. Each open
+/// takes a distinct metrics label, as commonware's child contexts do.
+fn Harness(comptime Current: type) type {
+    return struct {
+        const Self = @This();
+
+        storage: runtime.buffer.mocks.Storage,
+        cache_ref: runtime.buffer.paged.CacheRef,
+        registry: metrics.Registry,
+
+        fn init(harness: *Self) !void {
+            harness.* = .{
+                .storage = .init(testing.allocator),
+                .cache_ref = try .init(testing.allocator, 101, 11),
+                .registry = metrics.Registry.init(testing.allocator),
+            };
+        }
+
+        fn deinit(harness: *Self) void {
+            harness.registry.deinit();
+            harness.cache_ref.deinit();
+            harness.storage.deinit();
+        }
+
+        fn env(harness: *Self, label: []const u8) db.Env {
+            return .{
+                .gpa = testing.allocator,
+                .io = testing.io,
+                .storage = harness.storage.interface(),
+                .scope = metrics.Scope.init(&harness.registry).child(label),
+            };
+        }
+
+        /// commonware's `fixed_config(suffix)` and `variable_config(suffix)`.
+        fn config(harness: *Self, comptime suffix: []const u8) Current.Config {
+            const LogCfg = @FieldType(Current.Config, "log");
+            return .{
+                .merkle = .{
+                    .journal_partition = "stateful-current-journal-" ++ suffix,
+                    .metadata_partition = "stateful-current-metadata-" ++ suffix,
+                    .items_per_blob = 11,
+                    .write_buffer = 1024,
+                    .replay_buffer = 1024,
+                    .cache_ref = &harness.cache_ref,
+                },
+                .log = log_config(LogCfg, suffix, &harness.cache_ref),
+                .grafted_metadata_partition = "stateful-current-grafted-" ++ suffix,
+                .translator = .{},
+                .init_cache = 1024,
+            };
+        }
+
+        fn open(
+            harness: *Self,
+            label: []const u8,
+            comptime suffix: []const u8,
+            expected: ?Current.SyncTarget,
+        ) !Current.Shared {
+            return Current.Shared.open(harness.env(label), harness.config(suffix), expected);
+        }
+    };
+}
 
 fn hash(text: []const u8) Digest {
     return Sha256.hash(&.{text});
@@ -99,14 +161,14 @@ fn hash_u64(value: u64) Digest {
     return Sha256.hash(&.{&bytes});
 }
 
-fn apply_and_finalize(shared: Current.Shared, batch: *const Current.Merkleized) !void {
+fn apply_and_finalize(shared: anytype, batch: anytype) !void {
     try shared.apply(batch);
     const barrier = try shared.finalize();
     try barrier.durable();
 }
 
 /// A batch over `shared` writing `key` = `value` with `metadata`.
-fn write_one(shared: Current.Shared, key: Digest, value: Digest) !Current.Merkleized {
+fn write_one(shared: anytype, key: Digest, value: Digest) !@TypeOf(shared).Merkleized {
     var batch = try shared.new_batches();
     errdefer batch.deinit();
     try batch.write(key, value);
@@ -115,7 +177,11 @@ fn write_one(shared: Current.Shared, key: Digest, value: Digest) !Current.Merkle
 }
 
 test "stateful current: a managed db applies a batch and proves its value" {
-    var harness: Harness = undefined;
+    inline for (variants) |Current| try a_managed_db_applies_a_batch_and_proves_its_value(Current);
+}
+
+fn a_managed_db_applies_a_batch_and_proves_its_value(comptime Current: type) !void {
+    var harness: Harness(Current) = undefined;
     try harness.init();
     defer harness.deinit();
     const shared = try harness.open("db", "managed-db", null);
@@ -138,13 +204,18 @@ test "stateful current: a managed db applies a batch and proves its value" {
     defer proved.deinit(testing.allocator);
     try testing.expectEqual(value, proved.value);
     const root = inner.root();
-    try testing.expect(Inner.verify_key_value_proof(&proved.proof, key, value, &root));
-    try testing.expect(!Inner.verify_key_value_proof(&proved.proof, key, hash("other"), &root));
+    try testing.expect(Current.Database.verify_key_value_proof(&proved.proof, key, value, &root));
+    const other = hash("other");
+    try testing.expect(!Current.Database.verify_key_value_proof(&proved.proof, key, other, &root));
     try testing.expectError(error.KeyNotFound, inner.key_value_proof(&hash("missing")));
 }
 
 test "stateful current: matches_sync_target rejects a wrong ops root and range" {
-    var harness: Harness = undefined;
+    inline for (variants) |Current| try rejects_wrong_ops_root_and_range(Current);
+}
+
+fn rejects_wrong_ops_root_and_range(comptime Current: type) !void {
+    var harness: Harness(Current) = undefined;
     try harness.init();
     defer harness.deinit();
     const shared = try harness.open("db", "matches-sync-target", null);
@@ -178,22 +249,51 @@ test "stateful current: matches_sync_target rejects a wrong ops root and range" 
 }
 
 test "stateful current: staged merkleize matches explicit writes" {
-    var harness: Harness = undefined;
+    inline for (variants) |Current| try staged_merkleize_matches_explicit_writes(Current);
+}
+
+/// Seeds keys 0..50 and persists them.
+fn seed_keys(shared: anytype) !void {
+    var seed = try shared.new_batches();
+    errdefer seed.deinit();
+    for (0..50) |i| try seed.write(hash_u64(i), hash_u64(i + 10_000));
+    var merkleized = try seed.merkleize();
+    defer merkleized.deinit();
+    try apply_and_finalize(shared, &merkleized);
+}
+
+/// Metadata set before staging carries through to the staged merkleize.
+fn expect_carried_metadata(
+    comptime Current: type,
+    shared: Current.Shared,
+    keys: *const [3]Digest,
+    slots: []const Current.Slot,
+    unstaged: []const Current.Mutation,
+    metadata: Digest,
+    explicit: struct { *const [3]?Digest, Digest },
+) !void {
+    var carried_values: [3]?Digest = undefined;
+    var batch = try shared.new_batches();
+    batch.with_metadata(metadata);
+    var staged = batch.stage(keys, &carried_values) catch |err| {
+        batch.deinit();
+        return err;
+    };
+    var carried = try staged.merkleize(slots, unstaged);
+    defer carried.deinit();
+    try testing.expectEqualSlices(?Digest, explicit[0], &carried_values);
+    try testing.expect(explicit[1].eql(carried.root()));
+}
+
+fn staged_merkleize_matches_explicit_writes(comptime Current: type) !void {
+    var harness: Harness(Current) = undefined;
     try harness.init();
     defer harness.deinit();
     const shared = try harness.open("db", "glue-staged", null);
     defer shared.deinit();
     const metadata = hash("metadata");
 
-    // Seed keys 0..50 and persist them.
-    {
-        var seed = try shared.new_batches();
-        errdefer seed.deinit();
-        for (0..50) |i| try seed.write(hash_u64(i), hash_u64(i + 10_000));
-        var merkleized = try seed.merkleize();
-        defer merkleized.deinit();
-        try apply_and_finalize(shared, &merkleized);
-    }
+    try seed_keys(shared);
 
     // Read set: key 1 updated, key 2 deleted, key 999 missing and created.
     const keys = [_]Digest{ hash_u64(1), hash_u64(2), hash_u64(999) };
@@ -245,22 +345,18 @@ test "stateful current: staged merkleize matches explicit writes" {
         try testing.expect(explicit_root.eql(merkleized.root()));
     }
 
-    // Metadata set before staging carries through to the staged merkleize.
-    var carried_values: [keys.len]?Digest = undefined;
-    var batch = try shared.new_batches();
-    batch.with_metadata(metadata);
-    var staged = batch.stage(&keys, &carried_values) catch |err| {
-        batch.deinit();
-        return err;
-    };
-    var carried = try staged.merkleize(&slots, &unstaged);
-    defer carried.deinit();
-    try testing.expectEqualSlices(?Digest, &explicit_values, &carried_values);
-    try testing.expect(explicit_root.eql(carried.root()));
+    try expect_carried_metadata(Current, shared, &keys, &slots, &unstaged, metadata, .{
+        &explicit_values,
+        explicit_root,
+    });
 }
 
 test "stateful current: bounded initialization discards later targets durably" {
-    var harness: Harness = undefined;
+    inline for (variants) |Current| try bounded_init_discards_later_targets(Current);
+}
+
+fn bounded_init_discards_later_targets(comptime Current: type) !void {
+    var harness: Harness(Current) = undefined;
     try harness.init();
     defer harness.deinit();
     var first: Current.SyncTarget = undefined;
@@ -300,7 +396,11 @@ test "stateful current: bounded initialization discards later targets durably" {
 }
 
 test "stateful current: pruning keeps retained targets initializable" {
-    var harness: Harness = undefined;
+    inline for (variants) |Current| try pruning_keeps_retained_targets_initializable(Current);
+}
+
+fn pruning_keeps_retained_targets_initializable(comptime Current: type) !void {
+    var harness: Harness(Current) = undefined;
     try harness.init();
     defer harness.deinit();
     var targets: [4]Current.SyncTarget = undefined;
@@ -343,4 +443,94 @@ test "stateful current: pruning keeps retained targets initializable" {
         const recovered = try bounded.committed_targets();
         try testing.expect(db.targets_eql(Current.SyncTarget, &targets[index], &recovered));
     }
+}
+
+fn applies_batch_and_proves_exclusion(comptime Current: type) !void {
+    var harness: Harness(Current) = undefined;
+    try harness.init();
+    defer harness.deinit();
+    const shared = try harness.open("db", "ordered-managed-db", null);
+    defer shared.deinit();
+    const key = hash("key");
+    const value = hash("value");
+    const missing = hash("missing");
+    var merkleized = try write_one(shared, key, value);
+    defer merkleized.deinit();
+    const expected_root = merkleized.root();
+    try apply_and_finalize(shared, &merkleized);
+
+    var guard = try shared.read();
+    defer guard.deinit();
+    const inner = &guard.get().inner;
+    const root = inner.root();
+    try testing.expect(root.eql(expected_root));
+    try testing.expectEqual(value, (try inner.get(&key)).?);
+    var proof = try inner.exclusion_proof(&missing);
+    defer proof.deinit(testing.allocator);
+    try testing.expect(Current.Database.verify_exclusion_proof(&proof, missing, &root));
+    try testing.expect(!Current.Database.verify_exclusion_proof(&proof, key, &root));
+    try testing.expectError(error.KeyExists, inner.exclusion_proof(&key));
+}
+
+test "stateful current: an ordered managed db applies a batch and proves exclusion" {
+    // commonware `ordered_fixed_managed_db_applies_batch_and_proves_exclusion` and
+    // `ordered_variable_managed_db_applies_batch_and_proves_exclusion`.
+    try applies_batch_and_proves_exclusion(OrderedFixedDb);
+    try applies_batch_and_proves_exclusion(variants[3]);
+}
+
+test "stateful current: every adapter implements StateSyncDb" {
+    // commonware `ordered_current_db_trait_impls_compile` and
+    // `variable_current_db_trait_impls_compile`.
+    comptime {
+        for (variants) |Current| state_sync.assert_state_sync_db(Current);
+    }
+}
+
+/// Syncs a fresh `Current` (own storage and page cache) from a populated one served through
+/// its `sync_source`, with no later tips; the target commits to the ops root.
+fn syncs_from_populated(comptime Current: type) !void {
+    var source_harness: Harness(Current) = undefined;
+    try source_harness.init();
+    defer source_harness.deinit();
+    const source = try source_harness.open("source", "sync-source", null);
+    defer source.deinit();
+    try seed_keys(source);
+    const target = try source.committed_targets();
+
+    var guard = try source.read();
+    defer guard.deinit();
+    var log_source = guard.get().sync_source();
+    var harness: Harness(Current) = undefined;
+    try harness.init();
+    defer harness.deinit();
+    const Tip = sync.TipUpdate(Digest, Current.SyncTarget);
+    var tips = try utils.channel.ring.channel(Tip, testing.allocator, testing.io, 1);
+    tips.sender.deinit();
+    const start: sync.Anchor(Digest) = .{
+        .height = .new(1),
+        .round = .new(.zero(), .new(1)),
+        .digest = .{ .bytes = @splat(1) },
+    };
+    const synced = try state_sync.sync_shared(
+        Current,
+        Digest,
+        harness.env("synced"),
+        harness.config("sync-target"),
+        &log_source,
+        start,
+        target,
+        tips.receiver,
+        .{ .fetch_batch_size = 3, .apply_batch_size = 2, .max_outstanding_requests = 2 },
+    );
+    defer synced.databases.deinit();
+    const reached = try synced.databases.committed_targets();
+    try testing.expect(db.targets_eql(Current.SyncTarget, &reached, &target));
+    var batch = try synced.databases.new_batches();
+    defer batch.deinit();
+    try testing.expectEqual(hash_u64(10_007), (try batch.get(&hash_u64(7))).?);
+}
+
+test "stateful current: a database syncs from a populated one" {
+    inline for (variants) |Current| try syncs_from_populated(Current);
 }
