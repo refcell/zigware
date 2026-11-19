@@ -35,8 +35,9 @@
 //!   its section. Markers trail proven syncs, publishing once a section is durable and idle
 //!   (or on an empty flush).
 //!
-//! Data syncs may be in flight (`start_sync_tracked`); marker generations still persist
-//! synchronously, so none is ever in flight.
+//! Data syncs and one marker generation may be in flight (`start_sync_tracked`). A request
+//! publishes only boundaries whose sync it has observed, and mutates no marker while the
+//! previous generation is in flight; a failed generation surfaces at the next request.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -114,13 +115,36 @@ const Tracking = struct {
     metadata: Markers,
     /// Joint index/value durability proofs not yet fully published as markers, by section.
     barriers: std.ArrayList(SectionBarrier) = .empty,
+    /// Completion of the marker generation being persisted (one reference), if any.
+    marker_pending: ?Completion = null,
 
     const SectionBarrier = struct { section: u64, barrier: Barrier };
 
     fn deinit(self: *Tracking) void {
+        self.drop_marker();
         self.drop_barriers();
         self.metadata.deinit();
         self.* = undefined;
+    }
+
+    /// Return the in-flight marker generation's reference (the store keeps its own).
+    fn drop_marker(self: *Tracking) void {
+        const completion = self.marker_pending orelse return;
+        completion.release();
+        self.marker_pending = null;
+    }
+
+    /// Observe the in-flight marker generation without blocking, retiring the proofs it
+    /// published once it succeeded. Returns whether it is still in flight; its failure is
+    /// returned.
+    fn observe_marker(self: *Tracking) Markers.Error!bool {
+        const completion = self.marker_pending orelse return false;
+        const result = completion.poll() orelse return true;
+        try result;
+        self.drop_marker();
+        self.retire_published();
+        assert(self.marker_pending == null);
+        return false;
     }
 
     /// Free every barrier, returning their completions (the syncs themselves continue).
@@ -205,10 +229,11 @@ const Tracking = struct {
         assert(kept <= self.barriers.capacity);
     }
 
-    /// Persist staged markers, then retire the proofs they publish.
+    /// Start persisting staged markers as the next generation; observing its success retires
+    /// the proofs it publishes.
     fn persist(self: *Tracking) Markers.Error!void {
-        try self.metadata.sync();
-        self.retire_published();
+        assert(self.marker_pending == null);
+        self.marker_pending = try self.metadata.start_sync();
     }
 };
 
@@ -382,13 +407,22 @@ pub fn Oversized(comptime I: type, comptime V: type) type {
         pub fn sync_tracked(self: *Self, sections: []const u64, active: []const u64) Error!void {
             assert_ascending(sections);
             assert_ascending(active);
-            const lengths = try self.section_lengths(sections);
-            defer self.index.manager.gpa.free(lengths);
-            // Blocking syncs observe each buffer's started sync, leaving it clean.
-            try self.index.sync(sections);
-            try self.values.sync(sections);
-            try self.record(sections, lengths, Completion.ok);
-            try self.tracking.?.publish(active);
+            // The marker generation starts beside the data syncs, not after them.
+            const completion = try self.start_sync_tracked(sections, active);
+            try completion.wait_release();
+            // Observe each buffer's completed sync (no I/O, no sync counted), leaving it clean.
+            try settle(&self.index.manager, sections);
+            try settle(&self.values.manager, sections);
+            _ = try self.tracking.?.observe_marker();
+        }
+
+        /// Observe the started syncs of `sections` in one journal's manager.
+        fn settle(manager: anytype, sections: []const u64) Error!void {
+            for (sections) |section| {
+                const buffer = try manager.get(section) orelse continue;
+                if (buffer.sync_state == .pending) try buffer.wait_for_sync();
+                assert(buffer.sync_state != .pending);
+            }
         }
 
         /// The index length of each of `sections` (owned by the caller).
@@ -430,6 +464,7 @@ pub fn Oversized(comptime I: type, comptime V: type) type {
             assert_ascending(sections);
             assert_ascending(active);
             const tracking = &self.tracking.?;
+            const marker_in_flight = try tracking.observe_marker();
             const lengths = try self.section_lengths(sections);
             defer self.index.manager.gpa.free(lengths);
             const index = try self.index.start_sync(sections);
@@ -440,7 +475,9 @@ pub fn Oversized(comptime I: type, comptime V: type) type {
             const joint = try Completion.join(index, values);
             errdefer joint.release();
             try self.record(sections, lengths, joint);
-            try tracking.publish(active);
+            // Metadata is not mutated while its prior generation is in flight: completed
+            // barriers stay as debt until a later request.
+            if (!marker_in_flight) try tracking.publish(active);
             return joint;
         }
 
@@ -488,7 +525,11 @@ pub fn Oversized(comptime I: type, comptime V: type) type {
             if (self.tracking) |*tracking| {
                 const before = tracking.metadata.count();
                 tracking.metadata.retain(min, keep_at_least);
-                if (tracking.metadata.count() != before) try tracking.metadata.sync();
+                if (tracking.metadata.count() != before) {
+                    // The blocking sync observes the in-flight generation first.
+                    try tracking.metadata.sync();
+                    tracking.drop_marker();
+                }
                 tracking.drop_below(min);
             }
             const index_pruned = try self.index.prune(min);
@@ -532,6 +573,7 @@ pub fn Oversized(comptime I: type, comptime V: type) type {
             // what it owns; on error the journals not yet destroyed are only closed.
             defer self.* = undefined;
             if (self.tracking) |*tracking| {
+                tracking.drop_marker();
                 tracking.drop_barriers();
                 // Remove the floors first, so an interrupted destroy only forces conservative
                 // recovery of the pair data left behind.

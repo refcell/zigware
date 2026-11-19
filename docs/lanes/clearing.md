@@ -191,7 +191,7 @@ qmdb `current` (balances, over the MMB) and `keyless` (payout log, over the MMR)
     bug. The last one, archive immutable interrupted destroy, now runs with
     `runtime.buffer.mocks.Storage.keep_unsynced` (retention 1.0).
 - [x] Async start_sync step 4: the prunable archive's pipelined `start_sync` and 11 tests.
-- [ ] Step 4b: oversized's in-flight marker generation (`marker_sync_pending`) on metadata's
+- [x] Step 4b: oversized's in-flight marker generation (`marker_sync_pending`) on metadata's
   `start_sync` completion (step 2c), and the archive's 4 marker-pipeline tests.
 
 ## Log
@@ -246,3 +246,4 @@ qmdb `current` (balances, over the MMB) and `keyless` (payout log, over the MMR)
 - 2026-11-19: freezer determinism gated (per runtime-telemetry's test-storage profile).
 - 2026-11-19: paged writer start_sync waits and the buffer range-sync tests (sync counts).
 - 2026-11-19: archive async start_sync step 4 (pipelined start_sync, 11 of 15 tests).
+- 2026-11-19: async start_sync step 4b (oversized marker generations, 4 marker tests).

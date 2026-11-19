@@ -10,9 +10,9 @@
 //! - prune: `retain_at_least(&requested, min)` and the journals settling the started syncs of
 //!   the sections they remove; a failed one surfaces at once.
 //! - restarts: independent per-section syncs, of which only completed ones survive a crash.
-//!
-//! The marker-pipeline tests (startup marker failure, closed-section boundaries, withheld
-//! markers) need metadata syncs in flight and are not ported yet.
+//! - markers: oversized's in-flight marker generation (`Tracking.marker_pending`): a marker
+//!   trails the data sync it publishes, starts beside the next request's data syncs, and a
+//!   failed generation fails the next request.
 
 const std = @import("std");
 const testing = std.testing;
@@ -359,4 +359,215 @@ test "prunable overlapping put_start_sync restarts after all handles complete" {
 
 test "prunable overlapping put_start_sync restarts only completed handles" {
     try run(Restarts(2).body);
+}
+const StartupMarkerFailure = struct {
+    fn body(ctx: deterministic.Context) !void {
+        var harness = try Harness.init();
+        defer harness.deinit();
+        const cfg = harness.config("startup-marker-failure", 4, translator.FourCap);
+        {
+            // One durable value with no published marker, so reopen derives one.
+            var archive = try harness.open(translator.FourCap, i32, cfg, "seed");
+            defer archive.deinit();
+            try archive.put(0, tests.test_key("zero"), 10);
+            try archive.sync();
+        }
+        var delayed: Delayed = undefined;
+        delayed.wrap(ctx.io(), &harness);
+        defer delayed.deinit();
+        try delayed.syncs.arm();
+        var archive = try delayed.open(&harness, cfg, "reopen");
+        defer archive.deinit();
+        // The derived marker sync is the only durability operation startup issues.
+        try testing.expectEqual(@as(usize, 1), delayed.syncs.parked());
+        delayed.syncs.fail_all();
+        // commonware: Error::Metadata; zigware's metadata error set is the journal's Io.
+        try testing.expectError(error.Io, archive.sync());
+    }
+};
+
+test "prunable startup marker failure fails the next sync" {
+    try run(StartupMarkerFailure.body);
+}
+
+const StartSyncPublishes = struct {
+    fn body(ctx: deterministic.Context) !void {
+        var harness = try Harness.init();
+        defer harness.deinit();
+        const cfg = harness.config("marker-lag", 4, translator.FourCap);
+        {
+            var delayed: Delayed = undefined;
+            delayed.wrap(ctx.io(), &harness);
+            defer delayed.deinit();
+            var archive = try delayed.open(&harness, cfg, "archive");
+            defer archive.deinit();
+            const first = try archive.put_start_sync(0, tests.test_key("zero"), 10);
+            defer first.release();
+            try testing.expectEqual(@as(usize, 2), delayed.syncs.parked());
+            delayed.syncs.release_all();
+            try first.wait();
+            // Moving to section 4 publishes section 0's boundary beside section 4's data.
+            try archive.put(4, tests.test_key("four"), 40);
+            const second = try archive.start_sync();
+            defer second.release();
+            try testing.expectEqual(@as(usize, 3), delayed.syncs.parked());
+            delayed.syncs.release_all();
+            try second.wait();
+        }
+        for ([_][]const u8{ "first_reopen", "second_reopen" }) |name| {
+            var archive = try harness.open(translator.FourCap, i32, cfg, name);
+            defer archive.deinit();
+            const ranges = archive.ranges();
+            try testing.expectEqual(@as(usize, 2), ranges.len);
+            try testing.expectEqual(@as(u64, 0), ranges[0].start);
+            try testing.expectEqual(@as(u64, 4), ranges[1].start);
+        }
+    }
+};
+
+test "prunable start_sync publishes the closed section boundary" {
+    try run(StartSyncPublishes.body);
+}
+
+const SyncPublishes = struct {
+    fn body(ctx: deterministic.Context) !void {
+        var harness = try Harness.init();
+        defer harness.deinit();
+        const cfg = harness.config("blocking-marker-lag", 4, translator.FourCap);
+        {
+            var delayed: Delayed = undefined;
+            delayed.wrap(ctx.io(), &harness);
+            defer delayed.deinit();
+            var archive = try delayed.open(&harness, cfg, "archive");
+            defer archive.deinit();
+            const first = try archive.put_start_sync(0, tests.test_key("zero"), 10);
+            defer first.release();
+            delayed.syncs.release_all();
+            try first.wait();
+            try archive.put(4, tests.test_key("four"), 40);
+            var done = false;
+            const handle = try ctx.child("sync").spawn(run_op, .{ blocking_sync, &archive, &done });
+            try ctx.sleep(.fromMilliseconds(10));
+            // The closed section's marker starts beside the two data syncs, not after them;
+            // releasing only the marker (parked last) does not finish the blocking sync.
+            try testing.expectEqual(@as(usize, 3), delayed.syncs.parked());
+            const data = release_newest_of_three(&delayed);
+            try ctx.sleep(.fromMilliseconds(10));
+            try testing.expect(!done);
+            for (data) |deferred| deferred.release({});
+            try try handle.join();
+        }
+        var archive = try harness.open(translator.FourCap, i32, cfg, "first_reopen");
+        defer archive.deinit();
+        try expect_index(&archive, 0, 10);
+        try expect_index(&archive, 4, 40);
+    }
+};
+
+test "prunable sync publishes the closed section boundary beside its data" {
+    try run(SyncPublishes.body);
+}
+
+const WithholdsMarker = struct {
+    fn body(ctx: deterministic.Context) !void {
+        var harness = try Harness.init();
+        defer harness.deinit();
+        const cfg = harness.config("marker-unproven-boundary", 4, translator.FourCap);
+        {
+            var delayed: Delayed = undefined;
+            delayed.wrap(ctx.io(), &harness);
+            defer delayed.deinit();
+            var archive = try delayed.open(&harness, cfg, "archive");
+            defer archive.deinit();
+            const first = try archive.put_start_sync(0, tests.test_key("zero"), 10);
+            defer first.release();
+            delayed.syncs.release_all();
+            try first.wait();
+            try archive.put(4, tests.test_key("four"), 40);
+            const second = try archive.start_sync();
+            defer second.release();
+            try testing.expectEqual(@as(usize, 3), delayed.syncs.parked());
+            // Complete only the marker; section 4's data stays in flight, so nothing beyond
+            // its floor is proven and the next request starts only section 8's data syncs.
+            const data = release_newest_of_three(&delayed);
+            try archive.put(8, tests.test_key("eight"), 80);
+            const before = delayed.syncs.starts();
+            const third = try archive.start_sync();
+            defer third.release();
+            try testing.expectEqual(@as(u64, 2), delayed.syncs.starts() - before);
+            for (data) |deferred| deferred.release({});
+            delayed.syncs.release_all();
+            try second.wait();
+            try third.wait();
+            delayed.syncs.unblock();
+            try archive.sync();
+        }
+        var archive = try harness.open(translator.FourCap, i32, cfg, "reopen");
+        defer archive.deinit();
+        const ranges = archive.ranges();
+        try testing.expectEqual(@as(usize, 3), ranges.len);
+        for (ranges, [_]u64{ 0, 4, 8 }) |range, start| {
+            try testing.expectEqual(start, range.start);
+            try testing.expectEqual(start, range.end);
+        }
+    }
+};
+
+test "prunable start_sync withholds the marker of an unproven boundary" {
+    try run(WithholdsMarker.body);
+}
+
+const DefersMarkers = struct {
+    fn start_eight(archive: *Archive) !void {
+        try archive.put(8, tests.test_key("eight"), 80);
+        const handle = try archive.start_sync();
+        handle.release();
+    }
+
+    fn body(ctx: deterministic.Context) !void {
+        var harness = try Harness.init();
+        defer harness.deinit();
+        const cfg = harness.config("marker-in-flight", 4, translator.FourCap);
+        var delayed: Delayed = undefined;
+        delayed.wrap(ctx.io(), &harness);
+        defer delayed.deinit();
+        var archive = try delayed.open(&harness, cfg, "archive");
+        defer archive.deinit();
+        const first = try archive.put_start_sync(0, tests.test_key("zero"), 10);
+        defer first.release();
+        delayed.syncs.release_all();
+        try first.wait();
+        // Section 4's data and section 0's marker start; only the data completes.
+        try archive.put(4, tests.test_key("four"), 40);
+        const second = try archive.start_sync();
+        defer second.release();
+        const marker = release_newest_of_three_but_marker(&delayed);
+        try second.wait();
+        // Section 4 is proven and idle, but the parked marker generation defers it: the
+        // request neither waits on the marker nor starts another one.
+        const before = delayed.syncs.starts();
+        var done = false;
+        const handle = try ctx.child("start").spawn(run_op, .{ &start_eight, &archive, &done });
+        try ctx.sleep(.fromMilliseconds(10));
+        try testing.expect(done);
+        try testing.expectEqual(@as(u64, 2), delayed.syncs.starts() - before);
+        marker.release({});
+        delayed.syncs.release_all();
+        try try handle.join();
+        try archive.sync();
+        // The blocking sync leaves its marker generation in flight.
+        delayed.syncs.release_all();
+    }
+
+    /// Releases the two data syncs of exactly three parked syncs, keeping the marker (newest).
+    fn release_newest_of_three_but_marker(delayed: *Delayed) runtime.storage.mocks.Deferred {
+        std.debug.assert(delayed.syncs.parked() == 3);
+        delayed.syncs.next().release({});
+        delayed.syncs.next().release({});
+        return delayed.syncs.next();
+    }
+};
+
+test "prunable start_sync defers markers while a marker generation is in flight" {
+    try run(DefersMarkers.body);
 }

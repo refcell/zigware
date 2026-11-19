@@ -94,9 +94,10 @@ storage-journal (thread T-01a1d58d-a981-75c2-966d-93dcd484f46b).
   `requested`, kept until a blocking `sync` and trimmed by `prune`, and
   `Oversized.start_sync_tracked` starts the journals' syncs and records them in each
   section's barrier, publishing a marker only once its sync is observed to have succeeded.
-  Markers still persist synchronously, so the 4 marker-pipeline tests wait for metadata's
-  `start_sync` completion (storage-merkle's step 2c). Blocking `sync` stays on the journals'
-  blocking syncs. Marshal waits on the completions at once until its step 6. Sections are a sorted
+  One marker generation may be in flight (`Tracking.marker_pending`, on metadata's
+  `start_sync`): a request publishes nothing while it is, and its failure fails the next
+  request. A blocking `sync` starts its marker beside the data syncs and waits only for the
+  data. Marshal waits on the completions at once until its step 6. Sections are a sorted
   list of `(start, slot)`; extra multi-put positions are a hash map pruned by scan. The
   recovery fuzz runs on faulty storage (see the fault model below) and checks retained
   entries against synced ones, per-section prefixes, the range helpers, and a second reopen.
@@ -128,17 +129,18 @@ entries, matched to zigware tests by what they check (zigware folds many into on
 
 | module | tests | ported | partial | open | not portable |
 |---|---|---|---|---|---|
-| archive | 93 | 89 | 0 | 4 | 0 |
+| archive | 93 | 93 | 0 | 0 | 0 |
 | freezer | 33 | 33 | 0 | 0 | 0 |
 | ordinal | 44 | 44 | 0 | 0 | 0 |
 | cache | 14 | 14 | 0 | 0 | 0 |
 | storage `utils.rs` (`bits_for_indices`, in ordinal) | 1 | 1 | 0 | 0 | 0 |
 
-The 11 pipelined `start_sync` and in-flight sync tests are in
-`archive/prunable/start_sync_test.zig` (2026-11-19).
+The 15 pipelined `start_sync`, in-flight sync, and marker-pipeline tests are in
+`archive/prunable/start_sync_test.zig` (2026-11-19), with one more that a deferred marker
+generation is neither waited on nor duplicated.
 
-Open (they need marker syncs in flight, metadata `start_sync` from step 2c):
-- [ ] `test_startup_marker_failure_fails_next_sync`,
+Marker pipeline (step 4b, done):
+- [x] `test_startup_marker_failure_fails_next_sync`,
   `test_start_sync_publishes_closed_section_boundary`,
   `test_sync_publishes_closed_section_boundary`,
   `test_start_sync_withholds_marker_for_unproven_boundary`.
@@ -205,3 +207,5 @@ Partial:
 - 2026-11-19: async start_sync step 4: the prunable archive's pipelined `start_sync` with
   `requested`, oversized's tracked start_sync on the journals' started syncs, and 11 of the
   15 pipelined tests (clearing lane).
+- 2026-11-19: step 4b: oversized's in-flight marker generation and the archive's last 4
+  pipelined tests (clearing lane).
