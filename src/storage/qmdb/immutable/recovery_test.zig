@@ -206,10 +206,12 @@ test "immutable prune retires only the pruned location of a collision bucket" {
         k1.bytes[31] = 0x01;
         k2.bytes[31] = 0x02;
         const k3 = fill(3);
-        // 0: initial commit, 1: Set(k1), 2: commit, 3-4: Set(k2), Set(k3), 5: commit(floor 4).
+        // 0: initial commit, 1: Set(k1), 2: commit, 3-4: Set(k2), Set(k3), 5: commit(floor 3).
+        // Floor 3 retires k1 and permits prune(2).
         try apply_sets(&db, &.{.{ k1, fill(1) }}, null);
-        try apply_sets(&db, &.{ .{ k2, fill(2) }, .{ k3, fill(3) } }, 4);
-        try expect_value(try db.get(&k1), fill(1));
+        try apply_sets(&db, &.{ .{ k2, fill(2) }, .{ k3, fill(3) } }, 3);
+        // The floor retires k1 from reads, and it stays indexed until it is pruned.
+        try expect_value(try db.get(&k1), null);
         try expect_value(try db.get(&k2), fill(2));
         try testing.expectEqual(@as(u64, 3), db.snapshot.len());
         try db.prune(2);

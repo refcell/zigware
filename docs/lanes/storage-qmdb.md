@@ -195,7 +195,9 @@ which every database here is built on.
   re-export theirs). Applied the commit's 95 `storage/conformance.toml` hash changes, its
   clearing ledger vectors, and the dkg example's state roots, which were regenerated with
   the scratch Rust vector test over 43b357a41 plus this commit only.
-- [ ] Upstream 90960d81c (#5770): immutable `get`/`get_many` read from the inactivity floor.
+- [x] Upstream 90960d81c (#5770): immutable `get`/`get_many` read from the inactivity floor,
+  so live, pruned, reopened, and synced databases at one commitment answer alike; sets below
+  the floor stay indexed until pruned. Its mod.rs and sync/tests.rs assertions are ported.
 - [ ] Upstream `qmdb::commit_floor_at`: immutable init reads its floor through it and
   returns its errors instead of panicking.
 - [ ] Upstream 102430409 (#5649): the store's strategy and any's shared batched read.
@@ -425,3 +427,4 @@ which every database here is built on.
 - 2026-11-19: qmdb duration metrics timed on an optional config `io`; metrics tests ported.
 - 2026-11-19: qmdb dbs pass their `io` down to their journals.
 - 2026-11-19: upstream a9ffc25f3: one qmdb operation tag table; hashes and vectors updated.
+- 2026-11-19: upstream 90960d81c: immutable database reads start at the inactivity floor.

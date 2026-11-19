@@ -229,14 +229,16 @@ pub fn Db(F: type, K: type, E: type, C: type, H: type, T: type) type {
             return self.inactivity_floor_loc;
         }
 
-        /// The value of `key`, or null if it was never set (or its set was pruned). The caller
-        /// owns it.
+        /// The value of `key`, or null if no set at or above the inactivity floor holds it. The
+        /// caller owns it. Every database at the same commitment answers alike, however far it
+        /// has pruned and whether or not it was reopened; null does not mean `key` may be set,
+        /// since a key the floor retired was still set once.
         pub fn get(self: *const Self, key: *const K) !?Value {
             self.metrics.get_calls.metric().inc();
             const timing = self.metrics.start("get_duration");
             defer timing.finish();
             self.metrics.lookups_requested.metric().inc();
-            return self.get_from(key, 0);
+            return self.get_from(key, self.inactivity_floor_loc);
         }
 
         /// The value of `key` if a set at or above `floor` holds it.
@@ -249,9 +251,9 @@ pub fn Db(F: type, K: type, E: type, C: type, H: type, T: type) type {
             return null;
         }
 
-        /// The values of `keys` into `out`.
+        /// The values of `keys` into `out`, each as `get` reads it.
         pub fn get_many(self: *const Self, keys: []const K, out: []?Value) !void {
-            return self.get_many_from(keys, 0, out);
+            return self.get_many_from(keys, self.inactivity_floor_loc, out);
         }
 
         /// The values of `keys` held by sets at or above `floor` into `out`. The caller owns
@@ -338,6 +340,8 @@ pub fn Db(F: type, K: type, E: type, C: type, H: type, T: type) type {
         }
 
         /// Prunes operations below `location`, which may not exceed the inactivity floor.
+        /// Pruning leaves `get` and `get_many` results unchanged; proofs by location still need
+        /// their operations and Merkle nodes retained.
         pub fn prune(self: *Self, location: u64) !void {
             self.metrics.prune_calls.metric().inc();
             const timing = self.metrics.start("prune_duration");

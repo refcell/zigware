@@ -93,6 +93,15 @@ fn run(comptime F: type, floor: ?u64) !void {
     // A key set at or after the floor reads back with its value.
     try testing.expectEqual(try source_db.get(&fill(40)), try synced.db.get(&fill(40)));
     try testing.expect((try synced.db.get(&fill(40))) != null);
+    // The synced index starts at the floor: with floor 17 it holds the sets at 17..20 and the
+    // second batch's 15. The source still indexes the earlier sets, but both hide them.
+    const indexed: u64 = if (floor) |location| 20 - location + 1 + 15 else 35;
+    try testing.expectEqual(indexed, synced.db.snapshot.len());
+    try testing.expectEqual(@as(u64, 35), source_db.snapshot.len());
+    if (floor != null) {
+        try testing.expect((try source_db.get(&fill(1))) == null);
+        try testing.expect((try synced.db.get(&fill(1))) == null);
+    }
 }
 
 test "immutable sync from genesis matches the source" {

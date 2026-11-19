@@ -76,7 +76,10 @@ test "immutable pruning keeps whole sections and persists across reopen" {
         try testing.expectEqual(half, db.bounds());
         const start = db.bounds().start;
         try testing.expect(try db.get(&key_at(&sorted, start - 1)) == null);
-        try testing.expect(try db.get(&key_at(&sorted, start)) != null);
+        // The key at the retained start is below the floor, so it is not read either; the key
+        // at the floor is.
+        try testing.expect(try db.get(&key_at(&sorted, start)) == null);
+        try testing.expect(try db.get(&key_at(&sorted, floor)) != null);
         const root = db.root();
         try db.sync();
         db.deinit();
@@ -96,7 +99,8 @@ test "immutable pruning keeps whole sections and persists across reopen" {
 }
 
 // Commonware's run_prune_retires_pruned_sets: with one operation per section, each prune
-// retires exactly the sets below the retained start.
+// retires exactly the sets below the retained start from the index, and a set at the retained
+// start survives; it is readable when it is at or above the floor.
 test "immutable prune retires exactly the sets below the retained start" {
     inline for (families) |F| {
         var harness = try support.Harness.init(gpa);
@@ -121,13 +125,26 @@ test "immutable prune retires exactly the sets below the retained start" {
             try testing.expectEqual(10 - location / 2, db.snapshot.len());
         }
         try testing.expect(try db.get(&fill(0)) == null);
-        try db.prune(9); // Retires the set at 7, keeps the one at 9.
+        // The set at 9 stays indexed at the pruning boundary, though it is below the floor.
+        const key4 = fill(4);
+        try db.prune(9); // Retires the set at 7.
         try testing.expectEqual(@as(u64, 6), db.snapshot.len());
-        try testing.expect((try db.get(&fill(4))).?.eql(fill(4)));
+        var positions = db.snapshot.get(&key4.bytes);
+        try testing.expectEqual(@as(?u64, 9), positions.next());
+        try testing.expectEqual(@as(?u64, null), positions.next());
+        try testing.expect(try db.get(&key4) == null);
+        // Pruning past it retires it from the index too.
         try db.prune(10);
         try testing.expectEqual(@as(u64, 5), db.snapshot.len());
-        try testing.expect(try db.get(&fill(4)) == null);
-        try testing.expect((try db.get(&fill(5))).?.eql(fill(5)));
+        var retired = db.snapshot.get(&key4.bytes);
+        try testing.expectEqual(@as(?u64, null), retired.next());
+        // Pruning to the floor keeps the set there, which stays readable.
+        try testing.expectEqual(@as(u64, 19), db.inactivity_floor());
+        try db.prune(19);
+        try testing.expectEqual(@as(u64, 19), db.bounds().start);
+        try testing.expectEqual(@as(u64, 1), db.snapshot.len());
+        try testing.expect(try db.get(&fill(8)) == null);
+        try testing.expect((try db.get(&fill(9))).?.eql(fill(9)));
     }
 }
 
@@ -167,8 +184,9 @@ fn expect_digest(actual: ?Digest, expected: ?Digest) !void {
     if (expected) |e| try testing.expect(actual.?.eql(e));
 }
 
-// Commonware's run_single_commit_live_set: a floor at its own commit keeps the sets readable
-// until reopen, allows pruning to the commit but not past it, and keeps the commit's metadata.
+// Commonware's run_single_commit_live_set: a floor at its own commit retires its sets from
+// reads at once (they stay indexed until pruned), allows pruning to the commit but not past
+// it, and keeps the commit's metadata.
 test "immutable a commit at its own floor anchors the pruned database" {
     inline for (families) |F| {
         var harness = try support.Harness.init(gpa);
@@ -188,7 +206,11 @@ test "immutable a commit at its own floor anchors the pruned database" {
         try testing.expectEqual(@as(u64, commit_loc + 1), db.bounds().end);
         try testing.expectEqual(@as(u64, commit_loc), db.inactivity_floor());
         const root = db.root();
-        for ([_]u8{ 1, 2, 3 }) |k| try expect_digest(try db.get(&fill(k)), fill(k + 10));
+        try testing.expectEqual(@as(u64, 3), db.snapshot.len());
+        const keys = [_]Digest{ fill(1), fill(2), fill(3) };
+        var values: [keys.len]?Digest = undefined;
+        try db.get_many(&keys, &values);
+        for (values) |got| try expect_digest(got, null);
         try db.prune(commit_loc);
         try testing.expect(db.bounds().start <= commit_loc);
         try testing.expectEqual(@as(u64, commit_loc + 1), db.bounds().end);
@@ -212,7 +234,9 @@ test "immutable a commit at its own floor anchors the pruned database" {
         try db.apply_batch(follow);
         try db.commit();
         try testing.expectEqual(@as(u64, commit_loc + 2), db.inactivity_floor());
-        try expect_digest(try db.get(&fill(4)), fill(14));
+        // The new commit's floor retires the new key too, though it stays indexed until pruned.
+        try testing.expectEqual(@as(u64, 1), db.snapshot.len());
+        try expect_digest(try db.get(&fill(4)), null);
         try expect_digest(try db.get(&fill(1)), null);
         try expect_digest(try db.get_metadata(), null);
     }

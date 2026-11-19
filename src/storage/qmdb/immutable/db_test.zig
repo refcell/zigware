@@ -279,9 +279,9 @@ test "immutable batch reads ignore sets below their floor" {
         for ([_]u8{ 1, 2, 3 }) |k| try expect_value(try grandchild.get(&fill(k), &db), null);
         try db.apply_batch(parent);
         try db.commit();
-        // The database itself still reads below the floor; batches on it do not.
-        try expect_value(try db.get(&fill(1)), fill(101));
-        try expect_batch_reads(&db, &.{ fill(1), fill(2) }, &.{ null, fill(102) });
+        // The database and batches on it read alike: neither serves a set below the floor.
+        try expect_value(try db.get(&fill(1)), null);
+        try expect_reads(&db, &.{ fill(1), fill(2) }, &.{ null, fill(102) });
         // `twin` shares `old`'s translated key, so the index yields both locations for either.
         var twin = fill(1);
         twin.bytes[31] = 9;
@@ -291,29 +291,32 @@ test "immutable batch reads ignore sets below their floor" {
         defer collided.release();
         try db.apply_batch(collided);
         try db.commit();
-        try expect_batch_reads(&db, &.{ fill(1), twin }, &.{ null, fill(104) });
+        try expect_reads(&db, &.{ fill(1), twin }, &.{ null, fill(104) });
         try db.prune(base);
         try testing.expect(db.bounds().start > 1);
-        try expect_value(try db.get(&fill(1)), null);
-        try expect_batch_reads(&db, &.{ fill(1), fill(2) }, &.{ null, fill(102) });
-        try expect_batch_reads(&db, &.{ fill(1), twin }, &.{ null, fill(104) });
+        try expect_reads(&db, &.{ fill(1), fill(2) }, &.{ null, fill(102) });
+        try expect_reads(&db, &.{ fill(1), twin }, &.{ null, fill(104) });
         db.deinit();
         db = try harness.open(F, null);
-        try expect_batch_reads(&db, &.{ fill(1), fill(2) }, &.{ null, fill(102) });
-        try expect_batch_reads(&db, &.{ fill(1), twin }, &.{ null, fill(104) });
+        try expect_reads(&db, &.{ fill(1), fill(2) }, &.{ null, fill(102) });
+        try expect_reads(&db, &.{ fill(1), twin }, &.{ null, fill(104) });
     }
 }
 
-/// A fresh batch on `db` reads `keys` as `wants`, through both `get` and `get_many`.
-fn expect_batch_reads(db: anytype, keys: []const Digest, wants: []const ?Digest) !void {
+/// `db` and a fresh batch on it read `keys` as `wants`, through both `get` and `get_many`.
+fn expect_reads(db: anytype, keys: []const Digest, wants: []const ?Digest) !void {
     var batch = try db.new_batch();
     defer batch.deinit();
     var values: [4]?Digest = undefined;
+    var direct: [4]?Digest = undefined;
     assert(keys.len <= values.len and keys.len == wants.len);
     try batch.get_many(keys, db, values[0..keys.len]);
-    for (keys, wants, values[0..keys.len]) |*k, want, got| {
+    try db.get_many(keys, direct[0..keys.len]);
+    for (keys, wants, values[0..keys.len], direct[0..keys.len]) |*k, want, got, own| {
         try expect_value(got, want);
+        try expect_value(own, want);
         try expect_value(try batch.get(k, db), want);
+        try expect_value(try db.get(k), want);
     }
 }
 

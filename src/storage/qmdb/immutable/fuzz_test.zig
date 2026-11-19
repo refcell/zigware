@@ -198,11 +198,13 @@ fn Driver(comptime F: type) type {
             try self.pending.append(gpa, entry);
         }
 
-        /// The value the database must serve for `key`, if any.
+        /// The value the database must serve for `key`, if any: reads skip sets below the
+        /// retained start and below the inactivity floor.
         fn expected(self: *const Self, key: *const Digest) ?[]const u8 {
+            const floor = @max(self.db.bounds().start, self.db.inactivity_floor());
             for (self.applied.items) |entry| {
                 if (!entry.key.eql(key.*)) continue;
-                if (!entry.indexed or entry.loc < self.db.bounds().start) return null;
+                if (!entry.indexed or entry.loc < floor) return null;
                 return entry.value;
             }
             return null;
