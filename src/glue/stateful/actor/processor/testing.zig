@@ -230,6 +230,8 @@ pub const TestApp = struct {
     probe: ?*Probe = null,
     capture_probe: ?*Probe = null,
     finalized_probe: ?*Probe = null,
+    /// Gates each build on the parent's digest (commonware's proposal gate).
+    propose_probe: ?*Probe = null,
     observations: ?*std.ArrayList(Observation) = null,
 
     /// Pre-apply reads (commonware `Captured`).
@@ -290,7 +292,6 @@ pub const TestApp = struct {
         batches: Any.Unmerkleized,
         _: void,
     ) !?Built {
-        _ = app;
         var owned = batches;
         var parent = (ancestry.next() catch |err| {
             owned.deinit();
@@ -300,6 +301,10 @@ pub const TestApp = struct {
             return null;
         };
         defer parent.deinit();
+        if (app.propose_probe) |probe| probe.call(parent.digest()) catch |err| {
+            owned.deinit();
+            return err;
+        };
         const at = parent.inner().height().next();
         var merkleized = try execute(owned, at, context.round.view.get());
         errdefer merkleized.deinit();

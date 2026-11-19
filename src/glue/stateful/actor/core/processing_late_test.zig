@@ -392,3 +392,102 @@ test "stateful processing: consecutive finalizations preserve a descendant verif
 test "stateful processing: consecutive finalizations preserve a descendant proposal" {
     try consecutive_finalizations(.propose);
 }
+
+/// Blocks at views 1 to 4, each on the last. The fixture caches the first two (finalizable
+/// without a replay); the third and fourth come from a scratch harness, so the fixture holds
+/// none of their state.
+fn prunable_chain(fixture: *Fixture) ![4]TestBlock {
+    var scratch: harness.Harness = undefined;
+    try scratch.init();
+    defer scratch.deinit();
+    const genesis = TestBlock.genesis();
+    var chain: [4]TestBlock = undefined;
+    chain[0] = try fixture.harness.stage_pending_child(&genesis, 1);
+    chain[1] = try fixture.harness.stage_pending_child(&chain[0], 2);
+    const first = try scratch.stage_pending_child(&genesis, 1);
+    try testing.expect(chain[0].digest().eql(first.digest()));
+    const second = try scratch.stage_pending_child(&chain[0], 2);
+    try testing.expect(chain[1].digest().eql(second.digest()));
+    chain[2] = try scratch.stage_pending_child(&chain[1], 3);
+    chain[3], var batch = try scratch.build_child(&chain[2], 4);
+    batch.deinit();
+    try fixture.harness.provider_state.insert(chain[2]);
+    return chain;
+}
+
+/// Prunes after every finalized height and retains nothing beyond the pending window.
+fn eager_pruning() !harness.Processor.Pruning {
+    const config: @import("../processor/pruning.zig").PruneConfig = .{
+        .maintenance_interval = 1,
+        .retained_marshal_blocks = 0,
+        .retained_qmdb_blocks = 0,
+    };
+    return harness.Processor.Pruning.init(gpa, config, 1, 0);
+}
+
+fn pruning_joins_execution(request: Managed) !void {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer deinit_fixture(&fixture);
+    // Set before any message, so the loop reads it after the mailbox hand-off.
+    fixture.harness.processor.pruning = try eager_pruning();
+    const chain = try prunable_chain(&fixture);
+    // Null target: the first gate holds the parent's replay, the second the request's next
+    // step (the child's processing, or the build on the parent).
+    var probe: harness.Probe = .{ .target = null };
+    defer probe.deinit();
+    const replay = try probe.add_gate();
+    var replay_started = replay.started;
+    defer replay_started.deinit();
+    var replay_release = replay.release;
+    const step = try probe.add_gate();
+    var step_started = step.started;
+    defer step_started.deinit();
+    var step_release = step.release;
+    for ([_]*harness.TestApp{
+        &fixture.processing.verifications.verifier.app,
+        &fixture.processing.processor.app,
+    }) |app| {
+        app.probe = &probe;
+        app.propose_probe = &probe;
+    }
+
+    const blocks: []const TestBlock = switch (request) {
+        .verify => &.{ chain[3], chain[2] },
+        .propose => &.{ chain[2], chain[1] },
+    };
+    var pending = try Descendant.send(&fixture, request, blocks);
+    defer pending.deinit();
+    try replay_started.recv();
+    var first_waiter = try fixture.finalize(chain[0]);
+    defer first_waiter.deinit();
+    try first_waiter.wait();
+    var second_waiter = try fixture.finalize(chain[1]);
+    defer second_waiter.deinit();
+    // The prune waits for the parent's replay to finish.
+    try testing.io.sleep(.fromMilliseconds(20), .awake);
+    try testing.expectEqual(0, fixture.prunes.items.len);
+    try replay_release.send({});
+    // The request's next step starts only once the prune completed.
+    try step_started.recv();
+    try testing.expectEqualSlices(u64, &.{1}, fixture.prunes.items);
+    try step_release.send({});
+    try testing.expect(try pending.wait());
+    try second_waiter.wait();
+    try testing.expectEqual(2, probe.calls);
+}
+
+// commonware `pruning_joins_execution_before_database_prune` (verify case): pruning waits
+// for a verification's replay of the parent before pruning, and the verification then
+// continues without replaying the parent again. Adapted: barriers and prunes complete
+// synchronously here, so the prune is seen through marshal's recorded prunes, and the
+// target barrier's pending flush is not modeled.
+test "stateful processing: pruning joins a verification's replay before pruning" {
+    try pruning_joins_execution(.verify);
+}
+
+// commonware `pruning_joins_execution_before_database_prune` (propose case): the same with
+// a build on the replayed parent.
+test "stateful processing: pruning joins a proposal's replay before pruning" {
+    try pruning_joins_execution(.propose);
+}
