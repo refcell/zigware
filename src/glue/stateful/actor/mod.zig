@@ -7,6 +7,9 @@ const std = @import("std");
 pub const plan = @import("syncer/plan.zig");
 pub const SyncPlan = plan.SyncPlan;
 pub const SyncState = plan.SyncState;
+pub const syncer_mailbox = @import("syncer/mailbox.zig");
+pub const Artifact = syncer_mailbox.Artifact;
+pub const SyncerMailbox = syncer_mailbox.Mailbox;
 
 pub const pruning = @import("processor/pruning.zig");
 pub const PruneConfig = pruning.PruneConfig;
