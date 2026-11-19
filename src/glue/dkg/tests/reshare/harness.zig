@@ -131,6 +131,8 @@ pub const ReshareEngine = struct {
     sharing_mode: cryptography.bls12381.primitives.sharing.Mode = .non_zero_counter,
     /// Epochs whose ceremonies fail: every validator drops their DKG messages.
     failures: []const u64 = &.{},
+    /// commonware `with_elector`; the default rotates the leader every view.
+    elector: Validator.ElectorConfig = .default(),
 
     /// commonware `ReshareEngine::new`: five participants, committees of four.
     pub fn create(gpa: Allocator) !ReshareEngine {
@@ -168,6 +170,7 @@ pub const ReshareEngine = struct {
         self.network = network_kind;
         self.sharing_mode = .non_zero_counter;
         self.failures = &.{};
+        self.elector = .default();
         self.rotation_stride = rotation_stride;
         self.committee_sizes = try gpa.dupe(usize, committee_sizes);
         errdefer gpa.free(self.committee_sizes);
@@ -381,6 +384,7 @@ pub const ReshareEngine = struct {
             .initial = &self.initial,
             .network = self.network,
             .sharing_mode = self.sharing_mode,
+            .elector = self.elector,
             .partition_prefix = prefixes[index],
         };
     }
@@ -416,11 +420,20 @@ fn run_node(ctx: Context, started: Started) void {
     @panic("reshare validator stopped");
 }
 
-/// commonware `good_link`.
-pub const good_link: p2p.simulated.Link = .{
-    .latency = Duration.from_millis(20),
-    .jitter = Duration.from_millis(5),
-    .success_rate = 1.0,
-};
+/// commonware `stable_leaders`: terms of two views, a 5 s stall timeout, and two optimistic
+/// views, so every dealer of the largest committee (7) leads a term in an epoch's inclusion
+/// window.
+pub fn stable_leaders() Validator.ElectorConfig {
+    const length = utils.NonZero(u32).init(2).?;
+    return Validator.ElectorConfig.default().with_term(.new(length), .from_secs(5), .new(2));
+}
+
+/// commonware's `#[values(RoundRobin::default(), stable_leaders())]`.
+pub const electors = [_]Validator.ElectorConfig{ .default(), stable_leaders() };
+
+/// The link of commonware's reshare plans: `PlanBuilder`'s default (10ms latency, 5ms jitter),
+/// not the dkg harness's 20ms `good_link`. Timing-sensitive ceremonies (full rotation) depend
+/// on it.
+pub const good_link: p2p.simulated.Link = simulate.plan.default_link;
 
 pub const Plan = simulate.Plan(ReshareEngine);

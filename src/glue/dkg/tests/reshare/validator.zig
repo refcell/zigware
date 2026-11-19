@@ -43,6 +43,7 @@ const SharingMode = cryptography.bls12381.primitives.sharing.Mode;
 const fd = cryptography.bls12381.dkg.feldman_desmedt;
 const FixedEpocher = consensus.types.FixedEpocher;
 const Exact = utils.acknowledgement.Exact;
+const RoundRobin = simplex.elector.RoundRobin(Sha256);
 
 /// commonware `NAMESPACE`.
 pub const namespace = "_COMMONWARE_GLUE_DKG_RESHARE_E2E";
@@ -104,7 +105,7 @@ pub fn Validator(comptime T: type) type {
             pub const Manager = *T.Manager;
             pub const Marshal = Node.Mailbox;
             pub const Blocker = T.Blocker;
-            pub const ElectorConfig = simplex.elector.RoundRobin(Sha256);
+            pub const ElectorConfig = RoundRobin;
             pub const Elector = simplex.elector.RoundRobinElector;
             pub const Automaton = *Wrapper;
             pub const Relay = *Wrapper;
@@ -113,11 +114,13 @@ pub fn Validator(comptime T: type) type {
             pub const Sender = T.Network.Sender;
             pub const Receiver = T.Network.Receiver;
 
-            pub fn build_elector(config: ElectorConfig, gpa: Allocator, n: u32) !Elector {
+            pub fn build_elector(config: RoundRobin, gpa: Allocator, n: u32) !Elector {
                 return config.build(gpa, n);
             }
         };
         const Orchestrator = orchestrator.Actor(OrchestratorTypes);
+        /// commonware's `RoundRobin` elector config (`ReshareEngine::with_elector`).
+        pub const ElectorConfig = RoundRobin;
         pub const Channel = Node.Channel;
         pub const MarshalMailbox = Node.Mailbox;
 
@@ -148,6 +151,7 @@ pub fn Validator(comptime T: type) type {
             /// Which transport the directories address (commonware `Network`).
             network: lookup.Network,
             sharing_mode: SharingMode,
+            elector: ElectorConfig = .default(),
             /// Owned by the caller; outlives the validator.
             partition_prefix: []const u8,
             /// Receives a marshal mailbox clone (owned by the slot's holder) once marshal is up.
@@ -471,7 +475,7 @@ pub fn Validator(comptime T: type) type {
                 .reporter = self.wrapper,
                 .strategy = .{},
                 .simplex = .{
-                    .elector = .default(),
+                    .elector = self.config.elector,
                     .mailbox_size = 3,
                     .replay_buffer = 2048,
                     .write_buffer = 2048,
