@@ -180,8 +180,9 @@ fn gen_signature(gpa: Allocator, u: *Unstructured) arbitrary.Error!Signature {
     return private_key.sign("_COMMONWARE_CRYPTOGRAPHY_BLS12381_TEST", message.items);
 }
 
+// About 65 s even in ReleaseSafe (most of it signature generation); nightly runs it.
 test "conformance: bls12381 scheme keys and signatures" {
-    try shared.skip_slow();
+    try shared.skip_heavy();
     const name = "scheme::tests::conformance::CodecConformance<";
     try shared.verify(name ++ "PrivateKey>", PrivateKey, gen_private_key);
     try shared.verify(name ++ "PublicKey>", PublicKey, gen_public_key);
