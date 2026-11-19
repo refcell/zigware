@@ -169,6 +169,16 @@ fn await_closed(sender: *const oneshot.Sender(void)) !void {
     return error.TestTimedOut;
 }
 
+/// Waits until `waiter`'s block is acknowledged (bounded, so a lost acknowledgement fails).
+fn await_acknowledged(waiter: *const @import("utils").acknowledgement.Exact.Waiter) !void {
+    // Each pass sleeps 1 ms; the bound is a hang guard.
+    for (0..10_000) |_| {
+        if (waiter.poll()) |outcome| return outcome;
+        try std.testing.io.sleep(.fromMilliseconds(1), .awake);
+    }
+    return error.TestTimedOut;
+}
+
 /// A parent whose state is not cached, and its child (uncached too), over genesis.
 fn uncached_pair(fixture: *Fixture) !struct { TestBlock, TestBlock } {
     const genesis = TestBlock.genesis();
@@ -357,4 +367,42 @@ test "stateful processing: a pending proposal does not block a new verification"
     try propose_gate.release.send({});
     const built = try proposal.recv();
     built.discard();
+}
+
+test "stateful processing: a cancelled handoff proposal unblocks finalization" {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer check(&fixture);
+    const genesis = TestBlock.genesis();
+    var propose_probe: Probe = .{ .target = genesis.digest() };
+    defer propose_probe.deinit();
+    var gate = try propose_probe.add_gate();
+    defer gate.started.deinit();
+    // Released on any exit, so a failed assertion still lets the held build end.
+    var release: ?oneshot.Sender(void) = gate.release;
+    defer if (release) |*sender| sender.deinit();
+    fixture.processing.processor.app.propose_probe = &propose_probe;
+
+    // A prepare on genesis, held in the application.
+    const pair = try oneshot.channel(fixture_mod.Mailbox.Built, gpa, std.testing.io);
+    var proposer = pair.receiver;
+    try fixture.send(.{ .propose = .{
+        .context = .{ .round = harness_mod.round(1) },
+        .ancestry = try fixture.harness.ancestry(&.{genesis}),
+        .upstream = {},
+        .proposal = .{ .prepare = pair.sender },
+    } });
+    try gate.started.recv();
+    // The finalization queues behind the held build.
+    const winner = try uncached_child(&fixture, &genesis, 1);
+    var waiter = try fixture.finalize(winner);
+    defer waiter.deinit();
+    try std.testing.io.sleep(.fromMilliseconds(20), .awake);
+    try testing.expect(waiter.poll() == null);
+    try testing.expect(!release.?.is_closed());
+
+    // The proposer leaving cancels the build, and the queued finalization applies.
+    proposer.deinit();
+    try await_acknowledged(&waiter);
+    try await_closed(&release.?);
 }

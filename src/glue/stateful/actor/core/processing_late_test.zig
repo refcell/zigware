@@ -337,19 +337,25 @@ fn consecutive_finalizations(request: Managed) !void {
     var verify_first = try fixture.verify(&.{ first, genesis });
     defer verify_first.deinit();
     try testing.expect(!verify_first.is_ready());
-    try finalize_across(&fixture, &probe, &descendant, &replay_release, .{ first, second });
-    try testing.expect(try verify_first.recv());
+    try finalize_across(&fixture, &probe, &descendant, &replay_release, &verify_first, .{
+        first,
+        second,
+    });
     // Each block ran once: the finalizations reused the request's executions.
     try testing.expectEqual(3, probe.calls);
 }
 
 /// Finalizes `blocks[0]` while its replay is held, then `blocks[1]` while the descendant's
-/// own processing is held, and checks the descendant completes valid.
+/// own processing is held, and checks the descendant completes valid. `verify_first` (a
+/// verification of `blocks[0]` joined to its replay) is answered valid before the second
+/// finalization, as in commonware: once the anchor passes `blocks[0]`, a resumed acquisition
+/// needs its canonical digest, which this provider does not record, and would wait.
 fn finalize_across(
     fixture: *Fixture,
     probe: *harness.Probe,
     descendant: *Descendant,
     replay_release: *utils.channel.oneshot.Sender(void),
+    verify_first: *utils.channel.oneshot.Receiver(bool),
     blocks: [2]TestBlock,
 ) !void {
     const second_gate = try probe.add_gate();
@@ -367,6 +373,7 @@ fn finalize_across(
     try testing.expectEqual(null, first_waiter.poll());
     try replay_release.send({});
     try first_waiter.wait();
+    try testing.expect(try verify_first.recv());
     try second_started.recv();
     try second_release.send({});
     try own_started.recv();
@@ -1160,6 +1167,19 @@ test "stateful processing: a tip redelivery keeps an acquiring verification" {
 }
 
 /// A probe's gate with its two ends, the release still owned until sent.
+/// Waits (bounded) until a speculative request's phase has posted its completion.
+fn await_posted(fixture: *Fixture) !void {
+    const verifications = &fixture.processing.verifications;
+    for (0..2000) |_| {
+        verifications.mutex.lockUncancelable(io);
+        const posted = verifications.done.items.len > 0;
+        verifications.mutex.unlock(io);
+        if (posted) return;
+        try testing.io.sleep(.fromMilliseconds(1), .awake);
+    }
+    return error.TestTimedOut;
+}
+
 const HeldGate = struct {
     started: utils.channel.oneshot.Receiver(void),
     release: utils.channel.oneshot.Sender(void),
@@ -1313,13 +1333,13 @@ test "stateful processing: a paused acquisition restarts after finalization" {
 
 // commonware `finalization_rejects_next_step_with_stale_round`: a handoff's recovery step
 // retained across a finalization selects a successor whose round is at or before the
-// finalized round; the handoff declines, and the retained block is processed once.
-// Adapted: the finalized and retained blocks are served by the provider, and the answer is
-// read after the finalized hook returns, since the loop that answers also runs the hook.
-// Divergence (reported to the stateful lane): commonware selects the successor while the
-// hook runs, under the finalization's boundary, which rejects it unprocessed; zigware
-// selects it once admission reopens, so the stale block is processed (and still declined),
-// and commonware's `process_calls.at(stale) == 0` is not asserted.
+// finalized round; the finalization's boundary rejects it unprocessed, the handoff declines,
+// and the retained block is processed once. Adapted: the finalized and retained blocks are
+// served by the provider; the retained step's completion is awaited before the hook opens
+// (commonware's scheduler finishes it while the hook is held); and the answer is read after
+// the hook returns, since the loop that answers also runs the hook. The loop completes posted
+// steps under the finalizing admission before reopening it, so the successor is still
+// selected under the boundary.
 test "stateful processing: a finalization rejects a next step with a stale round" {
     var fixture: Fixture = undefined;
     try fixture.init();
@@ -1344,13 +1364,13 @@ test "stateful processing: a finalization rejects a next step with a stale round
     const stale_height = retained.height().next();
     const stale = TestBlock.init(retained.digest(), stale_height, stale_round, retained.target);
 
-    // The gate holds the recovery's processing of the retained block.
-    var probe: harness.Probe = .{ .target = retained.digest() };
+    // Null target on the speculative path only: the probe counts every block the recovery
+    // processes, and its gate holds the first, the retained block.
+    var probe: harness.Probe = .{ .target = null };
     defer probe.deinit();
     var held = try HeldGate.add(&probe);
     defer held.deinit();
     fixture.processing.verifications.verifier.app.probe = &probe;
-    fixture.processing.processor.app.probe = &probe;
     var hook_probe: harness.Probe = .{ .target = finalized.digest() };
     defer hook_probe.deinit();
     var hook = try HeldGate.add(&hook_probe);
@@ -1372,6 +1392,7 @@ test "stateful processing: a finalization rejects a next step with a stale round
     defer receipt.deinit();
     try hook.started.recv();
     try held.open();
+    try await_posted(&fixture); // The retained step finishes while the hook is held.
     // The loop runs the hook, so the handoff's answer follows it here (commonware answers
     // while the hook is still held).
     try hook.open();
@@ -1379,5 +1400,7 @@ test "stateful processing: a finalization rejects a next step with a stale round
     const built = try prepared.recv();
     defer built.discard();
     try testing.expect(built.handoff.is_wait()); // The handoff on the stale block declines.
-    try testing.expectEqual(1, probe.calls); // The retained block once.
+    // The retained block once; the stale block never (commonware's
+    // `process_calls.at(stale) == 0`).
+    try testing.expectEqual(1, probe.calls);
 }

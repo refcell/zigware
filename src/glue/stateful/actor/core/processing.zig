@@ -266,29 +266,68 @@ fn ProcessingOf(comptime key: [4]type) type {
             }
         }
 
+        /// A build's answer, held until the build's watcher stops (it reads the proposal).
+        const Built = union(enum) {
+            none,
+            block: Digested,
+            handoff: Mailbox.Built,
+
+            fn discard(built: Built) void {
+                switch (built) {
+                    .none => {},
+                    .block => |block| block.discard(),
+                    .handoff => |handoff| handoff.discard(),
+                }
+            }
+        };
+
         const Building = union(enum) {
-            built: void,
+            built: Built,
+            /// The proposer left (commonware drops the build's future).
+            cancelled: Io.Cancelable!void,
             ready: Io.Cancelable!void,
             message: Io.Cancelable!?Message,
         };
 
         /// Builds a recovered proposal (taken) and answers it. Verifications keep starting and
-        /// completing meanwhile; other messages and newly ready builds queue in order.
+        /// completing meanwhile; other messages and newly ready builds queue in order. A
+        /// proposer that leaves cancels the build at once, so queued work is not held behind it.
         fn build(self: *Self, request: ProposalRequest) !void {
             var owned = request;
             if (owned.is_cancelled()) return owned.deinit();
-            var buffer: [3]Building = undefined;
+            var buffer: [4]Building = undefined;
             var select: Io.Select(Building) = .init(self.io, &buffer);
             select.concurrent(.built, build_task, .{ self, &owned }) catch |err| {
                 owned.deinit();
                 return err;
             };
-            defer while (select.cancel()) |rest| self.absorb_building(rest);
+            var built: Built = .none;
+            const outcome = self.await_build(&select, &owned, &built);
+            // Stop the build, its watcher, and the receivers before answering: they read the
+            // request. Each pass collects one of at most four tasks.
+            while (select.cancel()) |rest| self.absorb_building(rest, &built);
+            answer(&owned, built);
+            return outcome;
+        }
+
+        fn await_build(
+            self: *Self,
+            select: *Io.Select(Building),
+            owned: *ProposalRequest,
+            built: *Built,
+        ) !void {
+            // Without a watcher the build only notices a departed proposer when it ends.
+            select.concurrent(.cancelled, ProposalRequest.closed, .{owned}) catch {};
             try select.concurrent(.ready, Verifications.wait_ready, .{&self.verifications});
             try select.concurrent(.message, Receiver.recv, .{self.receiver});
-            // Each pass handles one completion; the build's completion ends the loop.
+            // Each pass handles one completion; the build's end or the proposer's departure
+            // ends the loop.
             while (true) switch (try select.await()) {
-                .built => return,
+                .built => |result| {
+                    built.* = result;
+                    return;
+                },
+                .cancelled => |result| return result,
                 .ready => |result| {
                     try result;
                     self.complete_ready();
@@ -310,10 +349,13 @@ fn ProcessingOf(comptime key: [4]type) type {
             }
         }
 
-        fn absorb_building(self: *Self, outcome: Building) void {
+        fn absorb_building(self: *Self, outcome: Building, built: *Built) void {
             switch (outcome) {
-                .built => {},
-                .ready => {},
+                .built => |result| {
+                    assert(built.* == .none);
+                    built.* = result;
+                },
+                .cancelled, .ready => {},
                 .message => |result| {
                     const message = (result catch return) orelse return;
                     self.route_during_build(message);
@@ -321,30 +363,51 @@ fn ProcessingOf(comptime key: [4]type) type {
             }
         }
 
-        /// Runs the application's build and answers the proposal; an error answers no block.
-        fn build_task(self: *Self, request: *ProposalRequest) void {
-            defer request.ancestry.deinit();
+        /// Runs the application's build; an error (or cancellation) builds nothing. The build
+        /// consumes the request's input; `answer` releases the rest.
+        fn build_task(self: *Self, request: *ProposalRequest) Built {
             const processor = self.processor;
             switch (request.proposal) {
-                .propose => |*sender| {
+                .propose => {
                     const built = processor.propose(
                         request.context,
                         &request.ancestry,
                         request.upstream,
                     ) catch null;
-                    const block = built orelse return sender.deinit();
-                    sender.send(block) catch block.discard();
+                    return if (built) |block| .{ .block = block } else .none;
                 },
-                .prepare => |*sender| {
+                .prepare => {
                     const handoff = processor.prepare(
                         request.context,
                         &request.ancestry,
                         request.upstream,
-                    ) catch return sender.deinit();
-                    const answer: Mailbox.Built = .{ .handoff = handoff };
-                    sender.send(answer) catch answer.discard();
+                    ) catch return .none;
+                    return .{ .handoff = .{ .handoff = handoff } };
                 },
             }
+        }
+
+        /// Answers a built proposal (taken with `built`): nothing built drops the sender
+        /// unsent, which the proposer reads as no block (`.wait` for a prepare).
+        fn answer(request: *ProposalRequest, built: Built) void {
+            request.ancestry.deinit();
+            switch (request.proposal) {
+                .propose => |*sender| switch (built) {
+                    .block => |block| sender.send(block) catch block.discard(),
+                    else => {
+                        built.discard();
+                        sender.deinit();
+                    },
+                },
+                .prepare => |*sender| switch (built) {
+                    .handoff => |handoff| sender.send(handoff) catch handoff.discard(),
+                    else => {
+                        built.discard();
+                        sender.deinit();
+                    },
+                },
+            }
+            request.* = undefined;
         }
 
         /// Applies a finalized block (taken) and holds its acknowledgement (taken) until a
@@ -363,7 +426,13 @@ fn ProcessingOf(comptime key: [4]type) type {
                 try self.verifications.pause(boundary);
                 defer self.verifications.@"resume"();
                 const start = self.durability.barrier == null;
-                break :applied try self.processor.finalize(&self.provider, &owned_block, start);
+                const result = try self.processor.finalize(&self.provider, &owned_block, start);
+                // Steps that finished while the hooks ran on this task select their successors
+                // under the finalization's boundary, as commonware drives them during
+                // finalization: a successor the finalized block made stale is rejected
+                // unprocessed rather than admitted once admission reopens.
+                self.complete_ready();
+                break :applied result;
             };
             // Acknowledge once a barrier covers this height, so a restart replays the unsynced
             // suffix. `record` takes the acknowledgement, also on error.
