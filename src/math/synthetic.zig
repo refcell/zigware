@@ -10,6 +10,7 @@ const std = @import("std");
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const algebra = @import("algebra.zig");
+const parallel = @import("parallel");
 const minifuzz = @import("invariants").minifuzz;
 const Unstructured = minifuzz.Unstructured;
 
@@ -153,6 +154,10 @@ pub fn Synthetic(comptime F: type, comptime G: type) type {
             for (self.concrete.items, 0..) |term, i| {
                 points[offset + i] = term.point;
                 weights[offset + i] = term.weight;
+            }
+            // commonware `G::msm(&points, &weights, strategy)`, on the calling thread.
+            if (comptime @hasDecl(G, "msm_strategy")) {
+                return G.msm_strategy(allocator, points, weights, parallel.sequential);
             }
             return algebra.msm(G, F, points, weights);
         }

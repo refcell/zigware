@@ -16,6 +16,7 @@ const codec = @import("codec");
 const utils = @import("utils");
 const minifuzz = @import("invariants").minifuzz;
 const arithmetic = @import("arithmetic/root.zig");
+const sequential = @import("parallel").sequential;
 const Opaque = @import("../../secret.zig").Opaque;
 
 const Allocator = std.mem.Allocator;
@@ -658,7 +659,12 @@ fn Point(comptime kind: PointKind) type {
                 strategy: @TypeOf(strategy),
 
                 pub fn serial(run: @This()) Allocator.Error!Self {
-                    return msm(run.points, run.scalars);
+                    // `msm` sums 256-point chunks without allocating; one Pippenger over
+                    // every point picks a wider window (blst sums them at once too).
+                    if (run.points.len <= arithmetic.msm.chunk_points_max) {
+                        return msm(run.points, run.scalars);
+                    }
+                    return msm_parallel(run.gpa, run.points, run.scalars, sequential);
                 }
 
                 pub fn parallel(run: @This()) Allocator.Error!Self {

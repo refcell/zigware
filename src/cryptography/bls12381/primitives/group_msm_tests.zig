@@ -298,3 +298,25 @@ test "group msm: eval_msm across pools equals eval and the sequential msm" {
         }
     }
 }
+
+test "group msm: sequential strategy past one chunk matches the chunked msm" {
+    // Past `chunk_points_max` the sequential path sums every point in one Pippenger, which
+    // drops identities and zero scalars first; the chunked `msm` sums 256 at a time.
+    var rng = utils.test_rng();
+    const n = tiled.chunk_points_max + 44;
+    const points = try gpa.alloc(G1, n);
+    defer gpa.free(points);
+    const scalars = try gpa.alloc(Scalar, n);
+    defer gpa.free(scalars);
+    for (points, scalars) |*point, *scalar| {
+        point.* = G1.generator.mul(Scalar.random(&rng));
+        scalar.* = Scalar.random(&rng);
+    }
+    points[3] = G1.zero;
+    scalars[200] = Scalar.zero;
+    points[n - 1] = points[0];
+    const expected = G1.msm(points, scalars);
+    const sum = try G1.msm_strategy(gpa, points, scalars, parallel.sequential);
+    try testing.expect(sum.eql(expected));
+    try testing.expect(!sum.eql(G1.zero));
+}
