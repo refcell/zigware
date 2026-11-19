@@ -17,7 +17,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # One job ran every package for 136 minutes on x86 (fe3bdcb) and neared the timeout
+        # on arm, so it splits like ci.yml: consensus, glue, and the rest, where
+        # cryptography's 57 minutes is the longest step.
         os: [ubuntu-latest, ubuntu-24.04-arm]
+        steps: [test-consensus, test-glue, test-rest]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 180
     steps:
@@ -29,9 +33,11 @@ jobs:
       - name: slow tests
         env:
           FILTER: ${{ inputs.filter }}
+          STEPS: ${{ matrix.steps }}
         run: |
           if [ -n "$FILTER" ]; then
-            zig build test -Doptimize=ReleaseSafe -Dslow-tests -Dtest-filter="$FILTER" --summary all
+            zig build "$STEPS" -Doptimize=ReleaseSafe -Dslow-tests -Dtest-filter="$FILTER" \
+              --summary all
           else
-            zig build test -Doptimize=ReleaseSafe -Dslow-tests --summary all
+            zig build "$STEPS" -Doptimize=ReleaseSafe -Dslow-tests --summary all
           fi
