@@ -1295,6 +1295,223 @@ test "certify without prior verify honors application rejection" {
     }.body);
 }
 
+test "certify reconstructs from buffered gossip shards" {
+    try common.run(struct {
+        fn body(ctx: Ctx) anyerror!void {
+            var validators = try fixture();
+            defer validators.deinit(gpa);
+            var stack: common.ValidatorStack = undefined;
+            try stack.start(ctx, &validators);
+            defer stack.stop();
+            const participants = validators.participants;
+            const shards = stack.shards();
+            // No peer runs a marshal actor, so round-bound block fetches go unanswered.
+            try stack.network.link_all(participants, shared.link);
+
+            // The parent is local; the notarized candidate was never seen here.
+            const genesis = try common.genesis_block(gpa);
+            const parent_round = common.round_at(0, 1);
+            const parent_context: common.CodingCtx = .{
+                .round = parent_round,
+                .leader = shared.default_leader(),
+                .parent = .{ .zero(), harness.genesis_commitment() },
+            };
+            const parent = try common.coded(gpa, parent_context, genesis.digest(), 1, 100);
+            const parent_digest = parent.digest();
+            const parent_commitment = parent.commitment();
+            try shards.disperse(parent_round, parent);
+            const round = common.round_at(0, 2);
+            const context: common.CodingCtx = .{
+                .round = round,
+                .leader = participants[1],
+                .parent = .{ .new(1), parent_commitment },
+            };
+            var child = try common.coded(gpa, context, parent_digest, 2, 200);
+            defer child.deinit(gpa);
+
+            // Each peer sends its sender-indexed gossip shard; until a gather for the
+            // commitment the shard engine only buffers them.
+            for (participants[1..], 1..) |peer, index| {
+                var shard = (try child.shard(gpa, @intCast(index))) orelse
+                    return error.MissingShard;
+                defer shard.deinit(gpa);
+                try send_shard(&stack, peer, &shard);
+            }
+            try ctx.sleep(.fromMilliseconds(250));
+
+            // Certify reports the commitment, drains the buffered shards, and verifies the
+            // reconstructed block through its embedded context.
+            var certify = try stack.marshaled.start_certify(round, child.commitment());
+            defer certify.deinit();
+            try testing.expect(try verdict_within(ctx, &certify, 5_000));
+        }
+    }.body);
+}
+
+/// What consensus asks of the validator in `assigned_shard_is_checked_and_gossiped`.
+const Asked = enum {
+    /// `verify`, before the assigned shard arrives.
+    verify,
+    /// `certify`, without `verify`.
+    certify,
+    /// `certify`, while the `verify` of a re-proposal awaits its block.
+    certify_during_verify,
+};
+
+/// The other participants' shard channels, registered once and kept open.
+const Peers = struct {
+    channels: [shared.num_validators - 1]shared.Network.Registered,
+    made: usize,
+
+    fn open(self: *Peers, stack: *common.ValidatorStack, participants: []const common.K) !void {
+        self.made = 0;
+        errdefer self.close();
+        for (&self.channels, participants[1..]) |*channel, peer| {
+            const control = stack.network.network.oracle().control(peer);
+            channel.* = try control.register(2, shared.test_quota);
+            self.made += 1;
+        }
+    }
+
+    fn close(self: *Peers) void {
+        for (self.channels[0..self.made]) |*channel| channel.deinit();
+        self.made = 0;
+    }
+
+    /// Sends `block`'s shard `index` from peer `from` (an index into the peers) to `to`.
+    fn send(self: *Peers, from: usize, to: common.K, block: *const common.Block, index: u16) !void {
+        const codec = @import("codec");
+        var shard = (try block.shard(gpa, index)) orelse return error.MissingShard;
+        defer shard.deinit(gpa);
+        const bytes = try codec.encode(common.Shard, gpa, shard);
+        defer gpa.free(bytes);
+        const sent = try self.channels[from].sender.send(.{ .one = to }, &.{bytes}, true);
+        gpa.free(sent);
+    }
+};
+
+/// Waits for the last peer to receive `child`'s shard 0 (the validator's assigned shard)
+/// from `me` as gossip.
+fn expect_gossiped(ctx: Ctx, peers: *Peers, me: common.K, child: *const common.Block) !void {
+    const codec = @import("codec");
+    var assigned = (try child.shard(gpa, 0)) orelse return error.MissingShard;
+    defer assigned.deinit(gpa);
+    const expected = try codec.encode(common.Shard, gpa, assigned);
+    defer gpa.free(expected);
+    var waited: u64 = 0;
+    while (waited < 5_000) : (waited += 10) {
+        var message = peers.channels[2].receiver.try_recv() catch |err| switch (err) {
+            error.Empty => {
+                try ctx.sleep(.fromMilliseconds(10));
+                continue;
+            },
+            error.Disconnected => return error.Disconnected,
+        };
+        defer message.deinit();
+        try testing.expect(message.peer.eql(me));
+        try testing.expectEqualSlices(u8, expected, message.payload);
+        return;
+    }
+    return error.TestTimedOut;
+}
+
+/// Runs one validator whose peers only send shards, and asks it to verify or certify a
+/// proposal of peer 1 (commonware `assigned_shard_is_checked_and_gossiped`).
+fn assigned_shard_is_checked_and_gossiped(ctx: Ctx, asked: Asked) !void {
+    var validators = try fixture();
+    defer validators.deinit(gpa);
+    var stack: common.ValidatorStack = undefined;
+    try stack.start(ctx, &validators);
+    defer stack.stop();
+    const participants = validators.participants;
+    const me = participants[0];
+    var peers: Peers = undefined;
+    try peers.open(&stack, participants);
+    defer peers.close();
+    // No peer runs a marshal actor, so round-bound block fetches go unanswered.
+    try stack.network.link_all(participants, shared.link);
+
+    // The parent is available locally.
+    const genesis = try common.genesis_block(gpa);
+    const parent_round = common.round_at(0, 1);
+    const parent_context: common.CodingCtx = .{
+        .round = parent_round,
+        .leader = shared.default_leader(),
+        .parent = .{ .zero(), harness.genesis_commitment() },
+    };
+    const parent = try common.coded(gpa, parent_context, genesis.digest(), 1, 100);
+    const parent_digest = parent.digest();
+    const parent_commitment = parent.commitment();
+    try testing.expect(try stack.validator.mailbox.verified(parent_round, parent));
+
+    // Peer 1 proposes a child at view 2; it is the epoch's boundary block when a re-proposal
+    // is verified.
+    const child_context: common.CodingCtx = .{
+        .round = common.round_at(0, 2),
+        .leader = participants[1],
+        .parent = .{ .new(1), parent_commitment },
+    };
+    const height: u64 = if (asked == .certify_during_verify) shared.blocks_per_epoch - 1 else 2;
+    var child = try common.coded(gpa, child_context, parent_digest, height, 200);
+    defer child.deinit(gpa);
+    const commitment = child.commitment();
+
+    if (asked == .verify) {
+        // Verification waits for the assigned shard, then resolves once the leader sends it.
+        var verify = try stack.marshaled.start_verify(child_context, commitment);
+        defer verify.deinit();
+        try ctx.sleep(.fromMilliseconds(250));
+        try testing.expectError(error.Empty, verify.try_recv());
+        try peers.send(0, me, &child, 0);
+        try testing.expect(try verdict_within(ctx, &verify, 5_000));
+    } else {
+        // A re-proposal at view 3 is verified first; it fetches the block before it reports
+        // the commitment, and no peer answers.
+        var round = child_context.round;
+        var pending: ?utils.channel.oneshot.Receiver(bool) = null;
+        defer if (pending) |*receiver| receiver.deinit();
+        if (asked == .certify_during_verify) {
+            round = common.round_at(0, 3);
+            const context = reproposal(round, participants[1], 2, commitment);
+            pending = try stack.marshaled.start_verify(context, commitment);
+        }
+        // The leader sends the assigned shard and one peer gossips its own: two decode.
+        try peers.send(0, me, &child, 0);
+        try peers.send(1, me, &child, 2);
+        try ctx.sleep(.fromMilliseconds(250));
+        if (pending) |*receiver| try testing.expectError(error.Empty, receiver.try_recv());
+        var certify = try stack.marshaled.start_certify(round, commitment);
+        defer certify.deinit();
+        try testing.expect(try verdict_within(ctx, &certify, 5_000));
+    }
+
+    try expect_gossiped(ctx, &peers, me, &child);
+}
+
+test "certify reconstructs with buffered assigned shard" {
+    try common.run(struct {
+        fn body(ctx: Ctx) anyerror!void {
+            try assigned_shard_is_checked_and_gossiped(ctx, .certify);
+        }
+    }.body);
+}
+
+test "certify reconstructs while reproposal verify awaits block" {
+    try common.run(struct {
+        fn body(ctx: Ctx) anyerror!void {
+            try assigned_shard_is_checked_and_gossiped(ctx, .certify_during_verify);
+        }
+    }.body);
+}
+
+test "verify resolves once assigned shard arrives" {
+    try common.run(struct {
+        fn body(ctx: Ctx) anyerror!void {
+            try assigned_shard_is_checked_and_gossiped(ctx, .verify);
+        }
+    }.body);
+}
+
 test {
     _ = common;
 }
