@@ -7,8 +7,8 @@
 //! The contiguous and segmented workloads write up to 16k items per case (about a minute each
 //! in Debug), so Debug builds run them only with `-Dslow-tests`.
 //!
-//! The compressed workloads (`<true>`) are not checked: their blobs hold zstd level-3 output,
-//! which only a byte-exact port of zstd's compressor reproduces.
+//! The compressed workloads (`<true>`) write zstd level-3 frames, so their hashes also check
+//! that `zstd.compress_into` writes exactly what libzstd's level 3 does.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -55,8 +55,25 @@ fn Workload(
     return runtime.conformance.StorageConformance(W);
 }
 
-/// A random-length byte item of up to 255 bytes (the uncompressed `fill_variable_item`).
-fn fill_item(rng: *Rng, buffer: *[256]u8) []u8 {
+/// A variable workload with `compressed` bound (commonware's `const COMPRESSED: bool`).
+fn Variant(
+    comptime write: fn (Allocator, runtime.storage.Storage, *Rng, u64, bool) anyerror!void,
+    comptime compressed: bool,
+) fn (Allocator, runtime.storage.Storage, *Rng, u64) anyerror!void {
+    return struct {
+        fn run(gpa: Allocator, storage: runtime.storage.Storage, rng: *Rng, seed: u64) !void {
+            return write(gpa, storage, rng, seed, compressed);
+        }
+    }.run;
+}
+
+/// commonware's `fill_variable_item`: when compressed, even items are 192 bytes repeating
+/// `0..16` (compressible); otherwise items are random bytes of a random length below 256.
+fn fill_item(rng: *Rng, buffer: *[256]u8, index: usize, compressed: bool) []u8 {
+    if (compressed and index % 2 == 0) {
+        for (buffer[0..192], 0..) |*byte, offset| byte.* = @intCast(offset % 16);
+        return buffer[0..192];
+    }
     const len = utils.rng.range_less_than(rng, usize, 0, 256);
     rng.fill_bytes(buffer[0..len]);
     assert(len < 256);
@@ -98,6 +115,7 @@ fn contiguous_variable(
     storage: runtime.storage.Storage,
     rng: *Rng,
     seed: u64,
+    compressed: bool,
 ) !void {
     var cache_ref = try CacheRef.init(gpa, page_size, page_cache_size);
     defer cache_ref.deinit();
@@ -105,6 +123,7 @@ fn contiguous_variable(
     var journal = try contiguous.variable.Journal(Bytes).init(gpa, storage, .{
         .partition = try partition_name(&buffer, "contiguous-variable-conformance", seed),
         .items_per_section = items_per_blob,
+        .compression = if (compressed) 3 else null,
         .codec_config = bytes_config,
         .cache_ref = &cache_ref,
         .write_buffer = write_buffer,
@@ -112,13 +131,13 @@ fn contiguous_variable(
     });
     defer journal.deinit();
     // Every item is drawn before the first append, as commonware fills its vector first.
-    const items = try draw_items(gpa, rng);
+    const items = try draw_items(gpa, rng, compressed);
     defer free_items(gpa, items);
     for (items) |item| _ = try journal.append(item);
     try journal.sync();
 }
 
-fn draw_items(gpa: Allocator, rng: *Rng) ![][]u8 {
+fn draw_items(gpa: Allocator, rng: *Rng, compressed: bool) ![][]u8 {
     const items = try gpa.alloc([]u8, item_count(rng));
     var drawn: usize = 0;
     errdefer {
@@ -127,7 +146,7 @@ fn draw_items(gpa: Allocator, rng: *Rng) ![][]u8 {
     }
     var buffer: [256]u8 = undefined;
     while (drawn < items.len) : (drawn += 1) {
-        items[drawn] = try gpa.dupe(u8, fill_item(rng, &buffer));
+        items[drawn] = try gpa.dupe(u8, fill_item(rng, &buffer, drawn, compressed));
     }
     return items;
 }
@@ -167,16 +186,23 @@ fn segmented_fixed_run(
     try journal.sync(&.{ 0, 1, 2 });
 }
 
-fn segmented_glob(gpa: Allocator, storage: runtime.storage.Storage, rng: *Rng, seed: u64) !void {
+fn segmented_glob(
+    gpa: Allocator,
+    storage: runtime.storage.Storage,
+    rng: *Rng,
+    seed: u64,
+    compressed: bool,
+) !void {
     var buffer: [64]u8 = undefined;
     var recovery = try glob.Recovery(Bytes).init(gpa, storage, .{
         .partition = try partition_name(&buffer, "segmented-glob-conformance", seed),
+        .compression = if (compressed) 3 else null,
         .codec_config = bytes_config,
         .write_buffer = write_buffer,
     });
     var journal = recovery.finish();
     defer journal.deinit();
-    const items = try draw_items(gpa, rng);
+    const items = try draw_items(gpa, rng, compressed);
     defer free_items(gpa, items);
     for (items, 0..) |item, index| _ = try journal.append(section_of(index), item);
     try journal.sync(&.{ 0, 1, 2 });
@@ -187,12 +213,14 @@ fn segmented_variable_run(
     storage: runtime.storage.Storage,
     rng: *Rng,
     seed: u64,
+    compressed: bool,
 ) !void {
     var cache_ref = try CacheRef.init(gpa, page_size, page_cache_size);
     defer cache_ref.deinit();
     var buffer: [64]u8 = undefined;
     var recovery = try segmented_variable.Journal(Bytes).init(gpa, storage, .{
         .partition = try partition_name(&buffer, "segmented-variable-conformance", seed),
+        .compression = if (compressed) 3 else null,
         .codec_config = bytes_config,
         .cache_ref = &cache_ref,
         .write_buffer = write_buffer,
@@ -201,7 +229,7 @@ fn segmented_variable_run(
     try recovery.drain();
     var journal = try recovery.finish();
     defer journal.deinit();
-    const items = try draw_items(gpa, rng);
+    const items = try draw_items(gpa, rng, compressed);
     defer free_items(gpa, items);
     for (items, 0..) |item, index| _ = try journal.append(section_of(index), item);
     try journal.sync(&.{ 0, 1, 2 });
@@ -247,6 +275,7 @@ fn segmented_oversized(
     storage: runtime.storage.Storage,
     rng: *Rng,
     seed: u64,
+    compressed: bool,
 ) !void {
     var cache_ref = try CacheRef.init(gpa, page_size, page_cache_size);
     defer cache_ref.deinit();
@@ -268,10 +297,11 @@ fn segmented_oversized(
         .index_write_buffer = write_buffer,
         .value_write_buffer = write_buffer,
         .replay_buffer = replay_buffer,
+        .compression = if (compressed) 3 else null,
         .codec_config = bytes_config,
     }, .{ .section = 0, .size = 0 });
     defer journal.deinit();
-    const items = try draw_items(gpa, rng);
+    const items = try draw_items(gpa, rng, compressed);
     defer free_items(gpa, items);
     for (items, 0..) |item, index| {
         _ = try journal.append(section_of(index), .{ .id = index }, item);
@@ -335,6 +365,7 @@ fn Authenticated(comptime F: type, comptime prefix: []const u8) type {
 }
 
 const cases = 512;
+const conformance_prefix = "commonware_storage::journal::conformance::StorageConformance<";
 
 /// Skips a large workload in Debug unless slow tests are enabled.
 fn skip_large() !void {
@@ -355,9 +386,20 @@ test "conformance StorageConformance<ContiguousFixedWorkload>" {
 test "conformance StorageConformance<ContiguousVariableWorkload>" {
     try skip_large();
     try conformance.verify(
-        Workload(contiguous_variable),
+        Workload(Variant(contiguous_variable, false)),
         std.testing.allocator,
         "commonware_storage::journal::conformance::StorageConformance<ContiguousVariableWorkload>",
+        cases,
+        conformance_file,
+    );
+}
+
+test "conformance StorageConformance<ContiguousVariableWorkload<true>>" {
+    try skip_large();
+    try conformance.verify(
+        Workload(Variant(contiguous_variable, true)),
+        std.testing.allocator,
+        conformance_prefix ++ "ContiguousVariableWorkload<true>>",
         cases,
         conformance_file,
     );
@@ -377,9 +419,20 @@ test "conformance StorageConformance<SegmentedFixedWorkload>" {
 test "conformance StorageConformance<SegmentedGlobWorkload>" {
     try skip_large();
     try conformance.verify(
-        Workload(segmented_glob),
+        Workload(Variant(segmented_glob, false)),
         std.testing.allocator,
         "commonware_storage::journal::conformance::StorageConformance<SegmentedGlobWorkload>",
+        cases,
+        conformance_file,
+    );
+}
+
+test "conformance StorageConformance<SegmentedGlobWorkload<true>>" {
+    try skip_large();
+    try conformance.verify(
+        Workload(Variant(segmented_glob, true)),
+        std.testing.allocator,
+        conformance_prefix ++ "SegmentedGlobWorkload<true>>",
         cases,
         conformance_file,
     );
@@ -388,9 +441,20 @@ test "conformance StorageConformance<SegmentedGlobWorkload>" {
 test "conformance StorageConformance<SegmentedVariableWorkload>" {
     try skip_large();
     try conformance.verify(
-        Workload(segmented_variable_run),
+        Workload(Variant(segmented_variable_run, false)),
         std.testing.allocator,
         "commonware_storage::journal::conformance::StorageConformance<SegmentedVariableWorkload>",
+        cases,
+        conformance_file,
+    );
+}
+
+test "conformance StorageConformance<SegmentedVariableWorkload<true>>" {
+    try skip_large();
+    try conformance.verify(
+        Workload(Variant(segmented_variable_run, true)),
+        std.testing.allocator,
+        conformance_prefix ++ "SegmentedVariableWorkload<true>>",
         cases,
         conformance_file,
     );
@@ -399,9 +463,20 @@ test "conformance StorageConformance<SegmentedVariableWorkload>" {
 test "conformance StorageConformance<SegmentedOversizedWorkload>" {
     try skip_large();
     try conformance.verify(
-        Workload(segmented_oversized),
+        Workload(Variant(segmented_oversized, false)),
         std.testing.allocator,
         "commonware_storage::journal::conformance::StorageConformance<SegmentedOversizedWorkload>",
+        cases,
+        conformance_file,
+    );
+}
+
+test "conformance StorageConformance<SegmentedOversizedWorkload<true>>" {
+    try skip_large();
+    try conformance.verify(
+        Workload(Variant(segmented_oversized, true)),
+        std.testing.allocator,
+        conformance_prefix ++ "SegmentedOversizedWorkload<true>>",
         cases,
         conformance_file,
     );

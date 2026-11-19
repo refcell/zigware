@@ -102,9 +102,10 @@ resize, sync), `runtime.storage`, with the in-memory backend `runtime.storage.me
   variable, and oversized, and authenticated over MMR and MMB, all matching commonware's.
 - [x] Conformance workloads run through `runtime.conformance.StorageConformance` (the
   deterministic runner's storage audit), like commonware's; all hashes unchanged.
-- [ ] Journal conformance hashes of the compressed (`<true>`) workloads: they need zstd
-  output byte-identical to libzstd level 3. Blocked on storage-merkle's compressor
-  (`journal/zstd.zig`, theirs since 2026-11-16).
+- [x] Journal conformance hashes of the compressed (`<true>`) workloads: contiguous variable,
+  segmented glob, variable, and oversized, with `compression: 3` and commonware's
+  compressible `fill_variable_item::<true>`, all matching on storage-merkle's byte-exact
+  libzstd 1.5.7 level-3 compressor (00abad1).
 - [x] Metrics: metadata (`sync_rewrites`, `sync_overwrites`, `keys`) and queue (`tip`, `floor`,
   `next`) through `runtime.telemetry.metrics`.
 - [x] Metrics: contiguous fixed and variable journals (`size`, `pruning_boundary`, `retained`,
@@ -374,8 +375,8 @@ resize, sync), `runtime.storage`, with the in-memory backend `runtime.storage.me
 - `fixed_read_random`/`variable_read_random` `mode=concurrent` issues its reads back to back:
   the journals take reads through one handle, so there are no futures to join. Syncs complete
   synchronously, so `append_sync`'s `start_sync` mode has no handle to await.
-- `variable_read_compressed` and `variable_prepare_append`'s level-3 cases compress with our
-  zstd encoder; frame sizes match libzstd's only once storage-merkle's byte-exact port lands.
+- `variable_read_compressed` and `variable_prepare_append`'s level-3 cases compress with the
+  byte-exact libzstd level-3 encoder (00abad1), so frame sizes match commonware's.
 - Contiguous journal duration histograms (`*_duration`) are not ported: journals hold no clock.
   Their scope is `Config.metrics` (null by default).
 - Metrics record through `runtime.telemetry.metrics` handles; without a scope, handles are
@@ -430,3 +431,4 @@ resize, sync), `runtime.storage`, with the in-memory backend `runtime.storage.me
 - 2026-11-19: ported the runtime buffer benches (`src/runtime/buffer/benches/`).
 - 2026-11-19: ported the variable journal start_sync flush and init sync-order fault tests
   (from storage-merkle's backlog) and the iobuf bench.
+- 2026-11-19: enabled the four compressed (`<true>`) journal conformance hashes; all match.
