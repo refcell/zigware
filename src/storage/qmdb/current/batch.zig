@@ -10,6 +10,8 @@
 
 const std = @import("std");
 const assert = std.debug.assert;
+const refcount = @import("../../refcount.zig");
+const RefCount = refcount.RefCount;
 const Allocator = std.mem.Allocator;
 const diff_mod = @import("../any/diff.zig");
 const grafting = @import("grafting.zig");
@@ -25,7 +27,7 @@ pub fn Layer(comptime N: usize) type {
         pub const Chunk = [N]u8;
         pub const chunk_bits: u64 = N * 8;
 
-        references: u32,
+        references: RefCount,
         /// The layer below, null for the database's bitmap. A strong reference.
         parent: ?*Self,
         chunks: std.AutoHashMapUnmanaged(u64, Chunk) = .empty,
@@ -33,8 +35,7 @@ pub fn Layer(comptime N: usize) type {
         len: u64,
 
         pub fn retain(self: *Self) *Self {
-            assert(self.references > 0);
-            self.references += 1;
+            self.references.retain();
             return self;
         }
 
@@ -42,9 +43,7 @@ pub fn Layer(comptime N: usize) type {
         pub fn release(self: *Self, gpa: Allocator) void {
             var current: ?*Self = self;
             while (current) |layer| {
-                assert(layer.references > 0);
-                layer.references -= 1;
-                if (layer.references > 0) break;
+                if (!layer.references.release()) break;
                 current = layer.parent;
                 layer.chunks.deinit(gpa);
                 gpa.destroy(layer);
@@ -135,7 +134,8 @@ fn build_layer(
     const base = view.len();
     assert(batch_len > 0); // A batch ends with its commit.
     const layer = try gpa.create(L);
-    layer.* = .{ .references = 1, .parent = if (parent) |p| p.retain() else null, .len = base };
+    const retained = if (parent) |p| p.retain() else null;
+    layer.* = .{ .references = .init(), .parent = retained, .len = base };
     errdefer layer.release(gpa);
     var builder: Builder(N, @TypeOf(view)) = .{
         .gpa = gpa,
@@ -452,7 +452,7 @@ fn current_layer(
     const result = try gpa.create(D.MerkleizedBatch);
     result.* = .{
         .gpa = gpa,
-        .references = 1,
+        .references = .init(),
         .inner = inner,
         .grafted = grafted,
         .layer = layer,
@@ -547,7 +547,7 @@ pub fn Merkleized(comptime D: type) type {
         const Self = @This();
 
         gpa: Allocator,
-        references: u32,
+        references: RefCount,
         /// A strong reference.
         inner: *D.Any.MerkleizedBatch,
         /// A strong reference.
@@ -569,7 +569,7 @@ pub fn Merkleized(comptime D: type) type {
             const self = try gpa.create(Self);
             self.* = .{
                 .gpa = gpa,
-                .references = 1,
+                .references = .init(),
                 .inner = inner,
                 .grafted = grafted,
                 .layer = null,
@@ -582,15 +582,12 @@ pub fn Merkleized(comptime D: type) type {
         }
 
         pub fn retain(self: *Self) *Self {
-            assert(self.references > 0);
-            self.references += 1;
+            self.references.retain();
             return self;
         }
 
         pub fn release(self: *Self) void {
-            assert(self.references > 0);
-            self.references -= 1;
-            if (self.references > 0) return;
+            if (!self.references.release()) return;
             const gpa = self.gpa;
             self.inner.release();
             self.grafted.release(gpa);

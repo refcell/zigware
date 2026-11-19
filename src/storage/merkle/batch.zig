@@ -10,8 +10,10 @@
 //! ```
 //!
 //! Commonware links batches with `Arc` (to their changes) and `Weak` (to their parent).
-//! zigware counts both by hand: `Merkleized.retain`/`release` are the strong references
-//! (`release` is commonware's `drop`), and a child's parent link is a weak one. A batch's
+//! zigware counts both atomically (`RefCount`), since forks of one parent are merkleized and
+//! dropped on several threads: `Merkleized.retain`/`release` are the strong references
+//! (`release` is commonware's `drop`), and a child's parent link is a weak one, upgraded
+//! (held) at each step of a walk up the chain. A batch's
 //! changes (`Data`) are reference counted too, so a merkleized batch keeps the changes of every
 //! live ancestor and `apply_batch` can replay uncommitted ancestors after they are released.
 //! Releasing an unapplied ancestor before a descendant is merkleized loses its changes, and
@@ -29,6 +31,8 @@ const parallel = @import("parallel");
 const merkle = @import("mod.zig");
 const hasher_module = @import("hasher.zig");
 const proof_module = @import("proof.zig");
+const refcount = @import("../refcount.zig");
+const RefCount = refcount.RefCount;
 
 const max_peaks = merkle.max_pinned_nodes;
 /// Node heights in a u64-sized structure are below 64.
@@ -47,7 +51,7 @@ pub fn Data(comptime Digest: type) type {
     return struct {
         const Self = @This();
 
-        references: u32,
+        references: RefCount,
         /// Node count before this batch's changes.
         parent_size: u64,
         /// Nodes appended after `parent_size`.
@@ -67,15 +71,13 @@ pub fn Data(comptime Digest: type) type {
         }
 
         fn retain(self: *Self) *Self {
-            assert(self.references > 0);
-            self.references += 1;
+            self.references.retain();
             return self;
         }
 
         fn release(self: *Self, gpa: Allocator) void {
-            assert(self.references > 0);
-            self.references -= 1;
-            if (self.references > 0) return;
+            if (!self.references.release()) return;
+            assert(self.appended.capacity >= self.appended.items.len);
             self.appended.deinit(gpa);
             self.overwrites.deinit(gpa);
             gpa.destroy(self);
@@ -91,10 +93,12 @@ pub fn Merkleized(comptime F: type, comptime Digest: type) type {
         pub const Proof = proof_module.Proof(F, Digest);
         pub const BatchData = Data(Digest);
 
+        /// The allocator of the batch, so a walk can drop the ancestors it holds.
+        gpa: Allocator,
         /// Strong references; the batch's changes live while this is non-zero.
-        strong: u32,
+        strong: RefCount,
         /// Weak references (children's parent links) plus one shared by the strong ones.
-        weak: u32,
+        weak: RefCount,
         /// The parent batch (a weak link), null for a root batch or once released.
         parent: ?*Self,
         data: *BatchData,
@@ -112,7 +116,7 @@ pub fn Merkleized(comptime F: type, comptime Digest: type) type {
             const data = try gpa.create(BatchData);
             errdefer gpa.destroy(data);
             data.* = .{
-                .references = 1,
+                .references = .init(),
                 .parent_size = mem.size(),
                 .appended = .empty,
                 .overwrites = .empty,
@@ -121,8 +125,9 @@ pub fn Merkleized(comptime F: type, comptime Digest: type) type {
             };
             const self = try gpa.create(Self);
             self.* = .{
-                .strong = 1,
-                .weak = 1,
+                .gpa = gpa,
+                .strong = .init(),
+                .weak = .init(),
                 .parent = null,
                 .data = data,
                 .base_size = mem.size(),
@@ -134,17 +139,15 @@ pub fn Merkleized(comptime F: type, comptime Digest: type) type {
         }
 
         pub fn retain(self: *Self) *Self {
-            assert(self.strong > 0);
-            self.strong += 1;
+            self.strong.retain();
             return self;
         }
 
         /// Drops a strong reference. The last one frees the batch's changes unless a merkleized
         /// descendant holds them; descendants not yet merkleized lose them.
         pub fn release(self: *Self, gpa: Allocator) void {
-            assert(self.strong > 0);
-            self.strong -= 1;
-            if (self.strong > 0) return;
+            assert(gpa.ptr == self.gpa.ptr);
+            if (!self.strong.release()) return;
             self.data.release(gpa);
             for (self.ancestors) |ancestor| ancestor.release(gpa);
             gpa.free(self.ancestors);
@@ -154,16 +157,8 @@ pub fn Merkleized(comptime F: type, comptime Digest: type) type {
         }
 
         fn release_weak(self: *Self, gpa: Allocator) void {
-            assert(self.weak > 0);
-            self.weak -= 1;
-            if (self.weak == 0) gpa.destroy(self);
-        }
-
-        /// The parent, if it is still alive (commonware's `Weak::upgrade`).
-        fn live_parent(self: *const Self) ?*Self {
-            const parent = self.parent orelse return null;
-            assert(parent.weak > 0);
-            return if (parent.strong > 0) parent else null;
+            assert(self.weak.load() > 0);
+            if (self.weak.release()) gpa.destroy(self);
         }
 
         pub fn size(self: *const Self) u64 {
@@ -178,16 +173,25 @@ pub fn Merkleized(comptime F: type, comptime Digest: type) type {
         /// committed structure (or past the end).
         pub fn get_node(self: *const Self, position: u64) ?Digest {
             if (position >= self.size()) return null;
-            var current: ?*const Self = self;
-            while (current) |batch| : (current = batch.live_parent()) {
-                const data = batch.data;
-                if (position >= data.parent_size) {
-                    const index: usize = @intCast(position - data.parent_size);
-                    if (index < data.appended.items.len) return data.appended.items[index];
-                    return null;
-                }
-                if (data.overwrites.get(position)) |digest| return digest;
+            if (node_in(self.data, position)) |found| return found;
+            // Hold each live ancestor while reading it (commonware upgrades each `Weak`).
+            var walk: refcount.Ancestors(Self) = .init(self.gpa, self);
+            defer walk.deinit();
+            while (walk.next()) |batch| {
+                if (node_in(batch.data, position)) |found| return found;
             }
+            return null;
+        }
+
+        /// The node at `position` if `data` decides it (null: an older batch may), where
+        /// `data` holds the nodes at and above its `parent_size`.
+        fn node_in(data: *const BatchData, position: u64) ??Digest {
+            if (position >= data.parent_size) {
+                const index: usize = @intCast(position - data.parent_size);
+                if (index < data.appended.items.len) return data.appended.items[index];
+                return @as(?Digest, null);
+            }
+            if (data.overwrites.get(position)) |digest| return digest;
             return null;
         }
 
@@ -258,14 +262,24 @@ fn collect_ancestors(
     parent: *Merkleized(F, Digest),
 ) Allocator.Error![]const *Data(Digest) {
     var ancestors: std.ArrayList(*Data(Digest)) = .empty;
-    errdefer ancestors.deinit(gpa);
-    var current: ?*Merkleized(F, Digest) = parent;
-    while (current) |batch| : (current = batch.live_parent()) {
-        if (!batch.data.is_empty()) try ancestors.append(gpa, batch.data);
+    errdefer {
+        for (ancestors.items) |data| data.release(gpa);
+        ancestors.deinit(gpa);
+    }
+    // The caller holds `parent`; each older batch is held while its changes are retained.
+    if (!parent.data.is_empty()) {
+        try ancestors.ensureUnusedCapacity(gpa, 1);
+        ancestors.appendAssumeCapacity(parent.data.retain());
+    }
+    var walk: refcount.Ancestors(Merkleized(F, Digest)) = .init(gpa, parent);
+    defer walk.deinit();
+    while (walk.next()) |batch| {
+        if (batch.data.is_empty()) continue;
+        try ancestors.ensureUnusedCapacity(gpa, 1);
+        ancestors.appendAssumeCapacity(batch.data.retain());
     }
     std.mem.reverse(*Data(Digest), ancestors.items);
     const owned = try ancestors.toOwnedSlice(gpa);
-    for (owned) |data| _ = data.retain();
     assert(owned.len <= std.math.maxInt(u32));
     return owned;
 }
@@ -497,17 +511,18 @@ pub fn Unmerkleized(comptime F: type, comptime Digest: type) type {
             errdefer gpa.destroy(data);
             const child = try gpa.create(Parent);
             data.* = .{
-                .references = 1,
+                .references = .init(),
                 .parent_size = self.parent.size(),
                 .appended = self.appended,
                 .overwrites = self.overwrites,
                 .parent_peaks = self.parent.data.tip_peaks,
                 .tip_peaks = self.tip_peaks(base),
             };
-            self.parent.weak += 1;
+            self.parent.weak.retain();
             child.* = .{
-                .strong = 1,
-                .weak = 1,
+                .gpa = gpa,
+                .strong = .init(),
+                .weak = .init(),
                 .parent = self.parent,
                 .data = data,
                 .base_size = self.parent.base_size,
@@ -517,7 +532,7 @@ pub fn Unmerkleized(comptime F: type, comptime Digest: type) type {
             self.free_changes(gpa);
             self.parent.release(gpa);
             self.* = undefined;
-            assert(child.strong == 1);
+            assert(child.strong.load() == 1);
             return child;
         }
 

@@ -14,6 +14,8 @@
 
 const std = @import("std");
 const assert = std.debug.assert;
+const refcount = @import("../../refcount.zig");
+const RefCount = refcount.RefCount;
 const Allocator = std.mem.Allocator;
 const codec = @import("codec");
 const runtime = @import("runtime");
@@ -50,7 +52,7 @@ pub fn Diff(comptime K: type, comptime V: type) type {
         const Self = @This();
         pub const Entry = struct { key: K, value: V, loc: u64 };
 
-        references: u32,
+        references: RefCount,
         entries: []const Entry,
 
         /// Takes ownership of `entries`, which must be sorted by key with no duplicates.
@@ -59,20 +61,17 @@ pub fn Diff(comptime K: type, comptime V: type) type {
                 assert(diff_mod.order(K, &a.key, &b.key) == .lt);
             }
             const self = try gpa.create(Self);
-            self.* = .{ .references = 1, .entries = entries };
+            self.* = .{ .references = .init(), .entries = entries };
             return self;
         }
 
         fn retain(self: *Self) *Self {
-            assert(self.references > 0);
-            self.references += 1;
+            self.references.retain();
             return self;
         }
 
         fn release(self: *Self, gpa: Allocator) void {
-            assert(self.references > 0);
-            self.references -= 1;
-            if (self.references > 0) return;
+            if (!self.references.release()) return;
             for (self.entries) |entry| codec.free(V, gpa, entry.value);
             gpa.free(self.entries);
             gpa.destroy(self);
@@ -646,10 +645,12 @@ fn Unmerkleized(comptime D: type) type {
                 defer diffs.deinit(gpa);
                 errdefer for (diffs.items) |d| d.release(gpa);
                 var oldest_base: ?D.Commitment = null;
-                var current = batch.parent;
-                while (current) |ancestor| : (current = ancestor.live_parent()) {
+                var walk: refcount.Ancestors(D.MerkleizedBatch) = .from_first(gpa, batch.parent);
+                defer walk.deinit();
+                while (walk.next()) |ancestor| {
                     try tips.append(gpa, ancestor.bounds.tip);
-                    try diffs.append(gpa, ancestor.diff.retain());
+                    try diffs.ensureUnusedCapacity(gpa, 1);
+                    diffs.appendAssumeCapacity(ancestor.diff.retain());
                     oldest_base = ancestor.bounds.base;
                 }
                 const inherited = if (batch.parent) |p| p.bounds.db else batch.base;
@@ -691,8 +692,8 @@ fn Merkleized(comptime D: type) type {
         const V = D.Value;
 
         gpa: Allocator,
-        strong: u32,
-        weak: u32,
+        strong: RefCount,
+        weak: RefCount,
         parent: ?*Self,
         journal_batch: *D.Journal.MerkleizedBatch,
         /// This batch's sets.
@@ -717,27 +718,24 @@ fn Merkleized(comptime D: type) type {
             assert(ancestor_diffs.len == state.ancestors.len);
             self.* = .{
                 .gpa = gpa,
-                .strong = 1,
-                .weak = 1,
+                .strong = .init(),
+                .weak = .init(),
                 .parent = parent,
                 .journal_batch = journal_batch,
                 .diff = diff,
                 .ancestor_diffs = ancestor_diffs,
                 .bounds = state,
             };
-            if (parent) |link| link.weak += 1;
+            if (parent) |link| link.weak.retain();
         }
 
         pub fn retain(self: *Self) *Self {
-            assert(self.strong > 0);
-            self.strong += 1;
+            self.strong.retain();
             return self;
         }
 
         pub fn release(self: *Self) void {
-            assert(self.strong > 0);
-            self.strong -= 1;
-            if (self.strong > 0) return;
+            if (!self.strong.release()) return;
             self.journal_batch.release(self.gpa);
             self.diff.release(self.gpa);
             for (self.ancestor_diffs) |d| d.release(self.gpa);
@@ -749,15 +747,7 @@ fn Merkleized(comptime D: type) type {
         }
 
         fn release_weak(self: *Self) void {
-            assert(self.weak > 0);
-            self.weak -= 1;
-            if (self.weak == 0) self.gpa.destroy(self);
-        }
-
-        fn live_parent(self: *const Self) ?*Self {
-            const parent = self.parent orelse return null;
-            assert(parent.weak > 0);
-            return if (parent.strong > 0) parent else null;
+            if (self.weak.release()) self.gpa.destroy(self);
         }
 
         pub fn commitment(self: *const Self) D.Commitment {
@@ -803,8 +793,9 @@ fn Merkleized(comptime D: type) type {
         ) ?*const D.BatchDiff.Entry {
             if (self.diff.lookup(key, floor)) |entry| return entry;
             var live: usize = 0;
-            var current = self.live_parent();
-            while (current) |ancestor| : (current = ancestor.live_parent()) live += 1;
+            var walk: refcount.Ancestors(Self) = .init(self.gpa, self);
+            defer walk.deinit();
+            while (walk.next()) |_| live += 1;
             for (self.ancestor_diffs, self.bounds.ancestors, 0..) |ancestor, state, at| {
                 if (at >= live and state.size <= db_size) break;
                 if (ancestor.lookup(key, floor)) |entry| return entry;

@@ -29,6 +29,8 @@ const write_rounds = 30;
 const batch_rounds = 40;
 const prove_rounds = 60;
 const provers = 2;
+const forkers = 4;
+const fork_rounds = 150;
 
 fn Shared(comptime D: type) type {
     return utils.sync.UpgradableRwLock(D);
@@ -146,6 +148,80 @@ fn prove_round(comptime A: type, db: *const A, pick: u64) !u32 {
     return @intFromBool(!valid);
 }
 
+/// Forks one shared merkleized `parent` `fork_rounds` times: merkleizes a child and a
+/// grandchild of it against `db`, reads a key the parent wrote through the grandchild, and drops
+/// the child before the grandchild, so the batches' shared references and weak parent walks
+/// race with other forkers'. Task 0 instead retains and releases the parent.
+fn forker(comptime D: type) fn (*const D, *D.MerkleizedBatch, u64) u32 {
+    return struct {
+        fn run(db: *const D, parent: *D.MerkleizedBatch, index: u64) u32 {
+            var failures: u32 = 0;
+            for (0..fork_rounds) |round| {
+                if (index == 0) {
+                    _ = parent.retain();
+                    parent.release();
+                    continue;
+                }
+                failures += fork_round(D, db, parent, index * 1000 + round) catch 1;
+            }
+            return failures;
+        }
+    }.run;
+}
+
+fn fork_round(comptime D: type, db: *const D, parent: *D.MerkleizedBatch, salt: u64) !u32 {
+    assert(salt >= 1000);
+    var child_batch = parent.new_batch();
+    const child = child: {
+        errdefer child_batch.deinit();
+        const key = any_support.to_digest(seeded_keys + salt);
+        try child_batch.write(key, any_support.to_val(salt, 0));
+        break :child try child_batch.merkleize(db);
+    };
+    var grand_batch = child.new_batch();
+    const grand = grand: {
+        errdefer grand_batch.deinit();
+        errdefer child.release();
+        try grand_batch.write(any_support.to_digest(1), any_support.to_val(salt, 1));
+        break :grand try grand_batch.merkleize(db);
+    };
+    defer grand.release();
+    child.release();
+    var failures: u32 = 0;
+    const from_parent = try grand.get(&any_support.to_digest(0), db);
+    if (from_parent == null or !from_parent.?.eql(any_support.to_val(0, 7))) failures += 1;
+    const own = try grand.get(&any_support.to_digest(1), db);
+    if (own == null or !own.?.eql(any_support.to_val(salt, 1))) failures += 1;
+    return failures;
+}
+
+/// Runs the forkers over one parent batch that overwrites key 0, then drops the parent.
+fn run_forks(comptime D: type, db_owned: D) !void {
+    var db = db_owned;
+    defer db.deinit();
+    try seed_db(D, &db);
+    var parent_batch = try db.new_batch();
+    const parent = parent: {
+        errdefer parent_batch.deinit();
+        try parent_batch.write(any_support.to_digest(0), any_support.to_val(0, 7));
+        break :parent try parent_batch.merkleize(&db);
+    };
+    defer parent.release();
+    var futures: [forkers]std.Io.Future(u32) = undefined;
+    var started: usize = 0;
+    defer for (futures[0..started]) |*future| {
+        _ = future.cancel(io);
+    };
+    for (&futures, 0..) |*future, index| {
+        future.* = try io.concurrent(forker(D), .{ &db, parent, index });
+        started += 1;
+    }
+    var failures: u32 = 0;
+    for (futures[0..started]) |*future| failures += future.await(io);
+    started = 0;
+    try testing.expectEqual(@as(u32, 0), failures);
+}
+
 fn write_round(comptime D: type, lock: *Shared(D), round: u64) !void {
     var guard = try lock.write();
     defer guard.deinit();
@@ -218,5 +294,19 @@ test "current concurrent readers under a read lock see every seeded value" {
         var harness = try current_support.Harness.init(gpa);
         defer harness.deinit();
         try run(D, try harness.open(D, null));
+    }
+}
+
+test "any and current forks of one shared parent merkleize and drop on several threads" {
+    inline for (.{ any_support.UnorderedFixed(Mmr), any_support.OrderedVariable(Mmb) }) |D| {
+        var harness = try any_support.Harness.init(gpa);
+        defer harness.deinit();
+        try run_forks(D, try harness.open(D, null));
+    }
+    const currents = .{ current_support.UnorderedFixed(Mmb), current_support.OrderedVariable(Mmr) };
+    inline for (currents) |D| {
+        var harness = try current_support.Harness.init(gpa);
+        defer harness.deinit();
+        try run_forks(D, try harness.open(D, null));
     }
 }

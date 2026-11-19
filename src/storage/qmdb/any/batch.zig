@@ -24,6 +24,8 @@
 
 const std = @import("std");
 const assert = std.debug.assert;
+const refcount = @import("../../refcount.zig");
+const RefCount = refcount.RefCount;
 const Allocator = std.mem.Allocator;
 const codec = @import("codec");
 const merkle = @import("../../merkle/mod.zig");
@@ -518,9 +520,11 @@ fn Merkleizer(comptime D: type) type {
             var ancestors: std.ArrayList(*D.MerkleizedBatch) = .empty;
             defer ancestors.deinit(gpa);
             errdefer for (ancestors.items) |a| a.release();
-            var current = batch.parent;
-            while (current) |ancestor| : (current = ancestor.live_parent()) {
-                try ancestors.append(gpa, ancestor.retain());
+            var ancestry: refcount.Ancestors(D.MerkleizedBatch) = .from_first(gpa, batch.parent);
+            defer ancestry.deinit();
+            while (ancestry.next()) |ancestor| {
+                try ancestors.ensureUnusedCapacity(gpa, 1);
+                ancestors.appendAssumeCapacity(ancestor.retain());
             }
             const inherited = if (batch.parent) |p| p.bounds.db else batch.base;
             const oldest_base: ?D.Commitment = if (ancestors.items.len > 0)
@@ -917,8 +921,8 @@ fn Merkleizer(comptime D: type) type {
             for (self.ancestors, diffs) |a, *d| d.* = a.diff.retain();
             merkleized.* = .{
                 .gpa = gpa,
-                .strong = 1,
-                .weak = 1,
+                .strong = .init(),
+                .weak = .init(),
                 .parent = self.parent,
                 .journal_batch = journal,
                 .diff = diff_owned.?,
@@ -933,7 +937,7 @@ fn Merkleizer(comptime D: type) type {
                     .inactivity_floor = floor,
                 },
             };
-            if (self.parent) |parent| parent.weak += 1;
+            if (self.parent) |parent| parent.weak.retain();
             return merkleized;
         }
 
@@ -1019,8 +1023,8 @@ pub fn Merkleized(comptime D: type) type {
         pub const BaseLoc = struct { key: K, loc: ?u64 };
 
         gpa: Allocator,
-        strong: u32,
-        weak: u32,
+        strong: RefCount,
+        weak: RefCount,
         parent: ?*Self,
         journal_batch: *D.Log.MerkleizedBatch,
         /// This batch's own key-level changes, sorted by key.
@@ -1044,8 +1048,8 @@ pub fn Merkleized(comptime D: type) type {
             const journal_batch = try db.log.to_merkleized_batch();
             self.* = .{
                 .gpa = gpa,
-                .strong = 1,
-                .weak = 1,
+                .strong = .init(),
+                .weak = .init(),
                 .parent = null,
                 .journal_batch = journal_batch,
                 .diff = diff,
@@ -1058,15 +1062,12 @@ pub fn Merkleized(comptime D: type) type {
         }
 
         pub fn retain(self: *Self) *Self {
-            assert(self.strong > 0);
-            self.strong += 1;
+            self.strong.retain();
             return self;
         }
 
         pub fn release(self: *Self) void {
-            assert(self.strong > 0);
-            self.strong -= 1;
-            if (self.strong > 0) return;
+            if (!self.strong.release()) return;
             const gpa = self.gpa;
             self.journal_batch.release(gpa);
             self.diff.release(gpa);
@@ -1080,15 +1081,7 @@ pub fn Merkleized(comptime D: type) type {
         }
 
         fn release_weak(self: *Self) void {
-            assert(self.weak > 0);
-            self.weak -= 1;
-            if (self.weak == 0) self.gpa.destroy(self);
-        }
-
-        pub fn live_parent(self: *const Self) ?*Self {
-            const parent = self.parent orelse return null;
-            assert(parent.weak > 0);
-            return if (parent.strong > 0) parent else null;
+            if (self.weak.release()) self.gpa.destroy(self);
         }
 
         pub fn commitment(self: *const Self) D.Commitment {
@@ -1127,8 +1120,9 @@ pub fn Merkleized(comptime D: type) type {
         fn read_diffs(self: *const Self, db_size: u64, out: *std.ArrayList([]const Pair)) !void {
             try out.append(self.gpa, self.diff.entries);
             var live: usize = 0;
-            var current = self.live_parent();
-            while (current) |batch| : (current = batch.live_parent()) live += 1;
+            var walk: refcount.Ancestors(Self) = .init(self.gpa, self);
+            defer walk.deinit();
+            while (walk.next()) |_| live += 1;
             for (self.ancestor_diffs, self.bounds.ancestors, 0..) |d, state, index| {
                 if (index >= live and state.size <= db_size) break;
                 try out.append(self.gpa, d.entries);

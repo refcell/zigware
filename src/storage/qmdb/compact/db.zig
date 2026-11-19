@@ -7,6 +7,8 @@
 
 const std = @import("std");
 const assert = std.debug.assert;
+const refcount = @import("../../refcount.zig");
+const RefCount = refcount.RefCount;
 const Allocator = std.mem.Allocator;
 const codec = @import("codec");
 const runtime = @import("runtime");
@@ -606,8 +608,9 @@ pub fn Db(comptime F: type, comptime O: type, comptime H: type) type {
                 var ancestors: std.ArrayList(Commitment) = .empty;
                 errdefer ancestors.deinit(self.gpa);
                 var oldest_base: ?Commitment = null;
-                var current = self.parent;
-                while (current) |batch| : (current = batch.live_parent()) {
+                var walk: refcount.Ancestors(MerkleizedBatch) = .from_first(self.gpa, self.parent);
+                defer walk.deinit();
+                while (walk.next()) |batch| {
                     try ancestors.append(self.gpa, batch.bounds.tip);
                     oldest_base = batch.bounds.base;
                 }
@@ -632,8 +635,8 @@ pub fn Db(comptime F: type, comptime O: type, comptime H: type) type {
         /// A merkleized batch, reference counted (`retain`/`release`), with a weak parent link.
         pub const MerkleizedBatch = struct {
             gpa: Allocator,
-            strong: u32,
-            weak: u32,
+            strong: RefCount,
+            weak: RefCount,
             parent: ?*MerkleizedBatch,
             merkle_batch: *Merkle.MerkleizedBatch,
             /// This batch's operations (owned), ending with its commit.
@@ -652,26 +655,23 @@ pub fn Db(comptime F: type, comptime O: type, comptime H: type) type {
                 assert(merkle_batch.leaves() == state.tip.size);
                 self.* = .{
                     .gpa = gpa,
-                    .strong = 1,
-                    .weak = 1,
+                    .strong = .init(),
+                    .weak = .init(),
                     .parent = parent,
                     .merkle_batch = merkle_batch,
                     .ops = ops,
                     .bounds = state,
                 };
-                if (parent) |link| link.weak += 1;
+                if (parent) |link| link.weak.retain();
             }
 
             pub fn retain(self: *MerkleizedBatch) *MerkleizedBatch {
-                assert(self.strong > 0);
-                self.strong += 1;
+                self.strong.retain();
                 return self;
             }
 
             pub fn release(self: *MerkleizedBatch) void {
-                assert(self.strong > 0);
-                self.strong -= 1;
-                if (self.strong > 0) return;
+                if (!self.strong.release()) return;
                 self.merkle_batch.release(self.gpa);
                 codec.free_items(O, self.gpa, self.ops);
                 self.gpa.free(self.ops);
@@ -682,15 +682,7 @@ pub fn Db(comptime F: type, comptime O: type, comptime H: type) type {
             }
 
             fn release_weak(self: *MerkleizedBatch) void {
-                assert(self.weak > 0);
-                self.weak -= 1;
-                if (self.weak == 0) self.gpa.destroy(self);
-            }
-
-            fn live_parent(self: *const MerkleizedBatch) ?*MerkleizedBatch {
-                const parent = self.parent orelse return null;
-                assert(parent.weak > 0);
-                return if (parent.strong > 0) parent else null;
+                if (self.weak.release()) self.gpa.destroy(self);
             }
 
             pub fn commitment(self: *const MerkleizedBatch) Commitment {

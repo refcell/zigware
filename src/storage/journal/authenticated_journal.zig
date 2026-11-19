@@ -21,6 +21,8 @@ const Allocator = std.mem.Allocator;
 const codec = @import("codec");
 const runtime = @import("runtime");
 const merkle = @import("../merkle/mod.zig");
+const refcount = @import("../refcount.zig");
+const RefCount = refcount.RefCount;
 const contiguous = @import("contiguous/mod.zig");
 const authenticated = @import("authenticated.zig");
 
@@ -402,25 +404,22 @@ pub fn Journal(comptime F: type, comptime C: type, comptime H: type) type {
 
         /// A refcounted list of a batch's items, shared with descendant batches.
         pub const ItemChunk = struct {
-            references: u32,
+            references: RefCount,
             items: []Item,
 
             fn create(gpa: Allocator, items: []Item) Allocator.Error!*ItemChunk {
                 const chunk = try gpa.create(ItemChunk);
-                chunk.* = .{ .references = 1, .items = items };
+                chunk.* = .{ .references = .init(), .items = items };
                 return chunk;
             }
 
             fn retain(self: *ItemChunk) *ItemChunk {
-                assert(self.references > 0);
-                self.references += 1;
+                self.references.retain();
                 return self;
             }
 
             fn release(self: *ItemChunk, gpa: Allocator) void {
-                assert(self.references > 0);
-                self.references -= 1;
-                if (self.references > 0) return;
+                if (!self.references.release()) return;
                 codec.free_items(Item, gpa, self.items);
                 gpa.free(self.items);
                 gpa.destroy(self);
@@ -491,10 +490,10 @@ pub fn Journal(comptime F: type, comptime C: type, comptime H: type) type {
                     self.items = .fromOwnedSlice(owned);
                     return err;
                 };
-                if (self.parent) |parent| parent.weak += 1;
+                if (self.parent) |parent| parent.weak.retain();
                 batch.* = .{
-                    .strong = 1,
-                    .weak = 1,
+                    .strong = .init(),
+                    .weak = .init(),
                     .inner = inner,
                     .bagging = self.hasher.root_bagging(),
                     .items = chunk,
@@ -515,15 +514,24 @@ pub fn Journal(comptime F: type, comptime C: type, comptime H: type) type {
             parent: *MerkleizedBatch,
         ) Allocator.Error![]*ItemChunk {
             var chunks: std.ArrayList(*ItemChunk) = .empty;
-            errdefer chunks.deinit(gpa);
-            var current: ?*MerkleizedBatch = parent;
-            while (current) |batch| : (current = batch.live_parent()) {
-                if (batch.items.items.len > 0) try chunks.append(gpa, batch.items);
+            errdefer {
+                for (chunks.items) |chunk| chunk.release(gpa);
+                chunks.deinit(gpa);
+            }
+            // The caller holds `parent`; each older batch is held while its chunk is retained.
+            if (parent.items.items.len > 0) {
+                try chunks.ensureUnusedCapacity(gpa, 1);
+                chunks.appendAssumeCapacity(parent.items.retain());
+            }
+            var walk: refcount.Ancestors(MerkleizedBatch) = .init(gpa, parent);
+            defer walk.deinit();
+            while (walk.next()) |batch| {
+                if (batch.items.items.len == 0) continue;
+                try chunks.ensureUnusedCapacity(gpa, 1);
+                chunks.appendAssumeCapacity(batch.items.retain());
             }
             std.mem.reverse(*ItemChunk, chunks.items);
-            const owned = try chunks.toOwnedSlice(gpa);
-            for (owned) |chunk| _ = chunk.retain();
-            return owned;
+            return chunks.toOwnedSlice(gpa);
         }
 
         fn release_chunks(gpa: Allocator, chunks: []const *ItemChunk) void {
@@ -534,9 +542,9 @@ pub fn Journal(comptime F: type, comptime C: type, comptime H: type) type {
         /// A speculative batch whose root is computed: immutable, reference counted.
         pub const MerkleizedBatch = struct {
             /// Strong references; the batch's items live while this is non-zero.
-            strong: u32,
+            strong: RefCount,
             /// Weak references (children's parent links) plus one shared by the strong ones.
-            weak: u32,
+            weak: RefCount,
             /// The Merkle batch (a strong reference).
             inner: *Merkle.MerkleizedBatch,
             /// The peak bagging inherited from the journal or parent batch.
@@ -549,16 +557,14 @@ pub fn Journal(comptime F: type, comptime C: type, comptime H: type) type {
             ancestor_items: []const *ItemChunk,
 
             pub fn retain(self: *MerkleizedBatch) *MerkleizedBatch {
-                assert(self.strong > 0);
-                self.strong += 1;
+                self.strong.retain();
                 return self;
             }
 
             /// Drops a strong reference (commonware's `drop` of an `Arc`).
             pub fn release(self: *MerkleizedBatch, gpa: Allocator) void {
-                assert(self.strong > 0);
-                self.strong -= 1;
-                if (self.strong > 0) return;
+                if (!self.strong.release()) return;
+                assert(self.weak.load() > 0);
                 self.inner.release(gpa);
                 self.items.release(gpa);
                 release_chunks(gpa, self.ancestor_items);
@@ -568,15 +574,8 @@ pub fn Journal(comptime F: type, comptime C: type, comptime H: type) type {
             }
 
             fn release_weak(self: *MerkleizedBatch, gpa: Allocator) void {
-                assert(self.weak > 0);
-                self.weak -= 1;
-                if (self.weak == 0) gpa.destroy(self);
-            }
-
-            fn live_parent(self: *const MerkleizedBatch) ?*MerkleizedBatch {
-                const parent = self.parent orelse return null;
-                assert(parent.weak > 0);
-                return if (parent.strong > 0) parent else null;
+                assert(self.weak.load() > 0);
+                if (self.weak.release()) gpa.destroy(self);
             }
 
             /// The item count visible through this batch, ancestors included.
@@ -679,8 +678,8 @@ pub fn Journal(comptime F: type, comptime C: type, comptime H: type) type {
             errdefer self.gpa.destroy(chunk);
             const batch = try self.gpa.create(MerkleizedBatch);
             batch.* = .{
-                .strong = 1,
-                .weak = 1,
+                .strong = .init(),
+                .weak = .init(),
                 .inner = inner,
                 .bagging = self.hasher.root_bagging(),
                 .items = chunk,

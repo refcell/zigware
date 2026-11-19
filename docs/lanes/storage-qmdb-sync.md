@@ -213,6 +213,10 @@ Design:
    applying batches under the write lock) checks every value read; it fails without step 1.
 
 ## Decisions
+- Batch reference counts are atomic (`storage.refcount.RefCount`: monotonic retain, acq_rel
+  release, a CAS `try_retain` for `Weak::upgrade`), and walks up a weak parent chain hold each
+  live ancestor while reading it (`refcount.Ancestors`), as commonware's `Arc`/`Weak` do: forks
+  of one parent are merkleized, read, and dropped on several threads under shared read guards.
 - compact: `Db(F, O, H)` is generic over the keyless or immutable operation (detected by its
   `append`/`set` variant) instead of commonware's sealed trait; `compact.Keyless` and
   `compact.Immutable` are the aliases, kept under `compact/` so keyless/immutable stay

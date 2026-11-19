@@ -7,6 +7,8 @@
 
 const std = @import("std");
 const assert = std.debug.assert;
+const refcount = @import("../../refcount.zig");
+const RefCount = refcount.RefCount;
 const Allocator = std.mem.Allocator;
 const codec = @import("codec");
 const value_mod = @import("../value.zig");
@@ -71,7 +73,7 @@ pub fn Diff(comptime K: type, comptime V: type) type {
         const Self = @This();
         pub const Item = Pair(K, V);
 
-        references: u32,
+        references: RefCount,
         entries: []Item,
 
         /// Takes ownership of `entries` and their values; they must be sorted by key without
@@ -79,20 +81,17 @@ pub fn Diff(comptime K: type, comptime V: type) type {
         pub fn create(gpa: Allocator, entries: []Item) Allocator.Error!*Self {
             assert(is_sorted(K, V, entries));
             const self = try gpa.create(Self);
-            self.* = .{ .references = 1, .entries = entries };
+            self.* = .{ .references = .init(), .entries = entries };
             return self;
         }
 
         pub fn retain(self: *Self) *Self {
-            assert(self.references > 0);
-            self.references += 1;
+            self.references.retain();
             return self;
         }
 
         pub fn release(self: *Self, gpa: Allocator) void {
-            assert(self.references > 0);
-            self.references -= 1;
-            if (self.references > 0) return;
+            if (!self.references.release()) return;
             free_entries(K, V, gpa, self.entries);
             gpa.destroy(self);
         }
