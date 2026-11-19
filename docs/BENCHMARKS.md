@@ -105,6 +105,23 @@ directory under `BENCH_DIR` (default `$TMPDIR` or `/tmp`). commonware gets it th
   per-key index cursor work and allocations dominate. Compare with commonware's index update
   path, which is allocation-free here and runs over mimalloc.
 
+## Updates since the table
+
+- **ed25519, 2026-11-19.** The table above predates two fixes. 3907c86 (actor-stream) sums
+  batch shards with the bucket MSM. 077c6cc ports commonware curve25519's single-signature
+  check (`ed25519/verify_msm.zig`): `half_size` splits `k` so every scalar is below 2^128,
+  and one Straus doubling chain of at most 129 steps runs in projective and completed
+  coordinates, with width-8 NAF tables of `B` and `2^128 B` built at compile time. The
+  re-run of both benches came at a 1-minute load average of 100 to 127, where commonware's
+  own medians were 2 to 3 times the table's, so the wall-clock figures are not quotable:
+  best medians were 74.8 µs against 57.9 µs for `signature_verification` (1.29×) and
+  3.58 ms against 3.81 ms for `batch_verify_same_message` (0.94×). By thread CPU time in
+  one process, which the load moves less, the new single verify takes 38 to 40 µs where
+  std's `mulDoubleBasePublic` path took 51 to 54 µs. The rest of the gap is std's
+  radix-2^51 field arithmetic (commonware selects an AVX-512 or NEON backend) and
+  `half_size`, about 4.6 µs here as a 256-bit shift-and-subtract Euclid. A vectorized field
+  and a Lehmer-style `half_size` are the next steps.
+
 ## Appendix: bench coverage
 
 Every Criterion bench in commonware a9ffc25f3 (`benches/` dirs with `criterion_main!`), listed
