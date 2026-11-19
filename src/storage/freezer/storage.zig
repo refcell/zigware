@@ -405,18 +405,21 @@ pub fn Freezer(comptime K: type, comptime V: type) type {
 
         /// The value for `identifier`, or null for an unknown key. Free it with `codec.free`.
         pub fn get(self: *Self, identifier: Identifier) Error!?V {
-            switch (identifier) {
-                .cursor => |cursor| {
-                    const section = cursor.section();
-                    return try self.oversized.get_value(section, cursor.offset(), cursor.size());
-                },
-                .key => |key| {
+            return self.get_with(identifier, self.gpa);
+        }
+
+        /// `get`, decoding the value's memory from `value_gpa` (such as a buffer the caller
+        /// reuses across reads).
+        pub fn get_with(self: *Self, identifier: Identifier, value_gpa: Allocator) Error!?V {
+            const section, const offset, const size = switch (identifier) {
+                .cursor => |cursor| .{ cursor.section(), cursor.offset(), cursor.size() },
+                .key => |key| found: {
                     self.gets.metric().inc();
                     const section, const record = try self.find_key(key.*) orelse return null;
-                    const offset, const size = .{ record.value_offset, record.value_size };
-                    return try self.oversized.get_value(section, offset, size);
+                    break :found .{ section, record.value_offset, record.value_size };
                 },
-            }
+            };
+            return try self.oversized.get_value_with(section, offset, size, value_gpa);
         }
 
         /// Whether a value exists for `key` (walks the chain without reading values).

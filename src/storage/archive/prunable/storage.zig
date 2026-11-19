@@ -360,26 +360,35 @@ pub fn Archive(comptime T: type, comptime K: type, comptime V: type) type {
         /// The value at `index` (its first record) or under `key`. Free it with `codec.free`
         /// if `V` owns memory.
         pub fn get(self: *Self, identifier: Identifier) Error!?V {
+            return self.get_with(identifier, self.gpa);
+        }
+
+        /// `get`, decoding the value's memory from `value_gpa` (such as a buffer the caller
+        /// reuses across reads).
+        pub fn get_with(self: *Self, identifier: Identifier, value_gpa: Allocator) Error!?V {
             assert(!self.failed);
             self.gets.metric().inc();
-            return switch (identifier) {
-                .index => |index| self.get_index(index),
-                .key => |key| self.get_key(key),
+            const start, const entry = switch (identifier) {
+                .index => |index| found: {
+                    const position = self.first_position(index) orelse return null;
+                    const start = self.section(index);
+                    const entry = try self.oversized.get(start, position);
+                    assert(entry.index == index);
+                    break :found .{ start, entry };
+                },
+                .key => |key| found: {
+                    const found = try self.find(key) orelse return null;
+                    break :found .{ found.start, found.entry };
+                },
             };
+            return try self.read_value(start, entry, value_gpa);
         }
 
-        fn get_index(self: *Self, index: u64) Error!?V {
-            const position = self.first_position(index) orelse return null;
-            const start = self.section(index);
-            const entry = try self.oversized.get(start, position);
-            assert(entry.index == index);
-            return try self.read_value(start, entry);
-        }
-
-        fn read_value(self: *Self, start: u64, entry: Record) Error!V {
+        fn read_value(self: *Self, start: u64, entry: Record, value_gpa: Allocator) Error!V {
             assert(self.section(entry.index) == start);
             assert(entry.value_size > 0);
-            return self.oversized.get_value(start, entry.value_offset, entry.value_size);
+            const offset, const size = .{ entry.value_offset, entry.value_size };
+            return self.oversized.get_value_with(start, offset, size, value_gpa);
         }
 
         /// The section and index journal entry of a record storing `key`, if any. Candidates
@@ -407,11 +416,6 @@ pub fn Archive(comptime T: type, comptime K: type, comptime V: type) type {
         fn keys_equal(stored: K, key_bytes: *const [key_size]u8) bool {
             const stored_bytes: [key_size]u8 = codec.encode_fixed(K, stored);
             return std.mem.eql(u8, &stored_bytes, key_bytes);
-        }
-
-        fn get_key(self: *Self, key: *const K) Error!?V {
-            const found = try self.find(key) orelse return null;
-            return try self.read_value(found.start, found.entry);
         }
 
         /// Whether `index` is stored, or any retained index stores `key`.
@@ -442,7 +446,7 @@ pub fn Archive(comptime T: type, comptime K: type, comptime V: type) type {
             for (values, 0..) |*value, i| {
                 const position = if (i == 0) first else extras[i - 1];
                 const entry = try self.oversized.get(start, position);
-                value.* = try self.read_value(start, entry);
+                value.* = try self.read_value(start, entry, self.gpa);
                 filled += 1;
             }
             assert(filled == values.len);

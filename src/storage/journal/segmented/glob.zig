@@ -150,6 +150,19 @@ pub fn Glob(comptime V: type) type {
         /// Read the value at `offset` with known `size` (from an index entry). Free it with
         /// `codec.free`.
         pub fn get(self: *Self, section: u64, offset: u64, size_bytes: u32) Error!V {
+            return self.get_with(section, offset, size_bytes, self.manager.gpa);
+        }
+
+        /// `get`, decoding the value's memory from `value_gpa` (such as a buffer the caller
+        /// reuses across reads); decompression scratch still comes from the journal's
+        /// allocator.
+        pub fn get_with(
+            self: *Self,
+            section: u64,
+            offset: u64,
+            size_bytes: u32,
+            value_gpa: Allocator,
+        ) Error!V {
             const buffer = try self.manager.get(section) orelse return error.SectionOutOfRange;
             const gpa = self.manager.gpa;
             self.scratch.clearRetainingCapacity();
@@ -160,9 +173,14 @@ pub fn Glob(comptime V: type) type {
             const data = buf[0..data_len];
             const stored = std.mem.readInt(u32, buf[data_len..][0..checksum_size], .big);
             if (Crc32.checksum(data) != stored) return error.ChecksumMismatch;
-            const compressed = self.compression != null;
-            const value = frame.decode_item(V, gpa, data, self.codec_config, compressed);
-            return value catch |err| return @errorCast(err);
+            if (self.compression == null) {
+                return codec.decode_cfg(V, value_gpa, data, self.codec_config) catch |err|
+                    return @errorCast(err);
+            }
+            const decompressed = try frame.decompress(gpa, data);
+            defer gpa.free(decompressed);
+            return codec.decode_cfg(V, value_gpa, decompressed, self.codec_config) catch |err|
+                return @errorCast(err);
         }
 
         /// Whether the entry at `(offset, size)` of `section` has a valid trailing checksum.

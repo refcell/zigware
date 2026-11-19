@@ -311,6 +311,17 @@ The rest of the get gap is the returned value: decoding still allocates its 64 K
 `smp_allocator` maps directly, where commonware's malloc reuses heap memory. The values'
 copies are not the cost: CRC32C over 10,000 64 KiB values takes 25 ms and a memcpy 12 ms.
 
+Then the returned value: the archives, the freezer, and the glob gained `get_with(identifier,
+value_gpa)`, which decodes the value's memory from the caller's allocator (decompression
+scratch still comes from the journal's own). The bench now decodes every read into one reused
+64 KiB buffer, as a caller that drops each value does under commonware's malloc. After the
+machine's reboot, load 79 to 102:
+
+| bench | parameters | commonware | zigware | zigware / commonware |
+|---|---|---|---|---|
+| `archive::get` | `variant=prunable mode=serial pattern=key comp=off items=10000 reads=1000` | 16.8 ms | 11.2 ms | 0.67× |
+| `archive::get` | `variant=immutable mode=serial pattern=key comp=off items=10000 reads=1000` | 24.2 ms | 13.2 ms | 0.55× |
+
 ### Freezer: same work, different I/O dispatch (2026-11-19, clearing lane)
 
 Both benches use the same configuration (1 MiB key and value write buffers, a 65,536-entry

@@ -107,11 +107,14 @@ const Archive = struct {
     }
 
     /// Reads the value at `identifier`, which must exist, returning its length.
-    fn get(self: *Archive, gpa: Allocator, identifier: Identifier) !usize {
+    /// Reads `identifier`, decoding its value into `buffer`, which the caller reuses for
+    /// every read (`get_with`): a fresh 64 KiB value per read would be an mmap under
+    /// `smp_allocator`, which maps allocations over 32 KiB directly.
+    fn get(self: *Archive, buffer: []u8, identifier: Identifier) !usize {
+        var value_gpa: std.heap.FixedBufferAllocator = .init(buffer);
         const value = switch (self.inner) {
-            inline else => |*inner| try inner.get(identifier),
+            inline else => |*inner| try inner.get_with(identifier, value_gpa.allocator()),
         } orelse unreachable; // Every benchmark reads a stored item.
-        defer codec.free(Val, gpa, value);
         return value.len;
     }
 
@@ -260,6 +263,8 @@ const GetWorkload = struct {
     selection: Selection,
     target: Archive = undefined,
     opened: bool = false,
+    /// The buffer every read decodes its value into.
+    value_buffer: []u8 = &.{},
 
     pub fn setup(self: *GetWorkload) !void {
         assert(!self.opened);
@@ -267,6 +272,8 @@ const GetWorkload = struct {
         const keys = self.fill.keys.?;
         select_reads(keys, self.reads, self.selection.keys[0..self.reads], self.indices());
         const fill = self.fill;
+        self.value_buffer = try fill.gpa.alloc(u8, VALUE_SIZE);
+        errdefer fill.gpa.free(self.value_buffer);
         try self.target.open(fill.gpa, fill.disk, fill.variant, fill.compression);
         self.opened = true;
     }
@@ -276,14 +283,14 @@ const GetWorkload = struct {
     }
 
     pub fn iter(self: *GetWorkload) !usize {
-        const gpa = self.fill.gpa;
+        const buffer = self.value_buffer;
         var total: usize = 0;
         if (self.by_key) {
             for (self.selection.keys[0..self.reads]) |*key| {
-                total += try self.target.get(gpa, .{ .key = key });
+                total += try self.target.get(buffer, .{ .key = key });
             }
         } else {
-            for (self.indices()) |index| total += try self.target.get(gpa, .{ .index = index });
+            for (self.indices()) |index| total += try self.target.get(buffer, .{ .index = index });
         }
         assert(total == self.reads * VALUE_SIZE);
         return total;
@@ -292,6 +299,7 @@ const GetWorkload = struct {
     pub fn teardown(self: *GetWorkload) void {
         if (!self.opened) return;
         self.opened = false;
+        self.fill.gpa.free(self.value_buffer);
         self.target.close(false) catch |err| std.log.warn("archive get bench: {t}", .{err});
     }
 };

@@ -402,6 +402,17 @@ pub fn Oversized(comptime I: type, comptime V: type) type {
             return self.values.get(section, offset, size_bytes);
         }
 
+        /// `get_value`, decoding the value's memory from `value_gpa`.
+        pub fn get_value_with(
+            self: *Self,
+            section: u64,
+            offset: u64,
+            size_bytes: u32,
+            value_gpa: Allocator,
+        ) Error!V {
+            return self.values.get_with(section, offset, size_bytes, value_gpa);
+        }
+
         /// Sync `sections` (ascending) of both journals, then publish the proven lengths of
         /// tracked sections that are not `active` (ascending).
         pub fn sync_tracked(self: *Self, sections: []const u64, active: []const u64) Error!void {

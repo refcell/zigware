@@ -507,3 +507,34 @@ comptime {
     _ = Shared;
     _ = Small;
 }
+
+/// `get_with` decodes the whole value from the caller's allocator, compressed or not.
+fn check_get_with(compression: ?u8) !void {
+    var harness = try Harness.init();
+    defer harness.deinit();
+    const base = harness.shared_config(compression);
+    var cfg: immutable.Config([]const u8) = undefined;
+    inline for (@typeInfo(@TypeOf(base)).@"struct".field_names) |name| {
+        if (comptime !std.mem.eql(u8, name, "codec_config")) @field(cfg, name) = @field(base, name);
+    }
+    cfg.codec_config = .{ .range = .full() };
+    var archive = try harness.open(Key, []const u8, cfg);
+    defer archive.deinit();
+    var value: [3000]u8 = undefined;
+    for (&value, 0..) |*byte, i| byte.* = @truncate(i % 7);
+    try archive.put(1, test_key("big"), &value);
+    try archive.sync();
+    var buffer: [value.len]u8 = undefined;
+    const key = test_key("big");
+    for ([_]@TypeOf(archive).Identifier{ .{ .index = 1 }, .{ .key = &key } }) |identifier| {
+        var value_gpa: std.heap.FixedBufferAllocator = .init(&buffer);
+        const got = (try archive.get_with(identifier, value_gpa.allocator())).?;
+        try testing.expectEqualSlices(u8, &value, got);
+        try testing.expectEqual(value.len, value_gpa.end_index);
+    }
+}
+
+test "immutable get_with decodes into the caller's buffer" {
+    try check_get_with(null);
+    try check_get_with(3);
+}

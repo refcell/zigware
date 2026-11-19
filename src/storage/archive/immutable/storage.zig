@@ -213,14 +213,20 @@ pub fn Archive(comptime K: type, comptime V: type) type {
 
         /// The value at `index` or under `key`. Free it with `codec.free` if `V` owns memory.
         pub fn get(self: *Self, identifier: Identifier) Error!?V {
+            return self.get_with(identifier, self.gpa);
+        }
+
+        /// `get`, decoding the value's memory from `value_gpa` (such as a buffer the caller
+        /// reuses across reads).
+        pub fn get_with(self: *Self, identifier: Identifier, value_gpa: Allocator) Error!?V {
             assert(!self.failed);
             self.gets.metric().inc();
             return switch (identifier) {
                 .index => |index| {
                     const cursor = try self.ordinal.get(index) orelse return null;
-                    return try self.freezer.get(.{ .cursor = cursor });
+                    return try self.freezer.get_with(.{ .cursor = cursor }, value_gpa);
                 },
-                .key => |key| try self.freezer.get(.{ .key = key }),
+                .key => |key| try self.freezer.get_with(.{ .key = key }, value_gpa),
             };
         }
 

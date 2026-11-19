@@ -289,3 +289,8 @@ qmdb `current` (balances, over the MMB) and `keyless` (payout log, over the MMR)
   (put 970 ms to 410 ms prunable, 1.17 s to 424 ms immutable; commonware 517 and 670 ms), and
   glob `get` reads into its retained scratch instead of a fresh 64 KiB mmap (get 47.3 ms to
   31.0 ms, commonware 24.5 ms; the rest is the decoded value's own mmap).
+- 2026-11-19: `get_with(identifier, value_gpa)` on the prunable and immutable archives, the
+  freezer, oversized, and glob: the caller supplies the value's allocator, so the archive bench
+  reuses one 64 KiB buffer. Archive get by key: prunable 11.2 ms, immutable 13.2 ms
+  (commonware 16.8 and 24.2 ms). Planted: decompressing with the caller's allocator fails both
+  new tests.
