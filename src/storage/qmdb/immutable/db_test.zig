@@ -417,3 +417,139 @@ test "immutable init_from_log rebuilds an opened log and refuses an empty one" {
         try db.destroy();
     }
 }
+
+// Commonware's run_inactivity_floor_tracking: a default floor keeps the database's, an explicit
+// floor takes effect at apply (before any commit), and a reopen restores it.
+test "immutable inactivity floor tracks applies and survives reopen" {
+    inline for (families) |F| {
+        var harness = try support.Harness.init(gpa);
+        defer harness.deinit();
+        var db = try harness.open(F, null);
+        defer db.deinit();
+        try testing.expectEqual(@as(u64, 0), db.inactivity_floor());
+        const first = try merkleize_set(&db, null, 1, 2);
+        defer first.release();
+        try db.apply_batch(first);
+        try testing.expectEqual(@as(u64, 0), db.inactivity_floor());
+        var batch = try db.new_batch();
+        try batch.set(fill(3), fill(4));
+        batch.with_inactivity_floor(3);
+        const second = try batch.merkleize(&db);
+        defer second.release();
+        try db.apply_batch(second);
+        try testing.expectEqual(@as(u64, 3), db.inactivity_floor());
+        try db.commit();
+        try db.sync();
+        db.deinit();
+        db = try harness.open(F, null);
+        try testing.expectEqual(@as(u64, 3), db.inactivity_floor());
+    }
+}
+
+/// Sets `fill(key)` with `floor` in one batch on the database and applies it.
+fn apply_set_with_floor(db: anytype, key: u8, floor: u64) !void {
+    var batch = try db.new_batch();
+    const merkleized = merkleized: {
+        errdefer batch.deinit();
+        try batch.set(fill(key), fill(key + 1));
+        batch.with_inactivity_floor(floor);
+        break :merkleized try batch.merkleize(db);
+    };
+    defer merkleized.release();
+    try db.apply_batch(merkleized);
+}
+
+// Commonware's run_floor_monotonicity and run_floor_monotonicity_violation: a batch may keep
+// or raise the database's floor, never lower it.
+test "immutable floors may stay or rise but not regress from the database" {
+    inline for (families) |F| {
+        var harness = try support.Harness.init(gpa);
+        defer harness.deinit();
+        var db = try harness.open(F, null);
+        defer db.deinit();
+        try apply_set_with_floor(&db, 1, 2); // The commit location, 2, is the largest floor.
+        try testing.expectEqual(@as(u64, 2), db.inactivity_floor());
+        try apply_set_with_floor(&db, 3, 2);
+        try testing.expectEqual(@as(u64, 2), db.inactivity_floor());
+        try apply_set_with_floor(&db, 5, 5);
+        try testing.expectEqual(@as(u64, 5), db.inactivity_floor());
+        var batch = try db.new_batch();
+        defer batch.deinit();
+        try batch.set(fill(7), fill(8));
+        batch.with_inactivity_floor(4);
+        try testing.expectError(error.FloorRegressed, batch.merkleize(&db));
+        try testing.expectEqual(@as(u64, 7), db.bounds().end);
+    }
+}
+
+// Commonware's run_chained_floor_beyond_commit: a child's floor bound is its own commit
+// location, which counts its parent's operations.
+test "immutable a chained floor may reach but not pass the child's commit" {
+    inline for (families) |F| {
+        var harness = try support.Harness.init(gpa);
+        defer harness.deinit();
+        var db = try harness.open(F, null);
+        defer db.deinit();
+        var batch = try db.new_batch();
+        try batch.set(fill(1), fill(2));
+        batch.with_inactivity_floor(2);
+        const parent = try batch.merkleize(&db);
+        defer parent.release();
+        var beyond = parent.new_batch();
+        defer beyond.deinit();
+        try beyond.set(fill(3), fill(4));
+        beyond.with_inactivity_floor(5); // One past the child's commit at 4.
+        try testing.expectError(error.FloorBeyondCommit, beyond.merkleize(&db));
+        var at_commit = parent.new_batch();
+        try at_commit.set(fill(3), fill(4));
+        at_commit.with_inactivity_floor(4);
+        const child = try at_commit.merkleize(&db);
+        defer child.release();
+        try testing.expectEqual(@as(u64, 4), child.bounds.inactivity_floor);
+    }
+}
+
+// Commonware's fixed.rs test_batch_inherits_floor_but_not_metadata: a child inherits its
+// parent's floor but not its metadata, and so does a batch from the database after the parent
+// applies. (Its compact half belongs to the compact database's tests.)
+test "immutable batches inherit the floor but not the metadata" {
+    inline for (families) |F| {
+        var harness = try support.Harness.init(gpa);
+        defer harness.deinit();
+        var db = try harness.open(F, null);
+        defer db.deinit();
+        var batch = try db.new_batch();
+        try batch.set(fill(1), fill(9));
+        batch.with_metadata(fill(9));
+        batch.with_inactivity_floor(1);
+        const parent = try batch.merkleize(&db);
+        defer parent.release();
+        var inherited = parent.new_batch();
+        const child = try inherited.merkleize(&db);
+        defer child.release();
+        var cleared = parent.new_batch();
+        cleared.with_metadata(fill(9));
+        cleared.with_metadata(null);
+        cleared.with_inactivity_floor(1);
+        const explicit = try cleared.merkleize(&db);
+        defer explicit.release();
+        try testing.expect(child.root().eql(explicit.root()));
+        try testing.expectEqual(@as(u64, 1), child.bounds.inactivity_floor);
+        var regressed = parent.new_batch();
+        defer regressed.deinit();
+        regressed.with_inactivity_floor(0);
+        try testing.expectError(error.FloorRegressed, regressed.merkleize(&db));
+        try db.apply_batch(parent);
+        try expect_value(try db.get_metadata(), fill(9));
+        var from_db = try db.new_batch();
+        const fresh = try from_db.merkleize(&db);
+        defer fresh.release();
+        try testing.expect(fresh.root().eql(explicit.root()));
+        try db.apply_batch(explicit);
+        try expect_value(try db.get_metadata(), null);
+        var after = try db.new_batch();
+        const next = try after.merkleize(&db);
+        defer next.release();
+        try testing.expectEqual(@as(u64, 1), next.bounds.inactivity_floor);
+    }
+}

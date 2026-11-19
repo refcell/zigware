@@ -114,6 +114,28 @@ which every database here is built on.
 - [x] immutable: the mod.rs batch scenarios (stacked apply, speculative roots, many
   sequential, large, sibling-apply proof refusal, operations match the applied log;
   `batch_test.zig`), including its `ElementPruned` tail after a flushing commit.
+- immutable audit (2026-11-19) against mod.rs's 59 `run_*` scenarios and the fixed.rs and
+  variable.rs tests: 25 covered, 15 partial, 19 missing at the start.
+  - [x] batch A, floors: `run_inactivity_floor_tracking`, `run_floor_monotonicity`,
+    `run_floor_monotonicity_violation`, `run_chained_floor_beyond_commit`, fixed.rs
+    `test_batch_inherits_floor_but_not_metadata` (its compact half is the compact lane's).
+  - [ ] batch B, staleness: `run_descendant_apply_makes_parent_reads_stale`,
+    `run_merkleize_foreign_db`, `run_merkleize_stale_sibling`,
+    `run_stale_batch_child_applied_before_parent`, and the `StaleRead` halves of
+    `run_stale_fork_refuses`, `run_stale_batch_rejected`, `run_stale_batch_chained`.
+  - [ ] batch C, chains: `run_partial_ancestor_commit`,
+    `run_delayed_merkleize_after_ancestor_apply`,
+    `run_child_root_matches_pending_and_committed`, `run_merkleize_across_prune`, and the
+    partial `run_to_batch`, `run_batch_chain`, `run_batch_chained_merkleized_get`,
+    `run_dropped_ancestor_reads`, `run_operations_match_applied_log` (child proof unchanged).
+  - [ ] batch D, prune and build: `run_pruning` (5 items per blob), `run_prune_retires_pruned_sets`,
+    `run_single_commit_live_set`, `run_build_and_authenticate`, and the partial
+    `run_build_basic`, `run_batch_many_sequential`, `run_batch_empty_batch`,
+    `run_reads_ignore_inactive_operations` (colliding twin, reopen).
+  - [ ] batch E, fixed.rs: `start_sync` recovery and failure (synchronous forms), metrics,
+    `bounded_init_then_set_crash_recovers_history`. Not portable while `start_sync` completes
+    synchronously: `start_sync_overlaps_work`, `apply_indexes_while_journal_waits`,
+    `start_sync_prune_waits`. Compact root compatibility is the compact lane's.
 - [x] Fuzz: `qmdb_keyless_operations` (seeded and `std.testing.fuzz`), with a value model.
 - [x] store batch 1: shared-prefix snapshot rebuild, floor bound (`churn` and
   `randomized_churn` with commonware's `bounded` replay check), collision reads (floors and
@@ -351,3 +373,4 @@ which every database here is built on.
 - 2026-11-19: store policy scenarios (batch 2) against `walk_model`.
 - 2026-11-19: store batch 3 (bitmap, recovery, start_sync); `read_location` cfg tests.
 - 2026-11-19: store variable-length keys and `test_store_variable_length_keys`.
+- 2026-11-19: immutable audit; batch A (floor scenarios and batch floor inheritance).
