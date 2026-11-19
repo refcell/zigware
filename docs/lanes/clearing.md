@@ -156,6 +156,14 @@ qmdb `current` (balances, over the MMB) and `keyless` (payout log, over the MMR)
   in `zig build test` and under `std.testing.fuzz`; the verify target includes BalanceProof.
 - [x] Benches `src/clearing/benches.zig` (zigware's own; commonware's clearing has none):
   `clearing::amounts_root`, `clearing::matrix_open`, `clearing::close_check`.
+- Storage benches (assigned after clearing closed), one `benches.zig` per module, each run
+  once on smoke inputs under `zig build test`:
+  - [x] index (`index::*` 8 criterion benches and `index_scale`; `index_scale` is opt-in in
+    commonware, so standard inputs skip it, full inputs run its 20M/100M tier once per variant,
+    and smoke inputs run 10,000 keys).
+  - [ ] merkle (12).
+  - [ ] archive (get, put, restart).
+  - [ ] freezer (get, put, restart).
 
 ## Log
 - 2026-11-16: namespace, amounts, lookup with their tests; Amounts and Lookup conformance
@@ -193,3 +201,4 @@ qmdb `current` (balances, over the MMB) and `keyless` (payout log, over the MMR)
 - 2026-11-18: the model checker for model.rs (`tests/bajillion/checker.zig`).
 - 2026-11-18: model.rs groundwork: World, its fingerprint, and the memoized committee replay.
 - 2026-11-19: model.rs: the workload, its seven properties, and all six workloads (five slow).
+- 2026-11-19: storage index benches (`src/storage/index/benches.zig`).
