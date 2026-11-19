@@ -126,3 +126,161 @@ test "dkg: bootstrap writes genesis to its own directory when no sibling matches
     defer read.deinit(gpa);
     try testing.expect(read.eql(genesis));
 }
+
+const glue_dkg = zigware.glue.dkg;
+const p2p = zigware.p2p;
+const runtime = zigware.runtime;
+const Net = p2p.simulated.Network(types.PublicKey);
+
+const EngineTypes = struct {
+    pub const Variant = types.MinSig;
+    pub const Directory = types.Unit;
+    pub const Manager = glue_dkg.network.KeyOnlyManager(Net.Manager);
+    pub const PeerProvider = Net.Manager;
+    pub const Blocker = Net.Control;
+    pub const SecretStore = types.Secrets;
+    pub const Network = Net;
+};
+const Engine = glue_dkg.bootstrap.Engine(EngineTypes);
+
+fn register_channels(net: *Net, key: types.PublicKey) !Engine.Channels {
+    const quota = p2p.Quota.per_second(types.message_rate_per_second);
+    const ids = [_]u64{
+        types.vote_channel,     types.certificate_channel, types.resolver_channel,
+        types.backfill_channel, types.broadcast_channel,   types.dkg_channel,
+    };
+    var channels: [ids.len]Engine.Channel = undefined;
+    for (&channels, ids) |*channel, id| {
+        const registered = try net.oracle().control(key).register(id, quota);
+        channel.* = .{ .sender = registered.sender, .receiver = registered.receiver };
+    }
+    return .{
+        .votes = channels[0],
+        .certificates = channels[1],
+        .resolver = channels[2],
+        .backfill = channels[3],
+        .broadcast = channels[4],
+        .dkg = channels[5],
+    };
+}
+
+fn engine_config(
+    net: *Net,
+    signer: ed25519.PrivateKey,
+    manager: *EngineTypes.Manager,
+    store: *types.Secrets,
+    committee: types.Set(types.PublicKey),
+) glue_dkg.bootstrap.Config(EngineTypes) {
+    return .{
+        .signer = signer,
+        .manager = manager,
+        .peer_provider = net.oracle().manager(),
+        .blocker = net.oracle().control(signer.public_key()),
+        .secret_store = store,
+        .namespace = types.namespace,
+        .sharing_mode = types.sharing_mode,
+        .reveal = types.reveal,
+        .max_supported_mode = types.max_supported_mode,
+        .partition_prefix = "bootstrap",
+        .write_buffer = types.io_buffer_size,
+        .replay_buffer = types.io_buffer_size,
+        .mailbox_size = types.mailbox_size,
+        .fetch_timeout = .from_secs(2),
+        .fetch_retry_delay = .from_millis(100),
+        .items_per_section = types.items_per_section,
+        .participants = committee,
+        .directory = .{},
+        .blocks_per_epoch = types.blocks_per_epoch,
+    };
+}
+
+/// A singleton committee's bootstrap: the ceremony completes, the share moves to the validator
+/// store, and the genesis lands in the node's directory with the next epoch's players.
+fn singleton_bootstrap(ctx: runtime.deterministic.Context, base: std.Io.Dir) anyerror!void {
+    const signer = ed25519.PrivateKey.from_seed(0);
+    const key = signer.public_key();
+    const network: config.NetworkConfig = .{
+        .participants = &.{key},
+        .committee_size = 1,
+        .peers = &.{},
+    };
+    {
+        var dir = try base.openDir(io, "nodes/validator-0", .{});
+        defer dir.close(io);
+        const node: config.NodeConfig = .localhost(signer, 4300);
+        try config.write_json(io, dir, "node.json", &node);
+    }
+    var participants: types.Participants = try .init(gpa, &network);
+    defer participants.deinit(gpa);
+
+    const net = try Net.init(gpa, ctx.io(), .{
+        .max_size = 1024 * 1024,
+        .max_peers_per_set = 1,
+        .disconnect_on_block = true,
+        .tracked_peer_sets = 1,
+    });
+    defer net.deinit();
+    var network_task = try ctx.io().concurrent(Net.run, .{net});
+    defer {
+        net.close();
+        network_task.await(ctx.io()) catch {};
+    }
+    var store: types.Secrets = try .init(ctx.io(), gpa, ctx.storage, bootstrap.partition);
+    defer store.deinit();
+    var manager = EngineTypes.Manager.init(net.oracle().manager());
+    var committee = try participants.get(gpa, .zero());
+    defer committee.deinit(gpa);
+    const settings = engine_config(net, signer, &manager, &store, committee);
+    const channels = try register_channels(net, key);
+    var started = try Engine.start(ctx.child("bootstrap"), settings, channels);
+    defer started.completion.deinit();
+    const written = try bootstrap.complete(io, gpa, &started.completion, &store, ctx.storage, .{
+        .base = base,
+        .node_dir = "nodes/validator-0",
+        .local = key,
+        .network = &network,
+        .participants = &participants,
+    });
+    const ended = started.handle.abort();
+    if (ended) |result| try result else |_| {}
+    try testing.expectEqual(1, written);
+
+    try expect_handoff(ctx, base, &participants, committee, &store);
+}
+
+/// The genesis in validator-0's directory, and the share alone in the validator store.
+fn expect_handoff(
+    ctx: runtime.deterministic.Context,
+    base: std.Io.Dir,
+    participants: *const types.Participants,
+    committee: types.Set(types.PublicKey),
+    store: *types.Secrets,
+) !void {
+    var dir = try base.openDir(io, "nodes/validator-0", .{});
+    defer dir.close(io);
+    var genesis = try types.read_genesis(io, gpa, dir);
+    defer genesis.deinit(gpa);
+    try testing.expectEqual(0, genesis.epoch.get());
+    try testing.expectEqual(.success, genesis.outcome);
+    try testing.expect(genesis.players.eql(committee));
+    var next = try participants.get(gpa, .new(1));
+    defer next.deinit(gpa);
+    try testing.expect(genesis.next_players.eql(next));
+    // Only the share moved to the validator store.
+    var handed: types.Secrets = try .init(ctx.io(), gpa, ctx.storage, .validator);
+    defer handed.deinit();
+    const share = (try handed.get_share(.zero())) orelse return error.TestMissingShare;
+    try testing.expect(std.meta.eql(share, (try store.get_share(.zero())).?));
+    try testing.expectEqual(null, try handed.get_seed(.zero()));
+}
+
+test "dkg: bootstrap completes a singleton ceremony and hands off genesis" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "nodes/validator-0");
+    var runner = try runtime.deterministic.Runner.init(gpa, .{
+        .timeout_ns = 120 * std.time.ns_per_s,
+    });
+    defer runner.deinit();
+    try try runner.start_context(singleton_bootstrap, .{tmp.dir});
+}

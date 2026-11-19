@@ -24,7 +24,10 @@ setup. Owns `examples/dkg` (commonware `examples/dkg`).
       and the stateful application. Waits on glue.stateful's `Stateful` actor (utils lane) and
       the QMDB resolver actor (deployer lane); the reshare actor, orchestrator, and probe are on
       main.
-- [ ] `bootstrap` run: waits on glue.dkg's bootstrap `Engine` (bls-math lane).
+- [x] `bootstrap.complete`: await the ceremony, hand epoch zero's share to the validator
+      store, and write the genesis to sibling validators (singleton ceremony test).
+- [ ] `bootstrap` run on discovery p2p: waits on glue.dkg's bootstrap `Engine` taking a
+      production context (it takes `runtime.deterministic.Context`; bls-math lane).
 - [ ] Demo recording (`just` recipe `dkg`, etc/scripts/record-demo.sh).
 
 ## Decisions
@@ -40,7 +43,7 @@ setup. Owns `examples/dkg` (commonware `examples/dkg`).
 - The CLI's help screens are fixed text from `commonware-dkg`; the parser models clap 4.6's
   order of checks (see `cli.zig`). `--worker-threads` is parsed and ignored: the production
   runner runs on `std.Io.Threaded`, not Tokio.
-- Until glue.dkg's actor `run` lands, `bootstrap` and `validator` parse and exit 1.
+- Until their runs are wired, `bootstrap` and `validator` parse and exit 1.
 - zigware's probe takes the persisted floor's epoch (`floor_epoch`), not the floor, so
   `probe_resumes_persisted_floor` checks the epoch; its manager and blocker come from the
   simulated network instead of a discovery network, since the config only carries them.
@@ -57,3 +60,4 @@ setup. Owns `examples/dkg` (commonware `examples/dkg`).
 - 2026-11-18: the application with commonware's state-root vectors (examples lane).
 - 2026-11-19: bootstrap's genesis hand-off with commonware's test (examples lane).
 - 2026-11-19: the validator's probe config over the sync plan (examples lane).
+- 2026-11-19: bootstrap's completion and genesis hand-off on the bootstrap engine (examples lane).
