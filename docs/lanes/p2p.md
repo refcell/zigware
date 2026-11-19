@@ -646,6 +646,45 @@ Not portable:
   Per-connection analog: outbox.zig 'control frames go ahead of data and drop when full'
 - `utils/mux.rs` `test_sub_sender_panics_above_limit_less_prefix`: should_panic
 
+### Fuzz coverage audit: network-facing crates (2026-11-19)
+
+Scope (coordinator): p2p, resolver, broadcast and collector, simplex and marshal wire types,
+and stream; the parallel lane audits the rest. "Both" means a seeded fuzz in `zig build test`
+and a `std.testing.fuzz` target: `codec.fuzz.run`, `utils.fuzz.run`, and `p2p.fuzz.run` run
+the body seeded and then under `std.testing.fuzz`, so a test through them counts for both.
+
+Before:
+- Missing both, network-facing: p2p discovery `Payload` and the `Info`, `BitVec`, and `Data`
+  it dispatches into (`authenticated/discovery/types.zig`, `authenticated/data.zig`), and
+  lookup `Message` (`authenticated/lookup/types.zig`). These decode every frame a peer sends.
+- Covered by both: p2p `Ingress`/`Address` ("fuzz p2p types decode canonical"); resolver p2p
+  wire `Message` ("fuzz: wire decode is canonical"); simplex votes, certificates, and VRF
+  seeds for every scheme (`consensus/fuzz/messages.zig`); marshal resolver `Key`
+  (`marshal/fuzz.zig`) and coding types (`marshal/coding/fuzz.zig`); aggregation `Item`,
+  `TipAck`, `Activity`; broadcast and collector messages (their `fuzz.zig`); stream frames
+  (`stream/utils/codec_test.zig`, `stream/fuzz.zig`).
+- State machines: p2p simulated, discovery, and lookup networks (`p2p/fuzz/`), broadcast and
+  collector engines, the simplex engines and twins, and resolver's fetcher, delivery tracker,
+  subscriber tracker, and ingress coalescing each have a fuzz against a model or invariants.
+- Test-only `read`s (mock keys, blocks, digests) need none.
+- commonware fuzz targets: p2p `discovery`, `lookup`, `simulated`; broadcast
+  `broadcast_engine_operations`; collector `collector`; consensus `attributable_map`,
+  `simplex_elector`, `simplex_messages`, the 12 `simplex_*` scheme and twin targets, and the new
+  `consensus` dispatcher over them; stream `connection`, `e2e`, `lazy_transport`, `transport`.
+  Each has a zigware counterpart (`consensus` is a `Plan` enum over the simplex targets, which
+  zigware runs one test each). resolver has no commonware fuzz target.
+
+After:
+- [x] `authenticated/wire_fuzz_test.zig` "fuzz authenticated wire decoders are canonical and
+  bounded": mutates encodings of a greeting, a peer list, a bit vector, data, lookup data and
+  ping, plus seeds one past each limit (4 peers, 129 bits, a 65-byte message), and raw bytes
+  after a drawn prefix. Any decode of `Payload`, lookup `Message`, or `Data` re-encodes to its
+  input and stays within its limits. Planted bugs: lookup accepting prefix 2 as `ping`
+  (caught by the fuzz), peer list limit one too high (caught).
+- Left: the resolver and p2p engines' network handlers decode first and drop undecodable
+  frames, so the decoder fuzzes cover their parsing; driving `handle_network` with arbitrary
+  decoded messages has no commonware counterpart and is not added.
+
 ## Log
 - 2026-11-16: (parallel lane) lookup: graceful and clean shutdown, rate limiting, restarts,
   duplicate addresses, multi-index, and custom handshake tests; directory metrics with
