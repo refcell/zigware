@@ -780,3 +780,25 @@ test "a failed sync after a blob removal is redone by the next scan" {
     try expect_scan(&storage, "partition", &.{});
     try testing.expect(storage.synced.contains("partition"));
 }
+
+fn open_until_canceled(storage: *file_storage.Storage) iface.Error!void {
+    // Every pass creates a partition and opens a blob in it: the cancel request lands in one
+    // of the directory or file system calls (an engine aborted while opening a section).
+    var index: u32 = 0;
+    while (true) : (index += 1) {
+        var name: [16]u8 = undefined;
+        const partition = std.fmt.bufPrint(&name, "p{d}", .{index}) catch unreachable;
+        var opened = try storage.open_versioned(partition, "blob", .only(0));
+        opened.blob.close();
+    }
+}
+
+test "an open interrupted by cancellation fails with Canceled, not an I/O error" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage = try open_storage(&tmp, "root");
+    defer storage.deinit();
+    var task = try io.concurrent(open_until_canceled, .{&storage});
+    try io.sleep(.fromMilliseconds(5), .awake);
+    try testing.expectError(error.Canceled, task.cancel(io));
+}

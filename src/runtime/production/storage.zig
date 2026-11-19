@@ -160,7 +160,7 @@ pub const Storage = struct {
         const file = partition_dir.createFile(self.io, key[partition.len + 1 ..], .{
             .read = true,
             .truncate = false,
-        }) catch return error.BlobOpenFailed;
+        }) catch |err| return or_canceled(err, error.BlobOpenFailed);
         errdefer file.close(self.io);
         const resolved = try self.header_resolve_or_create(partition_dir, file, .{
             .key = key,
@@ -175,10 +175,11 @@ pub const Storage = struct {
 
     /// Creates the partition directory if needed, making a new one durable in the root.
     fn partition_create(self: *Storage, partition: []const u8) Error!Dir {
-        const status = self.root.createDirPathStatus(self.io, partition, .default_dir) catch
-            return error.PartitionCreationFailed;
+        const status = self.root.createDirPathStatus(self.io, partition, .default_dir) catch |err|
+            return or_canceled(err, error.PartitionCreationFailed);
         if (status == .created) try self.dir_sync(self.root);
-        return self.root.openDir(self.io, partition, .{}) catch error.PartitionCreationFailed;
+        return self.root.openDir(self.io, partition, .{}) catch |err|
+            or_canceled(err, error.PartitionCreationFailed);
     }
 
     fn header_resolve_or_create(
@@ -189,10 +190,11 @@ pub const Storage = struct {
         versions: iface.VersionRange,
     ) Error!header.Resolved {
         const key = path.key;
-        const raw_len = file.length(self.io) catch return error.ReadFailed;
+        const raw_len = file.length(self.io) catch |err| return or_canceled(err, error.ReadFailed);
         var raw_buffer: [header.region_max]u8 = undefined;
         const raw = raw_buffer[0..header.resolve_len(raw_len)];
-        const read = file.readPositionalAll(self.io, raw, 0) catch return error.ReadFailed;
+        const read = file.readPositionalAll(self.io, raw, 0) catch |err|
+            return or_canceled(err, error.ReadFailed);
         if (read != raw.len) return error.ReadFailed;
         const layouts = self.config.layouts;
         const resolved = try header.resolve(
@@ -207,7 +209,7 @@ pub const Storage = struct {
             try self.partition_sync_once(path.partition, partition_dir);
             if (!self.flushed.contains(key)) {
                 // The previous run may have left writes in the page cache: settle them first.
-                file.sync(self.io) catch return error.BlobSyncFailed;
+                file.sync(self.io) catch |err| return or_canceled(err, error.BlobSyncFailed);
                 self.flushed.putAssumeCapacityNoClobber(try self.gpa.dupe(u8, key), {});
             }
             return existing;
@@ -218,9 +220,10 @@ pub const Storage = struct {
         try self.partition_synced(path.partition);
         var region: [header.region_max]u8 = undefined;
         const created = header.create(.only(self.config.layout), versions, &region);
-        file.setLength(self.io, 0) catch return error.BlobResizeFailed;
-        file.writePositionalAll(self.io, created.region, 0) catch return error.WriteFailed;
-        file.sync(self.io) catch return error.BlobSyncFailed;
+        file.setLength(self.io, 0) catch |err| return or_canceled(err, error.BlobResizeFailed);
+        file.writePositionalAll(self.io, created.region, 0) catch |err|
+            return or_canceled(err, error.WriteFailed);
+        file.sync(self.io) catch |err| return or_canceled(err, error.BlobSyncFailed);
         if (!self.flushed.contains(key)) {
             self.flushed.putAssumeCapacityNoClobber(try self.gpa.dupe(u8, key), {});
         }
@@ -483,10 +486,11 @@ fn ring_perform(worker: *ring_mod.Worker, operation: ring_mod.Operation) Error!?
 fn sync_dir(io: Io, dir: Dir) Error!void {
     // A directory opened without `iterate` is an `O_PATH` handle on Linux, which cannot be
     // synced: reopen it readable.
-    const readable = dir.openDir(io, ".", .{ .iterate = true }) catch return error.BlobSyncFailed;
+    const readable = dir.openDir(io, ".", .{ .iterate = true }) catch |err|
+        return or_canceled(err, error.BlobSyncFailed);
     defer readable.close(io);
     const file: File = .{ .handle = readable.handle, .flags = .{ .nonblocking = false } };
-    file.sync(io) catch return error.BlobSyncFailed;
+    file.sync(io) catch |err| return or_canceled(err, error.BlobSyncFailed);
 }
 
 pub const Blob = struct {
