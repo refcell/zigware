@@ -295,6 +295,57 @@ pub const VoterStack = struct {
         return next_within(BatcherMessage, ctx, &self.batcher, limit_ms);
     }
 
+    /// The next batcher `update` (skipping `constructed`) within `limit_ms`, or an error.
+    pub fn next_update(self: *VoterStack, ctx: Ctx, limit_ms: u64) !BatcherMessage.Update {
+        var waited: u64 = 0;
+        // Bounded by `limit_ms` of simulated time.
+        while (waited <= limit_ms) : (waited += 1) {
+            const message = self.batcher.try_recv() catch |err| switch (err) {
+                error.Empty => {
+                    try ctx.sleep(.fromMilliseconds(1));
+                    continue;
+                },
+                else => return error.MailboxClosed,
+            };
+            if (message == .update) return message.update;
+        }
+        return error.TimedOut;
+    }
+
+    /// Waits for the batcher `update` announcing `current` with `finalized` as its floor,
+    /// skipping updates below `current` (commonware's update loops).
+    pub fn expect_update(self: *VoterStack, ctx: Ctx, current: u64, finalized: u64) !void {
+        // Bounded: views only advance, and each wait is limited.
+        while (true) {
+            const update = try self.next_update(ctx, 5_000);
+            if (update.current.get() < current) continue;
+            try std.testing.expectEqual(current, update.current.get());
+            try std.testing.expectEqual(finalized, update.finalized.get());
+            return;
+        }
+    }
+
+    /// commonware `expect_replayed`: the next resolver message is `replayed`.
+    pub fn expect_replayed(self: *VoterStack, ctx: Ctx) !void {
+        const message = (try self.next_resolver(ctx, 5_000)) orelse return error.TimedOut;
+        defer message.discard();
+        try std.testing.expect(message == .replayed);
+    }
+
+    /// Expects the next resolver message to be an `updated` certificate of `kind` at `view`.
+    pub fn expect_updated(
+        self: *VoterStack,
+        ctx: Ctx,
+        kind: std.meta.Tag(Certificate),
+        view: u64,
+    ) !void {
+        const message = (try self.next_resolver(ctx, 5_000)) orelse return error.TimedOut;
+        defer message.discard();
+        try std.testing.expect(message == .updated);
+        try std.testing.expectEqual(kind, std.meta.activeTag(message.updated.certificate));
+        try std.testing.expectEqual(view, message.updated.certificate.view().get());
+    }
+
     /// The next resolver message within `limit_ms` of simulated time, or null.
     pub fn next_resolver(self: *VoterStack, ctx: Ctx, limit_ms: u64) !?ResolverMessage {
         return next_within(ResolverMessage, ctx, &self.resolver, limit_ms);
