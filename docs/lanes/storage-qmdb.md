@@ -130,8 +130,11 @@ which every database here is built on.
   start_sync surfaces its error. Not observable here: commonware's `start_sync_overlaps_work`
   and `start_sync_prune_waits`, because zigware's journal `start_sync` completes before it
   returns (journal lane); they need an asynchronous `start_sync`.
-- [ ] store: variable-length keys (owned keys, as `any`'s variable values; fixed keys stay
-  allocation-free), then `test_store_variable_length_keys`.
+- [x] store: variable-length keys. `Db([]const u8, ...)` works: a batch and a changeset copy
+  each key (`value.clone`, a plain copy for fixed arrays, so fixed keys stay allocation-free),
+  every emitted operation owns its own copy, and lookups free the keys they decode. Ported
+  `test_store_variable_length_keys`, plus a leak-checked churn of owned keys through
+  overwrites, deletes, and the floor walk.
 - [x] Fuzz targets under storage/fuzz for these databases; benches under `qmdb/benches/`.
 
 ## Public API (on main)
@@ -347,3 +350,4 @@ which every database here is built on.
 - 2026-11-19: store floor bound, collision reads, shared prefix, and get_many duplicates.
 - 2026-11-19: store policy scenarios (batch 2) against `walk_model`.
 - 2026-11-19: store batch 3 (bitmap, recovery, start_sync); `read_location` cfg tests.
+- 2026-11-19: store variable-length keys and `test_store_variable_length_keys`.

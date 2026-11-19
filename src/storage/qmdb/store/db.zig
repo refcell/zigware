@@ -1,7 +1,8 @@
 //! An unauthenticated key-value store of variable-size values over an append-only log of
 //! operations (qmdb/store/db.rs).
 //!
-//! `Db(K, E, T)`: keys `K` (which own no memory), a value encoding `E` (`qmdb.value.Variable`),
+//! `Db(K, E, T)`: keys `K` (fixed arrays, or `[]const u8` for variable-length keys, which the
+//! store copies), a value encoding `E` (`qmdb.value.Variable`),
 //! and translator `T`. The log holds `any` unordered operations over the MMR family, as in
 //! commonware, so a store's log is byte-identical to commonware's. A snapshot maps each active
 //! key to its latest update, and an activity bitmap marks the active locations the floor walk
@@ -51,9 +52,6 @@ pub fn Db(comptime K: type, comptime E: type, comptime T: type) type {
     value_mod.check(E);
     return struct {
         const Self = @This();
-        comptime {
-            assert(!codec.owns_memory(K)); // Values may own memory; keys may not.
-        }
         pub const Family = merkle.mmr.Family;
         pub const Key = K;
         pub const Value = E.Value;
@@ -222,6 +220,7 @@ pub fn Db(comptime K: type, comptime E: type, comptime T: type) type {
                 var op = try self.read_op(location.*);
                 if (op != .update) return error.DataCorrupted; // The snapshot holds updates.
                 if (value_mod.eql(K, op.update.key, key.*)) {
+                    codec.free(K, self.gpa, op.update.key); // The caller owns only the value.
                     return .{ .location = location.*, .value = op.update.value };
                 }
                 op.deinit(self.gpa);
@@ -342,7 +341,11 @@ pub fn Db(comptime K: type, comptime E: type, comptime T: type) type {
             var made_inactive: usize = 0;
             for (changeset.entries, old_locs) |*entry, old_loc| {
                 const new_loc = start + ops.items.len;
+                if (entry.value == null and old_loc == null) continue; // Deletes nothing.
+                // The operation owns a copy of the key; the changeset frees its own.
+                const op_key = try value_mod.clone(K, gpa, entry.key);
                 if (entry.value) |v| {
+                    errdefer codec.free(K, gpa, op_key);
                     try self.point_at(&entry.key, old_loc, new_loc);
                     if (old_loc) |old| {
                         self.bitmap.set_bit(old, false);
@@ -351,13 +354,13 @@ pub fn Db(comptime K: type, comptime E: type, comptime T: type) type {
                         self.active_keys += 1;
                     }
                     try self.bitmap.push(gpa, true);
-                    ops.appendAssumeCapacity(.{ .update = .{ .key = entry.key, .value = v } });
+                    ops.appendAssumeCapacity(.{ .update = .{ .key = op_key, .value = v } });
                     entry.value = null; // Moved into `ops`.
                 } else if (old_loc) |old| {
                     self.delete_known_loc(&entry.key, old);
                     self.bitmap.set_bit(old, false);
+                    ops.appendAssumeCapacity(.{ .delete = op_key });
                     try self.bitmap.push(gpa, false);
-                    ops.appendAssumeCapacity(.{ .delete = entry.key });
                     made_inactive += 2;
                     self.active_keys -= 1;
                 }
@@ -450,7 +453,10 @@ pub fn Db(comptime K: type, comptime E: type, comptime T: type) type {
                     try self.bitmap.push(gpa, false);
                     ops.appendAssumeCapacity(.{ .delete = key });
                 },
-                .stop => return false,
+                .stop => {
+                    codec.free(K, gpa, key); // Not moved into `ops`.
+                    return false;
+                },
             }
             self.bitmap.set_bit(location, false);
             return true;
@@ -492,17 +498,19 @@ fn BatchOf(comptime D: type) type {
         writes: std.ArrayList(D.Write) = .empty,
         metadata: ?V = null,
 
-        /// Discards the batch and the values it owns.
+        /// Discards the batch and the keys and values it owns.
         pub fn deinit(self: *Self) void {
-            for (self.writes.items) |w| codec.free(?V, self.gpa, w.value);
+            for (self.writes.items) |w| free_write(self.gpa, w);
             self.writes.deinit(self.gpa);
             codec.free(?V, self.gpa, self.metadata);
             self.* = undefined;
         }
 
-        /// Records a write (null deletes); the batch owns `value` on success.
+        /// Records a write (null deletes); the batch copies `key` and owns `value` on success.
         pub fn write(self: *Self, key: K, value: ?V) !void {
-            try self.writes.append(self.gpa, .{ .key = key, .value = value });
+            try self.writes.ensureUnusedCapacity(self.gpa, 1);
+            const copy = try value_mod.clone(K, self.gpa, key);
+            self.writes.appendAssumeCapacity(.{ .key = copy, .value = value });
         }
 
         /// Sets the metadata of this batch's commit; the batch owns it and frees any before.
@@ -572,7 +580,7 @@ fn ChangesetOf(comptime D: type) type {
             for (items, 0..) |w, i| {
                 const last = i + 1 == items.len or !value_mod.eql(K, w.key, items[i + 1].key);
                 if (!last) {
-                    codec.free(?V, gpa, w.value);
+                    free_write(gpa, w);
                     continue;
                 }
                 items[count] = w;
@@ -581,30 +589,32 @@ fn ChangesetOf(comptime D: type) type {
             assert(count <= items.len);
             writes.shrinkRetainingCapacity(count);
             const entries = writes.toOwnedSlice(gpa) catch |err| {
-                for (writes.items) |w| codec.free(?V, gpa, w.value);
+                for (writes.items) |w| free_write(gpa, w);
                 writes.deinit(gpa);
                 return err;
             };
             return .{ .gpa = gpa, .entries = entries };
         }
 
-        /// The changes of `writes` (copied; the changeset owns copies of their values).
+        /// The changes of `writes` (copied; the changeset owns copies of their keys and values).
         pub fn init(gpa: Allocator, writes: []const D.Write) !Self {
             var owned: std.ArrayList(D.Write) = .empty;
             errdefer {
-                for (owned.items) |w| codec.free(?V, gpa, w.value);
+                for (owned.items) |w| free_write(gpa, w);
                 owned.deinit(gpa);
             }
             try owned.ensureTotalCapacity(gpa, writes.len);
             for (writes) |w| {
+                const key = try value_mod.clone(K, gpa, w.key);
+                errdefer codec.free(K, gpa, key);
                 const copy = try value_mod.clone(?V, gpa, w.value);
-                owned.appendAssumeCapacity(.{ .key = w.key, .value = copy });
+                owned.appendAssumeCapacity(.{ .key = key, .value = copy });
             }
             return from_writes(gpa, &owned);
         }
 
         pub fn deinit(self: *Self) void {
-            for (self.entries) |e| codec.free(?V, self.gpa, e.value);
+            for (self.entries) |e| free_write(self.gpa, e);
             self.gpa.free(self.entries);
             codec.free(?V, self.gpa, self.metadata);
             self.* = undefined;
@@ -619,4 +629,10 @@ fn ChangesetOf(comptime D: type) type {
             return std.mem.order(u8, value_mod.bytes(K, &a.key), value_mod.bytes(K, &b.key)) == .lt;
         }
     };
+}
+
+/// Frees a write's key and value.
+fn free_write(gpa: Allocator, write: anytype) void {
+    codec.free(@TypeOf(write.key), gpa, write.key);
+    codec.free(@TypeOf(write.value), gpa, write.value);
 }

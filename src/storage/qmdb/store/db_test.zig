@@ -1401,3 +1401,103 @@ test "store bitmap tracks activity through every policy action, prune, and reope
     for (decisions) |count| try testing.expect(count > 0);
     try db.destroy();
 }
+
+/// A store keyed by variable-length byte strings (commonware's `VecKeyStore`).
+const VecKeyDb = store.Db(Bytes, value.Variable(Bytes), translator.TwoCap);
+
+fn open_vec_keys(self: *Harness) !VecKeyDb {
+    const Cfg = @FieldType(VecKeyDb.Journal.Cfg, "codec_config");
+    var codec_config = test_support.codec_config(Cfg);
+    codec_config[0].range = .inclusive(0, 64); // Keys of up to 64 bytes.
+    const cfg: VecKeyDb.Cfg = .{
+        .log = .{
+            .partition = "journal",
+            .items_per_section = 7,
+            .codec_config = codec_config,
+            .cache_ref = &self.cache_ref,
+            .write_buffer = 64 * 1024,
+            .replay_buffer = 64 * 1024,
+        },
+        .translator = .{},
+        .init_cache = 1024,
+    };
+    return VecKeyDb.init(gpa, self.storage.interface(), cfg, null);
+}
+
+fn expect_vec_value(db: *VecKeyDb, k: Bytes, want: ?Bytes) !void {
+    const got = try db.get(&k);
+    defer codec.free(?Bytes, gpa, got);
+    try testing.expectEqual(want == null, got == null);
+    if (want) |w| try testing.expectEqualSlices(u8, w, got.?);
+}
+
+fn write_vec(batch: *VecKeyDb.Batch, k: Bytes, v: ?Bytes) !void {
+    const owned: ?Bytes = if (v) |bytes| try gpa.dupe(u8, bytes) else null;
+    errdefer codec.free(?Bytes, gpa, owned);
+    try batch.write(k, owned);
+}
+
+fn apply_vec(db: *VecKeyDb, batch: *VecKeyDb.Batch) !void {
+    var changeset = try batch.finalize();
+    try db.apply_batch(&changeset);
+}
+
+// Commonware's test_store_variable_length_keys: keys of different lengths that share a
+// translated prefix keep their own values, also after reopening.
+test "store variable-length keys share a translated prefix and survive reopening" {
+    var harness: Harness = undefined;
+    try harness.init();
+    defer harness.deinit();
+    const short: Bytes = "key";
+    const long: Bytes = "key-extended";
+    {
+        var db = try open_vec_keys(&harness);
+        defer db.deinit();
+        var batch = db.new_batch();
+        try write_vec(&batch, short, &.{1});
+        try write_vec(&batch, long, &.{2});
+        try apply_vec(&db, &batch);
+        try db.commit();
+        try expect_vec_value(&db, short, &.{1});
+        try expect_vec_value(&db, long, &.{2});
+    }
+    var db = try open_vec_keys(&harness);
+    try expect_vec_value(&db, short, &.{1});
+    try expect_vec_value(&db, long, &.{2});
+    try db.destroy();
+}
+
+// The store owns copies of variable-length keys through overwrites, deletes, and the floor
+// walk's rewrites (the testing allocator reports any key it leaks or frees twice).
+test "store variable-length keys stay owned through overwrite, delete, and floor raising" {
+    var harness: Harness = undefined;
+    try harness.init();
+    defer harness.deinit();
+    var db = try open_vec_keys(&harness);
+    defer db.deinit();
+    var names: [16][8]u8 = undefined;
+    for (&names, 0..) |*name, i| _ = std.fmt.bufPrint(name, "k{d:0>7}", .{i}) catch unreachable;
+    var round: u8 = 0;
+    while (round < 8) : (round += 1) {
+        var batch = db.new_batch();
+        errdefer batch.deinit();
+        for (&names, 0..) |*name, i| {
+            const k: Bytes = name[0 .. 1 + i % 8];
+            const deleted = (i + round) % 5 == 0;
+            try write_vec(&batch, k, if (deleted) null else &.{ round, @intCast(i) });
+        }
+        try apply_vec(&db, &batch);
+    }
+    try db.commit();
+    try testing.expect(db.inactivity_floor() > 0);
+    for (&names, 0..) |*name, i| {
+        const k: Bytes = name[0 .. 1 + i % 8];
+        // Within a batch the last write of a key wins.
+        var last = i;
+        for (i + 1..names.len) |j| {
+            if (std.mem.eql(u8, k, names[j][0 .. 1 + j % 8])) last = j;
+        }
+        const want: ?Bytes = if ((last + 7) % 5 == 0) null else &.{ 7, @intCast(last) };
+        try expect_vec_value(&db, k, want);
+    }
+}
