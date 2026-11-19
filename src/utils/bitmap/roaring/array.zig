@@ -173,24 +173,54 @@ pub const Array = struct {
             .difference => a.len,
         };
         var out: std.ArrayList(u16) = try .initCapacity(gpa, @min(bound, limit));
-        var i: usize = 0;
-        var j: usize = 0;
-        // Each pass advances `i` or `j`: at most `a.len + b.len` passes.
-        while (out.items.len < limit and (i < a.len or j < b.len)) {
-            const take_a = j >= b.len or (i < a.len and a[i] <= b[j]);
-            const take_b = i >= a.len or (j < b.len and b[j] <= a[i]);
-            const keep = switch (operation) {
-                .@"union" => true,
-                .intersection => take_a and take_b,
-                .difference => take_a and !take_b,
-            };
-            if (keep) out.appendAssumeCapacity(if (take_a) a[i] else b[j]);
-            i += @intFromBool(take_a);
-            j += @intFromBool(take_b);
-            if (operation != .@"union" and i >= a.len) break;
+        // commonware checks the limit per value only when it can bind.
+        if (limit >= bound) {
+            merge_into(&out, a, b, limit, operation, false);
+        } else {
+            merge_into(&out, a, b, limit, operation, true);
         }
         assert(out.items.len <= @min(bound, limit));
         return .{ .array = .{ .values = out }, .count = out.items.len };
+    }
+
+    /// Merges `a` and `b` into `out` (with room for the result), stopping at `limit` values
+    /// when `limited`: a three-way compare while both have values, then the tails as slices.
+    fn merge_into(
+        out: *std.ArrayList(u16),
+        a: []const u16,
+        b: []const u16,
+        limit: usize,
+        comptime operation: Operation,
+        comptime limited: bool,
+    ) void {
+        var i: usize = 0;
+        var j: usize = 0;
+        // Each pass advances `i` or `j`: at most `a.len + b.len` passes.
+        while (i < a.len and j < b.len) {
+            if (limited and out.items.len >= limit) return;
+            const a_value = a[i];
+            const b_value = b[j];
+            if (a_value < b_value) {
+                if (operation != .intersection) out.appendAssumeCapacity(a_value);
+                i += 1;
+            } else if (b_value < a_value) {
+                if (operation == .@"union") out.appendAssumeCapacity(b_value);
+                j += 1;
+            } else {
+                if (operation != .difference) out.appendAssumeCapacity(a_value);
+                i += 1;
+                j += 1;
+            }
+        }
+        assert(i == a.len or j == b.len);
+        if (operation != .intersection) append_tail(out, a[i..], limit);
+        if (operation == .@"union") append_tail(out, b[j..], limit);
+    }
+
+    fn append_tail(out: *std.ArrayList(u16), tail: []const u16, limit: usize) void {
+        assert(out.items.len <= limit);
+        const take = @min(tail.len, limit - out.items.len);
+        out.appendSliceAssumeCapacity(tail[0..take]);
     }
 
     pub fn is_subset(self: *const Array, other: *const Array) bool {

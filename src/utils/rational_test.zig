@@ -172,6 +172,34 @@ test "rational: log2_ceil edge cases" {
     try expect_log2(.ceil, .{ 17 << 30, 16 << 30 }, 8, .{ 23, 256 });
 }
 
+test "rational: log2 of 64-bit terms matches the wide-term path" {
+    // Scaling both terms by 2^70 keeps the ratio but takes them past 64 bits, so the second
+    // log2 runs the big-integer path rather than the allocation-free one.
+    var prng = std.Random.DefaultPrng.init(0x6c6f6732);
+    const random = prng.random();
+    for (0..2000) |iteration| {
+        const width = random.intRangeAtMost(u6, 1, 63);
+        const numer = random.intRangeAtMost(u64, 1, @as(u64, std.math.maxInt(u64)) >> (63 - width));
+        const denom = random.intRangeAtMost(u64, 1, std.math.maxInt(u64));
+        const digits = random.intRangeAtMost(usize, 0, 64);
+        var narrow: BigRational = .{
+            .numer = try Int.initSet(gpa, numer),
+            .denom = try Int.initSet(gpa, denom),
+        };
+        defer narrow.deinit();
+        var wide = try narrow.clone();
+        defer wide.deinit();
+        try wide.numer.shiftLeft(&wide.numer, 70);
+        try wide.denom.shiftLeft(&wide.denom, 70);
+        const ceil = iteration % 2 == 0;
+        var expected = if (ceil) try wide.log2_ceil(digits) else try wide.log2_floor(digits);
+        defer expected.deinit();
+        var actual = if (ceil) try narrow.log2_ceil(digits) else try narrow.log2_floor(digits);
+        defer actual.deinit();
+        try testing.expect(actual.eql(&expected));
+    }
+}
+
 test "rational: log2_floor values" {
     try expect_log2(.floor, .{ 3, 1 }, 0, .{ 1, 1 });
     try expect_log2(.floor, .{ 5, 1 }, 0, .{ 2, 1 });

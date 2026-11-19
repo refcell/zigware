@@ -472,6 +472,32 @@ test "bitmap: prune and prepend chunks" {
     try testing.expect(bv.get(0));
 }
 
+test "bitmap: count_ones and write span a wrapped chunk ring" {
+    // Pruning the front and pushing again wraps the chunks around the ring buffer, so
+    // count_ones and write must read both of its segments.
+    const chunks = [_][4]u8{
+        .{ 0xFF, 0x00, 0x01, 0x80 }, .{ 0x0F, 0xF0, 0x33, 0xCC }, .{ 0xAA, 0x55, 0x01, 0x02 },
+        .{ 0x07, 0x00, 0x00, 0x10 }, .{ 0xFF, 0xFF, 0xFF, 0x7F }, .{ 0x01, 0x02, 0x04, 0x08 },
+    };
+    var wrapped = try BitMap(4).init_capacity(gpa, 4 * 32);
+    defer wrapped.deinit(gpa);
+    for (chunks[0..4]) |*chunk| try wrapped.push_chunk(gpa, chunk);
+    wrapped.prune_chunks(2);
+    for (chunks[4..]) |*chunk| try wrapped.push_chunk(gpa, chunk);
+    try testing.expect(wrapped.chunks.head + wrapped.chunks.len > wrapped.chunks.buffer.len);
+
+    var flat: BitMap(4) = .empty;
+    defer flat.deinit(gpa);
+    for (chunks[2..]) |*chunk| try flat.push_chunk(gpa, chunk);
+    // Set bits in chunks 2 to 5: 10 + 4 + 31 + 4.
+    try testing.expectEqual(@as(u64, 49), wrapped.count_ones());
+    const expected = try codec.encode(BitMap(4), gpa, flat);
+    defer gpa.free(expected);
+    const actual = try codec.encode(BitMap(4), gpa, wrapped);
+    defer gpa.free(actual);
+    try testing.expectEqualSlices(u8, expected, actual);
+}
+
 test "bitmap: chunk alignment" {
     var bv: BitMap(4) = .empty;
     defer bv.deinit(gpa);

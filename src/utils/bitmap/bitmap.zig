@@ -342,13 +342,37 @@ pub fn BitMap(comptime N: usize) type {
         // Counting.
 
         pub fn count_ones(self: *const Self) u64 {
-            var total: u64 = 0;
-            var chunk_iter = self.chunks.iterator();
-            while (chunk_iter.nextPtr()) |chunk| {
-                for (chunk) |byte| total += @popCount(byte);
-            }
+            // Trailing bits are always zero, so every set bit in the chunks counts. Count the
+            // deque's two contiguous segments a 64-bit word at a time, as commonware does.
+            const segments = self.chunk_segments();
+            const total = count_ones_in(segments[0]) + count_ones_in(segments[1]);
             assert(total <= self.bit_len);
             return total;
+        }
+
+        fn count_ones_in(chunks: []const Chunk) u64 {
+            const bytes = std.mem.sliceAsBytes(chunks);
+            var total: u64 = 0;
+            var index: usize = 0;
+            while (index + 8 <= bytes.len) : (index += 8) {
+                total += @popCount(@as(u64, @bitCast(bytes[index..][0..8].*)));
+            }
+            for (bytes[index..]) |byte| total += @popCount(byte);
+            assert(total <= bytes.len * 8);
+            return total;
+        }
+
+        /// The chunks in order, as the ring buffer's two contiguous segments (commonware's
+        /// `VecDeque::as_slices`); the second is empty unless the chunks wrap.
+        fn chunk_segments(self: *const Self) [2][]const Chunk {
+            const deque = self.chunks;
+            const head_len = @min(deque.len, deque.buffer.len - deque.head);
+            const segments: [2][]const Chunk = .{
+                deque.buffer[deque.head..][0..head_len],
+                deque.buffer[0 .. deque.len - head_len],
+            };
+            assert(segments[0].len + segments[1].len == deque.len);
+            return segments;
         }
 
         pub fn count_zeros(self: *const Self) u64 {
@@ -519,8 +543,7 @@ pub fn BitMap(comptime N: usize) type {
 
         pub fn write(self: Self, writer: *codec.Writer) void {
             writer.write_int(u64, self.bit_len);
-            var chunk_iter = self.chunks.iterator();
-            while (chunk_iter.nextPtr()) |chunk| writer.write_bytes(chunk);
+            for (self.chunk_segments()) |segment| writer.write_bytes(std.mem.sliceAsBytes(segment));
         }
 
         pub fn encode_size(self: Self) usize {

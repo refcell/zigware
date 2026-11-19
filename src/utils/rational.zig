@@ -296,10 +296,25 @@ pub const BigRational = struct {
         if (rounding == .ceil and result.has_remainder) {
             try result.numerator.addScalar(&result.numerator, 1);
         }
-        var denom = try Int.initSet(gpa, 1);
+        return from_dyadic(result.numerator, binary_digits);
+    }
+
+    /// `numerator / 2^binary_digits`, reduced. Takes ownership of `numerator`, also on error.
+    /// The gcd with a power of two is the numerator's trailing zero count, so this needs no
+    /// gcd or division (`Ratio::new` reduces the same value to the same result).
+    fn from_dyadic(numerator: Int, binary_digits: usize) Allocator.Error!BigRational {
+        var numer = numerator;
+        errdefer numer.deinit();
+        // Zero counts `binary_digits` trailing zeros, which reduces it to 0/1.
+        const shift: usize = numer.toConst().ctz(@intCast(binary_digits));
+        assert(shift <= binary_digits);
+        try numer.shiftRight(&numer, shift);
+        var denom = try Int.initSet(numer.allocator, 1);
         errdefer denom.deinit();
-        try denom.shiftLeft(&denom, binary_digits);
-        return from_ints(result.numerator, denom);
+        try denom.shiftLeft(&denom, binary_digits - shift);
+        const result: BigRational = .{ .numer = numer, .denom = denom };
+        assert(result.denom.isPositive() and !result.denom.eqlZero());
+        return result;
     }
 };
 
@@ -323,6 +338,10 @@ const Log2 = struct {
 fn log2(gpa: Allocator, numer: *const Int, denom: *const Int, binary_digits: usize) !Log2 {
     assert(numer.isPositive() and !numer.eqlZero());
     assert(denom.isPositive() and !denom.eqlZero());
+    if (log2_native(numer, denom, binary_digits)) |native| {
+        const numerator = try Int.initSet(gpa, native.numerator);
+        return .{ .numerator = numerator, .has_remainder = native.has_remainder };
+    }
     const numer_bits = numer.bitCountAbs();
     const denom_bits = denom.bitCountAbs();
     var integer_part: i128 = @as(i128, numer_bits) - @as(i128, denom_bits);
@@ -387,8 +406,50 @@ fn log2(gpa: Allocator, numer: *const Int, denom: *const Int, binary_digits: usi
     return .{ .numerator = numerator, .has_remainder = has_remainder };
 }
 
-/// Fixed-point fractional bits of the interval `log2_digits_interval` squares.
+/// Fixed-point fractional bits of the interval `interval_digits` squares.
 const interval_precision = 120;
+
+/// `log2` without allocating, for a ratio whose terms fit in 64 bits and at most 64 digits
+/// (every small rate, such as the benches' 1/2 through 1023/1024). Null when the interval
+/// cannot decide a digit or the terms are too wide; `log2` then takes the exact path.
+fn log2_native(
+    numer: *const Int,
+    denom: *const Int,
+    binary_digits: usize,
+) ?struct { numerator: i128, has_remainder: bool } {
+    if (binary_digits > 64) return null;
+    var normalized_numer: u128 = numer.toInt(u64) catch return null;
+    var normalized_denom: u128 = denom.toInt(u64) catch return null;
+    assert(normalized_numer > 0 and normalized_denom > 0);
+    const numer_bits: u8 = 128 - @clz(normalized_numer);
+    const denom_bits: u8 = 128 - @clz(normalized_denom);
+    var integer_part: i128 = @as(i128, numer_bits) - @as(i128, denom_bits);
+    if (denom_bits > numer_bits) normalized_numer <<= @intCast(denom_bits - numer_bits);
+    if (numer_bits > denom_bits) normalized_denom <<= @intCast(numer_bits - denom_bits);
+    if (normalized_numer < normalized_denom) {
+        normalized_numer <<= 1;
+        integer_part -= 1;
+    }
+    // |integer_part| <= 64 and 64 digits: the numerator stays below 2^71.
+    const whole = integer_part << @intCast(binary_digits);
+    if (normalized_numer == normalized_denom) {
+        return .{ .numerator = whole, .has_remainder = false };
+    }
+    assert(normalized_numer > normalized_denom and normalized_numer < normalized_denom << 1);
+    // numer / denom = 1 + rest / denom with rest < denom < 2^64. Two 60-bit long-division
+    // steps give floor(2^120 numer / denom) in u128 divisions (a u256 division costs ~400 ns).
+    comptime assert(interval_precision == 120);
+    const rest = normalized_numer - normalized_denom;
+    const upper = (rest << 60) / normalized_denom;
+    const upper_rest = (rest << 60) % normalized_denom;
+    const lower = (upper_rest << 60) / normalized_denom;
+    const exact = (upper_rest << 60) % normalized_denom == 0;
+    const one: u256 = 1 << interval_precision;
+    const low = one + (@as(u256, upper) << 60) + lower;
+    const bits = interval_digits(low, low + @intFromBool(!exact), binary_digits) orelse
+        return null;
+    return .{ .numerator = whole + bits, .has_remainder = true };
+}
 
 /// The first `binary_digits` (at most 64) binary digits of log2(numer / denom) for a ratio in
 /// (1, 2), from the same square-and-compare as `log2` over a fixed-point interval that holds
@@ -404,8 +465,6 @@ fn log2_digits_interval(
 ) Allocator.Error!?u64 {
     assert(numer.order(denom.*) == .gt);
     if (binary_digits > 64) return null;
-    const one: u256 = 1 << interval_precision;
-    const two: u256 = one << 1;
     var shifted = try numer.clone();
     defer shifted.deinit();
     try shifted.shiftLeft(&shifted, interval_precision);
@@ -415,8 +474,18 @@ fn log2_digits_interval(
     defer remainder.deinit();
     try quotient.divFloor(&remainder, &shifted, denom);
     // Proof: numer / denom < 2, so the quotient is below 2^(interval_precision + 1).
-    var low = quotient.toInt(u256) catch unreachable;
-    var high = low + @intFromBool(!remainder.eqlZero());
+    const low = quotient.toInt(u256) catch unreachable;
+    return interval_digits(low, low + @intFromBool(!remainder.eqlZero()), binary_digits);
+}
+
+/// Squares the fixed-point bounds `[low, high]` of a ratio in (1, 2) once per digit; see
+/// `log2_digits_interval`.
+fn interval_digits(low_start: u256, high_start: u256, binary_digits: usize) ?u64 {
+    const one: u256 = 1 << interval_precision;
+    const two: u256 = one << 1;
+    var low = low_start;
+    var high = high_start;
+    assert(binary_digits <= 64);
     assert(low >= one and high <= two);
     var digits: u64 = 0;
     for (0..binary_digits) |_| {
