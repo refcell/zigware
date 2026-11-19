@@ -25,6 +25,11 @@ pub const max_jobs: usize = 64;
 /// The most worker threads a pool may own.
 pub const threads_max: u32 = 1024;
 
+/// How many times an idle worker, or a caller waiting for its jobs, polls before it sleeps on a
+/// futex (Rayon also spins before it parks). A fork-join loop of short operations then finds
+/// its workers awake, instead of paying a futex wake and its scheduling latency every call.
+pub const spin_polls: u32 = 1 << 6;
+
 pub const Config = struct {
     /// Worker threads to start. Zero runs every job on the calling thread.
     threads: u32,
@@ -69,6 +74,10 @@ pub const ThreadPool = struct {
     /// Bumped under `mutex` whenever jobs are queued or the pool shuts down; idle workers
     /// sleep on it.
     epoch: std.atomic.Value(u32) = .init(0),
+    /// Workers asleep on `epoch`, or about to be. Queuing jobs wakes workers only when one
+    /// sleeps: each side writes its own counter before reading the other's, both `seq_cst`,
+    /// so either the queuer sees the sleeper or the sleeper sees the new epoch.
+    sleepers: std.atomic.Value(u32) = .init(0),
     shutdown: bool = false,
     group: Io.Group = .init,
 
@@ -126,8 +135,25 @@ pub const ThreadPool = struct {
             }
             const seen = pool.epoch.load(.monotonic);
             pool.mutex.unlock(pool.io);
-            pool.io.futexWaitUncancelable(u32, &pool.epoch.raw, seen);
+            if (spin_until_changed(&pool.epoch, seen)) continue;
+            // The `seq_cst` re-read completes the ordering argument on `sleepers` whatever
+            // ordering the `Io`'s futex compare has, and skips a wait doomed to return.
+            _ = pool.sleepers.fetchAdd(1, .seq_cst);
+            if (pool.epoch.load(.seq_cst) == seen) {
+                pool.io.futexWaitUncancelable(u32, &pool.epoch.raw, seen);
+            }
+            const before = pool.sleepers.fetchSub(1, .monotonic);
+            assert(before > 0);
         }
+    }
+
+    /// Polls `value` up to `spin_polls` times and returns whether it moved off `seen`.
+    fn spin_until_changed(value: *const std.atomic.Value(u32), seen: u32) bool {
+        for (0..spin_polls) |_| {
+            if (value.load(.acquire) != seen) return true;
+            std.atomic.spinLoopHint();
+        }
+        return false;
     }
 
     fn pop_locked(pool: *ThreadPool) ?*Job {
@@ -146,9 +172,11 @@ pub const ThreadPool = struct {
             assert(job.queued);
             pool.queue.append(&job.node);
         }
-        _ = pool.epoch.fetchAdd(1, .release);
+        _ = pool.epoch.fetchAdd(1, .seq_cst);
         pool.mutex.unlock(pool.io);
-        const wake: u32 = @intCast(@min(jobs.len, pool.threads));
+        const sleepers = pool.sleepers.load(.seq_cst);
+        if (sleepers == 0) return;
+        const wake: u32 = @intCast(@min(jobs.len, sleepers));
         pool.io.futexWake(u32, &pool.epoch.raw, wake);
     }
 
@@ -188,7 +216,7 @@ pub const ThreadPool = struct {
             pool.mutex.unlock(pool.io);
             if (job) |queued| {
                 queued.execute(pool.io);
-            } else {
+            } else if (!spin_until_changed(&latch.pending, pending)) {
                 pool.io.futexWaitUncancelable(u32, &latch.pending.raw, pending);
             }
         }

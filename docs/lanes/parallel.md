@@ -561,24 +561,49 @@ test in them has both halves, and every decoder found in the audit has a fuzz.
 
 ## blake3 conc=8 at 128 and 256 KiB (2026-11-19)
 
-At 128 and 256 KiB, `blake3::hash_message conc=8` is slower than `conc=1` in zigware but not in
-commonware. Both were run on the same desktop at load ~70 to 95, so every number is noisy.
+The first port of `Blake3.hash_across` made `blake3::hash_message conc=8` slower than `conc=1` at
+128 and 256 KiB. Two causes: `blake3_tree.zig`'s own compression ran about 2× slower than std's
+`Blake3` (std keeps its SIMD chunk kernel private), and the pool paid a futex wake on every
+call. Both are fixed:
 
-| msg_len | commonware conc=1 | commonware conc=8 | zigware conc=1 | zigware conc=8 |
+- **Kernel.** `blake3_tree.zig` now compresses with std's `hashVec` layout: one round
+  interleaves the four column G functions, then the four diagonal ones, step by step over
+  `@Vector` lanes, using `std.math.rotr`. Chunk batches are always full width (a short last
+  batch is padded with copies of its last chunk, whose outputs are dropped). A whole last chunk
+  compresses in the same batch as the others. A rest of whole chunks merges as aligned
+  power-of-two runs at the widest width that fits.
+- **Pool.** Idle workers and waiting callers poll their futex word `spin_polls` (64) times
+  before sleeping, and queuing jobs skips the futex wake when no worker sleeps (a `sleepers`
+  count, ordered `seq_cst` against `epoch`). A 4096-poll spin made conc=8 2 to 3× slower on
+  this oversubscribed desktop (32 cores, load 70 to 100), so the spin stays token-sized.
+
+Serial tree hashing (`hash_subtrees` on `parallel.sequential`) against std's `Blake3`, minimum
+of 40 interleaved rounds of 20 hashes each:
+
+| msg_len | std | tree before | tree after |
+|---|---|---|---|
+| 131072 | 17.4 µs | 41.6 µs (2.40×) | 20.7 µs (1.19×) |
+| 262144 | 35.1 µs | 64.2 µs (1.83×) | 39.9 µs (1.14×) |
+| 1048576 | 138 µs | 191 µs (1.38×) | 152 µs (1.10×) |
+
+The remaining gap at 128 KiB is structural: each 16-chunk subtree merges its chaining values at
+widths 8, 4, 2, and 1 on its own task, where std merges all 128 at full width. That costs
+about 0.35 µs per task, which runs in parallel on a pool.
+
+`blake3::hash_message`, commonware against zigware on the same desktop, the minimum point
+estimate over 4 interleaved rounds:
+
+| msg_len | conc | commonware | zigware before | zigware after |
 |---|---|---|---|---|
-| 131072 | 39.5 µs | 14.1 µs | 18.4 µs | 42.2 µs |
-| 262144 | 39.4 µs | 30.5 µs | 33.1 µs | 50.3 µs |
-| 1048576 | 110 µs | 108 µs | 141 µs | 78.5 µs |
+| 131072 | 1 | 12.5 to 26.4 µs | 18.3 µs | 20.5 µs |
+| 131072 | 8 | 13.4 to 13.6 µs | 42.2 µs | 19.7 µs |
+| 262144 | 1 | 25.7 to 43.9 µs | 33.1 µs | 36.2 µs |
+| 262144 | 8 | 25.6 to 26.8 µs | 50.3 µs | 35.3 µs |
+| 1048576 | 1 | 103 to 171 µs | 141 µs | 148 µs |
+| 1048576 | 8 | 102 to 112 µs | 78.5 µs | 82.1 µs |
 
-The overhead is zigware's, from two sources (measured with probe benches, not committed):
-- **Kernel.** `blake3_tree.zig`'s own compression hashes the tree serially in 36 µs at
-  128 KiB and 63 µs at 256 KiB, against 18 and 33 µs for std's `Blake3`. That is 2× slower,
-  so a split pays twice the hashing before it gains from parallelism. std keeps its SIMD
-  chunk kernel (`hashMany`) private, so the tree cannot call it.
-- **Dispatch.** `map_into` handing a pool of 8 trivial jobs costs 3.9 µs for 7 jobs and
-  8.0 µs for 15. That is around a quarter of the 128 KiB budget, before futex wake latency
-  on a loaded machine.
-
-Next step (not done): port std's `hashVec`/`compressChunksParallel` layout (interleaved G
-rounds, `std.math.rotr`) into `blake3_tree.zig` so subtrees hash at std's speed. With that,
-128 KiB should land near commonware's ratio.
+Commonware's range spans two runs, a measure of the load noise. On this machine commonware's
+conc=8 rows are no faster than its conc=1 rows at 128 KiB to 1 MiB, and its conc=1 path is
+faster than std's `Blake3` (the `blake3` crate has AVX-512 kernels). Zigware's conc=8 no longer
+trails its own serial path, and beats it at 1 MiB. "zigware before" is the 668cdc1 single
+benchmark run, not the interleaved minimum.
