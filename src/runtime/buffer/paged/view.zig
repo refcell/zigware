@@ -202,6 +202,7 @@ pub const View = struct {
                 page,
                 page_size_value,
                 self.page_scratch,
+                .{},
             );
             // Pages below the tip are full; a shorter one fell back to a partial checksum.
             if (logical.len != page_size_value) return error.InvalidChecksum;
@@ -214,3 +215,30 @@ pub const View = struct {
         assert(done == buf.len);
     }
 };
+
+test "validate_ranges: in bounds, empty, zero-length, overflow, and past the end" {
+    // mod.rs's `test_validate_read_ranges` cases over a 16-byte view; mismatched buffers and
+    // unsorted ranges are asserts here (commonware's should_panic cases).
+    const view: View = .{
+        .blob = undefined,
+        .cache_ref = undefined,
+        .id = 0,
+        .size = 16,
+        .tail_offset = 16,
+        .tail = &.{},
+        .page_scratch = &.{},
+    };
+    try view.validate_ranges(12, &.{ .{ .offset = 0, .len = 4 }, .{ .offset = 4, .len = 8 } });
+    try view.validate_ranges(0, &.{});
+    try view.validate_ranges(4, &.{ .{ .offset = 0, .len = 0 }, .{ .offset = 0, .len = 4 } });
+    try view.validate_ranges(4, &.{.{ .offset = 12, .len = 4 }});
+    const max = std.math.maxInt(u64);
+    try std.testing.expectError(
+        error.OffsetOverflow,
+        view.validate_ranges(4, &.{.{ .offset = max, .len = 4 }}),
+    );
+    try std.testing.expectError(
+        error.BlobInsufficientLength,
+        view.validate_ranges(4, &.{.{ .offset = 14, .len = 4 }}),
+    );
+}

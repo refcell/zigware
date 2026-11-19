@@ -264,10 +264,11 @@ pub fn read_page_with_checksum(
     page: u64,
     logical_page_size: u64,
     scratch: []u8,
+    options: storage_mod.ReadOptions,
 ) Error!struct { []u8, ActiveChecksum } {
     const start, const len = try physical_page(page, logical_page_size);
     assert(scratch.len == len);
-    try blob.read_at(start, scratch);
+    try blob.read_at_options(start, scratch, options);
     const active = Checksum.validate_page(scratch) orelse return error.InvalidChecksum;
     return .{ scratch[0..active.len], active };
 }
@@ -352,6 +353,23 @@ test "validate page prefers the authoritative slot and falls back" {
     const too_long = test_page(16, data, .{ .len1 = 17, .crc1 = crc_long, .len2 = 0, .crc2 = 0 });
     try testing.expect(Checksum.validate_page(&too_long) == null);
     try testing.expect(Checksum.validate_page(zero[0..11]) == null);
+}
+
+test "validate page rejects bad checksums and ties go to the first slot" {
+    // mod.rs's equal-lengths, invalid-crc, corrupted-data, and no-fallback cases.
+    const tie: Checksum = .{ .len1 = 100, .crc1 = 0xAAAAAAAA, .len2 = 100, .crc2 = 0xBBBBBBBB };
+    try testing.expectEqual(Slot.first, tie.authoritative());
+    const data = "hello world";
+    const crc = Crc32.checksum(data);
+    const wrong = test_page(64, data, Checksum.init(data.len, 0xBADBADBA));
+    try testing.expect(Checksum.validate_page(&wrong) == null);
+    var corrupted = test_page(64, data, Checksum.init(data.len, crc));
+    try testing.expect(Checksum.validate_page(&corrupted) != null);
+    corrupted[0] = 0xFF;
+    try testing.expect(Checksum.validate_page(&corrupted) == null);
+    const primary_only: Checksum = .{ .len1 = data.len, .crc1 = 0xBAD1DEA, .len2 = 0, .crc2 = 0 };
+    const no_fallback = test_page(64, data, primary_only);
+    try testing.expect(Checksum.validate_page(&no_fallback) == null);
 }
 
 test "build crc record preserves the old slot" {

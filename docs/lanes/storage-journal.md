@@ -24,12 +24,16 @@ resize, sync), `runtime.storage`, with the in-memory backend `runtime.storage.me
   offsets are an assert), `test_sealed_reads_while_seal_sync_pending` (syncs are synchronous,
   so `seal` returns a durable view and has no handle), and the two `SplitWriteBlob`
   partial-page rewrite races (writes cannot pause mid-call on a synchronous blob).
-- [ ] The rest of writer.rs's 94 tests (19 were ported with the writer). Ported so far: its
-  snapshot, replay-options, recoverable-prefix, CRC-slot, read_many, needs_sync, recovery
-  truncate (including the `PartialWriteBlob` interrupted-stage cases, whose write counts
-  match), and read tests. No counterpart: tests of in-flight `start_sync` handles and waits,
-  range-vs-full sync selection, `IoBuf` ownership and allocation reuse, delayed or cancelled
-  reads, and should_panic argument checks (asserts here).
+- [x] The rest of writer.rs's 94 tests, mod.rs's, and read.rs's portable tests (snapshot,
+  replay options, recoverable prefix, CRC slots, read_many, needs_sync, recovery truncate
+  with commonware's `PartialWriteBlob` interrupted stages, whose write counts match, large
+  appends, replay seeks), plus two hints they check: `seal`'s flush writes with `dont_cache`
+  and a recovery shrink reads its retained page with `dont_cache`. No counterpart: tests of
+  in-flight `start_sync` handles and waits, range-vs-full sync selection, `IoBuf` ownership
+  and allocation reuse (`to_physical_pages_preserves_chunk_owners`,
+  `append_variable_value_encodes_in_place`, `replay_buf_bytes_share_pages`), delayed,
+  cancelled, or read-ahead reads (read.rs's batch pipeline: our replay reads one batch at a
+  time), the torn-extension blob, and should_panic argument checks (asserts here).
 - [x] journal frame format and durability (frame.rs, durability.rs), byte-identical.
 - [x] journal/segmented: section manager and fixed segmented journal (append, read, replay,
   prune, bounded init, floors and checkpoint restore), torn-page repair; tests incl.

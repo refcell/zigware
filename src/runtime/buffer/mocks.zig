@@ -29,6 +29,8 @@ pub const Storage = struct {
     dont_cache_reads: u64 = 0,
     /// Calls to `write_at` across all blobs.
     writes: u64 = 0,
+    /// Calls to `write_at` with `dont_cache` set.
+    dont_cache_writes: u64 = 0,
     /// Bytes passed to `write_at` across all blobs.
     write_bytes: u64 = 0,
     /// When set, removals fail with `Io` once this many more have succeeded.
@@ -193,6 +195,7 @@ const Blob = struct {
         var len: u64 = 0;
         for (chunks) |chunk| len += chunk.len;
         self.storage.writes += 1;
+        if (options.dont_cache) self.storage.dont_cache_writes += 1;
         self.storage.write_bytes += len;
         return self.inner.write_at_vectored(offset, chunks, options);
     }

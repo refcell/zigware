@@ -269,7 +269,7 @@ pub const Writer = struct {
             return self.append_bulk(bytes);
         }
         const offset = self.buffer.size();
-        if (self.buffer.append(bytes)) _ = try self.flush_internal(false, false);
+        if (self.buffer.append(bytes)) _ = try self.flush_internal(false, false, .{});
         assert(self.buffer.size() == offset + bytes.len);
         return offset;
     }
@@ -295,7 +295,7 @@ pub const Writer = struct {
         if (fill > 0) _ = self.buffer.append(bytes[0..fill]);
         const boundary = self.buffer.size();
         if (!self.buffer.is_empty()) {
-            _ = try self.flush_internal(false, false);
+            _ = try self.flush_internal(false, false, .{});
             assert(self.buffer.size() == boundary and self.buffer.is_empty());
         }
         assert(self.partial_page_state == null); // An empty tip has no partial page.
@@ -322,7 +322,12 @@ pub const Writer = struct {
 
     /// Write every full buffered page (and with `write_partial_page`, the partial page) in
     /// one write. With `durable`, the write is made durable. Returns whether it was.
-    fn flush_internal(self: *Self, write_partial_page: bool, durable: bool) Error!bool {
+    fn flush_internal(
+        self: *Self,
+        write_partial_page: bool,
+        durable: bool,
+        options: storage_iface.WriteOptions,
+    ) Error!bool {
         if (!self.has_flush_work(write_partial_page)) return false;
         // With no unsynced mutation, the last flushed partial state is durable and becomes
         // the checksum the rewrite below must preserve.
@@ -348,7 +353,7 @@ pub const Writer = struct {
         assert(self.current_page * page_size_value == self.buffer.offset);
 
         const pages_out = self.scratch[0..built.len];
-        try self.sync_state.write_at(self.blob, write_offset, pages_out, durable);
+        try self.sync_state.write_at_options(self.blob, write_offset, pages_out, durable, options);
         if (durable) self.durable_page_state = self.partial_page_state;
         return durable;
     }
@@ -403,9 +408,14 @@ pub const Writer = struct {
 
     /// Flush buffered bytes and make all pending mutations durable.
     pub fn sync(self: *Self) Error!void {
+        return self.sync_options(.{});
+    }
+
+    /// `sync` whose flush writes with `options`.
+    fn sync_options(self: *Self, options: storage_iface.WriteOptions) Error!void {
         assert(!self.failed);
         errdefer self.failed = true;
-        if (try self.flush_internal(true, true)) return;
+        if (try self.flush_internal(true, true, options)) return;
         try self.sync_state.sync(self.blob);
         self.durable_page_state = self.partial_page_state;
     }
@@ -421,7 +431,8 @@ pub const Writer = struct {
     /// its handle; blobs sync synchronously here, so the view is durable on return.
     pub fn seal(self: *Self) Error!Sealed {
         assert(self.phase == .append);
-        try self.sync();
+        // The sealed bytes are read back through the page cache, not the OS cache.
+        try self.sync_options(.{ .dont_cache = true });
         assert(self.buffer.len < self.page_size());
         const sealed = try self.sealed_handle(true);
         self.buffer.deinit(self.gpa);
@@ -437,7 +448,7 @@ pub const Writer = struct {
     pub fn snapshot(self: *Self) Error!Sealed {
         assert(!self.failed);
         errdefer self.failed = true;
-        _ = try self.flush_internal(false, false);
+        _ = try self.flush_internal(false, false, .{});
         return self.sealed_handle(false);
     }
 
@@ -510,11 +521,13 @@ pub const Writer = struct {
         tail_offset: u64,
     ) Error!void {
         self.current_page = full_pages;
+        // The retained prefix moves into the in-memory tip, so its read skips the OS cache.
         const page_data, const old = try paged.read_page_with_checksum(
             self.blob,
             full_pages,
             self.page_size(),
             self.page_scratch,
+            .{ .dont_cache = true },
         );
         if (page_data.len < partial_bytes) return error.InvalidChecksum;
         const new_data = page_data[0..partial_bytes];
@@ -624,7 +637,7 @@ pub const Writer = struct {
     pub fn replay(self: *Self, buffer_size: usize, read_options: ReadOptions) Error!Replay {
         assert(!self.failed);
         errdefer self.failed = true;
-        _ = try self.flush_internal(true, false);
+        _ = try self.flush_internal(true, false, .{});
         const batch_pages = @max(1, buffer_size / self.physical_page_size());
         return Replay.init(
             self.gpa,
@@ -707,7 +720,7 @@ pub fn read_range(
     var page = first_page;
     while (page <= last_page) : (page += 1) {
         const logical, _ =
-            try paged.read_page_with_checksum(blob, page, logical_page_size, scratch);
+            try paged.read_page_with_checksum(blob, page, logical_page_size, scratch, .{});
         const page_start = page * logical_page_size;
         const overlap_start = @max(offset, page_start);
         const overlap_end = @min(end, page_start + logical.len);
@@ -740,7 +753,7 @@ pub fn read_tail(
     const physical = logical_page_size + checksum_size;
     if (physical_size % physical != 0) return error.BlobInsufficientLength;
     const page = physical_size / physical - 1;
-    const tail, _ = try paged.read_page_with_checksum(blob, page, logical_page_size, scratch);
+    const tail, _ = try paged.read_page_with_checksum(blob, page, logical_page_size, scratch, .{});
     const page_start = page * logical_page_size;
     const logical_size = page_start + tail.len;
     const offset = std.math.sub(u64, logical_size, buf.len) catch

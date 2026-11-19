@@ -1323,3 +1323,412 @@ test "a same-page shrink survives an interrupted old-length invalidation" {
     try testing.expectEqual(@as(u64, 3), faulty.writes);
     try testing.expectEqual(@as(usize, 6), faulty.failed_write_len);
 }
+
+test "recovery truncate into a corrupted page fails its checksum" {
+    var h = try Harness.init();
+    defer h.deinit();
+    // 250 bytes: two full pages and a 44-byte partial page.
+    var data: [250]u8 = undefined;
+    for (&data, 0..) |*byte, index| byte.* = @intCast(index);
+    try h.append_synced("resize_crc_test", &data);
+    try h.mangle("resize_crc_test", physical_page_size * 2 - 12, &(@as([12]u8, @splat(0xFF))));
+    // Recovery validates only the terminal page; truncating into page 1 finds the damage.
+    var w = try h.recovery("resize_crc_test");
+    defer w.deinit();
+    try testing.expectEqual(@as(u64, 250), w.size());
+    try testing.expectError(error.InvalidChecksum, w.truncate(150));
+}
+
+test "finishing recovery keeps the retained prefix cached" {
+    for ([_]?u64{ null, page_size * 2 + 10, page_size + 10 }) |end| {
+        var h = try Harness.init();
+        defer h.deinit();
+        var w = try h.recovery("recovery-cache");
+        defer w.deinit();
+        _ = try w.append(&(@as([page_size * 2 + 20]u8, @splat(0xA5))));
+        try w.sync();
+        var page: [page_size]u8 = undefined;
+        try w.read_into(&page, 0);
+        if (end) |target| try w.truncate(target);
+        w.finish_recovery();
+        @memset(&page, 0);
+        try testing.expect(w.try_read_sync_into(&page, 0));
+        try testing.expectEqualSlices(u8, &(@as([page_size]u8, @splat(0xA5))), &page);
+    }
+}
+
+test "a direct append after a truncate replaces cached pages" {
+    var h = try Harness.init_cache(2);
+    defer h.deinit();
+    var w = try h.recovery("direct");
+    defer w.deinit();
+    var model: std.ArrayList(u8) = .empty;
+    defer model.deinit(gpa);
+    try model.appendSlice(gpa, &mod_251(5 * page_size + 20));
+    _ = try w.append(model.items);
+    try w.sync();
+    h.cache_ref.clear();
+    var page: [page_size]u8 = undefined;
+    try w.read_into(&page, page_size);
+    try w.read_into(&page, 2 * page_size);
+    // Shorten into a cached page, then bypass the buffer with a multi-page replacement.
+    try w.truncate(page_size + 10);
+    model.shrinkRetainingCapacity(page_size + 10);
+    const replacement: [3 * page_size + 7]u8 = @splat(0xCC);
+    _ = try w.append(&replacement);
+    try model.appendSlice(gpa, &replacement);
+    // Reads use the replacement bytes, not the discarded cached suffix.
+    try expect_read(&w, 2 * page_size, model.items[2 * page_size ..][0..page_size]);
+    try expect_read(&w, 0, model.items);
+    try w.sync();
+    w.finish_recovery();
+    // A snapshot keeps its prefix while later appends extend the live writer.
+    var snapshot = try w.snapshot();
+    defer snapshot.deinit();
+    const tail: [page_size - 17]u8 = @splat(0xDD);
+    _ = try w.append(&tail);
+    try w.sync();
+    const read = try gpa.alloc(u8, model.items.len);
+    defer gpa.free(read);
+    try snapshot.read_at(0, read);
+    try testing.expectEqualSlices(u8, model.items, read);
+    try model.appendSlice(gpa, &tail);
+    try expect_read(&w, 0, model.items);
+}
+
+test "recovery truncate replaces a cached tail" {
+    var h = try Harness.init();
+    defer h.deinit();
+    var w = try h.recovery("truncate");
+    defer w.deinit();
+    _ = try w.append(&(@as([page_size * 2 + 16]u8, @splat(0xAA))));
+    try w.sync();
+    var cached: [page_size * 2]u8 = undefined;
+    try w.read_into(&cached, 0);
+    try testing.expect(w.try_read_sync_into(&cached, 0));
+    try testing.expectEqualSlices(u8, &(@as([page_size * 2]u8, @splat(0xAA))), &cached);
+    try w.truncate(page_size + 16);
+    try w.read_into(cached[0..page_size], 0);
+    try w.truncate(page_size + 8);
+    try testing.expect(w.try_read_sync_into(cached[0..page_size], 0));
+    _ = try w.append(&(@as([page_size - 8]u8, @splat(0xBB))));
+    try w.sync();
+    // Page 1 is now full, so this read comes from cached bytes rather than the tip.
+    var rewritten: [page_size]u8 = undefined;
+    try testing.expect(w.try_read_sync_into(&rewritten, page_size));
+    try testing.expectEqualSlices(u8, &(@as([8]u8, @splat(0xAA))), rewritten[0..8]);
+    try testing.expectEqualSlices(u8, &(@as([page_size - 8]u8, @splat(0xBB))), rewritten[8..]);
+}
+
+test "a recovery sync keeps a truncate and a later append" {
+    var storage = Storage.init(gpa);
+    defer storage.deinit();
+    var cache_ref = try CacheRef.init(gpa, 64, 4);
+    defer cache_ref.deinit();
+    var expected: [175]u8 = undefined;
+    for (expected[0..129], 0..) |*byte, index| byte.* = @intCast(index);
+    @memset(expected[95..], 7);
+    {
+        const opened = try storage.open(partition, "compact_recovery");
+        var w = W.open_recovery(gpa, opened.blob, opened.len, 256, &cache_ref) catch |err| {
+            opened.blob.close();
+            return err;
+        };
+        defer w.deinit();
+        var initial: [129]u8 = undefined;
+        for (&initial, 0..) |*byte, index| byte.* = @intCast(index);
+        _ = try w.append(&initial);
+        try w.sync();
+        // The earlier partial page is larger than the compacted tail.
+        try w.truncate(95);
+        _ = try w.append(expected[95..]);
+        try w.sync();
+    }
+    const opened = try storage.open(partition, "compact_recovery");
+    var w = W.init(gpa, opened.blob, opened.len, 256, &cache_ref) catch |err| {
+        opened.blob.close();
+        return err;
+    };
+    defer w.deinit();
+    try testing.expectEqual(@as(u64, expected.len), w.size());
+    try expect_read(&w, 0, &expected);
+}
+
+// read.rs's replay tests.
+
+test "replay of an empty blob is exhausted" {
+    var h = try Harness.init();
+    defer h.deinit();
+    var w = try h.writer("test_blob");
+    defer w.deinit();
+    var replay = try w.replay(buffer_size, .{});
+    defer replay.deinit();
+    try testing.expectEqual(@as(usize, 0), replay.remaining());
+    try testing.expect(try replay.ensure(0));
+    try testing.expect(!try replay.ensure(1));
+    try testing.expect(replay.is_exhausted());
+    try testing.expectEqual(@as(usize, 0), replay.bytes().len);
+}
+
+test "replay ensures a partial page and crosses single-page batches" {
+    var h = try Harness.init();
+    defer h.deinit();
+    {
+        var w = try h.writer("partial");
+        defer w.deinit();
+        const data = sequence(1, page_size + 10);
+        _ = try w.append(&data);
+        try w.sync();
+        var replay = try w.replay(buffer_size, .{});
+        defer replay.deinit();
+        try testing.expect(try replay.ensure(data.len));
+        try testing.expectEqual(@as(usize, data.len), replay.remaining());
+    }
+    var w = try h.writer("cross");
+    defer w.deinit();
+    const data = cycle_from(0, 400);
+    _ = try w.append(&data);
+    try w.sync();
+    // One physical page per batch: four pages need at least four fills.
+    var replay = try w.replay(physical_page_size, .{});
+    defer replay.deinit();
+    try testing.expect(try replay.ensure(400));
+    try testing.expectEqual(@as(usize, 400), replay.remaining());
+    try testing.expectEqualSlices(u8, &data, replay.bytes()[0..400]);
+}
+
+test "replay seeks forward, back, to the end, and not past it" {
+    var h = try Harness.init();
+    defer h.deinit();
+    var w = try h.writer("test_blob");
+    defer w.deinit();
+    const data = cycle_from(0, 300);
+    _ = try w.append(&data);
+    try w.sync();
+    var replay = try w.replay(buffer_size, .{});
+    defer replay.deinit();
+    try replay.seek_to(150);
+    try testing.expect(try replay.ensure(50));
+    try testing.expectEqual(data[150], replay.bytes()[0]);
+    try replay.seek_to(0);
+    try testing.expect(try replay.ensure(1));
+    try testing.expectEqual(data[0], replay.bytes()[0]);
+    try testing.expectError(error.BlobInsufficientLength, replay.seek_to(data.len + 1));
+    for ([_]usize{ 150, data.len, 250, 299 }) |offset| {
+        try replay.seek_to(offset);
+        const remaining = data.len - offset;
+        try testing.expect(!try replay.ensure(remaining + 1));
+        try testing.expectEqual(remaining, replay.remaining());
+        try testing.expectEqualSlices(u8, data[offset..], replay.bytes()[0..remaining]);
+    }
+}
+
+fn mod_n(comptime len: usize, comptime n: usize) [len]u8 {
+    var bytes: [len]u8 = undefined;
+    for (&bytes, 0..) |*byte, index| byte.* = @intCast(index % n);
+    return bytes;
+}
+
+test "a large append after a synced partial page reopens at every stage" {
+    var h = try Harness.init();
+    defer h.deinit();
+    const all = mod_n(500, 247);
+    {
+        var w = try h.writer("owned_partial");
+        defer w.deinit();
+        _ = try w.append(all[0..50]);
+        try w.sync();
+        // Bypasses the buffer; unsynced, so a reopen sees only the synced prefix.
+        _ = try w.append(all[50..]);
+        try testing.expectEqual(@as(u64, 500), w.size());
+        try expect_read(&w, 0, &all);
+    }
+    {
+        var w = try h.writer("owned_partial");
+        defer w.deinit();
+        try testing.expectEqual(@as(u64, 50), w.size());
+        try expect_read(&w, 0, all[0..50]);
+        _ = try w.append(all[50..]);
+        try w.sync();
+    }
+    var w = try h.writer("owned_partial");
+    defer w.deinit();
+    try testing.expectEqual(@as(u64, 500), w.size());
+    try expect_read(&w, 0, &all);
+}
+
+test "a large append after a buffered tip and a small one after a page multiple" {
+    var h = try Harness.init();
+    defer h.deinit();
+    const all = mod_n(430, 239);
+    {
+        var w = try h.writer("owned_buffered");
+        defer w.deinit();
+        _ = try w.append(all[0..30]);
+        _ = try w.append(all[30..]);
+        try expect_read(&w, 0, &all);
+        try w.sync();
+    }
+    const bulk = mod_n(412, 233);
+    const small = mod_n(10, 229);
+    {
+        var w = try h.writer("owned_exact");
+        defer w.deinit();
+        _ = try w.append(&bulk);
+        try testing.expectEqual(@as(u64, 412), w.size());
+        _ = try w.append(&small);
+        try expect_read(&w, 0, &(bulk ++ small));
+        try w.sync();
+    }
+    var buffered = try h.writer("owned_buffered");
+    defer buffered.deinit();
+    try expect_read(&buffered, 0, &all);
+    var exact = try h.writer("owned_exact");
+    defer exact.deinit();
+    try testing.expectEqual(@as(u64, 422), exact.size());
+}
+
+test "try_append_value respects capacity across a snapshot and recovery" {
+    var storage = Storage.init(gpa);
+    defer storage.deinit();
+    var cache_ref = try CacheRef.init(gpa, 16, 4);
+    defer cache_ref.deinit();
+    {
+        const opened = try storage.open("append_value", "blob");
+        var w = W.init(gpa, opened.blob, opened.len, 32, &cache_ref) catch |err| {
+            opened.blob.close();
+            return err;
+        };
+        defer w.deinit();
+        try testing.expectEqual(@as(?u64, 0), w.try_append_value(u64, 0));
+        try testing.expectEqual(@as(?u64, null), w.try_append_value([25]u8, @splat(0)));
+        var snapshot = try w.snapshot();
+        defer snapshot.deinit();
+        for (1..4) |value| {
+            const offset = w.try_append_value(u64, value);
+            try testing.expectEqual(@as(?u64, value * 8), offset);
+        }
+        try testing.expectEqual(@as(?u64, null), w.try_append_value(u64, 9));
+        try testing.expectEqual(@as(u64, 32), w.size());
+        var first: [8]u8 = undefined;
+        try snapshot.read_at(0, &first);
+        try testing.expectEqual(@as(u64, 0), std.mem.readInt(u64, &first, .big));
+        var four: [8]u8 = undefined;
+        std.mem.writeInt(u64, &four, 4, .big);
+        try testing.expectEqual(@as(u64, 32), try w.append(&four));
+        try w.sync();
+    }
+    const opened = try storage.open("append_value", "blob");
+    var w = W.init(gpa, opened.blob, opened.len, 32, &cache_ref) catch |err| {
+        opened.blob.close();
+        return err;
+    };
+    defer w.deinit();
+    try testing.expectEqual(@as(u64, 40), w.size());
+    var expected: [40]u8 = undefined;
+    for (0..5) |value| std.mem.writeInt(u64, expected[value * 8 ..][0..8], value, .big);
+    try expect_read(&w, 0, &expected);
+}
+
+test "only the seal's flush writes with the uncached hint" {
+    var h = try Harness.init();
+    defer h.deinit();
+    var w = try h.writer("uncached");
+    errdefer w.deinit();
+    try w.sync();
+    _ = try w.append("first");
+    try w.sync();
+    try testing.expectEqual(@as(u64, 0), h.storage.dont_cache_writes);
+    _ = try w.append("second");
+    var sealed = try w.seal();
+    defer sealed.deinit();
+    try testing.expectEqual(@as(u64, 1), h.storage.dont_cache_writes);
+}
+
+test "a recovery shrink reads the retained page uncached" {
+    var h = try Harness.init();
+    defer h.deinit();
+    var w = try h.recovery("resize_read_options");
+    defer w.deinit();
+    _ = try w.append(&(@as([page_size]u8, @splat(7))));
+    try w.sync();
+    // The shrink keeps the prefix in the in-memory tip.
+    const reads = h.storage.reads;
+    try w.truncate(50);
+    try testing.expectEqual(reads + 1, h.storage.reads);
+    try testing.expectEqual(@as(u64, 1), h.storage.dont_cache_reads);
+}
+
+test "read_many_into and try_read_sync_into from the tip alone, then the cache" {
+    var h = try Harness.init();
+    defer h.deinit();
+    var w = try h.writer("rmany_tip");
+    defer w.deinit();
+    var data: [20]u8 = undefined;
+    for (&data, 0..) |*byte, index| byte.* = @intCast(index);
+    _ = try w.append(&data);
+    var buf: [20]u8 = undefined;
+    try testing.expect(w.try_read_sync_into(&buf, 0));
+    try testing.expectEqualSlices(u8, &data, &buf);
+    const offsets = [_]u64{ 0, 4, 8, 12, 16 };
+    try testing.expectEqual(@as(usize, 5), try w.read_many_into(&buf, &offsets, 4));
+    try testing.expectEqualSlices(u8, &data, &buf);
+    try testing.expectEqual(@as(usize, 1), try w.read_many_into(buf[0..8], &.{0}, 8));
+    try testing.expectEqualSlices(u8, data[0..8], buf[0..8]);
+    // After a sync the bytes sit in a flushed partial page and its cached copy.
+    try w.sync();
+    const spaced = [_]u64{ 0, 8, 16 };
+    _ = try w.read_many_into(buf[0..12], &spaced, 4);
+    for (spaced, 0..) |offset, index| {
+        const start: usize = @intCast(offset);
+        try testing.expectEqualSlices(u8, data[start..][0..4], buf[index * 4 ..][0..4]);
+    }
+}
+
+test "a large borrowed append takes the direct path and keeps the partial page buffered" {
+    var h = try Harness.init();
+    defer h.deinit();
+    const all = mod_n(530, 241);
+    {
+        var w = try h.writer("borrowed_large");
+        defer w.deinit();
+        _ = try w.append(&all);
+        try testing.expectEqual(@as(u64, 530), w.size());
+        // 530 = 5 full pages + 15 bytes, and only the 15 stay in the buffer.
+        try testing.expectEqual(@as(usize, 15), w.buffer.len);
+        try expect_read(&w, 0, &all);
+        try w.sync();
+    }
+    var w = try h.writer("borrowed_large");
+    defer w.deinit();
+    try testing.expectEqual(@as(u64, 530), w.size());
+    try expect_read(&w, 0, &all);
+}
+
+test "a torn shrink keeps the fallback slot validated from storage" {
+    var h = try Harness.init();
+    defer h.deinit();
+    const data = cycle_from(0, 52);
+    const name = "same_page_shrink_fallback_slot";
+    var faulty: PartialWriteBlob = .{ .inner = undefined, .fail_on = 4, .partial_len = 3 };
+    {
+        var w = try faulty_recovery(&h, name, &faulty, buffer_size, &h.cache_ref);
+        defer w.deinit();
+        for ([_][2]usize{ .{ 0, 48 }, .{ 48, 50 }, .{ 50, 52 } }, 1..) |range, writes| {
+            _ = try w.append(data[range[0]..range[1]]);
+            try w.sync();
+            try testing.expectEqual(@as(u64, writes), faulty.writes);
+        }
+        // Corrupt the newer authoritative slot: the older one still covers the target, and
+        // the torn shrink must preserve it although the writer's footer no longer matches.
+        try faulty.inner.write_at(page_size, &dummy_marker, .{});
+        try faulty.inner.sync();
+        try testing.expectError(error.Io, w.truncate(45));
+    }
+    try testing.expectEqual(@as(u64, 4), faulty.writes);
+    try testing.expectEqual(@as(usize, 6), faulty.failed_write_len);
+    var w = try h.recovery(name);
+    defer w.deinit();
+    try testing.expectEqual(@as(u64, 50), w.size());
+    try expect_read(&w, 0, data[0..50]);
+}

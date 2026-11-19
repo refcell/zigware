@@ -7,6 +7,7 @@
 const std = @import("std");
 const assert = std.debug.assert;
 const Blob = @import("../storage.zig").Blob;
+const WriteOptions = @import("../storage.zig").WriteOptions;
 
 pub const mocks = @import("mocks.zig");
 pub const tip = @import("tip.zig");
@@ -40,7 +41,20 @@ pub const SyncState = enum {
         bytes: []const u8,
         durable: bool,
     ) !void {
-        try blob.write_at(offset, bytes, .{});
+        return self.write_at_options(blob, offset, bytes, durable, .{});
+    }
+
+    /// `write_at` with the blob write's `options` (such as the `dont_cache` hint).
+    pub fn write_at_options(
+        self: *SyncState,
+        blob: Blob,
+        offset: u64,
+        bytes: []const u8,
+        durable: bool,
+        options: WriteOptions,
+    ) !void {
+        assert(!options.sync);
+        try blob.write_at(offset, bytes, options);
         if (!durable) {
             self.* = .dirty;
             return;
