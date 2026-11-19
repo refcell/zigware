@@ -300,10 +300,10 @@ resolver; those lanes are running, so do the types first and the actors as they 
   certification ordering and replay). None are ported; they need a voter-actor harness
   with a mock batcher, resolver, and automaton on the deterministic runtime. Handed to the
   runtime lane on 2026-11-19 (actors/voter/tests/).
-- [ ] actors/batcher/mod.rs: 70 of its 76 tests ported (2026-11-19); the 6 left are
-  handed over to lookup (T-01a1d59c), which ports them in actor_late_test.zig: 4935
-  conflicting votes, 6506 and 6513 same-term optimistic future votes, 6819 and 6966
-  activity-window reporting, and 7128 constructed votes not future-bounded. Round-level ones in round_test.zig: forwarding
+- [x] actors/batcher/mod.rs: all 76 tests ported (2026-11-19). Lookup (T-01a1d59c) landed
+  6 in actor_late_test.zig (8905ff8, ed25519): 4935 conflicting votes, 6506 and 6513
+  same-term optimistic future votes, 6819 and 6966 activity-window reporting, and 7128
+  constructed votes not future-bounded. Round-level ones in round_test.zig: forwarding
   a notarization's proposal without a leader, certificate vote release and retention,
   nullify-finalize conflicts with held and compacted evidence, our own votes reported
   once, finalization- and finalize-established proposals, both skipped-round cases, and
@@ -329,7 +329,7 @@ resolver; those lanes are running, so do the types first and the actors as they 
   (`route_masks`, covered by the route tests), and
   `compressed_counts_match_reference_enumeration` would need commonware's 200-line
   brute-force enumerator; the single-round space is checked against its closed form.
-- [ ] Tracing: actor events are done (voter, batcher, resolver, engine). The voter opens
+- [x] Tracing: actor events are done (voter, batcher, resolver, engine). The voter opens
   commonware's `simplex.voter.start`, `.timeout`, `.process`, and `.notify` spans, and
   events inside them carry them. Each view's root `simplex.voter.view` span opens on entry
   and closes once decided; `.propose`, `.verify`, `.certify`, `.notify`, and `.timeout`
@@ -340,8 +340,12 @@ resolver; those lanes are running, so do the types first and the actors as they 
   under it). The resolver opens `simplex.resolver.process`, `.deliver`, and `.validate`;
   `process` and `deliver` are roots because mailbox and fetch spans are not carried across
   tasks. Not ported: spans no event of ours is emitted in (journal sync/prune, replay,
-  produce, resolved, fetch, batcher construct). Still to do: the voter state machine's
-  events.
+  produce, resolved, fetch, batcher construct). The voter state machine's 11 events
+  (state.rs 7, round.rs 3, slot.rs 1) are emitted by State under commonware's `state`,
+  `round`, and `slot` targets inside the voter's open span (2026-11-19); proposals are
+  traced as their round and parent, since `Proposal` has no formatter. The view-1 leader
+  election at genesis happens before the voter hands the state its tracer, so it is not
+  traced.
 - [x] Fuzz targets (commonware consensus/fuzz): owned by the crypto lane in
   `src/consensus/fuzz/`.
 
@@ -478,3 +482,9 @@ resolver; those lanes are running, so do the types first and the actors as they 
   an old notarization after its nullification (both on every scheme), the VRF
   optimistic-recovery fallback with its block and counter, and verification on a
   two-worker pool.
+
+- 2026-11-19: voter state tracing: leader elected, proposal set from a certificate and
+  certificate equivocation (round), occupied-slot warning (slot), entry certificate not
+  found, finalize withheld after a same-term nullify, missing parent during proposal,
+  failed verification and uncertified ancestry, certification precheck failure, and an
+  optimistic ancestor missing its nullification (state).

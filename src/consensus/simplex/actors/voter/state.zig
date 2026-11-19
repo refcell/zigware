@@ -21,6 +21,7 @@ const context = @import("../context.zig");
 const ask = @import("../ask.zig");
 const round_mod = @import("round.zig");
 const views_mod = @import("views.zig");
+const traces = @import("runtime").telemetry.traces;
 
 const Epoch = consensus_types.Epoch;
 const View = consensus_types.View;
@@ -32,6 +33,12 @@ const TimeoutReason = metrics.TimeoutReason;
 const Instant = round_mod.Instant;
 const Duration = @import("utils").Duration;
 const ViewSet = views_mod.ViewSet;
+
+/// The tracing targets of the state machine's events (commonware's module paths): the
+/// state's own, and its rounds' and slots', which the state emits on their behalf.
+pub const trace_target = "commonware_consensus::simplex::actors::voter::state";
+pub const round_trace_target = "commonware_consensus::simplex::actors::voter::round";
+pub const slot_trace_target = "commonware_consensus::simplex::actors::voter::slot";
 
 /// The view number of the genesis block.
 pub const genesis_view: View = .zero();
@@ -171,6 +178,10 @@ pub fn State(comptime S: type, comptime E: type, comptime D: type) type {
         outstanding_certifications: ViewSet = .empty,
         /// Registered by the voter on its `state` scope; null in unit tests without one.
         metrics: ?Metrics = null,
+        /// The voter's tracer; events go out under `trace_target` (or a round's or slot's).
+        tracer: traces.Tracer = .none,
+        /// Where the voter keeps its innermost open span, if it shares one with the state.
+        span: ?*const ?*const traces.Span = null,
 
         pub const Metrics = metrics.StateMetrics(S.PublicKey);
 
@@ -189,6 +200,34 @@ pub fn State(comptime S: type, comptime E: type, comptime D: type) type {
                 .timeout_retry_ns = nanos(cfg.timeout_retry),
                 .skip_budget = cfg.skip_budget,
             };
+        }
+
+        /// Emits an event under `target`, inside the voter's current span if one is open.
+        fn trace_at(
+            self: *const Self,
+            comptime target: []const u8,
+            level: traces.Level,
+            message: []const u8,
+            fields: anytype,
+        ) void {
+            comptime assert(target.len > 0);
+            if (!self.tracer.enabled(level)) return;
+            const tracer = self.tracer.with_target(target);
+            if (self.span) |source| if (source.*) |outer| {
+                var span = outer.*;
+                span.tracer = tracer;
+                return span.event(level, message, fields);
+            };
+            tracer.event(level, message, fields);
+        }
+
+        fn trace(
+            self: *const Self,
+            level: traces.Level,
+            message: []const u8,
+            fields: anytype,
+        ) void {
+            self.trace_at(trace_target, level, message, fields);
         }
 
         fn release_round(round: *Round, gpa: Allocator) void {
@@ -355,7 +394,20 @@ pub fn State(comptime S: type, comptime E: type, comptime D: type) type {
         ) Allocator.Error!void {
             if (self.leader_is_set(view)) return;
             const leader = self.elector.elect(.new(self.epoch, view), elector_input(certificate));
-            (try self.create_round(view)).set_leader(leader);
+            try self.elect(view, leader);
+        }
+
+        /// Sets `view`'s leader to `leader` and traces it (commonware `Round::set_leader`).
+        fn elect(self: *Self, view: View, leader: Participant) Allocator.Error!void {
+            const round = try self.create_round(view);
+            round.set_leader(leader);
+            const key = round.leader().?.key;
+            assert(round.leader().?.index.get() == leader.get());
+            self.trace_at(round_trace_target, .debug, "leader elected", .{
+                .round = Rnd.new(self.epoch, view),
+                .leader = leader.get(),
+                .key = key,
+            });
         }
 
         /// Copies the same-term stable leader of `from` into `to` when `to` has none.
@@ -364,7 +416,7 @@ pub fn State(comptime S: type, comptime E: type, comptime D: type) type {
             const source = self.round_at(from) orelse return;
             const leader = source.leader() orelse return;
             const index = leader.index;
-            (try self.create_round(to)).set_leader(index);
+            try self.elect(to, index);
         }
 
         pub fn create_round(self: *Self, view: View) Allocator.Error!*Round {
@@ -451,6 +503,7 @@ pub fn State(comptime S: type, comptime E: type, comptime D: type) type {
             if (self.notarization(prev)) |value| {
                 return .{ .notarization = try value.clone(self.gpa) };
             }
+            self.trace(.warn, "entry certificate not found", .{ .prev = prev });
             return null;
         }
 
@@ -464,7 +517,9 @@ pub fn State(comptime S: type, comptime E: type, comptime D: type) type {
             errdefer owned.deinit(self.gpa);
             try self.set_leader(view.next(), &owned.certificate);
             const round = try self.create_round(view);
+            const held = if (round.proposal()) |value| value.* else null;
             const result = round.add_notarization(owned);
+            if (result.added) self.trace_recovered(held, round, result.equivocator);
             if (!result.added) {
                 owned.deinit(self.gpa);
                 return result;
@@ -474,6 +529,31 @@ pub fn State(comptime S: type, comptime E: type, comptime D: type) type {
             }
             try self.slide_optimistic_frontier(view);
             return result;
+        }
+
+        /// Traces how a certificate's proposal changed `round`'s slot, given the proposal it
+        /// `held` before (commonware `Round::add_recovered_proposal`).
+        fn trace_recovered(
+            self: *const Self,
+            held: ?Proposal,
+            round: *const Round,
+            equivocator: ?S.PublicKey,
+        ) void {
+            const current = round.proposal() orelse return;
+            const previous = held orelse {
+                const message = "setting proposal from certificate";
+                return self.trace_at(round_trace_target, .debug, message, .{
+                    .round = current.round,
+                    .parent = current.parent,
+                });
+            };
+            if (previous.eql(current.*) and equivocator == null) return;
+            const message = "certificate conflicts with proposal (equivocation detected)";
+            self.trace_at(round_trace_target, .debug, message, .{
+                .equivocator = equivocator,
+                .dropped_parent = previous.parent,
+                .retained_parent = current.parent,
+            });
         }
 
         /// Inserts a nullification (taking ownership) and enters the next term's first view.
@@ -505,7 +585,9 @@ pub fn State(comptime S: type, comptime E: type, comptime D: type) type {
             _ = try self.enter_view(view.next());
             try self.set_leader(view.next(), &owned.certificate);
             const round = try self.create_round(view);
+            const held = if (round.proposal()) |value| value.* else null;
             const result = round.add_finalization(owned);
+            if (result.added) self.trace_recovered(held, round, result.equivocator);
             if (!result.added) {
                 owned.deinit(self.gpa);
                 return result;
@@ -553,7 +635,11 @@ pub fn State(comptime S: type, comptime E: type, comptime D: type) type {
             if (view.get() <= self.last_finalized_.get()) return null;
             if (!self.admits_outbound(view)) return null;
             if (self.highest_local_nullify_in_term(view)) |nullified| {
-                if (nullified.get() > self.last_finalized_.get()) return null;
+                if (nullified.get() > self.last_finalized_.get()) {
+                    const message = "withholding finalize vote due to same-term nullify";
+                    self.trace(.debug, message, .{ .view = view, .nullified = nullified });
+                    return null;
+                }
             }
             const round = self.round_at(view) orelse return null;
             const held = round.proposal() orelse return null;
@@ -674,7 +760,11 @@ pub fn State(comptime S: type, comptime E: type, comptime D: type) type {
                 // Resolve ancestry before claiming the one-shot build request.
                 const parent = switch (self.find_parent(view)) {
                     .found => |found| found,
-                    .missing => continue,
+                    .missing => |missing| {
+                        const message = "missing parent during proposal";
+                        self.trace(.debug, message, .{ .view = view, .missing = missing });
+                        continue;
+                    },
                 };
                 const is_handoff = view.is_term_start(self.term_length()) and
                     !self.parent_certified(parent);
@@ -719,6 +809,7 @@ pub fn State(comptime S: type, comptime E: type, comptime D: type) type {
             }
             const value = Proposal.init(request.round, request.parent[0], payload);
             const round = self.round_at(value.view()) orelse return false;
+            self.trace_occupied_slot(round, &value);
             if (!round.proposed(self.now(), value)) return false;
             assert(round.proposal().?.eql(value));
             // Bind the captured parent payload, as replay does.
@@ -730,7 +821,25 @@ pub fn State(comptime S: type, comptime E: type, comptime D: type) type {
         /// `record_proposed`, which `proposed` runs after its parent check).
         pub fn record_proposed(self: *Self, value: Proposal) bool {
             const round = self.round_at(value.view()) orelse return false;
+            self.trace_occupied_slot(round, &value);
             return round.proposed(self.now(), value);
+        }
+
+        /// commonware `Slot::record_verified`'s warning: the slot already holds another
+        /// proposal (a conflicting certificate arrived first).
+        fn trace_occupied_slot(
+            self: *const Self,
+            round: *const Round,
+            value: *const Proposal,
+        ) void {
+            const existing = round.proposal() orelse return;
+            if (existing.eql(value.*)) return;
+            const message = "ignoring verified proposal because slot already populated";
+            self.trace_at(slot_trace_target, .warn, message, .{
+                .round = value.round,
+                .existing_parent = existing.parent,
+                .proposal_parent = value.parent,
+            });
         }
 
         /// Releases the build latch when the captured parent is no longer valid and a
@@ -801,9 +910,19 @@ pub fn State(comptime S: type, comptime E: type, comptime D: type) type {
                     .payload => |payload| payload,
                     .err => |err| {
                         if (err.invalid_proposal()) {
+                            self.trace(.warn, "proposal failed verification", .{
+                                .round = value.round,
+                                .err = std.meta.activeTag(err),
+                            });
                             self.trigger_timeout(view, .invalid_proposal);
                             continue;
                         }
+                        self.trace(.debug, "proposal exists but ancestry is not yet certified", .{
+                            .view = view,
+                            .proposal_round = value.round,
+                            .parent = value.parent,
+                            .err = std.meta.activeTag(err),
+                        });
                         const missing, const kind = self.resolve_ancestry(err) orelse continue;
                         if (!round.request(missing)) continue;
                         return .{ .resolve = .{
@@ -892,7 +1011,13 @@ pub fn State(comptime S: type, comptime E: type, comptime D: type) type {
                 const round = self.round_at(view) orelse continue;
                 const held = (round.proposal() orelse continue).*;
                 if (self.certification_parent_ready(&held)) |err| {
-                    if (err.invalid_proposal()) continue;
+                    if (err.invalid_proposal()) {
+                        self.trace(.warn, "proposal failed certification precheck", .{
+                            .round = held.round,
+                            .err = std.meta.activeTag(err),
+                        });
+                        continue;
+                    }
                     // Dormant candidates wake only through `wake_certification_child`.
                     assert(err == .parent_not_certified);
                     if (self.certification_fetch(err)) |fetch| try fetches.append(self.gpa, fetch);
@@ -1043,7 +1168,11 @@ pub fn State(comptime S: type, comptime E: type, comptime D: type) type {
             const held = round.proposal() orelse return null;
             if (held.parent.get() < self.last_finalized_.get()) return null;
             if (held.parent.get() >= view.get()) return null;
-            if (self.first_unnullified_view(held.parent, held.view()) != null) return null;
+            if (self.first_unnullified_view(held.parent, held.view())) |missing_view| {
+                const message = "optimistic ancestor missing nullification";
+                self.trace(.debug, message, .{ .view = view, .missing_view = missing_view });
+                return null;
+            }
             const expected: ?D = if (round.verifying()) |bound| bound.parent_payload else null;
             return .{ .payload = held.payload, .parent = held.parent, .expected_parent = expected };
         }
@@ -1076,7 +1205,7 @@ pub fn State(comptime S: type, comptime E: type, comptime D: type) type {
             if (!round.broadcast_notarize()) return;
             const leader = self.handoff_leader(next) orelse return;
             if (!self.is_me(leader) or self.leader_is_set(next)) return;
-            (try self.create_round(next)).set_leader(leader);
+            try self.elect(next, leader);
         }
 
         /// Extends the optimistic frontier through the issuance window `view`'s notarization

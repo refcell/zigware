@@ -1240,3 +1240,58 @@ test "voter state try verify requests an uncertified cross-term parent" {
         }
     }.body);
 }
+
+/// Whether `event` is `message` under `target`.
+fn traced_at(event: anytype, target: []const u8, message: []const u8) bool {
+    return std.mem.eql(u8, event.target, target) and
+        std.mem.eql(u8, event.metadata.content, message);
+}
+
+// commonware's voter state, round, and slot events: leader election and a proposal set
+// from a certificate (round), and a finalize withheld after a same-term nullify (state).
+test "voter state traces its events at commonware's targets" {
+    try run(struct {
+        fn body(io: Io) !void {
+            const traces = runtime.telemetry.traces;
+            var collector = traces.Collector.init(gpa, .{});
+            defer collector.deinit();
+            var subscriber = collector.subscriber();
+            subscriber.level = .debug;
+            var env: Env = undefined;
+            try env.start(io, terms_of_five);
+            defer env.stop();
+            const state = &env.state;
+            state.tracer = .init(subscriber, "commonware_consensus::simplex::actors::voter");
+            const f = &env.fixture;
+            _ = try state.construct_nullify(state.current_view(), .leader_timeout);
+            const first = proposal(1, 1, 0, 42);
+            const first_notarized = try build_notarization(f, first);
+            try testing.expect((try state.add_notarization(first_notarized)).added);
+            try testing.expect(try state.certified(.new(1), true) != null);
+            const second = proposal(1, 2, 1, 43);
+            try testing.expect(try state.set_proposal(.new(2), &second));
+            try testing.expect(state.try_verify() == .ready);
+            try testing.expect(state.verified(.new(2)));
+            const second_notarized = try build_notarization(f, second);
+            try testing.expect((try state.add_notarization(second_notarized)).added);
+            try testing.expect(try state.certified(.new(2), true) != null);
+            try testing.expectEqual(null, try state.construct_finalize(.new(2)));
+            const Check = struct {
+                fn elected(_: void, event: traces.collector.RecordedEvent) bool {
+                    return traced_at(event, state_mod.round_trace_target, "leader elected");
+                }
+                fn recovered(_: void, event: traces.collector.RecordedEvent) bool {
+                    const message = "setting proposal from certificate";
+                    return traced_at(event, state_mod.round_trace_target, message);
+                }
+                fn withheld(_: void, event: traces.collector.RecordedEvent) bool {
+                    const message = "withholding finalize vote due to same-term nullify";
+                    return traced_at(event, state_mod.trace_target, message);
+                }
+            };
+            try collector.get_all().expect_event({}, Check.elected);
+            try collector.get_all().expect_event({}, Check.recovered);
+            try collector.get_all().expect_event({}, Check.withheld);
+        }
+    }.body);
+}

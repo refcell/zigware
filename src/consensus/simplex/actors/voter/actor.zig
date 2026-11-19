@@ -1033,6 +1033,9 @@ pub fn Actor(comptime P: type) type {
             vote_sender: *P.Sender,
             certificate_sender: *P.Sender,
         ) !void {
+            // The state traces under the voter's tracer, inside whichever span is open.
+            self.state.tracer = self.tracer;
+            self.state.span = &self.span;
             var inbox: Inbox = undefined;
             inbox.init(self.io);
             var links: Links = .{
