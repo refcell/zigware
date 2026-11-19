@@ -98,4 +98,5 @@ test {
     std.testing.refAllDecls(@This());
     _ = @import("conformance_test.zig");
     _ = @import("tests/mocks.zig");
+    _ = @import("tests/root.zig");
 }

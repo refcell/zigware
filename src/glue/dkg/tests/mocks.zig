@@ -27,6 +27,14 @@ const fd = cryptography.bls12381.dkg.feldman_desmedt;
 const Share = cryptography.bls12381.primitives.group.Share;
 const Summary = cryptography.transcript.Summary;
 const ModeVersion = cryptography.bls12381.primitives.sharing.ModeVersion;
+const mocks_network = @import("mocks_network.zig");
+
+pub const widest_addresses = mocks_network.widest_addresses;
+pub const FailingManager = mocks_network.FailingManager;
+pub const DirectoryManager = mocks_network.DirectoryManager;
+pub const DirectoryTrack = mocks_network.DirectoryTrack;
+pub const Filter = mocks_network.Filter;
+pub const FilteredReceiver = mocks_network.FilteredReceiver;
 
 pub const TestDigest = Sha256.Digest;
 pub const TestPublicKey = cryptography.ed25519.PublicKey;

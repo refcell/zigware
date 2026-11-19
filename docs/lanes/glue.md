@@ -524,3 +524,23 @@ orchestrator.
 - 2026-11-19: probe actor (discovery, service, mailbox) with mod.rs's tests; they catch a
   responder mismatch, blocking stale replies, a late failover, a wrong boundary height, and
   kept subscribers after a failed activation.
+
+## dkg bootstrap and test harnesses (owner: bls-math lane)
+
+The bls-math lane owns `src/glue/dkg/bootstrap/` and `src/glue/dkg/tests/` other than the
+shared `tests/mocks.zig`, which takes additive edits only (agreed with the glue and p2p lanes on
+2026-11-19). The glue lane keeps reshare/ and orchestrator/.
+
+- [x] mocks.rs's network fixtures (`FailingManager`, `DirectoryManager`, `FilteredReceiver`,
+  `widest_addresses`) in `tests/mocks_network.zig`, re-exported by `tests/mocks.zig`.
+- [x] tests/dkg/properties.rs (`DkgOutcome`). `expected` is comptime, since
+  `simulate.Property` needs a constant `name`.
+- [ ] bootstrap engine (bootstrap/mod.rs), with its 3 tests.
+- [ ] tests/dkg/harness.rs and mod.rs's 14 ceremony tests on the bootstrap engine (the lossy,
+  filtered, crash, and laggard plans behind -Dslow-tests).
+- [ ] tests/reshare harness, properties, and mod.rs's ceremony tests (needs the orchestrator).
+- [ ] lookup's peer-activation tests.
+
+### Log
+- 2026-11-19: the network mocks and `DkgOutcome`; the tests catch a planted skipped
+  output-agreement check and an inverted epoch filter.
