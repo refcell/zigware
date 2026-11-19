@@ -371,8 +371,8 @@ ones: d = deployer (thread T-01a1d5b9-c237), u = utils, j = storage-journal
 | stateful/actor/core/syncing.rs | 16 | 13 | 2 | 1 | d |
 | stateful/actor/core/processing.rs | 86 | 0 | 86 | 0 | u |
 | stateful/actor/processor/mod.rs | 44 | 22 | 22 | 0 | u |
-| stateful/tests/mod.rs, floor.rs | 28 | 11 | 17 | 0 | j |
-| **total** | **469** | **313** | **132** | **24** | |
+| stateful/tests/mod.rs, floor.rs | 28 | 17 | 11 | 0 | j |
+| **total** | **469** | **319** | **126** | **24** | |
 
 - Not portable (db/mod.rs, 22): zigware's `Barrier` is synchronous (databases persist inside
   `finalize`), so `barrier_waits_for_every_handle` (8), `barrier_cancellation_releases_handles`
@@ -426,13 +426,20 @@ ones: d = deployer (thread T-01a1d5b9-c237), u = utils, j = storage-journal
     recovery, the dropped-flight and woken-request hand-offs, overlapping rebuilds, and the
     deferred-prune ordering.
 - Open, j (storage-journal): tests/ (src/glue/stateful/tests/). `SingleDbEngine` runs Simplex,
-  the marshal node, and `Stateful` over one fixed QMDB per validator. Ported (single-db
-  engine; commonware also runs each on `MultiDbEngine`, not yet ported): finalize,
-  determinism, crash/restart, pruning (marshal and QMDB), delayed start, lossy, random, many,
-  and rapid crashes, full outage, and partition. One 20-block plan always runs; the rest need
-  -Dslow-tests. `..._with_storage_faults` is written but skipped: commonware runs it with
-  `catch_panics`, and zigware's Simplex voter panics on a failed sync. Open: the state sync
-  scenarios (probe, qmdb resolver), multi_db_app, floor.rs, and mod.rs's targeted qmdb tests.
+  the marshal node, the probe, the qmdb sync resolver, and `Stateful` over one fixed QMDB per
+  validator. Ported (single-db engine; commonware also runs each on `MultiDbEngine`, not yet
+  ported): finalize (and with storage faults), determinism, crash/restart, pruning (marshal and
+  QMDB), delayed start, lossy, random, many, and rapid crashes, full outage, partition, and
+  the state sync scenarios: handoff (and with storage faults), determinism, random crashes,
+  lossy, crash during sync, and the partitioned restart. One 20-block plan always runs; the
+  rest need -Dslow-tests. Adaptations: crash during sync crashes at 6.6 s, not 6.25 s (the
+  joiner reaches view 80 later here); the state sync properties also require the plan's
+  recorded completion, since syncing acknowledges retained blocks and marshal's processed
+  height advances during a sync that never finishes. Written but skipped: crash during sync
+  and the partitioned restart, both on `with_slow_state_sync`, whose sync does not complete by
+  height 130 here (commonware's does); the partitioned plan's timed-out teardown also
+  segfaults. Open: those two, multi_db_app (and the multi-db partitioned restart), floor.rs,
+  and mod.rs's six targeted qmdb tests.
 
 ### Backlog
 - [x] db: `Shared`, `Reader`, `Barrier`, single and tuple sets, with mod.rs's set tests.

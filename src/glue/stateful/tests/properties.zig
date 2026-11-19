@@ -81,3 +81,48 @@ pub const QmdbPruned = struct {
         }
     }
 };
+
+/// At least one validator used state sync and then processed past the synced height.
+///
+/// Beyond commonware, the validator's plan must also have recorded completion: syncing
+/// acknowledges retained blocks to marshal, so marshal's processed height advances past the
+/// synced height even while a sync that never finishes is still fetching.
+pub const LateJoinerStateSyncHandoff = struct {
+    pub const name = "late_joiner_state_sync_handoff";
+
+    pub fn check(_: *const LateJoinerStateSyncHandoff, _: anytype, states: anytype) !void {
+        assert(states.len > 0);
+        for (states) |state| {
+            const synced = state.state_sync_height() orelse continue;
+            if (!state.state_sync_completed()) continue;
+            if (state.processed_height() > synced) return;
+        }
+        log.err("no validator both used state sync and advanced beyond the synced height", .{});
+        return error.NoStateSyncHandoff;
+    }
+};
+
+/// A validator crashed during state sync, restarted into it from its persisted floor, and
+/// then processed past the synced height.
+/// Like `LateJoinerStateSyncHandoff`, its plan must also have recorded completion.
+pub const CrashDuringStateSyncRecovery = struct {
+    pub const name = "crash_during_state_sync_recovery";
+
+    pub fn check(_: *const CrashDuringStateSyncRecovery, _: anytype, states: anytype) !void {
+        assert(states.len > 0);
+        for (states, 0..) |state, index| {
+            const processed = state.processed_height();
+            log.info("validator {d}: resumed={} sync_height={?d} processed_height={d}", .{
+                index,
+                state.state_sync_resumed(),
+                state.state_sync_height(),
+                processed,
+            });
+            const synced = state.state_sync_height() orelse continue;
+            if (!state.state_sync_completed()) continue;
+            if (state.state_sync_resumed() and processed > synced) return;
+        }
+        log.err("no validator re-entered state sync after a crash and then advanced", .{});
+        return error.NoStateSyncRecovery;
+    }
+};
