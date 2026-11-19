@@ -4,9 +4,14 @@
 //! all allocated at init. It is unaware of the physical page format, which the writer owns.
 //!
 //! commonware evicts with Clock2Q+ and shares in-flight page reads between concurrent async
-//! readers. zigware's readers are single-owner fibers, so a miss is a plain validated page read
-//! (in the writer), and eviction is CLOCK (second chance). The replacement policy changes hit
-//! rates, never contents.
+//! readers. zigware's misses are plain validated page reads (in the writer), and eviction is
+//! CLOCK (second chance). The replacement policy changes hit rates, never contents.
+//!
+//! Like commonware's, one cache may be shared by blobs that tasks on different threads use
+//! (on `std.Io.Threaded`, a sync engine's fetch task reads a source while the caller writes
+//! its destination), so every operation holds `lock`. A critical section copies at most a
+//! caller's buffer and does no I/O, so the lock spins; the deterministic runtime never
+//! preempts a fiber inside one, so there it is never contended.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -30,6 +35,20 @@ pub const CacheRef = struct {
     slots: std.AutoHashMapUnmanaged(Key, u32) = .empty,
     /// Next slot the CLOCK hand examines.
     hand: u32 = 0,
+    /// Held by every operation; see the file comment.
+    lock: std.atomic.Value(bool) = .init(false),
+
+    fn acquire(self: *CacheRef) void {
+        while (self.lock.cmpxchgWeak(false, true, .acquire, .monotonic) != null) {
+            std.atomic.spinLoopHint();
+        }
+        assert(self.lock.load(.monotonic));
+    }
+
+    fn release(self: *CacheRef) void {
+        assert(self.lock.load(.monotonic));
+        self.lock.store(false, .release);
+    }
 
     /// A cache of `capacity` pages of `page_size` bytes, allocated now.
     pub fn init(gpa: Allocator, page_size: u16, capacity: u32) Allocator.Error!CacheRef {
@@ -64,6 +83,8 @@ pub const CacheRef = struct {
 
     /// A unique id for the next blob that uses this cache.
     pub fn next_id(self: *CacheRef) u64 {
+        self.acquire();
+        defer self.release();
         const id = self.id_next;
         self.id_next += 1;
         return id;
@@ -78,8 +99,15 @@ pub const CacheRef = struct {
         return self.pages[@as(usize, slot) * self.page_size ..][0..self.page_size];
     }
 
-    /// The cached page `page` of blob `blob_id`, marking it recently used.
+    /// The cached page `page` of blob `blob_id`, marking it recently used. The slice stays
+    /// valid only until the next insert, so only a test that owns the cache may hold it.
     pub fn get_page(self: *CacheRef, blob_id: u64, page: u64) ?[]const u8 {
+        self.acquire();
+        defer self.release();
+        return self.find_page(blob_id, page);
+    }
+
+    fn find_page(self: *CacheRef, blob_id: u64, page: u64) ?[]const u8 {
         const slot = self.slots.get(.{ .blob_id = blob_id, .page = page }) orelse return null;
         self.referenced.set(slot);
         return self.slot_bytes(slot);
@@ -88,10 +116,12 @@ pub const CacheRef = struct {
     /// Copy cached bytes starting at `offset` into `buf`, stopping at the first missing page.
     /// Returns the bytes copied.
     pub fn read_cached(self: *CacheRef, blob_id: u64, buf: []u8, offset: u64) usize {
+        self.acquire();
+        defer self.release();
         var done: usize = 0;
         while (done < buf.len) {
             const page, const in_page = self.offset_to_page(offset + done);
-            const bytes = self.get_page(blob_id, page) orelse break;
+            const bytes = self.find_page(blob_id, page) orelse break;
             const count = @min(buf.len - done, bytes.len - in_page);
             @memcpy(buf[done..][0..count], bytes[@intCast(in_page)..][0..count]);
             done += count;
@@ -103,6 +133,8 @@ pub const CacheRef = struct {
     /// Cache the whole pages of `buf`, which starts at page-aligned logical `offset`. Returns
     /// the trailing bytes that do not fill a page (not cached).
     pub fn cache(self: *CacheRef, blob_id: u64, buf: []const u8, offset: u64) usize {
+        self.acquire();
+        defer self.release();
         var page, const in_page = self.offset_to_page(offset);
         assert(in_page == 0);
         var start: usize = 0;
@@ -144,6 +176,8 @@ pub const CacheRef = struct {
 
     /// Drop every cached page.
     pub fn clear(self: *CacheRef) void {
+        self.acquire();
+        defer self.release();
         @memset(self.keys, null);
         self.slots.clearRetainingCapacity();
         self.referenced.unsetAll();
@@ -181,4 +215,32 @@ test "cache basic reads, partial tails, and eviction" {
     try testing.expectEqualStrings("WXYZ", cache_ref.get_page(7, 3).?);
     cache_ref.clear();
     try testing.expect(cache_ref.get_page(7, 3) == null);
+}
+
+fn hammer(cache_ref: *CacheRef, blob_id: u64, rounds: u32) void {
+    var page: [4]u8 = undefined;
+    var buf: [8]u8 = undefined;
+    for (0..rounds) |round| {
+        const at: u64 = (round % 16) * 4;
+        std.mem.writeInt(u32, &page, @intCast(round), .little);
+        _ = cache_ref.cache(blob_id, &page, at);
+        _ = cache_ref.read_cached(blob_id, &buf, at);
+    }
+}
+
+test "cache shared by threads keeps its slot map consistent" {
+    // Two threads insert, evict, and read one small cache at once, as a sync engine's fetch
+    // task and its caller do on std.Io.Threaded. Without the lock the slot map and the slot
+    // keys diverge and an assertion fails.
+    var cache_ref = try CacheRef.init(testing.allocator, 4, 3);
+    defer cache_ref.deinit();
+    const rounds = 20_000;
+    const other = try std.Thread.spawn(.{}, hammer, .{ &cache_ref, 1, rounds });
+    hammer(&cache_ref, 2, rounds);
+    other.join();
+    try testing.expect(cache_ref.slots.count() <= cache_ref.keys.len);
+    for (cache_ref.keys, 0..) |key, slot| {
+        const present = key orelse continue;
+        try testing.expectEqual(@as(u32, @intCast(slot)), cache_ref.slots.get(present).?);
+    }
 }
