@@ -280,15 +280,21 @@ resolver; those lanes are running, so do the types first and the actors as they 
   twins campaigns (sampled, pipelined handoff, sustained, stable leader, optimistic; the
   large ones in slow builds), tle, the four slow-certifier DSTs, the certified splits and
   cross-term certified splits, hailstorm and floor joiner with a stable leader, and
-  dishonest_leader_certification_rejected are ported. Not ported, each a 2026-11-19 audit
-  finding: `all_online_rayon` (parallel's thread-pool strategy is not wired into the
-  deterministic runtime), `1k` (1,000 views on the mock scheme; slow-only in commonware),
-  the stable-leader optimistic variants of unclean_shutdown, backfill, one_offline,
-  partition, slow_and_lossy_links, and equivocator, `stable_leader_finalizes_full_term_
-  without_nullification`, `stable_leader_optimistic_blocks_faster_than_network_latency`,
-  and the three `pipelined_handoff` latency DSTs. Those are the next mod.rs item below.
-- [ ] mod.rs remainder: the 13 DSTs named above. Handed to the broadcast-collector lane on
-  2026-11-19.
+  dishonest_leader_certification_rejected are ported. The 13 DSTs left by the 2026-11-19 audit are in
+  engine_optimistic_test.zig (broadcast-collector lane, on engine_test's harness), each on the
+  fixture commonware runs it on: ed25519 for the three pipelined_handoff DSTs,
+  stable_leader_optimistic_blocks_faster_than_network_latency,
+  stable_leader_finalizes_full_term_without_nullification, and the stable-leader optimistic
+  unclean_shutdown, backfill, partition, slow_and_lossy_links, and equivocator; the mock
+  scheme (`MockFixture`) for one_offline_stable_leader and 1k; threshold VRF MinPk on two
+  Rayon threads (`RayonVrfFixture`) for all_online_rayon. Per push: Debug runs the four
+  latency DSTs (40 measured views rather than 100) and the parent-nullify one; ReleaseSafe
+  also runs the stable-leader variants and rayon (quick sizes, about 17 s and 6 s); the
+  1000-view full term and 1k run in slow builds. A fixture with `harness_only` hosts only
+  these (engine_test's DSTs skip it). The VRF scheme ignores its strategy (`_ = strategy` in
+  vrf.zig), so the rayon DST cannot fail on a strategy bug yet.
+- [x] mod.rs remainder: the 13 DSTs named above, ported by the broadcast-collector lane on
+  2026-11-19 (engine_optimistic_test.zig).
 - [ ] actors/voter/mod.rs: the 96 voter-actor tests (restart and floor journaling, the
   pipelined handoff build lifecycle, nullify on failed or dropped propose and verify,
   certification ordering and replay). None are ported; they need a voter-actor harness

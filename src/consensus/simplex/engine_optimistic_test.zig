@@ -14,6 +14,30 @@ const cryptography = @import("cryptography");
 const runtime = @import("runtime");
 const elector_mod = @import("elector.zig");
 const mock_scheme = @import("mocks/scheme.zig");
+const vrf = @import("scheme/bls12381_threshold/vrf.zig");
+
+/// commonware's threshold VRF MinPk fixture with the Random (V1) elector, whose engines run on
+/// a two-thread Rayon strategy (`all_online_rayon_bls12381_threshold_vrf_min_pk`).
+pub const RayonVrfFixture = struct {
+    const Digest = cryptography.Sha256.Digest;
+    const Key = cryptography.ed25519.PublicKey;
+    const V = cryptography.bls12381.primitives.MinPk;
+    pub const harness_only = {};
+    pub const Strategy = @import("parallel").Rayon;
+    pub const parallelism = 2;
+    pub const Scheme = vrf.Scheme(Digest, Key, V);
+    pub const Elector = elector_mod.RandomElector(cryptography.Sha256, V);
+
+    pub fn fixture(rng: anytype, n: u32) !cryptography.certificate.mocks.Fixture(Scheme) {
+        return vrf.fixture(Scheme, testing.allocator, rng, "consensus", n);
+    }
+
+    pub fn elector(n: u32) !Elector {
+        return elector_mod.Random(cryptography.Sha256).init(.v1).build(V, n);
+    }
+
+    pub fn deinit_elector(_: *Elector) void {}
+};
 
 /// commonware `scheme_mocks::fixture` with round robin, which `one_offline_stable_leader` and
 /// `1k` run on.
@@ -43,6 +67,7 @@ pub fn Suite(comptime F: type) type {
         const E = engine_test.Suite(F);
         const ed25519 = F == engine_test.Ed25519Fixture;
         const mocks = F == MockFixture;
+        const rayon = F == RayonVrfFixture;
         /// commonware runs the stable-leader variants in its slow group; Debug runs without
         /// `-Dslow-tests` skip them.
         const slow_variants = builtin.mode != .debug or build_options.slow_tests;
@@ -265,6 +290,67 @@ pub fn Suite(comptime F: type) type {
             _ = try E.run_seeded(0, full_term_scenario, .{});
         }
 
+        /// The validators other than `skip` reported a finalization at or above `view`.
+        fn finalized_except(harness: *Harness, skip: usize, view: u64) bool {
+            for (harness.validators, 0..) |*validator, index| {
+                if (index == skip) continue;
+                if (validator.reporter.latest_finalized().get() < view) return false;
+            }
+            return true;
+        }
+
+        /// commonware `pipelined_handoff_parent_nullify_releases_blocked_certification`: the
+        /// incoming leader's application certifies its handoff parent (view 2) only after its
+        /// pending view 3 build ends. With the next term's leader offline every certificate
+        /// needs the incoming leader, so the cluster resumes only because the leader cancels
+        /// the build once it votes to nullify the parent's view.
+        fn parent_nullify_scenario(ctx: Context) !void {
+            const required = 10;
+            const round_robin = term(2, 30, 1);
+            var schedule = try round_robin.build(E.gpa, 4);
+            defer schedule.deinit(E.gpa);
+            const incoming = schedule.elect(.new(E.epoch, .new(3)), {}).get();
+            const offline = schedule.elect(.new(E.epoch, .new(5)), {}).get();
+            const first = schedule.elect(.new(E.epoch, .new(1)), {}).get();
+            try testing.expect(offline != first and offline != incoming);
+            var harness: Harness = undefined;
+            try harness.start_network(ctx, 4, E.link_ms(10, 1, 1.0), .honest, .{});
+            defer harness.deinit();
+            harness.round_robin = round_robin;
+            const unit: application_mod.Latency = .{ .mean = 1, .std_dev = 0 };
+            harness.propose_latency = unit;
+            harness.verify_latency = unit;
+            harness.certify_latency = unit_latency;
+            var hold: application_mod.Hold = .{ .certify_view = .new(2), .prepare_view = .new(3) };
+            // The incoming leader starts first: nothing progresses before a quorum is up.
+            try harness.start_validator(incoming);
+            harness.validators[incoming].application.handoff = .stage;
+            harness.validators[incoming].application.hold = &hold;
+            for (0..4) |index| {
+                if (index == incoming or index == offline) continue;
+                try harness.start_validator(index);
+            }
+            const deadline = now_ns(ctx) + 120 * std.time.ns_per_s;
+            while (!finalized_except(&harness, offline, required)) {
+                if (now_ns(ctx) >= deadline) return error.TestTimedOut;
+                // Certify view 2 once the build is canceled, as an application whose parent
+                // verification was queued behind that build would.
+                if (hold.prepare_canceled.load(.acquire)) hold.released.store(true, .release);
+                try ctx.sleep(.fromMilliseconds(10));
+            }
+            try testing.expect(hold.released.load(.acquire));
+            for (harness.validators, 0..) |*validator, index| {
+                if (index == offline) continue;
+                validator.reporter.assert_no_faults();
+                validator.reporter.assert_no_invalid();
+            }
+        }
+
+        test "pipelined handoff parent nullify releases blocked certification" {
+            if (comptime !ed25519) return error.SkipZigTest;
+            _ = try E.run_seeded(0, parent_nullify_scenario, .{});
+        }
+
         /// commonware's stable-leader optimistic variants: five-view terms, a 13 s stall timeout,
         /// and two optimistic views.
         fn optimistic_terms() RoundRobin {
@@ -347,9 +433,17 @@ pub fn Suite(comptime F: type) type {
             if (comptime !mocks or !build_options.slow_tests) return error.SkipZigTest;
             _ = try E.run_seeded(0, thousand_scenario, .{});
         }
+
+        // commonware `all_online` on threshold VRF MinPk with engines on two Rayon threads;
+        // commonware runs it in its slow group.
+        test "all online with a rayon strategy" {
+            if (comptime !rayon or !slow_variants) return error.SkipZigTest;
+            _ = try E.run_seeded(0, E.all_online, .{ 5, if (E.quick) 20 else 100 });
+        }
     };
 }
 
 test {
     _ = Suite(MockFixture);
+    _ = Suite(RayonVrfFixture);
 }

@@ -54,6 +54,16 @@ pub fn Certifier(comptime D: type) type {
     };
 }
 
+/// commonware's controlled certifier and handoff controller, each for one view:
+/// `certify` at `certify_view` answers only once `released` is set, and `prepare` at
+/// `prepare_view` builds nothing until canceled, then sets `prepare_canceled`.
+pub const Hold = struct {
+    certify_view: View,
+    prepare_view: View,
+    released: std.atomic.Value(bool) = .init(false),
+    prepare_canceled: std.atomic.Value(bool) = .init(false),
+};
+
 pub fn Config(comptime H: type, comptime P: type) type {
     return struct {
         relay: *relay_mod.Relay(H.Digest, P),
@@ -101,6 +111,8 @@ pub fn Application(comptime H: type, comptime P: type) type {
         handoff_until: ?View = null,
         /// Candidates returned at or below `handoff_until`.
         handoffs_returned: std.atomic.Value(u32) = .init(0),
+        /// One held certification and one held handoff build (borrowed).
+        hold: ?*Hold = null,
         /// Guards the maps below and wakes verifications waiting for a payload.
         mutex: Io.Mutex = .init,
         condition: Io.Condition = .init,
@@ -201,6 +213,13 @@ pub fn Application(comptime H: type, comptime P: type) type {
         pub fn prepare(self: *Self, io: Io, request: Context) Io.Cancelable!?Handoff {
             _ = io; // The same runtime as `self.io`.
             if (self.handoff == .wait) return .wait;
+            if (self.hold) |hold| if (request.round.view.get() == hold.prepare_view.get()) {
+                // Never returns normally: the build stays pending until canceled.
+                while (true) self.io.sleep(.fromSeconds(3600), .awake) catch |err| {
+                    hold.prepare_canceled.store(true, .release);
+                    return err;
+                };
+            };
             const limited = self.handoff_until != null;
             if (limited and request.round.view.get() > self.handoff_until.?.get()) return .wait;
             if (self.drop_proposals) return null;
@@ -261,6 +280,12 @@ pub fn Application(comptime H: type, comptime P: type) type {
                 defer self.busy.unlock(self.io);
                 try self.simulate(self.certify_latency);
             }
+            if (self.hold) |hold| if (round.view.get() == hold.certify_view.get()) {
+                // Each poll re-checks the release; it ends on release or cancel.
+                while (!hold.released.load(.acquire)) {
+                    try self.io.sleep(.fromMilliseconds(10), .awake);
+                }
+            };
             return switch (self.should_certify) {
                 .always => true,
                 .custom => |predicate| predicate(round, payload),

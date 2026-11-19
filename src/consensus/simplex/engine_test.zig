@@ -87,6 +87,10 @@ pub fn Suite(comptime F: type) type {
         const View = consensus_types.View;
         const Epoch = consensus_types.Epoch;
 
+        /// The engines' strategy: a fixture may run them on `parallel.Rayon` with
+        /// `parallelism` threads (commonware `context.strategy`).
+        const EngineStrategy = if (@hasDecl(F, "Strategy")) F.Strategy else parallel.Sequential;
+
         const Params = struct {
             pub const Context = runtime.deterministic.Context;
             pub const Scheme = wrapped.Scheme(F.Scheme);
@@ -96,7 +100,7 @@ pub fn Suite(comptime F: type) type {
             pub const Automaton = *Application;
             pub const Relay = *Application;
             pub const Reporter = *Routed;
-            pub const Strategy = parallel.Sequential;
+            pub const Strategy = EngineStrategy;
             pub const Sender = Net.Sender;
             pub const Receiver = Net.Receiver;
         };
@@ -255,6 +259,8 @@ pub fn Suite(comptime F: type) type {
             floor: ?Reporter.Finalization = null,
             /// How applications started from now on answer certification requests.
             should_certify: application_mod.Certifier(Digest) = .always,
+            /// The engines' strategy, shared by every validator.
+            strategy: EngineStrategy,
 
             pub const Timeouts = struct {
                 leader_ms: u64 = 1000,
@@ -372,6 +378,10 @@ pub fn Suite(comptime F: type) type {
                 harness.certify_latency = null;
                 harness.floor = null;
                 harness.should_certify = .always;
+                harness.strategy = if (EngineStrategy == parallel.Sequential)
+                    parallel.sequential
+                else
+                    (try ctx.strategy(F.parallelism)).rayon;
             }
 
             /// Starts validator `index` as the Byzantine mock `role`.
@@ -430,6 +440,7 @@ pub fn Suite(comptime F: type) type {
                 harness.network.deinit();
                 gpa.free(harness.schemes);
                 harness.fixture.deinit(gpa);
+                if (EngineStrategy != parallel.Sequential) harness.strategy.pool.destroy();
                 harness.* = undefined;
             }
 
@@ -559,6 +570,7 @@ pub fn Suite(comptime F: type) type {
                 _ = try std.fmt.bufPrint(&validator.partition, "validator-{d}", .{index});
                 const control = harness.oracle().control(key);
                 var cfg = engine_config(validator, harness.schemes[index], control);
+                cfg.strategy = harness.strategy;
                 cfg.track_historical_votes = harness.track_historical_votes;
                 cfg.mailbox_size = harness.mailbox_size;
                 cfg.leader_timeout = .from_millis(harness.timeouts.leader_ms);
@@ -701,7 +713,8 @@ pub fn Suite(comptime F: type) type {
                 .relay = &validator.application,
                 .reporter = &validator.routed,
                 .track_historical_votes = false,
-                .strategy = parallel.sequential,
+                // `start_validator` sets the harness's strategy.
+                .strategy = undefined,
                 .partition = std.mem.sliceTo(&validator.partition, 0),
                 .mailbox_size = 1024,
                 .epoch = epoch,
@@ -744,7 +757,7 @@ pub fn Suite(comptime F: type) type {
         }
 
         /// commonware `all_online` (ed25519, round robin; 50 views rather than 100 in Debug).
-        fn all_online(ctx: Context, n: u32, required: u64) !void {
+        pub fn all_online(ctx: Context, n: u32, required: u64) !void {
             var harness: Harness = undefined;
             try harness.start(ctx, n, link_ms(200, 1, 1.0), .honest);
             defer harness.deinit();
