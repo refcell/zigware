@@ -19,10 +19,6 @@ pub fn Tests(comptime h: type) type {
             try try runner.start_context(body, .{});
         }
 
-        fn certify_calls(stack: *h.VoterStack) u32 {
-            return @atomicLoad(u32, &stack.automaton.certify_calls, .acquire);
-        }
-
         const no_recertification: h.Options = .{
             .leader_timeout_ms = 500,
             .certification_timeout_ms = 1_000_000,
@@ -43,7 +39,7 @@ pub fn Tests(comptime h: type) type {
             try stack.mailbox.recovered(gpa, .{ .finalization = finalization });
             // Bounded: views only advance, and each wait is limited.
             while ((try stack.next_update(ctx, 5_000)).finalized.get() < 2) {}
-            try testing.expectEqual(@as(u32, 0), certify_calls(stack));
+            try testing.expectEqual(@as(u32, 0), stack.automaton.certify_count());
             const round_3: h.Round = .new(epoch, .new(3));
             const payload_3 = Sha256.hash(&.{"payload_for_certification"});
             const proposal_3: h.Proposal = .init(round_3, .new(2), payload_3);
@@ -53,7 +49,7 @@ pub fn Tests(comptime h: type) type {
             try stack.mailbox.recovered(gpa, .{ .notarization = notarization });
             // Bounded: views only advance, and each wait is limited.
             while ((try stack.next_update(ctx, 5_000)).current.get() <= 3) {}
-            try testing.expectEqual(@as(u32, 1), certify_calls(stack));
+            try testing.expectEqual(@as(u32, 1), stack.automaton.certify_count());
         }
 
         // commonware test_no_recertification_after_replay
@@ -73,7 +69,7 @@ pub fn Tests(comptime h: type) type {
                     try stack.restart(ctx, &net, no_recertification);
                     _ = try stack.next_update(ctx, 5_000);
                     try ctx.sleep(.fromMilliseconds(100));
-                    try testing.expectEqual(@as(u32, 1), certify_calls(&stack));
+                    try testing.expectEqual(@as(u32, 1), stack.automaton.certify_count());
                 }
             }.body);
         }

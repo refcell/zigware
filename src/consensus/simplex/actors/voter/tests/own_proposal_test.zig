@@ -1,5 +1,6 @@
 //! commonware `simplex/actors/voter/mod.rs` own-proposal tests: a voter never verifies a
-//! proposal it built, nor proposes or verifies again for a view whose notarize it journaled.
+//! proposal it built, nor proposes or verifies again for a view whose notarize it journaled,
+//! yet certifies every proposal of a view it leads.
 //! Round robin over 5 in epoch 333 elects us (participant 0) for view 2 and participant 1 for
 //! view 3.
 
@@ -57,6 +58,46 @@ pub fn Tests(comptime h: type) type {
                     .finalize => {},
                 }
             }
+        }
+
+        /// Waits for our finalize on `expected`, failing on a nullify of its view.
+        fn wait_finalize_not_nullify(ctx: Ctx, stack: *h.VoterStack, expected: h.Proposal) !void {
+            const view = expected.round.view.get();
+            // Bounded by the per-message wait.
+            while (true) {
+                const message = (try stack.next_batcher(ctx, 5_000)) orelse
+                    return error.NoFinalize;
+                if (message != .constructed or message.constructed.view().get() != view) continue;
+                switch (message.constructed) {
+                    .finalize => |vote| {
+                        try testing.expect(vote.proposal.eql(expected));
+                        return;
+                    },
+                    .nullify => return error.Nullified,
+                    .notarize => {},
+                }
+            }
+        }
+
+        fn recover_notarization(
+            ctx: Ctx,
+            net: *h.Network,
+            stack: *h.VoterStack,
+            of: h.Proposal,
+        ) !void {
+            const gpa = ctx.gpa();
+            const notarization =
+                try h.build(gpa, .notarization, net.schemes(), of, net.quorum());
+            try stack.mailbox.recovered(gpa, .{ .notarization = notarization });
+        }
+
+        /// commonware's certify-own-proposal voter: 5 s leader and certification timeouts.
+        fn certifying(partition: []const u8) h.Options {
+            var voter = options(partition);
+            voter.leader_timeout_ms = 5_000;
+            voter.certification_timeout_ms = 5_000;
+            voter.timeout_retry_ms = 60 * 60 * 1000;
+            return voter;
         }
 
         /// Expects the restarted voter's first update to re-enter `view` under `leader`.
@@ -175,6 +216,83 @@ pub fn Tests(comptime h: type) type {
                     try testing.expect(try stack.nullify_within(ctx, 3, 5_000));
                     try testing.expect(!stack.automaton.verification_requested(3));
                     try testing.expect(!stack.automaton.proposal_requested(3));
+                }
+            }.body);
+        }
+
+        // commonware test_certifies_own_proposal_when_proposing
+        test "voter certifies own proposal when proposing" {
+            try h.covers(.schemes_round_robin);
+            try run(10, struct {
+                fn body(ctx: Ctx) anyerror!void {
+                    var net: h.Network = undefined;
+                    try net.start(ctx, 5, "certifies_own_proposal_when_proposing");
+                    defer net.deinit();
+                    var stack: h.VoterStack = undefined;
+                    try stack.start(ctx, &net, certifying("certifies_own_proposal_when_proposing"));
+                    defer stack.stop();
+                    _ = try stack.next_update(ctx, 1_000);
+                    _ = try h.advance_to_view(&stack, ctx, &net, 2);
+                    const proposal = try wait_notarize(ctx, &stack, 2);
+                    // Its notarization certifies our own proposal, and we finalize it.
+                    try recover_notarization(ctx, &net, &stack, proposal);
+                    try wait_finalize_not_nullify(ctx, &stack, proposal);
+                    try testing.expect(stack.automaton.certify_called(2));
+                }
+            }.body);
+        }
+
+        // commonware test_certifies_own_proposal_after_restart
+        test "voter certifies own proposal after restart" {
+            try h.covers(.schemes_round_robin);
+            try run(20, struct {
+                fn body(ctx: Ctx) anyerror!void {
+                    var net: h.Network = undefined;
+                    try net.start(ctx, 5, "certifies_own_proposal_after_restart");
+                    defer net.deinit();
+                    const voter = certifying("certifies_own_proposal_after_restart");
+                    var stack: h.VoterStack = undefined;
+                    try stack.start(ctx, &net, voter);
+                    defer stack.stop();
+                    _ = try stack.next_update(ctx, 1_000);
+                    _ = try h.advance_to_view(&stack, ctx, &net, 2);
+                    const proposal = try wait_notarize(ctx, &stack, 2);
+                    // The proposal restored from our journaled notarize still certifies.
+                    try stack.replace(ctx, &net, voter);
+                    try expect_reentered(ctx, &stack, 2, 0);
+                    try recover_notarization(ctx, &net, &stack, proposal);
+                    try wait_finalize_not_nullify(ctx, &stack, proposal);
+                    try testing.expect(stack.automaton.certify_called(2));
+                }
+            }.body);
+        }
+
+        // commonware test_certify_observer_fires_for_external_leader_proposal
+        test "voter certifies an external proposal for a view it leads" {
+            try h.covers(.schemes_round_robin);
+            try run(20, struct {
+                fn body(ctx: Ctx) anyerror!void {
+                    var net: h.Network = undefined;
+                    try net.start(ctx, 5, "certify_observer_fires_for_external_leader_proposal");
+                    defer net.deinit();
+                    // Our own proposal stalls, and the timeouts outlast the test.
+                    var voter = options("certify_observer_fires_for_external_leader_proposal");
+                    voter.leader_timeout_ms = 600_000;
+                    voter.certification_timeout_ms = 600_000;
+                    voter.timeout_retry_ms = 600_000;
+                    voter.stall_proposals = true;
+                    var stack: h.VoterStack = undefined;
+                    try stack.start(ctx, &net, voter);
+                    defer stack.stop();
+                    _ = try stack.next_update(ctx, 1_000);
+                    _ = try h.advance_to_view(&stack, ctx, &net, 2);
+                    // A notarization of a proposal we never built is certified, then finalized.
+                    const round: h.Round = .new(epoch, .new(2));
+                    const payload = Sha256.hash(&.{"foreign_leader_owned_proposal"});
+                    const foreign: h.Proposal = .init(round, .new(1), payload);
+                    try recover_notarization(ctx, &net, &stack, foreign);
+                    try wait_finalize_not_nullify(ctx, &stack, foreign);
+                    try testing.expect(stack.automaton.certify_called(2));
                 }
             }.body);
         }

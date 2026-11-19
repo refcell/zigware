@@ -74,7 +74,8 @@ handshake), then certificate, secp256r1, the rest, zk last. banderwagon moved to
   immutable over commonware's variable harnesses in both families. storage-qmdb-sync owns
   any, current, and compact sync glue and the `qmdb_any_*_sync` fuzz targets.
 - [ ] simplex voter `actors/voter/mod.rs` tests, shared with runtime (T-01a1d57b-1bfd): runtime
-  ports lines 881-6716 (52 tests), this lane 6717-end (44 tests) in
+  ports lines 881-6716 (52 tests) and 11858-end (16 tests, re-split at runtime's offer), this
+  lane 6717-11712 (28 tests) in
   `src/consensus/simplex/actors/voter/tests/{nullify,certification,verification,replay,
   timeout}_test.zig`, each `Tests(h)` over runtime's fixture-generic `Harness(F)` with
   commonware's per-test scheme coverage. Done (each group checked by a planted bug): the four
@@ -85,14 +86,16 @@ handshake), then certificate, secp256r1, the rest, zk last. banderwagon moved to
   dropped_verify_still_votes_after_prior_participation, no_recertification_after_replay
   (replay_test.zig), and no_self_verify_when_proposing,
   no_self_propose_or_verify_after_restart, nullify_after_crash_in_propose_window, and
-  no_self_verify_after_restart (own_proposal_test.zig). Next: 10127
-  (certifies_own_proposal_when_proposing) onward in file order.
+  no_self_verify_after_restart, certifies_own_proposal_when_proposing,
+  certifies_own_proposal_after_restart, and certify_observer_fires_for_external_leader_proposal
+  (own_proposal_test.zig), and certification_cancelled_on_finalization. Next: 10793
+  (stale_same_parent_verification_failure_does_not_nullify_replacement) through 11712.
   - no_recertification_after_replay: replay marks a view certified both in `Round.replay` and
     in the actor's `handle_certification`; dropping either alone still passes, and dropping
     both is caught as a voter panic (the replayed view cannot advance), not a recertify.
   - The restart tests use the harness's `VoterStack.replace` (fresh recording automaton,
     commonware's new mock application); no_recertification_after_replay uses `restart` so
-    the automaton's `certify_calls` count spans the restart.
+    the automaton's certify record (`certify_count`, `certify_called`) spans the restart.
   - finalization_cancels_inflight_verification's final check (no notarize for the finalized
     view) is defended at four layers (the actor's drop, `verified`'s staleness check,
     `admits_outbound`, and `verification_matches`); removing all four together still does

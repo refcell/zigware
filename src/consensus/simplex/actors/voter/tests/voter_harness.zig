@@ -201,8 +201,10 @@ pub fn Harness(comptime F: type) type {
             hold_verifications: bool = false,
             dropped: [requests_max]View = undefined,
             dropped_count: u32 = 0,
-            /// Certification requests received (commonware's tracking `Certifier::Custom`).
-            certify_calls: u32 = 0,
+            /// The view of each certification request (commonware's tracking
+            /// `Certifier::Custom`).
+            certifies: [requests_max]View = undefined,
+            certifies_count: u32 = 0,
 
             /// A built handoff candidate the test answers.
             pub const HeldHandoff = struct {
@@ -380,7 +382,13 @@ pub fn Harness(comptime F: type) type {
             }
 
             pub fn certify(self: *Automaton, io: Io, at: Round, payload: D) Io.Cancelable!?bool {
-                _ = @atomicRmw(u32, &self.certify_calls, .Add, 1, .acq_rel);
+                {
+                    self.mutex.lockUncancelable(self.io);
+                    defer self.mutex.unlock(self.io);
+                    assert(self.certifies_count < requests_max);
+                    self.certifies[self.certifies_count] = at.view;
+                    self.certifies_count += 1;
+                }
                 const held = switch (self.hold) {
                     .none => return self.application.certify(io, at, payload),
                     .all => true,
@@ -467,6 +475,24 @@ pub fn Harness(comptime F: type) type {
                 defer self.mutex.unlock(self.io);
                 for (self.dropped[0..self.dropped_count]) |dropped| {
                     if (dropped.get() == view) return true;
+                }
+                return false;
+            }
+
+            /// Certification requests received, for any view.
+            pub fn certify_count(self: *Automaton) u32 {
+                self.mutex.lockUncancelable(self.io);
+                defer self.mutex.unlock(self.io);
+                assert(self.certifies_count <= requests_max);
+                return self.certifies_count;
+            }
+
+            /// Whether a certification request for `view` arrived.
+            pub fn certify_called(self: *Automaton, view: u64) bool {
+                self.mutex.lockUncancelable(self.io);
+                defer self.mutex.unlock(self.io);
+                for (self.certifies[0..self.certifies_count]) |requested| {
+                    if (requested.get() == view) return true;
                 }
                 return false;
             }

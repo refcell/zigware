@@ -162,5 +162,72 @@ pub fn Tests(comptime h: type) type {
                 }
             }.body);
         }
+
+        /// Expects the resolver's finalization update for `view` before any certification
+        /// verdict, then no verdict for 4 s.
+        fn expect_no_certified(ctx: Ctx, stack: *h.VoterStack, view: u64) !void {
+            // Bounded by the per-message wait.
+            while (true) {
+                const message = (try stack.next_resolver(ctx, 5_000)) orelse
+                    return error.NoFinalizationUpdate;
+                defer message.discard();
+                if (message == .certified) return error.Certified;
+                if (message != .updated or message.updated.certificate != .finalization) continue;
+                try testing.expectEqual(view, message.updated.certificate.view().get());
+                break;
+            }
+            var waited_ms: u64 = 0;
+            // Bounded by 4 s of simulated time.
+            while (waited_ms < 4_000) : (waited_ms += 1) {
+                if (stack.resolver.try_recv()) |message| {
+                    defer message.discard();
+                    if (message == .certified) return error.Certified;
+                } else |_| {}
+                try ctx.sleep(.fromMilliseconds(1));
+            }
+        }
+
+        // commonware test_certification_cancelled_on_finalization
+        test "voter certification cancelled on finalization" {
+            try h.covers(.schemes);
+            try run_for(30, struct {
+                fn body(ctx: Ctx) anyerror!void {
+                    const gpa = ctx.gpa();
+                    var net: h.Network = undefined;
+                    try net.start(ctx, 5, "consensus");
+                    defer net.deinit();
+                    // Certification takes 2 s, so the finalization overtakes it.
+                    var stack: h.VoterStack = undefined;
+                    try stack.start(ctx, &net, .{
+                        .leader_timeout_ms = 5_000,
+                        .certification_timeout_ms = 5_000,
+                        .timeout_retry_ms = 60 * 60 * 1000,
+                        .certify_latency_ms = 2_000,
+                        .partition = "cert_cancel_test",
+                        .batcher_capacity = 1024,
+                        .resolver_capacity = 10,
+                    });
+                    defer stack.stop();
+                    _ = try stack.next_update(ctx, 1_000);
+                    const round: h.Round = .new(epoch, .new(5));
+                    const payload = h.Sha256.hash(&.{"payload_to_certify"});
+                    const proposal: h.Proposal = .init(round, .new(0), payload);
+                    h.relay_contents(&net, 0, payload, round, h.Sha256.hash(&.{"genesis"}), 42);
+                    try stack.mailbox.proposal(proposal);
+                    const schemes = net.schemes();
+                    const quorum = net.quorum();
+                    const notarization =
+                        try h.build(gpa, .notarization, schemes, proposal, quorum);
+                    try stack.mailbox.recovered(gpa, .{ .notarization = notarization });
+                    try ctx.sleep(.fromMilliseconds(100));
+                    const finalization =
+                        try h.build(gpa, .finalization, schemes, proposal, quorum);
+                    try stack.mailbox.recovered(gpa, .{ .finalization = finalization });
+                    // Bounded: views only advance, and each wait is limited.
+                    while ((try stack.next_update(ctx, 5_000)).finalized.get() < 5) {}
+                    try expect_no_certified(ctx, &stack, 5);
+                }
+            }.body);
+        }
     };
 }
