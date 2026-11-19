@@ -340,6 +340,15 @@ test "batcher tracks each peer's latest vote view" {
 }
 
 fn notarization_bytes(fixture: anytype, value: types.Proposal(Digest)) ![]u8 {
+    return notarization_bytes_as(fixture, value, value);
+}
+
+/// A notarization signed over `value` but carrying `shown` (tampered when they differ).
+fn notarization_bytes_as(
+    fixture: anytype,
+    value: types.Proposal(Digest),
+    shown: types.Proposal(Digest),
+) ![]u8 {
     const Notarize = types.Notarize(Scheme, Digest);
     var votes: [3]Notarize = undefined;
     for (&votes, 0..) |*vote, signer| {
@@ -349,6 +358,7 @@ fn notarization_bytes(fixture: anytype, value: types.Proposal(Digest)) ![]u8 {
     const Notarization = types.Notarization(Scheme, Digest);
     var notarization = try Notarization.from_votes(gpa, scheme, &votes, parallel.sequential);
     defer notarization.deinit(gpa);
+    notarization.proposal = shown;
     const certificate: types.Certificate(Scheme, Digest) = .{ .notarization = notarization };
     return codec.encode(types.Certificate(Scheme, Digest), gpa, certificate);
 }
@@ -381,6 +391,39 @@ test "batcher forwards a future notarization's proposal without a leader" {
             defer VoterMessage.discard(message);
             try testing.expect(message.verified.certificate == .nullification);
             try testing.expectEqual(1, message.verified.certificate.view().get());
+        }
+    };
+    try run_deterministic(Root.run);
+}
+
+// commonware `test_invalid_certificate_blocks_sender`: a valid certificate blocks no one; a
+// notarization whose proposal was swapped no longer verifies, and its sender is blocked.
+test "batcher blocks the sender of a tampered certificate" {
+    const Root = struct {
+        fn run(io: Io) !void {
+            var harness: Harness = undefined;
+            try harness.start(io);
+            defer harness.stop();
+            const fixture = &harness.fixture;
+            try harness.mailbox.update(.new(1), .init(0), .zero(), null);
+            const valid = try nullification_bytes(fixture, 0, 1);
+            try harness.certificates.deliver(fixture.participants[1], valid);
+            const first = try harness.next_certificate();
+            VoterMessage.discard(first);
+            try testing.expectEqual(0, harness.log.blocked.items.len);
+            // A notarization of one proposal that carries another.
+            const signed = proposal(1);
+            const swapped: types.Proposal(Digest) = .init(signed.round, .zero(), .fill(0xee));
+            const tampered = try notarization_bytes_as(fixture, signed, swapped);
+            try harness.certificates.deliver(fixture.participants[2], tampered);
+            // Certificates are processed in order: once the next one arrives, the tampered
+            // one was judged.
+            const honest = try notarization_bytes(fixture, signed);
+            try harness.certificates.deliver(fixture.participants[3], honest);
+            const next = try harness.next_certificate();
+            VoterMessage.discard(next);
+            try testing.expectEqual(1, harness.log.blocked.items.len);
+            try testing.expect(harness.log.blocked.items[0].eql(fixture.participants[2]));
         }
     };
     try run_deterministic(Root.run);
