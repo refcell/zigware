@@ -14,8 +14,8 @@
 //! still content-checked: every readable frame is CRC-gated, so a recovered item must be one
 //! of the values recorded at that position.
 //!
-//! Syncs complete at once here: a held `start_sync` handle is observed as completed at the
-//! call, and a dropped one leaves the durable bounds unchanged. Snapshot readers are not
+//! A held `start_sync` completion is waited for (the memory backend completes it at the
+//! call), and a dropped one leaves the durable bounds unchanged. Snapshot readers are not
 //! ported, so `Snapshot` does nothing.
 
 const std = @import("std");
@@ -604,11 +604,17 @@ fn Driver(comptime J: type) type {
             /// A dropped handle leaves the durable bounds unchanged; a held one completed.
             fn start_sync(self: *Ops, hold: bool) !bool {
                 const size = self.journal.size();
-                self.journal.start_sync() catch |err| {
+                const completion = self.journal.start_sync() catch |err| {
                     try expect_not_corruption(err);
                     return false;
                 };
-                if (hold) self.expected.started_sync_completed(size);
+                defer completion.release();
+                if (!hold) return true;
+                completion.wait() catch |err| {
+                    try expect_not_corruption(err);
+                    return false;
+                };
+                self.expected.started_sync_completed(size);
                 return true;
             }
 

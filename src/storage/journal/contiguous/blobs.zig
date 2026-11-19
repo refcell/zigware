@@ -1,8 +1,8 @@
 //! Blob management for a contiguous journal (commonware's `journal/contiguous/blobs.rs`).
 //!
-//! A journal's blobs are contiguous sealed blobs ending in one writable tail. Syncs complete
-//! synchronously, so a sealed blob is a fully synced paged writer: no sync is ever in flight
-//! and there is no separate `Sealed` view or snapshot.
+//! A journal's blobs are contiguous sealed blobs ending in one writable tail. A sealed blob is
+//! a paged writer whose last started sync (the tail predecessor's) may still be in flight;
+//! there is no separate `Sealed` view or snapshot.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -15,6 +15,7 @@ const journal = @import("../mod.zig");
 
 const Storage = runtime.storage.Storage;
 const Writer = paged.Writer;
+const Completion = runtime.storage.Completion;
 
 pub const Error = journal.Error || paged.Error;
 
@@ -186,6 +187,9 @@ pub const Writable = struct {
     metrics: Metrics,
     /// Set while `clear` has closed the tail; a failed reopen leaves it set for `deinit`.
     tail_closed: bool = false,
+    /// The started sync of the tail's predecessor, sealed by `seal_tail` (commonware
+    /// `tail_predecessor_sync`). Kept until a later operation observes it.
+    tail_predecessor_sync: ?Completion = null,
 
     /// Build from recovered writers (ascending, contiguous, none above `tail_blob`, ending at
     /// it): seal every blob below `tail_blob` and install the tail, opening an empty one if
@@ -245,6 +249,7 @@ pub const Writable = struct {
 
     /// Close every blob (dropping unsynced data) and free the partition.
     pub fn deinit(self: *Writable) void {
+        if (self.tail_predecessor_sync) |completion| completion.release();
         for (self.sealed.items) |*writer| writer.deinit();
         self.sealed.deinit(self.partition.gpa);
         if (!self.tail_closed) self.tail.deinit();
@@ -275,24 +280,62 @@ pub const Writable = struct {
         return null;
     }
 
-    /// Seal the full tail (making it durable) and open the next blob as the new tail.
+    /// Seal the full tail, start syncing it, and open the next blob as the new tail. The
+    /// sealed blob's sync stays in flight in `tail_predecessor_sync`.
     pub fn seal_tail(self: *Writable) Error!void {
+        // Observe both outstanding syncs before creating a successor blob.
+        try self.drain_tail_predecessor_sync();
+        try self.tail.wait_for_sync();
         const next_blob = std.math.add(u64, self.tail_blob_index(), 1) catch
             return error.OffsetOverflow;
         try self.sealed.ensureUnusedCapacity(self.partition.gpa, 1);
-        try self.tail.sync();
+        var next = try self.partition.open(next_blob);
+        errdefer next.deinit();
+        const completion = try self.tail.start_sync();
         self.metrics.synced.metric().inc();
-        const next = try self.partition.open(next_blob);
         self.sealed.appendAssumeCapacity(self.tail);
         self.tail = next;
         self.metrics.tracked.metric().inc();
+        assert(self.tail_predecessor_sync == null);
+        self.tail_predecessor_sync = completion;
         assert(self.tail_blob_index() == next_blob);
+    }
+
+    /// Wait for the predecessor's started sync. A failure stays retained, so it surfaces again.
+    fn drain_tail_predecessor_sync(self: *Writable) Error!void {
+        const completion = self.tail_predecessor_sync orelse return;
+        try completion.wait();
+        completion.release();
+        self.tail_predecessor_sync = null;
+        assert(self.tail_predecessor_sync == null);
+    }
+
+    /// Wait for every started sync, surfacing a failure without changing any blob.
+    pub fn wait_for_sync(self: *Writable) Error!void {
+        try self.drain_tail_predecessor_sync();
+        try self.tail.wait_for_sync();
+        assert(self.tail_predecessor_sync == null);
+    }
+
+    /// Start syncing the tail, returning a completion (one reference, owned by the caller) for
+    /// both the tail and its predecessor. At most one tail sync is in flight: an earlier one is
+    /// waited for first; the predecessor's is joined, not waited for.
+    pub fn start_sync(self: *Writable) Error!Completion {
+        assert(!self.tail_closed);
+        try self.tail.wait_for_sync();
+        const tail_sync = try self.tail.start_sync();
+        self.metrics.synced.metric().inc();
+        const predecessor = self.tail_predecessor_sync orelse return tail_sync;
+        // `join` consumes both references, also on error.
+        return Completion.join(predecessor.retain(), tail_sync);
     }
 
     /// Drop every blob below `min_blob` and remove its file, oldest first.
     /// Requires `oldest_blob_index < min_blob <= tail_blob_index`.
     pub fn prune(self: *Writable, min_blob: u64) Error!void {
         assert(self.oldest_blob_index < min_blob and min_blob <= self.tail_blob_index());
+        // Observe outstanding sync failures before removing any retained data.
+        try self.wait_for_sync();
         const drop_count: usize = @intCast(min_blob - self.oldest_blob_index);
         for (self.sealed.items[0..drop_count]) |*writer| writer.deinit();
         const kept = self.sealed.items.len - drop_count;
@@ -310,6 +353,8 @@ pub const Writable = struct {
 
     /// Remove every blob and start an empty journal with its tail at `tail_blob`.
     pub fn clear(self: *Writable, tail_blob: u64) Error!void {
+        // Observe outstanding sync failures before removing any retained data.
+        try self.wait_for_sync();
         const newest = self.tail_blob_index();
         for (self.sealed.items) |*writer| writer.deinit();
         self.sealed.clearRetainingCapacity();
@@ -325,14 +370,17 @@ pub const Writable = struct {
         assert(self.tail_blob_index() == tail_blob);
     }
 
-    /// Make the tail durable (every sealed blob already is).
+    /// Make the tail and its sealed predecessor durable (older sealed blobs already are).
     pub fn sync(self: *Writable) Error!void {
+        try self.drain_tail_predecessor_sync();
         try self.tail.sync();
         self.metrics.synced.metric().inc();
     }
 
     /// Remove every blob and the partition, freeing the blobs.
     pub fn destroy(self: *Writable) Error!void {
+        // A failed sync removes nothing.
+        try self.wait_for_sync();
         const newest = self.tail_blob_index();
         const oldest = self.oldest_blob_index;
         assert(!self.tail_closed);

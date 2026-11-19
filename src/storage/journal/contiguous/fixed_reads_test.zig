@@ -236,7 +236,7 @@ test "fixed: journal metrics" {
     _ = try journal.append(test_digest(5));
     try journal.commit();
     try journal.sync();
-    try journal.start_sync();
+    try (try journal.start_sync()).wait_release();
     _ = try journal.read(0);
     try testing.expect(journal.try_read_sync(0) != null);
     var three: [3]Digest = undefined;

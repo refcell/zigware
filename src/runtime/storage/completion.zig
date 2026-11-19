@@ -95,6 +95,13 @@ pub const Completion = struct {
         }
     }
 
+    /// Wait for the sync, then return this reference (commonware's `handle.await`).
+    pub fn wait_release(c: Completion) Error!void {
+        defer c.release();
+        assert(c.state != .ready or c.poll() != null);
+        return c.wait();
+    }
+
     /// Whether the sync is still in flight.
     pub fn is_pending(c: Completion) bool {
         return c.poll() == null;

@@ -588,7 +588,7 @@ pub fn Merkle(comptime F: type, comptime Digest: type) type {
         /// here). A later `sync` still performs a full durable sync.
         pub fn start_sync(self: *Self) Error!void {
             try self.flush_internal();
-            try self.journal.start_sync();
+            try (try self.journal.start_sync()).wait_release();
             self.journal_dirty = true;
         }
 

@@ -31,8 +31,8 @@
 //! # Watermark
 //!
 //! The watermark never exceeds what is durably on disk. `sync` completes its data sync before
-//! writing the watermark. Syncs complete synchronously here, so `start_sync` advances the
-//! watermark to the current size as well (commonware advances it to the last observed sync).
+//! writing the watermark. `start_sync` advances it only to the size its last observed,
+//! completed sync proved, as commonware does.
 //!
 //! # Clearing
 //!
@@ -45,6 +45,7 @@ const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const codec = @import("codec");
 const runtime = @import("runtime");
+const Completion = runtime.storage.Completion;
 const paged = runtime.buffer.paged;
 const Storage = runtime.storage.Storage;
 const contiguous = @import("mod.zig");
@@ -81,13 +82,7 @@ pub const Config = struct {
     io: ?std.Io = null,
 };
 
-/// A sync completion that has already succeeded: syncs complete synchronously.
-const Done = struct {
-    pub fn poll(_: *Done) ?bool {
-        return true;
-    }
-};
-const Barrier = durability.Barrier(Done);
+const Barrier = durability.Barrier(durability.Sync);
 
 /// The first retained position in `blob`.
 fn first_in_blob(pruning_boundary: u64, blob: u64, items_per_blob: u64) Error!u64 {
@@ -804,6 +799,7 @@ pub fn Journal(comptime A: type) type {
 
         /// Close every blob (dropping unsynced items).
         pub fn deinit(self: *Self) void {
+            self.barrier.deinit();
             self.metrics.deinit();
             self.scratch.deinit(self.gpa);
             self.blobs.deinit();
@@ -837,15 +833,36 @@ pub fn Journal(comptime A: type) type {
             self.barrier.mark_durable(self.bounds.end);
         }
 
-        /// commonware's `start_sync`: the data sync completes synchronously, so the watermark
-        /// advances to the current size.
-        pub fn start_sync(self: *Self) Error!void {
+        /// Start making the journal durable, returning a completion (one reference, owned by
+        /// the caller) for the data sync (commonware `start_sync`). The recovery watermark
+        /// advances only to the prefix an already completed sync proved, so it trails by one
+        /// call while syncs are in flight. Its publication is synchronous here.
+        pub fn start_sync(self: *Self) Error!Completion {
             assert(!self.failed);
             self.metrics.start_sync_calls.metric().inc();
+            const data = try self.start_data_sync();
+            errdefer data.release();
+            try self.start_watermark_sync(self.barrier.boundary());
+            return data;
+        }
+
+        /// Start the data sync and record it in the barrier (commonware `start_data_sync`).
+        pub fn start_data_sync(self: *Self) Error!Completion {
+            assert(!self.failed);
             errdefer self.failed = true;
-            try self.blobs.sync();
-            self.barrier.record(self.bounds.end, .{});
-            try self.checkpoint.start_watermark_sync(self.barrier.boundary());
+            const data = try self.blobs.start_sync();
+            self.barrier.record(self.bounds.end, .{ .completion = data.retain() });
+            assert(self.barrier.boundary() <= self.bounds.end);
+            return data;
+        }
+
+        /// Raise the recovery watermark toward `size`, capped at the proven barrier.
+        pub fn start_watermark_sync(self: *Self, size_target: u64) Error!void {
+            assert(!self.failed);
+            errdefer self.failed = true;
+            const capped = @min(size_target, self.barrier.boundary());
+            assert(capped <= self.bounds.end);
+            try self.checkpoint.start_watermark_sync(capped);
         }
 
         /// Durably persist the journal and its watermark, so no recovery is needed on startup.
@@ -989,6 +1006,7 @@ pub fn Journal(comptime A: type) type {
             assert(!self.failed);
             defer self.* = undefined;
             defer self.metrics.deinit();
+            defer self.barrier.deinit();
             defer self.gpa.free(self.prefix);
             defer self.scratch.deinit(self.gpa);
             self.checkpoint.stage_clear(0) catch |err| {
@@ -1019,6 +1037,7 @@ pub fn Journal(comptime A: type) type {
             try self.blobs.clear(position_to_blob(size_new, self.items_per_blob));
             self.bounds = .{ .start = size_new, .end = size_new };
             self.update_metrics();
+            self.barrier.deinit();
             self.barrier = .init(size_new);
             try self.checkpoint.finish_clear(self.items_per_blob, size_new);
         }

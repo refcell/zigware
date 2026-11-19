@@ -21,8 +21,8 @@
 //! # Watermark
 //!
 //! The offsets watermark only ever takes a size proven durable for both the data and the
-//! offsets. Syncs complete synchronously here, so `start_sync` advances it to the current size
-//! (commonware advances it to the last completed combined sync).
+//! offsets: `start_sync` advances it to the size its last completed combined sync proved, as
+//! commonware does.
 //!
 //! # Ownership
 //!
@@ -35,6 +35,7 @@ const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const codec = @import("codec");
 const runtime = @import("runtime");
+const Completion = runtime.storage.Completion;
 const paged = runtime.buffer.paged;
 const Storage = runtime.storage.Storage;
 const contiguous = @import("mod.zig");
@@ -89,13 +90,7 @@ pub fn Config(comptime V: type) type {
     };
 }
 
-/// A sync completion that has already succeeded: syncs complete synchronously.
-const Done = struct {
-    pub fn poll(_: *Done) ?bool {
-        return true;
-    }
-};
-const Barrier = durability.Barrier(Done);
+const Barrier = durability.Barrier(durability.Sync);
 
 /// The owned data and offsets partition names of a base partition.
 const Names = struct {
@@ -956,6 +951,7 @@ pub fn Journal(comptime V: type) type {
         }
 
         fn release(self: *Self) void {
+            self.barrier.deinit();
             self.metrics.deinit();
             self.scratch.deinit(self.gpa);
             self.starts.deinit(self.gpa);
@@ -1125,15 +1121,28 @@ pub fn Journal(comptime V: type) type {
             try self.blobs.sync();
         }
 
-        /// Durably persist the data and offsets and advance the watermark to the size proven
-        /// durable for both (commonware's `start_sync`; syncs complete synchronously).
-        pub fn start_sync(self: *Self) Error!void {
+        /// Start making the data and offsets durable, returning a completion (one reference,
+        /// owned by the caller) for both (commonware `start_sync`). The offsets' recovery
+        /// watermark advances only to the prefix an already completed combined sync proved.
+        pub fn start_sync(self: *Self) Error!Completion {
             assert(!self.failed);
             self.metrics.start_sync_calls.metric().inc();
             errdefer self.failed = true;
-            try self.blobs.sync();
-            try self.offsets.start_sync();
-            self.barrier.record(self.bounds.end, .{});
+            const data = try self.blobs.start_sync();
+            const offsets = self.offsets.start_data_sync() catch |err| {
+                data.release();
+                return err;
+            };
+            // Publish only the watermark already proved by a completed combined barrier.
+            self.offsets.start_watermark_sync(self.barrier.boundary()) catch |err| {
+                data.release();
+                offsets.release();
+                return err;
+            };
+            const both = try Completion.join(data, offsets);
+            self.barrier.record(self.bounds.end, .{ .completion = both.retain() });
+            assert(self.barrier.boundary() <= self.bounds.end);
+            return both;
         }
 
         /// Persist the data, then the offsets and their watermark.
@@ -1188,6 +1197,7 @@ pub fn Journal(comptime V: type) type {
             try self.offsets.clear_to_size(size_new);
             self.bounds = .{ .start = size_new, .end = size_new };
             self.update_metrics();
+            self.barrier.deinit();
             self.barrier = .init(size_new);
         }
 

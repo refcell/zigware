@@ -4,8 +4,8 @@
 //! size. commonware's `WriteFaults` (fail every write while armed) becomes a write failure
 //! rate of one on `runtime.storage.faulty`, retaining none of the failed bytes.
 //!
-//! The other start-sync tests depend on parked or dropped sync handles
-//! (`DelayedSyncContext`, `PendingSyncs`), which synchronous syncs cannot produce.
+//! The in-flight start-sync tests (`DelayedSyncContext`, `PendingSyncs`) are in
+//! start_sync_test.zig.
 
 const std = @import("std");
 const testing = std.testing;
@@ -96,7 +96,7 @@ test "fixed: a failed watermark advance keeps the data" {
         var journal = try h.open(null);
         defer journal.deinit();
         try append_values(&journal, &.{ 1, 2, 3 });
-        try journal.start_sync();
+        try (try journal.start_sync()).wait_release();
         try testing.expectEqual(3, journal.recovery_watermark());
         _ = try journal.append(4);
         try journal.commit();
@@ -153,7 +153,7 @@ test "fixed: truncate lowers the durable size" {
         defer journal.deinit();
         try testing.expectEqual(2, journal.recovery_watermark());
         _ = try journal.append(9);
-        try journal.start_sync();
+        try (try journal.start_sync()).wait_release();
     }
     try h.storage.crash();
     h.inner.crash();

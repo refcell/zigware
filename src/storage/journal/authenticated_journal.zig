@@ -209,9 +209,10 @@ pub fn Journal(comptime F: type, comptime C: type, comptime H: type) type {
             try self.merkle.flush();
         }
 
-        /// Makes both components durable (completes at once here).
+        /// Makes both components durable. The journal's started sync is waited for here
+        /// until this journal returns a completion (async start_sync step 3).
         pub fn start_sync(self: *Self) Error!void {
-            try self.journal.start_sync();
+            try (try self.journal.start_sync()).wait_release();
             try self.merkle.start_sync();
         }
 

@@ -370,7 +370,7 @@ test "variable: start sync durability" {
     defer h.deinit();
     var journal = try h.open();
     try append_scaled(&journal, 7, 10);
-    try journal.start_sync();
+    try (try journal.start_sync()).wait_release();
     journal.deinit();
     h.storage.crash();
     journal = try h.open();

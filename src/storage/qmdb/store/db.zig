@@ -267,7 +267,7 @@ pub fn Db(comptime K: type, comptime E: type, comptime T: type) type {
 
         /// Starts a sync (it completes at once here).
         pub fn start_sync(self: *Self) !void {
-            try self.log.start_sync();
+            try (try self.log.start_sync()).wait_release();
         }
 
         /// Makes every applied operation durable; reopening may replay the log.

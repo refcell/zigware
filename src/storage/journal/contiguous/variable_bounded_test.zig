@@ -235,7 +235,7 @@ test "variable: a recovery failure does not clear durable data" {
         var journal = try Journal.init_at_size(gpa, h.iface(), h.cfg(), 20);
         defer journal.deinit();
         for (0..8) |value| _ = try journal.append(value);
-        try journal.start_sync();
+        try (try journal.start_sync()).wait_release();
     }
     const opened = try h.iface().open(H.data, &manager_mod.section_name(2));
     opened.blob.close();

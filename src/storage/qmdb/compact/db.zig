@@ -336,7 +336,7 @@ pub fn Db(comptime F: type, comptime O: type, comptime H: type) type {
         /// Starts persisting the current state; zigware syncs complete at once.
         pub fn start_sync(self: *Self) !void {
             const open = try self.open_witnesses();
-            try open.journal.start_sync();
+            try (try open.journal.start_sync()).wait_release();
             open.committed = true;
         }
 

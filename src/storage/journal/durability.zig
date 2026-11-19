@@ -3,10 +3,28 @@
 //! commonware records the shared future of the last started sync and polls it without
 //! blocking. zigware takes the completion as a comptime type with
 //! `poll(self: *Completion) ?bool`: null while the sync runs, then true if it succeeded and
-//! false if it failed. Polling must not block and must keep returning the same outcome.
+//! false if it failed. Polling must not block and must keep returning the same outcome. A
+//! completion with `release(self: Completion) void` is released when the barrier drops it.
+//! `Sync` adapts `runtime.storage.Completion`.
 
 const std = @import("std");
 const assert = std.debug.assert;
+const runtime = @import("runtime");
+
+/// A barrier completion holding one reference to a started sync.
+pub const Sync = struct {
+    completion: runtime.storage.Completion,
+
+    pub fn poll(self: *Sync) ?bool {
+        const result = self.completion.poll() orelse return null;
+        result catch return false;
+        return true;
+    }
+
+    pub fn release(self: Sync) void {
+        self.completion.release();
+    }
+};
 
 /// The boundary below which every item is known durable.
 pub fn Barrier(comptime Completion: type) type {
@@ -26,6 +44,18 @@ pub fn Barrier(comptime Completion: type) type {
             return .{ .boundary_durable = boundary_initial };
         }
 
+        /// Drop the pending completion, if any (the sync itself continues).
+        pub fn deinit(self: *Self) void {
+            self.drop();
+            assert(self.settled());
+        }
+
+        fn drop(self: *Self) void {
+            const pending = self.pending orelse return;
+            if (@hasDecl(Completion, "release")) pending.completion.release();
+            self.pending = null;
+        }
+
         /// The highest proven boundary, observing the pending sync completion if any.
         pub fn boundary(self: *Self) u64 {
             self.observe();
@@ -39,7 +69,7 @@ pub fn Barrier(comptime Completion: type) type {
             if (succeeded) self.boundary_durable = @max(self.boundary_durable, pending.boundary);
             // The layer that started a failed sync owns surfacing the failure. A failed
             // observation cannot advance this proof, so retaining it would add nothing.
-            self.pending = null;
+            self.drop();
             assert(self.settled());
         }
 
@@ -53,7 +83,7 @@ pub fn Barrier(comptime Completion: type) type {
         pub fn mark_durable(self: *Self, boundary_new: u64) void {
             self.boundary_durable = @max(self.boundary_durable, boundary_new);
             if (self.pending) |pending| {
-                if (pending.boundary <= boundary_new) self.pending = null;
+                if (pending.boundary <= boundary_new) self.drop();
             }
             assert(self.boundary_durable >= boundary_new);
         }
@@ -62,6 +92,7 @@ pub fn Barrier(comptime Completion: type) type {
         pub fn record(self: *Self, boundary_synced: u64, completion: Completion) void {
             // Preserve a completed prior proof before replacing its observer.
             self.observe();
+            self.drop();
             self.pending = .{ .boundary = boundary_synced, .completion = completion };
             assert(!self.settled());
         }

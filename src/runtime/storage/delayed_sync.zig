@@ -174,6 +174,18 @@ pub const DelayedSync = struct {
         return first;
     }
 
+    /// Take the newest parked sync (commonware `pending.lock().pop()`); panics if none.
+    pub fn last(self: *DelayedSync) Deferred {
+        self.lock.lock();
+        defer self.lock.unlock();
+        assert(self.queued > 0); // No pending sync was started.
+        self.queued -= 1;
+        const newest = self.queue[self.queued];
+        // The gate is always the oldest entry until consumed, so it is never the newest here.
+        assert(newest.blob != null or self.gate == null);
+        return newest;
+    }
+
     /// Complete the oldest `count` parked syncs successfully.
     pub fn release_next(self: *DelayedSync, count: usize) void {
         assert(count <= self.parked());

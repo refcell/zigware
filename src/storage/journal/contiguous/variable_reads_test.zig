@@ -521,7 +521,7 @@ test "variable: journal metrics" {
     try testing.expectEqual(3, journal.try_read_sync(3).?);
     try journal.commit();
     try journal.sync();
-    try journal.start_sync();
+    try (try journal.start_sync()).wait_release();
     _ = try journal.prune(2);
     const m = &journal.metrics;
     try testing.expectEqual(6, m.size.metric().get());

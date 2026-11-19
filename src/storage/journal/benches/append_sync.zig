@@ -1,6 +1,6 @@
 //! `journal::append_sync`: steady-state cost of appending one item and making it durable.
 //! `commit` makes items durable without updating the checkpoint, so it is a control. Syncs
-//! here complete synchronously, so `start_sync` has no handle to await.
+//! here complete inline on the memory backend, so `start_sync`'s completion is ready.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -77,7 +77,7 @@ fn Cycle(comptime kind: Kind) type {
             const position = try self.journal.append(item);
             switch (self.mode) {
                 .sync => try self.journal.sync(),
-                .start_sync => try self.journal.start_sync(),
+                .start_sync => try (try self.journal.start_sync()).wait_release(),
                 .commit => try self.journal.commit(),
             }
             assert(position + 1 == self.journal.size());
