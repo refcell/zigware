@@ -700,14 +700,10 @@ pub fn BatchedRead(comptime Op: type) type {
                     try candidates.append(gpa, .{ .key_index = key_index, .position = location.* });
                 }
             }
-            // No key is indexed: nothing to read or validate. Temporary: the variable
-            // journal's `try_read_many_sync` panics on empty positions (de86473); remove this
-            // once storage-merkle's fix is on main.
-            if (candidates.items.len == 0) return .empty;
             std.mem.sortUnstable(Candidate, candidates.items, {}, by_position);
             const positions = try dedup_positions(gpa, candidates.items);
             defer gpa.free(positions);
-            assert(positions.len > 0);
+            assert(positions.len <= candidates.items.len);
             const served = try gpa.alloc(?Op, positions.len);
             defer gpa.free(served);
             shard.reader.try_read_many_sync(positions, served);

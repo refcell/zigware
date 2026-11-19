@@ -230,8 +230,8 @@ which every database here is built on.
   on reopen as in commonware's `test_config`; it also checks the repeat read is all cache hits.
   `zig build qmdb-scale -- get_many` (200,000 keys, batches of 64, warm, under other lanes'
   load): one reader 85-88 ms against 107-118 ms for the per-key loop in the quietest rounds;
-  four readers show no clear difference. The cache pass skips an empty batch until the variable
-  journal's `try_read_many_sync` accepts empty positions (storage-merkle).
+  four readers show no clear difference. An empty batch goes to the journal, whose
+  `try_read_many_sync` returns early on empty positions (storage-merkle, 6f8df09b).
 
 ## Public API (on main)
 - `storage.qmdb.value`: `Fixed(V)`, `Variable(V)` (encodings with `Value`, `fixed`), `check`,
