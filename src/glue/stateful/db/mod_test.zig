@@ -246,10 +246,10 @@ test "stateful db: barriers report every member's sync" {
     var set = try Set.open(TestEnv{}, .{ &good, &bad, &good }, null);
     defer set.deinit();
     const barrier = try set.finalize();
-    try testing.expectError(error.DatabaseSyncFailed, barrier.durable());
     const failure = barrier.first_failure().?;
     try testing.expectEqual(1, failure.index.?);
     try testing.expectEqual(error.TestSyncFailed, failure.err);
+    try testing.expectError(error.DatabaseSyncFailed, barrier.durable());
     try testing.expectEqual(2, good.finalizes); // The later member still ran.
 
     const empty: db.Barrier = .{};

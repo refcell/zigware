@@ -28,8 +28,10 @@
 //! - `T.new_batch(BatchContext(T)) !T.Unmerkleized`: a batch over the applied state. The batch
 //!   may keep the `Shared` handle for later reads, never the borrowed database.
 //! - `T.matches_sync_target(*const Merkleized, *const SyncTarget) bool`.
-//! - `t.apply(*const Merkleized) !void`, `t.finalize() !void` (persist every checkpoint
-//!   applied before the call), optionally `t.prune(*const SyncTarget) !void`,
+//! - `t.apply(*const Merkleized) !void`, `t.finalize() !runtime.storage.Completion` (start
+//!   persisting every checkpoint applied before the call; the completion, the caller's one
+//!   reference, finishes once it is durable; a database persisting inline may return `void`),
+//!   optionally `t.prune(*const SyncTarget) !void`,
 //!   `t.sync_target() SyncTarget`, and `t.deinit()`.
 //!
 //! # Failures
@@ -262,7 +264,7 @@ pub fn Shared(comptime DB: type) type {
         /// Persists every checkpoint applied before this call.
         pub fn finalize(self: Self) !Barrier {
             var barrier: Barrier = .{};
-            barrier.record(@typeName(DB), null, mutate(DB, self, .finalize, .{}));
+            barrier.record(@typeName(DB), null, finalize_member(DB, self));
             return barrier;
         }
 
@@ -312,7 +314,7 @@ pub fn BatchContext(comptime DB: type) type {
 /// A mutation of one member, holding only that member's lock. On failure the member is lost
 /// and the error returned; commonware panics with the member's index and type, which the
 /// caller knows here.
-const Mutation = enum { apply, finalize, prune };
+const Mutation = enum { apply, prune };
 
 fn mutate(
     comptime DB: type,
@@ -329,6 +331,23 @@ fn mutate(
     slot.put();
 }
 
+/// Starts persisting one member under its lock, returning its sync's completion (or void when
+/// the database persisted inline). A failure loses the member, as `mutate`.
+fn finalize_member(comptime DB: type, shared: Shared(DB)) anyerror!FinalizeResult(DB) {
+    var slot = try shared.write();
+    const started = slot.get().finalize() catch |err| {
+        slot.lose();
+        return err;
+    };
+    slot.put();
+    return started;
+}
+
+fn FinalizeResult(comptime DB: type) type {
+    const Return = @typeInfo(@TypeOf(DB.finalize)).@"fn".return_type.?;
+    return @typeInfo(Return).error_union.payload;
+}
+
 fn run_mutation(
     comptime DB: type,
     database: *DB,
@@ -337,21 +356,25 @@ fn run_mutation(
 ) !void {
     switch (mutation) {
         .apply => try database.apply(args[0]),
-        .finalize => try database.finalize(),
         // Databases without prunable history omit `prune`.
         .prune => if (@hasDecl(DB, "prune")) try database.prune(args[0]),
     }
 }
 
-/// A durability barrier returned by `finalize` (commonware `Barrier`).
+/// A durability barrier returned by `finalize` (commonware `Barrier`): the completion of
+/// each member's started sync (`runtime.storage.Completion`), one reference each.
 ///
-/// zigware's databases persist synchronously in `finalize`, so the barrier holds each
-/// member's outcome; `durable` reports a failure, which is fatal, as commonware's panic.
+/// Every barrier is consumed once: `durable` waits for it, and `deinit` drops it without
+/// waiting (the syncs continue; a failure stays with its database). A member failure is fatal,
+/// as commonware's panic; a canceled wait or sync (commonware's runtime shutdown) is not
+/// durable, but a failure anywhere wins over it.
 pub const Barrier = struct {
+    /// The most syncs one barrier covers.
+    pub const max_syncs = 64;
+    /// The most members a tuple set has.
     pub const max_members = 8;
-
-    failures: [max_members]?Failure = @splat(null),
-    count: usize = 0,
+    pub const Error = error{ DatabaseSyncFailed, Canceled };
+    const Completion = runtime.storage.Completion;
 
     pub const Failure = struct {
         db_type: []const u8,
@@ -359,33 +382,105 @@ pub const Barrier = struct {
         err: anyerror,
     };
 
-    pub fn record(
-        barrier: *Barrier,
-        db_type: []const u8,
-        index: ?usize,
-        outcome: anyerror!void,
-    ) void {
-        assert(barrier.count < max_members);
-        barrier.failures[barrier.count] = if (outcome) |_| null else |err| .{
-            .db_type = db_type,
-            .index = index,
-            .err = err,
-        };
+    const Sync = struct { db_type: []const u8, index: ?usize, completion: Completion };
+
+    syncs: [max_syncs]Sync = undefined,
+    count: usize = 0,
+    /// The first member whose finalize failed before it started a sync.
+    failure: ?Failure = null,
+
+    /// A barrier over `completions` (taken) of `db_type`, indexed by position (commonware
+    /// `from_handles`). An empty barrier is durable at once.
+    pub fn from_completions(db_type: []const u8, completions: []const Completion) Barrier {
+        assert(completions.len <= max_syncs);
+        var barrier: Barrier = .{};
+        for (completions, 0..) |completion, index| barrier.add(db_type, index, completion);
+        assert(barrier.count == completions.len);
+        return barrier;
+    }
+
+    /// Adds one started sync (its completion taken).
+    pub fn add(barrier: *Barrier, db_type: []const u8, index: ?usize, completion: Completion) void {
+        assert(barrier.count < max_syncs);
+        const entry: Sync = .{ .db_type = db_type, .index = index, .completion = completion };
+        barrier.syncs[barrier.count] = entry;
         barrier.count += 1;
     }
 
-    /// Succeeds once every member's state is durable; an empty barrier is durable at once.
-    /// Fails with the first member's sync error.
-    pub fn durable(barrier: *const Barrier) error{DatabaseSyncFailed}!void {
-        for (barrier.failures[0..barrier.count]) |failure| {
-            if (failure != null) return error.DatabaseSyncFailed;
-        }
+    /// Records a member's finalize outcome: its sync's completion (taken), a member that
+    /// persisted inline (`void`), or the error that stopped it before a sync started.
+    pub fn record(barrier: *Barrier, db_type: []const u8, index: ?usize, outcome: anytype) void {
+        const T = @TypeOf(outcome);
+        const Payload = switch (@typeInfo(T)) {
+            .error_union => |info| info.payload,
+            .error_set => void,
+            else => T,
+        };
+        const normalized: anyerror!Payload = outcome;
+        const completion: Completion = if (normalized) |value| switch (Payload) {
+            void => .ok,
+            Completion => value,
+            else => @compileError("finalize returns void or a Completion"),
+        } else |err| failed: {
+            if (barrier.failure == null) {
+                barrier.failure = .{ .db_type = db_type, .index = index, .err = err };
+            }
+            break :failed .ok;
+        };
+        barrier.add(db_type, index, completion);
     }
 
-    /// The first failure, if any.
+    /// The barrier's outcome without waiting: null while a sync is pending and none failed.
+    pub fn poll(barrier: *const Barrier) ?Error!void {
+        if (barrier.failure != null) return error.DatabaseSyncFailed;
+        var pending = false;
+        var canceled = false;
+        for (barrier.syncs[0..barrier.count]) |entry| {
+            const result = entry.completion.poll() orelse {
+                pending = true;
+                continue;
+            };
+            result catch |err| switch (err) {
+                error.Canceled => canceled = true,
+                else => return error.DatabaseSyncFailed,
+            };
+        }
+        if (pending) return null;
+        if (canceled) return error.Canceled;
+    }
+
+    /// Waits until every sync completes, consuming the barrier. A failure already reported
+    /// returns at once, without waiting on syncs still pending (commonware's `try_join_all`).
+    pub fn durable(barrier_value: Barrier) Error!void {
+        var owned = barrier_value;
+        const barrier = &owned;
+        defer barrier.deinit();
+        if (barrier.poll()) |outcome| return outcome;
+        // `poll` settles the outcome: each wait either surfaces a failure, or, after the last
+        // one, leaves nothing pending.
+        for (barrier.syncs[0..barrier.count]) |entry| {
+            entry.completion.wait() catch {};
+            if (barrier.poll()) |outcome| return outcome;
+        }
+        unreachable; // The last wait completed every sync, so `poll` returned.
+    }
+
+    /// Drops the barrier without waiting (commonware's drop): releases every completion.
+    pub fn deinit(barrier: *Barrier) void {
+        for (barrier.syncs[0..barrier.count]) |entry| entry.completion.release();
+        barrier.count = 0;
+        barrier.failure = null;
+    }
+
+    /// The first failure known now: a finalize error, else a completed sync's error.
     pub fn first_failure(barrier: *const Barrier) ?Failure {
-        for (barrier.failures[0..barrier.count]) |failure| {
-            if (failure != null) return failure;
+        if (barrier.failure) |failure| return failure;
+        for (barrier.syncs[0..barrier.count]) |entry| {
+            const result = entry.completion.poll() orelse continue;
+            result catch |err| {
+                if (err == error.Canceled) continue;
+                return .{ .db_type = entry.db_type, .index = entry.index, .err = err };
+            };
         }
         return null;
     }
@@ -397,6 +492,7 @@ pub const Barrier = struct {
 pub fn Tuple(comptime types: anytype) type {
     const count = types.len;
     comptime assert(count >= 1 and count <= Barrier.max_members);
+    comptime assert(Barrier.max_members <= Barrier.max_syncs);
     return struct {
         const Self = @This();
         /// The member database types, in order.
@@ -496,7 +592,7 @@ pub fn Tuple(comptime types: anytype) type {
         pub fn finalize(self: *const Self) !Barrier {
             var barrier: Barrier = .{};
             inline for (types, 0..) |DB, i| {
-                barrier.record(@typeName(DB), i, mutate(DB, self.members[i], .finalize, .{}));
+                barrier.record(@typeName(DB), i, finalize_member(DB, self.members[i]));
             }
             return barrier;
         }
@@ -613,6 +709,7 @@ pub fn assert_managed_db(comptime DB: type) void {
 test {
     std.testing.refAllDecls(@This());
     _ = @import("mod_test.zig");
+    _ = @import("barrier_test.zig");
     _ = @import("adapters_test.zig");
     _ = @import("tuple_test.zig");
 }

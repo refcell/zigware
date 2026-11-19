@@ -9,6 +9,7 @@
 //! journal of `qmdb.keyless.Operation(F, E)`.
 
 const std = @import("std");
+const runtime = @import("runtime");
 const assert = std.debug.assert;
 const storage = @import("storage");
 const db = @import("mod.zig");
@@ -73,8 +74,9 @@ pub fn Keyless(comptime F: type, comptime E: type, comptime C: type, comptime H:
             try self.inner.apply_batch(batch.inner);
         }
 
-        pub fn finalize(self: *Self) !void {
-            try (try self.inner.start_sync()).wait_release();
+        /// Starts persisting the applied state; the completion finishes once it is durable.
+        pub fn finalize(self: *Self) !runtime.storage.Completion {
+            return self.inner.start_sync();
         }
 
         pub fn prune(self: *Self, target: *const SyncTarget) !void {

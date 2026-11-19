@@ -9,6 +9,7 @@
 //! `qmdb.immutable.Operation(F, K, E)`; `T` is the key index's translator.
 
 const std = @import("std");
+const runtime = @import("runtime");
 const assert = std.debug.assert;
 const storage = @import("storage");
 const db = @import("mod.zig");
@@ -74,8 +75,9 @@ pub fn Immutable(F: type, K: type, E: type, C: type, H: type, T: type) type {
             try self.inner.apply_batch(batch.inner);
         }
 
-        pub fn finalize(self: *Self) !void {
-            try (try self.inner.start_sync()).wait_release();
+        /// Starts persisting the applied state; the completion finishes once it is durable.
+        pub fn finalize(self: *Self) !runtime.storage.Completion {
+            return self.inner.start_sync();
         }
 
         pub fn prune(self: *Self, target: *const SyncTarget) !void {

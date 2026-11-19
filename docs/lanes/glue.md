@@ -365,7 +365,7 @@ ones: d = deployer (thread T-01a1d5b9-c237), u = utils, j = storage-journal
 | transfers/tests.rs | 53 | 53 | 0 | 0 | |
 | stateful/probe/mod.rs (+2 conformance) | 22 | 22 | 0 | 0 | |
 | stateful/probe/limits.rs | 1 | 1 | 0 | 0 | |
-| stateful/db/mod.rs | 83 | 61 | 0 | 22 | |
+| stateful/db/mod.rs | 83 | 81 | 0 | 2 | |
 | stateful/db/any.rs | 3 | 3 | 0 | 0 | |
 | stateful/db/current.rs | 11 | 11 | 0 | 0 | |
 | stateful/db/keyless/standard.rs | 5 | 5 | 0 | 0 | |
@@ -385,12 +385,13 @@ ones: d = deployer (thread T-01a1d5b9-c237), u = utils, j = storage-journal
 | stateful/actor/core/processing.rs, 3451-5885 | 39 | 33 | 0 | 6 | |
 | stateful/actor/processor/mod.rs | 44 | 40 | 0 | 4 | |
 | stateful/tests/mod.rs, floor.rs | 28 | 20 | 8 | 0 | j |
-| **total** | **469** | **380** | **55** | **34** | |
+| **total** | **469** | **400** | **55** | **14** | |
 
-- Not portable (db/mod.rs, 22): zigware's `Barrier` is synchronous (databases persist inside
-  `finalize`), so `barrier_waits_for_every_handle` (8), `barrier_cancellation_releases_handles`
-  (8), `barrier_reports_shutdown_as_not_durable`, and the shutdown half of
-  `barrier_panics_on_later_failure` (3) have no pending handle to wait on or cancel; tuple
+- db/mod.rs's barrier tests are ported since async start_sync step 6 (`Barrier` holds each
+  member's `runtime.storage.Completion`): `barrier_waits_for_every_handle` (8),
+  `barrier_cancellation_releases_handles` (8), `barrier_reports_shutdown_as_not_durable`, and
+  `barrier_panics_on_later_failure`'s shutdown half (3) are in db/barrier_test.zig.
+- Not portable (db/mod.rs, 2): tuple
   members run one after another under their mutexes, so `tuple_new_batches_queues_reads_concurrently`
   and `tuple_apply_runs_databases_in_parallel` have no concurrency to observe.
 - Open, d (deployer):
