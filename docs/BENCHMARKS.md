@@ -427,6 +427,43 @@ Re-run: build commonware's `flood` with those two changes, then `zig build insta
 -Doptimize=ReleaseFast`, `examples/flood/local.sh 4 <dir> 1024 <rate>`, and
 `etc/scripts/flood-compare.py <commonware-flood> zig-out/bin/flood <dir> 20 3 8`.
 
+## Actor: mailbox (2026-11-19, actor-stream lane)
+
+All ten cases of commonware's `mailbox` bench, with bench-compare.sh's settings (warm-up 1 s,
+measurement 3 s, 50 samples). The two sides alternated per case over three runs, and each
+number is the best of the three medians. The 1-minute load average was 63 to 78.
+
+| bench | parameters | commonware | zigware | zigware / commonware |
+|---|---|---|---|---|
+| `enqueue_ready` | `capacity=1024` | 24.7 µs | 12.9 µs | 0.52× |
+| `try_recv_ready` | `capacity=1024` | 8.85 µs | 6.30 µs | 0.71× (fixed, see below) |
+| `try_recv_overflow` | `capacity=1024 overflow=1024` | 63.1 µs | 44.4 µs | 0.70× |
+| `round_trip_ready` | `capacity=1024` | 26.7 µs | 19.2 µs | 0.72× |
+| `recv_waiting` | `capacity=1` | 77.5 µs | 156 µs | 2.01× (runtime, see below) |
+| `overflow_drop` | `capacity=1` | 49.3 µs | 29.3 µs | 0.59× |
+| `overflow_spill` | `capacity=1` | 39.9 µs | 38.9 µs | 0.98× |
+| `overflow_replace` | `capacity=1024 position=newest` | 44.9 µs | 38.8 µs | 0.87× |
+| `overflow_replace` | `capacity=1024 position=oldest` | 416 µs | 272 µs | 0.65× (fixed, see below) |
+| `concurrent_enqueue` | `producers=4 capacity=65536` | 3.74 ms | 1.66 ms | 0.45× |
+
+Fixed in 9cac0dd6:
+
+- **`try_recv_ready`, before 1.49× (10.8 µs against 7.25 µs at load 34 to 50).** Every pop
+  locked and unlocked one `std.Io.Mutex` that guarded ready and overflow. With the lock
+  stubbed out, the case fell to about 3 µs, so the lock was the whole gap. The mailbox now
+  uses commonware's design: a port of crossbeam's `ArrayQueue` for ready, the overflow
+  activity word, and a futex word in place of `AtomicWaker`.
+- **`overflow_replace position=oldest`, before 2.2× (675 µs against 302 µs).** The bench's
+  policy scanned the overflow deque backward with `atPtr`, a wrap branch per element. It now
+  scans the deque's two contiguous halves from the back, 4 bytes per step, as Rust's slice
+  `rfind` does behind commonware's `iter_mut().rev().find`.
+
+Not fixed: **`recv_waiting`, 2.01×.** zigware runs it on the deterministic runtime, and each
+message costs one `io.sleep` scheduler cycle, a park, and a wake. commonware polls the future
+by hand with `block_on`. The same loop with the mailbox swapped for a bare `futexWait` and
+`futexWake` handoff took 223 to 258 µs, against 247 to 294 µs with the mailbox in the same
+alternating runs, so about 90% of the time is the runtime's scheduler, not the mailbox.
+
 ## Appendix: bench coverage
 
 Every Criterion bench in commonware a9ffc25f3 (`benches/` dirs with `criterion_main!`), listed
@@ -455,8 +492,9 @@ Not Criterion benches, so not in the table: `qmdb_gungraun` (an instruction-coun
 `coding_scheme_sizes` (a size report; zigware's `reed_solomon size (shard)` rows),
 `index_scale`, runtime's `storage` workload binary (zigware's `runtime::storage::<workload>`),
 and qmdb's `cold_read`, `scale`, and `constantinople` (zigware's `zig build qmdb-<name>`).
-Crates with no Criterion benches in commonware, so no rows: `resolver`, `broadcast`, and
-`collector` (no `[[bench]]` target or `benches/` dir); zigware has none for them either.
+Crates with no Criterion benches in commonware, so no rows: `resolver`, `broadcast`,
+`collector`, and `stream` (no `[[bench]]` target or `benches/` dir); zigware has none for them
+either. stream's cipher and handshake are measured through p2p's rows above.
 zigware-only groups, with no commonware counterpart: `clearing::*`, `curve25519::{sign,
 verify, x25519}` (against `std.crypto`), `parallel::{fold, sort_by}`, `journal::zstd::encode`,
 and runtime's I/O backend benches (`runtime::network::echo`, `runtime::storage`).
