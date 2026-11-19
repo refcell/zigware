@@ -534,3 +534,191 @@ fn syncs_from_populated(comptime Current: type) !void {
 test "stateful current: a database syncs from a populated one" {
     inline for (variants) |Current| try syncs_from_populated(Current);
 }
+
+/// Storage that keeps unsynced writes and drops unsynced resizes at a crash, with one
+/// fixed-database operation per page so a bounded initialization truncates page aligned.
+const CrashHarness = struct {
+    const Faulty = runtime.storage.faulty.Storage(utils.rng.TestRng);
+    /// Operations the journal write buffer holds.
+    const capacity: u64 = 4;
+    const op_size: usize = codec.fixed_size(FixedDb.Database.Operation).?;
+
+    memory: runtime.storage.memory.Storage,
+    rng: utils.rng.TestRng,
+    faulty: Faulty,
+    cache_ref: runtime.buffer.paged.CacheRef,
+    registry: metrics.Registry,
+
+    fn init(self: *CrashHarness) !void {
+        self.memory = .init(testing.allocator);
+        self.rng = .init(0);
+        self.faulty = .init(testing.allocator, &self.memory, &self.rng, .{
+            .write_rate = .{ .failure_rate = .zero, .retention_rate = .one, .mode = .prefix },
+            .resize_rate = .{ .failure_rate = .zero, .partial_rate = .zero },
+        });
+        self.cache_ref = try .init(testing.allocator, @intCast(op_size), 11);
+        self.registry = metrics.Registry.init(testing.allocator);
+    }
+
+    fn deinit(self: *CrashHarness) void {
+        self.registry.deinit();
+        self.cache_ref.deinit();
+        self.faulty.deinit();
+        self.memory.deinit();
+    }
+
+    /// A buffer of `capacity` pages keeps an append of at most `capacity` operations in
+    /// memory; a larger append writes every page to the blob at once. One blob keeps the
+    /// applied batch over the discarded second target's bytes.
+    fn config(self: *CrashHarness) FixedDb.Config {
+        var result = harness_config(self);
+        result.log.write_buffer = capacity * op_size;
+        result.log.items_per_blob = 1000;
+        result.merkle.items_per_blob = 1000;
+        return result;
+    }
+
+    fn harness_config(self: *CrashHarness) FixedDb.Config {
+        const suffix = "bounded-init-crash";
+        return .{
+            .merkle = .{
+                .journal_partition = "stateful-current-journal-" ++ suffix,
+                .metadata_partition = "stateful-current-metadata-" ++ suffix,
+                .items_per_blob = 11,
+                .write_buffer = 1024,
+                .replay_buffer = 1024,
+                .cache_ref = &self.cache_ref,
+            },
+            .log = log_config(@FieldType(FixedDb.Config, "log"), suffix, &self.cache_ref),
+            .grafted_metadata_partition = "stateful-current-grafted-" ++ suffix,
+            .translator = .{},
+            .init_cache = 1024,
+        };
+    }
+
+    fn open(
+        self: *CrashHarness,
+        label: []const u8,
+        expected: ?FixedDb.SyncTarget,
+    ) !FixedDb.Shared {
+        const env: db.Env = .{
+            .gpa = testing.allocator,
+            .io = testing.io,
+            .storage = self.faulty.storage(),
+            .scope = metrics.Scope.init(&self.registry).child(label),
+        };
+        return FixedDb.Shared.open(env, self.config(), expected);
+    }
+
+    /// Loses everything unsynced, as the process dying would.
+    fn crash(self: *CrashHarness) !void {
+        try self.faulty.crash();
+        self.memory.crash();
+    }
+};
+
+/// Batch `id` writes `writes` keys and metadata that no other batch uses.
+fn crash_batch(shared: FixedDb.Shared, id: u8, writes: u8) !FixedDb.Merkleized {
+    var batch = try shared.new_batches();
+    errdefer batch.deinit();
+    for (0..writes) |i| {
+        const tag = [_]u8{ id, @intCast(i) };
+        try batch.write(Sha256.hash(&.{ "key", &tag }), Sha256.hash(&.{ "value", &tag }));
+    }
+    batch.with_metadata(Sha256.hash(&.{ "metadata", &[_]u8{id} }));
+    return batch.merkleize();
+}
+
+const CrashTargets = struct {
+    first: FixedDb.SyncTarget,
+    second: FixedDb.SyncTarget,
+    applied: FixedDb.SyncTarget,
+};
+
+/// Reopens at the first target (initialization syncs the truncated journal before
+/// returning) and applies a batch of `writes` keys without finalizing.
+fn apply_over_discarded(
+    harness: *CrashHarness,
+    result: *CrashTargets,
+    writes: u8,
+    written: bool,
+) !void {
+    // Initialization at the first target syncs the truncated journal before returning.
+    const bounded = try harness.open("bounded", result.first);
+    defer bounded.deinit();
+    const reopened = try bounded.committed_targets();
+    try testing.expect(db.targets_eql(FixedDb.SyncTarget, &result.first, &reopened));
+    // One journal append of the batch's updates, floor moves, and commit: three operations
+    // for one key, six for four keys. Only the written case exceeds `capacity`.
+    var merkleized = try crash_batch(bounded, 3, writes);
+    defer merkleized.deinit();
+    try bounded.apply(&merkleized);
+    result.applied = try bounded.committed_targets();
+    try testing.expect(!db.targets_eql(FixedDb.SyncTarget, &result.applied, &result.first));
+    try testing.expect(result.applied.end < result.second.end);
+    const ops = result.applied.end - result.first.end;
+    try testing.expectEqual(written, ops > CrashHarness.capacity);
+}
+
+/// Finalizes two targets, reopens at the first, and applies a batch of `writes` keys over
+/// the discarded second target's bytes without finalizing, then crashes.
+fn crash_after_apply(harness: *CrashHarness, writes: u8, written: bool) !CrashTargets {
+    var result: CrashTargets = undefined;
+    {
+        const shared = try harness.open("db", null);
+        defer shared.deinit();
+        // The second writes one more key than the applied batch below, so the applied batch
+        // cannot cover all of its operations.
+        for ([_]u8{ 1, 2 }, [_]u8{ 1, writes + 1 }) |id, count| {
+            var merkleized = try crash_batch(shared, id, count);
+            defer merkleized.deinit();
+            try apply_and_finalize(shared, &merkleized);
+            const target = try shared.committed_targets();
+            if (id == 1) result.first = target else result.second = target;
+        }
+    }
+    try testing.expect(!db.targets_eql(FixedDb.SyncTarget, &result.first, &result.second));
+    try apply_over_discarded(harness, &result, writes, written);
+    try harness.crash();
+    return result;
+}
+
+/// commonware `managed_db_bounded_init_then_apply_crash_recovers_history`: recovery yields
+/// the first target or the applied batch, as the write-buffer geometry selects; the first
+/// target reopens, and the discarded second target is rejected.
+fn crash_recovers_history(writes: u8, written: bool) !void {
+    var harness: CrashHarness = undefined;
+    try harness.init();
+    defer harness.deinit();
+    const targets = try crash_after_apply(&harness, writes, written);
+    {
+        const recovering = try harness.open("recover", null);
+        defer recovering.deinit();
+        const recovered = try recovering.committed_targets();
+        const at_first = db.targets_eql(FixedDb.SyncTarget, &recovered, &targets.first);
+        const at_applied = db.targets_eql(FixedDb.SyncTarget, &recovered, &targets.applied);
+        try testing.expect(at_first or at_applied);
+        // A buffered batch is dropped whole and a written one kept whole.
+        try testing.expectEqual(written, at_applied);
+    }
+    {
+        const first = try harness.open("first", targets.first);
+        defer first.deinit();
+        const reopened = try first.committed_targets();
+        try testing.expect(db.targets_eql(FixedDb.SyncTarget, &targets.first, &reopened));
+    }
+    try testing.expectError(error.TargetMismatch, harness.open("second", targets.second));
+    // A rejected initialization leaves the first target in place.
+    const restart = try harness.open("restart", null);
+    defer restart.deinit();
+    const restarted = try restart.committed_targets();
+    try testing.expect(db.targets_eql(FixedDb.SyncTarget, &targets.first, &restarted));
+}
+
+test "stateful current: a buffered applied batch is lost at a crash after bounded init" {
+    try crash_recovers_history(1, false);
+}
+
+test "stateful current: a written applied batch survives a crash after bounded init" {
+    try crash_recovers_history(4, true);
+}

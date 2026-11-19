@@ -314,9 +314,9 @@ marshal's actors (consensus-marshal) for the actor; until then it ports what is 
 - [x] db: `Shared`, `Reader`, `Barrier`, single and tuple sets, with mod.rs's set tests.
 - [x] db/any: the ManagedDb adapter with any.rs's stale-read and apply-does-not-finalize tests.
 - [x] db/any: `stage`/`expand`/staged `merkleize` with any.rs's staged test.
-- [ ] db/any: variable values, ordered.
+- [x] db/any: variable values, ordered, `sync_db`/`sync_source` (StateSyncDb).
 - [x] db/current: the unordered fixed ManagedDb with staging and current.rs's tests.
-- [ ] db/current: ordered and variable (after storage-qmdb-sync), the crash-recovery test.
+- [x] db/current: ordered and variable, `sync_db`/`sync_source`, the crash-recovery test.
 - [ ] db: keyless, immutable, compact.
 - [x] db: `Anchor`, `TipUpdate`, `dispatch_queued_tips`, and the generation coordinator with
   mod.rs's tests of them, a regroup test, and the channel edge cases.
