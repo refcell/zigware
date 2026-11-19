@@ -2,7 +2,8 @@
 //! `AsyncRwLock`): reader tasks on `std.Io.Threaded` hold read guards and `get`/`get_many`
 //! seeded keys through `*const Db`, while the test applies and commits batches of other keys
 //! under the write guard (each commit's floor walk moves seeded updates to the tip). A batcher
-//! task merkleizes batches against the database under read guards beside them. A page
+//! task merkleizes batches against the database under read guards beside them, and prover
+//! tasks serve sync proofs from it through a `JournalSource`, verifying each. A page
 //! cache of a few pages makes most reads miss, so readers fetch pages of one blob at once.
 
 const std = @import("std");
@@ -12,6 +13,8 @@ const utils = @import("utils");
 const merkle = @import("../../merkle/mod.zig");
 const any_support = @import("test_support.zig");
 const current_support = @import("../current/test_support.zig");
+const sync = @import("../sync/mod.zig");
+const verify = @import("../verify.zig");
 
 const gpa = testing.allocator;
 const io = testing.io;
@@ -24,6 +27,8 @@ const readers = 3;
 const read_rounds = 300;
 const write_rounds = 30;
 const batch_rounds = 40;
+const prove_rounds = 60;
+const provers = 2;
 
 fn Shared(comptime D: type) type {
     return utils.sync.UpgradableRwLock(D);
@@ -97,6 +102,50 @@ fn batch_round(comptime D: type, db: *const D, i: u64, other: u64) !u32 {
     return failures;
 }
 
+/// `D`'s `any` database: `D` itself, or the one a `current` database wraps.
+fn AnyOf(comptime D: type) type {
+    return if (@hasDecl(D, "Any")) D.Any else D;
+}
+
+/// Serves `prove_rounds` sync requests through a `JournalSource` under read guards, as glue's
+/// `SharedSource` does for peers, checking every proof against the root read under the guard.
+fn prover(comptime D: type) fn (*Shared(D), u64) u32 {
+    return struct {
+        fn run(lock: *Shared(D), seed: u64) u32 {
+            var prng: std.Random.DefaultPrng = .init(seed);
+            var failures: u32 = 0;
+            for (0..prove_rounds) |_| {
+                var guard = lock.read() catch return failures + 1;
+                defer guard.deinit();
+                const db = guard.get();
+                const any_db: *const AnyOf(D) = if (comptime @hasDecl(D, "Any")) &db.any else db;
+                failures += prove_round(AnyOf(D), any_db, prng.random().int(u64)) catch 1;
+            }
+            return failures;
+        }
+    }.run;
+}
+
+fn prove_round(comptime A: type, db: *const A, pick: u64) !u32 {
+    const source: sync.JournalSource(A.Family, A.Log) = .{ .journal = &db.log };
+    const size = db.log.size();
+    assert(size > seeded_keys);
+    const start = pick % size;
+    const request: sync.Request(A.Family) = .{
+        .operations = .{ .size = size, .start = start, .max_ops = 16 },
+    };
+    var served = try source.serve(gpa, request);
+    defer served.response.deinit(gpa);
+    assert(served.feedback == null);
+    const ops = &served.response.operations;
+    const root = db.root();
+    const Sha256 = any_support.Sha256;
+    const proved = ops.operations;
+    const Op = A.Operation;
+    const valid = try verify.verify(A.Family, Sha256, Op, gpa, &ops.proof, start, proved, &root);
+    return @intFromBool(!valid);
+}
+
 fn write_round(comptime D: type, lock: *Shared(D), round: u64) !void {
     var guard = try lock.write();
     defer guard.deinit();
@@ -126,8 +175,8 @@ fn run(comptime D: type, db_owned: D) !void {
         db.deinit();
     }
     try seed_db(D, &lock.value);
-    // The readers, then one batcher.
-    var futures: [readers + 1]std.Io.Future(u32) = undefined;
+    // The readers, then one batcher, then the provers.
+    var futures: [readers + 1 + provers]std.Io.Future(u32) = undefined;
     var started: usize = 0;
     defer for (futures[0..started]) |*future| {
         _ = future.cancel(io);
@@ -135,8 +184,10 @@ fn run(comptime D: type, db_owned: D) !void {
     for (&futures, 0..) |*future, index| {
         future.* = if (index < readers)
             try io.concurrent(reader(D), .{ &lock, index + 1 })
+        else if (index == readers)
+            try io.concurrent(batcher(D), .{ &lock, index + 1 })
         else
-            try io.concurrent(batcher(D), .{ &lock, index + 1 });
+            try io.concurrent(prover(D), .{ &lock, index + 1 });
         started += 1;
     }
     for (0..write_rounds) |round| try write_round(D, &lock, round);

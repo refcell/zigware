@@ -296,14 +296,14 @@ pub fn Db(F: type, K: type, E: type, C: type, H: type, T: type) type {
         }
 
         /// A proof of up to `max_ops` operations from `start` against the current root.
-        pub fn proof(self: *Self, start: u64, max_ops: u64) !ProofOps {
+        pub fn proof(self: *const Self, start: u64, max_ops: u64) !ProofOps {
             return self.historical_proof(self.journal.size(), start, max_ops);
         }
 
         /// A proof of up to `max_ops` operations from `start` against the root at the commit
         /// ending at `historical_size`.
         pub fn historical_proof(
-            self: *Self,
+            self: *const Self,
             historical_size: u64,
             start: u64,
             max_ops: u64,
@@ -317,7 +317,7 @@ pub fn Db(F: type, K: type, E: type, C: type, H: type, T: type) type {
 
         /// Reads the log for `qmdb.inactive_peaks_at`.
         const LogReader = struct {
-            journal: *Journal,
+            journal: *const Journal,
 
             pub fn bounds(reader: *const LogReader) merkle.Range {
                 const span = reader.journal.get_bounds();
@@ -331,7 +331,7 @@ pub fn Db(F: type, K: type, E: type, C: type, H: type, T: type) type {
 
         /// The pins that authenticate a lower boundary at `location`.
         pub fn pinned_nodes_at(
-            self: *Self,
+            self: *const Self,
             location: u64,
             out: *[merkle.max_pinned_nodes]Digest,
         ) ![]Digest {

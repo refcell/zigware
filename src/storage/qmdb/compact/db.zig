@@ -383,7 +383,7 @@ pub fn Db(comptime F: type, comptime O: type, comptime H: type) type {
 
         /// The first retained position whose witness commits at least `size` operations (the
         /// journal end if none does), with that witness, owned by the caller.
-        fn first_at_or_above(gpa: Allocator, journal: *WitnessJournal, size_min: u64) !Found {
+        fn first_at_or_above(gpa: Allocator, journal: *const WitnessJournal, size_min: u64) !Found {
             const bounds = journal.get_bounds();
             var low = bounds.start;
             var high = bounds.end;
@@ -408,7 +408,7 @@ pub fn Db(comptime F: type, comptime O: type, comptime H: type) type {
         /// Serves `request` from a committed state the witness journal retains: exactly its
         /// commit and the pinned nodes one operation below it. Other requests fail as a pruned
         /// log does. The caller owns the response (`deinit`).
-        pub fn serve(self: *Self, request: Request) !Response {
+        pub fn serve(self: *const Self, request: Request) !Response {
             const request_size = request.size();
             const start = request.start();
             if (request_size > self.size() or request_size == 0) return error.RangeOutOfBounds;
@@ -439,7 +439,7 @@ pub fn Db(comptime F: type, comptime O: type, comptime H: type) type {
         }
 
         /// The retained witness below the tip that commits exactly `size_exact` operations.
-        fn retained(self: *Self, size_exact: u64) !Verified {
+        fn retained(self: *const Self, size_exact: u64) !Verified {
             // A pending import is absent from the journal, which holds the previous contents.
             const open = switch (self.state) {
                 .open => |*open| open,

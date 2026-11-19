@@ -95,7 +95,7 @@ pub fn Db(F: type, U: type, C: type, I: type, H: type, comptime N: usize) type {
         pub const StagedBatch = batch_mod.Staged(Self);
         pub const Slot = Any.Slot;
         const Metadata = metadata_mod.Metadata(MetadataKey, []const u8);
-        const GraftedStorage = grafted_mod.Storage(F, H, *const Mem, *Any.Log.Merkle);
+        const GraftedStorage = grafted_mod.Storage(F, H, *const Mem, *const Any.Log.Merkle);
         const chunk_bits: u64 = N * 8;
 
         gpa: Allocator,
@@ -325,7 +325,7 @@ pub fn Db(F: type, U: type, C: type, I: type, H: type, comptime N: usize) type {
         }
 
         /// The grafted view of the ops tree: grafted nodes at and above the grafting height.
-        pub fn grafted_storage(self: *Self) GraftedStorage {
+        pub fn grafted_storage(self: *const Self) GraftedStorage {
             const height = grafting.height(N);
             assert(self.grafted_tree.leaves() <= self.any.bitmap.complete_chunks());
             return .{
@@ -403,7 +403,7 @@ pub fn Db(F: type, U: type, C: type, I: type, H: type, comptime N: usize) type {
 
         /// The proof that the operation at `location` is part of the database, with its
         /// activity chunk. Fails with `OperationPruned` if its chunk is pruned.
-        pub fn operation_proof(self: *Self, location: u64) !OperationProof {
+        pub fn operation_proof(self: *const Self, location: u64) !OperationProof {
             const chunk_index = location / chunk_bits;
             if (chunk_index < self.any.bitmap.pruned_chunks()) return error.OperationPruned;
             const range: merkle.Range = .{ .start = location, .end = location + 1 };
@@ -416,7 +416,7 @@ pub fn Db(F: type, U: type, C: type, I: type, H: type, comptime N: usize) type {
             };
         }
 
-        fn build_range_proof(self: *Self, range: merkle.Range) !RangeProof {
+        fn build_range_proof(self: *const Self, range: merkle.Range) !RangeProof {
             const storage = self.grafted_storage();
             const floor = self.any.inactivity_floor_loc;
             const ops_root_value = self.any.root();
@@ -444,7 +444,7 @@ pub fn Db(F: type, U: type, C: type, I: type, H: type, comptime N: usize) type {
         /// A proof of up to `max_ops` operations from `start` against the canonical root, with
         /// the operations and the activity chunks verification needs. Fails with
         /// `OperationPruned` if `start`'s chunk is pruned.
-        pub fn range_proof(self: *Self, start: u64, max_ops: u64) !Ranged {
+        pub fn range_proof(self: *const Self, start: u64, max_ops: u64) !Ranged {
             assert(max_ops > 0);
             const leaves = self.any.bitmap.len();
             if (start >= leaves) return error.RangeOutOfBounds;
@@ -484,7 +484,7 @@ pub fn Db(F: type, U: type, C: type, I: type, H: type, comptime N: usize) type {
         };
 
         /// The proof of `key`'s current value. Fails with `KeyNotFound` if it has none.
-        pub fn key_value_proof(self: *Self, key: *const Key) !ProvedValue {
+        pub fn key_value_proof(self: *const Self, key: *const Key) !ProvedValue {
             var located = try self.any.get_with_loc(key) orelse return error.KeyNotFound;
             errdefer located.update.deinit(self.gpa);
             assert(value_mod.eql(Key, located.update.key, key.*));
@@ -500,7 +500,7 @@ pub fn Db(F: type, U: type, C: type, I: type, H: type, comptime N: usize) type {
         /// The proof that `key` is absent (ordered databases): the active update whose span
         /// covers it, or an empty database's last commit. Fails with `KeyExists` if `key` is
         /// active.
-        pub fn exclusion_proof(self: *Self, key: *const Key) !ExclusionProof {
+        pub fn exclusion_proof(self: *const Self, key: *const Key) !ExclusionProof {
             comptime assert(U.siblings);
             if (try self.any.get_span(key)) |located| {
                 var span = located;

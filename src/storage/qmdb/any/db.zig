@@ -198,7 +198,7 @@ pub fn Db(F: type, U: type, C: type, I: type, H: type, comptime N: usize) type {
 
         /// Reads the log for `qmdb.find_inactivity_floor_at`.
         pub const LogReader = struct {
-            log: *Log,
+            log: *const Log,
 
             pub fn bounds(reader: *const LogReader) merkle.Range {
                 const span = reader.log.get_bounds();
@@ -387,7 +387,7 @@ pub fn Db(F: type, U: type, C: type, I: type, H: type, comptime N: usize) type {
 
         /// The pins that authenticate a lower boundary at `location`.
         pub fn pinned_nodes_at(
-            self: *Self,
+            self: *const Self,
             location: u64,
             out: *[merkle.max_pinned_nodes]Digest,
         ) ![]Digest {
@@ -397,7 +397,7 @@ pub fn Db(F: type, U: type, C: type, I: type, H: type, comptime N: usize) type {
         /// A proof of up to `max_ops` operations from `start` against the root at the commit
         /// ending at `historical_size`.
         pub fn historical_proof(
-            self: *Self,
+            self: *const Self,
             historical_size: u64,
             start: u64,
             max_ops: u64,
@@ -411,7 +411,7 @@ pub fn Db(F: type, U: type, C: type, I: type, H: type, comptime N: usize) type {
         }
 
         /// A proof of up to `max_ops` operations from `start` against the current root.
-        pub fn proof(self: *Self, start: u64, max_ops: u64) !ProofOps {
+        pub fn proof(self: *const Self, start: u64, max_ops: u64) !ProofOps {
             return self.historical_proof(self.log.size(), start, max_ops);
         }
 

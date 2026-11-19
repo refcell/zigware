@@ -554,7 +554,7 @@ pub fn Merkle(comptime F: type, comptime Digest: type) type {
 
         /// The pins that authenticate a lower leaf boundary at `location`, in pin order.
         pub fn pinned_nodes_at(
-            self: *Self,
+            self: *const Self,
             location: u64,
             out: *[max_pins]Digest,
         ) Error![]Digest {
@@ -782,7 +782,7 @@ pub fn Merkle(comptime F: type, comptime Digest: type) type {
         /// An inclusion proof for the element at `location` against the state with `leaves`
         /// leaves. Caller owns the proof.
         pub fn historical_proof(
-            self: *Self,
+            self: *const Self,
             hasher: anytype,
             historical_leaves: u64,
             location: u64,
@@ -796,7 +796,7 @@ pub fn Merkle(comptime F: type, comptime Digest: type) type {
         /// An inclusion proof for `range` against the state with `historical_leaves` leaves,
         /// reading nodes from memory and the journal. Caller owns the proof.
         pub fn historical_range_proof(
-            self: *Self,
+            self: *const Self,
             hasher: anytype,
             historical_leaves: u64,
             range: merkle.Range,
@@ -816,7 +816,7 @@ pub fn Merkle(comptime F: type, comptime Digest: type) type {
 
         /// An inclusion proof for the element at `location` against the current root.
         pub fn proof(
-            self: *Self,
+            self: *const Self,
             hasher: anytype,
             location: u64,
             inactive_peaks: usize,
@@ -826,7 +826,7 @@ pub fn Merkle(comptime F: type, comptime Digest: type) type {
 
         /// An inclusion proof for `range` against the current root.
         pub fn range_proof(
-            self: *Self,
+            self: *const Self,
             hasher: anytype,
             range: merkle.Range,
             inactive_peaks: usize,

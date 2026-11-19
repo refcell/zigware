@@ -727,7 +727,12 @@ pub fn Journal(comptime F: type, comptime C: type, comptime H: type) type {
 
         /// An inclusion proof of the items from `start` against the current root, with the
         /// items `[start, min(size, start + max_ops))`.
-        pub fn proof(self: *Self, start: u64, max_ops: u64, inactive_peaks: usize) Error!Proved {
+        pub fn proof(
+            self: *const Self,
+            start: u64,
+            max_ops: u64,
+            inactive_peaks: usize,
+        ) Error!Proved {
             return self.historical_proof(self.size(), start, max_ops, inactive_peaks);
         }
 
@@ -735,7 +740,7 @@ pub fn Journal(comptime F: type, comptime C: type, comptime H: type) type {
         /// `RangeOutOfBounds` when `start` is not below `historical_leaves` or that exceeds
         /// the size, and with `ItemPruned` or `ElementPruned` for pruned history.
         pub fn historical_proof(
-            self: *Self,
+            self: *const Self,
             historical_leaves: u64,
             start: u64,
             max_ops: u64,
@@ -747,6 +752,7 @@ pub fn Journal(comptime F: type, comptime C: type, comptime H: type) type {
             const end = @min(historical_leaves, start +| max_ops);
             const range: merkle.Range = .{ .start = start, .end = end };
             const leaves = historical_leaves;
+            // The hasher is stateless (`*const` methods), so readers on several threads share it.
             var range_proof =
                 try self.merkle.historical_range_proof(&self.hasher, leaves, range, inactive_peaks);
             errdefer range_proof.deinit(self.gpa);

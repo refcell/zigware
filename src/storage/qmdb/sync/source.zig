@@ -417,11 +417,11 @@ pub fn JournalSource(comptime F: type, comptime J: type) type {
         pub const Error = qmdb.Error || J.Error || Allocator.Error;
         const R = Response(F, Op, Digest);
 
-        journal: *J,
+        journal: *const J,
 
         /// Answers `request` against the root the journal had at `request.size()`. The
         /// response is allocated with the journal's allocator, which must be `gpa`.
-        pub fn serve(self: *Self, gpa: Allocator, request: Request(F)) Error!Served(R) {
+        pub fn serve(self: *const Self, gpa: Allocator, request: Request(F)) Error!Served(R) {
             assert(gpa.ptr == self.journal.gpa.ptr);
             // Rejected before the floor lookup, which must not read out-of-range locations.
             if (request.size() > self.journal.size()) return error.RangeOutOfBounds;
@@ -462,7 +462,7 @@ pub fn JournalSource(comptime F: type, comptime J: type) type {
 fn LogReader(comptime J: type) type {
     return struct {
         const Self = @This();
-        journal: *J,
+        journal: *const J,
 
         pub fn bounds(self: *const Self) merkle.Range {
             const span = self.journal.get_bounds();
