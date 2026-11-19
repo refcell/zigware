@@ -16,6 +16,13 @@ pub fn skip_slow() error{SkipZigTest}!void {
     if (builtin.mode == .debug and !build_options.slow_tests) return error.SkipZigTest;
 }
 
+/// Conformance cases that cost tens of seconds even in ReleaseSafe (hundreds of thousands of
+/// signatures) run only with `-Dslow-tests`, which the nightly workflow passes on every
+/// platform; per-push CI skips them.
+pub fn skip_unless_slow() error{SkipZigTest}!void {
+    if (!build_options.slow_tests) return error.SkipZigTest;
+}
+
 /// Computes the conformance hash of `commit(gpa, seed, *log)` over `n_cases` seeds.
 pub fn hash(
     gpa: std.mem.Allocator,

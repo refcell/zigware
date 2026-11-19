@@ -234,10 +234,16 @@ test "conformance: secp256r1 certificate" {
     );
 }
 
-test "conformance: certificate signers, attestation, and ed25519 certificate" {
-    try slow.skip_slow();
-    const tests = "certificate::tests::conformance::";
-    try verify(tests ++ "CodecConformance<Signers>", certificate.Signers, gen_signers);
+const certificate_tests = "certificate::tests::conformance::";
+
+test "conformance: certificate signers" {
+    try verify(certificate_tests ++ "CodecConformance<Signers>", certificate.Signers, gen_signers);
+}
+
+// About 40 s in ReleaseSafe: up to nine ed25519 keys and signatures per case.
+test "conformance: certificate attestation and ed25519 certificate" {
+    try slow.skip_unless_slow();
+    const tests = certificate_tests;
     try verify(
         tests ++ "CodecConformance<Attestation<Scheme>>",
         Ed25519Attestation,
