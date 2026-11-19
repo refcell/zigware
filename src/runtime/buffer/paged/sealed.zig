@@ -11,7 +11,9 @@ const std = @import("std");
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const paged = @import("mod.zig");
-const Blob = @import("../../storage.zig").Blob;
+const storage_iface = @import("../../storage.zig");
+const Blob = storage_iface.Blob;
+const ReadOptions = storage_iface.ReadOptions;
 const CacheRef = @import("cache.zig").CacheRef;
 const view_mod = @import("view.zig");
 const View = view_mod.View;
@@ -159,8 +161,13 @@ pub const Sealed = struct {
 
     /// A `Replay` of every logical byte, reading `buffer_size` bytes of pages per blob read.
     /// Full pages are validated as they are read; the partial page is the frozen copy. The
-    /// replay borrows the blob: it must not outlive this view (or a snapshot's writer).
-    pub fn replay(self: *Self, buffer_size: usize) Allocator.Error!Replay {
+    /// replay borrows the blob: it must not outlive this view (or a snapshot's writer). Every
+    /// blob read uses `read_options`, refills after a seek included.
+    pub fn replay(
+        self: *Self,
+        buffer_size: usize,
+        read_options: ReadOptions,
+    ) Allocator.Error!Replay {
         const physical = self.cache_ref.page_size + checksum_size;
         const batch_pages = @max(1, buffer_size / physical);
         assert(batch_pages > 0);
@@ -171,6 +178,7 @@ pub const Sealed = struct {
             self.full_pages(),
             self.partial,
             batch_pages,
+            read_options,
         );
     }
 };

@@ -1023,3 +1023,42 @@ test "restore rejects a damaged earlier boundary" {
     );
     try testing.expectEqual(torn, try h.blob_len(0));
 }
+
+test "replay propagates read options across sections" {
+    // Pages hold exactly one digest (commonware's `aligned_cfg`), so replay reads full pages.
+    var h = try Harness.init_sized(32, page_cache_size);
+    defer h.deinit();
+    var config = h.cfg();
+    config.replay_buffer = 56;
+    config.replay_read_options = .{ .dont_cache = true };
+    {
+        var journal = try J.init(gpa, h.storage.interface(), config);
+        defer journal.deinit();
+        for (1..3) |section| _ = try journal.append(section, test_digest(section));
+        try journal.sync_all();
+    }
+    var recovery = try J.preflight_floors(gpa, h.storage.interface(), config, &.{});
+    errdefer recovery.deinit();
+    // Opening the writers reads each tail page once with the default options; every replay
+    // read after that carries the configured ones.
+    const reads = h.storage.reads;
+    const dont_cache = h.storage.dont_cache_reads;
+    const first = (try recovery.next()).?;
+    try testing.expectEqual(@as(u64, 1), first.section);
+    try testing.expectEqual(test_digest(1), first.item);
+    try testing.expect(h.storage.dont_cache_reads > dont_cache);
+    try testing.expect(h.storage.reads - reads <= 2 + h.storage.dont_cache_reads - dont_cache);
+    // Crossing into the next section keeps the same options.
+    const reads_before_second = h.storage.reads;
+    const dont_cache_before_second = h.storage.dont_cache_reads;
+    const second = (try recovery.next()).?;
+    try testing.expectEqual(@as(u64, 2), second.section);
+    try testing.expect(h.storage.reads > reads_before_second);
+    try testing.expectEqual(
+        h.storage.reads - reads_before_second,
+        h.storage.dont_cache_reads - dont_cache_before_second,
+    );
+    try testing.expect((try recovery.next()) == null);
+    var journal = try recovery.finish();
+    try journal.destroy();
+}

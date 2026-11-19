@@ -196,7 +196,7 @@ test "non-last page rejects partial fallback" {
     // The tail page is still readable.
     try expect_read(&w, 103, &sequence(104, 113));
     // Replay fails on the short interior page too.
-    var replay = try w.replay(1024);
+    var replay = try w.replay(1024, .{});
     defer replay.deinit();
     try testing.expectError(error.InvalidChecksum, replay.ensure(1));
 }
@@ -350,7 +350,7 @@ test "replay returns every logical byte and seeks" {
     var data: [500]u8 = undefined;
     for (&data, 0..) |*byte, index| byte.* = @truncate(index);
     _ = try w.append(&data);
-    var replay = try w.replay(physical_page_size * 2);
+    var replay = try w.replay(physical_page_size * 2, .{});
     defer replay.deinit();
     try testing.expectEqual(@as(u64, 500), replay.blob_size());
     try testing.expect(try replay.ensure(500));

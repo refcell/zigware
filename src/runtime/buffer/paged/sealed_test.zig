@@ -366,7 +366,7 @@ test "sealed: replay streams every logical byte, synced first or not" {
         if (sync_first) try w.sync();
         var sealed = try w.seal();
         defer sealed.deinit();
-        var replay = try sealed.replay(buffer_size);
+        var replay = try sealed.replay(buffer_size, .{});
         defer replay.deinit();
         try testing.expectEqual(@as(u64, total), replay.blob_size());
         const out = try drain(&replay);
@@ -387,7 +387,7 @@ test "sealed: a snapshot replay stays frozen after the writer grows" {
     try w.sync();
     var snapshot = try w.snapshot();
     defer snapshot.deinit();
-    var replay = try snapshot.replay(buffer_size);
+    var replay = try snapshot.replay(buffer_size, .{});
     defer replay.deinit();
     try testing.expectEqual(@as(u64, original.len), replay.blob_size());
     _ = try w.append("newtail");
@@ -446,4 +446,36 @@ test "sealed: sealing a recovered synced partial page does not rewrite it" {
     defer gpa.free(read);
     try sealed.read_at(0, read);
     try testing.expectEqualSlices(u8, data, read);
+}
+
+test "sealed: a dont_cache replay leaves the page cache cold, sealed or snapshot" {
+    for ([_]bool{ false, true }) |snapshot| {
+        var h = try Harness.init(32);
+        defer h.deinit();
+        var w = try h.writer("review-cold");
+        var w_open = true;
+        defer if (w_open) w.deinit();
+        const total = page_size * 9 + 25;
+        const data = try cycle(total);
+        defer gpa.free(data);
+        _ = try w.append(data);
+        try w.sync();
+        var sealed = if (snapshot) (try w.try_snapshot()).? else try w.seal();
+        w_open = snapshot;
+        defer sealed.deinit();
+        h.cache_ref.clear();
+        var probe: [page_size]u8 = undefined;
+        for (0..9) |page| try testing.expect(!sealed.try_read_sync_into(&probe, page * page_size));
+        const reads = h.storage.reads;
+        var replay = try sealed.replay(buffer_size, .{ .dont_cache = true });
+        defer replay.deinit();
+        const out = try drain(&replay);
+        defer gpa.free(out);
+        try testing.expectEqualSlices(u8, data, out);
+        try testing.expectEqual(h.storage.reads - reads, h.storage.dont_cache_reads);
+        for (0..9) |page| try testing.expect(!sealed.try_read_sync_into(&probe, page * page_size));
+        try sealed.read_at(0, &probe);
+        try testing.expect(sealed.try_read_sync_into(&probe, 0));
+        try testing.expectEqualSlices(u8, data[0..page_size], &probe);
+    }
 }

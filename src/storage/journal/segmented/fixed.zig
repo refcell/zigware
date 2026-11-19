@@ -41,6 +41,10 @@ pub const Config = struct {
     write_buffer: usize,
     /// Buffer size used to replay each section when the journal opens.
     replay_buffer: usize,
+    /// Options of every blob read a replay makes (commonware's replay `read_options`):
+    /// `dont_cache` keeps a one-pass recovery scan out of the OS cache. Opening the
+    /// writers reads each section's last page with the default options.
+    replay_read_options: runtime.storage.ReadOptions = .{},
     /// Where the section manager registers `tracked`, `synced`, and `pruned`.
     metrics: ?runtime.telemetry.metrics.Scope = null,
 };
@@ -117,7 +121,7 @@ pub fn Journal(comptime A: type) type {
                 try journal.manager.truncate_pending(section, end - end % chunk_u64);
             }
             // The recovery owns the journal from here, even when starting it fails.
-            var recovery = try Recovery.from_journal(gpa, journal, cfg.replay_buffer);
+            var recovery = try Recovery.from_journal(gpa, journal, cfg);
             try recovery.drain();
             return recovery.finish();
         }
@@ -416,13 +420,9 @@ fn RecoveryType(comptime A: type) type {
 
         /// A recovery replaying an already opened journal with no floors. Takes ownership of
         /// `journal`, closing it on error.
-        fn from_journal(gpa: Allocator, journal: J, replay_buffer: usize) Error!Self {
-            var self = Self.init(gpa, journal.manager.storage, .{
-                .partition = journal.manager.partition,
-                .cache_ref = journal.manager.factory.cache_ref,
-                .write_buffer = journal.manager.factory.write_buffer,
-                .replay_buffer = replay_buffer,
-            });
+        fn from_journal(gpa: Allocator, journal: J, cfg: Config) Error!Self {
+            assert(cfg.replay_buffer > 0);
+            var self = Self.init(gpa, journal.manager.storage, cfg);
             self.journal = journal;
             errdefer self.deinit();
             try self.begin();
@@ -471,7 +471,8 @@ fn RecoveryType(comptime A: type) type {
             const manager = &self.journal.?.manager;
             try self.replays.ensureTotalCapacity(self.gpa, manager.sections.items.len);
             for (manager.sections.items) |*entry| {
-                const reader = try entry.buffer.replay(self.cfg.replay_buffer);
+                const options = self.cfg.replay_read_options;
+                const reader = try entry.buffer.replay(self.cfg.replay_buffer, options);
                 self.replays.appendAssumeCapacity(.{
                     .section = entry.section,
                     .reader = reader,
@@ -567,7 +568,7 @@ fn RecoveryType(comptime A: type) type {
             errdefer self.clear_replays();
             const buffer = (try self.journal.?.manager.get(section)).?;
             try buffer.truncate(target);
-            var reader = try buffer.replay(self.cfg.replay_buffer);
+            var reader = try buffer.replay(self.cfg.replay_buffer, self.cfg.replay_read_options);
             errdefer reader.deinit();
             try reader.seek_to(valid_size);
             self.replays.items[self.head].reader.deinit();

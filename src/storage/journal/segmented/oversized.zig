@@ -79,6 +79,9 @@ pub fn Config(comptime V: type) type {
         value_write_buffer: usize,
         /// Buffer size for sequential index recovery.
         replay_buffer: usize,
+        /// Options of every blob read the index replay makes (`init_with_markers`'s
+        /// `read_options`); value reads keep the defaults.
+        replay_read_options: runtime.storage.ReadOptions = .{},
         /// Optional zstd compression level for values. Keep the choice between none and some
         /// fixed while values are retained.
         compression: ?u8 = null,
@@ -228,6 +231,7 @@ pub fn Oversized(comptime I: type, comptime V: type) type {
                 .cache_ref = cfg.index_cache_ref,
                 .write_buffer = cfg.index_write_buffer,
                 .replay_buffer = cfg.replay_buffer,
+                .replay_read_options = cfg.replay_read_options,
                 .metrics = child(cfg, "index"),
             };
         }

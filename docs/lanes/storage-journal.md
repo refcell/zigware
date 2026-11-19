@@ -24,7 +24,6 @@ resize, sync), `runtime.storage`, with the in-memory backend `runtime.storage.me
   offsets are an assert), `test_sealed_reads_while_seal_sync_pending` (syncs are synchronous,
   so `seal` returns a durable view and has no handle), and the two `SplitWriteBlob`
   partial-page rewrite races (writes cannot pause mid-call on a synchronous blob).
-  `test_replay_with_dont_cache_leaves_cache_cold` waits on ReadOptions threading.
 - [x] journal frame format and durability (frame.rs, durability.rs), byte-identical.
 - [x] journal/segmented: section manager and fixed segmented journal (append, read, replay,
   prune, bounded init, floors and checkpoint restore), torn-page repair; tests incl.
@@ -37,11 +36,12 @@ resize, sync), `runtime.storage`, with the in-memory backend `runtime.storage.me
   and marker-tracked recovery) with its core tests.
 - [x] journal/segmented: the rest of oversized.rs's recovery tests (61 ported in
   oversized_recovery_test.zig). No counterpart: the value-alignment sync-concurrency test
-  and the dropped-`start_sync`-handle test (syncs complete serially and synchronously), and
-  the read-options test (journals take no `ReadOptions` yet; see the item below). The
+  and the dropped-`start_sync`-handle test (syncs complete serially and synchronously). The
   dropped-replay read-gate test is ported as a `Canceled` value read.
-- [ ] Thread commonware's `ReadOptions` (the `dont_cache` hint) through journal replay and
-  `init_with_markers`, with oversized.rs's read-options propagation test.
+- [x] `ReadOptions` (the `dont_cache` hint) through replay: `Writer.replay`/`view_replay` and
+  `Sealed.replay` take it, and the segmented fixed, variable, and oversized configs carry
+  `replay_read_options` (default `.{}`). Ported the fixed, variable, and oversized
+  `replay_propagates_read_options` tests and sealed.rs's dont_cache cold-cache test.
 - [x] journal/contiguous: fixed journal (checkpoint, blob partition, recovery with watermark
   and clear intent, bounded open, `init_at_size`, `clear_to_size`, replay batches) with the
   shared contiguous suite and the checkpoint tests.
@@ -240,12 +240,14 @@ resize, sync), `runtime.storage`, with the in-memory backend `runtime.storage.me
 
 - segmented: `Recovery.next` returns `?Item` with errors through the error union (commonware's
   `Option<Result>`); an error ends that section and makes `finish` fail. `finish` and
-  `drain` consume the recovery even on error. Replay reads options (`DONT_CACHE`) do not
-  exist, so `replay_propagates_read_options` has no counterpart; the replay never fills the
-  page cache. Tests of in-flight `start_sync` handles and of dropping a `next` mid-repair
+  `drain` consume the recovery even on error. commonware passes replay `read_options` as an
+  argument to `preflight_floors`, `init`, and `init_with_markers`; here it is the configs'
+  `replay_read_options` field with a default, so callers that keep the defaults (every lane
+  but tests today) need no change. The replay never fills the page cache. Tests of in-flight `start_sync` handles and of dropping a `next` mid-repair
   have no counterpart: syncs and repairs complete synchronously. Removing a section removes
   its blob name before closing its writer, as commonware does.
-- The storage mocks provide `reads` (commonware's `RecordingContext` read count) and
+- The storage mocks provide `reads` and `dont_cache_reads` (commonware's `RecordingContext`
+  read count and recorded options) and
   `allow_mutations`/`mutation_refused` (commonware's `MutationFaults`). A clean replay of
   eight pages takes one read where commonware takes two (larger batches).
 

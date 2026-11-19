@@ -446,7 +446,7 @@ pub fn Recovery(comptime V: type) type {
                 const physical_size = entry.writer.size();
                 var scanner: Scanner(V) = .{
                     .gpa = self.gpa,
-                    .replay = try entry.writer.replay(self.cfg.replay_buffer),
+                    .replay = try entry.writer.replay(self.cfg.replay_buffer, .{}),
                     .codec_config = self.cfg.codec_config,
                     .compressed = self.cfg.compression != null,
                 };
@@ -651,7 +651,7 @@ pub fn Recovery(comptime V: type) type {
         fn scan_blob(self: *Self, writer: *paged.Writer) Error!BlobScan {
             var scanner: Scanner(V) = .{
                 .gpa = self.gpa,
-                .replay = try writer.replay(self.cfg.replay_buffer),
+                .replay = try writer.replay(self.cfg.replay_buffer, .{}),
                 .codec_config = self.cfg.codec_config,
                 .compressed = self.cfg.compression != null,
             };
@@ -1410,7 +1410,7 @@ fn ReplayType(comptime V: type) type {
             const per = journal.items_per_blob;
             const blob = position_to_blob(self.position, per);
             const writer = journal.blobs.get(blob).?;
-            var reader = try writer.view_replay(journal.replay_buffer);
+            var reader = try writer.view_replay(journal.replay_buffer, .{});
             errdefer reader.deinit();
             try reader.seek_to(self.offset);
             self.reader = reader;

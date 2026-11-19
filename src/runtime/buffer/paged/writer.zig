@@ -20,7 +20,9 @@ const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const Crc32 = @import("cryptography").crc32.Crc32;
 const paged = @import("mod.zig");
-const Blob = @import("../../storage.zig").Blob;
+const storage_iface = @import("../../storage.zig");
+const Blob = storage_iface.Blob;
+const ReadOptions = storage_iface.ReadOptions;
 const SyncState = @import("../mod.zig").SyncState;
 const Buffer = @import("tip.zig").Buffer;
 const CacheRef = @import("cache.zig").CacheRef;
@@ -618,7 +620,8 @@ pub const Writer = struct {
     /// Flush buffered data, then return a `Replay` of the logical bytes reading
     /// `buffer_size` bytes of pages per blob read. The replay borrows the blob: it must not
     /// outlive this writer. Durability is not established.
-    pub fn replay(self: *Self, buffer_size: usize) Error!Replay {
+    /// Every blob read of the replay, refills after a seek included, uses `read_options`.
+    pub fn replay(self: *Self, buffer_size: usize, read_options: ReadOptions) Error!Replay {
         assert(!self.failed);
         errdefer self.failed = true;
         _ = try self.flush_internal(true, false);
@@ -630,13 +633,18 @@ pub const Writer = struct {
             self.current_page,
             self.buffer.partial(),
             batch_pages,
+            read_options,
         );
     }
 
     /// A `Replay` of the current logical bytes that writes nothing, as commonware's replay
     /// through a reader view: the flushed full pages are read from the blob and the buffered
     /// tail is a frozen copy. The replay borrows the blob: it must not outlive this writer.
-    pub fn view_replay(self: *Self, buffer_size: usize) Allocator.Error!Replay {
+    pub fn view_replay(
+        self: *Self,
+        buffer_size: usize,
+        read_options: ReadOptions,
+    ) Allocator.Error!Replay {
         assert(!self.failed);
         assert(self.current_page * self.page_size() == self.buffer.offset);
         const batch_pages = @max(1, buffer_size / self.physical_page_size());
@@ -647,6 +655,7 @@ pub const Writer = struct {
             self.current_page,
             self.buffer.data[0..self.buffer.len],
             batch_pages,
+            read_options,
         );
     }
 
@@ -765,6 +774,8 @@ pub const Replay = struct {
     partial: []u8,
     /// Physical pages per blob read.
     batch_pages: usize,
+    /// The options of every blob read.
+    read_options: ReadOptions,
     batch: []u8,
     /// Logical bytes read and not yet consumed start at `start`.
     data: std.ArrayList(u8),
@@ -783,6 +794,7 @@ pub const Replay = struct {
         full_pages: u64,
         partial: []const u8,
         batch_pages: usize,
+        read_options: ReadOptions,
     ) Allocator.Error!Self {
         assert(page_size > 0);
         assert(batch_pages > 0);
@@ -799,6 +811,7 @@ pub const Replay = struct {
             .full_pages = full_pages,
             .partial = partial_copy,
             .batch_pages = batch_pages,
+            .read_options = read_options,
             .batch = batch,
             .data = data,
         };
@@ -865,7 +878,7 @@ pub const Replay = struct {
         const physical = self.page_size + checksum_size;
         const count: usize = @intCast(@min(self.batch_pages, self.full_pages - self.next_page));
         const batch = self.batch[0 .. count * physical];
-        try self.blob.read_at(self.next_page * physical, batch);
+        try self.blob.read_at_options(self.next_page * physical, batch, self.read_options);
         try self.data.ensureUnusedCapacity(self.gpa, count * self.page_size);
         for (0..count) |index| {
             const page = batch[index * physical ..][0..physical];

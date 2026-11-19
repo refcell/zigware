@@ -1003,3 +1003,34 @@ test "bounded initialization bounds its scan" {
     }
     try testing.expectEqual(counts[0], counts[1]);
 }
+
+test "replay propagates read options across sections" {
+    var h = try Harness.init_sized(8, page_cache_size);
+    defer h.deinit();
+    var config = h.cfg(u64);
+    config.replay_buffer = 1036;
+    config.replay_read_options = .{ .dont_cache = true };
+    {
+        var journal = try open_cfg(u64, h.storage.interface(), config);
+        defer journal.deinit();
+        for (1..3) |section| _ = try journal.append(section, section);
+        try journal.sync_all();
+    }
+    const J = variable.Journal(u64);
+    var recovery = try J.init(gpa, h.storage.interface(), config);
+    errdefer recovery.deinit();
+    for (1..3) |section| {
+        // Each section's first lazy refill carries the configured options.
+        const reads = h.storage.reads;
+        const dont_cache = h.storage.dont_cache_reads;
+        const item = (try recovery.next()).?;
+        try testing.expectEqual(@as(u64, section), item.section);
+        try testing.expectEqual(@as(u64, 0), item.offset);
+        try testing.expectEqual(@as(u64, section), item.item);
+        try testing.expect(h.storage.reads > reads);
+        try testing.expectEqual(h.storage.reads - reads, h.storage.dont_cache_reads - dont_cache);
+    }
+    try testing.expect((try recovery.next()) == null);
+    var journal = try recovery.finish();
+    try journal.destroy();
+}

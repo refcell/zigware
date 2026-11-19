@@ -25,6 +25,8 @@ pub const Storage = struct {
     backend: memory.Storage,
     /// Calls to `read_at` across all blobs.
     reads: u64 = 0,
+    /// Calls to `read_at` with `dont_cache` set (commonware's recorded read options).
+    dont_cache_reads: u64 = 0,
     /// Calls to `write_at` across all blobs.
     writes: u64 = 0,
     /// Bytes passed to `write_at` across all blobs.
@@ -176,6 +178,7 @@ const Blob = struct {
     fn read_at(ptr: *anyopaque, offset: u64, buf: []u8, options: iface.ReadOptions) Error!void {
         const self = from(ptr);
         self.storage.reads += 1;
+        if (options.dont_cache) self.storage.dont_cache_reads += 1;
         return self.inner.read_at_options(offset, buf, options);
     }
 

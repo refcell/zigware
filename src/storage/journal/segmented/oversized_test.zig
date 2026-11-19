@@ -291,3 +291,37 @@ test "oversized: destroy stops at its first failed or cancelled removal" {
         }
     }
 }
+
+test "oversized: replay propagates read options" {
+    // Each index page holds one entry, so the replay reads a full page from the blob.
+    var h = try Harness.init_page(TestEntry.fixed_size);
+    defer h.deinit();
+    {
+        var journal = try h.open_tracked();
+        defer journal.deinit();
+        _ = try journal.append(1, entry(1), @splat(1));
+        // An idle section's tracked sync publishes a marker covering the entry, so the replay
+        // reads no value.
+        try journal.sync_tracked(&.{1}, &.{});
+    }
+    var config = h.cfg();
+    config.replay_read_options = .{ .dont_cache = true };
+    const iface = h.storage.interface();
+    var recovery = try Journal.init_with_markers(gpa, iface, config, "test-markers");
+    errdefer recovery.deinit();
+    h.cache_ref.clear();
+    const reads = h.storage.reads;
+    const dont_cache = h.storage.dont_cache_reads;
+    const item = (try recovery.next()).?;
+    try testing.expectEqual(@as(u64, 1), item.section);
+    try testing.expectEqual(@as(u64, 0), item.position);
+    try testing.expectEqual(@as(u64, 1), item.item.id);
+    // The first call opens the index writer, which reads its tail page once with the default
+    // options; every read the replay makes after it uses the configured ones.
+    const replayed = h.storage.dont_cache_reads - dont_cache;
+    try testing.expect(replayed > 0);
+    try testing.expectEqual(@as(u64, 1), h.storage.reads - reads - replayed);
+    try testing.expect((try recovery.next()) == null);
+    var journal = try recovery.finish();
+    try journal.destroy();
+}
