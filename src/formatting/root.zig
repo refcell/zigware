@@ -15,13 +15,52 @@ const Allocator = std.mem.Allocator;
 
 const hex_digits_lower = "0123456789abcdef";
 
+/// Bytes per vector step of the hex encoder and decoder (`const-hex` vectorizes too).
+const lanes = 16;
+const Lanes = @Vector(lanes, u8);
+
+/// Shuffle masks: `interleave` pairs two vectors' bytes, `evens` and `odds` split one.
+const interleave = shuffle_mask(2 * lanes, .interleave);
+const evens = shuffle_mask(lanes, .evens);
+const odds = shuffle_mask(lanes, .odds);
+
+fn shuffle_mask(comptime len: usize, comptime kind: enum { interleave, evens, odds }) [len]i32 {
+    var mask: [len]i32 = undefined;
+    for (&mask, 0..) |*slot, index| slot.* = switch (kind) {
+        // Even slots take the first vector's byte, odd slots the second's (as `~index`).
+        .interleave => if (index % 2 == 0) index / 2 else ~@as(i32, index / 2),
+        .evens => 2 * index,
+        .odds => 2 * index + 1,
+    };
+    return mask;
+}
+
+/// Lane-wise `a or b`.
+fn either(a: @Vector(lanes, bool), b: @Vector(lanes, bool)) @Vector(lanes, bool) {
+    return @select(bool, a, a, b);
+}
+
+/// The lowercase hex digit of each nibble (each below 16).
+fn nibble_digits(nibbles: Lanes) Lanes {
+    const letter_gap: Lanes = @splat('a' - '0' - 10);
+    const gap = @select(u8, nibbles >= @as(Lanes, @splat(10)), letter_gap, @as(Lanes, @splat(0)));
+    return nibbles + @as(Lanes, @splat('0')) + gap;
+}
+
 /// Writes the lowercase hexadecimal encoding of `bytes` into `out` and returns the written
 /// prefix. `out` must hold at least `2 * bytes.len` bytes.
 pub fn hex_encode(out: []u8, bytes: []const u8) []u8 {
     assert(out.len >= bytes.len * 2);
-    for (bytes, 0..) |byte, index| {
-        out[index * 2] = hex_digits_lower[byte >> 4];
-        out[index * 2 + 1] = hex_digits_lower[byte & 0x0f];
+    var index: usize = 0;
+    while (index + lanes <= bytes.len) : (index += lanes) {
+        const chunk: Lanes = bytes[index..][0..lanes].*;
+        const high = nibble_digits(chunk >> @splat(4));
+        const low = nibble_digits(chunk & @as(Lanes, @splat(0x0f)));
+        out[index * 2 ..][0 .. 2 * lanes].* = @shuffle(u8, high, low, interleave);
+    }
+    for (bytes[index..], index..) |byte, tail| {
+        out[tail * 2] = hex_digits_lower[byte >> 4];
+        out[tail * 2 + 1] = hex_digits_lower[byte & 0x0f];
     }
     const written = out[0 .. bytes.len * 2];
     assert(written.len % 2 == 0);
@@ -49,6 +88,47 @@ fn is_hex_whitespace(char: u8) bool {
     return char == ' ' or char == '\t' or char == '\n' or char == '\r';
 }
 
+/// The value of each hex digit in `chars`, or null if any is not one.
+fn digit_values(chars: Lanes) ?Lanes {
+    const decimal = chars -% @as(Lanes, @splat('0'));
+    const letter = (chars | @as(Lanes, @splat(0x20))) -% @as(Lanes, @splat('a'));
+    const is_decimal = decimal < @as(Lanes, @splat(10));
+    const is_letter = letter < @as(Lanes, @splat(6));
+    if (!@reduce(.And, either(is_decimal, is_letter))) return null;
+    return @select(u8, is_decimal, decimal, letter + @as(Lanes, @splat(10)));
+}
+
+/// Decodes `digits` (an even count) into `out`; false if any is not a hex digit.
+fn decode_digits(out: []u8, digits: []const u8) bool {
+    assert(digits.len == out.len * 2);
+    var index: usize = 0;
+    while (index + lanes <= out.len) : (index += lanes) {
+        const pairs: @Vector(2 * lanes, u8) = digits[index * 2 ..][0 .. 2 * lanes].*;
+        const high = digit_values(@shuffle(u8, pairs, undefined, evens)) orelse return false;
+        const low = digit_values(@shuffle(u8, pairs, undefined, odds)) orelse return false;
+        out[index..][0..lanes].* = (high << @splat(4)) | low;
+    }
+    for (out[index..], index..) |*byte, tail| {
+        const high = hex_value(digits[tail * 2]) orelse return false;
+        const low = hex_value(digits[tail * 2 + 1]) orelse return false;
+        byte.* = (high << 4) | low;
+    }
+    return true;
+}
+
+/// Whether `string` holds any of the whitespace `from_hex` strips.
+fn has_hex_whitespace(string: []const u8) bool {
+    var index: usize = 0;
+    while (index + lanes <= string.len) : (index += lanes) {
+        const chunk: Lanes = string[index..][0..lanes].*;
+        const space = either(chunk == @as(Lanes, @splat(' ')), chunk == @as(Lanes, @splat('\t')));
+        const line = either(chunk == @as(Lanes, @splat('\n')), chunk == @as(Lanes, @splat('\r')));
+        if (@reduce(.Or, either(space, line))) return true;
+    }
+    for (string[index..]) |char| if (is_hex_whitespace(char)) return true;
+    return false;
+}
+
 /// Converts a hexadecimal string to newly allocated bytes, stripping ASCII whitespace
 /// (space, tab, newline, carriage return) and an optional `0x` / `0X` prefix. Returns null if
 /// the input is not valid hex. Caller owns the result.
@@ -56,15 +136,18 @@ fn is_hex_whitespace(char: u8) bool {
 /// Matches commonware exactly: whitespace is removed first, then a leading `0X` is stripped,
 /// then `const-hex` strips one more leading `0x` or `0X`.
 pub fn from_hex(gpa: Allocator, string: []const u8) Allocator.Error!?[]u8 {
-    const compact = try gpa.alloc(u8, string.len);
+    var compact: []u8 = &.{};
     defer gpa.free(compact);
-    var compact_len: usize = 0;
-    for (string) |char| {
-        if (is_hex_whitespace(char)) continue;
-        compact[compact_len] = char;
-        compact_len += 1;
+    var digits = string;
+    if (has_hex_whitespace(string)) {
+        compact = try gpa.alloc(u8, string.len);
+        var compact_len: usize = 0;
+        for (string) |char| {
+            compact[compact_len] = char;
+            compact_len += @intFromBool(!is_hex_whitespace(char));
+        }
+        digits = compact[0..compact_len];
     }
-    var digits = compact[0..compact_len];
     if (std.mem.startsWith(u8, digits, "0X")) digits = digits[2..];
     if (digits.len >= 2 and digits[0] == '0' and (digits[1] == 'x' or digits[1] == 'X')) {
         digits = digits[2..];
@@ -72,16 +155,9 @@ pub fn from_hex(gpa: Allocator, string: []const u8) Allocator.Error!?[]u8 {
     if (digits.len % 2 != 0) return null;
 
     const out = try gpa.alloc(u8, digits.len / 2);
-    for (out, 0..) |*byte, index| {
-        const high = hex_value(digits[index * 2]) orelse {
-            gpa.free(out);
-            return null;
-        };
-        const low = hex_value(digits[index * 2 + 1]) orelse {
-            gpa.free(out);
-            return null;
-        };
-        byte.* = (high << 4) | low;
+    if (!decode_digits(out, digits)) {
+        gpa.free(out);
+        return null;
     }
     assert(out.len * 2 == digits.len);
     return out;
@@ -293,6 +369,82 @@ test "hex_literal usable in const" {
 /// The fuzz input as one byte string. A fixed input (a corpus entry under `zig build test`)
 /// is used as written, since `smith.slice` would read its first four bytes as a length.
 /// (formatting sits below codec, so it does not use `codec.fuzz.Draws`.)
+/// The scalar `from_hex` the vector path replaced, as the reference it must match.
+fn reference_from_hex(gpa: Allocator, string: []const u8) Allocator.Error!?[]u8 {
+    var compact: std.ArrayList(u8) = .empty;
+    defer compact.deinit(gpa);
+    for (string) |char| if (!is_hex_whitespace(char)) try compact.append(gpa, char);
+    var digits: []const u8 = compact.items;
+    if (std.mem.startsWith(u8, digits, "0X")) digits = digits[2..];
+    digits = strip_hex_prefix(digits);
+    if (digits.len % 2 != 0) return null;
+    const out = try gpa.alloc(u8, digits.len / 2);
+    for (out, 0..) |*byte, index| {
+        const high = hex_value(digits[index * 2]);
+        const low = hex_value(digits[index * 2 + 1]);
+        if (high == null or low == null) {
+            gpa.free(out);
+            return null;
+        }
+        byte.* = (high.? << 4) | low.?;
+    }
+    return out;
+}
+
+fn expect_matches_reference(input: []const u8) !void {
+    const gpa = testing.allocator;
+    const expected = try reference_from_hex(gpa, input);
+    defer if (expected) |bytes| gpa.free(bytes);
+    const actual = try from_hex(gpa, input);
+    defer if (actual) |bytes| gpa.free(bytes);
+    try testing.expectEqual(expected == null, actual == null);
+    if (expected) |bytes| try testing.expectEqualSlices(u8, bytes, actual.?);
+}
+
+// The vector encoder and decoder match the scalar code at every length across the lane
+// boundaries, and one non-digit at any position (each lane, either nibble, or the tail)
+// fails the decode.
+test "vector hex matches the scalar reference" {
+    var rng = std.Random.DefaultPrng.init(0x6865);
+    var bytes: [3 * lanes + 3]u8 = undefined;
+    var digits: [2 * bytes.len]u8 = undefined;
+    var expected: [2 * bytes.len]u8 = undefined;
+    for (0..bytes.len + 1) |len| {
+        rng.random().bytes(bytes[0..len]);
+        const encoded = hex_encode(&digits, bytes[0..len]);
+        for (bytes[0..len], 0..) |byte, index| {
+            expected[2 * index] = hex_digits_lower[byte >> 4];
+            expected[2 * index + 1] = hex_digits_lower[byte & 0x0f];
+        }
+        try testing.expectEqualSlices(u8, expected[0 .. 2 * len], encoded);
+        try expect_matches_reference(encoded);
+        for (encoded, 0..) |_, position| {
+            const saved = encoded[position];
+            // Upper case still decodes; the neighbours of each digit range do not.
+            for ([_]u8{ 'A', 'F', '/', ':', '@', 'G', '`', 'g', 0x10, 0xb0 }) |char| {
+                encoded[position] = char;
+                try expect_matches_reference(encoded);
+            }
+            encoded[position] = saved;
+        }
+        try expect_whitespace_stripped(encoded);
+    }
+}
+
+/// Each stripped whitespace character, inserted at any position of `encoded`, still decodes
+/// as the reference does.
+fn expect_whitespace_stripped(encoded: []const u8) !void {
+    var spaced: [2 * (3 * lanes + 3) + 1]u8 = undefined;
+    for (0..encoded.len + 1) |position| {
+        for (" \t\n\r") |char| {
+            @memcpy(spaced[0..position], encoded[0..position]);
+            spaced[position] = char;
+            @memcpy(spaced[position + 1 ..][0 .. encoded.len - position], encoded[position..]);
+            try expect_matches_reference(spaced[0 .. encoded.len + 1]);
+        }
+    }
+}
+
 fn fuzz_input(smith: *testing.Smith, buffer: []u8) []const u8 {
     if (smith.in) |in| {
         const len = @min(in.len, buffer.len);
@@ -323,6 +475,7 @@ fn fuzz_from_hex(_: void, smith: *testing.Smith) anyerror!void {
         defer testing.allocator.free(bytes);
         try testing.expect(bytes.len * 2 <= input.len);
     }
+    try expect_matches_reference(input);
 }
 
 test "fuzz hex roundtrip" {
