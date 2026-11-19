@@ -28,6 +28,7 @@ test {
             _ = @import("handoff_outgoing_term.zig").Tests(h);
             _ = @import("floor_journal.zig").Tests(h);
             _ = @import("replay.zig").Tests(h);
+            _ = @import("nullify_replay.zig").Tests(h);
         }
     }
 }
