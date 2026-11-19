@@ -449,7 +449,9 @@ pub fn Actor(comptime T: type) type {
             collected.collect(try select.await());
             while (select.cancel()) |outcome| collected.collect(outcome);
             const events = collected.events();
-            assert(events.len > 0);
+            // Every source answered canceled: this task is being canceled.
+            if (events.len == 0) return error.Canceled;
+            assert(events.len <= events.items.len);
             return events;
         }
 
