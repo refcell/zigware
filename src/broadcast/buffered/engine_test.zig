@@ -247,10 +247,12 @@ fn subscribe_timeout(io: Io, mailbox: Mailbox, digest: TestMessage.Digest, timeo
         select.cancelDiscard();
         return err;
     };
-    const first = try select.await();
+    // A canceled await leaves both branches running: stop them before returning.
+    const awaited = select.await();
     while (select.cancel()) |rest| {
         if (rest == .received) if (rest.received) |value| value.discard() else |_| {};
     }
+    const first = try awaited;
     return switch (first) {
         .received => |result| result catch null,
         .timeout => null,

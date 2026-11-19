@@ -287,10 +287,12 @@ pub fn recv_within(io: Io, receiver: anytype, timeout_ms: u64) !?RecvValue(@Type
         select.cancelDiscard();
         return err;
     };
-    const first = try select.await();
+    // A canceled await leaves both branches running: stop them before returning.
+    const awaited = select.await();
     while (select.cancel()) |rest| {
         if (rest == .received) if (rest.received) |value| free_value(value) else |_| {};
     }
+    const first = try awaited;
     return switch (first) {
         .received => |result| try result,
         .timeout => null,
