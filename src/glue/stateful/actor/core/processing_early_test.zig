@@ -722,3 +722,161 @@ test "stateful processing: deferred messages keep mailbox order" {
     try await_acknowledged(&first_waiter);
     try await_acknowledged(&second_waiter);
 }
+
+// commonware `finalization_keeps_compatible_verification_active`: finalizing a verified
+// parent keeps its child's running verification active, and the child is accepted.
+test "stateful processing: a finalization keeps a compatible verification active" {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer check(&fixture);
+    const genesis = TestBlock.genesis();
+    const parent, const child = try uncached_pair(&fixture);
+    // Null target: the gates hold the parent's verification, then the child's.
+    var probe: Probe = .{ .target = null };
+    defer probe.deinit();
+    var parent_gate = try Held.add(&probe);
+    defer parent_gate.deinit();
+    var child_gate = try Held.add(&probe);
+    defer child_gate.deinit();
+    fixture.processing.verifications.verifier.app.probe = &probe;
+
+    var verify_parent = try fixture.verify(&.{ parent, genesis });
+    defer verify_parent.deinit();
+    try parent_gate.await_started();
+    try parent_gate.open();
+    try testing.expect(try await_verdict(&verify_parent));
+    var verify_child = try fixture.verify(&.{ child, parent });
+    defer verify_child.deinit();
+    try child_gate.await_started();
+    var waiter = try fixture.finalize(parent);
+    defer waiter.deinit();
+    try await_acknowledged(&waiter);
+    try testing.expect(!child_gate.release.?.is_closed());
+    try child_gate.open();
+    try testing.expect(try await_verdict(&verify_child));
+    try testing.expectEqual(2, probe.calls);
+}
+
+// commonware `deferred_finalization_does_not_block_completed_verification`: a finalization
+// queued behind a held proposal does not block a verification of the applied genesis, nor a
+// losing-branch child whose processing already started; the child completes valid, and the
+// finalization applies once the build ends.
+test "stateful processing: a deferred finalization does not block a completed verification" {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer check(&fixture);
+    const genesis = TestBlock.genesis();
+    const winner = try uncached_child(&fixture, &genesis, 1);
+    const losing_parent = try fixture.harness.stage_pending_child(&genesis, 2);
+    const losing_child, var batch = try fixture.harness.build_child(&losing_parent, 3);
+    batch.deinit();
+    fixture.harness.execution.state.clear();
+    var probe: Probe = .{ .target = null };
+    defer probe.deinit();
+    var parent_gate = try Held.add(&probe);
+    defer parent_gate.deinit();
+    var child_gate = try Held.add(&probe);
+    defer child_gate.deinit();
+    fixture.processing.verifications.verifier.app.probe = &probe;
+    var propose_probe: Probe = .{ .target = genesis.digest() };
+    defer propose_probe.deinit();
+    var build = try Held.add(&propose_probe);
+    defer build.deinit();
+    fixture.processing.processor.app.propose_probe = &propose_probe;
+
+    var verify_parent = try fixture.verify(&.{ losing_parent, genesis });
+    defer verify_parent.deinit();
+    try parent_gate.await_started();
+    try parent_gate.open();
+    try testing.expect(try await_verdict(&verify_parent));
+    var proposal = try fixture.propose_async(&.{genesis}, 4);
+    defer proposal.deinit();
+    try build.await_started();
+    var verify_child = try fixture.verify(&.{ losing_child, losing_parent });
+    defer verify_child.deinit();
+    try child_gate.await_started();
+    var waiter = try fixture.finalize(winner);
+    defer waiter.deinit();
+    // The applied genesis verifies during the build, once the loop received the report.
+    var verify_genesis = try fixture.verify(&.{genesis});
+    defer verify_genesis.deinit();
+    try testing.expect(try await_verdict(&verify_genesis));
+    try testing.expect(waiter.poll() == null);
+    try child_gate.open();
+    try testing.expect(try await_verdict(&verify_child));
+    try build.open();
+    const built = try proposal.recv();
+    var owned = built;
+    owned.deinit();
+    try await_acknowledged(&waiter);
+}
+
+// commonware `deferred_finalization_fences_later_verifications`: a finalization queued behind
+// a held proposal fences verifications that start after it: work on the finalized branch
+// continues, work on a competing branch is rejected, and the finalization joins and reuses
+// the winner's execution.
+test "stateful processing: a deferred finalization fences later verifications" {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer check(&fixture);
+    const genesis = TestBlock.genesis();
+    const winner = try fixture.harness.stage_pending_child(&genesis, 1);
+    const losing = try fixture.harness.stage_pending_child(&genesis, 2);
+    const child, var child_batch = try fixture.harness.build_child(&winner, 3);
+    child_batch.deinit();
+    const losing_child, var losing_batch = try fixture.harness.build_child(&losing, 4);
+    losing_batch.deinit();
+    fixture.harness.execution.state.clear();
+    // Null target: the gates hold the speculative processing in call order (commonware's
+    // gate queue): the winner, the losing parent, then the child.
+    var probe: Probe = .{ .target = null };
+    defer probe.deinit();
+    var winner_gate = try Held.add(&probe);
+    defer winner_gate.deinit();
+    var losing_gate = try Held.add(&probe);
+    defer losing_gate.deinit();
+    var child_gate = try Held.add(&probe);
+    defer child_gate.deinit();
+    fixture.processing.verifications.verifier.app.probe = &probe;
+    var propose_probe: Probe = .{ .target = genesis.digest() };
+    defer propose_probe.deinit();
+    var build = try Held.add(&propose_probe);
+    defer build.deinit();
+    fixture.processing.processor.app.propose_probe = &propose_probe;
+
+    // Hold a proposal and queue the winner's finalization behind it.
+    var proposal = try fixture.propose_async(&.{genesis}, 5);
+    defer proposal.deinit();
+    try build.await_started();
+    var waiter = try fixture.finalize(winner);
+    defer waiter.deinit();
+    // Verifications queued after the finalization start during the proposal.
+    var verify_winner = try fixture.verify(&.{ winner, genesis });
+    defer verify_winner.deinit();
+    try winner_gate.await_started();
+    var verify_child = try fixture.verify(&.{ child, winner });
+    defer verify_child.deinit();
+    var verify_losing = try fixture.verify(&.{ losing_child, losing });
+    defer verify_losing.deinit();
+    try losing_gate.await_started();
+    try testing.expect(!verify_child.is_ready());
+    try testing.expect(waiter.poll() == null);
+
+    // Once the build answers, the finalization waits for both processings.
+    try build.open();
+    const built = try proposal.recv();
+    var owned = built;
+    owned.deinit();
+    try std.testing.io.sleep(.fromMilliseconds(20), .awake);
+    try testing.expect(waiter.poll() == null);
+    try winner_gate.open();
+    try losing_gate.open();
+    try await_acknowledged(&waiter);
+    try testing.expect(!try await_verdict(&verify_losing));
+    try testing.expect(try await_verdict(&verify_winner));
+    // The child continues from its parent's finalized state.
+    try child_gate.await_started();
+    try child_gate.open();
+    try testing.expect(try await_verdict(&verify_child));
+    try testing.expectEqual(3, probe.calls);
+}
