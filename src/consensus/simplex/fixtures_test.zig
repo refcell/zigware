@@ -865,6 +865,8 @@ test "all fixtures: one offline" {
 }
 
 test "all fixtures: partition heals" {
+    // About 40 s per push in ReleaseSafe; engine_test.zig's ed25519 partition runs per push.
+    if (!full) return error.SkipZigTest;
     try run_all(partition, .{});
 }
 
@@ -944,21 +946,19 @@ test "all fixtures: unclean shutdown" {
 // fixture's scheme and elector. Slow builds run all 20 cases per fixture; ReleaseSafe runs
 // one case per fixture.
 test "all fixtures: twins" {
-    if (builtin.mode == .debug and !full) return error.SkipZigTest;
+    // About 50 s per push in ReleaseSafe; the mock-scheme twins campaigns run per push.
+    if (!full) return error.SkipZigTest;
     const campaigns = twins_campaign_test;
-    var campaign = campaigns.twins_campaign;
-    if (!full) campaign.max_cases = 1;
-    inline for (fixtures, quick_fixtures) |F, quick| {
-        if (!full and !quick) continue;
+    inline for (fixtures) |F| {
+        const campaign = campaigns.twins_campaign;
         try campaigns.Suite(F).run_campaign(campaign, campaigns.twins_link);
     }
 }
 
-// engine_test.zig's remaining `test_for_all_fixtures` DSTs on the other fixtures. Per push,
-// ReleaseSafe runs them on the threshold VRF MinPk fixture alone (the non-attributable path
-// and the Random elector); slow builds run all seven.
+// engine_test.zig's remaining `test_for_all_fixtures` DSTs on the other seven fixtures, in
+// slow builds (ed25519 runs them in every build).
 test {
-    inline for (fixtures, 0..) |F, index| {
-        if (F != engine_test.Ed25519Fixture) _ = engine_test.Suite(F, index == 0);
+    inline for (fixtures) |F| {
+        if (F != engine_test.Ed25519Fixture) _ = engine_test.Suite(F);
     }
 }

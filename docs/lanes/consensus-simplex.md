@@ -271,9 +271,11 @@ resolver; those lanes are running, so do the types first and the actors as they 
   received_certificates_are_reported, survives_burst, children_shutdown_on_engine_abort,
   graceful_shutdown, attributable_reporter_filtering, split_views_no_lockup, hailstorm,
   observer, non_genesis_floor_joiner). ed25519 runs every engine_test DST in every build
-  (Debug shrinks them, `quick`). Per push, ReleaseSafe runs a quick slice: fixtures_test on
-  one fixture per scheme family, engine_test's Suite on threshold VRF MinPk (about 4 min);
-  slow builds (nightly) run full sizes on every fixture. The engine reports through
+  (Debug shrinks them, `quick`). Per push, ReleaseSafe runs a quick slice of fixtures_test
+  on one fixture per scheme family (without twins and partition, about 40 and 50 s each);
+  engine_test's Suite on the other seven fixtures, the per-fixture twins and partition,
+  and every twins campaign but "twins sampled" run in slow builds (nightly), at full size,
+  to keep per-push CI near its 25-minute target. The engine reports through
   `AttributableReporter` only in attributable_reporter_filtering, as commonware does. The
   twins campaigns (sampled, pipelined handoff, sustained, stable leader, optimistic; the
   large ones in slow builds), tle, the four slow-certifier DSTs, the certified splits and
@@ -292,10 +294,11 @@ resolver; those lanes are running, so do the types first and the actors as they 
   with a mock batcher, resolver, and automaton on the deterministic runtime.
 - [ ] actors/batcher/mod.rs: 69 of its 76 batcher-actor tests (forwarding, leader activity,
   optimistic assembly fallback, vote retention, construction order, the per-fixture
-  quorum test on the other 7 fixtures). verifier.rs: 29 of its 32 have counterparts
+  quorum test on the other 7 fixtures). verifier.rs: 27 of its 32 have counterparts
   (lazy vote buffers, quorum reservations, the ready, exact-quorum, empty-pending, and
-  verified-quorum cases, and late leader votes, 2026-11-19); its 3 panicking cases are not
-  ported (below).
+  verified-quorum cases, late leader votes, and non-batchable finalize accounting,
+  2026-11-19). Still open: `add_nullify` and `add_finalize` bookkeeping (as "add notarize"
+  does for notarizes); its 3 panicking cases are not ported (below).
 - [x] Panicking tests are not ported: Zig test runners cannot catch a panic in process.
   These are commonware's `#[should_panic]` cases in elector.rs (3), types.rs
   (`issue_2944_regression_*_new`, 2), vrf.rs (12 constructor and certificate-verifier
@@ -427,3 +430,7 @@ resolver; those lanes are running, so do the types first and the actors as they 
   ported. An audit against commonware's simplex tests found 453 of 724 ported (counting
   macro expansions per fixture); the voter and batcher actor tests are the open gap. All 21
   simplex conformance entries match; commonware has no simplex benches.
+- 2026-11-19: CI time: "all fixtures: twins", "all fixtures: partition heals", the
+  non-ed25519 engine_test Suite instances, and four of the five mock-scheme twins campaigns
+  (all but sampled) run in ReleaseSafe only with `-Dslow-tests`; Debug keeps its one-case
+  campaigns.

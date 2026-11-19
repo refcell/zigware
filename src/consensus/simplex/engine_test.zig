@@ -43,14 +43,13 @@ pub const Ed25519Fixture = struct {
 };
 
 /// The engine DSTs over fixture `F` (`Scheme`, `Elector`, `fixture`, `elector`,
-/// `deinit_elector`). The ed25519 fixture runs every test; other fixtures run commonware's
-/// `test_for_all_fixtures` ones that fixtures_test.zig lacks: in slow builds at full size,
-/// and, when `selected`, in ReleaseSafe as a quick slice.
-pub fn Suite(comptime F: type, comptime selected: bool) type {
+/// `deinit_elector`). The ed25519 fixture runs every test in every build; other fixtures run
+/// commonware's `test_for_all_fixtures` ones that fixtures_test.zig lacks, in slow builds.
+pub fn Suite(comptime F: type) type {
     return struct {
         const primary = F == Ed25519Fixture;
         const full = build_options.slow_tests;
-        const fixture_enabled = primary or full or (builtin.mode != .debug and selected);
+        const fixture_enabled = primary or full;
         const gpa = testing.allocator;
         const Sha256 = cryptography.Sha256;
         const Digest = Sha256.Digest;
@@ -2226,7 +2225,7 @@ pub fn Suite(comptime F: type, comptime selected: bool) type {
     };
 }
 
-const Primary = Suite(Ed25519Fixture, true);
+const Primary = Suite(Ed25519Fixture);
 pub const count_nonzero_metric_lines = Primary.nonzero_metric_lines;
 
 test {

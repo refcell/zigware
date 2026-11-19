@@ -571,29 +571,39 @@ const MockFixture = struct {
 };
 const Mock = Suite(MockFixture);
 
+/// ReleaseSafe runs only "twins sampled" per push (CI time); slow builds run every campaign,
+/// and Debug runs each with one case.
+fn nightly_in_release() error{SkipZigTest}!void {
+    if (builtin.mode != .debug and !build_options.slow_tests) return error.SkipZigTest;
+}
+
 test "twins sampled" {
     try Mock.run_all_links(twins_campaign);
 }
 
 test "twins pipelined handoff" {
+    try nightly_in_release();
     var campaign = twins_campaign;
     campaign.handoffs = true;
     try Mock.run_all_links(campaign);
 }
 
 test "twins sustained" {
+    try nightly_in_release();
     var campaign = twins_campaign;
     campaign.mode = .sustained;
     try Mock.run_all_links(campaign);
 }
 
 test "twins stable leader" {
+    try nightly_in_release();
     var campaign = twins_campaign;
     campaign.term_length = 3;
     try Mock.run_all_links(campaign);
 }
 
 test "twins stable leader optimistic" {
+    try nightly_in_release();
     var campaign = twins_campaign;
     campaign.term_length = 3;
     campaign.optimistic_views = 2;
