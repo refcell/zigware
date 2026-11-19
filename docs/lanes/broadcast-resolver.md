@@ -178,29 +178,29 @@ open, 5 not portable.
 | `p2p/wire.rs` | 8 | 5 | 0 | 3 |
 
 Open:
-- [ ] `p2p/inflight.rs` `test_insert_contains_cancel_remove_round_trip`: Inflight
+- [x] `p2p/inflight.rs` `test_insert_contains_cancel_remove_round_trip`: Inflight
   insert/contains/cancel round trip, with a second cancel returning false. Goes in
   src/resolver/p2p/inflight.zig, which has no tests; delivery.zig "insert contains remove round
   trip" covers only the underlying Tracker
-- [ ] `p2p/inflight.rs` `test_cancel_suppresses_duration_metric`: Inflight.cancel after insert
+- [x] `p2p/inflight.rs` `test_cancel_suppresses_duration_metric`: Inflight.cancel after insert
   leaves the fetch-duration histogram count at 0. Goes in src/resolver/p2p/inflight.zig
-- [ ] `p2p/inflight.rs` `test_complete_records_duration_metric`: Inflight.complete after insert
+- [x] `p2p/inflight.rs` `test_complete_records_duration_metric`: Inflight.complete after insert
   records one fetch-duration observation (count 1). Goes in src/resolver/p2p/inflight.zig
-- [ ] `p2p/inflight.rs` `test_retain_drops_non_matching_and_suppresses_metric`: Inflight.retain with
+- [x] `p2p/inflight.rs` `test_retain_drops_non_matching_and_suppresses_metric`: Inflight.retain with
   an odd-key predicate drops 1 of keys 1..3, keeps 1 and 3, and the duration count stays 0. Goes in
   src/resolver/p2p/inflight.zig
-- [ ] `p2p/inflight.rs` `test_drain_removes_all_and_suppresses_metric`: Inflight.drain returns 2,
+- [x] `p2p/inflight.rs` `test_drain_removes_all_and_suppresses_metric`: Inflight.drain returns 2,
   removes both keys, and the duration count stays 0. Goes in src/resolver/p2p/inflight.zig
-- [ ] `p2p/inflight.rs` `test_deliver_completes_with_consumer_result`: Inflight.deliver(peer, 17ms,
+- [x] `p2p/inflight.rs` `test_deliver_completes_with_consumer_result`: Inflight.deliver(peer, 17ms,
   "data") -> next_delivery has the key, the Source{peer, 17ms, 4} context, a Complete outcome, and
   not canceled; the consumer saw (key, value). Goes in src/resolver/p2p/inflight.zig (delivery.zig
   "deliver completes with context and consumer result" covers only the Tracker with a u8 context)
-- [ ] `p2p/inflight.rs` `test_cancellation_preserves_ready_verdict_without_recording_duration`:
+- [x] `p2p/inflight.rs` `test_cancellation_preserves_ready_verdict_without_recording_duration`:
   After deliver then cancel (or drain), next_delivery is canceled but keeps the Source context and
   Complete outcome; the key is gone and the duration count is 0. Goes in
   src/resolver/p2p/inflight.zig (engine_delivery_test "cancellation preserves submitted verdict" is
   engine-level and checks no metric)
-- [ ] `p2p/inflight.rs` `test_cancel_after_completion_is_idempotent`: deliver -> next_delivery
+- [x] `p2p/inflight.rs` `test_cancel_after_completion_is_idempotent`: deliver -> next_delivery
   Complete -> complete(key); a later cancel returns false without asserting. Goes in
   src/resolver/p2p/inflight.zig
 

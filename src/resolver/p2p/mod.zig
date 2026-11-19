@@ -43,4 +43,5 @@ test {
     _ = fetcher;
     _ = inflight;
     _ = ingress;
+    _ = @import("inflight_test.zig");
 }
