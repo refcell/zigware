@@ -14,7 +14,8 @@
 //! - `Blob.read_at` fills a caller buffer with exactly `buffer.len` bytes at `offset`;
 //!   `Blob.write_at` writes bytes (or chunks, `write_at_vectored`) at `offset`, extending the
 //!   blob; `Blob.resize` truncates or zero-extends; `Blob.sync` makes every completed write and
-//!   resize durable. `Blob.close` releases the handle and does not sync.
+//!   resize durable, and `Blob.start_sync` starts that and returns a `Completion` to observe
+//!   it. `Blob.close` releases the handle and does not sync.
 //!
 //! Durability: after a crash, data not covered by a completed sync may be lost or torn; data
 //! readable when a run starts is durable. Blob contents start after a runtime-owned header
@@ -34,6 +35,7 @@ pub const audited = @import("storage/audited.zig");
 pub const metered = @import("storage/metered.zig");
 pub const mocks = @import("storage/mocks.zig");
 pub const tests = @import("storage/tests.zig");
+pub const Completion = @import("storage/completion.zig").Completion;
 
 pub const Error = error{
     PartitionNameInvalid,
@@ -154,6 +156,8 @@ pub const Blob = struct {
         resize: *const fn (ptr: *anyopaque, length: u64) Error!void,
         sync: *const fn (ptr: *anyopaque) Error!void,
         close: *const fn (ptr: *anyopaque) void,
+        /// Null for backends whose `start_sync` is `sync` run inline (`Blob.start_sync`).
+        start_sync: ?*const fn (ptr: *anyopaque) Error!Completion = null,
     };
 
     /// Read exactly `buffer.len` bytes at `offset`; `error.BlobInsufficientLength` if the blob
@@ -186,6 +190,17 @@ pub const Blob = struct {
 
     pub fn sync(blob: Blob) Error!void {
         return blob.vtable.sync(blob.ptr);
+    }
+
+    /// Request that every write and resize completed before this call becomes durable
+    /// (commonware `start_sync`). The writes covered are fixed at the call; the returned
+    /// completion (one reference, owned by the caller) only observes, so releasing it without
+    /// waiting cancels nothing. A sync failure is reported by the completion. Backends without
+    /// a `start_sync` entry sync inline and return a ready completion, as commonware's memory
+    /// backend does.
+    pub fn start_sync(blob: Blob) Error!Completion {
+        const start = blob.vtable.start_sync orelse return Completion.ready(blob.sync());
+        return start(blob.ptr);
     }
 
     /// Release the handle. Unsynced changes may be discarded; closing does not sync.
@@ -296,5 +311,6 @@ test {
     _ = audited;
     _ = metered;
     _ = mocks;
+    _ = @import("storage/completion.zig");
     _ = @import("storage/memory_test.zig");
 }

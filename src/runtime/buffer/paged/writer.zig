@@ -22,6 +22,7 @@ const Crc32 = @import("cryptography").crc32.Crc32;
 const paged = @import("mod.zig");
 const storage_iface = @import("../../storage.zig");
 const Blob = storage_iface.Blob;
+const Completion = storage_iface.Completion;
 const ReadOptions = storage_iface.ReadOptions;
 const SyncState = @import("../mod.zig").SyncState;
 const Buffer = @import("tip.zig").Buffer;
@@ -200,6 +201,7 @@ pub const Writer = struct {
 
     /// Close the blob (dropping unsynced bytes) and free buffers.
     pub fn deinit(self: *Self) void {
+        self.sync_state.deinit();
         self.blob.close();
         self.buffer.deinit(self.gpa);
         self.gpa.free(self.scratch);
@@ -328,9 +330,13 @@ pub const Writer = struct {
         durable: bool,
         options: storage_iface.WriteOptions,
     ) Error!bool {
+        // Without flush work, return before observing a pending sync: an empty `start_sync`
+        // must stay a cheap re-observation of the in-flight sync.
         if (!self.has_flush_work(write_partial_page)) return false;
-        // With no unsynced mutation, the last flushed partial state is durable and becomes
-        // the checksum the rewrite below must preserve.
+        // A flush mutates the blob, so first resolve an outstanding `start_sync`. With no
+        // unsynced mutation, the last flushed partial state is durable and becomes the
+        // checksum the rewrite below must preserve.
+        try self.sync_state.wait_for_pending();
         if (self.sync_state.is_clean()) self.durable_page_state = self.partial_page_state;
 
         const page_size_value = self.page_size();
@@ -420,26 +426,53 @@ pub const Writer = struct {
         self.durable_page_state = self.partial_page_state;
     }
 
-    /// commonware's `start_sync`: blobs sync synchronously here, so this is `sync`.
-    pub fn start_sync(self: *Self) Error!void {
-        return self.sync();
+    /// Flush buffered bytes and start making every pending mutation durable, returning a
+    /// completion (one reference, owned by the caller). Waiting on it gives `sync`'s guarantee
+    /// for the state flushed by this call. Later `sync`s and blob mutations first wait for it;
+    /// its failure is reported by the completion and by the next such call. Flush errors are
+    /// returned directly. Buffered appends during the sync do no I/O and do not wait.
+    pub fn start_sync(self: *Self) Error!Completion {
+        assert(!self.failed);
+        errdefer self.failed = true;
+        _ = try self.flush_internal(true, false, .{});
+        assert(!self.has_flush_work(true));
+        return self.sync_state.start_sync(self.blob);
     }
 
-    /// Consume the writer: flush and sync every byte, then return a `Sealed` view that owns
-    /// the blob and keeps this writer's page-cache id. On error the writer is still owned by
-    /// the caller (and only `deinit` may follow). commonware starts the sync and hands back
-    /// its handle; blobs sync synchronously here, so the view is durable on return.
-    pub fn seal(self: *Self) Error!Sealed {
+    /// Wait for an outstanding `start_sync` (commonware `wait_for_sync`).
+    pub fn wait_for_sync(self: *Self) Error!void {
+        assert(!self.failed);
+        errdefer self.failed = true;
+        try self.sync_state.wait_for_pending();
+        assert(self.sync_state != .pending);
+    }
+
+    /// A sealed view and the completion of the sync `seal` started.
+    pub const Sealing = struct { sealed: Sealed, completion: Completion };
+
+    /// Consume the writer: flush every byte and start syncing it, then return a `Sealed` view
+    /// that owns the blob and keeps this writer's page-cache id, plus the sync's completion
+    /// (one reference, owned by the caller). Reads through the view see the flushed bytes at
+    /// once; they are durable once the completion succeeds. On error the writer is still owned
+    /// by the caller (and only `deinit` may follow).
+    pub fn seal(self: *Self) Error!Sealing {
         assert(self.phase == .append);
+        assert(!self.failed);
+        errdefer self.failed = true;
+        // Complete earlier syncs before flushing the final bytes.
+        try self.sync_state.wait_for_pending();
         // The sealed bytes are read back through the page cache, not the OS cache.
-        try self.sync_options(.{ .dont_cache = true });
+        _ = try self.flush_internal(true, false, .{ .dont_cache = true });
         assert(self.buffer.len < self.page_size());
+        const completion = try self.sync_state.start_sync(self.blob);
+        errdefer completion.release();
         const sealed = try self.sealed_handle(true);
+        self.sync_state.deinit();
         self.buffer.deinit(self.gpa);
         self.gpa.free(self.scratch);
         self.gpa.free(self.page_scratch);
         self.* = undefined;
-        return sealed;
+        return .{ .sealed = sealed, .completion = completion };
     }
 
     /// Write complete pages, then return an immutable `Sealed` view of the logical bytes. It

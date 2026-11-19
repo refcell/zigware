@@ -1640,8 +1640,11 @@ test "only the seal's flush writes with the uncached hint" {
     try w.sync();
     try testing.expectEqual(@as(u64, 0), h.storage.dont_cache_writes);
     _ = try w.append("second");
-    var sealed = try w.seal();
+    const sealing = try w.seal();
+    var sealed = sealing.sealed;
     defer sealed.deinit();
+    try sealing.completion.wait();
+    sealing.completion.release();
     try testing.expectEqual(@as(u64, 1), h.storage.dont_cache_writes);
 }
 

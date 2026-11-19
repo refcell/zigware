@@ -13,9 +13,11 @@
 //! journal it covers; a successful open retires the blob's journal, since the new handle sees
 //! only durable contents (commonware's deterministic `Context::open_versioned` admits it).
 //!
-//! Differences from commonware: there is no `start_sync` (zigware's `sync` is synchronous), and
-//! a journaled mutation is identified by the memory backend's blob generation rather than by a
-//! shared file-generation handle; both retire on the same events. Only the deterministic
+//! Differences from commonware: `start_sync` is the default (`Blob.start_sync` runs `sync` and
+//! returns a ready completion), so its fault is rolled at start and its durability cut is
+//! complete at once, as with commonware's memory backend underneath. A journaled mutation is
+//! identified by the memory backend's blob generation rather than by a shared file-generation
+//! handle; both retire on the same events. Only the deterministic
 //! runtime uses this wrapper, from one thread, so it has no lock.
 
 const std = @import("std");

@@ -3,9 +3,9 @@
 //! `ReadGateContext`). `Wrapper(Policy)` wraps a `storage.Storage` and is one, so the wrappers
 //! nest (commonware's `forward_context!` has no counterpart: Context's storage is a field).
 //!
-//! `SyncGates` is commonware's `PendingSyncs` over `DelayedSyncContext` without the deferred
-//! queue: zigware's `sync` is synchronous, with no `start_sync` to defer, so only the armed
-//! one-shot gate parks a sync (it blocks its caller until released). No counterpart:
+//! `DelayedSync`/`DelayedSynced` (delayed_sync.zig) port `PendingSyncs` and
+//! `DelayedSyncContext`: started syncs park until a test releases them. `SyncGates` is the
+//! armed one-shot gate alone (the voter tests' journal sync gate). No counterpart:
 //! `MigratingReadBlob` (moves a half-polled read between tasks),
 //! and recorded read batches (there is no `read_many`).
 //!
@@ -19,6 +19,11 @@ const Io = std.Io;
 const iface = @import("../storage.zig");
 
 const Error = iface.Error;
+
+const delayed_sync = @import("delayed_sync.zig");
+pub const DelayedSync = delayed_sync.DelayedSync;
+pub const DelayedSynced = delayed_sync.DelayedSynced;
+pub const Deferred = delayed_sync.Deferred;
 
 /// Spin lock for the policies' short critical sections; nothing blocks while holding it.
 const Lock = struct {
@@ -113,6 +118,7 @@ pub fn Wrapper(comptime Policy: type) type {
                 .resize = resize,
                 .sync = sync,
                 .close = close,
+                .start_sync = start_sync,
             };
 
             fn of(ptr: *anyopaque) *Blob {
@@ -152,6 +158,14 @@ pub fn Wrapper(comptime Policy: type) type {
                 const self = of(ptr);
                 try self.owner.policy.sync(self.selected);
                 return self.inner.sync();
+            }
+
+            /// A started sync is a sync to the policy (commonware's fault mocks count it as one
+            /// mutation and fail it at start), then the inner blob's `start_sync`.
+            fn start_sync(ptr: *anyopaque) Error!iface.Completion {
+                const self = of(ptr);
+                try self.owner.policy.sync(self.selected);
+                return self.inner.start_sync();
             }
 
             fn close(ptr: *anyopaque) void {

@@ -11,6 +11,17 @@ const Sealed = paged.Sealed;
 const Range = paged.view.Range;
 
 const gpa = testing.allocator;
+
+/// Seal `w` and wait for the started sync, as commonware's tests await the seal handle.
+fn seal_durably(w: *Writer) !Sealed {
+    const sealing = try w.seal();
+    defer sealing.completion.release();
+    var sealed = sealing.sealed;
+    errdefer sealed.deinit();
+    try sealing.completion.wait();
+    return sealed;
+}
+
 const page_size: usize = 103;
 const physical_page_size: usize = page_size + 12;
 const buffer_size: usize = page_size * 2;
@@ -43,7 +54,7 @@ const Harness = struct {
         var w = try self.writer(name);
         errdefer w.deinit();
         _ = try w.append(data);
-        return w.seal();
+        return seal_durably(&w);
     }
 };
 
@@ -75,7 +86,7 @@ test "sealed: seal makes the appended bytes durable" {
     defer gpa.free(data);
     _ = try w.append(data);
     try testing.expectEqual(@as(?u64, 0), try h.storage.durable_len(partition, "sync"));
-    var sealed = try w.seal();
+    var sealed = try seal_durably(&w);
     defer sealed.deinit();
     // 300 bytes are two full pages and a 94-byte partial page.
     const durable = try h.storage.durable_len(partition, "sync");
@@ -92,7 +103,7 @@ test "sealed: seal succeeds with snapshot readers, which agree with it" {
     var reader = try w.snapshot();
     defer reader.deinit();
     try testing.expectEqual(@as(u64, 11), reader.size);
-    var sealed = try w.seal();
+    var sealed = try seal_durably(&w);
     defer sealed.deinit();
     try testing.expectEqual(@as(u64, 11), sealed.size);
     var via_reader: [11]u8 = undefined;
@@ -115,7 +126,7 @@ test "sealed: a snapshot reads full pages and the partial page after the seal" {
     _ = try w.append(data);
     var reader = try w.snapshot();
     defer reader.deinit();
-    var sealed = try w.seal();
+    var sealed = try seal_durably(&w);
     defer sealed.deinit();
     try testing.expectEqual(@as(u64, total), reader.size);
     const cases = [_]struct { u64, usize }{
@@ -143,7 +154,7 @@ test "sealed: seal preserves the writer's page-cache id" {
     var w = try h.writer("cache_id");
     errdefer w.deinit();
     const id = w.cache_id();
-    var sealed = try w.seal();
+    var sealed = try seal_durably(&w);
     defer sealed.deinit();
     try testing.expectEqual(id, sealed.cache_id());
 }
@@ -364,7 +375,7 @@ test "sealed: replay streams every logical byte, synced first or not" {
         errdefer w.deinit();
         _ = try w.append(data);
         if (sync_first) try w.sync();
-        var sealed = try w.seal();
+        var sealed = try seal_durably(&w);
         defer sealed.deinit();
         var replay = try sealed.replay(buffer_size, .{});
         defer replay.deinit();
@@ -439,7 +450,7 @@ test "sealed: sealing a recovered synced partial page does not rewrite it" {
     try testing.expectEqual(@as(u64, data.len), recovered.size());
     try recovered.sync();
     try testing.expectEqual(writes, h.storage.writes);
-    var sealed = try recovered.seal();
+    var sealed = try seal_durably(&recovered);
     defer sealed.deinit();
     try testing.expectEqual(writes, h.storage.writes);
     const read = try gpa.alloc(u8, data.len);
@@ -460,7 +471,7 @@ test "sealed: a dont_cache replay leaves the page cache cold, sealed or snapshot
         defer gpa.free(data);
         _ = try w.append(data);
         try w.sync();
-        var sealed = if (snapshot) (try w.try_snapshot()).? else try w.seal();
+        var sealed = if (snapshot) (try w.try_snapshot()).? else try seal_durably(&w);
         w_open = snapshot;
         defer sealed.deinit();
         h.cache_ref.clear();

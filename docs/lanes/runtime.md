@@ -374,15 +374,11 @@ Not portable:
   cancelled reads (`MigratingReadBlob`, parked reads)
 - `utils/buffer/mod.rs` `test_read_structure_single_vs_chunked`: storage-journal.md: `IoBuf`
   ownership/chunk structure (reads copy into caller buffers)
-- `utils/buffer/mod.rs` `test_write_start_sync_flush_failure_returns_err`,
-  `test_write_start_sync_persists_and_marks_clean`,
-  `test_write_sync_waits_for_outstanding_start_sync`,
-  `test_write_sync_after_start_sync_and_small_write_waits_before_range_sync`,
-  `test_write_at_overlap_flush_waits_for_outstanding_start_sync`,
-  `test_write_resize_waits_for_outstanding_start_sync_before_resizing`,
+- `utils/buffer/mod.rs` `test_write_start_sync_persists_and_marks_clean`,
   `test_write_sync_uses_range_sync_for_buffer_only_write`,
-  `test_write_sync_uses_full_sync_after_resize`: storage-journal.md: in-flight `start_sync`
-  handles/waits, range-vs-full sync selection
+  `test_write_sync_uses_full_sync_after_resize`: range-vs-full sync selection (zigware's `Blob`
+  has no range sync). The in-flight `start_sync` tests are ported in
+  `buffer/start_sync_test.zig` (2026-11-19).
 - `utils/buffer/paged/cache.rs` `test_read_cached_many_across_chunks`,
   `test_read_cached_many_stale_hint_after_eviction`,
   `test_read_cached_many_cross_blob_hint_collision`,
@@ -428,8 +424,6 @@ Not portable:
 - `utils/buffer/paged/read.rs` `test_replay_is_sync`: compile-time Rust `Sync` bound check
 - `utils/buffer/paged/sealed.rs` `test_sealed_read_many_into_rejects_unsorted_offsets`:
   `#[should_panic]` or panic propagation/`catch_unwind`; Zig cannot catch a panic
-- `utils/buffer/paged/sealed.rs` `test_sealed_reads_while_seal_sync_pending`: storage-journal.md:
-  syncs are synchronous, so `seal` has no pending sync handle
 - `utils/buffer/paged/sealed.rs` `test_replay_preserves_tail_during_partial_page_rewrite`:
   storage-journal.md: `SplitWriteBlob` partial-page rewrite races
 - `utils/buffer/paged/tip.rs` `test_typed_append_rejects_short_encoding`,
@@ -454,15 +448,12 @@ Not portable:
 - `utils/buffer/paged/writer.rs` `test_recoverable_prefix_len_batches_reads`: storage-journal.md:
   "`recoverable_prefix_len` reads one page at a time"
 - `utils/buffer/paged/writer.rs` `test_sync_uses_range_sync_for_single_flush`,
-  `test_start_sync_persists_and_marks_clean`, `test_start_sync_flush_failure_returns_err`,
-  `test_sync_waits_for_outstanding_start_sync`,
-  `test_sync_after_start_sync_and_small_write_waits_before_range_sync`,
+  `test_start_sync_flush_failure_returns_err`,
   `test_write_flush_waits_for_outstanding_start_sync`,
-  `test_seal_waits_for_outstanding_start_sync_before_flushing`,
   `test_snapshot_waits_for_outstanding_start_sync_before_flushing`,
   `test_replay_waits_for_outstanding_start_sync_before_flushing`,
-  `test_append_waits_for_outstanding_start_sync_before_writing`,
-  `test_recovery_truncate_shrink_waits_for_outstanding_start_sync_before_resizing`,
+  `test_recovery_truncate_shrink_waits_for_outstanding_start_sync_before_resizing`: not yet
+  ported (same flush/resize wait as the ported `start_sync_test.zig` cases);
   `test_sync_uses_full_sync_after_prior_plain_flush`,
   `test_sync_uses_full_sync_after_replay_plain_flush`,
   `test_recreated_sync_preserves_replay_plain_flush_barrier`,

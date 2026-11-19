@@ -259,3 +259,146 @@ test "sync gate parks the first durability operation after arm until released" {
     defer runner.deinit();
     try (try runner.start_context(SyncGateTest.body, .{}));
 }
+
+/// The durable logical contents of `partition/name` in `inner`, or "" if it has none yet.
+fn expect_durable(inner: *memory.Storage, name: []const u8, expected: []const u8) !void {
+    const contents = try inner.logical_blob(gpa, "delayed", name) orelse
+        return testing.expectEqualStrings(expected, "");
+    defer gpa.free(contents);
+    try testing.expectEqualStrings(expected, contents);
+}
+
+const DelayedTest = struct {
+    fn waiting(ctx: deterministic.Context, completion: iface.Completion) anyerror!void {
+        _ = ctx;
+        defer completion.release();
+        try completion.wait();
+    }
+
+    fn syncing(ctx: deterministic.Context, blob: iface.Blob) anyerror!void {
+        _ = ctx;
+        try blob.sync();
+    }
+
+    fn parks(ctx: deterministic.Context) !void {
+        var inner: memory.Storage = .init(gpa);
+        defer inner.deinit();
+        var pending: mocks.DelayedSync = .init(gpa, ctx.io());
+        defer pending.deinit();
+        var wrapper: mocks.DelayedSynced = .init(gpa, inner.storage(), &pending);
+        const blob = (try wrapper.storage().open("delayed", "blob")).blob;
+        try blob.write_at(0, "data", .{});
+        const completion = try blob.start_sync();
+        defer completion.release();
+        // The started sync parks: nothing is durable and no waiter has entered.
+        try testing.expect(completion.is_pending());
+        try testing.expectEqual(@as(u64, 1), pending.starts());
+        try testing.expectEqual(@as(u64, 0), pending.entered());
+        try expect_durable(&inner, "blob", "");
+        // A waiter is reported as blocked and entered.
+        const handle = try ctx.child("wait").spawn(waiting, .{completion.retain()});
+        try ctx.sleep(.fromMilliseconds(10));
+        try testing.expectEqual(@as(u64, 1), pending.entered());
+        const deferred = pending.next();
+        try testing.expect(deferred.blocked());
+        // Closing the handle keeps the open alive for the parked sync; releasing syncs it.
+        blob.close();
+        deferred.release({});
+        try try handle.join();
+        try testing.expectEqual(@as(u64, 1), pending.completions());
+        try expect_durable(&inner, "blob", "data");
+        try completion.wait();
+    }
+
+    fn fails(ctx: deterministic.Context) !void {
+        var inner: memory.Storage = .init(gpa);
+        defer inner.deinit();
+        var pending: mocks.DelayedSync = .init(gpa, ctx.io());
+        defer pending.deinit();
+        var wrapper: mocks.DelayedSynced = .init(gpa, inner.storage(), &pending);
+        const blob = (try wrapper.storage().open("delayed", "blob")).blob;
+        defer blob.close();
+        try blob.write_at(0, "data", .{});
+        // A failed release reports the error and syncs nothing.
+        const first = try blob.start_sync();
+        defer first.release();
+        const second = try blob.start_sync();
+        defer second.release();
+        try testing.expectEqual(@as(usize, 2), pending.parked());
+        pending.fail_all();
+        try testing.expectError(error.Io, first.wait());
+        try testing.expectError(error.Io, second.wait());
+        try testing.expectEqual(@as(u64, 0), pending.completions());
+        try expect_durable(&inner, "blob", "");
+        // After `unblock`, started syncs run at once; after `arm_fail`, they fail.
+        pending.unblock();
+        const ran = try blob.start_sync();
+        try ran.wait();
+        try expect_durable(&inner, "blob", "data");
+        pending.arm_fail();
+        try testing.expectError(error.Io, (try blob.start_sync()).wait());
+        try testing.expectEqual(@as(u64, 4), pending.starts());
+    }
+
+    fn gate(ctx: deterministic.Context) !void {
+        var inner: memory.Storage = .init(gpa);
+        defer inner.deinit();
+        var pending: mocks.DelayedSync = .init(gpa, ctx.io());
+        defer pending.deinit();
+        var wrapper: mocks.DelayedSynced = .init(gpa, inner.storage(), &pending);
+        const blob = (try wrapper.storage().open("delayed", "blob")).blob;
+        defer blob.close();
+        // Unarmed, blocking syncs pass.
+        try blob.write_at(0, "data", .{ .sync = true });
+        try pending.arm();
+        try blob.write_at(0, "more", .{});
+        const handle = try ctx.child("sync").spawn(syncing, .{blob});
+        try ctx.sleep(.fromMilliseconds(10));
+        // The armed gate holds the blocking sync, which has not reached the inner blob.
+        const deferred = pending.next();
+        try testing.expect(deferred.blocked());
+        try testing.expectEqual(@as(u64, 1), pending.calls());
+        try expect_durable(&inner, "blob", "data");
+        deferred.release({});
+        try try handle.join();
+        try expect_durable(&inner, "blob", "more");
+        // Later durability operations are counted; started syncs park as usual.
+        try blob.write_at(0, "last", .{ .sync = true });
+        const started = try blob.start_sync();
+        defer started.release();
+        try testing.expectEqual(@as(u64, 3), pending.calls());
+        try testing.expect(started.is_pending());
+        pending.release_next(1);
+        try started.wait();
+    }
+};
+
+test "delayed sync parks started syncs until released and syncs on release" {
+    var runner = try deterministic.Runner.init(gpa, .{});
+    defer runner.deinit();
+    try (try runner.start_context(DelayedTest.parks, .{}));
+}
+
+test "delayed sync fails parked syncs and unblock stops parking" {
+    var runner = try deterministic.Runner.init(gpa, .{});
+    defer runner.deinit();
+    try (try runner.start_context(DelayedTest.fails, .{}));
+}
+
+test "delayed sync gate holds the next durability operation after arm" {
+    var runner = try deterministic.Runner.init(gpa, .{});
+    defer runner.deinit();
+    try (try runner.start_context(DelayedTest.gate, .{}));
+}
+
+test "delayed sync blob forwards read options (delayed_sync_blob_forwards_read_options)" {
+    var inner: memory.Storage = .init(gpa);
+    defer inner.deinit();
+    var recordings: mocks.Recordings = .init(gpa);
+    defer recordings.deinit();
+    var recording: mocks.Recording = .init(gpa, inner.storage(), &recordings);
+    var pending: mocks.DelayedSync = .init(gpa, testing.io);
+    defer pending.deinit();
+    var delayed: mocks.DelayedSynced = .init(gpa, recording.storage(), &pending);
+    try expect_read_options_forwarded(delayed.storage(), &recordings, "delayed");
+}

@@ -36,6 +36,7 @@ pub const Write = struct {
 
     /// Close the blob (dropping unsynced bytes) and free the buffer.
     pub fn deinit(self: *Write) void {
+        self.sync_state.deinit();
         self.blob.close();
         self.buffer.deinit(self.gpa);
         self.* = undefined;
@@ -121,9 +122,28 @@ pub const Write = struct {
         assert(!self.needs_sync());
     }
 
-    /// commonware's `start_sync`: blobs sync synchronously here, so this is `sync`.
-    pub fn start_sync(self: *Write) Error!void {
-        return self.sync();
+    /// Flush buffered data and start making every accepted write durable, returning a
+    /// completion (one reference, owned by the caller). Waiting on it gives `sync`'s guarantee
+    /// for the state flushed by this call. Later `sync`s and blob mutations first wait for it;
+    /// its failure is reported by the completion and by the next such call. Flush errors are
+    /// returned directly.
+    pub fn start_sync(self: *Write) Error!storage.Completion {
+        assert(!self.failed);
+        errdefer self.failed = true;
+        if (self.buffer.take()) |taken| {
+            const data, const offset = taken;
+            try self.sync_state.write_at(self.blob, offset, data, false);
+        }
+        assert(self.buffer.is_empty());
+        return self.sync_state.start_sync(self.blob);
+    }
+
+    /// Wait for an outstanding `start_sync` (commonware `wait_for_sync`).
+    pub fn wait_for_sync(self: *Write) Error!void {
+        assert(!self.failed);
+        errdefer self.failed = true;
+        try self.sync_state.wait_for_pending();
+        assert(self.sync_state != .pending);
     }
 
     /// Durably shorten to `len` (a section buffer's truncate). A larger `len` changes nothing.
@@ -360,7 +380,12 @@ test "write needs sync tracks sync work" {
     try testing.expect(!w.needs_sync());
     try w.write_at(0, "ab");
     try testing.expect(w.needs_sync());
-    try w.start_sync();
+    // A started sync needs observation even after it completes.
+    const started = try w.start_sync();
+    try started.wait();
+    started.release();
+    try testing.expect(w.needs_sync());
+    try w.wait_for_sync();
     try testing.expect(!w.needs_sync());
     // A direct write leaves the blob dirty with an empty buffer.
     try w.write_at(0, "0123456789");
