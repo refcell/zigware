@@ -25,111 +25,121 @@ const gpa = testing.allocator;
 const namespace = "_COMMONWARE_GLUE_DKG_RESHARE_INCLUSION_TEST";
 
 /// Owns everything a singleton actor test keeps alive (commonware `InclusionHarness`).
-pub const Harness = struct {
-    io: Io,
-    store_harness: mocks.StoreHarness,
-    secrets: mocks.MemorySecretStore,
-    store: TestActor.Store,
-    consumer: mocks.MockConsumer,
-    provider: mocks.StaticParticipants,
-    manager: mocks.InertManager = .{},
-    blocker: mocks.MockBlocker,
-    fence: Fence,
-    registry: metrics.Registry,
-    actor: TestActor,
-    mailbox: TestActor.Mailbox,
-    public_key: mocks.TestPublicKey,
+pub const Harness = HarnessOf(mocks.ActorTypes);
 
-    pub fn init(self: *Harness, io: Io, partition: []const u8, blocks_per_epoch: u64) !void {
-        const signer = mocks.TestSigner.from_seed(0);
-        self.io = io;
-        self.public_key = signer.public_key();
-        self.store_harness = try .init(gpa);
-        self.secrets = .init(gpa);
-        self.store = try self.store_harness.open(gpa, partition, &self.secrets);
-        self.consumer = .init(gpa);
-        self.provider = .{ .participants_value = try Set.from_dedup(gpa, &.{self.public_key}) };
-        self.manager = .{};
-        self.blocker = .init(gpa);
-        self.fence = Fence.init(io);
-        self.registry = .init(gpa);
-        const scope = metrics.Scope.init(&self.registry).child("reshare");
-        self.actor, self.mailbox = try TestActor.init(gpa, io, &scope, .{
-            .signer = signer,
-            .manager = &self.manager,
-            .blocker = &self.blocker,
-            .participants_provider = &self.provider,
-            .strategy = .{},
-            .registrar = &self.consumer,
-            .marshal = .{},
-            .fence = &self.fence,
-            .namespace = namespace,
-            .sharing_mode = .non_zero_counter,
-            .reveal = .v1,
-            .mailbox_size = 16,
-            .max_participants = 16,
-            .blocks_per_epoch = blocks_per_epoch,
-        });
-    }
+/// `Harness` over an actor of `Types`, which differ from `mocks.ActorTypes` at most in
+/// `Ancestry`.
+pub fn HarnessOf(comptime Types: type) type {
+    return struct {
+        const Self = @This();
+        pub const Actor = actor_mod.Actor(Types);
 
-    pub fn deinit(self: *Harness) void {
-        self.mailbox.deinit();
-        self.actor.deinit();
-        self.registry.deinit();
-        self.fence.close();
-        self.blocker.deinit();
-        self.provider.participants_value.deinit(gpa);
-        self.consumer.deinit();
-        self.store.deinit();
-        self.secrets.deinit();
-        self.store_harness.deinit();
-    }
+        io: Io,
+        store_harness: mocks.StoreHarness,
+        secrets: mocks.MemorySecretStore,
+        store: Actor.Store,
+        consumer: mocks.MockConsumer,
+        provider: mocks.StaticParticipants,
+        manager: mocks.InertManager = .{},
+        blocker: mocks.MockBlocker,
+        fence: Fence,
+        registry: metrics.Registry,
+        actor: Actor,
+        mailbox: Actor.Mailbox,
+        public_key: mocks.TestPublicKey,
 
-    /// Reports a finalized block (a new handle) and returns its acknowledgement's waiter.
-    pub fn deliver(self: *Harness, block: *const Digested) !Exact.Waiter {
-        const handle = try Exact.handle(gpa, self.io);
-        const Update = consensus.marshal.Update(mocks.TestBlock, Exact);
-        const ack = handle.acknowledgement;
-        const update: Update = .{ .block = .{ .block = block.clone(), .ack = ack } };
-        _ = self.mailbox.report(update);
-        return handle.waiter;
-    }
-
-    /// The chain genesis, child, child, ... of `len` blocks led by this node.
-    pub fn chain(self: *Harness, blocks: []Digested) !void {
-        var raw = mocks.genesis_block(self.public_key);
-        for (blocks) |*block| {
-            block.* = try Digested.precomputed(gpa, raw, raw.digest());
-            raw = mocks.child(&raw);
+        pub fn init(self: *Self, io: Io, partition: []const u8, blocks_per_epoch: u64) !void {
+            const signer = mocks.TestSigner.from_seed(0);
+            self.io = io;
+            self.public_key = signer.public_key();
+            self.store_harness = try .init(gpa);
+            self.secrets = .init(gpa);
+            self.store = try self.store_harness.open(gpa, partition, &self.secrets);
+            self.consumer = .init(gpa);
+            self.provider = .{ .participants_value = try Set.from_dedup(gpa, &.{self.public_key}) };
+            self.manager = .{};
+            self.blocker = .init(gpa);
+            self.fence = Fence.init(io);
+            self.registry = .init(gpa);
+            const scope = metrics.Scope.init(&self.registry).child("reshare");
+            self.actor, self.mailbox = try Actor.init(gpa, io, &scope, .{
+                .signer = signer,
+                .manager = &self.manager,
+                .blocker = &self.blocker,
+                .participants_provider = &self.provider,
+                .strategy = .{},
+                .registrar = &self.consumer,
+                .marshal = .{},
+                .fence = &self.fence,
+                .namespace = namespace,
+                .sharing_mode = .non_zero_counter,
+                .reveal = .v1,
+                .mailbox_size = 16,
+                .max_participants = 16,
+                .blocks_per_epoch = blocks_per_epoch,
+            });
         }
-    }
 
-    /// Epoch `epoch`'s info over this node alone, with a trusted output dealt from seed zero.
-    pub fn singleton_info(self: *Harness, epoch: u64) !TestActor.Info {
-        var rng = utils.rng.TestRng.init(0);
-        const participants = try Set.from_dedup(gpa, &.{self.public_key});
-        const V = mocks.TestBlsVariant;
-        const P = mocks.TestPublicKey;
-        var dealt = try fd.deal(V, P, utils.N3f1, gpa, &rng, .non_zero_counter, participants);
-        for (dealt.shares.values) |*share| share.private.zeroize();
-        dealt.shares.deinit(gpa);
-        return .{
-            .outcome = .success,
-            .epoch = .new(epoch),
-            .output = dealt.output,
-            .players = try dealt.output.players.clone(gpa),
-            .next_players = try dealt.output.players.clone(gpa),
-            .directory = .{},
-        };
-    }
+        pub fn deinit(self: *Self) void {
+            self.mailbox.deinit();
+            self.actor.deinit();
+            self.registry.deinit();
+            self.fence.close();
+            self.blocker.deinit();
+            self.provider.participants_value.deinit(gpa);
+            self.consumer.deinit();
+            self.store.deinit();
+            self.secrets.deinit();
+            self.store_harness.deinit();
+        }
 
-    /// The canonical child of `parent` carrying `info` (copied).
-    pub fn boundary(self: *Harness, parent: *const Digested, info: TestActor.Info) !Digested {
-        _ = self;
-        const raw = try mocks.child(parent.inner()).with_payload(gpa, 16, .{ .epoch_info = info });
-        return Digested.precomputed(gpa, raw, raw.digest());
-    }
-};
+        /// Reports a finalized block (a new handle) and returns its acknowledgement's waiter.
+        pub fn deliver(self: *Self, block: *const Digested) !Exact.Waiter {
+            const handle = try Exact.handle(gpa, self.io);
+            const Update = consensus.marshal.Update(mocks.TestBlock, Exact);
+            const ack = handle.acknowledgement;
+            const update: Update = .{ .block = .{ .block = block.clone(), .ack = ack } };
+            _ = self.mailbox.report(update);
+            return handle.waiter;
+        }
+
+        /// The chain genesis, child, child, ... of `len` blocks led by this node.
+        pub fn chain(self: *Self, blocks: []Digested) !void {
+            var raw = mocks.genesis_block(self.public_key);
+            for (blocks) |*block| {
+                block.* = try Digested.precomputed(gpa, raw, raw.digest());
+                raw = mocks.child(&raw);
+            }
+        }
+
+        /// Epoch `epoch`'s info over this node alone, with a trusted output dealt from seed zero.
+        pub fn singleton_info(self: *Self, epoch: u64) !Actor.Info {
+            var rng = utils.rng.TestRng.init(0);
+            const participants = try Set.from_dedup(gpa, &.{self.public_key});
+            const V = mocks.TestBlsVariant;
+            const P = mocks.TestPublicKey;
+            var dealt = try fd.deal(V, P, utils.N3f1, gpa, &rng, .non_zero_counter, participants);
+            for (dealt.shares.values) |*share| share.private.zeroize();
+            dealt.shares.deinit(gpa);
+            return .{
+                .outcome = .success,
+                .epoch = .new(epoch),
+                .output = dealt.output,
+                .players = try dealt.output.players.clone(gpa),
+                .next_players = try dealt.output.players.clone(gpa),
+                .directory = .{},
+            };
+        }
+
+        /// The canonical child of `parent` carrying `info` (copied).
+        pub fn boundary(self: *Self, parent: *const Digested, info: Actor.Info) !Digested {
+            _ = self;
+            const payload: mocks.TestBlock.Payload = .{ .epoch_info = info };
+            const raw = try mocks.child(parent.inner()).with_payload(gpa, 16, payload);
+            return Digested.precomputed(gpa, raw, raw.digest());
+        }
+    };
+}
 
 fn free_blocks(blocks: []Digested) void {
     for (blocks) |*block| block.deinit();

@@ -11,7 +11,7 @@ const p2p = @import("p2p");
 const utils = @import("utils");
 const mocks = @import("../../tests/mocks.zig");
 const actor_test = @import("actor_test.zig");
-const dealing = @import("dealing.zig");
+const dealing_mod = @import("dealing.zig");
 const window = @import("inclusion_window.zig");
 
 const Epoch = consensus.Epoch;
@@ -20,68 +20,101 @@ const P = mocks.TestPublicKey;
 const V = mocks.TestBlsVariant;
 const Set = utils.ordered.Set(P);
 const N3f1 = utils.N3f1;
+const Summary = cryptography.transcript.Summary;
 const fd = cryptography.bls12381.dkg.feldman_desmedt;
 const Harness = actor_test.Harness;
 const TestActor = @import("actor.zig").Actor(mocks.ActorTypes);
 const Digested = TestActor.Digested;
-const Dealing = dealing.Window(mocks.ActorTypes);
-const Inclusion = window.Window(mocks.ActorTypes);
 const gpa = testing.allocator;
 const namespace = "_COMMONWARE_GLUE_DKG_RESHARE_INCLUSION_TEST";
 
 /// A singleton harness switched to one-shot DKG mode, with epoch zero's round.
-const Fixture = struct {
-    h: Harness,
-    round: fd.Info(V, P),
+const Fixture = FixtureOf(mocks.ActorTypes);
 
-    fn init(self: *Fixture, io: Io, partition: []const u8, length: u64) !void {
-        try self.h.init(io, partition, length);
-        errdefer self.h.deinit();
-        const key = self.h.public_key;
-        const participants = try Set.from_dedup(gpa, &.{key});
-        self.h.actor.mode = .{ .dkg = .{ .participants = participants, .directory = .{} } };
-        const mode = .non_zero_counter;
-        const dealers = try Set.from_dedup(gpa, &.{key});
-        const players = try Set.from_dedup(gpa, &.{key});
-        self.round = try .init(N3f1, gpa, namespace, 0, null, mode, .v1, dealers, players);
-    }
+/// `Fixture` over an actor of `Types` (`mocks.ActorTypes` with another `Ancestry`).
+fn FixtureOf(comptime Types: type) type {
+    return struct {
+        const Self = @This();
+        const H = actor_test.HarnessOf(Types);
+        const Block = H.Actor.Digested;
+        const Dealing = dealing_mod.Window(Types);
+        const Inclusion = window.Window(Types);
 
-    fn deinit(self: *Fixture) void {
-        self.round.deinit(gpa);
-        self.h.deinit();
-    }
+        h: H,
+        round: fd.Info(V, P),
 
-    fn dealing(self: *Fixture, epoch: u64) !Dealing.Outcome {
-        const peers = (&self.h.public_key)[0..1];
-        var channel = p2p.utils.mocks.inert_channel(P, gpa, self.h.io, peers);
-        const session: Dealing.Session = .{
-            .epoch = .new(epoch),
-            .store = &self.h.store,
-            .dealer = null,
-            .player = null,
-        };
-        return Dealing.dealing(&self.h.actor, session, &channel.sender, &channel.receiver);
-    }
-
-    fn inclusion(self: *Fixture, requests: Inclusion.Requests) !@import("actor.zig").Flow {
-        const session: Inclusion.Session = .{
-            .epoch = .zero(),
-            .info = &self.round,
-            .store = &self.h.store,
-            .dealer = null,
-        };
-        return Inclusion.inclusion_window(&self.h.actor, session, requests);
-    }
-
-    /// Delivers `blocks[index]` for each index and returns the waiters.
-    fn deliver(self: *Fixture, blocks: []const Digested, indices: []const usize) ![4]Exact.Waiter {
-        var waiters: [4]Exact.Waiter = undefined;
-        for (indices, waiters[0..indices.len]) |index, *waiter| {
-            waiter.* = try self.h.deliver(&blocks[index]);
+        fn init(self: *Self, io: Io, partition: []const u8, length: u64) !void {
+            try self.h.init(io, partition, length);
+            errdefer self.h.deinit();
+            const key = self.h.public_key;
+            const participants = try Set.from_dedup(gpa, &.{key});
+            self.h.actor.mode = .{ .dkg = .{ .participants = participants, .directory = .{} } };
+            const mode = .non_zero_counter;
+            const dealers = try Set.from_dedup(gpa, &.{key});
+            const players = try Set.from_dedup(gpa, &.{key});
+            self.round = try .init(N3f1, gpa, namespace, 0, null, mode, .v1, dealers, players);
         }
-        return waiters;
-    }
-};
+
+        /// This node's signed log for `round`, after dealing to itself through the store
+        /// (commonware's harness completes self-dealing the same way).
+        fn self_log(self: *Self) !fd.SignedDealerLog(V, P) {
+            const signer = mocks.TestSigner.from_seed(0);
+            const store = &self.h.store;
+            const key = self.h.public_key;
+            const summary: Summary = .{ .bytes = @splat(2) };
+            const S = mocks.TestSigner;
+            const round = &self.round;
+            const created = try store.create_dealer(N3f1, S, .zero(), signer, round, null, summary);
+            var dealer = created orelse return error.ExpectedDealer;
+            defer dealer.deinit();
+            const joined = try store.create_player(N3f1, S, .zero(), signer, &self.round);
+            var player = joined orelse return error.ExpectedPlayer;
+            defer player.deinit();
+            const item = dealer.shares_to_distribute()[0];
+            std.debug.assert(item.player.eql(key));
+            const ack = try player.handle(store, .zero(), key, dealer.public, item.msg);
+            try testing.expectEqual(.recorded, try dealer.handle(store, .zero(), key, ack));
+            try testing.expect(try dealer.finalize(N3f1));
+            return dealer.finalized.?.clone(gpa);
+        }
+
+        fn deinit(self: *Self) void {
+            self.round.deinit(gpa);
+            self.h.deinit();
+        }
+
+        fn dealing(self: *Self, epoch: u64) !Dealing.Outcome {
+            const peers = (&self.h.public_key)[0..1];
+            var channel = p2p.utils.mocks.inert_channel(P, gpa, self.h.io, peers);
+            const session: Dealing.Session = .{
+                .epoch = .new(epoch),
+                .store = &self.h.store,
+                .dealer = null,
+                .player = null,
+            };
+            return Dealing.dealing(&self.h.actor, session, &channel.sender, &channel.receiver);
+        }
+
+        fn inclusion(self: *Self, requests: Inclusion.Requests) !@import("actor.zig").Flow {
+            const session: Inclusion.Session = .{
+                .epoch = .zero(),
+                .info = &self.round,
+                .store = &self.h.store,
+                .dealer = null,
+            };
+            return Inclusion.inclusion_window(&self.h.actor, session, requests);
+        }
+
+        /// Delivers `blocks[index]` for each index and returns the waiters.
+        fn deliver(self: *Self, blocks: []const Block, indices: []const usize) ![4]Exact.Waiter {
+            var waiters: [4]Exact.Waiter = undefined;
+            for (indices, waiters[0..indices.len]) |index, *waiter| {
+                waiter.* = try self.h.deliver(&blocks[index]);
+            }
+            return waiters;
+        }
+    };
+}
 
 fn expect_acknowledged(waiters: []Exact.Waiter) !void {
     for (waiters) |*waiter| {
@@ -167,6 +200,230 @@ test "inclusion: a request held through dealing is answered on entry (pr 5263)" 
             if (running.cancel(io)) |_| {} else |_| {}
             try testing.expect(response == .available);
             try testing.expect(response.available.payload == null);
+        }
+    }.body);
+}
+
+/// Released and first-read signals shared by a gated ancestry and its clones.
+const Gate = struct {
+    io: Io,
+    started: Io.Event = .unset,
+    released: Io.Event = .unset,
+
+    fn release(gate: *Gate) void {
+        std.debug.assert(!gate.released.isSet());
+        gate.released.set(gate.io);
+    }
+};
+
+/// A fixed ancestry, newest first, whose reads wait for its gate when it has one (commonware
+/// `GatedAncestry`); it peeks nothing until the gate opens.
+const Gated = struct {
+    pub const Block = mocks.TestBlock;
+    const D = TestActor.Digested;
+
+    blocks: [2]D = undefined,
+    head: usize = 0,
+    len: usize = 0,
+    gate: ?*Gate = null,
+
+    /// Takes new handles to `blocks`.
+    fn init(blocks: []const D, gate: ?*Gate) Gated {
+        std.debug.assert(blocks.len > 0 and blocks.len <= 2);
+        var result: Gated = .{ .len = blocks.len, .gate = gate };
+        for (blocks, result.blocks[0..blocks.len]) |block, *copy| copy.* = block.clone();
+        return result;
+    }
+
+    fn opened(self: *const Gated) bool {
+        const gate = self.gate orelse return true;
+        return gate.released.isSet();
+    }
+
+    pub fn peek(self: *const Gated) ?*const D {
+        std.debug.assert(self.head <= self.len);
+        if (!self.opened() or self.head == self.len) return null;
+        return &self.blocks[self.head];
+    }
+
+    pub fn next(self: *Gated) Io.Cancelable!?D {
+        std.debug.assert(self.head <= self.len);
+        if (self.gate) |gate| {
+            gate.started.set(gate.io);
+            try gate.released.wait(gate.io);
+        }
+        if (self.head == self.len) return null;
+        self.head += 1;
+        return self.blocks[self.head - 1];
+    }
+
+    pub fn clone(self: *const Gated) std.mem.Allocator.Error!Gated {
+        var copy = self.*;
+        const live = self.blocks[self.head..self.len];
+        for (live, copy.blocks[self.head..self.len]) |block, *handle| handle.* = block.clone();
+        return copy;
+    }
+
+    pub fn deinit(self: *Gated) void {
+        std.debug.assert(self.head <= self.len);
+        for (self.blocks[self.head..self.len]) |*block| block.deinit();
+        self.* = undefined;
+    }
+};
+
+const GatedTypes = struct {
+    pub const Block = mocks.ActorTypes.Block;
+    pub const Ack = mocks.ActorTypes.Ack;
+    pub const Ancestry = Gated;
+    pub const Signer = mocks.ActorTypes.Signer;
+    pub const Manager = mocks.ActorTypes.Manager;
+    pub const Blocker = mocks.ActorTypes.Blocker;
+    pub const Provider = mocks.ActorTypes.Provider;
+    pub const SecretStore = mocks.ActorTypes.SecretStore;
+    pub const Registrar = mocks.ActorTypes.Registrar;
+    pub const Marshal = mocks.ActorTypes.Marshal;
+    pub const Strategy = mocks.ActorTypes.Strategy;
+};
+const GatedFixture = FixtureOf(GatedTypes);
+const GatedResponse = GatedFixture.H.Actor.Mailbox.Response;
+
+/// An `epoch_info` request running in its own task; `done` is set once it answered.
+const Asked = struct {
+    done: std.atomic.Value(bool) = .init(false),
+    task: Io.Future(anyerror!GatedResponse) = undefined,
+
+    fn start(self: *Asked, io: Io, f: *GatedFixture, ancestry: Gated) !void {
+        self.done = .init(false);
+        self.task = try io.concurrent(run, .{ self, f, ancestry });
+    }
+
+    fn run(self: *Asked, f: *GatedFixture, ancestry: Gated) anyerror!GatedResponse {
+        defer self.done.store(true, .release);
+        return f.h.mailbox.epoch_info(ancestry);
+    }
+
+    fn answered(self: *const Asked) bool {
+        return self.done.load(.acquire);
+    }
+
+    /// Awaits the answer and checks it: `null` expects unavailable, otherwise an available
+    /// response whose payload presence is `expected.?`.
+    fn expect(self: *Asked, io: Io, expected: ?bool) !void {
+        var response = try self.task.await(io);
+        defer response.deinit();
+        if (expected) |has_payload| {
+            try testing.expect(response == .available);
+            try testing.expectEqual(has_payload, response.available.payload != null);
+        } else {
+            try testing.expect(response == .unavailable);
+        }
+    }
+};
+
+fn gated_block(parent: mocks.TestDigest, height: u64, timestamp: u64) mocks.TestBlock {
+    const genesis = mocks.genesis_block(mocks.TestSigner.from_seed(0).public_key());
+    return .init(genesis.context(), parent, .new(height), timestamp);
+}
+
+fn ready(raw: mocks.TestBlock) !TestActor.Digested {
+    return TestActor.Digested.precomputed(gpa, raw, raw.digest());
+}
+
+fn run_inclusion(f: *GatedFixture) anyerror!@import("actor.zig").Flow {
+    return f.inclusion(.empty);
+}
+
+/// Reports `block` and waits for its acknowledgement.
+fn finalize(f: *GatedFixture, block: *const TestActor.Digested) !void {
+    var waiter = try f.h.deliver(block);
+    defer waiter.deinit();
+    try waiter.wait();
+}
+
+const Histories = struct {
+    canonical: [4]TestActor.Digested,
+    detached: [2]TestActor.Digested,
+
+    fn deinit(self: *Histories) void {
+        free_blocks(&self.canonical);
+        free_blocks(&self.detached);
+    }
+};
+
+/// The canonical chain's midpoint, fourth, and final blocks (heights 3 to 5 of a six-block
+/// epoch, at indices 0 to 2, and the height-2 block at 3), and a detached midpoint carrying
+/// `log` with its child.
+fn histories(log: fd.SignedDealerLog(V, P)) !Histories {
+    const genesis = mocks.genesis_block(mocks.TestSigner.from_seed(0).public_key());
+    const common = gated_block(genesis.digest(), 1, 1);
+    const two = gated_block(common.digest(), 2, 2);
+    const mid = gated_block(two.digest(), 3, 3);
+    const four = gated_block(mid.digest(), 4, 4);
+    const last = gated_block(four.digest(), 5, 5);
+    const detached_mid = try gated_block(two.digest(), 3, 6).with_payload(gpa, 16, .{
+        .dealer_log = log,
+    });
+    const detached_four = gated_block(detached_mid.digest(), 4, 7);
+    return .{
+        .canonical = .{ try ready(mid), try ready(four), try ready(last), try ready(two) },
+        .detached = .{ try ready(detached_four), try ready(detached_mid) },
+    };
+}
+
+// commonware `unanchored_or_delayed_ancestry_does_not_block_finalization`: a request waits
+// for an anchor, a gated ancestry never holds up finalized reporting, and a scan the final
+// block overtakes answers unavailable.
+test "inclusion: unanchored or delayed ancestry does not block finalization" {
+    try actor_test.run(struct {
+        fn body(io: Io) anyerror!void {
+            var f: GatedFixture = undefined;
+            try f.init(io, "inclusion-actor", 6);
+            defer f.deinit();
+            var log = try f.self_log();
+            defer log.deinit(gpa);
+            var h = try histories(log);
+            defer h.deinit();
+            const mid = &h.canonical[0];
+            const four = &h.canonical[1];
+            const last = &h.canonical[2];
+
+            // The detached request arrives before the window starts and waits for an anchor.
+            var detached: Asked = .{};
+            try detached.start(io, &f, .init(&h.detached, null));
+            var inclusion = try io.concurrent(run_inclusion, .{&f});
+            defer _ = inclusion.cancel(io) catch {};
+            // A verification candidate without its parent is truncated.
+            var malformed: Asked = .{};
+            try malformed.start(io, &f, .init(last[0..1], null));
+            try io.sleep(.fromMilliseconds(50), .awake);
+            try testing.expect(!detached.answered());
+            try testing.expect(!malformed.answered());
+
+            // Finalizing the canonical midpoint anchors the scans: the detached history
+            // conflicts with it, and the malformed one lacks its parent.
+            try finalize(&f, mid);
+            try detached.expect(io, null);
+            try malformed.expect(io, null);
+
+            // While a scan waits for its parent, finalized reporting continues.
+            var gate: Gate = .{ .io = io };
+            var canonical: Asked = .{};
+            try canonical.start(io, &f, .init(four[0..1], &gate));
+            try gate.started.wait(io);
+            try finalize(&f, four);
+            try testing.expect(!canonical.answered());
+            gate.release();
+            try canonical.expect(io, false);
+
+            // A scan the final block overtakes stays unresolved, then reads as unavailable.
+            var terminal_gate: Gate = .{ .io = io };
+            var terminal: Asked = .{};
+            try terminal.start(io, &f, .init(four[0..1], &terminal_gate));
+            try terminal_gate.started.wait(io);
+            try finalize(&f, last);
+            try terminal.expect(io, null);
+            try testing.expectEqual(.proceed, try inclusion.await(io));
+            try testing.expect(f.h.store.current_info() == null);
         }
     }.body);
 }
