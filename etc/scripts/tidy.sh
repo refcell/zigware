@@ -54,7 +54,7 @@ if grep -qE '^\s*\.[a-z_]+\s*=\s*\.\{\s*\.url' build.zig.zon; then
   echo "tidy: build.zig.zon must have no dependencies"; fail=1
 fi
 
-# README links, images, and anchors resolve locally (about 30 ms): `just check-links`.
+# Markdown links, images, and anchors resolve locally (under 0.2 s): `just check-links`.
 python3 -I etc/scripts/check-links.py >/dev/null || { python3 -I etc/scripts/check-links.py; fail=1; }
 
 [ "$fail" -eq 0 ] && echo "tidy: ok"

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Checks the links of README.md and examples/*/README.md against the local tree.
+"""Checks the links of the repository's Markdown against the local tree: README.md,
+examples/*/README.md, docs/*.md, docs/lanes/*.md, and every README.md under src/.
 
 Usage: check-links.py [markdown files]
 
@@ -79,7 +80,8 @@ def check_target(source, target):
 
 def main(argv):
     files = [Path(a).resolve() for a in argv] or [ROOT / "README.md"] + sorted(
-        (ROOT / "examples").glob("*/README.md"))
+        [*ROOT.glob("examples/*/README.md"), *ROOT.glob("docs/*.md"),
+         *ROOT.glob("docs/lanes/*.md"), *ROOT.glob("src/**/README.md")])
     checked, errors = 0, []
     for source in files:
         text = strip_code(source.read_text())
