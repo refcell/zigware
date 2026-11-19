@@ -311,7 +311,10 @@ line, with where its Zig counterpart lives. Coding's in-progress owners: 24 exam
 (`mocks/scenarios.zig`, `scenarios_queries.zig`, `scenarios_recoverable.zig`) and run through
 the standard wrappers above. `conformance.rs`'s StandardStorageConformance workload is in
 `marshal/conformance.zig` (hash unreachable, see Log); CodingStorageConformance is the
-coding lane's. Not portable: the 8 `should_panic` tests (7 standard, 1 coding), because a Zig
+coding lane's. Commonware has no marshal fuzz targets; AGENTS.md's fuzz bodies
+(seeded and `std.testing.fuzz`, each with a planted bug caught) cover the resolver `Key`
+codec, `Annotation` order, standard `decode_block`, `DispatchGate`, `PendingAcks`, `Staged`,
+the mailbox overflow policy, and the ancestor stream. Not portable: the 8 `should_panic` tests (7 standard, 1 coding), because a Zig
 test cannot catch a panic (zigware panics with commonware's message in the floor and genesis
 cases, and returns the storage error, stopping the actor, in the sync-failure cases);
 `cache_writes_do_not_clone_block_payloads`
@@ -617,8 +620,8 @@ job to gate, and `mocks/strategy.rs`'s GatedStrategy has no other user).
 - L6333 `test_certify_releases_conflicting_reproposal`: in progress (runtime)
 
 ## Backlog
-- [ ] Marshal fuzz outside coding/ (`marshal/fuzz.zig`: handler Key/Annotation, standard
-  decode_block, DispatchGate, PendingAcks, staged, mailbox overflow, ancestry): bls-math.
+- [x] Marshal fuzz outside coding/ (`marshal/fuzz.zig`; overflow policy in
+  `core/mailbox_test.zig`, ancestor stream in `ancestry.zig`).
 - [x] Pool the finalized-archive sync (`actor_finalize.start_finalized_sync` runs inline;
   commonware pools it). Then flip `pooled_finalized_sync` in `standard/tests/dispatch.zig`
   (3 skipped tests: mailbox not blocked by a sync, per-batch release, stale floor anchor).
@@ -719,3 +722,6 @@ job to gate, and `mocks/strategy.rs`'s GatedStrategy has no other user).
   is deterministic per seed, but commonware's hash (e22663c9) is unreachable: the workload's
   block count and timestamps come from the runtime RNG the scheduler shuffles with, and
   zigware's actor runs a different task set, so the streams diverge (checked: hash differs).
+- 2026-11-19: marshal fuzz: 8 bodies, each against a model or round trip, each catching a
+  planted bug. The mock `Block` carries its digest in its encoding (as commonware's), so
+  decode_block's mutation property runs on `EmptyBlock`, which digests every field.

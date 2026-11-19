@@ -27,4 +27,5 @@ pub const Update = update.Update;
 
 test {
     std.testing.refAllDecls(@This());
+    _ = @import("fuzz.zig");
 }

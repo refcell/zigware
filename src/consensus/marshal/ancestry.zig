@@ -741,3 +741,85 @@ test "missing parent ends stream" {
     try expect_next(&stream, block3);
     try expect_next(&stream, null);
 }
+
+const chain_max = 16;
+
+/// A random chain, oldest first: each block names the one before it, its height usually one
+/// above, sometimes two (a height gap the stream must stop at). Some blocks are withheld from
+/// the provider (a missing parent).
+const FuzzChain = struct {
+    blocks: [chain_max]TestBlock,
+    known: [chain_max]TestBlock,
+    len: usize,
+    known_len: usize,
+    withheld: [chain_max]bool,
+
+    fn draw(draws: @import("codec").fuzz.Draws) FuzzChain {
+        var chain: FuzzChain = undefined;
+        chain.len = draws.range_at_most(usize, 1, chain_max);
+        var height = draws.range_at_most(u64, 0, 3);
+        var parent = empty;
+        for (chain.blocks[0..chain.len], 0..) |*block, index| {
+            if (index > 0) height += if (draws.range_at_most(u8, 0, 7) == 0) 2 else 1;
+            block.* = block_at(parent, height, draws.value(u64));
+            parent = block.digest();
+        }
+        chain.known_len = 0;
+        // The newest block starts the stream; the rest may be withheld.
+        for (chain.blocks[0..chain.len], 0..) |block, index| {
+            const top = index == chain.len - 1;
+            chain.withheld[index] = !top and draws.range_at_most(u8, 0, 7) == 0;
+            if (chain.withheld[index]) continue;
+            chain.known[chain.known_len] = block;
+            chain.known_len += 1;
+        }
+        assert(chain.known_len >= 1);
+        return chain;
+    }
+
+    /// How many blocks the stream yields, newest first: down to genesis, a withheld parent,
+    /// or a parent whose height is not one below its child.
+    fn expected_yields(chain: *const FuzzChain) usize {
+        var count: usize = 1;
+        var index = chain.len - 1;
+        while (index > 0) : (index -= 1) {
+            const child = &chain.blocks[index];
+            if (child.height().get() == 0) break;
+            if (chain.withheld[index - 1]) break;
+            if (!has_contiguous_height(chain.blocks[index - 1].height(), child.height())) break;
+            count += 1;
+        }
+        return count;
+    }
+};
+
+fn fuzz_ancestor_stream(_: void, smith: *std.testing.Smith) anyerror!void {
+    const draws: @import("codec").fuzz.Draws = .init(smith);
+    const chain = FuzzChain.draw(draws);
+    var state: ProviderState = .{ .known = chain.known[0..chain.known_len] };
+    defer state.deinit();
+    var stream = try stream_of(&state, &.{chain.blocks[chain.len - 1]});
+    defer stream.deinit();
+    const expected = chain.expected_yields();
+    const clone_at = draws.range_at_most(usize, 0, expected);
+    var copy: ?TestStream = null;
+    defer if (copy) |*value| value.deinit();
+    for (0..expected) |offset| {
+        if (offset == clone_at) copy = try stream.clone();
+        const want = chain.blocks[chain.len - 1 - offset];
+        if (stream.peek()) |peeked| try testing.expect(peeked.inner().eql(want));
+        try expect_next(&stream, want);
+    }
+    try expect_next(&stream, null);
+    // A clone taken partway yields the same remaining blocks, then ends.
+    if (copy) |*value| {
+        for (clone_at..expected) |offset| {
+            try expect_next(value, chain.blocks[chain.len - 1 - offset]);
+        }
+        try expect_next(value, null);
+    }
+}
+
+test "fuzz ancestor stream against a chain model" {
+    try @import("codec").fuzz.run({}, fuzz_ancestor_stream, 0xA5CE, 256);
+}

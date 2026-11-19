@@ -163,7 +163,7 @@ const Collector = struct {
     items: std.ArrayList(TestMessage),
 
     fn init() !Collector {
-        return .{ .items = try .initCapacity(gpa, 16) };
+        return .{ .items = try .initCapacity(gpa, fuzz_steps_max + 2) };
     }
 
     pub fn push(self: *Collector, value: TestMessage) ?TestMessage {
@@ -724,4 +724,163 @@ test "ancestry from a closed mailbox is missing" {
     var stream = try closed.ancestor_stream(&.{try block(3)}, null);
     defer stream.deinit();
     try testing.expectEqual(3, stream.peek().?.inner().height().get());
+}
+
+const fuzz_steps_max = 32;
+const fuzz_heights = 16;
+const fuzz_keys = 3;
+
+/// The overflow policy's model: the highest floor and prune, and the queue in arrival order,
+/// with each hint height's targets unioned at its first arrival.
+const PolicyModel = struct {
+    const Entry = struct { tag: std.meta.Tag(Body), height: u64, receiver: ?usize };
+
+    floor: ?u64 = null,
+    prune: ?u64 = null,
+    entries: [fuzz_steps_max]Entry = undefined,
+    len: usize = 0,
+    /// Per hint height, the targets as a bitmask over the fuzz keys (zero: no pending hint).
+    hints: [fuzz_heights]u8 = @splat(0),
+
+    fn push(self: *PolicyModel, entry: Entry) void {
+        self.entries[self.len] = entry;
+        self.len += 1;
+    }
+
+    /// Whether `entry` survives to the drain, given which receivers are open.
+    fn kept(self: *const PolicyModel, entry: Entry, open: []const bool) bool {
+        const pruned = self.prune orelse return entry.receiver == null or open[entry.receiver.?];
+        return switch (entry.tag) {
+            .get_finalization => entry.height >= pruned and open[entry.receiver.?],
+            .hint_finalized => entry.height > pruned,
+            else => true,
+        };
+    }
+};
+
+const PolicyFuzz = struct {
+    overflow: TestPending = .empty,
+    model: PolicyModel = .{},
+    receivers: [fuzz_steps_max]oneshot.Receiver(?TestMessage.Finalization) = undefined,
+    open: [fuzz_steps_max]bool = @splat(false),
+    receiver_count: usize = 0,
+
+    fn deinit(self: *PolicyFuzz) void {
+        self.overflow.deinit(gpa);
+        for (self.receivers[0..self.receiver_count], self.open[0..self.receiver_count]) |*r, o| {
+            if (o) r.deinit();
+        }
+    }
+
+    fn step(self: *PolicyFuzz, draws: @import("codec").fuzz.Draws) !void {
+        const height = draws.range_less_than(u64, 0, fuzz_heights);
+        switch (draws.range_at_most(u8, 0, 5)) {
+            0 => {
+                const request = try get_finalization(height);
+                const index = self.receiver_count;
+                self.receivers[index] = request.receiver;
+                self.open[index] = true;
+                self.receiver_count += 1;
+                const stale = if (self.model.prune) |p| height < p else false;
+                try handle(&self.overflow, request.message);
+                if (stale) return;
+                self.model.push(.{ .tag = .get_finalization, .height = height, .receiver = index });
+            },
+            1 => {
+                const key = draws.range_less_than(u8, 0, fuzz_keys);
+                try handle(&self.overflow, try hint_finalized(height, public_key(key)));
+                if (self.model.prune) |p| if (height <= p) return;
+                if (self.model.hints[height] == 0) {
+                    const entry: PolicyModel.Entry = .{
+                        .tag = .hint_finalized,
+                        .height = height,
+                        .receiver = null,
+                    };
+                    self.model.push(entry);
+                }
+                self.model.hints[height] |= @as(u8, 1) << @intCast(key);
+            },
+            2 => {
+                try handle(&self.overflow, set_floor(height));
+                const raises = self.model.floor == null or self.model.floor.? < height;
+                if (raises) self.model.floor = height;
+            },
+            3 => {
+                try handle(&self.overflow, prune(height));
+                if (self.model.prune == null or self.model.prune.? < height) {
+                    self.model.prune = height;
+                    for (self.model.hints[0 .. height + 1]) |*mask| mask.* = 0;
+                }
+            },
+            4 => {
+                try handle(&self.overflow, hint_notarized(height));
+                self.model.push(.{ .tag = .hint_notarized, .height = height, .receiver = null });
+            },
+            else => if (self.receiver_count > 0) {
+                // A caller drops its response receiver while the request is queued.
+                const index = draws.index(self.receiver_count);
+                if (!self.open[index]) return;
+                self.receivers[index].deinit();
+                self.open[index] = false;
+            },
+        }
+    }
+
+    /// Drains the overflow and checks it hands out the model's floor, prune, and queue.
+    fn check_drain(self: *PolicyFuzz) !void {
+        var drained = try drain(&self.overflow);
+        defer drained.deinit();
+        const items = drained.items.items;
+        var position: usize = 0;
+        if (self.model.floor) |height| {
+            try expect_floor(items[position], height);
+            position += 1;
+        }
+        if (self.model.prune) |height| {
+            try expect_prune(items[position], height);
+            position += 1;
+        }
+        for (self.model.entries[0..self.model.len]) |entry| {
+            if (!self.model.kept(entry, &self.open)) continue;
+            if (position >= items.len) return error.TestPolicyDrainedTooFew;
+            const got = items[position];
+            position += 1;
+            try testing.expectEqual(entry.tag, std.meta.activeTag(got.body));
+            switch (got.body) {
+                .get_finalization => |body| {
+                    try testing.expectEqual(entry.height, body.height.get());
+                },
+                .hint_notarized => |body| try testing.expectEqual(round(entry.height), body.round),
+                .hint_finalized => |body| {
+                    try testing.expectEqual(entry.height, body.height.get());
+                    try expect_targets(self.model.hints[entry.height], body.targets);
+                },
+                else => return error.TestPolicyUnexpectedMessage,
+            }
+        }
+        try testing.expectEqual(items.len, position);
+        try testing.expect(self.overflow.is_empty());
+    }
+};
+
+/// `targets` holds exactly the fuzz keys in `mask`, each once.
+fn expect_targets(mask: u8, targets: []const Key) !void {
+    try testing.expectEqual(@as(usize, @popCount(mask)), targets.len);
+    for (0..fuzz_keys) |index| {
+        const wanted = mask & (@as(u8, 1) << @intCast(index)) != 0;
+        try testing.expectEqual(wanted, contains(targets, public_key(index)));
+    }
+}
+
+fn fuzz_policy(_: void, smith: *std.testing.Smith) anyerror!void {
+    const draws: @import("codec").fuzz.Draws = .init(smith);
+    var state: PolicyFuzz = .{};
+    defer state.deinit();
+    const steps = draws.range_at_most(usize, 0, fuzz_steps_max);
+    for (0..steps) |_| try state.step(draws);
+    try state.check_drain();
+}
+
+test "fuzz overflow policy against a model" {
+    try @import("codec").fuzz.run({}, fuzz_policy, 0x9011C, 256);
 }
