@@ -14,6 +14,7 @@ const testing = std.testing;
 const cryptography = @import("cryptography");
 const p2p = @import("p2p");
 const parallel = @import("parallel");
+const utils = @import("utils");
 const runtime = @import("runtime");
 const consensus_types = @import("../types.zig");
 const elector_mod = @import("elector.zig");
@@ -144,6 +145,15 @@ fn Params(comptime F: type) type {
     };
 }
 
+/// How a validator differs from commonware's honest-path defaults.
+const Options = struct {
+    /// Its application takes 10 s per step (commonware `slow_validator`).
+    slow: bool = false,
+    /// commonware `unclean_shutdown`'s short progress timeouts and retry, so a restarted
+    /// cluster times out of views it cannot finish.
+    short_timeouts: bool = false,
+};
+
 /// One validator's engine and mocks. Must not move once started.
 fn Validator(comptime F: type) type {
     const P = Params(F);
@@ -160,7 +170,13 @@ fn Validator(comptime F: type) type {
         handle: ?runtime.context.Handle(Engine.RunResult),
 
         /// commonware's engine configuration for the honest-path DSTs.
-        fn config(self: *Self, scheme: P.Scheme, blocker: Net.Control) Engine.Config {
+        fn config(
+            self: *Self,
+            scheme: P.Scheme,
+            blocker: Net.Control,
+            options: Options,
+        ) Engine.Config {
+            const short = options.short_timeouts;
             return .{
                 .scheme = scheme,
                 .elector = self.elector,
@@ -177,9 +193,9 @@ fn Validator(comptime F: type) type {
                 .replay_buffer = 1024 * 1024,
                 .write_buffer = 1024 * 1024,
                 .page_cache = &self.page_cache,
-                .leader_timeout = .from_secs(1),
-                .certification_timeout = .from_secs(2),
-                .timeout_retry = .from_secs(10),
+                .leader_timeout = if (short) .from_millis(500) else .from_secs(1),
+                .certification_timeout = if (short) .from_secs(1) else .from_secs(2),
+                .timeout_retry = if (short) .from_millis(500) else .from_secs(10),
                 .view_retention = .new(10),
                 .skip = .{ .enabled = .{ .timeout = .from_secs(11) } },
                 .fetch_timeout = .from_secs(1),
@@ -195,8 +211,9 @@ fn Validator(comptime F: type) type {
             fixture: anytype,
             index: usize,
             oracle: Net.Oracle,
-            slow: bool,
+            options: Options,
         ) !void {
+            const slow = options.slow;
             const io = ctx.io();
             const key = fixture.participants[index];
             const normal: application_mod.Latency = .{ .mean = 10, .std_dev = 5 };
@@ -222,7 +239,7 @@ fn Validator(comptime F: type) type {
                 channel.* = .{ .sender = registered.sender, .receiver = registered.receiver };
             }
             const scheme = fixture.schemes[index];
-            try self.engine.init(ctx, self.config(scheme, oracle.control(key)));
+            try self.engine.init(ctx, self.config(scheme, oracle.control(key), options));
             self.handle = try ctx.child("engine").spawn(Engine.run, .{
                 &self.engine, channels[0], channels[1], channels[2],
             });
@@ -262,12 +279,19 @@ fn Cluster(comptime F: type, comptime n: u32) type {
         running: [n]bool,
         /// The validator whose application takes 10 s per step, if any.
         slow: ?usize,
+        short_timeouts: bool,
 
         fn start(self: *Self, ctx: Context) !void {
+            var rng: IoRng = .{ .io = ctx.io() };
+            return self.start_with(ctx, &rng);
+        }
+
+        /// `start`, drawing the fixture from `rng`; a fixed rng keeps the same keys across
+        /// restarts (commonware `unclean_shutdown`).
+        fn start_with(self: *Self, ctx: Context, rng: anytype) !void {
             const io = ctx.io();
-            var rng: IoRng = .{ .io = io };
             self.ctx = ctx;
-            self.fixture = try F.fixture(&rng, n);
+            self.fixture = try F.fixture(rng, n);
             errdefer self.fixture.deinit(gpa);
             self.network = try Net.init(gpa, io, .{
                 .max_size = 1024 * 1024,
@@ -280,6 +304,7 @@ fn Cluster(comptime F: type, comptime n: u32) type {
             self.relay = .init(gpa, io);
             self.running = @splat(false);
             self.slow = null;
+            self.short_timeouts = false;
         }
 
         fn deinit(self: *Self) void {
@@ -312,9 +337,12 @@ fn Cluster(comptime F: type, comptime n: u32) type {
             const key = self.fixture.participants[index];
             validator_ctx.scope = scope.with_attribute("public_key", key);
             const validator = &self.validators[index];
-            const slow = self.slow == index;
+            const options: Options = .{
+                .slow = self.slow == index,
+                .short_timeouts = self.short_timeouts,
+            };
             const fixture = &self.fixture;
-            try validator.start(validator_ctx, &self.relay, fixture, index, self.oracle(), slow);
+            try validator.start(validator_ctx, &self.relay, fixture, index, self.oracle(), options);
             self.running[index] = true;
         }
 
@@ -363,6 +391,16 @@ fn Cluster(comptime F: type, comptime n: u32) type {
             for (&self.validators, self.running) |*validator, running| {
                 if (running) try validator.reporter.wait_for_finalized(.new(view));
             }
+        }
+
+        fn min_finalized(self: *Self) u64 {
+            var lowest: u64 = std.math.maxInt(u64);
+            for (&self.validators, self.running) |*validator, running| {
+                if (!running) continue;
+                lowest = @min(lowest, validator.reporter.latest_finalized().get());
+            }
+            assert(lowest != std.math.maxInt(u64)); // Some validator is running.
+            return lowest;
         }
 
         fn max_finalized(self: *Self) u64 {
@@ -597,6 +635,48 @@ fn all_crash_after_nullify(comptime F: type, ctx: Context) !void {
     try cluster.check(10);
 }
 
+/// One run of commonware `unclean_shutdown`: start every validator from its journal, stop
+/// them all at a random point within 2 s, and report whether all reached `required`.
+fn UncleanRun(comptime F: type) type {
+    return struct {
+        fn run(ctx: Context, required: u64) !bool {
+            return unclean_run(F, ctx, required);
+        }
+    };
+}
+
+fn unclean_run(comptime F: type, ctx: Context, required: u64) !bool {
+    var cluster: Cluster(F, 5) = undefined;
+    var rng = utils.rng.test_rng();
+    try cluster.start_with(ctx, &rng);
+    defer cluster.deinit();
+    cluster.short_timeouts = true;
+    try cluster.link_all(link_ms(50, 50, 1.0), null);
+    try cluster.start_all_but(null);
+    const random: IoRng = .{ .io = ctx.io() };
+    const wait_ms = 100 + random.next_u64() % 1900;
+    try ctx.sleep(.fromMilliseconds(@intCast(wait_ms)));
+    for (&cluster.validators) |*validator| validator.reporter.assert_no_faults();
+    const blocked = try cluster.oracle().blocked(gpa);
+    defer gpa.free(blocked);
+    try testing.expectEqual(0, blocked.len);
+    return cluster.min_finalized() >= required;
+}
+
+/// commonware `unclean_shutdown`: crash every validator repeatedly (each start after the
+/// first crashes storage, keeping only synced journal contents) until one run finalizes
+/// `required` views on all of them.
+fn unclean_shutdown(comptime F: type) !void {
+    var runner = try runtime.deterministic.Runner.init(gpa, .{ .seed = 0 });
+    defer runner.deinit();
+    const restarts_max = 200;
+    const required: u64 = if (full) 100 else 15;
+    const restarts = for (0..restarts_max) |restart| {
+        if (try (try runner.start_context(UncleanRun(F).run, .{required}))) break restart;
+    } else return error.TestUnexpectedResult;
+    try testing.expect(restarts > 0);
+}
+
 /// The quick slice's fixtures: one per scheme family (VRF MinPk, standard MinSig, multisig
 /// MinPk, secp256r1); engine_test.zig covers ed25519 in every build.
 const quick_fixtures = [fixtures.len]bool{ true, false, false, true, true, false, false, true };
@@ -648,6 +728,13 @@ test "all fixtures: all recovery" {
 
 test "all fixtures: all crash after nullify" {
     try run_all(all_crash_after_nullify, .{});
+}
+
+test "all fixtures: unclean shutdown" {
+    if (builtin.mode == .debug and !full) return error.SkipZigTest;
+    inline for (fixtures, quick_fixtures) |F, quick| {
+        if (full or quick) try unclean_shutdown(F);
+    }
 }
 
 // commonware `twins`: `twins_campaign` on `TWINS_CAMPAIGN` over `TWINS_LINK`, with each

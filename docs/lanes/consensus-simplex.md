@@ -398,3 +398,5 @@ resolver; those lanes are running, so do the types first and the actors as they 
 - 2026-11-19: slow_validator, all_recovery, and all_crash_after_nullify run on every fixture
   (`Cluster.slow`, `Cluster.crash_all`). The quick ReleaseSafe slice of every fixture DST
   takes 2 min together.
+- 2026-11-19: unclean_shutdown runs on every fixture, with a fixed-rng fixture
+  (`Cluster.start_with`) and short timeouts (`Options.short_timeouts`).
