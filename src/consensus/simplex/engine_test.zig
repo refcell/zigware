@@ -1435,6 +1435,34 @@ pub fn Suite(comptime F: type) type {
             for (0..3) |seed| _ = try run_seeded(seed, engine_shutdown_scenario, .{true});
         }
 
+        /// A voter storage fault ends the engine with the voter's error instead of aborting the
+        /// process (commonware panics in a task its runtime contains; zigware returns the error,
+        /// marshal's rule). A lone validator finalizes, then every storage sync fails.
+        fn voter_storage_fault_scenario(ctx: Context, runner: *runtime.deterministic.Runner) !void {
+            var harness: Harness = undefined;
+            try harness.start(ctx, 1, null, .honest);
+            defer harness.deinit();
+            try ctx.sleep(.fromMilliseconds(1000));
+            try testing.expect(harness.max_finalized() > 0);
+            runner.storage_fault_config().sync_rate = .one;
+            const validator = harness.honest(0).?;
+            try validator.engine.wait_stopped();
+            const handle = validator.handle.?;
+            validator.handle = null;
+            try testing.expectError(error.Io, try handle.join());
+            // The other actors stopped with the engine: nothing finalizes afterwards.
+            const ended = harness.max_finalized();
+            try ctx.sleep(.fromMilliseconds(1000));
+            try testing.expectEqual(ended, harness.max_finalized());
+        }
+
+        test "engine: a voter storage fault ends the engine with an error" {
+            if (comptime !fixture_enabled) return error.SkipZigTest;
+            var runner = try runtime.deterministic.Runner.init(gpa, .{ .seed = 0 });
+            defer runner.deinit();
+            try (try runner.start_context(voter_storage_fault_scenario, .{&runner}));
+        }
+
         /// commonware `attributable_reporter_filtering`: every engine reports through the
         /// attributable wrapper with verification on. On an attributable scheme each validator
         /// still sees its peers' notarize (except at the last view) and finalize votes; on a

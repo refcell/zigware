@@ -59,9 +59,14 @@ pub fn Engine(comptime P: type) type {
         };
         const Ctx = P.Context;
         pub const Config = config_mod.Config(P);
-        pub const RunResult = Ctx.SpawnError!void;
         const Batcher = batcher.Actor(BatcherParams);
         const Voter = voter.Actor(VoterParams);
+        const VoterError = @typeInfo(@typeInfo(@TypeOf(Voter.run)).@"fn".return_type.?)
+            .error_union.error_set;
+        /// A voter storage or I/O error ends the engine with that error (marshal's rule):
+        /// zigware cannot contain a panicking task the way commonware's runtime does.
+        pub const RunError = Ctx.SpawnError || VoterError;
+        pub const RunResult = RunError!void;
         const Resolver = resolver.Actor(ResolverParams);
 
         gpa: Allocator,
@@ -78,6 +83,8 @@ pub fn Engine(comptime P: type) type {
         mutex: Io.Mutex = .init,
         condition: Io.Condition = .init,
         stopped: bool = false,
+        /// The voter's error, set before it marks the engine stopped.
+        voter_failure: ?VoterError = null,
 
         /// Builds the actors on `ctx`'s allocator, runtime, and storage (commonware
         /// `Engine::new`). The engine must not move: actors borrow its scheme. Start it with
@@ -101,6 +108,7 @@ pub fn Engine(comptime P: type) type {
             self.mutex = .init;
             self.condition = .init;
             self.stopped = false;
+            self.voter_failure = null;
             self.scheme = cfg.scheme;
             self.batcher, self.batcher_mailbox = try Batcher.init(gpa, io, .{
                 .scheme = &self.scheme,
@@ -206,7 +214,12 @@ pub fn Engine(comptime P: type) type {
                 certificate_sender,
             ) catch |err| switch (err) {
                 error.Canceled => {},
-                else => std.debug.panic("simplex voter failed: {t}", .{err}),
+                else => {
+                    ctx.tracer(trace_target).event(.warn, "voter failed: {t}", .{err});
+                    assert(self.voter_failure == null);
+                    // Published before mark_stopped, whose mutex orders it for `run`.
+                    self.voter_failure = err;
+                },
             };
         }
 
@@ -246,7 +259,7 @@ pub fn Engine(comptime P: type) type {
             votes: Channel(P),
             certificates: Channel(P),
             backfill: Channel(P),
-        ) Ctx.SpawnError!void {
+        ) RunResult {
             var channels = .{ votes, certificates };
             defer {
                 channels[0].sender.deinit();
@@ -273,7 +286,9 @@ pub fn Engine(comptime P: type) type {
                 resolver_task.abort() catch {};
                 batcher_task.abort() catch {};
             }
-            self.wait_stopped() catch {}; // Canceled: the engine is being aborted.
+            self.wait_stopped() catch return; // Canceled: the engine is being aborted.
+            // Returning runs the deferred aborts, so the other actors stop first.
+            if (self.voter_failure) |err| return err;
         }
     };
 }
