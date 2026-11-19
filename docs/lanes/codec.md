@@ -237,7 +237,7 @@ Every commonware `#[test]` in this lane's crates (macro and rstest cases expande
 | Total | 172 | 141 | 1 | 30 |
 
 Open:
-- [ ] `types/hash_map.rs:407` `test_hashmap_malicious_allocation`: u32::MAX map length, one entry,
+- [x] `types/hash_map.rs:407` `test_hashmap_malicious_allocation`: u32::MAX map length, one entry,
   fails EndOfBuffer unallocated
   (map_test.zig checks this for sets only; `Map.read` is never fed a hostile length)
 

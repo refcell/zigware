@@ -221,6 +221,21 @@ test "map truncation and extra data" {
     try testing.expectEqual(@as(?u64, 100), value.get(1));
 }
 
+test "map hostile length fails without allocating it" {
+    // commonware `test_hashmap_malicious_allocation`: a count of u32::MAX with one entry of
+    // payload fails at the end of the buffer. The 4 KiB allocator turns an attempt to reserve
+    // the advertised entries into OutOfMemory instead.
+    const hostile = [_]u8{ 0xff, 0xff, 0xff, 0xff, 0x0f } ++ [_]u8{ 0, 0, 0, 1 } ++
+        [_]u8{ 0, 0, 0, 0, 0, 0, 0, 100 };
+    var buffer: [4096]u8 = undefined;
+    inline for (.{ map.HashMap(u32, u64), map.Map(u32, u64) }) |M| {
+        var fixed = std.heap.FixedBufferAllocator.init(&buffer);
+        const cfg: M.Cfg = .{ .range = .full() };
+        const result = codec.decode_cfg(M, fixed.allocator(), &hostile, cfg);
+        try testing.expectError(error.EndOfBuffer, result);
+    }
+}
+
 test "set truncation, extra data, and hostile length" {
     const S = map.HashSet(u32);
     const encoded = try encode_owned(S, .init(&.{ 1, 5 }));
