@@ -33,8 +33,9 @@ jobs:
             optimize: ReleaseSafe
             steps: test-rest
     runs-on: ${{ matrix.os }}
-    # ReleaseSafe hit 50 minutes on x86 at 9d1a066 while slow tests moved to nightly; lower
-    # this to about twice the slowest job once two green runs show the split's times.
+    # About twice the slowest job: x86 release-rest took 37 and 32 minutes on the split's
+    # first two green runs (4d433c8, 6f935ee). Caching Zig's build caches between runs
+    # restored them but hit no compile step and saved no time, so CI builds cold.
     timeout-minutes: 75
     steps:
       - uses: actions/checkout@v4
@@ -42,18 +43,6 @@ jobs:
         run: |
           sh etc/scripts/install-zig.sh "$HOME/zig"
           echo "$HOME/zig" >> "$GITHUB_PATH"
-      # Zig's caches: a package whose sources did not change since the restored run neither
-      # recompiles nor reruns its tests. Each run saves under its own commit; restore-keys
-      # takes the newest cache for the same toolchain, build files, and job.
-      - name: zig cache
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cache/zig
-            .zig-cache
-          key: zig-0.17.1-${{ runner.arch }}-${{ matrix.group }}-${{ hashFiles('build.zig', 'build.zig.zon') }}-${{ github.sha }}
-          restore-keys: |
-            zig-0.17.1-${{ runner.arch }}-${{ matrix.group }}-${{ hashFiles('build.zig', 'build.zig.zon') }}-
       - name: tidy
         if: matrix.group == 'debug'
         run: bash etc/scripts/tidy.sh
