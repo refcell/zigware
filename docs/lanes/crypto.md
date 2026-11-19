@@ -133,6 +133,12 @@ handshake), then certificate, secp256r1, the rest, zk last. banderwagon moved to
   signatures with one `A` term per distinct key, as commonware's `batch.rs` coalesces;
   smaller shards keep `core.MultiScalar` (Straus). Before, every shard went through
   `MultiScalar`, whose 8-point flushes each ran their own 256-doubling chain.
+  The basepoint term joins the last chunk's MSM (or the Straus sum), sharing its doubling
+  chain, rather than a separate `mulPublic` (about 28 µs of 252 doublings at pks=100).
+  Profile at pks=100 against curve25519-dalek 5.0.0 (2026-11-19): decompress, challenge, and
+  scalar work match or beat dalek; the bucket MSM is about 1.0 ms against dalek's 0.83 ms
+  with its AVX2 backend and 1.6 ms with its serial one, so the rest of the gap is vectorized
+  field and point arithmetic.
 - `verify_batch(rng, items, projector, strategy)`: `projector.project(index, *const Item)`
   returns a `BatchEntry`; `cryptography.entries` projects a slice of entries.
 - Conformance hashes that run signature schemes thousands of times skip in Debug unless

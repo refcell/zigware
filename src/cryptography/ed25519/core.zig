@@ -292,8 +292,8 @@ fn share_of(item: BatchItem, noise: *transcript.Noise) ?Share {
 /// Checks the items in `range` as one equation, with coefficients for batch `ordinal`.
 /// Ranges below `msm.straus_signatures` sum through `MultiScalar`; larger ones are cut into
 /// chunks of at most `msm.chunk_signatures`, each a bucket MSM with one `A` term per distinct
-/// key (commonware coalesces per key the same way). The basepoint term is added once, from
-/// std's precomputed basepoint table.
+/// key (commonware coalesces per key the same way). The basepoint term joins the last sum, so
+/// it shares that sum's doubling chain, as it does in commonware's one MSM.
 fn verify_shard(
     items: anytype,
     range: parallel.Range,
@@ -317,29 +317,31 @@ fn verify_shard(
             // minus_a carries -A, so the coefficient is negated to add z k A.
             sum.add(item.key.minus_a, scalar.neg(share.zk));
         }
+        sum.add(Point.basePoint, base_coefficient);
         total = sum.finish();
     } else {
         const chunks = std.math.divCeil(usize, count, msm.chunk_signatures) catch unreachable;
         for (0..chunks) |chunk| {
             const local = parallel.ops.balanced(count, chunks, chunk);
             const slice: parallel.Range = .init(range.start + local.start, range.start + local.end);
-            const sum = chunk_sum(items, slice, &noise, &base_coefficient) orelse return false;
+            const last = chunk + 1 == chunks;
+            const sum = chunk_sum(items, slice, &noise, &base_coefficient, last) orelse
+                return false;
             total = total.add(sum);
         }
     }
-    // mulPublic's only error is a product that is the identity, which it then is.
-    const base = Point.basePoint.mulPublic(base_coefficient) catch Point.identityElement;
-    return is_identity(total.add(base).clearCofactor());
+    return is_identity(total.clearCofactor());
 }
 
-/// The bucket MSM of the at most `msm.chunk_signatures` items in `range`, without the
-/// basepoint: `z R` per signature and `(sum z k) A` per distinct key. Subtracts the chunk's
-/// `sum z s` from `base_coefficient`. Null on a structurally invalid signature.
+/// The bucket MSM of the at most `msm.chunk_signatures` items in `range`: `z R` per signature
+/// and `(sum z k) A` per distinct key, plus `base_coefficient B` for the `last` chunk. Subtracts
+/// the chunk's `sum z s` from `base_coefficient` first. Null on a structurally invalid signature.
 fn chunk_sum(
     items: anytype,
     range: parallel.Range,
     noise: *transcript.Noise,
     base_coefficient: *[32]u8,
+    last: bool,
 ) ?Point {
     const count = range.end - range.start;
     assert(count > 0 and count <= msm.chunk_signatures);
@@ -359,6 +361,8 @@ fn chunk_sum(
         order[local] = @intCast(local);
     }
     msm.add_signers(&terms, keys[0..count], minus_a[0..count], zk[0..count], order[0..count]);
-    assert(terms.count <= 2 * count);
+    // The basepoint carries Z = 1, as mixed addition needs.
+    if (last) terms.add(Point.basePoint, base_coefficient);
+    assert(terms.count <= 2 * count + 1);
     return terms.sum();
 }

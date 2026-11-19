@@ -88,8 +88,14 @@ directory under `BENCH_DIR` (default `$TMPDIR` or `/tmp`). commonware gets it th
   with one `A` term per distinct key, as commonware coalesces. The row above is a separate
   re-run of this pair only (`etc/scripts/bench-compare.sh`'s settings, best of three
   alternating runs, load average 34 to 62). An interleaved A/B of the old and new zigware code
-  at a load average of about 67 measured 3.02 ms against 1.90 ms. The remaining gap is probably
-  field arithmetic (unprofiled, as for `signature_verification` below).
+  at a load average of about 67 measured 3.02 ms against 1.90 ms. A component profile of both
+  sides (same 100 signatures, ReleaseFast and `--release`, under load) puts the rest of the gap
+  in the MSM's field arithmetic: decompressing 100 `R` takes 349 µs against dalek's 406 µs,
+  the challenges 30 µs against 37 µs, and the bucket MSM over 200 terms 0.94 to 1.27 ms against
+  0.82 to 0.89 ms. Forced to its serial backend (`curve25519_dalek_backend="serial"`), dalek's
+  MSM takes 1.55 to 1.77 ms, so its lead is its AVX2 backend. The MSM's width (6), chunking, and
+  coalescing match dalek's for this size; the basepoint term now shares the MSM's doubling
+  chain instead of a separate 28 µs `mulPublic`.
 
 ## Perf bugs (zigware more than 1.5× slower)
 
