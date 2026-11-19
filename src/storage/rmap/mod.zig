@@ -165,7 +165,7 @@ pub const RMap = struct {
     /// Writes up to `out.len` missing values at or after `start` that lie in gaps before
     /// some range, and returns how many. Values past the last range are never reported.
     pub fn missing_items(self: *const RMap, start: u64, out: []u64) []u64 {
-        assert(out.len > 0); // max must be greater than 0.
+        if (out.len == 0) return out; // A zero limit reports nothing.
         var found: usize = 0;
         var current = start;
         for (self.iter_from(start)) |range| {
@@ -178,6 +178,7 @@ pub const RMap = struct {
             current = range.end + 1;
         }
         assert(found <= out.len);
+        assert(found == 0 or out[0] >= start);
         return out[0..found];
     }
 
@@ -611,6 +612,14 @@ test "rmap missing items large gap" {
     try testing.expectEqual(@as(usize, 998), found.len);
     try testing.expectEqual(@as(u64, 2), found[0]);
     try testing.expectEqual(@as(u64, 999), found[997]);
+}
+
+test "rmap missing items zero limit" {
+    // commonware `test_missing_items_zero_limit`: a zero limit reports nothing.
+    var map: RMap = .empty;
+    defer map.deinit(testing.allocator);
+    try insert_all(&map, &.{ 1, 5 });
+    try expect_missing(&map, 1, 0, &.{});
 }
 
 test "rmap missing items near max" {

@@ -271,6 +271,26 @@ Partial:
 - [x] translator: `identity_hasher_integer_writes_differ` (0 against 1 at u16/u32/u64),
   `hashed_all_cap_sizes` (EightCap).
 
+## Upstream drift 43b357a41..a9ffc25f3 (2026-11-19, storage outside qmdb and clearing)
+Commonware changed 79 storage files in 14 commits; most are qmdb (storage-qmdb's, now glue's
+for the async steps). Outside qmdb:
+- e7987e8c3 rmap: `missing_items` with a zero limit returns nothing instead of asserting.
+  Ported (`rmap missing items zero limit`, commonware `test_missing_items_zero_limit`).
+- 33861fb2a queue docs: recovered uncommitted appends are delivered on reopen, and acked
+  items can be redelivered unless pruned. zigware's queue already behaves so (`published`
+  starts at the recovered size); its docs now say so.
+- 5573c2929 variable journal: refactors the batched reader's cached frame extents
+  (`cached_frame_extents`, `cached_frame_header`) and strengthens the tampered-offsets test.
+  No counterpart: zigware's `read_many` reads item by item, with no batched extents, and
+  `variable_reads_test.zig` records the tampered-offset tests as not ported.
+- 082daecd6 merkle (batch, mem, mmr/mem, verification, benches): test and bench harnesses
+  drop async wrappers; only indentation and line wrapping change. Nothing to port.
+- 162216038 bmt, merkle proof, merkle full, queue, ordinal fuzz: lint-only test edits
+  (`.clone()` removed, `NonZero::get` dropped). Nothing to port.
+- conformance.toml: every changed hash is a qmdb entry (a9ffc25f3 op tags, 8bf364011 sync
+  targets); none of this lane's or clearing's hashes moved.
+- Clearing's crates (archive, freezer, ordinal, cache, index): no source change.
+
 ## Log
 - translator: Rust's `Translator`/`BuildHasher` traits become a comptime interface
   (`Key`, `ordered`, `transform`, `hash`, `order`, `eql`; `translator.check`). `Hashed`

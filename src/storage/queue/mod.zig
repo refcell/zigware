@@ -1,19 +1,20 @@
 //! A durable, at-least-once delivery queue backed by a contiguous variable journal (commonware's
 //! `storage/src/queue`).
 //!
-//! Items are durably stored in a journal and survive crashes. The reader side delivers committed
-//! items in FIFO order and must acknowledge each one after processing; items can be acknowledged
-//! out of order. Acknowledgements are in memory only: the durable equivalent is the journal's
-//! pruning boundary, which `sync` advances to the whole sections below the ack floor. On restart
-//! every non-pruned item is re-delivered, acknowledged or not, so processing must be idempotent.
+//! A commit or sync publishes new items to the reader side, which delivers them in FIFO order and
+//! must acknowledge each one after processing; items can be acknowledged out of order. Committed
+//! items survive restart unless pruned. On reopen the reader also delivers any uncommitted items
+//! the journal recovers (a prefix of later appends). Acknowledgements are in memory only: the
+//! durable equivalent is the journal's pruning boundary, which `sync` advances to the whole
+//! sections below the ack floor. Items acknowledged before restart can be delivered again unless
+//! pruned, so processing must be idempotent.
 //!
 //! # Operations
 //!
-//! - `append` / `commit`: write items, then persist and publish them to the reader. Appended items
-//!   are lost on restart unless committed.
+//! - `append` / `commit`: write items, then persist and publish them to the reader.
 //! - `enqueue`: append and commit in one step.
 //! - `sync`: commit, then prune completed sections below the ack floor.
-//! - `try_recv`: the next unacknowledged committed item.
+//! - `try_recv`: the next unacknowledged published item.
 //! - `ack` / `ack_up_to`: mark items processed.
 //!
 //! # Ownership
@@ -68,7 +69,8 @@ pub fn Queue(comptime V: type) type {
         /// Acknowledged items (the ack floor).
         ack_floor: metrics.Gauge,
 
-        /// Open the queue. On restart the reader begins at the journal's pruning boundary.
+        /// Open the queue. On restart the reader begins at the journal's pruning boundary and
+        /// delivers every recovered item.
         /// Its gauges register under `scope` (commonware's context metrics); null records them
         /// unregistered.
         pub fn init(
@@ -122,7 +124,8 @@ pub fn Queue(comptime V: type) type {
             self.ack_floor.deinit();
         }
 
-        /// Close the queue, dropping uncommitted items and acknowledgements.
+        /// Close the queue, dropping acknowledgements. Uncommitted appends are not rolled back:
+        /// a reopened queue delivers those the journal recovers.
         pub fn deinit(self: *Self) void {
             self.cursor.deinit(self.gpa);
             self.journal.deinit();
@@ -150,7 +153,8 @@ pub fn Queue(comptime V: type) type {
         }
 
         /// Append an item without committing, returning its position. The reader receives it
-        /// after the next `commit` or `sync`.
+        /// after the next `commit` or `sync`. Closing the queue does not roll the append back:
+        /// if the journal recovers the item on restart, the reopened reader delivers it.
         pub fn append(self: *Self, item: V) Error!u64 {
             assert(!self.failed);
             errdefer self.failed = true;
@@ -167,7 +171,8 @@ pub fn Queue(comptime V: type) type {
             return position;
         }
 
-        /// Append `items` with a single commit, returning their positions.
+        /// Append `items` with a single commit, returning their positions. If it fails, a
+        /// reopened reader may deliver none, some, or all of the batch, in order from the start.
         pub fn enqueue_bulk(self: *Self, items: []const V) Error!Range {
             const start = self.journal.size();
             for (items) |item| _ = try self.append(item);
