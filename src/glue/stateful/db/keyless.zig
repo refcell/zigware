@@ -12,6 +12,7 @@ const std = @import("std");
 const assert = std.debug.assert;
 const storage = @import("storage");
 const db = @import("mod.zig");
+const state_sync = @import("state_sync.zig");
 
 const qmdb = storage.qmdb;
 
@@ -79,6 +80,30 @@ pub fn Keyless(comptime F: type, comptime E: type, comptime C: type, comptime H:
 
         pub fn sync_target(self: *const Self) SyncTarget {
             return .init(self.inner.root(), self.inner.sync_boundary(), self.inner.bounds().end);
+        }
+
+        /// The database's `qmdb.sync` interface.
+        pub const SyncDatabase = qmdb.keyless.sync.Database(F, E, C, H);
+
+        /// Syncs a new database from `source` (the StateSyncDb contract, `state_sync.zig`).
+        pub fn sync_db(
+            env: anytype,
+            config: Config,
+            source: anytype,
+            target: SyncTarget,
+            channels: state_sync.Channels(SyncTarget),
+            sync_config: state_sync.SyncEngineConfig,
+        ) !Self {
+            const synced = try state_sync.sync_standard_db(
+                SyncDatabase,
+                env,
+                config,
+                source,
+                target,
+                channels,
+                sync_config,
+            );
+            return .{ .inner = synced.db };
         }
 
         /// A speculative batch of appended values over the shared database.

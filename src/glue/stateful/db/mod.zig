@@ -51,6 +51,7 @@ pub const current = @import("current.zig");
 pub const immutable = @import("immutable.zig");
 pub const keyless = @import("keyless.zig");
 pub const p2p = @import("p2p/mod.zig");
+pub const state_sync = @import("state_sync.zig");
 pub const sync = @import("sync.zig");
 pub const Anchor = sync.Anchor;
 pub const TipUpdate = sync.TipUpdate;

@@ -9,6 +9,7 @@ const std = @import("std");
 const assert = std.debug.assert;
 const storage = @import("storage");
 const db = @import("mod.zig");
+const state_sync = @import("state_sync.zig");
 
 const qmdb = storage.qmdb;
 
@@ -73,6 +74,27 @@ pub fn Compact(comptime F: type, comptime O: type, comptime H: type) type {
             const target = self.inner.target();
             assert(target.size == self.inner.size());
             return target;
+        }
+
+        /// Syncs a new database from `source` (the StateSyncDb contract, `state_sync.zig`).
+        pub fn sync_db(
+            env: anytype,
+            config: Config,
+            source: anytype,
+            target: SyncTarget,
+            channels: state_sync.Channels(SyncTarget),
+            sync_config: state_sync.SyncEngineConfig,
+        ) !Self {
+            const synced = try state_sync.sync_compact_db(
+                D,
+                env,
+                config,
+                source,
+                target,
+                channels,
+                sync_config,
+            );
+            return .{ .inner = synced };
         }
 
         /// A speculative batch over the shared database.

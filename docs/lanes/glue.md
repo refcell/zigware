@@ -140,6 +140,13 @@ marshal's actors (consensus-marshal) for the actor; until then it ports what is 
   immutable, `with_metadata`, `with_inactivity_floor`, `merkleize`; no reads) and `Merkleized`
   (`root`, `bounds`, `new_batch`, `clone`, `deinit`). Its `SyncTarget` is a
   `qmdb.sync.CompactTarget` (root and size).
+- `glue.stateful.db.state_sync`: `SyncEngineConfig`, `Channels(Target)` (borrowed
+  `tip_updates` and `finish`, owned `reached_target`), the StateSyncDb contract
+  (`assert_state_sync_db`; `T.sync_db(env, config, source, target, channels, sync_config)`),
+  `sync_standard_db(DB, ...)` and `sync_compact_db(DB, ...)` over `qmdb.sync`, and
+  `sync_shared(T, D, env, config, source, anchor, target, tip_updates, sync_config)` →
+  `Synced(T, D)` (`databases`, `anchor`), the single-database coordinator. The keyless,
+  immutable, and compact adapters implement `sync_db`.
 - `glue.stateful.db.sync` (also `db.Anchor`, `db.TipUpdate`): `Anchor(D)` (`height`, `round`,
   `digest`, `eql`), `TipUpdate(D, T)` (`init`, `with_observation(gpa, io, anchor, targets)`
   → update and a `oneshot.Receiver(void)`, `record(context)` calling
@@ -332,6 +339,8 @@ marshal's actors (consensus-marshal) for the actor; until then it ports what is 
 - 2026-11-19 (stateful, broadcast-resolver lane): the `keyless` ManagedDb adapter.
 - 2026-11-19 (stateful, broadcast-resolver lane): the `immutable` and `compact` ManagedDb
   adapters.
+- 2026-11-19 (stateful, broadcast-resolver lane): single-database state sync and the
+  adapters' `sync_db`.
 - 2026-11-19 (stateful): the core actor's `Durability`.
 - 2026-11-19 (stateful): the core actor's `Verifications` handler; waiting verifies abstain.
 
