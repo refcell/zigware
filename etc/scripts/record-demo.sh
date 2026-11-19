@@ -445,6 +445,93 @@ $dir/data/validator-\$i >$dir/bootstrap-\$i.log 2>&1 & done" 0
       kill $(jobs -p) 2>/dev/null || true
       wait 2>/dev/null || true
       ;;
+    interop-bridge)
+      # commonware's and zigware's bridge in one deployment (etc/scripts/interop_bridge.py
+      # checks it): one dealing, commonware's indexer, and two networks of 4 that each mix
+      # two commonware validators (1, 2 and 7, 8) with two zigware ones (3, 4 and 5, 6).
+      reference=${COMMONWARE_REF:-$HOME/.cache/zigware/commonware-ref}
+      target=${INTEROP_TARGET:-${TMPDIR:-/tmp}/zigware-interop-target}
+      (cd "$reference" && CARGO_TARGET_DIR="$target" cargo build --release --offline -q \
+        -p commonware-bridge)
+      if [ -n "$(find src examples/bridge examples/ui build.zig -newer \
+        zig-out/bin/bridge-validator -print -quit 2>/dev/null || echo stale)" ] ||
+        [ ! -x zig-out/bin/bridge-validator ]; then
+        zig build -Doptimize=ReleaseFast >/dev/null
+      fi
+      rust=$target/release zig=$PWD/zig-out/bin dir=/tmp/zigware-interop-bridge-demo base=3600
+      rm -rf "$dir"
+      mkdir -p "$dir"
+      export NO_COLOR=1
+      printf '\033[H\033[2J'
+      type_cmd "cmp <($zig/bridge-dealer --seed 1 --participants 1,2,3,4) \
+<($rust/dealer --seed 1 --participants 1,2,3,4) && echo identical dealings" 1
+      "$zig/bridge-dealer" --seed 1 --participants 1,2,3,4 >"$dir/network-1.txt"
+      "$zig/bridge-dealer" --seed 2 --participants 5,6,7,8 >"$dir/network-2.txt"
+      field() { awk -v key="$2" '$1 == key { print $NF }' "$dir/network-$1.txt"; }
+      share() { awk -v v="validator=$2)" 'index($0, v) { print $NF }' "$dir/network-$1.txt"; }
+      "$rust/indexer" --me "0@$base" --participants 1,2,3,4,5,6,7,8 \
+        --networks "$(field 1 public:),$(field 2 public:)" >"$dir/indexer.log" 2>&1 &
+      until ss -ltn | grep -q ":$base "; do sleep 0.2; done
+      mix=rrzzzzrr
+      for v in 1 2 3 4 5 6 7 8; do
+        if [ "$v" -le 4 ]; then net=1 other=2 first=1 parts=1,2,3,4; else
+          net=2 other=1 first=5 parts=5,6,7,8
+        fi
+        bin=$rust/validator
+        [ "${mix:v-1:1}" = z ] && bin=$zig/bridge-validator
+        boot=()
+        [ "$v" != "$first" ] && boot=(--bootstrappers "$first@127.0.0.1:$((base + first))")
+        "$bin" --me "$v@$((base + v))" "${boot[@]}" --participants "$parts" \
+          --storage-dir "$dir/storage-$v" --indexer "0@127.0.0.1:$base" \
+          --identity "$(field $net polynomial:)" --share "$(share $net $v)" \
+          --other-public "$(field $other public:)" >"$dir/validator-$v.log" 2>&1 &
+      done
+      line='s/^[0-9-]+T([0-9:]+)\.[0-9]+Z +[A-Z]+ [a-z_:]+: /\1 /'
+      line+='; s/([0-9a-f]{8})[0-9a-f]{16,}/\1../g; s/signature=.*//; s/Finalization \{.*/../'
+      green='s/(finalized|stored finalization)/\x1b[32m&\x1b[0m/'
+      yellow='s/(proposed|stored block)/\x1b[33m&\x1b[0m/'
+      follow() {
+        local file=$1 pattern=$2 width=$3
+        printf '%s' "tail -n +1 -F $dir/$file 2>/dev/null | grep --line-buffered -E '$pattern' | \
+sed -u -E '$line; s/^(.{$width}).*/\\1/; $green; $yellow'"
+      }
+      pattern='actor: (proposed|finalized)'
+      t() { tmux -L zigware-demo -f /dev/null "$@"; }
+      t kill-server 2>/dev/null || true
+      t new-session -d -s ibridge -x 200 -y 50 "$(follow indexer.log stored 196)"
+      t set-option -g status off
+      t set-option -g pane-border-status top
+      t set-option -g pane-border-format ' #[bold]#{pane_title}#[default] '
+      t select-pane -t ibridge -T 'commonware (Rust): indexer, both networks'
+      t split-window -v -t ibridge "$(follow validator-1.log "$pattern" 96)"
+      t select-pane -t ibridge -T 'network 1: commonware (Rust) validator 1'
+      t split-window -h -t ibridge "$(follow validator-3.log "$pattern" 96)"
+      t select-pane -t ibridge -T 'network 1: zigware (Zig) validator 3'
+      t select-pane -t ibridge -L
+      t split-window -v -t ibridge "$(follow validator-7.log "$pattern" 96)"
+      t select-pane -t ibridge -T 'network 2: commonware (Rust) validator 7'
+      t select-pane -t ibridge -R
+      t split-window -v -t ibridge "$(follow validator-5.log "$pattern" 96)"
+      t select-pane -t ibridge -T 'network 2: zigware (Zig) validator 5'
+      (
+        # End once a zigware and a commonware validator of each network proposed a Bridge block.
+        for _ in $(seq 240); do
+          n=0
+          for v in 1 3 5 7; do
+            grep -qs 'proposed block=Bridge' "$dir/validator-$v.log" && n=$((n + 1))
+          done
+          [ "$n" = 4 ] && break
+          sleep 0.5
+        done
+        sleep 4
+        t detach-client -s ibridge
+      ) &
+      t attach -t ibridge || true
+      wait %%
+      t kill-server
+      kill $(jobs -p) 2>/dev/null || true
+      wait 2>/dev/null || true
+      ;;
     *) echo "unknown demo: $name" >&2; exit 1 ;;
   esac
   exit 0
@@ -459,12 +546,14 @@ case $name in
   interop) size=220x50 ;;
   interop-log) size=200x64 ;;
   interop-dkg) size=220x50 ;;
+  interop-bridge) size=200x50 ;;
   *) size=104x40 ;;
 esac
 DEMO_SESSION=1 TERM=xterm-256color asciinema rec --overwrite --quiet --output-format asciicast-v2 --window-size "$size" \
   --command "$0 $name" "$out.cast"
 if [ "$name" = chat ] || [ "$name" = log ] || [ "$name" = bridge ] || [ "$name" = dkg ] ||
-  [ "$name" = interop ] || [ "$name" = interop-log ] || [ "$name" = interop-dkg ]; then
+  [ "$name" = interop ] || [ "$name" = interop-log ] || [ "$name" = interop-dkg ] ||
+  [ "$name" = interop-bridge ]; then
   # End on the panes, not tmux's exit screen: cut where tmux leaves the alternate screen, and
   # drop the screen clear tmux sometimes writes as a separate event just before it.
   awk 'index($0, "\\u001b[?1049l") { if (held && !index(held, "\\u001b[2J")) print held; exit }
@@ -479,6 +568,7 @@ font=16 fps=30
 [ "$name" = interop ] && font=14 fps=12
 [ "$name" = interop-log ] && font=12 fps=8
 [ "$name" = interop-dkg ] && font=12 fps=8
+[ "$name" = interop-bridge ] && font=12 fps=8
 # x264's default quality (crf 23) puts dkg's five busy panes near 4 MB; 30 keeps it under 3.
 crf=23
 [ "$name" = dkg ] && crf=30
