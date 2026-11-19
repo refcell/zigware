@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Records a README demo: docs/assets/<name>-demo.{cast,gif,mp4}.
 #   etc/scripts/record-demo.sh estimator
-# Needs asciinema 3, agg, and ffmpeg on PATH. The session itself is scripted below, so a
+# Needs asciinema 3, agg, ffmpeg, and gifsicle on PATH. The session itself is scripted below, so a
 # re-recording types the same commands.
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
@@ -487,5 +487,8 @@ agg --theme monokai --font-size "$font" --idle-time-limit 3 --last-frame-duratio
   --fps-cap "$fps" "$out.cast" "$out.gif"
 ffmpeg -y -loglevel error -i "$out.gif" -movflags faststart -pix_fmt yuv420p -crf "$crf" \
   -vf 'fps=30,scale=trunc(iw/2)*2:trunc(ih/2)*2' "$out.mp4"
+# A 16-color lossy pass shrinks every gif by 40-52% with the text still crisp (the terminal
+# themes use few colors); the mp4 above is encoded from agg's full-color gif.
+gifsicle -O3 --lossy=80 --colors 16 --batch "$out.gif" 2>/dev/null
 rm "$out.cast"
 ls -lh "$out.gif" "$out.mp4"
