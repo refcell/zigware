@@ -48,7 +48,12 @@ peer 4         3938          630       1.249 ms
 
 ### Create Deployer Artifacts
 
+`setup` copies a Grafana dashboard from `--dashboard` into the output. Fetch commonware's
+[`dashboard.json`][dashboard] into the directory you run from first; without it `setup` fails
+with `FileNotFound`, as commonware's does:
+
 ```sh
+curl -sO https://raw.githubusercontent.com/commonwarexyz/monorepo/main/examples/flood/dashboard.json
 zig build run-flood-setup -Doptimize=ReleaseFast -- --peers 3 --bootstrappers 1 \
     --regions us-west-2,us-east-1,eu-west-1 --instance-type c7g.xlarge --storage-size 10 \
     --storage-class gp3 --worker-threads 4 --message-size 1024 --message-rate 16384 \
@@ -65,9 +70,6 @@ peers spread over the regions in turn:
 info(setup): generated deployment tag: tag=14a3c41c-1f05-48de-be9b-cc511243244e
 info(setup): wrote configuration files: path=assets/config.yaml
 ```
-
-`--dashboard` takes a Grafana dashboard to copy into `assets`; commonware's
-[`dashboard.json`][dashboard] works as is.
 
 [dashboard]: https://github.com/commonwarexyz/monorepo/blob/main/examples/flood/dashboard.json
 
