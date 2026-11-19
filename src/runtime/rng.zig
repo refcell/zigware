@@ -89,21 +89,20 @@ test "shuffle matches rand 0.10" {
     try testing.expectEqualSlices(u32, &want200, many[0..10]);
 }
 
-test "shuffle is a permutation (seeded fuzz)" {
-    const build_options = @import("build_options");
-    var seeds = utils.rng.TestRng.init(build_options.fuzz_seed);
-    const iterations = 500 * @as(usize, build_options.fuzz_soak);
-    for (0..iterations) |_| {
-        var rng = utils.rng.TestRng.init(seeds.next_u64());
-        const len = utils.rng.range_less_than(&seeds, usize, 0, 300);
-        var items: [300]u32 = undefined;
-        for (items[0..len], 0..) |*item, i| item.* = @intCast(i);
-        shuffle(&rng, u32, items[0..len]);
-        var seen: [300]bool = @splat(false);
-        for (items[0..len]) |item| {
-            try testing.expect(item < len);
-            try testing.expect(!seen[item]);
-            seen[item] = true;
-        }
+fn fuzz_shuffle(_: void, r: *utils.rng.FuzzRng) !void {
+    var rng = utils.rng.TestRng.init(r.next_u64());
+    const len = utils.rng.range_less_than(r, usize, 0, 300);
+    var items: [300]u32 = undefined;
+    for (items[0..len], 0..) |*item, i| item.* = @intCast(i);
+    shuffle(&rng, u32, items[0..len]);
+    var seen: [300]bool = @splat(false);
+    for (items[0..len]) |item| {
+        try testing.expect(item < len);
+        try testing.expect(!seen[item]);
+        seen[item] = true;
     }
+}
+
+test "fuzz shuffle is a permutation" {
+    try utils.fuzz.run({}, fuzz_shuffle, 0x7368_7566, 500);
 }

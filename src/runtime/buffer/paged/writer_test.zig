@@ -5,7 +5,6 @@ const std = @import("std");
 const assert = std.debug.assert;
 const testing = std.testing;
 const Crc32 = @import("cryptography").crc32.Crc32;
-const build_options = @import("build_options");
 const mocks = @import("../mocks.zig");
 const paged = @import("mod.zig");
 const writer_mod = @import("writer.zig");
@@ -16,6 +15,8 @@ const Blob = storage_iface.Blob;
 const ReadOptions = storage_iface.ReadOptions;
 const WriteOptions = storage_iface.WriteOptions;
 const Error = storage_iface.Error;
+const rng = @import("utils").rng;
+const FuzzRng = rng.FuzzRng;
 
 const Storage = mocks.Storage;
 const W = writer_mod.Writer;
@@ -453,9 +454,7 @@ test "try append respects capacity" {
 
 const fuzz_bytes_max = 4096;
 
-fn fuzz_run(seed: u64) !void {
-    var prng = std.Random.DefaultPrng.init(seed);
-    const random = prng.random();
+fn fuzz_crashes(_: void, r: *FuzzRng) !void {
     var h = try Harness.init();
     defer h.deinit();
     var model: std.ArrayList(u8) = .empty;
@@ -463,13 +462,15 @@ fn fuzz_run(seed: u64) !void {
     var durable_len: usize = 0;
     var w = try h.writer("fuzz");
     defer w.deinit();
-    for (0..64) |_| {
-        switch (random.uintLessThan(u8, 6)) {
+    const steps = rng.range_at_most(r, u8, 1, 64);
+    for (0..steps) |_| {
+        switch (rng.range_less_than(r, u8, 0, 6)) {
             0, 1, 2 => {
-                const len = random.uintAtMost(usize, @min(400, fuzz_bytes_max - model.items.len));
+                const room = @min(400, fuzz_bytes_max - model.items.len);
+                const len = rng.range_at_most(r, usize, 0, room);
                 const start = model.items.len;
                 try model.resize(gpa, start + len);
-                random.bytes(model.items[start..]);
+                r.fill_bytes(model.items[start..]);
                 try testing.expectEqual(@as(u64, start), try w.append(model.items[start..]));
             },
             3 => {
@@ -483,7 +484,7 @@ fn fuzz_run(seed: u64) !void {
                 model.shrinkRetainingCapacity(durable_len);
             },
             5 => {
-                const target = random.uintAtMost(usize, model.items.len);
+                const target = rng.range_at_most(r, usize, 0, model.items.len);
                 try w.sync();
                 w.deinit();
                 w = try h.recovery("fuzz");
@@ -499,14 +500,8 @@ fn fuzz_run(seed: u64) !void {
     }
 }
 
-test "fuzz paged writer crashes (seeded)" {
-    const base: u64 = 0x7061676564 ^ build_options.fuzz_seed;
-    for (0..32 * build_options.fuzz_soak) |iteration| {
-        fuzz_run(base +% iteration) catch |err| {
-            std.debug.print("fuzz failure: seed={d}\n", .{base +% iteration});
-            return err;
-        };
-    }
+test "fuzz paged writer crashes" {
+    try @import("utils").fuzz.run({}, fuzz_crashes, 0x7061676564, 32);
 }
 
 test "read_many_into: empty" {
