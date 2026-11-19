@@ -300,7 +300,8 @@ pub fn recv_timeout(io: Io, receiver: anytype) !?Message {
         select.cancelDiscard();
         return err;
     };
-    const first = try select.await();
+    // A canceled await leaves both branches running: stop them before this frame returns.
+    const awaited = select.await();
     while (select.cancel()) |rest| {
         // A message that lands as the timeout fires counts as dropped.
         if (rest == .received) if (rest.received) |value| {
@@ -308,6 +309,7 @@ pub fn recv_timeout(io: Io, receiver: anytype) !?Message {
             late.deinit();
         } else |_| {};
     }
+    const first = try awaited;
     return switch (first) {
         .received => |result| result catch null,
         .timeout => null,
