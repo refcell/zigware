@@ -86,7 +86,7 @@ variants need `runtime` storage; do them after its interface lands.
   never observe. The variable journal passes its io to its offsets journal. Ports
   `read_miss_timed` for both journals.
 
-## Design: asynchronous start_sync (2026-11-19, proposed, not implemented)
+## Design: asynchronous start_sync (2026-11-19, approved; steps 1-3 in this lane)
 
 Commonware's `Blob::start_sync` returns once the runtime has fixed which completed writes the
 sync covers and taken responsibility for it; the returned `Handle<()>` only observes. Dropping
@@ -137,7 +137,7 @@ the `DelayedSyncContext` test mock (`runtime/src/mocks.rs:869-1190`) holds syncs
   started sync (counters `starts`, `entered`, `completions`; `next`, `release_next`,
   `release_all`, `fail_all`, `arm_fail`, `unblock`, and the `arm` gate on blocking syncs). A
   release runs the inner blob's `sync` then, so durability is taken at completion, as in the
-  mock. The existing `SyncGates` mock folds into it.
+  mock. The existing `SyncGates`/`SyncGated` mock (the voter tests' sync gate) stays as is.
 - Commonware tests assert an operation is blocked with `now_or_never().is_none()`. Here the
   test runs the operation as an `Io.concurrent` task on the deterministic runtime, waits until
   the mock reports the wait entered, asserts the task has not finished, releases, and joins.

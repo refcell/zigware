@@ -65,6 +65,12 @@ resize, sync), `runtime.storage`, with the in-memory backend `runtime.storage.me
   offset rebuild from the watermark, torn-tail and torn-page repair, prune/append crash
   alignment, `init_at_size`/`clear_to_size` under a staged offsets intent, compression,
   prepared appends, replay batches, `Backing`) with the shared suite and core recovery tests.
+- [ ] journal/contiguous shared suite (`contiguous/tests.rs`), skipped until the asynchronous
+  start_sync lands (storage-merkle.md, "Design: asynchronous start_sync", step 2): the in-flight
+  sync tests `test_{fixed,variable}_start_sync_overlaps_predecessor_and_tail`,
+  `_start_sync_overlaps_work`, `_start_sync_waits_for_prior`, `_start_sync_failure_propagates`,
+  `_prune_waits_for_pending_sync`, and `_prune_surfaces_failed_sync` (12 tests). Recorded
+  2026-11-19 by storage-merkle.
 - [x] journal/contiguous: the rest of variable.rs's ~150 tests: handed to storage-merkle
   (2026-11-18), which ports them in new sibling test files.
 - [x] journal/authenticated.rs backing contract: `assert_backing`, `last_matching`, `covers`,

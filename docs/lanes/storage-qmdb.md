@@ -151,6 +151,14 @@ which every database here is built on.
   - Not portable while `start_sync` completes synchronously: `start_sync_overlaps_work`,
     `apply_indexes_while_journal_waits`, `start_sync_prune_waits`. Compact root
     compatibility is the compact lane's.
+  - [ ] Also skipped until the asynchronous start_sync lands (storage-merkle.md, "Design:
+    asynchronous start_sync", step 5), recorded 2026-11-19 by storage-merkle:
+    keyless/fixed.rs `test_keyless_fixed_start_sync_overlaps_work`,
+    `test_keyless_fixed_start_sync_failure_propagates` (reduced port at most),
+    `test_keyless_fixed_start_sync_recovery`, `test_keyless_fixed_rebranch_sync_crash`, and
+    `test_keyless_fixed_start_sync_prune_waits`; any/unordered/fixed.rs
+    `test_start_sync_overlaps_work`, `test_start_sync_failure_propagates`, and
+    `test_start_sync_prune_waits` (8 tests).
   - The audit is done: every mod.rs scenario is ported; the variable-journal instances run on
     the fixed journal (its owned-value behavior is `variable_test.zig`'s).
 - [x] Fuzz: `qmdb_keyless_operations` (seeded and `std.testing.fuzz`), with a value model.
