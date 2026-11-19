@@ -358,3 +358,5 @@ ports its range's tests and the helpers defined in it, into
   "unclean byzantine shutdown" runs only under `-Dslow-tests` (CI wall time).
 - 2026-11-18: `store.start_sync` returns a `store.Durable` handle; a delayed (paced) finalized
   sync is pooled in `Actor.Syncs` and released per batch, ahead of every other event.
+- 2026-11-18: generic `mocks/scenarios.Hailstorm(H)` (harness.rs 448-1008) with the three
+  standard wrappers; a short storm per shape runs outside `-Dslow-tests`.

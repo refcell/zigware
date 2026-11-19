@@ -230,3 +230,315 @@ pub fn Finalize(comptime H: type) type {
         }
     };
 }
+
+/// A uniform draw from `[low, high]`.
+fn random_range(ctx: Ctx, low: u64, high: u64) u64 {
+    assert(low <= high);
+    return low + random_u64(ctx) % (high - low + 1);
+}
+
+/// commonware `hailstorm`: a canonical finalized chain keeps advancing while `shutdowns`
+/// rounds each crash up to `max_down` validators (sometimes between a height's verify and its
+/// finalization), advance further, and restart them. Every restarted validator recovers the
+/// height it had persisted and catches up, and every live one matches the canonical chain.
+/// Returns the runtime's audit state, for determinism checks.
+pub fn Hailstorm(comptime H: type) type {
+    return struct {
+        const Self = @This();
+        const App = Application(H.ApplicationBlock);
+        const Validator = H.Validator(App);
+        const Proposal = simplex_types.Proposal(H.Commitment);
+        pub const Options = struct {
+            shutdowns: u32,
+            interval: u64,
+            max_down: u32,
+            link: p2p.simulated.Link,
+        };
+        const Live = struct { app: App, node: *Validator };
+        const Entry = struct { height: Height, digest: harness.D, finalization: H.Finalization };
+        /// A height proposed and verified whose finalization is not yet reported.
+        const Pending = struct {
+            height: Height,
+            digest: harness.D,
+            commitment: H.Commitment,
+            finalization: H.Finalization,
+        };
+
+        ctx: Ctx,
+        gpa: Allocator,
+        fixture: H.Fixture,
+        network: harness.TestNetwork,
+        live: [num_validators]?Live,
+        canonical: std.ArrayList(Entry),
+        parent: harness.D,
+        parent_commitment: H.Commitment,
+
+        pub fn run(gpa: Allocator, seed: u64, options: Options) ![8]u8 {
+            var runner = try runtime.deterministic.Runner.init(gpa, .{
+                .seed = seed,
+                .timeout_ns = H.finalize_timeout_s * std.time.ns_per_s,
+            });
+            defer runner.deinit();
+            try try runner.start_context(body, .{options});
+            return runner.auditor.state();
+        }
+
+        fn body(ctx: Ctx, options: Options) anyerror!void {
+            var self: Self = undefined;
+            try self.start(ctx, options.link);
+            defer self.stop();
+            var target: u64 = 0;
+            const interval = @max(options.interval, 1);
+            for (0..options.shutdowns) |shutdown| {
+                const leadup = random_range(ctx, 1, interval);
+                target += leadup;
+                var down_buffer: [num_validators]usize = undefined;
+                const down = self.select_down(&down_buffer, @max(options.max_down, 1));
+                const crash_after = random_range(ctx, 0, leadup);
+                const persisted = target - leadup + crash_after;
+                try self.advance_to(persisted);
+                try self.crash_mid_advance(down, persisted, target);
+                target += random_range(ctx, 1, interval);
+                try self.advance_to(target);
+                try self.restart(down, persisted, @intCast(shutdown));
+                try self.expect_all_match();
+            }
+        }
+
+        fn start(self: *Self, ctx: Ctx, link: p2p.simulated.Link) !void {
+            const gpa = ctx.gpa();
+            self.ctx = ctx;
+            self.gpa = gpa;
+            var rng = utils.rng.test_rng();
+            self.fixture = try H.fixture(gpa, &rng);
+            errdefer self.fixture.deinit(gpa);
+            const participants = self.fixture.participants;
+            const max_size = harness.max_message_size(H.Variant);
+            self.network = try .start(gpa, ctx.io(), 3, participants, max_size);
+            errdefer self.network.stop();
+            try self.network.link_all(participants, link);
+            self.live = @splat(null);
+            self.canonical = .empty;
+            errdefer self.stop_nodes();
+            for (0..num_validators) |index| {
+                const node_ctx = ctx.child("validator").with_attribute("index", index);
+                try self.start_node(node_ctx, index);
+            }
+            self.parent = harness.genesis_parent();
+            self.parent_commitment = H.genesis_parent_commitment(num_validators);
+        }
+
+        fn start_node(self: *Self, ctx: Ctx, index: usize) !void {
+            assert(self.live[index] == null);
+            var app: App = try .init(self.gpa, ctx.io());
+            errdefer app.deinit();
+            const provider: H.Provider = .init(&self.fixture.schemes[index]);
+            const me = self.fixture.participants[index];
+            const network = self.network.network;
+            const node = try Validator.setup(ctx, network, me, provider, 1, app.clone());
+            self.live[index] = .{ .app = app, .node = node };
+        }
+
+        fn crash_node(self: *Self, index: usize) void {
+            var live = self.live[index].?;
+            live.node.crash();
+            live.app.deinit();
+            self.live[index] = null;
+        }
+
+        fn stop_nodes(self: *Self) void {
+            for (0..num_validators) |index| if (self.live[index] != null) self.crash_node(index);
+            for (self.canonical.items) |*entry| entry.finalization.deinit(self.gpa);
+            self.canonical.deinit(self.gpa);
+        }
+
+        fn stop(self: *Self) void {
+            self.stop_nodes();
+            self.network.stop();
+            self.fixture.deinit(self.gpa);
+            self.* = undefined;
+        }
+
+        /// The live validators' indices, ascending.
+        fn active(self: *const Self, out: *[num_validators]usize) []usize {
+            var count: usize = 0;
+            for (self.live, 0..) |live, index| if (live != null) {
+                out[count] = index;
+                count += 1;
+            };
+            return out[0..count];
+        }
+
+        /// Between one and `max_down` live validators to crash, keeping one up; ascending.
+        fn select_down(self: *Self, out: *[num_validators]usize, max_down: u32) []usize {
+            const live = self.active(out);
+            assert(live.len > 1);
+            const limit = @min(max_down, live.len - 1);
+            const count: usize = @intCast(random_range(self.ctx, 1, limit));
+            shuffle(self.ctx, usize, live);
+            std.mem.sort(usize, live[0..count], {}, std.sort.asc(usize));
+            return live[0..count];
+        }
+
+        /// Proposes `height` at a random live validator, notarizes it there, and verifies it
+        /// at up to a quorum of live validators, without finalizing it.
+        fn drive_up_to_verify(self: *Self, value: u64) !Pending {
+            const gpa = self.gpa;
+            const height: Height = .new(value);
+            var buffer: [num_validators]usize = undefined;
+            const live = self.active(&buffer);
+            shuffle(self.ctx, usize, live);
+            const parent, const parent_commitment = .{ self.parent, self.parent_commitment };
+            var block = try H.make_test_block(gpa, parent, parent_commitment, height, value, 4);
+            defer H.Variant.deinit_block(gpa, &block);
+            const epoch_length = utils.NonZero(u64).init(harness.blocks_per_epoch).?;
+            const epocher = types.FixedEpocher.new(epoch_length);
+            const round: Round = .new(epocher.containing(height).?.epoch, .new(value));
+            const proposal = Proposal.init(round, .new(value - 1), H.commitment(&block));
+            const proposer = self.live[live[0]].?.node;
+            try H.propose(proposer, round, &block);
+            const quorum = harness.quorum;
+            var notarization = try H.make_notarization(gpa, &self.fixture, proposal, quorum);
+            defer notarization.deinit(gpa);
+            _ = proposer.mailbox.report(.{ .notarization = notarization });
+            // The proposer plus quorum - 1 others (commonware's verifier count includes it).
+            const verifiers = @min(quorum, live.len);
+            for (live[1..verifiers]) |index| try H.verify(self.live[index].?.node, round, &block);
+            return .{
+                .height = height,
+                .digest = H.digest(&block),
+                .commitment = H.commitment(&block),
+                .finalization = try H.make_finalization(gpa, &self.fixture, proposal, quorum),
+            };
+        }
+
+        /// Reports `pending` (taken) to every live validator, appends it to the canonical
+        /// chain, and waits until each live validator holds it.
+        fn finalize_pending(self: *Self, pending: Pending) !void {
+            var owned = pending;
+            errdefer owned.finalization.deinit(self.gpa);
+            for (self.live) |live| if (live) |value| {
+                _ = value.node.mailbox.report(.{ .finalization = owned.finalization });
+            };
+            try self.canonical.append(self.gpa, .{
+                .height = owned.height,
+                .digest = owned.digest,
+                .finalization = owned.finalization,
+            });
+            self.parent = owned.digest;
+            self.parent_commitment = owned.commitment;
+            const entry = self.canonical.items[self.canonical.items.len - 1];
+            for (self.live) |live| if (live) |value| try self.wait_height(value.node, entry);
+        }
+
+        fn advance_to(self: *Self, target: u64) !void {
+            var value: u64 = self.canonical.items.len + 1;
+            while (value <= target) : (value += 1) {
+                try self.finalize_pending(try self.drive_up_to_verify(value));
+            }
+            try self.expect_all_match();
+        }
+
+        /// Crashes `down` after driving the next height through verify (when it is still
+        /// below `target`), then finalizes that height at the survivors.
+        fn crash_mid_advance(self: *Self, down: []const usize, persisted: u64, target: u64) !void {
+            const pending: ?Pending = if (persisted < target)
+                try self.drive_up_to_verify(persisted + 1)
+            else
+                null;
+            for (down) |index| self.crash_node(index);
+            if (pending) |value| try self.finalize_pending(value);
+        }
+
+        /// Restarts `down`: each recovers `persisted`, replays the later finalizations, and
+        /// catches up to the whole canonical chain.
+        fn restart(self: *Self, down: []const usize, persisted: u64, shutdown: u32) !void {
+            for (down) |index| {
+                const node_ctx = self.ctx.child("validator")
+                    .with_attribute("index", index)
+                    .with_attribute("restart", shutdown);
+                try self.start_node(node_ctx, index);
+                const node = self.live[index].?.node;
+                const recovered = node.height orelse return error.HailstormHeightMissing;
+                if (recovered.get() != persisted) return error.HailstormRecoveredWrongHeight;
+                for (self.canonical.items[@intCast(persisted)..]) |entry| {
+                    _ = node.mailbox.report(.{ .finalization = entry.finalization });
+                }
+            }
+            for (down) |index| {
+                const node = self.live[index].?.node;
+                for (self.canonical.items) |entry| try self.wait_height(node, entry);
+            }
+        }
+
+        /// Polls `node` until it stores `entry`'s block and finalization, then checks them.
+        fn wait_height(self: *Self, node: *Validator, entry: Entry) !void {
+            while (true) {
+                if (try self.stored_matches(node, entry)) return;
+                try self.ctx.sleep(.fromMilliseconds(10));
+            }
+        }
+
+        /// Whether `node` stores `entry`'s block and finalization (an error when they differ).
+        fn stored_matches(self: *Self, node: *Validator, entry: Entry) !bool {
+            var block = try node.mailbox.get_block(.{ .height = entry.height }) orelse return false;
+            defer H.Variant.deinit_block(self.gpa, &block);
+            var finalization = try node.mailbox.get_finalization(entry.height) orelse return false;
+            defer finalization.deinit(self.gpa);
+            if (!std.meta.eql(block.digest(), entry.digest)) return error.HailstormWrongBlock;
+            const expected = &entry.finalization;
+            if (!std.meta.eql(finalization.round(), expected.round())) {
+                return error.HailstormWrongFinalizationRound;
+            }
+            if (!std.meta.eql(finalization.proposal.payload, expected.proposal.payload)) {
+                return error.HailstormWrongFinalizationPayload;
+            }
+            return true;
+        }
+
+        fn expect_all_match(self: *Self) !void {
+            for (self.live) |live| if (live) |value| try self.expect_matches(value);
+        }
+
+        /// The application saw only canonical blocks and the canonical tip, and the actor
+        /// stores the whole chain with the canonical tip as its latest.
+        fn expect_matches(self: *Self, live: Live) !void {
+            var genesis = try H.genesis_block(self.gpa, num_validators);
+            const genesis_digest = H.digest(&genesis);
+            H.Variant.deinit_block(self.gpa, &genesis);
+            const delivered = try live.app.blocks(self.gpa);
+            defer App.free_blocks(self.gpa, delivered);
+            for (delivered) |entry| {
+                const expected = self.canonical_digest(entry.height, genesis_digest) orelse
+                    return error.HailstormUnexpectedDelivery;
+                if (!std.meta.eql(entry.block.digest(), expected)) {
+                    return error.HailstormWrongDelivery;
+                }
+            }
+            const tip_height, const tip_digest = if (self.canonical.items.len == 0)
+                .{ Height.zero(), genesis_digest }
+            else
+                .{ self.canonical.getLast().height, self.canonical.getLast().digest };
+            if (live.app.tip()) |tip| {
+                if (tip.height.get() != tip_height.get()) return error.HailstormWrongTip;
+                if (!std.meta.eql(tip.digest, tip_digest)) return error.HailstormWrongTip;
+            }
+            for (self.canonical.items) |entry| {
+                if (!try self.stored_matches(live.node, entry)) return error.HailstormMissing;
+            }
+            if (self.canonical.items.len == 0) return;
+            const latest = try live.node.mailbox.get_info(.latest);
+            const info = latest orelse return error.HailstormNoLatest;
+            if (info.height.get() != tip_height.get()) return error.HailstormWrongLatest;
+            if (!std.meta.eql(info.digest, tip_digest)) return error.HailstormWrongLatest;
+        }
+
+        fn canonical_digest(self: *const Self, height: Height, genesis: harness.D) ?harness.D {
+            if (height.is_zero()) return genesis;
+            const index: usize = @intCast(height.get() - 1);
+            if (index >= self.canonical.items.len) return null;
+            assert(self.canonical.items[index].height.get() == height.get());
+            return self.canonical.items[index].digest;
+        }
+    };
+}
