@@ -707,3 +707,11 @@ Not portable:
 - 2026-11-19: lookup `test_tokio_connectivity` in lookup/network_production_test.zig: 10 peers,
   Mode::One, real TCP on `runtime.production`, from a probed random base port like discovery's.
   It reuses network_test.zig's public helpers rather than making the lookup harness generic.
+- 2026-11-19: the real-socket connectivity tests (discovery and lookup) failed silently once on
+  CI's loaded arm release runner. Their base ports were drawn from [20000, 60000), inside the
+  Linux ephemeral range, so an outgoing connection could take a node's port between the probe and
+  its bind; that node never listened and the loop ran out its rounds with no output (release
+  builds print no trace). Ports now come from [10000, 32000), below Linux's and macOS's ephemeral
+  ranges; `wait_listening` dials every port before the run, and a port that never accepts retries
+  the attempt on fresh ports (3 tries); a timeout prints the unheard pairs (discovery) or missing
+  deliveries (lookup, now at least 120 s) and failed metric checks print the metrics.

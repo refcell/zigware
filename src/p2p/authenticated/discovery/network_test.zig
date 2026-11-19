@@ -241,10 +241,11 @@ fn connectivity(
     n: usize,
     mode: Mode,
 ) !void {
-    return connectivity_at(io, transport, scope, base_port, max_message_size, n, mode);
+    return connectivity_at(io, transport, scope, base_port, max_message_size, n, mode, false);
 }
 
-/// `connectivity` on any transport, with nodes listening on ports from `base`.
+/// `connectivity` on any transport, with nodes listening on ports from `base`. With
+/// `probe_listeners`, first waits for every node's port to accept (real sockets only).
 fn connectivity_at(
     io: Io,
     transport: anytype,
@@ -253,6 +254,7 @@ fn connectivity_at(
     max_message_size: u32,
     n: usize,
     mode: Mode,
+    comptime probe_listeners: bool,
 ) !void {
     assert(n >= 2 and n <= peers_max);
     var keys: [peers_max]PublicKey = undefined;
@@ -260,10 +262,11 @@ fn connectivity_at(
     var nodes: [peers_max]TransportNode(@TypeOf(transport)) = undefined;
     try start_nodes(io, transport, scope, base, max_message_size, keys[0..n], nodes[0..n]);
     defer stop_nodes(io, nodes[0..n]);
+    if (probe_listeners) try wait_listening(io, transport, base, n);
     var heard: [peers_max][peers_max]bool = @splat(@splat(false));
     var rounds: u32 = 0;
     while (!all_heard(&heard, n)) : (rounds += 1) {
-        try testing.expect(rounds < 10_000);
+        if (rounds >= 10_000) return report_unheard(&heard, n);
         for (nodes[0..n], 0..) |*node, index| try send_identity(io, node, keys[0..n], index, mode);
         for (nodes[0..n], 0..) |*node, index| {
             while (node.registered.receiver.try_recv()) |message| {
@@ -279,6 +282,7 @@ fn connectivity_at(
     }
     const text = try scope.encode(gpa);
     defer gpa.free(text);
+    errdefer std.debug.print("connectivity metrics failed:\n{s}\n", .{text});
     try expect_no_rate_limiting(text);
     try expect_connected_metrics(text, n);
 }
@@ -330,6 +334,19 @@ fn expect_connected_metrics(text: []const u8, n: usize) !void {
     try testing.expect(attempts.next() != null);
 }
 
+/// Names every node that never heard from a peer, then fails: a bare failed `expect` gives
+/// no output in release builds.
+fn report_unheard(heard: *const [peers_max][peers_max]bool, n: usize) error{TestUnheard} {
+    std.debug.print("connectivity timed out; nodes that never heard a peer (to <- from):", .{});
+    for (0..n) |to| {
+        for (0..n) |from| {
+            if (to != from and !heard[to][from]) std.debug.print(" {d}<-{d}", .{ to, from });
+        }
+    }
+    std.debug.print("\n", .{});
+    return error.TestUnheard;
+}
+
 fn all_heard(heard: *const [peers_max][peers_max]bool, n: usize) bool {
     for (0..n) |to| {
         for (0..n) |from| {
@@ -361,25 +378,76 @@ test "peers discover each other through a bootstrapper and exchange messages" {
 
 const production = runtime.production;
 const production_peers = 10;
+const production_peers_max = 16;
 
 /// A base port whose next `production_peers` ports bind now: lanes and CI jobs sharing a host
-/// run this test at once, so a fixed port (commonware's 3000) would collide.
-fn free_base_port(io: Io, transport: *production.network.Network) !u16 {
-    for (0..16) |_| {
+/// run this test at once, so a fixed port (commonware's 3000) would collide. Bases stay in
+/// [10000, 32000), below the ephemeral ranges of Linux (32768) and macOS (49152), so no
+/// outgoing connection takes a port between this probe and a node's own bind.
+pub fn free_base_port(io: Io, transport: *production.network.Network, count: u16) !u16 {
+    assert(count <= production_peers_max);
+    for (0..64) |_| {
         var random: [2]u8 = undefined;
         io.random(&random);
-        const base: u16 = 20_000 + std.mem.readInt(u16, &random, .little) % 40_000;
+        const base: u16 = 10_000 + std.mem.readInt(u16, &random, .little) % (22_000 - count);
         var bound: usize = 0;
-        var listeners: [production_peers]*production.network.Network.Listener = undefined;
+        var listeners: [production_peers_max]*production.network.Network.Listener = undefined;
         defer for (listeners[0..bound]) |listener| listener.deinit();
-        while (bound < production_peers) : (bound += 1) {
+        while (bound < count) : (bound += 1) {
             const port = base + @as(u16, @intCast(bound));
             const address = network_mod.to_address(local_socket(port));
             listeners[bound] = transport.bind(address) catch break;
         }
-        if (bound == production_peers) return base;
+        if (bound == count) return base;
     }
+    std.debug.print("no run of {d} free ports below 32000\n", .{count});
     return error.TestNoFreePorts;
+}
+
+/// Waits up to 10 s for each of the `count` ports from `base` to accept. A node whose bind
+/// lost its port to another process never does: `error.TestPortLost` asks for a retry.
+pub fn wait_listening(io: Io, transport: anytype, base: u16, count: usize) !void {
+    for (0..count) |index| {
+        const port = base + @as(u16, @intCast(index));
+        const address = network_mod.to_address(local_socket(port));
+        var tries: u32 = 0;
+        while (true) : (tries += 1) {
+            var connection = transport.dial(address) catch {
+                if (tries >= 1_000) {
+                    std.debug.print("port {d} never accepted; another process took it\n", .{port});
+                    return error.TestPortLost;
+                }
+                try io.sleep(.fromMilliseconds(10), .real);
+                continue;
+            };
+            connection.deinit();
+            break;
+        }
+    }
+}
+
+/// Runs `function(io, network, metrics)` on a fresh production runner, up to three times
+/// while an attempt reports `error.TestPortLost`.
+pub fn run_production(comptime function: anytype) !void {
+    var attempt: u32 = 1;
+    while (true) : (attempt += 1) {
+        var tmp = testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var buffer: [128]u8 = undefined;
+        const directory = std.fmt.bufPrint(&buffer, ".zig-cache/tmp/{s}/runner", .{
+            tmp.sub_path,
+        }) catch unreachable; // The buffer fits the fixed-length temporary path.
+        var runner: production.Runner = undefined;
+        try runner.init(gpa, .{ .storage_directory = directory });
+        defer runner.deinit();
+        const args = .{ runner.io(), runner.network(), runner.metrics() };
+        runner.start(function, args) catch |err| {
+            if (err != error.TestPortLost or attempt == 3) return err;
+            std.debug.print("attempt {d} lost a port; retrying on fresh ports\n", .{attempt});
+            continue;
+        };
+        return;
+    }
 }
 
 fn production_connectivity(
@@ -387,23 +455,14 @@ fn production_connectivity(
     transport: *production.network.Network,
     scope: metrics.Scope,
 ) !void {
-    const base = try free_base_port(io, transport);
+    const base = try free_base_port(io, transport, production_peers);
     const n = production_peers;
-    try connectivity_at(io, transport, scope, base, max_message_size_default, n, Mode.one);
+    try connectivity_at(io, transport, scope, base, max_message_size_default, n, Mode.one, true);
 }
 
 test "peers connect over real sockets on the production runtime" {
     // commonware `test_tokio_connectivity`.
-    var tmp = testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var buffer: [128]u8 = undefined;
-    const directory = std.fmt.bufPrint(&buffer, ".zig-cache/tmp/{s}/runner", .{tmp.sub_path}) catch
-        unreachable; // The buffer fits the fixed-length temporary path.
-    var runner: production.Runner = undefined;
-    try runner.init(gpa, .{ .storage_directory = directory });
-    defer runner.deinit();
-    const args = .{ runner.io(), runner.network(), runner.metrics() };
-    try runner.start(production_connectivity, args);
+    try run_production(production_connectivity);
 }
 
 /// commonware `run_deterministic_test`: two runs of one seed end in the same state.
