@@ -325,14 +325,14 @@ marshal's actors (consensus-marshal) for the actor; until then it ports what is 
 - [x] db/any: variable values, ordered, `sync_db`/`sync_source` (StateSyncDb).
 - [x] db/current: the unordered fixed ManagedDb with staging and current.rs's tests.
 - [x] db/current: ordered and variable, `sync_db`/`sync_source`, the crash-recovery test.
-- [ ] db: keyless, immutable, compact.
+- [x] db: keyless, immutable, compact, with their tests and `sync_db`/`SyncSource`.
 - [x] db: `Anchor`, `TipUpdate`, `dispatch_queued_tips`, and the generation coordinator with
   mod.rs's tests of them, a regroup test, and the channel edge cases.
 - [x] db/p2p: `max_payload_size` with limits.rs's widest-encodings test.
 - [x] db/p2p: `Handler` and `EngineMessage` with handler.rs's overflow test.
-- [ ] db: state sync engines (`StateSyncDb`, `StateSyncSet`, `drain_generation_updates`, the
-  single and tuple sync loops) and their tests; db/p2p (actor, mailbox; waits on qmdb's sync
-  `Source` and engine).
+- [x] db: state sync engines (`StateSyncDb`, `StateSyncSet`, `drain_generation_updates`, the
+  single and tuple sync loops) and their tests; db/p2p (actor, mailbox) on qmdb's sync
+  `Source` and engine.
 - [x] probe: `Sample`, wire `Message`, `max_payload_size` with limits.rs's widest-encodings
   test and sample selection tests.
 - [x] probe: `Discovery` with probe/mod.rs's protocol tests (selection, late subscribers,
