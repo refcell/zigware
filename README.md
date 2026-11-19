@@ -152,6 +152,26 @@ Support packages: [formatting](src/formatting), [conformance](src/conformance),
 [bench](src/bench). [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) maps every commonware crate
 to its package and lists the dependency order.
 
+## Performance
+
+Twelve of commonware's criterion benchmarks, run against the zigware benchmark of the same
+name and parameters on the same machine ([docs/BENCHMARKS.md](docs/BENCHMARKS.md) has the
+setup, the commands, and the caveats). Below 1× means zigware is faster.
+
+| bench | zigware / commonware |
+| --- | --- |
+| `codec::lazy::get` (100k shared) | 0.17× |
+| `journal::append_sync` (fixed) / `fixed_append` (10k) / `fixed_replay` (100k) | 0.11× / 0.23× / 1.19× |
+| `buffer_paged::append` (4 KiB) | 0.43× |
+| `bls12381::aggregate_verify_same_message` (1000 keys) / single verify | 0.96× / 1.30× |
+| `sha256::hash_message` (4 KiB / 1 MiB) | 1.11× / 1.12× |
+| `ed25519::signature_verification` / `batch_verify_same_message` (100 keys) | 1.62× / 2.13× |
+| `qmdb::apply_batch` (16384 updates) | 2.43× |
+
+These were measured on a busy desktop with storage on tmpfs, so ratios near 1 are noise and
+the storage numbers measure code, not the disk. The ed25519, BLS single verify, and qmdb
+gaps are being worked on.
+
 ## Design
 
 - **Zero dependencies.** Only the Zig standard library: no C libraries, no vendored code,

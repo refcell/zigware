@@ -11,6 +11,7 @@
 //!   zig build test            run every package's unit tests (-Dtest-filter=... to narrow)
 //!   zig build test-<package>  run one package's unit tests, e.g. zig build test-codec
 //!   zig build run-<example>   run an example: zig build run-log -- --help
+//!   zig build test-example-<example>  run one example's tests, e.g. test-example-bridge
 //!   zig build check           compile everything without running
 //!   zig build bench           measure every package's benchmarks (src/<package>/benches.zig);
 //!                             -Dbench-filter=... narrows, COMMONWARE_BENCH_FULL=1 for full inputs
@@ -416,6 +417,16 @@ fn add_examples(
             .root_module = root,
             .filters = filters,
         });
-        test_step.dependOn(&b.addRunArtifact(tests).step);
+        const run_tests = b.addRunArtifact(tests);
+        test_step.dependOn(&run_tests.step);
+        example_test_step(b, entry).dependOn(&run_tests.step);
     }
+}
+
+/// `test-example-<dir>`: the tests of every binary under `examples/<dir>`.
+fn example_test_step(b: *std.Build, entry: []const u8) *std.Build.Step {
+    const dir = entry[0 .. std.mem.indexOfScalar(u8, entry, '/') orelse entry.len];
+    const step_name = b.fmt("test-example-{s}", .{dir});
+    if (b.top_level_steps.get(step_name)) |existing| return &existing.step;
+    return b.step(step_name, b.fmt("Run the {s} example's tests", .{dir}));
 }

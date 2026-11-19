@@ -121,6 +121,11 @@ Read this whole file before you change anything. These rules are not optional.
 - `std.Io.Condition` counts signals, not waiters: a waiter whose timeout fired can consume a
   signal meant for another waiter. Give each waiter its own condition (or a queue) instead of
   sharing one across waiters with timeouts (found in aggregation's engine, d35ed1a).
+- `Io.Select.await()` can return `error.Canceled` while its branches are still running. A bare
+  `try select.await()` then frees whatever the branches wait on (the nightly
+  "many concurrent crashes" use-after-free, 3d0d720). Drain the select on every path, with a
+  `defer` or `errdefer` that cancels and collects the branches, before anything they borrow is
+  freed.
 - On the deterministic runtime every hand-off between tasks costs a scheduler cycle (1 ms of
   simulated time), so a one-item inbox caps a pipeline near 500 items/s. Hand off through a
   bounded ring or queue, not one slot.
