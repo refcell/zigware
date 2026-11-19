@@ -775,7 +775,8 @@ After:
     heights 191–383, where the joiner synced in at 191.
   - Found on the way, not interop: a pure-zigware dkg network aborted in 2 of 6 runs. The
     cause is a null unwrap in glue's inclusion window (`.closed` after `.scan` took the
-    request in the same window). The coding lane owns it.
+    request in the same window). The coding lane fixed it in f1e5c99, with a regression
+    test.
 - No wire mismatch turned up, so no vector was added.
 
 ## Log
