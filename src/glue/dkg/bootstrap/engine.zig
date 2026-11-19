@@ -174,7 +174,7 @@ pub fn Engine(comptime T: type) type {
                 self: *MarshalReporter,
                 update: consensus.marshal.Update(Self.Block, ReshareTypes.Ack),
             ) consensus.Feedback {
-                return self.mailbox.report(update) catch @panic("out of memory");
+                return self.mailbox.report(update);
             }
 
             pub fn clone(self: *const MarshalReporter) MarshalReporter {
@@ -463,9 +463,6 @@ pub fn Engine(comptime T: type) type {
 
         fn deinit_reshare(self: *Self) void {
             self.reshare_mailbox.deinit();
-            // The actor borrows its marshal handle; this engine cloned it.
-            var marshal_handle = self.actor.config.marshal;
-            marshal_handle.deinit();
             self.actor.deinit();
             self.store.deinit();
             self.fence.close();

@@ -254,7 +254,7 @@ fn deliver(io: Io, mailbox: TestActor.Mailbox, block: *const Digested) !Exact.Wa
     const update: consensus.marshal.Update(mocks.TestBlock, Exact) = .{
         .block = .{ .block = block.clone(), .ack = handle.acknowledgement },
     };
-    _ = try mailbox.report(update);
+    _ = mailbox.report(update);
     return handle.waiter;
 }
 

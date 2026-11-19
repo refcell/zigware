@@ -27,7 +27,7 @@ test "orchestrator mailbox: tips are ignored and blocks overflow in order" {
     defer pair.receiver.deinit();
     var mailbox = TestMailbox.init(pair.sender);
     defer mailbox.deinit();
-    const tip = try mailbox.report(.{ .tip = .{
+    const tip = mailbox.report(.{ .tip = .{
         .round = .{ .epoch = .new(0), .view = .new(1) },
         .height = .new(1),
         .digest = mocks.genesis_block(mocks.TestSigner.from_seed(0).public_key()).digest(),
@@ -40,7 +40,7 @@ test "orchestrator mailbox: tips are ignored and blocks overflow in order" {
         const block, const handle = try finalized(index);
         waiters[index] = handle.waiter;
         digests[index] = block.digest();
-        const feedback = try mailbox.report(.{ .block = .{
+        const feedback = mailbox.report(.{ .block = .{
             .block = block,
             .ack = handle.acknowledgement,
         } });

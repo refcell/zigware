@@ -91,7 +91,7 @@ pub const Harness = struct {
         const Update = consensus.marshal.Update(mocks.TestBlock, Exact);
         const ack = handle.acknowledgement;
         const update: Update = .{ .block = .{ .block = block.clone(), .ack = ack } };
-        _ = try self.mailbox.report(update);
+        _ = self.mailbox.report(update);
         return handle.waiter;
     }
 

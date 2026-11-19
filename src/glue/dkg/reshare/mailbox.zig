@@ -314,8 +314,9 @@ pub fn Mailbox(comptime T: type) type {
         }
 
         /// Forwards a finalized block from marshal (commonware `Reporter::report`); a tip
-        /// update is ignored. Takes `update`.
-        pub fn report(self: Self, update: Update(T.Block, T.Ack)) Allocator.Error!Feedback {
+        /// update is ignored. Takes `update`. Panics when the overflow cannot grow, as Rust
+        /// aborts on allocation failure.
+        pub fn report(self: Self, update: Update(T.Block, T.Ack)) Feedback {
             switch (update) {
                 .tip => return .ok,
                 .block => |block| {
@@ -323,7 +324,8 @@ pub fn Mailbox(comptime T: type) type {
                         .block = block.block,
                         .response = block.ack,
                     } };
-                    return self.sender.enqueue(.{ .gpa = self.gpa, .body = body });
+                    const feedback = self.sender.enqueue(.{ .gpa = self.gpa, .body = body });
+                    return feedback catch @panic("out of memory");
                 },
             }
         }

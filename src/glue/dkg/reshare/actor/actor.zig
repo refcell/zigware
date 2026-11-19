@@ -50,6 +50,12 @@ const log = std.log.scoped(.dkg_reshare);
 /// `ControlFlow`.
 pub const Flow = enum { proceed, stop };
 
+/// Releases `marshal` when the actor owns it: a value with `deinit`. A pointer is borrowed.
+fn release_marshal(marshal: anytype) void {
+    const M = @TypeOf(marshal.*);
+    if (comptime @typeInfo(M) != .pointer and @hasDecl(M, "deinit")) marshal.deinit();
+}
+
 /// Marshal or provider contract violations, where commonware panics.
 pub const ContractError = error{
     ConflictingFinalizedBlock,
@@ -240,6 +246,7 @@ pub fn Actor(comptime T: type) type {
             }
             self.mailbox.deinit();
             self.metrics.deinit();
+            release_marshal(&self.config.marshal);
             self.* = undefined;
         }
 

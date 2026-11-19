@@ -79,15 +79,17 @@ pub fn Mailbox(comptime B: type, comptime A: type) type {
         }
 
         /// Forwards a finalized block (commonware `Reporter::report`); a tip is ignored.
-        /// Takes `update`.
-        pub fn report(self: Self, update: consensus.marshal.Update(B, A)) Allocator.Error!Feedback {
+        /// Takes `update`. Panics when the overflow cannot grow, as Rust aborts on
+        /// allocation failure.
+        pub fn report(self: Self, update: consensus.marshal.Update(B, A)) Feedback {
             assert(self.sender.capacity() > 0);
             switch (update) {
                 .tip => return .ok,
                 .block => |value| {
-                    return self.sender.enqueue(.{
+                    const feedback = self.sender.enqueue(.{
                         .finalized = .{ .block = value.block, .ack = value.ack },
                     });
+                    return feedback catch @panic("out of memory");
                 },
             }
         }

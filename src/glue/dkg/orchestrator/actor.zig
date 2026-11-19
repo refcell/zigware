@@ -23,7 +23,8 @@
 //! Commonware panics when marshal skips the active epoch's final block, when a boundary block
 //! carries no `EpochInfo` or one for another epoch, and when the provider has no scheme for
 //! an entered epoch; here those are `ContractError`s and `run` returns them. The
-//! `latest_epoch` gauge is not carried.
+//! `latest_epoch` gauge is not carried. `deinit` releases `marshal` when it is a value with
+//! `deinit` (the actor owns it); a pointer is borrowed.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -216,6 +217,10 @@ pub fn Actor(comptime T: type) type {
         pub fn deinit(self: *Self) void {
             assert(self.config.blocks_per_epoch > 0);
             self.mailbox.deinit();
+            const M = @TypeOf(self.config.marshal);
+            if (comptime @typeInfo(M) != .pointer and @hasDecl(M, "deinit")) {
+                self.config.marshal.deinit();
+            }
             self.* = undefined;
         }
 
