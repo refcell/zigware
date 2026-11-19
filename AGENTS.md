@@ -126,6 +126,11 @@ Read this whole file before you change anything. These rules are not optional.
   "many concurrent crashes" use-after-free, 229c523). Drain the select on every path, with a
   `defer` or `errdefer` that cancels and collects the branches, before anything they borrow is
   freed.
+- Code that catches `error.Canceled` and carries on (or returns a plain value, as in
+  `catch return 0`) must call `io.recancel()` first. A cancel is delivered once: after it is
+  acknowledged, the next wait blocks forever, so a supervisor never reaches its abort and
+  drain (the partitioned-restart teardown assert, found by marshal). A catch-all `catch` that
+  can see `Canceled` counts too.
 - On the deterministic runtime every hand-off between tasks costs a scheduler cycle (1 ms of
   simulated time), so a one-item inbox caps a pipeline near 500 items/s. Hand off through a
   bounded ring or queue, not one slot.
