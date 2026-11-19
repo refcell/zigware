@@ -339,3 +339,14 @@ variants need `runtime` storage; do them after its interface lands.
     for 648 generated inputs (60 reach M2): 0 mismatches. `fse_exact_test.zig` pins SHA-256
     digests of 8 oracle lines plus the exact capacity edge. Planted bugs (M2 always failing,
     swapped final states, `>` for `>=` in the overflow check) fail it.
+  - [x] Piece 4: `zstd/huf_exact.zig`, libzstd's Huffman literals: `HUF_sort` (buckets, then
+    quicksort with its recursion on an explicit stack), `HUF_buildTree`, `HUF_setMaxHeight`,
+    canonical codes, `HUF_writeCTable` (FSE weights at log 6, else raw nibbles), 1X and 4X
+    streams, `HUF_compress_internal`'s repeat, preferRepeat, and suspect-sample heuristics,
+    and `ZSTD_compressLiterals` at dfast (raw below 64 literals, RLE, `minGain`, headers).
+    A fourth scratch oracle linked from libzstd's `zstd_compress_literals.c` and
+    `huf_compress.c` compresses chunk sequences with tables carried across chunks; 1,400 random
+    and targeted chunk sequences matched with 0 mismatches. `huf_exact_test.zig` pins 7
+    digests. Planted bugs (no overshoot repayment, quicksort threshold 4, preferRepeat off,
+    suspect sample off, `<` for `<=` in the old-table check, single stream below 255) each
+    fail it. Raw weights above 128 symbols (libzstd: "should not happen") was never reached.
