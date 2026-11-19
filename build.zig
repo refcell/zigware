@@ -110,8 +110,8 @@ const examples = [_][]const u8{
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
-    const test_filter = b.option([]const u8, "test-filter", "Only run tests matching");
-    const filters: []const []const u8 = if (test_filter) |f| &.{f} else &.{};
+    const test_filter = b.option([]const []const u8, "test-filter", "Only run tests matching any");
+    const filters: []const []const u8 = test_filter orelse &.{};
 
     const options = b.addOptions();
     options.addOption([]const u8, "version", "0.0.0");

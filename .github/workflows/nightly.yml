@@ -17,17 +17,40 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # One job ran every package for 136 minutes on x86 (fe3bdcb) and neared the timeout
-        # on arm, so it splits like ci.yml: consensus, glue, and the rest, where
-        # cryptography's 57 to 90 minutes is the longest step. Most of that is skip_heavy
-        # tests (golden DKG rounds, 2 to 3 minutes each), which test-rest and two more
-        # cryptography jobs split three ways with -Dheavy-shard.
+        # One job ran every package for 136 minutes on x86 (fe3bdcb), so it splits by
+        # package. test-consensus alone ran past 2 hours (6ace499), so it splits into groups
+        # of test-name filters (etc/scripts/consensus-filters.sh). Cryptography ran 57 to 90
+        # minutes, mostly skip_heavy tests (golden DKG rounds, 2 to 3 minutes each), which
+        # test-rest and two cryptography jobs split three ways with -Dheavy-shard.
         os: [ubuntu-latest, ubuntu-24.04-arm]
-        job: [consensus, glue, rest, cryptography-1, cryptography-2]
+        job:
+          - consensus-marshal
+          - consensus-aggregation
+          - consensus-simplex-engine-1
+          - consensus-simplex-engine-2
+          - consensus-simplex-engine-3
+          - consensus-simplex-fixtures-1
+          - consensus-simplex-fixtures-2
+          - consensus-simplex-fixtures-3
+          - consensus-simplex-twins
+          - consensus-rest
+          - glue
+          - rest
+          - cryptography-1
+          - cryptography-2
         include:
-          - { job: consensus, steps: test-consensus, heavy_shard: 0 }
-          - { job: glue, steps: test-glue, heavy_shard: 0 }
-          - { job: rest, steps: test-rest, heavy_shard: 0 }
+          - { job: consensus-marshal, steps: test-consensus, group: marshal }
+          - { job: consensus-aggregation, steps: test-consensus, group: aggregation }
+          - { job: consensus-simplex-engine-1, steps: test-consensus, group: simplex-engine-1 }
+          - { job: consensus-simplex-engine-2, steps: test-consensus, group: simplex-engine-2 }
+          - { job: consensus-simplex-engine-3, steps: test-consensus, group: simplex-engine-3 }
+          - { job: consensus-simplex-fixtures-1, steps: test-consensus, group: simplex-fixtures-1 }
+          - { job: consensus-simplex-fixtures-2, steps: test-consensus, group: simplex-fixtures-2 }
+          - { job: consensus-simplex-fixtures-3, steps: test-consensus, group: simplex-fixtures-3 }
+          - { job: consensus-simplex-twins, steps: test-consensus, group: simplex-twins }
+          - { job: consensus-rest, steps: test-consensus, group: rest }
+          - { job: glue, steps: test-glue }
+          - { job: rest, steps: test-rest }
           - { job: cryptography-1, steps: test-cryptography, heavy_shard: 1 }
           - { job: cryptography-2, steps: test-cryptography, heavy_shard: 2 }
     runs-on: ${{ matrix.os }}
@@ -42,11 +65,16 @@ jobs:
         env:
           FILTER: ${{ inputs.filter }}
           STEPS: ${{ matrix.steps }}
-          SHARD: ${{ matrix.heavy_shard }}
+          GROUP: ${{ matrix.group }}
+          SHARD: ${{ matrix.heavy_shard || 0 }}
         run: |
           set -- -Doptimize=ReleaseSafe -Dslow-tests -Dheavy-shards=3 -Dheavy-shard="$SHARD"
           if [ -n "$FILTER" ]; then
-            zig build "$STEPS" "$@" -Dtest-filter="$FILTER" --summary all
-          else
-            zig build "$STEPS" "$@" --summary all
+            set -- "$@" -Dtest-filter="$FILTER"
+          elif [ -n "$GROUP" ]; then
+            filters=$(sh etc/scripts/consensus-filters.sh "$GROUP")
+            while IFS= read -r filter; do set -- "$@" -Dtest-filter="$filter"; done <<EOF
+          $filters
+          EOF
           fi
+          zig build "$STEPS" "$@" --summary all
