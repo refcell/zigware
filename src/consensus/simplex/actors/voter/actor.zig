@@ -1147,10 +1147,15 @@ pub fn Actor(comptime P: type) type {
 
         /// Waits for the next event or the timeout and handles it.
         fn next_outcome(self: *Self, links: *const Links) !Outcome {
-            if (try self.release_held()) |view| {
-                return .{ .notify = .{ .view = view, .staged = .{} } };
-            }
             const deadline = self.state.next_timeout();
+            // commonware's biased `select_loop!` polls an expired timeout before releasing a
+            // held candidate, so a leader timeout that passed during a parked journal sync
+            // makes the candidate ineligible instead of voted.
+            if (context_mod.now_ns(self.io) < deadline.deadline) {
+                if (try self.release_held()) |view| {
+                    return .{ .notify = .{ .view = view, .staged = .{} } };
+                }
+            }
             const event = try links.inbox.next_until(deadline.deadline) orelse {
                 const current = self.state.current_view();
                 assert(self.span == null);

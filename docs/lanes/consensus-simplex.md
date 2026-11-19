@@ -492,3 +492,9 @@ resolver; those lanes are running, so do the types first and the actors as they 
 - 2026-11-19: open item, assigned to broadcast-collector (T-01a1d58d): the threshold schemes
   ignore `strategy` (`_ = strategy;` in vrf.zig's five verify and assemble paths, and in
   bls12381 certificate/threshold.zig), so all_online_rayon cannot catch a strategy bug.
+- 2026-11-19 (runtime lane, voter mod.rs port): the voter now checks `next_timeout()` before
+  releasing a held handoff candidate, as commonware's biased `select_loop!` polls
+  `sleep_until(deadline)` ahead of `propose_wait`. Before, a leader timeout that expired
+  while the parent's certification sync was parked still let the candidate be voted
+  (test_pipelined_handoff_held_build_becomes_ineligible_at_leader_timeout). Open: the inbox's
+  `next_event` still returns a queued event ahead of an already expired deadline.
