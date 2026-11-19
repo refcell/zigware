@@ -384,11 +384,11 @@ ones: d = deployer (thread T-01a1d5b9-c237), u = utils, j = storage-journal
 | stateful/actor/core/mailbox.rs | 2 | 2 | 0 | 0 | |
 | stateful/actor/core/mod.rs | 4 | 4 | 0 | 0 | |
 | stateful/actor/core/syncing.rs | 16 | 15 | 0 | 1 | |
-| stateful/actor/core/processing.rs, 1070-3396 | 47 | see backlog | see backlog | | u |
+| stateful/actor/core/processing.rs, 1070-3396 | 47 | 22 | 24 | 1 | u |
 | stateful/actor/core/processing.rs, 3451-5885 | 39 | 35 | 2 | 2 | s |
 | stateful/actor/processor/mod.rs | 44 | 40 | 0 | 4 | |
 | stateful/tests/mod.rs, floor.rs | 28 | 21 | 7 | 0 | j |
-| **total** | **469** | **403** | **56** | **10** | |
+| **total** | **475** | **431** | **33** | **11** | |
 
 - db/mod.rs's barrier tests are ported since async start_sync step 6 (`Barrier` holds each
   member's `runtime.storage.Completion`): `barrier_waits_for_every_handle` (8),
@@ -428,7 +428,20 @@ ones: d = deployer (thread T-01a1d5b9-c237), u = utils, j = storage-journal
     zigware's barrier is synchronous, and the partial-window test checks the
     ack-before-completion order it also covers.
 - Open, u (utils):
-  - core/processing.rs, first half (1070-3396): see the backlog line.
+  - core/processing.rs, first half (1070-3396): 47 cases (22 `#[test]`, 25 rstest cases),
+    22 ported in core/processing_early_test.zig (processing_test.zig's 5 are core unit tests,
+    not ports). Not portable: `processing_runs_on_the_actor_context` (`Mailbox.verify` takes
+    no caller context, and `App.process` gets only `std.Io` and the consensus context). Open
+    (24): `pending_proposal_polls_ready_verification_before_ingress`,
+    `parent_certification_overtakes_deferred_finalization`, and the rstests
+    `handoff_and_parent_verification_execute_parent_once` ×2,
+    `shared_parent_execution_survives_cancellation` ×4,
+    `unexecutable_handoff_parent_executes_once` ×2,
+    `concurrent_verifications_share_one_processing` ×2,
+    `maintenance_preserves_owned_requests_and_retained_work` ×2,
+    `retained_verification_finishes_during_finalization` ×2,
+    `finalization_completes_build_processing_finalized_parent` ×6, and
+    `recovered_handoff_ancestry_executes_once` ×2.
   - core/processing.rs, second half (3451-5885), done in core/processing_late_test.zig: 32
     zigware tests for 39 cases (24 `#[test]`, 7 rstests with 15 cases). 5325
     `ready_aborted_flush_stops_processing` is covered by 5285's test, since no barrier is ever
