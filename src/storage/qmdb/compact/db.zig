@@ -58,7 +58,6 @@ pub fn Db(comptime F: type, comptime O: type, comptime H: type) type {
         pub const Merkle = witness.Merkle(F, Digest);
         pub const Request = source.Request(F);
         pub const Response = source.Response(F, O, Digest);
-        pub const CompactTarget = target_mod.CompactTarget(F, Digest);
         pub const keyed = op_mod.is_keyed(O);
         const Rebuilt = witness.Rebuilt(F, Digest, O);
 
@@ -75,7 +74,8 @@ pub fn Db(comptime F: type, comptime O: type, comptime H: type) type {
         pub const persist_sync_result = SyncImpl.persist_sync_result;
         pub const discard_local_state = SyncImpl.discard_local_state;
         pub const local_pinned_nodes = SyncImpl.local_pinned_nodes;
-        pub const ops_root = SyncImpl.ops_root;
+        pub const prune_to_target = SyncImpl.prune_to_target;
+        pub const validate_target = SyncImpl.validate_target;
 
         const Open = struct {
             journal: WitnessJournal,
@@ -258,9 +258,9 @@ pub fn Db(comptime F: type, comptime O: type, comptime H: type) type {
             return value_mod.clone(?Value, self.gpa, op_mod.metadata(O, &self.tip.witness.commit));
         }
 
-        /// The compact-sync target of the current witness (durable once a covering `commit`,
-        /// `sync`, `start_sync`, or `prune` returns).
-        pub fn target(self: *const Self) CompactTarget {
+        /// The sync target of the current witness, whose range covers only the last commit
+        /// (durable once a covering `commit`, `sync`, `start_sync`, or `prune` returns).
+        pub fn target(self: *const Self) Target {
             return self.tip.target();
         }
 

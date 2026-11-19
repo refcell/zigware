@@ -13,6 +13,7 @@ const runtime = @import("runtime");
 const merkle = @import("../../merkle/mod.zig");
 const sync_journal = @import("../sync/journal.zig");
 const target_mod = @import("../sync/target.zig");
+const errors = @import("../sync/error.zig");
 
 const Storage = runtime.storage.Storage;
 const Scope = runtime.telemetry.metrics.Scope;
@@ -85,8 +86,18 @@ pub fn Sync(comptime D: type) type {
             return null;
         }
 
-        pub fn ops_root(db: *const D) D.Digest {
-            return db.root();
+        /// The target reaching the db's state; its range covers only the last commit, the one
+        /// operation a compact db holds.
+        /// Prunes everything a reached `target` no longer needs: all before its end.
+        pub fn prune_to_target(db: *D, reached: Target) !void {
+            assert(reached.start < reached.end);
+            try db.prune(reached.end);
+        }
+
+        /// Refuses a target that covers more than the last commit.
+        pub fn validate_target(candidate: Target) errors.EngineError!void {
+            assert(candidate.start < candidate.end);
+            if (candidate.start + 1 != candidate.end) return error.InvalidTarget;
         }
     };
 }

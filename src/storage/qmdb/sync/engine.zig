@@ -37,6 +37,7 @@ const metrics_mod = @import("metrics.zig");
 const requests_mod = @import("requests.zig");
 const source_mod = @import("source.zig");
 const target_mod = @import("target.zig");
+const EngineError = @import("error.zig").EngineError;
 
 const ring = channel.ring;
 const mpsc = channel.mpsc;
@@ -203,10 +204,17 @@ pub fn Engine(comptime DB: type, comptime S: type) type {
             self.record_progress();
         }
 
+        /// Runs the database's target check (commonware's `Database::validate_target`), which
+        /// accepts any target by default.
+        fn validate_target(candidate: Target) EngineError!void {
+            if (@hasDecl(DB, "validate_target")) try DB.validate_target(candidate);
+        }
+
         fn open(gpa: Allocator, io: Io, config: Config(DB, S)) !Self {
             const target = config.target;
             if (!merkle.location_is_valid(Family, target.end)) return error.InvalidTarget;
             assert(target.start < target.end);
+            try validate_target(target);
             assert(config.max_outstanding_requests > 0);
             assert(config.fetch_batch_size > 0 and config.apply_batch_size > 0);
             const range: merkle.Range = .{ .start = target.start, .end = target.end };
@@ -628,6 +636,8 @@ pub fn Engine(comptime DB: type, comptime S: type) type {
                     if (new_target.root.eql(self.target.root)) {
                         return error.SyncTargetRootUnchanged;
                     }
+                    // A malformed adopted target is a caller bug, so it fails the sync.
+                    try validate_target(new_target);
                     try self.reset_for_target_update(new_target);
                     self.record_progress();
                     try self.schedule_requests();
@@ -805,7 +815,7 @@ pub fn Engine(comptime DB: type, comptime S: type) type {
                 self.apply_batch_size,
             );
             errdefer db.deinit();
-            if (!db.ops_root().eql(self.target.root)) return error.RootMismatch;
+            if (!db.target().root.eql(self.target.root)) return error.RootMismatch;
             try db.persist_sync_result();
             return db;
         }

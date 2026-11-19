@@ -73,9 +73,9 @@ pub fn Compact(comptime F: type, comptime O: type, comptime H: type) type {
         }
 
         pub fn sync_target(self: *const Self) SyncTarget {
-            const target = self.inner.target();
-            assert(target.size == self.inner.size());
-            return target;
+            const reached = self.inner.target();
+            assert(reached.end == self.inner.size());
+            return .{ .root = reached.root, .size = reached.end };
         }
 
         /// Serves peers' sync requests from this database's current peaks (commonware's

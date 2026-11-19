@@ -203,6 +203,13 @@ which every database here is built on.
 - [x] Upstream 90960d81c (#5770): immutable `get`/`get_many` read from the inactivity floor,
   so live, pruned, reopened, and synced databases at one commitment answer alike; sets below
   the floor stay indexed until pruned. Its mod.rs and sync/tests.rs assertions are ported.
+- [x] Upstream 8bf364011 (#4590) batch 1: the sync `Database` contract's `ops_root` becomes
+  `target()` (root over `[sync_boundary, end)`; compact's covers only its last commit) plus
+  `prune_to_target` and an optional `validate_target` the engine runs on the initial target
+  and every adopted update (compact refuses wider than one operation). Compact `Db.target`
+  returns the ranged `Target`. Ported `step_fails_on_same_root_advance`.
+- [ ] 8bf364011 batch 2: drop `CompactTarget` and its two conformance entries once glue's
+  compact adapter (deployer) takes `Target`; merkleized-batch `target()` for the dbs.
 - [x] Upstream `qmdb::commit_floor_at`: `qmdb.commit_floor_at` returns the floor of the
   commit at `size - 1`, or null for a non-commit (`HistoricalFloorPruned` at size 0,
   `ItemPruned`, `DataCorrupted` past its own location); `find_inactivity_floor_at` wraps it.
@@ -443,3 +450,4 @@ which every database here is built on.
 - 2026-11-19: upstream 90960d81c: immutable database reads start at the inactivity floor.
 - 2026-11-19: upstream commit_floor_at: qmdb inits refuse a log not ending in a commit.
 - 2026-11-19: upstream 102430409: store get_many cached/uncached test (refactor moot by decision).
+- 2026-11-19: upstream 8bf364011 batch 1: sync databases report `target()`; engine validates.

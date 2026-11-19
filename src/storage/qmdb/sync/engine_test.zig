@@ -97,9 +97,11 @@ const TestDb = struct {
         return try allocator.alloc(D, 0);
     }
 
-    pub fn ops_root(_: *const TestDb) D {
-        return .fill(0);
+    pub fn target(_: *const TestDb) Target {
+        return .init(.fill(0), 0, 1);
     }
+
+    pub fn prune_to_target(_: *TestDb, _: Target) !void {}
 
     pub fn deinit(_: *TestDb) void {}
 };
@@ -248,6 +250,23 @@ test "sync step takes a queued update before completing" {
     defer engine.deinit();
     try testing.expect(try engine.step() == null);
     try testing.expect(engine.target.eql(advancing));
+}
+
+// commonware's `step_fails_on_same_root_advance`: an advancing update that keeps the root
+// fails the sync, since an append-only log cannot grow without changing its root.
+test "sync step fails on a same-root advance" {
+    var fixture = Fixture.init();
+    defer fixture.deinit();
+    var updates = try channel.ring.channel(Target, gpa, testing.io, 1);
+    defer updates.receiver.deinit();
+    defer updates.sender.deinit();
+    var config = fixture.config(10);
+    config.update_rx = &updates.receiver;
+    try testing.expect(updates.sender.send_lossy(.init(config.target.root, 5, 12)));
+    var engine: Engine = undefined;
+    try engine.init(gpa, testing.io, config);
+    defer engine.deinit();
+    try testing.expectError(error.SyncTargetRootUnchanged, engine.step());
 }
 
 test "sync step completes at the current target after finish" {

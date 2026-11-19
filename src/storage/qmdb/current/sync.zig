@@ -95,24 +95,32 @@ pub fn Database(comptime D: type, comptime H: type) type {
             gpa: Allocator,
             storage: Storage,
             cfg: Config,
-            target: Target,
+            wanted: Target,
             log: *C,
         ) !?[]Digest {
             const span = log.get_bounds();
             const bounds: merkle.Range = .{ .start = span.start, .end = span.end };
-            const range: merkle.Range = .{ .start = target.start, .end = target.end };
-            if (target.start == 0 or !sync.database.journal_covers_range(bounds, range)) {
+            const range: merkle.Range = .{ .start = wanted.start, .end = wanted.end };
+            if (wanted.start == 0 or !sync.database.journal_covers_range(bounds, range)) {
                 return null;
             }
-            // The inactivity floor is the last commit's, not the target's start.
+            // The inactivity floor is the last commit's, not the wanted's start.
             var reader: LogReader = .{ .log = log };
-            const floor = try qmdb.find_inactivity_floor_at(gpa, &reader, target.end);
-            return sync.database.local_pinned_nodes(F, H, gpa, storage, cfg.merkle, target, floor);
+            const floor = try qmdb.find_inactivity_floor_at(gpa, &reader, wanted.end);
+            return sync.database.local_pinned_nodes(F, H, gpa, storage, cfg.merkle, wanted, floor);
         }
 
-        /// The ops root, which the engine verifies batches against.
-        pub fn ops_root(self: *const Self) Digest {
-            return self.db.ops_root();
+        /// The target reaching the applied state. Its root is the ops root (not the canonical
+        /// root), which the engine verifies batches against.
+        pub fn target(self: *const Self) Target {
+            const end = self.db.bounds().end;
+            return .init(self.db.ops_root(), self.db.sync_boundary(), end);
+        }
+
+        /// Prunes the history below the start of a reached `target`.
+        pub fn prune_to_target(self: *Self, reached: Target) !void {
+            assert(reached.start < reached.end);
+            try self.db.prune(reached.start);
         }
 
         const LogReader = struct {

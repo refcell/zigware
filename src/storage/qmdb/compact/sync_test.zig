@@ -50,7 +50,7 @@ test "compact sync imports a served boundary and persists it" {
         try apply(Db, &db, 1, 3);
         try db.sync();
         const size = db.size();
-        const root = Db.ops_root(&db);
+        const root = db.target().root;
         var response = try db.serve(.{ .boundary = .{ .size = size, .start = size - 1 } });
         defer response.deinit(gpa);
         const served = response.boundary;
@@ -67,7 +67,7 @@ test "compact sync imports a served boundary and persists it" {
         const pins = try gpa.dupe(Db.Digest, served.pinned_nodes);
         var imported =
             try Db.from_sync_result(gpa, storage, undefined, cfg, journal, pins, range, 1);
-        try testing.expect(Db.ops_root(&imported).eql(root));
+        try testing.expect(imported.target().root.eql(root));
         try Db.persist_sync_result(&imported);
         imported.deinit();
         var reopened = try other.open(Db, null);
@@ -116,5 +116,23 @@ test "compact sync refuses a journal that is not the start commit" {
             error.UnexpectedData,
             Db.from_sync_result(gpa, storage, undefined, cfg, empty, null, range, 1),
         );
+    }
+}
+
+// commonware's compact `validate_target`: the target and every adopted update cover exactly
+// the last commit, and a db's own target is one.
+test "compact sync accepts only a target covering the last commit" {
+    inline for (all_dbs) |Db| {
+        var harness = try support.Harness.init(gpa);
+        defer harness.deinit();
+        var db = try harness.open(Db, null);
+        defer db.deinit();
+        try apply(Db, &db, 1, 3);
+        const reached = db.target();
+        try testing.expectEqual(db.size(), reached.end);
+        try testing.expectEqual(reached.end - 1, reached.start);
+        try Db.validate_target(reached);
+        const wide = Db.Target.init(reached.root, reached.start - 1, reached.end);
+        try testing.expectError(error.InvalidTarget, Db.validate_target(wide));
     }
 }

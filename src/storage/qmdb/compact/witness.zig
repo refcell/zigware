@@ -128,8 +128,11 @@ pub fn Verified(comptime F: type, comptime D: type, comptime O: type) type {
             return self.witness.size;
         }
 
-        pub fn target(self: *const Self) qmdb.sync.CompactTarget(F, D) {
-            return .{ .root = self.root, .size = self.size() };
+        /// The sync target this witness can serve: its root and its last commit.
+        pub fn target(self: *const Self) qmdb.sync.Target(F, D) {
+            const end = self.size();
+            assert(end > 0);
+            return .init(self.root, end - 1, end);
         }
     };
 }

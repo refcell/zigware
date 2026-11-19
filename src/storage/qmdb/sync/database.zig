@@ -6,12 +6,16 @@
 //!   `Config` with `journal_config(cfg)` (commonware's `Config::journal_config`);
 //! - `from_sync_result(gpa, storage, scope, cfg, journal, pinned_nodes, range, batch)`, which
 //!   takes ownership of the journal and the pinned nodes, also on error;
-//! - `persist_sync_result(*DB)`, called only once `ops_root` matches the target;
+//! - `persist_sync_result(*DB)`, called only once the root of `target` matches the target;
 //! - `discard_local_state(gpa, storage, cfg)`, called when the opened sync journal holds no
 //!   operation of the target's range;
 //! - `local_pinned_nodes(gpa, storage, cfg, target, *journal) ?[]Digest` (owned), probed when
 //!   the journal already reaches the target;
-//! - `ops_root(*const DB) Digest`, which `current` computes differently from its root.
+//! - `target(*const DB) Target`, the sync target that reaches the applied state; its root is
+//!   the ops root, which `current` computes differently from its canonical root;
+//! - `prune_to_target(*DB, Target)`, pruning history a reached target no longer needs;
+//! - optionally `validate_target(Target) EngineError!void`, rejecting a target the database
+//!   cannot sync to; the engine checks the initial target and every adopted update.
 //!
 //! The shared bodies for databases backed by a persisted `merkle.full.Merkle` are here:
 //! `discard_local_state` and `local_pinned_nodes`, plus `journal_covers_range`.
@@ -38,7 +42,8 @@ pub fn assert_database(comptime DB: type) void {
             "persist_sync_result",
             "discard_local_state",
             "local_pinned_nodes",
-            "ops_root",
+            "target",
+            "prune_to_target",
             "journal_config",
         }) |name| {
             if (!@hasDecl(DB, name)) @compileError(@typeName(DB) ++ " lacks " ++ name);
@@ -83,10 +88,10 @@ pub fn local_pinned_nodes(
     gpa: Allocator,
     storage: Storage,
     cfg: merkle.full.Config,
-    target: target_mod.Target(F, H.Digest),
+    wanted: target_mod.Target(F, H.Digest),
     inactivity_floor: u64,
 ) !?[]H.Digest {
-    assert(target.start < target.end);
+    assert(wanted.start < wanted.end);
     const Merkle = merkle.full.Merkle(F, H.Digest);
     const hasher = qmdb.hasher(H);
     var structure = Merkle.init(gpa, storage, &hasher, cfg) catch |err| switch (err) {
@@ -96,12 +101,12 @@ pub fn local_pinned_nodes(
     };
     defer structure.deinit();
     const bounds = structure.bounds();
-    if (bounds.start > target.start or bounds.end != target.end) return null;
-    const inactive_peaks = merkle.inactive_peaks(F, target.end, inactivity_floor);
+    if (bounds.start > wanted.start or bounds.end != wanted.end) return null;
+    const inactive_peaks = merkle.inactive_peaks(F, wanted.end, inactivity_floor);
     const root = try structure.root(&hasher, inactive_peaks);
-    if (!root.eql(target.root)) return null;
+    if (!root.eql(wanted.root)) return null;
     var buffer: [merkle.max_pinned_nodes]H.Digest = undefined;
-    const pins = try structure.pinned_nodes_at(target.start, &buffer);
+    const pins = try structure.pinned_nodes_at(wanted.start, &buffer);
     return try gpa.dupe(H.Digest, pins);
 }
 
@@ -190,23 +195,30 @@ pub fn Persisted(comptime F: type, comptime V: type) type {
             gpa: Allocator,
             storage: Storage,
             cfg: Config,
-            target: Target,
+            wanted: Target,
             log: *C,
         ) !?[]Digest {
             const span = log.get_bounds();
             const bounds: merkle.Range = .{ .start = span.start, .end = span.end };
-            const range: merkle.Range = .{ .start = target.start, .end = target.end };
-            if (target.start == 0 or !journal_covers_range(bounds, range)) {
+            const range: merkle.Range = .{ .start = wanted.start, .end = wanted.end };
+            if (wanted.start == 0 or !journal_covers_range(bounds, range)) {
                 return null;
             }
-            // The inactivity floor is the last commit's, not the target's start.
+            // The inactivity floor is the last commit's, not the wanted's start.
             var reader: LogReader = .{ .log = log };
-            const floor = try qmdb.find_inactivity_floor_at(gpa, &reader, target.end);
-            return merkle_pinned_nodes(F, H, gpa, storage, cfg.merkle, target, floor);
+            const floor = try qmdb.find_inactivity_floor_at(gpa, &reader, wanted.end);
+            return merkle_pinned_nodes(F, H, gpa, storage, cfg.merkle, wanted, floor);
         }
 
-        pub fn ops_root(self: *const Self) Digest {
-            return self.db.root();
+        /// The target reaching the applied state: its root over `[sync_boundary, end)`.
+        pub fn target(self: *const Self) Target {
+            return .init(self.db.root(), self.db.sync_boundary(), self.db.bounds().end);
+        }
+
+        /// Prunes the history below the start of a reached `target`.
+        pub fn prune_to_target(self: *Self, reached: Target) !void {
+            assert(reached.start < reached.end);
+            try self.db.prune(reached.start);
         }
 
         const LogReader = struct {

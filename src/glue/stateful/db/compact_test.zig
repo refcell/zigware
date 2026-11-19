@@ -191,10 +191,10 @@ fn bounded_initialization(comptime C: type) !void {
     {
         defer seed_db.deinit();
         try commit_inner(C, &seed_db.inner, &.{ 1, 2, 3 }, 11, null);
-        first = seed_db.inner.target();
+        first = seed_db.sync_target();
         try testing.expectEqual(@as(u64, 5), first.size);
         try commit_inner(C, &seed_db.inner, &.{4}, 22, 1);
-        latest = seed_db.inner.target();
+        latest = seed_db.sync_target();
     }
 
     var wrong_root = latest;

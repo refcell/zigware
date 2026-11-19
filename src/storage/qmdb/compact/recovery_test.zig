@@ -58,7 +58,7 @@ fn apply_seed(comptime Db: type, db: *Db, seed: u64, metadata: u64, floor: ?u64)
 
 /// Durably commits `seed`'s mutation, with `seed`'s value as metadata, on top of the state in
 /// `cfg`'s partition, returning the new target.
-fn commit_seed(comptime Db: type, storage: Storage, cfg: Db.Cfg, seed: u64) !Db.CompactTarget {
+fn commit_seed(comptime Db: type, storage: Storage, cfg: Db.Cfg, seed: u64) !Db.Target {
     var db = try Db.init(gpa, storage, cfg, null);
     defer db.deinit();
     _ = try apply_seed(Db, &db, seed, seed, null);
@@ -68,13 +68,13 @@ fn commit_seed(comptime Db: type, storage: Storage, cfg: Db.Cfg, seed: u64) !Db.
 
 /// The state a sync client fetches for `target`: its commit and pinned nodes (owned).
 fn Import(comptime Db: type) type {
-    return struct { target: Db.CompactTarget, pinned: []Db.Digest, commit: Db.Operation };
+    return struct { target: Db.Target, pinned: []Db.Digest, commit: Db.Operation };
 }
 
-fn fetch(comptime Db: type, storage: Storage, cfg: Db.Cfg, target: Db.CompactTarget) !Import(Db) {
+fn fetch(comptime Db: type, storage: Storage, cfg: Db.Cfg, target: Db.Target) !Import(Db) {
     var db = try Db.init(gpa, storage, cfg, null);
     defer db.deinit();
-    const request: Db.Request = .{ .boundary = .{ .size = target.size, .start = target.size - 1 } };
+    const request: Db.Request = .{ .boundary = .{ .size = target.end, .start = target.end - 1 } };
     var response = try db.serve(request);
     response.boundary.proof.deinit(gpa);
     const boundary = response.boundary;
@@ -83,7 +83,7 @@ fn fetch(comptime Db: type, storage: Storage, cfg: Db.Cfg, target: Db.CompactTar
 
 /// Imports `import` into `cfg`'s partition; the db takes the commit.
 fn import_db(comptime Db: type, storage: Storage, cfg: Db.Cfg, import: Import(Db)) !Db {
-    const last = import.target.size - 1;
+    const last = import.target.end - 1;
     const db = try Db.init_from_sync(gpa, storage, cfg, last, import.pinned, import.commit);
     try testing.expect(db.target().eql(import.target));
     return db;
@@ -156,14 +156,14 @@ fn crash_import(comptime Db: type, crash: Crash, seed: u64) !Reopened {
     };
     defer db.deinit();
     const reopened = db.commitment();
-    if (reopened.size == seeded.size and reopened.root.eql(seeded.root)) return .seeded;
-    if (reopened.size == target.size and reopened.root.eql(target.root)) return .imported;
+    if (reopened.size == seeded.end and reopened.root.eql(seeded.root)) return .seeded;
+    if (reopened.size == target.end and reopened.root.eql(target.root)) return .imported;
     if (applied) |tip| if (reopened.eql(tip)) return .applied;
     return error.TestUnexpectedResult;
 }
 
 /// A re-sync of an interrupted import replaces the partition, and the import reopens.
-fn resync(comptime Db: type, storage: Storage, cache: *CacheRef, target: Db.CompactTarget) !void {
+fn resync(comptime Db: type, storage: Storage, cache: *CacheRef, target: Db.Target) !void {
     const src = config(Db, cache, "compact-import-crash-src");
     const dst = config(Db, cache, "compact-import-crash-dst");
     const import = try fetch(Db, storage, src, target);
@@ -270,7 +270,7 @@ fn Edits(comptime Db: type) type {
 }
 
 /// Commits `seed`'s mutation with metadata 11 and floor 1, durably.
-fn commit_floored(comptime Db: type, harness: *support.Harness, seed: u64) !Db.CompactTarget {
+fn commit_floored(comptime Db: type, harness: *support.Harness, seed: u64) !Db.Target {
     var db = try harness.open(Db, null);
     defer db.deinit();
     _ = try apply_seed(Db, &db, seed, 11, 1);
@@ -307,12 +307,12 @@ test "compact reopen of a flipped pinned node yields another root" {
         try rewrite_entry(Db, storage, harness.cfg(Db), 1, Edits(Db).flip_pin);
         var db = try harness.open(Db, null);
         defer db.deinit();
-        try testing.expectEqual(tampered.size, db.size());
+        try testing.expectEqual(tampered.end, db.size());
         try testing.expect(!db.target().eql(tampered));
     }
 }
 
-fn expect_tip(comptime Db: type, harness: *support.Harness, tip: Db.CompactTarget) !void {
+fn expect_tip(comptime Db: type, harness: *support.Harness, tip: Db.Target) !void {
     var db = try harness.open(Db, null);
     defer db.deinit();
     try testing.expect(db.target().eql(tip));
@@ -323,7 +323,7 @@ test "compact bounded initialization rejects a corrupt target and keeps newer hi
     inline for (all_dbs) |Db| {
         var harness = try support.Harness.init(gpa);
         defer harness.deinit();
-        const bound = (try commit_floored(Db, &harness, 1)).size;
+        const bound = (try commit_floored(Db, &harness, 1)).end;
         const tip = try commit_floored(Db, &harness, 2);
         // The journal holds the genesis witness, the bounded target, and the tip.
         const storage = harness.storage.interface();
