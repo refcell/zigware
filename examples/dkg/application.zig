@@ -91,10 +91,7 @@ pub const App = struct {
     pub const Merkleized = Managed.Merkleized;
     /// The reshare payload the `reshare.Application` wrapper selected (commonware's
     /// `ReshareInput`), with the allocator that frees it.
-    pub const Input = struct {
-        gpa: Allocator,
-        payload: ?types.Payload = null,
-    };
+    pub const Input = zigware.glue.dkg.reshare.application.InputOf(types.Payload);
     /// Nothing is read before a finalized block applies.
     pub const Captured = void;
 
@@ -105,8 +102,8 @@ pub const App = struct {
 
     /// Frees an unused input.
     pub fn deinit_input(input: *Input) void {
-        if (input.payload) |*payload| payload.deinit(input.gpa);
-        input.payload = null;
+        input.deinit();
+        assert(input.payload == null);
     }
 
     /// The genesis block, copied for the caller.
@@ -162,9 +159,13 @@ pub const App = struct {
             return null;
         };
         defer parent.deinit();
-        const built = try build(app.gpa, context, parent.inner(), &owned, payload.payload);
-        payload.payload = null;
-        return built;
+        const payload_gpa = payload.gpa;
+        const taken = payload.take();
+        errdefer if (taken) |owned_payload| {
+            var dropped = owned_payload;
+            dropped.deinit(payload_gpa);
+        };
+        return try build(app.gpa, context, parent.inner(), &owned, taken);
     }
 
     /// Re-executes the block at the head of `ancestry` (commonware `process`); null when it is

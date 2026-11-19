@@ -52,8 +52,8 @@ setup. Owns `examples/dkg` (commonware `examples/dkg`).
   over the ancestry stream, empty `capture`/`finalized`); `build` and `execute` are their
   cores. Its root vectors come from a scratch Rust test over commonware's `Database` and
   `db_config` (heights 1-4, forked batches, height 2 applied and finalized).
-- `App.Input` is `{ gpa, payload: ?Payload }`, not commonware's `ReshareInput`: the stateful
-  actor frees an unused input with `App.deinit_input(*Input)`, which needs the allocator.
+- `App.Input` is glue's `reshare.application.InputOf(Payload)` (`{ gpa, payload }`), the type
+  the `reshare.Application` wrapper hands the stateful mailbox.
 
 ## Log
 

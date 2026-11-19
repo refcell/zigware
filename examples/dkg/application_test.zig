@@ -163,12 +163,12 @@ test "dkg: the stateful hooks build on and re-execute the ancestry's head" {
     // No parent: nothing is built and the batches are released.
     const io = testing.io;
     var empty: OneAncestry = .{ .block = null };
-    const none = try app.propose(io, context, &empty, try database.new_batches(), .{ .gpa = gpa });
+    const none = try app.propose(io, context, &empty, try database.new_batches(), .none(gpa));
     try testing.expectEqual(null, none);
 
     var ancestry: OneAncestry = .{ .block = parent.clone() };
     const batches = try database.new_batches();
-    var proposed = (try app.propose(io, context, &ancestry, batches, .{ .gpa = gpa })).?;
+    var proposed = (try app.propose(io, context, &ancestry, batches, .none(gpa))).?;
     defer proposed.block.deinit(gpa);
     defer proposed.merkleized.deinit();
     try testing.expectEqual(1, proposed.block.height().get());
