@@ -9,7 +9,10 @@
 # exchange to agree byte for byte. A control run with a dead bootstrapper must fail. Then
 # commonware's and zigware's `examples/log` validators (2 and 2) run one simplex network and
 # must finalize the same digests at the same views, with blocks proposed by both, and a
-# restarted zigware validator must catch up (etc/scripts/interop_log.py).
+# restarted zigware validator must catch up (etc/scripts/interop_log.py). Then simplex's resolver
+# crosses implementations both ways: a zigware validator among three commonware ones, then a
+# commonware validator among three zigware ones, is restarted until it fetches a certificate it
+# missed from the other implementation's peers, and must then finalize the same digests.
 #
 # Skips (exit 0) when cargo or the reference clone is missing.
 #
@@ -59,5 +62,15 @@ fi
 echo "interop: simplex log, commonware validators 0 and 1 with zigware validators 2 and 3"
 python3 -I "$root/etc/scripts/interop_log.py" "$target/release/commonware-log" \
     "$root/zig-out/bin/log" "$((port + 40))" "$((timeout_s * 2))" 100
+
+echo "interop: simplex resolver, zigware validator 3 fetching from commonware validators 0-2"
+INTEROP_LOG_MIX=rrrz INTEROP_LOG_RESOLVER=1 python3 -I "$root/etc/scripts/interop_log.py" \
+    "$target/release/commonware-log" "$root/zig-out/bin/log" "$((port + 50))" \
+    "$((timeout_s * 2))" 30
+
+echo "interop: simplex resolver, commonware validator 3 fetching from zigware validators 0-2"
+INTEROP_LOG_MIX=zzzr INTEROP_LOG_RESOLVER=1 python3 -I "$root/etc/scripts/interop_log.py" \
+    "$target/release/commonware-log" "$root/zig-out/bin/log" "$((port + 60))" \
+    "$((timeout_s * 2))" 30
 
 echo "interop: ok"

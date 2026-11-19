@@ -11,7 +11,9 @@ finalized by all four validators with one digest each, at least 5 of them propos
 implementation. Views are not consecutive: the example nullifies some views, in commonware and
 zigware alike. Fails on any view finalized with two digests, or on timeout. Then zigware's
 validator 3 is stopped for 10 s and restarted, and must finalize later views with the others'
-digests (INTEROP_LOG_RESTART=0 skips this).
+digests (INTEROP_LOG_RESTART=0 skips this). INTEROP_LOG_RESOLVER=1 also requires it to fetch a
+missed certificate over simplex's resolver (see `restart`); with INTEROP_LOG_MIX=rrrz or zzzr
+every peer that can serve it runs the other implementation.
 """
 
 import os
@@ -24,6 +26,7 @@ import time
 
 FINALIZED = re.compile(r'\] => finalized \(payload="([0-9a-f]{64})" view="(\d+)"')
 NULLIFIED = re.compile(r'\] => nullified \(view="(\d+)"')
+FETCHED = re.compile(r'received certificate for request \(received="?\d+"? view="?(\d+)')
 PROPOSED = re.compile(r'\] => proposed \(msg="[0-9a-f]+" payload="([0-9a-f]{64})"')
 # Which implementation runs each validator: INTEROP_LOG_MIX, one letter per seed (r or z).
 MIX = os.environ.get("INTEROP_LOG_MIX", "rrzz")
@@ -55,7 +58,7 @@ def main():
         line = " ".join(command)
         commands[seed] = line
         if index == 0:
-            tmux(socket, "new-session", "-d", "-s", "log", "-x", "250", "-y", "60",
+            tmux(socket, "new-session", "-d", "-s", "log", "-x", "250", "-y", "200",
                  "-n", "node0", line)
         else:
             tmux(socket, "new-window", "-t", "log", "-n", f"node{seed}", line)
@@ -115,16 +118,28 @@ def main():
 
 
 def restart(socket, commands, finalized, seed, timeout_s):
-    """Stops validator `seed` for 10 s while the others advance, restarts it on its storage,
-    and waits until it finalizes later views with the others' digests. It catches up from the
-    certificates its peers broadcast; the example's catch-up does not reach simplex's resolver
-    (no `received certificate for request` event), so this checks recovery, not the resolver."""
+    """Stops validator `seed` while the others advance, restarts it on its storage, and waits
+    until it finalizes later views with the others' digests. With INTEROP_LOG_RESOLVER=1 the
+    stop and restart repeat (up to 8 times) until the restarted validator fetches a certificate
+    over simplex's resolver: on restart it recovers its floor from its journal, and when it
+    assembles a certificate above that floor before a finalization covers the gap, it requests
+    the missing views from its peers (`received certificate for request` is logged when a
+    response validates). Most restarts fetch; the rest catch up from broadcast finalizations."""
     window = f"log:node{seed}"
-    tmux(socket, "respawn-pane", "-k", "-t", window, "sleep 1000")
-    stopped_at = max(finalized[seed], default=0)
-    time.sleep(10)
-    tmux(socket, "respawn-pane", "-k", "-t", window, commands[seed])
     others = [s for s in finalized if s != seed]
+    want_fetch = os.environ.get("INTEROP_LOG_RESOLVER", "0") == "1"
+    fetched, cycles = set(), 0
+    while True:
+        cycles += 1
+        stopped_at = max(finalized[seed], default=0)
+        tmux(socket, "respawn-pane", "-k", "-t", window, "sleep 1000")
+        time.sleep(8 if want_fetch else 10)
+        tmux(socket, "respawn-pane", "-k", "-t", window, commands[seed])
+        fetched |= watch_fetches(socket, window, 10 if want_fetch else 0)
+        if fetched or not want_fetch or cycles == 8:
+            break
+    if want_fetch and not fetched:
+        return 1, f"validator {seed} fetched nothing over the resolver in {cycles} restarts"
     start = time.time()
     while time.time() - start < timeout_s:
         time.sleep(0.4)
@@ -144,10 +159,23 @@ def restart(socket, commands, finalized, seed, timeout_s):
         caught = [v for v in finalized[seed] if v > stopped_at and
                   all(finalized[s].get(v) == finalized[seed][v] for s in others)]
         if len(caught) >= 10:
-            return 0, (f"validator {seed} stopped at view {stopped_at}, restarted, and "
+            served = sorted({kind for kind, s in NODES if s != seed})
+            fetch = (f", fetched views {sorted(fetched)} over the resolver from "
+                     f"{'/'.join(served)} peers in restart {cycles}") if fetched else ""
+            return 0, (f"validator {seed} stopped at view {stopped_at}, restarted{fetch}, and "
                        f"finalized {len(caught)} later views with the same digests after "
                        f"{time.time() - start:.0f}s")
     return 1, f"restarted validator {seed} did not catch up"
+
+
+def watch_fetches(socket, window, seconds):
+    """Views the restarted validator received over the resolver in the next `seconds`."""
+    views, start = set(), time.time()
+    while time.time() - start < seconds:
+        screen = tmux(socket, "capture-pane", "-p", "-t", window, check=False)
+        views.update(int(view) for view in FETCHED.findall(screen))
+        time.sleep(0.25)
+    return views
 
 
 def longest_run(views):

@@ -228,8 +228,9 @@ handshake and the runtime's network, which the actor-stream and runtime lanes ar
 ### Test audit: p2p (2026-11-19, commonware 43b357a41)
 
 Every `#[test]`/`#[test_traced]`/`#[rstest]` fn in commonware `p2p/src`, matched to a zigware test
-by name or by reading both bodies (a zigware test may cover several). 476 tests: 359 ported, 86
-open, 31 not portable.
+by name or by reading both bodies (a zigware test may cover several). 476 tests: 445 ported, 0
+open, 31 not portable. The 86 first found open are all ported now (ticked under Open below),
+none reclassified; the table was recounted on 2026-11-19.
 
 `lib.rs`'s `recipient_unions` is one rstest fn of 25 cases (5 x 5 values); the zigware test covers
 all 25.
@@ -247,39 +248,39 @@ and transport connect timeouts, see Decisions), so its dialer timeout test is to
 | `sizing.rs` | 7 | 5 | 0 | 2 |
 | `types.rs` | 13 | 12 | 0 | 1 |
 | `authenticated/channels.rs` | 4 | 1 | 0 | 3 |
-| `authenticated/data.rs` | 5 | 4 | 1 | 0 |
+| `authenticated/data.rs` | 5 | 5 | 0 | 0 |
 | `authenticated/relay.rs` | 2 | 2 | 0 | 0 |
 | `authenticated/stream.rs` | 3 | 1 | 0 | 2 |
 | `authenticated/throttle.rs` | 2 | 2 | 0 | 0 |
-| `authenticated/discovery/mod.rs` | 30 | 27 | 1 | 2 |
+| `authenticated/discovery/mod.rs` | 30 | 28 | 0 | 2 |
 | `authenticated/discovery/network.rs` | 2 | 2 | 0 | 0 |
 | `authenticated/discovery/types.rs` | 22 | 22 | 0 | 0 |
-| `authenticated/discovery/actors/dialer.rs` | 6 | 0 | 6 | 0 |
-| `authenticated/discovery/actors/listener.rs` | 4 | 0 | 4 | 0 |
-| `authenticated/discovery/actors/peer/actor.rs` | 6 | 0 | 6 | 0 |
-| `authenticated/discovery/actors/peer/ingress.rs` | 1 | 0 | 1 | 0 |
-| `authenticated/discovery/actors/spawner/actor.rs` | 2 | 0 | 2 | 0 |
+| `authenticated/discovery/actors/dialer.rs` | 6 | 6 | 0 | 0 |
+| `authenticated/discovery/actors/listener.rs` | 4 | 4 | 0 | 0 |
+| `authenticated/discovery/actors/peer/actor.rs` | 6 | 6 | 0 | 0 |
+| `authenticated/discovery/actors/peer/ingress.rs` | 1 | 1 | 0 | 0 |
+| `authenticated/discovery/actors/spawner/actor.rs` | 2 | 2 | 0 | 0 |
 | `authenticated/discovery/actors/spawner/ingress.rs` | 1 | 0 | 0 | 1 |
-| `authenticated/discovery/actors/tracker/actor.rs` | 22 | 3 | 19 | 0 |
-| `authenticated/discovery/actors/tracker/bit_set.rs` | 11 | 7 | 2 | 2 |
-| `authenticated/discovery/actors/tracker/directory.rs` | 28 | 19 | 9 | 0 |
+| `authenticated/discovery/actors/tracker/actor.rs` | 22 | 22 | 0 | 0 |
+| `authenticated/discovery/actors/tracker/bit_set.rs` | 11 | 9 | 0 | 2 |
+| `authenticated/discovery/actors/tracker/directory.rs` | 28 | 28 | 0 | 0 |
 | `authenticated/discovery/actors/tracker/ingress.rs` | 2 | 1 | 0 | 1 |
-| `authenticated/discovery/actors/tracker/record.rs` | 24 | 17 | 3 | 4 |
-| `authenticated/lookup/mod.rs` | 29 | 24 | 3 | 2 |
-| `authenticated/lookup/types.rs` | 6 | 5 | 1 | 0 |
-| `authenticated/lookup/actors/dialer.rs` | 6 | 0 | 6 | 0 |
-| `authenticated/lookup/actors/listener.rs` | 7 | 0 | 6 | 1 |
-| `authenticated/lookup/actors/peer/actor.rs` | 3 | 0 | 3 | 0 |
-| `authenticated/lookup/actors/peer/ingress.rs` | 1 | 0 | 1 | 0 |
+| `authenticated/discovery/actors/tracker/record.rs` | 24 | 20 | 0 | 4 |
+| `authenticated/lookup/mod.rs` | 29 | 27 | 0 | 2 |
+| `authenticated/lookup/types.rs` | 6 | 6 | 0 | 0 |
+| `authenticated/lookup/actors/dialer.rs` | 6 | 6 | 0 | 0 |
+| `authenticated/lookup/actors/listener.rs` | 7 | 6 | 0 | 1 |
+| `authenticated/lookup/actors/peer/actor.rs` | 3 | 3 | 0 | 0 |
+| `authenticated/lookup/actors/peer/ingress.rs` | 1 | 1 | 0 | 0 |
 | `authenticated/lookup/actors/spawner/ingress.rs` | 1 | 0 | 0 | 1 |
-| `authenticated/lookup/actors/tracker/actor.rs` | 27 | 26 | 1 | 0 |
-| `authenticated/lookup/actors/tracker/directory.rs` | 39 | 29 | 10 | 0 |
+| `authenticated/lookup/actors/tracker/actor.rs` | 27 | 27 | 0 | 0 |
+| `authenticated/lookup/actors/tracker/directory.rs` | 39 | 39 | 0 | 0 |
 | `authenticated/lookup/actors/tracker/ingress.rs` | 1 | 1 | 0 | 0 |
 | `authenticated/lookup/actors/tracker/record.rs` | 19 | 15 | 0 | 4 |
 | `authenticated/router/actor.rs` | 1 | 0 | 0 | 1 |
 | `authenticated/router/ingress.rs` | 3 | 0 | 0 | 3 |
 | `simulated/bandwidth.rs` | 12 | 12 | 0 | 0 |
-| `simulated/mod.rs` | 48 | 47 | 1 | 0 |
+| `simulated/mod.rs` | 48 | 48 | 0 | 0 |
 | `simulated/network.rs` | 20 | 20 | 0 | 0 |
 | `simulated/transmitter.rs` | 16 | 16 | 0 | 0 |
 | `utils/codec.rs` | 10 | 10 | 0 | 0 |
@@ -709,8 +710,24 @@ After:
   validator stopped for 10 s and restarted on its storage finalized later views with the same
   digests within 4 s. Pure-Rust and pure-Zig networks nullify the same share of views (about
   1 in 4, in pairs every 6 views), as the mixed one does, at similar throughput.
-  - Not exercised: simplex's resolver channel. A restarted validator catches up from broadcast
-    certificates, and no `received certificate for request` event appears.
+  - [x] Simplex's resolver channel, both ways (`INTEROP_LOG_RESOLVER=1`, run by `interop.sh`
+    as `rrrz` and `zzzr`). Validator 3 is stopped for 8 s and restarted, up to 8 times, until
+    its log shows `received certificate for request`: the view it requested, received, and
+    verified. Then it must finalize 10 later views with the others' digests. In `rrrz` it runs
+    zigware and its three peers run commonware, and the reverse in `zzzr`, so only the other
+    implementation can serve the response. Both resolvers log serves only at trace, so that
+    is the serve-side evidence. First runs: zigware fetched view 48 from commonware on the 1st
+    restart, and commonware fetched view 122 from zigware on the 2nd.
+    - Trigger, from probes of `consensus/src/simplex/actors/resolver/state.rs`: the restarted
+      node recovers its floor from the journal. If it assembles a notarization or
+      nullification above that floor, from current-view votes, before a finalization covers
+      the gap, `fetch_missing` requests the gap's term anchors. Otherwise a broadcast
+      finalization raises the floor first and nothing is fetched. Over 5 restarts of 8 s
+      each, zigware fetched in 4 and commonware in 2. A pause (SIGSTOP) or a longer stop
+      (20–30 s) fetched less often.
+    - A probe run once aborted with `network failed: BindFailed`: it reused fixed ports while
+      the previous run's sockets still held them. That was the harness, not the listener,
+      which sets SO_REUSEADDR as tokio does. interop.sh gives each run its own ports.
   - Example GUI differences, not wire: commonware's Activity lines carry span fields and its
     colors do not render under tmux.
   - Demo: `record-demo.sh interop-log` (docs/assets/interop-log-demo.{gif,mp4}).
