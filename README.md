@@ -129,8 +129,9 @@ setup, the commands, and the caveats). Below 1× means zigware is faster.
 
 These were measured on a busy desktop with storage on tmpfs, so ratios near 1 are noise and
 the storage numbers measure code, not the disk. ed25519 single verify uses an AVX-512 IFMA
-backend where the CPU has one; batch verify uses IFMA, then AVX2 (0.76×), then a scalar path. The BLS rows were re-run at high
-load and wait on a quiet re-run; the qmdb gap is being worked on.
+backend where the CPU has one; batch verify uses IFMA, then AVX2 (0.76×), then a scalar
+path. The BLS and `fixed_replay` rows wait on a quiet re-run, and the qmdb gap is being
+worked on.
 
 ## Design
 
@@ -148,7 +149,8 @@ load and wait on a quiet re-run; the qmdb gap is being worked on.
   [docs/TIGER_STYLE.md](docs/TIGER_STYLE.md).
 - **Fuzzed.** Every decoder, parser, and state machine has a coverage-guided fuzz target
   and a seeded fuzz run that executes with the normal test suite.
-- **io_uring.** The production runtime is completion-based IO on Linux, kqueue on macOS.
+- **Production runtime.** Production I/O runs on `std.Io.Threaded`; on Linux, blob and
+  socket I/O can move onto an io_uring ring (`Config.io_uring`).
 
 ## Installation
 
