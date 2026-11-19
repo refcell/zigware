@@ -1,7 +1,5 @@
 //! Tests of fault-injecting storage (commonware `storage::faulty::tests`). The tests that gate
-//! the backing I/O mid-operation (commonware's `OperationGate` over tokio and io_uring) have no
-//! counterpart: faulty wraps the memory backend, which completes every operation at once, and
-//! its `start_sync` is the default one (`sync` inline, then a ready completion).
+//! the backing I/O mid-operation (commonware's `OperationGate`) are in `faulty_gate_test.zig`.
 
 const std = @import("std");
 const testing = std.testing;

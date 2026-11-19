@@ -13,12 +13,17 @@
 //! journal it covers; a successful open retires the blob's journal, since the new handle sees
 //! only durable contents (commonware's deterministic `Context::open_versioned` admits it).
 //!
-//! Differences from commonware: `start_sync` is the default (`Blob.start_sync` runs `sync` and
-//! returns a ready completion), so its fault is rolled at start and its durability cut is
-//! complete at once, as with commonware's memory backend underneath. A journaled mutation is
-//! identified by the memory backend's blob generation rather than by a shared file-generation
-//! handle; both retire on the same events. Only the deterministic
-//! runtime uses this wrapper, from one thread, so it has no lock.
+//! `start_sync` rolls its fault at start and starts the inner blob's sync without waiting; the
+//! journal keeps the cut (commonware `PendingMutation::Sync`), which a crash honors only if
+//! the sync succeeded. Over the memory backend the sync completes at once and settles as
+//! `sync` does. With `io` set, each handle serializes its mutations and sync starts (commonware
+//! `FileGeneration::mutation`), for an inner blob that blocks mid-operation (`wrap`).
+//!
+//! Differences from commonware: a journaled mutation is identified by the memory backend's
+//! blob generation rather than by a shared file-generation handle; both retire on the same
+//! events. A cut settles at a crash rather than when its completion is awaited; the replay is
+//! the same. Only the deterministic runtime uses this wrapper, from one thread, so the journal
+//! itself has no lock.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -28,6 +33,8 @@ const iface = @import("../storage.zig");
 const memory = @import("memory.zig");
 
 const Error = iface.Error;
+const Completion = iface.Completion;
+const Io = std.Io;
 pub const Probability = utils.Probability;
 
 /// Operation kinds that can fail.
@@ -109,6 +116,9 @@ const Pending = struct {
         write: struct { offset: u64, retention: *Retention, start: usize, end: usize },
         /// A successful resize selected to survive a crash.
         resize: u64,
+        /// A started sync not yet complete (commonware `PendingMutation::Sync`): once its
+        /// completion succeeds, the generation's earlier entries no longer replay at a crash.
+        sync: Completion,
     },
 };
 
@@ -166,6 +176,10 @@ pub fn Storage(comptime Rng: type) type {
         pending: std.ArrayList(Pending) = .empty,
         /// Every handle not yet closed.
         handles: std.DoublyLinkedList = .{},
+        /// When set, each handle serializes its mutations and sync starts on a lock (commonware's
+        /// `FileGeneration::mutation`), for inner blobs that block mid-operation. The memory
+        /// backend completes every operation at once, so the deterministic runner leaves it null.
+        io: ?Io = null,
 
         pub fn init(gpa: Allocator, inner: *memory.Storage, rng: *Rng, config: Config) Self {
             return .{ .gpa = gpa, .inner = inner, .rng = rng, .config = config };
@@ -232,18 +246,34 @@ pub fn Storage(comptime Rng: type) type {
             const opened = try self.inner.open_versioned(partition, name, versions);
             errdefer opened.blob.close();
             const inner_blob: *memory.Blob = @ptrCast(@alignCast(opened.blob.ptr));
+            const generation = inner_blob.generation;
+            const blob = try self.wrap(opened.blob, generation, inner_blob.data_offset, opened.len);
+            // The new handle sees only durable contents: retire this incarnation's journal.
+            self.retire(generation);
+            return .{ .blob = blob, .len = opened.len, .version = opened.version };
+        }
+
+        /// Wraps `inner` (taken), which reaches the memory backend's blob incarnation
+        /// `generation`, possibly through another blob such as a test gate, so crash replay
+        /// reaches its durable contents (commonware's `Blob::new`).
+        pub fn wrap(
+            self: *Self,
+            inner: iface.Blob,
+            generation: u64,
+            data_offset: u64,
+            size: u64,
+        ) Allocator.Error!iface.Blob {
             const blob = try self.gpa.create(Blob);
             blob.* = .{
                 .storage = self,
-                .inner = opened.blob,
-                .generation = inner_blob.generation,
-                .data_offset = inner_blob.data_offset,
-                .size = opened.len,
+                .inner = inner,
+                .generation = generation,
+                .data_offset = data_offset,
+                .size = size,
             };
             self.handles.append(&blob.node);
-            // The new handle sees only durable contents: retire this incarnation's journal.
-            self.retire(blob.generation);
-            return .{ .blob = blob.blob(), .len = opened.len, .version = opened.version };
+            assert(blob.generation == generation);
+            return blob.blob();
         }
 
         /// Removes a blob or a partition and retires the journal of what was removed.
@@ -260,6 +290,8 @@ pub fn Storage(comptime Rng: type) type {
 
         /// Replays the journal in issue order onto the durable contents and clears it
         /// (commonware `faulty::Storage::crash`). The runner then crashes the memory backend.
+        /// A started sync covers the generation's entries before it only if its completion
+        /// succeeded by now.
         pub fn crash(self: *Self) Error!void {
             var journal = self.pending;
             self.pending = .empty;
@@ -267,7 +299,24 @@ pub fn Storage(comptime Rng: type) type {
                 for (journal.items) |*mutation| self.release(mutation);
                 journal.deinit(self.gpa);
             }
-            for (journal.items) |*mutation| try self.replay(mutation);
+            var synced: std.ArrayList(u64) = .empty;
+            defer synced.deinit(self.gpa);
+            const skip = try self.gpa.alloc(bool, journal.items.len);
+            defer self.gpa.free(skip);
+            // Newest first, so a succeeded cut covers every entry issued before it.
+            var index = journal.items.len;
+            while (index > 0) {
+                index -= 1;
+                const mutation = &journal.items[index];
+                const covered = std.mem.indexOfScalar(u64, synced.items, mutation.generation);
+                skip[index] = covered != null or mutation.kind == .sync;
+                if (mutation.kind != .sync or covered != null) continue;
+                const done = mutation.kind.sync.poll() orelse continue;
+                if (done) |_| try synced.append(self.gpa, mutation.generation) else |_| {}
+            }
+            for (journal.items, skip) |*mutation, skipped| {
+                if (!skipped) try self.replay(mutation);
+            }
             assert(self.pending.items.len == 0);
         }
 
@@ -294,6 +343,7 @@ pub fn Storage(comptime Rng: type) type {
                         return error.OffsetOverflow;
                     try self.inner.retain_crash_resize(mutation.generation, physical);
                 },
+                .sync => unreachable, // `crash` skips sync cuts.
             }
         }
 
@@ -310,6 +360,7 @@ pub fn Storage(comptime Rng: type) type {
                     self.gpa.destroy(retention);
                 },
                 .resize => {},
+                .sync => |completion| completion.release(),
             }
         }
 
@@ -391,6 +442,7 @@ pub fn Storage(comptime Rng: type) type {
                         follows_resize = true;
                         retained.appendAssumeCapacity(mutation.*);
                     },
+                    .sync => retained.appendAssumeCapacity(mutation.*),
                     .write => self.split_write(&retained, mutation, offset, end),
                 }
             }
@@ -467,6 +519,8 @@ pub fn Storage(comptime Rng: type) type {
             data_offset: u64,
             /// Logical size as this handle last set it, for partial resizes.
             size: u64,
+            /// Serializes mutations and sync starts when the storage has an `Io`.
+            mutation: Io.Mutex = .init,
 
             /// The `Blob` interface of this handle.
             pub fn blob(self: *Blob) iface.Blob {
@@ -478,6 +532,7 @@ pub fn Storage(comptime Rng: type) type {
                 .write_at = write_at_erased,
                 .resize = resize_erased,
                 .sync = sync_erased,
+                .start_sync = start_sync_erased,
                 .close = close_erased,
             };
 
@@ -511,6 +566,20 @@ pub fn Storage(comptime Rng: type) type {
                 return from(ptr).sync();
             }
 
+            fn start_sync_erased(ptr: *anyopaque) Error!Completion {
+                return from(ptr).start_sync();
+            }
+
+            fn lock(self: *Blob) Io.Cancelable!void {
+                const io = self.storage.io orelse return;
+                try self.mutation.lock(io);
+            }
+
+            fn unlock(self: *Blob) void {
+                const io = self.storage.io orelse return;
+                self.mutation.unlock(io);
+            }
+
             fn close_erased(ptr: *anyopaque) void {
                 from(ptr).close();
             }
@@ -542,6 +611,8 @@ pub fn Storage(comptime Rng: type) type {
                 const gpa = owner.gpa;
                 const bytes = try coalesce(gpa, chunks, @intCast(total));
                 defer gpa.free(bytes);
+                try self.lock();
+                defer self.unlock();
                 if (fail) {
                     if (policy) |retention| {
                         try self.write_retained(offset, bytes, retention, options);
@@ -600,6 +671,8 @@ pub fn Storage(comptime Rng: type) type {
             pub fn resize(self: *Blob, length: u64) Error!void {
                 const owner = self.storage;
                 const fault = owner.resize_fault();
+                try self.lock();
+                defer self.unlock();
                 if (fault.fail) {
                     if (!fault.partial.sample(owner.rng)) return error.Io;
                     const partial = random_between(owner.rng, self.size, length) orelse
@@ -617,8 +690,37 @@ pub fn Storage(comptime Rng: type) type {
             /// Makes the handle's contents durable and retires its journal.
             pub fn sync(self: *Blob) Error!void {
                 if (self.storage.should_fail(.sync)) return error.Io;
+                try self.lock();
+                defer self.unlock();
                 try self.inner.sync();
                 self.storage.retire(self.generation);
+            }
+
+            /// Starts the inner blob's sync and returns its completion (commonware's
+            /// `start_sync`), without waiting for it: a later write proceeds while it runs. The
+            /// journal keeps the cut until a crash, where it covers earlier entries only if the
+            /// sync succeeded; a sync already complete settles at once, as `sync` would.
+            pub fn start_sync(self: *Blob) Error!Completion {
+                const owner = self.storage;
+                if (owner.should_fail(.sync)) return Completion.ready(error.Io);
+                try self.lock();
+                defer self.unlock();
+                const completion = try self.inner.start_sync();
+                if (completion.poll()) |result| {
+                    if (result) |_| owner.retire(self.generation) else |_| {}
+                    return completion;
+                }
+                owner.pending.append(owner.gpa, .{
+                    .generation = self.generation,
+                    .data_offset = self.data_offset,
+                    .kind = .{ .sync = completion.retain() },
+                }) catch |err| {
+                    completion.release();
+                    completion.release();
+                    return err;
+                };
+                assert(owner.pending.items.len > 0);
+                return completion;
             }
 
             /// Releases the handle; its journal stays until a sync, reopen, removal, or crash.
@@ -634,4 +736,5 @@ pub fn Storage(comptime Rng: type) type {
 
 test {
     _ = @import("faulty_test.zig");
+    _ = @import("faulty_gate_test.zig");
 }

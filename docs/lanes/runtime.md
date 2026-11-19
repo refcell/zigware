@@ -182,9 +182,14 @@ time, files, and network: build on it rather than around it where it fits.
   that never spawns holds its node until then: make long-lived child contexts once rather
   than per message.
 - Faulty storage draws from the runtime RNG and journals by the memory backend's blob
-  generation. Its `start_sync` is the default one (`sync` inline, then a ready completion),
-  so commonware's tests that gate the backing I/O mid-operation and its read-option
-  recording tests are not ported; its start_sync fault and crash-epoch tests are. The runner
+  generation. Commonware's faulty is generic over its backing storage; zigware's keeps memory
+  as its only backend (so DSTs and the runner are unchanged) and instead takes any blob that
+  reaches a memory incarnation through `faulty.Storage.wrap`, which is how the
+  `OperationGate` tests (`faulty_gate_test.zig`) gate a backing write or sync mid-operation.
+  Its `start_sync` forwards to the inner blob: a ready result retires the journal at once, a
+  pending one journals a sync cut that `crash` honours only once it succeeded. Setting
+  `Storage.io` serializes each handle's mutations behind a mutex, as commonware's per-blob
+  lock does; it stays unset (no lock) under the deterministic runner. The runner
   crashes storage when each run ends, as commonware does, so `storage_audit` after a run
   includes the crash replay.
 - `Context.sleep_until` clamps deadlines past `context.deadline_max` (2262):
@@ -494,7 +499,7 @@ Not portable:
 | File | Tests | Ported | Open | Not portable |
 | --- | --- | --- | --- | --- |
 | storage/audited.rs | 8 | 5 | 2 | 1 |
-| storage/faulty.rs | 51 | 43 | 1 | 7 |
+| storage/faulty.rs | 51 | 47 | 1 | 3 |
 | storage/header.rs | 21 | 20 | 0 | 1 |
 | storage/hold.rs | 2 | 0 | 2 | 0 |
 | storage/iouring.rs | 66 | 13 | 16 | 37 |
@@ -509,7 +514,7 @@ Not portable:
 | iobuf/buf.rs | 60 | 13 | 1 | 46 |
 | iobuf/bufs.rs | 98 | 45 | 7 | 46 |
 | iobuf/owner.rs | 36 | 0 | 0 | 36 |
-| Total | 450 | 171 | 40 | 239 |
+| Total | 450 | 175 | 40 | 235 |
 
 Open:
 - [x] `storage/audited.rs:266` `test_audited_blob_forwards_read_options`: audited blob passes each
@@ -518,6 +523,11 @@ Open:
   blob sees the original chunk count and write options
 - [x] `storage/faulty.rs:1942` `test_faulty_blob_forwards_read_options_without_faults`: fault-free
   faulty blob forwards dont_cache reads to the inner blob
+- [x] `storage/faulty.rs` `test_start_sync_returns_before_backing_completion`,
+  `test_dropped_start_sync_epoch_is_linearized_with_overlapping_write`,
+  `test_completed_backing_write_cannot_record_after_later_full_sync`,
+  `test_full_sync_epoch_is_linearized_with_overlapping_write` (`faulty_gate_test.zig`): faulty
+  over a gated backing blob (`Storage.wrap`) instead of a tokio or io_uring one
 - [x] `storage/hold.rs:120` `test_hold_name_rejected_as_partition`: `.hold` is rejected as a
   partition name
 - [x] `storage/hold.rs:125` `test_acquire_fails_on_unusable_root`: storage init fails when the
@@ -597,19 +607,12 @@ Not portable:
 - `storage/tokio/blob.rs` `test_header_read_after_payload_shrink`: open reads the header under
   the storage mutex while no handle of the blob can be open (`BlobAlreadyOpen`), so its length
   cannot go stale; `header.resolve` asserts the read covers it
-- `storage/faulty.rs` `test_start_sync_returns_before_backing_completion` and
-  `test_dropped_start_sync_epoch_is_linearized_with_overlapping_write`: they run faulty over a
-  tokio or io_uring blob gated mid-operation (`OperationGate`); zigware's faulty wraps the
-  memory backend, which completes every operation at once, and syncs inline in `start_sync`
 - `storage/iouring.rs` `test_queued_write_and_start_sync_finish_through_shutdown`: a
   registration queued beyond a full ring and finished by the driver at shutdown; zigware's ring
   submits and waits on its caller, so nothing is queued
 - `storage/tokio/blob.rs` `test_reopen_after_start_sync_completion`: pauses tokio's sync
   worker (`after_start_sync`) and counts the reopen's flush of the pending-sync debt
   (`pending.rs`); zigware syncs on the caller and keeps no such debt
-- `storage/faulty.rs` `test_completed_backing_write_cannot_record_after_later_full_sync`,
-  `test_full_sync_epoch_is_linearized_with_overlapping_write`: gate a backing write or sync
-  mid-poll (`OperationGate`), which faulty's memory backend cannot hold
 - `storage/faulty.rs` `test_write_config_arbitrary_is_compact_and_covers_grid`: Rust `Arbitrary`
   impl for `WriteConfig`; faulty.zig has none
 - `storage/header.rs` `test_header_create_empty_versions`: #[should_panic]
