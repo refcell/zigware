@@ -509,6 +509,21 @@ ones: d = deployer (thread T-01a1d5b9-c237), u = utils, j = storage-journal
   atomic batch reference counts (e5941c1, `storage.refcount`). They were off while merkle and
   qmdb batch counts were plain integers: shared guards crashed processing_early/late tests in
   2 of 6 parallel runs under load. Compact stays on the mutex.
+- [x] db drift, commonware 8bf364011 ("Unify QMDB sync targets and dedupe glue database
+  adapters"). The shared `db::qmdb::Qmdb` adapter is an internal refactor: zigware's
+  adapters already share `state_sync.sync_standard_db`. `ordered_any_is_qmdb` is a type check
+  with no zigware counterpart. compact.rs's queued-target test became
+  `state_sync_adopts_queued_target_before_reaching_initial`: compact_sync_test.zig now
+  expects targets[1] and then a closed channel. zigware already adopted the newest queued
+  target before starting, so its behavior did not change.
+- [ ] db drift (8bf364011), open:
+  - `sync::Target` is `{ root, range }` for compact too (storage lane). Until storage's
+    `CompactTarget` goes, `sync_compact_db` keeps its update and reached forwarders, so the
+    forwarder-stops test stays, although upstream removed it.
+  - `StateSyncDb::sync_db`'s new contract fails the sync on an unreachable target, whether
+    initial or on `tip_updates`. zigware fails on an invalid initial compact target but skips
+    an invalid one on `tip_updates` (the forwarder's `to_target() catch continue`). It goes
+    with the target unification.
 - [ ] tests: single_db_app.rs's engine on `glue.simulate` (simplex, marshal, buffered broadcast,
   marshal and qmdb resolvers, probe, `Stateful`), then tests/mod.rs's scenarios (finalize,
   crash/restart, pruning, state sync, lossy, partitions), multi_db_app, floor, properties.

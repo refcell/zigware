@@ -1,6 +1,6 @@
 //! commonware `glue/src/stateful/db/compact.rs`'s state-sync tests, each for keyless and
-//! immutable: the update forwarder stops with the sync, a queued target is drained before
-//! the reached report, progress gauges from compact and full sources, and superseding an
+//! immutable: the update forwarder stops with the sync, a queued target is adopted before the
+//! initial one is reached, progress gauges from compact and full sources, and superseding an
 //! in-flight stale target from compact and full sources. They run on the deterministic
 //! runtime, so a sync that never finishes fails instead of hanging.
 
@@ -295,7 +295,7 @@ fn forwarder_stops(comptime C: type) fn (Io) anyerror!void {
     }.body;
 }
 
-fn drains_queued_target(comptime C: type) fn (Io) anyerror!void {
+fn adopts_queued_target(comptime C: type) fn (Io) anyerror!void {
     return struct {
         fn body(io: Io) anyerror!void {
             const A = C.Compact;
@@ -309,7 +309,8 @@ fn drains_queued_target(comptime C: type) fn (Io) anyerror!void {
             defer tips.sender.deinit();
             defer tips.receiver.deinit();
             try testing.expect(tips.sender.send_lossy(source.targets[1]));
-            var reached = try ring.channel(A.SyncTarget, gpa, io, 1);
+            // Room for two reports, but the initial target is never reached on its own.
+            var reached = try ring.channel(A.SyncTarget, gpa, io, 2);
             defer reached.receiver.deinit();
             const config = node.compact_config(A);
             var synced = try A.sync_db(node.env(), config, &source.source, source.targets[0], .{
@@ -319,6 +320,7 @@ fn drains_queued_target(comptime C: type) fn (Io) anyerror!void {
             defer synced.deinit();
             const first = (try reached.receiver.recv()).?;
             try testing.expect(first.eql(source.targets[1]));
+            try testing.expectEqual(null, try reached.receiver.recv());
             try expect_synced(C, &synced, source.targets[1], 8);
         }
     }.body;
@@ -439,8 +441,8 @@ test "stateful compact sync: the update forwarder stops after completion" {
     inline for (cases) |C| try run(forwarder_stops(C));
 }
 
-test "stateful compact sync: a queued target is drained before reporting reached" {
-    inline for (cases) |C| try run(drains_queued_target(C));
+test "stateful compact sync: a queued target is adopted before reaching the initial one" {
+    inline for (cases) |C| try run(adopts_queued_target(C));
 }
 
 test "stateful compact sync: progress gauges from a compact source" {
