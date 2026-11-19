@@ -161,9 +161,15 @@ qmdb `current` (balances, over the MMB) and `keyless` (payout log, over the MMR)
   - [x] index (`index::*` 8 criterion benches and `index_scale`; `index_scale` is opt-in in
     commonware, so standard inputs skip it, full inputs run its 20M/100M tier once per variant,
     and smoke inputs run 10,000 keys).
-  - [ ] merkle (12).
-  - [ ] archive (get, put, restart).
-  - [ ] freezer (get, put, restart).
+  - [x] merkle (all 12, both families, 160 cases). Zigware's batches hash sequentially, so
+    commonware's `workers=8` and `strategy=BatchedParallel` cases keep their names but measure
+    the sequential path. The proof benches share one tree per family and size.
+  - [x] archive (get, put, restart; prunable and immutable, compression off and 3).
+  - [x] freezer (get, put, restart).
+  - `src/storage/bench_disk.zig` opens production disk storage under `.zig-cache/tmp` for
+    measured runs (as commonware's tokio benches use the disk) and in-memory storage on smoke
+    inputs. The archive and freezer `mode=concurrent` reads run one after another, since
+    zigware's stores are not shared between tasks.
 
 ## Log
 - 2026-11-16: namespace, amounts, lookup with their tests; Amounts and Lookup conformance
@@ -204,3 +210,4 @@ qmdb `current` (balances, over the MMB) and `keyless` (payout log, over the MMR)
 - 2026-11-19: storage index benches (`src/storage/index/benches.zig`).
 - 2026-11-19: conformance payment and close (about 96 s and 63 s in ReleaseSafe) run only with
   `-Dslow-tests`, in every mode; nightly covers them.
+- 2026-11-19: storage merkle, archive, and freezer benches; the storage bench backlog is done.
