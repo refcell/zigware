@@ -183,15 +183,23 @@ pub const VoterStack = struct {
         self.gpa = gpa;
         self.io = io;
         self.task = null;
-        const index = options.local_index;
-        const me = net.keys()[index];
-        const scheme = &net.schemes()[index];
-        try self.start_application(net, me, options);
+        try self.start_application(net, net.keys()[options.local_index], options);
         errdefer self.application.deinit();
         self.reporter = .init(gpa, io, &net.fixture.verifier);
         errdefer self.reporter.deinit();
         self.page_cache = try .init(gpa, page_size, page_cache_size);
         errdefer self.page_cache.deinit();
+        try self.start_voter(ctx, net, options);
+    }
+
+    /// Starts the voter half over the kept application, reporter, and page cache.
+    fn start_voter(self: *VoterStack, ctx: Ctx, net: *Network, options: Options) !void {
+        const gpa = self.gpa;
+        const io = self.io;
+        assert(self.task == null);
+        const index = options.local_index;
+        const me = net.keys()[index];
+        const scheme = &net.schemes()[index];
         const n: u32 = @intCast(net.keys().len);
         self.elector = try elector_mod.RoundRobin(Sha256).default().build(gpa, n);
         errdefer self.elector.deinit(gpa);
@@ -269,8 +277,17 @@ pub const VoterStack = struct {
         return self.voter.run(batcher, resolver, &self.vote_sender, &self.certificate_sender);
     }
 
-    /// Aborts the voter (commonware `handle.abort()`); its journal stays in storage.
+    /// Stops the voter and everything `start` built.
     pub fn stop(self: *VoterStack) void {
+        self.stop_voter();
+        self.page_cache.deinit();
+        self.reporter.deinit();
+        self.application.deinit();
+        self.* = undefined;
+    }
+
+    /// Aborts the voter (commonware `handle.abort()`); its journal stays in storage.
+    fn stop_voter(self: *VoterStack) void {
         if (self.task) |*task| {
             task.cancel(self.io) catch {};
             self.task = null;
@@ -284,10 +301,14 @@ pub const VoterStack = struct {
         self.certificate_receiver.deinit();
         self.batcher.deinit();
         self.resolver.deinit();
-        self.page_cache.deinit();
-        self.reporter.deinit();
-        self.application.deinit();
-        self.* = undefined;
+    }
+
+    /// Aborts the voter and starts a new one over the same journal, application, and
+    /// reporter (commonware's `handle.abort()` then a second `Actor::new`), with fresh
+    /// batcher and resolver mailboxes.
+    pub fn restart(self: *VoterStack, ctx: Ctx, net: *Network, options: Options) !void {
+        self.stop_voter();
+        try self.start_voter(ctx, net, options);
     }
 
     /// The next batcher message within `limit_ms` of simulated time, or null.

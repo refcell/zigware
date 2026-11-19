@@ -202,3 +202,47 @@ test "voter replay floor does not move during replay" {
         }
     }.body);
 }
+
+/// Expects the next resolver update to be the finalization `expected`, byte for byte.
+fn expect_finalization(ctx: Ctx, stack: *h.VoterStack, expected: *const h.Finalization) !void {
+    const gpa = ctx.gpa();
+    const message = (try stack.next_resolver(ctx, 5_000)) orelse return error.TimedOut;
+    defer message.discard();
+    try testing.expect(message == .updated);
+    try testing.expect(message.updated.certificate == .finalization);
+    const want = try codec.encode(h.Finalization, gpa, expected.*);
+    defer gpa.free(want);
+    const got = try codec.encode(h.Finalization, gpa, message.updated.certificate.finalization);
+    defer gpa.free(got);
+    try testing.expectEqualSlices(u8, want, got);
+}
+
+// commonware populate_resolver_on_restart: a finalization the voter journaled is handed to
+// the resolver again after a restart, and the voter resumes past it.
+test "voter populate resolver on restart" {
+    try run(struct {
+        fn body(ctx: Ctx) anyerror!void {
+            const gpa = ctx.gpa();
+            var net: h.Network = undefined;
+            try net.start(ctx, 5, "populate_resolver_on_restart_test");
+            defer net.deinit();
+            const options: h.Options = .{
+                .partition = "voter_populate_resolver_on_restart_test",
+                .batcher_capacity = 8,
+            };
+            var stack: h.VoterStack = undefined;
+            try stack.start(ctx, &net, options);
+            defer stack.stop();
+            try stack.expect_update(ctx, 1, 0);
+            try stack.expect_replayed(ctx);
+            const subject = proposal(2, "finalize_without_notarization");
+            var expected = try h.build(gpa, .finalization, net.schemes(), subject, net.quorum());
+            defer expected.deinit(gpa);
+            try stack.mailbox.recovered(gpa, .{ .finalization = try expected.clone(gpa) });
+            try expect_finalization(ctx, &stack, &expected);
+            try stack.restart(ctx, &net, options);
+            try stack.expect_update(ctx, 3, 2);
+            try expect_finalization(ctx, &stack, &expected);
+        }
+    }.body);
+}
