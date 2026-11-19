@@ -5,10 +5,6 @@
 //! block), and DB-B, a compact immutable QMDB that keeps only its witness and records the height
 //! marker. Every block commits to both roots. Both QMDB sync resolvers share the sync channel
 //! through a muxer (subchannels 0 and 1), as commonware's do.
-//!
-//! Differences from commonware: DB-B's sync target is zigware's `CompactTarget` (its root and
-//! size) where commonware's is the ranged `Target` over the last commit (`size - 1..size`); both
-//! name the same state.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -94,8 +90,7 @@ pub const Block = struct {
     /// The height-zero block over both empty databases (commonware `Block::genesis`).
     pub fn genesis() Block {
         const empty: Sha256.Digest = .fill(0);
-        const initial_b = QmdbB.initial_sync_target();
-        const target_b: RangedTarget = .init(initial_b.root, 0, initial_b.size);
+        const target_b = QmdbB.initial_sync_target();
         const target_a = QmdbA.initial_sync_target();
         return init(engine.genesis_context(), empty, .zero(), target_a, target_b);
     }
@@ -155,7 +150,7 @@ pub const App = struct {
         const target_b = block.target_b;
         assert(target_b.end > target_b.start);
         // DB-B is compact, so its target covers only the last commit.
-        return .{ block.target_a, .{ .root = target_b.root, .size = target_b.end } };
+        return .{ block.target_a, .init(target_b.root, target_b.end - 1, target_b.end) };
     }
 
     /// Executes a block against both databases (commonware `App::execute`).

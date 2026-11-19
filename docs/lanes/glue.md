@@ -476,9 +476,8 @@ ones: d = deployer (thread T-01a1d5b9-c237), u = utils, j = storage-journal
   crashes, full outage, partition, and the state sync scenarios: handoff (and with storage
   faults), determinism, random crashes, lossy, crash during sync, and the partitioned restart
   (one test per engine). One 20-block single-db plan always runs; the rest need -Dslow-tests.
-  Adaptations: crash during sync crashes at 7.5 s, not 6.25 s (the joiner reaches view 80
-  later here); DB-B's sync target is zigware's `CompactTarget` (root and size). Beyond
-  commonware, `StateSyncCompleted` checks that every fast-sync plan's joiner recorded
+  Adaptation: crash during sync crashes at 7.5 s, not 6.25 s (the joiner reaches view 80
+  later here). Beyond commonware, `StateSyncCompleted` checks that every fast-sync plan's joiner recorded
   completion (syncing acknowledges retained blocks, so the handoff properties alone pass while
   a sync never finishes; the slow-sync plans end mid-sync in commonware too, and skip it).
   The partitioned restarts' timed-out runs used to fault on teardown: marshal's canceled waits
