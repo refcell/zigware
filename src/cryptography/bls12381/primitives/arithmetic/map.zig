@@ -263,7 +263,9 @@ pub fn hash_to_g1_parts(parts: []const []const u8, dst: []const u8) ExpandError!
     const u = try hash_to_field_fp_parts(parts, dst);
     const sum = map_to_curve_g1(u[0]).add(map_to_curve_g1(u[1]));
     const result = g1.clear_cofactor(sum).to_affine();
-    assert(g1.is_in_subgroup(result));
+    // A subgroup check is a third of the hash. ReleaseFast never checks an assert, yet LLVM
+    // keeps this one's work, so it runs only in builds that check asserts.
+    if (std.debug.runtime_safety) assert(g1.is_in_subgroup(result));
     return result;
 }
 
@@ -277,7 +279,9 @@ pub fn hash_to_g2_parts(parts: []const []const u8, dst: []const u8) ExpandError!
     const u = try hash_to_field_fp2_parts(parts, dst);
     const sum = map_to_curve_g2(u[0]).add(map_to_curve_g2(u[1]));
     const result = g2.clear_cofactor(sum).to_affine();
-    assert(g2.is_in_subgroup(result));
+    // A subgroup check is a third of the hash. ReleaseFast never checks an assert, yet LLVM
+    // keeps this one's work, so it runs only in builds that check asserts.
+    if (std.debug.runtime_safety) assert(g2.is_in_subgroup(result));
     return result;
 }
 

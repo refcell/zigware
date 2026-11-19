@@ -164,11 +164,18 @@ pub const Fp2 = struct {
         assert(!a.c1.is_zero());
         const half = comptime Fp.from_int_comptime((p + 1) / 2);
         const s = a.norm().sqrt() orelse return null;
-        const x0 = a.c0.add(s).mul(half).sqrt() orelse
-            a.c0.sub(s).mul(half).sqrt() orelse return null;
-        // x0 != 0: otherwise c0 = -s, so c1^2 = s^2 - c0^2 = 0.
-        assert(!x0.is_zero());
-        return .{ .c0 = x0, .c1 = a.c1.mul(x0.double().inverse()) };
+        // t (c0 - s) / 2 = -c1^2 / 4 is not a square, so exactly one of t and (c0 - s) / 2
+        // is. y = t^((p + 1) / 4) squares to t or -t; in the second case (c1 / (2y))^2 =
+        // -c1^2 / (4t) = (c0 - s) / 2, so one exponentiation serves both (as blst).
+        const t = a.c0.add(s).mul(half);
+        // t != 0: otherwise c0 = -s, so c1^2 = s^2 - c0^2 = 0.
+        assert(!t.is_zero());
+        const y = t.pow((p + 1) / 4);
+        const y_square = y.square();
+        const other = a.c1.mul(y.double().inverse());
+        if (y_square.eql(t)) return .{ .c0 = y, .c1 = other };
+        assert(y_square.eql(t.neg()));
+        return .{ .c0 = other, .c1 = y };
     }
 
     /// RFC 9380 sgn0 for m = 2.
