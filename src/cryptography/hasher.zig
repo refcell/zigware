@@ -48,6 +48,8 @@ pub fn Streaming(comptime Core: type, comptime DigestType: type) type {
 /// `Streaming` whose `hash_many` hashes runs of equal-length messages with `Kernel` (`void`
 /// for none): a multi-message kernel with `lanes`, `minimum_batch_len`, and
 /// `hash([lanes][]const u8) [lanes][digest_length]u8`, as commonware's SHA-256 x16 kernel.
+/// A kernel with `mixed_lengths = true` instead takes `hash([]const []const u8)` of up to
+/// `lanes` messages of any lengths, as commonware's SHA-512 x8 kernel.
 pub fn StreamingWith(comptime Core: type, comptime DigestType: type, comptime Kernel: type) type {
     comptime assert(DigestType.fixed_size > 0);
     return struct {
@@ -199,8 +201,19 @@ fn hash_runs(
     messages: []const []const u8,
     digests: []H.Digest,
 ) void {
-    comptime assert(Kernel.minimum_batch_len >= 1 and Kernel.minimum_batch_len <= Kernel.lanes);
     assert(messages.len == digests.len);
+    if (comptime @hasDecl(Kernel, "mixed_lengths") and Kernel.mixed_lengths) {
+        // commonware sha512 `hash_batch`: any `Kernel.lanes` consecutive messages share a
+        // call, whatever their lengths, and a short last chunk passes only its own.
+        var start: usize = 0;
+        while (start < messages.len) : (start += Kernel.lanes) {
+            const end = @min(start + Kernel.lanes, messages.len);
+            const out = Kernel.hash(messages[start..end]);
+            for (digests[start..end], out[0 .. end - start]) |*digest, bytes| digest.bytes = bytes;
+        }
+        return;
+    }
+    comptime assert(Kernel.minimum_batch_len >= 1 and Kernel.minimum_batch_len <= Kernel.lanes);
     var start: usize = 0;
     while (start < messages.len) {
         const len = messages[start].len;
@@ -219,4 +232,57 @@ fn hash_runs(
         start = end;
     }
     assert(start == messages.len);
+}
+
+const testing = std.testing;
+
+/// A hasher stand-in whose "digest" of a message is its index and the index of the first
+/// message of its batch (commonware's `test_hash_batches_shares_whole_units` closure).
+const Recording = struct {
+    pub const Digest = struct { bytes: [8]u8 };
+
+    fn each(comptime H: type, batch: []const []const u8, out: []H.Digest) void {
+        assert(batch.len == out.len);
+        assert(batch.len > 0);
+        for (batch, out) |message, *digest| {
+            digest.bytes[0..4].* = message[0..4].*;
+            digest.bytes[4..8].* = batch[0][0..4].*;
+        }
+    }
+};
+
+// commonware lib.rs `test_hash_batches_shares_whole_units`.
+test "hash_batches shares hold whole units of lanes" {
+    const strategy = try parallel.mocks.pooled(testing.allocator, testing.io, 4, 8);
+    defer strategy.pool.destroy();
+    const explorer = parallel.mocks.Explorer.parallel(strategy);
+    var storage: [200][4]u8 = undefined;
+    var messages: [200][]const u8 = undefined;
+    for (&storage, &messages, 0..) |*bytes, *message, index| {
+        std.mem.writeInt(u32, bytes, @intCast(index), .little);
+        message.* = bytes;
+    }
+    var digests: [200]Recording.Digest = undefined;
+    inline for (.{ 1, 2, 8, 16 }) |lanes| {
+        for ([_]usize{ 0, 1, lanes + 1, 3 * lanes, 7 * lanes + 1, 9 * lanes, 100 }) |count| {
+            const out = digests[0..count];
+            run_hash_batches(Recording, lanes, Recording.each, messages[0..count], out, explorer);
+            var shares: usize = 0;
+            var share_len: usize = 0;
+            for (out, 0..) |digest, index| {
+                const own = std.mem.readInt(u32, digest.bytes[0..4], .little);
+                const first = std.mem.readInt(u32, digest.bytes[4..8], .little);
+                try testing.expectEqual(@as(u32, @intCast(index)), own);
+                if (first == own) {
+                    // Every share but the last holds a multiple of `lanes` messages.
+                    if (shares > 0) try testing.expectEqual(@as(usize, 0), share_len % lanes);
+                    shares += 1;
+                    share_len = 0;
+                }
+                share_len += 1;
+            }
+            const units = std.math.divCeil(usize, count, lanes) catch unreachable;
+            try testing.expectEqual(@min(units, 8), shares);
+        }
+    }
 }

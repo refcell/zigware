@@ -1,6 +1,7 @@
 //! SHA-512 implementation of the hasher interface (commonware `cryptography/src/sha512.rs`).
 //!
-//! Backed by `std.crypto.hash.sha2.Sha512`. Digests encode as their 64 raw bytes.
+//! Backed by `std.crypto.hash.sha2.Sha512`, and `hash_many` hashes eight messages at once on
+//! AVX-512F (`sha512_x8.zig`), as commonware does. Digests encode as their 64 raw bytes.
 
 const std = @import("std");
 const parallel = @import("parallel");
@@ -16,8 +17,11 @@ const digest_length = 64;
 /// Digest of a SHA-512 hashing operation.
 pub const Digest = digest.Digest(digest_length, "sha512");
 
+/// The eight-message kernel `Sha512.hash_many` runs on, where the target has AVX-512F.
+pub const x8 = @import("sha512_x8.zig");
+
 /// SHA-512 hasher.
-pub const Sha512 = hasher.Streaming(Core, Digest);
+pub const Sha512 = hasher.StreamingWith(Core, Digest, if (x8.supported) x8 else void);
 
 comptime {
     assert(Core.digest_length == digest_length);
@@ -115,4 +119,56 @@ test "sha512 hash_many on overlapping and aliased messages" {
     try fuzz.check_hash_many(Sha512, &messages);
     const aliased: [9][]const u8 = @splat(&backing);
     try fuzz.check_hash_many(Sha512, &aliased);
+}
+
+// commonware `padding.rs` `test_blocks_pad_messages`: compressing a message's padded blocks
+// from the IV gives its digest, for every length across the first three blocks' boundaries.
+test "sha512 padded blocks give the digest" {
+    var data: [400]u8 = undefined;
+    for (&data, 0..) |*byte, i| byte.* = @truncate(i * 7);
+    for (0..data.len + 1) |len| {
+        var state = Core.init(.{});
+        for (0..x8.block_count(len)) |index| {
+            var bytes: [Core.block_length]u8 = undefined;
+            x8.block(data[0..len], index, &bytes);
+            state.update(&bytes);
+        }
+        var got: [digest_length]u8 = undefined;
+        for (state.s, 0..) |word, j| std.mem.writeInt(u64, got[j * 8 ..][0..8], word, .big);
+        var expected: [digest_length]u8 = undefined;
+        Core.hash(data[0..len], &expected, .{});
+        try testing.expectEqualSlices(u8, &expected, &got);
+    }
+}
+
+test "sha512 hash_many with one long lane among short ones" {
+    // The longest lane finishes alone: from a block inside its message (std's compressor) or
+    // from its padding (lockstep with one lane active), next to lanes of every block count.
+    const gpa = testing.allocator;
+    var prng = std.Random.DefaultPrng.init(0x5a512);
+    const random = prng.random();
+    const data = try gpa.alloc(u8, 1 << 13);
+    defer gpa.free(data);
+    random.bytes(data);
+    var messages: [19][]const u8 = undefined;
+    var digests: [19]Digest = undefined;
+    for (0..200) |round| {
+        for (&messages, 0..) |*message, index| {
+            const len = if (index % 8 == round % 8)
+                random.uintAtMost(usize, 3000)
+            else
+                random.uintAtMost(usize, if (round % 2 == 0) 260 else 1100);
+            message.* = data[random.uintAtMost(usize, data.len - len)..][0..len];
+        }
+        Sha512.hash_many(&messages, &digests, parallel.sequential);
+        for (messages, digests) |message, d| {
+            var expected: Digest = undefined;
+            Core.hash(message, &expected.bytes, .{});
+            try testing.expect(d.eql(expected));
+        }
+    }
+}
+
+test {
+    _ = x8;
 }

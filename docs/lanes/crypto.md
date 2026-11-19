@@ -292,8 +292,8 @@ or rename variables, with no behavior change.
 
 Every `#[test]`/`#[rstest]` fn in commonware `cryptography/src (outside bls12381 and reed_solomon)`,
 with each `#[case]` and each test-generating macro expansion counted separately, matched to a
-zigware test by name or by reading both bodies (a zigware test may cover several). 435 tests: 429
-ported, 0 open, 6 not portable (the 27 open items below were ported and ticked earlier; the
+zigware test by name or by reading both bodies (a zigware test may cover several). 435 tests: 431
+ported, 0 open, 4 not portable (the 27 open items below were ported and ticked earlier; the
 table was reconciled 2026-11-19).
 
 | commonware file | tests | ported | open | not portable |
@@ -302,7 +302,7 @@ table was reconciled 2026-11-19).
 | `certificate.rs` | 29 | 29 | 0 | 0 |
 | `chacha20_poly1305.rs` | 7 | 7 | 0 | 0 |
 | `fuzz.rs` | 5 | 5 | 0 | 0 |
-| `lib.rs` | 42 | 41 | 0 | 1 |
+| `lib.rs` | 42 | 42 | 0 | 0 |
 | `secret.rs` | 7 | 7 | 0 | 0 |
 | `sha512.rs` | 8 | 6 | 0 | 2 |
 | `transcript.rs` | 24 | 24 | 0 | 0 |
@@ -322,7 +322,7 @@ table was reconciled 2026-11-19).
 | `secp256r1/standard.rs` | 47 | 47 | 0 | 0 |
 | `secp256r1/certificate/mod.rs` | 27 | 27 | 0 | 0 |
 | `sha256/mod.rs` | 10 | 10 | 0 | 0 |
-| `sha512/padding.rs` | 1 | 0 | 0 | 1 |
+| `sha512/padding.rs` | 1 | 1 | 0 | 0 |
 | `zk/circuit.rs` | 6 | 6 | 0 | 0 |
 | `zk/pedersen_to_plain.rs` | 3 | 3 | 0 | 0 |
 | `zk/bulletproofs/circuit.rs` | 10 | 10 | 0 | 0 |
@@ -457,12 +457,10 @@ checks, which a dead child cannot report; blake3's `test_hash_splits_long_messag
 the parallel lane in `blake3_tree_tests.zig`; `secret.rs` `test_debug_redacted` is covered by
 `redaction_test.zig`, which checks `{any}`, Zig's Debug path; and `ed25519/scheme.rs`
 `test_from_signing_key` is "ed25519 private key from a core signing key", over main's
-`core.SigningKey`. The 6 below still have no counterpart, unchanged on main.):
-- `lib.rs` `test_hash_batches_shares_whole_units`: Tests the lanes parameter and caller-supplied
-  batch closure of Rust hash_batches; zigware's hasher.hash_batches is fixed at one lane with no
-  closure (docs/lanes/crypto.md Log: hash_many is commonware's one-lane hash_batches over
-  run_batches), so whole-unit share cutting for lanes 2/8/16 has no counterpart; batch splitting
-  itself is tested in src/parallel/tests.zig "run_batches supplies ordered balanced ranges"
+`core.SigningKey`. Later: `lib.rs` `test_hash_batches_shares_whole_units` is "hash_batches shares
+hold whole units of lanes" over coding's lane-aware `hash_batches`, and `sha512/padding.rs`
+`test_blocks_pad_messages` is "sha512 padded blocks give the digest" over the x8 kernel's
+`block`. The 4 below still have no counterpart.):
 - `sha512.rs` `test_avx512_detection`: Checks runtime AVX-512F detection for the x86_64 multi-lane
   kernel; zigware SHA-512 is std.crypto.hash.sha2.Sha512 with no arch kernels or feature detection
   (docs/lanes/crypto.md: hashes on std.crypto)
@@ -476,9 +474,6 @@ the parallel lane in `blake3_tree_tests.zig`; `secret.rs` `test_debug_redacted` 
   every 64 bytes decode as an ed25519 signature, so no malformed ed25519 attestation/certificate
   exists (docs/lanes/crypto.md: ed25519 malformed-Lazy cases have no counterpart; secp256r1 covers
   malformed signatures)
-- `sha512/padding.rs` `test_blocks_pad_messages`: Tests the block()/block_count() padding helper of
-  commonware's multi-message SHA-512 kernels; zigware has no such module and pads inside
-  std.crypto.hash.sha2.Sha512 (docs/lanes/crypto.md: hashes on std.crypto)
 - 2026-11-19 (p2p lane): std.fmt's `{}` and `{any}` ignore `format` and print every struct
   field, so `Secret`, ed25519, secp256r1, and X25519 private keys printed their bytes (bls
   `Private` escaped only by fmt's depth limit of 3). Key material now lives in
@@ -501,3 +496,10 @@ the parallel lane in `blake3_tree_tests.zig`; `secret.rs` `test_debug_redacted` 
   `order` compares 8-byte big-endian words (a `memcmp`). Tested against std at every short
   length and pair of lengths, on x86-64 and aarch64 under qemu; planted bugs in the padding
   boundary, bit length, pair outputs, pair feed-forward, and word order are caught.
+- 2026-11-19: sha512 `hash_many` hashes eight messages at once on AVX-512F
+  (`sha512_x8.zig`, commonware's `avx512.rs` and `padding.rs`): lanes run in lockstep, each
+  masked out when its blocks run out, and the longest finishes on std's compressor.
+  `hasher.StreamingWith` takes a `mixed_lengths` kernel for it. Planted bugs (a rotation, the
+  lane mask, the tail resume, the padding tail, chunking) are caught. Standalone, 8 x 64 KiB
+  took 844 µs on std and 135 µs on x8. Also ported `test_hash_batches_shares_whole_units`;
+  not portable 6 -> 4 (431/0/4).
