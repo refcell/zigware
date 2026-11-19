@@ -515,7 +515,8 @@ pub fn Suite(comptime F: type) type {
         /// commonware `twins_campaign`: generates the campaign's cases from `test_rng` and runs
         /// each on a fresh deterministic runner seeded from it.
         pub fn run_campaign(campaign: Campaign, link: Link) !void {
-            var rng = utils.rng.test_rng();
+            // `-Dfuzz-seed` draws other cases; the default 0 is commonware's `test_rng`.
+            var rng = utils.rng.TestRng.init(build_options.fuzz_seed);
             const faults = utils.N3f1.max_faults(campaign.n);
             const cases = try twins.cases(gpa, &rng, .{
                 .participants = campaign.n,
