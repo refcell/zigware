@@ -35,4 +35,5 @@ test {
     _ = mocks;
     _ = @import("height_map.zig");
     _ = @import("mod_test.zig");
+    _ = @import("fuzz.zig");
 }
