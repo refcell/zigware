@@ -754,10 +754,33 @@ After:
     cause is a null unwrap in glue's inclusion window (`.closed` after `.scan` took the
     request in the same window). The coding lane fixed it in f1e5c99, with a regression
     test.
+- [x] Bridge, through the bridge examples (`etc/scripts/interop_bridge.py`, run by
+  `interop.sh`).
+  - Setup: one dealing sets up both networks. zigware's `bridge-dealer` and commonware's
+    `dealer` print byte-identical polynomials, publics, and shares for seeds 1 and 2.
+  - Mix: each network runs two validators of each implementation.
+  - Indexers: there are two runs. One has a commonware indexer (`rrzzzzrr`, validators 1–8);
+    the other has a zigware indexer (`zzrrrrzz`).
+  - Pass: each network finalizes 20+ views with one payload from all four validators. In each
+    network, validators of both implementations must have proposed a finalized `Bridge` block
+    carrying the other network's certificate. A validator verifies the fetched certificate
+    against the other network's key before proposing, and every voter verifies it again.
+  - Local result: both runs passed, in 15 s (commonware indexer) and 7 s (zigware indexer).
+    The views finalized by all four were 21 and 31 in the first run, and 23 and 24 in the
+    second.
+  - Control: zigware's validators were given a third network's key as `--other-public`.
+    Both networks kept finalizing (36 and 63 views), but no `Bridge` block finalized.
+    commonware's proposals failed zigware's verification, so they missed the 3-of-4 quorum,
+    and zigware's validators found nothing to bridge. So the pass condition depends on
+    certificates verifying across implementations.
+  - Found on the way, not interop: zigware's bridge application asserts
+    `this_network != other_network`, and commonware's has no such check. Given its own
+    network's key as `--other-public`, zigware's validator aborts, while commonware's runs
+    and bridges its own network's certificates. Reported to the examples lane.
 - No wire mismatch turned up, so no vector was added.
 - [x] Nightly CI: nightly.yml's `interop` job (`gh workflow run nightly.yml -f only=interop`
-  runs it alone) fetches commonware at the pinned revision, builds its chat, log, and dkg
-  examples with cargo (registry and target cached by revision, saved once the build
+  runs it alone) fetches commonware at the pinned revision, builds its chat, log, dkg, and
+  bridge examples with cargo (registry and target cached by revision, saved once the build
   succeeds), and runs interop.sh. A skip fails the job, and a failed run uploads
   `interop-logs`: the dkg nodes' logs, the log validators' screens, and the chat screens,
   which the drivers keep under `$TMPDIR`. First run on CI: 44565356294, 17 minutes, green.

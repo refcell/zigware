@@ -130,10 +130,11 @@ jobs:
           name: e2e-logs
           path: ${{ runner.temp }}/e2e
 
-  # Live interop with commonware (etc/scripts/interop.sh): its chat, log, and dkg examples,
-  # built from the pinned reference revision, run against zigware's in shared networks. Chat
-  # over discovery, simplex log with a restart, simplex's resolver in both directions, and a
-  # mixed dkg network with a state-syncing joiner of each kind.
+  # Live interop with commonware (etc/scripts/interop.sh): its chat, log, dkg, and bridge
+  # examples, built from the pinned reference revision, run against zigware's in shared
+  # networks. Chat over discovery, simplex log with a restart, simplex's resolver in both
+  # directions, a mixed dkg network with a state-syncing joiner of each kind, and two mixed
+  # bridge networks bridging each other's certificates through each kind of indexer.
   interop:
     if: inputs.only == '' || inputs.only == 'interop'
     runs-on: ubuntu-latest
@@ -175,7 +176,7 @@ jobs:
           cd "$COMMONWARE_REF"
           cargo fetch --locked
           CARGO_TARGET_DIR="$INTEROP_TARGET" cargo build --release --offline --locked \
-            -p commonware-chat -p commonware-log -p commonware-dkg
+            -p commonware-chat -p commonware-log -p commonware-dkg -p commonware-bridge
       - name: save cargo cache
         if: steps.cargo-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
