@@ -110,10 +110,14 @@ current epoch and reshares in step with the rest ([video](docs/assets/dkg-demo.m
 
 ## Packages
 
+Each package's README gives its upstream stability, its modules, how to test, bench, and fuzz
+it, and every recorded difference from commonware.
+
 | Package | What it does | Status |
 | --- | --- | --- |
 | [codec](src/codec) | Serialize structured data | ported |
 | [cryptography](src/cryptography) | Keys, signatures, hashes, BLS12-381 threshold crypto | porting |
+| [curve25519](src/cryptography/curve25519) | Curve25519 arithmetic, Ed25519 signing and batch verification, X25519 | ported |
 | [math](src/math) | Fields, polynomials, NTT | porting |
 | [runtime](src/runtime) | Async tasks with a deterministic scheduler or io_uring | porting |
 | [storage](src/storage) | Journals, archives, MMRs, authenticated databases | porting |
