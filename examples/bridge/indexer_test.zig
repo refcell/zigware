@@ -69,6 +69,10 @@ test "bridge: the indexer decodes networks as commonware does" {
     const bytes = zigware.codec.encode_fixed(@TypeOf(publics[0]), publics[0]);
     _ = try std.fmt.bufPrint(&hex, "{x}", .{&bytes});
     try testing.expectEqualStrings(public, &hex);
+    // A network listed twice is served once, as commonware's HashMap keeps one entry.
+    const twice = try indexer.decode_networks(arena.allocator(), &.{ public, public }, &panic);
+    try testing.expectEqual(@as(usize, 1), twice.len);
+    try testing.expect(twice[0].eql(publics[0]));
     // commonware's panics: not hex, then hex that is too short for a public key.
     const decode = indexer.decode_networks;
     try testing.expectError(error.Panic, decode(arena.allocator(), &.{"zz"}, &panic));

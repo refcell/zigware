@@ -125,20 +125,32 @@ pub fn setup(
 
 const duplicate_key = "public keys are unique: DuplicateKey";
 
-/// Decodes each network's identity as commonware does once its runtime starts.
+/// Decodes each network's identity as commonware does once its runtime starts. A network listed
+/// twice is served once: commonware inserts each into a `HashMap`, so a repeat overwrites.
 pub fn decode_networks(
     arena: Allocator,
     networks: []const []const u8,
     panic: *rust.Panic,
 ) (Allocator.Error || error{Panic})![]const types.Public {
     const publics = try arena.alloc(types.Public, networks.len);
-    for (publics, networks) |*public, network| {
+    var count: usize = 0;
+    for (networks) |network| {
         const bytes = try zigware.formatting.from_hex(arena, network) orelse
             return panic.fail("Network not well-formed", .{});
-        public.* = codec.decode(types.Public, arena, bytes) catch |err|
+        const public = codec.decode(types.Public, arena, bytes) catch |err|
             return panic.fail("Network not well-formed: {t}", .{err});
+        for (publics[0..count]) |earlier| {
+            if (earlier.eql(public)) break;
+        } else {
+            if (count == store_mod.networks_max) {
+                return panic.fail("Indexer serves at most {d} networks", .{store_mod.networks_max});
+            }
+            publics[count] = public;
+            count += 1;
+        }
     }
-    return publics;
+    assert(count > 0 and count <= networks.len);
+    return publics[0..count];
 }
 
 pub fn main(init: std.process.Init) !u8 {

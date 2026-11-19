@@ -42,6 +42,12 @@ statistics, output, CLI) and run against a minimal in-lane stand-in, then switch
   it when `--dashboard dashboard.json` is missing from the working directory, so the README's
   command runs from the repository root as well as from `examples/flood`. Any other missing
   dashboard fails as commonware's `unwrap` does.
+- bridge accepts the configurations commonware accepts (rule 7). A validator whose
+  `--other-public` is its own network's key bridges its own finalizations, which verify
+  (c111d676 dropped zigware's startup assert). The indexer serves a network listed twice in
+  `--networks` once, as commonware's `HashMap` keeps one entry. It serves at most
+  `store.networks_max` (16) networks and says so at startup beyond that; commonware has no
+  bound.
 - flood's `messages` counter also counts sends made before any peer connects, as
   commonware's does (an empty `Recipients::All` send is accepted); the demo shows received
   messages instead.
