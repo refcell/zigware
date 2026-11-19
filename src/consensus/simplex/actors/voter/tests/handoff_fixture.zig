@@ -51,7 +51,7 @@ pub fn Fixture(comptime h: type) type {
             merged.sync_gates = &self.gates;
             try self.stack.start(ctx, &self.net, merged);
             errdefer self.stack.stop();
-            self.parent = try self.prepare_tip(ctx);
+            self.parent = try prepare_tip(ctx, &self.net, &self.stack, self.local, self.outgoing);
             // commonware's `observer()`: the next participant listens to later relays.
             try self.relayed.start(&self.net, (self.local + 1) % 5);
         }
@@ -119,53 +119,60 @@ pub fn Fixture(comptime h: type) type {
         }
 
         /// commonware `prepare_pipelined_handoff_tip`: certifies view 1 and drives the voter
-        /// through its notarize vote for view 2.
-        fn prepare_tip(self: *Self, ctx: Ctx) !h.Proposal {
+        /// at `local` through its notarize vote for view 2, leaving the outgoing tip
+        /// uncertified. Returns that tip.
+        pub fn prepare_tip(
+            ctx: Ctx,
+            net: *h.Network,
+            stack: *h.VoterStack,
+            local: usize,
+            outgoing: usize,
+        ) !h.Proposal {
             const gpa = ctx.gpa();
-            _ = try self.stack.next_update(ctx, 5_000);
+            _ = try stack.next_update(ctx, 5_000);
             const genesis = h.genesis(epoch);
             const p1 = h.proposal_at(epoch, 1, "pipelined_test_view_1");
-            h.relay_contents(&self.net, self.outgoing, p1.payload, p1.round, genesis, 0);
+            h.relay_contents(net, outgoing, p1.payload, p1.round, genesis, 0);
             const notarization = try h.build_peers(
                 gpa,
                 .notarization,
-                self.net.schemes(),
-                self.local,
+                net.schemes(),
+                local,
                 p1,
-                self.net.quorum(),
+                net.quorum(),
             );
-            try self.stack.mailbox.recovered(gpa, .{ .notarization = notarization });
-            try self.wait_certified_view_1(ctx);
+            try stack.mailbox.recovered(gpa, .{ .notarization = notarization });
+            try wait_certified_view_1(ctx, stack);
             const p2 = h.proposal_at(epoch, view_parent, "pipelined_test_view_2");
-            h.relay_contents(&self.net, self.outgoing, p2.payload, p2.round, p1.payload, 1);
-            try self.stack.mailbox.proposal(p2);
-            try self.wait_notarize(ctx, view_parent);
-            return p2;
+            h.relay_contents(net, outgoing, p2.payload, p2.round, p1.payload, 1);
+            try stack.mailbox.proposal(p2);
+            // Bounded by the 5 s wait per message.
+            while (true) {
+                const next = try stack.next_batcher(ctx, 5_000);
+                const message = next orelse return error.NoNotarize;
+                if (message != .constructed or message.constructed != .notarize) continue;
+                if (message.constructed.view().get() == view_parent) return p2;
+            }
         }
 
         /// Waits until view 1 certifies and the voter enters view 2.
-        fn wait_certified_view_1(self: *Self, ctx: Ctx) !void {
+        fn wait_certified_view_1(ctx: Ctx, stack: *h.VoterStack) !void {
             var certified = false;
             var entered = false;
             var waited: u64 = 0;
             // Bounded by 5 s of simulated time.
             while (!certified or !entered) : (waited += 1) {
                 if (waited > 5_000) return error.TipNotReached;
-                if (self.stack.batcher.try_recv()) |message| {
+                if (stack.batcher.try_recv()) |message| {
                     if (message == .update and message.update.current.get() == 2) entered = true;
                 } else |_| {}
-                if (self.stack.resolver.try_recv()) |message| {
+                if (stack.resolver.try_recv()) |message| {
                     defer message.discard();
                     if (message == .certified and message.certified.success and
                         message.certified.notarization.view().get() == 1) certified = true;
                 } else |_| {}
                 try ctx.sleep(.fromMilliseconds(1));
             }
-        }
-
-        /// Waits up to 5 s of simulated time for our notarize vote at `view`.
-        pub fn wait_notarize(self: *Self, ctx: Ctx, view: u64) !void {
-            _ = try self.next_notarize(ctx, view, 5_000) orelse return error.NoNotarize;
         }
 
         /// Our next notarize vote's payload at `view` within `limit_ms`, skipping other

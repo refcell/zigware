@@ -10,6 +10,7 @@ pub fn Tests(comptime h: type) type {
     return struct {
         const Ctx = h.Ctx;
         const epoch = h.default_epoch;
+        const Fixture = @import("handoff_fixture.zig").Fixture(h);
 
         fn run(comptime body: fn (Ctx) anyerror!void) !void {
             var runner = try runtime.deterministic.Runner.init(testing.allocator, .{
@@ -158,6 +159,87 @@ pub fn Tests(comptime h: type) type {
                     try testing.expect(stack.reporter.certified(.new(2)));
                 }
             }.body);
+        }
+
+        // commonware test_pipelined_handoff_parent_repair_targets_leader: a follower that
+        // entered a term start through a nullification of the outgoing tip requests the tip's
+        // certificate from the incoming leader, which built on it.
+        test "voter pipelined handoff parent repair targets leader" {
+            try h.covers(.ed25519);
+            try run(struct {
+                fn body(ctx: Ctx) anyerror!void {
+                    try parent_repair_targets_leader(ctx);
+                }
+            }.body);
+        }
+
+        fn parent_repair_targets_leader(ctx: Ctx) !void {
+            const gpa = ctx.gpa();
+            var net: h.Network = undefined;
+            try net.start(ctx, 5, "pipelined_handoff_parent_repair_targets_leader");
+            defer net.deinit();
+            const elector = h.term_elector(2, 30_000, 1);
+            const outgoing = try h.leader_of(gpa, elector, 1);
+            const incoming = try h.leader_of(gpa, elector, 3);
+            var local: usize = 0;
+            while (local == outgoing or local == incoming) local += 1;
+            var stack: h.VoterStack = undefined;
+            try stack.start(ctx, &net, .{
+                .leader_timeout_ms = 10_000,
+                .certification_timeout_ms = 10_000,
+                .timeout_retry_ms = 30_000,
+                .local_index = local,
+                .elector = elector,
+            });
+            defer stack.stop();
+            const p2 = try Fixture.prepare_tip(ctx, &net, &stack, local, outgoing);
+            // The follower holds a nullification of the tip the incoming leader built on, so
+            // it enters view 3 without the tip's certificate.
+            const nullification = try h.build_peers(
+                gpa,
+                .nullification,
+                net.schemes(),
+                local,
+                .new(epoch, .new(2)),
+                net.quorum(),
+            );
+            try stack.mailbox.recovered(gpa, .{ .nullification = nullification });
+            const round: h.Round = .new(epoch, .new(3));
+            const p3: h.Proposal = .init(round, .new(2), h.Sha256.hash(&.{"parent_repair_view_3"}));
+            h.relay_contents(&net, incoming, p3.payload, round, p2.payload, 2);
+            try stack.mailbox.proposal(p3);
+            try expect_repair_from(ctx, &stack, net.keys()[incoming]);
+            // Delivered as an unrestricted resolver response, the parent certifies, the
+            // buffered child verifies, and we vote before the term-start view times out.
+            const notarization = try h.build(gpa, .notarization, net.schemes(), p2, net.quorum());
+            try stack.mailbox.recovered(gpa, .{ .notarization = notarization });
+            // Bounded by the 5 s wait per message.
+            while (true) {
+                const next = try stack.next_batcher(ctx, 5_000);
+                const message = next orelse return error.NoNotarize;
+                if (message != .constructed or message.constructed.view().get() != 3) continue;
+                if (message.constructed == .nullify) return error.RepairTimedOut;
+                if (message.constructed == .notarize) return;
+            }
+        }
+
+        /// Expects the voter to ask `leader` alone for view 2's notarization, the parent of
+        /// view 3.
+        fn expect_repair_from(ctx: Ctx, stack: *h.VoterStack, leader: h.Key) !void {
+            // Bounded by the 5 s wait per message.
+            while (true) {
+                const next = try stack.next_resolver(ctx, 5_000);
+                const message = next orelse return error.NoRepair;
+                defer message.discard();
+                if (message != .resolve) continue;
+                const resolve = message.resolve;
+                try testing.expectEqual(3, resolve.proposal.get());
+                try testing.expectEqual(2, resolve.view.get());
+                try testing.expect(resolve.kind == .notarization);
+                const target = resolve.target orelse return error.UntargetedRepair;
+                try testing.expect(target.eql(leader));
+                return;
+            }
         }
     };
 }
