@@ -534,7 +534,9 @@ fn Draining(comptime Context: type) type {
             never.wait(ctx.io()) catch |err| switch (err) {
                 error.Canceled => {},
             };
-            // A cancel at the end of the run would cut this short.
+            // Deliberate cleanup after the cancel: block cancelation so it runs in full.
+            const protection = ctx.io().swapCancelProtection(.blocked);
+            defer _ = ctx.io().swapCancelProtection(protection);
             ctx.sleep(.fromMilliseconds(100)) catch return;
             cleaned.store(true, .release);
         }

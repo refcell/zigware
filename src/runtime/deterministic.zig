@@ -24,6 +24,7 @@
 //!   different points than polled futures, so its digests are not comparable with Rust's.
 
 const std = @import("std");
+const build_options = @import("build_options");
 const assert = std.debug.assert;
 const Io = std.Io;
 const utils = @import("utils");
@@ -207,6 +208,22 @@ const Task = struct {
 
     fn task_label(task: *const Task) TaskLabel {
         return .{ .name = task.label(), .kind = task.label_kind, .execution = .shared };
+    }
+
+    /// With `-Dcancel-audit`, panics when the task reaches a cancelation point while holding a
+    /// cancel it already acknowledged and never re-armed: it caught `error.Canceled` without
+    /// propagating it or calling `io.recancel()`, so this point cannot deliver the cancel and a
+    /// cancelable wait here is never woken by it. Deliberate work after a cancel opts out by
+    /// blocking cancelation (`io.swapCancelProtection(.blocked)`).
+    fn audit_cancel(task: *const Task) void {
+        if (!build_options.cancel_audit) return;
+        if (!task.cancel_requested or !task.cancel_acknowledged) return;
+        if (task.cancel_protection != .unblocked) return;
+        std.debug.panic(
+            "deterministic: task '{s}' caught error.Canceled without propagating it or " ++
+                "calling io.recancel(), then reached another cancelation point",
+            .{task.label()},
+        );
     }
 
     fn cancel_point_open(task: *const Task) bool {
@@ -655,6 +672,7 @@ pub const Runner = struct {
     fn block(runner: *Runner, cancelable: bool) @FieldType(Task, "wake_reason") {
         const task = runner.current.?;
         assert(task.state == .running);
+        if (cancelable) task.audit_cancel();
         task.state = .blocked;
         task.wait_cancelable = cancelable;
         fiber.switch_to(&task.context, &runner.scheduler_context);
@@ -685,6 +703,7 @@ pub const Runner = struct {
     /// A cancelation point for the current task.
     fn check_cancel(runner: *Runner) Io.Cancelable!void {
         const task = runner.current.?;
+        task.audit_cancel();
         if (task.cancel_requested and task.cancel_point_open()) {
             task.cancel_acknowledged = true;
             return error.Canceled;
@@ -1290,6 +1309,32 @@ test "cancel interrupts a sleeping task (test_spawn_abort)" {
             var future = try io.concurrent(forever, .{io});
             try io.sleep(.fromSeconds(5), .awake);
             try testing.expectError(error.Canceled, future.cancel(io));
+        }
+    };
+    try (try runner.start(Root.run, .{runner.io()}));
+}
+
+test "recancel re-arms a caught cancel for the next wait" {
+    var runner = try test_runner(.{});
+    defer runner.deinit();
+    const Root = struct {
+        /// Catches the cancel, re-arms it, and returns what a later 1 s sleep reports.
+        fn swallow(io: Io, started_ns: *i96) anyerror!void {
+            io.sleep(.fromSeconds(60), .awake) catch |err| {
+                assert(err == error.Canceled);
+                io.recancel();
+            };
+            started_ns.* = Io.Clock.awake.now(io).nanoseconds;
+            return io.sleep(.fromSeconds(1), .awake);
+        }
+        fn run(io: Io) !void {
+            var started_ns: i96 = 0;
+            var future = try io.concurrent(swallow, .{ io, &started_ns });
+            try io.sleep(.fromSeconds(1), .awake);
+            // The second sleep fails at once instead of sleeping its full second.
+            try testing.expectError(error.Canceled, future.cancel(io));
+            const elapsed_ns = Io.Clock.awake.now(io).nanoseconds - started_ns;
+            try testing.expect(elapsed_ns < std.time.ns_per_s);
         }
     };
     try (try runner.start(Root.run, .{runner.io()}));

@@ -119,7 +119,7 @@ pub fn build(b: *std.Build) void {
     options.addOption([]const u8, "git_rev", git_rev orelse "unknown");
     const slow_tests = b.option(bool, "slow-tests", "Also run large tests") orelse false;
     options.addOption(bool, "slow_tests", slow_tests);
-    add_heavy_shard_options(b, options);
+    add_test_options(b, options);
     const fuzz_soak = b.option(u32, "fuzz-soak", "Multiply seeded fuzz iterations") orelse 1;
     options.addOption(u32, "fuzz_soak", fuzz_soak);
     const fuzz_soak_budget_s = b.option(
@@ -176,6 +176,24 @@ pub fn build(b: *std.Build) void {
     add_test_rest(b, test_step);
 
     add_deployer(b, modules[package_index("deployer")], target, optimize, check_step);
+}
+
+/// The test-run options: heavy-test sharding and the cancel audit.
+fn add_test_options(b: *std.Build, options: *std.Build.Step.Options) void {
+    add_heavy_shard_options(b, options);
+    add_cancel_audit_option(b, options);
+}
+
+/// `-Dcancel-audit`: the deterministic runtime panics when a task swallows its cancel (catches
+/// `error.Canceled` without propagating it or calling `io.recancel()`) and then reaches another
+/// cancelation point.
+fn add_cancel_audit_option(b: *std.Build, options: *std.Build.Step.Options) void {
+    const cancel_audit = b.option(
+        bool,
+        "cancel-audit",
+        "Panic when a deterministic task swallows its cancel (no recancel) and waits again",
+    ) orelse false;
+    options.addOption(bool, "cancel_audit", cancel_audit);
 }
 
 /// `-Dheavy-shards=n -Dheavy-shard=i`: with `-Dslow-tests`, run only every n-th heavy test
