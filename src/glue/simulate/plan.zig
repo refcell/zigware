@@ -346,7 +346,7 @@ pub fn Plan(comptime D: type) type {
                     .restart => |pk| try sim.restart(pk),
                     .crash => |pk| {
                         const index = sim.team.index_of(pk) orelse return error.UnknownParticipant;
-                        if (sim.team.crash(index)) sim.crashes += 1;
+                        if (try sim.team.crash(sim.ctx, index)) sim.crashes += 1;
                     },
                     .crash_tick => try sim.crash_random(),
                 }
@@ -448,7 +448,7 @@ pub fn Plan(comptime D: type) type {
                     triggered.* = true;
                     for (window.participants) |pk| {
                         const index = sim.team.index_of(pk) orelse unreachable; // Checked above.
-                        if (!sim.team.crash(index)) continue;
+                        if (!try sim.team.crash(sim.ctx, index)) continue;
                         sim.crashes += 1;
                         try sim.restart_after(pk, window.downtime);
                     }
@@ -512,7 +512,7 @@ pub fn Plan(comptime D: type) type {
                 const count = @min(config.count, active.len);
                 shuffle(sim.ctx.io(), active, count);
                 for (active[0..count]) |index| {
-                    if (!sim.team.crash(index)) continue;
+                    if (!try sim.team.crash(sim.ctx, index)) continue;
                     sim.crashes += 1;
                     try sim.restart_after(sim.team.participants[index], config.downtime);
                 }

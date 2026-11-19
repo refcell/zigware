@@ -60,6 +60,10 @@ a test harness), `transfers` (4.4k with tests and benches), `stateful` (about 33
   test-glue under "failed command" even when every test passes.
 - Commonware's panics for unexercised faults (random crashes, schedules, delays, processed
   height windows) and duplicate strategies are `PlanError`s, so their tests port.
+- `Team.crash` aborts a validator from a task it spawns, since an abort waits for the
+  validator's teardown (Zig cannot drop a running task) and commonware's crash does not
+  wait. Validators due to crash together then do, and the plan keeps handling reports. A
+  restart joins its validator's aborting task before reusing its channels and state.
 
 ## Backlog
 - [x] simulate: tracker, action (Schedule, Action, Crash) with their tests.

@@ -30,6 +30,10 @@ pub fn Team(comptime D: type) type {
         order: []usize,
         /// Running validators' task handles.
         handles: []?Handle,
+        /// Per crashed validator, the task aborting it (an abort waits for the validator's
+        /// teardown, since Zig cannot drop a running task). A restart joins its validator's
+        /// before reusing the channels and state, and `deinit` joins the rest.
+        stopping: []?Handle,
         /// Inspectable state per validator, kept after a crash until its restart.
         states: []?S,
         /// The slice of registered channels handed to each validator's engine.
@@ -47,6 +51,9 @@ pub fn Team(comptime D: type) type {
             const handles = try gpa.alloc(?Handle, n);
             errdefer gpa.free(handles);
             @memset(handles, null);
+            const stopping = try gpa.alloc(?Handle, n);
+            errdefer gpa.free(stopping);
+            @memset(stopping, null);
             const states = try gpa.alloc(?S, n);
             errdefer gpa.free(states);
             @memset(states, null);
@@ -61,6 +68,7 @@ pub fn Team(comptime D: type) type {
                 .participants = participants,
                 .order = order,
                 .handles = handles,
+                .stopping = stopping,
                 .states = states,
                 .channels = channels,
                 .restart_counts = restart_counts,
@@ -71,16 +79,21 @@ pub fn Team(comptime D: type) type {
             return participants[a].order(participants[b]) == .lt;
         }
 
-        /// Aborts every running validator and releases every state.
+        /// Aborts every running validator, waits for every crashed one, and releases every
+        /// state.
         pub fn deinit(self: *Self) void {
-            for (self.handles, self.states, self.channels) |*handle, *state, channels| {
-                if (handle.*) |running| _ = running.abort() catch {};
+            for (self.handles, self.stopping) |handle, stopped| {
+                if (handle) |running| _ = running.abort() catch {};
+                if (stopped) |crashing| _ = crashing.join() catch {};
+            }
+            for (self.states, self.channels) |*state, channels| {
                 if (state.*) |*held| deinit_state(held);
                 self.gpa.free(channels);
             }
             self.gpa.free(self.restart_counts);
             self.gpa.free(self.channels);
             self.gpa.free(self.states);
+            self.gpa.free(self.stopping);
             self.gpa.free(self.handles);
             self.gpa.free(self.order);
             self.* = undefined;
@@ -112,6 +125,9 @@ pub fn Team(comptime D: type) type {
             assert(index < self.participants.len);
             if (self.handles[index]) |running| _ = running.abort() catch {};
             self.handles[index] = null;
+            // The crashed instance still holds its channels and state until it returns.
+            if (self.stopping[index]) |crashing| _ = crashing.join() catch {};
+            self.stopping[index] = null;
             const restart = self.restart_counts[index];
             self.restart_counts[index] += 1;
             const validator_ctx = ctx.child("validator")
@@ -169,12 +185,20 @@ pub fn Team(comptime D: type) type {
             }
         }
 
-        /// Crashes validator `index` by aborting its task. Returns whether it was running.
-        pub fn crash(self: *Self, index: usize) bool {
+        /// Crashes validator `index` by aborting its task from a task spawned under `ctx`, so
+        /// the caller does not wait for the validator's teardown (commonware drops the aborted
+        /// handle) and validators due to crash together do. Returns whether it was running.
+        pub fn crash(self: *Self, ctx: Context, index: usize) !bool {
             const running = self.handles[index] orelse return false;
-            _ = running.abort() catch {};
+            // A restart joined any earlier crash before the instance now running started.
+            assert(self.stopping[index] == null);
+            self.stopping[index] = try ctx.child("crash").spawn(abort_validator, .{running});
             self.handles[index] = null;
             return true;
+        }
+
+        fn abort_validator(_: Context, running: Handle) void {
+            _ = running.abort() catch {};
         }
 
         /// The states of the running validators, in key order, written into `buffer`.

@@ -542,6 +542,9 @@ const ProcessingEngine = struct {
     processed: []std.atomic.Value(u64),
     /// Every validator start, in order.
     starts: *Log,
+    /// How long a crashed validator takes to return after its abort, as a real validator
+    /// tears down its actors.
+    teardown: Duration = .zero,
 
     /// A validator start: its index, and the height each validator had processed by then.
     const Start = struct { index: usize, heights: [3]u64 };
@@ -569,6 +572,7 @@ const ProcessingEngine = struct {
         monitor: simulate.Monitor(Key),
         pk: Key,
         period: Duration,
+        teardown: Duration,
         processed: *std.atomic.Value(u64),
     };
 
@@ -599,6 +603,7 @@ const ProcessingEngine = struct {
             .monitor = ctx.monitor,
             .pk = ctx.public_key,
             .period = self.periods[ctx.index],
+            .teardown = self.teardown,
             .processed = processed,
         }, .{ .value = processed } };
     }
@@ -609,7 +614,7 @@ const ProcessingEngine = struct {
 
     fn process(ctx: Context, node: Node) void {
         while (true) {
-            sleep(ctx, node.period) catch return;
+            sleep(ctx, node.period) catch return tear_down(ctx, node.teardown);
             const height = node.processed.fetchAdd(1, .monotonic) + 1;
             const sent = node.monitor.send(.{
                 .pk = node.pk,
@@ -621,6 +626,14 @@ const ProcessingEngine = struct {
         }
     }
 };
+
+/// Waits out `teardown` after an abort, which cannot interrupt it.
+fn tear_down(ctx: Context, teardown: Duration) void {
+    const io = ctx.io();
+    const protection = io.swapCancelProtection(.blocked);
+    defer _ = io.swapCancelProtection(protection);
+    sleep(ctx, teardown) catch unreachable; // Cancelation is blocked.
+}
 
 const ProcessingPlan = simulate.Plan(ProcessingEngine);
 
@@ -750,6 +763,42 @@ test "plan: processed height crash stops participants together" {
     for (together) |start| try testing.expectEqual(heights, start.heights);
     try testing.expectEqual(5, heights[slow]);
     for (fast) |index| try testing.expect(heights[index] > 5);
+}
+
+test "plan: a processed height crash does not wait for each validator's teardown" {
+    // Three validators process a height every 10ms and take 50ms to return once aborted. They
+    // crash together inside the window, so each stops at the same height: had the plan waited
+    // for each teardown before crashing the next, the later ones would process five more.
+    const participants = keys(3);
+    var processed: [3]std.atomic.Value(u64) = @splat(.init(0));
+    var starts: ProcessingEngine.Log = .{};
+    const period: Duration = .from_millis(10);
+    const engine: ProcessingEngine = .{
+        .keys = &participants,
+        .periods = &.{ period, period, period },
+        .processed = &processed,
+        .starts = &starts,
+        .teardown = .from_millis(50),
+    };
+    const condition: simulate.exit.ProcessedHeightAtLeast = .{ .required = 12 };
+    const plan: ProcessingPlan = .{
+        .engine = &engine,
+        .crashes = &.{.{ .processed_height = .{
+            .participants = &participants,
+            .heights = .{ .min = 5, .max = 7 },
+            .downtime = .from_millis(100),
+        } }},
+        .exit_condition = .from(&condition),
+        .timeout = .from_secs(2),
+    };
+    var result = try plan.run(gpa);
+    defer result.deinit();
+    try testing.expectEqual(3, result.crashes);
+    const restarts = starts.slice()[3..];
+    try testing.expectEqual(3, restarts.len);
+    const heights = restarts[0].heights;
+    for (restarts) |start| try testing.expectEqual(heights, start.heights);
+    for (heights) |height| try testing.expect(height >= 5 and height <= 7);
 }
 
 test "plan: processed height crash requires every participant inside window" {
