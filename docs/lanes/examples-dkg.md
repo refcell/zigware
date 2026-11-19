@@ -20,10 +20,12 @@ setup. Owns `examples/dkg` (commonware `examples/dkg`).
       commonware's test.
 - [x] `validator.zig`: the probe's configuration over the persisted `SyncPlan`
       (`probe_config`, commonware's `probe_resumes_persisted_floor`).
-- [ ] `validator` run: p2p, broadcast, marshal, probe, QMDB resolver, reshare, orchestrator,
-      and the stateful application. Waits on glue.stateful's `Stateful` actor (utils lane) and
-      the QMDB resolver actor (deployer lane); the reshare actor, orchestrator, and probe are on
-      main.
+- [x] `provider.zig`: `DynamicProvider`, `Registrar`, and `scheme` (commonware `types.rs`).
+- [x] `validator` run: p2p, broadcast, marshal, probe, QMDB resolver, reshare, orchestrator,
+      and the stateful application. A 4-peer, committee-3 cluster reshares every epoch
+      (`completed reshare ceremony ... success=true` through epoch 3) and recovers on restart.
+- [ ] `validator --state-sync` and startup from a persisted state-sync floor: needs glue's
+      bootstrap `Node` to take a floor start, plus `Stateful`'s resolvers and sync config.
 - [x] `bootstrap.complete`: await the ceremony, hand epoch zero's share to the validator
       store, and write the genesis to sibling validators (singleton ceremony test).
 - [x] `bootstrap` run on discovery p2p and the production runner (`network.zig` holds the
@@ -43,7 +45,15 @@ setup. Owns `examples/dkg` (commonware `examples/dkg`).
 - The CLI's help screens are fixed text from `commonware-dkg`; the parser models clap 4.6's
   order of checks (see `cli.zig`). `--worker-threads` is parsed and ignored: the production
   runner runs on `std.Io.Threaded`, not Tokio.
-- Until its run is wired, `validator` parses and exits 1.
+- `validator` builds marshal from glue's bootstrap `Node`, so marshal's own partition is
+  `validator-marshal` (commonware: `validator`) and it always starts from genesis; a state-sync
+  startup fails with `error.StateSyncUnsupported`. The QMDB resolver and `Stateful` run as
+  plain futures (their awaits are not cancelable) and stop at shutdown rather than in
+  `select`. zigware's `Stateful` attaches its databases to the resolver only after state sync,
+  so the validator attaches them once `Stateful` opens them (commonware's recovery path).
+- `Reporter` fans each finalized block out to the stateful, orchestrator, and reshare
+  mailboxes with a clone of the block and acknowledgement each, then logs it
+  (`commonware_dkg::types: finalized block`, commonware's `LogReporter`).
 - zigware's probe takes the persisted floor's epoch (`floor_epoch`), not the floor, so
   `probe_resumes_persisted_floor` checks the epoch; its manager and blocker come from the
   simulated network instead of a discovery network, since the config only carries them.
@@ -65,3 +75,4 @@ setup. Owns `examples/dkg` (commonware `examples/dkg`).
 - 2026-11-19: bootstrap's completion and genesis hand-off on the bootstrap engine (examples lane).
 - 2026-11-19: the application on glue.stateful's Processor contract (examples lane).
 - 2026-11-19: the `bootstrap` subcommand on the production runtime (examples lane).
+- 2026-11-19: the validator composition, resharing across epochs on 4 nodes (examples lane).

@@ -117,6 +117,8 @@ pub const Block = struct {
     pub const Directory = Unit;
     pub const Context = block_context;
     pub const Digest = types_digest;
+    /// The block reads without configuration (commonware's `Cfg = ()`).
+    pub const Cfg = void;
 
     /// The encoded-size bound: the widest context, height, range, and reshare payload.
     pub const max_encode_size: usize = Payload.max_encode_size_with(max_participants) +
