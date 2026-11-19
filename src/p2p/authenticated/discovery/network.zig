@@ -492,7 +492,7 @@ pub fn Network(comptime U: type, comptime Transport: type) type {
 
         /// Runs an authenticated connection to `peer` under its reservation, then releases
         /// both (commonware's spawner).
-        fn serve(
+        pub fn serve(
             network: *Self,
             peer: P,
             connection: *Upgraded,
@@ -577,7 +577,7 @@ pub fn Network(comptime U: type, comptime Transport: type) type {
         /// With peers queued, dial again after `dial_frequency`; otherwise ask the tracker
         /// again when it expects a peer to become dialable, within `[dial_frequency,
         /// max(dial_frequency, peer_connection_cooldown)]`.
-        fn next_deadline(
+        pub fn next_deadline(
             config: *const Config,
             now: SystemTime,
             empty: bool,

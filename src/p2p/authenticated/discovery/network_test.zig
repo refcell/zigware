@@ -79,15 +79,30 @@ fn test_config(
     return config;
 }
 
-const Node = struct {
-    network: *Net,
-    registered: Net.Registered,
-    task: Io.Future(anyerror!void),
-    /// When the node next sends its identity.
-    send_at_ns: u64 = 0,
-    /// Mode `one`: the next recipient to send to.
-    cursor: usize = 0,
-};
+/// A running network and its channel 0, over network type `N`.
+fn NodeOf(comptime N: type) type {
+    return struct {
+        network: *N,
+        registered: N.Registered,
+        task: Io.Future(anyerror!void),
+        /// When the node next sends its identity.
+        send_at_ns: u64 = 0,
+        /// Mode `one`: the next recipient to send to.
+        cursor: usize = 0,
+    };
+}
+
+/// The discovery network over transport type `T`.
+fn NetOf(comptime T: type) type {
+    return network_mod.Network(Upgrader, T);
+}
+
+/// The node type of a transport pointer.
+fn TransportNode(comptime TransportPointer: type) type {
+    return NodeOf(NetOf(@typeInfo(TransportPointer).pointer.child));
+}
+
+const Node = NodeOf(Net);
 
 /// Each node's metrics scope: `peer` with an `index` attribute, then `network`, as
 /// commonware's `context.child("peer").with_attribute("index", i).child("network")`.
@@ -95,17 +110,19 @@ fn node_scope(scope: metrics.Scope, index: usize) metrics.Scope {
     return scope.child("peer").with_attribute("index", index).child("network");
 }
 
-/// Starts `keys.len` networks: node 0 bootstraps the rest, and all track every key at index 0.
+/// Starts `keys.len` networks on ports from `base`: node 0 bootstraps the rest, and all track
+/// every key at index 0.
 fn start_nodes(
     io: Io,
-    transport: *Transport,
+    transport: anytype,
     scope: metrics.Scope,
+    base: u16,
     max_message_size: u32,
     keys: []const PublicKey,
-    nodes: []Node,
+    nodes: []TransportNode(@TypeOf(transport)),
 ) !void {
     assert(keys.len == nodes.len);
-    const first: p2p.Ingress = .{ .socket = local_socket(base_port) };
+    const first: p2p.Ingress = .{ .socket = local_socket(base) };
     const bootstrap = [_]Bootstrapper{.{ .peer = keys[0], .ingress = first }};
     const sorted = try gpa.dupe(PublicKey, keys);
     defer gpa.free(sorted);
@@ -114,7 +131,7 @@ fn start_nodes(
         const bootstrappers: []const Bootstrapper = if (index == 0) &.{} else &bootstrap;
         const config = test_config(
             PrivateKey.from_seed(index),
-            base_port + @as(u16, @intCast(index)),
+            base + @as(u16, @intCast(index)),
             bootstrappers,
             max_message_size,
         );
@@ -126,21 +143,22 @@ fn start_nodes(
 /// Creates a network tracking `sorted` at index 0 with channel 0 at `quota`, and runs it.
 fn start_node(
     io: Io,
-    transport: *Transport,
+    transport: anytype,
     scope: metrics.Scope,
     config: Net.Config,
     sorted: []const PublicKey,
     quota: rate_limit.Quota,
-) !Node {
-    const network = try Net.create(gpa, io, transport, scope, config);
+) !TransportNode(@TypeOf(transport)) {
+    const N = NetOf(@typeInfo(@TypeOf(transport)).pointer.child);
+    const network = try N.create(gpa, io, transport, scope, config);
     const tracked: p2p.TrackedPeers(PublicKey) = .init_primary(.init(sorted));
     try testing.expectEqual(p2p.Feedback.ok, network.oracle().track(0, tracked));
-    var node: Node = .{
+    var node: TransportNode(@TypeOf(transport)) = .{
         .network = network,
         .registered = try network.register(0, quota),
         .task = undefined,
     };
-    node.task = try io.concurrent(run_node, .{network});
+    node.task = try io.concurrent(RunNode(N).run, .{network});
     return node;
 }
 
@@ -148,7 +166,15 @@ fn run_node(network: *Net) anyerror!void {
     return network.run();
 }
 
-fn stop_nodes(io: Io, nodes: []Node) void {
+fn RunNode(comptime N: type) type {
+    return struct {
+        fn run(network: *N) anyerror!void {
+            return network.run();
+        }
+    };
+}
+
+fn stop_nodes(io: Io, nodes: anytype) void {
     for (nodes) |*node| {
         node.task.cancel(io) catch {};
         node.registered.sender.deinit();
@@ -171,7 +197,7 @@ fn now_ns(io: Io) u64 {
 
 /// Sends `node`'s identity per `mode` when due (commonware's sender task): after a complete
 /// send it waits 10 s, after a partial one 100 ms.
-fn send_identity(io: Io, node: *Node, keys: []const PublicKey, me: usize, mode: Mode) !void {
+fn send_identity(io: Io, node: anytype, keys: []const PublicKey, me: usize, mode: Mode) !void {
     const now = now_ns(io);
     if (now < node.send_at_ns) return;
     var recipients: [peers_max]PublicKey = undefined;
@@ -215,11 +241,24 @@ fn connectivity(
     n: usize,
     mode: Mode,
 ) !void {
+    return connectivity_at(io, transport, scope, base_port, max_message_size, n, mode);
+}
+
+/// `connectivity` on any transport, with nodes listening on ports from `base`.
+fn connectivity_at(
+    io: Io,
+    transport: anytype,
+    scope: metrics.Scope,
+    base: u16,
+    max_message_size: u32,
+    n: usize,
+    mode: Mode,
+) !void {
     assert(n >= 2 and n <= peers_max);
     var keys: [peers_max]PublicKey = undefined;
     for (keys[0..n], 0..) |*key, index| key.* = PrivateKey.from_seed(index).public_key();
-    var nodes: [peers_max]Node = undefined;
-    try start_nodes(io, transport, scope, max_message_size, keys[0..n], nodes[0..n]);
+    var nodes: [peers_max]TransportNode(@TypeOf(transport)) = undefined;
+    try start_nodes(io, transport, scope, base, max_message_size, keys[0..n], nodes[0..n]);
     defer stop_nodes(io, nodes[0..n]);
     var heard: [peers_max][peers_max]bool = @splat(@splat(false));
     var rounds: u32 = 0;
@@ -318,6 +357,53 @@ test "peers discover each other through a bootstrapper and exchange messages" {
             max_message_size_default, @as(usize, 5), Mode.all,
         });
     }
+}
+
+const production = runtime.production;
+const production_peers = 10;
+
+/// A base port whose next `production_peers` ports bind now: lanes and CI jobs sharing a host
+/// run this test at once, so a fixed port (commonware's 3000) would collide.
+fn free_base_port(io: Io, transport: *production.network.Network) !u16 {
+    for (0..16) |_| {
+        var random: [2]u8 = undefined;
+        io.random(&random);
+        const base: u16 = 20_000 + std.mem.readInt(u16, &random, .little) % 40_000;
+        var bound: usize = 0;
+        var listeners: [production_peers]*production.network.Network.Listener = undefined;
+        defer for (listeners[0..bound]) |listener| listener.deinit();
+        while (bound < production_peers) : (bound += 1) {
+            const port = base + @as(u16, @intCast(bound));
+            const address = network_mod.to_address(local_socket(port));
+            listeners[bound] = transport.bind(address) catch break;
+        }
+        if (bound == production_peers) return base;
+    }
+    return error.TestNoFreePorts;
+}
+
+fn production_connectivity(
+    io: Io,
+    transport: *production.network.Network,
+    scope: metrics.Scope,
+) !void {
+    const base = try free_base_port(io, transport);
+    const n = production_peers;
+    try connectivity_at(io, transport, scope, base, max_message_size_default, n, Mode.one);
+}
+
+test "peers connect over real sockets on the production runtime" {
+    // commonware `test_tokio_connectivity`.
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var buffer: [128]u8 = undefined;
+    const directory = std.fmt.bufPrint(&buffer, ".zig-cache/tmp/{s}/runner", .{tmp.sub_path}) catch
+        unreachable; // The buffer fits the fixed-length temporary path.
+    var runner: production.Runner = undefined;
+    try runner.init(gpa, .{ .storage_directory = directory });
+    defer runner.deinit();
+    const args = .{ runner.io(), runner.network(), runner.metrics() };
+    try runner.start(production_connectivity, args);
 }
 
 /// commonware `run_deterministic_test`: two runs of one seed end in the same state.
@@ -739,7 +825,7 @@ fn graceful_shutdown(io: Io, transport: *Transport, scope: metrics.Scope) !void 
     var keys: [n]PublicKey = undefined;
     for (&keys, 0..) |*key, index| key.* = PrivateKey.from_seed(index).public_key();
     var nodes: [n]Node = undefined;
-    try start_nodes(io, transport, scope, max_message_size_default, &keys, &nodes);
+    try start_nodes(io, transport, scope, base_port, max_message_size_default, &keys, &nodes);
     wait_connected(io, &keys, &nodes) catch |err| {
         stop_nodes(io, &nodes);
         return err;
@@ -1447,4 +1533,270 @@ test "peers connect through names that also resolve to dead addresses" {
     // commonware `test_dns_mixed_ips_connectivity` (seeds 0..25; fewer in Debug).
     const seeds: u64 = if (peers_full) 25 else 3;
     for (0..seeds) |seed| _ = try run_with_dns(seed, dns_mixed_ips, .{});
+}
+
+/// Runs one network on port 30001 under `config`, dials it `attempts` times from loopback,
+/// and returns the encoded metrics (caller-freed). commonware's listener `check_rate_limits`.
+fn dial_listener(
+    io: Io,
+    transport: *Transport,
+    scope: metrics.Scope,
+    config: Net.Config,
+    attempts: usize,
+) ![]u8 {
+    const network = try Net.create(gpa, io, transport, scope, config);
+    defer network.destroy();
+    var task = try io.concurrent(run_node, .{network});
+    defer task.cancel(io) catch {};
+    const address = network_mod.to_address(local_socket(30_001));
+    for (0..attempts) |_| {
+        var connection = while (true) {
+            break transport.dial(address) catch |err| switch (err) {
+                error.ConnectionFailed => {
+                    try io.sleep(.fromMilliseconds(1), .awake);
+                    continue;
+                },
+                else => return err,
+            };
+        };
+        // Give the listener time to accept (and possibly drop) the connection.
+        try io.sleep(.fromMilliseconds(10), .awake);
+        connection.deinit();
+    }
+    return scope.encode(gpa);
+}
+
+fn listener_config(per_ip: rate_limit.Quota, per_subnet: rate_limit.Quota) Net.Config {
+    var config = test_config(PrivateKey.from_seed(1), 30_001, &.{}, 1024);
+    config.allowed_handshake_rate_per_ip = per_ip;
+    config.allowed_handshake_rate_per_subnet = per_subnet;
+    return config;
+}
+
+fn expect_metric(text: []const u8, needle: []const u8) !void {
+    if (std.mem.indexOf(u8, text, needle) == null) {
+        std.debug.print("missing \"{s}\" in:\n{s}\n", .{ needle, text });
+        return error.TestMetricMissing;
+    }
+}
+
+fn check_rate_limits(
+    io: Io,
+    transport: *Transport,
+    scope: metrics.Scope,
+    per_ip: u32,
+    per_subnet: u32,
+    ip_limited: []const u8,
+    subnet_limited: []const u8,
+) !void {
+    const config = listener_config(.per_hour(per_ip), .per_hour(per_subnet));
+    // One admitted handshake, then three attempts the limits drop at once.
+    const text = try dial_listener(io, transport, scope, config, 4);
+    defer gpa.free(text);
+    try expect_metric(text, ip_limited);
+    try expect_metric(text, subnet_limited);
+}
+
+test "the listener rate limits handshakes per ip, per subnet, and both" {
+    const ip = "handshake_ip_rate_limited_total ";
+    const subnet = "handshake_subnet_rate_limited_total ";
+    _ = try run_deterministic(0, check_rate_limits, .{ 1, 100, ip ++ "3", subnet ++ "0" });
+    _ = try run_deterministic(0, check_rate_limits, .{ 100, 1, ip ++ "0", subnet ++ "3" });
+    _ = try run_deterministic(0, check_rate_limits, .{ 1, 1, ip ++ "3", subnet ++ "3" });
+}
+
+fn blocks_private(io: Io, transport: *Transport, scope: metrics.Scope, allow: bool) !void {
+    var config = listener_config(.per_hour(100), .per_hour(100));
+    config.allow_private_ips = allow;
+    const text = try dial_listener(io, transport, scope, config, 1);
+    defer gpa.free(text);
+    const expected = if (allow) "handshakes_blocked_total 0" else "handshakes_blocked_total 1";
+    try expect_metric(text, expected);
+}
+
+test "the listener drops private addresses unless allowed" {
+    _ = try run_deterministic(0, blocks_private, .{false});
+    _ = try run_deterministic(0, blocks_private, .{true});
+}
+
+fn epoch_at_ms(ms: u64) utils.SystemTime {
+    return utils.SystemTime.UNIX_EPOCH.saturating_add(.from_millis(ms));
+}
+
+fn deadline_ms(config: *const Net.Config, now: u64, empty: bool, next_query_ms: ?u64) u64 {
+    const next = if (next_query_ms) |ms| epoch_at_ms(ms) else null;
+    return Net.next_deadline(config, epoch_at_ms(now), empty, next).epoch_millis();
+}
+
+test "the dialer waits dial_frequency, or the tracker's hint clamped to the cooldown" {
+    // commonware's dialer cadence tests: dial_frequency 200 ms, cooldown 250 ms.
+    var config = test_config(PrivateKey.from_seed(0), 3000, &.{}, 1024);
+    // Queued peers drain one per dial_frequency, whatever the hint.
+    try testing.expectEqual(@as(u64, 1200), deadline_ms(&config, 1000, false, 1010));
+    // A hint before dial_frequency waits for dial_frequency.
+    try testing.expectEqual(@as(u64, 1200), deadline_ms(&config, 1000, true, 1050));
+    // A hint within the window is followed; without one the cooldown bounds the wait.
+    try testing.expectEqual(@as(u64, 1230), deadline_ms(&config, 1000, true, 1230));
+    try testing.expectEqual(@as(u64, 1250), deadline_ms(&config, 1000, true, 5000));
+    try testing.expectEqual(@as(u64, 1250), deadline_ms(&config, 1000, true, null));
+    // A cooldown shorter than dial_frequency still waits dial_frequency.
+    config.peer_connection_cooldown = .from_millis(50);
+    try testing.expectEqual(@as(u64, 1200), deadline_ms(&config, 1000, true, null));
+    // An unbounded cooldown saturates, and the hint drives the refresh.
+    config.peer_connection_cooldown = utils.Duration.max;
+    try testing.expectEqual(@as(u64, 4000), deadline_ms(&config, 1000, true, 4000));
+    const saturated = Net.next_deadline(&config, epoch_at_ms(1000), true, null);
+    try testing.expect(saturated.order(epoch_at_ms(std.math.maxInt(u32))) == .gt);
+}
+
+/// Three bootstrappers that never answer: the dialer dials one per tick.
+fn dial_cadence(io: Io, transport: *Transport, scope: metrics.Scope) !void {
+    var bootstrappers: [3]Bootstrapper = undefined;
+    for (&bootstrappers, 0..) |*bootstrapper, index| {
+        const port = 4000 + @as(u16, @intCast(index));
+        bootstrapper.* = .{
+            .peer = PrivateKey.from_seed(10 + index).public_key(),
+            .ingress = .{ .socket = local_socket(port) },
+        };
+    }
+    var config = test_config(PrivateKey.from_seed(0), 3000, &bootstrappers, 1024);
+    config.peer_connection_cooldown = .from_secs(10);
+    const network = try Net.create(gpa, io, transport, scope, config);
+    defer network.destroy();
+    var task = try io.concurrent(run_node, .{network});
+    defer task.cancel(io) catch {};
+    // Ticks at 0, 200, and 400 ms dial each bootstrapper once; the long cooldown keeps them
+    // from being dialed again.
+    try io.sleep(.fromMilliseconds(100), .awake);
+    try testing.expectEqual(@as(u64, 1), dial_attempts(network, &bootstrappers));
+    try io.sleep(.fromMilliseconds(500), .awake);
+    try testing.expectEqual(@as(u64, 3), dial_attempts(network, &bootstrappers));
+    for (bootstrappers) |bootstrapper| {
+        const counter = network.counters.attempts.metric().get(.{ .peer = bootstrapper.peer });
+        try testing.expectEqual(@as(u64, 1), counter.?.get());
+    }
+    try io.sleep(.fromMilliseconds(600), .awake);
+    try testing.expectEqual(@as(u64, 3), dial_attempts(network, &bootstrappers));
+}
+
+fn dial_attempts(network: *Net, bootstrappers: []const Bootstrapper) u64 {
+    var total: u64 = 0;
+    for (bootstrappers) |bootstrapper| {
+        const family = network.counters.attempts.metric();
+        if (family.get(.{ .peer = bootstrapper.peer })) |counter| total += counter.get();
+    }
+    return total;
+}
+
+test "the dialer drains its queue one peer per dial_frequency" {
+    _ = try run_deterministic(0, dial_cadence, .{});
+}
+
+/// A bootstrapper whose listener never answers: the handshake timeout ends the dial and
+/// releases its reservation (commonware `test_dial_timeout_releases_reservation`, whose
+/// separate `dial_timeout` race is the handshake timeout here).
+fn stalled_dial(io: Io, transport: *Transport, scope: metrics.Scope) !void {
+    const silent = try transport.bind(network_mod.to_address(local_socket(4100)));
+    defer silent.deinit();
+    const bootstrappers = [_]Bootstrapper{.{
+        .peer = PrivateKey.from_seed(10).public_key(),
+        .ingress = .{ .socket = local_socket(4100) },
+    }};
+    var config = test_config(PrivateKey.from_seed(0), 3000, &bootstrappers, 1024);
+    config.handshake_timeout = .from_secs(1);
+    config.peer_connection_cooldown = .from_secs(10);
+    const network = try Net.create(gpa, io, transport, scope, config);
+    defer network.destroy();
+    var task = try io.concurrent(run_node, .{network});
+    defer task.cancel(io) catch {};
+    const reserved = network.tracker.directory.metrics.reserved.metric();
+    try io.sleep(.fromMilliseconds(500), .awake);
+    try testing.expectEqual(@as(i64, 1), reserved.get());
+    try io.sleep(.fromMilliseconds(1_000), .awake);
+    try testing.expectEqual(@as(i64, 0), reserved.get());
+}
+
+test "a dial that never completes its handshake releases its reservation" {
+    _ = try run_deterministic(0, stalled_dial, .{});
+}
+
+const Rejection = enum { tracker, router };
+
+/// Admits every peer: the remote end of a spawner test authenticates anyone.
+const AdmitAll = struct {
+    pub fn admit(_: AdmitAll, _: PublicKey) Io.Cancelable!bool {
+        return true;
+    }
+};
+
+/// Accepts one connection as `signer` and reports whether any frame arrived before the
+/// connection closed.
+fn greeting_heard(
+    io: Io,
+    listener: *Transport.Listener,
+    signer: PrivateKey,
+    namespace: []const u8,
+    max_frame_size: u32,
+) anyerror!bool {
+    const accepted = try listener.accept();
+    const timeout: Io.Duration = .fromSeconds(5);
+    const remote = stream.utils.Timeout(Upgrader).init(upgrader(signer), timeout);
+    var upgraded = try remote.listen(
+        gpa,
+        io,
+        namespace,
+        max_frame_size,
+        AdmitAll{},
+        accepted.stream,
+        accepted.sink,
+    );
+    defer upgraded.deinit(gpa);
+    _ = upgraded.connection.receiver.recv() catch return false;
+    return true;
+}
+
+/// Runs `serve` for a reserved peer that the tracker or router then rejects (commonware's
+/// spawner `tracker_rejection_sends_no_greeting` and `router_rejection_sends_no_greeting`).
+fn rejected_serve(io: Io, transport: *Transport, scope: metrics.Scope, rejection: Rejection) !void {
+    const remote_signer = PrivateKey.from_seed(1);
+    const peer = remote_signer.public_key();
+    const bootstrappers = [_]Bootstrapper{.{
+        .peer = peer,
+        .ingress = .{ .socket = local_socket(4200) },
+    }};
+    const config = test_config(PrivateKey.from_seed(2), 3000, &bootstrappers, 1024);
+    const network = try Net.create(gpa, io, transport, scope, config);
+    defer network.destroy();
+    const address = network_mod.to_address(local_socket(4200));
+    const listener = try transport.bind(address);
+    defer listener.deinit();
+    const namespace = network.stream_namespace;
+    const max_frame_size = network.max_frame_size;
+    const args = .{ io, listener, remote_signer, namespace, max_frame_size };
+    var remote = try io.concurrent(greeting_heard, args);
+    defer _ = remote.cancel(io) catch {};
+    const dialed = try transport.dial(address);
+    var upgraded = try network.upgrader.dial(
+        gpa,
+        io,
+        namespace,
+        max_frame_size,
+        peer,
+        dialed.stream,
+        dialed.sink,
+    );
+    const metadata = network.tracker.listen(peer).?;
+    switch (rejection) {
+        .tracker => try testing.expectEqual(p2p.Feedback.ok, network.tracker.block(peer)),
+        .router => network.router.close(),
+    }
+    try network.serve(peer, &upgraded, metadata);
+    try testing.expect(!try remote.await(io));
+    const reserved = network.tracker.directory.metrics.reserved.metric();
+    try testing.expectEqual(@as(i64, 0), reserved.get());
+}
+
+test "serve sends no greeting when the tracker or router rejects the peer" {
+    _ = try run_deterministic(0, rejected_serve, .{Rejection.tracker});
+    _ = try run_deterministic(0, rejected_serve, .{Rejection.router});
 }

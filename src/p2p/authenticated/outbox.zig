@@ -237,6 +237,17 @@ test "control frames go ahead of data and drop when full" {
     try testing.expect(!outbox.send_control(control));
 }
 
+test "a kill lands when the control queue is full" {
+    var outbox = Outbox.init(testing.allocator, Io.failing, 1);
+    defer outbox.deinit();
+    const control = try Frame.adopt(testing.allocator, try testing.allocator.dupe(u8, "peers"));
+    defer control.release();
+    try testing.expect(outbox.send_control(control));
+    try testing.expect(!outbox.send_control(control));
+    outbox.kill();
+    try testing.expect(outbox.try_next().? == .killed);
+}
+
 test "frame bytes encode a data message" {
     const codec = @import("codec");
     const frame = try Frame.create(testing.allocator, 12345, &.{ "hello ", "world", "!" });

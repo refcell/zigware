@@ -233,6 +233,29 @@ test "timeout preserves results and releases connections" {
     }
 }
 
+/// An attempt awaited after its deadline has already timed out: the deadline runs from the
+/// call, not from the await (commonware `handshake_starts_timeout_when_called`).
+fn starts_timeout_when_called(io: Io, dialer: bool) !void {
+    var received: std.ArrayList(Parameters) = .empty;
+    defer received.deinit(gpa);
+    const opaque_upgrader: OpaqueUpgrader = .{ .outcome = .pending, .received = &received };
+    const upgrader = Timeout(OpaqueUpgrader).init(opaque_upgrader, .fromMilliseconds(50));
+    var peer: Peer = undefined;
+    var future = try io.concurrent(attempt, .{ io, upgrader, dialer, "timeout", 1, &peer });
+    try io.sleep(.fromMilliseconds(100), .awake);
+    const start = Io.Clock.awake.now(io);
+    try testing.expectError(error.Timeout, future.await(io));
+    const waited_ns = Io.Clock.awake.now(io).nanoseconds - start.nanoseconds;
+    try testing.expect(waited_ns < std.time.ns_per_ms);
+    try peer.expect_released();
+}
+
+test "timeout starts when the attempt is made" {
+    for ([_]bool{ false, true }) |dialer| {
+        try run_deterministic(starts_timeout_when_called, .{dialer});
+    }
+}
+
 /// Never admits; records that its pending admission was dropped (canceled).
 const PendingBouncer = struct {
     io: Io,

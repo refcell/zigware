@@ -285,37 +285,37 @@ Open:
 - [ ] `authenticated/data.rs` `test_decode_does_not_allocate`: decode a Data frame with a
   failing/counting allocator and assert message is a slice into the input buffer;
   src/p2p/authenticated/data.zig
-- [ ] `authenticated/discovery/mod.rs` `test_tokio_connectivity`: run connectivity (10 peers,
+- [x] `authenticated/discovery/mod.rs` `test_tokio_connectivity`: run connectivity (10 peers,
   Mode.one) on runtime.production instead of the deterministic runner; no p2p test uses the
   production runner. Goes in network_test.zig
-- [ ] `authenticated/discovery/actors/dialer.rs` `test_dial_timeout_releases_reservation`: a dial to
+- [x] `authenticated/discovery/actors/dialer.rs` `test_dial_timeout_releases_reservation`: a dial to
   a listener that never handshakes releases its reservation; zigware has no separate dial_timeout
   race (Decisions), so adapt to release after the handshake timeout. network_test.zig
-- [ ] `authenticated/discovery/actors/dialer.rs` `test_dialer_dials_one_peer_per_tick`: dial_loop
+- [x] `authenticated/discovery/actors/dialer.rs` `test_dialer_dials_one_peer_per_tick`: dial_loop
   dials at most one peer per dial_frequency tick (2-4 dials in 3 ticks with 10 dialable peers);
   network_test.zig or a test in network.zig (dial_loop/next_deadline are private)
-- [ ] `authenticated/discovery/actors/dialer.rs` `test_dialer_uses_tracker_next_query_deadline`:
+- [x] `authenticated/discovery/actors/dialer.rs` `test_dialer_uses_tracker_next_query_deadline`:
   next_deadline clamps a tracker next_query_at below dial_frequency up to dial_frequency (1 refresh
   in 350 ms at 500 ms frequency); test of next_deadline in network.zig
-- [ ] `authenticated/discovery/actors/dialer.rs` `test_dialer_drains_queue_at_dial_frequency`: a
+- [x] `authenticated/discovery/actors/dialer.rs` `test_dialer_drains_queue_at_dial_frequency`: a
   queued batch of 3 peers is dialed one per dial_frequency (3 dials in 250 ms at 100 ms) with
   next_query_at null; network.zig
-- [ ] `authenticated/discovery/actors/dialer.rs`
+- [x] `authenticated/discovery/actors/dialer.rs`
   `test_dialer_does_not_panic_when_dial_frequency_exceeds_peer_connection_cooldown`: next_deadline
   with cooldown < dial_frequency and empty queue refreshes every dial_frequency without panicking;
   network.zig
-- [ ] `authenticated/discovery/actors/dialer.rs`
+- [x] `authenticated/discovery/actors/dialer.rs`
   `test_dialer_does_not_panic_with_unbounded_peer_connection_cooldown`: next_deadline with
   peer_connection_cooldown = max saturates and follows next_query_at (4 refreshes in 350 ms);
   network.zig
-- [ ] `authenticated/discovery/actors/listener.rs` `rate_limits_ip`: repeated inbound connections
+- [x] `authenticated/discovery/actors/listener.rs` `rate_limits_ip`: repeated inbound connections
   from one IP with a 1/hour per-IP quota count handshake_ip_rate_limited_total 3 and subnet 0;
   network_test.zig (listen_loop/admit, counters exist untested)
-- [ ] `authenticated/discovery/actors/listener.rs` `rate_limits_subnet`: same with a 1/hour
+- [x] `authenticated/discovery/actors/listener.rs` `rate_limits_subnet`: same with a 1/hour
   per-subnet quota: handshake_subnet_rate_limited_total 3, ip 0; network_test.zig
-- [ ] `authenticated/discovery/actors/listener.rs` `rate_limits_both`: both quotas 1/hour: ip and
+- [x] `authenticated/discovery/actors/listener.rs` `rate_limits_both`: both quotas 1/hour: ip and
   subnet rate-limited totals both 3; network_test.zig
-- [ ] `authenticated/discovery/actors/listener.rs` `blocks_private_ips`: with
+- [x] `authenticated/discovery/actors/listener.rs` `blocks_private_ips`: with
   allow_private_ips=false an inbound localhost connection is rejected and counts
   handshakes_blocked_total 1; network_test.zig
 - [x] `authenticated/discovery/actors/peer/actor.rs`
@@ -336,13 +336,13 @@ Open:
 - [x] `authenticated/discovery/actors/peer/actor.rs` `test_oversized_data_returns_error`: data one
   byte over max_message_size makes Peer.run fail with a decode error; peer.zig ("a payload above the
   receiver's limit is never delivered" checks only non-delivery at network level)
-- [ ] `authenticated/discovery/actors/peer/ingress.rs` `kill_retained_on_overflow`: with the outbox
+- [x] `authenticated/discovery/actors/peer/ingress.rs` `kill_retained_on_overflow`: with the outbox
   control queue full (extra control frame dropped), kill still lands and try_next yields .killed;
   outbox.zig (existing tests cover drop-when-full and kill separately, never kill after overflow)
-- [ ] `authenticated/discovery/actors/spawner/actor.rs` `tracker_rejection_sends_no_greeting`: when
+- [x] `authenticated/discovery/actors/spawner/actor.rs` `tracker_rejection_sends_no_greeting`: when
   tracker.connect returns null, serve sends no greeting on the connection; network_test.zig (serve
   is private; drive via an untracked peer connecting)
-- [ ] `authenticated/discovery/actors/spawner/actor.rs` `router_rejection_sends_no_greeting`: when
+- [x] `authenticated/discovery/actors/spawner/actor.rs` `router_rejection_sends_no_greeting`: when
   router.ready fails (router shut down), serve sends no greeting; network_test.zig
 - [x] `authenticated/discovery/actors/tracker/actor.rs`
   `test_connect_unauthorized_peer_returns_none`: Tracker.connect returns null for an untracked peer
@@ -692,3 +692,12 @@ Not portable:
   (`max_message_size_exceeds_stream_limit`, `above_stream_boundary`, `message_too_large`)
   panic at the same sites with commonware's messages. The p2p lane's own backlog is done;
   `[-]` items belong to other lanes.
+- 2026-11-19: discovery audit batches. `test_tokio_connectivity` now runs (10 peers, Mode::One,
+  real TCP on `runtime.production`), replacing the 2026-11-18 skip; the connectivity helpers
+  take any transport. Its nodes listen from a random base port that `free_base_port` checks
+  binds first, not commonware's fixed 3000, because lanes and CI jobs sharing a host run the
+  suite at once. The spawner rejection tests call `Network.serve` (now `pub`) directly over a
+  real handshake: a block after reservation stands in for the tracker's dropped responder, a
+  closed router for its dropped channels. `kill_retained_on_overflow` checks that a kill
+  lands with the control queue full; a zigware kill drains the queue and comes first (where
+  commonware queues it last), so the test checks `.killed` rather than the order.

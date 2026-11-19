@@ -129,7 +129,7 @@ open, 3 not portable.
 | `utils/codec.rs` | 12 | 11 | 0 | 1 |
 
 Open:
-- [ ] `lib.rs` `handshake_starts_timeout_when_called`: The deadline starts at the dial/listen call,
+- [x] `lib.rs` `handshake_starts_timeout_when_called`: The deadline starts at the dial/listen call,
   not when awaited: start an attempt with a pending upgrader, sleep 100ms past the 50ms timeout
   before awaiting, expect error.Timeout and released channels, for dialer and listener. Goes in
   src/stream/utils/timeout_test.zig (Zig calls are eager, so this may only need to check that the
