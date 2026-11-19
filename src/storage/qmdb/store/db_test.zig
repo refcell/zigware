@@ -1121,6 +1121,78 @@ test "store collision reads resolve each key within its bucket" {
     for (cases) |case| try check_collision_reads(case);
 }
 
+/// Even keys share the translated prefix `a5 5a`, odd keys lead with `i` as a big-endian u16,
+/// and bytes 24.. hold `i` big-endian.
+fn cached_key(i: u64) Digest {
+    var bytes: [32]u8 = @splat(0);
+    if (i % 2 == 0) {
+        bytes[0..2].* = .{ 0xa5, 0x5a };
+    } else {
+        std.mem.writeInt(u16, bytes[0..2], @truncate(i), .big);
+    }
+    std.mem.writeInt(u64, bytes[24..32], i, .big);
+    return .{ .bytes = bytes };
+}
+
+fn expect_cached_reads(db: *Db, ids: []const u8) !void {
+    var keys: [8]Digest = undefined;
+    var out: [8]?Bytes = undefined;
+    for (ids, keys[0..ids.len]) |i, *k| k.* = cached_key(i);
+    try db.get_many(keys[0..ids.len], out[0..ids.len]);
+    defer for (out[0..ids.len]) |o| codec.free(?Bytes, gpa, o);
+    for (ids, out[0..ids.len]) |i, got| {
+        try testing.expectEqual(i >= 32, got == null);
+        const want: [64]u8 = @splat(i);
+        if (i < 32) try testing.expectEqualSlices(u8, &want, got.?);
+    }
+}
+
+// db.rs `test_store_get_many_cached_and_uncached`: half the keys share a translated key, the
+// values outgrow the page cache, and a reopened store (with a fresh page cache, as commonware's
+// `test_config`) serves reads both from the cache and from storage.
+test "store get_many reads cached and uncached positions" {
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    var values: [32][64]u8 = undefined;
+    var writes: [32]Write = undefined;
+    for (&writes, &values, 0..) |*w, *v, i| {
+        v.* = @splat(@intCast(i));
+        w.* = .{ .key = cached_key(i), .value = v };
+    }
+    {
+        var seeded = try h.open(null);
+        defer seeded.deinit();
+        _ = try apply(&seeded, &writes, null);
+        try seeded.sync();
+    }
+    var cache_ref: CacheRef = try .init(gpa, 77, 9);
+    defer cache_ref.deinit();
+    var db = try open_on(h.storage.interface(), &cache_ref, null);
+    defer db.deinit();
+    const ids = [_]u8{ 3, 40, 8, 3, 17, 8, 30, 1 };
+    const metrics = &db.log.metrics;
+    const hits_before = metrics.cache_hits.metric().get();
+    const reads_before = metrics.items_read.metric().get();
+    try expect_cached_reads(&db, &ids);
+    try expect_cached_reads(&db, &ids);
+    const hits = metrics.cache_hits.metric().get() - hits_before;
+    const reads = metrics.items_read.metric().get() - reads_before;
+    try testing.expect(hits > 0 and hits < reads);
+    // Reading one key leaves its pages in the cache, so reading it again never reaches the
+    // log's batched read. zigware reads key by key (never through `read_many`), so this also
+    // checks that the cache served every read.
+    try expect_cached_reads(&db, ids[0..1]);
+    const calls_before = metrics.read_many_calls.metric().get();
+    const hits_one = metrics.cache_hits.metric().get();
+    const reads_one = metrics.items_read.metric().get();
+    try expect_cached_reads(&db, ids[0..1]);
+    try testing.expectEqual(calls_before, metrics.read_many_calls.metric().get());
+    const reads_again = metrics.items_read.metric().get() - reads_one;
+    try testing.expect(reads_again > 0);
+    try testing.expectEqual(reads_again, metrics.cache_hits.metric().get() - hits_one);
+}
+
 // db.rs `test_store_get_many_moves_values`: commonware moves each decoded value to its last
 // matching slot and clones it for earlier duplicates. zigware's `get_many` returns an owned
 // value per slot, so each duplicate holds its own allocation.

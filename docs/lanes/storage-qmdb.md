@@ -209,6 +209,14 @@ which every database here is built on.
   Immutable and keyless `init_from_log` and store init return `UnexpectedData` when the log
   does not end with a commit (store used to panic there).
 - [ ] Upstream 102430409 (#5649): the store's strategy and any's shared batched read.
+- [ ] Upstream `qmdb::commit_floor_at`: immutable init reads its floor through it and
+  returns its errors instead of panicking.
+- [x] Upstream 102430409 (#5649): the store's strategy and any's shared batched read. The
+  commit moves any's batched `get_many` into a shared `read_many_map` and gives the store a
+  `strategy`; under the 2026-11-18 decision both `get_many`s stay loops over `get` and there
+  is no `strategy`, so neither change applies (results are identical). Ported its one new
+  test, `test_store_get_many_cached_and_uncached` (store/db_test.zig), with a fresh page cache
+  on reopen as in commonware's `test_config`; it also checks the repeat read is all cache hits.
 
 ## Public API (on main)
 - `storage.qmdb.value`: `Fixed(V)`, `Variable(V)` (encodings with `Value`, `fixed`), `check`,
@@ -437,3 +445,4 @@ which every database here is built on.
 - 2026-11-19: upstream a9ffc25f3: one qmdb operation tag table; hashes and vectors updated.
 - 2026-11-19: upstream 90960d81c: immutable database reads start at the inactivity floor.
 - 2026-11-19: upstream commit_floor_at: qmdb inits refuse a log not ending in a commit.
+- 2026-11-19: upstream 102430409: store get_many cached/uncached test (refactor moot by decision).
