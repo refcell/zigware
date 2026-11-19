@@ -73,19 +73,24 @@ fn Vec(comptime n: usize) type {
     return @Vector(n, u32);
 }
 
-inline fn rotr(comptime n: usize, x: Vec(n), comptime r: u5) Vec(n) {
-    return (x >> @splat(r)) | (x << @splat(@as(u5, @intCast(32 - @as(u6, r)))));
-}
-
-inline fn g(comptime n: usize, v: *[16]Vec(n), comptime i: [4]u8, x: Vec(n), y: Vec(n)) void {
-    v[i[0]] +%= v[i[1]] +% x;
-    v[i[3]] = rotr(n, v[i[3]] ^ v[i[0]], 16);
-    v[i[2]] +%= v[i[3]];
-    v[i[1]] = rotr(n, v[i[1]] ^ v[i[2]], 12);
-    v[i[0]] +%= v[i[1]] +% y;
-    v[i[3]] = rotr(n, v[i[3]] ^ v[i[0]], 8);
-    v[i[2]] +%= v[i[3]];
-    v[i[1]] = rotr(n, v[i[1]] ^ v[i[2]], 7);
+/// One round over `n` lanes, as std's `roundFnVec`: the four column G functions, then the
+/// four diagonal ones, interleaved step by step so their independent operations overlap.
+inline fn round(comptime n: usize, v: *[16]Vec(n), m: *const [16]Vec(n), comptime r: usize) void {
+    const s = msg_schedule[r];
+    const rotr = std.math.rotr;
+    const columns = .{ .{ 0, 4, 8, 12 }, .{ 1, 5, 9, 13 }, .{ 2, 6, 10, 14 }, .{ 3, 7, 11, 15 } };
+    const diagonals = .{ .{ 0, 5, 10, 15 }, .{ 1, 6, 11, 12 }, .{ 2, 7, 8, 13 }, .{ 3, 4, 9, 14 } };
+    inline for (.{ columns, diagonals }, 0..) |quads, half| {
+        inline for (.{ .{ 0, 16, 12 }, .{ 1, 8, 7 } }) |step| {
+            inline for (quads, 0..) |q, i| v[q[0]] +%= m[s[8 * half + 2 * i + step[0]]];
+            inline for (quads) |q| v[q[0]] +%= v[q[1]];
+            inline for (quads) |q| v[q[3]] ^= v[q[0]];
+            inline for (quads) |q| v[q[3]] = rotr(Vec(n), v[q[3]], step[1]);
+            inline for (quads) |q| v[q[2]] +%= v[q[3]];
+            inline for (quads) |q| v[q[1]] ^= v[q[2]];
+            inline for (quads) |q| v[q[1]] = rotr(Vec(n), v[q[1]], step[2]);
+        }
+    }
 }
 
 /// The block's input words of a compression, per lane.
@@ -99,7 +104,8 @@ fn Words(comptime n: usize) type {
 }
 
 /// BLAKE3's compression of `n` independent blocks, returning their chaining values.
-fn compress(comptime n: usize, cv: [8]Vec(n), m: [16]Vec(n), words: Words(n)) [8]Vec(n) {
+fn compress(comptime n: usize, cv: [8]Vec(n), m: *const [16]Vec(n), words: Words(n)) [8]Vec(n) {
+    @setEvalBranchQuota(20_000);
     var v: [16]Vec(n) = undefined;
     inline for (0..8) |i| v[i] = cv[i];
     inline for (0..4) |i| v[8 + i] = @splat(iv[i]);
@@ -107,16 +113,7 @@ fn compress(comptime n: usize, cv: [8]Vec(n), m: [16]Vec(n), words: Words(n)) [8
     v[13] = words.counter_high;
     v[14] = words.block_len;
     v[15] = words.flags;
-    inline for (msg_schedule) |s| {
-        g(n, &v, .{ 0, 4, 8, 12 }, m[s[0]], m[s[1]]);
-        g(n, &v, .{ 1, 5, 9, 13 }, m[s[2]], m[s[3]]);
-        g(n, &v, .{ 2, 6, 10, 14 }, m[s[4]], m[s[5]]);
-        g(n, &v, .{ 3, 7, 11, 15 }, m[s[6]], m[s[7]]);
-        g(n, &v, .{ 0, 5, 10, 15 }, m[s[8]], m[s[9]]);
-        g(n, &v, .{ 1, 6, 11, 12 }, m[s[10]], m[s[11]]);
-        g(n, &v, .{ 2, 7, 8, 13 }, m[s[12]], m[s[13]]);
-        g(n, &v, .{ 3, 4, 9, 14 }, m[s[14]], m[s[15]]);
-    }
+    inline for (0..msg_schedule.len) |r| round(n, &v, m, r);
     var out: [8]Vec(n) = undefined;
     inline for (0..8) |i| out[i] = v[i] ^ v[i + 8];
     return out;
@@ -149,17 +146,19 @@ fn chunk_cvs(comptime n: usize, chunks: *const [n][*]const u8, counter: u64, out
     }
     var cv = splat_cv(n, iv);
     for (0..blocks_per_chunk) |block| {
+        var rows: [n][16]u32 = undefined;
+        for (&rows, chunks) |*row, chunk| {
+            const bytes = chunk + block * block_len;
+            for (row, 0..) |*word, w| word.* = read_word(bytes[4 * w ..][0..4]);
+        }
         var m: [16]Vec(n) = undefined;
         for (&m, 0..) |*word, w| {
-            var column: [n]u32 = undefined;
-            const at = block * block_len + 4 * w;
-            for (&column, chunks) |*c, chunk| c.* = read_word(chunk[at..][0..4]);
-            word.* = column;
+            inline for (0..n) |lane| word[lane] = rows[lane][w];
         }
         var flags: u32 = 0;
         if (block == 0) flags |= flag_chunk_start;
         if (block == blocks_per_chunk - 1) flags |= flag_chunk_end;
-        cv = compress(n, cv, m, .{
+        cv = compress(n, cv, &m, .{
             .counter_low = low,
             .counter_high = high,
             .block_len = @splat(block_len),
@@ -179,7 +178,7 @@ fn parent_cvs(comptime n: usize, children: *const [2 * n]Cv, extra_flags: u32, o
         for (&column, 0..) |*c, lane| c.* = children[2 * lane + w / 8][w % 8];
         m[w] = column;
     }
-    const cv = compress(n, splat_cv(n, iv), m, .{
+    const cv = compress(n, splat_cv(n, iv), &m, .{
         .counter_low = @splat(0),
         .counter_high = @splat(0),
         .block_len = @splat(block_len),
@@ -239,35 +238,60 @@ const Cursor = struct {
     }
 };
 
-/// Chaining values of `out.len` whole chunks read from `cursor`, the first at chunk `counter`.
+/// The widest power-of-two compression width, at most `lanes`, that fits `count` items.
+fn width_for(count: usize) usize {
+    assert(count > 0);
+    const width = @min(lanes, std.math.floorPowerOfTwo(usize, count));
+    assert(width <= count);
+    return width;
+}
+
+/// Compression widths: `lanes`, then every smaller power of two down to one.
+const widths = blk: {
+    var list: [std.math.log2_int(usize, lanes) + 1]usize = undefined;
+    for (&list, 0..) |*width, index| width.* = lanes >> index;
+    break :blk list;
+};
+
+/// Chaining values of `out.len` whole chunks read from `cursor`, the first at chunk `counter`,
+/// compressed `lanes` at a time. A short last batch still compresses at full width, padded
+/// with copies of its last chunk whose outputs are dropped: one wide compression costs less
+/// than the narrow ones that would cover it.
 fn chunks_cvs(cursor: *Cursor, counter: u64, out: []Cv) void {
     var scratch: [lanes][chunk_len]u8 = undefined;
     var done: usize = 0;
-    while (out.len - done >= lanes) : (done += lanes) {
+    while (done < out.len) : (done += lanes) {
+        const count = @min(lanes, out.len - done);
         var chunks: [lanes][*]const u8 = undefined;
-        for (&chunks, &scratch) |*chunk, *buffer| chunk.* = cursor.take(chunk_len, buffer).ptr;
-        chunk_cvs(lanes, &chunks, counter + done, out[done..][0..lanes]);
+        for (chunks[0..count], scratch[0..count]) |*chunk, *buffer| {
+            chunk.* = cursor.take(chunk_len, buffer).ptr;
+        }
+        for (chunks[count..]) |*chunk| chunk.* = chunks[count - 1];
+        var cvs: [lanes]Cv = undefined;
+        chunk_cvs(lanes, &chunks, counter + done, &cvs);
+        @memcpy(out[done..][0..count], cvs[0..count]);
     }
-    while (done < out.len) : (done += 1) {
-        const chunk = cursor.take(chunk_len, &scratch[0]);
-        chunk_cvs(1, &.{chunk.ptr}, counter + done, out[done..][0..1]);
-    }
+    assert(done >= out.len);
 }
 
-/// Merges `cvs`, a power-of-two count of sibling chaining values, into their subtree's.
+/// Merges `cvs`, a power-of-two count of sibling chaining values, into their subtree's, each
+/// level at the widest width that fits its pairs.
 fn merge_subtree(cvs: []Cv) Cv {
     assert(std.math.isPowerOfTwo(cvs.len));
     var count = cvs.len;
     while (count > 1) : (count /= 2) {
         const pairs = count / 2;
         var done: usize = 0;
-        while (pairs - done >= lanes) : (done += lanes) {
-            var merged: [lanes]Cv = undefined;
-            parent_cvs(lanes, cvs[2 * done ..][0 .. 2 * lanes], 0, &merged);
-            @memcpy(cvs[done..][0..lanes], &merged);
-        }
-        while (done < pairs) : (done += 1) {
-            cvs[done] = parent_cv(cvs[2 * done], cvs[2 * done + 1], 0);
+        while (done < pairs) {
+            const width = width_for(pairs - done);
+            inline for (widths) |n| {
+                if (n == width) {
+                    var merged: [n]Cv = undefined;
+                    parent_cvs(n, cvs[2 * done ..][0 .. 2 * n], 0, &merged);
+                    @memcpy(cvs[done..][0..n], &merged);
+                }
+            }
+            done += width;
         }
     }
     return cvs[0];
@@ -311,14 +335,9 @@ const Stack = struct {
     }
 };
 
-/// The root digest of a message whose earlier chunks are on `stack` and whose last chunk,
-/// `chunk` (1 to `chunk_len` bytes), is chunk number `counter`.
-fn finish(stack_unmerged: Stack, chunk: []const u8, counter: u64) [32]u8 {
-    assert(counter > 0);
+/// The chaining value of the last chunk, `chunk` (1 to `chunk_len` bytes), chunk `counter`.
+fn last_chunk_cv(chunk: []const u8, counter: u64) Cv {
     assert(chunk.len > 0 and chunk.len <= chunk_len);
-    var stack = stack_unmerged;
-    stack.merge(counter);
-    assert(stack.len > 0);
     const blocks = (chunk.len + block_len - 1) / block_len;
     var cv: [8]Vec(1) = splat_cv(1, iv);
     var last: [block_len]u8 = @splat(0);
@@ -331,16 +350,26 @@ fn finish(stack_unmerged: Stack, chunk: []const u8, counter: u64) [32]u8 {
         var flags: u32 = 0;
         if (block == 0) flags |= flag_chunk_start;
         if (block == blocks - 1) flags |= flag_chunk_end;
-        cv = compress(1, cv, m, .{
+        cv = compress(1, cv, &m, .{
             .counter_low = @splat(@truncate(counter)),
             .counter_high = @splat(@truncate(counter >> 32)),
             .block_len = @splat(@intCast(bytes.len)),
             .flags = @splat(flags),
         });
     }
-    var right: [1]Cv = undefined;
-    lane_cvs(1, cv, &right);
-    var output = right[0];
+    var out: [1]Cv = undefined;
+    lane_cvs(1, cv, &out);
+    return out[0];
+}
+
+/// The root digest of a message whose earlier chunks are on `stack` and whose last chunk,
+/// chunk number `counter`, has chaining value `last`.
+fn finish(stack_unmerged: Stack, last: Cv, counter: u64) [32]u8 {
+    assert(counter > 0);
+    var stack = stack_unmerged;
+    stack.merge(counter);
+    assert(stack.len > 0);
+    var output = last;
     var index = stack.len;
     while (index > 1) {
         index -= 1;
@@ -389,17 +418,31 @@ pub fn hash_subtrees(parts: []const []const u8, len: usize, strategy: anytype) [
         for (cvs[0..count], done..) |cv, index| stack.push(cv, index * subtree_chunks);
         done += count;
     }
-    // The rest: its whole chunks, then the last chunk.
+    // The rest: its whole chunks, then the last chunk. A whole last chunk compresses in the
+    // same batch as the others; only its merge into the root differs.
     const rest_offset = whole * subtree_len;
-    const rest_chunks = (len - rest_offset - 1) / chunk_len;
-    assert(rest_chunks < subtree_chunks_max);
+    const rest_len = len - rest_offset;
+    const last_whole = rest_len % chunk_len == 0;
+    const rest_chunks = (rest_len - 1) / chunk_len;
+    const batched = rest_chunks + @intFromBool(last_whole);
+    assert(batched <= subtree_chunks_max);
     var cursor = Cursor.at(parts, rest_offset);
     var cvs: [subtree_chunks_max]Cv = undefined;
     const first = rest_offset / chunk_len;
-    chunks_cvs(&cursor, first, cvs[0..rest_chunks]);
-    for (cvs[0..rest_chunks], first..) |cv, counter| stack.push(cv, counter);
+    chunks_cvs(&cursor, first, cvs[0..batched]);
+    // Merge the whole chunks as aligned runs of decreasing powers of two, so the stack takes
+    // one entry per run and every merge inside a run runs at full width.
+    var merged: usize = 0;
+    while (merged < rest_chunks) {
+        const run = std.math.floorPowerOfTwo(usize, rest_chunks - merged);
+        assert((first + merged) % run == 0);
+        stack.push(merge_subtree(cvs[merged..][0..run]), first + merged);
+        merged += run;
+    }
+    assert(merged == rest_chunks);
+    const counter = first + rest_chunks;
+    if (last_whole) return finish(stack, cvs[rest_chunks], counter);
     var scratch: [chunk_len]u8 = undefined;
-    const last_len = len - rest_offset - rest_chunks * chunk_len;
-    const last = cursor.take(last_len, &scratch);
-    return finish(stack, last, first + rest_chunks);
+    const last = cursor.take(rest_len - rest_chunks * chunk_len, &scratch);
+    return finish(stack, last_chunk_cv(last, counter), counter);
 }
