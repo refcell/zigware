@@ -146,6 +146,31 @@ test "peek sees the buffered remainder (test_peek_with_buffered_data)" {
     defer accepted.deinit();
 }
 
+fn accept_and_close(listener: *Network.Listener) !void {
+    var accepted = try listener.accept();
+    accepted.deinit();
+}
+
+test "a port rebinds while its closed connection is in TIME_WAIT (SO_REUSEADDR)" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    const io = testing.io;
+    // Without zero linger, the side that closes first keeps the port in TIME_WAIT.
+    var tcp: Network = .init(testing.allocator, io, .{ .zero_linger = false });
+    defer tcp.deinit();
+    const listener = try tcp.bind(any_port);
+    const address = listener.local_addr();
+    var acceptor = try io.concurrent(accept_and_close, .{listener});
+    var connection = try tcp.dial(address);
+    try acceptor.await(io);
+    var byte: [1]u8 = undefined;
+    try testing.expectError(error.RecvFailed, connection.stream.recv(&byte));
+    connection.deinit();
+    listener.deinit();
+    const rebound = try tcp.bind(address);
+    defer rebound.deinit();
+    try testing.expectEqual(address.getPort(), rebound.local_addr().getPort());
+}
+
 test "a dial to a full accept queue times out (test_connect_timeout)" {
     if (builtin.os.tag != .linux) return error.SkipZigTest;
     const io = testing.io;

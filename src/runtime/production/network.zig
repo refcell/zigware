@@ -395,11 +395,7 @@ pub const Network = struct {
     pub fn bind(network_: *const Network, address: Address) Error!*Listener {
         const listener = try network_.gpa.create(Listener);
         errdefer network_.gpa.destroy(listener);
-        const options: net.IpAddress.ListenOptions = .{ .kernel_backlog = listen_backlog };
-        const server = address.listen(network_.io, options) catch |err| return switch (err) {
-            error.Canceled => error.Canceled,
-            else => error.BindFailed,
-        };
+        const server = try listen(address);
         listener.* = .{ .network = network_, .server = server };
         assert(listener.local_addr().getPort() != 0);
         return listener;
@@ -445,6 +441,34 @@ pub fn connect(io: Io, address: Address, duration: Io.Duration) Error!net.Stream
     if (named != .SUCCESS) return error.ConnectionFailed;
     assert(fd >= 0);
     return .{ .socket = .{ .handle = fd, .address = address_from(&local) } };
+}
+
+/// Listens on `address` with SO_REUSEADDR, as tokio's `TcpListener::bind` does on Unix, so a
+/// restarted node rebinds its port while the previous run's connections sit in TIME_WAIT.
+/// `std.Io.net.IpAddress.listen`'s `reuse_address` also sets SO_REUSEPORT, which would let a
+/// second listener share a port that is in use.
+fn listen(address: Address) Error!net.Server {
+    var storage: SocketAddress = undefined;
+    var length = socket_address(address, &storage);
+    const fd = socket_open(storage.any.family) catch return error.BindFailed;
+    errdefer _ = posix.system.close(fd);
+    set_nonblocking(fd, false) catch return error.BindFailed; // `Threaded` accepts blocking.
+    const reuse = std.mem.asBytes(&@as(c_int, 1));
+    posix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.REUSEADDR, reuse) catch
+        return error.BindFailed;
+    if (posix.errno(posix.system.bind(fd, &storage.any, length)) != .SUCCESS) {
+        return error.BindFailed;
+    }
+    if (posix.errno(posix.system.listen(fd, listen_backlog)) != .SUCCESS) {
+        return error.BindFailed;
+    }
+    length = @sizeOf(SocketAddress);
+    if (posix.errno(posix.system.getsockname(fd, &storage.any, &length)) != .SUCCESS) {
+        return error.BindFailed;
+    }
+    const local = address_from(&storage);
+    assert(local.getPort() != 0);
+    return .{ .socket = .{ .handle = fd, .address = local }, .options = {} };
 }
 
 const SocketAddress = extern union {
