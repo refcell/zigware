@@ -127,8 +127,18 @@ pub fn ChaChaRng(comptime rounds: u8) type {
 
         /// Fills `dest` with little-endian words; a partially used final word is discarded.
         pub fn fill_bytes(rng: *Self, dest: []u8) void {
+            const buffer_bytes = buffer_words * 4;
             var written: usize = 0;
             while (written < dest.len) {
+                const whole = (dest.len - written) / buffer_bytes;
+                if (rng.index == buffer_words and whole > 0) {
+                    // Whole buffers go straight into `dest`: the keystream the buffer would hold.
+                    const out = dest[written..][0 .. whole * buffer_bytes];
+                    ChaCha.stream(out, rng.block_counter, rng.key, @splat(0));
+                    rng.block_counter +%= whole * buffer_blocks;
+                    written += out.len;
+                    continue;
+                }
                 const word = rng.next_u32();
                 var bytes: [4]u8 = undefined;
                 std.mem.writeInt(u32, &bytes, word, .little);
@@ -436,6 +446,30 @@ test "rng: TestRng matches rand 0.10 StdRng::seed_from_u64" {
         230, 90,  133, 3,   32, 105, 221, 191, 196, 13, 85,  173, 10,  227, 215, 50,
     };
     try testing.expectEqualSlices(u8, &tail, fill[250..]);
+}
+
+test "rng: fill_bytes matches word-by-word fills at every offset" {
+    // Bulk fills write whole buffers straight from the keystream; they must equal filling
+    // from `next_u32`, from any position in the buffer.
+    for ([_]usize{ 0, 1, 63, 64, 100 }) |skip| {
+        for ([_]usize{ 1, 255, 256, 257, 511, 512, 1029 }) |len| {
+            var bulk = TestRng.init(9);
+            var reference = TestRng.init(9);
+            for (0..skip) |_| {
+                _ = bulk.next_u32();
+                _ = reference.next_u32();
+            }
+            var got: [1029]u8 = undefined;
+            bulk.fill_bytes(got[0..len]);
+            var expected: [1032]u8 = undefined;
+            var at: usize = 0;
+            while (at < len) : (at += 4) {
+                std.mem.writeInt(u32, expected[at..][0..4], reference.next_u32(), .little);
+            }
+            try testing.expectEqualSlices(u8, expected[0..len], got[0..len]);
+            try testing.expectEqual(reference.next_u32(), bulk.next_u32());
+        }
+    }
 }
 
 test "rng: sampling helpers match rand 0.10" {
