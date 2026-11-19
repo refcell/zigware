@@ -179,6 +179,65 @@ directory under `BENCH_DIR` (default `$TMPDIR` or `/tmp`). commonware gets it th
   copy through the paged tip. The profile and a patch are with the storage-journal and
   runtime lanes.
 
+## bls12381: the remaining benches (2026-11-19, bls-math lane)
+
+The bls12381 benches the table above left out, at `bench-compare.sh`'s settings (1 s warm-up,
+3 s measurement, 50 samples), one `conc=1` case per bench. Each side's number is its best
+median of two alternating rounds, at a 1-minute load average of 81 (round 1) and 41
+(round 2). commonware's best mostly came from the quieter round, so rows near 1.3× are inside
+the noise: round 1 alone had `signature_generation` at 0.76×, `aggregate_verify_same_signer`
+at 1.07×, `batch_verify_same_signer` at 0.92×, and `combine_signatures` at 1.09×. The golden
+DKG rows ran once with 10 samples (commonware's own sample size for them) at a load of 59.
+The two assemble rows are a same-load re-run after the fix below (load 67 to 73).
+
+| bench | parameters | commonware | zigware | zigware / commonware |
+|---|---|---|---|---|
+| `bls12381::signature_generation` | `ns_len=9 msg_len=32` | 257 µs | 385 µs | 1.50× (noise, see above) |
+| `bls12381::hash_to_curve` | `n=100 conc=1` | 4.33 ms | 7.37 ms | 1.70× (open) |
+| `bls12381::tle_encrypt` | | 1.29 ms | 1.04 ms | 0.80× |
+| `bls12381::tle_decrypt` | | 704 µs | 901 µs | 1.28× |
+| `bls12381::combine_public_keys` | `pks=1000` | 1.27 ms | 1.22 ms | 0.96× |
+| `bls12381::combine_signatures` | `sigs=1000` | 446 µs | 590 µs | 1.32× (noise) |
+| `bls12381::batch_to_affine` | `group=g1 n=100` | 31.9 µs | 18.9 µs | 0.59× |
+| `bls12381::batch_to_affine` | `group=g2 n=100` | 85.8 µs | 62.7 µs | 0.73× |
+| `bls12381::attestation_eq` | `bytes=equal` | 25.4 ns | 119 ns | 4.68× (harness) |
+| `bls12381::msm` | `group=g1 n=1000 conc=1` | 14.0 ms | 17.2 ms | 1.22× |
+| `bls12381::msm` | `group=g2 n=1000 conc=1` | 40.1 ms | 49.6 ms | 1.23× |
+| `bls12381::evaluate_point` | `n=50 t=34 conc=1` | 899 µs | 954 µs | 1.06× |
+| `bls12381::batch_verify_same_signer` | `conc=1 msgs=100` | 6.25 ms | 8.24 ms | 1.32× (noise) |
+| `bls12381::aggregate_verify_same_signer` | `conc=1 msgs=100` | 4.20 ms | 6.76 ms | 1.61× (noise) |
+| `bls12381::scheme_batch_verify_same_message` | `pks=100 conc=1` | 37.3 ms | 38.8 ms | 1.04× |
+| `bls12381::scheme_batch_verify_same_signer` | `msgs=100 conc=1` | 33.3 ms | 37.4 ms | 1.12× |
+| `bls12381::threshold_recover` | `mode=NonZeroCounter n=100 t=67` | 954 µs | 959 µs | 1.01× |
+| `bls12381::threshold_batch_verify_same_message` | `n=10 t=7 invalid=0 conc=1 mode=NonZeroCounter` | 7.83 ms | 2.20 ms | 0.28× |
+| `bls12381::threshold_batch_verify_same_message_pre` | `n=10 t=7 invalid=0 conc=1 mode=NonZeroCounter` | 1.48 ms | 1.71 ms | 1.16× |
+| `bls12381::threshold_batch_verify_same_signer` | `n=10 t=7 msgs=100 conc=1 mode=NonZeroCounter` | 9.22 ms | 8.53 ms | 0.93× |
+| `bls12381::threshold_optimistic_assemble` | `variant=MinPk mode=NonZeroCounter n=100 case=valid` | 7.00 ms | 7.95 ms | 1.14× (fixed, was 2.54×) |
+| `bls12381::multisig_optimistic_assemble` | `variant=MinPk n=100 case=valid` | 1.18 ms | 1.43 ms | 1.21× (fixed, was 6.51×) |
+| `bls12381::dkg::feldman_desmedt_recovery` | `n=20 t=14 conc=1` | 24.1 ms | 12.8 ms | 0.53× |
+| `bls12381::dkg::feldman_desmedt_reshare_recovery` | `n=20 t=14 conc=1` | 45.6 ms | 22.4 ms | 0.49× |
+| `bls12381::dkg::golden::deal` | `n=5` | 6.55 s | 7.15 s | 1.09× |
+| `bls12381::dkg::golden::verify` | `n=5` | 577 ms | 1.99 s | 3.45× (open) |
+
+- **Optimistic assembly (fixed, f72c0613).** `certificate.Deferred.get()` decoded the
+  signature on every call: for MinPk a G2 decompression and subgroup check, about 105 µs in
+  ReleaseFast under load, and an assembly reads 67 of them. commonware's `Lazy` caches the
+  decoded value in a `OnceLock`. `Deferred` now keeps the value from `init(value)`, decodes
+  read bytes once through `decode()`, and compares like `Lazy`'s `PartialEq` (equal bytes,
+  else equal decoded values, two failures equal).
+- **`attestation_eq` measures the harness.** The comparison is a 48-byte `mem.eql` (0.9 ns).
+  `bench.criterion` reads `Clock.awake.now` around every iteration, a pair that costs about
+  43 ns under this load, while criterion's `iter_batched` times a whole batch. Passed to the
+  parallel lane (`src/bench`).
+- **`hash_to_curve` (open, simplex lane).** The bench hashes to G1 (MinSig messages): 74 µs
+  against 43 µs per hash. The G2 hash work (67308018, 6e50645b) does not cover it; G1 SSWU,
+  its square root, and G1 cofactor clearing are in `arithmetic/map.zig` and `fields.zig`.
+- **`dkg::golden::verify` (open).** Both sides run the same algorithm: banderwagon MSMs are
+  `msm_naive` on both, and its field `F` multiply is deliberately slow on both. Timings in
+  ReleaseFast under load: a BLS `Fr` multiply 26 ns, a banderwagon add 387 ns, a banderwagon
+  scalar multiply 166 µs. The next step is a per-phase split (eVRF batch check, IPA, the
+  dealing checks) against commonware's.
+
 ## Storage: index, archive, freezer (2026-11-19, clearing lane)
 
 commonware's clearing crate has no benches (`[lib] bench = false`), so this head-to-head covers
