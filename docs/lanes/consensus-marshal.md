@@ -300,12 +300,12 @@ ports its range's tests and the helpers defined in it, into
 ## Test tally (2026-11-19, against main)
 
 Every `fn test_*` in commonware's `marshal/standard/mod.rs` and `marshal/coding/mod.rs`, by
-line, with where its Zig counterpart lives. Coding's in-progress owner: broadcast-collector. Counts:
+line, with where its Zig counterpart lives. Counts:
 
 | File | Ported | In progress | Not portable | Total |
 | --- | --- | --- | --- | --- |
 | standard/mod.rs | 184 | 0 | 9 | 193 |
-| coding/mod.rs | 95 | 1 | 1 | 97 |
+| coding/mod.rs | 96 | 0 | 1 | 97 |
 
 `mocks/harness.rs` has no tests of its own: all 31 generic scenario functions are ported
 (`mocks/scenarios.zig`, `scenarios_queries.zig`, `scenarios_recoverable.zig`) and run through
@@ -575,7 +575,7 @@ job to gate, and `mocks/strategy.rs`'s GatedStrategy has no other user).
 - L1786 `test_marshaled_reproposal_validation`: ported (coding/mod_test.zig)
 - L2048 `test_invalid_reproposal_does_not_open_reconstruction`: ported (coding/mod_test.zig)
 - L2143 `test_coding_reproposal_recreates_shard_state_after_eviction`: ported (coding/mod_test.zig)
-- L2297 `test_coding_reproposal_verify_fetches_block_by_parent_round`: in progress (broadcast-collector)
+- L2297 `test_coding_reproposal_verify_fetches_block_by_parent_round`: ported (coding/mod_test.zig)
 - L2399 `test_marshaled_rejects_mismatched_context_digest`: ported (coding/mod_test.zig)
 - L2493 `test_reproposal_certify_recovers_after_verify_receiver_drop`: ported (coding/mod_test.zig)
 - L2594 `test_reproposal_missing_block_does_not_synthesize_false`: ported (coding/mod_test.zig)
@@ -735,3 +735,9 @@ job to gate, and `mocks/strategy.rs`'s GatedStrategy has no other user).
   runs good links on one seed and one short storm per hailstorm shape; aggregation's
   scenario matrices and unsigned-height shutdown run ed25519 only; the BLS message
   conformance hashes run nightly (the Item hash still runs on every push).
+- 2026-11-19: glue: network.rs's lookup peer-activation test (secondary dials primary).
+- 2026-11-19: the dkg bootstrap's teardown GPF (reported in simplex's voter and resolver) was
+  `runtime.context.select`: a runner shutdown cancels select's waiters, a canceled join
+  detaches, so select returned while the engine task still unwound, and the bootstrap freed
+  the engine under it. The waiters now join uncancelably; context_test.zig has the
+  regression test (it fails without the fix).
