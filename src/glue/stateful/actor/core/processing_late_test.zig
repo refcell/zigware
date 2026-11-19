@@ -883,7 +883,7 @@ fn finalization_join(stop: bool) !void {
         live = false;
         deinit_fixture(&fixture);
         // Shutdown cancels the winner's receipt and drops the candidate's execution.
-        if (receipt.wait()) |_| return error.TestUnexpectedResult else |_| {}
+        try testing.expectError(error.AcknowledgementCanceled, receipt.wait());
         try release.closed();
         try testing.expectEqual(0, captures.calls);
     } else {
@@ -910,4 +910,94 @@ test "stateful processing: shutdown preempts a finalization joining an execution
 // winner.
 test "stateful processing: a finalization join rejects the sibling and applies" {
     try finalization_join(false);
+}
+
+/// Stops the loop by closing its mailbox, and returns how it ended; the fixture stays
+/// alive for checks.
+fn stop_loop(fixture: *Fixture) anyerror!void {
+    fixture.mailbox.?.deinit();
+    fixture.mailbox = null;
+    var future = fixture.future.?;
+    fixture.future = null;
+    return future.await(io);
+}
+
+fn expect_canceled(waiter: anytype) !void {
+    try testing.expectError(error.AcknowledgementCanceled, waiter.wait());
+}
+
+// commonware `aborted_target_flush_prevents_prune`: when the barrier covering the prune
+// target fails, processing stops before pruning, and the unflushed acknowledgements are
+// cancelled. Adapted: the barrier fails through the storage's mutation faults (commonware
+// drops the held flush), so processing ends with that error, and block 2's report is
+// discarded unhandled rather than applied behind the pending barrier.
+test "stateful processing: an aborted target barrier prevents the prune" {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    var live = true;
+    defer if (live) deinit_fixture(&fixture);
+    fixture.harness.processor.pruning = try eager_pruning();
+    const genesis = TestBlock.genesis();
+    const block1 = try fixture.harness.stage_pending_child(&genesis, 1);
+    const block2 = try fixture.harness.stage_pending_child(&block1, 2);
+    // Set before the reports: every later mutation, and so the barrier, fails.
+    fixture.harness.storage.allow_mutations(0);
+    var first_waiter = try fixture.finalize(block1);
+    defer first_waiter.deinit();
+    var second_waiter = try fixture.finalize(block2);
+    defer second_waiter.deinit();
+    if (stop_loop(&fixture)) |_| return error.TestUnexpectedResult else |_| {}
+    try testing.expectEqual(0, fixture.prunes.items.len);
+    // Releasing the stopped loop drops the acknowledgements it still holds.
+    live = false;
+    deinit_fixture(&fixture);
+    try expect_canceled(&first_waiter);
+    try expect_canceled(&second_waiter);
+}
+
+// commonware `idle_acks_follow_flush_outcome`: a completed barrier releases block 1's
+// acknowledgement, and when block 2's barrier does not complete, processing stops and
+// cancels block 2's acknowledgement. Adapted: block 2's barrier fails through the
+// storage's mutation faults (commonware drops the held flush, resolving it as shutdown).
+// This also covers `ready_aborted_flush_stops_processing`, which differs only in block 2
+// coalescing behind block 1's pending barrier, and barriers here are never pending.
+test "stateful processing: acknowledgements follow the barrier's outcome" {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    var live = true;
+    defer if (live) deinit_fixture(&fixture);
+    const genesis = TestBlock.genesis();
+    const block1 = try fixture.harness.stage_pending_child(&genesis, 1);
+    const block2 = try fixture.harness.stage_pending_child(&block1, 2);
+    try finalize_and_wait(&fixture, block1);
+    fixture.harness.storage.allow_mutations(0); // The loop is idle: block 1 is acknowledged.
+    var second_waiter = try fixture.finalize(block2);
+    defer second_waiter.deinit();
+    if (stop_loop(&fixture)) |_| return error.TestUnexpectedResult else |_| {}
+    live = false;
+    deinit_fixture(&fixture);
+    try expect_canceled(&second_waiter);
+}
+
+// commonware `mailbox_eof_finishes_scheduled_prune`: a prune scheduled before ingress
+// closes still runs, and processing then stops. Adapted: barriers are durable when they
+// start, so both blocks are acknowledged (commonware cancels block 2's, whose barrier never
+// starts once the prune ends processing).
+test "stateful processing: mailbox close finishes a scheduled prune" {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer deinit_fixture(&fixture);
+    fixture.harness.processor.pruning = try eager_pruning();
+    const genesis = TestBlock.genesis();
+    const block1 = try fixture.harness.stage_pending_child(&genesis, 1);
+    const block2 = try fixture.harness.stage_pending_child(&block1, 2);
+    var first_waiter = try fixture.finalize(block1);
+    defer first_waiter.deinit();
+    var second_waiter = try fixture.finalize(block2);
+    defer second_waiter.deinit();
+    // Queue both reports and close ingress before the loop handles them.
+    try stop_loop(&fixture);
+    try testing.expectEqualSlices(u64, &.{1}, fixture.prunes.items);
+    try first_waiter.wait();
+    try second_waiter.wait();
 }
