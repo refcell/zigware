@@ -65,6 +65,14 @@ handshake), then certificate, secp256r1, the rest, zk last. banderwagon moved to
   per view with simplex's `twins.view_masks`/`view_route` over p2p's split senders and
   receivers; the primary half runs the engine, the secondary a disrupter).
 - Benches moved to bls-math (coordinator handover).
+- [x] qmdb sync (`src/storage/qmdb/sync/`, handed over by storage-qmdb-sync): the `Database`
+  interface and `Persisted` adapter (`database.zig`), `Source`/`Feedback`/`JournalSource`
+  (`source.zig`), the engine (`engine.zig`, commonware's unit tests in `engine_test.zig`),
+  keyless and immutable sync glue, and the shared harness (`harness.zig`, `Tests(H)`:
+  commonware's `harness/full.rs` tests, the five per-harness `engine.rs` retention tests, and
+  the three issue-5669 interrupted-destroy regressions), instantiated for keyless and
+  immutable over commonware's variable harnesses in both families. storage-qmdb-sync owns
+  any, current, and compact sync glue and the `qmdb_any_*_sync` fuzz targets.
 
 ## Log
 - Digests are `Digest(length, name)`: one distinct type per hasher, encoded as raw bytes.
@@ -197,3 +205,19 @@ handshake), then certificate, secp256r1, the rest, zk last. banderwagon moved to
   (`invalid_notarize_parent`, `finalized_between_parent_and_child`). Planted
   finalize-after-nullify (`construct_finalize` ignoring a nullify decision): the three
   default ed25519 twin runs fail with `nullify_and_finalize_vote`.
+- qmdb sync engine: fetch tasks start eagerly (`io.concurrent`), while commonware's request
+  futures run only when its biased select polls them. Woken events are handled in that
+  select's order (finish, then target updates, then fetch results), and a queued update is
+  polled before fetch results, so a fetch a queued update retains out is ignored rather than
+  failing the sync on a source that has already pruned it (found by the harness's
+  bounds-increase case over immutable).
+- qmdb sync harness: ops come from a seed (`apply_ops(db, seed, count, metadata)`), and the
+  checks regenerate them, instead of commonware's `Vec<Op>`. Every database in a test shares
+  one page cache. Plain Debug builds run the 1000-op `test_sync` cases only at fetch batch
+  100, skip the update cases over 100 ops, and use 200-op histories for subset/existing-db
+  (release builds and `-Dslow-tests` run commonware's sizes).
+- CI time: `utils.rational.log2` takes digits from a 120-bit interval when it decides them
+  (exact fallback; the RationalOptimalBits hash is unchanged), so the bloom filter tests take
+  8 s instead of about 79 s in ReleaseSafe. The certificate Attestation and ed25519
+  Certificate conformance hashes (about 40 s in ReleaseSafe) run only with `-Dslow-tests`
+  (`conformance.skip_unless_slow`, nightly on every platform); `Signers` stays per push.
