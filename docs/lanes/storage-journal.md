@@ -13,7 +13,9 @@ resize, sync), `runtime.storage`, with the in-memory backend `runtime.storage.me
 - [x] runtime buffer paged core: page format (two-slot CRC record), tip buffer, page cache,
   `Writer` (append, bulk append, sync, recovery open/truncate with staged shrink), `Replay`,
   `recoverable_prefix_len`; `runtime.buffer`.
-- [x] runtime buffer `Write` and its tip (write.rs, tip.rs) with their tests.
+- [x] runtime buffer `Write` and its tip (write.rs, tip.rs) with their tests (mod.rs's write
+  tests, including the straddle, direct-write, at-size append, and pre-wrapped-mutation
+  cases). No counterpart: its in-flight `start_sync` and range-vs-full sync tests.
 - [x] runtime buffer `Read` (read.rs) with mod.rs's read tests; `read` copies into the caller's
   buffer (one refill buffer allocated at `init`) and rewinds on failure.
 - [x] paged `Writer.read_many_into`/`read_ranges_into`/`try_read_ranges_sync_into` with
@@ -84,6 +86,11 @@ resize, sync), `runtime.storage`, with the in-memory backend `runtime.storage.me
 - [x] metadata: the `metadata_recovery` fuzz target and the overwrite-crash-during-sync test
   on `runtime.storage.faulty` (with storage-archive's `archive/faults.zig` harness).
 - [x] metadata: `start_sync` with its tests, and the `MetadataWorkload` conformance hash.
+  Writes and open reads carry commonware's `DONT_CACHE` hint (`test_io_options_and_durability`
+  without its sync-handle counts; durability stays an explicit blob sync, where commonware
+  folds a lone write's sync into `WriteOptions::SYNC`). No counterpart: `value_too_big`
+  (a should_panic on a 4 GiB value), `determinism` (deterministic-runtime auditor state; the
+  conformance hash pins the bytes), and the dropped-handle and delayed-sync tests.
 - [x] `queue_recovery` fuzz target on faulty storage.
 - [x] `journal_segmented_variable_recovery` fuzz target on faulty storage (raw-image oracle).
 - [x] `journal_oversized_recovery` fuzz target on faulty storage (marker-floor oracle).
@@ -295,7 +302,8 @@ resize, sync), `runtime.storage`, with the in-memory backend `runtime.storage.me
 - contiguous fixed: syncs complete synchronously, so `start_sync` advances the watermark to
   the current size (commonware advances it to the last observed sync), sealed blobs are
   fully synced paged writers (no `Sealed` views or snapshots; `snapshot` readers are not
-  ported, since nothing runs concurrently with the journal), and `read_many` reads item by item
+  ported, since nothing runs concurrently with the journal; `runtime.buffer.paged.Sealed`
+  exists since 48ec31b if a reader ever needs one), and `read_many` reads item by item
   through the page cache. Metrics are plain counters (`items_read`, `cache_hits`,
   `cache_misses`, blob `synced`/`pruned`).
 

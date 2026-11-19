@@ -156,6 +156,10 @@ const Harness = struct {
         return buf;
     }
 
+    fn durable(self: *Harness, name: []const u8) !?u64 {
+        return self.storage.durable_len("partition", name);
+    }
+
     fn expect(self: *Harness, name: []const u8, expected: []const u8) !void {
         const actual = try self.contents(name);
         defer testing.allocator.free(actual);
@@ -379,4 +383,129 @@ test "write truncate is durable and ignores growth" {
     h.storage.crash();
     w.deinit();
     try h.expect("truncate", "ab");
+}
+
+test "write straddling a gap and an overlap that cannot merge" {
+    var h = harness();
+    defer h.storage.deinit();
+    var w = try h.writer("write_straddle", 10);
+    try w.write_at(0, "0123456789");
+    try w.write_at(15, "abc");
+    try testing.expectEqual(@as(u64, 18), w.size());
+    try w.sync();
+    w.deinit();
+    try h.expect("write_straddle", "0123456789\x00\x00\x00\x00\x00abc");
+    w = try h.writer("write_straddle2", 10);
+    try w.write_at(0, "0123456789");
+    try w.write_at(5, "ABCDEFGHIJKL");
+    try testing.expectEqual(@as(u64, 17), w.size());
+    try w.sync();
+    w.deinit();
+    try h.expect("write_straddle2", "01234ABCDEFGHIJKL");
+}
+
+test "write close, direct writes, and an in-buffer overwrite that extends" {
+    var h = harness();
+    defer h.storage.deinit();
+    var w = try h.writer("write_close", 8);
+    try w.write_at(0, "pending");
+    try w.sync();
+    w.deinit();
+    try h.expect("write_close", "pending");
+    // Larger than the buffer: written directly.
+    w = try h.writer("write_direct_size", 5);
+    try w.write_at(0, "0123456789");
+    try w.sync();
+    w.deinit();
+    try h.expect("write_direct_size", "0123456789");
+    w = try h.writer("write_direct_size", 5);
+    try w.write_at(10, "abc");
+    try testing.expectEqual(@as(u64, 13), w.size());
+    var small: [3]u8 = undefined;
+    try w.read_at(10, &small);
+    try testing.expectEqualStrings("abc", &small);
+    try w.sync();
+    w.deinit();
+    try h.expect("write_direct_size", "0123456789abc");
+    w = try h.writer("overwrite_extend_buf", 15);
+    try w.write_at(0, "0123456789");
+    try w.write_at(5, "ABCDEFGHIJ");
+    try testing.expectEqual(@as(u64, 15), w.size());
+    var all: [15]u8 = undefined;
+    try w.read_at(0, &all);
+    try testing.expectEqualStrings("01234ABCDEFGHIJ", &all);
+    try w.sync();
+    w.deinit();
+    try h.expect("overwrite_extend_buf", "01234ABCDEFGHIJ");
+}
+
+test "write appends at the size after syncs, gaps, and a resize" {
+    var h = harness();
+    defer h.storage.deinit();
+    var w = try h.writer("write_multiple_appends_at_size", 5);
+    for ([_][]const u8{ "AAA", "BBB", "CCC" }) |chunk| {
+        try w.write_at(w.size(), chunk);
+        try w.sync();
+    }
+    try testing.expectEqual(@as(u64, 9), w.size());
+    w.deinit();
+    try h.expect("write_multiple_appends_at_size", "AAABBBCCC");
+    w = try h.writer("write_non_contiguous_then_append", 10);
+    try w.write_at(0, "INITIAL");
+    try w.write_at(20, "NONCONTIG");
+    try testing.expectEqual(@as(u64, 29), w.size());
+    try w.sync();
+    try w.write_at(w.size(), "APPEND");
+    try testing.expectEqual(@as(u64, 35), w.size());
+    try w.sync();
+    w.deinit();
+    var expected: [35]u8 = @splat(0);
+    expected[0..7].* = "INITIAL".*;
+    expected[20..29].* = "NONCONTIG".*;
+    expected[29..35].* = "APPEND".*;
+    try h.expect("write_non_contiguous_then_append", &expected);
+    w = try h.writer("resize_then_append_at_size", 10);
+    try w.write_at(0, "0123456789ABCDEF");
+    try w.sync();
+    try w.resize(5);
+    try w.sync();
+    try testing.expectEqual(@as(u64, 5), w.size());
+    try w.write_at(w.size(), "XXXXX");
+    try w.sync();
+    try testing.expectEqual(@as(u64, 10), w.size());
+    w.deinit();
+    try h.expect("resize_then_append_at_size", "01234XXXXX");
+}
+
+test "write sync persists a mutation made before wrapping and earlier direct flushes" {
+    var h = harness();
+    defer h.storage.deinit();
+    {
+        const opened = try h.storage.open("partition", "pre_wrapped");
+        try opened.blob.write_at(0, "abc", .{});
+        var w = Write.init(testing.allocator, opened.blob, 3, 8) catch |err| {
+            opened.blob.close();
+            return err;
+        };
+        defer w.deinit();
+        // A fresh writer starts dirty, so its first sync covers the unsynced "abc".
+        try w.sync();
+        try testing.expectEqual(@as(?u64, 3), try h.durable("pre_wrapped"));
+        try w.write_at(3, "d");
+        try w.sync();
+    }
+    try h.expect("pre_wrapped", "abcd");
+    var w = try h.writer("direct_then_tip", 4);
+    defer w.deinit();
+    try w.write_at(0, "abcdef");
+    try w.write_at(6, "g");
+    const writes = h.storage.writes;
+    try w.sync();
+    try testing.expectEqual(@as(?u64, 7), try h.durable("direct_then_tip"));
+    // A clean writer's sync writes nothing more.
+    try w.sync();
+    try testing.expectEqual(writes + 1, h.storage.writes);
+    try w.write_at(7, "h");
+    try w.sync();
+    try testing.expectEqual(@as(?u64, 8), try h.durable("direct_then_tip"));
 }

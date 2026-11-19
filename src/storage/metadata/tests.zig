@@ -147,6 +147,32 @@ test "put returns previous value" {
     try store.destroy();
 }
 
+test "every write and open read carries the uncached hint" {
+    // commonware's `test_io_options_and_durability`, minus its sync-handle accounting.
+    var storage = Storage.init(gpa);
+    defer storage.deinit();
+    var store = try open(&storage);
+    try put(&store, 1, &(@as([8]u8, @splat(1))));
+    try store.sync();
+    try store.sync();
+    // An overwrite, a grown rewrite, and a shrinking rewrite.
+    try put(&store, 1, &(@as([8]u8, @splat(2))));
+    try store.sync();
+    try put(&store, 2, &(@as([16]u8, @splat(4))));
+    try store.sync();
+    try store.sync();
+    if (store.remove(2)) |previous| gpa.free(previous);
+    try store.sync();
+    try testing.expect(storage.writes > 0);
+    try testing.expectEqual(storage.writes, storage.dont_cache_writes);
+    store.deinit();
+    const reads = storage.reads;
+    store = try open(&storage);
+    defer store.deinit();
+    try testing.expectEqual(reads + 2, storage.reads);
+    try testing.expectEqual(@as(u64, 2), storage.dont_cache_reads);
+}
+
 test "multi sync" {
     var storage = Storage.init(gpa);
     defer storage.deinit();

@@ -44,6 +44,9 @@ const version_size: usize = 8;
 const checksum_size: usize = 4;
 /// Runtime's `BLOB_PAGE_SIZE`.
 const blob_page_size: usize = runtime_storage.blob_page_size;
+/// Every metadata write carries commonware's `DONT_CACHE` hint: the store keeps its own copy
+/// of both blobs in memory.
+const uncached: runtime_storage.WriteOptions = .{ .dont_cache = true };
 
 /// Configuration for `Metadata`.
 pub fn Config(comptime V: type) type {
@@ -260,7 +263,8 @@ pub fn Metadata(comptime K: type, comptime V: type) type {
 
             const size = std.math.cast(usize, len) orelse return error.OutOfMemory;
             const data = try loaded.wrapper.data.addManyAsSlice(gpa, size);
-            try blob.read_at(0, data);
+            // Both copies are read once, at open: keep them out of the OS cache.
+            try blob.read_at_options(0, data, .{ .dont_cache = true });
             if (data.len < version_size + checksum_size) {
                 loaded.valid = false;
                 loaded.wrapper.data.clearRetainingCapacity();
@@ -555,14 +559,15 @@ pub fn Metadata(comptime K: type, comptime V: type) type {
             // A store no larger than one blob page is written whole: its changed values,
             // version, and checksum share that page, so one write replaces several.
             if (data.len <= blob_page_size) {
-                try target.blob.write_at(0, data, .{});
+                try target.blob.write_at(0, data, uncached);
             } else {
                 for (target.modified.keys()) |key_bytes| {
                     const info = target.lengths.get(key_bytes).?;
-                    try target.blob.write_at(info.start, data[info.start..][0..info.length], .{});
+                    const value = data[info.start..][0..info.length];
+                    try target.blob.write_at(info.start, value, uncached);
                 }
-                try target.blob.write_at(0, data[0..version_size], .{});
-                try target.blob.write_at(checksum_index, data[checksum_index..], .{});
+                try target.blob.write_at(0, data[0..version_size], uncached);
+                try target.blob.write_at(checksum_index, data[checksum_index..], uncached);
             }
             try target.blob.sync();
             target.modified.clearRetainingCapacity();
@@ -600,7 +605,7 @@ pub fn Metadata(comptime K: type, comptime V: type) type {
             writer.write_int(u32, Crc32.checksum(writer.written()));
             assert(writer.end == data_len);
 
-            try target.blob.write_at(0, data, .{});
+            try target.blob.write_at(0, data, uncached);
             if (data_len < old_len) try target.blob.resize(data_len);
             try target.blob.sync();
             target.version = version;
