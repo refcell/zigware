@@ -21,7 +21,6 @@ const Db = store.Db(Digest, value.Variable(Bytes), translator.TwoCap);
 const Write = Db.Write;
 const Storage = runtime.storage.Storage;
 const CacheRef = runtime.buffer.paged.CacheRef;
-const Faults = @import("../../archive/faults.zig").Faults;
 
 /// Commonware's `Blake3::hash(&[&i.to_be_bytes()])`.
 const CodecCfg = @FieldType(Db.Journal.Cfg, "codec_config");
@@ -1313,22 +1312,6 @@ test "store state persisted by start_sync is recovered" {
     try testing.expectEqual(size, db.bounds().end);
     try expect_value(&db, key(0), &ones);
     try db.destroy();
-}
-
-// db.rs `test_store_start_sync_failure_propagates`. A failed mutator leaves only `deinit` (the
-// failures-are-fatal contract); the failure surfaces from `start_sync` or its completion.
-test "store start_sync surfaces a failed sync" {
-    var faults: Faults = undefined;
-    faults.init(gpa, 7);
-    defer faults.deinit();
-    var cache = try CacheRef.init(gpa, 77, 9);
-    defer cache.deinit();
-    var db = try open_on(faults.interface(), &cache, null);
-    defer db.deinit();
-    _ = try apply(&db, &.{.{ .key = key(0), .value = &.{ 1, 1, 1, 1, 1, 1, 1, 1 } }}, null);
-    faults.layer.config = .{ .sync_rate = .one };
-    const started = db.start_sync();
-    try testing.expectError(error.Io, if (started) |sync| sync.wait_release() else |err| err);
 }
 
 /// db.rs `BitmapPolicy`: three entries, unlimited skips, and one action per round, applied to

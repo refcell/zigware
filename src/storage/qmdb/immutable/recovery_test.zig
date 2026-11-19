@@ -11,7 +11,6 @@ const testing = std.testing;
 const merkle = @import("../../merkle/mod.zig");
 const metrics = @import("runtime").telemetry.metrics;
 const support = @import("test_support.zig");
-const Faults = @import("../../archive/faults.zig").Faults;
 
 const gpa = testing.allocator;
 const families = .{ merkle.mmr.Family, merkle.mmb.Family };
@@ -281,26 +280,6 @@ test "immutable state persisted by start_sync survives a crash" {
         try testing.expect(db.root().eql(root));
         try expect_values(&.{try db.get(&fill(1))}, &.{fill(2)});
         try db.destroy();
-    }
-}
-
-// fixed.rs `test_fixed_start_sync_failure_propagates`. A failed mutator leaves only `deinit` (the
-// failures-are-fatal contract); the failure surfaces from `start_sync` or its completion.
-test "immutable start_sync surfaces a failed sync" {
-    inline for (families) |F| {
-        var harness = try support.Harness.init(gpa);
-        defer harness.deinit();
-        var faults: Faults = undefined;
-        faults.init(gpa, 7);
-        defer faults.deinit();
-        const D = support.Fixed(F);
-        const scope = metrics.Scope.init(&harness.registry).child("db");
-        var db = try D.init(gpa, faults.interface(), scope, harness.cfg(D), null);
-        defer db.deinit();
-        try apply_sets(&db, &.{.{ fill(1), fill(2) }}, db.inactivity_floor());
-        faults.layer.config = .{ .sync_rate = .one };
-        const started = db.start_sync();
-        try testing.expectError(error.Io, if (started) |sync| sync.wait_release() else |err| err);
     }
 }
 

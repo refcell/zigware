@@ -149,8 +149,9 @@ which every database here is built on.
   - [x] the db's `io` also times its log: `qmdb.log_with_io` fills the journal config's `io`
     when the caller left it null (current passes it through its `any` config). The store
     takes its journal config as given.
-  - `start_sync` no longer completes synchronously (step 5, below): `start_sync_overlaps_work`
-    and `start_sync_prune_waits` are ported; `apply_indexes_while_journal_waits` is still open.
+  - `start_sync` no longer completes synchronously (step 5, below): `start_sync_overlaps_work`,
+    `start_sync_failure_propagates` (in full), and `start_sync_prune_waits` are ported in
+    immutable/start_sync_test.zig; `apply_indexes_while_journal_waits` is still open.
     Compact root
     compatibility is the compact lane's.
   - [x] Ported with async start_sync step 5 (storage-merkle.md, "Design: asynchronous
@@ -180,9 +181,9 @@ which every database here is built on.
 - [x] store batch 3: bitmap activity through every policy action, prune, and reopen; bitmap
   chunk-prune recovery; prune at an unsynced floor then reopen; commit after sync recovers;
   an update persisted without its commit is discarded; start_sync recovery; a failed
-  start_sync surfaces its error. Not observable here: commonware's `start_sync_overlaps_work`
-  and `start_sync_prune_waits`, because zigware's journal `start_sync` completes before it
-  returns (journal lane); they need an asynchronous `start_sync`.
+  start_sync surfaces its error. With the asynchronous `start_sync`, store/start_sync_test.zig
+  ports `test_store_start_sync_overlaps_work`, `_failure_propagates` (in full: the completion
+  and the next commit fail, with no fresh sync started), and `_prune_waits`.
 - [x] store: variable-length keys. `Db([]const u8, ...)` works: a batch and a changeset copy
   each key (`value.clone`, a plain copy for fixed arrays, so fixed keys stay allocation-free),
   every emitted operation owns its own copy, and lookups free the keys they decode. Ported
@@ -457,3 +458,4 @@ which every database here is built on.
 - 2026-11-19: upstream 8bf364011 batch 1: sync databases report `target()`; engine validates.
 - 2026-11-19: upstream 8bf364011: merkleized batches report their sync `target()`.
 - 2026-11-19: upstream 8bf364011 batch 2: `CompactTarget` and its conformance entries removed.
+- 2026-11-19: immutable and store in-flight start_sync tests (overlap, failure, prune waits).
