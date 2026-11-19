@@ -507,8 +507,20 @@ hold whole units of lanes" over coding's lane-aware `hash_batches`, and `sha512/
   compress whole chunks and output blocks `lanes` at a time (std's Blake3 does one block at a
   time), and add, subtract, and combine step through the state 32 `u16`s at a time (element
   loops compiled to scalar adds inside the bench; one `@Vector(1024, u16)` bitcast from bytes
+  time), and add, subtract, and combine step through the state 32 `u16`s at a time (element
+  loops compiled to scalar adds inside the bench; one `@Vector(1024, u16)` bitcast from bytes
   compiled to element-wise code and made add 130x slower). The XOF writes straight into
   `[1024]u16`: a 32-lane bitcast from bytes still compiled element-wise (add 5 µs, against
   0.4 µs without it). XOF tested against std across input and output lengths; planted bugs
   (lane counter, upper half, parent flag, chunk start, last whole chunk, subtract and combine
   sign) are caught.
+- 2026-11-19: sha256 short and pair paths start from the IV as vector constants and write the
+  digest through one shuffle, byte swap, and vector store (`sha256_blocks.digest_n`), as
+  commonware's `hash_single`/`hash_pair` kernels keep the state in registers. Block loads and
+  the digest store go through `*align(1)` vector pointers: a `@bitCast` between a byte array
+  and a vector compiled to byte extracts, shifts, and ors (about 100 instructions per block).
+  Parts of 4, 8, and 32 bytes copy inline instead of calling memcpy. bmt_leaf went from
+  about 50 to 45 ns (commonware 22 ns; the compression alone is 24 to 28 ns, the rest is
+  assembling the block on the stack, which clearing's `hash_36` port takes on). Planted bugs
+  (digest word order, padding fill, part offset) are caught on x86-64; aarch64 tested under
+  qemu.

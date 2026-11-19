@@ -40,15 +40,6 @@ pub fn compress(state: *[8]u32, blocks: []const u8) void {
     compress_n(1, &states, .{blocks});
 }
 
-/// Compresses `left` into `states[0]` and `right` into `states[1]`, interleaving the two
-/// so each fills the other's SHA instruction latency (commonware's pair kernels).
-pub fn compress_pair(states: *[2]*[8]u32, left: []const u8, right: []const u8) void {
-    comptime assert(available);
-    assert(left.len == right.len);
-    assert(left.len % 64 == 0 and left.len > 0);
-    compress_n(2, states, .{ left, right });
-}
-
 fn compress_n(comptime n: usize, states: *[n]*[8]u32, inputs: [n][]const u8) void {
     switch (builtin.cpu.arch) {
         .x86_64 => compress_x86(n, states, inputs),
@@ -57,11 +48,48 @@ fn compress_n(comptime n: usize, states: *[n]*[8]u32, inputs: [n][]const u8) voi
     }
 }
 
+/// The SHA-256 digests of `inputs`, each a whole padded message of the same length, hashed from
+/// the initial state with the state kept in registers from the IV to the digest bytes (as
+/// commonware's `hash_single` and `hash_pair` kernels do). Two inputs interleave, so each
+/// fills the other's SHA instruction latency.
+pub fn digest_n(comptime n: usize, inputs: [n][]const u8, outs: [n]*[32]u8) void {
+    comptime assert(available);
+    comptime assert(n == 1 or n == 2);
+    const len = inputs[0].len;
+    for (inputs) |input| assert(input.len == len);
+    assert(len % 64 == 0 and len > 0);
+    // ABEF and CDGH on x86 (sha256rnds2's layout); ABCD and EFGH on aarch64.
+    const x86 = builtin.cpu.arch == .x86_64;
+    var x: [n]V4u32 = @splat(if (x86) .{ iv[5], iv[4], iv[1], iv[0] } else iv[0..4].*);
+    var y: [n]V4u32 = @splat(if (x86) .{ iv[7], iv[6], iv[3], iv[2] } else iv[4..8].*);
+    switch (builtin.cpu.arch) {
+        .x86_64 => blocks_x86(n, &x, &y, inputs),
+        .aarch64 => blocks_aarch64(n, &x, &y, inputs),
+        else => comptime unreachable,
+    }
+    // Words A to H, from lanes of x (0 to 3) and y (-1 to -4).
+    const order: @Vector(8, i32) = if (x86) .{ 3, 2, -4, -3, 1, 0, -2, -1 } else .{
+        0, 1, 2, 3, -1, -2, -3, -4,
+    };
+    inline for (0..n) |j| {
+        const words: @Vector(8, u32) = @shuffle(u32, x[j], y[j], order);
+        const big = if (builtin.cpu.arch.endian() == .little) @byteSwap(words) else words;
+        // A pointer store: a bitcast to the byte array compiled to byte extracts.
+        @as(*align(1) @Vector(8, u32), @ptrCast(outs[j])).* = big;
+    }
+}
+
+/// FIPS 180-4 initial state.
+const iv = [8]u32{
+    0x6A09E667, 0xBB67AE85, 0x3C6EF372, 0xA54FF53A, 0x510E527F, 0x9B05688C, 0x1F83D9AB, 0x5BE0CD19,
+};
+
 /// The four big-endian words at `bytes[offset..][0..16]`.
 inline fn load(bytes: []const u8, offset: usize) V4u32 {
     assert(offset % 16 == 0);
     assert(offset + 16 <= bytes.len);
-    const words: V4u32 = @bitCast(bytes[offset..][0..16].*);
+    // A pointer load: a bitcast from the byte array compiled to byte loads, shifts, and ors.
+    const words: V4u32 = @as(*align(1) const V4u32, @ptrCast(bytes[offset..][0..16])).*;
     return @byteSwap(words);
 }
 
@@ -73,8 +101,6 @@ inline fn load_block(bytes: []const u8, offset: usize) [4]V4u32 {
 }
 
 fn compress_x86(comptime n: usize, states: *[n]*[8]u32, inputs: [n][]const u8) void {
-    const len = inputs[0].len;
-    for (inputs) |input| assert(input.len == len);
     // sha256rnds2 keeps the state as ABEF and CDGH.
     var x: [n]V4u32 = undefined;
     var y: [n]V4u32 = undefined;
@@ -83,10 +109,19 @@ fn compress_x86(comptime n: usize, states: *[n]*[8]u32, inputs: [n][]const u8) v
         x[j] = .{ state[5], state[4], state[1], state[0] };
         y[j] = .{ state[7], state[6], state[3], state[2] };
     }
+    blocks_x86(n, &x, &y, inputs);
+    inline for (0..n) |j| {
+        states[j].* = .{ x[j][3], x[j][2], y[j][3], y[j][2], x[j][1], x[j][0], y[j][1], y[j][0] };
+    }
+}
+
+inline fn blocks_x86(comptime n: usize, x: *[n]V4u32, y: *[n]V4u32, inputs: [n][]const u8) void {
+    const len = inputs[0].len;
+    for (inputs) |input| assert(input.len == len);
     var offset: usize = 0;
     while (offset < len) : (offset += 64) {
-        const x_start = x;
-        const y_start = y;
+        const x_start = x.*;
+        const y_start = y.*;
         var m: [n][4]V4u32 = undefined;
         inline for (0..n) |j| m[j] = load_block(inputs[j], offset);
         inline for (0..16) |k| {
@@ -98,9 +133,6 @@ fn compress_x86(comptime n: usize, states: *[n]*[8]u32, inputs: [n][]const u8) v
         }
     }
     assert(offset == len);
-    inline for (0..n) |j| {
-        states[j].* = .{ x[j][3], x[j][2], y[j][3], y[j][2], x[j][1], x[j][0], y[j][1], y[j][0] };
-    }
 }
 
 /// Rounds 4k to 4k+3, then (for k < 12) message words 4(k+4) to 4(k+4)+3.
@@ -136,18 +168,31 @@ inline fn x86_rounds(comptime k: usize, x: *V4u32, y: *V4u32, m: *[4]V4u32) void
 }
 
 fn compress_aarch64(comptime n: usize, states: *[n]*[8]u32, inputs: [n][]const u8) void {
-    const len = inputs[0].len;
-    for (inputs) |input| assert(input.len == len);
     var x: [n]V4u32 = undefined;
     var y: [n]V4u32 = undefined;
     inline for (0..n) |j| {
         x[j] = states[j][0..4].*;
         y[j] = states[j][4..8].*;
     }
+    blocks_aarch64(n, &x, &y, inputs);
+    inline for (0..n) |j| {
+        states[j][0..4].* = x[j];
+        states[j][4..8].* = y[j];
+    }
+}
+
+inline fn blocks_aarch64(
+    comptime n: usize,
+    x: *[n]V4u32,
+    y: *[n]V4u32,
+    inputs: [n][]const u8,
+) void {
+    const len = inputs[0].len;
+    for (inputs) |input| assert(input.len == len);
     var offset: usize = 0;
     while (offset < len) : (offset += 64) {
-        const x_start = x;
-        const y_start = y;
+        const x_start = x.*;
+        const y_start = y.*;
         var m: [n][4]V4u32 = undefined;
         inline for (0..n) |j| m[j] = load_block(inputs[j], offset);
         inline for (0..16) |k| {
@@ -159,10 +204,6 @@ fn compress_aarch64(comptime n: usize, states: *[n]*[8]u32, inputs: [n][]const u
         }
     }
     assert(offset == len);
-    inline for (0..n) |j| {
-        states[j][0..4].* = x[j];
-        states[j][4..8].* = y[j];
-    }
 }
 
 /// (For k > 3) message words 4k to 4k+3, then rounds 4k to 4k+3.

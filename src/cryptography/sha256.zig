@@ -64,19 +64,21 @@ pub const Core = struct {
         if (total > short_max) return stream(parts, out);
         var padded: [2 * block_length]u8 align(16) = @splat(0);
         const len = pad_short(parts, total, &padded);
-        var state = iv;
-        blocks.compress(&state, padded[0..len]);
-        write_state(state, out);
+        blocks.digest_n(1, .{padded[0..len]}, .{out});
     }
 
-    const iv = StdSha256.init(.{}).s;
-
-    /// `parts` padded into `padded` as one or two final blocks; returns the padded length.
+    /// `parts` padded into `padded` (zeroed) as one or two final blocks; returns the padded
+    /// length.
     fn pad_short(parts: []const []const u8, total: usize, padded: *[2 * block_length]u8) usize {
         assert(total <= short_max);
         var offset: usize = 0;
         for (parts) |part| {
-            @memcpy(padded[offset..][0..part.len], part);
+            // The Merkle part lengths copy inline; a variable-length copy is a memcpy call,
+            // which cost as much as the compression (commonware's kernels load them directly).
+            switch (part.len) {
+                inline 4, 8, 32 => |n| padded[offset..][0..n].* = part[0..n].*,
+                else => @memcpy(padded[offset..][0..part.len], part),
+            }
             offset += part.len;
         }
         assert(offset == total);
@@ -84,10 +86,6 @@ pub const Core = struct {
         const len: usize = if (total + 9 <= block_length) block_length else 2 * block_length;
         std.mem.writeInt(u64, padded[len - 8 ..][0..8], @as(u64, total) * 8, .big);
         return len;
-    }
-
-    fn write_state(state: [8]u32, out: *[StdSha256.digest_length]u8) void {
-        for (state, 0..) |word, index| std.mem.writeInt(u32, out[index * 4 ..][0..4], word, .big);
     }
 
     /// The digests of `left` and `right`; two short messages of the same padded length
@@ -107,11 +105,9 @@ pub const Core = struct {
         const len_left = pad_short(left, totals[0], &padded[0]);
         const len_right = pad_short(right, totals[1], &padded[1]);
         if (len_left != len_right) return separate(left, right, out);
-        var states: [2][8]u32 = .{ iv, iv };
-        var pointers: [2]*[8]u32 = .{ &states[0], &states[1] };
-        blocks.compress_pair(&pointers, padded[0][0..len_left], padded[1][0..len_right]);
-        write_state(states[0], &out[0]);
-        write_state(states[1], &out[1]);
+        blocks.digest_n(2, .{ padded[0][0..len_left], padded[1][0..len_right] }, .{
+            &out[0], &out[1],
+        });
     }
 
     fn separate(
