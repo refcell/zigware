@@ -58,7 +58,7 @@ pub const PrivateKey = struct {
 
     /// Constant-time comparison of the seeds.
     pub fn eql(a: *const PrivateKey, b: *const PrivateKey) bool {
-        return std.crypto.timing_safe.eql([32]u8, a.key.seed, b.key.seed);
+        return std.crypto.timing_safe.eql([32]u8, a.key.seed.value, b.key.seed.value);
     }
 
     pub fn zeroize(self: *PrivateKey) void {
@@ -66,7 +66,7 @@ pub const PrivateKey = struct {
     }
 
     pub fn write(self: *const PrivateKey, writer: *codec.Writer) void {
-        writer.write_bytes(&self.key.seed);
+        writer.write_bytes(&self.key.seed.value);
     }
 
     pub fn read(gpa: std.mem.Allocator, reader: *codec.Reader, cfg: void) codec.Error!PrivateKey {

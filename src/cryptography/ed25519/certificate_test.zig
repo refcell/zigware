@@ -206,10 +206,8 @@ test "ed25519 certificate member reports membership without signing" {
 
     // A key outside the committee yields no member.
     const outsider = PrivateKey.random(&rng).public_key();
-    try testing.expectEqual(
-        null,
-        try Scheme.member(gpa, namespace, try participants.clone(gpa), outsider),
-    );
+    const outside = try Scheme.member(gpa, namespace, try participants.clone(gpa), outsider);
+    try testing.expect(outside == null);
 
     // A member reports its membership but cannot sign. Verifiers report no membership, and
     // each signer reports the index it signs at.

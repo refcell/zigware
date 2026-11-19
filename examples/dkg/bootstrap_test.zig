@@ -271,7 +271,7 @@ fn expect_handoff(
     var handed: types.Secrets = try .init(ctx.io(), gpa, ctx.storage, .validator);
     defer handed.deinit();
     const share = (try handed.get_share(.zero())) orelse return error.TestMissingShare;
-    try testing.expect(std.meta.eql(share, (try store.get_share(.zero())).?));
+    try testing.expect(share.eql((try store.get_share(.zero())).?));
     try testing.expectEqual(null, try handed.get_seed(.zero()));
 }
 

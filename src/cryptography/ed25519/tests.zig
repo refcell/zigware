@@ -174,7 +174,7 @@ test "ed25519 keys and signatures match commonware" {
     const random = test_key();
     const random_seed =
         hex(32, "7f6f2ccdb23f2abb7b69278e947c01c6160a31cf02c19d06d0f6e5ab1d768b95");
-    try testing.expectEqualSlices(u8, &random_seed, &random.key.seed);
+    try testing.expectEqualSlices(u8, &random_seed, &random.key.seed.value);
     const random_public =
         hex(32, "ee1aa49a4459dfe813a3cf6eb882041230c7b2558469de81f87c9bf23bf10a03");
     try testing.expectEqualSlices(u8, &random_public, random.public_key().as_slice());

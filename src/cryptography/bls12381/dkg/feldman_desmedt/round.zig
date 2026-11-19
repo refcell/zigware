@@ -353,7 +353,7 @@ pub fn Dealer(comptime V: type, comptime S: type) type {
             share: ?Share,
         ) !Started {
             if (info.dealer_index(me.public_key()) == null) return error.DealerNotInRound;
-            const secret = if (share) |s| s.private.scalar else null;
+            const secret = if (share) |s| s.private.scalar.value else null;
             var constant = try info.unwrap_or_random_share(rng, secret);
             defer constant.zeroize();
             var poly = try Poly(Scalar).random_with_constant(gpa, rng, info.degree(M), constant);

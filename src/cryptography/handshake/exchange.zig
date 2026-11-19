@@ -8,6 +8,7 @@
 const std = @import("std");
 const assert = std.debug.assert;
 const codec = @import("codec");
+const Opaque = @import("../secret.zig").Opaque;
 const X25519 = std.crypto.dh.X25519;
 
 /// An ephemeral X25519 public key: its 32-byte u-coordinate, kept as given.
@@ -41,32 +42,32 @@ pub const SharedSecret = [32]u8;
 
 /// An ephemeral X25519 secret key.
 pub const SecretKey = struct {
-    bytes: [32]u8,
+    bytes: Opaque([32]u8),
 
     /// 32 random bytes from `rng` (`fill_bytes`), as `EphemeralSecret::random_from_rng`.
     pub fn random(rng: anytype) SecretKey {
         var key: SecretKey = undefined;
-        rng.fill_bytes(&key.bytes);
+        rng.fill_bytes(&key.bytes.value);
         return key;
     }
 
     pub fn public(self: *const SecretKey) EphemeralPublicKey {
         // Proof: the clamped scalar is a nonzero multiple of 8 below the group order times 8,
         // so the base point (of prime order) never maps to the identity.
-        return .{ .bytes = X25519.recoverPublicKey(self.bytes) };
+        return .{ .bytes = X25519.recoverPublicKey(self.bytes.value) };
     }
 
     /// The shared secret with `other`, or null when it is non-contributory. Consumes the key:
     /// the secret bytes are zeroized either way.
     pub fn exchange(self: *SecretKey, other: *const EphemeralPublicKey) ?SharedSecret {
         defer self.zeroize();
-        const shared = X25519.scalarmult(self.bytes, other.bytes) catch return null;
+        const shared = X25519.scalarmult(self.bytes.value, other.bytes) catch return null;
         assert(!std.mem.allEqual(u8, &shared, 0));
         return shared;
     }
 
     pub fn zeroize(self: *SecretKey) void {
-        std.crypto.secureZero(u8, &self.bytes);
+        std.crypto.secureZero(u8, &self.bytes.value);
     }
 };
 
@@ -81,13 +82,13 @@ fn hex32(text: []const u8) [32]u8 {
 
 test "x25519 RFC 7748 vectors" {
     for (vectors.rfc7748) |vector| {
-        var key: SecretKey = .{ .bytes = hex32(vector.scalar) };
+        var key: SecretKey = .{ .bytes = .{ .value = hex32(vector.scalar) } };
         const shared = key.exchange(&.{ .bytes = hex32(vector.u) }).?;
         try testing.expectEqualSlices(u8, &hex32(vector.output), &shared);
     }
     const dh = vectors.rfc7748_diffie_hellman;
-    var alice: SecretKey = .{ .bytes = hex32(dh.alice_secret) };
-    var bob: SecretKey = .{ .bytes = hex32(dh.bob_secret) };
+    var alice: SecretKey = .{ .bytes = .{ .value = hex32(dh.alice_secret) } };
+    var bob: SecretKey = .{ .bytes = .{ .value = hex32(dh.bob_secret) } };
     const alice_public = alice.public();
     const bob_public = bob.public();
     try testing.expectEqualSlices(u8, &hex32(dh.alice_public), &alice_public.bytes);
@@ -99,7 +100,7 @@ test "x25519 RFC 7748 vectors" {
 test "x25519 Wycheproof vectors, non-contributory exchanges rejected" {
     var rejected: usize = 0;
     for (vectors.wycheproof) |vector| {
-        var key: SecretKey = .{ .bytes = hex32(vector.private_key) };
+        var key: SecretKey = .{ .bytes = .{ .value = hex32(vector.private_key) } };
         const shared = key.exchange(&.{ .bytes = hex32(vector.public_key) });
         if (vector.shared_secret) |expected| {
             try testing.expectEqualSlices(u8, &hex32(expected), &shared.?);

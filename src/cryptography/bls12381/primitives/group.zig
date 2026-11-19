@@ -16,6 +16,7 @@ const codec = @import("codec");
 const utils = @import("utils");
 const minifuzz = @import("invariants").minifuzz;
 const arithmetic = @import("arithmetic/root.zig");
+const Opaque = @import("../../secret.zig").Opaque;
 
 const Allocator = std.mem.Allocator;
 const Unstructured = minifuzz.Unstructured;
@@ -348,36 +349,37 @@ pub const SmallScalar = struct {
 
 /// A BLS private key: a non-zero scalar that decodes with `reject_zero`.
 pub const Private = struct {
-    scalar: Scalar,
+    /// Opaque so that `{}`/`{any}` never print the key (secret.zig).
+    scalar: Opaque(Scalar),
 
     pub const fixed_size: usize = private_key_length;
 
     pub fn init(scalar: Scalar) Private {
-        return .{ .scalar = scalar };
+        return .{ .scalar = .{ .value = scalar } };
     }
 
     pub fn random(rng: anytype) Private {
-        return .{ .scalar = Scalar.random(rng) };
+        return .{ .scalar = .{ .value = Scalar.random(rng) } };
     }
 
     pub fn arbitrary(u: *Unstructured) minifuzz.Error!Private {
-        return .{ .scalar = try Scalar.arbitrary(u) };
+        return .{ .scalar = .{ .value = try Scalar.arbitrary(u) } };
     }
 
     pub fn eql(a: Private, b: Private) bool {
-        return a.scalar.eql(b.scalar);
+        return a.scalar.value.eql(b.scalar.value);
     }
 
     pub fn zeroize(self: *Private) void {
-        self.scalar.zeroize();
+        self.scalar.value.zeroize();
     }
 
     pub fn write(self: Private, writer: *codec.Writer) void {
-        self.scalar.write(writer);
+        self.scalar.value.write(writer);
     }
 
     pub fn read(gpa: Allocator, reader: *codec.Reader, _: void) codec.Error!Private {
-        return .{ .scalar = try Scalar.read(gpa, reader, .reject_zero) };
+        return .{ .scalar = .{ .value = try Scalar.read(gpa, reader, .reject_zero) } };
     }
 
     pub fn format(_: Private, writer: *std.Io.Writer) std.Io.Writer.Error!void {
@@ -396,7 +398,7 @@ pub const Share = struct {
 
     /// The share's public key `generator * private` in `V.Public`'s group.
     pub fn public(self: Share, comptime V: type) V.Public {
-        return V.Public.generator.mul(self.private.scalar);
+        return V.Public.generator.mul(self.private.scalar.value);
     }
 
     pub fn arbitrary(u: *Unstructured) minifuzz.Error!Share {

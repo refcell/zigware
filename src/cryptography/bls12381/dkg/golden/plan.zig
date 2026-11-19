@@ -268,7 +268,7 @@ pub const Plan = struct {
         const degree = info.degree();
         const shifted = self.shifted_degree(i, degree);
         if (shifted == degree) return golden.deal(gpa, rng, setup, info, dealer, share, strategy);
-        const private: ?Scalar = if (share) |s| s.private.scalar else null;
+        const private: ?Scalar = if (share) |s| s.private.scalar.value else null;
         const constant = try info.unwrap_or_random_share(rng, private);
         var poly = try Poly(Scalar).random_with_constant(gpa, rng, shifted, constant);
         defer poly.deinit(gpa);

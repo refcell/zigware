@@ -445,3 +445,9 @@ Not portable:
 - `sha512/padding.rs` `test_blocks_pad_messages`: Tests the block()/block_count() padding helper of
   commonware's multi-message SHA-512 kernels; zigware has no such module and pads inside
   std.crypto.hash.sha2.Sha512 (docs/lanes/crypto.md: hashes on std.crypto)
+- 2026-11-19 (p2p lane): std.fmt's `{}` and `{any}` ignore `format` and print every struct
+  field, so `Secret`, ed25519, secp256r1, and X25519 private keys printed their bytes (bls
+  `Private` escaped only by fmt's depth limit of 3). Key material now lives in
+  `secret.Opaque(T)` fields, an untagged union that std.fmt prints as `.{ ... }` at any depth;
+  `redaction_test.zig` checks every private key type through `{any}`, `{}`, `{f}`, and a
+  depth-16 print. `expectEqual` cannot compare such fields, so tests compare `== null`.

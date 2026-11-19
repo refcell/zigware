@@ -348,7 +348,7 @@ test "group: share codec and redaction" {
     var buffer: [128]u8 = undefined;
     const text = try std.fmt.bufPrint(&buffer, "{f}", .{share});
     try testing.expect(std.mem.indexOf(u8, text, "REDACTED") != null);
-    const scalar_text = try std.fmt.bufPrint(&buffer, "{f}", .{share.private.scalar});
+    const scalar_text = try std.fmt.bufPrint(&buffer, "{f}", .{share.private.scalar.value});
     try testing.expectEqualStrings("[REDACTED]", scalar_text);
 }
 

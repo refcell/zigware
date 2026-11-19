@@ -17,6 +17,7 @@
 const std = @import("std");
 const assert = std.debug.assert;
 const codec = @import("codec");
+const Opaque = @import("../secret.zig").Opaque;
 const P256 = std.crypto.ecc.P256;
 const Scalar = P256.scalar.Scalar;
 const Fe = P256.Fe;
@@ -191,7 +192,7 @@ fn sign_prehashed(secret: *const [32]u8, hash: [32]u8) Signed {
 
 /// A secp256r1 private key and its public key. Formatting never shows the key.
 pub const PrivateKeyInner = struct {
-    raw: [private_key_length]u8,
+    raw: Opaque([private_key_length]u8),
     public: PublicKeyInner,
 
     /// The key encoded by `raw`, or null if it is zero or not below n.
@@ -199,7 +200,7 @@ pub const PrivateKeyInner = struct {
         const d = nonzero_scalar(raw) orelse return null;
         // d is in [1, n), so d * G is never the identity.
         const point = P256.basePoint.mul(d.toBytes(.big), .big) catch unreachable;
-        return .{ .raw = raw, .public = .from_point(point) };
+        return .{ .raw = .{ .value = raw }, .public = .from_point(point) };
     }
 
     /// Draws 32-byte candidates from `rng` until one is a valid key.
@@ -215,20 +216,20 @@ pub const PrivateKeyInner = struct {
     }
 
     pub fn sign(self: *const PrivateKeyInner, namespace: ?[]const u8, message: []const u8) Signed {
-        return sign_prehashed(&self.raw, payload_hash(namespace, message));
+        return sign_prehashed(&self.raw.value, payload_hash(namespace, message));
     }
 
     /// Constant-time comparison of the keys.
     pub fn eql(a: *const PrivateKeyInner, b: *const PrivateKeyInner) bool {
-        return std.crypto.timing_safe.eql([private_key_length]u8, a.raw, b.raw);
+        return std.crypto.timing_safe.eql([private_key_length]u8, a.raw.value, b.raw.value);
     }
 
     pub fn zeroize(self: *PrivateKeyInner) void {
-        std.crypto.secureZero(u8, &self.raw);
+        std.crypto.secureZero(u8, &self.raw.value);
     }
 
     pub fn write(self: *const PrivateKeyInner, writer: *codec.Writer) void {
-        writer.write_bytes(&self.raw);
+        writer.write_bytes(&self.raw.value);
     }
 
     pub fn read(reader: *codec.Reader) codec.Error!PrivateKeyInner {

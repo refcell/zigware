@@ -19,6 +19,7 @@ const codec = @import("codec");
 const parallel = @import("parallel");
 const hasher_mod = @import("../hasher.zig");
 const transcript = @import("../transcript.zig");
+const Opaque = @import("../secret.zig").Opaque;
 
 pub const Point = std.crypto.ecc.Edwards25519;
 const Fe = Point.Fe;
@@ -128,10 +129,10 @@ pub fn challenge(
 
 /// An expanded signing key (RFC 8032 section 5.1.5).
 pub const SigningKey = struct {
-    seed: [32]u8,
+    seed: Opaque([32]u8),
     /// The clamped secret scalar, reduced mod l.
-    secret: [32]u8,
-    prefix: [32]u8,
+    secret: Opaque([32]u8),
+    prefix: Opaque([32]u8),
     verification_key: VerificationKey,
 
     pub fn from_seed(seed: [32]u8) SigningKey {
@@ -147,9 +148,9 @@ pub const SigningKey = struct {
         const a = Point.basePoint.mul(secret) catch unreachable;
         const a_bytes = a.toBytes();
         const key: SigningKey = .{
-            .seed = seed,
-            .secret = secret,
-            .prefix = digest[32..64].*,
+            .seed = .{ .value = seed },
+            .secret = .{ .value = secret },
+            .prefix = .{ .value = digest[32..64].* },
             .verification_key = .{ .bytes = a_bytes, .minus_a = a.neg(), .small_order = false },
         };
         assert(!is_small_order(a));
@@ -159,7 +160,7 @@ pub const SigningKey = struct {
     /// Signs `message`, framed with `namespace` when it is given; deterministic.
     pub fn sign(self: *const SigningKey, namespace: ?[]const u8, message: []const u8) [64]u8 {
         var hasher = Sha512.init(.{});
-        hasher.update(&self.prefix);
+        hasher.update(&self.prefix.value);
         update_payload(&hasher, namespace, message);
         var nonce_digest = hasher.finalResult();
         defer std.crypto.secureZero(u8, &nonce_digest);
@@ -169,16 +170,16 @@ pub const SigningKey = struct {
         var signature: [64]u8 = undefined;
         signature[0..32].* = r.toBytes();
         const k = challenge(signature[0..32], &self.verification_key.bytes, namespace, message);
-        signature[32..64].* = scalar.mulAdd(k, self.secret, nonce);
+        signature[32..64].* = scalar.mulAdd(k, self.secret.value, nonce);
         // Proof: mulAdd reduces mod l, so s is canonical.
         scalar.rejectNonCanonical(signature[32..64].*) catch unreachable;
         return signature;
     }
 
     pub fn zeroize(self: *SigningKey) void {
-        std.crypto.secureZero(u8, &self.seed);
-        std.crypto.secureZero(u8, &self.secret);
-        std.crypto.secureZero(u8, &self.prefix);
+        std.crypto.secureZero(u8, &self.seed.value);
+        std.crypto.secureZero(u8, &self.secret.value);
+        std.crypto.secureZero(u8, &self.prefix.value);
     }
 };
 

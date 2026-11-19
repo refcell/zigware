@@ -441,7 +441,7 @@ fn Runner(comptime V: type) type {
         ) !Dealer.Started {
             const gpa = self.gpa;
             const degree: u32 = @intCast(@max(@as(i64, info.degree(N3f1)) + shift, 0));
-            const secret = if (share) |s| s.private.scalar else null;
+            const secret = if (share) |s| s.private.scalar.value else null;
             const constant = try info.unwrap_or_random_share(&self.rng, secret);
             var poly = try Poly(Scalar).random_with_constant(gpa, &self.rng, degree, constant);
             defer poly.deinit(gpa);

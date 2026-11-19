@@ -23,7 +23,7 @@ const Error = variant.Error;
 
 /// The public key `generator * private`.
 pub fn compute_public(comptime V: type, private: Private) V.Public {
-    return V.Public.generator.mul(private.scalar);
+    return V.Public.generator.mul(private.scalar.value);
 }
 
 pub fn Keypair(comptime V: type) type {
@@ -55,7 +55,7 @@ pub fn hash_with_namespace(
 
 /// Signs `message` hashed with `dst`.
 pub fn sign(comptime V: type, private: Private, dst: []const u8, message: []const u8) V.Signature {
-    return hash(V, dst, message).mul(private.scalar);
+    return hash(V, dst, message).mul(private.scalar.value);
 }
 
 /// Verifies a signature over `message` hashed with `dst`.
@@ -76,7 +76,7 @@ pub fn sign_message(
     namespace: []const u8,
     message: []const u8,
 ) V.Signature {
-    return hash_with_namespace(V, V.message, namespace, message).mul(private.scalar);
+    return hash_with_namespace(V, V.message, namespace, message).mul(private.scalar.value);
 }
 
 /// Verifies a signature over `message` in `namespace`. Assumes `public` and `signature`
@@ -100,7 +100,7 @@ pub fn sign_proof_of_possession(
     const public = compute_public(V, private);
     const encoded = public.to_bytes();
     const hm = hash_with_namespace(V, V.proof_of_possession, namespace, &encoded);
-    return hm.mul(private.scalar);
+    return hm.mul(private.scalar.value);
 }
 
 /// Verifies a proof of possession for `public`.

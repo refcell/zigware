@@ -39,7 +39,7 @@ pub const PrivateKey = struct {
     }
 
     pub fn from_private(key: Private) PrivateKey {
-        assert(!key.scalar.eql(group.Scalar.zero));
+        assert(!key.scalar.value.eql(group.Scalar.zero));
         return .{ .key = key };
     }
 
@@ -58,8 +58,8 @@ pub const PrivateKey = struct {
 
     /// Constant-time comparison of the encodings.
     pub fn eql(a: *const PrivateKey, b: *const PrivateKey) bool {
-        const a_bytes = a.key.scalar.to_bytes();
-        const b_bytes = b.key.scalar.to_bytes();
+        const a_bytes = a.key.scalar.value.to_bytes();
+        const b_bytes = b.key.scalar.value.to_bytes();
         return std.crypto.timing_safe.eql([fixed_size]u8, a_bytes, b_bytes);
     }
 

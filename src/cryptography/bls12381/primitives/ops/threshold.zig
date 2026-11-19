@@ -43,7 +43,7 @@ pub fn sign_proof_of_possession(
 ) PartialSignature(V) {
     const encoded = sharing.public().to_bytes();
     const hm = ops.hash_with_namespace(V, V.proof_of_possession, namespace, &encoded);
-    return .{ .index = share.index, .value = hm.mul(share.private.scalar) };
+    return .{ .index = share.index, .value = hm.mul(share.private.scalar.value) };
 }
 
 /// Verifies a partial signature against its signer's partial public key. Assumes the

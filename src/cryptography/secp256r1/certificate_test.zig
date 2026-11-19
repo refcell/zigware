@@ -147,10 +147,8 @@ test "secp256r1 certificate member reports membership without signing" {
 
     // A key outside the committee yields no member.
     const outsider = PrivateKey.random(&rng).public_key();
-    try testing.expectEqual(
-        null,
-        try Scheme.member(gpa, namespace, try clone(participants), outsider),
-    );
+    const outside = try Scheme.member(gpa, namespace, try clone(participants), outsider);
+    try testing.expect(outside == null);
 
     const index = Participant.init(2);
     const key = participants.keys().key(index).?.*;
@@ -195,7 +193,7 @@ test "secp256r1 certificate member uses identity keys" {
     }
     for (signing_keys) |key| {
         const set = try clone(&participants);
-        try testing.expectEqual(null, try Scheme.member(gpa, namespace, set, key));
+        try testing.expect((try Scheme.member(gpa, namespace, set, key)) == null);
     }
 }
 

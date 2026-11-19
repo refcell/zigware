@@ -277,7 +277,8 @@ pub fn deal(
 ) !SignedDealerLog {
     try check_setup(setup, info);
     _ = try info.dealer_index(me.public_key());
-    var constant = try info.unwrap_or_random_share(rng, if (share) |s| s.private.scalar else null);
+    const secret = if (share) |s| s.private.scalar.value else null;
+    var constant = try info.unwrap_or_random_share(rng, secret);
     defer constant.zeroize();
     var poly = try Poly(Scalar).random_with_constant(gpa, rng, info.degree(), constant);
     defer {
