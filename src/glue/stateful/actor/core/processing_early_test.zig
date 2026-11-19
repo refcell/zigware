@@ -296,3 +296,65 @@ test "stateful processing: a verification keeps a cancelled proposal's replay ru
     try testing.expectEqual(@as(u32, 1), probe.calls);
     try testing.expectError(error.Empty, duplicate.started.try_recv());
 }
+
+test "stateful processing: a pending proposal does not block an active verification" {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer check(&fixture);
+    const genesis = TestBlock.genesis();
+    const block = try uncached_child(&fixture, &genesis, 1);
+    var verify_probe: Probe = .{ .target = block.digest() };
+    defer verify_probe.deinit();
+    var verify_gate = try verify_probe.add_gate();
+    defer verify_gate.started.deinit();
+    fixture.processing.verifications.verifier.app.probe = &verify_probe;
+    var propose_probe: Probe = .{ .target = genesis.digest() };
+    defer propose_probe.deinit();
+    var propose_gate = try propose_probe.add_gate();
+    defer propose_gate.started.deinit();
+    fixture.processing.processor.app.propose_probe = &propose_probe;
+
+    var verdict = try fixture.verify(&.{ block, genesis });
+    defer verdict.deinit();
+    try verify_gate.started.recv();
+    var proposal = try fixture.propose_async(&.{genesis}, 2);
+    defer proposal.deinit();
+    try propose_gate.started.recv();
+    // The active verification answers while the build is held in the application.
+    try verify_gate.release.send({});
+    try testing.expect(try verdict.recv());
+    try propose_gate.release.send({});
+    const built = try proposal.recv();
+    built.discard();
+}
+
+test "stateful processing: a pending proposal does not block a new verification" {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer check(&fixture);
+    const genesis = TestBlock.genesis();
+    const block = try uncached_child(&fixture, &genesis, 2);
+    var propose_probe: Probe = .{ .target = genesis.digest() };
+    defer propose_probe.deinit();
+    var propose_gate = try propose_probe.add_gate();
+    defer propose_gate.started.deinit();
+    fixture.processing.processor.app.propose_probe = &propose_probe;
+    var verify_probe: Probe = .{ .target = block.digest() };
+    defer verify_probe.deinit();
+    var verify_gate = try verify_probe.add_gate();
+    defer verify_gate.started.deinit();
+    fixture.processing.verifications.verifier.app.probe = &verify_probe;
+
+    var proposal = try fixture.propose_async(&.{genesis}, 1);
+    defer proposal.deinit();
+    try propose_gate.started.recv();
+    // A verification sent while the build is held still starts and answers.
+    var verdict = try fixture.verify(&.{ block, genesis });
+    defer verdict.deinit();
+    try verify_gate.started.recv();
+    try verify_gate.release.send({});
+    try testing.expect(try verdict.recv());
+    try propose_gate.release.send({});
+    const built = try proposal.recv();
+    built.discard();
+}
