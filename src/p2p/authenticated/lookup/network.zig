@@ -546,4 +546,5 @@ test {
     _ = @import("network_handshake_test.zig");
     _ = @import("network_listener_test.zig");
     _ = @import("network_dialer_test.zig");
+    _ = @import("network_production_test.zig");
 }

@@ -452,7 +452,7 @@ Open:
 - [x] `authenticated/lookup/mod.rs` `test_determinism_some`: run_network in Mode::Some (each peer
   sends to a subset) over seeds 0..10, running each seed twice and comparing auditor state; zig
   connectivity only covers Mode::All with no replay comparison; goes in lookup/network_test.zig
-- [ ] `authenticated/lookup/mod.rs` `test_tokio_connectivity`: run_network (10 peers, Mode::One) on
+- [x] `authenticated/lookup/mod.rs` `test_tokio_connectivity`: run_network (10 peers, Mode::One) on
   the production runtime over real sockets; runtime.production exists, but the lane skipped the
   discovery twin as redundant with the deterministic run (docs/lanes/p2p.md 2026-11-18); would go in
   lookup/network_test.zig
@@ -704,3 +704,6 @@ Not portable:
   closed router for its dropped channels. `kill_retained_on_overflow` checks that a kill
   lands with the control queue full; a zigware kill drains the queue and comes first (where
   commonware queues it last), so the test checks `.killed` rather than the order.
+- 2026-11-19: lookup `test_tokio_connectivity` in lookup/network_production_test.zig: 10 peers,
+  Mode::One, real TCP on `runtime.production`, from a probed random base port like discovery's.
+  It reuses network_test.zig's public helpers rather than making the lookup harness generic.
