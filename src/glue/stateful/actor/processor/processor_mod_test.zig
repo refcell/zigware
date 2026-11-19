@@ -518,3 +518,39 @@ test "stateful processor: overlapping rebuilds share processing across cancellat
     try testing.expect(harness.execution.flights_idle());
     try testing.expect(harness.execution.pending_contains(block3.digest()));
 }
+
+// commonware `execution_finalization_prunes_before_finalized_hook_completes`: the losing
+// fork is pruned from the pending cache before the finalized hook runs, while the winner's
+// descendants stay cached.
+test "stateful processor: finalization prunes before the finalized hook completes" {
+    var harness: Harness = undefined;
+    try harness.init();
+    defer harness.deinit();
+    const genesis = TestBlock.genesis();
+    const block1 = try harness.stage_pending_child(&genesis, 1);
+    try harness.finalize(&block1);
+    const loser = try harness.stage_pending_child(&block1, 2);
+    const winner = try harness.stage_pending_child(&block1, 3);
+    const winner_child = try harness.stage_pending_child(&winner, 4);
+    var probe: Probe = .{ .target = winner.digest() };
+    defer probe.deinit();
+    const handles = try probe.add_gate();
+    var gate: HeldGate = .{ .started = handles.started, .release = handles.release };
+    defer gate.deinit();
+    harness.processor.app.finalized_probe = &probe;
+
+    var finalizing = try testing.io.concurrent(finalize_task, .{ &harness, winner });
+    var live = true;
+    errdefer if (live) {
+        if (!gate.released) gate.open() catch {};
+        finalizing.await(testing.io) catch {};
+    };
+    try gate.started.recv();
+    const execution = harness.execution;
+    try testing.expect(execution.pending_contains(winner_child.digest()));
+    try testing.expect(!execution.pending_contains(block1.digest()));
+    try testing.expect(!execution.pending_contains(loser.digest()));
+    try gate.open();
+    live = false;
+    try finalizing.await(testing.io);
+}
