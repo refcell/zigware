@@ -98,9 +98,21 @@ const Env = struct {
 
     /// A wrapper over the validator's marshal and shards under `ctx.child(name)`.
     fn wrap(self: *Env, ctx: Ctx, comptime name: []const u8, app: Mock) !M {
+        return self.wrap_as(Mock, ctx, name, app);
+    }
+
+    /// A wrapper over application `A` (owned), as `wrap`.
+    fn wrap_as(
+        self: *Env,
+        comptime A: type,
+        ctx: Ctx,
+        comptime name: []const u8,
+        app: A,
+    ) !common.MarshaledOf(A) {
+        const W = common.MarshaledOf(A);
         const marshal = self.validator.mailbox.clone();
         const shard_mailbox = self.validator.extra.clone();
-        const config = common.marshaled_config(M, app, marshal, shard_mailbox, self.provider());
+        const config = common.marshaled_config(W, app, marshal, shard_mailbox, self.provider());
         return .init(ctx.child(name), config);
     }
 };
@@ -606,6 +618,245 @@ test "coding prepare builds on epoch genesis" {
             const decision = (try wrapper.prepare(ctx.io(), context)) orelse
                 return error.PrepareDecisionMissing;
             try testing.expect(std.meta.eql(decision, Handoff{ .stage = child_commitment }));
+        }
+    }.body);
+}
+
+/// Persists the stale block a pre-crash relay broadcast stored for `round` by `me`, built on
+/// a parent replay has since replaced; returns its digest and commitment.
+fn persist_stale(ctx: Ctx, env: *Env, round: Round) !struct { common.D, common.Commitment } {
+    const genesis = try common.genesis_block(gpa);
+    const replaced: common.Commitment = .init(
+        common.Sha256.hash(&.{"replaced-parent-block"}),
+        common.Sha256.hash(&.{"replaced-parent-inner"}),
+        common.Sha256.hash(&.{"replaced-parent-ctx"}),
+        common.committee_config(),
+    );
+    const context: common.CodingCtx = .{
+        .round = round,
+        .leader = env.me(),
+        .parent = .{ .new(1), replaced },
+    };
+    const stale = try common.coded(gpa, context, genesis.digest(), 1, 100);
+    const result = .{ stale.digest(), stale.commitment() };
+    var persisted = try utils.channel.oneshot.channel(void, gpa, ctx.io());
+    defer persisted.receiver.deinit();
+    _ = try env.validator.mailbox.proposed(round, stale, .all, persisted.sender);
+    try persisted.receiver.recv();
+    return result;
+}
+
+fn expect_stored(env: *Env, digest: common.D) !void {
+    var block = (try env.validator.mailbox.get_block(.{ .digest = digest })) orelse
+        return error.BlockLost;
+    block.deinit(gpa);
+}
+
+test "prepare rebuilds despite verified block on restart" {
+    try run_seeded(0, struct {
+        fn body(ctx: Ctx) anyerror!void {
+            var env: Env = undefined;
+            try env.init(ctx);
+            defer env.deinit();
+            const round = common.round_at(0, 2);
+            const stale_digest, const stale_commitment = try persist_stale(ctx, &env, round);
+            try env.restart(ctx, "restarted");
+            // The restarted marshal restores the stale block.
+            const marshal = env.validator.mailbox;
+            const restored = (try verified_commitment(marshal, round)) orelse
+                return error.StaleBlockLost;
+            try testing.expect(restored.eql(stale_commitment));
+            var context = try first_context(env.me());
+            context.round = round;
+            const fresh = try first_block(context, 200);
+            const fresh_digest = fresh.digest();
+            const fresh_commitment = try commitment_of(fresh);
+            const app = Mock.init(gpa).with_handoff(.{ .vote = {} }).with_propose_result(fresh);
+            var wrapper = try env.wrap(ctx, "marshaled", app);
+            // A restarted leader builds a fresh block under the application's decision.
+            const decision = (try wrapper.prepare(ctx.io(), context)) orelse
+                return error.PrepareDecisionMissing;
+            try testing.expect(std.meta.eql(decision, Handoff{ .vote = fresh_commitment }));
+            _ = wrapper.broadcast(fresh_commitment, .{ .propose = .{ .round = round } });
+            // The fresh block certifies through the relay handshake.
+            try testing.expectEqual(true, try wrapper.certify(ctx.io(), round, fresh_commitment));
+            // The stale block stays stored first at the round.
+            const first = (try verified_commitment(marshal, round)) orelse
+                return error.StaleBlockLost;
+            try testing.expect(first.eql(stale_commitment));
+            try ctx.sleep(.fromMilliseconds(100));
+            wrapper.deinit();
+            try env.restart(ctx, "recovered");
+            // Both blocks are recoverable from storage.
+            try expect_stored(&env, stale_digest);
+            try expect_stored(&env, fresh_digest);
+            var certifier = try env.wrap(ctx, "certifier", Mock.init(gpa));
+            defer certifier.deinit();
+            // The fresh block certifies from storage after a restart.
+            const recertified = try certifier.certify(ctx.io(), round, fresh_commitment);
+            try testing.expectEqual(true, recertified);
+            try ctx.sleep(.fromMilliseconds(100));
+        }
+    }.body);
+}
+
+const verifying = @import("../../mocks/verifying.zig");
+const GatedApp =
+    verifying.GatedVerifyingApp(common.CodingB, Ctx, common.CodingCtx, common.Ancestry);
+const RecordingApp =
+    verifying.RecordingVerifyingApp(common.CodingB, Ctx, common.CodingCtx, common.Ancestry);
+
+/// The epoch-0 boundary block over `parent` at height `blocks_per_epoch - 1`, by the default
+/// leader at its own view.
+fn boundary_block(parent_commitment: common.Commitment, parent: common.D) !common.Block {
+    const height = shared.blocks_per_epoch - 1;
+    const context: common.CodingCtx = .{
+        .round = common.round_at(0, height),
+        .leader = shared.default_leader(),
+        .parent = .{ .zero(), parent_commitment },
+    };
+    return common.coded(gpa, context, parent, height, 1900);
+}
+
+test "propose reuses reproposed boundary block on restart" {
+    try run_seeded(0, struct {
+        fn body(ctx: Ctx) anyerror!void {
+            var env: Env = undefined;
+            try env.init(ctx);
+            defer env.deinit();
+            const genesis = try common.genesis_block(gpa);
+            const genesis_commitment = try common.genesis_coding_commitment(gpa, &genesis);
+            // The pre-crash relay broadcast of the re-proposal stored the boundary block at
+            // the re-proposal round.
+            const boundary = try boundary_block(genesis_commitment, genesis.digest());
+            const boundary_commitment = boundary.commitment();
+            const boundary_view = shared.blocks_per_epoch - 1;
+            const round = common.round_at(0, boundary_view + 1);
+            try testing.expect(try env.validator.mailbox.verified(round, boundary));
+            const context: common.CodingCtx = .{
+                .round = round,
+                .leader = env.me(),
+                .parent = .{ .new(boundary_view), boundary_commitment },
+            };
+            // The application cannot build and its verification never completes, so the
+            // checks below hold only if the stored parent is re-proposed as-is.
+            var gate = try verifying.Gated.init(gpa, ctx.io());
+            defer gate.state.deinit();
+            defer gate.started.deinit();
+            defer gate.release.deinit();
+            const app: GatedApp = .{ .state = &gate.state };
+            var wrapper = try env.wrap_as(GatedApp, ctx, "marshaled", app);
+            defer wrapper.deinit();
+            const commitment = (try wrapper.propose(ctx.io(), context)) orelse
+                return error.NoProposal;
+            try testing.expect(commitment.eql(boundary_commitment));
+            _ = wrapper.broadcast(commitment, .{ .propose = .{ .round = round } });
+            // The re-proposal certifies through the relay handshake, without app verification.
+            try testing.expectEqual(true, try wrapper.certify(ctx.io(), round, commitment));
+            try testing.expectError(error.Empty, gate.started.try_recv());
+        }
+    }.body);
+}
+
+/// The log of `RecordingApp`; it outlives the runtime, since verifications pending at
+/// shutdown record their cancellation.
+var observed: verifying.Observed(common.D) = undefined;
+
+fn expect_observed(expected: []const verifying.Verification(common.D)) !void {
+    try testing.expectEqual(expected.len, observed.items.items.len);
+    for (expected, observed.items.items) |want, seen| {
+        try testing.expect(std.meta.eql(want, seen));
+    }
+}
+
+fn releases_verification_body(ctx: Ctx) anyerror!void {
+    var env: Env = undefined;
+    try env.init(ctx);
+    defer env.deinit();
+    const marshal = env.validator.mailbox;
+    const participants = env.validators.participants;
+    // The parent at view 1 is available locally.
+    const parent_context = try first_context(shared.default_leader());
+    const config = common.committee_config();
+    const parent = try common.encode_block(gpa, try first_block(parent_context, 100), config);
+    const parent_digest = parent.digest();
+    const parent_commitment = parent.commitment();
+    try testing.expect(try marshal.verified(parent_context.round, parent));
+    // Participant 1 equivocates at view 2: children A and B share one context.
+    const round = common.round_at(0, 2);
+    const context: common.CodingCtx = .{
+        .round = round,
+        .leader = participants[1],
+        .parent = .{ .new(1), parent_commitment },
+    };
+    const a = try common.coded(gpa, context, parent_digest, 2, 200);
+    const b = try common.coded(gpa, context, parent_digest, 2, 201);
+    const a_commitment = a.commitment();
+    const b_commitment = b.commitment();
+    const b_digest = b.digest();
+    try testing.expect(!a_commitment.eql(b_commitment));
+    const app: RecordingApp = .{ .observed = &observed };
+    var wrapper = try env.wrap_as(RecordingApp, ctx, "marshaled", app);
+    defer wrapper.deinit();
+    // The leader withholds A's shards. Consensus asks to verify it.
+    var verify_a = try wrapper.start_verify(context, a_commitment);
+    defer verify_a.deinit();
+    try ctx.sleep(.fromMilliseconds(10));
+    try expect_observed(&.{});
+    // B is reconstructed and notarized, so consensus asks to certify it.
+    try testing.expect(try marshal.verified(round, b));
+    var certify_b = try wrapper.start_certify(round, b_commitment);
+    defer certify_b.deinit();
+    try ctx.sleep(.fromMilliseconds(50));
+    try expect_observed(&.{.{ .started = b_digest }});
+    // A is reconstructed: the application must not verify a block that conflicts with the
+    // certified one.
+    try testing.expect(try marshal.verified(round, a));
+    try ctx.sleep(.fromMilliseconds(100));
+    try expect_observed(&.{.{ .started = b_digest }});
+}
+
+test "certify releases conflicting verification" {
+    observed = .init(gpa);
+    defer observed.deinit();
+    try run_seeded(0, releases_verification_body);
+}
+
+test "certify releases conflicting reproposal" {
+    try common.run(struct {
+        fn body(ctx: Ctx) anyerror!void {
+            var env: Env = undefined;
+            try env.init(ctx);
+            defer env.deinit();
+            var wrapper = try env.wrap(ctx, "marshaled", Mock.init(gpa));
+            defer wrapper.deinit();
+            // The epoch boundary block, which this validator does not hold.
+            const missing_parent = common.Sha256.hash(&.{"parent"});
+            var boundary = try boundary_block(harness.genesis_commitment(), missing_parent);
+            defer boundary.deinit(gpa);
+            const boundary_commitment = boundary.commitment();
+            const boundary_view = shared.blocks_per_epoch - 1;
+            // B, led by participant 1 on the boundary block, is what the network notarizes.
+            const round = common.round_at(0, boundary_view + 1);
+            const context: common.CodingCtx = .{
+                .round = round,
+                .leader = env.validators.participants[1],
+                .parent = .{ .new(boundary_view), boundary_commitment },
+            };
+            var b = try common.coded(gpa, context, boundary.digest(), boundary_view + 1, 200);
+            defer b.deinit(gpa);
+            const b_commitment = b.commitment();
+            try testing.expect(!boundary_commitment.eql(b_commitment));
+            // Verifying the re-proposal waits for the boundary block.
+            var verify = try wrapper.start_verify(context, boundary_commitment);
+            defer verify.deinit();
+            try ctx.sleep(.fromMilliseconds(10));
+            try testing.expectError(error.Empty, verify.try_recv());
+            // Certifying B claims the round, so the wait for the boundary block ends.
+            var certify_b = try wrapper.start_certify(round, b_commitment);
+            defer certify_b.deinit();
+            try ctx.sleep(.fromMilliseconds(10));
+            try testing.expectError(error.Closed, verify.try_recv());
         }
     }.body);
 }
