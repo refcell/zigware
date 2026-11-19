@@ -92,6 +92,52 @@ test "a recv with no data times out, and the ring stays usable" {
     try testing.expectEqualStrings("data", &buffer);
 }
 
+test "an expired deadline submits nothing and leaves ready data unread" {
+    var ring: Ring = undefined;
+    try init_ring(&ring, 2);
+    defer ring.deinit();
+    const worker = try worker_or_skip(&ring);
+    const pair = try socket_pair();
+    defer Io.net.Socket.closeMany(io, &pair);
+    const data = "data";
+    try testing.expectEqual(data.len, std.os.linux.write(pair[1].handle, data, data.len));
+    var buffer: [4]u8 = @splat(0);
+    const recv: ring_mod.Operation = .{ .recv = .{ .fd = pair[0].handle, .buffer = &buffer } };
+    try testing.expectError(error.Timeout, worker.perform(recv, deadline_in_ms(-1)));
+    try testing.expectEqualSlices(u8, &@as([4]u8, @splat(0)), &buffer);
+    // The data is still in the socket for the next recv.
+    try testing.expectEqual(@as(i32, 4), try worker.perform(recv, .none));
+    try testing.expectEqualStrings("data", &buffer);
+}
+
+fn canceled_recv(ring: *Ring, fd: std.posix.fd_t) anyerror!i32 {
+    var buffer: [4]u8 = undefined;
+    const worker = try worker_or_skip(ring);
+    // Waits for the cancellation, so it is pending when the recv starts.
+    io.sleep(.fromSeconds(10), .awake) catch |err| {
+        if (err != error.Canceled) return err;
+        io.recancel();
+    };
+    const result = try worker.perform(.{ .recv = .{ .fd = fd, .buffer = &buffer } }, .none);
+    try testing.expectEqualStrings("data", &buffer);
+    // The completed recv returned its bytes and re-armed the cancellation.
+    try testing.expectError(error.Canceled, io.checkCancel());
+    return result;
+}
+
+test "a canceled recv that completed returns its bytes and stays canceled" {
+    var ring: Ring = undefined;
+    try init_ring(&ring, 2);
+    defer ring.deinit();
+    const pair = try socket_pair();
+    defer Io.net.Socket.closeMany(io, &pair);
+    const data = "data";
+    try testing.expectEqual(data.len, std.os.linux.write(pair[1].handle, data, data.len));
+    var future = try io.concurrent(canceled_recv, .{ &ring, pair[0].handle });
+    try io.sleep(.fromMilliseconds(5), .awake);
+    try testing.expectEqual(@as(i32, 4), try future.cancel(io));
+}
+
 fn blocked_recv(ring: *Ring, fd: std.posix.fd_t) anyerror!i32 {
     var buffer: [4]u8 = undefined;
     const worker = try worker_or_skip(ring);

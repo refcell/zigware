@@ -201,6 +201,12 @@ const LinuxWorker = struct {
         worker.busy = true;
         defer worker.busy = false;
         const deadline = timeout.toDeadline(worker.io);
+        // An already-expired deadline submits nothing (commonware's
+        // `test_expired_registration_never_stages`), so a recv leaves ready data unread.
+        if (deadline == .deadline) {
+            const left = deadline.deadline.durationFromNow(worker.io).raw.nanoseconds;
+            if (left <= 0) return error.Timeout;
+        }
         worker.operation_done = false;
         worker.queue(operation);
         while (true) {
@@ -231,9 +237,11 @@ const LinuxWorker = struct {
         assert(worker.uring.sq.sqe_tail -% worker.uring.sq.sqe_head == 1);
     }
 
-    /// Cancels the operation in flight, waits until the kernel is done with it, and returns
-    /// `err`.
-    fn abort(worker: *LinuxWorker, err: PerformError) PerformError {
+    /// Cancels the operation in flight and waits until the kernel is done with it. Returns
+    /// `err` if the cancellation took effect. An operation that completed first keeps its
+    /// result, as in commonware, so a recv that lost the race keeps the bytes it read; a
+    /// cancellation request it consumed is re-armed for the task's next cancellation point.
+    fn abort(worker: *LinuxWorker, err: PerformError) PerformError!i32 {
         assert(!worker.operation_done);
         const sqe = worker.uring.get_sqe() catch unreachable;
         sqe.prep_cancel(user_data_operation, 0);
@@ -243,7 +251,10 @@ const LinuxWorker = struct {
             worker.enter(slice_ns);
             worker.reap();
         }
-        return err;
+        assert(worker.operation_done and worker.cancel_done);
+        if (worker.result == -@as(i32, @backingInt(linux.E.CANCELED))) return err;
+        if (err == error.Canceled) worker.io.recancel();
+        return worker.result;
     }
 
     /// Submits what is queued and waits up to `wait_ns` for a completion.
