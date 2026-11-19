@@ -481,3 +481,164 @@ test "round reports conflicting finalizes as evidence" {
     try testing.expectEqual(1, count_activities(&h.log, .conflicting_finalize));
     try testing.expectEqual(1, h.log.blocked.items.len);
 }
+
+/// A round for the fixture's non-signing verifier.
+fn verifier_round(h: *Harness) Round {
+    const log = &h.log;
+    return Round.init(at, &h.fixture.verifier, .{ .log = log }, .{ .log = log }, false);
+}
+
+// commonware `test_local_certificate_preserves_proposal_authority`: a locally constructed
+// notarization or finalization fixes its proposal before the votes are compacted, so a
+// conflicting certificate of the other kind does not replace it.
+test "round keeps a constructed certificate's proposal against a conflicting one" {
+    const gpa = testing.allocator;
+    const quorum = utils.N3f1.quorum(5);
+    inline for (.{ .notarization, .finalization }) |kind| {
+        var h: Harness = undefined;
+        try h.init();
+        defer h.deinit();
+        var round = verifier_round(&h);
+        defer round.deinit(gpa);
+        try testing.expect(try round.add_network(gpa, h.peer(0), try h.notarize(0, 1)));
+        round.set_leader(.init(0));
+        if (kind == .notarization) {
+            for (1..quorum) |i| {
+                try testing.expect(try round.add_network(gpa, h.peer(i), try h.notarize(i, 1)));
+            }
+        } else for (0..quorum) |i| {
+            try testing.expect(try round.add_network(gpa, h.peer(i), try h.finalize(i, 1)));
+        }
+        var rng = utils.rng.test_rng();
+        var batch = (try round.try_construct(gpa, &rng, sequential)).?;
+        defer batch.deinit(gpa);
+        try testing.expectEqual(quorum, batch.processed);
+        try testing.expectEqual(0, batch.invalid.len);
+        try testing.expect(!batch.fallback);
+        try testing.expect(batch.certificate.? == kind);
+        const other = if (kind == .notarization) .finalization else .notarization;
+        var conflicting = try build_certificate(&h.fixture, other, 2, quorum);
+        defer conflicting.deinit(gpa);
+        try testing.expect(!try round.record_certificate(gpa, &conflicting));
+        try testing.expect(round.try_forward_proposal(.init(1)).?.eql(proposal(1)));
+    }
+}
+
+// commonware `test_constructed_finalize_restores_only_network_votes`: our finalize
+// replaces a conflicting leader proposal and restores only the matching network
+// finalizes for verification; it is itself trusted.
+test "round restores matching network finalizes behind our own finalize" {
+    const gpa = testing.allocator;
+    const quorum = utils.N3f1.quorum(5);
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    var round = verifier_round(&h);
+    defer round.deinit(gpa);
+    try testing.expect(try round.add_network(gpa, h.peer(quorum), try h.notarize(quorum, 2)));
+    round.set_leader(.init(quorum));
+    for (1..quorum) |i| {
+        try testing.expect(try round.add_network(gpa, h.peer(i), try h.finalize(i, 1)));
+    }
+    _ = try round.accept_vote(gpa, try h.finalize(0, 1), true);
+    var rng = utils.rng.test_rng();
+    var batch = (try round.try_construct(gpa, &rng, sequential)).?;
+    defer batch.deinit(gpa);
+    try testing.expectEqual(quorum - 1, batch.processed);
+    try testing.expectEqual(0, batch.invalid.len);
+    try testing.expect(!batch.fallback);
+    try testing.expect(batch.certificate.?.finalization.proposal.eql(proposal(1)));
+}
+
+// commonware `test_notarization_restores_filtered_finalizes`: matching finalizes filtered
+// out by a conflicting leader proposal, buffered before and after it, are restored by
+// the notarization of their proposal.
+test "round restores filtered finalizes once their proposal is notarized" {
+    const gpa = testing.allocator;
+    const quorum = utils.N3f1.quorum(5);
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    var round = verifier_round(&h);
+    defer round.deinit(gpa);
+    for (0..quorum / 2) |i| {
+        try testing.expect(try round.add_network(gpa, h.peer(i), try h.finalize(i, 1)));
+    }
+    try testing.expect(try round.add_network(gpa, h.peer(quorum), try h.notarize(quorum, 2)));
+    round.set_leader(.init(quorum));
+    for (quorum / 2..quorum) |i| {
+        try testing.expect(try round.add_network(gpa, h.peer(i), try h.finalize(i, 1)));
+    }
+    var notarization = try build_certificate(&h.fixture, .notarization, 1, quorum);
+    defer notarization.deinit(gpa);
+    try testing.expect(try round.record_certificate(gpa, &notarization));
+    var rng = utils.rng.test_rng();
+    var batch = (try round.try_construct(gpa, &rng, sequential)).?;
+    defer batch.deinit(gpa);
+    try testing.expectEqual(quorum, batch.processed);
+    try testing.expectEqual(0, batch.invalid.len);
+    try testing.expect(!batch.fallback);
+    try testing.expect(batch.certificate.?.finalization.proposal.eql(proposal(1)));
+}
+
+// commonware `test_construct_prioritizes_kinds_in_order`: with a notarize quorum and a
+// nullify from everyone ready, notarizes verify first, then nullifies, then nothing.
+test "round constructs vote kinds in priority order" {
+    const gpa = testing.allocator;
+    const quorum = utils.N3f1.quorum(5);
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    var round = h.round(0);
+    defer round.deinit(gpa);
+    for (0..5) |i| {
+        if (i < quorum) {
+            try testing.expect(try round.add_network(gpa, h.peer(i), try h.notarize(i, 1)));
+        }
+        try testing.expect(try round.add_network(gpa, h.peer(i), try h.nullify(i)));
+    }
+    round.set_leader(.init(0));
+    var rng = utils.rng.test_rng();
+    var first = (try round.try_construct(gpa, &rng, sequential)).?;
+    defer first.deinit(gpa);
+    try testing.expectEqual(quorum, first.processed);
+    try testing.expect(first.certificate.? == .notarization);
+    var second = (try round.try_construct(gpa, &rng, sequential)).?;
+    defer second.deinit(gpa);
+    try testing.expectEqual(5, second.processed);
+    try testing.expect(second.certificate.? == .nullification);
+    try testing.expectEqual(null, try round.try_construct(gpa, &rng, sequential));
+}
+
+// commonware `test_finalization_construction_filters_overridden_proposal`: a numeric quorum
+// of finalizes split between the leader's proposal and a certified override forms no
+// finalization; finalizes all matching the certified proposal do.
+test "round does not mix finalizes across an overridden proposal" {
+    const gpa = testing.allocator;
+    const quorum = utils.N3f1.quorum(5);
+    var h: Harness = undefined;
+    try h.init();
+    defer h.deinit();
+    var rng = utils.rng.test_rng();
+    {
+        var round = h.round(0);
+        defer round.deinit(gpa);
+        round.set_leader(.init(0));
+        _ = try round.accept_vote(gpa, try h.notarize(0, 1), true);
+        for (0..quorum - 1) |i| _ = try round.accept_vote(gpa, try h.finalize(i, 1), true);
+        var notarization = try build_certificate(&h.fixture, .notarization, 2, quorum);
+        defer notarization.deinit(gpa);
+        _ = try round.record_certificate(gpa, &notarization);
+        _ = try round.accept_vote(gpa, try h.finalize(quorum - 1, 2), true);
+        try testing.expectEqual(null, try round.try_construct(gpa, &rng, sequential));
+    }
+    var round = h.round(0);
+    defer round.deinit(gpa);
+    var notarization = try build_certificate(&h.fixture, .notarization, 2, quorum);
+    defer notarization.deinit(gpa);
+    _ = try round.record_certificate(gpa, &notarization);
+    for (0..quorum) |i| _ = try round.accept_vote(gpa, try h.finalize(i, 2), true);
+    var batch = (try round.try_construct(gpa, &rng, sequential)).?;
+    defer batch.deinit(gpa);
+    try testing.expect(batch.certificate.?.finalization.proposal.eql(proposal(2)));
+}

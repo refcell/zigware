@@ -1080,3 +1080,116 @@ fn quorum_votes_construct_certificate(comptime entry: anytype) !void {
 test "batcher builds a notarization from quorum votes on every scheme" {
     try types_scheme_test.for_each_scheme(quorum_votes_construct_certificate);
 }
+
+/// Delivers a finalize for `value` from each signer in `signers`.
+fn deliver_finalizes(
+    harness: *Harness,
+    signers: []const usize,
+    value: types.Proposal(Digest),
+) !void {
+    assert(signers.len > 0);
+    const Finalize = types.Finalize(Scheme, Digest);
+    const Vote = types.Vote(Scheme, Digest);
+    for (signers) |signer| {
+        const vote = (try Finalize.sign(gpa, &harness.fixture.schemes[signer], value)).?;
+        const bytes = try codec.encode(Vote, gpa, .{ .finalize = vote });
+        try harness.votes.deliver(harness.fixture.participants[signer], bytes);
+    }
+}
+
+/// Drains voter messages until a notarization and a finalization of `value` arrive; a
+/// forwarded proposal must be `value`, and nothing else may arrive.
+fn expect_notarization_and_finalization(harness: *Harness, value: types.Proposal(Digest)) !void {
+    var notarized = false;
+    var finalized = false;
+    for (0..8) |_| {
+        if (notarized and finalized) return;
+        const message = (try harness.voter.recv()) orelse return error.Closed;
+        defer VoterMessage.discard(message);
+        switch (message) {
+            .proposal => |forwarded| try testing.expect(forwarded.eql(value)),
+            .verified => |verified| switch (verified.certificate) {
+                .notarization => |notarization| {
+                    try testing.expect(notarization.proposal.eql(value));
+                    notarized = true;
+                },
+                .finalization => |finalization| {
+                    try testing.expect(finalization.proposal.eql(value));
+                    finalized = true;
+                },
+                .nullification => return error.UnexpectedNullification,
+            },
+            else => return error.UnexpectedMessage,
+        }
+    }
+    try testing.expect(notarized and finalized);
+}
+
+/// commonware `buffered_finalization_setup`: at view 1 under leader 1, a finalize quorum
+/// for proposal 1 is buffered but unverifiable until the leader's proposal is known.
+fn buffered_finalization(harness: *Harness, io: Io) !types.Proposal(Digest) {
+    try harness.start_with(io, null, .{ .participants = 5 });
+    try harness.mailbox.update(.new(1), .init(1), .zero(), null);
+    try io.sleep(.fromMilliseconds(10), .awake);
+    const value = proposal_at(1, 0, 1);
+    try deliver_finalizes(harness, &.{ 1, 2, 3, 4 }, value);
+    try io.sleep(.fromMilliseconds(10), .awake);
+    try testing.expectError(error.Empty, harness.voter.try_recv());
+    return value;
+}
+
+// commonware `test_local_notarization_drains_ready_finalization`: the leader's notarize,
+// arriving last, reveals the proposal and drains the buffered finalize quorum too.
+test "batcher drains a buffered finalization when the leader's notarize arrives" {
+    const Root = struct {
+        fn run(io: Io) !void {
+            var harness: Harness = undefined;
+            const value = try buffered_finalization(&harness, io);
+            defer harness.stop();
+            try deliver_notarizes(&harness, &.{ 2, 3, 4 }, value);
+            try io.sleep(.fromMilliseconds(10), .awake);
+            try deliver_notarizes(&harness, &.{1}, value);
+            try expect_notarization_and_finalization(&harness, value);
+        }
+    };
+    try run_deterministic(Root.run);
+}
+
+// commonware `test_network_notarization_unlocks_buffered_finalization`: a network
+// notarization reveals the proposal; the batcher forwards it and builds the finalization.
+test "batcher builds a buffered finalization after a network notarization" {
+    const Root = struct {
+        fn run(io: Io) !void {
+            var harness: Harness = undefined;
+            const value = try buffered_finalization(&harness, io);
+            defer harness.stop();
+            const bytes = try notarization_bytes(&harness.fixture, value);
+            try harness.certificates.deliver(harness.fixture.participants[1], bytes);
+            try expect_notarization_and_finalization(&harness, value);
+        }
+    };
+    try run_deterministic(Root.run);
+}
+
+// commonware `test_leader_proposal_verifies_all_ready_vote_kinds`: with finalize and
+// notarize quorums buffered, the leader's notarize yields its proposal, a notarization,
+// and a finalization in one pass.
+test "batcher verifies every ready vote kind once the leader's proposal is known" {
+    const Root = struct {
+        fn run(io: Io) !void {
+            var harness: Harness = undefined;
+            try harness.start_with(io, null, .{ .participants = 5 });
+            defer harness.stop();
+            try harness.mailbox.update(.new(1), .init(4), .zero(), null);
+            try io.sleep(.fromMilliseconds(10), .awake);
+            const value = proposal_at(1, 0, 1);
+            try deliver_finalizes(&harness, &.{ 1, 2, 3, 4 }, value);
+            try deliver_notarizes(&harness, &.{ 1, 2, 3 }, value);
+            try io.sleep(.fromMilliseconds(50), .awake);
+            try testing.expectError(error.Empty, harness.voter.try_recv());
+            try deliver_notarizes(&harness, &.{4}, value);
+            try expect_notarization_and_finalization(&harness, value);
+        }
+    };
+    try run_deterministic(Root.run);
+}
