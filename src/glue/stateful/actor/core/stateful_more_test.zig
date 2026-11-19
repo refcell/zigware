@@ -305,10 +305,6 @@ fn wait_released(owners: []const Digested) !void {
 }
 
 test "stateful actor: startup recovery releases cancelled verify ancestries" {
-    // Skipped until queued verifications hold their ancestry weakly, as commonware's
-    // `WeakAncestry` does: here a queued `verify` message owns its ancestry, so a cancelled
-    // caller's blocks live until the actor drains the queue (`wait_released` fails).
-    if (true) return error.SkipZigTest;
     var node: fixtures.Node = undefined;
     try node.init();
     defer node.deinit();

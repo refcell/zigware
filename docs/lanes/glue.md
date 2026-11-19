@@ -367,12 +367,12 @@ ones: d = deployer (thread T-01a1d5b9-c237), u = utils, j = storage-journal
 | stateful/actor/syncer/plan.rs | 7 | 6 | 0 | 1 | |
 | stateful/actor/syncer/mod.rs (conformance) | 1 | 1 | 0 | 0 | |
 | stateful/actor/core/mailbox.rs | 2 | 2 | 0 | 0 | |
-| stateful/actor/core/mod.rs | 4 | 3 | 1 | 0 | u |
+| stateful/actor/core/mod.rs | 4 | 4 | 0 | 0 | |
 | stateful/actor/core/syncing.rs | 16 | 13 | 2 | 1 | d |
 | stateful/actor/core/processing.rs | 86 | 0 | 86 | 0 | u |
 | stateful/actor/processor/mod.rs | 44 | 22 | 22 | 0 | u |
 | stateful/tests/mod.rs, floor.rs | 28 | 17 | 11 | 0 | j |
-| **total** | **469** | **319** | **126** | **24** | |
+| **total** | **469** | **320** | **125** | **24** | |
 
 - Not portable (db/mod.rs, 22): zigware's `Barrier` is synchronous (databases persist inside
   `finalize`), so `barrier_waits_for_every_handle` (8), `barrier_cancellation_releases_handles`
@@ -413,11 +413,6 @@ ones: d = deployer (thread T-01a1d5b9-c237), u = utils, j = storage-journal
     `invalid_duplicate_finalization_is_ignored`,
     `resolves_rotated_committee_finalization_from_solicited_peers`,
     `sample_size_uses_scoped_scheme_with_participantless_all_verifier`.
-  - core/mod.rs: `startup_recovery_releases_cancelled_verify_ancestries`, written and skipped
-    in core/stateful_more_test.zig. A queued `verify` message owns its ancestry, where
-    commonware's holds a `WeakAncestry`, so a cancelled caller's blocks live until the actor
-    drains the queue. The prepare-decision cases are in stateful_more_test.zig, and the
-    floor-resolution case in syncer/actor_marshal_test.zig.
   - core/processing.rs: all 86 scenarios. zigware's 16 core unit tests (processing,
     verifications, durability, stateful) cover the same mechanisms, but none is a one-to-one
     port.

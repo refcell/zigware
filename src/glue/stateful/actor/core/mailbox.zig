@@ -17,9 +17,10 @@
 //!   consensus cancels it, so a waiting block is never voted against. Commonware panics when
 //!   the actor stops during a verify; here that also reads as no verdict.
 //!
-//! Differences from commonware: a queued verification owns its ancestry (commonware holds a
-//! weak handle the caller owns). Blocks are reference counted, so a cancelled caller's blocks
-//! live until the actor drops the obsolete request.
+//! A queued verification holds its caller's ancestry weakly (commonware's `WeakAncestry`): the
+//! `verify` caller owns it in a `Lease`, and the request's ancestry is a `Weak` handle whose
+//! `clone` upgrades it. A cancelled caller releases its blocks while the request is still queued,
+//! and the actor's upgrade then fails, so the request abstains.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -131,6 +132,99 @@ fn MailboxOf(comptime App_: type, comptime Databases_: type) type {
             fn release_inputs(self: *ProposalRequest) void {
                 self.ancestry.deinit();
                 if (comptime @hasDecl(App, "deinit_input")) App.deinit_input(&self.upstream);
+            }
+        };
+
+        /// A verify caller's ancestry, shared with its request's `Weak` handle. The caller
+        /// `revoke`s it on return; the last of the two references frees it.
+        const Lease = struct {
+            gpa: Allocator,
+            io: Io,
+            mutex: Io.Mutex = .init,
+            ancestry: ?Ancestry,
+            references: std.atomic.Value(u32) = .init(1),
+
+            /// A lease over `ancestry` (taken, also on error).
+            fn create(gpa: Allocator, io: Io, ancestry: Ancestry) Allocator.Error!*Lease {
+                const lease = gpa.create(Lease) catch |err| {
+                    var owned = ancestry;
+                    owned.deinit();
+                    return err;
+                };
+                lease.* = .{ .gpa = gpa, .io = io, .ancestry = ancestry };
+                return lease;
+            }
+
+            fn retain(self: *Lease) *Lease {
+                const previous = self.references.fetchAdd(1, .monotonic);
+                assert(previous > 0);
+                return self;
+            }
+
+            fn release(self: *Lease) void {
+                const previous = self.references.fetchSub(1, .acq_rel);
+                assert(previous > 0);
+                if (previous == 1) {
+                    assert(self.ancestry == null);
+                    self.gpa.destroy(self);
+                }
+            }
+
+            /// An independent cursor over the caller's ancestry; fails once the caller left.
+            fn upgrade(self: *Lease) anyerror!Ancestry {
+                self.mutex.lockUncancelable(self.io);
+                defer self.mutex.unlock(self.io);
+                const ancestry = if (self.ancestry) |*held| held else return error.AncestryReleased;
+                return ancestry.clone();
+            }
+
+            /// The caller leaves: its ancestry's blocks are released now.
+            fn revoke(self: *Lease) void {
+                self.mutex.lockUncancelable(self.io);
+                var taken = self.ancestry;
+                self.ancestry = null;
+                self.mutex.unlock(self.io);
+                assert(taken != null);
+                taken.?.deinit();
+                self.release();
+            }
+        };
+
+        /// A request's non-owning handle on a verify caller's ancestry (an Ancestry the actor
+        /// reads only through `clone`, which upgrades it to a strong cursor).
+        const Weak = union(enum) {
+            weak: *Lease,
+            strong: Ancestry,
+
+            pub const Block = App.Block;
+
+            pub fn peek(self: *const Weak) ?*const Digested {
+                return switch (self.*) {
+                    .weak => null,
+                    .strong => |*strong| strong.peek(),
+                };
+            }
+
+            pub fn next(self: *Weak) anyerror!?Digested {
+                return switch (self.*) {
+                    .weak => error.AncestryNotUpgraded,
+                    .strong => |*strong| strong.next(),
+                };
+            }
+
+            pub fn clone(self: *const Weak) anyerror!Weak {
+                return switch (self.*) {
+                    .weak => |lease| .{ .strong = try lease.upgrade() },
+                    .strong => |*strong| .{ .strong = try strong.clone() },
+                };
+            }
+
+            pub fn deinit(self: *Weak) void {
+                switch (self.*) {
+                    .weak => |lease| lease.release(),
+                    .strong => |*strong| strong.deinit(),
+                }
+                self.* = undefined;
             }
         };
 
@@ -318,13 +412,17 @@ fn MailboxOf(comptime App_: type, comptime Databases_: type) type {
         pub fn verify(self: *Self, ctx: anytype, context: Context, ancestry: anytype) !bool {
             _ = ctx;
             _ = context; // The block carries its context.
-            const pair = try oneshot.channel(bool, self.gpa, self.io);
+            // The request holds the ancestry weakly, so leaving releases its blocks.
+            const lease = try Lease.create(self.gpa, self.io, try self.box(ancestry));
+            defer lease.revoke();
+            var weak = try Ancestry.init(self.gpa, Weak{ .weak = lease.retain() });
+            const pair = oneshot.channel(bool, self.gpa, self.io) catch |err| {
+                weak.deinit();
+                return err;
+            };
             var receiver = pair.receiver;
             defer receiver.deinit();
-            _ = try self.enqueue(.{ .verify = .{
-                .ancestry = try self.box(ancestry),
-                .verification = pair.sender,
-            } });
+            _ = try self.enqueue(.{ .verify = .{ .ancestry = weak, .verification = pair.sender } });
             return receiver.recv() catch |err| switch (err) {
                 error.Closed => abstain(self.io),
                 else => |other| other,
