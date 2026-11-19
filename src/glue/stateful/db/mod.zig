@@ -455,14 +455,24 @@ pub const Barrier = struct {
         var owned = barrier_value;
         const barrier = &owned;
         defer barrier.deinit();
-        if (barrier.poll()) |outcome| return outcome;
-        // `poll` settles the outcome: each wait either surfaces a failure, or, after the last
-        // one, leaves nothing pending.
+        try barrier.settle();
+        return barrier.poll().?;
+    }
+
+    /// Waits until `poll` reports an outcome, without consuming the barrier. Fails only when
+    /// the waiter itself is canceled.
+    pub fn settle(barrier: *const Barrier) Io.Cancelable!void {
+        if (barrier.poll() != null) return;
+        // Each wait either surfaces a failure, which settles the barrier, or completes a sync.
         for (barrier.syncs[0..barrier.count]) |entry| {
-            entry.completion.wait() catch {};
-            if (barrier.poll()) |outcome| return outcome;
+            entry.completion.wait() catch {
+                // A sync that completed with an error settles the barrier below; one still
+                // pending means this waiter was canceled.
+                if (entry.completion.is_pending()) return error.Canceled;
+            };
+            if (barrier.poll() != null) return;
         }
-        unreachable; // The last wait completed every sync, so `poll` returned.
+        unreachable; // The last wait completed every sync, so `poll` reported.
     }
 
     /// Drops the barrier without waiting (commonware's drop): releases every completion.

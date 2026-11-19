@@ -538,6 +538,14 @@ ones: d = deployer (thread T-01a1d5b9-c237), u = utils, j = storage-journal
   `state_sync_adopts_queued_target_before_reaching_initial`: compact_sync_test.zig now
   expects targets[1] and then a closed channel. zigware already adopted the newest queued
   target before starting, so its behavior did not change.
+- [x] async start_sync step 6 (storage-merkle.md's design): `ManagedDb.finalize` returns the
+  database's `runtime.storage.Completion`, `db.Barrier` holds one per member (`poll`,
+  `settle`, `durable`, `deinit`), and `Durability` keeps at most one active barrier: Processing
+  completes it once settled (a `wait_idle` arm beside requests and the mailbox), so heights
+  applied while it runs coalesce into the next barrier. A prune waits for the active barrier
+  (without driving verifications meanwhile, where commonware drives them). Stopping with a
+  barrier pending drops it, canceling the acks it held. Marshal's `store.Durable` stand-in is
+  not converted yet.
 - [ ] db drift (8bf364011), open:
   - `sync::Target` is `{ root, range }` for compact too (storage lane). Until storage's
     `CompactTarget` goes, `sync_compact_db` keeps its update and reached forwarders, so the

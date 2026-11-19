@@ -3,12 +3,13 @@
 //!
 //! Marshal learns a finalized block was processed only once a database barrier covering it
 //! completes. At most one barrier is active; heights applied after it was captured wait for the
-//! next one. zigware databases persist synchronously in `finalize`, so the active barrier is
-//! already complete and `complete` reads its outcome (commonware awaits a handle).
+//! next one. The active barrier holds the databases' in-flight syncs: the processing loop
+//! waits on it (`settle`) beside its other work, and `complete` consumes it once settled.
 
 const std = @import("std");
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
+const Io = std.Io;
 const consensus = @import("consensus");
 const utils = @import("utils");
 const db = @import("../../db/mod.zig");
@@ -35,6 +36,8 @@ pub const Durability = struct {
 
     /// Drops every pending acknowledgement unacknowledged (marshal redelivers after restart).
     pub fn deinit(self: *Durability) void {
+        // A barrier still pending is dropped: its syncs continue, and the acks it held cancel.
+        if (self.barrier) |*active| active.barrier.deinit();
         while (self.pending.popFront()) |entry| {
             var acknowledgement = entry.acknowledgement;
             acknowledgement.deinit();
@@ -107,12 +110,24 @@ pub const Durability = struct {
         self.barrier = .{ .height = self.applied(), .barrier = barrier };
     }
 
-    /// Clears the active barrier and acknowledges every height it made durable. Returns false,
-    /// without advancing, when the barrier failed (a database failure is fatal to the caller).
-    pub fn complete(self: *Durability) bool {
+    /// Whether the active barrier has an outcome (`complete` then returns without waiting).
+    pub fn settled(self: *const Durability) bool {
+        const active = &(self.barrier orelse return false);
+        return active.barrier.poll() != null;
+    }
+
+    /// Waits until the active barrier has an outcome; fails only when canceled.
+    pub fn settle(self: *const Durability) Io.Cancelable!void {
+        const active = &(self.barrier orelse @panic("barrier not active"));
+        try active.barrier.settle();
+    }
+
+    /// Clears the active barrier (waiting for it) and acknowledges every height it made
+    /// durable. A failed barrier (fatal) or a canceled one (shutdown) acknowledges nothing.
+    pub fn complete(self: *Durability) db.Barrier.Error!void {
         const active = self.barrier orelse @panic("barrier not active");
         self.barrier = null;
-        active.barrier.durable() catch return false;
+        try active.barrier.durable();
         assert(active.height.get() > self.durable.get());
         assert(active.height.get() <= self.applied().get());
         self.durable = active.height;
@@ -122,6 +137,5 @@ pub const Durability = struct {
             var entry = self.pending.popFront().?;
             entry.acknowledgement.acknowledge();
         }
-        return true;
     }
 };

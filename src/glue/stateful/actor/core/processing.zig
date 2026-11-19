@@ -9,10 +9,10 @@
 //!
 //! A finalization pauses the speculative requests it would invalidate, applies the block, and
 //! holds marshal's acknowledgement until a database barrier covers it, so marshal's processed
-//! height never passes durable state. zigware databases persist synchronously in `finalize`, so
-//! a barrier completes as soon as it starts (commonware awaits it, driving verifications
-//! meanwhile). A due prune runs once queued work and the mailbox are empty, after every
-//! execution step has finished.
+//! height never passes durable state. At most one barrier is active: the loop waits on it
+//! beside requests and the mailbox, and heights applied meanwhile wait for the next barrier,
+//! so finalizations coalesce while a slow sync runs. A due prune waits for the active barrier,
+//! then runs once queued work and the mailbox are empty, after every execution step finished.
 //!
 //! `P` declares `App`, `Databases`, `Provider` (the block provider for replays), and `Marshal`
 //! (with `prune(Marshal, Height) !void`, as marshal's core mailbox).
@@ -148,6 +148,7 @@ fn ProcessingOf(comptime key: [4]type) type {
 
         /// One pass of the loop; false once processing stops.
         fn tick(self: *Self) !bool {
+            if (self.durability.settled()) try self.durability.complete();
             // A pending prune suppresses successor barriers.
             if (self.pending_prune == null and self.durability.needs_barrier()) {
                 try self.start_barrier();
@@ -177,13 +178,11 @@ fn ProcessingOf(comptime key: [4]type) type {
             return self.wait_idle();
         }
 
-        /// Starts a barrier covering all applied state and records its (synchronous)
-        /// completion. A failed barrier is fatal.
+        /// Starts a barrier covering all applied state; the loop completes it once settled.
         fn start_barrier(self: *Self) !void {
             assert(self.durability.needs_barrier());
             const barrier = try self.processor.execution.databases.finalize();
             self.durability.set_barrier(barrier);
-            if (!self.durability.complete()) return error.DatabaseSyncFailed;
             assert(!self.durability.needs_barrier());
         }
 
@@ -212,25 +211,33 @@ fn ProcessingOf(comptime key: [4]type) type {
         const Wait = union(enum) {
             ready: Io.Cancelable!void,
             message: Io.Cancelable!?Message,
+            barrier: Io.Cancelable!void,
         };
 
         /// Waits for a request phase to end or a message to arrive; false once the mailbox
         /// closes.
         fn wait_idle(self: *Self) !bool {
-            var buffer: [2]Wait = undefined;
+            var buffer: [3]Wait = undefined;
             var select: Io.Select(Wait) = .init(self.io, &buffer);
             try select.concurrent(.ready, Verifications.wait_ready, .{&self.verifications});
             select.concurrent(.message, Receiver.recv, .{self.receiver}) catch |err| {
                 select.cancelDiscard();
                 return err;
             };
+            if (self.durability.barrier != null) {
+                const settle = Durability.settle;
+                select.concurrent(.barrier, settle, .{&self.durability}) catch |err| {
+                    while (select.cancel()) |rest| self.absorb(rest);
+                    return err;
+                };
+            }
             const first = select.await() catch |err| {
                 while (select.cancel()) |rest| self.absorb(rest);
                 return err;
             };
             while (select.cancel()) |rest| self.absorb(rest);
             switch (first) {
-                .ready => |result| try result,
+                .ready, .barrier => |result| try result, // The next pass completes it.
                 .message => |result| {
                     const message = try result orelse return false;
                     self.queue(message);
@@ -242,7 +249,7 @@ fn ProcessingOf(comptime key: [4]type) type {
         /// Keeps a message a cancelled receive already took.
         fn absorb(self: *Self, outcome: Wait) void {
             switch (outcome) {
-                .ready => {},
+                .ready, .barrier => {},
                 .message => |result| {
                     const message = (result catch return) orelse return;
                     self.queue(message);
@@ -438,7 +445,6 @@ fn ProcessingOf(comptime key: [4]type) type {
             try self.durability.record(height, owned_ack);
             if (applied.barrier) |barrier| {
                 self.durability.set_barrier(barrier);
-                if (!self.durability.complete()) return error.DatabaseSyncFailed;
             }
             if (applied.prune) |prune| self.pending_prune = prune;
         }
@@ -488,14 +494,15 @@ fn ProcessingOf(comptime key: [4]type) type {
         /// Prunes the databases and marshal once every execution step has finished and a
         /// barrier covers the prune target.
         fn run_prune(self: *Self, prune: Prune) !void {
-            // Barriers complete when they start, so none is ever left active.
-            assert(self.durability.barrier == null);
+            // Pruning waits for the active barrier (it removes history a branch may read).
+            if (self.durability.barrier != null) try self.durability.complete();
             try self.verifications.pause(null);
             defer self.verifications.@"resume"();
             assert(self.processor.flights_idle());
             if (!self.durability.covers(prune.barrier_height)) {
                 assert(self.durability.needs_barrier());
                 try self.start_barrier();
+                try self.durability.complete();
                 assert(self.durability.covers(prune.barrier_height));
             }
             try self.processor.execution.databases.prune(&prune.qmdb_target);
