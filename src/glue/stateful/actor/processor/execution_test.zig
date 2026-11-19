@@ -197,3 +197,25 @@ test "stateful execution: replay rejects non-contiguous and missing ancestry" {
     try testing.expectError(error.Incomplete, missing);
     try testing.expect(!execution.pending_contains(block1.digest()));
 }
+
+// commonware `execution_rebuild_pending_bounds_parent_requests_by_round`: the recovery walk
+// requests the parents of block3 and block2, and both requests carry block3's round as their
+// bound, so marshal can retire them once its processed round floor covers that round.
+test "stateful execution: rebuild_pending bounds parent requests by round" {
+    var harness: Harness = undefined;
+    try harness.init();
+    defer harness.deinit();
+    const genesis = TestBlock.genesis();
+    const block1 = try harness.stage_pending_child(&genesis, 1);
+    try harness.finalize(&block1);
+    const block2 = try harness.stage_pending_child(&block1, 2);
+    const block3 = try harness.stage_pending_child(&block2, 3);
+    harness.execution.state.clear();
+    const requested_before = harness.provider_state.bounds.items.len;
+
+    var provider = harness.provider();
+    try harness.execution.rebuild_pending(harness.app, &provider, try digested(block3));
+    const bounds = harness.provider_state.bounds.items[requested_before..];
+    try testing.expect(bounds.len >= 2); // The walk requests both parents.
+    for (bounds) |bound| try testing.expectEqual(@as(?@TypeOf(round(3)), round(3)), bound);
+}

@@ -116,8 +116,11 @@ pub const ProviderState = struct {
     /// Finalized blocks by height (marshal's local store).
     canonical: std.AutoHashMapUnmanaged(u64, Sha256.Digest) = .empty,
     fetches: u32 = 0,
+    /// The bound of each parent request, in order (commonware `MapProvider::bounds`).
+    bounds: std.ArrayList(?Round) = .empty,
 
     pub fn deinit(state: *ProviderState) void {
+        state.bounds.deinit(gpa);
         state.blocks.deinit(gpa);
         state.canonical.deinit(gpa);
     }
@@ -135,12 +138,17 @@ pub const TestProvider = struct {
     pub fn subscribe_parent(
         self: *TestProvider,
         child: *const Digested,
-        _: ?consensus.types.Round,
+        bound: ?consensus.types.Round,
     ) !oneshot.Receiver(Digested) {
         const pair = try oneshot.channel(Digested, gpa, io);
         var sender = pair.sender;
         self.state.mutex.lockUncancelable(io);
         self.state.fetches += 1;
+        self.state.bounds.append(gpa, bound) catch {
+            self.state.mutex.unlock(io);
+            sender.deinit();
+            return error.OutOfMemory;
+        };
         const found = self.state.blocks.get(child.inner().parent());
         self.state.mutex.unlock(io);
         const block = found orelse {

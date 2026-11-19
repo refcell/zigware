@@ -230,7 +230,8 @@ fn ProcessorOf(comptime App_: type, comptime Databases_: type, comptime Provider
                 }
             }
             const batches = try execution.databases.new_batches();
-            var ancestry = try execution.stream(provider, &.{block.clone()});
+            const bound = block.inner().context().round;
+            var ancestry = try execution.stream(provider, &.{block.clone()}, bound);
             defer ancestry.deinit();
             var app = self.app;
             const context = block.inner().context();

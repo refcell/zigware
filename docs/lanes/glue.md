@@ -613,8 +613,9 @@ ones: d = deployer (thread T-01a1d5b9-c237), u = utils, j = storage-journal
 
 - 2026-11-19 (stateful): upstream drift 43b357a41..a9ffc25f3 audited, 26 glue files. Mine:
   processor 28596e605 (parent requests bounded by the target's round, and
-  `execution_rebuild_pending_bounds_parent_requests_by_round`), waiting on marshal's
-  `subscribe_parent(child, bound: ?Round)` (consensus-marshal lane). Handed off: db adapters
+  `execution_rebuild_pending_bounds_parent_requests_by_round`), done on marshal's
+  `subscribe_parent(child, bound: ?Round)` (2464e1f): prepare_replay, next_replay, and the
+  finalize reconstruction pass the target block's round. Handed off: db adapters
   8bf364011 (`db::qmdb::Qmdb`, compact's `state_sync_adopts_queued_target_before_reaching_
   initial`, `Target { root, range }`) to deployer; tests/ bca770a0c and 8bf364011 to
   storage-journal; dkg 0f104147e, 519f7dd4c, bca770a0c, a9ffc25f3 to the coding lane;

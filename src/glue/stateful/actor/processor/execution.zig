@@ -31,6 +31,7 @@ const db = @import("../../db/mod.zig");
 const pending_mod = @import("pending.zig");
 
 const Height = consensus.types.Height;
+const Round = consensus.types.Round;
 const ancestry_mod = consensus.marshal.ancestry;
 
 /// Whether `process` may rely on the block's finalization (commonware `Finality`).
@@ -308,6 +309,9 @@ fn ExecutionOf(comptime App_: type, comptime Databases_: type, comptime Provider
             blocks: std.ArrayList(Digested) = .empty,
             /// Parent of the next block to process.
             parent: Digested,
+            /// Round of the block the path leads to: every request for the path's ancestry
+            /// carries it as its bound (commonware #5717).
+            bound: Round,
 
             pub fn deinit(path: *ReplayPath, gpa: Allocator) void {
                 for (path.blocks.items) |*block| block.deinit();
@@ -335,8 +339,11 @@ fn ExecutionOf(comptime App_: type, comptime Databases_: type, comptime Provider
         /// without forking batches. `error.Invalid` when the walk reaches the anchor's height
         /// without meeting the anchor or the provider returns a block that is not the parent one
         /// height below; `error.Incomplete` when the provider stops before delivering a parent.
+        /// Each parent is requested under `target`'s round: once marshal's processed round floor
+        /// covers it, every ancestor of `target` is processed or can never be finalized.
         pub fn prepare_replay(self: *Self, provider: *Provider, target: Digested) !ReplayPath {
-            var path: ReplayPath = .{ .parent = target };
+            const bound = target.inner().context().round;
+            var path: ReplayPath = .{ .parent = target, .bound = bound };
             errdefer path.deinit(self.gpa);
             const start_height = target.inner().height().get();
             // Each step moves one height down, and the walk stops at the anchor's height.
@@ -347,7 +354,7 @@ fn ExecutionOf(comptime App_: type, comptime Databases_: type, comptime Provider
                 const cursor_height = cursor.inner().height();
                 if (cursor_height.get() <= anchor.height.get()) return error.Invalid;
                 assert(path.blocks.items.len < start_height);
-                var parent = try fetch_parent(provider, cursor);
+                var parent = try fetch_parent(provider, cursor, bound);
                 errdefer parent.deinit();
                 if (!ancestry_mod.has_contiguous_height(parent.inner().height(), cursor_height) or
                     !std.meta.eql(parent.digest(), cursor.inner().parent()))
@@ -360,8 +367,8 @@ fn ExecutionOf(comptime App_: type, comptime Databases_: type, comptime Provider
             return path;
         }
 
-        fn fetch_parent(provider: *Provider, child: *const Digested) !Digested {
-            var receiver = try provider.subscribe_parent(child, null);
+        fn fetch_parent(provider: *Provider, child: *const Digested, bound: Round) !Digested {
+            var receiver = try provider.subscribe_parent(child, bound);
             defer receiver.deinit();
             return receiver.recv() catch |err| switch (err) {
                 error.Closed => return error.Incomplete,
@@ -370,13 +377,19 @@ fn ExecutionOf(comptime App_: type, comptime Databases_: type, comptime Provider
         }
 
         /// A boxed stream over `initial` (taken; newest first) that fetches earlier ancestors
-        /// from a copy of `provider`.
-        pub fn stream(self: *Self, provider: *const Provider, initial: []const Digested) !Ancestry {
+        /// from a copy of `provider`, each request bounded by `bound`, the round that ends the
+        /// need for them.
+        pub fn stream(
+            self: *Self,
+            provider: *const Provider,
+            initial: []const Digested,
+            bound: Round,
+        ) !Ancestry {
             const stream_provider = if (comptime @hasDecl(Provider, "clone"))
                 provider.clone()
             else
                 provider.*;
-            const ancestry = Stream.init(self.gpa, self.io, stream_provider, initial, null, null);
+            const ancestry = Stream.init(self.gpa, self.io, stream_provider, initial, bound, null);
             const owned = ancestry catch |err| {
                 for (initial) |handle| handle.discard();
                 return err;
@@ -390,7 +403,8 @@ fn ExecutionOf(comptime App_: type, comptime Databases_: type, comptime Provider
         pub fn next_replay(self: *Self, provider: *const Provider, path: *ReplayPath) !?Ancestry {
             if (path.blocks.items.len == 0) return null;
             const block = path.blocks.getLast();
-            const ancestry = try self.stream(provider, &.{ block.clone(), path.parent.clone() });
+            const initial = [_]Digested{ block.clone(), path.parent.clone() };
+            const ancestry = try self.stream(provider, &initial, path.bound);
             _ = path.blocks.pop();
             path.parent.deinit();
             path.parent = block;
