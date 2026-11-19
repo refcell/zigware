@@ -230,6 +230,12 @@ pub fn Harness(comptime F: type) type {
                 taken: bool = false,
                 answer: bool = false,
                 answered: Io.Event = .unset,
+                /// The voter canceled the request (commonware's `is_closed`).
+                closed: bool = false,
+
+                pub fn is_closed(self: *const Held) bool {
+                    return @atomicLoad(bool, &self.closed, .acquire);
+                }
             };
 
             fn record_proposal(self: *Automaton, request: harness_context) void {
@@ -379,7 +385,10 @@ pub fn Harness(comptime F: type) type {
                 // commonware's `Certifier::Controlled` answers the others at once.
                 if (!held) return true;
                 const slot = self.park_certification(at.view);
-                try slot.answered.wait(self.io);
+                slot.answered.wait(self.io) catch |err| {
+                    @atomicStore(bool, &slot.closed, true, .release);
+                    return err;
+                };
                 return slot.answer;
             }
 

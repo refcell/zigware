@@ -84,7 +84,13 @@ pub fn Tests(comptime h: type) type {
 
         /// Broadcasts a proposal at `at` over the finalized `view - 1` (payload
         /// `hash(view - 1)`), from its leader, and hands it to the voter.
-        fn propose(net: *h.Network, stack: *h.VoterStack, at: Position, label: []const u8) !void {
+        fn propose(
+            net: *h.Network,
+            stack: *h.VoterStack,
+            at: Position,
+            label: []const u8,
+            nonce: u64,
+        ) !void {
             const view = at.view.get();
             const proposal = h.proposal_at(epoch, view, label);
             var parent_label: [8]u8 = undefined;
@@ -93,7 +99,7 @@ pub fn Tests(comptime h: type) type {
             var writer: codec.Writer = .init(&buffer);
             proposal.round.write(&writer);
             codec.write(h.Digest, Sha256.hash(&.{&parent_label}), &writer);
-            codec.write(u64, 7, &writer);
+            codec.write(u64, nonce, &writer);
             net.relay.broadcast(net.keys()[at.leader], .all, proposal.payload, writer.written());
             try stack.mailbox.proposal(proposal);
         }
@@ -113,6 +119,50 @@ pub fn Tests(comptime h: type) type {
                 }
                 try ctx.sleep(.fromMilliseconds(1));
                 waited += 1;
+            }
+            return false;
+        }
+
+        /// Whether the timeouts metric counted `reason` at least once.
+        fn timeout_counted(ctx: Ctx, comptime reason: []const u8) !bool {
+            const gpa = ctx.gpa();
+            const encoded = try ctx.scope.encode(gpa);
+            defer gpa.free(encoded);
+            const label = "reason=\"" ++ reason ++ "\"";
+            var lines = std.mem.splitScalar(u8, encoded, '\n');
+            var counted = false;
+            // Bounded by the encoded metrics.
+            while (lines.next()) |line| {
+                if (std.mem.indexOf(u8, line, "_timeouts") == null) continue;
+                if (std.mem.indexOf(u8, line, label) == null) continue;
+                counted = counted or !std.mem.endsWith(u8, line, " 0");
+            }
+            return counted;
+        }
+
+        const Vote = @FieldType(h.BatcherMessage, "constructed");
+
+        /// Whether our vote at `view` reaches `observer` within `limit_ms` of simulated time,
+        /// draining the batcher meanwhile (commonware's `select!` over both).
+        fn network_vote_within(
+            ctx: Ctx,
+            stack: *h.VoterStack,
+            observer: *h.Observer,
+            view: View,
+            limit_ms: u64,
+        ) !bool {
+            var waited: u64 = 0;
+            // Bounded by `limit_ms` of simulated time.
+            while (waited < limit_ms) {
+                while (stack.batcher.try_recv()) |_| {} else |_| {}
+                var message = observer.receiver.try_recv() catch {
+                    try ctx.sleep(.fromMilliseconds(1));
+                    waited += 1;
+                    continue;
+                };
+                defer message.deinit();
+                const vote = try codec.decode(Vote, ctx.gpa(), message.payload);
+                if (vote.view().get() == view.get()) return true;
             }
             return false;
         }
@@ -139,7 +189,7 @@ pub fn Tests(comptime h: type) type {
                     defer stack.stop();
                     const start = try first_update(ctx, &stack);
                     const at = try advance_until(ctx, &net, &stack, start, false);
-                    try propose(&net, &stack, at, "test_proposal");
+                    try propose(&net, &stack, at, "test_proposal", 0);
                     try expect_fast_nullify(ctx, &stack, at.view);
                 }
             }.body);
@@ -198,7 +248,6 @@ pub fn Tests(comptime h: type) type {
             try h.covers(.schemes);
             try run(struct {
                 fn body(ctx: Ctx) anyerror!void {
-                    const gpa = ctx.gpa();
                     var net: h.Network = undefined;
                     try net.start(ctx, 5, "dropped_verify_emits_nullify_immediately");
                     defer net.deinit();
@@ -210,20 +259,72 @@ pub fn Tests(comptime h: type) type {
                     stack.application.drop_verifications = true;
                     const start = try first_update(ctx, &stack);
                     const at = try advance_until(ctx, &net, &stack, start, false);
-                    try propose(&net, &stack, at, "drop_verify");
+                    try propose(&net, &stack, at, "drop_verify", 0);
                     try expect_fast_nullify(ctx, &stack, at.view);
                     // A dropped verify counts as an ignored proposal.
-                    const encoded = try ctx.scope.encode(gpa);
-                    defer gpa.free(encoded);
-                    var lines = std.mem.splitScalar(u8, encoded, '\n');
-                    var counted = false;
-                    while (lines.next()) |line| {
-                        if (std.mem.indexOf(u8, line, "_timeouts") == null) continue;
-                        const reason = "reason=\"IgnoredProposal\"";
-                        if (std.mem.indexOf(u8, line, reason) == null) continue;
-                        counted = counted or !std.mem.endsWith(u8, line, " 0");
-                    }
-                    try testing.expect(counted);
+                    try testing.expect(try timeout_counted(ctx, "IgnoredProposal"));
+                }
+            }.body);
+        }
+
+        // commonware test_invalid_ancestry_emits_nullify_immediately
+        test "voter invalid ancestry emits nullify immediately" {
+            try h.covers(.schemes);
+            try run(struct {
+                fn body(ctx: Ctx) anyerror!void {
+                    var net: h.Network = undefined;
+                    try net.start(ctx, 5, "invalid_ancestry_emits_nullify_immediately");
+                    defer net.deinit();
+                    var stack: h.VoterStack = undefined;
+                    try stack.start(ctx, &net, slow_timeouts);
+                    defer stack.stop();
+                    // Advance until we verify in a view after a finalization.
+                    var at = try first_update(ctx, &stack);
+                    if (at.view.get() == 1) at = try finalize_and_advance(ctx, &net, &stack, at);
+                    at = try advance_until(ctx, &net, &stack, at, false);
+                    // A proposal whose parent is below the finalized floor.
+                    const view = at.view.get();
+                    const parent: View = .new((view - 1) -| 1);
+                    const payload = Sha256.hash(&.{"invalid_parent_before_finalized"});
+                    try stack.mailbox.proposal(.init(.new(epoch, at.view), parent, payload));
+                    try expect_fast_nullify(ctx, &stack, at.view);
+                    try testing.expect(try timeout_counted(ctx, "InvalidProposal"));
+                }
+            }.body);
+        }
+
+        // commonware test_dropped_verify_still_votes_after_prior_participation
+        test "voter dropped verify still votes after prior participation" {
+            try h.covers(.schemes_round_robin);
+            try run(struct {
+                fn body(ctx: Ctx) anyerror!void {
+                    var net: h.Network = undefined;
+                    try net.start(ctx, 5, "dropped_verify_still_votes_after_prior_participation");
+                    defer net.deinit();
+                    var observer: h.Observer = undefined;
+                    try observer.start(&net, 1, 0);
+                    defer observer.deinit();
+                    var stack: h.VoterStack = undefined;
+                    try stack.start(ctx, &net, .{
+                        .leader_timeout_ms = 250,
+                        .certification_timeout_ms = 250,
+                        .timeout_retry_ms = 60 * 60 * 1000,
+                        .partition = "voter_dropped_verify_after_participation",
+                        .batcher_capacity = 64,
+                    });
+                    defer stack.stop();
+                    stack.application.drop_verifications = true;
+                    // We vote over the network in a view we lead.
+                    const start = try first_update(ctx, &stack);
+                    const led = try advance_until(ctx, &net, &stack, start, true);
+                    const voted = try network_vote_within(ctx, &stack, &observer, led.view, 1_000);
+                    try testing.expect(voted);
+                    // In a later view we verify, the dropped verify still leads to a vote.
+                    var at = try finalize_and_advance(ctx, &net, &stack, led);
+                    at = try advance_until(ctx, &net, &stack, at, false);
+                    try propose(&net, &stack, at, "drop_verify_after_ready", 11);
+                    const retried = try network_vote_within(ctx, &stack, &observer, at.view, 1_000);
+                    try testing.expect(retried);
                 }
             }.body);
         }

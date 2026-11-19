@@ -236,5 +236,89 @@ pub fn Tests(comptime h: type) type {
                 }
             }.body);
         }
+
+        /// A validator leading none of views 1 to 3 among 4.
+        fn follower_of_first_views(gpa: std.mem.Allocator) !usize {
+            var leads: [4]bool = @splat(false);
+            for (1..4) |view| leads[try leader(gpa, .default(), 4, view)] = true;
+            for (leads, 0..) |led, index| {
+                if (!led) return index;
+            }
+            return error.NoFollower;
+        }
+
+        /// Waits for our finalize vote on `expected`, failing on any notarize of its view.
+        fn expect_finalize_only(ctx: Ctx, stack: *h.VoterStack, expected: h.Proposal) !void {
+            const view = expected.round.view.get();
+            // Bounded by the per-message wait.
+            while (true) {
+                const message = (try stack.next_batcher(ctx, 5_000)) orelse
+                    return error.NoFinalize;
+                if (message != .constructed) continue;
+                switch (message.constructed) {
+                    .notarize => |vote| if (vote.view().get() == view) return error.Notarized,
+                    .finalize => |vote| {
+                        if (vote.view().get() != view) continue;
+                        try testing.expect(vote.proposal.eql(expected));
+                        return;
+                    },
+                    .nullify => {},
+                }
+            }
+        }
+
+        // commonware test_certification_precludes_verification
+        test "voter certification precludes verification" {
+            try h.covers(.ed25519);
+            try run(10, struct {
+                fn body(ctx: Ctx) anyerror!void {
+                    const gpa = ctx.gpa();
+                    var net: h.Network = undefined;
+                    try net.start(ctx, 4, "certification_precludes_verification");
+                    defer net.deinit();
+                    const local = try follower_of_first_views(gpa);
+                    var stack: h.VoterStack = undefined;
+                    try stack.start(ctx, &net, .{
+                        .leader_timeout_ms = 5_000,
+                        .certification_timeout_ms = 5_000,
+                        .local_index = local,
+                    });
+                    defer stack.stop();
+                    stack.automaton.hold = .{ .view = 2 };
+                    const first = try stack.next_update(ctx, 1_000);
+                    try testing.expectEqual(@as(u64, 1), first.current.get());
+                    // View 2's notarization arrives first, and its certification is requested.
+                    // Its payload is relayed, so verifying it would succeed.
+                    const proposal_1 = proposal(1, 0, "proposal_1");
+                    const proposal_2 = proposal(2, 1, "proposal_2");
+                    const leader_2 = try leader(gpa, .default(), 4, 2);
+                    relay(&net, leader_2, proposal_2, proposal_1.payload, 0);
+                    const schemes = net.schemes();
+                    const quorum = net.quorum();
+                    const n2 =
+                        try h.build_peers(gpa, .notarization, schemes, local, proposal_2, quorum);
+                    try stack.mailbox.recovered(gpa, .{ .notarization = n2 });
+                    const certified_2 = try stack.automaton.take_certification(ctx, 2);
+                    try testing.expect(!stack.automaton.verification_requested(1));
+                    try testing.expect(!stack.automaton.verification_requested(2));
+                    // View 1 notarizes and certifies, so we enter view 2.
+                    const n1 =
+                        try h.build_peers(gpa, .notarization, schemes, local, proposal_1, quorum);
+                    try stack.mailbox.recovered(gpa, .{ .notarization = n1 });
+                    // Bounded: views only advance, and each wait is limited.
+                    while ((try stack.next_update(ctx, 5_000)).current.get() != 2) {}
+                    // View 1 was verifiable before it certified; view 2 only after its
+                    // certification was requested, so it is never verified.
+                    try ctx.sleep(.fromMilliseconds(100));
+                    try testing.expect(stack.automaton.verification_requested(1));
+                    try testing.expect(!stack.automaton.verification_requested(2));
+                    try testing.expect(!certified_2.is_closed());
+                    // Certification alone carries view 2 to a finalize vote.
+                    stack.automaton.answer_certification(certified_2, true);
+                    try expect_finalize_only(ctx, &stack, proposal_2);
+                    try testing.expect(!stack.automaton.verification_requested(2));
+                }
+            }.body);
+        }
     };
 }

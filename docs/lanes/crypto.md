@@ -79,9 +79,11 @@ handshake), then certificate, secp256r1, the rest, zk last. banderwagon moved to
   timeout}_test.zig`, each `Tests(h)` over runtime's fixture-generic `Harness(F)` with
   commonware's per-test scheme coverage. Done (each group checked by a planted bug): the four
   nullify fast-path tests, recovered_finalization_is_reported, missed_notarization_is_fetched,
-  failed_certification_blocks_direct_descendant_verify, and the finalization and conflicting
-  notarization in-flight verification cancels. Next: certification_precludes_verification
-  (on runtime's certify `Hold`), then 8397 onward in file order.
+  failed_certification_blocks_direct_descendant_verify, the finalization and conflicting
+  notarization in-flight verification cancels, certification_precludes_verification,
+  invalid_ancestry_emits_nullify_immediately, and
+  dropped_verify_still_votes_after_prior_participation. Next: 8937
+  (no_recertification_after_replay) onward in file order.
   - finalization_cancels_inflight_verification's final check (no notarize for the finalized
     view) is defended at four layers (the actor's drop, `verified`'s staleness check,
     `admits_outbound`, and `verification_matches`); removing all four together still does
