@@ -428,3 +428,35 @@ test "batcher blocks the sender of a tampered certificate" {
     };
     try run_deterministic(Root.run);
 }
+
+// commonware `test_votes_and_certificate_deduplication`: the leader's vote forwards its
+// proposal, a network notarization is forwarded once, and the vote that would complete the
+// quorum afterwards forms no second notarization.
+test "batcher forwards one notarization when votes complete a certified quorum" {
+    const Root = struct {
+        fn run(io: Io) !void {
+            var harness: Harness = undefined;
+            try harness.start(io);
+            defer harness.stop();
+            const fixture = &harness.fixture;
+            try harness.mailbox.update(.new(1), .init(1), .zero(), null);
+            const value = proposal(1);
+            try harness.votes.deliver(fixture.participants[1], try notarize_bytes(fixture, 1, 1));
+            const Notarize = types.Notarize(Scheme, Digest);
+            const ours = (try Notarize.sign(gpa, &fixture.schemes[0], value)).?;
+            try harness.mailbox.constructed(.{ .notarize = ours });
+            const forwarded = (try harness.voter.recv()).?;
+            defer VoterMessage.discard(forwarded);
+            try testing.expect(forwarded == .proposal);
+            try testing.expect(forwarded.proposal.eql(value));
+            const certificate = try notarization_bytes(fixture, value);
+            try harness.certificates.deliver(fixture.participants[3], certificate);
+            const verified = try harness.next_certificate();
+            VoterMessage.discard(verified);
+            try harness.votes.deliver(fixture.participants[2], try notarize_bytes(fixture, 2, 1));
+            try io.sleep(.fromMilliseconds(150), .awake);
+            try testing.expectError(error.Empty, harness.voter.try_recv());
+        }
+    };
+    try run_deterministic(Root.run);
+}
