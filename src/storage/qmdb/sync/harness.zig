@@ -314,9 +314,10 @@ pub fn Tests(comptime H: type) type {
                 .{ 1000, 100 }, .{ 1000, 1000 }, .{ 1000, 1001 }, .{ 10, 1 },   .{ 10, 20 },
             };
             for (cases) |case| {
-                // Debug keeps one large case; the rest run in release builds and soaks.
+                // Plain Debug builds keep one large case, shortened to `history_ops`; the rest
+                // run in release builds and with -Dslow-tests.
                 if (case[0] == 1000 and case[1] != 100 and !heavy()) continue;
-                try sync_case(case[0], case[1]);
+                try sync_case(if (case[0] == 1000) history_ops() else case[0], case[1]);
             }
         }
 
@@ -891,8 +892,9 @@ pub fn Tests(comptime H: type) type {
         // commonware's issue 5669 regressions: client storage whose destroy stopped after
         // emptying its log, beside a Merkle structure the destroy never removed.
 
-        /// Operations in each batch the interrupted-destroy tests apply.
-        const interrupted_destroy_ops = 300;
+        /// Operations in each batch the interrupted-destroy tests apply: commonware's 300,
+        /// halved in plain Debug builds.
+        const interrupted_destroy_ops: u64 = if (heavy()) 300 else 150;
         /// Least sync boundary `prune_to_sync_boundary` leaves.
         const pruned_sync_boundary = 64;
 
@@ -996,6 +998,8 @@ pub fn Tests(comptime H: type) type {
         test "issue 5669: a sync after an interrupted destroy reaches the target durably" {
             for ([_]bool{ false, true }) |pruned| {
                 for ([_]bool{ false, true }) |ahead| {
+                    // Plain Debug builds run one case; -Dslow-tests and release run all four.
+                    if (!heavy() and !(pruned and ahead)) continue;
                     try sync_after_interrupted_destroy_case(pruned, ahead);
                 }
             }
@@ -1039,6 +1043,8 @@ pub fn Tests(comptime H: type) type {
         test "issue 5669: a sync restarted after an interrupted destroy reaches the target" {
             for ([_]bool{ false, true }) |pruned| {
                 for ([_]bool{ false, true }) |fetched| {
+                    // Plain Debug builds run one case; -Dslow-tests and release run all four.
+                    if (!heavy() and !(pruned and !fetched)) continue;
                     try restart_after_destroy_case(pruned, fetched);
                 }
             }

@@ -355,26 +355,28 @@ test "store recovery" {
     try h.init();
     defer h.deinit();
     var db = try h.open(null);
+    // commonware's 1000 keys, shortened in plain Debug builds.
+    const keys: u64 = if (test_support.heavy()) 1000 else 200;
     // A batch dropped before apply leaves nothing behind.
     var dropped = db.new_batch();
-    for (0..1000) |i| try dropped.write(key(i), try gpa.dupe(u8, &.{@intCast(i % 255)}));
+    for (0..keys) |i| try dropped.write(key(i), try gpa.dupe(u8, &.{@intCast(i % 255)}));
     dropped.deinit();
     db.deinit();
     db = try h.open(null);
     try testing.expectEqual(@as(u64, 1), db.bounds().end);
     var buffer: [32]u8 = undefined;
-    for (0..1000) |i| {
+    for (0..keys) |i| {
         _ = try apply(&db, &.{.{ .key = key(i), .value = recovery_value(&buffer, i, 0) }}, null);
     }
     try db.commit();
     var i: u64 = 0;
-    while (i < 1000) : (i += 3) {
+    while (i < keys) : (i += 3) {
         _ = try apply(&db, &.{.{ .key = key(i), .value = recovery_value(&buffer, i, 1) }}, null);
     }
     try db.commit();
-    try testing.expectEqual(@as(u64, 1000), db.snapshot.items());
+    try testing.expectEqual(keys, db.snapshot.items());
     i = 1;
-    while (i < 1000) : (i += 7) _ = try apply(&db, &.{.{ .key = key(i), .value = null }}, null);
+    while (i < keys) : (i += 7) _ = try apply(&db, &.{.{ .key = key(i), .value = null }}, null);
     try db.commit();
     const end = db.bounds().end;
     const floor = db.inactivity_floor();
@@ -385,8 +387,9 @@ test "store recovery" {
     try testing.expectEqual(floor, db.inactivity_floor());
     try db.prune(floor);
     try testing.expectEqual(floor - floor % 7, db.bounds().start);
-    try testing.expectEqual(@as(u64, 857), db.snapshot.items());
-    for (0..1000) |n| {
+    // Every seventh key from 1 was deleted: 857 of 1000 remain.
+    try testing.expectEqual(keys - (keys + 5) / 7, db.snapshot.items());
+    for (0..keys) |n| {
         const bump: u64 = @intFromBool(n % 3 == 0);
         const want: ?Bytes = if (n % 7 == 1) null else recovery_value(&buffer, n, bump);
         try expect_value(&db, key(n), want);
@@ -1003,6 +1006,9 @@ fn randomized_epoch(c: *Churn, rng: *utils.TestRng, epoch: u64) !void {
 
 test "store floor bound under churn and randomized churn" {
     for ([_]?u64{ null, 0, 1, 7, 0x5133 }) |seed| {
+        // Plain Debug builds run the scripted churn and one seed; -Dslow-tests and
+        // release builds run every seed.
+        if (!test_support.heavy() and seed != null and seed != 0x5133) continue;
         var h: Harness = undefined;
         try h.init();
         defer h.deinit();
@@ -1158,13 +1164,15 @@ test "store reopens at a floor pruned before any further commit" {
     defer h.deinit();
     var db = try h.open(null);
     var buffer: [32]u8 = undefined;
-    for (0..1000) |i| {
+    // commonware's 1000 keys, shortened in plain Debug builds.
+    const keys: u64 = if (test_support.heavy()) 1000 else 200;
+    for (0..keys) |i| {
         _ = try apply(&db, &.{.{ .key = key(i), .value = sized_value(&buffer, i, 0) }}, null);
     }
     try db.commit();
     const durable_floor = db.inactivity_floor();
     // Apply, without committing, writes that advance the floor past the durable one.
-    for (0..1000) |i| {
+    for (0..keys) |i| {
         _ = try apply(&db, &.{.{ .key = key(i), .value = sized_value(&buffer, i, 1) }}, null);
     }
     const unsynced_floor = db.inactivity_floor();

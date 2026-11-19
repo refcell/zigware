@@ -184,6 +184,12 @@ which every database here is built on.
   `test_store_variable_length_keys`, plus a leak-checked churn of owned keys through
   overwrites, deletes, and the floor walk.
 - [x] Fuzz targets under storage/fuzz for these databases; benches under `qmdb/benches/`.
+- [x] CI test-storage trim (qmdb part): plain Debug builds without `-Dslow-tests` shrink
+  the heaviest qmdb and sync tests to a per-push case (`test_support.heavy()`, the sync
+  harness's `heavy()`). Sync-boundary harness: its one large case at 200 operations.
+  Issue 5669: one case of each four-case test, batches of 150. Store recovery and
+  reopen-at-pruned-floor: 200 keys. Store churn: scripted plus one seed. Release builds and
+  `-Dslow-tests` (nightly) keep commonware's full sizes. Conformance-hash tests stay full.
 
 ## Public API (on main)
 - `storage.qmdb.value`: `Fixed(V)`, `Variable(V)` (encodings with `Value`, `fixed`), `check`,

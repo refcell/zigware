@@ -2,12 +2,20 @@
 //! `storage/conformance.toml`.
 
 const std = @import("std");
+const builtin = @import("builtin");
+const build_options = @import("build_options");
 const Allocator = std.mem.Allocator;
 const codec = @import("codec");
 const conformance = @import("conformance");
 const runtime = @import("runtime");
 
 pub const conformance_file = @embedFile("../conformance.toml");
+
+/// Whether heavy test cases run at commonware's full size: everywhere but plain Debug builds,
+/// which run a smaller per-push case unless built with `-Dslow-tests` (nightly).
+pub fn heavy() bool {
+    return builtin.mode != .debug or build_options.slow_tests;
+}
 
 /// commonware's `CodecConformance<T>`: encodes `T::arbitrary` for seeds `0..65536`. `T`
 /// declares `arbitrary(gpa, *Unstructured)`.
