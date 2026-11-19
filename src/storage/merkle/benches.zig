@@ -3,8 +3,8 @@
 //! flushing a journaled structure, leaf updates, position conversion, and generating and
 //! verifying single, range, and multi proofs.
 //!
-//! Zigware's batches hash sequentially, so commonware's parallel cases (`workers=8`,
-//! `strategy=BatchedParallel`) keep their names but measure the sequential path. The proof
+//! commonware's parallel cases (`workers=8`, `strategy=BatchedParallel`) run `add_many_with`
+//! and `merkleize_with` on a `parallel.Rayon` pool of that many threads. The proof
 //! benchmarks share one tree per family and size (setup is untimed either way), so they run
 //! tree by tree rather than in commonware's group order.
 
@@ -13,6 +13,7 @@ const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const bench = @import("bench");
 const cryptography = @import("cryptography");
+const parallel = @import("parallel");
 const runtime = @import("runtime");
 const storage = @import("storage");
 const utils = @import("utils");
@@ -428,8 +429,17 @@ const SKEWED_ITEMS: usize = 512;
 const CLUSTERED: usize = 64;
 const KIB: usize = 1024;
 const MIB: usize = 1024 * KIB;
-/// Workers in commonware's parallel strategy (zigware hashes sequentially).
+/// Workers in commonware's parallel strategy.
 const WORKERS: usize = 8;
+
+/// A pool of `workers` threads, or none for one worker (commonware's sequential case).
+fn worker_pool(runner: *bench.Runner, workers: usize) !?parallel.Rayon {
+    assert(workers >= 1);
+    if (workers == 1) return null;
+    const config: parallel.ThreadPoolConfig = .{ .threads = @intCast(workers) };
+    const pool = try parallel.ThreadPool.create(runner.allocator, runner.io, config);
+    return parallel.Rayon.init(pool).with_parallelism(workers);
+}
 
 /// A tree of `COMMITTED` leaves, leaf `i` holding `i` as big-endian bytes.
 fn committed(comptime F: type, gpa: Allocator) !Mem(F) {
@@ -455,12 +465,18 @@ fn AddManyWorkload(comptime F: type) type {
         gpa: Allocator,
         mem: *const Mem(F),
         items: []const []const u8,
+        strategy: ?parallel.Rayon = null,
 
         pub fn iter(self: *@This()) !u64 {
+            if (self.strategy) |strategy| return self.add_many(strategy);
+            return self.add_many(parallel.sequential);
+        }
+
+        fn add_many(self: *@This(), strategy: anytype) !u64 {
             var batch = try self.mem.new_batch(self.gpa);
             errdefer batch.deinit(self.gpa);
-            try batch.add_many(self.gpa, &hasher, []const u8, self.items);
-            const merkleized = try batch.merkleize(self.gpa, self.mem, &hasher);
+            try batch.add_many_with(self.gpa, &hasher, []const u8, self.items, strategy);
+            const merkleized = try batch.merkleize_with(self.gpa, self.mem, &hasher, strategy);
             defer merkleized.release(self.gpa);
             return merkleized.size();
         }
@@ -479,6 +495,8 @@ fn bench_workers(
     var workload: AddManyWorkload(F) = .{ .gpa = runner.allocator, .mem = mem, .items = items };
     for (cases(usize, runner, &.{ 1, WORKERS }, 1)) |workers| {
         const benchmark = params.with_param("workers", workers).with_param("family", family);
+        workload.strategy = try worker_pool(runner, workers);
+        defer if (workload.strategy) |strategy| strategy.pool.destroy();
         try runner.run(benchmark, &workload);
     }
 }
@@ -588,6 +606,7 @@ fn UpdateWorkload(comptime F: type) type {
         mem: Mem(F) = .empty,
         map: std.AutoHashMapUnmanaged(u64, Digest) = .empty,
         list: std.ArrayList(LeafUpdate) = .empty,
+        strategy: ?parallel.Rayon = null,
 
         pub fn setup(self: *Self) !void {
             self.elements = try random_digests(self.gpa, &self.rng, self.leaves);
@@ -615,7 +634,10 @@ fn UpdateWorkload(comptime F: type) type {
             var batch = try self.mem.new_batch(gpa);
             errdefer batch.deinit(gpa);
             try batch.update_leaf_batched(gpa, self.list.items);
-            const merkleized = try batch.merkleize(gpa, &self.mem, &hasher);
+            const merkleized = if (self.strategy) |strategy|
+                try batch.merkleize_with(gpa, &self.mem, &hasher, strategy)
+            else
+                try batch.merkleize(gpa, &self.mem, &hasher);
             defer merkleized.release(gpa);
             try self.mem.apply_batch(gpa, merkleized);
             return self.mem.size();
@@ -661,6 +683,9 @@ fn bench_update(runner: *bench.Runner) !void {
                             .leaves = leaves,
                             .updates = updates,
                         };
+                        const workers: usize = if (mode == .BatchedParallel) WORKERS else 1;
+                        workload.strategy = try worker_pool(runner, workers);
+                        defer if (workload.strategy) |strategy| strategy.pool.destroy();
                         try runner.run(benchmark, &workload);
                     }
                 }

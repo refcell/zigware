@@ -68,10 +68,13 @@ variants need `runtime` storage; do them after its interface lands.
 - [x] Storage fuzz targets `journal_fixed_operations` and `queue_operations` (handed over from
   storage-journal).
 - Partitioned index `new_range`/`install_range`: moved to the clearing lane with its index tests.
-- [ ] Parallel merkleize strategy over the `parallel` package (commonware's `Strategy` on
-  `UnmerkleizedBatch`/`MerkleizedBatch`; the benches' workers=8 and BatchedParallel cases), and
-  the tests that need it (`level_batches_keep_pairs`, `batch_parallel_update_leaf`,
-  `test_mem_mmr_batched_root_parallel`).
+- [x] Parallel merkleize strategy over the `parallel` package: `merkleize_with` and
+  `add_many_with` take any strategy (commonware stores it on the batch; zigware passes it per
+  call, so batches stay plain values), and the benches' workers=8 and BatchedParallel cases run
+  on an 8-thread `Rayon` pool. Tests: `level_batches_keep_pairs` under `mocks.explore`,
+  `batch_parallel_update_leaf`, `test_mem_mmr_batched_root_parallel`, `add_many_mixed_operations`
+  on 1/2/3/8 workers, and `add_many_at_limit` split three ways. Bench: add_many of 65536 items
+  11.6 ms on one worker, 3.4 ms on eight.
 - [ ] Duration histograms for the journals' `read_miss_timed`, if runtime telemetry has them.
 
 ## Test tally (2026-11-19, merkle and journal internals)
@@ -80,16 +83,17 @@ check. Status after the 24 open ports landed (two `read_location` tests went to 
 
 | file | tests | ported | open | not portable |
 |---|---|---|---|---|
-| merkle batch, mem, proof, verification, hasher, storage, position | 219 | 207 | 0 | 12 |
-| mmr (mod, mem, full, iterator, proof), mmb, persisted/compact | 87 | 68 | 2 (qmdb) | 17 |
+| merkle batch, mem, proof, verification, hasher, storage, position | 219 | 211 | 0 | 8 |
+| mmr (mod, mem, full, iterator, proof), mmb, persisted/compact | 87 | 69 | 2 (qmdb) | 16 |
 | persisted/full.rs | 121 | 116 | 0 | 5 |
 | journal/contiguous/fixed.rs | 136 | 118 | 0 | 18 |
 | journal/contiguous/variable.rs | 152 | 121 | 0 | 31 |
 
 Not portable: positions are plain `u64` (Display, operator, checked/saturating sub tests),
 `should_panic` tests, start_sync handles (parked, dropped, or failed syncs), `View` sharing,
-snapshot readers, decode counts, batched `read_many` internals, and Rust type checks. The
-parallel-strategy and duration-histogram tests are capabilities, now in the backlog.
+snapshot readers, decode counts, batched `read_many` internals, Rust type checks, and the
+`ExactSizeIterator` length test (Zig takes slices). The parallel-strategy tests are ported;
+the duration-histogram tests are in the backlog.
 
 Deviations in the ports:
 - Replay read options: commonware replays a tip holding an unwritten full page through the page

@@ -17,13 +17,15 @@
 //! Releasing an unapplied ancestor before a descendant is merkleized loses its changes, and
 //! `apply_batch` reports `AncestorDropped`. Batches are not thread-safe.
 //!
-//! `merkleize` and `add_many` hash sequentially; commonware's strategy-parallel split of the
-//! same work (which gives the same digests) is not ported yet.
+//! `merkleize_with` and `add_many_with` split their hashing across a `parallel` strategy
+//! (commonware's batch strategy, passed per call instead of stored on the batch); every split
+//! gives the same digests. `merkleize` and `add_many` run them on `parallel.sequential`.
 
 const std = @import("std");
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const codec = @import("codec");
+const parallel = @import("parallel");
 const merkle = @import("mod.zig");
 const hasher_module = @import("hasher.zig");
 const proof_module = @import("proof.zig");
@@ -390,6 +392,19 @@ pub fn Unmerkleized(comptime F: type, comptime Digest: type) type {
             comptime Item: type,
             items: []const Item,
         ) !void {
+            return self.add_many_with(gpa, hasher, Item, items, parallel.sequential);
+        }
+
+        /// `add_many` with the items split into ranges hashed across `strategy`. A node whose
+        /// leaves span two ranges is left for `merkleize`; the digests match `add_many`.
+        pub fn add_many_with(
+            self: *Self,
+            gpa: Allocator,
+            hasher: anytype,
+            comptime Item: type,
+            items: []const Item,
+            strategy: anytype,
+        ) !void {
             if (items.len == 0) return;
             const first = self.leaves();
             if (self.add_many_start == null) self.add_many_start = first;
@@ -400,7 +415,21 @@ pub fn Unmerkleized(comptime F: type, comptime Digest: type) type {
             try self.appended.resize(gpa, new_len);
             const nodes = self.appended.items[old_len..];
             @memset(nodes, std.mem.zeroes(Digest));
-            try build_range(F, gpa, hasher, Item, first, items, nodes, &self.unhashed);
+            const ranges: AddRanges(Item, @TypeOf(hasher)) = .{
+                .gpa = gpa,
+                .hasher = hasher,
+                .first = first,
+                .items = items,
+                .nodes = nodes,
+            };
+            var unhashed: [parallel.max_chunks]Levels = undefined;
+            const run: AddRun(Item, @TypeOf(hasher)) = .{ .ranges = ranges, .unhashed = &unhashed };
+            const count = try strategy.try_run_batches(items.len, 1, 1, run);
+            // Each range's unhashed nodes are ascending and below the next range's.
+            defer for (unhashed[0..count]) |*levels| levels_deinit(gpa, levels);
+            for (unhashed[0..count]) |*levels| {
+                for (levels, &self.unhashed) |level, *into| try into.appendSlice(gpa, level.items);
+            }
             assert(self.leaves() == end);
         }
 
@@ -443,11 +472,24 @@ pub fn Unmerkleized(comptime F: type, comptime Digest: type) type {
         /// merkleized batch (one strong reference, for the caller). Consumes this batch on
         /// success; on error only `deinit` may follow.
         pub fn merkleize(self: *Self, gpa: Allocator, base: anytype, hasher: anytype) !*Parent {
+            return self.merkleize_with(gpa, base, hasher, parallel.sequential);
+        }
+
+        /// `merkleize` with each height's nodes hashed across `strategy`. `hasher` and `base`
+        /// must allow concurrent reads.
+        pub fn merkleize_with(
+            self: *Self,
+            gpa: Allocator,
+            base: anytype,
+            hasher: anytype,
+            strategy: anytype,
+        ) !*Parent {
             var levels = try self.hash_plan(gpa);
             defer levels_deinit(gpa, &levels);
             for (&levels, 0..) |*level, height| {
                 if (level.items.len == 0) continue;
-                try self.merkleize_level(gpa, base, hasher, level.items, @intCast(height));
+                const positions = level.items;
+                try self.merkleize_level(gpa, base, hasher, positions, @intCast(height), strategy);
             }
             const ancestors = try collect_ancestors(F, Digest, gpa, self.parent);
             errdefer release_all(gpa, ancestors);
@@ -521,7 +563,9 @@ pub fn Unmerkleized(comptime F: type, comptime Digest: type) type {
             return levels;
         }
 
-        /// Hashes one height's nodes, two at a time so the hasher can pair them.
+        /// Hashes one height's nodes, two at a time so the hasher can pair them. The strategy
+        /// splits the pairs into batches, so every pair reaches `node_digest_pair` together and
+        /// only the last batch can end in a lone node; the digests are stored afterwards.
         fn merkleize_level(
             self: *Self,
             gpa: Allocator,
@@ -529,25 +573,132 @@ pub fn Unmerkleized(comptime F: type, comptime Digest: type) type {
             hasher: anytype,
             positions: []const u64,
             height: u32,
+            strategy: anytype,
         ) !void {
             assert(height > 0);
-            var index: usize = 0;
-            while (index + 1 < positions.len) : (index += 2) {
-                const left = self.child_digests(base, positions[index], height);
-                const right = self.child_digests(base, positions[index + 1], height);
-                const digests = hasher.node_digest_pair(.{
-                    .{ .position = positions[index], .left = &left[0], .right = &left[1] },
-                    .{ .position = positions[index + 1], .left = &right[0], .right = &right[1] },
-                });
-                try self.store_node(gpa, positions[index], digests[0]);
-                try self.store_node(gpa, positions[index + 1], digests[1]);
-            }
-            if (index < positions.len) {
-                const position = positions[index];
-                const children = self.child_digests(base, position, height);
-                const digest = hasher.node_digest(position, &children[0], &children[1]);
-                try self.store_node(gpa, position, digest);
-            }
+            assert(positions.len > 0);
+            const digests = try gpa.alloc(Digest, positions.len);
+            defer gpa.free(digests);
+            const level: Level(@TypeOf(base), @TypeOf(hasher)) = .{
+                .batch = self,
+                .base = base,
+                .hasher = hasher,
+                .positions = positions,
+                .digests = digests,
+                .height = height,
+            };
+            const pairs = positions.len / 2 + positions.len % 2;
+            strategy.run_batches(pairs, 1, 2, level);
+            for (positions, digests) |position, digest| try self.store_node(gpa, position, digest);
+        }
+
+        /// One height's hashing, as a `run_batches` operation over its node pairs.
+        fn Level(comptime Base: type, comptime HasherRef: type) type {
+            return struct {
+                batch: *const Self,
+                base: Base,
+                hasher: HasherRef,
+                positions: []const u64,
+                digests: []Digest,
+                height: u32,
+
+                pub fn run(level: @This(), batches: anytype) void {
+                    if (batches.is_whole()) {
+                        return level.map(0, .{ .start = 0, .end = batches.len });
+                    }
+                    var done: [parallel.max_chunks]void = undefined;
+                    batches.map_collect(done[0..batches.count()], level);
+                }
+
+                /// Hashes the nodes of pairs `range`.
+                pub fn map(level: @This(), _: usize, range: parallel.Range) void {
+                    const end = @min(2 * range.end, level.positions.len);
+                    const positions = level.positions[2 * range.start .. end];
+                    const digests = level.digests[2 * range.start .. end];
+                    assert(positions.len > 0);
+                    var index: usize = 0;
+                    while (index + 1 < positions.len) : (index += 2) {
+                        const left = level.children(positions[index]);
+                        const right = level.children(positions[index + 1]);
+                        digests[index..][0..2].* = level.hasher.node_digest_pair(.{
+                            .{ .position = positions[index], .left = &left[0], .right = &left[1] },
+                            .{
+                                .position = positions[index + 1],
+                                .left = &right[0],
+                                .right = &right[1],
+                            },
+                        });
+                    }
+                    if (index < positions.len) {
+                        const position = positions[index];
+                        const children_digests = level.children(position);
+                        const left = &children_digests[0];
+                        const right = &children_digests[1];
+                        digests[index] = level.hasher.node_digest(position, left, right);
+                    }
+                }
+
+                fn children(level: @This(), position: u64) [2]Digest {
+                    return level.batch.child_digests(level.base, position, level.height);
+                }
+            };
+        }
+
+        /// `add_many`'s ranges: range `i` hashes its items into its own slice of `nodes`.
+        fn AddRanges(comptime Item: type, comptime HasherRef: type) type {
+            return struct {
+                gpa: Allocator,
+                hasher: HasherRef,
+                first: u64,
+                items: []const Item,
+                nodes: []Digest,
+
+                pub fn map(
+                    ranges: @This(),
+                    _: usize,
+                    range: parallel.Range,
+                ) Allocator.Error!Levels {
+                    const range_first = ranges.first + range.start;
+                    const start = F.location_to_position(range_first) -
+                        F.location_to_position(ranges.first);
+                    const stop = F.location_to_position(ranges.first + range.end) -
+                        F.location_to_position(ranges.first);
+                    assert(start < stop and stop <= ranges.nodes.len);
+                    const nodes = ranges.nodes[@intCast(start)..@intCast(stop)];
+                    const range_items = ranges.items[range.start..range.end];
+                    var levels: Levels = @splat(.empty);
+                    errdefer levels_deinit(ranges.gpa, &levels);
+                    const gpa = ranges.gpa;
+                    const hasher = ranges.hasher;
+                    try build_range(F, gpa, hasher, Item, range_first, range_items, nodes, &levels);
+                    return levels;
+                }
+
+                pub fn discard(ranges: @This(), levels: Levels) void {
+                    var owned = levels;
+                    levels_deinit(ranges.gpa, &owned);
+                }
+            };
+        }
+
+        /// The `run_batches` operation of `add_many`: returns how many ranges it hashed, each
+        /// range's unhashed nodes in `unhashed`.
+        fn AddRun(comptime Item: type, comptime HasherRef: type) type {
+            return struct {
+                ranges: AddRanges(Item, HasherRef),
+                unhashed: *[parallel.max_chunks]Levels,
+
+                pub fn run(op: @This(), batches: anytype) Allocator.Error!usize {
+                    const count = batches.count();
+                    assert(count >= 1 and count <= parallel.max_chunks);
+                    if (batches.is_whole()) {
+                        op.unhashed[0] = try op.ranges.map(0, .{ .start = 0, .end = batches.len });
+                        return 1;
+                    }
+                    try batches.try_map_collect(op.unhashed[0..count], op.ranges);
+                    return count;
+                }
+            };
         }
 
         fn child_digests(self: *const Self, base: anytype, position: u64, height: u32) [2]Digest {
