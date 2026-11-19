@@ -73,8 +73,8 @@ time, files, and network: build on it rather than around it where it fits.
 - [x] Context on `production.Runner` (runtime-telemetry's `start_context`); the Context
   suite runs on both runners.
 - [x] Runtime task metrics (`runtime_tasks_spawned`/`running`, `runtime_iterations`), written
-  by runtime-telemetry (515cd03, 6929fea). Not yet: `runtime_task_polls` and the root's
-  `kind="Root"` series.
+  by runtime-telemetry (515cd03, 6929fea); `runtime_task_polls` with the root's `kind="Root"`
+  series (3b877683).
 - [x] iobuf (`iobuf.zig`): `IoBuf` (refcounted immutable view: clone, slice, split_to,
   advance, try_into_mut), `IoBufMut` (fixed capacity, aligned, freeze), `IoBufs` (chunk
   sequence: append, prepend, advance, split_to, coalesce, slices), the IoBuf codec with
