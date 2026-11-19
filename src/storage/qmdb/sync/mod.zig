@@ -37,4 +37,5 @@ test {
     _ = @import("tests.zig");
     _ = @import("source_test.zig");
     _ = @import("../keyless/sync.zig");
+    _ = @import("../immutable/sync.zig");
 }

@@ -23,6 +23,7 @@ const runtime = @import("runtime");
 const merkle = @import("../../merkle/mod.zig");
 const qmdb = @import("../mod.zig");
 const target_mod = @import("target.zig");
+const Scope = runtime.telemetry.metrics.Scope;
 
 const Storage = runtime.storage.Storage;
 
@@ -102,6 +103,125 @@ pub fn local_pinned_nodes(
     var buffer: [merkle.max_pinned_nodes]H.Digest = undefined;
     const pins = try structure.pinned_nodes_at(target.start, &buffer);
     return try gpa.dupe(H.Digest, pins);
+}
+
+/// A variant database's authenticated journal type (`Log` in any, `Journal` elsewhere).
+fn LogOf(comptime DbType: type) type {
+    return if (@hasDecl(DbType, "Log")) DbType.Log else DbType.Journal;
+}
+
+const discard_merkle = discard_local_state;
+const merkle_pinned_nodes = local_pinned_nodes;
+
+/// The sync database adapter of a variant over a persisted Merkle structure and a backing
+/// contiguous journal `C` (commonware's `sync::Database` impls of any, immutable, and
+/// keyless, which differ only in how the database is built over the filled log). `build`
+/// takes ownership of the journal, also on error (the variant's `init_from_log`). `V`
+/// declares `Db`, `Backing` (the contiguous journal `C`), `Hasher`, and
+/// `build(gpa, scope, cfg, log) !Db`.
+pub fn Persisted(comptime F: type, comptime V: type) type {
+    const DbType = V.Db;
+    const C = V.Backing;
+    const H = V.Hasher;
+    const build = V.build;
+    const Log = LogOf(DbType);
+    return struct {
+        const Self = @This();
+        pub const Db = DbType;
+        pub const Family = F;
+        pub const Op = Db.Operation;
+        pub const Digest = H.Digest;
+        pub const Hasher = H;
+        pub const Journal = C;
+        pub const Config = Db.Cfg;
+        pub const Target = target_mod.Target(F, Digest);
+
+        db: Db,
+
+        pub fn deinit(self: *Self) void {
+            self.db.deinit();
+            self.* = undefined;
+        }
+
+        pub fn journal_config(cfg: Config) C.BackingConfig {
+            return cfg.log;
+        }
+
+        /// Builds the database over the filled sync journal `log`: the Merkle structure is
+        /// opened for `range` with `pinned_nodes`, missing leaves are replayed from the log,
+        /// and the result is synced. Takes ownership of `log` and `pinned_nodes`.
+        pub fn from_sync_result(
+            gpa: Allocator,
+            storage: Storage,
+            scope: Scope,
+            cfg: Config,
+            log: C,
+            pinned_nodes: ?[]Digest,
+            range: merkle.Range,
+            apply_batch_size: u64,
+        ) !Self {
+            assert(range.start < range.end);
+            var owned_log = log;
+            const structure = structure: {
+                defer if (pinned_nodes) |pins| gpa.free(pins);
+                errdefer owned_log.deinit();
+                break :structure try Log.Merkle.init_sync(gpa, storage, .{
+                    .config = cfg.merkle,
+                    .range = range,
+                    .pinned_nodes = pinned_nodes,
+                });
+            };
+            const hasher = qmdb.hasher(H);
+            const journal =
+                try Log.from_components(gpa, structure, owned_log, hasher, apply_batch_size);
+            var self: Self = .{ .db = try build(gpa, scope, cfg, journal) };
+            errdefer self.deinit();
+            try self.db.sync();
+            return self;
+        }
+
+        pub fn persist_sync_result(_: *Self) !void {}
+
+        pub fn discard_local_state(gpa: Allocator, storage: Storage, cfg: Config) !void {
+            try discard_merkle(F, H, gpa, storage, cfg.merkle);
+        }
+
+        pub fn local_pinned_nodes(
+            gpa: Allocator,
+            storage: Storage,
+            cfg: Config,
+            target: Target,
+            log: *C,
+        ) !?[]Digest {
+            const span = log.get_bounds();
+            const bounds: merkle.Range = .{ .start = span.start, .end = span.end };
+            const range: merkle.Range = .{ .start = target.start, .end = target.end };
+            if (target.start == 0 or !journal_covers_range(bounds, range)) {
+                return null;
+            }
+            // The inactivity floor is the last commit's, not the target's start.
+            var reader: LogReader = .{ .log = log };
+            const floor = try qmdb.find_inactivity_floor_at(gpa, &reader, target.end);
+            return merkle_pinned_nodes(F, H, gpa, storage, cfg.merkle, target, floor);
+        }
+
+        pub fn ops_root(self: *const Self) Digest {
+            return self.db.root();
+        }
+
+        const LogReader = struct {
+            log: *C,
+
+            pub fn bounds(reader: *const LogReader) merkle.Range {
+                const span = reader.log.get_bounds();
+                return .{ .start = span.start, .end = span.end };
+            }
+
+            pub fn read(reader: *LogReader, _: Allocator, location: u64) !Op {
+                return reader.log.read(location);
+            }
+        };
+    };
 }
 
 const testing = std.testing;
