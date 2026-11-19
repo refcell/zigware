@@ -650,33 +650,53 @@ const ReporterTestDb = struct {
     }
 };
 
+/// A member whose tasks never start, for driving its reporter by hand: the coordinator's
+/// senders are closed after `queued` is sent, and only the reached receiver stays open.
+const ReporterHarness = struct {
+    const TestEnv = struct { gpa: Allocator, io: Io };
+    const M = Member(ReporterTestDb, TestEnv, void);
+
+    events: Events,
+    member: M,
+
+    fn init(harness: *ReporterHarness, target: u64, queued: []const M.Assignment) !void {
+        const env: TestEnv = .{ .gpa = std.testing.allocator, .io = std.testing.io };
+        harness.events = .{ .io = env.io, .count = 1 };
+        try harness.member.init(.{
+            .index = 0,
+            .env = env,
+            .config = {},
+            .source = {},
+            .target = target,
+            .sync_config = undefined,
+            .events = &harness.events,
+        });
+        for (queued) |assignment| _ = harness.member.generation_tx.send_lossy(assignment);
+        harness.member.release_coordinator();
+        harness.member.target_rx.deinit();
+        harness.member.finish_rx.deinit();
+        harness.member.reached_tx.deinit();
+    }
+
+    fn deinit(harness: *ReporterHarness) void {
+        harness.member.reached_rx.deinit();
+    }
+
+    fn reporter(harness: *ReporterHarness) M.Reporter {
+        return .{ .member = &harness.member, .current_target = harness.member.target };
+    }
+};
+
 test "state sync tuple: a reporter woken by both waits releases its assignments once" {
     // One wake can complete both of the reporter's waits (CI seed 0x6c117747). Handling the
     // reached target drains the closed assignment channel; the assignment wait that completed
     // in the same wake then carries an older assignment, and another sees the channel closed.
-    const TestEnv = struct { gpa: Allocator, io: Io };
-    const M = Member(ReporterTestDb, TestEnv, void);
-    const env: TestEnv = .{ .gpa = std.testing.allocator, .io = std.testing.io };
-    var events: Events = .{ .io = env.io, .count = 1 };
-    var member: M = undefined;
-    try member.init(.{
-        .index = 0,
-        .env = env,
-        .config = {},
-        .source = {},
-        .target = 5,
-        .sync_config = undefined,
-        .events = &events,
-    });
-    // The coordinator queued generation 2 at target 7, then closed its senders.
-    try member.generation_tx.send(.{ .generation = 2, .target = 7 });
-    member.release_coordinator();
-    member.target_rx.deinit();
-    member.finish_rx.deinit();
-    member.reached_tx.deinit();
-    defer member.reached_rx.deinit();
+    var harness: ReporterHarness = undefined;
+    try harness.init(5, &.{.{ .generation = 2, .target = 7 }});
+    defer harness.deinit();
+    const events = &harness.events;
 
-    var reporter: M.Reporter = .{ .member = &member, .current_target = 5 };
+    var reporter = harness.reporter();
     defer reporter.close_assignments();
     try std.testing.expect(reporter.handle(.{ .reached = 7 }));
     try std.testing.expect(!reporter.assignments_open);
@@ -687,4 +707,47 @@ test "state sync tuple: a reporter woken by both waits releases its assignments 
     try std.testing.expectEqual(@as(u64, 7), reporter.current_target);
     try std.testing.expect(reporter.handle(.{ .assigned = null }));
     try std.testing.expect(!reporter.assignments_open);
+}
+
+test "state sync tuple: a generation drain reports only the newest assignment" {
+    // commonware `generation_drain_reports_only_the_newest_assignment`: two assignments
+    // arrive before the reporter reads them, so the one-slot ring keeps only the newest,
+    // whose target the database already reached.
+    var harness: ReporterHarness = undefined;
+    try harness.init(0, &.{
+        .{ .generation = 1, .target = 1 },
+        .{ .generation = 2, .target = 2 },
+    });
+    defer harness.deinit();
+    var reporter = harness.reporter();
+    defer reporter.close_assignments();
+    reporter.last_reached = 2;
+    reporter.drain_assignments();
+
+    // The skipped assignment is never reported; the newest one is reported once.
+    try std.testing.expectEqual(@as(u64, 2), reporter.current_generation);
+    try std.testing.expectEqual(@as(u64, 2), reporter.current_target);
+    try std.testing.expectEqual(@as(?u64, 2), reporter.last_reported);
+    const event = harness.events.try_take_reached().?;
+    try std.testing.expectEqual(@as(usize, 0), event.reached.index);
+    try std.testing.expectEqual(@as(u64, 2), event.reached.generation);
+    try std.testing.expectEqual(@as(?Events.Event, null), harness.events.try_take_reached());
+}
+
+test "state sync tuple: reached events keep the newest event per database" {
+    // commonware `reached_events_keep_the_newest_event_per_database`. commonware's mailbox
+    // first delivers its ready queue, (0, 0) and (1, 0), and then each database's newest
+    // overflow event; zigware keeps only each database's newest, which the coordinator would
+    // reach after ignoring the older ones it drops (see the module comment).
+    var events: Events = .{ .io = std.testing.io, .count = 2 };
+    for ([_][2]u64{ .{ 0, 0 }, .{ 1, 0 }, .{ 0, 1 }, .{ 1, 1 }, .{ 0, 2 } }) |pair| {
+        events.report(pair[0], pair[1]);
+    }
+    const expected = [_][2]u64{ .{ 0, 2 }, .{ 1, 1 } };
+    for (expected) |pair| {
+        const event = events.try_take_reached().?;
+        try std.testing.expectEqual(@as(usize, pair[0]), event.reached.index);
+        try std.testing.expectEqual(pair[1], event.reached.generation);
+    }
+    try std.testing.expectEqual(@as(?Events.Event, null), events.try_take_reached());
 }
