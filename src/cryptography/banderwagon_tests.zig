@@ -512,3 +512,24 @@ test "banderwagon: scalar_mul_bits and scalar_bits_le build commonware's circuit
     });
     try testing.expect(try finish_satisfied(&ctx));
 }
+
+test "banderwagon canonical affine batch matches canonicalize per point" {
+    var rng = utils.test_rng();
+    const base = G.generator.mul(F.random(&rng));
+    var points: [33]G = undefined;
+    points[0] = G.zero;
+    for (points[1..], 0..) |*point, previous| point.* = points[previous].add(base);
+    // A negated twin has the other sign of `y`, so both branches run.
+    points[7] = points[7].neg();
+    var xs: [points.len]Base = undefined;
+    var ys: [points.len]Base = undefined;
+    G.canonical_affine_batch(&points, &xs, &ys);
+    var negated: usize = 0;
+    for (points, xs, ys) |point, x, y| {
+        const expected_x, const expected_y = point.canonicalize().affine();
+        try testing.expect(x.eql(expected_x) and y.eql(expected_y));
+        _, const raw_y = point.affine();
+        if (!raw_y.eql(y)) negated += 1;
+    }
+    try testing.expect(negated > 0 and negated < points.len);
+}

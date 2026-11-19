@@ -298,6 +298,35 @@ pub const G = struct {
         return .{ self.x.mul(z_inv), self.y.mul(z_inv) };
     }
 
+    /// `points[i].canonicalize().affine()` for subgroup points, with one shared inversion:
+    /// the canonical twin is the affine `(x, y)` negated to a positive `y`, which is what
+    /// `from_x` re-derives (commonware recomputes it through `from_x` per point).
+    pub fn canonical_affine_batch(points: []const G, xs: []Base, ys: []Base) void {
+        assert(points.len == xs.len and points.len == ys.len);
+        if (points.len == 0) return;
+        // Montgomery's trick: xs holds the prefix products of the z's until overwritten.
+        var product = Base.one;
+        for (points, xs) |point, *prefix| {
+            assert(!point.z.eql(Base.zero));
+            product = product.mul(point.z);
+            prefix.* = product;
+        }
+        var inverse = product.inv();
+        var index = points.len;
+        while (index > 0) {
+            index -= 1;
+            const point = points[index];
+            const z_inv = if (index == 0) inverse else inverse.mul(xs[index - 1]);
+            inverse = inverse.mul(point.z);
+            const x = point.x.mul(z_inv);
+            const y = point.y.mul(z_inv);
+            const positive = y.is_positive();
+            xs[index] = if (positive) x else x.neg();
+            ys[index] = if (positive) y else y.neg();
+        }
+        assert(inverse.eql(Base.one));
+    }
+
     /// The serialized abscissa `x Sign(y)`, equal for both twins.
     fn abscissa(self: G) Base {
         const x, const y = self.affine();
@@ -436,13 +465,12 @@ pub fn scalar_mul_many_in_circuit(
 fn select_window(gpa: Allocator, selector: Selector, base: G, len: usize) Allocator.Error!GVar {
     assert(len >= 1 and len <= 8);
     const count = @as(usize, 1) << @intCast(len);
+    var multiples: [256]G = undefined;
     var xs: [256]Base = undefined;
     var ys: [256]Base = undefined;
-    var point = G.zero;
-    for (xs[0..count], ys[0..count]) |*x, *y| {
-        x.*, y.* = point.canonicalize().affine();
-        point = point.add(base);
-    }
+    multiples[0] = G.zero;
+    for (multiples[1..count], 0..) |*point, previous| point.* = multiples[previous].add(base);
+    G.canonical_affine_batch(multiples[0..count], xs[0..count], ys[0..count]);
     const x = try selector.select_constant(gpa, xs[0..count]);
     const y = try selector.select_constant(gpa, ys[0..count]);
     return .{ .x = x, .y = y };
