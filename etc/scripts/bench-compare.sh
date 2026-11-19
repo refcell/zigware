@@ -77,6 +77,9 @@ read_options=cache"
   "chacha20_poly1305|cryptography|chacha20_poly1305::seal_open/n=65536"
   "chacha20_poly1305|cryptography|chacha20_poly1305::seal_open/n=1048576"
   "sake|cryptography|sake::sake"
+  "secp256r1|cryptography|secp256r1::signature_verification/variant=standard ns_len=9 msg_len=32"
+  "secp256r1|cryptography|secp256r1::signature_verification/variant=recoverable ns_len=9 \
+msg_len=32"
 )
 
 echo "building commonware benches (cargo bench --no-run, release)" >&2
@@ -86,6 +89,7 @@ echo "building commonware benches (cargo bench --no-run, release)" >&2
   --bench codec --bench sha256 --bench ed25519 --bench bls12381 \
   --bench journal --bench qmdb --bench merkle --bench bmt --bench rmap --bench buffer_paged \
   --bench chacha20_poly1305 --bench sake \
+  --bench secp256r1 \
   2> "$out/cargo.log") |
   python3 -I -c '
 import json, sys

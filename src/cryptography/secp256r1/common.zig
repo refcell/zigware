@@ -12,12 +12,14 @@
 //!   additional data), retrying the next `k` when `r` or `s` is zero, then moves `s` into the
 //!   lower half of the order (BIP 62) and flips the recovery id's y parity to match. std's
 //!   ECDSA is not used for signing: its nonce mixes in a noise block, so it is not RFC 6979.
-//! - Verification is plain ECDSA; public-key recovery follows the `ecdsa` crate.
+//! - Verification is plain ECDSA (`verify.zig`, structured as aws-lc's); public-key recovery
+//!   follows the `ecdsa` crate.
 
 const std = @import("std");
 const assert = std.debug.assert;
 const codec = @import("codec");
 const Opaque = @import("../secret.zig").Opaque;
+const verify = @import("verify.zig");
 const P256 = std.crypto.ecc.P256;
 const Scalar = P256.scalar.Scalar;
 const Fe = P256.Fe;
@@ -238,14 +240,19 @@ pub const PrivateKeyInner = struct {
     }
 };
 
-/// A secp256r1 public key: its compressed encoding and the decoded point.
+/// A secp256r1 public key: its compressed encoding and the decoded point, in affine
+/// coordinates so verification needs no inversion to use it.
 pub const PublicKeyInner = struct {
     raw: [public_key_length]u8,
-    point: P256,
+    point: verify.Affine,
 
     pub fn from_point(point: P256) PublicKeyInner {
         point.rejectIdentity() catch unreachable;
-        return .{ .raw = point.toCompressedSec1(), .point = point };
+        const affine = point.affineCoordinates();
+        var raw: [public_key_length]u8 = undefined;
+        raw[0] = if (affine.y.isOdd()) 0x03 else 0x02;
+        raw[1..].* = affine.x.toBytes(.big);
+        return .{ .raw = raw, .point = .{ .x = affine.x, .y = affine.y } };
     }
 
     /// Decodes a compressed point, or returns null when it is not one.
@@ -253,24 +260,14 @@ pub const PublicKeyInner = struct {
         if (raw[0] != 0x02 and raw[0] != 0x03) return null;
         const point = P256.fromSec1(&raw) catch return null;
         point.rejectIdentity() catch return null;
-        return .{ .raw = raw, .point = point };
+        // fromSec1 returns the point with Z = 1, so X and Y are its affine coordinates.
+        assert(point.z.equivalent(Fe.one));
+        return .{ .raw = raw, .point = .{ .x = point.x, .y = point.y } };
     }
 
     /// Verifies ECDSA `r || s` (already validated) over the payload hash `hash`.
     pub fn verify_prehashed(self: *const PublicKeyInner, hash: [32]u8, scalars: Scalars) bool {
-        const z = reduce(hash);
-        const s_inverse = scalars.s.invert();
-        const scalar_g = z.mul(s_inverse).toBytes(.big);
-        const scalar_q = scalars.r.mul(s_inverse).toBytes(.big);
-        const point = P256.mulDoubleBasePublic(
-            P256.basePoint,
-            scalar_g,
-            self.point,
-            scalar_q,
-            .big,
-        ) catch return false;
-        const x = point.affineCoordinates().x.toBytes(.big);
-        return reduce(x).equivalent(scalars.r);
+        return verify.verify(self.point, reduce(hash), scalars.r, scalars.s);
     }
 
     pub fn eql(a: *const PublicKeyInner, b: *const PublicKeyInner) bool {
