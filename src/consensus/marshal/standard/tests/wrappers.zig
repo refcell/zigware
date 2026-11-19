@@ -1057,3 +1057,275 @@ test "switch deferred to inline wrapper at epoch boundary" {
     // commonware `test_standard_switch_wrapper_at_epoch_boundary` (Deferred -> Inline).
     try run_for(60, SwitchCase(DeferredWrapper, InlineWrapper).body);
 }
+
+/// A partition-safe name for wrapper `W`.
+fn kind_name(comptime W: type) []const u8 {
+    return if (W == InlineWrapper) "inline" else "deferred";
+}
+
+const Buffered = common.Started(harness.Provider, App, common.RecordingBuffer);
+comptime {
+    // The wrappers bind the harness validator's mailbox; a direct actor's must be the same.
+    std.debug.assert(Buffered.A.Mailbox == Marshal);
+}
+
+/// commonware `certification_case`: a buffered actor started at genesis with a manually
+/// acknowledging application, a wrapper `W` over it, and the height-1 block at view 1.
+fn CertificationCase(comptime W: type) type {
+    return struct {
+        const Self = @This();
+
+        fixture: harness.Fixture,
+        started: Buffered,
+        wrapper: *W,
+        block: harness.B,
+
+        fn init(self: *Self, ctx: Ctx, prefix: []const u8) !void {
+            var rng = utils.rng.test_rng();
+            self.fixture = try harness.fixture(gpa, &rng);
+            errdefer self.fixture.deinit(gpa);
+            self.started = try common.start_standard_actor(
+                harness.Provider,
+                App,
+                common.RecordingBuffer,
+                ctx.child("validator"),
+                prefix,
+                .init(&self.fixture.schemes[0]),
+                try App.manual_ack(gpa, ctx.io()),
+                try common.RecordingBuffer.init(gpa, ctx.io()),
+                .{ .genesis = try H.genesis_block(gpa, harness.num_validators) },
+            );
+            errdefer self.started.crash();
+            const marshal = self.started.mailbox.clone();
+            const mock = Mock.init(gpa);
+            self.wrapper = try W.create(ctx.child("wrapper"), mock, marshal, epocher());
+            const genesis = try harness.make_raw_block(gpa, hash(""), .zero(), 0);
+            const me = self.fixture.participants[0];
+            const context: harness.Ctx = .{
+                .round = round_at(1),
+                .leader = me,
+                .parent = .{ .zero(), genesis.digest() },
+            };
+            self.block = try harness.B.init(gpa, context, genesis.digest(), .new(1), 100);
+        }
+
+        fn deinit(self: *Self, ctx: Ctx) void {
+            self.wrapper.destroy();
+            ctx.io().sleep(.fromMilliseconds(100), .awake) catch {};
+            self.started.crash();
+            self.fixture.deinit(gpa);
+        }
+
+        fn buffer(self: *const Self) common.RecordingBuffer {
+            return self.started.buffer.?;
+        }
+
+        /// Stages the quorum notarization of the block with the block for the next fetch.
+        fn respond_notarized(self: *Self) !void {
+            const digest = self.block.digest();
+            const proposal = harness.Proposal.init(round_at(1), .zero(), digest);
+            var notarization = try harness.make_notarization(
+                gpa,
+                &self.fixture,
+                proposal,
+                harness.quorum,
+            );
+            defer notarization.deinit(gpa);
+            const value = try encode_pair(notarization, self.block);
+            defer gpa.free(value);
+            try self.started.resolver.respond_to_next_fetch(value);
+        }
+    };
+}
+
+fn encode_pair(first: anytype, second: anytype) ![]u8 {
+    const codec = @import("codec");
+    const a = try codec.encode(@TypeOf(first), gpa, first);
+    defer gpa.free(a);
+    const b = try codec.encode(@TypeOf(second), gpa, second);
+    defer gpa.free(b);
+    return std.mem.concat(gpa, u8, &.{ a, b });
+}
+
+const RoundRequest = struct { resolver: common.RecordingResolver, round: Round };
+
+/// Whether a notarized fetch for `round` with a notarization subscriber was recorded.
+fn round_requested(state: RoundRequest) bool {
+    const fetches = state.resolver.fetches(gpa) catch return false;
+    defer gpa.free(fetches);
+    const key: common.Key = .{ .notarized = state.round };
+    const subscriber: common.Annotation = .{ .notarization = state.round };
+    for (fetches) |fetch| {
+        if (fetch.key.eql(key) and fetch.subscriber.eql(subscriber)) return true;
+    }
+    return false;
+}
+
+fn expect_round_requested(resolver: common.RecordingResolver, round: Round) !void {
+    try testing.expect(round_requested(.{ .resolver = resolver, .round = round }));
+}
+
+fn MissingVerify(comptime W: type) type {
+    return struct {
+        fn body(ctx: Ctx) anyerror!void {
+            const io = ctx.io();
+            var case: CertificationCase(W) = undefined;
+            try case.init(ctx, "missing-candidate-" ++ comptime kind_name(W));
+            defer case.deinit(ctx);
+            const resolver = case.started.resolver;
+            const context = case.block.context();
+            const missing = hash("missing candidate");
+            var verify = try io.concurrent(Calls(W).verify, .{ case.wrapper, context, missing });
+            try io.sleep(.fromMilliseconds(50), .awake);
+            // An unavailable candidate registers a local wait and fetches from no peer.
+            try testing.expect(case.buffer().subscription_count() > 0);
+            try testing.expectEqual(@as(usize, 0), resolver.fetch_count());
+            try testing.expect(resolver.targeted_is_empty());
+            // Still pending: consensus dropping the verification cancels it.
+            try testing.expectError(error.Canceled, verify.cancel(io));
+            try io.sleep(.fromMilliseconds(10), .awake);
+            try testing.expectEqual(@as(usize, 0), resolver.fetch_count());
+        }
+    };
+}
+
+test "inline verify missing candidate waits without fetching" {
+    // commonware `test_standard_verify_missing_candidate_waits_without_fetching` (Inline).
+    try run_for(30, MissingVerify(InlineWrapper).body);
+}
+
+test "deferred verify missing candidate waits without fetching" {
+    // commonware `test_standard_verify_missing_candidate_waits_without_fetching` (Deferred).
+    try run_for(30, MissingVerify(DeferredWrapper).body);
+}
+
+/// After an unclean shutdown simplex may recover a notarized payload while marshal has no
+/// local gate and no block: certification fetches the block by notarized round.
+fn MissingCertify(comptime W: type) type {
+    return struct {
+        fn body(ctx: Ctx) anyerror!void {
+            var case: CertificationCase(W) = undefined;
+            try case.init(ctx, "missing-certify-candidate-" ++ comptime kind_name(W));
+            defer case.deinit(ctx);
+            const resolver = case.started.resolver;
+            try case.respond_notarized();
+            const digest = case.block.digest();
+            const certified = try case.wrapper.certify(undefined, round_at(1), digest);
+            try testing.expectEqual(@as(?bool, true), certified);
+            try testing.expect(try resolver.wait_for_delivery_response());
+            try expect_round_requested(resolver, round_at(1));
+            try testing.expect(case.buffer().subscription_count() > 0);
+            try testing.expect(resolver.targeted_is_empty());
+        }
+    };
+}
+
+test "inline certify missing candidate fetches by round" {
+    // commonware `test_standard_certify_missing_candidate_fetches_by_round` (Inline).
+    try run_for(30, MissingCertify(InlineWrapper).body);
+}
+
+test "deferred certify missing candidate fetches by round" {
+    // commonware `test_standard_certify_missing_candidate_fetches_by_round` (Deferred).
+    try run_for(30, MissingCertify(DeferredWrapper).body);
+}
+
+/// `verify` parks on a gate whose block wait cannot pull from peers; `certify` takes that
+/// gate and nudges a round-bound notarized fetch, so both resolve once it delivers.
+/// Without the `hint_notarized` nudge both wait until the runtime times out.
+fn BumpsFetch(comptime W: type) type {
+    return struct {
+        fn body(ctx: Ctx) anyerror!void {
+            const io = ctx.io();
+            var case: CertificationCase(W) = undefined;
+            try case.init(ctx, "certify-bumps-fetch-" ++ comptime kind_name(W));
+            defer case.deinit(ctx);
+            const digest = case.block.digest();
+            const context = case.block.context();
+            var verify = try io.concurrent(Calls(W).verify, .{ case.wrapper, context, digest });
+            defer _ = verify.cancel(io) catch {};
+            try case.respond_notarized();
+            const call = Calls(W).certify;
+            var certify = try io.concurrent(call, .{ case.wrapper, round_at(1), digest });
+            defer _ = certify.cancel(io) catch {};
+            try testing.expectEqual(@as(?bool, true), try verify.await(io));
+            try testing.expectEqual(@as(?bool, true), try certify.await(io));
+            try expect_round_requested(case.started.resolver, round_at(1));
+        }
+    };
+}
+
+test "inline certify bumps notarized fetch for pending verify" {
+    // commonware `test_standard_certify_bumps_notarized_fetch_for_pending_verify` (Inline).
+    try run_for(30, BumpsFetch(InlineWrapper).body);
+}
+
+test "deferred certify bumps notarized fetch for pending verify" {
+    // commonware `test_standard_certify_bumps_notarized_fetch_for_pending_verify` (Deferred).
+    try run_for(30, BumpsFetch(DeferredWrapper).body);
+}
+
+/// A pending verification owns a transiently buffered block before certification waits on
+/// its gate, so the buffer evicting it on lookup leaves neither pending.
+fn TransientHit(comptime W: type) type {
+    return struct {
+        fn body(ctx: Ctx) anyerror!void {
+            const io = ctx.io();
+            var case: CertificationCase(W) = undefined;
+            try case.init(ctx, "certify-transient-buffer-" ++ comptime kind_name(W));
+            defer case.deinit(ctx);
+            const digest = case.block.digest();
+            const context = case.block.context();
+            const transient = try mocks_block.ready(harness.B, gpa, case.block);
+            try case.buffer().insert_transient(transient);
+            var verify = try io.concurrent(Calls(W).verify, .{ case.wrapper, context, digest });
+            defer _ = verify.cancel(io) catch {};
+            try io.sleep(.fromMilliseconds(1), .awake);
+            const call = Calls(W).certify;
+            var certify = try io.concurrent(call, .{ case.wrapper, round_at(1), digest });
+            defer _ = certify.cancel(io) catch {};
+            try io.sleep(.fromMilliseconds(1), .awake);
+            // Ordered after the verification subscription and certification hint in the
+            // mailbox: once it returns, the one-shot buffer hit and eviction have happened.
+            _ = try case.started.mailbox.get_processed();
+            try testing.expect(!case.buffer().contains(digest));
+            try testing.expectEqual(@as(?bool, true), try verify.await(io));
+            try testing.expectEqual(@as(?bool, true), try certify.await(io));
+        }
+    };
+}
+
+test "inline certify retains transient buffer hit through eviction" {
+    // commonware `test_standard_certify_retains_transient_buffer_hit_through_eviction`.
+    try run_for(30, TransientHit(InlineWrapper).body);
+}
+
+test "deferred certify retains transient buffer hit through eviction" {
+    // commonware `test_standard_certify_retains_transient_buffer_hit_through_eviction`.
+    try run_for(30, TransientHit(DeferredWrapper).body);
+}
+
+test "deferred certify falls back after canceled verify" {
+    // commonware `test_standard_deferred_certify_falls_back_after_canceled_verify`: consensus
+    // drops the optimistic verify before the block arrives; certification recovers the
+    // notarized block by round instead of returning the stale verdict.
+    try run_for(30, struct {
+        fn body(ctx: Ctx) anyerror!void {
+            const io = ctx.io();
+            const W = DeferredWrapper;
+            var case: CertificationCase(W) = undefined;
+            try case.init(ctx, "deferred-certify-canceled-verify");
+            defer case.deinit(ctx);
+            const digest = case.block.digest();
+            const context = case.block.context();
+            var verify = try io.concurrent(Calls(W).verify, .{ case.wrapper, context, digest });
+            try testing.expectError(error.Canceled, verify.cancel(io));
+            try io.sleep(.fromMilliseconds(10), .awake);
+            try case.respond_notarized();
+            const certified = try case.wrapper.certify(undefined, round_at(1), digest);
+            try testing.expectEqual(@as(?bool, true), certified);
+            try testing.expect(try case.started.resolver.wait_for_delivery_response());
+            try expect_round_requested(case.started.resolver, round_at(1));
+        }
+    }.body);
+}
