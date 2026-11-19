@@ -102,7 +102,8 @@ on p2p's simulated network and the deterministic runtime.
   `call(key, subscriber) bool`.
 - `subscribers.Tracker.pending`/`remove_delivered` return borrowed slices instead of clones.
 - resolver imports `conformance` (a dev-dependency in commonware) for its conformance test.
-- Wire `encode_iobufs` tests have no counterpart (no `IoBufs` yet; writes go to one buffer).
+- Wire `Message` and `Payload` declare `write_bufs`/`encode_inline_size`, so
+  `runtime.iobuf.encode_iobufs` pushes a response's value as its own chunk.
 - Ingress batches carry the mailbox allocator (`Batch.gpa`) because the mailbox's `discard`
   takes none; `handle` asserts every batch uses the mailbox's allocator. The pending-fetch
   index hashes each key's codec encoding (Wyhash), so keys need a bounded encoding.
@@ -174,8 +175,8 @@ passes even without the fix (the verdict task queues before the engine reads the
 direct engine test is the one that covers it.
 
 Every `#[test]`/`#[test_traced]`/`#[rstest]` fn in commonware `resolver/src`, matched to a zigware
-test by name or by reading both bodies (a zigware test may cover several). 178 tests: 173 ported, 0
-open, 5 not portable (the 8 inflight tests below are ported in src/resolver/p2p/inflight_test.zig).
+test by name or by reading both bodies (a zigware test may cover several). 178 tests: 174 ported, 0
+open, 4 not portable (the 8 inflight tests below are ported in src/resolver/p2p/inflight_test.zig).
 
 | commonware file | tests | ported | open | not portable |
 |---|---|---|---|---|
@@ -183,12 +184,12 @@ open, 5 not portable (the 8 inflight tests below are ported in src/resolver/p2p/
 | `ingress.rs` | 11 | 11 | 0 | 0 |
 | `opaque.rs` | 13 | 13 | 0 | 0 |
 | `subscribers.rs` | 5 | 5 | 0 | 0 |
-| `p2p/fetcher.rs` | 58 | 58 | 0 | 0 |
+| `p2p/fetcher.rs` | 58 | 57 | 0 | 1 |
 | `p2p/inflight.rs` | 9 | 8 | 0 | 1 |
 | `p2p/ingress.rs` | 7 | 7 | 0 | 0 |
 | `p2p/mod.rs` | 51 | 51 | 0 | 0 |
 | `p2p/score.rs` | 7 | 7 | 0 | 0 |
-| `p2p/wire.rs` | 8 | 5 | 0 | 3 |
+| `p2p/wire.rs` | 8 | 7 | 0 | 1 |
 
 Ported since the audit:
 - [x] `p2p/inflight.rs` `test_insert_contains_cancel_remove_round_trip`: Inflight
@@ -224,10 +225,14 @@ Not portable:
   assertion (.? unwrap) in Inflight.complete
 - `p2p/wire.rs` `test_max_message_size_beyond_prefix`: #[should_panic] ("value must fit the u32
   length prefix"); an assertion in Zig
-- `p2p/wire.rs` `test_message_encode_iobufs_matches_encode`: No encode_iobufs/IoBufs API in Zig;
-  writes go to one buffer (docs/lanes/broadcast-resolver.md Decisions)
-- `p2p/wire.rs` `test_payload_response_encode_iobufs_matches_encode`: No encode_iobufs/IoBufs API in
-  Zig; writes go to one buffer (docs/lanes/broadcast-resolver.md Decisions)
+- `p2p/fetcher.rs` `test_add_retry_duplicate_panics`: #[should_panic]; `Fetcher.add_retry`
+  asserts (missing from the table until the 2026-11-19 review)
+
+Not-portable review (2026-11-19, coding lane): before 6 (5 counted, plus the uncounted
+`test_add_retry_duplicate_panics`). The two wire `encode_iobufs` tests were stale:
+`runtime.iobuf` has existed since da3bee6. They are ported in p2p/wire.zig with
+`Message.write_bufs` and `Payload.write_bufs`, and catch a response written with the request
+tag. After: 4, all panic (zigware asserts or unwraps too).
 
 ## Log
 - 2026-11-13: resolver lib.rs types, subscribers tracker, p2p wire (conformance hashes match).

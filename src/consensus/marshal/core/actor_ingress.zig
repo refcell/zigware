@@ -19,15 +19,15 @@ pub fn handle(self: anytype, message: anytype) !void {
     const Actor = @TypeOf(self.*);
     if (message.response_closed()) return Actor.Message.discard(message);
     switch (message.body) {
-        .get_info => |body| reply(self.gpa, body.response, try get_info(self, body.identifier)),
-        .get_verified => |body| reply(self.gpa, body.response, try get_verified(self, body.round)),
-        .get_block => |body| reply(self.gpa, body.response, try get_block(self, body.identifier)),
+        .get_info => |body| try answer(self.gpa, body.response, get_info(self, body.identifier)),
+        .get_verified => |body| try answer(self.gpa, body.response, get_verified(self, body.round)),
+        .get_block => |body| try answer(self.gpa, body.response, get_block(self, body.identifier)),
         .get_finalization => |body| {
-            const found = try finalize.get_finalization_by_height(self, body.height);
-            reply(self.gpa, body.response, found);
+            const found = finalize.get_finalization_by_height(self, body.height);
+            try answer(self.gpa, body.response, found);
         },
         .get_processed => |body| reply(self.gpa, body.response, self.floor.processed),
-        .get_anchor => |body| reply(self.gpa, body.response, try get_anchor(self)),
+        .get_anchor => |body| try answer(self.gpa, body.response, get_anchor(self)),
         .forward => |body| try forward(self, message.gpa, body),
         .proposed => |body| try proposed(self, message.gpa, body),
         .prepared => |body| {
@@ -64,6 +64,17 @@ pub fn handle(self: anytype, message: anytype) !void {
 }
 
 /// Sends `value` (owned) to `response`; a caller that stopped waiting drops it.
+/// Replies with `result`'s value, or on a failed read drops the responder (closing the
+/// requester's wait) and returns the error, which stops the actor.
+fn answer(gpa: std.mem.Allocator, response: anytype, result: anytype) !void {
+    const value = result catch |err| {
+        var sender = response;
+        sender.deinit();
+        return err;
+    };
+    reply(gpa, response, value);
+}
+
 fn reply(gpa: std.mem.Allocator, response: anytype, value: anytype) void {
     var sender = response;
     sender.send(value) catch {

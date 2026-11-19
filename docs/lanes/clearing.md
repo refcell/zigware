@@ -184,7 +184,10 @@ qmdb `current` (balances, over the MMB) and `keyless` (payout log, over the MMR)
   freezer, ordinal, cache, index, rmap, bitmap, translator, utils, and bmt against zigware,
   written into the owning lane files (storage-archive, storage-merkle, coding), then port the
   open ones in batches with a planted bug each.
-  - [x] Tally: 495 tests, 375 ported, 17 partial, 30 open, 73 not portable.
+  - [x] Tally: 495 tests, 375 ported, 17 partial, 30 open, 73 not portable. Since then the
+    archive's 15 landed (start_sync steps 4 and 4b), rmap's 1 is ported upstream-renamed, and
+    index's 3 `cursor_across_threads` are ported; the 2026-11-19 not-portable review leaves 54
+    (52 in storage-merkle.md, 2 bmt in coding.md).
   - [x] Freezer's 9 open tests; archive's slow tests at commonware's sizes; a sync count in
     `runtime.storage.mocks.Recordings`.
   - [x] Archive's open tests: 11 of 14 (markers, sync counts, below-floor syncs, destroys).

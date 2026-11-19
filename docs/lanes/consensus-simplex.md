@@ -327,9 +327,15 @@ resolver; those lanes are running, so do the types first and the actors as they 
   replay-conflict cases), and batcher verifier.rs (3). Each guarded path asserts or panics
   in the Zig code. mocks/twins.rs `route_with_groups_covers_reachable_split_targets`
   has no counterpart because routing here takes participant-index masks
-  (`route_masks`, covered by the route tests), and
-  `compressed_counts_match_reference_enumeration` would need commonware's 200-line
-  brute-force enumerator; the single-round space is checked against its closed form.
+  (`route_masks`, covered by the route tests).
+- [ ] Not-portable review (2026-11-19, coding lane): before 28, after 27. Every panic case
+  still panics or asserts in zigware (category panic, 26); `route_with_groups_covers_
+  reachable_split_targets` is a design difference (mask routing). Reopened as portable:
+  `compressed_counts_match_reference_enumeration` (twins.rs:1707). It only needs commonware's
+  reference enumerator (twins.rs:1294-1546, without recursion) compared with the public
+  `twins_generator.Generator.count` for 2-4 participants and 1-3 rounds; a plant reading
+  `counts[0]` instead of `counts[remaining - 1]` in `count` would fail it from two rounds. The
+  same enumerator lets `compressed_unranking_matches_reference_space` check set equality.
 - [x] Tracing: actor events are done (voter, batcher, resolver, engine). The voter opens
   commonware's `simplex.voter.start`, `.timeout`, `.process`, and `.notify` spans, and
   events inside them carry them. Each view's root `simplex.voter.view` span opens on entry

@@ -220,7 +220,7 @@ ports its range's tests and the helpers defined in it, into
   in its channel), then every resolved acknowledgement, even when their inbox notices have
   not arrived. So ack-then-`get_processed` sees the new height, and a query after the buffer
   hands a floor anchor over sees the installed floor. Commonware's first arm (pooled sync
-  completions) has no counterpart, since zigware's syncs complete inside their event.
+  completions) is `Syncs`, drained first since async start_sync step 6.
 - `storage.archive.immutable` borrows its config's partition names (its ordinal opens
   section blobs lazily), so `harness.Archives` owns them for the archives' lifetime.
 - Marshal blocks keep commonware's trait method names (`height()`, `parent()`, `digest()`,
@@ -268,8 +268,9 @@ ports its range's tests and the helpers defined in it, into
 - The cache's `put_verified`/`put_notarized`/`put_notarization`/`start_sync_*` return the
   archives' `runtime.storage.Completion` (commonware's sync handle); `put_certified`,
   `put_finalization`, and the epoch metadata sync before they return, as commonware's do.
-  `durable(result, round, name)` keeps commonware's policy: shutdown (`Canceled`/`Closed`)
-  reports not durable, any other sync failure panics (no `should_panic` test in Zig).
+  The actor pools those completions; a failed sync or archive read returns the storage error,
+  which stops the actor (commonware panics), and a query's responder is released first so
+  its requester sees the mailbox close. `durable` (panicking) is only used by its own tests.
 - Buffer waiters and the pending floor's waiter are aborted through an `Aborter` type
   parameter (`abort(*Aborter)`), which the actor supplies from its waiter tasks (one inbox
   fed by tasks, as simplex's voter does).
@@ -346,7 +347,7 @@ line, with where its Zig counterpart lives. Counts:
 
 | File | Ported | In progress | Not portable | Total |
 | --- | --- | --- | --- | --- |
-| standard/mod.rs | 188 | 0 | 9 | 197 |
+| standard/mod.rs | 192 | 1 | 4 | 197 |
 | coding/mod.rs | 100 | 0 | 1 | 101 |
 
 `mocks/harness.rs` has no tests of its own: all 31 generic scenario functions are ported
@@ -356,14 +357,24 @@ the standard wrappers above. `conformance.rs`'s StandardStorageConformance workl
 coding lane's. Commonware has no marshal fuzz targets; AGENTS.md's fuzz bodies
 (seeded and `std.testing.fuzz`, each with a planted bug caught) cover the resolver `Key`
 codec, `Annotation` order, standard `decode_block`, `DispatchGate`, `PendingAcks`, `Staged`,
-the mailbox overflow policy, and the ancestor stream. Not portable: the 8 `should_panic` tests (7 standard, 1 coding), because a Zig
-test cannot catch a panic (zigware panics with commonware's message in the floor and genesis
-cases, and returns the storage error, stopping the actor, in the sync-failure cases);
-`cache_writes_do_not_clone_block_payloads`
-(it counts implicit Rust payload clones; Zig blocks are refcounted handles and cache writes
-encode from a borrow), and `resolver_delivery_waits_for_identity_job` (it gates the strategy
-job that digests a delivered block; standard's `decode_block` digests inline, so there is no
-job to gate, and `mocks/strategy.rs`'s GatedStrategy has no other user).
+the mailbox overflow policy, and the ancestor stream. Not portable (after the 2026-11-19
+review below): panic, where zigware panics with commonware's message too: the two floor
+`rejects_invalid_finalization` tests, `restart_rejects_mismatched_genesis_anchor`, and coding's
+`floor_anchor_panics_on_parent_commitment_mismatch`; missing feature:
+`resolver_delivery_waits_for_identity_job` (standard's `decode_block` digests inline, so there
+is no strategy job to gate; `parallel`'s `spawn` runs inline under `Sequential`).
+
+Not-portable review (2026-11-19, coding lane). Before: 10 here (9 standard, 1 coding).
+The four sync and read failure tests were filed as `should_panic`, but zigware returns the
+error and stops the actor, so they port as error checks in standard/tests/dispatch.zig, each
+catching a planted bug: verified (ack sent before the sync), certified (already "failed certify
+barrier sync stops the actor"), notarization (an `.observed` failure ignored), and digest read
+(the read error swallowed). Porting the read test found a hang: a query whose read failed
+dropped its responder unreleased, so the requester waited forever; `actor_ingress.answer`
+now releases it. `cache_writes_do_not_clone_block_payloads` moved to in progress: its reason
+was wrong. `cache.put_block` deep-copies an owning block through `V.into_stored` before the
+archive encodes it; the mock block owns no memory, so nothing showed. It needs a payload-owning
+test block and a borrowed encode in `put_block` (marshal lane). After: 5.
 
 #### standard/mod.rs
 
@@ -467,10 +478,10 @@ job to gate, and `mocks/strategy.rs`'s GatedStrategy has no other user).
 - L5545 `test_verify_reproposal_validation`: ported (standard/tests/propose_validation.zig)
 - L5691 `test_verify_rejects_invalid_ancestry`: ported (standard/tests/propose_validation.zig)
 - L5839 `test_application_verify_failure`: ported (standard/tests/propose_validation.zig)
-- L5932 `test_mailbox_verified_sync_failure_panics`: not portable (see above)
-- L5989 `test_mailbox_certified_sync_failure_panics`: not portable (see above)
-- L6043 `test_notarization_sync_failure_panics`: not portable (see above)
-- L6104 `test_get_info_by_digest_read_failure_panics`: not portable (see above)
+- L5932 `test_mailbox_verified_sync_failure_panics`: ported as an error check (standard/tests/dispatch.zig)
+- L5989 `test_mailbox_certified_sync_failure_panics`: ported as an error check (standard/tests/dispatch.zig)
+- L6043 `test_notarization_sync_failure_panics`: ported as an error check (standard/tests/dispatch.zig)
+- L6104 `test_get_info_by_digest_read_failure_panics`: ported as an error check (standard/tests/dispatch.zig)
 - L6151 `test_certified_covered_by_verified_write_recoverable_after_restart`: ported (standard/tests/wrappers.zig)
 - L6740 `test_standard_application_shutdown_redelivers_pending_ack_after_restart`: ported (standard/tests/floor.zig)
 - L6850 `test_standard_actor_starts_without_buffer`: ported (standard/tests/floor.zig)
@@ -515,7 +526,7 @@ job to gate, and `mocks/strategy.rs`'s GatedStrategy has no other user).
 - L9967 `test_standard_round_floor_advance_releases_superseded_pending_floor`: ported (standard/tests/floor.zig)
 - L10119 `test_standard_unverifiable_delivery_is_ignored`: ported (standard/tests/floor.zig)
 - L10275 `test_standard_dispatches_finalized_blocks_after_sync`: ported (standard/tests/floor.zig)
-- L10612 `test_standard_cache_writes_do_not_clone_block_payloads`: not portable (see above)
+- L10612 `test_standard_cache_writes_do_not_clone_block_payloads`: in progress (see the review above)
 - L10723 `test_standard_notarized_delivery_decodes_after_verification`: ported (standard/tests/dispatch.zig)
 - L10819 `test_standard_finalization_sync_does_not_block_mailbox`: ported (standard/tests/dispatch.zig)
 - L10942 `test_standard_stale_floor_anchor_holds_dispatch_until_durable`: ported (standard/tests/dispatch.zig)

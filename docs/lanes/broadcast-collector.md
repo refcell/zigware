@@ -98,8 +98,13 @@ that harness. It builds on `coding` (ReedSolomon), `consensus.types.coding.Commi
   the message; `CodedBlock.shard` copies them out of the shared encoding), where commonware
   shares `Bytes`. `CodedBlock.from_decoded` returns `ConfigMismatch`, `BlockDigestMismatch`,
   `RecommitFailed`, or `CommitmentMismatch` for commonware's `Invalid("CodedBlock", ...)`
-  messages. Strategy jobs run inline. The two `should_panic` tests and the iobufs test have
-  no counterpart.
+  messages. Strategy jobs run inline. The two `should_panic` tests have no counterpart (zigware
+  panics too); `test_shard_encode_iobufs_matches_encode` is ported (`Shard.write_bufs`, 2026-11-19
+  not-portable review: it catches a dropped shard index). Still not portable after that review:
+  those two panics, `floor_anchor_panics_on_parent_commitment_mismatch` (panic), and the 4 shard
+  engine job tests (missing feature: reconstruction runs inline, with no job set). Before 8,
+  after 7. `count_running_tasks` exists in runtime telemetry, but these engines start tasks with
+  `io.concurrent`, which it does not count; `WrappedBackgroundReceiver` exists in p2p utils.
 
 - marshal coding validation: `validate_proposal(H, gpa, commitment, config, ?context)`,
   `validate_block(H, gpa, epocher, *block, *parent, context, commitment, parent_commitment)`,

@@ -251,17 +251,21 @@ Commonware's `#[test]` functions matched to zigware tests by what they check.
 | module | tests | ported | partial | open | not portable |
 |---|---|---|---|---|---|
 | index | 172 | 125 | 0 | 0 | 47 |
-| rmap | 39 | 38 | 0 | 0 | 1 |
+| rmap | 39 | 39 | 0 | 0 | 0 |
 | bitmap | 15 | 11 | 0 | 0 | 4 |
 | translator | 18 | 17 | 0 | 0 | 1 |
 
-Not portable: 36 `should_panic` tests (zig tests cannot catch panics; each panic exists),
+Not portable: 35 `should_panic` tests (zig tests cannot catch panics; each panic exists),
 index's spill tests (one tree, no spill threshold, see Decisions), and the metrics-registry
 range test (the indices keep plain counters, not registry metrics). The 3
 `cursor_across_threads` tests are ported as `index cursor across threads` (an index behind a
 `std.Io.Mutex`, updated through a cursor on a spawned thread). Re-audited 2026-11-19 against
 start_sync, DelayedSync, the faulty wrap, and parallel conformance: none of the other
-not-portable entries depends on them.
+not-portable entries depends on them. Not-portable review (2026-11-19, coding lane): rmap's one
+(`test_missing_items_zero_n`) became the plain `test_missing_items_zero_limit` upstream
+(e7987e8c3), which is ported. By category: panic 35 (index 30, bitmap 4, translator 1); design
+difference 17 (one treap with no spill: 9 spill and worker-metrics tests, 7 `partition.rs`
+internals, and the registry range test). 52 in all.
 
 Open (index):
 - [x] `range_for_each_value_visits_all_values_once` and `install_range_nonzero_offset` for

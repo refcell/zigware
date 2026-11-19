@@ -1389,6 +1389,11 @@ fn sync_failure_body(ctx: Ctx, comptime which: SyncFailure) anyerror!void {
             pending.fail_all();
         },
     }
+    // Each pass sleeps 1 ms; the actor closes its mailbox when the failure ends it.
+    for (0..2_000) |_| {
+        if (env.started.mailbox.sender.is_closed()) break;
+        try ctx.sleep(.fromMilliseconds(1));
+    } else return error.TestActorKeptRunning;
     ended = true;
     defer env.fixture.deinit(gpa);
     try testing.expectError(error.Io, env.started.join());
@@ -1408,6 +1413,39 @@ test "standard failed notarization sync stops the actor" {
             return sync_failure_body(ctx, .notarization);
         }
     }.body);
+}
+
+/// A failed archive read in a digest lookup ends the actor with the storage error
+/// (commonware panics in `test_get_info_by_digest_read_failure_panics`).
+fn read_failure_body(ctx: Ctx, runner: *runtime.deterministic.Runner) anyerror!void {
+    var env: Env = undefined;
+    try env.init(ctx, "read-failure");
+    var ended = false;
+    defer if (!ended) {
+        runner.storage_fault_config().read_rate = null;
+        env.deinit();
+    };
+    _ = try env.started.mailbox.get_verified(round_at(1));
+    try ctx.sleep(.fromMilliseconds(10));
+    // Every blob read fails; the digest lookup is the actor's next archive read.
+    runner.storage_fault_config().read_rate = .one;
+    _ = env.started.mailbox.get_info(.{ .digest = try genesis_digest() }) catch null;
+    // Each pass sleeps 1 ms; the actor closes its mailbox when the failure ends it.
+    for (0..2_000) |_| {
+        if (env.started.mailbox.sender.is_closed()) break;
+        try ctx.sleep(.fromMilliseconds(1));
+    } else return error.TestActorKeptRunning;
+    runner.storage_fault_config().read_rate = null;
+    ended = true;
+    defer env.fixture.deinit(gpa);
+    try testing.expectError(error.Io, env.started.join());
+}
+
+test "standard failed digest lookup read stops the actor" {
+    const config: runtime.deterministic.Config = .{ .timeout_ns = 30 * std.time.ns_per_s };
+    var runner = try runtime.deterministic.Runner.init(gpa, config);
+    defer runner.deinit();
+    try try runner.start_context(read_failure_body, .{&runner});
 }
 
 fn processed_is_one(ctx: Ctx) bool {
