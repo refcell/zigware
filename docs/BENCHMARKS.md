@@ -16,7 +16,7 @@ better. A ratio below 1 means zigware is faster.
 | `bls12381::aggregate_verify_same_message` | `pks=1000` | 3.19 ms | 3.13 ms | 0.98× (re-run, see below) |
 | `journal::fixed_append` | `items=10000 size=32` | 2.00 ms | 456 µs | 0.23× |
 | `journal::append_sync` | `journal=fixed mode=sync` | 14.6 µs | 1.55 µs | 0.11× |
-| `journal::fixed_replay` | `items=100000 buffer=65536 size=32 read_options=cache` | 690 µs | 817 µs | 1.19× (fixed, see below) |
+| `journal::fixed_replay` | `items=100000 buffer=65536 size=32 read_options=cache` | 415 µs | 316 µs | 0.76× (re-run, see below) |
 | `qmdb::apply_batch` | `case=direct variant=any::unordered::fixed::mmb chunk=32 updates=16384` | 1.13 ms | 1.21 ms | 1.07× |
 | `buffer_paged::append` | `backend=tokio chunk=4096` | 66.1 ms | 28.2 ms | 0.43× |
 
@@ -140,10 +140,16 @@ directory under `BENCH_DIR` (default `$TMPDIR` or `/tmp`). commonware gets it th
   serves `variable_replay`. Best of 3 at a load average of 74 to 82: zigware 481 µs (was
   1.08 ms at a similar load), commonware 1.78 ms. commonware's multi-threaded runtime slows
   far more under this load than zigware's replay, so the fair comparison is with its quiet
-  table figure: 481 µs against 690 µs, about 0.70× while loaded. Commonware's replay also
-  keeps three reads in flight ahead of the decoder (`Blob::start_read_many`); here the
-  blob reads cost about 120 to 270 µs of wall time on tmpfs, so read-ahead is a smaller,
-  later step.
+  table figure: 481 µs against 690 µs, about 0.70× while loaded. The table row is a later
+  re-run with bench-compare.sh's own method (`BENCH_FILTER=journal::fixed_replay
+  etc/scripts/bench-compare.sh 5`: five alternating runs per side on tmpfs, load average 38.6
+  to 44.2, on fa6525fd): commonware 415 µs, zigware 316 µs, 0.76×, and zigware was faster in
+  all five pairs (315 to 341 µs against 415 to 472 µs). The 1.19× (690 µs against 817 µs)
+  was measured before the drain fix. Commonware's replay also keeps three reads in flight
+  ahead of the decoder (`Blob::start_read_many`). zigware ports that behind storage
+  `Config.read_ahead`, off by default: on `std.Io.Threaded` each read starts on another task,
+  and on tmpfs that made fixed replay about 4× slower (1.3 to 2.1 ms against 0.38 to 0.47 ms
+  inline), while `variable_replay` was neutral.
 - **ed25519 batch MSM on AVX2, 2026-11-19.** `ed25519/verify_avx2.zig` ports
   curve25519-dalek 5.0.0's `backend/vector/avx2` (four radix-2^25.5 field elements per
   `u32x8` lane set, and its parallel extended-point add and double), the backend commonware's
