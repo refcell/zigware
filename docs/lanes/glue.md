@@ -542,6 +542,8 @@ Owns `src/glue/dkg`. Reference: `glue/src/dkg` (about 24k Rust lines).
 - 2026-11-19: orchestrator mailbox; its test catches an overflow policy that drops reports.
 - 2026-11-19: orchestrator actor; its tests catch an early boundary acknowledgement, a
   missing skipped-block check, and an ignored future-epoch hint.
+- 2026-11-19: orchestrator mod.rs's single-node tests (missing boundary, shutdown in the gate
+  wait, recovered start); they catch an ignored processed height and an unraced gate wait.
 
 ## dkg probe/bootstrap (owner: p2p lane)
 

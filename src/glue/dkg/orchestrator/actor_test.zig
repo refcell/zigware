@@ -48,6 +48,7 @@ const EpochProvider = struct {
 
 /// Serves the blocks the test stores, and records finalization hints.
 const MockMarshal = struct {
+    processed: ?consensus.marshal.core.floor.Processed = null,
     blocks: std.ArrayList(Digested) = .empty,
     hints: std.ArrayList(Height) = .empty,
 
@@ -58,8 +59,7 @@ const MockMarshal = struct {
     }
 
     pub fn get_processed(self: *MockMarshal) !?consensus.marshal.core.floor.Processed {
-        _ = self;
-        return null;
+        return self.processed;
     }
 
     pub fn get_block(self: *MockMarshal, identifier: anytype) !?Digested {
@@ -396,4 +396,129 @@ test "orchestrator actor: a later-epoch vote hints the boundary finalization" {
     });
     defer runner.deinit();
     try try runner.start_context(catch_up_body, .{});
+}
+
+/// Epoch zero's chain for `key`: genesis carrying epoch zero's info (stored in marshal), the
+/// middle block, and the final block carrying epoch one's info (stored when `store_final`).
+fn epoch_zero(h: *Harness, store_final: bool) !struct { Digested, Digested } {
+    const key = h.key();
+    var raw = mocks.genesis_block(key);
+    try h.marshal.blocks.append(gpa, try with_info(raw, key, 0));
+    raw = mocks.child(&raw);
+    var middle = try digested(raw);
+    errdefer middle.deinit();
+    raw = mocks.child(&raw);
+    const final = try with_info(raw, key, 1);
+    if (store_final) try h.marshal.blocks.append(gpa, final.clone());
+    return .{ middle, final };
+}
+
+fn start_runner(comptime body: fn (runtime.deterministic.Context) anyerror!void) !void {
+    var runner = try runtime.deterministic.Runner.init(gpa, .{
+        .timeout_ns = 60 * std.time.ns_per_s,
+    });
+    defer runner.deinit();
+    try try runner.start_context(body, .{});
+}
+
+// commonware `missing_boundary_block_stops_cleanly`: marshal cannot supply the final block
+// it reported, so the actor stops without error and drops the acknowledgement.
+fn missing_boundary_body(ctx: runtime.deterministic.Context) anyerror!void {
+    const io = ctx.io();
+    var h: Harness = undefined;
+    try h.init(ctx, 1);
+    defer h.deinit();
+    var middle, var final = try epoch_zero(&h, false);
+    defer middle.deinit();
+    defer final.deinit();
+    h.fence.mark(.zero());
+    var orchestrator, var mailbox = try TestActor.init(ctx, h.config());
+    defer orchestrator.deinit();
+    defer mailbox.deinit();
+    const channels = try h.channels();
+    var task = try io.concurrent(run_actor, .{ &orchestrator, &channels });
+    defer _ = task.cancel(io) catch {};
+    var boundary = try deliver(io, mailbox, &final);
+    defer boundary.deinit();
+    try task.await(io);
+    try testing.expectError(error.AcknowledgementCanceled, boundary.poll().?);
+    try testing.expectEqual(@as(u32, 1), h.manager.tracked);
+}
+
+test "orchestrator actor: a missing boundary block stops the actor cleanly" {
+    try start_runner(missing_boundary_body);
+}
+
+// commonware `shutdown_interrupts_boundary_gate_wait`: a stop resolves while the actor waits
+// for the gate to open the next epoch, and the actor releases its stop signals.
+fn shutdown_gate_body(ctx: runtime.deterministic.Context) anyerror!void {
+    const io = ctx.io();
+    var h: Harness = undefined;
+    try h.init(ctx, 1);
+    defer h.deinit();
+    var middle, var final = try epoch_zero(&h, true);
+    defer middle.deinit();
+    defer final.deinit();
+    h.fence.mark(.zero());
+    var orchestrator, var mailbox = try TestActor.init(ctx, h.config());
+    defer orchestrator.deinit();
+    defer mailbox.deinit();
+    const channels = try h.channels();
+    var task = try io.concurrent(run_actor, .{ &orchestrator, &channels });
+    defer _ = task.cancel(io) catch {};
+    var boundary = try deliver(io, mailbox, &final);
+    defer boundary.deinit();
+    try io.sleep(.fromMilliseconds(10), .awake);
+    try testing.expect(boundary.poll() == null);
+    try ctx.child("shutdown").stop(7, .fromSeconds(1));
+    try task.await(io);
+    try testing.expect(boundary.poll() != null);
+}
+
+test "orchestrator actor: shutdown interrupts the boundary gate wait" {
+    try start_runner(shutdown_gate_body);
+}
+
+// commonware `recovered_node_starts_from_processed_epoch`: marshal processed epoch zero's
+// final block, so the actor starts in epoch one from that block's info. A vote for epoch two
+// then hints epoch one's final height.
+fn recovered_body(ctx: runtime.deterministic.Context) anyerror!void {
+    const io = ctx.io();
+    var h: Harness = undefined;
+    try h.init(ctx, 1);
+    defer h.deinit();
+    var middle, var final = try epoch_zero(&h, true);
+    defer middle.deinit();
+    defer final.deinit();
+    h.marshal.processed = .{ .block = final.inner().height() };
+    const peer = mocks.TestSigner.from_seed(99).public_key();
+    const peers = try Set.from_dedup(gpa, &.{ h.key(), peer });
+    defer @constCast(&peers).deinit(gpa);
+    _ = h.network.oracle().manager().track(1, .init_primary(.init(peers.items)));
+    const link: p2p.simulated.Link = .{
+        .latency = .from_millis(1),
+        .jitter = .from_millis(0),
+        .success_rate = 1.0,
+    };
+    try h.network.oracle().add_link(peer, h.key(), link);
+    h.fence.mark(.new(1));
+    var orchestrator, var mailbox = try TestActor.init(ctx, h.config());
+    defer orchestrator.deinit();
+    defer mailbox.deinit();
+    const channels = try h.channels();
+    var task = try io.concurrent(run_actor, .{ &orchestrator, &channels });
+    defer _ = task.cancel(io) catch {};
+    var votes = try h.network.oracle().control(peer).register(0, p2p.Quota.per_second(1024));
+    defer votes.sender.deinit();
+    defer votes.receiver.deinit();
+    const epoch_two = [_]u8{2};
+    gpa.free(try votes.sender.send(.{ .one = h.key() }, &.{ &epoch_two, "vote" }, false));
+    try wait_hints(io, &h.marshal.hints, 1, 1000);
+    try testing.expectEqual(@as(usize, 1), h.marshal.hints.items.len);
+    try testing.expectEqual(@as(u64, 2 * blocks_per_epoch - 1), h.marshal.hints.items[0].get());
+    try testing.expectEqual(@as(u32, 1), h.manager.tracked);
+}
+
+test "orchestrator actor: a recovered node starts from the processed epoch" {
+    try start_runner(recovered_body);
 }
