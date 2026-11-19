@@ -2,9 +2,13 @@
 //!
 //! Port of commonware's `storage/src/rmap`. Ranges are stored in ascending order of their
 //! start points, never overlap, and adjacent ranges are merged (inserting `5` into `[0, 4]`
-//! yields `[0, 5]`). Commonware keeps them in a `BTreeMap<start, end>`; zigware keeps a
-//! sorted array of ranges and finds positions by binary search, which has the same lookup
-//! cost and better locality for the small range counts storage tracks.
+//! yields `[0, 5]`). Commonware keeps them in a `BTreeMap<start, end>` (O(log n) inserts).
+//! zigware keeps a two-level B-tree: sorted chunks of at most `chunk_max` ranges, and the
+//! first start of every chunk for binary search, so an insert moves at most one chunk's
+//! ranges (one sorted array was quadratic under random inserts: 8 GB of moves for 100,000
+//! shuffled values). `items` and `iter_from` return slices of a flat copy rebuilt on the
+//! first read after a change, into room each change reserves, so reads never allocate. The
+//! rebuild writes through a pointer, so a map must not be read from two threads at once.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -22,71 +26,253 @@ pub const Gap = struct {
     next_start: ?u64,
 };
 
-pub const RMap = struct {
+/// Most ranges a chunk holds: an insert moves at most this many, a split half of them.
+const chunk_max = 256;
+
+const Chunk = struct {
+    len: u32 = 0,
+    ranges: [chunk_max]Range = undefined,
+
+    fn slice(chunk: *Chunk) []Range {
+        assert(chunk.len <= chunk_max);
+        return chunk.ranges[0..chunk.len];
+    }
+};
+
+/// A place between ranges: before `chunks[chunk].ranges[offset]`, or at the end of the last
+/// chunk. A normalized position is never at the end of a chunk that has a successor.
+const Position = struct {
+    chunk: usize,
+    offset: usize,
+};
+
+/// The flat copy `items` and `iter_from` return.
+const Flat = struct {
     ranges: std.ArrayList(Range) = .empty,
+    valid: bool = false,
+};
+
+/// Index of the first of `starts` greater than `value` (`starts` ascending).
+fn upper_bound_starts(starts: []const u64, value: u64) usize {
+    var low: usize = 0;
+    var high: usize = starts.len;
+    while (low < high) {
+        const middle = low + (high - low) / 2;
+        if (starts[middle] <= value) low = middle + 1 else high = middle;
+    }
+    assert(low == starts.len or starts[low] > value);
+    assert(low == 0 or starts[low - 1] <= value);
+    return low;
+}
+
+/// Index of the first of `ranges` whose start is greater than `value`.
+fn upper_bound_ranges(ranges: []const Range, value: u64) usize {
+    var low: usize = 0;
+    var high: usize = ranges.len;
+    while (low < high) {
+        const middle = low + (high - low) / 2;
+        if (ranges[middle].start <= value) low = middle + 1 else high = middle;
+    }
+    assert(low == ranges.len or ranges[low].start > value);
+    assert(low == 0 or ranges[low - 1].start <= value);
+    return low;
+}
+
+pub const RMap = struct {
+    chunks: std.ArrayList(*Chunk) = .empty,
+    /// `firsts[c]` is `chunks[c].ranges[0].start`; every chunk holds at least one range.
+    firsts: std.ArrayList(u64) = .empty,
+    len: usize = 0,
+    /// Allocated by the first change; null only while the map has never held a range.
+    flat: ?*Flat = null,
 
     pub const empty: RMap = .{};
 
     pub fn deinit(self: *RMap, gpa: Allocator) void {
-        self.ranges.deinit(gpa);
+        for (self.chunks.items) |chunk| gpa.destroy(chunk);
+        self.chunks.deinit(gpa);
+        self.firsts.deinit(gpa);
+        if (self.flat) |flat| {
+            flat.ranges.deinit(gpa);
+            gpa.destroy(flat);
+        }
         self.* = undefined;
     }
 
-    /// The ranges in ascending order.
+    /// The ranges in ascending order. Valid until the map changes.
     pub fn items(self: *const RMap) []const Range {
-        return self.ranges.items;
+        const flat = self.flat orelse return &.{};
+        if (!flat.valid) {
+            assert(flat.ranges.capacity >= self.len);
+            flat.ranges.clearRetainingCapacity();
+            for (self.chunks.items) |chunk| flat.ranges.appendSliceAssumeCapacity(chunk.slice());
+            flat.valid = true;
+        }
+        assert(flat.ranges.items.len == self.len);
+        return flat.ranges.items;
     }
 
     /// Number of disjoint ranges.
     pub fn count(self: *const RMap) usize {
-        return self.ranges.items.len;
+        return self.len;
     }
 
-    /// Index of the first range whose start is greater than `value`.
-    fn upper_bound(self: *const RMap, value: u64) usize {
-        var low: usize = 0;
-        var high: usize = self.ranges.items.len;
-        while (low < high) {
-            const middle = low + (high - low) / 2;
-            if (self.ranges.items[middle].start <= value) low = middle + 1 else high = middle;
+    /// The range at `position`, if one is there.
+    fn at(self: *const RMap, position: Position) ?*Range {
+        if (position.chunk >= self.chunks.items.len) return null;
+        const ranges = self.chunks.items[position.chunk].slice();
+        if (position.offset >= ranges.len) return null;
+        return &ranges[position.offset];
+    }
+
+    fn previous(self: *const RMap, position: Position) ?Position {
+        if (position.offset > 0) return .{ .chunk = position.chunk, .offset = position.offset - 1 };
+        if (position.chunk == 0) return null;
+        const len = self.chunks.items[position.chunk - 1].len;
+        assert(len > 0);
+        return .{ .chunk = position.chunk - 1, .offset = len - 1 };
+    }
+
+    fn normalize(self: *const RMap, position: Position) Position {
+        const chunks = self.chunks.items;
+        assert(chunks.len == 0 or position.chunk < chunks.len);
+        if (position.chunk + 1 < chunks.len and position.offset == chunks[position.chunk].len) {
+            return .{ .chunk = position.chunk + 1, .offset = 0 };
         }
-        assert(low == self.ranges.items.len or self.ranges.items[low].start > value);
-        assert(low == 0 or self.ranges.items[low - 1].start <= value);
-        return low;
+        return position;
+    }
+
+    /// The normalized position after the range at `position`.
+    fn following(self: *const RMap, position: Position) Position {
+        assert(self.at(position) != null);
+        return self.normalize(.{ .chunk = position.chunk, .offset = position.offset + 1 });
+    }
+
+    /// The position of the first range whose start is greater than `value` (normalized).
+    fn upper_bound(self: *const RMap, value: u64) Position {
+        const after = upper_bound_starts(self.firsts.items, value);
+        if (after == 0) return .{ .chunk = 0, .offset = 0 };
+        const offset = upper_bound_ranges(self.chunks.items[after - 1].slice(), value);
+        assert(offset > 0); // The chunk's first start is at most `value`.
+        return self.normalize(.{ .chunk = after - 1, .offset = offset });
+    }
+
+    /// Makes room in the flat copy for `len` ranges and marks it stale.
+    fn changing(self: *RMap, gpa: Allocator, len: usize) Allocator.Error!void {
+        const flat = self.flat orelse blk: {
+            const flat = try gpa.create(Flat);
+            flat.* = .{};
+            self.flat = flat;
+            break :blk flat;
+        };
+        try flat.ranges.ensureTotalCapacity(gpa, len);
+        flat.valid = false;
+        assert(flat.ranges.capacity >= len);
     }
 
     /// Inserts `value`: creates `[value, value]`, extends an adjacent range, bridges two
-    /// ranges, or does nothing if `value` is already covered.
+    /// ranges it separates, or does nothing if a range already covers it.
     pub fn insert(self: *RMap, gpa: Allocator, value: u64) Allocator.Error!void {
-        const next_index = self.upper_bound(value);
-        const ranges = self.ranges.items;
-        const prev: ?*Range = if (next_index > 0) &ranges[next_index - 1] else null;
-        const next: ?*Range = if (next_index < ranges.len) &ranges[next_index] else null;
-
+        const position = self.upper_bound(value);
+        const before = self.previous(position);
+        const prev: ?*Range = if (before) |p| self.at(p) else null;
+        const next = self.at(position);
         if (prev) |p| {
             if (value <= p.end) return; // Already covered.
         }
+        try self.changing(gpa, self.len + 1);
         const joins_prev = if (prev) |p| p.end + 1 == value else false;
         const joins_next = if (next) |n| value + 1 == n.start else false;
         if (joins_prev and joins_next) {
             prev.?.end = next.?.end;
-            _ = self.ranges.orderedRemove(next_index);
+            self.remove_at(gpa, position);
         } else if (joins_prev) {
             prev.?.end = value;
         } else if (joins_next) {
-            next.?.start = value;
+            self.set_start(position, value);
         } else {
-            try self.ranges.insert(gpa, next_index, .{ .start = value, .end = value });
+            try self.insert_at(gpa, position, .{ .start = value, .end = value });
         }
         assert(self.get(value) != null);
         self.assert_invariants();
     }
 
+    fn set_start(self: *RMap, position: Position, start: u64) void {
+        const range = self.at(position).?;
+        assert(start <= range.end);
+        range.start = start;
+        if (position.offset == 0) self.firsts.items[position.chunk] = start;
+    }
+
+    /// Inserts `range` at `position`, splitting a full chunk; changes nothing on failure.
+    fn insert_at(
+        self: *RMap,
+        gpa: Allocator,
+        at_position: Position,
+        range: Range,
+    ) Allocator.Error!void {
+        var position = at_position;
+        if (self.chunks.items.len == 0) {
+            assert(position.chunk == 0 and position.offset == 0);
+            try self.append_chunk(gpa, 0);
+        } else if (self.chunks.items[position.chunk].len == chunk_max) {
+            try self.append_chunk(gpa, position.chunk + 1);
+            const full = self.chunks.items[position.chunk];
+            const upper = self.chunks.items[position.chunk + 1];
+            const half = chunk_max / 2;
+            @memcpy(upper.ranges[0 .. chunk_max - half], full.ranges[half..chunk_max]);
+            upper.len = chunk_max - half;
+            full.len = half;
+            self.firsts.items[position.chunk + 1] = upper.ranges[0].start;
+            if (position.offset > half) {
+                position = .{ .chunk = position.chunk + 1, .offset = position.offset - half };
+            }
+        }
+        const chunk = self.chunks.items[position.chunk];
+        assert(chunk.len < chunk_max and position.offset <= chunk.len);
+        const old_len = chunk.len;
+        chunk.len += 1;
+        const ranges = chunk.slice();
+        const offset = position.offset;
+        std.mem.copyBackwards(Range, ranges[offset + 1 ..], ranges[offset..old_len]);
+        ranges[position.offset] = range;
+        if (position.offset == 0) self.firsts.items[position.chunk] = range.start;
+        self.len += 1;
+    }
+
+    /// Adds an empty chunk at index `index` (its first start is set by the caller).
+    fn append_chunk(self: *RMap, gpa: Allocator, index: usize) Allocator.Error!void {
+        try self.chunks.ensureUnusedCapacity(gpa, 1);
+        try self.firsts.ensureUnusedCapacity(gpa, 1);
+        const chunk = try gpa.create(Chunk);
+        chunk.* = .{};
+        self.chunks.insertAssumeCapacity(index, chunk);
+        self.firsts.insertAssumeCapacity(index, 0);
+        assert(self.chunks.items.len == self.firsts.items.len);
+    }
+
+    /// Removes the range at `position`, dropping its chunk if it empties.
+    fn remove_at(self: *RMap, gpa: Allocator, position: Position) void {
+        const chunk = self.chunks.items[position.chunk];
+        assert(position.offset < chunk.len);
+        const ranges = chunk.slice();
+        std.mem.copyForwards(Range, ranges[position.offset..], ranges[position.offset + 1 ..]);
+        chunk.len -= 1;
+        self.len -= 1;
+        if (chunk.len == 0) {
+            gpa.destroy(chunk);
+            _ = self.chunks.orderedRemove(position.chunk);
+            _ = self.firsts.orderedRemove(position.chunk);
+        } else if (position.offset == 0) {
+            self.firsts.items[position.chunk] = chunk.ranges[0].start;
+        }
+        assert(self.chunks.items.len == self.firsts.items.len);
+    }
+
     /// The range that contains `value`, if any.
     pub fn get(self: *const RMap, value: u64) ?Range {
-        const next_index = self.upper_bound(value);
-        if (next_index == 0) return null;
-        const range = self.ranges.items[next_index - 1];
+        const before = self.previous(self.upper_bound(value)) orelse return null;
+        const range = self.at(before).?.*;
         assert(range.start <= value);
         if (value <= range.end) return range;
         return null;
@@ -96,67 +282,81 @@ pub const RMap = struct {
     /// and splits a range that strictly contains the removal. Does nothing if `start > end`.
     pub fn remove(self: *RMap, gpa: Allocator, start: u64, end: u64) Allocator.Error!void {
         if (start > end) return;
-        const first = self.iter_from_index(start);
-        var last = first;
-        while (last < self.ranges.items.len and self.ranges.items[last].start <= end) last += 1;
-        if (first == last) return; // No overlap.
-
-        const head = self.ranges.items[first];
-        const tail = self.ranges.items[last - 1];
-        var keep_buffer: [2]Range = undefined;
-        var keep: usize = 0;
-        if (head.start < start) {
-            keep_buffer[keep] = .{ .start = head.start, .end = start - 1 };
-            keep += 1;
+        var position = self.iter_from_position(start);
+        const first = self.at(position) orelse return;
+        if (first.start > end) return; // No overlap.
+        try self.changing(gpa, self.len + 1);
+        if (first.start < start and first.end > end) {
+            // Split: insert the upper part first, so a failure changes nothing.
+            const lower_start = first.start;
+            const upper: Range = .{ .start = end + 1, .end = first.end };
+            const after = self.following(position);
+            try self.insert_at(gpa, after, upper);
+            self.at(self.previous(self.upper_bound(lower_start)).?).?.end = start - 1;
+        } else {
+            while (self.at(position)) |range| {
+                if (range.start > end) break;
+                if (range.start < start) {
+                    range.end = start - 1;
+                    position = self.following(position);
+                } else if (range.end > end) {
+                    self.set_start(position, end + 1);
+                    break;
+                } else {
+                    self.remove_at(gpa, position);
+                    if (position.chunk >= self.chunks.items.len) break;
+                    position = self.normalize(position);
+                }
+            }
         }
-        if (tail.end > end) {
-            keep_buffer[keep] = .{ .start = end + 1, .end = tail.end };
-            keep += 1;
-        }
-        try self.ranges.replaceRange(gpa, first, last - first, keep_buffer[0..keep]);
         assert(self.get(start) == null and self.get(end) == null);
         self.assert_invariants();
     }
 
-    /// Index of the first range that overlaps or follows `from` (its end >= `from`).
-    fn iter_from_index(self: *const RMap, from: u64) usize {
-        const next_index = self.upper_bound(from);
-        if (next_index > 0 and self.ranges.items[next_index - 1].end >= from) {
-            return next_index - 1;
+    /// The position of the first range that overlaps or follows `from` (its end >= `from`).
+    fn iter_from_position(self: *const RMap, from: u64) Position {
+        const position = self.upper_bound(from);
+        if (self.previous(position)) |before| {
+            if (self.at(before).?.end >= from) return before;
         }
-        return next_index;
+        return position;
     }
 
-    /// The ranges that overlap or follow `from`, in ascending order.
+    /// The ranges that overlap or follow `from`, in ascending order. Valid until the map
+    /// changes.
     pub fn iter_from(self: *const RMap, from: u64) []const Range {
-        const ranges = self.ranges.items[self.iter_from_index(from)..];
+        const all = self.items();
+        var index = upper_bound_ranges(all, from);
+        if (index > 0 and all[index - 1].end >= from) index -= 1;
+        const ranges = all[index..];
         assert(ranges.len == 0 or ranges[0].end >= from);
         return ranges;
     }
 
     /// The first index in the map.
     pub fn first_index(self: *const RMap) ?u64 {
-        if (self.ranges.items.len == 0) return null;
-        return self.ranges.items[0].start;
+        if (self.len == 0) return null;
+        return self.firsts.items[0];
     }
 
     /// The last index in the map.
     pub fn last_index(self: *const RMap) ?u64 {
-        if (self.ranges.items.len == 0) return null;
-        return self.ranges.items[self.ranges.items.len - 1].end;
+        if (self.len == 0) return null;
+        const last = self.chunks.items[self.chunks.items.len - 1].slice();
+        return last[last.len - 1].end;
     }
 
     /// The end of the range containing `value` and the start of the first range strictly
     /// after `value`, for finding the gaps around a point.
     pub fn next_gap(self: *const RMap, value: u64) Gap {
-        const next_index = self.upper_bound(value);
+        const position = self.upper_bound(value);
         var gap: Gap = .{ .current_end = null, .next_start = null };
-        if (next_index > 0) {
-            const prev = self.ranges.items[next_index - 1];
+        if (self.previous(position)) |before| {
+            const prev = self.at(before).?.*;
             if (prev.end >= value) gap.current_end = prev.end;
         }
-        if (next_index < self.ranges.items.len) {
-            gap.next_start = self.ranges.items[next_index].start;
+        if (self.at(position)) |next| {
+            gap.next_start = next.start;
             assert(gap.next_start.? > value);
         }
         return gap;
@@ -168,7 +368,9 @@ pub const RMap = struct {
         if (out.len == 0) return out; // A zero limit reports nothing.
         var found: usize = 0;
         var current = start;
-        for (self.iter_from(start)) |range| {
+        // Walks the chunks, not `iter_from`, so a call after a change costs no rebuild.
+        var position = self.iter_from_position(start);
+        while (self.at(position)) |range| : (position = self.following(position)) {
             while (current < range.start and found < out.len) : (current += 1) {
                 out[found] = current;
                 found += 1;
@@ -184,12 +386,21 @@ pub const RMap = struct {
 
     fn assert_invariants(self: *const RMap) void {
         if (!std.debug.runtime_safety) return;
-        const ranges = self.ranges.items;
-        for (ranges, 0..) |range, index| {
-            assert(range.start <= range.end);
-            // Disjoint and not adjacent: adjacent ranges are always merged.
-            if (index > 0) assert(ranges[index - 1].end + 1 < range.start);
+        assert(self.chunks.items.len == self.firsts.items.len);
+        var total: usize = 0;
+        var last: ?Range = null;
+        for (self.chunks.items, self.firsts.items) |chunk, first| {
+            assert(chunk.len > 0 and chunk.len <= chunk_max);
+            assert(chunk.ranges[0].start == first);
+            for (chunk.slice()) |range| {
+                assert(range.start <= range.end);
+                // Disjoint and not adjacent: adjacent ranges are always merged.
+                if (last) |l| assert(l.end + 1 < range.start);
+                last = range;
+            }
+            total += chunk.len;
         }
+        assert(total == self.len);
     }
 };
 
@@ -783,4 +994,56 @@ test "fuzz rmap operations (seeded)" {
 
 test "fuzz rmap operations" {
     try testing.fuzz({}, fuzz_bytes.smith(1024, fuzz_run), .{});
+}
+
+/// The ranges of the set bits of `set`, derived without the map.
+fn ranges_of(set: *const std.DynamicBitSetUnmanaged, out: *std.ArrayList(Range)) !void {
+    out.clearRetainingCapacity();
+    var value: usize = 0;
+    while (value < set.bit_length) {
+        if (!set.isSet(value)) {
+            value += 1;
+            continue;
+        }
+        const start = value;
+        while (value < set.bit_length and set.isSet(value)) value += 1;
+        try out.append(testing.allocator, .{ .start = start, .end = value - 1 });
+    }
+}
+
+// Thousands of ranges span many chunks, so inserts split chunks and removals empty them;
+// the map must match a bitset model after every phase.
+test "rmap many ranges across chunks match a reference set" {
+    const gpa = testing.allocator;
+    const window = 8192;
+    var set = try std.DynamicBitSetUnmanaged.initEmpty(gpa, window);
+    defer set.deinit(gpa);
+    var expected: std.ArrayList(Range) = .empty;
+    defer expected.deinit(gpa);
+    var map: RMap = .empty;
+    defer map.deinit(gpa);
+    var prng = std.Random.DefaultPrng.init(0x5eed);
+    const random = prng.random();
+    var peak: usize = 0;
+    for (0..6) |phase| {
+        for (0..3000) |_| {
+            const value = random.uintLessThan(u64, window);
+            try map.insert(gpa, value);
+            set.set(@intCast(value));
+        }
+        for (0..40 * phase) |_| {
+            const start = random.uintLessThan(u64, window);
+            const end: u64 = @min(window - 1, start + random.uintLessThan(u64, 64));
+            try map.remove(gpa, start, end);
+            set.setRangeValue(.{ .start = @intCast(start), .end = @intCast(end + 1) }, false);
+        }
+        try ranges_of(&set, &expected);
+        peak = @max(peak, expected.items.len);
+        try testing.expectEqualSlices(Range, expected.items, map.items());
+        try testing.expectEqual(expected.items.len, map.count());
+        const probe = random.uintLessThan(u64, window);
+        const tail = map.iter_from(probe);
+        try testing.expect(tail.len == 0 or tail[0].end >= probe);
+    }
+    try testing.expect(peak > 4 * chunk_max); // Several chunks were in use.
 }

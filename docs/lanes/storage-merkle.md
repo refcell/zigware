@@ -380,8 +380,13 @@ The ports found four differences from commonware, now fixed:
   uses `std.hash.Wyhash` instead of `ahash`; commonware documents its output as unstable
   and never persisted, so they need not match. Seeds come from a caller's `std.Random`
   (`init_random`) or `from_seed`, never from the OS.
-- rmap: a sorted array of ranges with binary search instead of a `BTreeMap`; same
-  semantics and tests. `missing_items` writes into a caller buffer whose length is `max`.
+- rmap: a two-level B-tree (sorted chunks of at most 256 ranges, binary-searched by each
+  chunk's first start) instead of a `BTreeMap`; same semantics and tests. It replaced one
+  sorted array (2026-11-19), which was quadratic under random inserts: 8 GB of moves for
+  `rmap::insert/items=100000` (3.7× commonware) and about 800 GB at 1,000,000. `items` and
+  `iter_from` still return slices, of a flat copy rebuilt on the first read after a change
+  into room the change reserved, so reads never allocate; a map must not be read from two
+  threads at once. `missing_items` writes into a caller buffer whose length is `max`.
   Seeded + `std.testing.fuzz` target mirrors `rmap_operations` against a reference set.
 - merkle/bmt build on `cryptography`'s real hashers (`Sha256`, `assert_hasher`).
 - merkle: positions and locations are plain `u64` (named `position`/`location`, or
