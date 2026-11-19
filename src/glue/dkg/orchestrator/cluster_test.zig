@@ -285,6 +285,7 @@ fn ClusterNode(comptime M: type) type {
             gate_epoch: u64,
             dealers: []const Key,
             deaf: bool,
+            marshal_started: bool = true,
         };
 
         fn start(
@@ -395,7 +396,10 @@ fn ClusterNode(comptime M: type) type {
                 self.ctx.child("orchestrator"),
                 self.config(net, key),
             );
-            self.marshal_handle = try self.node.start(self.mailbox.clone());
+            self.marshal_handle = null;
+            if (options.marshal_started) {
+                self.marshal_handle = try self.node.start(self.mailbox.clone());
+            }
             if (options.boundary) |block| try self.seed(fixture, block);
             const control = net.oracle().control(key);
             for (&self.channels, vote_channel..) |*channel, index| {
@@ -403,7 +407,18 @@ fn ClusterNode(comptime M: type) type {
                 channel.* = .{ .sender = registered.sender, .receiver = registered.receiver };
             }
             self.task = try self.ctx.io().concurrent(run_actor, .{self});
-            assert(self.marshal_handle != null);
+            assert((self.marshal_handle != null) == options.marshal_started);
+        }
+
+        /// Frees the never-started marshal actor while its mailbox stays open (commonware
+        /// dropping `marshal_actor`), which drops the requests queued for it.
+        fn drop_unstarted_marshal(self: *Self) void {
+            assert(self.marshal_handle == null);
+            const unstarted = self.node.actor.?;
+            unstarted.deinit();
+            self.node.resolver.mailbox.deinit();
+            self.node.resolver.receiver.deinit();
+            self.node.actor = null;
         }
 
         fn run_actor(self: *Self) anyerror!void {
@@ -479,6 +494,7 @@ fn ClusterOf(comptime M: type) type {
             seed_first: bool,
             gate_epoch: u64 = 1,
             layout: Layout = .{},
+            marshal_started: bool = true,
         };
 
         const Self = @This();
@@ -522,6 +538,7 @@ fn ClusterOf(comptime M: type) type {
                     .gate_epoch = options.gate_epoch,
                     .dealers = dealers,
                     .deaf = options.layout.is_deaf(index),
+                    .marshal_started = options.marshal_started,
                 });
                 self.started += 1;
             }
@@ -776,4 +793,34 @@ fn shutdown_body(ctx: Ctx) anyerror!void {
 test "orchestrator cluster: shutdown interrupts the boundary gate wait" {
     try slow_only();
     try run_body(shutdown_body, 10);
+}
+
+fn stop_context(ctx: Ctx) anyerror!void {
+    return ctx.child("stopper").stop(0, null);
+}
+
+// commonware `marshal_shutdown_during_startup_resolution_stops_cleanly`: marshal never starts,
+// so the orchestrator's startup read of the processed height parks. A stop is signaled, then
+// the marshal actor is dropped, which cancels that read; the orchestrator must stop cleanly
+// within a second instead of waiting on marshal forever.
+fn marshal_shutdown_body(ctx: Ctx) anyerror!void {
+    const io = ctx.io();
+    var c: Cluster = undefined;
+    try c.start(ctx, .{ .nodes = 1, .seed_first = false, .marshal_started = false });
+    defer c.deinit();
+    try io.sleep(.fromMilliseconds(10), .awake);
+    try testing.expect(c.nodes[0].recorder.count == 0);
+    var stopper = try io.concurrent(stop_context, .{ctx});
+    defer _ = stopper.cancel(io) catch {};
+    try io.sleep(.fromMilliseconds(10), .awake);
+    c.nodes[0].drop_unstarted_marshal();
+    const before = Io.Clock.awake.now(io);
+    try c.nodes[0].join();
+    const elapsed = before.durationTo(Io.Clock.awake.now(io));
+    try testing.expect(elapsed.toNanoseconds() < std.time.ns_per_s);
+    try stopper.await(io);
+}
+
+test "orchestrator cluster: marshal shutdown during startup resolution stops cleanly" {
+    try run_body(marshal_shutdown_body, 10);
 }
