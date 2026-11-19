@@ -363,6 +363,35 @@ test "stateful p2p actor: get_operations registers each caller and cancels exact
     try testing.expectEqual(@as(i64, 0), fixture.pending());
 }
 
+test "stateful p2p actor: completed request cleanup preserves a new subscriber" {
+    // commonware `completed_request_cleanup_preserves_new_subscriber`.
+    var fixture: Fixture = undefined;
+    try fixture.init(null);
+    defer fixture.deinit();
+    const request = request_at(1);
+    var completed = try fixture.get_operations(request);
+    const payload = try encoded_payload(0, &.{});
+    defer gpa.free(payload);
+    var verdict = try fixture.deliver(request, &.{fixture.id(0)}, payload);
+    defer verdict.deinit();
+    try judge(&completed, payload, true);
+    try testing.expect(try verdict.recv());
+    // Accepting ends the caller's fetch, and the resolver retires the old subscription
+    // before a new caller arrives.
+    completed.deinit();
+    fixture.recording.subscriptions.clearRetainingCapacity();
+    var fresh = try fixture.get_operations(request);
+    // The delayed cleanup of the completed request preserves the new subscription.
+    try fixture.next_work();
+    var buffer: [4]u64 = undefined;
+    try testing.expectEqualSlices(u64, &.{fixture.id(1)}, fixture.recording.ids(&buffer));
+    try testing.expectEqual(@as(i64, 1), fixture.pending());
+    fresh.deinit();
+    try fixture.next_work();
+    try testing.expectEqual(@as(usize, 0), fixture.recording.subscriptions.items.len);
+    try testing.expectEqual(@as(i64, 0), fixture.pending());
+}
+
 test "stateful p2p actor: a canceled mailbox request is skipped before registration" {
     var fixture: Fixture = undefined;
     try fixture.init(null);
@@ -547,4 +576,55 @@ test "stateful p2p actor: an abandoned fan-out is unjudged and retracts every su
     try testing.expectError(error.Closed, verdict.recv());
     while (fixture.pending() != 0) try fixture.next_work();
     try testing.expectEqual(@as(usize, 0), fixture.recording.subscriptions.items.len);
+}
+
+/// commonware `fanout_waits_for_slow_receipt_and_preserves_other_demand_on_cancel` with
+/// caller `rejecting` judging first.
+fn check_slow_receipt(rejecting: usize) !void {
+    var fixture: Fixture = undefined;
+    try fixture.init(null);
+    defer fixture.deinit();
+    const request = request_at(1);
+    var callers = [2]?mpsc.Receiver(Candidate){
+        try fixture.get_operations(request),
+        try fixture.get_operations(request),
+    };
+    defer for (&callers) |*caller| if (caller.*) |*receiver| receiver.deinit();
+    const slow = 1 - rejecting;
+    const payload = try encoded_payload(0, &.{});
+    defer gpa.free(payload);
+    var verdict = try fixture.deliver(request, &.{ fixture.id(0), fixture.id(1) }, payload);
+    defer verdict.deinit();
+
+    // One caller rejects; the verdict waits until the slow caller took its candidate.
+    try judge(&callers[rejecting].?, payload, false);
+    try io.sleep(.fromMilliseconds(20), .awake);
+    try testing.expectError(error.Empty, verdict.try_recv());
+
+    // The rejecting caller leaves while the slow candidate is still queued. A fresh
+    // registration survives both the old closure and the verdict.
+    callers[rejecting].?.deinit();
+    callers[rejecting] = null;
+    try fixture.next_work();
+    var fresh = try fixture.get_operations(request);
+    defer fresh.deinit();
+    try judge(&callers[slow].?, payload, false);
+    try testing.expect(!try verdict.recv());
+    var buffer: [4]u64 = undefined;
+    try testing.expectEqual(@as(usize, 3), fixture.recording.fetches.items.len);
+    const expected = [2]u64{ fixture.id(slow), fixture.id(2) };
+    try testing.expectEqualSlices(u64, &expected, fixture.recording.ids(&buffer));
+
+    // Both survivors take the retry without registering again.
+    var retry = try fixture.deliver(request, &expected, payload);
+    defer retry.deinit();
+    try judge(&callers[slow].?, payload, true);
+    try judge(&fresh, payload, true);
+    try testing.expect(try retry.recv());
+    try testing.expectEqual(@as(usize, 3), fixture.recording.fetches.items.len);
+}
+
+test "stateful p2p actor: a fan-out waits for a slow receipt and keeps other demand" {
+    try check_slow_receipt(0);
+    try check_slow_receipt(1);
 }
