@@ -6,4 +6,5 @@ pub const BitMap = authenticated.BitMap;
 test {
     @import("std").testing.refAllDecls(@This());
     _ = @import("tests.zig");
+    _ = @import("death_test.zig");
 }

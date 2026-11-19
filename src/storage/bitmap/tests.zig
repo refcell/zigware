@@ -1,8 +1,7 @@
 //! Tests for the authenticated bitmap, ported from commonware's
 //! `storage/src/bitmap/authenticated.rs`, plus the `bitmap_operations` fuzz target
 //! (storage/fuzz). Commonware's `should_panic` tests (pushing a chunk or byte onto an
-//! unaligned bitmap, reading out-of-bounds or pruned bits) check `Prunable` panics, which a
-//! Zig test cannot catch; the panics themselves are in `utils.bitmap.Prunable`.
+//! unaligned bitmap, reading out-of-bounds or pruned bits) are death tests in death_test.zig.
 
 const std = @import("std");
 const testing = std.testing;

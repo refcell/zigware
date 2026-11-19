@@ -260,10 +260,11 @@ Commonware's `#[test]` functions matched to zigware tests by what they check.
 |---|---|---|---|---|---|
 | index | 172 | 139 | 0 | 0 | 33 |
 | rmap | 39 | 39 | 0 | 0 | 0 |
-| bitmap | 15 | 11 | 0 | 0 | 4 |
+| bitmap | 15 | 15 | 0 | 0 | 0 |
 | translator | 18 | 18 | 0 | 0 | 0 |
 
-Not portable: 34 `should_panic` tests (storage-merkle is porting them with `utils.death`),
+Not portable: 30 index `should_panic` tests (storage-merkle is porting them with `utils.death`;
+the bitmap's 4 are death tests in bitmap/death_test.zig, each failing with its panic removed),
 two worker-metrics tests (a worker publishes metrics to the full index in registry batches),
 and the metrics-registry range test (the indices keep plain counters, not registry metrics). The 3
 `cursor_across_threads` tests are ported as `index cursor across threads` (an index behind a
