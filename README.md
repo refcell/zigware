@@ -120,7 +120,7 @@ setup, the commands, and the caveats). Below 1× means zigware is faster.
 | bench | zigware / commonware |
 | --- | --- |
 | `codec::lazy::get` (100k shared) | 0.17× |
-| `journal::append_sync` (fixed) / `fixed_append` (10k) / `fixed_replay` (100k) | 0.11× / 0.23× / 1.19× |
+| `journal::append_sync` (fixed) / `fixed_append` (10k) / `fixed_replay` (100k) | 0.11× / 0.23× / 0.70× |
 | `buffer_paged::append` (4 KiB) | 0.43× |
 | `bls12381::aggregate_verify_same_message` (1000 keys) / single verify | 0.98× / 0.79× |
 | `sha256::hash_message` (4 KiB / 1 MiB) | 1.11× / 1.12× |
