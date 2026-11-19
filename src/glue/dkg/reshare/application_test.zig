@@ -33,6 +33,11 @@ const Recording = struct {
 
     accept: bool = true,
     verify_result: bool = true,
+    /// What `prepare` decides.
+    handoff: std.meta.Tag(consensus.Handoff(Digested)) = .wait,
+    /// When set, `propose` waits on this runtime until it is canceled.
+    pending: ?Io = null,
+    prepares: u32 = 0,
     proposals: u32 = 0,
     verifies: u32 = 0,
     last_payload: ?Wrapper.Payload = null,
@@ -46,18 +51,38 @@ const Recording = struct {
         _: void,
         _: void,
         ancestry: anytype,
-        payload: ?Wrapper.Payload,
+        input: application.Input(Types),
     ) anyerror!?Digested {
         var owned = ancestry;
         defer owned.deinit();
+        var taken = input;
+        const payload = taken.take();
         self.proposals += 1;
         if (self.last_payload) |*old| old.deinit(gpa);
         self.last_payload = payload;
+        if (self.pending) |io| try io.sleep(.fromSeconds(3600), .awake);
         if (!self.accept) return null;
         const parent = owned.peek().?;
         var raw = mocks.child(parent.inner());
         if (payload) |value| raw = try raw.with_payload(gpa, 16, value);
         return try Digested.precomputed(gpa, raw, raw.digest());
+    }
+
+    pub fn prepare(
+        self: *Recording,
+        _: void,
+        _: void,
+        ancestry: anytype,
+        input: application.Input(Types),
+    ) anyerror!consensus.Handoff(Digested) {
+        var owned = ancestry;
+        defer owned.deinit();
+        std.debug.assert(input.payload == null);
+        self.prepares += 1;
+        if (self.handoff == .wait) return .wait;
+        const raw = mocks.child(owned.peek().?.inner());
+        const block = try Digested.precomputed(gpa, raw, raw.digest());
+        return if (self.handoff == .vote) .{ .vote = block } else .{ .stage = block };
     }
 
     pub fn verify(self: *Recording, _: void, _: void, ancestry: anytype) anyerror!bool {
@@ -79,6 +104,7 @@ const FakeActor = struct {
     info: ?App.Payload = null,
     served_at: ?Height = null,
     released: ?Height = null,
+    info_requests: u32 = 0,
 
     fn run(self: *FakeActor) anyerror!void {
         while (try self.receiver.recv()) |message| try self.handle(message);
@@ -105,6 +131,7 @@ const FakeActor = struct {
             .epoch_info => |value| {
                 var body = value;
                 body.ancestry.deinit();
+                self.info_requests += 1;
                 const response: App.Mailbox.Response = if (self.info) |info|
                     .{ .available = .{ .gpa = gpa, .payload = try info.clone(gpa) } }
                 else
@@ -306,4 +333,114 @@ fn settle(io: Io, f: *Fixture) !void {
 
 fn height_of(height: ?Height) ?u64 {
     return if (height) |value| value.get() else null;
+}
+
+const HandoffTag = std.meta.Tag(consensus.Handoff(Digested));
+
+fn release_handoff(handoff: consensus.Handoff(Digested)) void {
+    switch (handoff) {
+        .vote, .stage => |block| {
+            var owned = block;
+            owned.deinit();
+        },
+        .wait => {},
+    }
+}
+
+// commonware `prepare_leaves_dealer_log_to_propose`: at the midpoint a prepare that finds this
+// node's dealer log declines and releases it for the ordinary proposal; before the midpoint
+// the inner application's decision is forwarded.
+test "application: prepare leaves a dealer log to propose" {
+    try actor_test.run(struct {
+        fn body(io: Io) anyerror!void {
+            for ([_]HandoffTag{ .vote, .stage, .wait }) |decision| try check(io, decision);
+        }
+
+        fn check(io: Io, decision: HandoffTag) !void {
+            var blocks: [2]Digested = undefined;
+            try chain(&blocks, null);
+            defer free_blocks(&blocks);
+            var inner: Recording = .{ .handoff = decision };
+            defer inner.deinit();
+            var f: Fixture = undefined;
+            try f.init(io, &inner, 4);
+            defer f.deinit();
+            f.fake.log = try log_payload();
+            const prepared = try f.app.prepare({}, {}, try ancestry_of(&blocks));
+            try testing.expect(prepared.is_wait());
+            try testing.expectEqual(@as(u32, 0), inner.prepares);
+            try settle(io, &f);
+            try testing.expectEqual(@as(?u64, 2), height_of(f.fake.released));
+            // The released log is served to the ordinary proposal at the same height.
+            var proposed = (try f.app.propose({}, {}, try ancestry_of(&blocks))).?;
+            defer proposed.deinit();
+            try testing.expect(inner.last_payload.? == .dealer_log);
+            // Before the midpoint no dealer log is due, so the decision is forwarded.
+            const early = try f.app.prepare({}, {}, try ancestry_of(blocks[0..1]));
+            defer release_handoff(early);
+            try testing.expectEqual(decision, std.meta.activeTag(early));
+            try testing.expectEqual(@as(u32, 1), inner.prepares);
+        }
+    }.body);
+}
+
+// commonware `prepare_leaves_final_block_to_propose`: prepare never builds the epoch's final
+// block nor asks for its info; the ordinary proposal does both.
+test "application: prepare leaves the final block to propose" {
+    try actor_test.run(struct {
+        fn body(io: Io) anyerror!void {
+            for ([_]HandoffTag{ .vote, .stage, .wait }) |decision| try check(io, decision);
+        }
+
+        fn check(io: Io, decision: HandoffTag) !void {
+            var blocks: [1]Digested = undefined;
+            try chain(&blocks, null);
+            defer free_blocks(&blocks);
+            var inner: Recording = .{ .handoff = decision };
+            defer inner.deinit();
+            var f: Fixture = undefined;
+            try f.init(io, &inner, 2);
+            defer f.deinit();
+            f.fake.info = try epoch_payload(7);
+            const prepared = try f.app.prepare({}, {}, try ancestry_of(&blocks));
+            try testing.expect(prepared.is_wait());
+            try testing.expectEqual(@as(u32, 0), inner.prepares);
+            try settle(io, &f);
+            try testing.expectEqual(@as(u32, 0), f.fake.info_requests);
+            var proposed = (try f.app.propose({}, {}, try ancestry_of(&blocks))).?;
+            defer proposed.deinit();
+            try testing.expectEqual(@as(u32, 1), f.fake.info_requests);
+            try testing.expect(inner.last_payload.? == .epoch_info);
+        }
+    }.body);
+}
+
+fn propose_task(app: *App, ancestry: Types.Ancestry) anyerror!?Digested {
+    return app.propose({}, {}, ancestry);
+}
+
+// commonware `dropped_proposal_future_releases_dealer_log_reservation`: a proposal canceled
+// inside the inner application releases the dealer log it reserved.
+test "application: a canceled proposal releases its dealer log" {
+    try actor_test.run(struct {
+        fn body(io: Io) anyerror!void {
+            var blocks: [2]Digested = undefined;
+            try chain(&blocks, null);
+            defer free_blocks(&blocks);
+            var inner: Recording = .{ .pending = io };
+            defer inner.deinit();
+            var f: Fixture = undefined;
+            try f.init(io, &inner, 4);
+            defer f.deinit();
+            f.fake.log = try log_payload();
+            var task = try io.concurrent(propose_task, .{ &f.app, try ancestry_of(&blocks) });
+            var waited: u32 = 0;
+            while (inner.proposals == 0 and waited < 100) : (waited += 1) try settle(io, &f);
+            try testing.expectEqual(@as(u32, 1), inner.proposals);
+            try testing.expect(f.fake.released == null);
+            try testing.expectError(error.Canceled, task.cancel(io));
+            try settle(io, &f);
+            try testing.expectEqual(@as(?u64, 2), height_of(f.fake.released));
+        }
+    }.body);
 }

@@ -8,11 +8,14 @@
 //! cannot derive the final payload, verification stays pending until canceled.
 //!
 //! zigware's marshal contract (`consensus.marshal.application.build`) has no `Input` type, so
-//! the reshare payload reaches the inner application as an extra argument:
-//! `A.propose(*A, ctx, consensus_context, ancestry, payload: ?Payload) !?Digested(Block)` and,
-//! optionally, `A.prepare(..., payload)` (always called with null, as commonware forwards
+//! the reshare payload reaches the inner application as an extra `Input(T)` argument
+//! (commonware's `Input` without `upstream`):
+//! `A.propose(*A, ctx, consensus_context, ancestry, input: Input(T)) !?Digested(Block)` and,
+//! optionally, `A.prepare(..., input)` (always without a payload, as commonware forwards
 //! `payload: None`). `A.verify(*A, ctx, consensus_context, ancestry) !bool` is unchanged. The
-//! inner application owns `payload` and `ancestry`.
+//! inner application owns `input` and `ancestry`; `Input.deinit` releases an input it never
+//! uses, so a `glue.stateful` app declares `Input = reshare.application.Input(T)` and
+//! `deinit_input(input) = input.deinit()`.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -31,10 +34,43 @@ const log = std.log.scoped(.dkg_reshare);
 
 /// Wraps marshal application `A` (pointer-free value, cloned like the inner) with the reshare
 /// mailbox of the actor types `T`.
+/// The reshare payload the inner application builds on, with the allocator that frees it.
+pub fn Input(comptime T: type) type {
+    return struct {
+        const Self = @This();
+        pub const Payload = mailbox_mod.PayloadOf(T);
+
+        gpa: Allocator,
+        payload: ?Payload,
+
+        /// No payload.
+        pub fn none(gpa: Allocator) Self {
+            const result: Self = .{ .gpa = gpa, .payload = null };
+            assert(result.payload == null);
+            return result;
+        }
+
+        /// Takes the payload, leaving none; the caller owns it.
+        pub fn take(self: *Self) ?Payload {
+            const payload = self.payload;
+            self.payload = null;
+            assert(self.payload == null);
+            return payload;
+        }
+
+        /// Releases the payload if the input still holds one.
+        pub fn deinit(self: *Self) void {
+            if (self.payload) |*payload| payload.deinit(self.gpa);
+            self.payload = null;
+        }
+    };
+}
+
 pub fn Application(comptime A: type, comptime T: type) type {
     return struct {
         const Self = @This();
         pub const Block = T.Block;
+        const In = Input(T);
         pub const Mailbox = mailbox_mod.Mailbox(T);
         pub const Payload = mailbox_mod.PayloadOf(T);
         const Digested = broadcast.Digested(Block);
@@ -101,7 +137,9 @@ pub fn Application(comptime A: type, comptime T: type) type {
             ancestry: anytype,
         ) anyerror!Handoff(Digested) {
             var owned = ancestry;
-            errdefer owned.deinit();
+            // The inner application owns `owned` once it is handed over.
+            var handed = false;
+            errdefer if (!handed) owned.deinit();
             const height = next_height(&owned) orelse {
                 owned.deinit();
                 return .wait;
@@ -123,7 +161,9 @@ pub fn Application(comptime A: type, comptime T: type) type {
                 owned.deinit();
                 return .wait;
             }
-            return self.inner.prepare(ctx, consensus_context, owned, @as(?Payload, null));
+            const input: In = .none(self.reshare.gpa);
+            handed = true;
+            return self.inner.prepare(ctx, consensus_context, owned, input);
         }
 
         /// Selects the reshare payload for the block extending `ancestry` and asks the inner
@@ -136,7 +176,9 @@ pub fn Application(comptime A: type, comptime T: type) type {
             ancestry: anytype,
         ) anyerror!?Digested {
             var owned = ancestry;
-            errdefer owned.deinit();
+            // The inner application owns `owned` once it is handed over.
+            var handed = false;
+            errdefer if (!handed) owned.deinit();
             const height = next_height(&owned) orelse {
                 log.debug("proposal rejected: missing parent ancestry", .{});
                 owned.deinit();
@@ -152,17 +194,21 @@ pub fn Application(comptime A: type, comptime T: type) type {
                         return null;
                     },
                     .available => |available| {
-                        const payload = available.payload;
-                        return self.inner.propose(ctx, consensus_context, owned, payload);
+                        const input: In = .{ .gpa = available.gpa, .payload = available.payload };
+                        handed = true;
+                        return self.inner.propose(ctx, consensus_context, owned, input);
                     },
                 }
             }
             if (!inclusion_phase(self.phase(height))) {
-                return self.inner.propose(ctx, consensus_context, owned, @as(?Payload, null));
+                handed = true;
+                return self.inner.propose(ctx, consensus_context, owned, In.none(self.reshare.gpa));
             }
             var reservation = try self.reshare.next_log(height);
             const payload: ?Payload = if (reservation) |*value| value.take_payload() else null;
-            const built = self.inner.propose(ctx, consensus_context, owned, payload);
+            const input: In = .{ .gpa = self.reshare.gpa, .payload = payload };
+            handed = true;
+            const built = self.inner.propose(ctx, consensus_context, owned, input);
             const proposed = built catch |err| {
                 if (reservation) |*value| value.deinit();
                 return err;
@@ -182,9 +228,13 @@ pub fn Application(comptime A: type, comptime T: type) type {
             ancestry: anytype,
         ) anyerror!bool {
             var owned = ancestry;
-            errdefer owned.deinit();
-            const tip = owned.peek() orelse
+            // The inner application owns `owned` once it is handed over.
+            var handed = false;
+            errdefer if (!handed) owned.deinit();
+            const tip = owned.peek() orelse {
+                handed = true;
                 return self.inner.verify(ctx, consensus_context, owned);
+            };
             const height = tip.inner().height();
             const gpa = self.reshare.gpa;
             var carried = try tip.inner().payload(gpa);
@@ -210,6 +260,7 @@ pub fn Application(comptime A: type, comptime T: type) type {
                 owned.deinit();
                 return false;
             }
+            handed = true;
             return self.inner.verify(ctx, consensus_context, owned);
         }
 

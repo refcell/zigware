@@ -529,6 +529,10 @@ Owns `src/glue/dkg`. Reference: `glue/src/dkg` (about 24k Rust lines).
   then handles every source that finished, in commonware's `select_loop!` order. Marshal sits
   behind the same small reader interface the reshare actor uses. The `latest_epoch` gauge is
   not carried.
+- reshare `Application`: the inner app receives `application.Input(T)` (`{ gpa, payload }`,
+  commonware's `Input` without `upstream`) instead of a bare `?Payload`, so a
+  `glue.stateful` app can declare `Input = reshare.application.Input(T)` and free an
+  undelivered one in `deinit_input(input) = input.deinit()` without an allocator.
 
 ### Backlog
 - [x] types (with conformance hashes), limits, fence, network.
@@ -553,7 +557,7 @@ Owns `src/glue/dkg`. Reference: `glue/src/dkg` (about 24k Rust lines).
   startup tip, state-synced epoch registration, DKG or reshare mode).
 - [x] reshare: the `Application` wrapper with 9 of application.rs's tests (final-block
   proposal and verification, phase gating of dealer logs, reservation release).
-- [ ] reshare: application.rs's prepare and dropped-proposal tests.
+- [x] reshare: application.rs's prepare and dropped-proposal tests (all 12 ported).
 - [x] reshare actor: `Runner(T).resolve_start(actor, storage, plan, marshal) !Start`, the
   startup preamble (marshal's anchor, state-sync plan, synced floor block), with 3 tests.
 - [ ] reshare actor: inclusion's remaining window tests (gated and stalled ancestry, scan
@@ -599,6 +603,9 @@ Owns `src/glue/dkg`. Reference: `glue/src/dkg` (about 24k Rust lines).
 - 2026-11-19: four slow dkg conformance hashes run only with `-Dslow-tests` (CI time).
 - 2026-11-19: the reshare startup preamble (`resolve_start`); its test catches a tip that
   ignores the synced floor.
+- 2026-11-19: application.rs's last 3 tests; the canceled-proposal test found a double free
+  of the ancestry when the inner app fails (fixed), and they catch an ignored dealer log in
+  prepare and a canceled proposal that keeps its reservation.
 
 ## dkg probe/bootstrap (owner: p2p lane)
 

@@ -244,9 +244,10 @@ pub fn Engine(comptime T: type) type {
                 ctx: anytype,
                 context: Self.Block.Context,
                 ancestry: anytype,
-                payload: ?Self.Block.Payload,
+                input: reshare.application.Input(ReshareTypes),
             ) anyerror!?Digested {
                 _ = ctx;
+                const payload = input.payload;
                 var owned = ancestry;
                 defer owned.deinit();
                 var carried = payload;
