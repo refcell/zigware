@@ -498,3 +498,44 @@ test "batcher skips votes for finalized views" {
     };
     try run_deterministic(Root.run);
 }
+
+fn vote_bytes(fixture: anytype, comptime kind: enum { notarize, finalize }, signer: usize) ![]u8 {
+    const Vote = types.Vote(Scheme, Digest);
+    const scheme = &fixture.schemes[signer];
+    const value = proposal(1);
+    const Notarize = types.Notarize(Scheme, Digest);
+    const Finalize = types.Finalize(Scheme, Digest);
+    const vote: Vote = switch (kind) {
+        .notarize => .{ .notarize = (try Notarize.sign(gpa, scheme, value)).? },
+        .finalize => .{ .finalize = (try Finalize.sign(gpa, scheme, value)).? },
+    };
+    return codec.encode(Vote, gpa, vote);
+}
+
+// commonware `test_duplicate_notarize_with_different_attestation_blocks_peer` and
+// `test_duplicate_finalize_with_different_attestation_blocks_peer`: an exact duplicate is
+// ignored, but the same vote with another signature blocks its sender.
+test "batcher blocks a peer that resends a vote with another attestation" {
+    const Root = struct {
+        fn run(io: Io) !void {
+            inline for (.{ .notarize, .finalize }) |kind| {
+                var harness: Harness = undefined;
+                try harness.start(io);
+                defer harness.stop();
+                const fixture = &harness.fixture;
+                const peer = fixture.participants[1];
+                try harness.mailbox.update(.new(1), .init(1), .zero(), null);
+                try harness.votes.deliver(peer, try vote_bytes(fixture, kind, 1));
+                try io.sleep(.fromMilliseconds(50), .awake);
+                try harness.votes.deliver(peer, try vote_bytes(fixture, kind, 1));
+                try io.sleep(.fromMilliseconds(50), .awake);
+                try testing.expectEqual(0, harness.log.blocked.items.len);
+                try harness.votes.deliver(peer, try vote_bytes(fixture, kind, 2));
+                try io.sleep(.fromMilliseconds(50), .awake);
+                try testing.expectEqual(1, harness.log.blocked.items.len);
+                try testing.expect(harness.log.blocked.items[0].eql(peer));
+            }
+        }
+    };
+    try run_deterministic(Root.run);
+}
