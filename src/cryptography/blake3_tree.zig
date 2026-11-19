@@ -260,24 +260,33 @@ const widths = blk: {
 };
 
 /// Chaining values of `out.len` whole chunks read from `cursor`, the first at chunk `counter`,
-/// compressed `lanes` at a time. A short last batch still compresses at full width, padded
-/// with copies of its last chunk whose outputs are dropped: one wide compression costs less
-/// than the narrow ones that would cover it.
+/// compressed `lanes` at a time. A short last batch compresses at the narrowest width that
+/// covers it, padded with copies of its last chunk whose outputs are dropped: one compression
+/// costs less than the narrower ones that would cover it, and a narrower one less than a wider
+/// one (2 chunks: 1.7 µs at 2 lanes, 2.2 µs at 16).
 fn chunks_cvs(cursor: *Cursor, counter: u64, out: []Cv) void {
     var scratch: [lanes][chunk_len]u8 = undefined;
     var done: usize = 0;
-    while (done < out.len) : (done += lanes) {
-        const count = @min(lanes, out.len - done);
+    while (done < out.len) {
+        // `usize`, not the narrowed type `@min` gives: `2 * count` must not overflow.
+        const count: usize = @min(lanes, out.len - done);
+        const width: usize = @min(lanes, std.math.ceilPowerOfTwoAssert(usize, count));
+        assert(width >= count and width < 2 * count);
         var chunks: [lanes][*]const u8 = undefined;
         for (chunks[0..count], scratch[0..count]) |*chunk, *buffer| {
             chunk.* = cursor.take(chunk_len, buffer).ptr;
         }
-        for (chunks[count..]) |*chunk| chunk.* = chunks[count - 1];
-        var cvs: [lanes]Cv = undefined;
-        chunk_cvs(lanes, &chunks, counter + done, &cvs);
-        @memcpy(out[done..][0..count], cvs[0..count]);
+        for (chunks[count..width]) |*chunk| chunk.* = chunks[count - 1];
+        inline for (widths) |n| {
+            if (n == width) {
+                var cvs: [n]Cv = undefined;
+                chunk_cvs(n, chunks[0..n], counter + done, &cvs);
+                @memcpy(out[done..][0..count], cvs[0..count]);
+            }
+        }
+        done += count;
     }
-    assert(done >= out.len);
+    assert(done == out.len);
 }
 
 /// Merges `cvs`, a power-of-two count of sibling chaining values, into their subtree's, each

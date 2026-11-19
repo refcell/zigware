@@ -1,6 +1,7 @@
 //! BLAKE3 implementation of the hasher interface (commonware `cryptography/src/blake3`).
 //!
-//! Backed by `std.crypto.hash.Blake3`, which hashes chunks with SIMD. `hash_across` splits a
+//! Backed by `std.crypto.hash.Blake3`, which hashes chunks with SIMD, except that one-shot
+//! messages of 1 to 16 KiB hash in `blake3_tree.zig`'s kernel. `hash_across` splits a
 //! message of at least 128 KiB along the BLAKE3 tree and hashes the subtrees across the given
 //! strategy (`blake3_tree.zig`); the digest is identical either way.
 
@@ -39,7 +40,18 @@ pub const Blake3 = struct {
         return self.streaming.finalize();
     }
 
-    pub const hash = Streaming.hash;
+    /// The digest of the concatenation of `parts`. A message of more than one chunk and less
+    /// than `tree.subtree_len_min` bytes compresses its chunks side by side in `blake3_tree`'s
+    /// kernel: `Core` compresses a batch of fewer than four chunks one at a time (2 KiB: 3.4
+    /// µs against 1.7). Longer messages stay on `Core`, which is faster there.
+    pub fn hash(parts: []const []const u8) Value {
+        var len: usize = 0;
+        for (parts) |part| {
+            len = std.math.add(usize, len, part.len) catch return Streaming.hash(parts);
+        }
+        if (len <= tree.chunk_len or len >= tree.subtree_len_min) return Streaming.hash(parts);
+        return .{ .bytes = tree.hash_subtrees(parts, len, parallel.sequential) };
+    }
 
     /// `hash(parts)`, with a message of at least `tree.split_len_min` bytes hashed as
     /// subtrees across `strategy` when it runs the call in parallel. A total that overflows

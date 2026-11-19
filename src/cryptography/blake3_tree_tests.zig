@@ -17,15 +17,16 @@ const split_len = tree.split_len_min;
 
 const total_len = (1 << 20) + 5000;
 
-/// Messages around multiples of the minimum subtree and around the split length.
+/// Messages around multiples of the minimum subtree and around the split length, and short
+/// messages whose chunks compress at each width.
 const lengths = [_]usize{
-    0,                                   1,                           chunk_len,
-    chunk_len + 1,                       3 * chunk_len + 7,           subtree_len - 1,
-    subtree_len,                         subtree_len + 1,             subtree_len + chunk_len,
-    2 * subtree_len - 1,                 2 * subtree_len,             2 * subtree_len + 1,
-    2 * subtree_len + 3 * chunk_len + 7, 3 * subtree_len + 17,        split_len - 1,
-    split_len,                           split_len + subtree_len + 1, 3 * split_len + 17,
-    total_len,
+    0,                           1,                       chunk_len,
+    2 * chunk_len,               7 * chunk_len + 5,       chunk_len + 1,
+    3 * chunk_len + 7,           subtree_len - 1,         subtree_len,
+    subtree_len + 1,             subtree_len + chunk_len, 2 * subtree_len - 1,
+    2 * subtree_len,             2 * subtree_len + 1,     2 * subtree_len + 3 * chunk_len + 7,
+    3 * subtree_len + 17,        split_len - 1,           split_len,
+    split_len + subtree_len + 1, 3 * split_len + 17,      total_len,
 };
 
 fn random_data() ![]u8 {
