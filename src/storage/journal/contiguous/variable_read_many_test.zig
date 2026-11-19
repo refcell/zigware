@@ -216,3 +216,12 @@ test "variable read_many last frame uses the blob size" {
     try f.expect_read_many(&.{ 2, 3 });
     try f.expect_sync(&.{3}, &.{3});
 }
+
+test "variable read_many and try_read_many_sync accept no positions" {
+    // An empty batch reads nothing (the crypto lane's batched store read passes one).
+    var f: Fixture = undefined;
+    try f.init(2, 512);
+    defer f.deinit();
+    try f.expect_sync(&.{}, &.{});
+    try f.expect_read_many(&.{});
+}

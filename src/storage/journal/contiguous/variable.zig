@@ -1307,7 +1307,8 @@ pub fn Journal(comptime V: type) type {
         /// so `read_many` reports the corruption; running out of memory also serves nothing.
         pub fn try_read_many_sync(self: *const Self, positions: []const u64, out: []?V) void {
             assert(out.len == positions.len);
-            for (positions[1..], positions[0..positions.len -| 1]) |position, previous| {
+            if (positions.len == 0) return;
+            for (positions[1..], positions[0 .. positions.len - 1]) |position, previous| {
                 assert(previous < position);
             }
             @memset(out, null);
