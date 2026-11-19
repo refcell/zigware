@@ -764,6 +764,10 @@ pub fn Actor(comptime T: type) type {
         /// Aborts `active`'s engine and releases it.
         fn stop(self: *Self, active: *Active) void {
             assert(active.epoch.get() == active.engine_epoch);
+            // Wait out the engine even while this task is canceled: a canceled join detaches
+            // the engine task, which would then run on the engine freed below.
+            const protection = self.io.swapCancelProtection(.blocked);
+            defer _ = self.io.swapCancelProtection(protection);
             if (active.handle.abort()) |result| {
                 const text = "simplex engine stopped unexpectedly";
                 result catch |err| self.tracer.event(.@"error", text, .{

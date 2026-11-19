@@ -85,6 +85,8 @@ pub fn Engine(comptime P: type) type {
         stopped: bool = false,
         /// The voter's error, set before it marks the engine stopped.
         voter_failure: ?VoterError = null,
+        /// Set once `run` starts; until then the engine still owns the actors' mailboxes.
+        started: bool = false,
 
         /// Builds the actors on `ctx`'s allocator, runtime, and storage (commonware
         /// `Engine::new`). The engine must not move: actors borrow its scheme. Start it with
@@ -101,13 +103,7 @@ pub fn Engine(comptime P: type) type {
             const terms = cfg.elector.terms();
             // Stall timeout must be greater than certification timeout.
             if (terms.stall_timeout) |stall| assert(stall.order(cfg.certification_timeout) == .gt);
-            self.gpa = gpa;
-            self.io = io;
-            self.mutex = .init;
-            self.condition = .init;
-            self.stopped = false;
-            self.voter_failure = null;
-            self.scheme = cfg.scheme;
+            self.init_state(gpa, io, cfg.scheme);
             self.batcher, self.batcher_mailbox = try Batcher.init(gpa, io, .{
                 .scheme = &self.scheme,
                 .blocker = cfg.blocker,
@@ -160,8 +156,25 @@ pub fn Engine(comptime P: type) type {
             });
         }
 
-        /// Releases the actors. Call after the engine's task ended.
+        fn init_state(self: *Self, gpa: Allocator, io: Io, scheme: P.Scheme) void {
+            self.gpa = gpa;
+            self.io = io;
+            self.mutex = .init;
+            self.condition = .init;
+            self.stopped = false;
+            self.voter_failure = null;
+            self.started = false;
+            self.scheme = scheme;
+        }
+
+        /// Releases the actors. Call after the engine's task ended, or without starting it.
         pub fn deinit(self: *Self) void {
+            // `run` hands the mailboxes to the actor tasks; an engine that never ran keeps them.
+            if (!self.started) {
+                self.batcher_mailbox.deinit();
+                self.voter_mailbox.deinit();
+                self.resolver_mailbox.deinit();
+            }
             self.batcher.deinit();
             self.voter.deinit();
             self.resolver.deinit();
@@ -241,6 +254,14 @@ pub fn Engine(comptime P: type) type {
 
         /// Marks the engine stopped once the runtime stops (commonware selects on
         /// `context.stopped()`), releasing the signal so `stop` can complete.
+        /// Releases what `run_resolver` would own when its task never started.
+        fn release_unstarted_resolver(self: *Self, backfill: Channel(P)) void {
+            var owned = backfill;
+            owned.sender.deinit();
+            owned.receiver.deinit();
+            self.voter_mailbox.deinit();
+        }
+
         fn watch_shutdown(ctx: Ctx, self: *Self) void {
             var shutdown = ctx.stopped();
             defer shutdown.deinit();
@@ -260,6 +281,8 @@ pub fn Engine(comptime P: type) type {
             certificates: Channel(P),
             backfill: Channel(P),
         ) RunResult {
+            assert(!self.started);
+            self.started = true;
             var channels = .{ votes, certificates };
             defer {
                 channels[0].sender.deinit();
@@ -267,18 +290,27 @@ pub fn Engine(comptime P: type) type {
                 channels[1].sender.deinit();
                 channels[1].receiver.deinit();
             }
+            // A spawn on an aborted context never starts its task, which then never releases
+            // the arguments it would own: release them here.
+            var batcher_voter = self.voter_mailbox.clone();
             const batcher_task = try ctx.child("batcher").spawn(run_batcher, .{
                 self,
-                self.voter_mailbox.clone(),
+                batcher_voter,
                 &channels[0].receiver,
                 &channels[1].receiver,
             });
+            if (batcher_task.header == null) batcher_voter.deinit();
             const resolver_task = try ctx.child("resolver").spawn(run_resolver, .{
                 self, self.voter_mailbox, backfill,
             });
+            if (resolver_task.header == null) release_unstarted_resolver(self, backfill);
             const voter_task = try ctx.child("voter").spawn(run_voter, .{
                 self, &channels[0].sender, &channels[1].sender,
             });
+            if (voter_task.header == null) {
+                self.batcher_mailbox.deinit();
+                self.resolver_mailbox.deinit();
+            }
             const shutdown_task = try ctx.child("shutdown").spawn(watch_shutdown, .{self});
             defer {
                 shutdown_task.abort() catch {};
