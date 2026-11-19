@@ -123,7 +123,7 @@ Read this whole file before you change anything. These rules are not optional.
   sharing one across waiters with timeouts (found in aggregation's engine, d35ed1a).
 - `Io.Select.await()` can return `error.Canceled` while its branches are still running. A bare
   `try select.await()` then frees whatever the branches wait on (the nightly
-  "many concurrent crashes" use-after-free, 3d0d720). Drain the select on every path, with a
+  "many concurrent crashes" use-after-free, 229c523). Drain the select on every path, with a
   `defer` or `errdefer` that cancels and collects the branches, before anything they borrow is
   freed.
 - On the deterministic runtime every hand-off between tasks costs a scheduler cycle (1 ms of
