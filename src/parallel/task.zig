@@ -21,6 +21,7 @@ const assert = std.debug.assert;
 const ops = @import("ops.zig");
 const pool_module = @import("pool.zig");
 const policy_module = @import("policy.zig");
+const Clock = @import("clock.zig").Clock;
 
 const ThreadPool = pool_module.ThreadPool;
 
@@ -32,7 +33,9 @@ pub const Recorder = struct {
     len: usize,
     threads: usize,
     plan: policy_module.SpawnPlan,
-    /// When the job was handed off, on the pool's clock.
+    /// The clock the job and its round trip are timed on.
+    clock: Clock = .wall,
+    /// When the job was handed off, on `clock`.
     start_ns: u64 = 0,
 };
 
@@ -74,9 +77,10 @@ pub fn Task(comptime Op: type) type {
                 return;
             }
             const io = self.pool.?.io;
-            const start = now_ns(io);
+            const clock = self.recorder.?.clock;
+            const start = clock.now_ns(io);
             self.result = self.op.call();
-            self.job_ns = now_ns(io) -| start;
+            self.job_ns = clock.now_ns(io) -| start;
         }
 
         /// Runs the job on the calling thread before returning.
@@ -109,7 +113,7 @@ pub fn Task(comptime Op: type) type {
         pub fn offload_measured(self: *Self, pool: *ThreadPool, recorder: Recorder) void {
             assert(recorder.plan.execution == .offload and recorder.plan.measure);
             var measured = recorder;
-            measured.start_ns = now_ns(pool.io);
+            measured.start_ns = recorder.clock.now_ns(pool.io);
             self.recorder = measured;
             self.offload(pool);
         }
@@ -121,7 +125,7 @@ pub fn Task(comptime Op: type) type {
             if (self.pool) |pool| pool.finish(&self.job);
             assert(self.is_done());
             if (self.recorder) |recorder| {
-                const round_trip_ns = now_ns(self.pool.?.io) -| recorder.start_ns;
+                const round_trip_ns = recorder.clock.now_ns(self.pool.?.io) -| recorder.start_ns;
                 const policy = recorder.policy;
                 const job_ns = self.job_ns;
                 policy.record_spawn_job(
@@ -150,11 +154,4 @@ pub fn block_on(strategy: anytype, task: anytype) @TypeOf(task.*).Result {
     _ = strategy;
     comptime assert(@typeInfo(@TypeOf(task)) == .pointer);
     return task.wait();
-}
-
-/// Nanoseconds on `io`'s monotonic clock.
-fn now_ns(io: std.Io) u64 {
-    const now = std.Io.Clock.awake.now(io).nanoseconds;
-    assert(now >= 0);
-    return @intCast(now);
 }

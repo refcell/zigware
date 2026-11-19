@@ -21,6 +21,8 @@ const tiles = @import("tiles.zig");
 const task_module = @import("task.zig");
 const pool_module = @import("pool.zig");
 const policy_module = @import("policy.zig");
+const Clock = @import("clock.zig").Clock;
+const TestClock = @import("clock.zig").TestClock;
 
 const ThreadPool = pool_module.ThreadPool;
 const Policy = policy_module.Policy;
@@ -37,6 +39,8 @@ pub const Rayon = struct {
     policy: ?*Policy = null,
     /// Where `execute` adds each job's busy time during a measured parallel run.
     meter: ?*std.atomic.Value(u64) = null,
+    /// The clock measured runs and spawns read.
+    clock: Clock = .wall,
 
     /// A strategy over `pool`, planning with the pool's workers plus the calling thread, which
     /// also runs jobs while it waits.
@@ -62,6 +66,18 @@ pub const Rayon = struct {
         copy.policy = policy;
         assert(copy.pool == rayon.pool);
         return copy;
+    }
+
+    /// The strategy timing its measurements on `clock`, which tests advance by hand.
+    pub fn with_clock(rayon: Rayon, clock: *TestClock) Rayon {
+        var copy = rayon;
+        copy.clock = .{ .virtual = clock };
+        assert(copy.pool == rayon.pool);
+        return copy;
+    }
+
+    fn now(rayon: Rayon) u64 {
+        return rayon.clock.now_ns(rayon.pool.io);
     }
 
     /// One call's plan and timing (see `strategy.adapt`).
@@ -100,7 +116,7 @@ pub const Rayon = struct {
                 // An error can skip work and bias the estimates down.
                 _ = result catch return result;
             }
-            const wall_ns = now_ns(adaptation.chosen.pool.io) -| adaptation.start_ns;
+            const wall_ns = adaptation.chosen.now() -| adaptation.start_ns;
             const metered_ns = adaptation.busy_ns.load(.acquire);
             const busy_ns = if (adaptation.metered()) metered_ns else wall_ns;
             policy.record_run(
@@ -146,7 +162,7 @@ pub const Rayon = struct {
             .body = body,
             .parallelism_planned = rayon.parallelism_planned,
             .plan = plan,
-            .start_ns = if (plan.measure) now_ns(rayon.pool.io) else 0,
+            .start_ns = if (plan.measure) rayon.now() else 0,
         };
     }
 
@@ -180,15 +196,15 @@ pub const Rayon = struct {
         const Metered = struct {
             inner: @TypeOf(context),
             meter: *std.atomic.Value(u64),
-            io: std.Io,
+            rayon: Rayon,
 
             fn call(metered: *const @This(), index: usize) void {
-                const start = now_ns(metered.io);
+                const start = metered.rayon.now();
                 body(metered.inner, index);
-                _ = metered.meter.fetchAdd(now_ns(metered.io) -| start, .release);
+                _ = metered.meter.fetchAdd(metered.rayon.now() -| start, .release);
             }
         };
-        const metered: Metered = .{ .inner = context, .meter = meter, .io = rayon.pool.io };
+        const metered: Metered = .{ .inner = context, .meter = meter, .rayon = rayon };
         rayon.pool.run(count, &metered, Metered.call);
     }
 
@@ -202,7 +218,7 @@ pub const Rayon = struct {
     /// call site learns whether a job of about `len` items runs faster inline than the
     /// hand-off costs. Every caller counts as outside the pool (`Spawner.outside`): pool
     /// workers are `std.Io` tasks, which carry no identity a thread-local could hold.
-    pub fn spawn(rayon: Rayon, len: usize, task: anytype) void {
+    pub noinline fn spawn(rayon: Rayon, len: usize, task: anytype) void {
         const threads: usize = rayon.pool.threads;
         if (threads == 0) {
             task.run_inline();
@@ -214,11 +230,11 @@ pub const Rayon = struct {
         const plan = policy.choose_spawn(site, len, threads, .outside);
         switch (plan.execution) {
             .inlined => {
-                const start = if (plan.measure) now_ns(rayon.pool.io) else 0;
+                const start = if (plan.measure) rayon.now() else 0;
                 task.run_inline();
                 assert(task.is_done());
                 if (!plan.measure) return;
-                const job_ns = now_ns(rayon.pool.io) -| start;
+                const job_ns = rayon.now() -| start;
                 policy.record_spawn_inline(site, len, threads, job_ns);
             },
             .offload => {
@@ -229,6 +245,7 @@ pub const Rayon = struct {
                     .len = len,
                     .threads = threads,
                     .plan = plan,
+                    .clock = rayon.clock,
                 });
             },
         }
@@ -256,10 +273,3 @@ pub const Rayon = struct {
     pub const sort_by = shared.sort_by;
     pub const sort_unstable_by = shared.sort_unstable_by;
 };
-
-/// Nanoseconds on `io`'s monotonic clock.
-fn now_ns(io: std.Io) u64 {
-    const now = std.Io.Clock.awake.now(io).nanoseconds;
-    assert(now >= 0);
-    return @intCast(now);
-}

@@ -407,7 +407,7 @@ fn deinit_state(op: anytype, state: anytype) void {
 /// Runs `op.run(tiles)` once with tiles over `len` columns of one of `grids` (see `Tiles`).
 /// `multiplier` estimates work per cell for adaptive strategies. A parallel run plans for at
 /// most `max_chunks` workers. Both shapes must produce equivalent results.
-pub fn run_tiles(
+pub noinline fn run_tiles(
     strategy: anytype,
     len: usize,
     grids: []const Grid,

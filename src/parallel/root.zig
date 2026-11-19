@@ -61,6 +61,8 @@ pub const Topology = topology.Topology;
 
 pub const Sequential = @import("sequential.zig").Sequential;
 pub const Rayon = @import("rayon.zig").Rayon;
+pub const Clock = @import("clock.zig").Clock;
+pub const TestClock = @import("clock.zig").TestClock;
 
 const pool_module = @import("pool.zig");
 pub const ThreadPool = pool_module.ThreadPool;

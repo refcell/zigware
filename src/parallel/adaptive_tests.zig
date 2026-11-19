@@ -14,6 +14,7 @@ const Rayon = parallel.Rayon;
 const Policy = parallel.Policy;
 const ThreadPool = parallel.ThreadPool;
 const Placement = parallel.policy.Placement;
+const TestClock = parallel.TestClock;
 const gpa = testing.allocator;
 const us = std.time.ns_per_us;
 const ms = std.time.ns_per_ms;
@@ -33,16 +34,12 @@ fn now_ns() u64 {
     return @intCast(std.Io.Clock.awake.now(testing.io).nanoseconds);
 }
 
-fn spin(ns: u64) void {
-    const start = now_ns();
-    while (now_ns() - start < ns) std.atomic.spinLoopHint();
-}
-
-/// The id of the thread a spawned job ran on, after an optional sleep.
+/// The id of the thread a spawned job ran on, after spinning `spin_ns` on `clock`.
 const ThreadOf = struct {
-    sleep_ns: u64 = 0,
+    clock: ?*TestClock = null,
+    spin_ns: u64 = 0,
     pub fn call(job: ThreadOf) std.Thread.Id {
-        if (job.sleep_ns > 0) testing.io.sleep(.fromNanoseconds(job.sleep_ns), .awake) catch {};
+        if (job.clock) |clock| clock.spin(job.spin_ns);
         return std.Thread.getCurrentId();
     }
 };
@@ -81,13 +78,15 @@ test "spawn inlines a job cheaper than its hand-off" {
 }
 
 test "spawn keeps offloading jobs over the inline budget" {
-    // commonware `spawn_keeps_offloading_big_jobs`: 2 ms jobs never run on the caller.
+    // commonware `spawn_keeps_offloading_big_jobs`: jobs of 2 ms on the virtual clock never
+    // run on the caller.
     const pool = try create_pool(3);
     defer pool.destroy();
+    var clock: TestClock = .{};
     var policy = Policy.init(testing.io);
-    const strategy = Rayon.init(pool).with_policy(&policy);
+    const strategy = Rayon.init(pool).with_policy(&policy).with_clock(&clock);
     for (0..runtime(@as(usize, 20))) |_| {
-        const job: ThreadOf = .{ .sleep_ns = 2 * ms };
+        const job: ThreadOf = .{ .clock = &clock, .spin_ns = 2 * ms };
         try testing.expect(@call(.never_inline, spawn_site, .{ strategy, job }));
     }
 }
@@ -98,30 +97,50 @@ fn recorded_busy(policy: *Policy) ?u64 {
     return policy.run_entries.entries[0].busy_ns[@backingInt(Placement.wide)].get();
 }
 
+/// A map item that spins `ns` on the virtual clock, charging whichever thread runs it.
 const SpinEach = struct {
+    clock: *TestClock,
     ns: u64,
     pub fn map(each: SpinEach, _: usize) u8 {
-        spin(each.ns);
+        each.clock.spin(each.ns);
         return 0;
     }
 };
 
+/// A pool, a policy, and a strategy timing on a virtual clock (commonware `virtual_strategy`).
+const Virtual = struct {
+    pool: *ThreadPool,
+    clock: TestClock = .{},
+    policy: Policy,
+
+    fn init(threads: u32) !Virtual {
+        return .{ .pool = try create_pool(threads), .policy = Policy.init(testing.io) };
+    }
+
+    fn deinit(virtual: *Virtual) void {
+        virtual.pool.destroy();
+    }
+
+    fn strategy(virtual: *Virtual) Rayon {
+        return Rayon.init(virtual.pool).with_policy(&virtual.policy).with_clock(&virtual.clock);
+    }
+};
+
 test "a measured run records the busy time of all its items" {
-    // commonware `measured_run_records_busy_time_of_all_items`: 32 items of 1 ms each.
-    const pool = try create_pool(3);
-    defer pool.destroy();
-    var policy = Policy.init(testing.io);
-    const strategy = Rayon.init(pool).with_policy(&policy);
-    const out = try strategy.map_collect(gpa, Range.upto(32), SpinEach{ .ns = ms });
-    gpa.free(out);
-    const busy = recorded_busy(&policy).?;
-    try testing.expect(busy >= 32 * ms and busy < 48 * ms);
+    // commonware `measured_run_records_busy_time_of_all_items`: 32 items that each spin 1 ms
+    // record 32 ms, wherever each item runs.
+    var virtual: Virtual = try .init(3);
+    defer virtual.deinit();
+    const each: SpinEach = .{ .clock = &virtual.clock, .ns = ms };
+    gpa.free(try virtual.strategy().map_collect(gpa, Range.upto(32), each));
+    try testing.expectEqual(@as(?u64, 32 * ms), recorded_busy(&virtual.policy));
 }
 
 const SpinThenAwait = struct {
+    clock: *TestClock,
     stolen: *std.atomic.Value(bool),
     pub fn call(side: SpinThenAwait) void {
-        spin(5 * ms);
+        side.clock.spin(5 * ms);
         const start = now_ns();
         while (!side.stolen.load(.acquire)) {
             std.debug.assert(now_ns() - start < 10 * std.time.ns_per_s);
@@ -131,47 +150,64 @@ const SpinThenAwait = struct {
 };
 
 const MarkThenSpin = struct {
+    clock: *TestClock,
     stolen: *std.atomic.Value(bool),
     pub fn call(side: MarkThenSpin) void {
         side.stolen.store(true, .release);
-        spin(40 * ms);
+        side.clock.spin(40 * ms);
     }
 };
 
 test "a measured join is charged its work, not the joiner's wait" {
-    // commonware `measured_join_excludes_idle_waits`: 5 ms and 40 ms charge 45 ms, though the
-    // joiner waits out the other side.
-    const pool = try create_pool(3);
-    defer pool.destroy();
-    var policy = Policy.init(testing.io);
-    const strategy = Rayon.init(pool).with_policy(&policy);
+    // commonware `measured_join_excludes_idle_waits`: the 5 ms side and the 40 ms that pass on
+    // the worker that took the other side charge 45 ms. The joiner waits for the second side
+    // to be taken, and that wait passes no time on its clock.
+    var virtual: Virtual = try .init(3);
+    defer virtual.deinit();
     var stolen: std.atomic.Value(bool) = .init(false);
-    _ = strategy.join(SpinThenAwait{ .stolen = &stolen }, MarkThenSpin{ .stolen = &stolen });
-    const busy = recorded_busy(&policy).?;
-    try testing.expect(busy >= 45 * ms and busy < 65 * ms);
+    _ = virtual.strategy().join(
+        SpinThenAwait{ .clock = &virtual.clock, .stolen = &stolen },
+        MarkThenSpin{ .clock = &virtual.clock, .stolen = &stolen },
+    );
+    try testing.expectEqual(@as(?u64, 45 * ms), recorded_busy(&virtual.policy));
 }
 
+/// Holds a worker until released, letting `elapse_ns` pass for every thread once it starts.
 const Occupy = struct {
-    pub fn call(_: Occupy) void {
-        spin(50 * ms);
+    clock: *TestClock,
+    elapse_ns: u64,
+    started: *std.atomic.Value(usize),
+    release: *std.atomic.Value(bool),
+    pub fn call(occupy: Occupy) void {
+        occupy.clock.elapse(occupy.elapse_ns);
+        _ = occupy.started.fetchAdd(1, .acq_rel);
+        while (!occupy.release.load(.acquire)) std.atomic.spinLoopHint();
     }
 };
 
-test "a measured run is not charged for queueing behind busy workers" {
-    // commonware `measured_run_excludes_queueing`: with every worker busy for 50 ms, four 1 ms
-    // items are charged 4 ms.
-    const pool = try create_pool(2);
-    defer pool.destroy();
-    var occupied: [2]parallel.Task(Occupy) = .{ .init(.{}), .init(.{}) };
-    const fixed = Rayon.init(pool);
+test "a measured run is not charged for time its workers spend elsewhere" {
+    // commonware `measured_run_excludes_queueing`: two occupied workers let 50 ms pass each,
+    // and the run's four 1 ms items are charged 4 ms. zigware's caller takes back the jobs no
+    // worker has started, so the items run on the caller rather than wait in the queue.
+    var virtual: Virtual = try .init(2);
+    defer virtual.deinit();
+    var started: std.atomic.Value(usize) = .init(0);
+    var release: std.atomic.Value(bool) = .init(false);
+    const occupy: Occupy = .{
+        .clock = &virtual.clock,
+        .elapse_ns = 50 * ms,
+        .started = &started,
+        .release = &release,
+    };
+    var occupied: [2]parallel.Task(Occupy) = .{ .init(occupy), .init(occupy) };
+    const fixed = Rayon.init(virtual.pool);
     for (&occupied) |*task| fixed.spawn(1, task);
-    var policy = Policy.init(testing.io);
-    const strategy = Rayon.init(pool).with_policy(&policy);
-    const out = try strategy.map_collect(gpa, Range.upto(4), SpinEach{ .ns = ms });
-    gpa.free(out);
+    while (started.load(.acquire) < occupied.len) std.atomic.spinLoopHint();
+    const each: SpinEach = .{ .clock = &virtual.clock, .ns = ms };
+    gpa.free(try virtual.strategy().map_collect(gpa, Range.upto(4), each));
+    release.store(true, .release);
     for (&occupied) |*task| fixed.block_on(task);
-    const busy = recorded_busy(&policy).?;
-    try testing.expect(busy >= 4 * ms and busy < 20 * ms);
+    try testing.expectEqual(@as(?u64, 4 * ms), recorded_busy(&virtual.policy));
 }
 
 /// Each batch's range and the thread that mapped it.
