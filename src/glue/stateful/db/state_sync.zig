@@ -459,6 +459,23 @@ fn Coordinator(comptime D: type, comptime Target: type) type {
     };
 }
 
+/// Attaches each synced database to the resolver that serves sync requests from it
+/// (commonware's `AttachableResolverSet`). `resolvers` is one resolver (a value or pointer
+/// declaring `attach_database(db.Shared(DB)) !void`, commonware's `AttachableResolver`) with
+/// `databases` a `db.Shared(DB)`, or a tuple of them with `databases` a `db.Tuple`, attached
+/// by index in order.
+pub fn attach_databases(resolvers: anytype, databases: anytype) !void {
+    const Databases = @TypeOf(databases);
+    if (comptime @hasField(Databases, "members")) {
+        const count = databases.members.len;
+        comptime assert(resolvers.len == count);
+        inline for (0..count) |i| try resolvers[i].attach_database(databases.members[i]);
+    } else {
+        comptime assert(@hasField(Databases, "cell")); // A `db.Shared`.
+        try resolvers.attach_database(databases);
+    }
+}
+
 test {
     std.testing.refAllDecls(@This());
     _ = @import("state_sync_test.zig");

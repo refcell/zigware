@@ -152,6 +152,9 @@ marshal's actors (consensus-marshal) for the actor; until then it ports what is 
   over `sync.CoordinatorState`. Each member syncs in its own task beside a reporter of the
   generations it reached. On failure it returns the first failing member's error, and
   `Failure` names its index and type (commonware's error string).
+- `glue.stateful.db.state_sync.attach_databases(resolvers, databases)`: attaches each synced
+  database to its resolver (`attach_database(db.Shared(DB)) !void`), one or a tuple in index
+  order (commonware's `AttachableResolverSet`).
 - `glue.stateful.db.sync` (also `db.Anchor`, `db.TipUpdate`): `Anchor(D)` (`height`, `round`,
   `digest`, `eql`), `TipUpdate(D, T)` (`init`, `with_observation(gpa, io, anchor, targets)`
   → update and a `oneshot.Receiver(void)`, `record(context)` calling

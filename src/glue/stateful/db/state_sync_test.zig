@@ -1044,3 +1044,51 @@ test "stateful state sync: a tuple regroup completes when a database's target is
     // The unchanged-target database receives no duplicate target updates.
     try testing.expectEqual(@as(u64, 0), fast.gate.updates);
 }
+
+// Attaching resolvers.
+
+/// Records the order resolvers are attached in (commonware's `RecordingResolver`).
+const AttachLog = struct {
+    ids: [4][]const u8 = undefined,
+    len: usize = 0,
+};
+
+const RecordingResolver = struct {
+    id: []const u8,
+    log: *AttachLog,
+
+    pub fn attach_database(self: RecordingResolver, _: anytype) !void {
+        self.log.ids[self.log.len] = self.id;
+        self.log.len += 1;
+    }
+};
+
+fn attach_db() !db.Shared(SyncMock(ImmediateSync)) {
+    return db.Shared(SyncMock(ImmediateSync)).init(gpa, io, "test", .{ .final_target = 0 });
+}
+
+test "stateful state sync: a single database attaches to its resolver" {
+    var log: AttachLog = .{};
+    const shared = try attach_db();
+    defer shared.deinit();
+    try state_sync.attach_databases(RecordingResolver{ .id = "db1", .log = &log }, shared);
+    try testing.expectEqual(@as(usize, 1), log.len);
+    try testing.expectEqualStrings("db1", log.ids[0]);
+}
+
+test "stateful state sync: tuple attachment is index-stable" {
+    var log: AttachLog = .{};
+    const types = .{ SyncMock(ImmediateSync), SyncMock(FailingSync) };
+    var databases: db.Tuple(types) = undefined;
+    databases.members[0] = try db.Shared(types[0]).init(gpa, io, "0", .{ .final_target = 0 });
+    databases.members[1] = try db.Shared(types[1]).init(gpa, io, "1", .{ .final_target = 0 });
+    defer databases.deinit();
+    const resolvers = .{
+        RecordingResolver{ .id = "resolver_0", .log = &log },
+        RecordingResolver{ .id = "resolver_1", .log = &log },
+    };
+    try state_sync.attach_databases(resolvers, databases);
+    try testing.expectEqual(@as(usize, 2), log.len);
+    try testing.expectEqualStrings("resolver_0", log.ids[0]);
+    try testing.expectEqualStrings("resolver_1", log.ids[1]);
+}
