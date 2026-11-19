@@ -16,7 +16,7 @@ inside `range` and `rng`.
 See commonware's [stability levels](https://github.com/commonwarexyz/monorepo#stability).
 Every backlog item in [docs/lanes/utils.md](../../docs/lanes/utils.md) is done. Its test audit
 lists no open tests: outside `bitmap/`, 391 of 489 are ported and 98 are not portable; in
-`bitmap/`, 324 of 360 are ported and 36 are not portable.
+`bitmap/`, 330 of 360 are ported and 30 are not portable.
 
 ## Modules
 

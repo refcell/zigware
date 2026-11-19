@@ -209,6 +209,23 @@ caught).
 
 Every commonware `#[test]` in this lane's crates (macro and rstest cases expanded where noted), matched by reading both sides: ported (a Zig test checks the behavior, often one consolidated test), open, or not portable with the reason. Written by the consensus-marshal lane; tick a box when its test lands.
 
+Re-audit (2026-11-19, against main at f70cf67, after async start_sync, `DelayedSync`, faulty's
+`Storage.wrap`, `FlushControl`/`HeldShared`, and parallel conformance landed): 6 bitmap entries
+became portable and are ported; every other reason was rechecked against the Zig code and stands
+(none depends on storage or runtime pieces: they are `#[should_panic]`, `catch_unwind`, Waker or
+Drop counting, Rust conversion traits, or not ported by design).
+- roaring/container/run.rs `test_arbitrary_can_generate_run_starting_at_zero` and
+  `test_arbitrary_can_generate_trailing_max_singleton`: `Run.arbitrary` already follows
+  arbitrary's byte consumption; run.zig's `arbitrary_from` feeds it commonware's fixed bytes
+  through a keystream whose block 0 is preset. Planted bugs caught: runs allowed adjacent
+  (`low = end + 1`) and a first run starting at 1.
+- roaring/mod.rs `test_from_iter_empty`, `test_from_iter_basic`,
+  `test_from_iter_range_expression`, `test_extend_into_existing`: `roaring.Bitmap` gains
+  `from_values` and `extend` (commonware's `FromIterator`/`Extend`, as `roaring.Prunable` has);
+  two sibling `from_iter` tests were already ported through the same insert loop. Planted bugs
+  caught: `extend` clearing first, `from_values` dropping its last value.
+- Stale reference fixed: cache.rs's rehash entries cite cache.zig:465 (was 462).
+
 ### utils (everything but bitmap/)
 | File | Tests | Ported | Open | Not portable |
 | --- | --- | --- | --- | --- |
@@ -314,7 +331,7 @@ Not portable:
   key clone counting and Rc/Drop ownership counts
 - `cache.rs` `test_ghost_rehash_reads_live_keys`, `collisions_rehash_and_stable_values`,
   `distinct_hashes_rehash_and_stable_values`: force hashbrown lazy growth; Zig indexes are
-  preallocated with `init_capacity` (cache.zig:336, 462) and never rehash
+  preallocated with `init_capacity` (cache.zig:336, 465) and never rehash
 - `futures/shared.rs` `test_clones_share_output_and_poll_one_at_a_time`,
   `test_clone_after_completion_resolves`, `test_wake_during_poll_rewakes_clone_polled_meanwhile`,
   `test_clone_finding_future_busy_is_woken_after_poll`,
@@ -370,12 +387,12 @@ Not portable:
 | bitmap/roaring/container/array.rs | 25 | 25 | 0 | 0 |
 | bitmap/roaring/container/bitmap.rs | 26 | 26 | 0 | 0 |
 | bitmap/roaring/container/mod.rs | 27 | 27 | 0 | 0 |
-| bitmap/roaring/container/run.rs | 26 | 24 | 0 | 2 |
+| bitmap/roaring/container/run.rs | 26 | 26 | 0 | 0 |
 | bitmap/roaring/fuzz.rs | 1 | 1 | 0 | 0 |
-| bitmap/roaring/mod.rs | 32 | 28 | 0 | 4 |
+| bitmap/roaring/mod.rs | 32 | 32 | 0 | 0 |
 | bitmap/roaring/ops.rs | 43 | 43 | 0 | 0 |
 | bitmap/roaring/prunable.rs | 27 | 22 | 0 | 5 |
-| **Total** | **360** | **324** | **0** | **36** |
+| **Total** | **360** | **330** | **0** | **30** |
 
 Open:
 - [x] `bitmap/mod.rs:1800` `test_multi_chunk_operations`: and/or/xor over two full 4-byte chunks
@@ -446,10 +463,6 @@ Not portable:
   `test_set_chunk_by_index_rejects_nonzero_final_byte`: #[should_panic]
 - `bitmap/historical/tests.rs` `test_read_popped_bit_panics`, `test_prune_beyond_length_panics`,
   `test_pop_into_pruned_region_panics`: #[should_panic]
-- `bitmap/roaring/container/run.rs` `test_arbitrary_can_generate_run_starting_at_zero`,
-  `test_arbitrary_can_generate_trailing_max_singleton`: Rust Arbitrary impl
-- `bitmap/roaring/mod.rs` `test_from_iter_empty`, `test_from_iter_basic`,
-  `test_from_iter_range_expression`, `test_extend_into_existing`: Rust FromIterator/Extend impls
 - `bitmap/roaring/prunable.rs` `test_panic_on_insert_below_pruned`,
   `test_panic_on_contains_below_pruned`, `test_panic_on_insert_range_below_pruned`,
   `test_panic_on_iter_range_below_pruned`, `test_extend_below_pruned_panics`: #[should_panic]

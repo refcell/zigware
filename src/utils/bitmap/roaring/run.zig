@@ -488,3 +488,31 @@ test "roaring run: encode size is the count plus four bytes per run" {
     defer gpa.free(encoded);
     try testing.expectEqual(codec.encode_size(Run, run), encoded.len);
 }
+
+/// `Run.arbitrary` over fixed bytes, as `arbitrary::Unstructured::new(data)` gives: a keystream
+/// whose cached block 0 is preset to `data`, so it never generates one.
+fn arbitrary_from(gpa: Allocator, data: []const u8) !Run {
+    assert(data.len <= 64);
+    var stream: codec.arbitrary.Keystream = .{ .key = @splat(0), .len = data.len };
+    stream.block_index = 0;
+    @memset(&stream.block, 0);
+    @memcpy(stream.block[0..data.len], data);
+    var u: codec.arbitrary.Unstructured = .init(&stream);
+    return Run.arbitrary(gpa, &u);
+}
+
+test "roaring run: arbitrary can generate a run starting at zero" {
+    // commonware `test_arbitrary_can_generate_run_starting_at_zero`.
+    const gpa = testing.allocator;
+    var run = try arbitrary_from(gpa, &.{ 0, 1, 0, 0, 0, 5 });
+    defer run.deinit(gpa);
+    try expect_spans(&run, &.{.{ 0, 5 }});
+}
+
+test "roaring run: arbitrary can generate a trailing max singleton" {
+    // commonware `test_arbitrary_can_generate_trailing_max_singleton`.
+    const gpa = testing.allocator;
+    var run = try arbitrary_from(gpa, &.{ 0, 2, 0, 0, 0xff, 0xfd });
+    defer run.deinit(gpa);
+    try expect_spans(&run, &.{ .{ 0, 65533 }, .{ 65535, 65535 } });
+}

@@ -140,6 +140,21 @@ pub const Bitmap = struct {
         return target.insert(gpa, low_bits(value));
     }
 
+    /// commonware's `FromIterator<u64>`: a bitmap holding `values`, in any order, deduplicated.
+    pub fn from_values(gpa: Allocator, values: []const u64) Allocator.Error!Bitmap {
+        var result: Bitmap = .empty;
+        errdefer result.deinit(gpa);
+        try result.extend(gpa, values);
+        assert(result.len() <= values.len);
+        return result;
+    }
+
+    /// commonware's `Extend<u64>`: inserts each of `values`.
+    pub fn extend(self: *Bitmap, gpa: Allocator, values: []const u64) Allocator.Error!void {
+        for (values) |value| _ = try self.insert(gpa, value);
+        assert(values.len == 0 or self.contains(values[values.len - 1]));
+    }
+
     /// Inserts `[start, end)`; returns how many values were new.
     pub fn insert_range(
         self: *Bitmap,

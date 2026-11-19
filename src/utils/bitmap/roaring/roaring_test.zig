@@ -10,10 +10,7 @@ const testing = std.testing;
 const gpa = testing.allocator;
 
 fn from(values: []const u64) !Bitmap {
-    var result: Bitmap = .empty;
-    errdefer result.deinit(gpa);
-    for (values) |value| _ = try result.insert(gpa, value);
-    return result;
+    return Bitmap.from_values(gpa, values);
 }
 
 fn expect_values(iterator: Bitmap.Iterator, expected: []const u64) !void {
@@ -163,4 +160,40 @@ test "roaring: high and low bits" {
     try testing.expectEqual(roaring.MAX_KEY, roaring.high_bits(std.math.maxInt(u64)));
     try testing.expectEqual(@as(u16, 65535), roaring.low_bits(std.math.maxInt(u64)));
     try testing.expectEqual(@as(u64, 65537), roaring.combine(1, 1));
+}
+
+test "roaring: collect from values (test_from_iter_*)" {
+    // commonware `test_from_iter_empty`, `test_from_iter_basic`,
+    // `test_from_iter_unsorted_with_duplicates`, `test_from_iter_multi_container`.
+    var empty = try from(&.{});
+    defer empty.deinit(gpa);
+    try testing.expect(empty.is_empty());
+    var basic = try from(&.{ 5, 10, 15, 100 });
+    defer basic.deinit(gpa);
+    try testing.expectEqual(@as(u64, 4), basic.len());
+    try expect_values(basic.iter(), &.{ 5, 10, 15, 100 });
+    var unsorted = try from(&.{ 100, 5, 100, 50, 5, 10 });
+    defer unsorted.deinit(gpa);
+    try testing.expectEqual(@as(u64, 4), unsorted.len());
+    try expect_values(unsorted.iter(), &.{ 5, 10, 50, 100 });
+    var multi = try from(&.{ 1, 65_537, 131_073, 1_000_000 });
+    defer multi.deinit(gpa);
+    try testing.expectEqual(@as(u64, 4), multi.len());
+    try testing.expectEqual(@as(usize, 4), multi.container_count());
+}
+
+test "roaring: collect a range expression (test_from_iter_range_expression)" {
+    var values: [1000]u64 = undefined;
+    for (&values, 0..) |*value, index| value.* = index;
+    var bitmap = try from(&values);
+    defer bitmap.deinit(gpa);
+    try testing.expectEqual(@as(u64, 1000), bitmap.len());
+    try testing.expect(bitmap.contains(0) and bitmap.contains(999) and !bitmap.contains(1000));
+}
+
+test "roaring: extend into an existing bitmap (test_extend_into_existing)" {
+    var bitmap = try from(&.{ 1, 2, 3 });
+    defer bitmap.deinit(gpa);
+    try bitmap.extend(gpa, &.{ 3, 4, 5 });
+    try expect_values(bitmap.iter(), &.{ 1, 2, 3, 4, 5 });
 }
