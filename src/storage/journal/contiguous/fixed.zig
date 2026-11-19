@@ -925,8 +925,12 @@ pub fn Journal(comptime A: type) type {
         fn encode_items(gpa: Allocator, out: *std.ArrayList(u8), nested: []const []const A) !void {
             for (nested) |items| {
                 const bytes = try out.addManyAsSlice(gpa, items.len * chunk);
-                for (items, 0..) |value, index| {
-                    bytes[index * chunk ..][0..chunk].* = codec.encode_fixed(A, value);
+                // Encode in place, as commonware's `item.write(&mut buf)`: a per-item stack
+                // array and copy cost a third of the append (qmdb's apply_batch profile).
+                for (items, 0..) |*value, index| {
+                    var writer = codec.Writer.init(bytes[index * chunk ..][0..chunk]);
+                    codec.write(A, value.*, &writer);
+                    assert(writer.end == chunk);
                 }
             }
             assert(out.items.len % chunk == 0);
