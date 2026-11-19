@@ -158,6 +158,8 @@ const Harness = struct {
                 .{}
             else if (comptime std.mem.eql(u8, name, "codec_config"))
                 codec_config(F)
+            else if (comptime std.mem.eql(u8, name, "io"))
+                null // Untimed.
             else
                 @compileError("unknown adapter config field " ++ name);
         }
