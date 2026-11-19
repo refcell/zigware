@@ -384,3 +384,10 @@ ports its range's tests and the helpers defined in it, into
   runtime; sync_height_floor and reject_stale (563, 569, 2586) are bls-math's queries slice.
 - 2026-11-19: bls-math finished harness.rs 3442-end (20 scenarios, `tests/queries.zig`);
   reject_stale's retired fetch matches commonware's set_floor retain. bls-math takes fuzz.
+- 2026-11-19: parallel lane finished `tests/wrappers.zig` (2592-4712, 6151-6220): floor
+  anchors, epoch gates, conflicting verify, below-finalized prune, genesis parent, epoch
+  switch, missing-candidate fetch paths, scripted equivocation on simplex, and the covered
+  restart. 4713-4993 went to examples (`tests/fetch.zig`), 4994-5931 to runtime
+  (`tests/propose_validation.zig`). The four sync-failure panic tests (5932-6150) have no Zig
+  counterpart (a Zig test cannot catch a panic). `mocks.GatedStrategy` is deferred: it needs
+  an async `Strategy.spawn`, and its only user is outside this range.
